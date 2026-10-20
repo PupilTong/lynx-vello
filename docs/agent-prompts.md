@@ -44,7 +44,7 @@ The order is fork grammar first, then the engine, then the UA sheet, then
 tests — a property that isn't in the fork's `lynx` allowlist doesn't parse.
 
 ```
-Read AGENTS.md (standards policy, the crates/dom entry and its vendored-stylo
+Read AGENTS.md (standards policy, the crates/terminus entry and its vendored-stylo
 paragraphs), docs/style-architecture.md, docs/style-assumptions.md, and
 docs/tracking/{css-layout,css-visual,css-text,css-animation,
 css-selectors-cascade}.md for {PROPERTY_NAME}. If the tracking doc doesn't
@@ -55,12 +55,12 @@ and cite what you read.
    longhand/shorthand tables. If the property or a value of it is missing, that
    is a vendor/stylo fork patch first, with a lynx_* test under
    vendor/stylo/style/tests/.
-2. Engine: crates/dom/src/style/ for cascade/computed/invalidation, and
+2. Engine: crates/terminus/src/style/ for cascade/computed/invalidation, and
    crates/bobcat-source/src/lower_style.rs +
    crates/bobcat-core/src/style.rs if the .web.bundle StyleInfo path carries it.
 3. UA policy: crates/bobcat-core/src/main/tree/ua_sheet.rs and the per-tag
    rules beside it, if Lynx gives the property a non-CSS default.
-4. Tests: a grammar/cascade test under crates/dom/tests/, plus a screenshot
+4. Tests: a grammar/cascade test under crates/terminus/tests/, plus a screenshot
    case if it paints.
 
 Implement the W3C-correct behavior unless the property is a Lynx-only
@@ -78,9 +78,9 @@ behavior, and lynx/ for the native element it mirrors. Implement the
 equivalent natively: the Lynx element policy layer is
 crates/bobcat-core/src/main/tree/ (see text.rs, raw_text.rs, image.rs and
 scroll_container.rs for the existing shapes), registered through
-dom::CustomElement, with its UA box authored in the UA sheet. Delegate layout
-to hughie, paint to dom's visual/paint modules and text to
-hughie::text::block rather than reimplementing those concerns inline. Add a
+terminus::CustomElement, with its UA box authored in the UA sheet. Delegate layout
+to seldon, paint to terminus's visual/paint modules and text to
+seldon::text::block rather than reimplementing those concerns inline. Add a
 crates/bobcat-core test and a screenshot case. Note any behavior you couldn't
 verify against real source.
 ```
@@ -134,8 +134,8 @@ web-core's behavior — that is the compatibility target. Where a case cannot
 pass today, land it as a recorded GAP row rather than deleting it, and say
 what engine work would close it. Where native Lynx and web-core disagree,
 report both and ask me which to assert; do not decide silently. Screenshot
-cases go through flashbulb: look at the PNG before accepting a golden with
-FLASHBULB_UPDATE_SNAPSHOTS=1, and remember a newly created golden fails its
+cases go through prime-radiant: look at the PNG before accepting a golden with
+PRIME_RADIANT_UPDATE_SNAPSHOTS=1, and remember a newly created golden fails its
 own run by design.
 ```
 

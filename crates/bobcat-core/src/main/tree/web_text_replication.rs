@@ -9,11 +9,11 @@
 //! portable, so each replica splits that diff into the two claims it actually
 //! carries: geometry, which this file asserts against the vendored Ahem face
 //! (solid em squares, so an advance is exactly glyph count times font size),
-//! and paint, which belongs to `crates/dom`'s pixel tests.
+//! and paint, which belongs to `crates/terminus`'s pixel tests.
 //!
 //! One deliberate exception to that rule is on record. The truncation marker
 //! `text-maxline` and `text-maxlength` append is gated on
-//! `text-overflow: ellipsis` here (`crates/hughie/src/text/block/truncate.rs`),
+//! `text-overflow: ellipsis` here (`crates/seldon/src/text/block/truncate.rs`),
 //! which neither the initial value `clip` nor the Lynx UA sheet ever sets. Both
 //! references append it unconditionally for `text-maxlength`, and web-core does
 //! so for `text-maxline` too. The 2026-09-14 ruling adopts this engine's gating
@@ -51,16 +51,16 @@
 // replicas assert is compared exactly; glyph counts convert to advances.
 #![allow(clippy::float_cmp, clippy::cast_precision_loss, clippy::similar_names)]
 
-use dom::NodeId;
-use dom::stylo::color::AbsoluteColor;
-use dom::stylo::properties::PropertyId;
-use dom::stylo::values::computed::{ColorPropertyValue, Display};
+use terminus::NodeId;
+use terminus::stylo::color::AbsoluteColor;
+use terminus::stylo::properties::PropertyId;
+use terminus::stylo::values::computed::{ColorPropertyValue, Display};
 
 use super::test_support::{child, display, element_under, style_of, with_config};
 use super::{LynxDocument, PageConfig};
 
 /// Solid em squares, so a run's advance is its glyph count times its font size.
-const AHEM: &[u8] = include_bytes!("../../../../hughie/tests/fixtures/Ahem.ttf");
+const AHEM: &[u8] = include_bytes!("../../../../seldon/tests/fixtures/Ahem.ttf");
 
 /// The attribute a `raw-text` carries its run in, and the one a compiled
 /// `ReactLynx` card writes a static string child into.
@@ -79,7 +79,10 @@ fn ahem_document() -> LynxDocument {
 /// holds.
 fn ahem_document_with(config: PageConfig) -> LynxDocument {
     let mut document = with_config(config);
-    assert_eq!(document.register_fonts(dom::FontBlob::from_static(AHEM)), 1);
+    assert_eq!(
+        document.register_fonts(terminus::FontBlob::from_static(AHEM)),
+        1
+    );
     assert!(document.set_default_font_family("Ahem"));
     document
 }
@@ -194,7 +197,7 @@ fn a_text_attribute_on_a_text_element_carries_the_paragraph_s_run() {
 /// of line breaking.
 ///
 /// Geometry only — the fixture's backgrounds and borders are paint, and
-/// `crates/dom`'s pixel tests own them. The fixture selects the view's vertical
+/// `crates/terminus`'s pixel tests own them. The fixture selects the view's vertical
 /// stacking with `--lynx-display: linear` and no toggle; here the `text > view`
 /// UA rule computes the child to `flex`, so the replica writes the column
 /// direction the toggle was selecting.
@@ -204,13 +207,13 @@ fn a_text_attribute_on_a_text_element_carries_the_paragraph_s_run() {
 /// advance is the atom's own and not the module-level leading-space divergence.
 /// And the line's own height is not asserted: this case's claim is the atom's
 /// advance, and the CSS 2.2 §10.8.1 line box parley 0.12 builds around a
-/// baseline-aligned box is pinned by `crates/hughie/tests/text_block.rs`.
+/// baseline-aligned box is pinned by `crates/seldon/tests/text_block.rs`.
 /// Held only from `d19cbea2` (#227) on: before it the paragraph ran every
 /// atom with `LayoutInput::measure`, which writes no box, and copied that
 /// unwritten zero size into the placed layout. #227 needed committed geometry
 /// for atomic children restored after a content replacement and gave the
 /// paragraph a commit-goal path through `compute_inline_box_layout`
-/// (`crates/dom/src/layout/text_block.rs:596-603`).
+/// (`crates/terminus/src/layout/text_block.rs:596-603`).
 #[test]
 fn a_view_child_of_a_text_is_one_atomic_inline_box_laid_out_on_its_own() {
     let mut document = ahem_document();
@@ -271,7 +274,7 @@ fn a_view_child_of_a_text_is_one_atomic_inline_box_laid_out_on_its_own() {
 /// unwritten zero size into the placed layout. #227 needed committed geometry
 /// for atomic children restored after a content replacement and gave the
 /// paragraph a commit-goal path through `compute_inline_box_layout`
-/// (`crates/dom/src/layout/text_block.rs:596-603`).
+/// (`crates/terminus/src/layout/text_block.rs:596-603`).
 #[test]
 fn a_container_nested_inside_an_inline_atom_sizes_itself_without_re_entering_the_line() {
     const BOX: &str = "width: 50px; height: 20px; border: 1px solid red";
@@ -327,7 +330,7 @@ fn a_container_nested_inside_an_inline_atom_sizes_itself_without_re_entering_the
 /// child collapses to exactly one space.
 ///
 /// The colour half of the screenshot diff is a per-run paint claim that
-/// `crates/dom`'s pixel tests own; here it is asserted as computed style. The
+/// `crates/terminus`'s pixel tests own; here it is asserted as computed style. The
 /// collapse claim is pinned against a control written without that whitespace,
 /// which is one square narrower.
 ///
@@ -606,7 +609,7 @@ fn runs_of_different_size_share_a_baseline_while_sibling_text_blocks_do_not() {
 /// 22x22, whatever the 162x162 file's intrinsic size is — and advances the line
 /// by that width after the collapsed space.
 ///
-/// Geometry only; whether the bitmap is drawn is paint, and `crates/dom` owns
+/// Geometry only; whether the bitmap is drawn is paint, and `crates/terminus` owns
 /// it. The fixture's four-CJK run becomes four Ahem em squares, which carry the
 /// same one-glyph-per-em advance and are deterministic here. The line's own
 /// height is left out: this case's claim is the used size and the advance.
@@ -615,7 +618,7 @@ fn runs_of_different_size_share_a_baseline_while_sibling_text_blocks_do_not() {
 /// unwritten zero size into the placed layout. #227 needed committed geometry
 /// for atomic children restored after a content replacement and gave the
 /// paragraph a commit-goal path through `compute_inline_box_layout`
-/// (`crates/dom/src/layout/text_block.rs:596-603`).
+/// (`crates/terminus/src/layout/text_block.rs:596-603`).
 ///
 /// The fixture's markup indentation is written the way a compiled card
 /// carries it — what the browser's collapsing leaves of it, as literal text —
@@ -658,7 +661,7 @@ fn an_image_child_of_a_text_advances_the_line_by_its_used_size() {
 /// Held from the `inline-truncation` wiring on: `place_and_hide` used to hide
 /// every consumed child's whole subtree, which zeroed the atom under a
 /// `display: contents` wrapper and left the wrapper's own slot unwritten, so
-/// the rounding walk pruned there (`crates/hughie/src/compute/mod.rs`'s
+/// the rounding walk pruned there (`crates/seldon/src/compute/mod.rs`'s
 /// `round_layout_inner`). A consumed element holding a placed atom now keeps
 /// an empty layout of its own instead.
 ///
@@ -720,7 +723,7 @@ fn a_wrapper_between_a_text_and_an_inline_image_changes_nothing() {
 /// Both halves were gaps until the atom-placement pass. The margin now reaches
 /// the line because phase 2 of `compute_text_block_layout` hands the paragraph
 /// the atom's *margin* box rather than its border box
-/// (`crates/dom/src/layout/text_block.rs`'s `margin_box`), and the padding no
+/// (`crates/terminus/src/layout/text_block.rs`'s `margin_box`), and the padding no
 /// longer reaches a box at all because the UA sheet gives an `image` that is
 /// inline content of a paragraph `padding: 0 !important`
 /// (`crates/bobcat-core/src/main/tree/text.rs`'s `UA_RULES`) — the cascade
@@ -898,7 +901,7 @@ fn adjacent_text_siblings_are_separate_blocks_that_keep_their_own_newlines() {
 /// unwritten zero size into the placed layout. #227 needed committed geometry
 /// for atomic children restored after a content replacement and gave the
 /// paragraph a commit-goal path through `compute_inline_box_layout`
-/// (`crates/dom/src/layout/text_block.rs:596-603`).
+/// (`crates/terminus/src/layout/text_block.rs:596-603`).
 #[test]
 fn a_flex_view_inside_a_text_shrinks_to_fit_and_stays_on_the_line() {
     let mut document = ahem_document();
@@ -947,7 +950,7 @@ fn a_flex_view_inside_a_text_shrinks_to_fit_and_stays_on_the_line() {
 /// unwritten zero size into the placed layout. #227 needed committed geometry
 /// for atomic children restored after a content replacement and gave the
 /// paragraph a commit-goal path through `compute_inline_box_layout`
-/// (`crates/dom/src/layout/text_block.rs:596-603`).
+/// (`crates/terminus/src/layout/text_block.rs:596-603`).
 ///
 /// The fixture's markup indentation is written the way a compiled card
 /// carries it — what the browser's collapsing leaves of it, as literal text —
@@ -1041,7 +1044,7 @@ fn a_wrapper_between_a_text_and_a_raw_text_carrier_changes_nothing() {
 /// unwritten zero size into the placed layout. #227 needed committed geometry
 /// for atomic children restored after a content replacement and gave the
 /// paragraph a commit-goal path through `compute_inline_box_layout`
-/// (`crates/dom/src/layout/text_block.rs:596-603`).
+/// (`crates/terminus/src/layout/text_block.rs:596-603`).
 #[test]
 fn the_image_beside_a_wrapped_carrier_is_a_real_box_on_the_line() {
     let mut document = ahem_document();
@@ -1212,7 +1215,7 @@ fn truncation_content_is_laid_in_at_the_clamp_a_maxline_overflows() {
 /// run of mixed sizes and letter-spacings; the replica keeps the break-all and
 /// makes every unit one Ahem em square, so a line is twelve squares and the
 /// retreat is countable. The freed-unit arithmetic over the fixture's *own*
-/// mixed runs is not re-derived here — `crates/hughie`'s replica of this same
+/// mixed runs is not re-derived here — `crates/seldon`'s replica of this same
 /// fixture owns it. What this layer adds is the wiring: whether an
 /// `inline-truncation` written in the tree reaches the paragraph at all.
 ///
@@ -1434,7 +1437,7 @@ fn a_leading_image_survives_the_retreat_that_lays_the_truncation_content_in() {
 /// measure, and the bottom padding still sits below the last line.
 ///
 /// Geometry only, and padding is exactly what this case is about: whether the
-/// clipped remainder is painted over that padding belongs to `crates/dom`. The
+/// clipped remainder is painted over that padding belongs to `crates/terminus`. The
 /// fixture reaches its four lines with `word-break: break-all` over one long
 /// string; the replica reaches them with spaced words, so the break points are
 /// the ones every engine agrees on and the measure is what is under test.
@@ -1543,7 +1546,7 @@ fn a_single_line_clamp_caps_the_block_to_its_parent_s_available_width() {
 /// says so verbatim — "Ellipsis will be appended disregarding the overflowing
 /// mode." (Android `TextRenderer.java:126-135`). This engine instead gates the
 /// marker on `text-overflow: ellipsis`
-/// (`crates/hughie/src/text/block/truncate.rs:135`), which the initial value
+/// (`crates/seldon/src/text/block/truncate.rs:135`), which the initial value
 /// `clip` and the Lynx UA sheet's silence leave unset here, so the fixture
 /// renders `12345` bare. That gating is the intended behavior under the
 /// 2026-09-14 ruling — a Lynx-vello-specific behavior matching neither
@@ -1583,7 +1586,7 @@ fn a_maxlength_cut_inside_a_raw_text_payload_lands_bare_at_the_kept_five() {
 /// `a_maxlength_cut_inside_a_raw_text_payload_lands_bare_at_the_kept_five`: the
 /// same fixture with `text-overflow: ellipsis` declared, which is the one state
 /// in which this engine emits the marker
-/// (`crates/hughie/src/text/block/truncate.rs:135`).
+/// (`crates/seldon/src/text/block/truncate.rs:135`).
 ///
 /// This is what web-core renders for the fixture *unconditionally*, and pinning
 /// it here keeps the marker machinery covered: without this test a regression
@@ -1729,7 +1732,7 @@ fn a_text_block_as_a_flex_item_sizes_to_its_run_and_is_centred_not_stretched() {
 /// web-core does not already do, tail being its only behaviour. The clamp
 /// marker itself is not observable through this crate's surface, since a full
 /// clamped line measures the same width with or without it; the marker is
-/// pinned in `crates/hughie`.
+/// pinned in `crates/seldon`.
 ///
 /// This is the card's style half, which holds today. Its geometric half — that
 /// a one-line clamp does not wrap at all in web-core, so the kept line runs to
@@ -1967,7 +1970,7 @@ fn a_compiled_card_s_inline_image_takes_its_used_size_and_its_margin() {
 /// The atom's vertical placement in the line is left out, as in the other
 /// atomic-inline replicas: this case's claim is the advance and the shared
 /// line, and the CSS 2.2 §10.8.1 placement parley 0.12 gives a baseline-aligned
-/// box is pinned by `crates/hughie/tests/text_block.rs`.
+/// box is pinned by `crates/seldon/tests/text_block.rs`.
 ///
 /// Held only from `d19cbea2` (#227) on: before it an atom's subtree was only
 /// ever measured, so a text block nested inside an atom committed no paragraph
@@ -2203,7 +2206,7 @@ fn the_later_of_two_equal_specificity_class_rules_wins_on_a_text() {
     document.add_stylesheet(
         ".a { color: red; font-size: 16px }\n\
          .b { color: linear-gradient(green, #ff0); font-size: 80px }",
-        dom::StylesheetOrigin::Author,
+        terminus::StylesheetOrigin::Author,
     );
     let text = child(&mut document, "text", "width: 900px");
     document.add_class(text, "a");
@@ -2373,7 +2376,7 @@ fn inheritance_card(switch: Option<bool>) -> InheritanceCard {
         config.enable_css_inheritance = enabled;
     }
     let mut document = ahem_document_with(config);
-    document.add_stylesheet(INHERITANCE_CARD_CSS, dom::StylesheetOrigin::Author);
+    document.add_stylesheet(INHERITANCE_CARD_CSS, terminus::StylesheetOrigin::Author);
     let root = child(&mut document, "view", "");
 
     let solid_parent = card_view(&mut document, root, "typography");
@@ -2667,7 +2670,7 @@ fn css_inheritance_follows_a_change_of_the_view_s_text_decoration() {
     });
     document.add_stylesheet(
         ".struck { text-decoration: line-through; }",
-        dom::StylesheetOrigin::Author,
+        terminus::StylesheetOrigin::Author,
     );
     let view = child(&mut document, "view", "");
     let direct = card_text(&mut document, view, "", "direct");
@@ -2711,7 +2714,7 @@ fn css_inheritance_is_scoped_to_a_view_s_own_text_and_wrapper() {
     });
     document.add_stylesheet(
         "page, .coloured { color: rgb(1, 2, 3); }",
-        dom::StylesheetOrigin::Author,
+        terminus::StylesheetOrigin::Author,
     );
     let page = document.document_element().id();
     let mut texts = vec![("page", card_text(&mut document, page, "", "page"))];
@@ -2754,7 +2757,7 @@ fn every_authored_declaration_outranks_css_inheritance() {
     });
     document.add_stylesheet(
         "text { color: rgb(4, 5, 6); text-decoration: line-through; }",
-        dom::StylesheetOrigin::Author,
+        terminus::StylesheetOrigin::Author,
     );
     let view = child(
         &mut document,

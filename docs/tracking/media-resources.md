@@ -50,7 +50,7 @@ is re-decoded at that size. The prefetch API row below maps to
 `LynxView::prefetch_images`; the bitmap-size cache is the fetcher's remembered
 intrinsic size, answered inline on a second request.
 
-Both halves of the replaced-content handoff exist on the `dom` side.
+Both halves of the replaced-content handoff exist on the `terminus` side.
 `Document::set_natural_size` installs the `NaturalSize`, invalidating the
 node-to-root layout-cache path, and `Document::set_image_source` installs the
 source string the paint walk presents to the store; neither waits for the
@@ -73,7 +73,7 @@ it is how Lynx's own rule that an `<image>` box is never bitmap-sized reaches
 a layout engine that would otherwise size a replaced leaf from its pixels.
 
 Implementation note (2026-09-06): `bobcat_core`'s `tree::image` defines the
-`image` tag as a `dom::CustomElement` observing `src` alone and reflecting it
+`image` tag as a `terminus::CustomElement` observing `src` alone and reflecting it
 into `Document::set_image_source`, with an empty value and a removed attribute
 both meaning no source — web-core relays `newval || placeholder` to its inner
 `<img>`, which with no placeholder is the same case, and native refuses to
@@ -92,14 +92,14 @@ is the tripwire for that ordering. A `text`/`inline-text` child
 was the one exception the sheet could not reach while `display: -lynx-text`
 was UA-important, until 2026-10-15 (the value was removed on 2026-10-17, and a
 text is a paragraph by its element kind); it is hidden like any other child
-now, and a `src` masks every child anyway, since `dom` hides every child of a
-replaced box. Two enabling changes landed with it: `hughie`'s `compute_leaf_layout`
+now, and a `src` masks every child anyway, since `terminus` hides every child of a
+replaced box. Two enabling changes landed with it: `seldon`'s `compute_leaf_layout`
 suppresses the natural aspect ratio under size containment (it otherwise fills
-a missing axis before containment is consulted), and `dom`'s `free_node`
+a missing axis before containment is consulted), and `terminus`'s `free_node`
 unbinds a freed node from the image registry — without which a load completing
 after its element was dropped reached `set_natural_size`'s stale-id panic.
 
-Implementation note (2026-09-17): `dom` now carries the second source a
+Implementation note (2026-09-17): `terminus` now carries the second source a
 placeholder needs, under the native race-and-lock model this table's
 `src/placeholder concurrency model` row records and the user ruled for on
 2026-09-17 (over web-core's error-fallback model).
@@ -111,7 +111,7 @@ element draws is its own source while that is loaded, the placeholder
 otherwise, and its natural size always names that same bitmap — so a loaded
 `src` permanently suppresses the placeholder (iOS `LynxImageManager.mm:79-82`),
 a failed `src` leaves the placeholder showing, and swapping `src` blanks the
-element until the new URL reports, as native does. `dom` also produces what a
+element until the new URL reports, as native does. `terminus` also produces what a
 `load`/`error` needs: `Document::apply_image_events` returns an `ImageOutcome`
 per element whose *own* source settled, and `Document::set_image_source`
 returns one when it binds a URL this document had already settled — the case
@@ -172,7 +172,7 @@ overflowing the box — where both references blur the bitmap alone; ruled
 2026-09-20 to stay so until a bitmap-only blur lands separately.
 Every native-vs-web-core conflict the surface raised is recorded in
 [deviations.md](deviations.md) under Components. The `auto-size` rule depends
-on `hughie`'s `determine_flex_base_sizes` handing a stretched item's cross size
+on `seldon`'s `determine_flex_base_sizes` handing a stretched item's cross size
 to the measurement that produces its flex base size (css-flexbox-1 §9.8 with
 §9.2 step B, PR #287), without which an `auto-size` image in a parent that
 stretches it reported its own pixels' main size.
@@ -267,7 +267,7 @@ revision 4.1 of the design, ruled 2026-10-10):
    the load skips the platform decoder and parses the preprocessed bytes
    instead (step 3). The browser embedder does not decode SVG through
    `HTMLImageElement`, so every target parses the same bytes.
-2. **Markup, in `dom`.** `<svg content>` (`crates/bobcat-core/src/main/tree/svg.rs`)
+2. **Markup, in `terminus`.** `<svg content>` (`crates/bobcat-core/src/main/tree/svg.rs`)
    hands its markup to `Document::set_image_document` as bytes. The registry
    files it under a synthetic source, `svg-content:` and the 32 hex digits of
    a 128-bit SipHash-1-3 of the bytes, created pending with its bytes queued
@@ -282,9 +282,9 @@ revision 4.1 of the design, ruled 2026-10-10):
 3. **Parse, in the host.** `bobcat-resources` parses a document where it
    would decode a bitmap: under a decode permit, in a blocking closure of its
    own on its tokio pool natively, inside the load's local task on the
-   Render Worker in the browser. The parse is `dom`'s own converter
-   (`crates/dom/src/render/svg/`), reached through
-   `dom::ImageEvent::parse_document`: one `roxmltree` parse (DTD allowed),
+   Render Worker in the browser. The parse is `terminus`'s own converter
+   (`crates/terminus/src/render/svg/`), reached through
+   `terminus::ImageEvent::parse_document`: one `roxmltree` parse (DTD allowed),
    presentation attribute values through `svgtypes` (CSS inside the
    document, a `<style>` element or a `style` attribute, is not read; ruled
    2026-10-09), and one walk producing a flat command list with geometry,
@@ -312,7 +312,7 @@ revision 4.1 of the design, ruled 2026-10-10):
 5. **Encode, on the document thread.** Applying a parsed document shapes
    its text through the document's own `TextContext` (fonts from the SVG's
    own attributes, `@font-face` faces included) and encodes one vello scene,
-   held by `dom`'s image registry as a ready vector image. The painter's
+   held by `terminus`'s image registry as a ready vector image. The painter's
    `FrameImages`, the bitmap atlas and `ImageSizeHint` never see it.
 6. **Paint.** Where `paint/background.rs` would emit an image draw
    (replaced content for `<image>` and `<svg>`, a background layer, a mask
@@ -321,7 +321,7 @@ revision 4.1 of the design, ruled 2026-10-10):
    visible tile, referenced by `ComposeOp::Vector`; destination rectangle,
    `object-fit`/`object-position`, `background-size`, position and repeat
    come from the same code as for a raster. The painter's raster cache
-   (`crates/dom/src/render/vector_textures.rs`) renders each draw's scene
+   (`crates/terminus/src/render/vector_textures.rs`) renders each draw's scene
    with `render_to_texture` at its device size, the viewport mapped onto it
    by `preserveAspectRatio`, keys the texture by `(image, width, height)`,
    keeps the textures under a byte budget (64 MiB native, 32 MiB wasm32;

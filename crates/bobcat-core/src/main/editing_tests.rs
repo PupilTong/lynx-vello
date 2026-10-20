@@ -11,22 +11,22 @@
 use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 
-use dom::Point2D;
-use dom::editing::{Command, TextInputState};
-use dom::input::{InputEvent, KeyPhase, Modifiers, PointerKind, PointerPhase};
+use terminus::Point2D;
+use terminus::editing::{Command, TextInputState};
+use terminus::input::{InputEvent, KeyPhase, Modifiers, PointerKind, PointerPhase};
 
 use crate::EngineEvent;
 use crate::editing::TextInputSource;
 use crate::test_support::{TestEngine, TestViewSpec, wait_for_boot};
 
 /// Solid em squares: at 20px every character is a 20px-wide box.
-const AHEM: &[u8] = include_bytes!("../../../hughie/tests/fixtures/Ahem.ttf");
+const AHEM: &[u8] = include_bytes!("../../../seldon/tests/fixtures/Ahem.ttf");
 
 /// The editing host.
 const HOST: u64 = 3;
 
-fn node_id(bits: u64) -> dom::NodeId {
-    dom::NodeId::from_bits(bits).expect("a well-formed packed handle")
+fn node_id(bits: u64) -> terminus::NodeId {
+    terminus::NodeId::from_bits(bits).expect("a well-formed packed handle")
 }
 
 /// One host 200×40 at the page's origin, listening for `names` with a
@@ -269,7 +269,7 @@ fn the_text_input_state_is_published_when_it_changes_and_only_then() {
     assert!(typed.caret.size.height > 0.0, "a caret box: {typed:?}");
     assert_eq!(
         typed.editable_bounds.size,
-        dom::Size2D::new(200.0, 40.0),
+        terminus::Size2D::new(200.0, 40.0),
         "the host's border box"
     );
 
@@ -687,7 +687,10 @@ fn an_x_input_types_confirms_and_reports_in_web_core_s_shape() {
         Some(node_id(HOST)),
         "the editor, not the host"
     );
-    assert_eq!(focused.enter_key_hint, dom::editing::EnterKeyHint::Send);
+    assert_eq!(
+        focused.enter_key_hint,
+        terminus::editing::EnterKeyHint::Send
+    );
 
     for text in ["a", "b", "c", "d"] {
         engine.dispatch_input(key(text));
@@ -778,7 +781,7 @@ fn a_readonly_x_input_is_not_focused_by_a_tap() {
                 tree.get(root)?
                     .children()
                     .find(|child| child.is_element())
-                    .map(dom::Node::id)
+                    .map(terminus::Node::id)
             });
             let value = editor
                 .and_then(|editor| tree.get(editor)?.first_child()?.text().map(str::to_owned));
@@ -872,7 +875,10 @@ fn an_empty_focused_x_input_paints_its_caret() {
     // The editor is centred in the 40px field: a 10px line from y = 15.
     assert_eq!(
         state.caret,
-        dom::Rect::new(dom::Point2D::new(0.0, 15.0), dom::Size2D::new(1.0, 10.0))
+        terminus::Rect::new(
+            terminus::Point2D::new(0.0, 15.0),
+            terminus::Size2D::new(1.0, 10.0)
+        )
     );
 
     let pixel = |shot: &crate::view::Screenshot, x: u32, y: u32| {

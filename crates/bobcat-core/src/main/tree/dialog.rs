@@ -1,6 +1,6 @@
 //! The `dialog` tag: HTML's `<dialog>` element (interactive-elements.html,
-//! "The dialog element") over `dom`'s top layer (css-position-4 §3,
-//! `dom::tree::top_layer`).
+//! "The dialog element") over `terminus`'s top layer (css-position-4 §3,
+//! `terminus::tree::top_layer`).
 //!
 //! A W3C element, so `AGENTS.md`'s standards policy puts it in the first
 //! bucket: web-core runs in a browser, where a card that writes `<dialog>`
@@ -36,15 +36,15 @@
 //!   declares `-servo-top-layer: auto`, a UA-only longhand (an author or user sheet drops it) that
 //!   switches on Stylo's `StyleAdjuster::adjust_for_top_layer`, css-position-4 §3.1's
 //!   computed-value fixups: a `position` other than `absolute`/`fixed` computes to `absolute`, as
-//!   in a browser, and `display: contents` is blockified. Membership remains `dom`'s truth for what
-//!   the computed value does not carry: paint order, the backdrop, inertness and the initial
-//!   containing block (`dom::tree::top_layer`).
+//!   in a browser, and `display: contents` is blockified. Membership remains `terminus`'s truth for
+//!   what the computed value does not carry: paint order, the backdrop, inertness and the initial
+//!   containing block (`terminus::tree::top_layer`).
 //! - **Colours.** HTML's `background-color: Canvas; color: CanvasText`. Both compute through
 //!   Stylo's Servo device (`device/servo.rs`, `system_color`) under the light colour scheme — this
 //!   engine's device has no other — to `rgb(255, 255, 255)` and `rgb(0, 0, 0)`.
 //! - **`::backdrop`.** HTML's `position: fixed; inset: 0`, plus `-servo-top-layer: auto` as on
 //!   `dialog:modal`, and `display: flex`, because the pseudo-element's style has no other source of
-//!   a display `dom` lowers. `dialog::backdrop` is HTML's `rgba(0, 0, 0, 0.1)`.
+//!   a display `terminus` lowers. `dialog::backdrop` is HTML's `rgba(0, 0, 0, 0.1)`.
 //!
 //! Every rule is HTML's selector inside `:where()`, so it has no specificity
 //! and every Lynx rule outranks it, as web-elements' author rules outrank a
@@ -53,7 +53,7 @@
 //!
 //! No rule is `!important`. HTML's `width: fit-content; height: fit-content;
 //! margin: auto` centres a modal dialog by shrink-to-fit sizing, and so it
-//! does here: hughie's absolute pass stretch-fits only an `auto` size
+//! does here: seldon's absolute pass stretch-fits only an `auto` size
 //! between two insets (css-position-3 §4.1), so a dialog with no author size
 //! takes its fit-content size (css-sizing-3 §3.2) in the viewport and its
 //! `auto` margins centre it.
@@ -68,12 +68,12 @@
 //!   through `__SetAttribute` or a method below. Removing the attribute (or writing `"false"`) also
 //!   takes a modal dialog out of the top layer and clears `ElementState::MODAL`, without a `close`
 //!   event: HTML's attribute change steps for `open` fire none, and the dialog simply stops
-//!   rendering. A dialog showing as a popover stays in the layer: the popover is `dom`'s
-//!   (`dom::tree::popover`), and `close()` leaves it too.
+//!   rendering. A dialog showing as a popover stays in the layer: the popover is `terminus`'s
+//!   (`terminus::tree::popover`), and `close()` leaves it too.
 //! - **Modal** is top-layer membership with the blocks-the-document flag,
-//!   [`dom::Document::blocks_document`]. `ElementState::MODAL` (`:modal`) follows it. One case
+//!   [`terminus::Document::blocks_document`]. `ElementState::MODAL` (`:modal`) follows it. One case
 //!   needs the component's help: a modal dialog removed from the document leaves the top layer in
-//!   `dom`'s unlink path (HTML's removing steps), where no callback can mutate
+//!   `terminus`'s unlink path (HTML's removing steps), where no callback can mutate
 //!   (`disconnected_callback` takes `&Document`). A disconnected element has no style, so the stale
 //!   bit is invisible until the element is connected again, and [`Dialog::connected_callback`]
 //!   clears it there: a re-inserted dialog is open and not modal, as in a browser.
@@ -83,7 +83,7 @@
 //! [`show`], [`show_modal`], [`close`] and [`request_close`] are HTML's
 //! `show()`, `showModal()`, `close()` and `requestClose()`, reached through
 //! `invoke` / `__InvokeUIMethod` as UI methods: `callElementMethod` in
-//! `main/runtime` asks [`dom::Document::invoke_element_method`], which runs
+//! `main/runtime` asks [`terminus::Document::invoke_element_method`], which runs
 //! [`Dialog`]'s [`CustomElement::invoke`]. Each sets or removes the `open`
 //! attribute and lets the attribute callback do the state work, so there is
 //! one path for each fact.
@@ -128,7 +128,7 @@
 //!   `::backdrop` animations and transitions do not run (the lazy pseudo-element cascade carries no
 //!   animation declarations).
 
-use dom::{CustomElement, ElementState, MethodCall, MethodError, MethodOutcome, NodeId};
+use terminus::{CustomElement, ElementState, MethodCall, MethodError, MethodOutcome, NodeId};
 
 use super::{ComponentEvents, LynxDocument};
 
@@ -169,7 +169,7 @@ pub(super) const UA_RULES: &str = r#"
 "#;
 
 /// Installs the `dialog` component. Must run before any element could carry
-/// the tag, which is [`Document::define`](dom::Document::define)'s own
+/// the tag, which is [`Document::define`](terminus::Document::define)'s own
 /// precondition. `events` is the queue `close()` and `requestClose()` leave
 /// their events in.
 pub(super) fn define(document: &mut LynxDocument, events: ComponentEvents) {
@@ -211,7 +211,7 @@ impl CustomElement<()> for Dialog {
         } else {
             set_state(document, element, ElementState::OPEN, false);
             // A modal dialog leaves the layer; a dialog showing as a popover
-            // is the popover's to take out (`dom::Document::hide_popover`),
+            // is the popover's to take out (`terminus::Document::hide_popover`),
             // as HTML's `close()` leaves it.
             if document.blocks_document(element) {
                 document.remove_from_top_layer(element);
@@ -321,7 +321,7 @@ fn is_open(document: &LynxDocument, dialog: NodeId) -> bool {
 fn set_state(document: &mut LynxDocument, element: NodeId, flags: ElementState, on: bool) {
     let current = document
         .get(element)
-        .map_or(ElementState::empty(), dom::Node::element_state);
+        .map_or(ElementState::empty(), terminus::Node::element_state);
     if current.contains(flags) == on {
         return;
     }
@@ -336,9 +336,9 @@ fn set_state(document: &mut LynxDocument, element: NodeId, flags: ElementState, 
 mod tests {
     #![allow(clippy::float_cmp)] // Authored pixel sizes lay out exactly.
 
-    use dom::stylo::properties::PropertyId;
-    use dom::stylo::values::computed::{Display, Overflow};
-    use dom::{MethodCall, MethodError, MethodOutcome, NodeId, Point2D};
+    use terminus::stylo::properties::PropertyId;
+    use terminus::stylo::values::computed::{Display, Overflow};
+    use terminus::{MethodCall, MethodError, MethodOutcome, NodeId, Point2D};
 
     use super::super::test_support::{
         child, display, document, element_under, overflow, style_of, with_component_events,

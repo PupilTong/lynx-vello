@@ -12,7 +12,7 @@
 //! the embedder-owned caches and image decoding that feed painter turns.
 
 // The workspace-wide `unsafe_code = "warn"` says a block may exist; this says
-// it must explain itself. Crate-local rather than workspace-wide because `dom`
+// it must explain itself. Crate-local rather than workspace-wide because `terminus`
 // and `quickjs-rust-bridge` are not at this bar yet.
 #![warn(clippy::undocumented_unsafe_blocks)]
 

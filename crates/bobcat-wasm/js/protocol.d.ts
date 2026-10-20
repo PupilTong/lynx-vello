@@ -129,7 +129,7 @@ export interface ViewportRect {
 
 /**
  * One editing command for the view's focused editing host, from the
- * facade's `<textarea>` proxy: `dom::editing::Command`'s variants a browser's
+ * facade's `<textarea>` proxy: `terminus::editing::Command`'s variants a browser's
  * input events produce. Offsets and lengths are UTF-16 code units, as the
  * browser's own are.
  *

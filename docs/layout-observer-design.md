@@ -81,8 +81,8 @@ pass (`#layoutText`, itself driven by the element's own `ResizeObserver`,
 when read; no `size`. The upstream e2e test is permanently skipped
 (`reactlynx.spec.ts:2944`, "the text layout event should be improved").
 
-**This engine.** The data exists: `hughie::text::block::LineInfo`
-(`crates/hughie/src/text/block/mod.rs:93-101`) carries `source_start`,
+**This engine.** The data exists: `seldon::text::block::LineInfo`
+(`crates/seldon/src/text/block/mod.rs:93-101`) carries `source_start`,
 `source_end` and `ellipsis_count` per line, computed by every paragraph
 layout. What is missing is the delivery and a host-visible query
 (`Document::text_block` is `pub(crate)`).
@@ -103,7 +103,7 @@ Listed for completeness; none is a candidate for the primitive below.
 
 ## 2. What the engine already has to build on
 
-- **The IntersectionObserver primitive** (`crates/dom/src/visual/intersection/`):
+- **The IntersectionObserver primitive** (`crates/terminus/src/visual/intersection/`):
   a `Vec` of observers in creation order, `Box<dyn Handler<T>>` per observer
   (user ruling 2026-10-10), `Registration {target, previous}` per target,
   a stale bit set by every built frame, moved scroll, observe and freed
@@ -120,10 +120,10 @@ Listed for completeness; none is a candidate for the primitive below.
   `bobcat:exposure` row), one observer per element because each element has
   its own thresholds and margins.
 - **Per-node committed layout**: `LayoutSlot.rounded: Layout`
-  (`hughie/src/tree/io.rs:268`: `location`, `size`, `content_size`,
+  (`seldon/src/tree/io.rs:268`: `location`, `size`, `content_size`,
   `border`, `padding`, `margin`), read in O(1) by `Document::rounded_layout`.
   The rounding tail already marks `BOX_CHANGED` per node whose unrounded box
-  moved (`hughie/src/tree/mod.rs:96-101`, consumed and cleared in
+  moved (`seldon/src/tree/mod.rs:96-101`, consumed and cleared in
   `compute/mod.rs:1938-1940`).
 - **The committed-box table** (`committed_box.rs`): the content box of
   size-query containers and `contain-intrinsic-size: auto` boxes, recorded
@@ -144,7 +144,7 @@ Listed for completeness; none is a candidate for the primitive below.
 
 ### 3.1 Path A: W3C ResizeObserver primitive + a Lynx `layoutchange` adapter
 
-Mirror of the exposure design: a standards primitive in `dom`, a bucket-2
+Mirror of the exposure design: a standards primitive in `terminus`, a bucket-2
 adapter in `bobcat-core`, registration driven by the listener table.
 
 **Classification.** web-core's `layoutchange` *is* a `ResizeObserver` on the
@@ -152,7 +152,7 @@ element, so under the compat target (web-core) the event is bucket 1: a
 real W3C feature with Lynx's event shape on top. Native's "own box changed"
 is the deviation.
 
-**The primitive** (`crates/dom/src/visual/resize/` or `layout/resize.rs`):
+**The primitive** (`crates/terminus/src/visual/resize/` or `layout/resize.rs`):
 
 - `ResizeObservers<T>`: `Vec<ResizeObserver<T>>` in creation order, ids
   monotone, `Box<dyn ResizeEventHandler<T>>` per observer (the same `dyn`
@@ -290,17 +290,17 @@ see that. So the ResizeObserver is not its producer.
 A generic **RelayoutObserver**, "tell me when this node's layout algorithm
 re-ran", was considered and is not needed either. It would be a second
 observer registry with one consumer, no W3C equivalent, and a hook in
-hughie's cached dispatch for arbitrary nodes; and its payload would still
+seldon's cached dispatch for arbitrary nodes; and its payload would still
 be text-engine data that only the text block can supply. What the event
 needs is the precedent the engine already has for `content-visibility`:
-**a per-pass report list collected by `dom` during the commit and taken by
+**a per-pass report list collected by `terminus` during the commit and taken by
 the host in the epilogue** (`Document.content_visibility_changes`,
 `relevance.rs:170-186`, `take_content_visibility_changes`).
 
 Concretely:
 
 - `compute_text_block_layout` (`layout/text_block.rs:482`) runs only when
-  hughie's layout cache missed, and its `input.goal.commits()` branch is
+  seldon's layout cache missed, and its `input.goal.commits()` branch is
   the committing run that recomputed the lines. There, when the element is
   flagged as reporting, push its id onto `Document.text_layout_reports`.
   The flag is membership in a node set on `DocumentLayoutState`
@@ -387,9 +387,9 @@ With rulings 1 and 2 the primitive keeps the spec's data model (observation
 list, `lastReportedSizes`, box kinds, entry shape) and its gather step, and
 delivers from a posted entry rather than inside "update the rendering".
 
-**Built (2026-10-20).** The primitive is `crates/dom/src/visual/resize/`
+**Built (2026-10-20).** The primitive is `crates/terminus/src/visual/resize/`
 and the text layout report list `Document::set_text_layout_reporting`,
-`take_text_layout_reports` and `text_lines` (`crates/dom/src/layout/mod.rs`);
+`take_text_layout_reports` and `text_lines` (`crates/terminus/src/layout/mod.rs`);
 the host side is `crates/bobcat-core/src/main/layout_change.rs`
 (`LayoutChangeObserver` and `LayoutEventRegistration`), the resize
 delivery entry `Page::post_resize_notifications` and

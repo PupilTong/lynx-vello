@@ -17,9 +17,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use bobcat_core::{DrawTarget, LynxView, NoWakeup, Painter, ViewSources};
-use dom::Point2D;
-use dom::input::InputEvent;
 use support::{FetcherDouble, solo_view, tick, wait_for_script};
+use terminus::Point2D;
+use terminus::input::InputEvent;
 
 /// The screen these tests' views report, as a host with no screen to measure
 /// names it. None of them reads `SystemInfo`.
@@ -87,7 +87,7 @@ const BLUE: [u8; 4] = [0, 0, 255, 255];
 fn wheel(painter: &mut Painter, delta_y: f32) {
     painter.dispatch_input(InputEvent::wheel(
         Point2D::new(50.0, 50.0),
-        dom::Vector2D::new(0.0, delta_y),
+        terminus::Vector2D::new(0.0, delta_y),
     ));
 }
 

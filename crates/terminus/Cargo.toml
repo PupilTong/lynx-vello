@@ -1,0 +1,94 @@
+[package]
+name = "terminus"
+description = "Generic W3C DOM, Stylo/layout core, and document-owned Vello paint pipeline"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+# Only `benches/` holds benchmarks: keep `cargo build --benches` from compiling
+# this target a second time as a bench harness (AGENTS.md, "Benchmarks are
+# only the `benches/` targets").
+bench = false
+
+[features]
+layout-test-utils = ["seldon/layout-test-utils"]
+
+[dependencies]
+bytes = { workspace = true }
+flume = { workspace = true }
+rustc-hash = { workspace = true }
+slab = { workspace = true }
+smallvec = { workspace = true }
+pollster = { workspace = true }
+rayon = { workspace = true }
+vello = { workspace = true, features = ["wgpu", "wgpu_default"] }
+roxmltree = { workspace = true }
+siphasher = { workspace = true }
+svgtypes = { workspace = true }
+
+seldon = { workspace = true }
+
+stylo = { workspace = true }
+stylo_atoms = { workspace = true }
+stylo_dom = { workspace = true }
+stylo_traits = { workspace = true }
+selectors = { workspace = true }
+app_units = { workspace = true }
+cssparser = { workspace = true }
+euclid = { workspace = true }
+url = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+parley = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+parley = { workspace = true, features = ["complex-scripts"] }
+
+[dev-dependencies]
+divan = { workspace = true }
+prime-radiant = { workspace = true, features = ["render"] }
+html5ever = { workspace = true }
+markup5ever_rcdom = { workspace = true }
+png = { workspace = true }
+
+[[bench]]
+name = "animation"
+harness = false
+
+[[bench]]
+name = "container_units"
+harness = false
+
+[[bench]]
+name = "css"
+harness = false
+
+[[bench]]
+name = "paint"
+harness = false
+
+[[bench]]
+name = "custom_elements"
+harness = false
+
+[[bench]]
+name = "shadow"
+harness = false
+
+[[bench]]
+name = "query_selector"
+harness = false
+
+[[bench]]
+name = "lifecycle"
+harness = false
+
+[lints]
+workspace = true
+
+[[bench]]
+name = "culling"
+harness = false

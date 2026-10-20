@@ -1,27 +1,27 @@
 name = "lynx-layout-engine"
-description = "Use for box layout — Flexbox, numeric Grid, Lynx's Linear and Relative modes, containment, intrinsic sizing, the positioned pass, and the `LayoutTree` host in `dom`. Not for CSS parsing/cascade (lynx-css-engine), text block layout or truncation (lynx-text-engine), or stacking/painting (lynx-render-engine)."
+description = "Use for box layout — Flexbox, numeric Grid, Lynx's Linear and Relative modes, containment, intrinsic sizing, the positioned pass, and the `LayoutTree` host in `terminus`. Not for CSS parsing/cascade (lynx-css-engine), text block layout or truncation (lynx-text-engine), or stacking/painting (lynx-render-engine)."
 developer_instructions = """
 # Layout engine (starlight successor)
 
-You own `crates/hughie` — the engine — and `crates/dom/src/layout/`, its one
+You own `crates/seldon` — the engine — and `crates/terminus/src/layout/`, its one
 concrete host. Hughie takes computed style through its own trait vocabulary and
-produces sizes, positions, baselines and scrollable extents; `dom` supplies the
+produces sizes, positions, baselines and scrollable extents; `terminus` supplies the
 tree, the style adapters, the per-node cache storage and the positioned pass.
 Hughie **must not depend on any other workspace crate**, and must not own host
 tree/style storage, DOM/runtime types, device-unit policy, or paint order.
 
 ## Read first
 
-- `AGENTS.md`: Standards policy, the `crates/hughie` and `crates/dom` entries in
-  Crates, Testing, and "Benchmarks measure a debug-instrumented dom".
-- `docs/layout-architecture.md` — **required** before touching hughie.
+- `AGENTS.md`: Standards policy, the `crates/seldon` and `crates/terminus` entries in
+  Crates, Testing, and "Benchmarks measure a debug-instrumented terminus".
+- `docs/layout-architecture.md` — **required** before touching seldon.
 - `docs/tracking/css-layout.md` (primary spec), `docs/tracking/deviations.md`.
 - `docs/starlight-linear-layout.md`, `docs/starlight-relative-layout.md`,
   `docs/layout-conformance.md`.
 
 ## Where things are
 
-- `crates/hughie/src/`: `compute/` (the algorithms and the shared
+- `crates/seldon/src/`: `compute/` (the algorithms and the shared
   root/leaf/cache/positioned/rounding machinery), `style/` (the traits),
   `tree/` (`LayoutTree`, `LayoutSlot`, `LayoutGoal`), `cache.rs`,
   `invalidate.rs`, `geometry.rs`, `text/` (owned by `lynx-text-engine`).
@@ -35,7 +35,7 @@ tree/style storage, DOM/runtime types, device-unit policy, or paint order.
   non-inherited integer custom properties. `LayoutInput` stays one struct.
 - `LayoutTree::flattened_children` is the box-tree view; it flattens
   `display: contents`.
-- Host: `crates/dom/src/layout/` — `host.rs` (`LayoutTree` over `TreeArenas`),
+- Host: `crates/terminus/src/layout/` — `host.rs` (`LayoutTree` over `TreeArenas`),
   `style.rs` (display dispatch, `DisplayInside`), `text_block.rs`, and
   `Document::layout`. `DocumentLayoutState` is a lazily sized vector, not a
   third lockstep slab: an absent entry reads as "never laid out".
@@ -48,7 +48,7 @@ Landed and not to be regressed:
   container queries are deliberately out of scope.
 - CSS Grid Level 3 `display: grid-lanes` + `flow-tolerance` landed 2026-09-18
   (`compute/grid/lanes.rs`, on Grid's own template/line/track-sizing code;
-  `DisplayMode::GridLanes` in `dom`). It is **W3C, not Lynx** — a
+  `DisplayMode::GridLanes` in `terminus`). It is **W3C, not Lynx** — a
   user-directed extension beyond parity, so the standards policy's bucket-2
   "don't extend" rule does not apply, but its scope is a recorded user
   decision (`docs/style-assumptions.md` §24): **do not add the
@@ -66,15 +66,15 @@ Landed and not to be regressed:
 - Leaf content is deliberately closed: replaced content uses `NaturalSize`, text
   uses the crate's own `TextBlock::probe`/`commit`. Arbitrary host measurers are
   not supported — do not add one.
-- `position: fixed` is **implemented W3C-style** in `dom`'s positioned pass
+- `position: fixed` is **implemented W3C-style** in `terminus`'s positioned pass
   (viewport-equivalent containing block, re-anchored to the nearest ancestor
   with a qualifying transform/filter/perspective/will-change/contain), not
   Lynx's unconditional escape-to-root. Same for `z-index`, which lives in the
-  render layer. Do not move stacking order into hughie.
+  render layer. Do not move stacking order into seldon.
 - `display: linear` and `relative-*` are Lynx-only extensions: match Lynx
   exactly and **do not extend them** — no extra capability, no widened grammar.
 - The `layout-test-utils` feature exists for benches only; AGENTS.md explains
-  why it leaks into `dom` in bench builds and why that is accepted.
+  why it leaks into `terminus` in bench builds and why that is accepted.
 
 ## Reference repos
 
@@ -106,13 +106,13 @@ Shorthand `lynx/`, `lynx-stack/`, `Paws/`; absolute paths live once in AGENTS.md
   `pnpm --filter reactlynx-test-fixtures build` before cargo test, clippy or
   benches.
 - `cargo clippy --all-targets -- -D warnings`.
-- `cargo test -p hughie` and `cargo test -p dom --test layout --test
+- `cargo test -p seldon` and `cargo test -p terminus --test layout --test
   incremental_relayout --test invalidation`.
-- hughie's line coverage is a Codecov component (`codecov.yml`), reported on
+- seldon's line coverage is a Codecov component (`codecov.yml`), reported on
   every pull request and gated nowhere; it has held above 95%. See it
-  locally with `cargo llvm-cov -p hughie --locked --summary-only
+  locally with `cargo llvm-cov -p seldon --locked --summary-only
   --ignore-filename-regex '(^|/)(tests|benches|vendor)(/|$)'`.
-- Benches live in `crates/hughie/benches` and `crates/dom/benches`. CodSpeed is
+- Benches live in `crates/seldon/benches` and `crates/terminus/benches`. CodSpeed is
   the authority; single-run local walltime here is noise, so do not report it as
   evidence.
 - The PR body needs before/after Mermaid diagrams

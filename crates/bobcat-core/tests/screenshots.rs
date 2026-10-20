@@ -13,7 +13,7 @@ use bobcat_core::{
     DrawTarget, FontBlob, LynxView, NoWakeup, Painter, PreparsedDeclaration, PreparsedRule,
     PreparsedStyleSheet, ViewSources,
 };
-use flashbulb::{Image, Screenshots};
+use prime_radiant::{Image, Screenshots};
 use support::{FetcherDouble, solo_view, tick, wait_for_script};
 
 /// The screen these tests' views report, as a host with no screen to measure
@@ -239,7 +239,7 @@ fn settle(
 fn settle_images(
     view: &mut LynxView<Rc<FetcherDouble>>,
     painter: &mut Painter,
-    images: &flashbulb::TestImages,
+    images: &prime_radiant::TestImages,
 ) {
     settle(
         view,
@@ -261,7 +261,7 @@ fn settle_images(
 fn settle_drawing(
     view: &mut LynxView<Rc<FetcherDouble>>,
     painter: &mut Painter,
-    images: &flashbulb::TestImages,
+    images: &prime_radiant::TestImages,
     expected: &[&str],
 ) {
     settle(
@@ -280,7 +280,7 @@ fn settle_drawing(
 }
 
 fn screenshots() -> Screenshots {
-    flashbulb::screenshots_in(env!("CARGO_MANIFEST_DIR"))
+    prime_radiant::screenshots_in(env!("CARGO_MANIFEST_DIR"))
 }
 
 /// The painter's newest frame, ready to compare with a golden.
@@ -290,7 +290,7 @@ fn captured(painter: &mut Painter) -> Image {
 }
 
 /// A store carrying the one checker the image page draws.
-fn checker_store() -> Rc<flashbulb::TestImages> {
+fn checker_store() -> Rc<prime_radiant::TestImages> {
     let mut rgba = Vec::with_capacity(4 * 4 * 4);
     for y in 0..4 {
         for x in 0..4 {
@@ -303,7 +303,7 @@ fn checker_store() -> Rc<flashbulb::TestImages> {
             rgba.extend_from_slice(&pixel);
         }
     }
-    let images = Rc::new(flashbulb::TestImages::new());
+    let images = Rc::new(prime_radiant::TestImages::new());
     images.insert_rgba8(IMAGE_URL, 4, 4, rgba);
     images
 }
@@ -393,7 +393,7 @@ async fn an_image_element_loads_and_paints_from_its_src() {
 /// element carrying its run in an attribute — reaches the painter as glyphs.
 #[tokio::test]
 async fn raw_text_reaches_the_private_painter_as_glyphs() {
-    const ROBOTO: &[u8] = include_bytes!("../../hughie/tests/fixtures/Roboto-Regular.ttf");
+    const ROBOTO: &[u8] = include_bytes!("../../seldon/tests/fixtures/Roboto-Regular.ttf");
 
     // Selecting the face by name is what proves the container registered: an
     // unknown default family fails the construction.
@@ -418,7 +418,7 @@ async fn raw_text_reaches_the_private_painter_as_glyphs() {
 /// inline code.
 #[tokio::test]
 async fn markdown_renders_its_content_in_its_shadow_tree() {
-    const ROBOTO: &[u8] = include_bytes!("../../hughie/tests/fixtures/Roboto-Regular.ttf");
+    const ROBOTO: &[u8] = include_bytes!("../../seldon/tests/fixtures/Roboto-Regular.ttf");
     const SOURCE: &str = r"
 globalThis.renderPage = function renderPage() {
   const page = __CreatePage('card', 0);
@@ -471,7 +471,7 @@ globalThis.renderPage = function renderPage() {
 /// same 21px line height makes the two boxes 84 and 42 device pixels tall.
 #[tokio::test]
 async fn text_maxline_halves_the_rendered_box_at_device_pixel_ratio_two() {
-    const AHEM: &[u8] = include_bytes!("../../hughie/tests/fixtures/Ahem.ttf");
+    const AHEM: &[u8] = include_bytes!("../../seldon/tests/fixtures/Ahem.ttf");
     const SOURCE: &str = r"
 globalThis.renderPage = function () {
   const page = __CreatePage('card', 0);
@@ -534,7 +534,7 @@ globalThis.renderPage = function () {
 /// box, so the picture is exact.
 #[tokio::test]
 async fn text_fields_draw_their_placeholder_or_their_value() {
-    const AHEM: &[u8] = include_bytes!("../../hughie/tests/fixtures/Ahem.ttf");
+    const AHEM: &[u8] = include_bytes!("../../seldon/tests/fixtures/Ahem.ttf");
     const SOURCE: &str = r"
 globalThis.renderPage = function () {
   const page = __CreatePage('card', 0);
@@ -578,7 +578,7 @@ globalThis.renderPage = function () {
 /// field, whose rule does not apply to it.
 #[tokio::test]
 async fn a_placeholder_rule_draws_the_placeholder_in_its_style() {
-    const AHEM: &[u8] = include_bytes!("../../hughie/tests/fixtures/Ahem.ttf");
+    const AHEM: &[u8] = include_bytes!("../../seldon/tests/fixtures/Ahem.ttf");
     const SOURCE: &str = r"
 globalThis.renderPage = function () {
   const page = __CreatePage('card', 0);
@@ -833,8 +833,8 @@ fn punched_bitmap() -> (u32, u32, Vec<u8>) {
 /// this never publishes — `PENDING_SOURCE` and, until a test publishes it,
 /// `PORTRAIT_SOURCE` — stay pending for the whole run. Nothing here is
 /// timing: which state a source is in is the test's to choose.
-fn picture_store() -> Rc<flashbulb::TestImages> {
-    let images = Rc::new(flashbulb::TestImages::new());
+fn picture_store() -> Rc<prime_radiant::TestImages> {
+    let images = Rc::new(prime_radiant::TestImages::new());
     for (source, bitmap) in [
         (LANDSCAPE_SOURCE, landscape_bitmap()),
         (HOLDING_SOURCE, holding_bitmap()),
@@ -866,7 +866,7 @@ fn image_page(body: &str) -> String {
 /// at a device pixel ratio of 1, serving `images`.
 async fn booted_with_images(
     source: String,
-    images: &Rc<flashbulb::TestImages>,
+    images: &Rc<prime_radiant::TestImages>,
     width: f32,
     height: f32,
 ) -> (LynxView<Rc<FetcherDouble>>, Painter) {
@@ -955,7 +955,7 @@ globalThis.renderPage = function renderPage() {
 }
 
 /// Requirement: the two sources are concurrent, and which of them an element
-/// draws follows `dom`'s rule rather than a fallback chain.
+/// draws follows `terminus`'s rule rather than a fallback chain.
 ///
 /// Four 80x60 boxes, all with the same ready placeholder:
 ///
@@ -1339,7 +1339,7 @@ globalThis.renderPage = function renderPage() {
 /// sheet the host pre-parsed, a commit on `bobcat-main`, and the painter's own
 /// `compose_and_render`, which bakes the group offscreen before it composes.
 ///
-/// This is the one golden that covers that pre-step end to end. `dom`'s own
+/// This is the one golden that covers that pre-step end to end. `terminus`'s own
 /// blur screenshots drive the headless renderer directly and would pass
 /// unchanged if `Painter` never called `prepare_filters` at all; here the
 /// blurred card would simply come out crisp.
@@ -1350,7 +1350,7 @@ globalThis.renderPage = function renderPage() {
 /// of them have a crisp twin 40 px below to be compared against.
 #[tokio::test]
 async fn a_blurred_card_reaches_the_offscreen_draw_target() {
-    const ROBOTO: &[u8] = include_bytes!("../../hughie/tests/fixtures/Roboto-Regular.ttf");
+    const ROBOTO: &[u8] = include_bytes!("../../seldon/tests/fixtures/Roboto-Regular.ttf");
 
     let (_view, mut painter) = booted_with_sheet_sources(
         BLUR_CARD_SCRIPT.as_bytes(),
@@ -1480,7 +1480,7 @@ globalThis.renderPage = function renderPage() {
 /// behind the lower one is not.
 #[tokio::test]
 async fn a_backdrop_filtered_card_reaches_the_offscreen_draw_target() {
-    const ROBOTO: &[u8] = include_bytes!("../../hughie/tests/fixtures/Roboto-Regular.ttf");
+    const ROBOTO: &[u8] = include_bytes!("../../seldon/tests/fixtures/Roboto-Regular.ttf");
 
     let (_view, mut painter) = booted_with_sheet_sources(
         BACKDROP_CARD_SCRIPT.as_bytes(),
@@ -1633,7 +1633,7 @@ globalThis.renderPage = function renderPage() {
 /// would also catch one name losing its component.
 #[tokio::test]
 async fn a_blur_view_reaches_the_offscreen_draw_target() {
-    const ROBOTO: &[u8] = include_bytes!("../../hughie/tests/fixtures/Roboto-Regular.ttf");
+    const ROBOTO: &[u8] = include_bytes!("../../seldon/tests/fixtures/Roboto-Regular.ttf");
 
     let (_view, mut painter) = booted_with_sheet_sources(
         BLUR_VIEW_SCRIPT.as_bytes(),

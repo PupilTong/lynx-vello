@@ -395,7 +395,7 @@ fn svg(attributes: &str) -> String {
 /// What the engine's parser makes of `svg`, as text: a reported document
 /// prints the same exactly when it was parsed from the same bytes. The
 /// document has no public members, so its `Debug` is what a test outside
-/// `dom` can compare.
+/// `terminus` can compare.
 fn parse_of(svg: &[u8]) -> String {
     match ImageEvent::parse_document(Arc::from("app:///expected.svg"), svg, DocumentKind::Svg) {
         ImageEvent::ParsedDocument { document, .. } => format!("{document:?}"),
@@ -405,7 +405,7 @@ fn parse_of(svg: &[u8]) -> String {
 
 /// A registered SVG document is not decoded: the fetcher parses it with the
 /// engine's parser and reports the parsed document, and keeps neither it nor
-/// a bitmap, so it counts nothing. Sizing is the engine's, pinned in `dom`.
+/// a bitmap, so it counts nothing. Sizing is the engine's, pinned in `terminus`.
 #[test]
 fn a_registered_svg_loads_as_the_document_it_parses_to() {
     let harness = Harness::new(Harness::quiet());

@@ -36,17 +36,17 @@ use std::sync::Arc;
 #[cfg(test)]
 use std::time::Duration;
 
-use dom::input::{InputEvent, InputKind, PointerId};
-use dom::render::gpu::Headless;
-use dom::scroll::{
+use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
+use terminus::input::{InputEvent, InputKind, PointerId};
+use terminus::render::gpu::Headless;
+use terminus::scroll::{
     AutoScrollRequest, ChainLink, ScrollAxes, ScrollBehavior, ScrollRequest, drive_chain,
     settle_offset,
 };
-use dom::vello::Scene;
-use dom::vello::peniko::{Color, ImageData};
-use dom::{CommittedFrame, HitTarget, NodeId, Vector2D};
-use rustc_hash::FxHashMap;
-use smallvec::SmallVec;
+use terminus::vello::Scene;
+use terminus::vello::peniko::{Color, ImageData};
+use terminus::{CommittedFrame, HitTarget, NodeId, Vector2D};
 #[cfg(test)]
 use tokio::sync::mpsc;
 use tokio::sync::watch;
@@ -184,7 +184,7 @@ pub(crate) struct FarEnd {
 /// Named once because two renders read it. The composite render clears to
 /// it, and the bake of a `backdrop-filter` element at the document's root
 /// renders over it, since filter-effects-2's Backdrop Root Image of the root
-/// holds the canvas (see [`dom::render::blur`]).
+/// holds the canvas (see [`terminus::render::blur`]).
 const CANVAS: Color = Color::WHITE;
 
 /// Where a painter's pixels go: a window's presentation stack, or a texture
@@ -295,7 +295,7 @@ impl Output {
         frame: &CommittedFrame,
         images: &[Option<ImageData>],
         vectors: &[Option<ImageData>],
-        offset_of: &dyn Fn(&dom::ScrollSlot) -> Option<Vector2D<f32>>,
+        offset_of: &dyn Fn(&terminus::ScrollSlot) -> Option<Vector2D<f32>>,
         scroll_generation: u64,
         animation_now: Option<f64>,
         out: &mut Vec<Option<ImageData>>,
@@ -343,7 +343,7 @@ impl Output {
     ///
     /// The scene's bitmaps are named because a target tracks what its
     /// renderer's image atlas still holds; see
-    /// [`dom::render::gpu::AtlasResidency`].
+    /// [`terminus::render::gpu::AtlasResidency`].
     fn render(
         &mut self,
         scene: &Scene,
@@ -468,8 +468,8 @@ pub(super) struct ScrollIntents {
     /// bounce back on its way home — and that an
     /// `overscroll-behavior: circular` axis may stand anywhere: it has no
     /// boundary, and its scrolling area repeats every
-    /// [`dom::ScrollSlot::wrap_period`]. Such an offset is composed, hit
-    /// tested and sampled modulo the period (`dom` normalizes it at every
+    /// [`terminus::ScrollSlot::wrap_period`]. Such an offset is composed, hit
+    /// tested and sampled modulo the period (`terminus` normalizes it at every
     /// entry point), posted modulo the period and unclamped, which the
     /// document admits as it stands ([`Self::drain_changed`]), and brought
     /// back into `[0, period)` by each rebase, which shifts the drag origins
@@ -506,7 +506,7 @@ pub(super) struct ScrollIntents {
     /// words and nothing else.
     auto_scrolls: Vec<AutoScroll>,
     /// The newest programmatic scroll request or auto-scroll change handled
-    /// per container ([`dom::ScrollSlot::request`],
+    /// per container ([`terminus::ScrollSlot::request`],
     /// [`CommittedFrame::auto_scroll_requests`]), which every post for it
     /// names. An
     /// entry is written when a request is first seen and pruned by every
@@ -538,7 +538,7 @@ struct Snapped {
 
 impl ScrollIntents {
     /// Reads, as a newer commit replaces `frame`, the snap area each
-    /// container stands on in it ([`dom::scroll::SnapAxis::snapped_area`],
+    /// container stands on in it ([`terminus::scroll::SnapAxis::snapped_area`],
     /// from the live offset), for the rebase onto that commit to follow.
     /// Every container is read, moving or not: whether one is at rest is
     /// decided by that rebase.
@@ -704,7 +704,7 @@ impl ScrollIntents {
     /// back moving it stops ([`Self::stop_flings_and_bounces_on`]), while an
     /// auto-scroll goes on from where the request leaves the container and
     /// a glide is kept or ended below. One that yields to a pointer
-    /// ([`dom::Document::scroll_to_yielding`]) is dropped whole while a drag
+    /// ([`terminus::Document::scroll_to_yielding`]) is dropped whole while a drag
     /// holds the container. An instant one
     /// puts the live offset on the target, where a drag holding the
     /// container continues from; a smooth one glides there, to the position
@@ -718,7 +718,7 @@ impl ScrollIntents {
     fn apply_request(
         &mut self,
         frame: &CommittedFrame,
-        slot: &dom::ScrollSlot,
+        slot: &terminus::ScrollSlot,
         request: ScrollRequest,
         now: f64,
     ) {
@@ -804,21 +804,27 @@ impl ScrollIntents {
 
     /// css-scroll-snap-1 §4.1.3 for one container at rest: on each axis it
     /// stood on an area's position, it moves to the position `frame` gives
-    /// that area ([`dom::scroll::SnapAxis::position_of`]), however far that
+    /// that area ([`terminus::scroll::SnapAxis::position_of`]), however far that
     /// is and whatever the strictness. An axis whose area contributes no
     /// position any more keeps its offset, for the at-rest rule. On a
     /// circular axis the position is taken into the period, where the
     /// rebase has just brought the offset: the old offset says nothing
     /// about which copy is near under the new period, and nothing refers to
     /// the offset of a container at rest.
-    fn follow_snapped(&mut self, frame: &CommittedFrame, slot: &dom::ScrollSlot, snapped: Snapped) {
+    fn follow_snapped(
+        &mut self,
+        frame: &CommittedFrame,
+        slot: &terminus::ScrollSlot,
+        snapped: Snapped,
+    ) {
         let (snap_x, snap_y) = frame.snap_axes(slot);
         let offset = self.offsets.get(&slot.node).copied().unwrap_or(slot.offset);
-        let axis = |area: Option<NodeId>, snap: Option<dom::scroll::SnapAxis<'_>>, offset: f32| {
-            area.zip(snap)
-                .and_then(|(area, snap)| snap.position_of(area, offset))
-                .unwrap_or(offset)
-        };
+        let axis =
+            |area: Option<NodeId>, snap: Option<terminus::scroll::SnapAxis<'_>>, offset: f32| {
+                area.zip(snap)
+                    .and_then(|(area, snap)| snap.position_of(area, offset))
+                    .unwrap_or(offset)
+            };
         let followed = slot.wrap(Vector2D::new(
             axis(snapped.x, snap_x, offset.x),
             axis(snapped.y, snap_y, offset.y),
@@ -833,7 +839,7 @@ impl ScrollIntents {
     /// stands, so a `mandatory` axis moves to its nearest position and a
     /// `proximity` one only when within range. A stretched axis is left to
     /// its bounce back.
-    fn settle_node_at_rest(&mut self, frame: &CommittedFrame, slot: &dom::ScrollSlot) {
+    fn settle_node_at_rest(&mut self, frame: &CommittedFrame, slot: &terminus::ScrollSlot) {
         let (snap_x, snap_y) = frame.snap_axes(slot);
         if snap_x.is_none() && snap_y.is_none() {
             return;
@@ -877,9 +883,9 @@ impl ScrollIntents {
 
     /// Drives one scroll step from the slot `from` names, outward along the
     /// published chain, and reports per axis what was absorbed and where a
-    /// container is now stretched. Order and reach are `dom`'s
+    /// container is now stretched. Order and reach are `terminus`'s
     /// [`drive_chain`] over the slots' published policy, and each step
-    /// lands per [`resolve_elastic_step`] — [`dom::scroll::resolve_step`]'s
+    /// lands per [`resolve_elastic_step`] — [`terminus::scroll::resolve_step`]'s
     /// rule, the same walk the document runs over live geometry, plus the
     /// `contain-bounce` stretch the document never takes. A drag or fling
     /// step (`pointer` set) records where it found each container it moved,
@@ -1014,7 +1020,7 @@ impl ScrollIntents {
     /// bounces, glides or auto-scrolls them — and forgets them. A container `frame` no longer
     /// carries is dropped. Both buffers keep their capacity.
     ///
-    /// An axis with a [`dom::ScrollSlot::wrap_period`] is normalized into
+    /// An axis with a [`terminus::ScrollSlot::wrap_period`] is normalized into
     /// its period and posted unclamped: the document admits the whole
     /// period on such an axis, so while the scrollport straddles the seam —
     /// the normalized offset past `max_offset` — main holds the offset the
@@ -1089,7 +1095,7 @@ fn clamp_scroll_axis(value: f32, max: f32) -> f32 {
 /// snap data.
 fn slot_step(
     frame: &CommittedFrame,
-    slot: &dom::ScrollSlot,
+    slot: &terminus::ScrollSlot,
     motion: Motion,
     offset: Vector2D<f32>,
     admitted: Vector2D<f32>,
@@ -1117,7 +1123,7 @@ fn slot_step(
 /// the next rebase ([`ScrollIntents::shift_motion`]). A bounded axis keeps
 /// its target.
 fn nearest_copy(
-    slot: &dom::ScrollSlot,
+    slot: &terminus::ScrollSlot,
     live: Vector2D<f32>,
     target: Vector2D<f32>,
 ) -> Vector2D<f32> {
@@ -1134,10 +1140,10 @@ fn nearest_copy(
 }
 
 /// The axes on which `slot` wraps: circular, with content to scroll
-/// ([`dom::ScrollSlot::wrap_period`]). Everything the intents do treats
+/// ([`terminus::ScrollSlot::wrap_period`]). Everything the intents do treats
 /// only these as boundless; a circular axis without overflow clamps like
 /// any other.
-fn wrap_axes(slot: &dom::ScrollSlot) -> ScrollAxes {
+fn wrap_axes(slot: &terminus::ScrollSlot) -> ScrollAxes {
     let (x, y) = slot.wrap_period();
     ScrollAxes {
         x: x.is_some(),
@@ -1169,9 +1175,9 @@ fn clamp_intent_axis(value: f32, max: f32, extent: f32, bounces: bool) -> f32 {
 fn settle_stretch_aware(
     start: Vector2D<f32>,
     offset: Vector2D<f32>,
-    slot: &dom::ScrollSlot,
-    snap_x: Option<dom::scroll::SnapAxis<'_>>,
-    snap_y: Option<dom::scroll::SnapAxis<'_>>,
+    slot: &terminus::ScrollSlot,
+    snap_x: Option<terminus::scroll::SnapAxis<'_>>,
+    snap_y: Option<terminus::scroll::SnapAxis<'_>>,
 ) -> Vector2D<f32> {
     let wrap = wrap_axes(slot);
     let start_axis = |value: f32, max: f32, wraps: bool| {
@@ -1385,7 +1391,7 @@ impl Painter {
             frame_demand: RefCell::default(),
             commands: crate::link::CommandSender::new(commands),
             metrics: watch::channel(Some(viewport)).0,
-            images: Rc::new(dom::NoImages),
+            images: Rc::new(terminus::NoImages),
             scroll: Arc::clone(&scroll),
         });
         let mut painter = Self::without_output(width, height, 1.0);

@@ -85,22 +85,22 @@ pub(crate) enum RealmId {
 
 impl RealmId {
     /// This id as one opaque number, for a table that files what a realm
-    /// reports under a [`dom::event::ListenerKey`]: 0 for [`Self::Page`],
+    /// reports under a [`terminus::event::ListenerKey`]: 0 for [`Self::Page`],
     /// the child key's own number for a child. Child keys are handed out
     /// from 1 and never reused, so no child is ever 0 and a released child's
     /// number is never a newer child's.
-    pub(crate) fn listener_key(self) -> dom::event::ListenerKey {
+    pub(crate) fn listener_key(self) -> terminus::event::ListenerKey {
         match self {
-            Self::Page => dom::event::ListenerKey(0),
+            Self::Page => terminus::event::ListenerKey(0),
             Self::Child(key) => {
                 debug_assert_ne!(key.number(), 0, "child keys start at 1");
-                dom::event::ListenerKey(key.number())
+                terminus::event::ListenerKey(key.number())
             }
         }
     }
 
     /// The realm [`Self::listener_key`] answered `key` for.
-    pub(crate) fn from_listener_key(key: dom::event::ListenerKey) -> Self {
+    pub(crate) fn from_listener_key(key: terminus::event::ListenerKey) -> Self {
         match key.0 {
             0 => Self::Page,
             number => Self::Child(ChildKey::from_number(number)),

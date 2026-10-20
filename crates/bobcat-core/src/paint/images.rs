@@ -6,7 +6,7 @@
 //! thread holds names and load states; it never sees a store, a buffer or a
 //! `peniko::ImageData`, and no channel between the two can carry one. A
 //! painter observing a view reads pixels out of that store through
-//! [`FrameImages`](dom::FrameImages) and asks it for nothing else — which is
+//! [`FrameImages`](terminus::FrameImages) and asks it for nothing else — which is
 //! why what it holds is a table of resolved bitmaps rather than a store.
 //!
 //! A host that decodes off-thread synchronises that itself. It already drives
@@ -17,8 +17,8 @@
 
 use std::sync::Arc;
 
-use dom::FrameImages;
-use dom::vello::peniko::ImageData;
+use terminus::FrameImages;
+use terminus::vello::peniko::ImageData;
 
 /// The pixels the current commit draws, in draw order.
 ///
@@ -59,7 +59,7 @@ impl PainterImages {
     /// the synchronous read. When it is safe to pay that is the painter's own
     /// `poll_link` to say: adopting a commit is the only thing that calls
     /// this, and it is what runs before a swap-chain image is acquired.
-    pub(crate) fn resolve(&mut self, frame: &dom::CommittedFrame, images: &dyn FrameImages) {
+    pub(crate) fn resolve(&mut self, frame: &terminus::CommittedFrame, images: &dyn FrameImages) {
         frame.resolve_images(images, &mut self.resolved, &mut self.sources);
         images.retain(&self.sources);
         self.key = Some(frame.commit_id());
@@ -93,18 +93,18 @@ mod tests {
     /// uploads and two atlas slots.
     #[test]
     fn every_read_of_one_image_keeps_the_same_buffer_identity() {
-        use dom::FrameImages as _;
+        use terminus::FrameImages as _;
 
-        let images = flashbulb::TestImages::new();
-        let pixels = flashbulb::rgba8(1, 1, vec![1, 2, 3, 255]);
+        let images = prime_radiant::TestImages::new();
+        let pixels = prime_radiant::rgba8(1, 1, vec![1, 2, 3, 255]);
         let published = pixels.data.id();
         images.insert("app:///pixel.png", pixels);
 
         let first = images
-            .read("app:///pixel.png", dom::ImageSizeHint::UNBOUNDED)
+            .read("app:///pixel.png", terminus::ImageSizeHint::UNBOUNDED)
             .expect("a published image reads back");
         let second = images
-            .read("app:///pixel.png", dom::ImageSizeHint::UNBOUNDED)
+            .read("app:///pixel.png", terminus::ImageSizeHint::UNBOUNDED)
             .expect("and reads back again");
         assert_eq!(
             first.data.id(),
@@ -122,12 +122,12 @@ mod tests {
     /// standing in for another image.
     #[test]
     fn an_unpublished_source_reads_as_nothing() {
-        use dom::FrameImages as _;
+        use terminus::FrameImages as _;
 
-        let images = flashbulb::TestImages::new();
+        let images = prime_radiant::TestImages::new();
         assert!(
             images
-                .read("app:///missing.png", dom::ImageSizeHint::UNBOUNDED)
+                .read("app:///missing.png", terminus::ImageSizeHint::UNBOUNDED)
                 .is_none()
         );
     }

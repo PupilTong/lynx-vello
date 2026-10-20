@@ -77,7 +77,7 @@ pub(crate) struct InlineFetcher {
     /// The faces this host serves an `@font-face` `src` from, by URL. A URL
     /// that is not in here fails, which is how a test drives the fall-through
     /// to a rule's next source.
-    fonts: FxHashMap<String, dom::FontBlob>,
+    fonts: FxHashMap<String, terminus::FontBlob>,
     /// The absolute URLs a [`SourceRequest::Fetch`] succeeds for; every
     /// other plain fetch fails.
     fetchable: FxHashSet<String>,
@@ -98,12 +98,12 @@ fn resolved(url: &str) -> String {
         .map_or_else(|_| url.to_owned(), String::from)
 }
 
-impl dom::FrameImages for InlineFetcher {
+impl terminus::FrameImages for InlineFetcher {
     fn read(
         &self,
         _source: &str,
-        _hint: dom::ImageSizeHint,
-    ) -> Option<dom::vello::peniko::ImageData> {
+        _hint: terminus::ImageSizeHint,
+    ) -> Option<terminus::vello::peniko::ImageData> {
         None
     }
 
@@ -235,7 +235,7 @@ impl TestEngine {
         self.painter.capture()
     }
 
-    pub(crate) fn dispatch_input(&mut self, event: dom::input::InputEvent) {
+    pub(crate) fn dispatch_input(&mut self, event: terminus::input::InputEvent) {
         self.painter.dispatch_input(event);
     }
 
@@ -250,7 +250,7 @@ impl TestEngine {
         self.view.probe_document(probe)
     }
 
-    pub(crate) fn published_frame(&mut self) -> Option<Arc<dom::CommittedFrame>> {
+    pub(crate) fn published_frame(&mut self) -> Option<Arc<terminus::CommittedFrame>> {
         self.view.published_frame()
     }
 }
@@ -275,10 +275,10 @@ pub(crate) struct TestViewSpec {
     /// Sheets the host holds and the view does not list: what an adoption
     /// asks for by URL.
     served_sheets: Vec<(String, TestSheet)>,
-    fonts: Vec<(String, dom::FontBlob)>,
+    fonts: Vec<(String, terminus::FontBlob)>,
     /// A face the view registers at construction and its family, the page's
     /// default font.
-    default_font: Option<(String, dom::FontBlob)>,
+    default_font: Option<(String, terminus::FontBlob)>,
     fetchable: FxHashSet<String>,
     probes_fetches: bool,
     probes_style_sheets: bool,
@@ -364,7 +364,7 @@ impl TestViewSpec {
     /// One face this host serves, at the URL an `@font-face` `src` names.
     pub(crate) fn with_font(mut self, url: &str, bytes: &'static [u8]) -> Self {
         self.fonts
-            .push((url.to_owned(), dom::FontBlob::from_static(bytes)));
+            .push((url.to_owned(), terminus::FontBlob::from_static(bytes)));
         self
     }
 
@@ -373,7 +373,7 @@ impl TestViewSpec {
     /// default font: text no author rule gives a family shapes with it, and
     /// not with whatever the machine has.
     pub(crate) fn with_default_font(mut self, family: &str, bytes: &'static [u8]) -> Self {
-        self.default_font = Some((family.to_owned(), dom::FontBlob::from_static(bytes)));
+        self.default_font = Some((family.to_owned(), terminus::FontBlob::from_static(bytes)));
         self
     }
 
@@ -617,9 +617,9 @@ pub(crate) fn take_watched(log: &WatcherLog) -> Vec<String> {
 }
 
 /// An engine component that observes intersection, for the tests that pin
-/// when its entries are delivered: a `dom::CustomElement` defined by the test
+/// when its entries are delivered: a `terminus::CustomElement` defined by the test
 /// itself, through a document probe, rather than a component the engine
-/// ships. Its observers are created with a `dom::ElementHandler` naming it,
+/// ships. Its observers are created with a `terminus::ElementHandler` naming it,
 /// which calls its `intersections_changed`.
 ///
 /// It records every entry it hears as `observer:target:intersecting:ratio`,
@@ -643,13 +643,13 @@ impl IntersectionWatcher {
     }
 }
 
-impl dom::CustomElement<()> for IntersectionWatcher {
+impl terminus::CustomElement<()> for IntersectionWatcher {
     fn intersections_changed(
         &self,
-        document: &mut dom::Document<()>,
-        element: dom::NodeId,
-        observer: dom::IntersectionObserverId,
-        entries: Vec<dom::IntersectionObserverEntry>,
+        document: &mut terminus::Document<()>,
+        element: terminus::NodeId,
+        observer: terminus::IntersectionObserverId,
+        entries: Vec<terminus::IntersectionObserverEntry>,
     ) {
         {
             let mut log = self.log.lock().expect("the log is never poisoned");

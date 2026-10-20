@@ -46,8 +46,8 @@
 //! white space between the block's `<p>`s, as
 //! [`super::parse::Block::HtmlSpace`], which is a text node here too.
 
-use dom::NodeId;
 use rustc_hash::FxHashMap;
+use terminus::NodeId;
 
 use super::parse::{Alignment, Block, HtmlElement, Inline, ListItem, TableRow};
 use crate::main::tree::LynxDocument;
@@ -216,7 +216,7 @@ impl Builder<'_> {
         before: Newlines,
     ) -> NodeId {
         let table = self.element(parent, "table", AFTER_CLOSE | AFTER_OPEN | before);
-        // hughie has no `repeat()`: one `auto` track per column.
+        // seldon has no `repeat()`: one `auto` track per column.
         let columns = head.cells.len().max(1);
         let tracks = vec!["auto"; columns].join(" ");
         self.document

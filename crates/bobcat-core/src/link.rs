@@ -38,9 +38,9 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use dom::scroll::ScrollAxes;
-use dom::{CommittedFrame, FrameImages, HitTarget, NodeId, Vector2D};
 use rustc_hash::{FxHashMap, FxHashSet};
+use terminus::scroll::ScrollAxes;
+use terminus::{CommittedFrame, FrameImages, HitTarget, NodeId, Vector2D};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 use url::Url;
@@ -172,7 +172,7 @@ pub(crate) enum ToMain {
     /// acknowledged only once it has been applied. Main dispatches the
     /// events it owes (`beforeinput`, `input`, `composition*`) around the
     /// change, which no listener can stop.
-    Edit(dom::editing::Command),
+    Edit(terminus::editing::Command),
     /// Where the view's typed text comes from, from
     /// [`LynxView::set_text_input_source`](crate::LynxView::set_text_input_source):
     /// what a `keydown`'s editing default action does from the next key on.
@@ -187,7 +187,7 @@ pub(crate) enum ToMain {
     /// carry pixels (encoded document bytes and a parsed tree are not
     /// pixels), which is what makes "`ImageData` never crosses a channel" a
     /// property of the type.
-    ImageEvents(Vec<dom::ImageEvent>),
+    ImageEvents(Vec<terminus::ImageEvent>),
     /// An embedder's native module answering one function argument of one
     /// call the MTS realm made, sent by a
     /// [`ModuleCallback`](crate::native_module::ModuleCallback) as it drops:
@@ -214,13 +214,13 @@ pub(crate) enum ToMain {
 }
 
 /// Everything one routed event carries beside its type and target: what the
-/// router decided the event carries, in `dom`'s one description of it, and
+/// router decided the event carries, in `terminus`'s one description of it, and
 /// when it happened. Nothing here is encoded: the main thread lends the
 /// detail to the Rust walk as it is and encodes it into the realm's numbers
 /// at that boundary alone.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct InputEventPayload {
-    pub(crate) detail: dom::event::EventDetail,
+    pub(crate) detail: terminus::event::EventDetail,
     /// The event's `timestamp`: milliseconds on the view's own timeline,
     /// taken from the reading of the pass that decided the event — an
     /// input's arrival, or the gesture tick's `now`.
@@ -267,7 +267,7 @@ pub(crate) enum ViewNotice {
     /// under the synthetic source the document filed it as, with its bytes
     /// and kind, for the store to parse and report like a fetched document
     /// (`ResourceFetcher::request_document`).
-    RequestDocuments(Vec<dom::DocumentRequest>),
+    RequestDocuments(Vec<terminus::DocumentRequest>),
     /// One source — a stylesheet, an imported module or a worker script —
     /// and the right to answer it. Whoever holds the receiving end
     /// is the destination, which is why the host never learns which.
@@ -276,13 +276,13 @@ pub(crate) enum ViewNotice {
         completion: SourceCompletion,
     },
     /// The focused editing host's state changed since the last one sent
-    /// ([`dom::Document::text_input_state`]): the value, the selection, the
+    /// ([`terminus::Document::text_input_state`]): the value, the selection, the
     /// composition, the geometry of the commit that showed them, or the
     /// focus itself (a default state is "nothing editable is focused").
     /// Sent from a page's epilogue after its commit, at most once per
     /// entry; `LynxView::pump` hands it on as
     /// [`EngineEvent::TextInputStateChanged`].
-    TextInputState(Box<dom::editing::TextInputState>),
+    TextInputState(Box<terminus::editing::TextInputState>),
     /// One `NativeModules.<module>.<method>(...)` a realm of this view made,
     /// for the embedder's own module of that name to serve.
     ///
@@ -371,7 +371,7 @@ pub(crate) struct ScrollEntry {
     /// snap after a commit. Kept across later posts until taken.
     pub(crate) rest: Option<Vector2D<f32>>,
     /// The newest programmatic scroll request the painter had handled for
-    /// the container when it posted ([`dom::ScrollSlot::request`]). Main
+    /// the container when it posted ([`terminus::ScrollSlot::request`]). Main
     /// drops a post naming an older one than the container's pending
     /// request, which it was made before the painter saw, and acknowledges
     /// the request with one that names it.

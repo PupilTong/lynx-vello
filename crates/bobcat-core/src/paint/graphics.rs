@@ -21,14 +21,14 @@
 //! is the frame being produced for the next refresh, not one produced a
 //! pipeline-depth earlier.
 
-use dom::render::blur::FilterTextures;
+use terminus::render::blur::FilterTextures;
 #[cfg(not(target_arch = "wasm32"))]
-use dom::render::gpu::read_texture;
-use dom::render::gpu::{AtlasResidency, render_params, renderer_options};
-use dom::render::vector_textures::VectorTextures;
-use dom::vello::peniko::ImageData;
-use dom::vello::util::{RenderContext, RenderSurface};
-use dom::{CommittedFrame, ScrollSlot, Vector2D, vello};
+use terminus::render::gpu::read_texture;
+use terminus::render::gpu::{AtlasResidency, render_params, renderer_options};
+use terminus::render::vector_textures::VectorTextures;
+use terminus::vello::peniko::ImageData;
+use terminus::vello::util::{RenderContext, RenderSurface};
+use terminus::{CommittedFrame, ScrollSlot, Vector2D, vello};
 
 use super::CANVAS;
 use crate::view::{EngineError, FrameSize};
@@ -64,14 +64,14 @@ pub(crate) struct WindowGraphics {
     surface: RenderSurface<'static>,
     renderer: vello::Renderer,
     /// What that renderer's image atlas still holds; see
-    /// [`dom::render::gpu::AtlasResidency`].
+    /// [`terminus::render::gpu::AtlasResidency`].
     atlas: AtlasResidency,
     /// The `filter: blur()` bakes of the frame this renderer last composed;
-    /// see [`dom::render::blur::FilterTextures`].
+    /// see [`terminus::render::blur::FilterTextures`].
     filters: FilterTextures,
     /// The textures the vector images drawn through this renderer were
     /// baked into, kept across frames under a byte budget; see
-    /// [`dom::render::vector_textures::VectorTextures`].
+    /// [`terminus::render::vector_textures::VectorTextures`].
     vectors: VectorTextures,
     #[cfg(not(target_arch = "wasm32"))]
     capture: Option<CaptureTarget>,

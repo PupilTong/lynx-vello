@@ -14,7 +14,7 @@ the semantics are stylo's.** Everything below refines that sentence.
 
 ## Settled before this session (not re-decided)
 
-- stylo is the cascade engine, layered `future runtime adapter → dom →
+- stylo is the cascade engine, layered `future runtime adapter → terminus →
   vendor/stylo` (fork with the `lynx` feature; Lynx-only properties and
   `rpx`/`ppx`/`sp` units are first-class grammar in the fork, no side-channel
   tricks — and since 2026-09-21 the fork's `lynx` length surface also admits
@@ -105,7 +105,7 @@ the semantics are stylo's.** Everything below refines that sentence.
 
    *§6/§7 required a DOM redesign, and it shipped together with the styling
    system* (not as a retrofit onto the earlier single-threaded-flush
-   `dom`): flushes now drive stylo's own `driver::traverse_dom`;
+   `terminus`): flushes now drive stylo's own `driver::traverse_dom`;
    every piece of element state stylo mutates through `&self` became
    atomic; the one non-atomic slot (`ElementData`) is single-owner under
    stylo's one-worker-per-element traversal discipline; and mutations
@@ -114,7 +114,7 @@ the semantics are stylo's.** Everything below refines that sentence.
    lifecycle and thread-safety invariants.
 
 8. **Style→layout handoff: direct `Arc<ComputedValues>` reads + change
-   flags.** hughie / render consume stylo's computed values in place;
+   flags.** seldon / render consume stylo's computed values in place;
    dirty/invalidation flags (stylo change hints) decide what re-runs.
    Flattening into per-node PODs is *not* assumed — it happens only if
    profiling later proves the pointer-chasing costs.
@@ -287,7 +287,7 @@ the semantics are stylo's.** Everything below refines that sentence.
       until 2026-10-17 a plain `display: -lynx-text`; the value was removed
       that day. The paragraph is now the element's kind
       (`CustomElement::is_lynx_text`), which
-      `dom::layout::display_mode` reads after `none` and `contents` (user
+      `terminus::layout::display_mode` reads after `none` and `contents` (user
       ruling, 2026-10-15; native ignores any other value too, the difference
       from web-core is in `docs/tracking/deviations.md`). With the
       `!important` gone, a UA rule hiding an element's children
@@ -396,7 +396,7 @@ the semantics are stylo's.** Everything below refines that sentence.
 
 16. **cssId scoping is a runtime-adapter concern — implemented 2026-10-12
     (user-directed).** It is what a bundle compiled with the ReactLynx
-    option `enableRemoveCSSScope: false` needs; `dom` stays scope-unaware.
+    option `enableRemoveCSSScope: false` needs; `terminus` stays scope-unaware.
     Mechanism, as web-core's: `bobcat-source`'s `lower_style` repeats each
     selector of a scoped fragment's style rule once per fragment that
     imports it (transitively, itself included), inserting
@@ -532,8 +532,8 @@ and §D.16 with what the wire format actually permits.)*
     longhands) under the `lynx` feature — pref-gated for stock servo — with
     fork-side parse/compute/damage coverage. Ingestion applies no property allowlist, so the fork build is
     the only gate. On top of that grammar, this repo adds the consuming
-    machinery: `dom`'s internal `effective_containment` fold and Stylo damage
-    harvest, and `hughie`'s
+    machinery: `terminus`'s internal `effective_containment` fold and Stylo damage
+    harvest, and `seldon`'s
     size/layout containment, skipped contents, and relayout-boundary
     invalidation. Motivation: `<list>` virtualization (see
     [tracking/components.md](tracking/components.md)) — off-screen / recycled
@@ -545,7 +545,7 @@ and §D.16 with what the wire format actually permits.)*
       `container-type` is exposed, because `cqw`/`cqh` are a *standard* implementation rather
       than viewport aliases, and css-contain-3 §2.1 makes a size query container a contained
       box: `inline-size` applies layout, style and inline-size containment, `size` applies
-      layout, style and size containment. `hughie::style::containment::effective_containment`
+      layout, style and size containment. `seldon::style::containment::effective_containment`
       folds it in beside `content-visibility`.
     - **Single-axis `inline-size` containment is real in layout** *(2026-09-21 user ruling,
       for standard `container-type` support; it replaces the v1 rule that layout ignored the
@@ -571,11 +571,11 @@ and §D.16 with what the wire format actually permits.)*
         dropped the whole declaration.
 
         The container's size comes from the **last committed layout**, because it is a cascade
-        input only layout can produce. `dom` records every size query container's content box
+        input only layout can produce. `terminus` records every size query container's content box
         (`size − padding − border`, unrounded CSS px) at the committing layout run that
         produced it — the same moment, and the same call, that records the last remembered
         size, since both are that run's content box — into the slot-keyed last-committed-box
-        table on the tree arenas (`crates/dom/src/layout/committed_box.rs`), and answers
+        table on the tree arenas (`crates/terminus/src/layout/committed_box.rs`), and answers
         Stylo's `TElement::query_container_size` from it. A container that has never been laid out, or that has just stopped being one,
         answers `None` and its descendants fall back to the viewport.
 
@@ -658,7 +658,7 @@ and §D.16 with what the wire format actually permits.)*
         `vw`/`vh` as above. `px`, `em`/`rem` and `%` are the standard ones.
     - **`content-visibility: auto` relevance is implemented** *(2026-09-20; it was deferred to a
       host-pushed "always relevant" signal until then)*. `auto` still computes its always-on
-      `layout | paint | style` containment, and on top of that `dom` determines *relevance to the
+      `layout | paint | style` containment, and on top of that `terminus` determines *relevance to the
       user* (css-contain-2 §4.1) inside the commit that draws the frame: after the paint order is
       built and before the walk, each `auto` element **the build reached** — i.e. every one not
       under a skipped or `display: none` ancestor, whether or not it emitted a paint item — is
@@ -666,7 +666,7 @@ and §D.16 with what the wire format actually permits.)*
       region that frame's culling admits. The build records the box itself rather than an item
       index, because relevance is geometric: a `visibility: hidden` `auto` element paints nothing
       yet still decides whether its (possibly `visibility: visible`) contents lay out. The bit is layout-side per-element state in a slot-keyed side table on
-      `dom`'s tree arenas — never a Stylo `ElementState`, never a restyle trigger — and
+      `terminus`'s tree arenas — never a Stylo `ElementState`, never a restyle trigger — and
       `StyleView` folds it into `CoreStyle::skips_contents`, which `effective_containment` turns
       into the `SIZE` bit a skipped box gains. An element no rendering update has reached yet is
       *undetermined* and skips, matching the spec's "determined in the next rendering update".
@@ -696,8 +696,8 @@ and §D.16 with what the wire format actually permits.)*
         whose *skipping* changed — which is why the spec's "first observation" case needs no rule
         of its own: an undetermined box already skips, so the first determination of an on-screen
         box is a change and that of an off-screen box is not. The event is then delivered by
-        `dom` itself, over `Document::event_steps`' path, to the **engine's own components** — a
-        defined `dom::CustomElement`, which is what the built-in `<list>` will be — through
+        `terminus` itself, over `Document::event_steps`' path, to the **engine's own components** — a
+        defined `terminus::CustomElement`, which is what the built-in `<list>` will be — through
         `CustomElement::handle_event`. It is **never dispatched to JavaScript**: no realm is
         entered, a card's `addEventListener` for the same name never runs, and there is no Lynx
         event name, string-handler, worklet or `global-bindEvent` form of it. `bobcat-core`'s
@@ -716,7 +716,7 @@ and §D.16 with what the wire format actually permits.)*
       advancing on their timelines as normal from that point." An element "is skipped" when it is
       part of some ancestor's skipped *contents* — "the flat tree descendants of the element" — so
       the box that skips is **not** itself skipped and its own animations run as normal.
-      `dom`'s animation driver (`crates/dom/src/style/animation.rs`) asks
+      `terminus`'s animation driver (`crates/terminus/src/style/animation.rs`) asks
       `crate::layout::skips_contents` up the flat tree, once per element that owns animation
       state, and freezes by carrying every one of that element's start times forward by the
       interval the tick advanced over — the arithmetic that already anchors a newly created
@@ -747,7 +747,7 @@ and §D.16 with what the wire format actually permits.)*
       a last remembered size and is currently skipping its contents, its explicit intrinsic inner
       size in the corresponding axis is the last remembered size in that axis"
       ([css-sizing-4 §5.2](https://drafts.csswg.org/css-sizing-4/#intrinsic-size-override)). The
-      three parts are all `dom`'s (`crates/dom/src/layout/committed_box.rs`); `hughie` is unchanged,
+      three parts are all `terminus`'s (`crates/terminus/src/layout/committed_box.rs`); `seldon` is unchanged,
       because it already reads `AutoLength(l)` as `l` and `AutoNone` as no explicit size and the
       substituted answer arrives as a plain `Length`.
       - **The recording moment is the commit's own layout run.** css-sizing-4 §5.2.1 records "at
@@ -782,13 +782,13 @@ and §D.16 with what the wire format actually permits.)*
         as `AutoLength(l)` and `None` as `AutoNone`. The fork carries the mapping
         (`ContainIntrinsicSize::add_auto_if_needed`) but applies it in
         `StyleAdjuster::adjust_for_contain_intrinsic_size`, which is `#[cfg(feature = "gecko")]`
-        and never runs in this build, so `dom` applies the fold on the computed value on the way
+        and never runs in this build, so `terminus` applies the fold on the computed value on the way
         into layout rather than at cascade time. The observable difference from a cascade-time
         adjustment is confined to serialization: `getComputedStyle` still reports the authored
         value.
     - **Paint containment: layout + visual order.** `contain: paint`'s IFC / containing-block
       effects are computed and exposed by layout; since 2026-07-23 its stacking context and
-      paint/hit-area clipping are implemented by `dom`'s `visual` module (paint order + hit
+      paint/hit-area clipping are implemented by `terminus`'s `visual` module (paint order + hit
       testing). Actual pixel output still awaits the render crate.
     - **Style containment is N/A.** `contain: style` parses and feeds the `content` / `strict`
       composite math, but the engine has no counters or quotes; string/attribute generated content
@@ -871,9 +871,9 @@ and §D.16 with what the wire format actually permits.)*
     `lynx_only` alone does not enable a property. Both keywords survive to
     computed-value time on purpose: layout, not the cascade, resolves them.
     On top of that grammar this repo adds the algorithm
-    (`crates/hughie/src/compute/grid/lanes.rs`, the `GridLanesStyle` trait)
+    (`crates/seldon/src/compute/grid/lanes.rs`, the `GridLanesStyle` trait)
     and its host dispatch (`DisplayMode::GridLanes` in
-    `crates/dom/src/layout/style.rs` and `layout/host.rs`). Motivation: the
+    `crates/terminus/src/layout/style.rs` and `layout/host.rs`). Motivation: the
     Lynx `<list list-type="waterfall">` component — the feasibility
     assessment for that path is recorded in
     [tracking/deviations.md](tracking/deviations.md).
@@ -1050,7 +1050,7 @@ and §D.16 with what the wire format actually permits.)*
       `scroll-snap-stop`, `scroll-padding` and `scroll-margin`, ported to servo
       in the fork behind the experimental pref like the other gecko-only
       Lynx-relevant properties, physical sides only. The engine's choices,
-      each recorded in `crates/dom/src/scroll/snap.rs`: the proximity range is
+      each recorded in `crates/terminus/src/scroll/snap.rs`: the proximity range is
       a third of the scrollport (Blink's ratio); a wheel tick is a
       direction-based operation (`mandatory` steps to the next position ahead
       of it, `proximity` keeps its natural end unless the next position is
@@ -1228,7 +1228,7 @@ and §D.16 with what the wire format actually permits.)*
       `@container` rule is gecko-only in `stylesheets/rule_parser.rs` and
       container style queries stay behind `layout.css.style-queries.enabled`
       (false) — pinned by `lynx_if_function.rs`.
-    - **Invalidation.** `dom` adds no code for it. A queried custom property
+    - **Invalidation.** `terminus` adds no code for it. A queried custom property
       of the element's own changes with its own declarations; an inherited
       one changes the parent's inherited custom properties, and stylo
       recascades the children. A test that reads the parent's value of a
@@ -1239,12 +1239,12 @@ and §D.16 with what the wire format actually permits.)*
       through `attr()`, in a condition or a chosen value, lands in the
       element's `attribute_references`, which
       `note_generated_attribute_change`
-      (`crates/dom/src/style/invalidation.rs`) turns into a recascade of
+      (`crates/terminus/src/style/invalidation.rs`) turns into a recascade of
       that element. A tree-counting function flags the parent
       `MAY_HAVE_TREE_COUNTING_FUNCTION`; inserting or removing a child then
       recascades its element children (`note_child_list_change`). A device
       change recascades the whole tree (`change_device`,
-      `crates/dom/src/style/engine.rs`), which re-evaluates `media()`. Each
+      `crates/terminus/src/style/engine.rs`), which re-evaluates `media()`. Each
       is paid at the mutation; nothing runs per frame or per commit.
     - **Known gap (fork, pre-existing).** A typed `attr()` is substituted
       from the element's attribute map, which the cascade fills from the
@@ -1263,7 +1263,7 @@ and §D.16 with what the wire format actually permits.)*
       `attr(select-index type(<integer>), attr(initial-select-index
       type(<integer>), -1))` with `select-index="two"` and
       `initial-select-index="3"` is `-1`, not `3`
-      (`crates/dom/tests/if_function.rs`, the ignored
+      (`crates/terminus/tests/if_function.rs`, the ignored
       `recipe_a_non_integer_first_attribute_falls_through_to_the_second`).
 
 28. **css-anchor-position-1 (user-directed, 2026-09-29 and 2026-09-30):
@@ -1307,22 +1307,22 @@ and §D.16 with what the wire format actually permits.)*
       `auto` stands for `normal`. It does take `<baseline-position>`
       (`baseline`, `first baseline`, `last baseline`) on both, by the user's
       ruling of 2026-10-17 (fork PR PupilTong/stylo#50).
-    - **Who resolves what.** `hughie`'s absolute pass owns every rule that
+    - **Who resolves what.** `seldon`'s absolute pass owns every rule that
       turns anchor geometry into a box — `anchor()` and `anchor-size()`
       (`compute/anchor.rs`), the `position-area` grid and its default
       alignment (`compute/anchor_area.rs`), `anchor-center`, the
       self-alignment of absolutely positioned boxes (`compute/mod.rs`) and
-      the §6.5 fallback loop (`compute/anchor_fallback.rs`). The `dom` host
-      (`crates/dom/src/layout/anchors.rs`) owns what is a tree walk or a
+      the §6.5 fallback loop (`compute/anchor_fallback.rs`). The `terminus` host
+      (`crates/terminus/src/layout/anchors.rs`) owns what is a tree walk or a
       cascade: the target anchor element, the default anchor, the anchor's
       rectangle with remembered scroll offsets, the scrollable containing
       block, the cascaded position options, the last successful option and
-      the settle loop. The frame's space tree (`crates/dom/src/visual/anchored.rs`)
+      the settle loop. The frame's space tree (`crates/terminus/src/visual/anchored.rs`)
       owns the default scroll shift and `position-visibility`, sampled at
       compose and hit-test time; the main thread's scroll adoption asks the
       document whether a shift requires a new fallback determination. The
       seam is `docs/layout-architecture.md`; the storage and the settle loop
-      `docs/dom-architecture.md` ("Anchor positioning"); the compose side and
+      `docs/terminus-architecture.md` ("Anchor positioning"); the compose side and
       the wake `docs/runtime-architecture.md` ("Anchored boxes compose").
     - **Target anchor element (§2.3).** Candidates come from a name index
       the style harvests maintain (entries only for elements declaring
@@ -1352,7 +1352,7 @@ and §D.16 with what the wire format actually permits.)*
       anything in flow (Blink's behaviour); "tree order" is the flat tree's;
       the skipped-contents clause is subsumed by the committed-box check (an
       element in skipped contents has no box, and a positioned box in the
-      same skipped contents is not laid out either). `hughie` asks only from
+      same skipped contents is not laid out either). `seldon` asks only from
       a containing block's absolute pass, where everything in flow under it
       and every earlier box it is the containing block of is already
       committed: a box escaping a static wrapper (an `absolute` box under a
@@ -1382,7 +1382,7 @@ and §D.16 with what the wire format actually permits.)*
       padding-box coordinates of the element generating the query box's
       containing block (the viewport's for none), unscrolled, relative
       offsets included, transforms ignored, translated by the box's
-      remembered scroll offsets ("Scroll compensation", below); `hughie`
+      remembered scroll offsets ("Scroll compensation", below); `seldon`
       rebases it onto what it lays the box out against (a grid area, the
       scrollable containing block, a `position-area` region).
       `anchor-size()`'s keyword picks the anchor's axis: `width`/`height`
@@ -1467,7 +1467,7 @@ and §D.16 with what the wire format actually permits.)*
          (`most-height`/`most-block-size` vertical, the others horizontal) —
          skipping the current one, each as a measurement; the first that
          fits is committed. None fits → the current option's commit stands.
-         `hughie` never records the last successful option; the host
+         `seldon` never records the last successful option; the host
          does (below).
       7. *Outcome.* For every committed anchor-positioned box: the chosen
          option, whether it still overflows (`no-overflow`), whether it
@@ -1501,7 +1501,7 @@ and §D.16 with what the wire format actually permits.)*
       §3.5.2: the `auto` one, else the end one). **Flexbox and grid
       containers, every box laid out by a containing block that is not its
       parent (whatever that block's algorithm — Lynx has no such boxes, so
-      starlight has no rule for them), and the boxes `dom` places itself
+      starlight has no rule for them), and the boxes `terminus` places itself
       (initial-containing-block boxes, `<text>` blocks) follow
       css-position-3; Lynx `linear` and `relative` containers follow
       starlight and ignore authored `justify-self`/`align-self` on their own
@@ -1543,7 +1543,7 @@ and §D.16 with what the wire format actually permits.)*
       `__GetComputedStyleByKey`) reports the chosen option's values for the
       accepted properties; every other property, and layout and paint
       themselves, read the base style (plus the option's geometry, which
-      `hughie` reads from the option). Descendants inherit from the base
+      `seldon` reads from the option). Descendants inherit from the base
       style, not the chosen option (see "Gaps").
     - **Scroll compensation (§3.3).** Layout is unscrolled, so a scroll
       between an anchor and its box's containing block relays nothing out.
@@ -1584,7 +1584,7 @@ and §D.16 with what the wire format actually permits.)*
       refreshes the remembered offsets, including one that keeps a
       still-fitting current option. The fit test moves the margin box, and
       the inset-modified containing block's *carried* edges, by the shift;
-      `hughie` reports which those are (`AnchorOutcome::carried_edges`):
+      `seldon` reports which those are (`AnchorOutcome::carried_edges`):
       a non-`auto` inset's edge (an `anchor()` edge moves with the anchor;
       a length or `anchor-size()` edge leaves that side unconstrained, as
       Blink's `CalculateNonOverflowingRangeInOneAxis` does) and an `auto`
@@ -1706,7 +1706,7 @@ and §D.16 with what the wire format actually permits.)*
       ignored (Blink maps through them; an open spec issue); a box anchored
       to an anchored box does not follow that box's own default scroll
       shift (spec-literal: only scroll containers adjust; Blink adds the
-      chained translation); `no-overflow` applies only to boxes `hughie`
+      chained translation); `no-overflow` applies only to boxes `seldon`
       reports (anchor-positioned or with options); an anchor with no box
       item of its own (an inline span painted by its paragraph) is never
       found clipped. `bounding_client_rect` (the `boundingClientRect` UI
@@ -1737,14 +1737,14 @@ and §D.16 with what the wire format actually permits.)*
       the grid container's padding edge, unshifted, overflowing that edge;
       the engine follows §4.4.1.2's text and shifts it back until it ends
       at the padding edge (the mock-host test uses a 30px box).
-    - **Tests.** `crates/hughie/tests/anchor_positioning.rs` and
+    - **Tests.** `crates/seldon/tests/anchor_positioning.rs` and
       `anchor_size.rs` (every rule above against a mock host, WPT numbers
-      where a file is named); `crates/dom/tests/anchor_positioning.rs` (the
+      where a file is named); `crates/terminus/tests/anchor_positioning.rs` (the
       WPT ports through a real document, each naming its file and
       adaptation, and the skipped groups in its module doc) and
       `anchor_size.rs` (the `anchor-size()` ports, the coordinator geometry
       and its invalidation); the compose-side units in
-      `crates/dom/src/visual/anchored.rs`; one GPU pixel test
+      `crates/terminus/src/visual/anchored.rs`; one GPU pixel test
       (`gpu_pixels.rs`,
       `an_anchored_box_follows_its_scrolled_anchor_and_hides_with_it`); the
       painter's end-to-end tests in
@@ -1780,8 +1780,8 @@ and §D.16 with what the wire format actually permits.)*
     shadow tree, opened with `showModal()` (`htmlTemplates.ts:136-172`). Native
     Lynx has neither a dialog nor a top layer — its `<overlay>` is a
     zero-sized box whose content is reparented into a platform window. The
-    layer is generic in `dom` (`crates/dom/src/tree/top_layer.rs`,
-    `docs/dom-architecture.md` "Top layer and `::backdrop`"); `<dialog>` is
+    layer is generic in `terminus` (`crates/terminus/src/tree/top_layer.rs`,
+    `docs/terminus-architecture.md` "Top layer and `::backdrop`"); `<dialog>` is
     its first user (`crates/bobcat-core/src/main/tree/dialog.rs`).
     `<overlay>` / `<x-overlay-ng>` is its second, through a `<dialog>` in
     its shadow tree (§30), and HTML's popovers (§31) are its third.
@@ -1815,7 +1815,7 @@ and §D.16 with what the wire format actually permits.)*
       engine) and `top: 0; bottom: 0` for its `inset-block: 0` (disabled in
       the fork); `-servo-top-layer: auto` on `dialog:modal` and `::backdrop`
       (below); and `::backdrop { position: fixed; inset: 0; display: flex }`,
-      the display because the pseudo-element has no other source of one `dom`
+      the display because the pseudo-element has no other source of one `terminus`
       lowers. No rule is `!important`.
     - **§3.1's fixups run where the UA sheet asks; membership places the
       box.** The `lynx` build admits the UA-only `-servo-top-layer` in a
@@ -1823,13 +1823,13 @@ and §D.16 with what the wire format actually permits.)*
       `::backdrop` declare it, so Stylo's
       `StyleAdjuster::adjust_for_top_layer` computes a modal dialog's
       `position` other than `absolute`/`fixed` to `absolute`, as a browser
-      does, and blockifies `display: contents`. `dom` does not derive
+      does, and blockifies `display: contents`. `terminus` does not derive
       membership from the longhand: the layer is generic and the embedder
       decides what enters it, so a top-layer element and its backdrop lower
       to `fixed` against the viewport whatever their computed `position`, and
       a top-layer element ends its descendants' containing-block walks. For
       an element the UA rule reaches this agrees with the computed value; for
-      one no rule reaches (`dom` used directly) membership alone places it,
+      one no rule reaches (`terminus` used directly) membership alone places it,
       and a `display: contents` one renders nothing. The UA rules keep HTML's
       `position: fixed` on `dialog:modal` and `::backdrop`. A `display:
       contents` modal dialog is blockified to `flex`, the `lynx` grammar's
@@ -1853,11 +1853,11 @@ and §D.16 with what the wire format actually permits.)*
       from it (user ruling 2026-10-09, `docs/tracking/deviations.md`).
     - **Centring.** HTML centres a modal dialog by shrink-to-fit sizing
       (`width: fit-content; height: fit-content; margin: auto` between
-      zero insets). hughie's absolute pass stretch-fits only an `auto`
+      zero insets). seldon's absolute pass stretch-fits only an `auto`
       size (css-position-3 §4.1), so a `fit-content` dialog takes its
       fit-content size (css-sizing-3 §3.2) in the viewport and its `auto`
       margins centre it (tests in `dialog.rs` and in
-      `crates/dom/tests/layout.rs`).
+      `crates/terminus/tests/layout.rs`).
     - **Out, with the reason.**
       - The `overlay` property, transitions on it, and the pending top-layer
         removals: the fork has no `overlay`, so nothing could observe a
@@ -1966,7 +1966,7 @@ and §D.16 with what the wire format actually permits.)*
       `defaultDisplayLinear` picks for `dialog` rather than a browser's
       `block`, and `.overlay-inner` is a column flex box rather than a block.
     - **State.** The component keeps no Rust state; the attribute and
-      connection callbacks keep the dialog's membership in step, and `dom`'s
+      connection callbacks keep the dialog's membership in step, and `terminus`'s
       unlink drops the dialog's entry when the overlay leaves the document
       (a shadow tree is connected only through its host), with no event (as
       in web-core): a popover comes back hidden, a modal dialog open and not
@@ -2001,8 +2001,8 @@ and §D.16 with what the wire format actually permits.)*
     attribute is the browser's popover; native Lynx has none. The rule set
     for this one is stricter than "W3C-correct": implement a subset of the
     latest browsers' capability, and nothing that behaves differently from
-    them (user ruling). `dom` owns the state machine
-    (`crates/dom/src/tree/popover.rs`), because the attribute is global to
+    them (user ruling). `terminus` owns the state machine
+    (`crates/terminus/src/tree/popover.rs`), because the attribute is global to
     every element; bobcat-core owns HTML's UA rules for it
     (`crates/bobcat-core/src/main/tree/popover.rs`).
     - **Implemented.** The attribute's four states, as HTML's enumerated
@@ -2063,7 +2063,7 @@ and §D.16 with what the wire format actually permits.)*
         IDL attribute, `popovertarget` and `command`: no script reaches a
         popover. Exposing the methods needs `beforetoggle` first, which is
         cancelable, and this engine's event model has no `preventDefault`.
-      - `beforetoggle` and `toggle`: `dom` fires none. The engine shows a
+      - `beforetoggle` and `toggle`: `terminus` fires none. The engine shows a
         popover only inside a UA shadow tree (§30's pass-through overlay),
         where both events, not composed, reach no listener.
       - Focus (the popover focusing steps, focus restoration), popover
@@ -2079,8 +2079,8 @@ and §D.16 with what the wire format actually permits.)*
     native Lynx re-implements the same rect/threshold algorithm per platform
     with a 50 ms poll. The primitive is the spec; the Lynx API shape is a
     bucket-2 adapter for a later change.
-    - **Implemented, Rust-only.** `crates/dom/src/visual/intersection/`
-      (`docs/dom-architecture.md` "Intersection observations"): the
+    - **Implemented, Rust-only.** `crates/terminus/src/visual/intersection/`
+      (`docs/terminus-architecture.md` "Intersection observations"): the
       registry, §3.2.10's update after each commit or adopted scroll,
       §3.2.7's geometry, and §3.2.5's notify loop run from a posted task,
       calling each observer's boxed `IntersectionEventHandler` —
@@ -2163,7 +2163,7 @@ and §D.16 with what the wire format actually permits.)*
       `ImplicitScopeRoot::DocumentElement`, Gecko's resolution). A shadow
       tree's stylesheet resolves to the shadow host, as a constructed sheet
       adopted by a shadow root does in a browser, and the host can match
-      `:scope` (`ShadowStyleSheet` in `crates/dom/src/style/engine.rs`
+      `:scope` (`ShadowStyleSheet` in `crates/terminus/src/style/engine.rs`
       reports `ImplicitScopeRoot::Constructed`). WPT
       `scope-implicit-constructed-document.html` expects a document-adopted
       sheet's root to be the document *node* (`:scope` matches nothing, the
@@ -2186,7 +2186,7 @@ and §D.16 with what the wire format actually permits.)*
       nesting more than 74 `@scope` rules around a style rule loses the
       innermost rules at parse time — Firefox's result on WPT
       `scope-deep.html`, where Chrome and Safari pass.
-    - **Coverage.** `crates/dom/tests/scope.rs` ports `css/css-cascade/`
+    - **Coverage.** `crates/terminus/tests/scope.rs` ports `css/css-cascade/`
       `scope-evaluation`, `-proximity`, `-specificity`, `-declarations`,
       `-nesting`, `-implicit`, `-shadow`, `-shadow-sharing`,
       `-ua-shadow-host`, `-invalidation`, `-style-sharing-001`/`-002`,

@@ -908,7 +908,7 @@ fn a_script_answered_with_a_font_is_reported_naming_the_module_and_the_answer() 
     let key = group.construct_requesting(0, "", "app:///font-worker.js");
     group
         .script_request(key)
-        .complete(Ok(LoadedSource::Font(dom::FontBlob::from_static(
+        .complete(Ok(LoadedSource::Font(terminus::FontBlob::from_static(
             b"not a script",
         ))));
     let event = group.next(0);

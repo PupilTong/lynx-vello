@@ -8,7 +8,7 @@ static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
 #[test]
 fn a_file_bundle_supports_debugger_style_screenshots() {
-    let gpu = flashbulb::headless("a_file_bundle_supports_debugger_style_screenshots");
+    let gpu = prime_radiant::headless("a_file_bundle_supports_debugger_style_screenshots");
     drop(gpu);
 
     let root = std::env::temp_dir().join(format!(
@@ -67,7 +67,7 @@ fn a_file_bundle_supports_debugger_style_screenshots() {
             "missing `{expected}` in:\n{stdout}"
         );
     }
-    let image = flashbulb::Image::read_png(&screenshot_path).unwrap();
+    let image = prime_radiant::Image::read_png(&screenshot_path).unwrap();
     assert_eq!((image.width(), image.height()), (32, 24));
     assert!(
         image
@@ -85,7 +85,7 @@ fn a_file_bundle_supports_debugger_style_screenshots() {
 /// the inline-style bundle does.
 #[test]
 fn author_css_from_the_style_info_section_renders() {
-    let gpu = flashbulb::headless("author_css_from_the_style_info_section_renders");
+    let gpu = prime_radiant::headless("author_css_from_the_style_info_section_renders");
     drop(gpu);
 
     let root = std::env::temp_dir().join(format!(
@@ -124,7 +124,7 @@ fn author_css_from_the_style_info_section_renders() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let image = flashbulb::Image::read_png(&screenshot_path).unwrap();
+    let image = prime_radiant::Image::read_png(&screenshot_path).unwrap();
     assert_eq!((image.width(), image.height()), (32, 24));
     let red = image
         .pixels()
@@ -144,7 +144,7 @@ fn author_css_from_the_style_info_section_renders() {
 /// before the main-thread program creates the classed element.
 #[test]
 fn author_css_from_raw_lynx_xml_renders() {
-    let gpu = flashbulb::headless("author_css_from_raw_lynx_xml_renders");
+    let gpu = prime_radiant::headless("author_css_from_raw_lynx_xml_renders");
     drop(gpu);
 
     let root = std::env::temp_dir().join(format!(
@@ -182,7 +182,7 @@ fn author_css_from_raw_lynx_xml_renders() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let image = flashbulb::Image::read_png(&screenshot_path).unwrap();
+    let image = prime_radiant::Image::read_png(&screenshot_path).unwrap();
     assert_eq!((image.width(), image.height()), (32, 24));
     let red = image
         .pixels()
@@ -206,7 +206,7 @@ fn author_css_from_raw_lynx_xml_renders() {
 /// `compositionend` after the commit's `input`.
 #[test]
 fn the_editing_commands_type_compose_and_commit_into_a_host() {
-    let gpu = flashbulb::headless("the_editing_commands_type_compose_and_commit_into_a_host");
+    let gpu = prime_radiant::headless("the_editing_commands_type_compose_and_commit_into_a_host");
     drop(gpu);
 
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

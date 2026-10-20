@@ -47,7 +47,7 @@
 //!
 //! # A rejected value has to clear the hint
 //!
-//! [`dom::Document::set_presentational_hint`] has `setProperty` semantics: an
+//! [`terminus::Document::set_presentational_hint`] has `setProperty` semantics: an
 //! empty value removes the hint, and **an invalid value is a no-op**. A no-op
 //! is the wrong answer here — `blur-radius="abc"` after `blur-radius="25"`
 //! would leave the 25px blur standing — and the grammar that decides valid is
@@ -99,7 +99,7 @@
 
 use std::borrow::Cow;
 
-use dom::{CustomElement, NodeId};
+use terminus::{CustomElement, NodeId};
 
 use super::LynxDocument;
 
@@ -111,7 +111,7 @@ const BLUR_RADIUS_ATTRIBUTE: &str = "blur-radius";
 const BACKDROP_FILTER: &str = "backdrop-filter";
 
 /// Installs the component under both tag names. Must run before any element
-/// could carry either, which is [`Document::define`](dom::Document::define)'s
+/// could carry either, which is [`Document::define`](terminus::Document::define)'s
 /// own precondition.
 pub(super) fn define(document: &mut LynxDocument) {
     for tag in [BLUR_VIEW_TAG, X_BLUR_VIEW_TAG] {
@@ -184,8 +184,8 @@ fn blur_length(value: &str) -> Cow<'_, str> {
 
 #[cfg(test)]
 mod tests {
-    use dom::NodeId;
-    use dom::stylo::values::computed::Filter;
+    use terminus::NodeId;
+    use terminus::stylo::values::computed::Filter;
 
     use super::super::LynxDocument;
     use super::super::test_support::{child, document, element_under, style_of};
@@ -356,7 +356,7 @@ mod tests {
             style_of(&document, element)
                 .get_background()
                 .background_color,
-            dom::stylo::values::computed::Color::TRANSPARENT_BLACK,
+            terminus::stylo::values::computed::Color::TRANSPARENT_BLACK,
             "nothing but `backdrop-filter` is ever written"
         );
     }
@@ -391,7 +391,7 @@ mod tests {
         document.set_attribute(sheeted, "class", "frosted");
         document.add_stylesheet(
             ".frosted { backdrop-filter: blur(3px); }",
-            dom::StylesheetOrigin::Author,
+            terminus::StylesheetOrigin::Author,
         );
         document.layout();
         assert_eq!(

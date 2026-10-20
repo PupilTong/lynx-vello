@@ -221,7 +221,7 @@ Landed and not to be regressed:
   (function, `Symbol`, `Map`, `Set`, `RegExp`, `Error`, `DataView`, accessor)
   **throws synchronously at the send**. Do not add a custom codec, a deep
   clone, or a JSON-shaped degradation on top of it.
-- Event dispatch: `dom::Document::event_steps` builds the path; the host makes
+- Event dispatch: `terminus::Document::event_steps` builds the path; the host makes
   **one** `__BobcatDispatchEvent` call per event and the realm runs capture,
   bubble and the `global-bindEvent` pass itself. The host keeps no listener
   index — it is told only when a listener name's registration count crosses
@@ -303,7 +303,7 @@ Shorthand `lynx/`, `lynx-stack/`, `Paws/`; absolute paths live once in AGENTS.md
   `src/background/tests.rs`.
 - TypeScript changes: `pnpm test:type` and `pnpm --filter bobcat-element test`
   (Rstest). CI also asserts `packages/bobcat-element/dist` stays untracked.
-- Screenshot goldens: `FLASHBULB_UPDATE_SNAPSHOTS=1` only after looking at the
+- Screenshot goldens: `PRIME_RADIANT_UPDATE_SNAPSHOTS=1` only after looking at the
   PNG.
 - The PR body needs before/after Mermaid diagrams
   (`.github/pull_request_template.md`, AGENTS.md "Pull-request descriptions").

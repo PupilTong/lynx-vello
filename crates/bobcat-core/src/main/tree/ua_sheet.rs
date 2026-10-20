@@ -95,7 +95,7 @@ impl Default for PageConfig {
     }
 }
 
-/// The Lynx UA stylesheet: embedder cascade policy `dom` must not know.
+/// The Lynx UA stylesheet: embedder cascade policy `terminus` must not know.
 ///
 /// The container tags — `page`, `view`, `scroll-view`, `list`, `list-item`,
 /// `viewpager`, `x-viewpager-ng`, `viewpager-item`, `x-viewpager-item-ng`,
@@ -300,21 +300,21 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
 /// kind and `display` give it — a `<text>` its Lynx paragraph, which keeps
 /// its text verbatim whatever `white-space` says, any other element the
 /// standard inline formatting context of the anonymous block box around its
-/// text — and `dom` addresses whichever paragraph that is through its source
+/// text — and `terminus` addresses whichever paragraph that is through its source
 /// map, so neither declaration is pinned: an author `display: none` hides
 /// the host (which then cannot be focused), and an author `white-space:
 /// normal` collapses what it shows while the value keeps every character.
 /// The rule applies to every value but an ASCII case-insensitive `"false"`,
 /// which is HTML's reading of the attribute and
-/// `dom::Document::is_editing_host`'s.
+/// `terminus::Document::is_editing_host`'s.
 pub(super) const EDITING_HOST_RULE: &str =
     "[contenteditable]:not([contenteditable=\"false\" i]) { white-space: pre-wrap; }";
 
 #[cfg(test)]
 mod tests {
-    use dom::stylo::computed_values::{box_sizing, position};
-    use dom::stylo::values::computed::font::{FontFamily, GenericFontFamily};
-    use dom::stylo::values::computed::{BorderStyle, CSSPixelLength, Display, Overflow, Size};
+    use terminus::stylo::computed_values::{box_sizing, position};
+    use terminus::stylo::values::computed::font::{FontFamily, GenericFontFamily};
+    use terminus::stylo::values::computed::{BorderStyle, CSSPixelLength, Display, Overflow, Size};
 
     use super::super::LynxDocument;
     use super::super::overlay::{OVERLAY_TAG, X_OVERLAY_TAG};
@@ -357,7 +357,7 @@ mod tests {
 
     /// Attaches one of each container tag, answering with the page itself for
     /// `page` — it is minted with the document and cannot be created again.
-    fn containers(document: &mut LynxDocument) -> Vec<dom::NodeId> {
+    fn containers(document: &mut LynxDocument) -> Vec<terminus::NodeId> {
         CONTAINER_TAGS
             .iter()
             .map(|tag| {
@@ -485,7 +485,7 @@ mod tests {
                 GenericFontFamily::SystemUi,
             ),
         ] {
-            document.add_stylesheet(css, dom::StylesheetOrigin::Author);
+            document.add_stylesheet(css, terminus::StylesheetOrigin::Author);
             document.layout();
             for node in [page, view, text] {
                 assert_eq!(
@@ -686,10 +686,10 @@ mod tests {
     /// `white-space` and `display: none` win over the default.
     #[test]
     fn an_editing_host_preserves_white_space_by_default_only() {
-        use dom::stylo::computed_values::white_space_collapse::T as Collapse;
+        use terminus::stylo::computed_values::white_space_collapse::T as Collapse;
 
         let mut document = document();
-        let hosts: Vec<(dom::NodeId, bool)> = [
+        let hosts: Vec<(terminus::NodeId, bool)> = [
             ("", true),
             ("true", true),
             ("plaintext-only", true),

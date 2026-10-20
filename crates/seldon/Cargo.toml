@@ -1,0 +1,75 @@
+[package]
+name = "seldon"
+description = "Statically-dispatched CSS Flex/Grid and Starlight Linear/Relative layout for host-owned trees"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+keywords = ["layout", "flexbox", "grid", "css", "ui"]
+categories = ["gui"]
+
+[lib]
+# Only `benches/` holds benchmarks: keep `cargo build --benches` from compiling
+# this target a second time as a bench harness (AGENTS.md, "Benchmarks are
+# only the `benches/` targets").
+bench = false
+
+[features]
+layout-test-utils = []
+
+[dependencies]
+icu_properties = { workspace = true }
+smallvec = { workspace = true }
+style_traits = { workspace = true }
+stylo = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+parley = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+parley = { workspace = true, features = ["complex-scripts"] }
+
+[dev-dependencies]
+divan = { workspace = true }
+euclid = { workspace = true }
+terminus = { workspace = true, features = ["layout-test-utils"] }
+
+[[bench]]
+name = "flexbox"
+harness = false
+
+[lints]
+workspace = true
+
+[[bench]]
+name = "grid"
+harness = false
+
+[[bench]]
+name = "grid_lanes"
+harness = false
+
+[[bench]]
+name = "relative"
+harness = false
+
+[[bench]]
+name = "linear"
+harness = false
+
+[[bench]]
+name = "containment"
+harness = false
+
+[[bench]]
+name = "text_block"
+harness = false
+
+[[bench]]
+name = "seldon_flex"
+harness = false
+
+[[bench]]
+name = "deep_nesting"
+harness = false

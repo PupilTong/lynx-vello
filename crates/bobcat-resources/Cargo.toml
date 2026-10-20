@@ -49,7 +49,7 @@ web-sys = { workspace = true, features = [
 
 [dev-dependencies]
 bobcat-source = { workspace = true }
-flashbulb = { workspace = true, features = ["render"] }
+prime-radiant = { workspace = true, features = ["render"] }
 flume = { workspace = true }
 png = { workspace = true }
 # `rt` and `sync` come from `[dependencies]`; every test is a default-flavour

@@ -1,6 +1,6 @@
 # Layout conformance evidence
 
-This document records what hughie's executable tests establish. It is a
+This document records what seldon's executable tests establish. It is a
 coverage map, not a claim that the crate implements every feature in the
 referenced specifications.
 
@@ -10,7 +10,7 @@ referenced specifications.
   Recommendation Draft dated 14 October 2025.
 - Grid follows the W3C CSS Grid Layout Module Level 2, Candidate
   Recommendation Draft dated 26 March 2025, limited to the numeric track and
-  placement surface implemented by hughie.
+  placement surface implemented by seldon.
 - Grid lanes follows the W3C CSS Grid Layout Module Level 3 Editor's Draft as
   read on 18 September 2026, limited to the subset recorded in
   `style-assumptions.md` §24. It is a W3C extension beyond Lynx parity: native
@@ -71,7 +71,7 @@ size, and §9.9.3's flex-base-size cap and floor apply only to a definite flex
 basis. So `flex: 1 1 auto; width: 100px` around 300px of content contributes
 100, and `flex: 0 0 content; width: 100px` contributes 100 while keeping its
 300px flex base size. The fit-content tests beside
-`absolute_fit_content_between_insets_*` in `crates/hughie/tests/flexbox.rs`
+`absolute_fit_content_between_insets_*` in `crates/seldon/tests/flexbox.rs`
 pin these against numbers read off Chrome 155. A percentage flex basis that
 was indefinite while the container was sized stays the content size in the
 final layout, where Chrome re-resolves it against the decided size

@@ -46,8 +46,8 @@ use std::sync::atomic::AtomicBool;
 #[cfg(not(target_arch = "wasm32"))]
 use std::thread::Builder as ThreadBuilder;
 
-use dom::StylePool;
 use rustc_hash::FxHashMap;
+use terminus::StylePool;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::{self, JoinError, JoinSet};
 use tokio_util::sync::CancellationToken;
@@ -307,7 +307,7 @@ struct AttachedView {
     sources: ViewSources,
     /// This view's fonts and default family, validated on the embedder's
     /// thread before anything was requested.
-    text_context: Option<dom::TextContext>,
+    text_context: Option<terminus::TextContext>,
     /// The answers to the startup requests `create_lynx_view` already made:
     /// the author sheets in the order the view listed them, and the entry.
     startup: StartupSources,

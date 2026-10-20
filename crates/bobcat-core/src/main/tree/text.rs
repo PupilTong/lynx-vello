@@ -13,7 +13,7 @@
 //! `@since 2.18`); web-core's `XText` has none of them.
 //!
 //! - `getTextBoundingRect({start, end})` is built ([`text_bounding_rect`]), over
-//!   [`dom::Document::text_range_boxes`], with iOS's per-line answer
+//!   [`terminus::Document::text_range_boxes`], with iOS's per-line answer
 //!   (`lynx/platform/darwin/ios/lynx/ui/text/LynxUIText.m:790-807`, `LynxTextView.m:205-235`).
 //! - `getSelectedText()` and `setTextSelection({startX, startY, endX, endY, ...})` are not built
 //!   and answer code 3: the engine has no text selection model, so there is nothing selected to
@@ -39,14 +39,14 @@
 //!   `inline-text` whose record changed, for the same entry to deliver after the W3C one. web-core
 //!   listens for the document's `selectionchange` in the same way.
 //! - Only while something listens for `selectionchange` on the element
-//!   ([`dom::Document::would_reach_listener`]), as web-core attaches its document listener only
-//!   while the event is bound.
+//!   ([`terminus::Document::would_reach_listener`]), as web-core attaches its document listener
+//!   only while the event is bound.
 //! - A record equal to the last one sent to the element is not sent again, and the empty record is
 //!   sent only to an element whose last record was not empty: web-core's signature check.
 //! - Not bubbling, composed ([`ComponentEvents::queue_detailed`]).
 //!
 //! The document's selection exists only inside an editing host
-//! ([`dom::Document::selection`]): a `text` with `contenteditable`, or an
+//! ([`terminus::Document::selection`]): a `text` with `contenteditable`, or an
 //! element inside one. Its boundary points are offsets into the host's
 //! value, its direct text children, and [`text_selection_in`] maps each into
 //! an element's text content the way web-core's
@@ -65,9 +65,9 @@
 //! [`report_selection_changes`] ([`SelectionReports`]). Its definition, and
 //! the two behaviourless ones beside it for `inline-text` and
 //! `inline-truncation`, carry one fact besides the method: the three tags are
-//! Lynx text elements ([`dom::CustomElement::is_lynx_text`]), which is what
+//! Lynx text elements ([`terminus::CustomElement::is_lynx_text`]), which is what
 //! lays each out as a Lynx paragraph or a run of one. `:defined` already
-//! matches every element in `dom`, and the `raw-text` rules are selector rules
+//! matches every element in `terminus`, and the `raw-text` rules are selector rules
 //! on the tag name, which a definition does not touch.
 
 /// `text`'s own defaults, from `web-elements`' `x-text.css`.
@@ -127,7 +127,7 @@
 /// An `inline-truncation` is content wherever it is written *directly* inside
 /// a `text`, and generates no box anywhere else — the same scope web-core's
 /// `:scope > inline-truncation` query honours. It carries
-/// `--lynx-inline-truncation` because `crates/dom` names no Lynx tag: which
+/// `--lynx-inline-truncation` because `crates/terminus` names no Lynx tag: which
 /// subtree a paragraph takes its custom truncation content from is a
 /// computed-style fact there, exactly as the paragraph limits are.
 ///
@@ -136,7 +136,7 @@
 /// A text tag — `text`, `inline-text`, `inline-truncation` — lays out as a
 /// Lynx paragraph, or a run of one, because of what the element is: [`define`]
 /// marks the three definitions as Lynx text elements
-/// ([`dom::CustomElement::is_lynx_text`]), as an HTML `img` is replaced content
+/// ([`terminus::CustomElement::is_lynx_text`]), as an HTML `img` is replaced content
 /// whatever its `display` says. Its computed `display` keeps the author's value.
 /// `none` hides it, as it does in native Lynx and in web-core; every other
 /// value but `contents` leaves it a paragraph. That is native Lynx's shape: a
@@ -278,11 +278,11 @@ view > text, view > wrapper, view > wrapper > text { color: inherit; text-decora
 
 use std::ops::Range;
 
-use dom::editing::DocumentSelection;
-use dom::{CustomElement, MethodCall, MethodError, MethodOutcome, NodeId};
 use rustc_hash::FxHashMap;
 use serde_json::{Map, Value};
 use smallvec::SmallVec;
+use terminus::editing::DocumentSelection;
+use terminus::{CustomElement, MethodCall, MethodError, MethodOutcome, NodeId};
 
 use super::scroll_container::object;
 use super::{ComponentDetail, ComponentEvents, InvalidParams, LynxDocument, SELECTION_CHANGE};
@@ -300,14 +300,14 @@ pub(super) const TEXT_TAG: &str = "text";
 pub(crate) fn is_text(document: &LynxDocument, node: NodeId) -> bool {
     document
         .get(node)
-        .and_then(dom::Node::tag_name)
+        .and_then(terminus::Node::tag_name)
         .is_some_and(|tag| tag == TEXT_TAG)
 }
 
 /// Installs the `text` component, and `inline-text` and `inline-truncation`
 /// beside it as Lynx text elements with no component behaviour. Must run
 /// before any element could carry the tags, which is
-/// [`Document::define`](dom::Document::define)'s own precondition.
+/// [`Document::define`](terminus::Document::define)'s own precondition.
 pub(super) fn define(document: &mut LynxDocument) {
     document.define(TEXT_TAG, Box::new(Text));
     document.define(INLINE_TEXT_TAG, Box::new(TextRun));
@@ -372,7 +372,7 @@ pub(crate) struct SelectionReports(FxHashMap<NodeId, (Range<u32>, bool)>);
 
 /// Whether `node` fires Lynx's `selectionchange`: a `text` or an
 /// `inline-text` (module documentation).
-fn reports_selection(node: &dom::Node<()>) -> bool {
+fn reports_selection(node: &terminus::Node<()>) -> bool {
     matches!(node.tag_name(), Some(TEXT_TAG | INLINE_TEXT_TAG))
 }
 
@@ -461,7 +461,7 @@ fn text_selection_in(
 ) -> Option<(Range<u32>, bool)> {
     let mut current = Some(selection.host);
     while current != Some(element) {
-        current = document.get(current?).and_then(dom::Node::parent_id);
+        current = document.get(current?).and_then(terminus::Node::parent_id);
     }
     if selection.anchor == selection.focus {
         return None;
@@ -525,14 +525,14 @@ fn text_offset(document: &LynxDocument, root: NodeId, host: NodeId, unit: u32) -
 ///   string is code 4, where iOS's `intValue` would read its digits. Offsets are UTF-16 units of
 ///   the paragraph's source text, an inline image or view counting one, as both natives count them
 ///   (an `NSString`, a Java `String`).
-/// - The boxes are [`dom::Document::text_range_boxes`]: one per line the range shows content on,
-///   from the first selected cluster's inline start to the last one's inline end, with the line's
-///   top and height. That is iOS's reading (`enumerateEnclosingRectsForGlyphRange`,
+/// - The boxes are [`terminus::Document::text_range_boxes`]: one per line the range shows content
+///   on, from the first selected cluster's inline start to the last one's inline end, with the
+///   line's top and height. That is iOS's reading (`enumerateEnclosingRectsForGlyphRange`,
 ///   `LynxTextView.m:205-235`); Android widens every line but the first and the last to the full
 ///   layout width (`AndroidText.java:438-475`). `start == end` is one zero-width box at the content
 ///   box's origin, as tall as the line holding `start`, which is both natives' answer.
 /// - Each box moves from the paragraph's own space into the space of `boundingClientRect`: plus the
-///   element's [`dom::Document::bounding_client_rect`] origin and its border and padding, the
+///   element's [`terminus::Document::bounding_client_rect`] origin and its border and padding, the
 ///   content box's offset in the border box, as iOS's `getMapFromRect:lineBox:` adds them
 ///   (`LynxUIText.m:890-903`). `relativeTo` is not read, as `boundingClientRect` reads none of its
 ///   params here.
@@ -569,7 +569,7 @@ fn text_bounding_rect(
     else {
         return Ok(None);
     };
-    let origin = dom::Vector2D::new(
+    let origin = terminus::Vector2D::new(
         element_box.origin.x + layout.border.left + layout.padding.left,
         element_box.origin.y + layout.border.top + layout.padding.top,
     );
@@ -614,8 +614,8 @@ fn range_offset(params: &Map<String, Value>, key: &str) -> Result<u32, InvalidPa
 mod tests {
     #![allow(clippy::float_cmp)] // Ahem and explicit line heights have exact metrics.
 
-    use dom::stylo::color::AbsoluteColor;
-    use dom::stylo::values::computed::{ColorPropertyValue, Display};
+    use terminus::stylo::color::AbsoluteColor;
+    use terminus::stylo::values::computed::{ColorPropertyValue, Display};
 
     use super::super::LynxDocument;
     use super::super::test_support::{child, display, document, element_under, style_of};
@@ -629,7 +629,7 @@ mod tests {
     /// mutation and nothing else. Stylo tracks the attribute dependency.
     fn set_limit(
         document: &mut LynxDocument,
-        element: dom::NodeId,
+        element: terminus::NodeId,
         name: &str,
         value: Option<&str>,
     ) {
@@ -640,15 +640,18 @@ mod tests {
         }
     }
 
-    fn append_run(document: &mut LynxDocument, parent: dom::NodeId, content: &str) {
+    fn append_run(document: &mut LynxDocument, parent: terminus::NodeId, content: &str) {
         let raw = element_under(document, parent, "raw-text", "");
         document.set_attribute(raw, "text", content);
     }
 
-    fn paragraph(content: &str) -> (LynxDocument, dom::NodeId) {
-        const AHEM: &[u8] = include_bytes!("../../../../hughie/tests/fixtures/Ahem.ttf");
+    fn paragraph(content: &str) -> (LynxDocument, terminus::NodeId) {
+        const AHEM: &[u8] = include_bytes!("../../../../seldon/tests/fixtures/Ahem.ttf");
         let mut document = document();
-        assert_eq!(document.register_fonts(dom::FontBlob::from_static(AHEM)), 1);
+        assert_eq!(
+            document.register_fonts(terminus::FontBlob::from_static(AHEM)),
+            1
+        );
         let text = child(
             &mut document,
             "text",
@@ -658,7 +661,7 @@ mod tests {
         (document, text)
     }
 
-    fn assert_height(document: &mut LynxDocument, text: dom::NodeId, height: f32) {
+    fn assert_height(document: &mut LynxDocument, text: terminus::NodeId, height: f32) {
         document.layout();
         assert_eq!(
             document.text_block_size(text).expect("paragraph").height,
@@ -857,7 +860,7 @@ mod tests {
             document.add_class(text, "override");
             document.add_stylesheet(
                 &format!("@layer limits {{ .override {{ {property}: 2; }} }}"),
-                dom::StylesheetOrigin::Author,
+                terminus::StylesheetOrigin::Author,
             );
             for value in [Some("1"), Some("3"), None, Some("1")] {
                 set_limit(&mut document, text, attribute, value);
@@ -879,7 +882,7 @@ mod tests {
             let (mut document, text) = paragraph("abc def");
             document.add_stylesheet(
                 &format!("[{attribute}=\"{invalid}\"] {{ padding-top: 7px; }}"),
-                dom::StylesheetOrigin::Author,
+                terminus::StylesheetOrigin::Author,
             );
             set_limit(&mut document, text, attribute, Some(first));
             document.layout();
@@ -901,11 +904,11 @@ mod tests {
     /// unset property reports its registered initial value.
     fn custom_value(
         document: &LynxDocument,
-        element: dom::NodeId,
+        element: terminus::NodeId,
         name: &str,
         initial: &str,
     ) -> String {
-        use dom::stylo::custom_properties::Name;
+        use terminus::stylo::custom_properties::Name;
 
         style_of(document, element)
             .custom_properties()
@@ -915,10 +918,13 @@ mod tests {
     }
 
     /// A wide Ahem `text` at 20px whose run a `raw-text` carries, laid out.
-    fn verbatim_paragraph(content: &str) -> (LynxDocument, dom::NodeId) {
-        const AHEM: &[u8] = include_bytes!("../../../../hughie/tests/fixtures/Ahem.ttf");
+    fn verbatim_paragraph(content: &str) -> (LynxDocument, terminus::NodeId) {
+        const AHEM: &[u8] = include_bytes!("../../../../seldon/tests/fixtures/Ahem.ttf");
         let mut document = document();
-        assert_eq!(document.register_fonts(dom::FontBlob::from_static(AHEM)), 1);
+        assert_eq!(
+            document.register_fonts(terminus::FontBlob::from_static(AHEM)),
+            1
+        );
         let text = child(
             &mut document,
             "text",
@@ -929,7 +935,7 @@ mod tests {
         (document, text)
     }
 
-    fn ink(document: &LynxDocument, text: dom::NodeId) -> (f32, f32) {
+    fn ink(document: &LynxDocument, text: terminus::NodeId) -> (f32, f32) {
         let size = document.text_block_size(text).expect("paragraph");
         (size.width, size.height)
     }
@@ -978,8 +984,8 @@ mod tests {
     }
 
     /// One computed longhand of `element`, as CSS text.
-    fn computed(document: &LynxDocument, element: dom::NodeId, property: &str) -> String {
-        use dom::stylo::properties::PropertyId;
+    fn computed(document: &LynxDocument, element: terminus::NodeId, property: &str) -> String {
+        use terminus::stylo::properties::PropertyId;
 
         let id = PropertyId::parse_enabled_for_all_content(property)
             .unwrap_or_else(|()| panic!("unknown property `{property}`"));
@@ -1123,7 +1129,7 @@ mod tests {
     }
 
     /// The width of the paragraph `text` establishes, after a layout.
-    fn paragraph_width(document: &mut LynxDocument, text: dom::NodeId) -> f32 {
+    fn paragraph_width(document: &mut LynxDocument, text: terminus::NodeId) -> f32 {
         document.layout();
         document.text_block_size(text).expect("paragraph").width
     }
@@ -1171,7 +1177,7 @@ mod tests {
         document.add_class(text, "override");
         document.add_stylesheet(
             "@layer limits { .override { text-overflow: clip; } }",
-            dom::StylesheetOrigin::Author,
+            terminus::StylesheetOrigin::Author,
         );
         assert_eq!(paragraph_width(&mut document, text), 20.0);
         assert_eq!(
@@ -1404,7 +1410,7 @@ mod tests {
     /// crash. What this test observes is **not a supported behaviour**, and
     /// nothing may rely on it. Today `contents` acts as computed, as on every
     /// element, before the element's kind is read
-    /// (`dom::layout::style::display_mode`): the text generates no box and
+    /// (`terminus::layout::style::display_mode`): the text generates no box and
     /// establishes no paragraph, and its run is loose text of the `view`
     /// around it.
     #[test]
@@ -1429,16 +1435,16 @@ mod tests {
     /// Runs `getTextBoundingRect` (or `name`) on `text` with `params`.
     fn invoke(
         document: &mut LynxDocument,
-        text: dom::NodeId,
+        text: terminus::NodeId,
         name: &str,
         params: &str,
-    ) -> dom::MethodOutcome {
-        document.invoke_element_method(text, dom::MethodCall { name, params })
+    ) -> terminus::MethodOutcome {
+        document.invoke_element_method(text, terminus::MethodCall { name, params })
     }
 
     /// The record `text_bounding_rect` answers: the count, then `left`,
     /// `top`, `width`, `height` per box.
-    fn boxes_record(boxes: &[[f32; 4]]) -> dom::MethodOutcome {
+    fn boxes_record(boxes: &[[f32; 4]]) -> terminus::MethodOutcome {
         let mut record = String::new();
         crate::main::record::write_record_field(&mut record, &boxes.len().to_string());
         for values in boxes {
@@ -1446,14 +1452,17 @@ mod tests {
                 crate::main::record::write_record_field(&mut record, &value.to_string());
             }
         }
-        dom::MethodOutcome::Data(record)
+        terminus::MethodOutcome::Data(record)
     }
 
     #[test]
     fn get_text_bounding_rect_answers_one_box_per_line_in_viewport_coordinates() {
-        const AHEM: &[u8] = include_bytes!("../../../../hughie/tests/fixtures/Ahem.ttf");
+        const AHEM: &[u8] = include_bytes!("../../../../seldon/tests/fixtures/Ahem.ttf");
         let mut document = document();
-        assert_eq!(document.register_fonts(dom::FontBlob::from_static(AHEM)), 1);
+        assert_eq!(
+            document.register_fonts(terminus::FontBlob::from_static(AHEM)),
+            1
+        );
         let text = child(
             &mut document,
             "text",
@@ -1521,8 +1530,8 @@ mod tests {
         append_run(&mut document, nested, "gh");
         let view = child(&mut document, "view", "width:10px;height:10px");
         document.layout();
-        let invalid = dom::MethodOutcome::Failed(dom::MethodError::InvalidParams);
-        let not_found = dom::MethodOutcome::Failed(dom::MethodError::Operation);
+        let invalid = terminus::MethodOutcome::Failed(terminus::MethodError::InvalidParams);
+        let not_found = terminus::MethodOutcome::Failed(terminus::MethodError::Operation);
         for params in [
             "{}",
             "null",
@@ -1562,7 +1571,7 @@ mod tests {
                 "getTextBoundingRect",
                 r#"{"start":7,"end":9}"#
             ),
-            dom::MethodOutcome::Data(_)
+            terminus::MethodOutcome::Data(_)
         ));
         assert_eq!(
             invoke(
@@ -1577,7 +1586,7 @@ mod tests {
         for name in ["getSelectedText", "setTextSelection", "boundingClientRect"] {
             assert_eq!(
                 invoke(&mut document, text, name, "{}"),
-                dom::MethodOutcome::NotFound,
+                terminus::MethodOutcome::NotFound,
                 "{name}: no selection model; the base set answers the rest"
             );
         }
@@ -1588,7 +1597,7 @@ mod tests {
                 "getTextBoundingRect",
                 r#"{"start":0,"end":1}"#
             ),
-            dom::MethodOutcome::NotFound,
+            terminus::MethodOutcome::NotFound,
             "only `text` has the method"
         );
     }
@@ -1597,20 +1606,20 @@ mod tests {
 
     /// A text node `content` appended to `parent`: a DOM text child, which
     /// an editing host's value is made of (a `raw-text` carrier is not).
-    fn append_text(document: &mut LynxDocument, parent: dom::NodeId, content: &str) {
+    fn append_text(document: &mut LynxDocument, parent: terminus::NodeId, content: &str) {
         let node = document.create_text_node(content, ());
         document.append_child(parent, node);
     }
 
     /// Focuses `host` and selects `anchor`..`focus` of its value, in UTF-16
     /// units.
-    fn select(document: &mut LynxDocument, host: dom::NodeId, anchor: usize, focus: usize) {
+    fn select(document: &mut LynxDocument, host: terminus::NodeId, anchor: usize, focus: usize) {
         if document.focused() != Some(host) {
             assert!(document.focus(host));
         }
         assert!(
             document
-                .apply_editing(dom::editing::Command::SetSelection {
+                .apply_editing(terminus::editing::Command::SetSelection {
                     range: anchor..focus,
                 })
                 .applied
@@ -1620,7 +1629,7 @@ mod tests {
     /// The record of `element` for the document's selection now.
     fn record_of(
         document: &LynxDocument,
-        element: dom::NodeId,
+        element: terminus::NodeId,
     ) -> Option<(std::ops::Range<u32>, bool)> {
         super::text_selection_in(document, element, document.selection()?)
     }
@@ -1687,7 +1696,7 @@ mod tests {
     /// non-empty one; an element nobody listens on any more is forgotten.
     #[test]
     fn selection_reports_are_deduped_and_the_empty_record_follows_a_selection() {
-        use dom::event::{ListenerKey, ListenerKinds};
+        use terminus::event::{ListenerKey, ListenerKinds};
 
         use super::super::test_support::with_component_events;
         use super::super::{ComponentDetail, ComponentEvent, PageConfig};

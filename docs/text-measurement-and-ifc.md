@@ -6,7 +6,7 @@
 > A Lynx text block is now one flattened paragraph owned by the element that
 > establishes it (a Lynx text element, `CustomElement::is_lynx_text`, since
 > 2026-10-17; the since-removed `display: -lynx-text` value before), laid out by
-> `crates/hughie/src/text/block/` and driven by `crates/dom/src/layout/text_block.rs`.
+> `crates/seldon/src/text/block/` and driven by `crates/terminus/src/layout/text_block.rs`.
 > Text nodes generate no boxes; sibling runs share a line; a glyph run paints
 > in its own element's style.
 >
@@ -31,9 +31,9 @@
 >
 > **Status (2026-10-17): a second paragraph kind, the CSS block container's
 > inline formatting context, carries HTML inline content.** It shares the
-> paragraph core (`crates/hughie/src/text/paragraph/`) with the Lynx block and
-> is laid out by `crates/hughie/src/text/inline/`, driven by
-> `crates/dom/src/layout/inline_flow.rs`. Unlike a `<text>`, which flattens
+> paragraph core (`crates/seldon/src/text/paragraph/`) with the Lynx block and
+> is laid out by `crates/seldon/src/text/inline/`, driven by
+> `crates/terminus/src/layout/inline_flow.rs`. Unlike a `<text>`, which flattens
 > its nested scopes into runs, it keeps non-atomic inline boxes as boxes: each
 > one's inline-axis margin, border and padding is an *edge cluster* the
 > inline formatting context lays into the core's shaped text through the
@@ -48,8 +48,8 @@
 > context") and `docs/tracking/deviations.md` ("Text layout") do.
 
 Two halves. The first records what the measurement path did and why —
-the retained-layout contract `crates/hughie/src/text/` implemented and the
-eviction contract `crates/dom` drove it with. The second is the design
+the retained-layout contract `crates/seldon/src/text/` implemented and the
+eviction contract `crates/terminus` drove it with. The second is the design
 argument for the inline formatting context that now sits on top of it.
 
 Companion documents: `docs/layout-architecture.md` (the box-layout engine this
@@ -61,8 +61,8 @@ hangs off), `docs/tracking/css-text.md` (per-property Lynx conformance),
 ## 1. What a text node retains
 
 One shaped Parley layout per text node, in `TextLayoutStore`
-(`crates/hughie/src/text/layout.rs`), reached through `NodeLayoutState.text`
-(`crates/dom/src/tree/arena.rs`) and lazily allocated by `text_parts`.
+(`crates/seldon/src/text/layout.rs`), reached through `NodeLayoutState.text`
+(`crates/terminus/src/tree/arena.rs`) and lazily allocated by `text_parts`.
 
 Shaping is the expensive half and is invariant under line breaking. Of the ten
 vectors Parley's `LayoutData` owns (`parley-0.11.0/src/layout/data.rs`), eight
@@ -116,13 +116,13 @@ constraints, on a struct that already owns ten heap vectors. Pinned by
 ### 1.2 What that is worth
 
 `one_pass_breaks_a_text_node_once_per_distinct_constraint`
-(`crates/dom/src/layout/mod.rs`) pins the result on the canonical Lynx label —
+(`crates/terminus/src/layout/mod.rs`) pins the result on the canonical Lynx label —
 an auto-sized `text` element in a definite-width flex row. Nine measurements
 reach the text node in one pass. Two of them break lines; the other seven are
 answered from the retained layout. Before the memos all nine broke, and the
 first probe additionally deep-cloned the shaped layout into a second slot.
 
-Nine, not three, because the box cache (`crates/hughie/src/cache.rs`) keys on
+Nine, not three, because the box cache (`crates/seldon/src/cache.rs`) keys on
 the available height — which a text node's answer does not depend on — and
 because each enclosing flex level asks its own intrinsic pair. That
 over-specification is a box-cache question, not a text one; the text-level
@@ -188,7 +188,7 @@ but committed only later in the round walk depends on.
 Two caches, two different questions. The box cache is invalid the moment any
 geometry around a node moves; the shaped layout dies only when the text, or the
 style Parley shaped it from, changes. `clear_box_cache` and
-`clear_layout_cache` (`crates/dom/src/tree/arena.rs`) are the two answers.
+`clear_layout_cache` (`crates/terminus/src/tree/arena.rs`) are the two answers.
 
 The style harvest picks between them per relayout-damaged element
 (`Document::invalidate_text_children`). Text children *always* lose their box
@@ -198,7 +198,7 @@ committed measurement — and lose their shaped layout only when
 
 ### 3.1 The two levels
 
-`shaping_inputs_changed` (`crates/dom/src/layout/style.rs`):
+`shaping_inputs_changed` (`crates/terminus/src/layout/style.rs`):
 
 1. **Pointer comparison** on `get_font()` and `get_inherited_text()`. Stylo
    allocates a fresh style struct only when the cascade actually applies a
@@ -252,7 +252,7 @@ whole animation.
 
 Fixed by routing both harvests through the same
 `invalidate_text_children`. `an_animated_font_size_remeasures_the_text_it_scales`
-(`crates/dom/tests/animation_driver.rs`) fails on the pre-fix code with
+(`crates/terminus/tests/animation_driver.rs`) fails on the pre-fix code with
 `80.0 != 120.0`.
 
 ---
@@ -318,7 +318,7 @@ two independent shaped paragraphs.
 
 ### 5.1 `TextBrush = ()` is the deepest incompatibility
 
-`pub type TextBrush = ();` (`crates/hughie/src/style/text.rs`). Parley's
+`pub type TextBrush = ();` (`crates/seldon/src/style/text.rs`). Parley's
 `Layout<B>` stores `styles: Vec<Style<B>>` with `Style<B> { brush, underline:
 Option<Decoration<B>>, strikethrough: Option<Decoration<B>> }`. The brush is
 the only channel through which run-level identity survives into the retained
@@ -327,7 +327,7 @@ index that `TextMeasurer::shape` computes and immediately discards, and that
 call is the single place where a run↔style mapping currently exists.
 
 So painting resolves everything once per paint item from one element's
-`ComputedValues` (`crates/dom/src/paint/text.rs`): the fill colour and its
+`ComputedValues` (`crates/terminus/src/paint/text.rs`): the fill colour and its
 gradient, `text-shadow` and its `currentColor` resolution, the
 `-webkit-text-stroke` pair, and the propagated decoration set — plus
 `font-size` for the ink-extent heuristic in the walker, and `visibility` and
@@ -337,7 +337,7 @@ thickness and `-x-text-decoration-width`/`-gap` per run via `PushTextStyle`,
 and pushes an **event target per run**, so its hit-testing granularity is the
 run, not the element.
 
-The incompatibility is not large today — dom's entire Parley surface is one
+The incompatibility is not large today — terminus's entire Parley surface is one
 import, `TextLayout` is `pub(crate)`, and nine sites name the brush type. It
 deepens with every inline feature layered on top, which is the argument for
 settling it before the ownership move rather than after.
@@ -395,7 +395,7 @@ index nor a text range). §8 D1.
 The unit of line breaking in an IFC is the paragraph. A run cannot start on the
 line its predecessor ended while each run owns its own `Layout`, and no
 production caller ever passes more than one `TextRun` today — the multi-run
-machinery in `crates/hughie/src/text/content.rs` (pointer-identity range
+machinery in `crates/seldon/src/text/content.rs` (pointer-identity range
 merging, cross-run whitespace collapsing, cross-run CRLF) is exercised only by
 its own tests. So the store has to move to the box that establishes the IFC.
 
@@ -426,7 +426,7 @@ because a single-run paragraph has exactly one brush and one owner.
    `letter-spacing`). Both resolve to the same element today; keeping the roles
    apart is what lets the run side gain its own style source without
    disturbing the paragraph side.
-2. **Brush becomes an opaque run index.** hughie threads it; dom keeps a
+2. **Brush becomes an opaque run index.** seldon threads it; terminus keeps a
    one-entry table; the painter reads it. Observably a no-op.
 3. **Move the store to the IFC-establishing element**, still one run: the host
    collects runs by walking the element's flat children, `text_layout` is keyed

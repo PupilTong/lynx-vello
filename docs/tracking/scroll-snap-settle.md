@@ -77,7 +77,7 @@ Sources:
 ## This engine
 
 `crates/bobcat-core/src/paint/inertia.rs` (`end_drag`, `Glide`) and `paint/motion.rs` (`glide`,
-`glide_velocity`); the snap rule itself is `crates/dom/src/scroll/snap.rs` (css-scroll-snap-1).
+`glide_velocity`); the snap rule itself is `crates/terminus/src/scroll/snap.rs` (css-scroll-snap-1).
 
 - **Destination**: the css-scroll-snap-1 choice over the position the fling would naturally end
   at (exponential decay, UIKit's 0.998 per ms), clamped to the range; `scroll-snap-stop: always`

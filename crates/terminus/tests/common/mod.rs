@@ -1,0 +1,367 @@
+//! Shared harness for the CSS behavior tests ported from the `LynxJS` C++
+//! engine (`lynx/core/renderer/css/**_test.cc` / `**_unittest.cc`).
+
+#![allow(dead_code)]
+
+use euclid::{Scale, Size2D};
+use stylo::color::AbsoluteColor;
+use stylo::context::QuirksMode;
+use stylo::device::servo::FontMetricsProvider;
+use stylo::font_metrics::FontMetrics;
+use stylo::media_queries::MediaType;
+use stylo::properties::style_structs::Font;
+use stylo::properties::{ComputedValues, PropertyId, parse_style_attribute};
+use stylo::queries::values::PrefersColorScheme;
+use stylo::selector_parser::SelectorParser;
+use stylo::servo::media_features::PointerCapabilities;
+use stylo::servo_arc::Arc;
+use stylo::stylesheets::{CssRuleType, UrlExtraData};
+use stylo::values::computed::font::GenericFontFamily;
+use stylo::values::computed::{CSSPixelLength, Length};
+use stylo::values::specified::font::{FONT_MEDIUM_PX, QueryFontMetricsFlags};
+use stylo_traits::{CSSPixel, DevicePixel};
+use terminus::{Device, Document, NodeId, StylesheetOrigin, standards_device};
+
+#[must_use]
+pub(crate) fn url_data() -> UrlExtraData {
+    UrlExtraData::from(url::Url::parse("about:blank").expect("about:blank is a valid URL"))
+}
+
+#[must_use]
+pub(crate) fn device(width: f32, height: f32) -> Device {
+    device_with(width, height, 1.0, PrefersColorScheme::Light)
+}
+
+#[must_use]
+pub(crate) fn device_with(
+    width: f32,
+    height: f32,
+    device_pixel_ratio: f32,
+    scheme: PrefersColorScheme,
+) -> Device {
+    standards_device(
+        MediaType::screen(),
+        Size2D::<f32, CSSPixel>::new(width, height),
+        Size2D::<f32, DevicePixel>::new(width * device_pixel_ratio, height * device_pixel_ratio),
+        Scale::<f32, CSSPixel, DevicePixel>::new(device_pixel_ratio),
+        Box::new(TestFontMetricsProvider),
+        ComputedValues::initial_values_with_font_override(Font::initial_values()),
+        scheme,
+        PointerCapabilities::empty(),
+        PointerCapabilities::empty(),
+    )
+}
+
+#[derive(Debug)]
+pub(crate) struct TestFontMetricsProvider;
+
+impl FontMetricsProvider for TestFontMetricsProvider {
+    fn query_font_metrics(
+        &self,
+        _vertical: bool,
+        _font: &Font,
+        base_size: CSSPixelLength,
+        _flags: QueryFontMetricsFlags,
+    ) -> FontMetrics {
+        FontMetrics {
+            ascent: Length::new(base_size.px()),
+            ..FontMetrics::default()
+        }
+    }
+
+    fn base_size_for_generic(&self, _generic: GenericFontFamily) -> Length {
+        Length::new(FONT_MEDIUM_PX)
+    }
+}
+
+/// A definition whose elements are Lynx text elements
+/// ([`terminus::CustomElement::is_lynx_text`]) and nothing else: what
+/// `crates/bobcat-core` installs for `inline-text` and `inline-truncation`.
+pub(crate) struct TextKind;
+
+impl<T> terminus::CustomElement<T> for TextKind {
+    fn is_lynx_text(&self) -> bool {
+        true
+    }
+}
+
+/// Defines `tag` on `document` as a Lynx text element: each element of the
+/// tag lays out as a Lynx paragraph, or as a run of the paragraph around it,
+/// whatever its computed `display` is other than `none` and `contents`.
+///
+/// [`Document::define`]'s precondition applies: no element of the tag may
+/// exist yet, except the document element, which the definition upgrades.
+pub(crate) fn define_lynx_text<T>(document: &mut Document<T>, tag: &str) {
+    document.define(tag, Box::new(TextKind));
+}
+
+/// A document, root, and mutation helpers for CSS tests.
+#[derive(Debug)]
+pub(crate) struct Doc {
+    pub(crate) dom: Document<()>,
+    pub(crate) root: NodeId,
+}
+
+impl Doc {
+    #[must_use]
+    pub(crate) fn new() -> Self {
+        Self::with_device(device(800.0, 600.0))
+    }
+
+    #[must_use]
+    pub(crate) fn with_css(css: &str) -> Self {
+        let mut doc = Self::new();
+        doc.add_css(css);
+        doc
+    }
+
+    #[must_use]
+    pub(crate) fn with_device(device: Device) -> Self {
+        let dom = Document::new(device, "page", ());
+        let root = dom.document_element().id();
+        Self { dom, root }
+    }
+
+    /// [`define_lynx_text`] on this document.
+    pub(crate) fn define_lynx_text(&mut self, tag: &str) {
+        define_lynx_text(&mut self.dom, tag);
+    }
+
+    pub(crate) fn add_css(&mut self, css: &str) {
+        self.dom.add_stylesheet(css, StylesheetOrigin::Author);
+    }
+
+    pub(crate) fn add_ua_css(&mut self, css: &str) {
+        self.dom.add_stylesheet(css, StylesheetOrigin::UserAgent);
+    }
+
+    pub(crate) fn el(&mut self, parent: NodeId, spec: &str) -> NodeId {
+        let parsed = NodeSpec::parse(spec);
+        let id = self.dom.create_element(&parsed.tag, ());
+        if let Some(id_attribute) = parsed.id {
+            self.dom.set_id_attribute(id, Some(&id_attribute));
+        }
+        for class in parsed.classes {
+            self.dom.add_class(id, &class);
+        }
+        for (name, value) in parsed.attrs {
+            self.dom.set_attribute(id, &name, &value);
+        }
+        self.dom.append_child(parent, id);
+        id
+    }
+
+    pub(crate) fn els(&mut self, parent: NodeId, specs: &[&str]) -> Vec<NodeId> {
+        specs.iter().map(|spec| self.el(parent, spec)).collect()
+    }
+
+    pub(crate) fn flush(&mut self) {
+        self.dom.layout();
+    }
+
+    #[must_use]
+    pub(crate) fn style(&self, id: NodeId) -> Arc<ComputedValues> {
+        self.dom
+            .get(id)
+            .expect("node id is live")
+            .computed_style()
+            .expect("doc.flush() must run before reading computed style")
+    }
+
+    #[must_use]
+    pub(crate) fn value(&self, id: NodeId, longhand: &str) -> String {
+        let property = PropertyId::parse_enabled_for_all_content(longhand)
+            .unwrap_or_else(|()| panic!("unknown property `{longhand}`"));
+        let declaration_id = property
+            .as_shorthand()
+            .err()
+            .unwrap_or_else(|| panic!("`{longhand}` is a shorthand; assert its longhands"));
+        self.style(id).computed_value_to_string(declaration_id)
+    }
+
+    #[must_use]
+    pub(crate) fn color(&self, id: NodeId) -> AbsoluteColor {
+        self.style(id).get_color().solid_color()
+    }
+
+    #[must_use]
+    pub(crate) fn matches(&self, id: NodeId, selector: &str) -> bool {
+        self.dom
+            .matches(id, selector)
+            .unwrap_or_else(|_| panic!("selector `{selector}` must parse"))
+    }
+
+    #[must_use]
+    pub(crate) fn selector_parses(selector: &str) -> bool {
+        SelectorParser::parse_author_origin_no_namespace(selector, &url_data()).is_ok()
+    }
+
+    pub(crate) fn add_class(&mut self, id: NodeId, class: &str) {
+        self.dom.add_class(id, class);
+    }
+
+    pub(crate) fn remove_class(&mut self, id: NodeId, class: &str) {
+        self.dom.remove_class(id, class);
+    }
+
+    pub(crate) fn set_id(&mut self, id: NodeId, value: Option<&str>) {
+        self.dom.set_id_attribute(id, value);
+    }
+
+    pub(crate) fn set_attr(&mut self, id: NodeId, name: &str, value: &str) {
+        self.dom.set_attribute(id, name, value);
+    }
+
+    pub(crate) fn remove_attr(&mut self, id: NodeId, name: &str) {
+        self.dom.remove_attribute(id, name);
+    }
+
+    pub(crate) fn set_inline(&mut self, id: NodeId, css: &str) {
+        self.dom.set_inline_style(id, css);
+    }
+}
+
+impl Default for Doc {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Parsed form of the [`Doc::el`] spec grammar.
+struct NodeSpec {
+    tag: String,
+    id: Option<String>,
+    classes: Vec<String>,
+    attrs: Vec<(String, String)>,
+}
+
+impl NodeSpec {
+    fn parse(spec: &str) -> Self {
+        let mut parsed = Self {
+            tag: String::new(),
+            id: None,
+            classes: Vec::new(),
+            attrs: Vec::new(),
+        };
+        let mut rest = spec;
+        while !rest.is_empty() {
+            let (kind, body_start) = match rest.as_bytes()[0] {
+                b'#' => ('#', 1),
+                b'.' => ('.', 1),
+                b'[' => ('[', 1),
+                _ => ('t', 0),
+            };
+            if kind == '[' {
+                let end = rest.find(']').expect("unterminated `[` in node spec");
+                let inner = &rest[1..end];
+                let (name, value) = match inner.split_once('=') {
+                    Some((name, value)) => (name, value.trim_matches(['"', '\''])),
+                    None => (inner, ""),
+                };
+                parsed.attrs.push((name.to_owned(), value.to_owned()));
+                rest = &rest[end + 1..];
+                continue;
+            }
+            let body = &rest[body_start..];
+            let end = body.find(['#', '.', '[']).unwrap_or(body.len());
+            let token = &body[..end];
+            assert!(!token.is_empty(), "empty token in node spec `{spec}`");
+            match kind {
+                't' => token.clone_into(&mut parsed.tag),
+                '#' => parsed.id = Some(token.to_owned()),
+                '.' => parsed.classes.push(token.to_owned()),
+                _ => unreachable!(),
+            }
+            rest = &rest[body_start + end..];
+        }
+        if parsed.tag.is_empty() {
+            "view".clone_into(&mut parsed.tag);
+        }
+        parsed
+    }
+}
+
+#[must_use]
+pub(crate) fn specified(property: &str, value: &str) -> Option<String> {
+    let css = format!("{property}: {value}");
+    let block = parse_style_attribute(
+        &css,
+        &url_data(),
+        None,
+        QuirksMode::NoQuirks,
+        CssRuleType::Style,
+    );
+    if block.is_empty() {
+        return None;
+    }
+    let id = PropertyId::parse_enabled_for_all_content(property).ok()?;
+    let mut serialized = String::new();
+    block.property_value_to_css(&id, &mut serialized).ok()?;
+    (!serialized.is_empty()).then_some(serialized)
+}
+
+#[must_use]
+pub(crate) fn parses(property: &str, value: &str) -> bool {
+    specified(property, value).is_some()
+}
+
+#[must_use]
+pub(crate) fn property_is_supported(name: &str) -> bool {
+    matches!(
+        PropertyId::parse_unchecked(name, None),
+        Ok(PropertyId::NonCustom(_))
+    )
+}
+
+#[must_use]
+pub(crate) fn specificity(selector: &str) -> Option<(u32, u32, u32)> {
+    let list = SelectorParser::parse_author_origin_no_namespace(selector, &url_data()).ok()?;
+    let selector = list.slice().first()?;
+    let packed = selector.specificity();
+    Some((
+        (packed >> 20) & 0x3FF,
+        (packed >> 10) & 0x3FF,
+        packed & 0x3FF,
+    ))
+}
+
+#[must_use]
+pub(crate) fn media_matches_on(
+    query: &str,
+    width: f32,
+    height: f32,
+    dpr: f32,
+    scheme: PrefersColorScheme,
+) -> bool {
+    const PROBE: &str = ".probe { color: rgb(1, 2, 3) }";
+    let mut doc: Document<()> = Document::new(device_with(width, height, dpr, scheme), "page", ());
+    let css = if query.trim().is_empty() {
+        PROBE.to_owned()
+    } else {
+        format!("@media {query} {{ {PROBE} }}")
+    };
+    doc.add_stylesheet(&css, StylesheetOrigin::Author);
+    let root = doc.document_element().id();
+    let probe = doc.create_element("view", ());
+    doc.add_class(probe, "probe");
+    doc.append_child(root, probe);
+    doc.layout();
+    doc.get(probe)
+        .and_then(terminus::Node::computed_style)
+        .is_some_and(|style| style.get_color().solid_color() == rgb(1, 2, 3))
+}
+
+#[must_use]
+pub(crate) fn media_matches(query: &str) -> bool {
+    media_matches_on(query, 800.0, 600.0, 1.0, PrefersColorScheme::Light)
+}
+
+#[must_use]
+pub(crate) fn rgb(r: u8, g: u8, b: u8) -> AbsoluteColor {
+    AbsoluteColor::srgb_legacy(r, g, b, 1.0)
+}
+
+#[must_use]
+pub(crate) fn rgba(r: u8, g: u8, b: u8, alpha: f32) -> AbsoluteColor {
+    AbsoluteColor::srgb_legacy(r, g, b, alpha)
+}

@@ -118,7 +118,7 @@ const CREATE_VIEWPORT: Viewport = Viewport::new(320.0, 240.0);
 /// The metrics a published frame was committed at, as bits: these are values
 /// copied across a channel rather than computed, so exact equality is the
 /// question and `to_bits` is how it is asked.
-fn committed_at(frame: &dom::CommittedFrame) -> (u32, u32, u32) {
+fn committed_at(frame: &terminus::CommittedFrame) -> (u32, u32, u32) {
     (
         frame.viewport().width.to_bits(),
         frame.viewport().height.to_bits(),
@@ -555,7 +555,7 @@ impl OwnedPage {
 
     /// Posts `offset` for `scroller` the way a painter does and applies the
     /// marker as one burst.
-    async fn scroll_to(&self, scroller: dom::NodeId, offset: dom::Vector2D<f32>) {
+    async fn scroll_to(&self, scroller: terminus::NodeId, offset: terminus::Vector2D<f32>) {
         self.post(
             scroller,
             ScrollEntry {
@@ -570,7 +570,7 @@ impl OwnedPage {
 
     /// Posts `entry` for `scroller` the way a painter does and applies the
     /// marker as one burst.
-    async fn post(&self, scroller: dom::NodeId, entry: ScrollEntry) {
+    async fn post(&self, scroller: terminus::NodeId, entry: ScrollEntry) {
         assert!(
             self.scroll.post([(scroller, entry)], None),
             "a marker is due"
@@ -726,18 +726,18 @@ struct Recorder {
     log: Log,
 }
 
-impl dom::CustomElement<()> for Recorder {
+impl terminus::CustomElement<()> for Recorder {
     fn observed_events(&self) -> &'static [&'static str] {
         &["contentvisibilityautostatechange"]
     }
 
     fn handle_event(
         &self,
-        document: &mut dom::Document<()>,
-        element: dom::NodeId,
-        event: &mut dom::event::ElementEvent<'_>,
+        document: &mut terminus::Document<()>,
+        element: terminus::NodeId,
+        event: &mut terminus::event::ElementEvent<'_>,
     ) {
-        let dom::event::EventDetail::ContentVisibility { skipped } = *event.detail() else {
+        let terminus::event::EventDetail::ContentVisibility { skipped } = *event.detail() else {
             panic!(
                 "an engine event this page never fires: {:?}",
                 event.detail()
@@ -749,9 +749,9 @@ impl dom::CustomElement<()> for Recorder {
             .expect("every target here is a live row")
             .to_owned();
         let phase = match event.phase() {
-            dom::event::EventPhase::Capturing => "capture",
-            dom::event::EventPhase::AtTarget => "at-target",
-            dom::event::EventPhase::Bubbling => "bubble",
+            terminus::event::EventPhase::Capturing => "capture",
+            terminus::event::EventPhase::AtTarget => "at-target",
+            terminus::event::EventPhase::Bubbling => "bubble",
         };
         let state = if skipped { "skipped" } else { "shown" };
         self.log
@@ -783,7 +783,7 @@ fn whole_path(row: usize, skipped: bool) -> Vec<String> {
 /// A probe rather than JavaScript because an engine component is not
 /// script-reachable at all — there is no PAPI for one, and that is the point.
 /// Returns the scroller, which is what a posted offset has to name.
-async fn build_scrolling_rows(page: &Rc<Page>, log: &Log) -> dom::NodeId {
+async fn build_scrolling_rows(page: &Rc<Page>, log: &Log) -> terminus::NodeId {
     let (answer, built) = std::sync::mpsc::channel();
     let log = Arc::clone(log);
     page.apply(vec![ToMain::Probe(Box::new(move |document| {
@@ -895,7 +895,7 @@ fn a_scroll_past_the_window_delivers_both_directions_in_the_entry_after_its_comm
         let settled = owned.page.epilogue_count();
 
         owned
-            .scroll_to(scroller, dom::Vector2D::new(0.0, 150.0))
+            .scroll_to(scroller, terminus::Vector2D::new(0.0, 150.0))
             .await;
         assert_eq!(
             owned.page.epilogue_count(),
@@ -929,7 +929,7 @@ const WATCHED_SCROLLPORT: usize = 100;
 /// Defines `watcher` as `x-watcher` and builds one under the card's page
 /// element, beside a column scroller of [`WATCHED_ROWS`] rows, then creates
 /// the watcher's observer — root the scroller, thresholds `[0, 0.5, 1]` —
-/// and observes every row, in row order, through a `dom::ElementHandler`
+/// and observes every row, in row order, through a `terminus::ElementHandler`
 /// bound to the watcher. One probe, because the handler is bound to a live
 /// element and hears only a constructed one, which `create_element` has made
 /// by the time it returns.
@@ -940,7 +940,7 @@ const WATCHED_SCROLLPORT: usize = 100;
 async fn build_watched_rows(
     page: &Rc<Page>,
     watcher: IntersectionWatcher,
-) -> (dom::NodeId, dom::IntersectionObserverId) {
+) -> (terminus::NodeId, terminus::IntersectionObserverId) {
     let (answer, built) = std::sync::mpsc::channel();
     page.apply(vec![ToMain::Probe(Box::new(move |document| {
         document.define("x-watcher", Box::new(watcher));
@@ -961,7 +961,7 @@ async fn build_watched_rows(
             ),
         );
         document.append_child(root, scroller);
-        let rows: Vec<dom::NodeId> = (0..WATCHED_ROWS)
+        let rows: Vec<terminus::NodeId> = (0..WATCHED_ROWS)
             .map(|index| {
                 let row = document.create_element("view", ());
                 document.set_inline_style(
@@ -975,11 +975,11 @@ async fn build_watched_rows(
             .collect();
 
         let observer = document.create_intersection_observer(
-            Box::new(dom::ElementHandler(watcher)),
-            dom::IntersectionObserverInit {
+            Box::new(terminus::ElementHandler(watcher)),
+            terminus::IntersectionObserverInit {
                 root: Some(scroller),
                 thresholds: vec![0.0, 0.5, 1.0],
-                ..dom::IntersectionObserverInit::default()
+                ..terminus::IntersectionObserverInit::default()
             },
         );
         for row in rows {
@@ -993,7 +993,7 @@ async fn build_watched_rows(
 
 /// What an [`IntersectionWatcher`] logs for one row's entry.
 fn watched(
-    observer: dom::IntersectionObserverId,
+    observer: terminus::IntersectionObserverId,
     row: usize,
     intersecting: bool,
     ratio: f64,
@@ -1047,7 +1047,7 @@ fn intersection_entries_are_delivered_by_an_entry_after_the_update() {
         let committed = owned.view.published.commit();
         let settled = owned.page.epilogue_count();
         owned
-            .scroll_to(scroller, dom::Vector2D::new(0.0, 30.0))
+            .scroll_to(scroller, terminus::Vector2D::new(0.0, 30.0))
             .await;
         assert_eq!(
             owned.view.published.commit(),
@@ -1075,7 +1075,7 @@ fn intersection_entries_are_delivered_by_an_entry_after_the_update() {
         // One pixel more moves every ratio and crosses nothing.
         let settled = owned.page.epilogue_count();
         owned
-            .scroll_to(scroller, dom::Vector2D::new(0.0, 31.0))
+            .scroll_to(scroller, terminus::Vector2D::new(0.0, 31.0))
             .await;
         assert_eq!(
             owned.page.epilogue_count(),
@@ -1110,7 +1110,7 @@ fn an_intersection_hook_that_mutates_gets_its_own_commit_and_no_second_delivery(
         let (scroller, observer) = build_watched_rows(&owned.page, watcher).await;
         assert_eq!(take_watched(&log).len(), WATCHED_ROWS);
         owned
-            .scroll_to(scroller, dom::Vector2D::new(0.0, 30.0))
+            .scroll_to(scroller, terminus::Vector2D::new(0.0, 30.0))
             .await;
         assert_eq!(take_watched(&log).len(), 3);
 
@@ -1124,7 +1124,7 @@ fn an_intersection_hook_that_mutates_gets_its_own_commit_and_no_second_delivery(
             .expect("the rows were committed");
         let settled = owned.page.epilogue_count();
         owned
-            .scroll_to(scroller, dom::Vector2D::new(0.0, 0.0))
+            .scroll_to(scroller, terminus::Vector2D::new(0.0, 0.0))
             .await;
         assert_eq!(
             take_watched(&log),
@@ -1224,10 +1224,15 @@ async fn heard(page: &Rc<Page>) -> Vec<String> {
 }
 
 /// The page element's first child: [`exposure_page`]'s scroller.
-async fn first_page_child(page: &Rc<Page>) -> dom::NodeId {
+async fn first_page_child(page: &Rc<Page>) -> terminus::NodeId {
     let (answer, read) = std::sync::mpsc::channel();
     page.apply(vec![ToMain::Probe(Box::new(move |document| {
-        let _ = answer.send(document.document_element().first_child().map(dom::Node::id));
+        let _ = answer.send(
+            document
+                .document_element()
+                .first_child()
+                .map(terminus::Node::id),
+        );
     }))])
     .await;
     read.try_recv()
@@ -1271,7 +1276,7 @@ fn exposure_events_are_delivered_by_an_entry_after_the_update() {
 
         let settled = owned.page.epilogue_count();
         owned
-            .scroll_to(scroller, dom::Vector2D::new(0.0, 30.0))
+            .scroll_to(scroller, terminus::Vector2D::new(0.0, 30.0))
             .await;
         assert_eq!(
             owned.page.epilogue_count(),
@@ -1288,7 +1293,7 @@ fn exposure_events_are_delivered_by_an_entry_after_the_update() {
         // One pixel more moves no row in or out.
         let settled = owned.page.epilogue_count();
         owned
-            .scroll_to(scroller, dom::Vector2D::new(0.0, 31.0))
+            .scroll_to(scroller, terminus::Vector2D::new(0.0, 31.0))
             .await;
         assert_eq!(
             owned.page.epilogue_count(),
@@ -1299,7 +1304,7 @@ fn exposure_events_are_delivered_by_an_entry_after_the_update() {
 
         // Back to the top: row 3 leaves.
         owned
-            .scroll_to(scroller, dom::Vector2D::new(0.0, 0.0))
+            .scroll_to(scroller, terminus::Vector2D::new(0.0, 0.0))
             .await;
         assert_eq!(heard(&owned.page).await[4..], ["uidisappear:row3"]);
     });
@@ -1446,8 +1451,8 @@ fn a_stop_that_owes_records_posts_a_delivery_entry_of_its_own() {
 /// The document's offset for `scroller`, and its pending request.
 async fn scroll_state(
     page: &Rc<Page>,
-    scroller: dom::NodeId,
-) -> (dom::Vector2D<f32>, Option<std::num::NonZeroU64>) {
+    scroller: terminus::NodeId,
+) -> (terminus::Vector2D<f32>, Option<std::num::NonZeroU64>) {
     let (answer, read) = std::sync::mpsc::channel();
     page.apply(vec![ToMain::Probe(Box::new(move |document| {
         let _ = answer.send((
@@ -1487,8 +1492,8 @@ fn a_post_older_than_the_pending_scroll_request_is_dropped() {
                 document.layout();
                 document.scroll_to_with(
                     scroller,
-                    dom::Vector2D::new(0.0, 100.0),
-                    dom::scroll::ScrollBehavior::Instant,
+                    terminus::Vector2D::new(0.0, 100.0),
+                    terminus::scroll::ScrollBehavior::Instant,
                 );
                 let _ = answer.send((scroller, document.pending_scroll_request(scroller)));
             }))])
@@ -1496,7 +1501,7 @@ fn a_post_older_than_the_pending_scroll_request_is_dropped() {
         let (scroller, pending) = built.try_recv().expect("the probe ran");
         let serial = pending.expect("the request is pending");
         let entry = |offset: f32, request| ScrollEntry {
-            offset: dom::Vector2D::new(0.0, offset),
+            offset: terminus::Vector2D::new(0.0, offset),
             at: 0.0,
             rest: None,
             request,
@@ -1505,21 +1510,21 @@ fn a_post_older_than_the_pending_scroll_request_is_dropped() {
         owned.post(scroller, entry(40.0, None)).await;
         assert_eq!(
             scroll_state(&owned.page, scroller).await,
-            (dom::Vector2D::new(0.0, 100.0), Some(serial)),
+            (terminus::Vector2D::new(0.0, 100.0), Some(serial)),
             "the stale post was dropped"
         );
 
         owned.post(scroller, entry(100.0, Some(serial))).await;
         assert_eq!(
             scroll_state(&owned.page, scroller).await,
-            (dom::Vector2D::new(0.0, 100.0), None),
+            (terminus::Vector2D::new(0.0, 100.0), None),
             "adopted, and the request acknowledged"
         );
 
         owned.post(scroller, entry(60.0, Some(serial))).await;
         assert_eq!(
             scroll_state(&owned.page, scroller).await,
-            (dom::Vector2D::new(0.0, 60.0), None),
+            (terminus::Vector2D::new(0.0, 60.0), None),
             "with nothing pending every post is adopted"
         );
     });
@@ -1540,7 +1545,7 @@ globalThis.renderPage = function () {
 ";
 
 /// The page element's first child, through a probe.
-async fn first_box(page: &Rc<Page>) -> dom::NodeId {
+async fn first_box(page: &Rc<Page>) -> terminus::NodeId {
     let (target, found) = std::sync::mpsc::channel();
     page.apply(vec![ToMain::Probe(Box::new(move |document| {
         let root = document.document_element().id();
@@ -1550,7 +1555,7 @@ async fn first_box(page: &Rc<Page>) -> dom::NodeId {
     found.try_recv().expect("the probe ran")
 }
 
-fn tap(target: dom::NodeId) -> ToMain {
+fn tap(target: terminus::NodeId) -> ToMain {
     ToMain::DispatchEvent {
         target,
         name: "tap",
@@ -2186,11 +2191,13 @@ fn an_image_load_reaches_its_listener_in_an_entry_of_its_own() {
         let settled = owned.page.epilogue_count();
         owned
             .page
-            .apply(vec![ToMain::ImageEvents(vec![dom::ImageEvent::Loaded {
-                source: Arc::from("app:///b.png"),
-                width: 10,
-                height: 5,
-            }])])
+            .apply(vec![ToMain::ImageEvents(vec![
+                terminus::ImageEvent::Loaded {
+                    source: Arc::from("app:///b.png"),
+                    width: 10,
+                    height: 5,
+                },
+            ])])
             .await;
         assert_eq!(owned.page.epilogue_count(), settled + 1);
         assert_eq!(image_attributes(&owned.page, "data-loads").await, None);
@@ -2208,11 +2215,13 @@ fn an_image_load_reaches_its_listener_in_an_entry_of_its_own() {
         let settled = owned.page.epilogue_count();
         owned
             .page
-            .apply(vec![ToMain::ImageEvents(vec![dom::ImageEvent::Loaded {
-                source: Arc::from("app:///a.png"),
-                width: 40,
-                height: 20,
-            }])])
+            .apply(vec![ToMain::ImageEvents(vec![
+                terminus::ImageEvent::Loaded {
+                    source: Arc::from("app:///a.png"),
+                    width: 40,
+                    height: 20,
+                },
+            ])])
             .await;
         assert_eq!(
             owned.page.epilogue_count(),
@@ -2273,11 +2282,13 @@ fn an_image_event_queued_by_a_listener_is_delivered_by_an_entry_of_its_own() {
             .await;
         owned
             .page
-            .apply(vec![ToMain::ImageEvents(vec![dom::ImageEvent::Loaded {
-                source: Arc::from("app:///b.png"),
-                width: 10,
-                height: 5,
-            }])])
+            .apply(vec![ToMain::ImageEvents(vec![
+                terminus::ImageEvent::Loaded {
+                    source: Arc::from("app:///b.png"),
+                    width: 10,
+                    height: 5,
+                },
+            ])])
             .await;
 
         owned
@@ -2291,11 +2302,13 @@ fn an_image_event_queued_by_a_listener_is_delivered_by_an_entry_of_its_own() {
         let settled = owned.page.epilogue_count();
         owned
             .page
-            .apply(vec![ToMain::ImageEvents(vec![dom::ImageEvent::Loaded {
-                source: Arc::from("app:///a.png"),
-                width: 40,
-                height: 20,
-            }])])
+            .apply(vec![ToMain::ImageEvents(vec![
+                terminus::ImageEvent::Loaded {
+                    source: Arc::from("app:///a.png"),
+                    width: 40,
+                    height: 20,
+                },
+            ])])
             .await;
         assert_eq!(
             owned.page.epilogue_count(),
@@ -2437,10 +2450,10 @@ fn empty_svg(width: u32, height: u32) -> String {
 /// the engine's parser, or a failure for one that does not parse, in one
 /// batch.
 fn host_report(source: &str, svg: &str) -> ToMain {
-    ToMain::ImageEvents(vec![dom::ImageEvent::parse_document(
+    ToMain::ImageEvents(vec![terminus::ImageEvent::parse_document(
         Arc::from(source),
         svg.as_bytes(),
-        dom::DocumentKind::Svg,
+        terminus::DocumentKind::Svg,
     )])
 }
 
@@ -2448,7 +2461,7 @@ fn host_report(source: &str, svg: &str) -> ToMain {
 impl OwnedPage {
     /// Every document request this page has handed its host so far, one
     /// entry per `RequestDocuments` notice. Every other notice is dropped.
-    fn document_requests(&mut self) -> Vec<Vec<dom::DocumentRequest>> {
+    fn document_requests(&mut self) -> Vec<Vec<terminus::DocumentRequest>> {
         let mut requests = Vec::new();
         while let Ok(notice) = self.view.notices.try_recv() {
             if let ViewNotice::RequestDocuments(documents) = notice {
@@ -2460,10 +2473,10 @@ impl OwnedPage {
 
     /// Answers `requests` as a host does: parses each document with the
     /// engine's parser and reports them as one batch.
-    async fn answer_documents(&self, requests: Vec<dom::DocumentRequest>) {
+    async fn answer_documents(&self, requests: Vec<terminus::DocumentRequest>) {
         let reports = requests
             .into_iter()
-            .map(|(source, bytes, kind)| dom::ImageEvent::parse_document(source, &bytes, kind))
+            .map(|(source, bytes, kind)| terminus::ImageEvent::parse_document(source, &bytes, kind))
             .collect();
         self.page.apply(vec![ToMain::ImageEvents(reports)]).await;
     }
@@ -2565,7 +2578,7 @@ fn an_svg_load_carries_the_layout_size_for_src_and_content() {
         };
         assert!(source.starts_with("svg-content:"), "{source}");
         assert_eq!(&**bytes, markup.as_bytes(), "the markup as written");
-        assert_eq!(*kind, dom::DocumentKind::Svg);
+        assert_eq!(*kind, terminus::DocumentKind::Svg);
         for _ in 0..TURNS {
             task::yield_now().await;
         }
@@ -2795,11 +2808,13 @@ fn an_svg_load_settled_before_the_first_commit_waits_for_it() {
         // own entry, before any commit: the hold is what this pins.
         harness
             .commands
-            .send(ToMain::ImageEvents(vec![dom::ImageEvent::parse_document(
-                Arc::from("app:///a.svg"),
-                empty_svg(30, 15).as_bytes(),
-                dom::DocumentKind::Svg,
-            )]))
+            .send(ToMain::ImageEvents(vec![
+                terminus::ImageEvent::parse_document(
+                    Arc::from("app:///a.svg"),
+                    empty_svg(30, 15).as_bytes(),
+                    terminus::DocumentKind::Svg,
+                ),
+            ]))
             .expect("the view is serving");
         for _ in 0..16 {
             harness.turn().await;

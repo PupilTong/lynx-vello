@@ -16,7 +16,7 @@
 //! is counted at one delivery only: the bubble pass for an ancestor of the
 //! target, and the one at-target delivery for the element itself or for a
 //! host standing in for a node of its shadow tree, which has no bubble-pass
-//! step ([`dom::event::ElementEvent`]'s walk calls a target once). The
+//! step ([`terminus::event::ElementEvent`]'s walk calls a target once). The
 //! capture-pass delivery of the same event is never counted.
 //!
 //! An element with no finger down holds no entry, so the table is as long
@@ -24,9 +24,9 @@
 
 use std::cell::RefCell;
 
-use dom::NodeId;
-use dom::event::{ElementEvent, EventPhase};
 use smallvec::SmallVec;
+use terminus::NodeId;
+use terminus::event::{ElementEvent, EventPhase};
 
 /// The touch event a finger going down dispatches.
 pub(super) const TOUCH_START: &str = "touchstart";
@@ -93,8 +93,8 @@ mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;
 
-    use dom::event::{ElementEvent, EventDetail};
-    use dom::{CustomElement, NodeId};
+    use terminus::event::{ElementEvent, EventDetail};
+    use terminus::{CustomElement, NodeId};
 
     use super::super::LynxDocument;
     use super::super::test_support::{child, document, element_under};

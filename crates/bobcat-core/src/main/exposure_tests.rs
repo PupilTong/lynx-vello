@@ -1,5 +1,5 @@
 //! Exposure over real documents: the registrations the listener table makes,
-//! the re-arms an element's attributes make, and the changes `dom`'s
+//! the re-arms an element's attributes make, and the changes `terminus`'s
 //! intersection updates turn into.
 //!
 //! Each test plays the page's part by hand: [`deliver`] is one render, one
@@ -12,7 +12,7 @@
 
 #![allow(clippy::float_cmp)] // Authored pixel sizes and ratios are exact.
 
-use dom::{IntersectionMargin, MarginLength, NodeId, Vector2D};
+use terminus::{IntersectionMargin, MarginLength, NodeId, Vector2D};
 
 use super::{Exposure, ExposureChange, Length, Margins, fold_margins, parse_area, parse_length};
 use crate::main::tree::test_support::{

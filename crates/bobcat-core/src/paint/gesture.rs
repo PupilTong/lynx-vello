@@ -2,12 +2,12 @@
 //! every decision the engine executes — which scroll the user-agent performs,
 //! which event is dispatched, and at which target node.
 //!
-//! Routing (hit testing) stays in `dom`; the propagation chain stays in the
+//! Routing (hit testing) stays in `terminus`; the propagation chain stays in the
 //! event module (`Document::event_steps`) — this layer decides the *type and
 //! target*, never the chain. The engine feeds each routed event in and
 //! executes the returned [`InputDecision`]s in order: a scroll decision
 //! drives the painter's own chain walk over the published slot table
-//! (`ScrollIntents::chain`, on `dom`'s `drive_chain`), an emit decision goes
+//! (`ScrollIntents::chain`, on `terminus`'s `drive_chain`), an emit decision goes
 //! to path construction and the ordered script channel. That order is therefore the
 //! delivery order, which is how the layer guarantees a due `longpress`
 //! precedes the release that follows it and a `tap` follows its own
@@ -43,10 +43,10 @@
 //! - **User-agent scrolling.** The drag recognizer (every pointer kind, a mouse included by ruling,
 //!   latched at the down on the nearest user-scrollable, 8px slop with the slop subtracted from the
 //!   first movement, per-pointer independent) and wheel scrolling (per-event nearest scrollable
-//!   filtered by the CSS-pixel delta's axes). Both were `dom`'s default action; the engine now
-//!   routes with `default_prevented` set so `dom` performs none, and this router is the one
+//!   filtered by the CSS-pixel delta's axes). Both were `terminus`'s default action; the engine now
+//!   routes with `default_prevented` set so `terminus` performs none, and this router is the one
 //!   decision point. The scroll *primitives* (`drive_chain`'s remainder chaining, the step rule,
-//!   the published chain links) stay in `dom`. A drag that scrolled ends with a
+//!   the published chain links) stay in `terminus`. A drag that scrolled ends with a
 //!   [`InputDecision::ScrollEnd`] at its release or cancel, ahead of the release's own events, so
 //!   the containers it moved settle onto their css-scroll-snap-1 positions (the executor's intents
 //!   own that; the router only marks the end).
@@ -73,15 +73,17 @@
 //! `scrollend`) are the main thread's, decided from the offsets this side
 //! posts.
 
-use dom::event::EventDetail;
-// The touch vocabulary is `dom`'s, because every layer that names an event
+use smallvec::SmallVec;
+use terminus::event::EventDetail;
+// The touch vocabulary is `terminus`'s, because every layer that names an event
 // names it: the router fills the points in, the Rust walk reads them, and the
 // main thread encodes them into the realm's argument list.
-pub(crate) use dom::event::{TOUCH_ACTIVE, TOUCH_CHANGED, TOUCH_TARGET, TouchPoint, TouchPoints};
-use dom::input::{InputEvent, InputKind, KeyPhase, PointerId, PointerKind, PointerPhase};
-use dom::scroll::ScrollAxes;
-use dom::{HitTarget, NodeId, Point2D, Vector2D};
-use smallvec::SmallVec;
+pub(crate) use terminus::event::{
+    TOUCH_ACTIVE, TOUCH_CHANGED, TOUCH_TARGET, TouchPoint, TouchPoints,
+};
+use terminus::input::{InputEvent, InputKind, KeyPhase, PointerId, PointerKind, PointerPhase};
+use terminus::scroll::ScrollAxes;
+use terminus::{HitTarget, NodeId, Point2D, Vector2D};
 
 /// How far a sequence may travel, in viewport CSS px, and still deliver `tap`.
 ///
@@ -160,7 +162,7 @@ pub(crate) struct EmitEvent {
     /// The node the event targets. It may have been freed since the decision
     /// was formed — the executor checks liveness before building a path.
     pub(crate) target: NodeId,
-    /// What the event carries, in `dom`'s one description of it: a pointer
+    /// What the event carries, in `terminus`'s one description of it: a pointer
     /// event's position and device, a wheel's delta, a touch event's lists.
     pub(crate) detail: EventDetail,
     /// For a `click` alone: the node the release routed to. The event's
@@ -369,7 +371,7 @@ impl GestureRouter {
     ///
     /// The event's own `default_prevented` is the embedder's suppression
     /// seam: a prevented event produces no scroll decision (a prevented move
-    /// re-bases the drag origin, exactly as `dom`'s recognizer did) but still
+    /// re-bases the drag origin, exactly as `terminus`'s recognizer did) but still
     /// dispatches and still feeds synthesis.
     pub(crate) fn on_input(
         &mut self,
@@ -497,7 +499,7 @@ impl GestureRouter {
     }
 
     /// The drag half of the pointer default action: latch at down, slop at
-    /// the first movement, one scroll decision per move — `dom`'s recognizer,
+    /// the first movement, one scroll decision per move — `terminus`'s recognizer,
     /// relocated behind this layer's decision boundary.
     #[allow(clippy::too_many_arguments, reason = "one private dispatch site")]
     fn drag_step(
@@ -891,7 +893,7 @@ impl GestureRouter {
 
 #[cfg(test)]
 mod tests {
-    use dom::input::{InputEvent, PointerKind, PointerPhase};
+    use terminus::input::{InputEvent, PointerKind, PointerPhase};
 
     use super::*;
 
@@ -1058,7 +1060,7 @@ mod tests {
 
     #[test]
     fn a_key_is_keydown_then_keyup_at_the_document_element_with_its_strings() {
-        use dom::input::{KeyPhase, Modifiers};
+        use terminus::input::{KeyPhase, Modifiers};
 
         let mut harness = Harness::new();
         let shift = Modifiers {

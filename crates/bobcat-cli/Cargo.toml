@@ -79,7 +79,7 @@ winit = { workspace = true, optional = true }
 crc64fast = { workspace = true }
 image = { workspace = true, features = ["bmp"] }
 zip = { workspace = true }
-flashbulb = { workspace = true, features = ["render"] }
+prime-radiant = { workspace = true, features = ["render"] }
 rkyv = { workspace = true }
 tower = { workspace = true, features = ["util"] }
 

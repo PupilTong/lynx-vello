@@ -66,8 +66,8 @@ mod view;
 /// Normalized host input vocabulary. No document or hit-test result crosses
 /// this boundary.
 pub mod input {
-    pub use dom::Point2D;
-    pub use dom::input::{
+    pub use terminus::Point2D;
+    pub use terminus::input::{
         InputEvent, InputKind, KeyPhase, Modifiers, PointerId, PointerKind, PointerPhase,
     };
 }
@@ -77,8 +77,8 @@ pub mod input {
 /// [`EngineEvent::TextInputStateChanged`] reports.
 pub mod editing {
     /// The rectangle [`TextInputState`]'s geometry is in (viewport CSS px).
-    pub use dom::Rect;
-    pub use dom::editing::{
+    pub use terminus::Rect;
+    pub use terminus::editing::{
         Command, Direction, EnterKeyHint, Granularity, InputMode, InputType, TextInputState,
     };
 
@@ -112,15 +112,15 @@ pub mod editing {
     }
 }
 
-pub use dom::{
-    DocumentKind, FontBlob, FrameImages, ImageEvent, ImageInbox, ImageReports, ImageSizeHint,
-    MAX_RENDERABLE_DIMENSION, MAX_STYLE_THREADS, NoImages, VectorDocument, is_renderable, vello,
-};
 pub use esm::{BTS_CHUNK_PREAMBLE, MTS_CHUNK_PREAMBLE};
 pub use main::tree::PageConfig;
 pub use native_module::{ModuleCall, ModuleCallback, NativeModule};
 pub use paint::{Painter, PostedFrame};
 pub use style::{PreparsedDeclaration, PreparsedKeyframe, PreparsedRule, PreparsedStyleSheet};
+pub use terminus::{
+    DocumentKind, FontBlob, FrameImages, ImageEvent, ImageInbox, ImageReports, ImageSizeHint,
+    MAX_RENDERABLE_DIMENSION, MAX_STYLE_THREADS, NoImages, VectorDocument, is_renderable, vello,
+};
 #[cfg(target_arch = "wasm32")]
 pub use view::configure_wasm_workers;
 pub use view::{

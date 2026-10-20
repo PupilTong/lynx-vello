@@ -13,9 +13,9 @@
 //! - **Inside a tag that is not a Lynx tag** — an HTML element such as `div` or `span`, or any
 //!   other name — directly or through one `wrapper`: its text is loose text of that element, laid
 //!   out the way CSS lays out the text children of a flex, grid or grid-lanes container: each
-//!   contiguous sequence in one anonymous block box, which is one item (`dom`'s `tree::anonymous`).
-//!   A ruled deviation from web-core, which hides it there too (`docs/tracking/deviations.md`);
-//!   native has no such tags.
+//!   contiguous sequence in one anonymous block box, which is one item (`terminus`'s
+//!   `tree::anonymous`). A ruled deviation from web-core, which hides it there too
+//!   (`docs/tracking/deviations.md`); native has no such tags.
 //!
 //! A tag is a Lynx tag when [`LYNX_TAGS`] lists it. `wrapper` is not one: it
 //! generates no box, so the tag that matters is the one holding the wrapper —
@@ -114,14 +114,14 @@ raw-text {{ content: attr(text); }}
 
 #[cfg(test)]
 mod tests {
-    use dom::NodeId;
+    use terminus::NodeId;
 
     use super::super::LynxDocument;
     use super::super::test_support::{child, display, document};
 
     const RAW_TEXT_TAG: &str = "raw-text";
     const TEXT_ATTRIBUTE: &str = "text";
-    const AHEM: &[u8] = include_bytes!("../../../../hughie/tests/fixtures/Ahem.ttf");
+    const AHEM: &[u8] = include_bytes!("../../../../seldon/tests/fixtures/Ahem.ttf");
 
     fn text_element(document: &mut LynxDocument) -> NodeId {
         child(document, "text", "font-family: Ahem; font-size: 20px")
@@ -137,7 +137,7 @@ mod tests {
     #[test]
     fn generated_text_updates_without_mutating_the_carrier_children() {
         let mut document = document();
-        document.register_fonts(dom::FontBlob::from_static(AHEM));
+        document.register_fonts(terminus::FontBlob::from_static(AHEM));
         let text = text_element(&mut document);
         let wrapper = document.create_element("wrapper", ());
         document.append_child(text, wrapper);
@@ -163,11 +163,14 @@ mod tests {
         }
         document.add_stylesheet(
             "raw-text { content: 'CSS'; }",
-            dom::StylesheetOrigin::Author,
+            terminus::StylesheetOrigin::Author,
         );
         document.layout();
         assert!((document.text_block_size(text).unwrap().width - 60.0).abs() < f32::EPSILON);
-        document.add_stylesheet("raw-text { content: none; }", dom::StylesheetOrigin::Author);
+        document.add_stylesheet(
+            "raw-text { content: none; }",
+            terminus::StylesheetOrigin::Author,
+        );
         document.layout();
         assert!(document.text_block_size(text).unwrap().width.abs() < f32::EPSILON);
     }
@@ -175,7 +178,7 @@ mod tests {
     #[test]
     fn text_attribute_replaces_children_and_removal_restores_them() {
         let mut document = document();
-        document.register_fonts(dom::FontBlob::from_static(AHEM));
+        document.register_fonts(terminus::FontBlob::from_static(AHEM));
         let text = text_element(&mut document);
         let raw = raw_text(&mut document, text, "child");
         for (value, width) in [
@@ -196,7 +199,7 @@ mod tests {
 
     #[test]
     fn the_ua_sheet_dissolves_a_raw_text_only_inside_the_text_it_is_written_in() {
-        use dom::stylo::values::computed::Display;
+        use terminus::stylo::values::computed::Display;
 
         let mut document = document();
         let page = document.document_element().id();
@@ -227,7 +230,7 @@ mod tests {
 
     #[test]
     fn a_carrier_renders_under_a_tag_that_is_not_a_lynx_tag() {
-        use dom::stylo::values::computed::Display;
+        use terminus::stylo::values::computed::Display;
 
         let mut document = document();
         let page = document.document_element().id();
@@ -289,7 +292,10 @@ mod tests {
     #[test]
     fn carriers_in_a_div_are_one_item_across_a_wrapper() {
         let mut document = document();
-        assert_eq!(document.register_fonts(dom::FontBlob::from_static(AHEM)), 1);
+        assert_eq!(
+            document.register_fonts(terminus::FontBlob::from_static(AHEM)),
+            1
+        );
         let div = child(
             &mut document,
             "div",
@@ -325,7 +331,10 @@ mod tests {
     #[test]
     fn a_text_element_is_sized_by_the_run_its_raw_text_carries() {
         let mut document = document();
-        assert_eq!(document.register_fonts(dom::FontBlob::from_static(AHEM)), 1);
+        assert_eq!(
+            document.register_fonts(terminus::FontBlob::from_static(AHEM)),
+            1
+        );
         let text = text_element(&mut document);
         let _raw = raw_text(&mut document, text, "hello");
         document.layout();
@@ -351,7 +360,10 @@ mod tests {
     #[test]
     fn a_literal_newline_in_the_attribute_breaks_the_line() {
         let mut document = document();
-        assert_eq!(document.register_fonts(dom::FontBlob::from_static(AHEM)), 1);
+        assert_eq!(
+            document.register_fonts(terminus::FontBlob::from_static(AHEM)),
+            1
+        );
         let text = text_element(&mut document);
         let raw = raw_text(&mut document, text, "ab\ncd");
         document.layout();

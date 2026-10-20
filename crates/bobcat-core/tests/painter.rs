@@ -204,7 +204,7 @@ async fn a_view_dropped_under_its_painter_leaves_the_last_frame_standing() {
 /// image is still there to draw once nothing can be read any more.
 #[tokio::test]
 async fn a_dropped_views_last_frame_keeps_the_image_pixels_it_read() {
-    let images = Rc::new(flashbulb::TestImages::new());
+    let images = Rc::new(prime_radiant::TestImages::new());
     images.insert_rgba8(IMAGE_URL, 1, 1, vec![0, 0, 255, 255]);
     let group = group().await;
     let mut view = group
@@ -472,7 +472,7 @@ globalThis.renderPage = function renderPage() {
 /// leaves its border box, and the fall-off is symmetric about the border.
 ///
 /// The bake is a pre-step of `compose_and_render`, so this is the one test
-/// that proves an embedder gets it — `dom`'s own pixel tests drive the
+/// that proves an embedder gets it — `terminus`'s own pixel tests drive the
 /// headless renderer directly and would pass with the painter never calling
 /// `prepare_filters` at all.
 #[tokio::test]
@@ -555,7 +555,7 @@ globalThis.renderPage = function renderPage() {
 /// is a gradient inside the element's border box and a step beside it.
 ///
 /// Same argument as the blur test above — the bake is a pre-step of
-/// `compose_and_render`, and `dom`'s own pixel tests drive the headless
+/// `compose_and_render`, and `terminus`'s own pixel tests drive the headless
 /// renderer directly, so this is the one test that proves an embedder gets a
 /// backdrop at all.
 #[tokio::test]

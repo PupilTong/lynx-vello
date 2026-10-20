@@ -38,13 +38,13 @@
 //! of the curves above ever meets an edge there: a drag, a fling or a wheel
 //! tick on it moves the offset along an unbounded line and absorbs its
 //! whole delta, so nothing stretches and nothing chains outward. The line
-//! repeats the scrolling area every [`dom::ScrollSlot::wrap_period`]; the
+//! repeats the scrolling area every [`terminus::ScrollSlot::wrap_period`]; the
 //! intents normalize the offset into one period when a commit is adopted,
-//! and `dom` normalizes it wherever it composes, hit-tests or samples, so
+//! and `terminus` normalizes it wherever it composes, hit-tests or samples, so
 //! these functions never wrap anything themselves.
 
-use dom::scroll::{ScrollAxes, ScrollKind, SnapAxis, resolve_step};
-use dom::{Size2D, Vector2D};
+use terminus::scroll::{ScrollAxes, ScrollKind, SnapAxis, resolve_step};
+use terminus::{Size2D, Vector2D};
 
 /// The rubber band's `c`: the slope a stretch starts at. lynx-ui's
 /// `rubberC`, which is `UIKit`'s.
@@ -668,15 +668,15 @@ mod tests {
 
     #[test]
     fn a_wheel_tick_on_a_wrapped_axis_moves_on_to_the_next_periodic_snap_position() {
-        let points = [0.0, 200.0, 400.0].map(|at| dom::scroll::SnapPoint {
+        let points = [0.0, 200.0, 400.0].map(|at| terminus::scroll::SnapPoint {
             min: at,
             max: at,
             stop: false,
-            area: dom::NodeId::from_bits(1).expect("a well-formed handle"),
+            area: terminus::NodeId::from_bits(1).expect("a well-formed handle"),
             order: 0,
         });
         let snap = SnapAxis {
-            strictness: dom::scroll::SnapStrictness::Mandatory,
+            strictness: terminus::scroll::SnapStrictness::Mandatory,
             points: &points,
             period: Some(700.0),
         };

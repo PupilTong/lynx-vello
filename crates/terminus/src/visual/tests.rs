@@ -1,0 +1,3714 @@
+//! Behavior tests for `terminus::visual`: stacking contexts, Appendix-E paint
+//! order, transform matrices, clip chains, and hit testing.
+
+#![allow(clippy::float_cmp)]
+
+use stylo::properties::animated_properties::{AnimationValue, AnimationValueMap};
+use stylo::properties::{LonghandId, OwnedPropertyDeclarationId};
+
+use crate::test_common::{self as common, Doc};
+use crate::visual::{PaintItemKind, PaintOrder};
+use crate::{FontBlob, NodeId, Point2D};
+
+const AHEM: &[u8] = include_bytes!("../../../seldon/tests/fixtures/Ahem.ttf");
+
+struct Harness {
+    doc: Doc,
+}
+
+impl Harness {
+    fn new(css: &str) -> Self {
+        Self {
+            doc: Doc::with_css(css),
+        }
+    }
+
+    fn el(&mut self, parent: NodeId, spec: &str) -> NodeId {
+        self.doc.el(parent, spec)
+    }
+
+    fn root(&self) -> NodeId {
+        self.doc.root
+    }
+
+    fn paint(&mut self) -> PaintOrder {
+        self.doc.dom.build_paint_order()
+    }
+
+    fn element_order(&mut self) -> Vec<NodeId> {
+        self.paint()
+            .items()
+            .iter()
+            .filter(|item| item.kind == PaintItemKind::ElementBox)
+            .map(|item| item.node)
+            .collect()
+    }
+
+    fn hit(&mut self, x: f32, y: f32) -> Option<NodeId> {
+        self.doc.dom.render();
+        self.doc
+            .dom
+            .elements_from_point(Point2D::new(x, y))
+            .first()
+            .copied()
+    }
+}
+
+const PAGE: &str = "page { display: flex; position: relative; width: 800px; height: 600px; }";
+
+fn abs_box(extra: &str) -> String {
+    format!(
+        ".box {{ display: flex; position: absolute; left: 0; top: 0; width: 100px; height: 100px; }} {extra}"
+    )
+}
+
+#[test]
+fn in_flow_content_paints_in_tree_order() {
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 600px; }
+         .a, .b, .inner { display: flex; width: 100px; height: 100px; }",
+    );
+    let root = h.root();
+    let a = h.el(root, "view.a");
+    let inner = h.el(a, "view.inner");
+    let b = h.el(root, "view.b");
+    assert_eq!(h.element_order(), vec![root, a, inner, b]);
+}
+
+#[test]
+fn z_index_orders_positioned_siblings() {
+    let mut h = Harness::new(&format!(
+        "{PAGE} {}",
+        abs_box(".low { z-index: 1; } .high { z-index: 2; }")
+    ));
+    let root = h.root();
+    let high = h.el(root, "view.box.high");
+    let low = h.el(root, "view.box.low");
+    assert_eq!(h.element_order(), vec![root, low, high]);
+    assert_eq!(h.hit(50.0, 50.0), Some(high));
+}
+
+#[test]
+fn negative_z_index_paints_below_in_flow_content() {
+    let mut h = Harness::new(&format!(
+        "{PAGE} {} .flow {{ display: flex; width: 100px; height: 100px; }}",
+        abs_box(".neg { z-index: -1; }")
+    ));
+    let root = h.root();
+    let neg = h.el(root, "view.box.neg");
+    let flow = h.el(root, "view.flow");
+    assert_eq!(h.element_order(), vec![root, neg, flow]);
+    assert_eq!(h.hit(50.0, 50.0), Some(flow));
+}
+
+/// A scroll container is no stacking context by itself, as on the web: a
+/// `z-index` inside it sorts against its siblings outside, so the content
+/// paints above a positioned sibling with a lower level.
+#[test]
+fn a_scroll_containers_z_index_content_sorts_in_the_enclosing_context() {
+    let mut h = Harness::new(&format!(
+        "{PAGE}
+         .scroller {{ display: flex; position: absolute; left: 0; top: 0;
+                      overflow: scroll; width: 200px; height: 200px; }}
+         .content {{ display: flex; flex-shrink: 0; position: relative; z-index: 10;
+                     width: 200px; height: 300px; }}
+         .above {{ display: flex; position: absolute; left: 0; top: 0;
+                   width: 100px; height: 100px; z-index: 5; }}"
+    ));
+    let root = h.root();
+    let scroller = h.el(root, "view.scroller");
+    let content = h.el(scroller, "view.content");
+    let above = h.el(root, "view.above");
+    assert_eq!(h.element_order(), vec![root, scroller, above, content]);
+    assert_eq!(h.hit(50.0, 50.0), Some(content));
+    // Sorted outside the scroller, still cut by its scrollport.
+    assert_eq!(h.hit(150.0, 250.0), Some(root));
+}
+
+/// Content hoisted out of its scroller by `z-index` keeps the scroller's
+/// clip and scroll space: it is painted in the enclosing context but moves
+/// with the scroll offset and is cut by the scrollport.
+#[test]
+fn hoisted_scroll_content_keeps_its_scrollers_clip_and_space() {
+    let mut h = Harness::new(&format!(
+        "{PAGE}
+         .scroller {{ display: flex; flex-direction: column; position: absolute;
+                      left: 0; top: 0; overflow: scroll; width: 200px; height: 200px; }}
+         .content {{ flex-shrink: 0; position: relative; z-index: 1; margin-top: 150px;
+                     width: 200px; height: 100px; }}
+         .spacer {{ flex-shrink: 0; width: 10px; height: 400px; }}"
+    ));
+    let root = h.root();
+    let scroller = h.el(root, "view.scroller");
+    let content = h.el(scroller, "view.content");
+    h.el(scroller, "view.spacer");
+    let frame = h.paint();
+    let item = frame
+        .items()
+        .iter()
+        .find(|item| item.node == content)
+        .expect("the content paints");
+    let clip = &frame.clips()[item.clip.expect("the content is clipped")];
+    assert_eq!(clip.node, scroller, "the scroller's scrollport cuts it");
+    let space = item.space.expect("the content rides a space");
+    assert!(
+        matches!(
+            frame.spaces()[space as usize].kind,
+            crate::visual::SpaceKind::Scroll(_)
+        ),
+        "the innermost space is the scroller's scroll node",
+    );
+
+    // Below the scrollport's end before the scroll, inside it after.
+    assert_eq!(h.hit(150.0, 225.0), Some(root));
+    assert_eq!(h.hit(150.0, 120.0), Some(scroller));
+    h.doc.dom.layout();
+    h.doc
+        .dom
+        .scroll_to(scroller, crate::Vector2D::new(0.0, 100.0));
+    assert_eq!(h.hit(150.0, 120.0), Some(content));
+}
+
+/// A fixed box inside scroll content escapes the scroller's clip and scroll
+/// space for its containing block's, and with no stacking context in the
+/// way its `z-index` also lifts it over the scroller's later siblings.
+#[test]
+fn a_fixed_popup_in_scroll_content_overlays_the_scrollers_siblings() {
+    let mut h = Harness::new(&format!(
+        "{PAGE}
+         .scroller {{ display: flex; position: absolute; left: 0; top: 0;
+                      overflow: scroll; width: 200px; height: 200px; }}
+         .popup {{ position: fixed; left: 150px; top: 150px; z-index: 10;
+                   width: 200px; height: 200px; }}
+         .sibling {{ position: absolute; left: 150px; top: 150px; z-index: 5;
+                     width: 200px; height: 200px; }}"
+    ));
+    let root = h.root();
+    let scroller = h.el(root, "view.scroller");
+    let popup = h.el(scroller, "view.popup");
+    h.el(root, "view.sibling");
+    assert_eq!(h.hit(175.0, 175.0), Some(popup));
+    assert_eq!(h.hit(300.0, 300.0), Some(popup), "outside the scrollport");
+}
+
+#[test]
+fn z_index_compares_only_within_the_same_stacking_context() {
+    let mut h = Harness::new(&format!(
+        "{PAGE} {}",
+        abs_box(".wrap { z-index: 1; } .inner { z-index: 9999; } .top { z-index: 2; }")
+    ));
+    let root = h.root();
+    let wrap = h.el(root, "view.box.wrap");
+    let inner = h.el(wrap, "view.box.inner");
+    let top = h.el(root, "view.box.top");
+    assert_eq!(h.element_order(), vec![root, wrap, inner, top]);
+    assert_eq!(h.hit(50.0, 50.0), Some(top));
+}
+
+#[test]
+fn pseudo_context_members_interleave_with_the_outer_context() {
+    let mut h = Harness::new(&format!(
+        "{PAGE} {} .d {{ display: flex; width: 50px; height: 50px; }}",
+        abs_box(".neg { z-index: -1; }")
+    ));
+    let root = h.root();
+    let wrapper = h.el(root, "view.box");
+    let d = h.el(wrapper, "view.d");
+    let neg = h.el(wrapper, "view.box.neg");
+    assert_eq!(h.element_order(), vec![root, neg, wrapper, d]);
+    assert_eq!(h.hit(25.0, 25.0), Some(d));
+}
+
+#[test]
+fn order_modified_document_order_drives_member_ties() {
+    let mut h = Harness::new(
+        "page { display: flex; position: relative; width: 800px; height: 600px; }
+         .item { display: flex; position: relative; width: 100px; height: 100px; }
+         .first { order: 2; }
+         .second { order: 1; margin-right: -100px; }",
+    );
+    let root = h.root();
+    let first = h.el(root, "view.item.first");
+    let second = h.el(root, "view.item.second");
+    assert_eq!(h.element_order(), vec![root, second, first]);
+    assert_eq!(h.hit(50.0, 50.0), Some(first));
+}
+
+#[test]
+fn order_is_inert_on_absolutely_positioned_children() {
+    let mut h = Harness::new(&format!(
+        "{PAGE} {}",
+        abs_box(".first { order: 2; } .second { order: 1; }")
+    ));
+    let root = h.root();
+    let first = h.el(root, "view.box.first");
+    let second = h.el(root, "view.box.second");
+    assert_eq!(h.element_order(), vec![root, first, second]);
+    assert_eq!(h.hit(50.0, 50.0), Some(second));
+}
+
+#[test]
+fn opacity_context_is_atomic() {
+    let mut h = Harness::new(&format!(
+        "{PAGE} {}",
+        abs_box(".fade { opacity: 0.5; } .trapped { z-index: 5; } .over { z-index: 1; }")
+    ));
+    let root = h.root();
+    let fade = h.el(root, "view.box.fade");
+    let trapped = h.el(fade, "view.box.trapped");
+    let over = h.el(root, "view.box.over");
+    assert_eq!(h.element_order(), vec![root, fade, trapped, over]);
+    assert_eq!(h.hit(50.0, 50.0), Some(over));
+}
+
+#[test]
+fn static_flex_item_with_z_index_forms_a_context() {
+    let mut h = Harness::new(
+        "page { display: flex; position: relative; width: 800px; height: 600px; }
+         .item { display: flex; width: 100px; height: 100px; margin-right: -100px; z-index: 5; }
+         .item2 { display: flex; width: 100px; height: 100px; position: relative; z-index: 1; }
+         .trapped { display: flex; position: absolute; left: 0; top: 0;
+                    width: 100px; height: 100px; z-index: 9; }",
+    );
+    let root = h.root();
+    let item = h.el(root, "view.item");
+    let trapped = h.el(item, "view.trapped");
+    let item2 = h.el(root, "view.item2");
+    assert_eq!(h.element_order(), vec![root, item2, item, trapped]);
+    assert_eq!(h.hit(50.0, 50.0), Some(trapped));
+}
+
+/// A grid-lanes container's children are grid items (the fork's
+/// `Display::is_item_container` says so), so a non-positioned one's `z-index`
+/// applies and lifts it out of tree order.
+#[test]
+fn static_grid_lanes_item_with_z_index_forms_a_context() {
+    let mut h = Harness::new(
+        "page { display: flex; position: relative; width: 800px; height: 600px; }
+         .lanes { display: grid-lanes; width: 100px; gap: 0px; flow-tolerance: 0;
+                  grid-template-columns: minmax(0, 1fr); }
+         .first { height: 100px; z-index: 5; }
+         .second { height: 100px; margin-top: -100px; }",
+    );
+    let root = h.root();
+    let lanes = h.el(root, "view.lanes");
+    let first = h.el(lanes, "view.first");
+    let second = h.el(lanes, "view.second");
+    // The two items occupy the same 100px of the one lane, so paint order is
+    // what decides which of them is on top.
+    assert_eq!(h.element_order(), vec![root, lanes, second, first]);
+    assert_eq!(h.hit(50.0, 50.0), Some(first));
+}
+
+/// Without a `z-index` the same two items paint in tree order, so the item
+/// after wins — the lift above is the `z-index`, not the display mode.
+#[test]
+fn grid_lanes_items_without_z_index_paint_in_tree_order() {
+    let mut h = Harness::new(
+        "page { display: flex; position: relative; width: 800px; height: 600px; }
+         .lanes { display: grid-lanes; width: 100px; gap: 0px; flow-tolerance: 0;
+                  grid-template-columns: minmax(0, 1fr); }
+         .first { height: 100px; }
+         .second { height: 100px; margin-top: -100px; }",
+    );
+    let root = h.root();
+    let lanes = h.el(root, "view.lanes");
+    let first = h.el(lanes, "view.first");
+    let second = h.el(lanes, "view.second");
+    assert_eq!(h.element_order(), vec![root, lanes, first, second]);
+    assert_eq!(h.hit(50.0, 50.0), Some(second));
+}
+
+/// Hit testing reads the lanes pass's own placement: each point lands in the
+/// item the stacking pass put there, not in document order.
+#[test]
+fn hit_testing_finds_items_at_their_lane_positions() {
+    let mut h = Harness::new(
+        "page { display: flex; align-items: flex-start; position: relative;
+                width: 800px; height: 600px; }
+         .lanes { display: grid-lanes; width: 200px; gap: 10px; flow-tolerance: 0;
+                  grid-template-columns: repeat(2, minmax(0, 1fr)); }",
+    );
+    let root = h.root();
+    let lanes = h.el(root, "view.lanes");
+    let items = [30.0_f32, 50.0, 20.0]
+        .into_iter()
+        .map(|height| {
+            let item = h.el(lanes, "view");
+            h.doc.set_inline(item, &format!("height: {height}px"));
+            item
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(h.hit(10.0, 10.0), Some(items[0]));
+    assert_eq!(h.hit(110.0, 10.0), Some(items[1]));
+    assert_eq!(h.hit(10.0, 45.0), Some(items[2]));
+    // The gutter between the two lanes belongs to the container itself.
+    assert_eq!(h.hit(100.0, 10.0), Some(lanes));
+}
+
+#[test]
+fn will_change_and_containment_create_atomic_contexts() {
+    for trigger in [
+        "will-change: transform;",
+        "will-change: opacity;",
+        "perspective: 100px;",
+        "filter: grayscale(1);",
+        "backdrop-filter: blur(4px);",
+        "transform: translate(0px, 0px);",
+    ] {
+        let mut h = Harness::new(&format!(
+            "{PAGE} {}",
+            abs_box(&format!(
+                ".t {{ {trigger} }} .trapped {{ z-index: 5; }} .over {{ z-index: 1; }}"
+            ))
+        ));
+        let root = h.root();
+        let t = h.el(root, "view.box.t");
+        let trapped = h.el(t, "view.box.trapped");
+        let over = h.el(root, "view.box.over");
+        assert_eq!(
+            h.element_order(),
+            vec![root, t, trapped, over],
+            "trigger `{trigger}` must make an atomic stacking context",
+        );
+    }
+}
+
+#[test]
+fn contain_paint_creates_a_context_and_clips() {
+    let mut h = Harness::new(&format!("{PAGE} {}", abs_box("")));
+    let root = h.root();
+    let contained = h.el(root, "view.box");
+    h.doc.set_inline(contained, "contain: paint");
+    let trapped = h.el(contained, "view.box.trapped");
+    h.doc.set_inline(trapped, "z-index: 5; left: 150px");
+    let over = h.el(root, "view.box.over");
+    h.doc.set_inline(over, "z-index: 1");
+    assert_eq!(h.element_order(), vec![root, contained, trapped, over]);
+    assert_eq!(h.hit(50.0, 50.0), Some(over));
+    assert_eq!(h.hit(170.0, 50.0), Some(root));
+}
+
+#[test]
+fn fixed_position_forms_a_context_and_reanchors_to_transformed_ancestors() {
+    let mut h = Harness::new(
+        "page { display: flex; position: relative; width: 800px; height: 600px; }
+         .mover { display: flex; position: absolute; left: 100px; top: 100px;
+                  width: 200px; height: 200px; transform: translate(50px, 0px); }
+         .fixed { display: flex; position: fixed; left: 10px; top: 10px;
+                  width: 50px; height: 50px; }",
+    );
+    let root = h.root();
+    let mover = h.el(root, "view.mover");
+    let fixed = h.el(mover, "view.fixed");
+    let paint = h.paint();
+    let item = paint
+        .items()
+        .iter()
+        .find(|item| item.node == fixed)
+        .expect("fixed box paints");
+    let mapped = item
+        .transform
+        .transform_point2d(Point2D::new(0.0, 0.0))
+        .expect("affine world matrix");
+    assert_eq!((mapped.x, mapped.y), (160.0, 110.0));
+    assert_eq!(h.hit(170.0, 120.0), Some(fixed));
+}
+
+#[test]
+fn overflow_hidden_clips_paint_and_hits_of_in_flow_descendants() {
+    let mut h = Harness::new(
+        "page { display: flex; position: relative; width: 800px; height: 600px; }
+         .clipper { display: flex; overflow: hidden; width: 50px; height: 50px; }
+         .big { display: flex; flex-shrink: 0; width: 200px; height: 200px; }",
+    );
+    let root = h.root();
+    let clipper = h.el(root, "view.clipper");
+    let big = h.el(clipper, "view.big");
+    let paint = h.paint();
+    let item = paint
+        .items()
+        .iter()
+        .find(|item| item.node == big)
+        .expect("clipped content still paints");
+    let clip = &paint.clips()[item.clip.expect("descendant carries the clip")];
+    assert_eq!(clip.node, clipper);
+    assert_eq!(h.hit(25.0, 25.0), Some(big));
+    assert_eq!(h.hit(100.0, 25.0), Some(root));
+}
+
+#[test]
+fn absolute_boxes_escape_clips_outside_their_containing_block_chain() {
+    let mut h = Harness::new(
+        "page { display: flex; position: relative; width: 800px; height: 600px; }
+         .w { display: flex; overflow: hidden; width: 50px; height: 50px; }
+         .x { display: flex; position: absolute; left: 100px; top: 0;
+              width: 50px; height: 50px; }
+         .d { display: flex; flex-shrink: 0; width: 50px; height: 50px; }
+         .g { display: flex; position: absolute; left: 0; top: 0;
+              width: 25px; height: 25px; }",
+    );
+    let root = h.root();
+    let clipper = h.el(root, "view.w");
+    let escaper = h.el(clipper, "view.x");
+    let static_child = h.el(escaper, "view.d");
+    let abs_child = h.el(escaper, "view.g");
+    assert_eq!(h.hit(140.0, 40.0), Some(static_child));
+    assert_eq!(h.hit(110.0, 10.0), Some(abs_child));
+    let paint = h.paint();
+    for id in [escaper, static_child, abs_child] {
+        let item = paint.items().iter().find(|item| item.node == id).unwrap();
+        assert_eq!(item.clip, None, "escaping box must not carry the clip");
+    }
+}
+
+#[test]
+fn absolute_boxes_are_clipped_by_their_own_containing_block() {
+    let mut h = Harness::new(
+        "page { display: flex; position: relative; width: 800px; height: 600px; }
+         .r { display: flex; position: relative; overflow: hidden;
+              width: 100px; height: 100px; }
+         .w { display: flex; width: 100px; height: 100px; }
+         .a { display: flex; position: absolute; left: 0; top: 150px;
+              width: 50px; height: 50px; }",
+    );
+    let root = h.root();
+    let clipping_block = h.el(root, "view.r");
+    let wrapper = h.el(clipping_block, "view.w");
+    let out_of_bounds = h.el(wrapper, "view.a");
+    let paint = h.paint();
+    let item = paint
+        .items()
+        .iter()
+        .find(|item| item.node == out_of_bounds)
+        .unwrap();
+    let clip = &paint.clips()[item.clip.expect("clipped by its containing block")];
+    assert_eq!(clip.node, clipping_block);
+    assert_eq!(h.hit(10.0, 160.0), Some(root));
+}
+
+#[test]
+fn rotation_rotates_the_hit_region_about_the_transform_origin() {
+    let mut h = Harness::new(
+        "page { display: flex; position: relative; width: 800px; height: 600px; }
+         .rot { display: flex; position: absolute; left: 100px; top: 0;
+                width: 100px; height: 100px; transform: rotate(90deg);
+                transform-origin: 0 0; }",
+    );
+    let root = h.root();
+    let rotated = h.el(root, "view.rot");
+    let paint = h.paint();
+    let item = paint
+        .items()
+        .iter()
+        .find(|item| item.node == rotated)
+        .unwrap();
+    let mapped = item
+        .transform
+        .transform_point2d(Point2D::new(100.0, 0.0))
+        .expect("rotation is invertible");
+    assert!((mapped.x - 100.0).abs() < 1e-4 && (mapped.y - 100.0).abs() < 1e-4);
+    assert_eq!(h.hit(50.0, 50.0), Some(rotated));
+    assert_eq!(h.hit(150.0, 50.0), Some(root));
+}
+
+#[test]
+fn percentage_translate_resolves_against_the_border_box() {
+    let mut h = Harness::new(
+        "page { display: flex; position: relative; width: 800px; height: 600px; }
+         .pct { display: flex; position: absolute; left: 0; top: 0;
+                width: 200px; height: 100px; transform: translate(50%, 50%); }",
+    );
+    let root = h.root();
+    let pct = h.el(root, "view.pct");
+    assert_eq!(h.hit(110.0, 60.0), Some(pct));
+    assert_eq!(h.hit(10.0, 10.0), Some(root));
+}
+
+#[test]
+fn scale_zero_is_not_hittable() {
+    let mut h = Harness::new(&format!(
+        "{PAGE} {}",
+        abs_box(".flat { transform: scale(0); }")
+    ));
+    let root = h.root();
+    let flat = h.el(root, "view.box.flat");
+    assert_eq!(h.hit(50.0, 50.0), Some(root));
+    let _ = flat;
+}
+
+#[test]
+fn perspective_projects_children_about_the_parent_center() {
+    let mut h = Harness::new(
+        "page { display: flex; position: relative; width: 800px; height: 600px; }
+         .p { display: flex; position: absolute; left: 0; top: 0;
+              width: 200px; height: 200px; perspective: 100px; }
+         .c { display: flex; position: absolute; left: 75px; top: 75px;
+              width: 50px; height: 50px; transform: translateZ(50px); }",
+    );
+    let root = h.root();
+    let p = h.el(root, "view.p");
+    let c = h.el(p, "view.c");
+    let paint = h.paint();
+    let item = paint.items().iter().find(|item| item.node == c).unwrap();
+    let top_left = item
+        .transform
+        .transform_point2d(Point2D::new(0.0, 0.0))
+        .unwrap();
+    let bottom_right = item
+        .transform
+        .transform_point2d(Point2D::new(50.0, 50.0))
+        .unwrap();
+    assert!((top_left.x - 50.0).abs() < 1e-3 && (top_left.y - 50.0).abs() < 1e-3);
+    assert!((bottom_right.x - 150.0).abs() < 1e-3 && (bottom_right.y - 150.0).abs() < 1e-3);
+    assert_eq!(h.hit(140.0, 140.0), Some(c));
+    let _ = p;
+}
+
+#[test]
+fn pointer_events_none_falls_through_and_descendants_reenable() {
+    let mut h = Harness::new(&format!(
+        "{PAGE} {}
+         .ghost {{ pointer-events: none; }}
+         .solid {{ pointer-events: auto; width: 50px; height: 50px; }}",
+        abs_box("")
+    ));
+    let root = h.root();
+    let under = h.el(root, "view.box");
+    let ghost = h.el(root, "view.box.ghost");
+    let solid = h.el(ghost, "view.solid");
+    assert_eq!(h.hit(25.0, 25.0), Some(solid));
+    assert_eq!(h.hit(75.0, 75.0), Some(under));
+}
+
+#[test]
+fn visibility_hidden_skips_the_box_but_not_visible_descendants() {
+    let mut h = Harness::new(&format!(
+        "{PAGE} {}
+         .hidden {{ visibility: hidden; }}
+         .shown {{ visibility: visible; width: 50px; height: 50px; }}",
+        abs_box("")
+    ));
+    let root = h.root();
+    let hidden = h.el(root, "view.box.hidden");
+    let shown = h.el(hidden, "view.shown");
+    let paint = h.paint();
+    assert!(
+        paint.items().iter().all(|item| item.node != hidden),
+        "a hidden box paints nothing",
+    );
+    assert_eq!(h.hit(25.0, 25.0), Some(shown));
+    assert_eq!(h.hit(75.0, 75.0), Some(root));
+}
+
+#[test]
+fn border_radius_rounds_the_hit_region() {
+    let mut h = Harness::new(&format!(
+        "{PAGE} {}",
+        abs_box(".round { border-radius: 50px; }")
+    ));
+    let root = h.root();
+    let round = h.el(root, "view.box.round");
+    assert_eq!(h.hit(50.0, 50.0), Some(round));
+    assert_eq!(h.hit(5.0, 5.0), Some(root));
+}
+
+#[test]
+fn clip_border_radius_rounds_descendant_hit_regions() {
+    let mut h = Harness::new(
+        "page { display: flex; position: relative; width: 800px; height: 600px; }
+         .clipper { display: flex; overflow: hidden; border-radius: 50px;
+                    width: 100px; height: 100px; }
+         .fill { display: flex; flex-shrink: 0; width: 100px; height: 100px; }",
+    );
+    let root = h.root();
+    let clipper = h.el(root, "view.clipper");
+    let fill = h.el(clipper, "view.fill");
+    assert_eq!(h.hit(50.0, 50.0), Some(fill));
+    assert_eq!(h.hit(5.0, 5.0), Some(root));
+    let _ = clipper;
+}
+
+#[test]
+fn text_runs_paint_with_their_element_and_hit_as_the_element() {
+    let mut h = Harness::new(
+        "page { display: flex; position: relative; width: 800px; height: 600px; }
+         .label { width: 200px; height: 50px; font-family: Ahem; font-size: 20px; }",
+    );
+    h.doc.define_lynx_text("text");
+    h.doc.dom.register_fonts(FontBlob::from_static(AHEM));
+    let root = h.root();
+    let label = h.el(root, "text.label");
+    let text = h.doc.dom.create_text_node("hello", ());
+    h.doc.dom.append_child(label, text);
+    let paint = h.paint();
+    // The paragraph is the establishing element's item: a text node is
+    // content of the block, and generates nothing of its own.
+    assert!(
+        paint.items().iter().all(|item| item.node != text),
+        "a text node paints no item of its own"
+    );
+    let item = paint
+        .items()
+        .iter()
+        .find(|item| item.kind == PaintItemKind::TextRun { element: label })
+        .expect("the block paints one paragraph item");
+    assert!(item.size.width > 0.0 && item.size.height > 0.0);
+    assert_eq!(h.hit(10.0, 10.0), Some(label));
+    assert_eq!(
+        h.doc.dom.elements_from_point(Point2D::new(10.0, 10.0)),
+        vec![label, root]
+    );
+}
+
+#[test]
+fn hit_outside_all_content_is_none() {
+    let mut h = Harness::new("page { display: flex; width: 100px; height: 100px; }");
+    assert_eq!(h.hit(400.0, 400.0), None);
+}
+
+#[test]
+fn a_bare_document_paints_only_its_permanent_root() {
+    let mut doc: terminus::Document<()> =
+        terminus::Document::new(common::device(800.0, 600.0), "page", ());
+    let root = doc.document_element().id();
+    let paint = doc.build_paint_order();
+    let painted: Vec<_> = paint.items().iter().map(|item| item.node).collect();
+    assert_eq!(painted, [root]);
+}
+
+#[test]
+fn display_none_subtrees_neither_paint_nor_hit() {
+    let mut h = Harness::new(&format!(
+        "{PAGE} {} .gone {{ display: none; }}",
+        abs_box("")
+    ));
+    let root = h.root();
+    let gone = h.el(root, "view.box.gone");
+    let child = h.el(gone, "view.box");
+    let paint = h.paint();
+    assert!(
+        paint
+            .items()
+            .iter()
+            .all(|item| item.node != gone && item.node != child)
+    );
+    assert_eq!(h.hit(50.0, 50.0), Some(root));
+}
+
+#[test]
+fn sticky_position_forms_a_stacking_context() {
+    let mut h = Harness::new(&format!(
+        "{PAGE} {}",
+        abs_box(
+            ".stick { position: sticky; left: 0; top: 0; } .trapped { z-index: 5; } .over { z-index: 1; }"
+        )
+    ));
+    let root = h.root();
+    let stick = h.el(root, "view.box.stick");
+    let trapped = h.el(stick, "view.box.trapped");
+    let over = h.el(root, "view.box.over");
+    assert_eq!(h.element_order(), vec![root, stick, trapped, over]);
+    assert_eq!(h.hit(50.0, 50.0), Some(over));
+}
+
+#[test]
+fn fixed_position_escapes_static_clippers_to_the_viewport() {
+    let mut h = Harness::new(
+        "page { display: flex; position: relative; width: 800px; height: 600px; }
+         .clipper { display: flex; overflow: hidden; width: 50px; height: 50px; }
+         .fix { display: flex; position: fixed; left: 100px; top: 100px;
+                width: 50px; height: 50px; }",
+    );
+    let root = h.root();
+    let clipper = h.el(root, "view.clipper");
+    let fix = h.el(clipper, "view.fix");
+    let paint = h.paint();
+    let item = paint.items().iter().find(|item| item.node == fix).unwrap();
+    assert_eq!(item.clip, None, "no fixed-CB ancestor: every clip escaped");
+    assert_eq!(h.hit(110.0, 110.0), Some(fix));
+    let _ = clipper;
+}
+
+#[test]
+fn clip_chains_link_across_nested_clippers() {
+    let mut h = Harness::new(
+        "page { display: flex; position: relative; width: 800px; height: 600px; }
+         .outer { display: flex; overflow: hidden; width: 100px; height: 100px; }
+         .inner { display: flex; overflow: hidden; flex-shrink: 0;
+                  width: 200px; height: 50px; }
+         .big { display: flex; flex-shrink: 0; width: 300px; height: 300px; }",
+    );
+    let root = h.root();
+    let outer = h.el(root, "view.outer");
+    let inner = h.el(outer, "view.inner");
+    let big = h.el(inner, "view.big");
+    let paint = h.paint();
+    let item = paint.items().iter().find(|item| item.node == big).unwrap();
+    let inner_clip = &paint.clips()[item.clip.expect("clipped by inner")];
+    assert_eq!(inner_clip.node, inner);
+    let outer_clip = &paint.clips()[inner_clip.parent.expect("chained to outer")];
+    assert_eq!(outer_clip.node, outer);
+    assert_eq!(outer_clip.parent, None);
+    assert_eq!(h.hit(150.0, 25.0), Some(root));
+    assert_eq!(h.hit(75.0, 25.0), Some(big));
+    assert_eq!(h.hit(75.0, 75.0), Some(outer));
+}
+
+#[test]
+fn a_transformed_clipper_carries_its_clip_along() {
+    let mut h = Harness::new(
+        "page { display: flex; position: relative; width: 800px; height: 600px; }
+         .mover { display: flex; position: absolute; left: 0; top: 0;
+                  width: 100px; height: 100px; overflow: hidden;
+                  transform: translate(100px, 0px); }
+         .big { display: flex; flex-shrink: 0; width: 200px; height: 200px; }",
+    );
+    let root = h.root();
+    let mover = h.el(root, "view.mover");
+    let big = h.el(mover, "view.big");
+    assert_eq!(h.hit(150.0, 50.0), Some(big));
+    assert_eq!(h.hit(50.0, 50.0), Some(root));
+    let _ = mover;
+}
+
+#[test]
+fn rotate_x_flattens_about_the_default_center_origin() {
+    let mut h = Harness::new(
+        "page { display: flex; position: relative; width: 800px; height: 600px; }
+         .rx { display: flex; position: absolute; left: 0; top: 0;
+               width: 100px; height: 100px; transform: rotateX(60deg); }",
+    );
+    let root = h.root();
+    let rx = h.el(root, "view.rx");
+    let paint = h.paint();
+    let item = paint.items().iter().find(|item| item.node == rx).unwrap();
+    let top = item
+        .transform
+        .transform_point2d(Point2D::new(0.0, 0.0))
+        .unwrap();
+    let bottom = item
+        .transform
+        .transform_point2d(Point2D::new(0.0, 100.0))
+        .unwrap();
+    assert!((top.x).abs() < 1e-3 && (top.y - 25.0).abs() < 1e-3);
+    assert!((bottom.x).abs() < 1e-3 && (bottom.y - 75.0).abs() < 1e-3);
+    assert_eq!(h.hit(50.0, 50.0), Some(rx));
+    assert_eq!(h.hit(50.0, 10.0), Some(root));
+}
+
+#[test]
+fn transform_origin_defaults_to_the_border_box_center() {
+    let mut h = Harness::new(
+        "page { display: flex; position: relative; width: 800px; height: 600px; }
+         .rot { display: flex; position: absolute; left: 100px; top: 0;
+                width: 200px; height: 100px; transform: rotate(90deg); }",
+    );
+    let root = h.root();
+    let rotated = h.el(root, "view.rot");
+    let paint = h.paint();
+    let item = paint
+        .items()
+        .iter()
+        .find(|item| item.node == rotated)
+        .unwrap();
+    let mapped = item
+        .transform
+        .transform_point2d(Point2D::new(0.0, 0.0))
+        .unwrap();
+    assert!((mapped.x - 250.0).abs() < 1e-3 && (mapped.y + 50.0).abs() < 1e-3);
+    assert_eq!(h.hit(200.0, 50.0), Some(rotated));
+    assert_eq!(h.hit(120.0, 50.0), Some(root));
+}
+
+#[test]
+fn a_clipping_pseudo_inside_an_escaping_pseudo_starts_a_fresh_chain() {
+    let mut h = Harness::new(
+        "page { display: flex; position: relative; width: 800px; height: 600px; }
+         .w { display: flex; overflow: hidden; width: 50px; height: 50px; }
+         .x { display: flex; position: absolute; left: 100px; top: 0;
+              width: 100px; height: 100px; overflow: hidden; }
+         .y { display: flex; flex-shrink: 0; width: 200px; height: 200px; }",
+    );
+    let root = h.root();
+    let wrapper = h.el(root, "view.w");
+    let escaper = h.el(wrapper, "view.x");
+    let filler = h.el(escaper, "view.y");
+    let paint = h.paint();
+    let item = paint
+        .items()
+        .iter()
+        .find(|item| item.node == filler)
+        .unwrap();
+    let clip = &paint.clips()[item.clip.expect("clipped by the escaping pseudo")];
+    assert_eq!(clip.node, escaper);
+    assert_eq!(
+        clip.parent, None,
+        "the escaped wrapper clip must not chain in"
+    );
+    assert_eq!(h.hit(150.0, 50.0), Some(filler));
+    assert_eq!(h.hit(210.0, 50.0), Some(root));
+}
+
+#[test]
+fn sticky_boxes_stay_in_the_normal_clip_flow() {
+    let mut h = Harness::new(
+        "page { display: flex; position: relative; width: 800px; height: 600px; }
+         .clipper { display: flex; overflow: hidden; width: 50px; height: 50px; }
+         .stick { display: flex; position: sticky; left: 0; top: 0;
+                  flex-shrink: 0; width: 200px; height: 200px; }",
+    );
+    let root = h.root();
+    let clipper = h.el(root, "view.clipper");
+    let stick = h.el(clipper, "view.stick");
+    assert_eq!(h.hit(25.0, 25.0), Some(stick));
+    assert_eq!(h.hit(100.0, 25.0), Some(root));
+    let _ = clipper;
+}
+
+#[test]
+fn a_hidden_context_root_still_structures_and_clips() {
+    let mut h = Harness::new(
+        "page { display: flex; position: relative; width: 800px; height: 600px; }
+         .fade { display: flex; position: absolute; left: 0; top: 0;
+                 width: 100px; height: 100px; opacity: 0.5;
+                 visibility: hidden; overflow: hidden; }
+         .shown { display: flex; visibility: visible; flex-shrink: 0;
+                  width: 200px; height: 200px; }",
+    );
+    let root = h.root();
+    let fade = h.el(root, "view.fade");
+    let shown = h.el(fade, "view.shown");
+    let paint = h.paint();
+    assert!(paint.items().iter().all(|item| item.node != fade));
+    assert_eq!(h.hit(50.0, 50.0), Some(shown));
+    assert_eq!(h.hit(150.0, 50.0), Some(root));
+}
+
+#[test]
+fn pointer_events_none_on_a_context_root_lets_auto_descendants_hit() {
+    let mut h = Harness::new(&format!(
+        "{PAGE} {}
+         .ghost {{ opacity: 0.5; pointer-events: none; }}
+         .solid {{ pointer-events: auto; width: 50px; height: 50px; }}",
+        abs_box("")
+    ));
+    let root = h.root();
+    let under = h.el(root, "view.box");
+    let ghost = h.el(root, "view.box.ghost");
+    let solid = h.el(ghost, "view.solid");
+    assert_eq!(h.hit(25.0, 25.0), Some(solid));
+    assert_eq!(h.hit(75.0, 75.0), Some(under));
+}
+
+#[test]
+fn text_runs_are_clipped_by_their_element() {
+    let mut h = Harness::new(
+        "page { display: flex; position: relative; width: 800px; height: 600px; }
+         .clipper { overflow: hidden; width: 60px; height: 20px;
+                    font-family: Ahem; font-size: 20px; }",
+    );
+    h.doc.define_lynx_text("text");
+    h.doc.dom.register_fonts(FontBlob::from_static(AHEM));
+    let root = h.root();
+    let clipper = h.el(root, "text.clipper");
+    let text = h.doc.dom.create_text_node("hellohello", ());
+    h.doc.dom.append_child(clipper, text);
+    let paint = h.paint();
+    let _ = text;
+    let item = paint
+        .items()
+        .iter()
+        .find(|item| item.kind == PaintItemKind::TextRun { element: clipper })
+        .expect("the block paints one paragraph item");
+    let clip = &paint.clips()[item.clip.expect("text is clipped by its element")];
+    assert_eq!(clip.node, clipper);
+    assert_eq!(h.hit(30.0, 10.0), Some(clipper));
+    assert_eq!(h.hit(100.0, 10.0), Some(root));
+}
+
+/// The same for a block that is no stacking context: `overflow: clip` makes
+/// no scroll container, and the UA sheet gives every `text` exactly that, so
+/// an ordinary `<text>` paints its paragraph on the in-context path.
+#[test]
+fn text_runs_are_clipped_by_their_element_outside_a_stacking_context() {
+    let mut h = Harness::new(
+        "page { display: flex; position: relative; width: 800px; height: 600px; }
+         .clipper { overflow: clip; width: 60px; height: 20px;
+                    font-family: Ahem; font-size: 20px; }",
+    );
+    h.doc.define_lynx_text("text");
+    h.doc.dom.register_fonts(FontBlob::from_static(AHEM));
+    let root = h.root();
+    let clipper = h.el(root, "text.clipper");
+    let text = h.doc.dom.create_text_node("hellohello", ());
+    h.doc.dom.append_child(clipper, text);
+    let paint = h.paint();
+    let item = paint
+        .items()
+        .iter()
+        .find(|item| item.kind == PaintItemKind::TextRun { element: clipper })
+        .expect("the block paints one paragraph item");
+    let clip = &paint.clips()[item.clip.expect("text is clipped by its element")];
+    assert_eq!(clip.node, clipper);
+    assert_eq!(h.hit(30.0, 10.0), Some(clipper));
+    assert_eq!(h.hit(100.0, 10.0), Some(root));
+}
+
+#[test]
+fn shared_edges_resolve_by_paint_order_and_trailing_edges_miss() {
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 600px; }
+         .cell { display: flex; width: 100px; height: 100px; }",
+    );
+    let root = h.root();
+    let first = h.el(root, "view.cell");
+    let second = h.el(root, "view.cell");
+    assert_eq!(h.hit(100.0, 50.0), Some(second));
+    assert_eq!(h.hit(200.0, 50.0), Some(root));
+    assert_eq!(h.hit(400.0, 600.0), None);
+    let _ = first;
+}
+
+#[test]
+fn perspective_skips_non_direct_descendants() {
+    let mut h = Harness::new(
+        "page { display: flex; position: relative; width: 800px; height: 600px; }
+         .p { display: flex; position: absolute; left: 0; top: 0;
+              width: 200px; height: 200px; perspective: 100px; }
+         .mid { display: flex; position: absolute; left: 75px; top: 75px;
+                width: 50px; height: 50px; }
+         .deep { display: flex; position: absolute; left: 0; top: 0;
+                 width: 50px; height: 50px; transform: translateZ(50px); }",
+    );
+    let root = h.root();
+    let parent = h.el(root, "view.p");
+    let mid = h.el(parent, "view.mid");
+    let deep = h.el(mid, "view.deep");
+    let paint = h.paint();
+    let item = paint.items().iter().find(|item| item.node == deep).unwrap();
+    let top_left = item
+        .transform
+        .transform_point2d(Point2D::new(0.0, 0.0))
+        .unwrap();
+    let bottom_right = item
+        .transform
+        .transform_point2d(Point2D::new(50.0, 50.0))
+        .unwrap();
+    assert!((top_left.x - 75.0).abs() < 1e-3 && (top_left.y - 75.0).abs() < 1e-3);
+    assert!((bottom_right.x - 125.0).abs() < 1e-3 && (bottom_right.y - 125.0).abs() < 1e-3);
+    assert_eq!(h.hit(140.0, 140.0), Some(parent));
+}
+
+#[test]
+fn context_member_inside_a_pseudo_inside_a_negative_member_stays_atomic() {
+    let mut h = Harness::new(&format!(
+        "{PAGE} {}
+         .neg {{ z-index: -1; }}
+         .opaq {{ opacity: 0.5; }}
+         .trapped {{ z-index: 99; }}
+         .flow {{ display: flex; width: 100px; height: 100px; }}",
+        abs_box("")
+    ));
+    let root = h.root();
+    let neg = h.el(root, "view.box.neg");
+    let pseudo = h.el(neg, "view.box");
+    let opaq = h.el(pseudo, "view.box.opaq");
+    let trapped = h.el(opaq, "view.box.trapped");
+    let flow = h.el(root, "view.flow");
+    assert_eq!(
+        h.element_order(),
+        vec![root, neg, pseudo, opaq, trapped, flow]
+    );
+    assert_eq!(h.hit(50.0, 50.0), Some(flow));
+}
+
+#[test]
+fn display_contents_paints_no_own_box() {
+    let mut h = Harness::new(&format!(
+        "{PAGE} {} .contents {{ display: contents; }}",
+        abs_box("")
+    ));
+    let root = h.root();
+    let contents = h.el(root, "view.contents");
+    let paint = h.paint();
+    assert!(
+        paint.items().iter().all(|item| item.node != contents),
+        "a display:contents element generates no box and paints nothing",
+    );
+    assert_eq!(h.hit(50.0, 50.0), Some(root));
+}
+
+#[test]
+fn contents_children_paint_and_hit_in_the_outer_context() {
+    let mut h = Harness::new(&format!(
+        "{PAGE} {} .wrap {{ display: contents; }}",
+        abs_box("")
+    ));
+    let root = h.root();
+    let wrap = h.el(root, "view.wrap");
+    let child = h.el(wrap, "view.box");
+    let paint = h.paint();
+    assert!(
+        paint.items().iter().all(|item| item.node != wrap),
+        "the contents element still paints no own box",
+    );
+    assert!(paint.items().iter().any(|item| item.node == child));
+    assert_eq!(h.hit(50.0, 50.0), Some(child));
+}
+
+#[test]
+fn contents_elements_never_form_stacking_contexts() {
+    let mut h = Harness::new(&format!(
+        "{PAGE} {}
+         .wrap {{ display: contents; opacity: 0.5; z-index: 10; }}
+         .hi {{ z-index: 5; }} .lo {{ z-index: 1; }}",
+        abs_box("")
+    ));
+    let root = h.root();
+    let wrap = h.el(root, "view.wrap");
+    let hi = h.el(wrap, "view.box.hi");
+    let lo = h.el(root, "view.box.lo");
+    assert_eq!(h.element_order(), vec![root, lo, hi]);
+    assert_eq!(h.hit(50.0, 50.0), Some(hi));
+    let _ = wrap;
+}
+
+#[test]
+fn visibility_and_pointer_events_inherit_through_contents() {
+    let mut h = Harness::new(&format!(
+        "{PAGE} {}
+         .hidden-wrap {{ display: contents; visibility: hidden; }}
+         .shown {{ visibility: visible; width: 50px; height: 50px; }}",
+        abs_box("")
+    ));
+    let root = h.root();
+    let wrap = h.el(root, "view.hidden-wrap");
+    let ghost = h.el(wrap, "view.box");
+    let shown = h.el(ghost, "view.shown");
+    assert_eq!(h.hit(25.0, 25.0), Some(shown));
+    assert_eq!(h.hit(75.0, 75.0), Some(root));
+
+    let mut h2 = Harness::new(&format!(
+        "{PAGE} {}
+         .ghost-wrap {{ display: contents; pointer-events: none; }}
+         .solid {{ pointer-events: auto; width: 50px; height: 50px; }}",
+        abs_box("")
+    ));
+    let root2 = h2.root();
+    let under = h2.el(root2, "view.box");
+    let wrap2 = h2.el(root2, "view.ghost-wrap");
+    let through = h2.el(wrap2, "view.box");
+    let solid = h2.el(through, "view.solid");
+    assert_eq!(h2.hit(25.0, 25.0), Some(solid));
+    assert_eq!(h2.hit(75.0, 75.0), Some(under));
+}
+
+#[test]
+fn text_in_contents_hits_the_contents_element() {
+    let mut h = Harness::new(
+        "page { position: relative; width: 800px; height: 600px;
+                font-family: Ahem; font-size: 20px; }
+         .wrap { display: contents; }",
+    );
+    // The page itself is the paragraph: the definition upgrades the document
+    // element.
+    h.doc.define_lynx_text("page");
+    h.doc.dom.register_fonts(FontBlob::from_static(AHEM));
+    let root = h.root();
+    let wrap = h.el(root, "view.wrap");
+    let text = h.doc.dom.create_text_node("hello", ());
+    h.doc.dom.append_child(wrap, text);
+    let paint = h.paint();
+    let _ = (text, wrap);
+    // A `display: contents` element generates no box, so it cannot establish
+    // a paragraph: the text is content of the block above it, and the walk
+    // flattens straight through.
+    assert!(
+        paint
+            .items()
+            .iter()
+            .any(|item| item.kind == PaintItemKind::TextRun { element: root }),
+        "the nearest establishing element owns the paragraph"
+    );
+    assert_eq!(h.hit(10.0, 10.0), Some(root));
+}
+
+#[test]
+fn transform_and_overflow_are_inert_on_contents_elements() {
+    let mut h = Harness::new(
+        "page { display: flex; position: relative; width: 800px; height: 600px; }
+         .wrap { display: contents; transform: translate(100px, 0px);
+                 overflow: hidden; }
+         .big { display: flex; width: 200px; height: 200px; }",
+    );
+    let root = h.root();
+    let wrap = h.el(root, "view.wrap");
+    let big = h.el(wrap, "view.big");
+    let paint = h.paint();
+    let item = paint.items().iter().find(|item| item.node == big).unwrap();
+    let mapped = item
+        .transform
+        .transform_point2d(Point2D::new(0.0, 0.0))
+        .unwrap();
+    assert_eq!((mapped.x, mapped.y), (0.0, 0.0));
+    assert_eq!(item.clip, None);
+    assert_eq!(h.hit(150.0, 150.0), Some(big));
+    let _ = wrap;
+}
+
+#[test]
+fn fixed_child_of_contents_escapes_clips() {
+    let mut h = Harness::new(
+        "page { display: flex; position: relative; width: 800px; height: 600px; }
+         .clipper { display: flex; overflow: hidden; width: 50px; height: 50px; }
+         .wrap { display: contents; }
+         .fix { display: flex; position: fixed; left: 100px; top: 100px;
+                width: 50px; height: 50px; }",
+    );
+    let root = h.root();
+    let clipper = h.el(root, "view.clipper");
+    let wrap = h.el(clipper, "view.wrap");
+    let fix = h.el(wrap, "view.fix");
+    let paint = h.paint();
+    let item = paint.items().iter().find(|item| item.node == fix).unwrap();
+    assert_eq!(item.clip, None);
+    assert_eq!(h.hit(110.0, 110.0), Some(fix));
+    let _ = clipper;
+}
+
+#[test]
+fn perspective_applies_through_contents_wrappers() {
+    let mut h = Harness::new(
+        "page { display: flex; position: relative; width: 800px; height: 600px; }
+         .p { display: flex; position: absolute; left: 0; top: 0;
+              width: 200px; height: 200px; perspective: 100px; }
+         .wrap { display: contents; }
+         .c { display: flex; position: absolute; left: 75px; top: 75px;
+              width: 50px; height: 50px; transform: translateZ(50px); }",
+    );
+    let root = h.root();
+    let parent = h.el(root, "view.p");
+    let wrap = h.el(parent, "view.wrap");
+    let c = h.el(wrap, "view.c");
+    let paint = h.paint();
+    let item = paint.items().iter().find(|item| item.node == c).unwrap();
+    let top_left = item
+        .transform
+        .transform_point2d(Point2D::new(0.0, 0.0))
+        .unwrap();
+    assert!((top_left.x - 50.0).abs() < 1e-3 && (top_left.y - 50.0).abs() < 1e-3);
+    assert_eq!(h.hit(140.0, 140.0), Some(c));
+    let _ = (parent, wrap);
+}
+
+#[test]
+fn absolute_child_of_contents_is_clipped_by_its_containing_block() {
+    let mut h = Harness::new(
+        "page { display: flex; position: relative; width: 800px; height: 600px; }
+         .clipper { display: flex; position: relative; overflow: hidden;
+                    width: 50px; height: 50px; }
+         .wrap { display: contents; }
+         .abs { display: flex; position: absolute; left: 100px; top: 100px;
+                width: 50px; height: 50px; }",
+    );
+    let root = h.root();
+    let clipper = h.el(root, "view.clipper");
+    let wrap = h.el(clipper, "view.wrap");
+    let abs = h.el(wrap, "view.abs");
+    let paint = h.paint();
+    let item = paint.items().iter().find(|item| item.node == abs).unwrap();
+    let clip = &paint.clips()[item.clip.expect("clipped by the containing block")];
+    assert_eq!(clip.node, clipper);
+    assert_eq!(h.hit(110.0, 110.0), Some(root));
+    let _ = wrap;
+}
+
+#[test]
+fn contents_order_interleave_paints_and_survives_hidden_siblings() {
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 100px; }
+         .wrap { display: contents; }
+         .cell { display: flex; width: 100px; height: 100px; }
+         .gone { display: none; }
+         .o0 { order: 0; } .o1 { order: 1; } .o2 { order: 2; } .o3 { order: 3; }",
+    );
+    let root = h.root();
+    let second = h.el(root, "view.cell.o2");
+    let wrap = h.el(root, "view.wrap");
+    let inner_first = h.el(wrap, "view.cell.o1");
+    let hidden = h.el(wrap, "view.cell.gone");
+    let inner_last = h.el(wrap, "view.cell.o3");
+    let leading = h.el(root, "view.cell.o0");
+    assert_eq!(
+        h.element_order(),
+        vec![root, leading, inner_first, second, inner_last]
+    );
+    let _ = hidden;
+}
+
+/// A removal drops its own node out of the retained frame's answers and
+/// leaves the rest of the frame answering. The replacement built on the freed
+/// node's storage is not in that frame at all, so it only appears once the
+/// next render puts it there — it can never be mistaken for its predecessor,
+/// because it carries a different id.
+#[test]
+fn a_removal_drops_only_its_own_node_from_the_retained_frame() {
+    let mut h = Harness::new(&format!("{PAGE} {}", abs_box("")));
+    let root = h.root();
+    let removed = h.el(root, "view.box");
+    h.doc.dom.render();
+    assert_eq!(
+        h.doc.dom.elements_from_point(Point2D::new(50.0, 50.0)),
+        vec![removed, root]
+    );
+
+    h.doc.dom.drop_subtree(removed);
+    let replacement = h.el(root, "view.box");
+    assert_ne!(replacement, removed, "the removed id is retired");
+    assert_eq!(
+        h.doc.dom.elements_from_point(Point2D::new(50.0, 50.0)),
+        vec![root],
+        "the removed node is skipped while every other item still answers"
+    );
+
+    h.doc.dom.render();
+    assert_eq!(
+        h.doc.dom.elements_from_point(Point2D::new(50.0, 50.0)),
+        vec![replacement, root]
+    );
+}
+
+#[test]
+fn hit_queries_read_the_rendered_frame_without_rebuilding_it() {
+    let mut h = Harness::new(&format!("{PAGE} {}", abs_box("")));
+    let root = h.root();
+    let target = h.el(root, "view.box");
+    h.doc.dom.render();
+    assert_eq!(
+        h.doc.dom.elements_from_point(Point2D::new(50.0, 50.0)),
+        vec![target, root]
+    );
+    h.doc.dom.set_inline_style(target, "left: 200px");
+    assert_eq!(
+        h.doc.dom.elements_from_point(Point2D::new(50.0, 50.0)),
+        vec![target, root]
+    );
+    h.doc.dom.render();
+    assert_eq!(
+        h.doc.dom.elements_from_point(Point2D::new(50.0, 50.0)),
+        vec![root]
+    );
+    assert_eq!(
+        h.doc.dom.elements_from_point(Point2D::new(250.0, 50.0)),
+        vec![target, root]
+    );
+}
+
+#[test]
+fn a_document_that_never_rendered_answers_hit_queries_with_nothing() {
+    let mut h = Harness::new(&format!("{PAGE} {}", abs_box("")));
+    let root = h.root();
+    let boxed = h.el(root, "view.box");
+    h.doc.dom.layout();
+    let _ = boxed;
+    assert_eq!(
+        h.doc.dom.elements_from_point(Point2D::new(50.0, 50.0)),
+        Vec::new()
+    );
+}
+
+#[test]
+fn elements_from_points_answers_each_point_from_one_frame() {
+    let mut h = Harness::new(&format!("{PAGE} {}", abs_box("")));
+    let root = h.root();
+    let target = h.el(root, "view.box");
+    h.doc.dom.render();
+    let points = [
+        Point2D::new(50.0, 50.0),
+        Point2D::new(250.0, 50.0),
+        Point2D::new(10_000.0, 50.0),
+    ];
+    let batch = h.doc.dom.elements_from_points(&points);
+    let singles: Vec<_> = points
+        .iter()
+        .map(|point| h.doc.dom.elements_from_point(*point))
+        .collect();
+    assert_eq!(batch, singles);
+    assert_eq!(batch[0], vec![target, root]);
+    assert_eq!(batch[1], vec![root]);
+    assert_eq!(batch[2], Vec::new());
+}
+
+#[test]
+fn offset_path_translates_the_anchor_along_the_path() {
+    let mut h = Harness::new(&format!(
+        "{PAGE} {}",
+        abs_box(
+            r#".mover { offset-path: path("M 0 0 L 100 0"); offset-distance: 100%; offset-rotate: 0deg; }"#
+        )
+    ));
+    let root = h.root();
+    let mover = h.el(root, "view.box.mover");
+    let paint = h.paint();
+    let item = paint
+        .items()
+        .iter()
+        .find(|item| item.node == mover)
+        .unwrap();
+    let mapped = item
+        .transform
+        .transform_point2d(Point2D::new(0.0, 0.0))
+        .unwrap();
+    assert!((mapped.x - 50.0).abs() < 1e-3 && (mapped.y - -50.0).abs() < 1e-3);
+    assert_eq!(h.hit(100.0, 25.0), Some(mover));
+    assert_eq!(h.hit(25.0, 75.0), Some(root));
+}
+
+#[test]
+fn offset_rotate_auto_follows_the_path_direction() {
+    let mut h = Harness::new(&format!(
+        "{PAGE} {}",
+        abs_box(r#".mover { offset-path: path("M 0 0 L 0 100"); offset-distance: 50%; }"#)
+    ));
+    let root = h.root();
+    let mover = h.el(root, "view.box.mover");
+    let paint = h.paint();
+    let item = paint
+        .items()
+        .iter()
+        .find(|item| item.node == mover)
+        .unwrap();
+    let corner = item
+        .transform
+        .transform_point2d(Point2D::new(0.0, 0.0))
+        .unwrap();
+    assert!((corner.x - 50.0).abs() < 1e-3 && corner.y.abs() < 1e-3);
+    let far = item
+        .transform
+        .transform_point2d(Point2D::new(100.0, 0.0))
+        .unwrap();
+    assert!((far.x - 50.0).abs() < 1e-3 && (far.y - 100.0).abs() < 1e-3);
+    let _ = root;
+}
+
+#[test]
+fn offset_rotate_fixed_angles_ignore_the_path_direction() {
+    let mut h = Harness::new(&format!(
+        "{PAGE} {}",
+        abs_box(
+            r#".mover { offset-path: path("M 0 0 L 100 0"); offset-distance: 0; offset-rotate: 90deg; }"#
+        )
+    ));
+    let root = h.root();
+    let mover = h.el(root, "view.box.mover");
+    let paint = h.paint();
+    let item = paint
+        .items()
+        .iter()
+        .find(|item| item.node == mover)
+        .unwrap();
+    let mapped = item
+        .transform
+        .transform_point2d(Point2D::new(0.0, 0.0))
+        .unwrap();
+    assert!(
+        (mapped.x - 50.0).abs() < 1e-3 && (mapped.y - -50.0).abs() < 1e-3,
+        "mapped = ({}, {})",
+        mapped.x,
+        mapped.y,
+    );
+    let _ = root;
+}
+
+#[test]
+fn offset_rotate_reverse_is_not_in_the_lynx_grammar() {
+    let mut h = Harness::new(&format!(
+        "{PAGE} {}",
+        abs_box(
+            r#".mover { offset-path: path("M 0 0 L 0 100"); offset-distance: 50%; offset-rotate: reverse; }"#
+        )
+    ));
+    let root = h.root();
+    let mover = h.el(root, "view.box.mover");
+    let paint = h.paint();
+    let item = paint
+        .items()
+        .iter()
+        .find(|item| item.node == mover)
+        .unwrap();
+    let mapped = item
+        .transform
+        .transform_point2d(Point2D::new(0.0, 0.0))
+        .unwrap();
+    assert!(
+        (mapped.x - 50.0).abs() < 1e-3 && mapped.y.abs() < 1e-3,
+        "mapped = ({}, {})",
+        mapped.x,
+        mapped.y,
+    );
+    let _ = root;
+}
+
+#[test]
+fn closed_paths_wrap_and_open_paths_clamp_the_offset_distance() {
+    let mut h = Harness::new(&format!(
+        r#"{PAGE} {}
+         .wrap {{ offset-path: path("M 0 0 L 100 0 L 100 100 L 0 100 Z");
+                  offset-distance: 550px; offset-rotate: 0deg; }}
+         .clamp {{ offset-path: path("M 0 0 L 100 0"); offset-distance: 250px;
+                   offset-rotate: 0deg; }}"#,
+        abs_box("")
+    ));
+    let root = h.root();
+    let wrapping = h.el(root, "view.box.wrap");
+    let clamped = h.el(root, "view.box.clamp");
+    let paint = h.paint();
+    let item = paint
+        .items()
+        .iter()
+        .find(|item| item.node == wrapping)
+        .unwrap();
+    let mapped = item
+        .transform
+        .transform_point2d(Point2D::new(0.0, 0.0))
+        .unwrap();
+    assert!((mapped.x - 50.0).abs() < 1e-3 && mapped.y.abs() < 1e-3);
+    let item = paint
+        .items()
+        .iter()
+        .find(|item| item.node == clamped)
+        .unwrap();
+    let mapped = item
+        .transform
+        .transform_point2d(Point2D::new(0.0, 0.0))
+        .unwrap();
+    assert!((mapped.x - 50.0).abs() < 1e-3 && (mapped.y - -50.0).abs() < 1e-3);
+}
+
+#[test]
+fn circle_paths_start_rightmost_and_run_clockwise() {
+    let mut h = Harness::new(&format!(
+        "{PAGE} {}",
+        abs_box(".mover { offset-path: circle(50px); offset-distance: 25%; offset-rotate: 0deg; }")
+    ));
+    let root = h.root();
+    let mover = h.el(root, "view.box.mover");
+    let paint = h.paint();
+    let item = paint
+        .items()
+        .iter()
+        .find(|item| item.node == mover)
+        .unwrap();
+    let mapped = item
+        .transform
+        .transform_point2d(Point2D::new(0.0, 0.0))
+        .unwrap();
+    assert!(mapped.x.abs() < 0.5 && (mapped.y - 50.0).abs() < 0.5);
+    let _ = root;
+}
+
+#[test]
+fn inset_paths_start_at_the_top_edge_and_run_clockwise() {
+    let mut h = Harness::new(&format!(
+        "{PAGE} {}
+         .start {{ offset-path: inset(10px); offset-distance: 0; offset-rotate: 0deg; }}
+         .quarter {{ offset-path: inset(10px); offset-distance: 25%; offset-rotate: 0deg; }}",
+        abs_box("")
+    ));
+    let root = h.root();
+    let start = h.el(root, "view.box.start");
+    let quarter = h.el(root, "view.box.quarter");
+    let paint = h.paint();
+    let item = paint
+        .items()
+        .iter()
+        .find(|item| item.node == start)
+        .unwrap();
+    let mapped = item
+        .transform
+        .transform_point2d(Point2D::new(0.0, 0.0))
+        .unwrap();
+    assert!((mapped.x - -40.0).abs() < 1e-3 && (mapped.y - -40.0).abs() < 1e-3);
+    let item = paint
+        .items()
+        .iter()
+        .find(|item| item.node == quarter)
+        .unwrap();
+    let mapped = item
+        .transform
+        .transform_point2d(Point2D::new(0.0, 0.0))
+        .unwrap();
+    assert!((mapped.x - 40.0).abs() < 1e-3 && (mapped.y - -40.0).abs() < 1e-3);
+}
+
+#[test]
+fn svg_arc_commands_flatten_within_tolerance() {
+    let mut h = Harness::new(&format!(
+        "{PAGE} {}",
+        abs_box(
+            r#".mover { offset-path: path("M 0 50 A 50 50 0 0 1 100 50"); offset-distance: 50%; offset-rotate: 0deg; }"#
+        )
+    ));
+    let root = h.root();
+    let mover = h.el(root, "view.box.mover");
+    let paint = h.paint();
+    let item = paint
+        .items()
+        .iter()
+        .find(|item| item.node == mover)
+        .unwrap();
+    let mapped = item
+        .transform
+        .transform_point2d(Point2D::new(0.0, 0.0))
+        .unwrap();
+    assert!(mapped.x.abs() < 0.5 && (mapped.y - -50.0).abs() < 0.5);
+    let _ = root;
+}
+
+fn item_index(paint: &PaintOrder, node: NodeId) -> usize {
+    paint
+        .items()
+        .iter()
+        .position(|item| item.node == node && item.kind == PaintItemKind::ElementBox)
+        .expect("node must have an element-box item")
+}
+
+#[test]
+fn group_effect_contexts_get_render_layers() {
+    for trigger in [
+        "opacity: 0.5;",
+        "filter: grayscale(1);",
+        // filter-effects-2 §2.1: the filtered backdrop is painted inside the
+        // element's own effect layer, so `backdrop-filter` needs a group.
+        "backdrop-filter: blur(4px);",
+        "clip-path: circle(40px);",
+    ] {
+        let mut h = Harness::new(&format!(
+            "{PAGE} {}",
+            abs_box(&format!(".fade {{ {trigger} }} .over {{ z-index: 1; }}"))
+        ));
+        let root = h.root();
+        let fade = h.el(root, "view.box.fade");
+        let inner = h.el(fade, "view.box");
+        let over = h.el(root, "view.box.over");
+        let paint = h.paint();
+
+        let layers = paint.layers();
+        assert_eq!(layers.len(), 1, "trigger `{trigger}` must form one layer");
+        let layer = &layers[0];
+        assert_eq!(layer.node, fade);
+        assert_eq!(layer.parent, None);
+        assert_eq!(layer.items.start, item_index(&paint, fade));
+        assert!(layer.items.contains(&item_index(&paint, inner)));
+        assert!(!layer.items.contains(&item_index(&paint, over)));
+        assert_eq!(layer.items.end, layer.items.start + 2);
+    }
+}
+
+#[test]
+fn plain_stacking_contexts_get_no_layer() {
+    let mut h = Harness::new(&format!(
+        "{PAGE} {}",
+        abs_box(".ctx { z-index: 3; transform: translate(5px, 0px); }")
+    ));
+    let root = h.root();
+    let ctx = h.el(root, "view.box.ctx");
+    let _inner = h.el(ctx, "view.box");
+    assert!(h.paint().layers().is_empty());
+}
+
+#[test]
+fn nested_group_effects_nest_layers() {
+    let mut h = Harness::new(&format!(
+        "{PAGE} {}",
+        abs_box(".outer { filter: grayscale(1); } .inner { opacity: 0.5; }")
+    ));
+    let root = h.root();
+    let outer = h.el(root, "view.box.outer");
+    let inner = h.el(outer, "view.box.inner");
+    let paint = h.paint();
+
+    let layers = paint.layers();
+    assert_eq!(layers.len(), 2);
+    assert_eq!(layers[0].node, outer);
+    assert_eq!(layers[0].parent, None);
+    assert_eq!(layers[1].node, inner);
+    assert_eq!(layers[1].parent, Some(0));
+    assert!(layers[0].items.start <= layers[1].items.start);
+    assert!(layers[1].items.end <= layers[0].items.end);
+    assert_eq!(layers[1].items.start, item_index(&paint, inner));
+}
+
+#[test]
+fn hidden_group_root_still_layers_visible_content() {
+    let mut h = Harness::new(&format!(
+        "{PAGE} {}",
+        abs_box(
+            ".fade { opacity: 0.5; visibility: hidden; left: 20px; top: 10px;
+                     border-radius: 8px; }
+             .shown { visibility: visible; }"
+        )
+    ));
+    let root = h.root();
+    let fade = h.el(root, "view.box.fade");
+    let shown = h.el(fade, "view.box.shown");
+    let paint = h.paint();
+
+    assert!(paint.items().iter().all(|item| item.node != fade));
+    let layers = paint.layers();
+    assert_eq!(layers.len(), 1);
+    let layer = &layers[0];
+    assert_eq!(layer.node, fade);
+    assert_eq!(layer.items.clone().count(), 1);
+    assert_eq!(layer.items.start, item_index(&paint, shown));
+    assert_eq!(layer.size.width, 100.0);
+    assert_eq!(layer.size.height, 100.0);
+    assert_eq!(layer.radii.top_left.width, 8.0);
+    assert_eq!(layer.radii.bottom_right.height, 8.0);
+    let origin = layer
+        .transform
+        .transform_point2d(Point2D::new(0.0, 0.0))
+        .unwrap();
+    assert_eq!((origin.x, origin.y), (20.0, 10.0));
+}
+
+#[test]
+fn empty_groups_are_dropped() {
+    let mut h = Harness::new(&format!(
+        "{PAGE} {}",
+        abs_box(".fade { opacity: 0.5; visibility: hidden; }")
+    ));
+    let root = h.root();
+    let fade = h.el(root, "view.box.fade");
+    let _hidden_child = h.el(fade, "view.box");
+    assert!(h.paint().layers().is_empty());
+}
+
+#[test]
+fn leaf_group_contexts_close_their_layer() {
+    let mut h = Harness::new(&format!(
+        "{PAGE} {}",
+        abs_box(".fade { opacity: 0.5; } .fade > * { display: none; }")
+    ));
+    let root = h.root();
+    let fade = h.el(root, "view.box.fade");
+    let over = h.el(root, "view.box.over");
+    let paint = h.paint();
+    let layers = paint.layers();
+    assert_eq!(layers.len(), 1);
+    assert_eq!(layers[0].items.clone().count(), 1);
+    assert_eq!(layers[0].items.start, item_index(&paint, fade));
+    assert!(!layers[0].items.contains(&item_index(&paint, over)));
+}
+
+// ---------------------------------------------------------------------------
+// Buffer reuse
+//
+// The builder fills buffers reclaimed from the frame the painter last retired
+// and a working set carried across frames, so the second build of a document
+// runs against warm storage where the first ran against empty storage. These
+// pin the property that makes that admissible: the storage a build starts from
+// is not an input to what it produces.
+// ---------------------------------------------------------------------------
+
+/// Every field of a `PaintOrder` an observer could distinguish, with floats
+/// compared by bit pattern so a path that turned `-0.0` into `0.0` would fail.
+fn fingerprint(paint: &PaintOrder) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::new();
+    for item in paint.items() {
+        let _ = writeln!(
+            out,
+            "item {:?} {:?} clip={:?} hit={} size={:?} radii={:?} m={:?}",
+            item.node,
+            item.kind,
+            item.clip,
+            item.hit_testable,
+            (item.size.width.to_bits(), item.size.height.to_bits()),
+            radii_bits(&item.radii),
+            item.transform.to_array().map(f32::to_bits),
+        );
+    }
+    for clip in paint.clips() {
+        let _ = writeln!(
+            out,
+            "clip parent={:?} rect={:?} radii={:?} m={:?}",
+            clip.parent,
+            (
+                clip.rect.origin.x.to_bits(),
+                clip.rect.origin.y.to_bits(),
+                clip.rect.size.width.to_bits(),
+                clip.rect.size.height.to_bits(),
+            ),
+            radii_bits(&clip.radii),
+            clip.transform.to_array().map(f32::to_bits),
+        );
+    }
+    for layer in paint.layers() {
+        let _ = writeln!(
+            out,
+            "layer {:?} parent={:?} items={:?} size={:?} radii={:?} m={:?}",
+            layer.node,
+            layer.parent,
+            layer.items,
+            (layer.size.width.to_bits(), layer.size.height.to_bits()),
+            radii_bits(&layer.radii),
+            layer.transform.to_array().map(f32::to_bits),
+        );
+    }
+    out
+}
+
+fn radii_bits(radii: &crate::visual::CornerRadii) -> [u32; 8] {
+    [
+        radii.top_left.width.to_bits(),
+        radii.top_left.height.to_bits(),
+        radii.top_right.width.to_bits(),
+        radii.top_right.height.to_bits(),
+        radii.bottom_right.width.to_bits(),
+        radii.bottom_right.height.to_bits(),
+        radii.bottom_left.width.to_bits(),
+        radii.bottom_left.height.to_bits(),
+    ]
+}
+
+/// Every shape the build's buffer discipline has to survive: nested stacking
+/// contexts, a group effect, negative and positive stack levels, an escaping
+/// absolute inside a scrolled clipper, nested pseudo-contexts, reordered
+/// siblings, and a `display: none` sibling among them.
+fn reuse_harness() -> (Harness, NodeId) {
+    let mut h = Harness::new(&format!(
+        "{PAGE}
+         .box {{ display: flex; position: absolute; left: 4px; top: 6px;
+                 width: 100px; height: 100px; }}
+         .rel {{ position: relative; }}
+         .fade {{ opacity: 0.5; }}
+         .under {{ z-index: -1; }}
+         .over {{ z-index: 3; }}
+         .clip {{ overflow: scroll; width: 40px; height: 40px; }}
+         .tall {{ display: flex; flex-shrink: 0; width: 200px; height: 400px; }}
+         .flow {{ display: flex; width: 30px; height: 12px; }}
+         .first {{ order: -1; }}
+         .gone {{ display: none; }}"
+    ));
+    let root = h.root();
+    let scroller = h.el(root, "view.box.rel.clip");
+    h.el(scroller, "view.tall");
+    let escaping = h.el(scroller, "view.box");
+    h.el(escaping, "view.flow");
+    let fade = h.el(root, "view.box.fade");
+    h.el(fade, "view.flow");
+    h.el(fade, "view.flow.first");
+    h.el(fade, "view.flow.gone");
+    let nested = h.el(fade, "view.box.rel");
+    h.el(nested, "view.box.rel");
+    h.el(root, "view.box.under");
+    h.el(root, "view.box.over");
+    // `scroll_to` clamps against the last committed layout, so a fixture that
+    // scrolls before laying out silently scrolls nothing.
+    h.doc.dom.layout();
+    (h, scroller)
+}
+
+/// Scrolls the fixture's container and fails if the offset did not move,
+/// which would quietly turn every reuse round into the same build.
+fn scroll_to(document: &mut crate::Document<()>, scroller: NodeId, offset: f32) {
+    let applied = document.scroll_to(scroller, crate::Vector2D::new(0.0, offset));
+    assert_eq!(
+        applied.y, offset,
+        "the fixture's container must admit the offset the test asked for",
+    );
+}
+
+/// Invalidates the retained frame with a mutation that leaves every table's
+/// size unchanged, so a reuse round rebuilds without growing anything.
+///
+/// A scroll no longer serves: a composable scroll deliberately invalidates
+/// nothing. A background flip does — color reaches only the encode, never
+/// the tables, so a round at the same state fingerprints identically.
+fn nudge(document: &mut crate::Document<()>, scroller: NodeId, alternate: bool) {
+    let color = if alternate { "navy" } else { "teal" };
+    document.set_inline_style(scroller, &format!("background-color: {color}"));
+    assert!(
+        document.needs_render(),
+        "the nudge must invalidate the frame"
+    );
+}
+
+/// The fingerprint of the frame a document currently retains.
+fn retained_fingerprint(document: &crate::Document<()>) -> String {
+    let painter = document.painter.borrow();
+    fingerprint(
+        &painter
+            .frame()
+            .expect("a rendered document retains its frame")
+            .order,
+    )
+}
+
+#[test]
+fn a_warm_build_produces_the_paint_order_a_cold_build_produces() {
+    let (mut h, scroller) = reuse_harness();
+
+    // Only `Painter::paint` retires a frame into the spare buffers, so the
+    // rounds below render rather than build: a loop of bare builds would
+    // exercise the working scratch and never the frame tables, which are
+    // the buffers carrying the node ids, clip links and layer ranges this
+    // fingerprint checks. A composable scroll invalidates nothing any more,
+    // so the rounds alternate a background nudge instead.
+    nudge(&mut h.doc.dom, scroller, false);
+    h.doc.dom.render();
+    let cold = retained_fingerprint(&h.doc.dom);
+    assert!(cold.contains("layer"), "the fixture must exercise a group");
+    assert!(cold.contains("clip"), "the fixture must exercise a clip");
+    assert_eq!(
+        h.doc.dom.paint_storage_capacities()[7],
+        0,
+        "the first build has nothing to recycle",
+    );
+
+    for round in 1..4 {
+        nudge(&mut h.doc.dom, scroller, true);
+        h.doc.dom.render();
+        assert!(
+            h.doc.dom.paint_storage_capacities()[7] > 0,
+            "round {round} must have a retired frame to build into",
+        );
+        nudge(&mut h.doc.dom, scroller, false);
+        h.doc.dom.render();
+        assert_eq!(
+            cold,
+            retained_fingerprint(&h.doc.dom),
+            "round {round} diverged",
+        );
+    }
+}
+
+#[test]
+fn a_frame_held_elsewhere_is_reclaimed_one_retirement_late() {
+    let (mut h, scroller) = reuse_harness();
+    h.doc.dom.render();
+    // A hub-shaped holder: always holds the latest committed frame, releasing
+    // the previous one only when the next commit replaces it — exactly the
+    // publish flow, under which immediate reclamation can never succeed.
+    let mut published = h.doc.dom.committed_frame();
+    for round in [true, false, true, false] {
+        nudge(&mut h.doc.dom, scroller, round);
+        h.doc.dom.render();
+        published = h.doc.dom.committed_frame();
+    }
+    let _ = published;
+    assert!(
+        h.doc.dom.paint_storage_capacities()[7] > 0,
+        "a frame retired while published must still come back as spare storage",
+    );
+}
+
+#[test]
+fn a_warm_frame_encodes_the_scene_a_cold_frame_encodes() {
+    let (mut h, scroller) = reuse_harness();
+    scroll_to(&mut h.doc.dom, scroller, 37.0);
+    nudge(&mut h.doc.dom, scroller, false);
+    h.doc.dom.render();
+    let cold = h.doc.dom.scene(&crate::NoImages).clone();
+
+    // A repaint of an unchanged document is refused, so each round flips the
+    // nudge and flips it back. The second render of each pair sees the
+    // recycled buffers and must land on the same composed encoding as the
+    // first — at the same scrolled offset, which stays applied throughout.
+    for _ in 0..3 {
+        nudge(&mut h.doc.dom, scroller, true);
+        h.doc.dom.render();
+        nudge(&mut h.doc.dom, scroller, false);
+        h.doc.dom.render();
+    }
+    crate::paint::equivalence::assert_scenes_identical(&cold, &h.doc.dom.scene(&crate::NoImages));
+}
+
+#[test]
+fn the_builder_stops_growing_its_buffers_once_the_page_shape_settles() {
+    let (mut h, scroller) = reuse_harness();
+    h.doc.dom.render();
+    for round in [true, false, true, false] {
+        nudge(&mut h.doc.dom, scroller, round);
+        h.doc.dom.render();
+    }
+    let settled = h.doc.dom.paint_storage_capacities();
+
+    for round in [true, false, true, false] {
+        nudge(&mut h.doc.dom, scroller, round);
+        h.doc.dom.render();
+    }
+
+    assert_eq!(
+        settled,
+        h.doc.dom.paint_storage_capacities(),
+        "a settled page must reuse every buffer instead of growing a new one",
+    );
+    // Indices 4 and 11 are the retained and spare animation-slot tables, 5
+    // and 12 the `content-visibility: auto` ones and 6 and 13 the snap-point
+    // ones, which this fixture — animating nothing, skipping nothing and
+    // snapping nothing — never fills.
+    assert!(
+        settled
+            .iter()
+            .enumerate()
+            .all(|(index, &capacity)| capacity > 0 || matches!(index, 4 | 5 | 6 | 11 | 12 | 13)),
+        "the fixture must exercise every buffer at least once, got {settled:?}",
+    );
+    assert!(
+        settled.len() > 10,
+        "every pooled pseudo-context buffer is reported on its own, so a \
+         reallocation that moved capacity between two of them is visible",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Culling is invisible to hit testing
+//
+// The painter discards items that cannot put ink where the scene is looked at.
+// That decision lives in the painter's scratch, never in the retained frame,
+// which is what keeps a programmatic hit outside the viewport — and an event
+// arriving between a scroll and its repaint — answering from the geometry the
+// frame was built with.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_box_outside_the_viewport_still_answers_hit_queries() {
+    let mut h = Harness::new(&format!(
+        "{PAGE} .box {{ display: flex; position: absolute; width: 100px; height: 100px; }}"
+    ));
+    let root = h.root();
+    let far = h.el(root, "view.box");
+    h.doc.set_inline(far, "left: -500px; top: 20px");
+    assert_eq!(h.hit(-450.0, 70.0), Some(far));
+}
+
+#[test]
+fn culling_does_not_change_the_retained_frame() {
+    let mut h = Harness::new(&format!(
+        "{PAGE} .box {{ display: flex; position: absolute; width: 100px; height: 100px; }}"
+    ));
+    let root = h.root();
+    for index in 0..6 {
+        let box_id = h.el(root, "view.box");
+        h.doc
+            .set_inline(box_id, &format!("left: 4000px; top: {}px", index * 120));
+    }
+    let built = h.paint().items().len();
+    h.doc.dom.render();
+    let retained = h
+        .doc
+        .dom
+        .painter
+        .borrow()
+        .frame()
+        .expect("a rendered document retains its frame")
+        .order
+        .items()
+        .len();
+    assert_eq!(
+        built, retained,
+        "the frame carries every item, painted or not"
+    );
+}
+
+/// A document whose root runs `animation`, with `extra` CSS alongside,
+/// advanced past the pending promotion so the animation is `Running` at the
+/// second commit — the state the exporter requires.
+fn animated_document(animation_css: &str) -> crate::Document<()> {
+    let mut document: crate::Document<()> =
+        crate::Document::new(crate::tree::document::tests::device(), "page", ());
+    document.add_stylesheet(animation_css, crate::StylesheetOrigin::Author);
+    document.render();
+    // The render's flush creates the animation, and the first tick is the
+    // frame it starts on: taking that tick at zero puts the animation's origin
+    // on the timeline's, which is what the sampled assertions below read
+    // against.
+    document.advance_animations(0.0);
+    let tick = document.advance_animations(0.25);
+    assert!(tick.needs_next_frame, "the fixture animation must be live");
+    document.render();
+    document
+}
+
+#[test]
+fn an_opacity_animation_exports_a_curve_and_frees_the_main_thread() {
+    let document = animated_document(
+        "page { width: 100px; height: 100px; background-color: red;
+                animation: fade 1s linear infinite; }
+         @keyframes fade { from { opacity: 1; } to { opacity: 0; } }",
+    );
+    let frame = document.committed_frame().expect("a frame is committed");
+    assert!(frame.animations_active());
+    assert!(
+        !frame.needs_main_ticks(),
+        "an exported curve animates without main-thread ticks"
+    );
+    assert!(frame.has_live_curves());
+    let slots = frame.animation_slots();
+    assert_eq!(slots.len(), 1);
+    let sampled = slots[0]
+        .sample(
+            Some(0.5),
+            &frame.committed_offsets(),
+            &mut AnimationValueMap::default(),
+        )
+        .alpha
+        .expect("the slot exports an opacity curve");
+    assert!(
+        (sampled - 0.5).abs() < 1e-4,
+        "halfway through the fade, opacity is 0.5, got {sampled}"
+    );
+    assert!(
+        !frame.animation_boundary_passed(1e6),
+        "an infinite animation never hands back to the main thread"
+    );
+}
+
+#[test]
+fn a_transform_animation_composes_and_hits_at_the_sampled_position() {
+    let mut document: crate::Document<()> =
+        crate::Document::new(crate::tree::document::tests::device(), "page", ());
+    document.add_stylesheet(
+        "page { width: 200px; height: 200px; }
+         .mover { position: absolute; left: 0; top: 0; width: 50px; height: 50px;
+                  background-color: blue; animation: slide 1s linear infinite; }
+         @keyframes slide { from { transform: translateX(0px); }
+                            to { transform: translateX(100px); } }",
+        crate::StylesheetOrigin::Author,
+    );
+    let page = document.document_element().id();
+    let mover = document.create_element("view", ());
+    document.set_attribute(mover, "class", "mover");
+    document.append_child(page, mover);
+    document.render();
+    // Starts the animation on the timeline's origin, as `animated_document`
+    // does — the sampled positions below are read against it.
+    document.advance_animations(0.0);
+    let tick = document.advance_animations(0.30);
+    assert!(tick.needs_next_frame, "the slide must be live");
+    document.render();
+
+    let frame = document.committed_frame().expect("a frame is committed");
+    assert!(
+        frame.has_live_curves(),
+        "the slide exports a transform curve"
+    );
+    assert!(!frame.needs_main_ticks());
+
+    // Sampled at 0.5s the element sits at x = 50; the frame was baked at
+    // the 0.30s commit (x = 30), so the hit must follow the sample, not
+    // the bake.
+    let sampled_hit = frame
+        .hit(crate::Point2D::new(70.0, 25.0), &|_| None, Some(0.5))
+        .expect("something is hit");
+    assert_eq!(
+        sampled_hit.node, mover,
+        "the sampled position is where it hits"
+    );
+    let vacated = frame
+        .hit(crate::Point2D::new(10.0, 25.0), &|_| None, Some(0.5))
+        .expect("the page is behind");
+    assert_eq!(vacated.node, page, "the vacated position falls through");
+    // At the commit instant the delta is the identity: the baked position.
+    let at_commit = frame
+        .hit(crate::Point2D::new(35.0, 25.0), &|_| None, Some(0.30))
+        .expect("something is hit");
+    assert_eq!(at_commit.node, mover);
+}
+
+#[test]
+fn an_inexportable_animation_keeps_main_thread_ticks() {
+    let document = animated_document(
+        "page { width: 100px; height: 100px; background-color: red;
+                animation: recolor 1s linear infinite; }
+         @keyframes recolor { from { background-color: red; } to { background-color: blue; } }",
+    );
+    let frame = document.committed_frame().expect("a frame is committed");
+    assert!(frame.animations_active());
+    assert!(
+        frame.needs_main_ticks(),
+        "a non-composite animation still ticks on the main thread"
+    );
+    assert!(!frame.has_live_curves());
+}
+
+/// An animated scroll container exports: its own clip and its content's
+/// scroll translation are nodes of the same space tree as its animation, so
+/// the delta composes around them.
+#[test]
+fn an_animated_scroll_container_exports_its_curve() {
+    let document = animated_document(
+        "page { width: 100px; height: 100px; overflow: scroll;
+                animation: fade 1s linear infinite; }
+         @keyframes fade { from { opacity: 1; } to { opacity: 0; } }",
+    );
+    let frame = document.committed_frame().expect("a frame is committed");
+    assert!(frame.has_live_curves(), "the fade exports a curve");
+    assert!(
+        !frame.needs_main_ticks(),
+        "and the main thread is free of it"
+    );
+}
+
+/// A page-sized wrapper running `animation`, with content `height` px tall
+/// overflowing it: over the budget, if at all, by `content_size` alone.
+fn tall_wrapper(height: u16, animation: &str) -> std::sync::Arc<crate::CommittedFrame> {
+    let mut h = Harness::new(&format!(
+        "page {{ display: flex; flex-direction: column; width: 800px; height: 600px;
+                 animation: {animation} 1s linear infinite; }}
+         .tall {{ display: flex; flex-shrink: 0; width: 800px; height: {height}px; }}
+         @keyframes slide {{ from {{ transform: translateY(0px); }}
+                             to {{ transform: translateY(-100px); }} }}
+         @keyframes fade {{ from {{ opacity: 1; }} to {{ opacity: 0.5; }} }}
+         @keyframes warp {{ from {{ transform: matrix(1, 0, 0, 1, 0, 0); }}
+                            to {{ transform: matrix(1, 0.1, 0, 1, 0, -100); }} }}"
+    ));
+    let root = h.root();
+    h.el(root, "view.tall");
+    let document = &mut h.doc.dom;
+    document.render();
+    document.advance_animations(0.0);
+    assert!(document.advance_animations(0.25).needs_next_frame);
+    document.commit()
+}
+
+#[test]
+fn a_transform_curve_over_the_extent_budget_is_not_exported() {
+    // 800 × 1400 is 2.3 viewports of 800 × 600; 800 × 2000 is 3.3.
+    let within = tall_wrapper(1400, "slide");
+    assert!(
+        within.has_exported_curves(),
+        "within the budget the slide exports"
+    );
+    let over = tall_wrapper(2000, "slide");
+    assert!(!over.has_exported_curves(), "over it the slide is refused");
+    assert!(over.needs_main_ticks(), "and ticks on the main thread");
+    // A matrix curve has no reach; the budget is all that bounds it.
+    assert!(tall_wrapper(1400, "warp").has_exported_curves());
+    assert!(!tall_wrapper(2000, "warp").has_exported_curves());
+}
+
+#[test]
+fn an_opacity_curve_is_exempt_from_the_extent_budget() {
+    let frame = tall_wrapper(2000, "fade");
+    assert!(
+        frame.has_exported_curves(),
+        "an opacity curve moves nothing"
+    );
+    assert!(frame.has_live_curves(), "and its group composes it");
+    assert!(!frame.needs_main_ticks());
+}
+
+/// Two animated elements, started on the timeline's origin and committed a
+/// quarter second in.
+fn two_animated(first: &str, second: &str) -> std::sync::Arc<crate::CommittedFrame> {
+    let mut h = Harness::new(&format!(
+        "page {{ display: flex; width: 800px; height: 600px; }}
+         .first {{ display: flex; width: 50px; height: 50px; background-color: red;
+                   animation: {first}; }}
+         .second {{ display: flex; width: 50px; height: 50px; background-color: red;
+                    animation: {second}; }}
+         @keyframes fade {{ from {{ opacity: 1; }} to {{ opacity: 0; }} }}
+         @keyframes fade2 {{ from {{ opacity: 0.5; }} to {{ opacity: 0.9; }} }}
+         @keyframes recolor {{ from {{ background-color: red; }}
+                               to {{ background-color: blue; }} }}"
+    ));
+    let root = h.root();
+    h.el(root, "view.first");
+    h.el(root, "view.second");
+    let document = &mut h.doc.dom;
+    document.render();
+    document.advance_animations(0.0);
+    assert!(document.advance_animations(0.25).needs_next_frame);
+    document.commit()
+}
+
+/// web-animations-1: an `opacity` or `transform` animation makes its element
+/// a stacking context — and an `opacity` one a group — for as long as it is
+/// current, whether or not its curve exports. A second animation on a
+/// non-composite property makes the exporter refuse; an anchored delay
+/// exports, with or without a backwards fill. The fade still reads 1 at the
+/// commit, so no committed style stacks the card. Paint order is the same in
+/// every case, so nothing reorders at the handover.
+#[test]
+fn an_animation_stacks_its_element_whether_or_not_it_exports() {
+    for (keyframes, grouped) in [("fade", true), ("slide", false)] {
+        let mut orders = Vec::new();
+        for (animation, exports) in [
+            (format!("{keyframes} 1s linear infinite"), true),
+            (
+                format!("{keyframes} 1s linear infinite, recolor 1s linear infinite"),
+                false,
+            ),
+            (format!("{keyframes} 1s linear 5s infinite"), true),
+            (format!("{keyframes} 1s linear 5s infinite both"), true),
+        ] {
+            let mut h = Harness::new(&format!(
+                "{PAGE}
+                 .card {{ display: flex; width: 200px; height: 200px; background-color: red;
+                          animation: {animation}; }}
+                 .under {{ display: flex; position: relative; z-index: -1;
+                           width: 50px; height: 50px; }}
+                 .flow {{ display: flex; width: 50px; height: 50px; }}
+                 @keyframes fade {{ 0%, 50% {{ opacity: 1; }} 100% {{ opacity: 0.5; }} }}
+                 @keyframes slide {{ from {{ transform: translateX(0px); }}
+                                     to {{ transform: translateX(10px); }} }}
+                 @keyframes recolor {{ from {{ background-color: red; }}
+                                       to {{ background-color: blue; }} }}"
+            ));
+            let root = h.root();
+            let card = h.el(root, "view.card");
+            let under = h.el(card, "view.under");
+            let flow = h.el(card, "view.flow");
+            let document = &mut h.doc.dom;
+            document.render();
+            document.advance_animations(0.0);
+            assert!(document.advance_animations(0.25).needs_next_frame);
+            let frame = h.paint();
+            let label = &animation;
+            assert_eq!(
+                frame.animations().len(),
+                usize::from(exports),
+                "{label}: export"
+            );
+            assert_eq!(
+                frame.layers().iter().any(|layer| layer.node == card),
+                grouped,
+                "{label}: group",
+            );
+            let order = h.element_order();
+            assert_eq!(
+                order,
+                vec![root, card, under, flow],
+                "{label}: stacking context"
+            );
+            orders.push(order);
+        }
+        assert!(orders.windows(2).all(|pair| pair[0] == pair[1]));
+    }
+}
+
+/// web-animations-1: a current transform animation makes its element the
+/// containing block of a fixed descendant during a delay too, where the
+/// committed transform is `none`. Layout places the box against the card,
+/// and paint and hit testing clip it with the card's `overflow`, so a box
+/// placed outside the card is hidden until the animation ends and it
+/// escapes to the viewport.
+#[test]
+fn a_delayed_transform_animation_clips_its_fixed_descendant() {
+    let mut h = Harness::new(&format!(
+        "{PAGE}
+         .card {{ display: flex; width: 100px; height: 100px; margin-left: 50px;
+                  margin-top: 40px; overflow: hidden; animation: slide 1s linear 1s; }}
+         .pinned {{ display: flex; position: fixed; left: 150px; top: 0;
+                    width: 20px; height: 20px; }}
+         @keyframes slide {{ from {{ transform: translateX(0px); }}
+                             to {{ transform: translateX(10px); }} }}"
+    ));
+    let root = h.root();
+    let card = h.el(root, "view.card");
+    let pinned = h.el(card, "view.pinned");
+    let document = &mut h.doc.dom;
+    document.render();
+    document.advance_animations(0.0);
+    document.advance_animations(0.5);
+    let style = document
+        .get(card)
+        .and_then(crate::Node::computed_style)
+        .expect("the card is styled");
+    assert!(
+        style.get_box().transform.0.is_empty(),
+        "the delay commits no transform"
+    );
+    assert_eq!(h.hit(205.0, 45.0), Some(root), "clipped by the card");
+    assert_eq!(h.hit(155.0, 5.0), Some(root), "not against the viewport");
+
+    h.doc.dom.advance_animations(2.5);
+    assert_eq!(h.hit(155.0, 5.0), Some(pinned), "escaped after the end");
+    assert_eq!(h.hit(205.0, 45.0), Some(root));
+}
+
+/// One element's exported fade does not free the main thread of another
+/// element's inexportable animation.
+#[test]
+fn an_exported_curve_beside_an_inexportable_animation_keeps_main_thread_ticks() {
+    let frame = two_animated("fade 1s linear infinite", "recolor 1s linear infinite");
+    assert_eq!(frame.animation_slots().len(), 1, "the fade exports");
+    assert!(frame.needs_main_ticks(), "the recolor still ticks");
+}
+
+/// A frame hands its animations back at the earliest curve end — not the
+/// latest, nor the first slot's — and at exactly that instant.
+#[test]
+fn the_earliest_curve_end_is_the_handback_instant() {
+    let frame = two_animated("fade 5s linear 1", "fade 0.5s linear 1");
+    let ends: Vec<f64> = frame
+        .animation_slots()
+        .iter()
+        .map(|slot| slot.curve.expires_at.expect("a finite curve ends"))
+        .collect();
+    let [long, short] = ends[..] else {
+        panic!("both fades export, got {ends:?}");
+    };
+    assert!(short < long && (short - 0.5).abs() < 1e-3, "{ends:?}");
+    assert!(!frame.animation_boundary_passed(short - 1e-6));
+    assert!(frame.animation_boundary_passed(short));
+}
+
+/// One element's curve hands back at its first animation's end: the
+/// earlier of two finite animations'.
+#[test]
+fn a_curve_hands_back_at_its_first_animations_end() {
+    let frame = two_animated("fade 2s linear 1, fade2 0.25s linear 2", "fade 1s linear 1");
+    assert_eq!(
+        frame.animation_slots()[0].curve.expires_at,
+        Some(0.5),
+        "the shorter animation's two iterations end first",
+    );
+    assert!(!frame.animation_boundary_passed(0.5 - 1e-6));
+    assert!(frame.animation_boundary_passed(0.5));
+}
+
+/// A fade of 2.5 iterations of 0.7 s anchored at 1.163 s, committed at
+/// 1.2 s, so its end is no binary fraction: the instant before the curve's
+/// end still samples the fade, as the main thread's tick there does, and the
+/// main thread's tick at the end finds it over.
+#[test]
+fn a_curve_ends_where_the_main_thread_finds_its_animation_over() {
+    let fade = |ticks: &[f64]| {
+        let mut h = Harness::new(&format!(
+            "{PAGE}
+             .card {{ display: flex; width: 50px; height: 50px; background-color: red;
+                      animation: fade 0.7s linear 2.5; }}
+             @keyframes fade {{ from {{ opacity: 1; }} to {{ opacity: 0; }} }}"
+        ));
+        let root = h.root();
+        let card = h.el(root, "view.card");
+        let document = &mut h.doc.dom;
+        document.render();
+        for &now in ticks {
+            document.advance_animations(now);
+            document.render();
+        }
+        (h, card)
+    };
+    let (h, _) = fade(&[1.163, 1.2]);
+    let frame = h.doc.dom.committed_frame().expect("a frame is committed");
+    let [slot] = frame.animation_slots() else {
+        panic!("the card exports its fade");
+    };
+    let end = slot.curve.expires_at.expect("the fade ends");
+    let mut values = AnimationValueMap::default();
+    slot.curve.values_at(
+        Some(end.next_down()),
+        &frame.committed_offsets(),
+        &mut values,
+    );
+    assert!(
+        values.contains_key(&OwnedPropertyDeclarationId::Longhand(LonghandId::Opacity)),
+        "the hold instant samples the fade"
+    );
+
+    let (before, card) = fade(&[1.163, 1.2, end.next_down()]);
+    assert_ne!(before.doc.value(card, "opacity"), "1", "still fading");
+    let (after, card) = fade(&[1.163, 1.2, end]);
+    assert_eq!(after.doc.value(card, "opacity"), "1", "over at the end");
+}
+
+/// An easing overshooting 1 samples an opacity past 1, which stylo leaves
+/// unclamped; the compositor clamps it as paint clamps the committed one.
+#[test]
+fn an_overshooting_opacity_never_composes_past_one() {
+    let frame = two_animated(
+        "fade2 1s cubic-bezier(0.3, 1.8, 0.7, 1.8) infinite",
+        "fade 1s linear infinite",
+    );
+    let slot = &frame.animation_slots()[0];
+    let mut values = AnimationValueMap::default();
+    let mut overshot = false;
+    for step in 0_u8..=64 {
+        let now = 0.25 + f64::from(step) / 64.0;
+        slot.curve
+            .values_at(Some(now), &frame.committed_offsets(), &mut values);
+        if let Some(AnimationValue::Opacity(raw)) =
+            values.get(&OwnedPropertyDeclarationId::Longhand(LonghandId::Opacity))
+        {
+            overshot |= *raw > 1.0;
+        }
+        let alpha = slot
+            .sample(Some(now), &frame.committed_offsets(), &mut values)
+            .alpha
+            .expect("a fade");
+        assert!((0.0..=1.0).contains(&alpha), "{now}: {alpha}");
+    }
+    assert!(overshot, "the easing overshoots");
+}
+
+/// A curve culling leaves out of the program is exported but not live: the
+/// frame composes once, and still hands the animation back at its end. An
+/// opacity animation forces a group, which is left out with its content.
+#[test]
+fn a_frame_whose_curves_are_all_culled_has_no_live_curves() {
+    for keyframes in [
+        "from { transform: translateX(0px); } to { transform: translateX(100px); }",
+        "from { opacity: 0; } to { opacity: 1; }",
+        "from { opacity: 0; transform: translateY(20px); }
+         to { opacity: 1; transform: translateY(0px); }",
+    ] {
+        let mut h = Harness::new(&format!(
+            "page {{ display: flex; position: relative; width: 800px; height: 600px; }}
+             .far {{ display: flex; position: absolute; left: 5000px; top: 0px;
+                     width: 50px; height: 50px; background-color: red;
+                     animation: move 0.5s linear 1; }}
+             @keyframes move {{ {keyframes} }}"
+        ));
+        let root = h.root();
+        h.el(root, "view.far");
+        let document = &mut h.doc.dom;
+        document.render();
+        document.advance_animations(0.0);
+        assert!(document.advance_animations(0.25).needs_next_frame);
+        let frame = document.commit();
+        assert!(
+            frame.has_exported_curves(),
+            "{keyframes}: the curve exports"
+        );
+        assert!(frame.animations_active());
+        assert!(
+            !frame.has_live_curves(),
+            "{keyframes}: and composes nothing"
+        );
+        assert!(!frame.needs_main_ticks());
+        assert!(
+            frame.animation_boundary_passed(0.5),
+            "{keyframes}: it still hands back at its end"
+        );
+    }
+}
+
+/// A transparent mover draws nothing, so the program names no curve, yet
+/// its hit area moves with the curve: hit tests sample the instant whenever
+/// a curve is exported.
+#[test]
+fn an_inkless_mover_is_hit_where_its_curve_carries_it() {
+    let mut h = Harness::new(
+        "page { display: flex; position: relative; width: 800px; height: 600px; }
+         .hotspot { display: flex; position: absolute; left: 0px; top: 0px;
+                    width: 100px; height: 100px;
+                    animation: slide 1s linear infinite; }
+         @keyframes slide { from { transform: translateX(0px); }
+                            to { transform: translateX(600px); } }",
+    );
+    let root = h.root();
+    let hotspot = h.el(root, "view.hotspot");
+    let document = &mut h.doc.dom;
+    document.render();
+    document.advance_animations(0.0);
+    assert!(document.advance_animations(0.1).needs_next_frame);
+    let frame = document.commit();
+    assert!(frame.has_exported_curves(), "the slide exports");
+    assert!(!frame.has_live_curves(), "and draws nothing");
+    let hit = |x: f32, now: f64| {
+        frame
+            .hit(Point2D::new(x, 50.0), &|_| None, Some(now))
+            .map(|target| target.node)
+    };
+    // Committed at x = 60; at t = 0.9 the slide puts it at x = 540.
+    assert_eq!(hit(580.0, 0.9), Some(hotspot), "hit where it moved to");
+    assert_ne!(hit(80.0, 0.9), Some(hotspot), "not where it was committed");
+}
+
+/// A curve on content culling discards — a moving dot inside a clipped row
+/// the list's encode window never reaches — is exported but never sampled
+/// per frame: composition samples only the slots its program names.
+#[test]
+fn a_compose_samples_only_the_curves_its_program_encodes() {
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 600px; }
+         .list { display: flex; flex-direction: column; overflow: scroll;
+                 width: 300px; height: 120px; }
+         .row { display: flex; flex-shrink: 0; height: 40px; overflow: clip; }
+         .dot { display: flex; width: 20px; height: 20px; background-color: teal;
+                animation: slide 1s linear infinite; }
+         @keyframes slide { from { transform: translateX(0px); }
+                            to { transform: translateX(100px); } }",
+    );
+    let root = h.root();
+    let list = h.el(root, "view.list");
+    for _ in 0..50 {
+        let row = h.el(list, "view.row");
+        h.el(row, "view.dot");
+    }
+    let document = &mut h.doc.dom;
+    document.render();
+    document.advance_animations(0.0);
+    assert!(document.advance_animations(0.25).needs_next_frame);
+    let frame = document.commit();
+    assert_eq!(frame.animation_slots().len(), 50, "every dot exports");
+    let composed = frame.presentation.composed.animations.len();
+    assert!(
+        (1..10).contains(&composed),
+        "only the dots in the list's window compose, got {composed}",
+    );
+    let mut scene = crate::vello::Scene::new();
+    frame.compose_into(&mut scene, &[], &[], &[], &|_| None, Some(0.5));
+}
+
+/// The same for a scroll container that is no stacking context: it takes
+/// its slot and scroll node on the in-context path, inside the card's
+/// animation node, so the card's slide still exports.
+#[test]
+fn an_in_context_scroll_container_inside_an_animated_card_exports_the_curve() {
+    let mut document: crate::Document<()> =
+        crate::Document::new(crate::tree::document::tests::device(), "page", ());
+    document.add_stylesheet(
+        ".card { width: 100px; height: 100px; animation: slide 1s linear infinite; }
+         .scroller { overflow: scroll; width: 100px; height: 100px; }
+         .content { width: 100px; height: 300px; }
+         @keyframes slide { from { transform: translateX(0px); }
+                            to { transform: translateX(50px); } }",
+        crate::StylesheetOrigin::Author,
+    );
+    let page = document.document_element().id();
+    let card = document.create_element("view", ());
+    document.set_attribute(card, "class", "card");
+    document.append_child(page, card);
+    let scroller = document.create_element("view", ());
+    document.set_attribute(scroller, "class", "scroller");
+    document.append_child(card, scroller);
+    let content = document.create_element("view", ());
+    document.set_attribute(content, "class", "content");
+    document.append_child(scroller, content);
+    document.render();
+    document.advance_animations(0.0);
+    let tick = document.advance_animations(0.25);
+    assert!(tick.needs_next_frame, "the slide must be live");
+    document.render();
+    let frame = document.committed_frame().expect("a frame is committed");
+    assert!(frame.has_live_curves(), "the slide exports a curve");
+    assert!(
+        !frame.needs_main_ticks(),
+        "the scroller inside the moving card rides its delta"
+    );
+}
+
+/// 200 rows fading in and up, each an opacity group: a row the list's window
+/// does not encode opens no group, so exactly the encoded rows' curves
+/// compose.
+#[test]
+fn only_the_rows_a_list_window_encodes_compose_their_curves() {
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 600px; }
+         .list { display: flex; flex-direction: column; overflow: scroll;
+                 width: 300px; height: 600px; }
+         .row { display: flex; flex-shrink: 0; width: 300px; height: 40px;
+                background-color: teal; animation: rise 1s linear infinite; }
+         @keyframes rise { from { opacity: 0; transform: translateY(20px); }
+                           to { opacity: 1; transform: translateY(0px); } }",
+    );
+    let root = h.root();
+    let list = h.el(root, "view.list");
+    let rows: Vec<_> = (0..200).map(|_| h.el(list, "view.row")).collect();
+    let document = &mut h.doc.dom;
+    document.render();
+    document.advance_animations(0.0);
+    assert!(document.advance_animations(0.25).needs_next_frame);
+    let frame = document.commit();
+    assert_eq!(frame.animation_slots().len(), 200, "every row exports");
+    let encoded = crate::paint::walker::encoded_items(&h.doc.dom, &frame.order);
+    let encoded_rows = frame
+        .order
+        .items()
+        .iter()
+        .zip(encoded)
+        .filter(|(item, encoded)| {
+            *encoded && item.kind == PaintItemKind::ElementBox && rows.contains(&item.node)
+        })
+        .count();
+    assert!(
+        (1..40).contains(&encoded_rows),
+        "the window encodes a few rows, got {encoded_rows}"
+    );
+    assert_eq!(
+        frame.presentation.composed.animations.len(),
+        encoded_rows,
+        "only the encoded rows compose their curves"
+    );
+}
+
+/// An element's own box and clip ride its box space — inside its own sticky
+/// node, outside its own scroll node — and its content its content space.
+#[test]
+fn a_box_and_its_clip_ride_the_box_space_and_its_content_the_content_space() {
+    use crate::visual::{Space, SpaceKind};
+
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 600px; }
+         .outer { display: flex; flex-direction: column; overflow: scroll;
+                  width: 400px; height: 400px; }
+         .stick { display: flex; flex-shrink: 0; position: sticky; top: 0;
+                  overflow: scroll; width: 200px; height: 200px; }
+         .content { flex-shrink: 0; width: 200px; height: 1000px; }
+         .filler { flex-shrink: 0; width: 10px; height: 1000px; }",
+    );
+    let root = h.root();
+    let outer = h.el(root, "view.outer");
+    let stick = h.el(outer, "view.stick");
+    let content = h.el(stick, "view.content");
+    let filler = h.el(outer, "view.filler");
+    let frame = h.paint();
+
+    assert_eq!(
+        frame.spaces(),
+        [
+            Space {
+                parent: None,
+                kind: SpaceKind::Scroll(0),
+            },
+            Space {
+                parent: Some(0),
+                kind: SpaceKind::Sticky(0),
+            },
+            Space {
+                parent: Some(1),
+                kind: SpaceKind::Scroll(1),
+            },
+        ],
+        "outer's content, then the sticky box inside it, then its own content",
+    );
+    let item = |node| {
+        frame
+            .items()
+            .iter()
+            .find(|item| item.node == node && item.kind == PaintItemKind::ElementBox)
+            .map(|item| (item.space, item.slot))
+            .expect("the node paints a box")
+    };
+    assert_eq!(
+        item(outer),
+        (None, Some(0)),
+        "a scroller's box is outside its scroll node"
+    );
+    assert_eq!(item(filler), (Some(0), Some(0)));
+    assert_eq!(
+        item(stick),
+        (Some(1), Some(1)),
+        "the sticky box moves with its sticky node"
+    );
+    assert_eq!(item(content), (Some(2), Some(1)));
+    let clip = |node| {
+        frame
+            .clips()
+            .iter()
+            .find(|clip| clip.node == node)
+            .map(|clip| clip.space)
+            .expect("the node clips")
+    };
+    assert_eq!(clip(outer), None);
+    assert_eq!(
+        clip(stick),
+        Some(1),
+        "a clip rides its box space, not its own scroll"
+    );
+}
+
+/// `scroll(self)` on an animated scroller binds the scroller's own slot,
+/// which the build allocates after the element's animation slot: a composed
+/// offset fades it, and a `contain-bounce` stretch past either end clamps the
+/// progress to the scroll range, where a fade with no fill still has an
+/// effect.
+#[test]
+fn a_scroll_self_timeline_binds_the_scrollers_own_slot() {
+    use crate::visual::curves::Timeline;
+    use crate::visual::{ScrollOffsets, ScrollSlot, SpaceKind};
+
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 600px; }
+         .scroller { display: flex; flex-direction: column; overflow: scroll;
+                     width: 200px; height: 200px;
+                     animation: fade linear; animation-timeline: scroll(self); }
+         .filler { flex-shrink: 0; width: 200px; height: 1200px; }
+         @keyframes fade { from { opacity: 1; } to { opacity: 0; } }",
+    );
+    let root = h.root();
+    let scroller = h.el(root, "view.scroller");
+    h.el(scroller, "view.filler");
+    let frame = h.doc.dom.commit();
+    let [slot] = frame.animation_slots() else {
+        panic!("the scroller exports its fade");
+    };
+    let Timeline::Scroll(scroll) = &slot.curve.animations[0].1 else {
+        panic!("the fade reads a scroll timeline");
+    };
+    let own = frame.slot_of(scroller).expect("the scroller has a slot");
+    assert_eq!(scroll.slot, Some(own), "bound to its own slot");
+    let position = |kind: SpaceKind| {
+        frame
+            .order
+            .spaces()
+            .iter()
+            .position(|space| space.kind == kind)
+            .expect("the slot has a space")
+    };
+    assert!(position(SpaceKind::Animation(0)) < position(SpaceKind::Scroll(own)));
+    let alpha = |y: f32| {
+        let offset_of =
+            |slot: &ScrollSlot| (slot.node == scroller).then_some(crate::Vector2D::new(0.0, y));
+        let offsets = ScrollOffsets {
+            slots: frame.scroll_slots(),
+            offset_of: &offset_of,
+        };
+        slot.sample(None, &offsets, &mut AnimationValueMap::default())
+            .alpha
+    };
+    assert_eq!(alpha(0.0), Some(1.0));
+    assert_eq!(alpha(500.0), Some(0.5));
+    assert_eq!(alpha(1000.0), Some(0.0));
+    assert_eq!(alpha(1400.0), Some(0.0), "a stretch is no scroll offset");
+    assert_eq!(alpha(-80.0), Some(1.0));
+}
+
+/// On a circular axis (`max` 1000, period 1200) the painter samples a
+/// scroll progress timeline through the seam at the offset's
+/// representative nearer the range, as the main thread does: 50px before
+/// the period's end reads −50, the start, and 50px past `max` reads
+/// itself, the end; the seam's midpoint keeps the offset, and an offset off
+/// the circle is wrapped first. A view progress timeline reads the offset
+/// as it stands in the period: the card's cover range `[-200, 100]` is
+/// behind every offset past `max`, where the card's own copy is off the
+/// scrollport.
+#[test]
+fn a_circular_scroll_timeline_samples_the_nearer_end_through_the_seam() {
+    use crate::visual::{ScrollOffsets, ScrollSlot};
+
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 600px; }
+         .scroller { display: flex; flex-direction: column; overflow: scroll;
+                     overscroll-behavior-y: circular; width: 200px; height: 200px;
+                     animation: fade linear; animation-timeline: scroll(self); }
+         .card { flex-shrink: 0; width: 200px; height: 100px;
+                 animation: fade linear both; animation-timeline: view(); }
+         .filler { flex-shrink: 0; width: 200px; height: 1100px; }
+         @keyframes fade { from { opacity: 1; } to { opacity: 0; } }",
+    );
+    let root = h.root();
+    let scroller = h.el(root, "view.scroller");
+    let card = h.el(scroller, "view.card");
+    h.el(scroller, "view.filler");
+    let frame = h.doc.dom.commit();
+    let own = frame.slot_of(scroller).expect("the scroller has a slot");
+    assert_eq!(
+        frame.scroll_slots()[own as usize].wrap_period(),
+        (None, Some(1200.0))
+    );
+    let alpha = |node: NodeId, y: f32| {
+        let slot = frame
+            .animation_slots()
+            .iter()
+            .find(|slot| slot.node == node)
+            .expect("the fade exports");
+        let offset_of =
+            |slot: &ScrollSlot| (slot.node == scroller).then_some(crate::Vector2D::new(0.0, y));
+        let offsets = ScrollOffsets {
+            slots: frame.scroll_slots(),
+            offset_of: &offset_of,
+        };
+        slot.sample(None, &offsets, &mut AnimationValueMap::default())
+            .alpha
+    };
+    for (y, scroll, view) in [
+        (1150.0, 1.0, 0.0),
+        (2350.0, 1.0, 0.0),
+        (1050.0, 0.0, 0.0),
+        (1100.0, 0.0, 0.0),
+        (500.0, 0.5, 0.0),
+    ] {
+        assert_eq!(alpha(scroller, y), Some(scroll), "scroll(self) at {y}");
+        assert_eq!(alpha(card, y), Some(view), "view() at {y}");
+    }
+}
+
+/// While a circular scroller's scrollport straddles the seam, the seam copy
+/// of its content samples a view progress timeline again with the offset
+/// one period back — the copy shows the card there — while a scroll
+/// progress timeline keeps the container's one sample: at 1150 of a period
+/// of 1200 the card's copy stands 50px before the start, halfway through
+/// its cover range `[-200, 100]`, and the scroller's own `scroll(self)`
+/// fade reads the start in both passes. At 500 nothing straddles.
+#[test]
+fn a_seam_pass_resamples_the_view_timelines_riding_its_slot() {
+    use crate::visual::ScrollSlot;
+
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 600px; }
+         .scroller { display: flex; flex-direction: column; overflow: scroll;
+                     overscroll-behavior-y: circular; width: 200px; height: 200px;
+                     animation: fade linear; animation-timeline: scroll(self); }
+         .card { flex-shrink: 0; width: 200px; height: 100px;
+                 animation: fade linear both; animation-timeline: view(); }
+         .filler { flex-shrink: 0; width: 200px; height: 1100px; }
+         @keyframes fade { from { opacity: 1; } to { opacity: 0; } }",
+    );
+    let root = h.root();
+    let scroller = h.el(root, "view.scroller");
+    let card = h.el(scroller, "view.card");
+    h.el(scroller, "view.filler");
+    let frame = h.doc.dom.commit();
+    let slot_of = |node: NodeId| {
+        let index = frame
+            .animation_slots()
+            .iter()
+            .position(|slot| slot.node == node)
+            .expect("the fade exports");
+        u32::try_from(index).expect("a frame cannot hold 2^32 animation slots")
+    };
+    let (scroller_fade, card_fade) = (slot_of(scroller), slot_of(card));
+    let own = frame.slot_of(scroller).expect("the scroller has a slot");
+    let passes = |y: f32| {
+        let offset_of =
+            |slot: &ScrollSlot| (slot.node == scroller).then_some(crate::Vector2D::new(0.0, y));
+        let animations = frame.order.sample_animations(None, &offset_of);
+        let stickies = frame.order.sample_stickies(1.0, &offset_of);
+        let anchored = frame
+            .order
+            .sample_anchored(&animations, &stickies, 1.0, &offset_of);
+        let samples = frame
+            .order
+            .space_samples(&animations, &stickies, &anchored, 1.0, &offset_of);
+        let passes = samples.seam_passes_with(frame.animation_slots(), None);
+        let alphas = |table: &crate::visual::AnimationSamples| {
+            (table.get(scroller_fade).alpha, table.get(card_fade).alpha)
+        };
+        (
+            alphas(&animations),
+            passes
+                .iter()
+                .map(|pass| (pass.slot, pass.shift, alphas(&pass.animations)))
+                .collect::<Vec<_>>(),
+        )
+    };
+    assert_eq!(
+        passes(1150.0),
+        (
+            (Some(1.0), Some(0.0)),
+            vec![(
+                own,
+                crate::Vector2D::new(0.0, -1200.0),
+                (Some(1.0), Some(0.5))
+            )]
+        ),
+        "straddling: the copy reads the card halfway in, the scroller's fade stays"
+    );
+    assert_eq!(
+        passes(500.0),
+        ((Some(0.5), Some(0.0)), vec![]),
+        "not straddling"
+    );
+}
+
+/// A circular scroller whose scrollport straddles the seam is hit through
+/// both copies of its content: the end of the scrolling area at the offset
+/// itself, and its start one period back below it. An offset off the
+/// circle is normalized first.
+#[test]
+fn a_straddling_circular_scroller_hits_the_copy_under_the_point() {
+    use crate::visual::ScrollSlot;
+
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 600px; }
+         .scroller { display: flex; flex-direction: column; overflow: scroll;
+                     overscroll-behavior-y: circular; width: 200px; height: 200px; }
+         .card { flex-shrink: 0; width: 200px; height: 200px; }",
+    );
+    let root = h.root();
+    let scroller = h.el(root, "view.scroller");
+    let first = h.el(scroller, "view.card");
+    let second = h.el(scroller, "view.card");
+    let frame = h.doc.dom.commit();
+    let slot = &frame.scroll_slots()[frame.slot_of(scroller).expect("a slot") as usize];
+    assert_eq!(slot.wrap_period(), (None, Some(400.0)));
+
+    let hit = |offset: f32, y: f32| {
+        let offset_of = |slot: &ScrollSlot| {
+            (slot.node == scroller).then_some(crate::Vector2D::new(0.0, offset))
+        };
+        frame
+            .hit(crate::Point2D::new(100.0, y), &offset_of, None)
+            .map(|target| target.node)
+    };
+    for offset in [300.0, 700.0, -100.0] {
+        assert_eq!(hit(offset, 50.0), Some(second), "the end, at {offset}");
+        assert_eq!(
+            hit(offset, 150.0),
+            Some(first),
+            "the start's copy below it, at {offset}"
+        );
+    }
+    assert_eq!(hit(0.0, 50.0), Some(first));
+    assert_eq!(hit(0.0, 150.0), Some(first));
+}
+
+/// An animation on an inactive timeline is not current, so it animates
+/// nothing, as the driver's bits count it: beside a clock fade, a slide on a
+/// `scroll()` whose scroller cannot scroll yet exports no transform track,
+/// and stays in the curve contributing nothing.
+#[test]
+fn an_animation_on_an_inactive_timeline_animates_nothing_in_the_export() {
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 600px; }
+         .scroller { display: flex; flex-direction: column; overflow: scroll;
+                     width: 200px; height: 200px; }
+         .card { flex-shrink: 0; width: 40px; height: 40px; background-color: teal;
+                 animation: fade 1s infinite, slide linear both;
+                 animation-timeline: auto, scroll(); }
+         @keyframes fade { from { opacity: 1; } to { opacity: 0.2; } }
+         @keyframes slide { from { transform: translateX(0px); }
+                            to { transform: translateX(100px); } }",
+    );
+    let root = h.root();
+    let scroller = h.el(root, "view.scroller");
+    let card = h.el(scroller, "view.card");
+    let document = &mut h.doc.dom;
+    document.render();
+    document.advance_animations(0.0);
+    document.advance_animations(0.25);
+    let frame = document.commit();
+    let [slot] = frame.animation_slots() else {
+        panic!("the card exports its fade");
+    };
+    assert_eq!(slot.node, card);
+    assert!(
+        slot.curve.animates(LonghandId::Transform),
+        "the slide stays"
+    );
+    assert!(slot.curve.transform.is_none(), "but moves nothing");
+    assert!(
+        slot.sample(
+            Some(0.5),
+            &frame.committed_offsets(),
+            &mut AnimationValueMap::default()
+        )
+        .alpha
+        .is_some()
+    );
+}
+
+/// A scroll-driven transform's reach eases in the direction its binding
+/// samples: after `animation-direction: normal, normal` becomes `normal,
+/// reverse`, stylo's `return;` deviation leaves the second clone `normal`
+/// while its binding reads `reverse`, easing through the `to` keyframe's
+/// overshooting function — and every delta a sweep over the scroll range
+/// composes stays inside the reach.
+#[test]
+fn a_scroll_driven_reach_eases_in_the_bindings_direction() {
+    use stylo::properties::longhands::animation_direction::computed_value::single_value::T as AnimationDirection;
+
+    use crate::vello::kurbo::{Point, Rect};
+    use crate::visual::curves::Timeline;
+    use crate::visual::{ScrollOffsets, ScrollSlot};
+
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 600px; }
+         .scroller { display: flex; flex-direction: column; overflow: scroll;
+                     width: 300px; height: 200px; }
+         .card { flex-shrink: 0; width: 40px; height: 40px; background-color: teal;
+                 animation-name: fade, slide; animation-duration: 1s, 1s;
+                 animation-iteration-count: infinite, 1; animation-fill-mode: none, both;
+                 animation-timing-function: linear, linear;
+                 animation-timeline: auto, scroll(); }
+         .filler { flex-shrink: 0; width: 300px; height: 1000px; }
+         @keyframes fade { from { opacity: 1; } to { opacity: 0.2; } }
+         @keyframes slide {
+             from { transform: translateX(0px); }
+             to { transform: translateX(100px);
+                  animation-timing-function: cubic-bezier(0.5, -1, 0.5, 2); } }",
+    );
+    let root = h.root();
+    let scroller = h.el(root, "view.scroller");
+    let card = h.el(scroller, "view.card");
+    h.el(scroller, "view.filler");
+    h.doc
+        .set_inline(card, "animation-direction: normal, normal");
+    let document = &mut h.doc.dom;
+    document.render();
+    document.advance_animations(0.0);
+    h.doc
+        .set_inline(card, "animation-direction: normal, reverse");
+    let document = &mut h.doc.dom;
+    document.render();
+    document.advance_animations(0.25);
+    let frame = document.commit();
+    let [slot] = frame.animation_slots() else {
+        panic!("the card exports");
+    };
+    let (animation, Timeline::Scroll(scroll)) = &slot.curve.animations[1] else {
+        panic!("the slide reads a scroll timeline");
+    };
+    assert_eq!(
+        animation.direction,
+        AnimationDirection::Normal,
+        "the clone lags"
+    );
+    assert_eq!(scroll.timing.direction, AnimationDirection::Reverse);
+    let reach = &slot
+        .curve
+        .transform
+        .as_ref()
+        .expect("a transform track")
+        .reach;
+    let bounds = Rect::new(0.0, 0.0, 40.0, 40.0);
+    let carried = reach.carry(bounds);
+    let mut values = AnimationValueMap::default();
+    for step in 0_u8..=100 {
+        let y = f32::from(step) * 10.0;
+        let offset_of =
+            |slot: &ScrollSlot| (slot.node == scroller).then_some(crate::Vector2D::new(0.0, y));
+        let offsets = ScrollOffsets {
+            slots: frame.scroll_slots(),
+            offset_of: &offset_of,
+        };
+        let delta = slot.sample(Some(0.25), &offsets, &mut values).delta;
+        for corner in [Point::new(0.0, 0.0), Point::new(40.0, 40.0)] {
+            let moved = delta * corner;
+            assert!(
+                moved.x >= carried.x0 - 1e-6 && moved.x <= carried.x1 + 1e-6,
+                "offset {y}: {moved:?} escapes {carried:?}"
+            );
+        }
+    }
+}
+
+/// A scroll timeline's effect is representable at every offset only where
+/// the commit had none, or where it keeps one over the whole scroll range:
+/// `view()` over its `entry` range (80 px to 160 px of 300 px) without a
+/// fill exports when committed before the range and refuses inside it;
+/// `both` exports anywhere; `scroll()` without a fill has an effect at every
+/// offset of its range, the limit included, and exports.
+#[test]
+fn a_scroll_timeline_exports_only_where_every_offset_is_representable() {
+    let exports = |animation: &str, offset: f32| {
+        let mut h = Harness::new(
+            "page { display: flex; width: 800px; height: 600px; }
+             .scroller { display: flex; flex-direction: column; overflow: scroll;
+                         width: 300px; height: 300px; }
+             .lead { flex-shrink: 0; width: 280px; height: 380px; }
+             .card { flex-shrink: 0; width: 120px; height: 80px; background-color: teal; }
+             .tail { flex-shrink: 0; width: 280px; height: 140px; }
+             @keyframes fade { from { opacity: 1; } to { opacity: 0.2; } }",
+        );
+        let root = h.root();
+        let scroller = h.el(root, "view.scroller");
+        h.el(scroller, "view.lead");
+        let card = h.el(scroller, "view.card");
+        h.el(scroller, "view.tail");
+        h.doc.set_inline(card, animation);
+        let dom = &mut h.doc.dom;
+        dom.render();
+        dom.scroll_to(scroller, crate::Vector2D::new(0.0, offset));
+        dom.note_scroll_windows_stale();
+        !dom.commit().animation_slots().is_empty()
+    };
+    let view = "animation: fade linear; animation-timeline: view(); animation-range: entry";
+    assert!(
+        exports(view, 0.0),
+        "committed before its range, with no effect"
+    );
+    assert!(!exports(view, 120.0), "committed inside it");
+    let filled = "animation: fade linear both; animation-timeline: view(); animation-range: entry";
+    assert!(exports(filled, 120.0));
+    assert!(exports(filled, 300.0));
+    let scroll = "animation: fade linear; animation-timeline: scroll()";
+    assert!(
+        exports(scroll, 150.0),
+        "the whole range, its limit included"
+    );
+}
+
+/// 200 rows in a list, each styled `animation`, committed with the list
+/// scrolled to `offset` after `ticks`: the frame, and which items its walk
+/// encodes.
+fn rising_rows(
+    animation: &str,
+    offset: f32,
+    ticks: &[f64],
+) -> (std::sync::Arc<crate::CommittedFrame>, Vec<bool>) {
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 600px; }
+         .list { display: flex; flex-direction: column; overflow: scroll;
+                 width: 300px; height: 600px; }
+         .row { display: flex; flex-shrink: 0; width: 300px; height: 40px;
+                background-color: teal; }
+         @keyframes rise { from { transform: translateY(20px); }
+                           to { transform: translateY(-60px); } }",
+    );
+    let root = h.root();
+    let list = h.el(root, "view.list");
+    for _ in 0..200 {
+        let row = h.el(list, "view.row");
+        h.doc.set_inline(row, animation);
+    }
+    let document = &mut h.doc.dom;
+    document.render();
+    document.scroll_to(list, crate::Vector2D::new(0.0, offset));
+    for &now in ticks {
+        document.advance_animations(now);
+    }
+    document.note_scroll_windows_stale();
+    let frame = document.commit();
+    let encoded = crate::paint::walker::encoded_items(&h.doc.dom, &frame.order);
+    (frame, encoded)
+}
+
+/// A curve's reach reads no time, so a row on a scroll timeline is culled
+/// through its keyframes exactly as the same row on the document timeline:
+/// committed at the same progress and offset — a quarter, 1850 px of a
+/// 7400 px range — the two frames encode the same items, compose the same
+/// curves and pull the viewport back alike.
+#[test]
+fn a_scroll_driven_mover_is_culled_like_a_time_mover() {
+    let (timed, timed_encoded) =
+        rising_rows("animation: rise 1s linear infinite", 1850.0, &[0.0, 0.25]);
+    let (driven, driven_encoded) = rising_rows(
+        "animation: rise 1s linear both; animation-timeline: scroll()",
+        1850.0,
+        &[],
+    );
+    assert_eq!(timed.animation_slots().len(), 200);
+    assert_eq!(driven.animation_slots().len(), 200);
+    assert!(
+        driven
+            .animation_slots()
+            .iter()
+            .all(|slot| slot.curve.reads_scroll())
+    );
+    assert_eq!(timed_encoded, driven_encoded, "the same items encode");
+    assert!(driven_encoded.contains(&false), "and the walk culls");
+    assert_eq!(
+        timed.presentation.composed.animations,
+        driven.presentation.composed.animations,
+    );
+    let region = crate::vello::kurbo::Rect::new(-40.0, 10.0, 260.0, 90.0);
+    for (a, b) in timed.animation_slots().iter().zip(driven.animation_slots()) {
+        let reach = |slot: &crate::AnimationSlot| {
+            slot.curve
+                .transform
+                .as_ref()
+                .expect("a transform track")
+                .reach
+                .pull_back(region)
+        };
+        assert_eq!(reach(a), reach(b));
+    }
+}
+
+/// A `transform` transition's reach runs from its `from` to its `to`, so it
+/// culls: 200 rows sliding up by a transition encode only the rows that can
+/// meet the list's window, as a keyframes curve would.
+#[test]
+fn a_transform_transition_bounds_the_encode_of_its_rows() {
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 600px; }
+         .list { display: flex; flex-direction: column; overflow: scroll;
+                 width: 300px; height: 600px; }
+         .row { display: flex; flex-shrink: 0; width: 300px; height: 40px;
+                background-color: teal; transition: transform 1s ease-in-out; }",
+    );
+    let root = h.root();
+    let list = h.el(root, "view.list");
+    let rows: Vec<_> = (0..200).map(|_| h.el(list, "view.row")).collect();
+    let document = &mut h.doc.dom;
+    document.render();
+    document.advance_animations(0.0);
+    for &row in &rows {
+        document.set_inline_style(row, "transform: translateY(-30px)");
+    }
+    document.render();
+    document.advance_animations(0.0);
+    document.advance_animations(0.25);
+    let frame = document.commit();
+    assert_eq!(
+        frame.animation_slots().len(),
+        200,
+        "every transition exports"
+    );
+    assert!(frame.animation_slots().iter().all(|slot| {
+        slot.curve
+            .transform
+            .as_ref()
+            .is_some_and(|track| track.reach.is_bounded())
+    }));
+    let encoded = crate::paint::walker::encoded_items(&h.doc.dom, &frame.order);
+    let encoded_rows = frame
+        .order
+        .items()
+        .iter()
+        .zip(encoded)
+        .filter(|(item, encoded)| {
+            *encoded && item.kind == PaintItemKind::ElementBox && rows.contains(&item.node)
+        })
+        .count();
+    assert!(
+        (1..40).contains(&encoded_rows),
+        "the window encodes a few rows, got {encoded_rows}"
+    );
+}
+
+/// With a reach, a `transform` transition exports inside a composited group:
+/// a card sliding by a transition inside a fading group exports beside the
+/// group's own fade.
+#[test]
+fn a_transform_transition_exports_inside_a_fading_group() {
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 600px; }
+         .group { display: flex; width: 400px; height: 300px; padding: 20px;
+                  background-color: navy; animation: fade 1s linear infinite; }
+         .card { display: flex; width: 100px; height: 80px; background-color: teal;
+                 transition: transform 1s linear; }
+         @keyframes fade { from { opacity: 1; } to { opacity: 0.2; } }",
+    );
+    let root = h.root();
+    let group = h.el(root, "view.group");
+    let card = h.el(group, "view.card");
+    let document = &mut h.doc.dom;
+    document.render();
+    document.advance_animations(0.0);
+    document.set_inline_style(card, "transform: translateX(120px) rotate(20deg)");
+    document.render();
+    document.advance_animations(0.0);
+    document.advance_animations(0.25);
+    let frame = document.commit();
+    let exported: Vec<NodeId> = frame
+        .animation_slots()
+        .iter()
+        .map(|slot| slot.node)
+        .collect();
+    assert_eq!(
+        exported,
+        [group, card],
+        "the transition exports in the group"
+    );
+    assert!(!frame.needs_main_ticks());
+}
+
+/// A paused scroll-driven animation holds its sample on the painter as the
+/// main thread holds it: its curve reads no slot, and a composed offset
+/// leaves it at the value of the offset it was created at.
+#[test]
+fn a_paused_scroll_driven_animation_holds_on_the_painter() {
+    use crate::visual::ScrollOffsets;
+
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 600px; }
+         .scroller { display: flex; flex-direction: column; overflow: scroll;
+                     width: 200px; height: 200px; }
+         .mover { flex-shrink: 0; width: 20px; height: 20px; background-color: teal;
+                  animation: fade linear both paused; animation-timeline: scroll(); }
+         .filler { flex-shrink: 0; width: 200px; height: 1180px; }
+         @keyframes fade { from { opacity: 1; } to { opacity: 0; } }",
+    );
+    let root = h.root();
+    let scroller = h.el(root, "view.scroller");
+    let mover = h.el(scroller, "view.mover");
+    h.el(scroller, "view.filler");
+    h.doc.dom.render();
+    h.doc
+        .dom
+        .scroll_to(scroller, crate::Vector2D::new(0.0, 250.0));
+    h.doc.dom.note_scroll_windows_stale();
+    let frame = h.doc.dom.commit();
+    let [slot] = frame.animation_slots() else {
+        panic!("the paused fade exports");
+    };
+    assert_eq!(slot.node, mover);
+    assert!(!slot.curve.reads_scroll() && !slot.curve.reads_clock());
+    let offset_of = |_: &crate::visual::ScrollSlot| Some(crate::Vector2D::new(0.0, 700.0));
+    let offsets = ScrollOffsets {
+        slots: frame.scroll_slots(),
+        offset_of: &offset_of,
+    };
+    let alpha = slot
+        .sample(None, &offsets, &mut AnimationValueMap::default())
+        .alpha;
+    assert_eq!(
+        alpha,
+        Some(1.0),
+        "created paused at offset 0, it holds there"
+    );
+}
+
+/// The `animates` side effects follow the keyframes an animation has, not
+/// its `@keyframes` rule. A 400px scroller over 600px, the 200px subject
+/// defining `--foo` and 600px: with its only `transform` keyframes, on
+/// `entry`, ignored — on the document timeline, or attached to an empty
+/// range — the subject is no stacking context and no containing block for
+/// its fixed child; placed on its view timeline, it is both, and ignoring
+/// them again undoes both.
+#[test]
+fn ignored_range_keyframes_have_no_side_effects() {
+    let mut doc = Doc::with_css(
+        "page { display: flex; width: 800px; height: 600px; align-items: flex-start; }
+         .container { display: flex; flex-direction: column; overflow: scroll; width: 400px;
+                      height: 400px; flex-shrink: 0; }
+         .spacer { flex-shrink: 0; width: 400px; height: 600px; }
+         .subject { flex-shrink: 0; width: 200px; height: 200px; view-timeline-name: --foo; }
+         .fixed { position: fixed; left: 0px; top: 0px; width: 10px; height: 10px; }
+         @keyframes shift {
+             entry 0% { transform: translateX(10px); }
+             entry 100% { transform: translateX(20px); } }",
+    );
+    let root = doc.root;
+    let container = doc.el(root, "view.container");
+    doc.el(container, "view.spacer");
+    let subject = doc.el(container, "view.subject");
+    let fixed = doc.el(subject, "view.fixed");
+    doc.el(container, "view.spacer");
+    let effects = |doc: &Doc| {
+        let node = doc.dom.get(subject).expect("live");
+        let style = doc.dom.paint_style(subject).expect("styled");
+        let origin = |id| doc.dom.bounding_client_rect(id).expect("laid out").origin;
+        (
+            node.animates_transform(),
+            super::stacking::establishes_stacking_context(node, style, false),
+            origin(fixed) == origin(subject),
+        )
+    };
+    for (animation, expected) in [
+        ("shift 10s linear both", (false, false, false)),
+        (
+            "shift linear both; animation-timeline: --foo;
+             animation-range: contain 50% contain 50%",
+            (false, false, false),
+        ),
+        (
+            "shift linear both; animation-timeline: --foo",
+            (true, true, true),
+        ),
+        (
+            "shift linear both; animation-timeline: --foo;
+             animation-range: contain 50% contain 50%",
+            (false, false, false),
+        ),
+    ] {
+        doc.set_inline(subject, &format!("animation: {animation}"));
+        doc.flush();
+        assert_eq!(effects(&doc), expected, "{animation}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The top layer (css-position-4 §3, `tree::top_layer`).
+
+/// What bobcat-core's UA sheet gives a modal `<dialog>` and `::backdrop`,
+/// reduced to what these tests read: both boxes need a display
+/// `display_mode` supports.
+const TOP_LAYER_UA: &str = "
+    dialog { display: flex; position: absolute; }
+    dialog.modal { position: fixed; }
+    ::backdrop { display: flex; position: fixed; inset: 0; }";
+
+fn top_layer_harness(css: &str) -> Harness {
+    let mut h = Harness::new(&format!("{PAGE} {css}"));
+    h.doc.add_ua_css(TOP_LAYER_UA);
+    h
+}
+
+fn backdrop_index(paint: &PaintOrder, element: NodeId) -> Option<usize> {
+    paint
+        .items()
+        .iter()
+        .position(|item| item.kind == PaintItemKind::Backdrop { element })
+}
+
+fn element_index(paint: &PaintOrder, element: NodeId) -> usize {
+    paint
+        .items()
+        .iter()
+        .position(|item| item.node == element && item.kind == PaintItemKind::ElementBox)
+        .expect("the element paints a box")
+}
+
+#[test]
+fn a_top_layer_element_paints_after_the_roots_highest_z_index() {
+    let mut h = top_layer_harness(&abs_box(
+        ".high { z-index: 100; } .dialog { width: 50px; height: 50px; }",
+    ));
+    let root = h.root();
+    let dialog = h.el(root, "dialog.modal.dialog");
+    let high = h.el(root, "view.box.high");
+    assert_eq!(h.element_order(), vec![root, dialog, high]);
+
+    h.doc.dom.add_to_top_layer(dialog, true);
+    assert_eq!(h.element_order(), vec![root, high, dialog]);
+    let paint = h.paint();
+    let backdrop = backdrop_index(&paint, dialog).expect("the default backdrop has a box");
+    assert_eq!(
+        backdrop + 1,
+        element_index(&paint, dialog),
+        "the backdrop paints immediately below its element"
+    );
+    assert_eq!(h.hit(25.0, 25.0), Some(dialog));
+}
+
+#[test]
+fn top_layer_entries_paint_in_insertion_order_and_a_readd_moves_to_the_top() {
+    let mut h = top_layer_harness(".dialog { width: 50px; height: 50px; }");
+    let root = h.root();
+    let first_in_tree = h.el(root, "dialog.modal.dialog");
+    let second_in_tree = h.el(root, "dialog.modal.dialog");
+    h.doc.dom.add_to_top_layer(second_in_tree, false);
+    h.doc.dom.add_to_top_layer(first_in_tree, false);
+    assert_eq!(h.element_order(), vec![root, second_in_tree, first_in_tree]);
+    assert_eq!(h.hit(25.0, 25.0), Some(first_in_tree));
+
+    h.doc.dom.add_to_top_layer(second_in_tree, false);
+    assert_eq!(h.element_order(), vec![root, first_in_tree, second_in_tree]);
+    assert_eq!(
+        h.doc
+            .dom
+            .top_layer()
+            .map(terminus::TopLayerEntry::element)
+            .collect::<Vec<_>>(),
+        vec![first_in_tree, second_in_tree]
+    );
+    let paint = h.paint();
+    assert_eq!(
+        backdrop_index(&paint, second_in_tree).map(|index| index + 1),
+        Some(element_index(&paint, second_in_tree))
+    );
+    assert!(backdrop_index(&paint, first_in_tree) < Some(element_index(&paint, first_in_tree)));
+    assert_eq!(h.hit(25.0, 25.0), Some(second_in_tree));
+}
+
+/// css-position-4 §3.1: a top-layer element is a sibling of the root's
+/// stacking context, so none of its ancestors' effects, clips or
+/// transforms reach it.
+#[test]
+fn a_top_layer_element_escapes_its_ancestors_group_clip_and_transform() {
+    let mut h = top_layer_harness(
+        ".fx { display: flex; opacity: 0.5; overflow: clip; transform: translate(30px, 40px);
+               width: 20px; height: 20px; }
+         .dialog { width: 50px; height: 50px; }",
+    );
+    let root = h.root();
+    let fx = h.el(root, "view.fx");
+    let dialog = h.el(fx, "dialog.modal.dialog");
+    h.doc.dom.add_to_top_layer(dialog, false);
+    let paint = h.paint();
+    let index = element_index(&paint, dialog);
+    let item = &paint.items()[index];
+    assert_eq!(item.clip, None, "no ancestor clip chain");
+    assert_eq!(item.space, None, "no ancestor space");
+    assert_eq!(
+        item.transform,
+        euclid::default::Transform3D::identity(),
+        "no ancestor transform, and a static position of zero"
+    );
+    assert!(
+        paint
+            .layers()
+            .iter()
+            .all(|layer| !layer.items.contains(&index)),
+        "in no ancestor's group"
+    );
+    let backdrop = &paint.items()[backdrop_index(&paint, dialog).expect("has a box")];
+    assert_eq!(backdrop.size, euclid::default::Size2D::new(800.0, 600.0));
+    assert_eq!(backdrop.clip, None);
+}
+
+#[test]
+fn the_inert_floor_is_set_only_while_an_entry_blocks_the_document() {
+    let mut h = top_layer_harness(&abs_box(
+        ".dialog { left: 100px; top: 100px; width: 100px; height: 100px; }
+         .child { display: flex; width: 20px; height: 20px; }",
+    ));
+    let root = h.root();
+    let under = h.el(root, "view.box");
+    let dialog = h.el(root, "dialog.modal.dialog");
+    let child = h.el(dialog, "view.child");
+    assert_eq!(h.paint().inert_floor(), None);
+
+    h.doc.dom.add_to_top_layer(dialog, false);
+    assert_eq!(h.paint().inert_floor(), None, "a non-blocking entry");
+    // The backdrop covers the viewport and reports its element.
+    assert_eq!(h.hit(50.0, 50.0), Some(dialog));
+
+    h.doc.dom.add_to_top_layer(dialog, true);
+    assert!(h.doc.dom.blocks_document(dialog));
+    let paint = h.paint();
+    assert_eq!(paint.inert_floor(), backdrop_index(&paint, dialog));
+    assert_eq!(
+        h.hit(50.0, 50.0),
+        Some(dialog),
+        "the backdrop reports its element"
+    );
+    assert_eq!(h.hit(110.0, 110.0), Some(child));
+    assert_eq!(h.hit(150.0, 150.0), Some(dialog));
+
+    // With no backdrop box, the document below the floor is still inert.
+    h.doc.add_css("dialog::backdrop { display: none; }");
+    let paint = h.paint();
+    assert_eq!(backdrop_index(&paint, dialog), None);
+    assert_eq!(paint.inert_floor(), Some(element_index(&paint, dialog)));
+    assert_eq!(h.hit(50.0, 50.0), None, "`under` is below the floor");
+    assert_eq!(
+        h.doc
+            .dom
+            .elements_from_point(Point2D::new(50.0, 50.0))
+            .as_slice(),
+        &[] as &[NodeId]
+    );
+    let _ = under;
+}
+
+#[test]
+fn a_non_blocking_entry_above_a_blocking_one_stays_hit_testable() {
+    let mut h = top_layer_harness(
+        ".dialog { left: 0; top: 0; width: 100px; height: 100px; }
+         dialog::backdrop { display: none; }",
+    );
+    let root = h.root();
+    let modal = h.el(root, "dialog.modal.dialog");
+    let popup = h.el(root, "dialog.modal.dialog");
+    h.doc.dom.add_to_top_layer(modal, true);
+    h.doc.dom.add_to_top_layer(popup, false);
+    let paint = h.paint();
+    assert_eq!(paint.inert_floor(), Some(element_index(&paint, modal)));
+    assert_eq!(h.hit(50.0, 50.0), Some(popup));
+    h.doc.dom.remove_from_top_layer(popup);
+    assert_eq!(h.hit(50.0, 50.0), Some(modal));
+    h.doc.dom.remove_from_top_layer(modal);
+    assert_eq!(h.paint().inert_floor(), None);
+    assert!(!h.doc.dom.in_top_layer(modal));
+}
+
+#[test]
+fn a_backdrop_with_pointer_events_none_passes_hits_to_nothing_below_the_floor() {
+    let mut h = top_layer_harness(
+        ".dialog { left: 100px; top: 100px; width: 100px; height: 100px; }
+         dialog::backdrop { pointer-events: none; }",
+    );
+    let root = h.root();
+    let dialog = h.el(root, "dialog.modal.dialog");
+    h.doc.dom.add_to_top_layer(dialog, true);
+    assert_eq!(h.hit(50.0, 50.0), None);
+    h.doc.dom.add_to_top_layer(dialog, false);
+    assert_eq!(
+        h.hit(50.0, 50.0),
+        Some(root),
+        "nothing blocks, so the page answers"
+    );
+}
+
+/// Removing a top-layer element from the document takes it out of the top
+/// layer and frees its backdrop (HTML's removing steps), wherever in the
+/// removed subtree it was.
+#[test]
+fn removing_a_top_layer_element_drops_its_entry_and_frees_its_backdrop() {
+    let mut h = top_layer_harness(".dialog { width: 50px; height: 50px; }");
+    let root = h.root();
+    let wrapper = h.el(root, "view");
+    let dialog = h.el(wrapper, "dialog.modal.dialog");
+    h.doc.dom.add_to_top_layer(dialog, true);
+    let backdrop = h
+        .doc
+        .dom
+        .arenas()
+        .top_layer()
+        .entries()
+        .first()
+        .expect("one entry")
+        .backdrop;
+    assert_eq!(h.doc.dom.backdrop_origin(backdrop), Some(dialog));
+    assert!(h.doc.dom.get(backdrop).is_some());
+    h.paint();
+
+    h.doc.dom.remove_element(wrapper);
+    assert!(!h.doc.dom.in_top_layer(dialog));
+    assert_eq!(h.doc.dom.top_layer().count(), 0);
+    assert!(
+        h.doc.dom.get(backdrop).is_none(),
+        "the backdrop node is freed"
+    );
+    assert_eq!(h.doc.dom.backdrop_origin(backdrop), None);
+    assert_eq!(h.paint().inert_floor(), None);
+    // Reinsertion does not restore membership.
+    h.doc.dom.append_child(root, wrapper);
+    assert!(!h.doc.dom.in_top_layer(dialog));
+}
+
+/// A touch inside a scrolling modal dialog scrolls the dialog, and the
+/// chain ends there: nothing behind it is reachable.
+#[test]
+fn a_scrolling_modal_dialog_chains_to_nothing_behind_it() {
+    let mut h = top_layer_harness(
+        "page { overflow: scroll; }
+         .dialog { left: 0; top: 0; width: 100px; height: 100px; overflow: scroll;
+                   flex-direction: column; }
+         .tall { display: flex; flex-shrink: 0; width: 100px; height: 400px; }
+         .page-tall { display: flex; flex-shrink: 0; width: 10px; height: 2000px; }",
+    );
+    let root = h.root();
+    h.el(root, "view.page-tall");
+    let dialog = h.el(root, "dialog.modal.dialog");
+    h.el(dialog, "view.tall");
+    h.doc.dom.add_to_top_layer(dialog, true);
+    h.doc.dom.render();
+    let frame = h.doc.dom.commit();
+    let target = frame
+        .hit(Point2D::new(50.0, 50.0), &|_| None, None)
+        .expect("the dialog's content is hit");
+    let slot = target.scroll.expect("the dialog is a scroll container");
+    let slots = frame.scroll_slots();
+    assert_eq!(slots[slot as usize].node, dialog);
+    assert_eq!(
+        slots[slot as usize].parent, None,
+        "the chain ends at the dialog"
+    );
+    let outside = frame
+        .hit(Point2D::new(500.0, 500.0), &|_| None, None)
+        .expect("the backdrop is hit");
+    assert_eq!(outside.node, dialog);
+    assert_eq!(outside.scroll, None, "a backdrop hit scrolls nothing");
+}
+
+/// A top-layer element inside a scrolled scroller stays where the viewport
+/// places it: no ancestor scroll offset reaches it, in paint or in hits.
+#[test]
+fn a_top_layer_element_ignores_its_ancestors_scroll_offset() {
+    let mut h = top_layer_harness(
+        ".scroller { display: flex; flex-direction: column; position: relative;
+                     overflow: scroll; width: 200px; height: 200px; }
+         .tall { display: flex; flex-shrink: 0; width: 200px; height: 1000px; }
+         .dialog { left: 300px; top: 100px; width: 50px; height: 50px; }
+         dialog::backdrop { display: none; }",
+    );
+    let root = h.root();
+    let scroller = h.el(root, "view.scroller");
+    h.el(scroller, "view.tall");
+    let dialog = h.el(scroller, "dialog.modal.dialog");
+    h.doc.dom.add_to_top_layer(dialog, true);
+    h.doc.dom.layout();
+    h.doc
+        .dom
+        .scroll_to(scroller, crate::Vector2D::new(0.0, 300.0));
+    let paint = h.paint();
+    let item = &paint.items()[element_index(&paint, dialog)];
+    assert_eq!(item.space, None);
+    assert_eq!(
+        item.transform,
+        euclid::default::Transform3D::translation(300.0, 100.0, 0.0)
+    );
+    assert_eq!(h.hit(310.0, 110.0), Some(dialog));
+    assert_eq!(
+        h.doc
+            .dom
+            .bounding_client_rect(dialog)
+            .map(|rect| (rect.origin.x, rect.origin.y)),
+        Some((300.0, 100.0))
+    );
+}

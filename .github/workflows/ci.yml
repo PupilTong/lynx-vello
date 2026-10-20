@@ -162,8 +162,8 @@ jobs:
           -p bobcat-wasm
           -p bobcat-resources
           -p bobcat-core
-          -p dom
-          -p hughie
+          -p terminus
+          -p seldon
           -p bobcat-source
           -p quickjs-rust-bridge
           -- -D warnings
@@ -247,7 +247,7 @@ jobs:
       # The CLI, HTTP server, and their source adapter are the native workspace
       # products no other job compiles on Linux. The macOS job builds them
       # there; the Ubuntu benchmark job builds
-      # dom/hughie/quickjs-rust-bridge through their bench targets but never
+      # terminus/seldon/quickjs-rust-bridge through their bench targets but never
       # reaches these embedders, which nothing depends on. Without this job the
       # headless runners — the modes Linux hosts actually run — have no gate
       # compiling them at all.
@@ -268,7 +268,7 @@ jobs:
 
       - name: Install system dependencies
         # libfontconfig1-dev is a build-time dependency of parley's `system`
-        # font source, which the CLI reaches through dom.
+        # font source, which the CLI reaches through terminus.
         run: |
           sudo apt-get update
           sudo apt-get install --yes clang-22 llvm-22 libfontconfig1-dev

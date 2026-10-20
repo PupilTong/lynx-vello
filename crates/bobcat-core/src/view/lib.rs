@@ -19,7 +19,7 @@ use std::num::NonZeroUsize;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use dom::{FontBlob, FrameImages, ImageInbox, StylePool};
+use terminus::{FontBlob, FrameImages, ImageInbox, StylePool};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
@@ -65,8 +65,8 @@ impl Viewport {
         self
     }
 
-    pub(crate) fn device(self) -> dom::Device {
-        dom::Device::new(self.width, self.height, self.device_pixel_ratio)
+    pub(crate) fn device(self) -> terminus::Device {
+        terminus::Device::new(self.width, self.height, self.device_pixel_ratio)
     }
 }
 
@@ -434,7 +434,7 @@ pub enum EngineEvent {
     /// input-method query (the candidate window's rectangle, the text around
     /// the caret) from it; the commands it sends back go through
     /// [`LynxView::edit`].
-    TextInputStateChanged(Box<dom::editing::TextInputState>),
+    TextInputStateChanged(Box<terminus::editing::TextInputState>),
     /// A realm's console output, delivered to the embedder that owns the view.
     /// `level` is the name of the console method that was called: `"log"`,
     /// `"info"`, `"debug"`, `"warn"` or `"error"`. Reported under the same
@@ -575,14 +575,14 @@ impl EventRequester for NoWakeup {
 /// construction-time choice.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum StyleThreads {
-    /// Stylo's own heuristic for this machine, under [`dom::MAX_STYLE_THREADS`].
+    /// Stylo's own heuristic for this machine, under [`terminus::MAX_STYLE_THREADS`].
     /// A machine whose parallelism the platform cannot answer for — Wasm,
     /// where the embedder passes it to [`StyleThreads::for_parallelism`]
     /// instead — resolves to [`StyleThreads::Sequential`].
     #[default]
     Auto,
     /// Exactly this many threads, `bobcat-main` included, so `Fixed(3)` is
-    /// the group's `bobcat-main` and two more. More than [`dom::MAX_STYLE_THREADS`] is a
+    /// the group's `bobcat-main` and two more. More than [`terminus::MAX_STYLE_THREADS`] is a
     /// construction error rather than a silent clamp: Stylo indexes its
     /// per-traversal thread-local storage by rayon thread index into an
     /// array that long.
@@ -932,7 +932,7 @@ impl LynxGroup {
     ) -> Result<LynxView<F>, LynxViewError>
     where
         F: ResourceFetcher + 'static,
-        B: FnOnce(dom::ImageReports) -> F,
+        B: FnOnce(terminus::ImageReports) -> F,
     {
         // Read once, before anything is sent: the table is what crosses, and
         // the modules themselves stay here.
@@ -953,7 +953,7 @@ impl LynxGroup {
         // containers cannot serve the family it named will never render, and
         // the requests below go out in this same call, so a check made
         // anywhere later would already be behind them. It needs no document —
-        // fonts and the default family are a `dom::TextContext`'s business,
+        // fonts and the default family are a `terminus::TextContext`'s business,
         // and a document only ever adopts a finished one.
         let default_font_family = sources.default_font_family.take();
         let text_context = stage_text_context(
@@ -1296,7 +1296,7 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
     ///
     /// Returns [`EngineError::NotReady`] before MTS boot is observed or after
     /// the view ends, like the page updates; the command is not queued.
-    pub fn edit(&self, command: dom::editing::Command) -> Result<(), EngineError> {
+    pub fn edit(&self, command: terminus::editing::Command) -> Result<(), EngineError> {
         if !self.is_ready() {
             return Err(EngineError::NotReady);
         }
@@ -1581,7 +1581,7 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
     }
 
     /// The newest committed frame this view has published.
-    pub(crate) fn published_frame(&mut self) -> Option<Arc<dom::CommittedFrame>> {
+    pub(crate) fn published_frame(&mut self) -> Option<Arc<terminus::CommittedFrame>> {
         self.frames.borrow_and_update().frame.clone()
     }
 }
@@ -1605,7 +1605,7 @@ pub(crate) struct ViewAttachment {
     /// This view's fonts and default family, already registered and
     /// validated on the embedder's thread. `None` is a view that named
     /// neither, which leaves the document's own lazy context alone.
-    pub(crate) text_context: Option<dom::TextContext>,
+    pub(crate) text_context: Option<terminus::TextContext>,
     /// The answers to the requests `create_lynx_view` already made.
     pub(crate) startup: StartupSources,
     /// The embedder's native modules as the BTS realm hears about them: one
@@ -1724,7 +1724,7 @@ pub(crate) fn resolve_startup_urls(sources: &mut ViewSources) -> Result<url::Url
 /// document exists and before anything has been fetched.
 ///
 /// Neither needs a document: fonts and the default family are a
-/// [`TextContext`](dom::TextContext)'s business, and a document only ever
+/// [`TextContext`](terminus::TextContext)'s business, and a document only ever
 /// adopts a finished one. Running it here, in `create_lynx_view`, is what
 /// keeps a family nothing provides a zero-fetch failure — the startup
 /// requests go out in that same call, so there is no later point at which
@@ -1737,11 +1737,11 @@ fn stage_text_context(
     fonts: Vec<FontBlob>,
     default_font_family: Option<&str>,
     fallback_fonts: Vec<FontBlob>,
-) -> Result<Option<dom::TextContext>, LynxViewError> {
+) -> Result<Option<terminus::TextContext>, LynxViewError> {
     if fonts.is_empty() && default_font_family.is_none() && fallback_fonts.is_empty() {
         return Ok(None);
     }
-    let mut text = dom::TextContext::new();
+    let mut text = terminus::TextContext::new();
     for font in fonts {
         text.register_fonts(font);
     }

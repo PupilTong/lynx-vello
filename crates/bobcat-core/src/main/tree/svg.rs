@@ -7,18 +7,18 @@
 //! attribute and renders no light-DOM child. Under the standards policy the
 //! tag is a Lynx-only component that shares its name with the HTML element
 //! (`docs/svg-lynx-component-design.md`). This module reflects both
-//! attributes into the element's [`dom::ImageRole::Source`], so the element
+//! attributes into the element's [`terminus::ImageRole::Source`], so the element
 //! is replaced content and the image pipeline — the parse, the vector image,
 //! the natural size, the painter's raster cache — is shared with `<image>`.
 //!
 //! # `src` and `content`
 //!
-//! `src` is relayed as written to [`dom::Document::set_image_source`]: the
+//! `src` is relayed as written to [`terminus::Document::set_image_source`]: the
 //! host fetches it, parses the document and reports it, as it does for an
 //! `<image src="x.svg">`.
 //!
-//! `content` goes to [`dom::Document::set_image_document`] as its bytes. No
-//! URL is made of it and the host is never asked to fetch it: `dom` files
+//! `content` goes to [`terminus::Document::set_image_document`] as its bytes. No
+//! URL is made of it and the host is never asked to fetch it: `terminus` files
 //! the markup under a synthetic source named by a 128-bit hash of it
 //! (`svg-content:<32 hex digits>`) and queues the bytes as a document
 //! request, which the page's epilogue hands the host
@@ -74,7 +74,7 @@
 //! document's intrinsic size (ruled 2026-10-08), so the runtime reads the
 //! border box at delivery ([`is_svg`] is how it tells the two apart).
 
-use dom::{CustomElement, DocumentKind, ImageRole, NodeId};
+use terminus::{CustomElement, DocumentKind, ImageRole, NodeId};
 
 use super::{ComponentEvents, LynxDocument};
 
@@ -105,7 +105,7 @@ pub(super) fn define(document: &mut LynxDocument, outcomes: ComponentEvents) {
 pub(crate) fn is_svg(document: &LynxDocument, node: NodeId) -> bool {
     document
         .get(node)
-        .and_then(dom::Node::tag_name)
+        .and_then(terminus::Node::tag_name)
         .is_some_and(|tag| tag == SVG_TAG)
 }
 
@@ -114,7 +114,7 @@ pub(crate) fn is_svg(document: &LynxDocument, node: NodeId) -> bool {
 /// Only `attribute_changed_callback` is implemented, for the reasons
 /// [`super::image`]'s component gives: the reaction that carries a source
 /// always follows the element's creation, and a release unbinds the source
-/// in `dom` itself.
+/// in `terminus` itself.
 struct Svg {
     /// Where a source that settles at the bind leaves its outcome. The
     /// reaction runs inside a JavaScript call, so it cannot dispatch.
@@ -164,9 +164,9 @@ mod tests {
 
     use std::sync::Arc;
 
-    use dom::stylo::computed_values::box_sizing;
-    use dom::stylo::values::computed::{Contain, Display};
-    use dom::{ImageEvent, ImageOutcome, ImageRole, NodeId};
+    use terminus::stylo::computed_values::box_sizing;
+    use terminus::stylo::values::computed::{Contain, Display};
+    use terminus::{ImageEvent, ImageOutcome, ImageRole, NodeId};
 
     use super::super::test_support::{
         child, display, document, element_under, style_of, with_component_events, with_config,
@@ -324,7 +324,7 @@ mod tests {
         assert_eq!(requests.len(), 1);
         let (source, bytes, kind) = &requests[0];
         assert_eq!(&**bytes, markup.as_bytes(), "the bytes as written");
-        assert_eq!(*kind, dom::DocumentKind::Svg);
+        assert_eq!(*kind, terminus::DocumentKind::Svg);
         assert!(source.starts_with("svg-content:"), "{source}");
         assert_eq!(source_of(&document, element).as_deref(), Some(&**source));
     }

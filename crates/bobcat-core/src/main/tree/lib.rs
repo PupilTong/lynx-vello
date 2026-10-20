@@ -1,12 +1,12 @@
 //! Main-thread Lynx page policy: the `page` root tag, the UA
 //! cascade defaults, the components the engine defines, and view metrics.
 //! Everything else the runtime does goes
-//! straight to [`dom::Document`] — element identity is the DOM [`NodeId`],
+//! straight to [`terminus::Document`] — element identity is the DOM [`NodeId`],
 //! which is also the element's Lynx `unique_id`: one number, issued by the
 //! DOM, never reissued after the element is freed. Script therefore cannot
 //! name a stranger by holding an id too long, only something that no longer
 //! exists. The private host boundary still validates script-provided IDs and
-//! mutation preconditions before entering `dom`, returning misuse as a
+//! mutation preconditions before entering `terminus`, returning misuse as a
 //! JavaScript error.
 //!
 //! Each tag owns its UA rules and tests. Numeric text and list attributes
@@ -39,8 +39,8 @@
 //! and `blur` events, queued like the markdown element's as
 //! [`ComponentEvent::Detailed`], and their UI methods ([`text_field`]). A
 //! component's UI methods are its
-//! [`dom::CustomElement::invoke`], which the runtime's `callElementMethod`
-//! reaches through [`dom::Document::invoke_element_method`]. The methods
+//! [`terminus::CustomElement::invoke`], which the runtime's `callElementMethod`
+//! reaches through [`terminus::Document::invoke_element_method`]. The methods
 //! every element has whatever its kind, which `callElementMethod` runs when
 //! the kind has no method of the name, are [`base_methods`]'
 //! (`boundingClientRect`, `scrollIntoView`, `scrollTo` and `scrollBy`).
@@ -49,7 +49,7 @@
 //! `scroll-capture-y`, and the component on its two coordinator tags exists
 //! for `setFoldExpanded` alone. `overlay` has no UI method.
 //!
-//! [`NodeId`]: dom::NodeId
+//! [`NodeId`]: terminus::NodeId
 
 mod base_methods;
 mod blur_view;
@@ -82,8 +82,8 @@ use std::cell::RefCell;
 use std::ops::Range;
 use std::rc::Rc;
 
-use dom::{Document, ImageOutcome, NodeId, StylesheetOrigin};
 use smallvec::SmallVec;
+use terminus::{Document, ImageOutcome, NodeId, StylesheetOrigin};
 
 pub(crate) use self::base_methods::invoke_base_method;
 pub(crate) use self::frame::{MAX_FRAME_DEPTH, frame_depth, nested_page, reset_frame};
@@ -109,7 +109,7 @@ pub(crate) type LynxDocument = Document<()>;
 pub(crate) const PAGE_TAG: &str = "page";
 
 /// DOM's `slotchange`, which a component with a UA shadow tree observes
-/// ([`dom::CustomElement::observed_events`]) to learn that its assigned
+/// ([`terminus::CustomElement::observed_events`]) to learn that its assigned
 /// children changed.
 pub(super) const SLOT_CHANGE: &str = "slotchange";
 
@@ -117,7 +117,7 @@ pub(super) const SLOT_CHANGE: &str = "slotchange";
 /// with its own audience:
 ///
 /// - the Selection API's event at the document node, which the runtime fires from the
-///   component-events entry when [`dom::Document::take_selectionchange`] says the document's
+///   component-events entry when [`terminus::Document::take_selectionchange`] says the document's
 ///   selection changed, and which a realm hears through the boot module's `document`;
 /// - the engine-only event the runtime fires at an editing host after every command it applied
 ///   (`runtime/editing.rs`), which no realm hears and from which the text field component reads its
@@ -226,7 +226,7 @@ pub(super) fn element_children(
         .get(parent)
         .into_iter()
         .flat_map(|node| node.child_ids().iter().copied())
-        .filter(|child| document.get(*child).is_some_and(dom::Node::is_element))
+        .filter(|child| document.get(*child).is_some_and(terminus::Node::is_element))
 }
 
 /// Which of `parent`'s element children holds `node` — `node` itself or an
@@ -275,7 +275,7 @@ pub(crate) enum ComponentEvent {
     Scroll {
         node: NodeId,
         name: &'static str,
-        delta: dom::Vector2D<f32>,
+        delta: terminus::Vector2D<f32>,
     },
     /// An event whose detail the component read when it queued the event,
     /// named by that component: `<x-markdown>`'s `parseEnd`, `link` and
@@ -307,7 +307,7 @@ pub(crate) enum ComponentEvent {
     Frame { node: NodeId, connected: bool },
     /// A reporting `text`'s paragraph was recomputed by a committing layout
     /// run: its `layout` event (`crate::main::layout_change`), with what the
-    /// commit left — the lines it shows ([`dom::Document::text_lines`]) and
+    /// commit left — the lines it shows ([`terminus::Document::text_lines`]) and
     /// its content box (the border box less padding and border, in CSS px,
     /// native's `GetContentBoxWidth`/`GetContentBoxHeight`,
     /// `text_fragment_behavior.cc:86-87`) — read when the epilogue queued it.
@@ -318,7 +318,7 @@ pub(crate) enum ComponentEvent {
     /// outside every UA shadow tree.
     TextLayout {
         node: NodeId,
-        lines: Vec<dom::TextLineReport>,
+        lines: Vec<terminus::TextLineReport>,
         width: f32,
         height: f32,
     },
@@ -429,7 +429,7 @@ impl ComponentEvents {
         }
     }
 
-    /// Queues a whole image report batch's outcomes, in the order `dom`
+    /// Queues a whole image report batch's outcomes, in the order `terminus`
     /// returned them.
     pub(crate) fn extend_images(&self, outcomes: Vec<ImageOutcome>) {
         self.0
@@ -446,7 +446,12 @@ impl ComponentEvents {
 
     /// Queues a `scroll` or `scrollend` at `node`, with the offset change it
     /// reports.
-    pub(crate) fn queue_scroll(&self, node: NodeId, name: &'static str, delta: dom::Vector2D<f32>) {
+    pub(crate) fn queue_scroll(
+        &self,
+        node: NodeId,
+        name: &'static str,
+        delta: terminus::Vector2D<f32>,
+    ) {
         self.0
             .borrow_mut()
             .push(ComponentEvent::Scroll { node, name, delta });
@@ -465,7 +470,7 @@ impl ComponentEvents {
     pub(crate) fn queue_text_layout(
         &self,
         node: NodeId,
-        lines: Vec<dom::TextLineReport>,
+        lines: Vec<terminus::TextLineReport>,
         width: f32,
         height: f32,
     ) {

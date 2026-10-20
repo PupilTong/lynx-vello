@@ -128,7 +128,7 @@ queue without clearing it. Selection captures its root at select time.
   `autoScroll({rate, start = false, autoStop = true})` on a `scroll-view` or
   a `list` (`scroll_container.rs`'s `auto_scroll`, shared) succeeds with no
   data and moves nothing itself: a truthy `start` records a change of the
-  container's auto-scroll (`dom::Document::auto_scroll`) at `rate` CSS px
+  container's auto-scroll (`terminus::Document::auto_scroll`) at `rate` CSS px
   per second on the scrolling axis — a number, or a string read as
   `scrollTo`'s `offset` is, negative toward the start edge — which the next
   committed frame carries to the painter; a falsy or missing `start` records
@@ -147,7 +147,7 @@ queue without clearing it. Selection captures its root at select time.
   `scrollIntoView({scrollIntoViewOptions: {behavior?, block?, inline?}})`
   exists on every element and succeeds with no data once the scroll is
   requested: it is CSSOM-View's `scrollIntoView` with `container: "nearest"`
-  (`Document::scroll_into_view`, `crates/dom/src/scroll/into_view.rs:188`,
+  (`Document::scroll_into_view`, `crates/terminus/src/scroll/into_view.rs:188`,
   run by `crates/bobcat-core/src/main/tree/base_methods.rs:252`), so only the
   nearest scroll container above the element moves, to the position
   `block` (default `"start"`) and `inline` (default `"nearest"`) choose

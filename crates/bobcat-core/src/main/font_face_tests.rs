@@ -1,7 +1,7 @@
 //! The `@font-face` loader seam, driven end to end through a real view.
 //!
-//! What the pieces are: `dom` reports the rules a mounted sheet declared
-//! ([`dom::Document::take_font_face_requests`]), the page's epilogue spawns
+//! What the pieces are: `terminus` reports the rules a mounted sheet declared
+//! ([`terminus::Document::take_font_face_requests`]), the page's epilogue spawns
 //! one task per rule, each task asks the host for
 //! [`SourceRequest::Font`](crate::resource::SourceRequest::Font) in author
 //! order, and the first answer is registered under the declared family. These
@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use crate::test_support::{TestEngine, TestViewSpec, wait_for_boot};
 
 /// Solid em squares: five characters at 16px are exactly 80px of advance.
-const AHEM: &[u8] = include_bytes!("../../../hughie/tests/fixtures/Ahem.ttf");
+const AHEM: &[u8] = include_bytes!("../../../seldon/tests/fixtures/Ahem.ttf");
 
 /// One text element holding one carrier, which is what a compiled card's
 /// update slots produce.

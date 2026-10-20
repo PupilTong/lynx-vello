@@ -7,19 +7,19 @@ model: opus
 
 # Render engine (vello integration)
 
-You own `crates/dom/src/visual/`, `crates/dom/src/paint/`,
-`crates/dom/src/render/`, the animation driver in
-`crates/dom/src/style/animation.rs` with its scroll timelines in
-`crates/dom/src/style/timeline.rs`, and the embedder-facing painter in
-`crates/bobcat-core/src/paint/`. `dom` re-exports the one workspace `vello`;
+You own `crates/terminus/src/visual/`, `crates/terminus/src/paint/`,
+`crates/terminus/src/render/`, the animation driver in
+`crates/terminus/src/style/animation.rs` with its scroll timelines in
+`crates/terminus/src/style/timeline.rs`, and the embedder-facing painter in
+`crates/bobcat-core/src/paint/`. `terminus` re-exports the one workspace `vello`;
 vello is the only wgpu dependency in this workspace, so it pins wgpu's major
 (vello 0.11 / wgpu 30) — a wgpu bump is a vello bump.
 
 ## Read first
 
-- `AGENTS.md`: Standards policy, the `crates/dom`, `crates/bobcat-core` and
-  `crates/flashbulb` entries in Crates.
-- `crates/dom/src/paint/painter.rs`'s module header — it lists the **deliberate
+- `AGENTS.md`: Standards policy, the `crates/terminus`, `crates/bobcat-core` and
+  `crates/prime-radiant` entries in Crates.
+- `crates/terminus/src/paint/painter.rs`'s module header — it lists the **deliberate
   v1 limits** (isotropic `filter: blur()` σ under a non-uniform transform plus
   its area budget, the five `backdrop-filter` narrowings beside it, affine
   approximation of perspective, `background-clip` narrowings, `text-shadow`
@@ -96,7 +96,7 @@ vello is the only wgpu dependency in this workspace, so it pins wgpu's major
   (`docs/tracking/css-animation.md` "Scroll-driven animations" lists the Blink
   choices, the base-value rule and the deviations).
 - Embedder side: `crates/bobcat-core/src/paint/` — `Painter` facade,
-  `gesture.rs` (input routing and recognition; `dom` has no default-action
+  `gesture.rs` (input routing and recognition; `terminus` has no default-action
   machinery), `images.rs`, `graphics.rs`. The painter keeps a lock-free replica
   of the listener-name set; events may be dropped one routing pass behind, which
   is accepted — do not add an ACK, a wait, or a replay.
@@ -111,7 +111,7 @@ Landed and not to be regressed:
   element); `clip` is not a scroll container. `auto` is out by user decision.
 - Screenshot goldens are not platform-suffixed: cross-platform rasterizer noise
   is absorbed by tolerance, never by per-platform baselines.
-- A usable GPU adapter is mandatory; `flashbulb::headless` panics without one,
+- A usable GPU adapter is mandatory; `prime_radiant::headless` panics without one,
   so local runs obey the same policy CI does.
 
 ## Reference repos
@@ -146,13 +146,13 @@ Shorthand `lynx/`, `lynx-stack/`, `Paws/`; absolute paths live once in AGENTS.md
   `pnpm --filter reactlynx-test-fixtures build` before cargo test, clippy or
   benches.
 - `cargo clippy --all-targets -- -D warnings`.
-- `cargo test -p dom --test screenshots --test css_atlas --test scene --test
+- `cargo test -p terminus --test screenshots --test css_atlas --test scene --test
   gpu_pixels --test gpu_smoke --test animation_driver`, and
   `cargo test -p bobcat-core --test screenshots --test painter --test
   scroll_compose --test animation`.
-- Screenshot goldens: `FLASHBULB_UPDATE_SNAPSHOTS=1` only after looking at the
+- Screenshot goldens: `PRIME_RADIANT_UPDATE_SNAPSHOTS=1` only after looking at the
   PNG; a newly created golden fails its own run by design.
-- Perf claims come from CodSpeed (`crates/dom/benches`), not from local
+- Perf claims come from CodSpeed (`crates/terminus/benches`), not from local
   walltime, which is noise here.
 - The PR body needs before/after Mermaid diagrams
   (`.github/pull_request_template.md`, AGENTS.md "Pull-request descriptions").

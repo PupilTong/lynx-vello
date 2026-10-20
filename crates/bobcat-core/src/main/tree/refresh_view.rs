@@ -103,9 +103,9 @@
 //! `index.ts:27-29`), none of which reads params, and [`RefreshView`]'s
 //! [`CustomElement::invoke`] answers each with code 0, whatever `params` is and on a view with no
 //! box too. Each is CSSOM-View's "scroll an element into view"
-//! ([`dom::Document::scroll_into_view`]) in the element's nearest scroll container, `#container`:
-//! smooth for the two finishing methods, instant for `autoStartRefresh`. A UI method never
-//! flushes, so the positions are the last completed layout's.
+//! ([`terminus::Document::scroll_into_view`]) in the element's nearest scroll container,
+//! `#container`: smooth for the two finishing methods, instant for `autoStartRefresh`. A UI method
+//! never flushes, so the positions are the last completed layout's.
 //!
 //! - `finishRefresh` and `finishLoadMore` ([`finish`]) smoothly scroll `#content` back into view at
 //!   `block: center`. web-core removes `x-magnet-enable` from the first header (footer), and the
@@ -156,7 +156,7 @@
 //! path ends at the view's shadow root, which delivers them to the view's
 //! [`CustomElement::handle_event`] in the capture pass; the component takes them when their target
 //! is `#container` and no other node. Each event is queued at the view — not bubbling —
-//! only when a listener on the view registered for its name ([`dom::Document::has_listener`]),
+//! only when a listener on the view registered for its name ([`terminus::Document::has_listener`]),
 //! a `{}` detail through [`ComponentEvents::queue`] and the others through
 //! [`ComponentEvents::queue_detailed`]; the latches are recorded whether or not anything listens.
 //! Geometry is the last completed layout's, read at the delivery, and never flushed: the header's
@@ -219,13 +219,13 @@
 
 use std::cell::RefCell;
 
-use dom::event::{ElementEvent, EventPhase};
-use dom::scroll::{
-    ScrollBehavior, ScrollIntoViewContainer, ScrollIntoViewOptions, ScrollLogicalPosition,
-};
-use dom::{CustomElement, MethodCall, MethodOutcome, Node, NodeId, ShadowRootMode};
 use rustc_hash::FxHashMap;
 use smallvec::smallvec;
+use terminus::event::{ElementEvent, EventPhase};
+use terminus::scroll::{
+    ScrollBehavior, ScrollIntoViewContainer, ScrollIntoViewOptions, ScrollLogicalPosition,
+};
+use terminus::{CustomElement, MethodCall, MethodOutcome, Node, NodeId, ShadowRootMode};
 
 use super::scroll_container::{
     SCROLL_END_EVENT, SCROLL_EVENT, rect_in_scroller, rendered_scroll_box,
@@ -321,7 +321,7 @@ const LANDING_TOLERANCE: f64 = 1.0;
 
 /// Installs the `x-refresh-view` component, which queues its events on
 /// `events`. Must run before any element could carry the tag,
-/// [`Document::define`](dom::Document::define)'s own precondition.
+/// [`Document::define`](terminus::Document::define)'s own precondition.
 pub(super) fn define(document: &mut LynxDocument, events: ComponentEvents) {
     document.define(
         REFRESH_VIEW_TAG,
@@ -865,10 +865,10 @@ fn slotted(document: &LynxDocument, view: NodeId, name: &str) -> Option<NodeId> 
 mod tests {
     #![allow(clippy::float_cmp)] // Explicit pixel sizes lay out exactly.
 
-    use dom::scroll::ScrollBehavior;
-    use dom::stylo::properties::PropertyId;
-    use dom::stylo::values::computed::Display;
-    use dom::{MethodCall, MethodOutcome, NodeId, StylesheetOrigin, Vector2D};
+    use terminus::scroll::ScrollBehavior;
+    use terminus::stylo::properties::PropertyId;
+    use terminus::stylo::values::computed::Display;
+    use terminus::{MethodCall, MethodOutcome, NodeId, StylesheetOrigin, Vector2D};
 
     use super::super::test_support::{
         child, document, element_under, style_of, with_component_events,
@@ -1519,7 +1519,7 @@ mod tests {
 
     // --- the events ---------------------------------------------------------
 
-    use dom::event::EventDetail;
+    use terminus::event::EventDetail;
 
     use super::super::scroll_container::tests::{listen, scrolled};
     use super::super::test_support::touched;

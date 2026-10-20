@@ -85,10 +85,10 @@
 //! crate and are **not** claimed here:
 //!
 //! * the computed value of `color: var(--X, rgba(22,24,35,.6))` with `--X` unset belongs in
-//!   `crates/dom/tests/custom_properties.rs`;
+//!   `crates/terminus/tests/custom_properties.rs`;
 //! * what stylo does with a `var()` inside an `@font-face` descriptor, and the
 //!   `DescriptorId::FontFamily` / `DescriptorId::Src` readback, belong in
-//!   `crates/dom/tests/at_rules.rs` — which today has no `var()` case at all.
+//!   `crates/terminus/tests/at_rules.rs` — which today has no `var()` case at all.
 //!
 //! Both are stated in the relevant case's doc comment rather than asserted.
 //!
@@ -102,14 +102,14 @@
 //! encoder emits, and the lowering hands each descriptor to the engine's
 //! stylesheet contract unrewritten. None of them observes anything downstream
 //! of that hand-off, and downstream the path ends. The rule parses into a real
-//! stylo `FontFaceRule` (`crates/dom/src/style/engine.rs:417-426`) and enters
+//! stylo `FontFaceRule` (`crates/terminus/src/style/engine.rs:417-426`) and enters
 //! the cascade, but no reader of that variant exists, no `src:` URL is ever
 //! fetched, and a face reaches shaping only as embedder-supplied bytes through
-//! `Document::register_fonts` (`crates/dom/src/layout/mod.rs:192`). A card
+//! `Document::register_fonts` (`crates/terminus/src/layout/mod.rs:192`). A card
 //! that ships its own face and names it therefore renders in the default
 //! family. That gap is carried by
 //! `a_font_face_declared_family_shapes_the_text_that_names_it` in
-//! `crates/dom/tests/web_text_replication.rs`, which asserts the shaped
+//! `crates/terminus/tests/web_text_replication.rs`, which asserts the shaped
 //! advance a browser gives web-core and is `#[ignore]`d on the gap. Read the
 //! green count below as "the wire and the lowering", never as "`@font-face`
 //! works".
@@ -610,7 +610,7 @@ fn font_face_with_a_src_url_survives_the_bundle() {
 ///
 /// The stylo half of the assignment — `DescriptorId::FontFamily == "MyFont"`
 /// and `DescriptorId::Src` naming `myfont.woff`, through the `font_face_descriptor`
-/// helper at `crates/dom/tests/at_rules.rs:49` — is *not* asserted here and has
+/// helper at `crates/terminus/tests/at_rules.rs:49` — is *not* asserted here and has
 /// no case in that file today.
 #[test]
 fn font_face_descriptors_decode_in_authored_order_and_form() {
@@ -643,7 +643,7 @@ fn font_face_descriptors_decode_in_authored_order_and_form() {
 ///
 /// What stylo then makes of that descriptor is the other end of the same case,
 /// pinned by `font_face_descriptors_do_not_substitute_var` in
-/// `crates/dom/tests/at_rules.rs`: css-variables-1 §3 limits `var()`
+/// `crates/terminus/tests/at_rules.rs`: css-variables-1 §3 limits `var()`
 /// substitution to property values inside a declaration block, so the
 /// descriptor carrying one is dropped while its siblings parse. That is the
 /// browser's behaviour too, so it is the reference — not a gap.
@@ -687,8 +687,8 @@ fn font_face_var_fallback_decodes_verbatim() {
 ///
 /// The assignment's primary assertion for this row — that with
 /// `--Text-TextQuaternary` unset the computed colour *is* `rgba(22,24,35,0.6)`
-/// — belongs in `crates/dom/tests/custom_properties.rs`; `bobcat-source` cannot
-/// depend on `dom`, and no computed value is asserted in this file.
+/// — belongs in `crates/terminus/tests/custom_properties.rs`; `bobcat-source` cannot
+/// depend on `terminus`, and no computed value is asserted in this file.
 #[test]
 fn color_var_fallback_decodes_verbatim() {
     let info = style_info(vec![style_rule(

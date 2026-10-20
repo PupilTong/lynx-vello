@@ -40,7 +40,7 @@
 //!   absorbed, so the fling there ends by its decay alone, and the release aims at a snap position
 //!   whatever copy of it the whole travel reaches across the seam.
 //! - An [`AutoScroll`] is the one motion a script starts and ends: Lynx's `autoScroll`, an axis
-//!   moving at a constant rate ([`dom::scroll::AutoScrollRequest`]). It is the last to move a
+//!   moving at a constant rate ([`terminus::scroll::AutoScrollRequest`]). It is the last to move a
 //!   container: while a drag holds it, or a fling, a bounce back or a glide moves it, the
 //!   auto-scroll adds nothing, and it goes on from where they left the container. Nothing but
 //!   another change of the container's auto-scroll ends it, except the edge it moves toward when it
@@ -55,10 +55,10 @@
 //! not re-snap a container out from under the curve; a gliding container
 //! is exempt from that at-rest rule on its own.
 
-use dom::input::PointerId;
-use dom::scroll::{AutoScrollRequest, ScrollAxes, SnapAxis};
-use dom::{CommittedFrame, NodeId, Size2D, Vector2D};
 use smallvec::SmallVec;
+use terminus::input::PointerId;
+use terminus::scroll::{AutoScrollRequest, ScrollAxes, SnapAxis};
+use terminus::{CommittedFrame, NodeId, Size2D, Vector2D};
 
 use super::motion::{
     FLING_DECAY_PER_MS, Motion, OVERSHOOT_DECAY_PER_MS, bounce_back, fling_distance, fling_travel,

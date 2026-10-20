@@ -18,7 +18,7 @@ bench = false
 # The type a document request's bytes travel in, from the document to the
 # host (`ResourceFetcher::request_document`).
 bytes = { workspace = true }
-dom = { workspace = true }
+terminus = { workspace = true }
 # `<markdown>` (`tree::markdown`): its source parser and bare-URL autolinking.
 linkify = { workspace = true }
 pulldown-cmark = { workspace = true }
@@ -27,7 +27,7 @@ regex-lite = { workspace = true }
 rustc-hash = { workspace = true }
 # Only for `serde::de::Visitor`: `<markdown>`'s `markdown-style` is read in
 # its own key order, which `serde_json::Value` (a sorted map without the
-# `preserve_order` feature) does not keep. Already in the graph through `dom`.
+# `preserve_order` feature) does not keep. Already in the graph through `terminus`.
 serde = { workspace = true }
 serde_json = { workspace = true }
 smallvec = { workspace = true }
@@ -51,7 +51,7 @@ web-time = { workspace = true }
 [dev-dependencies]
 divan = { workspace = true }
 flume = { workspace = true }
-flashbulb = { workspace = true, features = ["render"] }
+prime-radiant = { workspace = true, features = ["render"] }
 bobcat-source = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
 

@@ -1,0 +1,305 @@
+//! End-to-end replaced content: encoded bytes → decoded pixels → natural size
+//! into layout → `object-fit` geometry at paint.
+//!
+//! Structural (no GPU): asserts on the scene encoding and on the layout the
+//! natural size produces. The pixel-level check is the `replaced-object-fit`
+//! screenshot golden. Decoding here is the `png` crate driven directly — the
+//! real decode pipeline lives above this layer, in the engine and its
+//! embedder, and this test's subject is replaced-content layout and paint,
+//! not codecs.
+
+mod paint_common;
+
+use std::rc::Rc;
+
+use paint_common::Doc;
+use prime_radiant::TestImages;
+use terminus::ImageRole;
+use terminus::layout::{NaturalSize, Size};
+
+const PAGE: &str = "page { display: flex; position: relative; width: 800px; height: 600px; }
+    img { display: flex; position: absolute; left: 0; top: 0; }
+    .box { width: 200px; height: 100px; }";
+
+fn checker_png(side: u32) -> Vec<u8> {
+    let half = side / 2;
+    let mut rgba = Vec::with_capacity((side * side * 4) as usize);
+    for y in 0..side {
+        for x in 0..side {
+            let pixel = match (x < half, y < half) {
+                (true, true) => [255, 0, 0, 255],
+                (false, true) => [0, 255, 0, 255],
+                (true, false) => [0, 0, 255, 255],
+                (false, false) => [255, 255, 255, 255],
+            };
+            rgba.extend_from_slice(&pixel);
+        }
+    }
+    let mut bytes = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut bytes, side, side);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().expect("png header");
+        writer.write_image_data(&rgba).expect("png data");
+    }
+    bytes
+}
+
+struct Harness {
+    doc: Doc,
+    images: Rc<TestImages>,
+}
+
+impl Harness {
+    fn new(css: &str) -> Self {
+        let doc = Doc::with_css(&format!("{PAGE} {css}"));
+        let images = Rc::new(TestImages::new());
+        Self { doc, images }
+    }
+
+    fn img(&mut self, class: &str, bytes: &[u8]) -> terminus::NodeId {
+        let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+        let mut reader = decoder.read_info().expect("png header");
+        let mut rgba = vec![0u8; reader.output_buffer_size().expect("png size")];
+        let info = reader.next_frame(&mut rgba).expect("png frame");
+        rgba.truncate(info.buffer_size());
+
+        let root = self.doc.root;
+        let node = self.doc.el_tag(root, "img", class);
+        #[allow(clippy::cast_precision_loss)]
+        let natural = NaturalSize::from_size(Size::new(info.width as f32, info.height as f32));
+        let source = format!("app:///{}.png", node.to_bits());
+        self.images
+            .insert_rgba8(&source, info.width, info.height, rgba);
+        // The source first: for an element that has one, the document owns the
+        // natural size and recomputes it from whichever bitmap the element
+        // draws, so a hand-written size only survives after the source.
+        self.doc
+            .dom
+            .set_image_source(node, ImageRole::Source, Some(&source));
+        self.doc.dom.set_natural_size(node, natural);
+        node
+    }
+
+    fn stats(&mut self) -> (usize, u32) {
+        prime_radiant::render_with_images(&mut self.doc.dom, &self.images);
+        let scene = self.doc.dom.scene(self.images.as_ref());
+        let encoding = scene.encoding();
+        (encoding.draw_tags.len(), encoding.n_open_clips)
+    }
+}
+
+#[test]
+fn a_decoded_image_paints_and_leaves_every_layer_closed() {
+    let mut h = Harness::new("");
+    h.img("box", &checker_png(4));
+    let (draws, open) = h.stats();
+    assert!(draws > 0, "replaced content must encode at least one draw");
+    assert_eq!(open, 0, "every pushed layer must be popped");
+}
+
+#[test]
+fn the_natural_size_reaches_layout_when_no_size_is_specified() {
+    let mut h = Harness::new("");
+    let node = h.img("", &checker_png(8));
+    h.doc.dom.layout();
+
+    let layout = h.doc.dom.rounded_layout(node).expect("laid out");
+    assert_eq!(
+        (layout.size.width, layout.size.height),
+        (8.0, 8.0),
+        "an unsized replaced element takes its intrinsic size"
+    );
+}
+
+#[test]
+fn natural_size_updates_change_auto_sized_layout() {
+    let mut h = Harness::new("");
+    let node = h.img("", &checker_png(4));
+    h.doc.dom.layout();
+    let size = |h: &Harness| h.doc.dom.rounded_layout(node).expect("laid out").size;
+    assert_eq!(size(&h), Size::new(4.0, 4.0));
+
+    h.doc
+        .dom
+        .set_natural_size(node, NaturalSize::from_size(Size::new(4.0, 4.0)));
+    h.doc.dom.layout();
+    assert_eq!(size(&h), Size::new(4.0, 4.0));
+
+    h.doc
+        .dom
+        .set_natural_size(node, NaturalSize::from_size(Size::new(9.0, 9.0)));
+    h.doc.dom.layout();
+    assert_eq!(size(&h), Size::new(9.0, 9.0));
+}
+
+#[test]
+fn a_node_with_no_registered_pixels_paints_nothing_but_still_lays_out() {
+    let mut h = Harness::new("");
+    let root = h.doc.root;
+    let node = h.doc.el_tag(root, "img", "");
+    h.doc
+        .dom
+        .set_natural_size(node, NaturalSize::from_size(Size::new(40.0, 20.0)));
+
+    let (_, open) = h.stats();
+    assert_eq!(open, 0);
+    let layout = h.doc.dom.rounded_layout(node).expect("laid out");
+    assert_eq!((layout.size.width, layout.size.height), (40.0, 20.0));
+}
+
+/// Which of an element's two sources a frame draws: its own while that has
+/// pixels, its placeholder until then — and the drawn source is the one the
+/// frame reads, which is what the store sees.
+#[test]
+fn a_frame_draws_the_placeholder_until_the_source_has_pixels() {
+    const SRC: &str = "app:///src.png";
+    const PLACEHOLDER: &str = "app:///placeholder.png";
+
+    let mut h = Harness::new("");
+    let root = h.doc.root;
+    let node = h.doc.el_tag(root, "img", "box");
+    h.doc
+        .dom
+        .set_image_source(node, ImageRole::Source, Some(SRC));
+    h.doc
+        .dom
+        .set_image_source(node, ImageRole::Placeholder, Some(PLACEHOLDER));
+    h.images.insert_rgba8(PLACEHOLDER, 1, 1, vec![0; 4]);
+
+    let _ = h.stats();
+    assert!(
+        h.images.was_asked_for(SRC),
+        "both sources are requested, and the placeholder is no fallback"
+    );
+    let sources = |h: &Harness| -> Vec<String> {
+        h.images
+            .reads()
+            .into_iter()
+            .map(|(source, _)| source)
+            .collect()
+    };
+    assert_eq!(sources(&h), vec![PLACEHOLDER.to_owned()]);
+
+    // The element's own source arriving takes the frame over for good.
+    h.images.insert_rgba8(SRC, 2, 2, vec![0; 16]);
+    let _ = h.stats();
+    assert_eq!(sources(&h).last().map(String::as_str), Some(SRC));
+}
+
+#[test]
+fn every_object_fit_value_paints_without_unbalancing_layers() {
+    for fit in ["fill", "contain", "cover", "none", "scale-down"] {
+        let mut h = Harness::new(&format!(".box {{ object-fit: {fit}; }}"));
+        h.img("box", &checker_png(4));
+        let (draws, open) = h.stats();
+        assert!(draws > 0, "object-fit: {fit} must draw");
+        assert_eq!(open, 0, "object-fit: {fit} left a layer open");
+    }
+}
+
+#[test]
+fn object_position_and_image_rendering_are_accepted_together() {
+    let mut h = Harness::new(
+        ".box { object-fit: none; object-position: 100% 0%; image-rendering: pixelated; }",
+    );
+    h.img("box", &checker_png(4));
+    let (draws, open) = h.stats();
+    assert!(draws > 0);
+    assert_eq!(open, 0);
+}
+
+/// The frame reads each source with the size it draws it at: the fitted rect
+/// for a replaced element, so a store can size its decode to the draw rather
+/// than to the intrinsic size. `object-fit: cover` on a square image in a
+/// 200x100 box draws a 200x200 copy clipped to the box, and that is what the
+/// hint has to say — the copy's size, not the box's.
+#[test]
+fn a_read_carries_the_drawn_size_as_its_hint() {
+    for (fit, expected) in [
+        ("fill", (200, 100)),
+        ("cover", (200, 200)),
+        ("contain", (100, 100)),
+    ] {
+        let mut h = Harness::new(&format!(".box {{ object-fit: {fit}; }}"));
+        h.img("box", &checker_png(4));
+        let _ = h.stats();
+        let reads = h.images.reads();
+        let (_, hint) = reads.last().expect("the frame read the image");
+        assert_eq!(
+            (hint.width, hint.height),
+            expected,
+            "object-fit: {fit} draws a {}x{} copy",
+            expected.0,
+            expected.1
+        );
+    }
+}
+
+/// Regression: a load completing after its element was freed must not panic.
+///
+/// The registry names replaced nodes so a completed load knows whose natural
+/// size to set, and `Document::set_natural_size` panics on a stale id rather
+/// than ignoring one. Freeing is the only place an id stops meaning anything,
+/// so the free is where the binding has to go — before this, an ordinary
+/// unmount during a load reached that panic, which is fatal on abort-only
+/// Wasm.
+#[test]
+fn freeing_a_node_mid_load_leaves_no_stale_binding() {
+    let mut h = Harness::new("");
+    let root = h.doc.root;
+    let node = h.doc.el_tag(root, "img", "box");
+    h.doc
+        .dom
+        .set_image_source(node, ImageRole::Source, Some("app:///pending.png"));
+    assert_eq!(
+        h.doc.dom.take_wanted_images(),
+        vec![std::sync::Arc::<str>::from("app:///pending.png")],
+        "the source was asked for, so a report for it is in flight"
+    );
+
+    h.doc.dom.drop_element(node);
+    h.doc
+        .dom
+        .apply_image_events(&[terminus::ImageEvent::Loaded {
+            source: std::sync::Arc::from("app:///pending.png"),
+            width: 4,
+            height: 4,
+        }]);
+}
+
+/// And the unbind is per node, not per source: one element going away leaves
+/// the others presenting the same URL bound, so the load still sizes them.
+#[test]
+fn freeing_one_node_leaves_a_sibling_on_the_same_source_bound() {
+    const SHARED: &str = "app:///shared.png";
+
+    let mut h = Harness::new("");
+    let root = h.doc.root;
+    let leaving = h.doc.el_tag(root, "img", "");
+    let staying = h.doc.el_tag(root, "img", "");
+    h.doc
+        .dom
+        .set_image_source(leaving, ImageRole::Source, Some(SHARED));
+    h.doc
+        .dom
+        .set_image_source(staying, ImageRole::Source, Some(SHARED));
+
+    h.doc.dom.drop_element(leaving);
+    h.doc
+        .dom
+        .apply_image_events(&[terminus::ImageEvent::Loaded {
+            source: std::sync::Arc::from(SHARED),
+            width: 40,
+            height: 20,
+        }]);
+    h.doc.dom.layout();
+
+    let layout = h.doc.dom.rounded_layout(staying).expect("laid out");
+    assert_eq!(
+        (layout.size.width, layout.size.height),
+        (40.0, 20.0),
+        "the surviving node still received the load's natural size"
+    );
+}

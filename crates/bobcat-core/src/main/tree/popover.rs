@@ -1,12 +1,12 @@
 //! HTML's `popover` attribute: the UA rules HTML's rendering section gives
-//! it (rendering.html, "Flow content"), over `dom`'s popover algorithms
-//! (`dom::tree::popover`) and top layer.
+//! it (rendering.html, "Flow content"), over `terminus`'s popover algorithms
+//! (`terminus::tree::popover`) and top layer.
 //!
 //! A W3C feature, so `AGENTS.md`'s standards policy puts it in the first
 //! bucket: web-core runs in a browser, where an element with a `popover`
 //! attribute is the browser's popover. Native Lynx has none. The engine's
-//! capability is a subset — `dom` shows and hides Manual popovers, and no
-//! popover method or `popovertarget` reaches script (`dom::tree::popover`
+//! capability is a subset — `terminus` shows and hides Manual popovers, and no
+//! popover method or `popovertarget` reaches script (`terminus::tree::popover`
 //! lists what is absent) — and every rule here is the browser's, unchanged
 //! but for the two adaptations every HTML rule in this sheet gets:
 //!
@@ -76,9 +76,9 @@ pub(super) const UA_RULES: &str = r"
 mod tests {
     #![allow(clippy::float_cmp)] // Authored pixel sizes lay out exactly.
 
-    use dom::stylo::properties::PropertyId;
-    use dom::stylo::values::computed::Display;
-    use dom::{NodeId, Point2D, PopoverError, StylesheetOrigin};
+    use terminus::stylo::properties::PropertyId;
+    use terminus::stylo::values::computed::Display;
+    use terminus::{NodeId, Point2D, PopoverError, StylesheetOrigin};
 
     use super::super::dialog::{DIALOG_TAG, InvalidState, close, show, show_modal};
     use super::super::test_support::{

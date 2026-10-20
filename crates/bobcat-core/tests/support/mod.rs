@@ -144,7 +144,7 @@ pub struct FetcherDouble {
     /// The images this host serves, if a test installed any. Shared with the
     /// test through an `Arc` so it can publish pixels and read the retain log
     /// while the painter owns its own handle.
-    pub images: Option<Rc<flashbulb::TestImages>>,
+    pub images: Option<Rc<prime_radiant::TestImages>>,
     /// Every call the view made on this host's image half, counted whether or
     /// not a store was installed — which is what a test asserting that a view
     /// stopped asking reads.
@@ -192,7 +192,7 @@ impl FetcherDouble {
     /// Serves images from `images`, which the test keeps a handle on so it
     /// can publish pixels and read the retain log.
     #[must_use]
-    pub fn with_images(mut self, images: Rc<flashbulb::TestImages>) -> Self {
+    pub fn with_images(mut self, images: Rc<prime_radiant::TestImages>) -> Self {
         self.images = Some(images);
         self
     }

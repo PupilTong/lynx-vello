@@ -733,7 +733,7 @@ mod tests {
                 "stylesheet",
             ),
             (
-                LoadedSource::Font(dom::FontBlob::from_static(b"not a font")),
+                LoadedSource::Font(terminus::FontBlob::from_static(b"not a font")),
                 "font",
             ),
             (LoadedSource::Fetched, "plain fetch"),

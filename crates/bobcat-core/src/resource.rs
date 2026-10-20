@@ -19,14 +19,14 @@ use crate::style::PreparsedStyleSheet;
 /// nowhere else, past the one call that builds it: that call hands it the
 /// view's startup sources as well, so their IO overlaps everything the
 /// embedder does before its first turn. A painter observing that view reads
-/// pixels out of it through [`FrameImages`](dom::FrameImages) while it
+/// pixels out of it through [`FrameImages`](terminus::FrameImages) while it
 /// composes, and asks it for nothing.
 ///
 /// Source requests are non-blocking: the fetcher resolves the URL, loads and
 /// validates UTF-8 (or returns a pre-parsed sheet), then consumes the concrete
 /// [`SourceCompletion`] to answer whoever asked, without naming them. It owns
 /// any executor its IO needs. Images are reported through
-/// [`ImageReports`](dom::ImageReports), then read during composition.
+/// [`ImageReports`](terminus::ImageReports), then read during composition.
 ///
 /// **A fetcher's base URL must be the view's
 /// [`ViewSources::base_url`](crate::ViewSources::base_url).** Every script
@@ -44,7 +44,7 @@ use crate::style::PreparsedStyleSheet;
 /// Every protocol method is synchronous: it starts work and returns. Core therefore holds no
 /// resource future and polls none, and nothing here names a host's transport, caches or
 /// codecs: whatever surface those have belongs to the host's own crate.
-pub trait ResourceFetcher: dom::FrameImages {
+pub trait ResourceFetcher: terminus::FrameImages {
     /// Begins one source load without blocking its caller.
     ///
     /// **A view's startup sources are requested before it runs at all**:
@@ -86,12 +86,12 @@ pub trait ResourceFetcher: dom::FrameImages {
     /// host canonicalises to one resource are simply asked for twice.
     ///
     /// For every source it is asked for, a host eventually calls exactly one
-    /// of [`ImageReports::loaded`](dom::ImageReports::loaded),
-    /// [`ImageReports::parsed_document`](dom::ImageReports::parsed_document)
-    /// or [`ImageReports::failed`](dom::ImageReports::failed), unless the view
+    /// of [`ImageReports::loaded`](terminus::ImageReports::loaded),
+    /// [`ImageReports::parsed_document`](terminus::ImageReports::parsed_document)
+    /// or [`ImageReports::failed`](terminus::ImageReports::failed), unless the view
     /// is torn down first. A source whose bytes are an SVG document is not
     /// decoded but parsed, with the engine's own parser
-    /// ([`ImageEvent::parse_document`](dom::ImageEvent::parse_document)), on
+    /// ([`ImageEvent::parse_document`](terminus::ImageEvent::parse_document)), on
     /// whatever thread the host decodes bitmaps on, and reported as the
     /// parsed document, or as a failure when it does not parse. Reporting and
     /// asking for the turn that drains the report are both the host's, and
@@ -108,10 +108,10 @@ pub trait ResourceFetcher: dom::FrameImages {
     /// `source` is a synthetic name the document chose (`svg-content:` and a
     /// hash of the bytes), not a URL: there is nothing to fetch. The host
     /// parses the bytes exactly as it parses a fetched document of that kind
-    /// — with [`ImageEvent::parse_document`](dom::ImageEvent::parse_document),
+    /// — with [`ImageEvent::parse_document`](terminus::ImageEvent::parse_document),
     /// where it decodes bitmaps — and reports exactly one of
-    /// [`ImageReports::parsed_document`](dom::ImageReports::parsed_document)
-    /// or [`ImageReports::failed`](dom::ImageReports::failed) for `source`.
+    /// [`ImageReports::parsed_document`](terminus::ImageReports::parsed_document)
+    /// or [`ImageReports::failed`](terminus::ImageReports::failed) for `source`.
     /// The document asks once per distinct markup while some element
     /// presents it, and again after it forgot the source with the last
     /// element presenting it. Every request is parsed and reported on its
@@ -121,14 +121,15 @@ pub trait ResourceFetcher: dom::FrameImages {
     ///
     /// The default serves nothing: on a host without document support an
     /// `<svg content>` stays pending and draws nothing.
-    fn request_document(&self, _source: &str, _bytes: bytes::Bytes, _kind: dom::DocumentKind) {}
+    fn request_document(&self, _source: &str, _bytes: bytes::Bytes, _kind: terminus::DocumentKind) {
+    }
 
     /// The host's own moment in every [`LynxView::pump`](crate::LynxView::pump),
     /// on this thread, before the turn reads the reports queued so far.
     ///
     /// A host whose loads finish somewhere else — a decode thread, a
     /// browser worker — forwards each completion into its
-    /// [`ImageReports`](dom::ImageReports) here, so a load that completed
+    /// [`ImageReports`](terminus::ImageReports) here, so a load that completed
     /// between turns is reported in the next one whether or not that turn
     /// requested or resolved anything. Asking for that turn is still the
     /// host's, through the wakeup it gave the view. A host that reports
@@ -195,7 +196,7 @@ pub type StyleSheetProbe = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 /// clone and never used.
 ///
 /// It is the right handle for a registry that answers reads and starts loads,
-/// and the wrong one for a registry that *reports* — an [`ImageReports`](dom::ImageReports)
+/// and the wrong one for a registry that *reports* — an [`ImageReports`](terminus::ImageReports)
 /// belongs to one view, and a handle shared across views has nowhere to put
 /// more than one. A host that loads images asynchronously returns a per-view
 /// value from the builder [`create_lynx_view`](crate::LynxGroup::create_lynx_view) takes,
@@ -213,7 +214,7 @@ impl<T: ResourceFetcher + ?Sized> ResourceFetcher for Rc<T> {
         (**self).request_image(source);
     }
 
-    fn request_document(&self, source: &str, bytes: bytes::Bytes, kind: dom::DocumentKind) {
+    fn request_document(&self, source: &str, bytes: bytes::Bytes, kind: terminus::DocumentKind) {
         (**self).request_document(source, bytes, kind);
     }
 
@@ -291,7 +292,7 @@ pub enum LoadedSource {
     /// One `@font-face` source's bytes, unvalidated: a font file is binary,
     /// so nothing here decodes or transcodes it. The font backend is what
     /// rejects bytes that are not a face.
-    Font(dom::FontBlob),
+    Font(terminus::FontBlob),
     /// A [`SourceRequest::Fetch`] that is over. It carries nothing: the
     /// bytes stayed with the fetcher, and whatever it made of them is
     /// reachable only as the source requests it now answers.
