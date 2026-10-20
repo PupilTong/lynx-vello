@@ -84,8 +84,11 @@
 //! container) always has one: with no content, that paragraph lays out one
 //! empty line of the host's strut, so the host is one line tall and its
 //! caret sits on that line, as an HTML text control is never shorter than
-//! one line. A host with no paragraph — a flex, grid, linear or relative
-//! host that is empty, or holds only white space it does not render — is
+//! one line. A text control's editor keeps that line when editing is turned
+//! off and it is no longer a host: its component marks it
+//! ([`Document::set_has_line_if_empty`]), as Blink's inner editor's UA style
+//! does; every other empty paragraph lays out no line. A host with no paragraph — a flex, grid,
+//! linear or relative host that is empty, or holds only white space it does not render — is
 //! edited on value offsets alone, a cluster being one code point there.
 //!
 //! Commands that read the layout — pointer placement, caret movement,
@@ -285,11 +288,18 @@ pub(crate) fn makes_host(value: Option<&str>) -> bool {
 }
 
 /// Whether `node` is an editing host ([`Document::is_editing_host`]), read
-/// off the node itself: what layout asks of the element establishing a
-/// paragraph, whose paragraph then keeps one empty line when it has no
-/// content.
+/// off the node itself.
 pub(crate) fn is_host_node<T>(node: &crate::Node<T>) -> bool {
     node.is_element() && makes_host(node.attribute(CONTENTEDITABLE))
+}
+
+/// Whether the paragraph `node` establishes keeps one empty line of its
+/// strut when it has no content: `node` is an editing host, or was given
+/// the line by [`Document::set_has_line_if_empty`]. What layout asks of the
+/// element establishing a paragraph; Blink's `LayoutBlock::HasLineIfEmpty`,
+/// true for an editable root or a style that says so.
+pub(crate) fn has_line_if_empty<T>(node: &crate::Node<T>) -> bool {
+    node.has_line_if_empty() || is_host_node(node)
 }
 
 impl<T> Document<T> {
@@ -313,6 +323,24 @@ impl<T> Document<T> {
         self.editing.hosts > 0
     }
 
+    /// Gives `node`'s own paragraph one empty line of its strut when it has
+    /// no content (`on`), or takes it away, whether or not `node` is an
+    /// editing host: for a text control's editor, which is one line tall
+    /// while editing is turned off too. Blink's text control inner editor
+    /// carries the same bit in its UA style (`SetHasLineIfEmpty`), apart
+    /// from being editable. An editing host has the line either way. A
+    /// node that is not an element is left alone.
+    pub fn set_has_line_if_empty(&mut self, node: NodeId, on: bool) {
+        if !self.get(node).is_some_and(crate::Node::is_element) {
+            return;
+        }
+        if self.live_node_mut(node).set_has_line_if_empty(on) != on {
+            // A shaping input of the paragraph the element establishes, as
+            // in `note_contenteditable_change`.
+            self.invalidate_layout(node);
+        }
+    }
+
     /// Records that `node`'s `contenteditable` attribute is about to change
     /// from what it is now to `value` (`None` for a removal), keeping
     /// [`Self::has_editing_hosts`]'s count. Called by the attribute setters
@@ -327,8 +355,8 @@ impl<T> Document<T> {
         }
         if is != was {
             // A paragraph the element establishes keeps one empty line for
-            // no content only while it is a host, which is a shaping input
-            // of that paragraph: lay it out again. Nothing in the style
+            // no content while it is a host ([`has_line_if_empty`]), which
+            // is a shaping input of that paragraph: lay it out again. Nothing in the style
             // system sees the attribute unless a selector names it.
             self.invalidate_layout(node);
         }

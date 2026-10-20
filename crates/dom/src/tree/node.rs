@@ -115,6 +115,7 @@ impl NodeFlags {
     const MAY_OVERRIDE_CHILDREN: u8 = 1 << 1;
     const LYNX_TEXT: u8 = 1 << 2;
     const PLACEHOLDER_PSEUDO: u8 = 1 << 3;
+    const LINE_IF_EMPTY: u8 = 1 << 4;
 
     const fn get(self, bit: u8) -> bool {
         self.0 & bit != 0
@@ -339,6 +340,18 @@ impl<T> Node<T> {
     /// called once, where the element is given its definition.
     pub(crate) fn mark_lynx_text(&mut self) {
         self.flags.set(NodeFlags::LYNX_TEXT, true);
+    }
+
+    /// Whether this element's own paragraph keeps one empty line when it
+    /// has no content, whether or not it is an editing host
+    /// ([`crate::Document::set_has_line_if_empty`]).
+    pub(crate) fn has_line_if_empty(&self) -> bool {
+        self.flags.get(NodeFlags::LINE_IF_EMPTY)
+    }
+
+    /// Records [`Self::has_line_if_empty`], answering what it was.
+    pub(crate) fn set_has_line_if_empty(&mut self, on: bool) -> bool {
+        self.flags.set(NodeFlags::LINE_IF_EMPTY, on)
     }
 
     pub(crate) fn owner_document(&self) -> &Node<T> {

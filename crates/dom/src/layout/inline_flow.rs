@@ -422,10 +422,10 @@ fn breaking_of(style: &ComputedValues) -> BreakStyle {
 }
 
 /// The block's own parameters, from its computed style and, for an editing
-/// host, its `contenteditable` attribute: a host's paragraph keeps one empty
-/// line of its strut when it has no content, so the host is one line tall and
-/// its caret has a line to sit on, as an HTML text control is never shorter
-/// than one line.
+/// host or a text control's editor, [`crate::editing::has_line_if_empty`]:
+/// such a block's paragraph keeps one empty line of its strut when it has no
+/// content, so the block is one line tall and a caret has a line to sit on,
+/// as an HTML text control is never shorter than one line.
 ///
 /// An anonymous block box is never a host: a host that establishes no
 /// paragraph of its own (a flex `view`) lays its loose text out in one, and
@@ -434,7 +434,7 @@ fn flow_style<T>(tree: &TreeArenas<T>, element: NodeSlot) -> InlineFlowStyle {
     let node = tree.at(element);
     let view = StyleView::of(node);
     InlineFlowStyle {
-        strut_line_when_empty: crate::editing::is_host_node(node),
+        strut_line_when_empty: crate::editing::has_line_if_empty(node),
         ..InlineFlowStyle::from_container_style(&view, &TextRunView::from_values(view.values()))
     }
 }
