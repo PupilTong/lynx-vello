@@ -278,15 +278,15 @@ fn touch_xy(id: u32, phase: PointerPhase, x: f32, y: f32) -> InputEvent {
 #[test]
 fn a_click_reaches_the_common_ancestor_and_two_quick_ones_a_dblclick() {
     let mut engine = booted(CLICK_PAGE);
-    engine.painter.clock.pin(0.0);
+    engine.painter.clock_mut().pin(0.0);
     engine.dispatch_input(touch_xy(1, PointerPhase::Down, 50.0, 50.0));
     engine.dispatch_input(touch_xy(1, PointerPhase::Up, 150.0, 50.0));
     wait_for_log(&mut engine, "click@3");
 
-    engine.painter.clock.pin(1.0);
+    engine.painter.clock_mut().pin(1.0);
     engine.dispatch_input(touch_xy(1, PointerPhase::Down, 50.0, 50.0));
     engine.dispatch_input(touch_xy(1, PointerPhase::Up, 50.0, 50.0));
-    engine.painter.clock.pin(1.2);
+    engine.painter.clock_mut().pin(1.2);
     engine.dispatch_input(touch_xy(1, PointerPhase::Down, 50.0, 50.0));
     engine.dispatch_input(touch_xy(1, PointerPhase::Up, 50.0, 50.0));
     wait_for_log(
@@ -325,7 +325,7 @@ const STAMPED_GESTURE_PAGE: &str = r"
 fn a_delivered_event_carries_its_timestamp_and_params() {
     let mut engine = booted(STAMPED_GESTURE_PAGE);
     engine.dispatch_input(touch(1, PointerPhase::Down, 10.0));
-    engine.painter.clock.pin(0.25);
+    engine.painter.clock_mut().pin(0.25);
     engine.dispatch_input(touch(1, PointerPhase::Up, 12.0));
     wait_for_log(&mut engine, "number:250:object:{}");
 }
@@ -351,7 +351,7 @@ fn travel_beyond_the_tap_slop_suppresses_the_tap() {
 fn a_held_pointer_delivers_longpress_and_suppresses_the_tap() {
     let mut engine = booted(&gesture_page(true));
     engine.dispatch_input(touch(1, PointerPhase::Down, 10.0));
-    engine.painter.clock.pin(0.6);
+    engine.painter.clock_mut().pin(0.6);
     engine.dispatch_input(touch(1, PointerPhase::Move, 10.0));
     wait_for_log(&mut engine, "longpress:10");
 
@@ -368,7 +368,7 @@ fn a_held_pointer_delivers_longpress_and_suppresses_the_tap() {
 fn a_long_hold_without_longpress_listener_still_taps() {
     let mut engine = booted(&gesture_page(false));
     engine.dispatch_input(touch(1, PointerPhase::Down, 10.0));
-    engine.painter.clock.pin(0.6);
+    engine.painter.clock_mut().pin(0.6);
     engine.dispatch_input(touch(1, PointerPhase::Up, 10.0));
     wait_for_log(&mut engine, "tap:10");
 }
@@ -380,7 +380,7 @@ fn a_long_hold_without_longpress_listener_still_taps() {
 fn a_release_after_the_deadline_delivers_longpress_before_the_release() {
     let mut engine = booted(&gesture_page(true));
     engine.dispatch_input(touch(1, PointerPhase::Down, 10.0));
-    engine.painter.clock.pin(0.6);
+    engine.painter.clock_mut().pin(0.6);
     engine.dispatch_input(touch(1, PointerPhase::Up, 10.0));
     engine.dispatch_input(touch(1, PointerPhase::Down, 30.0));
     engine.dispatch_input(touch(1, PointerPhase::Up, 30.0));
@@ -492,7 +492,7 @@ fn a_scroll_consuming_drag_suppresses_the_tap() {
     // document followed: the marker queued ahead of the probe.
     let offset = engine
         .painter
-        .scroll_intents
+        .scroll_intents()
         .offset_for(node_id(3))
         .expect("the drag scrolled the view");
     assert!(
@@ -596,7 +596,7 @@ fn instant_drag_and_wheel_scrolls_fire_scroll_then_one_scrollend() {
         (3.0, "scroll,scrollend,scroll,scrollend,scroll"),
         (3.03, "scroll,scrollend,scroll,scrollend,scroll,scroll"),
     ] {
-        engine.painter.clock.pin(at);
+        engine.painter.clock_mut().pin(at);
         engine.dispatch_input(InputEvent::wheel(
             Point2D::new(100.0, 100.0),
             terminus::Vector2D::new(0.0, 20.0),
@@ -746,7 +746,7 @@ fn a_capturing_container_hands_its_drag_to_the_scroller_above() {
     drag(&mut engine, 50.0, 20.0);
     assert_shown_at(&mut engine, 3, 22.0);
     assert_eq!(
-        engine.painter.scroll_intents.offset_for(node_id(4)),
+        engine.painter.scroll_intents().offset_for(node_id(4)),
         None,
         "the inner scroller was not moved"
     );
@@ -763,7 +763,7 @@ fn overscroll_contain_keeps_a_wheel_inside_its_container() {
     ));
     assert_shown_at(&mut engine, 4, 900.0);
     assert_eq!(
-        engine.painter.scroll_intents.offset_for(node_id(3)),
+        engine.painter.scroll_intents().offset_for(node_id(3)),
         None,
         "the remainder was fenced off"
     );
@@ -862,7 +862,7 @@ fn an_initial_scroll_target_positions_the_container_in_the_boot_commit() {
         terminus::Vector2D::zero(),
     ));
     assert_eq!(
-        engine.painter.scroll_intents.offset_for(node_id(3)),
+        engine.painter.scroll_intents().offset_for(node_id(3)),
         None,
         "nothing for the painter to override"
     );
@@ -870,7 +870,7 @@ fn an_initial_scroll_target_positions_the_container_in_the_boot_commit() {
 
 /// Pins the painter's clock and feeds one touch at `y`.
 fn touch_at(engine: &mut TestEngine, at: f64, phase: PointerPhase, y: f32) {
-    engine.painter.clock.pin(at);
+    engine.painter.clock_mut().pin(at);
     engine.dispatch_input(InputEvent::pointer(
         Point2D::new(100.0, y),
         1,
@@ -881,7 +881,7 @@ fn touch_at(engine: &mut TestEngine, at: f64, phase: PointerPhase, y: f32) {
 
 /// Runs the painter's gesture clock at `at`, the way a display frame does.
 fn frame_at(engine: &mut TestEngine, at: f64) {
-    engine.painter.clock.pin(at);
+    engine.painter.clock_mut().pin(at);
     engine.painter.service_gesture_clock(at);
 }
 
@@ -1196,7 +1196,7 @@ fn a_circular_axis_never_chains_out() {
         live_offset(&mut engine, 4).y
     );
     assert_eq!(
-        engine.painter.scroll_intents.offset_for(node_id(3)),
+        engine.painter.scroll_intents().offset_for(node_id(3)),
         None,
         "nothing chained out to the outer"
     );
@@ -1280,7 +1280,7 @@ fn a_drag_on_a_flinging_scroller_takes_it_over() {
     assert!((live_offset(&mut engine, 3).y - held).abs() < f32::EPSILON);
     assert!(!engine.is_animating());
 
-    engine.painter.clock.pin(2.0);
+    engine.painter.clock_mut().pin(2.0);
     engine.dispatch_input(touch(1, PointerPhase::Down, 150.0));
     engine.dispatch_input(touch(1, PointerPhase::Up, 150.0));
     wait_for_log(&mut engine, "tap:150");
@@ -1311,7 +1311,7 @@ fn pager_page(page_css: &str) -> String {
 
 /// Pins the painter's clock and feeds one touch at `x`, halfway down.
 fn touch_x_at(engine: &mut TestEngine, at: f64, phase: PointerPhase, x: f32) {
-    engine.painter.clock.pin(at);
+    engine.painter.clock_mut().pin(at);
     engine.dispatch_input(InputEvent::pointer(
         Point2D::new(x, 100.0),
         1,
@@ -1325,7 +1325,7 @@ fn live_offset(engine: &mut TestEngine, node: u64) -> terminus::Vector2D<f32> {
     let node = node_id(node);
     engine
         .painter
-        .scroll_intents
+        .scroll_intents()
         .offset_for(node)
         .unwrap_or_else(|| {
             let frame = engine
@@ -1345,7 +1345,7 @@ fn adopt_at(engine: &mut TestEngine, at: f64) {
         .painter
         .published_frame()
         .expect("a frame is adopted");
-    engine.painter.scroll_intents.rebase(&frame, at);
+    engine.painter.scroll_intents_mut().rebase(&frame, at);
 }
 
 /// A horizontal flick on the pager: 60px of leftward travel over 20ms —
@@ -1437,11 +1437,11 @@ fn a_far_snap_position_is_still_reached_by_a_fling() {
     assert!(
         engine
             .painter
-            .scroll_intents
+            .scroll_intents()
             .is_flinging(&frame, node_id(3)),
         "a fling carries it"
     );
-    assert!(!engine.painter.scroll_intents.is_gliding(node_id(3)));
+    assert!(!engine.painter.scroll_intents().is_gliding(node_id(3)));
     frame_at(&mut engine, 0.3);
     let mid = live_offset(&mut engine, 3).x;
     assert!(mid > 200.0 && mid < 800.0, "on its way, got {mid}");
@@ -1502,7 +1502,7 @@ fn a_smooth_request_glides_to_its_target() {
 
     adopt_at(&mut engine, 1.0);
     assert!(engine.is_animating(), "the request started a glide");
-    assert!(engine.painter.scroll_intents.is_gliding(node_id(3)));
+    assert!(engine.painter.scroll_intents().is_gliding(node_id(3)));
     let mut previous = 0.0;
     let mut at = 1.0;
     while engine.is_animating() {
@@ -1544,7 +1544,7 @@ fn an_auto_scroll_runs_on_the_painter_and_its_posts_reach_the_document() {
 
     adopt_at(&mut engine, 1.0);
     assert!(engine.is_animating(), "the auto-scroll owes frames");
-    assert!(engine.painter.scroll_intents.has_auto_scroll(node_id(3)));
+    assert!(engine.painter.scroll_intents().has_auto_scroll(node_id(3)));
     let mut at = 1.0;
     for _ in 0..31 {
         at += 1.0 / 60.0;
@@ -1708,9 +1708,9 @@ fn a_wheel_tick_ends_a_glide_where_the_wheel_puts_it() {
     frame_at(&mut engine, 1.05);
     let mid = live_offset(&mut engine, 3).x;
     assert!(mid > 0.0 && mid < 600.0, "mid-glide, got {mid}");
-    assert!(engine.painter.scroll_intents.is_gliding(node_id(3)));
+    assert!(engine.painter.scroll_intents().is_gliding(node_id(3)));
 
-    engine.painter.clock.pin(1.06);
+    engine.painter.clock_mut().pin(1.06);
     engine.dispatch_input(InputEvent::wheel(
         Point2D::new(100.0, 100.0),
         terminus::Vector2D::new(30.0, 0.0),
@@ -1720,9 +1720,9 @@ fn a_wheel_tick_ends_a_glide_where_the_wheel_puts_it() {
         landed > mid && landed % 200.0 == 0.0,
         "the wheel stepped to the next page ahead of {mid}, got {landed}"
     );
-    assert!(!engine.painter.scroll_intents.is_gliding(node_id(3)));
+    assert!(!engine.painter.scroll_intents().is_gliding(node_id(3)));
     assert!(
-        engine.painter.scroll_intents.is_wheeling(node_id(3)),
+        engine.painter.scroll_intents().is_wheeling(node_id(3)),
         "the glide ended, and the wheel gesture's quiet interval runs"
     );
     for at in [1.1, 1.3, 2.0] {
@@ -1893,7 +1893,7 @@ fn a_viewpager_that_cannot_scroll_ignores_drags_but_not_select_tab() {
     assert!(!engine.is_animating());
     assert!(live_offset(&mut engine, 3).x.abs() < f32::EPSILON);
 
-    engine.painter.clock.pin(1.0);
+    engine.painter.clock_mut().pin(1.0);
     engine.dispatch_input(touch(1, PointerPhase::Down, 100.0));
     engine.dispatch_input(touch(1, PointerPhase::Up, 100.0));
     wait_for_log(&mut engine, "selectTab:0");
@@ -2075,7 +2075,7 @@ fn a_swiper_resized_at_rest_stays_on_its_item() {
         touch_x_at(&mut engine, 0.05, PointerPhase::Move, to);
         touch_x_at(&mut engine, 0.4, PointerPhase::Up, to);
         let mut at = 0.4;
-        while engine.painter.scroll_intents.is_animating() {
+        while engine.painter.scroll_intents().is_animating() {
             at += 1.0 / 60.0;
             assert!(at < 3.0, "never came to rest (circular={circular})");
             frame_at(&mut engine, at);
@@ -2110,7 +2110,7 @@ fn a_swiper_resized_at_rest_stays_on_its_item() {
             "the painter shows the item, got {live} (circular={circular})"
         );
         assert!(
-            !engine.painter.scroll_intents.is_animating(),
+            !engine.painter.scroll_intents().is_animating(),
             "a jump, not a glide (circular={circular})"
         );
         engine.painter.publish_scroll(at + 0.1, None);
@@ -2145,7 +2145,7 @@ fn a_wheel_scrolls_and_reaches_a_wheel_listener() {
     wait_for_log(&mut engine, "wheel:30:{}");
     let offset = engine
         .painter
-        .scroll_intents
+        .scroll_intents()
         .offset_for(node_id(3))
         .expect("the wheel scrolled the view");
     assert!(
@@ -2163,16 +2163,16 @@ fn a_stationary_hold_longpresses_on_the_frame_clock() {
     let mut engine = booted(&gesture_page(true));
     engine.dispatch_input(touch(1, PointerPhase::Down, 10.0));
     assert!(
-        engine.painter.gesture.needs_frame(),
+        engine.painter.gesture().needs_frame(),
         "the down arms a deadline, which is what keeps frames coming"
     );
 
-    engine.painter.clock.pin(0.6);
-    let now = engine.painter.clock.now_seconds();
+    engine.painter.clock_mut().pin(0.6);
+    let now = engine.painter.clock_mut().now_seconds();
     engine.painter.service_gesture_clock(now);
     wait_for_log(&mut engine, "longpress:10");
     assert!(
-        !engine.painter.gesture.needs_frame(),
+        !engine.painter.gesture().needs_frame(),
         "a resolved deadline stops asking for frames"
     );
 }
@@ -2237,7 +2237,7 @@ fn a_windowed_scroll_recommits_nothing_and_hits_route_at_the_intent_offsets() {
     );
     let scroller = node_id(3);
     assert_eq!(
-        engine.painter.scroll_intents.offset_for(scroller),
+        engine.painter.scroll_intents().offset_for(scroller),
         Some(terminus::Vector2D::new(0.0, 30.0)),
         "the intent carries the offset composition draws at"
     );
@@ -2866,7 +2866,7 @@ fn a_tap_finds_an_inkless_mover_where_its_curve_carries_it() {
     assert!(!frame.has_live_curves(), "and draws nothing");
     // Committed at x ≤ 25; at 0.9 the slide has carried it to x ≥ 200,
     // whether its first tick was at 0 or at 0.1.
-    engine.painter.clock.pin(0.9);
+    engine.painter.clock_mut().pin(0.9);
     engine.dispatch_input(touch(1, PointerPhase::Down, 260.0));
     engine.dispatch_input(touch(1, PointerPhase::Up, 260.0));
     wait_for_log(&mut engine, "tap:260");
@@ -2965,7 +2965,7 @@ fn an_animation_started_after_idle_time_runs_from_the_next_frame() {
     // frame post has crossed since boot and the document's timeline still
     // reads zero.
     let tapped_at = 10.0;
-    engine.painter.clock.pin(tapped_at);
+    engine.painter.clock_mut().pin(tapped_at);
     engine.dispatch_input(touch(1, PointerPhase::Down, 10.0));
     engine.dispatch_input(touch(1, PointerPhase::Up, 12.0));
     wait_for_log(&mut engine, "tap");
@@ -3210,7 +3210,7 @@ fn anchor_sheet(anchored: &str) -> String {
 /// What the painter's hit test finds at `(x, y)`, at its own offsets.
 fn painter_hit(engine: &mut TestEngine, x: f32, y: f32) -> Option<terminus::NodeId> {
     let frame = engine.published_frame()?;
-    let intents = &engine.painter.scroll_intents;
+    let intents = engine.painter.scroll_intents();
     frame
         .hit(
             Point2D::new(x, y),
@@ -3704,7 +3704,7 @@ fn booted_refresh_view_with_methods() -> (TestEngine, u64) {
 /// the commit that carries the request, and adopts that commit.
 fn tap_refresh_view(engine: &mut TestEngine, at: f64, log: &str) {
     let before = engine.published_frame().expect("booted").commit_id();
-    engine.painter.clock.pin(at);
+    engine.painter.clock_mut().pin(at);
     engine.dispatch_input(touch(1, PointerPhase::Down, 100.0));
     engine.dispatch_input(touch(1, PointerPhase::Up, 100.0));
     wait_for_log(engine, log);

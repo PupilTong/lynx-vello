@@ -38,13 +38,13 @@
 //! of the curves above ever meets an edge there: a drag, a fling or a wheel
 //! tick on it moves the offset along an unbounded line and absorbs its
 //! whole delta, so nothing stretches and nothing chains outward. The line
-//! repeats the scrolling area every [`terminus::ScrollSlot::wrap_period`]; the
+//! repeats the scrolling area every [`crate::ScrollSlot::wrap_period`]; the
 //! intents normalize the offset into one period when a commit is adopted,
 //! and `terminus` normalizes it wherever it composes, hit-tests or samples, so
 //! these functions never wrap anything themselves.
 
-use terminus::scroll::{ScrollAxes, ScrollKind, SnapAxis, resolve_step};
-use terminus::{Size2D, Vector2D};
+use crate::scroll::{ScrollAxes, ScrollKind, SnapAxis, resolve_step};
+use crate::{Size2D, Vector2D};
 
 /// The rubber band's `c`: the slope a stretch starts at. lynx-ui's
 /// `rubberC`, which is `UIKit`'s.
@@ -310,7 +310,7 @@ pub(super) fn resolve_elastic_step(
 /// more than what brings it home: `(applied, absorbed)`. A delta pushing
 /// further out, or an axis in range, is left to the chain walk.
 ///
-/// Lynx's restore-first rule: a container already stretched on the chain
+/// The restore-first rule: a container already stretched on the chain
 /// unwinds before any delta chains inward, whatever the walk's order.
 pub(super) fn unwind_stretch(
     motion: Motion,
@@ -668,15 +668,15 @@ mod tests {
 
     #[test]
     fn a_wheel_tick_on_a_wrapped_axis_moves_on_to_the_next_periodic_snap_position() {
-        let points = [0.0, 200.0, 400.0].map(|at| terminus::scroll::SnapPoint {
+        let points = [0.0, 200.0, 400.0].map(|at| crate::scroll::SnapPoint {
             min: at,
             max: at,
             stop: false,
-            area: terminus::NodeId::from_bits(1).expect("a well-formed handle"),
+            area: crate::NodeId::from_bits(1).expect("a well-formed handle"),
             order: 0,
         });
         let snap = SnapAxis {
-            strictness: terminus::scroll::SnapStrictness::Mandatory,
+            strictness: crate::scroll::SnapStrictness::Mandatory,
             points: &points,
             period: Some(700.0),
         };

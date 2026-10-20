@@ -33,14 +33,15 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::hash_map::Entry;
-use std::num::NonZeroU64;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use rustc_hash::{FxHashMap, FxHashSet};
+use terminus::painter::RouterHost;
+pub(crate) use terminus::painter::ScrollEntry;
 use terminus::scroll::ScrollAxes;
-use terminus::{CommittedFrame, FrameImages, HitTarget, NodeId, Vector2D};
+use terminus::{CommittedFrame, FrameImages, HitTarget, NodeId};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 use url::Url;
@@ -49,7 +50,6 @@ use crate::background::{WorkerKey, WorkerMessage};
 #[cfg(test)]
 use crate::main::tree::LynxDocument;
 use crate::native_module::ModuleReply;
-use crate::paint::RouterHost;
 use crate::resource::{FetchProbe, LoadedSource, SourceCompletion, SourceRequest, StyleSheetProbe};
 use crate::view::{EngineEvent, EventRequester, LynxViewError, Viewport};
 
@@ -328,7 +328,9 @@ pub(crate) struct Published {
 
 impl Published {
     /// The commit a frame came from, which is the whole of what makes one
-    /// frame different from another.
+    /// frame different from another. The presenting painter compares the
+    /// frames it adopts itself; this is the far end's reading in tests.
+    #[cfg(test)]
     pub(crate) fn commit(&self) -> Option<u64> {
         self.frame.as_ref().map(|frame| frame.commit_id())
     }
@@ -356,26 +358,6 @@ impl RouterHost for Published {
     fn has_listener(&self, name: &str) -> bool {
         self.listeners.contains(name)
     }
-}
-
-/// One scroll container's state as the painter last posted it.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct ScrollEntry {
-    /// The offset, clamped to the committed range: a `contain-bounce`
-    /// stretch posts its edge.
-    pub(crate) offset: Vector2D<f32>,
-    /// The painter clock of the pass that posted it, in seconds.
-    pub(crate) at: f64,
-    /// Where the container came to rest, if it did since the last take: a
-    /// drag let go without a fling, a fling spent, a bounce back landed, a
-    /// snap after a commit. Kept across later posts until taken.
-    pub(crate) rest: Option<Vector2D<f32>>,
-    /// The newest programmatic scroll request the painter had handled for
-    /// the container when it posted ([`terminus::ScrollSlot::request`]). Main
-    /// drops a post naming an older one than the container's pending
-    /// request, which it was made before the painter saw, and acknowledges
-    /// the request with one that names it.
-    pub(crate) request: Option<NonZeroU64>,
 }
 
 /// The painter's frame request: its clock reading, the sequence number

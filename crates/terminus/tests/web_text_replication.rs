@@ -1457,7 +1457,7 @@ fn a_font_face_declared_family_shapes_the_text_that_names_it() {
 
     // What is reported is the URL resolved against the document's base, so
     // the `..` this fixture path spells has already been normalized away.
-    let resolved = AHEM_URL.replace("/dom/../seldon/", "/seldon/");
+    let resolved = AHEM_URL.replace("/terminus/../seldon/", "/seldon/");
     let requests = doc.dom.take_font_face_requests();
     assert_eq!(
         requests,

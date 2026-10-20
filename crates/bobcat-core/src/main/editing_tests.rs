@@ -445,7 +445,7 @@ fn a_press_focuses_the_host_and_places_the_caret_where_it_landed() {
     let origin = state.editable_bounds.origin;
 
     // Inside `c`'s left half: the caret goes before it.
-    engine.painter.clock.pin(10.0);
+    engine.painter.clock_mut().pin(10.0);
     engine.dispatch_input(mouse(PointerPhase::Down, origin.x + 45.0, origin.y + 10.0));
     states.wait(&mut engine, "with the caret at 2", |state| {
         state.selection == (2..2)
@@ -459,10 +459,10 @@ fn a_press_focuses_the_host_and_places_the_caret_where_it_landed() {
     engine.dispatch_input(mouse(PointerPhase::Up, origin.x + 85.0, origin.y + 10.0));
 
     // Two quick presses: the second selects the word.
-    engine.painter.clock.pin(20.0);
+    engine.painter.clock_mut().pin(20.0);
     engine.dispatch_input(mouse(PointerPhase::Down, origin.x + 45.0, origin.y + 10.0));
     engine.dispatch_input(mouse(PointerPhase::Up, origin.x + 45.0, origin.y + 10.0));
-    engine.painter.clock.pin(20.2);
+    engine.painter.clock_mut().pin(20.2);
     engine.dispatch_input(mouse(PointerPhase::Down, origin.x + 45.0, origin.y + 10.0));
     engine.dispatch_input(mouse(PointerPhase::Up, origin.x + 45.0, origin.y + 10.0));
     states.wait(&mut engine, "selecting the word", |state| {

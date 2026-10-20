@@ -4788,6 +4788,7 @@ dependencies = [
  "svgtypes",
  "url",
  "vello",
+ "web-time",
 ]
 
 [[package]]

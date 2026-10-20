@@ -51,6 +51,9 @@ web-time = { workspace = true }
 [dev-dependencies]
 divan = { workspace = true }
 flume = { workspace = true }
+# The presenting painter's test surface, for `paint`'s own tests: a painter
+# with no draw target, a pinnable clock, its router and scroll intents.
+terminus = { workspace = true, features = ["painter-test-utils"] }
 prime-radiant = { workspace = true, features = ["render"] }
 bobcat-source = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }

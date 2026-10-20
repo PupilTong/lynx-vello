@@ -1,24 +1,23 @@
 //! The painter's per-commit pixels: what one committed frame draws, read out
-//! of the view's own resource system once per commit.
+//! of the host's resource system once per commit.
 //!
-//! The whole image resource system lives on this thread, owned by the
-//! [`LynxView`](crate::LynxView) and serviced in its `pump`. The Lynx main
-//! thread holds names and load states; it never sees a store, a buffer or a
-//! `peniko::ImageData`, and no channel between the two can carry one. A
-//! painter observing a view reads pixels out of that store through
-//! [`FrameImages`](terminus::FrameImages) and asks it for nothing else — which is
+//! The whole image resource system lives on the painting thread, owned by
+//! the host and serviced in its own turns. The thread that builds the
+//! document holds names and load states; it never sees a store, a buffer or
+//! a `peniko::ImageData`. A painter reads pixels out of that store through
+//! [`FrameImages`](crate::FrameImages) and asks it for nothing else — which is
 //! why what it holds is a table of resolved bitmaps rather than a store.
 //!
 //! A host that decodes off-thread synchronises that itself. It already drives
-//! the view's turns, so it has somewhere to do it; putting the machinery
+//! the painter's turns, so it has somewhere to do it; putting the machinery
 //! here would charge every host for a capability the browser — the one host
 //! that will actually load images — does not use, since its decode callbacks
 //! land on the embedder's own event loop.
 
 use std::sync::Arc;
 
-use terminus::FrameImages;
-use terminus::vello::peniko::ImageData;
+use crate::FrameImages;
+use crate::vello::peniko::ImageData;
 
 /// The pixels the current commit draws, in draw order.
 ///
@@ -57,9 +56,10 @@ impl PainterImages {
     /// **May block.** A store is allowed — required, in fact — to restore a
     /// bitmap it evicted, and doing so inside this call is the whole point of
     /// the synchronous read. When it is safe to pay that is the painter's own
-    /// `poll_link` to say: adopting a commit is the only thing that calls
-    /// this, and it is what runs before a swap-chain image is acquired.
-    pub(crate) fn resolve(&mut self, frame: &terminus::CommittedFrame, images: &dyn FrameImages) {
+    /// adoption to say ([`Painter::adopt`](super::Painter::adopt)): adopting a
+    /// commit is the only thing that calls this, and it runs before a
+    /// swap-chain image is acquired.
+    pub(crate) fn resolve(&mut self, frame: &crate::CommittedFrame, images: &dyn FrameImages) {
         frame.resolve_images(images, &mut self.resolved, &mut self.sources);
         images.retain(&self.sources);
         self.key = Some(frame.commit_id());
@@ -80,55 +80,5 @@ impl PainterImages {
         self.key = None;
         self.resolved.clear();
         self.sources.clear();
-    }
-}
-
-#[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
-mod tests {
-
-    /// Decision: one bitmap, reused. Every read of one source must hand back
-    /// a clone sharing the *same* `Blob`, because `Blob::id()` is what vello
-    /// keys its image atlas on — two ids for one image would be two GPU
-    /// uploads and two atlas slots.
-    #[test]
-    fn every_read_of_one_image_keeps_the_same_buffer_identity() {
-        use terminus::FrameImages as _;
-
-        let images = prime_radiant::TestImages::new();
-        let pixels = prime_radiant::rgba8(1, 1, vec![1, 2, 3, 255]);
-        let published = pixels.data.id();
-        images.insert("app:///pixel.png", pixels);
-
-        let first = images
-            .read("app:///pixel.png", terminus::ImageSizeHint::UNBOUNDED)
-            .expect("a published image reads back");
-        let second = images
-            .read("app:///pixel.png", terminus::ImageSizeHint::UNBOUNDED)
-            .expect("and reads back again");
-        assert_eq!(
-            first.data.id(),
-            published,
-            "the buffer that comes out is the one that went in — no copy"
-        );
-        assert_eq!(
-            first.data.id(),
-            second.data.id(),
-            "and every later read is the same GPU resource"
-        );
-    }
-
-    /// A source the host carries no pixels for reads as nothing rather than
-    /// standing in for another image.
-    #[test]
-    fn an_unpublished_source_reads_as_nothing() {
-        use terminus::FrameImages as _;
-
-        let images = prime_radiant::TestImages::new();
-        assert!(
-            images
-                .read("app:///missing.png", terminus::ImageSizeHint::UNBOUNDED)
-                .is_none()
-        );
     }
 }

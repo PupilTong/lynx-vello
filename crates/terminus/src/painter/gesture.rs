@@ -1,24 +1,27 @@
 //! The painting side's input router: one place that turns routed input into
-//! every decision the engine executes — which scroll the user-agent performs,
+//! every decision the painter executes — which scroll the user-agent performs,
 //! which event is dispatched, and at which target node.
 //!
-//! Routing (hit testing) stays in `terminus`; the propagation chain stays in the
-//! event module (`Document::event_steps`) — this layer decides the *type and
-//! target*, never the chain. The engine feeds each routed event in and
-//! executes the returned [`InputDecision`]s in order: a scroll decision
-//! drives the painter's own chain walk over the published slot table
-//! (`ScrollIntents::chain`, on `terminus`'s `drive_chain`), an emit decision goes
-//! to path construction and the ordered script channel. That order is therefore the
-//! delivery order, which is how the layer guarantees a due `longpress`
-//! precedes the release that follows it and a `tap` follows its own
+//! Routing (hit testing) stays in the committed frame
+//! ([`CommittedFrame::hit`](crate::CommittedFrame::hit)); the propagation
+//! chain stays in the event module (`Document::event_steps`) — this layer
+//! decides the *type and target*, never the chain. The painter feeds each
+//! routed event in and executes the returned [`InputDecision`]s in order: a
+//! scroll decision drives the painter's own chain walk over the published
+//! slot table (`ScrollIntents::chain`, on
+//! [`drive_chain`](crate::scroll::drive_chain)), an emit decision is handed
+//! back to the painter's owner, which delivers it. That order is therefore
+//! the delivery order, which is how the layer guarantees a due hold gesture
+//! precedes the release that follows it and a press gesture follows its own
 //! `pointerup`.
 //!
 //! # What lives here
 //!
 //! - **Raw event naming.** A routed pointer phase becomes its W3C name
 //!   (`pointerdown`/`pointermove`/`pointerup`/`pointercancel`), a wheel becomes `wheel`, each
-//!   targeted at the routed node. Lynx's `tap` and `longpress` are *synthesized* from the sequence
-//!   beside them.
+//!   targeted at the routed node. The two gestures a [`GesturePolicy`] names — a press released
+//!   near where it went down ([`GesturePolicy::tap_event`]) and a hold
+//!   ([`GesturePolicy::long_press_event`]) — are *synthesized* from the sequence beside them.
 //! - **Compatibility mouse events** (Pointer Events Level 3 §11). A [`PointerKind::Mouse`]
 //!   pointer's down, move and up are followed at once by `mousedown`/`mousemove`/`mouseup` at the
 //!   same target with the same detail. Touch and pen produce none (a recorded deviation), and
@@ -27,95 +30,87 @@
 //!   pressed and released, with no movement slop, suppressed when the drag recognizer's scroll
 //!   consumed the sequence or the sequence was cancelled. The release emits one decision naming the
 //!   down's target and the release's, after the release's pointer, touch and mouse events and
-//!   before `tap`; the main thread targets it at their nearest common inclusive ancestor and
-//!   follows a second one at the same target within 500 ms with `dblclick`. `tap` keeps its own
-//!   rules and fires beside it.
+//!   before the press gesture; the owner targets it at their nearest common inclusive ancestor and
+//!   follows a second one at the same target within 500 ms with `dblclick`. The press gesture keeps
+//!   its own rules and fires beside it.
 //! - **Key events.** A key phase becomes `keydown`/`keyup` (W3C UI Events), carrying the W3C
 //!   `key`/`code` strings, `repeat` and the modifiers. A key is never hit-tested: this side has no
-//!   focus, so it names the document element ([`NodeId::DOCUMENT_ELEMENT`]), and the main thread,
-//!   which holds the document's focused element, delivers the key there when there is one.
+//!   focus, so it names the document element ([`NodeId::DOCUMENT_ELEMENT`]), and the thread that
+//!   holds the document's focused element delivers the key there when there is one.
 //! - **Touch events.** A pointer that [`produces_touch_events`] also produces the W3C touch name
 //!   for its phase (`touchstart`/`touchmove`/`touchend`/`touchcancel`), carrying the three lists
 //!   ([`TouchPoint`]) the standard gives one. Every finger is tracked from its down, and the node
 //!   its down routed to is that finger's target for the finger's whole life — the standard's
 //!   implicit capture, so a move that leaves the node still dispatches at it. Multi-touch is always
 //!   on.
-//! - **User-agent scrolling.** The drag recognizer (every pointer kind, a mouse included by ruling,
-//!   latched at the down on the nearest user-scrollable, 8px slop with the slop subtracted from the
-//!   first movement, per-pointer independent) and wheel scrolling (per-event nearest scrollable
-//!   filtered by the CSS-pixel delta's axes). Both were `terminus`'s default action; the engine now
-//!   routes with `default_prevented` set so `terminus` performs none, and this router is the one
-//!   decision point. The scroll *primitives* (`drive_chain`'s remainder chaining, the step rule,
-//!   the published chain links) stay in `terminus`. A drag that scrolled ends with a
+//! - **User-agent scrolling.** The drag recognizer (every pointer kind, a mouse included, latched
+//!   at the down on the nearest user-scrollable, [`GesturePolicy::drag_slop`] with the slop
+//!   subtracted from the first movement, per-pointer independent) and wheel scrolling (per-event
+//!   nearest scrollable filtered by the CSS-pixel delta's axes). The document routes with
+//!   `default_prevented` set so it performs no default action of its own, and this router is the
+//!   one decision point. The scroll *primitives* (`drive_chain`'s remainder chaining, the step
+//!   rule, the published chain links) stay in [`crate::scroll`]. A drag that scrolled ends with a
 //!   [`InputDecision::ScrollEnd`] at its release or cancel, ahead of the release's own events, so
 //!   the containers it moved settle onto their css-scroll-snap-1 positions (the executor's intents
 //!   own that; the router only marks the end).
-//! - **Gesture synthesis** per the 2026-08-21 ruling (recorded in `docs/tracking/deviations.md`):
-//!   `tap` fires at release, targeted at the down-routed node, unless the sequence travelled past
-//!   the 50px radial [`TAP_SLOP`], the drag recognizer's scroll consumed (reported back by the
-//!   executor through [`GestureRouter::note_scroll_consumed`], so a boundary drag that moves
-//!   nothing keeps its tap — the Lynx Android behavior), a second pointer joined, or a `longpress`
-//!   was delivered. `longpress` fires [`LONG_PRESS_SECONDS`] into a hold that stayed within
-//!   [`LONG_PRESS_MOVE_SLOP`], gated on a listener existing anywhere ([`RouterHost::has_listener`]
-//!   — name-level, a recorded approximation).
+//! - **Gesture synthesis**, on the [`GesturePolicy`] the router was built with: the press gesture
+//!   fires at release, targeted at the down-routed node, unless the sequence travelled past the
+//!   radial [`GesturePolicy::tap_slop`], the drag recognizer's scroll consumed (reported back by
+//!   the executor through [`GestureRouter::note_scroll_consumed`], so a boundary drag that moves
+//!   nothing keeps its press gesture), a second pointer joined, or the hold gesture was delivered.
+//!   The hold gesture fires [`GesturePolicy::long_press_seconds`] into a hold that stayed within
+//!   [`GesturePolicy::long_press_move_slop`], gated on a listener existing anywhere
+//!   ([`RouterHost::has_listener`] — name-level, an approximation).
 //!
 //! The router owns no clock and holds no document: time arrives as the
-//! engine's own frame-clock reading, and every document fact arrives through
+//! painter's own frame-clock reading, and every document fact arrives through
 //! the borrowed [`RouterHost`] queries. That keeps the core a plain state
 //! machine a test can drive without an engine.
 //!
 //! # What this module deliberately is not
 //!
-//! No fling or velocity, no `:active` driving, no `consume-slide-event`, no
-//! per-element `GestureDetector`/arena relations — recorded follow-ups. No
-//! `pointerover`/`out`/`enter`/`leave`, `mouseover`/`out`/`enter`/`leave`,
-//! `auxclick` or `contextmenu` (deferred). Scroll *events* (`scroll`,
-//! `scrollend`) are the main thread's, decided from the offsets this side
-//! posts.
+//! No fling or velocity (the scroll intents measure those), no `:active`
+//! driving, no per-element gesture detectors or arena relations — recorded
+//! follow-ups. No `pointerover`/`out`/`enter`/`leave`,
+//! `mouseover`/`out`/`enter`/`leave`, `auxclick` or `contextmenu` (deferred).
+//! Scroll *events* (`scroll`, `scrollend`) are the document's, decided from
+//! the offsets this side posts.
 
 use smallvec::SmallVec;
-use terminus::event::EventDetail;
-// The touch vocabulary is `terminus`'s, because every layer that names an event
-// names it: the router fills the points in, the Rust walk reads them, and the
-// main thread encodes them into the realm's argument list.
-pub(crate) use terminus::event::{
-    TOUCH_ACTIVE, TOUCH_CHANGED, TOUCH_TARGET, TouchPoint, TouchPoints,
-};
-use terminus::input::{InputEvent, InputKind, KeyPhase, PointerId, PointerKind, PointerPhase};
-use terminus::scroll::ScrollAxes;
-use terminus::{HitTarget, NodeId, Point2D, Vector2D};
 
-/// How far a sequence may travel, in viewport CSS px, and still deliver `tap`.
-///
-/// Lynx reads this from the page config (`tapSlop`, default `"50px"`); wiring
-/// the config key is a recorded follow-up, so today every view uses the
-/// default.
-pub(crate) const TAP_SLOP: f32 = 50.0;
+use crate::event::EventDetail;
+// The touch vocabulary is the event module's, because every layer that names
+// an event names it: the router fills the points in, the Rust walk reads them,
+// and the document's owner encodes them for its scripts.
+use crate::event::{TOUCH_ACTIVE, TOUCH_CHANGED, TOUCH_TARGET, TouchPoint, TouchPoints};
+use crate::input::{InputEvent, InputKind, KeyPhase, PointerId, PointerKind, PointerPhase};
+use crate::scroll::ScrollAxes;
+use crate::{HitTarget, NodeId, Point2D, Vector2D};
 
-/// Movement beyond this, in viewport CSS px, cancels a pending `longpress`.
-///
-/// Lynx cancels its long-press timer at the platform touch slop (nominally
-/// 8dp on Android) — the same threshold the drag recognizer latches at, so on
-/// scrollable content the long-press cancel and the scroll claim engage at
-/// the same travel.
-pub(crate) const LONG_PRESS_MOVE_SLOP: f32 = 8.0;
-
-/// How far a pointer drag travels before it starts scrolling, in viewport
-/// CSS px. The first movement subtracts the slop instead of jumping.
-pub(crate) const DRAG_SLOP: f32 = 8.0;
-
-/// How long a pointer must stay down before `longpress` fires.
-///
-/// Lynx's default on every platform (Android `getLongPressTimeout()`, iOS
-/// `minimumPressDuration`, Harmony). The page-config override
-/// (`longPressDuration`) is a recorded follow-up.
-pub(crate) const LONG_PRESS_SECONDS: f64 = 0.5;
-
-/// The event name a held sequence synthesizes.
-pub(crate) const LONG_PRESS_EVENT: &str = "longpress";
-
-/// The event name a released sequence synthesizes.
-pub(crate) const TAP_EVENT: &str = "tap";
+/// The gesture vocabulary and thresholds a [`GestureRouter`] synthesizes
+/// with: what a press and a hold are called, and how far and how long each
+/// may go. W3C names neither gesture, so the router has no defaults — its
+/// owner names the platform's.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GesturePolicy {
+    /// How far a sequence may travel, in viewport CSS px, and still deliver
+    /// [`Self::tap_event`] at its release.
+    pub tap_slop: f32,
+    /// Movement beyond this, in viewport CSS px, cancels a pending
+    /// [`Self::long_press_event`].
+    pub long_press_move_slop: f32,
+    /// How far a pointer drag travels before it starts scrolling, in
+    /// viewport CSS px. The first movement subtracts the slop instead of
+    /// jumping.
+    pub drag_slop: f32,
+    /// How long, in seconds, a pointer must stay down before
+    /// [`Self::long_press_event`] fires.
+    pub long_press_seconds: f64,
+    /// The event name a released sequence synthesizes.
+    pub tap_event: &'static str,
+    /// The event name a held sequence synthesizes.
+    pub long_press_event: &'static str,
+}
 
 /// UI Events' `click`: the primary button pressed and released, at the
 /// nearest common inclusive ancestor of the two targets.
@@ -123,11 +118,12 @@ pub(crate) const CLICK_EVENT: &str = "click";
 
 /// Whether a pointer of this kind produces touch events.
 ///
-/// Touch and pen do; a mouse produces none, which is what both a browser and
-/// web-core do — a mouse gesture is reported through the pointer events, the
-/// compatibility mouse events and `tap`. Not the drag-to-scroll policy, which
-/// a mouse drag shares here by ruling.
-pub(crate) fn produces_touch_events(device: PointerKind) -> bool {
+/// Touch and pen do; a mouse produces none, which is what a browser does — a
+/// mouse gesture is reported through the pointer events, the compatibility
+/// mouse events and the synthesized gestures. Not the drag-to-scroll policy,
+/// which a mouse drag shares here.
+#[must_use]
+pub fn produces_touch_events(device: PointerKind) -> bool {
     matches!(device, PointerKind::Touch | PointerKind::Pen)
 }
 
@@ -135,8 +131,8 @@ pub(crate) fn produces_touch_events(device: PointerKind) -> bool {
 /// for exactly one call; the router retains nothing of the host's. Every
 /// answer comes from the committed frame's scroll-slot table and the
 /// painter's own listener-name replica — never from the document,
-/// which lives on the main thread, and never from behind a lock.
-pub(crate) trait RouterHost {
+/// which lives on another thread, and never from behind a lock.
+pub trait RouterHost {
     /// The nearest scroll container on the hit item's containing-block chain
     /// (itself included) the user may scroll on any of `axes`.
     fn nearest_user_scrollable(&self, from: HitTarget, axes: ScrollAxes) -> Option<NodeId>;
@@ -149,7 +145,7 @@ pub(crate) trait RouterHost {
     /// Whether any listener for `name` exists anywhere in the document, as
     /// of the pass this call belongs to. The replica behind it is resynced
     /// once per pass, so an answer cannot change under a decision — and can
-    /// be one pass behind the main thread's index.
+    /// be one pass behind the document's own index.
     fn has_listener(&self, name: &str) -> bool;
 }
 
@@ -157,41 +153,49 @@ pub(crate) trait RouterHost {
 /// it carries. The propagation chain is the event module's to compute from
 /// the target.
 #[derive(Clone, Debug)]
-pub(crate) struct EmitEvent {
-    pub(crate) name: &'static str,
+pub struct EmitEvent {
+    /// The event's type.
+    pub name: &'static str,
     /// The node the event targets. It may have been freed since the decision
     /// was formed — the executor checks liveness before building a path.
-    pub(crate) target: NodeId,
-    /// What the event carries, in `terminus`'s one description of it: a pointer
-    /// event's position and device, a wheel's delta, a touch event's lists.
-    pub(crate) detail: EventDetail,
+    pub target: NodeId,
+    /// What the event carries, in the event module's one description of it: a
+    /// pointer event's position and device, a wheel's delta, a touch event's
+    /// lists.
+    pub detail: EventDetail,
     /// For a `click` alone: the node the release routed to. The event's
     /// target is then the nearest common inclusive ancestor of
-    /// [`Self::target`] (the down's) and this one, which the main thread
-    /// resolves, because it holds the tree and this side holds none.
-    pub(crate) release: Option<NodeId>,
+    /// [`Self::target`] (the down's) and this one, which the document's
+    /// owner resolves, because it holds the tree and this side holds none.
+    pub release: Option<NodeId>,
 }
 
-/// One decision the engine executes, in order.
+/// One decision the painter executes, in order.
 #[derive(Clone, Debug)]
-pub(crate) enum InputDecision {
+pub enum InputDecision {
     /// Drive the user-agent scroll chain from `from` by `delta` CSS px.
     /// `pointer` names the drag the scroll belongs to, so consumption can be
     /// reported back; a wheel scroll has none.
     Scroll {
+        /// The drag the scroll belongs to; `None` for a wheel.
         pointer: Option<PointerId>,
+        /// The scroll container the chain walk starts from.
         from: NodeId,
+        /// The scroll delta, in CSS px.
         delta: Vector2D<f32>,
     },
     /// The drag `pointer` was scrolling has ended (release or cancel): the
     /// containers it moved settle onto their snap positions.
-    ScrollEnd { pointer: PointerId },
+    ScrollEnd {
+        /// The drag that ended.
+        pointer: PointerId,
+    },
     /// Dispatch one event through the ordinary path.
     Emit(EmitEvent),
 }
 
 /// An inline-first batch of ordered decisions produced by the input router.
-pub(crate) type InputDecisions = SmallVec<[InputDecision; 4]>;
+pub type InputDecisions = SmallVec<[InputDecision; 4]>;
 
 fn emit(name: &'static str, target: NodeId, detail: EventDetail) -> InputDecision {
     InputDecision::Emit(EmitEvent {
@@ -236,41 +240,35 @@ fn compat_mouse_event_name(device: PointerKind, phase: PointerPhase) -> Option<&
     }
 }
 
-/// The W3C name a routed pointer phase dispatches under. Lynx's
-/// `tap`/`longpress` are synthesized from the whole sequence beside these.
-fn pointer_event_name(phase: PointerPhase) -> Option<&'static str> {
+/// The W3C name a routed pointer phase dispatches under. The policy's two
+/// gestures are synthesized from the whole sequence beside these.
+fn pointer_event_name(phase: PointerPhase) -> &'static str {
     match phase {
-        PointerPhase::Down => Some("pointerdown"),
-        PointerPhase::Move => Some("pointermove"),
-        PointerPhase::Up => Some("pointerup"),
-        PointerPhase::Cancel => Some("pointercancel"),
-        // `PointerPhase` is `#[non_exhaustive]` so keyboard and focus can
-        // arrive without a break; an unnamed phase dispatches nothing rather
-        // than guessing.
-        _ => None,
+        PointerPhase::Down => "pointerdown",
+        PointerPhase::Move => "pointermove",
+        PointerPhase::Up => "pointerup",
+        PointerPhase::Cancel => "pointercancel",
     }
 }
 
 /// The W3C UI Events name a key phase dispatches under: `keydown` and
 /// `keyup`, and nothing else (`keypress` is deprecated, and `input` and the
 /// composition events need an editing model).
-fn key_event_name(phase: KeyPhase) -> Option<&'static str> {
+fn key_event_name(phase: KeyPhase) -> &'static str {
     match phase {
-        KeyPhase::Down => Some("keydown"),
-        KeyPhase::Up => Some("keyup"),
-        _ => None,
+        KeyPhase::Down => "keydown",
+        KeyPhase::Up => "keyup",
     }
 }
 
 /// The W3C touch name the same phase dispatches under, beside the pointer
-/// event and before any `tap` the release synthesizes.
-fn touch_event_name(phase: PointerPhase) -> Option<&'static str> {
+/// event and before any press gesture the release synthesizes.
+fn touch_event_name(phase: PointerPhase) -> &'static str {
     match phase {
-        PointerPhase::Down => Some("touchstart"),
-        PointerPhase::Move => Some("touchmove"),
-        PointerPhase::Up => Some("touchend"),
-        PointerPhase::Cancel => Some("touchcancel"),
-        _ => None,
+        PointerPhase::Down => "touchstart",
+        PointerPhase::Move => "touchmove",
+        PointerPhase::Up => "touchend",
+        PointerPhase::Cancel => "touchcancel",
     }
 }
 
@@ -304,13 +302,14 @@ struct Sequence {
     target: NodeId,
     down_position: Point2D<f32>,
     latest_position: Point2D<f32>,
-    /// Cleared by travel beyond [`TAP_SLOP`] or a consumed scroll.
+    /// Cleared by travel beyond [`GesturePolicy::tap_slop`] or a consumed
+    /// scroll.
     tap_allowed: bool,
-    /// Armed at down; disarmed by travel beyond [`LONG_PRESS_MOVE_SLOP`], a
-    /// consumed scroll, or expiry.
+    /// Armed at down; disarmed by travel beyond
+    /// [`GesturePolicy::long_press_move_slop`], a consumed scroll, or expiry.
     longpress_deadline: Option<f64>,
-    /// A `longpress` was delivered for this sequence, which is what makes the
-    /// release not a `tap`.
+    /// The hold gesture was delivered for this sequence, which is what makes
+    /// the release not a press gesture.
     longpress_fired: bool,
 }
 
@@ -330,10 +329,13 @@ struct ClickCandidate {
     target: NodeId,
 }
 
-/// The per-view router state. Owned by the engine, fed on the painting side
+/// The per-view router state. Owned by the painter, fed on the painting side
 /// only.
-#[derive(Debug, Default)]
-pub(crate) struct GestureRouter {
+#[derive(Debug)]
+pub struct GestureRouter {
+    /// What the two synthesized gestures are called and where their
+    /// thresholds lie.
+    policy: GesturePolicy,
     /// Every pointer currently down, in down order. Length is what matters
     /// for synthesis: more than one cancels it for the whole overlap. Drags
     /// stay per-pointer regardless — each pointer scrolls independently.
@@ -357,23 +359,43 @@ pub(crate) struct GestureRouter {
 }
 
 impl GestureRouter {
+    /// A router with nothing down, synthesizing on `policy`.
+    #[must_use]
+    pub fn new(policy: GesturePolicy) -> Self {
+        Self {
+            policy,
+            down_pointers: Vec::new(),
+            sequence: None,
+            drags: Vec::new(),
+            touches: SmallVec::new(),
+            click: None,
+        }
+    }
+
+    /// The policy this router synthesizes on.
+    #[must_use]
+    pub const fn policy(&self) -> GesturePolicy {
+        self.policy
+    }
+
     /// Feeds one routed input event and appends the decisions it produces.
     ///
-    /// `target` is what routing hit and `at` is the engine clock's reading
+    /// `target` is what routing hit and `at` is the painter clock's reading
     /// when the event arrived — arrival time rather than drain time, so a
     /// sequence buffered behind a busy document keeps its real duration. Due
     /// deadlines resolve first, so their emits precede the event's own on
-    /// the ordered channel. Within one pointer event the order is: due
-    /// `longpress`, the scroll decision (the user-agent default action runs
+    /// the ordered channel. Within one pointer event the order is: a due hold
+    /// gesture, the scroll decision (the user-agent default action runs
     /// first, as it always has), the raw event, the touch event, then a
-    /// synthesized `tap` — so a release delivers `pointerup`, `touchend`,
-    /// `tap`, the order native Lynx and a browser both give.
+    /// synthesized press gesture — so a release delivers `pointerup`,
+    /// `touchend` and then the press gesture, the order a browser gives its
+    /// own events.
     ///
     /// The event's own `default_prevented` is the embedder's suppression
     /// seam: a prevented event produces no scroll decision (a prevented move
-    /// re-bases the drag origin, exactly as `terminus`'s recognizer did) but still
-    /// dispatches and still feeds synthesis.
-    pub(crate) fn on_input(
+    /// re-bases the drag origin) but still dispatches and still feeds
+    /// synthesis.
+    pub fn on_input(
         &mut self,
         event: &InputEvent,
         target: Option<HitTarget>,
@@ -400,9 +422,8 @@ impl GestureRouter {
                     out,
                 );
                 let detail = pointer_detail(event.position, id, device, button, buttons);
-                if let Some(target) = target
-                    && let Some(name) = pointer_event_name(phase)
-                {
+                if let Some(target) = target {
+                    let name = pointer_event_name(phase);
                     out.push(emit(name, target.node, detail.clone()));
                     if let Some(compat) = compat_mouse_event_name(device, phase) {
                         out.push(emit(compat, target.node, detail.clone()));
@@ -436,12 +457,10 @@ impl GestureRouter {
                 modifiers,
                 ref text,
             } => {
-                let Some(name) = key_event_name(phase) else {
-                    return;
-                };
+                let name = key_event_name(phase);
                 // No hit test, and no focus on this side: the document
                 // element is the target, as it is in a browser with nothing
-                // focused, and the main thread retargets the key to the
+                // focused, and the document's owner retargets the key to the
                 // focused element when there is one.
                 out.push(emit(
                     name,
@@ -455,17 +474,14 @@ impl GestureRouter {
                     },
                 ));
             }
-            // `InputKind` is `#[non_exhaustive]`; an unknown kind decides
-            // nothing rather than guessing.
-            _ => {}
         }
     }
 
     /// The executor reports that a scroll decision for `pointer`'s drag
     /// actually moved something. That consumption — not the drag alone — is
     /// what claims the sequence away from synthesis, so a drag at a
-    /// scroller's boundary that moves nothing keeps its tap, matching Lynx.
-    pub(crate) fn note_scroll_consumed(&mut self, pointer: PointerId) {
+    /// scroller's boundary that moves nothing keeps its press gesture.
+    pub fn note_scroll_consumed(&mut self, pointer: PointerId) {
         if self
             .click
             .is_some_and(|candidate| candidate.pointer == pointer)
@@ -482,25 +498,25 @@ impl GestureRouter {
         }
     }
 
-    /// Fires a due long-press deadline against the frame clock.
+    /// Fires a due hold deadline against the frame clock.
     ///
-    /// The engine calls this once per produced frame; while a deadline is
+    /// The painter calls this once per produced frame; while a deadline is
     /// armed [`Self::needs_frame`] keeps frames coming, the same continuation
     /// contract running animations use.
-    pub(crate) fn on_tick(&mut self, now: f64, host: &impl RouterHost, out: &mut InputDecisions) {
+    pub fn on_tick(&mut self, now: f64, host: &impl RouterHost, out: &mut InputDecisions) {
         self.fire_due(now, host, out);
     }
 
     /// Whether a deadline is armed and so owes the timeline another frame.
-    pub(crate) fn needs_frame(&self) -> bool {
+    #[must_use]
+    pub fn needs_frame(&self) -> bool {
         self.sequence
             .as_ref()
             .is_some_and(|sequence| sequence.longpress_deadline.is_some())
     }
 
     /// The drag half of the pointer default action: latch at down, slop at
-    /// the first movement, one scroll decision per move — `terminus`'s recognizer,
-    /// relocated behind this layer's decision boundary.
+    /// the first movement, one scroll decision per move.
     #[allow(clippy::too_many_arguments, reason = "one private dispatch site")]
     fn drag_step(
         &mut self,
@@ -512,6 +528,7 @@ impl GestureRouter {
         host: &impl RouterHost,
         out: &mut InputDecisions,
     ) {
+        let drag_slop = self.policy.drag_slop;
         match phase {
             PointerPhase::Down => {
                 self.drags.retain(|drag| drag.pointer != id);
@@ -546,13 +563,13 @@ impl GestureRouter {
                     travel
                 } else {
                     let distance = travel.length();
-                    if distance <= DRAG_SLOP {
+                    if distance <= drag_slop {
                         return;
                     }
                     drag.scrolling = true;
                     // Subtract the slop from the first movement rather than
                     // jumping by the full travel.
-                    travel * ((distance - DRAG_SLOP) / distance)
+                    travel * ((distance - drag_slop) / distance)
                 };
                 drag.origin = event.position;
                 out.push(InputDecision::Scroll {
@@ -571,7 +588,6 @@ impl GestureRouter {
                     out.push(InputDecision::ScrollEnd { pointer: id });
                 }
             }
-            _ => {}
         }
     }
 
@@ -604,9 +620,7 @@ impl GestureRouter {
         // `touches`; what it reports instead is the last point the finger was
         // tracked at, which is finite by this rule.
         let finite = event.position.x.is_finite() && event.position.y.is_finite();
-        let Some(name) = touch_event_name(phase) else {
-            return;
-        };
+        let name = touch_event_name(phase);
         let (target, changed) = match phase {
             PointerPhase::Down => {
                 if !finite {
@@ -652,13 +666,11 @@ impl GestureRouter {
                     },
                 )
             }
-            _ => return,
         };
         let touches = self.touch_points(target, id, changed);
-        // web-core's rule for the `{x, y}` detail: the first finger still
-        // down. When the last one just lifted there is none, and the changed
-        // finger's own point is reported (native Lynx's answer; web-core
-        // yields the number `0` there).
+        // The `{x, y}` detail is the first finger still down. When the last
+        // one just lifted there is none, and the changed finger's own point
+        // is reported.
         let position = touches
             .iter()
             .find(|point| point.flags & TOUCH_ACTIVE != 0)
@@ -736,8 +748,8 @@ impl GestureRouter {
     /// The `click` half (UI Events): a primary-button press of the primary
     /// pointer, released anywhere, with no movement slop. The release emits
     /// one `click` decision naming both targets, after the release's own
-    /// pointer, touch and mouse events and before any `tap`; the main thread
-    /// targets it at their nearest common inclusive ancestor and decides a
+    /// pointer, touch and mouse events and before any press gesture; the
+    /// owner targets it at their nearest common inclusive ancestor and decides a
     /// `dblclick` from it. A release that routed to nothing clicks nothing,
     /// and neither does a cancelled sequence or one whose drag consumed a
     /// scroll ([`Self::note_scroll_consumed`]).
@@ -779,7 +791,7 @@ impl GestureRouter {
         }
     }
 
-    /// The synthesis half: sequence lifecycle and the `tap` decision.
+    /// The synthesis half: sequence lifecycle and the press-gesture decision.
     #[allow(clippy::too_many_arguments, reason = "one private dispatch site")]
     fn synthesize(
         &mut self,
@@ -791,15 +803,16 @@ impl GestureRouter {
         at: f64,
         out: &mut InputDecisions,
     ) {
+        let policy = self.policy;
         match phase {
             PointerPhase::Down => {
                 if !self.down_pointers.contains(&id) {
                     self.down_pointers.push(id);
                 }
                 if self.down_pointers.len() > 1 {
-                    // Lynx delivers `tap` for single-finger sequences only;
-                    // the overlap disqualifies both fingers, and recognition
-                    // resumes at the next solitary down.
+                    // The press gesture is single-finger only: the overlap
+                    // disqualifies both fingers, and recognition resumes at
+                    // the next solitary down.
                     self.sequence = None;
                 } else {
                     // A down that hit nothing can name no target later, so
@@ -811,7 +824,7 @@ impl GestureRouter {
                         down_position: event.position,
                         latest_position: event.position,
                         tap_allowed: true,
-                        longpress_deadline: Some(at + LONG_PRESS_SECONDS),
+                        longpress_deadline: Some(at + policy.long_press_seconds),
                         longpress_fired: false,
                     });
                 }
@@ -823,10 +836,10 @@ impl GestureRouter {
                     .filter(|sequence| sequence.pointer == id)
                 {
                     sequence.latest_position = event.position;
-                    if sequence.travelled_beyond(event.position, LONG_PRESS_MOVE_SLOP) {
+                    if sequence.travelled_beyond(event.position, policy.long_press_move_slop) {
                         sequence.longpress_deadline = None;
                     }
-                    if sequence.travelled_beyond(event.position, TAP_SLOP) {
+                    if sequence.travelled_beyond(event.position, policy.tap_slop) {
                         sequence.tap_allowed = false;
                     }
                 }
@@ -836,10 +849,10 @@ impl GestureRouter {
                 if let Some(sequence) = self.sequence.take_if(|sequence| sequence.pointer == id)
                     && sequence.tap_allowed
                     && !sequence.longpress_fired
-                    && !sequence.travelled_beyond(event.position, TAP_SLOP)
+                    && !sequence.travelled_beyond(event.position, policy.tap_slop)
                 {
                     out.push(emit(
-                        TAP_EVENT,
+                        policy.tap_event,
                         sequence.target,
                         pointer_detail(event.position, id, device, 0, 0),
                     ));
@@ -855,11 +868,11 @@ impl GestureRouter {
                     self.sequence = None;
                 }
             }
-            _ => {}
         }
     }
 
     fn fire_due(&mut self, now: f64, host: &impl RouterHost, out: &mut InputDecisions) {
+        let long_press_event = self.policy.long_press_event;
         let Some(sequence) = self.sequence.as_mut() else {
             return;
         };
@@ -870,13 +883,13 @@ impl GestureRouter {
             return;
         }
         // The deadline lapses exactly once, whatever the listener answer: the
-        // walk Lynx runs at this instant either finds a handler or the
-        // sequence's long-press half is simply over.
+        // walk at this instant either finds a handler or the sequence's hold
+        // half is simply over.
         sequence.longpress_deadline = None;
-        if host.has_listener(LONG_PRESS_EVENT) {
+        if host.has_listener(long_press_event) {
             sequence.longpress_fired = true;
             out.push(emit(
-                LONG_PRESS_EVENT,
+                long_press_event,
                 sequence.target,
                 // Held down: no button changed, the primary one is held.
                 pointer_detail(
@@ -893,13 +906,24 @@ impl GestureRouter {
 
 #[cfg(test)]
 mod tests {
-    use terminus::input::{InputEvent, PointerKind, PointerPhase};
-
     use super::*;
+    use crate::input::{InputEvent, PointerKind, PointerPhase};
 
     const TARGET: u64 = 3;
     const OTHER: u64 = 5;
     const SCROLLER: u64 = 7;
+
+    /// The policy these cases are written against: a 50 px press radius, an
+    /// 8 px hold and drag slop, a half-second hold, and the two gestures
+    /// named `tap` and `longpress`.
+    const POLICY: GesturePolicy = GesturePolicy {
+        tap_slop: 50.0,
+        long_press_move_slop: 8.0,
+        drag_slop: 8.0,
+        long_press_seconds: 0.5,
+        tap_event: "tap",
+        long_press_event: "longpress",
+    };
 
     fn target() -> NodeId {
         NodeId::from_bits(TARGET).expect("a well-formed packed handle")
@@ -948,7 +972,7 @@ mod tests {
         }
 
         fn has_listener(&self, name: &str) -> bool {
-            name == LONG_PRESS_EVENT && self.longpress_bound
+            name == POLICY.long_press_event && self.longpress_bound
         }
     }
 
@@ -961,7 +985,7 @@ mod tests {
     impl Harness {
         fn new() -> Self {
             Self {
-                router: GestureRouter::default(),
+                router: GestureRouter::new(POLICY),
                 host: MockHost::default(),
                 out: InputDecisions::new(),
             }
@@ -1060,7 +1084,7 @@ mod tests {
 
     #[test]
     fn a_key_is_keydown_then_keyup_at_the_document_element_with_its_strings() {
-        use terminus::input::{KeyPhase, Modifiers};
+        use crate::input::{KeyPhase, Modifiers};
 
         let mut harness = Harness::new();
         let shift = Modifiers {
@@ -1491,7 +1515,7 @@ mod tests {
                 "click",
                 "tap"
             ],
-            "an 8-50px nudge that moved nothing still taps, matching Lynx"
+            "an 8-50px nudge that moved nothing still taps"
         );
     }
 

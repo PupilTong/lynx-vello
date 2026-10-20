@@ -5,12 +5,11 @@
 //!
 //! Everything here is a motion of the intents alone: a fling step is one
 //! more chain walk over the published slot table, a bounce back moves one
-//! offset per frame, and neither recommits, waits on the main thread, or
-//! involves the input router or any event — the same contract a drag step
-//! has. Each step's offsets are posted to the main thread like a drag
-//! step's, and the step that ends a fling or lands a bounce back posts the
-//! container's rest. The curves and their constants are `motion`'s; what this module
-//! adds is when each starts and stops:
+//! offset per frame, and neither recommits, waits on the document's thread,
+//! or involves the input router or any event — the same contract a drag step
+//! has. Each step's offsets are posted to the document like a drag step's, and the step that ends a
+//! fling or lands a bounce back posts the container's rest. The curves and their constants are
+//! `motion`'s; what this module adds is when each starts and stops:
 //!
 //! - A drag's release velocity is measured here, from the drag's own steps over its last
 //!   [`VELOCITY_WINDOW_SECONDS`] — the intents see every step the drag decided, stamped with the
@@ -39,16 +38,16 @@
 //! - An `overscroll-behavior: circular` axis has no wall and no stretch: every fling step on it is
 //!   absorbed, so the fling there ends by its decay alone, and the release aims at a snap position
 //!   whatever copy of it the whole travel reaches across the seam.
-//! - An [`AutoScroll`] is the one motion a script starts and ends: Lynx's `autoScroll`, an axis
-//!   moving at a constant rate ([`terminus::scroll::AutoScrollRequest`]). It is the last to move a
-//!   container: while a drag holds it, or a fling, a bounce back or a glide moves it, the
-//!   auto-scroll adds nothing, and it goes on from where they left the container. Nothing but
-//!   another change of the container's auto-scroll ends it, except the edge it moves toward when it
-//!   was asked to stop there. It moves its own container only, clamps at the edge and never
-//!   stretches, and an axis that wraps has no edge to end it. A write is at least one physical
-//!   pixel and at least [`AUTO_SCROLL_MIN_INTERVAL_SECONDS`] after the last, so a slow rate or a
-//!   fast display does not recompose a frame per refresh; a container whose auto-scroll cannot move
-//!   — held, or at its edge — owes no frame on its account ([`ScrollIntents::is_auto_scrolling`]).
+//! - An [`AutoScroll`] is the one motion a script starts and ends: an axis moving at a constant
+//!   rate ([`crate::scroll::AutoScrollRequest`]). It is the last to move a container: while a drag
+//!   holds it, or a fling, a bounce back or a glide moves it, the auto-scroll adds nothing, and it
+//!   goes on from where they left the container. Nothing but another change of the container's
+//!   auto-scroll ends it, except the edge it moves toward when it was asked to stop there. It moves
+//!   its own container only, clamps at the edge and never stretches, and an axis that wraps has no
+//!   edge to end it. A write is at least one physical pixel and at least
+//!   [`AUTO_SCROLL_MIN_INTERVAL_SECONDS`] after the last, so a slow rate or a fast display does not
+//!   recompose a frame per refresh; a container whose auto-scroll cannot move — held, or at its
+//!   edge — owes no frame on its account ([`ScrollIntents::is_auto_scrolling`]).
 //!
 //! The drag's own holds ([`ScrollIntents::gesture_origins`]) outlive the
 //! drag for as long as its fling runs, so a commit landing mid-fling does
@@ -56,9 +55,6 @@
 //! is exempt from that at-rest rule on its own.
 
 use smallvec::SmallVec;
-use terminus::input::PointerId;
-use terminus::scroll::{AutoScrollRequest, ScrollAxes, SnapAxis};
-use terminus::{CommittedFrame, NodeId, Size2D, Vector2D};
 
 use super::motion::{
     FLING_DECAY_PER_MS, Motion, OVERSHOOT_DECAY_PER_MS, bounce_back, fling_distance, fling_travel,
@@ -66,6 +62,9 @@ use super::motion::{
     rubber_band_slope, rubber_band_travel, stretch_of,
 };
 use super::{ScrollIntents, note_changed, wrap_axes};
+use crate::input::PointerId;
+use crate::scroll::{AutoScrollRequest, ScrollAxes, SnapAxis};
+use crate::{CommittedFrame, NodeId, Size2D, Vector2D};
 
 /// How far back a release looks for its velocity: the drag's travel over
 /// the steps inside this window, divided by their span. A drag whose last
@@ -89,12 +88,11 @@ pub(crate) const VELOCITY_MIN_SPAN_SECONDS: f64 = 0.005;
 const VELOCITY_SAMPLES: usize = 8;
 
 /// The least time between two writes of one auto-scroll. A tick that comes
-/// sooner writes nothing, so its frame is not recomposed: iOS's list steps
-/// every 16 ms and Android's `scroll-view` every 16 ms whatever the display,
-/// and a 120 Hz one would otherwise render twice as often for the same
-/// motion. Between one and two frames of such a display, and under the frame
-/// of a 60 Hz one with room for the jitter of a clock read after the swap
-/// chain's wait: every second frame at 120 Hz, every frame at 60 Hz.
+/// sooner writes nothing, so its frame is not recomposed: the native mobile
+/// scrollers step every 16 ms whatever the display, and a 120 Hz one would
+/// otherwise render twice as often for the same motion. Between one and two frames of such a
+/// display, and under the frame of a 60 Hz one with room for the jitter of a clock read after the
+/// swap chain's wait: every second frame at 120 Hz, every frame at 60 Hz.
 pub(crate) const AUTO_SCROLL_MIN_INTERVAL_SECONDS: f64 = 1.0 / 80.0;
 
 /// One pointer's drag as the intents see it: the slot it chains from and
@@ -291,7 +289,8 @@ impl Glide {
     }
 }
 
-/// One container's axis moving at a constant rate: Lynx's `autoScroll`.
+/// One container's axis moving at a constant rate, as a script asked
+/// ([`AutoScrollRequest`]).
 #[derive(Debug, Clone)]
 pub(super) struct AutoScroll {
     node: NodeId,
@@ -340,7 +339,8 @@ impl ScrollIntents {
     /// gesture's quiet interval is running, and so owes the timeline another
     /// frame. An auto-scroll is asked separately, against the frame it stands
     /// on ([`Self::is_auto_scrolling`]).
-    pub(super) fn is_animating(&self) -> bool {
+    #[must_use]
+    pub fn is_animating(&self) -> bool {
         !self.flings.is_empty()
             || !self.bounce_backs.is_empty()
             || !self.glides.is_empty()
@@ -366,7 +366,8 @@ impl ScrollIntents {
     }
 
     /// Whether a wheel gesture's quiet interval holds `node` off rest.
-    pub(super) fn is_wheeling(&self, node: NodeId) -> bool {
+    #[must_use]
+    pub fn is_wheeling(&self, node: NodeId) -> bool {
         self.wheel_steps.iter().any(|(held, _)| *held == node)
     }
 
@@ -619,7 +620,7 @@ impl ScrollIntents {
     /// Advances every fling, bounce back, glide and auto-scroll to `now`.
     /// The auto-scrolls go last, so one whose container another motion let
     /// go of in this tick starts counting from it.
-    pub(super) fn tick(&mut self, frame: &CommittedFrame, now: f64) {
+    pub fn tick(&mut self, frame: &CommittedFrame, now: f64) {
         if !self.is_animating() && self.auto_scrolls.is_empty() {
             return;
         }
@@ -638,7 +639,8 @@ impl ScrollIntents {
     /// moved by something else, or at the edge it moves toward — owes none:
     /// the motion that has the container asks for its own frames, and a
     /// range that grows arrives in a commit, which is a frame.
-    pub(super) fn is_auto_scrolling(&self, frame: &CommittedFrame) -> bool {
+    #[must_use]
+    pub fn is_auto_scrolling(&self, frame: &CommittedFrame) -> bool {
         self.auto_scrolls.iter().any(|run| {
             self.auto_scroll_room(frame, run)
                 .is_some_and(|room| room > 0.0)
@@ -656,7 +658,8 @@ impl ScrollIntents {
     }
 
     /// Whether `node` has an auto-scroll, moving or not.
-    pub(super) fn has_auto_scroll(&self, node: NodeId) -> bool {
+    #[must_use]
+    pub fn has_auto_scroll(&self, node: NodeId) -> bool {
         self.auto_scrolls.iter().any(|run| run.node == node)
     }
 
@@ -906,7 +909,7 @@ impl ScrollIntents {
     /// already moving `node`: an axis already gliding to `to` keeps its
     /// glide — a request for where the container is going changes nothing,
     /// so a timer that asks for the same turn again before the first one
-    /// lands, an `x-swiper` autoplay with a short `interval`, does not
+    /// lands — an autoplay whose interval is shorter than the glide — does not
     /// start the glide over from rest at every frame, which would leave the
     /// container creeping toward the turn and never arriving — while an
     /// axis gliding elsewhere ends that glide and starts over from rest,
@@ -964,7 +967,7 @@ impl ScrollIntents {
 
     /// Starts a bounce back for every stretched axis of every container
     /// nothing is holding or flinging, unless a glide is moving that axis.
-    pub(super) fn start_bounce_backs(&mut self, frame: &CommittedFrame, now: f64) {
+    pub fn start_bounce_backs(&mut self, frame: &CommittedFrame, now: f64) {
         for slot in frame.scroll_slots() {
             if slot.bounce == ScrollAxes::NONE {
                 continue;
@@ -1006,24 +1009,28 @@ impl ScrollIntents {
     }
 
     /// Whether some drag holds `node`.
-    pub(super) fn is_held(&self, node: NodeId) -> bool {
+    #[must_use]
+    pub fn is_held(&self, node: NodeId) -> bool {
         self.gesture_origins.keys().any(|(_, held)| *held == node)
     }
 
     /// Whether some fling's chain runs through `node`.
-    pub(super) fn is_flinging(&self, frame: &CommittedFrame, node: NodeId) -> bool {
+    #[must_use]
+    pub fn is_flinging(&self, frame: &CommittedFrame, node: NodeId) -> bool {
         self.flings
             .iter()
             .any(|fling| chain_nodes(frame, fling.from).contains(&node))
     }
 
     /// Whether a bounce back is moving `node`.
-    pub(super) fn is_bouncing(&self, node: NodeId) -> bool {
+    #[must_use]
+    pub fn is_bouncing(&self, node: NodeId) -> bool {
         self.bounce_backs.iter().any(|back| back.node == node)
     }
 
     /// Whether a glide is moving `node`.
-    pub(super) fn is_gliding(&self, node: NodeId) -> bool {
+    #[must_use]
+    pub fn is_gliding(&self, node: NodeId) -> bool {
         self.glides.iter().any(|glide| glide.node == node)
     }
 

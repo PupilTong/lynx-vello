@@ -19,6 +19,10 @@ use std::num::NonZeroUsize;
 use std::rc::Rc;
 use std::sync::Arc;
 
+/// View metrics, copied across the view's one thread boundary: the
+/// presenting painter's own.
+pub(crate) use terminus::painter::Viewport;
+pub use terminus::painter::{DrawTarget, FrameSize, Screenshot, WindowTarget};
 use terminus::{FontBlob, FrameImages, ImageInbox, StylePool};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
@@ -31,44 +35,9 @@ pub use crate::main::configure_wasm_workers;
 use crate::main::tree::PageConfig;
 use crate::main::{GroupLink, spawn_group};
 use crate::native_module::{NativeModule, NativeModuleTable};
-pub use crate::paint::WindowTarget;
 use crate::resource::{ResourceFetcher, SourceCompletion, SourceRequest};
 use crate::script::ScriptError;
 use crate::threads::ThreadJoin;
-
-/// View metrics, copied across the view's one thread boundary.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct Viewport {
-    /// Viewport width in CSS pixels.
-    pub width: f32,
-    /// Viewport height in CSS pixels.
-    pub height: f32,
-    /// Physical pixels per CSS pixel.
-    pub device_pixel_ratio: f32,
-}
-
-impl Viewport {
-    /// Creates a viewport with a device-pixel ratio of 1.
-    #[must_use]
-    pub(crate) const fn new(width: f32, height: f32) -> Self {
-        Self {
-            width,
-            height,
-            device_pixel_ratio: 1.0,
-        }
-    }
-
-    /// Returns this viewport with a new device-pixel ratio.
-    #[must_use]
-    pub(crate) const fn with_device_pixel_ratio(mut self, device_pixel_ratio: f32) -> Self {
-        self.device_pixel_ratio = device_pixel_ratio;
-        self
-    }
-
-    pub(crate) fn device(self) -> terminus::Device {
-        terminus::Device::new(self.width, self.height, self.device_pixel_ratio)
-    }
-}
 
 /// The screen metrics `SystemInfo` reports: `pixelRatio`, `pixelWidth`,
 /// `pixelHeight`.
@@ -111,117 +80,6 @@ impl ScreenMetrics {
         }
     }
 }
-
-/// The physical pixel size of the render target.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct FrameSize {
-    pub width: u32,
-    pub height: u32,
-}
-
-impl FrameSize {
-    /// The physical target a CSS viewport at this device scale needs.
-    ///
-    /// The same computation [`Painter::new`](crate::Painter::new) and
-    /// [`Painter::resize`](crate::Painter::resize) make, exposed because a
-    /// host that owns the surface's backing store — a browser canvas — has to
-    /// size it before it hands a painter a target.
-    ///
-    /// # Errors
-    ///
-    /// [`EngineError::Viewport`] if the metrics are not finite and positive,
-    /// or if the physical target would exceed 16384 pixels on either axis.
-    pub fn for_viewport(
-        width: f32,
-        height: f32,
-        device_pixel_ratio: f32,
-    ) -> Result<Self, EngineError> {
-        if !width.is_finite()
-            || !height.is_finite()
-            || !device_pixel_ratio.is_finite()
-            || width <= 0.0
-            || height <= 0.0
-            || device_pixel_ratio <= 0.0
-        {
-            return Err(EngineError::Viewport(format!(
-                "CSS size and device-pixel ratio must be finite and positive, got \
-                 {width}\u{d7}{height} at {device_pixel_ratio}\u{d7}"
-            )));
-        }
-
-        let physical_width = f64::from(width) * f64::from(device_pixel_ratio);
-        let physical_height = f64::from(height) * f64::from(device_pixel_ratio);
-        if physical_width > f64::from(MAX_RENDER_DIMENSION)
-            || physical_height > f64::from(MAX_RENDER_DIMENSION)
-        {
-            return Err(EngineError::Viewport(format!(
-                "the physical render target may not exceed \
-                 {MAX_RENDER_DIMENSION}\u{d7}{MAX_RENDER_DIMENSION}, got \
-                 {physical_width:.0}\u{d7}{physical_height:.0}"
-            )));
-        }
-
-        #[allow(
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            reason = "finite positive values were bounded to 16384 immediately above"
-        )]
-        Ok(Self {
-            width: physical_width.round().max(1.0) as u32,
-            height: physical_height.round().max(1.0) as u32,
-        })
-    }
-}
-
-/// Where a painter's pixels go, named once and kept for its whole life.
-///
-/// There is no attaching a target later: [`Painter::new`](crate::Painter::new)
-/// builds it, on the thread that will draw into it, before the painter
-/// exists — and a painter then shows whichever views it attaches to through
-/// that one target.
-pub enum DrawTarget {
-    /// A window's presentation stack, built from a `'static` surface target —
-    /// a shared window handle or an owned canvas.
-    Window(WindowTarget),
-    /// A texture the painter owns and nothing displays.
-    /// [`Painter::draw_posted`](crate::Painter::draw_posted) renders into it
-    /// and [`Painter::capture`](crate::Painter::capture) reads it back.
-    ///
-    /// Native only in practice: building one blocks the calling thread on a
-    /// device request, and in a browser that thread is the one whose event
-    /// loop would answer it — so a Wasm painter is refused this target at
-    /// construction rather than hanging on it.
-    Offscreen,
-}
-
-impl DrawTarget {
-    /// A window target, from anything a surface can be built out of.
-    #[must_use]
-    pub fn window(target: impl Into<WindowTarget>) -> Self {
-        Self::Window(target.into())
-    }
-}
-
-// Hand-written: a `SurfaceTarget` carries a window handle or a canvas, and
-// neither is `Debug`. Which target this is, is the whole of what a formatter
-// can honestly say.
-impl fmt::Debug for DrawTarget {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::Window(_) => "DrawTarget::Window",
-            Self::Offscreen => "DrawTarget::Offscreen",
-        })
-    }
-}
-
-const MAX_RENDER_DIMENSION: u32 = 16_384;
-
-/// What a rendered target is identified by: the commit it came from, and
-/// the scroll generation it was composed at.
-///
-/// Images need no term of their own. A load that changes what a frame draws
-/// dirties the document, and every rebuild takes a new commit id.
-pub(crate) type ComposeKey = (u64, u64);
 
 #[derive(Clone, Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -268,6 +126,18 @@ pub enum EngineError {
     /// clash where the view is built is the whole of the resolution.
     #[error("two native modules are named `{0}`")]
     DuplicateNativeModule(String),
+}
+
+/// The presenting painter's failures, one variant each: its metrics, its
+/// GPU work and its rendering.
+impl From<terminus::painter::PainterError> for EngineError {
+    fn from(error: terminus::painter::PainterError) -> Self {
+        match error {
+            terminus::painter::PainterError::Viewport(message) => Self::Viewport(message),
+            terminus::painter::PainterError::Gpu(message) => Self::Gpu(message),
+            terminus::painter::PainterError::Render(message) => Self::Render(message),
+        }
+    }
 }
 
 /// A view construction or startup failure. Construction reports target,
@@ -519,22 +389,6 @@ impl From<WorkerKey> for WorkerId {
 impl fmt::Display for WorkerId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "{}", self.0)
-    }
-}
-
-/// One captured frame: tightly packed RGBA8 pixels at size.
-#[derive(Clone)]
-pub struct Screenshot {
-    pub size: FrameSize,
-    pub pixels: Vec<u8>,
-}
-
-impl fmt::Debug for Screenshot {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("Screenshot")
-            .field("size", &self.size)
-            .finish_non_exhaustive()
     }
 }
 

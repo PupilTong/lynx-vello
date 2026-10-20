@@ -15,6 +15,10 @@ bench = false
 
 [features]
 layout-test-utils = ["seldon/layout-test-utils"]
+# The presenting painter's test surface: a painter with no draw target, a
+# pinnable frame clock, and read access to its gesture router and scroll
+# intents, for an owner's own tests (`docs/terminus-link-api.md`).
+painter-test-utils = []
 
 [dependencies]
 bytes = { workspace = true }
@@ -43,6 +47,9 @@ url = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 parley = { workspace = true }
+# The painter's frame clock: `std::time::Instant` panics on
+# wasm32-unknown-unknown.
+web-time = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 parley = { workspace = true, features = ["complex-scripts"] }

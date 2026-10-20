@@ -3,8 +3,9 @@
 //! clock, and the committed frame moves.
 //!
 //! Inside the crate rather than in `tests/`, because the timeline is not an
-//! embedder-facing thing to drive: pinning it is [`FrameClock::pin`], which
-//! exists only in a test build. The integration suite covers what a host can
+//! embedder-facing thing to drive: pinning it is
+//! [`FrameClock::pin`](terminus::painter::FrameClock::pin), which exists only
+//! in a test build. The integration suite covers what a host can
 //! actually observe — that animations run with the host arranging nothing.
 
 use std::time::Duration;
@@ -115,11 +116,11 @@ fn red_left_edge(engine: &mut TestEngine) -> usize {
 fn a_keyframes_animation_moves_the_committed_frame_on_the_frame_clock() {
     let mut engine = booted();
 
-    engine.painter.clock.pin(0.0);
+    engine.painter.clock_mut().pin(0.0);
     engine.tick(true).expect("render the first frame");
     let start = red_left_edge(&mut engine);
 
-    engine.painter.clock.pin(0.5);
+    engine.painter.clock_mut().pin(0.5);
     engine.tick(true).expect("render the half-way frame");
     let middle = red_left_edge(&mut engine);
 
@@ -141,11 +142,11 @@ fn a_keyframes_animation_moves_the_committed_frame_on_the_frame_clock() {
 fn animation_frames_need_no_script_thread_work() {
     let mut engine = booted();
 
-    engine.painter.clock.pin(0.0);
+    engine.painter.clock_mut().pin(0.0);
     engine.tick(true).expect("first frame");
     let mut edges = vec![red_left_edge(&mut engine)];
     for step in 1..=3 {
-        engine.painter.clock.pin(f64::from(step) * 0.25);
+        engine.painter.clock_mut().pin(f64::from(step) * 0.25);
         engine.tick(true).expect("animated frame");
         edges.push(red_left_edge(&mut engine));
     }
@@ -169,12 +170,12 @@ fn one_reading_places_every_animation_in_a_frame() {
 
     // The boot flush created the animation; the first frame is what starts it,
     // so taking that frame at zero puts the animation's origin on the clock's.
-    engine.painter.clock.pin(0.0);
+    engine.painter.clock_mut().pin(0.0);
     engine
         .tick(true)
         .expect("the frame that starts the animation");
 
-    engine.painter.clock.pin(0.5);
+    engine.painter.clock_mut().pin(0.5);
     engine.tick(true).expect("frame on the pinned instant");
     let held = red_left_edge(&mut engine);
 
@@ -207,7 +208,7 @@ fn an_animation_inside_a_skipped_subtree_leaves_the_painter_idle() {
         .offscreen(32.0, 24.0)
         .boot();
 
-    engine.painter.clock.pin(0.0);
+    engine.painter.clock_mut().pin(0.0);
     engine.tick(true).expect("render the first frame");
 
     assert!(
@@ -265,7 +266,7 @@ fn booted_scroll_driven(slide: u32, max: u32, header_css: &str, list_css: &str) 
 
 /// One touch on the list at `y`, at the pinned instant `at`.
 fn touch_list(engine: &mut TestEngine, at: f64, phase: terminus::input::PointerPhase, y: f32) {
-    engine.painter.clock.pin(at);
+    engine.painter.clock_mut().pin(at);
     engine.dispatch_input(terminus::input::InputEvent::pointer(
         terminus::Point2D::new(32.0, y),
         1,
@@ -279,7 +280,7 @@ fn list_intent(engine: &TestEngine) -> f32 {
     let list = frame.scroll_slots()[0].node;
     engine
         .painter
-        .scroll_intents
+        .scroll_intents()
         .offset_for(list)
         .expect("the list scrolled")
         .y
@@ -297,7 +298,7 @@ fn a_drag_moves_a_scroll_driven_header_with_no_commit_and_no_frame_post() {
     let boot = engine.published_frame().expect("boot committed a frame");
     assert_eq!(boot.animation_slots().len(), 1, "the header exports");
     assert!(!boot.has_live_curves() && !boot.needs_main_ticks() && !boot.animations_active());
-    engine.painter.clock.pin(0.0);
+    engine.painter.clock_mut().pin(0.0);
     assert_eq!(red_left_edge(&mut engine), 0);
 
     // Past the 8px drag slop, then inside half the 48px encode window.
@@ -337,7 +338,7 @@ fn a_fling_keeps_a_scroll_driven_header_following() {
     use terminus::input::PointerPhase;
 
     let mut engine = booted_scroll_driven(40, 400, "animation: slide linear both;", "");
-    engine.painter.clock.pin(0.0);
+    engine.painter.clock_mut().pin(0.0);
     touch_list(&mut engine, 0.0, PointerPhase::Down, 60.0);
     touch_list(&mut engine, 0.01, PointerPhase::Move, 45.0);
     touch_list(&mut engine, 0.02, PointerPhase::Move, 30.0);
@@ -345,7 +346,7 @@ fn a_fling_keeps_a_scroll_driven_header_following() {
     assert!(engine.is_animating(), "the fling owes frames");
     let mut edges = Vec::new();
     for at in [0.05, 0.1, 0.2, 0.4, 1.0, 4.0] {
-        engine.painter.clock.pin(at);
+        engine.painter.clock_mut().pin(at);
         engine.painter.service_gesture_clock(at);
         let edge = red_left_edge(&mut engine);
         // A tenth of the offset, anti-aliased on its left column.
@@ -377,7 +378,7 @@ fn a_bounce_stretch_holds_a_scroll_driven_header_at_the_edge() {
         "animation: slide linear;",
         "overscroll-behavior: contain-bounce;",
     );
-    engine.painter.clock.pin(0.0);
+    engine.painter.clock_mut().pin(0.0);
     engine.dispatch_input(terminus::input::InputEvent::wheel(
         terminus::Point2D::new(32.0, 40.0),
         terminus::Vector2D::new(0.0, 32.0),
@@ -425,16 +426,16 @@ fn a_scroll_self_timeline_moves_its_scroller_with_its_own_offset() {
         )
         .offscreen(64.0, 64.0)
         .boot();
-    engine.painter.clock.pin(0.0);
+    engine.painter.clock_mut().pin(0.0);
     assert_eq!(red_left_edge(&mut engine), 0);
-    engine.painter.clock.pin(0.0);
+    engine.painter.clock_mut().pin(0.0);
     engine.dispatch_input(terminus::input::InputEvent::pointer(
         terminus::Point2D::new(8.0, 60.0),
         1,
         terminus::input::PointerKind::Touch,
         PointerPhase::Down,
     ));
-    engine.painter.clock.pin(0.05);
+    engine.painter.clock_mut().pin(0.05);
     engine.dispatch_input(terminus::input::InputEvent::pointer(
         terminus::Point2D::new(8.0, 40.0),
         1,

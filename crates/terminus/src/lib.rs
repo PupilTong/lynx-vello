@@ -24,6 +24,7 @@ pub mod event;
 pub mod input;
 pub mod layout;
 mod paint;
+pub mod painter;
 pub mod render;
 pub mod scroll;
 mod style;
