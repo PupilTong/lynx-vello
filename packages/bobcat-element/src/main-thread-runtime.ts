@@ -55,7 +55,7 @@ import {
   type ContextEvent,
   createCrossThreadContext,
 } from "bobcat:cross-thread-context";
-import { __BobcatQueryNodes, type ExposureRecord } from "bobcat:element";
+import { __BobcatQueryNodes, __BobcatSwitchExposure, type ExposureRecord } from "bobcat:element";
 // The whole PAPI as one namespace, for the binding list a named Lepus
 // chunk is called with: the export names are this module's only source of
 // truth for what `MTS_CHUNK_PREAMBLE` imports.
@@ -64,7 +64,7 @@ import type { NodeQueryRequest } from "bobcat:selector-query";
 import "bobcat:timers";
 import { cancelAnimationFrame, clearAnimationFrames, requestAnimationFrame } from "bobcat:animation-frame";
 import { createSystemInfo } from "bobcat:system-info";
-import { initialProcessor as getInitialProcessor, globalProps, initData, loadModuleSync, nativeModuleTable, hasStyleSheet, preloadStyleSheet, adoptStyleSheet, switchExposure } from "bobcat-internal:host";
+import { initialProcessor as getInitialProcessor, globalProps, initData, loadModuleSync, nativeModuleTable, hasStyleSheet, preloadStyleSheet, adoptStyleSheet } from "bobcat-internal:host";
 import { reportError as _ReportError, console } from "bobcat:diagnostics";
 import { sectionURL, styleSheetURL as sectionStyleSheetURL } from "bobcat:section-url";
 import { type BundleHandle, createBundleFetches } from "bobcat:bundle-fetch";
@@ -112,7 +112,8 @@ type FromBackground = LepusMethodCall | NodeQueryRequest
 /**
  * The BTS's `lynx.stopExposure` (`on` false) and `lynx.resumeExposure()`
  * (`on` true), with `sendEvent` already read the way [`sendsDisexposure`]
- * reads it. Booleans here; the host member takes them as `0 | 1`.
+ * reads it, which this realm runs as its own: over the elements it
+ * registered (`bobcat:element`'s `__BobcatSwitchExposure`).
  */
 type SwitchExposure = {
   bobcat: "runtime";
@@ -291,7 +292,7 @@ export function __BobcatConnectBackground(worker: Worker, data: unknown, entry?:
           });
         }
       } else if (message.method === "switchExposure") {
-        switchExposure(message.on ? 1 : 0, message.sendEvent ? 1 : 0);
+        __BobcatSwitchExposure(message.on, message.sendEvent);
       }
     } else {
       jsContext.receive(message);
@@ -798,17 +799,22 @@ export const lynx = {
   loadScript,
   triggerGlobalEventFromLepus: noop,
   /**
-   * Stops exposure detection, as native does: every detection is dropped,
-   * and with `sendEvent` (the default; see [`sendsDisexposure`]) every
-   * exposed element is sent one `disexposure`. What the stop sends is
+   * Stops exposure detection for the elements this realm registered, as
+   * native does for one card: their detection stops, and with `sendEvent`
+   * (the default; see [`sendsDisexposure`]) every exposed one is sent one
+   * `disexposure`. Another realm's elements — a frame's card's for the page,
+   * the page's for a card — are that realm's to stop. What the stop sends is
    * delivered by the host's next intersection delivery entry.
    */
   stopExposure(options?: {sendEvent?: boolean}) {
-    switchExposure(0, sendsDisexposure(options) ? 1 : 0);
+    __BobcatSwitchExposure(false, sendsDisexposure(options));
   },
-  /** Resumes exposure detection after `stopExposure`. */
+  /**
+   * Resumes exposure detection for the elements this realm registered,
+   * those it registered while stopped included.
+   */
   resumeExposure() {
-    switchExposure(1, 1);
+    __BobcatSwitchExposure(true, false);
   },
   /**
    * Accepted and ignored: exposure is detected by the intersection update

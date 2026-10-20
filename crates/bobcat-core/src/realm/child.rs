@@ -347,9 +347,9 @@ impl ChildRealms {
     /// nothing of another realm with no timer armed, nothing in flight and
     /// nothing its host state keeps it for. Answers with how many were freed.
     ///
-    /// Run by the epilogue, and by the MTS realm right after it hands a
-    /// `frame`'s disconnection to `bobcat:frame`, so the child that disposal
-    /// retired goes in that entry; always outside every JavaScript call:
+    /// Run by the epilogue, and by the MTS realm right after it dispatches a
+    /// `frame`'s disconnection, so the child that disposal retired goes in
+    /// that entry; always outside every JavaScript call:
     /// freeing a realm collects the whole runtime. One child's release can leave
     /// another unreferenced — a grandchild only its `ShadowRealm` held — so
     /// this repeats until nothing more goes.

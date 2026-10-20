@@ -302,15 +302,26 @@ interface BobcatNative {
   listenerClosed(nodeId: number, eventName: string): void;
   /**
    * `lynx.stopExposure({sendEvent})` (`on` `0`) and `lynx.resumeExposure()`
-   * (`on` `1`), as native runs them. Stopping drops every detection; with
-   * `sendEvent` `1` every exposed element is sent one `disexposure` record
-   * and forgotten as exposed, with `0` nothing is sent and the exposed set
-   * is kept. Resuming detects every registered element again, and one that
-   * is visible and not recorded as exposed is exposed again. Stopping a
-   * stopped page and resuming a running one do nothing; `sendEvent` is read
-   * by a stop alone.
+   * (`on` `1`), as native runs them for one card: for the elements `ids`
+   * names — comma-joined node ids, as `childElementIds` answers a list, `""`
+   * for none — which are the ones the calling realm registered: only it
+   * knows which elements are its own. The host keeps one stopped mark per
+   * element. Stopping marks each listed element stopped, and its detection
+   * stops; with `sendEvent` `1` each of them that is exposed is sent one
+   * `disexposure` record and forgotten as exposed, with `0` nothing is sent
+   * and the exposed record is kept. Resuming clears the mark of each listed
+   * stopped element and detects it again, and one that is visible and not
+   * recorded as exposed is exposed again; a listed element that is running
+   * is left alone. An element no switch lists is untouched, and an id that
+   * names no registered element is skipped. `sendEvent` is read by a stop
+   * alone.
+   *
+   * Answers how many records it queued, which the next intersection
+   * delivery entry dispatches at their elements as `bobcat:exposure`
+   * events: one per listed element exposed under an `exposure-id`, for a
+   * stop with `sendEvent` `1`; `0` for anything else.
    */
-  switchExposure(on: 0 | 1, sendEvent: 0 | 1): void;
+  switchExposure(on: 0 | 1, sendEvent: 0 | 1, ids: string): number;
   /**
    * Arms one timer `delayMilliseconds` from now — repeating until cleared
    * when `repeats` — and returns the id it is armed under. The delay goes

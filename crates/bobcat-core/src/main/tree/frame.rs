@@ -37,10 +37,10 @@
 //! What the component does observe is its connection: each
 //! `connectedCallback` and `disconnectedCallback` queues a
 //! [`ComponentEvent::Frame`](super::ComponentEvent::Frame), which the
-//! runtime turns into one call of `bobcat:frame`'s `__BobcatFrameConnected`
-//! or `__BobcatFrameDisconnected` in the page realm, out of the mutation
-//! that caused it. A reaction queues and never acts, because the callback
-//! holds the document.
+//! runtime dispatches at the frame as the internal event
+//! `bobcat:frameconnected` or `bobcat:framedisconnected`, out of the mutation
+//! that caused it, so the realm that holds the frame's handle hears it. A
+//! reaction queues and never acts, because the callback holds the document.
 //!
 //! # The UA rules
 //!

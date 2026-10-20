@@ -131,12 +131,6 @@ fn margin(sides: impl FnOnce(&mut IntersectionMargin)) -> IntersectionMargin {
     margin
 }
 
-/// `nodes` in `NodeId` order, the order a switch visits registrations in.
-fn in_node_order(mut nodes: Vec<NodeId>) -> Vec<NodeId> {
-    nodes.sort_unstable_by_key(|node| node.to_bits());
-    nodes
-}
-
 // --- registration and the first update -----------------------------------
 
 /// An `exposure-id` registers the element; the first update after it reports
@@ -784,71 +778,68 @@ fn a_listener_and_an_id_make_one_change() {
 
 // --- stop and resume -----------------------------------------------------
 
-/// `stopExposure({sendEvent: true})` sends one `disexposure` per exposed
-/// element and forgets them as exposed; while stopped nothing is detected,
-/// a registration made then included; `resumeExposure()` exposes whatever is
-/// visible again, in `NodeId` order.
+/// Three 100px boxes down the page, `a` and `b` shown and `c` below the
+/// viewport, with the `exposure-id`s `a`, `b` and `c`, and the first
+/// delivery, which exposes `a` and `b`, taken.
+fn three_exposed(exposure: &mut Exposure, document: &mut LynxDocument) -> [NodeId; 3] {
+    let a = boxed(document, 0.0, 100.0);
+    let b = boxed(document, 100.0, 100.0);
+    let c = boxed(document, 1000.0, 100.0);
+    for (node, id) in [(a, "a"), (b, "b"), (c, "c")] {
+        set(exposure, document, node, "exposure-id", id);
+    }
+    assert_eq!(
+        deliver(exposure, document),
+        vec![record(a, true, "a"), record(b, true, "b")]
+    );
+    [a, b, c]
+}
+
+/// Moves a [`boxed`] element to `top`.
+fn move_to(document: &mut LynxDocument, node: NodeId, top: f32) {
+    document.set_inline_style(
+        node,
+        &format!("position:absolute;left:0;top:{top}px;width:100px;height:100px"),
+    );
+}
+
+/// `stopExposure({sendEvent: true})` sends one `disexposure` per listed
+/// exposed element, in the order listed, answers how many it queued, and
+/// forgets them as exposed; while stopped nothing listed is detected, though
+/// every observer stays; `resumeExposure()` exposes whatever listed is
+/// visible again. A second stop with nothing exposed queues nothing.
 #[test]
 fn stopping_with_send_event_leaves_everything_and_resuming_finds_it_again() {
     let mut document = fresh_document();
     let mut exposure = Exposure::new();
-    let a = boxed(&mut document, 0.0, 100.0);
-    let b = boxed(&mut document, 100.0, 100.0);
-    let c = boxed(&mut document, 1000.0, 100.0);
-    for (node, id) in [(a, "a"), (b, "b"), (c, "c")] {
-        set(&mut exposure, &mut document, node, "exposure-id", id);
-    }
-    assert_eq!(
-        deliver(&exposure, &mut document),
-        vec![record(a, true, "a"), record(b, true, "b")]
-    );
+    let [a, b, c] = three_exposed(&mut exposure, &mut document);
 
-    exposure.switch(&mut document, false, true);
-    let ids = |nodes: Vec<NodeId>, appeared| -> Vec<ExposureChange> {
-        nodes
-            .into_iter()
-            .map(|node| {
-                let id = if node == a {
-                    "a"
-                } else if node == b {
-                    "b"
-                } else if node == c {
-                    "c"
-                } else {
-                    "d"
-                };
-                record(node, appeared, id)
-            })
-            .collect()
-    };
+    assert_eq!(exposure.switch(&mut document, false, true, &[b, a, c]), 2);
     assert_eq!(
         exposure.take_changes(),
-        ids(in_node_order(vec![a, b]), false)
+        vec![record(b, false, "b"), record(a, false, "a")]
     );
-    assert_eq!(exposure.observer_of(a), None, "every observer is dropped");
+    assert!(
+        exposure.observer_of(a).is_some(),
+        "an observer stays, and what it reports is ignored"
+    );
+    assert!([a, b, c].iter().all(|node| exposure.is_stopped(*node)));
 
-    // Stopped: `c` moving into view and `d` registering are not detected.
-    document.set_inline_style(
-        c,
-        "position:absolute;left:0;top:200px;width:100px;height:100px",
-    );
-    let d = boxed(&mut document, 300.0, 100.0);
-    set(&mut exposure, &mut document, d, "exposure-id", "d");
+    // Stopped: `c` moving into view is not detected.
+    move_to(&mut document, c, 200.0);
     assert_eq!(deliver(&exposure, &mut document), Vec::new());
-    exposure.switch(&mut document, false, true);
-    assert!(!exposure.has_changes(), "a second stop does nothing");
+    assert_eq!(exposure.switch(&mut document, false, true, &[a, b, c]), 0);
+    assert!(!exposure.has_changes(), "a second stop owes nothing");
 
-    exposure.switch(&mut document, true, true);
+    assert_eq!(exposure.switch(&mut document, true, false, &[a, b, c]), 0);
+    assert!([a, b, c].iter().all(|node| !exposure.is_stopped(*node)));
     assert_eq!(
         deliver(&exposure, &mut document),
-        ids(in_node_order(vec![a, b, c, d]), true)
-    );
-    let observer = exposure.observer_of(a);
-    exposure.switch(&mut document, true, true);
-    assert_eq!(
-        exposure.observer_of(a),
-        observer,
-        "resuming a running page does nothing"
+        vec![
+            record(a, true, "a"),
+            record(b, true, "b"),
+            record(c, true, "c")
+        ]
     );
 }
 
@@ -865,19 +856,198 @@ fn stopping_without_send_event_keeps_the_exposed_record() {
     set(&mut exposure, &mut document, gone, "exposure-id", "gone");
     assert_eq!(deliver(&exposure, &mut document).len(), 2);
 
-    exposure.switch(&mut document, false, false);
-    assert!(!exposure.has_changes());
-    document.set_inline_style(
-        gone,
-        "position:absolute;left:0;top:1000px;width:100px;height:100px",
+    assert_eq!(
+        exposure.switch(&mut document, false, false, &[kept, gone]),
+        0
     );
+    assert!(!exposure.has_changes());
+    assert!(exposure.is_exposed(kept) && exposure.is_exposed(gone));
+    move_to(&mut document, gone, 1000.0);
     assert_eq!(deliver(&exposure, &mut document), Vec::new());
 
-    exposure.switch(&mut document, true, true);
+    exposure.switch(&mut document, true, false, &[kept, gone]);
     assert_eq!(
         deliver(&exposure, &mut document),
         vec![record(gone, false, "gone")]
     );
+}
+
+/// A switch reaches the elements it lists and no other: a stop of `a` and
+/// `b` leaves `c` detected, and a resume of `a` alone leaves `b` stopped.
+/// That is how one card's stop leaves the page and every other card running:
+/// each realm lists the elements it registered.
+#[test]
+fn a_switch_reaches_only_the_listed_elements() {
+    let mut document = fresh_document();
+    let mut exposure = Exposure::new();
+    let [a, b, c] = three_exposed(&mut exposure, &mut document);
+    move_to(&mut document, c, 200.0);
+    assert_eq!(
+        deliver(&exposure, &mut document),
+        vec![record(c, true, "c")]
+    );
+
+    assert_eq!(exposure.switch(&mut document, false, true, &[a, b]), 2);
+    exposure.take_changes();
+    assert!(!exposure.is_stopped(c));
+
+    // `c` leaves and is told; `a` and `b` leaving are not detected.
+    for node in [a, b, c] {
+        move_to(&mut document, node, 1000.0);
+    }
+    assert_eq!(
+        deliver(&exposure, &mut document),
+        vec![record(c, false, "c")]
+    );
+
+    // Back in view; `a` alone resumes.
+    for (node, top) in [(a, 0.0), (b, 100.0), (c, 200.0)] {
+        move_to(&mut document, node, top);
+    }
+    let b_observer = exposure.observer_of(b);
+    let c_observer = exposure.observer_of(c);
+    exposure.switch(&mut document, true, false, &[a]);
+    assert_eq!(
+        exposure.observer_of(b),
+        b_observer,
+        "an element the resume does not list keeps its observer"
+    );
+    assert_eq!(
+        exposure.observer_of(c),
+        c_observer,
+        "and so does one that was never stopped"
+    );
+    assert_eq!(
+        deliver(&exposure, &mut document),
+        vec![record(c, true, "c"), record(a, true, "a")]
+    );
+    assert!(exposure.is_stopped(b));
+}
+
+/// What a stop answers is the records it queued: none without `sendEvent`,
+/// none for listed elements with nothing exposed, and none for an exposed
+/// element with no `exposure-id`, which is forgotten as exposed all the
+/// same. A stop with `sendEvent` after one without sends the records the
+/// first kept, as native's sends whatever it has recorded as exposed.
+#[test]
+fn a_stop_answers_the_records_it_queued() {
+    let mut document = fresh_document();
+    let mut exposure = Exposure::new();
+    let [a, b, c] = three_exposed(&mut exposure, &mut document);
+    let quiet = boxed(&mut document, 200.0, 10.0);
+    listen(&mut exposure, &mut document, quiet, true);
+    assert_eq!(
+        deliver(&exposure, &mut document),
+        vec![ExposureChange {
+            node: quiet,
+            appeared: true,
+            exposure_id: None,
+            scene: String::new(),
+            element_event: true,
+        }]
+    );
+
+    assert_eq!(exposure.switch(&mut document, false, false, &[a, quiet]), 0);
+    assert!(!exposure.has_changes());
+    assert_eq!(exposure.switch(&mut document, false, true, &[a, quiet]), 1);
+    assert_eq!(exposure.take_changes(), vec![record(a, false, "a")]);
+    assert!(!exposure.is_exposed(quiet));
+
+    // `c` is registered and below the viewport: nothing is exposed to send.
+    assert_eq!(exposure.switch(&mut document, false, true, &[c]), 0);
+    assert!(!exposure.has_changes());
+    assert!(
+        exposure.is_exposed(b),
+        "an element not listed keeps its record"
+    );
+}
+
+/// An element registered while its realm is stopped is stopped by the realm
+/// right after it files the record listener — a stop that lists it alone,
+/// without `sendEvent` — so its first report is ignored, and the resume
+/// that lists it exposes it.
+#[test]
+fn an_element_registered_while_its_realm_is_stopped_waits_for_the_resume() {
+    let mut document = fresh_document();
+    let mut exposure = Exposure::new();
+    let [a, b, c] = three_exposed(&mut exposure, &mut document);
+    assert_eq!(exposure.switch(&mut document, false, true, &[a, b, c]), 2);
+    exposure.take_changes();
+
+    let late = boxed(&mut document, 300.0, 100.0);
+    set(&mut exposure, &mut document, late, "exposure-id", "late");
+    assert!(!exposure.is_stopped(late), "a registration starts running");
+    assert_eq!(exposure.switch(&mut document, false, false, &[late]), 0);
+    assert_eq!(deliver(&exposure, &mut document), Vec::new());
+
+    exposure.switch(&mut document, true, false, &[a, b, c, late]);
+    assert_eq!(
+        deliver(&exposure, &mut document),
+        vec![
+            record(a, true, "a"),
+            record(b, true, "b"),
+            record(late, true, "late")
+        ]
+    );
+}
+
+/// A stopped element stays stopped wherever it goes: the mark is the
+/// element's, not its tree's, so one moved under another parent while
+/// stopped is not detected there, visible and not exposed as it is, and an
+/// id write re-arms it without resuming it; the resume that lists it exposes
+/// it under its new id.
+#[test]
+fn a_stopped_element_stays_stopped_wherever_it_moves() {
+    let mut document = fresh_document();
+    let mut exposure = Exposure::new();
+    let [a, _b, _c] = three_exposed(&mut exposure, &mut document);
+    assert_eq!(exposure.switch(&mut document, false, true, &[a]), 1);
+    exposure.take_changes();
+
+    let holder = boxed(&mut document, 300.0, 100.0);
+    document.remove_element(a);
+    document.append_child(holder, a);
+    set(&mut exposure, &mut document, a, "exposure-id", "a2");
+    assert_eq!(deliver(&exposure, &mut document), Vec::new());
+    assert!(exposure.is_stopped(a));
+
+    exposure.switch(&mut document, true, false, &[a]);
+    assert_eq!(
+        deliver(&exposure, &mut document),
+        vec![record(a, true, "a2")]
+    );
+}
+
+/// Ids that name no registered element are skipped, by a stop and a resume
+/// alike: an element never registered, and one freed — whose registration
+/// went with its handler — even once its arena slot names another element.
+#[test]
+fn unregistered_and_freed_ids_are_ignored() {
+    let mut document = fresh_document();
+    let mut exposure = Exposure::new();
+    let [a, _b, _c] = three_exposed(&mut exposure, &mut document);
+    let never = boxed(&mut document, 0.0, 10.0);
+    let freed = boxed(&mut document, 0.0, 10.0);
+    set(&mut exposure, &mut document, freed, "exposure-id", "freed");
+    document.remove_element(freed);
+    document.drop_element(freed);
+    let next = boxed(&mut document, 0.0, 10.0);
+    set(&mut exposure, &mut document, next, "exposure-id", "next");
+    deliver(&exposure, &mut document);
+
+    let page = document.document_element().id();
+    assert_eq!(
+        exposure.switch(&mut document, false, true, &[never, freed, page]),
+        0
+    );
+    assert!(!exposure.has_changes());
+    assert!(!exposure.is_registered(never) && !exposure.is_registered(freed));
+    assert!(!exposure.is_stopped(next) && exposure.is_exposed(a));
+    assert_eq!(
+        exposure.switch(&mut document, true, false, &[never, freed, page]),
+        0
+    );
+    assert!(!exposure.has_changes());
 }
 
 // --- element lifetime ----------------------------------------------------
@@ -901,17 +1071,18 @@ fn a_freed_element_that_was_exposed_sends_nothing() {
     assert!(!exposure.has_changes());
     assert_eq!(deliver(&exposure, &mut document), Vec::new());
 
-    // Freed while stopped, with the exposed record kept: the resume lets
-    // the registration go, sending nothing either.
+    // Freed while stopped, with the exposed record kept: its observer
+    // stayed, so its drop lets the registration go at once, sending nothing
+    // either, and the resume that lists it finds nothing of it.
     let node = boxed(&mut document, 0.0, 100.0);
     set(&mut exposure, &mut document, node, "exposure-id", "b");
     assert_eq!(deliver(&exposure, &mut document).len(), 1);
-    exposure.switch(&mut document, false, false);
+    exposure.switch(&mut document, false, false, &[node]);
     document.remove_element(node);
     document.drop_element(node);
-    assert!(!exposure.has_changes(), "no observer to drop while stopped");
-    exposure.switch(&mut document, true, true);
     assert!(!exposure.is_registered(node));
+    assert!(!exposure.has_changes());
+    exposure.switch(&mut document, true, false, &[node]);
     assert!(!exposure.has_changes());
 }
 

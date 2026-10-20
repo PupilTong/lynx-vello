@@ -132,17 +132,17 @@ pub(crate) const RUNTIME_MODULE_SPECIFIER: &str = "bobcat:runtime";
 /// What a `frame` element's `src`, connection and disconnection do in the
 /// realm that holds its handle: the fetch, the `ShadowRealm` child, the
 /// calls into [`FRAME_BOOT_MODULE_SPECIFIER`] there, and the disposal.
-/// [`ELEMENT_MODULE_SPECIFIER`] imports it, the page realm hears a frame's
-/// connections through its `__BobcatFrameConnected` and
-/// `__BobcatFrameDisconnected`, and the page's disposal lets go of every
-/// frame's card first through its `__BobcatCloseFrames`.
+/// [`ELEMENT_MODULE_SPECIFIER`] imports it and hands it a frame's
+/// connections, which it hears as the internal events the runtime dispatches
+/// at the frame, and the page's disposal lets go of every frame's card first
+/// through its `__BobcatCloseFrames`.
 pub(crate) const FRAME_MODULE_SPECIFIER: &str = "bobcat:frame";
 
 /// A nested card's main-thread boot, which a frame's `ShadowRealm` child
 /// imports: the page boot's steps under the frame's nested page, without a
 /// document of its own — the card's BTS included, a `Worker` the child
-/// creates — and the `dispose` that disposes of that BTS and then closes the
-/// child.
+/// creates — and the `dispose` that sends the card's last `disexposure` list,
+/// disposes of that BTS and then closes the child.
 pub(crate) const FRAME_BOOT_MODULE_SPECIFIER: &str = "bobcat:frame-boot";
 
 /// The MTS realm's `Worker` class. The one built-in name without a colon,

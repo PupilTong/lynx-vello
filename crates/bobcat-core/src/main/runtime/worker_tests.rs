@@ -2986,8 +2986,9 @@ fn exposure_records_reach_the_bts_emitter_as_one_list() {
 }
 
 /// `lynx.stopExposure()` from the BTS is a post to the MTS realm, which runs
-/// it as `switchExposure(0, 1)`: every exposed row owes a `disexposure`, and
-/// the next delivery sends them, as one list, to the same listener.
+/// it as `switchExposure(0, 1, <the ids of the rows it registered>)`: every
+/// exposed row owes a `disexposure`, and the next delivery sends them, as one
+/// list, to the same listener.
 #[test]
 fn a_bts_stop_exposure_sends_the_disexposure_list_back_to_the_bts() {
     let mut pair = Pair::with_background(EXPOSURE_MTS_ENTRY, Some(EXPOSURE_BTS_ENTRY));

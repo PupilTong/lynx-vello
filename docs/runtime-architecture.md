@@ -676,7 +676,8 @@ and, when a threshold was crossed — or when the Lynx exposure service holds
 changes, as it does after `lynx.stopExposure`/`resumeExposure` — posted as
 one fresh entry, which runs the observers' handlers and then delivers the
 exposure changes those handlers recorded: each `uiappear`/`uidisappear`,
-then each `bobcat:exposure` record event at its element, under one microtask
+then each `bobcat:exposure` record event at its element — those the
+`uiappear`/`uidisappear` listeners queued included — under one microtask
 checkpoint per realm called (`Checkpoint::Deferred`), out of which that
 realm's Lynx layer sends one `exposure` and one `disexposure` list to its
 background thread; then the two
@@ -862,8 +863,11 @@ calls them, and the only difference is the child's `retired` flag, which its
 component (`main/tree/frame.rs`) builds a nested page `page[part=page]` in
 its shadow root for each card — the first in `constructed`, each later one
 when `resetFrame` frees the last — and queues its connections as
-`ComponentEvent::Frame`, which the page realm hears as `bobcat:frame`'s
-`__BobcatFrameConnected`/`__BobcatFrameDisconnected`. What makes a child is
+`ComponentEvent::Frame`, which the runtime dispatches at the frame as the
+internal events `bobcat:frameconnected`/`bobcat:framedisconnected`;
+`bobcat:element` files its own listener for both on every frame it creates,
+so the listener table calls the realm that holds the frame's handle, at any
+depth, and it hands the change to `bobcat:frame`. What makes a child is
 `bobcat:frame` (`packages/bobcat-element/src/frame.ts`), when a `frame`'s
 `src` is written or a frame with a `src` is connected again: it resolves `src`
 against the view's base (`resolveUrl`), fetches that URL, creates the child,
@@ -875,12 +879,20 @@ shadowRoot)`), runs the card's `root` with the frame's `data` and
 the child creates, its entry `U#background-thread` — whose `initialize`
 carries the view's native module table; later writes `bobcat:frame` hands the
 running child as its `updateData`/`updateGlobalProps`, which post to that BTS
-too. A new `src` or a disconnection calls the child's `dispose` (its BTS's
-`dispose`, then `closeRealm` once that is acknowledged; the child is kept while
-its worker runs) and then, without waiting, `resetFrame`, which frees the old
-card's nested page with everything under it and the shadow root's sheets and
-builds the next card's page (see AGENTS.md, "The frame's lifecycle"). A worker realm's child has
-the core alone.
+too. A new `src` or a disconnection calls the child's `dispose` with a
+`done` of the frame's own. The child stops its card's exposure with
+`sendEvent` — `switchExposure(0, 1, ids)` over the elements its realm
+registered, which only it knows — lets go of its own frames' cards, and —
+at once when the stop answered `0` and none of those cards waits, otherwise
+once the next intersection delivery entry has dispatched the stop's records
+at its still-live elements and its flush has posted the last `disexposure`
+list — disposes of its BTS (`closeRealm` follows once that is acknowledged;
+the child is kept while its worker runs) and calls `done`, which runs
+`resetFrame`, freeing the old card's nested page with everything under it
+and the shadow root's sheets — the old card's stopped elements with them —
+and building the next card's page. A load of the frame waits for that reset
+(see AGENTS.md, "The frame's lifecycle"). A worker realm's child has the
+core alone.
 
 ### Realm construction and driving
 
@@ -1537,7 +1549,9 @@ private callbacks as named exports of the native `bobcat-internal:host` ESM —
 the document member `createDocument`, the tree and attribute
 members, the two listener members (`listenerOpened`, `listenerClosed`, which
 file per-element registrations in the document's listener table), the
-exposure switch (`switchExposure`), the two timer members, and the three worker
+exposure switch (`switchExposure`, over the comma-joined ids of the elements
+the calling realm registered, answering the records it queued), the two
+timer members, and the three worker
 members — then preloads three kinds of ESM source: the core-owned
 `bobcat:runtime` named compatibility exports, the embedded `bobcat:element`
 named Element-PAPI exports, and the fetched entry under the URL boot imports
