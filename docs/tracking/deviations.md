@@ -2791,14 +2791,6 @@ consequential choice about whether to follow the spec or the quirk.
   no second engine; a custom-element ability). Native stands up a second
   `LynxTemplateRender` per frame (`LynxFrameView.java`) and web-core a nested
   `lynx-view` with an iframe realm; what follows from sharing one document:
-  - *A frame inside a nested card is disconnected for nobody but the page
-    realm.* Connections and disconnections reach `bobcat:frame` in the page
-    realm alone, which holds no handle for a frame a nested card created; so
-    a nested card that removes one of its own frames and keeps its handle
-    keeps that frame's card running. Letting go of the handle disposes of it
-    (the child's `FinalizationRegistry`), and so does the outer card going:
-    its `dispose` closes every card its frames loaded. web-core's nested
-    `lynx-view` hears its own `disconnectedCallback` at any depth.
   - *The nested card's `PageConfig` is ignored.* The nested page is styled by
     the host document's UA sheet, built from the host's
     `defaultDisplayLinear`, `defaultOverflowVisible` and the rest; native and
@@ -2879,19 +2871,32 @@ consequential choice about whether to follow the spec or the quirk.
     - *A frame's BTS reports as any BTS* (my decision): `WorkerThrew` and
       `WorkerEnded` name `worker <id> bobcat:bts`, non-fatal, so an embedder
       cannot tell it from the page's.
-    - *`lynx.stopExposure`/`resumeExposure` from a frame's BTS switch the
-      whole document's exposure* (my decision): both references scope it to
-      the nested view; here exposure is the document's.
-    - *Disposal does not hold the frame* (my decision): a removal or a new
-      `src` runs the old card's BTS `dispose` (ReactLynx's `destroyCard`,
-      its unmount effects) and frees the card's nested page at once, without
-      waiting for the acknowledgement; the old child is kept until its BTS
-      acknowledges and ignores what that BTS says meanwhile. As the view ends
-      the page closes its frames first, so each frame card's BTS gets
-      `dispose` ahead of the page BTS's, but nothing waits for their
+    - *Disposal does not wait for the BTS* (my decision): a removal or a
+      new `src` runs the old card's BTS `dispose` (ReactLynx's
+      `destroyCard`, its unmount effects) and frees the card's nested page
+      without waiting for the acknowledgement; the old child is kept until
+      its BTS acknowledges and ignores what that BTS says meanwhile. As the
+      view ends the page closes its frames first, so each frame card's BTS
+      gets `dispose` ahead of the page BTS's, but nothing waits for their
       acknowledgements. web-core awaits its nested instance's dispose RPC
       before terminating the Worker; native destroys the nested render with
       the frame.
+    - *A card let go of sends its last `disexposure` list one main-thread
+      entry later* (user rulings 2026-10-16, native's last list, and
+      2026-10-20, option A): its `dispose` stops its exposure with
+      `sendEvent` — the elements its realm registered, which it lists to the
+      host — and when that queued records, the BTS `dispose` and the
+      parent's `resetFrame` wait for the host's next intersection delivery
+      entry, which dispatches the records at the card's still-live elements,
+      and for the card realm's flush that posts the list to its BTS. Native
+      sends that list inside the teardown itself; web-core sends none
+      (`ExposureServices.ts:304-316`, `dispose` clears its exposed set and
+      drops its pending batch). Meanwhile the old card's page stays in the
+      frame and the card is still called for what is dispatched to it, and a
+      new `src` boots only once the page was reset. As the view ends, a card
+      that owes a list waits for a delivery entry the ending view may never
+      run, so its BTS gets no `dispose` and runs no app cleanup; a card with
+      nothing exposed is disposed of at once, as before.
   - *Events reach the card in its own realm, called by the kernel at the
     path's top* (user rulings 2026-10-16 and 2026-10-18, scheme D, and
     2026-10-19; "Each realm's Lynx walk runs at the path's top step", Event
@@ -2924,21 +2929,29 @@ consequential choice about whether to follow the spec or the quirk.
       same dispatch: the realms a dispatch calls are fixed before its walk,
       and the card keeps its registrations until the frame lets go of it,
       which the disconnection starts in a later entry. A new `src` written
-      by an earlier listener lets go of the old card at once: `resetFrame`
-      frees its page, its registrations leave with its nodes, and its call
-      is skipped, since it holds nothing for the name any more.
+      by an earlier listener lets go of an old card with nothing exposed at
+      once: `resetFrame` frees its page, its registrations leave with its
+      nodes, and its call is skipped, since it holds nothing for the name any
+      more. An old card that owes its last `disexposure` list keeps its page
+      until a later entry, so its call is made.
     - *A card's exposure records reach its own BTS* (resolved 2026-10-20):
       each record is a `bobcat:exposure` event at its element, and the
       listener table calls the realm holding the element's handle, so a
       card's elements' `exposure`/`disexposure` lists are sent by the card
       realm to the card's BTS, as both references keep exposure per card.
-      `lynx.stopExposure`/`resumeExposure` still switch the whole document's
-      exposure (above).
-    - *A frame's connection calls reach the page realm alone* (deferred):
-      `__BobcatFrameConnected`/`__BobcatFrameDisconnected` are not routed to
-      the realm whose scope holds the frame's handle, so a frame inside a
-      nested card that the card disconnects without letting go of its handle
-      keeps its card.
+      `lynx.stopExposure`/`resumeExposure` are per card too (resolved
+      2026-10-20, user ruling): the calling realm lists the elements it
+      registered — those it filed the record listener on, which only it
+      knows — and Rust keeps one stopped mark per element and no scope, so a
+      card's stop stops its own elements alone, and an element the realm
+      registers while stopped is stopped as it is registered.
+    - *A frame's connection reaches the realm that holds its handle*
+      (resolved 2026-10-20): each connection and disconnection is an
+      internal event at the frame, `bobcat:frameconnected` or
+      `bobcat:framedisconnected`, on which `bobcat:element` files its own
+      listener, so a frame a nested card created and disconnects, keeping
+      its handle, lets go of its card, as web-core's nested `lynx-view`
+      hears its own `disconnectedCallback` at any depth.
   - *A relative `src` resolves against the view's base*, not the host card's
     URL: `bobcat:frame` resolves `src` with `resolveUrl`, which is the
     resolution the fetcher makes against `ViewSources::base_url`, and the
@@ -3228,7 +3241,9 @@ consequential choice about whether to follow the spec or the quirk.
   web-core's do: neither the per-element `enable-exposure-ui-margin`
   attribute nor the `enableExposureUIMargin` page config is read
   (user-directed 2026-10-12; native applies the margins only under the
-  attribute or, without it, the page config); `lynx.stopExposure` stops detection and `resumeExposure` restarts
+  attribute or, without it, the page config); `lynx.stopExposure` stops detection, for the elements the calling
+  card's realm registered alone (user rulings 2026-10-16, both references' per-card switch, and 2026-10-20, the
+  realm's own element list), and `resumeExposure` restarts
   it (web-core's flag is read nowhere else); delivery is one batch per
   update with no timer (web-core coalesces the global lists on a 50 ms
   timer, native polls at 50 ms), and `setObserverFrameRate` is accepted and

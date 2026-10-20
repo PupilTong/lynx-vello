@@ -30,15 +30,28 @@
 // `update_data` and `update_global_props`, the BTS's `updateCardData` and
 // `updateGlobalProps` included.
 //
+// The card's exposure is its own: its records are events at its elements,
+// whose handles this realm holds, so its BTS hears its own elements alone;
+// its `lynx.stopExposure` lists the elements this realm registered, so it
+// stops this card's elements alone.
+//
 // `dispose` is the other half: `bobcat:frame` calls it when the frame lets
-// go of this card. It lets go of every card a frame of this card's loaded,
-// disposes of the card's BTS — its app cleanup runs and acknowledges — and
-// only then closes this realm. The nested page is this card's alone: the
-// parent's `resetFrame`, right after `dispose` returns, frees it with
-// everything under it, so this realm's page root then names a freed node,
-// which nothing on the way to `closeRealm` reads: `__DestroyLifetime` runs
-// inside `dispose`, before the free, and what the BTS says meanwhile is
-// ignored.
+// go of this card, with a `done` of its own. It stops the card's exposure
+// with `sendEvent` — the elements this realm registered — as native's card
+// sends its exposed elements a last `disexposure` when it is torn down (user
+// ruling 2026-10-16), and lets go of every card a frame of this card's
+// loaded. When the stop queued records they are dispatched at the card's
+// elements in the host's next intersection delivery entry, so `dispose`
+// waits for this realm's next flush of records, which posts the last list
+// to the card's BTS (user ruling 2026-10-20, option A), and for its own
+// frames' cards to do the same; then it disposes of the card's BTS — its
+// app cleanup runs and acknowledges — calls `done`, and closes this realm
+// once the BTS answered. When nothing waits, all of it happens inside
+// `dispose`, as before. The nested page is this card's alone: the parent's
+// `resetFrame`, in `done`, frees it with everything under it, so this
+// realm's page root then names a freed node, which nothing on the way to
+// `closeRealm` reads: `__DestroyLifetime` runs before `done`, before the
+// free, and what the BTS says meanwhile is ignored.
 //
 // `bobcat:runtime` is imported before `bobcat:element`, as the boot module
 // imports them: the two import each other, and this order is what lets
@@ -56,7 +69,12 @@ import {
   __BobcatUpdateGlobalProps,
   lynx,
 } from "bobcat:runtime";
-import { __BobcatUsePageRoot, __FlushElementTree } from "bobcat:element";
+import {
+  __BobcatAfterExposureRecords,
+  __BobcatSwitchExposure,
+  __BobcatUsePageRoot,
+  __FlushElementTree,
+} from "bobcat:element";
 import { __BobcatCloseFrames } from "bobcat:frame";
 import { Worker } from "bobcat-internal";
 import {
@@ -181,23 +199,50 @@ function shadowRootOf(page: number): number {
 }
 
 /**
- * Lets go of this card: every card a frame of this realm loaded first, then
- * the card's BTS — `__DestroyLifetime`, then `dispose`, whose app cleanup
- * (ReactLynx's `destroyCard`, its unmount effects) runs before the BTS
- * acknowledges and this realm terminates the Worker — and then this realm
- * itself, which the host frees outside every JavaScript call.
+ * Lets go of this card: stops its exposure with `sendEvent` — every element
+ * this realm registered, and those it registers from here on — which
+ * answers how many `disexposure` records it queued, and lets go of every
+ * card a frame of this realm loaded; once those records are posted to the
+ * card's BTS ([`__BobcatAfterExposureRecords`]) and every such card has
+ * posted its own, the card's BTS — `__DestroyLifetime`, then `dispose`,
+ * whose app cleanup (ReactLynx's `destroyCard`, its unmount effects) runs
+ * before the BTS acknowledges and this realm terminates the Worker — then
+ * `done`, the parent's, which resets the frame, and then this realm itself,
+ * which the host frees outside every JavaScript call.
  *
- * Returns at once. The host keeps this realm while its BTS runs, so the
- * acknowledgement is delivered here; a BTS that never answers keeps it until
- * the view ends. The nested page, with what the card built under it, is the
- * parent's to free, with `resetFrame`, right after this returns, and this
- * realm ignores what its BTS says meanwhile.
+ * Returns at once. When the stop queued nothing and no frame's card waits,
+ * everything up to `done` has happened by then; otherwise it happens in the
+ * host's next intersection delivery entry, one main-thread entry later,
+ * after the records were dispatched at the card's still-live elements. The
+ * host keeps this realm while its BTS runs, so the acknowledgement is
+ * delivered here; a BTS that never answers keeps it until the view ends.
+ * The nested page, with what the card built under it, is the parent's to
+ * free, with `resetFrame`, in `done`, and this realm ignores what its BTS
+ * says from its disposal on.
  */
-export function dispose(): void {
-  __BobcatCloseFrames();
-  void __BobcatDispose()
-    .catch(error => {
+export function dispose(done?: () => void): void {
+  let pending = 2;
+  const arrive = () => {
+    pending -= 1;
+    if (pending > 0) return;
+    void __BobcatDispose()
+      .catch(error => {
+        _ReportError(error);
+      })
+      .finally(closeRealm);
+    try {
+      done?.();
+    } catch (error) {
       _ReportError(error);
-    })
-    .finally(closeRealm);
+    }
+  };
+  let queued = 0;
+  try {
+    queued = __BobcatSwitchExposure(false, true);
+  } catch (error) {
+    _ReportError(error);
+  }
+  __BobcatCloseFrames(arrive);
+  if (queued > 0) __BobcatAfterExposureRecords(arrive);
+  else arrive();
 }

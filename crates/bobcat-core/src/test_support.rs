@@ -81,6 +81,9 @@ pub(crate) struct InlineFetcher {
     /// The absolute URLs a [`SourceRequest::Fetch`] succeeds for; every
     /// other plain fetch fails.
     fetchable: FxHashSet<String>,
+    /// The absolute URLs a plain fetch has succeeded for, which
+    /// [`ResourceFetcher::fetch_probe`] answers from when this host has one.
+    fetched: Option<Arc<Mutex<FxHashSet<String>>>>,
     /// Whether this host answers [`ResourceFetcher::style_sheet_probe`]: from
     /// the sheets it holds, by absolute URL. Without one, every
     /// `hasStyleSheet` is `true`.
@@ -129,6 +132,12 @@ impl ResourceFetcher for InlineFetcher {
                 })
             }
             SourceRequest::Fetch { url } if self.fetchable.contains(&resolved(&url)) => {
+                if let Some(fetched) = &self.fetched {
+                    fetched
+                        .lock()
+                        .expect("the fetched set is never poisoned")
+                        .insert(resolved(&url));
+                }
                 Ok(LoadedSource::Fetched)
             }
             SourceRequest::StyleSheet(url) => match self.sheets.get(&resolved(&url)) {
@@ -149,6 +158,16 @@ impl ResourceFetcher for InlineFetcher {
             SourceRequest::Module(url) | SourceRequest::Fetch { url } => Err(missing(&url)),
         };
         completion.complete(answer);
+    }
+
+    fn fetch_probe(&self) -> Option<crate::resource::FetchProbe> {
+        let fetched = Arc::clone(self.fetched.as_ref()?);
+        Some(Arc::new(move |url: &str| {
+            fetched
+                .lock()
+                .expect("the fetched set is never poisoned")
+                .contains(&resolved(url))
+        }))
     }
 
     fn style_sheet_probe(&self) -> Option<StyleSheetProbe> {
@@ -261,6 +280,7 @@ pub(crate) struct TestViewSpec {
     /// default font.
     default_font: Option<(String, dom::FontBlob)>,
     fetchable: FxHashSet<String>,
+    probes_fetches: bool,
     probes_style_sheets: bool,
     /// The names of the [`EchoModule`]s the view is built with.
     echo_modules: Vec<&'static str>,
@@ -308,6 +328,7 @@ impl TestViewSpec {
             fonts: Vec::new(),
             default_font: None,
             fetchable: FxHashSet::default(),
+            probes_fetches: false,
             probes_style_sheets: false,
             echo_modules: Vec::new(),
             target: TestTarget::None,
@@ -370,6 +391,15 @@ impl TestViewSpec {
     pub(crate) fn serving_style_sheet(mut self, url: &str, css: &str) -> Self {
         self.served_sheets
             .push((resolved(url), TestSheet::Text(css.to_owned())));
+        self
+    }
+
+    /// Answers [`ResourceFetcher::fetch_probe`] from the plain fetches this
+    /// host has completed, as a caching resource system does: a repeat
+    /// `fetchResource` of one settles at once, so a `frame`'s card for it
+    /// starts in a microtask rather than a later job.
+    pub(crate) fn with_fetch_probe(mut self) -> Self {
+        self.probes_fetches = true;
         self
     }
 
@@ -453,6 +483,7 @@ impl TestViewSpec {
             fonts,
             default_font,
             fetchable,
+            probes_fetches,
             probes_style_sheets,
             echo_modules,
             target,
@@ -482,6 +513,7 @@ impl TestViewSpec {
             sheets: sheets.into_iter().chain(served_sheets).collect(),
             fonts: fonts.into_iter().collect(),
             fetchable,
+            fetched: probes_fetches.then(Arc::default),
             probes_style_sheets,
         });
         block_on(async move {

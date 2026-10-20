@@ -48,14 +48,24 @@
 //! a ui margin rather than add it (`ExposureServices.ts:141-151`).
 //!
 //! **`stopExposure`/`resumeExposure` are native's** (`LynxUIExposure.m:538-569`,
-//! `UIExposure.java:478-505`). Stopping drops every observer, so nothing is
-//! detected and no `uiappear` fires; with `sendEvent` (its default) every
-//! element recorded as exposed gets one `disexposure` record and the record
-//! is cleared, without it nothing is sent and the record is kept. Resuming
-//! observes every registered element again, registrations made while stopped
-//! included, and whatever is visible then and not recorded as exposed is
-//! exposed again, `uiappear` included. web-core's switch only gates its
-//! global records and keeps observing (`ExposureServices.ts:278-302`).
+//! `UIExposure.java:478-505`), **for the elements the caller lists** (user
+//! rulings 2026-10-16 and 2026-10-20: per card, as both references keep one
+//! switch per card, web-core's `createNativeModules.ts:19-30` and native's
+//! `LynxExposureModule.java:22-47`). Which elements are a card's is its
+//! realm's knowledge — it filed their record listeners — so a switch names
+//! its elements, and each registration here carries one flag of its own,
+//! stopped or not; nothing here names a realm, a frame or a tree. Stopping an
+//! element stops detecting it, so it queues nothing and fires no `uiappear`;
+//! with `sendEvent` (its default) each listed element recorded as exposed
+//! gets one `disexposure` record and the record is cleared, without it
+//! nothing is sent and the record is kept. A stop with `sendEvent` sends what
+//! is recorded as exposed whatever an earlier stop did, as native's sends its
+//! exposed set on every call. Resuming observes each listed stopped element
+//! again, and whichever is visible then and not recorded as exposed is
+//! exposed again, `uiappear` included. An element listed by no switch is
+//! left alone, so one card's stop leaves the page and every other card
+//! running. web-core's switch only gates its global records and keeps
+//! observing (`ExposureServices.ts:278-302`).
 //!
 //! **There is no timer.** Native polls on a display link and web-core batches
 //! its records behind a 50 ms timeout (`ExposureServices.ts:246-275`). Here
@@ -63,8 +73,9 @@
 //! the one the epilogue posts after an update that queued entries
 //! (`docs/runtime-architecture.md`): first each `uiappear`/`uidisappear`, in
 //! the order the changes formed, then each record event, in the same order,
-//! all inside the one entry, so the realm's Lynx layer sends one `exposure`
-//! list and then one `disexposure` list, web-core's order.
+//! followed by the records those listeners queued, all inside the one entry,
+//! so the realm's Lynx layer sends one `exposure` list and then one
+//! `disexposure` list, web-core's order.
 //! `lynx.setObserverFrameRate` has no rate to set.
 //!
 //! # Where the references differ, and what is chosen
@@ -138,9 +149,14 @@
 //! always reports the element, so an element whose visibility did not move
 //! reports what was already recorded and queues nothing.
 //!
+//! A registration keeps its observer while it is stopped: the handler
+//! ignores what the primitive reports for a stopped element, and a resume
+//! re-arms it, so the fresh observer's first report is judged against the
+//! record again.
+//!
 //! The handler is bound to its element, so the primitive drops it when the
 //! element is freed; that drop is how a freed element is noticed, and it
-//! only lets the registration go. Every drop
+//! only lets the registration go, whether or not it is stopped. Every drop
 //! this module makes itself clears the registration's observer first, so the
 //! handler's `Drop` tells the two apart. That `Drop` borrows the shared state
 //! and runs inside `Document::drop_intersection_observer` and inside an
@@ -212,9 +228,9 @@ pub(crate) struct ExposureChange {
 /// One registered element.
 #[derive(Debug)]
 struct Entry {
-    /// The observer this registration owns. `None` while exposure is stopped
-    /// and before the first arm, and cleared before every drop this module
-    /// makes, which is what [`ExposureHandler`]'s `Drop` reads.
+    /// The observer this registration owns. `None` before the first arm,
+    /// and cleared before every drop this module makes, which is what
+    /// [`ExposureHandler`]'s `Drop` reads.
     observer: Option<IntersectionObserverId>,
     /// The element hears `uiappear`/`uidisappear`: some realm has filed a
     /// handler for one of them on it.
@@ -225,9 +241,13 @@ struct Entry {
     scene: String,
     /// `exposure-area` as a ratio in `[0, 1]`.
     area: f64,
-    /// Recorded as exposed: the last change this registration queued
-    /// was an appearance.
+    /// Recorded as exposed: the last change this registration queued was an
+    /// appearance.
     exposed: bool,
+    /// Between a switch that stopped it and one that resumes it
+    /// ([`Exposure::switch`]): its observer stays, and the handler ignores
+    /// what it reports.
+    stopped: bool,
 }
 
 /// What [`Exposure`] and every [`ExposureHandler`] share.
@@ -247,29 +267,42 @@ fn queue(changes: &mut Vec<ExposureChange>, change: ExposureChange) {
     }
 }
 
-/// Records `entry` as visible or not, queueing the change when that is a
-/// change. `element_event` is whether the element hears it.
-fn record(
+/// Records `entry` as exposed, queueing the appearance, unless it already
+/// is. `element_event` is whether the element hears it.
+fn expose(changes: &mut Vec<ExposureChange>, node: NodeId, entry: &mut Entry, element_event: bool) {
+    if entry.exposed {
+        return;
+    }
+    entry.exposed = true;
+    queue(changes, change(node, entry, true, element_event));
+}
+
+/// Records `entry` as not exposed, queueing the disappearance, if it was
+/// exposed; answers whether that queued a change. `element_event` is whether
+/// the element hears it.
+fn disexpose(
     changes: &mut Vec<ExposureChange>,
     node: NodeId,
     entry: &mut Entry,
-    visible: bool,
     element_event: bool,
-) {
-    if visible == entry.exposed {
-        return;
+) -> bool {
+    if !std::mem::take(&mut entry.exposed) {
+        return false;
     }
-    entry.exposed = visible;
-    queue(
-        changes,
-        ExposureChange {
-            node,
-            appeared: visible,
-            exposure_id: entry.exposure_id.clone(),
-            scene: entry.scene.clone(),
-            element_event,
-        },
-    );
+    let before = changes.len();
+    queue(changes, change(node, entry, false, element_event));
+    changes.len() > before
+}
+
+/// `entry`'s change, with the id and scene it carries now.
+fn change(node: NodeId, entry: &Entry, appeared: bool, element_event: bool) -> ExposureChange {
+    ExposureChange {
+        node,
+        appeared,
+        exposure_id: entry.exposure_id.clone(),
+        scene: entry.scene.clone(),
+        element_event,
+    }
 }
 
 /// The handler of one registration's observer.
@@ -284,8 +317,9 @@ struct ExposureHandler {
 
 impl IntersectionEventHandler<()> for ExposureHandler {
     /// Compares each entry with the recorded state and queues a change
-    /// where they differ. Touches no `Document` method, which is what lets it
-    /// hold the shared borrow for the whole call.
+    /// where they differ, unless the registration is stopped. Touches no
+    /// `Document` method, which is what lets it hold the shared borrow for
+    /// the whole call.
     fn notify(
         &mut self,
         _document: &mut LynxDocument,
@@ -302,8 +336,9 @@ impl IntersectionEventHandler<()> for ExposureHandler {
         };
         // Only the registration's current observer speaks for it; a dropped
         // one cannot deliver, so this is a statement of the invariant more
-        // than a filter.
-        if entry.observer != Some(observer) {
+        // than a filter. A stopped element is not detected: what the
+        // primitive reports is ignored, and the resume re-arms it.
+        if entry.observer != Some(observer) || entry.stopped {
             return;
         }
         for observed in entries {
@@ -311,7 +346,11 @@ impl IntersectionEventHandler<()> for ExposureHandler {
             // but intersection.
             let visible = observed.is_intersecting && observed.intersection_ratio >= entry.area;
             let element_event = entry.element_event;
-            record(changes, self.node, entry, visible, element_event);
+            if visible {
+                expose(changes, self.node, entry, element_event);
+            } else {
+                disexpose(changes, self.node, entry, element_event);
+            }
         }
     }
 
@@ -323,8 +362,9 @@ impl IntersectionEventHandler<()> for ExposureHandler {
 impl Drop for ExposureHandler {
     /// The element was freed, when its registration still names an
     /// observer: every drop this module makes clears that first. The
-    /// registration goes, and nothing is queued: a freed element is no
-    /// target, so there is nothing to dispatch a record at.
+    /// registration goes, and nothing is queued, whether or not it is
+    /// stopped: a freed element is no target, so there is nothing to
+    /// dispatch a record at.
     fn drop(&mut self) {
         let mut shared = self.shared.borrow_mut();
         let freed = shared
@@ -555,24 +595,21 @@ impl Attributes {
     }
 }
 
-/// A document's exposure registrations, the switch `stopExposure` and
-/// `resumeExposure` turn, and the changes waiting for a delivery entry.
+/// A document's exposure registrations, each stopped or not, and the
+/// changes waiting for a delivery entry.
 ///
 /// Owned by the realm's document slot beside the document.
 #[derive(Debug)]
 pub(crate) struct Exposure {
     /// Shared with every registration's [`ExposureHandler`].
     shared: Rc<RefCell<Shared>>,
-    /// False between `stopExposure` and `resumeExposure`.
-    running: bool,
 }
 
 impl Exposure {
-    /// No registrations, detection running.
+    /// No registrations.
     pub(crate) fn new() -> Self {
         Self {
             shared: Rc::default(),
-            running: true,
         }
     }
 
@@ -626,8 +663,9 @@ impl Exposure {
     /// An existing observer is dropped. A registration recorded as exposed
     /// under another id than the one it now has sends a `disexposure` under
     /// the old id and is recorded as not exposed, so the new id gets an
-    /// exposure of its own. While detection runs, a fresh observer is
-    /// created and observes the element.
+    /// exposure of its own. A fresh observer is created and observes the
+    /// element, whether or not the registration is stopped: the handler
+    /// ignores what it reports while it is.
     fn arm(
         &mut self,
         document: &mut LynxDocument,
@@ -651,10 +689,11 @@ impl Exposure {
                 scene: String::new(),
                 area: 0.0,
                 exposed: false,
+                stopped: false,
             });
             let previous = entry.observer.take();
             if entry.exposure_id != exposure_id {
-                record(changes, node, entry, false, false);
+                disexpose(changes, node, entry, false);
             }
             entry.element_event = element_event;
             entry.exposure_id = exposure_id;
@@ -664,9 +703,6 @@ impl Exposure {
         };
         if let Some(observer) = previous {
             document.drop_intersection_observer(observer);
-        }
-        if !self.running {
-            return;
         }
         let observer = document.create_intersection_observer(
             Box::new(ExposureHandler {
@@ -699,7 +735,7 @@ impl Exposure {
             let Some(mut entry) = entries.remove(&node) else {
                 return;
             };
-            record(changes, node, &mut entry, false, false);
+            disexpose(changes, node, &mut entry, false);
             entry.observer
         };
         if let Some(observer) = observer {
@@ -708,64 +744,62 @@ impl Exposure {
     }
 
     /// `lynx.stopExposure({sendEvent})` (`on` false) and
-    /// `lynx.resumeExposure()` (`on` true), as native runs them. Stopping a
-    /// stopped document and resuming a running one do nothing.
+    /// `lynx.resumeExposure()` (`on` true) for the elements `nodes`, the ones
+    /// the calling realm registered, as native runs them for one card.
+    /// Answers how many records the call queued: one per listed element
+    /// recorded as exposed under an `exposure-id` for a stop with
+    /// `send_event`, and 0 for anything else.
     ///
-    /// Stopping drops every observer; with `send_event` every registration
-    /// recorded as exposed sends one `disexposure` (records only) and is
-    /// recorded as not exposed, and without it nothing is sent and the
-    /// record is kept, so a resume that finds the element still visible
-    /// sends nothing for it. Resuming first lets go of the registrations
-    /// whose element was freed while stopped, sending nothing, as a free
-    /// while running does, and then arms every other from its attributes as
-    /// they are now.
+    /// Stopping marks each listed registration stopped: its observer stays,
+    /// and what it reports is ignored. With `send_event` each listed
+    /// registration recorded as exposed sends one `disexposure` (records
+    /// only) and is recorded as not exposed, whatever an earlier stop did;
+    /// without it nothing is sent and the record is kept, so a resume that
+    /// finds the element still visible sends nothing for it. Resuming clears
+    /// the mark of each listed stopped registration and arms it again from
+    /// its attributes as they are now, so its fresh observer's first report
+    /// is judged against the record: one whose element did not move queues
+    /// nothing. A listed registration that is not stopped is running already
+    /// and is left alone.
     ///
-    /// Registrations are visited in `NodeId` order, so the records one call
-    /// sends, and the observers a resume creates, come in an order that does
-    /// not depend on the hash map's.
-    pub(crate) fn switch(&mut self, document: &mut LynxDocument, on: bool, send_event: bool) {
-        if on == self.running {
-            return;
-        }
-        self.running = on;
-        let nodes = self.registered();
-        if on {
-            for node in nodes {
-                if document.get(node).is_some() {
-                    let element_event = self.shared.borrow().entries[&node].element_event;
-                    let attributes = Attributes::read(document, node);
-                    self.arm(document, node, attributes, element_event);
-                } else {
-                    // Freed while stopped: no handler was there to notice.
-                    self.shared.borrow_mut().entries.remove(&node);
-                }
-            }
-            return;
-        }
-        let mut observers = Vec::new();
-        {
+    /// A listed node that is not registered — never, no longer, or freed,
+    /// which lets its registration go with its handler, sending nothing — is
+    /// skipped. Registrations are visited in the order listed, so the records
+    /// one call sends come in the caller's order.
+    pub(crate) fn switch(
+        &mut self,
+        document: &mut LynxDocument,
+        on: bool,
+        send_event: bool,
+        nodes: &[NodeId],
+    ) -> usize {
+        if !on {
             let mut shared = self.shared.borrow_mut();
             let Shared { entries, changes } = &mut *shared;
-            for node in nodes {
+            let mut queued = 0;
+            for &node in nodes {
                 let Some(entry) = entries.get_mut(&node) else {
                     continue;
                 };
-                observers.extend(entry.observer.take());
-                if send_event {
-                    record(changes, node, entry, false, false);
+                entry.stopped = true;
+                if send_event && disexpose(changes, node, entry, false) {
+                    queued += 1;
                 }
             }
+            return queued;
         }
-        for observer in observers {
-            document.drop_intersection_observer(observer);
+        for &node in nodes {
+            let element_event = match self.shared.borrow_mut().entries.get_mut(&node) {
+                Some(entry) if entry.stopped => {
+                    entry.stopped = false;
+                    entry.element_event
+                }
+                _ => continue,
+            };
+            let attributes = Attributes::read(document, node);
+            self.arm(document, node, attributes, element_event);
         }
-    }
-
-    /// Every registered element, in `NodeId` order.
-    fn registered(&self) -> Vec<NodeId> {
-        let mut nodes: Vec<NodeId> = self.shared.borrow().entries.keys().copied().collect();
-        nodes.sort_unstable_by_key(|node| node.to_bits());
-        nodes
+        0
     }
 
     /// Every pending change, in the order they formed, leaving none.
@@ -780,8 +814,8 @@ impl Exposure {
         !self.shared.borrow().changes.is_empty()
     }
 
-    /// The observer `node`'s registration owns, if it is registered and
-    /// detection runs — for the tests that read what an arm created.
+    /// The observer `node`'s registration owns, if it is registered — for
+    /// the tests that read what an arm created.
     #[cfg(test)]
     pub(crate) fn observer_of(&self, node: NodeId) -> Option<IntersectionObserverId> {
         self.shared
@@ -795,6 +829,26 @@ impl Exposure {
     #[cfg(test)]
     fn is_registered(&self, node: NodeId) -> bool {
         self.shared.borrow().entries.contains_key(&node)
+    }
+
+    /// Whether `node` is registered and recorded as exposed.
+    #[cfg(test)]
+    fn is_exposed(&self, node: NodeId) -> bool {
+        self.shared
+            .borrow()
+            .entries
+            .get(&node)
+            .is_some_and(|entry| entry.exposed)
+    }
+
+    /// Whether `node` is registered and stopped.
+    #[cfg(test)]
+    fn is_stopped(&self, node: NodeId) -> bool {
+        self.shared
+            .borrow()
+            .entries
+            .get(&node)
+            .is_some_and(|entry| entry.stopped)
     }
 }
 
