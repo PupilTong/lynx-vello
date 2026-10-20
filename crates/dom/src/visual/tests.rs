@@ -2778,8 +2778,9 @@ fn a_scroll_self_timeline_binds_the_scrollers_own_slot() {
 /// the period's end reads −50, the start, and 50px past `max` reads
 /// itself, the end; the seam's midpoint keeps the offset, and an offset off
 /// the circle is wrapped first. A view progress timeline reads the offset
-/// as it stands, clamped to the range: the card's cover range `[-200, 100]`
-/// is behind every offset past `max`.
+/// as it stands in the period: the card's cover range `[-200, 100]` is
+/// behind every offset past `max`, where the card's own copy is off the
+/// scrollport.
 #[test]
 fn a_circular_scroll_timeline_samples_the_nearer_end_through_the_seam() {
     use crate::visual::{ScrollOffsets, ScrollSlot};
@@ -2829,6 +2830,84 @@ fn a_circular_scroll_timeline_samples_the_nearer_end_through_the_seam() {
         assert_eq!(alpha(scroller, y), Some(scroll), "scroll(self) at {y}");
         assert_eq!(alpha(card, y), Some(view), "view() at {y}");
     }
+}
+
+/// While a circular scroller's scrollport straddles the seam, the seam copy
+/// of its content samples a view progress timeline again with the offset
+/// one period back — the copy shows the card there — while a scroll
+/// progress timeline keeps the container's one sample: at 1150 of a period
+/// of 1200 the card's copy stands 50px before the start, halfway through
+/// its cover range `[-200, 100]`, and the scroller's own `scroll(self)`
+/// fade reads the start in both passes. At 500 nothing straddles.
+#[test]
+fn a_seam_pass_resamples_the_view_timelines_riding_its_slot() {
+    use crate::visual::ScrollSlot;
+
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 600px; }
+         .scroller { display: flex; flex-direction: column; overflow: scroll;
+                     overscroll-behavior-y: circular; width: 200px; height: 200px;
+                     animation: fade linear; animation-timeline: scroll(self); }
+         .card { flex-shrink: 0; width: 200px; height: 100px;
+                 animation: fade linear both; animation-timeline: view(); }
+         .filler { flex-shrink: 0; width: 200px; height: 1100px; }
+         @keyframes fade { from { opacity: 1; } to { opacity: 0; } }",
+    );
+    let root = h.root();
+    let scroller = h.el(root, "view.scroller");
+    let card = h.el(scroller, "view.card");
+    h.el(scroller, "view.filler");
+    let frame = h.doc.dom.commit();
+    let slot_of = |node: NodeId| {
+        let index = frame
+            .animation_slots()
+            .iter()
+            .position(|slot| slot.node == node)
+            .expect("the fade exports");
+        u32::try_from(index).expect("a frame cannot hold 2^32 animation slots")
+    };
+    let (scroller_fade, card_fade) = (slot_of(scroller), slot_of(card));
+    let own = frame.slot_of(scroller).expect("the scroller has a slot");
+    let passes = |y: f32| {
+        let offset_of =
+            |slot: &ScrollSlot| (slot.node == scroller).then_some(crate::Vector2D::new(0.0, y));
+        let animations = frame.order.sample_animations(None, &offset_of);
+        let stickies = frame.order.sample_stickies(1.0, &offset_of);
+        let anchored = frame
+            .order
+            .sample_anchored(&animations, &stickies, 1.0, &offset_of);
+        let samples = frame
+            .order
+            .space_samples(&animations, &stickies, &anchored, 1.0, &offset_of);
+        let passes = samples.seam_passes_with(frame.animation_slots(), None);
+        let alphas = |table: &crate::visual::AnimationSamples| {
+            (table.get(scroller_fade).alpha, table.get(card_fade).alpha)
+        };
+        (
+            alphas(&animations),
+            passes
+                .iter()
+                .map(|pass| (pass.slot, pass.shift, alphas(&pass.animations)))
+                .collect::<Vec<_>>(),
+        )
+    };
+    assert_eq!(
+        passes(1150.0),
+        (
+            (Some(1.0), Some(0.0)),
+            vec![(
+                own,
+                crate::Vector2D::new(0.0, -1200.0),
+                (Some(1.0), Some(0.5))
+            )]
+        ),
+        "straddling: the copy reads the card halfway in, the scroller's fade stays"
+    );
+    assert_eq!(
+        passes(500.0),
+        ((Some(0.5), Some(0.0)), vec![]),
+        "not straddling"
+    );
 }
 
 /// A circular scroller whose scrollport straddles the seam is hit through

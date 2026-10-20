@@ -971,7 +971,12 @@ and §D.16 with what the wire format actually permits.)*
       the swiper's dots show the first item when the first item is centred
       across the seam, and the last item when the last item stands past
       `max_offset`. A view progress timeline samples the normalized offset
-      clamped to the range. On a circular axis the committed encode window
+      unclamped, since on a circular axis every offset of the period is a
+      position and a subject's ranges lie anywhere in it, and the seam
+      copy of the container's content samples it again with the offset one
+      period back, where the copy shows the subject: an `x-swiper`
+      `coverflow` item drawn across the seam turns by where the copy
+      stands in the scrollport. On a circular axis the committed encode window
       is the whole scrolling area and never re-centres, so a
       `content-visibility: auto` box inside it is always relevant on that
       axis. An axis whose content does not overflow wraps nothing. A
@@ -980,9 +985,11 @@ and §D.16 with what the wire format actually permits.)*
       of the circle between the offset and the target, through the seam when
       that is shorter (from 80 to 320 on a period of 360 it runs back 120
       across the start, not forward 240). Known approximations of the seam
-      copy: a sticky or anchored box
-      and an exported animation inside it sample the unshifted offset, so
-      they are positioned as in the first copy; a backdrop texture inside it
+      copy: a sticky or anchored box inside it, and an exported animation
+      on a scroll progress timeline or the clock, sample the unshifted
+      offset, so they are positioned as in the first copy (an animation on
+      a view progress timeline over the container is resampled at the
+      copy's offset); a backdrop texture inside it
       is the one baked for the original; nested circular containers that
       straddle at once each draw only their own copy, not the
       wrapped-inside-wrapped combination; element measurement

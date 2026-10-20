@@ -578,8 +578,11 @@ the specifications are silent or disagree.
     keeping it — on the main thread (`ScrollBox::unwrapped_offset`) and the
     painter (`ScrollSlot::unwrap`) alike, so a scrollport just before the
     start reads progress 0, not 1. A view progress timeline reads the offset
-    as it stands, clamped: inside the seam copy it samples the unshifted
-    offset, an approximation §25 records.
+    as it stands in the period, unclamped — on such an axis every offset of
+    the period is a position and the subject's ranges lie anywhere in it —
+    and the seam copy of the container's content samples it again with the
+    offset one period back (`SpaceSamples::seam_passes_with`), where the
+    copy shows the subject.
 
 ---
 

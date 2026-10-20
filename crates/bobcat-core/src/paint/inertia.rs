@@ -902,6 +902,35 @@ impl ScrollIntents {
         }
     }
 
+    /// [`Self::glide_to`] for a smooth programmatic scroll, over the glides
+    /// already moving `node`: an axis already gliding to `to` keeps its
+    /// glide — a request for where the container is going changes nothing,
+    /// so a timer that asks for the same turn again before the first one
+    /// lands, an `x-swiper` autoplay with a short `interval`, does not
+    /// start the glide over from rest at every frame, which would leave the
+    /// container creeping toward the turn and never arriving — while an
+    /// axis gliding elsewhere ends that glide and starts over from rest,
+    /// as an axis not gliding does.
+    #[expect(
+        clippy::float_cmp,
+        reason = "a request for exactly where a glide already goes changes nothing; one for a \
+                  position any distance away starts over"
+    )]
+    pub(super) fn glide_to_or_keep(
+        &mut self,
+        frame: &CommittedFrame,
+        node: NodeId,
+        from: Vector2D<f32>,
+        to: Vector2D<f32>,
+        now: f64,
+    ) {
+        if !self.glides.is_empty() {
+            self.glides
+                .retain(|glide| glide.node != node || glide.target == glide.axis.of(to));
+        }
+        self.glide_to(frame, node, from, to, now);
+    }
+
     /// Glides `node`'s axes from `from` to `to`, or writes an axis whose
     /// distance is under one physical pixel at once. An axis already gliding
     /// is left to its glide.
@@ -1012,11 +1041,18 @@ impl ScrollIntents {
         }
     }
 
-    /// Stops everything moving `node` on the painter's own account — a
-    /// fling whose chain runs through it, its bounce backs and its glides —
-    /// for a programmatic scroll that decides where it goes. A stopped
-    /// fling lets go of its other holds as a spent one does.
-    pub(super) fn stop_motion_on(&mut self, frame: &CommittedFrame, node: NodeId, now: f64) {
+    /// Stops what moves `node` on the painter's own account besides its
+    /// glides — a fling whose chain runs through it and its bounce backs —
+    /// for a programmatic scroll that decides where it goes: an instant one
+    /// ends the glides too ([`Self::stop_glides`]), a smooth one keeps those
+    /// already going its way ([`Self::glide_to_or_keep`]). A stopped fling
+    /// lets go of its other holds as a spent one does.
+    pub(super) fn stop_flings_and_bounces_on(
+        &mut self,
+        frame: &CommittedFrame,
+        node: NodeId,
+        now: f64,
+    ) {
         let mut stopped: SmallVec<[PointerId; 1]> = SmallVec::new();
         self.flings.retain(|fling| {
             let through = chain_nodes(frame, fling.from).contains(&node);
@@ -1033,7 +1069,6 @@ impl ScrollIntents {
             self.start_bounce_backs(frame, now);
         }
         self.bounce_backs.retain(|back| back.node != node);
-        self.glides.retain(|glide| glide.node != node);
     }
 
     /// Moves everything that refers to `node`'s live offset by `shift`: the

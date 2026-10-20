@@ -474,6 +474,13 @@ impl CommittedFrame {
         let anchored =
             self.order
                 .sample_anchored(&animations, &stickies, self.device_pixel_ratio, offset_of);
+        let samples = self.order.space_samples(
+            &animations,
+            &stickies,
+            &anchored,
+            self.device_pixel_ratio,
+            offset_of,
+        );
         compose::replay(
             scene,
             &self.presentation.fragments,
@@ -484,13 +491,8 @@ impl CommittedFrame {
             vectors,
             &self.presentation.filter_groups,
             filtered,
-            &self.order.space_samples(
-                &animations,
-                &stickies,
-                &anchored,
-                self.device_pixel_ratio,
-                offset_of,
-            ),
+            &samples,
+            &samples.seam_passes_with(self.order.animations(), animation_now),
         );
     }
 
@@ -615,6 +617,7 @@ impl CommittedFrame {
             },
             group.ops.start as usize..group.ops.end as usize,
             &samples,
+            &samples.seam_passes_with(self.order.animations(), animation_now),
             compose::ReplayTarget::Bake {
                 entry: group.space,
                 origin: (group.rect.x0, group.rect.y0),
@@ -866,22 +869,23 @@ impl CommittedFrame {
             self.device_pixel_ratio,
             offset_of,
         );
-        let passes = samples.seam_passes();
+        let passes = samples.seam_passes_with(self.order.animations(), animation_now);
         if passes.is_empty() {
             return self.order.raw_hits_at(point, &samples).next();
         }
         let offsets: SmallVec<[_; 2]> = passes
             .iter()
-            .map(|&(slot, shift)| samples.shifted_offsets(slot, shift))
+            .map(|pass| samples.shifted_offsets(pass.slot, pass.shift))
             .collect();
         let seams: SmallVec<[(u32, SpaceSamples<'_>); 2]> = passes
             .iter()
             .zip(&offsets)
-            .map(|(&(slot, _), offsets)| {
+            .map(|(pass, offsets)| {
                 (
-                    slot,
+                    pass.slot,
                     SpaceSamples {
                         offset_of: offsets,
+                        animations: &pass.animations,
                         ..samples
                     },
                 )

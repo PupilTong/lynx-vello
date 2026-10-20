@@ -700,17 +700,19 @@ impl ScrollIntents {
         }
     }
 
-    /// One programmatic scroll of `slot`'s container. Whatever the painter
-    /// was moving it with stops ([`Self::stop_motion_on`]), except an
-    /// auto-scroll, which goes on from where the request leaves the
-    /// container. One that yields to a pointer
+    /// One programmatic scroll of `slot`'s container. The fling or bounce
+    /// back moving it stops ([`Self::stop_flings_and_bounces_on`]), while an
+    /// auto-scroll goes on from where the request leaves the container and
+    /// a glide is kept or ended below. One that yields to a pointer
     /// ([`dom::Document::scroll_to_yielding`]) is dropped whole while a drag
     /// holds the container. An instant one
     /// puts the live offset on the target, where a drag holding the
-    /// container continues from; a smooth one glides there from rest, to
-    /// the position the at-rest snap rule would move the target to, so a
-    /// snapping container does not jump at the end. On a circular axis the
-    /// glide runs along the shorter arc of the circle
+    /// container continues from; a smooth one glides there, to the position
+    /// the at-rest snap rule would move the target to, so a snapping
+    /// container does not jump at the end — from rest, unless a glide to
+    /// that position is already running, which goes on as it is
+    /// ([`Self::glide_to_or_keep`]). On a
+    /// circular axis the glide runs along the shorter arc of the circle
     /// ([`nearest_copy`]), across the seam when that is shorter. Either way
     /// the container is posted, naming the request.
     fn apply_request(
@@ -728,13 +730,14 @@ impl ScrollIntents {
             note_changed(&mut self.changed, node);
             return;
         }
-        self.stop_motion_on(frame, node, now);
+        self.stop_flings_and_bounces_on(frame, node, now);
         // The request decides where the container goes, not the area it
         // stood on before.
         self.snapped.remove(&node);
         let live = self.offsets.get(&node).copied().unwrap_or(slot.offset);
         match request.behavior {
             ScrollBehavior::Instant => {
+                self.stop_glides(node);
                 for ((_, held), origin) in &mut self.gesture_origins {
                     if *held == node {
                         *origin = request.target;
@@ -757,7 +760,7 @@ impl ScrollIntents {
                 );
                 // `live` is in the period: `rebase` normalizes before `apply_requests`.
                 let target = nearest_copy(slot, live, target);
-                self.glide_to(frame, node, live, target, now);
+                self.glide_to_or_keep(frame, node, live, target, now);
             }
         }
         note_changed(&mut self.changed, node);

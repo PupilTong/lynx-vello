@@ -224,6 +224,12 @@ impl<S> SlotSamples<S> {
         );
         self.0.push((slot, sample));
     }
+
+    /// Every sampled slot with its sample, to write over: how a seam pass
+    /// resamples the few slots its copy reads differently.
+    pub(crate) fn entries_mut(&mut self) -> impl Iterator<Item = (u32, &mut S)> {
+        self.0.iter_mut().map(|(slot, sample)| (*slot, sample))
+    }
 }
 
 impl<S> FromIterator<(u32, S)> for SlotSamples<S> {
