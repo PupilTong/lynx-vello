@@ -2064,7 +2064,14 @@ they stay in that tree for its component; a press in a text field outside its
 editor focuses the editor (`tree::focus_delegate`); after every applied
 command `apply_edit` fires the engine-only `selectionchange` at the host
 through the Rust walk; and focus events a UI method's `focus()`/`blur()` left
-in `dom` are dispatched from the entry that delivers component events.
+in `dom` are dispatched from the entry that delivers component events. That
+entry also fires the W3C `selectionchange` at the document node (not
+bubbling) whenever `dom`'s flag is set, which `has_component_events` asks so
+the epilogue posts the entry; the realm's boot-module `document` is the
+document node's handle and its `addEventListener` hears it. The `text`
+component's Lynx `selectionchange` (`{start, end, direction}` at `text` and
+`inline-text`, web-core's) is derived from it in the same entry
+(`tree::text::report_selection_changes`).
 
 That host side is one function, `MainThreadRuntime::dispatch`, the only place
 an event script hears is delivered. It computes the steps once and drives
@@ -3477,7 +3484,12 @@ Subsystems:
   Focus}`. The element layer over it (E5, `tree::text_field`) writes a value
   with `set_host_value` (no event, the composition ended, the selection
   placed) and the host's `type` attribute picks `TextInputState::input_type`;
-  `has_focus_events` says a method's focus change is waiting.
+  `has_focus_events` says a method's focus change is waiting. The document's
+  selection is the focused host's (`selection()`, anchor and focus in UTF-16
+  units, `None` with nothing focused), and every change of it — focus, blur,
+  the fixup rule, an applied command that moved it, a value write — sets the
+  Selection API's "has scheduled selectionchange event" flag
+  (`has_pending_selectionchange`/`take_selectionchange`).
 - `input/` and `event/` — the `InputEvent` host seam, `Document::event_steps`,
   which computes a path for a *script* dispatch above,
   `Document::dispatch_element_event_over`, which walks those same steps here

@@ -109,6 +109,9 @@ rstest.mockRequire("bobcat:frame", () => ({
  */
 const DOCUMENT_REFUSAL = new Error("the realm already created its document");
 
+/** The document node's id, which `createDocument` answers. */
+const DOCUMENT_NODE_ID = 1;
+
 /**
  * The page configuration a boot module is written with and hands to the
  * constructor. Its five switches are the host's; nothing in this file reads
@@ -242,6 +245,8 @@ function createMockBobcat(issuedIds?: number[]): MockBobcat {
         throw DOCUMENT_REFUSAL;
       }
       documentSpent = true;
+      // The document node's id, as the host answers it.
+      return DOCUMENT_NODE_ID;
     },
     createPage: () => {
       calls.push(["createPage"]);
@@ -620,6 +625,42 @@ describe("installation", () => {
     expect(thrown).toBe(DOCUMENT_REFUSAL);
     expect(mock.named("createDocument")).toHaveLength(2);
     expect(first).toBeInstanceOf(elementModule.Document);
+  });
+
+  it("makes the document the handle of the document node, an event target", () => {
+    const document = new elementModule.Document(PAGE_CONFIG);
+    expect(elementModule.__BobcatHandleOf(DOCUMENT_NODE_ID)).toBe(document);
+    expect(__GetElementUniqueID(document)).toBe(DOCUMENT_NODE_ID);
+
+    const seen: unknown[] = [];
+    const listener = (event: { type: string; target: unknown; currentTarget: unknown }) => {
+      seen.push([event.type, event.target, event.currentTarget]);
+    };
+    document.addEventListener("selectionchange", listener);
+    // The host is told as for any handle: the document node, the bubble pass.
+    expect(mock.named("listenerOpened")).toEqual([
+      ["listenerOpened", DOCUMENT_NODE_ID, "selectionchange", 1],
+    ]);
+    // The host's W3C `selectionchange`: a path of the document node alone,
+    // not bubbling, with nothing in its detail.
+    dispatch([document], "selectionchange", { empty: true }, undefined, false);
+    const descriptor = {
+      dataset: {},
+      id: null,
+      uid: DOCUMENT_NODE_ID,
+      elementRefptr: document,
+    };
+    expect(seen).toEqual([["selectionchange", descriptor, descriptor]]);
+    // The document node has no attributes to ask the host for.
+    expect(mock.named("getAttribute")).toEqual([]);
+    expect(mock.named("attributeNames")).toEqual([]);
+
+    document.removeEventListener("selectionchange", listener);
+    expect(mock.named("listenerClosed")).toEqual([
+      ["listenerClosed", DOCUMENT_NODE_ID, "selectionchange"],
+    ]);
+    dispatch([document], "selectionchange", { empty: true }, undefined, false);
+    expect(seen).toHaveLength(1);
   });
 
   it("does not install __DropElement: collection is the only release path", () => {

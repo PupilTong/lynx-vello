@@ -13,6 +13,9 @@ interface BobcatNative {
    * first `flushElementTree` mounts them, in the order the view listed them.
    * A switch that is not a boolean, and a realm that already has a document,
    * both throw.
+   *
+   * Returns the `NodeId` of the document node, the target of the document's
+   * own events (`selectionchange`).
    */
   createDocument(
     defaultDisplayLinear: boolean,
@@ -20,7 +23,7 @@ interface BobcatNative {
     enableCssSelector: boolean,
     enableJSDataProcessor: boolean,
     enableCssInheritance: boolean,
-  ): void;
+  ): number;
   /**
    * Returns the `NodeId` of the document's permanent `page`, in every realm.
    * A frame's `ShadowRealm` child does not call it: its `__CreatePage`

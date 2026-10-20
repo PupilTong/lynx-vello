@@ -1710,3 +1710,190 @@ fn each_host_s_paragraph_reports_its_kind_and_its_lines() {
     );
     assert_eq!(doc.paragraph_line_count(host), None);
 }
+
+// --- The document's selection and `selectionchange` ------------------------
+
+/// Takes the document's `selectionchange` flag, answering whether it was
+/// set, and checks the take cleared it.
+fn took_selectionchange(doc: &mut Document<()>) -> bool {
+    let taken = doc.take_selectionchange();
+    assert!(
+        !doc.has_pending_selectionchange(),
+        "the take clears the flag"
+    );
+    taken
+}
+
+/// `selection()`'s anchor and focus, which a test of a move compares.
+fn anchor_focus(doc: &Document<()>) -> (u32, u32) {
+    let selection = doc.selection().expect("a focused host has a selection");
+    (selection.anchor, selection.focus)
+}
+
+/// A session starting is a change of the document's selection, which the
+/// flag records once until it is taken; focusing the focused host is no
+/// change.
+#[test]
+fn focus_sets_the_selectionchange_flag_once() {
+    for kind in KINDS {
+        eprintln!("kind {kind:?}");
+        let mut doc = document();
+        let host = kind.create(&mut doc);
+        doc.set_attribute(host, "contenteditable", "");
+        doc.append_child(doc.document_element().id(), host);
+        doc.layout();
+        assert!(!doc.has_pending_selectionchange());
+        assert_eq!(doc.selection(), None, "nothing focused, no selection");
+
+        assert!(doc.focus(host));
+        assert!(doc.has_pending_selectionchange());
+        assert!(took_selectionchange(&mut doc));
+        assert!(!took_selectionchange(&mut doc), "taken once");
+        assert_eq!(
+            doc.selection(),
+            Some(DocumentSelection {
+                host,
+                anchor: 0,
+                focus: 0
+            })
+        );
+
+        assert!(doc.focus(host), "the focused host");
+        assert!(!doc.has_pending_selectionchange(), "no new session");
+    }
+}
+
+/// A caret move that extends the selection changes it, and the document's
+/// selection keeps its two boundary points apart in UTF-16 units: a
+/// forward extension has `anchor < focus`, a backward one `focus < anchor`,
+/// and the surrogate pair counts two.
+#[test]
+fn a_caret_move_sets_selectionchange_and_the_selection_keeps_its_direction() {
+    let extend = |doc: &mut Document<()>, direction| {
+        assert!(
+            doc.apply_editing(Command::Move {
+                granularity: Granularity::Character,
+                direction,
+                extend: true,
+            })
+            .applied
+        );
+    };
+    for kind in KINDS {
+        eprintln!("kind {kind:?}");
+        let (mut doc, host) = host_in(kind, &[MIXED], 200.0);
+        took_selectionchange(&mut doc);
+
+        extend(&mut doc, Direction::Forward);
+        assert!(took_selectionchange(&mut doc));
+        assert_eq!(anchor_focus(&doc), (0, 1));
+        extend(&mut doc, Direction::Forward);
+        extend(&mut doc, Direction::Forward);
+        assert!(took_selectionchange(&mut doc), "two moves, one flag");
+        assert_eq!(anchor_focus(&doc), (0, 4), "over the pair: two units");
+        assert_eq!(doc.selection().map(|selection| selection.host), Some(host));
+
+        select(&mut doc, 4..4);
+        assert!(took_selectionchange(&mut doc));
+        extend(&mut doc, Direction::Backward);
+        assert!(took_selectionchange(&mut doc));
+        assert_eq!(anchor_focus(&doc), (4, 2), "backward: focus before anchor");
+        assert_eq!(selection(&doc), 2..4, "the input state orders them");
+    }
+}
+
+/// A `SetSelection` to the range already held changes nothing, whether the
+/// session holds it as value offsets or, after a layout pass, in the
+/// paragraph; another range, or the same one in the other direction, does.
+#[test]
+fn a_set_selection_to_the_held_range_does_not_set_selectionchange() {
+    for kind in KINDS {
+        eprintln!("kind {kind:?}");
+        let (mut doc, _) = host_in(kind, &["hello"], 200.0);
+        took_selectionchange(&mut doc);
+
+        select(&mut doc, 1..3);
+        assert!(took_selectionchange(&mut doc));
+        select(&mut doc, 1..3);
+        assert!(!took_selectionchange(&mut doc), "held as value offsets");
+        doc.layout();
+        assert!(
+            !took_selectionchange(&mut doc),
+            "placing the offsets in the paragraph changes none of them"
+        );
+        select(&mut doc, 1..3);
+        assert!(!took_selectionchange(&mut doc), "held in the paragraph");
+        select(&mut doc, Range { start: 3, end: 1 });
+        assert!(took_selectionchange(&mut doc), "the other direction");
+        assert_eq!(anchor_focus(&doc), (3, 1));
+        select(&mut doc, 2..3);
+        assert!(took_selectionchange(&mut doc));
+        assert!(doc.apply_editing(Command::Insert("x".to_owned())).applied);
+        assert!(took_selectionchange(&mut doc), "a value change");
+    }
+}
+
+/// The element layer's value write to the focused host changes the
+/// document's selection when it changes the value or the offsets; the same
+/// value and the same offsets again change nothing, and a write to a host
+/// that is not focused never does.
+#[test]
+fn a_value_write_sets_selectionchange_only_when_it_changes_something() {
+    for kind in KINDS {
+        eprintln!("kind {kind:?}");
+        let (mut doc, host) = host_in(kind, &["hello"], 200.0);
+        took_selectionchange(&mut doc);
+
+        // Held in the paragraph: not compared, so the write counts.
+        doc.set_host_value(host, "hello", 1..2);
+        assert!(took_selectionchange(&mut doc));
+        doc.set_host_value(host, "hello", 1..2);
+        assert!(
+            !took_selectionchange(&mut doc),
+            "the same value and offsets"
+        );
+        doc.set_host_value(host, "hello", 0..2);
+        assert!(took_selectionchange(&mut doc), "other offsets");
+        doc.set_host_value(host, "help", 0..2);
+        assert!(took_selectionchange(&mut doc), "another value");
+        assert_eq!(anchor_focus(&doc), (0, 2));
+
+        let other = doc.create_element("view", ());
+        doc.append_child(doc.document_element().id(), other);
+        doc.set_host_value(other, "plain", 0..0);
+        assert!(!took_selectionchange(&mut doc), "not the focused host");
+    }
+}
+
+/// A session ending ends the document's selection, whether a blur ends it
+/// or the fixup rule does (the host stops being an editing host), and
+/// either sets the flag.
+#[test]
+fn a_blur_or_the_fixup_rule_ends_the_document_selection() {
+    for kind in KINDS {
+        eprintln!("kind {kind:?}");
+        let (mut doc, host) = host_in(kind, &["hello"], 200.0);
+        select(&mut doc, 1..3);
+        took_selectionchange(&mut doc);
+
+        assert!(doc.blur());
+        assert!(took_selectionchange(&mut doc));
+        assert_eq!(doc.selection(), None);
+        assert_eq!(
+            doc.host_selection(host),
+            Some(1..3),
+            "the host retains its own"
+        );
+        assert!(!doc.blur());
+        assert!(!took_selectionchange(&mut doc), "nothing was focused");
+
+        assert!(doc.focus(host));
+        doc.take_focus_events();
+        took_selectionchange(&mut doc);
+        doc.remove_attribute(host, "contenteditable");
+        assert_eq!(doc.focused(), None);
+        assert!(doc.take_focus_events().is_empty(), "no focus event");
+        assert!(took_selectionchange(&mut doc), "the fixup rule's ending");
+        assert_eq!(doc.selection(), None);
+    }
+}

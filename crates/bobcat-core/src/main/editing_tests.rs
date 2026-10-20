@@ -514,6 +514,95 @@ fn a_touch_drag_that_scrolls_does_not_focus_the_host_and_a_tap_does() {
     assert_eq!(focused(&mut engine), Some(node_id(4)), "the tap focused it");
 }
 
+// --- `selectionchange` ---------------------------------------------------------
+
+/// A `<text contenteditable>` (node 3) logging, to its `log` attribute, the
+/// W3C `selectionchange` at the document (`document`, through the handle of
+/// the document node, id 1) and its own Lynx `selectionchange` with web-core's
+/// detail (`text:start:end:direction`).
+const SELECTION_PAGE: &str = r"
+    import { __BobcatHandleOf } from 'bobcat:element';
+    globalThis.renderPage = function () {
+      const page = __CreatePage('card', 0);
+      const host = __CreateElement('text', 0);
+      __AppendElement(page, host);
+      globalThis.held = [page, host];
+      globalThis.entries = [];
+      __SetAttribute(host, 'contenteditable', '');
+      __SetInlineStyles(host, 'width:200px;height:40px');
+      const log = (entry) => {
+        entries.push(entry);
+        __SetAttribute(host, 'log', entries.join('|'));
+      };
+      __AddEventListener(host, 'selectionchange', (event) => log('text:' + event.detail.start
+        + ':' + event.detail.end + ':' + event.detail.direction));
+      __AddEventListener(__BobcatHandleOf(1), 'selectionchange', () => log('document'));
+      __FlushElementTree();
+    };
+";
+
+/// A key with Shift held and no text: an arrow that extends the selection.
+fn shift_key(key: &str) -> InputEvent {
+    InputEvent::key(
+        KeyPhase::Down,
+        key,
+        key,
+        false,
+        Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        },
+    )
+}
+
+/// Every change of the document's selection fires the W3C
+/// `selectionchange` at the document — focusing the host, typing, placing
+/// the caret, each Shift+arrow, the blur of a tap outside it — and the
+/// `<text>` hears its Lynx `selectionchange` right after it, in the same
+/// entry, whenever its record changed: a range in its text, forward or
+/// backward, and the empty record `-1:-1:forward` once its selection is gone.
+/// A collapsed caret is the empty record, which is not sent before a range
+/// was.
+#[test]
+fn selection_changes_fire_at_the_document_then_at_the_text() {
+    let mut engine = TestViewSpec::new(SELECTION_PAGE).boot();
+    let mut states = States::default();
+    let mut expected = vec!["document"];
+
+    focus_host(&mut engine, &mut states);
+    wait_for_log(&mut engine, &expected.join("|"));
+    // The host's text is typed: a `raw-text` carrier is no text node, and an
+    // editing host's value is its text nodes.
+    engine
+        .view
+        .edit(Command::Insert("abcdef".to_owned()))
+        .unwrap();
+    expected.push("document");
+    wait_for_log(&mut engine, &expected.join("|"));
+    engine
+        .view
+        .edit(Command::SetSelection { range: 0..0 })
+        .unwrap();
+    expected.push("document");
+    wait_for_log(&mut engine, &expected.join("|"));
+
+    for (key, text) in [
+        ("ArrowRight", "text:0:1:forward"),
+        ("ArrowRight", "text:0:2:forward"),
+        ("ArrowLeft", "text:0:1:forward"),
+    ] {
+        engine.dispatch_input(shift_key(key));
+        expected.extend(["document", text]);
+        wait_for_log(&mut engine, &expected.join("|"));
+    }
+
+    engine.dispatch_input(touch(PointerPhase::Down, 300.0, 300.0));
+    engine.dispatch_input(touch(PointerPhase::Up, 300.0, 300.0));
+    expected.extend(["document", "text:-1:-1:forward"]);
+    wait_for_log(&mut engine, &expected.join("|"));
+    states.wait(&mut engine, "blurred", |state| state.host.is_none());
+}
+
 // --- `x-input` and `x-textarea` (E5) -----------------------------------------
 
 /// The text field (node 3), 200×40 with 10px padding in 20px Ahem, with

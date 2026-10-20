@@ -50,7 +50,8 @@ use crate::main::exposure::{Exposure, is_exposure_attribute};
 use crate::main::record::write_record_field;
 use crate::main::tree::{
     Autoplays, ComponentDetail, ComponentEvent, ComponentEvents, LynxDocument, MAX_FRAME_DEPTH,
-    PageConfig, frame_depth, invoke_base_method, is_svg, nested_page, new_document, reset_frame,
+    PageConfig, SELECTION_CHANGE, SelectionReports, frame_depth, invoke_base_method, is_svg,
+    nested_page, new_document, report_selection_changes, reset_frame,
 };
 use crate::realm::child::{ChildHostModules, ChildHostState, ChildKey};
 use crate::realm::policy::context_of;
@@ -177,7 +178,10 @@ type Extras<'a> = &'a [(&'static str, Extra<'a>)];
 /// field's (`XInputEvents.ts`) `value`; `value`, `textLength`, `cursor`,
 /// `isComposing`, `selectionStart` and `selectionEnd`, where `textLength`
 /// is the value's UTF-16 length and the deprecated `cursor` the selection's
-/// start; `selectionStart` and `selectionEnd`.
+/// start; `selectionStart` and `selectionEnd`; and a Lynx text element's
+/// (`XTextSelectionEvents.ts`) `start`, `end` and `direction`, `-1`, `-1`
+/// and `"forward"` for the empty record. Seven extras at most, which the
+/// inline capacity holds.
 fn push_detail_extras<'a>(
     detail: &'a ComponentDetail,
     extras: &mut SmallVec<[(&'static str, Extra<'a>); 7]>,
@@ -224,6 +228,19 @@ fn push_detail_extras<'a>(
             ("selectionStart", unit(selection.start)),
             ("selectionEnd", unit(selection.end)),
         ]),
+        ComponentDetail::TextSelection { range, forward } => {
+            let (start, end) = range
+                .as_ref()
+                .map_or((Extra::Number(-1.0), Extra::Number(-1.0)), |range| {
+                    (unit(range.start), unit(range.end))
+                });
+            let direction = if *forward { "forward" } else { "backward" };
+            extras.extend([
+                ("start", start),
+                ("end", end),
+                ("direction", Extra::Str(direction)),
+            ]);
+        }
     }
 }
 
@@ -811,6 +828,16 @@ struct DocumentSlot {
     /// exposure here and drained into the realm by the intersection delivery
     /// entry ([`MainThreadRuntime::notify_intersection_observers`]).
     exposure: Exposure,
+    /// Per text element, the last non-empty Lynx `selectionchange` record it
+    /// was sent, which the `text` module compares the next one against
+    /// ([`report_selection_changes`]). Beside the document for what
+    /// `exposure` is beside it for: the event is Lynx's, and `dom` keeps only
+    /// the W3C selection it is derived from. An entry exists only for an
+    /// element that was sent a non-empty record, and leaves when the element
+    /// is sent the empty record or nothing listens on it any more, so the
+    /// table holds the one or two text elements the document's one
+    /// selection lies in.
+    text_selection_reports: SelectionReports,
     /// Removals since the last collection; see [`REMOVALS_PER_COLLECTION`].
     removals: u32,
     /// Which [`editing::EditingRoute`]s the editing account routes in the
@@ -895,6 +922,7 @@ impl DocumentSlot {
             component_events: ComponentEvents::default(),
             autoplays: Autoplays::default(),
             exposure: Exposure::new(),
+            text_selection_reports: SelectionReports::default(),
             removals: 0,
             editing_routes: 0,
             observed: FxHashSet::default(),
@@ -2211,13 +2239,74 @@ impl MainThreadRuntime {
     /// settle gets its outcome at the bind, and a `close` handler can close
     /// another dialog, so a delivery entry can leave the queue non-empty for
     /// an entry of its own.
+    ///
+    /// Two flags of the document's count as well: focus events a UI method
+    /// left, and the document's selection having changed
+    /// ([`dom::Document::has_pending_selectionchange`]), whose W3C
+    /// `selectionchange` that entry fires. Posting the entry is this
+    /// engine's form of the Selection API's "queue a task", so every change
+    /// before it runs owes one event.
     pub(crate) fn has_component_events(&self) -> bool {
         let slot = self.slot.borrow();
         !slot.component_events.is_empty()
-            || slot
-                .document
-                .as_ref()
-                .is_some_and(LynxDocument::has_focus_events)
+            || slot.document.as_ref().is_some_and(|document| {
+                document.has_focus_events() || document.has_pending_selectionchange()
+            })
+    }
+
+    /// The Selection API's `selectionchange`, when the document's selection
+    /// changed since the last one ([`dom::Document::take_selectionchange`]):
+    /// one event per set flag, which is one task in the standard, fired at
+    /// the document node, not bubbling and not cancelable (no event is
+    /// cancelable here). The document node has no element, so no
+    /// component's `handle_event` runs at it, and [`Self::dispatch`] builds
+    /// no path when nothing hears the name; the text field's own
+    /// `selectionchange` is the engine-only one at its editor
+    /// (`runtime/editing.rs`), which this is not. A listener that moves the
+    /// selection again sets the flag again, and the epilogue of the entry
+    /// posts another, as the standard queues another task.
+    ///
+    /// Then queues the Lynx `selectionchange` derived from it at each `text`
+    /// and `inline-text` whose record changed ([`report_selection_changes`]),
+    /// read from the selection as the listeners left it, for
+    /// [`Self::dispatch_component_events`] to deliver in this same entry.
+    ///
+    /// Returns what the listeners threw.
+    fn dispatch_selectionchange(
+        &mut self,
+        js_runtime: &mut ScriptRuntime,
+        timestamp: f64,
+    ) -> Vec<MainThreadError> {
+        let mut failures = Vec::new();
+        if !self.slot.borrow_mut().document_mut().take_selectionchange() {
+            return failures;
+        }
+        let document_node = self.slot.borrow().document_ref().root_node().id();
+        if let Err(error) = self.dispatch(
+            js_runtime,
+            document_node,
+            SELECTION_CHANGE,
+            false,
+            false,
+            timestamp,
+            &EventDetail::None,
+            &[],
+        ) {
+            failures.extend(error.into_errors());
+        }
+        let mut slot = self.slot.borrow_mut();
+        let DocumentSlot {
+            document,
+            text_selection_reports,
+            component_events,
+            ..
+        } = &mut *slot;
+        report_selection_changes(
+            document.as_ref().expect(DOCUMENT_EXISTS),
+            text_selection_reports,
+            component_events,
+        );
+        failures
     }
 
     /// Dispatches everything [`Self::apply_image_events`], the `image`,
@@ -2229,6 +2318,14 @@ impl MainThreadRuntime {
     /// at the frame, after which the children nothing needs any more are
     /// freed, outside every call, so the child a disposal retired goes in
     /// this entry.
+    ///
+    /// Before the queue, after the focus events a UI method left: the W3C
+    /// `selectionchange` at the document node when the document's selection
+    /// changed since the last one ([`dom::Document::take_selectionchange`]),
+    /// then the Lynx `selectionchange` at each `text` and `inline-text` whose
+    /// record that changed, which the `text` module queues
+    /// ([`report_selection_changes`]) for this same entry to deliver with the
+    /// rest.
     ///
     /// Called by the entry the page posts for the batch and by nothing else:
     /// the events are tasks, not part of the entry that produced them. Each
@@ -2255,6 +2352,7 @@ impl MainThreadRuntime {
         // queued after it, and the component events they produce (an
         // `x-input`'s `focus`) join the queue for a turn of their own.
         let mut failures = self.dispatch_focus_events(js_runtime, timestamp);
+        failures.extend(self.dispatch_selectionchange(js_runtime, timestamp));
         let events = self.slot.borrow().component_events.take();
         for event in &events {
             // Every one of them is W3C-shaped, with no payload of its own:
@@ -3916,11 +4014,14 @@ fn install_document_members(
             enable_js_data_processor: boolean_argument(NAME, arguments, 3)?,
             enable_css_inheritance: boolean_argument(NAME, arguments, 4)?,
         };
-        // The page id is not this member's answer: `createPage` is still what
-        // hands the realm the permanent root, and it now has a document to
-        // read it from.
-        borrow_slot(NAME, &tree)?.create_document(config)?;
-        Ok(HostValue::Undefined)
+        // The answer is the document node's id, the target of the document's
+        // own events (the W3C `selectionchange`), which the realm's
+        // `Document` is the handle of. The page id is not: `createPage` is
+        // still what hands the realm the permanent root, and it now has a
+        // document to read it from.
+        let mut slot = borrow_slot(NAME, &tree)?;
+        slot.create_document(config)?;
+        Ok(node_id_value(slot.document_ref().root_node().id()))
     })?;
 
     Ok(())

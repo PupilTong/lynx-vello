@@ -153,7 +153,9 @@
 //! - `selection` `{selectionStart, selectionEnd}`: a change of the selection that changed no value
 //!   and leaves text selected (a browser's `select`), from a pointer, a key or the
 //!   `setSelectionRange`/`select` methods. The runtime tells the component after every applied
-//!   command with the engine-only `selectionchange` at the editor.
+//!   command with the engine-only `selectionchange` at the editor. The W3C `selectionchange` script
+//!   hears is separate: the runtime fires it at the document node when the document's selection
+//!   changed ([`super::SELECTION_CHANGE`]), and this component does not hear it.
 //! - `focus` and `blur` `{value}`.
 //!
 //! The last reported value and selection are kept for the focused editor
@@ -190,7 +192,11 @@ use dom::{CustomElement, MethodCall, MethodError, MethodOutcome, NodeId, ShadowR
 use serde_json::Value;
 
 use super::text::TEXT_TAG;
-use super::{ComponentDetail, ComponentEvents, InvalidParams, LynxDocument};
+// `SELECTION_CHANGE` is the engine-only event the runtime fires at an editing
+// host after every command it applied, which this component reads its
+// `selection` from; the W3C event of the same name at the document node is
+// not heard here.
+use super::{ComponentDetail, ComponentEvents, InvalidParams, LynxDocument, SELECTION_CHANGE};
 use crate::main::record::write_record_field;
 
 /// The single-line tags: web-core's element name and its `-ng` alias. Not
@@ -199,10 +205,6 @@ pub(super) const INPUT_TAGS: [&str; 2] = ["x-input", "x-input-ng"];
 /// The multi-line tags: web-core's element name and its `-ng` alias. Not
 /// the HTML name `textarea`.
 pub(super) const TEXTAREA_TAGS: [&str; 2] = ["x-textarea", "x-textarea-ng"];
-
-/// The engine-only event the runtime fires at an editing host after every
-/// command it applied, which this component reads its `selection` from.
-pub(crate) const SELECTION_CHANGE: &str = "selectionchange";
 
 const VALUE: &str = "value";
 const PLACEHOLDER: &str = "placeholder";
