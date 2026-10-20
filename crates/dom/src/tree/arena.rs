@@ -15,7 +15,7 @@ use std::num::{NonZeroU32, NonZeroU64};
 use hughie::geometry::{Edges, Size};
 use hughie::text::TextContext;
 use hughie::tree::{LayoutInput, LayoutSlot};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use slab::Slab;
 use smallvec::SmallVec;
 
@@ -661,6 +661,22 @@ pub(crate) struct DocumentLayoutState {
     /// serve the few that scroll. An entry lives until its element is freed;
     /// one that stops scrolling is never asked about again.
     pub(crate) scrollable_containing_blocks: FxHashMap<NodeId, Size<f32>>,
+    /// The Lynx text elements whose committing paragraph runs are reported
+    /// ([`Self::note_text_layout`]), as the host set them through
+    /// `Document::set_text_layout_reporting`. A side table keyed by node
+    /// rather than a field of the paragraph store, because the store is
+    /// replaced on every rebuild, dropped by relayout damage
+    /// (`clear_text_artifact`) and absent before the first layout, and the
+    /// setting has to survive all three. An empty set holds no allocation, so
+    /// a page with no reporting element pays one `is_empty` test per
+    /// committing paragraph run. An entry lives until the host clears it or
+    /// the element is freed ([`Self::remove`]).
+    pub(crate) text_layout_reporters: FxHashSet<NodeId>,
+    /// The reporting Lynx text elements whose paragraph a committing run
+    /// recomputed since the host last took the list, in the order the runs
+    /// reached them, one entry per run: an element can appear more than once
+    /// until `Document::take_text_layout_reports` removes the repeats.
+    pub(crate) text_layout_reports: Vec<NodeId>,
 }
 
 /// One entry of [`DocumentLayoutState::sticky_containing_blocks`].
@@ -706,6 +722,8 @@ impl DocumentLayoutState {
             hoisted_to: FxHashMap::default(),
             in_rounding_tail: false,
             scrollable_containing_blocks: FxHashMap::default(),
+            text_layout_reporters: FxHashSet::default(),
+            text_layout_reports: Vec::new(),
         }
     }
 
@@ -759,6 +777,22 @@ impl DocumentLayoutState {
         self.hoisted_to.remove(&slot);
         if !self.scrollable_containing_blocks.is_empty() {
             self.scrollable_containing_blocks.remove(&slot);
+        }
+        if !self.text_layout_reporters.is_empty() {
+            self.text_layout_reporters.remove(&slot);
+            self.text_layout_reports.retain(|node| *node != slot);
+        }
+    }
+
+    /// Records that a committing run recomputed `slot`'s Lynx paragraph, when
+    /// `slot` is a reporting element ([`Self::text_layout_reporters`]). Called
+    /// from the committing branch of
+    /// [`crate::layout::text_block::compute_text_block_layout`], which hughie
+    /// reaches only when its layout cache for the element missed.
+    #[inline]
+    pub(crate) fn note_text_layout(&mut self, slot: NodeId) {
+        if !self.text_layout_reporters.is_empty() && self.text_layout_reporters.contains(&slot) {
+            self.text_layout_reports.push(slot);
         }
     }
 
@@ -839,6 +873,8 @@ impl DocumentLayoutState {
             hoisted_to: _,
             in_rounding_tail: _,
             scrollable_containing_blocks: _,
+            text_layout_reporters: _,
+            text_layout_reports: _,
         } = self;
         let context = text_context
             .get_or_insert_with(|| Box::new(TextContext::new()))
@@ -899,6 +935,8 @@ impl DocumentLayoutState {
             hoisted_to: _,
             in_rounding_tail: _,
             scrollable_containing_blocks: _,
+            text_layout_reporters: _,
+            text_layout_reports: _,
         } = self;
         // Unlike the path this replaces, restoring can re-enter the shaper —
         // a truncating block rebuilds its display layout — so the context is

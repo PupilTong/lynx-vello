@@ -3347,7 +3347,20 @@ Subsystems:
   `inline_source_range`, which the geometry APIs (`text_range_boxes`,
   `text_index_at_point`) answer from for either kind; `paragraph_kind` and
   `paragraph_line_count` say which kind a node established and how many
-  lines its last commit laid out.
+  lines its last commit laid out. The `<text>` `layout` event's `dom` half
+  (`docs/layout-observer-design.md` §3.3): `Document::set_text_layout_reporting`
+  puts a Lynx text element in `DocumentLayoutState::text_layout_reporters`
+  (a node-keyed set, empty and unallocated on a page without one; a
+  non-Lynx-text node panics); the committing branch of
+  `compute_text_block_layout`, reached only on a hughie cache miss, pushes a
+  reporting element onto `text_layout_reports`;
+  `Document::take_text_layout_reports` hands that list over deduplicated in
+  first-occurrence order (one `layout()` can commit a paragraph in several
+  passes), an empty `Vec` without allocating when there is none; a freed node
+  leaves both. `Document::text_lines` answers the last commit's lines as
+  `TextLineReport { start, end, ellipsis_count }` (source UTF-16 units, from
+  `TextBlock::lines`). The host side (listener gate, component event, detail)
+  is not built yet.
 - `visual/` — stacking contexts, CSS2 Appendix E paint order, transforms,
   `RenderLayer` group effects, reverse-paint-order hit testing, and
   `content-visibility: auto` relevance determination (`relevance.rs`), which
