@@ -31,8 +31,10 @@
 //! `overscroll-behavior: circular` axis a scroll progress timeline first
 //! takes an offset through the seam at its representative nearer the range
 //! ([`ScrollSlot::unwrap`](super::ScrollSlot::unwrap)), as the main thread
-//! does; a view progress timeline reads the offset as it stands
-//! ([`ProgressKind`]).
+//! does; a view progress timeline reads the offset as it stands in the
+//! period, unclamped, and the seam copy of the container's content samples
+//! it again one period back ([`ProgressKind`],
+//! [`SeamPass`](super::space::SeamPass)).
 
 use euclid::default::Transform3D;
 use stylo::properties::animated_properties::{AnimationValue, AnimationValueMap};
@@ -104,11 +106,25 @@ pub(crate) struct ScrollTimeline {
 }
 
 impl ScrollTimeline {
+    /// Whether this is a view progress timeline over scroll slot `slot`:
+    /// the timeline a seam copy of that slot's content samples again at the
+    /// copy's own offset ([`SeamPass`](super::space::SeamPass)).
+    pub(crate) fn views(&self, slot: u32) -> bool {
+        self.kind == ProgressKind::View && self.slot == Some(slot)
+    }
+
     /// Where the animation stands with `slot` at `offsets`: the offset along
-    /// `axis` — on a scroll progress timeline through a circular axis's seam,
-    /// its representative nearer the range ([`ScrollSlot::unwrap`]) — then
-    /// clamped to the scroll range as the main thread clamps it (a
+    /// `axis`, clamped to the scroll range as the main thread clamps it (a
     /// `contain-bounce` stretch is no scroll offset) and unsnapped.
+    ///
+    /// Through a circular axis's seam the two kinds part: a scroll progress
+    /// timeline reads the offset's representative nearer the range
+    /// ([`ScrollSlot::unwrap`], which normalizes first, so a seam pass's
+    /// shifted offset reads as the original's); a view progress timeline
+    /// reads the offset as `offsets` hands it — inside the period in the
+    /// frame's own pass, one period back in a seam pass — and unclamped,
+    /// since on such an axis every offset of the period is a position and
+    /// the subject's ranges lie anywhere in it.
     ///
     /// [`ScrollSlot::unwrap`]: super::ScrollSlot::unwrap
     fn progress(
@@ -116,12 +132,25 @@ impl ScrollTimeline {
         slot: u32,
         offsets: &ScrollOffsets<'_>,
     ) -> Option<stylo::servo::animation::AnimationProgress> {
+        let scroll_slot = &offsets.slots[slot as usize];
         let offset = offsets.of(slot);
-        let offset = match self.kind {
-            ProgressKind::Scroll => offsets.slots[slot as usize].unwrap(offset),
-            ProgressKind::View => offset,
+        let (offset, clamped) = match self.kind {
+            ProgressKind::Scroll => (scroll_slot.unwrap(offset), true),
+            ProgressKind::View => {
+                let (x, y) = scroll_slot.wrap_period();
+                let wraps = match self.axis {
+                    Axis::X => x.is_some(),
+                    Axis::Y => y.is_some(),
+                };
+                (offset, !wraps)
+            }
         };
-        let offset = self.axis.of_vector(offset).max(0.0).min(self.timing.limit);
+        let offset = self.axis.of_vector(offset);
+        let offset = if clamped {
+            offset.max(0.0).min(self.timing.limit)
+        } else {
+            offset
+        };
         iteration_progress(&self.timing, offset)
     }
 }
@@ -219,6 +248,15 @@ impl CompositeCurve {
             _ => Affine::IDENTITY,
         };
         CurveSample { delta, alpha }
+    }
+
+    /// Whether an animation of this curve runs on a view progress timeline
+    /// over scroll slot `slot`, so a seam copy of that slot's content
+    /// samples the curve again at the copy's offset.
+    pub(crate) fn views(&self, slot: u32) -> bool {
+        self.animations
+            .iter()
+            .any(|(_, timeline)| matches!(timeline, Timeline::Scroll(scroll) if scroll.views(slot)))
     }
 
     /// Fills `values` with what the cascade at `now` (the committed instant

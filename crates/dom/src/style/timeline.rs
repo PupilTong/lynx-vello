@@ -21,7 +21,7 @@
 //! exported curves do. On an `overscroll-behavior: circular` axis the document's offset stands
 //! anywhere in the period `[0, P)`; a scroll progress timeline reads an offset past `max` at its
 //! representative nearer the range ([`ProgressKind`]), a view progress timeline reads it as it
-//! stands.
+//! stands, unclamped.
 //!
 //! Where the specifications are silent or disagree this follows Blink;
 //! `docs/tracking/css-animation.md` lists each choice.
@@ -297,9 +297,12 @@ pub(crate) enum ProgressKind {
     /// scrollport just before the start reads the start, not the end.
     Scroll,
     /// A view progress timeline (`view()`, `view-timeline`): the offset as it
-    /// stands in the period, clamped to the range like any other. Inside
-    /// the seam copy this samples the unshifted offset, the approximation
-    /// `docs/style-assumptions.md` §25 records.
+    /// stands in the period, unclamped, since on a circular axis every
+    /// offset of the period is a position and the subject's ranges lie
+    /// anywhere in it. The painter samples the seam copy of the container's
+    /// content again one period back ([`SeamPass`]).
+    ///
+    /// [`SeamPass`]: crate::visual::space::SeamPass
     View,
 }
 
@@ -338,8 +341,9 @@ impl Binding {
     /// The progress at the offset of the scroll box `scroll_box_of` answers
     /// for the source — read as the binding's [`ProgressKind`] reads it,
     /// then clamped to the scroll range `[0, limit]` as the painter's
-    /// exported curve clamps it — or at offset 0 when the source has no
-    /// scroll box.
+    /// exported curve clamps it, except a view progress timeline on a
+    /// circular axis, whose whole period is positions — or at offset 0 when
+    /// the source has no scroll box.
     fn sample(
         &self,
         scroll_box_of: impl Fn(NodeId) -> Option<ScrollBox>,
@@ -351,9 +355,24 @@ impl Binding {
                 timing,
                 kind,
             } => {
-                let offset = scroll_box_of(*source)
-                    .map_or_else(Vector2D::zero, |scroll_box| kind.offset_of(&scroll_box));
-                let offset = axis.of_vector(offset).max(0.0).min(timing.limit);
+                let scroll_box = scroll_box_of(*source);
+                let offset = scroll_box
+                    .as_ref()
+                    .map_or_else(Vector2D::zero, |scroll_box| kind.offset_of(scroll_box));
+                let offset = axis.of_vector(offset);
+                let wraps = *kind == ProgressKind::View
+                    && scroll_box.is_some_and(|scroll_box| {
+                        let (x, y) = scroll_box.wrap_period();
+                        match axis {
+                            Axis::X => x.is_some(),
+                            Axis::Y => y.is_some(),
+                        }
+                    });
+                let offset = if wraps {
+                    offset
+                } else {
+                    offset.max(0.0).min(timing.limit)
+                };
                 iteration_progress(timing, offset)
             }
             Self::Inactive => None,

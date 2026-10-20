@@ -89,7 +89,7 @@ use crate::vello::peniko::{
     BlendMode, BrushRef, Extend, Fill, ImageBrush, ImageData, ImageQuality, ImageSampler,
 };
 use crate::visual::anchored::AnchoredSlot;
-use crate::visual::space::{self, Space, SpaceSamples};
+use crate::visual::space::{self, SeamPass, Space, SpaceSamples};
 use crate::visual::{AnimationSamples, AnimationSlot};
 
 /// A shape captured at encode time, replayable without the document.
@@ -1089,6 +1089,7 @@ pub(crate) fn replay(
     filter_groups: &[FilterGroup],
     filtered: &[Option<ImageData>],
     samples: &SpaceSamples<'_>,
+    seams: &[SeamPass],
 ) {
     replay_seams(
         scene,
@@ -1106,6 +1107,7 @@ pub(crate) fn replay(
         },
         0..program.len(),
         samples,
+        seams,
         ReplayTarget::Frame,
     );
 }
@@ -1260,8 +1262,9 @@ struct SeamRun {
 
 /// Replays `ops` for `target` with each op mapped by its space at the
 /// instant `samples` holds, and draws the seam copies of every circular
-/// scroll container whose scrollport straddles its seam
-/// ([`SpaceSamples::seam_passes`]). Without a straddling slot this is one
+/// scroll container whose scrollport straddles its seam: `seams`, the
+/// instant's [`SpaceSamples::seam_passes_with`], each copy composing with
+/// its own animation table. Without a straddling slot this is one
 /// [`replay_ops`] over the range, byte for byte.
 ///
 /// A copy replays the ops from the start of the innermost layer run that
@@ -1283,13 +1286,13 @@ pub(crate) fn replay_seams(
     tables: Tables<'_>,
     ops: Range<usize>,
     samples: &SpaceSamples<'_>,
+    seams: &[SeamPass],
     target: ReplayTarget,
 ) {
     let within = target.within();
-    let passes: SmallVec<[(u32, Vector2D<f32>); 2]> = samples
-        .seam_passes()
-        .into_iter()
-        .filter(|&(slot, _)| !space::rides(tables.spaces, within, slot))
+    let passes: SmallVec<[&SeamPass; 2]> = seams
+        .iter()
+        .filter(|pass| !space::rides(tables.spaces, within, pass.slot))
         .collect();
     if passes.is_empty() {
         target.with_map(samples, |map| replay_ops(scene, tables, ops, map, None));
@@ -1298,24 +1301,32 @@ pub(crate) fn replay_seams(
 
     let end = ops.end.min(tables.program.len());
     let walk = OpWalk::new(tables, ops.start.min(end)..end);
-    let mut runs: SmallVec<[SeamRun; 2]> = passes
+    let mut runs: SmallVec<[(SeamRun, &SeamPass); 2]> = passes
         .into_iter()
-        .filter_map(|(slot, shift)| walk.seam_run(tables, slot, shift))
+        .filter_map(|pass| {
+            walk.seam_run(tables, pass.slot, pass.shift)
+                .map(|run| (run, pass))
+        })
         .collect();
-    runs.sort_by_key(|run| run.last);
+    runs.sort_by_key(|(run, _)| run.last);
     let next = |position: usize| walk.next(position, end);
     let walk = &walk.ops;
 
     target.with_map(samples, |map| {
         let mut cursor = ops.start.min(end);
-        for run in &runs {
+        for (run, pass) in &runs {
             let after = next(run.last);
             replay_ops(scene, tables, cursor..after, map, None);
             cursor = cursor.max(after);
             let offsets = samples.shifted_offsets(run.slot, run.shift);
             let shifted = SpaceSamples {
                 offset_of: &offsets,
+                animations: &pass.animations,
                 ..*samples
+            };
+            let tables = Tables {
+                samples: &pass.animations,
+                ..tables
             };
             target.with_map(&shifted, |shifted_map| {
                 replay_ops(
@@ -1790,6 +1801,7 @@ mod tests {
                 ratio: 1.0,
                 offset_of: &|_| None,
             },
+            &[],
         );
         scene
     }
@@ -1821,6 +1833,15 @@ mod tests {
         let slots = [circular_slot()];
         let offset_of = move |_: &crate::visual::ScrollSlot| Some(offset);
         let mut scene = Scene::default();
+        let samples = SpaceSamples {
+            spaces: &SPACES,
+            slots: &slots,
+            animations: &crate::visual::AnimationSamples::default(),
+            stickies: &crate::visual::StickySamples::default(),
+            anchored: &crate::visual::anchored::AnchoredSamples::new(),
+            ratio: 1.0,
+            offset_of: &offset_of,
+        };
         replay(
             &mut scene,
             &fragments,
@@ -1831,15 +1852,8 @@ mod tests {
             &[],
             &[],
             &[],
-            &SpaceSamples {
-                spaces: &SPACES,
-                slots: &slots,
-                animations: &crate::visual::AnimationSamples::default(),
-                stickies: &crate::visual::StickySamples::default(),
-                anchored: &crate::visual::anchored::AnchoredSamples::new(),
-                ratio: 1.0,
-                offset_of: &offset_of,
-            },
+            &samples,
+            &samples.seam_passes_with(&[], None),
         );
         scene
     }
@@ -2404,6 +2418,7 @@ mod tests {
                 ratio: 1.0,
                 offset_of: &|_| None,
             },
+            &[],
         );
         scene
     }

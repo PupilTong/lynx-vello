@@ -30,6 +30,7 @@
 
 use euclid::default::Vector2D;
 use smallvec::SmallVec;
+use stylo::properties::animated_properties::AnimationValueMap;
 
 use super::anchored::{AnchoredSamples, AnchoredSlot};
 use super::reach::Reach;
@@ -263,6 +264,21 @@ pub(crate) fn nearest_animation(spaces: &[Space], space: Option<u32>) -> Option<
     })
 }
 
+/// One seam copy of a circular scroll container's content at one instant:
+/// the slot whose scrollport straddles its seam, the shift that moves the
+/// slot's offset back by one period for the copy, and the animation table
+/// the copy composes with ([`SpaceSamples::seam_passes_with`]).
+///
+/// The copy composes with `SpaceSamples { offset_of: &shifted, animations:
+/// &pass.animations, ..*samples }`, `shifted` being
+/// [`SpaceSamples::shifted_offsets`] of the slot and shift.
+#[derive(Debug, Clone)]
+pub(crate) struct SeamPass {
+    pub(crate) slot: u32,
+    pub(crate) shift: Vector2D<f32>,
+    pub(crate) animations: AnimationSamples,
+}
+
 /// One instant's node inputs with the tables they index: the scroll offsets
 /// `offset_of` reports (falling back to the committed ones), the sampled
 /// sticky shifts, anchored shifts and animation deltas.
@@ -314,6 +330,47 @@ impl<'a> SpaceSamples<'a> {
             }
         }
         passes
+    }
+
+    /// The seam copies this instant composes ([`Self::seam_passes`]), each
+    /// with the animation table its replay reads ([`SeamPass`]): these
+    /// samples' table with
+    /// every curve of `curves` that runs on a view progress timeline over
+    /// the copied slot sampled again at `now` with that slot one period
+    /// back — the copy shows the content at that offset, so an item's
+    /// place in the scrollport, which such a timeline reads, is the copy's
+    /// own. Every other curve keeps its sample: a scroll progress timeline
+    /// is the container's position, the same in both copies, and a clock
+    /// animation reads no offset. Only the slots the table holds are
+    /// resampled, which a composed table narrows to what the program names.
+    pub(crate) fn seam_passes_with(
+        &self,
+        curves: &[AnimationSlot],
+        now: Option<f64>,
+    ) -> SmallVec<[SeamPass; 2]> {
+        let mut values = AnimationValueMap::default();
+        self.seam_passes()
+            .into_iter()
+            .map(|(slot, shift)| {
+                let mut animations = self.animations.clone();
+                let shifted = self.shifted_offsets(slot, shift);
+                let offsets = super::ScrollOffsets {
+                    slots: self.slots,
+                    offset_of: &shifted,
+                };
+                for (index, sample) in animations.entries_mut() {
+                    let curve = &curves[index as usize];
+                    if curve.curve.views(slot) {
+                        *sample = curve.sample(now, &offsets, &mut values);
+                    }
+                }
+                SeamPass {
+                    slot,
+                    shift,
+                    animations,
+                }
+            })
+            .collect()
     }
 
     /// `offset_of` with slot `slot`'s offset moved by `shift`, every other

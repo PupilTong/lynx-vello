@@ -2142,6 +2142,63 @@ fn a_request_that_yields_to_a_pointer_is_dropped_under_a_finger() {
     assert!(painter.scroll_intents.is_gliding(scroller), "and glides");
 }
 
+/// [`adopt`] at clock reading `now`: the frame's requests are carried out
+/// as of then.
+fn adopt_at(painter: &mut Painter, main: &FarEnd, document: &mut LynxDocument, now: f64) {
+    main.outbox.publish_frame(document.commit());
+    painter.poll_link();
+    let frame = painter.frame().cloned().expect("the frame is adopted");
+    painter.scroll_intents.rebase(&frame, now);
+}
+
+/// A smooth request for the position the container is already gliding to
+/// leaves the glide as it is: the container stands where one request alone
+/// would have it, rather than starting over from rest with every request —
+/// which an `x-swiper` autoplay with a short `interval` makes at every
+/// frame until the turn lands, and which would leave the swiper creeping
+/// toward the next item and never arriving. The repeated request is still
+/// posted as handled.
+#[test]
+fn a_repeated_smooth_request_to_where_the_container_glides_keeps_the_glide() {
+    use dom::scroll::ScrollBehavior::Smooth;
+
+    const HZ: f64 = 60.0;
+    const FRAMES: u32 = 6;
+    let run = |repeat: bool| {
+        let (mut document, scroller, _) = auto_scrolled(1000);
+        let (mut painter, main) = detached();
+        adopt(&mut painter, &main, &mut document);
+        assert!(document.scroll_to_yielding(scroller, dom::Vector2D::new(0.0, 400.0), Smooth));
+        adopt(&mut painter, &main, &mut document);
+        let now = tick_at(&mut painter, 0.0, HZ, FRAMES);
+        let midway = shown(&painter, scroller);
+        if repeat {
+            assert!(document.scroll_to_yielding(scroller, dom::Vector2D::new(0.0, 400.0), Smooth));
+            let serial = document
+                .pending_scroll_request(scroller)
+                .expect("the request is pending");
+            adopt_at(&mut painter, &main, &mut document, now);
+            assert_eq!(
+                shown(&painter, scroller),
+                midway,
+                "nothing moved by the request"
+            );
+            painter.publish_scroll(now, None);
+            let (entries, _) = take(&main);
+            assert_eq!(entries[0].1.request, Some(serial), "posted as handled");
+        }
+        assert!(painter.scroll_intents.is_gliding(scroller));
+        tick_at(&mut painter, now, HZ, FRAMES);
+        (midway, shown(&painter, scroller))
+    };
+    let (midway, once) = run(false);
+    assert!(
+        midway.y > 0.0 && once.y > midway.y && once.y < 400.0,
+        "{midway:?} {once:?}"
+    );
+    assert_eq!(run(true), (midway, once));
+}
+
 /// A wheel step posts its container moving, not at rest: the wheel gesture
 /// ends only once [`super::inertia::WHEEL_REST_SECONDS`] pass with no
 /// further step, and a step inside that interval restarts it. The quiet

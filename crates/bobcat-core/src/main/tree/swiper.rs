@@ -116,7 +116,10 @@
 //! `coverflow` and `carry` transform each item by where it stands in the scrollport:
 //! `animation-timeline: view(inline)` (`view(block)` under `vertical`; this engine's `inline` is
 //! x), `animation-duration: auto`, `animation-fill-mode: both`, linear timing. `carry` runs `0%`
-//! `scale(0.6)`, `45%, 55%` `scale(1)`, `100%` `scale(0.6)`.
+//! `scale(0.6)`, `45%, 55%` `scale(1)`, `100%` `scale(0.6)`. Under `circular` an item drawn
+//! across the seam is the painter's seam copy, which samples these timelines at the copy's own
+//! offset, so the first item turning in after the last one stands where the copy shows it
+//! (`docs/style-assumptions.md` §25).
 //!
 //! web-core's `coverflow` turns each item about the axis across the swiper's main one — `rotateY`,
 //! `rotateX` under `vertical` — by up to 50° with `scale(0.8)`, under `perspective: 200px` on
@@ -840,7 +843,10 @@ fn flag(element: &Node<()>, name: &str) -> bool {
 /// ([`dom::Document::scroll_to_yielding`]), so the document's offset stays
 /// where it is until the painter posts it back, for a `smooth-scroll` turn
 /// too. A turn that comes before then counts from the old item and asks for
-/// the same one again. A pending `scrollTo` a script made is not replaced.
+/// the same one again, which the painter leaves to the glide already
+/// running toward it: so an `interval` shorter than a turn, 0 included,
+/// keeps turning rather than starting the glide over at every frame. A
+/// pending `scrollTo` a script made is not replaced.
 ///
 /// The offset, the positions and the turn are `#content`'s ([`content`]),
 /// the scroll container. Reads the last completed layout and never flushes.
