@@ -3103,8 +3103,10 @@ consequential choice about whether to follow the spec or the quirk.
     fires `confirm` on Enter whenever `confirm-type` is not the default.
     Here `confirm` follows that Enter's `input` (web-core fires it on the
     `keyup`), so an Enter the input method consumed does not confirm.
-  - *`getValue` answers a field that is not focused* with a caret at the
-    end of the value (web-core's `<input>` keeps that selection); native
+  - *`getValue` answers a field that is not focused* with the selection
+    it kept since it lost focus or a script last wrote its value, and a
+    caret at the end of the value for a field never focused nor written
+    (web-core's `<input>` keeps its selection across a blur); native
     answers `-1` for both offsets. The data carries the typings'
     `selectionStart` and web-core's `selectionBegin`, both.
   - *`selection` fires for a selected range only* (web-core's `select`):
@@ -3114,10 +3116,14 @@ consequential choice about whether to follow the spec or the quirk.
     field takes focus and a caret but no edit; here `readonly`, like
     `disabled`, turns the editor's `contenteditable` off, so a tap focuses
     nothing and no `focus` fires.
-  - *A `password` field is not masked.* web-core's `<input type=password>`
-    shows bullets; here the text shows as typed, because masking needs a
-    paragraph built from other text than the value, over which `dom`
-    refuses edits. `TextInputState::input_type` is `Password`.
+  - *A `password` field masks per character, not per UTF-16 unit.* The
+    shadow sheet gives a `password` editor `-webkit-text-security: disc`,
+    so it shows one disc per character, white space and line breaks
+    included, and edits the value as typed (`TextInputState::input_type` is
+    `Password`). web-core's `<input type=password>` masks through the
+    browser's UA sheet, and Blink fills one disc per UTF-16 code unit, so a
+    character outside the BMP (an emoji) shows two discs there and one here,
+    where a caret can never land between the halves of a surrogate pair.
   - *No intrinsic width.* An unsized field in a row is as wide as its text;
     a browser's `<input>` is about 20 characters wide.
   - *The single-line field does not follow its caret.* Text wider than the
@@ -3125,6 +3131,16 @@ consequential choice about whether to follow the spec or the quirk.
     in view.
   - *`placeholder-font-style` and the `-x-placeholder-*` aliases* are
     native's and not web-core's, and not built.
+  - *`::placeholder` takes css-pseudo-4 §4.2's properties only* (2026-10-19,
+    bucket 1: a real pseudo-element): the `::first-line` properties,
+    `opacity`, `text-align`, `text-overflow` and the white-space properties,
+    the restriction Stylo applies. Chrome, under web-core, applies any
+    property to its placeholder element (`line-height`, `padding`,
+    `transform` included); native Lynx carries `color`, `font-size`,
+    `font-family`, `font-weight` and `font-style` to the platform
+    (`core/renderer/dom/fiber/pseudo_element.cc`). The placeholder's block
+    carries `pseudo="-webkit-input-placeholder"`, as Blink's does, which is
+    what makes it the host's `::placeholder` to `dom`.
 
   Two differ from web-core by user ruling (2026-10-19):
   - *`input` and `textarea` are not text fields.* web-core's tag map sends

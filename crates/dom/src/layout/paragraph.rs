@@ -31,7 +31,7 @@ use hughie::text::TextContext;
 use hughie::text::block::{BlockConstraint, BlockMetrics, PlacedBox, SourceItem, TextBlock};
 use hughie::text::inline::{FlowSource, InlineEdges, InlineFlow, InlineFragment};
 use hughie::text::paragraph::{
-    BreakStyle, Direction, LineGeometry, OffsetMap, RunStyle, WhiteSpaceCollapse,
+    BreakStyle, Direction, LineGeometry, OffsetMap, RunStyle, TextSecurity, WhiteSpaceCollapse,
 };
 use hughie::tree::AvailableSpace;
 use stylo::properties::ComputedValues;
@@ -303,13 +303,17 @@ impl PaintedParagraph<'_> {
     /// Whether the glyph run of a parley style index is drawn: every one but
     /// an inline box's edge cluster, which is advance and no ink — no glyph,
     /// no decoration, no shadow (css-text-decor-3 draws a decoration across a
-    /// box's text, not across its padding).
+    /// box's text, not across its padding) — and the strut's. The strut
+    /// carries a glyph run only in a paragraph with no content that keeps
+    /// one empty line (an editing host's): the substitute space parley
+    /// shapes there is no text, so it takes no decoration either.
     pub(crate) fn draws(&self, style_index: u16) -> bool {
         match self.kind {
-            PaintedKind::Block(_) => true,
-            PaintedKind::Flow(flow, _) => {
-                !matches!(flow.source_of(style_index), FlowSource::Edge(_))
-            }
+            PaintedKind::Block(block) => !matches!(block.source_of(style_index), SourceItem::Strut),
+            PaintedKind::Flow(flow, _) => !matches!(
+                flow.source_of(style_index),
+                FlowSource::Edge(_) | FlowSource::Strut
+            ),
         }
     }
 
@@ -369,6 +373,7 @@ pub(crate) enum OwnedItem {
         text: String,
         style: RunStyle,
         white_space: WhiteSpaceCollapse,
+        text_security: TextSecurity,
     },
     Atom {
         vertical_align: hughie::text::paragraph::VerticalAlign,
@@ -386,18 +391,22 @@ pub(crate) enum OwnedItem {
 }
 
 /// Hashes one flow's structure: its length, and per item the node behind it
-/// and a run's text and `white-space-collapse`.
+/// and a run's text, `white-space-collapse` and `-webkit-text-security`.
 pub(crate) fn hash_flow(collected: &[Collected], hasher: &mut impl Hasher) {
     collected.len().hash(hasher);
     for entry in collected {
         entry.source.hash(hasher);
         match &entry.item {
             OwnedItem::Run {
-                text, white_space, ..
+                text,
+                white_space,
+                text_security,
+                ..
             } => {
                 0_u8.hash(hasher);
                 text.hash(hasher);
                 white_space.hash(hasher);
+                text_security.hash(hasher);
             }
             OwnedItem::Atom { .. } => 1_u8.hash(hasher),
             OwnedItem::Open { .. } => 2_u8.hash(hasher),
@@ -473,6 +482,7 @@ pub(crate) fn collect_generated<T>(
                 text,
                 style: RunStyle::from_run_style(&TextRunView::from_values(style)),
                 white_space: style_white_space(style),
+                text_security: style_text_security(style),
             },
             source: slot,
         });
@@ -498,6 +508,26 @@ pub(crate) fn style_white_space(style: &ComputedValues) -> WhiteSpaceCollapse {
         Collapse::PreserveBreaks => WhiteSpaceCollapse::PreserveBreaks,
         Collapse::BreakSpaces => WhiteSpaceCollapse::BreakSpaces,
         Collapse::Collapse => WhiteSpaceCollapse::Collapse,
+    }
+}
+
+/// Which mask a run's characters show as, if any.
+///
+/// Read from computed style like [`run_white_space`]: an author's
+/// `-webkit-text-security`, or an x-input editor's shadow-sheet rule for
+/// `type=password`, inherited into text runs.
+pub(crate) fn run_text_security<T>(node: &Node<T>) -> TextSecurity {
+    style_text_security(inline_style_of(node))
+}
+
+/// The fork's four `-webkit-text-security` keywords, one for one.
+pub(crate) fn style_text_security(style: &ComputedValues) -> TextSecurity {
+    use stylo::values::computed::TextSecurity as Security;
+    match *style.get_inherited_text().get__webkit_text_security() {
+        Security::None => TextSecurity::None,
+        Security::Circle => TextSecurity::Circle,
+        Security::Disc => TextSecurity::Disc,
+        Security::Square => TextSecurity::Square,
     }
 }
 

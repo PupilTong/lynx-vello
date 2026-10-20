@@ -594,8 +594,9 @@ impl<T: Sync> Document<T> {
     /// becomes `selection`, in UTF-16 units of the new value (an offset
     /// inside a surrogate pair rounds down to its character's start, one
     /// past the end clamps, as [`Command::SetSelection`] reads them). A
-    /// host that is not focused keeps no selection, so `selection` is
-    /// ignored for it.
+    /// host that is not focused retains `selection` instead
+    /// ([`Self::host_selection`]), for its next [`Self::focus`] to restore,
+    /// as a browser's text control keeps the selection a value write left.
     ///
     /// The value is written as exactly one text node, the normalization the
     /// first edit performs, and only when it differs from the current one.
@@ -615,21 +616,21 @@ impl<T: Sync> Document<T> {
         if self.host_value(host) != value {
             self.write_host_value(host, value.to_owned());
         }
+        let selection = ByteSelection {
+            anchor: byte_of_unit_floor(value, selection.start),
+            focus: byte_of_unit_floor(value, selection.end),
+            affinity: Affinity::Downstream,
+        };
         if self.focused() != Some(host) {
+            self.editing.retained.insert(host, selection);
             return;
         }
-        let anchor = byte_of_unit_floor(value, selection.start);
-        let focus = byte_of_unit_floor(value, selection.end);
         let session = self
             .editing
             .session
             .as_mut()
             .expect("the focused host has a session");
-        session.pending = Some(ByteSelection {
-            anchor,
-            focus,
-            affinity: Affinity::Downstream,
-        });
+        session.pending = Some(selection);
         session.composition = None;
         self.note_visual_mutation();
     }
@@ -689,8 +690,9 @@ fn select_at_point(
 ) -> Option<PreparedEdit> {
     let composition = context.composition();
     let Some(paragraph) = paragraph else {
-        // No paragraph: an empty host, or one whose white space renders
-        // nothing. Every point is at the end of the value.
+        // No paragraph: a host that establishes none and is empty, or whose
+        // white space renders nothing. Every point is at the end of the
+        // value.
         let end = context.value.len();
         return Some(PreparedEdit::select(
             context.host,
@@ -796,9 +798,9 @@ fn move_selection(
 /// box's start and end edges, nested a few deep, before the next character.
 const MAX_EDGE_STEPS: usize = 8;
 
-/// A move with no paragraph to measure in — an empty host, or one whose
-/// white space renders nothing: one code point for a character, the value's
-/// ends for every other granularity.
+/// A move with no paragraph to measure in — a host that establishes none and
+/// is empty, or whose white space renders nothing: one code point for a
+/// character, the value's ends for every other granularity.
 fn move_in_value(
     context: &Context,
     granularity: Granularity,

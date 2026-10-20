@@ -37,7 +37,7 @@ use hughie::text::block::{
 use crate::layout::paragraph::{
     AtomOffset, BlockBox, Collected, OutOfFlowBox, OwnedItem, Placement, TextStore,
     collect_generated, context_and_store, generated_content, hash_flow, place_and_hide,
-    run_white_space,
+    run_text_security, run_white_space,
 };
 use crate::layout::style::{DisplayMode, StyleView, TextRunView};
 use crate::tree::document::{DocumentLayoutState, NodeId, NodeSlot, TreeArenas};
@@ -229,6 +229,7 @@ fn collect_content<T>(
                     text: text.to_owned(),
                     style: RunStyle::from_run_style(&run),
                     white_space: run_white_space(node),
+                    text_security: run_text_security(node),
                 },
                 // The *element* the run's style came from, not the text node:
                 // a text node carries no computed style, so it could never
@@ -307,10 +308,12 @@ fn as_items(collected: &[Collected], id_offset: usize) -> Vec<InlineItem<'_>> {
                 text,
                 style,
                 white_space,
+                text_security,
             } => InlineItem::Run(TextRunItem {
                 text,
                 style,
                 white_space: *white_space,
+                text_security: *text_security,
             }),
             OwnedItem::Atom { vertical_align } => InlineItem::Box(InlineBoxSpec {
                 // The item index is the box id, so one table answers for
@@ -328,9 +331,17 @@ fn as_items(collected: &[Collected], id_offset: usize) -> Vec<InlineItem<'_>> {
 }
 
 /// The paragraph style, from the establishing element's CSS and attributes.
+///
+/// An editing host's paragraph keeps one empty line of its strut when it has
+/// no content, so the host is one line tall and its caret has a line to sit
+/// on, as an HTML text control is never shorter than one line.
 fn block_style<T>(tree: &TreeArenas<T>, element: NodeSlot) -> BlockStyle {
-    let view = StyleView::of(tree.at(element));
-    BlockStyle::from_container_style(&view, &TextRunView::from_values(view.values()))
+    let node = tree.at(element);
+    let view = StyleView::of(node);
+    BlockStyle {
+        strut_line_when_empty: crate::editing::is_host_node(node),
+        ..BlockStyle::from_container_style(&view, &TextRunView::from_values(view.values()))
+    }
 }
 
 /// Rebuilds `element`'s paragraph when its content or style moved, and reports
@@ -360,8 +371,9 @@ pub(crate) fn refresh<T>(
 
     // Only the values parley *shapes* from force a new paragraph —
     // `text-wrap-mode` among them, because it chooses whether native's
-    // `nowrap` cuts the text at its first newline, and the strut, which is
-    // parley's style 0. Alignment and truncation are applied to a finished
+    // `nowrap` cuts the text at its first newline, the strut, which is
+    // parley's style 0, and whether empty content is shaped into one line
+    // of that strut. Alignment and truncation are applied to a finished
     // layout, so a change there is a re-break at most — which is the whole
     // point of keeping the two evictions apart.
     let needs_build = state.text_block(element).is_none_or(|store| {
@@ -369,6 +381,7 @@ pub(crate) fn refresh<T>(
             || store.style.word_break != style.word_break
             || store.style.text_wrap != style.text_wrap
             || store.style.strut != style.strut
+            || store.style.strut_line_when_empty != style.strut_line_when_empty
             || store.run_styles != run_styles
     });
 
@@ -1114,5 +1127,109 @@ mod hit_tests {
         assert_eq!(doc.paragraph_of(out_of_flow), None, "not inline content");
         assert_eq!(doc.inline_source_range(atom), Some(2..3));
         assert_eq!(at(&doc, inner, 5.0, 5.0), Some(0));
+    }
+}
+
+#[cfg(test)]
+mod empty_host_tests {
+    #![allow(clippy::float_cmp)] // Ahem's em squares have exact metrics.
+
+    use hughie::geometry::Size;
+
+    use crate::tree::document::NodeId;
+    use crate::{Document, FontBlob, StylesheetOrigin};
+
+    /// A page whose paragraphs are Ahem at 10px on 24px lines, with the
+    /// block container an engine sheet writes, which an author sheet cannot:
+    /// a UA sheet stands in for the engine's own here.
+    fn document() -> Document<()> {
+        let mut doc = Document::new(crate::tree::document::tests::device(), "page", ());
+        crate::test_common::define_lynx_text(&mut doc, "text");
+        doc.register_fonts(FontBlob::from_static(include_bytes!(
+            "../../../hughie/tests/fixtures/Ahem.ttf"
+        )));
+        doc.add_stylesheet(".flow { display: block; }", StylesheetOrigin::UserAgent);
+        doc.add_stylesheet(
+            "page { display: flex; flex-direction: column; align-items: flex-start; \
+             font-family: Ahem; font-size: 10px; line-height: 24px; }",
+            StylesheetOrigin::Author,
+        );
+        doc
+    }
+
+    /// An empty element of each kind that establishes a paragraph of its
+    /// own: a Lynx `<text>`, and a block container.
+    fn empty(doc: &mut Document<()>, block: bool) -> NodeId {
+        let element = if block {
+            let element = doc.create_element("div", ());
+            doc.set_attribute(element, "class", "flow");
+            element
+        } else {
+            doc.create_element("text", ())
+        };
+        doc.append_child(doc.document_element().id(), element);
+        element
+    }
+
+    fn height(doc: &Document<()>, id: NodeId) -> f32 {
+        doc.rounded_layout(id).expect("laid out").size.height
+    }
+
+    /// An editing host's own paragraph with no content is one empty line of
+    /// its strut tall, so the host is never shorter than one line; the same
+    /// element that is no host lays out no line. The attribute is a shaping
+    /// input of the paragraph, so toggling it lays the element out again.
+    #[test]
+    fn an_empty_editing_host_lays_out_one_line_of_its_strut() {
+        for block in [false, true] {
+            let mut doc = document();
+            let host = empty(&mut doc, block);
+            doc.set_attribute(host, "contenteditable", "plaintext-only");
+            doc.layout();
+            assert_eq!(doc.paragraph_line_count(host), Some(1), "block {block}");
+            assert_eq!(doc.text_block_size(host), Some(Size::new(0.0, 24.0)));
+            assert_eq!(height(&doc, host), 24.0);
+
+            doc.remove_attribute(host, "contenteditable");
+            doc.layout();
+            assert_eq!(doc.paragraph_line_count(host), Some(0), "block {block}");
+            assert_eq!(doc.text_block_size(host), Some(Size::new(0.0, 0.0)));
+            assert_eq!(height(&doc, host), 0.0);
+
+            doc.set_attribute(host, "contenteditable", "FALSE");
+            doc.layout();
+            assert_eq!(doc.paragraph_line_count(host), Some(0), "no host");
+            assert_eq!(height(&doc, host), 0.0);
+
+            doc.set_attribute(host, "contenteditable", "");
+            doc.layout();
+            assert_eq!(doc.paragraph_line_count(host), Some(1), "block {block}");
+            assert_eq!(height(&doc, host), 24.0);
+
+            // Content lays out its own lines, whether or not it is a host.
+            let text = doc.create_text_node("ab", ());
+            doc.append_child(host, text);
+            doc.layout();
+            assert_eq!(doc.paragraph_line_count(host), Some(1));
+            assert_eq!(doc.text_block_size(host), Some(Size::new(20.0, 24.0)));
+            doc.set_text_node_data(text, "");
+            doc.layout();
+            assert_eq!(doc.paragraph_line_count(host), Some(1), "empty again");
+            assert_eq!(height(&doc, host), 24.0);
+        }
+    }
+
+    /// An element that is no editing host keeps today's empty paragraph:
+    /// no line, no height.
+    #[test]
+    fn an_empty_paragraph_that_is_no_host_has_no_line() {
+        for block in [false, true] {
+            let mut doc = document();
+            let element = empty(&mut doc, block);
+            doc.layout();
+            assert_eq!(doc.paragraph_line_count(element), Some(0), "block {block}");
+            assert_eq!(doc.text_block_size(element), Some(Size::new(0.0, 0.0)));
+            assert_eq!(height(&doc, element), 0.0);
+        }
     }
 }

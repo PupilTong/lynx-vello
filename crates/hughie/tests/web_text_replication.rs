@@ -41,8 +41,8 @@
 use hughie::geometry::{Point, Size};
 use hughie::text::block::{
     BlockConstraint, BlockStyle, InlineBoxSpec, InlineItem, LineHeight, PlacedBox, RunStyle,
-    SourceItem, TextBlock, TextOverflow, TextRunItem, TextWrap, VerticalAlign, WhiteSpaceCollapse,
-    WordBreak,
+    SourceItem, TextBlock, TextOverflow, TextRunItem, TextSecurity, TextWrap, VerticalAlign,
+    WhiteSpaceCollapse, WordBreak,
 };
 use hughie::text::{FontBlob, TextContext};
 use stylo::Atom;
@@ -104,6 +104,7 @@ fn run<'src>(style: &'src RunStyle, text: &'src str) -> InlineItem<'src> {
         text,
         style,
         white_space: WhiteSpaceCollapse::Collapse,
+        text_security: TextSecurity::None,
     })
 }
 

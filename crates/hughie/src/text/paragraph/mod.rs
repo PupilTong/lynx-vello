@@ -77,7 +77,7 @@ pub use position::used_line_height;
 use shape::{BreakOverride, NaturalLine, ShapeSpan};
 pub use style::{
     BreakStyle, Direction, IndentKeywords, LineHeight, OverflowWrap, RunStyle, TextAlign,
-    TextIndent, TextWrap, VerticalAlign, WhiteSpaceCollapse, WordBreak,
+    TextIndent, TextSecurity, TextWrap, VerticalAlign, WhiteSpaceCollapse, WordBreak,
 };
 
 use crate::style::TextBrush;
@@ -381,6 +381,9 @@ pub(in crate::text) struct Paragraph<S, A = ()> {
 pub(in crate::text) struct ParagraphRoot<S> {
     pub(in crate::text) strut: Option<(RunStyle, S)>,
     pub(in crate::text) direction: parley::BaseDirection,
+    /// Whether content with no text and no box lays out one empty line of
+    /// the strut rather than none ([`shape::LineRoot::strut_line_when_empty`]).
+    pub(in crate::text) strut_line_when_empty: bool,
 }
 
 impl<S: Copy> ParagraphRoot<S> {
@@ -388,6 +391,7 @@ impl<S: Copy> ParagraphRoot<S> {
         shape::LineRoot {
             strut: self.strut.as_ref().map(|(style, source)| (style, *source)),
             direction: self.direction,
+            strut_line_when_empty: self.strut_line_when_empty,
         }
     }
 }
@@ -471,7 +475,10 @@ impl<S: Copy, A: Additions> Paragraph<S, A> {
 
     /// Breaks the natural layout at `constraint`, committing at most
     /// `max_lines` lines, and reads the committed lines back in the
-    /// content's own offset spaces, trailing blank lines dropped.
+    /// content's own offset spaces, trailing blank lines dropped — except
+    /// the one line fully empty content keeps when the root asks for it
+    /// ([`ParagraphRoot::strut_line_when_empty`]), which is reported as an
+    /// empty line at the start of the source.
     ///
     /// The atomic boxes' current sizes, baselines and `vertical-align` values
     /// are written in first, and the constraint's indent goes
@@ -518,12 +525,63 @@ impl<S: Copy, A: Additions> Paragraph<S, A> {
             self.reshape(context, breaking);
             tab_rounds += 1;
         }
+        if self.is_empty_strut_line() {
+            debug_assert_eq!(
+                self.natural.len(),
+                1,
+                "parley breaks empty text into one line"
+            );
+            // Parley aligns a line within the width it was broken at, less
+            // the line's advance, and this line's advance is the substitute
+            // space's. Breaking it once more at that width plus the space's
+            // advance leaves the free space at the width itself, so every
+            // `text-align` places the line where it places a zero-wide one:
+            // the start, the exact centre, the end; `justify` as the start.
+            // Only this path adds the advance: parley ignores the width when
+            // it breaks empty text, so the second break moves nothing but
+            // the line's alignment width. Unconstrained, the line's width is
+            // its own advance and there is nothing to align within.
+            if let Some(width) = width {
+                let advance = self
+                    .natural
+                    .get(0)
+                    .map_or(0.0, |line| line.metrics().advance);
+                shape::break_clamped(&mut self.natural, Some(width + advance), max_lines);
+            }
+            // The one line empty content was shaped into, which holds only
+            // the substitute space parley shapes in the strut: no source
+            // text, so it is read as an empty line at the start of the
+            // source that consumes none of it, rather than through the
+            // source map, which has no byte for that space.
+            return vec![NaturalLine {
+                start_unit: 0,
+                end_unit: 0,
+                consumed_end: 0,
+                start_byte: 0,
+                end_byte: 0,
+            }];
+        }
         shape::capture_lines(
             &self.natural,
             &self.content.block.text,
             &self.content.block.map,
             &self.content.block.boxes,
         )
+    }
+
+    /// Whether the content is fully empty — no text and no atomic box once
+    /// white space is processed — and the root lays out one empty line of
+    /// the strut for it ([`ParagraphRoot::strut_line_when_empty`]).
+    ///
+    /// That line holds the substitute space parley shapes for empty text,
+    /// which parley neither lets hang nor leaves out of its widths, so the
+    /// natural layout's width and its content widths count the space's
+    /// advance. The paragraph's own width is zero: [`Self::content_widths`]
+    /// answers so, and each consumer reports a zero-wide line.
+    pub(in crate::text) fn is_empty_strut_line(&self) -> bool {
+        self.root.line_root().shapes_empty_content()
+            && self.content.block.text.is_empty()
+            && self.content.block.boxes.is_empty()
     }
 
     /// Writes the atomic boxes' current sizes, baselines and alignments into
@@ -587,7 +645,13 @@ impl<S: Copy, A: Additions> Paragraph<S, A> {
     /// from the committed lines or an alignment, so the widths are the same
     /// whenever after that break they are asked for, and a justified
     /// alignment does not change them.
+    ///
+    /// Both are zero for the one empty line fully empty content keeps
+    /// ([`Self::is_empty_strut_line`]): it shows nothing.
     pub(in crate::text) fn content_widths(&self) -> ContentWidths {
+        if self.is_empty_strut_line() {
+            return ContentWidths { min: 0.0, max: 0.0 };
+        }
         self.natural.calculate_content_widths()
     }
 

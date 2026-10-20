@@ -53,6 +53,10 @@ pub(in crate::text) struct LineRoot<'block, S> {
     /// The bidi paragraph level (UAX #9 P2–P3): a CSS block container's
     /// `direction`, or first-strong detection for a Lynx `<text>`.
     pub(in crate::text) direction: BaseDirection,
+    /// Whether content with no text and no box is still shaped, so that it
+    /// lays out one empty line of the strut rather than no line: the line
+    /// an editing host's caret sits on. Read only with a strut.
+    pub(in crate::text) strut_line_when_empty: bool,
 }
 
 impl<S> LineRoot<'_, S> {
@@ -60,7 +64,14 @@ impl<S> LineRoot<'_, S> {
     pub(in crate::text) const PROBE: Self = Self {
         strut: None,
         direction: BaseDirection::Auto,
+        strut_line_when_empty: false,
     };
+
+    /// Whether fully empty content is shaped into one empty line of the
+    /// strut ([`Self::strut_line_when_empty`]).
+    pub(in crate::text) const fn shapes_empty_content(&self) -> bool {
+        self.strut_line_when_empty && self.strut.is_some()
+    }
 }
 
 /// A consumer's own line-break override, asked before the paragraph's for
@@ -99,7 +110,14 @@ impl core::fmt::Debug for BreakOverride {
 ///
 /// Fully empty content short-circuits to an empty layout: parley shapes a
 /// substitute space for an empty build, whose glyph run would carry a style
-/// index this module never pushed.
+/// index this module never pushed. A root that keeps a line for empty
+/// content ([`LineRoot::shapes_empty_content`]) is the exception: its strut
+/// is style 0, which parley shapes the substitute space in, so the layout
+/// has one line whose box is the strut's, and that space is the one glyph
+/// run the strut's index carries. It is no content: paint draws no glyph run
+/// of the strut, and since parley neither hangs the space nor leaves it out
+/// of its widths, each consumer reports that line zero wide
+/// (`Paragraph::is_empty_strut_line`).
 pub(in crate::text) fn shape<S: Copy>(
     context: &mut TextContext,
     text: &str,
@@ -177,7 +195,8 @@ pub(in crate::text) fn probe_width<S: Copy>(
 }
 
 /// Builds `text` into the context's scratch layout, reusing its buffers.
-/// `false`, building nothing, for fully empty content.
+/// `false`, building nothing, for fully empty content, unless the root keeps
+/// a line for it ([`LineRoot::shapes_empty_content`]).
 ///
 /// The line-break override is one decision per parley builder, so it cannot
 /// follow each span's `word-break`: the paragraph takes it unless a span is
@@ -194,7 +213,7 @@ fn build_into_scratch<S: Copy>(
     overriding: Option<BreakOverride>,
 ) -> bool {
     sources.clear();
-    if text.is_empty() && boxes.is_empty() {
+    if text.is_empty() && boxes.is_empty() && !root.shapes_empty_content() {
         return false;
     }
     #[cfg(test)]

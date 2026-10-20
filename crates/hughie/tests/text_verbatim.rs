@@ -12,7 +12,7 @@
 use hughie::geometry::Size;
 use hughie::text::block::{
     BlockConstraint, BlockStyle, InlineBoxSpec, InlineItem, PlacedBox, RunStyle, TextBlock,
-    TextOverflow, TextRunItem, TextWrap, VerticalAlign, WhiteSpaceCollapse,
+    TextOverflow, TextRunItem, TextSecurity, TextWrap, VerticalAlign, WhiteSpaceCollapse,
 };
 use hughie::text::{FontBlob, TextContext};
 use stylo::Atom;
@@ -62,6 +62,7 @@ fn run<'src>(style: &'src RunStyle, text: &'src str) -> InlineItem<'src> {
         text,
         style,
         white_space: WhiteSpaceCollapse::Collapse,
+        text_security: TextSecurity::None,
     })
 }
 

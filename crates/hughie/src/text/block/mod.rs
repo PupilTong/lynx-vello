@@ -50,8 +50,8 @@ use super::paragraph::shape::{self, NaturalLine, ShapeSpan};
 use super::paragraph::style::resolve_alignment;
 pub use super::paragraph::{
     BlockConstraint, BlockMetrics, Direction, InlineBoxSpec, InlineItem, LineHeight, OffsetMap,
-    RunStyle, TextAlign, TextIndent, TextRunItem, TextWrap, VerticalAlign, WhiteSpaceCollapse,
-    WordBreak,
+    RunStyle, TextAlign, TextIndent, TextRunItem, TextSecurity, TextWrap, VerticalAlign,
+    WhiteSpaceCollapse, WordBreak,
 };
 use super::paragraph::{
     Flow, LineGeometry, OwnedItem, Paragraph, ParagraphRoot, RunBreaking, parley_boxes, sized_box,
@@ -64,7 +64,9 @@ use crate::text::TextContext;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceItem {
     /// The root inline box's strut ([`BlockStyle::strut`]): parley's style 0,
-    /// which no text is shaped in, so no glyph run carries it.
+    /// which no text is shaped in. The one glyph run that carries it is the
+    /// substitute space parley shapes for a block with no content that keeps
+    /// one line ([`BlockStyle::strut_line_when_empty`]), which draws nothing.
     Strut,
     /// Index into the `items` slice the block was built from.
     Content(u32),
@@ -205,14 +207,18 @@ impl TextBlock {
         items: &[InlineItem<'_>],
         truncation: Option<&[InlineItem<'_>]>,
     ) -> Self {
+        // A block that keeps a line for empty content has a strut to make
+        // that line of, its own or the initial font.
+        let strut = block_style
+            .strut
+            .clone()
+            .or_else(|| block_style.strut_line_when_empty.then(RunStyle::default));
         // Native Lynx keeps a `<text>`'s bidi paragraph level first-strong
         // (its platform engines detect it), and so does this.
         let root = ParagraphRoot {
-            strut: block_style
-                .strut
-                .clone()
-                .map(|strut| (strut, SourceItem::Strut)),
+            strut: strut.map(|strut| (strut, SourceItem::Strut)),
             direction: parley::BaseDirection::Auto,
+            strut_line_when_empty: block_style.strut_line_when_empty,
         };
         let paragraph = Paragraph::new(
             context,
@@ -264,10 +270,12 @@ impl TextBlock {
     /// Sound only for values parley does not shape from: alignment and
     /// direction are applied after breaking, and truncation is decided from a
     /// finished layout. A font, a letter-spacing, a word-break, a
-    /// `text_wrap` or a `verbatim` change is a different paragraph and needs a
-    /// new block — the last two choose the white-space processing the text
-    /// was normalized with. The host decides which it has, because it is the
-    /// one holding the old style to compare.
+    /// `text_wrap`, a `verbatim` or a `strut_line_when_empty` change is a
+    /// different paragraph and needs a new block — `text_wrap` and
+    /// `verbatim` choose the white-space processing the text was normalized
+    /// with, and `strut_line_when_empty` whether empty content is shaped at
+    /// all. The host decides which it has, because it is the one holding the
+    /// old style to compare.
     ///
     /// Invalidates the break memo, since `text-align` moves line offsets and
     /// `max_lines` moves the reported size.
@@ -773,14 +781,19 @@ impl TextBlock {
 
         let mut sources = Vec::new();
         // The same root inline box as the natural layout, so the visible
-        // lines keep their line boxes.
+        // lines keep their line boxes; but a display that a cut left empty
+        // is no empty content, and lays out no line of its own: the natural
+        // layout supplies the line it reports (`assemble`).
         let mut display = shape::shape(
             context,
             &text,
             &spans,
             boxes,
             &mut sources,
-            self.paragraph.root.line_root(),
+            shape::LineRoot {
+                strut_line_when_empty: false,
+                ..self.paragraph.root.line_root()
+            },
         );
         drop(spans);
         // The natural layout's indent rule, so every visible line keeps the
@@ -985,6 +998,19 @@ impl Retained for TextBlock {
             BlockStyle::INDENT_KEYWORDS,
         );
 
+        if self.paragraph.is_empty_strut_line() {
+            // The one empty line a block with no content keeps: nothing to
+            // cut, and nothing shown, so it is zero wide whatever parley
+            // measured its substitute space at.
+            let mut result = self.finish_untruncated(&natural_lines, constraint);
+            result.size.width = 0.0;
+            for line in &mut result.lines {
+                line.advance = 0.0;
+            }
+            self.result = Some(result);
+            return;
+        }
+
         // Whether content remains past the committed lines is a unit-space
         // fact, never the breaker's: parley reports itself unfinished while
         // only a renderless final line is pending. What a `nowrap` verbatim
@@ -1185,6 +1211,7 @@ mod tests {
                 text: "aaaa aaaa",
                 style: &style,
                 white_space: WhiteSpaceCollapse::Collapse,
+                text_security: TextSecurity::None,
             }),
             InlineItem::Box(InlineBoxSpec {
                 id: 1,
@@ -1222,12 +1249,14 @@ mod tests {
             text: "aaaa aaaa aaaa",
             style: &style,
             white_space: WhiteSpaceCollapse::Collapse,
+            text_security: TextSecurity::None,
         })];
         let tail_style = ahem_style();
         let tail = [InlineItem::Run(TextRunItem {
             text: "XX",
             style: &tail_style,
             white_space: WhiteSpaceCollapse::Collapse,
+            text_security: TextSecurity::None,
         })];
         let block_style = BlockStyle {
             max_lines: core::num::NonZeroU32::new(2),
@@ -1269,6 +1298,7 @@ mod tests {
             text: "ab c\td",
             style: &style,
             white_space: WhiteSpaceCollapse::Preserve,
+            text_security: TextSecurity::None,
         })];
         let mut block = TextBlock::new(&mut context, BlockStyle::default(), &items, None);
         assert_eq!(

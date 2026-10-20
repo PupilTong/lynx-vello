@@ -2323,7 +2323,11 @@ E5: a UA shadow tree of one `contenteditable="plaintext-only"` editor — for
 `x-input` an engine-sheet `display: block` `div`, its own inline formatting
 context, `white-space: pre`; for `x-textarea` a Lynx `<text>`, whose Lynx
 paragraph lays the lines out — and a `#placeholder` shown while the editor
-is `:empty`; the host is the field's box; the placeholder style attributes
+is `:empty`, whose text block is the field's `::placeholder` (it carries
+`pseudo="-webkit-input-placeholder"`, `dom::PLACEHOLDER_PSEUDO_ID`, so an
+author's `.hint::placeholder` rule reaches it under css-pseudo-4's property
+restriction, and the UA sheet's `x-input::placeholder` rules lay it out);
+the host is the field's box; the placeholder style attributes
 as UA `attr()` custom properties; `value`, `type`, `confirm-type`,
 `disabled`/`readonly` and `input-filter` mapped onto the editor in its
 attribute callback; line breaks (single-line), `maxlength`, the `number`
@@ -3392,8 +3396,10 @@ Subsystems:
   and its queued focus events, a parley `Selection` and an IME composition
   over the committed paragraph that lays the host's text out — a Lynx text
   element's own, a block container's own, or the anonymous block box around
-  a flex host's loose text — with every offset converted through that
-  paragraph's source map (`hughie::text::paragraph::OffsetMap`), the
+  a flex host's loose text; a host's own paragraph keeps one empty line of
+  its strut when empty, so the host is one line tall — with every offset
+  converted through that paragraph's source map
+  (`hughie::text::paragraph::OffsetMap`), the
   Chromium-shaped command set with
   its `beforeinput`/`input`/`composition*` events reported as data
   (`prepare_editing`/`commit_editing`), `TextInputState`, and the count of
@@ -3706,7 +3712,10 @@ addresses either kind through (`offsets.rs`, `OffsetMap`, from
 line sits, parley 0.12's own CSS 2.2 §10.8.1 line box — and `Paragraph`, which
 owns one shaped natural layout and re-breaks it in place, starting every line
 with its root inline box (`ParagraphRoot`: the strut, which is parley's style
-0, and the base direction). The core knows nothing of inline boxes; a
+0, the base direction, and whether content with no text and no box still
+lays out one empty line of the strut, which `dom` asks for an editing host's
+paragraph: `BlockStyle`/`InlineFlowStyle::strut_line_when_empty`). The core
+knows nothing of inline boxes; a
 consumer that lays text of its own into the content has four generic hooks,
 which the Lynx block does not use: markers in the item stream
 (`InlineItem::Marker`) whose places after white space collapsing the

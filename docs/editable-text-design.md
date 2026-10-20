@@ -188,7 +188,7 @@ winit's macOS backend sends no key event for them at all (E3).
 | **E2** | bobcat-core, bobcat-element (dom: two small additions) | `ToMain::Edit`, `LynxView::edit`, `ViewNotice::TextInputState` → `EngineEvent::TextInputStateChanged`, standard events into the realm (`EventDetail::{Input, Composition, Focus}` with string data), no cancellation channel (ruled 2026-10-19), pointer → caret placement and keyboard default actions on the main thread | E1, #407 |
 | **E3** | bobcat-cli (macOS) | winit `Ime` → commands, `set_ime_allowed` / `set_ime_cursor_area` from the state, `KeyEvent.text` insertion, headless driver | E2 |
 | **E4** | bobcat-wasm (bobcat-core: the text-source flag) | hidden `<textarea>` proxy in the facade (`beforeinput`/`composition*` → `bobcat-edit` → `LynxView::edit`), keyboard focus, `TextInputState` → `bobcat-text-input`; `EditContext` recorded as the follow-up | E2 |
-| **E5** | bobcat-core (components), bobcat-element | `x-input` / `x-textarea`: UA shadow tree with a plain-text editing host, attributes (`value`, `placeholder`, `type`, `maxlength`, `confirm-type`, `disabled`, `readonly`, `input-filter`, `send-composing-input`), `lynxinput`/`confirm`/`selection`/`focus`/`blur` in web-core's shape, methods (`setValue`, `getValue`, `focus`, `blur`, `setSelectionRange`, `select`) | E2 |
+| **E5** | bobcat-core (components), bobcat-element | `x-input` / `x-textarea`: UA shadow tree with a plain-text editing host, attributes (`value`, `placeholder`, `type`, `maxlength`, `confirm-type`, `disabled`, `readonly`, `input-filter`, `send-composing-input`; `x-textarea`'s `min-height`, `max-height`), `lynxinput`/`confirm`/`selection`/`focus`/`blur` in web-core's shape, methods (`setValue`, `getValue`, `focus`, `blur`, `setSelectionRange`, `select`) | E2 |
 
 Deferred after E5, in the order the survey ranks them: clipboard (needs a host
 notice pair), caret blink, `::selection` colors, rich-text hosts, undo/redo,
@@ -204,7 +204,8 @@ on); `maxlength` 140 by default (native unlimited) and counted in UTF-16
 units without native's whole-cluster rule; `input-filter` removes what
 matches (native keeps what matches); a textarea confirms only with
 `confirm-enter` (native: whenever `confirm-type` is not the default);
-`getValue` of a field not focused answers a caret at the end (native `-1`);
+`getValue` of a field not focused answers the selection it kept, a caret at
+the end when it never had one (native `-1`);
 `selection` fires for selected ranges only (native: every change).
 
 Two follow native or a user ruling instead (2026-10-19): the HTML names
@@ -249,7 +250,9 @@ Public surface:
   (the removal path) or stops being a host (`contenteditable` removed or set
   to `"false"`) loses focus with no event, as HTML's focus fixup rule says.
   `focus()` on the focused element is a no-op that answers `true`, and puts
-  the caret at the start of the value, as browsers do for `element.focus()`.
+  the caret at the start of the value, as browsers do for `element.focus()`
+  (since 2026-10-19 only for a host never focused nor written; any other
+  restores the selection it retained, `Document::host_selection`).
   A host inside a shadow tree counts as connected through its shadow host, so
   E5's UA shadow trees can be focused.
 - **`:focus` is the focused host.** `focus`/`blur` set and clear
@@ -297,8 +300,10 @@ Public surface:
 - **`TextInputState`** carries the selection as `start ≤ end`; `caret` is the
   focus's caret box, 1 CSS px wide; `composition_bounds` gives each UTF-16
   unit the box of the grapheme cluster it belongs to (both halves of a pair
-  share one). An empty host's caret is one used line tall (`line-height`,
-  `normal` as 1.2 × `font-size`). Geometry is the last committed layout's;
+  share one). An empty host that establishes its own paragraph has one
+  empty line (below), and its caret is that line's; the caret of a host with
+  no paragraph is one used line tall (`line-height`, `normal` as 1.2 ×
+  `font-size`). Geometry is the last committed layout's;
   `text_input_state` runs no pass.
 - **Painting.** The selection highlight is a UA constant (`#B4D5FE`), painted
   over inline backgrounds and under shadows and glyphs; the caret only shows
@@ -308,13 +313,33 @@ Public surface:
   itself when it establishes a paragraph (a Lynx text element, a block
   container), else the anonymous block box of its first text child, whose
   container is the host. A host with element children can have several
-  boxes; it is read-only, so the first one serves its selection. An empty
-  host, or one holding only white space — which a flex, grid, linear or
-  relative container does not render (css-flexbox-1 §4) — has no paragraph:
-  it is edited on value offsets alone (a cluster is one code point there,
-  a word or line move goes to the value's end), its caret sits at the
-  content box's origin, one used line tall, and the walker paints that
-  caret with the host's own box.
+  boxes; it is read-only, so the first one serves its selection.
+- **An empty host is one line tall.** A paragraph an editing host
+  establishes (a Lynx text element's, a block container's) that has no
+  content — no text and no atomic box; for an inline formatting context
+  also text white space processing collapses to nothing — lays out exactly
+  one empty line of the strut: the host's own font and `line-height` (CSS
+  2.2 §10.8.1). The host is that line tall and the caret sits on it, as an
+  HTML `<input>` or `<textarea>` is never shorter than one line;
+  `Document::paragraph_line_count` answers 1. The layout host sets
+  `strut_line_when_empty` on `BlockStyle`/`InlineFlowStyle` from
+  `contenteditable` (`editing::is_host_node`); it is a shaping input, so
+  toggling the attribute invalidates the element's layout and rebuilds its
+  paragraph. Parley shapes a substitute space for empty text in style 0,
+  the strut, which gives the line its box; that space is no content — the
+  line is zero wide, so `text-align` puts it and the caret at the start, the
+  exact centre or the end (the line is aligned within its width plus the
+  space's advance), it selects and hits nothing, and paint skips the
+  strut's glyph run. Every other empty paragraph still lays out no line.
+  (The editors' shadow sheet once asked for this with `min-height: 1lh`,
+  which the fork's `lynx` grammar does not parse.)
+- **A host with no paragraph.** A host that establishes no paragraph of its
+  own — a flex, grid, linear or relative host — and is empty, or holds only
+  white space, which such a container does not render (css-flexbox-1 §4),
+  has none: it is edited on value offsets alone (a cluster is one code
+  point there, a word or line move goes to the value's end), its caret sits
+  at the content box's origin, one used line tall, and the walker paints
+  that caret with the host's own box.
 - **Offsets through the source map.** A value byte becomes a UTF-16 unit
   (`offsets.rs`), then a layout byte (`OffsetMap::unit_to_byte_or_end`); a
   layout byte becomes a unit read as a start (`byte_to_unit`) or, for a
@@ -324,7 +349,10 @@ Public surface:
   between two collapsed spaces is shown on the one space and, once a layout
   pass has placed it, reported at the span's start. An inline box's edge
   bytes read as the unit after them, and a character move that only
-  crossed an edge cluster steps on.
+  crossed an edge cluster steps on. Under `-webkit-text-security` every
+  layout character is a mask standing for one character of the value, one
+  or two units, so a caret is placed, moved and deleted by masks and a
+  unit inside a masked surrogate pair lands on the pair's mask.
 - **Trust is structural.** A paragraph's units are the value's when every
   child of the host is a text node, no generated `content` replaces them,
   and every run of the paragraph is the host's own
@@ -829,6 +857,12 @@ Public surface:
   focused host the composition ended and the selection placed (UTF-16,
   rounded down inside a pair, clamped).
 - `dom::Document::has_focus_events()`.
+- `dom::Document::host_selection(host)`: a host's selection in UTF-16
+  units, the session's while focused and otherwise the one it retained
+  (2026-10-19). A host keeps its selection while it is not focused, as a
+  browser's text control does: losing focus retains it, `set_host_value` on
+  a host that is not focused replaces it, and `focus` restores it, clamped
+  to the value; a host never focused nor written gets a caret at 0.
 - `TextInputState::input_type` is read from the host's `type` attribute with
   `<input type>`'s keywords (`password`, `search`, `email`, `number`, `tel`,
   `url`; anything else `Text`).
@@ -891,7 +925,24 @@ Public surface:
   size, weight and family are custom properties the host declares from typed
   `attr()` (grey and `normal` by default; an absent size or family is
   invalid at computed-value time, so the placeholder inherits the host's).
-  The component writes only the text.
+  The component writes only the text. The block holding it is the field's
+  `::placeholder` (2026-10-19): it carries `pseudo="-webkit-input-placeholder"`
+  (`dom::PLACEHOLDER_PSEUDO_ID`, Blink's name for the element behind
+  `::placeholder` in its UA shadow trees), which `dom` reports to Stylo as
+  the element implementing the host's `::placeholder`, so an author's
+  `.hint::placeholder { color: red }` reaches it, over the attribute
+  defaults the box carries (an outer context's normal declaration wins, CSS
+  Scoping §3.3) — web-core's `.target::placeholder` card renders the same.
+  css-pseudo-4 §4.2 restricts an author's `::placeholder` declarations to
+  the `::first-line` properties, `opacity`, `text-align`, `text-overflow`
+  and the white-space properties, which Stylo enforces on every author
+  declaration for the block, the shadow sheet's included; the block's layout
+  (`display: block; flex: 1 1 auto; min-width: 0; overflow: clip`, its
+  `white-space`) is therefore in the UA sheet as `x-input::placeholder`
+  rules, which the restriction exempts. Native Lynx's `::placeholder` carries
+  only `color`, `font-size`, `font-family`, `font-weight` and `font-style`
+  (`pseudo_element.cc`'s `PlaceHolderPseudoElementStyleNames`); Chrome,
+  under web-core, restricts nothing.
 - **Events are derived from the editor's standard events, heard in Rust.**
   An editing host inside a UA shadow tree dispatches its edit and focus
   events non-composed (`is_shadow_content` in `runtime/editing.rs`): the
@@ -945,29 +996,45 @@ Public surface:
   `text-maxline`: the value stays visible and editable. iOS also caps the
   text container at `maxlines` lines, which hides overflow from a script
   write; that is not built.
+- **`min-height` and `max-height` on `x-textarea` are UA CSS**
+  (2026-10-19). web-core binds each attribute to its inner `<textarea>`'s
+  inline style (`XTextareaAttributes.ts`, `bindToStyle`); the host is the
+  field's box here, so the UA sheet clamps the host's own box with
+  `x-textarea[min-height] { min-height: attr(min-height type(<length>),
+  0px) }` and `max-height` with `none` (typed `attr()` directly in the
+  property). An absent attribute matches no rule, and one that is no
+  `<length>` takes the fallback, the value the field has without it (the
+  common UA block's `min-height: 0`; without the fallback the declaration
+  would be invalid at computed-value time and `min-height` would become
+  `auto`); `rpx` parses. An author's own `min-height`/`max-height` on the host
+  outranks the attribute (author beats UA), whereas in web-core only the
+  attribute reaches the inner box; that difference is accepted.
 - **`input-filter` on `regex-lite`.** web-core hands the pattern to
   `new RegExp`; ECMAScript's `\uXXXX` is translated to `\x{XXXX}`, and a
   pattern the small engine cannot compile (lookaround, backreferences)
   filters nothing. `setInputFilter` writes the same pattern (the editor's
   `pattern` attribute, where web-core writes it too), so the last write
   wins.
-- **Methods.** `focus()` focuses with the caret at the end and queues the
-  Lynx `focus` inside the call, so a `setSelectionRange` in the same job
-  reports after it; the standard focus events it leaves in `dom` are
+- **Methods.** `focus()` restores the selection the field kept since it
+  lost focus or a script last wrote its value (a never-focused field gets
+  the caret at the end) and queues the Lynx `focus` inside the call, so a
+  `setSelectionRange` in the same job reports after it; the standard focus events it leaves in `dom` are
   dispatched from the entry that delivers component events
   (`has_component_events` asks `has_focus_events`). `setSelectionRange`
   and `select` act only on a focused field.
 
 ### Limitations
 
-- A `password` field is not masked (masking needs a paragraph built from
-  other text than the value, over which `dom` refuses edits).
+- A `password` field shows one disc per character (the shadow sheet's
+  `-webkit-text-security: disc`), where Blink shows one per UTF-16 code
+  unit: an emoji is one disc here, two in a browser. The paragraph
+  normalizer masks the text and its source map keeps every offset in the
+  value's units, so editing reads the value as typed.
 - The single-line field does not scroll to follow the caret; text past its
   width is clipped.
 - No intrinsic width: an unsized field in a row is as wide as its text.
 - `readonly` fields cannot be focused (editing is off, as for `disabled`).
-- Not built: `line-spacing`, `auto-height`/`min-height`/
-  `max-height`, `linechange`, `autocomplete`, `spell-check`,
+- Not built: `line-spacing`, `auto-height`, `linechange`, `autocomplete`, `spell-check`,
   `getTextBoundingRect` on a field, `placeholder-font-style` and the
   `-x-placeholder-*` aliases.
 - `linechange` is deferred: web-core names it only in a doc comment

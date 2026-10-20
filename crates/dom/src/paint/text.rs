@@ -998,8 +998,10 @@ impl EditingPaint {
     }
 }
 
-/// The caret of the focused host when no paragraph holds its text — an
-/// empty host, or one whose white space a flex container does not render:
+/// The caret of the focused host when no paragraph holds its text — a host
+/// that establishes no paragraph of its own (a flex `view`) and is empty, or
+/// holds white space it does not render. A host that establishes one has a
+/// line even when empty, where its caret paints with its text:
 /// [`crate::editing::CARET_WIDTH`] wide and one used line tall, at the
 /// content box's origin, in the host's border-box space. `None` for every
 /// other element, and while the selection is a range.

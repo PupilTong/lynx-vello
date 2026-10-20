@@ -21,7 +21,9 @@ use stylo_atoms::Atom;
 use crate::tree::document::{DOCUMENT_NODE_ID, Document, NodeId};
 use crate::tree::node::Node;
 use crate::tree::popover::is_popover_attribute;
-use crate::tree::shadow::is_slot_assignment_attribute;
+use crate::tree::shadow::{
+    PLACEHOLDER_PSEUDO_ID, is_pseudo_attribute, is_slot_assignment_attribute,
+};
 
 const STRUCTURE_SENSITIVE: ElementSelectorFlags = ElementSelectorFlags::HAS_SLOW_SELECTOR
     .union(ElementSelectorFlags::HAS_SLOW_SELECTOR_LATER_SIBLINGS)
@@ -437,6 +439,7 @@ impl<T> Document<T> {
         let slot_assignment = is_slot_assignment_attribute(name);
         let popover = is_popover_attribute(name).then(|| self.popover_state(id));
         let editing = crate::editing::is_contenteditable_attribute(name);
+        let pseudo = is_pseudo_attribute(name).then_some(value == PLACEHOLDER_PSEUDO_ID);
         if editing {
             self.note_contenteditable_change(id, Some(value));
         }
@@ -446,6 +449,9 @@ impl<T> Document<T> {
         self.note_attribute_change(id, &name);
         self.live_node_mut(id)
             .set_attr_local_name(name, value.to_owned());
+        if let Some(on) = pseudo {
+            self.note_pseudo_attribute(id, on);
+        }
         if slot_assignment {
             self.note_slot_assignment_attribute(id);
         }
@@ -486,6 +492,7 @@ impl<T> Document<T> {
         let slot_assignment = is_slot_assignment_attribute(name);
         let popover = is_popover_attribute(name).then(|| self.popover_state(id));
         let editing = crate::editing::is_contenteditable_attribute(name);
+        let pseudo = is_pseudo_attribute(name);
         if editing {
             self.note_contenteditable_change(id, None);
         }
@@ -494,6 +501,9 @@ impl<T> Document<T> {
         self.enqueue_attribute_changed(id, &name, None);
         self.note_attribute_change(id, &name);
         self.live_node_mut(id).remove_attr_local_name(&name);
+        if pseudo {
+            self.note_pseudo_attribute(id, false);
+        }
         if slot_assignment {
             self.note_slot_assignment_attribute(id);
         }
@@ -504,6 +514,17 @@ impl<T> Document<T> {
             self.fix_up_focus();
         }
         self.drain_reactions(base);
+    }
+
+    /// The `pseudo` attribute is `PLACEHOLDER_PSEUDO_ID` (`on`) or not: when
+    /// that changed, the element implements a different pseudo-element than
+    /// before ([`Node::implemented_pseudo_element`]), so the rules it takes
+    /// come from other maps, and it is matched again from scratch, with its
+    /// subtree, which inherits from it.
+    fn note_pseudo_attribute(&mut self, id: NodeId, on: bool) {
+        if self.live_node_mut(id).set_placeholder_pseudo(on) != on {
+            self.mark_subtree_dirty(id);
+        }
     }
 
     pub fn add_element_state(&mut self, id: NodeId, flags: stylo_dom::ElementState) {

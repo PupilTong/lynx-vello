@@ -127,6 +127,42 @@ pub enum WhiteSpaceCollapse {
     BreakSpaces,
 }
 
+/// `-webkit-text-security`, per run: whether the run's characters are
+/// replaced by a mask character before white-space processing.
+///
+/// Under any value but [`Self::None`] every character of the run is masked,
+/// white space and newlines included, as Blink's `LayoutText::SecureText`
+/// fills the whole text node with the mask before white-space processing: a
+/// masked run never collapses, never wraps at a space it had and never breaks
+/// at a newline it had. One mask stands for one Unicode scalar value of the
+/// source, where Blink fills per UTF-16 code unit, so a caret never lands
+/// between the halves of a surrogate pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum TextSecurity {
+    #[default]
+    None,
+    /// U+25E6 WHITE BULLET, Blink's `kWhiteBulletCharacter`.
+    Circle,
+    /// U+2022 BULLET, Blink's `kBulletCharacter`.
+    Disc,
+    /// U+25A0 BLACK SQUARE, Blink's `kBlackSquareCharacter`.
+    Square,
+}
+
+impl TextSecurity {
+    /// The character every source character of a run is shown as, or `None`
+    /// for an unmasked run. Each is three bytes in UTF-8
+    /// (`super::content::MASK_BYTES`).
+    pub(in crate::text) const fn mask(self) -> Option<char> {
+        match self {
+            Self::None => None,
+            Self::Circle => Some('\u{25E6}'),
+            Self::Disc => Some('\u{2022}'),
+            Self::Square => Some('\u{25A0}'),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WordBreak {
     #[default]

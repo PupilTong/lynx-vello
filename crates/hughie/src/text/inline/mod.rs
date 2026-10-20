@@ -82,7 +82,7 @@ use crate::text::paragraph::style::resolve_alignment;
 use crate::text::paragraph::{
     Additions, BlockConstraint, BlockMetrics, BreakStyle, Direction, Flow, IndentKeywords,
     InlineBoxSpec, InlineItem, LineGeometry, OffsetMap, OverflowWrap, OwnedItem, Paragraph,
-    ParagraphRoot, RunBreaking, RunStyle, TextAlign, TextRunItem, VerticalAlign,
+    ParagraphRoot, RunBreaking, RunStyle, TextAlign, TextRunItem, TextSecurity, VerticalAlign,
     WhiteSpaceCollapse,
 };
 
@@ -101,6 +101,12 @@ pub struct InlineFlowStyle {
     /// [`BlockConstraint`] input, because a percentage resolves against the
     /// definite inline size only the caller knows.
     pub indent: IndentKeywords,
+    /// Whether a block with no content — no text once white space is
+    /// processed, no atomic box and no inline box edge — lays out one empty
+    /// line of the strut rather than none: set for an editing host's
+    /// paragraph, which is never shorter than one line, so that its caret
+    /// has a line to sit on. A shaping input, like the strut.
+    pub strut_line_when_empty: bool,
 }
 
 impl InlineFlowStyle {
@@ -121,6 +127,7 @@ impl InlineFlowStyle {
                 each_line: indent.each_line,
                 hanging: indent.hanging,
             },
+            strut_line_when_empty: false,
         }
     }
 }
@@ -133,6 +140,8 @@ pub struct InlineRun<'src> {
     pub style: &'src RunStyle,
     /// The run's `white-space-collapse`.
     pub white_space: WhiteSpaceCollapse,
+    /// The run's `-webkit-text-security` ([`TextRunItem::text_security`]).
+    pub text_security: TextSecurity,
     /// The run's `word-break`, `text-wrap-mode` and `overflow-wrap`.
     pub breaking: BreakStyle,
 }
@@ -185,7 +194,10 @@ pub struct InlineBoxOpen<'src> {
 /// What a parley style index of [`InlineFlow::display`] was shaped from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FlowSource {
-    /// The strut, which no text is shaped in.
+    /// The strut, which no text is shaped in. The one glyph run that
+    /// carries it is the substitute space parley shapes for a block with no
+    /// content that keeps one line
+    /// ([`InlineFlowStyle::strut_line_when_empty`]), which draws nothing.
     Strut,
     /// A text run: its index in the items the flow was built from.
     Run(u32),
@@ -299,6 +311,7 @@ impl InlineFlow {
                 Direction::Ltr => BaseDirection::Ltr,
                 Direction::Rtl => BaseDirection::Rtl,
             },
+            strut_line_when_empty: style.strut_line_when_empty,
         };
         let paragraph = Paragraph::from_flow(
             context,
@@ -326,18 +339,22 @@ impl InlineFlow {
 
     /// Replaces the parameters without re-shaping.
     ///
-    /// Sound only while the strut and the direction are unchanged: both are
-    /// shaping inputs — the strut is parley's style 0 and the direction the
-    /// bidi paragraph level — so a change to either needs a new flow, which
-    /// the host decides because it holds the old style to compare. Alignment
-    /// and the indent keywords are applied at break time.
+    /// Sound only while the strut, the direction and
+    /// `strut_line_when_empty` are unchanged: all are shaping inputs — the
+    /// strut is parley's style 0, the direction the bidi paragraph level,
+    /// and the last whether empty content is shaped at all — so a change to
+    /// any needs a new flow, which the host decides because it holds the old
+    /// style to compare. Alignment and the indent keywords are applied at
+    /// break time.
     pub fn set_style(&mut self, style: InlineFlowStyle) {
         if self.style == style {
             return;
         }
         debug_assert!(
-            self.style.strut == style.strut && self.style.direction == style.direction,
-            "a strut or direction change needs a new flow"
+            self.style.strut == style.strut
+                && self.style.direction == style.direction
+                && self.style.strut_line_when_empty == style.strut_line_when_empty,
+            "a strut, direction or empty-line change needs a new flow"
         );
         self.style = style;
         self.memo.forget();
@@ -838,6 +855,18 @@ impl InlineFlow {
         {
             return intrinsic;
         }
+        if self.paragraph.is_empty_strut_line() {
+            // The one empty line a block with no content keeps shows
+            // nothing, at any indent: zero wide whatever parley measured
+            // its substitute space at.
+            let intrinsic = Intrinsic {
+                indent,
+                min: 0.0,
+                max: 0.0,
+            };
+            self.intrinsic = Some(intrinsic);
+            return intrinsic;
+        }
         let one_pass =
             self.one_pass && indent == 0.0 && self.paragraph.box_widths().all(|width| width >= 0.0);
         let (min, max) = if one_pass {
@@ -927,6 +956,7 @@ fn lay_in(items: &[InlineFlowItem<'_>]) -> (Flow<EdgeAdditions>, InlineBoxes) {
                 text: run.text,
                 style: run.style,
                 white_space: run.white_space,
+                text_security: run.text_security,
             }),
             InlineFlowItem::Atom(atom) => InlineItem::Box(InlineBoxSpec {
                 id: index as u64,

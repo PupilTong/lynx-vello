@@ -937,6 +937,91 @@ fn a_value_written_by_the_element_layer_ends_the_composition_and_places_the_sele
     }
 }
 
+/// A host keeps its selection while it is not focused, as a browser's text
+/// control keeps `selectionStart`/`selectionEnd` across a blur, and the
+/// next focus restores it.
+#[test]
+fn a_host_keeps_its_selection_while_it_is_not_focused() {
+    for kind in KINDS {
+        eprintln!("kind {kind:?}");
+        let (mut doc, host) = host_in(kind, &["hello"], 200.0);
+        select(&mut doc, 1..3);
+        doc.layout();
+        assert_eq!(doc.host_selection(host), Some(1..3), "the session's");
+        assert!(doc.blur());
+        doc.take_focus_events();
+        assert_eq!(doc.focused(), None);
+        assert_eq!(doc.host_selection(host), Some(1..3));
+
+        assert!(doc.focus(host));
+        doc.take_focus_events();
+        assert_eq!(selection(&doc), 1..3, "restored, as value offsets");
+        doc.layout();
+        assert_eq!(selection(&doc), 1..3, "placed in the paragraph");
+
+        // Moving focus to another host retains this one's selection too,
+        // and a host never focused has none, so it starts at 0.
+        let other = kind.create(&mut doc);
+        doc.set_attribute(other, "contenteditable", "");
+        doc.append_child(doc.document_element().id(), other);
+        let text = doc.create_text_node("abc", ());
+        doc.append_child(other, text);
+        doc.layout();
+        assert_eq!(doc.host_selection(other), None, "never focused");
+        assert!(doc.focus(other));
+        doc.take_focus_events();
+        assert_eq!(selection(&doc), 0..0);
+        assert_eq!(doc.host_selection(host), Some(1..3));
+
+        // A script's write while the host is not focused leaves the
+        // selection it passes (UTF-16, rounded down inside a pair, clamped).
+        doc.set_host_value(host, "h😀llo", 2..99);
+        assert_eq!(doc.host_selection(host), Some(1..6));
+        assert!(doc.focus(host));
+        doc.take_focus_events();
+        assert_eq!(selection(&doc), 1..6);
+        doc.set_host_value(host, "h😀llo", 3..6);
+        assert!(doc.blur());
+        doc.take_focus_events();
+
+        // A value shortened under a retained selection clamps it, never
+        // inside a surrogate pair: bytes 5..8 of "h😀llo" become byte 2
+        // (the pair's start in "ab😀") and the end.
+        let text = doc.get(host).unwrap().first_child().unwrap().id();
+        doc.set_text_node_data(text, "ab😀");
+        assert_eq!(doc.host_selection(host), Some(2..4));
+        assert!(doc.focus(host));
+        doc.take_focus_events();
+        assert_eq!(selection(&doc), 2..4);
+        doc.layout();
+        assert_eq!(selection(&doc), 2..4);
+    }
+}
+
+/// The fixup rule's silent unfocus retains the selection, a host that stops
+/// being an editing host keeps it, and freeing the host drops it.
+#[test]
+fn a_retained_selection_outlives_editing_but_not_the_node() {
+    let (mut doc, host) = host_in(Kind::View, &["hello"], 200.0);
+    select(&mut doc, 2..4);
+    doc.set_attribute(host, "contenteditable", "false");
+    assert_eq!(doc.focused(), None);
+    assert!(doc.take_focus_events().is_empty());
+    assert_eq!(doc.host_selection(host), Some(2..4), "read-only keeps it");
+    doc.set_attribute(host, "contenteditable", "");
+    assert!(doc.focus(host));
+    assert_eq!(selection(&doc), 2..4);
+    doc.remove_element(host);
+    assert_eq!(doc.focused(), None);
+    assert_eq!(doc.host_selection(host), Some(2..4), "removed, not freed");
+    assert_eq!(doc.editing.retained.len(), 1);
+    doc.drop_element(host);
+    assert!(
+        doc.editing.retained.is_empty(),
+        "a retired id keeps no entry"
+    );
+}
+
 #[test]
 fn composition_bounds_have_one_box_per_utf16_unit() {
     for kind in KINDS {
@@ -998,6 +1083,144 @@ fn an_empty_host_shows_a_caret_one_line_tall() {
             state(&doc).caret,
             rect(origin.x + 5.0, origin.y + 3.0, 1.0, 10.0)
         );
+    }
+}
+
+/// A host that establishes its own paragraph keeps one empty line of its
+/// strut when it is empty, so its caret is that line's: at the content
+/// origin, as tall as the line box. With `line-height: normal` that is
+/// Ahem's 10px em, where the fallback for a host with no paragraph (the
+/// flex `view`, whose loose text has no anonymous box while it has none)
+/// takes `normal` as 1.2em.
+#[test]
+fn an_empty_host_s_caret_is_its_paragraph_s_one_empty_line() {
+    for kind in KINDS {
+        let mut doc = document();
+        let host = kind.create(&mut doc);
+        doc.set_attribute(host, "contenteditable", "plaintext-only");
+        doc.set_inline_style(host, "width: 200px; padding: 3px 5px; line-height: normal;");
+        doc.append_child(doc.document_element().id(), host);
+        doc.layout();
+        assert!(doc.focus(host), "{kind:?}");
+        doc.layout();
+        let origin = doc.bounding_client_rect(host).unwrap().origin;
+        let caret = state(&doc).caret;
+        if kind == Kind::View {
+            assert!(doc.editable_paragraph(host).is_none());
+            assert_eq!(caret, rect(origin.x + 5.0, origin.y + 3.0, 1.0, 12.0));
+        } else {
+            let paragraph = doc
+                .editable_paragraph(host)
+                .expect("the host's own paragraph");
+            assert_eq!(paragraph.node, host, "{kind:?}");
+            assert_eq!(doc.paragraph_line_count(host), Some(1), "{kind:?}");
+            assert_eq!(
+                caret,
+                rect(origin.x + 5.0, origin.y + 3.0, 1.0, 10.0),
+                "{kind:?}"
+            );
+            // The host is that line tall: its padding box is the line and
+            // the padding around it.
+            assert_eq!(
+                doc.bounding_client_rect(host).unwrap().size.height,
+                16.0,
+                "{kind:?}"
+            );
+        }
+    }
+}
+
+/// The empty line of an empty host's own paragraph holds no value text:
+/// every pointer and move command over it lands at offset 0, and typing
+/// into it and deleting back to empty leaves the line in place.
+#[test]
+fn commands_over_an_empty_host_s_one_line_stay_at_its_start() {
+    use Direction::{Backward, Forward};
+    use Granularity::{Character, Document as Whole, Line, LineBoundary, Word};
+    for kind in [Kind::Text, Kind::Block] {
+        eprintln!("kind {kind:?}");
+        let (mut doc, host) = host_in(kind, &[], 200.0);
+        assert!(doc.editable_paragraph(host).is_some());
+        // Left of, on and right of where parley's substitute space sits.
+        for x in [1.0, 6.0, 13.0, 40.0] {
+            for command in [
+                Command::SelectFromPoint {
+                    point: Point2D::new(x, 8.0),
+                    extend: false,
+                },
+                Command::SelectWordAtPoint {
+                    point: Point2D::new(x, 8.0),
+                },
+                Command::SelectLineAtPoint {
+                    point: Point2D::new(x, 8.0),
+                },
+            ] {
+                doc.apply_editing(command);
+                assert_eq!(selection(&doc), 0..0, "{kind:?} at {x}");
+            }
+        }
+        for granularity in [Character, Word, LineBoundary, Line, Whole] {
+            for direction in [Forward, Backward] {
+                doc.apply_editing(Command::Move {
+                    granularity,
+                    direction,
+                    extend: false,
+                });
+                assert_eq!(selection(&doc), 0..0, "{kind:?} {granularity:?}");
+            }
+        }
+        assert!(doc.apply_editing(Command::Insert("ab".to_owned())).applied);
+        doc.layout();
+        assert_eq!((value(&doc), selection(&doc)), ("ab".to_owned(), 2..2));
+        assert!(doc.apply_editing(Command::DeleteBackward).applied);
+        assert!(doc.apply_editing(Command::DeleteBackward).applied);
+        doc.layout();
+        assert_eq!((value(&doc), selection(&doc)), (String::new(), 0..0));
+        assert_eq!(doc.paragraph_line_count(host), Some(1), "{kind:?}");
+        let origin = doc.bounding_client_rect(host).unwrap().origin;
+        assert_eq!(
+            state(&doc).caret,
+            rect(origin.x + 5.0, origin.y + 3.0, 1.0, 10.0)
+        );
+    }
+}
+
+/// The empty line of an empty host's own paragraph is zero wide, so
+/// `text-align` puts its caret where it puts a zero-wide line: at the start,
+/// the exact centre or the end of the 190px content box, as a browser places
+/// the caret of an empty centred or right-aligned `<input>`.
+#[test]
+fn an_empty_host_s_caret_follows_text_align_exactly() {
+    for kind in [Kind::Text, Kind::Block] {
+        for (align, offset) in [
+            ("start", 0.0),
+            ("left", 0.0),
+            ("center", 95.0),
+            ("right", 190.0),
+            ("end", 190.0),
+            ("justify", 0.0),
+        ] {
+            let mut doc = document();
+            let host = kind.create(&mut doc);
+            doc.set_attribute(host, "contenteditable", "");
+            doc.set_inline_style(
+                host,
+                &format!(
+                    "width: 200px; box-sizing: border-box; padding: 3px 5px; \
+                     text-align: {align};"
+                ),
+            );
+            doc.append_child(doc.document_element().id(), host);
+            doc.layout();
+            assert!(doc.focus(host), "{kind:?}");
+            doc.layout();
+            let origin = doc.bounding_client_rect(host).unwrap().origin;
+            assert_eq!(
+                state(&doc).caret,
+                rect(origin.x + 5.0 + offset, origin.y + 3.0, 1.0, 10.0),
+                "{kind:?} text-align: {align}"
+            );
+        }
     }
 }
 
@@ -1064,6 +1287,81 @@ fn a_tab_is_shown_as_a_space_and_edits_stay_aligned() {
         assert!(doc.apply_editing(Command::DeleteBackward).applied);
         assert_eq!(value(&doc), "a\tb");
         assert_eq!(selection(&doc), 3..3);
+    }
+}
+
+#[test]
+fn a_masked_host_edits_its_value_over_a_layout_of_masks() {
+    // `a 😀 space b`: UTF-16 units 0..5, one disc each in the layout but the
+    // emoji's, which stands for two units. Ahem has a disc glyph, so every
+    // mask is one 10px square.
+    for kind in KINDS {
+        eprintln!("kind {kind:?}");
+        let (mut doc, host) = host_in(kind, &["a\u{1F600} b"], 200.0);
+        doc.set_inline_style(
+            host,
+            "width: 200px; padding: 3px 5px; -webkit-text-security: disc;",
+        );
+        doc.layout();
+        assert!(doc.editable_paragraph(host).unwrap().shows_value);
+        assert_eq!(paragraph_size(&doc, host), (40.0, 10.0));
+        let origin = doc.bounding_client_rect(host).unwrap().origin;
+
+        // From after `a`, one character move steps over the emoji's mask:
+        // both of its units.
+        select(&mut doc, 1..1);
+        assert!(
+            doc.apply_editing(Command::Move {
+                granularity: Granularity::Character,
+                direction: Direction::Forward,
+                extend: false,
+            })
+            .applied
+        );
+        // After the emoji: two masks in.
+        doc.layout();
+        doc.layout();
+        let input = state(&doc);
+        assert_eq!(input.value, "a\u{1F600} b");
+        assert_eq!(input.selection, 3..3);
+        assert_eq!(
+            input.caret,
+            rect(origin.x + 5.0 + 20.0, origin.y + 3.0, 1.0, 10.0)
+        );
+
+        // Typing lands in the value, unmasked, and the caret moves one mask.
+        assert!(doc.apply_editing(Command::Insert("x".to_owned())).applied);
+        doc.layout();
+        let input = state(&doc);
+        assert_eq!(input.value, "a\u{1F600}x b");
+        assert_eq!(input.selection, 4..4);
+        assert_eq!(
+            input.caret,
+            rect(origin.x + 5.0 + 30.0, origin.y + 3.0, 1.0, 10.0)
+        );
+
+        // Deleting backward twice takes the `x`, then both units of the
+        // emoji behind its one mask.
+        assert!(doc.apply_editing(Command::DeleteBackward).applied);
+        assert!(doc.apply_editing(Command::DeleteBackward).applied);
+        doc.layout();
+        let input = state(&doc);
+        assert_eq!(input.value, "a b");
+        assert_eq!(input.selection, 1..1);
+        assert_eq!(
+            input.caret,
+            rect(origin.x + 5.0 + 10.0, origin.y + 3.0, 1.0, 10.0)
+        );
+        // A character move steps over one mask: the space, one unit.
+        assert!(
+            doc.apply_editing(Command::Move {
+                granularity: Granularity::Character,
+                direction: Direction::Forward,
+                extend: false,
+            })
+            .applied
+        );
+        assert_eq!(selection(&doc), 2..2);
     }
 }
 

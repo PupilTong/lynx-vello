@@ -174,8 +174,11 @@ pub struct TextInputState {
     pub composition_bounds: Vec<Rect<f32>>,
 }
 
-/// The used line height of `style` for a paragraph with no line to measure:
-/// an empty host still shows a caret one line tall.
+/// The used line height of `style` for a host with no paragraph to measure
+/// a line in — a flex `view` with no text, or with only white space it does
+/// not render: its caret is still one line tall. A host that establishes a
+/// paragraph of its own has a line even when empty (one empty line of its
+/// strut), and its caret is that line's.
 pub(crate) fn empty_line_height(style: &ComputedValues) -> f32 {
     use stylo::values::computed::font::LineHeight;
     let font_size = style.get_font().font_size.computed_size().px();
@@ -186,9 +189,10 @@ pub(crate) fn empty_line_height(style: &ComputedValues) -> f32 {
     }
 }
 
-/// The caret box at `cursor` in `layout`'s coordinates, `width` wide. A
-/// layout with no line (an empty host) puts it at the origin, `fallback`
-/// tall.
+/// The caret box at `cursor` in `layout`'s coordinates, `width` wide, as
+/// tall as its line. An empty host's own paragraph has one empty line, which
+/// answers here like any other; a layout with no line at all puts the caret
+/// at the origin, `fallback` tall.
 pub(crate) fn caret_box(
     layout: &Layout<TextBrush>,
     cursor: Cursor,
@@ -277,9 +281,10 @@ impl<T> Document<T> {
                     }
                 }
             } else {
-                // No paragraph — an empty host, or white space a flex
-                // container does not render: the caret at the content box's
-                // origin, one line tall.
+                // No paragraph — a flex host with no text, or with white
+                // space it does not render: the caret at the content box's
+                // origin, one line tall. A host with a paragraph of its own
+                // has a line even when empty, and is answered above.
                 let origin = editable_bounds.origin + self.content_inset(host);
                 caret = Rect::new(origin, Size2D::new(CARET_WIDTH, fallback));
                 if let Some(range) = &session.composition {
