@@ -545,12 +545,39 @@ impl<T: Sync> Document<T> {
     /// the composition, and answers with the edit's events. Applies nothing
     /// when the host is no longer focused or its value changed since the
     /// edit was prepared.
+    ///
+    /// An edit that changes the value, or leaves a selection other than the
+    /// one held ([`selection_differs`]), sets the document's
+    /// `selectionchange` flag ([`Self::has_pending_selectionchange`]); one
+    /// that leaves the same offsets — a `SetSelection` to the range already
+    /// selected — does not, as the Selection API fires `selectionchange`
+    /// only when the selection changes.
     pub fn commit_editing(&mut self, edit: PreparedEdit) -> EditOutcome
     where
         T: Default,
     {
         if self.focused() != Some(edit.host) || self.host_value(edit.host) != edit.base {
             return EditOutcome::refused();
+        }
+        let changes_selection = !edit.changes.is_empty() || {
+            let session = self
+                .editing
+                .session
+                .as_ref()
+                .expect("the focused host has a session");
+            // The held selection as value offsets is read only where the
+            // comparison needs it: offsets after, against a selection held
+            // in the paragraph. Read before anything is written.
+            let held = match (edit.selection, session.pending) {
+                (SelectionAfter::Bytes(_), None) => {
+                    session.bytes(self.editable_paragraph(edit.host).as_ref(), &edit.base)
+                }
+                _ => session.pending,
+            };
+            selection_differs(session, &edit.selection, held)
+        };
+        if changes_selection {
+            self.editing.selectionchange_pending = true;
         }
         if !edit.changes.is_empty() {
             let value = apply_changes(&edit.base, &edit.changes);
@@ -613,7 +640,8 @@ impl<T: Sync> Document<T> {
         if self.get(host).is_none_or(|node| !node.is_element()) {
             return;
         }
-        if self.host_value(host) != value {
+        let value_changes = self.host_value(host) != value;
+        if value_changes {
             self.write_host_value(host, value.to_owned());
         }
         let selection = ByteSelection {
@@ -630,6 +658,14 @@ impl<T: Sync> Document<T> {
             .session
             .as_mut()
             .expect("the focused host has a session");
+        // The focused host's write changes the document's selection when it
+        // changes the value or the offsets. A selection held in the
+        // paragraph (`pending` is `None`) counts as changed: that form is
+        // not compared here, and a write that places the selection again is
+        // taken as a change of it.
+        if value_changes || session.pending != Some(selection) {
+            self.editing.selectionchange_pending = true;
+        }
         session.pending = Some(selection);
         session.composition = None;
         self.note_visual_mutation();
@@ -660,6 +696,34 @@ impl<T: Sync> Document<T> {
         }
         for &other in rest {
             self.remove_element(other);
+        }
+    }
+}
+
+/// Whether committing `after` changes the session's selection: the
+/// document's `selectionchange` flag's test for an edit that changes no
+/// value ([`Document::commit_editing`]).
+///
+/// - Offsets after (`Bytes`) differ unless they equal `held`, the selection the session holds as
+///   value offsets: its pending offsets, or, while it is held in the paragraph, what the paragraph
+///   reads back ([`Session::bytes`]). `None` — a paragraph that cannot read it back — differs.
+/// - A parley selection after (`Layout`) differs unless the session holds one in the paragraph too
+///   (`pending` is `None`) with the same anchor and focus, each by byte index and affinity.
+///   [`Selection`] has no `PartialEq`, so the two cursors are compared field by field; the
+///   remembered horizontal position and the granularity are not offsets and are not compared.
+fn selection_differs(
+    session: &Session,
+    after: &SelectionAfter,
+    held: Option<ByteSelection>,
+) -> bool {
+    match after {
+        SelectionAfter::Bytes(bytes) => held != Some(*bytes),
+        SelectionAfter::Layout(selection) => {
+            let same_cursor =
+                |a: Cursor, b: Cursor| a.index() == b.index() && a.affinity() == b.affinity();
+            session.pending.is_some()
+                || !same_cursor(session.selection.anchor(), selection.anchor())
+                || !same_cursor(session.selection.focus(), selection.focus())
         }
     }
 }

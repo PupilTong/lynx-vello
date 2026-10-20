@@ -471,6 +471,13 @@ import { frameConnectionChanged, frameDataChanged, frameSourceChanged } from "bo
 //   realm does, and the host frees it after the realm, not from a cleanup
 //   job. That is the opposite of the element path above, where cards genuinely
 //   unroot handles and a collection every 32 removals frees what they named.
+//   The `Document` is the handle of the document node, whose id
+//   `createDocument` answers: it is indexed in [`handlesByNodeId`] as the
+//   page handle is, and, like it, never registered for collection. It is an
+//   event target — `addEventListener` and `removeEventListener`, and
+//   `__AddEventListener` takes it as it takes any handle — and the target of
+//   the W3C `selectionchange` the host fires at the document node, a path of
+//   one step with no element.
 
 declare global {
   /**
@@ -855,21 +862,59 @@ export interface PageConfig {
  * class and construct a second one; the host refuses that, and the card's
  * boot fails with the host's message.
  */
-export class Document {
+export class Document implements Handle {
+  /**
+   * The document node's id, which `createDocument` answers: what makes the
+   * document a handle, so an event the host fires at the document node —
+   * the W3C `selectionchange` — reaches the listeners filed on it.
+   */
+  readonly [nodeIdSymbol]: number;
+
   constructor(config: PageConfig) {
-    createDocument(
+    const nodeId = createDocument(
       config.defaultDisplayLinear,
       config.defaultOverflowVisible,
       config.enableCssSelector,
       config.enableJSDataProcessor,
       config.enableCssInheritance,
     );
+    this[nodeIdSymbol] = nodeId;
+    // Indexed as `holdPageRoot` indexes the page, and for its reason: a
+    // dispatch at the document node has to find this handle. Never
+    // registered for collection, because nothing could collect it: the boot
+    // module's exported binding holds it for the realm's life, and the
+    // document goes when the realm does.
+    documentNodeId = nodeId;
+    handlesByNodeId.set(nodeId, new WeakRef<Handle>(this));
+  }
+
+  /**
+   * `EventTarget.addEventListener`, which a browser's `document` has: the
+   * registration identity is [`addListener`]'s, (document, name, callback,
+   * capture).
+   */
+  addEventListener(type: string, callback: unknown, options?: unknown): undefined {
+    return addListener(this, type, callback, options);
+  }
+
+  /** `EventTarget.removeEventListener`, by the same identity. */
+  removeEventListener(type: string, callback: unknown, options?: unknown): undefined {
+    return removeListener(this, type, callback, options);
   }
 
   get [Symbol.toStringTag](): string {
     return "Document";
   }
 }
+
+/**
+ * The document node's id, once this realm constructed its `Document`: the
+ * one handle whose node is no element, so [`targetInfo`] and [`datasetOf`]
+ * answer it without asking the host's attribute members, which accept a
+ * live element alone. Undefined in a realm that constructs none, a frame's
+ * child.
+ */
+let documentNodeId: number | undefined;
 
 let pageHandle: Handle | undefined;
 /** The page root `__BobcatUsePageRoot` chose, which `__CreatePage` answers without asking the host. */
@@ -911,9 +956,20 @@ function handleOf(nodeId: number): Handle | undefined {
 }
 
 /**
+ * [`handleOf`] for a node read as an element: the document's handle is
+ * none. A walk up the tree from an element ends at the page this way, as it
+ * did before the document was a handle, and the host's element members —
+ * `tagName`, `childElementIds`, `queryElementIds` — are never handed the
+ * document node, which they refuse.
+ */
+function elementHandleOf(nodeId: number): Handle | undefined {
+  return nodeId === documentNodeId ? undefined : handleOf(nodeId);
+}
+
+/**
  * The live handle this realm holds for `nodeId`, or undefined: the realm's
  * handle index, read by `bobcat-core`'s tests to name an element a script
- * created.
+ * created, and the document's once the realm constructed it.
  */
 export function __BobcatHandleOf(nodeId: number): object | undefined {
   return handleOf(nodeId);
@@ -986,7 +1042,7 @@ function adopt(parent: unknown, child: unknown): undefined {
  * there is no set to file it in and nothing is lost by not having one.
  */
 function adoptUnder(parentNodeId: number, child: unknown): undefined {
-  const parent = handleOf(parentNodeId);
+  const parent = elementHandleOf(parentNodeId);
   if (parent === undefined) {
     disown(child);
     return undefined;
@@ -2246,7 +2302,7 @@ function nodeFields(element: Handle, fields: string[]): QueryNode {
       case "dataset": case "dataSet": result[field] = __GetDataset(element); break;
       case "index": {
         const parent = parentNode(id);
-        const hasElementParent = parent !== null && handleOf(parent) !== undefined;
+        const hasElementParent = parent !== null && elementHandleOf(parent) !== undefined;
         const siblings = hasElementParent ? childElementIds(parent).split(",").map(Number) : [];
         result['index'] = hasElementParent ? siblings.indexOf(id) : 0;
         break;
@@ -2266,7 +2322,7 @@ function nodeFields(element: Handle, fields: string[]): QueryNode {
 
 export function __BobcatQueryNodes(request: NodeQueryRequest) {
   const {operation, token, params} = request;
-  const root = token.root_unique_id !== undefined ? handleOf(token.root_unique_id)
+  const root = token.root_unique_id !== undefined ? elementHandleOf(token.root_unique_id)
     : token.component_id ? undefined : pageHandle;
   let code = 0;
   let elements: Handle[] = [];
@@ -2274,7 +2330,7 @@ export function __BobcatQueryNodes(request: NodeQueryRequest) {
   else if (typeof token.identifier !== "string") throw new TypeError("node identifier must be a string");
   else if (token.type === 2) {
     // Native unique-ID lookup is global once the specified root exists.
-    const selected = /^-?\d+$/.test(token.identifier) ? handleOf(Number(token.identifier)) : undefined;
+    const selected = /^-?\d+$/.test(token.identifier) ? elementHandleOf(Number(token.identifier)) : undefined;
     if (selected) elements = [selected];
   } else if (token.type === 0 || token.type === 1) {
     if (token.type === 0 && token.identifier === "") elements = [root];
@@ -2295,7 +2351,7 @@ export function __BobcatQueryNodes(request: NodeQueryRequest) {
         // Inclusive: SelectorQuery's scope includes the root it is given.
         const ids = queryElementIds(nodeIdOf(root), token.identifier, token.first_only ? 1 : 0, 1);
         elements = ids ? ids.split(",").map(id => {
-          const element = handleOf(Number(id));
+          const element = elementHandleOf(Number(id));
           if (!element) throw new Error("a queried live node has no handle");
           return element;
         }) : [];
@@ -2338,7 +2394,7 @@ export function __BobcatQueryNodes(request: NodeQueryRequest) {
     while (ancestor) {
       path.push(nodeFields(ancestor, ["tag", "id", "dataSet", "index", "class"]));
       const parent = parentNode(nodeIdOf(ancestor));
-      ancestor = parent === null ? undefined : handleOf(parent);
+      ancestor = parent === null ? undefined : elementHandleOf(parent);
     }
     return path;
   });
@@ -2870,6 +2926,11 @@ function targetInfo(
       `no handle names element ${nodeId}: the element ownership graph and the tree disagree`,
     );
   }
+  // The document node has no attributes, and the host's attribute members
+  // throw for a node that is not an element.
+  if (nodeId === documentNodeId) {
+    return { dataset: {}, id: null, uid: nodeId, elementRefptr: handle };
+  }
   return {
     dataset: datasetOf(nodeId),
     id: getAttribute(nodeId, "id"),
@@ -2899,6 +2960,11 @@ function targetInfo(
  * still answer, the reflected ones among them, as strings.
  */
 function datasetOf(nodeId: number): Record<string, unknown> {
+  // The document node: no attributes, and no element for the host's
+  // attribute members to read.
+  if (nodeId === documentNodeId) {
+    return {};
+  }
   const handle = handleOf(nodeId);
   const typed = handle?.[datasetSymbol];
   // Most elements have no typed dataset, and then nothing is reflected.

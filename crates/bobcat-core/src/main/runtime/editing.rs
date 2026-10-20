@@ -17,6 +17,13 @@
 //!   `dom` queues focus events only from [`dom::Document::focus`] and [`dom::Document::blur`], and
 //!   only this module calls them; the focus fixup rule (a removed or no longer editable host) fires
 //!   nothing.
+//! - **`selectionchange`** is two events of one name. The engine-only one at the host, after every
+//!   command [`MainThreadRuntime::apply_edit`] applied, reaches the text field component alone. The
+//!   W3C one is separate: `dom` sets its flag whenever the document's selection changes
+//!   ([`dom::Document::has_pending_selectionchange`]) — focus, blur, a command, a value write — and
+//!   the entry that delivers component events fires it at the document node
+//!   ([`MainThreadRuntime::dispatch_component_events`]), followed by the `text` component's Lynx
+//!   `selectionchange` derived from it.
 //! - **Key events** go to the focused element when there is one, and a `keydown` at a focused host
 //!   runs the keyboard's editing action ([`key_command`]).
 //! - **Pointer events** over an editing host place the caret. A mouse's primary press focuses the
@@ -51,8 +58,7 @@ use super::{
 };
 use crate::editing::TextInputSource;
 use crate::link::{InputEventPayload, ViewNotice};
-use crate::main::tree::text_field::SELECTION_CHANGE;
-use crate::main::tree::{LynxDocument, focus_delegate};
+use crate::main::tree::{LynxDocument, SELECTION_CHANGE, focus_delegate};
 
 /// One group of event names the painter routes to this thread on the
 /// editing account, whether or not the realm listens for them, each while
@@ -576,9 +582,13 @@ impl MainThreadRuntime {
             }
         }
         // The engine's own `selectionchange` at the host, after every
-        // command that applied: no realm hears it (`selectionchange` is not
-        // built for script); the text field component reads its `selection`
-        // event from it. One set lookup when no component observes it.
+        // command that applied: no realm hears it, because
+        // `dispatch_element_event` runs components alone; the text field
+        // component reads its `selection` event from it. One set lookup when
+        // no component observes it. The W3C `selectionchange` script hears is
+        // separate: the commit set the document's flag if the selection
+        // changed, and the component-events entry fires it at the document
+        // node.
         self.slot
             .borrow_mut()
             .document_mut()

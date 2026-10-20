@@ -85,7 +85,7 @@ pub(crate) use self::base_methods::invoke_base_method;
 pub(crate) use self::frame::{MAX_FRAME_DEPTH, frame_depth, nested_page, reset_frame};
 pub(crate) use self::svg::is_svg;
 pub(crate) use self::swiper::Autoplays;
-pub(crate) use self::text::is_text;
+pub(crate) use self::text::{SelectionReports, is_text, report_selection_changes};
 pub(crate) use self::text_field::focus_delegate;
 pub use self::ua_sheet::PageConfig;
 pub(crate) use crate::view::Viewport;
@@ -108,6 +108,20 @@ pub(crate) const PAGE_TAG: &str = "page";
 /// ([`dom::CustomElement::observed_events`]) to learn that its assigned
 /// children changed.
 pub(super) const SLOT_CHANGE: &str = "slotchange";
+
+/// `selectionchange`, the one W3C type name fired at three places, each
+/// with its own audience:
+///
+/// - the Selection API's event at the document node, which the runtime fires from the
+///   component-events entry when [`dom::Document::take_selectionchange`] says the document's
+///   selection changed, and which a realm hears through the boot module's `document`;
+/// - the engine-only event the runtime fires at an editing host after every command it applied
+///   (`runtime/editing.rs`), which no realm hears and from which the text field component reads its
+///   `selection` ([`text_field`]);
+/// - the Lynx event at a `text` or `inline-text`, `{start, end, direction}`, which the `text`
+///   module derives from the document's selection after the W3C event fired
+///   ([`text::report_selection_changes`]).
+pub(crate) const SELECTION_CHANGE: &str = "selectionchange";
 
 /// Creates the document with its permanent `page` element, the components the
 /// engine defines, and the UA cascade.
@@ -324,6 +338,15 @@ pub(crate) enum ComponentDetail {
     /// `{selectionStart, selectionEnd}`: a text field's selection in UTF-16
     /// units, such as an `x-input`'s or `x-textarea`'s `selection` reports.
     Selection { selection: Range<u32> },
+    /// `{start, end, direction}`: a Lynx text element's selection as offsets
+    /// of its text content in UTF-16 units and the direction from anchor to
+    /// focus (`"forward"` or `"backward"`), such as a `text`'s or
+    /// `inline-text`'s `selectionchange` reports ([`text`]); `None` is the
+    /// empty record `-1`, `-1`, `"forward"`, and `forward` is then `true`.
+    TextSelection {
+        range: Option<Range<u32>>,
+        forward: bool,
+    },
 }
 
 /// The events this document's components have produced and not delivered
