@@ -1121,7 +1121,7 @@ fn a_collected_element_retires_its_unique_id_instead_of_lending_it_out() {
             r"
                 globalThis.renderPage = function () {
                   const page = __CreatePage('card', 0);
-                  let doomed = __CreateView(0);
+                  globalThis.doomed = __CreateView(0);
                   __AppendElement(page, doomed);
                   if (__GetElementUniqueID(doomed) !== 3) {
                     throw new Error(
@@ -1129,7 +1129,6 @@ fn a_collected_element_retires_its_unique_id_instead_of_lending_it_out() {
                     );
                   }
                   __RemoveElement(page, doomed);
-                  doomed = undefined;
                 };
                 ",
             "app:///collected.js",
@@ -1137,9 +1136,19 @@ fn a_collected_element_retires_its_unique_id_instead_of_lending_it_out() {
         .expect("main-thread script");
     assert!(
         elements.tree().get(node_id(3)).is_some(),
-        "the detached element is still allocated while script could reach it"
+        "the detached element is still allocated while script can reach it"
     );
 
+    // Let go of the handle only now: a collection the engine starts on its
+    // own may otherwise free it before the probe above.
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            "globalThis.doomed = undefined;",
+            "app:///forget-doomed.js",
+            "letting go of the detached element",
+        )
+        .expect("letting go");
     runtime
         .collect_garbage(&mut js_runtime)
         .expect("collection");
@@ -6531,10 +6540,9 @@ fn a_collected_raw_text_releases_its_attribute_content() {
                   const page = __CreatePage('card', 0);
                   const text = __CreateText(0);
                   __AppendElement(page, text);
-                  let raw = __CreateRawText('hello');
+                  globalThis.raw = __CreateRawText('hello');
                   __AppendElement(text, raw);
                   __RemoveElement(text, raw);
-                  raw = undefined;
                 };
                 ",
             "app:///collected-raw-text.js",
@@ -6553,6 +6561,16 @@ fn a_collected_raw_text_releases_its_attribute_content() {
             .is_empty()
     );
 
+    // Let go of the handle only now: a collection the engine starts on its
+    // own may otherwise free it before the probe above.
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            "globalThis.raw = undefined;",
+            "app:///forget-raw-text.js",
+            "letting go of the raw text",
+        )
+        .expect("letting go");
     runtime
         .collect_garbage(&mut js_runtime)
         .expect("collection");
@@ -6854,7 +6872,11 @@ fn dropping_a_detached_ancestor_leaves_a_still_named_descendant_a_root() {
 /// `ReactLynx`'s unmount: `__RemoveElement` on the snapshot's root, then
 /// every handle of the subtree is let go at once. Whatever order the
 /// finalizer delivers those in, the whole subtree is gone after one
-/// collection and the ids are retired.
+/// collection and the ids are retired. The three handles are held on
+/// `globalThis` until the intact subtree has been read, and let go of
+/// together by a second script: a collection `QuickJS` starts on its own
+/// while the first script allocates would otherwise free them before the
+/// test reads the subtree.
 #[test]
 fn an_unmounted_subtree_is_freed_by_the_collection_that_takes_its_handles() {
     let (mut js_runtime, mut runtime, elements) = runtime();
@@ -6871,7 +6893,8 @@ fn an_unmounted_subtree_is_freed_by_the_collection_that_takes_its_handles() {
                   __AppendElement(root, middle);
                   __AppendElement(middle, leaf);
                   __RemoveElement(page, root);
-                  // `__elements` of the unmounted snapshot instance, deleted.
+                  // `__elements` of the unmounted snapshot instance.
+                  globalThis.elements = [root, middle, leaf];
                 };
                 ",
             "app:///unmount.js",
@@ -6886,6 +6909,16 @@ fn an_unmounted_subtree_is_freed_by_the_collection_that_takes_its_handles() {
         "before collection the detached subtree is intact"
     );
 
+    // The unmounted snapshot instance's `__elements`, deleted: all three
+    // handles are let go at once.
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            "delete globalThis.elements;",
+            "app:///forget-unmounted.js",
+            "letting go of the unmounted subtree",
+        )
+        .expect("letting go");
     runtime
         .collect_garbage(&mut js_runtime)
         .expect("collection");
