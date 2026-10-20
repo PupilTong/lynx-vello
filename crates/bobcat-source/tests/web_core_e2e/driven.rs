@@ -15,6 +15,21 @@ use Step::{
     UpdateGlobalProps, Wait, Wheel,
 };
 
+/// The two `change` events `basic-element-x-viewpager-ng-bindchange-select-tab`
+/// logs, one per `selectTab`, up to their `timestamp`.
+const SELECT_TAB_LAST: &str = concat!(
+    r#"{"type":"change","eventPhase":2,"#,
+    r#""target":{"dataset":{"testid":"bindchange"},"id":null,"uid":7},"#,
+    r#""currentTarget":{"dataset":{"testid":"bindchange"},"id":null,"uid":7},"#,
+    r#""detail":{"index":5,"isDragged":false}"#,
+);
+const SELECT_TAB_FIRST: &str = concat!(
+    r#"{"type":"change","eventPhase":2,"#,
+    r#""target":{"dataset":{"testid":"bindchange"},"id":null,"uid":7},"#,
+    r#""currentTarget":{"dataset":{"testid":"bindchange"},"id":null,"uid":7},"#,
+    r#""detail":{"index":0,"isDragged":false}"#,
+);
+
 /// What the two `getValue` cards log: the value, and the selection the field kept
 /// when the tap on `#target` took its focus.
 const GOT_VALUE: &str =
@@ -245,12 +260,24 @@ driven! {
             LoggedStart("{\"type\":\"scrollend\","),
         ],
     ],
+    // Upstream's two swipes: from (100, 300) up 200px, scrolling down, then from
+    // (100, 100) down 200px, back to the top; it reads the logged `scrolltoupper`.
+    "basic-element-scroll-view-event-scrolltoupper" => [
+        "swiped-to-upper": [
+            Drag((100.0, 300.0), (100.0, 100.0)),
+            Wait(200),
+            Drag((100.0, 100.0), (100.0, 300.0)),
+            Wait(600),
+            LoggedStart("{\"type\":\"scrolltoupper\","),
+        ],
+    ],
     // Upstream's two CDP swipes: from (100, 500) up 450px, 100 ms apart.
     "basic-element-scroll-view-event-scrolltolower" => [
         "swiped-to-lower": [
             Drag((100.0, 500.0), (100.0, 50.0)),
             Wait(100),
             Drag((100.0, 500.0), (100.0, 50.0)),
+            LoggedStart("{\"type\":\"scrolltolower\","),
             Wait(100),
         ],
     ],
@@ -368,11 +395,12 @@ driven! {
         "overlay-4-closed": [Tap(50.0, 50.0)],
     ],
     // Upstream drags the content down 100px and screenshots with the finger held, then
-    // again 2 s after letting go; then the same upward by 200px. A drag here lifts at
-    // its end, so only the two frames after a release are taken.
+    // again 2 s after letting go; then the same upward by 200px.
     "basic-element-x-refresh-view-demo" => [
-        "refreshed": [Drag((200.0, 500.0), (200.0, 600.0)), Wait(2000)],
-        "loaded-more": [Drag((200.0, 600.0), (200.0, 400.0)), Wait(2000)],
+        "pull-down": [Hold((200.0, 500.0), (200.0, 600.0))],
+        "pull-down-loaded": [Release(200.0, 600.0), Wait(2000)],
+        "pull-up": [Hold((200.0, 600.0), (200.0, 400.0))],
+        "pull-up-loaded": [Release(200.0, 400.0), Wait(2000)],
     ],
     // Upstream waits out one 5 s interval with `autoplay` off, clicks the 10x10 button
     // at the top right to turn it on, waits two intervals, and clicks it off again.
@@ -563,10 +591,33 @@ driven! {
     "basic-element-x-textarea-placeholder-style" => [
         "updated": [Tap(100.0, 100.0)],
     ],
+    // `allow-horizontal-gesture={false}`: upstream swipes from (100, 50) right 200px and
+    // expects the pager not to move.
+    "basic-element-x-viewpager-ng-allow-horizontal-gesture" => [
+        "swiped": [Drag((100.0, 50.0), (300.0, 50.0)), Wait(1000)],
+    ],
+    // Upstream swipes from (300, 50) left 250px and reads the last logged `change`:
+    // index 1, with `isDragged` present.
+    "basic-element-x-viewpager-ng-bindchange" => [
+        "swiped": [
+            Drag((300.0, 50.0), (50.0, 50.0)),
+            Wait(1000),
+            Logged("{\"index\":1,\"isDragged\":false}"),
+        ],
+    ],
     // The control texts `last` (y 16..32), then `first` (y 0..16).
     "basic-element-x-viewpager-ng-bindchange-select-tab" => [
-        "last-selected": [Tap(196.5, 24.0)],
-        "first-selected": [Tap(196.5, 8.0)],
+        "last-selected": [Tap(196.5, 24.0), LoggedStart(SELECT_TAB_LAST)],
+        "first-selected": [Tap(196.5, 8.0), LoggedStart(SELECT_TAB_FIRST)],
+    ],
+    // Upstream swipes from (300, 50) left 250px and expects at least one logged
+    // `offsetchange`.
+    "basic-element-x-viewpager-ng-bindoffsetchange" => [
+        "swiped": [
+            Drag((300.0, 50.0), (50.0, 50.0)),
+            Wait(1000),
+            LoggedStart("{\"offset\":"),
+        ],
     ],
     // Upstream's two swipes over the pager (x 39..353, y 80..580): 200px to the left from
     // (300, 200), then 200px to the right from (50, 200).

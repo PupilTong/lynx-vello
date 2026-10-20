@@ -590,4 +590,24 @@ verified! {
     api_global_disallowed_vars => "api-global-disallowed-vars",
     // A 400x400 pink `#target1` with `capture-bindtap` and `bindtap`, a 50x50 green `#target2` in it, and a text under that. A tap on either, each from a fresh card, writes `[bind tap]`: by the 2026-10-20 ruling handlers follow native, one per element and event name, so the `bindtap` filed second replaced the capture handler (web-core keeps both and reads `[capture tap][bind tap]`).
     basic_event_trigger => "basic-event-trigger",
+    // A 300x600 yellow `scroll-view` of red, green and blue 300px views. Upstream's two swipes up 450px scroll it to the end, green and blue in view, and `scrolltolower` (#469) is logged once with the scroll metrics, awaited in the log.
+    basic_element_scroll_view_event_scrolltolower => "basic-element-scroll-view-event-scrolltolower",
+    // The same `scroll-view`: a swipe up 200px scrolls it down, a swipe down 200px back to the top, red in view, and `scrolltoupper` (#469) is logged with the scroll metrics, awaited in the log.
+    basic_element_scroll_view_event_scrolltoupper => "basic-element-scroll-view-event-scrolltoupper",
+    // An `x-viewpager-ng` of four pages, `index-0` to `index-3`. A swipe left 250px lands on `index-1`, and its `change` (#469) logs index 1 with `isDragged` (false, the finger lifted), awaited in the log, which is what upstream asserts.
+    basic_element_x_viewpager_ng_bindchange => "basic-element-x-viewpager-ng-bindchange",
+    // Every frame is right: tapping `select last tab` runs `selectTab({index: 5})` and the pager shows index-5, tapping `select first tab` brings back index-0. Each `selectTab` logs one `change` (#469), index 5 and then index 0, each awaited in the log, which is what upstream asserts.
+    basic_element_x_viewpager_ng_bindchange_select_tab => "basic-element-x-viewpager-ng-bindchange-select-tab",
+    // The same four-page pager: a swipe left 250px lands on `index-1`, and `offsetchange` (#469) logs the offset rising towards 1 on the way, the first awaited in the log; upstream asks for at least one.
+    basic_element_x_viewpager_ng_bindoffsetchange => "basic-element-x-viewpager-ng-bindoffsetchange",
+    // A four-page pager with `allow-horizontal-gesture={false}` on `index-0`. Upstream's swipe right 200px moves nothing: the frame after it is the first screen again.
+    basic_element_x_viewpager_ng_allow_horizontal_gesture => "basic-element-x-viewpager-ng-allow-horizontal-gesture",
+    // An 800px `x-refresh-view` over a yellow scroll-view holding a large image, with a red 50px header and footer. Pulled down 100px and held, the header shows above the content; let go, `startrefresh` (#469) is logged, the card adds two rows and `finishRefresh` puts the header back. Pushed up 200px and held, the footer shows under the content; let go, `startloadmore` is logged, the card adds two more rows (four) and `finishLoadMore` puts the footer back, the content at rest at the top.
+    basic_element_x_refresh_view_demo => "basic-element-x-refresh-view-demo",
+    // A two-column waterfall `list` of five empty items whose `estimated-main-axis-size-px` is 172 to 335: the estimate is a `contain-intrinsic-size` for an item skipped off screen, as on web-core, and every item is on screen at its real size, its 10px of borders, so `autoScroll` has nothing to scroll. By the 2026-10-20 ruling a threshold event is decided on `scroll` alone (native), so no `scrolltolower` is logged; web-core's sentinel observer would fire one on the first render.
+    basic_element_list_estimated_main_axis_size_px_waterfall => "basic-element-list-estimated-main-axis-size-px-waterfall",
+    // A horizontal `list` of six items `1` to `6` with `estimated-main-axis-size-px={100}`: each is on screen at its real width, its text and borders, 113px in all, so the 393px list has nothing for `autoScroll` to scroll and, the threshold events being decided on `scroll` alone (native, 2026-10-20), no `scrolltolower` is logged.
+    basic_element_list_horizontal_estimated_main_axis_size_px => "basic-element-list-horizontal-estimated-main-axis-size-px",
+    // A horizontal two-row waterfall `list` of empty items with estimates: every item is on screen at its real size, its borders, so nothing scrolls and, the threshold events being decided on `scroll` alone (native, 2026-10-20), no `scrolltolower` is logged.
+    basic_element_list_horizontal_estimated_main_axis_size_px_waterfall => "basic-element-list-horizontal-estimated-main-axis-size-px-waterfall",
 }

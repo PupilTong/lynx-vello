@@ -32,16 +32,6 @@ pending! {
         "DEFECT: the BTS `app` behind `lynxCoreInject.tt` has no `setSourceMapRelease`, so the card hits a TypeError before its own error",
     "api-updateData-callback" =>
         "two things stand in the way: the suite never calls `update_data`, and this engine's host API has no completion callback at all — `LynxView::update_data(data, processor_name)` reports no completion, where web-core takes a third callback argument. Upstream asserts only the console line it produces",
-    "basic-element-list-estimated-main-axis-size-px-waterfall" =>
-        "the card exists to show that a waterfall list whose cells carry only `estimated-main-axis-size-px` still reports `scrolltolower` after `autoScroll` is invoked from `useEffect` (upstream's removed test waited for that console line). `autoScroll` is built on lists since #408, but the list threshold event `scrolltolower` is not (#407 built only `scroll` and `scrollend`), so nothing is logged",
-    "basic-element-list-horizontal-estimated-main-axis-size-px" =>
-        "the card exists to show that a horizontal list whose cells carry only `estimated-main-axis-size-px` still reports `scrolltolower` after `autoScroll` is invoked from `useEffect` (upstream's removed test waited for that console line). `autoScroll` is built on lists since #408, but the list threshold event `scrolltolower` is not (#407 built only `scroll` and `scrollend`), so nothing is logged",
-    "basic-element-list-horizontal-estimated-main-axis-size-px-waterfall" =>
-        "the card exists to show that a horizontal waterfall list whose cells carry only `estimated-main-axis-size-px` still reports `scrolltolower` after `autoScroll` is invoked from `useEffect` (upstream's removed test waited for that console line). `autoScroll` is built on lists since #408, but the list threshold event `scrolltolower` is not (#407 built only `scroll` and `scrollend`), so nothing is logged",
-    "basic-element-scroll-view-event-scrolltolower" =>
-        "the script mirrors upstream's two swipes from (100, 500) up 450px, and the frame is right, scrolled to the end. What upstream asserts is a `scrolltolower` event logged once. #407 built the W3C `scroll` and `scrollend` events; the Lynx threshold events `scrolltolower` and `scrolltoupper` are not built, so nothing is logged",
-    "basic-element-scroll-view-event-scrolltoupper" =>
-        "the upper-threshold event, same reason as `basic-element-scroll-view-event-scrolltolower`: `scrolltoupper` is not built",
     "basic-element-scroll-view-scroll-to-index" =>
         "`initial-scroll-to-index={1}` must land the scrollport on the second child at boot; the attribute does not exist here, so we start at the first. Statically wrong, and a missing attribute rather than an interaction",
     "basic-element-text-bindselectionchange" =>
@@ -58,22 +48,12 @@ pending! {
         "what a selection drag highlights is an interaction no first screen carries; selection is out of scope",
     "basic-element-x-audio-tt-play" =>
         "upstream's own test body is empty (its skip is commented out with a FIXME), so nothing is asserted. There is no `x-audio-tt` component and no audio output here, and the card's tap handler reads an undeclared `e`, so it would throw before any `invoke`",
-    "basic-element-x-refresh-view-demo" =>
-        "the first screen is right, and a 100px pull does bring the red header in. `finishRefresh` and `finishLoadMore` now exist (`crates/bobcat-core/src/main/tree/refresh_view.rs`), but the card calls them, and adds its item rows, only from its `startrefresh` and `startloadmore` handlers, and no refresh-view event is dispatched (same file: every event is not implemented), so after each release no item rows appear and the header stays snapped in where upstream shows two rows, then four, with the header and footer put back. Upstream's two mid-pull screenshots are taken with the finger still down, which the suite has no step for",
     "basic-element-x-swiper-bindchange" =>
-        "upstream asserts the `change` events three swipers log across a manual swipe, autoplay and a `current` change; the card logs nothing: no swiper event exists (`crates/bobcat-core/src/main/tree/swiper.rs`; #408 built autoplay and left the swiper's events out of its scope). The paged frame's manual swiper position depends on the fling velocity of the Drag step, which depends on wall-clock time between moves, so that frame is not a stable picture either",
+        "the `manual` and `autoplay` swipers log their `change` events (#469), but upstream also expects the `programming` swiper's: the `next` button writes its `current` 1, which turns it instantly with no `scroll`, so its component decides no event. web-core turns it smoothly and its scroll events report it",
     "basic-element-x-swiper-bindscrollend" =>
-        "upstream asserts the `scrollend` events three swipers log; the card logs nothing: no swiper event exists (`crates/bobcat-core/src/main/tree/swiper.rs`; #408 built autoplay and left the swiper's events out of its scope)",
+        "the `manual` and `autoplay` swipers log `scrollend` (#469), but the `programming` swiper's `current` written by the `next` button turns it instantly with no `scroll`, so it has no `scrollend` with `current` 1, which upstream expects",
     "basic-element-x-swiper-bindscrollstart" =>
-        "upstream asserts the `scrollstart` events three swipers log, with `isDragged` and `current`; the card logs nothing: no swiper event exists (`crates/bobcat-core/src/main/tree/swiper.rs`; #408 built autoplay and left the swiper's events out of its scope)",
-    "basic-element-x-viewpager-ng-allow-horizontal-gesture" =>
-        "the first screen is right; `allow-horizontal-gesture={false}` only shows under the swipe it refuses",
-    "basic-element-x-viewpager-ng-bindchange" =>
-        "the first screen is right; the pager's `change` event is deliberately not implemented and the card is swipe-driven",
-    "basic-element-x-viewpager-ng-bindchange-select-tab" =>
-        "every frame is right: tapping `select last tab` runs `selectTab({index: 5})` and the pager shows index-5, tapping `select first tab` brings back index-0. What upstream asserts is the `change` event: one per `selectTab`, with `detail.index` 5 and then 0; the card logs none because the pager dispatches no event (`crates/bobcat-core/src/main/tree/viewpager.rs`: the component has the `selectTab` method alone)",
-    "basic-element-x-viewpager-ng-bindoffsetchange" =>
-        "the first screen is right; `offsetchange` is deliberately not implemented and the card is swipe-driven",
+        "the `manual` swiper logs `scrollstart` with `isDragged` true and the `autoplay` one each turn (#469), but the `programming` swiper's `current` written by the `next` button turns it instantly with no `scroll`, so no `scrollstart` is decided for it, where upstream expects one with `current` 0",
     "basic-element-x-webview-bindmessage" =>
         "the text must read `hello from iframe` once the `<x-webview html=…>` document posts a message; it reads `waiting`: there is no `x-webview` component and nothing in `crates/` hosts an HTML document",
 }
