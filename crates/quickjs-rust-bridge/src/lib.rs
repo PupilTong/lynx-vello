@@ -82,6 +82,14 @@ mod implementation {
 
     const HOST_INLINE_ARGS: usize = 8;
 
+    /// The arguments a host->realm [`Context::call_member`] describes on the
+    /// stack before any spill to the heap; the shim's
+    /// `QJS_CALL_INLINE_ARGS` is the same number, for the `JSValue`s it
+    /// builds from them. Wider than [`HOST_INLINE_ARGS`] because the engine's
+    /// event dispatch is one such call with two arguments per path step: a
+    /// position event over eight steps is 31.
+    const CALL_INLINE_ARGS: usize = 32;
+
     /// `QuickJS`'s "no such atom" sentinel, returned when interning fails.
     const JS_ATOM_NULL: u32 = 0;
 
@@ -2414,7 +2422,7 @@ mod implementation {
                     "member name belongs to a different QuickJS runtime",
                 ));
             }
-            let mut described: SmallVec<[ffi::QjsHostArg; HOST_INLINE_ARGS]> =
+            let mut described: SmallVec<[ffi::QjsHostArg; CALL_INLINE_ARGS]> =
                 SmallVec::with_capacity(arguments.len());
             for argument in arguments {
                 let mut slot = ffi::QjsHostArg {

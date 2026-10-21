@@ -3975,34 +3975,6 @@ function runEventHandler(handler: unknown, event: DispatchedEvent): undefined {
 }
 
 /**
- * One step of the event path: the node visited, and the target the standard
- * reports there — the two differ only across a shadow boundary, where
- * retargeting hands the steps above it the node they can name.
- */
-interface PathStep {
-  node: number;
-  target: number;
-}
-
-/**
- * The path the host computed, from the `count` node/target id pairs at the
- * head of `values`.
- *
- * Target-first, root-last: the bubble order, which the capture pass reads
- * backwards.
- */
-function pathSteps(count: number, values: unknown[]): PathStep[] {
-  const steps: PathStep[] = new Array(count);
-  for (let index = 0; index < count; index++) {
-    steps[index] = {
-      node: Number(values[2 * index]),
-      target: Number(values[2 * index + 1]),
-    };
-  }
-  return steps;
-}
-
-/**
  * The handler of one kind on a path step, or undefined when the one filed
  * belongs to the other pass.
  */
@@ -4056,9 +4028,12 @@ function dispatchEvent(
 ): undefined {
   // The path's node/target pairs first, then the extras' count and
   // name/value pairs, then the detail kind and its values, which run to the
-  // end because a touch event's points have no fixed count.
-  const stepValues = Number(stepCount ?? 0) * 2;
-  const steps = pathSteps(stepValues / 2, rest);
+  // end because a touch event's points have no fixed count. Step `at` is
+  // read where it arrived, its node at `rest[2 * at]` and the target it sees
+  // after it, target-first and root-last: the bubble order, which the
+  // capture pass reads backwards.
+  const steps = Number(stepCount ?? 0);
+  const stepValues = steps * 2;
   const pairs = Number(rest[stepValues] ?? 0) * 2;
   const extrasAt = stepValues + 1;
   const extras = pairs > 0
@@ -4071,8 +4046,12 @@ function dispatchEvent(
   // component's shadow content. None — a frame's card hearing a key at the
   // document element, which is no node of its tree — leaves a global pass
   // to run, or nothing at all.
-  const first = steps.find((step) => handleOf(step.node) !== undefined);
-  if (first === undefined && !bubbles) {
+  let first = 0;
+  while (first < steps && handleOf(Number(rest[2 * first])) === undefined) {
+    first++;
+  }
+  const firstTarget = first < steps ? Number(rest[2 * first + 1]) : undefined;
+  if (firstTarget === undefined && !bubbles) {
     return undefined;
   }
   const name = String(eventName).toLowerCase();
@@ -4080,7 +4059,7 @@ function dispatchEvent(
   let immediate = false;
   // No node yet for a dispatch with no step held: its first delivery names
   // one.
-  let targetNodeId = first?.target ?? NaN;
+  let targetNodeId = firstTarget ?? NaN;
   // A reading the host could not take — a detached painter's, say — reports
   // the time origin rather than `NaN`.
   const stamp = Number(timestamp ?? 0);
@@ -4098,7 +4077,7 @@ function dispatchEvent(
     eventPhase: NONE,
     // With no step held, it is set by the first delivery, before any
     // listener reads it.
-    target: first === undefined
+    target: firstTarget === undefined
       ? (null as unknown as DispatchedEvent["target"])
       : targetInfo(targetNodeId),
     currentTarget: null,
@@ -4160,13 +4139,20 @@ function dispatchEvent(
 
   // The string handler, then the worklet, then the `__AddEventListener`
   // closures, which is web-core's per-node order in both its path walk and
-  // its global-bind delivery.
-  const runPass = (ordered: PathStep[], phase: 0 | 1): undefined => {
-    for (const step of ordered) {
+  // its global-bind delivery. The capture pass walks the path root-first,
+  // the bubble pass target-first.
+  const runPass = (phase: 0 | 1): undefined => {
+    for (let index = 0; index < steps; index++) {
       if (stopped) {
         return undefined;
       }
-      const handle = handleOf(step.node);
+      const at = phase === CAPTURE ? steps - 1 - index : index;
+      const node = Number(rest[2 * at]);
+      const target = Number(rest[2 * at + 1]);
+      if (phase === BUBBLE && !bubbles && node !== target) {
+        continue;
+      }
+      const handle = handleOf(node);
       if (handle === undefined) {
         continue;
       }
@@ -4185,7 +4171,7 @@ function dispatchEvent(
       ) {
         continue;
       }
-      aim(step.node, step.target, eventPhaseOf(step.node, step.target, phase));
+      aim(node, target, eventPhaseOf(node, target, phase));
       // Before either handler rather than after: a `catch` form ends the
       // walk because of what it is, so it has to end it even when its
       // handler is a background-thread name delivered asynchronously. Either
@@ -4256,7 +4242,7 @@ function dispatchEvent(
       if (published === undefined && worklet === undefined) {
         continue;
       }
-      aim(nodeId, first?.target ?? nodeId, NONE);
+      aim(nodeId, firstTarget ?? nodeId, NONE);
       if (published !== undefined) {
         runEventHandler(published.handler, event);
       }
@@ -4268,17 +4254,14 @@ function dispatchEvent(
   };
 
   try {
-    // The reversed copy is the capture order; a path is a handful of steps.
-    runPass(steps.slice().reverse(), CAPTURE);
-    // A non-bubbling event binds on its at-target steps alone — the target,
+    runPass(CAPTURE);
+    // A non-bubbling event binds on its at-target steps alone, the bubble
+    // pass skipping every other step — the target,
     // and any shadow host retargeting made stand in for it, which is the same
     // set the host would have sent had it built a non-bubbling path itself
     // (`terminus`'s `event_steps` keeps exactly the at-target entries). web-core,
     // which has no retargeting to carry, narrows to the path's first entry.
-    runPass(
-      bubbles ? steps : steps.filter((step) => step.node === step.target),
-      BUBBLE,
-    );
+    runPass(BUBBLE);
     if (bubbles) {
       runGlobalPass();
     }
