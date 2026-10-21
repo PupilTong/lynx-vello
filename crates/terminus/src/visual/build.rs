@@ -861,6 +861,7 @@ impl<'doc, T: Sync> Builder<'doc, T> {
             });
         }
 
+        self.record_initial_target(root, values, seed.current.chain);
         let mode = style.display_mode();
         if mode == DisplayMode::Leaf || skips_contents(self.node(root), values) {
             self.close_layer(layer);
@@ -1279,6 +1280,7 @@ impl<'doc, T: Sync> Builder<'doc, T> {
                 self.push_space(outer.current.space, SpaceKind::Scroll(slot)),
             )
         });
+        self.record_initial_target(child.node, style, outer.current.chain);
         // Entered before the records: the paragraph paints inside the
         // element's own clip, as `push_paragraph` gives it on the stacking
         // context path. The element's own box keeps the outer context.
@@ -1406,6 +1408,22 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         }
     }
 
+    /// Records `node` as an initial scroll target of the scroll slot `chain`
+    /// its box lives in, when its `scroll-initial-target` is `nearest`.
+    ///
+    /// Called for every box the build reaches, before the build decides
+    /// whether to enter the box's contents: css-scroll-snap-2 §3.1.1 makes an
+    /// element a target by its own box, so a replaced element and a
+    /// `content-visibility: auto` box whose contents skip are targets too —
+    /// a list's cell is the second.
+    fn record_initial_target(&mut self, node: NodeId, style: &ComputedValues, chain: Option<u32>) {
+        if *style.get_scroll_initial_target() == scroll_initial_target::T::Nearest
+            && let Some(chain) = chain
+        {
+            self.initial_targets.push(InitialTarget { chain, node });
+        }
+    }
+
     /// The contexts inside `node`'s box. `ctx.current` is already `node`'s
     /// box context — its own sticky and animation nodes entered — which is
     /// where its clip is established; `own_scroll` is its own scroll slot and
@@ -1418,11 +1436,6 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         ctx: ClipContexts,
         own_scroll: Option<(u32, u32)>,
     ) -> ClipContexts {
-        if *style.get_scroll_initial_target() == scroll_initial_target::T::Nearest
-            && let Some(chain) = ctx.current.chain
-        {
-            self.initial_targets.push(InitialTarget { chain, node });
-        }
         let mut inner = ctx;
         let clipped = clipped_axes(self.node(node), style);
         if clipped.x || clipped.y {

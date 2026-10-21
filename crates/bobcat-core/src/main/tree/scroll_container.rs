@@ -88,6 +88,52 @@
 //! element, or one that is no scroll container, decides nothing
 //! ([`rendered_scroll_box`]).
 //!
+//! # The initial child
+//!
+//! `initial-scroll-to-index` names the child the view starts scrolled to:
+//! web-core scrolls `children.item(index)` to the scrollport's start,
+//! `scrollTop = child.offsetTop`, or `scrollLeft = child.offsetLeft` under
+//! `scroll-x` (`ScrollAttributes.ts:64-81`). Android, iOS and Harmony read
+//! the same name (`UIScrollView.java:699-707`, `AbsLynxUIScroller.m:35`,
+//! `ui_scroll.h:33-34`) and also put the child's origin at the start
+//! (`LynxUIScroller.m:577-589`, `ui_scroll.cc:297-304`).
+//!
+//! Three UA rules and no component code, the [`super::viewpager`] recipe
+//! (`docs/style-assumptions.md` §27): a view with the attribute sets the
+//! registered, inherited `<integer>` `--scroll-view-initial-index` from
+//! `attr(initial-scroll-to-index type(<integer>), -1)`, and each of its
+//! element children is its `scroll-initial-target` exactly when that number
+//! equals the child's `sibling-index() - 1`. css-scroll-snap-2's initial
+//! target does the rest (`crates/terminus/src/scroll/initial_target.rs`):
+//! the first layout with a target scrolls the view to it, instantly, in the
+//! same commit, and the frame carries the position to the painter as an
+//! instant scroll request.
+//!
+//! - **Alignment.** The target is placed as `scrollIntoView` places it with `block: start` and
+//!   `inline: nearest` (css-scroll-snap-2 §3.1.1). On a vertical view the child's top meets the
+//!   scrollport's top, web-core's position. On a horizontal view the x axis is the inline axis: a
+//!   child as wide as the scrollport or wider lands at its start, but a narrower child already
+//!   inside the scrollport moves nothing and one past its end lands with its end edge at the
+//!   scrollport's end, where web-core puts its start edge at the scrollport's start. CSS has no way
+//!   to ask the initial target for `inline: start` without adding snapping or changing the
+//!   snapport, so this gap is recorded in `docs/tracking/deviations.md`.
+//! - **The index** counts the view's element children, web-core's `children.item`, whether or not
+//!   they render. An index that is negative, past the last child or no integer (`"abc"`, `"1.5"`,
+//!   `""`) names no child: the view starts at 0. web-core's `parseFloat` makes `"1.5"` child 1.
+//! - **A later change** names a new target, which is honoured once, so the view scrolls to the new
+//!   child, instantly. web-core does the same, its handler running on every change of the
+//!   attribute, and so does Android outside a list (`UIScrollView.java:653-667`); iOS
+//!   (`LynxUIScroller.m:591-614`) and Harmony (`ui_scroll.cc:298-299`) honour the attribute once. A
+//!   commit that leaves the target where it was moves nothing, so a user who scrolled away stays,
+//!   and removing the attribute moves nothing.
+//! - **Nesting.** Only a view that carries the attribute sets the property, and only its children
+//!   are tested against it, so a nested view without the attribute keeps the outer view's index for
+//!   its own target and gives its children none. A nested view that is the direct child of a view
+//!   and carries the attribute itself tests its own index, not its parent's, for its own target:
+//!   one inherited property cannot hold both numbers.
+//! - `scroll-to-index`, which web-core binds to the same handler, re-scrolls on every write and is
+//!   no initial target; it is not built.
+//!
 //! # Not built
 //!
 //! `takeContentScreenshot` stays unanswered (code 3): it needs a pixel
@@ -127,6 +173,9 @@ pub(super) const SCROLL_VIEW_TAG: &str = "scroll-view";
 /// axis is a scroll container that only script can move rather than a plain
 /// clip. That is what a browser makes of the same declaration in
 /// `scroll-view.css`, so it is parity rather than a shortcut.
+///
+/// The last three rules are `initial-scroll-to-index`; the module
+/// documentation's "The initial child" says what they do.
 pub(super) const UA_RULES: &str = r#"
 scroll-view, scroll-view[scroll-y], scroll-view[scroll-orientation="vertical"] {
   overflow-x: clip; overflow-y: scroll;
@@ -140,6 +189,14 @@ scroll-view[scroll-y][enable-scroll="false"],
 scroll-view[scroll-orientation="vertical"][enable-scroll="false"] { overflow-y: hidden; }
 scroll-view[scroll-x][enable-scroll="false"],
 scroll-view[scroll-orientation="horizontal"][enable-scroll="false"] { overflow-x: hidden; }
+@property --scroll-view-initial-index { syntax: "<integer>"; inherits: true; initial-value: -1; }
+scroll-view[initial-scroll-to-index] {
+  --scroll-view-initial-index: attr(initial-scroll-to-index type(<integer>), -1);
+}
+scroll-view[initial-scroll-to-index] > * {
+  scroll-initial-target:
+    if(style(--scroll-view-initial-index: calc(sibling-index() - 1)): nearest; else: none);
+}
 "#;
 
 /// The kernel's CSSOM-View event the threshold events are decided on, which
@@ -816,6 +873,7 @@ pub(super) mod tests {
     use terminus::link::event::{EventDetail, ListenerKey, ListenerKinds};
     use terminus::link::scroll::ScrollBehavior;
     use terminus::link::stylo::computed_values::{flex_direction, linear_direction};
+    use terminus::link::stylo::properties::PropertyId;
     use terminus::link::stylo::values::computed::Overflow;
     use terminus::link::{MethodCall, MethodError, MethodOutcome, NodeId, Vector2D};
 
@@ -1944,5 +2002,252 @@ pub(super) mod tests {
             period: None,
         };
         assert_eq!(nearest_snap_position(&empty, 10.0), None);
+    }
+
+    /// One computed longhand or custom property, as CSSOM serializes it.
+    fn computed(document: &LynxDocument, element: NodeId, property: &str) -> String {
+        let id = PropertyId::parse_enabled_for_all_content(property)
+            .unwrap_or_else(|()| panic!("unknown property `{property}`"));
+        let declaration = id
+            .as_shorthand()
+            .err()
+            .unwrap_or_else(|| panic!("`{property}` is a shorthand"));
+        style_of(document, element).computed_value_to_string(declaration)
+    }
+
+    fn targets(document: &LynxDocument, children: &[NodeId]) -> Vec<String> {
+        children
+            .iter()
+            .map(|child| computed(document, *child, "scroll-initial-target"))
+            .collect()
+    }
+
+    /// `count` children of `child_style` under a `scroll-view` of
+    /// `view_style`, with `attributes` written before the first commit.
+    fn indexed(
+        view_style: &str,
+        child_style: &str,
+        attributes: &[(&str, &str)],
+        count: usize,
+    ) -> (LynxDocument, NodeId, Vec<NodeId>) {
+        let mut document = document();
+        let view = child(&mut document, SCROLL_VIEW_TAG, view_style);
+        for (name, value) in attributes {
+            document.set_attribute(view, name, value);
+        }
+        let children = (0..count)
+            .map(|_| element_under(&mut document, view, "view", child_style))
+            .collect();
+        (document, view, children)
+    }
+
+    /// web-core's `basic-element-scroll-view-scroll-to-index` card's shape:
+    /// a 300x600 `scroll-view` with `scroll-y`, its children 300px tall.
+    fn vertical_indexed(
+        attributes: &[(&str, &str)],
+        count: usize,
+    ) -> (LynxDocument, NodeId, Vec<NodeId>) {
+        let mut all = vec![("scroll-y", "")];
+        all.extend_from_slice(attributes);
+        indexed(
+            "width: 300px; height: 600px",
+            "width: 300px; height: 300px; flex-shrink: 0",
+            &all,
+            count,
+        )
+    }
+
+    /// The first commit starts the view with the indexed child at the
+    /// scrollport's start, web-core's `scrollTop = child.offsetTop`
+    /// (`ScrollAttributes.ts:64-81`), and carries the position to the
+    /// painter as an instant request. With the card's three children and
+    /// index 1 the first screen is the second child over the third.
+    #[test]
+    fn initial_scroll_to_index_starts_a_vertical_view_on_the_child() {
+        for (index, offset) in [("0", 0.0), ("1", 300.0), ("2", 600.0)] {
+            let (mut document, view, children) =
+                vertical_indexed(&[("initial-scroll-to-index", index)], 4);
+            let request = carried(&mut document, view);
+            assert_eq!(
+                document.scroll_offset(view),
+                Vector2D::new(0.0, offset),
+                "{index}"
+            );
+            assert_eq!(
+                request,
+                Some((Vector2D::new(0.0, offset), ScrollBehavior::Instant)),
+                "{index}"
+            );
+            assert_eq!(
+                computed(&document, view, "--scroll-view-initial-index"),
+                index
+            );
+            let expected: Vec<&str> = (0..4)
+                .map(|child| {
+                    if child.to_string() == index {
+                        "nearest"
+                    } else {
+                        "none"
+                    }
+                })
+                .collect();
+            assert_eq!(targets(&document, &children), expected, "{index}");
+        }
+    }
+
+    /// The card itself: three children and index 1 start at 300, the
+    /// second and third child filling the 600px scrollport.
+    #[test]
+    fn the_scroll_to_index_card_starts_on_its_second_child() {
+        let (mut document, view, _) = vertical_indexed(&[("initial-scroll-to-index", "1")], 3);
+        document.commit();
+        assert_eq!(document.scroll_offset(view), Vector2D::new(0.0, 300.0));
+        let scroll_box = document.scroll_box(view).expect("a scroll container");
+        assert_eq!(scroll_box.max_offset().y, 300.0);
+    }
+
+    /// A child as wide as the scrollport lands at its start on x too.
+    /// `scroll-initial-target` aligns the inline axis `nearest`: a child
+    /// that fits and lies past the scrollport's end is aligned by its end
+    /// edge, which for a child as wide as the scrollport is the offset its
+    /// start gives.
+    #[test]
+    fn initial_scroll_to_index_starts_a_horizontal_view_on_the_child() {
+        for axis in [("scroll-x", ""), ("scroll-orientation", "horizontal")] {
+            let (mut document, view, children) = indexed(
+                "width: 300px; height: 300px",
+                "width: 300px; height: 300px; flex-shrink: 0",
+                &[axis, ("initial-scroll-to-index", "1")],
+                3,
+            );
+            let request = carried(&mut document, view);
+            assert_eq!(
+                document.scroll_offset(view),
+                Vector2D::new(300.0, 0.0),
+                "{axis:?}"
+            );
+            assert_eq!(
+                request,
+                Some((Vector2D::new(300.0, 0.0), ScrollBehavior::Instant))
+            );
+            assert_eq!(targets(&document, &children), ["none", "nearest", "none"]);
+        }
+    }
+
+    /// The recorded gap on x: a child narrower than the scrollport is
+    /// aligned `nearest`, not at the start web-core puts it at
+    /// (`scrollLeft = child.offsetLeft`). One already inside the scrollport
+    /// moves nothing; one past its end lands with its end edge at the
+    /// scrollport's end.
+    #[test]
+    fn a_narrow_child_on_x_is_aligned_nearest_not_at_the_start() {
+        for (index, offset) in [("1", 0.0), ("4", 200.0)] {
+            let (mut document, view, _) = indexed(
+                "width: 300px; height: 100px",
+                "width: 100px; height: 100px; flex-shrink: 0",
+                &[("scroll-x", ""), ("initial-scroll-to-index", index)],
+                6,
+            );
+            document.commit();
+            assert_eq!(document.scroll_offset(view).x, offset, "{index}");
+        }
+    }
+
+    /// No attribute, or one that names no child — negative, past the last
+    /// child, or no integer — scrolls nothing and records no request.
+    #[test]
+    fn an_index_naming_no_child_scrolls_nothing() {
+        for value in [None, Some("-1"), Some("-5"), Some("4"), Some("10")]
+            .into_iter()
+            .chain(["abc", "1.5", ""].map(Some))
+        {
+            let attributes: Vec<(&str, &str)> = value
+                .map(|value| ("initial-scroll-to-index", value))
+                .into_iter()
+                .collect();
+            let (mut document, view, children) = vertical_indexed(&attributes, 4);
+            assert_eq!(carried(&mut document, view), None, "{value:?}");
+            assert_eq!(document.scroll_offset(view), Vector2D::zero(), "{value:?}");
+            assert_eq!(targets(&document, &children), ["none"; 4], "{value:?}");
+        }
+    }
+
+    /// web-core runs its handler on every change of the attribute
+    /// (`ScrollAttributes.ts:64-81`, an `attributeChangedCallback` handler),
+    /// and here each new target is honoured once: a change after the first
+    /// layout scrolls to the new child, instantly. A commit that leaves the
+    /// target where it was, or rewrites the same value, leaves a view the
+    /// user scrolled alone, and removing the attribute names no target and
+    /// moves nothing.
+    #[test]
+    fn a_later_change_scrolls_to_the_new_child_and_nothing_else_does() {
+        let (mut document, view, children) =
+            vertical_indexed(&[("initial-scroll-to-index", "1")], 4);
+        document.commit();
+        assert_eq!(document.scroll_offset(view).y, 300.0);
+
+        document.set_attribute(view, "initial-scroll-to-index", "2");
+        assert_eq!(
+            carried(&mut document, view),
+            Some((Vector2D::new(0.0, 600.0), ScrollBehavior::Instant))
+        );
+        assert_eq!(document.scroll_offset(view).y, 600.0);
+
+        // Where main writes the offset the painter posted for a drag.
+        document.scroll_to(view, Vector2D::new(0.0, 50.0));
+        let serial = document
+            .pending_scroll_request(view)
+            .expect("not yet acknowledged");
+        document.acknowledge_scroll_request(view, serial);
+        document.set_attribute(view, "initial-scroll-to-index", "2");
+        document.set_inline_style(
+            children[0],
+            "width: 300px; height: 300px; flex-shrink: 0; opacity: 0.5",
+        );
+        assert_eq!(carried(&mut document, view), None);
+        assert_eq!(document.scroll_offset(view).y, 50.0);
+
+        document.remove_attribute(view, "initial-scroll-to-index");
+        assert_eq!(carried(&mut document, view), None);
+        assert_eq!(document.scroll_offset(view).y, 50.0);
+        assert_eq!(targets(&document, &children), ["none"; 4]);
+    }
+
+    /// The rules apply under a view that carries the attribute only, so a
+    /// nested view without one keeps the outer view's index for its own
+    /// target and gives its own children none, and a nested view with one
+    /// starts on its own child.
+    #[test]
+    fn a_nested_view_is_its_parents_target_and_keeps_its_own_index() {
+        let full = "width: 300px; height: 300px; flex-shrink: 0";
+        let (mut document, outer, _) = vertical_indexed(&[("initial-scroll-to-index", "1")], 0);
+        let first = element_under(&mut document, outer, "view", full);
+        let inner = element_under(&mut document, outer, SCROLL_VIEW_TAG, full);
+        document.set_attribute(inner, "scroll-x", "");
+        let inner_children: Vec<NodeId> = (0..3)
+            .map(|_| element_under(&mut document, inner, "view", full))
+            .collect();
+        element_under(&mut document, outer, "view", full);
+        document.commit();
+        assert_eq!(targets(&document, &[first, inner]), ["none", "nearest"]);
+        assert_eq!(targets(&document, &inner_children), ["none"; 3]);
+        assert_eq!(document.scroll_offset(outer).y, 300.0);
+        assert_eq!(document.scroll_offset(inner).x, 0.0);
+
+        let (mut document, outer, _) = vertical_indexed(&[], 0);
+        let inner = element_under(&mut document, outer, SCROLL_VIEW_TAG, full);
+        document.set_attribute(inner, "scroll-x", "");
+        document.set_attribute(inner, "initial-scroll-to-index", "2");
+        let inner_children: Vec<NodeId> = (0..3)
+            .map(|_| element_under(&mut document, inner, "view", full))
+            .collect();
+        document.commit();
+        assert_eq!(targets(&document, &[inner]), ["none"]);
+        assert_eq!(
+            targets(&document, &inner_children),
+            ["none", "none", "nearest"]
+        );
+        assert_eq!(document.scroll_offset(inner).x, 600.0);
+        assert_eq!(document.scroll_offset(outer).y, 0.0);
     }
 }
