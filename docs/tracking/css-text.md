@@ -204,7 +204,7 @@ ruling, against web-core's ([deviations.md](deviations.md)).
 Core reflects `text-maxline` / `text-maxlength` into the custom properties
 `--lynx-text-maxline` / `--lynx-text-maxlength`. Its UA stylesheet registers both
 with `<integer>` syntax and `inherits: false`; the initial values (`0` and `-1`)
-mean unlimited. `terminus::layout::StyleView` reads their computed values through
+mean unlimited. `terminus::link::layout::StyleView` reads their computed values through
 `LynxTextStyle`, and `BlockStyle::from_container_style` consumes those inputs
 for the establishing element's paragraph. Normal restyles and animation ticks
 compare the effective limits when refreshing the layout style snapshot and

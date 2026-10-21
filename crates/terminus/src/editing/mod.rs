@@ -322,7 +322,7 @@ pub(crate) struct EditingState {
 
 /// The document's selection ([`Document::selection`]): the focused editing
 /// host's, as UTF-16 unit offsets into the host's value
-/// ([`Document::host_value`]). `anchor` and `focus` are the Selection API's
+/// (`Document::host_value`). `anchor` and `focus` are the Selection API's
 /// two boundary points, so `focus < anchor` is a backward selection and
 /// `anchor == focus` a collapsed one (a caret).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

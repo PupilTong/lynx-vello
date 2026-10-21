@@ -598,7 +598,7 @@ pub(crate) struct Backdrop {
 ///
 /// Two properties produce one: `filter: blur()`, whose range is the ops the
 /// entry *brackets*, and `backdrop-filter`, whose range is the ops already
-/// painted *before* it inside its Backdrop Root — [`Self::backdrop`] is
+/// painted *before* it inside its Backdrop Root — `Self::backdrop` is
 /// which.
 ///
 /// Everything here is decided at commit time on the document's thread, in

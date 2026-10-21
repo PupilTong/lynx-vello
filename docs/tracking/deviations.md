@@ -127,7 +127,7 @@ consequential choice about whether to follow the spec or the quirk.
   native model. This engine says it structurally too: `text`, `inline-text`
   and `inline-truncation` are Lynx text elements by their definition
   (`CustomElement::is_lynx_text`, read once by `Document::define` and kept on
-  each element from its creation), and `terminus::layout::display_mode` lays one
+  each element from its creation), and `terminus::link::layout::display_mode` lays one
   out as one flattened Lynx paragraph, or as a nested text scope of the
   paragraph around it, under every computed `display` but `none` and
   `contents`. Its subtree is inline content — runs, nested text scopes,
@@ -826,7 +826,7 @@ consequential choice about whether to follow the spec or the quirk.
   rather than by a `display` value. `text`, `inline-text` and
   `inline-truncation` are Lynx text elements
   (`CustomElement::is_lynx_text`, `crates/bobcat-core/src/main/tree/text.rs`),
-  which `terminus::layout::display_mode` reads after `none` and `contents` and
+  which `terminus::link::layout::display_mode` reads after `none` and `contents` and
   before every other computed `display`. So an author `display: none` hides
   one in all three engines, and `<text style="display: flex">` is still one
   paragraph. **Native** ignores the value: a text's inline-ness is structural
@@ -983,7 +983,7 @@ consequential choice about whether to follow the spec or the quirk.
   recognizers) instead of a hardcoded cross-event rule, so apps that don't
   use the gesture API don't inherit an invisible suppression.
 - **`tap`/`longpress` synthesis semantics (user ruling 2026-08-21,
-  implemented in `crates/bobcat-core/src/paint/gesture.rs`)** — `tap` fires at
+  implemented in `crates/terminus/src/painter/gesture.rs`)** — `tap` fires at
   release with the native movement-cancel rule; `longpress` fires at a press
   held past 500ms (the native default on every platform). The recorded
   deviations inside that ruling:
@@ -2191,10 +2191,10 @@ consequential choice about whether to follow the spec or the quirk.
     painter, which does not exist.
   - *`autoScroll({rate, start = false, autoStop = true})` (2026-10-13) is a
     motion of the painter, shared whole with `list`.* The document records
-    a change of the container's auto-scroll (`terminus::Document::auto_scroll`,
+    a change of the container's auto-scroll (`terminus::link::Document::auto_scroll`,
     `crates/terminus/src/scroll/request.rs`), the committed frame carries it
     beside its scroll slots, and the painter moves the scrolling axis on its
-    own clock (`crates/bobcat-core/src/paint/inertia.rs`). References: iOS
+    own clock (`crates/terminus/src/painter/inertia.rs`). References: iOS
     `LynxUIScroller.m:1337-1375,1975-2040`, Android
     `AndroidScrollView.java:142-235`, Harmony `ui/utils/auto_scroller.cc`,
     web-core `ScrollView.ts:84-112` and `XList.ts:118-205`. Where it leaves
@@ -2256,7 +2256,7 @@ consequential choice about whether to follow the spec or the quirk.
   method is the standard `scrollIntoView` of the CSSOM-View editor's draft
   (§"scroll an element into view", §"determine the scroll-into-view
   position") called with `container: "nearest"`, not an algorithm of its
-  own. `terminus::Document::scroll_into_view`
+  own. `terminus::link::Document::scroll_into_view`
   (`crates/terminus/src/scroll/into_view.rs:188`) is the algorithm, and the base
   method (`crates/bobcat-core/src/main/tree/base_methods.rs:252`) reads the
   params into its options. References: iOS `LynxUI.m:1549-1615` and
@@ -2304,7 +2304,7 @@ consequential choice about whether to follow the spec or the quirk.
   every element (`createInvokeUIMethod.ts:29-31`). The base method
   (`crates/bobcat-core/src/main/tree/base_methods.rs:143`) reads `params`
   as a `ScrollToOptions` dictionary and runs the standard steps over
-  `terminus::Document::scroll_to_with`. Where it leaves the standard or web-core, and the rules a reader might not expect:
+  `terminus::link::Document::scroll_to_with`. Where it leaves the standard or web-core, and the rules a reader might not expect:
   - *`behavior: "auto"` is instant.* CSSOM-View's `auto` takes the
     element's computed `scroll-behavior`, and this engine has no
     `scroll-behavior` property, so `auto` is its initial value's instant
@@ -2865,7 +2865,7 @@ consequential choice about whether to follow the spec or the quirk.
 - **`<dialog>` and the top layer (2026-10-07)** — W3C (bucket 1): web-core
   hands `<dialog>` to the browser, and native Lynx has neither a dialog nor a
   top layer. Implemented in `terminus` (the layer, `::backdrop`, inertness) and
-  `bobcat-core`'s `tree::dialog`
+  `terminus::link::html::dialog`
   ([style-assumptions.md](../style-assumptions.md) §29). What a page can
   observe differently from a browser:
   - *Leaving the top layer is immediate.* There is no `overlay` property and
@@ -2891,7 +2891,7 @@ consequential choice about whether to follow the spec or the quirk.
     `flex`, the `lynx` grammar's initial display, where a browser computes
     `block`. The dialog renders as a `flex` box centred in the viewport
     (`a_display_contents_modal_dialog_is_blockified_and_renders` in
-    `tree::dialog`). An element `terminus` puts in the top
+    bobcat-core's `dialog_tests.rs`). An element `terminus` puts in the top
     layer without such a UA rule is not adjusted: membership alone places it
     against the viewport, and a `display: contents` one renders nothing.
   - *`returnValue` is dropped.* `close(returnValue)` and
@@ -3265,7 +3265,7 @@ consequential choice about whether to follow the spec or the quirk.
 - **`x-input` / `x-textarea` (2026-10-14, editable text E5)** — Lynx-only
   (bucket 2): web-core wraps a real `<input>`/`<textarea>` in a shadow
   tree; here the shadow tree holds one plain-text editing host over
-  `terminus::editing` (`bobcat-core`'s `tree::text_field`,
+  `terminus::link::editing` (`bobcat-core`'s `tree::text_field`,
   `docs/editable-text-design.md` E5). Where native Lynx and web-core (or
   the Lynx typings) disagree, web-core was followed:
   - *`send-composing-input` is off by default* (web-core). Native sends

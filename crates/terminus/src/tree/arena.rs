@@ -42,7 +42,7 @@ use crate::tree::top_layer::TopLayer;
 /// generation on every free, so a handle taken before that free no longer
 /// matches and every getter answers `None` instead of a stranger.
 ///
-/// Key zero is permanently occupied by [`TreeArenas::reserve_zero`], so no
+/// Key zero is permanently occupied by `TreeArenas::reserve_zero`, so no
 /// live node sits there and [`NonZeroU32`] is the key's own type rather than an
 /// encoding — which is what lets `Option<NodeId>` stay four bytes wide for the
 /// tree's own links.

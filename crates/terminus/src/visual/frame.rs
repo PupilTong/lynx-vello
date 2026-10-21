@@ -64,7 +64,7 @@ pub struct ScrollSlot {
     pub circular: ScrollAxes,
     /// Whether the container above goes first, per axis:
     /// `scroll-capture-x` / `scroll-capture-y`.
-    pub capture: CaptureAxes,
+    pub(crate) capture: CaptureAxes,
     /// The axes this container snaps on, each naming its points in the
     /// frame's [`snap_points`](CommittedFrame::snap_points).
     pub snap: SnapSlot,
@@ -151,9 +151,9 @@ impl SnapSlotAxis {
 
 impl ScrollSlot {
     /// This container's part in a chain walk, for
-    /// [`drive_chain`](crate::scroll::drive_chain).
+    /// `drive_chain`.
     #[must_use]
-    pub fn link(&self) -> ChainLink {
+    pub(crate) fn link(&self) -> ChainLink {
         ChainLink {
             user_scrollable: self.user_scrollable,
             chains: self.chains,

@@ -4,11 +4,9 @@
 //! them over the scroll intents on the painter's clock.
 //!
 //! css-overscroll-1 leaves the boundary effect to the user agent, and
-//! nothing in CSS describes inertia at all, so these are the engine's own.
-//! The curves and their constants are lynx-ui's `useBounce`
-//! (`packages/lynx-ui-scroll-view/src/hooks/useBounce.tsx`), so a page that
-//! bounces through `overscroll-behavior: contain-bounce` and one that bounces
-//! through that hook's transforms move the same way:
+//! nothing in CSS describes inertia at all, so these are the engine's own:
+//! a rubber band with `UIKit`'s coefficient, flings that decay at `UIKit`'s
+//! deceleration rates, and a critically damped spring.
 //!
 //! - **Rubber band** — a drag past a boundary. With `x` the finger's travel past the edge and `L`
 //!   the scrollport's extent on that axis, `d(x) = (1 − 1 / (x·c/L + 1))·L`, `c =`
@@ -25,7 +23,7 @@
 //!   initial velocity `v` of the displacement: `x(t) = (C + (v + β·C)·t)·e^(−β·t)`. With `v = 0` it
 //!   is the bounce back. What moves a container to a snap position after a release, and to the
 //!   target of a smooth programmatic scroll. `v` is limited ([`glide_velocity`]) so the curve never
-//!   crosses its target: the engine's own rule, since lynx-ui only ever springs from rest.
+//!   crosses its target.
 //!
 //! Rest is one physical pixel ([`rest_threshold`]): a curve whose remaining
 //! travel is under it is over, and a stretch under it is none.
@@ -40,28 +38,28 @@
 //! whole delta, so nothing stretches and nothing chains outward. The line
 //! repeats the scrolling area every [`crate::visual::ScrollSlot::wrap_period`]; the
 //! intents normalize the offset into one period when a commit is adopted,
-//! and `terminus` normalizes it wherever it composes, hit-tests or samples, so
+//! and this crate normalizes it wherever it composes, hit-tests or samples, so
 //! these functions never wrap anything themselves.
 
 use euclid::default::{Size2D, Vector2D};
 
 use crate::scroll::{ScrollAxes, ScrollKind, SnapAxis, resolve_step};
 
-/// The rubber band's `c`: the slope a stretch starts at. lynx-ui's
-/// `rubberC`, which is `UIKit`'s.
-pub(crate) const RUBBER_BAND_COEFFICIENT: f32 = 0.55;
+/// The rubber band's `c`: the slope a stretch starts at. `UIKit`'s
+/// coefficient.
+pub(super) const RUBBER_BAND_COEFFICIENT: f32 = 0.55;
 
-/// A fling's in-range decay per millisecond. `UIKit`'s normal deceleration
-/// rate; lynx-ui leaves the in-range fling to the native scroller and names
-/// no rate of its own.
-pub(crate) const FLING_DECAY_PER_MS: f32 = 0.998;
+/// A fling's in-range decay per millisecond: `UIKit`'s normal deceleration
+/// rate.
+pub(super) const FLING_DECAY_PER_MS: f32 = 0.998;
 
 /// A fling's decay per millisecond once it has stretched past a boundary:
-/// lynx-ui's `flingDeceleratingRate`.
-pub(crate) const OVERSHOOT_DECAY_PER_MS: f32 = 0.99;
+/// `UIKit`'s fast deceleration rate, so an overshoot is short.
+pub(super) const OVERSHOOT_DECAY_PER_MS: f32 = 0.99;
 
-/// The bounce back's `β`, per second: lynx-ui's `beta`.
-pub(crate) const BOUNCE_BACK_STIFFNESS: f32 = 15.0;
+/// The bounce back's `β`, per second: the critically damped spring's
+/// stiffness.
+pub(super) const BOUNCE_BACK_STIFFNESS: f32 = 15.0;
 
 /// What is moving a scroll container through one chain step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,7 +68,7 @@ pub(super) enum Motion {
     /// `contain-bounce` edge.
     Drag,
     /// One step of a fling: raw in range, and past a `contain-bounce` edge
-    /// raw too, capped at one scrollport — lynx-ui's overshoot.
+    /// raw too, capped at one scrollport.
     Fling,
     /// A wheel tick: snaps as it lands, and never stretches.
     Wheel,
@@ -89,7 +87,7 @@ impl Motion {
 /// One physical pixel in CSS px: the distance under which a curve is over
 /// and a stretch is none, and — read as CSS px per millisecond — the
 /// velocity under which an overshoot starts its bounce back.
-pub(crate) fn rest_threshold(device_pixel_ratio: f32) -> f32 {
+pub(super) fn rest_threshold(device_pixel_ratio: f32) -> f32 {
     if device_pixel_ratio.is_finite() && device_pixel_ratio > 0.0 {
         1.0 / device_pixel_ratio
     } else {
@@ -100,7 +98,7 @@ pub(crate) fn rest_threshold(device_pixel_ratio: f32) -> f32 {
 /// How far a boundary stretches when the finger has travelled `travel` CSS
 /// px past it, for a scrollport of `extent` on that axis. Non-negative in,
 /// non-negative out; a non-positive extent stretches nothing.
-pub(crate) fn rubber_band(travel: f32, extent: f32) -> f32 {
+pub(super) fn rubber_band(travel: f32, extent: f32) -> f32 {
     // NaN in, nothing out: neither comparison holds.
     if travel <= 0.0 || extent <= 0.0 || travel.is_nan() || extent.is_nan() {
         return 0.0;
@@ -111,7 +109,7 @@ pub(crate) fn rubber_band(travel: f32, extent: f32) -> f32 {
 /// How fast the stretch grows per px of finger travel at `travel` past the
 /// edge: the rubber band's derivative, `c / (x·c/L + 1)²`. What a finger's
 /// release velocity is damped by when it lets go mid-stretch.
-pub(crate) fn rubber_band_slope(travel: f32, extent: f32) -> f32 {
+pub(super) fn rubber_band_slope(travel: f32, extent: f32) -> f32 {
     if extent <= 0.0 || extent.is_nan() {
         return 0.0;
     }
@@ -122,7 +120,7 @@ pub(crate) fn rubber_band_slope(travel: f32, extent: f32) -> f32 {
 /// The finger travel that stretches a boundary by `displacement`: the
 /// inverse of [`rubber_band`]. A displacement at or past the extent is
 /// unreachable and answers the travel for a hair short of it.
-pub(crate) fn rubber_band_travel(displacement: f32, extent: f32) -> f32 {
+pub(super) fn rubber_band_travel(displacement: f32, extent: f32) -> f32 {
     if displacement <= 0.0 || extent <= 0.0 || displacement.is_nan() || extent.is_nan() {
         return 0.0;
     }
@@ -132,31 +130,31 @@ pub(crate) fn rubber_band_travel(displacement: f32, extent: f32) -> f32 {
 
 /// A fling's velocity `elapsed_ms` after it started at `velocity`, decaying
 /// at `rate` per millisecond.
-pub(crate) fn fling_velocity(velocity: f32, rate: f32, elapsed_ms: f32) -> f32 {
+pub(super) fn fling_velocity(velocity: f32, rate: f32, elapsed_ms: f32) -> f32 {
     velocity * rate.powf(elapsed_ms)
 }
 
 /// The distance a fling that started at `velocity` has covered
 /// `elapsed_ms` later, decaying at `rate` per millisecond.
-pub(crate) fn fling_distance(velocity: f32, rate: f32, elapsed_ms: f32) -> f32 {
+pub(super) fn fling_distance(velocity: f32, rate: f32, elapsed_ms: f32) -> f32 {
     velocity * (rate.powf(elapsed_ms) - 1.0) / rate.ln()
 }
 
 /// The whole distance a fling from `velocity` covers before it is spent.
-pub(crate) fn fling_travel(velocity: f32, rate: f32) -> f32 {
+pub(super) fn fling_travel(velocity: f32, rate: f32) -> f32 {
     -velocity / rate.ln()
 }
 
 /// The velocity whose whole fling covers exactly `travel`: how a fling is
 /// aimed at a snap position.
-pub(crate) fn fling_velocity_for_travel(travel: f32, rate: f32) -> f32 {
+pub(super) fn fling_velocity_for_travel(travel: f32, rate: f32) -> f32 {
     -travel * rate.ln()
 }
 
 /// Where a bounce back from `displacement` stands `elapsed_s` seconds in.
 /// Critically damped with no initial velocity, so it never crosses the
 /// boundary it returns to.
-pub(crate) fn bounce_back(displacement: f32, elapsed_s: f32) -> f32 {
+pub(super) fn bounce_back(displacement: f32, elapsed_s: f32) -> f32 {
     glide(displacement, 0.0, elapsed_s)
 }
 
@@ -164,7 +162,7 @@ pub(crate) fn bounce_back(displacement: f32, elapsed_s: f32) -> f32 {
 /// `velocity` CSS px per second, stands `elapsed_s` seconds in: the
 /// critically damped spring `(C + (v + β·C)·t)·e^(−β·t)`. It never crosses
 /// zero when `velocity` is what [`glide_velocity`] admits.
-pub(crate) fn glide(displacement: f32, velocity: f32, elapsed_s: f32) -> f32 {
+pub(super) fn glide(displacement: f32, velocity: f32, elapsed_s: f32) -> f32 {
     let t = elapsed_s.max(0.0);
     let beta_t = BOUNCE_BACK_STIFFNESS * t;
     (displacement + (velocity + BOUNCE_BACK_STIFFNESS * displacement) * t) * (-beta_t).exp()
@@ -175,7 +173,7 @@ pub(crate) fn glide(displacement: f32, velocity: f32, elapsed_s: f32) -> f32 {
 /// `velocity`: toward the target it keeps up to `β·|C|`, the speed of a pure
 /// exponential approach, past which the spring would cross the target; a
 /// velocity pointing away from the target starts the glide from rest.
-pub(crate) fn glide_velocity(displacement: f32, velocity: f32) -> f32 {
+pub(super) fn glide_velocity(displacement: f32, velocity: f32) -> f32 {
     if !velocity.is_finite() || velocity * displacement >= 0.0 {
         return 0.0;
     }
@@ -185,7 +183,7 @@ pub(crate) fn glide_velocity(displacement: f32, velocity: f32) -> f32 {
 
 /// The signed stretch of `offset` past `0..=max`: negative past the start
 /// edge, positive past the end edge, zero in range.
-pub(crate) fn stretch_of(offset: f32, max: f32) -> f32 {
+pub(super) fn stretch_of(offset: f32, max: f32) -> f32 {
     if offset < 0.0 {
         offset
     } else if offset > max {
@@ -218,7 +216,7 @@ pub(super) struct ElasticStep {
 /// [`rubber_band_travel`] when the container was already stretched — maps
 /// through [`rubber_band`], and a drag that pulls back through the edge
 /// spends the rest of its delta scrolling. A fling step stretches raw,
-/// capped at one scrollport, the way lynx-ui's overshoot does. A wheel tick
+/// capped at one scrollport. A wheel tick
 /// never stretches: it first brings a stretched container back to its
 /// edge, then lands as any wheel tick does.
 ///

@@ -76,7 +76,7 @@ pub(crate) static ANONYMOUS_STYLE: LazyLock<Arc<ComputedValues>> = LazyLock::new
 
 impl<T: Sync> Document<T> {
     /// Flushes style and lays the document out — up to
-    /// [`CONTAINER_PASSES`](committed_box::CONTAINER_PASSES) times, because a
+    /// `CONTAINER_PASSES` times, because a
     /// css-contain-3 size query container's size is a *cascade* input that
     /// only layout can produce.
     ///
@@ -91,7 +91,7 @@ impl<T: Sync> Document<T> {
     /// inside itself: it publishes the size at the entry of that box's own
     /// committing run and restyles the readers under it before laying its
     /// contents out at all (`layout::host::run_layout`, and
-    /// [`crate::layout::committed_box`] for why the size is knowable there).
+    /// `layout::committed_box` for why the size is knowable there).
     /// What reaches this loop is what that cannot predict — an
     /// `inline-size` container, whose block axis answers to its contents, and
     /// a Lynx text element, whose paragraph algorithm implements no size
@@ -105,7 +105,7 @@ impl<T: Sync> Document<T> {
     /// strip. A mark made on the last permitted iteration is laid out by
     /// nobody here: it waits for whatever flush comes next, which an animation
     /// tick can precede, so that one is spelled the way
-    /// [`Document::mark_subtree_recascade`] spells it.
+    /// `Document::mark_subtree_recascade` spells it.
     pub fn layout(&mut self) {
         let mut resized = Vec::new();
         for pass in 0..committed_box::CONTAINER_PASSES {

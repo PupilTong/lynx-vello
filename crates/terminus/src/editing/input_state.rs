@@ -163,7 +163,7 @@ pub struct TextInputState {
     pub selection: Range<u32>,
     /// The composition, in UTF-16 units into `value`.
     pub composition: Option<Range<u32>>,
-    /// The caret at the selection's focus, [`CARET_WIDTH`] wide and as tall
+    /// The caret at the selection's focus, `CARET_WIDTH` wide and as tall
     /// as its line, in viewport CSS px.
     pub caret: Rect<f32>,
     /// The host's border box, in viewport CSS px.

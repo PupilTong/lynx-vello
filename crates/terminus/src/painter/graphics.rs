@@ -59,7 +59,7 @@ pub(super) enum FrameAcquisition {
     Retry,
 }
 
-pub(crate) struct WindowGraphics {
+pub(super) struct WindowGraphics {
     context: RenderContext,
     surface: RenderSurface<'static>,
     renderer: vello::Renderer,
@@ -99,7 +99,7 @@ impl std::fmt::Debug for WindowGraphics {
 }
 
 impl WindowGraphics {
-    pub(crate) async fn new(
+    pub(super) async fn new(
         target: impl Into<WindowTarget>,
         size: FrameSize,
     ) -> Result<Self, PainterError> {

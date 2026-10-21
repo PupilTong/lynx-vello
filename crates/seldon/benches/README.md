@@ -42,7 +42,7 @@ hidden/absolute children, dense percentage padding, percentage min/max, and
 cross-gravity matrices. Relative clones wrap-width refinement, reverse chains,
 disjoint cycles, duplicate IDs, and nested relative containers.
 
-All box-layout scenarios build real `terminus::Document` trees with CSS styles.
+All box-layout scenarios build real `terminus::link::Document` trees with CSS styles.
 The shared `support::LayoutFixture` resolves those styles outside the timed
 region, then measured calls enter through `Document::layout`.
 Consequently the timed path includes terminus's production `&Node` host,

@@ -550,7 +550,7 @@ impl<T: Sync> Document<T> {
     /// edit was prepared.
     ///
     /// An edit that changes the value, or leaves a selection other than the
-    /// one held ([`selection_differs`]), sets the document's
+    /// one held (`selection_differs`), sets the document's
     /// `selectionchange` flag ([`Self::has_pending_selectionchange`]); one
     /// that leaves the same offsets — a `SetSelection` to the range already
     /// selected — does not, as the Selection API fires `selectionchange`

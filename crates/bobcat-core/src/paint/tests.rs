@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use terminus::link::event::EventDetail;
+use terminus::link::painter::ScrollIntentsTestUtils as _;
 
 use super::{FarEnd, Painter, ToMain};
 use crate::link::{FramePost, ScrollEntry, ScrollMailbox};
@@ -1893,6 +1894,16 @@ fn an_auto_scroll_moves_at_its_rate_and_ends_on_its_edge() {
 /// [`AUTO_SCROLL_MIN_INTERVAL_SECONDS`]: terminus::link::painter::AUTO_SCROLL_MIN_INTERVAL_SECONDS
 #[test]
 fn an_auto_scroll_writes_no_more_often_than_its_interval_and_a_pixel() {
+    use terminus::link::painter::AUTO_SCROLL_MIN_INTERVAL_SECONDS;
+
+    // The frame rates below sit on either side of the interval: a 120 Hz
+    // frame is shorter than it and two are not, while a 60 Hz frame is not.
+    const {
+        assert!(1.0 / 120.0 < AUTO_SCROLL_MIN_INTERVAL_SECONDS);
+        assert!(AUTO_SCROLL_MIN_INTERVAL_SECONDS <= 2.0 / 120.0);
+        assert!(AUTO_SCROLL_MIN_INTERVAL_SECONDS <= 1.0 / 60.0);
+    }
+
     let writes = |rate: f32, hz: f64, ticks: u32| {
         let (mut document, scroller, _) = auto_scrolled(1000);
         let (mut painter, main) = detached();

@@ -1855,7 +1855,7 @@ fn retained_fingerprint(document: &crate::tree::document::Document<()>) -> Strin
 fn a_warm_build_produces_the_paint_order_a_cold_build_produces() {
     let (mut h, scroller) = reuse_harness();
 
-    // Only `Painter::paint` retires a frame into the spare buffers, so the
+    // Only `FramePainter::paint` retires a frame into the spare buffers, so the
     // rounds below render rather than build: a loop of bare builds would
     // exercise the working scratch and never the frame tables, which are
     // the buffers carrying the node ids, clip links and layer ranges this

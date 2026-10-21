@@ -15,7 +15,7 @@ coherent architectures that fit this repository's policies.
 | --- | --- |
 | One host member, `callElementMethod(nodeId, method, paramsJson)`, hand-matches the method name with a tag guard (`"selectTab" if is_viewpager`, `"show" \| … if is_dialog`) and falls to code 3. | `crates/bobcat-core/src/main/runtime/lib.rs:2108-2202` |
 | The answer is a `number` status or a string the realm always decodes as a rect; no method can return other data. | `packages/bobcat-element/src/native.d.ts:87`, `element-papi.ts:1636-1655` |
-| Components are `impl terminus::CustomElement<()>` with lifecycle callbacks and `handle_event`; the trait has no method surface. `Document::define` stores `Arc<dyn CustomElement<T>>`; the per-element handler lookup is `pub(crate)`. | `crates/terminus/src/tree/custom.rs:130, 362-390, 589-606` |
+| Components are `impl terminus::link::CustomElement<()>` with lifecycle callbacks and `handle_event`; the trait has no method surface. `Document::define` stores `Arc<dyn CustomElement<T>>`; the per-element handler lookup is `pub(crate)`. | `crates/terminus/src/tree/custom.rs:130, 362-390, 589-606` |
 | An element in script is a plain object `{ [nodeIdSymbol]: id }` on `Object.prototype`; no per-tag prototype. | `packages/bobcat-element/src/element-papi.ts:577-588, 698-700` |
 | The bridge installs flat host functions only. It has no object, array, class or prototype builder; `HostValue::Structured` is opaque bytes Rust cannot build or read. | `crates/quickjs-rust-bridge/src/lib.rs:630-670, 1735-1909` |
 | Policy: payloads JS consumes stay opaque in Rust; expose Rust facts as primitive binding arguments and build the object in JavaScript. | `AGENTS.md:135-143` |
@@ -101,7 +101,7 @@ flowchart LR
   I["__InvokeUIMethod(el, name, paramsJson)"] --> H["callElementMethod host member"]
   H --> T["tree::Methods table<br/>(tag, name) → Box&lt;dyn Fn&gt;"]:::focus
   T -->|miss| B["base table:<br/>boundingClientRect, scrollTo, …"]:::focus
-  T --> D["tree::dialog::show(doc, node)"]
+  T --> D["terminus::link::html::dialog::show(doc, node)"]
   D --> E["status-prefixed record<br/>code, data fields"]:::focus
 ```
 
@@ -141,7 +141,7 @@ flowchart LR
   I["__InvokeUIMethod(el, name, params)"] --> R["typeof el[name] === 'function'<br/>(web-core's line)"]:::focus
   R --> P["DialogElement.prototype.show<br/>↑ LynxElement.prototype<br/>(boundingClientRect, scrollTo, focus…)"]:::focus
   P --> M["host member dialogShow(nodeId)<br/>(tree_members!, primitives only)"]:::focus
-  M --> D["tree::dialog::show(doc, node)<br/>-> Result&lt;(), InvalidState&gt;"]
+  M --> D["terminus::link::html::dialog::show(doc, node)<br/>-> Result&lt;(), InvalidState&gt;"]
   D --> O["TS builds {code, data}"]
 ```
 
@@ -159,7 +159,7 @@ flowchart LR
   `tree_members!` macro in a new `runtime/element_members.rs`, with
   primitive arguments (`viewpagerSelectTab(nodeId, index, smooth)`) and
   primitive or record answers; each calls the component's existing free
-  function (`tree::dialog::show`, `tree::select_tab`). A member called on
+  function (`terminus::link::html::dialog::show`, `tree::select_tab`). A member called on
   the wrong kind answers a `TypeError` (WebIDL's "illegal invocation"),
   which the prototype makes unreachable through `invoke`. `terminus` and the
   `CustomElement` trait are untouched; `serde_json` leaves `viewpager.rs`.
@@ -220,13 +220,13 @@ recorded so the comparison is complete.
 | every element (`LynxElement`) | `boundingClientRect`, `scrollIntoView` (built 2026-10-10), `scrollTo`/`scrollBy` (CSSOM-View `ScrollToOptions`, built 2026-10-11) in `tree::base_methods`; `focus`/`blur` not built on every element: only editing hosts are focusable, and the text fields answer them themselves; `takeScreenshot` not built: no pixel readback | rect |
 | `dialog` | `show`, `showModal`, `close`, `requestClose` (built) | — |
 | `viewpager` / `x-viewpager-ng` | `selectTab` (built); `setDragGesture` is iOS/Android-only, undocumented, and left at code 3 (user ruling 2026-10-11) | — |
-| `scroll-view` | `scrollTo` (Lynx overload), `autoScroll` (built 2026-10-13: a painter-driven constant-rate motion, `terminus::Document::auto_scroll`), `getScrollInfo` (native) | yes |
+| `scroll-view` | `scrollTo` (Lynx overload), `autoScroll` (built 2026-10-13: a painter-driven constant-rate motion, `terminus::link::Document::auto_scroll`), `getScrollInfo` (native) | yes |
 | `x-list` | `scrollToPosition`, `getScrollContainerInfo`, `getVisibleCells` (web-core) and `scrollBy` (native; `scroll-view`'s own, on the list's axis), built 2026-10-11 in `tree::list`; `autoScroll` is `scroll-view`'s own on the list's axis (built 2026-10-13); `getScrollInfo` is iOS/Android-only, undocumented on `list`, and left at code 3 (the `setDragGesture` ruling, 2026-10-11) | yes |
 | `x-refresh-view` | `autoStartRefresh`, `finishRefresh`, `finishLoadMore` (built 2026-10-11 in `tree::refresh_view`: each a `Document::scroll_into_view` in the shadow `#container`: `#content` at `block: center`, smooth, for the two finishing methods, the header at `block: start`, instant, for `autoStartRefresh`, because the painter settles a smooth request's target onto the frame's snap positions and the header is none from rest; no params, always code 0) | — |
 | `x-foldview-ng` / `scroll-coordinator` | `setFoldExpanded({offset, smooth = true})` (built 2026-10-11 in `tree::scroll_coordinator`; web-core `XFoldviewNg.ts:63-72`, iOS `LynxUIScrollCoordinator.m:771-830`; a missing or unreadable `offset` is code 4); `getScrollInfo` and `scrollBy({offset})` are iOS-only and undocumented, and not built (the `setDragGesture` ruling, 2026-10-11): `getScrollInfo` is code 3, and `scrollBy` reaches the base set's CSSOM-View one, as `HTMLElement.scrollBy` does in web-core | — |
 | `image` | `startAnimate`, `pauseAnimation`, `resumeAnimation`, `stopAnimation` (documented; iOS `LynxUIImage.mm:1812-1833`, Android `UIImage.java:111-129`; web-core's `XImage` has none): not built, no primitive. The engine decodes still images only (`bobcat-resources/src/image_header.rs` probes a GIF's size; nothing plays frames), so there is no playback state to control | — |
 | `text` | `getTextBoundingRect({start, end})`, `getSelectedText`, `setTextSelection` (documented; iOS `LynxUIText.m:790-844`, Android `UIText.java:343-418`; web-core's `XText` has none). `getTextBoundingRect` built 2026-10-11 in `tree::text` over `Document::text_range_boxes` (`seldon`'s `TextBlock::range_boxes`): one box per line of the source UTF-16 range with iOS's per-line glyph extents, moved into viewport px from the content box's origin, `boundingRect` their union; params that are no non-negative numbers (truncated) or `start > end` are code 4, nothing found code 8 (the natives' 1 has no engine code). `getSelectedText` and `setTextSelection` not built, no primitive: there is no text selection model | yes |
-| `x-input` / `x-textarea` (and `x-input-ng`, `x-textarea-ng`; not the HTML names `input`, `textarea`, user ruling 2026-10-19) | Built 2026-10-14 (editable text E5) in `tree::text_field` over `terminus::editing`: `focus` (restores the selection the field kept since it lost focus or a script wrote its value, a caret at the end for a field never focused nor written; code 8 when the field is `disabled`/`readonly`), `blur`, `controlKeyBoard({action})` (0/1 focus, 2/3 blur), `setValue({value, index?})` (no `input`; the caret at a positive `index`, else the end), `getValue()` (`{value, selectionStart, selectionEnd, isComposing}` plus web-core's `selectionBegin`; a field not focused answers the selection it kept, a caret at the end when it never had one), `setSelectionRange({selectionStart, selectionEnd})` and `select()` (clamped; nothing while not focused), `addText({text})` and `sendDelEvent({action, length})` (web-core's value writes at the selection's start), `setInputFilter({pattern})` (replaces `input-filter`'s pattern). A missing `value`, `text` or `pattern`, or params that are no object, are code 4. `getTextBoundingRect` is not built on a field | yes |
+| `x-input` / `x-textarea` (and `x-input-ng`, `x-textarea-ng`; not the HTML names `input`, `textarea`, user ruling 2026-10-19) | Built 2026-10-14 (editable text E5) in `tree::text_field` over `terminus::link::editing`: `focus` (restores the selection the field kept since it lost focus or a script wrote its value, a caret at the end for a field never focused nor written; code 8 when the field is `disabled`/`readonly`), `blur`, `controlKeyBoard({action})` (0/1 focus, 2/3 blur), `setValue({value, index?})` (no `input`; the caret at a positive `index`, else the end), `getValue()` (`{value, selectionStart, selectionEnd, isComposing}` plus web-core's `selectionBegin`; a field not focused answers the selection it kept, a caret at the end when it never had one), `setSelectionRange({selectionStart, selectionEnd})` and `select()` (clamped; nothing while not focused), `addText({text})` and `sendDelEvent({action, length})` (web-core's value writes at the selection's start), `setInputFilter({pattern})` (replaces `input-filter`'s pattern). A missing `value`, `text` or `pattern`, or params that are no object, are code 4. `getTextBoundingRect` is not built on a field | yes |
 | `x-audio-tt`, `x-markdown`, `x-webview` | playback / readback / `reload` | yes |
 | `x-swiper` | `scrollTo({index, smooth})` (built 2026-10-11; web-core `XSwiper.ts:142-170`, Android `XSwiperUI.java:651`) | — |
 | `x-overlay-ng`, `x-image` | none in web-core | — |
@@ -265,7 +265,7 @@ table can be added later as the fallback the `LynxElement` prototype's
 
 The user ruled, in the decision dialog:
 
-1. **Architecture: 4.1b**, a virtual `invoke` on `terminus::CustomElement<T>`.
+1. **Architecture: 4.1b**, a virtual `invoke` on `terminus::link::CustomElement<T>`.
 2. **`InvalidStateError` answers code 7** (native's table), not web-core's 4.
    `docs/tracking/deviations.md` must be updated: the current 4 is replaced.
 3. **The shared base set is the documented UI methods only**:
@@ -327,6 +327,6 @@ impl<T> Document<T> {
 - `docs/terminus-link-api.md` row "Custom elements" gains `invoke`,
   `MethodCall`, `MethodOutcome`, `MethodError` and
   `Document::invoke_element_method`.
-- Existing component functions (`tree::dialog::show`, `tree::select_tab`)
+- Existing component functions (`terminus::link::html::dialog::show`, `tree::select_tab`)
   stay as they are and remain the unit-test surface; each kind's `invoke`
   is a `match call.name` over them.

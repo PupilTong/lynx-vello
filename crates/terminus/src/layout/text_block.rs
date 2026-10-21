@@ -82,7 +82,7 @@ impl TextBlockStore {
     /// `None` rather than a panic: every terminus reader keeps its existing
     /// `let Some(..) else { return }` shape, so a paragraph no commit produced
     /// is one that does not paint. The alternative is a panic on the paint
-    /// thread, where `Painter::paint` fails closed and the symptom is a frozen
+    /// thread, where `FramePainter::paint` fails closed and the symptom is a frozen
     /// frame rather than an error.
     pub(crate) fn committed(&self) -> Option<&TextBlock> {
         self.block.has_committed().then_some(&self.block)

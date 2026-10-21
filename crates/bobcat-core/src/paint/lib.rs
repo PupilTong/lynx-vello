@@ -22,6 +22,21 @@
 //!
 //! Lynx's gesture vocabulary and thresholds are the policy the presenting
 //! painter is built with ([`LYNX_GESTURES`]).
+//!
+//! Its scroll physics are fixed in `terminus` rather than passed in, and
+//! they are lynx-ui's `useBounce`
+//! (`packages/lynx-ui-scroll-view/src/hooks/useBounce.tsx`), so a page that
+//! bounces through `overscroll-behavior: contain-bounce` and one that bounces
+//! through that hook's transforms move the same way: the rubber band's
+//! coefficient is its `rubberC` (`UIKit`'s), a fling's decay past a boundary
+//! its `flingDeceleratingRate`, the bounce back's stiffness its `beta`, and a
+//! fling past a boundary stretches raw up to one scrollport, as its overshoot
+//! does. A stretched fling ends once its velocity is under one physical
+//! pixel, lynx-ui's rule, so the bounce back starts promptly. lynx-ui leaves
+//! the in-range fling to the native scroller and names no rate of its own, so
+//! that decay is `UIKit`'s normal deceleration rate; and it springs only from
+//! rest, so the limit on a glide's initial velocity, which keeps the spring
+//! from crossing its target, is the engine's own.
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod animation_tests;
@@ -1009,6 +1024,10 @@ impl Painter {
 impl Painter {
     pub(crate) fn clock_mut(&mut self) -> &mut FrameClock {
         self.core.clock_mut()
+    }
+
+    pub(crate) fn now_seconds(&self) -> f64 {
+        self.core.now_seconds()
     }
 
     pub(crate) fn scroll_intents(&self) -> &ScrollIntents {

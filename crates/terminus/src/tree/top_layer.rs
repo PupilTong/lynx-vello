@@ -56,10 +56,10 @@
 //! to its block equivalent) to a style whose `-servo-top-layer` is `auto`.
 //! The fork's `lynx` build admits that longhand in a UA-origin sheet only
 //! (`LYNX_UA_LONGHANDS` in `properties/data.py`), so the fixups run for an
-//! element exactly when an embedder UA rule declares it — bobcat-core's
-//! `dialog:modal`, `:popover-open` and `::backdrop` do. Membership is not derived from that
-//! declaration and does not require it: the embedder decides what enters the
-//! layer, and an element can be in it with no such rule. So membership stays
+//! element exactly when an embedder UA rule declares it — the `html` module's
+//! `dialog:modal`, `:popover-open` and `::backdrop` rules do, written into the embedder's UA sheet.
+//! Membership is not derived from that declaration and does not require it: the embedder decides
+//! what enters the layer, and an element can be in it with no such rule. So membership stays
 //! this crate's truth where it reads it — the position lowering answers
 //! `fixed`, and a top-layer element establishes the containing block of its
 //! absolutely positioned descendants whatever its computed position — and for
@@ -409,7 +409,7 @@ mod tests {
     use crate::test_common::Doc;
     use crate::tree::document::NodeId;
 
-    /// The parts of bobcat-core's UA sheet these tests read.
+    /// The parts of an embedder's UA sheet these tests read.
     const UA: &str = "
         dialog { display: flex; position: absolute; }
         dialog.modal { position: fixed; }

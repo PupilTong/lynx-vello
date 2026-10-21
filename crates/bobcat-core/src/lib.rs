@@ -125,6 +125,6 @@ pub use terminus::link::{
 pub use view::configure_wasm_workers;
 pub use view::{
     DrawTarget, EngineError, EngineEvent, EventRequester, FrameSize, LynxGroup, LynxView,
-    LynxViewError, NoWakeup, ScreenMetrics, Screenshot, ScriptSource, StyleThreads, ViewSources,
-    WindowTarget, WorkerId,
+    LynxViewError, NoWakeup, PainterError, ScreenMetrics, Screenshot, ScriptSource, StyleThreads,
+    ViewSources, WindowTarget, WorkerId,
 };

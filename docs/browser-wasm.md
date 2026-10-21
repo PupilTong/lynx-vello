@@ -439,7 +439,7 @@ receives (`docs/editable-text-design.md`, E4):
   per update and, at its end, a `finishComposition` when the end's text is
   the last update's, a `commitText` of it otherwise. The Render Worker queues the
   command with the keys and pointers and calls `BobcatRenderer::edit`,
-  which reads it back into `terminus::editing::Command` and hands it to
+  which reads it back into `terminus::link::editing::Command` and hands it to
   `LynxView::edit`, dropping it while the view cannot take edits (before
   boot). The textarea's own keys go out as `bobcat-key`, and its handling of
   the keys the engine moves the selection for (arrows, Home, End,

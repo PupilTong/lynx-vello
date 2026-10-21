@@ -49,11 +49,11 @@ use crate::tree::document::Document;
 
 impl<T> Document<T> {
     /// Defines HTML's built-in elements this crate implements
-    /// ([`crate::html`]): today `dialog` ([`dialog`]).
+    /// ([`link::html`](crate::link::html)): today `dialog` ([`dialog`](crate::link::html::dialog)).
     ///
     /// Like [`Document::define`], it must run before any element carries one
     /// of their tags, and the tags must have no definition yet. Their UA
-    /// rules are the embedder's to add ([`crate::html`], "The UA rules").
+    /// rules are the embedder's to add ([`link::html`](crate::link::html), "The UA rules").
     pub fn define_html_elements(&mut self) {
         dialog::define(self);
     }

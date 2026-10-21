@@ -129,7 +129,7 @@ const CLOSE_EVENT: &str = "close";
 const CANCEL_EVENT: &str = "cancel";
 
 /// HTML's UA rules for `dialog` and `::backdrop`, adapted as the module
-/// documentation lists, each at zero specificity ([`crate::html`], "The UA
+/// documentation lists, each at zero specificity ([`link::html`](crate::link::html), "The UA
 /// rules"). The display `dialog` gets is the embedder's, written ahead of
 /// them.
 pub const UA_RULES: &str = r#"

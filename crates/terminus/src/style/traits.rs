@@ -262,7 +262,7 @@ impl<'a, T: Sync> TElement for &'a Node<T> {
 
     /// An element of a shadow tree with the `pseudo` attribute of a
     /// placeholder is its host's `::placeholder`
-    /// ([`Node::implemented_pseudo_element`]). Stylo then collects its rules
+    /// (`Node::implemented_pseudo_element`). Stylo then collects its rules
     /// as an element-backed pseudo-element's: the `::placeholder` rules of
     /// every origin with the host as the originating element, the UA
     /// sheet's and its own shadow tree's normal rules as the element it
@@ -507,7 +507,7 @@ impl<'a, T: Sync> TElement for &'a Node<T> {
     ///
     /// `display` is Gecko's, for the table parts whose principal box is not
     /// the box that was laid out. This engine has no table box tree: the
-    /// element's own box is the one [`crate::layout::committed_box`] recorded.
+    /// element's own box is the one `layout::committed_box` recorded.
     fn query_container_size(&self, _display: &Display) -> Size2D<Option<Au>> {
         let size = Node::arenas(self).committed_box(Node::id(self)).container;
         Size2D::new(
@@ -554,7 +554,7 @@ impl<T: Sync> Element for &Node<T> {
 
     /// The host of the shadow tree the pseudo-element's element is in: the
     /// originating element a `::placeholder` compound's left-hand side is
-    /// matched against ([`Node::implemented_pseudo_element`]).
+    /// matched against (`Node::implemented_pseudo_element`).
     fn pseudo_element_originating_element(&self) -> Option<Self> {
         debug_assert!(self.is_pseudo_element());
         Element::containing_shadow_host(self)

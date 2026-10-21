@@ -73,7 +73,7 @@ it is how Lynx's own rule that an `<image>` box is never bitmap-sized reaches
 a layout engine that would otherwise size a replaced leaf from its pixels.
 
 Implementation note (2026-09-06): `bobcat_core`'s `tree::image` defines the
-`image` tag as a `terminus::CustomElement` observing `src` alone and reflecting it
+`image` tag as a `terminus::link::CustomElement` observing `src` alone and reflecting it
 into `Document::set_image_source`, with an empty value and a removed attribute
 both meaning no source — web-core relays `newval || placeholder` to its inner
 `<img>`, which with no placeholder is the same case, and native refuses to
@@ -284,7 +284,7 @@ revision 4.1 of the design, ruled 2026-10-10):
    own on its tokio pool natively, inside the load's local task on the
    Render Worker in the browser. The parse is `terminus`'s own converter
    (`crates/terminus/src/render/svg/`), reached through
-   `terminus::ImageEvent::parse_document`: one `roxmltree` parse (DTD allowed),
+   `terminus::link::ImageEvent::parse_document`: one `roxmltree` parse (DTD allowed),
    presentation attribute values through `svgtypes` (CSS inside the
    document, a `<style>` element or a `style` attribute, is not read; ruled
    2026-10-09), and one walk producing a flat command list with geometry,

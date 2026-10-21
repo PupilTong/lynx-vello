@@ -32,7 +32,7 @@ use crate::render::image::FrameImages;
 /// frame that scrolls, and a slice index costs nothing where a URL hash would
 /// have cost a lookup per draw per frame.
 #[derive(Debug, Default)]
-pub(crate) struct PainterImages {
+pub(super) struct PainterImages {
     /// The commit the table was built for.
     key: Option<u64>,
     /// One entry per image draw of that commit, in draw order.
@@ -44,7 +44,7 @@ pub(crate) struct PainterImages {
 
 impl PainterImages {
     /// Whether the table already holds this commit's pixels.
-    pub(crate) fn holds(&self, commit: u64) -> bool {
+    pub(super) fn holds(&self, commit: u64) -> bool {
         self.key == Some(commit)
     }
 
@@ -60,7 +60,7 @@ impl PainterImages {
     /// adoption to say ([`Painter::adopt`](super::Painter::adopt)): adopting a
     /// commit is the only thing that calls this, and it runs before a
     /// swap-chain image is acquired.
-    pub(crate) fn resolve(
+    pub(super) fn resolve(
         &mut self,
         frame: &crate::visual::CommittedFrame,
         images: &dyn FrameImages,
@@ -71,7 +71,7 @@ impl PainterImages {
     }
 
     /// This commit's pixels, in draw order.
-    pub(crate) fn resolved(&self) -> &[Option<ImageData>] {
+    pub(super) fn resolved(&self) -> &[Option<ImageData>] {
         &self.resolved
     }
 
@@ -81,7 +81,7 @@ impl PainterImages {
     /// out of that view's store, and commit ids restart at one per document,
     /// so a table still keyed by the old page's commit would be handed to the
     /// next one.
-    pub(crate) fn forget(&mut self) {
+    pub(super) fn forget(&mut self) {
         self.key = None;
         self.resolved.clear();
         self.sources.clear();

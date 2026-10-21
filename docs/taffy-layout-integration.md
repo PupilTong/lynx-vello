@@ -3,7 +3,7 @@
 Status: **design, not yet implemented**. This document records the decision
 basis and target architecture for replacing `seldon`'s hand-written Flexbox
 and Grid algorithms with the `taffy` crate's low-level custom-tree API, and
-for restructuring `seldon` and `terminus::layout` so the whole layout protocol
+for restructuring `seldon` and `terminus::link::layout` so the whole layout protocol
 uses taffy's vocabulary. Verified against **taffy 0.13.0** (released
 2026-08-08) and Blitz `blitz-dom`/`stylo_taffy` at 2026-08-12 main. The raw
 research reports (taffy API inventory, Blitz prior art, seldon/dom protocol
@@ -530,7 +530,7 @@ sequence in `run_layout` is unchanged.
 | `dom/src/layout/host.rs` | **Rewritten**: `LayoutCtx` + taffy trait impls + ext dispatch + containment wrapper; `run_layout`/parked-boundary/positioned-pass logic retained with the §7 fixed-hoisting change |
 | `dom/src/layout/style.rs` | **Extended**: taffy trait impls on `StyleView`; `resolve_position`/CB predicates unchanged |
 | terminus child storage | **New**: layout child lists (flatten + order sort) with flush-time rebuild |
-| `terminus` public API (`Document::layout`, `rounded_layout`, `set_natural_size`, `register_fonts`, scroll/visual consumers) | **Unchanged signatures**; `terminus::layout::Layout` is now `taffy::Layout` (gains `scrollbar_size`, loses nothing consumed today) |
+| `terminus` public API (`Document::layout`, `rounded_layout`, `set_natural_size`, `register_fonts`, scroll/visual consumers) | **Unchanged signatures**; `terminus::link::layout::Layout` is now `taffy::Layout` (gains `scrollbar_size`, loses nothing consumed today) |
 
 Dependency edges after: `dom → { seldon, taffy, stylo }`,
 `seldon → { taffy, stylo, parley }`. Nothing outside terminus touches seldon

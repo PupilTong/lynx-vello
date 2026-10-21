@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 
 use terminus::link::Point2D;
 use terminus::link::input::{InputEvent, PointerKind, PointerPhase};
+use terminus::link::painter::ScrollIntentsTestUtils as _;
 
 use crate::test_support::{
     IntersectionWatcher, TestEngine, TestViewSpec, WatcherLog, take_watched,
@@ -2180,7 +2181,7 @@ fn a_stationary_hold_longpresses_on_the_frame_clock() {
     );
 
     engine.painter.clock_mut().pin(0.6);
-    let now = engine.painter.clock_mut().now_seconds();
+    let now = engine.painter.now_seconds();
     engine.painter.service_gesture_clock(now);
     wait_for_log(&mut engine, "longpress:10");
     assert!(

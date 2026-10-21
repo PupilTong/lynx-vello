@@ -150,7 +150,7 @@ impl ScrollAxes {
 /// it when a gesture that starts in it chains: the engine's own
 /// `scroll-capture` property.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ScrollCapture {
+pub(crate) enum ScrollCapture {
     /// Inner first, the CSS default: this container consumes what it can and
     /// hands the remainder outward.
     #[default]
@@ -175,7 +175,7 @@ impl ScrollCapture {
     /// is never deferred, so an axis the step does not move keeps the
     /// inner-first order.
     #[must_use]
-    pub fn defers(self, sign: f32) -> bool {
+    pub(crate) fn defers(self, sign: f32) -> bool {
         let forward = sign > 0.0;
         let backward = sign < 0.0;
         match self {
@@ -190,15 +190,16 @@ impl ScrollCapture {
 /// A container's `scroll-capture` on each physical axis: the
 /// `scroll-capture-x` and `scroll-capture-y` longhands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct CaptureAxes {
-    pub x: ScrollCapture,
-    pub y: ScrollCapture,
+pub(crate) struct CaptureAxes {
+    pub(crate) x: ScrollCapture,
+    pub(crate) y: ScrollCapture,
 }
 
 impl CaptureAxes {
     /// The same value on both axes, as the `scroll-capture` shorthand sets.
+    #[cfg(test)]
     #[must_use]
-    pub const fn both(capture: ScrollCapture) -> Self {
+    pub(crate) const fn both(capture: ScrollCapture) -> Self {
         Self {
             x: capture,
             y: capture,
@@ -207,7 +208,7 @@ impl CaptureAxes {
 
     /// The value on `axis`.
     #[must_use]
-    pub fn on(self, axis: ScrollAxis) -> ScrollCapture {
+    pub(crate) fn on(self, axis: ScrollAxis) -> ScrollCapture {
         match axis {
             ScrollAxis::X => self.x,
             ScrollAxis::Y => self.y,
@@ -217,7 +218,7 @@ impl CaptureAxes {
 
 /// One physical scroll axis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ScrollAxis {
+pub(crate) enum ScrollAxis {
     X,
     Y,
 }
@@ -226,14 +227,14 @@ pub enum ScrollAxis {
 /// it lets past, and where it stands in the order. See the module's
 /// *Chaining* section.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ChainLink {
+pub(crate) struct ChainLink {
     /// The axes the user may scroll directly (`overflow: scroll`).
-    pub user_scrollable: ScrollAxes,
+    pub(crate) user_scrollable: ScrollAxes,
     /// The axes on which a boundary hands the remainder outward —
     /// `overscroll-behavior: auto`. `contain` and `none` clear the flag.
-    pub chains: ScrollAxes,
+    pub(crate) chains: ScrollAxes,
     /// Whether the container above goes first, per axis.
-    pub capture: CaptureAxes,
+    pub(crate) capture: CaptureAxes,
 }
 
 /// The order a chain of links is visited in on `axis` for a delta of
@@ -391,13 +392,13 @@ pub struct ScrollBox {
     pub circular: ScrollAxes,
     /// Whether the container above goes first, per axis
     /// (`scroll-capture-x` / `scroll-capture-y`).
-    pub capture: CaptureAxes,
+    pub(crate) capture: CaptureAxes,
 }
 
 impl ScrollBox {
     /// This container's part in a chain walk.
     #[must_use]
-    pub fn link(&self) -> ChainLink {
+    pub(crate) fn link(&self) -> ChainLink {
         ChainLink {
             user_scrollable: self.user_scrollable,
             chains: self.chains,
@@ -777,7 +778,7 @@ impl<T> Document<T> {
     /// `from` may be any node: the chain is every scroll container on its
     /// containing-block path, itself included, nearest first — `hidden`
     /// containers too, since they carry chain policy even though only a
-    /// `scroll` axis consumes. Order and reach are [`drive_chain`]'s; see
+    /// `scroll` axis consumes. Order and reach are `drive_chain`'s; see
     /// the module's *Chaining* section. The named container is the first to
     /// move in that order, which under `scroll-capture: nearest` can be an
     /// ancestor of the one the gesture started in.
@@ -791,7 +792,7 @@ impl<T> Document<T> {
 
     /// [`Self::scroll_chain`] for a discrete step with a direction and no
     /// end position of its own — a wheel tick: each container it reaches
-    /// snaps as it lands ([`resolve_step`] with [`ScrollKind::Directed`]).
+    /// snaps as it lands (`resolve_step` with `ScrollKind::Directed`).
     pub fn scroll_chain_directed(
         &mut self,
         from: NodeId,

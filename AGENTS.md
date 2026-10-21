@@ -267,15 +267,13 @@ page and what it adds to the realm driver, `quickjs.rs`'s script engine,
 `runtime/` for realm integration, `workers.rs` for the `Worker` class, `tree/`
 for Lynx page policy.
 `background/` is the `bobcat-workers` thread and its worker realms. `view/` is
-the public view facade, `paint/` the `Painter` with its `gesture.rs` input
-router, `motion.rs` scroll kinematics (lynx-ui's rubber band, fling decay,
-bounce back, and the glide — the bounce back's spring toward a snap position
-or a smooth programmatic scroll's target) with `inertia.rs` running them over
-the scroll intents, beside the constant-rate motion of Lynx's `autoScroll`
-(which yields to every one of them and to a finger, writes at most about
-sixty times a second and a physical pixel at a time, and owes no frame while
-it cannot move),
-`images.rs` image protocol and `graphics.rs` GPU target. `link.rs` is
+the public view facade, `paint/` the `Painter` facade: its link to one view
+(the publication watch, the seat's mailbox, the events it sends to main) and
+Lynx's gesture policy (`LYNX_GESTURES`) with the provenance of the scroll
+physics. The engine half it wraps — the input router, the scroll kinematics
+and the motions run over the scroll intents (Lynx's `autoScroll` among them),
+the image protocol and the GPU target — is `terminus`'s `painter/`, reached
+through `terminus::link::painter`. `link.rs` is
 the one channel set a view spans its two threads with, `jobs.rs` the engine
 thread itself — its scheduler and its job queue — `lifetime.rs` the task set,
 token and latches a view and a worker are both built from, `realm/` the one
@@ -394,7 +392,7 @@ not. `ToMain` carries a `PageUpdate` (the data, global-prop, global-event and
 reload commands a host accepted after observing MTS boot, in host FIFO order),
 a `DispatchEvent` (one event's type and target, plus the payload the router
 decided as values: the position, the wheel delta, the timestamp and — for the
-four touch events — its touch points), an `Edit` (one `terminus::editing::Command`
+four touch events — its touch points), an `Edit` (one `terminus::link::editing::Command`
 for the focused editing host, from `LynxView::edit`; main dispatches the
 `beforeinput`/`input`/`composition*` events it owes around the change, which
 no listener can stop), a `Vsync` (the display-frame reading a realm that called
@@ -432,7 +430,7 @@ arrives through `pump`; constructor errors cover attachment, an unknown default
 font family and two native modules claiming one name.
 
 **That same call hands the fetcher the view's startup sources.** It validates
-the fonts and default family first — a `terminus::TextContext`'s business, with no
+the fonts and default family first — a `terminus::link::TextContext`'s business, with no
 document and zero fetches on failure, which is why the check has to be here
 rather than a turn later — and then requests each stylesheet in the order the
 view listed them, followed by the entry module, on the embedder's thread,
@@ -512,7 +510,7 @@ restyling in parallel, on the assumption that a person drives one view at a
 time. A host that needs two pages genuinely parallel gives them a group each,
 on a thread each.
 
-`bobcat-main` builds the group's one `terminus::StylePool` — sized by the
+`bobcat-main` builds the group's one `terminus::link::StylePool` — sized by the
 `StyleThreads` passed to `LynxGroup::new`, `Auto` being the usual choice —
 before any view attaches, and every document it carries holds an `Rc` of it.
 Stylo's bloom filter and style-sharing cache are per-OS-thread borrows held for
@@ -533,7 +531,7 @@ group's rather than any view's.** A host that replaces groups — every
 linear memory. `StyleThreads::Sequential`, and `Auto` where the pool would have
 held `bobcat-main` and nothing else, gives a group no pool at all and traverses
 on `bobcat-main` alone, a configuration rather than a fallback.
-`terminus::MAX_STYLE_THREADS` is six, counted the way Stylo counts its own six: a
+`terminus::link::MAX_STYLE_THREADS` is six, counted the way Stylo counts its own six: a
 ceiling, not a tuning knob, because Stylo indexes its per-traversal
 thread-local storage by Rayon thread index into an array that long, so a wider
 pool is a construction error rather than a silent clamp, reported by
@@ -591,7 +589,7 @@ own cache/retry policy.
 fetcher builder, and for the same reason: a module runs on the embedder's own
 thread, inside `LynxView::pump`, so it needs neither `Send` nor `Sync` and a
 Wasm module may hold `JsValue`s. One `dyn` handler per `NativeModules` key,
-`terminus::CustomElement`'s shape: `name()` and `methods()` are read once at
+`terminus::link::CustomElement`'s shape: `name()` and `methods()` are read once at
 construction — two modules of one name is `EngineError::DuplicateNativeModule`,
 returned as `LynxViewError::Engine` — and the table crosses to the realm as
 data, so nothing asks a module a question while script is running. The call
@@ -1081,8 +1079,8 @@ and deliver nothing, and the module does not invent the background-only
 #### Painter, frames, pacing and images
 
 The core depends on `terminus` and re-exports one seam: the `input` module
-republishes `terminus::Point2D` and
-`terminus::input::{InputEvent, InputKind, PointerId, PointerKind, PointerPhase}`.
+republishes `terminus::link::Point2D` and
+`terminus::link::input::{InputEvent, InputKind, PointerId, PointerKind, PointerPhase}`.
 Wheel deltas there are viewport CSS pixels; converting physical-pixel, line or
 page units is embedder policy. No document, node or hit-test result crosses.
 
@@ -1206,7 +1204,7 @@ canvas's backing store first.
 
 **Images are entirely the embedder's**; core fetches, decodes, caches and
 retains no pixel of its own. A view's one resource system — its
-`ResourceFetcher`, which is also its `terminus::FrameImages`, owned by the
+`ResourceFetcher`, which is also its `terminus::link::FrameImages`, owned by the
 `LynxView` as an `Rc` and read by an attached painter through the view's seat —
 is asked for one image at a time by source string (the `url(…)` value CSS
 produced, or a replaced element's source): named through `request_image`,
@@ -1214,7 +1212,7 @@ answered through `ImageReports` with the intrinsic size layout needs, given its
 moment in every `LynxView::pump` through `service_images` (where a host whose
 loads complete off-thread forwards them into the reports), and read back
 synchronously when a painter adopts a commit through `FrameImages::read`, which
-carries a `terminus::ImageSizeHint` — the largest device-pixel extent the frame
+carries a `terminus::link::ImageSizeHint` — the largest device-pixel extent the frame
 draws that source at, computed per draw under its transform and unioned per
 source — so a host decodes to the draw rather than to the file. No container
 sniffing, codec contract, cache policy or byte budget lives in `bobcat-core` or
@@ -1228,8 +1226,8 @@ them.
 **An SVG document is parsed by the host, where it decodes bitmaps**
 (`docs/svg-lynx-component-design.md`, revision 4.1, ruled 2026-10-10). A
 fetched SVG is parsed by the fetcher with the engine's own parser,
-`terminus::ImageEvent::parse_document` (re-exported as `ImageEvent`; the converter
-in `terminus::render::svg`, which shapes no text), and reported through
+`terminus::link::ImageEvent::parse_document` (re-exported as `ImageEvent`; the converter
+in `terminus`'s `render/svg`, which shapes no text), and reported through
 `ImageReports::parsed_document(source, Arc<VectorDocument>)`, or `failed`
 when it does not parse; the report applies through
 `MainThreadRuntime::apply_image_events` like every other, where `terminus` shapes
@@ -1833,7 +1831,7 @@ it refused, `7` for a state that refused it (a dialog's
 `boundingClientRect` included (`left`, `top`, `width`, `height`), answers a
 length-prefixed record whose first field is the code. It matches no name
 itself: every name is the element's component's
-`terminus::CustomElement::invoke`, reached through
+`terminus::link::CustomElement::invoke`, reached through
 `Document::invoke_element_method`, and on its `NotFound` the base set every
 element has (`tree::base_methods`: `boundingClientRect`, `scrollIntoView`,
 `scrollTo`, `scrollBy`). The params cross as JSON text, and as the empty
@@ -2084,7 +2082,7 @@ step, so an engine component whose definition lists the type in
 `stop_propagation` is the walk's one stop flag and ends the walk after its
 step, which keeps no realm from its call, every call being at the first. What
 the event carries
-is `terminus::event::EventDetail` (one variant per payload shape), which the router
+is `terminus::link::event::EventDetail` (one variant per payload shape), which the router
 fills in, `ToMain::DispatchEvent` carries, the Rust walk lends out and
 `encode_detail` turns into the realm's numbers. A name a component observes is
 in the painter's name set while an element of that component exists, beside
@@ -2096,7 +2094,7 @@ freed node removed, both drained before each commit is published
 CSSOM-View's `scroll` and `scrollend` are decided on this thread, never on
 the painter: `adopt_scroll_offsets` queues a `scroll` per container a post
 moved and a `scrollend` when a post names it at rest after it scrolled, and a
-script-facing instant scroll (`terminus::Document::take_instant_scrolls`) queues
+script-facing instant scroll (`terminus::link::Document::take_instant_scrolls`) queues
 its `scroll` from its entry's epilogue and gets its `scrollend` from the
 painter's rest post after carrying the request out. A wheel gesture rests
 once, 100 ms after its last tick (`WHEEL_REST_SECONDS`). All are component
@@ -2113,7 +2111,7 @@ for the batch, which is the spec's "posting a task" — the event is never
 delivered inside the entry that committed — and that entry calls
 `Document::dispatch_content_visibility_changes`, which fires each one through
 `Document::dispatch_element_event`. The walk is `terminus`'s, the listeners are
-`terminus::CustomElement` definitions (the engine's components — `<image>` today,
+`terminus::link::CustomElement` definitions (the engine's components — `<image>` today,
 `<list>` next) reached through `CustomElement::handle_event`, and **no realm
 is entered at all**: there is no export, no Lynx event name, no
 `__AddEvent`/worklet table consultation and no `global-bindEvent` pass, and a
@@ -2375,7 +2373,7 @@ slot for the fold order, and the structure pinned in the cascade; a component
 on the two coordinator tags whose only member is the `setFoldExpanded` UI
 method, its `CustomElement::invoke`, a scroll of the coordinator to `offset`
 clamped to the fold range; iOS's `getScrollInfo` and `scrollBy` are not
-built), HTML's `<dialog>` and popover UA rules, which are `terminus::html`'s
+built), HTML's `<dialog>` and popover UA rules, which are `terminus::link::html`'s
 (`new_document` calls `Document::define_html_elements` before it defines
 the overlays, which build a `dialog` in their shadow trees, and registers
 the shared `ComponentEvents` queue `tree/lib.rs` defines as the document's
@@ -2390,7 +2388,7 @@ native's code 7, a ruled deviation from web-core's 4; `dialog_tests.rs` and
 layer, built as web-core builds it: the host is `display: contents` and
 paints nothing, and a UA shadow tree `dialog#dialog[part=dialog] >
 div.overlay-inner > slot` carries the content — the dialog
-(`popover="manual"`) is `terminus::html::dialog`'s own element, driven only through
+(`popover="manual"`) is `terminus::link::html::dialog`'s own element, driven only through
 HTML's API for it, as web-core drives its own: `visible` (present and not
 `"false"`) on a connected host shows it with `showModal()`, or — under
 `events-pass-through` — as a Manual popover, the top-layer element HTML does
@@ -2449,7 +2447,7 @@ E5: a UA shadow tree of one `contenteditable="plaintext-only"` editor — for
 context, `white-space: pre`; for `x-textarea` a Lynx `<text>`, whose Lynx
 paragraph lays the lines out — and a `#placeholder` shown while the editor
 is `:empty`, whose text block is the field's `::placeholder` (it carries
-`pseudo="-webkit-input-placeholder"`, `terminus::PLACEHOLDER_PSEUDO_ID`, so an
+`pseudo="-webkit-input-placeholder"`, `terminus::link::PLACEHOLDER_PSEUDO_ID`, so an
 author's `.hint::placeholder` rule reaches it under css-pseudo-4's property
 restriction, and the UA sheet's `x-input::placeholder` rules lay it out);
 the host is the field's box; the placeholder style attributes
@@ -2473,7 +2471,7 @@ hints, the swiper's item count, the refresh view's slot
 assignment, the dialog's `:open`/`:modal` state, the overlay's shadow
 tree, its dialog's top-layer membership and its events, the markdown
 element's shadow tree, its rendering and its events, and the frame's
-shadow root need `terminus::CustomElement` callbacks. Runtime attribute members perform
+shadow root need `terminus::link::CustomElement` callbacks. Runtime attribute members perform
 DOM mutations; Stylo tracks attribute dependencies and recascades on changes.
 HTML's own rules — the dialog's, the popover's and the display `dialog` maps
 `block` to — are written with their selectors inside `:where()` and ordered
@@ -2506,7 +2504,7 @@ without a box; `dispatch_component_events` tells it apart with
 component-event batch while its commit was skipped (`needs_render`, a listed
 author sheet still outstanding) and posts it after the first commit.
 
-The native host-module functions call `terminus::Document` directly. Element
+The native host-module functions call `terminus::link::Document` directly. Element
 identity is the DOM `NodeId`, which is also the element's Lynx `unique_id` —
 one number, issued by the DOM, never reissued; the JS side mints no ids.
 
@@ -3154,7 +3152,7 @@ as a `bobcat-edit` (`insertText`/`insertFromPaste` → `insert`, the line
 breaks, the deletions, `deleteByCut` → `deleteBackward`); a composition is
 `setComposition` per update, read at the `input` after it, and at its end a
 `finishComposition` (the end's text is the last update's) or a `commitText`. `BobcatRenderer::edit` reads the flat call back into
-`terminus::editing::Command` (`src/text_input.rs`, natively tested) and drops it
+`terminus::link::editing::Command` (`src/text_input.rs`, natively tested) and drops it
 while the view cannot take edits. Every view is set to
 `TextInputSource::Commands`, so a key carries no text and its `keydown` only
 moves and selects all; the facade prevents the textarea's own handling of
@@ -3520,11 +3518,11 @@ Subsystems:
   `RenderLayer` group effects, reverse-paint-order hit testing, and
   `content-visibility: auto` relevance determination (`relevance.rs`), which
   runs inside `render` between the paint-order build and the walk.
-- `paint/` — the document-owned private `Painter`, walker, fragment painters
+- `paint/` — the document-owned private `FramePainter`, walker, fragment painters
   and the retained `vello::Scene` a `commit` publishes as `CommittedFrame`.
 - `scroll/` — CSSOM-View geometry, per-node offsets, `scroll_to`/`scroll_by`/
   `scroll_chain`, and the one chain walk (`drive_chain`) both the document
-  and `bobcat-core`'s painter run: `overscroll-behavior` fences the reach,
+  and the presenting painter (`painter/`) run: `overscroll-behavior` fences the reach,
   the engine's own `scroll-capture-x` / `scroll-capture-y` (shorthand
   `scroll-capture`) hands a gesture to the container above first (per axis,
   for the named delta sign). `scroll/snap.rs` is css-scroll-snap-1 — positions from
@@ -3535,7 +3533,7 @@ Subsystems:
   position follows that area through a layout change (§4.1.3) instead of
   taking the position nearest its old offset: the document moves its own
   offset inside the render (`Document::resnap`, the committed frame's
-  positions against the newly built ones), and `bobcat-core`'s painter the
+  positions against the newly built ones), and the presenting painter the
   offset it holds when it adopts the commit, unless a drag, fling, bounce
   back or glide has the container.
   `scroll/request.rs` is CSSOM-View's `scrollTo({behavior})`: a script-facing
@@ -3600,6 +3598,15 @@ Subsystems:
   `backdrop-filter` bake at the document's root renders over the canvas
   colour its caller composites over, which `FilterTextures::prepare` and
   `Headless::prepare_filters` therefore take.
+- `painter/` — the presenting painter (`link::painter::Painter`), built on the
+  thread that draws and `!Send`: the input router and gesture synthesis on an
+  owner's `GesturePolicy` (`gesture.rs`), the scroll kinematics (`motion.rs`)
+  and the drags, flings, bounce backs, glides and auto-scrolls run over its
+  scroll intents (`inertia.rs`), the pixels an adopted frame draws
+  (`images.rs`) and the window target (`graphics.rs`). It composes each
+  committed frame at its own offsets and posts them back
+  (`Painter::drain_changed`); `bobcat-core`'s `Painter` facade is its link to
+  one view.
 
 **Vector images** (`docs/svg-lynx-component-design.md`): an SVG document used
 as an image — `<image src>`, `background-image`, `mask-image`, the Lynx
@@ -3652,7 +3659,7 @@ source, `svg-content:` and the 32 hex digits of a 128-bit SipHash-1-3 of the
 bytes (`siphasher`), so identical markup is one entry, one parse, one scene
 and one texture however many elements set it. An unknown source is created
 `Pending` and its bytes queued as a document request,
-`Document::take_document_requests` (`terminus::DocumentRequest` tuples, drained
+`Document::take_document_requests` (`terminus::link::DocumentRequest` tuples, drained
 once, which the embedder hands the host to parse and report like a fetched
 document); a known one binds and settles at once. No bind and no walk ever
 asks the host to fetch a synthetic source, and its entry is forgotten when
@@ -3765,7 +3772,7 @@ Rulings and limits to know before touching it:
   hit-tested as its element; it is never handed out. A side table, not a
   per-node bit: the layer is almost always empty and every per-box reader
   tests `is_empty` first. §3.1's computed-value fixups run where a UA rule
-  declares the UA-only `-servo-top-layer` (bobcat-core's `dialog:modal`,
+  declares the UA-only `-servo-top-layer` (`terminus::link::html`'s `dialog:modal`,
   `:popover-open` and `::backdrop`); membership, not the longhand, stays `terminus`'s truth for the
   containing block (see `docs/terminus-architecture.md` "Top layer and
   `::backdrop`").
@@ -4018,7 +4025,7 @@ retained scene → `terminus`'s headless GPU) over the whole painted frame, `vie
 that ratio, so anything smaller is a crop. Playwright instead downsamples to
 CSS pixels; the two coincide at a ratio of 1, which lynx-stack pins for
 determinism and every viewport here uses. Its `TestImages` is the in-memory
-`terminus::FrameImages` the image suites hand to a capture — the only image store in
+`terminus::link::FrameImages` the image suites hand to a capture — the only image store in
 this workspace, and deliberately a test double: it fetches, decodes and evicts
 nothing. `pump_images` drives one round of the document-to-host image protocol
 (every source `take_wanted_images` named and every document request
@@ -4060,12 +4067,12 @@ would host it:
   Underneath it, the data protocol —
   `__SetAttribute(element, "update-list-info", …)` — delivers a compiled
   `<list>`'s cells as real element children, which is the only path one
-  receives children on. `<list>` is a `terminus::CustomElement` for its UI
+  receives children on. `<list>` is a `terminus::link::CustomElement` for its UI
   methods only (`scrollToPosition`, `scrollBy`, `autoScroll`,
   `getScrollContainerInfo`, `getVisibleCells`): there is no cell recycling,
   no threshold or scroll events, and no sticky-bottom or snap rules
   (`docs/tracking/deviations.md`).
-- **Gesture detectors and the arena.** `crates/bobcat-core/src/paint/gesture.rs`
+- **Gesture detectors and the arena.** `crates/terminus/src/painter/gesture.rs`
   has no fling or velocity, no `:active` driving, no `consume-slide-event`, no
   per-element `GestureDetector`/arena relations and no `pointerover`/`out`/
   `enter`/`leave`, mouse boundary events, `auxclick` or `contextmenu`

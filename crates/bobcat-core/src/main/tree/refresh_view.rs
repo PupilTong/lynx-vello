@@ -32,7 +32,7 @@
 //! inner `scroll-view` at its top edge hands what it cannot take to `#container`, the inner
 //! scroller's flat-tree scroll parent, and the painter holds every container a drag moves until
 //! the release, then glides each to its snap position (`ScrollIntents::settle` in
-//! `crates/bobcat-core/src/paint/lib.rs`).
+//! `crates/terminus/src/painter/mod.rs`).
 //!
 //! # Slot assignment
 //!
@@ -127,7 +127,7 @@
 //!
 //! `autoStartRefresh` is instant where web-core's is smooth. The painter glides a smooth request
 //! to where the frame's at-rest snap rule would settle its target (`apply_request` in
-//! `crates/bobcat-core/src/paint/lib.rs`), and the header is a snap position only once it is at
+//! `crates/terminus/src/painter/mod.rs`), and the header is a snap position only once it is at
 //! least 90% visible. From rest it is not, so a smooth request to it would be settled back to
 //! `#content` and nothing would move. An instant request moves the document at once; the
 //! commit that carries it lays out, which re-samples the header's alignment animation at the new

@@ -79,7 +79,7 @@ call — embedders cannot set/clear dirty state or write computed styles.
 Mutation APIs follow a let-it-crash contract (`debug_assert` + panic on stale
 handles rather than silent no-ops).
 
-The embedder-facing `terminus::Device` profile exposes exactly the inputs that vary
+The embedder-facing `terminus::link::Device` profile exposes exactly the inputs that vary
 between views — `Device::new(width, height, device_pixel_ratio)` — and locks
 the rest: screen media type, standards (no-quirks) mode, light color scheme,
 coarse touch pointers, CSS-values-4 fallback font metrics. Quirks stays
@@ -115,7 +115,7 @@ swaps one sheet's text in its place in their order, as rewriting a shadow
 `<style>` does) replaces the document's author rules inside that tree;
 `::slotted()` and `::part()`/`exportparts` work off the same data. An
 element of a shadow tree whose `pseudo` attribute is
-`-webkit-input-placeholder` (`terminus::PLACEHOLDER_PSEUDO_ID`, Blink's name for
+`-webkit-input-placeholder` (`terminus::link::PLACEHOLDER_PSEUDO_ID`, Blink's name for
 the element behind `::placeholder` in its UA shadow trees) is its host's
 `::placeholder`: `Node::implemented_pseudo_element` answers
 `PseudoElement::Placeholder` for it (a node bit the two attribute setters
@@ -1004,7 +1004,7 @@ Its `input` module is the host seam: `InputEvent` is plain `Copy` data (pointer
 produce equally, and `Document::route_input(InputEvent)` is a pure read that
 reports the node the event hit through the rendered frame. The crate has **no
 default-action machinery and no recognizer**: deciding and driving the
-user-agent scroll belongs to `bobcat-core`'s input router (`gesture.rs`), which
+user-agent scroll belongs to the presenting painter's input router (`painter/gesture.rs`), which
 calls `scroll_by`/`scroll_chain` — whose unconsumed remainders exist for
 exactly that caller. `InputEvent::default_prevented` is the `preventDefault()`
 seam an embedder hands to that router after its own arbitration; this crate
@@ -1104,7 +1104,7 @@ step re-checks liveness, a step whose node was freed being skipped unreported;
 each call is its own `[CEReactions]` scope, so what a handler's mutation raised
 is drained before the next step. `ElementEvent` answers
 `type_name`/`detail`/`timestamp`/`target`/`current_target`/`phase` and carries
-both stop methods. `terminus::event::EventDetail` is the one description of an
+both stop methods. `terminus::link::event::EventDetail` is the one description of an
 event's payload, one variant per shape. A shadow root has no hook, so the
 shadow root a non-composed path ends at is delivered to its host's
 `handle_event` (with `element` and `current_target` the host) — where a script

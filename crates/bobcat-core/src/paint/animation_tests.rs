@@ -10,6 +10,8 @@
 
 use std::time::Duration;
 
+use terminus::link::painter::ScrollIntentsTestUtils as _;
+
 use crate::style::{PreparsedDeclaration, PreparsedKeyframe, PreparsedRule, PreparsedStyleSheet};
 use crate::test_support::{TestEngine, TestViewSpec};
 

@@ -21,7 +21,7 @@
 //! - `#content`, the scroll container: a row (a column under `vertical`) flex box of the host's
 //!   size, holding a default `<slot>` (`display: contents`) the light-DOM items are assigned to. It
 //!   scrolls, snaps `mandatory` on its main axis (css-scroll-snap-1), and the painter's snap rules
-//!   settle every release on an item (`crates/bobcat-core/src/paint/inertia.rs`).
+//!   settle every release on an item (`crates/terminus/src/painter/inertia.rs`).
 //! - `#indicator`, the dot strip, below.
 //!
 //! web-core's `#bounce-padding` and its two circular slots are left out. The

@@ -18,7 +18,7 @@ DPR 1, in sRGB, with a fixed 640×640 viewport. Text cases use the same vendored
 Ahem font in Chrome and Parley; a shard fails readiness unless Chrome reports
 that the face loaded. Each browser shard contains 25 isolated 128×128 iframes.
 In full-audit mode, the native side likewise paints 25 independent
-`terminus::Document`s and appends their scenes into isolated cells before one GPU
+`terminus::link::Document`s and appends their scenes into isolated cells before one GPU
 readback. A normal run preserves the original index/slot topology but does not
 build the 189 ignored cases. A permanent pixel test checks a non-zero
 translated cell against a standalone render byte-for-byte and verifies that

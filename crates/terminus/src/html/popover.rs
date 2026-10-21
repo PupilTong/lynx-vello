@@ -38,7 +38,7 @@
 //! `!important` does in a browser.
 
 /// HTML's popover UA rules, as the module documentation lists, each HTML's
-/// selector inside `:where()` ([`crate::html`], "The UA rules"). The one
+/// selector inside `:where()` ([`link::html`](crate::link::html), "The UA rules"). The one
 /// `!important` line stays whole on a line of its own, so a sheet can be
 /// audited for `!important` line by line.
 pub const UA_RULES: &str = r"

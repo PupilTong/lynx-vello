@@ -4,7 +4,7 @@ use std::rc::Rc;
 
 use crate::tree::document::{Document, NodeId};
 
-/// Where the events that this crate's own elements ([`crate::html`]) queue
+/// Where the events that this crate's own elements ([`link::html`](crate::link::html)) queue
 /// go: HTML's "queue an element task … to fire an event named *name* at
 /// *element*", for an embedder that fires them later, outside the call that
 /// queued them.

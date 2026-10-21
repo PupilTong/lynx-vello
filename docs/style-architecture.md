@@ -16,7 +16,7 @@ bobcat-cli ───▶ bobcat-core ───▶ terminus ─┬─▶ vendor/st
 order, and private paint pipeline.
 The Lynx runtime element layer is split across the boundary it crosses:
 `bobcat_core::tree` is the native half — Lynx page policy over
-`terminus::Document<()>`: view/device configuration and UA defaults — and
+`terminus::link::Document<()>`: view/device configuration and UA defaults — and
 `packages/bobcat-element` is the script half, owning Element-PAPI member
 policy, tag vocabulary, and handle lifecycle, without moving any of those
 concerns into the standards core.
@@ -130,7 +130,7 @@ CSS supplied as text.
 
 1. The realm's boot module constructs a `Document`, whose host member builds
    the page: private `bobcat_core::tree::new_document` constructs a Stylo `Device` and creates
-   `terminus::Document<()>` through `Document::new`, out of the ingredients the
+   `terminus::link::Document<()>` through `Document::new`, out of the ingredients the
    view's task staged before the realm opened. Device construction is deliberately outside the
    generic DOM because viewport, pointer, color, font-metric, and `rpx` policy
    belong to the runtime environment.
@@ -139,7 +139,7 @@ CSS supplied as text.
    `Document::add_stylesheet`, or — for CSS a host already parsed — build rules
    with `Document::build_style_rule`/`build_keyframes_rule`/`build_font_face_rule`
    and mount them with `Document::append_rules`. Locks and base URLs still never
-   cross the API: a `terminus::CssRule` is opaque and carries the lock that minted
+   cross the API: a `terminus::link::CssRule` is opaque and carries the lock that minted
    it, and `append_rules` rejects a rule built by a different document.
 3. DOM mutation methods record snapshots/restyle hints internally.
    Selector-visible data lives in the real node fields and attribute map.

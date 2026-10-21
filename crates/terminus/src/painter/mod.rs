@@ -227,7 +227,7 @@ impl fmt::Debug for Screenshot {
 ///
 /// Images need no term of their own. A load that changes what a frame draws
 /// dirties the document, and every rebuild takes a new commit id.
-pub(crate) type ComposeKey = (u64, u64);
+type ComposeKey = (u64, u64);
 
 /// What building, resizing or drawing through a painter fails with.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -661,9 +661,16 @@ impl fmt::Debug for WindowFrame {
 /// ([`inertia`]).
 ///
 /// Public only for the test surface, which reads it through
-/// `Painter::scroll_intents`.
+/// `Painter::scroll_intents` and calls it through [`ScrollIntentsTestUtils`].
 #[doc(hidden)]
-#[derive(Debug, Default)]
+#[cfg_attr(
+    not(feature = "painter-test-utils"),
+    expect(
+        unreachable_pub,
+        reason = "the link names it only for the test surface; a field of `Painter` otherwise"
+    )
+)]
+#[derive(Debug)]
 pub struct ScrollIntents {
     /// Each container's live offset where it differs from the committed
     /// one. In range on every axis, except that a `contain-bounce` axis
@@ -673,7 +680,7 @@ pub struct ScrollIntents {
     /// `overscroll-behavior: circular` axis may stand anywhere: it has no
     /// boundary, and its scrolling area repeats every
     /// [`crate::visual::ScrollSlot::wrap_period`]. Such an offset is composed, hit
-    /// tested and sampled modulo the period (`terminus` normalizes it at every
+    /// tested and sampled modulo the period (this crate normalizes it at every
     /// entry point), posted modulo the period and unclamped, which the
     /// document admits as it stands ([`Self::drain_changed`]), and brought
     /// back into `[0, period)` by each rebase, which shifts the drag origins
@@ -741,6 +748,26 @@ struct Snapped {
 }
 
 impl ScrollIntents {
+    /// No live offsets, and nothing moving any container.
+    fn new() -> Self {
+        Self {
+            offsets: FxHashMap::default(),
+            rebased_commit: None,
+            snapped: FxHashMap::default(),
+            generation: 0,
+            gesture_origins: FxHashMap::default(),
+            flings: SmallVec::new(),
+            bounce_backs: SmallVec::new(),
+            glides: SmallVec::new(),
+            auto_scrolls: Vec::new(),
+            handled: FxHashMap::default(),
+            drags: FxHashMap::default(),
+            wheel_steps: SmallVec::new(),
+            changed: SmallVec::new(),
+            posting: SmallVec::new(),
+        }
+    }
+
     /// Reads, as a newer commit replaces `frame`, the snap area each
     /// container stands on in it ([`crate::scroll::SnapAxis::snapped_area`],
     /// from the live offset), for the rebase onto that commit to follow.
@@ -781,7 +808,7 @@ impl ScrollIntents {
     /// ([`Self::shift_motion`]): a release still settles from where the
     /// drag found the container, and a glide still ends on the position it
     /// was aimed at, in the same unwrapped frame as the offset.
-    pub fn rebase(&mut self, frame: &CommittedFrame, now: f64) {
+    fn rebase(&mut self, frame: &CommittedFrame, now: f64) {
         if self.rebased_commit == Some(frame.commit_id()) {
             return;
         }
@@ -1087,7 +1114,7 @@ impl ScrollIntents {
 
     /// Drives one scroll step from the slot `from` names, outward along the
     /// published chain, and reports per axis what was absorbed and where a
-    /// container is now stretched. Order and reach are `terminus`'s
+    /// container is now stretched. Order and reach are the document's
     /// [`drive_chain`] over the slots' published policy, and each step
     /// lands per [`resolve_elastic_step`] — [`crate::scroll::resolve_step`]'s
     /// rule, the same walk the document runs over live geometry, plus the
@@ -1211,48 +1238,31 @@ impl ScrollIntents {
     /// The live offset of `node`'s container, where it differs from the
     /// committed one.
     #[must_use]
-    pub fn offset_for(&self, node: NodeId) -> Option<Vector2D<f32>> {
+    fn offset_for(&self, node: NodeId) -> Option<Vector2D<f32>> {
         self.offsets.get(&node).copied()
-    }
-
-    /// Whether any container's live offset differs from its committed one.
-    #[cfg(feature = "painter-test-utils")]
-    #[doc(hidden)]
-    #[must_use]
-    pub fn has_live_offsets(&self) -> bool {
-        !self.offsets.is_empty()
-    }
-
-    /// Where each drag holding `node`'s container found it: the offset before
-    /// that drag's first step on it.
-    #[cfg(feature = "painter-test-utils")]
-    #[doc(hidden)]
-    pub fn drag_origins(&self, node: NodeId) -> impl Iterator<Item = Vector2D<f32>> + '_ {
-        self.gesture_origins
-            .iter()
-            .filter(move |((_, held), _)| *held == node)
-            .map(|(_, origin)| *origin)
     }
 
     /// The one write of a live offset, which records the container for the
     /// next publish.
-    pub fn write(&mut self, node: NodeId, offset: Vector2D<f32>) {
+    fn write(&mut self, node: NodeId, offset: Vector2D<f32>) {
         self.offsets.insert(node, offset);
         note_changed(&mut self.changed, node);
     }
 
-    /// Hands the changed containers to `post` as main adopts them — clamped
+    /// Answers the changed containers as the document adopts them — clamped
     /// to the committed range, and `rest` where nothing holds, flings,
-    /// bounces, glides or auto-scrolls them — and forgets them. A container `frame` no longer
-    /// carries is dropped. Both buffers keep their capacity.
+    /// bounces, glides or auto-scrolls them — and forgets them. A container
+    /// `frame` no longer carries is dropped. Both buffers keep their
+    /// capacity.
     ///
     /// An axis with a [`crate::visual::ScrollSlot::wrap_period`] is normalized into
     /// its period and posted unclamped: the document admits the whole
     /// period on such an axis, so while the scrollport straddles the seam —
-    /// the normalized offset past `max_offset` — main holds the offset the
-    /// screen shows, and its readbacks, its `scrollIntoView` and its scroll
-    /// timeline samples agree with the painter. Every other axis is clamped,
-    /// so main sees the edge a `contain-bounce` stretch stands past.
+    /// the normalized offset past `max_offset` — the document holds the
+    /// offset the screen shows, and its readbacks, its `scrollIntoView` and
+    /// its scroll timeline samples agree with the painter. Every other axis
+    /// is clamped, so the document sees the edge a `contain-bounce` stretch
+    /// stands past.
     fn drain_changed(
         &mut self,
         frame: Option<&CommittedFrame>,
@@ -1574,7 +1584,7 @@ impl Painter {
             redraw_pending: Cell::new(false),
             gesture: GestureRouter::new(gestures),
             clock: FrameClock::new(),
-            scroll_intents: ScrollIntents::default(),
+            scroll_intents: ScrollIntents::new(),
             composed: None,
             composed_scene: Scene::new(),
             composed_filters: Vec::new(),
@@ -1694,7 +1704,7 @@ impl Painter {
     /// What the intents had not drained yet is dropped with them.
     pub fn forget_view(&mut self) {
         self.frame = None;
-        self.scroll_intents = ScrollIntents::default();
+        self.scroll_intents = ScrollIntents::new();
         self.gesture = GestureRouter::new(self.gesture.policy());
         self.images.forget();
     }
@@ -1865,7 +1875,7 @@ impl Painter {
     }
 
     /// Brings the scroll intents onto the adopted frame at `now`
-    /// ([`ScrollIntents::rebase`]): re-clamped to its ranges, its first-seen
+    /// (`ScrollIntents::rebase`): re-clamped to its ranges, its first-seen
     /// requests carried out, its snapping containers at rest settled. Once
     /// per commit; a no-op for a frame already rebased onto.
     pub fn rebase_scroll(&mut self, now: f64) {
@@ -2239,6 +2249,127 @@ impl Painter {
     }
 }
 
+/// The test surface of [`ScrollIntents`]: forwarders to the methods the
+/// painter itself calls, for an owner's tests that read the intents or drive
+/// them by hand. Not a contract — hidden, and only in builds with
+/// `painter-test-utils`.
+///
+/// A trait rather than an inherent block because each forwarder keeps the
+/// name of the method it forwards to, which an inherent block cannot hold
+/// twice. Outside this module those methods are private, so a call through
+/// the trait in scope resolves here.
+#[cfg(feature = "painter-test-utils")]
+#[doc(hidden)]
+pub trait ScrollIntentsTestUtils {
+    /// [`ScrollIntents::rebase`].
+    fn rebase(&mut self, frame: &CommittedFrame, now: f64);
+    /// [`ScrollIntents::tick`].
+    fn tick(&mut self, frame: &CommittedFrame, now: f64);
+    /// [`ScrollIntents::write`].
+    fn write(&mut self, node: NodeId, offset: Vector2D<f32>);
+    /// [`ScrollIntents::start_bounce_backs`].
+    fn start_bounce_backs(&mut self, frame: &CommittedFrame, now: f64);
+    /// [`ScrollIntents::is_animating`].
+    #[must_use]
+    fn is_animating(&self) -> bool;
+    /// [`ScrollIntents::is_wheeling`].
+    #[must_use]
+    fn is_wheeling(&self, node: NodeId) -> bool;
+    /// [`ScrollIntents::is_auto_scrolling`].
+    #[must_use]
+    fn is_auto_scrolling(&self, frame: &CommittedFrame) -> bool;
+    /// [`ScrollIntents::has_auto_scroll`].
+    #[must_use]
+    fn has_auto_scroll(&self, node: NodeId) -> bool;
+    /// [`ScrollIntents::is_held`].
+    #[must_use]
+    fn is_held(&self, node: NodeId) -> bool;
+    /// [`ScrollIntents::is_flinging`].
+    #[must_use]
+    fn is_flinging(&self, frame: &CommittedFrame, node: NodeId) -> bool;
+    /// [`ScrollIntents::is_bouncing`].
+    #[must_use]
+    fn is_bouncing(&self, node: NodeId) -> bool;
+    /// [`ScrollIntents::is_gliding`].
+    #[must_use]
+    fn is_gliding(&self, node: NodeId) -> bool;
+    /// [`ScrollIntents::offset_for`].
+    #[must_use]
+    fn offset_for(&self, node: NodeId) -> Option<Vector2D<f32>>;
+    /// Whether any container's live offset differs from its committed one.
+    #[must_use]
+    fn has_live_offsets(&self) -> bool;
+    /// Where each drag holding `node`'s container found it: the offset
+    /// before that drag's first step on it.
+    fn drag_origins(&self, node: NodeId) -> impl Iterator<Item = Vector2D<f32>> + '_;
+}
+
+#[cfg(feature = "painter-test-utils")]
+impl ScrollIntentsTestUtils for ScrollIntents {
+    fn rebase(&mut self, frame: &CommittedFrame, now: f64) {
+        Self::rebase(self, frame, now);
+    }
+
+    fn tick(&mut self, frame: &CommittedFrame, now: f64) {
+        Self::tick(self, frame, now);
+    }
+
+    fn write(&mut self, node: NodeId, offset: Vector2D<f32>) {
+        Self::write(self, node, offset);
+    }
+
+    fn start_bounce_backs(&mut self, frame: &CommittedFrame, now: f64) {
+        Self::start_bounce_backs(self, frame, now);
+    }
+
+    fn is_animating(&self) -> bool {
+        Self::is_animating(self)
+    }
+
+    fn is_wheeling(&self, node: NodeId) -> bool {
+        Self::is_wheeling(self, node)
+    }
+
+    fn is_auto_scrolling(&self, frame: &CommittedFrame) -> bool {
+        Self::is_auto_scrolling(self, frame)
+    }
+
+    fn has_auto_scroll(&self, node: NodeId) -> bool {
+        Self::has_auto_scroll(self, node)
+    }
+
+    fn is_held(&self, node: NodeId) -> bool {
+        Self::is_held(self, node)
+    }
+
+    fn is_flinging(&self, frame: &CommittedFrame, node: NodeId) -> bool {
+        Self::is_flinging(self, frame, node)
+    }
+
+    fn is_bouncing(&self, node: NodeId) -> bool {
+        Self::is_bouncing(self, node)
+    }
+
+    fn is_gliding(&self, node: NodeId) -> bool {
+        Self::is_gliding(self, node)
+    }
+
+    fn offset_for(&self, node: NodeId) -> Option<Vector2D<f32>> {
+        Self::offset_for(self, node)
+    }
+
+    fn has_live_offsets(&self) -> bool {
+        !self.offsets.is_empty()
+    }
+
+    fn drag_origins(&self, node: NodeId) -> impl Iterator<Item = Vector2D<f32>> + '_ {
+        self.gesture_origins
+            .iter()
+            .filter(move |((_, held), _)| *held == node)
+            .map(|(_, origin)| *origin)
+    }
+}
+
 /// [`inertia`]'s quiet interval that ends one wheel gesture, for tests that
 /// wait it out.
 #[cfg(feature = "painter-test-utils")]
@@ -2250,3 +2381,58 @@ pub const WHEEL_REST_SECONDS: f64 = inertia::WHEEL_REST_SECONDS;
 #[cfg(feature = "painter-test-utils")]
 #[doc(hidden)]
 pub const AUTO_SCROLL_MIN_INTERVAL_SECONDS: f64 = inertia::AUTO_SCROLL_MIN_INTERVAL_SECONDS;
+
+#[cfg(all(test, feature = "painter-test-utils"))]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod painter_tests {
+    use super::{GesturePolicy, Painter};
+    use crate::render::image::NoImages;
+    use crate::tree::document::Document;
+    use crate::tree::document::tests::device;
+
+    const POLICY: GesturePolicy = GesturePolicy {
+        tap_slop: 50.0,
+        long_press_move_slop: 8.0,
+        drag_slop: 8.0,
+        long_press_seconds: 0.5,
+        tap_event: "press",
+        long_press_event: "hold",
+    };
+
+    fn painter() -> Painter {
+        Painter::without_output(800.0, 600.0, 1.0, POLICY)
+    }
+
+    #[test]
+    fn un_occluding_asks_for_the_frame_held_back() {
+        let mut painter = painter();
+        painter.set_occluded(true);
+        assert!(painter.is_occluded());
+        assert!(!painter.redraw_pending(), "occluding asks for nothing");
+        painter.set_occluded(false);
+        assert!(!painter.is_occluded());
+        assert!(painter.take_redraw(), "un-occluding asks for a frame");
+    }
+
+    #[test]
+    fn an_occluded_painter_owes_no_frame() {
+        let mut painter = painter();
+        painter.set_occluded(true);
+        painter.refresh();
+        assert!(painter.redraw_pending());
+        assert!(
+            !painter.owes_frame(|| true),
+            "neither a pending redraw nor the document's demand"
+        );
+    }
+
+    #[test]
+    fn a_painter_without_output_begins_no_draw() {
+        let mut document: Document<()> = Document::new(device(), "page", ());
+        let frame = document.commit();
+        let mut painter = painter();
+        assert!(painter.adopt(Some(frame), Some(&NoImages)));
+        assert!(painter.frame().is_some(), "a frame is adopted");
+        assert!(matches!(painter.begin_draw(), Ok(None)));
+    }
+}

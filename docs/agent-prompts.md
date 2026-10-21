@@ -78,7 +78,7 @@ behavior, and lynx/ for the native element it mirrors. Implement the
 equivalent natively: the Lynx element policy layer is
 crates/bobcat-core/src/main/tree/ (see text.rs, raw_text.rs, image.rs and
 scroll_container.rs for the existing shapes), registered through
-terminus::CustomElement, with its UA box authored in the UA sheet. Delegate layout
+terminus::link::CustomElement, with its UA box authored in the UA sheet. Delegate layout
 to seldon, paint to terminus's visual/paint modules and text to
 seldon::text::block rather than reimplementing those concerns inline. Add a
 crates/bobcat-core test and a screenshot case. Note any behavior you couldn't

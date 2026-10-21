@@ -1416,7 +1416,7 @@ mod tests {
     /// crash. What this test observes is **not a supported behaviour**, and
     /// nothing may rely on it. Today `contents` acts as computed, as on every
     /// element, before the element's kind is read
-    /// (`terminus::layout::style::display_mode`): the text generates no box and
+    /// (`terminus::link::layout::style::display_mode`): the text generates no box and
     /// establishes no paragraph, and its run is loose text of the `view`
     /// around it.
     #[test]

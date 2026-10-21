@@ -22,7 +22,7 @@ use std::sync::Arc;
 /// View metrics, copied across the view's one thread boundary: the
 /// presenting painter's own.
 pub(crate) use terminus::link::painter::Viewport;
-pub use terminus::link::painter::{DrawTarget, FrameSize, Screenshot, WindowTarget};
+pub use terminus::link::painter::{DrawTarget, FrameSize, PainterError, Screenshot, WindowTarget};
 use terminus::link::{FontBlob, FrameImages, ImageInbox, StylePool};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
@@ -130,12 +130,12 @@ pub enum EngineError {
 
 /// The presenting painter's failures, one variant each: its metrics, its
 /// GPU work and its rendering.
-impl From<terminus::link::painter::PainterError> for EngineError {
-    fn from(error: terminus::link::painter::PainterError) -> Self {
+impl From<PainterError> for EngineError {
+    fn from(error: PainterError) -> Self {
         match error {
-            terminus::link::painter::PainterError::Viewport(message) => Self::Viewport(message),
-            terminus::link::painter::PainterError::Gpu(message) => Self::Gpu(message),
-            terminus::link::painter::PainterError::Render(message) => Self::Render(message),
+            PainterError::Viewport(message) => Self::Viewport(message),
+            PainterError::Gpu(message) => Self::Gpu(message),
+            PainterError::Render(message) => Self::Render(message),
         }
     }
 }

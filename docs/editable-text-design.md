@@ -56,7 +56,7 @@ every synchronous OS query from it with no wait.
 ```
           bobcat-main (Document, realm)                 host thread (Painter, LynxView::pump)
  ┌─────────────────────────────────────────┐    ┌──────────────────────────────────────────┐
- │ terminus::editing                             │    │ embedder IME client                       │
+ │ terminus::link::editing                             │    │ embedder IME client                       │
  │  • editing host = contenteditable elem   │    │  macOS: winit Ime + KeyEvent.text         │
  │  • Selection/Cursor over the host's      │    │  wasm:  hidden <textarea> proxy in facade │
  │    paragraph (its own, or its anonymous  │    │  headless: test driver                    │
@@ -119,7 +119,7 @@ every synchronous OS query from it with no wait.
   the composition range. Caret blink is deferred (needs a painter-side toggle;
   a main-thread timer would recommit every 500 ms).
 
-### Commands (`terminus::editing::Command`, applied on bobcat-main)
+### Commands (`terminus::link::editing::Command`, applied on bobcat-main)
 
 Chromium's set plus the local editing actions a keyboard produces:
 
@@ -166,7 +166,7 @@ geometry query over `CommittedFrame` is the recorded follow-up if that matters.
 
 `LynxView::edit(Command)` on the host thread sends a counted
 `ToMain::Edit(..)`, so it is ordered with pointer input and acknowledged by the
-next frame post (E2 named it after `terminus::editing::Command`, which it carries
+next frame post (E2 named it after `terminus::link::editing::Command`, which it carries
 as it is, rather than `ime`/`ImeCommand`: the same call carries a host's own
 selection and editing commands). Keyboard keys travel as `InputKind::Key` (PR
 #407) with the **text the key typed** (`text`, since E3), which main inserts
@@ -216,7 +216,7 @@ which web-core does not read.
 
 ## E1: what was built
 
-`terminus::editing` (`crates/terminus/src/editing/`; `paragraph.rs` resolves a host's
+`terminus::link::editing` (`crates/terminus/src/editing/`; `paragraph.rs` resolves a host's
 paragraph and converts offsets), the UA rule in
 `crates/bobcat-core/src/main/tree/ua_sheet.rs` (`EDITING_HOST_RULE`), the
 caret, selection and composition painting in `crates/terminus/src/paint/text.rs`
@@ -450,8 +450,8 @@ Public surface:
   the page updates).
 - `EngineEvent::TextInputStateChanged(Box<bobcat_core::editing::TextInputState>)`.
 - `bobcat_core::editing::{Command, Direction, Granularity, TextInputState,
-  InputType, InputMode, EnterKeyHint}` (re-exports of `terminus::editing`).
-- `terminus::Document::has_editing_hosts`; `terminus::event::EventDetail::{Input,
+  InputType, InputMode, EnterKeyHint}` (re-exports of `terminus::link::editing`).
+- `terminus::link::Document::has_editing_hosts`; `terminus::link::event::EventDetail::{Input,
   Composition, Focus}`.
 
 ### How an edit runs
@@ -479,7 +479,7 @@ pointer/wheel/touch kind was renamed `DETAIL_POSITION` to match the realm's.
 ### Choices made where the brief left one
 
 - **The command is `edit`, not `ime`.** `LynxView::edit(Command)` carries
-  `terminus::editing::Command` unchanged, which holds the keyboard and selection
+  `terminus::link::editing::Command` unchanged, which holds the keyboard and selection
   commands as well as Chromium's IME set.
 - **Focus events are drained right after the press, not in the epilogue.**
   `terminus` queues focus events only from `Document::focus`/`blur`, which only the
@@ -556,7 +556,7 @@ pointer/wheel/touch kind was renamed `DETAIL_POSITION` to match the realm's.
 
 - **No shift-click extension.** `InputKind::Pointer` carries no modifiers, so
   a press cannot say shift is held; extending by shift-click needs that field
-  in `terminus::input` and every host filling it in.
+  in `terminus::link::input` and every host filling it in.
 - **No listener stops an edit or an editing default action** (the ruling):
   a browser's `beforeinput`, `keydown`, `pointerdown` or `mousedown` listener
   could.
@@ -578,9 +578,9 @@ editing commands in the CLI prompt (`command.rs`, `headless.rs`).
 
 Public surface:
 
-- `terminus::input::InputKind::Key::text: Option<Arc<str>>` and
+- `terminus::link::input::InputKind::Key::text: Option<Arc<str>>` and
   `InputEvent::with_text`; `InputEvent::key` builds a key that typed nothing.
-- `terminus::event::EventDetail::Key::text`, read by the engine alone: the realm's
+- `terminus::link::event::EventDetail::Key::text`, read by the engine alone: the realm's
   `KeyboardEvent` is unchanged (`DETAIL_KEY` carries no text, W3C has no such
   member).
 - `key_command(key, text, modifiers)`: the typed text is inserted when it is
@@ -724,7 +724,7 @@ Public surface:
   `edit` it is taken before boot: it is a setting of the view's main thread,
   queued like every command, so a key routed after the call is decided by
   it. `NotReady` only once the view has ended.
-- `bobcat_core::editing::Rect` (re-export of `terminus::Rect`, the type of
+- `bobcat_core::editing::Rect` (re-export of `terminus::link::Rect`, the type of
   `TextInputState`'s geometry).
 - Facade → Render Worker `bobcat-edit { command: EditCommand }`; Render
   Worker → facade `bobcat-text-input` (`TextInputFields`: `host`,
@@ -863,12 +863,12 @@ shadow rules, its tests), the event and focus plumbing in
 
 Public surface:
 
-- `terminus::Document::set_host_value(host, value, selection)`: a script's write to
+- `terminus::link::Document::set_host_value(host, value, selection)`: a script's write to
   a field's value — written as one text node, no event owed, and for the
   focused host the composition ended and the selection placed (UTF-16,
   rounded down inside a pair, clamped).
-- `terminus::Document::has_focus_events()`.
-- `terminus::Document::host_selection(host)`: a host's selection in UTF-16
+- `terminus::link::Document::has_focus_events()`.
+- `terminus::link::Document::host_selection(host)`: a host's selection in UTF-16
   units, the session's while focused and otherwise the one it retained
   (2026-10-19). A host keeps its selection while it is not focused, as a
   browser's text control does: losing focus retains it, `set_host_value` on
@@ -938,7 +938,7 @@ Public surface:
   invalid at computed-value time, so the placeholder inherits the host's).
   The component writes only the text. The block holding it is the field's
   `::placeholder` (2026-10-19): it carries `pseudo="-webkit-input-placeholder"`
-  (`terminus::PLACEHOLDER_PSEUDO_ID`, Blink's name for the element behind
+  (`terminus::link::PLACEHOLDER_PSEUDO_ID`, Blink's name for the element behind
   `::placeholder` in its UA shadow trees), which `terminus` reports to Stylo as
   the element implementing the host's `::placeholder`, so an author's
   `.hint::placeholder { color: red }` reaches it, over the attribute

@@ -180,7 +180,7 @@ pub(crate) fn establishes_absolute_containing_block<T>(
         // `absolute` when it is neither `absolute` nor `fixed`. Stylo's
         // adjuster does so only for a style whose `-servo-top-layer` is
         // `auto`, which a UA rule has to declare: the embedder's UA sheet
-        // does for the elements it puts in the layer (bobcat-core's
+        // does for the elements it puts in the layer (the `html` module's
         // `dialog:modal`, `:popover-open` and `::backdrop`), and for those
         // the position test above already answers. The layer itself is
         // generic — membership is

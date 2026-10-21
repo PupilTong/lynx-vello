@@ -72,7 +72,7 @@ pub struct Document<T> {
     style_pool: Option<std::rc::Rc<crate::style::pool::StylePool>>,
     tree: Box<TreeArenas<T>>,
     layout: DocumentLayoutState,
-    pub(crate) painter: RefCell<crate::paint::painter::Painter>,
+    pub(crate) painter: RefCell<crate::paint::painter::FramePainter>,
     /// The document's image name table. Holds no pixels and no host handle:
     /// a page whose images have not loaded paints without them rather than
     /// failing.
@@ -153,7 +153,7 @@ impl<T> Document<T> {
             style_pool: None,
             tree,
             layout,
-            painter: RefCell::new(crate::paint::painter::Painter::default()),
+            painter: RefCell::new(crate::paint::painter::FramePainter::default()),
             images: crate::render::image::ImageRegistry::default(),
             content_visibility_changes: Vec::new(),
             intersections: crate::visual::intersection::IntersectionObservers::default(),
@@ -762,7 +762,7 @@ impl<T> Document<T> {
     /// Frees `id`, returning its payload. Its element children are unlinked
     /// and stay allocated as detached roots, each for its own owner to free;
     /// everything else under it — its text nodes, its shadow tree — is freed
-    /// with it, as [`Self::free_owned_subtree`] describes.
+    /// with it, as `Self::free_owned_subtree` describes.
     ///
     /// Only the named node's payload comes back. The payloads of what goes
     /// with it are dropped, because nothing outside the tree named those

@@ -69,7 +69,7 @@ interface BobcatNative {
    * JSON text — the empty string for `boundingClientRect`, which reads
    * none — and answers either a status code or the method's data as a
    * record. Every name is asked of the element's kind first (its
-   * component's `terminus::CustomElement::invoke`) and, when the kind has no
+   * component's `terminus::link::CustomElement::invoke`) and, when the kind has no
    * method of that name, of the base set every element has
    * (`boundingClientRect`, `scrollIntoView`, `scrollTo`, `scrollBy`); the
    * host matches no name itself:

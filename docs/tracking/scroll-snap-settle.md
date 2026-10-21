@@ -1,7 +1,7 @@
 # Snap settle: how a paged scroller lands after the finger lifts
 
-Research (2026-09-29) behind the painter's glide (`crates/bobcat-core/src/paint/motion.rs`,
-`paint/inertia.rs`): what each reference does between the release of a drag and the moment a
+Research (2026-09-29) behind the painter's glide (`crates/terminus/src/painter/motion.rs`,
+`painter/inertia.rs`): what each reference does between the release of a drag and the moment a
 paged or snapping container rests, compared with this engine. **Ruled 2026-09-29: the engine keeps
 its own implementation**; this file records the alternatives it was weighed against.
 
@@ -76,7 +76,7 @@ Sources:
 
 ## This engine
 
-`crates/bobcat-core/src/paint/inertia.rs` (`end_drag`, `Glide`) and `paint/motion.rs` (`glide`,
+`crates/terminus/src/painter/inertia.rs` (`end_drag`, `Glide`) and `painter/motion.rs` (`glide`,
 `glide_velocity`); the snap rule itself is `crates/terminus/src/scroll/snap.rs` (css-scroll-snap-1).
 
 - **Destination**: the css-scroll-snap-1 choice over the position the fling would naturally end

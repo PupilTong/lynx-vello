@@ -30,9 +30,9 @@
 //!   pressed and released, with no movement slop, suppressed when the drag recognizer's scroll
 //!   consumed the sequence or the sequence was cancelled. The release emits one decision naming the
 //!   down's target and the release's, after the release's pointer, touch and mouse events and
-//!   before the press gesture; the owner targets it at their nearest common inclusive ancestor and
-//!   follows a second one at the same target within 500 ms with `dblclick`. The press gesture keeps
-//!   its own rules and fires beside it.
+//!   before the press gesture; the owner targets it at their nearest common inclusive ancestor, and
+//!   decides `dblclick` from consecutive clicks. The press gesture keeps its own rules and fires
+//!   beside it.
 //! - **Key events.** A key phase becomes `keydown`/`keyup` (W3C UI Events), carrying the W3C
 //!   `key`/`code` strings, `repeat` and the modifiers. A key is never hit-tested: this side has no
 //!   focus, so it names the document element ([`NodeId::DOCUMENT_ELEMENT`]), and the thread that
@@ -116,7 +116,7 @@ pub struct GesturePolicy {
 
 /// UI Events' `click`: the primary button pressed and released, at the
 /// nearest common inclusive ancestor of the two targets.
-pub(crate) const CLICK_EVENT: &str = "click";
+pub(super) const CLICK_EVENT: &str = "click";
 
 /// Whether a pointer of this kind produces touch events.
 ///
@@ -125,15 +125,18 @@ pub(crate) const CLICK_EVENT: &str = "click";
 /// mouse events and the synthesized gestures. Not the drag-to-scroll policy,
 /// which a mouse drag shares here.
 #[must_use]
-pub(crate) fn produces_touch_events(device: PointerKind) -> bool {
+pub(super) fn produces_touch_events(device: PointerKind) -> bool {
     matches!(device, PointerKind::Touch | PointerKind::Pen)
 }
 
 /// The published-frame facts the router may ask for while deciding. Borrowed
-/// for exactly one call; the router retains nothing of the host's. Every
-/// answer comes from the committed frame's scroll-slot table and the
-/// painter's own listener-name replica — never from the document,
-/// which lives on another thread, and never from behind a lock.
+/// for exactly one call ([`GestureRouter::on_input`] or
+/// [`GestureRouter::on_tick`]); the router retains nothing of the host's.
+///
+/// The contract: no answer changes within one such call, so every decision
+/// of one pass sees the same facts, and an answer may lag the document — it
+/// describes the committed frame and the listeners as last known on the
+/// painter's thread, not the live document.
 pub trait RouterHost {
     /// The nearest scroll container on the hit item's containing-block chain
     /// (itself included) the user may scroll on any of `axes`.
@@ -145,9 +148,8 @@ pub trait RouterHost {
     fn contains_node(&self, node: NodeId) -> bool;
 
     /// Whether any listener for `name` exists anywhere in the document, as
-    /// of the pass this call belongs to. The replica behind it is resynced
-    /// once per pass, so an answer cannot change under a decision — and can
-    /// be one pass behind the document's own index.
+    /// of the pass this call belongs to: constant within the pass, and
+    /// possibly behind the document's own listeners.
     fn has_listener(&self, name: &str) -> bool;
 }
 
@@ -917,14 +919,14 @@ mod tests {
 
     /// The policy these cases are written against: a 50 px press radius, an
     /// 8 px hold and drag slop, a half-second hold, and the two gestures
-    /// named `tap` and `longpress`.
+    /// named `press` and `hold`.
     const POLICY: GesturePolicy = GesturePolicy {
         tap_slop: 50.0,
         long_press_move_slop: 8.0,
         drag_slop: 8.0,
         long_press_seconds: 0.5,
-        tap_event: "tap",
-        long_press_event: "longpress",
+        tap_event: "press",
+        long_press_event: "hold",
     };
 
     fn target() -> NodeId {
@@ -951,7 +953,7 @@ mod tests {
     struct MockHost {
         scroller: Option<NodeId>,
         live: bool,
-        longpress_bound: bool,
+        hold_bound: bool,
     }
 
     impl Default for MockHost {
@@ -959,7 +961,7 @@ mod tests {
             Self {
                 scroller: None,
                 live: true,
-                longpress_bound: true,
+                hold_bound: true,
             }
         }
     }
@@ -974,7 +976,7 @@ mod tests {
         }
 
         fn has_listener(&self, name: &str) -> bool {
-            name == POLICY.long_press_event && self.longpress_bound
+            name == POLICY.long_press_event && self.hold_bound
         }
     }
 
@@ -1164,10 +1166,10 @@ mod tests {
                 "pointerup",
                 "mouseup",
                 "click",
-                "tap"
+                "press"
             ]
             .map(|name| format!("{name}@{TARGET}")),
-            "each at the pointer event's own target, then the click and the tap"
+            "each at the pointer event's own target, then the click and the press"
         );
         let InputDecision::Emit(mouse_down) = &harness.out[1] else {
             panic!("an emit");
@@ -1266,7 +1268,7 @@ mod tests {
     }
 
     #[test]
-    fn a_quick_release_is_pointer_events_then_a_tap_at_the_release_point() {
+    fn a_quick_release_is_pointer_events_then_a_press_at_the_release_point() {
         let mut harness = Harness::new();
         harness.feed(touch(1, PointerPhase::Down, 10.0, 10.0), 0.0);
         harness.feed(touch(1, PointerPhase::Up, 12.0, 11.0), 0.1);
@@ -1278,21 +1280,21 @@ mod tests {
                 "pointerup",
                 "touchend",
                 "click",
-                "tap"
+                "press"
             ],
             "the touch event rides between the raw event and the synthesis, and the click \
-             precedes the tap"
+             precedes the press"
         );
-        let InputDecision::Emit(tap) = &harness.out[5] else {
-            panic!("the last decision is the tap");
+        let InputDecision::Emit(press) = &harness.out[5] else {
+            panic!("the last decision is the press");
         };
-        assert_eq!(tap.target, target());
-        let position = tap.detail.position().expect("a tap carries a position");
+        assert_eq!(press.target, target());
+        let position = press.detail.position().expect("a press carries a position");
         assert!((position.x - 12.0).abs() < f32::EPSILON);
     }
 
     #[test]
-    fn travel_beyond_the_tap_slop_cancels_the_tap() {
+    fn travel_beyond_the_tap_slop_cancels_the_press() {
         let mut harness = Harness::new();
         harness.feed(touch(1, PointerPhase::Down, 10.0, 10.0), 0.0);
         harness.feed(touch(1, PointerPhase::Move, 70.0, 10.0), 0.05);
@@ -1308,12 +1310,12 @@ mod tests {
                 "touchend",
                 "click"
             ],
-            "60px of travel is not a tap, and a click has no slop"
+            "60px of travel emits no press, and a click has no slop"
         );
     }
 
     #[test]
-    fn a_release_far_from_the_down_is_not_a_tap_even_without_moves() {
+    fn a_release_far_from_the_down_is_not_a_press_even_without_moves() {
         let mut harness = Harness::new();
         harness.feed(touch(1, PointerPhase::Down, 10.0, 10.0), 0.0);
         harness.feed(touch(1, PointerPhase::Up, 100.0, 10.0), 0.1);
@@ -1331,7 +1333,7 @@ mod tests {
     }
 
     #[test]
-    fn travel_within_the_tap_slop_keeps_the_tap_but_kills_the_longpress() {
+    fn travel_within_the_tap_slop_keeps_the_press_but_kills_the_hold() {
         let mut harness = Harness::new();
         harness.feed(touch(1, PointerPhase::Down, 10.0, 10.0), 0.0);
         // 20px: beyond the 8px long-press slop, inside the 50px tap slop.
@@ -1349,14 +1351,14 @@ mod tests {
                 "pointerup",
                 "touchend",
                 "click",
-                "tap"
+                "press"
             ],
-            "no longpress, tap survives"
+            "no hold, press survives"
         );
     }
 
     #[test]
-    fn a_held_pointer_fires_longpress_once_and_suppresses_the_tap() {
+    fn a_held_pointer_fires_hold_once_and_suppresses_the_press() {
         let mut harness = Harness::new();
         harness.feed(touch(1, PointerPhase::Down, 10.0, 10.0), 0.0);
         assert!(harness.router.needs_frame(), "a deadline is armed");
@@ -1369,14 +1371,14 @@ mod tests {
         harness.tick(0.6);
         assert_eq!(
             harness.emitted(),
-            ["pointerdown", "touchstart", "longpress"],
+            ["pointerdown", "touchstart", "hold"],
             "the deadline emits nothing touch-related"
         );
         assert!(!harness.router.needs_frame(), "the deadline lapsed");
         harness.tick(0.7);
         assert_eq!(
             harness.emitted(),
-            ["pointerdown", "touchstart", "longpress"],
+            ["pointerdown", "touchstart", "hold"],
             "it fires exactly once"
         );
         harness.feed(touch(1, PointerPhase::Up, 10.0, 10.0), 0.8);
@@ -1385,17 +1387,17 @@ mod tests {
             [
                 "pointerdown",
                 "touchstart",
-                "longpress",
+                "hold",
                 "pointerup",
                 "touchend",
                 "click"
             ],
-            "the release is not a tap; a long press still clicks"
+            "the release emits no press; a held pointer still clicks"
         );
     }
 
     #[test]
-    fn a_release_arriving_after_the_deadline_emits_longpress_before_its_pointerup() {
+    fn a_release_arriving_after_the_deadline_emits_hold_before_its_pointerup() {
         let mut harness = Harness::new();
         harness.feed(touch(1, PointerPhase::Down, 10.0, 10.0), 0.0);
         // No tick ran in between: the up itself is past the deadline.
@@ -1405,7 +1407,7 @@ mod tests {
             [
                 "pointerdown",
                 "touchstart",
-                "longpress",
+                "hold",
                 "pointerup",
                 "touchend",
                 "click"
@@ -1415,9 +1417,9 @@ mod tests {
     }
 
     #[test]
-    fn without_a_longpress_listener_the_deadline_lapses_and_tap_survives() {
+    fn without_a_hold_listener_the_deadline_lapses_and_press_survives() {
         let mut harness = Harness::new();
-        harness.host.longpress_bound = false;
+        harness.host.hold_bound = false;
         harness.feed(touch(1, PointerPhase::Down, 10.0, 10.0), 0.0);
         harness.tick(0.6);
         harness.feed(touch(1, PointerPhase::Up, 10.0, 10.0), 0.9);
@@ -1429,9 +1431,9 @@ mod tests {
                 "pointerup",
                 "touchend",
                 "click",
-                "tap"
+                "press"
             ],
-            "an unconsumed longpress does not suppress the tap"
+            "an unconsumed hold does not suppress the press"
         );
     }
 
@@ -1497,7 +1499,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unconsumed_boundary_drag_keeps_its_tap() {
+    fn an_unconsumed_boundary_drag_keeps_its_press() {
         let mut harness = Harness::new();
         harness.host.scroller = Some(scroller());
         harness.feed(touch(1, PointerPhase::Down, 10.0, 10.0), 0.0);
@@ -1515,9 +1517,9 @@ mod tests {
                 "pointerup",
                 "touchend",
                 "click",
-                "tap"
+                "press"
             ],
-            "an 8-50px nudge that moved nothing still taps"
+            "an 8-50px nudge that moved nothing still emits the press"
         );
     }
 
@@ -1570,9 +1572,9 @@ mod tests {
     /// A mouse drag scrolls (user ruling 2026-10-13): it latches the drag
     /// recognizer like a finger, the compatibility `mousemove` goes on
     /// flowing while it scrolls, and the consumed scroll claims the sequence
-    /// from `click` and `tap` alike.
+    /// from `click` and `press` alike.
     #[test]
-    fn a_mouse_drag_scrolls_and_its_consumed_scroll_suppresses_click_and_tap() {
+    fn a_mouse_drag_scrolls_and_its_consumed_scroll_suppresses_click_and_press() {
         let mut harness = Harness::new();
         harness.host.scroller = Some(scroller());
         harness.feed(mouse(1, PointerPhase::Down, 10.0, 10.0), 0.0);
@@ -1592,12 +1594,12 @@ mod tests {
                 format!("pointerup@{TARGET}"),
                 format!("mouseup@{TARGET}"),
             ],
-            "a scroll decision, the mouse events beside it, and no click or tap"
+            "a scroll decision, the mouse events beside it, and no click or press"
         );
     }
 
     /// The wheel is no pointer sequence: a mouse wheel during a press scrolls
-    /// as any wheel does and claims nothing from the press's `click`/`tap`.
+    /// as any wheel does and claims nothing from the `click` and `press` its release emits.
     #[test]
     fn a_mouse_wheel_is_unaffected_by_the_mouse_drag_policy() {
         let mut harness = Harness::new();
@@ -1618,7 +1620,7 @@ mod tests {
                 format!("pointerup@{TARGET}"),
                 format!("mouseup@{TARGET}"),
                 format!("click@{TARGET}"),
-                format!("tap@{TARGET}"),
+                format!("press@{TARGET}"),
             ]
         );
     }
@@ -1687,7 +1689,7 @@ mod tests {
     }
 
     #[test]
-    fn two_pointers_drag_independently_but_neither_taps() {
+    fn two_pointers_drag_independently_but_neither_presses() {
         let mut harness = Harness::new();
         harness.host.scroller = Some(scroller());
         harness.feed(touch(1, PointerPhase::Down, 10.0, 10.0), 0.0);
@@ -1703,14 +1705,14 @@ mod tests {
         harness.feed(touch(1, PointerPhase::Up, 10.0, 40.0), 0.1);
         harness.feed(touch(2, PointerPhase::Up, 100.0, 40.0), 0.15);
         assert!(
-            !harness.emitted().contains(&"tap"),
-            "no tap from a two-finger overlap"
+            !harness.emitted().contains(&"press"),
+            "no press from a two-finger overlap"
         );
 
         // The next solitary sequence recognizes again.
         harness.feed(touch(1, PointerPhase::Down, 10.0, 10.0), 0.2);
         harness.feed(touch(1, PointerPhase::Up, 10.0, 10.0), 0.3);
-        assert!(harness.emitted().contains(&"tap"));
+        assert!(harness.emitted().contains(&"press"));
     }
 
     #[test]
@@ -1844,7 +1846,7 @@ mod tests {
                 "pointerup",
                 "mouseup",
                 "click",
-                "tap"
+                "press"
             ]
         );
     }
@@ -1968,6 +1970,6 @@ mod tests {
         // A hover move from a different device id, no down.
         harness.feed(touch(9, PointerPhase::Move, 500.0, 500.0), 0.05);
         harness.feed(touch(1, PointerPhase::Up, 10.0, 10.0), 0.1);
-        assert!(harness.emitted().contains(&"tap"));
+        assert!(harness.emitted().contains(&"press"));
     }
 }

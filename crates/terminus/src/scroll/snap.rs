@@ -277,7 +277,7 @@ impl SnapAxis<'_> {
     /// `proximity` keeps the natural end unless the next position is within
     /// `threshold` of it. Either way an `always` stop between the two ends
     /// the step there. A `Some` equal to `current` means the container
-    /// refuses the step: it stays, and [`resolve_step`] lets the delta
+    /// refuses the step: it stays, and `resolve_step` lets the delta
     /// chain on to the container above. A circular axis always has a next
     /// position, so it never refuses: a tick at the last page moves on to
     /// the first page's next copy.
@@ -318,7 +318,7 @@ impl SnapAxis<'_> {
 
     /// The area a container standing at `offset` is snapped to on this axis
     /// (§4.1.3), or `None` when it stands on no position: of the areas whose
-    /// position holds `offset`, within [`SNAPPED_TOLERANCE`], the first in
+    /// position holds `offset`, within `SNAPPED_TOLERANCE`, the first in
     /// tree order (§6.2.1). The strictness does not enter: a `proximity`
     /// container that came to rest on a position is snapped to it. A
     /// non-finite offset stands nowhere.
@@ -664,7 +664,7 @@ impl<T> Document<T> {
     }
 
     /// Settles `id` after a scrolling operation that began at `start` —
-    /// [`settle_offset`] over live geometry — and returns the offset it
+    /// `settle_offset` over live geometry — and returns the offset it
     /// rests at. A container that does not snap keeps its offset. On a
     /// circular axis the positions repeat every period, so the nearest one
     /// may lie across the seam; [`Self::scroll_to`] admits it into the

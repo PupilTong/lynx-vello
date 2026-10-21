@@ -27,8 +27,9 @@
 //!   implemented. Hiding is never refused for this reason, because nothing can be showing in those
 //!   states.
 //! - **`beforetoggle` and `toggle`** are the embedder's to fire around these calls: `terminus`
-//!   dispatches no script event. Bobcat shows a popover only inside a UA shadow tree, where neither
-//!   event — both not composed — can reach a listener, and it exposes no popover method to script.
+//!   dispatches no script event. An embedder that shows a popover only inside a UA shadow tree,
+//!   where neither event — both not composed — can reach a listener, and exposes no popover method
+//!   to script, fires neither.
 //! - **The popover focusing steps and focus restoration**: the engine has no focus.
 //! - **Popover sources and triggers** (`popovertarget`, `command`), and with them the implicit
 //!   anchor element: no source is ever passed.

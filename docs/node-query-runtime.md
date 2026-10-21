@@ -128,7 +128,7 @@ queue without clearing it. Selection captures its root at select time.
   `autoScroll({rate, start = false, autoStop = true})` on a `scroll-view` or
   a `list` (`scroll_container.rs`'s `auto_scroll`, shared) succeeds with no
   data and moves nothing itself: a truthy `start` records a change of the
-  container's auto-scroll (`terminus::Document::auto_scroll`) at `rate` CSS px
+  container's auto-scroll (`terminus::link::Document::auto_scroll`) at `rate` CSS px
   per second on the scrolling axis — a number, or a string read as
   `scrollTo`'s `offset` is, negative toward the start edge — which the next
   committed frame carries to the painter; a falsy or missing `start` records

@@ -287,7 +287,7 @@ the semantics are stylo's.** Everything below refines that sentence.
       until 2026-10-17 a plain `display: -lynx-text`; the value was removed
       that day. The paragraph is now the element's kind
       (`CustomElement::is_lynx_text`), which
-      `terminus::layout::display_mode` reads after `none` and `contents` (user
+      `terminus::link::layout::display_mode` reads after `none` and `contents` (user
       ruling, 2026-10-15; native ignores any other value too, the difference
       from web-core is in `docs/tracking/deviations.md`). With the
       `!important` gone, a UA rule hiding an element's children
@@ -697,7 +697,7 @@ and §D.16 with what the wire format actually permits.)*
         of its own: an undetermined box already skips, so the first determination of an on-screen
         box is a change and that of an off-screen box is not. The event is then delivered by
         `terminus` itself, over `Document::event_steps`' path, to the **engine's own components** — a
-        defined `terminus::CustomElement`, which is what the built-in `<list>` will be — through
+        defined `terminus::link::CustomElement`, which is what the built-in `<list>` will be — through
         `CustomElement::handle_event`. It is **never dispatched to JavaScript**: no realm is
         entered, a card's `addEventListener` for the same name never runs, and there is no Lynx
         event name, string-handler, worklet or `global-bindEvent` form of it. `bobcat-core`'s
@@ -931,8 +931,8 @@ and §D.16 with what the wire format actually permits.)*
       (critically damped, no initial velocity). The stretch is the painter's
       alone — a programmatic scroll clamps, the document never stretches,
       and a wheel tick on a stretched container first lands it on its edge.
-      All of it lives in the painter (`crates/bobcat-core/src/paint/motion.rs`
-      for the curves, `paint/inertia.rs` for when they start and stop); the
+      All of it lives in the painter (`crates/terminus/src/painter/motion.rs`
+      for the curves, `painter/inertia.rs` for when they start and stop); the
       document only publishes the `bounce` axes on each scroll slot.
     - **`overscroll-behavior: circular`** (user-directed 2026-10-07) is the
       engine's own fifth value, declared under the fork's `lynx` feature only
@@ -1782,7 +1782,7 @@ and §D.16 with what the wire format actually permits.)*
     zero-sized box whose content is reparented into a platform window. The
     layer is generic in `terminus` (`crates/terminus/src/tree/top_layer.rs`,
     `docs/terminus-architecture.md` "Top layer and `::backdrop`"); `<dialog>` is
-    its first user (`crates/bobcat-core/src/main/tree/dialog.rs`).
+    its first user (`crates/terminus/src/html/dialog.rs`).
     `<overlay>` / `<x-overlay-ng>` is its second, through a `<dialog>` in
     its shadow tree (§30), and HTML's popovers (§31) are its third.
     - **Implemented.** A document top layer: an ordered set with a per-entry
@@ -1836,7 +1836,7 @@ and §D.16 with what the wire format actually permits.)*
       initial display, where a browser computes `block` (lynx fork
       `7742fa5c5`), and renders as a `flex` box centred in the viewport
       (`a_display_contents_modal_dialog_is_blockified_and_renders` in
-      `tree::dialog`).
+      bobcat-core's `dialog_tests.rs`).
     - **State.** "Open" is the `open` attribute, present and not `"false"`;
       the attribute callback is the one path that flips `:open`, and its
       removal (or `"false"`) also leaves the top layer and clears `:modal`,
@@ -1856,7 +1856,7 @@ and §D.16 with what the wire format actually permits.)*
       zero insets). seldon's absolute pass stretch-fits only an `auto`
       size (css-position-3 §4.1), so a `fit-content` dialog takes its
       fit-content size (css-sizing-3 §3.2) in the viewport and its `auto`
-      margins centre it (tests in `dialog.rs` and in
+      margins centre it (tests in `dialog_tests.rs` and in
       `crates/terminus/tests/layout.rs`).
     - **Out, with the reason.**
       - The `overlay` property, transitions on it, and the pending top-layer
@@ -2003,8 +2003,8 @@ and §D.16 with what the wire format actually permits.)*
     latest browsers' capability, and nothing that behaves differently from
     them (user ruling). `terminus` owns the state machine
     (`crates/terminus/src/tree/popover.rs`), because the attribute is global to
-    every element; bobcat-core owns HTML's UA rules for it
-    (`crates/bobcat-core/src/main/tree/popover.rs`).
+    every element; `terminus::link::html` owns HTML's UA rules for it
+    (`crates/terminus/src/html/popover.rs`).
     - **Implemented.** The attribute's four states, as HTML's enumerated
       attribute (`auto` and the empty string Auto, `manual` Manual, `hint`
       Hint, any other value Manual, no attribute No Popover). The popover

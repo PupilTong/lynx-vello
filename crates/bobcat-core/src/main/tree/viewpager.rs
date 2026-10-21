@@ -9,7 +9,7 @@
 //! box and snap at their start with `scroll-snap-stop: always`, and the
 //! painter's snap rules do the paging: a release under half a page glides
 //! back, one past half glides on, a flick stops at the next page
-//! (`crates/bobcat-core/src/paint/inertia.rs`). The pager's component
+//! (`crates/terminus/src/painter/inertia.rs`). The pager's component
 //! ([`Viewpager`]) answers the `selectTab` method ([`select_tab`]), which
 //! the runtime's `callElementMethod` reaches through
 //! [`terminus::link::Document::invoke_element_method`], and fires the pager's events

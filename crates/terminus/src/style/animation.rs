@@ -719,7 +719,7 @@ impl<T: Sync> Document<T> {
     /// why the previous reading is read before it is overwritten. The inactive
     /// path records the reading without stepping anything: a flush that creates
     /// an animation makes the timeline active through
-    /// [`Document::sync_animation_state`], so the first tick that can see a new
+    /// `Document::sync_animation_state`, so the first tick that can see a new
     /// animation always takes the path below, with `previous` at the time the
     /// animation was created.
     ///

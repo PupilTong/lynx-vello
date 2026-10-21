@@ -57,11 +57,13 @@ crates/bobcat-core/src/
                        `sleep_until`, which picks a waiter by target
   alarm.rs             wasm32 only: the bobcat-alarm thread that serves those
                        waits where tokio's timer cannot
-  paint/lib.rs         Painter: attach/detach, the frame clock, routing,
-                       composition, and the adopted snapshot
-  paint/images.rs      one commit's resolved pixels, in draw order
-  paint/gesture.rs     input arbitration
-  paint/graphics.rs    window GPU state
+  paint/lib.rs         Painter: attach/detach and the link to one view,
+                       over terminus's presenting painter
+                       (crates/terminus/src/painter/: the frame clock,
+                       routing, composition and the adopted snapshot;
+                       images.rs one commit's resolved pixels, in draw
+                       order; gesture.rs input arbitration; graphics.rs
+                       window GPU state)
   main/lib.rs          bobcat-main: the thread, the group task, and the style
                        pool and script runtime a group shares
   main/page.rs         one view's page: its tasks — the entry, commands,
@@ -199,7 +201,7 @@ QuickJS ESM graph — an MTS realm, on bobcat-main's runtime
     ├──  const config = { defaultDisplayLinear: …, … }  five boolean literals
     ├──  export const document = new Document(config)  the realm's first
     │      └──▶ bobcat-internal:host.createDocument      statement
-    │            └──▶ five booleans + DocumentIngredients ──▶ private terminus::Document<()>
+    │            └──▶ five booleans + DocumentIngredients ──▶ private terminus::link::Document<()>
     │   (the author sheets are mounted on this document, in listed order, by
     │    the first __FlushElementTree below, never by a statement here)
     └──▶ await import("<entry URL>")    completed by the view's `load_entry`
@@ -468,7 +470,7 @@ the view resolves its synchronous loads against it. The base itself is not
 handed to the fetcher, which resolves stylesheets and fetches against a
 base of its own; an embedder must give it the same one, and every embedder in
 this workspace does. Fonts
-and the default family come next, validated against a `terminus::TextContext` of
+and the default family come next, validated against a `terminus::link::TextContext` of
 their own: they are a text context's business, no document exists yet, and an
 unknown default family is therefore a zero-fetch, synchronous
 `EngineError::UnknownFontFamily` rather than a later `StartupFailed`. Then each
@@ -1776,7 +1778,7 @@ constructs one over that record; and that constructor calls
 enableCssSelector, enableJSDataProcessor, enableCssInheritance)`, which reads
 the five `HostValue::Boolean` arguments — Rust genuinely needs these fields — and builds
 a `LynxDocument` out of them plus the `DocumentIngredients` that never reached
-the realm: the create-time viewport, the validated `terminus::TextContext` and the
+the realm: the create-time viewport, the validated `terminus::link::TextContext` and the
 group's `StylePool`. It never waits and mounts no author stylesheet; the first
 `__FlushElementTree` mounts those, in listed order. The construction runs
 under a catch, because this member runs the UA cascade behind one call: a
@@ -1857,7 +1859,7 @@ frame and reports no `ScriptFinished`**, and so never becomes ready. One more
 task of the view consumes the watch, `consume_metrics`, and settles the page
 once per change: that is what commits a resize with no JavaScript behind it.
 
-`terminus::Document<T>` privately owns its style/layout state, retained commit
+`terminus::link::Document<T>` privately owns its style/layout state, retained commit
 builder and Vello scene; that DOM-side painter is distinct from the
 embedder-thread `bobcat_core::Painter` that composes a published frame.
 In Bobcat the payload is `()` and the core adds
@@ -2196,10 +2198,10 @@ read for its container. The document does the same for its own offset in
 the commit, so the frame is baked around the position the painter arrives
 at.
 
-Inertia is the same walk on the painter's clock (`paint/inertia.rs`): the
+Inertia is the same walk on the painter's clock (`terminus/src/painter/inertia.rs`): the
 intents measure a drag's release velocity from the drag's own steps, and
 each display frame the fling's distance since the last is chained from the
-slot the drag latched as a fling step, decaying on `paint/motion.rs`'s curve
+slot the drag latched as a fling step, decaying on `painter/motion.rs`'s curve
 until what is left is under a physical pixel — aimed, on a snapping axis, at
 the position its whole travel would settle on. A slot published with
 `overscroll-behavior: contain-bounce` lets the intents stand past its edge:
@@ -2487,7 +2489,7 @@ content uncut by the root's ancestors. Every other group re-pushes whole
 chains, which lets a fixed descendant of an `opacity` group escape the
 group's ancestors' clips.
 
-The device side is `terminus::render::blur::FilterTextures`, one per
+The device side is `terminus::link::render::blur::FilterTextures`, one per
 `vello::Renderer`, owned beside that renderer's `AtlasResidency` by `Headless`
 and by the painter's `WindowGraphics`. Its cache holds one commit's bakes,
 taken over one canvas colour, and each entry re-bakes on its own two
@@ -2712,7 +2714,7 @@ The takeover is permanent — rayon leaks about 25 KB per pool and refuses a
 second pool on the same thread forever — which is affordable only because the
 Lynx-main Worker is created for one group and dies with it. Disjoint pools are
 what let two views on two threads restyle at once; the process-wide traversal
-mutex that serialized them is gone. `terminus::MAX_STYLE_THREADS` (six) is a hard
+mutex that serialized them is gone. `terminus::link::MAX_STYLE_THREADS` (six) is a hard
 ceiling, not a preference: Stylo indexes its per-traversal thread-local
 storage by Rayon thread index into an array that long, and counts its own six
 the same way.
@@ -2732,7 +2734,7 @@ create/append/drop/flush DOM API is exposed to JavaScript.
    `bobcat-main`'s report that the group's Stylo pool is built; its QuickJS
    runtime is built first, and one that failed is each view's
    `StartupFailed` rather than the group's error. `create_lynx_view` validates the fonts and default family into a
-   `terminus::TextContext`, creates the view's link, builds the per-view
+   `terminus::link::TextContext`, creates the view's link, builds the per-view
    `ResourceFetcher` on the calling thread, hands that fetcher each author
    stylesheet in the order the view listed them and then the entry, sends the far half of the
    link — the text context and the answers among it — to that thread, and

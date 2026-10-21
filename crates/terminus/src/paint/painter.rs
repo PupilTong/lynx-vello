@@ -68,9 +68,14 @@ use vello::Scene;
 use crate::tree::document::Document;
 use crate::visual::{CommittedFrame, PaintOrder};
 
-/// Reusable document-owned scene builder state.
+/// The document-owned painter that builds the committed frame: it walks the
+/// paint order into fragments and a compose program, publishes the result as
+/// the document's [`CommittedFrame`], and keeps the storage of the frames it
+/// retires for the next build. Not the presenting painter
+/// ([`crate::painter::Painter`]), which composes and draws frames this one
+/// commits.
 #[derive(Default)]
-pub(crate) struct Painter {
+pub(crate) struct FramePainter {
     scratch: crate::paint::walker::Scratch,
     build_scratch: crate::visual::BuildScratch,
     /// The `content-visibility: auto` determination's working storage, kept
@@ -113,13 +118,15 @@ pub(crate) struct Painter {
     composed_marks: crate::visual::ComposedMarks,
 }
 
-impl std::fmt::Debug for Painter {
+impl std::fmt::Debug for FramePainter {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.debug_struct("Painter").finish_non_exhaustive()
+        formatter
+            .debug_struct("FramePainter")
+            .finish_non_exhaustive()
     }
 }
 
-impl Painter {
+impl FramePainter {
     pub(crate) fn paint<T>(
         &mut self,
         document: &Document<T>,

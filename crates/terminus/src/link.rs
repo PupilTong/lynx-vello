@@ -59,6 +59,15 @@ pub use crate::visual::{
 
 /// Focus, the editing commands a host sends a focused editing host, and the
 /// text-input state it reports.
+///
+/// Plain-text editing in the browser's model: an element whose
+/// `contenteditable` is present and not `"false"` is an editing host, and
+/// its value is its direct text children. The document dispatches nothing,
+/// so every event a change owes is reported for the embedder to dispatch —
+/// focus changes through `Document::take_focus_events`, edit events in the
+/// [`EditOutcome`](crate::link::editing::EditOutcome) of the
+/// [`Command`](crate::link::editing::Command)
+/// that caused them.
 pub mod editing {
     pub use crate::editing::{
         Command, Direction, DocumentSelection, EditEvent, EditEventKind, EditOutcome, EnterKeyHint,
@@ -69,6 +78,13 @@ pub mod editing {
 
 /// Event paths, the events the engine dispatches to elements, and the
 /// listener registrations a document reports.
+///
+/// The document calls no script. It computes which nodes an event visits
+/// and in which order (`Document::event_steps`), records who listens where
+/// without the callbacks (`Document::add_listener`), and walks one path
+/// ([`EventWalk`](crate::link::event::EventWalk)) while the embedder invokes each listener;
+/// registrations that change whether a type has any listener at all are reported as
+/// [`RegistrationChange`](crate::link::event::RegistrationChange)s.
 pub mod event {
     pub use crate::event::{
         ElementEvent, EventDetail, EventPhase, EventStep, EventSteps, EventWalk, ListenerKey,
@@ -78,6 +94,12 @@ pub mod event {
 }
 
 /// The host's normalized input: pointer, wheel and key events.
+///
+/// An [`InputEvent`](crate::link::input::InputEvent) is plain data — where (viewport CSS px), what
+/// kind of device, and what it just did — so a host adapter is a `match` and a
+/// constructor call. The document only routes one (`Document::route_input`,
+/// hit testing in paint order); naming, gestures and scrolling are the
+/// presenting painter's ([`link::painter`](crate::link::painter)).
 pub mod input {
     pub use crate::input::{
         InputEvent, InputKind, KeyPhase, Modifiers, PointerId, PointerKind, PointerPhase,
@@ -85,11 +107,21 @@ pub mod input {
 }
 
 /// Layout results and the natural sizes a host reports.
+///
+/// Box layout runs inside the document's commit, over `seldon`. What an
+/// embedder sees of it is a node's rounded [`Layout`](crate::link::layout::Layout), and what it
+/// supplies is the [`NaturalSize`](crate::link::layout::NaturalSize) of replaced content (an
+/// image's pixels, a component's intrinsic size).
 pub mod layout {
     pub use crate::layout::{Layout, NaturalSize, ParagraphKind, Size};
 }
 
 /// Headless GPU rendering, and the area limit of a `filter: blur()` bake.
+///
+/// The render floor knows no nodes, styles or layout: the document builds a
+/// [`vello::Scene`] per commit and this floor
+/// turns scenes into pixels, on the one workspace `vello` version this link
+/// re-exports.
 pub mod render {
     /// Headless rendering and readback.
     pub mod gpu {
@@ -103,22 +135,69 @@ pub mod render {
 }
 
 /// CSSOM-View scrolling and CSS scroll snap.
+///
+/// A scroll container is a box whose `overflow` is `scroll` or `hidden`
+/// (`hidden` moves only when asked programmatically); `clip` is none. The
+/// document keeps each container's committed offset, admitted against live
+/// geometry on every read, and records programmatic requests
+/// ([`ScrollRequest`](crate::link::scroll::ScrollRequest),
+/// [`AutoScrollRequest`](crate::link::scroll::AutoScrollRequest)) in the frame it commits; the
+/// presenting painter carries them out and owns the offsets a user's drag,
+/// fling or wheel writes, which it posts back for the document to adopt.
 pub mod scroll {
     pub use crate::scroll::{
-        AutoScrollRequest, CaptureAxes, ChainLink, ScrollAxes, ScrollAxis, ScrollBehavior,
-        ScrollBox, ScrollCapture, ScrollIntoViewContainer, ScrollIntoViewOptions,
-        ScrollLogicalPosition, ScrollRequest, SnapAxis, SnapAxisPositions, SnapPoint,
-        SnapPositions, SnapStrictness,
+        AutoScrollRequest, ScrollAxes, ScrollBehavior, ScrollBox, ScrollIntoViewContainer,
+        ScrollIntoViewOptions, ScrollLogicalPosition, ScrollRequest, SnapAxis, SnapAxisPositions,
+        SnapPoint, SnapPositions, SnapStrictness,
     };
 }
 
-/// HTML elements this crate implements over its own tree.
+/// HTML elements this crate implements over its own tree: HTML's `<dialog>`
+/// element and the `popover` attribute's UA rules.
 ///
-/// The order an embedder writes [`dialog::UA_RULES`] and
-/// [`popover::UA_RULES`] in, among its own UA rules, is set out in the
-/// crate's `html` module (`src/html/mod.rs`, "The UA rules").
+/// Neither is part of a document by itself. `Document::new` defines no
+/// element, so an embedder that wants them calls
+/// `Document::define_html_elements`, and adds the UA rules to its own UA
+/// sheet.
+///
+/// # The UA rules
+///
+/// Every rule is HTML's selector inside `:where()`, so it has no
+/// specificity: in one UA sheet with the embedder's rules, every embedder
+/// rule that names a tag outranks it, as an author rule outranks a
+/// browser's UA sheet. Among themselves the rules rank by source order
+/// alone, and HTML's own precedence is the order an embedder writes them
+/// in:
+///
+/// 1. `:where(dialog) { display: … }`, the display the embedder's block-like containers get, for
+///    HTML's `block`, which no box here lowers to;
+/// 2. [`dialog::UA_RULES`](crate::link::html::dialog::UA_RULES), in HTML's order;
+/// 3. [`popover::UA_RULES`](crate::link::html::popover::UA_RULES), whose `[popover]` box beats
+///    `dialog`'s as its higher specificity does in HTML;
+/// 4. `:where(dialog:popover-open) { display: … }`, the same display, after the closed `dialog`'s
+///    `none`, as in HTML.
+///
+/// The one pair whose order is then the reverse of HTML's, `dialog:modal`
+/// before `[popover]`, writes the same values for every property both
+/// declare, so no element can tell. HTML's one `!important`, the popover
+/// `::backdrop`'s `pointer-events`, beats every author declaration, as a
+/// UA `!important` does in a browser. A cascade layer would say the same,
+/// but an `@layer` in a UA sheet trips Stylo's rule tree.
 pub mod html {
-    /// HTML's `<dialog>` element.
+    /// HTML's `<dialog>` element: its UA rules, a component that keeps
+    /// `:open`, `:modal` and top-layer membership in step with the `open`
+    /// attribute, and its four methods.
+    ///
+    /// The `open` attribute is the open state, and the value `"false"` reads
+    /// as closed. [`show`](crate::link::html::dialog::show),
+    /// [`show_modal`](crate::link::html::dialog::show_modal),
+    /// [`close`](crate::link::html::dialog::close) and
+    /// [`request_close`](crate::link::html::dialog::request_close) are HTML's `show()`,
+    /// `showModal()`, `close()` and `requestClose()`; the component answers the same names
+    /// through `Document::invoke_element_method`, where an
+    /// [`InvalidState`](crate::link::html::dialog::InvalidState) is
+    /// `MethodError::InvalidState`. `close` and `cancel` are queued to the
+    /// document's `QueuedEventSink` for the embedder to fire.
     pub mod dialog {
         pub use crate::html::dialog::{
             DIALOG_TAG, InvalidState, UA_RULES, close, request_close, show, show_modal,
@@ -133,12 +212,24 @@ pub mod html {
 
 /// The presenting painter: input routing, scrolling, composition and one
 /// draw target, over the frames a document commits.
+///
+/// A [`Painter`](crate::link::painter::Painter) is built on the thread that will draw and is
+/// `!Send`, so that thread is its painting thread for its whole life; everything it owns
+/// — a surface, a scene buffer, the gesture in progress — is touched from
+/// there alone. It knows nothing of how frames reach it: its owner adopts
+/// each committed frame with the pixels it draws (`Painter::adopt`), hands it
+/// the host's input, and delivers the events it decides
+/// ([`EmitEvent`](crate::link::painter::EmitEvent)) and
+/// the scroll offsets it posts (`Painter::drain_changed`) to whatever runs
+/// the document. The gesture names and thresholds are the owner's
+/// ([`GesturePolicy`](crate::link::painter::GesturePolicy)). The frame is baked unscrolled, so a
+/// scroll recomposes and re-hit-tests without a commit.
 pub mod painter {
-    #[doc(hidden)]
-    pub use crate::painter::ScrollIntents;
     #[cfg(feature = "painter-test-utils")]
     #[doc(hidden)]
-    pub use crate::painter::{AUTO_SCROLL_MIN_INTERVAL_SECONDS, WHEEL_REST_SECONDS};
+    pub use crate::painter::{
+        AUTO_SCROLL_MIN_INTERVAL_SECONDS, ScrollIntents, ScrollIntentsTestUtils, WHEEL_REST_SECONDS,
+    };
     pub use crate::painter::{
         DrawTarget, EmitEvent, FrameClock, FrameSize, GesturePolicy, GestureRouter, InputDecision,
         InputDecisions, Painter, PainterError, RouterHost, Screenshot, ScrollEntry, Viewport,
