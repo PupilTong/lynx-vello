@@ -1171,8 +1171,9 @@ the painting — layout's job is to never be the frame's bottleneck.
   `compute_cached_layout` lays a box whose layout reads no percentage basis
   (`CoreStyle::reads_percentage_basis` — by default a percentage or
   anchor-relative size, min/max size, margin or padding; `terminus` adds
-  every paragraph-establishing box, whose lines and atoms read the basis) out
-  against `parent_size: None`, so one entry answers every basis a parent
+  every paragraph-establishing box, whose lines and atoms read the basis, and
+  answers from a node bit its style harvest evaluates rather than per lookup)
+  out against `parent_size: None`, so one entry answers every basis a parent
   hands it instead of one entry per basis. The `Commit` goal's
   `content_independent` payload is the one field left out: it changes no
   result, so it is packed into the committed entry outside the key bits — two

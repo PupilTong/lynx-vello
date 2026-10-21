@@ -342,13 +342,31 @@ impl<T> CoreStyle for StyleView<'_, T> {
         committed_box::contain_intrinsic_height(self.node, self.values())
     }
 
-    /// A box that establishes a paragraph reads its parent's basis beyond
-    /// its own box model: as the width its lines fall back to, and as the
-    /// basis of its atoms and inline boxes (`inline_flow`, `text_block`).
+    /// [`reads_percentage_basis`], as the node's own layout style answered
+    /// it at its last harvest ([`Node::layout_reads_percentage_basis`]); a
+    /// position option's style ([`Self::with_values`]) is evaluated here.
+    #[inline]
     fn reads_percentage_basis(&self) -> bool {
-        super::paragraph::establishes_paragraph(self.display_mode())
-            || seldon::style::box_model_reads_percentage_basis(self)
+        if self.node.views_own_layout_style(self.style) {
+            self.node.layout_reads_percentage_basis()
+        } else {
+            reads_percentage_basis(self.node, self.style)
+        }
     }
+}
+
+/// Whether laying `node` out under `style` reads the percentage basis its
+/// parent hands it: through its own box model
+/// ([`seldon::style::box_model_reads_percentage_basis`]), or because it
+/// establishes a paragraph, which reads the basis beyond its box model — as
+/// the width its lines fall back to, and as the basis of its atoms and inline
+/// boxes (`inline_flow`, `text_block`).
+///
+/// Reads nothing of `node` but its kind ([`Node::is_lynx_text`]), which is
+/// what lets the harvest store the answer as a node bit.
+pub(crate) fn reads_percentage_basis<T>(node: &Node<T>, style: &ComputedValues) -> bool {
+    super::paragraph::establishes_paragraph(display_mode(node, *style.get_display()))
+        || seldon::style::box_model_reads_percentage_basis(&StyleView::with_values(node, style))
 }
 
 // Every algorithm accessor reads computed values, including registered

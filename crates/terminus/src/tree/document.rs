@@ -395,6 +395,11 @@ impl<T> Document<T> {
         (&self.tree, &mut self.pending_snapshots)
     }
 
+    /// Whether the element at `opaque` already has a snapshot pending.
+    pub(crate) fn has_pending_snapshot(&self, opaque: stylo::dom::OpaqueNode) -> bool {
+        self.pending_snapshots.contains_key(&opaque)
+    }
+
     #[must_use]
     pub fn root_node(&self) -> &Node<T> {
         self.tree

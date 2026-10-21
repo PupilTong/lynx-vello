@@ -502,6 +502,11 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         sticky: Option<u32>,
         world: &Transform3D<f32>,
     ) -> Option<u32> {
+        // Asked of every box the build reaches; only a scroll container has
+        // an offset to look up (`scroll::resolve` answers `None` otherwise).
+        if !scroll::is_scroll_container(style) {
+            return None;
+        }
         let slot = self.tree.live_slot(node);
         let offset = self
             .state

@@ -33,7 +33,7 @@ use stylo::servo_arc::Arc;
 pub(crate) use self::style::{
     DisplayMode, StyleView, box_parent, converts_tail_color, display_mode,
     establishes_absolute_containing_block, establishes_fixed_containing_block, generates_no_box,
-    paragraph_limits_changed, skips_contents,
+    paragraph_limits_changed, reads_percentage_basis, skips_contents,
 };
 use crate::render::image::{ImageOutcome, ImageRole};
 use crate::tree::document::{DOCUMENT_ELEMENT_NODE_ID, Document, NodeLayoutState, RelayoutKind};
@@ -156,8 +156,8 @@ impl<T: Sync> Document<T> {
     ) {
         let full = self.layout_requires_full_pass(viewport, scale);
         let rescale = self.layout_inputs_changed(viewport, scale);
-        let bound = self.arenas().slot_bound();
-        self.layout_state_mut().ensure_covers(bound);
+        let (bound, elements) = (self.arenas().slot_bound(), self.arenas().live_elements());
+        self.layout_state_mut().ensure_covers(bound, elements);
         host::run_layout(self, viewport, scale, full, rescale, resized);
         // Publishing is what makes the pass's sizes readable by the style
         // traversal, which is parallel, and by the pass after this one; see

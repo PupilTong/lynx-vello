@@ -129,6 +129,9 @@ impl NodeFlags {
     pub(crate) const BACKDROP: u8 = 1 << 5;
     /// An anonymous block box's node ([`crate::tree::anonymous`]).
     pub(crate) const ANONYMOUS: u8 = 1 << 6;
+    /// The element's layout reads no percentage basis; see
+    /// [`Node::layout_reads_percentage_basis`].
+    const BASIS_FREE: u8 = 1 << 7;
 
     const fn get(self, bit: u8) -> bool {
         self.0 & bit != 0
@@ -384,6 +387,10 @@ impl<T> Node<T> {
     /// called once, where the element is given its definition.
     pub(crate) fn mark_lynx_text(&mut self) {
         self.flags.set(NodeFlags::LYNX_TEXT, true);
+        // A Lynx text element establishes a paragraph whatever its display
+        // is, and an element may be given its definition after its first
+        // style: the basis bit reads the kind as well as the style.
+        self.refresh_basis_free();
     }
 
     /// Whether this element's own paragraph keeps one empty line when it
@@ -850,7 +857,52 @@ impl<T> Node<T> {
             };
             refresh.containing_block_changed = role(&old) != role(new);
         }
+        self.refresh_basis_free();
         refresh
+    }
+
+    /// Whether this element's own layout reads the percentage basis its
+    /// parent hands it ([`seldon::style::CoreStyle::reads_percentage_basis`]),
+    /// as [`crate::layout::reads_percentage_basis`] answered it for the
+    /// element's layout style.
+    ///
+    /// A bit rather than an evaluation because `seldon` asks on every cache
+    /// lookup, and the answer reads the size, min-size, max-size, margin and
+    /// padding structs. Its only inputs are the element's own layout style
+    /// and its kind (whether it is a Lynx text element), and both writers of
+    /// those re-evaluate it: the style's — the damage harvest
+    /// ([`Self::refresh_layout_style`]) and a generated box's
+    /// [`Self::replace_pseudo_style`] — and the kind's, [`Self::mark_lynx_text`].
+    /// Nothing else can move it between them. A node with no layout style —
+    /// a text node, an element never styled — answers `true`, the
+    /// conservative answer: it is laid out against its basis.
+    #[inline]
+    pub(crate) fn layout_reads_percentage_basis(&self) -> bool {
+        !self.flags.get(NodeFlags::BASIS_FREE)
+    }
+
+    /// Whether a style view over this node reading `style` reads the
+    /// element's own layout style — the one
+    /// [`Self::layout_reads_percentage_basis`] was evaluated against — rather
+    /// than a position option's. A node holding none answers `true`: its view
+    /// reads the stand-in style, and the bit's conservative answer stands for
+    /// it.
+    #[inline]
+    pub(crate) fn views_own_layout_style(&self, style: &ComputedValues) -> bool {
+        match &self.data {
+            NodeData::Element(Some(own)) => std::ptr::eq(own.as_ref(), style),
+            _ => true,
+        }
+    }
+
+    /// Re-evaluates [`Self::layout_reads_percentage_basis`] against the
+    /// layout style the element holds now.
+    fn refresh_basis_free(&mut self) {
+        let free = match &self.data {
+            NodeData::Element(Some(style)) => !crate::layout::reads_percentage_basis(self, style),
+            _ => false,
+        };
+        self.flags.set(NodeFlags::BASIS_FREE, free);
     }
 
     /// [`Self::layout_computed_style`] as the `Arc` the snapshot holds, for a
@@ -905,7 +957,9 @@ impl<T> Node<T> {
         };
         *self.stylo_data_present.get_mut() = true;
         self.style_data.borrow_mut().styles.primary = Some(style.clone());
-        snapshot.replace(style)
+        let old = snapshot.replace(style);
+        self.refresh_basis_free();
+        old
     }
 
     #[must_use]
@@ -1497,5 +1551,41 @@ mod tests {
         // establishes it.
         let (_, slot) = document.layout_state_mut().text_store_parts(text_slot);
         assert!(slot.is_none());
+    }
+
+    /// The basis bit follows the element's style through the harvest: a
+    /// width that turns from a percentage into a length makes the element
+    /// basis-free, and back.
+    #[test]
+    fn the_harvest_reevaluates_whether_layout_reads_the_basis() {
+        let mut document = Document::new(crate::tree::document::tests::device(), "page", ());
+        let root = document.document_element().id();
+        let element = document.create_element("view", ());
+        document.append_child(root, element);
+        let run = document.create_text_node("run", ());
+        document.append_child(element, run);
+        let reads = |document: &Document<()>| {
+            document
+                .get(element)
+                .unwrap()
+                .layout_reads_percentage_basis()
+        };
+        assert!(reads(&document), "never styled: conservatively reads it");
+
+        document.set_inline_style(element, "display: flex; width: 50%");
+        document.layout();
+        assert!(reads(&document));
+        assert!(
+            document.get(run).unwrap().layout_reads_percentage_basis(),
+            "a text node has no style and reads it"
+        );
+
+        document.set_inline_style(element, "display: flex; width: 10px");
+        document.layout();
+        assert!(!reads(&document));
+
+        document.set_inline_style(element, "display: flex; width: 10px; padding-left: 5%");
+        document.layout();
+        assert!(reads(&document));
     }
 }

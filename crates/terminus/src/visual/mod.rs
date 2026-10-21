@@ -992,8 +992,8 @@ impl<T: Sync> Document<T> {
         }
         // A caller may render without ever laying out; the paint walk still
         // reads layout slots wholesale, so size them first.
-        let bound = self.arenas().slot_bound();
-        self.layout_state_mut().ensure_covers(bound);
+        let (bound, elements) = (self.arenas().slot_bound(), self.arenas().live_elements());
+        self.layout_state_mut().ensure_covers(bound, elements);
         // Style and layout run before the claim: the flush's damage harvest
         // invalidates layout, which notes a visual mutation, so an id
         // claimed ahead of it would be stale the instant it was claimed.

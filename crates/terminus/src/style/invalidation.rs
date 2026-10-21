@@ -972,10 +972,13 @@ impl<T> Document<T> {
         }
         // A snapshot's attribute values are read by attribute selectors and
         // nothing else, so a `style` value left to its block's serialization
-        // is serialized only for a rule that selects on `style`.
-        let style_text =
-            node.parsed_inline_style.is_some() && self.any_rule_depends_on_attribute(id, &STYLE);
+        // is serialized only for a rule that selects on `style` — asked only
+        // by the write that takes the snapshot, since a later write before the
+        // flush finds it taken and records into it.
         let opaque = OpaqueNode(id.arena_key());
+        let style_text = node.parsed_inline_style.is_some()
+            && !self.has_pending_snapshot(opaque)
+            && self.any_rule_depends_on_attribute(id, &STYLE);
         let (nodes, pending_snapshots) = self.snapshot_storage();
         Some(pending_snapshots.entry(opaque).or_insert_with(|| {
             let node = nodes

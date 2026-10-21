@@ -188,6 +188,13 @@ pub(crate) struct TreeArenas<T> {
     /// one reader on the layout path, reaches nothing but these arenas; see
     /// [`crate::tree::anonymous`].
     anonymous: AnonymousBoxes,
+    /// How many element nodes are live: the upper bound
+    /// [`DocumentLayoutState::ensure_covers`] reserves its entries to, since
+    /// only an element files one. Counted where [`Self::insert_node`] files a
+    /// node and [`Self::remove_node`] frees one, the only two places a node
+    /// enters or leaves the arena, and a node's kind never changes in
+    /// between.
+    live_elements: usize,
 }
 
 impl<T> TreeArenas<T> {
@@ -200,6 +207,7 @@ impl<T> TreeArenas<T> {
             anchors: AnchorRegistry::default(),
             top_layer: TopLayer::default(),
             anonymous: AnonymousBoxes::default(),
+            live_elements: 0,
         }
     }
 
@@ -352,6 +360,13 @@ impl<T> TreeArenas<T> {
         self.generations.len()
     }
 
+    /// How many element nodes are live — the bound the layout state reserves
+    /// its entries to.
+    #[inline]
+    pub(crate) const fn live_elements(&self) -> usize {
+        self.live_elements
+    }
+
     /// Whether a handle still names the node it was made for.
     ///
     /// False for one held across the free of its node, whether or not the key
@@ -470,6 +485,7 @@ impl<T> TreeArenas<T> {
         }
         let id = NodeId::at_key(key, self.generations[arena_key]);
         let node = make(owner, id);
+        self.live_elements += usize::from(node.is_element());
         assert_eq!(self.nodes.insert(node), arena_key);
         id
     }
@@ -489,6 +505,7 @@ impl<T> TreeArenas<T> {
             .nodes
             .try_remove(id.arena_key())
             .expect("a current handle always selects its node");
+        self.live_elements -= usize::from(node.is_element());
         self.generations[id.arena_key()] = self.generations[id.arena_key()].wrapping_add(1);
         // A dropped node takes its relevance with it: the key is recycled,
         // and its next occupant must start undetermined rather than inherit
@@ -741,10 +758,27 @@ impl DocumentLayoutState {
         sink.append(&mut self.container_deferrals);
     }
 
-    /// Sizes the key-aligned index to cover every key below `slots`.
-    pub(crate) fn ensure_covers(&mut self, slots: usize) {
+    /// Sizes the key-aligned index to cover every key below `slots`, and
+    /// makes room in `entries` for `elements` — the live element count,
+    /// which bounds the entries a pass can file, since a text node never
+    /// files one.
+    ///
+    /// Exact until the first entry is filed, so a page's first layout files
+    /// every entry into one allocation instead of doubling its way there
+    /// through `push` (a render reserves before the flush that may add
+    /// anonymous boxes, and the layout run after it reserves again, still
+    /// exactly); amortized as `Vec::reserve` is after that, so a page that
+    /// adds a few elements per layout is not reallocated exactly every time.
+    /// It never shrinks: an entry outlives its node.
+    pub(crate) fn ensure_covers(&mut self, slots: usize, elements: usize) {
         if self.index.len() < slots {
             self.index.resize(slots, NO_ENTRY);
+        }
+        if self.entries.is_empty() {
+            self.entries.reserve_exact(elements);
+        } else {
+            self.entries
+                .reserve(elements.saturating_sub(self.entries.len()));
         }
     }
 
@@ -768,7 +802,9 @@ impl DocumentLayoutState {
         if let Some(at) = self.entry_of(slot) {
             return at;
         }
-        self.ensure_covers(slot.arena_key() + 1);
+        if self.index.len() <= slot.arena_key() {
+            self.index.resize(slot.arena_key() + 1, NO_ENTRY);
+        }
         let at = self.entries.len();
         self.index[slot.arena_key()] =
             u32::try_from(at).expect("a document holds fewer than u32::MAX nodes");
@@ -1131,7 +1167,7 @@ mod tests {
         let run = arenas.insert_node(text(1));
         assert!(layout.get(element).is_none(), "past the index: nothing");
 
-        layout.ensure_covers(arenas.slot_bound());
+        layout.ensure_covers(arenas.slot_bound(), arenas.live_elements());
         assert!(
             layout
                 .get(element)
@@ -1148,6 +1184,33 @@ mod tests {
         assert!(layout.has_entry(element));
         assert!(layout.slot_at(element).is_hidden());
         assert_eq!(layout.entries.len(), 1);
+    }
+
+    /// A page's first layout files its entries into the one reservation the
+    /// live element count sizes, rather than doubling `entries` through
+    /// `push`: only elements file an entry, so the count bounds them.
+    #[test]
+    fn a_first_layout_files_its_entries_into_one_reservation() {
+        let mut document = crate::tree::document::Document::new(
+            crate::tree::document::tests::device(),
+            "page",
+            (),
+        );
+        let root = document.document_element().id();
+        for _ in 0..100 {
+            let view = document.create_element("view", ());
+            document.append_child(root, view);
+            let text = document.create_element("text", ());
+            document.append_child(view, text);
+            let run = document.create_text_node("run", ());
+            document.append_child(text, run);
+        }
+        document.layout();
+
+        let elements = document.arenas().live_elements();
+        let entries = &document.layout_state().entries;
+        assert!(entries.len() > 100 && entries.len() <= elements);
+        assert_eq!(entries.capacity(), elements, "one exact reservation");
     }
 
     /// A handle nobody ever made resolves to nothing rather than indexing past

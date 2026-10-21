@@ -623,8 +623,13 @@ impl<T> Document<T> {
     /// Returns this node's scroll geometry when it is a scroll container.
     #[must_use]
     pub fn scroll_box(&self, id: NodeId) -> Option<ScrollBox> {
+        let style = self.paint_style(id)?;
+        // Ahead of the offset lookup: an ancestor walk asks every box.
+        if !is_scroll_container(style) {
+            return None;
+        }
         resolve(
-            self.paint_style(id)?,
+            style,
             self.rounded_layout(id)?,
             self.stored_scroll_offset(id),
         )
