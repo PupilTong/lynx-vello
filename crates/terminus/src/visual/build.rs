@@ -48,11 +48,11 @@ use super::anchored::AnchoredSlot;
 use super::curves::TransformTrack;
 use super::frame::MAX_MOVING_EXTENT_VIEWPORTS;
 use super::geometry::{inner_radii, resolve_corner_radii};
-use super::transform::{ContextMatrix, ParentPerspective};
+use super::transform::{ContextMatrix, ParentPerspective, as_translation, same_bits};
 use super::{
-    AnimationSlot, AutoBox, ClipNode, CornerRadii, FrameBuffers, PaintItem, PaintItemKind,
-    PaintOrder, RenderLayer, ScrollSlot, SnapSlot, SnapSlotAxis, Space, SpaceKind, StickySlot,
-    stacking,
+    AnimationSlot, AutoBox, ClipNode, CornerRadii, FrameBuffers, ItemTransform, PaintItem,
+    PaintItemKind, PaintOrder, RenderLayer, ScrollSlot, SnapSlot, SnapSlotAxis, Space, SpaceKind,
+    StickySlot, stacking,
 };
 use crate::layout::inline_flow::is_inline_box;
 use crate::layout::{
@@ -93,6 +93,7 @@ pub(crate) fn build<T: Sync>(
         anchored: buffers.anchored,
         auto_boxes: buffers.auto_boxes,
         snap_points: buffers.snap_points,
+        matrices: buffers.matrices,
         initial_targets: Vec::new(),
         current_layer: None,
         scratch,
@@ -110,7 +111,8 @@ pub(crate) fn build<T: Sync>(
             && buffers.anchor_clips.is_empty()
             && buffers.anchored_order.is_empty()
             && builder.auto_boxes.is_empty()
-            && builder.snap_points.is_empty(),
+            && builder.snap_points.is_empty()
+            && builder.matrices.is_empty(),
         "a recycled frame is emptied before it is handed back to the builder",
     );
     builder.scratch.assert_settled();
@@ -171,6 +173,7 @@ pub(crate) fn build<T: Sync>(
         anchored_order: buffers.anchored_order,
         auto_boxes: builder.auto_boxes,
         snap_points: builder.snap_points,
+        matrices: builder.matrices,
         initial_targets: builder.initial_targets,
         auto_scroll_requests,
         inert_floor,
@@ -413,6 +416,8 @@ struct Builder<'doc, T> {
     auto_boxes: Vec<AutoBox>,
     /// Every slot's snap positions; see [`ScrollSlot::snap`].
     snap_points: Vec<SnapPoint>,
+    /// The frame's non-translation world matrices; see [`ItemTransform`].
+    matrices: Vec<Transform3D<f32>>,
     /// Every `scroll-initial-target: nearest` element reached, with the
     /// slot it lives in.
     initial_targets: Vec<InitialTarget>,
@@ -507,7 +512,7 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         let scroll_box = scroll::resolve(style, &self.state.slot_at(slot).rounded, offset)?;
         let snap = self
             .document
-            .snap_positions(node)
+            .snap_positions_of(node, style, &scroll_box)
             .map_or_else(SnapSlot::default, |positions| SnapSlot {
                 x: positions.x.map(|axis| self.push_snap_axis(&axis)),
                 y: positions.y.map(|axis| self.push_snap_axis(&axis)),
@@ -840,9 +845,10 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         // be determined, or its `visibility: visible` contents would never
         // lay out.
         if *values.get_content_visibility() == ContentVisibility::Auto {
+            let transform = intern(&mut self.matrices, world);
             self.auto_boxes.push(AutoBox {
                 node: root,
-                transform: world,
+                transform,
                 size,
                 clip: seed.current.clip,
                 space: box_space,
@@ -854,10 +860,11 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         // of the paragraph around it; its group holds only its atoms.
         let visible = visible && !is_inline_box(self.node(root));
         if visible {
+            let transform = intern(&mut self.matrices, world);
             self.items.push(PaintItem {
                 node: root,
                 kind: PaintItemKind::ElementBox,
-                transform: world,
+                transform,
                 clip: seed.current.clip,
                 size,
                 radii: resolve_corner_radii(values, size),
@@ -926,9 +933,14 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         {
             // Two disjoint field borrows: nothing in this loop recurses, so
             // the records are read in place instead of copied out.
-            let Builder { items, scratch, .. } = self;
+            let Builder {
+                items,
+                matrices,
+                scratch,
+                ..
+            } = self;
             for record in &scratch.stream[stream_base..stream_end] {
-                push_record(items, record, &world);
+                push_record(items, matrices, record, &world);
             }
         }
         while index < member_end {
@@ -955,10 +967,11 @@ impl<'doc, T: Sync> Builder<'doc, T> {
             return None;
         }
         let start = self.items.len();
+        let transform = intern(&mut self.matrices, *world);
         self.layers.push(RenderLayer {
             parent: self.current_layer,
             node,
-            transform: *world,
+            transform,
             size,
             radii: resolve_corner_radii(values, size),
             space,
@@ -1110,10 +1123,11 @@ impl<'doc, T: Sync> Builder<'doc, T> {
             inset.border.top + inset.padding.top,
             0.0,
         ));
+        let transform = intern(&mut self.matrices, glyph_origin);
         self.items.push(PaintItem {
             node: root,
             kind: PaintItemKind::TextRun { element: root },
-            transform: glyph_origin,
+            transform,
             clip: ctx.current.clip,
             size,
             radii: CornerRadii::ZERO,
@@ -1122,14 +1136,18 @@ impl<'doc, T: Sync> Builder<'doc, T> {
             space: ctx.current.space,
         });
         for fragment in self.fragment_records(root, Point2D::zero(), ctx.current) {
-            self.items.push(PaintItem {
-                node: fragment.node,
-                kind: fragment.kind,
-                transform: glyph_origin.then_translate(euclid::vec3(
+            let transform = intern(
+                &mut self.matrices,
+                glyph_origin.then_translate(euclid::vec3(
                     fragment.offset.x,
                     fragment.offset.y,
                     0.0,
                 )),
+            );
+            self.items.push(PaintItem {
+                node: fragment.node,
+                kind: fragment.kind,
+                transform,
                 clip: fragment.clip,
                 size: fragment.size,
                 radii: fragment.radii,
@@ -1401,10 +1419,15 @@ impl<'doc, T: Sync> Builder<'doc, T> {
             MemberPayload::Pseudo { stream } => {
                 // Three disjoint field borrows at once; nothing here recurses,
                 // so the records are drained in place.
-                let Builder { items, scratch, .. } = self;
+                let Builder {
+                    items,
+                    matrices,
+                    scratch,
+                    ..
+                } = self;
                 let buffer = &mut scratch.pseudo_pool[stream as usize];
                 for record in buffer.iter() {
-                    push_record(items, record, world);
+                    push_record(items, matrices, record, world);
                 }
                 buffer.clear();
                 scratch.pseudo_free.push(stream);
@@ -1446,11 +1469,12 @@ impl<'doc, T: Sync> Builder<'doc, T> {
                 };
                 (rect, radii)
             };
+            let transform = intern(&mut self.matrices, *transform);
             self.clips.push(ClipNode {
                 parent: inner.current.clip,
                 #[cfg(test)]
                 node,
-                transform: *transform,
+                transform,
                 rect,
                 radii,
                 space: inner.current.space,
@@ -1484,11 +1508,16 @@ fn rounded_at(state: &DocumentLayoutState, slot: NodeSlot) -> &Layout {
 
 /// A free function, not a method, so a caller can hold a disjoint borrow of
 /// the record buffer it is draining while pushing into `items`.
-fn push_record(items: &mut Vec<PaintItem>, record: &ItemRecord, world: &Transform3D<f32>) {
+fn push_record(
+    items: &mut Vec<PaintItem>,
+    matrices: &mut Vec<Transform3D<f32>>,
+    record: &ItemRecord,
+    world: &Transform3D<f32>,
+) {
     items.push(PaintItem {
         node: record.node,
         kind: record.kind,
-        transform: translated(world, record.offset),
+        transform: intern(matrices, translated(world, record.offset)),
         clip: record.clip,
         size: record.size,
         radii: record.radii,
@@ -1604,4 +1633,20 @@ fn item_flags(style: &ComputedValues) -> (bool, bool) {
 
 fn translated(world: &Transform3D<f32>, offset: Point2D<f32>) -> Transform3D<f32> {
     Transform3D::translation(offset.x, offset.y, 0.0).then(world)
+}
+
+/// `matrix` as a record stores it: inline when it is exactly a translation,
+/// otherwise in the frame's table. A context's own item, clip, layer and
+/// `auto` box are interned back to back with one world, so a matrix equal to
+/// the last one stored shares its entry.
+fn intern(matrices: &mut Vec<Transform3D<f32>>, matrix: Transform3D<f32>) -> ItemTransform {
+    if let Some(offset) = as_translation(&matrix) {
+        return ItemTransform::Translate(offset);
+    }
+    if !matrices.last().is_some_and(|last| same_bits(last, &matrix)) {
+        matrices.push(matrix);
+    }
+    ItemTransform::Matrix(
+        u32::try_from(matrices.len() - 1).expect("a frame cannot hold 2^32 matrices"),
+    )
 }

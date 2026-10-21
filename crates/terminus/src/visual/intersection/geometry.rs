@@ -845,7 +845,7 @@ mod tests {
             if item.kind != PaintItemKind::ElementBox {
                 continue;
             }
-            let painted = map_rect(&item.transform, &Rect::from_size(item.size))
+            let painted = map_rect(&order.matrix(item.transform), &Rect::from_size(item.size))
                 .expect("every box here projects in front of the viewer");
             let geometry = doc.dom.intersection_geometry(
                 item.node,

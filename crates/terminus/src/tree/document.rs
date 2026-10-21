@@ -257,6 +257,12 @@ impl<T> Document<T> {
         self.layout_dirty || self.last_layout_inputs != Some((viewport, scale))
     }
 
+    /// Whether the next `layout()` has a flush or a pass to run at the
+    /// viewport and scale of the last pass.
+    pub(crate) fn layout_owed(&self) -> bool {
+        self.layout_dirty || self.document_element().needs_style_flush()
+    }
+
     pub(crate) fn layout_requires_full_pass(&self, viewport: Size<f32>, scale: f32) -> bool {
         self.layout_root_dirty || self.layout_inputs_changed(viewport, scale)
     }

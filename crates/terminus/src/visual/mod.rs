@@ -124,7 +124,7 @@ mod transform;
 
 use std::sync::Arc;
 
-use euclid::default::{Point2D, Rect, Size2D, Transform3D};
+use euclid::default::{Point2D, Rect, Size2D, Transform3D, Vector2D};
 use rustc_hash::{FxHashMap, FxHashSet};
 use stylo::properties::animated_properties::AnimationValueMap;
 
@@ -173,6 +173,10 @@ pub(crate) struct PaintOrder {
     /// Every scroll slot's snap positions, in slot order; see
     /// [`ScrollSlot::snap`].
     snap_points: Vec<SnapPoint>,
+    /// The world matrices of the items, clips, layers and `auto` boxes that
+    /// are not a pure translation, which on most pages is none of them; see
+    /// [`ItemTransform`].
+    matrices: Vec<Transform3D<f32>>,
     /// Every `scroll-initial-target: nearest` element the build reached,
     /// with its slot; see `scroll::initial_target`. Rarely non-empty, so
     /// not a recycled buffer.
@@ -312,11 +316,12 @@ pub(crate) struct FrameBuffers {
     anchored_order: Vec<u32>,
     auto_boxes: Vec<AutoBox>,
     snap_points: Vec<SnapPoint>,
+    matrices: Vec<Transform3D<f32>>,
 }
 
 impl FrameBuffers {
     #[cfg(test)]
-    pub(crate) fn capacities(&self) -> [usize; 7] {
+    pub(crate) fn capacities(&self) -> [usize; 8] {
         [
             self.items.capacity(),
             self.clips.capacity(),
@@ -325,6 +330,7 @@ impl FrameBuffers {
             self.animations.capacity(),
             self.auto_boxes.capacity(),
             self.snap_points.capacity(),
+            self.matrices.capacity(),
         ]
     }
 }
@@ -350,6 +356,7 @@ impl PaintOrder {
         self.anchored_order.clear();
         self.auto_boxes.clear();
         self.snap_points.clear();
+        self.matrices.clear();
         FrameBuffers {
             items: self.items,
             clips: self.clips,
@@ -365,6 +372,7 @@ impl PaintOrder {
             anchored_order: self.anchored_order,
             auto_boxes: self.auto_boxes,
             snap_points: self.snap_points,
+            matrices: self.matrices,
         }
     }
 
@@ -387,6 +395,7 @@ impl PaintOrder {
             anchored_order: Vec::new(),
             auto_boxes: Vec::new(),
             snap_points: Vec::new(),
+            matrices: Vec::new(),
             initial_targets: Vec::new(),
             auto_scroll_requests: Vec::new(),
             inert_floor: None,
@@ -395,7 +404,7 @@ impl PaintOrder {
     }
 
     #[cfg(test)]
-    fn capacities(&self) -> [usize; 7] {
+    fn capacities(&self) -> [usize; 8] {
         [
             self.items.capacity(),
             self.clips.capacity(),
@@ -404,7 +413,17 @@ impl PaintOrder {
             self.animations.capacity(),
             self.auto_boxes.capacity(),
             self.snap_points.capacity(),
+            self.matrices.capacity(),
         ]
+    }
+
+    /// The world matrix `transform` names in this frame.
+    #[must_use]
+    pub(crate) fn matrix(&self, transform: ItemTransform) -> Transform3D<f32> {
+        match transform {
+            ItemTransform::Translate(offset) => Transform3D::translation(offset.x, offset.y, 0.0),
+            ItemTransform::Matrix(index) => self.matrices[index as usize],
+        }
     }
 
     #[must_use]
@@ -730,12 +749,26 @@ pub(crate) enum PaintItemKind {
     },
 }
 
+/// The world matrix of a paint item, clip, layer or `auto` box: its stacking
+/// context's flattened world pre-multiplied by its offset.
+///
+/// Inline when the matrix is exactly a translation — every entry the
+/// identity's, bit for bit, but `m41`/`m42` — which is every record outside a
+/// transformed context; otherwise an index into the frame's matrix table.
+/// [`PaintOrder::matrix`] gives back the very matrix the build computed
+/// either way, so every reader folds the same bits it always did.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum ItemTransform {
+    Translate(Vector2D<f32>),
+    Matrix(u32),
+}
+
 /// One node's entry in the paint order.
 #[derive(Debug, Clone)]
 pub(crate) struct PaintItem {
     pub(crate) node: NodeId,
     pub(crate) kind: PaintItemKind,
-    pub(crate) transform: Transform3D<f32>,
+    pub(crate) transform: ItemTransform,
     pub(crate) clip: Option<usize>,
     pub(crate) size: Size2D<f32>,
     pub(crate) radii: CornerRadii,
@@ -762,7 +795,7 @@ pub(crate) struct PaintItem {
 pub(crate) struct RenderLayer {
     pub(crate) parent: Option<usize>,
     pub(crate) node: NodeId,
-    pub(crate) transform: Transform3D<f32>,
+    pub(crate) transform: ItemTransform,
     pub(crate) size: Size2D<f32>,
     pub(crate) radii: CornerRadii,
     /// The root element's box space: the group moves with the root's own
@@ -784,7 +817,7 @@ pub(crate) struct ClipNode {
     pub(crate) parent: Option<usize>,
     #[cfg(test)]
     pub(crate) node: NodeId,
-    pub(crate) transform: Transform3D<f32>,
+    pub(crate) transform: ItemTransform,
     pub(crate) rect: Rect<f32>,
     pub(crate) radii: CornerRadii,
     /// The establishing element's box space: the clip moves with the
@@ -811,7 +844,7 @@ pub(crate) struct ClipNode {
 #[derive(Debug, Clone)]
 pub(crate) struct AutoBox {
     pub(crate) node: NodeId,
-    pub(crate) transform: Transform3D<f32>,
+    pub(crate) transform: ItemTransform,
     pub(crate) size: Size2D<f32>,
     pub(crate) clip: Option<usize>,
     pub(crate) space: Option<u32>,
@@ -857,18 +890,18 @@ impl<T: Sync> Document<T> {
         // carries it; a panicking build or walk leaves the previous frame
         // retained with its older id, so `needs_render` still reports stale.
         let _ = self.next_commit_id();
+        self.finish_layout();
         self.build_frame()
     }
 
-    /// One pass: style, layout, paint order, under the commit id already
-    /// claimed.
+    /// One paint-order build under the commit id already claimed; the caller
+    /// has laid out.
     ///
     /// Split out of [`Self::build_paint_order`] because a render may take
     /// more than one — a `content-visibility: auto` relevance flip voids the
     /// frame it was decided on — while the commit id is claimed once per
     /// render, so every pass builds the *same* commit.
     fn build_frame(&mut self) -> PaintOrder {
-        self.layout();
         // Both takes finish before `build` reborrows the document shared. The
         // retained frame is not among them: it stays where hit testing can
         // read it for the whole build, and a build that panics loses only one
@@ -883,6 +916,16 @@ impl<T: Sync> Document<T> {
         frame
     }
 
+    /// Lays out again only when the caller's own `layout()` left work owed —
+    /// a style flush, or a pass a capped settle loop did not reach. A settled
+    /// document's second `layout()` would re-test clean state and reach the
+    /// same frame, so the common case skips it.
+    fn finish_layout(&mut self) {
+        if self.layout_owed() {
+            self.layout();
+        }
+    }
+
     /// Builds the frame this render publishes, with
     /// `content-visibility: auto` relevance determined inside it.
     ///
@@ -891,6 +934,7 @@ impl<T: Sync> Document<T> {
     /// relevance flip pending.
     fn build_frame_with_relevance(&mut self) -> PaintOrder {
         let mut scratch = self.painter.get_mut().take_relevance_scratch();
+        self.finish_layout();
         let mut frame = self.build_frame();
         // css-scroll-snap-1 §4.1.3 before the initial targets: it reads each
         // offset against the positions the last commit published, and a
@@ -908,6 +952,7 @@ impl<T: Sync> Document<T> {
             // read it.
             let stale = std::mem::replace(&mut frame, PaintOrder::empty());
             self.painter.get_mut().restore_spare_buffers(stale);
+            self.layout();
             frame = self.build_frame();
             self.clear_visual_dirty();
         }
@@ -918,6 +963,7 @@ impl<T: Sync> Document<T> {
             // it.
             let stale = std::mem::replace(&mut frame, PaintOrder::empty());
             self.painter.get_mut().restore_spare_buffers(stale);
+            self.layout();
             frame = self.build_frame();
             // The flips invalidated layout, which dirtied the frame they
             // were decided on. This render owns that dirt and the rebuild
@@ -973,8 +1019,7 @@ impl<T: Sync> Document<T> {
         // So the flag this frame carries is decided after the last pass, and
         // a reveal starts its animations in the very commit that revealed
         // them.
-        let animations_active = self.refresh_animation_activity();
-        let needs_main_ticks = animations_active && self.animation_needs_main_ticks(&frame);
+        let (animations_active, needs_main_ticks) = self.refresh_animation_activity(Some(&frame));
         let viewport = self.viewport_size();
         let device_pixel_ratio = self.device_pixel_ratio();
         self.painter.borrow_mut().paint(
@@ -1147,7 +1192,7 @@ impl<T> Document<T> {
         let painter = self.painter.borrow();
         let mut out = painter
             .frame()
-            .map_or([0, 0, 0, 0, 0, 0, 0], |frame| frame.order.capacities())
+            .map_or([0; 8], |frame| frame.order.capacities())
             .to_vec();
         let (spare, scratch) = painter.storage_capacities();
         out.extend_from_slice(&spare);
