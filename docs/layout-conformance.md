@@ -55,8 +55,9 @@ They do not cover CSS parsing, cascade, anonymous box construction, paint,
 fragmentation, Grid named areas or named lines, or Grid subgrid. Grid lanes
 additionally leaves `inline-grid-lanes`, the orientation property and
 `grid-auto-flow: normal`, `dense` backfilling, intrinsic
-`repeat(auto-fill, auto)`, virtual-item grouping, stacking-axis
-self-alignment and baseline alignment/sharing untested because they are
+`repeat(auto-fill, auto)`, virtual-item grouping for spanning items,
+stacking-axis self-alignment and baseline alignment/sharing untested because
+they are
 unimplemented — see `style-assumptions.md` §24. A complete W3C
 conformance claim would require the future Lynx runtime/stylo adapter and the
 applicable Web Platform Tests in addition to these engine tests.

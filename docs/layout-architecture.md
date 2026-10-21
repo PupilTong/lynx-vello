@@ -1546,16 +1546,29 @@ computed `font_size`.
    algorithm once over the grid axis with the stacking axis passed as
    indefinite. A definite-position item contributes at its own span; an
    auto-placed item is assumed to sit at every start position its span fits
-   and contributes once per position. Those per-position clones are built only
-   when track sizing reads its item list at all — the predicate is
-   `size_tracks`'s own `track_sizing_reads_items`, borrowed rather than
-   restated, and it holds whenever some track is intrinsic or flexible — so an
-   all-fixed-length grid axis builds none of them.
-   §3.4.2's virtual-item grouping, which would bound the clone count by
-   distinct spans rather than by items, is deliberately not implemented: a
-   contribution here depends on the tracks the item spans (both the automatic
-   minimum and the fixed-maximum clamp read them), so a group maximum would
-   have to be recomputed per candidate position anyway. The axis is re-sized
+   and contributes once per position. The span-1 items are grouped as
+   §3.4.2's virtual items are: `sizing::LaneSizingItems` measures each one
+   once through a working copy and gives track sizing one aggregate entry per
+   track, standing for the definite-position items placed there and every
+   auto-placed one, whose contributions are the maxima of its members'
+   (`GroupMaxima`). A contribution depends on the track only through the
+   automatic minimum and the fixed-maximum clamp, so the aggregate keeps a
+   minimum in three parts (the members it never applies to; the
+   content-based minimum capped by each member's own maximum; the members'
+   contribution where it does not apply) and applies the track's test and
+   clamp per track. Every step that reads a span-1 contribution takes a
+   maximum through monotone float operations, so the tracks come out bit for
+   bit as with one clone per item and position — which a debug build checks
+   after every grid-axis run by sizing the clones too. An item spanning
+   several tracks is still cloned per candidate position: spreading its
+   contribution over the tracks (§12.5.1) is not shown to commute with the
+   maximum in floating point. The entries are built only when track sizing
+   reads its item list at all — the predicate is `size_tracks`'s own
+   `track_sizing_reads_items`, borrowed rather than restated, and it holds
+   whenever some track is intrinsic or flexible — so an all-fixed-length grid
+   axis builds none of them. Track sizing reads its items through
+   `sizing::SizingItems`, which Grid's own item slice implements as before.
+   The axis is re-sized
    once under its now-definite basis whenever that basis was missing or the
    gutter it feeds came out at a different value. Its available grid space
    follows regular Grid's rule (§12.1): with no size of its own under a

@@ -2159,3 +2159,118 @@ fn a_requested_last_baseline_asks_the_items_that_may_close_a_track() {
     assert_close(tree.layout(beside).location.y, 4.0);
     assert_eq!(output.last_baselines.y, Some(19.0));
 }
+
+/// The mix `aggregated_span_one_sizing_matches_per_position_sizing` sizes:
+/// auto-placed and definite span-1 items sharing tracks, the automatic
+/// minimum in tracks that do and do not allow it, a fixed-maximum clamp, a
+/// `fit-content()` limit, definite, preferred and maximum sizes, a scroll
+/// container and spanning items, down the columns or across the rows.
+fn aggregation_fixture(rows: bool) -> (TestTree, TestId) {
+    let tracks = vec![
+        support::track_auto(),
+        max_content(),
+        support::track_fit_content(support::breadth_px(45.0)),
+        fr(1.0),
+        support::track_minmax(support::breadth_px(0.0), support::breadth_fr(2.0)),
+        min_content(),
+        support::track_minmax(support::breadth_auto(), support::breadth_px(30.0)),
+        support::track_minmax(support::breadth_auto(), support::breadth_min_content()),
+    ];
+    let along = |width: f32, height: f32| {
+        if rows {
+            Size::new(height, width)
+        } else {
+            Size::new(width, height)
+        }
+    };
+    let grid_axis = |style: &mut TestStyle, lines: Line<stylo::values::computed::GridLine>| {
+        if rows {
+            style.grid_row = lines;
+        } else {
+            style.grid_column = lines;
+        }
+    };
+    let mut tree = TestTree::default();
+    let mut children = Vec::new();
+    for (index, (min, max)) in [
+        (20.0, 70.0),
+        (35.0, 50.0),
+        (5.0, 90.0),
+        (60.0, 60.0),
+        (12.0, 48.0),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut style = TestStyle::default();
+        match index {
+            1 => style.min_size = along(40.0, 0.0).map(size_px),
+            2 => style.max_size = along(25.0, 1000.0).map(max_px),
+            3 => style.overflow = Point::new(Overflow::Hidden, Overflow::Hidden),
+            4 => style.size = along(55.0, 10.0).map(size_px),
+            _ => {}
+        }
+        children.push(tree.push_intrinsic_leaf(style, along(min, 10.0), along(max, 10.0)));
+    }
+    for (start, min, max) in [
+        (2, 15.0, 80.0),
+        (4, 30.0, 40.0),
+        (8, 10.0, 55.0),
+        (4, 50.0, 65.0),
+    ] {
+        let mut style = TestStyle::default();
+        grid_axis(&mut style, Line::new(line(start), line(start + 1)));
+        children.push(tree.push_intrinsic_leaf(style, along(min, 10.0), along(max, 10.0)));
+    }
+    let mut spanning = TestStyle::default();
+    grid_axis(
+        &mut spanning,
+        Line::new(span(2), support::grid_auto_placement()),
+    );
+    children.push(tree.push_intrinsic_leaf(spanning, along(40.0, 10.0), along(120.0, 10.0)));
+    let mut placed_span = TestStyle::default();
+    grid_axis(&mut placed_span, Line::new(line(5), line(7)));
+    children.push(tree.push_intrinsic_leaf(placed_span, along(30.0, 10.0), along(90.0, 10.0)));
+    let style = if rows {
+        lanes_style(&[], &tracks)
+    } else {
+        lanes_style(&tracks, &[])
+    };
+    let root = tree.push_grid_lanes(style, children);
+    (tree, root)
+}
+
+/// Grid-axis sizing stands for every span-1 item that may sit in a track
+/// with one aggregate entry per track, and a debug build sizes every run
+/// again with one clone per item and candidate position, asserting the
+/// tracks come out bit for bit the same — so every lanes test checks the
+/// aggregation. This one gives it a mix that reaches each of the aggregate's
+/// parts (`aggregation_fixture`) under every kind of available space, in
+/// both orientations.
+#[test]
+fn aggregated_span_one_sizing_matches_per_position_sizing() {
+    for rows in [false, true] {
+        for space in [
+            AvailableSpace::MaxContent,
+            AvailableSpace::MinContent,
+            AvailableSpace::Definite(200.0),
+            AvailableSpace::Definite(900.0),
+        ] {
+            let (tree, root) = aggregation_fixture(rows);
+            let available = if rows {
+                Size::new(AvailableSpace::MaxContent, space)
+            } else {
+                Size::new(space, AvailableSpace::MaxContent)
+            };
+            let output = support::perform_layout(&tree, root, Size::NONE, available);
+            assert!(output.size.width > 0.0 && output.size.height > 0.0);
+        }
+        let (tree, root) = aggregation_fixture(rows);
+        let output = if rows {
+            sized_layout(&tree, root, None, Some(500.0))
+        } else {
+            sized_layout(&tree, root, Some(500.0), None)
+        };
+        assert!(output.size.width > 0.0 && output.size.height > 0.0);
+    }
+}
