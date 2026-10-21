@@ -1105,8 +1105,8 @@ consequential choice about whether to follow the spec or the quirk.
   are a touch count (the Lynx scroll-state events entry below).
   Recorded choices inside the step:
   - **A `scrollend` ends a scroll that happened.** The main thread records
-    every container that scrolled (an adopted offset moved it, or a
-    script-facing instant scroll did) whether or not anything listens, and a
+    every container that scrolled (an adopted offset moved it, or an
+    instant scroll request did) whether or not anything listens, and a
     post naming it at rest ends that record and fires `scrollend` if the name
     is heard at that moment. An instant scroll fires its `scroll` in the task
     that scrolled and its `scrollend` from the painter's rest post after it
@@ -1117,8 +1117,15 @@ consequential choice about whether to follow the spec or the quirk.
     and the gesture one `scrollend`. A drag or fling that moves the
     container takes it over, and its own end decides the rest. Browsers
     debounce the same way, with their own intervals.
-  - **The render's own positioning fires nothing**: `scroll-initial-target`
-    and the re-snap after a layout change move a container without an event.
+  - **The re-snap after a layout change fires nothing**: it moves a
+    container without an event. The render's other positioning,
+    `scroll-initial-target`, is an instant scroll request and fires `scroll`
+    and `scrollend` as one (2026-10-21): CSSOM-View fires both for any
+    change of a scroll position, and css-scroll-snap-2 §3.1.1 defines that
+    scroll as `scrollIntoView`'s. So an `x-swiper`'s `current` and a
+    `viewpager`'s `select-index`, at connect or written later, fire the
+    component events that follow from those two, as web-core's `scrollTo`
+    and native's pager callbacks do.
   - **An attribute-driven instant scroll at connect fires `scroll` then
     `scrollend` at mount**: a `scroll-top`/`scroll-left` on `scroll-view`, or
     any other component attribute that scrolls through
@@ -2087,7 +2094,19 @@ consequential choice about whether to follow the spec or the quirk.
       to the new page, instantly, over a user's swipe
       (`changing_the_index_in_force_turns_the_pager`; painter side
       `a_selected_page_is_the_first_frame_and_a_new_index_overrides_a_swipe`);
-      web-core does not;
+      web-core does not. The turn, like the one to the page in force at
+      connect, fires the pager's `scroll` and `scrollend` per CSSOM-View, so
+      `offsetchange` and `change` follow
+      (`a_viewpager_select_index_written_later_fires_offsetchange_and_change`),
+      as native's `select-index` setter reports both (Android
+      `BaseLynxViewPager.kt:156-165`, `LynxUIViewPager.kt:203-229`). At
+      connect this follows web-core, whose `selectTab` from
+      `connectedCallback` fires `offsetchange` and, at its `scrollend`, a
+      `change` from page 0 (`XViewpagerNg.ts:37-57`,
+      `XViewpagerNgEvents.ts`); native Android records the initial page as
+      already reported and sends no `change` for it
+      (`LynxUIViewPager.kt:259-266`) — **a native/web-core conflict, open
+      for the user**;
     - inserting or removing a page ahead of the target makes another page the
       target, and the pager turns to it
       (`inserting_or_removing_a_page_ahead_of_the_target_moves_the_target`);
@@ -2485,7 +2504,16 @@ consequential choice about whether to follow the spec or the quirk.
     where web-core turns it smoothly (`XSwiperAutoScroll.ts:35-41`,
     `XSwiper.ts:95-103`). The initial position is the item's snap position,
     as in web-core: its start, or its centre in `flat-coverflow`,
-    `coverflow` and `carry`.
+    `coverflow` and `carry`. The turn fires `#content`'s `scroll` and
+    `scrollend` per CSSOM-View, so a `current` written later fires
+    `scrollstart`, `change` and `scrollend`, as both references do
+    (web-core's `current` setter calls `scrollTo`; Android's `current` prop
+    turns the pager, `XSwiperUI.java:715-717`), and the swiper's first
+    commit on the `current` it was connected with fires `scrollstart` and
+    `scrollend` and no `change`, which is native's `isInit` rule
+    (`:197-199`) and web-core's connect-time `scrollTo`
+    (`a_swiper_current_written_later_fires_scrollstart_change_and_scrollend`,
+    `a_swiper_connected_with_current_fires_scrollstart_and_scrollend_and_no_change`).
   - *`bounces` stretches both ends of the main axis*
     (`overscroll-behavior-x`/`-y: contain-bounce`), the `<viewpager>`
     decision; web-core shows a blank page-wide box ahead of the items only
