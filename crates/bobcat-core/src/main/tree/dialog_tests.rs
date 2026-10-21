@@ -234,14 +234,20 @@ fn show_and_show_modal_refuse_each_other_s_open_dialog() {
     let dialog = child(&mut document, DIALOG_TAG, "");
 
     assert_eq!(show(&mut document, dialog), Ok(()));
-    assert_eq!(document.get(dialog).unwrap().attribute("open"), Some(""));
+    assert_eq!(
+        document.get(dialog).unwrap().attribute("open").as_deref(),
+        Some("")
+    );
     assert!(!document.in_top_layer(dialog));
     assert_eq!(show(&mut document, dialog), Ok(()), "already open: no-op");
     assert_eq!(show_modal(&mut document, dialog), Err(InvalidState));
     assert!(!document.in_top_layer(dialog));
 
     close(&mut document, dialog);
-    assert_eq!(document.get(dialog).unwrap().attribute("open"), None);
+    assert_eq!(
+        document.get(dialog).unwrap().attribute("open").as_deref(),
+        None
+    );
     assert_eq!(queued(&events), vec![(dialog, "close")]);
     close(&mut document, dialog);
     request_close(&mut document, dialog);
@@ -261,7 +267,10 @@ fn show_modal_refuses_a_disconnected_dialog() {
     let mut document = document();
     let dialog = document.create_element(DIALOG_TAG, ());
     assert_eq!(show_modal(&mut document, dialog), Err(InvalidState));
-    assert_eq!(document.get(dialog).unwrap().attribute("open"), None);
+    assert_eq!(
+        document.get(dialog).unwrap().attribute("open").as_deref(),
+        None
+    );
     assert!(!document.in_top_layer(dialog));
     assert_eq!(
         show(&mut document, dialog),

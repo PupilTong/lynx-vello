@@ -182,11 +182,11 @@ fn a_compiled_card_renders_its_markdown_and_hears_its_events() {
             let node = document.get(host).expect("the host");
             assert_eq!(node.tag_name(), Some("x-markdown"));
             assert_eq!(
-                node.attribute("markdown-style"),
+                node.attribute("markdown-style").as_deref(),
                 Some(r#"{"link":{"color":"ff0000"},"inlineCode":{"color":"0000ff"}}"#),
                 "an object-valued markdown-style is written as its JSON text"
             );
-            assert_eq!(node.attribute("content-id"), Some("case-1"));
+            assert_eq!(node.attribute("content-id").as_deref(), Some("case-1"));
 
             let headings = shadow_all(document, host, "h1");
             assert_eq!(headings.len(), 1);
@@ -195,7 +195,10 @@ fn a_compiled_card_renders_its_markdown_and_hears_its_events() {
             assert_eq!(links.len(), 1);
             let link = links[0];
             assert_eq!(
-                document.get(link).and_then(|node| node.attribute("href")),
+                document
+                    .get(link)
+                    .and_then(|node| node.attribute("href"))
+                    .as_deref(),
                 Some("https://lynxjs.org/")
             );
             assert_eq!(text_of(document, link), "link");

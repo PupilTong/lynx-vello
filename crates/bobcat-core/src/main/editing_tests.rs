@@ -75,7 +75,7 @@ fn log_of(engine: &mut TestEngine) -> Option<String> {
     engine
         .probe_document(|tree| {
             tree.get(node_id(HOST))
-                .and_then(|host| host.attribute("log").map(str::to_owned))
+                .and_then(|host| host.attribute("log").map(std::borrow::Cow::into_owned))
         })
         .flatten()
 }

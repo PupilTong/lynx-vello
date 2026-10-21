@@ -4760,7 +4760,7 @@ fn install_attribute_members(
         }
         fn getAttribute(node: node_id_argument, name: string_argument) |document| {
             let element = validate_live_element(document, NAME, node)?;
-            let value = element.attribute(name).map(str::to_owned);
+            let value = element.attribute(name).map(std::borrow::Cow::into_owned);
             Ok(value.map_or(HostValue::Null, HostValue::String))
         }
         fn tagName(node: node_id_argument) |document| {
@@ -4774,7 +4774,7 @@ fn install_attribute_members(
         fn attributeNames(node: node_id_argument) |document| {
             let element = validate_live_element(document, NAME, node)?;
             let mut record = String::new();
-            for (name, _) in element.attributes() {
+            for name in element.attribute_names() {
                 write_record_field(&mut record, name);
             }
             Ok(HostValue::String(record))

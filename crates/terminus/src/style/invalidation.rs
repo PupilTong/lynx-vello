@@ -1,5 +1,6 @@
 //! Matching-relevant mutation, with its style invalidation baked in.
 
+use std::borrow::Cow;
 use std::sync::LazyLock;
 
 use selectors::matching::ElementSelectorFlags;
@@ -371,7 +372,18 @@ impl<T> Document<T> {
         self.note_class_attribute_change(id);
         let node = self.live_node_mut(id);
         node.classes = classes.split_whitespace().map(Atom::from).collect();
-        node.set_attr_local_name(CLASS.clone(), classes.to_owned());
+        // Text that is the class list joined by single spaces reads back from
+        // the list ([`Node::attribute_text`]); any other text is kept as
+        // written.
+        let canonical = classes
+            .split(' ')
+            .eq(node.classes.iter().map(AsRef::<str>::as_ref));
+        let text = if canonical {
+            String::new()
+        } else {
+            classes.to_owned()
+        };
+        node.set_attr_local_name(CLASS.clone(), text);
         self.drain_reactions(base);
     }
 
@@ -385,7 +397,8 @@ impl<T> Document<T> {
         self.note_class_attribute_change(id);
         let node = self.live_node_mut(id);
         node.classes.push(class);
-        sync_class_attribute(node);
+        // The attribute now reads back as the class list.
+        node.set_attr_local_name(CLASS.clone(), String::new());
         let new = self.observed_class_value(id);
         self.enqueue_attribute_changed_values(id, &CLASS, old, new);
         self.drain_reactions(base);
@@ -401,7 +414,8 @@ impl<T> Document<T> {
         self.note_class_attribute_change(id);
         let node = self.live_node_mut(id);
         node.classes.retain(|existing| *existing != class);
-        sync_class_attribute(node);
+        // The attribute now reads back as the class list.
+        node.set_attr_local_name(CLASS.clone(), String::new());
         let new = self.observed_class_value(id);
         self.enqueue_attribute_changed_values(id, &CLASS, old, new);
         self.drain_reactions(base);
@@ -411,12 +425,12 @@ impl<T> Document<T> {
         if !self.observes_attribute(id, &CLASS) {
             return None;
         }
-        self.live(id).attr_local_name(&CLASS).map(str::to_owned)
+        self.live(id).attr_local_name(&CLASS).map(Cow::into_owned)
     }
 
     pub fn set_id_attribute(&mut self, id: NodeId, value: Option<&str>) {
         let base = self.begin_reactions();
-        if value.is_some() || self.live(id).attr_local_name(&ID).is_some() {
+        if value.is_some() || self.live(id).plain_attr(&ID).is_some() {
             self.enqueue_attribute_changed(id, &ID, value);
         }
         self.note_id_attribute_change(id);
@@ -465,7 +479,11 @@ impl<T> Document<T> {
     }
 
     pub fn remove_attribute(&mut self, id: NodeId, name: &str) {
-        if self.live_element(id).attribute(name).is_none() {
+        if !self
+            .live_element(id)
+            .attribute_names()
+            .any(|candidate| candidate == name)
+        {
             return;
         }
         match name {
@@ -483,6 +501,7 @@ impl<T> Document<T> {
             "style" => {
                 let base = self.begin_reactions();
                 self.enqueue_attribute_changed(id, &STYLE, None);
+                self.note_attribute_change(id, &STYLE);
                 self.apply_inline_style_block(id, None, None);
                 self.drain_reactions(base);
                 return;
@@ -626,6 +645,7 @@ impl<T> Document<T> {
             );
             Some(Arc::new(self.style_engine().shared_lock().wrap(parsed)))
         };
+        self.note_attribute_change(id, &STYLE);
         self.apply_inline_style_block(id, block, Some(css.to_owned()));
         self.drain_reactions(base);
     }
@@ -648,23 +668,24 @@ impl<T> Document<T> {
     /// is CSS syntax (for example `background-color` or `--theme-color`), not a
     /// Rust or wire-format property id.
     pub fn set_inline_style_property(&mut self, id: NodeId, property: &str, value: &str) {
-        let existing = self.live_element(id).parsed_inline_style.clone();
-        let Some(block) =
-            self.style_engine()
-                .update_style_property(existing.as_ref(), property, value)
-        else {
+        let Some(update) = self.style_engine().parse_style_update(
+            self.live_element(id).parsed_inline_style.as_ref(),
+            property,
+            value,
+        ) else {
             return;
         };
 
-        let mut css = String::new();
-        block
-            .to_css(&mut css)
-            .expect("serializing a declaration block into a String cannot fail");
-        let block =
-            (!block.is_empty()).then(|| Arc::new(self.style_engine().shared_lock().wrap(block)));
         let base = self.begin_reactions();
-        self.enqueue_attribute_changed(id, &STYLE, Some(&css));
-        self.apply_inline_style_block(id, block, Some(css));
+        // The old value and the snapshot read the block before it changes.
+        let old = self.observed_style_value(id);
+        self.note_attribute_change(id, &STYLE);
+        let mut block = self.live_node_mut(id).parsed_inline_style.take();
+        self.style_engine().apply_style_update(&mut block, update);
+        // The attribute now reads back as the block's serialization.
+        self.apply_inline_style_block(id, block, Some(String::new()));
+        let new = self.observed_style_value(id);
+        self.enqueue_attribute_changed_values(id, &STYLE, old, new);
         self.drain_reactions(base);
     }
 
@@ -678,17 +699,20 @@ impl<T> Document<T> {
     /// An empty value removes the hint; invalid names or values are no-ops,
     /// as in [`Self::set_inline_style_property`].
     pub fn set_presentational_hint(&mut self, id: NodeId, property: &str, value: &str) {
-        let existing = self.live_element(id).presentational_hints.clone();
-        let Some(block) =
-            self.style_engine()
-                .update_style_property(existing.as_ref(), property, value)
-        else {
+        let Some(update) = self.style_engine().parse_style_update(
+            self.live_element(id).presentational_hints.as_ref(),
+            property,
+            value,
+        ) else {
             return;
         };
+        let (engine, tree) = self.style_and_tree_parts();
+        let node = tree
+            .get_mut(id)
+            .expect("stale NodeId passed to a Document mutation method");
+        engine.apply_style_update(&mut node.presentational_hints, update);
 
         self.note_visual_mutation();
-        self.live_node_mut(id).presentational_hints =
-            (!block.is_empty()).then(|| Arc::new(self.style_engine().shared_lock().wrap(block)));
         // A hint is collected during matching, outside the style-attribute
         // replacement path. Re-match even if no selector uses the attribute.
         self.add_restyle_hint(id, RestyleHint::RESTYLE_SELF);
@@ -702,9 +726,8 @@ impl<T> Document<T> {
     /// *replacement*, like assigning `style.cssText`, rather than the
     /// property-level mutation of [`Self::set_inline_style_property`]. The
     /// block is built from empty, so applying an `n`-declaration record costs
-    /// one parse per declaration and one serialization, where replaying the
-    /// record through the property-level setter costs `n` whole-block clones
-    /// and `n` serializations.
+    /// one parse per declaration; the `style` attribute serializes the block
+    /// only when it is read.
     ///
     /// Each declaration keeps the property-level setter's parse semantics: an
     /// unknown property name or an invalid value drops that declaration and
@@ -720,13 +743,32 @@ impl<T> Document<T> {
         id: NodeId,
         declarations: impl IntoIterator<Item = (&'a str, &'a str)>,
     ) {
-        let (block, css) = self.style_engine().build_inline_style_block(declarations);
+        let block = self.style_engine().build_inline_style_block(declarations);
         let base = self.begin_reactions();
-        self.enqueue_attribute_changed(id, &STYLE, Some(&css));
-        self.apply_inline_style_block(id, block, Some(css));
+        let old = self.observed_style_value(id);
+        self.note_attribute_change(id, &STYLE);
+        // The attribute now reads back as the block's serialization.
+        self.apply_inline_style_block(id, block, Some(String::new()));
+        let new = self.observed_style_value(id);
+        self.enqueue_attribute_changed_values(id, &STYLE, old, new);
         self.drain_reactions(base);
     }
 
+    /// The `style` attribute's value, when a definition observes it on this
+    /// element and so needs it for its `attributeChangedCallback`.
+    fn observed_style_value(&self, id: NodeId) -> Option<String> {
+        if !self.observes_attribute(id, &STYLE) {
+            return None;
+        }
+        self.live(id).attr_local_name(&STYLE).map(Cow::into_owned)
+    }
+
+    /// Installs an element's inline declaration block and `style` text.
+    ///
+    /// `css` is the attribute's text: as written, empty for the block's own
+    /// serialization ([`Node::attribute_text`]), or `None` for no attribute.
+    /// The caller has noted the change (`note_attribute_change`) while the
+    /// element still held the block it replaces, for the snapshot to read.
     fn apply_inline_style_block(
         &mut self,
         id: NodeId,
@@ -734,7 +776,6 @@ impl<T> Document<T> {
         css: Option<String>,
     ) {
         self.note_visual_mutation();
-        self.note_attribute_change(id, &STYLE);
         let node = self.live_node_mut(id);
         node.parsed_inline_style = block;
         match css {
@@ -742,6 +783,10 @@ impl<T> Document<T> {
             None => node.remove_attr_local_name(&STYLE),
         }
         insert_restyle_hint(node, RestyleHint::RESTYLE_STYLE_ATTRIBUTE);
+        // The hint is what the traversal acts on; the path down to it is
+        // opened here, not by the attribute gate above, which skips the
+        // snapshot (and its ancestor mark) unless some rule names `[style]`.
+        self.mark_ancestors_dirty_descendants(id);
     }
 
     /// Notes an attribute change this element's own style reads through
@@ -825,8 +870,11 @@ impl<T> Document<T> {
     /// any selector matching, and the snapshot the invalidator would take of it
     /// would have no reader.
     ///
-    /// `class`, `id`, and `style` never reach this: they carry their own
-    /// invalidation, which does not depend on a rule naming them as attributes.
+    /// `class` and `id` never reach this: they carry their own invalidation,
+    /// which does not depend on a rule naming them as attributes. `style`
+    /// does: its declarations reach the cascade through the
+    /// `RESTYLE_STYLE_ATTRIBUTE` hint whatever the answer, so only a rule
+    /// naming `[style]` needs the snapshot.
     ///
     /// The sets are read at mutation time, so a rule arriving afterwards would
     /// have missed the write. What makes that sound is that every rule-set
@@ -918,16 +966,22 @@ impl<T> Document<T> {
 
     fn ensure_snapshot(&mut self, id: NodeId) -> Option<&mut Snapshot> {
         self.note_visual_mutation();
-        if !self.live_element(id).has_style_data() {
+        let node = self.live_element(id);
+        if !node.has_style_data() {
             return None;
         }
+        // A snapshot's attribute values are read by attribute selectors and
+        // nothing else, so a `style` value left to its block's serialization
+        // is serialized only for a rule that selects on `style`.
+        let style_text =
+            node.parsed_inline_style.is_some() && self.any_rule_depends_on_attribute(id, &STYLE);
         let opaque = OpaqueNode(id.arena_key());
         let (nodes, pending_snapshots) = self.snapshot_storage();
         Some(pending_snapshots.entry(opaque).or_insert_with(|| {
             let node = nodes
                 .get(id)
                 .expect("live node disappeared while recording its snapshot");
-            let snapshot = build_snapshot(node);
+            let snapshot = build_snapshot(node, style_text);
             node.set_snapshot_present();
             snapshot
         }))
@@ -974,14 +1028,9 @@ fn insert_restyle_hint<T>(node: &mut Node<T>, hint: RestyleHint) {
     }
 }
 
-fn sync_class_attribute<T>(node: &mut Node<T>) {
-    let value = node
-        .classes
-        .iter()
-        .map(AsRef::<str>::as_ref)
-        .collect::<Vec<_>>()
-        .join(" ");
-    node.set_attr_local_name(CLASS.clone(), value);
+/// The rule set a shadow root scopes, if it holds one.
+fn scoped_data<T>(root: Option<&Node<T>>) -> Option<&CascadeData> {
+    Some(&root?.shadow_data()?.styles.data)
 }
 
 /// Attributes whose invalidation is not recorded in
@@ -989,28 +1038,26 @@ fn sync_class_attribute<T>(node: &mut Node<T>) {
 /// on it.
 ///
 /// The gate asks Stylo whether an attribute selector anywhere names this
-/// attribute. Four attributes matter to matching without ever being named by
+/// attribute. Three attributes matter to matching without ever being named by
 /// one:
 ///
-/// - `style` carries declarations, not matching. Its flush is scheduled by the
-///   `RESTYLE_STYLE_ATTRIBUTE` hint plus the ancestor mark, never by a rule mentioning `[style]`.
 /// - `lang` is what `:lang()` reads. Stylo files that dependency into the `InvalidationMap` from
 ///   `on_pseudo_class`, under the attribute name — a different structure from the
 ///   `attribute_dependencies` set this gate reads, which only `visit_attribute_selector` fills.
 /// - `part` and `exportparts` drive `::part()` matching through
 ///   `TElement::has_part_attr`/`imported_part`, again with no attribute selector involved.
 ///
-/// Only `style` is load-bearing today. `::part()` reaches an element only through a containing
-/// shadow root, and a document that has one already answers the gate conservatively; `:lang()`
-/// cannot match anything while `TElement::match_element_lang` returns false. The other three are
+/// `style` is gated like any other attribute. It carries declarations, not
+/// matching: its flush is scheduled by the `RESTYLE_STYLE_ATTRIBUTE` hint and
+/// the ancestor mark `Document::apply_inline_style_block` sets itself, so the
+/// snapshot is taken only for a rule that names `[style]`.
+///
+/// None of the three is load-bearing today. `::part()` reaches an element only through a
+/// containing shadow root, and a document that has one already answers the gate conservatively;
+/// `:lang()` cannot match anything while `TElement::match_element_lang` returns false. They are
 /// listed so that closing either of those gaps does not quietly make the gate wrong.
-/// The rule set a shadow root scopes, if it holds one.
-fn scoped_data<T>(root: Option<&Node<T>>) -> Option<&CascadeData> {
-    Some(&root?.shadow_data()?.styles.data)
-}
-
 fn is_gate_exempt(name: &LocalName) -> bool {
-    *name == *STYLE || *name == *LANG || *name == *PART || *name == *EXPORTPARTS
+    *name == *LANG || *name == *PART || *name == *EXPORTPARTS
 }
 
 fn push_changed_attr(snapshot: &mut Snapshot, name: &LocalName) {
@@ -1019,7 +1066,10 @@ fn push_changed_attr(snapshot: &mut Snapshot, name: &LocalName) {
     }
 }
 
-fn build_snapshot<T>(node: &Node<T>) -> Snapshot {
+/// `node`'s attributes and state as they are before a change. `style_text`
+/// is whether a derived `style` value is serialized ([`Node::attribute_text`])
+/// rather than recorded as the empty value it is stored as.
+fn build_snapshot<T>(node: &Node<T>, style_text: bool) -> Snapshot {
     let mut attrs: Vec<(AttrIdentifier, AttrValue)> = Vec::new();
 
     if let Some(id_atom) = &node.id_attribute {
@@ -1037,14 +1087,16 @@ fn build_snapshot<T>(node: &Node<T>) -> Snapshot {
             ),
         ));
     }
-    for (name, value) in &node.attrs {
+    for (name, stored) in &node.attrs {
         if matches!(name.0.as_ref(), "id" | "class") {
             continue;
         }
-        attrs.push((
-            attr_identifier(name.clone()),
-            AttrValue::String(value.clone()),
-        ));
+        let value = if style_text || *name != *STYLE {
+            node.attribute_text(name, stored).into_owned()
+        } else {
+            stored.clone()
+        };
+        attrs.push((attr_identifier(name.clone()), AttrValue::String(value)));
     }
     let mut snapshot = Snapshot::new();
     snapshot.state = Some(node.element_state());
@@ -1332,5 +1384,113 @@ mod tests {
             root_hint(&doc).contains(RestyleHint::RESTYLE_DESCENDANTS),
             "crossing the breakpoint changes which rules apply"
         );
+    }
+
+    fn inline_block(
+        doc: &Doc,
+        id: crate::tree::document::NodeId,
+    ) -> Option<*const std::ffi::c_void> {
+        doc.dom
+            .get(id)
+            .expect("a live element")
+            .parsed_inline_style
+            .as_ref()
+            .map(stylo::servo_arc::Arc::heap_ptr)
+    }
+
+    /// A property write updates a declaration block nothing else holds where
+    /// it is, and copies the one a computed style was cascaded from. The rule
+    /// tree holds that one, and the flush finds a changed block by its
+    /// identity: Stylo's `update_rule_at_level` keeps the rule node whose
+    /// style-attribute level already holds the same `Arc`, so a block updated
+    /// in place there would never be cascaded again. An animation tick before
+    /// the next flush also cascades from the rule tree, and has to see the
+    /// declarations of the last flush.
+    #[test]
+    fn an_inline_property_write_copies_only_the_block_the_rule_tree_holds() {
+        let mut doc = Doc::new();
+        let root = doc.root;
+        let el = doc.el(root, "view");
+        doc.dom.set_inline_style_property(el, "width", "10px");
+        let first = inline_block(&doc, el);
+        doc.dom.set_inline_style_property(el, "height", "20px");
+        assert_eq!(inline_block(&doc, el), first, "nothing holds it yet");
+        doc.flush();
+
+        doc.dom.set_inline_style_property(el, "width", "30px");
+        let copy = inline_block(&doc, el);
+        assert_ne!(copy, first, "the rule tree holds the flushed block");
+        assert_eq!(
+            doc.value(el, "width"),
+            "10px",
+            "the cascade's block is as it was"
+        );
+        doc.dom.set_inline_style_property(el, "height", "40px");
+        assert_eq!(inline_block(&doc, el), copy, "nothing holds the copy yet");
+
+        doc.flush();
+        assert_eq!(doc.value(el, "width"), "30px");
+        assert_eq!(doc.value(el, "height"), "40px");
+        assert_eq!(
+            doc.dom.get(el).unwrap().attribute("style").as_deref(),
+            Some("width: 30px; height: 40px;")
+        );
+    }
+
+    /// A property write that leaves the attribute to its block's
+    /// serialization still matches attribute selectors on the text, before
+    /// and after: the snapshot a `[style]` rule needs serializes the block as
+    /// it was.
+    #[test]
+    fn a_style_attribute_selector_sees_a_property_write() {
+        let mut doc = Doc::with_css(
+            "view { color: rgb(0, 0, 255) } \
+             view[style*=\"30px\"] { color: rgb(255, 0, 0) }",
+        );
+        let root = doc.root;
+        let el = doc.el(root, "view");
+        doc.dom.set_inline_style_property(el, "width", "10px");
+        doc.flush();
+        assert_eq!(doc.color(el), crate::test_common::rgb(0, 0, 255));
+
+        doc.dom.set_inline_style_property(el, "width", "30px");
+        doc.flush();
+        assert_eq!(doc.color(el), crate::test_common::rgb(255, 0, 0));
+
+        doc.dom.set_inline_style_property(el, "width", "");
+        doc.flush();
+        assert_eq!(doc.color(el), crate::test_common::rgb(0, 0, 255));
+        assert_eq!(
+            doc.dom.get(el).unwrap().attribute("style").as_deref(),
+            Some("")
+        );
+    }
+
+    /// Class text is kept as written unless it is the class list joined by
+    /// single spaces, which is what it reads back as either way.
+    #[test]
+    fn class_text_reads_back_as_written_or_as_the_class_list() {
+        let mut doc = Doc::new();
+        let root = doc.root;
+        let el = doc.el(root, "view");
+        let class = |doc: &Doc| {
+            doc.dom
+                .get(el)
+                .unwrap()
+                .attribute("class")
+                .map(std::borrow::Cow::into_owned)
+        };
+        doc.dom.set_classes(el, " a  b ");
+        assert_eq!(class(&doc).as_deref(), Some(" a  b "));
+        doc.dom.set_classes(el, "a b");
+        assert_eq!(class(&doc).as_deref(), Some("a b"));
+        doc.dom.add_class(el, "c");
+        assert_eq!(class(&doc).as_deref(), Some("a b c"));
+        for name in ["a", "b", "c"] {
+            doc.dom.remove_class(el, name);
+        }
+        assert_eq!(class(&doc).as_deref(), Some(""));
+        doc.dom.set_classes(el, "");
+        assert_eq!(class(&doc).as_deref(), Some(""));
     }
 }

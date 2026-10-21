@@ -1,10 +1,11 @@
 //! [`Node`] — the unit the tree is composed of — and its `&Node` read/
 //! navigation handle.
 
+use std::borrow::Cow;
 use std::fmt;
 use std::marker::PhantomData;
 use std::sync::Arc as StdArc;
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
 #[cfg(feature = "layout-test-utils")]
 use seldon::compute::LeafMetrics;
@@ -67,7 +68,6 @@ pub(crate) struct StylingData {
     /// them.
     pub(crate) animates: AtomicU8,
     pub(crate) snapshot_flags: AtomicU8,
-    pub(crate) children_to_process: AtomicIsize,
 }
 
 impl Default for StylingData {
@@ -79,7 +79,6 @@ impl Default for StylingData {
             may_have_animations: AtomicBool::new(false),
             animates: AtomicU8::new(0),
             snapshot_flags: AtomicU8::new(0),
-            children_to_process: AtomicIsize::new(0),
         }
     }
 }
@@ -506,16 +505,76 @@ impl<T> Node<T> {
         self.classes.iter().map(AsRef::as_ref)
     }
 
+    /// One attribute's value, as `getAttribute` reads it.
+    ///
+    /// Borrowed as stored, but for a `style` or `class` value that a write
+    /// through the parsed form left to be serialized on read
+    /// ([`Self::attribute_text`]).
     #[must_use]
-    pub fn attribute(&self, name: &str) -> Option<&str> {
-        let name = LocalName::from(name);
-        self.attr_local_name(&name)
+    pub fn attribute(&self, name: &str) -> Option<Cow<'_, str>> {
+        self.attr_local_name(&LocalName::from(name))
     }
 
-    pub(crate) fn attr_local_name(&self, name: &LocalName) -> Option<&str> {
+    pub(crate) fn attr_local_name(&self, name: &LocalName) -> Option<Cow<'_, str>> {
+        self.attrs
+            .iter()
+            .find(|(candidate, _)| candidate == name)
+            .map(|(name, stored)| self.attribute_text(name, stored))
+    }
+
+    /// The value of an attribute whose text is always stored as written:
+    /// any attribute but `style` and `class` ([`Self::attribute_text`]).
+    pub(crate) fn plain_attr(&self, name: &LocalName) -> Option<&str> {
+        debug_assert!(
+            !matches!(name.0.as_ref(), "style" | "class"),
+            "`{}` text can be derived; read it with `attr_local_name`",
+            name.0
+        );
         self.attrs
             .iter()
             .find_map(|(candidate, value)| (candidate == name).then_some(value.as_str()))
+    }
+
+    /// An attribute's value, from what is stored for it.
+    ///
+    /// `style` and `class` each have a parsed form — the inline declaration
+    /// block, the class list — and their text is stored only while it is not
+    /// what that form serializes to: the text a `setAttribute` wrote, kept as
+    /// written. A write through the parsed form (one inline property, an
+    /// inline-style record, a single class) and a class list written in its
+    /// canonical form store an empty value instead, and the text is then the
+    /// block's CSSOM serialization or the class list joined by single spaces —
+    /// the text that write would otherwise have stored. An empty value with
+    /// nothing parsed behind it is the empty attribute.
+    pub(crate) fn attribute_text<'a>(&'a self, name: &LocalName, stored: &'a str) -> Cow<'a, str> {
+        if !stored.is_empty() {
+            return Cow::Borrowed(stored);
+        }
+        match name.0.as_ref() {
+            "style" => self
+                .parsed_inline_style
+                .as_ref()
+                .map_or(Cow::Borrowed(stored), |block| {
+                    let guard = self.document_lock().read();
+                    let mut css = String::new();
+                    block
+                        .read_with(&guard)
+                        .to_css(&mut css)
+                        .expect("serializing a declaration block into a String cannot fail");
+                    Cow::Owned(css)
+                }),
+            "class" if !self.classes.is_empty() => {
+                let mut text = String::new();
+                for (index, class) in self.classes.iter().enumerate() {
+                    if index > 0 {
+                        text.push(' ');
+                    }
+                    text.push_str(class);
+                }
+                Cow::Owned(text)
+            }
+            _ => Cow::Borrowed(stored),
+        }
     }
 
     pub(crate) fn set_attr_local_name(&mut self, name: LocalName, value: String) {
@@ -540,10 +599,17 @@ impl<T> Node<T> {
         }
     }
 
-    pub fn attributes(&self) -> impl ExactSizeIterator<Item = (&str, &str)> {
+    /// Every attribute with its value ([`Self::attribute`]), in the order
+    /// the element acquired them.
+    pub fn attributes(&self) -> impl ExactSizeIterator<Item = (&str, Cow<'_, str>)> {
         self.attrs
             .iter()
-            .map(|(name, value)| (name.0.as_ref(), value.as_str()))
+            .map(|(name, stored)| (name.0.as_ref(), self.attribute_text(name, stored)))
+    }
+
+    /// Every attribute's name, in the order the element acquired them.
+    pub fn attribute_names(&self) -> impl ExactSizeIterator<Item = &str> {
+        self.attrs.iter().map(|(name, _)| name.0.as_ref())
     }
 
     #[must_use]
@@ -1215,6 +1281,8 @@ impl<T> ExactSizeIterator for ChildrenIter<'_, T> {}
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use std::sync::atomic::AtomicIsize;
+
     use seldon::text::FontBlob;
     use stylo::dom::TElement;
 
@@ -1233,9 +1301,10 @@ mod tests {
         // `Option<NodeId>` has a niche where `Option<usize>` had none, so the
         // parent link costs 8 bytes rather than 16. Presentational hints add
         // one optional Arc; the declaration block allocates only when used.
+        // No node keeps Stylo's postorder child counter (`StylingData`).
         assert_eq!(
             std::mem::size_of::<Node<()>>(),
-            if cfg!(debug_assertions) { 232 } else { 224 }
+            if cfg!(debug_assertions) { 224 } else { 216 }
         );
         assert!(
             std::mem::size_of::<NodeData>() < PRE_BOXING_NODE_DATA_SIZE,
@@ -1264,8 +1333,13 @@ mod tests {
         }
 
         assert_eq!(std::mem::size_of::<PreviousStylingData>(), 32);
-        assert_eq!(std::mem::size_of::<StylingData>(), 24);
-        assert_eq!(std::mem::size_of::<usize>(), 32 - 24);
+        assert_eq!(std::mem::size_of::<StylingData>(), 16);
+        // The snapshot pointer, and the postorder child counter no traversal
+        // here uses (`RecalcStyle::needs_postorder_traversal` is false).
+        assert_eq!(
+            std::mem::size_of::<usize>() + std::mem::size_of::<AtomicIsize>(),
+            32 - 16
+        );
     }
 
     #[test]

@@ -163,6 +163,7 @@
 //! element's free (`Document::drop_element`), so no borrow of the shared
 //! state is ever held across a `Document` call.
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -579,17 +580,17 @@ impl Attributes {
             .get(node)
             .expect("an element is registered for exposure only while it is live");
         let width = document.viewport_size().width;
-        let length = |name: &str| parse_length(element.attribute(name), width);
+        let length = |name: &str| parse_length(element.attribute(name).as_deref(), width);
         Self {
             exposure_id: element
                 .attribute(EXPOSURE_ID)
                 .filter(|id| !id.is_empty())
-                .map(str::to_owned),
+                .map(Cow::into_owned),
             scene: element
                 .attribute(EXPOSURE_SCENE)
-                .unwrap_or_default()
-                .to_owned(),
-            area: parse_area(element.attribute(EXPOSURE_AREA)),
+                .map(Cow::into_owned)
+                .unwrap_or_default(),
+            area: parse_area(element.attribute(EXPOSURE_AREA).as_deref()),
             margins: fold_margins(SCREEN_MARGINS.map(length), UI_MARGINS.map(length)),
         }
     }

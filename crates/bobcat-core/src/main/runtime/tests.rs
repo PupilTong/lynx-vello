@@ -84,7 +84,10 @@ fn boot_defers_flush_to_a_microtask_without_draining_between_hooks() {
     // The first render job precedes the queued flush; its nested job follows it.
     // This test drives the realm directly, before Page's dirty-commit epilogue.
     assert_eq!(tree.rounded_layout(view.id()).unwrap().size.width, 20.0);
-    assert_eq!(view.attribute("style"), Some("width:30px;height:10px"));
+    assert_eq!(
+        view.attribute("style").as_deref(),
+        Some("width:30px;height:10px")
+    );
     while let Ok(notice) = far.0.notices.try_recv() {
         assert!(
             !matches!(
@@ -1219,7 +1222,7 @@ fn classes_attributes_and_identity_queries_reach_the_private_document() {
     let view = elements.get(node_id(3)).expect("the view is live");
     assert_eq!(view.classes().collect::<Vec<_>>(), ["row", "bold"]);
     assert_eq!(view.id_attribute(), Some("header"));
-    assert_eq!(view.attribute("flex-grow"), Some("1"));
+    assert_eq!(view.attribute("flex-grow").as_deref(), Some("1"));
     assert_eq!(view.tag_name(), Some("view"));
 }
 
@@ -1253,7 +1256,7 @@ fn clearing_a_class_id_or_attribute_removes_it_from_the_private_document() {
     let view = elements.get(node_id(3)).expect("the view is live");
     assert_eq!(view.classes().len(), 0);
     assert_eq!(view.id_attribute(), None);
-    assert_eq!(view.attribute("text"), None);
+    assert_eq!(view.attribute("text").as_deref(), None);
 }
 
 /// The page configuration reaches the document through the realm.
@@ -1659,7 +1662,7 @@ fn clearing_inline_styles_removes_the_attribute_and_layout_effect() {
 
     let elements = elements.tree();
     let view = elements.get(node_id(3)).expect("the view is live");
-    assert_eq!(view.attribute("style"), None);
+    assert_eq!(view.attribute("style").as_deref(), None);
     let layout = elements
         .rounded_layout(node_id(3))
         .expect("the view is laid out");
@@ -6213,7 +6216,8 @@ fn a_listener_may_mutate_the_tree_it_was_dispatched_on() {
             .tree()
             .get(node_id(3))
             .expect("the view is live")
-            .attribute("tapped"),
+            .attribute("tapped")
+            .as_deref(),
         Some("yes")
     );
 }
@@ -6651,7 +6655,7 @@ fn a_raw_text_reaches_the_private_document_as_a_laid_out_run() {
     let tree = elements.tree();
     let carrier = tree.get(node_id(4)).expect("the raw-text is live");
     assert_eq!(carrier.tag_name(), Some("raw-text"));
-    assert_eq!(carrier.attribute("text"), Some("hello"));
+    assert_eq!(carrier.attribute("text").as_deref(), Some("hello"));
     assert!(
         carrier.child_ids().is_empty(),
         "generated text is absent from the DOM"
@@ -6706,7 +6710,7 @@ fn text_maxline_from_element_papi_limits_the_paragraph_and_its_box() {
         let id = tree
             .document_element()
             .children()
-            .find(|node| node.attribute("id") == Some(name))
+            .find(|node| node.attribute("id").as_deref() == Some(name))
             .expect("the text element")
             .id();
         assert_eq!(
@@ -6797,7 +6801,7 @@ fn replacing_inline_styles_preserves_attribute_text_limits() {
             .expect("main-thread script");
         let tree = elements.tree();
         for text in tree.document_element().children() {
-            assert_eq!(text.attribute(attribute), Some("1"));
+            assert_eq!(text.attribute(attribute).as_deref(), Some("1"));
             assert!(!text.attribute("style").unwrap().contains("--lynx-text-"));
             let paragraph = tree.text_block_size(text.id()).expect("paragraph");
             assert_eq!(paragraph.height, 21.0, "{attribute}");
@@ -6850,10 +6854,10 @@ fn the_text_overflow_attribute_from_papi_reaches_the_paragraph_marker() {
         let text = tree
             .document_element()
             .children()
-            .find(|node| node.attribute("id") == Some(name))
+            .find(|node| node.attribute("id").as_deref() == Some(name))
             .expect("the text element");
         assert_eq!(
-            text.attribute("text-overflow"),
+            text.attribute("text-overflow").as_deref(),
             Some(attribute),
             "{name}: the attribute reaches the document verbatim"
         );
@@ -6889,7 +6893,7 @@ fn rewriting_the_text_attribute_updates_generated_content() {
 
     let tree = elements.tree();
     let carrier = tree.get(node_id(4)).expect("carrier");
-    assert_eq!(carrier.attribute("text"), Some("hi"));
+    assert_eq!(carrier.attribute("text").as_deref(), Some("hi"));
     assert!(carrier.child_ids().is_empty());
     assert!(
         tree.text_block_size(node_id(3))
@@ -6918,7 +6922,12 @@ fn a_collected_raw_text_releases_its_attribute_content() {
         )
         .expect("main-thread script");
     assert_eq!(
-        elements.tree().get(node_id(4)).unwrap().attribute("text"),
+        elements
+            .tree()
+            .get(node_id(4))
+            .unwrap()
+            .attribute("text")
+            .as_deref(),
         Some("hello")
     );
     assert!(
@@ -7669,21 +7678,25 @@ fn update_list_info_builds_and_retires_cells_through_the_filed_callbacks() {
     let list = tree
         .document_element()
         .children()
-        .find(|node| node.attribute("id") == Some("cells"))
+        .find(|node| node.attribute("id").as_deref() == Some("cells"))
         .expect("the list element");
     assert_eq!(
-        list.attribute("data-first-batch"),
+        list.attribute("data-first-batch").as_deref(),
         Some("4"),
         "every insertAction position built its cell"
     );
     assert_eq!(
-        list.attribute("data-retired"),
+        list.attribute("data-retired").as_deref(),
         Some("cell-1,cell-3"),
         "enqueueComponent is told the list and the sign of each cell removed"
     );
     let keys: Vec<_> = list
         .children()
         .map(|cell| (cell.tag_name(), cell.attribute("item-key")))
+        .collect();
+    let keys: Vec<_> = keys
+        .iter()
+        .map(|(tag, key)| (*tag, key.as_deref()))
         .collect();
     assert_eq!(
         keys,
@@ -7896,7 +7909,8 @@ fn a_timer_callback_mutates_the_document_the_realm_shares() {
             .tree()
             .get(node_id(3))
             .expect("the view is live")
-            .attribute("ticked"),
+            .attribute("ticked")
+            .as_deref(),
         Some("yes")
     );
 }
@@ -10116,7 +10130,7 @@ fn frame_page_of(tree: &LynxDocument, frame: terminus::link::NodeId) -> terminus
     let page = nested_page(tree, frame).expect("a frame holds its nested page");
     let node = tree.get(page).expect("live");
     assert_eq!(node.tag_name(), Some("page"));
-    assert_eq!(node.attribute("part"), Some("page"));
+    assert_eq!(node.attribute("part").as_deref(), Some("page"));
     page
 }
 
@@ -10828,8 +10842,8 @@ fn frame_lines(js: &mut ScriptRuntime, runtime: &mut MainThreadRuntime) -> Vec<S
     let probe = runtime.with_document(|tree| {
         tree.document_element()
             .attribute("data-seen")
+            .map(std::borrow::Cow::into_owned)
             .unwrap_or_default()
-            .to_owned()
     });
     if probe.is_empty() {
         return Vec::new();

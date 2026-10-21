@@ -250,7 +250,7 @@ impl CustomElement<()> for ScrollView {
 fn is_horizontal(document: &LynxDocument, view: NodeId) -> bool {
     document.get(view).is_some_and(|node| {
         node.attribute("scroll-x").is_some()
-            || node.attribute("scroll-orientation") == Some("horizontal")
+            || node.attribute("scroll-orientation").as_deref() == Some("horizontal")
     })
 }
 
@@ -343,7 +343,7 @@ pub(super) fn threshold_px(document: &LynxDocument, scroller: NodeId, name: &str
     document
         .get(scroller)
         .and_then(|node| node.attribute(name))
-        .and_then(parse_int)
+        .and_then(|value| parse_int(&value))
         .map_or(0.0, |value| value.max(0.0) as f32)
 }
 

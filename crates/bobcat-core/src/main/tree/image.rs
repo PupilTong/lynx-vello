@@ -781,7 +781,11 @@ mod tests {
             document.layout();
             assert_eq!(object_fit(&document, element), fit, "mode={mode:?}");
             assert_eq!(
-                document.get(element).unwrap().attribute(MODE_ATTRIBUTE),
+                document
+                    .get(element)
+                    .unwrap()
+                    .attribute(MODE_ATTRIBUTE)
+                    .as_deref(),
                 mode,
                 "and the attribute itself is never rewritten",
             );
@@ -805,7 +809,11 @@ mod tests {
         document.layout();
         assert_eq!(object_fit(&document, element), ObjectFit::Cover);
         assert_eq!(
-            document.get(element).unwrap().attribute(MODE_ATTRIBUTE),
+            document
+                .get(element)
+                .unwrap()
+                .attribute(MODE_ATTRIBUTE)
+                .as_deref(),
             Some("aspectFit"),
             "the author declaration wins the cascade without touching the attribute",
         );
@@ -1004,7 +1012,8 @@ mod tests {
                 document
                     .get(element)
                     .unwrap()
-                    .attribute(BLUR_RADIUS_ATTRIBUTE),
+                    .attribute(BLUR_RADIUS_ATTRIBUTE)
+                    .as_deref(),
                 value,
                 "and the attribute itself is never rewritten",
             );
@@ -1029,7 +1038,8 @@ mod tests {
             document
                 .get(element)
                 .unwrap()
-                .attribute(BLUR_RADIUS_ATTRIBUTE),
+                .attribute(BLUR_RADIUS_ATTRIBUTE)
+                .as_deref(),
             Some("10px"),
             "the author declaration wins the cascade without touching the attribute",
         );
