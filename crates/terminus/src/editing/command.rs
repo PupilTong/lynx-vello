@@ -43,7 +43,9 @@ use super::offsets::{
 use super::{ByteSelection, EditableParagraph, Session};
 use crate::tree::document::{Document, NodeId};
 
-/// One editing command, applied to the focused editing host.
+/// One editing command, applied to the selection host: the focused editing
+/// host, or a selectable element selected without focus, which refuses
+/// every command that would change a value or compose text.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
     /// `ImeSetComposition`: replaces the composition — or, when none is
@@ -340,7 +342,8 @@ struct Context {
     host: NodeId,
     value: String,
     session: Session,
-    /// Whether the value may change: no element child in the host.
+    /// Whether the value may change: the session is a focused editing
+    /// host's, and the host has no element child.
     writable: bool,
     /// The selection as value bytes, read once from wherever the session
     /// holds it.
@@ -455,20 +458,24 @@ fn apply_changes(base: &str, changes: &[(Range<usize>, String)]) -> String {
 }
 
 impl<T: Sync> Document<T> {
-    /// Computes what `command` would do to the focused host without doing
-    /// it. `None` when nothing is focused or the command has nothing to act
-    /// on or is refused.
+    /// Computes what `command` would do to the selection host without
+    /// doing it. `None` when there is no selection host or the command has
+    /// nothing to act on or is refused. A selectable element selected
+    /// without focus ([`Self::begin_selection`]) takes the commands that
+    /// place and move the selection, over its selection text
+    /// ([`Self::session_text`]), and refuses every one that would change a
+    /// value or compose text.
     ///
     /// Commands that measure the layout run a layout pass first.
     pub fn prepare_editing(&mut self, command: Command) -> Option<PreparedEdit> {
-        self.focused()?;
+        self.editing.session.as_ref()?;
         if command.reads_layout() {
             self.layout();
         }
-        let host = self.focused()?;
-        let value = self.host_value(host);
         let session = self.editing.session.clone()?;
-        let paragraph = self.editable_paragraph(host);
+        let host = session.host;
+        let value = self.session_text(&session);
+        let paragraph = self.session_paragraph(&session);
         // A paragraph built from more than the value — generated `content`,
         // an element child's text — has no offsets in the value: only the
         // commands that work on value offsets alone apply over it.
@@ -481,11 +488,13 @@ impl<T: Sync> Document<T> {
         let selection = session
             .bytes(paragraph.as_ref(), &value)
             .unwrap_or_else(|| ByteSelection::collapsed(value.len(), Affinity::Downstream));
+        let writable =
+            session.focused && self.is_editing_host(host) && self.host_is_plain_text(host);
         let context = Context {
             host,
             value,
             session,
-            writable: self.host_is_plain_text(host),
+            writable,
             selection,
         };
         let paragraph = paragraph.as_ref();
@@ -546,8 +555,8 @@ impl<T: Sync> Document<T> {
 
     /// Applies a prepared edit: writes the value, places the selection and
     /// the composition, and answers with the edit's events. Applies nothing
-    /// when the host is no longer focused or its value changed since the
-    /// edit was prepared.
+    /// when the host is no longer the selection host or its selection text
+    /// changed since the edit was prepared.
     ///
     /// An edit that changes the value, or leaves a selection other than the
     /// one held (`selection_differs`), sets the document's
@@ -559,21 +568,24 @@ impl<T: Sync> Document<T> {
     where
         T: Default,
     {
-        if self.focused() != Some(edit.host) || self.host_value(edit.host) != edit.base {
+        let Some(session) = self
+            .editing
+            .session
+            .as_ref()
+            .filter(|session| session.host == edit.host)
+        else {
+            return EditOutcome::refused();
+        };
+        if self.session_text(session) != edit.base {
             return EditOutcome::refused();
         }
         let changes_selection = !edit.changes.is_empty() || {
-            let session = self
-                .editing
-                .session
-                .as_ref()
-                .expect("the focused host has a session");
             // The held selection as value offsets is read only where the
             // comparison needs it: offsets after, against a selection held
             // in the paragraph. Read before anything is written.
             let held = match (edit.selection, session.pending) {
                 (SelectionAfter::Bytes(_), None) => {
-                    session.bytes(self.editable_paragraph(edit.host).as_ref(), &edit.base)
+                    session.bytes(self.session_paragraph(session).as_ref(), &edit.base)
                 }
                 _ => session.pending,
             };
@@ -590,7 +602,7 @@ impl<T: Sync> Document<T> {
             .editing
             .session
             .as_mut()
-            .expect("the focused host has a session");
+            .expect("the selection host has a session");
         match edit.selection {
             SelectionAfter::Bytes(bytes) => session.pending = Some(bytes),
             SelectionAfter::Layout(selection) => {

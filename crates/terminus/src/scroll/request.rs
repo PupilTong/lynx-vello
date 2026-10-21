@@ -183,7 +183,7 @@ impl<T> Document<T> {
         offset: Vector2D<f32>,
         behavior: ScrollBehavior,
     ) -> Vector2D<f32> {
-        self.request_scroll(id, offset, behavior, false, true)
+        self.request_scroll(id, offset, behavior, false)
             .unwrap_or_default()
     }
 
@@ -205,23 +205,21 @@ impl<T> Document<T> {
         offset: Vector2D<f32>,
         behavior: ScrollBehavior,
     ) -> bool {
-        self.request_scroll(id, offset, behavior, true, false)
-            .is_some()
+        self.request_scroll(id, offset, behavior, true).is_some()
     }
 
     /// The one request path behind [`Self::scroll_to_with`],
-    /// [`Self::scroll_to_yielding`] and the render's own positioning.
-    /// `yields_to_pointer` is the yielding request's rule; `script_facing`
-    /// records an instant move for the host's scroll events, which the
-    /// render's own positioning (`scroll-initial-target`) is not, and a
-    /// yielding request never performs here.
+    /// [`Self::scroll_to_yielding`] and the render's own positioning
+    /// (`scroll-initial-target`). `yields_to_pointer` is the yielding
+    /// request's rule. Every instant move performed here is recorded for the
+    /// host's scroll events ([`Self::take_instant_scrolls`]), whoever asked
+    /// for it; a yielding request never performs here.
     pub(crate) fn request_scroll(
         &mut self,
         id: NodeId,
         offset: Vector2D<f32>,
         behavior: ScrollBehavior,
         yields_to_pointer: bool,
-        script_facing: bool,
     ) -> Option<Vector2D<f32>> {
         debug_assert!(
             offset.x.is_finite() && offset.y.is_finite(),
@@ -238,7 +236,7 @@ impl<T> Document<T> {
             let previous = scroll_box.offset;
             let moved = self.scroll_to(id, target) != previous;
             let recorded = &mut self.layout_state_mut().instant_scrolls;
-            if moved && script_facing && !recorded.iter().any(|(held, _)| *held == id) {
+            if moved && !recorded.iter().any(|(held, _)| *held == id) {
                 recorded.push((id, previous));
             }
         }
@@ -260,12 +258,13 @@ impl<T> Document<T> {
         Some(target)
     }
 
-    /// The containers a script-facing instant [`Self::scroll_to_with`] moved
-    /// since the last call, each once with the offset it had before the
+    /// The containers an instant scroll request moved since the last call —
+    /// a [`Self::scroll_to_with`], or the render's own move to a
+    /// `scroll-initial-target` — each once with the offset it had before the
     /// first of those moves (so the host can report the change), in the
-    /// order they first moved, and forgets them. The host fires `scroll` at each, in the task that
-    /// scrolled; its `scrollend` follows when the painter, which carries the
-    /// request out, posts the container at rest. A smooth one is the
+    /// order they first moved, and forgets them. The host fires `scroll` at
+    /// each, in the task that scrolled; its `scrollend` follows when the
+    /// painter, which carries the request out, posts the container at rest. A smooth one is the
     /// painter's to move, and the host learns its offsets, and its end, from
     /// the painter's posts alone.
     ///

@@ -182,8 +182,12 @@
 //! `flat-coverflow` and at the start elsewhere, and mandatory snapping moves a start in the other
 //! centred modes to the centre. web-core reads `current` at connect (`:172-178`) and on every
 //! change (`XSwiperAutoScroll.ts:35-41`); a change here turns the swiper instantly where web-core
-//! turns it smoothly. Every other consequence of a target that is honoured once is the pager's,
-//! listed in `docs/tracking/deviations.md`.
+//! turns it smoothly. The move to a new target is an instant scroll request like a
+//! `scrollTo`'s, so `#content` fires `scroll` and, once the painter has carried it out,
+//! `scrollend` (CSSOM-View fires both for any change of a scroll position), and the swiper's
+//! events below follow from them, as both references fire theirs for a `current` write. Every
+//! other consequence of a target that is honoured once is the pager's, listed in
+//! `docs/tracking/deviations.md`.
 //!
 //! # The dot strip
 //!
@@ -321,8 +325,12 @@
 //!
 //! The item a swiper starts from is the `current` attribute it is connected with, read as
 //! web-core's `parseFloat(current ?? "0")`, a value that is no finite number being 0, so the
-//! scroll that puts a swiper on its initial item reports no change; a `current` written after the
-//! connection is read at the next one, as web-core reads it in `connectedCallback` alone.
+//! scroll that puts a swiper on its initial item at its first commit fires `scrollstart` and
+//! `scrollend` and reports no change: web-core's connect-time `scrollTo` fires the browser's
+//! scroll events, and native suppresses only the initial `change` (`XSwiperUI.java:197-199`,
+//! `onPageChange`'s `isInit`). A `current` written after the connection is not read here: the
+//! turn it causes is a scroll like any other, which fires `scrollstart`, `change` and `scrollend`
+//! from the item last reported.
 //! `isDragged` is whether a finger is down on the swiper or inside it
 //! ([`super::touch_count::TouchCount`]): web-core's touch flag, standing in for native's drag state
 //! (user ruling 2026-10-20). A swiper with no box decides nothing.

@@ -1081,7 +1081,10 @@ and §D.16 with what the wire format actually permits.)*
       the document scrolls each container to its first-in-tree-order target
       as `scrollIntoView` with `block: start`, `inline: nearest` and rebuilds
       the frame in the same commit. The scroll is an instant scroll request,
-      so the painter shows it even over an offset of its own. Each new target
+      so the painter shows it even over an offset of its own, and one that
+      moves the container fires CSSOM-View's `scroll` in the entry that
+      committed it and `scrollend` once the painter posts the container at
+      rest, as any instant request does. Each new target
       is honoured once (first layout, or a later arrival); the "user no
       longer interested" escape is not modelled, and an unchanged target
       never re-scrolls.

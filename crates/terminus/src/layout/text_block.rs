@@ -190,6 +190,15 @@ fn collect_block<T>(tree: &TreeArenas<T>, element: NodeSlot) -> Flattened {
     }
 }
 
+/// The source text of the Lynx paragraph `element` establishes: its content
+/// flow's runs — DOM text and generated `content` alike — in order, with one
+/// U+FFFC per atomic box ([`super::paragraph::source_text_of`]). The
+/// truncation flow is no source text and is left out. Built by the same
+/// flatten walk [`refresh`] runs, from the tree as it is now.
+pub(crate) fn source_text<T>(tree: &TreeArenas<T>, element: NodeSlot) -> String {
+    super::paragraph::source_text_of(&collect_block(tree, element).content)
+}
+
 /// Walks `element`'s flat subtree into runs and atomic boxes, skipping the
 /// children `skip` names.
 ///

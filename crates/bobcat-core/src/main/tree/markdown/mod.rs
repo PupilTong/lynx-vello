@@ -192,7 +192,9 @@
 //!   a clamp across many paragraphs, which the per-paragraph `text-maxline` cannot express.
 //! - `markdown-effect` (web-core's text mask): no counterpart for `background-clip: text` here.
 //! - Selection — `text-selection`, `enable-selection`, `selectionchange`, selection colours and
-//!   handles: no selection model.
+//!   handles: none of the attributes is read. The paragraphs select by the document's own rule
+//!   (`user-select` resolves to `text` at the page, as in a browser; `crate::main::runtime`'s
+//!   editing module), one paragraph at a time, with no event at the host.
 //! - `childrenexpose` and `exposure-tags`: native-only exposure of rendered children.
 //! - `allow-break-around-punctuation`, `image-downsampling`, `text-mark-attachments` and
 //!   `markdown-max-height`: native-only attributes web-core does not read.

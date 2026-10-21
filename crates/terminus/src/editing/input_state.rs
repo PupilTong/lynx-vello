@@ -236,7 +236,9 @@ impl<T> Document<T> {
     /// previous layout's, while the value and the offsets are current.
     #[must_use]
     pub fn text_input_state(&self) -> TextInputState {
-        let Some(session) = self.editing.session.as_ref() else {
+        // A selectable element selected without focus is nothing a platform
+        // input method edits.
+        let Some(session) = self.focused_session() else {
             return TextInputState::default();
         };
         let host = session.host;
