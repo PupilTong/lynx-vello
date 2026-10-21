@@ -620,4 +620,6 @@ verified! {
     basic_element_x_swiper_bindscrollend => "basic-element-x-swiper-bindscrollend",
     // The same three swipers and sequence; the `scrollstart` events upstream asserts are awaited: `programming` with current 0 not dragged (#472), `autoplay` with 0, 1 and 2 not dragged, `manual` with 0 dragged. The frame is `basic-element-x-swiper-bindchange`'s; the first screen is not pinned (`RESTLESS`).
     basic_element_x_swiper_bindscrollstart => "basic-element-x-swiper-bindscrollstart",
+    // A 300x600 yellow `scroll-view` with `initial-scroll-to-index={1}` holding red, green and blue 300px views. It starts scrolled to its second child (#474, the attribute as a UA `scroll-initial-target` rule): green over blue, the scroll range's end, which is upstream's `green-blue` screenshot.
+    basic_element_scroll_view_scroll_to_index => "basic-element-scroll-view-scroll-to-index",
 }
