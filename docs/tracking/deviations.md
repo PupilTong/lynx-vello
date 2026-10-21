@@ -1902,18 +1902,21 @@ consequential choice about whether to follow the spec or the quirk.
   web-core's model too (`components.md` row 23). `initial-scroll-index` is
   built (2026-10-21, next entry).
 - **`scroll-view`'s `initial-scroll-to-index` and `list`'s
-  `initial-scroll-index` are CSS, not a read at connect (2026-10-21).** The
-  `viewpager` recipe ([style-assumptions.md](../style-assumptions.md) §27):
-  a `scroll-view[initial-scroll-to-index]` sets the registered, inherited
-  `<integer>` `--scroll-view-initial-index` from
-  `attr(initial-scroll-to-index type(<integer>), -1)`, a
-  `list[initial-scroll-index]` sets `--list-initial-index` the same way, and
-  each element child of either is its `scroll-initial-target` when that
-  number equals its `sibling-index() - 1`
-  (`crates/bobcat-core/src/main/tree/scroll_container.rs`, "The initial
-  child"; `crates/bobcat-core/src/main/tree/list.rs`, "The initial cell").
-  web-core scrolls `children.item(index)` to the scrollport's start,
-  `scrollTop = offsetTop` or, under `scroll-x`, `scrollLeft = offsetLeft`
+  `initial-scroll-index` (2026-10-21).** The `viewpager` recipe
+  ([style-assumptions.md](../style-assumptions.md) §27) picks the target:
+  each element child of a `scroll-view[initial-scroll-to-index]` or a
+  `list[initial-scroll-index]` is its `scroll-initial-target` when a
+  registered, inherited `<integer>` equals its `sibling-index() - 1`. On a
+  `scroll-view` that number, `--scroll-view-initial-index`, is
+  `attr(initial-scroll-to-index type(<integer>), -1)`, the live attribute,
+  with no component code. On a `list` it is `--list-initial-index`, a
+  presentational hint the `list` component writes once, at connect, from
+  the attribute parsed as the typed `attr()` would parse it; the UA sheet
+  sets `-1` under it (`crates/bobcat-core/src/main/tree/scroll_container.rs`,
+  "The initial child"; `crates/bobcat-core/src/main/tree/list.rs`, "The
+  initial cell"). web-core scrolls `children.item(index)` to the
+  scrollport's start, `scrollTop = offsetTop` or, under `scroll-x`,
+  `scrollLeft = offsetLeft`
   (`web-elements/src/elements/ScrollView/ScrollAttributes.ts:64-81`), and
   the list's `scrollToPosition({position})` from `connectedCallback`
   (`XList/XListAttributes.ts:45-63`, `XList/XList.ts:89-115`). Consequences,
@@ -1933,21 +1936,25 @@ consequential choice about whether to follow the spec or the quirk.
     acts only through a `scroll-snap-type`, which would add snapping, and
     `scroll-padding`/`scroll-margin` would move every other
     `scrollIntoView` too. **A gap, open for the user**;
-  - **a later change scrolls**: each new target is honoured once, so a
-    change of the attribute after the first layout scrolls to the new child,
-    instantly, and a commit that leaves the target where it was does not
-    move a view the user scrolled
-    (`a_later_change_scrolls_to_the_new_child_and_nothing_else_does`,
-    `a_later_initial_scroll_index_change_scrolls_to_the_new_cell`). On a
-    `scroll-view` that is web-core's behavior (its handler runs on every
-    attribute change) and Android's outside a list
-    (`UIScrollView.java:653-667`), while iOS
-    (`LynxUIScroller.m:591-614`) and Harmony (`ui_scroll.cc:298-299`) honour
-    the attribute once. On a `list` both references read the attribute once
-    (web-core in `connectedCallback`; native
-    `core/renderer/ui_component/list/list_container_impl.cc:543-548`), so
-    this is a deviation from both, and a CSS-only rule cannot remember a
-    first value. **Open for the user**;
+  - **a later write scrolls a `scroll-view`, and not a `list`**. On a
+    `scroll-view` each new target is honoured once, so a change of the
+    attribute after the first layout scrolls to the new child, instantly,
+    and a commit that leaves the target where it was does not move a view
+    the user scrolled
+    (`a_later_change_scrolls_to_the_new_child_and_nothing_else_does`). That
+    is web-core's behavior (its handler runs on every attribute change) and
+    Android's outside a list (`UIScrollView.java:653-667`); iOS
+    (`LynxUIScroller.m:591-614`) and Harmony (`ui_scroll.cc:298-299`)
+    honour the attribute once, the recorded difference. A `list` reads the
+    attribute once (user ruling 2026-10-21), as web-core
+    (`connectedCallback`) and native
+    (`core/renderer/ui_component/list/list_container_impl.cc:543-548`) do:
+    a later write, a removal, and a write after removal move nothing
+    (`a_later_initial_scroll_index_write_does_not_scroll_the_list`,
+    `removing_initial_scroll_index_after_connect_does_not_scroll_the_list`),
+    and an attribute first written after connect is not read
+    (`an_initial_scroll_index_written_after_connect_is_not_read`). Each
+    connect reads it again, as web-core's `connectedCallback` runs again;
   - an index that is negative, past the last child or no integer (`"abc"`,
     `"1.5"`, `""`) names no child and scrolls nothing
     (`an_index_naming_no_child_scrolls_nothing`,
@@ -1971,9 +1978,9 @@ consequential choice about whether to follow the spec or the quirk.
   (`UIScrollView.java:699`, `AbsLynxUIScroller.m:35`, `ui_scroll.h:33-34`).
   Lynx's `clay` scroll view spells it `initial-scroll-index`, applied once,
   and marks `scroll-to-index` deprecated
-  (`lynx/clay/ui/component/scroll_view.cc:329-372`); that spelling is not
-  read on a `scroll-view`. **A native/web-core naming difference, open for
-  the user.**
+  (`lynx/clay/ui/component/scroll_view.cc:329-372`). **User ruling
+  2026-10-21: clay's spelling is not read on a `scroll-view`;
+  `initial-scroll-to-index` is the only name.**
 - **List waterfall over `display: grid-lanes` — path assessment
   (2026-09-18).** The layout mode landed
   ([style-assumptions.md](../style-assumptions.md) §24); this records how far

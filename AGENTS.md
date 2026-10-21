@@ -2313,8 +2313,9 @@ native's edge rule over `upper-threshold`/`lower-threshold`, the
 `ScrollEdges` `list` shares, and `nearest_snap_position`, the nearest snap
 position the swiper and the pager report by),
 `tree::list` (`list`'s scroll axis, `list-type` layout modes, cell
-virtualization and `initial-scroll-index` (`scroll-view`'s recipe) as UA
-rules, and a `list` component whose `CustomElement::invoke`
+virtualization as UA rules, `initial-scroll-index` as `scroll-view`'s
+child rule over a `--list-initial-index` hint the component writes once, at
+connect, and a `list` component whose `CustomElement::invoke`
 answers `scrollToPosition`, `scrollBy` and `autoScroll` (`scroll-view`'s, on
 the list's axis), `getScrollContainerInfo` and `getVisibleCells`;
 `getScrollInfo` is not built, and the base set's `scrollTo` answers on a list;
@@ -2478,8 +2479,8 @@ attributes use UA `attr()` declarations and registered custom properties;
 hints, the swiper's item count, the refresh view's slot
 assignment, the dialog's `:open`/`:modal` state, the overlay's shadow
 tree, its dialog's top-layer membership and its events, the markdown
-element's shadow tree, its rendering and its events, and the frame's
-shadow root need `terminus::link::CustomElement` callbacks. Runtime attribute members perform
+element's shadow tree, its rendering and its events, the frame's
+shadow root, and the list's `initial-scroll-index`, read once at connect, need `terminus::link::CustomElement` callbacks. Runtime attribute members perform
 DOM mutations; Stylo tracks attribute dependencies and recascades on changes.
 HTML's own rules — the dialog's, the popover's and the display `dialog` maps
 `block` to — are written with their selectors inside `:where()` and ordered
