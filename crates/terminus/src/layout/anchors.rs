@@ -1005,7 +1005,12 @@ fn stored_displacement<T>(
                 .and_then(Node::layout_computed_style)
                 .zip(state.get(scroller))
                 .and_then(|(style, entry)| {
-                    crate::scroll::resolve(style, &entry.slot.unrounded, entry.scroll_offset)
+                    let offset = state
+                        .scroll_offsets
+                        .get(&scroller)
+                        .copied()
+                        .unwrap_or_default();
+                    crate::scroll::resolve(style, &entry.slot.unrounded, offset)
                 })
                 .map_or_else(Vector2D::zero, |scroll_box| scroll_box.offset);
             sum - offset

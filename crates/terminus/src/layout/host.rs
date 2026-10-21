@@ -69,15 +69,17 @@ impl<T> LayoutTree for TreeArenas<T> {
     }
 
     fn layout<'state>(&self, state: &'state Self::State, node: NodeSlot) -> &'state LayoutSlot {
-        &state.at(node).slot
+        state.slot_at(node)
     }
 
+    /// A text node's writes go to the state's shared sink: it is content of
+    /// the paragraph above it, and nothing reads its box.
     fn layout_mut<'state>(
         &self,
         state: &'state mut Self::State,
         node: NodeSlot,
     ) -> &'state mut LayoutSlot {
-        &mut state.at_mut(node).slot
+        state.slot_mut(node, || self.at(node).is_text_node())
     }
 
     fn set_sticky_containing_block(
@@ -632,7 +634,10 @@ pub(super) fn run_layout<T: Sync>(
                         escalated = true;
                         let mut current = tree.at(slot).flat_parent_slot();
                         while let Some(ancestor) = current {
-                            state.clear_layout_cache(ancestor);
+                            // Geometry only: a paragraph an ancestor retains
+                            // answers for itself whether what it was shaped
+                            // from moved, as under `Document::invalidate_layout`.
+                            state.clear_box_cache(ancestor);
                             current = tree.at(ancestor).flat_parent_slot();
                         }
                     }
@@ -791,8 +796,9 @@ fn settle_deferred_containers<T: Sync>(
                 continue;
             }
             // The deferred run cached the size it published; the relay is the
-            // run that lays the contents out under it.
-            state.clear_layout_cache(slot);
+            // run that lays the contents out under it. A deferred container
+            // establishes no paragraph, so there is no shaped text to drop.
+            state.clear_box_cache(slot);
             let output = compute_boundary_relayout(tree, state, slot, input);
             tree.layout_mut(state, slot)
                 .set_unrounded_content_size(output.content_size);

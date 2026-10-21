@@ -165,7 +165,7 @@ pub(super) fn parent_offset<T>(
         if ancestor.id() == block {
             break;
         }
-        let location = state.at(ancestor.id()).slot.unrounded.location;
+        let location = state.slot_at(ancestor.id()).unrounded.location;
         offset = Point::new(offset.x + location.x, offset.y + location.y);
         current = box_parent(ancestor);
     }

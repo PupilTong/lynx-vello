@@ -641,8 +641,9 @@ impl<T> Document<T> {
 
     fn stored_scroll_offset(&self, id: NodeId) -> Vector2D<f32> {
         self.slot(id)
-            .and_then(|slot| self.layout_state().get(slot))
-            .map_or_else(Vector2D::zero, |state| state.scroll_offset)
+            .and_then(|slot| self.layout_state().scroll_offsets.get(&slot))
+            .copied()
+            .unwrap_or_default()
     }
 
     /// Scrolls to `offset` as the box admits it ([`ScrollBox::admit`]) and
@@ -692,7 +693,9 @@ impl<T> Document<T> {
         let slot = self
             .slot(id)
             .expect("a scroll container is a live node with layout-arena state");
-        self.layout_state_mut().at_mut(slot).scroll_offset = admitted;
+        self.layout_state_mut()
+            .scroll_offsets
+            .insert(slot, admitted);
         admitted
     }
 

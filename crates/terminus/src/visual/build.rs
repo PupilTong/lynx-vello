@@ -426,7 +426,7 @@ impl<'doc, T: Sync> Builder<'doc, T> {
     }
 
     fn rounded(&self, id: NodeId) -> &'doc Layout {
-        &self.state.at(self.tree.live_slot(id)).slot.rounded
+        &self.state.slot_at(self.tree.live_slot(id)).rounded
     }
 
     /// Appends a space node inside `parent` and returns it.
@@ -497,8 +497,14 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         sticky: Option<u32>,
         world: &Transform3D<f32>,
     ) -> Option<u32> {
-        let state = self.state.at(self.tree.live_slot(node));
-        let scroll_box = scroll::resolve(style, &state.slot.rounded, state.scroll_offset)?;
+        let slot = self.tree.live_slot(node);
+        let offset = self
+            .state
+            .scroll_offsets
+            .get(&slot)
+            .copied()
+            .unwrap_or_default();
+        let scroll_box = scroll::resolve(style, &self.state.slot_at(slot).rounded, offset)?;
         let snap = self
             .document
             .snap_positions(node)
@@ -1189,7 +1195,7 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         // A hidden layout generates nothing. This is what keeps a text block's
         // absorbed children out of the frame while still letting the walk
         // reach the out-of-flow ones it never consumed.
-        if self.state.at(child_slot).slot.is_hidden() {
+        if self.state.slot_at(child_slot).is_hidden() {
             return;
         }
         if !child_node.is_element() {
@@ -1473,7 +1479,7 @@ impl<'doc, T: Sync> Builder<'doc, T> {
 /// A free function, not a method, so the ranking loop can read layouts while
 /// it appends to the builder's own scratch.
 fn rounded_at(state: &DocumentLayoutState, slot: NodeSlot) -> &Layout {
-    &state.at(slot).slot.rounded
+    &state.slot_at(slot).rounded
 }
 
 /// A free function, not a method, so a caller can hold a disjoint borrow of

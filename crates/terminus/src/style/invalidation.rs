@@ -579,7 +579,7 @@ impl<T> Document<T> {
         self.live_node_mut(id).element_state.set(flags, enabled);
     }
 
-    fn set_element_text_content(&mut self, id: NodeId, text: Option<String>) {
+    fn set_element_text_content(&mut self, id: NodeId, text: Option<Box<str>>) {
         let node = self.live(id);
         let is_text_node = node.is_text_node();
         let affected_element = if is_text_node {
@@ -621,7 +621,7 @@ impl<T> Document<T> {
         }
     }
 
-    pub fn set_text_node_data(&mut self, id: NodeId, text: impl Into<String>) {
+    pub fn set_text_node_data(&mut self, id: NodeId, text: impl Into<Box<str>>) {
         assert!(
             self.live(id).is_text_node(),
             "Document::set_text_node_data called with an element node"

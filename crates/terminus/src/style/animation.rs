@@ -1315,10 +1315,6 @@ impl<T: Sync> Document<T> {
             }
             if damage.needs_relayout() {
                 tick.relayout = true;
-                // An animated `font-size` reaches its text through this
-                // harvest and no other, so the text children need the same
-                // two-level invalidation the style harvest gives them.
-                self.invalidate_text_children(current, refresh.shaping_changed);
                 self.invalidate_layout(current);
             }
         }

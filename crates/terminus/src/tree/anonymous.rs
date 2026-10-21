@@ -32,9 +32,9 @@
 //!
 //! Each rendering sequence is boxed by a node in the arenas, as a
 //! `::backdrop` is ([`crate::tree::top_layer`]): an element node no embedder
-//! created, payload [`PayloadSlot::Anonymous`], never in any child list, so no
-//! style traversal, selector match or DOM walk reaches it, and no script
-//! handle names it. Two links make it a box, and neither is mirrored:
+//! created, with no payload, marked by its node's anonymous flag, and never
+//! in any child list, so no style traversal, selector match or DOM walk
+//! reaches it, and no script handle names it. Two links make it a box, and neither is mirrored:
 //!
 //! - Its `parent` leads to the container: the container itself, or the shadow root of a container
 //!   that hosts one — the parent whose flat-tree parent is the container either way. Every walk up
@@ -130,8 +130,8 @@ use stylo::values::computed::ContentItem;
 use crate::layout::paragraph::generated_content;
 use crate::layout::{DisplayMode, display_mode};
 use crate::style::damage::StyleDamage;
-use crate::tree::document::{Document, NodeId, PayloadSlot, TreeArenas};
-use crate::tree::node::{Node, StyleRefresh};
+use crate::tree::document::{Document, NodeId, TreeArenas};
+use crate::tree::node::{Node, NodeFlags, StyleRefresh};
 
 /// The local name an anonymous box's node carries. No selector can name it:
 /// a type selector cannot start with `::`.
@@ -564,8 +564,8 @@ impl<T> Document<T> {
     }
 
     fn allocate_anonymous_box(&mut self) -> NodeId {
-        self.allocate_node(PayloadSlot::Anonymous, |owner, id| {
-            Node::new_element(owner, id, ANONYMOUS_BOX.clone())
+        self.allocate_node(|owner, id| {
+            Node::new_generated_element(owner, id, ANONYMOUS_BOX.clone(), NodeFlags::ANONYMOUS)
         })
     }
 

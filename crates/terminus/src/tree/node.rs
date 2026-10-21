@@ -3,7 +3,6 @@
 
 use std::borrow::Cow;
 use std::fmt;
-use std::marker::PhantomData;
 use std::sync::Arc as StdArc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
@@ -24,7 +23,7 @@ use stylo_dom::ElementState;
 
 use crate::render::image::ImageRole;
 use crate::tree::custom::{CustomElementState, DefinitionId};
-use crate::tree::document::{DOCUMENT_NODE_ID, NodeId, NodeSlot, PayloadSlot, TreeArenas};
+use crate::tree::document::{DOCUMENT_NODE_ID, NodeId, NodeSlot, TreeArenas};
 use crate::tree::shadow::{ShadowLinks, ShadowRootData, ShadowRootMode};
 
 pub(crate) const SNAPSHOT_PRESENT: u8 = 1 << 0;
@@ -83,31 +82,42 @@ impl Default for StylingData {
     }
 }
 
+/// What a node holds besides its tree links, boxed on the node because most
+/// nodes hold nothing.
+///
+/// Every variant is one pointer wide or narrower, so the box a text node
+/// allocates is the 16 B of its text's fat pointer: the replaced and test
+/// variants box their wider payloads a second time rather than widen every
+/// text node's allocation to theirs.
 enum NodeContent {
-    Text(String),
-    Replaced {
-        /// The dimensions of the bitmap this element presents — whichever of
-        /// its two sources that is.
-        ///
-        /// Not independent of the sources: a completed load carries the
-        /// image's own dimensions, and the document recomputes this from
-        /// whichever source the element now draws.
-        natural_size: NaturalSize,
-        /// The image source the paint walk resolves against the document's
-        /// image registry.
-        source: Option<Box<str>>,
-        /// The source drawn while `source` has no pixels, requested
-        /// concurrently with it and never falling back from it: a source that
-        /// loads suppresses this one for good.
-        placeholder: Option<Box<str>>,
-    },
+    Text(Box<str>),
+    Replaced(Box<Replaced>),
     #[cfg(feature = "layout-test-utils")]
-    Test(LeafMetrics),
+    Test(Box<LeafMetrics>),
+}
+
+/// A replaced element's content: the bitmap it presents and where it comes
+/// from.
+struct Replaced {
+    /// The dimensions of the bitmap this element presents — whichever of
+    /// its two sources that is.
+    ///
+    /// Not independent of the sources: a completed load carries the
+    /// image's own dimensions, and the document recomputes this from
+    /// whichever source the element now draws.
+    natural_size: NaturalSize,
+    /// The image source the paint walk resolves against the document's
+    /// image registry.
+    source: Option<Box<str>>,
+    /// The source drawn while `source` has no pixels, requested
+    /// concurrently with it and never falling back from it: a source that
+    /// loads suppresses this one for good.
+    placeholder: Option<Box<str>>,
 }
 
 /// Per-node bits that each cost a padded byte of the node stride as a `bool`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct NodeFlags(u8);
+pub(crate) struct NodeFlags(u8);
 
 impl NodeFlags {
     const CUSTOM_SUBTREE_MAY_CONTAIN: u8 = 1 << 0;
@@ -115,6 +125,10 @@ impl NodeFlags {
     const LYNX_TEXT: u8 = 1 << 2;
     const PLACEHOLDER_PSEUDO: u8 = 1 << 3;
     const LINE_IF_EMPTY: u8 = 1 << 4;
+    /// A `::backdrop` box's node ([`crate::tree::top_layer`]).
+    pub(crate) const BACKDROP: u8 = 1 << 5;
+    /// An anonymous block box's node ([`crate::tree::anonymous`]).
+    pub(crate) const ANONYMOUS: u8 = 1 << 6;
 
     const fn get(self, bit: u8) -> bool {
         self.0 & bit != 0
@@ -141,7 +155,11 @@ pub struct Node<T> {
     /// to resolve through, which is what keeps a walk step to one load.
     id: NodeId,
     data: NodeData,
-    payload: PhantomData<T>,
+    /// What the embedder filed this node with: `Some` for every element and
+    /// text node it created, `None` for the nodes nobody hands out — the
+    /// document node, a shadow root, a `::backdrop` box's node, an anonymous
+    /// box's. A unit payload sits in the stride's padding.
+    payload: Option<T>,
 
     pub(crate) parent: Option<NodeSlot>,
     pub(crate) children: Vec<NodeSlot>,
@@ -177,9 +195,6 @@ pub struct Node<T> {
 pub(crate) struct StyleRefresh {
     /// Whether the element's computed style is a different `Arc` than before.
     pub(crate) changed: bool,
-    /// Whether anything a descendant text node is *shaped* from moved with
-    /// it. Only meaningful when `changed`.
-    pub(crate) shaping_changed: bool,
     /// Whether the paragraph's effective custom-property limits changed.
     /// These layout inputs are outside Stylo's longhand damage comparison.
     pub(crate) paragraph_limits_changed: bool,
@@ -199,7 +214,6 @@ pub(crate) struct StyleRefresh {
 impl StyleRefresh {
     pub(crate) const UNCHANGED: Self = Self {
         changed: false,
-        shaping_changed: false,
         paragraph_limits_changed: false,
         containing_block_changed: false,
         box_tree_changed: false,
@@ -237,8 +251,39 @@ impl<T> Node<T> {
         node
     }
 
-    pub(crate) fn new_text(owner: *mut TreeArenas<T>, id: NodeId, text: String) -> Self {
+    pub(crate) fn new_text(owner: *mut TreeArenas<T>, id: NodeId, text: Box<str>) -> Self {
         Self::new(owner, id, NodeData::Text, None, Some(text))
+    }
+
+    /// An element node the tree generates rather than an embedder creates —
+    /// a `::backdrop` box's or an anonymous box's — marked by `marker`
+    /// ([`NodeFlags::BACKDROP`] or [`NodeFlags::ANONYMOUS`]). It carries no
+    /// payload.
+    pub(crate) fn new_generated_element(
+        owner: *mut TreeArenas<T>,
+        id: NodeId,
+        local_name: LocalName,
+        marker: u8,
+    ) -> Self {
+        debug_assert!(
+            marker == NodeFlags::BACKDROP || marker == NodeFlags::ANONYMOUS,
+            "a generated element is a backdrop or an anonymous box"
+        );
+        let mut node = Self::new_element(owner, id, local_name);
+        node.flags.set(marker, true);
+        node
+    }
+
+    /// Files the embedder's payload on a node it creates.
+    #[must_use]
+    pub(crate) fn with_payload(mut self, payload: T) -> Self {
+        self.payload = Some(payload);
+        self
+    }
+
+    /// Takes the embedder's payload off a node the arenas have freed.
+    pub(crate) fn into_payload(self) -> Option<T> {
+        self.payload
     }
 
     pub(crate) fn new_shadow_root(
@@ -254,13 +299,13 @@ impl<T> Node<T> {
         id: NodeId,
         data: NodeData,
         local_name: Option<LocalName>,
-        text: Option<String>,
+        text: Option<Box<str>>,
     ) -> Self {
         Self {
             owner,
             id,
             data,
-            payload: PhantomData,
+            payload: None,
             parent: None,
             children: Vec::new(),
             local_name,
@@ -351,6 +396,19 @@ impl<T> Node<T> {
     /// Records [`Self::has_line_if_empty`], answering what it was.
     pub(crate) fn set_has_line_if_empty(&mut self, on: bool) -> bool {
         self.flags.set(NodeFlags::LINE_IF_EMPTY, on)
+    }
+
+    /// Whether this is a `::backdrop` box's node ([`crate::tree::top_layer`]).
+    #[must_use]
+    pub(crate) fn is_backdrop_node(&self) -> bool {
+        self.flags.get(NodeFlags::BACKDROP)
+    }
+
+    /// Whether this is an anonymous block box's node
+    /// ([`crate::tree::anonymous`]).
+    #[must_use]
+    pub(crate) fn is_anonymous_box(&self) -> bool {
+        self.flags.get(NodeFlags::ANONYMOUS)
     }
 
     pub(crate) fn owner_document(&self) -> &Node<T> {
@@ -635,6 +693,7 @@ impl<T> Node<T> {
             ("owner", size_of::<*mut TreeArenas<()>>(), false),
             ("id", size_of::<NodeId>(), false),
             ("data", size_of::<NodeData>(), false),
+            ("payload", size_of::<Option<()>>(), false),
             ("parent", size_of::<Option<NodeSlot>>(), false),
             ("children", size_of::<Vec<NodeSlot>>(), false),
             ("local_name", size_of::<Option<LocalName>>(), true),
@@ -673,21 +732,18 @@ impl<T> Node<T> {
 
     #[must_use]
     pub fn payload(&self) -> &T {
+        if let Some(payload) = &self.payload {
+            return payload;
+        }
         match &self.data {
+            NodeData::Element(_) if self.is_backdrop_node() => {
+                panic!("a `::backdrop` node has no payload and is never handed out")
+            }
+            NodeData::Element(_) if self.is_anonymous_box() => {
+                panic!("an anonymous box's node has no payload and is never handed out")
+            }
             NodeData::Element(_) | NodeData::Text => {
-                let arenas = self.arenas();
-                match arenas.payload_at(arenas.live_slot(self.id)) {
-                    PayloadSlot::Node(payload) => payload,
-                    PayloadSlot::Backdrop => {
-                        panic!("a `::backdrop` node has no payload and is never handed out")
-                    }
-                    PayloadSlot::Anonymous => {
-                        panic!("an anonymous box's node has no payload and is never handed out")
-                    }
-                    PayloadSlot::Document | PayloadSlot::ShadowRoot | PayloadSlot::Reserved => {
-                        unreachable!("payload-less sentinels belong to non-element nodes")
-                    }
-                }
+                unreachable!("the arena's key-zero placeholder is the one payload-less text node")
             }
             NodeData::Document(_) => panic!("the document node has no payload"),
             NodeData::ShadowRoot(_) => panic!("a shadow root has no payload"),
@@ -760,7 +816,6 @@ impl<T> Node<T> {
                 } else {
                     StyleRefresh {
                         changed: true,
-                        shaping_changed: crate::layout::shaping_inputs_changed(old, new),
                         paragraph_limits_changed: crate::layout::paragraph_limits_changed(old, new),
                         containing_block_changed: false,
                         box_tree_changed: *old.get_display() != *new.get_display()
@@ -772,7 +827,6 @@ impl<T> Node<T> {
             // descendants have never been laid out under it.
             _ => StyleRefresh {
                 changed: true,
-                shaping_changed: true,
                 paragraph_limits_changed: false,
                 containing_block_changed: false,
                 box_tree_changed: true,
@@ -857,7 +911,7 @@ impl<T> Node<T> {
     #[must_use]
     pub(crate) fn natural_size(&self) -> NaturalSize {
         match self.content.as_deref() {
-            Some(NodeContent::Replaced { natural_size, .. }) => *natural_size,
+            Some(NodeContent::Replaced(replaced)) => replaced.natural_size,
             _ => NaturalSize::NONE,
         }
     }
@@ -865,17 +919,12 @@ impl<T> Node<T> {
     /// The URL this element holds in `role`, of the two it may hold at once.
     #[must_use]
     pub(crate) fn image_source(&self, role: ImageRole) -> Option<&str> {
-        let Some(NodeContent::Replaced {
-            source,
-            placeholder,
-            ..
-        }) = self.content.as_deref()
-        else {
+        let Some(NodeContent::Replaced(replaced)) = self.content.as_deref() else {
             return None;
         };
         match role {
-            ImageRole::Source => source.as_deref(),
-            ImageRole::Placeholder => placeholder.as_deref(),
+            ImageRole::Source => replaced.source.as_deref(),
+            ImageRole::Placeholder => replaced.placeholder.as_deref(),
         }
     }
 
@@ -915,7 +964,7 @@ impl<T> Node<T> {
     }
 
     pub(crate) fn is_replaced(&self) -> bool {
-        matches!(self.content.as_deref(), Some(NodeContent::Replaced { .. }))
+        matches!(self.content.as_deref(), Some(NodeContent::Replaced(_)))
     }
 
     pub(crate) fn set_natural_size(&mut self, natural_size: NaturalSize) -> bool {
@@ -923,11 +972,11 @@ impl<T> Node<T> {
             return false;
         }
         let (source, placeholder) = self.take_image_sources();
-        self.content = Some(Box::new(NodeContent::Replaced {
+        self.content = Some(Box::new(NodeContent::Replaced(Box::new(Replaced {
             natural_size,
             source,
             placeholder,
-        }));
+        }))));
         true
     }
 
@@ -976,22 +1025,20 @@ impl<T> Node<T> {
             return;
         }
         let natural_size = self.natural_size();
-        self.content = Some(Box::new(NodeContent::Replaced {
+        self.content = Some(Box::new(NodeContent::Replaced(Box::new(Replaced {
             natural_size,
             source,
             placeholder,
-        }));
+        }))));
     }
 
     /// Moves both sources out of the current content, so rewriting one half of
     /// a replaced element's state neither copies the strings nor drops them.
     fn take_image_sources(&mut self) -> (Option<Box<str>>, Option<Box<str>>) {
         match self.content.as_deref_mut() {
-            Some(NodeContent::Replaced {
-                source,
-                placeholder,
-                ..
-            }) => (source.take(), placeholder.take()),
+            Some(NodeContent::Replaced(replaced)) => {
+                (replaced.source.take(), replaced.placeholder.take())
+            }
             _ => (None, None),
         }
     }
@@ -999,17 +1046,17 @@ impl<T> Node<T> {
     #[cfg(feature = "layout-test-utils")]
     pub(crate) fn test_leaf_metrics(&self) -> Option<LeafMetrics> {
         match self.content.as_deref() {
-            Some(NodeContent::Test(metrics)) => Some(*metrics),
+            Some(NodeContent::Test(metrics)) => Some(**metrics),
             _ => None,
         }
     }
 
     #[cfg(feature = "layout-test-utils")]
     pub(crate) fn set_test_leaf_metrics(&mut self, metrics: LeafMetrics) {
-        self.content = Some(Box::new(NodeContent::Test(metrics)));
+        self.content = Some(Box::new(NodeContent::Test(Box::new(metrics))));
     }
 
-    pub(crate) fn set_literal_text(&mut self, text: Option<String>) {
+    pub(crate) fn set_literal_text(&mut self, text: Option<Box<str>>) {
         self.content = text.map(|value| Box::new(NodeContent::Text(value)));
     }
 

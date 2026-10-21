@@ -40,7 +40,7 @@ use stylo::LocalName;
 use stylo::author_styles::AuthorStyles;
 
 use crate::style::engine::ShadowStyleSheet;
-use crate::tree::document::{Document, NodeId, NodeSlot, PayloadSlot};
+use crate::tree::document::{Document, NodeId, NodeSlot};
 use crate::tree::node::Node;
 
 static SLOT: LazyLock<LocalName> = LazyLock::new(|| LocalName::from("slot"));
@@ -321,7 +321,7 @@ impl<T> Document<T> {
             "Document::attach_shadow: the host already hosts a shadow root"
         );
         let host_slot = self.live_slot(host);
-        let root = self.allocate_node(PayloadSlot::ShadowRoot, |owner, id| {
+        let root = self.allocate_node(|owner, id| {
             Node::new_shadow_root(owner, id, ShadowRootData::new(host_slot, mode))
         });
         let root_slot = self.live_slot(root);

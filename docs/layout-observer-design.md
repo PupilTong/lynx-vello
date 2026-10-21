@@ -330,7 +330,7 @@ Concretely:
 | per `listenerOpened`/`listenerClosed` | one name compare, beside the exposure-name compare already there |
 | per freed node | one `is_empty` test |
 | per text paragraph layout | one `is_empty` test on the reporting set, only on a cache miss |
-| memory | one empty `Vec` and a `bool` per document; `Node`, `LayoutSlot` and `NodeLayoutState` unchanged (the 224/336/352 assertion stands) |
+| memory | one empty `Vec` and a `bool` per document; `Node`, `LayoutSlot` and `NodeLayoutState` unchanged (the 224/336/352 assertion stands; a later change took `NodeLayoutState` to 344) |
 
 **Per registered `layoutchange` element**, R registrations:
 

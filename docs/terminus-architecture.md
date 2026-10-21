@@ -9,14 +9,18 @@ touching the crate.
 
 ## Tree, arenas and identity
 
-It owns a fixed-address boxed `TreeArenas<T>` containing two `Slab`s: a primary
-`Slab<Node<T>>` (slot zero is the real DOM Document node and carries its
-node-visible style context; later slots are element/text nodes) plus a
-slot-aligned payload slab. A separate inline `DocumentLayoutState` owns
-slot-aligned layout state — a lazily sized vector rather than a third lockstep
-slab, so a node that is never laid out allocates none,
-`Document::layout`/`render` size it to the arena's slot bound in one resize,
-and an absent entry reads as "never laid out" (an empty layout cache).
+It owns a fixed-address boxed `TreeArenas<T>` containing one `Slab<Node<T>>`
+(slot zero is the real DOM Document node and carries its node-visible style
+context; later slots are element/text nodes). The embedder's `T` payload rides
+in its node (`None` for the nodes nobody hands out), and so do the flags that
+mark a `::backdrop` box's node and an anonymous box's, so there is no second
+slab to keep in lockstep. A separate inline `DocumentLayoutState` owns the
+layout state of the nodes that lay out: a four-byte-per-key index into a dense
+entry vector, filed on a node's first layout write, so a node that is never
+laid out allocates no entry and a text node — whose box writes land in one
+shared sink nothing reads — never does. `Document::layout`/`render` size the
+index to the arena's slot bound in one resize, and a covered key with no entry
+reads as "never laid out" (an empty layout cache).
 
 Identity and storage are deliberately split (`tree/arena.rs`): a `NodeId`
 indexes `TreeArenas::slots`, a `Vec<Option<NodeSlot>>` holding the arena slot
@@ -30,9 +34,8 @@ table entry leaks, per node ever created. The raw slabs are private to
 per-element style data (the upstream `ElementDataWrapper`, no outer cell) and
 its traversal/invalidation flags live inline on `Node` (bench-defended
 2026-08-03: no traversal regression, a measurably faster no-op-commit fast
-path). The primary slab selects each raw-`usize` ID; the payload slab allocates
-and removes in lockstep and asserts the same key (reserving a payload-less
-sentinel at document slot zero), while the layout vector resets a freed key's
+path). The slab selects each raw-`usize` ID (reserving a payload-less
+placeholder at slot zero), while the layout state resets a freed key's
 entry so the next occupant starts clean (ONE TREE policy: nodes are created and
 mutated only through `Document` methods). Two more slot-keyed side tables live
 on `TreeArenas` itself rather than beside it — `content-visibility: auto`
@@ -40,13 +43,15 @@ relevance (`layout/relevance.rs`) and each element's last committed content box
 (`layout/committed_box.rs`), which carries both the css-sizing-4 last
 remembered size and the css-contain-3 query container size — because a
 `StyleView` is built from these arenas alone and the layout state is a
-separately borrowed parameter it cannot reach. Both are lazily sized, so a page
+separately borrowed parameter it cannot reach. Both are lazily filled, so a page
 that uses none of those features allocates neither, and both reset on free like
-the layout vector does. The committed-box table is the one the layout pass
+the layout state does; the committed-box table is a map holding an entry only
+for an element whose last record was not empty. It is the one the layout pass
 *writes*, and `LayoutTree::compute_layout` holds the arenas shared, so its
 records are staged through a `RefCell` and published by `Document::layout`
-under the exclusive borrow, once per pass — the published half has to be a
-plain `Vec`, because the parallel style traversal reads the container half. A
+under the exclusive borrow, once per pass — the published half has to be
+plain data written only under `&mut`, because the parallel style traversal
+reads the container half. A
 third, keyed rather than slot-aligned, is css-anchor-position-1's
 `AnchorRegistry` (`layout/anchors.rs`): the anchor-name index and each
 element's cascaded position options, kept on the arenas because
@@ -70,8 +75,8 @@ Stylo's traits mandate (all bodies safe). Both blocks carry a `SAFETY` comment
 stating the invariant they rest on, and a crate-local
 `#![warn(clippy::undocumented_unsafe_blocks)]` keeps that true.
 
-The generic `T` payload remains associated with each element/text node in the
-NodeId-aligned payload slab but is opaque and read-only to the DOM core;
+The generic `T` payload remains associated with each element/text node, held
+in the node itself, but is opaque and read-only to the DOM core;
 selector-visible state comes only from real DOM fields, so payloads cannot
 synthesize attributes. DOM setters own snapshot/restyle scheduling, while
 stylesheet and device methods on the document schedule its root in the same
@@ -672,7 +677,7 @@ removed subtree.
 Each entry owns its **`::backdrop` box as a real element node** that is
 never linked under a parent, so no style traversal, selector query, child
 list or flat-tree walk reaches it, and no script handle names it; its
-payload slot is `PayloadSlot::Backdrop`, which is also what marks it. Its
+node carries no payload and its backdrop flag is what marks it. Its
 style is Stylo's lazy pseudo-element cascade with the element's primary
 style as parent (so it inherits from the element), recomputed for every
 entry after each flush and animation tick that ran, diffed through Stylo's

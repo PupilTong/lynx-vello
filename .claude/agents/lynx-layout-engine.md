@@ -41,8 +41,10 @@ tree/style storage, DOM/runtime types, device-unit policy, or paint order.
   `display: contents`.
 - Host: `crates/terminus/src/layout/` — `host.rs` (`LayoutTree` over `TreeArenas`),
   `style.rs` (display dispatch, `DisplayInside`), `text_block.rs`, and
-  `Document::layout`. `DocumentLayoutState` is a lazily sized vector, not a
-  third lockstep slab: an absent entry reads as "never laid out".
+  `Document::layout`. `DocumentLayoutState` is an arena-key `index` (4 B per
+  key) over a dense `entries` vector, filed on a node's first layout write;
+  a covered key with no entry reads as "never laid out", and a text node's
+  writes go to a shared sink nothing reads, so it never files one.
 
 Landed and not to be regressed:
 
