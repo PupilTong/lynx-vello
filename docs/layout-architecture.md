@@ -1319,6 +1319,63 @@ the painting — layout's job is to never be the frame's bottleneck.
   the common Flex subset remain future work — not to copy those engines'
   designs, but to keep "high-performance" falsifiable.
 
+### Workload model and optimization order
+
+What `seldon` and its `terminus` host optimize for, settled on 2026-10-21
+from Starlight (`lynx/core/renderer/starlight`), Yoga and taffy, and Blink
+LayoutNG. The three agree on the shape of the work, and so does this engine:
+
+- **Text measurement is the cost center.** Starlight treats the platform
+  text measure as the one slow operation (it forces a final measure to avoid
+  measuring twice and gives measure-function nodes a percentage-base veto
+  hook); Yoga's three "old result still fits" cache relaxations exist only
+  for leaf measure functions, whose output is monotone in the constraint;
+  Blink reuses inline-formatting-context lines. Here the paragraph's three
+  constraint memo and the `TextStore` play that role.
+- **Updates re-enter at the root and are pruned by the per-node cache.**
+  Starlight keeps up to eight constraint entries per node and a "subtree in
+  sync" bit; Yoga eight measurements plus a dirty bit that stops at the
+  first already-dirty ancestor; taffy nine shape slots. None has layout
+  roots; Blink and WebKit do (containment, SVG roots, and fixed-size
+  overflow-clipped boxes), and Blink additionally stops the dirty walk at an
+  already-marked ancestor and never dirties a container from an out-of-flow
+  child. Here: the measurement cache (one committed entry plus measurement
+  slots), relayout boundaries at `contain: strict` and skipped contents,
+  and `content_independent` in-place relayout.
+- **The percentage basis is a veto, not a key.** Starlight refuses a hit
+  when the node or any child reads a percent base; Yoga compares the owner
+  size only on an axis the style resolves against; Blink carries a
+  "depends on percentage block size" bit per fragment and per subtree. Here
+  a box whose own box model reads no basis is cached against none (the
+  harvested `BASIS_FREE` node bit, recorded in the cache entry so a lookup
+  never asks the style).
+- **Scroll never lays out; first screen is linear in boxes; a list is
+  bounded by its bound window plus preload with estimated cell sizes.**
+
+The order work is taken in, by how often a ReactLynx page hits each path:
+
+1. **The update path.** One attribute, class or inline-style write on a
+   leaf of a list page: the relayout must stop at the nearest fixed-size
+   overflow-clipped scroll container (`scroll-view`, `list`), which is a
+   layout root in Blink and WebKit and only a `contain: strict` boundary
+   here today, and the dirty walk must stop at an already-marked ancestor
+   without clearing every ancestor's cache again. Measured as the number of
+   boxes recomputed per leaf change.
+2. **Text.** A paragraph or replaced box measured at `MaxContent` with
+   result `w` answers a later `Definite(a)` with `a >= w` (Yoga's
+   relaxations, restricted to monotone leaves). Goal: at most one shaping
+   per paragraph per axis per layout.
+3. **First screen.** A subtree-level "depends on the percentage basis" bit
+   so a parent with basis-free content normalizes too; a list's unbound
+   cells never become boxes.
+
+Deliberately not pursued, because the shapes are rare on Lynx pages or the
+cost is high: sparse grids with large explicit line numbers, grid-lanes
+spanning items (span-1 items are grouped per css-grid-3 §3.4.2), further
+`display: relative` passes, and inline-formatting-context line reuse.
+Benchmarks are read common path first; a delta on a rare shape is recorded,
+not optimized for.
+
 ## Algorithms (Flex, Grid, grid lanes, Relative, and Linear implemented)
 
 This pass structure documents the implemented L1 Flex and L2 Grid algorithms,
