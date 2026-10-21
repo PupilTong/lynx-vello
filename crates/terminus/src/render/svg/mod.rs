@@ -10,10 +10,10 @@
 //!   paint a final peniko brush. Geometry is resolved here; text is collected but not shaped, so
 //!   the parse needs no fonts and runs in the host, on the pool it decodes bitmaps on, reached
 //!   through `ImageEvent::parse_document`. `Send + Sync`.
-//! - [`encode`] turns a document into a [`Scene`](crate::vello::Scene) on the document thread,
-//!   shaping its text through the document's own [`TextContext`](seldon::text::TextContext),
-//!   created on the first text shaped, so SVG glyphs come from the same fonts and `@font-face`
-//!   registrations as `<text>`.
+//! - [`encode`] turns a document into a [`Scene`](vello::Scene) on the document thread, shaping its
+//!   text through the document's own [`TextContext`](seldon::text::TextContext), created on the
+//!   first text shaped, so SVG glyphs come from the same fonts and `@font-face` registrations as
+//!   `<text>`.
 //!
 //! # The supported subset
 //!
@@ -95,7 +95,7 @@
 //! `currentColor` is the stop's own `color`, inherited through the
 //! gradient's ancestors, whichever element the gradient paints. Gradients
 //! inherit attributes and stops along their `href` chain, map `spreadMethod` to
-//! [`Extend`](crate::vello::peniko::Extend), take `gradientTransform` as the
+//! [`Extend`](vello::peniko::Extend), take `gradientTransform` as the
 //! brush transform, and resolve `objectBoundingBox` units against the shape's
 //! `kurbo` bounding box (a text chunk's advance box after shaping);
 //! `userSpaceOnUse` percentages resolve against the viewport. A radial
@@ -134,17 +134,17 @@ mod text;
 pub(crate) use encode::encode;
 pub(crate) use parse::parse;
 pub(crate) use text::TextItem;
+use vello::kurbo::{Affine, BezPath, Rect, Stroke};
+use vello::peniko::{Brush, Fill};
 
 use crate::render::image::AspectRatio;
-use crate::vello::kurbo::{Affine, BezPath, Rect, Stroke};
-use crate::vello::peniko::{Brush, Fill};
 
 /// A parsed SVG document, ready to encode: its sizes and a flat command
 /// list in viewport units.
 ///
 /// `pub` only because a host reports it
-/// ([`ImageReports::parsed_document`](crate::ImageReports::parsed_document))
-/// and [`ImageEvent::ParsedDocument`](crate::ImageEvent) carries it from the
+/// ([`ImageReports::parsed_document`](crate::render::image::ImageReports::parsed_document))
+/// and [`ImageEvent::ParsedDocument`](crate::render::image::ImageEvent) carries it from the
 /// host's parsing thread to the document's; no field or method is public,
 /// and no crate outside `terminus` reads it.
 #[derive(Clone, Debug)]

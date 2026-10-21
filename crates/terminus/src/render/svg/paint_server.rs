@@ -6,12 +6,12 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use svgtypes::{Length, LengthUnit};
+use vello::kurbo::{Affine, Rect};
+use vello::peniko::color::DynamicColor;
+use vello::peniko::{Brush, Color, ColorStop, Extend, Gradient};
 
 use super::parse::Ids;
 use super::style::{Axis, Viewport, parse_opacity, resolve_length, transform};
-use crate::vello::kurbo::{Affine, Rect};
-use crate::vello::peniko::color::DynamicColor;
-use crate::vello::peniko::{Brush, Color, ColorStop, Extend, Gradient};
 
 /// Which space a gradient's coordinates are in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

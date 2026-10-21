@@ -1,7 +1,7 @@
 //! CSS commit benchmarks for `terminus`, tracked by `CodSpeed` (walltime mode on
 //! the macOS CI runner). Commits use the production `Document::layout` path.
 //!
-//! These documents are given no [`terminus::StylePool`], so their traversals run
+//! These documents are given no [`terminus::link::StylePool`], so their traversals run
 //! on this thread: what is measured is cascade, matching and invalidation
 //! work rather than Rayon dispatch, and a batch built inside `with_inputs`
 //! does not pay for a pool per sample. A view in production is given one —
@@ -24,7 +24,7 @@ use stylo::values::computed::font::GenericFontFamily;
 use stylo::values::computed::{CSSPixelLength, Length};
 use stylo::values::specified::font::{FONT_MEDIUM_PX, QueryFontMetricsFlags};
 use stylo_traits::{CSSPixel, DevicePixel};
-use terminus::{Document, ElementState, NodeId, StylesheetOrigin};
+use terminus::link::{Document, ElementState, NodeId, StylesheetOrigin};
 
 fn main() {
     divan::main();
@@ -52,8 +52,8 @@ impl FontMetricsProvider for BenchFontMetricsProvider {
     }
 }
 
-fn device(width: f32, height: f32) -> terminus::Device {
-    terminus::standards_device(
+fn device(width: f32, height: f32) -> terminus::link::Device {
+    terminus::link::standards_device(
         MediaType::screen(),
         Size2D::<f32, CSSPixel>::new(width, height),
         Size2D::<f32, DevicePixel>::new(width, height),

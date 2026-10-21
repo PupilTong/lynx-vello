@@ -103,7 +103,7 @@
 //! `index.ts:27-29`), none of which reads params, and [`RefreshView`]'s
 //! [`CustomElement::invoke`] answers each with code 0, whatever `params` is and on a view with no
 //! box too. Each is CSSOM-View's "scroll an element into view"
-//! ([`terminus::Document::scroll_into_view`]) in the element's nearest scroll container,
+//! ([`terminus::link::Document::scroll_into_view`]) in the element's nearest scroll container,
 //! `#container`: smooth for the two finishing methods, instant for `autoStartRefresh`. A UI method
 //! never flushes, so the positions are the last completed layout's.
 //!
@@ -156,12 +156,13 @@
 //! path ends at the view's shadow root, which delivers them to the view's
 //! [`CustomElement::handle_event`] in the capture pass; the component takes them when their target
 //! is `#container` and no other node. Each event is queued at the view — not bubbling —
-//! only when a listener on the view registered for its name ([`terminus::Document::has_listener`]),
-//! a `{}` detail through [`ComponentEvents::queue`] and the others through
-//! [`ComponentEvents::queue_detailed`]; the latches are recorded whether or not anything listens.
-//! Geometry is the last completed layout's, read at the delivery, and never flushed: the header's
-//! and the footer's rectangles in `#container`'s scroll coordinates ([`rect_in_scroller`]; each is
-//! a box child of `#container` through its `display: contents` slot) and `#container`'s offset.
+//! only when a listener on the view registered for its name
+//! ([`terminus::link::Document::has_listener`]), a `{}` detail through [`ComponentEvents::queue`]
+//! and the others through [`ComponentEvents::queue_detailed`]; the latches are recorded whether or
+//! not anything listens. Geometry is the last completed layout's, read at the delivery, and never
+//! flushed: the header's and the footer's rectangles in `#container`'s scroll coordinates
+//! ([`rect_in_scroller`]; each is a box child of `#container` through its `display: contents` slot)
+//! and `#container`'s offset.
 //!
 //! How far an end shows is native's `pullingPercent`, the length of the end inside the scrollport
 //! over its height: `percent = (header.max_y - offset.y) / header.height` — 1 with the header's
@@ -221,11 +222,11 @@ use std::cell::RefCell;
 
 use rustc_hash::FxHashMap;
 use smallvec::smallvec;
-use terminus::event::{ElementEvent, EventPhase};
-use terminus::scroll::{
+use terminus::link::event::{ElementEvent, EventPhase};
+use terminus::link::scroll::{
     ScrollBehavior, ScrollIntoViewContainer, ScrollIntoViewOptions, ScrollLogicalPosition,
 };
-use terminus::{CustomElement, MethodCall, MethodOutcome, Node, NodeId, ShadowRootMode};
+use terminus::link::{CustomElement, MethodCall, MethodOutcome, Node, NodeId, ShadowRootMode};
 
 use super::scroll_container::{
     SCROLL_END_EVENT, SCROLL_EVENT, rect_in_scroller, rendered_scroll_box,
@@ -321,7 +322,7 @@ const LANDING_TOLERANCE: f64 = 1.0;
 
 /// Installs the `x-refresh-view` component, which queues its events on
 /// `events`. Must run before any element could carry the tag,
-/// [`Document::define`](terminus::Document::define)'s own precondition.
+/// [`Document::define`](terminus::link::Document::define)'s own precondition.
 pub(super) fn define(document: &mut LynxDocument, events: ComponentEvents) {
     document.define(
         REFRESH_VIEW_TAG,
@@ -865,10 +866,10 @@ fn slotted(document: &LynxDocument, view: NodeId, name: &str) -> Option<NodeId> 
 mod tests {
     #![allow(clippy::float_cmp)] // Explicit pixel sizes lay out exactly.
 
-    use terminus::scroll::ScrollBehavior;
-    use terminus::stylo::properties::PropertyId;
-    use terminus::stylo::values::computed::Display;
-    use terminus::{MethodCall, MethodOutcome, NodeId, StylesheetOrigin, Vector2D};
+    use terminus::link::scroll::ScrollBehavior;
+    use terminus::link::stylo::properties::PropertyId;
+    use terminus::link::stylo::values::computed::Display;
+    use terminus::link::{MethodCall, MethodOutcome, NodeId, StylesheetOrigin, Vector2D};
 
     use super::super::test_support::{
         child, document, element_under, style_of, with_component_events,
@@ -1519,7 +1520,7 @@ mod tests {
 
     // --- the events ---------------------------------------------------------
 
-    use terminus::event::EventDetail;
+    use terminus::link::event::EventDetail;
 
     use super::super::scroll_container::tests::{listen, scrolled};
     use super::super::test_support::touched;

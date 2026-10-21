@@ -22,8 +22,7 @@ use stylo::values::computed::transform::{
 };
 use stylo::values::computed::{CSSPixelLength, TimingFunction};
 use stylo::values::generics::transform::GenericTransformOperation;
-
-use crate::vello::kurbo::{Affine, Point, Rect};
+use vello::kurbo::{Affine, Point, Rect};
 
 /// A closed interval `[low, high]`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -932,7 +931,7 @@ mod tests {
 
     /// The exported curve of an element running `animation` inside a
     /// transformed parent, committed at 0.3 s.
-    fn exported(keyframes: &str, animation: &str) -> std::sync::Arc<crate::CommittedFrame> {
+    fn exported(keyframes: &str, animation: &str) -> std::sync::Arc<crate::visual::CommittedFrame> {
         let mut doc = Doc::with_css(&format!(
             "page {{ display: flex; width: 800px; height: 600px; }}
              .parent {{ display: flex; margin: 100px; width: 300px; height: 200px;

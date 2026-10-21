@@ -16,14 +16,14 @@
 //!
 //! What the `frame_*` set is arranged to expose:
 //!
-//! - **Almost nothing is incremental yet.** [`terminus::Document::render`] is gated on one dirty
-//!   bit, so any visual mutation rebuilds the whole paint order and re-encodes the whole scene.
-//!   Every `frame_*` number here is therefore roughly the same constant, whatever the mutation
-//!   touched. That is the point: the constant is the baseline the tiered-damage work has to break,
-//!   and the benchmarks are shaped so that breaking it shows up as divergence between paired cases
-//!   rather than as one number moving. The one mutation already off that path is a windowed scroll:
-//!   the frame is baked unscrolled and a scroll tick only replays the compose program, so
-//!   `frame_scroll_tick` times composition, not `render`.
+//! - **Almost nothing is incremental yet.** [`terminus::link::Document::render`] is gated on one
+//!   dirty bit, so any visual mutation rebuilds the whole paint order and re-encodes the whole
+//!   scene. Every `frame_*` number here is therefore roughly the same constant, whatever the
+//!   mutation touched. That is the point: the constant is the baseline the tiered-damage work has
+//!   to break, and the benchmarks are shaped so that breaking it shows up as divergence between
+//!   paired cases rather than as one number moving. The one mutation already off that path is a
+//!   windowed scroll: the frame is baked unscrolled and a scroll tick only replays the compose
+//!   program, so `frame_scroll_tick` times composition, not `render`.
 //! - **Paired by reach.** `frame_visible_row_flip` and `frame_offscreen_row_flip` differ only in
 //!   whether the repainted row is inside the scrollport; `frame_with_text_runs` and
 //!   `frame_without_text_runs` differ only in whether the same boxes carry text. Today each pair
@@ -81,9 +81,9 @@ use stylo::values::computed::font::GenericFontFamily;
 use stylo::values::computed::{CSSPixelLength, Length};
 use stylo::values::specified::font::{FONT_MEDIUM_PX, QueryFontMetricsFlags};
 use stylo_traits::{CSSPixel, DevicePixel};
-use terminus::layout::{NaturalSize, Size};
-use terminus::vello::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
-use terminus::{Document, ImageRole, NodeId, StylesheetOrigin, Vector2D};
+use terminus::link::layout::{NaturalSize, Size};
+use terminus::link::vello::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
+use terminus::link::{Document, ImageRole, NodeId, StylesheetOrigin, Vector2D};
 
 fn main() {
     divan::main();
@@ -148,8 +148,8 @@ impl FontMetricsProvider for BenchFontMetricsProvider {
     }
 }
 
-fn device() -> terminus::Device {
-    terminus::standards_device(
+fn device() -> terminus::link::Device {
+    terminus::link::standards_device(
         MediaType::screen(),
         Size2D::<f32, CSSPixel>::new(800.0, 600.0),
         Size2D::<f32, DevicePixel>::new(800.0, 600.0),
@@ -416,7 +416,7 @@ fn list_page_with(rows: usize, skip_offscreen: bool) -> ListPage {
 /// Lynx paragraph.
 struct TextKind;
 
-impl terminus::CustomElement<()> for TextKind {
+impl terminus::link::CustomElement<()> for TextKind {
     fn is_lynx_text(&self) -> bool {
         true
     }
@@ -441,7 +441,7 @@ fn paragraph_page(with_text: bool) -> (Document<()>, NodeId) {
     let mut dom = page_document(PARAGRAPH_CSS);
     dom.define("text", Box::new(TextKind));
     assert!(
-        dom.register_fonts(terminus::FontBlob::from_static(AHEM)) >= 1,
+        dom.register_fonts(terminus::link::FontBlob::from_static(AHEM)) >= 1,
         "the text cases need Ahem registered before the first layout"
     );
     let root = dom.document_element().id();
@@ -601,7 +601,12 @@ fn bench_frames(
         phase = !phase;
         step(&mut page, phase);
         divan::black_box(page.render());
-        divan::black_box(page.scene(&terminus::NoImages).encoding().draw_tags.len());
+        divan::black_box(
+            page.scene(&terminus::link::NoImages)
+                .encoding()
+                .draw_tags
+                .len(),
+        );
     });
 }
 
@@ -639,7 +644,12 @@ fn render_document(bencher: divan::Bencher<'_, '_>, cards: usize) {
         .with_inputs(|| card_page(cards).0)
         .bench_local_values(|mut dom| {
             divan::black_box(dom.render());
-            divan::black_box(dom.scene(&terminus::NoImages).encoding().draw_tags.len());
+            divan::black_box(
+                dom.scene(&terminus::link::NoImages)
+                    .encoding()
+                    .draw_tags
+                    .len(),
+            );
             dom
         });
 }
@@ -660,7 +670,12 @@ fn render_list_document(bencher: divan::Bencher<'_, '_>, rows: usize) {
         .with_inputs(|| cold_list_page(rows, false).0)
         .bench_local_values(|mut dom| {
             divan::black_box(dom.render());
-            divan::black_box(dom.scene(&terminus::NoImages).encoding().draw_tags.len());
+            divan::black_box(
+                dom.scene(&terminus::link::NoImages)
+                    .encoding()
+                    .draw_tags
+                    .len(),
+            );
             dom
         });
 }
@@ -672,7 +687,12 @@ fn render_auto_list_document(bencher: divan::Bencher<'_, '_>, rows: usize) {
         .with_inputs(|| cold_list_page(rows, true).0)
         .bench_local_values(|mut dom| {
             divan::black_box(dom.render());
-            divan::black_box(dom.scene(&terminus::NoImages).encoding().draw_tags.len());
+            divan::black_box(
+                dom.scene(&terminus::link::NoImages)
+                    .encoding()
+                    .draw_tags
+                    .len(),
+            );
             dom
         });
 }
@@ -772,7 +792,7 @@ fn frame_scroll_tick(bencher: divan::Bencher<'_, '_>, rows: usize) {
         frame.slot_of(list).is_some(),
         "the committed frame must carry the list's scroll slot"
     );
-    let mut scene = terminus::vello::Scene::new();
+    let mut scene = terminus::link::vello::Scene::new();
     let mut phase = false;
     bencher.bench_local(move || {
         phase = !phase;
@@ -907,7 +927,7 @@ fn loose_text_page() -> (Document<()>, NodeId) {
          .paragraph.loose {{ display: flex; width: auto; align-self: flex-start; }}"
     ));
     assert!(
-        dom.register_fonts(terminus::FontBlob::from_static(AHEM)) >= 1,
+        dom.register_fonts(terminus::link::FontBlob::from_static(AHEM)) >= 1,
         "the text cases need Ahem registered before the first layout"
     );
     let root = dom.document_element().id();

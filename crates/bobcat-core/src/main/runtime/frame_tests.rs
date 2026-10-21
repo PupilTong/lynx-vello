@@ -27,7 +27,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use terminus::stylo::color::AbsoluteColor;
+use terminus::link::stylo::color::AbsoluteColor;
 
 use crate::main::tree::LynxDocument;
 use crate::test_support::{TestEngine, TestViewSpec};
@@ -192,7 +192,7 @@ fn operate(engine: &mut TestEngine, op: &str) {
 struct FrameState {
     frame_size: (f32, f32),
     /// The nested page's id and its element children's ids.
-    nested: Vec<terminus::NodeId>,
+    nested: Vec<terminus::link::NodeId>,
     nested_color: Option<AbsoluteColor>,
     host_color: Option<AbsoluteColor>,
 }
@@ -209,7 +209,7 @@ fn frame_state(tree: &mut LynxDocument) -> Option<FrameState> {
         .id();
     let color = |tree: &LynxDocument, id| {
         tree.get(id)
-            .and_then(terminus::Node::computed_style)
+            .and_then(terminus::link::Node::computed_style)
             .map(|style| style.get_color().solid_color())
     };
     let host_color = color(tree, host_text);
@@ -529,7 +529,10 @@ fn assert_no_more_ticks(engine: &mut TestEngine, what: &str) {
 
 /// The nested page of the frame `frame` and its element children, read
 /// wherever the frame is.
-fn nested_of(engine: &mut TestEngine, frame: terminus::NodeId) -> Vec<terminus::NodeId> {
+fn nested_of(
+    engine: &mut TestEngine,
+    frame: terminus::link::NodeId,
+) -> Vec<terminus::link::NodeId> {
     engine
         .probe_document(move |tree| {
             let page = crate::main::tree::nested_page(tree, frame).expect("a frame");
@@ -538,7 +541,7 @@ fn nested_of(engine: &mut TestEngine, frame: terminus::NodeId) -> Vec<terminus::
                 tree.get(page)
                     .into_iter()
                     .flat_map(|page| page.children().filter(|child| child.is_element()))
-                    .map(terminus::Node::id),
+                    .map(terminus::link::Node::id),
             );
             nested
         })
@@ -566,7 +569,7 @@ fn a_removed_frame_disposes_of_its_card_and_reappending_renders_it_again() {
             tree.document_element()
                 .children()
                 .find(|child| child.tag_name() == Some("frame"))
-                .map(terminus::Node::id)
+                .map(terminus::link::Node::id)
         })
         .flatten()
         .expect("the page holds the frame");
@@ -687,7 +690,7 @@ fn write_frame(engine: &mut TestEngine, key: &str, value: &str) {
 
 /// The text the frame's card shows — the raw text of the nested page's
 /// `text` — and that `text`'s id, read off the document.
-fn nested_text(tree: &mut LynxDocument) -> Option<(terminus::NodeId, String)> {
+fn nested_text(tree: &mut LynxDocument) -> Option<(terminus::link::NodeId, String)> {
     let frame = tree
         .document_element()
         .children()
@@ -712,8 +715,8 @@ fn pump_until_text(
     engine: &mut TestEngine,
     events: &mut Vec<EngineEvent>,
     expected: &str,
-    replacing: Option<terminus::NodeId>,
-) -> terminus::NodeId {
+    replacing: Option<terminus::link::NodeId>,
+) -> terminus::link::NodeId {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         for event in engine.pump() {
@@ -1195,7 +1198,7 @@ fn event_view() -> TestEngine {
 fn hit_ids(engine: &mut TestEngine, x: f32, y: f32) -> Option<(Option<String>, Option<String>)> {
     let frame = engine.published_frame()?;
     let node = frame
-        .hit(terminus::Point2D::new(x, y), &|_| None, None)?
+        .hit(terminus::link::Point2D::new(x, y), &|_| None, None)?
         .node;
     engine
         .view
@@ -1241,13 +1244,13 @@ fn pump_until_hit(
 /// A tap at `(x, y)`: a touch down and its release in place.
 fn tap(engine: &mut TestEngine, (x, y): (f32, f32)) {
     for phase in [
-        terminus::input::PointerPhase::Down,
-        terminus::input::PointerPhase::Up,
+        terminus::link::input::PointerPhase::Down,
+        terminus::link::input::PointerPhase::Up,
     ] {
-        engine.dispatch_input(terminus::input::InputEvent::pointer(
-            terminus::Point2D::new(x, y),
+        engine.dispatch_input(terminus::link::input::InputEvent::pointer(
+            terminus::link::Point2D::new(x, y),
             1,
-            terminus::input::PointerKind::Touch,
+            terminus::link::input::PointerKind::Touch,
             phase,
         ));
     }
@@ -1503,12 +1506,12 @@ fn a_grand_cards_steps_follow_the_cards() {
 #[test]
 fn a_key_reaches_a_cards_global_bind() {
     let mut engine = booted_event_view();
-    engine.dispatch_input(terminus::input::InputEvent::key(
-        terminus::input::KeyPhase::Down,
+    engine.dispatch_input(terminus::link::input::InputEvent::key(
+        terminus::link::input::KeyPhase::Down,
         "a",
         "KeyA",
         false,
-        terminus::input::Modifiers::default(),
+        terminus::link::input::Modifiers::default(),
     ));
     let lines = lines_until(&mut engine, "card-key-global keydown cv");
     assert_eq!(
@@ -1937,14 +1940,14 @@ fn pump_until_logged_times(
 
 /// The nested page of the host's frame, the page element's only `frame`,
 /// and the tags of its element children.
-fn host_nested_page(engine: &mut TestEngine) -> (terminus::NodeId, Vec<String>) {
+fn host_nested_page(engine: &mut TestEngine) -> (terminus::link::NodeId, Vec<String>) {
     engine
         .probe_document(|tree| {
             let frame = tree
                 .document_element()
                 .children()
                 .find(|child| child.tag_name() == Some("frame"))
-                .map(terminus::Node::id)
+                .map(terminus::link::Node::id)
                 .expect("the page holds the frame");
             let page = crate::main::tree::nested_page(tree, frame).expect("a frame");
             let tags = tree

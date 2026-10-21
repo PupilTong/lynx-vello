@@ -104,7 +104,7 @@ fn object_fit_matrix_matches_reference() {
         let source = format!("app:///{}.png", node.to_bits());
         images.insert_rgba8(&source, *width, *height, rgba.clone());
         doc.dom
-            .set_image_source(node, terminus::ImageRole::Source, Some(&source));
+            .set_image_source(node, terminus::link::ImageRole::Source, Some(&source));
     }
 
     // The natural size now arrives from the store's own load report, through
@@ -202,12 +202,12 @@ fn capture_scroll_stacking(test: &str, scroller_class: &str) -> prime_radiant::I
     doc.dom.layout();
     let applied = doc
         .dom
-        .scroll_to(scroller, terminus::Vector2D::new(0.0, 40.0));
+        .scroll_to(scroller, terminus::link::Vector2D::new(0.0, 40.0));
     assert!(
         (applied.y - 40.0).abs() < f32::EPSILON,
         "the columns must overflow the scrollport"
     );
-    screenshot::capture_prebuilt_document(test, &mut doc.dom, &terminus::NoImages)
+    screenshot::capture_prebuilt_document(test, &mut doc.dom, &terminus::link::NoImages)
 }
 
 /// `z-index: auto`: the scroller is no stacking context, so its columns sort
@@ -264,7 +264,7 @@ const TOP_LAYER_UA: &str = "
 fn a_modal_top_layer_element_and_its_backdrop_paint_over_any_z_index() {
     let mut doc = paint_common::Doc::with_css_sized(TOP_LAYER_CSS, 240.0, 200.0);
     doc.dom
-        .add_stylesheet(TOP_LAYER_UA, terminus::StylesheetOrigin::UserAgent);
+        .add_stylesheet(TOP_LAYER_UA, terminus::link::StylesheetOrigin::UserAgent);
     let root = doc.root;
     let fx = doc.el(root, "fx");
     let dialog = doc.el_tag(fx, "dialog", "");
@@ -274,7 +274,7 @@ fn a_modal_top_layer_element_and_its_backdrop_paint_over_any_z_index() {
     let actual = screenshot::capture_prebuilt_document(
         "a_modal_top_layer_element_and_its_backdrop_paint_over_any_z_index",
         &mut doc.dom,
-        &terminus::NoImages,
+        &terminus::link::NoImages,
     );
     screenshot::assert_golden(&["top-layer", "modal-backdrop"], &actual);
 }
@@ -288,7 +288,7 @@ fn a_modal_top_layer_element_and_its_backdrop_paint_over_any_z_index() {
 fn rounded_box_showcase_matches_browser() {
     let mut doc = paint_common::Doc::with_css_sized("", 220.0, 220.0);
     doc.dom
-        .register_fonts(terminus::FontBlob::from_static(screenshot::ROBOTO));
+        .register_fonts(terminus::link::FontBlob::from_static(screenshot::ROBOTO));
     doc.dom.set_inline_style(
         doc.root,
         "display:flex;position:relative;width:220px;height:220px;background:#fff",
@@ -299,7 +299,7 @@ fn rounded_box_showcase_matches_browser() {
     let actual = screenshot::capture_prebuilt_document(
         "rounded_box_showcase_matches_browser",
         &mut doc.dom,
-        &terminus::NoImages,
+        &terminus::link::NoImages,
     );
     let references = prime_radiant::Screenshots::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -360,7 +360,7 @@ fn rounded_box_matrix_matches_reference() {
     ];
     let mut doc = paint_common::Doc::with_css_sized("", 480.0, 320.0);
     doc.dom
-        .register_fonts(terminus::FontBlob::from_static(screenshot::ROBOTO));
+        .register_fonts(terminus::link::FontBlob::from_static(screenshot::ROBOTO));
     doc.dom.set_inline_style(
         doc.root,
         "display:flex;position:relative;width:480px;height:320px;background:#fff",
@@ -374,7 +374,7 @@ fn rounded_box_matrix_matches_reference() {
     let actual = screenshot::capture_prebuilt_document(
         "rounded_box_matrix_matches_reference",
         &mut doc.dom,
-        &terminus::NoImages,
+        &terminus::link::NoImages,
     );
     screenshot::assert_golden(&["rounded-box-matrix"], &actual);
 }

@@ -88,7 +88,7 @@
 mod common;
 
 use common::Doc;
-use terminus::{ElementState, NodeId, ShadowRootMode};
+use terminus::link::{ElementState, NodeId, ShadowRootMode};
 
 const GREEN: &str = "rgb(0, 128, 0)";
 const BLACK: &str = "rgb(0, 0, 0)";

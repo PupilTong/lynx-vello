@@ -4,7 +4,7 @@
 //! committed-input relayout, escalates to a whole-tree pass, or reaches the
 //! root outright.
 
-use terminus::{Device, Document, StylesheetOrigin};
+use terminus::link::{Device, Document, StylesheetOrigin};
 
 // Mirrors the Lynx UA sheet (`bobcat-core`): border-box, overflow hidden,
 // viewport-anchored page. That anchoring is what licenses the in-place
@@ -89,11 +89,11 @@ const BADGED: Kind = Kind {
 };
 
 /// `text` as `crates/bobcat-core` defines it, minus its method: a Lynx text
-/// element ([`terminus::CustomElement::is_lynx_text`]), so each label lays out as
+/// element ([`terminus::link::CustomElement::is_lynx_text`]), so each label lays out as
 /// a Lynx paragraph.
 struct TextKind;
 
-impl terminus::CustomElement<()> for TextKind {
+impl terminus::link::CustomElement<()> for TextKind {
     fn is_lynx_text(&self) -> bool {
         true
     }
@@ -108,9 +108,9 @@ fn doc() -> Document<()> {
 
 struct Page {
     doc: Document<()>,
-    rows: Vec<terminus::NodeId>,
-    cells: Vec<terminus::NodeId>,
-    texts: Vec<terminus::NodeId>,
+    rows: Vec<terminus::link::NodeId>,
+    cells: Vec<terminus::link::NodeId>,
+    texts: Vec<terminus::link::NodeId>,
 }
 
 fn build(row_class: &'static str, text: &str, rows: usize) -> Page {
@@ -171,7 +171,7 @@ fn geometry(doc: &Document<()>) -> Vec<(String, String)> {
             out.push((format!("{id:?}"), format!("{layout:?}")));
         }
         if let Some(node) = doc.get(id) {
-            stack.extend(node.children().map(terminus::Node::id));
+            stack.extend(node.children().map(terminus::link::Node::id));
         }
     }
     out.sort();
@@ -237,7 +237,7 @@ fn a_growing_subtree_escalates_and_still_matches_the_fresh_result() {
 }
 
 /// A column of fixed-height boxes, all empty; the Explorer page-switch shape.
-fn fixed_box_page() -> (Document<()>, terminus::NodeId) {
+fn fixed_box_page() -> (Document<()>, terminus::link::NodeId) {
     let mut doc = doc();
     let root = doc.document_element().id();
     let column = doc.create_element("view", ());
@@ -255,7 +255,7 @@ fn fixed_box_page() -> (Document<()>, terminus::NodeId) {
     (doc, target)
 }
 
-fn mount_into(doc: &mut Document<()>, target: terminus::NodeId) -> terminus::NodeId {
+fn mount_into(doc: &mut Document<()>, target: terminus::link::NodeId) -> terminus::link::NodeId {
     let child = doc.create_element("view", ());
     doc.set_inline_style(child, "height: 100px");
     let label = doc.create_element("text", ());
@@ -575,7 +575,11 @@ fn minimal_grow_repro() {
 fn waterfall(
     container: &str,
     heights: &[f32],
-) -> (Document<()>, terminus::NodeId, Vec<terminus::NodeId>) {
+) -> (
+    Document<()>,
+    terminus::link::NodeId,
+    Vec<terminus::link::NodeId>,
+) {
     let mut doc = doc();
     let root = doc.document_element().id();
     let list = doc.create_element("view", ());
@@ -591,7 +595,7 @@ fn waterfall(
     (doc, list, items)
 }
 
-fn rect(doc: &Document<()>, id: terminus::NodeId) -> (f32, f32, f32, f32) {
+fn rect(doc: &Document<()>, id: terminus::link::NodeId) -> (f32, f32, f32, f32) {
     let layout = doc.rounded_layout(id).expect("node id is live");
     (
         layout.location.x,
@@ -601,7 +605,7 @@ fn rect(doc: &Document<()>, id: terminus::NodeId) -> (f32, f32, f32, f32) {
     )
 }
 
-fn rects(doc: &Document<()>, ids: &[terminus::NodeId]) -> Vec<(f32, f32, f32, f32)> {
+fn rects(doc: &Document<()>, ids: &[terminus::link::NodeId]) -> Vec<(f32, f32, f32, f32)> {
     ids.iter().map(|&id| rect(doc, id)).collect()
 }
 
@@ -683,7 +687,13 @@ fn a_flow_tolerance_change_re_lays_the_container_out() {
 /// flags license has to land on exactly the cold result.
 #[test]
 fn a_content_change_inside_a_fixed_grid_lanes_item_relayouts_in_place() {
-    fn build_fixed(text: &str) -> (Document<()>, Vec<terminus::NodeId>, Vec<terminus::NodeId>) {
+    fn build_fixed(
+        text: &str,
+    ) -> (
+        Document<()>,
+        Vec<terminus::link::NodeId>,
+        Vec<terminus::link::NodeId>,
+    ) {
         let mut doc = doc();
         let root = doc.document_element().id();
         let list = doc.create_element("view", ());

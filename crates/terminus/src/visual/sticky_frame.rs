@@ -17,7 +17,7 @@ use crate::paint::compose::snap_offset;
 pub(crate) struct StickySlot {
     /// The sticky box, which an anchored box's scroll compensation looks its
     /// slot up by.
-    pub(crate) node: crate::NodeId,
+    pub(crate) node: crate::tree::document::NodeId,
     pub(crate) parent: Option<u32>,
     pub(crate) scroll: [Option<u32>; 2],
     /// Sticky movement shared with the selected scrollport cancels out.

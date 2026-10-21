@@ -194,9 +194,9 @@
 //! the number of elements assigned to its slot — every element child, since the one slot is the
 //! default one, as web-core's `childElementCount` counts them — through a presentational hint it
 //! rewrites on the standard's `slotchange` at that slot, heard through
-//! [`CustomElement::handle_event`](terminus::CustomElement::handle_event) where a script component
-//! listens on its shadow root. web-core observes the host's child list with a `MutationObserver`
-//! for the same purpose (`:103-113`).
+//! [`CustomElement::handle_event`](terminus::link::CustomElement::handle_event) where a script
+//! component listens on its shadow root. web-core observes the host's child list with a
+//! `MutationObserver` for the same purpose (`:103-113`).
 //!
 //! - **Geometry** (`x-swiper.css:137-178`): a dot is `--indicator-size: 0.6rem` across and the
 //!   pitch is `size × 7 / 5` — the dot plus web-core's `size / 5` margin on each side. The strip is
@@ -222,12 +222,12 @@
 //!   because the last item's end margin is scroll range (above) — which lies in the `k`-th of the
 //!   `count` steps, whose held value is `k × pitch`. Under `circular` there is no end margin and an
 //!   end item at rest may stand across the seam: the timeline reads an offset past `max_offset` at
-//!   its representative nearer the range (`terminus::ScrollBox::unwrapped_offset`), so the first
-//!   item centred just before the start shows the first dot and a last item past `max_offset` the
-//!   last. An item between them reads its own offset over `max_offset`, which is not `k / (count −
-//!   1)` there and need not lie in the `k`-th step once there are five items or more. web-core
-//!   instead runs one animation per dot on that item's view timeline, active between 30% and 70% of
-//!   it (`htmlTemplates.ts:253-266`).
+//!   its representative nearer the range (`terminus::link::scroll::ScrollBox::unwrapped_offset`),
+//!   so the first item centred just before the start shows the first dot and a last item past
+//!   `max_offset` the last. An item between them reads its own offset over `max_offset`, which is
+//!   not `k / (count − 1)` there and need not lie in the `k`-th step once there are five items or
+//!   more. web-core instead runs one animation per dot on that item's view timeline, active between
+//!   30% and 70% of it (`htmlTemplates.ts:253-266`).
 //! - **Cost**: `background-position` exports to no painter curve, so the strip re-cascades on the
 //!   main thread after each scroll the main thread adopts — one element per swiper. A `"false"`
 //!   strip drops its `animation-name` as well as its box: `display: none` alone does not stop an
@@ -245,12 +245,13 @@
 //!
 //! The component's one UI method is web-core's `scrollTo({index, smooth = true})` overload
 //! (`XSwiper.ts:142-170`), [`scroll_to`], which the runtime's `callElementMethod` reaches through
-//! [`terminus::Document::invoke_element_method`]. It runs CSSOM-View's "scroll an element into
-//! view" ([`terminus::Document::scroll_into_view`]) on the swiper's element child number `index`,
-//! aligned on the main axis as the item's own `scroll-snap-align` aligns it, in `#content`. That is
-//! the item's snap position, which is where web-core's per-mode offsets (`XSwiper.ts:104-129`) end
-//! up after mandatory snapping, in every mode. A bad or out-of-range `index` is code 4, Android's
-//! answer, where web-core does nothing and answers 0; Android's `direction` is not read.
+//! [`terminus::link::Document::invoke_element_method`]. It runs CSSOM-View's "scroll an element
+//! into view" ([`terminus::link::Document::scroll_into_view`]) on the swiper's element child number
+//! `index`, aligned on the main axis as the item's own `scroll-snap-align` aligns it, in
+//! `#content`. That is the item's snap position, which is where web-core's per-mode offsets
+//! (`XSwiper.ts:104-129`) end up after mandatory snapping, in every mode. A bad or out-of-range
+//! `index` is code 4, Android's answer, where web-core does nothing and answers 0; Android's
+//! `direction` is not read.
 //!
 //! # Autoplay is a timer of the component's
 //!
@@ -274,8 +275,8 @@
 //!
 //! A turn that comes due while a finger holds the swiper is not carried out, and the timer goes
 //! on unchanged (user ruling 2026-10-13): the turn is a scroll request the painter declines while
-//! a pointer has the container ([`terminus::Document::scroll_to_yielding`]). web-core scrolls under
-//! the finger; Android stops its timer for the drag and waits a whole interval after it
+//! a pointer has the container ([`terminus::link::Document::scroll_to_yielding`]). web-core scrolls
+//! under the finger; Android stops its timer for the drag and waits a whole interval after it
 //! (`XSwiperUI.java:208-220`).
 //!
 //! # Events
@@ -285,12 +286,12 @@
 //! to W3C events, nothing reported by the painter). `#content`'s `scroll`
 //! and `scrollend` neither bubble nor are composed, so their path ends at
 //! the swiper's shadow root, which delivers them to the swiper's
-//! [`CustomElement::handle_event`](terminus::CustomElement::handle_event) in the
+//! [`CustomElement::handle_event`](terminus::link::CustomElement::handle_event) in the
 //! capture pass; the component takes them when their target is `#content`
 //! and no other node. Each event is queued at the swiper — not bubbling,
 //! composed ([`super::ComponentEvents::queue_detailed`]) — only when a
 //! listener on the swiper registered for its name
-//! ([`terminus::Document::has_listener`]); what the component remembers is
+//! ([`terminus::link::Document::has_listener`]); what the component remembers is
 //! recorded whether or not anything listens. Geometry is the last completed
 //! layout's, read when the `scroll` is delivered, and never flushed.
 //!
@@ -349,12 +350,12 @@ use std::time::Duration;
 use rustc_hash::FxHashMap;
 use serde_json::Value;
 use smallvec::{SmallVec, smallvec};
-use terminus::event::{ElementEvent, EventPhase};
-use terminus::scroll::{
+use terminus::link::event::{ElementEvent, EventPhase};
+use terminus::link::scroll::{
     ScrollBehavior, ScrollIntoViewContainer, ScrollIntoViewOptions, ScrollLogicalPosition,
 };
-use terminus::stylo::values::specified::box_::ScrollSnapAlignKeyword;
-use terminus::{
+use terminus::link::stylo::values::specified::box_::ScrollSnapAlignKeyword;
+use terminus::link::{
     CustomElement, MethodCall, MethodError, MethodOutcome, Node, NodeId, ShadowRootMode, Vector2D,
 };
 
@@ -523,7 +524,7 @@ pub(super) const TRANSITION_EVENT: &str = "transition";
 /// Installs the `x-swiper` component, which keeps its autoplay timers in
 /// `autoplays` and queues its events on `events`. Must run before any
 /// element could carry the tag, which is
-/// [`Document::define`](terminus::Document::define)'s own precondition.
+/// [`Document::define`](terminus::link::Document::define)'s own precondition.
 pub(super) fn define(document: &mut LynxDocument, autoplays: Autoplays, events: ComponentEvents) {
     document.define(
         SWIPER_TAG,
@@ -948,7 +949,7 @@ impl CustomElement<()> for Swiper {
 
 /// `scrollTo({index, smooth = true})` on `swiper`, with `params` as the JSON
 /// text the realm serialized: CSSOM-View's "scroll an element into view"
-/// ([`terminus::Document::scroll_into_view`]) on the swiper's element child number
+/// ([`terminus::link::Document::scroll_into_view`]) on the swiper's element child number
 /// `index`, at the item's own snap alignment on the swiper's main axis.
 ///
 /// web-core overrides `HTMLElement.scrollTo` on the swiper
@@ -1079,7 +1080,7 @@ fn flag(element: &Node<()>, name: &str) -> bool {
 /// (`XSwiperAutoScroll.ts:22-33`).
 ///
 /// The positions are the swiper's snap positions on its main axis
-/// ([`terminus::Document::snap_positions`]), one per item, in order. The current
+/// ([`terminus::link::Document::snap_positions`]), one per item, in order. The current
 /// item is the one whose position is nearest the offset, the first on a tie
 /// ([`nearest_snap_position`], which the swiper's events share): under
 /// `circular` an offset across the seam counts from the item whose copy
@@ -1108,7 +1109,7 @@ fn flag(element: &Node<()>, name: &str) -> bool {
 /// travels backward with two items (`XSwiperCircular.ts:44-118`).
 ///
 /// It is a request the painter declines while a pointer holds the swiper
-/// ([`terminus::Document::scroll_to_yielding`]), so the document's offset stays
+/// ([`terminus::link::Document::scroll_to_yielding`]), so the document's offset stays
 /// where it is until the painter posts it back, for a `smooth-scroll` turn
 /// too. A turn that comes before then counts from the old item and asks for
 /// the same one again, which the painter leaves to the glide already
@@ -1209,10 +1210,10 @@ mod tests {
 
     use std::time::Duration;
 
-    use terminus::scroll::ScrollBehavior;
-    use terminus::stylo::properties::PropertyId;
-    use terminus::stylo::values::computed::{CSSPixelLength, Display, Overflow};
-    use terminus::{
+    use terminus::link::scroll::ScrollBehavior;
+    use terminus::link::stylo::properties::PropertyId;
+    use terminus::link::stylo::values::computed::{CSSPixelLength, Display, Overflow};
+    use terminus::link::{
         MethodCall, MethodError, MethodOutcome, NodeId, Point2D, Rect, Size2D, StylesheetOrigin,
         Vector2D,
     };
@@ -3107,7 +3108,7 @@ mod tests {
 
     // --- the events ---------------------------------------------------------
 
-    use terminus::event::EventDetail;
+    use terminus::link::event::EventDetail;
 
     use super::super::scroll_container::tests::{listen, scrolled};
     use super::super::test_support::{fields_heard, touched, with_component_events};

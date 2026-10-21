@@ -17,7 +17,7 @@ use stylo::servo::media_features::PointerCapabilities;
 use stylo::stylesheets::{CssRuleType, Origin};
 use stylo::values::computed::{CSSPixelLength, Length};
 use stylo_traits::{CSSPixel, DevicePixel, ParsingMode, ToCss};
-use terminus::{Device, Document, StylesheetOrigin, standards_device};
+use terminus::link::{Device, Document, StylesheetOrigin, standards_device};
 
 fn matches_dev(device: Device, query: &str) -> bool {
     let mut doc: Document<()> = Document::new(device, "page", ());
@@ -34,7 +34,7 @@ fn matches_dev(device: Device, query: &str) -> bool {
     doc.append_child(root, probe);
     doc.layout();
     doc.get(probe)
-        .and_then(terminus::Node::computed_style)
+        .and_then(terminus::link::Node::computed_style)
         .is_some_and(|style| style.get_color().solid_color() == rgb(1, 2, 3))
 }
 

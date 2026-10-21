@@ -3,10 +3,11 @@
 //!
 //! Each tag's own policy lives with that tag — [`super::scroll_container`],
 //! [`super::list`], [`super::viewpager`], [`super::swiper`],
-//! [`super::refresh_view`], [`super::scroll_coordinator`], [`super::dialog`],
-//! [`super::popover`], [`super::overlay`], [`super::text`], [`super::raw_text`],
-//! [`super::frame`], [`super::image`], [`super::svg`] — and this module
-//! only decides what they all agree on and what order they land in.
+//! [`super::refresh_view`], [`super::scroll_coordinator`], [`super::overlay`],
+//! [`super::text`], [`super::raw_text`], [`super::frame`], [`super::image`],
+//! [`super::svg`], and HTML's [`terminus::link::html::dialog`] and
+//! [`terminus::link::html::popover`] — and this module only decides what they all
+//! agree on and what order they land in.
 //! [`super::blur_view`] is the one tag module with no rules of its own: a
 //! blur view is a container and nothing more, so everything it needs is here.
 //!
@@ -15,19 +16,26 @@
 //! Under web-core a page has two sheets of defaults: the browser's UA sheet,
 //! and web-elements' CSS, which is *author* origin and so outranks every UA
 //! rule whatever its specificity. This sheet is one origin for both, so it
-//! keeps that order by specificity: every HTML rule — [`super::dialog`]'s,
-//! [`super::popover`]'s and the display `dialog` maps HTML's `block` to — has
-//! its selector inside `:where()`, so it has none (a `::backdrop` rule keeps
-//! the pseudo-element's own), and every Lynx rule names a tag, so it outranks
-//! all of them. A `<view popover>` therefore keeps its Lynx `display` against
+//! keeps that order by specificity: every HTML rule —
+//! [`terminus::link::html::dialog`]'s, [`terminus::link::html::popover`]'s and the
+//! display `dialog` maps HTML's `block` to — has its selector inside
+//! `:where()`, so it has none (a `::backdrop` rule keeps the pseudo-element's
+//! own), and every Lynx rule names a tag, so it outranks all of them. A
+//! `<view popover>` therefore keeps its Lynx `display` against
 //! `[popover]`'s `display: none`, as it does in a browser under
-//! web-elements' `x-view` rule.
+//! web-elements' `x-view` rule (`linear.css`'s common block, `x-view {
+//! display: flex; position: relative; overflow: clip; border-width: 0; … }`):
+//! it is never hidden by `[popover]`, and keeps its `position: relative` and
+//! borderless box, while the properties web-elements leaves alone — the
+//! insets, the fit-content size, the `auto` margins, the padding and the
+//! colours — are the popover's.
 //!
 //! Among themselves the HTML rules then rank by source order alone, and the
-//! sheet orders them so that this is HTML's own precedence: `dialog`'s
-//! `display` first; then [`super::dialog`]'s rules, in HTML's order; then
-//! [`super::popover`]'s, whose `[popover]` box beats `dialog`'s as its
-//! higher specificity does in HTML; then `dialog:popover-open`'s `display`,
+//! sheet orders them so that this is HTML's own precedence
+//! ([`terminus::link::html`], "The UA rules"): `dialog`'s `display` first; then
+//! [`terminus::link::html::dialog`]'s rules, in HTML's order; then
+//! [`terminus::link::html::popover`]'s, whose `[popover]` box beats `dialog`'s as
+//! its higher specificity does in HTML; then `dialog:popover-open`'s `display`,
 //! after the closed `dialog`'s `none`, as in HTML. The one pair whose order
 //! here is the reverse of HTML's, `dialog:modal` before `[popover]`, writes
 //! the same values for every property both declare (`position: fixed`, the
@@ -40,6 +48,12 @@
 //! an unlayered UA rule's priority, so the first layered rule under it fails
 //! its ordering assertion.
 //!
+//! A `dialog` whose `open` is `"false"` is closed, in its rules and its
+//! component alike ([`terminus::link::html::dialog`]): `open` is a boolean
+//! attribute, this engine's `__SetAttribute` stringifies `false`, and
+//! web-core removes an attribute whose value is `"false"` before its CSS sees
+//! it (see [`super::swiper`]'s "Boolean attributes and `"false"`").
+//!
 //! Order within the Lynx rules is mostly documentation, with one exception
 //! that is mechanism: [`super::image`]'s and [`super::svg`]'s child suppression ties on specificity
 //! with the `display` rules `view`, `scroll-view`, `list`, `list-item`, the two
@@ -50,15 +64,17 @@
 //! it wins only by being assembled last. Those modules' `nothing_inside_an_image_generates_a_box`
 //! and `nothing_inside_an_svg_generates_a_box` are the tripwires for it.
 
+use terminus::link::html::dialog::DIALOG_TAG;
+use terminus::link::html::{dialog, popover};
+
 use super::blur_view::{BLUR_VIEW_TAG, X_BLUR_VIEW_TAG};
-use super::dialog::DIALOG_TAG;
 use super::markdown::{MARKDOWN_TAG, X_MARKDOWN_TAG};
 use super::refresh_view::{REFRESH_FOOTER_TAG, REFRESH_HEADER_TAG};
 use super::swiper::{SWIPER_ITEM_TAG, SWIPER_TAG};
 use super::viewpager::{VIEWPAGER_ITEM_TAG, VIEWPAGER_TAG, X_VIEWPAGER_ITEM_TAG, X_VIEWPAGER_TAG};
 use super::{
-    dialog, frame, image, list, markdown, overlay, popover, raw_text, refresh_view,
-    scroll_container, scroll_coordinator, svg, swiper, text, text_field, viewpager,
+    frame, image, list, markdown, overlay, raw_text, refresh_view, scroll_container,
+    scroll_coordinator, svg, swiper, text, text_field, viewpager,
 };
 
 /// Page configuration for the Lynx runtime and UA cascade.
@@ -113,10 +129,10 @@ impl Default for PageConfig {
 /// `dialog` follows the switch's display too — HTML's `block` has no box in
 /// this engine, and the switch is what picks a page's block-like container —
 /// and nothing else of the common block: a browser gives it HTML's defaults
-/// ([`super::dialog`]). That display is HTML's, so it is written with
-/// HTML's other rules, at zero specificity, for `dialog` and for
-/// `dialog:popover-open` ([`super::popover`]), rather than in the Lynx
-/// display line.
+/// ([`terminus::link::html::dialog`]). That display is HTML's, so it is written
+/// with HTML's other rules, at zero specificity, for `dialog` and for
+/// `dialog:popover-open` ([`terminus::link::html::popover`]), rather than in the
+/// Lynx display line.
 /// `overlay` and `x-overlay-ng` are in neither: their host is `display:
 /// contents`, as web-core's, and what renders is the `dialog` in their shadow
 /// tree, which takes the switch's display as `dialog` ([`super::overlay`]).
@@ -202,7 +218,7 @@ impl Default for PageConfig {
 /// ([`super::scroll_coordinator`] carries the argument). HTML's own is one
 /// more, after the coordinator's, among HTML's rules: a popover's
 /// `::backdrop` is `pointer-events: none !important`, as in a browser
-/// ([`super::popover`]). The overlay's is one more, after it: only an
+/// ([`terminus::link::html::popover`]). The overlay's is one more, after it: only an
 /// overlay's first child renders, which web-core itself pins and native's
 /// measurement of child 0 alone agrees with ([`super::overlay`] carries the
 /// argument). `the_ua_sheet_is_important_free_apart_from_the_recorded_exceptions`
@@ -306,15 +322,17 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
 /// normal` collapses what it shows while the value keeps every character.
 /// The rule applies to every value but an ASCII case-insensitive `"false"`,
 /// which is HTML's reading of the attribute and
-/// `terminus::Document::is_editing_host`'s.
+/// `terminus::link::Document::is_editing_host`'s.
 pub(super) const EDITING_HOST_RULE: &str =
     "[contenteditable]:not([contenteditable=\"false\" i]) { white-space: pre-wrap; }";
 
 #[cfg(test)]
 mod tests {
-    use terminus::stylo::computed_values::{box_sizing, position};
-    use terminus::stylo::values::computed::font::{FontFamily, GenericFontFamily};
-    use terminus::stylo::values::computed::{BorderStyle, CSSPixelLength, Display, Overflow, Size};
+    use terminus::link::stylo::computed_values::{box_sizing, position};
+    use terminus::link::stylo::values::computed::font::{FontFamily, GenericFontFamily};
+    use terminus::link::stylo::values::computed::{
+        BorderStyle, CSSPixelLength, Display, Overflow, Size,
+    };
 
     use super::super::LynxDocument;
     use super::super::overlay::{OVERLAY_TAG, X_OVERLAY_TAG};
@@ -357,7 +375,7 @@ mod tests {
 
     /// Attaches one of each container tag, answering with the page itself for
     /// `page` — it is minted with the document and cannot be created again.
-    fn containers(document: &mut LynxDocument) -> Vec<terminus::NodeId> {
+    fn containers(document: &mut LynxDocument) -> Vec<terminus::link::NodeId> {
         CONTAINER_TAGS
             .iter()
             .map(|tag| {
@@ -485,7 +503,7 @@ mod tests {
                 GenericFontFamily::SystemUi,
             ),
         ] {
-            document.add_stylesheet(css, terminus::StylesheetOrigin::Author);
+            document.add_stylesheet(css, terminus::link::StylesheetOrigin::Author);
             document.layout();
             for node in [page, view, text] {
                 assert_eq!(
@@ -686,10 +704,10 @@ mod tests {
     /// `white-space` and `display: none` win over the default.
     #[test]
     fn an_editing_host_preserves_white_space_by_default_only() {
-        use terminus::stylo::computed_values::white_space_collapse::T as Collapse;
+        use terminus::link::stylo::computed_values::white_space_collapse::T as Collapse;
 
         let mut document = document();
-        let hosts: Vec<(terminus::NodeId, bool)> = [
+        let hosts: Vec<(terminus::link::NodeId, bool)> = [
             ("", true),
             ("true", true),
             ("plaintext-only", true),
@@ -803,7 +821,8 @@ mod tests {
     ///
     /// HTML's own follows the coordinator's: a popover's `::backdrop` is
     /// `pointer-events: none !important` in HTML's UA sheet, so it takes no
-    /// touch whatever an author writes. [`super::super::popover`] carries it.
+    /// touch whatever an author writes. [`terminus::link::html::popover`] carries
+    /// it.
     ///
     /// The overlay's one follows HTML's. Only an overlay's first
     /// child renders: web-core pins every other child `display: none

@@ -109,7 +109,7 @@
 //! stale is two tests. An observer costs one `Box` for its handler, and a
 //! delivery one indirect call.
 //!
-//! [`CustomElement::intersections_changed`]: crate::CustomElement::intersections_changed
+//! [`CustomElement::intersections_changed`]: crate::tree::custom::CustomElement::intersections_changed
 
 mod geometry;
 
@@ -198,7 +198,7 @@ pub trait IntersectionEventHandler<T> {
 /// entries are dropped. So are they for a freed one, which only a direct
 /// call can name, since its free dropped the observer.
 ///
-/// [`CustomElement::intersections_changed`]: crate::CustomElement::intersections_changed
+/// [`CustomElement::intersections_changed`]: crate::tree::custom::CustomElement::intersections_changed
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ElementHandler(pub NodeId);
 
@@ -464,7 +464,8 @@ impl<T> Document<T> {
         }
         if let Some(root) = root {
             assert!(
-                self.get(root).is_some_and(crate::Node::is_element),
+                self.get(root)
+                    .is_some_and(crate::tree::node::Node::is_element),
                 "an intersection observer's root {root:?} must be a live element"
             );
         }
@@ -531,7 +532,8 @@ impl<T> Document<T> {
     /// element.
     pub fn observe_intersection(&mut self, observer: IntersectionObserverId, target: NodeId) {
         assert!(
-            self.get(target).is_some_and(crate::Node::is_element),
+            self.get(target)
+                .is_some_and(crate::tree::node::Node::is_element),
             "an intersection observer's target {target:?} must be a live element"
         );
         let intersections = &mut self.intersections;

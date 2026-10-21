@@ -28,7 +28,7 @@ mod screenshot;
 
 use paint_common::Doc;
 use prime_radiant::TestImages;
-use terminus::{DocumentKind, ImageOutcome, ImageRole, NodeId};
+use terminus::link::{DocumentKind, ImageOutcome, ImageRole, NodeId};
 
 const SCREEN_WIDTH: f32 = 393.0;
 const SCREEN_HEIGHT: f32 = 727.0;
@@ -294,8 +294,10 @@ fn size_of(doc: &mut Doc, node: NodeId) -> (f32, f32) {
 
 /// What a host makes of one document request: the engine's parser run over
 /// its bytes, reported for its source.
-fn host_parse((source, bytes, kind): terminus::DocumentRequest) -> terminus::ImageEvent {
-    terminus::ImageEvent::parse_document(source, &bytes, kind)
+fn host_parse(
+    (source, bytes, kind): terminus::link::DocumentRequest,
+) -> terminus::link::ImageEvent {
+    terminus::link::ImageEvent::parse_document(source, &bytes, kind)
 }
 
 /// Answers every document request the way a host does, and applies what

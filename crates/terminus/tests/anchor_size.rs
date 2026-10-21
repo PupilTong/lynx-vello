@@ -15,8 +15,8 @@
 mod common;
 
 use common::Doc;
-use terminus::NodeId;
-use terminus::layout::{NaturalSize, Size};
+use terminus::link::NodeId;
+use terminus::link::layout::{NaturalSize, Size};
 
 /// A document laid out from `css`, with helpers for rounded geometry.
 struct Page {

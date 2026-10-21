@@ -3,14 +3,14 @@
 
 #![allow(clippy::float_cmp)]
 
-use euclid::default::{Size2D, Vector2D};
+use euclid::default::{Point2D, Size2D, Vector2D};
 use stylo::queries::values::PrefersColorScheme;
 
 use crate::input::{InputEvent, PointerKind, PointerPhase};
 use crate::scroll::{ScrollAxes, ScrollBehavior};
 use crate::test_common::{Doc, device_with};
+use crate::tree::document::NodeId;
 use crate::visual::{PaintItemKind, PaintOrder};
-use crate::{NodeId, Point2D};
 
 struct Harness {
     doc: Doc,
@@ -58,7 +58,7 @@ impl Harness {
         let moved = frame
             .space_samples(&animations, &stickies, &anchored, ratio, &offsets)
             .css(item.space)
-            * crate::vello::kurbo::Point::new(f64::from(baked.x), f64::from(baked.y));
+            * vello::kurbo::Point::new(f64::from(baked.x), f64::from(baked.y));
         #[allow(clippy::cast_possible_truncation, reason = "CSS px fit f32")]
         Point2D::new(moved.x as f32, moved.y as f32)
     }

@@ -13,9 +13,9 @@ mod common;
 use std::sync::{Arc, Mutex};
 
 use common::Doc;
-use terminus::event::{ElementEvent, EventDetail, EventPhase};
-use terminus::input::PointerKind;
-use terminus::{
+use terminus::link::event::{ElementEvent, EventDetail, EventPhase};
+use terminus::link::input::PointerKind;
+use terminus::link::{
     CustomElement, Document, MethodCall, MethodError, MethodOutcome, NodeId, ShadowRootMode,
 };
 
@@ -792,7 +792,7 @@ fn clearing_defined_through_the_element_state_api_panics() {
     let root = doc.root;
     let element = doc.el(root, "view");
     doc.dom
-        .remove_element_state(element, terminus::ElementState::DEFINED);
+        .remove_element_state(element, terminus::link::ElementState::DEFINED);
 }
 
 #[test]
@@ -802,7 +802,7 @@ fn setting_defined_through_the_element_state_api_panics() {
     let root = doc.root;
     let element = doc.el(root, "view");
     doc.dom
-        .add_element_state(element, terminus::ElementState::DEFINED);
+        .add_element_state(element, terminus::link::ElementState::DEFINED);
 }
 
 #[test]
@@ -1495,7 +1495,7 @@ fn shadow_child(doc: &Doc, host: NodeId, tag: &str) -> NodeId {
 /// pointer detail its gesture recognizer gives one.
 fn tap(doc: &mut Doc, target: NodeId) {
     let detail = EventDetail::Pointer {
-        position: terminus::Point2D::new(3.0, 4.5),
+        position: terminus::link::Point2D::new(3.0, 4.5),
         id: 1,
         device: PointerKind::Touch,
         button: 0,

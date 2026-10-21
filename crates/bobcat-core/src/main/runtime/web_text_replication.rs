@@ -64,8 +64,8 @@
 
 use std::time::Duration;
 
-use terminus::stylo::color::AbsoluteColor;
-use terminus::stylo::values::computed::FontStyle;
+use terminus::link::stylo::color::AbsoluteColor;
+use terminus::link::stylo::values::computed::FontStyle;
 use tokio::sync::mpsc;
 
 use super::*;
@@ -109,9 +109,9 @@ impl DocumentProbe {
 
 /// A runtime over a document that can shape text.
 fn text_runtime() -> (ScriptRuntime, MainThreadRuntime, DocumentProbe) {
-    let mut text = terminus::TextContext::new();
+    let mut text = terminus::link::TextContext::new();
     assert_eq!(
-        text.register_fonts(terminus::FontBlob::from_static(AHEM)),
+        text.register_fonts(terminus::link::FontBlob::from_static(AHEM)),
         1
     );
     let mut ingredients =
@@ -217,9 +217,9 @@ fn background_pair(main: &str, background: &str) -> BackgroundPair {
         WorkerHome::with_entry_for_test((background.to_owned(), "test:bts-entry".to_owned()));
     let (outbox, view) = detached_outbox(Arc::new(NoWakeup));
     let mut js = build_runtime().expect("the test runtime builds");
-    let mut text = terminus::TextContext::new();
+    let mut text = terminus::link::TextContext::new();
     assert_eq!(
-        text.register_fonts(terminus::FontBlob::from_static(AHEM)),
+        text.register_fonts(terminus::link::FontBlob::from_static(AHEM)),
         1
     );
     let mut ingredients =
@@ -259,9 +259,13 @@ fn background_pair(main: &str, background: &str) -> BackgroundPair {
 /// Every descendant of `root` in document order — the sequence
 /// `querySelectorAll` walks, which is what the ported counting assertions
 /// depend on.
-fn descendants(tree: &LynxDocument, root: terminus::NodeId, out: &mut Vec<terminus::NodeId>) {
-    let children: Vec<terminus::NodeId> = match tree.get(root) {
-        Some(node) => node.children().map(terminus::Node::id).collect(),
+fn descendants(
+    tree: &LynxDocument,
+    root: terminus::link::NodeId,
+    out: &mut Vec<terminus::link::NodeId>,
+) {
+    let children: Vec<terminus::link::NodeId> = match tree.get(root) {
+        Some(node) => node.children().map(terminus::link::Node::id).collect(),
         None => return,
     };
     for child in children {
@@ -273,11 +277,11 @@ fn descendants(tree: &LynxDocument, root: terminus::NodeId, out: &mut Vec<termin
 /// What every `raw-text` under `root` currently carries, in document order.
 /// The ported tests read content off the carrier's `text` attribute rather
 /// than off `textContent`, so this is the same query they make.
-fn carrier_contents(tree: &LynxDocument, root: terminus::NodeId) -> Vec<String> {
+fn carrier_contents(tree: &LynxDocument, root: terminus::link::NodeId) -> Vec<String> {
     let mut ids = Vec::new();
     descendants(tree, root, &mut ids);
     ids.into_iter()
-        .filter(|id| tree.get(*id).and_then(terminus::Node::tag_name) == Some("raw-text"))
+        .filter(|id| tree.get(*id).and_then(terminus::link::Node::tag_name) == Some("raw-text"))
         .map(|id| {
             tree.get(id)
                 .and_then(|node| node.attribute("text"))
@@ -289,7 +293,7 @@ fn carrier_contents(tree: &LynxDocument, root: terminus::NodeId) -> Vec<String> 
 
 /// The element script gave `id`, found without the test having to know which
 /// packed handle the PAPI minted for it.
-fn element_with_id(tree: &LynxDocument, id: &str) -> terminus::NodeId {
+fn element_with_id(tree: &LynxDocument, id: &str) -> terminus::link::NodeId {
     let page = tree.document_element().id();
     let mut ids = vec![page];
     descendants(tree, page, &mut ids);
@@ -299,26 +303,26 @@ fn element_with_id(tree: &LynxDocument, id: &str) -> terminus::NodeId {
 }
 
 /// The computed colour of a live element.
-fn color(tree: &LynxDocument, element: terminus::NodeId) -> AbsoluteColor {
+fn color(tree: &LynxDocument, element: terminus::link::NodeId) -> AbsoluteColor {
     computed(tree, element).get_color().solid_color()
 }
 
 /// The computed font size, in CSS pixels.
-fn font_size(tree: &LynxDocument, element: terminus::NodeId) -> f32 {
+fn font_size(tree: &LynxDocument, element: terminus::link::NodeId) -> f32 {
     computed(tree, element)
         .slow_clone_font_size()
         .computed_size()
         .px()
 }
 
-fn font_style(tree: &LynxDocument, element: terminus::NodeId) -> FontStyle {
+fn font_style(tree: &LynxDocument, element: terminus::link::NodeId) -> FontStyle {
     *computed(tree, element).get_font_style()
 }
 
 fn computed(
     tree: &LynxDocument,
-    element: terminus::NodeId,
-) -> terminus::stylo::servo_arc::Arc<terminus::stylo::properties::ComputedValues> {
+    element: terminus::link::NodeId,
+) -> terminus::link::stylo::servo_arc::Arc<terminus::link::stylo::properties::ComputedValues> {
     tree.get(element)
         .expect("a live element")
         .computed_style()
@@ -367,7 +371,7 @@ fn create_text_mints_an_element_tagged_text() {
     assert_eq!(
         tree.document_element()
             .first_child()
-            .and_then(terminus::Node::tag_name),
+            .and_then(terminus::link::Node::tag_name),
         Some("text"),
         "and the host tree agrees with the tag script was handed"
     );
@@ -462,11 +466,11 @@ fn a_text_and_its_carrier_survive_a_flush_as_one_measured_paragraph() {
         .id();
     let text = tree
         .get(view)
-        .and_then(terminus::Node::first_child)
+        .and_then(terminus::link::Node::first_child)
         .expect("the text")
         .id();
     assert_eq!(
-        tree.get(text).and_then(terminus::Node::tag_name),
+        tree.get(text).and_then(terminus::link::Node::tag_name),
         Some("text")
     );
     assert_eq!(
@@ -527,7 +531,7 @@ fn setting_the_text_attribute_replaces_the_constructor_supplied_content() {
     );
     let carrier = tree
         .get(text)
-        .and_then(terminus::Node::first_child)
+        .and_then(terminus::link::Node::first_child)
         .expect("the carrier")
         .id();
     assert!(
@@ -594,7 +598,7 @@ fn a_childless_text_exists_and_carries_no_content() {
         .id();
     assert!(
         tree.get(text)
-            .and_then(terminus::Node::first_child)
+            .and_then(terminus::link::Node::first_child)
             .is_none(),
         "no substitute child stands in for the missing run"
     );
@@ -693,7 +697,7 @@ fn a_tagged_text_is_found_and_reads_its_content_back() {
         .expect("the selector parses")
         .expect("the tagged text is found by its dataset entry");
     assert_eq!(
-        tree.get(text).and_then(terminus::Node::tag_name),
+        tree.get(text).and_then(terminus::link::Node::tag_name),
         Some("text")
     );
     assert_eq!(carrier_contents(&tree, text), vec!["2".to_owned()]);

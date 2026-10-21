@@ -9,7 +9,7 @@
 //!
 //! Everything that turns frames into pixels — the gesture router, the scroll
 //! intents, the composition, the frame clock and the draw target — is
-//! `terminus`'s presenting painter ([`terminus::painter::Painter`]). This
+//! `terminus`'s presenting painter ([`terminus::link::painter::Painter`]). This
 //! module is its link to one view: what it holds of a view is a receiver on
 //! the view's publication watch and a `Weak` on the view's [`ViewSeat`].
 //! Neither owns anything: a painter observes a view; it does not keep one
@@ -37,11 +37,11 @@ use std::sync::Arc;
 #[cfg(test)]
 use std::time::Duration;
 
-use terminus::CommittedFrame;
-use terminus::input::{InputEvent, InputKind};
-use terminus::painter::{EmitEvent, GesturePolicy};
+use terminus::link::CommittedFrame;
+use terminus::link::input::{InputEvent, InputKind};
+use terminus::link::painter::{EmitEvent, GesturePolicy};
 #[cfg(test)]
-use terminus::painter::{FrameClock, GestureRouter, InputDecisions, ScrollIntents};
+use terminus::link::painter::{FrameClock, GestureRouter, InputDecisions, ScrollIntents};
 #[cfg(test)]
 use tokio::sync::mpsc;
 use tokio::sync::watch;
@@ -166,7 +166,7 @@ pub(crate) struct FarEnd {
 pub struct Painter {
     /// The presenting painter: the draw target and everything that turns
     /// adopted frames into pixels in it.
-    core: terminus::painter::Painter,
+    core: terminus::link::painter::Painter,
     /// The seat this painter took on the view it observes, if it observes one.
     /// Non-owning, and the only handle there is on a live view: an upgrade
     /// that fails is the view having been released, which is therefore a fact
@@ -217,7 +217,7 @@ impl Painter {
         height: f32,
         device_pixel_ratio: f32,
     ) -> Result<Self, EngineError> {
-        let core = terminus::painter::Painter::new(
+        let core = terminus::link::painter::Painter::new(
             target,
             width,
             height,
@@ -228,7 +228,7 @@ impl Painter {
         Ok(Self::with_core(core))
     }
 
-    fn with_core(core: terminus::painter::Painter) -> Self {
+    fn with_core(core: terminus::link::painter::Painter) -> Self {
         Self {
             core,
             seat: Weak::new(),
@@ -243,7 +243,7 @@ impl Painter {
     /// build one.
     #[cfg(test)]
     pub(crate) fn without_output(width: f32, height: f32, device_pixel_ratio: f32) -> Self {
-        Self::with_core(terminus::painter::Painter::without_output(
+        Self::with_core(terminus::link::painter::Painter::without_output(
             width,
             height,
             device_pixel_ratio,
@@ -277,7 +277,7 @@ impl Painter {
             frame_demand: RefCell::default(),
             commands: crate::link::CommandSender::new(commands),
             metrics: watch::channel(Some(viewport)).0,
-            images: Rc::new(terminus::NoImages),
+            images: Rc::new(terminus::link::NoImages),
             scroll: Arc::clone(&scroll),
         });
         let mut painter = Self::without_output(width, height, 1.0);
@@ -713,7 +713,7 @@ impl Painter {
             return Ok(());
         }
         // A draw that fails marks the target failed itself
-        // (`terminus::painter::Painter::has_failed`), so this is reported
+        // (`terminus::link::painter::Painter::has_failed`), so this is reported
         // once.
         self.draw()
     }

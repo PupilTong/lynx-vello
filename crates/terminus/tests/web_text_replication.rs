@@ -25,8 +25,8 @@ mod common;
 
 use common::{Doc, device};
 use prime_radiant::headless;
-use terminus::vello::peniko::Color;
-use terminus::{FontBlob, FontFaceRequest, FontFaceSource, NodeId, Vector2D};
+use terminus::link::vello::peniko::Color;
+use terminus::link::{FontBlob, FontFaceRequest, FontFaceSource, NodeId, Vector2D};
 
 const AHEM: &[u8] = include_bytes!("../../seldon/tests/fixtures/Ahem.ttf");
 const ROBOTO: &[u8] = include_bytes!("../../seldon/tests/fixtures/Roboto-Regular.ttf");
@@ -74,7 +74,7 @@ fn readback(test: &str, doc: &mut Doc, width: u32, height: u32) -> Vec<u8> {
     let mut gpu = headless(test);
     doc.dom.layout();
     doc.dom.render();
-    let scene = doc.dom.scene(&terminus::NoImages);
+    let scene = doc.dom.scene(&terminus::link::NoImages);
     gpu.render(&scene, &[], width, height, Color::WHITE)
         .expect("headless render")
 }

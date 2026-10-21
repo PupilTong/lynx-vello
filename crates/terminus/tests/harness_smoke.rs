@@ -3,7 +3,7 @@
 mod common;
 
 use common::{Doc, media_matches, parses, rgb, specificity, specified};
-use terminus::ElementState;
+use terminus::link::ElementState;
 
 #[test]
 fn doc_builds_flushes_and_reads_computed_values() {

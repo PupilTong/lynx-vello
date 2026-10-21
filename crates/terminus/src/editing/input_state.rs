@@ -19,13 +19,13 @@
 
 use core::ops::Range;
 
+use euclid::default::{Point2D, Rect, Size2D};
 use parley::{Cluster, Cursor, Layout};
 use stylo::properties::ComputedValues;
 
 use super::offsets::{unit_of_byte, utf16_len};
 use crate::layout::TextBrush;
-use crate::tree::document::NodeId;
-use crate::{Document, Point2D, Rect, Size2D};
+use crate::tree::document::{Document, NodeId};
 
 /// The caret's width, in CSS px.
 pub(crate) const CARET_WIDTH: f32 = 1.0;

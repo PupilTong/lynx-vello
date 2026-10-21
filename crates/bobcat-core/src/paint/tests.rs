@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use terminus::event::EventDetail;
+use terminus::link::event::EventDetail;
 
 use super::{FarEnd, Painter, ToMain};
 use crate::link::{FramePost, ScrollEntry, ScrollMailbox};
@@ -233,9 +233,9 @@ fn a_commit_whose_pixels_can_no_longer_be_read_is_not_adopted() {
 /// A tap's detail, as the router decides one: a touch pointer's position.
 fn tap_detail() -> EventDetail {
     EventDetail::Pointer {
-        position: terminus::Point2D::new(1.0, 1.0),
+        position: terminus::link::Point2D::new(1.0, 1.0),
         id: 1,
-        device: terminus::input::PointerKind::Touch,
+        device: terminus::link::input::PointerKind::Touch,
         button: 0,
         buttons: 0,
     }
@@ -247,13 +247,13 @@ fn tap_detail() -> EventDetail {
 /// delivery.
 #[test]
 fn an_emit_decision_crosses_only_when_a_listener_wants_it() {
-    use terminus::painter::{EmitEvent, InputDecision, InputDecisions};
+    use terminus::link::painter::{EmitEvent, InputDecision, InputDecisions};
 
     use super::TAP_EVENT;
 
     let (mut painter, mut main) = detached();
     // The permanent page element's packed handle, as script would name it.
-    let target = terminus::NodeId::from_bits(2).expect("a well-formed packed handle");
+    let target = terminus::link::NodeId::from_bits(2).expect("a well-formed packed handle");
     let emit = |painter: &mut Painter| {
         let mut decisions = InputDecisions::new();
         decisions.push(InputDecision::Emit(EmitEvent {
@@ -328,11 +328,13 @@ fn an_emit_decision_crosses_only_when_a_listener_wants_it() {
 /// decided them. The realm is the side that gives them a shape.
 #[test]
 fn a_wheel_delta_and_touch_points_cross_as_values() {
-    use terminus::event::{TOUCH_ACTIVE, TOUCH_CHANGED, TOUCH_TARGET, TouchPoint, TouchPoints};
-    use terminus::painter::{EmitEvent, InputDecision, InputDecisions};
+    use terminus::link::event::{
+        TOUCH_ACTIVE, TOUCH_CHANGED, TOUCH_TARGET, TouchPoint, TouchPoints,
+    };
+    use terminus::link::painter::{EmitEvent, InputDecision, InputDecisions};
 
     let (mut painter, mut main) = detached();
-    let target = terminus::NodeId::from_bits(2).expect("a well-formed packed handle");
+    let target = terminus::link::NodeId::from_bits(2).expect("a well-formed packed handle");
     main.outbox.set_name_routed(Arc::from("wheel"), true);
     main.outbox.set_name_routed(Arc::from("touchmove"), true);
     painter.poll_link();
@@ -340,12 +342,12 @@ fn a_wheel_delta_and_touch_points_cross_as_values() {
     let mut touches = TouchPoints::new();
     touches.push(TouchPoint {
         identifier: 1,
-        position: terminus::Point2D::new(10.0, 20.0),
+        position: terminus::link::Point2D::new(10.0, 20.0),
         flags: TOUCH_ACTIVE,
     });
     touches.push(TouchPoint {
         identifier: 2,
-        position: terminus::Point2D::new(30.5, 40.0),
+        position: terminus::link::Point2D::new(30.5, 40.0),
         flags: TOUCH_ACTIVE | TOUCH_TARGET | TOUCH_CHANGED,
     });
     let mut decisions = InputDecisions::new();
@@ -353,8 +355,8 @@ fn a_wheel_delta_and_touch_points_cross_as_values() {
         name: "wheel",
         target,
         detail: EventDetail::Wheel {
-            position: terminus::Point2D::new(5.0, 6.0),
-            delta: terminus::Vector2D::new(0.0, 30.0),
+            position: terminus::link::Point2D::new(5.0, 6.0),
+            delta: terminus::link::Vector2D::new(0.0, 30.0),
         },
         release: None,
     }));
@@ -362,7 +364,7 @@ fn a_wheel_delta_and_touch_points_cross_as_values() {
         name: "touchmove",
         target,
         detail: EventDetail::Touch {
-            position: terminus::Point2D::new(30.5, 40.0),
+            position: terminus::link::Point2D::new(30.5, 40.0),
             points: touches.clone(),
         },
         release: None,
@@ -379,8 +381,8 @@ fn a_wheel_delta_and_touch_points_cross_as_values() {
     assert_eq!(
         payload.detail,
         EventDetail::Wheel {
-            position: terminus::Point2D::new(5.0, 6.0),
-            delta: terminus::Vector2D::new(0.0, 30.0),
+            position: terminus::link::Point2D::new(5.0, 6.0),
+            delta: terminus::link::Vector2D::new(0.0, 30.0),
         }
     );
 
@@ -392,7 +394,7 @@ fn a_wheel_delta_and_touch_points_cross_as_values() {
     assert_eq!(payload.detail.touch_points(), touches.as_slice());
     assert_eq!(
         payload.detail.position(),
-        Some(terminus::Point2D::new(30.5, 40.0))
+        Some(terminus::link::Point2D::new(30.5, 40.0))
     );
     assert!((payload.timestamp - 500.0).abs() < f64::EPSILON);
 }
@@ -441,15 +443,15 @@ fn a_poll_adopts_arrived_route_changes_in_order_and_does_not_block() {
 /// marker.
 #[test]
 fn a_scroll_decision_sends_no_command() {
-    use terminus::painter::{InputDecision, InputDecisions};
+    use terminus::link::painter::{InputDecision, InputDecisions};
 
     let (mut painter, mut main) = detached();
-    let node = terminus::NodeId::from_bits(2).expect("a well-formed packed handle");
+    let node = terminus::link::NodeId::from_bits(2).expect("a well-formed packed handle");
     let mut decisions = InputDecisions::new();
     decisions.push(InputDecision::Scroll {
         pointer: None,
         from: node,
-        delta: terminus::Vector2D::new(0.0, 5.0),
+        delta: terminus::link::Vector2D::new(0.0, 5.0),
     });
     painter.execute_decisions(&mut decisions, None, 0.0);
     painter.publish_scroll(0.0, None);
@@ -773,7 +775,7 @@ fn an_offscreen_wait_takes_only_its_own_acknowledgement_and_ends_with_its_view()
 
 /// A frame over one 200px column scroller of 1000px content at the origin,
 /// its style extended by `css`, and the scroller.
-fn scrolling_frame(css: &str) -> (Arc<terminus::CommittedFrame>, terminus::NodeId) {
+fn scrolling_frame(css: &str) -> (Arc<terminus::link::CommittedFrame>, terminus::link::NodeId) {
     let mut document = document();
     let root = document.document_element().id();
     let scroller = document.create_element("view", ());
@@ -793,7 +795,7 @@ fn scrolling_frame(css: &str) -> (Arc<terminus::CommittedFrame>, terminus::NodeI
 }
 
 /// A detached painter that has adopted [`scrolling_frame`], at clock 0.
-fn scrolling(css: &str) -> (Painter, FarEnd, terminus::NodeId) {
+fn scrolling(css: &str) -> (Painter, FarEnd, terminus::link::NodeId) {
     let (mut painter, main) = detached();
     let (frame, scroller) = scrolling_frame(css);
     main.outbox.publish_frame(frame);
@@ -802,11 +804,11 @@ fn scrolling(css: &str) -> (Painter, FarEnd, terminus::NodeId) {
     (painter, main, scroller)
 }
 
-fn touch(painter: &mut Painter, phase: terminus::input::PointerPhase, y: f32) {
-    painter.dispatch_input(terminus::input::InputEvent::pointer(
-        terminus::Point2D::new(100.0, y),
+fn touch(painter: &mut Painter, phase: terminus::link::input::PointerPhase, y: f32) {
+    painter.dispatch_input(terminus::link::input::InputEvent::pointer(
+        terminus::link::Point2D::new(100.0, y),
         1,
-        terminus::input::PointerKind::Touch,
+        terminus::link::input::PointerKind::Touch,
         phase,
     ));
 }
@@ -819,7 +821,12 @@ fn markers(main: &mut FarEnd) -> usize {
 }
 
 /// What main takes at a marker.
-fn take(main: &FarEnd) -> (Vec<(terminus::NodeId, ScrollEntry)>, Option<FramePost>) {
+fn take(
+    main: &FarEnd,
+) -> (
+    Vec<(terminus::link::NodeId, ScrollEntry)>,
+    Option<FramePost>,
+) {
     let mut spare = rustc_hash::FxHashMap::default();
     let frame = main.scroll.take(&mut spare);
     (spare.into_iter().collect(), frame)
@@ -830,7 +837,7 @@ fn take(main: &FarEnd) -> (Vec<(terminus::NodeId, ScrollEntry)>, Option<FramePos
 /// queues. A take re-arms it.
 #[test]
 fn a_drag_queues_one_marker_until_main_takes() {
-    use terminus::input::PointerPhase::{Down, Move};
+    use terminus::link::input::PointerPhase::{Down, Move};
 
     let (mut painter, mut main, scroller) = scrolling("");
     touch(&mut painter, Down, 150.0);
@@ -868,7 +875,7 @@ fn a_drag_queues_one_marker_until_main_takes() {
 /// A drag let go without a fling comes to rest where it stands.
 #[test]
 fn a_drag_released_without_a_fling_posts_its_rest() {
-    use terminus::input::PointerPhase::{Down, Move, Up};
+    use terminus::link::input::PointerPhase::{Down, Move, Up};
 
     let (mut painter, main, scroller) = scrolling("");
     touch(&mut painter, Down, 150.0);
@@ -892,7 +899,7 @@ fn a_drag_released_without_a_fling_posts_its_rest() {
 /// A fling posts its steps without a rest, and its last one with it.
 #[test]
 fn a_spent_fling_posts_its_rest() {
-    use terminus::input::PointerPhase::{Down, Move, Up};
+    use terminus::link::input::PointerPhase::{Down, Move, Up};
 
     let (mut painter, main, scroller) = scrolling("");
     for (at, phase, y) in [
@@ -938,7 +945,7 @@ fn a_spent_fling_posts_its_rest() {
 /// edge the stretch stands past.
 #[test]
 fn a_stretched_offset_posts_clamped() {
-    use terminus::input::PointerPhase::{Down, Move};
+    use terminus::link::input::PointerPhase::{Down, Move};
 
     let (mut painter, main, scroller) = scrolling("overscroll-behavior:contain-bounce");
     touch(&mut painter, Down, 50.0);
@@ -949,7 +956,7 @@ fn a_stretched_offset_posts_clamped() {
         .expect("the drag stretched the scroller");
     assert!(live.y < 0.0, "stretched past the start, got {live:?}");
     let (entries, _) = take(&main);
-    assert_eq!(entries[0].1.offset, terminus::Vector2D::zero());
+    assert_eq!(entries[0].1.offset, terminus::link::Vector2D::zero());
 }
 
 /// An `overscroll-behavior: circular` offset is posted modulo the period
@@ -962,12 +969,12 @@ fn a_stretched_offset_posts_clamped() {
 /// clamped (`a_stretched_offset_posts_clamped`).
 #[test]
 fn a_wrapped_offset_posts_through_the_seam_unclamped() {
-    use terminus::input::PointerPhase::{Down, Move, Up};
+    use terminus::link::input::PointerPhase::{Down, Move, Up};
 
     let (mut painter, main, scroller) = scrolling("overscroll-behavior:circular");
-    painter.dispatch_input(terminus::input::InputEvent::wheel(
-        terminus::Point2D::new(100.0, 100.0),
-        terminus::Vector2D::new(0.0, 800.0),
+    painter.dispatch_input(terminus::link::input::InputEvent::wheel(
+        terminus::link::Point2D::new(100.0, 100.0),
+        terminus::link::Vector2D::new(0.0, 800.0),
     ));
     let _ = take(&main);
 
@@ -981,14 +988,17 @@ fn a_wrapped_offset_posts_through_the_seam_unclamped() {
     let (entries, _) = take(&main);
     assert_eq!(
         entries[0].1.offset,
-        terminus::Vector2D::new(0.0, 900.0),
+        terminus::link::Vector2D::new(0.0, 900.0),
         "across the seam, as the screen shows it"
     );
     // Let go at one clock reading, so without velocity: at rest where it
     // stands.
     touch(&mut painter, Up, 82.0);
     let (entries, _) = take(&main);
-    assert_eq!(entries[0].1.rest, Some(terminus::Vector2D::new(0.0, 900.0)));
+    assert_eq!(
+        entries[0].1.rest,
+        Some(terminus::link::Vector2D::new(0.0, 900.0))
+    );
 
     touch(&mut painter, Down, 190.0);
     touch(&mut painter, Move, 32.0);
@@ -1043,8 +1053,8 @@ fn a_smooth_request_on_a_circular_axis_glides_along_the_shorter_arc() {
         // when it adopts the frame.
         document.scroll_to_with(
             scroller,
-            terminus::Vector2D::new(0.0, from),
-            terminus::scroll::ScrollBehavior::Instant,
+            terminus::link::Vector2D::new(0.0, from),
+            terminus::link::scroll::ScrollBehavior::Instant,
         );
         main.outbox.publish_frame(document.commit());
         painter.poll_link();
@@ -1056,12 +1066,16 @@ fn a_smooth_request_on_a_circular_axis_glides_along_the_shorter_arc() {
             .scroll_intents()
             .offset_for(scroller)
             .unwrap_or(slot.offset);
-        assert_eq!(standing, terminus::Vector2D::new(0.0, from), "{label}");
+        assert_eq!(
+            standing,
+            terminus::link::Vector2D::new(0.0, from),
+            "{label}"
+        );
 
         document.scroll_to_with(
             scroller,
-            terminus::Vector2D::new(0.0, to),
-            terminus::scroll::ScrollBehavior::Smooth,
+            terminus::link::Vector2D::new(0.0, to),
+            terminus::link::scroll::ScrollBehavior::Smooth,
         );
         main.outbox.publish_frame(document.commit());
         painter.poll_link();
@@ -1098,7 +1112,7 @@ fn a_smooth_request_on_a_circular_axis_glides_along_the_shorter_arc() {
         assert!(travelled, "{label}: the glide crossed the seam");
         assert_eq!(
             rested,
-            Some(terminus::Vector2D::new(0.0, to)),
+            Some(terminus::link::Vector2D::new(0.0, to)),
             "{label}: at rest"
         );
     }
@@ -1116,7 +1130,7 @@ fn a_smooth_request_on_a_circular_axis_glides_along_the_shorter_arc() {
 /// between 0 and 858, and glide the wrong way round.
 #[test]
 fn a_rebase_wraps_a_held_offset_and_its_drag_origin_together() {
-    use terminus::input::PointerPhase::{Down, Move, Up};
+    use terminus::link::input::PointerPhase::{Down, Move, Up};
 
     let mut document = document();
     let root = document.document_element().id();
@@ -1144,7 +1158,7 @@ fn a_rebase_wraps_a_held_offset_and_its_drag_origin_together() {
     touch(&mut painter, Down, 30.0);
     touch(&mut painter, Move, 180.0);
     let live = painter.scroll_intents().offset_for(scroller);
-    assert_eq!(live, Some(terminus::Vector2D::new(0.0, -142.0)));
+    assert_eq!(live, Some(terminus::link::Vector2D::new(0.0, -142.0)));
 
     document.set_inline_style(root, "background-color: teal");
     let frame = document.commit();
@@ -1153,13 +1167,13 @@ fn a_rebase_wraps_a_held_offset_and_its_drag_origin_together() {
     painter.scroll_intents_mut().rebase(&frame, 0.0);
     assert_eq!(
         painter.scroll_intents().offset_for(scroller),
-        Some(terminus::Vector2D::new(0.0, 858.0)),
+        Some(terminus::link::Vector2D::new(0.0, 858.0)),
         "normalized into the period"
     );
     let origins: Vec<_> = painter.scroll_intents().drag_origins(scroller).collect();
     assert_eq!(
         origins,
-        [terminus::Vector2D::new(0.0, 1000.0)],
+        [terminus::link::Vector2D::new(0.0, 1000.0)],
         "the origin moved with it"
     );
 
@@ -1211,7 +1225,7 @@ fn frame_posts_coalesce_to_the_latest_clock_and_greatest_sequence() {
 /// marker, so its listener never sees a document older than its pass.
 #[test]
 fn a_dispatch_in_a_scrolling_pass_follows_the_marker() {
-    use terminus::painter::{EmitEvent, InputDecision, InputDecisions};
+    use terminus::link::painter::{EmitEvent, InputDecision, InputDecisions};
 
     use super::TAP_EVENT;
 
@@ -1223,7 +1237,7 @@ fn a_dispatch_in_a_scrolling_pass_follows_the_marker() {
     decisions.push(InputDecision::Scroll {
         pointer: None,
         from: scroller,
-        delta: terminus::Vector2D::new(0.0, 30.0),
+        delta: terminus::link::Vector2D::new(0.0, 30.0),
     });
     decisions.push(InputDecision::Emit(EmitEvent {
         name: TAP_EVENT,
@@ -1239,7 +1253,7 @@ fn a_dispatch_in_a_scrolling_pass_follows_the_marker() {
     ));
     assert_eq!(
         take(&main).0[0].1.offset,
-        terminus::Vector2D::new(0.0, 30.0)
+        terminus::link::Vector2D::new(0.0, 30.0)
     );
 }
 
@@ -1249,7 +1263,7 @@ fn a_dispatch_in_a_scrolling_pass_follows_the_marker() {
 /// publishes the move ahead of it.
 #[test]
 fn a_vsync_follows_the_marker_of_its_pass() {
-    use terminus::painter::{InputDecision, InputDecisions};
+    use terminus::link::painter::{InputDecision, InputDecisions};
 
     let (mut painter, mut main, scroller) = scrolling("");
     main.seat.frame_demand.borrow_mut().set(None, true);
@@ -1258,7 +1272,7 @@ fn a_vsync_follows_the_marker_of_its_pass() {
     decisions.push(InputDecision::Scroll {
         pointer: None,
         from: scroller,
-        delta: terminus::Vector2D::new(0.0, 30.0),
+        delta: terminus::link::Vector2D::new(0.0, 30.0),
     });
     painter.execute_decisions(&mut decisions, Some(&frame), 0.5);
     assert!(main.commands.try_recv().is_err(), "nothing sent yet");
@@ -1267,7 +1281,7 @@ fn a_vsync_follows_the_marker_of_its_pass() {
     assert!(matches!(main.commands.try_recv(), Ok(ToMain::Vsync(_))));
     assert_eq!(
         take(&main).0[0].1.offset,
-        terminus::Vector2D::new(0.0, 30.0)
+        terminus::link::Vector2D::new(0.0, 30.0)
     );
 }
 
@@ -1276,7 +1290,7 @@ fn a_vsync_follows_the_marker_of_its_pass() {
 /// applied them, so the acknowledgement implies the tap below.
 #[test]
 fn a_frame_post_is_fenced_behind_every_command_sent_before_it() {
-    use terminus::painter::{EmitEvent, InputDecision, InputDecisions};
+    use terminus::link::painter::{EmitEvent, InputDecision, InputDecisions};
 
     use super::TAP_EVENT;
 
@@ -1288,7 +1302,7 @@ fn a_frame_post_is_fenced_behind_every_command_sent_before_it() {
     decisions.push(InputDecision::Scroll {
         pointer: None,
         from: scroller,
-        delta: terminus::Vector2D::new(0.0, 30.0),
+        delta: terminus::link::Vector2D::new(0.0, 30.0),
     });
     decisions.push(InputDecision::Emit(EmitEvent {
         name: TAP_EVENT,
@@ -1351,7 +1365,7 @@ fn a_frame_post_merge_keeps_the_greatest_sequence() {
 /// touched again before main takes still reports where it came to rest.
 #[test]
 fn an_untaken_rest_survives_a_later_post() {
-    use terminus::input::PointerPhase::{Down, Move, Up};
+    use terminus::link::input::PointerPhase::{Down, Move, Up};
 
     let (mut painter, main, scroller) = scrolling("");
     touch(&mut painter, Down, 150.0);
@@ -1397,13 +1411,16 @@ fn a_bounce_back_a_commit_ends_posts_its_rest() {
     let frame = painter.frame().cloned().expect("a frame is adopted");
 
     // Stretched 40px past the end, and let go: the bounce back starts.
-    let stretched = terminus::Vector2D::new(0.0, 840.0);
+    let stretched = terminus::link::Vector2D::new(0.0, 840.0);
     painter.scroll_intents_mut().write(scroller, stretched);
     painter.scroll_intents_mut().start_bounce_backs(&frame, 0.0);
     assert!(painter.scroll_intents().is_bouncing(scroller));
     painter.publish_scroll(0.0, None);
     let (entries, _) = take(&main);
-    assert_eq!(entries[0].1.offset, terminus::Vector2D::new(0.0, 800.0));
+    assert_eq!(
+        entries[0].1.offset,
+        terminus::link::Vector2D::new(0.0, 800.0)
+    );
     assert_eq!(entries[0].1.rest, None, "still bouncing");
 
     document.set_inline_style(filler, "flex-shrink:0;width:200px;height:1200px");
@@ -1451,17 +1468,17 @@ fn a_smooth_request_posts_its_serial_and_lands_at_rest() {
     painter.clock_mut().pin(0.0);
 
     // A wheel before the request: its post names no request.
-    painter.dispatch_input(terminus::input::InputEvent::wheel(
-        terminus::Point2D::new(100.0, 100.0),
-        terminus::Vector2D::new(0.0, 30.0),
+    painter.dispatch_input(terminus::link::input::InputEvent::wheel(
+        terminus::link::Point2D::new(100.0, 100.0),
+        terminus::link::Vector2D::new(0.0, 30.0),
     ));
     let (entries, _) = take(&main);
     assert_eq!(entries[0].1.request, None);
 
     document.scroll_to_with(
         scroller,
-        terminus::Vector2D::new(0.0, 300.0),
-        terminus::scroll::ScrollBehavior::Smooth,
+        terminus::link::Vector2D::new(0.0, 300.0),
+        terminus::link::scroll::ScrollBehavior::Smooth,
     );
     let serial = document
         .pending_scroll_request(scroller)
@@ -1478,7 +1495,7 @@ fn a_smooth_request_posts_its_serial_and_lands_at_rest() {
         [(
             scroller,
             ScrollEntry {
-                offset: terminus::Vector2D::new(0.0, 30.0),
+                offset: terminus::link::Vector2D::new(0.0, 30.0),
                 at: 0.0,
                 rest: None,
                 request: Some(serial),
@@ -1497,7 +1514,11 @@ fn a_smooth_request_posts_its_serial_and_lands_at_rest() {
         };
         assert_eq!(entry.request, Some(serial));
         if let Some(rest) = entry.rest {
-            assert_eq!(rest, terminus::Vector2D::new(0.0, 300.0), "landed exactly");
+            assert_eq!(
+                rest,
+                terminus::link::Vector2D::new(0.0, 300.0),
+                "landed exactly"
+            );
             assert!(!painter.scroll_intents().is_animating());
             return;
         }
@@ -1510,7 +1531,7 @@ fn a_smooth_request_posts_its_serial_and_lands_at_rest() {
 /// page as tall as the scrollport and snapping at its start, the scroller
 /// carrying `css`: positions 0, 200, 400, 600 and 800, and one scrollport
 /// apart at any other height.
-fn paged(css: &str) -> (LynxDocument, terminus::NodeId) {
+fn paged(css: &str) -> (LynxDocument, terminus::link::NodeId) {
     let mut document = document();
     let root = document.document_element().id();
     let scroller = document.create_element("view", ());
@@ -1545,7 +1566,7 @@ fn adopt(painter: &mut Painter, main: &FarEnd, document: &mut LynxDocument) {
 }
 
 /// Where the painter shows `node`: its live offset, else the committed one.
-fn shown(painter: &Painter, node: terminus::NodeId) -> terminus::Vector2D<f32> {
+fn shown(painter: &Painter, node: terminus::link::NodeId) -> terminus::link::Vector2D<f32> {
     painter
         .scroll_intents()
         .offset_for(node)
@@ -1556,9 +1577,9 @@ fn shown(painter: &Painter, node: terminus::NodeId) -> terminus::Vector2D<f32> {
 }
 
 fn wheel(painter: &mut Painter, dy: f32) {
-    painter.dispatch_input(terminus::input::InputEvent::wheel(
-        terminus::Point2D::new(100.0, 100.0),
-        terminus::Vector2D::new(0.0, dy),
+    painter.dispatch_input(terminus::link::input::InputEvent::wheel(
+        terminus::link::Point2D::new(100.0, 100.0),
+        terminus::link::Vector2D::new(0.0, dy),
     ));
 }
 
@@ -1580,7 +1601,7 @@ fn a_resized_scroller_stays_on_the_page_the_painter_showed() {
     wheel(&mut painter, 30.0);
     assert_eq!(
         shown(&painter, scroller),
-        terminus::Vector2D::new(0.0, 400.0)
+        terminus::link::Vector2D::new(0.0, 400.0)
     );
     // The wheel gesture's quiet interval ends: the container is at rest.
     let frame = painter.frame().cloned().expect("a frame is adopted");
@@ -1591,7 +1612,7 @@ fn a_resized_scroller_stays_on_the_page_the_painter_showed() {
     adopt(&mut painter, &main, &mut document);
     assert_eq!(
         shown(&painter, scroller),
-        terminus::Vector2D::new(0.0, 600.0)
+        terminus::link::Vector2D::new(0.0, 600.0)
     );
     assert!(
         !painter.scroll_intents().is_gliding(scroller),
@@ -1604,9 +1625,9 @@ fn a_resized_scroller_stays_on_the_page_the_painter_showed() {
         [(
             scroller,
             ScrollEntry {
-                offset: terminus::Vector2D::new(0.0, 600.0),
+                offset: terminus::link::Vector2D::new(0.0, 600.0),
                 at: 0.0,
-                rest: Some(terminus::Vector2D::new(0.0, 600.0)),
+                rest: Some(terminus::link::Vector2D::new(0.0, 600.0)),
                 request: None,
             }
         )],
@@ -1619,7 +1640,7 @@ fn a_resized_scroller_stays_on_the_page_the_painter_showed() {
     adopt(&mut painter, &main, &mut document);
     assert_eq!(
         shown(&painter, scroller),
-        terminus::Vector2D::new(0.0, 500.0)
+        terminus::link::Vector2D::new(0.0, 500.0)
     );
 }
 
@@ -1642,7 +1663,7 @@ fn a_resized_scroller_agrees_with_the_document_that_followed_it() {
     adopt(&mut painter, &main, &mut document);
     let frame = painter.frame().cloned().expect("a frame is adopted");
     let slot = &frame.scroll_slots()[frame.slot_of(scroller).expect("a slot") as usize];
-    assert_eq!(slot.offset, terminus::Vector2D::new(0.0, 600.0));
+    assert_eq!(slot.offset, terminus::link::Vector2D::new(0.0, 600.0));
     assert_eq!(shown(&painter, scroller), slot.offset);
 }
 
@@ -1662,14 +1683,14 @@ fn a_resized_circular_scroller_stays_on_the_page_the_painter_showed() {
     }
     assert_eq!(
         shown(&painter, scroller),
-        terminus::Vector2D::new(0.0, 1200.0)
+        terminus::link::Vector2D::new(0.0, 1200.0)
     );
 
     document.set_inline_style(scroller, &paged_style(circular, 300));
     adopt(&mut painter, &main, &mut document);
     assert_eq!(
         shown(&painter, scroller),
-        terminus::Vector2D::new(0.0, 300.0)
+        terminus::link::Vector2D::new(0.0, 300.0)
     );
 }
 
@@ -1689,15 +1710,15 @@ fn a_proximity_scroller_follows_its_area_only_when_it_stood_on_one() {
     adopt(&mut painter, &main, &mut document);
     painter
         .scroll_intents_mut()
-        .write(scroller, terminus::Vector2D::new(0.0, 400.0));
+        .write(scroller, terminus::link::Vector2D::new(0.0, 400.0));
     document.set_inline_style(scroller, &paged_style(proximity, 300));
     adopt(&mut painter, &main, &mut document);
     assert_eq!(
         shown(&painter, scroller),
-        terminus::Vector2D::new(0.0, 600.0)
+        terminus::link::Vector2D::new(0.0, 600.0)
     );
 
-    let between = terminus::Vector2D::new(0.0, 750.0);
+    let between = terminus::link::Vector2D::new(0.0, 750.0);
     painter.scroll_intents_mut().write(scroller, between);
     document.set_inline_style(scroller, &paged_style(proximity, 320));
     adopt(&mut painter, &main, &mut document);
@@ -1713,7 +1734,7 @@ fn a_proximity_scroller_follows_its_area_only_when_it_stood_on_one() {
 /// position of the last frame.
 #[test]
 fn a_commit_moves_no_scroller_a_drag_or_a_glide_has() {
-    use terminus::input::PointerPhase::{Down, Move, Up};
+    use terminus::link::input::PointerPhase::{Down, Move, Up};
 
     let (mut document, scroller) = paged("");
     let (mut painter, main) = detached();
@@ -1726,10 +1747,10 @@ fn a_commit_moves_no_scroller_a_drag_or_a_glide_has() {
     touch(&mut painter, Move, 120.0);
     assert_eq!(
         shown(&painter, scroller),
-        terminus::Vector2D::new(0.0, 422.0)
+        terminus::link::Vector2D::new(0.0, 422.0)
     );
     touch(&mut painter, Move, 142.0);
-    let held = terminus::Vector2D::new(0.0, 400.0);
+    let held = terminus::link::Vector2D::new(0.0, 400.0);
     assert_eq!(shown(&painter, scroller), held);
     document.set_inline_style(scroller, &paged_style("", 300));
     adopt(&mut painter, &main, &mut document);
@@ -1761,7 +1782,7 @@ fn a_commit_moves_no_scroller_a_drag_or_a_glide_has() {
 
 /// A document holding one 200px column scroller of `content` px at the
 /// origin, with the scroller and its filler: a range of `content - 200`.
-fn auto_scrolled(content: u32) -> (LynxDocument, terminus::NodeId, terminus::NodeId) {
+fn auto_scrolled(content: u32) -> (LynxDocument, terminus::link::NodeId, terminus::link::NodeId) {
     let mut document = document();
     let root = document.document_element().id();
     let scroller = document.create_element("view", ());
@@ -1823,7 +1844,7 @@ fn an_auto_scroll_moves_at_its_rate_and_ends_on_its_edge() {
         [(
             scroller,
             ScrollEntry {
-                offset: terminus::Vector2D::zero(),
+                offset: terminus::link::Vector2D::zero(),
                 at: 0.0,
                 rest: None,
                 request: Some(serial),
@@ -1845,20 +1866,23 @@ fn an_auto_scroll_moves_at_its_rate_and_ends_on_its_edge() {
     let now = tick_at(&mut painter, now, 60.0, 60);
     assert_eq!(
         shown(&painter, scroller),
-        terminus::Vector2D::new(0.0, 800.0),
+        terminus::link::Vector2D::new(0.0, 800.0),
         "on the edge exactly"
     );
     assert!(!painter.scroll_intents().has_auto_scroll(scroller), "ended");
     assert!(!painter.scroll_intents().is_auto_scrolling(&frame));
     painter.publish_scroll(now, None);
     let (entries, _) = take(&main);
-    assert_eq!(entries[0].1.rest, Some(terminus::Vector2D::new(0.0, 800.0)));
+    assert_eq!(
+        entries[0].1.rest,
+        Some(terminus::link::Vector2D::new(0.0, 800.0))
+    );
 
     // Back the other way, to the start edge.
     document.auto_scroll(scroller, -1200.0, false, true);
     adopt(&mut painter, &main, &mut document);
     tick_at(&mut painter, now, 60.0, 60);
-    assert_eq!(shown(&painter, scroller), terminus::Vector2D::zero());
+    assert_eq!(shown(&painter, scroller), terminus::link::Vector2D::zero());
     assert!(!painter.scroll_intents().has_auto_scroll(scroller));
 }
 
@@ -1866,7 +1890,7 @@ fn an_auto_scroll_moves_at_its_rate_and_ends_on_its_edge() {
 /// and at least one physical pixel: a 120 Hz display writes every second
 /// frame, a slow rate once per pixel, and neither loses any travel.
 ///
-/// [`AUTO_SCROLL_MIN_INTERVAL_SECONDS`]: terminus::painter::AUTO_SCROLL_MIN_INTERVAL_SECONDS
+/// [`AUTO_SCROLL_MIN_INTERVAL_SECONDS`]: terminus::link::painter::AUTO_SCROLL_MIN_INTERVAL_SECONDS
 #[test]
 fn an_auto_scroll_writes_no_more_often_than_its_interval_and_a_pixel() {
     let writes = |rate: f32, hz: f64, ticks: u32| {
@@ -1928,13 +1952,13 @@ fn an_auto_scroll_that_does_not_stop_waits_at_its_edge_for_a_longer_range() {
     document.auto_scroll(scroller, 600.0, false, false);
     document.scroll_to_with(
         scroller,
-        terminus::Vector2D::new(0.0, 700.0),
-        terminus::scroll::ScrollBehavior::Instant,
+        terminus::link::Vector2D::new(0.0, 700.0),
+        terminus::link::scroll::ScrollBehavior::Instant,
     );
     adopt(&mut painter, &main, &mut document);
     assert_eq!(
         shown(&painter, scroller),
-        terminus::Vector2D::new(0.0, 700.0),
+        terminus::link::Vector2D::new(0.0, 700.0),
         "the scroll request of the same turn was carried out"
     );
     assert!(
@@ -1946,7 +1970,7 @@ fn an_auto_scroll_that_does_not_stop_waits_at_its_edge_for_a_longer_range() {
     let frame = painter.frame().cloned().expect("a frame is adopted");
     assert_eq!(
         shown(&painter, scroller),
-        terminus::Vector2D::new(0.0, 800.0)
+        terminus::link::Vector2D::new(0.0, 800.0)
     );
     assert!(painter.scroll_intents().has_auto_scroll(scroller), "kept");
     assert!(
@@ -1957,7 +1981,7 @@ fn an_auto_scroll_that_does_not_stop_waits_at_its_edge_for_a_longer_range() {
     let (entries, _) = take(&main);
     assert_eq!(
         entries[0].1.rest,
-        Some(terminus::Vector2D::new(0.0, 800.0)),
+        Some(terminus::link::Vector2D::new(0.0, 800.0)),
         "at rest on the edge"
     );
 
@@ -1969,7 +1993,7 @@ fn an_auto_scroll_that_does_not_stop_waits_at_its_edge_for_a_longer_range() {
     let now = tick_at(&mut painter, now + 10.0, 60.0, 1);
     assert_eq!(
         shown(&painter, scroller),
-        terminus::Vector2D::new(0.0, 800.0),
+        terminus::link::Vector2D::new(0.0, 800.0),
         "the wait is not travelled"
     );
     tick_at(&mut painter, now, 60.0, 6);
@@ -1982,7 +2006,7 @@ fn an_auto_scroll_that_does_not_stop_waits_at_its_edge_for_a_longer_range() {
 /// finger left the container, the hold not travelled.
 #[test]
 fn an_auto_scroll_yields_to_a_drag_and_goes_on_after_it() {
-    use terminus::input::PointerPhase::{Down, Move, Up};
+    use terminus::link::input::PointerPhase::{Down, Move, Up};
 
     let (mut document, scroller, _) = auto_scrolled(1000);
     let (mut painter, main) = detached();
@@ -2037,8 +2061,8 @@ fn a_scroll_request_does_not_end_an_auto_scroll_and_a_stop_does() {
 
     document.scroll_to_with(
         scroller,
-        terminus::Vector2D::new(0.0, 500.0),
-        terminus::scroll::ScrollBehavior::Smooth,
+        terminus::link::Vector2D::new(0.0, 500.0),
+        terminus::link::scroll::ScrollBehavior::Smooth,
     );
     // Adopted at the clock the ticks run on, so the glide starts there.
     main.outbox.publish_frame(document.commit());
@@ -2061,7 +2085,7 @@ fn a_scroll_request_does_not_end_an_auto_scroll_and_a_stop_does() {
     }
     assert_eq!(
         shown(&painter, scroller),
-        terminus::Vector2D::new(0.0, 500.0)
+        terminus::link::Vector2D::new(0.0, 500.0)
     );
     assert!(painter.scroll_intents().is_auto_scrolling(&frame));
     let now = tick_at(&mut painter, now, 60.0, 60);
@@ -2109,7 +2133,7 @@ fn a_commit_does_not_snap_an_auto_scrolling_container() {
     adopt(&mut painter, &main, &mut document);
     assert_eq!(
         shown(&painter, scroller),
-        terminus::Vector2D::new(0.0, 0.0),
+        terminus::link::Vector2D::new(0.0, 0.0),
         "stopped, it settles on the nearest page"
     );
 }
@@ -2119,8 +2143,8 @@ fn a_commit_does_not_snap_an_auto_scrolling_container() {
 /// off, the next one is carried out like any other request.
 #[test]
 fn a_request_that_yields_to_a_pointer_is_dropped_under_a_finger() {
-    use terminus::input::PointerPhase::{Down, Move, Up};
-    use terminus::scroll::ScrollBehavior::{Instant, Smooth};
+    use terminus::link::input::PointerPhase::{Down, Move, Up};
+    use terminus::link::scroll::ScrollBehavior::{Instant, Smooth};
 
     let (mut document, scroller, _) = auto_scrolled(1000);
     let (mut painter, main) = detached();
@@ -2135,7 +2159,7 @@ fn a_request_that_yields_to_a_pointer_is_dropped_under_a_finger() {
     for behavior in [Smooth, Instant] {
         assert!(document.scroll_to_yielding(
             scroller,
-            terminus::Vector2D::new(0.0, 400.0),
+            terminus::link::Vector2D::new(0.0, 400.0),
             behavior
         ));
         let serial = document
@@ -2171,14 +2195,22 @@ fn a_request_that_yields_to_a_pointer_is_dropped_under_a_finger() {
     // Every step at one clock reading: no velocity to fling with.
     touch(&mut painter, Up, 120.0);
     assert!(!painter.scroll_intents().is_held(scroller));
-    assert!(document.scroll_to_yielding(scroller, terminus::Vector2D::new(0.0, 400.0), Instant));
+    assert!(document.scroll_to_yielding(
+        scroller,
+        terminus::link::Vector2D::new(0.0, 400.0),
+        Instant
+    ));
     adopt(&mut painter, &main, &mut document);
     assert_eq!(
         shown(&painter, scroller),
-        terminus::Vector2D::new(0.0, 400.0),
+        terminus::link::Vector2D::new(0.0, 400.0),
         "free, it is carried out"
     );
-    assert!(document.scroll_to_yielding(scroller, terminus::Vector2D::new(0.0, 600.0), Smooth));
+    assert!(document.scroll_to_yielding(
+        scroller,
+        terminus::link::Vector2D::new(0.0, 600.0),
+        Smooth
+    ));
     adopt(&mut painter, &main, &mut document);
     assert!(painter.scroll_intents().is_gliding(scroller), "and glides");
 }
@@ -2201,7 +2233,7 @@ fn adopt_at(painter: &mut Painter, main: &FarEnd, document: &mut LynxDocument, n
 /// posted as handled.
 #[test]
 fn a_repeated_smooth_request_to_where_the_container_glides_keeps_the_glide() {
-    use terminus::scroll::ScrollBehavior::Smooth;
+    use terminus::link::scroll::ScrollBehavior::Smooth;
 
     const HZ: f64 = 60.0;
     const FRAMES: u32 = 6;
@@ -2209,14 +2241,18 @@ fn a_repeated_smooth_request_to_where_the_container_glides_keeps_the_glide() {
         let (mut document, scroller, _) = auto_scrolled(1000);
         let (mut painter, main) = detached();
         adopt(&mut painter, &main, &mut document);
-        assert!(document.scroll_to_yielding(scroller, terminus::Vector2D::new(0.0, 400.0), Smooth));
+        assert!(document.scroll_to_yielding(
+            scroller,
+            terminus::link::Vector2D::new(0.0, 400.0),
+            Smooth
+        ));
         adopt(&mut painter, &main, &mut document);
         let now = tick_at(&mut painter, 0.0, HZ, FRAMES);
         let midway = shown(&painter, scroller);
         if repeat {
             assert!(document.scroll_to_yielding(
                 scroller,
-                terminus::Vector2D::new(0.0, 400.0),
+                terminus::link::Vector2D::new(0.0, 400.0),
                 Smooth
             ));
             let serial = document
@@ -2245,20 +2281,20 @@ fn a_repeated_smooth_request_to_where_the_container_glides_keeps_the_glide() {
 }
 
 /// A wheel step posts its container moving, not at rest: the wheel gesture
-/// ends only once [`terminus::painter::WHEEL_REST_SECONDS`] pass with no
+/// ends only once [`terminus::link::painter::WHEEL_REST_SECONDS`] pass with no
 /// further step, and a step inside that interval restarts it. The quiet
 /// interval owes frames while it runs, and the tick that ends it posts the
 /// container at rest.
 #[test]
 fn a_wheel_rests_only_after_a_quiet_interval() {
-    use terminus::painter::WHEEL_REST_SECONDS;
+    use terminus::link::painter::WHEEL_REST_SECONDS;
 
     let (mut painter, main, scroller) = scrolling("");
     let wheel = |painter: &mut Painter, at: f64| {
         painter.clock_mut().pin(at);
-        painter.dispatch_input(terminus::input::InputEvent::wheel(
-            terminus::Point2D::new(100.0, 100.0),
-            terminus::Vector2D::new(0.0, 20.0),
+        painter.dispatch_input(terminus::link::input::InputEvent::wheel(
+            terminus::link::Point2D::new(100.0, 100.0),
+            terminus::link::Vector2D::new(0.0, 20.0),
         ));
     };
     let rest_of = |main: &FarEnd| {
@@ -2287,14 +2323,14 @@ fn a_wheel_rests_only_after_a_quiet_interval() {
     tick(&mut painter, 0.061 + WHEEL_REST_SECONDS);
     assert_eq!(
         rest_of(&main),
-        Some(Some(terminus::Vector2D::new(0.0, 40.0))),
+        Some(Some(terminus::link::Vector2D::new(0.0, 40.0))),
         "the quiet interval ended the gesture at rest"
     );
     assert!(!painter.is_animating());
 }
 
 /// The store contract the painter's per-commit pixels rest on, read through
-/// `terminus::FrameImages` as the painter reads it. Here rather than beside
+/// `terminus::link::FrameImages` as the painter reads it. Here rather than beside
 /// the painter's image table in `terminus`, whose own unit-test build sees
 /// `prime-radiant`'s store implement a second copy of that trait.
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -2306,7 +2342,7 @@ mod frame_images {
     /// uploads and two atlas slots.
     #[test]
     fn every_read_of_one_image_keeps_the_same_buffer_identity() {
-        use terminus::FrameImages as _;
+        use terminus::link::FrameImages as _;
 
         let images = prime_radiant::TestImages::new();
         let pixels = prime_radiant::rgba8(1, 1, vec![1, 2, 3, 255]);
@@ -2314,10 +2350,10 @@ mod frame_images {
         images.insert("app:///pixel.png", pixels);
 
         let first = images
-            .read("app:///pixel.png", terminus::ImageSizeHint::UNBOUNDED)
+            .read("app:///pixel.png", terminus::link::ImageSizeHint::UNBOUNDED)
             .expect("a published image reads back");
         let second = images
-            .read("app:///pixel.png", terminus::ImageSizeHint::UNBOUNDED)
+            .read("app:///pixel.png", terminus::link::ImageSizeHint::UNBOUNDED)
             .expect("and reads back again");
         assert_eq!(
             first.data.id(),
@@ -2335,12 +2371,15 @@ mod frame_images {
     /// standing in for another image.
     #[test]
     fn an_unpublished_source_reads_as_nothing() {
-        use terminus::FrameImages as _;
+        use terminus::link::FrameImages as _;
 
         let images = prime_radiant::TestImages::new();
         assert!(
             images
-                .read("app:///missing.png", terminus::ImageSizeHint::UNBOUNDED)
+                .read(
+                    "app:///missing.png",
+                    terminus::link::ImageSizeHint::UNBOUNDED
+                )
                 .is_none()
         );
     }

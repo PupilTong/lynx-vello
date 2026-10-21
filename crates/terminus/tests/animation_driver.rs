@@ -9,7 +9,7 @@ use euclid::default::Vector2D;
 
 /// A document with one animated `view`, laid out once so the animation has
 /// started but not yet been ticked.
-fn animated(css: &str, spec: &str) -> (Doc, terminus::NodeId) {
+fn animated(css: &str, spec: &str) -> (Doc, terminus::link::NodeId) {
     let mut doc = Doc::with_css(css);
     let root = doc.root;
     let node = doc.el(root, spec);
@@ -20,7 +20,7 @@ fn animated(css: &str, spec: &str) -> (Doc, terminus::NodeId) {
 /// The element's laid-out border box, as the layout pass left it.
 fn box_of(
     doc: &Doc,
-    id: terminus::NodeId,
+    id: terminus::link::NodeId,
 ) -> (seldon::geometry::Point<f32>, seldon::geometry::Size<f32>) {
     let layout = doc.dom.rounded_layout(id).expect("the element is laid out");
     (layout.location, layout.size)
@@ -52,7 +52,7 @@ fn an_animated_font_size_remeasures_the_text_it_scales() {
     doc.define_lynx_text("text");
     assert_eq!(
         doc.dom
-            .register_fonts(terminus::FontBlob::from_static(AHEM)),
+            .register_fonts(terminus::link::FontBlob::from_static(AHEM)),
         1,
         "Ahem gives every glyph an exact one-em advance"
     );
@@ -341,7 +341,7 @@ fn an_element_with_no_animation_costs_one_bool() {
     assert!(!doc.dom.has_active_animations());
     assert_eq!(
         doc.dom.advance_animations(1.0),
-        terminus::AnimationTick::default()
+        terminus::link::AnimationTick::default()
     );
 }
 
@@ -511,7 +511,7 @@ fn a_held_fill_value_costs_no_frames() {
     );
     assert_eq!(
         doc.dom.advance_animations(12.0),
-        terminus::AnimationTick::default(),
+        terminus::link::AnimationTick::default(),
         "and later frames do no work at all"
     );
 }
@@ -629,8 +629,8 @@ const SKIPPING: &str = "
 /// "was never created".
 struct Skipping {
     doc: Doc,
-    boxed: terminus::NodeId,
-    mover: terminus::NodeId,
+    boxed: terminus::link::NodeId,
+    mover: terminus::link::NodeId,
 }
 
 impl Skipping {
@@ -864,7 +864,8 @@ fn an_animation_in_a_scrolled_away_auto_row_freezes_and_resumes() {
     );
     let root = doc.root;
     let scroller = doc.el(root, "view.scroller");
-    let rows: Vec<terminus::NodeId> = (0..ROWS).map(|_| doc.el(scroller, "view.row")).collect();
+    let rows: Vec<terminus::link::NodeId> =
+        (0..ROWS).map(|_| doc.el(scroller, "view.row")).collect();
     let mover = doc.el(rows[0], "view.mover");
 
     doc.dom.render();
@@ -927,7 +928,7 @@ fn a_revealed_animation_exports_once_its_start_times_are_carried() {
     );
     let root = doc.root;
     let scroller = doc.el(root, "view.scroller");
-    let rows: Vec<terminus::NodeId> = (0..20).map(|_| doc.el(scroller, "view.row")).collect();
+    let rows: Vec<terminus::link::NodeId> = (0..20).map(|_| doc.el(scroller, "view.row")).collect();
     doc.el(rows[0], "view.mover");
 
     doc.dom.render();
@@ -972,7 +973,7 @@ const SCROLL_DRIVEN: &str = "
 
 /// A 200px scroller over 1200px of content — a scroll timeline of 1000px —
 /// holding a mover carrying `classes`, then the filler.
-fn scroll_driven(classes: &str) -> (Doc, terminus::NodeId, terminus::NodeId) {
+fn scroll_driven(classes: &str) -> (Doc, terminus::link::NodeId, terminus::link::NodeId) {
     let mut doc = Doc::with_css(SCROLL_DRIVEN);
     let root = doc.root;
     let scroller = doc.el(root, "view.scroller");
@@ -983,7 +984,7 @@ fn scroll_driven(classes: &str) -> (Doc, terminus::NodeId, terminus::NodeId) {
 }
 
 /// Moves the scroller the way an adopted painter scroll does.
-fn scroll(doc: &mut Doc, scroller: terminus::NodeId, y: f32) {
+fn scroll(doc: &mut Doc, scroller: terminus::link::NodeId, y: f32) {
     doc.dom.scroll_to(scroller, Vector2D::new(0.0, y));
     doc.dom.advance_scroll_timelines(&[scroller]);
 }

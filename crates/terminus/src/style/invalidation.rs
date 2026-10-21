@@ -1207,7 +1207,9 @@ mod tests {
         let mut doc = Doc::with_css("view { color: rgb(0, 0, 255) }");
         let root = doc.root;
         let host = doc.el(root, "host");
-        let shadow = doc.dom.attach_shadow(host, crate::ShadowRootMode::Open);
+        let shadow = doc
+            .dom
+            .attach_shadow(host, crate::tree::shadow::ShadowRootMode::Open);
         doc.dom
             .add_shadow_stylesheet(shadow, "view[data-on] { color: rgb(255, 0, 0) }");
         let outside = doc.el(root, "view");
@@ -1228,7 +1230,9 @@ mod tests {
         let mut doc = Doc::with_css("view { color: rgb(0, 0, 255) }");
         let root = doc.root;
         let host = doc.el(root, "host");
-        let shadow = doc.dom.attach_shadow(host, crate::ShadowRootMode::Open);
+        let shadow = doc
+            .dom
+            .attach_shadow(host, crate::tree::shadow::ShadowRootMode::Open);
         doc.dom
             .add_shadow_stylesheet(shadow, "view[data-on] { color: rgb(255, 0, 0) }");
         let inside = doc.el(shadow, "view");
@@ -1250,7 +1254,9 @@ mod tests {
         let mut doc = Doc::with_css("host { color: rgb(0, 0, 255) }");
         let root = doc.root;
         let host = doc.el(root, "host");
-        let shadow = doc.dom.attach_shadow(host, crate::ShadowRootMode::Open);
+        let shadow = doc
+            .dom
+            .attach_shadow(host, crate::tree::shadow::ShadowRootMode::Open);
         doc.dom
             .add_shadow_stylesheet(shadow, ":host([data-on]) { color: rgb(255, 0, 0) }");
         doc.dom.layout();
@@ -1270,7 +1276,9 @@ mod tests {
         let mut doc = Doc::with_css("view { color: rgb(0, 0, 255) }");
         let root = doc.root;
         let host = doc.el(root, "host");
-        let shadow = doc.dom.attach_shadow(host, crate::ShadowRootMode::Open);
+        let shadow = doc
+            .dom
+            .attach_shadow(host, crate::tree::shadow::ShadowRootMode::Open);
         doc.el(shadow, "slot");
         doc.dom
             .add_shadow_stylesheet(shadow, "::slotted([data-on]) { color: rgb(255, 0, 0) }");

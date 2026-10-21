@@ -12,7 +12,7 @@
 //! (`crates/bobcat-core/src/paint/inertia.rs`). The pager's component
 //! ([`Viewpager`]) answers the `selectTab` method ([`select_tab`]), which
 //! the runtime's `callElementMethod` reaches through
-//! [`terminus::Document::invoke_element_method`], and fires the pager's events
+//! [`terminus::link::Document::invoke_element_method`], and fires the pager's events
 //! (below); nothing here reacts to an attribute outside the cascade, and
 //! the item tags have no component.
 //!
@@ -126,7 +126,7 @@
 //! whose capture pass crosses the pager, are not its own. Each event is
 //! queued at the pager — not bubbling, composed
 //! ([`super::ComponentEvents::queue_detailed`]) — only when a listener on
-//! the pager registered for its name ([`terminus::Document::has_listener`]).
+//! the pager registered for its name ([`terminus::link::Document::has_listener`]).
 //! Geometry is the last completed layout's, read at delivery, and never
 //! flushed; the page width is the pager's scrollport width, web-core's
 //! `clientWidth`, and a pager with no box or zero pixels wide reports no
@@ -170,11 +170,11 @@ use std::cell::RefCell;
 use rustc_hash::FxHashMap;
 use serde_json::Value;
 use smallvec::smallvec;
-use terminus::event::ElementEvent;
-use terminus::scroll::{
+use terminus::link::event::ElementEvent;
+use terminus::link::scroll::{
     ScrollBehavior, ScrollIntoViewContainer, ScrollIntoViewOptions, ScrollLogicalPosition,
 };
-use terminus::{CustomElement, MethodCall, MethodError, MethodOutcome, NodeId};
+use terminus::link::{CustomElement, MethodCall, MethodError, MethodOutcome, NodeId};
 
 use super::scroll_container::{
     SCROLL_END_EVENT, SCROLL_EVENT, nearest_snap_position, rendered_scroll_box,
@@ -229,7 +229,7 @@ pub(super) const WILL_CHANGE_EVENT: &str = "willchange";
 
 /// Installs the pager component under both of its tag names, queueing its
 /// events on `events`. Must run before any element could carry either tag,
-/// which is [`Document::define`](terminus::Document::define)'s own precondition.
+/// which is [`Document::define`](terminus::link::Document::define)'s own precondition.
 pub(super) fn define(document: &mut LynxDocument, events: ComponentEvents) {
     document.define(VIEWPAGER_TAG, Box::new(Viewpager::new(events.clone())));
     document.define(X_VIEWPAGER_TAG, Box::new(Viewpager::new(events)));
@@ -425,7 +425,7 @@ impl CustomElement<()> for Viewpager {
 
 /// `selectTab({index, smooth = true})` on `pager`, with `params` as the JSON
 /// text the realm serialized: CSSOM-View's "scroll an element into view"
-/// ([`terminus::Document::scroll_into_view`]) on the pager's element child number
+/// ([`terminus::link::Document::scroll_into_view`]) on the pager's element child number
 /// `index`, the same algorithm the base set's `scrollIntoView` runs
 /// ([`super::base_methods`]).
 ///
@@ -502,10 +502,10 @@ pub(super) fn select_tab(
 mod tests {
     #![allow(clippy::float_cmp)] // Explicit pixel sizes lay out exactly.
 
-    use terminus::scroll::ScrollBehavior;
-    use terminus::stylo::properties::PropertyId;
-    use terminus::stylo::values::computed::{Display, Overflow};
-    use terminus::{NodeId, StylesheetOrigin, Vector2D};
+    use terminus::link::scroll::ScrollBehavior;
+    use terminus::link::stylo::properties::PropertyId;
+    use terminus::link::stylo::values::computed::{Display, Overflow};
+    use terminus::link::{NodeId, StylesheetOrigin, Vector2D};
 
     use super::super::test_support::{
         child, document, element_under, overflow, style_of, with_config,
@@ -520,7 +520,7 @@ mod tests {
     fn is_viewpager(document: &LynxDocument, node: NodeId) -> bool {
         document
             .get(node)
-            .and_then(terminus::Node::tag_name)
+            .and_then(terminus::link::Node::tag_name)
             .is_some_and(|tag| tag == VIEWPAGER_TAG || tag == X_VIEWPAGER_TAG)
     }
 
@@ -1399,7 +1399,7 @@ mod tests {
 
     // --- the events ---------------------------------------------------------
 
-    use terminus::event::EventDetail;
+    use terminus::link::event::EventDetail;
 
     use super::super::scroll_container::tests::{listen, scrolled};
     use super::super::test_support::{fields_heard, touched, with_component_events};

@@ -1,11 +1,11 @@
-//! GPU smoke tests for [`terminus::render::gpu::Headless`]: build a tiny scene by
+//! GPU smoke tests for [`terminus::link::render::gpu::Headless`]: build a tiny scene by
 //! hand, render it headless, and check pixels from the readback. A usable GPU
 //! adapter is mandatory, including in CI.
 
-use terminus::render::gpu::Headless;
-use terminus::vello;
-use terminus::vello::kurbo::{Affine, Rect};
-use terminus::vello::peniko::{Color, Fill};
+use terminus::link::render::gpu::Headless;
+use terminus::link::vello;
+use terminus::link::vello::kurbo::{Affine, Rect};
+use terminus::link::vello::peniko::{Color, Fill};
 
 fn pixel(pixels: &[u8], width: usize, x: usize, y: usize) -> [u8; 4] {
     let offset = (y * width + x) * 4;

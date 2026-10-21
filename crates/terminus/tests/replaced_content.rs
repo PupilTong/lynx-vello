@@ -14,8 +14,8 @@ use std::rc::Rc;
 
 use paint_common::Doc;
 use prime_radiant::TestImages;
-use terminus::ImageRole;
-use terminus::layout::{NaturalSize, Size};
+use terminus::link::ImageRole;
+use terminus::link::layout::{NaturalSize, Size};
 
 const PAGE: &str = "page { display: flex; position: relative; width: 800px; height: 600px; }
     img { display: flex; position: absolute; left: 0; top: 0; }
@@ -58,7 +58,7 @@ impl Harness {
         Self { doc, images }
     }
 
-    fn img(&mut self, class: &str, bytes: &[u8]) -> terminus::NodeId {
+    fn img(&mut self, class: &str, bytes: &[u8]) -> terminus::link::NodeId {
         let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
         let mut reader = decoder.read_info().expect("png header");
         let mut rgba = vec![0u8; reader.output_buffer_size().expect("png size")];
@@ -262,7 +262,7 @@ fn freeing_a_node_mid_load_leaves_no_stale_binding() {
     h.doc.dom.drop_element(node);
     h.doc
         .dom
-        .apply_image_events(&[terminus::ImageEvent::Loaded {
+        .apply_image_events(&[terminus::link::ImageEvent::Loaded {
             source: std::sync::Arc::from("app:///pending.png"),
             width: 4,
             height: 4,
@@ -289,7 +289,7 @@ fn freeing_one_node_leaves_a_sibling_on_the_same_source_bound() {
     h.doc.dom.drop_element(leaving);
     h.doc
         .dom
-        .apply_image_events(&[terminus::ImageEvent::Loaded {
+        .apply_image_events(&[terminus::link::ImageEvent::Loaded {
             source: std::sync::Arc::from(SHARED),
             width: 40,
             height: 20,

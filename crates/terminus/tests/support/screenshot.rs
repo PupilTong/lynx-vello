@@ -29,18 +29,23 @@ pub(super) fn capture(test: &str, fragment: &str, width: f32, height: f32) -> Im
     let mut doc = html::parse(fragment, width, height);
     assert_eq!(
         doc.dom
-            .register_fonts(terminus::FontBlob::from_static(ROBOTO)),
+            .register_fonts(terminus::link::FontBlob::from_static(ROBOTO)),
         1,
         "the vendored Roboto fixture must register exactly one face"
     );
-    capture_document(&mut gpu, &mut doc.dom, Color::WHITE, &terminus::NoImages)
-        .expect("headless screenshot render")
+    capture_document(
+        &mut gpu,
+        &mut doc.dom,
+        Color::WHITE,
+        &terminus::link::NoImages,
+    )
+    .expect("headless screenshot render")
 }
 
 pub(super) fn capture_prebuilt_document<T: Sync>(
     test: &str,
-    document: &mut terminus::Document<T>,
-    pixels: &impl terminus::FrameImages,
+    document: &mut terminus::link::Document<T>,
+    pixels: &impl terminus::link::FrameImages,
 ) -> Image {
     let mut gpu = headless(test);
     capture_document(&mut gpu, document, Color::WHITE, pixels).expect("headless screenshot render")

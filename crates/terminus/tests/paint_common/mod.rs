@@ -16,7 +16,7 @@ use stylo::values::computed::font::GenericFontFamily;
 use stylo::values::computed::{CSSPixelLength, Length};
 use stylo::values::specified::font::{FONT_MEDIUM_PX, QueryFontMetricsFlags};
 use stylo_traits::{CSSPixel, DevicePixel};
-use terminus::{Device, Document, NodeId, StylesheetOrigin, standards_device};
+use terminus::link::{Device, Document, NodeId, StylesheetOrigin, standards_device};
 
 #[derive(Debug)]
 struct TestFontMetricsProvider;
@@ -56,11 +56,11 @@ pub(super) fn device(width: f32, height: f32) -> Device {
 }
 
 /// A definition whose elements are Lynx text elements
-/// ([`terminus::CustomElement::is_lynx_text`]) and nothing else: what
+/// ([`terminus::link::CustomElement::is_lynx_text`]) and nothing else: what
 /// `crates/bobcat-core` installs for `inline-text` and `inline-truncation`.
 pub(super) struct TextKind;
 
-impl<T> terminus::CustomElement<T> for TextKind {
+impl<T> terminus::link::CustomElement<T> for TextKind {
     fn is_lynx_text(&self) -> bool {
         true
     }

@@ -17,7 +17,7 @@
 use std::hint::black_box;
 use std::time::Instant;
 
-use terminus::{Device, Document, StylesheetOrigin};
+use terminus::link::{Device, Document, StylesheetOrigin};
 
 const CSS: &str = r#"
     page, view, text, image, scroll-view { overflow: hidden; box-sizing: border-box; }
@@ -35,11 +35,11 @@ const CSS: &str = r#"
 "#;
 
 /// `text` as `crates/bobcat-core` defines it, minus its method: a Lynx text
-/// element ([`terminus::CustomElement::is_lynx_text`]), so each label lays out as
+/// element ([`terminus::link::CustomElement::is_lynx_text`]), so each label lays out as
 /// a Lynx paragraph.
 struct TextKind;
 
-impl terminus::CustomElement<()> for TextKind {
+impl terminus::link::CustomElement<()> for TextKind {
     fn is_lynx_text(&self) -> bool {
         true
     }

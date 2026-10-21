@@ -909,9 +909,9 @@ fn string_handlers_reach_background_with_event_snapshots() {
         .unwrap()
         .dispatch_for_test(
             &mut pair.js,
-            terminus::NodeId::from_bits(3).unwrap(),
+            terminus::link::NodeId::from_bits(3).unwrap(),
             "tap",
-            terminus::Point2D::new(12.0, 30.0),
+            terminus::link::Point2D::new(12.0, 30.0),
         )
         .unwrap();
     pair.deliver();
@@ -1063,9 +1063,9 @@ fn a_published_dom_event_carries_values_only_and_no_propagation_methods() {
         .unwrap()
         .dispatch_for_test(
             &mut pair.js,
-            terminus::NodeId::from_bits(3).unwrap(),
+            terminus::link::NodeId::from_bits(3).unwrap(),
             "tap",
-            terminus::Point2D::new(12.0, 30.0),
+            terminus::link::Point2D::new(12.0, 30.0),
         )
         .unwrap();
     pair.deliver();
@@ -3878,7 +3878,7 @@ fn a_compiled_react_list_receives_its_cells_and_a_tap_edits_them() {
             &mut pair.js,
             header,
             "tap",
-            terminus::Point2D::new(4.0, 4.0),
+            terminus::link::Point2D::new(4.0, 4.0),
         )
         .expect("the tap is delivered");
     let deadline = ClockInstant::now() + PATIENCE;
@@ -3930,7 +3930,7 @@ fn list_cells(document: &mut LynxDocument) -> Vec<String> {
 /// The text a `<text>` renders, wherever the framework put it: a `raw-text`
 /// element's `text` attribute for generated content, a host text node's data
 /// otherwise.
-fn generated_text(node: &terminus::Node<()>) -> String {
+fn generated_text(node: &terminus::link::Node<()>) -> String {
     let mut text = String::new();
     for child in node.children() {
         if let Some(data) = child.text() {

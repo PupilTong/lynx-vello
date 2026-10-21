@@ -15,7 +15,7 @@
 //! document afterwards.
 //!
 //! ```
-//! # use terminus::{Document, NodeId};
+//! # use terminus::link::{Document, NodeId};
 //! # fn f(document: &Document<()>, button: NodeId) {
 //! for step in document.event_steps(button, true, false).steps() {
 //!     println!("{} sees target {}", step.node, step.target);
@@ -48,9 +48,9 @@
 //!
 //! # The engine's own listeners
 //!
-//! An engine component is a [`CustomElement`](crate::CustomElement) whose
+//! An engine component is a [`CustomElement`](crate::tree::custom::CustomElement) whose
 //! handler is Rust owned by this document, so the walk calls it directly:
-//! [`CustomElement::handle_event`](crate::CustomElement::handle_event) on
+//! [`CustomElement::handle_event`](crate::tree::custom::CustomElement::handle_event) on
 //! every defined element along the path, before [`Document::advance`]
 //! reports the step. [`Document::dispatch_element_event_over`] drives a walk
 //! to its end for a caller with nothing of its own per step, and
@@ -61,7 +61,7 @@
 //! shape, owned by this crate and carried unchanged by every layer above),
 //! the timestamp, and the stop methods, which end the walk — the host's
 //! later steps with it. A type no definition lists in
-//! [`CustomElement::observed_events`](crate::CustomElement::observed_events)
+//! [`CustomElement::observed_events`](crate::tree::custom::CustomElement::observed_events)
 //! looks no component up; a type nothing hears at all is one
 //! [`Document::hears`] check and builds no walk.
 //!
@@ -121,6 +121,7 @@
 mod detail;
 mod element;
 pub(crate) mod listeners;
+mod queued;
 
 use smallvec::SmallVec;
 
@@ -129,6 +130,7 @@ pub use self::detail::{
 };
 pub use self::element::{ElementEvent, EventPhase, EventWalk, StepOutcome};
 pub use self::listeners::{ListenerKey, ListenerKinds, RegistrationChange};
+pub use self::queued::QueuedEventSink;
 use crate::tree::document::{Document, NodeId};
 use crate::tree::node::Node;
 

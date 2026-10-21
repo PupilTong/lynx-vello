@@ -22,9 +22,10 @@ pub(crate) mod shape;
 mod text;
 pub(crate) mod walker;
 
+use vello::kurbo::{Affine, BezPath, Rect, Vec2};
+
 use crate::layout::{Edges, Layout, TextBrush};
 use crate::paint::shape::ReferenceBoxes;
-use crate::vello::kurbo::{Affine, BezPath, Rect, Vec2};
 use crate::visual::CornerRadii;
 
 /// Descendant glyph silhouettes used by `background-clip: text`.
@@ -66,7 +67,7 @@ pub(crate) struct BoxFragment {
 impl BoxFragment {
     pub(crate) fn new(
         transform: Affine,
-        size: crate::Size2D<f32>,
+        size: euclid::default::Size2D<f32>,
         radii: CornerRadii,
         layout: &Layout,
     ) -> Self {

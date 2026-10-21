@@ -1,7 +1,7 @@
 //! The `@font-face` loader seam, driven end to end through a real view.
 //!
 //! What the pieces are: `terminus` reports the rules a mounted sheet declared
-//! ([`terminus::Document::take_font_face_requests`]), the page's epilogue spawns
+//! ([`terminus::link::Document::take_font_face_requests`]), the page's epilogue spawns
 //! one task per rule, each task asks the host for
 //! [`SourceRequest::Font`](crate::resource::SourceRequest::Font) in author
 //! order, and the first answer is registered under the declared family. These

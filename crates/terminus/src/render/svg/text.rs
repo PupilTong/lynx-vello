@@ -13,10 +13,10 @@
 use std::sync::Arc;
 
 use seldon::text::ResolvedFont;
+use vello::kurbo::{Affine, Stroke};
+use vello::peniko::Color;
 
 use super::paint_server::GradientSpec;
-use crate::vello::kurbo::{Affine, Stroke};
-use crate::vello::peniko::Color;
 
 /// `text-anchor`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]

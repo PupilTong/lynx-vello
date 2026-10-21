@@ -6,9 +6,9 @@ mod paint_common;
 
 use paint_common::Doc;
 use prime_radiant::headless;
-use terminus::vello::Scene;
-use terminus::vello::kurbo::{Affine, Rect};
-use terminus::vello::peniko::{BlendMode, Color, Compose, Fill, Mix};
+use terminus::link::vello::Scene;
+use terminus::link::vello::kurbo::{Affine, Rect};
+use terminus::link::vello::peniko::{BlendMode, Color, Compose, Fill, Mix};
 
 const AHEM: &[u8] = include_bytes!("../../seldon/tests/fixtures/Ahem.ttf");
 const ISOLATION_ATLAS_WIDTH: u32 = 384;
@@ -35,13 +35,13 @@ fn background_clip_text_clips_to_glyph_ink() {
     let mut doc = Doc::with_css(css);
     doc.define_lynx_text("text");
     doc.dom
-        .register_fonts(terminus::FontBlob::from_static(AHEM));
+        .register_fonts(terminus::link::FontBlob::from_static(AHEM));
     let root = doc.root;
     let holder = doc.el_tag(root, "text", "text");
     doc.text(holder, "HH HH");
 
     doc.dom.render();
-    let scene = doc.dom.scene(&terminus::NoImages);
+    let scene = doc.dom.scene(&terminus::link::NoImages);
     let pixels = gpu
         .render(&scene, &[], 200, 100, Color::WHITE)
         .expect("headless render");
@@ -72,13 +72,13 @@ fn plain_background_covers_the_box() {
     let mut doc = Doc::with_css(css);
     doc.define_lynx_text("text");
     doc.dom
-        .register_fonts(terminus::FontBlob::from_static(AHEM));
+        .register_fonts(terminus::link::FontBlob::from_static(AHEM));
     let root = doc.root;
     let holder = doc.el_tag(root, "text", "text");
     doc.text(holder, "HH HH");
 
     doc.dom.render();
-    let scene = doc.dom.scene(&terminus::NoImages);
+    let scene = doc.dom.scene(&terminus::link::NoImages);
     let pixels = gpu
         .render(&scene, &[], 200, 100, Color::WHITE)
         .expect("headless render");
@@ -102,13 +102,13 @@ fn gradient_color_fills_glyph_ink_from_the_padding_box() {
     let mut doc = Doc::with_css(css);
     doc.define_lynx_text("text");
     doc.dom
-        .register_fonts(terminus::FontBlob::from_static(AHEM));
+        .register_fonts(terminus::link::FontBlob::from_static(AHEM));
     let root = doc.root;
     let holder = doc.el_tag(root, "text", "text");
     doc.text(holder, "HH");
 
     doc.dom.render();
-    let scene = doc.dom.scene(&terminus::NoImages);
+    let scene = doc.dom.scene(&terminus::link::NoImages);
     let pixels = gpu
         .render(&scene, &[], 200, 100, Color::WHITE)
         .expect("headless render");
@@ -143,7 +143,7 @@ fn gradient_square(name: &str, image: &str) -> Vec<u8> {
     doc.el(root, "square");
 
     doc.dom.render();
-    let scene = doc.dom.scene(&terminus::NoImages);
+    let scene = doc.dom.scene(&terminus::link::NoImages);
     gpu.render(&scene, &[], 200, 100, Color::WHITE)
         .expect("headless render")
 }
@@ -225,7 +225,7 @@ fn outline_rings_the_border_box() {
     doc.el(root, "out");
 
     doc.dom.render();
-    let scene = doc.dom.scene(&terminus::NoImages);
+    let scene = doc.dom.scene(&terminus::link::NoImages);
     let pixels = gpu
         .render(&scene, &[], 200, 100, Color::WHITE)
         .expect("headless render");
@@ -261,7 +261,7 @@ fn isolated_atlas_cell_matches_standalone_group_effects() {
     doc.el(root, "effect");
 
     doc.dom.render();
-    let scene = doc.dom.scene(&terminus::NoImages);
+    let scene = doc.dom.scene(&terminus::link::NoImages);
     let standalone = gpu
         .render(&scene, &[], 128, 128, Color::WHITE)
         .expect("standalone headless render");
@@ -330,8 +330,8 @@ fn isolated_atlas_cell_matches_standalone_group_effects() {
 /// One 64x64 scene drawing `image` over the whole target, with nearest
 /// sampling so a texel reads back exactly and a filtered edge cannot be
 /// mistaken for a wrong atlas.
-fn image_scene(image: &terminus::vello::peniko::ImageData, at: Affine) -> Scene {
-    use terminus::vello::peniko::{ImageBrush, ImageQuality, ImageSampler};
+fn image_scene(image: &terminus::link::vello::peniko::ImageData, at: Affine) -> Scene {
+    use terminus::link::vello::peniko::{ImageBrush, ImageQuality, ImageSampler};
 
     let mut scene = Scene::new();
     scene.draw_image(
@@ -487,7 +487,7 @@ fn a_frame_after_the_atlas_is_lost_repairs_only_the_images_it_draws() {
 /// the encode window.
 #[test]
 fn a_composition_at_a_scroll_offset_stays_inside_the_scrollport() {
-    use terminus::Vector2D;
+    use terminus::link::Vector2D;
 
     let mut gpu = headless("a_composition_at_a_scroll_offset_stays_inside_the_scrollport");
     // A 100x100 scroller over a red then a blue 100px row, on a 200x150 page,
@@ -559,7 +559,7 @@ fn a_nested_scope_paints_in_its_own_colour() {
     let mut doc = Doc::with_css(css);
     doc.define_lynx_text("text");
     doc.dom
-        .register_fonts(terminus::FontBlob::from_static(AHEM));
+        .register_fonts(terminus::link::FontBlob::from_static(AHEM));
     let root = doc.root;
     let holder = doc.el_tag(root, "text", "text");
     // "AA" in the root's red, then a nested scope's "BB" in blue.
@@ -568,7 +568,7 @@ fn a_nested_scope_paints_in_its_own_colour() {
     doc.text(scope, "BB");
 
     doc.dom.render();
-    let scene = doc.dom.scene(&terminus::NoImages);
+    let scene = doc.dom.scene(&terminus::link::NoImages);
     let pixels = gpu
         .render(&scene, &[], 200, 100, Color::WHITE)
         .expect("headless render");
@@ -613,7 +613,11 @@ fn blur_page(size: f32, square: f32, extra: &str) -> Doc {
 
 /// Renders a document through the same path an embedder's painter takes: the
 /// committed frame, its filter bakes, then the composition.
-fn render_filtered(gpu: &mut terminus::render::gpu::Headless, doc: &mut Doc, size: u32) -> Vec<u8> {
+fn render_filtered(
+    gpu: &mut terminus::link::render::gpu::Headless,
+    doc: &mut Doc,
+    size: u32,
+) -> Vec<u8> {
     doc.dom.render();
     // One `Headless` here renders several independent documents, and commit
     // ids restart at one per document, so the bake cache's key cannot tell
@@ -623,7 +627,7 @@ fn render_filtered(gpu: &mut terminus::render::gpu::Headless, doc: &mut Doc, siz
         .dom
         .committed_frame()
         .expect("render leaves a committed frame retained");
-    let filtered: Vec<Option<terminus::vello::peniko::ImageData>> = gpu
+    let filtered: Vec<Option<terminus::link::vello::peniko::ImageData>> = gpu
         .prepare_filters(&frame, &[], &[], &|_| None, 0, None, Color::WHITE)
         .expect("the filter bakes render")
         .to_vec();
@@ -803,7 +807,7 @@ fn a_blurred_square_straddling_the_viewport_edge_matches_one_inside() {
                 width: 48px; height: 48px; background-color: #000000;
                 filter: blur(4px); }";
 
-    let read = |gpu: &mut terminus::render::gpu::Headless, left: f32| -> Vec<u8> {
+    let read = |gpu: &mut terminus::link::render::gpu::Headless, left: f32| -> Vec<u8> {
         let mut doc = Doc::with_css_sized(css, 128.0, 128.0);
         let root = doc.root;
         let boxed = doc.el(root, "box");
@@ -833,7 +837,7 @@ fn a_blurred_square_straddling_the_viewport_edge_matches_one_inside() {
 /// with the offset while the scrollport clip does not.
 #[test]
 fn a_blurred_box_in_a_scroller_moves_with_the_offset() {
-    use terminus::Vector2D;
+    use terminus::link::Vector2D;
 
     let mut gpu = headless("a_blurred_box_in_a_scroller_moves_with_the_offset");
     let mut doc = Doc::with_css_sized(
@@ -864,7 +868,7 @@ fn a_blurred_box_in_a_scroller_moves_with_the_offset() {
 
     gpu.forget_filters();
     for offset in [0.0_f32, 40.0] {
-        let filtered: Vec<Option<terminus::vello::peniko::ImageData>> = gpu
+        let filtered: Vec<Option<terminus::link::vello::peniko::ImageData>> = gpu
             .prepare_filters(
                 &frame,
                 &[],
@@ -957,7 +961,7 @@ fn a_sliding_blurred_card_stays_inside_its_ancestors_clip() {
     // Committed at x = 30; at 0.6 s the card spans x = 80..140, and the
     // frame's clip ends at x = 100.
     let now = Some(0.6);
-    let filtered: Vec<Option<terminus::vello::peniko::ImageData>> = gpu
+    let filtered: Vec<Option<terminus::link::vello::peniko::ImageData>> = gpu
         .prepare_filters(&frame, &[], &[], &|_| None, 0, now, Color::WHITE)
         .expect("the filter bakes render")
         .to_vec();
@@ -981,12 +985,12 @@ fn a_sliding_blurred_card_stays_inside_its_ancestors_clip() {
 /// Bakes `frame`'s filter entries and composes it at `now`, the way an
 /// embedder's painter draws one frame.
 fn compose_at(
-    gpu: &mut terminus::render::gpu::Headless,
-    frame: &terminus::CommittedFrame,
+    gpu: &mut terminus::link::render::gpu::Headless,
+    frame: &terminus::link::CommittedFrame,
     now: Option<f64>,
     (width, height): (u32, u32),
 ) -> Vec<u8> {
-    let filtered: Vec<Option<terminus::vello::peniko::ImageData>> = gpu
+    let filtered: Vec<Option<terminus::link::vello::peniko::ImageData>> = gpu
         .prepare_filters(frame, &[], &[], &|_| None, 0, now, Color::WHITE)
         .expect("the filter bakes render")
         .to_vec();
@@ -1154,7 +1158,9 @@ fn a_blurred_backdrop_beside_a_sliding_card_composes_as_committed() {
     let groups = early.filter_groups();
     assert_eq!(groups.len(), 2, "a blur group and a backdrop");
     assert!(
-        groups.iter().all(terminus::FilterGroup::samples_animations),
+        groups
+            .iter()
+            .all(terminus::link::FilterGroup::samples_animations),
         "both sample the timeline: the backdrop reads the slide, the group draws the backdrop",
     );
 
@@ -1232,7 +1238,7 @@ fn a_backdrop_inside_a_fading_card_composes_as_committed() {
 /// frame is the one a cold bake at that offset draws.
 #[test]
 fn a_blurred_backdrop_over_a_scroller_re_bakes_with_it() {
-    use terminus::Vector2D;
+    use terminus::link::Vector2D;
 
     let mut gpu = headless("a_blurred_backdrop_over_a_scroller_re_bakes_with_it");
     let mut doc = Doc::with_css_sized(
@@ -1264,9 +1270,9 @@ fn a_blurred_backdrop_over_a_scroller_re_bakes_with_it() {
         "a blur group and a backdrop"
     );
 
-    let draw = |gpu: &mut terminus::render::gpu::Headless, generation: u64, offset: f32| {
-        let offset_of = |_: &terminus::ScrollSlot| Some(Vector2D::new(0.0, offset));
-        let filtered: Vec<Option<terminus::vello::peniko::ImageData>> = gpu
+    let draw = |gpu: &mut terminus::link::render::gpu::Headless, generation: u64, offset: f32| {
+        let offset_of = |_: &terminus::link::ScrollSlot| Some(Vector2D::new(0.0, offset));
+        let filtered: Vec<Option<terminus::link::vello::peniko::ImageData>> = gpu
             .prepare_filters(&frame, &[], &[], &offset_of, generation, None, Color::WHITE)
             .expect("the entries bake")
             .to_vec();
@@ -1342,7 +1348,7 @@ fn a_backdrop_half_outside_an_overflow_hidden_card_stops_at_its_edge() {
                .frost { display: flex; position: absolute; left: 40px; top: 10px;
                         width: 80px; height: 40px; }
                .frosted { backdrop-filter: blur(8px); }";
-    let read = |gpu: &mut terminus::render::gpu::Headless, class: &str| {
+    let read = |gpu: &mut terminus::link::render::gpu::Headless, class: &str| {
         let mut doc = striped_page(css, 200.0, 100.0);
         let root = doc.root;
         let card = doc.el(root, "card");
@@ -1360,7 +1366,7 @@ fn a_backdrop_half_outside_an_overflow_hidden_card_stops_at_its_edge() {
         frame
             .filter_groups()
             .iter()
-            .any(terminus::FilterGroup::is_backdrop),
+            .any(terminus::link::FilterGroup::is_backdrop),
         "the frost records a backdrop",
     );
 
@@ -1417,7 +1423,7 @@ fn a_blur_halo_stops_at_its_ancestors_overflow_clip() {
          .box { display: flex; position: absolute; left: 24px; top: 24px;
                 width: 40px; height: 48px; background-color: #000000;
                 filter: blur(4px); }";
-    let read = |gpu: &mut terminus::render::gpu::Headless, outer: &str| -> Vec<u8> {
+    let read = |gpu: &mut terminus::link::render::gpu::Headless, outer: &str| -> Vec<u8> {
         let mut doc = Doc::with_css_sized(css, 128.0, 128.0);
         let root = doc.root;
         let outer_box = doc.el(root, "outer");
@@ -1481,18 +1487,19 @@ fn a_blur_straddling_an_overflow_clip_reads_its_content_past_the_edge() {
                  width: 64px; height: 96px; }
          .box { display: flex; position: absolute; top: 24px; height: 48px;
                 background-color: #000000; filter: blur(4px); }";
-    let read =
-        |gpu: &mut terminus::render::gpu::Headless, overflow: &str, (left, width): (f32, f32)| {
-            let mut doc = Doc::with_css_sized(css, 128.0, 128.0);
-            let root = doc.root;
-            let card = doc.el(root, "card");
-            doc.dom
-                .set_inline_style(card, &format!("overflow: {overflow}"));
-            let boxed = doc.el(card, "box");
-            doc.dom
-                .set_inline_style(boxed, &format!("left: {left}px; width: {width}px"));
-            render_filtered(gpu, &mut doc, 128)
-        };
+    let read = |gpu: &mut terminus::link::render::gpu::Headless,
+                overflow: &str,
+                (left, width): (f32, f32)| {
+        let mut doc = Doc::with_css_sized(css, 128.0, 128.0);
+        let root = doc.root;
+        let card = doc.el(root, "card");
+        doc.dom
+            .set_inline_style(card, &format!("overflow: {overflow}"));
+        let boxed = doc.el(card, "box");
+        doc.dom
+            .set_inline_style(boxed, &format!("left: {left}px; width: {width}px"));
+        render_filtered(gpu, &mut doc, 128)
+    };
 
     for (label, geometry) in [("straddling", (24.0_f32, 80.0)), ("outside", (68.0, 40.0))] {
         let clipped = read(&mut gpu, "hidden", geometry);
@@ -1548,7 +1555,7 @@ fn a_nested_backdrop_reads_its_roots_content_past_an_ancestors_edge() {
                        width: 80px; height: 40px; backdrop-filter: brightness(1); }
                .frost { display: flex; position: absolute; left: 0px; top: 0px;
                         width: 80px; height: 40px; backdrop-filter: blur(4px); }";
-    let read = |gpu: &mut terminus::render::gpu::Headless, overflow: Option<&str>| {
+    let read = |gpu: &mut terminus::link::render::gpu::Headless, overflow: Option<&str>| {
         let mut doc = striped_page(css, 200.0, 100.0);
         let root = doc.root;
         let card = doc.el(root, "card");
@@ -1601,15 +1608,16 @@ fn a_nested_blur_blurs_more_than_either_alone() {
          .inner { display: flex; width: 64px; height: 64px;
                   background-color: #000000; }";
 
-    let read = |gpu: &mut terminus::render::gpu::Headless, outer: &str, inner: &str| -> Vec<u8> {
-        let mut doc = Doc::with_css_sized(css, 192.0, 192.0);
-        let root = doc.root;
-        let outer_box = doc.el(root, "outer");
-        let inner_box = doc.el(outer_box, "inner");
-        doc.dom.set_inline_style(outer_box, outer);
-        doc.dom.set_inline_style(inner_box, inner);
-        render_filtered(gpu, &mut doc, 192)
-    };
+    let read =
+        |gpu: &mut terminus::link::render::gpu::Headless, outer: &str, inner: &str| -> Vec<u8> {
+            let mut doc = Doc::with_css_sized(css, 192.0, 192.0);
+            let root = doc.root;
+            let outer_box = doc.el(root, "outer");
+            let inner_box = doc.el(outer_box, "inner");
+            doc.dom.set_inline_style(outer_box, outer);
+            doc.dom.set_inline_style(inner_box, inner);
+            render_filtered(gpu, &mut doc, 192)
+        };
 
     let outer_only = read(&mut gpu, "filter: blur(4px)", "");
     let inner_only = read(&mut gpu, "", "filter: blur(4px)");
@@ -1652,7 +1660,7 @@ fn a_group_over_the_budget_renders_unblurred() {
     assert_eq!(groups.len(), 1, "one blurred group");
     let (width, height) = groups[0].size();
     assert!(
-        u64::from(width) * u64::from(height) <= terminus::render::blur::MAX_FILTER_AREA,
+        u64::from(width) * u64::from(height) <= terminus::link::render::blur::MAX_FILTER_AREA,
         "this group is inside the budget",
     );
 
@@ -1680,10 +1688,10 @@ fn a_group_over_the_budget_renders_unblurred() {
     assert_eq!(groups.len(), 1, "the group is still recorded");
     let (width, height) = groups[0].size();
     assert!(
-        u64::from(width) * u64::from(height) > terminus::render::blur::MAX_FILTER_AREA,
+        u64::from(width) * u64::from(height) > terminus::link::render::blur::MAX_FILTER_AREA,
         "and it is past the budget ({width}x{height})",
     );
-    let filtered: Vec<Option<terminus::vello::peniko::ImageData>> = gpu
+    let filtered: Vec<Option<terminus::link::vello::peniko::ImageData>> = gpu
         .prepare_filters(&frame, &[], &[], &|_| None, 0, None, Color::WHITE)
         .expect("a refused group is not an error")
         .to_vec();
@@ -1775,7 +1783,7 @@ fn seam_page(
 /// Without that, a backdrop test asserting "what is beside the element is
 /// untouched" would pass just as happily with no backdrop drawn at all.
 fn render_baked(
-    gpu: &mut terminus::render::gpu::Headless,
+    gpu: &mut terminus::link::render::gpu::Headless,
     doc: &mut Doc,
     size: u32,
     entries: usize,
@@ -1785,7 +1793,7 @@ fn render_baked(
 
 /// [`render_baked`] over a canvas of `canvas`.
 fn render_baked_over(
-    gpu: &mut terminus::render::gpu::Headless,
+    gpu: &mut terminus::link::render::gpu::Headless,
     doc: &mut Doc,
     size: u32,
     entries: usize,
@@ -1802,7 +1810,7 @@ fn render_baked_over(
         entries,
         "the frame's filter entries",
     );
-    let filtered: Vec<Option<terminus::vello::peniko::ImageData>> = gpu
+    let filtered: Vec<Option<terminus::link::vello::peniko::ImageData>> = gpu
         .prepare_filters(&frame, &[], &[], &|_| None, 0, None, canvas)
         .expect("the bakes render")
         .to_vec();
@@ -1973,7 +1981,7 @@ fn an_opacity_ancestor_bounds_the_backdrop() {
 /// bake that ignored the offset would show the same pixels forever.
 #[test]
 fn a_fixed_backdrop_over_a_scroller_rebakes_per_offset() {
-    use terminus::Vector2D;
+    use terminus::link::Vector2D;
 
     let mut gpu = headless("a_fixed_backdrop_over_a_scroller_rebakes_per_offset");
     let mut doc = Doc::with_css_sized(
@@ -2006,7 +2014,7 @@ fn a_fixed_backdrop_over_a_scroller_rebakes_per_offset() {
     gpu.forget_filters();
     let mut reads = Vec::new();
     for (generation, offset) in [(0_u64, 0.0_f32), (1, 12.0)] {
-        let filtered: Vec<Option<terminus::vello::peniko::ImageData>> = gpu
+        let filtered: Vec<Option<terminus::link::vello::peniko::ImageData>> = gpu
             .prepare_filters(
                 &frame,
                 &[],
@@ -2168,10 +2176,10 @@ fn a_backdrop_over_the_budget_stays_unfiltered() {
     assert_eq!(entries.len(), 1, "the entry is still recorded");
     let (width, height) = entries[0].size();
     assert!(
-        u64::from(width) * u64::from(height) > terminus::render::blur::MAX_FILTER_AREA,
+        u64::from(width) * u64::from(height) > terminus::link::render::blur::MAX_FILTER_AREA,
         "and it is past the budget ({width}x{height})",
     );
-    let filtered: Vec<Option<terminus::vello::peniko::ImageData>> = gpu
+    let filtered: Vec<Option<terminus::link::vello::peniko::ImageData>> = gpu
         .prepare_filters(&frame, &[], &[], &|_| None, 0, None, Color::WHITE)
         .expect("a refused entry is not an error")
         .to_vec();
@@ -2215,7 +2223,7 @@ fn a_colour_only_backdrop_darkens_only_inside_the_box() {
         (frame.filter_groups()[0].sigma - 0.0).abs() < f32::EPSILON,
         "a colour-only list has no blur",
     );
-    let filtered: Vec<Option<terminus::vello::peniko::ImageData>> = gpu
+    let filtered: Vec<Option<terminus::link::vello::peniko::ImageData>> = gpu
         .prepare_filters(&frame, &[], &[], &|_| None, 0, None, Color::WHITE)
         .expect("the backdrop bakes")
         .to_vec();
@@ -2337,7 +2345,7 @@ fn a_canvas_change_re_bakes_a_backdrop_over_it() {
         (Color::WHITE, [255_u8, 255, 255]),
         (Color::from_rgb8(40, 120, 200), [40, 120, 200]),
     ] {
-        let filtered: Vec<Option<terminus::vello::peniko::ImageData>> = gpu
+        let filtered: Vec<Option<terminus::link::vello::peniko::ImageData>> = gpu
             .prepare_filters(&frame, &[], &[], &|_| None, 0, None, canvas)
             .expect("the backdrop bakes")
             .to_vec();
@@ -2439,7 +2447,7 @@ fn a_transformed_backdrop_over_the_canvas_draws_as_over_a_painted_ground() {
 #[test]
 fn a_sliding_backdrop_over_the_canvas_composes_as_over_a_painted_ground() {
     let mut gpu = headless("a_sliding_backdrop_over_the_canvas_composes_as_over_a_painted_ground");
-    let draw = |gpu: &mut terminus::render::gpu::Headless, ground: Ground, wrapper: &str| {
+    let draw = |gpu: &mut terminus::link::render::gpu::Headless, ground: Ground, wrapper: &str| {
         let mut doc = seam_page(
             ground,
             128.0,
@@ -2450,7 +2458,7 @@ fn a_sliding_backdrop_over_the_canvas_composes_as_over_a_painted_ground() {
         doc.dom.add_stylesheet(
             "@keyframes slide { from { transform: translateX(0px) rotate(0deg); }
                                 to { transform: translateX(60px) rotate(40deg); } }",
-            terminus::StylesheetOrigin::Author,
+            terminus::link::StylesheetOrigin::Author,
         );
         doc.dom.render();
         doc.dom.advance_animations(0.0);
@@ -2557,7 +2565,7 @@ fn a_backdrop_inside_an_opacity_group_does_not_read_the_canvas() {
 /// without a bake through a map with no inverse.
 #[test]
 fn an_anchored_box_follows_its_scrolled_anchor_and_hides_with_it() {
-    use terminus::Vector2D;
+    use terminus::link::Vector2D;
 
     let mut gpu = headless("an_anchored_box_follows_its_scrolled_anchor_and_hides_with_it");
     let mut doc = Doc::with_css_sized(
@@ -2593,8 +2601,8 @@ fn an_anchored_box_follows_its_scrolled_anchor_and_hides_with_it() {
         .into_iter()
         .enumerate()
     {
-        let offset_of = move |_: &terminus::ScrollSlot| Some(Vector2D::new(0.0, offset));
-        let filtered: Vec<Option<terminus::vello::peniko::ImageData>> = gpu
+        let offset_of = move |_: &terminus::link::ScrollSlot| Some(Vector2D::new(0.0, offset));
+        let filtered: Vec<Option<terminus::link::vello::peniko::ImageData>> = gpu
             .prepare_filters(
                 &frame,
                 &[],

@@ -126,7 +126,7 @@ impl<T: Sync> Document<T> {
 
     /// One flush and one layout, publishing the query-container sizes the
     /// pass committed into `resized`.
-    fn layout_pass(&mut self, resized: &mut Vec<crate::NodeId>) {
+    fn layout_pass(&mut self, resized: &mut Vec<crate::tree::document::NodeId>) {
         self.flush_styles_with_damage_sink(&mut |_, _| {});
 
         let viewport_size = self.device().viewport_size();
@@ -152,7 +152,7 @@ impl<T: Sync> Document<T> {
         &mut self,
         viewport: Size<f32>,
         scale: f32,
-        resized: &mut Vec<crate::NodeId>,
+        resized: &mut Vec<crate::tree::document::NodeId>,
     ) {
         let full = self.layout_requires_full_pass(viewport, scale);
         let rescale = self.layout_inputs_changed(viewport, scale);
@@ -190,7 +190,7 @@ impl<T: Sync> Document<T> {
         &mut self,
         viewport: Size<f32>,
         scale: f32,
-        resized: &mut Vec<crate::NodeId>,
+        resized: &mut Vec<crate::tree::document::NodeId>,
     ) {
         let mut invalidated = FxHashSet::default();
         while self.settle_anchors(&mut invalidated) {
@@ -227,7 +227,7 @@ impl<T: Sync> Document<T> {
     /// worst either way.
     fn recascade_resized_containers(
         &mut self,
-        resized: &mut Vec<crate::NodeId>,
+        resized: &mut Vec<crate::tree::document::NodeId>,
         cap: bool,
     ) -> bool {
         if resized.is_empty() {
@@ -241,7 +241,10 @@ impl<T: Sync> Document<T> {
         for id in resized.drain(..) {
             // A container freed since the run that measured it resolves to
             // nothing: `NodeId` carries the generation its key was at.
-            if self.get(id).is_some_and(crate::Node::is_element) {
+            if self
+                .get(id)
+                .is_some_and(crate::tree::node::Node::is_element)
+            {
                 if cap {
                     self.mark_subtree_recascade(id);
                     marked = true;
@@ -271,7 +274,11 @@ pub(crate) fn natural_size(width: u32, height: u32) -> NaturalSize {
 
 impl<T> Document<T> {
     /// Updates intrinsic dimensions and invalidates affected layout.
-    pub fn set_natural_size(&mut self, id: crate::NodeId, natural_size: NaturalSize) {
+    pub fn set_natural_size(
+        &mut self,
+        id: crate::tree::document::NodeId,
+        natural_size: NaturalSize,
+    ) {
         let changed = {
             let node = self
                 .arenas_mut()
@@ -289,14 +296,14 @@ impl<T> Document<T> {
     }
 
     #[must_use]
-    pub(crate) fn natural_size(&self, id: crate::NodeId) -> NaturalSize {
+    pub(crate) fn natural_size(&self, id: crate::tree::document::NodeId) -> NaturalSize {
         self.get(id)
-            .map_or(NaturalSize::NONE, crate::Node::natural_size)
+            .map_or(NaturalSize::NONE, crate::tree::node::Node::natural_size)
     }
 
     /// Sets one of this replaced element's two sources — the URL the paint
     /// walk presents to the host's resource system through
-    /// [`FrameImages`](crate::FrameImages) — with `role` saying which.
+    /// [`FrameImages`](crate::render::image::FrameImages) — with `role` saying which.
     ///
     /// The two are independent sources on one element, requested
     /// concurrently: [`ImageRole::Placeholder`] is not a fallback the element
@@ -325,7 +332,7 @@ impl<T> Document<T> {
     /// role alone is enough to make an element replaced.
     pub fn set_image_source(
         &mut self,
-        id: crate::NodeId,
+        id: crate::tree::document::NodeId,
         role: ImageRole,
         value: Option<&str>,
     ) -> Option<ImageOutcome> {
@@ -381,10 +388,10 @@ impl<T> Document<T> {
     /// it, by setting another source or by being freed.
     pub fn set_image_document(
         &mut self,
-        id: crate::NodeId,
+        id: crate::tree::document::NodeId,
         role: ImageRole,
         bytes: &[u8],
-        kind: crate::DocumentKind,
+        kind: crate::render::image::DocumentKind,
     ) -> Option<ImageOutcome> {
         let source = self.images.insert_document(bytes, kind);
         self.set_image_source(id, role, Some(&source))
@@ -392,9 +399,13 @@ impl<T> Document<T> {
 
     /// Settles a source change: the natural size the element's new sources
     /// give it, and the invalidation that change is worth.
-    fn note_replaced_change(&mut self, id: crate::NodeId, was_replaced: bool) {
+    fn note_replaced_change(&mut self, id: crate::tree::document::NodeId, was_replaced: bool) {
         self.refresh_natural_size(id);
-        if was_replaced == self.get(id).is_some_and(crate::Node::is_replaced) {
+        if was_replaced
+            == self
+                .get(id)
+                .is_some_and(crate::tree::node::Node::is_replaced)
+        {
             self.note_visual_mutation();
         } else {
             self.invalidate_layout(id);
@@ -409,7 +420,7 @@ impl<T> Document<T> {
     /// the natural size describing the bitmap actually drawn: `object-fit`
     /// resolves one against the other at paint, and a size left over from a
     /// departed source would fit the wrong picture.
-    pub(crate) fn refresh_natural_size(&mut self, id: crate::NodeId) {
+    pub(crate) fn refresh_natural_size(&mut self, id: crate::tree::document::NodeId) {
         let natural = {
             let Some(node) = self.get(id) else {
                 return;
@@ -435,7 +446,7 @@ impl<T> Document<T> {
     /// one: the URL [`Self::set_image_source`] was given, or the synthetic
     /// source [`Self::set_image_document`] filed its bytes under.
     #[must_use]
-    pub fn image_source(&self, id: crate::NodeId, role: ImageRole) -> Option<&str> {
+    pub fn image_source(&self, id: crate::tree::document::NodeId, role: ImageRole) -> Option<&str> {
         self.get(id)?.image_source(role)
     }
 
@@ -451,7 +462,10 @@ impl<T> Document<T> {
     /// Both sources of a replaced element, in the order the paint walk
     /// prefers them.
     #[must_use]
-    pub(crate) fn image_sources(&self, id: crate::NodeId) -> (Option<&str>, Option<&str>) {
+    pub(crate) fn image_sources(
+        &self,
+        id: crate::tree::document::NodeId,
+    ) -> (Option<&str>, Option<&str>) {
         self.get(id).map_or((None, None), |node| {
             (
                 node.image_source(ImageRole::Source),
@@ -464,7 +478,7 @@ impl<T> Document<T> {
     #[doc(hidden)]
     pub fn set_leaf_metrics_for_testing(
         &mut self,
-        id: crate::NodeId,
+        id: crate::tree::document::NodeId,
         size: Size<f32>,
         first_baseline: Option<f32>,
     ) {
@@ -517,9 +531,9 @@ impl<T> Document<T> {
     /// [`Self::register_font_face`]. Each rule is reported exactly once,
     /// whatever later sheets do to the cascade.
     ///
-    /// See [`FontFaceRequest`](crate::FontFaceRequest) for what is and is not
+    /// See [`FontFaceRequest`](crate::style::engine::FontFaceRequest) for what is and is not
     /// carried out of a rule.
-    pub fn take_font_face_requests(&mut self) -> Vec<crate::FontFaceRequest> {
+    pub fn take_font_face_requests(&mut self) -> Vec<crate::style::engine::FontFaceRequest> {
         self.style_engine_mut().take_font_face_requests()
     }
 
@@ -558,7 +572,7 @@ impl<T> Document<T> {
     }
 
     #[must_use]
-    pub fn rounded_layout(&self, id: crate::NodeId) -> Option<&Layout> {
+    pub fn rounded_layout(&self, id: crate::tree::document::NodeId) -> Option<&Layout> {
         let slot = self.slot(id)?;
         Some(&self.layout_state().get(slot)?.slot.rounded)
     }
@@ -609,7 +623,7 @@ impl<T> Document<T> {
     /// paragraph's content box, unsnapped. One with no fragment — no
     /// content and no nonzero edge — answers `None`.
     #[must_use]
-    pub fn bounding_client_rect(&self, id: crate::NodeId) -> Option<Rect<f32>> {
+    pub fn bounding_client_rect(&self, id: crate::tree::document::NodeId) -> Option<Rect<f32>> {
         let node = self.get(id)?;
         if inline_flow::is_inline_box(node) {
             return self.inline_box_client_rect(id);
@@ -659,7 +673,7 @@ impl<T> Document<T> {
 
     /// [`Self::bounding_client_rect`] of an inline box: its fragments'
     /// union, moved from the paragraph's content box to the viewport.
-    fn inline_box_client_rect(&self, id: crate::NodeId) -> Option<Rect<f32>> {
+    fn inline_box_client_rect(&self, id: crate::tree::document::NodeId) -> Option<Rect<f32>> {
         let paragraph = self.paragraph_of(id)?;
         let painted = self.painted_paragraph(paragraph)?;
         let mut union: Option<Rect<f32>> = None;
@@ -700,7 +714,10 @@ impl<T> Document<T> {
     /// what a run measured. `None` when `id` establishes no paragraph (an
     /// inline box, an element of another display) or no commit reached it.
     #[must_use]
-    pub fn text_block_size(&self, id: crate::NodeId) -> Option<seldon::geometry::Size<f32>> {
+    pub fn text_block_size(
+        &self,
+        id: crate::tree::document::NodeId,
+    ) -> Option<seldon::geometry::Size<f32>> {
         self.committed_paragraph(id)?.committed_size()
     }
 
@@ -709,7 +726,7 @@ impl<T> Document<T> {
     /// formatting context. `None` when `id` establishes no paragraph or no
     /// commit reached it, as for [`Self::text_block_size`].
     #[must_use]
-    pub fn paragraph_kind(&self, id: crate::NodeId) -> Option<ParagraphKind> {
+    pub fn paragraph_kind(&self, id: crate::tree::document::NodeId) -> Option<ParagraphKind> {
         Some(match self.committed_paragraph(id)? {
             paragraph::TextStore::Block(_) => ParagraphKind::Lynx,
             paragraph::TextStore::Flow(_) => ParagraphKind::InlineFormattingContext,
@@ -725,7 +742,7 @@ impl<T> Document<T> {
     /// line of its strut. Lines a truncation cut hides are not counted. `None` as for
     /// [`Self::paragraph_kind`]. Nothing here runs a pass.
     #[must_use]
-    pub fn paragraph_line_count(&self, id: crate::NodeId) -> Option<usize> {
+    pub fn paragraph_line_count(&self, id: crate::tree::document::NodeId) -> Option<usize> {
         Some(self.committed_paragraph(id)?.painted()?.lines.len())
     }
 
@@ -741,7 +758,7 @@ impl<T> Document<T> {
     /// Lynx text scope, any other element) or when no commit has reached it.
     /// Nothing here runs a pass, so the answer is the last one's.
     #[must_use]
-    pub fn text_lines(&self, id: crate::NodeId) -> Option<Vec<TextLineReport>> {
+    pub fn text_lines(&self, id: crate::tree::document::NodeId) -> Option<Vec<TextLineReport>> {
         let block = self.committed_paragraph(id)?.as_block()?.committed()?;
         Some(
             block
@@ -769,8 +786,8 @@ impl<T> Document<T> {
     /// # Panics
     ///
     /// On a stale `id`, and on an `id` that is not a Lynx text element
-    /// ([`crate::CustomElement::is_lynx_text`]).
-    pub fn set_text_layout_reporting(&mut self, id: crate::NodeId, on: bool) {
+    /// ([`crate::tree::custom::CustomElement::is_lynx_text`]).
+    pub fn set_text_layout_reporting(&mut self, id: crate::tree::document::NodeId, on: bool) {
         let node = self
             .get(id)
             .expect("stale NodeId passed to Document::set_text_layout_reporting");
@@ -799,7 +816,7 @@ impl<T> Document<T> {
     /// the list's own storage in place, as
     /// [`Self::take_content_visibility_changes`] does.
     #[must_use]
-    pub fn take_text_layout_reports(&mut self) -> Vec<crate::NodeId> {
+    pub fn take_text_layout_reports(&mut self) -> Vec<crate::tree::document::NodeId> {
         let pending = &mut self.layout_state_mut().text_layout_reports;
         if pending.is_empty() {
             return Vec::new();
@@ -839,7 +856,7 @@ impl<T> Document<T> {
     #[must_use]
     pub fn text_range_boxes(
         &self,
-        id: crate::NodeId,
+        id: crate::tree::document::NodeId,
         start: u32,
         end: u32,
     ) -> Option<Vec<Rect<f32>>> {
@@ -884,7 +901,7 @@ impl<T> Document<T> {
     #[must_use]
     pub fn text_index_at_point(
         &self,
-        paragraph: crate::NodeId,
+        paragraph: crate::tree::document::NodeId,
         point: Point2D<f32>,
     ) -> Option<usize> {
         let unit = self
@@ -911,7 +928,10 @@ impl<T> Document<T> {
     /// in the `inline-truncation` content, which is no source text. Nothing
     /// here runs a pass.
     #[must_use]
-    pub fn inline_source_range(&self, element: crate::NodeId) -> Option<core::ops::Range<usize>> {
+    pub fn inline_source_range(
+        &self,
+        element: crate::tree::document::NodeId,
+    ) -> Option<core::ops::Range<usize>> {
         let slot = self.slot(element)?;
         let units = paragraph::inline_source_range(self.arenas(), self.layout_state(), slot)?;
         Some(usize::try_from(units.start).ok()?..usize::try_from(units.end).ok()?)
@@ -934,7 +954,10 @@ impl<T> Document<T> {
     /// `inline-truncation` content answers the paragraph it truncates.
     /// Nothing here runs a pass.
     #[must_use]
-    pub fn paragraph_of(&self, node: crate::NodeId) -> Option<crate::NodeId> {
+    pub fn paragraph_of(
+        &self,
+        node: crate::tree::document::NodeId,
+    ) -> Option<crate::tree::document::NodeId> {
         let slot = self.slot(node)?;
         paragraph::paragraph_of(self.arenas(), self.layout_state(), slot)
     }
@@ -942,7 +965,10 @@ impl<T> Document<T> {
     /// The committed paragraph `id` establishes, of either kind. An inline
     /// box establishes none, whatever its layout state still holds from a
     /// time it laid itself out.
-    pub(crate) fn committed_paragraph(&self, id: crate::NodeId) -> Option<&paragraph::TextStore> {
+    pub(crate) fn committed_paragraph(
+        &self,
+        id: crate::tree::document::NodeId,
+    ) -> Option<&paragraph::TextStore> {
         let node = self.get(id)?;
         if inline_flow::is_inline_box(node) {
             return None;
@@ -958,7 +984,10 @@ impl<T> Document<T> {
     /// The Lynx paragraph `id` established, if a commit has produced one:
     /// what this crate's tests inspect beyond [`Self::text_block_size`].
     #[cfg(test)]
-    pub(crate) fn text_block(&self, id: crate::NodeId) -> Option<&seldon::text::block::TextBlock> {
+    pub(crate) fn text_block(
+        &self,
+        id: crate::tree::document::NodeId,
+    ) -> Option<&seldon::text::block::TextBlock> {
         let slot = self.slot(id)?;
         self.layout_state()
             .get(slot)?
@@ -973,7 +1002,7 @@ impl<T> Document<T> {
     #[must_use]
     pub(crate) fn painted_paragraph(
         &self,
-        id: crate::NodeId,
+        id: crate::tree::document::NodeId,
     ) -> Option<paragraph::PaintedParagraph<'_>> {
         let slot = self.slot(id)?;
         self.layout_state().get(slot)?.text.as_deref()?.painted()
@@ -985,7 +1014,7 @@ impl<T> Document<T> {
     #[must_use]
     pub(crate) fn inline_flow(
         &self,
-        id: crate::NodeId,
+        id: crate::tree::document::NodeId,
     ) -> Option<&seldon::text::inline::InlineFlow> {
         let slot = self.slot(id)?;
         self.layout_state()
@@ -999,7 +1028,7 @@ impl<T> Document<T> {
     /// How many times `id`'s paragraph has been shaped from scratch.
     #[cfg(test)]
     #[must_use]
-    pub(crate) fn text_block_rebuilds(&self, id: crate::NodeId) -> Option<u32> {
+    pub(crate) fn text_block_rebuilds(&self, id: crate::tree::document::NodeId) -> Option<u32> {
         let slot = self.slot(id)?;
         Some(self.layout_state().get(slot)?.text.as_deref()?.rebuilds())
     }
@@ -1007,7 +1036,7 @@ impl<T> Document<T> {
     /// Whether a probe left `id`'s paragraph off its committed break.
     #[cfg(test)]
     #[must_use]
-    pub(crate) fn text_block_is_probe_dirty(&self, id: crate::NodeId) -> bool {
+    pub(crate) fn text_block_is_probe_dirty(&self, id: crate::tree::document::NodeId) -> bool {
         self.slot(id)
             .and_then(|slot| self.layout_state().get(slot))
             .and_then(|state| state.text.as_deref())
@@ -1015,7 +1044,7 @@ impl<T> Document<T> {
     }
 
     #[must_use]
-    pub(crate) fn paint_style(&self, id: crate::NodeId) -> Option<&ComputedValues> {
+    pub(crate) fn paint_style(&self, id: crate::tree::document::NodeId) -> Option<&ComputedValues> {
         self.get(id)?.layout_computed_style()
     }
 
@@ -1023,7 +1052,10 @@ impl<T> Document<T> {
     /// against, in its box parent's border-box coordinates, when the last
     /// layout recorded one; `None` for every other box.
     #[must_use]
-    pub(crate) fn sticky_containing_block(&self, id: crate::NodeId) -> Option<Edges<f32>> {
+    pub(crate) fn sticky_containing_block(
+        &self,
+        id: crate::tree::document::NodeId,
+    ) -> Option<Edges<f32>> {
         let slot = self.slot(id)?;
         self.layout_state()
             .sticky_containing_blocks
@@ -1034,7 +1066,7 @@ impl<T> Document<T> {
 
     #[must_use]
     #[cfg(test)]
-    pub(crate) fn layout_cache_is_empty(&self, id: crate::NodeId) -> Option<bool> {
+    pub(crate) fn layout_cache_is_empty(&self, id: crate::tree::document::NodeId) -> Option<bool> {
         let slot = self.slot(id)?;
         Some(
             self.layout_state()
@@ -1055,7 +1087,7 @@ impl<T> Document<T> {
     /// it stops being free the moment a paragraph is owned by the element
     /// that establishes it: every descendant mutation and every ancestor this
     /// walk touches would re-shape a paragraph whose text never changed.
-    pub(crate) fn invalidate_layout(&mut self, id: crate::NodeId) {
+    pub(crate) fn invalidate_layout(&mut self, id: crate::tree::document::NodeId) {
         // Paragraph content (including generated runs) shares one cache. A
         // transparent scope has none, so starting the usual walk there would
         // stop early and leave its enclosing paragraph measured at the old text.
@@ -1192,7 +1224,10 @@ impl<T> Document<T> {
     /// an element that establishes the fixed containing block itself, which
     /// the absolute one implies; it runs only for an element whose role
     /// flipped, never per frame.
-    pub(crate) fn invalidate_containing_block(&mut self, id: crate::NodeId) -> bool {
+    pub(crate) fn invalidate_containing_block(
+        &mut self,
+        id: crate::tree::document::NodeId,
+    ) -> bool {
         let mut positioned = Vec::new();
         let mut stack = vec![(id, false)];
         while let Some((current, absolute_held)) = stack.pop() {
@@ -1248,7 +1283,10 @@ impl<T> Document<T> {
     /// from it reaches the block anyway. An inline box of an inline
     /// formatting context establishes none: its runs are the paragraph's
     /// around it, so the walk goes through it.
-    fn paragraph_container(&self, id: crate::NodeId) -> Option<crate::NodeId> {
+    fn paragraph_container(
+        &self,
+        id: crate::tree::document::NodeId,
+    ) -> Option<crate::tree::document::NodeId> {
         // Loose text is not under the anonymous box that lays it out
         // (`tree::anonymous`), so no walk up from it finds the box.
         if let Some(anonymous) = self.arenas().anonymous().box_of(id) {
@@ -1302,7 +1340,7 @@ impl<T> Document<T> {
     /// mutate synthetic leaf data outside the production DOM mutation API.
     #[cfg(feature = "layout-test-utils")]
     #[doc(hidden)]
-    pub fn invalidate_layout_for_testing(&mut self, id: crate::NodeId) {
+    pub fn invalidate_layout_for_testing(&mut self, id: crate::tree::document::NodeId) {
         self.invalidate_layout(id);
     }
 }
@@ -1334,7 +1372,7 @@ pub(crate) struct ContainingBlockChain<'a, T> {
     document: &'a Document<T>,
     current: &'a crate::tree::node::Node<T>,
     /// The last box the walk stood on: the box itself, then each ancestor.
-    top: crate::NodeId,
+    top: crate::tree::document::NodeId,
     /// The position the escaping box was keyed on.
     escape: PositionProperty,
     /// A top-layer box was passed: nothing above is on the chain.
@@ -1345,7 +1383,7 @@ pub(crate) struct ContainingBlockChain<'a, T> {
 /// One box above the walked one, as [`ContainingBlockChain`] yields it.
 pub(crate) struct ChainStep<'a, T> {
     pub(crate) node: &'a crate::tree::node::Node<T>,
-    pub(crate) id: crate::NodeId,
+    pub(crate) id: crate::tree::document::NodeId,
     pub(crate) style: StyleView<'a, T>,
     /// Its rounded layout; `location` is relative to its own box parent.
     pub(crate) layout: &'a Layout,
@@ -1458,7 +1496,7 @@ mod tests {
     use stylo::invalidation::element::restyle_hints::RestyleHint;
 
     use super::*;
-    use crate::StylesheetOrigin;
+    use crate::style::engine::StylesheetOrigin;
     use crate::tree::document::DOCUMENT_NODE_ID;
 
     #[test]
@@ -1471,7 +1509,7 @@ mod tests {
         // does. The retired measurement path's `TextLayoutStore` used to be
         // measured here beside it, which said nothing the pointer did not.
         let current = (
-            size_of::<crate::Node<()>>(),
+            size_of::<crate::tree::node::Node<()>>(),
             size_of::<LayoutSlot>(),
             size_of::<NodeLayoutState>(),
         );
@@ -1496,7 +1534,7 @@ mod tests {
 
     /// A document with one size query container holding one child, and
     /// whatever `item` declaration the case wants on it.
-    fn query_container_document(item: &str) -> (Document<()>, crate::NodeId) {
+    fn query_container_document(item: &str) -> (Document<()>, crate::tree::document::NodeId) {
         let mut document: Document<()> =
             Document::new(crate::tree::document::tests::device(), "page", ());
         document.add_stylesheet(
@@ -1563,7 +1601,13 @@ mod tests {
 
     /// One document per shape: `page > .query > .item`, with the case's own
     /// rules for the two.
-    fn query_document(rules: &str) -> (Document<()>, crate::NodeId, crate::NodeId) {
+    fn query_document(
+        rules: &str,
+    ) -> (
+        Document<()>,
+        crate::tree::document::NodeId,
+        crate::tree::document::NodeId,
+    ) {
         let mut document: Document<()> =
             Document::new(crate::tree::document::tests::device(), "page", ());
         document.add_stylesheet(
@@ -1585,7 +1629,7 @@ mod tests {
         (document, query, item)
     }
 
-    fn laid_out_size(document: &Document<()>, id: crate::NodeId) -> (f32, f32) {
+    fn laid_out_size(document: &Document<()>, id: crate::tree::document::NodeId) -> (f32, f32) {
         let size = document
             .rounded_layout(id)
             .expect("the box was laid out")
@@ -1924,9 +1968,9 @@ mod tests {
         container_type: &str,
     ) -> (
         Document<()>,
-        [crate::NodeId; 2],
-        crate::NodeId,
-        Vec<crate::NodeId>,
+        [crate::tree::document::NodeId; 2],
+        crate::tree::document::NodeId,
+        Vec<crate::tree::document::NodeId>,
     ) {
         let mut document: Document<()> =
             Document::new(crate::tree::document::tests::device(), "page", ());
@@ -1971,7 +2015,7 @@ mod tests {
         )
     }
 
-    fn restyle_hint(document: &Document<()>, id: crate::NodeId) -> RestyleHint {
+    fn restyle_hint(document: &Document<()>, id: crate::tree::document::NodeId) -> RestyleHint {
         document
             .live(id)
             .borrow_computed_style()
@@ -2143,7 +2187,11 @@ mod tests {
     fn label_document_parts(
         text: &str,
         width: f32,
-    ) -> (Document<()>, crate::NodeId, crate::NodeId) {
+    ) -> (
+        Document<()>,
+        crate::tree::document::NodeId,
+        crate::tree::document::NodeId,
+    ) {
         const AHEM: &[u8] = include_bytes!("../../../seldon/tests/fixtures/Ahem.ttf");
 
         let mut document: Document<()> =
@@ -2688,7 +2736,7 @@ mod tests {
     const OTHER_SRC: &str = "app:///b.png";
     const PLACEHOLDER: &str = "app:///p.png";
 
-    fn image_document() -> (Document<()>, crate::NodeId) {
+    fn image_document() -> (Document<()>, crate::tree::document::NodeId) {
         let mut document = Document::new(crate::tree::document::tests::device(), "page", ());
         let root = document.document_element().id();
         let image = document.create_element("image", ());
@@ -2696,16 +2744,16 @@ mod tests {
         (document, image)
     }
 
-    fn loaded(source: &str, width: u32, height: u32) -> crate::ImageEvent {
-        crate::ImageEvent::Loaded {
+    fn loaded(source: &str, width: u32, height: u32) -> crate::render::image::ImageEvent {
+        crate::render::image::ImageEvent::Loaded {
             source: std::sync::Arc::from(source),
             width,
             height,
         }
     }
 
-    fn failed(source: &str) -> crate::ImageEvent {
-        crate::ImageEvent::Failed {
+    fn failed(source: &str) -> crate::render::image::ImageEvent {
+        crate::render::image::ImageEvent::Failed {
             source: std::sync::Arc::from(source),
         }
     }
@@ -2713,11 +2761,11 @@ mod tests {
     /// What a host reports for `svg` fetched at `source`: the document it
     /// parsed with the engine's parser, or the failure of one that did not
     /// parse.
-    fn document_report(source: &str, svg: &str) -> crate::ImageEvent {
-        crate::ImageEvent::parse_document(
+    fn document_report(source: &str, svg: &str) -> crate::render::image::ImageEvent {
+        crate::render::image::ImageEvent::parse_document(
             std::sync::Arc::from(source),
             svg.as_bytes(),
-            crate::DocumentKind::Svg,
+            crate::render::image::DocumentKind::Svg,
         )
     }
 
@@ -2733,7 +2781,7 @@ mod tests {
 
         assert_eq!(
             document.apply_image_events(&[document_report(SRC, svg)]),
-            vec![crate::ImageOutcome::Loaded {
+            vec![crate::render::image::ImageOutcome::Loaded {
                 node: image,
                 width: 24,
                 height: 12,
@@ -2753,7 +2801,7 @@ mod tests {
                 OTHER_SRC,
                 "<svg xmlns='http://www.w3.org/2000/svg'><rect></svg>",
             )]),
-            vec![crate::ImageOutcome::Failed { node: image }]
+            vec![crate::render::image::ImageOutcome::Failed { node: image }]
         );
         assert_eq!(document.natural_size(image), NaturalSize::NONE);
         assert!(
@@ -2919,7 +2967,7 @@ mod tests {
         document.append_child(root, second);
         assert_eq!(
             document.set_image_source(second, ImageRole::Source, Some(SRC)),
-            Some(crate::ImageOutcome::Loaded {
+            Some(crate::render::image::ImageOutcome::Loaded {
                 node: second,
                 width: 40,
                 height: 20
@@ -2935,7 +2983,7 @@ mod tests {
         document.append_child(root, third);
         assert_eq!(
             document.set_image_source(third, ImageRole::Source, Some(OTHER_SRC)),
-            Some(crate::ImageOutcome::Failed { node: third })
+            Some(crate::render::image::ImageOutcome::Failed { node: third })
         );
         assert_eq!(document.natural_size(third), NaturalSize::NONE);
     }
@@ -2967,7 +3015,7 @@ mod tests {
 
         assert_eq!(
             document.apply_image_events(&[loaded(SRC, 40, 20)]),
-            vec![crate::ImageOutcome::Loaded {
+            vec![crate::render::image::ImageOutcome::Loaded {
                 node: owner,
                 width: 40,
                 height: 20
@@ -3009,7 +3057,7 @@ mod tests {
 
         assert_eq!(
             document.apply_image_events(&[failed(SRC)]),
-            vec![crate::ImageOutcome::Failed { node: image }]
+            vec![crate::render::image::ImageOutcome::Failed { node: image }]
         );
         assert!(
             document.apply_image_events(&[failed(SRC)]).is_empty(),
@@ -3060,7 +3108,7 @@ mod tests {
     /// Whether the node's committing parent proved its input survives any
     /// change confined to the node's own subtree — the license the in-place
     /// relayout path parks on.
-    fn is_content_independent(doc: &Document<()>, id: crate::NodeId) -> bool {
+    fn is_content_independent(doc: &Document<()>, id: crate::tree::document::NodeId) -> bool {
         let slot = doc.live_slot(id);
         doc.layout_state()
             .get(slot)
@@ -3089,7 +3137,11 @@ mod tests {
         doc
     }
 
-    fn child_of(doc: &mut Document<()>, parent: crate::NodeId, class: &str) -> crate::NodeId {
+    fn child_of(
+        doc: &mut Document<()>,
+        parent: crate::tree::document::NodeId,
+        class: &str,
+    ) -> crate::tree::document::NodeId {
         let child = doc.create_element("view", ());
         doc.add_class(child, class);
         doc.append_child(parent, child);
@@ -3536,7 +3588,11 @@ mod tests {
     fn skipping_row_list(
         rows: usize,
         skipping: Skipping,
-    ) -> (Document<()>, Vec<crate::NodeId>, crate::NodeId) {
+    ) -> (
+        Document<()>,
+        Vec<crate::tree::document::NodeId>,
+        crate::tree::document::NodeId,
+    ) {
         const VISIBLE_ROWS: usize = 2;
         let mut doc: Document<()> =
             Document::new(crate::tree::document::tests::device(), "page", ());

@@ -3,8 +3,10 @@
 
 #![allow(clippy::float_cmp)]
 
+use euclid::default::Vector2D;
+
 use crate::test_common::Doc;
-use crate::{NodeId, Vector2D};
+use crate::tree::document::NodeId;
 
 const CSS: &str = "
     page { display:flex; width:800px; height:600px; }

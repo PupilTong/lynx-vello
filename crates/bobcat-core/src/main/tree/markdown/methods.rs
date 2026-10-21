@@ -5,7 +5,7 @@
 
 use rustc_hash::FxHashMap;
 use serde_json::{Map, Value};
-use terminus::{NodeId, Point2D, Vector2D};
+use terminus::link::{NodeId, Point2D, Vector2D};
 
 use super::build::{IMAGE_TAG, Newlines, html_name};
 use super::parse::{slice_utf16, utf16_len};
@@ -148,7 +148,7 @@ pub(super) fn get_parse_result(
         Step::Enter(id) => {
             let name = document
                 .get(id)
-                .and_then(terminus::Node::tag_name)
+                .and_then(terminus::link::Node::tag_name)
                 .and_then(html_name);
             let index = name.and_then(|name| lowered.iter().position(|tag| tag == name));
             if let Some(index) = index {
@@ -204,10 +204,10 @@ pub(super) fn get_parse_result(
 ///   rendered offsets by web-core's greedy prefix walk (`mapSourceRangeToCharRange`,
 ///   `XMarkdown.ts:103-121`).
 /// - The range is split across the paragraphs it spans, each part asked of
-///   [`terminus::Document::text_range_boxes`] in that paragraph's source units, and each box moved
-///   into viewport space as the `text` component moves its own. A range covering a whole paragraph
-///   includes its images and inline views; a collapsed one is one zero-width box at the start of
-///   the paragraph holding it, the `text` component's quirk.
+///   [`terminus::link::Document::text_range_boxes`] in that paragraph's source units, and each box
+///   moved into viewport space as the `text` component moves its own. A range covering a whole
+///   paragraph includes its images and inline views; a collapsed one is one zero-width box at the
+///   start of the paragraph holding it, the `text` component's quirk.
 /// - With neither `start` nor `end`, web-core measures the selection; there is no selection model
 ///   here, so there is nothing to measure. That, and a range that shows no content, is `Ok(None)`:
 ///   code 8, the `text` component's answer when it finds nothing.
@@ -305,9 +305,9 @@ pub(super) fn get_text_bounding_rect(
 ///   native's are before it subtracts the border and padding to reach its text view's space; the
 ///   point is that origin plus `(x, y)` in viewport space.
 /// - The paragraph whose box holds the point answers the source unit under it
-///   ([`terminus::Document::text_index_at_point`]), which is turned into a rendered-text offset —
-///   an image's or inline view's the offset it sits at — or, under `indexType: "source"`, into the
-///   offset into `content` web-core's greedy prefix walk matched that character at.
+///   ([`terminus::link::Document::text_index_at_point`]), which is turned into a rendered-text
+///   offset — an image's or inline view's the offset it sits at — or, under `indexType: "source"`,
+///   into the offset into `content` web-core's greedy prefix walk matched that character at.
 /// - `Ok(None)`, code 8, when the point hits no character (native answers 1, "can not find char
 ///   index"), or the element has no box.
 pub(super) fn get_char_index_by_point(

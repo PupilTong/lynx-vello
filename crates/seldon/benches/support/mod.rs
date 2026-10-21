@@ -18,8 +18,8 @@ use stylo::servo::media_features::PointerCapabilities;
 use stylo::values::computed::font::GenericFontFamily;
 use stylo::values::computed::{CSSPixelLength, Display, Length};
 use stylo::values::specified::font::{FONT_MEDIUM_PX, QueryFontMetricsFlags};
-use terminus::layout::{Layout, NaturalSize};
-use terminus::{Document, Node, NodeId};
+use terminus::link::layout::{Layout, NaturalSize};
+use terminus::link::{Document, Node, NodeId};
 
 const TEXT_SAMPLES: &[&str] = &[
     "Settings",
@@ -67,8 +67,8 @@ impl FontMetricsProvider for BenchFontMetrics {
     }
 }
 
-fn device(viewport: Size<f32>) -> terminus::Device {
-    terminus::standards_device(
+fn device(viewport: Size<f32>) -> terminus::link::Device {
+    terminus::link::standards_device(
         MediaType::screen(),
         Size2D::<f32, CSSPixel>::new(viewport.width, viewport.height),
         Size2D::<f32, DevicePixel>::new(viewport.width, viewport.height),
@@ -103,7 +103,7 @@ const TEXT_TAG: &str = "text";
 /// The definition `crates/bobcat-core` gives `<text>`, minus its method.
 struct TextKind;
 
-impl terminus::CustomElement<()> for TextKind {
+impl terminus::link::CustomElement<()> for TextKind {
     fn is_lynx_text(&self) -> bool {
         true
     }
@@ -205,7 +205,7 @@ impl LayoutFixture {
         if !self.text_fonts_registered {
             assert_eq!(
                 self.document
-                    .register_fonts(terminus::FontBlob::from_static(AHEM)),
+                    .register_fonts(terminus::link::FontBlob::from_static(AHEM)),
                 1
             );
             self.text_fonts_registered = true;

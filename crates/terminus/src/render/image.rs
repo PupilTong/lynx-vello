@@ -84,7 +84,7 @@
 //!
 //! A document need not be fetched. The Lynx `<svg content>` hands the
 //! document its markup directly
-//! ([`Document::set_image_document`](crate::Document::set_image_document)),
+//! ([`Document::set_image_document`](crate::tree::document::Document::set_image_document)),
 //! and the registry files it under a *synthetic source*:
 //! [`SYNTHETIC_SOURCE_PREFIX`] followed by the 32 hex digits of a 128-bit
 //! hash of the bytes (SipHash-1-3 with the zero key, [`synthetic_source`]).
@@ -107,11 +107,11 @@ use bytes::Bytes;
 use rustc_hash::FxHashMap;
 use seldon::text::TextContext;
 use smallvec::SmallVec;
+use vello::Scene;
 use vello::peniko::ImageData;
 
-use crate::NodeId;
 use crate::render::svg::{self, VectorDocument};
-use crate::vello::Scene;
+use crate::tree::document::NodeId;
 
 /// A parsed SVG document, encoded and drawable at any size.
 ///
@@ -650,7 +650,7 @@ enum ImageKind {
 ///
 /// A node may hold one URL in both roles, so a binding is the pair and not
 /// the node alone — and it is what
-/// [`Document::set_image_source`](crate::Document::set_image_source) names to
+/// [`Document::set_image_source`](crate::tree::document::Document::set_image_source) names to
 /// say which of the two it is writing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ImageRole {
@@ -696,7 +696,7 @@ pub(crate) struct ImageApplied {
 
 /// The prefix of every synthetic source: the name the registry files a
 /// document handed over as markup under
-/// ([`Document::set_image_document`](crate::Document::set_image_document)),
+/// ([`Document::set_image_document`](crate::tree::document::Document::set_image_document)),
 /// `svg-content:<32 hex digits>`. Such an entry is never asked of the host,
 /// and is forgotten when its last binder unbinds.
 ///
@@ -1125,8 +1125,8 @@ mod tests {
         None
     }
 
-    fn node(bits: u64) -> crate::NodeId {
-        crate::NodeId::from_bits(bits).expect("a valid node id")
+    fn node(bits: u64) -> crate::tree::document::NodeId {
+        crate::tree::document::NodeId::from_bits(bits).expect("a valid node id")
     }
 
     use super::{ImageInbox, ImageReports};
@@ -1370,7 +1370,11 @@ mod tests {
     #[test]
     fn a_load_reports_the_nodes_whose_natural_size_must_change() {
         let mut registry = ImageRegistry::default();
-        let mut document = crate::Document::new(crate::tree::document::tests::device(), "page", ());
+        let mut document = crate::tree::document::Document::new(
+            crate::tree::document::tests::device(),
+            "page",
+            (),
+        );
         let root = document.create_element("view", ());
         registry.bind_node("app:///a.png", root, ImageRole::Source);
         let applied = registry
@@ -1679,8 +1683,8 @@ mod synthetic_tests {
     const ICON: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="4"/>"#;
     const OTHER: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" width="6" height="6"/>"#;
 
-    fn node(bits: u64) -> crate::NodeId {
-        crate::NodeId::from_bits(bits).expect("a valid node id")
+    fn node(bits: u64) -> crate::tree::document::NodeId {
+        crate::tree::document::NodeId::from_bits(bits).expect("a valid node id")
     }
 
     /// The source is the prefix and 32 lowercase hex digits, the same for

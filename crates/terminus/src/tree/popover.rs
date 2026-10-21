@@ -226,8 +226,8 @@ pub(crate) fn is_popover_attribute(name: &str) -> bool {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::{PopoverError, PopoverState};
-    use crate::NodeId;
     use crate::test_common::Doc;
+    use crate::tree::document::NodeId;
 
     /// The parts of a browser's popover UA sheet these tests read.
     const UA: &str = "
@@ -394,6 +394,6 @@ mod tests {
         let mut doc = page();
         let element = popover(&mut doc, "manual");
         doc.dom
-            .add_element_state(element, crate::ElementState::POPOVER_OPEN);
+            .add_element_state(element, stylo_dom::ElementState::POPOVER_OPEN);
     }
 }

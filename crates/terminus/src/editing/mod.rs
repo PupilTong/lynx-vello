@@ -148,8 +148,7 @@ pub use self::command::{
 pub(crate) use self::input_state::{CARET_WIDTH, caret_box, empty_line_height};
 pub use self::input_state::{EnterKeyHint, InputMode, InputType, TextInputState};
 pub(crate) use self::paragraph::EditableParagraph;
-use crate::Document;
-use crate::tree::document::NodeId;
+use crate::tree::document::{Document, NodeId};
 
 /// The attribute that makes an element an editing host.
 const CONTENTEDITABLE: &str = "contenteditable";
@@ -346,7 +345,7 @@ pub(crate) fn makes_host(value: Option<&str>) -> bool {
 
 /// Whether `node` is an editing host ([`Document::is_editing_host`]), read
 /// off the node itself.
-pub(crate) fn is_host_node<T>(node: &crate::Node<T>) -> bool {
+pub(crate) fn is_host_node<T>(node: &crate::tree::node::Node<T>) -> bool {
     node.is_element() && makes_host(node.attribute(CONTENTEDITABLE))
 }
 
@@ -355,7 +354,7 @@ pub(crate) fn is_host_node<T>(node: &crate::Node<T>) -> bool {
 /// the line by [`Document::set_has_line_if_empty`]. What layout asks of the
 /// element establishing a paragraph; Blink's `LayoutBlock::HasLineIfEmpty`,
 /// true for an editable root or a style that says so.
-pub(crate) fn has_line_if_empty<T>(node: &crate::Node<T>) -> bool {
+pub(crate) fn has_line_if_empty<T>(node: &crate::tree::node::Node<T>) -> bool {
     node.has_line_if_empty() || is_host_node(node)
 }
 
@@ -388,7 +387,10 @@ impl<T> Document<T> {
     /// from being editable. An editing host has the line either way. A
     /// node that is not an element is left alone.
     pub fn set_has_line_if_empty(&mut self, node: NodeId, on: bool) {
-        if !self.get(node).is_some_and(crate::Node::is_element) {
+        if !self
+            .get(node)
+            .is_some_and(crate::tree::node::Node::is_element)
+        {
             return;
         }
         if self.live_node_mut(node).set_has_line_if_empty(on) != on {
@@ -422,7 +424,7 @@ impl<T> Document<T> {
     /// Records that a node being freed leaves the count if it was a host,
     /// and drops its retained selection. One comparison each for a document
     /// that has neither.
-    pub(crate) fn note_freed_editing_host(&mut self, node: &crate::Node<T>) {
+    pub(crate) fn note_freed_editing_host(&mut self, node: &crate::tree::node::Node<T>) {
         if !self.editing.retained.is_empty() {
             self.editing.retained.remove(&node.id());
         }
@@ -472,7 +474,7 @@ impl<T> Document<T> {
         // A session starting gives the document a selection where it had
         // none, or another host's.
         self.editing.selectionchange_pending = true;
-        self.update_element_state(node, crate::ElementState::FOCUS, true);
+        self.update_element_state(node, stylo_dom::ElementState::FOCUS, true);
         self.note_visual_mutation();
         self.editing.events.extend([
             FocusEvent {
@@ -613,7 +615,7 @@ impl<T> Document<T> {
         self.editing.session = None;
         // The session's end is the document selection's.
         self.editing.selectionchange_pending = true;
-        self.update_element_state(element, crate::ElementState::FOCUS, false);
+        self.update_element_state(element, stylo_dom::ElementState::FOCUS, false);
         self.note_visual_mutation();
         self.editing.events.extend([
             FocusEvent {
@@ -651,8 +653,11 @@ impl<T> Document<T> {
         // No focus event, but the document's selection is gone: the flag is
         // set whatever ended the session.
         self.editing.selectionchange_pending = true;
-        if self.get(host).is_some_and(crate::Node::is_element) {
-            self.update_element_state(host, crate::ElementState::FOCUS, false);
+        if self
+            .get(host)
+            .is_some_and(crate::tree::node::Node::is_element)
+        {
+            self.update_element_state(host, stylo_dom::ElementState::FOCUS, false);
         }
         self.note_visual_mutation();
     }
@@ -708,7 +713,7 @@ impl<T> Document<T> {
         };
         let mut value = String::new();
         for &child in node.child_ids() {
-            if let Some(text) = self.get(child).and_then(crate::Node::text) {
+            if let Some(text) = self.get(child).and_then(crate::tree::node::Node::text) {
                 value.push_str(text);
             }
         }
@@ -719,9 +724,10 @@ impl<T> Document<T> {
     /// commands that change its value.
     pub(crate) fn host_is_plain_text(&self, host: NodeId) -> bool {
         self.get(host).is_some_and(|node| {
-            node.child_ids()
-                .iter()
-                .all(|&child| self.get(child).is_some_and(crate::Node::is_text_node))
+            node.child_ids().iter().all(|&child| {
+                self.get(child)
+                    .is_some_and(crate::tree::node::Node::is_text_node)
+            })
         })
     }
 

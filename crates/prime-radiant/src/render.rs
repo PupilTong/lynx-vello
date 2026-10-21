@@ -14,10 +14,10 @@
 
 use std::fmt;
 
-use terminus::Document;
-use terminus::render::gpu::{GpuError, Headless};
-use terminus::vello::Scene;
-use terminus::vello::peniko::{Color, ImageData};
+use terminus::link::Document;
+use terminus::link::render::gpu::{GpuError, Headless};
+use terminus::link::vello::Scene;
+use terminus::link::vello::peniko::{Color, ImageData};
 
 use crate::image::{Image, ImageError};
 
@@ -69,7 +69,7 @@ pub fn capture_document<T: Sync>(
     gpu: &mut Headless,
     document: &mut Document<T>,
     background: Color,
-    pixels: &impl terminus::FrameImages,
+    pixels: &impl terminus::link::FrameImages,
 ) -> Result<Image, CaptureError> {
     let (width, height) = frame_size(document);
     capture_document_sized(gpu, document, background, pixels, width, height)
@@ -80,7 +80,7 @@ pub fn capture_document_sized<T: Sync>(
     gpu: &mut Headless,
     document: &mut Document<T>,
     background: Color,
-    pixels: &impl terminus::FrameImages,
+    pixels: &impl terminus::link::FrameImages,
     width: u32,
     height: u32,
 ) -> Result<Image, CaptureError> {

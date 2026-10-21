@@ -58,7 +58,7 @@
 //! still uses the previous frame's value, while here the commit that laid the
 //! box out is the one that remembers it. Gecko likewise re-resolves container
 //! query styles after layout, in `UpdateContainerQueryStyles`; the loop in
-//! [`Document::layout`](crate::Document::layout) is this engine's version of
+//! [`Document::layout`](crate::tree::document::Document::layout) is this engine's version of
 //! that, driven by the ids [`CommittedBoxTable::apply`] collects.
 //!
 //! # The interleave, and why the container half rarely waits for that loop
@@ -95,7 +95,7 @@
 //! Recording then needs somewhere to put a box while layout holds the arenas
 //! *shared*, which is what `pending` is — [`CommittedBoxTable::apply`] moves
 //! the pass's records across afterwards, from
-//! [`Document::layout`](crate::Document::layout), which has the exclusive
+//! [`Document::layout`](crate::tree::document::Document::layout), which has the exclusive
 //! borrow, once per layout pass.
 //!
 //! The remembered half is read only from layout, which is single-threaded, so
@@ -151,7 +151,7 @@ use super::style::{StyleView, skips_contents};
 use crate::tree::document::{NodeId, NodeSlot, TreeArenas};
 use crate::tree::node::Node;
 
-/// How many times one [`Document::layout`](crate::Document::layout) call may
+/// How many times one [`Document::layout`](crate::tree::document::Document::layout) call may
 /// lay the document out — and, inside one run, how many nesting levels of
 /// deferred query containers it may settle.
 ///
@@ -563,7 +563,7 @@ pub(crate) struct ContainerEstimate {
 /// A `container-type: inline-size` box contains only its inline axis: its
 /// block size *is* a function of the contents, so there is no answer to give
 /// here before laying them out, and such a container goes on being settled by
-/// the loop in [`Document::layout`](crate::Document::layout).
+/// the loop in [`Document::layout`](crate::tree::document::Document::layout).
 ///
 /// `None` for anything that is not a size query container, and for a box whose
 /// effective containment does not (yet) contain both axes — a state
@@ -613,7 +613,7 @@ pub(crate) fn note_container_estimate<T>(
 /// run's entry is what the run came out at.
 ///
 /// A violation is not a correctness bug — the record below publishes the
-/// algorithm's size, and the loop in [`Document::layout`](crate::Document::layout)
+/// algorithm's size, and the loop in [`Document::layout`](crate::tree::document::Document::layout)
 /// re-cascades from it, which is the pre-interleave behaviour — so this is a
 /// `debug_assert`: it costs a release build nothing and tells a debug one that
 /// a page just paid the extra pass.

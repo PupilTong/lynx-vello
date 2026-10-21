@@ -20,7 +20,7 @@ use stylo::values::computed::font::GenericFontFamily;
 use stylo::values::computed::{CSSPixelLength, Length};
 use stylo::values::specified::font::{FONT_MEDIUM_PX, QueryFontMetricsFlags};
 use stylo_traits::{CSSPixel, DevicePixel};
-use terminus::{Device, Document, NodeId, StylesheetOrigin, standards_device};
+use terminus::link::{Device, Document, NodeId, StylesheetOrigin, standards_device};
 
 #[must_use]
 pub(crate) fn url_data() -> UrlExtraData {
@@ -75,11 +75,11 @@ impl FontMetricsProvider for TestFontMetricsProvider {
 }
 
 /// A definition whose elements are Lynx text elements
-/// ([`terminus::CustomElement::is_lynx_text`]) and nothing else: what
+/// ([`terminus::link::CustomElement::is_lynx_text`]) and nothing else: what
 /// `crates/bobcat-core` installs for `inline-text` and `inline-truncation`.
 pub(crate) struct TextKind;
 
-impl<T> terminus::CustomElement<T> for TextKind {
+impl<T> terminus::link::CustomElement<T> for TextKind {
     fn is_lynx_text(&self) -> bool {
         true
     }
@@ -347,7 +347,7 @@ pub(crate) fn media_matches_on(
     doc.append_child(root, probe);
     doc.layout();
     doc.get(probe)
-        .and_then(terminus::Node::computed_style)
+        .and_then(terminus::link::Node::computed_style)
         .is_some_and(|style| style.get_color().solid_color() == rgb(1, 2, 3))
 }
 

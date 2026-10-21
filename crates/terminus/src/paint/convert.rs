@@ -6,13 +6,11 @@
 
 //! Type bridges: euclid (terminus visual) → kurbo, stylo colors → peniko.
 
-use euclid::default::Transform3D;
+use euclid::default::{Size2D, Transform3D};
 use stylo::color::{AbsoluteColor, ColorSpace};
 use stylo::properties::ComputedValues;
-
-use crate::Size2D;
-use crate::vello::kurbo::Affine;
-use crate::vello::peniko::Color;
+use vello::kurbo::Affine;
+use vello::peniko::Color;
 
 pub(crate) fn item_affine(transform: &Transform3D<f32>, size: Size2D<f32>) -> Option<Affine> {
     if !transform.is_invertible() {
@@ -67,8 +65,9 @@ pub(crate) fn current_color(style: &ComputedValues) -> Color {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use vello::kurbo::Point;
+
     use super::*;
-    use crate::vello::kurbo::Point;
 
     #[test]
     fn affine_matrices_convert_exactly() {

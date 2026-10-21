@@ -133,7 +133,7 @@ impl NodeFlags {
     }
 }
 
-/// A single node in a [`Document`](crate::Document) tree.
+/// A single node in a [`Document`](crate::tree::document::Document) tree.
 pub struct Node<T> {
     owner: *mut TreeArenas<T>,
     /// This node's handle: both its identity and the arena position it
@@ -187,7 +187,7 @@ pub(crate) struct StyleRefresh {
     /// Whether the element started or stopped establishing the containing
     /// block of its absolute or fixed descendants. Its own relayout damage
     /// does not reach a positioned box deeper than a child, so the harvest
-    /// hands this to [`crate::Document::invalidate_containing_block`].
+    /// hands this to [`crate::tree::document::Document::invalidate_containing_block`].
     pub(crate) containing_block_changed: bool,
     /// Whether the boxes the element generates may have changed shape: a
     /// first or last style, or a different `display` or `content`. Either
@@ -344,7 +344,7 @@ impl<T> Node<T> {
 
     /// Whether this element's own paragraph keeps one empty line when it
     /// has no content, whether or not it is an editing host
-    /// ([`crate::Document::set_has_line_if_empty`]).
+    /// ([`crate::tree::document::Document::set_has_line_if_empty`]).
     pub(crate) fn has_line_if_empty(&self) -> bool {
         self.flags.get(NodeFlags::LINE_IF_EMPTY)
     }
@@ -821,7 +821,7 @@ impl<T> Node<T> {
     }
 
     /// Records whether this element's `pseudo` attribute is
-    /// [`PLACEHOLDER_PSEUDO_ID`](crate::PLACEHOLDER_PSEUDO_ID), answering
+    /// [`PLACEHOLDER_PSEUDO_ID`](crate::tree::shadow::PLACEHOLDER_PSEUDO_ID), answering
     /// what it was. Only `Document::set_attribute` and
     /// `Document::remove_attribute` write it, with the attribute.
     pub(crate) fn set_placeholder_pseudo(&mut self, on: bool) -> bool {
@@ -830,10 +830,10 @@ impl<T> Node<T> {
 
     /// The pseudo-element this element implements for its shadow host: an
     /// element of a shadow tree whose `pseudo` attribute is
-    /// [`PLACEHOLDER_PSEUDO_ID`](crate::PLACEHOLDER_PSEUDO_ID) is the host's `::placeholder`
-    /// (`docs/terminus-architecture.md`, "Shadow DOM and custom elements"). The attribute is read
-    /// through a node bit, so an element without it answers in one load; the walk to the
-    /// containing shadow root is paid by the elements that carry it.
+    /// [`PLACEHOLDER_PSEUDO_ID`](crate::tree::shadow::PLACEHOLDER_PSEUDO_ID) is the host's
+    /// `::placeholder` (`docs/terminus-architecture.md`, "Shadow DOM and custom elements"). The
+    /// attribute is read through a node bit, so an element without it answers in one load; the
+    /// walk to the containing shadow root is paid by the elements that carry it.
     ///
     /// A light-tree element with the attribute implements nothing: a
     /// pseudo-element has an originating element, and here that is the
@@ -1215,10 +1215,11 @@ impl<T> ExactSizeIterator for ChildrenIter<'_, T> {}
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use seldon::text::FontBlob;
     use stylo::dom::TElement;
 
     use super::*;
-    use crate::{Document, FontBlob};
+    use crate::tree::document::Document;
 
     #[cfg(target_pointer_width = "64")]
     #[test]

@@ -8,7 +8,7 @@ mod common;
 use common::{Doc, url_data};
 use cssparser::ToCss;
 use stylo::selector_parser::SelectorParser;
-use terminus::ElementState;
+use terminus::link::ElementState;
 
 fn roundtrip(selector: &str) -> Option<String> {
     let list = SelectorParser::parse_author_origin_no_namespace(selector, &url_data()).ok()?;

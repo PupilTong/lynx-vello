@@ -23,7 +23,7 @@
 //! # Why a side table
 //!
 //! The listener list is per-node state in the standard, and this table keeps
-//! it beside the tree rather than on [`Node`](crate::Node) because
+//! it beside the tree rather than on [`Node`](crate::tree::node::Node) because
 //! registrations are sparse: the project's performance assumption is that a
 //! page registers on a small fraction of its nodes, and very rarely every
 //! listener on every node. A field on `Node` would make every node pay for an

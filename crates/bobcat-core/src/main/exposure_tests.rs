@@ -12,7 +12,7 @@
 
 #![allow(clippy::float_cmp)] // Authored pixel sizes and ratios are exact.
 
-use terminus::{IntersectionMargin, MarginLength, NodeId, Vector2D};
+use terminus::link::{IntersectionMargin, MarginLength, NodeId, Vector2D};
 
 use super::{Exposure, ExposureChange, Length, Margins, fold_margins, parse_area, parse_length};
 use crate::main::tree::test_support::{

@@ -10,10 +10,10 @@
 //! shadow ends up on top (css-backgrounds-3 §7.4.1). CSS blur-radius is 2σ;
 //! vello's analytic blur cuts off at 2.5σ; the per-corner offscreen path uses 3σ.
 //!
-//! - Outset: [`crate::vello::Scene::draw_blurred_rounded_rect`] of the border-box rect offset by
-//!   the shadow offset and inflated by the spread, inside an even-odd clip that carves the
-//!   border-box shape out (§7.4.1: the shadow paints only outside the border box). Zero-blur
-//!   shadows fill the offset shape exactly, with per-corner radii.
+//! - Outset: [`vello::Scene::draw_blurred_rounded_rect`] of the border-box rect offset by the
+//!   shadow offset and inflated by the spread, inside an even-odd clip that carves the border-box
+//!   shape out (§7.4.1: the shadow paints only outside the border box). Zero-blur shadows fill the
+//!   offset shape exactly, with per-corner radii.
 //! - Inset: inside a full `SrcOver` layer clipped to the padding-box shape (a
 //!   full layer, not a clip layer, because a blend layer sits inside —
 //!   vello [#1198](https://github.com/linebender/vello/issues/1198)), fill
@@ -34,16 +34,16 @@
 //!
 //! `currentcolor` defaults resolve via [`convert::resolve_color`].
 
+use euclid::default::Size2D;
 use stylo::properties::ComputedValues;
 use stylo::values::computed::effects::BoxShadow;
+use vello::kurbo::Rect;
+use vello::peniko::{BlendMode, Color, Compose, Fill, Mix};
 
-use crate::Size2D;
 use crate::paint::compose::FilterGroup;
 use crate::paint::shape::{BoxShape, inner_radii, normalize_radii, ring_path_into, with_shape};
 use crate::paint::walker::WalkSink;
 use crate::paint::{BoxFragment, PathScratch, convert};
-use crate::vello::kurbo::Rect;
-use crate::vello::peniko::{BlendMode, Color, Compose, Fill, Mix};
 use crate::visual::{CornerRadii, PaintOrder};
 
 pub(crate) fn paint_outset(

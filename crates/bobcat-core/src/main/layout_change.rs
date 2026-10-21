@@ -4,10 +4,10 @@
 //!
 //! Neither has a standards counterpart with its event shape, so both live
 //! here rather than in `terminus`, over two primitives `terminus` has: the W3C
-//! `ResizeObserver` ([`terminus::ResizeEventHandler`]) for `layoutchange`, and the
+//! `ResizeObserver` ([`terminus::link::ResizeEventHandler`]) for `layoutchange`, and the
 //! per-pass text layout report list
-//! ([`terminus::Document::set_text_layout_reporting`],
-//! [`terminus::Document::take_text_layout_reports`]) for `layout`.
+//! ([`terminus::link::Document::set_text_layout_reporting`],
+//! [`terminus::link::Document::take_text_layout_reports`]) for `layout`.
 //!
 //! # `layoutchange` (the user's rulings of 2026-10-20, §5 of the design)
 //!
@@ -30,7 +30,7 @@
 //! ([`crate::main::runtime::MainThreadRuntime::notify_resize_observers`]).
 //! A handler's writes land in the next commit.
 //!
-//! **The detail's rect is [`terminus::Document::bounding_client_rect`]** (rulings
+//! **The detail's rect is [`terminus::link::Document::bounding_client_rect`]** (rulings
 //! 3 and 8), read when the event is delivered: the transform-free walk the
 //! `boundingClientRect` UI method answers from, in the Lynx view's own CSS
 //! px, with nothing subtracted. A target that has no box at delivery —
@@ -99,7 +99,9 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use rustc_hash::FxHashMap;
-use terminus::{NodeId, ObservedBox, ResizeEventHandler, ResizeObserverEntry, ResizeObserverId};
+use terminus::link::{
+    NodeId, ObservedBox, ResizeEventHandler, ResizeObserverEntry, ResizeObserverId,
+};
 
 use super::tree::{LynxDocument, layout_change_target};
 
@@ -112,7 +114,7 @@ pub(crate) const TEXT_LAYOUT_EVENT: &str = "layout";
 /// What a listener for one of the two Lynx layout events registers on the
 /// host: a `layoutchange` listener a resize observation of its element
 /// ([`LayoutChangeObserver::observe`]), a `layout` listener on a `text` that
-/// element's text layout report ([`terminus::Document::set_text_layout_reporting`]).
+/// element's text layout report ([`terminus::link::Document::set_text_layout_reporting`]).
 ///
 /// The runtime adds the registration when the listener table's answer to
 /// "does `node` have a row for this name" turns true, and removes it when the

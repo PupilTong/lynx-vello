@@ -95,7 +95,7 @@
 //! (`LynxFrameView.java:103-105`), which web-core does not read either: it
 //! is accepted and does nothing.
 
-use terminus::{CustomElement, NodeId, ShadowRootMode};
+use terminus::link::{CustomElement, NodeId, ShadowRootMode};
 
 use super::{ComponentEvents, LynxDocument, PAGE_TAG};
 
@@ -121,7 +121,7 @@ frame[auto-width]:not([auto-width="false"]) { contain: layout paint style; }
 
 /// Installs the component, over the queue its connections go on. Must run
 /// before any element could carry the tag, which is
-/// [`Document::define`](terminus::Document::define)'s own precondition.
+/// [`Document::define`](terminus::link::Document::define)'s own precondition.
 pub(super) fn define(document: &mut LynxDocument, events: ComponentEvents) {
     document.define(FRAME_TAG, Box::new(Frame { events }));
 }
@@ -160,7 +160,7 @@ fn append_nested_page(document: &mut LynxDocument, shadow: NodeId) -> NodeId {
 
 /// Lets go of the card the frame `frame` shows: frees its nested page with
 /// everything under it — the page is inside a shadow tree, so
-/// [`terminus::Document::drop_element`] frees the whole subtree outright, and
+/// [`terminus::link::Document::drop_element`] frees the whole subtree outright, and
 /// each freed node takes its listener rows and its intersection
 /// registrations with it through the document's free path — and every sheet
 /// mounted on the frame's shadow root, so the next card is styled by its
@@ -180,7 +180,7 @@ pub(crate) fn reset_frame(document: &mut LynxDocument, frame: NodeId) -> Option<
 pub(crate) fn is_frame(document: &LynxDocument, node: NodeId) -> bool {
     document
         .get(node)
-        .and_then(terminus::Node::tag_name)
+        .and_then(terminus::link::Node::tag_name)
         .is_some_and(|tag| tag == FRAME_TAG)
 }
 
@@ -195,7 +195,7 @@ pub(crate) fn nested_page(document: &LynxDocument, frame: NodeId) -> Option<Node
         .get(shadow)?
         .children()
         .find(|child| child.is_element())
-        .map(terminus::Node::id)
+        .map(terminus::link::Node::id)
 }
 
 /// How many frames `node` sits in, itself included: every frame among its
@@ -208,7 +208,7 @@ pub(crate) fn frame_depth(document: &LynxDocument, node: NodeId) -> usize {
         if is_frame(document, id) {
             depth += 1;
         }
-        current = document.get(id).and_then(terminus::Node::parent_id);
+        current = document.get(id).and_then(terminus::link::Node::parent_id);
     }
     depth
 }
@@ -217,8 +217,8 @@ pub(crate) fn frame_depth(document: &LynxDocument, node: NodeId) -> usize {
 mod tests {
     #![allow(clippy::float_cmp)] // Authored pixel sizes lay out exactly.
 
-    use terminus::stylo::values::computed::Display;
-    use terminus::{NodeId, ShadowRootMode};
+    use terminus::link::stylo::values::computed::Display;
+    use terminus::link::{NodeId, ShadowRootMode};
 
     use super::super::test_support::{
         child, display, document, element_under, with_component_events, with_config,
@@ -571,7 +571,7 @@ mod tests {
 
     /// What the component queued since the last call, as `(node,
     /// connected)`.
-    fn queued(events: &ComponentEvents) -> Vec<(terminus::NodeId, bool)> {
+    fn queued(events: &ComponentEvents) -> Vec<(terminus::link::NodeId, bool)> {
         events
             .take()
             .into_iter()

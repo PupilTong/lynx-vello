@@ -64,7 +64,7 @@ pub(super) fn install_styles(
             && !slot
                 .document_mut()
                 .get(shadow)
-                .is_some_and(terminus::Node::is_shadow_root)
+                .is_some_and(terminus::link::Node::is_shadow_root)
         {
             return Err(format!("{NAME}: {shadow:?} is not a live shadow root"));
         }
@@ -109,7 +109,7 @@ pub(super) fn settle_style_sheet(
     token: &CancellationToken,
     url: &str,
     answer: SourceAnswer,
-    shadow: Option<terminus::NodeId>,
+    shadow: Option<terminus::link::NodeId>,
 ) -> Result<(), String> {
     let sheet = match wait_for_source(thread, token, answer) {
         Ok(LoadedSource::StyleSheet(sheet)) => Ok(sheet),

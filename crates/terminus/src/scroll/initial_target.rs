@@ -34,8 +34,7 @@ use euclid::default::Vector2D;
 
 use super::ScrollBehavior;
 use super::into_view::ScrollLogicalPosition;
-use crate::NodeId;
-use crate::tree::document::Document;
+use crate::tree::document::{Document, NodeId};
 use crate::visual::PaintOrder;
 
 /// One `scroll-initial-target: nearest` element the build found, with the
@@ -148,7 +147,7 @@ impl<T> Document<T> {
 #[allow(clippy::float_cmp, reason = "the expectations are exact offsets")]
 mod tests {
     use super::*;
-    use crate::StylesheetOrigin;
+    use crate::style::engine::StylesheetOrigin;
     use crate::tree::document::tests::device;
 
     fn paged(page_css: &str, count: usize) -> (Document<()>, NodeId, Vec<NodeId>) {
@@ -209,7 +208,7 @@ mod tests {
     }
 
     fn slot_request(
-        frame: &crate::CommittedFrame,
+        frame: &crate::visual::CommittedFrame,
         scroller: NodeId,
     ) -> Option<crate::scroll::ScrollRequest> {
         let index = frame.slot_of(scroller).expect("the scroller has a slot");

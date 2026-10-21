@@ -1,4 +1,4 @@
-//! Behavior tests for the `terminus::layout` integration: the seldon
+//! Behavior tests for the `terminus::link::layout` integration: the seldon
 //! host protocol implemented over `Document<T>` + stylo computed styles.
 
 #![allow(clippy::float_cmp)]
@@ -7,8 +7,8 @@ mod common;
 
 use common::{Doc, device_with};
 use stylo::queries::values::PrefersColorScheme;
-use terminus::layout::Layout;
-use terminus::{FontBlob, NodeId};
+use terminus::link::layout::Layout;
+use terminus::link::{FontBlob, NodeId};
 
 const AHEM: &[u8] = include_bytes!("../../seldon/tests/fixtures/Ahem.ttf");
 
@@ -55,14 +55,14 @@ impl LayoutSnapshot {
 ///
 /// What the text tests were really asserting: a text node has no box of its
 /// own any more, and the element's box may be stretched by its parent.
-fn text_ink(dom: &terminus::Document<()>, holder: terminus::NodeId) -> (f32, f32) {
+fn text_ink(dom: &terminus::link::Document<()>, holder: terminus::link::NodeId) -> (f32, f32) {
     let size = dom
         .text_block_size(holder)
         .expect("holder establishes a block");
     (size.width, size.height)
 }
 
-fn dom_rect(dom: &terminus::Document<()>, id: NodeId) -> (f32, f32, f32, f32) {
+fn dom_rect(dom: &terminus::link::Document<()>, id: NodeId) -> (f32, f32, f32, f32) {
     let layout = dom.rounded_layout(id).expect("node id is live");
     (
         layout.location.x,
@@ -79,7 +79,7 @@ impl Harness {
         }
     }
 
-    fn with_device(css: &str, device: terminus::Device) -> Self {
+    fn with_device(css: &str, device: terminus::link::Device) -> Self {
         let mut doc = Doc::with_device(device);
         doc.add_css(css);
         Self { doc }
@@ -428,12 +428,12 @@ fn display_contents_works_across_every_container_algorithm() {
 
 #[test]
 fn display_contents_inherits_to_its_children_without_boxing_them() {
-    let mut dom = terminus::Document::new(common::device(800.0, 600.0), "page", ());
+    let mut dom = terminus::link::Document::new(common::device(800.0, 600.0), "page", ());
     common::define_lynx_text(&mut dom, "page");
     dom.add_stylesheet(
         "page { width: 200px; height: 100px; font-family: Ahem; font-size: 16px; }
          .wrapper { display: contents; font-size: 8px; }",
-        terminus::StylesheetOrigin::Author,
+        terminus::link::StylesheetOrigin::Author,
     );
     assert_eq!(dom.register_fonts(FontBlob::from_static(AHEM)), 1);
     let root = dom.document_element().id();
@@ -1003,13 +1003,13 @@ fn omitted_display_uses_flex_and_lays_out_children() {
 
 #[test]
 fn text_nodes_use_parley_with_their_parents_inherited_style() {
-    let mut dom = terminus::Document::new(common::device(800.0, 600.0), "page", ());
+    let mut dom = terminus::link::Document::new(common::device(800.0, 600.0), "page", ());
     common::define_lynx_text(&mut dom, "text");
     dom.add_stylesheet(
         "page { display: flex; width: 200px; height: 100px; align-items: flex-start;
                 font-family: Ahem; font-size: 16px; }
          .sibling { width: 50px; height: 10px; }",
-        terminus::StylesheetOrigin::Author,
+        terminus::link::StylesheetOrigin::Author,
     );
     assert_eq!(dom.register_fonts(FontBlob::from_static(AHEM)), 1);
     let root = dom.document_element().id();
@@ -1034,11 +1034,11 @@ fn text_nodes_use_parley_with_their_parents_inherited_style() {
 
 #[test]
 fn embedder_default_family_shapes_text_without_an_authored_font_family() {
-    let mut dom = terminus::Document::new(common::device(800.0, 600.0), "page", ());
+    let mut dom = terminus::link::Document::new(common::device(800.0, 600.0), "page", ());
     common::define_lynx_text(&mut dom, "page");
     dom.add_stylesheet(
         "page { width: 200px; height: 100px; font-size: 16px; }",
-        terminus::StylesheetOrigin::Author,
+        terminus::link::StylesheetOrigin::Author,
     );
     assert_eq!(dom.register_fonts(FontBlob::from_static(AHEM)), 1);
     let root = dom.document_element().id();
@@ -1055,11 +1055,11 @@ fn embedder_default_family_shapes_text_without_an_authored_font_family() {
 
 #[test]
 fn inherited_text_style_change_remeasures_text_child() {
-    let mut dom = terminus::Document::new(common::device(800.0, 600.0), "page", ());
+    let mut dom = terminus::link::Document::new(common::device(800.0, 600.0), "page", ());
     common::define_lynx_text(&mut dom, "page");
     dom.add_stylesheet(
         "page { width: 200px; height: 100px; font-family: Ahem; font-size: 16px; }",
-        terminus::StylesheetOrigin::Author,
+        terminus::link::StylesheetOrigin::Author,
     );
     assert_eq!(dom.register_fonts(FontBlob::from_static(AHEM)), 1);
     let root = dom.document_element().id();
@@ -1078,13 +1078,13 @@ fn inherited_text_style_change_remeasures_text_child() {
 
 #[test]
 fn inherited_text_style_change_remeasures_nested_text_child() {
-    let mut dom = terminus::Document::new(common::device(800.0, 600.0), "page", ());
+    let mut dom = terminus::link::Document::new(common::device(800.0, 600.0), "page", ());
     common::define_lynx_text(&mut dom, "text");
     dom.add_stylesheet(
         "page { display: flex; width: 200px; height: 100px;
                 font-family: Ahem; font-size: 16px; }
          text { width: 200px; height: 100px; }",
-        terminus::StylesheetOrigin::Author,
+        terminus::link::StylesheetOrigin::Author,
     );
     assert_eq!(dom.register_fonts(FontBlob::from_static(AHEM)), 1);
     let root = dom.document_element().id();
@@ -1444,7 +1444,9 @@ fn a_removed_boundary_does_not_replay_onto_the_node_that_replaces_it() {
 
     h.doc.dom.set_natural_size(
         old_child,
-        terminus::layout::NaturalSize::from_size(terminus::layout::Size::new(30.0, 20.0)),
+        terminus::link::layout::NaturalSize::from_size(terminus::link::layout::Size::new(
+            30.0, 20.0,
+        )),
     );
 
     assert_eq!(h.doc.dom.drop_subtree(old_boundary).len(), 2);
@@ -1484,11 +1486,11 @@ fn a_removed_boundary_does_not_replay_onto_the_node_that_replaces_it() {
 
 #[test]
 fn color_only_change_preserves_text_geometry() {
-    let mut dom = terminus::Document::new(common::device(800.0, 600.0), "page", ());
+    let mut dom = terminus::link::Document::new(common::device(800.0, 600.0), "page", ());
     common::define_lynx_text(&mut dom, "page");
     dom.add_stylesheet(
         "page { width: 200px; height: 100px; font-family: Ahem; font-size: 16px; }",
-        terminus::StylesheetOrigin::Author,
+        terminus::link::StylesheetOrigin::Author,
     );
     assert_eq!(dom.register_fonts(FontBlob::from_static(AHEM)), 1);
     let root = dom.document_element().id();
@@ -1792,14 +1794,14 @@ fn two_damaged_nodes_under_one_boundary_both_relayout() {
 
 #[test]
 fn content_visibility_hidden_skips_descendant_layout_and_measurement() {
-    let mut dom = terminus::Document::new(common::device(800.0, 600.0), "page", ());
+    let mut dom = terminus::link::Document::new(common::device(800.0, 600.0), "page", ());
     common::define_lynx_text(&mut dom, "text");
     dom.add_stylesheet(
         "page { display: flex; width: 200px; height: 100px; align-items: flex-start;
                 font-family: Ahem; font-size: 16px; }
          .container { width: 60px; height: 80px; }
          .fixed { position: fixed; left: 10px; top: 20px; width: 30px; height: 40px; }",
-        terminus::StylesheetOrigin::Author,
+        terminus::link::StylesheetOrigin::Author,
     );
     assert_eq!(dom.register_fonts(FontBlob::from_static(AHEM)), 1);
     let root = dom.document_element().id();
@@ -1815,7 +1817,7 @@ fn content_visibility_hidden_skips_descendant_layout_and_measurement() {
 
     dom.layout();
 
-    let rect = |dom: &terminus::Document<()>, id: NodeId| {
+    let rect = |dom: &terminus::link::Document<()>, id: NodeId| {
         let l = dom.rounded_layout(id).expect("live");
         (l.location.x, l.location.y, l.size.width, l.size.height)
     };
@@ -2418,7 +2420,7 @@ fn hoisted_rank_resolves_through_nested_contents_levels() {
 }
 
 /// `bounding_client_rect` as a tuple, for the same reason `dom_rect` exists.
-fn client_rect(dom: &terminus::Document<()>, id: NodeId) -> Option<(f32, f32, f32, f32)> {
+fn client_rect(dom: &terminus::link::Document<()>, id: NodeId) -> Option<(f32, f32, f32, f32)> {
     dom.bounding_client_rect(id).map(|rect| {
         (
             rect.origin.x,
@@ -2507,8 +2509,8 @@ fn bounding_client_rect_subtracts_ancestor_scroll_offsets_but_not_its_own() {
     assert_eq!(
         h.doc
             .dom
-            .scroll_to(scroller, terminus::Vector2D::new(0.0, 50.0)),
-        terminus::Vector2D::new(0.0, 50.0)
+            .scroll_to(scroller, terminus::link::Vector2D::new(0.0, 50.0)),
+        terminus::link::Vector2D::new(0.0, 50.0)
     );
     assert_eq!(
         client_rect(&h.doc.dom, child),
@@ -2524,7 +2526,7 @@ fn bounding_client_rect_subtracts_ancestor_scroll_offsets_but_not_its_own() {
     // Scrolled entirely out of the scrollport, the box is still a box.
     h.doc
         .dom
-        .scroll_to(scroller, terminus::Vector2D::new(0.0, 300.0));
+        .scroll_to(scroller, terminus::link::Vector2D::new(0.0, 300.0));
     assert_eq!(
         client_rect(&h.doc.dom, child),
         Some((20.0, -290.0, 80.0, 400.0))
@@ -2563,10 +2565,10 @@ fn an_out_of_flow_box_follows_only_its_containing_blocks_scroll() {
 
     h.doc
         .dom
-        .scroll_to(scroller, terminus::Vector2D::new(0.0, 50.0));
+        .scroll_to(scroller, terminus::link::Vector2D::new(0.0, 50.0));
     h.doc
         .dom
-        .scroll_to(anchored_scroller, terminus::Vector2D::new(0.0, 50.0));
+        .scroll_to(anchored_scroller, terminus::link::Vector2D::new(0.0, 50.0));
 
     assert_eq!(
         client_rect(&h.doc.dom, escaping),
@@ -2599,7 +2601,7 @@ fn a_fixed_box_inside_a_scroller_never_moves() {
 
     h.doc
         .dom
-        .scroll_to(scroller, terminus::Vector2D::new(0.0, 60.0));
+        .scroll_to(scroller, terminus::link::Vector2D::new(0.0, 60.0));
     assert_eq!(
         client_rect(&h.doc.dom, fixed),
         Some((7.0, 9.0, 30.0, 30.0)),
@@ -3007,7 +3009,9 @@ fn replaced_child(h: &mut Harness, parent: NodeId, spec: &str) -> NodeId {
     let node = h.doc.el(parent, spec);
     h.doc.dom.set_natural_size(
         node,
-        terminus::layout::NaturalSize::from_size(terminus::layout::Size::new(40.0, 20.0)),
+        terminus::link::layout::NaturalSize::from_size(terminus::link::layout::Size::new(
+            40.0, 20.0,
+        )),
     );
     node
 }

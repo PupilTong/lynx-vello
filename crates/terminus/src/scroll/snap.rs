@@ -83,20 +83,19 @@ use stylo::values::computed::{
 use stylo::values::specified::box_::ScrollSnapAlignKeyword;
 
 use super::{ScrollAxes, clamp_to, is_scroll_container, wrap_axis};
-use crate::NodeId;
 use crate::layout::{DisplayMode, StyleView, box_parent};
-use crate::tree::document::Document;
+use crate::tree::document::{Document, NodeId};
 use crate::visual::PaintOrder;
 
 /// The share of the scrollport, per axis, within which `proximity` snaps.
-pub const PROXIMITY_RATIO: f32 = 1.0 / 3.0;
+pub(crate) const PROXIMITY_RATIO: f32 = 1.0 / 3.0;
 
 /// How far from a snap position, in CSS px, an offset still stands on it
 /// ([`SnapAxis::snapped_area`]). An offset at rest on a position is that
 /// position's own number, except on a circular axis, where normalizing it
 /// into the period rounds; no container comes to rest this near a position
 /// without being on it.
-pub const SNAPPED_TOLERANCE: f32 = 0.5;
+pub(crate) const SNAPPED_TOLERANCE: f32 = 0.5;
 
 /// How strictly a container snaps on an axis (`scroll-snap-type`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -404,7 +403,7 @@ impl SnapPositions {
 
 /// What kind of scrolling operation a chain step belongs to (§7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ScrollKind {
+pub(crate) enum ScrollKind {
     /// One step of a continuing gesture — a drag. Applied raw; the gesture
     /// settles onto a snap position when it ends.
     Gesture,
@@ -440,7 +439,7 @@ pub enum ScrollKind {
     reason = "one step's full inputs: the container's geometry, its snapping per axis, \
               and the axes the caller wraps"
 )]
-pub fn resolve_step(
+pub(crate) fn resolve_step(
     kind: ScrollKind,
     offset: Vector2D<f32>,
     admitted: Vector2D<f32>,
@@ -480,7 +479,7 @@ pub fn resolve_step(
 /// moves to its nearest snap position, a `proximity` one only when within
 /// range.
 #[must_use]
-pub fn settle_offset(
+pub(crate) fn settle_offset(
     start: Vector2D<f32>,
     offset: Vector2D<f32>,
     scrollport: Size2D<f32>,
@@ -799,7 +798,7 @@ impl<T> Document<T> {
 #[allow(clippy::float_cmp, reason = "the expectations are exact offsets")]
 mod tests {
     use super::*;
-    use crate::StylesheetOrigin;
+    use crate::style::engine::StylesheetOrigin;
     use crate::tree::document::tests::device;
 
     /// The area named `key` in the axis tests, which read no tree.

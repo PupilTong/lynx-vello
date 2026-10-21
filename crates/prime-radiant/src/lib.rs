@@ -14,15 +14,15 @@
 //!
 //! ```no_run
 //! # #[cfg(feature = "render")]
-//! # fn example(document: &mut terminus::Document<()>) {
+//! # fn example(document: &mut terminus::link::Document<()>) {
 //! use prime_radiant::vello::peniko::Color;
 //! use prime_radiant::{Screenshots, capture_document, headless};
 //!
 //! let mut gpu = headless("my_test");
 //! // The pixel source a frame's image draws resolve against. A page with no
-//! // images passes `terminus::NoImages`; one with images passes the store.
-//! let image =
-//!     capture_document(&mut gpu, document, Color::WHITE, &terminus::NoImages).expect("capture");
+//! // images passes `terminus::link::NoImages`; one with images passes the store.
+//! let image = capture_document(&mut gpu, document, Color::WHITE, &terminus::link::NoImages)
+//!     .expect("capture");
 //! Screenshots::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/screenshots"))
 //!     .assert_matches(&["my-case", "index"], &image);
 //! # }
@@ -76,7 +76,7 @@ mod render;
 mod store;
 
 #[cfg(feature = "render")]
-pub use terminus::vello;
+pub use terminus::link::vello;
 
 pub use crate::compare::{CompareOptions, Comparison, compare};
 pub use crate::golden::{

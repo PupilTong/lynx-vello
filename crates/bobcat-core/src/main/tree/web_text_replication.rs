@@ -51,10 +51,10 @@
 // replicas assert is compared exactly; glyph counts convert to advances.
 #![allow(clippy::float_cmp, clippy::cast_precision_loss, clippy::similar_names)]
 
-use terminus::NodeId;
-use terminus::stylo::color::AbsoluteColor;
-use terminus::stylo::properties::PropertyId;
-use terminus::stylo::values::computed::{ColorPropertyValue, Display};
+use terminus::link::NodeId;
+use terminus::link::stylo::color::AbsoluteColor;
+use terminus::link::stylo::properties::PropertyId;
+use terminus::link::stylo::values::computed::{ColorPropertyValue, Display};
 
 use super::test_support::{child, display, element_under, style_of, with_config};
 use super::{LynxDocument, PageConfig};
@@ -80,7 +80,7 @@ fn ahem_document() -> LynxDocument {
 fn ahem_document_with(config: PageConfig) -> LynxDocument {
     let mut document = with_config(config);
     assert_eq!(
-        document.register_fonts(terminus::FontBlob::from_static(AHEM)),
+        document.register_fonts(terminus::link::FontBlob::from_static(AHEM)),
         1
     );
     assert!(document.set_default_font_family("Ahem"));
@@ -2206,7 +2206,7 @@ fn the_later_of_two_equal_specificity_class_rules_wins_on_a_text() {
     document.add_stylesheet(
         ".a { color: red; font-size: 16px }\n\
          .b { color: linear-gradient(green, #ff0); font-size: 80px }",
-        terminus::StylesheetOrigin::Author,
+        terminus::link::StylesheetOrigin::Author,
     );
     let text = child(&mut document, "text", "width: 900px");
     document.add_class(text, "a");
@@ -2376,7 +2376,10 @@ fn inheritance_card(switch: Option<bool>) -> InheritanceCard {
         config.enable_css_inheritance = enabled;
     }
     let mut document = ahem_document_with(config);
-    document.add_stylesheet(INHERITANCE_CARD_CSS, terminus::StylesheetOrigin::Author);
+    document.add_stylesheet(
+        INHERITANCE_CARD_CSS,
+        terminus::link::StylesheetOrigin::Author,
+    );
     let root = child(&mut document, "view", "");
 
     let solid_parent = card_view(&mut document, root, "typography");
@@ -2670,7 +2673,7 @@ fn css_inheritance_follows_a_change_of_the_view_s_text_decoration() {
     });
     document.add_stylesheet(
         ".struck { text-decoration: line-through; }",
-        terminus::StylesheetOrigin::Author,
+        terminus::link::StylesheetOrigin::Author,
     );
     let view = child(&mut document, "view", "");
     let direct = card_text(&mut document, view, "", "direct");
@@ -2714,7 +2717,7 @@ fn css_inheritance_is_scoped_to_a_view_s_own_text_and_wrapper() {
     });
     document.add_stylesheet(
         "page, .coloured { color: rgb(1, 2, 3); }",
-        terminus::StylesheetOrigin::Author,
+        terminus::link::StylesheetOrigin::Author,
     );
     let page = document.document_element().id();
     let mut texts = vec![("page", card_text(&mut document, page, "", "page"))];
@@ -2757,7 +2760,7 @@ fn every_authored_declaration_outranks_css_inheritance() {
     });
     document.add_stylesheet(
         "text { color: rgb(4, 5, 6); text-decoration: line-through; }",
-        terminus::StylesheetOrigin::Author,
+        terminus::link::StylesheetOrigin::Author,
     );
     let view = child(
         &mut document,

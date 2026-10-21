@@ -1,11 +1,11 @@
-//! An in-memory image source for tests and benchmarks: a [`terminus::FrameImages`]
+//! An in-memory image source for tests and benchmarks: a [`terminus::link::FrameImages`]
 //! that answers from whatever a test published into it.
 //!
 //! Production stores fetch, decode, cache and evict; this one does none of
 //! that. It holds exactly the pixels a test put in it, so a render either
 //! draws them or proves it looked the image up under the wrong source.
 //!
-//! It reports every load inline through the [`terminus::ImageReports`] a view
+//! It reports every load inline through the [`terminus::link::ImageReports`] a view
 //! handed it, so a test needs no async runtime at all. What it does honour is
 //! the identity contract: every [`FrameImages::read`] of one
 //! source returns a clone sharing the same `Blob`, which is what vello keys
@@ -25,8 +25,8 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use terminus::vello::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
-use terminus::{
+use terminus::link::vello::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
+use terminus::link::{
     Document, DocumentKind, FrameImages, ImageEvent, ImageReports, ImageSizeHint, VectorDocument,
 };
 
@@ -365,7 +365,9 @@ pub fn render_with_images<T: Sync>(document: &mut Document<T>, store: &TestImage
 mod tests {
     use std::sync::Arc;
 
-    use terminus::{Device, Document, DocumentKind, ImageEvent, ImageOutcome, ImageRole, NodeId};
+    use terminus::link::{
+        Device, Document, DocumentKind, ImageEvent, ImageOutcome, ImageRole, NodeId,
+    };
 
     use super::{TestImages, pump_images};
 
@@ -403,10 +405,10 @@ mod tests {
         );
         assert_eq!(store.len(), 1, "only the parsed document is held");
         assert!(
-            terminus::FrameImages::read(
+            terminus::link::FrameImages::read(
                 &store,
                 "app:///icon.svg",
-                terminus::ImageSizeHint::UNBOUNDED
+                terminus::link::ImageSizeHint::UNBOUNDED
             )
             .is_none(),
             "the engine draws a document itself and never reads it"

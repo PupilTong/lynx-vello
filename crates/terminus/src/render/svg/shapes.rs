@@ -1,8 +1,7 @@
 //! Geometry: path data and the basic shapes as kurbo paths.
 
 use svgtypes::{PathParser, PathSegment, PointsParser};
-
-use crate::vello::kurbo::{Arc, BezPath, Circle, Ellipse, Point, Rect, Shape, SvgArc, Vec2};
+use vello::kurbo::{Arc, BezPath, Circle, Ellipse, Point, Rect, Shape, SvgArc, Vec2};
 
 /// The tolerance arcs (elliptical arcs, circles, rounded corners) are
 /// turned into cubic Béziers at, in user units. Small: a 24-unit icon is

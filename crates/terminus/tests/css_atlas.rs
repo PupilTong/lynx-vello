@@ -21,10 +21,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use prime_radiant::{CompareOptions, Image, compare, screenshots_in};
-use terminus::render::gpu::Headless;
-use terminus::vello::Scene;
-use terminus::vello::kurbo::{Affine, Rect};
-use terminus::vello::peniko::{BlendMode, Color, Compose, Fill, Mix};
+use terminus::link::render::gpu::Headless;
+use terminus::link::vello::Scene;
+use terminus::link::vello::kurbo::{Affine, Rect};
+use terminus::link::vello::peniko::{BlendMode, Color, Compose, Fill, Mix};
 
 const CASE_COUNT: usize = 1_000;
 const CELL_SIZE: u32 = 128;
@@ -380,7 +380,7 @@ fn build_and_render(shard: usize, gpu: &mut Headless) -> Result<Image, String> {
         if case.category == "text" {
             let registered = document
                 .dom
-                .register_fonts(terminus::FontBlob::from_static(AHEM));
+                .register_fonts(terminus::link::FontBlob::from_static(AHEM));
             if registered != 1 {
                 return Err(format!(
                     "{}: expected to register one Ahem face, got {registered}",
@@ -389,7 +389,7 @@ fn build_and_render(shard: usize, gpu: &mut Headless) -> Result<Image, String> {
             }
         }
         document.dom.render();
-        let child = document.dom.scene(&terminus::NoImages);
+        let child = document.dom.scene(&terminus::link::NoImages);
 
         let column = u32::try_from(slot % GRID).expect("an atlas column fits u32");
         let row = u32::try_from(slot / GRID).expect("an atlas row fits u32");
@@ -773,7 +773,7 @@ fn asset_basenames(directory: &Path, extension: &str) -> BTreeSet<String> {
 /// which only a Lynx text element does under `display: flex`.
 #[test]
 fn the_text_block_class_makes_a_fixture_element_a_lynx_paragraph() {
-    use terminus::stylo::values::computed::Display;
+    use terminus::link::stylo::values::computed::Display;
 
     let case = generated::CASES
         .iter()
@@ -793,7 +793,7 @@ fn the_text_block_class_makes_a_fixture_element_a_lynx_paragraph() {
         .get(root)
         .expect("the staged root")
         .first_child()
-        .map(terminus::Node::id)
+        .map(terminus::link::Node::id)
         .expect("the staged root wraps the text box");
     let display = *doc
         .dom

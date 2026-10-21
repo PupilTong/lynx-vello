@@ -16,8 +16,7 @@ use stylo::values::computed::transform::{
 use stylo::values::generics::transform::{
     create_perspective_matrix, get_normalized_vector_and_angle,
 };
-
-use crate::vello::kurbo::Affine;
+use vello::kurbo::Affine;
 
 /// Perspective applied to direct child stacking contexts.
 #[derive(Debug, Clone, Copy)]

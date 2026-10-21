@@ -1,4 +1,4 @@
-//! The editing half of the main thread: `terminus::editing` wired to the realm
+//! The editing half of the main thread: `terminus::link::editing` wired to the realm
 //! and to the host (`docs/editable-text-design.md`, PR E2).
 //!
 //! `terminus` computes every edit and reports the events it owes; it dispatches
@@ -10,18 +10,18 @@
 //!   prepares it, the events before the change are dispatched at the host, `terminus` commits it,
 //!   and the events after the change follow. No listener can stop it: no event is cancelable from
 //!   script (the 2026-08-17 ruling, `docs/tracking/deviations.md`).
-//! - **Focus events** are drained from `terminus` ([`terminus::Document::take_focus_events`]) by
-//!   [`MainThreadRuntime::dispatch_focus_events`] right after the one operation here that moves
+//! - **Focus events** are drained from `terminus` ([`terminus::link::Document::take_focus_events`])
+//!   by [`MainThreadRuntime::dispatch_focus_events`] right after the one operation here that moves
 //!   focus — a pointer press — so `focus` and `focusin` reach script before the events the rest of
 //!   the press dispatches, as a browser's focus update runs inside its `mousedown` default action.
-//!   `terminus` queues focus events only from [`terminus::Document::focus`] and
-//!   [`terminus::Document::blur`], and only this module calls them; the focus fixup rule (a removed
-//!   or no longer editable host) fires nothing.
+//!   `terminus` queues focus events only from [`terminus::link::Document::focus`] and
+//!   [`terminus::link::Document::blur`], and only this module calls them; the focus fixup rule (a
+//!   removed or no longer editable host) fires nothing.
 //! - **`selectionchange`** is two events of one name. The engine-only one at the host, after every
 //!   command [`MainThreadRuntime::apply_edit`] applied, reaches the text field component alone. The
 //!   W3C one is separate: `terminus` sets its flag whenever the document's selection changes
-//!   ([`terminus::Document::has_pending_selectionchange`]) — focus, blur, a command, a value write
-//!   — and the entry that delivers component events fires it at the document node
+//!   ([`terminus::link::Document::has_pending_selectionchange`]) — focus, blur, a command, a value
+//!   write — and the entry that delivers component events fires it at the document node
 //!   ([`MainThreadRuntime::dispatch_component_events`]), followed by the `text` component's Lynx
 //!   `selectionchange` derived from it.
 //! - **Key events** go to the focused element when there is one, and a `keydown` at a focused host
@@ -43,15 +43,15 @@
 //!   listener — the kernel's dispatch builds no path for a name nothing hears — and
 //!   [`MainThreadRuntime::deliver_input_event`] runs the default action whenever the account routes
 //!   the name.
-//! - **[`TextInputState`](terminus::editing::TextInputState)** is compared after each epilogue's
-//!   commit and published to the host when it changed
+//! - **[`TextInputState`](terminus::link::editing::TextInputState)** is compared after each
+//!   epilogue's commit and published to the host when it changed
 //!   ([`MainThreadRuntime::publish_text_input_state`]).
 
 use std::sync::Arc;
 
-use terminus::editing::{Command, Direction, EditEvent, EditEventKind, Granularity};
-use terminus::event::EventDetail;
-use terminus::input::{Modifiers, PointerId, PointerKind};
+use terminus::link::editing::{Command, Direction, EditEvent, EditEventKind, Granularity};
+use terminus::link::event::EventDetail;
+use terminus::link::input::{Modifiers, PointerId, PointerKind};
 
 use super::{
     CLICK_EVENT, DOUBLE_CLICK_MILLISECONDS, ListenerFailures, MainThreadError, MainThreadRuntime,
@@ -106,11 +106,11 @@ impl EditingRoute {
 pub(super) struct PointerEditing {
     /// The mouse pointer whose press placed the caret in this host and whose
     /// primary button is still held: its moves extend the selection.
-    pressed: Option<(PointerId, terminus::NodeId)>,
+    pressed: Option<(PointerId, terminus::link::NodeId)>,
     /// The last primary press on an editing host, its timestamp, and how
     /// many quick presses on that host it ended: two select a word, three or
     /// more a line, as a browser's click count does.
-    last_press: Option<(terminus::NodeId, f64, u32)>,
+    last_press: Option<(terminus::link::NodeId, f64, u32)>,
 }
 
 /// The editing host `node` is in, by HTML's rule for a plain-text host:
@@ -119,7 +119,10 @@ pub(super) struct PointerEditing {
 /// with a `contenteditable="false"` element ending the run (its subtree is
 /// not editable). The walk stays inside `node`'s tree: a UA shadow tree's
 /// editing host is found from its own content.
-fn editing_host_of(document: &LynxDocument, node: terminus::NodeId) -> Option<terminus::NodeId> {
+fn editing_host_of(
+    document: &LynxDocument,
+    node: terminus::link::NodeId,
+) -> Option<terminus::link::NodeId> {
     let mut host = None;
     let mut current = Some(node);
     while let Some(id) = current {
@@ -143,7 +146,7 @@ fn editing_host_of(document: &LynxDocument, node: terminus::NodeId) -> Option<te
 /// tree as a browser's `<input>` keeps its inner editor's, and which the
 /// component re-fires at its host in Lynx's shape
 /// ([`crate::main::tree::text_field`]).
-fn is_shadow_content(document: &LynxDocument, node: terminus::NodeId) -> bool {
+fn is_shadow_content(document: &LynxDocument, node: terminus::link::NodeId) -> bool {
     document.shadow_root_of(node).is_some()
 }
 
@@ -266,10 +269,10 @@ impl MainThreadRuntime {
     pub(crate) fn deliver_input_event(
         &mut self,
         js_runtime: &mut ScriptRuntime,
-        target: terminus::NodeId,
+        target: terminus::link::NodeId,
         name: &str,
         payload: &InputEventPayload,
-        release: Option<terminus::NodeId>,
+        release: Option<terminus::link::NodeId>,
     ) -> Vec<MainThreadError> {
         let mut failures = Vec::new();
         if let Some(release) = release {
@@ -328,7 +331,7 @@ impl MainThreadRuntime {
     fn input_default_action(
         &mut self,
         js_runtime: &mut ScriptRuntime,
-        target: terminus::NodeId,
+        target: terminus::link::NodeId,
         name: &str,
         payload: &InputEventPayload,
         failures: &mut Vec<MainThreadError>,
@@ -422,8 +425,8 @@ impl MainThreadRuntime {
     fn press(
         &mut self,
         js_runtime: &mut ScriptRuntime,
-        target: terminus::NodeId,
-        position: terminus::Point2D<f32>,
+        target: terminus::link::NodeId,
+        position: terminus::link::Point2D<f32>,
         pointer: PointerId,
         device: PointerKind,
         timestamp: f64,
@@ -504,7 +507,7 @@ impl MainThreadRuntime {
     /// the drag then ends at the next move that reports the button up or
     /// the focus moved, or at the next press, which is routed whenever the
     /// document has a host.
-    pub(super) fn set_pressed(&mut self, pressed: Option<(PointerId, terminus::NodeId)>) {
+    pub(super) fn set_pressed(&mut self, pressed: Option<(PointerId, terminus::link::NodeId)>) {
         self.pointer_editing.pressed = pressed;
         self.slot
             .borrow_mut()
@@ -513,21 +516,21 @@ impl MainThreadRuntime {
 
     /// A viewport position in `host`'s border-box space, which the pointer
     /// commands take: the position less the host's
-    /// [`bounding_client_rect`](terminus::Document::bounding_client_rect) origin,
+    /// [`bounding_client_rect`](terminus::link::Document::bounding_client_rect) origin,
     /// from the last committed layout — the geometry the press was made
     /// against.
     fn host_point(
         &self,
-        host: terminus::NodeId,
-        position: terminus::Point2D<f32>,
-    ) -> Option<terminus::Point2D<f32>> {
+        host: terminus::link::NodeId,
+        position: terminus::link::Point2D<f32>,
+    ) -> Option<terminus::link::Point2D<f32>> {
         let origin = self
             .slot
             .borrow()
             .document_ref()
             .bounding_client_rect(host)?
             .origin;
-        Some(terminus::Point2D::new(
+        Some(terminus::link::Point2D::new(
             position.x - origin.x,
             position.y - origin.y,
         ))
@@ -630,7 +633,7 @@ impl MainThreadRuntime {
     fn dispatch_edit_event(
         &mut self,
         js_runtime: &mut ScriptRuntime,
-        host: terminus::NodeId,
+        host: terminus::link::NodeId,
         event: &EditEvent,
         timestamp: f64,
     ) -> Result<(), ListenerFailures> {
@@ -696,8 +699,8 @@ impl MainThreadRuntime {
         self.slot.borrow_mut().sync_editing_routes();
     }
 
-    /// Publishes the focused host's [`TextInputState`](terminus::editing::TextInputState) to the
-    /// host when it differs from the last one published. Asked by the page's epilogue
+    /// Publishes the focused host's [`TextInputState`](terminus::link::editing::TextInputState) to
+    /// the host when it differs from the last one published. Asked by the page's epilogue
     /// after its commit, so the geometry is the committed frame's. Nothing is
     /// computed while nothing is focused and nothing was.
     pub(crate) fn publish_text_input_state(&mut self) {

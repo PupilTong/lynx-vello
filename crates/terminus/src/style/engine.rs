@@ -34,8 +34,7 @@ use stylo::values::{KeyframesName, SourceLocation};
 use stylo_atoms::Atom;
 use stylo_traits::ParsingMode;
 
-use crate::Document;
-use crate::tree::document::NodeId;
+use crate::tree::document::{Document, NodeId};
 use crate::tree::shadow::ShadowRootData;
 
 /// An author stylesheet scoped to one shadow tree.
@@ -143,7 +142,7 @@ pub(crate) enum StyleInvalidation {
 /// `font-stretch`, `unicode-range` — are dropped because nothing reads them:
 /// a loaded face is registered under the declared family carrying its own
 /// metadata, see
-/// [`TextContext::register_font_face`](crate::TextContext::register_font_face).
+/// [`TextContext::register_font_face`](seldon::text::TextContext::register_font_face).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FontFaceRequest {
     /// The `font-family` descriptor: the family the face is registered under.
@@ -260,7 +259,7 @@ impl StyleEngine {
     /// The seam an embedder loads declared faces over: `terminus` never performs
     /// IO, so it names the rules and the caller fetches their sources and
     /// hands the bytes back through
-    /// [`Document::register_font_face`](crate::Document::register_font_face).
+    /// [`Document::register_font_face`](crate::tree::document::Document::register_font_face).
     ///
     /// A rule is reported once per document, whatever later sheets do to the
     /// cascade: the collected list is rebuilt from scratch on every stylist
@@ -799,9 +798,9 @@ impl<T> Document<T> {
 
     /// The viewport in CSS px.
     #[must_use]
-    pub fn viewport_size(&self) -> crate::Size2D<f32> {
+    pub fn viewport_size(&self) -> euclid::default::Size2D<f32> {
         let size = self.device().viewport_size();
-        crate::Size2D::new(size.width, size.height)
+        euclid::default::Size2D::new(size.width, size.height)
     }
 
     /// CSS-px → device-px scale factor.

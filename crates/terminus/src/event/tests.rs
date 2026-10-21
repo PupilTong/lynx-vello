@@ -4,9 +4,9 @@
 
 use super::EventStep;
 use crate::tree::document::tests::device;
+use crate::tree::document::{Document, NodeId};
 use crate::tree::node::Node;
 use crate::tree::shadow::ShadowRootMode;
-use crate::{Document, NodeId};
 
 /// `page > outer > inner`, returning the two descendants.
 fn nested() -> (Document<()>, NodeId, NodeId, NodeId) {
@@ -496,10 +496,13 @@ fn the_one_comparison_retargeting_rule_agrees_with_the_standards_predicate() {
 mod rust_walk {
     use std::sync::{Arc, Mutex};
 
+    use euclid::default::Point2D;
+
     use super::super::{ElementEvent, EventDetail, EventPhase, EventStep, EventWalk, StepOutcome};
     use crate::input::PointerKind;
+    use crate::tree::custom::CustomElement;
     use crate::tree::document::tests::device;
-    use crate::{CustomElement, Document, NodeId, Point2D};
+    use crate::tree::document::{Document, NodeId};
 
     type Log = Arc<Mutex<Vec<String>>>;
 
@@ -955,9 +958,10 @@ fn the_nearest_common_event_ancestor_is_inclusive_and_crosses_shadow_boundaries(
 mod listener_table {
     use super::{nested, shadow_tree};
     use crate::event::{ElementEvent, EventDetail, ListenerKey, ListenerKinds, RegistrationChange};
+    use crate::tree::custom::CustomElement;
     use crate::tree::document::tests::device;
+    use crate::tree::document::{Document, NodeId};
     use crate::tree::shadow::ShadowRootMode;
-    use crate::{CustomElement, Document, NodeId};
 
     const PAGE: ListenerKey = ListenerKey(0);
     const CARD: ListenerKey = ListenerKey(7);

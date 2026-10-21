@@ -11,6 +11,9 @@
 #![warn(clippy::undocumented_unsafe_blocks)]
 
 //! `terminus` — a generic, stylo-integrated W3C-DOM-subset document tree.
+//!
+//! Its one public module is [`link`], the paths an embedder names; every
+//! other module is private.
 
 #[cfg(test)]
 extern crate self as terminus;
@@ -19,58 +22,16 @@ extern crate self as terminus;
 #[path = "../tests/common/mod.rs"]
 mod test_common;
 
-pub mod editing;
-pub mod event;
-pub mod input;
-pub mod layout;
+mod editing;
+mod event;
+mod html;
+mod input;
+mod layout;
+pub mod link;
 mod paint;
-pub mod painter;
-pub mod render;
-pub mod scroll;
+mod painter;
+mod render;
+mod scroll;
 mod style;
 mod tree;
 mod visual;
-
-pub use euclid::default::{Point2D, Rect, Size2D, Vector2D};
-pub use seldon::text::{FontBlob, TextContext};
-pub use stylo;
-pub use stylo_dom::ElementState;
-pub use vello;
-
-pub use crate::layout::TextLineReport;
-pub use crate::paint::compose::FilterGroup;
-pub use crate::render::image::{
-    DocumentKind, DocumentRequest, FrameImages, ImageEvent, ImageInbox, ImageOutcome, ImageReports,
-    ImageRole, ImageSizeHint, MAX_RENDERABLE_DIMENSION, NoImages, is_renderable,
-};
-pub use crate::render::svg::VectorDocument;
-pub use crate::style::animation::AnimationTick;
-pub use crate::style::device::Device;
-#[doc(hidden)]
-pub use crate::style::device::standards_device;
-pub use crate::style::engine::{
-    CssDeclaration, CssKeyframe, CssRule, FontFaceRequest, FontFaceSource, StylesheetOrigin,
-};
-pub use crate::style::pool::{MAX_STYLE_THREADS, StylePool, StylePoolError, StyleWorker};
-pub use crate::style::query::InvalidSelector;
-pub use crate::tree::custom::{CustomElement, MethodCall, MethodError, MethodOutcome};
-pub use crate::tree::document::{Document, NodeId};
-#[doc(hidden)]
-pub use crate::tree::node::ChildrenIter;
-pub use crate::tree::node::Node;
-pub use crate::tree::popover::{PopoverError, PopoverState};
-pub use crate::tree::shadow::{PLACEHOLDER_PSEUDO_ID, ShadowRootMode};
-pub use crate::tree::top_layer::TopLayerEntry;
-pub use crate::visual::frame::ENCODE_WINDOW_SCROLLPORTS;
-pub use crate::visual::intersection::{
-    ElementHandler, IntersectionEventHandler, IntersectionGeometry, IntersectionMargin,
-    IntersectionObserver, IntersectionObserverEntry, IntersectionObserverId,
-    IntersectionObserverInit, IntersectionObserverRoot, MarginLength, RootGeometry,
-};
-pub use crate::visual::resize::{
-    ObservedBox, ResizeEventHandler, ResizeObserver, ResizeObserverEntry, ResizeObserverId,
-};
-pub use crate::visual::{
-    AnimationSlot, CommittedFrame, ContentVisibilityChange, HitTarget, ScrollSlot, SnapSlot,
-    SnapSlotAxis,
-};

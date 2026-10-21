@@ -1125,7 +1125,7 @@ impl<T: Sync> Document<T> {
     }
 
     /// The tree a tree-scoped name cascaded for `element` at `scope` belongs
-    /// to; see [`crate::Node::scoped_name_tree`].
+    /// to; see [`crate::tree::node::Node::scoped_name_tree`].
     fn name_tree(&self, element: NodeId, scope: CascadeLevel) -> Option<NodeId> {
         self.get(element)?.scoped_name_tree(scope)
     }
@@ -1222,7 +1222,9 @@ impl<T: Sync> Document<T> {
                     break false;
                 }
                 path.push(id);
-                current = self.get(id).and_then(crate::Node::flat_parent_id);
+                current = self
+                    .get(id)
+                    .and_then(crate::tree::node::Node::flat_parent_id);
             };
             if under {
                 path.reverse();

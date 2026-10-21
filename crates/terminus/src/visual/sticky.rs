@@ -8,9 +8,8 @@ use seldon::geometry::Edges;
 use seldon::style::PositionProperty;
 use stylo::values::computed::Margin;
 
-use crate::NodeId;
 use crate::layout::box_parent;
-use crate::tree::document::Document;
+use crate::tree::document::{Document, NodeId};
 use crate::tree::node::Node;
 
 /// One axis of the sticky view rectangle and its containing-block limit.

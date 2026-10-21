@@ -63,9 +63,9 @@
 use std::sync::Arc;
 
 use euclid::default::Size2D;
+use vello::Scene;
 
-use crate::Document;
-use crate::vello::Scene;
+use crate::tree::document::Document;
 use crate::visual::{CommittedFrame, PaintOrder};
 
 /// Reusable document-owned scene builder state.
@@ -78,7 +78,7 @@ pub(crate) struct Painter {
     /// determine relevance without allocating.
     relevance_scratch: crate::visual::relevance::RelevanceScratch,
     /// The frame the last successful paint committed — the hit-test snapshot,
-    /// and the object [`Document::commit`](crate::Document::commit) publishes.
+    /// and the object [`Document::commit`](crate::tree::document::Document::commit) publishes.
     frame: Option<Arc<CommittedFrame>>,
     /// A frame retired while something else still held it — in the engine's
     /// flow the frame hub always still holds the previous commit at the
@@ -269,7 +269,8 @@ impl Painter {
 mod tests {
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
-    use crate::{Document, StylesheetOrigin};
+    use crate::style::engine::StylesheetOrigin;
+    use crate::tree::document::Document;
 
     #[test]
     fn a_failed_paint_cannot_leave_a_partial_frame_committed() {

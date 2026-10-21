@@ -7,9 +7,9 @@ mod common;
 
 use common::Doc;
 use euclid::default::Vector2D;
-use terminus::vello::Scene;
-use terminus::vello::peniko::Color;
-use terminus::{CommittedFrame, NodeId, Point2D};
+use terminus::link::vello::Scene;
+use terminus::link::vello::peniko::Color;
+use terminus::link::{CommittedFrame, NodeId, Point2D};
 
 const CSS: &str = "page { display: flex; width: 800px; height: 600px; }
     .scroller { display: flex; flex-direction: column; align-items: flex-start;
@@ -178,7 +178,7 @@ fn horizontal_sticky_uses_left_and_right_insets() {
             ".scroller {{ flex-direction: row; }} .sticky {{ top: auto; {inset}; }}"
         ));
         let frame = doc.dom.commit();
-        let offset_of = |slot: &terminus::ScrollSlot| {
+        let offset_of = |slot: &terminus::link::ScrollSlot| {
             (slot.node == scroller).then_some(Vector2D::new(offset, 0.0))
         };
         assert_eq!(
@@ -389,7 +389,7 @@ fn sticky_survives_an_initial_target_refill_and_a_retained_snap_step() {
         // First use only the published offset; then override it with the
         // live snap result while retaining the same committed frame.
         let offsets =
-            |slot: &terminus::ScrollSlot| snapped.then(|| doc.dom.scroll_offset(slot.node));
+            |slot: &terminus::link::ScrollSlot| snapped.then(|| doc.dom.scroll_offset(slot.node));
         assert_eq!(
             frame
                 .hit(Point2D::new(20.0, 15.0), &offsets, None)
@@ -465,7 +465,8 @@ fn sticky_pixels_survive_enclosing_effects_and_far_refills() {
             doc.dom.commit();
             doc.dom.scroll_to(scroller, Vector2D::new(0.0, offset));
             let frame = doc.dom.commit();
-            let offsets = |slot: &terminus::ScrollSlot| Some(doc.dom.scroll_offset(slot.node));
+            let offsets =
+                |slot: &terminus::link::ScrollSlot| Some(doc.dom.scroll_offset(slot.node));
             let filtered = gpu
                 .prepare_filters(&frame, &[], &[], &offsets, generation, None, Color::WHITE)
                 .expect("prepare sticky effects")
@@ -506,7 +507,7 @@ fn nested_sticky_motion_refreshes_a_filter_with_the_same_scroll_chain() {
     assert_eq!(frame.filter_groups().len(), 1);
     let mut gpu = prime_radiant::headless("nested_sticky_filter_refresh");
     for (generation, offset, y) in [(0, 0.0, 45_u16), (1, 80.0, 20)] {
-        let offsets = |slot: &terminus::ScrollSlot| {
+        let offsets = |slot: &terminus::link::ScrollSlot| {
             (slot.node == scroller).then_some(Vector2D::new(0.0, offset))
         };
         let filtered = gpu

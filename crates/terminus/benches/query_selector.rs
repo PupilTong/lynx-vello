@@ -50,7 +50,7 @@ use stylo::values::computed::font::GenericFontFamily;
 use stylo::values::computed::{CSSPixelLength, Length};
 use stylo::values::specified::font::{FONT_MEDIUM_PX, QueryFontMetricsFlags};
 use stylo_traits::{CSSPixel, DevicePixel};
-use terminus::{Document, NodeId, StylesheetOrigin};
+use terminus::link::{Document, NodeId, StylesheetOrigin};
 
 fn main() {
     divan::main();
@@ -78,8 +78,8 @@ impl FontMetricsProvider for BenchFontMetricsProvider {
     }
 }
 
-fn device() -> terminus::Device {
-    terminus::standards_device(
+fn device() -> terminus::link::Device {
+    terminus::link::standards_device(
         MediaType::screen(),
         Size2D::<f32, CSSPixel>::new(800.0, 600.0),
         Size2D::<f32, DevicePixel>::new(800.0, 600.0),
@@ -350,7 +350,7 @@ fn query_selector_all_scoped_to_section(bencher: divan::Bencher) {
     let section = page
         .doc
         .get(page.shallow_row)
-        .and_then(terminus::Node::parent_id)
+        .and_then(terminus::link::Node::parent_id)
         .expect("a row has a section");
     assert_eq!(
         page.doc
@@ -384,7 +384,7 @@ fn closest_shallow(bencher: divan::Bencher) {
             .expect("selector parses"),
         page.doc
             .get(page.shallow_row)
-            .and_then(terminus::Node::parent_id),
+            .and_then(terminus::link::Node::parent_id),
         "the shallow probe stops at its own section, one step up",
     );
     bencher

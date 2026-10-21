@@ -160,7 +160,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
-use terminus::NodeId;
+use terminus::link::NodeId;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
@@ -388,7 +388,7 @@ impl Page {
     /// in between delivers nothing.
     ///
     /// The loop itself enters no JavaScript: an engine component's observer
-    /// calls its `intersections_changed` hook through `terminus::ElementHandler`,
+    /// calls its `intersections_changed` hook through `terminus::link::ElementHandler`,
     /// and an exposure registration's records a change. What enters the
     /// realm is the exposure drain after the loop — each element's
     /// `uiappear`/`uidisappear`, then each element's `bobcat:exposure` record
@@ -1399,11 +1399,11 @@ fn absolute_response(url: &str, response: String) -> Result<String, String> {
 /// `local()` is skipped: naming a face already installed on the platform needs
 /// a platform font enumerator this engine does not have, and the native
 /// Harmony loader refuses it too.
-async fn load_font_face(page: Rc<Page>, request: terminus::FontFaceRequest) {
-    let terminus::FontFaceRequest { family, sources } = request;
+async fn load_font_face(page: Rc<Page>, request: terminus::link::FontFaceRequest) {
+    let terminus::link::FontFaceRequest { family, sources } = request;
     let mut loaded = None;
     for source in sources {
-        let terminus::FontFaceSource::Url(url) = source else {
+        let terminus::link::FontFaceSource::Url(url) = source else {
             continue;
         };
         if page.ended() {

@@ -25,7 +25,7 @@ use stylo_traits::{CSSPixel, DevicePixel};
 /// workers by reference; `Send` would only buy the right to *move* a document
 /// between threads, which nothing does.
 ///
-/// [`Document`]: crate::Document
+/// [`Document`]: crate::tree::document::Document
 #[derive(Debug)]
 pub struct Device {
     stylo: stylo::device::Device,

@@ -965,11 +965,13 @@ fn inline_box_padding_box(store: &InlineFlowStore, id: NodeId, rtl: bool) -> Opt
 mod tests {
     #![allow(clippy::float_cmp)]
 
+    use euclid::default::Point2D;
     use seldon::geometry::Size;
+    use seldon::text::FontBlob;
 
+    use crate::style::engine::StylesheetOrigin;
     use crate::tree::document::{Document, NodeId};
     use crate::visual::PaintItemKind;
-    use crate::{FontBlob, Point2D, StylesheetOrigin};
 
     const AHEM: &[u8] = include_bytes!("../../../seldon/tests/fixtures/Ahem.ttf");
 
@@ -1313,9 +1315,9 @@ mod tests {
         let boxes = doc.text_range_boxes(p, 2, 4).expect("in range");
         assert_eq!(
             boxes,
-            [crate::Rect::new(
+            [euclid::default::Rect::new(
                 Point2D::new(25.0, 0.0),
-                crate::Size2D::new(20.0, 22.0)
+                euclid::default::Size2D::new(20.0, 22.0)
             )]
         );
         let boxes = doc.text_range_boxes(p, 6, 7).expect("in range");

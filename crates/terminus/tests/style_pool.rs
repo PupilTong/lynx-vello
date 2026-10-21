@@ -29,7 +29,7 @@ use stylo::values::computed::font::GenericFontFamily;
 use stylo::values::computed::{CSSPixelLength, Length};
 use stylo::values::specified::font::QueryFontMetricsFlags;
 use stylo_traits::{CSSPixel, DevicePixel};
-use terminus::{Device, Document, NodeId, StylePool, StylesheetOrigin, standards_device};
+use terminus::link::{Device, Document, NodeId, StylePool, StylesheetOrigin, standards_device};
 
 /// Long enough that a loaded machine never trips it, short enough that a
 /// serialized pair reports instead of hanging the suite.
@@ -323,7 +323,7 @@ fn a_thread_cannot_take_over_a_second_pool() {
         let error = StylePool::with_threads(NonZeroUsize::new(2).expect("a positive count"))
             .expect_err("the takeover is permanent, so dropping does not release the thread");
         assert!(
-            matches!(error, terminus::StylePoolError::ThreadAlreadyPooled),
+            matches!(error, terminus::link::StylePoolError::ThreadAlreadyPooled),
             "the refusal is named rather than reported as a spawn failure: {error}"
         );
     })
@@ -356,12 +356,12 @@ fn a_document_without_a_pool_traverses_on_the_flushing_thread() {
 #[test]
 fn a_pool_wider_than_stylo_indexes_is_refused() {
     let threads =
-        NonZeroUsize::new(terminus::MAX_STYLE_THREADS + 1).expect("a positive worker count");
+        NonZeroUsize::new(terminus::link::MAX_STYLE_THREADS + 1).expect("a positive worker count");
     let error = StylePool::with_threads(threads).expect_err("the ceiling is enforced");
     assert!(
         error
             .to_string()
-            .contains(&terminus::MAX_STYLE_THREADS.to_string()),
+            .contains(&terminus::link::MAX_STYLE_THREADS.to_string()),
         "the ceiling is named: {error}"
     );
 }
@@ -401,7 +401,7 @@ fn the_pool_size_is_stylos_own_heuristic() {
     assert!(
         sizes
             .iter()
-            .all(|(_, count)| count.is_none_or(|count| count <= terminus::MAX_STYLE_THREADS)),
+            .all(|(_, count)| count.is_none_or(|count| count <= terminus::link::MAX_STYLE_THREADS)),
         "the cap is never exceeded, so ScopedTLS is never indexed past its end"
     );
 }

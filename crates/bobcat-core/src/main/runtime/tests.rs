@@ -1,3 +1,4 @@
+use terminus::link::Point2D;
 use tokio::sync::mpsc;
 
 use super::*;
@@ -14,8 +15,8 @@ use crate::view::{NoWakeup, ScriptSource, WorkerId};
 /// an arena key, so a test spells one the way script sees it — and for a
 /// document that has freed nothing the generation is zero, which is why
 /// these read as the small integers the PAPI hands out.
-fn node_id(bits: u64) -> terminus::NodeId {
-    terminus::NodeId::from_bits(bits).expect("a well-formed packed handle")
+fn node_id(bits: u64) -> terminus::link::NodeId {
+    terminus::link::NodeId::from_bits(bits).expect("a well-formed packed handle")
 }
 
 /// The name and detail a dispatch carries, spelled as the painting side
@@ -25,8 +26,8 @@ fn tap() -> Arc<str> {
 }
 
 /// Where a test's event happened, when the position is not what it is about.
-fn event_point() -> terminus::Point2D<f32> {
-    terminus::Point2D::new(12.0, 30.0)
+fn event_point() -> Point2D<f32> {
+    Point2D::new(12.0, 30.0)
 }
 
 /// The ingredients a test stages when the document is not what it is about.
@@ -258,9 +259,9 @@ fn mts_imported_inputs_follow_global_props_updates() {
 fn text_runtime() -> (ScriptRuntime, MainThreadRuntime, DocumentProbe) {
     const AHEM: &[u8] = include_bytes!("../../../../seldon/tests/fixtures/Ahem.ttf");
 
-    let mut text = terminus::TextContext::new();
+    let mut text = terminus::link::TextContext::new();
     assert_eq!(
-        text.register_fonts(terminus::FontBlob::from_static(AHEM)),
+        text.register_fonts(terminus::link::FontBlob::from_static(AHEM)),
         1
     );
     runtime_over(DocumentIngredients {
@@ -1264,7 +1265,7 @@ fn clearing_a_class_id_or_attribute_removes_it_from_the_private_document() {
 /// literals working. The document is built from what JavaScript handed back.
 #[test]
 fn the_page_config_written_into_the_boot_module_builds_the_ua_cascade() {
-    use terminus::stylo::values::computed::{Display, Overflow};
+    use terminus::link::stylo::values::computed::{Display, Overflow};
 
     for linear in [true, false] {
         let (mut js_runtime, mut runtime, elements, _names) =
@@ -1314,7 +1315,7 @@ fn the_page_config_written_into_the_boot_module_builds_the_ua_cascade() {
 /// keeps the initial black, as before the switch existed.
 #[test]
 fn the_css_inheritance_switch_written_into_the_boot_module_reaches_the_ua_cascade() {
-    use terminus::stylo::color::AbsoluteColor;
+    use terminus::link::stylo::color::AbsoluteColor;
 
     for inheritance in [true, false] {
         let (mut js_runtime, mut runtime, elements, _names) =
@@ -1888,13 +1889,13 @@ fn a_key_event_reaches_the_page_with_its_keyboard_members() {
         .expect("main-thread script");
 
     let payload = InputEventPayload {
-        detail: terminus::event::EventDetail::Key {
+        detail: terminus::link::event::EventDetail::Key {
             key: Arc::from("ArrowLeft"),
             code: Arc::from("ArrowLeft"),
             repeat: true,
-            modifiers: terminus::input::Modifiers {
+            modifiers: terminus::link::input::Modifiers {
                 alt: true,
-                ..terminus::input::Modifiers::default()
+                ..terminus::link::input::Modifiers::default()
             },
             text: None,
         },
@@ -1903,7 +1904,7 @@ fn a_key_event_reaches_the_page_with_its_keyboard_members() {
     runtime
         .dispatch_input_event(
             &mut js_runtime,
-            terminus::NodeId::DOCUMENT_ELEMENT,
+            terminus::link::NodeId::DOCUMENT_ELEMENT,
             "keydown",
             &payload,
             None,
@@ -1956,10 +1957,10 @@ fn a_click_targets_the_common_ancestor_and_two_make_a_dblclick() {
     // `page` is 2, `outer` 3, `a` 4, `b` 5.
     let mut click = |down: u64, release: u64, at: f64| {
         let payload = InputEventPayload {
-            detail: terminus::event::EventDetail::Pointer {
-                position: terminus::Point2D::new(7.0, 8.0),
+            detail: terminus::link::event::EventDetail::Pointer {
+                position: Point2D::new(7.0, 8.0),
                 id: 1,
-                device: terminus::input::PointerKind::Mouse,
+                device: terminus::link::input::PointerKind::Mouse,
                 button: 0,
                 buttons: 0,
             },
@@ -2031,9 +2032,9 @@ fn adopted_offsets_queue_scroll_events_only_for_a_name_something_hears() {
         (
             scroller,
             crate::link::ScrollEntry {
-                offset: terminus::Vector2D::new(0.0, y),
+                offset: terminus::link::Vector2D::new(0.0, y),
                 at: 0.0,
-                rest: Some(terminus::Vector2D::new(0.0, y)),
+                rest: Some(terminus::link::Vector2D::new(0.0, y)),
                 request: None,
             },
         )
@@ -2042,7 +2043,7 @@ fn adopted_offsets_queue_scroll_events_only_for_a_name_something_hears() {
     runtime.adopt_scroll_offsets([entry(40.0)].into_iter());
     assert_eq!(
         elements.tree().scroll_offset(scroller),
-        terminus::Vector2D::new(0.0, 40.0)
+        terminus::link::Vector2D::new(0.0, 40.0)
     );
     assert!(!runtime.has_component_events(), "nothing hears either name");
 
@@ -2066,7 +2067,7 @@ fn adopted_offsets_queue_scroll_events_only_for_a_name_something_hears() {
         [ComponentEvent::Scroll {
             node: scroller,
             name: "scroll",
-            delta: terminus::Vector2D::new(0.0, 20.0),
+            delta: terminus::link::Vector2D::new(0.0, 20.0),
         }],
         "one `scroll`, with the change its post made, and no `scrollend` with nothing to \
          hear it"
@@ -2075,27 +2076,27 @@ fn adopted_offsets_queue_scroll_events_only_for_a_name_something_hears() {
 
 /// A painter post of `node` at offset `y`, at rest or still moving.
 fn scroll_post(
-    node: terminus::NodeId,
+    node: terminus::link::NodeId,
     y: f32,
     rest: bool,
-) -> (terminus::NodeId, crate::link::ScrollEntry) {
+) -> (terminus::link::NodeId, crate::link::ScrollEntry) {
     (
         node,
         crate::link::ScrollEntry {
-            offset: terminus::Vector2D::new(0.0, y),
+            offset: terminus::link::Vector2D::new(0.0, y),
             at: 0.0,
-            rest: rest.then(|| terminus::Vector2D::new(0.0, y)),
+            rest: rest.then(|| terminus::link::Vector2D::new(0.0, y)),
             request: None,
         },
     )
 }
 
 /// A queued `scroll` at `node` with the change `delta_y`.
-fn queued_scroll(node: terminus::NodeId, delta_y: f32) -> ComponentEvent {
+fn queued_scroll(node: terminus::link::NodeId, delta_y: f32) -> ComponentEvent {
     ComponentEvent::Scroll {
         node,
         name: "scroll",
-        delta: terminus::Vector2D::new(0.0, delta_y),
+        delta: terminus::link::Vector2D::new(0.0, delta_y),
     }
 }
 
@@ -2108,7 +2109,7 @@ struct ScrollProbe {
     log: ScrollLog,
 }
 
-impl terminus::CustomElement<()> for ScrollProbe {
+impl terminus::link::CustomElement<()> for ScrollProbe {
     fn observed_events(&self) -> &'static [&'static str] {
         &["scroll"]
     }
@@ -2116,8 +2117,8 @@ impl terminus::CustomElement<()> for ScrollProbe {
     fn handle_event(
         &self,
         _document: &mut LynxDocument,
-        element: terminus::NodeId,
-        event: &mut terminus::event::ElementEvent<'_>,
+        element: terminus::link::NodeId,
+        event: &mut terminus::link::event::ElementEvent<'_>,
     ) {
         self.log.borrow_mut().push(format!(
             "{}:{}",
@@ -2191,7 +2192,7 @@ fn a_component_observing_scroll_keeps_its_containers_scroll_queued() {
     runtime.slot.borrow().component_events.queue_scroll(
         probe,
         "scroll",
-        terminus::Vector2D::new(0.0, 40.0),
+        terminus::link::Vector2D::new(0.0, 40.0),
     );
     let failures = runtime.dispatch_component_events(&mut js_runtime);
     assert!(failures.is_empty(), "{failures:?}");
@@ -2257,7 +2258,7 @@ fn a_scroll_view_fires_scrolltolower_from_its_own_scroll() {
     runtime.slot.borrow().component_events.queue_scroll(
         scroller,
         "scroll",
-        terminus::Vector2D::new(0.0, 760.0),
+        terminus::link::Vector2D::new(0.0, 760.0),
     );
     let failures = runtime.dispatch_component_events(&mut js_runtime);
     assert!(failures.is_empty(), "{failures:?}");
@@ -2340,7 +2341,7 @@ fn a_swiper_fires_change_from_its_contents_scroll() {
     runtime.slot.borrow().component_events.queue_scroll(
         content,
         "scroll",
-        terminus::Vector2D::new(0.0, 210.0),
+        terminus::link::Vector2D::new(0.0, 210.0),
     );
     let failures = runtime.dispatch_component_events(&mut js_runtime);
     assert!(failures.is_empty(), "{failures:?}");
@@ -2416,7 +2417,7 @@ fn a_refresh_view_fires_startrefresh_when_its_container_rests_on_the_header() {
         }
         assert_eq!(
             tree.scroll_offset(container),
-            terminus::Vector2D::new(0.0, 170.0),
+            terminus::link::Vector2D::new(0.0, 170.0),
             "opens on `#content`"
         );
         container
@@ -2426,7 +2427,7 @@ fn a_refresh_view_fires_startrefresh_when_its_container_rests_on_the_header() {
     let rest = ComponentEvent::Scroll {
         node: container,
         name: "scrollend",
-        delta: terminus::Vector2D::zero(),
+        delta: terminus::link::Vector2D::zero(),
     };
     assert_eq!(
         runtime.slot.borrow().component_events.take(),
@@ -2438,10 +2439,13 @@ fn a_refresh_view_fires_startrefresh_when_its_container_rests_on_the_header() {
         slot.component_events.queue_scroll(
             container,
             "scroll",
-            terminus::Vector2D::new(0.0, -50.0),
+            terminus::link::Vector2D::new(0.0, -50.0),
         );
-        slot.component_events
-            .queue_scroll(container, "scrollend", terminus::Vector2D::zero());
+        slot.component_events.queue_scroll(
+            container,
+            "scrollend",
+            terminus::link::Vector2D::zero(),
+        );
     }
     let failures = runtime.dispatch_component_events(&mut js_runtime);
     assert!(failures.is_empty(), "{failures:?}");
@@ -2643,9 +2647,9 @@ fn scroll_metrics_and_a_load_size_reach_the_lynx_detail_as_extras() {
         (
             scroller,
             crate::link::ScrollEntry {
-                offset: terminus::Vector2D::new(0.0, y),
+                offset: terminus::link::Vector2D::new(0.0, y),
                 at: 0.0,
-                rest: rest.then_some(terminus::Vector2D::new(0.0, y)),
+                rest: rest.then_some(terminus::link::Vector2D::new(0.0, y)),
                 request: None,
             },
         )
@@ -2659,15 +2663,13 @@ fn scroll_metrics_and_a_load_size_reach_the_lynx_detail_as_extras() {
             .is_empty()
     );
     runtime.adopt_scroll_offsets([entry(65.0, true)].into_iter());
-    runtime
-        .slot
-        .borrow()
-        .component_events
-        .queue_image(Some(terminus::ImageOutcome::Loaded {
+    runtime.slot.borrow().component_events.queue_image(Some(
+        terminus::link::ImageOutcome::Loaded {
             node: card,
             width: 40,
             height: 20,
-        }));
+        },
+    ));
     let failures = runtime.dispatch_component_events(&mut js_runtime);
     assert!(failures.is_empty(), "no listener threw: {failures:?}");
     runtime
@@ -2701,7 +2703,7 @@ struct StoppingComponent {
     log: Rc<RefCell<Vec<String>>>,
 }
 
-impl terminus::CustomElement<()> for StoppingComponent {
+impl terminus::link::CustomElement<()> for StoppingComponent {
     fn observed_events(&self) -> &'static [&'static str] {
         &["tap"]
     }
@@ -2709,8 +2711,8 @@ impl terminus::CustomElement<()> for StoppingComponent {
     fn handle_event(
         &self,
         document: &mut LynxDocument,
-        _element: terminus::NodeId,
-        event: &mut terminus::event::ElementEvent<'_>,
+        _element: terminus::link::NodeId,
+        event: &mut terminus::link::event::ElementEvent<'_>,
     ) {
         let x = event.detail().position().map_or(-1.0, |point| point.x);
         self.log
@@ -3440,14 +3442,14 @@ fn select_tab_turns_a_viewpager_through_both_invoke_paths() {
     );
     assert_eq!(
         offset(),
-        terminus::Vector2D::new(400.0, 0.0),
+        terminus::link::Vector2D::new(400.0, 0.0),
         "instant: at once"
     );
     assert_eq!(
         request(),
         Some((
-            terminus::Vector2D::new(400.0, 0.0),
-            terminus::scroll::ScrollBehavior::Instant
+            terminus::link::Vector2D::new(400.0, 0.0),
+            terminus::link::scroll::ScrollBehavior::Instant
         ))
     );
 
@@ -3458,14 +3460,14 @@ fn select_tab_turns_a_viewpager_through_both_invoke_paths() {
     );
     assert_eq!(
         offset(),
-        terminus::Vector2D::new(400.0, 0.0),
+        terminus::link::Vector2D::new(400.0, 0.0),
         "smooth: the painter's"
     );
     assert_eq!(
         request(),
         Some((
-            terminus::Vector2D::new(200.0, 0.0),
-            terminus::scroll::ScrollBehavior::Smooth
+            terminus::link::Vector2D::new(200.0, 0.0),
+            terminus::link::scroll::ScrollBehavior::Smooth
         ))
     );
 
@@ -3475,12 +3477,16 @@ fn select_tab_turns_a_viewpager_through_both_invoke_paths() {
         "expectCode(viaQuery('#pager', 'selectTab', {index: 3}), 0);",
     ] {
         run(&mut runtime, &mut js_runtime, source);
-        assert_eq!(offset(), terminus::Vector2D::new(400.0, 0.0), "{source}");
+        assert_eq!(
+            offset(),
+            terminus::link::Vector2D::new(400.0, 0.0),
+            "{source}"
+        );
         assert_eq!(
             request(),
             Some((
-                terminus::Vector2D::new(600.0, 0.0),
-                terminus::scroll::ScrollBehavior::Smooth
+                terminus::link::Vector2D::new(600.0, 0.0),
+                terminus::link::scroll::ScrollBehavior::Smooth
             )),
             "{source}"
         );
@@ -3499,7 +3505,7 @@ fn select_tab_turns_a_viewpager_through_both_invoke_paths() {
             }
             ",
     );
-    assert_eq!(offset(), terminus::Vector2D::new(400.0, 0.0));
+    assert_eq!(offset(), terminus::link::Vector2D::new(400.0, 0.0));
     assert_eq!(elements.tree().pending_scroll_request(pager), pending);
 
     // An index naming no page, past the end or below zero, is refused on
@@ -3514,7 +3520,7 @@ fn select_tab_turns_a_viewpager_through_both_invoke_paths() {
             }
             ",
     );
-    assert_eq!(offset(), terminus::Vector2D::new(400.0, 0.0));
+    assert_eq!(offset(), terminus::link::Vector2D::new(400.0, 0.0));
     assert_eq!(elements.tree().pending_scroll_request(pager), pending);
 
     run(
@@ -3541,7 +3547,7 @@ fn select_tab_turns_a_viewpager_through_both_invoke_paths() {
             }
             ",
     );
-    assert_eq!(offset(), terminus::Vector2D::new(400.0, 0.0));
+    assert_eq!(offset(), terminus::link::Vector2D::new(400.0, 0.0));
 }
 
 /// An `x-swiper` given `autoplay` through `__SetAttribute` keeps a timer the
@@ -3619,10 +3625,13 @@ fn an_autoplaying_swiper_arms_the_pages_deadline_and_turns_when_due() {
         .expect("the turn is a scroll request");
     assert_eq!(
         request.target,
-        terminus::Vector2D::new(200.0, 0.0),
+        terminus::link::Vector2D::new(200.0, 0.0),
         "the next item"
     );
-    assert_eq!(request.behavior, terminus::scroll::ScrollBehavior::Smooth);
+    assert_eq!(
+        request.behavior,
+        terminus::link::scroll::ScrollBehavior::Smooth
+    );
     assert!(request.yields_to_pointer);
     assert!(
         runtime.next_deadline().expect("armed again") > armed,
@@ -3737,14 +3746,14 @@ fn scroll_to_turns_a_swiper_through_both_invoke_paths() {
     );
     assert_eq!(
         offset(),
-        terminus::Vector2D::new(400.0, 0.0),
+        terminus::link::Vector2D::new(400.0, 0.0),
         "instant: at once"
     );
     assert_eq!(
         request(),
         Some((
-            terminus::Vector2D::new(400.0, 0.0),
-            terminus::scroll::ScrollBehavior::Instant
+            terminus::link::Vector2D::new(400.0, 0.0),
+            terminus::link::scroll::ScrollBehavior::Instant
         ))
     );
 
@@ -3755,14 +3764,14 @@ fn scroll_to_turns_a_swiper_through_both_invoke_paths() {
     );
     assert_eq!(
         offset(),
-        terminus::Vector2D::new(400.0, 0.0),
+        terminus::link::Vector2D::new(400.0, 0.0),
         "smooth: the painter's"
     );
     assert_eq!(
         request(),
         Some((
-            terminus::Vector2D::new(200.0, 0.0),
-            terminus::scroll::ScrollBehavior::Smooth
+            terminus::link::Vector2D::new(200.0, 0.0),
+            terminus::link::scroll::ScrollBehavior::Smooth
         ))
     );
 
@@ -3772,12 +3781,16 @@ fn scroll_to_turns_a_swiper_through_both_invoke_paths() {
         "expectCode(viaQuery('#swiper', 'scrollTo', {index: 3}), 0);",
     ] {
         run(&mut runtime, &mut js_runtime, source);
-        assert_eq!(offset(), terminus::Vector2D::new(400.0, 0.0), "{source}");
+        assert_eq!(
+            offset(),
+            terminus::link::Vector2D::new(400.0, 0.0),
+            "{source}"
+        );
         assert_eq!(
             request(),
             Some((
-                terminus::Vector2D::new(600.0, 0.0),
-                terminus::scroll::ScrollBehavior::Smooth
+                terminus::link::Vector2D::new(600.0, 0.0),
+                terminus::link::scroll::ScrollBehavior::Smooth
             )),
             "{source}"
         );
@@ -3796,7 +3809,7 @@ fn scroll_to_turns_a_swiper_through_both_invoke_paths() {
             }
             ",
     );
-    assert_eq!(offset(), terminus::Vector2D::new(400.0, 0.0));
+    assert_eq!(offset(), terminus::link::Vector2D::new(400.0, 0.0));
     assert_eq!(elements.tree().pending_scroll_request(scroller), pending);
 
     // An index naming no item, past the end or below zero, is refused on
@@ -3811,7 +3824,7 @@ fn scroll_to_turns_a_swiper_through_both_invoke_paths() {
             }
             ",
     );
-    assert_eq!(offset(), terminus::Vector2D::new(400.0, 0.0));
+    assert_eq!(offset(), terminus::link::Vector2D::new(400.0, 0.0));
     assert_eq!(elements.tree().pending_scroll_request(scroller), pending);
 
     run(
@@ -3837,7 +3850,7 @@ fn scroll_to_turns_a_swiper_through_both_invoke_paths() {
             }
             ",
     );
-    assert_eq!(offset(), terminus::Vector2D::new(400.0, 0.0));
+    assert_eq!(offset(), terminus::link::Vector2D::new(400.0, 0.0));
 }
 
 /// `autoStartRefresh`, `finishRefresh` and `finishLoadMore` on an
@@ -3934,16 +3947,16 @@ fn a_refresh_view_answers_its_three_methods_through_both_invoke_paths() {
             .map(|request| (request.target, request.behavior))
     };
     let instant = Some((
-        terminus::Vector2D::new(0.0, 120.0),
-        terminus::scroll::ScrollBehavior::Instant,
+        terminus::link::Vector2D::new(0.0, 120.0),
+        terminus::link::scroll::ScrollBehavior::Instant,
     ));
     let smooth = Some((
-        terminus::Vector2D::new(0.0, 170.0),
-        terminus::scroll::ScrollBehavior::Smooth,
+        terminus::link::Vector2D::new(0.0, 170.0),
+        terminus::link::scroll::ScrollBehavior::Smooth,
     ));
     assert_eq!(
         offset(),
-        terminus::Vector2D::new(0.0, 170.0),
+        terminus::link::Vector2D::new(0.0, 170.0),
         "opens on `#content`"
     );
     let steps = std::cell::Cell::new(0);
@@ -3977,7 +3990,11 @@ fn a_refresh_view_answers_its_three_methods_through_both_invoke_paths() {
         ("expectCode(viaQuery('finishLoadMore', {}), 0);", smooth),
     ] {
         run(&mut runtime, &mut js_runtime, source);
-        assert_eq!(offset(), terminus::Vector2D::new(0.0, 120.0), "{source}");
+        assert_eq!(
+            offset(),
+            terminus::link::Vector2D::new(0.0, 120.0),
+            "{source}"
+        );
         assert_eq!(request(), carried, "{source}");
     }
 
@@ -3992,7 +4009,7 @@ fn a_refresh_view_answers_its_three_methods_through_both_invoke_paths() {
             ",
     );
     assert_eq!(elements.tree().pending_scroll_request(container), pending);
-    assert_eq!(offset(), terminus::Vector2D::new(0.0, 120.0));
+    assert_eq!(offset(), terminus::link::Vector2D::new(0.0, 120.0));
 }
 
 /// `setFoldExpanded` on an `x-foldview-ng`, through `__InvokeUIMethod` and
@@ -4076,7 +4093,7 @@ fn a_foldview_answers_set_fold_expanded_through_both_invoke_paths() {
             .tree()
             .scroll_box(fold)
             .map(|scroll_box| scroll_box.max_offset()),
-        Some(terminus::Vector2D::new(0.0, 80.0)),
+        Some(terminus::link::Vector2D::new(0.0, 80.0)),
         "the header height less the toolbar height"
     );
     let offset = || elements.tree().scroll_offset(fold).y;
@@ -4346,7 +4363,7 @@ fn a_scroll_view_answers_its_scroll_info_and_what_scroll_by_consumed() {
     };
     assert_eq!(
         elements.tree().scroll_offset(scroller),
-        terminus::Vector2D::new(0.0, 42.5)
+        terminus::link::Vector2D::new(0.0, 42.5)
     );
 }
 
@@ -4435,7 +4452,7 @@ fn a_list_answers_its_methods_and_the_base_set_answers_scroll_to() {
     };
     assert_eq!(
         elements.tree().scroll_offset(list),
-        terminus::Vector2D::new(0.0, 50.0)
+        terminus::link::Vector2D::new(0.0, 50.0)
     );
 }
 
@@ -4501,7 +4518,7 @@ fn every_element_answers_scroll_into_view_and_one_with_no_scroller_above_fails()
     };
     assert_eq!(
         elements.tree().scroll_offset(scroller),
-        terminus::Vector2D::new(0.0, 60.0)
+        terminus::link::Vector2D::new(0.0, 60.0)
     );
 }
 
@@ -4600,20 +4617,26 @@ fn every_element_answers_scroll_to_and_scroll_by_unless_its_kind_has_its_own() {
         &mut js_runtime,
         "expectCode(viaPapi(held[1], 'scrollTo', {top: 50}), 0);",
     );
-    assert_eq!(offset(scroll_box), terminus::Vector2D::new(0.0, 50.0));
+    assert_eq!(offset(scroll_box), terminus::link::Vector2D::new(0.0, 50.0));
     run(
         &mut runtime,
         &mut js_runtime,
         "expectCode(viaQuery('#box', 'scrollBy', {top: 30}), 0);
          expectCode(viaPapi(held[1], 'scrollBy', {top: 30}), 0);",
     );
-    assert_eq!(offset(scroll_box), terminus::Vector2D::new(0.0, 110.0));
+    assert_eq!(
+        offset(scroll_box),
+        terminus::link::Vector2D::new(0.0, 110.0)
+    );
     run(
         &mut runtime,
         &mut js_runtime,
         "expectCode(viaQuery('#box', 'scrollTo', {top: 1e9}), 0);",
     );
-    assert_eq!(offset(scroll_box), terminus::Vector2D::new(0.0, 200.0));
+    assert_eq!(
+        offset(scroll_box),
+        terminus::link::Vector2D::new(0.0, 200.0)
+    );
     // A `behavior` outside the enum, and params that are no dictionary, are
     // code 4 and move nothing, as web-core answers the `TypeError` Web IDL
     // throws; an array is a dictionary with no members.
@@ -4626,7 +4649,10 @@ fn every_element_answers_scroll_to_and_scroll_by_unless_its_kind_has_its_own() {
          expectCode(viaQuery('#box', 'scrollBy', 'top'), 4);
          expectCode(viaPapi(held[1], 'scrollTo', []), 0);",
     );
-    assert_eq!(offset(scroll_box), terminus::Vector2D::new(0.0, 200.0));
+    assert_eq!(
+        offset(scroll_box),
+        terminus::link::Vector2D::new(0.0, 200.0)
+    );
 
     // The scroll-view's own `scrollTo` answers: `{index: 1}` lands on the
     // second child, and `{top: 50}` is its offset-less call, which scrolls
@@ -4636,13 +4662,13 @@ fn every_element_answers_scroll_to_and_scroll_by_unless_its_kind_has_its_own() {
         &mut js_runtime,
         "expectCode(viaPapi(held[2], 'scrollTo', {index: 1}), 0);",
     );
-    assert_eq!(offset(scroller), terminus::Vector2D::new(0.0, 40.0));
+    assert_eq!(offset(scroller), terminus::link::Vector2D::new(0.0, 40.0));
     run(
         &mut runtime,
         &mut js_runtime,
         "expectCode(viaQuery('#scroller', 'scrollTo', {top: 50}), 0);",
     );
-    assert_eq!(offset(scroller), terminus::Vector2D::zero());
+    assert_eq!(offset(scroller), terminus::link::Vector2D::zero());
 
     // `boundingClientRect` is the base set's on every element, its answer
     // the object `element-papi.ts` builds on either path.
@@ -5178,13 +5204,13 @@ struct TapProbe {
     log: TapLog,
 }
 
-impl terminus::CustomElement<()> for TapProbe {
+impl terminus::link::CustomElement<()> for TapProbe {
     fn observed_events(&self) -> &'static [&'static str] {
         &["tap"]
     }
 
-    fn constructed(&self, document: &mut LynxDocument, element: terminus::NodeId) {
-        let shadow = document.attach_shadow(element, terminus::ShadowRootMode::Open);
+    fn constructed(&self, document: &mut LynxDocument, element: terminus::link::NodeId) {
+        let shadow = document.attach_shadow(element, terminus::link::ShadowRootMode::Open);
         let frame = document.create_element("view", ());
         document.append_child(shadow, frame);
         let text = document.create_element("text", ());
@@ -5194,8 +5220,8 @@ impl terminus::CustomElement<()> for TapProbe {
     fn handle_event(
         &self,
         document: &mut LynxDocument,
-        element: terminus::NodeId,
-        event: &mut terminus::event::ElementEvent<'_>,
+        element: terminus::link::NodeId,
+        event: &mut terminus::link::event::ElementEvent<'_>,
     ) {
         assert_eq!(event.type_name(), "tap", "the only type it observes");
         let Some(position) = event.detail().position() else {
@@ -5203,16 +5229,16 @@ impl terminus::CustomElement<()> for TapProbe {
         };
         let (x, y) = (position.x, position.y);
         let phase = match event.phase() {
-            terminus::event::EventPhase::Capturing => "capture",
-            terminus::event::EventPhase::AtTarget => "at-target",
-            terminus::event::EventPhase::Bubbling => "bubble",
+            terminus::link::event::EventPhase::Capturing => "capture",
+            terminus::link::event::EventPhase::AtTarget => "at-target",
+            terminus::link::event::EventPhase::Bubbling => "bubble",
         };
         let tag = document
             .get(event.target())
-            .and_then(terminus::Node::tag_name)
+            .and_then(terminus::link::Node::tag_name)
             .unwrap_or("?")
             .to_owned();
-        if event.phase() == terminus::event::EventPhase::Bubbling
+        if event.phase() == terminus::link::event::EventPhase::Bubbling
             && document.shadow_root_of(event.target()) == document.shadow_root(element)
         {
             document.set_attribute(element, "heard", &tag);
@@ -5389,7 +5415,7 @@ fn a_tap_on_markdown_link_text_reaches_script_as_link() {
         let root = tree.get(shadow).expect("the shadow root").child_ids()[0];
         let paragraph = tree.get(root).expect("the markdown root").child_ids()[0];
         assert_eq!(
-            tree.get(paragraph).and_then(terminus::Node::tag_name),
+            tree.get(paragraph).and_then(terminus::link::Node::tag_name),
             Some("p")
         );
         (markdown, paragraph)
@@ -5397,12 +5423,7 @@ fn a_tap_on_markdown_link_text_reaches_script_as_link() {
 
     // "see " is four 10px Ahem glyphs: the link's text starts at x = 40.
     runtime
-        .dispatch_for_test(
-            &mut js_runtime,
-            paragraph,
-            &tap(),
-            terminus::Point2D::new(45.0, 5.0),
-        )
+        .dispatch_for_test(&mut js_runtime, paragraph, &tap(), Point2D::new(45.0, 5.0))
         .expect("the tap on the link text");
     expect_seen(&mut js_runtime, &mut runtime, "");
     assert!(
@@ -5425,12 +5446,7 @@ fn a_tap_on_markdown_link_text_reaches_script_as_link() {
 
     // Plain text owes nothing.
     runtime
-        .dispatch_for_test(
-            &mut js_runtime,
-            paragraph,
-            &tap(),
-            terminus::Point2D::new(5.0, 5.0),
-        )
+        .dispatch_for_test(&mut js_runtime, paragraph, &tap(), Point2D::new(5.0, 5.0))
         .expect("the tap on plain text");
     assert!(!runtime.has_component_events());
 }
@@ -5593,7 +5609,7 @@ fn a_markdown_element_routes_tap_while_it_exists() {
         let children = tree.get(page).expect("the page").child_ids();
         (children[0], children[1])
     };
-    let freed = |node: terminus::NodeId| elements.tree().get(node).is_none();
+    let freed = |node: terminus::link::NodeId| elements.tree().get(node).is_none();
     assert!(names.contains("tap"), "a markdown element publishes `tap`");
 
     step(
@@ -6323,16 +6339,16 @@ const IMAGE_SOURCE: &str = "app:///a.png";
 const IMAGE_PLACEHOLDER: &str = "app:///holding.png";
 const IMAGE_PIXELS: (u32, u32) = (40, 20);
 
-fn image_loaded(source: &str) -> terminus::ImageEvent {
-    terminus::ImageEvent::Loaded {
+fn image_loaded(source: &str) -> terminus::link::ImageEvent {
+    terminus::link::ImageEvent::Loaded {
         source: Arc::from(source),
         width: IMAGE_PIXELS.0,
         height: IMAGE_PIXELS.1,
     }
 }
 
-fn image_failed(source: &str) -> terminus::ImageEvent {
-    terminus::ImageEvent::Failed {
+fn image_failed(source: &str) -> terminus::link::ImageEvent {
+    terminus::link::ImageEvent::Failed {
         source: Arc::from(source),
     }
 }
@@ -6385,7 +6401,7 @@ fn image_page(script_url: &str) -> (ScriptRuntime, MainThreadRuntime, DocumentPr
 
 /// The `<dialog>` in an `<overlay>`'s shadow tree: the element `visible`
 /// puts in the top layer.
-fn overlay_dialog(tree: &LynxDocument, overlay: terminus::NodeId) -> terminus::NodeId {
+fn overlay_dialog(tree: &LynxDocument, overlay: terminus::link::NodeId) -> terminus::link::NodeId {
     let root = tree
         .shadow_root(overlay)
         .expect("the overlay's shadow root");
@@ -6973,7 +6989,7 @@ fn an_attached_element_s_handle_is_kept_by_its_parent_s() {
         elements
             .tree()
             .get(node_id(4))
-            .and_then(terminus::Node::parent_id),
+            .and_then(terminus::link::Node::parent_id),
         Some(node_id(3)),
         "the element script let go of is still attached under its parent"
     );
@@ -7063,7 +7079,8 @@ fn every_connected_element_survives_a_collection_script_holds_nothing_through() 
     // page 2, a 3, b 4, c 5, d 6, e 7, f 8, g 9.
     for (id, parent) in [(3, 2), (6, 2), (7, 3), (8, 3)] {
         assert_eq!(
-            tree.get(node_id(id)).and_then(terminus::Node::parent_id),
+            tree.get(node_id(id))
+                .and_then(terminus::link::Node::parent_id),
             Some(node_id(parent)),
             "node {id} is connected, so its handle is reachable from the page's"
         );
@@ -7217,7 +7234,7 @@ fn dropping_a_detached_ancestor_leaves_a_still_named_descendant_a_root() {
         elements
             .tree()
             .get(node_id(4))
-            .and_then(terminus::Node::parent_id),
+            .and_then(terminus::link::Node::parent_id),
         Some(node_id(2))
     );
 }
@@ -7257,7 +7274,7 @@ fn an_unmounted_subtree_is_freed_by_the_collection_that_takes_its_handles() {
         elements
             .tree()
             .get(node_id(5))
-            .and_then(terminus::Node::parent_id),
+            .and_then(terminus::link::Node::parent_id),
         Some(node_id(4)),
         "before collection the detached subtree is intact"
     );
@@ -7324,7 +7341,8 @@ fn a_replaced_element_lives_as_long_as_the_handle_that_names_it() {
         .expect("replace");
     let tree = elements.tree();
     assert_eq!(
-        tree.get(node_id(3)).and_then(terminus::Node::parent_id),
+        tree.get(node_id(3))
+            .and_then(terminus::link::Node::parent_id),
         None,
         "the replaced holder is detached, and live: its handle names it"
     );
@@ -8363,7 +8381,7 @@ const MTS_HOST_MEMBERS: [&str; 51] = [
 
 /// The card's one element, the page element's first child: the element
 /// every exposure test below registers.
-fn first_card_element(elements: &DocumentProbe) -> terminus::NodeId {
+fn first_card_element(elements: &DocumentProbe) -> terminus::link::NodeId {
     elements
         .tree()
         .document_element()
@@ -8376,8 +8394,8 @@ fn first_card_element(elements: &DocumentProbe) -> terminus::NodeId {
 /// registered and detection runs.
 fn exposure_observer(
     elements: &DocumentProbe,
-    node: terminus::NodeId,
-) -> Option<terminus::IntersectionObserverId> {
+    node: terminus::link::NodeId,
+) -> Option<terminus::link::IntersectionObserverId> {
     elements.slot.borrow().exposure.observer_of(node)
 }
 
@@ -8417,7 +8435,7 @@ fn an_rpx_exposure_margin_resolves_against_the_viewport_width() {
             .intersection_observer(observer)
             .target_margin()
             .bottom,
-        terminus::MarginLength::Px(20.0 * 393.0 / 750.0),
+        terminus::link::MarginLength::Px(20.0 * 393.0 / 750.0),
     );
 
     // Removing the id through `__SetAttribute`'s `null` is the host's
@@ -10085,16 +10103,16 @@ fn the_page_realm_cannot_close_itself() {
 
 /// The first element child of the document's page: the frame the page
 /// realm's script appended first.
-fn first_frame(tree: &LynxDocument) -> terminus::NodeId {
+fn first_frame(tree: &LynxDocument) -> terminus::link::NodeId {
     tree.document_element()
         .children()
         .find(|child| child.tag_name() == Some("frame"))
-        .map(terminus::Node::id)
+        .map(terminus::link::Node::id)
         .expect("the page holds a frame")
 }
 
 /// The nested page the `frame` component built in `frame`'s shadow root.
-fn frame_page_of(tree: &LynxDocument, frame: terminus::NodeId) -> terminus::NodeId {
+fn frame_page_of(tree: &LynxDocument, frame: terminus::link::NodeId) -> terminus::link::NodeId {
     let page = nested_page(tree, frame).expect("a frame holds its nested page");
     let node = tree.get(page).expect("live");
     assert_eq!(node.tag_name(), Some("page"));
@@ -10152,10 +10170,10 @@ fn a_child_renders_under_the_nested_page_it_was_handed() {
     let text = tree
         .get(page)
         .and_then(|page| page.children().find(|child| child.is_element()))
-        .map(terminus::Node::id)
+        .map(terminus::link::Node::id)
         .expect("the child's text is under the nested page");
     assert_eq!(
-        tree.get(text).and_then(terminus::Node::tag_name),
+        tree.get(text).and_then(terminus::link::Node::tag_name),
         Some("text")
     );
 
@@ -10506,7 +10524,7 @@ fn a_frame_realm_closes_only_its_own_listener_names() {
 /// inside a shadow tree.
 fn whole_path_encoding(
     document: &LynxDocument,
-    steps: &terminus::event::EventSteps,
+    steps: &terminus::link::event::EventSteps,
 ) -> (String, String) {
     let mut nodes = String::new();
     let mut targets = String::new();
@@ -10550,7 +10568,7 @@ fn the_page_realms_call_carries_exactly_the_path_it_always_did() {
         document.append_child(outer, inner);
         let host = document.create_element("view", ());
         document.append_child(inner, host);
-        let shadow = document.attach_shadow(host, terminus::ShadowRootMode::Open);
+        let shadow = document.attach_shadow(host, terminus::link::ShadowRootMode::Open);
         let shadowed = document.create_element("view", ());
         document.append_child(shadow, shadowed);
         let loose = document.create_element("view", ());
@@ -10563,7 +10581,7 @@ fn the_page_realms_call_carries_exactly_the_path_it_always_did() {
     };
     let slot = elements.slot.borrow();
     let document = slot.document.as_ref().unwrap();
-    let encoded = |steps: &terminus::event::EventSteps| {
+    let encoded = |steps: &terminus::link::event::EventSteps| {
         let path = encode_path(document, steps);
         (path.nodes, path.targets)
     };
@@ -10617,7 +10635,7 @@ fn the_page_realms_call_carries_exactly_the_path_it_always_did() {
                 .any(|id| id == packed_node_id(step.node).to_string())),
         "no shadow root"
     );
-    let page = packed_node_id(terminus::NodeId::DOCUMENT_ELEMENT).to_string();
+    let page = packed_node_id(terminus::link::NodeId::DOCUMENT_ELEMENT).to_string();
     assert!(
         old_nodes.split(',').any(|id| id == page),
         "the document element is on it, with the document node above it"
@@ -10775,8 +10793,8 @@ fn frame_calls() -> (
     ScriptRuntime,
     MainThreadRuntime,
     DocumentProbe,
-    terminus::NodeId,
-    terminus::NodeId,
+    terminus::link::NodeId,
+    terminus::link::NodeId,
 ) {
     let (mut js, mut runtime, elements) = runtime();
     runtime
@@ -10830,7 +10848,7 @@ fn a_cards_bindtap_is_called_in_its_own_realm_after_the_pages_walk() {
     let (mut js, mut runtime, _elements, frame, inner) = frame_calls();
     assert!(
         runtime
-            .dispatch_for_test(&mut js, inner, &tap(), terminus::Point2D::new(30.0, 40.0))
+            .dispatch_for_test(&mut js, inner, &tap(), Point2D::new(30.0, 40.0))
             .expect("dispatch")
     );
     assert_eq!(
@@ -10853,11 +10871,11 @@ fn a_cards_bindtap_is_called_in_its_own_realm_after_the_pages_walk() {
 fn a_key_calls_every_realm_that_registered_it() {
     let (mut js, mut runtime, _elements, _frame, inner) = frame_calls();
     let payload = InputEventPayload {
-        detail: terminus::event::EventDetail::Key {
+        detail: terminus::link::event::EventDetail::Key {
             key: Arc::from("a"),
             code: Arc::from("KeyA"),
             repeat: false,
-            modifiers: terminus::input::Modifiers::default(),
+            modifiers: terminus::link::input::Modifiers::default(),
             text: None,
         },
         timestamp: 0.0,
@@ -10865,7 +10883,7 @@ fn a_key_calls_every_realm_that_registered_it() {
     runtime
         .dispatch_input_event(
             &mut js,
-            terminus::NodeId::DOCUMENT_ELEMENT,
+            terminus::link::NodeId::DOCUMENT_ELEMENT,
             "keydown",
             &payload,
             None,
@@ -10876,7 +10894,7 @@ fn a_key_calls_every_realm_that_registered_it() {
         [
             format!(
                 "page-key keydown {}",
-                packed_node_id(terminus::NodeId::DOCUMENT_ELEMENT)
+                packed_node_id(terminus::link::NodeId::DOCUMENT_ELEMENT)
             ),
             format!("card-key keydown {}", packed_node_id(inner)),
         ]
@@ -10909,7 +10927,7 @@ fn a_cards_global_registration_does_not_hear_a_tap_outside_its_frame() {
     let spacer = elements.tree().document_element().child_ids()[0];
     assert!(
         !runtime
-            .dispatch_for_test(&mut js, spacer, &tap(), terminus::Point2D::new(5.0, 5.0))
+            .dispatch_for_test(&mut js, spacer, &tap(), Point2D::new(5.0, 5.0))
             .expect("dispatch"),
         "no realm was called"
     );
@@ -10917,7 +10935,7 @@ fn a_cards_global_registration_does_not_hear_a_tap_outside_its_frame() {
 
     // Inside the frame it is reached, after the card's own `bindtap`.
     runtime
-        .dispatch_for_test(&mut js, inner, &tap(), terminus::Point2D::new(30.0, 40.0))
+        .dispatch_for_test(&mut js, inner, &tap(), Point2D::new(30.0, 40.0))
         .expect("dispatch");
     assert_eq!(
         frame_lines(&mut js, &mut runtime).last(),
@@ -10949,7 +10967,7 @@ fn a_page_global_registration_hears_a_tap_inside_a_card() {
         )
         .unwrap();
     runtime
-        .dispatch_for_test(&mut js, inner, &tap(), terminus::Point2D::new(30.0, 40.0))
+        .dispatch_for_test(&mut js, inner, &tap(), Point2D::new(30.0, 40.0))
         .expect("dispatch");
     assert_eq!(
         frame_lines(&mut js, &mut runtime),
@@ -10987,7 +11005,7 @@ fn close_realm_clears_the_childs_rows() {
     assert_eq!(card_rows(&elements), (false, false));
 
     runtime
-        .dispatch_for_test(&mut js, inner, &tap(), terminus::Point2D::new(30.0, 40.0))
+        .dispatch_for_test(&mut js, inner, &tap(), Point2D::new(30.0, 40.0))
         .expect("dispatch");
     assert_eq!(
         frame_lines(&mut js, &mut runtime),
@@ -11006,8 +11024,8 @@ fn frame_calls_with_a_next_card() -> (
     MainThreadRuntime,
     DocumentProbe,
     PublishedNames,
-    terminus::NodeId,
-    terminus::NodeId,
+    terminus::link::NodeId,
+    terminus::link::NodeId,
 ) {
     let (mut js, mut runtime, elements, names) = runtime_over_watching_names(ingredients());
     runtime
@@ -11117,7 +11135,7 @@ fn reset_frame_frees_the_old_cards_page_and_its_rows_with_it() {
     );
 
     runtime
-        .dispatch_for_test(&mut js, fresh, &tap(), terminus::Point2D::new(30.0, 40.0))
+        .dispatch_for_test(&mut js, fresh, &tap(), Point2D::new(30.0, 40.0))
         .expect("dispatch");
     assert_eq!(
         frame_lines(&mut js, &mut runtime),
@@ -11145,7 +11163,7 @@ fn reset_frame_frees_the_old_cards_page_and_its_rows_with_it() {
         [format!("next-page {}", packed_node_id(fresh))]
     );
     runtime
-        .dispatch_for_test(&mut js, fresh, &tap(), terminus::Point2D::new(30.0, 40.0))
+        .dispatch_for_test(&mut js, fresh, &tap(), Point2D::new(30.0, 40.0))
         .expect("dispatch");
     assert_eq!(
         frame_lines(&mut js, &mut runtime),
@@ -11185,7 +11203,7 @@ fn a_realm_whose_steps_an_earlier_listener_freed_is_not_called() {
         )
         .unwrap();
     runtime
-        .dispatch_for_test(&mut js, inner, &tap(), terminus::Point2D::new(30.0, 40.0))
+        .dispatch_for_test(&mut js, inner, &tap(), Point2D::new(30.0, 40.0))
         .expect("nothing fails");
     assert!(
         elements.tree().get(inner).is_none(),
@@ -11225,7 +11243,7 @@ fn a_realm_that_throws_does_not_keep_the_next_from_hearing_the_event() {
         )
         .unwrap();
     let failed = runtime
-        .dispatch_for_test(&mut js, inner, &tap(), terminus::Point2D::new(30.0, 40.0))
+        .dispatch_for_test(&mut js, inner, &tap(), Point2D::new(30.0, 40.0))
         .expect_err("the page listener threw");
     let failures: Vec<MainThreadError> = failed.into_errors().collect();
     assert_eq!(failures.len(), 1);
@@ -11433,9 +11451,9 @@ fn routed(names: &mut PublishedNames) -> Vec<String> {
 fn mouse(button: i16, buttons: u16) -> InputEventPayload {
     InputEventPayload {
         detail: EventDetail::Pointer {
-            position: terminus::Point2D::new(10.0, 10.0),
+            position: Point2D::new(10.0, 10.0),
             id: 1,
-            device: terminus::input::PointerKind::Mouse,
+            device: terminus::link::input::PointerKind::Mouse,
             button,
             buttons,
         },

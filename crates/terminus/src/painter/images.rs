@@ -5,7 +5,7 @@
 //! the host and serviced in its own turns. The thread that builds the
 //! document holds names and load states; it never sees a store, a buffer or
 //! a `peniko::ImageData`. A painter reads pixels out of that store through
-//! [`FrameImages`](crate::FrameImages) and asks it for nothing else — which is
+//! [`FrameImages`](crate::render::image::FrameImages) and asks it for nothing else — which is
 //! why what it holds is a table of resolved bitmaps rather than a store.
 //!
 //! A host that decodes off-thread synchronises that itself. It already drives
@@ -16,8 +16,9 @@
 
 use std::sync::Arc;
 
-use crate::FrameImages;
-use crate::vello::peniko::ImageData;
+use vello::peniko::ImageData;
+
+use crate::render::image::FrameImages;
 
 /// The pixels the current commit draws, in draw order.
 ///
@@ -59,7 +60,11 @@ impl PainterImages {
     /// adoption to say ([`Painter::adopt`](super::Painter::adopt)): adopting a
     /// commit is the only thing that calls this, and it runs before a
     /// swap-chain image is acquired.
-    pub(crate) fn resolve(&mut self, frame: &crate::CommittedFrame, images: &dyn FrameImages) {
+    pub(crate) fn resolve(
+        &mut self,
+        frame: &crate::visual::CommittedFrame,
+        images: &dyn FrameImages,
+    ) {
         frame.resolve_images(images, &mut self.resolved, &mut self.sources);
         images.retain(&self.sources);
         self.key = Some(frame.commit_id());

@@ -114,11 +114,10 @@ use smallvec::SmallVec;
 use stylo::properties::ComputedValues;
 use stylo::values::computed::{OverscrollBehavior, ScrollCapture as ComputedScrollCapture};
 
-use crate::NodeId;
 use crate::layout::{
     box_parent, establishes_absolute_containing_block, establishes_fixed_containing_block,
 };
-use crate::tree::document::Document;
+use crate::tree::document::{Document, NodeId};
 use crate::tree::node::Node;
 
 /// Per-axis scrolling capability flags.
@@ -133,16 +132,14 @@ mod behavior_tests;
 pub(crate) mod initial_target;
 mod into_view;
 mod request;
-pub mod snap;
+pub(crate) mod snap;
 #[cfg(test)]
 mod sticky_geometry_tests;
 
 pub use into_view::{ScrollIntoViewContainer, ScrollIntoViewOptions, ScrollLogicalPosition};
 pub use request::{AutoScrollRequest, ScrollBehavior, ScrollRequest};
-pub use snap::{
-    PROXIMITY_RATIO, SNAPPED_TOLERANCE, ScrollKind, SnapAxis, SnapAxisPositions, SnapPoint,
-    SnapPositions, SnapStrictness, resolve_step, settle_offset,
-};
+pub(crate) use snap::{ScrollKind, resolve_step, settle_offset};
+pub use snap::{SnapAxis, SnapAxisPositions, SnapPoint, SnapPositions, SnapStrictness};
 
 impl ScrollAxes {
     pub const NONE: Self = Self { x: false, y: false };
@@ -250,7 +247,11 @@ pub struct ChainLink {
 /// already found its own place. Every other link keeps its inner-first
 /// place.
 #[must_use]
-pub fn chain_order(links: &[ChainLink], axis: ScrollAxis, sign: f32) -> SmallVec<[usize; 4]> {
+pub(crate) fn chain_order(
+    links: &[ChainLink],
+    axis: ScrollAxis,
+    sign: f32,
+) -> SmallVec<[usize; 4]> {
     let mut order = SmallVec::new();
     for index in (0..links.len()).rev() {
         if links[index].capture.on(axis).defers(sign) && index + 1 < links.len() {
@@ -268,7 +269,7 @@ pub fn chain_order(links: &[ChainLink], axis: ScrollAxis, sign: f32) -> SmallVec
 
 /// A chain walk's visiting order on each axis, as indices into the links.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ChainOrders {
+pub(crate) struct ChainOrders {
     pub x: SmallVec<[usize; 4]>,
     pub y: SmallVec<[usize; 4]>,
 }
@@ -277,7 +278,7 @@ pub struct ChainOrders {
 /// axis's [`chain_order`], from that axis's own `scroll-capture` and the sign
 /// of its own delta. An axis with a zero delta keeps the inner-first order.
 #[must_use]
-pub fn chain_orders(links: &[ChainLink], delta: Vector2D<f32>) -> ChainOrders {
+pub(crate) fn chain_orders(links: &[ChainLink], delta: Vector2D<f32>) -> ChainOrders {
     ChainOrders {
         x: chain_order(links, ScrollAxis::X, delta.x),
         y: chain_order(links, ScrollAxis::Y, delta.y),
@@ -313,7 +314,7 @@ fn chain_reach(links: &[ChainLink]) -> (usize, usize) {
 /// walks rather than an interleaving, because the axes are independent —
 /// neither walk reads what the other absorbed — and a link visited at
 /// different positions on the two axes has no single place to receive both.
-pub fn drive_chain(
+pub(crate) fn drive_chain(
     links: &[ChainLink],
     delta: Vector2D<f32>,
     mut scroll: impl FnMut(usize, Vector2D<f32>) -> Vector2D<f32>,
@@ -845,7 +846,7 @@ impl<T> Document<T> {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use crate::StylesheetOrigin;
+    use crate::style::engine::StylesheetOrigin;
     use crate::tree::document::tests::device;
 
     fn nested_scrollers() -> (Document<()>, NodeId, NodeId) {
@@ -1007,7 +1008,7 @@ mod tests {
         let root = document.document_element().id();
         let host = document.create_element("view", ());
         document.append_child(root, host);
-        let shadow = document.attach_shadow(host, crate::ShadowRootMode::Open);
+        let shadow = document.attach_shadow(host, crate::tree::shadow::ShadowRootMode::Open);
         document.add_shadow_stylesheet(
             shadow,
             "slot { display: contents; }

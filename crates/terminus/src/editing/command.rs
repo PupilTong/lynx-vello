@@ -41,8 +41,7 @@ use super::offsets::{
     byte_of_unit, byte_of_unit_floor, floor_char_boundary, unit_of_byte, utf16_len,
 };
 use super::{ByteSelection, EditableParagraph, Session};
-use crate::Document;
-use crate::tree::document::NodeId;
+use crate::tree::document::{Document, NodeId};
 
 /// One editing command, applied to the focused editing host.
 #[derive(Clone, Debug, PartialEq)]
@@ -88,13 +87,17 @@ pub enum Command {
     /// the selection was made with, so a drag after a double-click extends
     /// by words.
     SelectFromPoint {
-        point: crate::Point2D<f32>,
+        point: euclid::default::Point2D<f32>,
         extend: bool,
     },
     /// Selects the word at `point` (a double-click).
-    SelectWordAtPoint { point: crate::Point2D<f32> },
+    SelectWordAtPoint {
+        point: euclid::default::Point2D<f32>,
+    },
     /// Selects the visual line at `point` (a triple-click).
-    SelectLineAtPoint { point: crate::Point2D<f32> },
+    SelectLineAtPoint {
+        point: euclid::default::Point2D<f32>,
+    },
     /// Inserts text in place of the selection (`insertText`). An active
     /// composition is finished first.
     Insert(String),
@@ -682,7 +685,10 @@ impl<T: Sync> Document<T> {
                 node.child_ids()
                     .iter()
                     .copied()
-                    .filter(|&child| self.get(child).is_some_and(crate::Node::is_text_node))
+                    .filter(|&child| {
+                        self.get(child)
+                            .is_some_and(crate::tree::node::Node::is_text_node)
+                    })
                     .collect()
             })
             .unwrap_or_default();
@@ -691,7 +697,7 @@ impl<T: Sync> Document<T> {
             self.append_child(host, text);
             return;
         };
-        if self.get(first).and_then(crate::Node::text) != Some(value.as_str()) {
+        if self.get(first).and_then(crate::tree::node::Node::text) != Some(value.as_str()) {
             self.set_text_node_data(first, value);
         }
         for &other in rest {
@@ -749,7 +755,7 @@ fn current_in(context: &Context, paragraph: &EditableParagraph<'_>) -> Option<Se
 fn select_at_point(
     context: Context,
     paragraph: Option<&EditableParagraph<'_>>,
-    point: crate::Point2D<f32>,
+    point: euclid::default::Point2D<f32>,
     select: impl FnOnce(&parley::Layout<crate::layout::TextBrush>, &Selection, f32, f32) -> Selection,
 ) -> Option<PreparedEdit> {
     let composition = context.composition();

@@ -39,8 +39,8 @@ use stylo::values::computed::font::GenericFontFamily;
 use stylo::values::computed::{CSSPixelLength, Length};
 use stylo::values::specified::font::{FONT_MEDIUM_PX, QueryFontMetricsFlags};
 use stylo_traits::{CSSPixel, DevicePixel};
-use terminus::vello::Scene;
-use terminus::{CommittedFrame, Document, FontBlob, StylesheetOrigin};
+use terminus::link::vello::Scene;
+use terminus::link::{CommittedFrame, Document, FontBlob, StylesheetOrigin};
 
 fn main() {
     divan::main();
@@ -83,8 +83,8 @@ impl FontMetricsProvider for BenchFontMetricsProvider {
     }
 }
 
-fn device() -> terminus::Device {
-    terminus::standards_device(
+fn device() -> terminus::link::Device {
+    terminus::link::standards_device(
         MediaType::screen(),
         Size2D::<f32, CSSPixel>::new(800.0, 600.0),
         Size2D::<f32, DevicePixel>::new(800.0, 600.0),
@@ -237,7 +237,7 @@ const TEXT_UA_CSS: &str = "text { overflow: clip; }";
 /// Lynx text element, which lays out as a Lynx paragraph.
 struct TextKind;
 
-impl terminus::CustomElement<()> for TextKind {
+impl terminus::link::CustomElement<()> for TextKind {
     fn is_lynx_text(&self) -> bool {
         true
     }
@@ -285,7 +285,7 @@ fn scroll_driven_css(header_animation: &str) -> String {
 }
 
 /// The page of [`scroll_driven_css`], and its list.
-fn scroll_driven_page(header_animation: &str) -> (Document<()>, terminus::NodeId) {
+fn scroll_driven_page(header_animation: &str) -> (Document<()>, terminus::link::NodeId) {
     let mut dom = Document::new(device(), "page", ());
     dom.add_stylesheet(
         &scroll_driven_css(header_animation),
@@ -331,7 +331,7 @@ fn frame_scroll_driven_composite(bencher: divan::Bencher<'_, '_>) {
     let mut index = 0_u32;
     bencher.bench_local(move || {
         index += 1;
-        let offset = terminus::Vector2D::new(0.0, swept_offset(index));
+        let offset = terminus::link::Vector2D::new(0.0, swept_offset(index));
         scene.reset();
         frame.compose_into(
             &mut scene,
@@ -360,7 +360,10 @@ fn frame_scroll_driven_main(bencher: divan::Bencher<'_, '_>) {
     let mut index = 0_u32;
     bencher.bench_local(move || {
         index += 1;
-        page.scroll_to(list, terminus::Vector2D::new(0.0, swept_offset(index)));
+        page.scroll_to(
+            list,
+            terminus::link::Vector2D::new(0.0, swept_offset(index)),
+        );
         page.advance_scroll_timelines(&[list]);
         divan::black_box(page.render());
     });

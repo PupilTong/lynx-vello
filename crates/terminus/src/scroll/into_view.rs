@@ -34,8 +34,7 @@ use stylo::values::computed::Length;
 
 use super::ScrollBehavior;
 use super::snap::scroll_padding;
-use crate::NodeId;
-use crate::tree::document::Document;
+use crate::tree::document::{Document, NodeId};
 
 /// CSSOM-View's `ScrollLogicalPosition`: where on one axis
 /// [`Document::scroll_into_view`] puts the element in a scrolling box.
@@ -269,7 +268,7 @@ impl<T> Document<T> {
 mod tests {
     use super::ScrollLogicalPosition::{Center, End, Nearest, Start};
     use super::*;
-    use crate::StylesheetOrigin;
+    use crate::style::engine::StylesheetOrigin;
     use crate::tree::document::tests::device;
 
     #[test]

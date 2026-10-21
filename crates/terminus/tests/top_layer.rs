@@ -11,7 +11,7 @@
 mod common;
 
 use common::Doc;
-use terminus::ElementState;
+use terminus::link::ElementState;
 
 /// What bobcat-core's UA sheet gives a modal `<dialog>` and `::backdrop`,
 /// reduced to what these tests read.

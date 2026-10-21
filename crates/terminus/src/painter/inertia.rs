@@ -54,6 +54,7 @@
 //! not re-snap a container out from under the curve; a gliding container
 //! is exempt from that at-rest rule on its own.
 
+use euclid::default::{Size2D, Vector2D};
 use smallvec::SmallVec;
 
 use super::motion::{
@@ -64,7 +65,8 @@ use super::motion::{
 use super::{ScrollIntents, note_changed, wrap_axes};
 use crate::input::PointerId;
 use crate::scroll::{AutoScrollRequest, ScrollAxes, SnapAxis};
-use crate::{CommittedFrame, NodeId, Size2D, Vector2D};
+use crate::tree::document::NodeId;
+use crate::visual::CommittedFrame;
 
 /// How far back a release looks for its velocity: the drag's travel over
 /// the steps inside this window, divided by their span. A drag whose last

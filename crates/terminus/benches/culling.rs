@@ -28,7 +28,7 @@ use stylo::values::computed::font::GenericFontFamily;
 use stylo::values::computed::{CSSPixelLength, Length};
 use stylo::values::specified::font::{FONT_MEDIUM_PX, QueryFontMetricsFlags};
 use stylo_traits::{CSSPixel, DevicePixel};
-use terminus::{Document, StylesheetOrigin};
+use terminus::link::{Document, StylesheetOrigin};
 #[derive(Debug)]
 struct BenchFontMetricsProvider;
 
@@ -51,8 +51,8 @@ impl FontMetricsProvider for BenchFontMetricsProvider {
     }
 }
 
-fn device() -> terminus::Device {
-    terminus::standards_device(
+fn device() -> terminus::link::Device {
+    terminus::link::standards_device(
         MediaType::screen(),
         Size2D::<f32, CSSPixel>::new(800.0, 600.0),
         Size2D::<f32, DevicePixel>::new(800.0, 600.0),
@@ -86,7 +86,11 @@ page { display: flex; position: relative; width: 800px; height: 600px; }
 @keyframes slide { from { transform: translateX(0px); } to { transform: translateX(100px); } }
 ";
 
-fn el(dom: &mut Document<()>, parent: terminus::NodeId, class: &str) -> terminus::NodeId {
+fn el(
+    dom: &mut Document<()>,
+    parent: terminus::link::NodeId,
+    class: &str,
+) -> terminus::link::NodeId {
     let node = dom.create_element("view", ());
     dom.add_class(node, class);
     dom.append_child(parent, node);

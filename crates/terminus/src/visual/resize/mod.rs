@@ -592,7 +592,8 @@ impl<T> Document<T> {
         box_kind: ObservedBox,
     ) {
         assert!(
-            self.get(target).is_some_and(crate::Node::is_element),
+            self.get(target)
+                .is_some_and(crate::tree::node::Node::is_element),
             "a resize observer's target {target:?} must be a live element"
         );
         let resizes = &mut self.resizes;

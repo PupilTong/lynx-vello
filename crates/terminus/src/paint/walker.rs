@@ -106,17 +106,17 @@
 //! viewport still answers with the element drawn there.
 
 use euclid::default::{Size2D, Vector2D};
+use vello::Scene;
+use vello::kurbo::{Affine, Point, Rect};
+use vello::peniko::{BlendMode, Compose, Fill, Mix};
 
-use crate::Document;
 use crate::paint::compose::{BackdropRoot, CapturedShape, ComposeAssembly, ComposeOp, FilterGroup};
 use crate::paint::shape::{BoxShape, with_shape};
 use crate::paint::{
     BoxFragment, PathScratch, background, border, convert, filters, mask, shadow, text,
 };
 use crate::render::image::ImageRegistry;
-use crate::vello::Scene;
-use crate::vello::kurbo::{Affine, Point, Rect};
-use crate::vello::peniko::{BlendMode, Compose, Fill, Mix};
+use crate::tree::document::Document;
 use crate::visual::space::{self, SpaceKind, nearest_scroll, nearest_sticky};
 use crate::visual::{AutoBox, ClipNode, PaintItem, PaintItemKind, PaintOrder, RenderLayer};
 
@@ -942,7 +942,7 @@ fn resolve_clips(
 /// is never tighter than the clip the painter pushes; taking the bounding box
 /// of a rounded rect only widens it, which is the safe direction.
 fn clip_bounds(clip: &ClipNode) -> Option<Rect> {
-    let size = crate::Size2D::new(clip.rect.size.width, clip.rect.size.height);
+    let size = euclid::default::Size2D::new(clip.rect.size.width, clip.rect.size.height);
     let affine = convert::item_affine(&clip.transform, size)?;
     Some(affine_rect(
         affine,
@@ -1723,7 +1723,7 @@ fn paint_inline_boxes<T>(
                 (padding_box.y1 - f64::from(padding.bottom)).max(padding_box.y0),
             );
             #[allow(clippy::cast_possible_truncation, reason = "CSS px fit f32")]
-            let strip = crate::Size2D::new(total as f32, fragment.rect.size.height);
+            let strip = euclid::default::Size2D::new(total as f32, fragment.rect.size.height);
             let box_fragment = BoxFragment {
                 transform: transform
                     * Affine::translate((
@@ -1799,7 +1799,7 @@ fn paint_inline_backgrounds<T>(
     let mut fragments = Vec::new();
     text::inline_background_fragments(paragraph, runs, &mut fragments);
     for (node, rect) in fragments {
-        let size = crate::Size2D::new(rect.width() as f32, rect.height() as f32);
+        let size = euclid::default::Size2D::new(rect.width() as f32, rect.height() as f32);
         if size.width <= 0.0 || size.height <= 0.0 {
             continue;
         }
@@ -1820,7 +1820,11 @@ fn paint_inline_backgrounds<T>(
     }
 }
 
-fn color_gradient_box<T>(document: &Document<T>, item: &PaintItem, element: crate::NodeId) -> Rect {
+fn color_gradient_box<T>(
+    document: &Document<T>,
+    item: &PaintItem,
+    element: crate::tree::document::NodeId,
+) -> Rect {
     let own_box = Rect::new(
         0.0,
         0.0,
@@ -1845,7 +1849,7 @@ fn color_gradient_box<T>(document: &Document<T>, item: &PaintItem, element: crat
     // content box, so that origin — border plus padding — is the offset
     // between the two, and the paint item is the establishing element itself
     // rather than a run inside it.
-    let content_origin = crate::vello::kurbo::Vec2::new(
+    let content_origin = vello::kurbo::Vec2::new(
         f64::from(element_layout.border.left + element_layout.padding.left),
         f64::from(element_layout.border.top + element_layout.padding.top),
     );
@@ -1854,25 +1858,20 @@ fn color_gradient_box<T>(document: &Document<T>, item: &PaintItem, element: crat
 
 fn collect_text_clip<T>(
     document: &Document<T>,
-    element: crate::NodeId,
+    element: crate::tree::document::NodeId,
 ) -> crate::paint::TextClip<'_> {
     let mut clip = crate::paint::TextClip::default();
-    collect_text_clip_under(
-        document,
-        element,
-        crate::vello::kurbo::Vec2::ZERO,
-        &mut clip,
-    );
+    collect_text_clip_under(document, element, vello::kurbo::Vec2::ZERO, &mut clip);
     clip
 }
 
 fn collect_text_clip_under<'doc, T>(
     document: &'doc Document<T>,
-    node: crate::NodeId,
-    offset: crate::vello::kurbo::Vec2,
+    node: crate::tree::document::NodeId,
+    offset: vello::kurbo::Vec2,
     clip: &mut crate::paint::TextClip<'doc>,
 ) {
-    use crate::vello::kurbo::Vec2;
+    use vello::kurbo::Vec2;
     let Some(node_ref) = document.get(node) else {
         return;
     };
@@ -1964,7 +1963,7 @@ fn push_clip(sink: &mut WalkSink<'_>, clip: &ClipNode, scale: Affine) {
 /// One clip node's rounded rect and its clip-local to device px map, or
 /// `None` for a singular transform, which has no shape to clip with.
 fn clip_geometry(clip: &ClipNode, scale: Affine) -> Option<(Affine, BoxShape)> {
-    let size = crate::Size2D::new(clip.rect.size.width, clip.rect.size.height);
+    let size = euclid::default::Size2D::new(clip.rect.size.width, clip.rect.size.height);
     let local = convert::item_affine(&clip.transform, size)?;
     let rect = Rect::new(
         clip.rect.origin.x as f64,
@@ -2672,14 +2671,13 @@ fn blend_mode(style: &stylo::properties::ComputedValues) -> BlendMode {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use euclid::default::Transform3D;
+    use euclid::default::{Size2D, Transform3D};
     use vello::kurbo::Affine;
 
     use super::{
         ComposeAssembly, ComposeOp, CullPlan, PaintItem, PaintItemKind, Rect, Scene, Scratch,
         can_reach, cull_rect, item_bounds, walk, walk_compose, walk_uncultured,
     };
-    use crate::Size2D;
     use crate::paint::equivalence::assert_scenes_identical;
     use crate::test_common::Doc;
     use crate::visual::CornerRadii;
@@ -2716,7 +2714,8 @@ mod tests {
                    background-clip: text; }",
         );
         assert_eq!(
-            doc.dom.register_fonts(crate::FontBlob::from_static(AHEM)),
+            doc.dom
+                .register_fonts(seldon::text::FontBlob::from_static(AHEM)),
             1
         );
         let div = doc.el(doc.root, "div");
@@ -2744,7 +2743,7 @@ mod tests {
             &doc.dom,
             &frame,
             &images,
-            &crate::NoImages,
+            &crate::render::image::NoImages,
         );
         let mut uncultured = Scene::default();
         let mut uncultured_scratch = Scratch::default();
@@ -2754,7 +2753,7 @@ mod tests {
             &doc.dom,
             &frame,
             &images,
-            &crate::NoImages,
+            &crate::render::image::NoImages,
         );
         Frames {
             cultured,
@@ -3092,7 +3091,7 @@ mod tests {
     /// A list 600 px tall of 200 rows 40 px tall, each row running
     /// `animation` — `shimmer`, `wobble` or none — except row `lifted`,
     /// which rises 5000 px.
-    fn animated_list(animation: &str, lifted: usize) -> (Doc, Vec<crate::NodeId>) {
+    fn animated_list(animation: &str, lifted: usize) -> (Doc, Vec<crate::tree::document::NodeId>) {
         let mut doc = Doc::with_css(&format!(
             "page {{ display: flex; position: relative; width: 800px; height: 600px; }}
              .list {{ display: flex; flex-direction: column; overflow: scroll;
@@ -3123,7 +3122,11 @@ mod tests {
     }
 
     /// Whether `node`'s element box encodes in `doc`'s frame.
-    fn box_encodes(doc: &Doc, frame: &crate::visual::PaintOrder, node: crate::NodeId) -> bool {
+    fn box_encodes(
+        doc: &Doc,
+        frame: &crate::visual::PaintOrder,
+        node: crate::tree::document::NodeId,
+    ) -> bool {
         let encoded = super::encoded_items(&doc.dom, frame);
         frame
             .items()
@@ -3563,7 +3566,10 @@ mod tests {
     /// A toast popping out to `scale(0)` holding a ticker that slides
     /// 6000 px, built from `css`, with `fill` adding the ticker's children:
     /// how many curves export, and the rect of every group layer.
-    fn toast(css: &str, fill: impl FnOnce(&mut Doc, crate::NodeId)) -> (usize, Vec<Rect>) {
+    fn toast(
+        css: &str,
+        fill: impl FnOnce(&mut Doc, crate::tree::document::NodeId),
+    ) -> (usize, Vec<Rect>) {
         let mut doc = Doc::with_css(&format!(
             "{PAGE}
              .toast {{ left: 100px; top: 100px; width: 300px; height: 60px;

@@ -23,10 +23,10 @@
 //! exist.
 
 use serde_json::{Map, Value};
-use terminus::scroll::{
+use terminus::link::scroll::{
     ScrollBehavior, ScrollIntoViewContainer, ScrollIntoViewOptions, ScrollLogicalPosition,
 };
-use terminus::{MethodCall, MethodError, MethodOutcome, NodeId, Vector2D};
+use terminus::link::{MethodCall, MethodError, MethodOutcome, NodeId, Vector2D};
 
 use super::scroll_container::{clamp_to_range, object};
 use super::{InvalidParams, LynxDocument};
@@ -35,9 +35,9 @@ use crate::main::record::write_record_field;
 /// Runs the base method `call` names on `element`, or answers
 /// [`MethodOutcome::NotFound`] for a name the base set does not build.
 ///
-/// It runs after the kind's [`terminus::CustomElement::invoke`] has answered
+/// It runs after the kind's [`terminus::link::CustomElement::invoke`] has answered
 /// `NotFound`, outside the `[CEReactions]` scope
-/// [`terminus::Document::invoke_element_method`] opens for the kind's method,
+/// [`terminus::link::Document::invoke_element_method`] opens for the kind's method,
 /// and needs none: a scroll request and a geometry readback queue no custom
 /// element reaction.
 pub(crate) fn invoke_base_method(
@@ -69,7 +69,7 @@ pub(crate) fn invoke_base_method(
 
 /// `boundingClientRect()` on `element`: the data fields `left`, `top`,
 /// `width`, `height`, in that order, of its border box in viewport CSS px
-/// ([`terminus::Document::bounding_client_rect`]), ancestor scroll offsets
+/// ([`terminus::link::Document::bounding_client_rect`]), ancestor scroll offsets
 /// applied and transforms ignored, as native's own conversion ignores them.
 /// An element with no box answers zeros rather than nothing, which is what
 /// both references report for one. `params` is unread: the options the
@@ -82,7 +82,7 @@ pub(crate) fn invoke_base_method(
 fn bounding_client_rect(document: &LynxDocument, element: NodeId) -> String {
     let rect = document
         .bounding_client_rect(element)
-        .unwrap_or_else(terminus::Rect::zero);
+        .unwrap_or_else(terminus::link::Rect::zero);
     let mut record = String::new();
     for value in [
         rect.origin.x,
@@ -125,14 +125,15 @@ enum ScrollMethod {
 ///   `"smooth"` is `Smooth`; `"auto"` is instant because this engine has no `scroll-behavior`
 ///   property for `auto` to read (`docs/tracking/deviations.md`).
 /// - The target clamps to the scroll range per axis, and the scroll goes through
-///   [`terminus::Document::scroll_to_with`], so the painter is told and a smooth one is recorded
-///   for the painter to animate. As [`terminus::Document::scroll_into_view`] does, a target equal
-///   to the current offset records nothing unless a request is pending, which this one then
-///   replaces (CSSOM-View's abort of the ongoing smooth scroll).
-/// - After the params convert, an element with no box ([`terminus::Document::bounding_client_rect`]
-///   is `None`) or that is no scroll container ([`terminus::Document::scroll_box`] is `None`) does
-///   nothing, which is CSSOM-View's "terminate these steps"; the call answers code 0, as web-core's
-///   does for a plain box. Params that do not convert are code 4 on such an element too.
+///   [`terminus::link::Document::scroll_to_with`], so the painter is told and a smooth one is
+///   recorded for the painter to animate. As [`terminus::link::Document::scroll_into_view`] does, a
+///   target equal to the current offset records nothing unless a request is pending, which this one
+///   then replaces (CSSOM-View's abort of the ongoing smooth scroll).
+/// - After the params convert, an element with no box
+///   ([`terminus::link::Document::bounding_client_rect`] is `None`) or that is no scroll container
+///   ([`terminus::link::Document::scroll_box`] is `None`) does nothing, which is CSSOM-View's
+///   "terminate these steps"; the call answers code 0, as web-core's does for a plain box. Params
+///   that do not convert are code 4 on such an element too.
 ///
 /// CSSOM-View's step for the root element, which scrolls the viewport
 /// instead, needs nothing of its own: the page element is the scroll
@@ -212,7 +213,7 @@ fn unrestricted_double(value: &Value) -> f64 {
 
 /// `scrollIntoView({scrollIntoViewOptions: {behavior?, block?, inline?}})`
 /// on `element`, with `params` as the JSON text the realm serialized:
-/// CSSOM-View's `scrollIntoView` ([`terminus::Document::scroll_into_view`])
+/// CSSOM-View's `scrollIntoView` ([`terminus::link::Document::scroll_into_view`])
 /// with `container: "nearest"`, which is Lynx's method. Answers whether a
 /// scroll container was found above the element.
 ///
@@ -294,8 +295,8 @@ fn logical_position(
 mod tests {
     #![allow(clippy::float_cmp)] // Explicit pixel sizes lay out exactly.
 
-    use terminus::scroll::{ScrollBehavior, ScrollRequest};
-    use terminus::{MethodCall, MethodError, MethodOutcome, NodeId, Vector2D};
+    use terminus::link::scroll::{ScrollBehavior, ScrollRequest};
+    use terminus::link::{MethodCall, MethodError, MethodOutcome, NodeId, Vector2D};
 
     use super::super::LynxDocument;
     use super::super::scroll_container::SCROLL_VIEW_TAG;

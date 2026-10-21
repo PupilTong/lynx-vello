@@ -9,9 +9,9 @@
 
 use std::time::{Duration, Instant};
 
-use terminus::Point2D;
-use terminus::input::{InputEvent, PointerKind, PointerPhase};
-use terminus::stylo::properties::PropertyId;
+use terminus::link::Point2D;
+use terminus::link::input::{InputEvent, PointerKind, PointerPhase};
+use terminus::link::stylo::properties::PropertyId;
 
 use super::super::LynxDocument;
 use super::super::test_support::style_of;
@@ -107,7 +107,7 @@ fn await_logged(engine: &mut TestEngine, lines: &[&str]) -> Vec<String> {
 }
 
 /// The element `selector` names in the light tree.
-fn light(document: &LynxDocument, selector: &str) -> terminus::NodeId {
+fn light(document: &LynxDocument, selector: &str) -> terminus::link::NodeId {
     document
         .query_selector(document.document_element().id(), selector)
         .expect("a valid selector")
@@ -115,7 +115,11 @@ fn light(document: &LynxDocument, selector: &str) -> terminus::NodeId {
 }
 
 /// Every element named `tag` in `host`'s shadow tree, in tree order.
-fn shadow_all(document: &LynxDocument, host: terminus::NodeId, tag: &str) -> Vec<terminus::NodeId> {
+fn shadow_all(
+    document: &LynxDocument,
+    host: terminus::link::NodeId,
+    tag: &str,
+) -> Vec<terminus::link::NodeId> {
     let mut found = Vec::new();
     let mut stack = vec![markdown_root(document, host).expect("the host's markdown root")];
     while let Some(id) = stack.pop() {
@@ -129,7 +133,7 @@ fn shadow_all(document: &LynxDocument, host: terminus::NodeId, tag: &str) -> Vec
 }
 
 /// The text nodes under `element`, concatenated.
-fn text_of(document: &LynxDocument, element: terminus::NodeId) -> String {
+fn text_of(document: &LynxDocument, element: terminus::link::NodeId) -> String {
     let mut text = String::new();
     let mut stack = vec![element];
     while let Some(id) = stack.pop() {
@@ -143,7 +147,7 @@ fn text_of(document: &LynxDocument, element: terminus::NodeId) -> String {
 }
 
 /// One computed longhand of `element`, as a string.
-fn computed(document: &LynxDocument, element: terminus::NodeId, property: &str) -> String {
+fn computed(document: &LynxDocument, element: terminus::link::NodeId, property: &str) -> String {
     let id = PropertyId::parse_enabled_for_all_content(property).expect("a known property");
     let longhand = id.as_shorthand().expect_err("a longhand");
     style_of(document, element).computed_value_to_string(longhand)
@@ -210,7 +214,7 @@ fn a_compiled_card_renders_its_markdown_and_hears_its_events() {
 
             let plain = light(document, "#plain");
             assert_eq!(
-                document.get(plain).and_then(terminus::Node::tag_name),
+                document.get(plain).and_then(terminus::link::Node::tag_name),
                 Some("markdown")
             );
             let strong = shadow_all(document, plain, "strong");

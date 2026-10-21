@@ -5,8 +5,8 @@ use stylo::servo::animation::AnimationProgress;
 use stylo::values::computed::{AnimationDirection, AnimationFillMode};
 
 use super::{Axis, Binding, ProgressTiming, iteration_progress};
-use crate::NodeId;
 use crate::test_common::Doc;
+use crate::tree::document::NodeId;
 
 /// A timing on a source scrolling to 1000.
 fn timed(
@@ -842,7 +842,9 @@ fn a_shadow_tree_matches_only_its_own_names() {
         let mut doc = Doc::with_css(&format!("{PAGE} {document_css}"));
         let root = doc.root;
         let host = doc.el(root, "view.scroller.host");
-        let shadow = doc.dom.attach_shadow(host, crate::ShadowRootMode::Open);
+        let shadow = doc
+            .dom
+            .attach_shadow(host, crate::tree::shadow::ShadowRootMode::Open);
         doc.dom.add_shadow_stylesheet(
             shadow,
             &format!(
@@ -870,7 +872,9 @@ fn a_slotted_name_belongs_to_the_slot_tree() {
     let mut doc = Doc::with_css(PAGE);
     let root = doc.root;
     let outer = doc.el(root, "view.box");
-    let tree = doc.dom.attach_shadow(outer, crate::ShadowRootMode::Open);
+    let tree = doc
+        .dom
+        .attach_shadow(outer, crate::tree::shadow::ShadowRootMode::Open);
     let keyframes = "@keyframes fade { from { opacity: 0; } to { opacity: 1; } }
          .inside { flex-shrink: 0; width: 20px; height: 20px;
                    animation: fade linear both; animation-timeline: --t; }";
@@ -881,7 +885,9 @@ fn a_slotted_name_belongs_to_the_slot_tree() {
     doc.el(tree, "slot");
     let from_slot_tree = doc.el(tree, "view.inside");
     let slotted = doc.el(outer, "view.scroller");
-    let own = doc.dom.attach_shadow(slotted, crate::ShadowRootMode::Open);
+    let own = doc
+        .dom
+        .attach_shadow(slotted, crate::tree::shadow::ShadowRootMode::Open);
     doc.dom.add_shadow_stylesheet(
         own,
         &format!(".tall {{ flex-shrink: 0; width: 200px; height: 500px; }} {keyframes}"),

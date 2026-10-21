@@ -5,8 +5,8 @@
 //! Spec sketch:
 //! - Walk `layout.lines()` → `line.items()` → `PositionedLayoutItem::GlyphRun`; for each run:
 //!   `scene.draw_glyphs(run.font())` with `font_size`, the run's `normalized_coords` (parley coord
-//!   i16s convert to `crate::vello::NormalizedCoord`), `hint(false)` (transforms are arbitrary),
-//!   `brush` = the element's used `color`, glyphs mapped from `glyph_run.positioned_glyphs()`.
+//!   i16s convert to `vello::NormalizedCoord`), `hint(false)` (transforms are arbitrary), `brush` =
+//!   the element's used `color`, glyphs mapped from `glyph_run.positioned_glyphs()`.
 //! - Synthesis (fake bold/oblique) from `run.synthesis()`: embolden via
 //!   `DrawGlyphs::font_embolden`, oblique via `glyph_transform` skew.
 //! - `text-shadow`: repeat the glyph pass per shadow (last-specified first, under the main pass),
@@ -40,13 +40,13 @@ use smallvec::SmallVec;
 use stylo::computed_values::text_decoration_style::T as TextDecorationStyle;
 use stylo::properties::ComputedValues;
 use stylo::values::computed::{ColorPropertyValue, Image, TextDecorationLine};
+use vello::kurbo::{Affine, BezPath, Diagonal2, Line, Rect, Stroke};
+use vello::peniko::{BrushRef, Color, Fill, StyleRef};
+use vello::{FontEmbolden, Scene, peniko};
 
 use crate::layout::paragraph::PaintedParagraph;
 use crate::paint::background::{GradientBrush, gradient_brush};
 use crate::paint::convert;
-use crate::vello::kurbo::{Affine, BezPath, Diagonal2, Line, Rect, Stroke};
-use crate::vello::peniko::{self, BrushRef, Color, Fill, StyleRef};
-use crate::vello::{FontEmbolden, Scene};
 
 enum TextFill {
     Solid(Color),
@@ -131,7 +131,7 @@ pub(crate) struct RunPaints<'doc> {
 }
 
 /// The inline scopes that paint a background behind one run, outermost first.
-type BackgroundChain = SmallVec<[crate::NodeId; 2]>;
+type BackgroundChain = SmallVec<[crate::tree::document::NodeId; 2]>;
 
 pub(crate) struct RunPaint<'doc> {
     style: &'doc ComputedValues,
@@ -156,8 +156,8 @@ pub(crate) struct RunPaint<'doc> {
 
 impl<'doc> RunPaints<'doc> {
     pub(crate) fn resolve<T>(
-        document: &'doc crate::Document<T>,
-        element: crate::NodeId,
+        document: &'doc crate::tree::document::Document<T>,
+        element: crate::tree::document::NodeId,
         paragraph: &PaintedParagraph<'_>,
         gradient_box: Option<Rect>,
     ) -> Self {
@@ -189,7 +189,7 @@ impl<'doc> RunPaints<'doc> {
         // element. Empty for every paragraph whose runs are solid-coloured or
         // whose only gradient is the block's own, so the layout pass below
         // never runs for them.
-        let mut nested: SmallVec<[(usize, crate::NodeId); 2]> = SmallVec::new();
+        let mut nested: SmallVec<[(usize, crate::tree::document::NodeId); 2]> = SmallVec::new();
         let mut backgrounds: SmallVec<[(usize, BackgroundChain); 2]> = SmallVec::new();
         for index in 0..paragraph.style_count() {
             // The dots are shaped in the run holding the last visible byte, so
@@ -281,14 +281,14 @@ impl<'doc> RunPaints<'doc> {
         !self.backgrounds.is_empty() || !self.atom_backgrounds.is_empty()
     }
 
-    fn background_chain(&self, style_index: usize) -> &[crate::NodeId] {
+    fn background_chain(&self, style_index: usize) -> &[crate::tree::document::NodeId] {
         self.backgrounds
             .iter()
             .find(|(index, _)| *index == style_index)
             .map_or(&[][..], |(_, chain)| chain)
     }
 
-    fn atom_background_chain(&self, id: u64) -> &[crate::NodeId] {
+    fn atom_background_chain(&self, id: u64) -> &[crate::tree::document::NodeId] {
         self.atom_backgrounds
             .iter()
             .find(|(placed, _)| *placed == id)
@@ -304,9 +304,9 @@ impl<'doc> RunPaints<'doc> {
 /// concatenate into that one id space.
 fn box_source(
     id: u64,
-    sources: &[crate::NodeId],
-    truncation: &[crate::NodeId],
-) -> Option<crate::NodeId> {
+    sources: &[crate::tree::document::NodeId],
+    truncation: &[crate::tree::document::NodeId],
+) -> Option<crate::tree::document::NodeId> {
     let index = usize::try_from(id).ok()?;
     match sources.get(index) {
         Some(node) => Some(*node),
@@ -326,9 +326,9 @@ fn box_source(
 /// element a background fragment paints for is the element that owns those
 /// source units.
 fn background_chain<T>(
-    document: &crate::Document<T>,
-    node: crate::NodeId,
-    element: crate::NodeId,
+    document: &crate::tree::document::Document<T>,
+    node: crate::tree::document::NodeId,
+    element: crate::tree::document::NodeId,
 ) -> BackgroundChain {
     let mut chain: BackgroundChain =
         crate::layout::text_block::inline_scopes(document.arenas(), node, element)
@@ -371,14 +371,14 @@ fn paints_background(style: &ComputedValues) -> bool {
 fn assign_nested_tiles(
     paragraph: &PaintedParagraph<'_>,
     by_style: &mut [RunPaint<'_>],
-    nested: &[(usize, crate::NodeId)],
+    nested: &[(usize, crate::tree::document::NodeId)],
 ) {
     // One entry per gradient-coloured element, not per style index: parley
     // splits a run at every style change and at every line break, so one
     // element's ink can arrive as several indices and must still sample one
     // ramp. Linear scans over a list that is as long as the paragraph has
     // gradient elements.
-    let mut tiles: SmallVec<[(crate::NodeId, Rect); 2]> = SmallVec::new();
+    let mut tiles: SmallVec<[(crate::tree::document::NodeId, Rect); 2]> = SmallVec::new();
     for line in paragraph.layout.lines() {
         let metrics = line.metrics();
         let top = f64::from(metrics.block_min_coord);
@@ -446,12 +446,12 @@ fn assign_nested_tiles(
 pub(crate) fn inline_background_fragments(
     paragraph: &PaintedParagraph<'_>,
     runs: &RunPaints<'_>,
-    out: &mut Vec<(crate::NodeId, Rect)>,
+    out: &mut Vec<(crate::tree::document::NodeId, Rect)>,
 ) {
     // Insertion order *is* paint order: a chain is walked outermost first and
     // every chain that holds a descendant holds its ancestors too, so an
     // ancestor is always pushed before the scope nested in it.
-    let mut scopes: SmallVec<[(crate::NodeId, Rect); 4]> = SmallVec::new();
+    let mut scopes: SmallVec<[(crate::tree::document::NodeId, Rect); 4]> = SmallVec::new();
     let atoms = !runs.atom_backgrounds.is_empty();
     for (index, line) in paragraph.layout.lines().enumerate() {
         scopes.clear();
@@ -519,8 +519,8 @@ pub(crate) fn inline_background_fragments(
 }
 
 fn union_into(
-    scopes: &mut SmallVec<[(crate::NodeId, Rect); 4]>,
-    chain: &[crate::NodeId],
+    scopes: &mut SmallVec<[(crate::tree::document::NodeId, Rect); 4]>,
+    chain: &[crate::tree::document::NodeId],
     fragment: Rect,
 ) {
     for &node in chain {
@@ -573,8 +573,8 @@ enum Layer {
 }
 
 pub(crate) fn propagated_decorations<T>(
-    document: &crate::Document<T>,
-    element: crate::NodeId,
+    document: &crate::tree::document::Document<T>,
+    element: crate::tree::document::NodeId,
 ) -> SmallVec<[Decorations; 2]> {
     use stylo::computed_values::position::T as Position;
     let mut out = SmallVec::new();
@@ -818,13 +818,11 @@ fn draw_glyph_run(
         .brush_transform(fill.brush_transform())
         .draw(
             style,
-            glyph_run
-                .positioned_glyphs()
-                .map(|glyph| crate::vello::Glyph {
-                    id: glyph.id,
-                    x: glyph.x,
-                    y: glyph.y,
-                }),
+            glyph_run.positioned_glyphs().map(|glyph| vello::Glyph {
+                id: glyph.id,
+                x: glyph.x,
+                y: glyph.y,
+            }),
         );
 }
 
@@ -968,8 +966,8 @@ impl EditingPaint {
     /// the paragraph's source map, an offset the layout does not show (past
     /// a truncation cut) painted at the end of what it shows.
     pub(crate) fn of<T>(
-        document: &crate::Document<T>,
-        node: crate::NodeId,
+        document: &crate::tree::document::Document<T>,
+        node: crate::tree::document::NodeId,
         style: &ComputedValues,
     ) -> Option<Self> {
         let session = document.editing.session.as_ref()?;
@@ -1006,8 +1004,8 @@ impl EditingPaint {
 /// content box's origin, in the host's border-box space. `None` for every
 /// other element, and while the selection is a range.
 pub(crate) fn empty_host_caret<T>(
-    document: &crate::Document<T>,
-    node: crate::NodeId,
+    document: &crate::tree::document::Document<T>,
+    node: crate::tree::document::NodeId,
     style: &ComputedValues,
 ) -> Option<(Rect, Color)> {
     let session = document.editing.session.as_ref()?;
@@ -1127,8 +1125,9 @@ pub(crate) fn paint_caret_and_composition(
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use vello::kurbo::{CubicBez, ParamCurve, PathEl, Point};
+
     use super::*;
-    use crate::vello::kurbo::{CubicBez, ParamCurve, PathEl, Point};
 
     const AHEM: &[u8] = include_bytes!("../../../seldon/tests/fixtures/Ahem.ttf");
 
@@ -1153,13 +1152,17 @@ mod tests {
     fn an_inline_formatting_context_paints_its_glyphs_on_the_css_baseline() {
         // A 20px Ahem block holding 10px Ahem text: the strut puts the line's
         // baseline at 16 (CSS 2.2 §10.8.1), where parley alone puts it at 8.
-        let mut doc = crate::Document::new(crate::tree::document::tests::device(), "page", ());
-        doc.register_fonts(crate::FontBlob::from_static(AHEM));
+        let mut doc = crate::tree::document::Document::new(
+            crate::tree::document::tests::device(),
+            "page",
+            (),
+        );
+        doc.register_fonts(seldon::text::FontBlob::from_static(AHEM));
         doc.add_stylesheet(
             "page { display: flex; align-items: flex-start; width: 200px; height: 200px;
                     font-family: Ahem; font-size: 20px; }
              small { display: contents; font-size: 10px; }",
-            crate::StylesheetOrigin::Author,
+            crate::style::engine::StylesheetOrigin::Author,
         );
         let block = doc.create_element("anonymous", ());
         doc.append_child(doc.document_element().id(), block);

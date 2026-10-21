@@ -10,7 +10,7 @@
 //! [`AtlasResidency`] and [`super::blur::FilterTextures`], persisting across
 //! frames and documents, and asked once per rendered frame for the table of
 //! textures the compose program indexes by draw
-//! ([`crate::CommittedFrame::compose_into`]'s `vectors`).
+//! ([`crate::visual::CommittedFrame::compose_into`]'s `vectors`).
 //!
 //! # Key and size
 //!
@@ -20,7 +20,7 @@
 //! it — which is why this cache, unlike the filter bakes keyed by commit id,
 //! has no `forget`. The size is [`VectorDraw::device_size`]: the draw's
 //! extent under the per-axis scale of its committed transform, rounded up,
-//! clamped to [`crate::MAX_RENDERABLE_DIMENSION`] per axis (vello's atlas
+//! clamped to [`crate::render::image::MAX_RENDERABLE_DIMENSION`] per axis (vello's atlas
 //! can place nothing longer). Every draw of one image at one device size — every tile
 //! of a repeated background, every element showing the same icon at the same
 //! size — shares one texture; a draw at another size is another texture. A
@@ -76,10 +76,10 @@ use crate::visual::CommittedFrame;
 
 /// The bytes of baked vector textures kept across frames.
 #[cfg(not(target_arch = "wasm32"))]
-pub const MAX_VECTOR_TEXTURE_BYTES: u64 = 64 * 1024 * 1024;
+pub(crate) const MAX_VECTOR_TEXTURE_BYTES: u64 = 64 * 1024 * 1024;
 /// The bytes of baked vector textures kept across frames.
 #[cfg(target_arch = "wasm32")]
-pub const MAX_VECTOR_TEXTURE_BYTES: u64 = 32 * 1024 * 1024;
+pub(crate) const MAX_VECTOR_TEXTURE_BYTES: u64 = 32 * 1024 * 1024;
 
 /// Bytes per `Rgba8Unorm` texel.
 const BYTES_PER_TEXEL: u64 = 4;
@@ -97,7 +97,7 @@ struct Entry {
 }
 
 /// The device side of vector images: the texture bank. See the module doc.
-pub struct VectorTextures {
+pub(crate) struct VectorTextures {
     entries: FxHashMap<(u64, u32, u32), Entry>,
     /// Index-parallel with the prepared frame's vector draws: the handle
     /// each draw is drawn through, or `None` for a draw with no texture.
@@ -161,7 +161,7 @@ impl VectorTextures {
     /// [`GpuError::Render`] if a bake render fails. The table is then
     /// incomplete and should not be composed from; the next prepare starts
     /// over, with every texture baked before the failure still resident.
-    pub fn prepare(
+    pub(crate) fn prepare(
         &mut self,
         frame: &CommittedFrame,
         renderer: &mut vello::Renderer,
@@ -218,19 +218,21 @@ impl VectorTextures {
     /// The table [`Self::prepare`] last produced — what a composite render
     /// has to name so the atlas residency stays truthful about it.
     #[must_use]
-    pub fn images(&self) -> &[Option<ImageData>] {
+    pub(crate) fn images(&self) -> &[Option<ImageData>] {
         &self.images
     }
 
     /// Bytes of texture resident right now.
+    #[cfg(test)]
     #[must_use]
-    pub fn resident_bytes(&self) -> u64 {
+    pub(crate) fn resident_bytes(&self) -> u64 {
         self.bytes
     }
 
     /// Textures resident right now.
+    #[cfg(test)]
     #[must_use]
-    pub fn resident(&self) -> usize {
+    pub(crate) fn resident(&self) -> usize {
         self.entries.len()
     }
 
@@ -346,8 +348,8 @@ mod tests {
     use vello::peniko::{Color, ImageData};
 
     use crate::render::gpu::Headless;
+    use crate::render::image::{DocumentKind, ImageEvent, ImageRole};
     use crate::test_common::Doc;
-    use crate::{DocumentKind, ImageEvent, ImageRole};
 
     /// A 64×64 document filled with `fill`.
     fn square(fill: &str) -> String {
@@ -365,7 +367,7 @@ mod tests {
     /// and the elements so a test can hide and show them. One document,
     /// because an image's key is per parse: the same markup parsed into a
     /// second document is another picture to the cache.
-    fn page(images: &[(&str, &str)]) -> (Doc, Vec<crate::NodeId>) {
+    fn page(images: &[(&str, &str)]) -> (Doc, Vec<crate::tree::document::NodeId>) {
         let mut doc = Doc::with_css(
             "page { display: flex; position: relative; width: 800px; height: 600px; }
              image { display: flex; position: absolute; top: 0px; width: 64px; height: 64px; }",
@@ -396,9 +398,9 @@ mod tests {
     /// Commits a frame of `doc` showing exactly the images in `shown`.
     fn showing(
         doc: &mut Doc,
-        nodes: &[crate::NodeId],
+        nodes: &[crate::tree::document::NodeId],
         shown: &[bool],
-    ) -> Arc<crate::CommittedFrame> {
+    ) -> Arc<crate::visual::CommittedFrame> {
         for (index, (&node, &visible)) in nodes.iter().zip(shown).enumerate() {
             let display = if visible { "flex" } else { "none" };
             doc.dom.set_inline_style(

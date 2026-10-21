@@ -38,13 +38,14 @@
 //! of the curves above ever meets an edge there: a drag, a fling or a wheel
 //! tick on it moves the offset along an unbounded line and absorbs its
 //! whole delta, so nothing stretches and nothing chains outward. The line
-//! repeats the scrolling area every [`crate::ScrollSlot::wrap_period`]; the
+//! repeats the scrolling area every [`crate::visual::ScrollSlot::wrap_period`]; the
 //! intents normalize the offset into one period when a commit is adopted,
 //! and `terminus` normalizes it wherever it composes, hit-tests or samples, so
 //! these functions never wrap anything themselves.
 
+use euclid::default::{Size2D, Vector2D};
+
 use crate::scroll::{ScrollAxes, ScrollKind, SnapAxis, resolve_step};
-use crate::{Size2D, Vector2D};
 
 /// The rubber band's `c`: the slope a stretch starts at. lynx-ui's
 /// `rubberC`, which is `UIKit`'s.
@@ -672,7 +673,7 @@ mod tests {
             min: at,
             max: at,
             stop: false,
-            area: crate::NodeId::from_bits(1).expect("a well-formed handle"),
+            area: crate::tree::document::NodeId::from_bits(1).expect("a well-formed handle"),
             order: 0,
         });
         let snap = SnapAxis {

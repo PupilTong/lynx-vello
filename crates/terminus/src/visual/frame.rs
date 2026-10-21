@@ -18,17 +18,17 @@
 use euclid::default::{Point2D, Size2D, Vector2D};
 use smallvec::SmallVec;
 use stylo::properties::animated_properties::AnimationValueMap;
+use vello::Scene;
+use vello::kurbo::Affine;
+use vello::peniko::ImageData;
 
 use super::{AnimationSample, PaintOrder, SpaceSamples};
-use crate::NodeId;
 use crate::paint::compose::{self, ComposeOp, FilterGroup};
 use crate::scroll::{
     AutoScrollRequest, CaptureAxes, ChainLink, ScrollAxes, ScrollRequest, SnapAxis, SnapPoint,
     SnapStrictness, unwrap_axis, wrap_axis, wrap_period_axis,
 };
-use crate::vello::Scene;
-use crate::vello::kurbo::Affine;
-use crate::vello::peniko::ImageData;
+use crate::tree::document::NodeId;
 
 /// One scroll container in the committed frame, linked to the nearest scroll
 /// container on its containing-block chain.
@@ -87,7 +87,7 @@ pub struct ScrollSlot {
     /// `max_offset`, or in `[0, period)` on an axis with a
     /// [`Self::wrap_period`]): carried by every frame until the painter
     /// acknowledges it, and handled by the painter once per serial
-    /// ([`Document::scroll_to_with`](crate::Document::scroll_to_with)).
+    /// ([`Document::scroll_to_with`](crate::tree::document::Document::scroll_to_with)).
     pub request: Option<ScrollRequest>,
 }
 
@@ -633,7 +633,7 @@ impl CommittedFrame {
         crate::paint::filters::draw_passes_rect(
             scene,
             &backdrop.before,
-            crate::vello::kurbo::Rect::new(0.0, 0.0, f64::from(width), f64::from(height)),
+            vello::kurbo::Rect::new(0.0, 0.0, f64::from(width), f64::from(height)),
             Affine::IDENTITY,
         );
     }
@@ -655,7 +655,7 @@ impl CommittedFrame {
     /// it in this frame — which is why the draws are walked before the first
     /// read: a source drawn small first and large later must be decoded for
     /// the large draw.
-    pub fn resolve_images<P: crate::FrameImages + ?Sized>(
+    pub fn resolve_images<P: crate::render::image::FrameImages + ?Sized>(
         &self,
         pixels: &P,
         images: &mut Vec<Option<ImageData>>,
@@ -666,7 +666,7 @@ impl CommittedFrame {
         // One entry per distinct source, parallel to `sources`. A frame draws
         // few distinct images however many draws it has, so this scan is over
         // a handful of pointers.
-        let mut hints: Vec<crate::ImageSizeHint> = Vec::new();
+        let mut hints: Vec<crate::render::image::ImageSizeHint> = Vec::new();
         let mut indices: Vec<usize> = Vec::with_capacity(self.presentation.image_draws.len());
         for draw in &self.presentation.image_draws {
             // Every draw of one source shares one allocation — the registry
@@ -796,7 +796,7 @@ impl CommittedFrame {
     /// The pending auto-scroll change of each container that has one, with
     /// the container: carried by every frame until the painter acknowledges
     /// it, and handled by the painter once per serial
-    /// ([`Document::auto_scroll`](crate::Document::auto_scroll)). Every
+    /// ([`Document::auto_scroll`](crate::tree::document::Document::auto_scroll)). Every
     /// container named has a slot in this frame. Empty for a document no
     /// script has called `autoScroll` on.
     #[must_use]
@@ -979,10 +979,15 @@ mod tests {
 
     use super::ScrollSlot;
     use crate::scroll::ScrollAxes;
+    use crate::style::engine::StylesheetOrigin;
+    use crate::tree::document::Document;
     use crate::tree::document::tests::device;
-    use crate::{Document, StylesheetOrigin};
 
-    fn scrolling_page() -> (Document<()>, crate::NodeId, crate::NodeId) {
+    fn scrolling_page() -> (
+        Document<()>,
+        crate::tree::document::NodeId,
+        crate::tree::document::NodeId,
+    ) {
         let mut document: Document<()> = Document::new(device(), "page", ());
         document.add_stylesheet(
             "page { display: flex; width: 800px; height: 600px; }
@@ -1164,7 +1169,7 @@ mod tests {
     fn a_composable_scroll_recommits_nothing_and_the_next_commit_publishes_it() {
         let (mut document, root, scroller) = scrolling_page();
         let before = document.commit();
-        document.scroll_to(scroller, crate::Vector2D::new(0.0, 120.0));
+        document.scroll_to(scroller, euclid::default::Vector2D::new(0.0, 120.0));
         assert!(
             !document.needs_render(),
             "a scroll the retained frame can compose invalidates nothing"

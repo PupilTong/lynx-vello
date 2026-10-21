@@ -37,14 +37,16 @@ use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant as ClockInstant;
 
+use euclid::default::Vector2D;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
+use vello::Scene;
+use vello::peniko::{Color, ImageData};
 #[cfg(target_arch = "wasm32")]
 use web_time::Instant as ClockInstant;
 
 pub use self::gesture::{
     EmitEvent, GesturePolicy, GestureRouter, InputDecision, InputDecisions, RouterHost,
-    produces_touch_events,
 };
 pub use self::graphics::WindowTarget;
 use self::graphics::{AcquiredFrame, FrameAcquisition, WindowGraphics};
@@ -52,13 +54,14 @@ use self::inertia::{AutoScroll, Axis, BounceBack, ChainOutcome, DragTrack, Fling
 use self::motion::{ElasticStep, Motion, resolve_elastic_step, stretch_of, unwind_stretch};
 use crate::input::{InputEvent, InputKind, PointerId};
 use crate::render::gpu::Headless;
+use crate::render::image::FrameImages;
 use crate::scroll::{
     AutoScrollRequest, ChainLink, ScrollAxes, ScrollBehavior, ScrollRequest, drive_chain,
     settle_offset,
 };
-use crate::vello::Scene;
-use crate::vello::peniko::{Color, ImageData};
-use crate::{CommittedFrame, Device, FrameImages, HitTarget, NodeId, Vector2D};
+use crate::style::device::Device;
+use crate::tree::document::NodeId;
+use crate::visual::{CommittedFrame, HitTarget};
 
 /// View metrics: the CSS size a document lays out at, and the device scale
 /// it is drawn at.
@@ -265,7 +268,7 @@ pub struct ScrollEntry {
     /// snap after a commit. Kept across later posts until taken.
     pub rest: Option<Vector2D<f32>>,
     /// The newest programmatic scroll request the painter had handled for
-    /// the container when it posted ([`crate::ScrollSlot::request`]). The
+    /// the container when it posted ([`crate::visual::ScrollSlot::request`]). The
     /// document drops a post naming an older one than the container's
     /// pending request, which it was made before the painter saw, and
     /// acknowledges the request with one that names it.
@@ -473,7 +476,7 @@ impl Output {
         frame: &CommittedFrame,
         images: &[Option<ImageData>],
         vectors: &[Option<ImageData>],
-        offset_of: &dyn Fn(&crate::ScrollSlot) -> Option<Vector2D<f32>>,
+        offset_of: &dyn Fn(&crate::visual::ScrollSlot) -> Option<Vector2D<f32>>,
         scroll_generation: u64,
         animation_now: Option<f64>,
         out: &mut Vec<Option<ImageData>>,
@@ -669,7 +672,7 @@ pub struct ScrollIntents {
     /// bounce back on its way home — and that an
     /// `overscroll-behavior: circular` axis may stand anywhere: it has no
     /// boundary, and its scrolling area repeats every
-    /// [`crate::ScrollSlot::wrap_period`]. Such an offset is composed, hit
+    /// [`crate::visual::ScrollSlot::wrap_period`]. Such an offset is composed, hit
     /// tested and sampled modulo the period (`terminus` normalizes it at every
     /// entry point), posted modulo the period and unclamped, which the
     /// document admits as it stands ([`Self::drain_changed`]), and brought
@@ -707,7 +710,7 @@ pub struct ScrollIntents {
     /// words and nothing else.
     auto_scrolls: Vec<AutoScroll>,
     /// The newest programmatic scroll request or auto-scroll change handled
-    /// per container ([`crate::ScrollSlot::request`],
+    /// per container ([`crate::visual::ScrollSlot::request`],
     /// [`CommittedFrame::auto_scroll_requests`]), which every post for it
     /// names. An
     /// entry is written when a request is first seen and pruned by every
@@ -905,7 +908,7 @@ impl ScrollIntents {
     /// back moving it stops ([`Self::stop_flings_and_bounces_on`]), while an
     /// auto-scroll goes on from where the request leaves the container and
     /// a glide is kept or ended below. One that yields to a pointer
-    /// ([`crate::Document::scroll_to_yielding`]) is dropped whole while a drag
+    /// ([`crate::tree::document::Document::scroll_to_yielding`]) is dropped whole while a drag
     /// holds the container. An instant one
     /// puts the live offset on the target, where a drag holding the
     /// container continues from; a smooth one glides there, to the position
@@ -919,7 +922,7 @@ impl ScrollIntents {
     fn apply_request(
         &mut self,
         frame: &CommittedFrame,
-        slot: &crate::ScrollSlot,
+        slot: &crate::visual::ScrollSlot,
         request: ScrollRequest,
         now: f64,
     ) {
@@ -1015,7 +1018,7 @@ impl ScrollIntents {
     fn follow_snapped(
         &mut self,
         frame: &CommittedFrame,
-        slot: &crate::ScrollSlot,
+        slot: &crate::visual::ScrollSlot,
         snapped: Snapped,
     ) {
         let (snap_x, snap_y) = frame.snap_axes(slot);
@@ -1040,7 +1043,7 @@ impl ScrollIntents {
     /// stands, so a `mandatory` axis moves to its nearest position and a
     /// `proximity` one only when within range. A stretched axis is left to
     /// its bounce back.
-    fn settle_node_at_rest(&mut self, frame: &CommittedFrame, slot: &crate::ScrollSlot) {
+    fn settle_node_at_rest(&mut self, frame: &CommittedFrame, slot: &crate::visual::ScrollSlot) {
         let (snap_x, snap_y) = frame.snap_axes(slot);
         if snap_x.is_none() && snap_y.is_none() {
             return;
@@ -1243,7 +1246,7 @@ impl ScrollIntents {
     /// bounces, glides or auto-scrolls them — and forgets them. A container `frame` no longer
     /// carries is dropped. Both buffers keep their capacity.
     ///
-    /// An axis with a [`crate::ScrollSlot::wrap_period`] is normalized into
+    /// An axis with a [`crate::visual::ScrollSlot::wrap_period`] is normalized into
     /// its period and posted unclamped: the document admits the whole
     /// period on such an axis, so while the scrollport straddles the seam —
     /// the normalized offset past `max_offset` — main holds the offset the
@@ -1318,7 +1321,7 @@ fn clamp_scroll_axis(value: f32, max: f32) -> f32 {
 /// snap data.
 fn slot_step(
     frame: &CommittedFrame,
-    slot: &crate::ScrollSlot,
+    slot: &crate::visual::ScrollSlot,
     motion: Motion,
     offset: Vector2D<f32>,
     admitted: Vector2D<f32>,
@@ -1346,7 +1349,7 @@ fn slot_step(
 /// the next rebase ([`ScrollIntents::shift_motion`]). A bounded axis keeps
 /// its target.
 fn nearest_copy(
-    slot: &crate::ScrollSlot,
+    slot: &crate::visual::ScrollSlot,
     live: Vector2D<f32>,
     target: Vector2D<f32>,
 ) -> Vector2D<f32> {
@@ -1363,10 +1366,10 @@ fn nearest_copy(
 }
 
 /// The axes on which `slot` wraps: circular, with content to scroll
-/// ([`crate::ScrollSlot::wrap_period`]). Everything the intents do treats
+/// ([`crate::visual::ScrollSlot::wrap_period`]). Everything the intents do treats
 /// only these as boundless; a circular axis without overflow clamps like
 /// any other.
-fn wrap_axes(slot: &crate::ScrollSlot) -> ScrollAxes {
+fn wrap_axes(slot: &crate::visual::ScrollSlot) -> ScrollAxes {
     let (x, y) = slot.wrap_period();
     ScrollAxes {
         x: x.is_some(),
@@ -1398,7 +1401,7 @@ fn clamp_intent_axis(value: f32, max: f32, extent: f32, bounces: bool) -> f32 {
 fn settle_stretch_aware(
     start: Vector2D<f32>,
     offset: Vector2D<f32>,
-    slot: &crate::ScrollSlot,
+    slot: &crate::visual::ScrollSlot,
     snap_x: Option<crate::scroll::SnapAxis<'_>>,
     snap_y: Option<crate::scroll::SnapAxis<'_>>,
 ) -> Vector2D<f32> {
@@ -1890,7 +1893,7 @@ impl Painter {
     /// or auto-scrolls it. A container the adopted frame no longer carries is
     /// dropped.
     ///
-    /// An axis with a [`crate::ScrollSlot::wrap_period`] is normalized into
+    /// An axis with a [`crate::visual::ScrollSlot::wrap_period`] is normalized into
     /// its period and posted unclamped: the document admits the whole period
     /// on such an axis, so while the scrollport straddles the seam it holds
     /// the offset the screen shows. Every other axis is clamped, so the

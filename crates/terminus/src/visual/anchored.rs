@@ -76,14 +76,14 @@ use rustc_hash::FxHashMap;
 use seldon::tree::AnchorOutcome;
 use smallvec::SmallVec;
 use stylo::values::specified::position::PositionVisibility;
+use vello::kurbo;
+use vello::kurbo::Affine;
 
 use super::space::{self, SpaceKind, SpaceSamples};
 use super::{PaintItemKind, PaintOrder};
-use crate::NodeId;
 use crate::layout::anchors::{ScrollAdjust, fits_shifted, mask, scroll_adjustment_ancestors};
 use crate::paint::compose::snap_offset;
-use crate::tree::document::Document;
-use crate::vello::kurbo::{self, Affine};
+use crate::tree::document::{Document, NodeId};
 
 /// One anchor-positioned box's compose-time state: its space node's inputs.
 #[derive(Debug, Clone)]
@@ -674,11 +674,11 @@ impl PaintOrder {
 mod tests {
     #![allow(clippy::float_cmp)]
 
-    use euclid::default::Vector2D;
+    use euclid::default::{Point2D, Vector2D};
 
     use crate::test_common::Doc;
+    use crate::tree::document::NodeId;
     use crate::visual::SpaceKind;
-    use crate::{NodeId, Point2D};
 
     const BASE: &str = "
         page { display: flex; flex-direction: column; width: 800px; height: 600px; }

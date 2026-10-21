@@ -1,9 +1,9 @@
 //! Dispatch to the engine's own components: the walk this crate runs
 //! itself, one step at a time, over the same path a script dispatch uses.
 //!
-//! A [`CustomElement`](crate::CustomElement) handler is Rust, it is owned by
+//! A [`CustomElement`](crate::tree::custom::CustomElement) handler is Rust, it is owned by
 //! this document, and it is already called from inside mutations this crate
-//! runs ([`connected_callback`](crate::CustomElement::connected_callback) and its
+//! runs ([`connected_callback`](crate::tree::custom::CustomElement::connected_callback) and its
 //! siblings). Handing the path *up* so the layer above can call back *down*
 //! per step would buy nothing and cost a crossing per node. A *script*
 //! listener is the other case: its callback lives in a realm, and the host
@@ -23,8 +23,8 @@
 //!   the engine hears: `slotchange` and `contentvisibilityautostatechange`, which never reach a
 //!   realm.
 //!
-//! [`CustomElement::handle_event`](crate::CustomElement::handle_event) is invoked on every step
-//! whose node is a defined custom element. An event is identified by its W3C type name
+//! [`CustomElement::handle_event`](crate::tree::custom::CustomElement::handle_event) is invoked on
+//! every step whose node is a defined custom element. An event is identified by its W3C type name
 //! ([`ElementEvent::type_name`]) and carries one [`EventDetail`] shape ([`ElementEvent::detail`]).
 //!
 //! # What this walk is not
@@ -39,11 +39,11 @@
 //! # Which names are walked
 //!
 //! A definition says which event types it handles, in
-//! [`CustomElement::observed_events`](crate::CustomElement::observed_events), the analogue of
-//! `observed_attributes`; [`Document::define`](crate::Document::define) unions them into one set
-//! for the document. A walk of a type no definition observes looks no component up on any step,
-//! and whether an element's component hears an event is its definition's answer alone — a script
-//! registration on the element changes nothing about it.
+//! [`CustomElement::observed_events`](crate::tree::custom::CustomElement::observed_events), the
+//! analogue of `observed_attributes`; [`Document::define`](crate::tree::document::Document::define)
+//! unions them into one set for the document. A walk of a type no definition observes looks no
+//! component up on any step, and whether an element's component hears an event is its definition's
+//! answer alone — a script registration on the element changes nothing about it.
 //!
 //! # The walk
 //!
@@ -65,11 +65,11 @@
 //!   own shadow tree on `this.shadowRoot.addEventListener(…)`; that is how it hears a non-composed
 //!   event such as `slotchange`, whose path ends at the shadow root. A shadow root has no handler
 //!   here, so the step at which a non-composed event's path ends — its target's own shadow root —
-//!   calls the host's [`handle_event`](crate::CustomElement::handle_event) instead, in both passes
-//!   as any defined element on the path is called, with `element` and `currentTarget` both the
-//!   host: a shadow root as `currentTarget` is not representable when the call is the host's. Only
-//!   that step, so a host never hears one event twice: a shadow root the path crosses is followed
-//!   by its host, which is called as itself.
+//!   calls the host's [`handle_event`](crate::tree::custom::CustomElement::handle_event) instead,
+//!   in both passes as any defined element on the path is called, with `element` and
+//!   `currentTarget` both the host: a shadow root as `currentTarget` is not representable when the
+//!   call is the host's. Only that step, so a host never hears one event twice: a shadow root the
+//!   path crosses is followed by its host, which is called as itself.
 //! - **A non-bubbling event reaches a host's boundary step in the capture pass only.** The bubble
 //!   pass of a non-bubbling event keeps its at-target steps alone, so for a non-composed,
 //!   non-bubbling event fired inside a UA shadow tree (the `scroll` of a container in a swiper's
@@ -278,7 +278,8 @@ pub struct StepOutcome {
 
 impl<T> Document<T> {
     /// Fires one engine event at `target` and runs the standard's two passes
-    /// over the path, calling [`CustomElement::handle_event`](crate::CustomElement::handle_event)
+    /// over the path, calling
+    /// [`CustomElement::handle_event`](crate::tree::custom::CustomElement::handle_event)
     /// on every step whose node is a defined custom element — and, for a
     /// non-composed event, on the host of the shadow root its path ends at.
     ///
@@ -287,7 +288,7 @@ impl<T> Document<T> {
     /// script. `timestamp` is [`ElementEvent::timestamp`].
     ///
     /// A name no definition observes
-    /// ([`CustomElement::observed_events`](crate::CustomElement::observed_events))
+    /// ([`CustomElement::observed_events`](crate::tree::custom::CustomElement::observed_events))
     /// returns before anything else, and so does a target that is no longer
     /// live, the rule a stale path already follows.
     pub fn dispatch_element_event(
@@ -318,7 +319,7 @@ impl<T> Document<T> {
     /// [`Self::advance`].
     ///
     /// Gated on the definitions: when no
-    /// [`CustomElement::observed_events`](crate::CustomElement::observed_events)
+    /// [`CustomElement::observed_events`](crate::tree::custom::CustomElement::observed_events)
     /// names `type_name`, this is one set lookup and returns. Otherwise each
     /// step costs one definition lookup and, on a defined element, one call.
     pub fn dispatch_element_event_over(

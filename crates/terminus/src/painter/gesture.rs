@@ -3,7 +3,7 @@
 //! which event is dispatched, and at which target node.
 //!
 //! Routing (hit testing) stays in the committed frame
-//! ([`CommittedFrame::hit`](crate::CommittedFrame::hit)); the propagation
+//! ([`CommittedFrame::hit`](crate::visual::CommittedFrame::hit)); the propagation
 //! chain stays in the event module (`Document::event_steps`) — this layer
 //! decides the *type and target*, never the chain. The painter feeds each
 //! routed event in and executes the returned [`InputDecision`]s in order: a
@@ -76,6 +76,7 @@
 //! Scroll *events* (`scroll`, `scrollend`) are the document's, decided from
 //! the offsets this side posts.
 
+use euclid::default::{Point2D, Vector2D};
 use smallvec::SmallVec;
 
 use crate::event::EventDetail;
@@ -85,7 +86,8 @@ use crate::event::EventDetail;
 use crate::event::{TOUCH_ACTIVE, TOUCH_CHANGED, TOUCH_TARGET, TouchPoint, TouchPoints};
 use crate::input::{InputEvent, InputKind, KeyPhase, PointerId, PointerKind, PointerPhase};
 use crate::scroll::ScrollAxes;
-use crate::{HitTarget, NodeId, Point2D, Vector2D};
+use crate::tree::document::NodeId;
+use crate::visual::HitTarget;
 
 /// The gesture vocabulary and thresholds a [`GestureRouter`] synthesizes
 /// with: what a press and a hold are called, and how far and how long each
@@ -123,7 +125,7 @@ pub(crate) const CLICK_EVENT: &str = "click";
 /// mouse events and the synthesized gestures. Not the drag-to-scroll policy,
 /// which a mouse drag shares here.
 #[must_use]
-pub fn produces_touch_events(device: PointerKind) -> bool {
+pub(crate) fn produces_touch_events(device: PointerKind) -> bool {
     matches!(device, PointerKind::Touch | PointerKind::Pen)
 }
 

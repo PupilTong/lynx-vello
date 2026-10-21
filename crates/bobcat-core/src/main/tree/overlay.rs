@@ -28,9 +28,9 @@
 //! web-core's template, part for part, less one:
 //!
 //! - `<dialog id="dialog" part="dialog" popover="manual">`, the top-layer element. It is this
-//!   engine's own `dialog` ([`super::dialog`]), driven only through HTML's API for it, as web-core
-//!   drives its own: `showModal()` and `close()`, and — for a pass-through overlay —
-//!   `showPopover()` and `hidePopover()` (`terminus::tree::popover`). The `popover` attribute is
+//!   engine's own `dialog` ([`terminus::link::html::dialog`]), driven only through HTML's API for
+//!   it, as web-core drives its own: `showModal()` and `close()`, and — for a pass-through overlay
+//!   — `showPopover()` and `hidePopover()` (`terminus::tree::popover`). The `popover` attribute is
 //!   the one part web-core's template lacks; see "Shown, modal or as a popover" below.
 //! - `<div class="overlay-inner">` inside it, filling it: the containing block of the first child.
 //! - The default `<slot>` inside that, which every child of the host is assigned to.
@@ -38,19 +38,20 @@
 //! web-core's `.overlay-placeholder`, a 1px box after `.overlay-inner` that keeps the dialog
 //! scrollable so its `overscroll-behavior: contain` stops a browser's scroll chain there, is not
 //! built: a top-layer element ends its scroll chain by membership here
-//! (`terminus::Document::scroll_parent`), with nothing to scroll. With it goes `.overlay-inner`'s
-//! `position: sticky; top: 0`, which only pinned it while that 1px scrolled: it is `relative`,
-//! the same box and the same containing block.
+//! (`terminus::link::Document::scroll_parent`), with nothing to scroll. With it goes
+//! `.overlay-inner`'s `position: sticky; top: 0`, which only pinned it while that 1px scrolled: it
+//! is `relative`, the same box and the same containing block.
 //!
 //! **The host generates no box** (`display: contents`, as web-core's): its children render in the
 //! dialog, through the slot, and nothing of the host itself is painted. Two facts follow, and they
 //! are why the host is not itself the top-layer element:
 //!
 //! - **Hidden is the dialog's state.** A hidden overlay's dialog is closed and not showing as a
-//!   popover, `display: none` by HTML's rules for both ([`super::dialog`], [`super::popover`]), and
-//!   the dialog is in a shadow tree no document rule reaches. An author `display` on the host — a
-//!   card's `.dialog-overlay { display: flex }` — gives the host a box, which the host rule keeps
-//!   zero-sized and paint-contained, and the children stay hidden.
+//!   popover, `display: none` by HTML's rules for both ([`terminus::link::html::dialog`],
+//!   [`terminus::link::html::popover`]), and the dialog is in a shadow tree no document rule
+//!   reaches. An author `display` on the host — a card's `.dialog-overlay { display: flex }` —
+//!   gives the host a box, which the host rule keeps zero-sized and paint-contained, and the
+//!   children stay hidden.
 //! - **What fills the viewport is the dialog, and it is transparent.** An author `background-color`
 //!   on the host paints nowhere: under `display: contents` the host has no box, and under an author
 //!   `display` its box is zero-sized. The dialog's own style is reachable only through
@@ -124,17 +125,17 @@
 //!   (`web-elements/src/element-reactive/component.ts:158-205`), and this engine's `__SetAttribute`
 //!   stringifies `false`.
 //! - **Shown, modal or as a popover.** A blocking overlay's dialog is shown with HTML's
-//!   `showModal()` ([`super::dialog::show_modal`]): modal, `:modal`, everything below inert. A
-//!   pass-through overlay's — `events-pass-through` present and not `"false"` — is shown as a
-//!   Manual popover (`terminus::Document::show_popover`): on the top layer, painted above
-//!   everything, and blocking nothing, because a popover is the one top-layer element HTML does not
-//!   make the document inert for. web-core shows both modally and forwards a `click` by hand
-//!   (`XOverlayAttributes.ts:69-88`); a popover is the standard's way to the pass-through native
-//!   has (`docs/tracking/deviations.md`).
+//!   `showModal()` ([`terminus::link::html::dialog::show_modal`]): modal, `:modal`, everything
+//!   below inert. A pass-through overlay's — `events-pass-through` present and not `"false"` — is
+//!   shown as a Manual popover (`terminus::link::Document::show_popover`): on the top layer,
+//!   painted above everything, and blocking nothing, because a popover is the one top-layer element
+//!   HTML does not make the document inert for. web-core shows both modally and forwards a `click`
+//!   by hand (`XOverlayAttributes.ts:69-88`); a popover is the standard's way to the pass-through
+//!   native has (`docs/tracking/deviations.md`).
 //! - The `visible` callback shows the dialog when the attribute starts to show a connected overlay
 //!   whose dialog is not in the layer, and hides it when the attribute stops showing one: HTML's
-//!   `close()` ([`super::dialog::close`]) for a modal dialog, `hidePopover()` for a popover. A
-//!   rewrite that keeps it shown (`"true"` to `""`) does nothing. Writing `visible` on a
+//!   `close()` ([`terminus::link::html::dialog::close`]) for a modal dialog, `hidePopover()` for a
+//!   popover. A rewrite that keeps it shown (`"true"` to `""`) does nothing. Writing `visible` on a
 //!   disconnected host does nothing until it connects.
 //! - The `events-pass-through` callback hides a shown overlay's dialog and shows it again the other
 //!   way when the flag changes. Showing puts it at the top of the layer, so toggling the attribute
@@ -203,9 +204,9 @@
 //!   not hit-testable, so every gesture outside the content, scrolls included, reaches what is
 //!   below, as in native (`LynxOverlayContainer.m:169-214`, `LynxOverlayView.kt:726-752`).
 
-use terminus::{CustomElement, Node, NodeId, ShadowRootMode};
+use terminus::link::html::dialog::{DIALOG_TAG, close, show_modal};
+use terminus::link::{CustomElement, Node, NodeId, ShadowRootMode};
 
-use super::dialog::{DIALOG_TAG, close, show_modal};
 use super::{ComponentEvents, LynxDocument};
 
 /// Native's tag, and the JSX tag a compiled card writes.
@@ -259,9 +260,10 @@ slot { display: contents; }
 "#;
 
 /// Installs the component under both tag names, over the queue its events go
-/// into. Must run after [`super::dialog::define`], whose component the shadow
-/// dialog is, and before any element could carry either tag, which is
-/// [`Document::define`](terminus::Document::define)'s own precondition.
+/// into. Must run after [`terminus::link::Document::define_html_elements`], whose
+/// `dialog` component the shadow dialog is, and before any element could
+/// carry either tag, which is
+/// [`Document::define`](terminus::link::Document::define)'s own precondition.
 pub(super) fn define(document: &mut LynxDocument, events: ComponentEvents) {
     document.define(
         OVERLAY_TAG,
@@ -289,33 +291,33 @@ impl Overlay {
     /// `showoverlay`.
     fn show(&self, document: &mut LynxDocument, overlay: NodeId) {
         let dialog = shadow_dialog(document, overlay);
-        self.show_dialog(document, overlay, dialog);
+        show_dialog(document, overlay, dialog);
         self.events.queue(overlay, SHOW_EVENT);
     }
+}
 
-    fn show_dialog(&self, document: &mut LynxDocument, overlay: NodeId, dialog: NodeId) {
-        if passes_through(attribute(document, overlay, EVENTS_PASS_THROUGH_ATTRIBUTE)) {
-            document
-                .show_popover(dialog)
-                .expect("a hidden manual popover in a connected host shows");
-        } else {
-            // A removal left a modal dialog open and not modal (HTML's
-            // removing steps); `showModal()` refuses an open one.
-            close(document, dialog, &self.events);
-            show_modal(document, dialog).expect("a closed dialog in a connected host shows");
-        }
+fn show_dialog(document: &mut LynxDocument, overlay: NodeId, dialog: NodeId) {
+    if passes_through(attribute(document, overlay, EVENTS_PASS_THROUGH_ATTRIBUTE)) {
+        document
+            .show_popover(dialog)
+            .expect("a hidden manual popover in a connected host shows");
+    } else {
+        // A removal left a modal dialog open and not modal (HTML's
+        // removing steps); `showModal()` refuses an open one.
+        close(document, dialog);
+        show_modal(document, dialog).expect("a closed dialog in a connected host shows");
     }
+}
 
-    /// Hides the shadow dialog the way it was shown: `hidePopover()`, or
-    /// `close()`, which also closes a dialog a removal left open.
-    fn hide_dialog(&self, document: &mut LynxDocument, dialog: NodeId) {
-        if document.popover_showing(dialog) {
-            document
-                .hide_popover(dialog)
-                .expect("a showing manual popover hides");
-        } else {
-            close(document, dialog, &self.events);
-        }
+/// Hides the shadow dialog the way it was shown: `hidePopover()`, or
+/// `close()`, which also closes a dialog a removal left open.
+fn hide_dialog(document: &mut LynxDocument, dialog: NodeId) {
+    if document.popover_showing(dialog) {
+        document
+            .hide_popover(dialog)
+            .expect("a showing manual popover hides");
+    } else {
+        close(document, dialog);
     }
 }
 
@@ -369,7 +371,7 @@ impl CustomElement<()> for Overlay {
                     self.show(document, element);
                 }
             } else {
-                self.hide_dialog(document, dialog);
+                hide_dialog(document, dialog);
                 if shown {
                     self.events.queue(element, DISMISS_EVENT);
                 }
@@ -377,8 +379,8 @@ impl CustomElement<()> for Overlay {
         } else {
             debug_assert_eq!(name, EVENTS_PASS_THROUGH_ATTRIBUTE);
             if shown && passes_through(old) != passes_through(new) {
-                self.hide_dialog(document, dialog);
-                self.show_dialog(document, element, dialog);
+                hide_dialog(document, dialog);
+                show_dialog(document, element, dialog);
             }
         }
     }
@@ -424,9 +426,9 @@ fn attribute<'a>(document: &'a LynxDocument, element: NodeId, name: &str) -> Opt
 mod tests {
     #![allow(clippy::float_cmp)] // Authored pixel sizes lay out exactly.
 
-    use terminus::stylo::properties::PropertyId;
-    use terminus::stylo::values::computed::Display;
-    use terminus::{Node, NodeId, Point2D, StylesheetOrigin, Vector2D};
+    use terminus::link::stylo::properties::PropertyId;
+    use terminus::link::stylo::values::computed::Display;
+    use terminus::link::{Node, NodeId, Point2D, StylesheetOrigin, Vector2D};
 
     use super::super::test_support::{
         child, display, document, element_under, style_of, with_component_events,
@@ -1173,7 +1175,7 @@ mod tests {
         document.set_attribute(first, "visible", "");
         let layer: Vec<NodeId> = document
             .top_layer()
-            .map(terminus::TopLayerEntry::element)
+            .map(terminus::link::TopLayerEntry::element)
             .collect();
         assert_eq!(
             layer,

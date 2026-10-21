@@ -16,7 +16,7 @@
 //! against the published frame alone.
 //! The hit queries answer from the retained frame however stale it is,
 //! skipping only the items whose node has since been freed. That is safe
-//! because a [`crate::NodeId`] is retired on free and never reissued: an id
+//! because a [`crate::tree::document::NodeId`] is retired on free and never reissued: an id
 //! the frame still names resolves either to the node it was drawn for or to
 //! nothing, never to a different node that took its place.
 //! Painting is pinned harder — to the current commit id with a clean dirty
@@ -138,11 +138,10 @@ pub(crate) use self::space::{Space, SpaceKind, SpaceSamples};
 #[cfg(test)]
 pub(crate) use self::sticky_frame::StickySample;
 pub(crate) use self::sticky_frame::{StickySamples, StickySlot};
-use crate::render::image::{DocumentRequest, ImageEvent, ImageOutcome, ImageRole};
+use crate::render::image::{DocumentRequest, FrameImages, ImageEvent, ImageOutcome, ImageRole};
 use crate::scroll::initial_target::InitialTarget;
 use crate::scroll::{AutoScrollRequest, SnapAxis, SnapPoint};
-use crate::tree::document::Document;
-use crate::{FrameImages, NodeId};
+use crate::tree::document::{Document, NodeId};
 
 /// A frame's back-to-front paint order.
 #[derive(Debug)]
@@ -285,7 +284,7 @@ impl ComposedSlots {
 /// committed one on the element's effect layer.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct AnimationSample {
-    pub(crate) delta: crate::vello::kurbo::Affine,
+    pub(crate) delta: vello::kurbo::Affine,
     pub(crate) alpha: Option<f32>,
 }
 
@@ -553,7 +552,7 @@ impl PaintOrder {
                 (
                     index,
                     AnimationSample {
-                        delta: crate::vello::kurbo::Affine::IDENTITY,
+                        delta: vello::kurbo::Affine::IDENTITY,
                         alpha: None,
                     },
                 )
@@ -609,7 +608,7 @@ impl PaintOrder {
     pub(crate) fn mark_composed_spaces(
         &self,
         program: &[crate::paint::compose::ComposeOp],
-        groups: &[crate::FilterGroup],
+        groups: &[crate::paint::compose::FilterGroup],
         marks: &mut ComposedMarks,
         composed: &mut ComposedSlots,
     ) {
@@ -1006,12 +1005,12 @@ impl<T: Sync> Document<T> {
 }
 
 /// A borrow-shaped handle on the committed frame's scene: it keeps the frame
-/// alive and dereferences to the [`crate::vello::Scene`] inside it. A
+/// alive and dereferences to the [`vello::Scene`] inside it. A
 /// layered frame retains no whole-frame composition, so the handle carries
 /// one composed for it on demand.
 pub struct SceneRef {
     frame: Arc<CommittedFrame>,
-    composed: Option<Box<crate::vello::Scene>>,
+    composed: Option<Box<vello::Scene>>,
 }
 
 impl std::fmt::Debug for SceneRef {
@@ -1024,9 +1023,9 @@ impl std::fmt::Debug for SceneRef {
 }
 
 impl std::ops::Deref for SceneRef {
-    type Target = crate::vello::Scene;
+    type Target = vello::Scene;
 
-    fn deref(&self) -> &crate::vello::Scene {
+    fn deref(&self) -> &vello::Scene {
         self.composed.as_deref().map_or_else(
             || {
                 self.frame
@@ -1061,7 +1060,7 @@ impl<T> Document<T> {
     /// A scene cannot be composed without a pixel source: after the image
     /// system moved to the painter, the frame names images rather than
     /// carrying them, so the caller supplies whatever resolves those names.
-    /// Pass [`NoImages`](crate::NoImages) for a page with no images.
+    /// Pass [`NoImages`](crate::render::image::NoImages) for a page with no images.
     pub fn scene<P: FrameImages + ?Sized>(&self, pixels: &P) -> SceneRef {
         let frame = self
             .committed_frame()
@@ -1069,7 +1068,7 @@ impl<T> Document<T> {
         let composed = frame.scene().is_none().then(|| {
             let (mut images, mut sources) = (Vec::new(), Vec::new());
             frame.resolve_images(pixels, &mut images, &mut sources);
-            let mut scene = crate::vello::Scene::new();
+            let mut scene = vello::Scene::new();
             // No GPU here, so no bake: a `filter: blur()` group replays raw
             // and this scene is the unblurred one, and a vector image, whose
             // texture only a renderer can bake, draws nothing (both

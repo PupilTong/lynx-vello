@@ -76,7 +76,7 @@ use stylo::values::computed::font::GenericFontFamily;
 use stylo::values::computed::{CSSPixelLength, Length};
 use stylo::values::specified::font::{FONT_MEDIUM_PX, QueryFontMetricsFlags};
 use stylo_traits::{CSSPixel, DevicePixel};
-use terminus::{Document, NodeId, StylesheetOrigin};
+use terminus::link::{Document, NodeId, StylesheetOrigin};
 
 fn main() {
     divan::main();
@@ -127,8 +127,8 @@ impl FontMetricsProvider for BenchFontMetricsProvider {
     }
 }
 
-fn device() -> terminus::Device {
-    terminus::standards_device(
+fn device() -> terminus::link::Device {
+    terminus::link::standards_device(
         MediaType::screen(),
         Size2D::<f32, CSSPixel>::new(VIEWPORT_WIDTH, VIEWPORT_HEIGHT),
         Size2D::<f32, DevicePixel>::new(VIEWPORT_WIDTH, VIEWPORT_HEIGHT),

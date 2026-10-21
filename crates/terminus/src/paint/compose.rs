@@ -38,7 +38,7 @@
 //! replayed without one (no GPU, or a group over the memory budget) the range
 //! plays raw and the frame simply is not blurred. The bake itself replays
 //! that range into an offscreen scene; see
-//! [`crate::CommittedFrame::bake_filter`].
+//! [`crate::visual::CommittedFrame::bake_filter`].
 //!
 //! [`ComposeOp::PushBackdrop`] is the `backdrop-filter` half of the same
 //! machinery, and the one op whose range points *backwards*. Its entry sits
@@ -78,15 +78,15 @@ use std::sync::Arc;
 
 use euclid::default::Vector2D;
 use smallvec::SmallVec;
+use vello::Scene;
+use vello::kurbo::{Affine, Point, Rect, Size};
+use vello::peniko::{
+    BlendMode, BrushRef, Extend, Fill, ImageBrush, ImageData, ImageQuality, ImageSampler,
+};
 
 use crate::paint::shape::{BoxShape, with_shape};
 use crate::render::image::{
     AspectAlign, AspectRatio, ImageSizeHint, MAX_RENDERABLE_DIMENSION, is_renderable,
-};
-use crate::vello::Scene;
-use crate::vello::kurbo::{Affine, Point, Rect, Size};
-use crate::vello::peniko::{
-    BlendMode, BrushRef, Extend, Fill, ImageBrush, ImageData, ImageQuality, ImageSampler,
 };
 use crate::visual::anchored::AnchoredSlot;
 use crate::visual::space::{self, SeamPass, Space, SpaceSamples};
@@ -1625,8 +1625,9 @@ fn is_integer_translation(affine: Affine) -> bool {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use vello::peniko::{Compose, Mix};
+
     use super::*;
-    use crate::vello::peniko::{Compose, Mix};
 
     fn assembly() -> ComposeAssembly {
         ComposeAssembly::with_storage(
@@ -1678,7 +1679,7 @@ mod tests {
         use crate::visual::reach::Reach;
         let transform = moves.then(|| TransformTrack::with_reach(Reach::still()));
         vec![AnimationSlot {
-            node: crate::NodeId::from_bits(1).expect("a handle's bits"),
+            node: crate::tree::document::NodeId::from_bits(1).expect("a handle's bits"),
             curve: CompositeCurve::inert(transform),
         }]
     }
@@ -1768,7 +1769,7 @@ mod tests {
         scene.fill(
             Fill::NonZero,
             Affine::IDENTITY,
-            crate::vello::peniko::Color::from_rgb8(0, 128, 128),
+            vello::peniko::Color::from_rgb8(0, 128, 128),
             None,
             &Rect::new(0.0, 0.0, 8.0, 8.0),
         );
@@ -1811,7 +1812,7 @@ mod tests {
     fn circular_slot() -> crate::visual::ScrollSlot {
         use crate::scroll::{CaptureAxes, ScrollAxes};
         crate::visual::ScrollSlot {
-            node: crate::NodeId::from_bits(1).expect("a handle's bits"),
+            node: crate::tree::document::NodeId::from_bits(1).expect("a handle's bits"),
             parent: None,
             user_scrollable: ScrollAxes { x: false, y: true },
             chains: ScrollAxes::NONE,
@@ -2011,9 +2012,9 @@ mod tests {
         group.ops = 2..3;
         let groups = [group];
         let baked = ImageData {
-            data: crate::vello::peniko::Blob::new(Arc::new([0_u8, 0, 0, 0])),
-            format: crate::vello::peniko::ImageFormat::Rgba8,
-            alpha_type: crate::vello::peniko::ImageAlphaType::AlphaPremultiplied,
+            data: vello::peniko::Blob::new(Arc::new([0_u8, 0, 0, 0])),
+            format: vello::peniko::ImageFormat::Rgba8,
+            alpha_type: vello::peniko::ImageAlphaType::AlphaPremultiplied,
             width: 8,
             height: 8,
         };
@@ -2232,9 +2233,9 @@ mod tests {
             ComposeOp::PushBackdrop { index: 0 },
         ];
         let baked = ImageData {
-            data: crate::vello::peniko::Blob::new(Arc::new([0_u8, 0, 0, 0])),
-            format: crate::vello::peniko::ImageFormat::Rgba8,
-            alpha_type: crate::vello::peniko::ImageAlphaType::AlphaPremultiplied,
+            data: vello::peniko::Blob::new(Arc::new([0_u8, 0, 0, 0])),
+            format: vello::peniko::ImageFormat::Rgba8,
+            alpha_type: vello::peniko::ImageAlphaType::AlphaPremultiplied,
             width: 8,
             height: 8,
         };
@@ -2384,9 +2385,9 @@ mod tests {
     /// identity of its own, as the raster cache registers one.
     fn texture(width: u32, height: u32) -> ImageData {
         ImageData {
-            data: crate::vello::peniko::Blob::new(Arc::new([])),
-            format: crate::vello::peniko::ImageFormat::Rgba8,
-            alpha_type: crate::vello::peniko::ImageAlphaType::Alpha,
+            data: vello::peniko::Blob::new(Arc::new([])),
+            format: vello::peniko::ImageFormat::Rgba8,
+            alpha_type: vello::peniko::ImageAlphaType::Alpha,
             width,
             height,
         }

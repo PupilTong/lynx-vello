@@ -23,9 +23,9 @@
 //! node it hit.
 //!
 //! ```
-//! # use terminus::input::InputEvent;
-//! # use terminus::Point2D;
-//! # fn f<T: Sync>(document: &terminus::Document<T>) {
+//! # use terminus::link::input::InputEvent;
+//! # use terminus::link::Point2D;
+//! # fn f<T: Sync>(document: &terminus::link::Document<T>) {
 //! let target = document.route_input(&InputEvent::wheel(Point2D::new(50.0, 50.0), (0.0, 120.0)));
 //! # let _ = target;
 //! # }
@@ -41,7 +41,7 @@
 //! momentum. This crate has no default-action machinery and no recognizer:
 //! that single decision point is the runtime's input router, and there is no
 //! second consumer this crate would keep one for — the router itself routes
-//! against the published [`crate::CommittedFrame`], which answers the same
+//! against the published [`crate::visual::CommittedFrame`], which answers the same
 //! hit question without the document. Dispatch is likewise not this
 //! crate's — [`crate::event`] computes which nodes an event visits and in
 //! what order, and reaching a listener means leaving this thread.
@@ -78,8 +78,7 @@ use std::sync::Arc;
 
 use euclid::default::{Point2D, Vector2D};
 
-use crate::NodeId;
-use crate::tree::document::Document;
+use crate::tree::document::{Document, NodeId};
 
 pub type PointerId = u32;
 
@@ -357,10 +356,14 @@ impl<T: Sync> Document<T> {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use crate::StylesheetOrigin;
+    use crate::style::engine::StylesheetOrigin;
     use crate::tree::document::tests::device;
 
-    fn page() -> (Document<()>, crate::NodeId, crate::NodeId) {
+    fn page() -> (
+        Document<()>,
+        crate::tree::document::NodeId,
+        crate::tree::document::NodeId,
+    ) {
         let mut document: Document<()> = Document::new(device(), "page", ());
         document.add_stylesheet(
             "page { display: flex; width: 800px; height: 600px; }

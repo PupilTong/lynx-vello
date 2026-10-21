@@ -9,13 +9,13 @@
 //! are UTF-16 code units, JavaScript string indices.
 //!
 //! A paragraph's own offsets are its source units
-//! ([`terminus::Document::text_range_boxes`]): the same text nodes, plus one unit
+//! ([`terminus::link::Document::text_range_boxes`]): the same text nodes, plus one unit
 //! for each atomic inline (an image, a slotted inline view) and the generated
 //! line break of a `br`, none of which renders text. [`Paragraph`] maps one
 //! to the other.
 
 use rustc_hash::FxHashMap;
-use terminus::NodeId;
+use terminus::link::NodeId;
 
 use super::build::{AFTER_CLOSE, AFTER_OPEN, BEFORE_OPEN, IMAGE_TAG, MARKER_TAG, Newlines};
 use super::parse::utf16_len;
@@ -174,7 +174,7 @@ impl Paragraph {
 
 /// The paragraphs under `root`, in tree order, from the last committed
 /// layout: an element is one when it establishes a committed paragraph
-/// ([`terminus::Document::paragraph_of`] answers itself).
+/// ([`terminus::link::Document::paragraph_of`] answers itself).
 pub(super) fn paragraphs(
     document: &LynxDocument,
     root: NodeId,
@@ -237,7 +237,10 @@ fn atom_units(document: &LynxDocument, element: NodeId) -> usize {
             .inline_source_range(node)
             .map_or(0, |range| range.len())
     };
-    match document.get(element).and_then(terminus::Node::tag_name) {
+    match document
+        .get(element)
+        .and_then(terminus::link::Node::tag_name)
+    {
         Some(IMAGE_TAG | "br") => range_len(element),
         Some("slot") => document
             .assigned_nodes(element)

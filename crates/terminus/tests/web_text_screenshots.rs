@@ -87,7 +87,7 @@ fn assert_web_text_golden(case: &str, actual: &Image) {
 fn capture_with_sheet(
     test: &str,
     css: &str,
-    origin: terminus::StylesheetOrigin,
+    origin: terminus::link::StylesheetOrigin,
     font: &'static [u8],
     fragment: &str,
     width: f32,
@@ -97,11 +97,11 @@ fn capture_with_sheet(
     doc.dom.add_stylesheet(css, origin);
     assert_eq!(
         doc.dom
-            .register_fonts(terminus::FontBlob::from_static(font)),
+            .register_fonts(terminus::link::FontBlob::from_static(font)),
         1,
         "the vendored fixture face must register exactly one face"
     );
-    screenshot::capture_prebuilt_document(test, &mut doc.dom, &terminus::NoImages)
+    screenshot::capture_prebuilt_document(test, &mut doc.dom, &terminus::link::NoImages)
 }
 
 /// [`screenshot::capture`] plus a user-agent sheet, for the fixtures that need
@@ -110,7 +110,7 @@ fn capture_with_ua_css(test: &str, ua_css: &str, fragment: &str, width: f32, hei
     capture_with_sheet(
         test,
         ua_css,
-        terminus::StylesheetOrigin::UserAgent,
+        terminus::link::StylesheetOrigin::UserAgent,
         screenshot::ROBOTO,
         fragment,
         width,
@@ -130,7 +130,7 @@ fn capture_ahem_with_ua_css(
     capture_with_sheet(
         test,
         ua_css,
-        terminus::StylesheetOrigin::UserAgent,
+        terminus::link::StylesheetOrigin::UserAgent,
         screenshot::AHEM,
         fragment,
         width,
@@ -150,7 +150,7 @@ fn capture_with_author_css(
     capture_with_sheet(
         test,
         author_css,
-        terminus::StylesheetOrigin::Author,
+        terminus::link::StylesheetOrigin::Author,
         screenshot::ROBOTO,
         fragment,
         width,

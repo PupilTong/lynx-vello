@@ -114,7 +114,7 @@ raw-text {{ content: attr(text); }}
 
 #[cfg(test)]
 mod tests {
-    use terminus::NodeId;
+    use terminus::link::NodeId;
 
     use super::super::LynxDocument;
     use super::super::test_support::{child, display, document};
@@ -137,7 +137,7 @@ mod tests {
     #[test]
     fn generated_text_updates_without_mutating_the_carrier_children() {
         let mut document = document();
-        document.register_fonts(terminus::FontBlob::from_static(AHEM));
+        document.register_fonts(terminus::link::FontBlob::from_static(AHEM));
         let text = text_element(&mut document);
         let wrapper = document.create_element("wrapper", ());
         document.append_child(text, wrapper);
@@ -163,13 +163,13 @@ mod tests {
         }
         document.add_stylesheet(
             "raw-text { content: 'CSS'; }",
-            terminus::StylesheetOrigin::Author,
+            terminus::link::StylesheetOrigin::Author,
         );
         document.layout();
         assert!((document.text_block_size(text).unwrap().width - 60.0).abs() < f32::EPSILON);
         document.add_stylesheet(
             "raw-text { content: none; }",
-            terminus::StylesheetOrigin::Author,
+            terminus::link::StylesheetOrigin::Author,
         );
         document.layout();
         assert!(document.text_block_size(text).unwrap().width.abs() < f32::EPSILON);
@@ -178,7 +178,7 @@ mod tests {
     #[test]
     fn text_attribute_replaces_children_and_removal_restores_them() {
         let mut document = document();
-        document.register_fonts(terminus::FontBlob::from_static(AHEM));
+        document.register_fonts(terminus::link::FontBlob::from_static(AHEM));
         let text = text_element(&mut document);
         let raw = raw_text(&mut document, text, "child");
         for (value, width) in [
@@ -199,7 +199,7 @@ mod tests {
 
     #[test]
     fn the_ua_sheet_dissolves_a_raw_text_only_inside_the_text_it_is_written_in() {
-        use terminus::stylo::values::computed::Display;
+        use terminus::link::stylo::values::computed::Display;
 
         let mut document = document();
         let page = document.document_element().id();
@@ -230,7 +230,7 @@ mod tests {
 
     #[test]
     fn a_carrier_renders_under_a_tag_that_is_not_a_lynx_tag() {
-        use terminus::stylo::values::computed::Display;
+        use terminus::link::stylo::values::computed::Display;
 
         let mut document = document();
         let page = document.document_element().id();
@@ -293,7 +293,7 @@ mod tests {
     fn carriers_in_a_div_are_one_item_across_a_wrapper() {
         let mut document = document();
         assert_eq!(
-            document.register_fonts(terminus::FontBlob::from_static(AHEM)),
+            document.register_fonts(terminus::link::FontBlob::from_static(AHEM)),
             1
         );
         let div = child(
@@ -332,7 +332,7 @@ mod tests {
     fn a_text_element_is_sized_by_the_run_its_raw_text_carries() {
         let mut document = document();
         assert_eq!(
-            document.register_fonts(terminus::FontBlob::from_static(AHEM)),
+            document.register_fonts(terminus::link::FontBlob::from_static(AHEM)),
             1
         );
         let text = text_element(&mut document);
@@ -361,7 +361,7 @@ mod tests {
     fn a_literal_newline_in_the_attribute_breaks_the_line() {
         let mut document = document();
         assert_eq!(
-            document.register_fonts(terminus::FontBlob::from_static(AHEM)),
+            document.register_fonts(terminus::link::FontBlob::from_static(AHEM)),
             1
         );
         let text = text_element(&mut document);

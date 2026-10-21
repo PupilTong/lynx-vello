@@ -47,7 +47,7 @@
 //! [`super::parse::Block::HtmlSpace`], which is a text node here too.
 
 use rustc_hash::FxHashMap;
-use terminus::NodeId;
+use terminus::link::NodeId;
 
 use super::parse::{Alignment, Block, HtmlElement, Inline, ListItem, TableRow};
 use crate::main::tree::LynxDocument;

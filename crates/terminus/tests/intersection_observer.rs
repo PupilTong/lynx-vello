@@ -19,7 +19,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use common::{Doc, device};
-use terminus::{
+use terminus::link::{
     CustomElement, Document, ElementHandler, IntersectionEventHandler, IntersectionMargin,
     IntersectionObserverEntry, IntersectionObserverId, IntersectionObserverInit,
     IntersectionObserverRoot, MarginLength, NodeId, Rect, Vector2D,
@@ -693,8 +693,8 @@ fn notifications_come_in_creation_order_over_any_handler_types() {
     let child = doc
         .dom
         .get(probe)
-        .and_then(terminus::Node::last_child)
-        .map(terminus::Node::id)
+        .and_then(terminus::link::Node::last_child)
+        .map(terminus::link::Node::id)
         .expect("the hook appended a child");
     assert_eq!(
         heard,
@@ -741,8 +741,8 @@ fn a_handler_may_mutate_the_tree() {
     let child = doc
         .dom
         .get(doc.root)
-        .and_then(terminus::Node::last_child)
-        .map(terminus::Node::id)
+        .and_then(terminus::link::Node::last_child)
+        .map(terminus::link::Node::id)
         .expect("the handler appended a child");
     assert_eq!(
         heard,
@@ -771,8 +771,8 @@ fn an_element_handler_runs_the_hook_in_its_own_reaction_scope() {
     let child = doc
         .dom
         .get(probe)
-        .and_then(terminus::Node::last_child)
-        .map(terminus::Node::id)
+        .and_then(terminus::link::Node::last_child)
+        .map(terminus::link::Node::id)
         .expect("the hook appended a child");
     assert_eq!(
         heard,

@@ -32,8 +32,8 @@
 //! `tests/gpu_pixels.rs` already does exactly that byte-exact pixel comparison for the atlas
 //! isolation case.
 
-use crate::vello::Scene;
-use crate::vello::peniko::color::cache_key::BitEq;
+use vello::Scene;
+use vello::peniko::color::cache_key::BitEq;
 
 /// The bit pattern of a `vello_encoding::Transform`, which cannot be named
 /// through the `vello` re-export.
@@ -223,7 +223,7 @@ pub(crate) fn compare_scenes(a: &Scene, b: &Scene) -> Result<(), String> {
                 r.font_size
             ));
         }
-        let embolden = |run: &crate::vello::FontEmbolden| {
+        let embolden = |run: &vello::FontEmbolden| {
             (
                 run.amount.xx.to_bits(),
                 run.amount.yy.to_bits(),
@@ -328,9 +328,10 @@ fn scalar(name: &str, left: u32, right: u32) -> Result<(), String> {
 
 #[cfg(test)]
 mod probe {
+    use vello::Scene;
+
     use super::{assert_scenes_identical, compare_scenes};
     use crate::test_common::Doc;
-    use crate::vello::Scene;
 
     const CSS: &str = "page { display: flex; position: relative; width: 300px; height: 200px; }
         .card { display: flex; position: absolute; left: 10px; top: 10px;
@@ -348,7 +349,7 @@ mod probe {
             doc.el(card, "view.chip");
         }
         doc.dom.render();
-        doc.dom.scene(&crate::NoImages).clone()
+        doc.dom.scene(&crate::render::image::NoImages).clone()
     }
 
     #[test]
@@ -362,11 +363,11 @@ mod probe {
         let root = doc.root;
         doc.el(root, "view.card");
         doc.dom.render();
-        let first = doc.dom.scene(&crate::NoImages).clone();
+        let first = doc.dom.scene(&crate::render::image::NoImages).clone();
         let card = doc.el(root, "view.card");
         doc.el(card, "view.chip");
         doc.dom.render();
-        let second = doc.dom.scene(&crate::NoImages).clone();
+        let second = doc.dom.scene(&crate::render::image::NoImages).clone();
         assert!(compare_scenes(&first, &second).is_err());
     }
 }

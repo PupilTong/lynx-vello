@@ -740,7 +740,7 @@ fn place_backdrops<T: Sync>(
 /// once, not the number of containers: one iteration settles every container
 /// at one level, and the only thing a relay can discover is a container *under*
 /// one just settled. It is bounded the way
-/// [`Document::layout`](crate::Document::layout)'s is, and its last iteration
+/// [`Document::layout`](crate::tree::document::Document::layout)'s is, and its last iteration
 /// closes the interleave rather than capping it — a relay that may not defer
 /// lays every subtree out for real, so this never returns with a subtree
 /// nobody laid out.

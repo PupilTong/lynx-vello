@@ -47,15 +47,14 @@
 //! the painter's posts like a fling's.
 //!
 //! [`ScrollSlot`]: crate::visual::ScrollSlot
-//! [`CommittedFrame::auto_scroll_requests`]: crate::CommittedFrame::auto_scroll_requests
+//! [`CommittedFrame::auto_scroll_requests`]: crate::visual::CommittedFrame::auto_scroll_requests
 
 use std::num::NonZeroU64;
 
 use euclid::default::Vector2D;
 use smallvec::SmallVec;
 
-use crate::NodeId;
-use crate::tree::document::Document;
+use crate::tree::document::{Document, NodeId};
 
 /// How a programmatic scroll moves the container: CSSOM-View's
 /// `ScrollBehavior` (§4) once `auto` is resolved. There is no
@@ -326,7 +325,7 @@ impl<T> Document<T> {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use crate::StylesheetOrigin;
+    use crate::style::engine::StylesheetOrigin;
     use crate::tree::document::tests::device;
 
     /// A 100px column scroller (max offset 0,300) in a page, and the scroller.

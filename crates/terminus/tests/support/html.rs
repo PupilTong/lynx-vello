@@ -9,7 +9,7 @@
 //!
 //! The exception is the Lynx text tags, `text`, `inline-text` and
 //! `inline-truncation`. [`parse`] defines them as Lynx text elements
-//! ([`terminus::CustomElement::is_lynx_text`]), as `crates/bobcat-core` does, so a
+//! ([`terminus::link::CustomElement::is_lynx_text`]), as `crates/bobcat-core` does, so a
 //! fixture's `<inline-truncation>` is the element it is in a Lynx page.
 //!
 //! One class carries meaning too: `text-block`. A fixture whose element
@@ -34,7 +34,7 @@
 use html5ever::tendril::TendrilSink;
 use html5ever::{ParseOpts, QualName, local_name, ns, parse_fragment};
 use markup5ever_rcdom::{Handle, NodeData, RcDom};
-use terminus::{Document, NodeId};
+use terminus::link::{Document, NodeId};
 
 use crate::paint_common::{Doc, define_lynx_text, device};
 

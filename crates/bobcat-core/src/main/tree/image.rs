@@ -6,7 +6,7 @@
 //! on it — while everything downstream speaks replaced content: the source
 //! reaches the host's resource system, the completed load reports an intrinsic
 //! size back, and the paint walk draws the bitmap into the content box. So
-//! this module owns both halves of the join: a [`terminus::CustomElement`]
+//! this module owns both halves of the join: a [`terminus::link::CustomElement`]
 //! reflecting the attributes into [`terminus`], and the UA rules that decide what
 //! shape the box it draws into has ([`UA_RULES`]).
 //!
@@ -16,8 +16,8 @@
 //! three different ways.
 //!
 //! `src` and `placeholder` are the two *sources*, reflected into the one
-//! [`terminus::Document::set_image_source`] under [`terminus::ImageRole::Source`] and
-//! [`terminus::ImageRole::Placeholder`] respectively. They are concurrent, not a
+//! [`terminus::link::Document::set_image_source`] under [`terminus::link::ImageRole::Source`] and
+//! [`terminus::link::ImageRole::Placeholder`] respectively. They are concurrent, not a
 //! fallback chain — `terminus` owns that model and `docs/tracking/media-resources.md`
 //! carries the 2026-09-17 ruling behind it; this module only relays the strings,
 //! identically for both, with an empty value meaning no source at all.
@@ -165,10 +165,10 @@
 //!   Ruled 2026-09-20 to stay so in this change; bitmap-only blur is a separate piece of paint
 //!   work, and needs a declaration other than `filter` for this module to write.
 //! - A `load` or an `error` is the *element's own source* settling. The placeholder produces
-//!   neither, which is `terminus`'s rule rather than this module's: [`terminus::ImageOutcome`] has
-//!   no variant naming a placeholder.
+//!   neither, which is `terminus`'s rule rather than this module's:
+//!   [`terminus::link::ImageOutcome`] has no variant naming a placeholder.
 
-use terminus::{CustomElement, ImageRole, NodeId};
+use terminus::link::{CustomElement, ImageRole, NodeId};
 
 use super::{ComponentEvents, LynxDocument};
 
@@ -253,7 +253,7 @@ image > * { display: none; }
 
 /// Installs the component, over the queue its bind-time outcomes go into. Must
 /// run before any element could carry the tag, which is
-/// [`Document::define`](terminus::Document::define)'s own precondition.
+/// [`Document::define`](terminus::link::Document::define)'s own precondition.
 pub(super) fn define(document: &mut LynxDocument, outcomes: ComponentEvents) {
     document.define(IMAGE_TAG, Box::new(Image { outcomes }));
 }
@@ -364,10 +364,10 @@ mod tests {
     // the exact zero Lynx's rule produces — no measurement, so no tolerance.
     #![allow(clippy::float_cmp)]
 
-    use terminus::NodeId;
-    use terminus::stylo::computed_values::box_sizing;
-    use terminus::stylo::computed_values::object_fit::T as ObjectFit;
-    use terminus::stylo::values::computed::{Contain, Display};
+    use terminus::link::NodeId;
+    use terminus::link::stylo::computed_values::box_sizing;
+    use terminus::link::stylo::computed_values::object_fit::T as ObjectFit;
+    use terminus::link::stylo::values::computed::{Contain, Display};
 
     use super::super::test_support::{
         child, display, document, element_under, style_of, with_config,
@@ -404,7 +404,7 @@ mod tests {
         document.set_attribute(element, SRC_ATTRIBUTE, SOURCE);
         document.set_natural_size(
             element,
-            terminus::layout::NaturalSize::from_size(terminus::layout::Size::new(
+            terminus::link::layout::NaturalSize::from_size(terminus::link::layout::Size::new(
                 NATURAL.0, NATURAL.1,
             )),
         );
@@ -705,7 +705,7 @@ mod tests {
         let element = element_under(&mut document, parent, IMAGE_TAG, "");
         document.set_attribute(element, AUTO_SIZE_ATTRIBUTE, "");
         document.set_attribute(element, PLACEHOLDER_ATTRIBUTE, PLACEHOLDER);
-        let _ = document.apply_image_events(&[terminus::ImageEvent::Loaded {
+        let _ = document.apply_image_events(&[terminus::link::ImageEvent::Loaded {
             source: std::sync::Arc::from(PLACEHOLDER),
             width: NATURAL_PIXELS.0,
             height: NATURAL_PIXELS.1,
@@ -800,7 +800,7 @@ mod tests {
         document.add_class(element, "override");
         document.add_stylesheet(
             "@layer fits { .override { object-fit: cover; } }",
-            terminus::StylesheetOrigin::Author,
+            terminus::link::StylesheetOrigin::Author,
         );
         document.layout();
         assert_eq!(object_fit(&document, element), ObjectFit::Cover);
@@ -893,7 +893,7 @@ mod tests {
             document.set_attribute(element, SRC_ATTRIBUTE, SOURCE);
             document.set_natural_size(
                 element,
-                terminus::layout::NaturalSize::from_size(terminus::layout::Size::new(
+                terminus::link::layout::NaturalSize::from_size(terminus::link::layout::Size::new(
                     NATURAL.0, NATURAL.1,
                 )),
             );
@@ -928,7 +928,7 @@ mod tests {
             document.set_attribute(element, SRC_ATTRIBUTE, SOURCE);
             document.set_natural_size(
                 element,
-                terminus::layout::NaturalSize::from_size(terminus::layout::Size::new(
+                terminus::link::layout::NaturalSize::from_size(terminus::link::layout::Size::new(
                     NATURAL.0, NATURAL.1,
                 )),
             );
@@ -959,7 +959,7 @@ mod tests {
     /// The blur radius in the element's computed `filter`, in CSS pixels;
     /// `None` when the list holds no blur at all, the initial value included.
     fn blur(document: &LynxDocument, element: NodeId) -> Option<f32> {
-        use terminus::stylo::values::computed::effects::Filter;
+        use terminus::link::stylo::values::computed::effects::Filter;
 
         match style_of(document, element).get_effects().filter.0.first() {
             Some(Filter::Blur(radius)) => Some(radius.0.px()),
@@ -1021,7 +1021,7 @@ mod tests {
         document.add_class(element, "override");
         document.add_stylesheet(
             "@layer blurs { .override { filter: none; } }",
-            terminus::StylesheetOrigin::Author,
+            terminus::link::StylesheetOrigin::Author,
         );
         document.layout();
         assert_eq!(blur(&document, element), None);

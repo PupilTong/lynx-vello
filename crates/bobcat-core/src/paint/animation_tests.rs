@@ -4,7 +4,7 @@
 //!
 //! Inside the crate rather than in `tests/`, because the timeline is not an
 //! embedder-facing thing to drive: pinning it is
-//! [`FrameClock::pin`](terminus::painter::FrameClock::pin), which exists only
+//! [`FrameClock::pin`](terminus::link::painter::FrameClock::pin), which exists only
 //! in a test build. The integration suite covers what a host can
 //! actually observe — that animations run with the host arranging nothing.
 
@@ -265,12 +265,17 @@ fn booted_scroll_driven(slide: u32, max: u32, header_css: &str, list_css: &str) 
 }
 
 /// One touch on the list at `y`, at the pinned instant `at`.
-fn touch_list(engine: &mut TestEngine, at: f64, phase: terminus::input::PointerPhase, y: f32) {
+fn touch_list(
+    engine: &mut TestEngine,
+    at: f64,
+    phase: terminus::link::input::PointerPhase,
+    y: f32,
+) {
     engine.painter.clock_mut().pin(at);
-    engine.dispatch_input(terminus::input::InputEvent::pointer(
-        terminus::Point2D::new(32.0, y),
+    engine.dispatch_input(terminus::link::input::InputEvent::pointer(
+        terminus::link::Point2D::new(32.0, y),
         1,
-        terminus::input::PointerKind::Touch,
+        terminus::link::input::PointerKind::Touch,
         phase,
     ));
 }
@@ -292,7 +297,7 @@ fn list_intent(engine: &TestEngine) -> f32 {
 /// nothing is owed.
 #[test]
 fn a_drag_moves_a_scroll_driven_header_with_no_commit_and_no_frame_post() {
-    use terminus::input::PointerPhase;
+    use terminus::link::input::PointerPhase;
 
     let mut engine = booted_scroll_driven(200, 200, "animation: slide linear both;", "");
     let boot = engine.published_frame().expect("boot committed a frame");
@@ -335,7 +340,7 @@ fn a_drag_moves_a_scroll_driven_header_with_no_commit_and_no_frame_post() {
 /// finger lifts, to where the fling comes to rest.
 #[test]
 fn a_fling_keeps_a_scroll_driven_header_following() {
-    use terminus::input::PointerPhase;
+    use terminus::link::input::PointerPhase;
 
     let mut engine = booted_scroll_driven(40, 400, "animation: slide linear both;", "");
     engine.painter.clock_mut().pin(0.0);
@@ -370,7 +375,7 @@ fn a_fling_keeps_a_scroll_driven_header_following() {
 /// `a_scroll_self_timeline_binds_the_scrollers_own_slot`.
 #[test]
 fn a_bounce_stretch_holds_a_scroll_driven_header_at_the_edge() {
-    use terminus::input::PointerPhase;
+    use terminus::link::input::PointerPhase;
 
     let mut engine = booted_scroll_driven(
         16,
@@ -379,9 +384,9 @@ fn a_bounce_stretch_holds_a_scroll_driven_header_at_the_edge() {
         "overscroll-behavior: contain-bounce;",
     );
     engine.painter.clock_mut().pin(0.0);
-    engine.dispatch_input(terminus::input::InputEvent::wheel(
-        terminus::Point2D::new(32.0, 40.0),
-        terminus::Vector2D::new(0.0, 32.0),
+    engine.dispatch_input(terminus::link::input::InputEvent::wheel(
+        terminus::link::Point2D::new(32.0, 40.0),
+        terminus::link::Vector2D::new(0.0, 32.0),
     ));
     assert_eq!(red_left_edge(&mut engine), 16, "at the end");
     touch_list(&mut engine, 0.0, PointerPhase::Down, 60.0);
@@ -399,7 +404,7 @@ fn a_bounce_stretch_holds_a_scroll_driven_header_at_the_edge() {
 /// latched on it.
 #[test]
 fn a_scroll_self_timeline_moves_its_scroller_with_its_own_offset() {
-    use terminus::input::PointerPhase;
+    use terminus::link::input::PointerPhase;
 
     let script = r"
         globalThis.renderPage = function renderPage() {
@@ -429,17 +434,17 @@ fn a_scroll_self_timeline_moves_its_scroller_with_its_own_offset() {
     engine.painter.clock_mut().pin(0.0);
     assert_eq!(red_left_edge(&mut engine), 0);
     engine.painter.clock_mut().pin(0.0);
-    engine.dispatch_input(terminus::input::InputEvent::pointer(
-        terminus::Point2D::new(8.0, 60.0),
+    engine.dispatch_input(terminus::link::input::InputEvent::pointer(
+        terminus::link::Point2D::new(8.0, 60.0),
         1,
-        terminus::input::PointerKind::Touch,
+        terminus::link::input::PointerKind::Touch,
         PointerPhase::Down,
     ));
     engine.painter.clock_mut().pin(0.05);
-    engine.dispatch_input(terminus::input::InputEvent::pointer(
-        terminus::Point2D::new(8.0, 40.0),
+    engine.dispatch_input(terminus::link::input::InputEvent::pointer(
+        terminus::link::Point2D::new(8.0, 40.0),
         1,
-        terminus::input::PointerKind::Touch,
+        terminus::link::input::PointerKind::Touch,
         PointerPhase::Move,
     ));
     assert!((list_intent(&engine) - 12.0).abs() < 0.5);

@@ -417,7 +417,7 @@ impl<T> Document<T> {
     pub(crate) fn own_box(
         &self,
         id: NodeId,
-    ) -> Option<(&crate::Node<T>, StyleView<'_, T>, &Layout)> {
+    ) -> Option<(&crate::tree::node::Node<T>, StyleView<'_, T>, &Layout)> {
         let node = self.get(id)?;
         let style = StyleView::try_of(node)?;
         if matches!(

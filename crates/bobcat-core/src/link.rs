@@ -38,10 +38,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use rustc_hash::{FxHashMap, FxHashSet};
-use terminus::painter::RouterHost;
-pub(crate) use terminus::painter::ScrollEntry;
-use terminus::scroll::ScrollAxes;
-use terminus::{CommittedFrame, FrameImages, HitTarget, NodeId};
+use terminus::link::painter::RouterHost;
+pub(crate) use terminus::link::painter::ScrollEntry;
+use terminus::link::scroll::ScrollAxes;
+use terminus::link::{CommittedFrame, FrameImages, HitTarget, NodeId};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 use url::Url;
@@ -172,7 +172,7 @@ pub(crate) enum ToMain {
     /// acknowledged only once it has been applied. Main dispatches the
     /// events it owes (`beforeinput`, `input`, `composition*`) around the
     /// change, which no listener can stop.
-    Edit(terminus::editing::Command),
+    Edit(terminus::link::editing::Command),
     /// Where the view's typed text comes from, from
     /// [`LynxView::set_text_input_source`](crate::LynxView::set_text_input_source):
     /// what a `keydown`'s editing default action does from the next key on.
@@ -187,7 +187,7 @@ pub(crate) enum ToMain {
     /// carry pixels (encoded document bytes and a parsed tree are not
     /// pixels), which is what makes "`ImageData` never crosses a channel" a
     /// property of the type.
-    ImageEvents(Vec<terminus::ImageEvent>),
+    ImageEvents(Vec<terminus::link::ImageEvent>),
     /// An embedder's native module answering one function argument of one
     /// call the MTS realm made, sent by a
     /// [`ModuleCallback`](crate::native_module::ModuleCallback) as it drops:
@@ -220,7 +220,7 @@ pub(crate) enum ToMain {
 /// at that boundary alone.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct InputEventPayload {
-    pub(crate) detail: terminus::event::EventDetail,
+    pub(crate) detail: terminus::link::event::EventDetail,
     /// The event's `timestamp`: milliseconds on the view's own timeline,
     /// taken from the reading of the pass that decided the event — an
     /// input's arrival, or the gesture tick's `now`.
@@ -267,7 +267,7 @@ pub(crate) enum ViewNotice {
     /// under the synthetic source the document filed it as, with its bytes
     /// and kind, for the store to parse and report like a fetched document
     /// (`ResourceFetcher::request_document`).
-    RequestDocuments(Vec<terminus::DocumentRequest>),
+    RequestDocuments(Vec<terminus::link::DocumentRequest>),
     /// One source — a stylesheet, an imported module or a worker script —
     /// and the right to answer it. Whoever holds the receiving end
     /// is the destination, which is why the host never learns which.
@@ -276,13 +276,13 @@ pub(crate) enum ViewNotice {
         completion: SourceCompletion,
     },
     /// The focused editing host's state changed since the last one sent
-    /// ([`terminus::Document::text_input_state`]): the value, the selection, the
+    /// ([`terminus::link::Document::text_input_state`]): the value, the selection, the
     /// composition, the geometry of the commit that showed them, or the
     /// focus itself (a default state is "nothing editable is focused").
     /// Sent from a page's epilogue after its commit, at most once per
     /// entry; `LynxView::pump` hands it on as
     /// [`EngineEvent::TextInputStateChanged`].
-    TextInputState(Box<terminus::editing::TextInputState>),
+    TextInputState(Box<terminus::link::editing::TextInputState>),
     /// One `NativeModules.<module>.<method>(...)` a realm of this view made,
     /// for the embedder's own module of that name to serve.
     ///

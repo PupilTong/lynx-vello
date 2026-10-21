@@ -14,7 +14,7 @@
 //! The component ([`List`]) adds five of the methods Lynx documents for the
 //! tag (lynxjs.org/api/elements/built-in/list), which the runtime's
 //! `callElementMethod` reaches through
-//! [`terminus::Document::invoke_element_method`]: `scrollToPosition`
+//! [`terminus::link::Document::invoke_element_method`]: `scrollToPosition`
 //! ([`scroll_to_position`]), `scrollBy` and `autoScroll` (`scroll-view`'s
 //! own, [`super::scroll_container::scroll_by`] and
 //! [`super::scroll_container::auto_scroll`], on the list's axis),
@@ -133,10 +133,10 @@
 //! rename and the real gap properties are what an author writes.
 
 use serde_json::{Map, Value};
-use terminus::event::ElementEvent;
-use terminus::scroll::{ScrollBehavior, ScrollBox};
-use terminus::stylo::values::computed::Display;
-use terminus::{
+use terminus::link::event::ElementEvent;
+use terminus::link::scroll::{ScrollBehavior, ScrollBox};
+use terminus::link::stylo::values::computed::Display;
+use terminus::link::{
     CustomElement, MethodCall, MethodError, MethodOutcome, NodeId, Rect, Size2D, Vector2D,
 };
 
@@ -255,7 +255,7 @@ const LOWER_THRESHOLD_ITEM_COUNT: &str = "lower-threshold-item-count";
 
 /// Installs the `list` component, which queues its threshold events on
 /// `events`. Must run before any element could carry the tag, which is
-/// [`Document::define`](terminus::Document::define)'s own precondition.
+/// [`Document::define`](terminus::link::Document::define)'s own precondition.
 pub(super) fn define(document: &mut LynxDocument, events: ComponentEvents) {
     document.define(
         LIST_TAG,
@@ -412,7 +412,7 @@ fn overlaps_scrollport(
 fn generates_box(document: &LynxDocument, cell: NodeId) -> bool {
     document
         .get(cell)
-        .and_then(terminus::Node::computed_style)
+        .and_then(terminus::link::Node::computed_style)
         .is_some_and(|style| {
             let display = *style.get_display();
             display != Display::None && display != Display::Contents
@@ -460,8 +460,8 @@ enum AlignTo {
 ///   to both axes (`XList.ts:84-87`).
 /// - `smooth` is read with JavaScript truthiness, as web-core's `smooth ? 'smooth' : 'auto'` reads
 ///   it, and a missing one is `false` (Android's default). A smooth scroll is the painter's to
-///   animate; an instant one moves the document at once ([`terminus::Document::scroll_to_with`]).
-///   Either way the call answers at once.
+///   animate; an instant one moves the document at once
+///   ([`terminus::link::Document::scroll_to_with`]). Either way the call answers at once.
 ///
 /// The params are read in full before any box is looked at. Then a list
 /// with no box, or that is no scroll container, or a cell with no box (any
@@ -676,11 +676,11 @@ fn cells_record(cells: &[VisibleCell]) -> String {
 mod tests {
     #![allow(clippy::float_cmp)] // Ahem and explicit lane sizes have exact metrics.
 
-    use terminus::scroll::ScrollBehavior;
-    use terminus::stylo::computed_values::{flex_direction, linear_direction};
-    use terminus::stylo::properties::PropertyId;
-    use terminus::stylo::values::computed::{Display, Overflow};
-    use terminus::{MethodCall, MethodError, MethodOutcome, NodeId, Rect, Size2D, Vector2D};
+    use terminus::link::scroll::ScrollBehavior;
+    use terminus::link::stylo::computed_values::{flex_direction, linear_direction};
+    use terminus::link::stylo::properties::PropertyId;
+    use terminus::link::stylo::values::computed::{Display, Overflow};
+    use terminus::link::{MethodCall, MethodError, MethodOutcome, NodeId, Rect, Size2D, Vector2D};
 
     use super::super::scroll_container::tests::{heard, listen, scrolled};
     use super::super::scroll_container::{SCROLL_TO_LOWER_EVENT, SCROLL_TO_UPPER_EVENT};
@@ -705,7 +705,7 @@ mod tests {
     fn list_page(style: &str) -> (LynxDocument, NodeId) {
         let mut document = document();
         assert_eq!(
-            document.register_fonts(terminus::FontBlob::from_static(AHEM)),
+            document.register_fonts(terminus::link::FontBlob::from_static(AHEM)),
             1
         );
         let list = child(&mut document, "list", style);
@@ -1894,7 +1894,10 @@ mod tests {
             id: id.to_owned(),
             item_key: item_key.to_owned(),
             index,
-            rect: Rect::new(terminus::Point2D::new(x, y), Size2D::new(width, height)),
+            rect: Rect::new(
+                terminus::link::Point2D::new(x, y),
+                Size2D::new(width, height),
+            ),
         }
     }
 

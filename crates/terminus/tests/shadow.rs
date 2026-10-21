@@ -7,7 +7,7 @@
 mod common;
 
 use common::Doc;
-use terminus::{CssDeclaration, CssRule, NodeId, ShadowRootMode, StylesheetOrigin};
+use terminus::link::{CssDeclaration, CssRule, NodeId, ShadowRootMode, StylesheetOrigin};
 
 /// A host with a shadow tree, plus the ids of interest.
 struct Harness {
@@ -457,7 +457,7 @@ fn a_shadow_tree_lays_out_and_hit_tests_as_the_hosts_content() {
     let hits = harness
         .doc
         .dom
-        .elements_from_point(terminus::Point2D::new(50.0, 20.0));
+        .elements_from_point(terminus::link::Point2D::new(50.0, 20.0));
     assert_eq!(
         hits.first().copied(),
         Some(slotted),
@@ -505,7 +505,11 @@ fn dropping_a_host_takes_its_shadow_tree_and_leaves_its_light_children() {
         "the shadow tree is the host's own"
     );
     assert_eq!(
-        harness.doc.dom.get(slotted).map(terminus::Node::parent_id),
+        harness
+            .doc
+            .dom
+            .get(slotted)
+            .map(terminus::link::Node::parent_id),
         Some(None),
         "the light-tree child outlives it as a detached root"
     );
@@ -860,7 +864,7 @@ fn removing_a_slot_stops_rendering_what_it_held() {
         harness
             .doc
             .dom
-            .elements_from_point(terminus::Point2D::new(10.0, 10.0))
+            .elements_from_point(terminus::link::Point2D::new(10.0, 10.0))
             .contains(&slottable)
     );
 
@@ -873,7 +877,7 @@ fn removing_a_slot_stops_rendering_what_it_held() {
         !harness
             .doc
             .dom
-            .elements_from_point(terminus::Point2D::new(10.0, 10.0))
+            .elements_from_point(terminus::link::Point2D::new(10.0, 10.0))
             .contains(&slottable),
         "with no slot left to render it, the slottable is out of the frame"
     );
@@ -1193,7 +1197,7 @@ fn a_shadow_scroller_snaps_to_and_starts_on_its_slotted_children() {
     assert_eq!(points, [0.0, 100.0, 200.0]);
     assert_eq!(
         harness.doc.dom.scroll_offset(scroller),
-        terminus::Vector2D::new(100.0, 0.0),
+        terminus::link::Vector2D::new(100.0, 0.0),
         "the first slotted target, {:?}, not the second",
         pages[1]
     );

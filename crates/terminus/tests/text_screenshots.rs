@@ -163,17 +163,17 @@ fn generated_text_matches_literal_runs() {
     generated.dom.set_attribute(carrier, "text", "Before ");
     generated
         .dom
-        .register_fonts(terminus::FontBlob::from_static(screenshot::ROBOTO));
-    generated.dom.add_stylesheet(".generated { content: attr(text); color: red; text-decoration: underline; font-size: 30px; }", terminus::StylesheetOrigin::Author);
+        .register_fonts(terminus::link::FontBlob::from_static(screenshot::ROBOTO));
+    generated.dom.add_stylesheet(".generated { content: attr(text); color: red; text-decoration: underline; font-size: 30px; }", terminus::link::StylesheetOrigin::Author);
     for color in ["red", "blue"] {
         generated.dom.add_stylesheet(
             &format!(".generated {{ color: {color}; }}"),
-            terminus::StylesheetOrigin::Author,
+            terminus::link::StylesheetOrigin::Author,
         );
         let actual = screenshot::capture_prebuilt_document(
             "generated-text",
             &mut generated.dom,
-            &terminus::NoImages,
+            &terminus::link::NoImages,
         );
         let expected = screenshot::capture(
             "literal-reference",
@@ -212,13 +212,13 @@ fn text_inline_boxes() {
 "#;
     let mut doc = html::parse(FRAGMENT, 440.0, 260.0);
     doc.dom
-        .register_fonts(terminus::FontBlob::from_static(screenshot::ROBOTO));
+        .register_fonts(terminus::link::FontBlob::from_static(screenshot::ROBOTO));
     doc.dom
-        .add_stylesheet(FLOW_SHEET, terminus::StylesheetOrigin::UserAgent);
+        .add_stylesheet(FLOW_SHEET, terminus::link::StylesheetOrigin::UserAgent);
     let actual = screenshot::capture_prebuilt_document(
         "text_inline_boxes",
         &mut doc.dom,
-        &terminus::NoImages,
+        &terminus::link::NoImages,
     );
     assert_text_golden("inline-boxes", &actual);
 }
@@ -237,13 +237,13 @@ fn text_nested_inline_box_across_a_wrap() {
 "#;
     let mut doc = html::parse(FRAGMENT, 300.0, 200.0);
     doc.dom
-        .register_fonts(terminus::FontBlob::from_static(screenshot::ROBOTO));
+        .register_fonts(terminus::link::FontBlob::from_static(screenshot::ROBOTO));
     doc.dom
-        .add_stylesheet(FLOW_SHEET, terminus::StylesheetOrigin::UserAgent);
+        .add_stylesheet(FLOW_SHEET, terminus::link::StylesheetOrigin::UserAgent);
     let actual = screenshot::capture_prebuilt_document(
         "text_nested_inline_box_across_a_wrap",
         &mut doc.dom,
-        &terminus::NoImages,
+        &terminus::link::NoImages,
     );
     assert_text_golden("nested-inline-box-wrap", &actual);
 }
@@ -271,16 +271,16 @@ fn editing_golden(
     kind: EditingHost,
     value: &str,
     host_style: &str,
-    edit: impl FnOnce(&mut terminus::Document<()>),
+    edit: impl FnOnce(&mut terminus::link::Document<()>),
 ) {
-    use terminus::StylesheetOrigin;
+    use terminus::link::StylesheetOrigin;
 
     let (width, height) = (360.0, 120.0);
-    let mut dom = terminus::Document::new(paint_common::device(width, height), "div", ());
+    let mut dom = terminus::link::Document::new(paint_common::device(width, height), "div", ());
     paint_common::define_lynx_text(&mut dom, "text");
-    dom.adopt_text_context(terminus::TextContext::without_system_fonts());
+    dom.adopt_text_context(terminus::link::TextContext::without_system_fonts());
     assert_eq!(
-        dom.register_fonts(terminus::FontBlob::from_static(screenshot::ROBOTO)),
+        dom.register_fonts(terminus::link::FontBlob::from_static(screenshot::ROBOTO)),
         1
     );
     // The embedder's UA rule for an editing host (bobcat-core's sheet).
@@ -310,7 +310,7 @@ fn editing_golden(
     dom.layout();
     assert!(dom.focus(host));
     edit(&mut dom);
-    let actual = screenshot::capture_prebuilt_document(case, &mut dom, &terminus::NoImages);
+    let actual = screenshot::capture_prebuilt_document(case, &mut dom, &terminus::link::NoImages);
     assert_text_golden(case, &actual);
 }
 
@@ -322,7 +322,7 @@ fn editing_caret_at_end() {
         "Caret at the end",
         "width: 300px",
         |dom| {
-            use terminus::editing::{Command, Direction, Granularity};
+            use terminus::link::editing::{Command, Direction, Granularity};
             assert!(
                 dom.apply_editing(Command::Move {
                     granularity: Granularity::Document,
@@ -343,7 +343,7 @@ fn editing_selection_across_two_lines() {
         "A selection that runs over a wrapped line",
         "width: 240px",
         |dom| {
-            use terminus::editing::Command;
+            use terminus::link::editing::Command;
             assert!(
                 dom.apply_editing(Command::SetSelection { range: 2..28 })
                     .applied
@@ -360,7 +360,7 @@ fn editing_composition_underline() {
         "Typing ",
         "width: 300px",
         |dom| {
-            use terminus::editing::{Command, Direction, Granularity};
+            use terminus::link::editing::{Command, Direction, Granularity};
             dom.apply_editing(Command::Move {
                 granularity: Granularity::Document,
                 direction: Direction::Forward,
@@ -385,7 +385,7 @@ fn editing_emoji_boundary() {
         "A😀B",
         "width: 300px",
         |dom| {
-            use terminus::editing::Command;
+            use terminus::link::editing::Command;
             // Exactly the surrogate pair's two units: the highlight covers its
             // one box and neither neighbour.
             assert!(
@@ -409,7 +409,7 @@ fn editing_flex_host_selection() {
         "Loose  text in a flex view",
         "width: 220px; white-space: normal",
         |dom| {
-            use terminus::editing::Command;
+            use terminus::link::editing::Command;
             assert!(
                 dom.apply_editing(Command::SetSelection { range: 6..24 })
                     .applied

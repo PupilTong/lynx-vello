@@ -14,7 +14,7 @@
 mod common;
 
 use common::{Doc, device};
-use terminus::{
+use terminus::link::{
     FontBlob, IntersectionGeometry, IntersectionMargin, MarginLength, NodeId, Point2D, Rect,
     Vector2D,
 };

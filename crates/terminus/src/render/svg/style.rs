@@ -12,10 +12,10 @@ use std::str::FromStr;
 use seldon::text::{ResolvedFont, ResolvedFontStyle};
 use smallvec::SmallVec;
 use svgtypes::{Length, LengthListParser, LengthUnit, PaintFallback};
+use vello::kurbo::{Affine, Cap, Join};
+use vello::peniko::Fill;
 
 use super::text::TextAnchor;
-use crate::vello::kurbo::{Affine, Cap, Join};
-use crate::vello::peniko::Fill;
 
 /// The property names read as presentation attributes. An attribute outside
 /// this list is never a property, so `width` on a `rect` stays geometry.

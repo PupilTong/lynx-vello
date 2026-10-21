@@ -2,7 +2,7 @@
 //! including a headless render-to-texture path with pixel readback (the
 //! test and screenshot surface — embedders with a window drive
 //! `vello::util::RenderContext`/`RenderSurface` themselves through the
-//! [`crate::vello`] re-export).
+//! [`vello`] re-export).
 //!
 //! There is one render policy in this crate: area-only antialiasing.
 //! [`renderer_options`] and [`render_params`] are its single definition, and
@@ -61,32 +61,22 @@ pub struct Headless {
 /// never seen: both enter the cache dirty by construction, so a skipped mark
 /// cannot cost pixels.
 #[derive(Debug, Default)]
-pub struct AtlasResidency {
+pub(crate) struct AtlasResidency {
     /// Blob ids ([`vello::peniko::Blob::id`]) marked since the last loss.
     reuploaded: FxHashSet<u64>,
 }
 
 impl AtlasResidency {
-    /// Brings `renderer` up to a render of `scene` drawing `images`. Call
-    /// immediately before that render.
-    pub fn prepare(
-        &mut self,
-        renderer: &mut vello::Renderer,
-        scene: &vello::Scene,
-        images: &[Option<ImageData>],
-    ) {
-        self.prepare_all(renderer, scene, images, &[], &[]);
-    }
-
-    /// [`Self::prepare`] over three tables: the bitmaps a frame's image
-    /// draws resolved, the textures its `filter: blur()` groups baked, and
-    /// the textures its vector images were baked into.
+    /// Brings `renderer` up to a render of `scene` drawing three tables: the
+    /// bitmaps a frame's image draws resolved, the textures its
+    /// `filter: blur()` groups baked, and the textures its vector images were
+    /// baked into. Call immediately before that render.
     ///
     /// The baked textures are override images like any other as far as the
     /// atlas is concerned, so they are owed the same repair after a loss —
     /// and a bake of a solid-color group, or of a flat icon, is precisely
     /// the patch-free render that causes one.
-    pub fn prepare_all(
+    pub(crate) fn prepare_all(
         &mut self,
         renderer: &mut vello::Renderer,
         scene: &vello::Scene,
@@ -171,7 +161,7 @@ impl std::error::Error for GpuError {}
 /// [`vello::Renderer`] must construct it with these options to match the
 /// headless path.
 #[must_use]
-pub fn renderer_options() -> vello::RendererOptions {
+pub(crate) fn renderer_options() -> vello::RendererOptions {
     vello::RendererOptions {
         antialiasing_support: vello::AaSupport::area_only(),
         ..vello::RendererOptions::default()
@@ -180,7 +170,7 @@ pub fn renderer_options() -> vello::RendererOptions {
 
 /// Per-frame render parameters for that same policy over `base_color`.
 #[must_use]
-pub fn render_params(
+pub(crate) fn render_params(
     base_color: vello::peniko::Color,
     width: u32,
     height: u32,
@@ -250,7 +240,7 @@ impl Headless {
 
     /// Bakes the textures of `frame`'s vector image draws that are not
     /// already resident, if it has any, and answers the table
-    /// [`crate::CommittedFrame::compose_into`] takes for them.
+    /// [`crate::visual::CommittedFrame::compose_into`] takes for them.
     ///
     /// Call before [`Self::prepare_filters`] and before composing: a filter
     /// bake replays ops that may draw these textures. A frame with no
@@ -277,7 +267,7 @@ impl Headless {
 
     /// Bakes `frame`'s `filter: blur()` groups and `backdrop-filter`
     /// elements, if it has any, and answers the table
-    /// [`crate::CommittedFrame::compose_into`] takes.
+    /// [`crate::visual::CommittedFrame::compose_into`] takes.
     ///
     /// Call before composing, at the same `animation_now` the composition
     /// will use, with the `vectors` table [`Self::prepare_vectors`] answered
@@ -556,7 +546,8 @@ impl Headless {
 }
 
 /// Reads an RGBA8 texture into tightly packed row-major pixels.
-pub fn read_texture(
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn read_texture(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     texture: &wgpu::Texture,

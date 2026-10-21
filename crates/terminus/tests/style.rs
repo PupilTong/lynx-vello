@@ -5,7 +5,7 @@ mod common;
 use common::device;
 use stylo::color::AbsoluteColor;
 use stylo::values::computed::Display;
-use terminus::{Document, NodeId, StylesheetOrigin};
+use terminus::link::{Document, NodeId, StylesheetOrigin};
 
 type TestDocument = Document<()>;
 
@@ -646,22 +646,22 @@ fn element_state_invalidates_only_for_states_a_rule_selects_on() {
     doc.layout();
 
     // No rule mentions `:focus`.
-    doc.add_element_state(el, terminus::ElementState::FOCUS);
+    doc.add_element_state(el, terminus::link::ElementState::FOCUS);
     doc.layout();
     assert_color!(doc, el, BLUE);
 
-    doc.add_element_state(el, terminus::ElementState::HOVER);
+    doc.add_element_state(el, terminus::link::ElementState::HOVER);
     doc.layout();
     assert_color!(doc, el, RED, ":hover is selected on, so it restyles");
 
-    doc.remove_element_state(el, terminus::ElementState::HOVER);
+    doc.remove_element_state(el, terminus::link::ElementState::HOVER);
     doc.layout();
     assert_color!(doc, el, BLUE);
     assert!(
         doc.get(el)
             .unwrap()
             .element_state()
-            .contains(terminus::ElementState::FOCUS),
+            .contains(terminus::link::ElementState::FOCUS),
         "the ungated state is still recorded on the element"
     );
 }

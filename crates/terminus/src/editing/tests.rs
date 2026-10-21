@@ -12,8 +12,11 @@
 
 #![allow(clippy::float_cmp)] // Ahem's em squares have exact metrics.
 
+use euclid::default::{Point2D, Rect, Size2D};
+use seldon::text::FontBlob;
+
 use super::*;
-use crate::{FontBlob, Point2D, Rect, Size2D, StylesheetOrigin};
+use crate::style::engine::StylesheetOrigin;
 
 /// The embedder's UA rule for an editing host, as `bobcat-core` writes it.
 const HOST_RULE: &str = "[contenteditable]:not([contenteditable=\"false\" i]) \
@@ -290,7 +293,7 @@ fn a_detached_host_cannot_be_focused_and_a_removed_one_loses_focus_silently() {
         !doc.get(host)
             .unwrap()
             .element_state()
-            .contains(crate::ElementState::FOCUS)
+            .contains(stylo_dom::ElementState::FOCUS)
     );
 
     doc.append_child(page, host);
@@ -1620,7 +1623,7 @@ fn a_host_that_is_not_rendered_cannot_hold_focus() {
             !doc.get(host)
                 .unwrap()
                 .element_state()
-                .contains(crate::ElementState::FOCUS)
+                .contains(stylo_dom::ElementState::FOCUS)
         );
         assert!(!doc.focus(host));
         doc.set_inline_style_property(host, "display", "");

@@ -3,7 +3,7 @@
 mod common;
 
 use common::{Doc, rgb};
-use terminus::NodeId;
+use terminus::link::NodeId;
 
 fn styled(inline: &str) -> (Doc, NodeId) {
     let mut doc = Doc::new();

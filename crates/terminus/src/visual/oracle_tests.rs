@@ -23,17 +23,18 @@
 //! ticks and the sampler's one step from the commit accumulate the same
 //! start times; for other durations they can differ in the last bit.
 
-use euclid::default::Vector2D;
+use euclid::default::{Point2D, Vector2D};
+use seldon::text::FontBlob;
 use stylo::properties::animated_properties::{AnimationValue, AnimationValueMap};
 use stylo::properties::{LonghandId, OwnedPropertyDeclarationId, PropertyDeclarationId};
 use stylo::rule_tree::CascadeOrigin;
+use vello::kurbo::{Affine, Point, Rect};
 
 use crate::paint::convert::item_affine;
 use crate::test_common::Doc;
-use crate::vello::kurbo::{Affine, Point, Rect};
+use crate::tree::document::NodeId;
 use crate::visual::curves::Timeline;
 use crate::visual::{CommittedFrame, PaintItemKind, ScrollOffsets, ScrollSlot, SpaceKind};
-use crate::{FontBlob, NodeId, Point2D};
 
 const AHEM: &[u8] = include_bytes!("../../../seldon/tests/fixtures/Ahem.ttf");
 

@@ -2127,7 +2127,7 @@ mod tests {
         use std::fmt::Write as _;
 
         // Every hop sits 10px below the bottom of the one before it.
-        let assert_tops = |doc: &Doc, hops: &[crate::NodeId], first: f32| {
+        let assert_tops = |doc: &Doc, hops: &[crate::tree::document::NodeId], first: f32| {
             let mut expected = first;
             for (k, &hop) in hops.iter().enumerate() {
                 let top = doc.dom.rounded_layout(hop).expect("laid out").location.y;

@@ -1,12 +1,12 @@
 //! Items into a vello scene, text shaped on the way.
 
 use seldon::text::{ShapedLine, TextContext, shape_line};
+use vello::kurbo::{Affine, Point, Rect, Stroke};
+use vello::peniko::{Brush, Fill, Mix, StyleRef};
+use vello::{Glyph, Scene};
 
 use super::text::{TextAnchor, TextItem, TextPaint};
 use super::{Item, LayerClip, VectorDocument, paint_server};
-use crate::vello::kurbo::{Affine, Point, Rect, Stroke};
-use crate::vello::peniko::{Brush, Fill, Mix, StyleRef};
-use crate::vello::{Glyph, Scene};
 
 /// Encodes `document` into a scene in viewport units, shaping its text
 /// through the document's `context`, created here on the first document

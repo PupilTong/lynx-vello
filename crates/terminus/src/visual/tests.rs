@@ -3,12 +3,14 @@
 
 #![allow(clippy::float_cmp)]
 
+use euclid::default::Point2D;
+use seldon::text::FontBlob;
 use stylo::properties::animated_properties::{AnimationValue, AnimationValueMap};
 use stylo::properties::{LonghandId, OwnedPropertyDeclarationId};
 
 use crate::test_common::{self as common, Doc};
+use crate::tree::document::NodeId;
 use crate::visual::{PaintItemKind, PaintOrder};
-use crate::{FontBlob, NodeId, Point2D};
 
 const AHEM: &[u8] = include_bytes!("../../../seldon/tests/fixtures/Ahem.ttf");
 
@@ -165,7 +167,7 @@ fn hoisted_scroll_content_keeps_its_scrollers_clip_and_space() {
     h.doc.dom.layout();
     h.doc
         .dom
-        .scroll_to(scroller, crate::Vector2D::new(0.0, 100.0));
+        .scroll_to(scroller, euclid::default::Vector2D::new(0.0, 100.0));
     assert_eq!(h.hit(150.0, 120.0), Some(content));
 }
 
@@ -670,8 +672,8 @@ fn hit_outside_all_content_is_none() {
 
 #[test]
 fn a_bare_document_paints_only_its_permanent_root() {
-    let mut doc: terminus::Document<()> =
-        terminus::Document::new(common::device(800.0, 600.0), "page", ());
+    let mut doc: terminus::link::Document<()> =
+        terminus::link::Document::new(common::device(800.0, 600.0), "page", ());
     let root = doc.document_element().id();
     let paint = doc.build_paint_order();
     let painted: Vec<_> = paint.items().iter().map(|item| item.node).collect();
@@ -1815,8 +1817,8 @@ fn reuse_harness() -> (Harness, NodeId) {
 
 /// Scrolls the fixture's container and fails if the offset did not move,
 /// which would quietly turn every reuse round into the same build.
-fn scroll_to(document: &mut crate::Document<()>, scroller: NodeId, offset: f32) {
-    let applied = document.scroll_to(scroller, crate::Vector2D::new(0.0, offset));
+fn scroll_to(document: &mut crate::tree::document::Document<()>, scroller: NodeId, offset: f32) {
+    let applied = document.scroll_to(scroller, euclid::default::Vector2D::new(0.0, offset));
     assert_eq!(
         applied.y, offset,
         "the fixture's container must admit the offset the test asked for",
@@ -1829,7 +1831,7 @@ fn scroll_to(document: &mut crate::Document<()>, scroller: NodeId, offset: f32) 
 /// A scroll no longer serves: a composable scroll deliberately invalidates
 /// nothing. A background flip does — color reaches only the encode, never
 /// the tables, so a round at the same state fingerprints identically.
-fn nudge(document: &mut crate::Document<()>, scroller: NodeId, alternate: bool) {
+fn nudge(document: &mut crate::tree::document::Document<()>, scroller: NodeId, alternate: bool) {
     let color = if alternate { "navy" } else { "teal" };
     document.set_inline_style(scroller, &format!("background-color: {color}"));
     assert!(
@@ -1839,7 +1841,7 @@ fn nudge(document: &mut crate::Document<()>, scroller: NodeId, alternate: bool) 
 }
 
 /// The fingerprint of the frame a document currently retains.
-fn retained_fingerprint(document: &crate::Document<()>) -> String {
+fn retained_fingerprint(document: &crate::tree::document::Document<()>) -> String {
     let painter = document.painter.borrow();
     fingerprint(
         &painter
@@ -1913,7 +1915,7 @@ fn a_warm_frame_encodes_the_scene_a_cold_frame_encodes() {
     scroll_to(&mut h.doc.dom, scroller, 37.0);
     nudge(&mut h.doc.dom, scroller, false);
     h.doc.dom.render();
-    let cold = h.doc.dom.scene(&crate::NoImages).clone();
+    let cold = h.doc.dom.scene(&crate::render::image::NoImages).clone();
 
     // A repaint of an unchanged document is refused, so each round flips the
     // nudge and flips it back. The second render of each pair sees the
@@ -1925,7 +1927,10 @@ fn a_warm_frame_encodes_the_scene_a_cold_frame_encodes() {
         nudge(&mut h.doc.dom, scroller, false);
         h.doc.dom.render();
     }
-    crate::paint::equivalence::assert_scenes_identical(&cold, &h.doc.dom.scene(&crate::NoImages));
+    crate::paint::equivalence::assert_scenes_identical(
+        &cold,
+        &h.doc.dom.scene(&crate::render::image::NoImages),
+    );
 }
 
 #[test]
@@ -2019,10 +2024,13 @@ fn culling_does_not_change_the_retained_frame() {
 /// A document whose root runs `animation`, with `extra` CSS alongside,
 /// advanced past the pending promotion so the animation is `Running` at the
 /// second commit — the state the exporter requires.
-fn animated_document(animation_css: &str) -> crate::Document<()> {
-    let mut document: crate::Document<()> =
-        crate::Document::new(crate::tree::document::tests::device(), "page", ());
-    document.add_stylesheet(animation_css, crate::StylesheetOrigin::Author);
+fn animated_document(animation_css: &str) -> crate::tree::document::Document<()> {
+    let mut document: crate::tree::document::Document<()> =
+        crate::tree::document::Document::new(crate::tree::document::tests::device(), "page", ());
+    document.add_stylesheet(
+        animation_css,
+        crate::style::engine::StylesheetOrigin::Author,
+    );
     document.render();
     // The render's flush creates the animation, and the first tick is the
     // frame it starts on: taking that tick at zero puts the animation's origin
@@ -2071,15 +2079,15 @@ fn an_opacity_animation_exports_a_curve_and_frees_the_main_thread() {
 
 #[test]
 fn a_transform_animation_composes_and_hits_at_the_sampled_position() {
-    let mut document: crate::Document<()> =
-        crate::Document::new(crate::tree::document::tests::device(), "page", ());
+    let mut document: crate::tree::document::Document<()> =
+        crate::tree::document::Document::new(crate::tree::document::tests::device(), "page", ());
     document.add_stylesheet(
         "page { width: 200px; height: 200px; }
          .mover { position: absolute; left: 0; top: 0; width: 50px; height: 50px;
                   background-color: blue; animation: slide 1s linear infinite; }
          @keyframes slide { from { transform: translateX(0px); }
                             to { transform: translateX(100px); } }",
-        crate::StylesheetOrigin::Author,
+        crate::style::engine::StylesheetOrigin::Author,
     );
     let page = document.document_element().id();
     let mover = document.create_element("view", ());
@@ -2104,19 +2112,31 @@ fn a_transform_animation_composes_and_hits_at_the_sampled_position() {
     // the 0.30s commit (x = 30), so the hit must follow the sample, not
     // the bake.
     let sampled_hit = frame
-        .hit(crate::Point2D::new(70.0, 25.0), &|_| None, Some(0.5))
+        .hit(
+            euclid::default::Point2D::new(70.0, 25.0),
+            &|_| None,
+            Some(0.5),
+        )
         .expect("something is hit");
     assert_eq!(
         sampled_hit.node, mover,
         "the sampled position is where it hits"
     );
     let vacated = frame
-        .hit(crate::Point2D::new(10.0, 25.0), &|_| None, Some(0.5))
+        .hit(
+            euclid::default::Point2D::new(10.0, 25.0),
+            &|_| None,
+            Some(0.5),
+        )
         .expect("the page is behind");
     assert_eq!(vacated.node, page, "the vacated position falls through");
     // At the commit instant the delta is the identity: the baked position.
     let at_commit = frame
-        .hit(crate::Point2D::new(35.0, 25.0), &|_| None, Some(0.30))
+        .hit(
+            euclid::default::Point2D::new(35.0, 25.0),
+            &|_| None,
+            Some(0.30),
+        )
         .expect("something is hit");
     assert_eq!(at_commit.node, mover);
 }
@@ -2157,7 +2177,7 @@ fn an_animated_scroll_container_exports_its_curve() {
 
 /// A page-sized wrapper running `animation`, with content `height` px tall
 /// overflowing it: over the budget, if at all, by `content_size` alone.
-fn tall_wrapper(height: u16, animation: &str) -> std::sync::Arc<crate::CommittedFrame> {
+fn tall_wrapper(height: u16, animation: &str) -> std::sync::Arc<crate::visual::CommittedFrame> {
     let mut h = Harness::new(&format!(
         "page {{ display: flex; flex-direction: column; width: 800px; height: 600px;
                  animation: {animation} 1s linear infinite; }}
@@ -2206,7 +2226,7 @@ fn an_opacity_curve_is_exempt_from_the_extent_budget() {
 
 /// Two animated elements, started on the timeline's origin and committed a
 /// quarter second in.
-fn two_animated(first: &str, second: &str) -> std::sync::Arc<crate::CommittedFrame> {
+fn two_animated(first: &str, second: &str) -> std::sync::Arc<crate::visual::CommittedFrame> {
     let mut h = Harness::new(&format!(
         "page {{ display: flex; width: 800px; height: 600px; }}
          .first {{ display: flex; width: 50px; height: 50px; background-color: red;
@@ -2319,7 +2339,7 @@ fn a_delayed_transform_animation_clips_its_fixed_descendant() {
     document.advance_animations(0.5);
     let style = document
         .get(card)
-        .and_then(crate::Node::computed_style)
+        .and_then(crate::tree::node::Node::computed_style)
         .expect("the card is styled");
     assert!(
         style.get_box().transform.0.is_empty(),
@@ -2555,7 +2575,7 @@ fn a_compose_samples_only_the_curves_its_program_encodes() {
         (1..10).contains(&composed),
         "only the dots in the list's window compose, got {composed}",
     );
-    let mut scene = crate::vello::Scene::new();
+    let mut scene = vello::Scene::new();
     frame.compose_into(&mut scene, &[], &[], &[], &|_| None, Some(0.5));
 }
 
@@ -2564,15 +2584,15 @@ fn a_compose_samples_only_the_curves_its_program_encodes() {
 /// animation node, so the card's slide still exports.
 #[test]
 fn an_in_context_scroll_container_inside_an_animated_card_exports_the_curve() {
-    let mut document: crate::Document<()> =
-        crate::Document::new(crate::tree::document::tests::device(), "page", ());
+    let mut document: crate::tree::document::Document<()> =
+        crate::tree::document::Document::new(crate::tree::document::tests::device(), "page", ());
     document.add_stylesheet(
         ".card { width: 100px; height: 100px; animation: slide 1s linear infinite; }
          .scroller { overflow: scroll; width: 100px; height: 100px; }
          .content { width: 100px; height: 300px; }
          @keyframes slide { from { transform: translateX(0px); }
                             to { transform: translateX(50px); } }",
-        crate::StylesheetOrigin::Author,
+        crate::style::engine::StylesheetOrigin::Author,
     );
     let page = document.document_element().id();
     let card = document.create_element("view", ());
@@ -2757,8 +2777,9 @@ fn a_scroll_self_timeline_binds_the_scrollers_own_slot() {
     };
     assert!(position(SpaceKind::Animation(0)) < position(SpaceKind::Scroll(own)));
     let alpha = |y: f32| {
-        let offset_of =
-            |slot: &ScrollSlot| (slot.node == scroller).then_some(crate::Vector2D::new(0.0, y));
+        let offset_of = |slot: &ScrollSlot| {
+            (slot.node == scroller).then_some(euclid::default::Vector2D::new(0.0, y))
+        };
         let offsets = ScrollOffsets {
             slots: frame.scroll_slots(),
             offset_of: &offset_of,
@@ -2812,8 +2833,9 @@ fn a_circular_scroll_timeline_samples_the_nearer_end_through_the_seam() {
             .iter()
             .find(|slot| slot.node == node)
             .expect("the fade exports");
-        let offset_of =
-            |slot: &ScrollSlot| (slot.node == scroller).then_some(crate::Vector2D::new(0.0, y));
+        let offset_of = |slot: &ScrollSlot| {
+            (slot.node == scroller).then_some(euclid::default::Vector2D::new(0.0, y))
+        };
         let offsets = ScrollOffsets {
             slots: frame.scroll_slots(),
             offset_of: &offset_of,
@@ -2870,8 +2892,9 @@ fn a_seam_pass_resamples_the_view_timelines_riding_its_slot() {
     let (scroller_fade, card_fade) = (slot_of(scroller), slot_of(card));
     let own = frame.slot_of(scroller).expect("the scroller has a slot");
     let passes = |y: f32| {
-        let offset_of =
-            |slot: &ScrollSlot| (slot.node == scroller).then_some(crate::Vector2D::new(0.0, y));
+        let offset_of = |slot: &ScrollSlot| {
+            (slot.node == scroller).then_some(euclid::default::Vector2D::new(0.0, y))
+        };
         let animations = frame.order.sample_animations(None, &offset_of);
         let stickies = frame.order.sample_stickies(1.0, &offset_of);
         let anchored = frame
@@ -2898,7 +2921,7 @@ fn a_seam_pass_resamples_the_view_timelines_riding_its_slot() {
             (Some(1.0), Some(0.0)),
             vec![(
                 own,
-                crate::Vector2D::new(0.0, -1200.0),
+                euclid::default::Vector2D::new(0.0, -1200.0),
                 (Some(1.0), Some(0.5))
             )]
         ),
@@ -2935,10 +2958,10 @@ fn a_straddling_circular_scroller_hits_the_copy_under_the_point() {
 
     let hit = |offset: f32, y: f32| {
         let offset_of = |slot: &ScrollSlot| {
-            (slot.node == scroller).then_some(crate::Vector2D::new(0.0, offset))
+            (slot.node == scroller).then_some(euclid::default::Vector2D::new(0.0, offset))
         };
         frame
-            .hit(crate::Point2D::new(100.0, y), &offset_of, None)
+            .hit(euclid::default::Point2D::new(100.0, y), &offset_of, None)
             .map(|target| target.node)
     };
     for offset in [300.0, 700.0, -100.0] {
@@ -3007,8 +3030,8 @@ fn an_animation_on_an_inactive_timeline_animates_nothing_in_the_export() {
 #[test]
 fn a_scroll_driven_reach_eases_in_the_bindings_direction() {
     use stylo::properties::longhands::animation_direction::computed_value::single_value::T as AnimationDirection;
+    use vello::kurbo::{Point, Rect};
 
-    use crate::vello::kurbo::{Point, Rect};
     use crate::visual::curves::Timeline;
     use crate::visual::{ScrollOffsets, ScrollSlot};
 
@@ -3066,8 +3089,9 @@ fn a_scroll_driven_reach_eases_in_the_bindings_direction() {
     let mut values = AnimationValueMap::default();
     for step in 0_u8..=100 {
         let y = f32::from(step) * 10.0;
-        let offset_of =
-            |slot: &ScrollSlot| (slot.node == scroller).then_some(crate::Vector2D::new(0.0, y));
+        let offset_of = |slot: &ScrollSlot| {
+            (slot.node == scroller).then_some(euclid::default::Vector2D::new(0.0, y))
+        };
         let offsets = ScrollOffsets {
             slots: frame.scroll_slots(),
             offset_of: &offset_of,
@@ -3109,7 +3133,7 @@ fn a_scroll_timeline_exports_only_where_every_offset_is_representable() {
         h.doc.set_inline(card, animation);
         let dom = &mut h.doc.dom;
         dom.render();
-        dom.scroll_to(scroller, crate::Vector2D::new(0.0, offset));
+        dom.scroll_to(scroller, euclid::default::Vector2D::new(0.0, offset));
         dom.note_scroll_windows_stale();
         !dom.commit().animation_slots().is_empty()
     };
@@ -3136,7 +3160,7 @@ fn rising_rows(
     animation: &str,
     offset: f32,
     ticks: &[f64],
-) -> (std::sync::Arc<crate::CommittedFrame>, Vec<bool>) {
+) -> (std::sync::Arc<crate::visual::CommittedFrame>, Vec<bool>) {
     let mut h = Harness::new(
         "page { display: flex; width: 800px; height: 600px; }
          .list { display: flex; flex-direction: column; overflow: scroll;
@@ -3154,7 +3178,7 @@ fn rising_rows(
     }
     let document = &mut h.doc.dom;
     document.render();
-    document.scroll_to(list, crate::Vector2D::new(0.0, offset));
+    document.scroll_to(list, euclid::default::Vector2D::new(0.0, offset));
     for &now in ticks {
         document.advance_animations(now);
     }
@@ -3192,9 +3216,9 @@ fn a_scroll_driven_mover_is_culled_like_a_time_mover() {
         timed.presentation.composed.animations,
         driven.presentation.composed.animations,
     );
-    let region = crate::vello::kurbo::Rect::new(-40.0, 10.0, 260.0, 90.0);
+    let region = vello::kurbo::Rect::new(-40.0, 10.0, 260.0, 90.0);
     for (a, b) in timed.animation_slots().iter().zip(driven.animation_slots()) {
-        let reach = |slot: &crate::AnimationSlot| {
+        let reach = |slot: &crate::visual::AnimationSlot| {
             slot.curve
                 .transform
                 .as_ref()
@@ -3318,7 +3342,7 @@ fn a_paused_scroll_driven_animation_holds_on_the_painter() {
     h.doc.dom.render();
     h.doc
         .dom
-        .scroll_to(scroller, crate::Vector2D::new(0.0, 250.0));
+        .scroll_to(scroller, euclid::default::Vector2D::new(0.0, 250.0));
     h.doc.dom.note_scroll_windows_stale();
     let frame = h.doc.dom.commit();
     let [slot] = frame.animation_slots() else {
@@ -3326,7 +3350,8 @@ fn a_paused_scroll_driven_animation_holds_on_the_painter() {
     };
     assert_eq!(slot.node, mover);
     assert!(!slot.curve.reads_scroll() && !slot.curve.reads_clock());
-    let offset_of = |_: &crate::visual::ScrollSlot| Some(crate::Vector2D::new(0.0, 700.0));
+    let offset_of =
+        |_: &crate::visual::ScrollSlot| Some(euclid::default::Vector2D::new(0.0, 700.0));
     let offsets = ScrollOffsets {
         slots: frame.scroll_slots(),
         offset_of: &offset_of,
@@ -3471,7 +3496,7 @@ fn top_layer_entries_paint_in_insertion_order_and_a_readd_moves_to_the_top() {
         h.doc
             .dom
             .top_layer()
-            .map(terminus::TopLayerEntry::element)
+            .map(terminus::link::TopLayerEntry::element)
             .collect::<Vec<_>>(),
         vec![first_in_tree, second_in_tree]
     );
@@ -3695,7 +3720,7 @@ fn a_top_layer_element_ignores_its_ancestors_scroll_offset() {
     h.doc.dom.layout();
     h.doc
         .dom
-        .scroll_to(scroller, crate::Vector2D::new(0.0, 300.0));
+        .scroll_to(scroller, euclid::default::Vector2D::new(0.0, 300.0));
     let paint = h.paint();
     let item = &paint.items()[element_index(&paint, dialog)];
     assert_eq!(item.space, None);

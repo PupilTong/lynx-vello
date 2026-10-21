@@ -7,7 +7,7 @@ mod common;
 
 use common::{Doc, parses};
 use stylo::color::AbsoluteColor;
-use terminus::NodeId;
+use terminus::link::NodeId;
 
 fn assert_rgba(got: AbsoluteColor, r: u8, g: u8, b: u8, alpha: f32, ctx: &str) {
     let srgb = got.into_srgb_legacy();

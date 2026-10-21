@@ -8,20 +8,18 @@
 use std::sync::Arc;
 
 use seldon::text::{FontBlob, TextContext};
+use vello::Scene;
+use vello::kurbo::{
+    Affine, BezPath, Cap, Circle, Ellipse, Join, PathEl, Point, Rect, Shape, Stroke,
+};
+use vello::peniko::color::DynamicColor;
+use vello::peniko::{BlendMode, Brush, Color, ColorStop, Compose, Extend, Fill, Gradient, Mix};
 
 use super::shapes::{self, ARC_TOLERANCE};
 use super::text::{TextAnchor, TextPaint};
 use super::{Item, LayerClip, SvgError, VectorDocument, encode, parse};
 use crate::paint::equivalence::assert_scenes_identical;
 use crate::render::image::{AspectAlign, AspectRatio};
-use crate::vello::Scene;
-use crate::vello::kurbo::{
-    Affine, BezPath, Cap, Circle, Ellipse, Join, PathEl, Point, Rect, Shape, Stroke,
-};
-use crate::vello::peniko::color::DynamicColor;
-use crate::vello::peniko::{
-    BlendMode, Brush, Color, ColorStop, Compose, Extend, Fill, Gradient, Mix,
-};
 
 const RED: Color = Color::from_rgba8(255, 0, 0, 255);
 const BLUE: Color = Color::from_rgba8(0, 0, 255, 255);
@@ -1483,14 +1481,8 @@ fn text_gradients_resolve_against_the_shaped_chunk_box() {
     // the baseline: the unit square maps onto it, relative to the pen.
     assert_eq!(brush.translation, [0.0, -8.0]);
     assert_eq!(brush.matrix, [20.0, 0.0, 0.0, 10.0]);
-    assert!(matches!(
-        runs[0].style,
-        crate::vello::peniko::Style::Fill(_)
-    ));
-    assert!(matches!(
-        runs[1].style,
-        crate::vello::peniko::Style::Stroke(_)
-    ));
+    assert!(matches!(runs[0].style, vello::peniko::Style::Fill(_)));
+    assert!(matches!(runs[1].style, vello::peniko::Style::Stroke(_)));
     assert!(!scene.encoding().resources.color_stops.is_empty());
 }
 
@@ -1535,7 +1527,7 @@ fn text_extends_the_bounds_of_the_layer_around_it() {
             .brush_transform(None)
             .draw(
                 Fill::NonZero,
-                run.glyphs.iter().map(|glyph| crate::vello::Glyph {
+                run.glyphs.iter().map(|glyph| vello::Glyph {
                     id: glyph.id,
                     x: glyph.x,
                     y: glyph.y,

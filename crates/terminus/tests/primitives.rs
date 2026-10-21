@@ -7,7 +7,7 @@
 
 mod common;
 
-use terminus::{Document, Node, NodeId, StylesheetOrigin};
+use terminus::link::{Document, Node, NodeId, StylesheetOrigin};
 
 fn test_document() -> Document<()> {
     Document::new(common::device(800.0, 600.0), "page", ())
@@ -242,7 +242,7 @@ fn drop_element_frees_the_text_nodes_under_it() {
     assert!(doc.get(container).is_none());
     assert!(doc.get(run).is_none(), "the run goes with its owner");
     assert_eq!(
-        doc.get(element).map(terminus::Node::parent_id),
+        doc.get(element).map(terminus::link::Node::parent_id),
         Some(None),
         "the element child stays, detached"
     );

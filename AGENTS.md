@@ -2375,27 +2375,22 @@ slot for the fold order, and the structure pinned in the cascade; a component
 on the two coordinator tags whose only member is the `setFoldExpanded` UI
 method, its `CustomElement::invoke`, a scroll of the coordinator to `offset`
 clamped to the fold range; iOS's `getScrollInfo` and `scrollBy` are not
-built), `tree::dialog` (HTML's `<dialog>` on `terminus`'s top
-layer: HTML's UA rules adapted — the display `defaultDisplayLinear` picks,
-`Canvas`/`CanvasText` (light scheme), `overflow: scroll` and `top`/`bottom`
-on `:modal`, `-servo-top-layer: auto` on `:modal` and `::backdrop` so Stylo's
-§3.1 position fixup runs, `::backdrop` with `display: flex` — a component with no per-element state whose `open`
-attribute callback is the one path that flips `:open` and, on removal or
-`"false"`, leaves the top layer; "modal" is `Document::blocks_document`; the
-four HTML methods as UI methods, the component's `CustomElement::invoke`, an
-`InvalidStateError` answering native's code 7 (a ruled deviation from
-web-core's 4) — `showModal()` also refusing
-a dialog showing as a popover; non-bubbling `close` and
-`cancel` on the shared `ComponentEvents` queue `tree/lib.rs` defines, which
-also carries an image's `load`/`error` and which the page's epilogue posts
-once per batch), `tree::popover` (HTML's popover UA rules over `terminus`'s
-popover algorithms: hidden is `display: none`, the `[popover]` box,
-`:popover-open` on the top layer, and a transparent, untouchable
-`::backdrop` with HTML's one `!important`; no component), `tree::overlay` (`overlay`/`x-overlay-ng`, Lynx's modal
+built), HTML's `<dialog>` and popover UA rules, which are `terminus::html`'s
+(`new_document` calls `Document::define_html_elements` before it defines
+the overlays, which build a `dialog` in their shadow trees, and registers
+the shared `ComponentEvents` queue `tree/lib.rs` defines as the document's
+`QueuedEventSink`, so a dialog's non-bubbling `close` and `cancel` land on
+it in order with every component's events, beside an image's `load`/`error`,
+for the page's epilogue to post once per batch; `ua_sheet.rs` imports their
+rules and writes the display
+`defaultDisplayLinear` picks for `dialog` and `dialog:popover-open`; the
+dialog's four methods are UI methods, an `InvalidStateError` answering
+native's code 7, a ruled deviation from web-core's 4; `dialog_tests.rs` and
+`popover_tests.rs` test both under the Lynx sheet), `tree::overlay` (`overlay`/`x-overlay-ng`, Lynx's modal
 layer, built as web-core builds it: the host is `display: contents` and
 paints nothing, and a UA shadow tree `dialog#dialog[part=dialog] >
 div.overlay-inner > slot` carries the content — the dialog
-(`popover="manual"`) is `tree::dialog`'s own element, driven only through
+(`popover="manual"`) is `terminus::html::dialog`'s own element, driven only through
 HTML's API for it, as web-core drives its own: `visible` (present and not
 `"false"`) on a connected host shows it with `showModal()`, or — under
 `events-pass-through` — as a Manual popover, the top-layer element HTML does
@@ -3432,6 +3427,20 @@ runtime-element vocabulary or Lynx device/unit policy: Lynx computed defaults
 (border-box, `overflow: clip`, `display: linear` on every element, …) stay
 embedder cascade policy in the UA sheet.
 
+Its one public module is `terminus::link` (`src/link.rs`). Every other module
+is private and the crate root re-exports nothing, so every crate built on it —
+the bobcat crates, `prime-radiant`, `seldon`'s benchmarks, and `terminus`'s own
+integration tests, benchmarks and examples — names an item as
+`terminus::link::…` (`terminus::link::Document`,
+`terminus::link::painter::Painter`, `terminus::link::html::dialog::show_modal`).
+The link re-exports each item by name, in submodules that keep the crate's
+module names (`editing`, `event`, `input`, `layout`, `render`, `scroll`,
+`html`, `painter`) with everything else at its top, and
+`#![deny(unreachable_pub)]` keeps it curated: a `pub` item the link does not
+reach fails the build, so it is on the link (a consumer names it, or a link
+item hands it out) or it is `pub(crate)`. A new consumer need is a new name on the link and in its row of
+`docs/terminus-link-api.md`.
+
 Subsystems:
 
 - `tree/` — the boxed `TreeArenas<T>`, `Node`, `Document`, shadow roots, the
@@ -3446,6 +3455,22 @@ Subsystems:
   css-grid-1 §6). `LayoutTree::children` answers the boxes in place of the
   text, they are re-derived after each style flush from what mutations
   recorded, and a hit on one targets its container.
+- `html/` — HTML elements `terminus` implements over its own tree, never
+  defined by `Document::new` (a test that builds a `<dialog>` by hand gets a
+  plain element) but by `Document::define_html_elements`, which an embedder
+  calls before any element carries their tags: `html::dialog` is HTML's
+  `<dialog>` — `UA_RULES` and `DIALOG_TAG`, a component with no per-element
+  state whose `open` attribute callback is the one path that flips `:open`
+  and, on removal or `"false"`, leaves the top layer, "modal" being
+  `Document::blocks_document`, and `show`/`show_modal`/`close`/`request_close`
+  (also the component's `CustomElement::invoke`, an `InvalidStateError`
+  answering `MethodError::InvalidState`); `html::popover::UA_RULES` is HTML's
+  popover rules over `tree/popover.rs`. Every rule is HTML's selector inside
+  `:where()`, `display` is the embedder's to write, and the module doc gives
+  the source order that keeps HTML's precedence. A dialog's `close` and
+  `cancel` go, at the moment they are queued, to the document's
+  `event::QueuedEventSink` (`Document::set_queued_event_sink`, registered
+  once by the embedder; with none they are dropped).
 - `style/` — the per-document `StyleEngine` (`Stylist`, cascade pipeline,
   device, stylesheet set, `SharedRwLock`), flush, invalidation, `StyleDamage`.
 - `layout/` — the concrete `seldon` host: `Document::layout`, the `LayoutTree`

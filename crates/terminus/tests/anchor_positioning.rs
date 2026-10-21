@@ -53,7 +53,7 @@
 mod common;
 
 use common::Doc;
-use terminus::{NodeId, ShadowRootMode};
+use terminus::link::{NodeId, ShadowRootMode};
 
 /// A border box: `(x, y, width, height)`.
 type Rect4 = (f32, f32, f32, f32);
@@ -1540,7 +1540,7 @@ fn remembered_scroll_offsets_hold_until_a_recalculation_point() {
 
     page.doc
         .dom
-        .scroll_to(scroller, terminus::Vector2D::new(0.0, 20.0));
+        .scroll_to(scroller, terminus::link::Vector2D::new(0.0, 20.0));
     // An unrelated relayout of the reader: its anchor answer is unchanged.
     page.doc.set_inline(reader, "width: 11px");
     page.layout();
@@ -4129,14 +4129,14 @@ fn wpt_anchor_fallback_scroll_axis() {
     page.render();
     page.doc
         .dom
-        .scroll_to(scroller, terminus::Vector2D::new(0.0, 400.0));
+        .scroll_to(scroller, terminus::link::Vector2D::new(0.0, 400.0));
     page.render();
     page.doc.set_inline(anchored, "display: flex");
     page.render();
     assert_eq!(page.abs(anchored).0, 51.0, "fits at its remembered offset");
     page.doc
         .dom
-        .scroll_to(scroller, terminus::Vector2D::new(300.0, 400.0));
+        .scroll_to(scroller, terminus::link::Vector2D::new(300.0, 400.0));
     page.render();
     assert_eq!(page.abs(anchored).0, 0.0, "the fallback after the scroll");
 }
@@ -4624,7 +4624,7 @@ fn wpt_sticky_anchor_position_invalid() {
     page.layout();
     page.doc
         .dom
-        .scroll_to(container, terminus::Vector2D::new(0.0, 50.0));
+        .scroll_to(container, terminus::link::Vector2D::new(0.0, 50.0));
     assert_eq!(page.abs(sticky).1, 42.0);
 }
 
@@ -4763,7 +4763,7 @@ fn bounding_client_rect_includes_the_default_scroll_shift() {
     assert_eq!(page.abs(child).1, 80.0);
     page.doc
         .dom
-        .scroll_to(scroller, terminus::Vector2D::new(0.0, 20.0));
+        .scroll_to(scroller, terminus::link::Vector2D::new(0.0, 20.0));
     page.render();
     assert_eq!(page.abs(anchor).1, 30.0, "the anchor scrolled");
     assert_eq!(page.abs(anchored).1, 60.0, "the box follows it");

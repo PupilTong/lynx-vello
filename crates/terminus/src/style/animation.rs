@@ -1344,9 +1344,10 @@ mod tests {
     use stylo::dom::OpaqueNode;
     use stylo::servo::animation::{AnimationSetKey, AnimationState};
 
+    use crate::style::engine::StylesheetOrigin;
     use crate::test_common::Doc;
     use crate::tree::document::tests::device;
-    use crate::{Document, NodeId, StylesheetOrigin};
+    use crate::tree::document::{Document, NodeId};
 
     const SIDE_EFFECTS: &str = "
         page { display: flex; width: 800px; height: 600px; }

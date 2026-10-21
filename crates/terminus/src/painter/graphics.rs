@@ -21,15 +21,17 @@
 //! is the frame being produced for the next refresh, not one produced a
 //! pipeline-depth earlier.
 
+use euclid::default::Vector2D;
+use vello::peniko::ImageData;
+use vello::util::{RenderContext, RenderSurface};
+
 use super::{CANVAS, FrameSize, PainterError};
 use crate::render::blur::FilterTextures;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::render::gpu::read_texture;
 use crate::render::gpu::{AtlasResidency, render_params, renderer_options};
 use crate::render::vector_textures::VectorTextures;
-use crate::vello::peniko::ImageData;
-use crate::vello::util::{RenderContext, RenderSurface};
-use crate::{CommittedFrame, ScrollSlot, Vector2D, vello};
+use crate::visual::{CommittedFrame, ScrollSlot};
 
 /// The draw target an embedder lends a painter.
 ///

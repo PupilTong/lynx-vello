@@ -17,7 +17,7 @@
 //! parsing, and property-name resolution for the shorthand-expanding
 //! properties — is skipped.
 
-use terminus::{CssDeclaration, CssKeyframe, CssRule, NodeId, StylesheetOrigin};
+use terminus::link::{CssDeclaration, CssKeyframe, CssRule, NodeId, StylesheetOrigin};
 
 use crate::main::tree::LynxDocument;
 
@@ -149,7 +149,7 @@ pub(crate) fn add_style_sheet_text(document: &mut LynxDocument, css: &str) {
 /// The shadow-root counterpart of [`add_preparsed_style_sheet`]: the rules
 /// match only inside `shadow_root`'s tree (the host through `:host`), and the
 /// sheet's implicit `@scope` root is the host. An `@font-face` rule in the
-/// sheet is not loaded ([`terminus::Document::append_shadow_rules`]).
+/// sheet is not loaded ([`terminus::link::Document::append_shadow_rules`]).
 ///
 /// # Panics
 ///
@@ -405,7 +405,7 @@ mod tests {
         let host = document.create_element("view", ());
         document.insert_before(page, host, None);
         document.set_classes(host, "card");
-        let shadow = document.attach_shadow(host, terminus::ShadowRootMode::Open);
+        let shadow = document.attach_shadow(host, terminus::link::ShadowRootMode::Open);
         let inside = document.create_element("view", ());
         document.insert_before(shadow, inside, None);
         document.set_classes(inside, "box");
@@ -600,12 +600,12 @@ mod tests {
         let subject = element(&mut document, container, "subject");
         element(&mut document, container, "spacer");
         document.layout();
-        document.scroll_to(container, terminus::Vector2D::new(0.0, 300.0));
+        document.scroll_to(container, terminus::link::Vector2D::new(0.0, 300.0));
         document.advance_scroll_timelines(&[container]);
 
         let opacity = document
             .get(subject)
-            .and_then(terminus::Node::computed_style)
+            .and_then(terminus::link::Node::computed_style)
             .map(|style| *style.get_opacity());
         assert_eq!(opacity, Some(0.5));
     }

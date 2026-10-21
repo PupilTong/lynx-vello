@@ -59,13 +59,13 @@ use crate::layout::{
     DisplayMode, StyleView, box_parent, establishes_absolute_containing_block,
     establishes_fixed_containing_block, skips_contents,
 };
+use crate::scroll;
 use crate::scroll::initial_target::InitialTarget;
 use crate::scroll::{ScrollAxes, ScrollRequest, SnapAxisPositions, SnapPoint};
 use crate::style::curve_export::ExportedComposite;
-use crate::tree::document::{Document, DocumentLayoutState, NodeSlot, TreeArenas};
+use crate::tree::document::{Document, DocumentLayoutState, NodeId, NodeSlot, TreeArenas};
 use crate::tree::node::Node;
 use crate::tree::top_layer;
-use crate::{NodeId, scroll};
 
 /// Builds one frame's paint order into `buffers`, using and returning
 /// `scratch`.

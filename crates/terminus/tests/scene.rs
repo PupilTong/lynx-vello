@@ -26,7 +26,7 @@ impl Harness {
 
     fn stats(&mut self) -> (usize, u32, u32) {
         self.doc.dom.render();
-        let scene = self.doc.dom.scene(&terminus::NoImages);
+        let scene = self.doc.dom.scene(&terminus::link::NoImages);
         let encoding = scene.encoding();
         (
             encoding.draw_tags.len(),
@@ -102,7 +102,7 @@ fn text_runs_encode_glyphs() {
     );
     h.doc
         .dom
-        .register_fonts(terminus::FontBlob::from_static(AHEM));
+        .register_fonts(terminus::link::FontBlob::from_static(AHEM));
     let root = h.doc.root;
     let holder = h.doc.el_tag(root, "text", "box text");
     h.doc.text(holder, "Hello");
@@ -147,7 +147,7 @@ fn background_clip_text_sandwiches_the_layer() {
     with_text
         .doc
         .dom
-        .register_fonts(terminus::FontBlob::from_static(AHEM));
+        .register_fonts(terminus::link::FontBlob::from_static(AHEM));
     let root = with_text.doc.root;
     let holder = with_text.doc.el_tag(root, "text", "box text");
     with_text.doc.text(holder, "Hello");
@@ -163,7 +163,7 @@ fn background_clip_text_sandwiches_the_layer() {
     empty
         .doc
         .dom
-        .register_fonts(terminus::FontBlob::from_static(AHEM));
+        .register_fonts(terminus::link::FontBlob::from_static(AHEM));
     let root2 = empty.doc.root;
     empty.doc.el_tag(root2, "text", "box text");
     let (_, clips_empty, open2) = empty.stats();
@@ -235,7 +235,7 @@ fn text_decorations_propagate_through_nested_boxes() {
     plain
         .doc
         .dom
-        .register_fonts(terminus::FontBlob::from_static(AHEM));
+        .register_fonts(terminus::link::FontBlob::from_static(AHEM));
     let root = plain.doc.root;
     let outer = plain.doc.el(root, "box text");
     let inner = plain.doc.el_tag(outer, "text", "inner");
@@ -246,7 +246,7 @@ fn text_decorations_propagate_through_nested_boxes() {
     decorated
         .doc
         .dom
-        .register_fonts(terminus::FontBlob::from_static(AHEM));
+        .register_fonts(terminus::link::FontBlob::from_static(AHEM));
     let root2 = decorated.doc.root;
     let outer2 = decorated.doc.el(root2, "box text u");
     let inner2 = decorated.doc.el_tag(outer2, "text", "inner");
@@ -268,7 +268,7 @@ fn text_decorations_propagate_through_nested_boxes() {
     escaped
         .doc
         .dom
-        .register_fonts(terminus::FontBlob::from_static(AHEM));
+        .register_fonts(terminus::link::FontBlob::from_static(AHEM));
     let root3 = escaped.doc.root;
     let outer3 = escaped.doc.el_tag(root3, "text", "box text u");
     let inner3 = escaped.doc.el_tag(outer3, "text", "inner");

@@ -66,8 +66,8 @@ mod view;
 /// Normalized host input vocabulary. No document or hit-test result crosses
 /// this boundary.
 pub mod input {
-    pub use terminus::Point2D;
-    pub use terminus::input::{
+    pub use terminus::link::Point2D;
+    pub use terminus::link::input::{
         InputEvent, InputKind, KeyPhase, Modifiers, PointerId, PointerKind, PointerPhase,
     };
 }
@@ -77,8 +77,8 @@ pub mod input {
 /// [`EngineEvent::TextInputStateChanged`] reports.
 pub mod editing {
     /// The rectangle [`TextInputState`]'s geometry is in (viewport CSS px).
-    pub use terminus::Rect;
-    pub use terminus::editing::{
+    pub use terminus::link::Rect;
+    pub use terminus::link::editing::{
         Command, Direction, EnterKeyHint, Granularity, InputMode, InputType, TextInputState,
     };
 
@@ -117,7 +117,7 @@ pub use main::tree::PageConfig;
 pub use native_module::{ModuleCall, ModuleCallback, NativeModule};
 pub use paint::{Painter, PostedFrame};
 pub use style::{PreparsedDeclaration, PreparsedKeyframe, PreparsedRule, PreparsedStyleSheet};
-pub use terminus::{
+pub use terminus::link::{
     DocumentKind, FontBlob, FrameImages, ImageEvent, ImageInbox, ImageReports, ImageSizeHint,
     MAX_RENDERABLE_DIMENSION, MAX_STYLE_THREADS, NoImages, VectorDocument, is_renderable, vello,
 };

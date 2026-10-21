@@ -14,7 +14,7 @@ use std::fmt::Write as _;
 
 use common::{Doc, rgb};
 use euclid::default::Vector2D;
-use terminus::NodeId;
+use terminus::link::NodeId;
 
 fn styled(inline: &str) -> (Doc, NodeId) {
     let mut doc = Doc::new();

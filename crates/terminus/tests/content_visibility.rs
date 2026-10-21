@@ -22,8 +22,8 @@ use std::sync::{Arc, Mutex};
 
 use common::{Doc, device};
 use euclid::default::{Point2D, Vector2D};
-use terminus::event::{ElementEvent, EventDetail, EventPhase};
-use terminus::{CustomElement, Document, FontBlob, NodeId};
+use terminus::link::event::{ElementEvent, EventDetail, EventPhase};
+use terminus::link::{CustomElement, Document, FontBlob, NodeId};
 
 const AHEM: &[u8] = include_bytes!("../../seldon/tests/fixtures/Ahem.ttf");
 
@@ -176,7 +176,7 @@ impl Page {
     }
 }
 
-fn rect(dom: &terminus::Document<()>, id: NodeId) -> (f32, f32, f32, f32) {
+fn rect(dom: &terminus::link::Document<()>, id: NodeId) -> (f32, f32, f32, f32) {
     let layout = dom.rounded_layout(id).expect("node id is live");
     (
         layout.location.x,

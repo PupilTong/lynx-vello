@@ -11,7 +11,7 @@
 //! By the child's kind and computed display ([`crate::layout::style::display_mode`]),
 //! never by tag name. `crates/terminus` must not contain Lynx element vocabulary,
 //! and it does not need to: the host defines the Lynx text tags as Lynx text
-//! elements ([`crate::CustomElement::is_lynx_text`]), and the Lynx UA sheet
+//! elements ([`crate::tree::custom::CustomElement::is_lynx_text`]), and the Lynx UA sheet
 //! encodes the rest of the structure as display values, so the rules below
 //! reproduce it without naming `text`, `wrapper`, `raw-text` or `view`. The
 //! rows are checked in order.
@@ -333,7 +333,7 @@ fn as_items(collected: &[Collected], id_offset: usize) -> Vec<InlineItem<'_>> {
 /// The paragraph style, from the establishing element's CSS and attributes.
 ///
 /// An editing host's paragraph, or a text control editor's
-/// ([`crate::Document::set_has_line_if_empty`]), keeps one empty line of its
+/// ([`crate::tree::document::Document::set_has_line_if_empty`]), keeps one empty line of its
 /// strut when it has no content, so the element is one line tall and a caret
 /// has a line to sit on, as an HTML text control is never shorter than one
 /// line.
@@ -600,8 +600,11 @@ pub(crate) fn compute_text_block_layout<T>(
 
 #[cfg(test)]
 mod generated_content_tests {
+    use seldon::text::FontBlob;
+
     use super::*;
-    use crate::{Document, FontBlob, StylesheetOrigin};
+    use crate::style::engine::StylesheetOrigin;
+    use crate::tree::document::Document;
 
     fn document(css: &str) -> (Document<()>, NodeId) {
         let mut doc = Document::new(crate::tree::document::tests::device(), "page", ());
@@ -895,8 +898,10 @@ mod generated_content_tests {
 #[cfg(test)]
 mod range_box_tests {
     use euclid::default::{Point2D, Rect, Size2D};
+    use seldon::text::FontBlob;
 
-    use crate::{Document, FontBlob, StylesheetOrigin};
+    use crate::style::engine::StylesheetOrigin;
+    use crate::tree::document::Document;
 
     #[test]
     fn a_laid_out_paragraph_answers_its_range_boxes_in_content_box_coordinates() {
@@ -953,8 +958,10 @@ mod range_box_tests {
 #[cfg(test)]
 mod hit_tests {
     use euclid::default::Point2D;
+    use seldon::text::FontBlob;
 
-    use crate::{Document, FontBlob, NodeId, StylesheetOrigin};
+    use crate::style::engine::StylesheetOrigin;
+    use crate::tree::document::{Document, NodeId};
 
     /// A 10px Ahem paragraph, `text`, styled by `inline`, under the page.
     fn paragraph(inline: &str) -> (Document<()>, NodeId) {
@@ -1143,9 +1150,10 @@ mod empty_host_tests {
     #![allow(clippy::float_cmp)] // Ahem's em squares have exact metrics.
 
     use seldon::geometry::Size;
+    use seldon::text::FontBlob;
 
-    use crate::tree::document::NodeId;
-    use crate::{Document, FontBlob, StylesheetOrigin};
+    use crate::style::engine::StylesheetOrigin;
+    use crate::tree::document::{Document, NodeId};
 
     /// A page whose paragraphs are Ahem at 10px on 24px lines, with the
     /// block container an engine sheet writes, which an author sheet cannot:
@@ -1244,7 +1252,11 @@ mod empty_host_tests {
 
 #[cfg(test)]
 mod layout_report_tests {
-    use crate::{Document, FontBlob, NodeId, StylesheetOrigin, TextLineReport};
+    use seldon::text::FontBlob;
+
+    use crate::layout::TextLineReport;
+    use crate::style::engine::StylesheetOrigin;
+    use crate::tree::document::{Document, NodeId};
 
     /// A 300px column of a 20px Ahem `text` holding `content`, styled by
     /// `inline`, and a sibling `view` after it.

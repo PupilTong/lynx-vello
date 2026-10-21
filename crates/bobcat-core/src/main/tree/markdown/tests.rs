@@ -2,10 +2,10 @@
 
 use std::fmt::Write as _;
 
-use terminus::event::EventDetail;
-use terminus::input::PointerKind;
-use terminus::stylo::properties::PropertyId;
-use terminus::{MethodCall, MethodError, MethodOutcome, NodeId, Point2D};
+use terminus::link::event::EventDetail;
+use terminus::link::input::PointerKind;
+use terminus::link::stylo::properties::PropertyId;
+use terminus::link::{MethodCall, MethodError, MethodOutcome, NodeId, Point2D};
 
 use super::super::test_support::{child, style_of, with_component_events};
 use super::super::{ComponentDetail, ComponentEvent, ComponentEvents, LynxDocument, PageConfig};
@@ -27,7 +27,7 @@ fn markdown(style: &str) -> (LynxDocument, ComponentEvents, NodeId) {
 
 fn markdown_tag(tag: &str, style: &str) -> (LynxDocument, ComponentEvents, NodeId) {
     let (mut document, events) = with_component_events(PageConfig::default());
-    document.register_fonts(terminus::FontBlob::from_static(AHEM));
+    document.register_fonts(terminus::link::FontBlob::from_static(AHEM));
     let element = child(&mut document, tag, style);
     (document, events, element)
 }

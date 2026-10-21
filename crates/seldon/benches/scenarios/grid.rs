@@ -4,7 +4,7 @@
 
 use divan::counter::ItemsCount;
 use seldon::geometry::Size;
-use terminus::NodeId;
+use terminus::link::NodeId;
 
 use crate::support::{LayoutFixture, LeafContent};
 
@@ -210,7 +210,7 @@ impl DirtyNestedFixture {
         Self { fixture, dirty }
     }
 
-    fn run(&mut self) -> terminus::layout::Layout {
+    fn run(&mut self) -> terminus::link::layout::Layout {
         self.fixture.invalidate(self.dirty);
         self.fixture.run()
     }

@@ -8,7 +8,7 @@
 mod common;
 
 use common::Doc;
-use terminus::{NodeId, ShadowRootMode};
+use terminus::link::{NodeId, ShadowRootMode};
 
 /// The document node — `document.querySelector(...)`'s receiver, as opposed to
 /// [`Doc::root`], which is the document *element*.

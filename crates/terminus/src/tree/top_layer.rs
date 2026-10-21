@@ -406,8 +406,8 @@ impl<T: Sync> Document<T> {
 mod tests {
     #![allow(clippy::float_cmp)]
 
-    use crate::NodeId;
     use crate::test_common::Doc;
+    use crate::tree::document::NodeId;
 
     /// The parts of bobcat-core's UA sheet these tests read.
     const UA: &str = "
@@ -499,7 +499,7 @@ mod tests {
             "rgba(0, 0, 0, 0.1)"
         );
         doc.dom
-            .add_element_state(dialog, crate::ElementState::MODAL);
+            .add_element_state(dialog, stylo_dom::ElementState::MODAL);
         doc.flush();
         assert_eq!(doc.value(backdrop, "background-color"), "rgb(0, 0, 255)");
     }

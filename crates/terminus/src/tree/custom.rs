@@ -46,8 +46,8 @@
 //!
 //! - **`adoptedCallback` is unreachable, not unimplemented.** There is no `adoptNode` and no second
 //!   document: [`Document::new`] builds a private style engine per document and every
-//!   [`Node`](crate::Node) holds a backpointer to *its* arena set, so a node cannot change
-//!   documents.
+//!   [`Node`](crate::tree::node::Node) holds a backpointer to *its* arena set, so a node cannot
+//!   change documents.
 //! - **`connectedMoveCallback` has no move primitive.** `insert_before` detaches unconditionally,
 //!   so every move is disconnect-then-connect — which is exactly the fallback the standard
 //!   synthesizes for a definition that does not implement one.
@@ -290,11 +290,11 @@ pub trait CustomElement<T> {
     }
 
     /// Entries one of this element's intersection observers queued — the
-    /// observers created with an [`ElementHandler`](crate::ElementHandler)
+    /// observers created with an [`ElementHandler`](crate::visual::intersection::ElementHandler)
     /// naming this element.
     ///
     /// Not a lifecycle callback either: it is called by that handler's
-    /// [`IntersectionEventHandler::notify`](crate::IntersectionEventHandler::notify)
+    /// [`IntersectionEventHandler::notify`](crate::visual::intersection::IntersectionEventHandler::notify)
     /// from [`Document::notify_intersection_observers`], which the host runs
     /// from a delivery of its own, after the update that queued them, never
     /// inside a render or a commit. `observer` says which of the element's
@@ -314,8 +314,8 @@ pub trait CustomElement<T> {
         &self,
         document: &mut Document<T>,
         element: NodeId,
-        observer: crate::IntersectionObserverId,
-        entries: Vec<crate::IntersectionObserverEntry>,
+        observer: crate::visual::intersection::IntersectionObserverId,
+        entries: Vec<crate::visual::intersection::IntersectionObserverEntry>,
     ) {
         let _ = (document, element, observer, entries);
     }

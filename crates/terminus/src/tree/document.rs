@@ -58,8 +58,8 @@ pub(crate) struct PendingRelayout {
 /// zero.
 ///
 /// A document belongs to the thread that created it and cannot leave: it is
-/// not `Send`, twice over. Its [`Node`](crate::Node)s hold a raw backpointer
-/// into the arena set that owns them, and the [`Device`](crate::Device)
+/// not `Send`, twice over. Its [`Node`](crate::tree::node::Node)s hold a raw backpointer
+/// into the arena set that owns them, and the [`Device`](crate::style::device::Device)
 /// it is built with owns a Stylo `Box<dyn FontMetricsProvider>` that is `Sync`
 /// but not `Send`. An embedder therefore builds a document *on* its owning
 /// thread rather than handing one over — which is what `bobcat-main` does.
@@ -100,6 +100,9 @@ pub struct Document<T> {
     /// events not yet taken ([`crate::editing`]). A field, not a
     /// [`TreeArenas`] table: it names at most one element.
     pub(crate) editing: crate::editing::EditingState,
+    /// Where the events this document's own elements queue go
+    /// ([`crate::event::QueuedEventSink`]); `None` drops them.
+    pub(crate) queued_events: Option<std::rc::Rc<dyn crate::event::QueuedEventSink>>,
     pending_snapshots: SnapshotMap,
     relayout_roots: Vec<PendingRelayout>,
     relayout_root_ids: FxHashSet<NodeId>,
@@ -157,6 +160,7 @@ impl<T> Document<T> {
             resizes: crate::visual::resize::ResizeObservers::default(),
             listeners: crate::event::listeners::Listeners::default(),
             editing: crate::editing::EditingState::default(),
+            queued_events: None,
             pending_snapshots: SnapshotMap::new(),
             relayout_roots: Vec::new(),
             relayout_root_ids: FxHashSet::default(),
@@ -198,13 +202,13 @@ impl<T> Document<T> {
     /// are exactly the documents that flush on that thread. `Rc` is what says
     /// so: a pool cannot reach a second thread, and two documents on one
     /// thread cannot traverse at once, because the thread driving one
-    /// traversal is inside it. The aliasing hazard [`crate::StylePool`]
+    /// traversal is inside it. The aliasing hazard [`crate::style::pool::StylePool`]
     /// describes needs two concurrent traversals over one worker, and this
     /// leaves nowhere for the second to come from.
     pub fn set_style_pool(
         &mut self,
-        pool: std::rc::Rc<crate::StylePool>,
-    ) -> Option<std::rc::Rc<crate::StylePool>> {
+        pool: std::rc::Rc<crate::style::pool::StylePool>,
+    ) -> Option<std::rc::Rc<crate::style::pool::StylePool>> {
         self.style_pool.replace(pool)
     }
 
@@ -1219,7 +1223,7 @@ pub(crate) mod tests {
     use stylo::values::specified::font::{FONT_MEDIUM_PX, QueryFontMetricsFlags};
 
     use super::*;
-    use crate::standards_device;
+    use crate::style::device::standards_device;
 
     #[derive(Debug)]
     struct NoFonts;
@@ -1266,7 +1270,7 @@ pub(crate) mod tests {
         let mut document = Document::new(device(), "page", ());
         document.add_stylesheet(
             "page { width: 10px; height: 10px; background-color: red; }",
-            crate::StylesheetOrigin::Author,
+            crate::style::engine::StylesheetOrigin::Author,
         );
         assert!(document.needs_render());
         assert!(document.render());
@@ -1274,13 +1278,13 @@ pub(crate) mod tests {
         assert!(!document.render());
         assert!(
             !document
-                .scene(&crate::NoImages)
+                .scene(&crate::render::image::NoImages)
                 .encoding()
                 .draw_tags
                 .is_empty()
         );
 
-        document.apply_image_events(&[crate::ImageEvent::Failed {
+        document.apply_image_events(&[crate::render::image::ImageEvent::Failed {
             source: std::sync::Arc::from("app:///a.png"),
         }]);
         assert!(document.needs_render());
@@ -1363,7 +1367,7 @@ pub(crate) mod tests {
         let page = document.document_element().id();
         let host = document.create_element("view", ());
         document.append_child(page, host);
-        let shadow = document.attach_shadow(host, crate::ShadowRootMode::Open);
+        let shadow = document.attach_shadow(host, crate::tree::shadow::ShadowRootMode::Open);
         let container = document.create_element("view", ());
         let inside = document.create_element("view", ());
         document.append_child(shadow, container);
@@ -1389,7 +1393,7 @@ pub(crate) mod tests {
         document.append_child(page, carrier);
         document.append_child(carrier, run);
         document.append_child(carrier, host);
-        let shadow = document.attach_shadow(host, crate::ShadowRootMode::Open);
+        let shadow = document.attach_shadow(host, crate::tree::shadow::ShadowRootMode::Open);
         let inside = document.create_element("view", ());
         document.append_child(shadow, inside);
 
@@ -1577,7 +1581,10 @@ pub(crate) mod tests {
     #[test]
     fn detached_snapshot_survives_an_unrelated_connected_flush() {
         let mut document: Document<()> = Document::new(device(), "page", ());
-        document.add_stylesheet(".hot { color: red; }", crate::StylesheetOrigin::Author);
+        document.add_stylesheet(
+            ".hot { color: red; }",
+            crate::style::engine::StylesheetOrigin::Author,
+        );
         let root = document.document_element().id();
         let connected = document.create_element("view", ());
         let detached = document.create_element("view", ());

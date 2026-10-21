@@ -372,7 +372,7 @@ fn blur_edges_and_replaced_content_matches_reference() {
         let (width, height, rgba) = checker(8, 8);
         images.insert_rgba8(&source, width, height, rgba);
         doc.dom
-            .set_image_source(node, terminus::ImageRole::Source, Some(&source));
+            .set_image_source(node, terminus::link::ImageRole::Source, Some(&source));
     }
 
     for class in [

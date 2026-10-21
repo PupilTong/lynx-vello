@@ -9,7 +9,7 @@
 
 //! The offscreen pass behind CSS `filter: blur()` and `backdrop-filter`.
 //!
-//! A commit records each of them as a [`crate::FilterGroup`] — σ in device
+//! A commit records each of them as a [`crate::paint::compose::FilterGroup`] — σ in device
 //! px, the device rect to bake, and the program ops that make up what is
 //! baked. Nothing in that record is a GPU resource, so the commit stays
 //! device-free and the frame stays `Send + Sync`. [`FilterTextures`] is
@@ -28,7 +28,7 @@
 //! Chromium does). A backdrop's σ may be zero, because a colour-only
 //! list still has to produce its isolated copy of the backdrop. And a
 //! backdrop whose Backdrop Root is the document's root element
-//! ([`crate::FilterGroup::reads_canvas`]) bakes over the **canvas colour**
+//! ([`crate::paint::compose::FilterGroup::reads_canvas`]) bakes over the **canvas colour**
 //! rather than over transparent black: filter-effects-2's Backdrop Root
 //! Image of the root holds the canvas under everything the page painted,
 //! and the canvas is the base colour of the composite render, which no op in
@@ -55,12 +55,12 @@
 //!   is its own content, and the scroller's clip is one of the output clips the walker pushes
 //!   outside the group, so a scroll moves the texture under a still clip.
 //! - the **timeline reading**, when a curve moves or fades some op in the range relative to the
-//!   entry ([`crate::FilterGroup::samples_animations`]). A backdrop's range is a *prefix of the
-//!   frame*, so anything animating in front of the Backdrop Root is behind the element, and the
-//!   element's own transform curve moves it over that prefix; a `filter: blur()` group holds
-//!   content its own curves move or fade inside it. Its element's own curves change no baked pixel:
-//!   a transform moves the texture across the ancestors' clips outside the range, and an
-//!   opacity-only curve applies where the texture is drawn.
+//!   entry ([`crate::paint::compose::FilterGroup::samples_animations`]). A backdrop's range is a
+//!   *prefix of the frame*, so anything animating in front of the Backdrop Root is behind the
+//!   element, and the element's own transform curve moves it over that prefix; a `filter: blur()`
+//!   group holds content its own curves move or fade inside it. Its element's own curves change no
+//!   baked pixel: a transform moves the texture across the ancestors' clips outside the range, and
+//!   an opacity-only curve applies where the texture is drawn.
 //!
 //! An entry whose range holds a `PushBackdrop` takes on that backdrop's two
 //! conditions when the commit records it. Scanning the range's ops alone
@@ -84,9 +84,9 @@
 //! Per entry, in this order:
 //!
 //! 1. **Bake.** The entry's ops replay into a scratch [`vello::Scene`] with the entry's own space
-//!    factored out (see [`crate::CommittedFrame::bake_filter`]) and render into a `STORAGE_BINDING`
-//!    target over `Color::TRANSPARENT`, or over the canvas colour for an entry that [reads the
-//!    canvas](crate::FilterGroup::reads_canvas).
+//!    factored out (see [`crate::visual::CommittedFrame::bake_filter`]) and render into a
+//!    `STORAGE_BINDING` target over `Color::TRANSPARENT`, or over the canvas colour for an entry
+//!    that [reads the canvas](crate::paint::compose::FilterGroup::reads_canvas).
 //! 2. **Premultiply.** vello writes its target *unpremultiplied*, and filtering unpremultiplied
 //!    color pulls the color of fully transparent pixels into their neighbours — a white square on
 //!    white gets a dark halo. So the first pass is `vec4(rgb * a, a)`, and the whole rest of the
@@ -140,8 +140,8 @@ use crate::visual::{CommittedFrame, ScrollSlot};
 ///
 /// vello's image atlas stops doubling at 8192 px, so a texture longer than
 /// this on either axis can never be placed in it at any atlas size — the
-/// same bound [`crate::MAX_RENDERABLE_DIMENSION`] enforces for bitmaps.
-pub const MAX_FILTER_DIMENSION: u32 = 8192;
+/// same bound [`crate::render::image::MAX_RENDERABLE_DIMENSION`] enforces for bitmaps.
+pub(crate) const MAX_FILTER_DIMENSION: u32 = 8192;
 
 /// Largest total device-pixel area one frame's filter bakes may cover.
 ///
@@ -710,7 +710,7 @@ impl Passes<'_> {
 /// The device side of `filter: blur()`: one bake texture set per filter group
 /// of the frame being rendered, cached across frames. See the module doc.
 #[derive(Default)]
-pub struct FilterTextures {
+pub(crate) struct FilterTextures {
     pipelines: Option<Pipelines>,
     /// One entry per filter group of the cached frame, `None` for a group
     /// over the budget.
@@ -764,7 +764,7 @@ impl FilterTextures {
     ///
     /// `canvas` is the colour the composite render of this frame clears its
     /// target to — the `base_color` it hands [`render_params`]. An entry that
-    /// [reads the canvas](crate::FilterGroup::reads_canvas) bakes over it,
+    /// [reads the canvas](crate::paint::compose::FilterGroup::reads_canvas) bakes over it,
     /// so the two must be the same colour or the filtered backdrop is the
     /// backdrop of another canvas.
     ///
@@ -779,7 +779,7 @@ impl FilterTextures {
         reason = "one bake pre-step's full inputs: the renderer's three device handles, the \
                   residency it shares, and the frame with its three compose inputs"
     )]
-    pub fn prepare(
+    pub(crate) fn prepare(
         &mut self,
         renderer: &mut vello::Renderer,
         device: &wgpu::Device,
@@ -853,7 +853,7 @@ impl FilterTextures {
     /// The table [`Self::prepare`] last produced — what a composite render
     /// has to name so the atlas residency stays truthful about it.
     #[must_use]
-    pub fn images(&self) -> &[Option<ImageData>] {
+    pub(crate) fn images(&self) -> &[Option<ImageData>] {
         &self.images
     }
 
@@ -864,7 +864,7 @@ impl FilterTextures {
     /// document, so a retained key could otherwise match a different
     /// document's first frame. The textures stay allocated, since the next
     /// page's groups will want textures of their own.
-    pub fn forget(&mut self) {
+    pub(crate) fn forget(&mut self) {
         self.commit = None;
     }
 
@@ -882,7 +882,12 @@ impl FilterTextures {
     /// Fills `due` with the entries this prepare bakes, answering whether the
     /// cached bakes belong to `commit`: of another commit every entry bakes,
     /// of the cached one only those whose readings moved.
-    fn mark_due(&mut self, commit: u64, groups: &[crate::FilterGroup], readings: Readings) -> bool {
+    fn mark_due(
+        &mut self,
+        commit: u64,
+        groups: &[crate::paint::compose::FilterGroup],
+        readings: Readings,
+    ) -> bool {
         // The length checks are a net, not the contract: a commit id carries
         // no document identity (see the module doc), and a table of the wrong
         // length is the one such mix-up that is cheap to catch.
@@ -904,7 +909,7 @@ impl FilterTextures {
     }
 
     /// Decides which groups fit the budget, and the order to bake them in.
-    fn plan(&mut self, groups: &[crate::FilterGroup]) {
+    fn plan(&mut self, groups: &[crate::paint::compose::FilterGroup]) {
         let mut budget = MAX_FILTER_AREA;
         self.admitted.clear();
         for group in groups {
@@ -1050,7 +1055,7 @@ struct Readings {
 /// The readings one entry's bake depends on: the scroll generation when its
 /// range rides a scroll or sticky node its own space does not, or draws a
 /// backdrop that reads it, or when it [samples
-/// animations](crate::FilterGroup::samples_animations) and some composed
+/// animations](crate::paint::compose::FilterGroup::samples_animations) and some composed
 /// curve reads a scroll offset — whose source need not be on the range's
 /// paths at all; and the timeline reading when it samples animations; each
 /// zero otherwise.
@@ -1059,7 +1064,7 @@ struct Readings {
 /// which is also `0.0`'s pattern. The two therefore collide at the timeline's
 /// own origin, and the cost is one stale bake in the instant a page's first
 /// exported curve starts.
-fn reading(group: &crate::FilterGroup, readings: Readings) -> (u64, u64) {
+fn reading(group: &crate::paint::compose::FilterGroup, readings: Readings) -> (u64, u64) {
     let animates = group.samples_animations();
     let generation = if group.inner_chains || (animates && readings.scroll_curves) {
         readings.scroll_generation
@@ -1316,7 +1321,7 @@ mod tests {
     /// once, and another colour forgets it.
     #[test]
     fn a_canvas_change_forgets_the_bakes_and_the_same_canvas_keeps_them() {
-        use crate::vello::peniko::Color;
+        use vello::peniko::Color;
 
         let mut textures = FilterTextures::default();
         textures.adopt_canvas(Color::WHITE);
@@ -1354,8 +1359,9 @@ mod tests {
     /// nothing is moving behind, from re-baking it.
     #[test]
     fn an_entry_reads_only_what_its_pixels_depend_on() {
+        use vello::kurbo::{Affine, Rect};
+
         use crate::paint::compose::{Backdrop, FilterGroup};
-        use crate::vello::kurbo::{Affine, Rect};
 
         let rect = Rect::new(0.0, 0.0, 8.0, 8.0);
         let entry = |scrolls: bool, animates: bool| {
@@ -1423,8 +1429,9 @@ mod tests {
     /// one beside it alone; a new commit re-bakes both.
     #[test]
     fn a_sampling_entry_does_not_re_bake_a_still_one() {
+        use vello::kurbo::Rect;
+
         use crate::paint::compose::FilterGroup;
-        use crate::vello::kurbo::Rect;
 
         let rect = Rect::new(0.0, 0.0, 8.0, 8.0);
         let mut sampling = FilterGroup::new(1.0, rect, None);
@@ -1494,7 +1501,9 @@ mod tests {
             };
             assert!(backdrop.is_backdrop() && !blur.is_backdrop(), "{behind}");
             let expected = (behind == "list", behind == "card");
-            let reads = |entry: &crate::FilterGroup| (entry.inner_chains, entry.inner_animations);
+            let reads = |entry: &crate::paint::compose::FilterGroup| {
+                (entry.inner_chains, entry.inner_animations)
+            };
             assert_eq!(reads(backdrop), expected, "{behind}: the backdrop");
             assert_eq!(reads(blur), expected, "{behind}: the group drawing it");
 

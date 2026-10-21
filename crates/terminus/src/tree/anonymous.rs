@@ -874,12 +874,14 @@ fn overrides<T>(
 mod tests {
     #![allow(clippy::float_cmp)]
 
+    use euclid::default::Point2D;
+    use seldon::text::FontBlob;
+
     use crate::test_common::Doc;
     use crate::tree::document::NodeId;
     use crate::tree::node::Node;
     use crate::tree::shadow::ShadowRootMode;
     use crate::visual::PaintItemKind;
-    use crate::{FontBlob, Point2D};
 
     const AHEM: &[u8] = include_bytes!("../../../seldon/tests/fixtures/Ahem.ttf");
 

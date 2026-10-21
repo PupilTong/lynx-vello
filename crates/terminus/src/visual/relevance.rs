@@ -54,7 +54,7 @@
 //!
 //! # The pass loop
 //!
-//! [`Document::render`](crate::Document::render) claims one commit id, builds
+//! [`Document::render`](crate::tree::document::Document::render) claims one commit id, builds
 //! one frame, and asks this module. A pass that flips nothing is the end of
 //! the render — the overwhelmingly common case, and the reason an idle
 //! document still builds exactly once. A pass that flips something invalidates
@@ -90,10 +90,9 @@
 //! it. A node freed in between stays queued and resolves to nothing at
 //! dispatch — a [`NodeId`] is retired on free and never reissued.
 
-use crate::NodeId;
 use crate::layout::relevance::Relevance;
 use crate::paint::walker::CullPlan;
-use crate::tree::document::Document;
+use crate::tree::document::{Document, NodeId};
 use crate::visual::PaintOrder;
 
 /// How many times one render may build the paint order.

@@ -31,12 +31,12 @@
 use euclid::default::Vector2D;
 use smallvec::SmallVec;
 use stylo::properties::animated_properties::AnimationValueMap;
+use vello::kurbo::Affine;
 
 use super::anchored::{AnchoredSamples, AnchoredSlot};
 use super::reach::Reach;
 use super::{AnimationSamples, AnimationSlot, ClipNode, ScrollSlot, StickySamples};
 use crate::paint::compose::snap_offset;
-use crate::vello::kurbo::Affine;
 
 /// One node of a frame's space tree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -473,11 +473,11 @@ impl<'a> SpaceSamples<'a> {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use euclid::default::{Point2D, Rect, Size2D, Transform3D, Vector2D};
+    use vello::kurbo::{Affine, Point};
 
     use super::{Space, SpaceKind, SpaceSamples};
     use crate::scroll::{CaptureAxes, ScrollAxes};
     use crate::tree::document::DOCUMENT_ELEMENT_NODE_ID;
-    use crate::vello::kurbo::{Affine, Point};
     use crate::visual::{
         AnimationSample, AnimationSamples, ClipNode, CornerRadii, PaintItem, PaintItemKind,
         PaintOrder, ScrollSlot, SlotSamples, SnapSlot, StickySample, StickySamples,

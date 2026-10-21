@@ -20,6 +20,7 @@
 //! so every conversion goes value byte → UTF-16 unit → layout byte and back
 //! through the paragraph's own source map ([`OffsetMap`]).
 
+use euclid::default::{Point2D, Vector2D};
 use parley::{Cursor, Layout, Selection};
 use seldon::text::paragraph::OffsetMap;
 
@@ -27,8 +28,7 @@ use super::ByteSelection;
 use super::offsets::{byte_of_unit_floor, unit_of_byte};
 use crate::layout::paragraph::{establishes_paragraph, generated_content};
 use crate::layout::{StyleView, TextBrush};
-use crate::tree::document::NodeId;
-use crate::{Document, Point2D, Vector2D};
+use crate::tree::document::{Document, NodeId};
 
 /// The committed paragraph a host's text is laid out in, as the editor
 /// reads it.
@@ -148,11 +148,10 @@ impl<T> Document<T> {
         if establishes_paragraph(view.display_mode()) {
             return self.committed_paragraph(host).map(|_| host);
         }
-        let first_text = node
-            .child_ids()
-            .iter()
-            .copied()
-            .find(|&child| self.get(child).is_some_and(crate::Node::is_text_node))?;
+        let first_text = node.child_ids().iter().copied().find(|&child| {
+            self.get(child)
+                .is_some_and(crate::tree::node::Node::is_text_node)
+        })?;
         let anonymous = self.arenas().anonymous().box_of(first_text)?;
         if self.arenas().anonymous_container(anonymous) != Some(host) {
             return None;
