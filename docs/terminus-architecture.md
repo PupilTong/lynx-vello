@@ -291,16 +291,24 @@ styles then lays out with the single `LayoutTree` trait implemented on
 `TreeArenas<T>`. Plain `NodeId`s identify nodes, and every engine entry
 receives `&TreeArenas` alongside a separate `&mut DocumentLayoutState`; there
 is no `LayoutTreeView`, session, or store adapter. After each completed
-traversal, the exclusive damage harvest clones every visited element's primary
-`Arc<ComputedValues>` into a per-node layout-style snapshot; layout/paint
-borrow that snapshot with no `ElementData` borrow check or per-read `Arc` bump,
-and the `Arc` keeps the value alive, so reads are always memory-safe. The
-harvest descends wherever Stylo's dirty-descendants bits point *or* the
-element's own snapshot identity changed — the latter covers initially styled
-and freshly cleared (`display: none`) subtrees, which set no dirty bits. A
-debug assertion at every snapshot read reports divergence from Stylo's live
-primary style; release builds read the stale-but-owned snapshot instead of
-crashing. Public computed-style access still uses Stylo's guarded borrow.
+traversal, the exclusive damage harvest reads what the traversal decided about
+each restyled element's primary style. The traversal drops an element's old
+style as soon as it has restyled it, so the comparisons that need the old and
+the new style together — whether the paragraph limits, the box tree
+(`display`, `content`) or the element's containing-block role moved — are
+taken there, by the fork's `TElement::compute_primary_style_damage` hook, and
+filed in the embedder bits of Stylo's damage (`style::damage::verdict`); no
+engine reference keeps an old style alive past its restyle. Layout and paint
+borrow Stylo's live primary style (`Node::layout_computed_style`) through the
+fork's unguarded `ElementDataWrapper::get`, with no borrow guard or per-read
+`Arc` bump: every write to an element's style data happens through
+`&mut Document` or inside a flush phase, and a read inside a traversal is
+debug-asserted against. The harvest descends wherever Stylo's
+dirty-descendants bits point *or* the element's primary style was replaced,
+gained or lost — the latter two cover initially styled and freshly cleared
+(`display: none`) subtrees, which set no dirty bits, and a node bit records
+whether the element held a style when the harvest last visited it. Public
+computed-style access still uses Stylo's guarded borrow.
 Layout and text state use ordinary exclusive Rust borrows with no runtime
 borrow checking. Display dispatch routes flex/grid/linear/relative with
 `display: none` hiding and a leaf fallback, text nodes through concrete Parley

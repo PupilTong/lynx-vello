@@ -1,6 +1,74 @@
 //! Restyle damage — what a style change means for downstream layout/paint.
 
+use stylo::properties::ComputedValues;
 use stylo::servo::restyle_damage::ServoRestyleDamage;
+
+use crate::tree::node::Node;
+
+/// What one element's primary style change moved beyond Stylo's longhand
+/// damage, decided while the old style is still alive and filed in the
+/// embedder bits of the element's damage ([`ServoRestyleDamage::EMBEDDER`]).
+///
+/// The traversal drops an element's old style as soon as it has restyled
+/// it, so the comparisons that need both styles are taken there
+/// ([`primary_style_verdicts`], Stylo's
+/// `TElement::compute_primary_style_damage`) and the damage harvest reads
+/// the answers ([`crate::tree::node::Node::take_style_refresh`]) — no
+/// reference to the old style outlives the traversal.
+pub(crate) mod verdict {
+    use stylo::servo::restyle_damage::ServoRestyleDamage;
+
+    /// The primary style is a different `Arc` than before. Set for every
+    /// replaced primary style, so this alone is what makes an element
+    /// restyled to the harvest.
+    pub(crate) const REPLACED: ServoRestyleDamage = ServoRestyleDamage::from_bits_retain(1 << 8);
+    /// The paragraph's effective custom-property limits changed: layout
+    /// inputs outside Stylo's longhand comparison, which gives a custom
+    /// property change repaint damage only.
+    pub(crate) const PARAGRAPH_LIMITS: ServoRestyleDamage =
+        ServoRestyleDamage::from_bits_retain(1 << 9);
+    /// `display` or `content` changed, so the boxes the element generates
+    /// may have changed shape.
+    pub(crate) const BOX_TREE: ServoRestyleDamage = ServoRestyleDamage::from_bits_retain(1 << 10);
+    /// The element started or stopped establishing the containing block of
+    /// its absolute or fixed descendants.
+    pub(crate) const CONTAINING_BLOCK: ServoRestyleDamage =
+        ServoRestyleDamage::from_bits_retain(1 << 11);
+}
+
+/// The [`verdict`] bits for `node`'s primary style changing from `old` to a
+/// different `new`. Called on the traversal's thread, with the element's own
+/// style data borrowed for its restyle: it reads the two styles and node
+/// facts no restyle moves, never a style through the node.
+pub(crate) fn primary_style_verdicts<T>(
+    node: &Node<T>,
+    old: &ComputedValues,
+    new: &ComputedValues,
+) -> ServoRestyleDamage {
+    let mut verdicts = verdict::REPLACED;
+    if crate::layout::paragraph_limits_changed(old, new) {
+        verdicts |= verdict::PARAGRAPH_LIMITS;
+    }
+    if *old.get_display() != *new.get_display()
+        || old.get_counters().content != new.get_counters().content
+    {
+        verdicts |= verdict::BOX_TREE;
+    }
+    // Both roles read the element too (its root-ness, its transform
+    // animation bit, its content-visibility relevance, its top-layer
+    // membership), none of which a restyle moves, so evaluating each style
+    // against the same node isolates what the style change did.
+    let role = |style: &ComputedValues| {
+        (
+            crate::layout::establishes_fixed_containing_block(node, style),
+            crate::layout::establishes_absolute_containing_block(node, style),
+        )
+    };
+    if role(old) != role(new) {
+        verdicts |= verdict::CONTAINING_BLOCK;
+    }
+    verdicts
+}
 
 /// The restyle damage produced for one node by a flush.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -9,10 +77,12 @@ pub(crate) struct StyleDamage(ServoRestyleDamage);
 impl StyleDamage {
     /// Merge Stylo damage with the layout inputs read outside its longhands.
     /// Both normal restyles and animation ticks use the same classification.
+    /// The [`verdict`] bits are not damage and are dropped.
     pub(crate) fn from_style_change(
         mut damage: ServoRestyleDamage,
         paragraph_limits_changed: bool,
     ) -> Option<Self> {
+        damage.remove(ServoRestyleDamage::EMBEDDER);
         if paragraph_limits_changed {
             damage.insert(ServoRestyleDamage::RELAYOUT);
         }

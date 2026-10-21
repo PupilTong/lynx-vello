@@ -207,8 +207,8 @@ with `<integer>` syntax and `inherits: false`; the initial values (`0` and `-1`)
 mean unlimited. `terminus::link::layout::StyleView` reads their computed values through
 `LynxTextStyle`, and `BlockStyle::from_container_style` consumes those inputs
 for the establishing element's paragraph. Normal restyles and animation ticks
-compare the effective limits when refreshing the layout style snapshot and
-merge changes into layout damage, clearing box measurements through the existing
+compare the effective limits while the traversal still holds the old style
+and merge changes into layout damage, clearing box measurements through the existing
 invalidation path. Attribute-derived declarations use the generic
 `Document::set_presentational_hint` seam and a separate optional declaration
 block at Stylo's `CascadeOrigin::PresHints`. Updates schedule matching even

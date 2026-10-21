@@ -11,6 +11,7 @@ use seldon::tree::{LayoutInput, LayoutOutput};
 use stylo::LocalName;
 use stylo::dom::OpaqueNode;
 use stylo::selector_parser::SnapshotMap;
+use stylo::servo::restyle_damage::ServoRestyleDamage;
 use stylo::stylesheets::UrlExtraData;
 
 use crate::style::damage::StyleDamage;
@@ -1078,16 +1079,18 @@ impl<T> Document<T> {
                     let Some(node) = self.tree.get_mut(current) else {
                         continue;
                     };
-                    let damage = node.stylo_data_mut().map(|wrapper| {
-                        let mut data = wrapper.borrow_mut();
-                        let damage = data.damage;
-                        data.clear_restyle_state();
-                        damage
-                    });
+                    let damage =
+                        node.stylo_data_mut()
+                            .map_or_else(ServoRestyleDamage::empty, |wrapper| {
+                                let mut data = wrapper.borrow_mut();
+                                let damage = data.damage;
+                                data.clear_restyle_state();
+                                damage
+                            });
                     // Reads the primary style after the clear above, which is
                     // sound only because clearing restyle state touches the
                     // hint, the damage, and the flags — never `styles`.
-                    let refresh = node.refresh_layout_style();
+                    let refresh = node.take_style_refresh(damage);
                     // `Some(declares)` for a restyled element: whether its new
                     // style declares anything the anchor registry indexes.
                     let anchor_restyle = refresh.changed.then(|| {
@@ -1099,10 +1102,8 @@ impl<T> Document<T> {
                             .timelines
                             .restyled(current, node.layout_computed_style());
                     }
-                    let harvested = StyleDamage::from_style_change(
-                        damage.unwrap_or_default(),
-                        refresh.paragraph_limits_changed,
-                    );
+                    let harvested =
+                        StyleDamage::from_style_change(damage, refresh.paragraph_limits_changed);
                     let dirty = node.styling.dirty_descendants.get_mut();
                     (
                         harvested,

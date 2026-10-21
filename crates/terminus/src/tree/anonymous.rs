@@ -337,19 +337,16 @@ fn brings_loose_text<T>(tree: &TreeArenas<T>, element: NodeId) -> bool {
     let Some(style) = node.layout_computed_style() else {
         return false;
     };
-    // The children's styles are read live: the harvest that calls this
-    // refreshes an element's layout snapshot before its children's.
+    // The harvest that calls this has not visited the children yet; the
+    // styles it reads are already their post-flush ones.
     let holds_text = || {
         node.flat_children().iter().any(|&child| {
             let child = tree.at(child);
             child.is_text_node()
                 || (child.is_element()
-                    && child.borrow_computed_style().is_none_or(|data| {
-                        data.styles
-                            .primary
-                            .as_ref()
-                            .is_none_or(|style| style.get_display().is_contents())
-                    }))
+                    && child
+                        .layout_computed_style()
+                        .is_none_or(|style| style.get_display().is_contents()))
         })
     };
     if style.get_display().is_contents() {
@@ -741,11 +738,10 @@ impl<T: Sync> Document<T> {
         previous_style: Option<&(Arc<ComputedValues>, Arc<ComputedValues>)>,
         moved: bool,
     ) -> Placed {
-        let container_style = Arc::clone(
-            self.live(container)
-                .layout_computed_style_arc()
-                .expect("an item container has a style"),
-        );
+        let container_style = self
+            .live(container)
+            .computed_style()
+            .expect("an item container has a style");
         let style = match previous_style {
             Some((parent, style)) if Arc::ptr_eq(parent, &container_style) => Arc::clone(style),
             _ => self.anonymous_block_style(&container_style),
@@ -781,9 +777,9 @@ impl<T: Sync> Document<T> {
                 node.children.clone_from(&sequence.sources);
             }
             // `Some(relayout)` when the style moved, `None` when it did not.
-            let damage = match node.layout_computed_style_arc() {
+            let damage = match node.layout_computed_style() {
                 None => Some(true),
-                Some(old) if Arc::ptr_eq(old, &style) => None,
+                Some(old) if std::ptr::eq(old, style.as_ref()) => None,
                 Some(old) => StyleDamage::from_style_change(
                     ServoRestyleDamage::compute_style_difference::<&Node<T>>(old, &style).damage,
                     false,

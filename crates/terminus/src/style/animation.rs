@@ -121,6 +121,7 @@ use stylo::servo::animation::{
     Animation, AnimationSetKey, AnimationState, DocumentAnimationSet, ElementAnimationSet,
     Transition,
 };
+use stylo::servo::restyle_damage::ServoRestyleDamage;
 use stylo::shared_lock::StylesheetGuards;
 use stylo::traversal_flags::TraversalFlags;
 use stylo_atoms::Atom;
@@ -1248,24 +1249,24 @@ impl<T: Sync> Document<T> {
                     let Some(node) = self.arenas_mut().get_mut(current) else {
                         continue;
                     };
-                    let damage = node.stylo_data_mut().map(|wrapper| {
-                        let mut data = wrapper.borrow_mut();
-                        let damage = data.damage;
-                        data.clear_restyle_flags_and_damage();
-                        damage
-                    });
+                    let damage =
+                        node.stylo_data_mut()
+                            .map_or_else(ServoRestyleDamage::empty, |wrapper| {
+                                let mut data = wrapper.borrow_mut();
+                                let damage = data.damage;
+                                data.clear_restyle_flags_and_damage();
+                                damage
+                            });
                     // Reads the primary style after the clear above, which is
                     // sound only because clearing restyle state touches the
                     // hint, the damage, and the flags — never `styles`.
-                    let refresh = node.refresh_layout_style();
+                    let refresh = node.take_style_refresh(damage);
                     let anchor_restyle = refresh.changed.then(|| {
                         node.layout_computed_style()
                             .is_some_and(crate::layout::anchors::declares_anchor_state)
                     });
-                    let harvested = StyleDamage::from_style_change(
-                        damage.unwrap_or_default(),
-                        refresh.paragraph_limits_changed,
-                    );
+                    let harvested =
+                        StyleDamage::from_style_change(damage, refresh.paragraph_limits_changed);
                     (
                         harvested,
                         refresh,
