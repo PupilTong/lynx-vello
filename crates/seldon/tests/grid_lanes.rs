@@ -1192,6 +1192,45 @@ fn rtl_mirrors_the_grid_axis_tracks() {
     assert_point(tree.layout(second).location, Point::new(0.0, 0.0));
 }
 
+/// A measured grid-lanes container reads its items' first baselines only
+/// when its own is read (`LayoutInput::reads_first_baseline`): a `linear`
+/// item then gives its fixed-size box's 7px, which otherwise is never
+/// measured.
+#[test]
+fn a_measured_container_asks_its_items_for_the_first_baseline_it_is_asked_for() {
+    let run = |reads_first_baseline| {
+        let mut tree = TestTree::default();
+        let inner = tree.push_leaf(
+            TestStyle {
+                size: Size::new(size_px(20.0), size_px(20.0)),
+                ..TestStyle::default()
+            },
+            Size::new(20.0, 20.0),
+            Some(7.0),
+        );
+        let column = tree.push_linear(TestStyle::default(), vec![inner]);
+        let root = tree.push_grid_lanes(lanes_style(&[px(50.0)], &[]), vec![column]);
+        let output = tree.compute_layout(
+            root,
+            LayoutInput::measure(
+                Size::NONE,
+                Size::NONE,
+                Size::MAX_CONTENT,
+                RequestedAxis::Both,
+            )
+            .reading_first_baseline(reads_first_baseline),
+        );
+        (output, tree.measure_inputs(inner).len())
+    };
+
+    let (read, read_probes) = run(true);
+    assert_eq!(read.first_baselines.y, Some(7.0));
+    assert_eq!(read_probes, 1);
+    let (unread, unread_probes) = run(false);
+    assert_eq!(unread.size, read.size);
+    assert_eq!(unread_probes, 0);
+}
+
 #[test]
 fn the_first_baseline_comes_from_the_items_that_open_each_track() {
     let mut tree = TestTree::default();

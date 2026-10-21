@@ -341,6 +341,14 @@ impl<T> CoreStyle for StyleView<'_, T> {
     fn contain_intrinsic_height(&self) -> ContainIntrinsicSize {
         committed_box::contain_intrinsic_height(self.node, self.values())
     }
+
+    /// A box that establishes a paragraph reads its parent's basis beyond
+    /// its own box model: as the width its lines fall back to, and as the
+    /// basis of its atoms and inline boxes (`inline_flow`, `text_block`).
+    fn reads_percentage_basis(&self) -> bool {
+        super::paragraph::establishes_paragraph(self.display_mode())
+            || seldon::style::box_model_reads_percentage_basis(self)
+    }
 }
 
 // Every algorithm accessor reads computed values, including registered

@@ -71,6 +71,9 @@ const BASELINES_INCOMPLETE: u32 = 1 << 19;
 /// lookup that carries it, unless it is a commit, whose last baseline is
 /// exact whatever the request (see [`packed_inputs_match`]).
 const READS_LAST_BASELINE: u32 = 1 << 20;
+/// The input's [`LayoutInput::reads_first_baseline`] request, kept and
+/// matched exactly as [`READS_LAST_BASELINE`] is.
+const READS_FIRST_BASELINE: u32 = 1 << 21;
 const INPUT_FLAGS: u32 = EXACT_INPUT_FLAGS
     | (AVAILABLE_TAG_MASK << AVAILABLE_WIDTH_SHIFT)
     | (AVAILABLE_TAG_MASK << AVAILABLE_HEIGHT_SHIFT)
@@ -156,6 +159,9 @@ impl PackedLayoutInput {
         if input.reads_last_baseline {
             flags |= READS_LAST_BASELINE;
         }
+        if input.reads_first_baseline {
+            flags |= READS_FIRST_BASELINE;
+        }
 
         Self { values, flags }
     }
@@ -197,6 +203,7 @@ impl PackedLayoutInput {
                 unpack_available_space(self.values[5], self.flags, AVAILABLE_HEIGHT_SHIFT),
             ),
             reads_last_baseline: self.flags & READS_LAST_BASELINE != 0,
+            reads_first_baseline: self.flags & READS_FIRST_BASELINE != 0,
         }
     }
 
@@ -464,14 +471,13 @@ fn packed_inputs_match(stored: PackedLayoutInput, requested: PackedLayoutInput) 
     } else {
         stored_goal == requested_goal
     };
-    // A request for an exact last baseline is answered by a commit or by a
-    // measurement that was itself asked for one; a precise answer may serve
-    // an imprecise request, never the reverse.
-    let last_baseline_exact = stored_goal == GOAL_COMMIT
-        || stored.flags & READS_LAST_BASELINE != 0
-        || requested.flags & READS_LAST_BASELINE == 0;
+    // A request for an exact last (or first) baseline is answered by a
+    // commit or by a measurement that was itself asked for one; a precise
+    // answer may serve an imprecise request, never the reverse.
+    let baselines_exact = stored_goal == GOAL_COMMIT
+        || requested.flags & !stored.flags & (READS_LAST_BASELINE | READS_FIRST_BASELINE) == 0;
     if !goal_matches
-        || !last_baseline_exact
+        || !baselines_exact
         || (stored.flags ^ requested.flags) & EXACT_INPUT_FLAGS != 0
         || stored.values[0] != requested.values[0]
         || stored.values[1] != requested.values[1]
@@ -559,10 +565,11 @@ fn inputs_match(stored: LayoutInput, requested: LayoutInput) -> bool {
         (LayoutGoal::Measure(stored), LayoutGoal::Measure(requested)) => stored == requested,
         _ => false,
     };
-    let last_baseline_exact =
-        stored.goal.commits() || stored.reads_last_baseline || !requested.reads_last_baseline;
+    let baselines_exact = stored.goal.commits()
+        || ((stored.reads_last_baseline || !requested.reads_last_baseline)
+            && (stored.reads_first_baseline || !requested.reads_first_baseline));
     if !goal_matches
-        || !last_baseline_exact
+        || !baselines_exact
         || stored.sizing_mode != requested.sizing_mode
         || stored.known_dimensions != requested.known_dimensions
         || stored.definite_dimensions != requested.definite_dimensions
@@ -675,6 +682,7 @@ mod tests {
         assert_available_bits_eq(left.available_space.width, right.available_space.width);
         assert_available_bits_eq(left.available_space.height, right.available_space.height);
         assert_eq!(left.reads_last_baseline, right.reads_last_baseline);
+        assert_eq!(left.reads_first_baseline, right.reads_first_baseline);
     }
 
     fn assert_output_bits_eq(left: LayoutOutput, right: LayoutOutput) {
@@ -750,6 +758,7 @@ mod tests {
                                     parent_size: Size::new(option(2), option(3)),
                                     available_space: Size::new(available_width, available_height),
                                     reads_last_baseline: false,
+                                    reads_first_baseline: false,
                                 };
                                 assert_input_bits_eq(input, PackedLayoutInput::new(input).unpack());
                             }
@@ -871,6 +880,57 @@ mod tests {
         assert_eq!(cache.get(both.reading_last_baseline(true)), Some(exact));
     }
 
+    /// The first-baseline request follows the last-baseline one's rule, and
+    /// the two are independent: neither answers for the other.
+    #[test]
+    fn a_first_baseline_request_is_answered_only_by_an_exact_entry() {
+        let plain = measurement(Size::NONE, Size::MAX_CONTENT);
+        let requested = plain.reading_first_baseline(true);
+        let last = plain.reading_last_baseline(true);
+        assert_input_bits_eq(requested, PackedLayoutInput::new(requested).unpack());
+        assert!(PackedLayoutInput::new(plain).key_eq(PackedLayoutInput::new(requested)));
+        let synthesized = LayoutOutput::new(Size::new(20.0, 30.0), Size::new(20.0, 30.0))
+            .with_first_baselines(Point::new(None, Some(30.0)));
+        let exact = synthesized.with_first_baselines(Point::new(None, Some(25.0)));
+
+        let mut cache = Cache::new();
+        cache.store(plain, synthesized);
+        assert_eq!(cache.get(plain), Some(synthesized));
+        assert_eq!(cache.get(requested), None);
+        cache.store(last, synthesized);
+        assert_eq!(cache.get(requested), None, "a last-baseline entry");
+        for (left, right) in [
+            (plain, requested),
+            (requested, plain),
+            (last, requested),
+            (requested, last),
+        ] {
+            assert_packed_match_agrees_with_oracle(left, right);
+        }
+
+        cache.store(requested, exact);
+        assert_eq!(cache.measurements.len(), 1);
+        assert_eq!(cache.get(requested), Some(exact));
+        assert_eq!(cache.get(plain), Some(exact));
+        assert_eq!(cache.get(last), None, "a first-baseline entry");
+
+        let committed = LayoutInput::commit(
+            Size::NONE,
+            Size::new(Some(320.0), Some(240.0)),
+            Size::MAX_CONTENT,
+            Size::new(false, false),
+        );
+        let mut cache = Cache::new();
+        cache.store(committed, exact);
+        let both = LayoutInput::measure(
+            Size::NONE,
+            Size::new(Some(320.0), Some(240.0)),
+            Size::MAX_CONTENT,
+            RequestedAxis::Both,
+        );
+        assert_eq!(cache.get(both.reading_first_baseline(true)), Some(exact));
+    }
+
     #[cfg(target_pointer_width = "64")]
     #[test]
     fn last_baselines_cost_the_cache_no_bytes() {
@@ -928,6 +988,7 @@ mod tests {
                                                         AvailableSpace::MaxContent,
                                                     ),
                                                     reads_last_baseline: false,
+                                                    reads_first_baseline: false,
                                                 };
                                                 let requested = LayoutInput {
                                                     goal: requested_goal,
@@ -946,6 +1007,7 @@ mod tests {
                                                         AvailableSpace::MaxContent,
                                                     ),
                                                     reads_last_baseline: false,
+                                                    reads_first_baseline: false,
                                                 };
                                                 assert_packed_match_agrees_with_oracle(
                                                     stored, requested,

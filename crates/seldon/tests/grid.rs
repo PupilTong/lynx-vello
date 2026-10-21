@@ -735,6 +735,101 @@ fn baseline_group_aligns_items_and_sets_the_container_first_baseline() {
     assert_eq!(output.first_baselines.y, Some(15.0));
 }
 
+/// A `linear` column of one fixed-size box, whose first baseline is that
+/// box's 7px: given only when its caller reads it
+/// (`LayoutInput::reads_first_baseline`), and synthesized from its own 20px
+/// bottom edge otherwise.
+fn linear_column_with_baseline(tree: &mut TestTree) -> (TestId, TestId) {
+    let inner = fixed_leaf(tree, 20.0, 20.0);
+    tree.set_first_baseline(inner, 7.0);
+    (
+        tree.push_linear(support::TestStyle::default(), vec![inner]),
+        inner,
+    )
+}
+
+#[test]
+fn a_baseline_group_sizes_its_row_from_a_linear_item_s_own_baseline() {
+    let mut tree = TestTree::default();
+    let first = fixed_leaf(&mut tree, 20.0, 20.0);
+    tree.set_first_baseline(first, 15.0);
+    let (column, _) = linear_column_with_baseline(&mut tree);
+    let mut style = grid_style(&[px(50.0), px(50.0)], &[]);
+    style.align_items = ItemPlacement(AlignFlags::BASELINE);
+    style.justify_items = justify_items(AlignFlags::START);
+    let root = tree.push_grid(style, vec![first, column]);
+
+    let output = support::perform_layout(
+        &tree,
+        root,
+        Size::new(Some(100.0), None),
+        Size::new(AvailableSpace::Definite(100.0), AvailableSpace::MaxContent),
+    );
+
+    // The shared baseline is the first item's 15px; the column's 7px
+    // baseline sits on it, and its 13px below that size the auto row.
+    assert_close(tree.layout(first).location.y, 0.0);
+    assert_close(tree.layout(column).location.y, 8.0);
+    assert_close(output.size.height, 28.0);
+    assert_eq!(output.first_baselines.y, Some(15.0));
+}
+
+#[test]
+fn a_measured_grid_aligns_a_baseline_group_by_a_linear_item_s_own_baseline() {
+    let mut tree = TestTree::default();
+    let first = fixed_leaf(&mut tree, 20.0, 20.0);
+    tree.set_first_baseline(first, 15.0);
+    let (column, _) = linear_column_with_baseline(&mut tree);
+    // A 10px row the items overflow: their aligned positions are what the
+    // container's scrollable extent reaches.
+    let mut style = grid_style(&[px(50.0), px(50.0)], &[px(10.0)]);
+    style.align_items = ItemPlacement(AlignFlags::BASELINE);
+    style.justify_items = justify_items(AlignFlags::START);
+    let root = tree.push_grid(style, vec![first, column]);
+
+    let output = tree.compute_layout(
+        root,
+        LayoutInput::measure(
+            Size::NONE,
+            Size::NONE,
+            Size::MAX_CONTENT,
+            RequestedAxis::Both,
+        ),
+    );
+
+    // The column's 7px baseline sits on the first item's 15px: it spans
+    // 8–28px.
+    assert_close(output.content_size.height, 28.0);
+}
+
+#[test]
+fn a_measured_grid_asks_its_items_for_the_first_baseline_it_is_asked_for() {
+    let run = |reads_first_baseline| {
+        let mut tree = TestTree::default();
+        let (column, inner) = linear_column_with_baseline(&mut tree);
+        let root = tree.push_grid(grid_style(&[px(50.0)], &[]), vec![column]);
+        let output = tree.compute_layout(
+            root,
+            LayoutInput::measure(
+                Size::NONE,
+                Size::NONE,
+                Size::MAX_CONTENT,
+                RequestedAxis::Both,
+            )
+            .reading_first_baseline(reads_first_baseline),
+        );
+        (output, tree.measure_call_count(inner))
+    };
+
+    let (read, read_probes) = run(true);
+    assert_eq!(read.first_baselines.y, Some(7.0));
+    assert_eq!(read_probes, 1);
+    // Unread, the column's fixed-size box is never measured for it.
+    let (unread, unread_probes) = run(false);
+    assert_eq!(unread.size, read.size);
+    assert_eq!(unread_probes, 0);
+}
+
 #[test]
 fn block_axis_auto_margin_excludes_an_item_from_baseline_sharing() {
     let mut tree = TestTree::default();

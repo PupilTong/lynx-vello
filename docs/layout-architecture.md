@@ -401,6 +401,29 @@ field rather than a payload of `LayoutGoal::Measure`, which the next paragraph
 would otherwise ask for, because it is harmless on a commit (exact anyway) and
 the variant's shape is matched at every measurement site.
 
+**`reads_first_baseline` is the same kind of request, for the first
+baseline.** A caller sets it when it reads the box's first baseline from a
+measurement, and passes it on only to the items its own requested first
+baseline is read from. A flex container's cross-size probe asks a
+first-baseline group member, and, when its own measurement was asked, the item
+its first baseline is exported from; a grid row's baseline contributions ask
+its `align-self: baseline` items in the row's track sizing; a grid measurement
+pass asks a first-baseline group member, and every item when its own
+measurement was asked (any of them may give the container's baseline); a
+grid-lanes measurement pass, which aligns by no baseline, asks every item only
+when its own measurement was asked; a linear container asks only under its own
+request, and then only the items its first baseline is read from — every item
+of a row, the first of a column; and the `terminus` host's inline-level atoms
+always ask, since a line box reads every atom's baseline. It changes one thing: a linear container's measurement
+probes a fixed-size item (both sizes known without its content) only when the
+request asks for the baseline that probe would supply; without it the item
+keeps its known size and the container reports a first baseline synthesized
+from that item's border box, which no caller reads. A commit lays every item
+out and reads the committed baselines, so it is exact either way. The cache
+keeps it beside the last-baseline request, in bit 21
+(`READS_FIRST_BASELINE`), under the same rule: an entry answers a request
+for either baseline only if it is a commit or was computed with that request.
+
 **`LayoutInput` stays one type, and the tree stays one trait.** The style
 surface splits per algorithm and the wire struct does not, for a structural
 reason rather than a matter of taste: a style belongs to one node whose own
@@ -1143,7 +1166,14 @@ the painting — layout's job is to never be the frame's bottleneck.
   definiteness independently from decided geometry, and `parent_size` is the
   percentage basis. All change results, so dropping any of them from the key
   would alias distinct layouts; matching may coalesce entries only under
-  provable equivalences (documented in the `cache` module). The `Commit` goal's
+  provable equivalences (documented in the `cache` module). The one
+  equivalence decided outside the cache is the basis itself:
+  `compute_cached_layout` lays a box whose layout reads no percentage basis
+  (`CoreStyle::reads_percentage_basis` — by default a percentage or
+  anchor-relative size, min/max size, margin or padding; `terminus` adds
+  every paragraph-establishing box, whose lines and atoms read the basis) out
+  against `parent_size: None`, so one entry answers every basis a parent
+  hands it instead of one entry per basis. The `Commit` goal's
   `content_independent` payload is the one field left out: it changes no
   result, so it is packed into the committed entry outside the key bits — two
   commits that differ only in it answer each other — and reads back whole

@@ -780,7 +780,8 @@ fn size_atoms<T>(
                     containing,
                     space,
                     seldon::tree::RequestedAxis::Both,
-                ),
+                )
+                .reading_first_baseline(true),
             )
         };
         if let Some((_, store)) = context_and_store(state, element)
@@ -1646,6 +1647,31 @@ mod tests {
             panic!("one line expected")
         };
         assert_eq!((line.height, line.baseline), (27.0, 25.0));
+        let placed = doc.rounded_layout(view).expect("placed");
+        assert_eq!((placed.location.x, placed.location.y), (20.0, 0.0));
+    }
+
+    #[test]
+    fn a_measured_line_reads_a_linear_atom_s_first_baseline() {
+        // The `linear` atom's baseline is its first item's, the 8px of the
+        // fixed-size block's one Ahem line, not one synthesized from its
+        // 20px bottom edge: it reaches 8px above the line's baseline and
+        // 12px below. The page measures `p` before committing it, so its
+        // size is the measured line's.
+        let (mut doc, p) = flow_page(
+            300.0,
+            "view { display: linear; } b { display: block; width: 20px; height: 20px; }",
+        );
+        text(&mut doc, p, "aa");
+        let view = element(&mut doc, p, "view");
+        let block = element(&mut doc, view, "b");
+        text(&mut doc, block, "a");
+        doc.layout();
+        let [line] = doc.inline_flow(p).expect("a flow").line_geometry() else {
+            panic!("one line expected")
+        };
+        assert_eq!((line.height, line.baseline), (20.0, 8.0));
+        assert_eq!(size(&doc, p), Size::new(40.0, 20.0));
         let placed = doc.rounded_layout(view).expect("placed");
         assert_eq!((placed.location.x, placed.location.y), (20.0, 0.0));
     }

@@ -514,7 +514,8 @@ pub(crate) fn compute_text_block_layout<T>(
                     input.parent_size,
                     Size::new(ATOM_SPACE, ATOM_SPACE),
                     seldon::tree::RequestedAxis::Both,
-                ),
+                )
+                .reading_first_baseline(true),
             )
         };
         let margin = seldon::compute::used_margins(&tree.style(atom), input.parent_size.width);
@@ -1121,6 +1122,31 @@ mod hit_tests {
         let hit = at(&doc, text, 55.0, 5.0).expect("on `f`");
         assert_eq!(hit, 5);
         assert!(doc.inline_source_range(strong).unwrap().contains(&hit));
+    }
+
+    #[test]
+    fn a_measured_paragraph_reads_a_linear_atom_s_first_baseline() {
+        // The `linear` atom's baseline is its first item's, the 8px of the
+        // fixed-size inner paragraph's one Ahem line, not one synthesized
+        // from that paragraph's 20px bottom edge: the atom reaches 8px above
+        // the line's baseline and 12px below, the strut 8px above and 2px
+        // below. The page measures the paragraph before committing it, so
+        // its height is the measured line's.
+        let (mut doc, text) = paragraph("");
+        append_text(&mut doc, text, "ab");
+        let atom = append_element(&mut doc, text, "view");
+        doc.set_inline_style(atom, "display: linear; width: 20px; height: 20px;");
+        let inner = append_element(&mut doc, atom, "text");
+        doc.set_inline_style(inner, "width: 10px; height: 20px;");
+        append_text(&mut doc, inner, "c");
+        doc.layout();
+        let measured = doc.text_block_size(text).expect("laid out paragraph");
+        let outer = doc.rounded_layout(text).expect("placed");
+        let placed = doc.rounded_layout(atom).expect("placed");
+        assert_eq!(
+            (measured.height, outer.size.height, placed.location.y),
+            (20.0, 20.0, 0.0)
+        );
     }
 
     #[test]

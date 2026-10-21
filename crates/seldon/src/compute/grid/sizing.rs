@@ -287,8 +287,10 @@ where
     // shim included: ask for it exactly.
     let reads_last_baseline =
         axis == Axis::Vertical && item.baseline_participation() == Some(BaselineSet::Last);
+    let reads_first_baseline = axis == Axis::Vertical && item.align_self == AlignFlags::BASELINE;
     let mut input = LayoutInput::measure(known, parent_size, available, axis.requested())
-        .reading_last_baseline(reads_last_baseline);
+        .reading_last_baseline(reads_last_baseline)
+        .reading_first_baseline(reads_first_baseline);
     input.sizing_mode = SizingMode::IgnoreSizeStyles;
     let output = tree.compute_layout(state, item.key.node, input);
     let size = output.size;

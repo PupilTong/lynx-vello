@@ -998,7 +998,11 @@ fn contribution_is_content_free<N>(item: &GridItem<N>, axis: Axis) -> bool {
         && !baseline_shim_measures
 }
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    clippy::fn_params_excessive_bools
+)]
 fn layout_in_flow_items<T>(
     tree: &T,
     state: &mut T::State,
@@ -1011,6 +1015,9 @@ fn layout_in_flow_items<T>(
     // a commit carries the independence the container can vouch for, which
     // each item narrows per axis.
     goal: LayoutGoal,
+    // The container's own measurement was asked for its first baseline
+    // (`LayoutInput::reads_first_baseline`); never set on a commit.
+    first_baseline_requested: bool,
     // The container's own measurement was asked for an exact last baseline
     // (`LayoutInput::reads_last_baseline`); never set on a commit.
     last_baseline_requested: bool,
@@ -1095,8 +1102,15 @@ where
         let reads_last_baseline = !goal.commits()
             && (item.baseline_participation() == Some(BaselineSet::Last)
                 || last_candidate == Some(index));
+        // It reads the first baseline of a row's first-baseline group member,
+        // and of every item when the container's own first baseline, which
+        // any of them may give, is read.
+        let reads_first_baseline = !goal.commits()
+            && (item.baseline_participation() == Some(BaselineSet::First)
+                || first_baseline_requested);
         let input = LayoutInput::new(item_goal, known, area, available)
-            .reading_last_baseline(reads_last_baseline);
+            .reading_last_baseline(reads_last_baseline)
+            .reading_first_baseline(reads_first_baseline);
         let output = tree.compute_layout(state, item.key.node, input);
 
         let mut margin = item.margin;
@@ -1767,6 +1781,7 @@ where
                 content_independent,
             },
         ),
+        input.reads_first_baseline && !commits_layout,
         input.reads_last_baseline && !commits_layout,
         rtl,
         is_scroll_container(style.overflow()),

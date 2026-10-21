@@ -243,17 +243,29 @@ pub fn compute_boundary_relayout<T: LayoutTree>(
     tree.compute_layout(state, node, input)
 }
 
+/// Answers `input` from the node's cache, or runs `compute_uncached` and
+/// stores what it produced.
+///
+/// A box whose layout reads no percentage basis
+/// ([`CoreStyle::reads_percentage_basis`]) is computed and cached against
+/// none: the basis changes nothing it produces, so the entry then answers
+/// every basis a parent hands it — a flex base-size probe and the commit
+/// after it, or a grid track's probe and the next track's — instead of one
+/// entry per basis.
 pub fn compute_cached_layout<T, ComputeFn>(
     tree: &T,
     state: &mut T::State,
     node: T::NodeId,
-    input: LayoutInput,
+    mut input: LayoutInput,
     compute_uncached: ComputeFn,
 ) -> LayoutOutput
 where
     T: LayoutTree,
     ComputeFn: FnOnce(&T, &mut T::State, T::NodeId, LayoutInput) -> LayoutOutput,
 {
+    if input.parent_size != Size::NONE && !tree.style(node).reads_percentage_basis() {
+        input.parent_size = Size::NONE;
+    }
     if let Some(output) = tree.layout(state, node).cached_layout(input) {
         return output;
     }

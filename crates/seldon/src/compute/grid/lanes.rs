@@ -295,6 +295,7 @@ struct PlacedItem<N> {
 }
 
 /// Everything §4.4's pass reads that is fixed for the whole pass.
+#[allow(clippy::struct_excessive_bools)]
 struct LanesContext<'a> {
     grid_axis: Axis,
     tracks: &'a TrackSet,
@@ -313,6 +314,9 @@ struct LanesContext<'a> {
     /// so give that baseline (§6.5), is known only once every item is
     /// placed, so each item's measurement is asked for its own.
     reads_last_baseline: bool,
+    /// The container's own measurement was asked for its first baseline
+    /// (`LayoutInput::reads_first_baseline`), which any item may give.
+    reads_first_baseline: bool,
 }
 
 struct LanesPass<N> {
@@ -421,7 +425,8 @@ where
             state,
             item.key.node,
             LayoutInput::new(item_goal, known, area, available)
-                .reading_last_baseline(context.reads_last_baseline && !item_goal.commits()),
+                .reading_last_baseline(context.reads_last_baseline && !item_goal.commits())
+                .reading_first_baseline(context.reads_first_baseline && !item_goal.commits()),
         );
 
         // Auto margins take the grid-axis free space; in the stacking axis
@@ -874,6 +879,7 @@ where
         goal: container_goal,
         all_tracks_fixed,
         reads_last_baseline: input.reads_last_baseline && !input.goal.commits(),
+        reads_first_baseline: input.reads_first_baseline && !input.goal.commits(),
     };
     let stacking_content = |range: f32| stacking_axis.size(contained.extents()).unwrap_or(range);
     // A percentage stacking gutter against an indefinite stacking size is
