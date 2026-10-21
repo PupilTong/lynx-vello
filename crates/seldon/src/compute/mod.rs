@@ -252,6 +252,12 @@ pub fn compute_boundary_relayout<T: LayoutTree>(
 /// every basis a parent hands it — a flex base-size probe and the commit
 /// after it, or a grid track's probe and the next track's — instead of one
 /// entry per basis.
+///
+/// The question is asked of the style only on a miss in an empty cache:
+/// every entry records the answer it was stored under, so a lookup compares
+/// a basis-free entry without the request's basis, and a later miss reads
+/// the answer back. Both hold for as long as the entries do, since the styles
+/// the answer reads are layout inputs whose change clears the cache.
 pub fn compute_cached_layout<T, ComputeFn>(
     tree: &T,
     state: &mut T::State,
@@ -263,16 +269,20 @@ where
     T: LayoutTree,
     ComputeFn: FnOnce(&T, &mut T::State, T::NodeId, LayoutInput) -> LayoutOutput,
 {
-    if input.parent_size != Size::NONE && !tree.style(node).reads_percentage_basis() {
-        input.parent_size = Size::NONE;
-    }
-    if let Some(output) = tree.layout(state, node).cached_layout(input) {
+    let cached = tree.layout(state, node);
+    if let Some(output) = cached.cached_layout(input) {
         return output;
+    }
+    let reads_basis = cached
+        .recorded_reads_basis()
+        .unwrap_or_else(|| tree.style(node).reads_percentage_basis());
+    if !reads_basis {
+        input.parent_size = Size::NONE;
     }
 
     let output = compute_uncached(tree, state, node, input);
     let slot = tree.layout_mut(state, node);
-    slot.store_cached_layout(input, output);
+    slot.store_cached_layout_recording_basis(input, output, reads_basis);
     if input.goal.commits() {
         // A commit that ran is the one thing that rewrites descendant boxes;
         // a measurement pass reads them and writes none. Marking here is what

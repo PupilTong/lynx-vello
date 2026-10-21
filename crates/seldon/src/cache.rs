@@ -74,6 +74,18 @@ const READS_LAST_BASELINE: u32 = 1 << 20;
 /// The input's [`LayoutInput::reads_first_baseline`] request, kept and
 /// matched exactly as [`READS_LAST_BASELINE`] is.
 const READS_FIRST_BASELINE: u32 = 1 << 21;
+/// The entry was stored for a box whose layout reads no percentage basis
+/// ([`crate::style::CoreStyle::reads_percentage_basis`]) and was computed
+/// against none, so it answers a request whatever `parent_size` that carries:
+/// `compute_cached_layout` would lay the request out against none too. A
+/// fact about the node rather than the input, so it stays outside every key
+/// mask, and it holds for as long as the entry does: the styles it was
+/// answered from are layout inputs, and changing one clears the cache.
+const BASIS_FREE: u32 = 1 << 22;
+/// The entry was stored for a box whose layout reads its percentage basis,
+/// the other answer [`BASIS_FREE`] records. An entry stored with neither
+/// ([`Cache::store`]) records no answer.
+const BASIS_READ: u32 = 1 << 23;
 const INPUT_FLAGS: u32 = EXACT_INPUT_FLAGS
     | (AVAILABLE_TAG_MASK << AVAILABLE_WIDTH_SHIFT)
     | (AVAILABLE_TAG_MASK << AVAILABLE_HEIGHT_SHIFT)
@@ -226,6 +238,16 @@ impl PackedLayoutInput {
     #[inline]
     const fn answers(self) -> bool {
         self.flags & BASELINES_INCOMPLETE == 0
+    }
+
+    /// The same input with no `parent_size`, packed as
+    /// [`Self::new`] packs `Size::NONE`.
+    #[inline]
+    fn without_basis(mut self) -> Self {
+        self.values[2] = 0.0;
+        self.values[3] = 0.0;
+        self.flags &= !(PARENT_WIDTH_PRESENT | PARENT_HEIGHT_PRESENT);
+        self
     }
 
     #[inline]
@@ -395,9 +417,18 @@ impl Cache {
 
     /// Returns a cached output. An entry whose output did not fit answers
     /// nothing, so the caller computes it again.
+    ///
+    /// In a cache whose entries record that the node reads no basis
+    /// ([`BASIS_FREE`]), `input` is looked up as if it carried no
+    /// `parent_size`, as `compute_cached_layout` computed every entry. The
+    /// first entry speaks for all of them: that function stores only the
+    /// answer it read back from the entries already there.
     #[must_use]
     pub fn get(&self, input: LayoutInput) -> Option<LayoutOutput> {
-        let requested = PackedLayoutInput::new(input);
+        let mut requested = PackedLayoutInput::new(input);
+        if self.recorded_reads_basis() == Some(false) {
+            requested = requested.without_basis();
+        }
         if let Some(slot) = self.committed
             && slot.input.answers()
             && packed_inputs_match(slot.input, requested)
@@ -415,9 +446,51 @@ impl Cache {
             .map(|slot| slot.unpack_output())
     }
 
+    /// Whether the node reads its percentage basis, as the entries stored
+    /// through [`Self::store_recording_basis`] recorded it; `None` when no
+    /// entry recorded an answer.
+    #[must_use]
+    pub fn recorded_reads_basis(&self) -> Option<bool> {
+        let flags = self
+            .committed
+            .or_else(|| self.measurements.first().copied())?
+            .input
+            .flags;
+        if flags & BASIS_FREE != 0 {
+            Some(false)
+        } else if flags & BASIS_READ != 0 {
+            Some(true)
+        } else {
+            None
+        }
+    }
+
     pub fn store(&mut self, input: LayoutInput, output: LayoutOutput) {
-        let slot = MeasurementSlot::new(input, output);
-        match input.goal {
+        self.store_slot(MeasurementSlot::new(input, output), input.goal);
+    }
+
+    /// [`Self::store`], recording whether the node reads its percentage
+    /// basis. An entry for a box that reads none is computed against none
+    /// (`input` carries no `parent_size`) and then answers every basis
+    /// ([`BASIS_FREE`]); either answer is kept for
+    /// [`Self::recorded_reads_basis`].
+    pub fn store_recording_basis(
+        &mut self,
+        input: LayoutInput,
+        output: LayoutOutput,
+        reads_basis: bool,
+    ) {
+        debug_assert!(
+            reads_basis || input.parent_size == Size::NONE,
+            "a basis-free entry is computed against no basis"
+        );
+        let mut slot = MeasurementSlot::new(input, output);
+        slot.input.flags |= if reads_basis { BASIS_READ } else { BASIS_FREE };
+        self.store_slot(slot, input.goal);
+    }
+
+    fn store_slot(&mut self, slot: MeasurementSlot, goal: LayoutGoal) {
+        match goal {
             LayoutGoal::Commit { .. } => self.committed = Some(slot),
             LayoutGoal::Measure(_) => {
                 // Retiring a live same-shape measurement while the cache still
@@ -878,6 +951,71 @@ mod tests {
             RequestedAxis::Both,
         );
         assert_eq!(cache.get(both.reading_last_baseline(true)), Some(exact));
+    }
+
+    /// An entry recorded as basis-free answers a request whatever basis it
+    /// carries, as `compute_cached_layout` would have laid it out against
+    /// none; one recorded as reading the basis, or recording nothing, answers
+    /// only its own.
+    #[test]
+    fn a_basis_free_entry_answers_every_basis() {
+        let unbased = LayoutInput::measure(
+            Size::NONE,
+            Size::NONE,
+            Size::MAX_CONTENT,
+            RequestedAxis::Both,
+        );
+        let based = measurement(Size::NONE, Size::MAX_CONTENT);
+        let other_basis = LayoutInput {
+            parent_size: Size::new(Some(1.0), None),
+            ..based
+        };
+        let output = LayoutOutput::new(Size::new(20.0, 30.0), Size::new(20.0, 30.0));
+
+        let mut cache = Cache::new();
+        assert_eq!(cache.recorded_reads_basis(), None, "empty: no answer");
+        cache.store_recording_basis(unbased, output, false);
+        assert_eq!(cache.recorded_reads_basis(), Some(false));
+        for request in [unbased, based, other_basis] {
+            assert_eq!(cache.get(request), Some(output));
+        }
+        let committed = LayoutInput::commit(
+            Size::NONE,
+            Size::NONE,
+            Size::MAX_CONTENT,
+            Size::new(false, false),
+        );
+        cache.store_recording_basis(committed, output, false);
+        assert_eq!(
+            cache.get(LayoutInput {
+                parent_size: Size::new(Some(320.0), Some(240.0)),
+                ..committed
+            }),
+            Some(output),
+            "the committed entry too"
+        );
+        assert_eq!(
+            cache.committed_input().map(|input| input.parent_size),
+            Some(Size::NONE),
+            "the entry keeps the input it was computed under"
+        );
+
+        let mut cache = Cache::new();
+        cache.store_recording_basis(based, output, true);
+        assert_eq!(cache.recorded_reads_basis(), Some(true));
+        assert_eq!(cache.get(based), Some(output));
+        assert_eq!(cache.get(unbased), None);
+        assert_eq!(cache.get(other_basis), None);
+
+        let mut cache = Cache::new();
+        cache.store(unbased, output);
+        assert_eq!(
+            cache.recorded_reads_basis(),
+            None,
+            "a plain entry records nothing"
+        );
+        assert_eq!(cache.get(unbased), Some(output));
+        assert_eq!(cache.get(based), None);
     }
 
     /// The first-baseline request follows the last-baseline one's rule, and

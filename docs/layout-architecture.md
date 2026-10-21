@@ -1174,7 +1174,12 @@ the painting — layout's job is to never be the frame's bottleneck.
   every paragraph-establishing box, whose lines and atoms read the basis, and
   answers from a node bit its style harvest evaluates rather than per lookup)
   out against `parent_size: None`, so one entry answers every basis a parent
-  hands it instead of one entry per basis. The `Commit` goal's
+  hands it instead of one entry per basis. The answer is asked of the style
+  only on a miss in an empty cache: each entry records it outside the key
+  (`BASIS_FREE`/`BASIS_READ`), a lookup in a basis-free cache drops the
+  request's basis, and a later miss reads the answer back — valid for as long
+  as the entries are, since the styles it reads are layout inputs whose change
+  clears the cache. The `Commit` goal's
   `content_independent` payload is the one field left out: it changes no
   result, so it is packed into the committed entry outside the key bits — two
   commits that differ only in it answer each other — and reads back whole
