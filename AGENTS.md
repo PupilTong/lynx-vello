@@ -4368,8 +4368,8 @@ own library whenever dev targets are in the build. `seldon` dev-depends on
 with bench targets:
 
 ```sh
-cargo build --unit-graph -Z unstable-options --workspace            # dom: []
-cargo build --unit-graph -Z unstable-options --workspace --benches  # dom: [layout-test-utils]
+cargo build --unit-graph -Z unstable-options --workspace            # terminus: []
+cargo build --unit-graph -Z unstable-options --workspace --benches  # terminus: [layout-test-utils]
 ```
 
 The second line is what `cargo codspeed build` and `cargo llvm-cov` resolve.
@@ -4383,9 +4383,14 @@ is noise — describe a `terminus` one branch away from the shipped one. On the
 **This is accepted, not fixed.** Breaking the cycle means moving seldon's
 terminus-based benches into `terminus`, renumbering every CodSpeed benchmark id and
 throwing away its history — a worse trade than one predictable branch.
+`bobcat-core`'s dev-dependency on `terminus` with `painter-test-utils` (for its
+painter tests) unifies that feature into `terminus` the same way; its cost is
+`FrameClock`'s pinned reading and branch in `now_seconds`, the test-only
+`Output::None` variant's match arms, and the doc-hidden test accessors in
+`crates/terminus/src/painter/mod.rs`, and it is accepted for the same reason.
 `.github/scripts/check-bench-feature-parity.py` runs in CI and holds the line:
-it diffs the two resolutions, prints the two recorded deviations, and fails on
-a third appearing or on a recorded one silently going away. Any new entry needs
+it diffs the two resolutions, prints the three recorded deviations, and fails on
+a new one appearing or on a recorded one silently going away. Any new entry needs
 a written reason for the same cost the existing ones state.
 
 ### Benchmarks are only the `benches/` targets

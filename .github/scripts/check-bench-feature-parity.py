@@ -38,7 +38,22 @@ ACCEPTED: dict[str, dict[str, str]] = {
             "Breaking the cycle means moving seldon's terminus-based benches into terminus, "
             "which renumbers every CodSpeed benchmark id and discards its history. "
             "See AGENTS.md, 'Benchmarks measure a debug-instrumented terminus'."
-        )
+        ),
+        "painter-test-utils": (
+            "bobcat-core dev-depends on terminus/painter-test-utils for its painter "
+            "tests, so any build that includes bench targets unifies the feature into "
+            "terminus's own library. Cost, all in crates/terminus/src/painter/mod.rs: "
+            "`FrameClock` carries a `pinned: Option<f64>` and `now_seconds` tests it "
+            "before reading the system clock; `Output` gains the test-only `None` "
+            "variant, which adds one match arm to each dispatch on the draw target "
+            "(`forget`, `prepare_vectors`, `prepare_filters`, `render`, `capture`) and "
+            "a refusal check at the top of `capture`; and the doc-hidden test "
+            "accessors (`Painter::without_output`, `clock_mut`, `scroll_intents_mut`, "
+            "`ScrollIntentsTestUtils`, the two interval constants) are compiled in. "
+            "Nothing else on the compose or draw path changes. Dropping it means "
+            "moving bobcat-core's painter tests off the feature. See AGENTS.md, "
+            "'Benchmarks measure a debug-instrumented terminus'."
+        ),
     },
     "seldon": {
         "layout-test-utils": (
