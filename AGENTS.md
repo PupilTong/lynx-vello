@@ -2303,15 +2303,18 @@ reflection and its UA box), `tree::scroll_container` (`scroll-view` and
 `list` as scroll containers — which axis scrolls, which one clips, and which
 way the subtree stacks, from `web-elements`' own `scroll-view.css` and
 `x-list.css`; `enable-scroll="false"` leaves the box a scroll container only
-script can move — and a `scroll-view` component whose `CustomElement::invoke`
+script can move; `initial-scroll-to-index` by the viewpager recipe, a typed
+`attr()` and an `if()` over `sibling-index()` into each child's
+`scroll-initial-target` — and a `scroll-view` component whose `CustomElement::invoke`
 answers the `scrollTo`, `scrollBy`, `autoScroll` and `getScrollInfo` UI
 methods on the axis the tag scrolls; `takeContentScreenshot` is not built —
 and fires `scrolltoupper`/`scrolltolower` from the `scroll` it observes,
 native's edge rule over `upper-threshold`/`lower-threshold`, the
 `ScrollEdges` `list` shares, and `nearest_snap_position`, the nearest snap
 position the swiper and the pager report by),
-`tree::list` (`list`'s scroll axis, `list-type` layout modes and cell
-virtualization as UA rules, and a `list` component whose `CustomElement::invoke`
+`tree::list` (`list`'s scroll axis, `list-type` layout modes, cell
+virtualization and `initial-scroll-index` (`scroll-view`'s recipe) as UA
+rules, and a `list` component whose `CustomElement::invoke`
 answers `scrollToPosition`, `scrollBy` and `autoScroll` (`scroll-view`'s, on
 the list's axis), `getScrollContainerInfo` and `getVisibleCells`;
 `getScrollInfo` is not built, and the base set's `scrollTo` answers on a list;

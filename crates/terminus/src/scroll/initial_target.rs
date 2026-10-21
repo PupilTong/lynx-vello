@@ -328,4 +328,26 @@ mod tests {
             "the third page (160..240) is to the right, so its end edge aligns",
         );
     }
+
+    /// A target is a target by its own box, so a `content-visibility: auto`
+    /// box whose contents skip — off screen at the first commit, as a list's
+    /// cells are — still sets the position, as does a replaced element, whose
+    /// children the build never enters either.
+    #[test]
+    fn a_box_whose_contents_are_not_entered_is_still_a_target() {
+        let (mut document, scroller, pages) = paged("content-visibility: auto", 4);
+        document.set_inline_style(pages[3], "scroll-initial-target: nearest");
+        document.commit();
+        assert_eq!(document.scroll_offset(scroller), Vector2D::new(0.0, 300.0));
+
+        let (mut document, scroller, pages) = paged("", 4);
+        document.set_image_source(
+            pages[2],
+            crate::render::image::ImageRole::Source,
+            Some("app:///a.png"),
+        );
+        document.set_inline_style(pages[2], "scroll-initial-target: nearest");
+        document.commit();
+        assert_eq!(document.scroll_offset(scroller), Vector2D::new(0.0, 200.0));
+    }
 }

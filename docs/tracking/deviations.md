@@ -1893,13 +1893,87 @@ consequential choice about whether to follow the spec or the quirk.
   nonnegative numbers and their CSS fallback is the scrollport size. `sticky-top="true"` supplies sticky positioning, the
   nonnegative inherited offset and `z-index: 1`. Still absent from the sheet:
   horizontal sticky insets and `sticky-bottom`, `item-snap` /
-  `paging-enabled` scroll snapping, the scrollbar rules,
-  `initial-scroll-index`, every list event and every list UI method (since
+  `paging-enabled` scroll snapping, the scrollbar rules, every list event
+  and every list UI method (since
   2026-10-20 the component decides `scrolltoupper` and `scrolltolower` from
   the list's `scroll`, with no observer: the Lynx scroll-state events
   entry) — and cell recycling, which this engine does not do at all: a
   virtualized cell keeps its element and skips its contents, which is
-  web-core's model too (`components.md` row 23).
+  web-core's model too (`components.md` row 23). `initial-scroll-index` is
+  built (2026-10-21, next entry).
+- **`scroll-view`'s `initial-scroll-to-index` and `list`'s
+  `initial-scroll-index` are CSS, not a read at connect (2026-10-21).** The
+  `viewpager` recipe ([style-assumptions.md](../style-assumptions.md) §27):
+  a `scroll-view[initial-scroll-to-index]` sets the registered, inherited
+  `<integer>` `--scroll-view-initial-index` from
+  `attr(initial-scroll-to-index type(<integer>), -1)`, a
+  `list[initial-scroll-index]` sets `--list-initial-index` the same way, and
+  each element child of either is its `scroll-initial-target` when that
+  number equals its `sibling-index() - 1`
+  (`crates/bobcat-core/src/main/tree/scroll_container.rs`, "The initial
+  child"; `crates/bobcat-core/src/main/tree/list.rs`, "The initial cell").
+  web-core scrolls `children.item(index)` to the scrollport's start,
+  `scrollTop = offsetTop` or, under `scroll-x`, `scrollLeft = offsetLeft`
+  (`web-elements/src/elements/ScrollView/ScrollAttributes.ts:64-81`), and
+  the list's `scrollToPosition({position})` from `connectedCallback`
+  (`XList/XListAttributes.ts:45-63`, `XList/XList.ts:89-115`). Consequences,
+  each pinned by a test in those two files:
+  - **the inline axis aligns `nearest`, not `start`**: css-scroll-snap-2
+    §3.1.1 places the target as `scrollIntoView` with `block: start` and
+    `inline: nearest`, and the x axis is the inline axis. A horizontal
+    `scroll-view` (`scroll-x`, `scroll-orientation="horizontal"`) or a
+    horizontal `list` lands a child as wide as the scrollport or wider at its
+    start, as web-core does, but leaves a narrower child that is already
+    inside the scrollport where it is and lands a narrower child past the
+    scrollport's end with its end edge at the scrollport's end
+    (`a_narrow_child_on_x_is_aligned_nearest_not_at_the_start`): with six
+    100px children in a 300px view, index 1 stays at 0 and index 4 lands at
+    200, where web-core gives 100 and 400. The UA sheet has no declaration
+    that asks the initial target for `inline: start`: `scroll-snap-align`
+    acts only through a `scroll-snap-type`, which would add snapping, and
+    `scroll-padding`/`scroll-margin` would move every other
+    `scrollIntoView` too. **A gap, open for the user**;
+  - **a later change scrolls**: each new target is honoured once, so a
+    change of the attribute after the first layout scrolls to the new child,
+    instantly, and a commit that leaves the target where it was does not
+    move a view the user scrolled
+    (`a_later_change_scrolls_to_the_new_child_and_nothing_else_does`,
+    `a_later_initial_scroll_index_change_scrolls_to_the_new_cell`). On a
+    `scroll-view` that is web-core's behavior (its handler runs on every
+    attribute change) and Android's outside a list
+    (`UIScrollView.java:653-667`), while iOS
+    (`LynxUIScroller.m:591-614`) and Harmony (`ui_scroll.cc:298-299`) honour
+    the attribute once. On a `list` both references read the attribute once
+    (web-core in `connectedCallback`; native
+    `core/renderer/ui_component/list/list_container_impl.cc:543-548`), so
+    this is a deviation from both, and a CSS-only rule cannot remember a
+    first value. **Open for the user**;
+  - an index that is negative, past the last child or no integer (`"abc"`,
+    `"1.5"`, `""`) names no child and scrolls nothing
+    (`an_index_naming_no_child_scrolls_nothing`,
+    `an_initial_scroll_index_naming_no_cell_scrolls_nothing`); web-core's
+    `parseFloat` makes `"1.5"` child 1;
+  - the index counts element children whether or not they render
+    (`the_initial_scroll_index_counts_every_element_child`), as
+    `children.item` does; a `wrapper` child is the indexed child in both,
+    and having no box (`display: contents`) it scrolls nothing here, where
+    web-core reads its `offsetTop`, 0;
+  - a nested `scroll-view` without the attribute keeps its parent's index for
+    its own target and gives its children none; one that is the direct child
+    of an indexed view and carries the attribute itself tests its own index,
+    not its parent's, for its own target, since one inherited property cannot
+    hold both numbers
+    (`a_nested_view_is_its_parents_target_and_keeps_its_own_index`);
+  - `scroll-to-index`, which web-core binds to the same handler and native
+    marks deprecated, re-scrolls on every write and is not built.
+
+  The attribute name is web-core's and the three mobile platforms'
+  (`UIScrollView.java:699`, `AbsLynxUIScroller.m:35`, `ui_scroll.h:33-34`).
+  Lynx's `clay` scroll view spells it `initial-scroll-index`, applied once,
+  and marks `scroll-to-index` deprecated
+  (`lynx/clay/ui/component/scroll_view.cc:329-372`); that spelling is not
+  read on a `scroll-view`. **A native/web-core naming difference, open for
+  the user.**
 - **List waterfall over `display: grid-lanes` — path assessment
   (2026-09-18).** The layout mode landed
   ([style-assumptions.md](../style-assumptions.md) §24); this records how far
