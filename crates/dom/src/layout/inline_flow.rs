@@ -202,6 +202,16 @@ enum Visit {
     Close(NodeSlot),
 }
 
+/// The source text of the inline formatting context `element` establishes
+/// (a block container, or an anonymous block box): its runs in order, with
+/// one U+FFFC per atomic box and nothing for an inline box's boundaries
+/// ([`super::paragraph::source_text_of`]). Built by the same walk
+/// [`refresh`] runs, from the tree as it is now; no percentage basis is
+/// needed, since only an inline box's edges read one.
+pub(crate) fn source_text<T>(tree: &TreeArenas<T>, element: NodeSlot) -> String {
+    super::paragraph::source_text_of(&collect_flow(tree, element, None).0)
+}
+
 /// The block's content, in order: runs, atoms and inline box boundaries;
 /// and every out-of-flow box among it, with the index of the item that
 /// follows it.

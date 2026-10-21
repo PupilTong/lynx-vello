@@ -2436,10 +2436,18 @@ consequential choice about whether to follow the spec or the quirk.
     the content box's origin, as tall as the line holding `start`, which
     says nothing about where `start` is; kept for parity rather than
     answering a caret position.
-  - *Selection methods absent.* `getSelectedText` and `setTextSelection`
-    are code 3: read-only text has no selection model, nothing selects it,
-    and so there is nothing to read or set. The only selection is an
-    editing host's (see the next entry).
+  - *Selection methods (2026-10-20).* `getSelectedText` answers
+    `{selectedText}` of the document's selection when it lies in the
+    element, `""` otherwise. `setTextSelection` selects between two
+    border-box points of a `text-selection` text and answers
+    `getTextBoundingRect`'s shape plus `handles`, two `{x, y, radius}` at
+    the first box's bottom-left and the last box's bottom-right with native
+    Android's radius 50; a negative coordinate clears the selection and
+    answers no data. A `text` without `text-selection` answers code 8, as a
+    nested `text` does: the element cannot hold the document's selection.
+    The handle flags are read and ignored, since no handle is painted.
+    Unlike every other UI method, `setTextSelection` runs a layout pass:
+    its point commands measure the current layout.
 
 - **`text` and `inline-text` `selectionchange` (2026-10-20): web-core's
   `XTextSelectionEvents.ts` over the document's W3C `selectionchange`**
@@ -2451,7 +2459,57 @@ consequential choice about whether to follow the spec or the quirk.
   empty record `{-1, -1, "forward"}`, where a browser's selection can enter
   it and web-core reports offsets into it. A `text` around a host that is a
   nested `inline-text` counts the text before the host, as web-core's
-  `range.toString().length` does.
+  `range.toString().length` does. A selection in a `text-selection` text
+  (next entry) is in source units of its paragraph, and its record counts
+  the text content, every text and generated run but no inline atom
+  (web-core's `range.toString().length`; native counts the placeholder
+  character, `AndroidText.java:482-490`); a `text` or `inline-text` inside
+  it reports when both points lie in its own source range.
+
+- **`text-selection` (2026-10-20): read-only text selected by a pointer,
+  as `user-select` in the UA sheet, a browser's gesture**
+  (`crates/bobcat-core/src/main/tree/text.rs`,
+  `crates/bobcat-core/src/main/runtime/editing.rs`,
+  `crates/dom/src/editing/mod.rs`). web-core's `x-text.css:147-181` is the
+  shape: `text`, `inline-text` and `inline-truncation` are
+  `user-select: none`, a `text-selection` text and the text elements inside
+  it `user-select: auto`, and `dom` resolves the used value as css-ui-4
+  says (the root's `auto` is `text`). Where it leaves a reference:
+  - *`text-selection="false"` does not select.* web-core's selector is
+    `[text-selection]`, presence alone, so there the string `"false"` (what
+    `setElementPropertyOrAttribute` writes for `false`) selects too. Native
+    parses the boolean (`UIText.java:256`, `LynxUIText.m:719`), and that
+    reading is kept: the UA selector is
+    `text[text-selection]:not([text-selection="false" i])`.
+  - *Loose text outside a `text` is selectable by default*, as in a
+    browser: the root's `auto` resolves to `text`, and only the Lynx text
+    tags carry the UA `none`. Native has no such text; in web-core the same
+    text (an HTML element's own) selects too. An author's `user-select` on
+    any element is honoured, `none` on an ancestor turning a
+    `text-selection` text off as it does in web-core.
+  - *`user-select: all` and `contain` select as `text` does*, and a nested
+    scope's own value only decides whether a press on it starts a
+    selection: a selection stays in one paragraph, and the paragraph root's
+    used value is what the session needs.
+  - *The press and the tap are always routed* to the main thread's default
+    actions once the page exists (`EditingRoute::Pointer`), where before
+    this change they were routed only while the document had an editing
+    host: with `user-select` resolving at the root there is no document
+    state that says nothing can be selected, and a press outside everything
+    is what blurs and clears. One cross-thread entry per press, no listener
+    called.
+  - *The gesture is a browser's, not native's.* A mouse press places a
+    caret, a second and third quick press select the word and the line, a
+    held drag extends; a finger's tap places a caret. Native begins a
+    one-character selection at a long press that the finger then drags
+    out, and adjusts it with handles (`AndroidText.java:113-140, 977-1060`,
+    `LynxTextView.m:657-736`); a touch browser's long press selects the
+    word and shows handles. Neither touch gesture is built: the supported
+    platforms (macOS, the desktop browser, headless) have no touch screen,
+    and routing `longpress` for it would make the painter's name-level
+    `longpress` gate suppress every long hold's `tap` on the page. No
+    handles, no copy menu, no `::selection` colours, no
+    `selection-background-color`.
 
 - **`x-swiper` (2026-10-06): a component with web-core's shadow `#content`
   scroll container and a dot strip, and its layouts are UA rules.** `crates/bobcat-core/src/main/tree/swiper.rs` translates

@@ -65,42 +65,67 @@
 //!
 //! # The document's selection
 //!
-//! The Selection API gives a document one selection. Here it is the focused
-//! editing host's session selection, and nothing else: with nothing focused
-//! the document has no selection (a browser's `rangeCount` 0), and
-//! [`Document::selection`] answers `None`. Text outside an editing host
-//! cannot be selected, so the session is the only place a selection can be.
-//! This is a simplification of the standard: a browser keeps the
-//! document's ranges after a script's `blur()`, while here a session ending
-//! — a blur, focus moving to another host, the fixup rule — ends the
-//! document's selection too. The host's own retained selection
+//! The Selection API gives a document one selection. Here it is the one
+//! session the document holds, and the element that session is in is the
+//! **selection host** ([`Document::selection_host`]): the focused editing
+//! host, or a **selectable element** selected without focus. An element is
+//! selectable when the used value of its `user-select` is not `none`
+//! (css-ui-4 "Content Selection", [`Document::is_user_selectable`]) and it
+//! establishes a committed paragraph; [`Document::selectable_root_of`]
+//! finds the one a node is in. [`Document::begin_selection`] starts a session
+//! in one — after blurring a focused editing host, with that host's focus
+//! events, as a browser's press on content that cannot be focused blurs the
+//! focused element — and [`Document::clear_selection`] ends it; focusing an
+//! editing host replaces it. With no session the document has no selection
+//! (a browser's `rangeCount` 0), and [`Document::selection`] answers `None`.
+//! This is a simplification of the standard: a browser keeps the document's
+//! ranges after a script's `blur()` and lets a selection cross elements,
+//! while here a session ending — a blur, focus moving to another host, the
+//! fixup rule — ends the document's selection too, and a selection stays in
+//! one paragraph. A host's own retained selection
 //! ([`Document::host_selection`]) is a text control's
 //! `selectionStart`/`selectionEnd`, a different thing, and is not the
 //! document's.
 //!
+//! The session's **selection text** is what its offsets index: a focused
+//! host's value, or, for a selectable element, the source text of its
+//! paragraph — every run of its flattened content in order, DOM text and
+//! generated `content` alike, with one U+FFFC per atomic inline box (an
+//! inline `image` or `view`) — so its UTF-16 units are exactly the
+//! paragraph's source units. That text is rebuilt on demand by the flatten
+//! walk layout runs, never stored, so a selectable element costs nothing
+//! while it is not selected. A selectable element is read only: the pointer
+//! and movement commands work over its paragraph, nested scopes and atoms
+//! included, and every command that would change a value or compose text is
+//! refused. Its session ends, with the flag set and no event, when the
+//! element leaves the document, computes `user-select: none`, stops being
+//! rendered or loses its paragraph, and when it is freed.
+//!
 //! [`Document::selection`] reports the two boundary points apart, as UTF-16
-//! offsets into the host's value: `anchor` where the selection was started,
-//! `focus` where it was extended to, so `focus < anchor` is a backward
-//! selection.
+//! offsets into the selection text: `anchor` where the selection was
+//! started, `focus` where it was extended to, so `focus < anchor` is a
+//! backward selection.
 //!
 //! Every change of the document's selection sets one flag, the Selection
 //! API's "has scheduled selectionchange event" (HTML keeps the same flag on
-//! each document and text control): a session starting
-//! ([`Document::focus`]) or ending (a blur, the fixup rule), an applied
-//! command that changed the value or left a selection other than the one
-//! held ([`Document::commit_editing`]), and a value write to the focused
-//! host that changed the value or the selection
-//! ([`Document::set_host_value`]). A layout pass that places a pending
-//! selection in the new paragraph changes no offsets and sets nothing. The
-//! flag is a single bit, so any number of changes before the embedder takes
-//! it ([`Document::take_selectionchange`]) owe one `selectionchange`, which
-//! the embedder fires at the document node (not bubbling, not cancelable),
-//! as the standard queues one task per set flag. `dom` dispatches nothing.
+//! each document and text control): a session starting ([`Document::focus`],
+//! [`Document::begin_selection`]) or ending (a blur,
+//! [`Document::clear_selection`], the fixup rule), an applied command that
+//! changed the value or left a selection other than the one held
+//! ([`Document::commit_editing`]), and a value write to the focused host that
+//! changed the value or the selection ([`Document::set_host_value`]). A
+//! layout pass that places a pending selection in the new paragraph changes
+//! no offsets and sets nothing. The flag is a single bit, so any number of
+//! changes before the embedder takes it ([`Document::take_selectionchange`])
+//! owe one `selectionchange`, which the embedder fires at the document node
+//! (not bubbling, not cancelable), as the standard queues one task per set
+//! flag. `dom` dispatches nothing.
 //!
 //! # Selection and composition
 //!
-//! The selection is a parley [`Selection`] over the host's committed
-//! paragraph, refreshed after every layout pass ([`Selection::refresh`]). A
+//! The selection is a parley [`Selection`] over the selection host's
+//! committed paragraph, refreshed after every layout pass
+//! ([`Selection::refresh`]). A
 //! command that changes the value cannot address the new text in the old
 //! layout, so it leaves the selection as byte offsets into the new value
 //! until the next layout pass places it in the new paragraph. The
@@ -141,6 +166,7 @@ use core::ops::Range;
 
 use parley::{Affinity, Selection};
 use rustc_hash::FxHashMap;
+use stylo::values::computed::UserSelect;
 
 pub use self::command::{
     Command, Direction, EditEvent, EditEventKind, EditOutcome, Granularity, PreparedEdit,
@@ -236,36 +262,61 @@ impl ByteSelection {
     }
 }
 
-/// The editing state of the focused host.
+/// The document's selection and the editing state around it, in its
+/// selection host: the focused editing host, or a selectable element
+/// selected without focus (the module's "The document's selection").
 #[derive(Clone, Debug)]
 pub(crate) struct Session {
+    /// The selection host.
     pub(crate) host: NodeId,
+    /// Whether `host` is the focused editing host. A focused session is
+    /// always an editing host's ([`Document::focus`] accepts nothing else,
+    /// and the fixup rule ends one whose host stopped being one); one that
+    /// is not is a selectable element's ([`Document::begin_selection`]).
+    pub(crate) focused: bool,
     /// Over the host's committed paragraph; authoritative while `pending`
     /// is `None`.
     pub(crate) selection: Selection,
-    /// The selection as value offsets, set by a change the committed
+    /// The selection as byte offsets into the selection text
+    /// ([`Document::session_text`]), set by a change the committed
     /// paragraph does not show yet, and kept while the host has no
     /// paragraph or the paragraph cannot show it (past a truncation cut).
     pub(crate) pending: Option<ByteSelection>,
-    /// The IME composition, as a byte range into the value.
+    /// The IME composition, as a byte range into the value. Only a focused
+    /// session has one.
     pub(crate) composition: Option<Range<usize>>,
 }
 
 impl Session {
-    /// A session over `host` whose selection is `selection`, as value
-    /// offsets the next layout pass places in the host's paragraph.
+    /// A focused session over `host` whose selection is `selection`, as
+    /// value offsets the next layout pass places in the host's paragraph.
     fn new(host: NodeId, selection: ByteSelection) -> Self {
         Self {
             host,
+            focused: true,
             selection: Selection::default(),
             pending: Some(selection),
             composition: None,
         }
     }
 
-    /// The selection as value bytes, whichever form it is held in. `None`
-    /// when it is held in a paragraph that cannot say: none is given, it is
-    /// not built from the value, or an end lies past its truncation cut.
+    /// A session in the selectable element `root`, not focused, collapsed
+    /// at the start of its selection text: offsets the next layout pass
+    /// places in its paragraph.
+    fn selectable(root: NodeId) -> Self {
+        Self {
+            host: root,
+            focused: false,
+            selection: Selection::default(),
+            pending: Some(ByteSelection::collapsed(0, Affinity::Downstream)),
+            composition: None,
+        }
+    }
+
+    /// The selection as bytes of the selection text `value`, whichever form
+    /// it is held in. `None` when it is held in a paragraph that cannot say:
+    /// none is given, it is not built from the value, or an end lies past
+    /// its truncation cut.
     pub(crate) fn bytes(
         &self,
         paragraph: Option<&EditableParagraph<'_>>,
@@ -298,10 +349,6 @@ pub(crate) struct EditingState {
     pub(crate) session: Option<Session>,
     /// Focus events not yet taken by the embedder.
     events: Vec<FocusEvent>,
-    /// How many elements of this document, connected or not, are editing
-    /// hosts ([`Document::has_editing_hosts`]). Kept by the attribute setters
-    /// and by [`Document::free_node`], the two places the answer can change.
-    hosts: usize,
     /// The selection of each host that is not focused, as byte offsets into
     /// the value it had when the selection was retained
     /// ([`Document::host_selection`]). A host that is not focused has no
@@ -321,20 +368,24 @@ pub(crate) struct EditingState {
     pub(crate) selectionchange_pending: bool,
 }
 
-/// The document's selection ([`Document::selection`]): the focused editing
-/// host's, as UTF-16 unit offsets into the host's value
-/// ([`Document::host_value`]). `anchor` and `focus` are the Selection API's
-/// two boundary points, so `focus < anchor` is a backward selection and
-/// `anchor == focus` a collapsed one (a caret).
+/// The document's selection ([`Document::selection`]): the selection
+/// host's, as UTF-16 unit offsets into its selection text — a focused
+/// editing host's value ([`Document::host_value`]), or a selectable
+/// element's paragraph source units, an atomic inline box counting one.
+/// `anchor` and `focus` are the Selection API's two boundary points, so
+/// `focus < anchor` is a backward selection and `anchor == focus` a
+/// collapsed one (a caret).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DocumentSelection {
-    /// The focused editing host, whose direct text children hold both
-    /// boundary points.
+    /// The selection host: the focused editing host, whose direct text
+    /// children hold both boundary points, or a selectable element, whose
+    /// paragraph does.
     pub host: NodeId,
-    /// Where the selection was started, in UTF-16 units of the host's value.
+    /// Where the selection was started, in UTF-16 units of the selection
+    /// text.
     pub anchor: u32,
-    /// Where the selection was extended to, in UTF-16 units of the host's
-    /// value.
+    /// Where the selection was extended to, in UTF-16 units of the
+    /// selection text.
     pub focus: u32,
 }
 
@@ -368,18 +419,6 @@ impl<T> Document<T> {
         self.get(node).is_some_and(is_host_node)
     }
 
-    /// Whether any element of this document is an editing host, connected
-    /// or not: one counter read. An embedder that does work only for
-    /// documents that can be edited — routing pointer and key events to the
-    /// editing default actions — asks this rather than walking the tree.
-    ///
-    /// A detached host still counts until it is freed, because it can be
-    /// inserted again without any attribute changing.
-    #[must_use]
-    pub const fn has_editing_hosts(&self) -> bool {
-        self.editing.hosts > 0
-    }
-
     /// Gives `node`'s own paragraph one empty line of its strut when it has
     /// no content (`on`), or takes it away, whether or not `node` is an
     /// editing host: for a text control's editor, which is one line tall
@@ -399,18 +438,10 @@ impl<T> Document<T> {
     }
 
     /// Records that `node`'s `contenteditable` attribute is about to change
-    /// from what it is now to `value` (`None` for a removal), keeping
-    /// [`Self::has_editing_hosts`]'s count. Called by the attribute setters
-    /// before they write.
+    /// from what it is now to `value` (`None` for a removal). Called by the
+    /// attribute setters before they write.
     pub(crate) fn note_contenteditable_change(&mut self, node: NodeId, value: Option<&str>) {
-        let was = self.is_editing_host(node);
-        let is = makes_host(value);
-        if is && !was {
-            self.editing.hosts += 1;
-        } else if was && !is {
-            self.editing.hosts -= 1;
-        }
-        if is != was {
+        if makes_host(value) != self.is_editing_host(node) {
             // A paragraph the element establishes keeps one empty line for
             // no content while it is a host ([`has_line_if_empty`]), which
             // is a shaping input of that paragraph: lay it out again. Nothing in the style
@@ -419,22 +450,186 @@ impl<T> Document<T> {
         }
     }
 
-    /// Records that a node being freed leaves the count if it was a host,
-    /// and drops its retained selection. One comparison each for a document
-    /// that has neither.
-    pub(crate) fn note_freed_editing_host(&mut self, node: &crate::Node<T>) {
+    /// Records that a node being freed drops its retained selection and
+    /// ends the session it is the selection host of, with the
+    /// `selectionchange` flag set. One comparison each for a document that
+    /// has neither.
+    pub(crate) fn note_freed_editing_node(&mut self, node: &crate::Node<T>) {
+        let id = node.id();
         if !self.editing.retained.is_empty() {
-            self.editing.retained.remove(&node.id());
+            self.editing.retained.remove(&id);
         }
-        if self.editing.hosts > 0 && is_host_node(node) {
-            self.editing.hosts -= 1;
+        if self.selection_host() == Some(id) {
+            // The node is out of the arenas already: no element state to
+            // clear, no selection to retain.
+            self.end_session();
         }
     }
 
-    /// The focused element, if any.
+    /// The focused element, if any: the selection host of a focused session.
     #[must_use]
     pub fn focused(&self) -> Option<NodeId> {
+        self.focused_session().map(|session| session.host)
+    }
+
+    /// The session, when it is the focused editing host's.
+    pub(crate) fn focused_session(&self) -> Option<&Session> {
+        self.editing
+            .session
+            .as_ref()
+            .filter(|session| session.focused)
+    }
+
+    /// The element the document's selection is in: the focused editing
+    /// host, or the selectable element [`Self::begin_selection`] started a
+    /// session in. `None` while the document has no selection.
+    #[must_use]
+    pub fn selection_host(&self) -> Option<NodeId> {
         self.editing.session.as_ref().map(|session| session.host)
+    }
+
+    /// Whether `node`'s text can be selected: the used value of its
+    /// `user-select` is not `none`, as of the last style flush. css-ui-4
+    /// "Content Selection" resolves `auto` from the parent's used value —
+    /// `none` under `none`, `all` under `all`, `text` otherwise, `contain`
+    /// for an editable element — so the nearest flat-tree ancestor-or-self
+    /// whose computed value is not `auto` decides, and the root's `auto` is
+    /// `text`. A text node takes its parent's; an element no flush has
+    /// styled yet counts as `auto`.
+    #[must_use]
+    pub fn is_user_selectable(&self, node: NodeId) -> bool {
+        let mut current = self.get(node);
+        while let Some(here) = current {
+            if here.is_element()
+                && let Some(style) = here.layout_computed_style()
+                && *style.get_user_select() != UserSelect::Auto
+            {
+                return *style.get_user_select() != UserSelect::None;
+            }
+            current = here.flat_parent();
+        }
+        true
+    }
+
+    /// The selectable element `node` is in: the nearest inclusive ancestor,
+    /// through parent links, that is being rendered and establishes a
+    /// committed paragraph, when both it and `node` can be selected
+    /// ([`Self::is_user_selectable`]). An element with no paragraph of its
+    /// own — a nested Lynx text, whose text the paragraph around it lays out
+    /// — is passed over for the one above it. `None` when `node` cannot be
+    /// selected or no such ancestor can hold the selection.
+    #[must_use]
+    pub fn selectable_root_of(&self, node: NodeId) -> Option<NodeId> {
+        if !self.is_user_selectable(node) {
+            return None;
+        }
+        let mut current = Some(node);
+        while let Some(id) = current {
+            let here = self.get(id)?;
+            if here.is_element() && self.is_rendered(id) && self.paragraph_node_of(id).is_some() {
+                return self.holds_selection(id).then_some(id);
+            }
+            current = here.parent_id();
+        }
+        None
+    }
+
+    /// Whether `root` can hold a selectable element's session: it can be
+    /// selected ([`Self::is_user_selectable`]), is in the document (a
+    /// shadow tree's host counting), is being rendered, and has a committed
+    /// paragraph.
+    fn holds_selection(&self, root: NodeId) -> bool {
+        self.is_shadow_including_connected(root)
+            && self.is_rendered(root)
+            && self.paragraph_node_of(root).is_some()
+            && self.is_user_selectable(root)
+    }
+
+    /// Starts the document's selection in the selectable element `root`,
+    /// collapsed at the start of its selection text, as offsets the next
+    /// layout pass places in its paragraph. Refused with `false`, changing
+    /// nothing, unless `root` can be selected ([`Self::is_user_selectable`]),
+    /// is in the document, is being rendered and has a committed paragraph.
+    /// A session already in `root` is kept and answers `true`.
+    ///
+    /// A focused editing host is blurred first, with its `blur` and
+    /// `focusout` queued and its selection retained, as [`Self::blur`] does:
+    /// a browser's press on content that cannot be focused blurs the
+    /// focused element. Sets the `selectionchange` flag.
+    pub fn begin_selection(&mut self, root: NodeId) -> bool {
+        if !self.holds_selection(root) {
+            return false;
+        }
+        if self.selection_host() == Some(root) {
+            return true;
+        }
+        if let Some(focused) = self.focused() {
+            self.unfocus(focused, None);
+        }
+        self.editing.session = Some(Session::selectable(root));
+        self.editing.selectionchange_pending = true;
+        self.note_visual_mutation();
+        true
+    }
+
+    /// Ends the document's selection when it is a selectable element's,
+    /// setting the `selectionchange` flag, and answers whether there was
+    /// one. A focused editing host's session is left alone (`false`):
+    /// [`Self::blur`] ends that.
+    pub fn clear_selection(&mut self) -> bool {
+        if self
+            .editing
+            .session
+            .as_ref()
+            .is_none_or(|session| session.focused)
+        {
+            return false;
+        }
+        self.end_session();
+        true
+    }
+
+    /// Ends the session with no event and no retained selection, setting
+    /// the `selectionchange` flag: a selectable element's ending, or any
+    /// session whose host was freed.
+    fn end_session(&mut self) {
+        self.editing.session = None;
+        self.editing.selectionchange_pending = true;
+        self.note_visual_mutation();
+    }
+
+    /// The text the session's offsets index: the focused host's value
+    /// ([`Self::host_value`]), or the source text of a selectable element's
+    /// paragraph, an atomic inline box as one U+FFFC
+    /// ([`Self::paragraph_source_text`]). Rebuilt on every call; empty for a
+    /// selectable element whose paragraph is gone.
+    pub(crate) fn session_text(&self, session: &Session) -> String {
+        if session.focused {
+            return self.host_value(session.host);
+        }
+        self.paragraph_node_of(session.host)
+            .and_then(|paragraph| self.paragraph_source_text(paragraph))
+            .unwrap_or_default()
+    }
+
+    /// The selected text of `root`'s selection: the part of its selection
+    /// text ([`Self::session_text`]) between the two boundary points, an
+    /// atomic inline box as U+FFFC, and `""` for a collapsed selection.
+    /// `None` when the document's selection is not in `root`. A selection
+    /// held in a paragraph that cannot read it back answers `""`, as
+    /// [`Self::selection`] reports it collapsed at the end.
+    #[must_use]
+    pub fn selected_text(&self, root: NodeId) -> Option<String> {
+        let session = self
+            .editing
+            .session
+            .as_ref()
+            .filter(|session| session.host == root)?;
+        let text = self.session_text(session);
+        let range = session
+            .bytes(self.session_paragraph(session).as_ref(), &text)
+            .map_or(text.len()..text.len(), |bytes| bytes.clamped(&text).range());
+        Some(text[range].to_owned())
     }
 
     /// Focuses `node`, which must be a connected editing host that is being
@@ -450,6 +645,9 @@ impl<T> Document<T> {
     /// retained ([`Self::host_selection`]), clamped to its value as it is
     /// now, or a collapsed caret at the start of its value when it has
     /// none (HTML's `contenteditable` focus).
+    ///
+    /// A selectable element's session ([`Self::begin_selection`]) is
+    /// replaced, with no event: the document's selection moves to `node`.
     pub fn focus(&mut self, node: NodeId) -> bool {
         if !self.is_editing_host(node)
             || !self.is_shadow_including_connected(node)
@@ -534,23 +732,24 @@ impl<T> Document<T> {
         std::mem::take(&mut self.editing.selectionchange_pending)
     }
 
-    /// The document's selection: the focused editing host's, its anchor and
-    /// focus as UTF-16 unit offsets into the host's value, or `None` while
-    /// nothing is focused (the module's "The document's selection").
+    /// The document's selection: the selection host's, its anchor and focus
+    /// as UTF-16 unit offsets into the selection text — the focused host's
+    /// value, or a selectable element's paragraph source units — or `None`
+    /// while there is none (the module's "The document's selection").
     ///
     /// Read as [`Self::host_selection`] reads the focused host's: a selection
-    /// held in a paragraph that cannot read it back as value offsets is
-    /// reported collapsed at the value's end, as [`Self::text_input_state`]
-    /// reports it. The two points stay apart here, where `host_selection`
-    /// orders them, because a reader of the document's selection needs its
-    /// direction.
+    /// held in a paragraph that cannot read it back as offsets of the
+    /// selection text is reported collapsed at the text's end, as
+    /// [`Self::text_input_state`] reports it. The two points stay apart
+    /// here, where `host_selection` orders them, because a reader of the
+    /// document's selection needs its direction.
     #[must_use]
     pub fn selection(&self) -> Option<DocumentSelection> {
         let session = self.editing.session.as_ref()?;
         let host = session.host;
-        let value = self.host_value(host);
+        let value = self.session_text(session);
         let bytes = session
-            .bytes(self.editable_paragraph(host).as_ref(), &value)
+            .bytes(self.session_paragraph(session).as_ref(), &value)
             .unwrap_or_else(|| ByteSelection::collapsed(value.len(), Affinity::Downstream));
         let to_units =
             |byte: usize| u32::try_from(offsets::unit_of_byte(&value, byte)).unwrap_or(u32::MAX);
@@ -572,9 +771,7 @@ impl<T> Document<T> {
     pub fn host_selection(&self, host: NodeId) -> Option<Range<u32>> {
         let value = self.host_value(host);
         let bytes = match self
-            .editing
-            .session
-            .as_ref()
+            .focused_session()
             .filter(|session| session.host == host)
         {
             // As `text_input_state` reads it: a selection the paragraph
@@ -594,7 +791,7 @@ impl<T> Document<T> {
     /// paragraph that cannot read it back as value offsets
     /// ([`Session::bytes`]) retains nothing new.
     fn retain_selection(&mut self) {
-        let Some(session) = self.editing.session.as_ref() else {
+        let Some(session) = self.focused_session() else {
             return;
         };
         let host = session.host;
@@ -629,17 +826,27 @@ impl<T> Document<T> {
         ]);
     }
 
-    /// HTML's focus fixup rule: a focused element that left the document or
-    /// stopped being an editing host is no longer focused, and no event says
-    /// so. Called from the removal path and the attribute setters.
-    pub(crate) fn fix_up_focus(&mut self) {
-        let Some(host) = self.focused() else {
+    /// HTML's focus fixup rule, and its counterpart for a selectable
+    /// element: a focused element that left the document or stopped being an
+    /// editing host is no longer focused, and a selectable element's session
+    /// ends when the element left the document, stopped being selectable,
+    /// stopped being rendered or lost its paragraph. No event says so; the
+    /// `selectionchange` flag is set. Called from the removal path and the
+    /// attribute setters; a style change reaches it through
+    /// [`Self::refresh_editing_after_layout`].
+    pub(crate) fn fix_up_selection(&mut self) {
+        let Some(session) = self.editing.session.as_ref() else {
             return;
         };
-        if self.is_editing_host(host) && self.is_shadow_including_connected(host) {
-            return;
+        let host = session.host;
+        if session.focused {
+            if self.is_editing_host(host) && self.is_shadow_including_connected(host) {
+                return;
+            }
+            self.drop_focus(host);
+        } else if !self.holds_selection(host) {
+            self.end_session();
         }
-        self.drop_focus(host);
     }
 
     /// Unfocuses `host` with no event: the fixup rule's ending. The host
@@ -726,25 +933,34 @@ impl<T> Document<T> {
     }
 
     /// After a layout pass: drops the focus of a host that is no longer
-    /// rendered (the fixup rule, no event), then places the focused host's
-    /// selection in the paragraph the pass committed — from the pending
-    /// offsets after a value change, with [`Selection::refresh`] otherwise.
+    /// rendered (the fixup rule, no event), and ends a selectable element's
+    /// session when the element no longer holds one — not rendered, no
+    /// paragraph ([`Self::fix_up_selection`]'s rule). Then places the
+    /// session's selection in the paragraph the pass committed — from the
+    /// pending offsets after a change, with [`Selection::refresh`] otherwise.
     /// Offsets the paragraph cannot show stay pending, and a host with no
-    /// paragraph keeps its selection as value offsets. Clamps a composition
-    /// that a script's own edit left past the value's end.
+    /// paragraph keeps its selection as value offsets. For a focused host,
+    /// clamps a composition that a script's own edit left past the value's
+    /// end.
     pub(crate) fn refresh_editing_after_layout(&mut self) {
-        let Some(host) = self.focused() else {
-            return;
-        };
-        if !self.is_rendered(host) {
-            self.drop_focus(host);
-            return;
-        }
-        let value = self.host_value(host);
         let Some(session) = self.editing.session.as_ref() else {
             return;
         };
-        let (selection, pending) = match self.editable_paragraph(host) {
+        let host = session.host;
+        let focused = session.focused;
+        if focused && !self.is_rendered(host) {
+            self.drop_focus(host);
+            return;
+        }
+        if !focused && !self.holds_selection(host) {
+            self.end_session();
+            return;
+        }
+        let Some(session) = self.editing.session.as_ref() else {
+            return;
+        };
+        let value = self.session_text(session);
+        let (selection, pending) = match self.session_paragraph(session) {
             Some(paragraph) => match session.pending {
                 Some(bytes) => match paragraph.place(&value, bytes) {
                     Some(placed) => (placed, None),
@@ -766,10 +982,11 @@ impl<T> Document<T> {
             .editing
             .session
             .as_mut()
-            .expect("a focused element has a session");
+            .expect("the session was read above");
         session.selection = selection;
         session.pending = pending;
-        if let Some(composition) = &session.composition
+        if focused
+            && let Some(composition) = &session.composition
             && (composition.end > value.len() || composition.start >= composition.end)
         {
             session.composition = None;

@@ -517,7 +517,9 @@ Each blocks replicas that could not be written at all.
   pass; the first now also asserts the `dataset` the detail carries
   (`docs/tracking/deviations.md`).
 - **`__AddClass`** and the `enableCSSSelector=false` cascade.
-- **Text selection.** No selection model anywhere; `text-selection` is inert.
+- **Text selection.** *Opened 2026-10-20.* A `text-selection` text holds the
+  document's selection (`getSelectedText`, `setTextSelection`, the pointer
+  gesture); no replica has been written against it yet.
 - **Editable text controls.** No `<input>` or `<textarea>`; 54 catalogued cases
   are specified but unwritable.
 - **`scrollIntoView`** and its CSSOM-View alignment computation. *Since

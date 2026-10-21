@@ -944,14 +944,15 @@ fn wavy_path(band: &DecorationBand) -> BezPath {
 /// blue for a focused selection, opaque, painted behind the glyphs.
 const SELECTION_BACKGROUND: Color = Color::from_rgba8(0xB4, 0xD5, 0xFE, 0xFF);
 
-/// What the focused editing host paints under and over its paragraph
-/// (`crate::editing`): the selection highlight, the caret, and the IME
-/// composition's underline.
+/// What the selection host paints under and over its paragraph
+/// (`crate::editing`): the selection highlight, and for the focused editing
+/// host the caret and the IME composition's underline.
 pub(crate) struct EditingPaint {
     selection: parley::Selection,
     composition: Option<core::ops::Range<usize>>,
     /// The caret's colour; `None` while the selection is a range, which
-    /// shows no caret.
+    /// shows no caret, and for a selectable element selected without focus,
+    /// which has none.
     caret: Option<Color>,
     /// The composition underline's colour: the host's text colour.
     underline: Color,
@@ -960,13 +961,15 @@ pub(crate) struct EditingPaint {
 }
 
 impl EditingPaint {
-    /// The editing state the paragraph `node` paints: `node` is the focused
-    /// host's paragraph — the host itself, or the anonymous block box around
-    /// its text ([`crate::tree::anonymous`]) — and `style` its style.
+    /// The editing state the paragraph `node` paints: `node` is the
+    /// selection host's paragraph — the host itself, or the anonymous block
+    /// box around its text ([`crate::tree::anonymous`]) — and `style` its
+    /// style.
     ///
-    /// The session's offsets are the value's; they reach the layout through
-    /// the paragraph's source map, an offset the layout does not show (past
-    /// a truncation cut) painted at the end of what it shows.
+    /// The session's offsets are its selection text's — a focused host's
+    /// value, a selectable element's paragraph source text; they reach the
+    /// layout through the paragraph's source map, an offset the layout does
+    /// not show (past a truncation cut) painted at the end of what it shows.
     pub(crate) fn of<T>(
         document: &crate::Document<T>,
         node: crate::NodeId,
@@ -977,13 +980,13 @@ impl EditingPaint {
         if node != host && document.arenas().anonymous_container(node) != Some(host) {
             return None;
         }
-        let paragraph = document.editable_paragraph(host)?;
+        let paragraph = document.session_paragraph(session)?;
         if paragraph.node != node {
             return None;
         }
-        let value = document.host_value(host);
+        let value = document.session_text(session);
         let selection = session.selection_in(&paragraph, &value);
-        let caret = selection.is_collapsed().then(|| caret_color(style));
+        let caret = (session.focused && selection.is_collapsed()).then(|| caret_color(style));
         let composition = session.composition.as_ref().map(|range| {
             paragraph.layout_byte_clamped(&value, range.start)
                 ..paragraph.layout_byte_clamped(&value, range.end)
@@ -1010,7 +1013,7 @@ pub(crate) fn empty_host_caret<T>(
     node: crate::NodeId,
     style: &ComputedValues,
 ) -> Option<(Rect, Color)> {
-    let session = document.editing.session.as_ref()?;
+    let session = document.focused_session()?;
     if session.host != node || document.editable_paragraph(node).is_some() {
         return None;
     }
@@ -1255,5 +1258,46 @@ mod tests {
         let strike = band(5.0, 40.0, 20.0, 8.0, 1.0);
         assert_near(strike.top, 12.0);
         assert_near(strike.centerline(), 12.5);
+    }
+
+    /// The selection highlight paints for a selectable element's session,
+    /// which never shows a caret; a focused host's collapsed selection does.
+    #[test]
+    fn a_selectable_root_paints_its_selection_and_no_caret() {
+        let mut doc = crate::Document::new(crate::tree::document::tests::device(), "page", ());
+        crate::test_common::define_lynx_text(&mut doc, "text");
+        doc.register_fonts(crate::FontBlob::from_static(AHEM));
+        doc.add_stylesheet(
+            "page { display: flex; align-items: flex-start; font-family: Ahem; \
+             font-size: 10px; line-height: 10px; }",
+            crate::StylesheetOrigin::Author,
+        );
+        let root = doc.create_element("text", ());
+        doc.set_inline_style(root, "user-select: text;");
+        doc.append_child(doc.document_element().id(), root);
+        let text = doc.create_text_node("hello", ());
+        doc.append_child(root, text);
+        doc.layout();
+        assert!(doc.begin_selection(root));
+        doc.layout();
+        let paint = |doc: &crate::Document<()>| {
+            EditingPaint::of(doc, root, doc.paint_style(root).expect("styled"))
+                .expect("the selection host paints its selection")
+        };
+        let collapsed = paint(&doc);
+        assert!(collapsed.selection.is_collapsed());
+        assert!(collapsed.caret.is_none(), "collapsed, but not focused");
+        assert!(
+            doc.apply_editing(crate::editing::Command::SetSelection { range: 1..3 })
+                .applied
+        );
+        let range = paint(&doc);
+        assert_eq!(range.selection.text_range(), 1..3);
+        assert!(range.caret.is_none());
+
+        doc.set_attribute(root, "contenteditable", "");
+        assert!(doc.focus(root));
+        doc.layout();
+        assert!(paint(&doc).caret.is_some(), "a focused host's caret");
     }
 }

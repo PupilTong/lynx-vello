@@ -2054,8 +2054,10 @@ extends. The slot routes those names on an editing account of its own, by
 state (`editing::EditingRoute`), one more term of `DocumentSlot::routes_given`
 beside the listener table and the observed names, whose changes go out through
 `DocumentSlot::change_names` after the waiting last removals: `pointerdown`
-and `click` while `Document::has_editing_hosts()`, `keydown` while an element
-is focused (both from the page's epilogue, `DocumentSlot::sync_editing_routes`),
+and `click` from the page's first epilogue on (a press selects any text whose
+used `user-select` is not `none`, and a press outside everything blurs and
+clears), `keydown` while an element is focused (both from the page's epilogue,
+`DocumentSlot::sync_editing_routes`),
 and `pointermove`/`pointerup`/`pointercancel` only while a mouse drag is held
 (`MainThreadRuntime::set_pressed`, inside the press's job). The kernel is not
 a registrant in the listener table, so an event routed only on that account
@@ -2295,8 +2297,10 @@ is written inside), `tree::text` (the paragraph attribute limits and what may
 generate a box inside a run, and a `text` component whose
 `CustomElement::invoke` answers `getTextBoundingRect` with the per-line boxes
 `Document::text_range_boxes` reads off the committed paragraph, in viewport
-px; `getSelectedText` and `setTextSelection` are not built, there being no
-selection model), `tree::image` (the `src`-to-replaced-content
+px, and, for a `text-selection` text — `user-select` in its UA rules, so
+a pointer selects it without focus — `getSelectedText` and
+`setTextSelection` over the document's selection),
+`tree::image` (the `src`-to-replaced-content
 reflection and its UA box), `tree::scroll_container` (`scroll-view` and
 `list` as scroll containers — which axis scrolls, which one clips, and which
 way the subtree stacks, from `web-elements`' own `scroll-view.css` and
@@ -3546,9 +3550,9 @@ Subsystems:
   (`hughie::text::paragraph::OffsetMap`), the
   Chromium-shaped command set with
   its `beforeinput`/`input`/`composition*` events reported as data
-  (`prepare_editing`/`commit_editing`), `TextInputState`, and the count of
-  editing hosts an embedder routes input by (`has_editing_hosts`, kept by the
-  `contenteditable` setters and `free_node`). The caret, selection highlight
+  (`prepare_editing`/`commit_editing`), `TextInputState`, and the read-only
+  selection of an element whose used `user-select` is not `none`
+  (`is_user_selectable`, `selectable_root_of`, `begin_selection`). The caret, selection highlight
   and composition underline are painted by `paint/text.rs`. `bobcat-core`'s
   `main/runtime/editing.rs` dispatches the events and runs the default
   actions (E2); the events cross as `EventDetail::{Input, Composition,
@@ -4065,13 +4069,13 @@ would host it:
   standard two, the five list methods on `list` only, whose `scrollBy`
   shadows the standard one, the refresh view's three on `x-refresh-view`
   only, `setFoldExpanded` on `scroll-coordinator` and `x-foldview-ng` only,
-  `getTextBoundingRect` on `text` only, the dialog's on `dialog` only) through
+  `getTextBoundingRect`, `getSelectedText` and `setTextSelection` on `text`
+  only, the dialog's on `dialog` only) through
   `__InvokeUIMethod`; every other name — the base set's `focus`/`blur` (no
   focus model), a `scroll-view`'s `takeContentScreenshot`,
   a `list`'s `getScrollInfo`, a scroll coordinator's
   `getScrollInfo`, an `image`'s four animation methods (nothing plays image
-  frames), a `text`'s `getSelectedText` and `setTextSelection` (no
-  selection model), `requestUIInfo`,
+  frames), `requestUIInfo`,
   `takeScreenshot` (no pixel readback) and the rest of the per-component
   catalog — answers code 3, `METHOD_NOT_FOUND`. The rect itself ignores
   transforms and never flushes.

@@ -331,6 +331,24 @@ impl SourceMap {
         self.final_empty_line
     }
 
+    /// How many atomic boxes the source units before `unit` hold: the box
+    /// segments whose unit is less than `unit`. Each box counts one source
+    /// unit and is no text, so `unit - boxes_before(unit)` is the offset of
+    /// `unit` in the text alone. Only the shown source content has
+    /// segments ([`Self::shown_len`]), so a box past it is not counted.
+    pub(in crate::text) fn boxes_before(&self, unit: u32) -> u32 {
+        // The segments are in unit order, so the ones starting before
+        // `unit` are a prefix.
+        let before = self
+            .segments
+            .partition_point(|segment| segment.units.start < unit);
+        let boxes = self.segments[..before]
+            .iter()
+            .filter(|segment| segment.kind == SegmentKind::Box)
+            .count();
+        u32::try_from(boxes).expect("a box count fits u32")
+    }
+
     /// Source unit of a normalized byte offset used as a *start*: the unit
     /// of the character at that byte. A box or a dropped whitespace span
     /// sharing the byte lies before that character and is not part of what
@@ -1393,6 +1411,24 @@ mod tests {
         assert_eq!(block.map.unit_to_byte(&block.text, 3), Some(2));
         assert_eq!(block.map.byte_to_unit(&block.text, 2), 4);
         assert_eq!(block.map.byte_to_unit(&block.text, 3), 5);
+    }
+
+    #[test]
+    fn boxes_before_counts_the_boxes_whose_unit_lies_before() {
+        let style = RunStyle::default();
+        let items = [
+            atom(1),
+            run(&style, "ab"),
+            atom(2),
+            atom(3),
+            run(&style, "c"),
+        ];
+        let block = normalize(&items);
+        // Units: box=0, 'a'=1, 'b'=2, box=3, box=4, 'c'=5.
+        assert_eq!(block.map.source_len(), 6);
+        let counts: Vec<u32> = (0..=6).map(|unit| block.map.boxes_before(unit)).collect();
+        assert_eq!(counts, [0, 1, 1, 1, 2, 3, 3]);
+        assert_eq!(normalize(&[run(&style, "abc")]).map.boxes_before(3), 0);
     }
 
     #[test]
