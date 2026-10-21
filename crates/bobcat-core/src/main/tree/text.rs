@@ -2262,6 +2262,10 @@ mod tests {
     /// coordinate clears this element's selection; bad params are code 4 and
     /// an element that cannot hold the selection code 8.
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one scenario over the selection, its boxes and both handles"
+    )]
     fn set_text_selection_selects_between_two_points_and_answers_boxes_and_handles() {
         const AHEM: &[u8] = include_bytes!("../../../../seldon/tests/fixtures/Ahem.ttf");
         let mut document = document();
