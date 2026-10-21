@@ -60,7 +60,7 @@ Landed and not to be regressed:
   decision (`docs/style-assumptions.md` §24): **do not add the
   not-implemented parts** — `inline-grid-lanes`, the orientation property and
   `grid-auto-flow: normal`, `dense` backfilling, intrinsic
-  `repeat(auto-fill, auto)`, §3.4.2 virtual-item grouping, stacking-axis
+  `repeat(auto-fill, auto)`, §3.4.2 virtual-item grouping for spanning items (span-1 items are grouped since the 2026-10-21 ruling), stacking-axis
   self-alignment, baseline alignment/sharing, subgrid, fragmentation —
   without a user decision. It exists to carry
   `<list list-type="waterfall">`; the placement differences from Lynx's own
