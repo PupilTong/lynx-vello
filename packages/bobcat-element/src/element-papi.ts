@@ -5,6 +5,7 @@ import {
   createDocument,
   createElement,
   createPage,
+  dispatchEvent,
   dropElement,
   flushElementTree,
   getAttribute,
@@ -24,6 +25,7 @@ import {
   swapElement,
   switchExposure,
   tagName,
+  timelineMilliseconds,
 } from "bobcat-internal:host";
 import type { NodeQueryRequest, QueryNode } from "bobcat:selector-query";
 import { __BobcatPublishEvent, __BobcatSendExposureRecords } from "bobcat:runtime";
@@ -85,6 +87,8 @@ import { frameConnectionChanged, frameDataChanged, frameSourceChanged } from "bo
 // | `__RemoveEventListener(element, name, callback, options?)` | this runtime's own store |
 // | `__StopPropagation(event)` | the event object's own method |
 // | `__StopImmediatePropagation(event)` | the event object's own method |
+// | `__CreateEvent(type, name, options, detail)` | native `timelineMilliseconds` export; the event object is this runtime's |
+// | `__DispatchEvent(element, event)` | native `dispatchEvent` export + this runtime's own walk |
 // | `__GetPageElement()` | the page handle `__CreatePage` minted |
 // | `__QuerySelector(element, selector, params)` | native `queryElementIds` export + this runtime's handle index |
 // | `__QuerySelectorAll(element, selector, params)` | native `queryElementIds` export + this runtime's handle index |
@@ -264,11 +268,35 @@ import { frameConnectionChanged, frameDataChanged, frameSourceChanged } from "bo
 // events this carries today: web-core builds both with `bubbles: false`
 // (`web-elements/src/elements/common/commonEventInitConfiguration.ts`).
 //
-// Both stop methods are pure local state. `stopPropagation` ends the
-// remaining steps of this realm's walk and `stopImmediatePropagation` also
-// skips the rest of the current node's registrations; neither crosses the
-// boundary, as web-core's never reach the DOM event: the kernel's walk, the
-// components' and the other realms' go on.
+// Both stop methods are pure local state, kept on the event object under a
+// realm-local symbol. `stopPropagation` ends the remaining steps of this
+// realm's walk and `stopImmediatePropagation` also skips the rest of the
+// current node's registrations; neither crosses the boundary, as web-core's
+// never reach the DOM event: the kernel's walk, the components' and the
+// other realms' go on.
+//
+// **A synthetic event runs the same walk.** `__CreateEvent(type, name,
+// options, detail)` and `__DispatchEvent(element, event)` are native's
+// renderer functions of the same names (`renderer_functions.cc:1216-1275`),
+// which nothing in lynx-stack or web-core has. `__CreateEvent` builds an event
+// object of the shape above, in no dispatch yet: `type` the name lowercased,
+// `detail` the given object by reference, `timestamp` read once from the
+// host's `timelineMilliseconds`, and `options.bubbles` and `options.composed`
+// (both false unless given) kept in its hidden state. Its numeric `type`,
+// `options.capture` and `options.cancelable` are accepted and ignored: the
+// capture pass always runs, as in web-core and DOM, and nothing is
+// cancelable here (below). `__DispatchEvent` hands the host's
+// `dispatchEvent(node, name, bubbles, composed, timestamp)` the element and
+// those facts; the host computes the path, runs the engine components' walk
+// over it to its end — so for a synthetic event the components hear it
+// before this realm's handlers do, the reverse of a routed dispatch (a user
+// ruling, 2026-10-22) — and answers the path as `"<nodes>;<targets>"`. This
+// file then runs the walk above over the steps it holds, the
+// `global-bindEvent` pass included when the event bubbles, and answers
+// `true`, since nothing cancels. No other realm hears the event: a frame
+// card's `composed` event does not reach the page realm's handlers. An event
+// whose dispatch is running cannot be dispatched again (a `TypeError`, where
+// DOM throws `InvalidStateError`); a finished one can.
 //
 // **What the host learns is the registrations, minus the callbacks.** Per
 // (element, name), the passes this realm's registrations there run in:
@@ -3028,8 +3056,11 @@ function datasetOf(nodeId: number): Record<string, unknown> {
  * One object for the whole dispatch, mutated as the passes advance, which is
  * both the standard's model and web-core's (`WASMJSBinding.ts` passes one
  * `LynxCrossThreadEvent` down its per-element loop): a property one listener
- * writes is there for the next. It is minted per dispatch and reachable from
- * nothing afterwards, so a listener that keeps one keeps only it.
+ * writes is there for the next. The host's dispatch mints one per dispatch,
+ * reachable from nothing afterwards, so a listener that keeps one keeps only
+ * it; `__CreateEvent` mints one the script holds and may dispatch more than
+ * once. Built by [`newEvent`], which puts the dispatch state under
+ * [`dispatchStateSymbol`].
  */
 interface DispatchedEvent {
   type: string;
@@ -4007,124 +4038,147 @@ function handlerInPass(
 }
 
 /**
- * One whole dispatch in this realm, the single call the host makes into it
- * per event, at the path's top step, with the whole path.
+ * Where an event object keeps the state of its dispatch, which no listener
+ * reads: the two stop flags, whether a dispatch of it is running, and, for
+ * an event `__CreateEvent` made, what it was created with.
  *
- * The host computed the path while it held the document and released it
- * before calling, which is what lets a listener mutate the tree. Everything
- * after that is this file's: the standard's capture pass from the far end of
- * the path inwards over the steps this realm holds handles for, its bubble
- * pass back out, then the `global-bindEvent` pass, which is not over the
- * path at all. A path with no step this realm holds — a frame's card
- * hearing a key — runs the global pass alone.
+ * A realm-local symbol, and a non-enumerable property, so a background
+ * handler's copy ([`backgroundEvent`]) and a listener enumerating the event
+ * never see it.
+ */
+const dispatchStateSymbol = Symbol("dispatchState");
+
+/** What [`dispatchStateSymbol`] holds. */
+interface DispatchState {
+  /**
+   * Whether the rest of the walk is skipped: set by either stop method, and
+   * by a `catch` form before its handlers run.
+   */
+  stopped: boolean;
+  /**
+   * Whether the rest of the current node's registrations is skipped: set by
+   * `stopImmediatePropagation`, cleared as each delivery is aimed.
+   */
+  immediate: boolean;
+  /**
+   * Whether a `__DispatchEvent` of this event is running, which is when a
+   * second one is refused — DOM's rule for an event whose dispatch flag is
+   * set.
+   */
+  dispatching: boolean;
+  /**
+   * What `__CreateEvent` made the event with; null for an event the host
+   * dispatched, which `__DispatchEvent` refuses, since the realm was never
+   * told whether it is composed.
+   */
+  created: CreatedEvent | null;
+}
+
+/**
+ * The facts `__CreateEvent` fixed, kept apart from the event's own
+ * properties so a listener writing `type` or `timestamp` does not change
+ * what a later `__DispatchEvent` of the event asks the host for.
+ */
+interface CreatedEvent {
+  name: string;
+  bubbles: boolean;
+  composed: boolean;
+  timestamp: number;
+}
+
+/**
+ * A new event object, in no dispatch yet: `eventPhase` `NONE`, no
+ * `currentTarget`, and the two stop methods, which set its hidden state.
+ * The host's dispatch and `__CreateEvent` both build theirs here.
+ */
+function newEvent(
+  name: string,
+  target: DispatchedEvent["target"],
+  detail: EventDetail,
+  timestamp: number,
+  created: CreatedEvent | null,
+): DispatchedEvent {
+  const state: DispatchState = {
+    stopped: false,
+    immediate: false,
+    dispatching: false,
+    created,
+  };
+  const event: DispatchedEvent = {
+    type: name,
+    eventPhase: NONE,
+    target,
+    currentTarget: null,
+    detail,
+    timestamp,
+    params: {},
+    stopPropagation: () => {
+      state.stopped = true;
+    },
+    stopImmediatePropagation: () => {
+      state.stopped = true;
+      state.immediate = true;
+    },
+  };
+  Object.defineProperty(event, dispatchStateSymbol, { value: state });
+  return event;
+}
+
+/** The hidden state of an event [`newEvent`] built, or undefined for any other value. */
+function dispatchStateOf(event: unknown): DispatchState | undefined {
+  if (typeof event !== "object" || event === null) {
+    return undefined;
+  }
+  return (event as { [dispatchStateSymbol]?: DispatchState })[dispatchStateSymbol];
+}
+
+/**
+ * The first step of `steps` this realm holds a handle for, whose target is
+ * this realm's `event.target`: the steps before it are another realm's or a
+ * UA component's shadow content. None — a frame's card hearing a key at the
+ * document element, which is no node of its tree, or a synthetic event whose
+ * target a component freed — leaves a global pass to run, or nothing at all.
+ */
+function firstHeldStep(steps: PathStep[]): PathStep | undefined {
+  return steps.find((step) => handleOf(step.node) !== undefined);
+}
+
+/**
+ * The Lynx walk of one event over the steps of its path this realm holds:
+ * the standard's capture pass from the far end of the path inwards, its
+ * bubble pass back out, then the `global-bindEvent` pass, which is not over
+ * the path at all. A path with no step this realm holds runs the global
+ * pass alone. The one walk both the host's dispatch
+ * ([`dispatchHostEvent`]) and a synthetic one ([`__DispatchEvent`]) run.
  *
  * `bubbles` narrows the last two and never the first: a non-bubbling event
  * binds on its at-target steps alone and runs no global pass. See the header.
  *
  * One event object serves all three, so a property one listener writes is
- * there for the next. Whatever ends the dispatch — the passes finishing, a
- * stop, or a listener throwing on its way out of this call — the standard's
- * last dispatch step runs: `eventPhase` back to `NONE` and `currentTarget`
- * to null, so an event a listener kept does not go on naming the node the
- * dispatch stopped on. `target` survives, as the standard leaves it.
+ * there for the next, and the stop flags are its hidden state. Whatever ends
+ * the walk — the passes finishing, a stop, or a listener throwing on its way
+ * out of this call — the standard's last dispatch step runs: `eventPhase`
+ * back to `NONE` and `currentTarget` to null, so an event a listener kept
+ * does not go on naming the node the dispatch stopped on. `target` survives,
+ * as the standard leaves it.
  *
  * A step whose handle is gone is skipped: its registrations lived on that
  * handle and went with it, and this is the window between the handle
  * becoming unreachable and the cleanup that frees its element.
- *
- * The host passes the facts it owns as numbers and this file builds the
- * objects: the `detail` out of the kind it named and the numbers behind it,
- * and — for a position detail — the three touch lists out of the four numbers
- * per point that follow. An event with no touch points carries no such keys
- * at all.
  */
-function dispatchEvent(
-  pathIds: unknown,
-  targetIds: unknown,
-  eventName: unknown,
-  bubbles: unknown,
-  timestamp: unknown,
-  extraCount: unknown,
-  ...rest: unknown[]
+function walkEvent(
+  event: DispatchedEvent,
+  name: string,
+  steps: PathStep[],
+  first: PathStep | undefined,
+  bubbles: boolean,
 ): undefined {
-  // The extras' name/value pairs first, then the detail kind and its values,
-  // which run to the end because a touch event's points have no fixed count.
-  const pairs = Number(extraCount ?? 0) * 2;
-  const extras = pairs > 0 ? extrasOf(rest.slice(0, pairs)) : undefined;
-  const detailKind = rest[pairs];
-  const detailNumbers = rest.slice(pairs + 1);
-  const steps = pathSteps(pathIds, targetIds);
-  // The first step this realm holds a handle for, whose target is this
-  // realm's `event.target`: the steps before it are another realm's or a UA
-  // component's shadow content. None — a frame's card hearing a key at the
-  // document element, which is no node of its tree — leaves a global pass
-  // to run, or nothing at all.
-  const first = steps.find((step) => handleOf(step.node) !== undefined);
   if (first === undefined && !bubbles) {
     return undefined;
   }
-  const name = String(eventName).toLowerCase();
-  let stopped = false;
-  let immediate = false;
-  // No node yet for a dispatch with no step held: its first delivery names
-  // one.
+  const state = dispatchStateOf(event) as DispatchState;
+  // No node yet for a walk with no step held: its first delivery names one.
   let targetNodeId = first?.target ?? NaN;
-  // A reading the host could not take — a detached painter's, say — reports
-  // the time origin rather than `NaN`.
-  const stamp = Number(timestamp ?? 0);
-  const kind = Number(detailKind);
-  // Read once, and only for a dispatch with a position to shape.
-  const origin = kind === DETAIL_POSITION ? pageOrigin() : VIEW_ORIGIN;
-  // The Lynx `detail`: the extras when the host sent any (built into the
-  // layout events' own shapes), the default shaping of the W3C payload
-  // otherwise.
-  const detail = extras === undefined
-    ? detailOf(kind, detailNumbers, targetNodeId, origin)
-    : layoutDetailOf(name, extras, targetNodeId);
-  const event: DispatchedEvent = {
-    type: name,
-    eventPhase: NONE,
-    // With no step held, it is set by the first delivery, before any
-    // listener reads it.
-    target: first === undefined
-      ? (null as unknown as DispatchedEvent["target"])
-      : targetInfo(targetNodeId),
-    currentTarget: null,
-    detail,
-    timestamp: Number.isNaN(stamp) ? 0 : stamp,
-    params: {},
-    stopPropagation: () => {
-      stopped = true;
-    },
-    stopImmediatePropagation: () => {
-      stopped = true;
-      immediate = true;
-    },
-  };
-  // Assigned rather than declared above, so an event that carries no touches
-  // has no such keys at all — the transport would carry three
-  // `undefined`-valued ones to a background handler otherwise. Only a
-  // position detail can have any: its first eight values are the position,
-  // the wheel delta and the pointer members, and the points follow them.
-  const lists = kind === DETAIL_POSITION
-    ? touchLists(detailNumbers.slice(8), origin)
-    : undefined;
-  if (lists !== undefined) {
-    Object.assign(event, lists);
-  }
-  if (kind === DETAIL_POSITION) {
-    const members = positionMembers(name, detailNumbers, origin);
-    if (members !== undefined) {
-      Object.assign(event, members);
-    }
-  }
-  if (kind === DETAIL_KEY) {
-    Object.assign(event, keyMembers(detailNumbers));
-  }
-  const editing = editingMembers(kind, detailNumbers);
-  if (editing !== undefined) {
-    Object.assign(event, editing);
-  }
 
   // Points the event at one delivery. `currentTarget` is rebuilt per step,
   // as web-core rebuilds it per listener invocation; `target` is kept while
@@ -4134,7 +4188,7 @@ function dispatchEvent(
   // steps after it. `id` is deliberately not refreshed; see the
   // cached-target note in docs/tracking/dom-events.md.
   const aim = (node: number, target: number, phase: number): undefined => {
-    immediate = false;
+    state.immediate = false;
     event.eventPhase = phase;
     event.currentTarget = targetInfo(node);
     if (target === targetNodeId) {
@@ -4151,7 +4205,7 @@ function dispatchEvent(
   // its global-bind delivery.
   const runPass = (ordered: PathStep[], phase: 0 | 1): undefined => {
     for (const step of ordered) {
-      if (stopped) {
+      if (state.stopped) {
         return undefined;
       }
       const handle = handleOf(step.node);
@@ -4187,13 +4241,13 @@ function dispatchEvent(
       if (published !== undefined) {
         runEventHandler(published.handler, event);
       }
-      if (worklet !== undefined && !immediate) {
+      if (worklet !== undefined && !state.immediate) {
         runEventHandler(worklet.handler, event);
       }
       // Skipped whole when a handler above stopped immediate propagation:
       // the rest of this node's registrations is exactly what that
       // suppresses.
-      if (closures === undefined || immediate) {
+      if (closures === undefined || state.immediate) {
         continue;
       }
       // A copy, so a callback that adds or removes listeners for this same
@@ -4209,7 +4263,7 @@ function dispatchEvent(
           });
         }
         registration.callback(event);
-        if (immediate) {
+        if (state.immediate) {
           break;
         }
       }
@@ -4248,7 +4302,7 @@ function dispatchEvent(
       if (published !== undefined) {
         runEventHandler(published.handler, event);
       }
-      if (worklet !== undefined && !immediate) {
+      if (worklet !== undefined && !state.immediate) {
         runEventHandler(worklet.handler, event);
       }
     }
@@ -4275,6 +4329,204 @@ function dispatchEvent(
     event.currentTarget = null;
   }
   return undefined;
+}
+
+/**
+ * One whole dispatch in this realm, the single call the host makes into it
+ * per event, at the path's top step, with the whole path.
+ *
+ * The host computed the path while it held the document and released it
+ * before calling, which is what lets a listener mutate the tree. Everything
+ * after that is this file's: one event object, built here, and the Lynx walk
+ * over it ([`walkEvent`]).
+ *
+ * The host passes the facts it owns as numbers and this file builds the
+ * objects: the `detail` out of the kind it named and the numbers behind it,
+ * and — for a position detail — the three touch lists out of the four numbers
+ * per point that follow. An event with no touch points carries no such keys
+ * at all.
+ */
+function dispatchHostEvent(
+  pathIds: unknown,
+  targetIds: unknown,
+  eventName: unknown,
+  bubbles: unknown,
+  timestamp: unknown,
+  extraCount: unknown,
+  ...rest: unknown[]
+): undefined {
+  // The extras' name/value pairs first, then the detail kind and its values,
+  // which run to the end because a touch event's points have no fixed count.
+  const pairs = Number(extraCount ?? 0) * 2;
+  const extras = pairs > 0 ? extrasOf(rest.slice(0, pairs)) : undefined;
+  const detailKind = rest[pairs];
+  const detailNumbers = rest.slice(pairs + 1);
+  const steps = pathSteps(pathIds, targetIds);
+  const first = firstHeldStep(steps);
+  if (first === undefined && !bubbles) {
+    return undefined;
+  }
+  const name = String(eventName).toLowerCase();
+  const targetNodeId = first?.target ?? NaN;
+  // A reading the host could not take — a detached painter's, say — reports
+  // the time origin rather than `NaN`.
+  const stamp = Number(timestamp ?? 0);
+  const kind = Number(detailKind);
+  // Read once, and only for a dispatch with a position to shape.
+  const origin = kind === DETAIL_POSITION ? pageOrigin() : VIEW_ORIGIN;
+  // The Lynx `detail`: the extras when the host sent any (built into the
+  // layout events' own shapes), the default shaping of the W3C payload
+  // otherwise.
+  const detail = extras === undefined
+    ? detailOf(kind, detailNumbers, targetNodeId, origin)
+    : layoutDetailOf(name, extras, targetNodeId);
+  const event = newEvent(
+    name,
+    // With no step held, it is set by the first delivery, before any
+    // listener reads it.
+    first === undefined
+      ? (null as unknown as DispatchedEvent["target"])
+      : targetInfo(targetNodeId),
+    detail,
+    Number.isNaN(stamp) ? 0 : stamp,
+    null,
+  );
+  // Assigned rather than declared above, so an event that carries no touches
+  // has no such keys at all — the transport would carry three
+  // `undefined`-valued ones to a background handler otherwise. Only a
+  // position detail can have any: its first eight values are the position,
+  // the wheel delta and the pointer members, and the points follow them.
+  const lists = kind === DETAIL_POSITION
+    ? touchLists(detailNumbers.slice(8), origin)
+    : undefined;
+  if (lists !== undefined) {
+    Object.assign(event, lists);
+  }
+  if (kind === DETAIL_POSITION) {
+    const members = positionMembers(name, detailNumbers, origin);
+    if (members !== undefined) {
+      Object.assign(event, members);
+    }
+  }
+  if (kind === DETAIL_KEY) {
+    Object.assign(event, keyMembers(detailNumbers));
+  }
+  const editing = editingMembers(kind, detailNumbers);
+  if (editing !== undefined) {
+    Object.assign(event, editing);
+  }
+  return walkEvent(event, name, steps, first, Boolean(bubbles));
+}
+
+/**
+ * Native's `FiberCreateEvent` (`renderer_functions.cc:1216-1255`): a new
+ * event, in no dispatch yet, for [`__DispatchEvent`].
+ *
+ * The object is the shape every listener here is handed: `type` the name
+ * lowercased, as this file files and dispatches every name; `eventPhase`
+ * `NONE`; no `target` or `currentTarget` until it is dispatched; `detail`
+ * the object given, by reference, `{}` for a nullish one; `timestamp` the
+ * view timeline's reading now, in milliseconds (`timelineMilliseconds`), as
+ * native and DOM stamp an event when it is constructed; `params` `{}`; and
+ * the two stop methods. A `detail` or `options` that is neither an object nor
+ * nullish is a `TypeError`, as native requires an object for both.
+ *
+ * `options.bubbles` and `options.composed`, both false unless given, are
+ * kept in the event's hidden state and read by `__DispatchEvent`. The
+ * numeric `type`, `options.capture` and `options.cancelable` are accepted
+ * and ignored: the capture pass always runs, as in web-core and DOM, and
+ * nothing here is cancelable (the 2026-08-17 ruling). See
+ * docs/tracking/deviations.md.
+ */
+export function __CreateEvent(
+  type: unknown,
+  name: unknown,
+  options: unknown,
+  detail: unknown,
+): object {
+  void type;
+  if (options !== undefined && options !== null && typeof options !== "object") {
+    throw new TypeError("__CreateEvent expects an object or nothing for its options");
+  }
+  if (detail !== undefined && detail !== null && typeof detail !== "object") {
+    throw new TypeError("__CreateEvent expects an object or nothing for its detail");
+  }
+  const init = (options ?? {}) as { bubbles?: unknown; composed?: unknown };
+  const lowered = String(name).toLowerCase();
+  const timestamp = timelineMilliseconds();
+  return newEvent(
+    lowered,
+    null as unknown as DispatchedEvent["target"],
+    (detail ?? {}) as EventDetail,
+    timestamp,
+    {
+      name: lowered,
+      bubbles: Boolean(init.bubbles),
+      composed: Boolean(init.composed),
+      timestamp,
+    },
+  );
+}
+
+/**
+ * Native's `FiberDispatchEvent` (`renderer_functions.cc:1257-1275`): runs an
+ * event `__CreateEvent` made at `element`, synchronously, and answers `true`
+ * — native answers whether the event was not cancelled, and nothing here
+ * cancels.
+ *
+ * The host's `dispatchEvent` computes the path from the element and the
+ * event's `bubbles` and `composed`, runs the engine components' walk over it
+ * first, and answers the path ([`pathSteps`]'s two lists, joined by `;`);
+ * this file then runs the same Lynx walk the host's dispatch runs
+ * ([`walkEvent`]) over the steps it holds, with `event.target` the target of
+ * the first of them. No other realm hears the event.
+ *
+ * A value that is not a handle, or not an event `__CreateEvent` made, is a
+ * `TypeError`; so is an event whose dispatch is running — DOM's
+ * `InvalidStateError` for a dispatch of a dispatching event, which this
+ * realm has no `DOMException` to throw. A finished event may be dispatched
+ * again, and starts with its stop flags clear.
+ */
+export function __DispatchEvent(element: unknown, event: unknown): boolean {
+  if (
+    typeof element !== "object" || element === null ||
+    typeof (element as Handle)[nodeIdSymbol] !== "number"
+  ) {
+    throw new TypeError("__DispatchEvent expects an element handle");
+  }
+  const state = dispatchStateOf(event);
+  if (state === undefined || state.created === null) {
+    throw new TypeError("__DispatchEvent expects an event __CreateEvent made");
+  }
+  if (state.dispatching) {
+    throw new TypeError("__DispatchEvent was given an event that is being dispatched");
+  }
+  const created = state.created;
+  const dispatched = event as DispatchedEvent;
+  state.dispatching = true;
+  state.stopped = false;
+  state.immediate = false;
+  try {
+    const answer = dispatchEvent(
+      nodeIdOf(element),
+      created.name,
+      created.bubbles,
+      created.composed,
+      created.timestamp,
+    );
+    const separator = answer.indexOf(";");
+    const steps = pathSteps(answer.slice(0, separator), answer.slice(separator + 1));
+    const first = firstHeldStep(steps);
+    dispatched.target = first === undefined
+      ? (null as unknown as DispatchedEvent["target"])
+      : targetInfo(first.target);
+    walkEvent(dispatched, created.name, steps, first, created.bubbles);
+  } finally {
+    dispatched.eventPhase = NONE;
+    dispatched.currentTarget = null;
+    state.dispatching = false;
+  }
+  return true;
 }
 
 export function __AddEventListener(
@@ -4397,4 +4649,4 @@ export function __FlushElementTree(): undefined {
 // The host calls this export once per dispatch, with the whole path. It is
 // deliberately not part of `MTS_CHUNK_PREAMBLE`'s PAPI imports; it is the
 // module-namespace return path from Rust into the realm.
-export { dispatchEvent as __BobcatDispatchEvent };
+export { dispatchHostEvent as __BobcatDispatchEvent };

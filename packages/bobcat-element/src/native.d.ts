@@ -304,6 +304,34 @@ interface BobcatNative {
    */
   listenerClosed(nodeId: number, eventName: string): void;
   /**
+   * The newest reading of the view's timeline the host was handed — the
+   * last frame's or vsync's — in milliseconds since the view was built, `0`
+   * before the first frame: the clock every event the host dispatches is
+   * stamped on. `__CreateEvent` reads it once, as it builds an event.
+   */
+  timelineMilliseconds(): number;
+  /**
+   * The host's half of `__DispatchEvent`: computes the path of an event
+   * named `eventName` (lowercased, as the realm files every name) at the
+   * live element `nodeId` from its `bubbles` and `composed` flags, runs the
+   * engine components' walk over it with an empty detail and `timestamp`,
+   * and answers the path the realm runs its own walk over, as one string:
+   * the target-first node ids, comma-joined, then `;`, then each step's
+   * shadow-retargeted target, position for position — the two lists
+   * `__BobcatDispatchEvent` is handed, without the shadow roots, the bubble
+   * steps and the nodes no longer live; `";"` for none. So the components
+   * hear the event before this realm's listeners, and no other realm hears
+   * it. A node that is not a live element, and a timestamp that is not a
+   * finite number, throw.
+   */
+  dispatchEvent(
+    nodeId: number,
+    eventName: string,
+    bubbles: boolean,
+    composed: boolean,
+    timestamp: number,
+  ): string;
+  /**
    * `lynx.stopExposure({sendEvent})` (`on` `0`) and `lynx.resumeExposure()`
    * (`on` `1`), as native runs them for one card: for the elements `ids`
    * names — comma-joined node ids, as `childElementIds` answers a list, `""`
@@ -494,6 +522,8 @@ declare module "bobcat-internal:host" {
   export function closeRealm(): void;
   export const listenerOpened: BobcatNative["listenerOpened"];
   export const listenerClosed: BobcatNative["listenerClosed"];
+  export const timelineMilliseconds: BobcatNative["timelineMilliseconds"];
+  export const dispatchEvent: BobcatNative["dispatchEvent"];
   export const switchExposure: BobcatNative["switchExposure"];
   export const setTimer: BobcatNative["setTimer"];
   export const clearTimer: BobcatNative["clearTimer"];

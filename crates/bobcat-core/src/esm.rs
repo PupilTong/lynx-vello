@@ -194,7 +194,8 @@ pub const MTS_CHUNK_PREAMBLE: &str = concat!(
     "__SetDataset, __GetDataset, __AddDataset, __SetInlineStyles, __AddInlineStyle, ",
     "__SetCSSId, __SetAttribute, __UpdateListCallbacks, __AddEvent, __GetEvent, ",
     "__GetEvents, __SetEvents, __AddEventListener, __RemoveEventListener, ",
-    "__StopPropagation, __StopImmediatePropagation, __GetPageElement, __QuerySelector, ",
+    "__StopPropagation, __StopImmediatePropagation, __CreateEvent, __DispatchEvent, ",
+    "__GetPageElement, __QuerySelector, ",
     "__QuerySelectorAll, __InvokeUIMethod, __GetComputedStyleByKey, __FlushElementTree ",
     "} from \"bobcat:element\"; ",
 );
