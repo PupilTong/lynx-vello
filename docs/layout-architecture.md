@@ -1466,7 +1466,20 @@ dispatches to it.
    §12.1. This per-run columns→rows correction is independent of the outer
    Grid layout phases: cyclic percentages are `auto` while finding an
    intrinsic container size, then resolve against that resulting size in a
-   final Grid sizing run.
+   final Grid sizing run. That run happens only when it can change the tracks
+   (`DefiniteRerun::moves_axis`): no provisional run sized the tracks at the
+   decided width, the gutter moved, or on some axis the percentage basis
+   moved and a track breadth, `fit-content()` limit, item `fit-content()`
+   size or (rows) a distributing `align-content` reads it, or the available
+   space moved from a min-content constraint, or from a max-content one
+   where the final size is not the tracks' used size (a `min-height`
+   stretching `auto` rows, a `max-height`, size containment), a flexible
+   track's factor is below 1, an `auto` minimum sits under a `min-content`
+   maximum, or an item spans several tracks none of them flexible.
+   Otherwise the run would repeat the provisional one up to float rounding,
+   and is skipped. An item whose geometry reads no percentage basis and
+   carries no intrinsic keyword (`GridItem::basis_free`) keeps its resolved
+   geometry across every refresh.
    The space the tracks are sized against is §12.1's available grid space,
    which has two cases only: the container's definite size, or the min- or
    max-content constraint it is measured under. A container whose size is

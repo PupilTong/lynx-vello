@@ -2706,6 +2706,7 @@ mod tests {
                 overflow: Point::new(Overflow::Visible, Overflow::Visible),
                 box_sizing: box_sizing::T::ContentBox,
                 margin_auto: crate::compute::util::EdgeMask::default(),
+                basis_free: false,
             },
             key: ItemKey {
                 node: TestRef(0),

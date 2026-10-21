@@ -530,6 +530,12 @@ pub(super) struct ItemGeometry {
     pub(super) overflow: Point<Overflow>,
     pub(super) box_sizing: box_sizing::T,
     pub(super) margin_auto: EdgeMask,
+    /// Grid's: every value above, and the item's insets, came out the same
+    /// against any percentage basis, and nothing fills a value in later (no
+    /// intrinsic keyword), so re-resolving the item against another basis is
+    /// a no-op. Only `grid::resolve_grid_item` sets it; every other resolver
+    /// leaves it false. It sits in the struct's padding.
+    pub(super) basis_free: bool,
 }
 
 impl ItemGeometry {
@@ -1233,6 +1239,7 @@ pub(super) fn resolve_item_geometry_with_bases(
         overflow,
         box_sizing,
         margin_auto: EdgeMask::from_margins(margin_value),
+        basis_free: false,
     }
 }
 

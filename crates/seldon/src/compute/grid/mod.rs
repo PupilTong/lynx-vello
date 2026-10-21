@@ -28,7 +28,7 @@ use sizing::{
     resolve_item_intrinsic_dimensions, size_tracks,
 };
 use stylo::computed_values::direction;
-use stylo::values::computed::{PositionProperty, Size as StyleSize};
+use stylo::values::computed::{Inset, PositionProperty, Size as StyleSize, TrackBreadth};
 use stylo::values::specified::align::AlignFlags;
 use tracks::{ExpandedTemplate, MAX_MATERIALIZED_TRACKS, build_axis_tracks, expand_template};
 use types::{Axis, GridItem, TrackSet, TrackSizingFunction};
@@ -219,6 +219,18 @@ where
     } else {
         defaults.justify_items
     };
+    let inset = style.inset();
+    // No size, min/max size, margin, padding or inset is a percentage (or an
+    // anchor function) and no size is an intrinsic keyword, so the geometry
+    // is the same against every basis and nothing fills it in later:
+    // `refresh_item_basis` leaves it as it is.
+    let mut geometry = geometry;
+    geometry.basis_free = !geometry.intrinsic.has_intrinsic()
+        && !crate::style::box_model_reads_percentage_basis(style)
+        && !inset_reads_basis(inset.left)
+        && !inset_reads_basis(inset.right)
+        && !inset_reads_basis(inset.top)
+        && !inset_reads_basis(inset.bottom);
     GridItem {
         geometry,
         key,
@@ -245,7 +257,7 @@ where
             minimum_behaves_auto(raw_min_size.width),
             minimum_behaves_auto(raw_min_size.height),
         ),
-        inset: resolve_insets(style.inset(), percentage_basis),
+        inset: resolve_insets(inset, percentage_basis),
         raw_min_content: Size::NONE,
         raw_max_content: Size::NONE,
         minimum_contribution: Size::NONE,
@@ -254,6 +266,19 @@ where
         measured_baseline: None,
         measured_last_descent: None,
         baseline_shim: 0.0,
+    }
+}
+
+/// Whether an inset resolves against a percentage basis: a percentage, or
+/// (conservatively) an anchor function.
+#[inline]
+fn inset_reads_basis(value: &Inset) -> bool {
+    match value {
+        Inset::LengthPercentage(lp) => lp.has_percentage(),
+        Inset::Auto => false,
+        Inset::AnchorFunction(_)
+        | Inset::AnchorSizeFunction(_)
+        | Inset::AnchorContainingCalcFunction(_) => true,
     }
 }
 
@@ -488,6 +513,111 @@ fn run_track_sizing<T>(
             align_content,
             scratch,
         );
+    }
+}
+
+/// What one axis of the provisional track-sizing run was sized against, and
+/// the size the container settled on: whether sizing the tracks again at the
+/// final definite size ([`DefiniteRerun::moves_axis`]) could change them.
+struct DefiniteRerun<'a> {
+    specs: &'a [tracks::AxisTrackSpec],
+    /// The provisional run's tracks.
+    tracks: &'a TrackSet,
+    /// The provisional run's percentage basis.
+    basis: Option<f32>,
+    /// The provisional run's available grid space.
+    available: AvailableSpace,
+    /// The provisional run's used track size, gaps included.
+    used: f32,
+    final_inner: f32,
+    inset: f32,
+    /// The other axis's sizing distributes this axis's free space by the
+    /// content alignment, against the percentage basis.
+    spacing_reads_basis: bool,
+}
+
+impl DefiniteRerun<'_> {
+    /// Whether the definite rerun could size this axis differently from the
+    /// provisional run — other than by the rounding of the same arithmetic
+    /// in another order, which it may. The rerun differs from the
+    /// provisional run in its percentage basis, now the final inner size, and
+    /// in its available space, now that size as a definite one.
+    ///
+    /// A basis that moved changes a percentage track breadth or
+    /// `fit-content()` limit (`tracks::specs_depend_on_basis`), an item's
+    /// `fit-content()` size, whose percentage limit resolves against it, and
+    /// column sizing's spacing of fixed rows by a distributing
+    /// `align-content`; nothing else in track sizing reads it (item geometry
+    /// resolves against the grid area, not the container).
+    ///
+    /// An available space that moved from a max-content constraint to the
+    /// final size repeats the provisional sizes when that size is the tracks'
+    /// own used size and every track is of a kind for which that holds. The
+    /// constraint sizes an `auto`-minimum track's base from limited
+    /// max-content contributions (§12.5 step 2) where the rerun uses the
+    /// minimum contributions, which are no larger, and both runs reach the
+    /// same growth limits; §12.6 then maximizes every track to its growth
+    /// limit in both, the free space being exactly the difference; §12.7's
+    /// definite fr size solves to the indefinite one, every flexible track
+    /// being at least as large as its base in both; §12.8 has nothing left to
+    /// stretch. The kinds it does not hold for keep the rerun:
+    ///
+    /// * a final size the container's min/max sizes or size containment moved away from the used
+    ///   size, which leaves free space (positive or negative) the rerun distributes — an
+    ///   auto-height grid's `min-height` stretching its `auto` rows, as §12.8 asks;
+    /// * a flex factor below 1, whose definite fr size leaves space unfilled that the indefinite
+    ///   one filled (§12.7.1 floors the factor sum at 1);
+    /// * an `auto` minimum under a `min-content` maximum, whose max-content base outgrows the
+    ///   min-content growth limit the rerun keeps;
+    /// * an item spanning several tracks none of them flexible, which the constraint also
+    ///   distributes in a max-content base phase (§12.5 step 3) the rerun does not run, and whose
+    ///   growth-limit phases read the bases that differ — not shown to come out the same, so kept.
+    ///
+    /// A min-content constraint sizes bases from limited min-content
+    /// contributions and stops there, and the rerun shares the difference to
+    /// the minimum contributions out equally rather than back to the tracks
+    /// it came from, so it always keeps the rerun.
+    fn moves_axis<N>(&self, items: &[GridItem<N>], axis: Axis) -> bool {
+        let basis_moved = self.basis != Some(self.final_inner);
+        if basis_moved
+            && (self.spacing_reads_basis
+                || tracks::specs_depend_on_basis(self.specs)
+                || items.iter().any(|item| {
+                    item.intrinsic.preferred(axis) == IntrinsicTag::FitContent
+                        || item.intrinsic.minimum(axis) == IntrinsicTag::FitContent
+                        || item.intrinsic.maximum(axis) == IntrinsicTag::FitContent
+                }))
+        {
+            return true;
+        }
+        // The final inner size is the used size passed through the outer
+        // size and back, so it can be a rounding step away from it.
+        let tolerance = 2.0 * f32::EPSILON * (self.used.abs() + self.inset).max(1.0);
+        match self.available {
+            AvailableSpace::Definite(available) => (available - self.final_inner).abs() > tolerance,
+            AvailableSpace::MinContent => true,
+            AvailableSpace::MaxContent => {
+                (self.final_inner - self.used).abs() > tolerance
+                    || self.tracks.tracks.iter().any(|track| {
+                        (track.is_flexible() && track.flex_factor < 1.0)
+                            || (matches!(track.sizing.min, TrackBreadth::Auto)
+                                && matches!(track.sizing.max, TrackBreadth::MinContent))
+                    })
+                    || items.iter().any(|item| {
+                        let span = match axis {
+                            Axis::Horizontal => item.area.column,
+                            Axis::Vertical => item.area.row,
+                        };
+                        let spanned =
+                            &self.tracks.tracks[self.tracks.span_indices(span.start, span.end)];
+                        spanned.len() > 1
+                            && !spanned.iter().any(types::Track::is_flexible)
+                            && spanned
+                                .iter()
+                                .any(|track| track.intrinsic_min || track.intrinsic_max)
+                    })
+            }
+        }
     }
 }
 
@@ -819,6 +949,9 @@ fn refresh_item_basis<T>(
 ) where
     T: LayoutTree,
 {
+    if item.basis_free {
+        return;
+    }
     let style = tree.style(item.key.node);
     item.geometry = resolve_item_geometry(&style, percentage_basis);
     item.inset = resolve_insets(style.inset(), percentage_basis);
@@ -1697,7 +1830,8 @@ where
     // basis, and the definite rerun below sizes the tracks at the final size
     // anyway.
     let height_decided = metrics.outer.height.is_some() || contained_size.height().is_some();
-    if decided_width.is_none() || !height_decided {
+    let provisional_ran = decided_width.is_none() || !height_decided;
+    if provisional_ran {
         run_track_sizing(
             tree,
             state,
@@ -1736,10 +1870,37 @@ where
         gap_value,
         Size::new(Some(final_inner.width), Some(final_inner.height)),
     );
-    let needs_definite_rerun = decided_width.is_some()
-        || initial_percentage_basis.width.is_none()
-        || initial_percentage_basis.height.is_none()
-        || final_gap != initial_gap;
+    let needs_definite_rerun = !provisional_ran
+        || final_gap != initial_gap
+        || DefiniteRerun {
+            specs: &column_specs,
+            tracks: &columns,
+            basis: initial_percentage_basis.width,
+            available: grid_space.width,
+            used: provisional_track_size.width,
+            final_inner: final_inner.width,
+            inset: metrics.box_inset.width,
+            spacing_reads_basis: false,
+        }
+        .moves_axis(&items, Axis::Horizontal)
+        || DefiniteRerun {
+            specs: &row_specs,
+            tracks: &rows,
+            basis: initial_percentage_basis.height,
+            available: grid_space.height,
+            used: provisional_track_size.height,
+            final_inner: final_inner.height,
+            inset: metrics.box_inset.height,
+            // Column sizing spaces fixed rows by `align-content` against the
+            // height basis (`run_track_sizing`'s `distributed_gap`).
+            spacing_reads_basis: [
+                AlignFlags::SPACE_BETWEEN,
+                AlignFlags::SPACE_AROUND,
+                AlignFlags::SPACE_EVENLY,
+            ]
+            .contains(&align_content),
+        }
+        .moves_axis(&items, Axis::Vertical);
     if needs_definite_rerun {
         run_track_sizing(
             tree,
