@@ -34,18 +34,8 @@ pending! {
         "two things stand in the way: the suite never calls `update_data`, and this engine's host API has no completion callback at all — `LynxView::update_data(data, processor_name)` reports no completion, where web-core takes a third callback argument. Upstream asserts only the console line it produces",
     "basic-element-scroll-view-scroll-to-index" =>
         "`initial-scroll-to-index={1}` must land the scrollport on the second child at boot; the attribute does not exist here, so we start at the first. Statically wrong, and a missing attribute rather than an interaction",
-    "basic-element-text-bindselectionchange" =>
-        "upstream selects `#inline-target`'s text with `setBaseAndExtent` and expects `bindselectionchange` to report `7-10-forward` on the `<text>` and `1-4-forward` on the inline text, then the same backward. #467 built the document's `selectionchange` and the Lynx `<text>` event derived from it, but a selection exists only inside a `contenteditable` host there: selecting read-only text is its follow-up, so this plain `<text>` can hold no selection and nothing is reported",
-    "basic-element-text-text-selection" =>
-        "what a selection drag highlights is an interaction no first screen carries; selection is out of scope",
     "basic-element-x-audio-tt-play" =>
         "upstream's own test body is empty (its skip is commented out with a FIXME), so nothing is asserted. There is no `x-audio-tt` component and no audio output here, and the card's tap handler reads an undeclared `e`, so it would throw before any `invoke`",
-    "basic-element-x-swiper-bindchange" =>
-        "the `manual` and `autoplay` swipers log their `change` events (#469), but upstream also expects the `programming` swiper's: the `next` button writes its `current` 1, which turns it instantly with no `scroll`, so its component decides no event. web-core turns it smoothly and its scroll events report it",
-    "basic-element-x-swiper-bindscrollend" =>
-        "the `manual` and `autoplay` swipers log `scrollend` (#469), but the `programming` swiper's `current` written by the `next` button turns it instantly with no `scroll`, so it has no `scrollend` with `current` 1, which upstream expects",
-    "basic-element-x-swiper-bindscrollstart" =>
-        "the `manual` swiper logs `scrollstart` with `isDragged` true and the `autoplay` one each turn (#469), but the `programming` swiper's `current` written by the `next` button turns it instantly with no `scroll`, so no `scrollstart` is decided for it, where upstream expects one with `current` 0",
     "basic-element-x-webview-bindmessage" =>
         "the text must read `hello from iframe` once the `<x-webview html=…>` document posts a message; it reads `waiting`: there is no `x-webview` component and nothing in `crates/` hosts an HTML document",
 }

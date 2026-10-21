@@ -41,7 +41,7 @@
 //! Each of those was found by a card that rendered wrong for no reason of the
 //! engine's, so a card that looks wrong is first checked against that file.
 //!
-//! Accepting a rendering is `FLASHBULB_UPDATE_SNAPSHOTS=1` on that one test,
+//! Accepting a rendering is `PRIME_RADIANT_UPDATE_SNAPSHOTS=1` on that one test,
 //! *after* reading the case and deciding — and moving it to [`verified!`] in
 //! the same change, or `no_pending_case_has_a_golden` fails.
 //!
@@ -64,7 +64,7 @@ use bobcat_core::{
 };
 use bobcat_resources::{Resources, ResourcesConfig, ViewResources};
 use bobcat_source::{BundleInstaller, PageSource};
-use flashbulb::{Image, Screenshots};
+use prime_radiant::{Image, Screenshots};
 use url::Url;
 
 /// The viewport upstream's Playwright project uses, and the one every case was
@@ -84,6 +84,16 @@ const LATE: &[(&str, u32)] = &[
     ("api-boundingclientrect-lynx-view-relative", 1),
     ("api-getJSModule", 1),
     ("basic-element-text-maxline-with-setData", 2),
+];
+/// Cards whose first screen is never still, so it is not pinned: each holds an
+/// `x-swiper` that autoplays every second from boot, and a capture taken then
+/// lands on whichever item it has reached. Upstream takes no screenshot of them;
+/// their frames after the script, once the autoplay swiper has stopped at its
+/// last item, are pinned.
+const RESTLESS: &[&str] = &[
+    "basic-element-x-swiper-bindchange",
+    "basic-element-x-swiper-bindscrollend",
+    "basic-element-x-swiper-bindscrollstart",
 ];
 /// How long a card may go on changing before the suite refuses to pin it.
 const STABLE_DEADLINE: Duration = Duration::from_secs(10);
@@ -289,8 +299,8 @@ fn screenshots() -> Screenshots {
     // the smallest of them moves whole glyphs or boxes. The nondeterminism
     // itself is worth fixing in the engine; until it is, this is what lets the
     // suite mean something.
-    flashbulb::screenshots_in(env!("CARGO_MANIFEST_DIR"))
-        .with_options(flashbulb::CompareOptions::default().with_max_diff_pixels(64))
+    prime_radiant::screenshots_in(env!("CARGO_MANIFEST_DIR"))
+        .with_options(prime_radiant::CompareOptions::default().with_max_diff_pixels(64))
 }
 
 fn golden_path(name: &str) -> PathBuf {
@@ -342,6 +352,11 @@ enum Step {
     /// The primary mouse button released at this viewport point: upstream's
     /// `mouse.up()`.
     MouseUp(f32, f32),
+    /// The primary mouse button pressed at the first viewport point, the
+    /// mouse moved to the second with it held and released there: a text
+    /// selection drag, standing in for upstream's `selectText` and
+    /// `setBaseAndExtent`.
+    MouseDrag((f32, f32), (f32, f32)),
     /// Upstream's `locator.fill(text)` on the field that has focus: its whole
     /// value selected, then replaced by `text` with one `insertText`, which
     /// is what Chromium does. The host's editing commands, so a step before
@@ -378,6 +393,10 @@ enum Step {
     /// fails the frame if it never does: [`Step::Logged`] for a line whose
     /// tail differs from run to run, such as a logged event's `timestamp`.
     LoggedStart(&'static str),
+    /// Waits until the card has logged a line that contains every one of
+    /// these fragments, in any order, and fails the frame if it never does:
+    /// for an event whose element fields differ from card to card.
+    LoggedWith(&'static [&'static str]),
 }
 
 /// A frame the suite pins after a card's first screen: what is done to the
@@ -656,18 +675,8 @@ impl Card {
             }
             Step::KeyDown(key, code) => self.key(KeyPhase::Down, key, code, false).await,
             Step::KeyUp(key, code) => self.key(KeyPhase::Up, key, code, false).await,
-            Step::MouseOver(x, y) => {
-                let over = InputEvent::pointer((x, y), 1, PointerKind::Mouse, PointerPhase::Move)
-                    .with_buttons(-1, 0);
-                self.input(over).await;
-            }
-            Step::MouseDown(x, y) => {
-                let down = InputEvent::pointer((x, y), 1, PointerKind::Mouse, PointerPhase::Down);
-                self.input(down).await;
-            }
-            Step::MouseUp(x, y) => {
-                let up = InputEvent::pointer((x, y), 1, PointerKind::Mouse, PointerPhase::Up);
-                self.input(up).await;
+            Step::MouseOver(..) | Step::MouseDown(..) | Step::MouseUp(..) | Step::MouseDrag(..) => {
+                self.mouse(step).await;
             }
             Step::Tap(x, y) => {
                 for phase in [PointerPhase::Down, PointerPhase::Up] {
@@ -745,6 +754,11 @@ impl Card {
             Step::LoggedStart(start) => {
                 self.hear(start, |logged| logged.starts_with(start)).await?;
             }
+            Step::LoggedWith(fragments) => {
+                let what = fragments.join(" … ");
+                self.hear(&what, |logged| fragments.iter().all(|f| logged.contains(f)))
+                    .await?;
+            }
         }
         Ok(())
     }
@@ -764,6 +778,37 @@ impl Card {
         self.painter.dispatch_input(event);
         self.turn();
         tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    /// The mouse steps: upstream's `mouse` calls and its text selection.
+    async fn mouse(&mut self, step: Step) {
+        match step {
+            Step::MouseOver(x, y) => {
+                let over = InputEvent::pointer((x, y), 1, PointerKind::Mouse, PointerPhase::Move)
+                    .with_buttons(-1, 0);
+                self.input(over).await;
+            }
+            Step::MouseDown(x, y) => {
+                let down = InputEvent::pointer((x, y), 1, PointerKind::Mouse, PointerPhase::Down);
+                self.input(down).await;
+            }
+            Step::MouseDrag(from, to) => {
+                let down = InputEvent::pointer(from, 1, PointerKind::Mouse, PointerPhase::Down);
+                self.input(down).await;
+                for at in Self::along(from, to) {
+                    let held = InputEvent::pointer(at, 1, PointerKind::Mouse, PointerPhase::Move)
+                        .with_buttons(-1, 1);
+                    self.input(held).await;
+                }
+                let up = InputEvent::pointer(to, 1, PointerKind::Mouse, PointerPhase::Up);
+                self.input(up).await;
+            }
+            Step::MouseUp(x, y) => {
+                let up = InputEvent::pointer((x, y), 1, PointerKind::Mouse, PointerPhase::Up);
+                self.input(up).await;
+            }
+            _ => unreachable!("not a mouse step: {step:?}"),
+        }
     }
 
     /// Hands the view one editing command, then turns it once.
@@ -818,8 +863,8 @@ fn script(case: &str) -> &'static [Frame] {
 }
 
 /// Every frame of a card, in order, each under its golden name: the first
-/// screen, then one per [`Frame`] of its script. Stops at the first step the
-/// card does not answer, and says which.
+/// screen (unless the card is [`RESTLESS`]), then one per [`Frame`] of its
+/// script. Stops at the first step the card does not answer, and says which.
 async fn frames(card: &mut Card) -> (Vec<(String, Image)>, Result<(), String>) {
     let case = card.case.clone();
     let mut taken = Vec::new();
@@ -836,9 +881,11 @@ async fn frames(card: &mut Card) -> (Vec<(String, Image)>, Result<(), String>) {
         if label.is_some() {
             card.settle().await;
         }
-        match card.frame().await {
-            Ok(image) => taken.push((name, image)),
-            Err(error) => return (taken, Err(format!("{name}: {error}"))),
+        if label.is_some() || !RESTLESS.contains(&case.as_str()) {
+            match card.frame().await {
+                Ok(image) => taken.push((name, image)),
+                Err(error) => return (taken, Err(format!("{name}: {error}"))),
+            }
         }
         let Some(next) = rest.next() else {
             return (taken, Ok(()));
@@ -859,10 +906,10 @@ async fn renders_as_judged(case: &str) {
     for (name, actual) in &taken {
         assert!(
             golden_path(name).exists()
-                || std::env::var(flashbulb::UPDATE_ENV).as_deref() == Ok("1"),
+                || std::env::var(prime_radiant::UPDATE_ENV).as_deref() == Ok("1"),
             "{name}: no golden. A verified case keeps the rendering someone judged \
              right; accept one with {}=1 only after reading the case",
-            flashbulb::UPDATE_ENV,
+            prime_radiant::UPDATE_ENV,
         );
         screenshots().assert_matches(&["web-core-e2e", name], actual);
     }

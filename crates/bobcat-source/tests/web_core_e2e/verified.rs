@@ -610,4 +610,14 @@ verified! {
     basic_element_list_horizontal_estimated_main_axis_size_px => "basic-element-list-horizontal-estimated-main-axis-size-px",
     // A horizontal two-row waterfall `list` of empty items with estimates: every item is on screen at its real size, its borders, so nothing scrolls and, the threshold events being decided on `scroll` alone (native, 2026-10-20), no `scrolltolower` is logged.
     basic_element_list_horizontal_estimated_main_axis_size_px_waterfall => "basic-element-list-horizontal-estimated-main-axis-size-px-waterfall",
+    // `before`, an `inline-text` `inline` and `after` in one `<text text-selection>`, over two result lines. A mouse drag across `inline`'s characters 1 to 4 selects `nli` (#470) and both `bindselectionchange` handlers report it (#467): `7-10-forward` on the text, `1-4-forward` on the inline text; the drag back the other way gives `7-10-backward` and `1-4-backward`, which is what upstream asserts after its two `setBaseAndExtent` calls.
+    basic_element_text_bindselectionchange => "basic-element-text-bindselectionchange",
+    // Four `<text>`s in a flex row, each wrapped: two with `text-selection` true, two false. Each frame drags the mouse across one of them on a fresh card, as upstream `selectText`s one per test: the two true ones are highlighted whole (#470, `text-selection` as `user-select`), the two false ones select nothing.
+    basic_element_text_text_selection => "basic-element-text-text-selection",
+    // Three `x-swiper`s: `manual`, `autoplay` (interval 1000) and `programming` (`circular`, its `current` written by the `next` button). After the button, two autoplay turns and a swipe on the first, every event upstream asserts is awaited in the log: the `programming` swiper's `change` to 1 (#472, a `current` write fires the scroll events), the `autoplay` one's to 2 and 3, and the `manual` one's to 1. The frame: manual on green (item 1), autoplay stopped on its last item, yellow, programming on green. The first screen is not pinned (`RESTLESS`).
+    basic_element_x_swiper_bindchange => "basic-element-x-swiper-bindchange",
+    // The same three swipers and sequence; the `scrollend` events upstream asserts are awaited: `programming` with current 1 (#472), `autoplay` with 2 and 3, and one from `manual`. The frame is `basic-element-x-swiper-bindchange`'s; the first screen is not pinned (`RESTLESS`).
+    basic_element_x_swiper_bindscrollend => "basic-element-x-swiper-bindscrollend",
+    // The same three swipers and sequence; the `scrollstart` events upstream asserts are awaited: `programming` with current 0 not dragged (#472), `autoplay` with 0, 1 and 2 not dragged, `manual` with 0 dragged. The frame is `basic-element-x-swiper-bindchange`'s; the first screen is not pinned (`RESTLESS`).
+    basic_element_x_swiper_bindscrollstart => "basic-element-x-swiper-bindscrollstart",
 }

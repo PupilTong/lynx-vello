@@ -43,7 +43,7 @@ consequential choice about whether to follow the spec or the quirk.
   Lynx has, so its keywords mean what Lynx says they mean, while `flex` is a
   CSS box and answers to CSS. The two therefore differ on a reversed
   container, which is the only place either pair parts, and
-  `computed_main_gravity` in `crates/hughie/src/compute/linear.rs` is where
+  `computed_main_gravity` in `crates/seldon/src/compute/linear.rs` is where
   the alias lives.
 - **`defaultOverflowVisible` never reaches `page` (user, 2026-09-25)** — the
   switch releases `view` and the two blur-view tags back to `visible`, and

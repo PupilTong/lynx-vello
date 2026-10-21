@@ -3052,7 +3052,7 @@ rendering reads as a decision. Two invariants keep that honest:
 against web-core's own screenshots was tried and dropped: the two stacks
 rasterize text differently and several cases are about behaviour an image only
 indirectly shows, so a pixel distance to chromium answers a question nobody
-asked. Accepting a rendering is `FLASHBULB_UPDATE_SNAPSHOTS=1` on one test,
+asked. Accepting a rendering is `PRIME_RADIANT_UPDATE_SNAPSHOTS=1` on one test,
 after the reading, in the same change that moves the card to `verified!`.
 
 A first screen is not the whole of most cases, so `web_core_e2e/driven.rs`

@@ -10,7 +10,8 @@
 // goldens: `<case>.png` for the first screen, `<case>.<label>.png` after it.
 
 use Step::{
-    Drag, Fill, Fresh, Hold, KeyDown, KeyUp, Logged, LoggedStart, MouseDown, MouseOver, MouseUp,
+    Drag, Fill, Fresh, Hold, KeyDown, KeyUp, Logged, LoggedStart, LoggedWith, MouseDown, MouseDrag,
+    MouseOver, MouseUp,
     Press, QuickCapture, Release, Reload, Select, SendGlobalEvent, Tap, UpdateData,
     UpdateGlobalProps, Wait, Wheel,
 };
@@ -281,6 +282,24 @@ driven! {
             Wait(100),
         ],
     ],
+    // Upstream selects `inline`'s characters 1 to 4 of `#inline-target` with
+    // `setBaseAndExtent`, forward and then backward. Here the mouse drags across the
+    // same characters (16px text: `before` ends at 41.9, `n` starts at 48.9 and the
+    // second `i` ends at 64.9, on the first line), each way.
+    "basic-element-text-bindselectionchange" => [
+        "forward": [MouseDrag((48.9, 9.0), (64.9, 9.0))],
+        "backward": [MouseDrag((64.9, 9.0), (48.9, 9.0))],
+    ],
+    // Upstream opens the card four times and `selectText`s one of the four texts each
+    // time. Here the mouse drags from the left half of that text's first glyph, so
+    // from its start, to the end of its last line, on a fresh card each time; the two with `text-selection` false select
+    // nothing.
+    "basic-element-text-text-selection" => [
+        "true-boolean": [MouseDrag((0.5, 9.0), (96.0, 40.0))],
+        "true-string": [Fresh, MouseDrag((101.0, 9.0), (181.0, 57.0))],
+        "false-string": [Fresh, MouseDrag((195.5, 9.0), (276.0, 57.0))],
+        "false-boolean": [Fresh, MouseDrag((291.5, 9.0), (390.0, 40.0))],
+    ],
     // `#tap`, clicked once.
     "basic-element-x-foldview-ng-method-setFoldExpanded" => [
         "folded-by-method": [Tap(113.2, 450.0)],
@@ -403,19 +422,58 @@ driven! {
         "autoplayed-to-2": [Wait(5600)],
         "autoplay-toggled-off": [Tap(388.0, 5.0), Wait(5500)],
     ],
-    // The `next` button under the three swipers (y 450..460), a wait for two autoplay
-    // turns, then a 100px swipe left on the first swiper. Upstream asserts once, at
-    // the end, on the `change` events the card logged.
+    // The `next` button under the three swipers (y 450..460), which writes the
+    // `programming` swiper's `current`; a wait for two autoplay turns; then a swipe
+    // left on the first, `manual`, swiper. Upstream asserts at the end on the logged
+    // events. Its swipe is a fast touch, where a fling's reach depends on the
+    // wall-clock spacing of the moves; here the finger drags 300px, well past half
+    // the 393px page, and stays still before it lifts, so the swiper snaps to item 1
+    // with no fling and the frame is the same every run.
     "basic-element-x-swiper-bindchange" => [
-        "paged": [Tap(5.0, 455.0), Wait(6600), Drag((300.0, 50.0), (200.0, 50.0))],
+        "paged": [
+            Tap(5.0, 455.0),
+            Wait(6600),
+            Hold((350.0, 50.0), (50.0, 50.0)),
+            Wait(300),
+            Release(50.0, 50.0),
+            Wait(1000),
+            LoggedWith(&[r#""type":"change""#, r#""testid":"programming""#, r#""detail":{"current":1,"#]),
+            LoggedWith(&[r#""type":"change""#, r#""testid":"autoplay""#, r#""detail":{"current":2,"#]),
+            LoggedWith(&[r#""type":"change""#, r#""testid":"autoplay""#, r#""detail":{"current":3,"#]),
+            LoggedWith(&[r#""type":"change""#, r#""testid":"manual""#, r#""detail":{"current":1,"#]),
+        ],
     ],
-    // The same sequence with a 200px swipe; upstream reads the logged `scrollend` events.
+    // The same sequence; upstream reads the logged `scrollend` events.
     "basic-element-x-swiper-bindscrollend" => [
-        "paged": [Tap(5.0, 455.0), Wait(6600), Drag((300.0, 50.0), (100.0, 50.0))],
+        "paged": [
+            Tap(5.0, 455.0),
+            Wait(6600),
+            Hold((350.0, 50.0), (50.0, 50.0)),
+            Wait(300),
+            Release(50.0, 50.0),
+            Wait(1000),
+            LoggedWith(&[r#""type":"scrollend""#, r#""testid":"programming""#, r#""detail":{"current":1}"#]),
+            LoggedWith(&[r#""type":"scrollend""#, r#""testid":"autoplay""#, r#""detail":{"current":2}"#]),
+            LoggedWith(&[r#""type":"scrollend""#, r#""testid":"autoplay""#, r#""detail":{"current":3}"#]),
+            LoggedWith(&[r#""type":"scrollend""#, r#""testid":"manual""#]),
+        ],
     ],
-    // The same sequence; upstream reads the logged `scrollstart` events.
+    // The same sequence; upstream reads the logged `scrollstart` events: the
+    // `programming` and `autoplay` swipers' not dragged, the `manual` one's dragged.
     "basic-element-x-swiper-bindscrollstart" => [
-        "paged": [Tap(5.0, 455.0), Wait(6600), Drag((300.0, 50.0), (100.0, 50.0))],
+        "paged": [
+            Tap(5.0, 455.0),
+            Wait(6600),
+            Hold((350.0, 50.0), (50.0, 50.0)),
+            Wait(300),
+            Release(50.0, 50.0),
+            Wait(1000),
+            LoggedWith(&[r#""type":"scrollstart""#, r#""testid":"programming""#, r#""detail":{"current":0,"isDragged":false}"#]),
+            LoggedWith(&[r#""type":"scrollstart""#, r#""testid":"autoplay""#, r#""detail":{"current":0,"isDragged":false}"#]),
+            LoggedWith(&[r#""type":"scrollstart""#, r#""testid":"autoplay""#, r#""detail":{"current":1,"isDragged":false}"#]),
+            LoggedWith(&[r#""type":"scrollstart""#, r#""testid":"autoplay""#, r#""detail":{"current":2,"isDragged":false}"#]),
+            LoggedWith(&[r#""type":"scrollstart""#, r#""testid":"manual""#, r#""detail":{"current":0,"isDragged":true}"#]),
+        ],
     ],
     // The transparent 10x10 `next` button under the swiper, at (0, 150), clicked four
     // times: `current` goes 1, 2, 3 and back to 0.

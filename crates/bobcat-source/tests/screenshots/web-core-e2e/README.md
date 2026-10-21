@@ -20,5 +20,5 @@ A card with no file here is in `web_core_e2e/pending.rs` with a reason, and
 is the point: a picture of a rendering nobody has judged would be read as a
 decision by whoever comes next.
 
-Accepting one is `FLASHBULB_UPDATE_SNAPSHOTS=1` on that single test, after the
+Accepting one is `PRIME_RADIANT_UPDATE_SNAPSHOTS=1` on that single test, after the
 reading, in the same change that moves the card into `verified!`.
