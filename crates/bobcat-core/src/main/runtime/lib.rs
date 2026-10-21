@@ -1084,7 +1084,7 @@ impl DocumentSlot {
         Ok(())
     }
 
-    /// Queues a `scroll` at every container a script-facing instant scroll
+    /// Queues a `scroll` at every container an instant scroll request
     /// moved ([`dom::Document::take_instant_scrolls`]), if anything in the
     /// document hears the name ([`Self::listens`]), and records the
     /// container as scrolling. Its `scrollend` comes from the painter, which
@@ -2340,12 +2340,15 @@ impl MainThreadRuntime {
             .is_some_and(LynxDocument::needs_render)
     }
 
-    /// Queues the `scroll` every script-facing instant scroll of this entry
-    /// owes: a UI method's `scrollTo`, `scrollBy` or `scrollIntoView`, or a
-    /// component's own instant scroll. Asked by the page's epilogue, so it
-    /// joins the component events this entry produced; one length check
-    /// when nothing scrolled. The `scrollend` follows from the painter's
-    /// post of the container at rest.
+    /// Queues the `scroll` every instant scroll of this entry owes: a UI
+    /// method's `scrollTo`, `scrollBy` or `scrollIntoView`, a component's
+    /// own instant scroll, or the render's move to a new
+    /// `scroll-initial-target` (an `x-swiper`'s `current`, a `viewpager`'s
+    /// `select-index`). Asked by the page's epilogue after its commit, which
+    /// is where that last one happens, so it joins the component events
+    /// this entry produced; one length check when nothing scrolled. The
+    /// `scrollend` follows from the painter's post of the container at
+    /// rest.
     pub(crate) fn queue_instant_scroll_events(&mut self) {
         let mut slot = self.slot.borrow_mut();
         if slot

@@ -1525,6 +1525,95 @@ fn a_post_older_than_the_pending_scroll_request_is_dropped() {
     });
 }
 
+/// A vertical `x-swiper` of three 200px items whose `scrollstart`, `change`
+/// and `scrollend` listeners append `<event>:<current>` to the page
+/// element's `data-heard` ([`heard`]); `updatePage({current})` writes the
+/// swiper's `current` and does not flush.
+const SWIPER_WITH_STATE_LISTENERS: &str = r"
+globalThis.renderPage = function () {
+  const page = __CreatePage('card', 0);
+  const swiper = __CreateElement('x-swiper', 0);
+  __SetAttribute(swiper, 'vertical', '');
+  __SetInlineStyles(swiper, 'width:100px;height:200px');
+  __AppendElement(page, swiper);
+  for (let i = 0; i < 3; i++) {
+    __AppendElement(swiper, __CreateElement('x-swiper-item', 0));
+  }
+  globalThis.swiper = swiper;
+  const heard = [];
+  for (const name of ['scrollstart', 'change', 'scrollend']) {
+    __AddEventListener(swiper, name, (event) => {
+      heard.push(name + ':' + event.detail.current);
+      __SetAttribute(page, 'data-heard', heard.join(','));
+    }, {});
+  }
+};
+globalThis.updatePage = function (data) {
+  __SetAttribute(globalThis.swiper, 'current', String(data.current));
+};
+";
+
+/// A `current` written by an entry that does not flush turns the swiper in
+/// that entry's epilogue commit, and the same epilogue, after the commit,
+/// queues `#content`'s `scroll` for the move: the swiper's `scrollstart`
+/// and `change` reach script in the delivery entries that follow, before
+/// any other command, and its `scrollend` once the painter posts `#content`
+/// at rest on the request.
+#[test]
+fn a_current_written_without_a_flush_fires_the_swipers_events_from_its_epilogue() {
+    on_a_js_thread(|thread| async move {
+        let (context, _workers) = group(&thread);
+        let mut owned = OwnedPage::new(context);
+        owned.boot(SWIPER_WITH_STATE_LISTENERS).await;
+        assert_eq!(heard(&owned.page).await, Vec::<String>::new());
+        let (answer, read) = std::sync::mpsc::channel();
+        owned
+            .page
+            .apply(vec![ToMain::Probe(Box::new(move |document| {
+                let swiper = document
+                    .document_element()
+                    .first_child()
+                    .map(dom::Node::id)
+                    .expect("the card rendered its swiper");
+                let _ = answer.send(crate::main::tree::swiper::content(document, swiper));
+            }))])
+            .await;
+        let scroller = read
+            .try_recv()
+            .expect("the probe ran")
+            .expect("the swiper's `#content`");
+
+        owned
+            .page
+            .apply(vec![ToMain::PageUpdate(PageUpdate::Data {
+                data: r#"{"current":2}"#.to_owned(),
+                processor_name: String::new(),
+                reset: false,
+            })])
+            .await;
+        assert_eq!(heard(&owned.page).await, ["scrollstart:0", "change:2"]);
+
+        let (offset, pending) = scroll_state(&owned.page, scroller).await;
+        assert_eq!(offset, dom::Vector2D::new(0.0, 400.0), "turned to item 2");
+        let serial = pending.expect("the turn is a pending request");
+        owned
+            .post(
+                scroller,
+                ScrollEntry {
+                    offset,
+                    at: 0.0,
+                    rest: Some(offset),
+                    request: Some(serial),
+                },
+            )
+            .await;
+        assert_eq!(
+            heard(&owned.page).await,
+            ["scrollstart:0", "change:2", "scrollend:2"]
+        );
+    });
+}
+
 /// A box whose `tap` listener starts an `opacity` transition and flushes.
 const TRANSITION_ON_TAP: &str = r"
 globalThis.renderPage = function () {

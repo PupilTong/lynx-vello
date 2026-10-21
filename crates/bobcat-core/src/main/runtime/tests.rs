@@ -2350,6 +2350,261 @@ fn a_swiper_fires_change_from_its_contents_scroll() {
     );
 }
 
+/// A vertical `x-swiper` of three 200px items with a worklet listener on
+/// the swiper for `scrollstart`, `change` and `scrollend`, connected with
+/// `current` when one is given, and its shadow `#content`.
+fn swiper_with_state_listeners(
+    js_runtime: &mut ScriptRuntime,
+    runtime: &mut MainThreadRuntime,
+    elements: &DocumentProbe,
+    current: Option<&str>,
+) -> dom::NodeId {
+    let set_current = current.map_or_else(String::new, |value| {
+        format!("__SetAttribute(swiper, 'current', '{value}');")
+    });
+    runtime
+        .run_main_thread_script(
+            js_runtime,
+            &format!(
+                r"
+                globalThis.seen = [];
+                globalThis.runWorklet = (value, params) => value.body(params[0]);
+                globalThis.renderPage = function () {{
+                  const page = __CreatePage('card', 0);
+                  const swiper = __CreateElement('x-swiper', 0);
+                  __SetAttribute(swiper, 'vertical', '');
+                  {set_current}
+                  __SetInlineStyles(swiper, 'width:100px;height:200px');
+                  __AppendElement(page, swiper);
+                  for (let i = 0; i < 3; i++) {{
+                    __AppendElement(swiper, __CreateElement('x-swiper-item', 0));
+                  }}
+                  globalThis.held = [page, swiper];
+                  const note = {{
+                    type: 'worklet',
+                    value: {{
+                      body: (event) => seen.push(event.type + ':' + JSON.stringify(event.detail)),
+                    }},
+                  }};
+                  for (const name of ['scrollstart', 'change', 'scrollend']) {{
+                    __AddEvent(swiper, 'bindEvent', name, note);
+                  }}
+                  __FlushElementTree();
+                }};
+                "
+            ),
+            "app:///swiper-current.js",
+        )
+        .expect("main-thread script");
+    let tree = elements.tree();
+    let page = tree.document_element().id();
+    let swiper = tree.get(page).expect("the page").child_ids()[0];
+    crate::main::tree::swiper::content(&tree, swiper).expect("the swiper's `#content`")
+}
+
+/// Runs the deliveries the component events queued so far ask for, each in
+/// an entry of its own as the page posts them, until none is left.
+fn deliver_component_events(js_runtime: &mut ScriptRuntime, runtime: &mut MainThreadRuntime) {
+    while runtime.has_component_events() {
+        let failures = runtime.dispatch_component_events(js_runtime);
+        assert!(failures.is_empty(), "{failures:?}");
+    }
+}
+
+/// The painter's post of `container` at rest at `offset`, once it carried
+/// out the pending instant request there: the post names that request.
+fn rest_after_request(
+    runtime: &mut MainThreadRuntime,
+    elements: &DocumentProbe,
+    container: dom::NodeId,
+    offset: dom::Vector2D<f32>,
+) {
+    let request = elements
+        .tree()
+        .pending_scroll_request(container)
+        .expect("the turn is a scroll request");
+    runtime.adopt_scroll_offsets(
+        [(
+            container,
+            crate::link::ScrollEntry {
+                offset,
+                at: 0.0,
+                rest: Some(offset),
+                request: Some(request),
+            },
+        )]
+        .into_iter(),
+    );
+}
+
+/// A `current` written after the first commit turns the swiper through
+/// `#content`'s `scroll-initial-target`, and that turn is a scroll like any
+/// other (CSSOM-View fires `scroll` and `scrollend` for every change of a
+/// scroll position; web-core's `current` setter calls `scrollTo`, native's
+/// pager reports the turn): the commit's instant move queues `#content`'s
+/// `scroll` in the same entry's epilogue, which brings the swiper's
+/// `scrollstart` from the item it was on and its `change`, and the
+/// painter's rest post after it carried the request out brings the
+/// swiper's `scrollend`.
+#[test]
+fn a_swiper_current_written_later_fires_scrollstart_change_and_scrollend() {
+    let (mut js_runtime, mut runtime, elements) = runtime();
+    let content = swiper_with_state_listeners(&mut js_runtime, &mut runtime, &elements, None);
+    runtime.queue_instant_scroll_events();
+    deliver_component_events(&mut js_runtime, &mut runtime);
+    expect_seen(&mut js_runtime, &mut runtime, "");
+
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+                import { __FlushElementTree, __SetAttribute } from 'bobcat:element';
+                __SetAttribute(held[1], 'current', '2');
+                __FlushElementTree();
+                ",
+            "app:///write-current.js",
+            "writing current",
+        )
+        .expect("the write");
+    // The epilogue's step after the commit.
+    runtime.queue_instant_scroll_events();
+    assert_eq!(
+        runtime.slot.borrow().component_events.take(),
+        [queued_scroll(content, 400.0)],
+        "the commit's move to the new target owes `#content`'s `scroll`"
+    );
+    runtime.slot.borrow().component_events.queue_scroll(
+        content,
+        "scroll",
+        dom::Vector2D::new(0.0, 400.0),
+    );
+    deliver_component_events(&mut js_runtime, &mut runtime);
+    expect_seen(
+        &mut js_runtime,
+        &mut runtime,
+        r#"scrollstart:{"current":0,"isDragged":false}|change:{"current":2,"isDragged":false}"#,
+    );
+
+    rest_after_request(
+        &mut runtime,
+        &elements,
+        content,
+        dom::Vector2D::new(0.0, 400.0),
+    );
+    deliver_component_events(&mut js_runtime, &mut runtime);
+    expect_seen(&mut js_runtime, &mut runtime, r#"scrollend:{"current":2}"#);
+}
+
+/// A swiper connected with `current` starts on that item through the same
+/// initial target, at its first commit: the move fires `scrollstart` and,
+/// at the painter's rest post, `scrollend`, as web-core's connect-time
+/// `scrollTo` does, and no `change`, since the swiper starts from the item
+/// `current` names — native too suppresses only the initial `change`.
+#[test]
+fn a_swiper_connected_with_current_fires_scrollstart_and_scrollend_and_no_change() {
+    let (mut js_runtime, mut runtime, elements) = runtime();
+    let content = swiper_with_state_listeners(&mut js_runtime, &mut runtime, &elements, Some("1"));
+    runtime.queue_instant_scroll_events();
+    deliver_component_events(&mut js_runtime, &mut runtime);
+    expect_seen(
+        &mut js_runtime,
+        &mut runtime,
+        r#"scrollstart:{"current":1,"isDragged":false}"#,
+    );
+
+    rest_after_request(
+        &mut runtime,
+        &elements,
+        content,
+        dom::Vector2D::new(0.0, 200.0),
+    );
+    deliver_component_events(&mut js_runtime, &mut runtime);
+    expect_seen(&mut js_runtime, &mut runtime, r#"scrollend:{"current":1}"#);
+}
+
+/// A `viewpager`'s `select-index` written after the first commit turns the
+/// pager through its pages' `scroll-initial-target`, and the turn fires the
+/// pager's events as a swipe's would: the commit's instant move queues the
+/// pager's own `scroll` in the same entry's epilogue, which brings its
+/// `offsetchange`, and the painter's rest post after it carried the request
+/// out brings its `change` — what web-core's connect-time `selectTab` and
+/// native's `select-index` setter report too.
+#[test]
+fn a_viewpager_select_index_written_later_fires_offsetchange_and_change() {
+    let (mut js_runtime, mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.seen = [];
+                globalThis.runWorklet = (value, params) => value.body(params[0]);
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const pager = __CreateElement('x-viewpager-ng', 0);
+                  __SetInlineStyles(pager, 'width:200px;height:100px');
+                  __AppendElement(page, pager);
+                  for (let i = 0; i < 3; i++) {
+                    __AppendElement(pager, __CreateElement('x-viewpager-item-ng', 0));
+                  }
+                  globalThis.held = [page, pager];
+                  const note = {
+                    type: 'worklet',
+                    value: {
+                      body: (event) => seen.push(event.type + ':' + JSON.stringify(event.detail)),
+                    },
+                  };
+                  for (const name of ['offsetchange', 'change']) {
+                    __AddEvent(pager, 'bindEvent', name, note);
+                  }
+                  __FlushElementTree();
+                };
+                ",
+            "app:///pager-select-index.js",
+        )
+        .expect("main-thread script");
+    let pager = {
+        let tree = elements.tree();
+        let page = tree.document_element().id();
+        tree.get(page).expect("the page").child_ids()[0]
+    };
+    runtime.queue_instant_scroll_events();
+    deliver_component_events(&mut js_runtime, &mut runtime);
+    expect_seen(&mut js_runtime, &mut runtime, "");
+
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+                import { __FlushElementTree, __SetAttribute } from 'bobcat:element';
+                __SetAttribute(held[1], 'select-index', '2');
+                __FlushElementTree();
+                ",
+            "app:///write-select-index.js",
+            "writing select-index",
+        )
+        .expect("the write");
+    runtime.queue_instant_scroll_events();
+    deliver_component_events(&mut js_runtime, &mut runtime);
+    expect_seen(
+        &mut js_runtime,
+        &mut runtime,
+        r#"offsetchange:{"offset":2}"#,
+    );
+
+    rest_after_request(
+        &mut runtime,
+        &elements,
+        pager,
+        dom::Vector2D::new(400.0, 0.0),
+    );
+    deliver_component_events(&mut js_runtime, &mut runtime);
+    expect_seen(
+        &mut js_runtime,
+        &mut runtime,
+        r#"change:{"index":2,"isDragged":false}"#,
+    );
+}
+
 /// An `x-refresh-view`'s `startrefresh` end to end: a painter post that
 /// moves its shadow `#container` from `#content` (170) onto the header's
 /// snap position (120) and leaves it at rest queues the kernel `scroll` and

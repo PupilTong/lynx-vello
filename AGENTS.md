@@ -2095,10 +2095,11 @@ freed node removed, both drained before each commit is published
 (`DocumentSlot::sync_names`).
 CSSOM-View's `scroll` and `scrollend` are decided on this thread, never on
 the painter: `adopt_scroll_offsets` queues a `scroll` per container a post
-moved and a `scrollend` when a post names it at rest after it scrolled, and a
-script-facing instant scroll (`dom::Document::take_instant_scrolls`) queues
-its `scroll` from its entry's epilogue and gets its `scrollend` from the
-painter's rest post after carrying the request out. A wheel gesture rests
+moved and a `scrollend` when a post names it at rest after it scrolled, and an
+instant scroll request — a script's, a component's, or the render's move to a
+new `scroll-initial-target` (`dom::Document::take_instant_scrolls`) — queues
+its `scroll` from its entry's epilogue, after the commit, and gets its
+`scrollend` from the painter's rest post after carrying the request out. A wheel gesture rests
 once, 100 ms after its last tick (`WHEEL_REST_SECONDS`). All are component
 events, non-bubbling, with Lynx's scroll metrics as extras, queued only for a name a realm
 listener or a component hears at that moment; which containers are scrolling
