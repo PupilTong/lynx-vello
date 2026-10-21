@@ -10539,23 +10539,14 @@ fn a_frame_realm_closes_only_its_own_listener_names() {
 fn whole_path_encoding(
     document: &LynxDocument,
     steps: &terminus::link::event::EventSteps,
-) -> (String, String) {
-    let mut nodes = String::new();
-    let mut targets = String::new();
-    for step in steps
+) -> Vec<(terminus::link::NodeId, terminus::link::NodeId)> {
+    steps
         .steps()
         .iter()
         .rev()
         .filter(|step| step.capture && document.shadow_root_of(step.node).is_none())
-    {
-        if !nodes.is_empty() {
-            nodes.push(',');
-            targets.push(',');
-        }
-        write!(nodes, "{}", packed_node_id(step.node)).unwrap();
-        write!(targets, "{}", packed_node_id(step.target)).unwrap();
-    }
-    (nodes, targets)
+        .map(|step| (step.node, step.target))
+        .collect()
 }
 
 /// The one encoding every realm is handed is the page realm's call as it
@@ -10595,10 +10586,7 @@ fn the_page_realms_call_carries_exactly_the_path_it_always_did() {
     };
     let slot = elements.slot.borrow();
     let document = slot.document.as_ref().unwrap();
-    let encoded = |steps: &terminus::link::event::EventSteps| {
-        let path = encode_path(document, steps);
-        (path.nodes, path.targets)
-    };
+    let encoded = |steps: &terminus::link::event::EventSteps| encode_path(document, steps).to_vec();
     for target in [inner, detached] {
         let steps = document.event_steps(target, true, true);
         let calls = realm_calls(document, &steps, "tap", std::iter::once(page_realm));
@@ -10614,29 +10602,20 @@ fn the_page_realms_call_carries_exactly_the_path_it_always_did() {
         realm_calls(document, &steps, "tap", std::iter::once(page_realm)).len(),
         1
     );
-    let (nodes, targets) = encoded(&steps);
-    let outside: (Vec<&str>, Vec<&str>) = nodes
-        .split(',')
-        .zip(targets.split(','))
-        .filter(|(node, _)| {
-            let id = steps
-                .steps()
-                .iter()
-                .find(|step| packed_node_id(step.node).to_string() == *node)
-                .unwrap()
-                .node;
-            document.shadow_root_of(id).is_none()
-        })
-        .unzip();
-    let (old_nodes, old_targets) = whole_path_encoding(document, &steps);
+    let path = encoded(&steps);
+    let outside: Vec<_> = path
+        .iter()
+        .copied()
+        .filter(|&(node, _)| document.shadow_root_of(node).is_none())
+        .collect();
+    let old = whole_path_encoding(document, &steps);
     assert_eq!(
-        (outside.0.join(","), outside.1.join(",")),
-        (old_nodes.clone(), old_targets),
+        outside, old,
         "less the shadow content, the steps the old call carried"
     );
     assert_eq!(
-        nodes.split(',').next(),
-        Some(packed_node_id(shadowed).to_string().as_str()),
+        path.first().map(|&(node, _)| node),
+        Some(shadowed),
         "the shadow content first, which the page realm skips"
     );
     assert!(
@@ -10644,14 +10623,12 @@ fn the_page_realms_call_carries_exactly_the_path_it_always_did() {
             .steps()
             .iter()
             .filter(|step| document.get(step.node).unwrap().is_shadow_root())
-            .all(|step| !nodes
-                .split(',')
-                .any(|id| id == packed_node_id(step.node).to_string())),
+            .all(|step| !path.iter().any(|&(node, _)| node == step.node)),
         "no shadow root"
     );
-    let page = packed_node_id(terminus::link::NodeId::DOCUMENT_ELEMENT).to_string();
     assert!(
-        old_nodes.split(',').any(|id| id == page),
+        old.iter()
+            .any(|&(node, _)| node == terminus::link::NodeId::DOCUMENT_ELEMENT),
         "the document element is on it, with the document node above it"
     );
     let steps = document.event_steps(shadowed, true, false);

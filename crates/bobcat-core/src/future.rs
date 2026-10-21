@@ -302,14 +302,18 @@ fn install_member(
     engine: &mut ScriptEngine,
     name: &str,
     arity: u8,
-    callback: impl FnMut(&[HostValue]) -> Result<HostValue, String> + 'static,
+    callback: impl FnMut(&[HostArgument<'_>]) -> Result<HostValue, String> + 'static,
 ) -> Result<(), ScriptError> {
     engine.register_host_module_function(HOST_MODULE_SPECIFIER, name, arity, Box::new(callback))
 }
 
-fn number_argument(function: &str, arguments: &[HostValue], index: usize) -> Result<f64, String> {
+fn number_argument(
+    function: &str,
+    arguments: &[HostArgument<'_>],
+    index: usize,
+) -> Result<f64, String> {
     match arguments.get(index) {
-        Some(&HostValue::Number(value)) => Ok(value),
+        Some(&HostArgument::Number(value)) => Ok(value),
         _ => Err(format!("{function} expects a number for argument {index}")),
     }
 }
@@ -317,19 +321,23 @@ fn number_argument(function: &str, arguments: &[HostValue], index: usize) -> Res
 #[cfg(test)]
 fn string_argument<'a>(
     function: &str,
-    arguments: &'a [HostValue],
+    arguments: &[HostArgument<'a>],
     index: usize,
 ) -> Result<&'a str, String> {
     match arguments.get(index) {
-        Some(HostValue::String(value)) => Ok(value),
+        Some(&HostArgument::String(value)) => Ok(value),
         _ => Err(format!("{function} expects a string for argument {index}")),
     }
 }
 
 #[cfg(test)]
-fn boolean_argument(function: &str, arguments: &[HostValue], index: usize) -> Result<bool, String> {
+fn boolean_argument(
+    function: &str,
+    arguments: &[HostArgument<'_>],
+    index: usize,
+) -> Result<bool, String> {
     match arguments.get(index) {
-        Some(&HostValue::Boolean(value)) => Ok(value),
+        Some(&HostArgument::Boolean(value)) => Ok(value),
         _ => Err(format!("{function} expects a boolean for argument {index}")),
     }
 }
@@ -341,7 +349,7 @@ fn boolean_argument(function: &str, arguments: &[HostValue], index: usize) -> Re
 )]
 fn future_id_argument(
     function: &str,
-    arguments: &[HostValue],
+    arguments: &[HostArgument<'_>],
     index: usize,
 ) -> Result<u32, String> {
     let value = number_argument(function, arguments, index)?;

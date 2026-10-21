@@ -592,9 +592,9 @@ describe("installation", () => {
         "__BobcatHandleOf",
       ].sort(),
     );
-    // The six every event carries; the detail numbers are a rest parameter,
-    // which `length` does not count.
-    expect(elementModule.__BobcatDispatchEvent).toHaveLength(6);
+    // The four every event carries; the path, the extras and the detail
+    // numbers are a rest parameter, which `length` does not count.
+    expect(elementModule.__BobcatDispatchEvent).toHaveLength(4);
   });
 
   it("creates the realm's document once, over the config it is given", () => {
@@ -1566,11 +1566,11 @@ function dispatch(
     ? nodes.map(() => nodes[0])
     : targets.map((handle) => __GetElementUniqueID(handle));
   elementModule.__BobcatDispatchEvent(
-    nodes.join(","),
-    targeted.join(","),
     name,
     bubbles,
     payload.timestamp ?? 0,
+    nodes.length,
+    ...nodes.flatMap((node, index) => [node, targeted[index] ?? node]),
     ...extraArguments(payload),
     ...detailArguments(payload),
   );
@@ -1938,13 +1938,14 @@ describe("event listeners", () => {
     // handle at all, which is what a step whose handle was collected before
     // its element was freed looks like from here.
     elementModule.__BobcatDispatchEvent(
-      `${__GetElementUniqueID(inner)},${__GetElementUniqueID(outer)},9999,${
-        __GetElementUniqueID(page)
-      }`,
-      new Array(4).fill(__GetElementUniqueID(inner)).join(","),
       "tap",
       true,
       0,
+      4,
+      ...[inner, outer, 9999, page].flatMap((step) => [
+        typeof step === "number" ? step : __GetElementUniqueID(step),
+        __GetElementUniqueID(inner),
+      ]),
       0,
       DETAIL_POSITION,
       0,
@@ -2030,11 +2031,12 @@ describe("event listeners", () => {
     // and the tree disagreeing, and it is reported rather than swallowed.
     expect(() =>
       elementModule.__BobcatDispatchEvent(
-        String(uid),
-        "999",
         "tap",
         true,
         0,
+        1,
+        uid,
+        999,
         0,
         DETAIL_POSITION,
         0,
@@ -3320,11 +3322,12 @@ describe("editing events", () => {
     }, {});
 
     const answer = elementModule.__BobcatDispatchEvent(
-      String(__GetElementUniqueID(inner)),
-      String(__GetElementUniqueID(inner)),
       "beforeinput",
       true,
       0,
+      1,
+      __GetElementUniqueID(inner),
+      __GetElementUniqueID(inner),
       0,
       DETAIL_INPUT,
       "insertText",
@@ -3397,11 +3400,12 @@ describe("timestamp and params", () => {
     }, {});
 
     elementModule.__BobcatDispatchEvent(
-      String(__GetElementUniqueID(inner)),
-      String(__GetElementUniqueID(inner)),
       "tap",
       undefined,
       0,
+      1,
+      __GetElementUniqueID(inner),
+      __GetElementUniqueID(inner),
       0,
       0,
       undefined,
@@ -5097,11 +5101,12 @@ describe("a frame's card", () => {
 
     expect(() =>
       elementModule.__BobcatDispatchEvent(
-        String(uid),
-        "999",
         "tap",
         true,
         0,
+        1,
+        uid,
+        999,
         0,
         DETAIL_POSITION,
         0,
@@ -5142,11 +5147,18 @@ describe("a frame's card", () => {
     // steps, then the frame and the page realm's page, which this realm
     // holds no handle for, retargeted to the frame.
     elementModule.__BobcatDispatchEvent(
-      [uid, pageUid, frameId, outer].join(","),
-      [uid, uid, frameId, frameId].join(","),
       "tap",
       true,
       0,
+      4,
+      uid,
+      uid,
+      pageUid,
+      uid,
+      frameId,
+      frameId,
+      outer,
+      frameId,
       0,
       DETAIL_EMPTY,
     );
@@ -5167,11 +5179,16 @@ describe("a frame's card", () => {
     const uid = __GetElementUniqueID(view);
 
     elementModule.__BobcatDispatchEvent(
-      [shadowContent, uid, frameId].join(","),
-      [shadowContent, uid, frameId].join(","),
       "tap",
       true,
       0,
+      3,
+      shadowContent,
+      shadowContent,
+      uid,
+      uid,
+      frameId,
+      frameId,
       0,
       DETAIL_EMPTY,
     );
@@ -5201,11 +5218,12 @@ describe("a frame's card", () => {
     // A key's target is the document element, which is no node of a card's
     // tree: the host hands the card the page's path, none of which it holds.
     elementModule.__BobcatDispatchEvent(
-      String(documentElement),
-      String(documentElement),
       "keydown",
       true,
       0,
+      1,
+      documentElement,
+      documentElement,
       0,
       DETAIL_KEY,
       "a",
@@ -5231,7 +5249,7 @@ describe("a frame's card", () => {
       value: { body: (event: ListenerEvent) => (target = event.target.uid) },
     });
 
-    elementModule.__BobcatDispatchEvent("", "", "keydown", true, 0, 0, DETAIL_KEY, "a", "KeyA", false, 0);
+    elementModule.__BobcatDispatchEvent("keydown", true, 0, 0, 0, DETAIL_KEY, "a", "KeyA", false, 0);
 
     expect(target).toBe(__GetElementUniqueID(view));
   });
@@ -5240,13 +5258,14 @@ describe("a frame's card", () => {
     const { frameId, view } = card();
     __AddEvent(view, "global-bindEvent", "load", "3:0:load");
 
-    elementModule.__BobcatDispatchEvent("", "", "load", false, 0, 0, DETAIL_EMPTY);
+    elementModule.__BobcatDispatchEvent("load", false, 0, 0, 0, DETAIL_EMPTY);
     elementModule.__BobcatDispatchEvent(
-      String(frameId),
-      String(frameId),
       "load",
       false,
       0,
+      1,
+      frameId,
+      frameId,
       0,
       DETAIL_EMPTY,
     );

@@ -28,10 +28,12 @@ use crate::script::{ScriptError, ScriptErrorKind, ScriptErrorPhase, ScriptSource
 /// A leaf host callback Bobcat installs in the realm.
 ///
 /// The realm turns a returned message into a JavaScript exception. Values
-/// crossing either way are [`quickjs::HostValue`] primitives, so no realm
-/// handle and no DOM identity ever crosses as itself.
+/// crossing either way are primitives or structured clones — the arguments
+/// lent for the call ([`quickjs::HostArgument`]), the answer owned
+/// ([`quickjs::HostValue`]) — so no realm handle and no DOM identity ever
+/// crosses as itself.
 pub(crate) type HostCallback =
-    Box<dyn FnMut(&[quickjs::HostValue]) -> Result<quickjs::HostValue, String> + 'static>;
+    Box<dyn FnMut(&[quickjs::HostArgument<'_>]) -> Result<quickjs::HostValue, String> + 'static>;
 
 /// The first panic a host function of one realm raised, kept until the
 /// operation that reached it ends.
@@ -1221,8 +1223,7 @@ mod tests {
                 Box::new(move |arguments| {
                     let value = arguments
                         .first()
-                        .cloned()
-                        .unwrap_or(quickjs::HostValue::Undefined);
+                        .map_or(quickjs::HostValue::Undefined, |value| value.to_value());
                     recorder
                         .lock()
                         .expect("the recorder is not poisoned")

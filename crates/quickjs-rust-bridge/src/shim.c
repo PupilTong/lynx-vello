@@ -2469,7 +2469,10 @@ static void qjs_host_describe(JSContext *raw_context, JSValueConst value,
         slot->number = number;
     } else if (JS_IsString(value)) {
         size_t length;
-        const char *text = JS_ToCStringLen2(raw_context, &length, value, 1);
+        /* UTF-8, not CESU-8: a surrogate pair is one four-byte sequence, so
+           the host borrows these bytes as they are and only a lone
+           surrogate's bytes are not UTF-8. */
+        const char *text = JS_ToCStringLen2(raw_context, &length, value, 0);
         if (text == NULL) {
             slot->kind = QJS_ARG_UNSUPPORTED;
             return;

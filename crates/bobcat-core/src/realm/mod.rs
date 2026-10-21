@@ -357,12 +357,12 @@ fn install_diagnostics(
 /// is refused with a message naming `function` and the argument's position.
 pub(crate) fn string_argument<'a>(
     function: &str,
-    arguments: &'a [HostValue],
+    arguments: &[HostArgument<'a>],
     index: usize,
 ) -> Result<&'a str, String> {
     match arguments.get(index) {
-        Some(HostValue::String(value)) => Ok(value),
-        None | Some(HostValue::Undefined | HostValue::Null) => Ok(""),
+        Some(&HostArgument::String(value)) => Ok(value),
+        None | Some(HostArgument::Undefined | HostArgument::Null) => Ok(""),
         _ => Err(format!("{function} expects a string for argument {index}")),
     }
 }

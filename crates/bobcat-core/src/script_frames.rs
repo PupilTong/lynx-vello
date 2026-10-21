@@ -1,7 +1,7 @@
 //! JS owns rAF callbacks. The host member only reports whether that realm
 //! needs another display frame through its existing host-notice channel.
 
-use quickjs_rust_bridge::HostValue;
+use quickjs_rust_bridge::{HostArgument, HostValue};
 
 use crate::main::quickjs::ScriptEngine;
 use crate::script::ScriptError;
@@ -15,10 +15,10 @@ pub(crate) fn install(
         "requestScriptFrame",
         1,
         Box::new(move |arguments| {
-            let Some(HostValue::Boolean(pending)) = arguments.first() else {
+            let Some(&HostArgument::Boolean(pending)) = arguments.first() else {
                 return Err("requestScriptFrame expects a boolean".to_owned());
             };
-            notify(*pending);
+            notify(pending);
             Ok(HostValue::Undefined)
         }),
     )

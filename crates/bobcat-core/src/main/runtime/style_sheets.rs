@@ -3,7 +3,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use quickjs_rust_bridge::HostValue;
+use quickjs_rust_bridge::{HostArgument, HostValue};
 use tokio_util::sync::CancellationToken;
 
 use super::{DocumentSlot, MainThreadError, ScriptEngine, install, optional_node_id_argument};
@@ -26,7 +26,7 @@ pub(super) fn install_styles(
     // out, as it always did.
     let probe = outbox.style_sheet_probe().cloned();
     install(engine, "hasStyleSheet", 1, move |args| {
-        let Some(HostValue::String(url)) = args.first() else {
+        let Some(&HostArgument::String(url)) = args.first() else {
             return Err("hasStyleSheet expects a URL".to_owned());
         };
         Ok(HostValue::Boolean(
@@ -36,10 +36,10 @@ pub(super) fn install_styles(
 
     let sources = outbox.host_outbox(outbox.token().clone());
     install(engine, "preloadStyleSheet", 1, move |args| {
-        let Some(HostValue::String(url)) = args.first() else {
+        let Some(&HostArgument::String(url)) = args.first() else {
             return Err("preloadStyleSheet expects a URL".to_owned());
         };
-        sources.preload(SourceRequest::StyleSheet(url.clone()));
+        sources.preload(SourceRequest::StyleSheet(url.to_owned()));
         Ok(HostValue::Undefined)
     })?;
 
@@ -52,7 +52,7 @@ pub(super) fn install_styles(
     // the sheet is the document's.
     install(engine, "adoptStyleSheet", 1, move |args| {
         const NAME: &str = "bobcat-internal:host.adoptStyleSheet";
-        let Some(HostValue::String(url)) = args.first() else {
+        let Some(&HostArgument::String(url)) = args.first() else {
             return Err("adoptStyleSheet expects a URL".to_owned());
         };
         let target = optional_node_id_argument(NAME, args, 1)?;
@@ -70,7 +70,7 @@ pub(super) fn install_styles(
         }
         // This receiver lives only for this call. Cache lookup and sharing an
         // in-flight preload belong to the resource fetcher on the host thread.
-        let answer = sources.request(SourceRequest::StyleSheet(url.clone()));
+        let answer = sources.request(SourceRequest::StyleSheet(url.to_owned()));
         // A synchronous wait, the same shape a `require` makes (see
         // `crate::require`). It is inside a job, so what it drives is this
         // engine thread's tasks — channel reads, lifecycle signals,

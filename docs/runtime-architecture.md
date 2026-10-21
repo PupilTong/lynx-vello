@@ -1577,7 +1577,7 @@ once per listening realm per dispatch — the host's one walk over the path
 calls each realm the listener table says listens, at the path's top step
 (`MainThreadRuntime::dispatch`) — carrying the whole event path, which each
 realm walks over the steps it holds handles for,
-as two comma-joined id strings and everything else as primitives: whether the event bubbles — which decides how
+as its step count and two node ids per step, and everything else as primitives: whether the event bubbles — which decides how
 much of that path the bind pass runs on, and whether the `global-bindEvent`
 pass runs at all — the event's `timestamp`, and a numeric detail kind followed
 by the numbers that kind spends (a position and an optional wheel delta plus

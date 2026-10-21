@@ -302,10 +302,12 @@ fn push_text_layout_extras<'a>(
     ]);
 }
 
-/// Inline arguments for one dispatch: the six of the header, then an
-/// input event's discriminator and eight detail numbers. Extras and touch
-/// points spill.
-type Arguments<'a> = SmallVec<[HostArgument<'a>; 15]>;
+/// Inline arguments for one dispatch, in call order: the name, `bubbles`,
+/// the timestamp and the step count; two node ids per step; the extras
+/// count; an input event's discriminator and eight detail numbers. That is
+/// 31 for a position event over the eight steps [`EncodedPath`] keeps
+/// inline; extras, touch points and longer paths spill.
+type Arguments<'a> = SmallVec<[HostArgument<'a>; 32]>;
 
 /// The registrants a dispatch of `name` over `steps` invites, as the
 /// document's listener table holds them when this is read: each with a path
@@ -365,13 +367,10 @@ fn realm_calls(
     registrants.filter(|&key| invited.contains(key)).collect()
 }
 
-/// The path every realm a dispatch calls is handed, as two comma-joined
-/// lists of packed node ids: each step's node, and the target that step
-/// sees ([`encode_path`]).
-struct EncodedPath {
-    nodes: String,
-    targets: String,
-}
+/// The path every realm a dispatch calls is handed ([`encode_path`]): each
+/// step's node and the target that step sees, which cross as two packed ids
+/// per step ([`packed_node_id`]).
+type EncodedPath = SmallVec<[(terminus::link::NodeId, terminus::link::NodeId); 8]>;
 
 /// The one encoding of a dispatch's path: the capture steps read backwards
 /// — the path, target first, whatever `bubbles` cut from the bubble pass —
@@ -381,23 +380,19 @@ struct EncodedPath {
 /// a UA component's shadow content) and skips them. A `NodeId` names one
 /// node for the life of the document, so liveness is one lookup per id.
 fn encode_path(document: &LynxDocument, steps: &terminus::link::event::EventSteps) -> EncodedPath {
-    let mut nodes = String::new();
-    let mut targets = String::new();
-    for step in steps.steps().iter().rev().filter(|step| {
-        step.capture
-            && document
-                .get(step.node)
-                .is_some_and(|node| !node.is_shadow_root())
-            && document.get(step.target).is_some()
-    }) {
-        if !nodes.is_empty() {
-            nodes.push(',');
-            targets.push(',');
-        }
-        write!(nodes, "{}", packed_node_id(step.node)).expect("writing to a String");
-        write!(targets, "{}", packed_node_id(step.target)).expect("writing to a String");
-    }
-    EncodedPath { nodes, targets }
+    steps
+        .steps()
+        .iter()
+        .rev()
+        .filter(|step| {
+            step.capture
+                && document
+                    .get(step.node)
+                    .is_some_and(|node| !node.is_shadow_root())
+                && document.get(step.target).is_some()
+        })
+        .map(|step| (step.node, step.target))
+        .collect()
 }
 
 /// Appends the extras channel: the count, then each name and its value.
@@ -2848,11 +2843,11 @@ impl MainThreadRuntime {
     /// once, right before the first call: the standard's event path, the
     /// capture steps in target-first, root-last order, each with its
     /// shadow-retargeted target, less the steps whose node or target is no
-    /// longer live and every shadow root, as two comma-joined decimal id
-    /// strings, which is how `childElementIds` carries a list already: the
-    /// boundary takes primitives and structured clones only, a clone can be
-    /// minted by the realm alone, and a decimal id cannot contain the
-    /// separator. A realm skips the steps it holds no handle for: the page
+    /// longer live and every shadow root, as the step count and then two
+    /// numbers per step, the node's packed id and its target's, the way a
+    /// touch event's points cross: the boundary takes primitives and
+    /// structured clones only, and a clone can be minted by the realm alone.
+    /// A realm skips the steps it holds no handle for: the page
     /// realm a UA component's shadow content, which script names no node of,
     /// and a frame's card; a card everything outside its nested page. Its
     /// `event.target` is the target of the first step it holds, so an event
@@ -2877,7 +2872,8 @@ impl MainThreadRuntime {
     /// tree its target is in (DOM's *get the parent*).
     ///
     /// Everything else crosses as primitives, and the realm builds the
-    /// objects, in this order: the `timestamp`; the extras channel
+    /// objects, in this order: the name, `bubbles` and the `timestamp`, then
+    /// the path; the extras channel
     /// ([`encode_extras`]: the count, then name/value pairs), which is what a
     /// Lynx handler reads beside the W3C payload and which the realm makes
     /// the Lynx `detail` whenever there are any; then the W3C payload as
@@ -3050,8 +3046,8 @@ impl MainThreadRuntime {
         ListenerFailures::or_called(failures, called)
     }
 
-    /// One realm's call in one dispatch: `__BobcatDispatchEvent(nodes,
-    /// targets, name, bubbles, timestamp, extras…, detail…)` in the realm
+    /// One realm's call in one dispatch: `__BobcatDispatchEvent(name,
+    /// bubbles, timestamp, stepCount, path…, extras…, detail…)` in the realm
     /// whose registrations are filed under `key`
     /// ([`RealmId::from_listener_key`]). A child already freed is not
     /// called. With `defer`, the call has no checkpoint of its own
@@ -3075,11 +3071,18 @@ impl MainThreadRuntime {
         // The detail last, because a touch event's points make it the one
         // part of variable length besides the extras before it.
         let mut arguments = Arguments::new();
-        arguments.push(HostArgument::String(&path.nodes));
-        arguments.push(HostArgument::String(&path.targets));
         arguments.push(HostArgument::String(name));
         arguments.push(HostArgument::Boolean(bubbles));
         arguments.push(HostArgument::Number(timestamp));
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a path's steps, far inside an f64's integers"
+        )]
+        arguments.push(HostArgument::Number(path.len() as f64));
+        for &(node, target) in path {
+            arguments.push(HostArgument::Number(packed_node_id(node)));
+            arguments.push(HostArgument::Number(packed_node_id(target)));
+        }
         encode_extras(extras, &mut arguments);
         encode_detail(detail, &mut arguments);
 
@@ -4124,7 +4127,7 @@ fn install(
     engine: &mut ScriptEngine,
     name: &str,
     arity: u8,
-    callback: impl FnMut(&[HostValue]) -> Result<HostValue, String> + 'static,
+    callback: impl FnMut(&[HostArgument<'_>]) -> Result<HostValue, String> + 'static,
 ) -> Result<(), MainThreadError> {
     engine
         .register_host_module_function(HOST_MODULE_SPECIFIER, name, arity, Box::new(callback))
@@ -5035,8 +5038,11 @@ fn validate_swap(
     Ok(())
 }
 
-fn argument(arguments: &[HostValue], index: usize) -> &HostValue {
-    arguments.get(index).unwrap_or(&HostValue::Undefined)
+fn argument<'a>(arguments: &[HostArgument<'a>], index: usize) -> HostArgument<'a> {
+    arguments
+        .get(index)
+        .copied()
+        .unwrap_or(HostArgument::Undefined)
 }
 
 /// The largest integer an `f64` represents exactly. A packed `NodeId` is built
@@ -5074,10 +5080,10 @@ fn node_id_value(node: terminus::link::NodeId) -> HostValue {
 )]
 fn node_id_argument(
     function: &str,
-    arguments: &[HostValue],
+    arguments: &[HostArgument<'_>],
     index: usize,
 ) -> Result<terminus::link::NodeId, String> {
-    let HostValue::Number(value) = *argument(arguments, index) else {
+    let HostArgument::Number(value) = argument(arguments, index) else {
         return Err(format!("{function} expects a number for argument {index}"));
     };
     if !value.is_finite() || value < 0.0 || value.fract() != 0.0 || value >= MAX_EXACT_INTEGER {
@@ -5091,11 +5097,11 @@ fn node_id_argument(
 
 fn optional_node_id_argument(
     function: &str,
-    arguments: &[HostValue],
+    arguments: &[HostArgument<'_>],
     index: usize,
 ) -> Result<Option<terminus::link::NodeId>, String> {
-    match *argument(arguments, index) {
-        HostValue::Undefined | HostValue::Null => Ok(None),
+    match argument(arguments, index) {
+        HostArgument::Undefined | HostArgument::Null => Ok(None),
         _ => node_id_argument(function, arguments, index).map(Some),
     }
 }
@@ -5106,11 +5112,11 @@ fn optional_node_id_argument(
 /// element is the caller's to ask.
 fn node_ids_argument(
     function: &str,
-    arguments: &[HostValue],
+    arguments: &[HostArgument<'_>],
     index: usize,
 ) -> Result<Vec<terminus::link::NodeId>, String> {
     let malformed = || format!("{function} expects comma-joined node ids for argument {index}");
-    let HostValue::String(ids) = argument(arguments, index) else {
+    let HostArgument::String(ids) = argument(arguments, index) else {
         return Err(malformed());
     };
     if ids.is_empty() {
@@ -5128,10 +5134,14 @@ fn node_ids_argument(
 
 /// A flag the realm spells as `0` or `1`, which is every boolean a tree
 /// member takes.
-fn flag_argument(function: &str, arguments: &[HostValue], index: usize) -> Result<bool, String> {
-    match *argument(arguments, index) {
-        HostValue::Number(0.0) => Ok(false),
-        HostValue::Number(1.0) => Ok(true),
+fn flag_argument(
+    function: &str,
+    arguments: &[HostArgument<'_>],
+    index: usize,
+) -> Result<bool, String> {
+    match argument(arguments, index) {
+        HostArgument::Number(0.0) => Ok(false),
+        HostArgument::Number(1.0) => Ok(true),
         _ => Err(format!("{function} expects 0 or 1 for argument {index}")),
     }
 }
@@ -5142,11 +5152,11 @@ fn flag_argument(function: &str, arguments: &[HostValue], index: usize) -> Resul
 /// and every bit outside the three.
 fn kinds_argument(
     function: &str,
-    arguments: &[HostValue],
+    arguments: &[HostArgument<'_>],
     index: usize,
 ) -> Result<ListenerKinds, String> {
-    match *argument(arguments, index) {
-        HostValue::Number(value) if value.fract() == 0.0 && (1.0..=7.0).contains(&value) =>
+    match argument(arguments, index) {
+        HostArgument::Number(value) if value.fract() == 0.0 && (1.0..=7.0).contains(&value) =>
         {
             #[expect(
                 clippy::cast_possible_truncation,
@@ -5163,9 +5173,13 @@ fn kinds_argument(
 
 /// A JavaScript boolean, which is what the boot module hands `createDocument`
 /// its five switches as.
-fn boolean_argument(function: &str, arguments: &[HostValue], index: usize) -> Result<bool, String> {
-    match *argument(arguments, index) {
-        HostValue::Boolean(value) => Ok(value),
+fn boolean_argument(
+    function: &str,
+    arguments: &[HostArgument<'_>],
+    index: usize,
+) -> Result<bool, String> {
+    match argument(arguments, index) {
+        HostArgument::Boolean(value) => Ok(value),
         _ => Err(format!("{function} expects a boolean for argument {index}")),
     }
 }
