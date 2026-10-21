@@ -567,7 +567,7 @@ impl<T> Node<T> {
     ///
     /// Borrowed as stored, but for a `style` or `class` value that a write
     /// through the parsed form left to be serialized on read
-    /// ([`Self::attribute_text`]).
+    /// (`attribute_text`).
     #[must_use]
     pub fn attribute(&self, name: &str) -> Option<Cow<'_, str>> {
         self.attr_local_name(&LocalName::from(name))
