@@ -28,7 +28,7 @@ const SLIDER_SCRIPT: &str = r"
 
 fn declaration(property: &str, value: &str) -> PreparsedDeclaration {
     PreparsedDeclaration {
-        property: property.to_owned(),
+        property: property.to_owned().into(),
         value: value.to_owned(),
         important: false,
     }
