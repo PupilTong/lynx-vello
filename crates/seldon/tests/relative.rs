@@ -1404,3 +1404,81 @@ fn a_scrolling_relative_container_counts_its_items_margin_areas() {
     assert_point(tree.layout(item).location, Point::ZERO);
     assert_size(output.content_size, Size::new(150.0, 20.0));
 }
+
+#[test]
+fn wrap_width_refresh_keeps_a_basis_free_measurement_the_content_width_still_fits() {
+    // The 200px item took its max-content width under 300px, and the 200px
+    // content width the third pass makes definite still fits it, so that
+    // pass reuses the measurement: one probe, then the commit.
+    let mut tree = TestTree::default();
+    let item = tree.push_measured_leaf(TestStyle::default(), width_bounded_by_available);
+    let root = relative_container(&mut tree, two_pass(), &[item]);
+
+    let output = perform_layout(
+        &tree,
+        root,
+        Size::NONE,
+        Size::new(AvailableSpace::Definite(300.0), AvailableSpace::MaxContent),
+    );
+
+    assert_size(output.size, Size::new(200.0, 10.0));
+    assert_size(tree.layout(item).size, Size::new(200.0, 10.0));
+    assert_eq!(tree.child_layout_calls.get(), 3);
+}
+
+#[test]
+fn wrap_width_refresh_remeasures_an_item_its_available_width_capped() {
+    // A 300px sibling widens the content box past the 150px the auto item was
+    // measured at and took all of, so the third pass measures it again at
+    // 300px and it grows to its 200px max-content width.
+    let mut tree = TestTree::default();
+    let wide = relative_leaf(&mut tree, 300.0, 10.0, 1);
+    let item = tree.push_measured_leaf(TestStyle::default(), width_bounded_by_available);
+    let root = relative_container(&mut tree, two_pass(), &[wide, item]);
+
+    let output = perform_layout(
+        &tree,
+        root,
+        Size::NONE,
+        Size::new(AvailableSpace::Definite(150.0), AvailableSpace::MaxContent),
+    );
+
+    assert_size(output.size, Size::new(300.0, 10.0));
+    assert_size(tree.layout(item).size, Size::new(200.0, 10.0));
+}
+
+#[test]
+fn wrap_width_refresh_remeasures_a_percentage_item() {
+    // A percentage margin reads the width basis the third pass moves, so the
+    // item is measured again even though the content width fits it.
+    let mut tree = TestTree::default();
+    let item = tree.push_measured_leaf(
+        TestStyle {
+            margin: Edges {
+                left: margin_pct(0.1),
+                right: margin_px(0.0),
+                top: margin_px(0.0),
+                bottom: margin_px(0.0),
+            },
+            ..TestStyle::default()
+        },
+        width_bounded_by_available,
+    );
+    let root = relative_container(&mut tree, two_pass(), &[item]);
+
+    perform_layout(
+        &tree,
+        root,
+        Size::NONE,
+        Size::new(AvailableSpace::Definite(300.0), AvailableSpace::MaxContent),
+    );
+
+    assert_eq!(tree.child_layout_calls.get(), 4);
+}
+
+fn two_pass() -> TestStyle {
+    TestStyle {
+        relative_layout_once: relative_layout_once::T::False,
+        ..TestStyle::default()
+    }
+}

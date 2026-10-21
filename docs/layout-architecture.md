@@ -1288,8 +1288,12 @@ the painting — layout's job is to never be the frame's bottleneck.
   items, reverse dependency chains, duplicate ids, adversarial disjoint
   cycles, one-pass versus two-pass solving, nested cold layout, warm
   descendants, root cache hits, and auto-width refinement. The refinement
-  path preserves measurements for unchanged, definite fixed items while
-  percentage-dependent or newly double-anchored items remeasure. The Linear
+  path preserves measurements for unchanged, definite fixed items, and for
+  a basis-free auto-width item (no percentage basis read, no block-axis
+  intrinsic keyword) whose margin box the definite content width still fits
+  after it was measured at max-content or narrower than its available width,
+  while percentage-dependent or newly double-anchored items remeasure. The
+  Linear
   suite covers fixed stacks,
   weighted distribution and freeze paths, ordering, gravity matrices,
   measurement/stretch, and mixed hidden/absolute children. Each algorithm
