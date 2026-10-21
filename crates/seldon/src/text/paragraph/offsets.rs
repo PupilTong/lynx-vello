@@ -59,6 +59,16 @@ impl<'a> OffsetMap<'a> {
         self.map.source_len()
     }
 
+    /// How many atomic inline boxes the source units before `unit` hold.
+    /// Every box counts one source unit and is no text, so
+    /// `unit - boxes_before(unit)` is `unit` as an offset into the
+    /// paragraph's text content alone. A box past the end of the shown
+    /// source content — after a `<text>`'s `nowrap` cut — is not counted.
+    #[must_use]
+    pub fn boxes_before(&self, unit: u32) -> u32 {
+        self.map.boxes_before(unit)
+    }
+
     /// Where the source content ends in the display layout's text: the
     /// text's length, or a truncation cut's byte, past which the display
     /// layout shows the dots or the inline-truncation content — no source

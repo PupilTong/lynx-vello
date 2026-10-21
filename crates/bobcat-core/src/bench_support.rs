@@ -193,8 +193,8 @@ impl ScriptHarness {
     /// The posts go into the document as `Page::adopt_posted` hands them
     /// over ([`MainThreadRuntime::adopt_scroll_offsets`]), which queues the
     /// `scroll`s and `scrollend`s they owe. Then the steps of the entry's
-    /// epilogue that bear on those events run in its order: the instant
-    /// scrolls' own `scroll`s, the commit if one is due, and — when the
+    /// epilogue that bear on those events run in its order: the commit if
+    /// one is due, the instant scrolls' own `scroll`s, and — when the
     /// queue holds anything and nothing is left uncommitted — the delivery
     /// the epilogue posts as an entry of its own
     /// ([`MainThreadRuntime::dispatch_component_events`]), run here in place.
@@ -221,8 +221,8 @@ impl ScriptHarness {
             };
             (node, entry)
         }));
-        self.runtime.queue_instant_scroll_events();
         self.runtime.commit_if_dirty();
+        self.runtime.queue_instant_scroll_events();
         if !self.runtime.has_component_events() || self.runtime.needs_render() {
             return false;
         }

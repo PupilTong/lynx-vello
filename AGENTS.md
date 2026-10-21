@@ -2052,8 +2052,10 @@ extends. The slot routes those names on an editing account of its own, by
 state (`editing::EditingRoute`), one more term of `DocumentSlot::routes_given`
 beside the listener table and the observed names, whose changes go out through
 `DocumentSlot::change_names` after the waiting last removals: `pointerdown`
-and `click` while `Document::has_editing_hosts()`, `keydown` while an element
-is focused (both from the page's epilogue, `DocumentSlot::sync_editing_routes`),
+and `click` from the page's first epilogue on (a press selects any text whose
+used `user-select` is not `none`, and a press outside everything blurs and
+clears), `keydown` while an element is focused (both from the page's epilogue,
+`DocumentSlot::sync_editing_routes`),
 and `pointermove`/`pointerup`/`pointercancel` only while a mouse drag is held
 (`MainThreadRuntime::set_pressed`, inside the press's job). The kernel is not
 a registrant in the listener table, so an event routed only on that account
@@ -2093,10 +2095,11 @@ freed node removed, both drained before each commit is published
 (`DocumentSlot::sync_names`).
 CSSOM-View's `scroll` and `scrollend` are decided on this thread, never on
 the painter: `adopt_scroll_offsets` queues a `scroll` per container a post
-moved and a `scrollend` when a post names it at rest after it scrolled, and a
-script-facing instant scroll (`terminus::link::Document::take_instant_scrolls`) queues
-its `scroll` from its entry's epilogue and gets its `scrollend` from the
-painter's rest post after carrying the request out. A wheel gesture rests
+moved and a `scrollend` when a post names it at rest after it scrolled, and an
+instant scroll request — a script's, a component's, or the render's move to a
+new `scroll-initial-target` (`terminus::link::Document::take_instant_scrolls`) — queues
+its `scroll` from its entry's epilogue, after the commit, and gets its
+`scrollend` from the painter's rest post after carrying the request out. A wheel gesture rests
 once, 100 ms after its last tick (`WHEEL_REST_SECONDS`). All are component
 events, non-bubbling, with Lynx's scroll metrics as extras, queued only for a name a realm
 listener or a component hears at that moment; which containers are scrolling
@@ -2292,8 +2295,10 @@ is written inside), `tree::text` (the paragraph attribute limits and what may
 generate a box inside a run, and a `text` component whose
 `CustomElement::invoke` answers `getTextBoundingRect` with the per-line boxes
 `Document::text_range_boxes` reads off the committed paragraph, in viewport
-px; `getSelectedText` and `setTextSelection` are not built, there being no
-selection model), `tree::image` (the `src`-to-replaced-content
+px, and, for a `text-selection` text — `user-select` in its UA rules, so
+a pointer selects it without focus — `getSelectedText` and
+`setTextSelection` over the document's selection),
+`tree::image` (the `src`-to-replaced-content
 reflection and its UA box), `tree::scroll_container` (`scroll-view` and
 `list` as scroll containers — which axis scrolls, which one clips, and which
 way the subtree stacks, from `web-elements`' own `scroll-view.css` and
@@ -3568,9 +3573,9 @@ Subsystems:
   (`seldon::text::paragraph::OffsetMap`), the
   Chromium-shaped command set with
   its `beforeinput`/`input`/`composition*` events reported as data
-  (`prepare_editing`/`commit_editing`), `TextInputState`, and the count of
-  editing hosts an embedder routes input by (`has_editing_hosts`, kept by the
-  `contenteditable` setters and `free_node`). The caret, selection highlight
+  (`prepare_editing`/`commit_editing`), `TextInputState`, and the read-only
+  selection of an element whose used `user-select` is not `none`
+  (`is_user_selectable`, `selectable_root_of`, `begin_selection`). The caret, selection highlight
   and composition underline are painted by `paint/text.rs`. `bobcat-core`'s
   `main/runtime/editing.rs` dispatches the events and runs the default
   actions (E2); the events cross as `EventDetail::{Input, Composition,
@@ -4096,13 +4101,13 @@ would host it:
   standard two, the five list methods on `list` only, whose `scrollBy`
   shadows the standard one, the refresh view's three on `x-refresh-view`
   only, `setFoldExpanded` on `scroll-coordinator` and `x-foldview-ng` only,
-  `getTextBoundingRect` on `text` only, the dialog's on `dialog` only) through
+  `getTextBoundingRect`, `getSelectedText` and `setTextSelection` on `text`
+  only, the dialog's on `dialog` only) through
   `__InvokeUIMethod`; every other name — the base set's `focus`/`blur` (no
   focus model), a `scroll-view`'s `takeContentScreenshot`,
   a `list`'s `getScrollInfo`, a scroll coordinator's
   `getScrollInfo`, an `image`'s four animation methods (nothing plays image
-  frames), a `text`'s `getSelectedText` and `setTextSelection` (no
-  selection model), `requestUIInfo`,
+  frames), `requestUIInfo`,
   `takeScreenshot` (no pixel readback) and the rest of the per-component
   catalog — answers code 3, `METHOD_NOT_FOUND`. The rect itself ignores
   transforms and never flushes.
@@ -4363,8 +4368,8 @@ own library whenever dev targets are in the build. `seldon` dev-depends on
 with bench targets:
 
 ```sh
-cargo build --unit-graph -Z unstable-options --workspace            # dom: []
-cargo build --unit-graph -Z unstable-options --workspace --benches  # dom: [layout-test-utils]
+cargo build --unit-graph -Z unstable-options --workspace            # terminus: []
+cargo build --unit-graph -Z unstable-options --workspace --benches  # terminus: [layout-test-utils]
 ```
 
 The second line is what `cargo codspeed build` and `cargo llvm-cov` resolve.
@@ -4378,9 +4383,14 @@ is noise — describe a `terminus` one branch away from the shipped one. On the
 **This is accepted, not fixed.** Breaking the cycle means moving seldon's
 terminus-based benches into `terminus`, renumbering every CodSpeed benchmark id and
 throwing away its history — a worse trade than one predictable branch.
+`bobcat-core`'s dev-dependency on `terminus` with `painter-test-utils` (for its
+painter tests) unifies that feature into `terminus` the same way; its cost is
+`FrameClock`'s pinned reading and branch in `now_seconds`, the test-only
+`Output::None` variant's match arms, and the doc-hidden test accessors in
+`crates/terminus/src/painter/mod.rs`, and it is accepted for the same reason.
 `.github/scripts/check-bench-feature-parity.py` runs in CI and holds the line:
-it diffs the two resolutions, prints the two recorded deviations, and fails on
-a third appearing or on a recorded one silently going away. Any new entry needs
+it diffs the two resolutions, prints the three recorded deviations, and fails on
+a new one appearing or on a recorded one silently going away. Any new entry needs
 a written reason for the same cost the existing ones state.
 
 ### Benchmarks are only the `benches/` targets

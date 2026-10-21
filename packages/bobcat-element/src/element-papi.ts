@@ -2147,6 +2147,15 @@ function invokeUIMethod(handle: Handle, method: string, params: unknown): Invoke
  *   its own union. No `id` or `dataset` rides along: the natives send only
  *   the two keys. A `markdown`'s answers in the same record and shape, its
  *   offsets the rendered text's.
+ * - `setTextSelection`, a `text`'s: `getTextBoundingRect`'s `{boundingRect,
+ *   boxes}` over the range it selected, plus `handles`, two `{x, y,
+ *   radius}` in viewport CSS px: the start handle at the first box's
+ *   bottom-left, the end handle at the last box's bottom-right. The host
+ *   writes the boxes as `getTextBoundingRect` does and then the six handle
+ *   numbers. A call that cleared the selection (a negative coordinate)
+ *   answers a bare code and no `data`.
+ * - `getSelectedText`, a `text`'s: `{selectedText}`, one string field,
+ *   `""` when nothing in the element is selected.
  * - `getContent`, a `markdown`'s: `{content}`, one string field.
  * - `getImages`, a `markdown`'s: `{images}`, the typings' shape (web-core
  *   answers the bare array). The host writes the count and then each URL.
@@ -2202,24 +2211,19 @@ function decodeMethodData(handle: Handle, method: string, fields: string[]): unk
       return cells;
     }
     case "getTextBoundingRect": {
-      const count = Number(fields[0] ?? 0);
-      const boxes = [];
-      for (let box = 0; box < count; box++) {
-        const [left = 0, top = 0, width = 0, height = 0] = fields
-          .slice(1 + box * 4, 5 + box * 4)
-          .map(Number);
-        boxes.push({ left, top, right: left + width, bottom: top + height, width, height });
-      }
-      let boundingRect = boxes[0] ?? { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 };
-      for (const box of boxes.slice(1)) {
-        const left = Math.min(boundingRect.left, box.left);
-        const top = Math.min(boundingRect.top, box.top);
-        const right = Math.max(boundingRect.right, box.right);
-        const bottom = Math.max(boundingRect.bottom, box.bottom);
-        boundingRect = { left, top, right, bottom, width: right - left, height: bottom - top };
-      }
-      return { boundingRect: { ...boundingRect }, boxes };
+      const { boundingRect, boxes } = textBoxes(fields);
+      return { boundingRect, boxes };
     }
+    case "setTextSelection": {
+      const { boundingRect, boxes, rest } = textBoxes(fields);
+      const handles = [0, 1].map((handle) => {
+        const [x = 0, y = 0, radius = 0] = rest.slice(handle * 3, handle * 3 + 3).map(Number);
+        return { x, y, radius };
+      });
+      return { boundingRect, boxes, handles };
+    }
+    case "getSelectedText":
+      return { selectedText: fields[0] ?? "" };
     case "getContent":
       return { content: fields[0] ?? "" };
     case "getImages": {
@@ -2261,6 +2265,33 @@ function decodeMethodData(handle: Handle, method: string, fields: string[]): unk
     default:
       return fields;
   }
+}
+
+/**
+ * The `{boundingRect, boxes}` of `getTextBoundingRect` and
+ * `setTextSelection` from their leading fields — the box count, then
+ * `left`, `top`, `width`, `height` per box — and the fields after the
+ * boxes. `boundingRect` is the boxes' union, as iOS's `CGRectUnion` builds
+ * it (`LynxUIText.m:867-887`), so one box is its own union.
+ */
+function textBoxes(fields: string[]) {
+  const count = Number(fields[0] ?? 0);
+  const boxes = [];
+  for (let box = 0; box < count; box++) {
+    const [left = 0, top = 0, width = 0, height = 0] = fields
+      .slice(1 + box * 4, 5 + box * 4)
+      .map(Number);
+    boxes.push({ left, top, right: left + width, bottom: top + height, width, height });
+  }
+  let boundingRect = boxes[0] ?? { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 };
+  for (const box of boxes.slice(1)) {
+    const left = Math.min(boundingRect.left, box.left);
+    const top = Math.min(boundingRect.top, box.top);
+    const right = Math.max(boundingRect.right, box.right);
+    const bottom = Math.max(boundingRect.bottom, box.bottom);
+    boundingRect = { left, top, right, bottom, width: right - left, height: bottom - top };
+  }
+  return { boundingRect: { ...boundingRect }, boxes, rest: fields.slice(1 + count * 4) };
 }
 
 /**

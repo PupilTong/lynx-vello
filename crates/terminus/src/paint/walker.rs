@@ -1619,9 +1619,10 @@ fn paint_item<T>(
                     sink, space, document, &paragraph, &runs, transform, images,
                 );
             }
-            // The focused editing host's selection sits over its backgrounds
-            // and under its glyphs; its caret and composition underline over
-            // them. One `Option` test for every other paragraph.
+            // The selection host's selection sits over its backgrounds and
+            // under its glyphs; a focused host's caret and composition
+            // underline over them. One `Option` test for every other
+            // paragraph.
             let editing = text::EditingPaint::of(document, item.node, style);
             if let Some(editing) = &editing {
                 text::paint_selection(sink.scene_for(space), paragraph.layout, transform, editing);

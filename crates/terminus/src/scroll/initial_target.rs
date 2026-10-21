@@ -11,15 +11,20 @@
 //! commit publishes the offset it settled on.
 //!
 //! The scroll is an instant scroll request ([`Document::scroll_to_with`]),
-//! not a plain [`Document::scroll_to`]. A painter that holds an offset of its
-//! own for the container — the user scrolled it, and the document adopted
-//! the posted offset without a commit — keeps showing that offset over a new
-//! frame's, so a plain write would move the document and leave the screen
-//! where the user left it. The request travels in the rebuilt frame's scroll
-//! slot and the painter carries it out on adoption. It is recorded even when
-//! the document's own offset already equals the position, because the
-//! painter's may not; that costs one more paint-order build inside the same
-//! render, and only on a render that honours a new target.
+//! not a plain [`Document::scroll_to`]. Like every instant request that
+//! moves its container, it is recorded for the host's CSSOM-View `scroll`
+//! and `scrollend` ([`Document::take_instant_scrolls`]): §3.1.1 scrolls as
+//! `scrollIntoView` would, and a scroll position that changes fires them
+//! whoever moved it. A painter that holds an offset of its own for the
+//! container — the user scrolled it, and the document adopted the posted
+//! offset without a commit — keeps showing that offset over a new frame's,
+//! so a plain write would move the document and leave the screen where the
+//! user left it. The request travels in the rebuilt frame's scroll slot and
+//! the painter carries it out on adoption. It is recorded even when the
+//! document's own offset already equals the position, because the painter's
+//! may not; that costs one more paint-order build inside the same render,
+//! and only on a render that honours a new target. Such a request moves
+//! nothing here, so it records nothing for the host's events.
 //!
 //! A container honours each new target once, when it first becomes the
 //! target: on the container's first layout, and again for a target that
@@ -83,7 +88,7 @@ impl<T> Document<T> {
                 ScrollLogicalPosition::Nearest,
                 Vector2D::zero(),
             ) {
-                self.request_scroll(container, position, ScrollBehavior::Instant, false, false);
+                self.request_scroll(container, position, ScrollBehavior::Instant, false);
                 requested = true;
             }
         }
@@ -256,6 +261,36 @@ mod tests {
         assert!(!document.needs_render());
         let request = slot_request(&frame, scroller).expect("the frame carries the request");
         assert_eq!(request.target, Vector2D::new(0.0, 100.0));
+    }
+
+    /// The move to a new target is recorded for the host's `scroll` and
+    /// `scrollend` as any instant scroll request's is: the container, with
+    /// the offset it had before the move. A new target the container
+    /// already rests on moves nothing and records nothing.
+    #[test]
+    fn a_honoured_target_that_moves_the_container_is_recorded_for_the_host() {
+        let (mut document, scroller, pages) = paged("", 4);
+        document.commit();
+        assert!(!document.has_instant_scrolls(), "no target, no move");
+
+        document.scroll_to(scroller, Vector2D::new(0.0, 50.0));
+        document.set_inline_style(pages[2], "scroll-initial-target: nearest");
+        document.commit();
+        assert_eq!(document.scroll_offset(scroller), Vector2D::new(0.0, 200.0));
+        assert_eq!(
+            document.take_instant_scrolls().as_slice(),
+            [(scroller, Vector2D::new(0.0, 50.0))],
+            "the container, with its offset before the move"
+        );
+
+        document.scroll_to(scroller, Vector2D::new(0.0, 100.0));
+        document.set_inline_style(pages[2], "");
+        document.set_inline_style(pages[1], "scroll-initial-target: nearest");
+        document.commit();
+        assert!(
+            !document.has_instant_scrolls(),
+            "a target at the current offset moves nothing"
+        );
     }
 
     #[test]

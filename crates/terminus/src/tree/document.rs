@@ -750,8 +750,9 @@ impl<T> Document<T> {
         // HTML's removing steps: an element that left the document leaves
         // the top layer with it (`tree::top_layer`, "Removal").
         self.drop_disconnected_top_layer_entries();
-        // ...and is no longer focused (the focus fixup rule, `editing`).
-        self.fix_up_focus();
+        // ...and is no longer focused nor selected (the focus fixup rule
+        // and its selectable-element counterpart, `editing`).
+        self.fix_up_selection();
     }
 
     /// Frees `id`, returning its payload. Its element children are unlinked
@@ -959,7 +960,7 @@ impl<T> Document<T> {
         if node.is_shadow_root() {
             self.shadow_roots -= 1;
         }
-        self.note_freed_editing_host(&node);
+        self.note_freed_editing_node(&node);
         self.layout.remove(slot);
         self.forget_reactions(id);
         // Every free comes through here, one node at a time, so a defined

@@ -1084,7 +1084,7 @@ impl DocumentSlot {
         Ok(())
     }
 
-    /// Queues a `scroll` at every container a script-facing instant scroll
+    /// Queues a `scroll` at every container an instant scroll request
     /// moved ([`terminus::link::Document::take_instant_scrolls`]), if anything in the
     /// document hears the name ([`Self::listens`]), and records the
     /// container as scrolling. Its `scrollend` comes from the painter, which
@@ -1494,16 +1494,15 @@ impl DocumentSlot {
     }
 
     /// Moves the two routes the document's state decides, once per entry
-    /// from the page's epilogue: [`editing::EditingRoute::Hosts`] while
-    /// [`terminus::link::Document::has_editing_hosts`], [`editing::EditingRoute::Focus`]
-    /// while an element is focused. One counter read and one field read when
-    /// nothing changed. The drag route is the press's own
-    /// ([`MainThreadRuntime::set_pressed`]).
+    /// from the page's epilogue: [`editing::EditingRoute::Pointer`] while
+    /// the document exists, [`editing::EditingRoute::Focus`] while an
+    /// element is focused. One field read when nothing changed. The drag
+    /// route is the press's own ([`MainThreadRuntime::set_pressed`]).
     fn sync_editing_routes(&mut self) {
-        let (hosts, focused) = self.document.as_ref().map_or((false, false), |document| {
-            (document.has_editing_hosts(), document.focused().is_some())
+        let (pointer, focused) = self.document.as_ref().map_or((false, false), |document| {
+            (true, document.focused().is_some())
         });
-        self.set_editing_route(editing::EditingRoute::Hosts, hosts);
+        self.set_editing_route(editing::EditingRoute::Pointer, pointer);
         self.set_editing_route(editing::EditingRoute::Focus, focused);
     }
 
@@ -2353,12 +2352,15 @@ impl MainThreadRuntime {
             .is_some_and(LynxDocument::needs_render)
     }
 
-    /// Queues the `scroll` every script-facing instant scroll of this entry
-    /// owes: a UI method's `scrollTo`, `scrollBy` or `scrollIntoView`, or a
-    /// component's own instant scroll. Asked by the page's epilogue, so it
-    /// joins the component events this entry produced; one length check
-    /// when nothing scrolled. The `scrollend` follows from the painter's
-    /// post of the container at rest.
+    /// Queues the `scroll` every instant scroll of this entry owes: a UI
+    /// method's `scrollTo`, `scrollBy` or `scrollIntoView`, a component's
+    /// own instant scroll, or the render's move to a new
+    /// `scroll-initial-target` (an `x-swiper`'s `current`, a `viewpager`'s
+    /// `select-index`). Asked by the page's epilogue after its commit, which
+    /// is where that last one happens, so it joins the component events
+    /// this entry produced; one length check when nothing scrolled. The
+    /// `scrollend` follows from the painter's post of the container at
+    /// rest.
     pub(crate) fn queue_instant_scroll_events(&mut self) {
         let mut slot = self.slot.borrow_mut();
         if slot

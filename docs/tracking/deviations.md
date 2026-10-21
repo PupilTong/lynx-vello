@@ -1105,8 +1105,8 @@ consequential choice about whether to follow the spec or the quirk.
   are a touch count (the Lynx scroll-state events entry below).
   Recorded choices inside the step:
   - **A `scrollend` ends a scroll that happened.** The main thread records
-    every container that scrolled (an adopted offset moved it, or a
-    script-facing instant scroll did) whether or not anything listens, and a
+    every container that scrolled (an adopted offset moved it, or an
+    instant scroll request did) whether or not anything listens, and a
     post naming it at rest ends that record and fires `scrollend` if the name
     is heard at that moment. An instant scroll fires its `scroll` in the task
     that scrolled and its `scrollend` from the painter's rest post after it
@@ -1117,8 +1117,15 @@ consequential choice about whether to follow the spec or the quirk.
     and the gesture one `scrollend`. A drag or fling that moves the
     container takes it over, and its own end decides the rest. Browsers
     debounce the same way, with their own intervals.
-  - **The render's own positioning fires nothing**: `scroll-initial-target`
-    and the re-snap after a layout change move a container without an event.
+  - **The re-snap after a layout change fires nothing**: it moves a
+    container without an event. The render's other positioning,
+    `scroll-initial-target`, is an instant scroll request and fires `scroll`
+    and `scrollend` as one (2026-10-21): CSSOM-View fires both for any
+    change of a scroll position, and css-scroll-snap-2 §3.1.1 defines that
+    scroll as `scrollIntoView`'s. So an `x-swiper`'s `current` and a
+    `viewpager`'s `select-index`, at connect or written later, fire the
+    component events that follow from those two, as web-core's `scrollTo`
+    and native's pager callbacks do.
   - **An attribute-driven instant scroll at connect fires `scroll` then
     `scrollend` at mount**: a `scroll-top`/`scroll-left` on `scroll-view`, or
     any other component attribute that scrolls through
@@ -2087,7 +2094,19 @@ consequential choice about whether to follow the spec or the quirk.
       to the new page, instantly, over a user's swipe
       (`changing_the_index_in_force_turns_the_pager`; painter side
       `a_selected_page_is_the_first_frame_and_a_new_index_overrides_a_swipe`);
-      web-core does not;
+      web-core does not. The turn, like the one to the page in force at
+      connect, fires the pager's `scroll` and `scrollend` per CSSOM-View, so
+      `offsetchange` and `change` follow
+      (`a_viewpager_select_index_written_later_fires_offsetchange_and_change`),
+      as native's `select-index` setter reports both (Android
+      `BaseLynxViewPager.kt:156-165`, `LynxUIViewPager.kt:203-229`). At
+      connect this follows web-core, whose `selectTab` from
+      `connectedCallback` fires `offsetchange` and, at its `scrollend`, a
+      `change` from page 0 (`XViewpagerNg.ts:37-57`,
+      `XViewpagerNgEvents.ts`); native Android records the initial page as
+      already reported and sends no `change` for it
+      (`LynxUIViewPager.kt:259-266`) — **a native/web-core conflict, open
+      for the user**;
     - inserting or removing a page ahead of the target makes another page the
       target, and the pager turns to it
       (`inserting_or_removing_a_page_ahead_of_the_target_moves_the_target`);
@@ -2417,10 +2436,18 @@ consequential choice about whether to follow the spec or the quirk.
     the content box's origin, as tall as the line holding `start`, which
     says nothing about where `start` is; kept for parity rather than
     answering a caret position.
-  - *Selection methods absent.* `getSelectedText` and `setTextSelection`
-    are code 3: read-only text has no selection model, nothing selects it,
-    and so there is nothing to read or set. The only selection is an
-    editing host's (see the next entry).
+  - *Selection methods (2026-10-20).* `getSelectedText` answers
+    `{selectedText}` of the document's selection when it lies in the
+    element, `""` otherwise. `setTextSelection` selects between two
+    border-box points of a `text-selection` text and answers
+    `getTextBoundingRect`'s shape plus `handles`, two `{x, y, radius}` at
+    the first box's bottom-left and the last box's bottom-right with native
+    Android's radius 50; a negative coordinate clears the selection and
+    answers no data. A `text` without `text-selection` answers code 8, as a
+    nested `text` does: the element cannot hold the document's selection.
+    The handle flags are read and ignored, since no handle is painted.
+    Unlike every other UI method, `setTextSelection` runs a layout pass:
+    its point commands measure the current layout.
 
 - **`text` and `inline-text` `selectionchange` (2026-10-20): web-core's
   `XTextSelectionEvents.ts` over the document's W3C `selectionchange`**
@@ -2432,7 +2459,57 @@ consequential choice about whether to follow the spec or the quirk.
   empty record `{-1, -1, "forward"}`, where a browser's selection can enter
   it and web-core reports offsets into it. A `text` around a host that is a
   nested `inline-text` counts the text before the host, as web-core's
-  `range.toString().length` does.
+  `range.toString().length` does. A selection in a `text-selection` text
+  (next entry) is in source units of its paragraph, and its record counts
+  the text content, every text and generated run but no inline atom
+  (web-core's `range.toString().length`; native counts the placeholder
+  character, `AndroidText.java:482-490`); a `text` or `inline-text` inside
+  it reports when both points lie in its own source range.
+
+- **`text-selection` (2026-10-20): read-only text selected by a pointer,
+  as `user-select` in the UA sheet, a browser's gesture**
+  (`crates/bobcat-core/src/main/tree/text.rs`,
+  `crates/bobcat-core/src/main/runtime/editing.rs`,
+  `crates/terminus/src/editing/mod.rs`). web-core's `x-text.css:147-181` is the
+  shape: `text`, `inline-text` and `inline-truncation` are
+  `user-select: none`, a `text-selection` text and the text elements inside
+  it `user-select: auto`, and `terminus` resolves the used value as css-ui-4
+  says (the root's `auto` is `text`). Where it leaves a reference:
+  - *`text-selection="false"` does not select.* web-core's selector is
+    `[text-selection]`, presence alone, so there the string `"false"` (what
+    `setElementPropertyOrAttribute` writes for `false`) selects too. Native
+    parses the boolean (`UIText.java:256`, `LynxUIText.m:719`), and that
+    reading is kept: the UA selector is
+    `text[text-selection]:not([text-selection="false" i])`.
+  - *Loose text outside a `text` is selectable by default*, as in a
+    browser: the root's `auto` resolves to `text`, and only the Lynx text
+    tags carry the UA `none`. Native has no such text; in web-core the same
+    text (an HTML element's own) selects too. An author's `user-select` on
+    any element is honoured, `none` on an ancestor turning a
+    `text-selection` text off as it does in web-core.
+  - *`user-select: all` and `contain` select as `text` does*, and a nested
+    scope's own value only decides whether a press on it starts a
+    selection: a selection stays in one paragraph, and the paragraph root's
+    used value is what the session needs.
+  - *The press and the tap are always routed* to the main thread's default
+    actions once the page exists (`EditingRoute::Pointer`), where before
+    this change they were routed only while the document had an editing
+    host: with `user-select` resolving at the root there is no document
+    state that says nothing can be selected, and a press outside everything
+    is what blurs and clears. One cross-thread entry per press, no listener
+    called.
+  - *The gesture is a browser's, not native's.* A mouse press places a
+    caret, a second and third quick press select the word and the line, a
+    held drag extends; a finger's tap places a caret. Native begins a
+    one-character selection at a long press that the finger then drags
+    out, and adjusts it with handles (`AndroidText.java:113-140, 977-1060`,
+    `LynxTextView.m:657-736`); a touch browser's long press selects the
+    word and shows handles. Neither touch gesture is built: the supported
+    platforms (macOS, the desktop browser, headless) have no touch screen,
+    and routing `longpress` for it would make the painter's name-level
+    `longpress` gate suppress every long hold's `tap` on the page. No
+    handles, no copy menu, no `::selection` colours, no
+    `selection-background-color`.
 
 - **`x-swiper` (2026-10-06): a component with web-core's shadow `#content`
   scroll container and a dot strip, and its layouts are UA rules.** `crates/bobcat-core/src/main/tree/swiper.rs` translates
@@ -2485,7 +2562,16 @@ consequential choice about whether to follow the spec or the quirk.
     where web-core turns it smoothly (`XSwiperAutoScroll.ts:35-41`,
     `XSwiper.ts:95-103`). The initial position is the item's snap position,
     as in web-core: its start, or its centre in `flat-coverflow`,
-    `coverflow` and `carry`.
+    `coverflow` and `carry`. The turn fires `#content`'s `scroll` and
+    `scrollend` per CSSOM-View, so a `current` written later fires
+    `scrollstart`, `change` and `scrollend`, as both references do
+    (web-core's `current` setter calls `scrollTo`; Android's `current` prop
+    turns the pager, `XSwiperUI.java:715-717`), and the swiper's first
+    commit on the `current` it was connected with fires `scrollstart` and
+    `scrollend` and no `change`, which is native's `isInit` rule
+    (`:197-199`) and web-core's connect-time `scrollTo`
+    (`a_swiper_current_written_later_fires_scrollstart_change_and_scrollend`,
+    `a_swiper_connected_with_current_fires_scrollstart_and_scrollend_and_no_change`).
   - *`bounces` stretches both ends of the main axis*
     (`overscroll-behavior-x`/`-y: contain-bounce`), the `<viewpager>`
     decision; web-core shows a blank page-wide box ahead of the items only
