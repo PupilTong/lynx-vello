@@ -63,6 +63,7 @@ mod platform_time;
 mod implementation {
     use std::cell::{Cell, RefCell};
     use std::ffi::{CStr, CString, c_char, c_int, c_void};
+    use std::mem::MaybeUninit;
     use std::num::TryFromIntError;
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::ptr::{self, NonNull};
@@ -806,32 +807,31 @@ mod implementation {
             }
         }
 
-        /// Fills in one C-ABI argument descriptor borrowing this value.
-        fn describe(self, slot: &mut ffi::QjsHostArg) {
-            slot.number = 0.0;
-            slot.text = ptr::null();
-            slot.text_len = 0;
-            match self {
-                Self::Undefined => slot.kind = ffi::HOST_ARG_UNDEFINED,
-                Self::Null => slot.kind = ffi::HOST_ARG_NULL,
-                Self::Boolean(value) => {
-                    slot.kind = ffi::HOST_ARG_BOOLEAN;
-                    slot.number = if value { 1.0 } else { 0.0 };
-                }
-                Self::Number(value) => {
-                    slot.kind = ffi::HOST_ARG_NUMBER;
-                    slot.number = value;
-                }
-                Self::String(value) => {
-                    slot.kind = ffi::HOST_ARG_STRING;
-                    slot.text = value.as_ptr();
-                    slot.text_len = value.len();
-                }
-                Self::Structured(value) => {
-                    slot.kind = ffi::HOST_ARG_STRUCTURED;
-                    slot.text = value.bytes.as_ptr();
-                    slot.text_len = value.bytes.len();
-                }
+        /// The C-ABI argument descriptor borrowing this value.
+        fn descriptor(self) -> ffi::QjsHostArg {
+            let (kind, number, text, text_len) = match self {
+                Self::Undefined => (ffi::HOST_ARG_UNDEFINED, 0.0, ptr::null(), 0),
+                Self::Null => (ffi::HOST_ARG_NULL, 0.0, ptr::null(), 0),
+                Self::Boolean(value) => (
+                    ffi::HOST_ARG_BOOLEAN,
+                    if value { 1.0 } else { 0.0 },
+                    ptr::null(),
+                    0,
+                ),
+                Self::Number(value) => (ffi::HOST_ARG_NUMBER, value, ptr::null(), 0),
+                Self::String(value) => (ffi::HOST_ARG_STRING, 0.0, value.as_ptr(), value.len()),
+                Self::Structured(value) => (
+                    ffi::HOST_ARG_STRUCTURED,
+                    0.0,
+                    value.bytes.as_ptr(),
+                    value.bytes.len(),
+                ),
+            };
+            ffi::QjsHostArg {
+                kind,
+                number,
+                text,
+                text_len,
             }
         }
     }
@@ -2422,18 +2422,24 @@ mod implementation {
                     "member name belongs to a different QuickJS runtime",
                 ));
             }
-            let mut described: SmallVec<[ffi::QjsHostArg; CALL_INLINE_ARGS]> =
-                SmallVec::with_capacity(arguments.len());
-            for argument in arguments {
-                let mut slot = ffi::QjsHostArg {
-                    kind: ffi::HOST_ARG_UNDEFINED,
-                    number: 0.0,
-                    text: ptr::null(),
-                    text_len: 0,
-                };
-                argument.describe(&mut slot);
-                described.push(slot);
+            // The descriptors are written where they stay: in an array on
+            // this frame, or for a longer call in a vector's spare capacity.
+            // Not a `SmallVec`, which `with_capacity` builds and then moves,
+            // a copy of all `CALL_INLINE_ARGS` slots on every call.
+            let count = arguments.len();
+            let mut inline = [const { MaybeUninit::<ffi::QjsHostArg>::uninit() }; CALL_INLINE_ARGS];
+            let mut spilled: Vec<ffi::QjsHostArg> = Vec::new();
+            let slots = if count <= CALL_INLINE_ARGS {
+                &mut inline[..count]
+            } else {
+                spilled.reserve_exact(count);
+                &mut spilled.spare_capacity_mut()[..count]
+            };
+            for (slot, argument) in slots.iter_mut().zip(arguments) {
+                slot.write(argument.descriptor());
             }
+            // Every one of the `count` slots is written above.
+            let described = slots.as_ptr().cast::<ffi::QjsHostArg>();
 
             let guard = self.begin();
             let mut raw = ptr::null_mut();
@@ -2442,13 +2448,13 @@ mod implementation {
                     self.raw().as_ptr(),
                     target.inner.value.raw.as_ptr(),
                     member.atom,
-                    described.len(),
-                    described.as_ptr(),
+                    count,
+                    described,
                     &raw mut raw,
                 )
             };
             // The descriptors borrow `arguments`, which outlives the call.
-            drop(described);
+            drop(spilled);
             let result = match status {
                 0 => self
                     .value_or_exception(raw, ErrorPhase::Call)
@@ -6014,14 +6020,16 @@ mod implementation {
                 )
                 .unwrap();
             let sum = realm.member("sum").unwrap();
-            let arguments: Vec<HostArgument<'_>> = (0..32)
+            // Past the descriptors' inline array and the shim's inline argv.
+            let count = u32::try_from(CALL_INLINE_ARGS).unwrap() + 8;
+            let arguments: Vec<HostArgument<'_>> = (0..count)
                 .map(|i| HostArgument::Number(f64::from(i)))
                 .collect();
             let CallOutcome::Called(total) = realm.call_member(&host, &sum, &arguments).unwrap()
             else {
                 panic!("the member ran");
             };
-            assert_eq!(total.as_number(), Some(496.0));
+            assert_eq!(total.as_number(), Some(f64::from(count * (count - 1) / 2)));
         }
 
         #[test]
