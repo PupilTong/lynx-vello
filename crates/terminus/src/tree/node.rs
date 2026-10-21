@@ -15,6 +15,7 @@ use stylo::LocalName;
 use stylo::data::{ElementData, ElementDataRef, ElementDataWrapper};
 use stylo::properties::{ComputedValues, PropertyDeclarationBlock};
 use stylo::selector_parser::PseudoElement;
+use stylo::servo::restyle_damage::ServoRestyleDamage;
 use stylo::servo_arc::Arc;
 use stylo::shared_lock::{Locked, SharedRwLock};
 use stylo::stylesheets::UrlExtraData;
@@ -22,6 +23,7 @@ use stylo_atoms::Atom;
 use stylo_dom::ElementState;
 
 use crate::render::image::ImageRole;
+use crate::style::damage::verdict;
 use crate::tree::custom::{CustomElementState, DefinitionId};
 use crate::tree::document::{DOCUMENT_NODE_ID, NodeId, NodeSlot, TreeArenas};
 use crate::tree::shadow::{ShadowLinks, ShadowRootData, ShadowRootMode};
@@ -40,11 +42,13 @@ struct DocumentNodeData {
     in_flush: StdArc<AtomicBool>,
 }
 
+/// What a document node or a shadow root holds besides the fields every node
+/// has. Element and text nodes hold nothing here — `Node::data` is `None` —
+/// and `Node::local_name`, which is `Some` exactly for an element, tells the
+/// two apart.
 enum NodeData {
-    Document(Box<DocumentNodeData>),
-    Element(Option<Arc<ComputedValues>>),
-    Text,
-    ShadowRoot(Box<ShadowRootData>),
+    Document(DocumentNodeData),
+    ShadowRoot(ShadowRootData),
 }
 
 /// Inline Stylo traversal and invalidation state.
@@ -67,6 +71,12 @@ pub(crate) struct StylingData {
     /// them.
     pub(crate) animates: AtomicU8,
     pub(crate) snapshot_flags: AtomicU8,
+    /// Whether the element held a style when the damage harvest last visited
+    /// it — or when a generated box's style was last written — so the next
+    /// harvest can tell a first and a last style from an unchanged one
+    /// ([`Node::take_style_refresh`]). Only written through `&mut Node`; it
+    /// sits in the padding the atomics leave.
+    harvested_style: bool,
 }
 
 impl Default for StylingData {
@@ -78,6 +88,7 @@ impl Default for StylingData {
             may_have_animations: AtomicBool::new(false),
             animates: AtomicU8::new(0),
             snapshot_flags: AtomicU8::new(0),
+            harvested_style: false,
         }
     }
 }
@@ -157,7 +168,7 @@ pub struct Node<T> {
     /// `parent`/`children` indexes the arena directly — there is no id table
     /// to resolve through, which is what keeps a walk step to one load.
     id: NodeId,
-    data: NodeData,
+    data: Option<Box<NodeData>>,
     /// What the embedder filed this node with: `Some` for every element and
     /// text node it created, `None` for the nodes nobody hands out — the
     /// document node, a shadow root, a `::backdrop` box's node, an anonymous
@@ -234,11 +245,11 @@ impl<T> Node<T> {
         Self::new(
             owner,
             id,
-            NodeData::Document(Box::new(DocumentNodeData {
+            Some(Box::new(NodeData::Document(DocumentNodeData {
                 lock,
                 url_data,
                 in_flush: StdArc::new(AtomicBool::new(false)),
-            })),
+            }))),
             None,
             None,
         )
@@ -249,13 +260,13 @@ impl<T> Node<T> {
         id: NodeId,
         local_name: LocalName,
     ) -> Self {
-        let mut node = Self::new(owner, id, NodeData::Element(None), Some(local_name), None);
+        let mut node = Self::new(owner, id, None, Some(local_name), None);
         node.element_state = ElementState::DEFINED;
         node
     }
 
     pub(crate) fn new_text(owner: *mut TreeArenas<T>, id: NodeId, text: Box<str>) -> Self {
-        Self::new(owner, id, NodeData::Text, None, Some(text))
+        Self::new(owner, id, None, None, Some(text))
     }
 
     /// An element node the tree generates rather than an embedder creates —
@@ -294,13 +305,19 @@ impl<T> Node<T> {
         id: NodeId,
         data: ShadowRootData,
     ) -> Self {
-        Self::new(owner, id, NodeData::ShadowRoot(Box::new(data)), None, None)
+        Self::new(
+            owner,
+            id,
+            Some(Box::new(NodeData::ShadowRoot(data))),
+            None,
+            None,
+        )
     }
 
     fn new(
         owner: *mut TreeArenas<T>,
         id: NodeId,
-        data: NodeData,
+        data: Option<Box<NodeData>>,
         local_name: Option<LocalName>,
         text: Option<Box<str>>,
     ) -> Self {
@@ -430,7 +447,7 @@ impl<T> Node<T> {
         } else {
             self.owner_document()
         };
-        let NodeData::Document(document) = &node.data else {
+        let Some(NodeData::Document(document)) = node.data.as_deref() else {
             unreachable!("slot zero must contain the document node")
         };
         document
@@ -459,31 +476,28 @@ impl<T> Node<T> {
 
     #[must_use]
     pub fn is_document(&self) -> bool {
-        matches!(&self.data, NodeData::Document(_))
+        matches!(self.data.as_deref(), Some(NodeData::Document(_)))
     }
 
     #[must_use]
     pub fn is_element(&self) -> bool {
-        matches!(&self.data, NodeData::Element(_))
+        self.local_name.is_some()
     }
 
     #[must_use]
     pub fn is_text_node(&self) -> bool {
-        matches!(&self.data, NodeData::Text)
+        self.data.is_none() && self.local_name.is_none()
     }
 
     /// Whether this node is a shadow root.
     #[must_use]
     pub fn is_shadow_root(&self) -> bool {
-        matches!(&self.data, NodeData::ShadowRoot(_))
+        matches!(self.data.as_deref(), Some(NodeData::ShadowRoot(_)))
     }
 
     #[must_use]
     pub(crate) fn shadow_host_slot(&self) -> Option<NodeSlot> {
-        match &self.data {
-            NodeData::ShadowRoot(shadow) => Some(shadow.host),
-            _ => None,
-        }
+        self.shadow_data().map(|shadow| shadow.host)
     }
 
     #[must_use]
@@ -494,22 +508,19 @@ impl<T> Node<T> {
 
     #[must_use]
     pub(crate) fn shadow_root_mode(&self) -> Option<ShadowRootMode> {
-        match &self.data {
-            NodeData::ShadowRoot(shadow) => Some(shadow.mode),
-            _ => None,
-        }
+        self.shadow_data().map(|shadow| shadow.mode)
     }
 
     pub(crate) fn shadow_data(&self) -> Option<&ShadowRootData> {
-        match &self.data {
-            NodeData::ShadowRoot(shadow) => Some(shadow),
+        match self.data.as_deref() {
+            Some(NodeData::ShadowRoot(shadow)) => Some(shadow),
             _ => None,
         }
     }
 
     pub(crate) fn shadow_data_mut(&mut self) -> Option<&mut ShadowRootData> {
-        match &mut self.data {
-            NodeData::ShadowRoot(shadow) => Some(shadow),
+        match self.data.as_deref_mut() {
+            Some(NodeData::ShadowRoot(shadow)) => Some(shadow),
             _ => None,
         }
     }
@@ -742,18 +753,18 @@ impl<T> Node<T> {
         if let Some(payload) = &self.payload {
             return payload;
         }
-        match &self.data {
-            NodeData::Element(_) if self.is_backdrop_node() => {
+        match self.data.as_deref() {
+            None if self.is_backdrop_node() => {
                 panic!("a `::backdrop` node has no payload and is never handed out")
             }
-            NodeData::Element(_) if self.is_anonymous_box() => {
+            None if self.is_anonymous_box() => {
                 panic!("an anonymous box's node has no payload and is never handed out")
             }
-            NodeData::Element(_) | NodeData::Text => {
+            None => {
                 unreachable!("the arena's key-zero placeholder is the one payload-less text node")
             }
-            NodeData::Document(_) => panic!("the document node has no payload"),
-            NodeData::ShadowRoot(_) => panic!("a shadow root has no payload"),
+            Some(NodeData::Document(_)) => panic!("the document node has no payload"),
+            Some(NodeData::ShadowRoot(_)) => panic!("a shadow root has no payload"),
         }
     }
 
@@ -790,46 +801,32 @@ impl<T> Node<T> {
         self.has_style_data().then_some(&self.style_data)
     }
 
-    /// Swaps in the post-flush computed style, reporting what moved.
+    /// What the flush that left `damage` on this element moved on its
+    /// style, noting the style it holds now for the next harvest. The damage
+    /// harvest's one reader of an element's style change.
     ///
-    /// The shaping verdict has to be taken here, while both the old and the
-    /// new style are alive: the caller only sees the new one, and the old
-    /// style structs can be freed — and their addresses reused — the moment
-    /// this returns.
-    ///
-    /// Stylo's style is read here rather than passed in, so the two `Arc`s can
-    /// be compared before either is cloned. A harvest visits every element
-    /// under a dirty ancestor, but only the ones the flush actually restyled
-    /// hold a different `Arc` than they did before, so cloning first would pay
-    /// an atomic increment and a decrement per visited element for a value
-    /// immediately dropped. Reading it here is also what makes that possible:
-    /// the comparison needs Stylo's data and the snapshot at once, and only
-    /// disjoint field borrows can hold both.
-    pub(crate) fn refresh_layout_style(&mut self) -> StyleRefresh {
-        let data = self
-            .stylo_data_present
-            .get_mut()
-            .then(|| self.style_data.borrow());
-        let live = data.as_ref().and_then(|data| data.styles.primary.as_ref());
-        let NodeData::Element(snapshot) = &mut self.data else {
-            debug_assert!(live.is_none(), "only elements own computed styles");
-            return StyleRefresh::UNCHANGED;
-        };
-        let mut refresh = match (&*snapshot, live) {
-            (None, None) => StyleRefresh::UNCHANGED,
-            (Some(old), Some(new)) => {
-                if Arc::ptr_eq(old, new) {
-                    StyleRefresh::UNCHANGED
-                } else {
-                    StyleRefresh {
-                        changed: true,
-                        paragraph_limits_changed: crate::layout::paragraph_limits_changed(old, new),
-                        containing_block_changed: false,
-                        box_tree_changed: *old.get_display() != *new.get_display()
-                            || old.get_counters().content != new.get_counters().content,
-                    }
-                }
+    /// Whether the style moved at all, and how, was decided by the traversal
+    /// while the old style was still alive
+    /// ([`crate::style::damage::primary_style_verdicts`]) and filed in
+    /// `damage`'s [`verdict`](crate::style::damage::verdict) bits: Stylo drops
+    /// the old style as soon as it has restyled the element, and nothing here
+    /// keeps it. What the traversal cannot report — a first style, which it
+    /// diffs against nothing, and a last one, which it clears without a diff —
+    /// is what [`StylingData`]'s harvest bit is for.
+    pub(crate) fn take_style_refresh(&mut self, damage: ServoRestyleDamage) -> StyleRefresh {
+        let styled = self.layout_computed_style().is_some();
+        let was_styled = std::mem::replace(&mut self.styling.harvested_style, styled);
+        let refresh = match (was_styled, styled) {
+            (false, false) => return StyleRefresh::UNCHANGED,
+            (true, true) if !damage.contains(verdict::REPLACED) => {
+                return StyleRefresh::UNCHANGED;
             }
+            (true, true) => StyleRefresh {
+                changed: true,
+                paragraph_limits_changed: damage.contains(verdict::PARAGRAPH_LIMITS),
+                containing_block_changed: damage.contains(verdict::CONTAINING_BLOCK),
+                box_tree_changed: damage.contains(verdict::BOX_TREE),
+            },
             // A first style has no old role to flip from: the element's
             // descendants have never been laid out under it.
             _ => StyleRefresh {
@@ -839,24 +836,6 @@ impl<T> Node<T> {
                 box_tree_changed: true,
             },
         };
-        if !refresh.changed {
-            return refresh;
-        }
-        let old = std::mem::replace(snapshot, live.cloned());
-        drop(data);
-        // Both roles read the element too (its root-ness, its transform
-        // animation bit, its content-visibility relevance), none of which a
-        // restyle moves, so evaluating each style against the same node
-        // isolates what the style change did.
-        if let (Some(old), NodeData::Element(Some(new))) = (old, &self.data) {
-            let role = |style: &ComputedValues| {
-                (
-                    crate::layout::establishes_fixed_containing_block(self, style),
-                    crate::layout::establishes_absolute_containing_block(self, style),
-                )
-            };
-            refresh.containing_block_changed = role(&old) != role(new);
-        }
         self.refresh_basis_free();
         refresh
     }
@@ -871,7 +850,7 @@ impl<T> Node<T> {
     /// padding structs. Its only inputs are the element's own layout style
     /// and its kind (whether it is a Lynx text element), and both writers of
     /// those re-evaluate it: the style's — the damage harvest
-    /// ([`Self::refresh_layout_style`]) and a generated box's
+    /// ([`Self::take_style_refresh`]) and a generated box's
     /// [`Self::replace_pseudo_style`] — and the kind's, [`Self::mark_lynx_text`].
     /// Nothing else can move it between them. A node with no layout style —
     /// a text node, an element never styled — answers `true`, the
@@ -889,75 +868,71 @@ impl<T> Node<T> {
     /// it.
     #[inline]
     pub(crate) fn views_own_layout_style(&self, style: &ComputedValues) -> bool {
-        match &self.data {
-            NodeData::Element(Some(own)) => std::ptr::eq(own.as_ref(), style),
-            _ => true,
-        }
+        self.layout_computed_style()
+            .is_none_or(|own| std::ptr::eq(own, style))
     }
 
     /// Re-evaluates [`Self::layout_reads_percentage_basis`] against the
     /// layout style the element holds now.
     fn refresh_basis_free(&mut self) {
-        let free = match &self.data {
-            NodeData::Element(Some(style)) => !crate::layout::reads_percentage_basis(self, style),
-            _ => false,
-        };
+        let free = self
+            .layout_computed_style()
+            .is_some_and(|style| !crate::layout::reads_percentage_basis(self, style));
         self.flags.set(NodeFlags::BASIS_FREE, free);
     }
 
-    /// [`Self::layout_computed_style`] as the `Arc` the snapshot holds, for a
-    /// reader that keeps it or compares it by pointer.
-    pub(crate) fn layout_computed_style_arc(&self) -> Option<&Arc<ComputedValues>> {
-        // Its divergence check.
-        self.layout_computed_style()?;
-        let NodeData::Element(snapshot) = &self.data else {
-            return None;
-        };
-        snapshot.as_ref()
-    }
-
+    /// The element's primary computed style, borrowed for as long as the
+    /// node is: what layout and paint read.
+    ///
+    /// Stylo's own style, read without a borrow guard or an `Arc` bump, so a
+    /// layout walk can hand out `&'dom ComputedValues`. No second owner of it
+    /// exists: the damage harvest takes what a restyle moved from the
+    /// traversal's damage ([`Self::take_style_refresh`]), not by comparing a
+    /// kept old style. A node that holds no style — a text node, an element
+    /// never styled or under `display: none` — answers `None`.
     pub(crate) fn layout_computed_style(&self) -> Option<&ComputedValues> {
-        let NodeData::Element(snapshot) = &self.data else {
-            return None;
-        };
-        #[cfg(debug_assertions)]
-        {
-            let live = self.borrow_computed_style();
-            let live_primary = live.as_ref().and_then(|data| data.styles.primary.as_ref());
-            let matches = match (snapshot.as_ref(), live_primary) {
-                (None, None) => true,
-                (Some(old), Some(new)) => Arc::ptr_eq(old, new),
-                _ => false,
-            };
-            debug_assert!(
-                matches,
-                "layout-style snapshot diverged from Stylo's live primary style — the damage \
-                 harvest missed this element (invalidation bug) or a traversal did not complete"
-            );
-        }
-        snapshot.as_deref()
+        debug_assert!(
+            !self.in_flush(),
+            "a layout style read inside a style traversal: Stylo writes element data there"
+        );
+        #[expect(
+            unsafe_code,
+            reason = "an unguarded shared read of Stylo's element data for the node's lifetime"
+        )]
+        // SAFETY: `&self` is a shared borrow lent out of the document's
+        // arenas, and every mutable access to `style_data` is reached either
+        // through `&mut Node` (`stylo_data_mut`, `replace_pseudo_style`),
+        // which the arenas lend only while no shared borrow of the tree is
+        // alive, or inside a flush phase — Stylo's traversal through
+        // `TElement::ensure_data`/`mutate_data`/`clear_data` — which runs
+        // under `&mut Document`, so no reference this returned before the
+        // flush survives into it, and none is taken during it (the assertion
+        // above). `TElement::mutate_data` outside a flush is test-only and
+        // drops its guard before reading through here. Data never initialized
+        // is `ElementData::default()`, whose primary style is `None`.
+        let data = unsafe { self.style_data.get() };
+        data.styles.primary.as_deref()
     }
 
     /// Stores a style the cascade did not produce for this node — a lazily
     /// cascaded pseudo-element style, or an anonymous box's inherited one —
-    /// as its computed style: Stylo's primary style and the layout snapshot
-    /// together, so the snapshot's divergence check above holds. Returns the
-    /// old one.
+    /// as its computed style (Stylo's primary style). Returns the old one.
     ///
     /// Only for a `::backdrop` node ([`crate::tree::top_layer`]) or an
     /// anonymous box's ([`crate::tree::anonymous`]): neither is ever in a
-    /// parent's child list, so no traversal reaches it and no harvest swaps
+    /// parent's child list, so no traversal reaches it and no harvest reads
     /// its style; this is the one writer.
     pub(crate) fn replace_pseudo_style(
         &mut self,
         style: Arc<ComputedValues>,
     ) -> Option<Arc<ComputedValues>> {
-        let NodeData::Element(snapshot) = &mut self.data else {
-            unreachable!("a generated box's node is an element node");
-        };
+        debug_assert!(
+            self.is_element(),
+            "a generated box's node is an element node"
+        );
         *self.stylo_data_present.get_mut() = true;
-        self.style_data.borrow_mut().styles.primary = Some(style.clone());
-        let old = snapshot.replace(style);
+        let old = self.style_data.borrow_mut().styles.primary.replace(style);
+        self.styling.harvested_style = true;
         self.refresh_basis_free();
         old
     }
@@ -1397,7 +1372,7 @@ mod tests {
         const PRE_BOXING_NODE_STRIDE: usize = 408;
         const PRE_STATIC_SPLIT_NODE_STRIDE: usize = 368;
 
-        assert_eq!(std::mem::size_of::<NodeData>(), 16);
+        assert_eq!(std::mem::size_of::<Option<Box<NodeData>>>(), 8);
         // A handle is identity and storage position in one 8-byte value, and
         // `Option<NodeId>` has a niche where `Option<usize>` had none, so the
         // parent link costs 8 bytes rather than 16. Presentational hints add
@@ -1405,10 +1380,10 @@ mod tests {
         // No node keeps Stylo's postorder child counter (`StylingData`).
         assert_eq!(
             std::mem::size_of::<Node<()>>(),
-            if cfg!(debug_assertions) { 224 } else { 216 }
+            if cfg!(debug_assertions) { 216 } else { 208 }
         );
         assert!(
-            std::mem::size_of::<NodeData>() < PRE_BOXING_NODE_DATA_SIZE,
+            std::mem::size_of::<Option<Box<NodeData>>>() < PRE_BOXING_NODE_DATA_SIZE,
             "document-only state must not inflate element and text nodes"
         );
         assert!(
@@ -1474,7 +1449,7 @@ mod tests {
     }
 
     #[test]
-    fn out_of_band_stylo_mutation_keeps_snapshot_readable() {
+    fn out_of_band_stylo_mutation_keeps_layout_style_readable() {
         let mut document = Document::<()>::new(crate::tree::document::tests::device(), "page", ());
         let root = document.document_element().id();
         document.flush_styles_with_damage_sink(&mut |_, _| {});
@@ -1486,18 +1461,19 @@ mod tests {
         );
         let after = std::ptr::from_ref(
             node.layout_computed_style()
-                .expect("the snapshot remains readable"),
+                .expect("the layout style remains readable"),
         );
         assert_eq!(
             before, after,
-            "hint-level access must leave the snapshot untouched"
+            "hint-level access must leave the layout style untouched"
         );
     }
 
-    /// A detached element reports a diverged harvested style in debug builds.
-    #[cfg(debug_assertions)]
+    /// A detached element's layout style is Stylo's, so it cannot diverge
+    /// from it: a primary style cleared out of band on an element no harvest
+    /// visits reads as cleared.
     #[test]
-    fn diverged_snapshot_on_unvisited_element_is_reported_in_debug() {
+    fn an_unvisited_element_reads_its_live_style() {
         let mut document = Document::<()>::new(crate::tree::document::tests::device(), "page", ());
         let root = document.document_element().id();
         let stale = document.create_element("view", ());
@@ -1518,13 +1494,7 @@ mod tests {
         document.flush_styles_with_damage_sink(&mut |_, _| {});
 
         let stale = document.get(stale).expect("child remains live");
-        assert!(
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let _ = stale.layout_computed_style();
-            }))
-            .is_err(),
-            "debug builds must report a snapshot that diverged from the live style"
-        );
+        assert!(stale.layout_computed_style().is_none());
     }
 
     #[test]

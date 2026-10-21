@@ -22,10 +22,11 @@ use stylo::applicable_declarations::ApplicableDeclarationBlock;
 use stylo::context::{QuirksMode, SharedStyleContext};
 use stylo::data::{ElementDataMut, ElementDataRef, ElementDataWrapper};
 use stylo::dom::{LayoutIterator, NodeInfo, OpaqueNode, TDocument, TElement, TNode, TShadowRoot};
-use stylo::properties::PropertyDeclarationBlock;
+use stylo::properties::{ComputedValues, PropertyDeclarationBlock};
 use stylo::rule_tree::{CascadeLevel, CascadeOrigin};
 use stylo::selector_parser::{AttrValue, Lang, NonTSPseudoClass, PseudoElement, SelectorImpl};
 use stylo::servo::animation::AnimationSetKey;
+use stylo::servo::restyle_damage::ServoRestyleDamage;
 use stylo::servo_arc::{Arc, ArcBorrow};
 use stylo::shared_lock::{Locked, SharedRwLock};
 use stylo::stylesheets::layer_rule::LayerOrder;
@@ -491,6 +492,17 @@ impl<'a, T: Sync> TElement for &'a Node<T> {
 
     fn namespace(&self) -> &<SelectorImpl as selectors::SelectorImpl>::BorrowedNamespaceUrl {
         empty_namespace()
+    }
+
+    /// The verdicts the damage harvest reads about a replaced primary style,
+    /// taken here because the traversal drops the old style right after
+    /// ([`crate::style::damage::primary_style_verdicts`]).
+    fn compute_primary_style_damage(
+        &self,
+        old: &ComputedValues,
+        new: &ComputedValues,
+    ) -> ServoRestyleDamage {
+        crate::style::damage::primary_style_verdicts(self, old, new)
     }
 
     /// The content box this element last committed as a size query
