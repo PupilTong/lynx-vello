@@ -3,11 +3,11 @@
 //! (`docs/layout-observer-design.md`).
 //!
 //! Neither has a standards counterpart with its event shape, so both live
-//! here rather than in `dom`, over two primitives `dom` has: the W3C
-//! `ResizeObserver` ([`dom::ResizeEventHandler`]) for `layoutchange`, and the
+//! here rather than in `terminus`, over two primitives `terminus` has: the W3C
+//! `ResizeObserver` ([`terminus::link::ResizeEventHandler`]) for `layoutchange`, and the
 //! per-pass text layout report list
-//! ([`dom::Document::set_text_layout_reporting`],
-//! [`dom::Document::take_text_layout_reports`]) for `layout`.
+//! ([`terminus::link::Document::set_text_layout_reporting`],
+//! [`terminus::link::Document::take_text_layout_reports`]) for `layout`.
 //!
 //! # `layoutchange` (the user's rulings of 2026-10-20, §5 of the design)
 //!
@@ -25,12 +25,12 @@
 //! observer per element.
 //!
 //! **Delivery is a posted entry after the frame** (ruling 2): the epilogue
-//! runs `dom`'s update after its commit and posts the page's resize delivery
+//! runs `terminus`'s update after its commit and posts the page's resize delivery
 //! entry when the update queued something
 //! ([`crate::main::runtime::MainThreadRuntime::notify_resize_observers`]).
 //! A handler's writes land in the next commit.
 //!
-//! **The detail's rect is [`dom::Document::bounding_client_rect`]** (rulings
+//! **The detail's rect is [`terminus::link::Document::bounding_client_rect`]** (rulings
 //! 3 and 8), read when the event is delivered: the transform-free walk the
 //! `boundingClientRect` UI method answers from, in the Lynx view's own CSS
 //! px, with nothing subtracted. A target that has no box at delivery —
@@ -62,7 +62,7 @@
 //! document's life.
 //!
 //! The handler, [`LayoutChangeHandler`], is bound to no node and only
-//! records which targets resized; the realm half runs after `dom`'s loop,
+//! records which targets resized; the realm half runs after `terminus`'s loop,
 //! with the document released, as the exposure handler's does
 //! (`crate::main::exposure`). The record is taken in the same delivery
 //! entry, so no target outlives it.
@@ -78,9 +78,9 @@
 //!
 //! A `text` element reports while the listener table has a `layout` row on
 //! it: on each change of that answer the runtime adds or removes the
-//! element's [`LayoutEventRegistration::TextLayoutReport`], turning `dom`'s
+//! element's [`LayoutEventRegistration::TextLayoutReport`], turning `terminus`'s
 //! text layout report on or off, as for `layoutchange`. A `layout` row on any
-//! other element is ignored. After every commit the epilogue takes `dom`'s report list and
+//! other element is ignored. After every commit the epilogue takes `terminus`'s report list and
 //! queues one component event per reporting paragraph a committing layout run
 //! recomputed ([`super::tree::ComponentEvent::TextLayout`]).
 //!
@@ -91,15 +91,17 @@
 //!
 //! # Cost
 //!
-//! A page with no `layoutchange` registration holds no observer, and `dom`'s
+//! A page with no `layoutchange` registration holds no observer, and `terminus`'s
 //! update answers at its first `is_empty` test. A page with no `layout`
 //! registration pays one `is_empty` test per commit for the report list.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use dom::{NodeId, ObservedBox, ResizeEventHandler, ResizeObserverEntry, ResizeObserverId};
 use rustc_hash::FxHashMap;
+use terminus::link::{
+    NodeId, ObservedBox, ResizeEventHandler, ResizeObserverEntry, ResizeObserverId,
+};
 
 use super::tree::{LynxDocument, layout_change_target};
 
@@ -112,7 +114,7 @@ pub(crate) const TEXT_LAYOUT_EVENT: &str = "layout";
 /// What a listener for one of the two Lynx layout events registers on the
 /// host: a `layoutchange` listener a resize observation of its element
 /// ([`LayoutChangeObserver::observe`]), a `layout` listener on a `text` that
-/// element's text layout report ([`dom::Document::set_text_layout_reporting`]).
+/// element's text layout report ([`terminus::link::Document::set_text_layout_reporting`]).
 ///
 /// The runtime adds the registration when the listener table's answer to
 /// "does `node` have a row for this name" turns true, and removes it when the
@@ -122,7 +124,7 @@ pub(crate) enum LayoutEventRegistration {
     /// `layoutchange`: the element's border box is a target of the
     /// document's [`LayoutChangeObserver`].
     ResizeObservation,
-    /// `layout`: the `text` element's paragraph is listed in `dom`'s text
+    /// `layout`: the `text` element's paragraph is listed in `terminus`'s text
     /// layout report after each committing layout run that recomputes it.
     TextLayoutReport,
 }
@@ -181,7 +183,7 @@ pub(crate) struct LayoutChangeObserver {
     /// `layoutchange` registration.
     observer: Option<ResizeObserverId>,
     /// Shared with the observer's [`LayoutChangeHandler`]: the targets the
-    /// last `dom` loop delivered, taken by the same delivery entry.
+    /// last `terminus` loop delivered, taken by the same delivery entry.
     resized: Rc<RefCell<Vec<NodeId>>>,
     /// The element each retargeted observation is for, keyed by the node
     /// observed: an overlay's shadow `#dialog` to the overlay
@@ -223,7 +225,7 @@ impl LayoutChangeObserver {
         }
     }
 
-    /// What the last `dom` loop delivered, in delivery order, leaving none:
+    /// What the last `terminus` loop delivered, in delivery order, leaving none:
     /// each observed node with the element its `layoutchange` is for, both
     /// live. A pair one of whose nodes is gone is dropped here, unreported.
     pub(crate) fn take_resized(&mut self, document: &LynxDocument) -> Vec<(NodeId, NodeId)> {

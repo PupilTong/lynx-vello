@@ -1,12 +1,12 @@
 # Design: Taffy-backed Flex/Grid with a Taffy-shaped Lynx layout protocol
 
 Status: **design, not yet implemented**. This document records the decision
-basis and target architecture for replacing `hughie`'s hand-written Flexbox
+basis and target architecture for replacing `seldon`'s hand-written Flexbox
 and Grid algorithms with the `taffy` crate's low-level custom-tree API, and
-for restructuring `hughie` and `dom::layout` so the whole layout protocol
+for restructuring `seldon` and `terminus::link::layout` so the whole layout protocol
 uses taffy's vocabulary. Verified against **taffy 0.13.0** (released
 2026-08-08) and Blitz `blitz-dom`/`stylo_taffy` at 2026-08-12 main. The raw
-research reports (taffy API inventory, Blitz prior art, hughie/dom protocol
+research reports (taffy API inventory, Blitz prior art, seldon/dom protocol
 inventories, Linear/Relative requirements, test-impact inventory) are in
 [taffy-layout-integration-research.md](taffy-layout-integration-research.md).
 
@@ -14,13 +14,13 @@ Requirements this design satisfies (user directive, 2026-08-12):
 
 1. Only taffy's **low-level custom-tree API** is used — never `TaffyTree`,
    never taffy-owned node storage.
-2. The dom-facing layout traits are refactored around taffy's traits.
-3. `hughie` is restructured so its remaining algorithms (Linear, Relative,
+2. The terminus-facing layout traits are refactored around taffy's traits.
+3. `seldon` is restructured so its remaining algorithms (Linear, Relative,
    leaf/text, positioned pass, containment, rounding) have the same API
    shape as taffy's compute functions and trait extensions.
 4. Linear, Relative, CSS containment, and the fixed/hoisted positioning
    capability are all retained at current functionality.
-5. `display: contents` flattening moves out of the engine into `dom`, which
+5. `display: contents` flattening moves out of the engine into `terminus`, which
    flattens automatically when building layout child lists.
 6. Latest taffy (0.13.0).
 7. The implementation preserves the current performance architecture
@@ -44,10 +44,10 @@ Requirements this design satisfies (user directive, 2026-08-12):
 | CSS containment / `content-visibility` | **No** |
 | `min-content`/`max-content`/`fit-content()` as width/height values | **No** — `Dimension` is length/percent/auto/calc only (intrinsic tags exist only for grid track sizing functions) |
 | Percentage-definiteness separate from `known_dimensions` (Flexbox §9.8 nuance) | **No** — definiteness is the `Option`-ness of `known_dimensions`/`parent_size` |
-| Last-baseline alignment | No (first baseline only) — and no longer parity: hughie gained `last baseline` alignment in flexbox and grid on 2026-10-16, which a taffy-backed Flex/Grid would have to add |
+| Last-baseline alignment | No (first baseline only) — and no longer parity: seldon gained `last baseline` alignment in flexbox and grid on 2026-10-16, which a taffy-backed Flex/Grid would have to add |
 | DPR-aware rounding | No — `round_layout` rounds to integer CSS px, origin fixed at (0,0) |
-| Subgrid | No (parity with hughie today) |
-| Masonry | No — and no longer parity: hughie gained CSS Grid Level 3 `display: grid-lanes` on 2026-09-18, so this would become another hughie-side algorithm taffy does not replace |
+| Subgrid | No (parity with seldon today) |
+| Masonry | No — and no longer parity: seldon gained CSS Grid Level 3 `display: grid-lanes` on 2026-09-18, so this would become another seldon-side algorithm taffy does not replace |
 
 Every "No" above maps to machinery we already have and keep (order sorting,
 positioned pass, containment layer, extended input, our rounding pass), or to
@@ -69,18 +69,18 @@ machinery (no functional loss, but the code cannot be deleted).
   length/percent/auto/calc only (the intrinsic tags exist solely for grid
   *track* sizing functions), and the sizing paths inside
   `compute_flexbox_layout`/`compute_grid_layout` cannot be intercepted per
-  property. hughie currently implements these keywords; Blitz ships the same
+  property. seldon currently implements these keywords; Blitz ships the same
   collapse. Only remedy: upstream taffy contribution or a vendored patch.
   Linear, Relative, and leaf boxes retain full support (their algorithms are
   ours and keep reading stylo values).
 - **A2. Known-but-indefinite percentage bases inside flex/grid subtrees.**
   taffy has no definiteness flag separate from `known_dimensions`; a
   parent-decided size is always a definite percentage basis for descendants.
-  The Flexbox §9.8 / Starlight distinction hughie models with
+  The Flexbox §9.8 / Starlight distinction seldon models with
   `definite_dimensions` cannot be threaded through taffy's algorithms. It is
   preserved only across linear/relative/leaf edges via `LayoutInputExt`
   (§5); within flex/grid subtrees taffy's model applies (delta D2).
-- **A3. hughie's grid hardening policies.** Track-limit component dropping,
+- **A3. seldon's grid hardening policies.** Track-limit component dropping,
   hostile `repeat()` count bounding, and minimum-precedence clamping of
   auto-repeat counting bases are replaced wholesale by taffy's own policies;
   the exact current behaviors are not reproducible from outside the
@@ -88,7 +88,7 @@ machinery (no functional loss, but the code cannot be deleted).
 - **A4. Flex/grid probe-shape and cache-traffic guarantees.** The
   single-axis measure fast path, probe-count linearity, and
   measure-goal write discipline pinned by ~10 algorithm-internal tests are
-  properties of hughie's implementations; taffy's internal call pattern
+  properties of seldon's implementations; taffy's internal call pattern
   differs and is not observable or controllable. Those tests die and the
   CodSpeed flex/grid baselines reset.
 - **A5. Bit-exact flex/grid geometry stability.** Where both
@@ -102,11 +102,11 @@ machinery (no functional loss, but the code cannot be deleted).
 - **B1. `taffy::Cache`** — cannot return the committed `LayoutInput`
   (private, lossily packed keys), which parked-boundary relayout must
   replay, and cannot key on the `LayoutInputExt` definiteness bits (distinct
-  inputs would alias). Keep hughie's cache behind the `CacheTree` trait.
+  inputs would alias). Keep seldon's cache behind the `CacheTree` trait.
 - **B2. `taffy::compute_leaf_layout`** — its measure closure returns only
   `Size<f32>`, dropping text first-baselines, which Linear consumes at
   measure time and flex baseline alignment consumes at commit. Keep
-  hughie's leaf engine and the Parley `TextMeasurer` probe/commit artifact
+  seldon's leaf engine and the Parley `TextMeasurer` probe/commit artifact
   path.
 - **B3. `taffy::round_layout`** — integer CSS-px rounding with no
   device-pixel-ratio parameter and a subtree origin hardcoded to (0,0);
@@ -118,13 +118,13 @@ machinery (no functional loss, but the code cannot be deleted).
   our stylo is the vendored fork (`lynx` branch: no `writing-mode`, Lynx
   `overflow` grammar, `lynx-rtl`, `linear-*`/`relative-*` longhands). The
   conversion module is rewritten in-repo modeled on it
-  (`hughie::style::convert`).
+  (`seldon::style::convert`).
 - **B6. `TaffyTree`** — excluded by requirement 1 (host-owned storage
   only); also loses the split-borrow architecture and NodeId alignment.
 
 **C. taffy gaps fully covered by retained machinery (no loss, no deletion):**
 
-- **C1. CSS `order`** — no taffy property; dom pre-sorts layout child lists
+- **C1. CSS `order`** — no taffy property; terminus pre-sorts layout child lists
   (§4).
 - **C2. `position: fixed` / CB-escaping absolute** — taffy positions
   absolute children against the direct parent only; the host positioned
@@ -133,26 +133,26 @@ machinery (no functional loss, but the code cannot be deleted).
   dispatch-wrapper interception plus the boundary/invalidation machinery
   remain (§7).
 - **C4. Starlight Linear/Relative** — out of taffy's scope by definition;
-  remain hughie algorithms.
+  remain seldon algorithms.
 - **C5. `display: contents`** — taffy has no contents box-generation mode;
-  dom flattens (§4), which is requirement 5 anyway.
+  terminus flattens (§4), which is requirement 5 anyway.
 
 Parity items (absent on both sides, no change): subgrid. Last-baseline
-alignment was one until 2026-10-16, when hughie's flexbox and grid began
+alignment was one until 2026-10-16, when seldon's flexbox and grid began
 aligning by last baselines; taffy has no `LastBaseline` variant. Masonry was
-one until 2026-09-18, when hughie landed CSS Grid Level 3
+one until 2026-09-18, when seldon landed CSS Grid Level 3
 `display: grid-lanes`; taffy has none, so grid lanes joins Linear and Relative
-as a hughie algorithm the migration would have to keep.
+as a seldon algorithm the migration would have to keep.
 
 ## 2. Ownership after the migration
 
 ```text
-        dom (host)                                  hughie (Lynx layout companion to taffy)
+        terminus (host)                                  seldon (Lynx layout companion to taffy)
 ┌─────────────────────────────────────┐   ┌──────────────────────────────────────────┐
 │ LayoutCtx<'t,T> {&TreeArenas,       │   │ taffy-shaped extension traits:           │
 │   &mut DocumentLayoutState}         │──▶│   LayoutLynxTree, LayoutLinearContainer, │
 │ implements taffy traits +           │   │   LayoutRelativeContainer                │
-│ hughie extension traits             │   │ compute_linear_layout /                  │
+│ seldon extension traits             │   │ compute_linear_layout /                  │
 │ layout_children: flattened +        │   │ compute_relative_layout (taffy shape)    │
 │   order-sorted box child lists      │   │ leaf/text (Parley, baselines),           │
 │ dispatch + containment wrapper +    │   │ compute_absolute_layout, skipped-        │
@@ -176,7 +176,7 @@ as a hughie algorithm the migration would have to keep.
   `DisplayInside::Flow` remains a leaf), no `taffy_tree`. Start on crates.io;
   vendor only if we end up needing patches (repo precedent exists for
   vello/wgpu/stylo, and §10 lists the candidate reasons).
-- **hughie** stops being a self-contained engine and becomes the Lynx
+- **seldon** stops being a self-contained engine and becomes the Lynx
   companion crate to taffy: Starlight Linear + Relative as taffy-shaped
   compute functions, the Parley leaf/text path, the shared absolute/hoisted
   resolver, containment machinery, the extended-key cache, invalidation, and
@@ -184,16 +184,16 @@ as a hughie algorithm the migration would have to keep.
   `AvailableSpace`, and geometry module are **deleted** in favor of taffy's
   (plus one extension struct, §5). `compute/flexbox.rs` (~2.5k lines) and
   `compute/grid/` (~6k lines) are deleted.
-- **dom** keeps all host policy: display dispatch, style views, containment
+- **terminus** keeps all host policy: display dispatch, style views, containment
   fold, positioned pass, invalidation funnel, parked boundaries, fused
   positioned+rounding traversal, and — new — `display: contents` flattening
   and `order` sorting (§4).
 
-The stylo→taffy value conversion module lives in `hughie::style::convert`,
+The stylo→taffy value conversion module lives in `seldon::style::convert`,
 modeled line-for-line on Blitz's `stylo_taffy/src/convert.rs` but written
 against **our stylo fork** (`stylo_taffy` itself depends on crates.io stylo
 0.19/0.20 and cannot be reused; our fork also lowers differently — no
-`writing-mode`, Lynx `overflow` grammar, `lynx-rtl`). hughie already owns the
+`writing-mode`, Lynx `overflow` grammar, `lynx-rtl`). seldon already owns the
 stylo dependency, and its test/bench mock hosts need the conversions too.
 
 ## 3. The host object and trait stack
@@ -222,7 +222,7 @@ pub(crate) struct LayoutCtx<'t, T> {
   normalization (§5).
 - `taffy::LayoutFlexboxContainer` + `taffy::LayoutGridContainer` — style
   views per §6.
-- `hughie::LayoutLynxTree` (new, defined in hughie):
+- `seldon::LayoutLynxTree` (new, defined in seldon):
 
 ```rust
 pub trait LayoutLynxTree: taffy::LayoutPartialTree + taffy::CacheTree {
@@ -282,7 +282,7 @@ pub fn round_layout_subtree_with<T: LayoutLynxTree>(...);  // DPR rounding
 
 ```rust
 pub struct LayoutSlot {
-    cache: Cache,                       // hughie cache, ext-keyed (§5)
+    cache: Cache,                       // seldon cache, ext-keyed (§5)
     pub static_position: Point<f32>,
     pub unrounded: taffy::Layout,
     pub rounded: taffy::Layout,
@@ -294,11 +294,11 @@ record is dropped as a consequence of adopting taffy's type (the rounding
 pass already only reads small fields; no new whole-record clones are
 introduced by us, but the type no longer forbids them).
 
-## 4. `display: contents` and `order` move into dom's child lists
+## 4. `display: contents` and `order` move into terminus's child lists
 
 taffy requires random access (`get_child_id(parent, index)`) and has no
 `order` property, so lazy flattening iterators are out and pre-sorting is
-required anyway. dom gains a per-node derived **layout child list**:
+required anyway. terminus gains a per-node derived **layout child list**:
 
 - Storage: `Option<Box<[NodeId]>>` on the node's layout-adjacent state.
   `None` means "identical to `flat_children`" — the common case pays one
@@ -313,7 +313,7 @@ required anyway. dom gains a per-node derived **layout child list**:
   slots). This is exactly today's `sibling_effective_paint_order` rule, so
   taffy's `Layout.order` (= index in the sorted list) becomes the correct
   order-modified-document-order paint rank **for in-flow and absolute
-  children alike**, and `dom::visual` keeps consuming `Layout.order`
+  children alike**, and `terminus::visual` keeps consuming `Layout.order`
   unchanged.
 - Rebuild triggers, driven by the existing damage harvest and mutation
   paths: child-list mutation under a parent with a boxed list (or where the
@@ -325,10 +325,10 @@ required anyway. dom gains a per-node derived **layout child list**:
   the layout epoch still observes immutable topology.
 - Consumers migrated from `flattened_children`: the four algorithms (via
   `child_ids` now), `sibling_paint_order`, and `visual/build.rs`. The
-  engine-side `FlattenedChildren` iterator is deleted; `hughie` never sees a
+  engine-side `FlattenedChildren` iterator is deleted; `seldon` never sees a
   contents node (its `LynxCoreStyle` keeps the `display()` accessor for
   `is_none()` classification only).
-- All other dom-side contents semantics are already host-side and stay
+- All other terminus-side contents semantics are already host-side and stay
   verbatim: CB predicates return false, containment empty, never skipped,
   slot zeroed by the positioned pass, `box_parent` inheritance for text.
 
@@ -365,7 +365,7 @@ impl From<taffy::LayoutInput> for LayoutInputExt {
   `compute_child_layout(input)` (what taffy's flex/grid call) forwards as
   `compute_child_layout_ext(input.into())`. Linear/Relative call the ext
   method directly and thread real definiteness.
-- **The cache stays hughie's**, retyped: key = the full `LayoutInputExt`
+- **The cache stays seldon's**, retyped: key = the full `LayoutInputExt`
   (`run_mode`, `axis`, `sizing_mode`, `known_dimensions`,
   `definite_dimensions`, `parent_size`, `available_space`;
   `vertical_margins_are_collapsible` is excluded — always default without
@@ -375,18 +375,18 @@ impl From<taffy::LayoutInput> for LayoutInputExt {
   and taffy's own `Cache` cannot return it (private lossy packed keys) nor
   key on the ext bits — which is why we do not adopt it. `CacheTree` for
   taffy's algorithms normalizes through the `From` impl above, so taffy- and
-  hughie-initiated probes share one per-node cache coherently.
+  seldon-initiated probes share one per-node cache coherently.
 - At the boundary between vocabularies the bits degrade exactly once, by
   design: a Linear parent that passes known-but-indefinite to a **flex/grid**
   child loses the distinction inside that subtree (taffy's model applies
   there). Linear/relative/leaf subtrees keep Starlight behavior. Recorded as
   delta D2 (§10).
 
-Vocabulary mapping (mechanical, applied throughout hughie):
+Vocabulary mapping (mechanical, applied throughout seldon):
 `LayoutGoal::Commit` → `RunMode::PerformLayout`; `LayoutGoal::Measure(axis)`
 → `RunMode::ComputeSize` + `LayoutInput.axis`; `SizingMode::ApplySizeStyles`
 → `SizingMode::InherentSize`; `IgnoreSizeStyles` → `ContentSize`;
-`AvailableSpace`/geometry types → taffy's. hughie `Edges` → `taffy::Rect`.
+`AvailableSpace`/geometry types → taffy's. seldon `Edges` → `taffy::Rect`.
 
 ## 6. Style views: two vocabularies, one mechanism, zero materialization
 
@@ -401,7 +401,7 @@ accessor converts on read (`#[inline]`, branch-on-tag, zero allocation):
   we must not), `overflow` (fork grammar → `Visible/Hidden/Scroll/Clip`
   1:1), `scrollbar_width` = 0 (Lynx overlay scrollbars), `position` (§7),
   `inset/size/min_size/max_size/margin/padding/border` via
-  `hughie::style::convert` (calc = `CompactLength::calc(ptr)` tagged
+  `seldon::style::convert` (calc = `CompactLength::calc(ptr)` tagged
   pointer; used border widths keep the none/hidden-style zeroing),
   `aspect_ratio`.
 - `taffy::FlexboxContainerStyle/ItemStyle`, `GridContainerStyle/ItemStyle`:
@@ -412,7 +412,7 @@ accessor converts on read (`#[inline]`, branch-on-tag, zero allocation):
   wrappers, modeled on `stylo_taffy/src/wrapper.rs`). `CustomIdent =
   stylo::Atom`; if the fork grammar does not parse named lines/areas the
   accessors return `None` at zero cost.
-- `hughie::LynxCoreStyle` (the trimmed successor of today's `CoreStyle`,
+- `seldon::LynxCoreStyle` (the trimmed successor of today's `CoreStyle`,
   same defaulted-accessor macro over `computed_values()`): the box set that
   Linear/Relative/leaf/absolute/containment actually read — raw stylo
   values, because those algorithms need `has_percentage()`, `is_auto()`,
@@ -450,15 +450,15 @@ otherwise, cached(ext):
                            then run the algorithm below
     Flex                 → taffy::compute_flexbox_layout
     Grid                 → taffy::compute_grid_layout
-    Linear               → hughie::compute_linear_layout
-    Relative             → hughie::compute_relative_layout
+    Linear               → seldon::compute_linear_layout
+    Relative             → seldon::compute_relative_layout
     Flow (leaf)          → natural-size leaf path
   then LAYOUT containment output rewrite:
     first_baselines = NONE; own_scrollable_overflow (content_size collapses
     to the border box unless the box is a scroll container)
 ```
 
-Containment therefore moves from inside the algorithms (where hughie
+Containment therefore moves from inside the algorithms (where seldon
 implemented it) to the dispatch wrapper — the only place it can live once
 flex/grid are taffy's. The semantics are unchanged: substitution happens at
 the child's own sizing layer, so parents probing a size-contained child see
@@ -474,7 +474,7 @@ node, which is precisely what the parked-boundary mechanism needs.
 
 **Absolute (CB = layout parent)**: taffy handles fully inside flex/grid,
 including the static-position fallback for auto insets — this replaces
-hughie's per-algorithm §9.8/§10.2 static-position code for flex/grid.
+seldon's per-algorithm §9.8/§10.2 static-position code for flex/grid.
 Linear/Relative keep their own absolute handling through the retained
 `compute_absolute_layout` (which also keeps the RTL `prefer_end` rule and
 the measure-goal variant Linear's gravity equation needs).
@@ -482,7 +482,7 @@ the measure-goal variant Linear's gravity equation needs).
 **Fixed (hoisted, CB ≠ parent)**: `StyleView::position()` for taffy maps
 resolved `Fixed` to `taffy::Position::Absolute`, so the parent computes a
 static-position-informed layout for it (against its own padding box — the
-same basis hughie's `measure_absolute_layout` used for gravity). The
+same basis seldon's `measure_absolute_layout` used for gravity). The
 positioned pass keeps everything else: `pre_position` detects resolved
 `Fixed`, resolves the true containing block (transform / perspective /
 offset-path / will-change / filter / containment ancestors — predicates
@@ -502,7 +502,7 @@ hits, and hoisted-fixed elements are rare.
 **Leaf/text**: taffy's `compute_leaf_layout` is **not** used — its measure
 closure returns only `Size<f32>`, which would drop text baselines (Linear
 consumes measure-time baselines; flex baseline alignment needs them at
-commit). hughie's leaf engine (`compute_leaf_layout_with_measurement`) and
+commit). seldon's leaf engine (`compute_leaf_layout_with_measurement`) and
 the Parley `TextMeasurer` (probe/commit artifact store, rebreak, shaping
 reuse) survive with retyped IO. Same for replaced `NaturalSize` leaves.
 
@@ -513,7 +513,7 @@ hook — including the boundary-scoped incremental tail — is retained,
 retyped over `taffy::Layout`. We do not implement `RoundTree`/`PrintTree`;
 nothing calls them.
 
-**Root**: hughie's `compute_root_layout` is kept (root margin resolution +
+**Root**: seldon's `compute_root_layout` is kept (root margin resolution +
 definite bits + display-none root) rather than taffy's, so the driving
 sequence in `run_layout` is unchanged.
 
@@ -521,26 +521,26 @@ sequence in `run_layout` is unchanged.
 
 | Unit | Fate |
 | --- | --- |
-| `hughie/src/compute/flexbox.rs`, `compute/grid/*` (~8.5k lines) | **Deleted** — taffy provides |
-| `hughie/src/tree/{mod,io}.rs` (`LayoutTree`, `LayoutInput/Output/Layout`, `FlattenedChildren`) | **Deleted** — taffy types + `LayoutLynxTree` + `LayoutInputExt`; `LayoutSlot` moves next to the cache |
-| `hughie/src/geometry.rs` | **Deleted** — taffy geometry (`Edges`→`Rect`) |
-| `hughie/src/style/mod.rs` `CoreStyle` | **Trimmed** to `LynxCoreStyle` (box core + display/position/order/direction/overflow + containment + linear-*/relative-*); flex/grid accessors deleted; + new `style::convert` (stylo fork → taffy values, modeled on `stylo_taffy`) |
-| `hughie/src/cache.rs` | **Kept**, keyed on `LayoutInputExt` |
-| `hughie/src/invalidate.rs`, containment helpers, `compute/{mod,leaf,linear,relative,single_axis,util}.rs`, `text/*` | **Kept**, retyped; linear/relative restructured to `&mut tree` (their scratch records already copy what crosses child calls; style views survive on the arena lifetime, §3) — probe patterns, memoization, CSR solver, freeze loops, and allocation structure preserved verbatim |
+| `seldon/src/compute/flexbox.rs`, `compute/grid/*` (~8.5k lines) | **Deleted** — taffy provides |
+| `seldon/src/tree/{mod,io}.rs` (`LayoutTree`, `LayoutInput/Output/Layout`, `FlattenedChildren`) | **Deleted** — taffy types + `LayoutLynxTree` + `LayoutInputExt`; `LayoutSlot` moves next to the cache |
+| `seldon/src/geometry.rs` | **Deleted** — taffy geometry (`Edges`→`Rect`) |
+| `seldon/src/style/mod.rs` `CoreStyle` | **Trimmed** to `LynxCoreStyle` (box core + display/position/order/direction/overflow + containment + linear-*/relative-*); flex/grid accessors deleted; + new `style::convert` (stylo fork → taffy values, modeled on `stylo_taffy`) |
+| `seldon/src/cache.rs` | **Kept**, keyed on `LayoutInputExt` |
+| `seldon/src/invalidate.rs`, containment helpers, `compute/{mod,leaf,linear,relative,single_axis,util}.rs`, `text/*` | **Kept**, retyped; linear/relative restructured to `&mut tree` (their scratch records already copy what crosses child calls; style views survive on the arena lifetime, §3) — probe patterns, memoization, CSR solver, freeze loops, and allocation structure preserved verbatim |
 | `dom/src/layout/host.rs` | **Rewritten**: `LayoutCtx` + taffy trait impls + ext dispatch + containment wrapper; `run_layout`/parked-boundary/positioned-pass logic retained with the §7 fixed-hoisting change |
 | `dom/src/layout/style.rs` | **Extended**: taffy trait impls on `StyleView`; `resolve_position`/CB predicates unchanged |
-| dom child storage | **New**: layout child lists (flatten + order sort) with flush-time rebuild |
-| `dom` public API (`Document::layout`, `rounded_layout`, `set_natural_size`, `register_fonts`, scroll/visual consumers) | **Unchanged signatures**; `dom::layout::Layout` is now `taffy::Layout` (gains `scrollbar_size`, loses nothing consumed today) |
+| terminus child storage | **New**: layout child lists (flatten + order sort) with flush-time rebuild |
+| `terminus` public API (`Document::layout`, `rounded_layout`, `set_natural_size`, `register_fonts`, scroll/visual consumers) | **Unchanged signatures**; `terminus::link::layout::Layout` is now `taffy::Layout` (gains `scrollbar_size`, loses nothing consumed today) |
 
-Dependency edges after: `dom → { hughie, taffy, stylo }`,
-`hughie → { taffy, stylo, parley }`. Nothing outside dom touches hughie
-types except through existing dom re-exports (verified: only `FontBlob`,
+Dependency edges after: `dom → { seldon, taffy, stylo }`,
+`seldon → { taffy, stylo, parley }`. Nothing outside terminus touches seldon
+types except through existing terminus re-exports (verified: only `FontBlob`,
 `Layout`, `Size`, `NaturalSize`).
 
 ## 9. Performance architecture (requirement 7)
 
 - **Static dispatch end-to-end is preserved.** taffy's compute functions are
-  generic over the concrete `LayoutCtx`; every host⇄taffy⇄hughie call
+  generic over the concrete `LayoutCtx`; every host⇄taffy⇄seldon call
   monomorphizes exactly as today. No `dyn`, no vtables.
 - **Zero style materialization** — the deliberate divergence from Blitz's
   production path (which builds a 520-byte `taffy::Style` per node per
@@ -580,16 +580,16 @@ types except through existing dom re-exports (verified: only `FontBlob`,
   (`indefinite_percentage_flex_basis_falls_back_to_content_not_width`,
   auto-repeat seeding) re-pin to taffy's behavior or are dropped with a
   deviation note.
-- **D3 — grid details.** taffy's bounding policies replace hughie's
+- **D3 — grid details.** taffy's bounding policies replace seldon's
   (track-limit drop, hostile auto-repeat counting); named lines/areas become
   available if the fork grammar supplies them; grid baseline
   group/shim/synthesis details re-verified against taffy (its abs-pos grid
   handling was reworked in 0.13 and is current-spec-aligned).
 - **D4 — paint-order mechanism.** `Layout.order` semantics are preserved
   (order-modified document order, effective 0 for out-of-flow) but are now
-  produced by dom's sorted child lists + taffy's index stamping instead of
+  produced by terminus's sorted child lists + taffy's index stamping instead of
   `sort_and_assign_layout_order`, which is deleted from Linear/Relative.
-- **D5 — cache/probe traces.** Tests and benches asserting hughie flex/grid
+- **D5 — cache/probe traces.** Tests and benches asserting seldon flex/grid
   probe counts, measure-input traces, or write discipline die with those
   implementations; geometry oracles are retargeted (see the migration test
   classification: ~120 of the 137 flex/grid tests survive as conformance
@@ -597,25 +597,25 @@ types except through existing dom re-exports (verified: only `FontBlob`,
   retype, all 113 linear/relative tests survive with retyping).
 - **D6 — `content_size` origin.** taffy 0.13 measures `content_size` from
   the padding-box origin (#1051); verify `scroll::resolve` and boundary
-  content-size merge-back against it during implementation (hughie's
+  content-size merge-back against it during implementation (seldon's
   convention must be confirmed equal or the reader adjusted).
 
 ## 11. Migration order
 
-1. **Types + conversion floor** — workspace `taffy` dep; hughie:
+1. **Types + conversion floor** — workspace `taffy` dep; seldon:
    `LayoutInputExt`, retyped cache/invalidate/geometry aliases,
    `style::convert` + `LynxCoreStyle` trim, trait definitions
    (`LayoutLynxTree`, container traits). Everything still compiles with the
    old algorithms behind a temporary shim, or this step lands together with
    2–4 on the integration branch.
-2. **dom child lists** — layout children (flatten + order sort), rebuild
+2. **terminus child lists** — layout children (flatten + order sort), rebuild
    triggers in flush/mutation paths, retarget `visual`/`sibling_paint_order`
    iteration. Independently testable against today's engine (the
    `FlattenedChildren` outputs must match).
 3. **Host cutover** — `LayoutCtx`, taffy trait impls, ext dispatch +
    containment wrapper, leaf/text retyping, taffy flex/grid live,
    linear/relative ported to `&mut` protocol, positioned-pass rework,
-   rounding retype; delete hughie flex/grid/tree/geometry.
+   rounding retype; delete seldon flex/grid/tree/geometry.
 4. **Test/bench migration** per the classification above; conformance
    re-verification list from `docs/layout-conformance.md` (RTL, baselines,
    automatic minimum, abs-pos fallbacks, auto-repeat, rounding interplay,

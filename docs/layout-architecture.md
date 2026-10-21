@@ -1,6 +1,6 @@
-# Layout architecture — `hughie`
+# Layout architecture — `seldon`
 
-`crates/hughie` is lynx-vello's box-layout engine: the from-scratch
+`crates/seldon` is lynx-vello's box-layout engine: the from-scratch
 successor to the Lynx C++ engine's `starlight`
 (`lynx/core/renderer/starlight/`). It implements CSS **flexbox**, CSS **Grid**,
 CSS Grid Level 3 **grid lanes**, and Lynx's Starlight **Relative** and
@@ -17,7 +17,7 @@ decoded natural size and concrete Parley text are the only leaf-content paths.
 
 Status: **Flexbox, Grid, grid lanes, Relative, Linear, and text measurement
 implemented** —
-`hughie`'s protocol, generic machinery, cache, leaf and positioned
+`seldon`'s protocol, generic machinery, cache, leaf and positioned
 sizing, rounding, CSS Flexbox Level 1, numeric CSS Grid Level 2, CSS Grid
 Level 3 `display: grid-lanes`, Starlight
 Relative Layout Level 1, Starlight Linear algorithms, and the
@@ -28,7 +28,7 @@ alone), layout containment, `content-visibility` skipped
 contents, the relayout-boundary predicate, and containment-bounded cache
 invalidation (`invalidate_for_relayout`) — plus css-contain-3's
 `container-type` fold, which is how a size query container becomes a contained
-box — its `dom` damage producer,
+box — its `terminus` damage producer,
 containment folding, and the damage→layout seam all ship alongside: every
 style flush consumes harvested relayout-class `StyleDamage` into
 the crate-private `Document::invalidate_layout` funnel automatically,
@@ -39,7 +39,7 @@ additionally excludes `inline-grid-lanes`, `dense` backfilling, stacking-axis
 self-alignment and baseline alignment
 ([`style-assumptions.md`](style-assumptions.md) §24). The concrete
 document/stylo host is
-implemented in `dom`'s `layout` module (`Document::layout`):
+implemented in `terminus`'s `layout` module (`Document::layout`):
 `LayoutTree` on immutable `TreeArenas`, with plain `NodeId`s and a separately
 borrowed mutable `DocumentLayoutState`. Style views are fetched on engine
 request and lend the post-flush `ComputedValues` pointer published under
@@ -72,7 +72,7 @@ the decoder that produces it is a separate crate, but it is not exposed
 through any Element PAPI.
 A Lynx text element (`text`, `inline-text`, `inline-truncation`, by their
 custom element definitions; `Node::is_lynx_text`) flattens its subtree into
-`hughie::text::block` under any `display` but `none` and `contents`, with
+`seldon::text::block` under any `display` but `none` and `contents`, with
 atomic inline boxes and element-backed raw text. `LynxTextStyle::text_maxline`
 and `text_maxlength` carry the establishing element's computed custom properties
 into `BlockStyle`; computed `text-overflow` selects clip or ellipsis. Core reflects
@@ -113,7 +113,7 @@ Text behavior is inventoried in
 ```text
         lynx-vello host stack                           engine
 ┌──────────────────────────────────┐     ┌─────────────────────────────────┐
-│ dom                              │     │ hughie                          │
+│ terminus                              │     │ seldon                          │
 │ immutable TreeArenas + styles    │     │ one LayoutTree protocol         │
 │ mutable DocumentLayoutState      │────▶│ flex / grid / grid-lanes /      │
 │ boxed text context/artifacts     │     │ relative / linear               │
@@ -125,21 +125,21 @@ Text behavior is inventoried in
 
 | Layer | Owns | Must not own |
 | --- | --- | --- |
-| `hughie` | Implemented Flex, Grid, grid lanes, Relative, and Linear algorithms; one unified source-backed `CoreStyle` protocol speaking stylo computed values (including the `relative-*` and `linear-*` longhands); the text style/run protocol; closed natural-size and Parley leaf paths, box-generation rules (`display: none` hiding and `display: contents` box-tree flattening through `flattened_children`), hidden-subtree cleanup, positioned layout, rounding; shared private arithmetic; geometry and layout IO; cache semantics | Node/style/content storage, display dispatch, arbitrary host content/measurers, DOM/runtime types, an engine-side style value vocabulary (it re-exports stylo's), resolved device-unit policy (`rpx`, etc.), stacking/paint order |
-| `hughie::text` (unconditional) | Parley context/font registration (`TextContext`, `FontBlob`) and the one-line shaper SVG text uses (`shape_line`) | Text truncation and ellipsis, paint styling, runtime/attribute lowering, resource fetching, or host cache and per-node slot storage |
-| `hughie::text::paragraph` (unconditional) | The shared Parley paragraph core with no Lynx semantics: whitespace normalization and the UTF-8 byte ↔ UTF-16 source-unit map, the run-style vocabulary and its Parley translation, shaping, line breaking and the read-back of committed lines (trailing blank lines dropped), preserved-tab stops, atomic-box `vertical-align`, the probe/commit break memo and its shared `Retained` protocol, the per-cluster extent walk, the source-range and hit queries both consumers answer, and `LineGeometry` — each laid-out line's box and the shift that moves parley's placement onto it; `Paragraph` retains one shaped natural layout and re-breaks it in place for every constraint; generic hooks for a consumer that lays text of its own into the content — markers whose places it reports, spliced segments with no source unit, the consumer's own line-break override, advance beside an atomic box | Paragraph-wide policy — alignment, truncation, line reports, box placement belong to the consumer — the box-protocol wire format, host tree walking, paint styling |
-| `hughie::text::block` (unconditional) | The Lynx `<text>` layer on that core, on its own parameter structs: `BlockStyle` with the `text-maxline`/`text-maxlength` limits and `text-overflow`, truncation with inline-truncation content and the dots marker, per-line layout-event data, hidden-box outcomes of a cut, the retained-natural-layout / rebuilt-display lifecycle, and the Lynx answers of the source-range and hit queries; its line geometry is parley's own | The box-protocol wire format (`LayoutInput`), host tree walking and the scoped style overlay (host cascade), paint styling, runtime/attribute lowering |
-| `hughie::text::inline` (unconditional) | The CSS block container's inline formatting context, on CSS-only parameters (`InlineFlowStyle`): text runs, non-atomic inline boxes with their inline-axis margin, border and padding laid into the line as unbreakable edge clusters under `box-decoration-break: slice` (its `edge` module, through the core's splice) and one fragment per line each (`InlineFragment`), and atomic inline boxes placed by margin box and `vertical-align` (`set_atom_size`, `atoms`); css-text-3 §4.1 white space in full, collapsing across inline box boundaries; per-run line-breaking values, the `text-indent` keywords counted in the intrinsic widths, CSS 2.2 §10.8.1 line boxes (the strut and each run's half-leading), the fit-content width under a definite available width, and the source-range and hit queries the Lynx block answers (`range_boxes`, `index_at_point`, through the core's `paragraph::query`) | Any Lynx attribute or `--lynx-*` input, truncation, block-in-inline splitting (a block-level box is an atom), host tree walking, laying out an atom's own content, paint styling |
-| `dom::layout` (implemented) | `LayoutTree` on immutable `TreeArenas<T>`, plain `NodeId`s, and separately borrowed mutable `DocumentLayoutState` (one protocol; no view/session/store wrapper layers); post-flush style views lending the `ComputedValues` pointer published from Stylo's still-owning primary `Arc` under the exclusive `Document` phase boundary (no `ElementData` borrow check, `Arc` bump, copy, or translation; public computed-style queries remain guarded); logical `relative-*-inline-*` lowering; the W3C fixed/absolute containing-block rule expressed through `position()`; anonymous box geometry plus inherited parent font/text values for text nodes; display dispatch (flex/grid/linear/relative, `display: none` hiding, `display: contents` box-less handling — never a containing block, never contained, never skipped, never hoisted, and zeroed by the positioned pass — skipped-contents routing — the hide sweep before the cache, the size through it — natural-size leaf, Lynx text element paragraph blocks, `(block, flow)` block containers laying their text runs, inline boxes and atoms out as an inline formatting context — an inline box generating no layout box of its own, painting from its fragments and hit-tested through hit-only paint records, and an out-of-flow box of the content taking its static position from its place in the line); lazily boxed shared `TextContext` and per-paragraph `TextStore` in layout state; a NodeId-aligned `LayoutSlot` containing cache, static position, unrounded layout, and rounded layout; public `rounded_layout` queries with unrounded and cache state kept internal; automatic dirty-path invalidation when content changes; the hoisted-box registry (`LayoutTree::hoisted_children`: each out-of-flow box whose containing block is not its box parent, listed under the element that generates that block when its parent records its static position, and laid out by that block's own absolute pass in tree order); one fused preorder rounding traversal whose pre-node hook places the boxes no containing block ran for (initial-containing-block boxes, and boxes under a subtree relaid in place), prunes at skipped-contents subtrees so a hoisted descendant cannot be revived, and applies the engine's effective-`order`-0 paint rule for out-of-flow children; device-pixel rounding without a whole-`Layout` clone; the effective-containment fold on the style view (feeding both the relayout-boundary predicate and the content-visibility-aware fixed/absolute containing-block predicate); **automatic style-damage consumption** (every harvest boundary-stops the internal `Document::invalidate_layout` funnel per relayout-damaged node during commit; it also invalidates direct text children, which read inherited style from the damaged element but have no Stylo damage record of their own — always their measurement cache, since the funnel walks upward and nothing else clears it, and their retained shaped layout only when a two-level comparison of the element's `Font` and `InheritedText` structs, pointer first and then narrowed to the shaping fields, says Parley would shape the paragraph differently; the animation harvest routes through the same decision; `Document::layout` re-runs each parked `contain: strict`/skipped boundary in place before the root pass, merging the re-run's scrollable `content_size` back into the boundary's stored layout); and public content/child/style mutations that perform their own invalidation (the explicit hook is `layout-test-utils`-only) | A second layout algorithm, generic content-measurement callbacks, engine-side style copies, layout/text runtime borrow wrappers, Lynx runtime-element vocabulary or device-unit policy (`rpx`), Lynx computed defaults (cascade/UA-sheet policy), text shaping algorithms |
-| Future runtime integration | Lynx view metrics and `rpx` policy; Lynx-specific text attributes, element-backed raw text and truncation; the `<list>` component surface over `display: grid-lanes` (attribute→CSS mapping and virtualization; the `update-list-info` consumer that delivers the cells is implemented in `packages/bobcat-element`) | A second Flex/Grid/grid-lanes/Relative/Linear/text-measurement implementation, arbitrary host content, engine-side copies of styles, the style-damage→layout wiring (now engine-internal in `dom`) |
+| `seldon` | Implemented Flex, Grid, grid lanes, Relative, and Linear algorithms; one unified source-backed `CoreStyle` protocol speaking stylo computed values (including the `relative-*` and `linear-*` longhands); the text style/run protocol; closed natural-size and Parley leaf paths, box-generation rules (`display: none` hiding and `display: contents` box-tree flattening through `flattened_children`), hidden-subtree cleanup, positioned layout, rounding; shared private arithmetic; geometry and layout IO; cache semantics | Node/style/content storage, display dispatch, arbitrary host content/measurers, DOM/runtime types, an engine-side style value vocabulary (it re-exports stylo's), resolved device-unit policy (`rpx`, etc.), stacking/paint order |
+| `seldon::text` (unconditional) | Parley context/font registration (`TextContext`, `FontBlob`) and the one-line shaper SVG text uses (`shape_line`) | Text truncation and ellipsis, paint styling, runtime/attribute lowering, resource fetching, or host cache and per-node slot storage |
+| `seldon::text::paragraph` (unconditional) | The shared Parley paragraph core with no Lynx semantics: whitespace normalization and the UTF-8 byte ↔ UTF-16 source-unit map, the run-style vocabulary and its Parley translation, shaping, line breaking and the read-back of committed lines (trailing blank lines dropped), preserved-tab stops, atomic-box `vertical-align`, the probe/commit break memo and its shared `Retained` protocol, the per-cluster extent walk, the source-range and hit queries both consumers answer, and `LineGeometry` — each laid-out line's box and the shift that moves parley's placement onto it; `Paragraph` retains one shaped natural layout and re-breaks it in place for every constraint; generic hooks for a consumer that lays text of its own into the content — markers whose places it reports, spliced segments with no source unit, the consumer's own line-break override, advance beside an atomic box | Paragraph-wide policy — alignment, truncation, line reports, box placement belong to the consumer — the box-protocol wire format, host tree walking, paint styling |
+| `seldon::text::block` (unconditional) | The Lynx `<text>` layer on that core, on its own parameter structs: `BlockStyle` with the `text-maxline`/`text-maxlength` limits and `text-overflow`, truncation with inline-truncation content and the dots marker, per-line layout-event data, hidden-box outcomes of a cut, the retained-natural-layout / rebuilt-display lifecycle, and the Lynx answers of the source-range and hit queries; its line geometry is parley's own | The box-protocol wire format (`LayoutInput`), host tree walking and the scoped style overlay (host cascade), paint styling, runtime/attribute lowering |
+| `seldon::text::inline` (unconditional) | The CSS block container's inline formatting context, on CSS-only parameters (`InlineFlowStyle`): text runs, non-atomic inline boxes with their inline-axis margin, border and padding laid into the line as unbreakable edge clusters under `box-decoration-break: slice` (its `edge` module, through the core's splice) and one fragment per line each (`InlineFragment`), and atomic inline boxes placed by margin box and `vertical-align` (`set_atom_size`, `atoms`); css-text-3 §4.1 white space in full, collapsing across inline box boundaries; per-run line-breaking values, the `text-indent` keywords counted in the intrinsic widths, CSS 2.2 §10.8.1 line boxes (the strut and each run's half-leading), the fit-content width under a definite available width, and the source-range and hit queries the Lynx block answers (`range_boxes`, `index_at_point`, through the core's `paragraph::query`) | Any Lynx attribute or `--lynx-*` input, truncation, block-in-inline splitting (a block-level box is an atom), host tree walking, laying out an atom's own content, paint styling |
+| `terminus::link::layout` (implemented) | `LayoutTree` on immutable `TreeArenas<T>`, plain `NodeId`s, and separately borrowed mutable `DocumentLayoutState` (one protocol; no view/session/store wrapper layers); post-flush style views lending the `ComputedValues` pointer published from Stylo's still-owning primary `Arc` under the exclusive `Document` phase boundary (no `ElementData` borrow check, `Arc` bump, copy, or translation; public computed-style queries remain guarded); logical `relative-*-inline-*` lowering; the W3C fixed/absolute containing-block rule expressed through `position()`; anonymous box geometry plus inherited parent font/text values for text nodes; display dispatch (flex/grid/linear/relative, `display: none` hiding, `display: contents` box-less handling — never a containing block, never contained, never skipped, never hoisted, and zeroed by the positioned pass — skipped-contents routing — the hide sweep before the cache, the size through it — natural-size leaf, Lynx text element paragraph blocks, `(block, flow)` block containers laying their text runs, inline boxes and atoms out as an inline formatting context — an inline box generating no layout box of its own, painting from its fragments and hit-tested through hit-only paint records, and an out-of-flow box of the content taking its static position from its place in the line); lazily boxed shared `TextContext` and per-paragraph `TextStore` in layout state; a NodeId-aligned `LayoutSlot` containing cache, static position, unrounded layout, and rounded layout; public `rounded_layout` queries with unrounded and cache state kept internal; automatic dirty-path invalidation when content changes; the hoisted-box registry (`LayoutTree::hoisted_children`: each out-of-flow box whose containing block is not its box parent, listed under the element that generates that block when its parent records its static position, and laid out by that block's own absolute pass in tree order); one fused preorder rounding traversal whose pre-node hook places the boxes no containing block ran for (initial-containing-block boxes, and boxes under a subtree relaid in place), prunes at skipped-contents subtrees so a hoisted descendant cannot be revived, and applies the engine's effective-`order`-0 paint rule for out-of-flow children; device-pixel rounding without a whole-`Layout` clone; the effective-containment fold on the style view (feeding both the relayout-boundary predicate and the content-visibility-aware fixed/absolute containing-block predicate); **automatic style-damage consumption** (every harvest boundary-stops the internal `Document::invalidate_layout` funnel per relayout-damaged node during commit; it also invalidates direct text children, which read inherited style from the damaged element but have no Stylo damage record of their own — always their measurement cache, since the funnel walks upward and nothing else clears it, and their retained shaped layout only when a two-level comparison of the element's `Font` and `InheritedText` structs, pointer first and then narrowed to the shaping fields, says Parley would shape the paragraph differently; the animation harvest routes through the same decision; `Document::layout` re-runs each parked `contain: strict`/skipped boundary in place before the root pass, merging the re-run's scrollable `content_size` back into the boundary's stored layout); and public content/child/style mutations that perform their own invalidation (the explicit hook is `layout-test-utils`-only) | A second layout algorithm, generic content-measurement callbacks, engine-side style copies, layout/text runtime borrow wrappers, Lynx runtime-element vocabulary or device-unit policy (`rpx`), Lynx computed defaults (cascade/UA-sheet policy), text shaping algorithms |
+| Future runtime integration | Lynx view metrics and `rpx` policy; Lynx-specific text attributes, element-backed raw text and truncation; the `<list>` component surface over `display: grid-lanes` (attribute→CSS mapping and virtualization; the `update-list-info` consumer that delivers the cells is implemented in `packages/bobcat-element`) | A second Flex/Grid/grid-lanes/Relative/Linear/text-measurement implementation, arbitrary host content, engine-side copies of styles, the style-damage→layout wiring (now engine-internal in `terminus`) |
 
 The engine/host seam keeps the engine storage-free even though its
 vocabulary is stylo's: the Lynx-specific values and algorithms for Relative
-and Linear live in `hughie`, but the crate owns no host storage — its
+and Linear live in `seldon`, but the crate owns no host storage — its
 style accessors return the same computed values the stylo cascade produces,
 so a stylo-backed host serves style views with no translation layer. Both
 are first-class peers rather than translations into Flex or Grid. The
-concrete adapter proved as mechanical as designed (`dom::layout`):
+concrete adapter proved as mechanical as designed (`terminus::link::layout`):
 style views as direct post-flush `ComputedValues` field reads, per-node
 `LayoutSlot`s resolved through the mutable state arena, and one display-mode
 dispatch. The existing `&Node` shape remains where Stylo needs it; box layout
@@ -148,8 +148,8 @@ to mutable layout state through a tree backpointer.
 
 ## The protocol in one page
 
-One tree trait (`hughie::tree::LayoutTree`) plus style-view traits
-(`hughie::style`). The host gives each entry point three values:
+One tree trait (`seldon::tree::LayoutTree`) plus style-view traits
+(`seldon::style`). The host gives each entry point three values:
 `&tree`, `&mut state`, and a `Copy + Debug` node ID. `LayoutTree` uses GATs
 for a borrowed `Style<'tree>` and `ChildIter<'tree>`, so topology and
 style data stay tied to the immutable tree borrow while recursion mutates only
@@ -167,7 +167,7 @@ the independent state:
 | `LinearStyle: CoreStyle` | `linear_direction`, `linear_weight_sum`, `linear_weight` | demanded by `compute_linear_layout` |
 | `RelativeStyle: CoreStyle` | `relative_layout_once`, `relative_id`, `relative_align`, `relative_adjacent`, `relative_center` | demanded by `compute_relative_layout` |
 | `TextContainerStyle: CoreStyle` | paragraph-level alignment, wrap-mode, word-break, indent, overflow | the Parley text block |
-| `LynxTextStyle: TextContainerStyle` | the Lynx `<text>` inputs from non-inherited integer custom properties: `text_maxline` / `text_maxlength`, `tail_color_convert`, `is_inline_truncation` | the Parley text block, the dom flatten walk and painter |
+| `LynxTextStyle: TextContainerStyle` | the Lynx `<text>` inputs from non-inherited integer custom properties: `text_maxline` / `text_maxlength`, `tail_color_convert`, `is_inline_truncation` | the Parley text block, the terminus flatten walk and painter |
 | `TextRunStyle` | run-level font, spacing, line-height, family, feature, and variation views; a Stylo host can expose one borrowed `computed_text_values()` source | the Parley text block |
 
 One `Style: CoreStyle` associated type still serves every box algorithm; the
@@ -185,7 +185,7 @@ add Linear) and `order` is read by all five for paint order, so partitioning
 them would duplicate rather than divide. A
 Stylo-backed host supplies its post-flush `ComputedValues` through
 `computed_values()` and overrides only genuinely host-dependent lowering
-(currently `position()` in `dom`); the defaults lend all other
+(currently `position()` in `terminus`); the defaults lend all other
 box/Flex/Grid/Relative/Linear fields directly from that source. Cascade-less
 hosts can instead override individual accessors. Everything the engine reads
 through `LayoutTree` is immutable for the flush; everything it writes goes
@@ -193,7 +193,7 @@ through `&mut State` into host-owned `LayoutSlot`s. The seam deliberately
 stops there: there is no `LayoutTreeView`, `LayoutSession`, or `LayoutStore`
 abstraction.
 
-Entry points (`hughie::compute`) are free generic functions — there is
+Entry points (`seldon::compute`) are free generic functions — there is
 no engine object, so unused entry points never monomorphize into the host.
 Implemented machinery: `compute_root_layout`, `compute_leaf_layout`
 (closed `NaturalSize` replaced-content path), explicit hidden-subtree cleanup via
@@ -235,12 +235,12 @@ data escapes outside of function` (the note reads "due to a current
 limitation of the type system, this implies a `'static` lifetime"). Both
 kinds of host in this repo are of that shape: `impl<'t> LayoutTree for
 TestHost<'t>` in `compute/grid/sizing.rs` and `impl<T> LayoutTree for
-TreeArenas<T>` in `dom`. Naming one `'tree` — the lifetime the caller's
+TreeArenas<T>` in `terminus`. Naming one `'tree` — the lifetime the caller's
 `&'tree T` already has — discharges the bound at the concrete host instead.
 
 The cost of the named lifetime is that any generic layer between a host and
 an entry point must name it too. There is one shape it forecloses: a
-hughie-internal function generic over `T` that reaches an algorithm entry
+seldon-internal function generic over `T` that reaches an algorithm entry
 point through `compute_cached_layout`'s `FnOnce(&T, ..)` closure. The
 closure's `&T` is higher-ranked, so satisfying the bound there would need the
 HRTB that does not compile (E0521 again). Nothing does this today — the host
@@ -371,11 +371,11 @@ its cache key carries every anchor and option it depends on, and trial options
 are measured, only the chosen one committed. A box with none of those
 properties but a `position-anchor` naming an element
 (`CoreStyle::names_position_anchor`) is on the anchored path too: it has a
-default anchor, and so a scrollable containing block. The `dom` host's half —
+default anchor, and so a scrollable containing block. The `terminus` host's half —
 the anchor-name index, the §2.3 lookup, remembered scroll offsets, options
 cascaded at the style harvest, and the settle loop that relays a box whose
 anchor moved without its containing block running again — is
-`docs/dom-architecture.md` ("Anchor positioning"). Scope and reasons:
+`docs/terminus-architecture.md` ("Anchor positioning"). Scope and reasons:
 `docs/style-assumptions.md` §28.
 
 **`reads_last_baseline` is a request, not geometry.** A caller sets it when it
@@ -424,10 +424,10 @@ sites.
 The tree trait likewise stays whole. taffy splits `LayoutTree` into
 per-algorithm container traits for two reasons that do not apply here — cargo
 features that compile one algorithm out, and hanging a grid track iterator off
-a GAT (hughie borrows stylo's `GridTemplateComponent` directly). Splitting it
+a GAT (seldon borrows stylo's `GridTemplateComponent` directly). Splitting it
 would also strand `FlattenedChildren`, whose item type has three consumers
 outside layout that discard the style entirely (`dom/src/layout/host.rs` twice
-and `dom/src/visual/build.rs`). Only the production host (dom's `TreeArenas`)
+and `dom/src/visual/build.rs`). Only the production host (terminus's `TreeArenas`)
 and the shared test host (`tests/support`'s `TestTree`) dispatch every
 algorithm, both from one `compute_layout`; every other impl reaches one
 algorithm or none. A per-algorithm container trait would therefore replace
@@ -441,7 +441,7 @@ styles through `&tree`, then calls
 first handles a non-generated box (`display: none`, i.e. stylo
 `Display::is_none`) by calling `hide_subtree` and
 returning `LayoutOutput::HIDDEN`; this explicit cleanup precedes and bypasses
-the cache. For a generated box, the host routes to a hughie container
+the cache. For a generated box, the host routes to a seldon container
 algorithm, the natural-size leaf path, the concrete Parley text path, or a
 future additional container algorithm, wrapping that
 routing in `compute_cached_layout`. This decision buys three properties at
@@ -452,7 +452,7 @@ once:
    non-CSS `display: relative` (id-anchored sibling constraint solving) and
    `display: linear` (Android `LinearLayout` semantics:
    `linear-direction`/`linear-weight`/…) are implemented peers in
-   `hughie`, against the same tree/state protocol. The `<list>`
+   `seldon`, against the same tree/state protocol. The `<list>`
    component surface over `grid-lanes` remains future host work. The engine owns
    **no display enum of its own** — `CoreStyle::display` returns stylo's
    `Display`, the engine consumes it only through `is_none` and
@@ -486,7 +486,7 @@ through `&LayoutTree`. Mutable results — unrounded/final layouts, static
 positions, cache slots, measurement context, retained text artifacts — are
 reached only through the disjoint `&mut LayoutTree::State`. This is an
 ordinary static Rust borrow split, not `Cell`, `RefCell`, `AtomicRefCell`, an
-unsafe borrow bypass, or a copied mirror tree. The concrete `dom` host
+unsafe borrow bypass, or a copied mirror tree. The concrete `terminus` host
 uses `NodeId` to index a `DocumentLayoutState` slab whose entries contain a
 `LayoutSlot` plus an optional boxed text store; the shared text context is
 also optionally boxed in that state. `TreeArenas` contains only nodes,
@@ -522,7 +522,7 @@ box trait (`CoreStyle`), `TextContainerStyle` / `LynxTextStyle`, and the standal
 `Display`,
 `LengthPercentage`, `Margin`, `AlignFlags`-based alignment wrappers, grid
 track lists, and keyword enums the stylo cascade produces, re-exported from
-`hughie::style`. There are no engine-owned style value enums and no
+`seldon::style`. There are no engine-owned style value enums and no
 materialized engine-side style structs: a stylo-backed host lends one
 `ComputedValues` through `CoreStyle::computed_values()`, whose default methods
 perform direct field reads; a cascade-less host (tests, benches) can override
@@ -573,7 +573,7 @@ layer above installs it through `Document::set_natural_size`, which
 invalidates the node-to-root box-cache path. That split is deliberate:
 intrinsic metadata is W3C replaced-content state and belongs on the document,
 while fetch and decode stay outside this workspace entirely — no image
-pipeline exists below the store, and `dom` learns nothing about `<img>` or any
+pipeline exists below the store, and `terminus` learns nothing about `<img>` or any
 other tag. Setting an equal value is a structural no-op, which is why there is
 no aspect-ratio epsilon here unlike native Lynx. This state does **not**
 mutate `contain-*` or `contain-intrinsic-size`: natural replaced size is
@@ -608,7 +608,7 @@ Font registration takes a `FontBlob`: the caller moves an owned byte container
 into Parley's shared resource handle, so resource-loader buffers are retained
 without copying their payload. `FontBlob::copy_from_slice` names the unavoidable
 copying fallback for a caller that owns only a temporary borrow.
-The `dom` host drives a block by borrowing immutable text/style content and
+The `terminus` host drives a block by borrowing immutable text/style content and
 the separately mutable layout state. That state lazily boxes one document
 `TextContext` and one `TextStore` — a `TextBlockStore` or an
 `InlineFlowStore` — for each Lynx text element or block container
@@ -667,8 +667,8 @@ definite-inset visual nudge):
   (`compute_hoisted_layout`, the same placement).
 
 **The top layer (css-position-4 §3) is host policy over the same
-protocol.** `dom` keeps the document's top layer as an ordered side table
-(`crates/dom/src/tree/top_layer.rs`). A top-layer element lowers to
+protocol.** `terminus` keeps the document's top layer as an ordered side table
+(`crates/terminus/src/tree/top_layer.rs`). A top-layer element lowers to
 `PositionProperty::Fixed` whatever its computed position, and the host's
 containing-block lookup answers the initial containing block for it, so
 its parent records only a static position, it contributes nothing to the
@@ -680,7 +680,7 @@ rather than to a transformed ancestor outside the layer. Each entry's
 `::backdrop` is a box with no parent: a **top-layer tail** after the
 rounding tail lays it out with `compute_absolute_layout` against the
 viewport and rounds it as a subtree of its own, every run, for every entry
-whose element rendered. `hughie` itself knows nothing of the layer.
+whose element rendered. `seldon` itself knows nothing of the layer.
 HTML's modal-dialog sizing (`inset: 0; width: fit-content; height:
 fit-content; margin: auto`) needs nothing layer-specific either: the
 absolute pass stretch-fits only an `auto` size (css-position-3 §4.1), so
@@ -688,7 +688,7 @@ a `fit-content` box between two insets takes its fit-content size
 (css-sizing-3 §3.2) in the inset-modified containing block and its `auto`
 margins centre it.
 
-`position: sticky` is resolved by the `dom` visual host at composition time.
+`position: sticky` is resolved by the `terminus` visual host at composition time.
 The retained frame stores scrollport inset and containing-block constraints;
 live scroll offsets determine the visual displacement without changing layout.
 Grid layout preserves each sticky item's grid area as its containing-block bounds.
@@ -725,7 +725,7 @@ is how engines drift.
 **`order` is protocol; `z-index` is not.** Flex/grid items expose `order`
 (Lynx supports it) and `Layout.order` records the resulting sibling
 traversal/paint index. Stacking contexts and `z-index` are implemented
-W3C-correctly over stylo in **`dom`'s `visual` module**
+W3C-correctly over stylo in **`terminus`'s `visual` module**
 (`Document::render` builds it — the full trigger set,
 CSS2 Appendix E paint order, transform matrices, overflow clip chains with
 containing-block escape — and `Document::elements_from_point` reads the
@@ -748,7 +748,7 @@ types directly — the `Contain` bit set
 `containment()`'s own default folds `content-visibility` and `container-type`
 into the `contain` bits exactly as stylo's gecko-mode effective-containment
 mapping does — `crate::style::effective_containment` is the one copy of that
-fold, which `dom` calls for its own non-layout containment questions (paint
+fold, which `terminus` calls for its own non-layout containment questions (paint
 clipping, stacking contexts, containing blocks).
 [css-contain-3 §2.1](https://drafts.csswg.org/css-contain-3/#container-type):
 `container-type: inline-size` applies layout, style and inline-size
@@ -794,7 +794,7 @@ v1 box-layout effects:
   host treats it like transform/filter/`will-change` in its positioned pass (see
   `PositionProperty::Fixed`). `PAINT` (clip + stacking context) and `STYLE` (counter/quote
   scoping) are carried for fidelity but have no v1 box-layout consumer — paint clipping and the
-  stacking context are consumed by `dom`'s `visual` module (paint order + hit testing), not by
+  stacking context are consumed by `terminus`'s `visual` module (paint order + hit testing), not by
   box layout; style containment remains a
   concern, and this engine has no counters/quotes. Effect bits are queried individually via
   `Contain::contains` (never the `CONTENT`/`STRICT` marker composites, which carry serialization
@@ -805,7 +805,7 @@ rectangle in border-box coordinates: each algorithm accumulates its children's r
 at its output construction (`own_scrollable_overflow`), takes the union with the box's own padding
 box — the area's floor is "the scroll container's own padding box", so an empty box's `content_size`
 ends at its padding box's far edge (`padding_box_end`), never inside its far border. A leaf's is its
-measured contents plus the end padding, floored the same way. `dom::scroll` subtracts the start
+measured contents plus the end padding, floored the same way. `terminus::link::scroll` subtracts the start
 border to get the scrolling area from the scrollport's origin, so an empty bordered scroll container
 has a scrolling area equal to its scrollport and no scroll range.
 
@@ -854,20 +854,20 @@ because the two halves stand in different relations to the cache:
   A measurement writes no durable geometry and hides nothing, which the
   function decides itself rather than leaving to its caller.
 
-Composing the two is the host's, exactly as choosing the algorithm is (`dom`'s
-is in `crates/dom/src/layout/host.rs`). Re-hiding an already-hidden child is
+Composing the two is the host's, exactly as choosing the algorithm is (`terminus`'s
+is in `crates/terminus/src/layout/host.rs`). Re-hiding an already-hidden child is
 one state read — `hide_subtree` returns at its `is_hidden()` mark — so the
 per-pass cost of a skipped box is its child count, not its box model.
 
 Which boxes those are is the host's answer, not the engine's:
 `CoreStyle::skips_contents` reads `content-visibility: hidden` off computed
-style by default, and `dom`'s `StyleView` overrides it to fold in the `auto`
-relevance bit as well (`crates/dom/src/layout/relevance.rs`). `containment()`
+style by default, and `terminus`'s `StyleView` overrides it to fold in the `auto`
+relevance bit as well (`crates/terminus/src/layout/relevance.rs`). `containment()`
 needs no override beside it — its own default already runs
 `self.skips_contents()` through `effective_containment`, which is where a
 skipped `auto` box gains `SIZE` and with it relayout-boundary status. The bit
 is determined once per commit, by `Document::render`, against the region the
-paint walk's culling admits (`crates/dom/src/visual/relevance.rs`); a box no
+paint walk's culling admits (`crates/terminus/src/visual/relevance.rs`); a box no
 rendering update has reached yet is undetermined and skips. From the engine's
 side nothing about this is visible: it is one more style answer, and a flip is
 an ordinary invalidation of the flipped node — which clears the cached skipped
@@ -879,8 +879,8 @@ reaches the engine only through `CoreStyle::{contain_intrinsic_width,
 contain_intrinsic_height}`, and `contain_intrinsic_length` reads
 `AutoLength(l)` as `l` and `AutoNone` as no explicit size — so the whole of
 css-sizing-4 §5.2.1's **last remembered size** fits inside those two accessors,
-and the engine needs no vocabulary for it. `dom` overrides them
-(`crates/dom/src/layout/committed_box.rs`): it folds in
+and the engine needs no vocabulary for it. `terminus` overrides them
+(`crates/terminus/src/layout/committed_box.rs`): it folds in
 [csswg-drafts#8407](https://github.com/w3c/csswg-drafts/issues/8407)
 (`content-visibility: auto` behaves as if `auto` were specified), and where the
 result carries `auto` **and the box is currently skipping its contents** it
@@ -889,7 +889,7 @@ skipping therefore keeps its `<length>`, exactly as the spec's `auto` clause
 is worded. The recording side is the host's too, and it lives in the same
 place the algorithms do: after a **committing** run of `compute_layout`, on a
 cache miss, for a box that has the keyword and does *not* have size
-containment, `dom` records that run's own content box (`size − padding −
+containment, `terminus` records that run's own content box (`size − padding −
 border`, unrounded) into a slot-keyed side table on its tree arenas. That
 exclusion is **per axis**, because containment is: under `contain: inline-size`
 the height this run produced is the contents' own and is recorded, while the
@@ -996,7 +996,7 @@ computes to `flex` under the fork's `lynx` grammar (lynx fork `9648159a6`),
 where a browser gives `block`: `flex` is that grammar's block-level container,
 so the root lays out exactly as a `display: flex` root
 (`display_contents_root_blockifies_to_a_flex_container` in
-`crates/dom/tests/layout.rs`). No `lynx` path produces Stylo's internal
+`crates/terminus/tests/layout.rs`). No `lynx` path produces Stylo's internal
 block/flow display, and `display_mode` panics on it rather than treating it as
 a leaf. Inheritance is unaffected — it follows the DOM tree,
 so a text child still reads its box-less parent's font/text values.
@@ -1022,7 +1022,7 @@ their contents. (A definite outer size can also close it,
 but that is a per-`LayoutInput` property, not a style property, so the
 predicate keys off style containment only.)
 
-A **skipped box is that theorem's easiest case**, and `dom`'s ancestor walk
+A **skipped box is that theorem's easiest case**, and `terminus`'s ancestor walk
 parks on one exactly as it parks on `contain: strict`: re-running it is the
 box model it already answered plus the hide sweep, its output is identical by
 construction, and the sweep is the only thing that can answer a box-tree
@@ -1055,7 +1055,7 @@ stacking / overflow-only → no cache work; RELAYOUT → invalidate + re-run;
 reconstruct/`display`/structural mutation → same but start from the mutated
 node's parent) is rustdoc'd on `invalidate` (`crate::invalidate`); it names the
 damage classes conceptually so the engine stays stylo-free. Their upstream
-producer is `dom`'s internal Stylo damage harvest; standalone records stay
+producer is `terminus`'s internal Stylo damage harvest; standalone records stay
 inside crate unit tests.
 
 ## Performance architecture
@@ -1157,11 +1157,11 @@ the painting — layout's job is to never be the frame's bottleneck.
   walks the host-supplied ancestor path and **stops at the nearest relayout
   boundary** (`contain: strict` / skipped `content-visibility`), returning
   the recommended re-layout root, so a dirty leaf inside a contained subtree
-  never invalidates past the boundary. `dom::layout` now drives this
+  never invalidates past the boundary. `terminus::link::layout` now drives this
   end-to-end: the crate-private `Document::invalidate_layout` funnel inlines
   the boundary-stopped ancestor walk (with real parent links, so no re-root
   return value is needed).
-  Every `dom` style harvest classifies internal `StyleDamage` into those calls
+  Every `terminus` style harvest classifies internal `StyleDamage` into those calls
   during `Document::layout`, which re-runs each parked boundary
   via `compute_boundary_relayout` before the root pass. Because it re-runs from
   the document root, a boundary's interior
@@ -1234,7 +1234,7 @@ the painting — layout's job is to never be the frame's bottleneck.
 - **Flex, Grid, grid-lanes, Relative, and Linear benchmarks are landed;
   broader
   performance hardening remains.** The `divan` (CodSpeed-compatible) suite
-  measures CSS-built documents through dom's production host: styles are
+  measures CSS-built documents through terminus's production host: styles are
   flushed outside the timed region, while measured calls enter through
   `Document::layout` and include the real `TreeArenas + DocumentLayoutState`
   protocol,
@@ -1270,7 +1270,7 @@ the painting — layout's job is to never be the frame's bottleneck.
   children, percentage intrinsic sizing, and cross gravity; and Relative
   wrap-width refinement, dependency chains/cycles, duplicate ids, and nesting.
   Five focused Flex shapes now also have their own Hughie-only benchmark target
-  (`hughie_flex`): active growth, wrapping with gaps, grow and shrink freezing,
+  (`seldon_flex`): active growth, wrapping with gaps, grow and shrink freezing,
   and a balanced deep tree. The local Taffy/Yoga/Starlight comparison that
   selected those shapes is summarized in
   [`layout-engine-benchmark-study.md`](layout-engine-benchmark-study.md), but
@@ -1362,13 +1362,13 @@ The automatic minimum size (§4.5, `min-size: auto`) resolves inside steps
 2/4, honoring stylo's `Overflow::is_scrollable`.
 
 **Linear** — Starlight linear layout, as a first-class single-axis pipeline in
-`crates/hughie`:
+`crates/seldon`:
 
 1. **Setup** — resolve the container box and axes, classify hidden,
    out-of-flow, and in-flow children, and stably apply non-zero `order`.
 2. **Item sizing** — resolve each item's box model, preferred/min/max sizes,
    aspect ratio, intrinsic constraints, effective cross gravity, and auto
-   margins through hughie's shared private box arithmetic.
+   margins through seldon's shared private box arithmetic.
 3. **Weight distribution** — when the incoming main-axis constraint has a
    decided size, distribute remaining space among positive `linear-weight`
    items using the explicit positive `linear-weight-sum` denominator when
@@ -1404,9 +1404,9 @@ The automatic minimum size (§4.5, `min-size: auto`) resolves inside steps
 8. **Measure-only path** — return sizes and baselines without durable child
    writes, retaining the same `LayoutInput`/cache semantics as flexbox.
 
-Like Flex and Grid, this is a generic hughie algorithm over
+Like Flex and Grid, this is a generic seldon algorithm over
 `LayoutTree`, a separately borrowed mutable state, and NodeIds, with Linear
-style-view bounds speaking stylo computed values; the concrete `dom` host
+style-view bounds speaking stylo computed values; the concrete `terminus` host
 dispatches to it.
 
 **Grid (L2)** — CSS Grid Level 2 (minus subgrid), as a pipeline:
@@ -1608,7 +1608,7 @@ fragmentation are out of scope; the grammar side of that list is recorded in
   `tests/linear.rs` covers orientation and gravity, weight/sum/freeze, order,
   intrinsic/minmax sizing, measurement, baselines, auto
   margins, absolute/hoisted behavior, and Flex/Grid composition.
-  Codecov reports `hughie`'s line coverage as its own component on every
+  Codecov reports `seldon`'s line coverage as its own component on every
   pull request, with test and benchmark source excluded from the metric
   (`codecov.yml`); CI itself enforces no threshold.
 - **Behavior/performance hardening:** each algorithm has an engine-native
@@ -1624,7 +1624,7 @@ fragmentation are out of scope; the grammar side of that list is recorded in
   static-position export and the common `compute_absolute_layout` completion
   pass. CSS Fixed root lowering, Sticky/list/component metadata, and anonymous
   text-item generation remain host/integration responsibilities and are not
-  hughie behavior contracts.
+  seldon behavior contracts.
 - **Remaining Lynx integration:** runtime-level view/device policy, the
   `<list>` component surface (nothing of it is built — see
   [`tracking/components.md`](tracking/components.md)), and
@@ -1648,20 +1648,20 @@ fragmentation are out of scope; the grammar side of that list is recorded in
   on Grid's own template/line/track-sizing machinery, the `GridLanesStyle`
   bound, `flow-tolerance` and the auto-placement cursor, the stacking pass and
   its content distribution, grid-line-relative absolutes against a two-line
-  stacking axis, and the `dom` dispatch arm. A W3C extension beyond Lynx
+  stacking axis, and the `terminus` dispatch arm. A W3C extension beyond Lynx
   parity ([`style-assumptions.md`](style-assumptions.md) §24), not a Lynx
   feature — do not add the not-implemented parts without a user decision.
 - **L2R — Starlight relative** *(complete)*: the relative style protocol,
   the one-pass combined and two-pass per-axis dependency solvers,
   intrinsic/percentage remeasurement, deterministic cycles, out-of-flow
-  handling, engine-native conformance fixtures, and dom-hosted CodSpeed
+  handling, engine-native conformance fixtures, and terminus-hosted CodSpeed
   benchmarks.
 - **L3 — Starlight modes + runtime integration** *(partial)*: the Lynx-linear
   value and style-view protocol, generic `compute_linear_layout` algorithm,
   unconditional Parley text measurement core, and CSS-containment machinery
   (size/layout containment, `content-visibility` skipped contents, the
   relayout-boundary predicate, and `invalidate_for_relayout`) are complete in
-  `hughie`; `dom` internally harvests per-node `StyleDamage` and owns the
+  `seldon`; `terminus` internally harvests per-node `StyleDamage` and owns the
   `effective_containment` fold as its style-to-layout seam (both kept internal —
   no runtime adapter forwards or re-exports it), and its `layout` module
   now **closes** the damage→layout loop: every style harvest consumes
@@ -1691,7 +1691,7 @@ fragmentation are out of scope; the grammar side of that list is recorded in
   intrinsic keywords.
 - Whether Lynx's legacy `grid-*-span` properties need adapter-side lowering
   beyond `span N` placement (tracking doc says they're superseded aliases).
-- Crate name availability on crates.io (`hughie`) — moot while the
+- Crate name availability on crates.io (`seldon`) — moot while the
   crate depends on the vendored stylo fork (not publishable as-is); recheck
   only if a publishable stylo dependency ever materializes. The protocol
   doesn't depend on the name.

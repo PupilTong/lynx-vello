@@ -9,7 +9,7 @@ the C++ runners, external-engine Rust adapters, result-processing scripts, and
 raw samples are intentionally not checked in.
 
 The repository retains only five standalone Hughie regression cases in the
-`hughie_flex` Cargo benchmark target. Those cases use Hughie's production DOM
+`seldon_flex` Cargo benchmark target. Those cases use Hughie's production DOM
 host and therefore preserve the useful workload shapes without creating a
 test-code dependency on another layout engine. They are not a reproduction of
 the low-level cross-engine timings below.
@@ -90,7 +90,7 @@ The clearest optimization targets are the deep-tree initial path and especially
 deep incremental invalidation/recomputation. The standalone Hughie cases keep
 all five shapes visible in CodSpeed without retaining cross-engine machinery.
 
-Do not compare future `hughie_flex` numbers directly with the tables above.
+Do not compare future `seldon_flex` numbers directly with the tables above.
 The committed target intentionally exercises `Document::layout` through the
 production host, whereas the local study isolated each engine's lower-level
 layout entry. The committed cases are suitable for Hughie before/after

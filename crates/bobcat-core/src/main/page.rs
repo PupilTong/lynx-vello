@@ -159,8 +159,8 @@ use std::future::poll_fn;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use dom::NodeId;
 use rustc_hash::FxHashMap;
+use terminus::link::NodeId;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
@@ -244,7 +244,7 @@ pub(super) struct Page {
     /// because that frame will then never come.
     pending_begin_frame: Cell<Option<u64>>,
     boot_reported: Cell<bool>,
-    /// Whether an entry that will deliver `dom`'s queued
+    /// Whether an entry that will deliver `terminus`'s queued
     /// `contentvisibilityautostatechange` changes is already queued and has
     /// not run yet.
     ///
@@ -254,7 +254,7 @@ pub(super) struct Page {
     /// the two would post one of its own and each would find the batch
     /// already gone. One post per batch.
     content_visibility_posted: Cell<bool>,
-    /// Whether an entry that will deliver the entries `dom`'s intersection
+    /// Whether an entry that will deliver the entries `terminus`'s intersection
     /// observers have queued, and the exposure changes waiting with them,
     /// is already queued and has not run yet — the spec's per-document
     /// `IntersectionObserverTaskQueued` flag, set where it queues the task
@@ -267,7 +267,7 @@ pub(super) struct Page {
     /// between the two would post one more and find the queues already
     /// taken. One post per batch.
     intersections_posted: Cell<bool>,
-    /// Whether an entry that will deliver the entries `dom`'s resize
+    /// Whether an entry that will deliver the entries `terminus`'s resize
     /// observers have queued — the document's `layoutchange` observer's —
     /// is already queued and has not run yet.
     ///
@@ -342,7 +342,7 @@ impl Page {
     /// between delivers nothing.
     ///
     /// **Nothing here enters JavaScript.** The listeners are the engine's own
-    /// components, the walk is `dom`'s, and this entry is a job only because
+    /// components, the walk is `terminus`'s, and this entry is a job only because
     /// *when* it runs is the whole point. It still goes through
     /// [`owner::enter`] rather than a bare job, because everything that
     /// touches this view's document does: one boundary, one epilogue, one
@@ -359,7 +359,7 @@ impl Page {
     /// already is: [`run_job`] catches it, [`owner::trapped`] reports the
     /// `Panicked` and the view ends. There is no per-change
     /// `catch_unwind` — a panicking handler leaves the document unspecified,
-    /// which is `dom`'s own recorded contract for one, and delivering the
+    /// which is `terminus`'s own recorded contract for one, and delivering the
     /// rest of the batch into it would be worse than stopping.
     fn post_content_visibility_changes(self: &Rc<Self>) {
         let page = Rc::clone(self);
@@ -372,7 +372,7 @@ impl Page {
         }));
     }
 
-    /// Queues the entry that delivers what the update just queued on `dom`'s
+    /// Queues the entry that delivers what the update just queued on `terminus`'s
     /// intersection observers, and waits for nothing.
     ///
     /// This is the spec's "queue an intersection observer task"
@@ -388,7 +388,7 @@ impl Page {
     /// in between delivers nothing.
     ///
     /// The loop itself enters no JavaScript: an engine component's observer
-    /// calls its `intersections_changed` hook through `dom::ElementHandler`,
+    /// calls its `intersections_changed` hook through `terminus::link::ElementHandler`,
     /// and an exposure registration's records a change. What enters the
     /// realm is the exposure drain after the loop — each element's
     /// `uiappear`/`uidisappear`, then each element's `bobcat:exposure` record
@@ -398,7 +398,7 @@ impl Page {
     /// listener that throws is nonfatal — `ListenerFailed`, the standing
     /// every listener here has — and the rest is still delivered.
     ///
-    /// One entry for every observer's queue, in creation order: `dom` runs
+    /// One entry for every observer's queue, in creation order: `terminus` runs
     /// the loop and calls each observer's handler. The latch is cleared at
     /// the start, before the loop, as §3.2.5's first step clears the flag:
     /// what a hook's or a listener's own mutation moves is seen by this
@@ -428,7 +428,7 @@ impl Page {
         }));
     }
 
-    /// Queues the entry that delivers what `dom`'s resize observers queued —
+    /// Queues the entry that delivers what `terminus`'s resize observers queued —
     /// the document's `layoutchange` observer's entries
     /// (`crate::main::layout_change`) — and waits for nothing.
     ///
@@ -1402,11 +1402,11 @@ fn absolute_response(url: &str, response: String) -> Result<String, String> {
 /// `local()` is skipped: naming a face already installed on the platform needs
 /// a platform font enumerator this engine does not have, and the native
 /// Harmony loader refuses it too.
-async fn load_font_face(page: Rc<Page>, request: dom::FontFaceRequest) {
-    let dom::FontFaceRequest { family, sources } = request;
+async fn load_font_face(page: Rc<Page>, request: terminus::link::FontFaceRequest) {
+    let terminus::link::FontFaceRequest { family, sources } = request;
     let mut loaded = None;
     for source in sources {
-        let dom::FontFaceSource::Url(url) = source else {
+        let terminus::link::FontFaceSource::Url(url) = source else {
             continue;
         };
         if page.ended() {

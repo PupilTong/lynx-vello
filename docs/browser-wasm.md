@@ -139,7 +139,7 @@ SVG costs the Render Worker its parse time rather than the Worker that runs
 the main-thread script. Nothing reaches the browser's main thread, and no
 bitmap is allocated on the resource side: the Render Worker's
 painter rasterises each vector draw into a texture of its own
-(`crates/dom/src/render/vector_textures.rs`), with the resident textures
+(`crates/terminus/src/render/vector_textures.rs`), with the resident textures
 bounded by a 32 MiB budget on wasm32 (64 MiB natively), and an evicted
 texture is rebaked from the scene the frame carries. All three targets
 therefore render an SVG the same way. The engine's converter does not
@@ -439,7 +439,7 @@ receives (`docs/editable-text-design.md`, E4):
   per update and, at its end, a `finishComposition` when the end's text is
   the last update's, a `commitText` of it otherwise. The Render Worker queues the
   command with the keys and pointers and calls `BobcatRenderer::edit`,
-  which reads it back into `dom::editing::Command` and hands it to
+  which reads it back into `terminus::link::editing::Command` and hands it to
   `LynxView::edit`, dropping it while the view cannot take edits (before
   boot). The textarea's own keys go out as `bobcat-key`, and its handling of
   the keys the engine moves the selection for (arrows, Home, End,

@@ -7,20 +7,20 @@ model: opus
 
 # Text engine (parley integration)
 
-You own `crates/hughie/src/text/` — the Lynx `<text>` block and the standard inline formatting context on parley 0.12 —
-and its wiring: `crates/dom/src/layout/text_block.rs` (`TextBlockStore`),
-`crates/dom/src/paint/text.rs` on the paint side, and
+You own `crates/seldon/src/text/` — the Lynx `<text>` block and the standard inline formatting context on parley 0.12 —
+and its wiring: `crates/terminus/src/layout/text_block.rs` (`TextBlockStore`),
+`crates/terminus/src/paint/text.rs` on the paint side, and
 `crates/bobcat-core/src/main/tree/text.rs`, which turns `<text>` attributes into
 presentational hints. A `<text>` is one flattened paragraph by its element
 kind: `text`, `inline-text` and `inline-truncation` are Lynx text elements
-(`CustomElement::is_lynx_text`), which `dom::layout::display_mode` reads under
+(`CustomElement::is_lynx_text`), which `terminus::link::layout::display_mode` reads under
 every `display` but `none` and `contents`. That says structurally what Lynx
 says by converting every added child, so a `<text>` subtree is inline content
 rather than child boxes.
 
 ## Read first
 
-- `AGENTS.md`: Standards policy, and the `crates/hughie` entry in Crates.
+- `AGENTS.md`: Standards policy, and the `crates/seldon` entry in Crates.
 - `docs/tracking/css-text.md` — the property survey.
 - `docs/tracking/web-text-test-replication.md` — the **status tracker** for the
   ported `lynx-stack` web-platform text tests: which replicas pass, which gaps
@@ -33,7 +33,7 @@ rather than child boxes.
 
 ## Where things are
 
-- `crates/hughie/src/text/paragraph/`: the shared parley paragraph core with
+- `crates/seldon/src/text/paragraph/`: the shared parley paragraph core with
   no Lynx semantics — `content.rs` (white-space normalization, inline atomic
   boxes, the source map), `shape.rs`, `tab.rs`, `position.rs`, `style.rs`
   (`RunStyle` and the run-level values), `memo.rs` (the probe/commit memo),
@@ -45,20 +45,20 @@ rather than child boxes.
   `()` for the Lynx block, never in plain `Flow`/`NormalizedBlock` fields: a
   Lynx `<text>` retains its flow per element, and its size is on the cold
   layout path.
-- `crates/hughie/src/text/inline/`: the CSS block container's inline
+- `crates/seldon/src/text/inline/`: the CSS block container's inline
   formatting context — text runs, non-atomic inline boxes with one
   `InlineFragment` per line (`fragment.rs`), their table (`boxes.rs`) and
   their margin, border and padding as edge clusters with the line-break
   override that keeps them glued to their content (`edge.rs`), atomic inline
   boxes — driven by
-  `crates/dom/src/layout/inline_flow.rs`; its inline boxes paint in
-  `crates/dom/src/paint/walker.rs` (`paint_inline_boxes`).
-- `crates/hughie/src/text/block/`: the Lynx layer on that core — `mod.rs`
+  `crates/terminus/src/layout/inline_flow.rs`; its inline boxes paint in
+  `crates/terminus/src/paint/walker.rs` (`paint_inline_boxes`).
+- `crates/seldon/src/text/block/`: the Lynx layer on that core — `mod.rs`
   (`TextBlock::probe`/`commit`), `style.rs` (`BlockStyle`), `truncate.rs`,
   `range.rs` (`TextBlock::range_boxes`, a source UTF-16 range to per-line
-  boxes). `crates/hughie/src/text/context.rs` and `font.rs` hold
-  `TextContext` and `FontBlob`, both re-exported by `dom`.
-- `LynxTextStyle` (`crates/hughie/src/style/text.rs`, on top of the CSS-only
+  boxes). `crates/seldon/src/text/context.rs` and `font.rs` hold
+  `TextContext` and `FontBlob`, both re-exported by `terminus`.
+- `LynxTextStyle` (`crates/seldon/src/style/text.rs`, on top of the CSS-only
   `TextContainerStyle`) supplies paragraph-wide `text_maxline`/`text_maxlength`,
   defaulting to unlimited.
 - Attribute wiring: `crates/bobcat-core/src/main/tree/text.rs` maps
@@ -116,7 +116,7 @@ Shorthand `lynx/`, `lynx-stack/`, `Paws/`; absolute paths live once in AGENTS.md
   way. Surface a *new* conflict to the **user**; do not pick a side silently.
 - Behavioral compatibility (same wrap points, same truncation, same line counts
   for a width), not identical glyph metrics.
-- Parley trap recorded in `crates/hughie/src/text/paragraph/shape.rs`: never ask
+- Parley trap recorded in `crates/seldon/src/text/paragraph/shape.rs`: never ask
   the breaker whether content remains. It leaves `is_done` false while only an
   empty final line is pending, which misreports fully consumed content as
   overflowing; decide from the captured lines' consumed units instead.
@@ -129,12 +129,12 @@ Shorthand `lynx/`, `lynx-stack/`, `Paws/`; absolute paths live once in AGENTS.md
 - `pnpm install --frozen-lockfile` and
   `pnpm --filter reactlynx-test-fixtures build` before cargo test or clippy.
 - `cargo clippy --all-targets -- -D warnings`.
-- `cargo test -p hughie --test text_block --test web_text_replication`,
-  `cargo test -p dom --test text_screenshots --test web_text_screenshots`, and
+- `cargo test -p seldon --test text_block --test web_text_replication`,
+  `cargo test -p terminus --test text_screenshots --test web_text_screenshots`, and
   `cargo test -p bobcat-core` (the replication suites live in
   `src/main/runtime/web_text_replication.rs` and
   `src/main/tree/web_text_replication.rs`).
-- Screenshot goldens: regenerate with `FLASHBULB_UPDATE_SNAPSHOTS=1` only after
+- Screenshot goldens: regenerate with `PRIME_RADIANT_UPDATE_SNAPSHOTS=1` only after
   looking at the PNG. A newly *created* golden fails its own run by design so an
   unreviewed baseline cannot pass.
 - Keep `docs/tracking/web-text-test-replication.md` in step when you close a gap

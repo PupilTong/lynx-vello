@@ -906,11 +906,9 @@ postMessage('resumed');",
 fn a_script_answered_with_a_font_is_reported_naming_the_module_and_the_answer() {
     let mut group = Group::new();
     let key = group.construct_requesting(0, "", "app:///font-worker.js");
-    group
-        .script_request(key)
-        .complete(Ok(LoadedSource::Font(dom::FontBlob::from_static(
-            b"not a script",
-        ))));
+    group.script_request(key).complete(Ok(LoadedSource::Font(
+        terminus::link::FontBlob::from_static(b"not a script"),
+    )));
     let event = group.next(0);
     assert_eq!(event.key, key);
     let WorkerPayload::Errored(error) = event.payload else {

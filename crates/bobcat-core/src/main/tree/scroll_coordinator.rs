@@ -163,8 +163,8 @@
 //!
 //! The coordinator's component ([`ScrollCoordinator`], defined on
 //! `scroll-coordinator` and `x-foldview-ng`) answers one method through its
-//! [`dom::CustomElement::invoke`], which the runtime's `callElementMethod`
-//! reaches through [`dom::Document::invoke_element_method`]:
+//! [`terminus::link::CustomElement::invoke`], which the runtime's `callElementMethod`
+//! reaches through [`terminus::link::Document::invoke_element_method`]:
 //! `setFoldExpanded({offset, smooth = true})` ([`set_fold_expanded`]), the one
 //! method web-core defines on the coordinator (`XFoldviewNg.ts:63-72`).
 //!
@@ -218,8 +218,8 @@
 //!   toolbar.
 //! - No `scrollbar-width` / `::-webkit-scrollbar` rules (`:13-30`): nothing draws a scrollbar here.
 
-use dom::scroll::ScrollBehavior;
-use dom::{CustomElement, MethodCall, MethodError, MethodOutcome, NodeId, Vector2D};
+use terminus::link::scroll::ScrollBehavior;
+use terminus::link::{CustomElement, MethodCall, MethodError, MethodOutcome, NodeId, Vector2D};
 
 use super::scroll_container::{clamp_to_range, object, offset_px};
 use super::{InvalidParams, LynxDocument, is_truthy};
@@ -296,7 +296,7 @@ x-foldview-ng[header-over-slot]:not([header-over-slot="false"]) > wrapper > x-fo
 /// Installs the coordinator component on both of its tags, as
 /// [`super::viewpager`] installs its one component on its two. Must run
 /// before any element could carry either tag, which is
-/// [`Document::define`](dom::Document::define)'s own precondition.
+/// [`Document::define`](terminus::link::Document::define)'s own precondition.
 pub(super) fn define(document: &mut LynxDocument) {
     document.define(SCROLL_COORDINATOR_TAG, Box::new(ScrollCoordinator));
     document.define(X_FOLDVIEW_TAG, Box::new(ScrollCoordinator));
@@ -349,7 +349,7 @@ impl CustomElement<()> for ScrollCoordinator {
 ///   destructuring default `smooth = true` and its `smooth ? 'smooth' : 'instant'` read it, and as
 ///   iOS's default `YES`. A smooth scroll is animated by the painter and leaves the document's
 ///   offset where it is until the painter posts it back; an instant one moves the document at once.
-///   Either way the request goes through [`dom::Document::scroll_to_with`], the call
+///   Either way the request goes through [`terminus::link::Document::scroll_to_with`], the call
 ///   [`super::scroll_container::scroll_to`] makes, and the call answers at once.
 ///
 /// The painter settles a smooth request's target onto the carrying frame's
@@ -398,10 +398,12 @@ pub(super) fn set_fold_expanded(
 mod tests {
     #![allow(clippy::float_cmp)] // Explicit pixel sizes lay out exactly.
 
-    use dom::scroll::ScrollBehavior;
-    use dom::stylo::properties::PropertyId;
-    use dom::stylo::values::computed::{Display, Overflow};
-    use dom::{MethodCall, MethodError, MethodOutcome, NodeId, StylesheetOrigin, Vector2D};
+    use terminus::link::scroll::ScrollBehavior;
+    use terminus::link::stylo::properties::PropertyId;
+    use terminus::link::stylo::values::computed::{Display, Overflow};
+    use terminus::link::{
+        MethodCall, MethodError, MethodOutcome, NodeId, StylesheetOrigin, Vector2D,
+    };
 
     use super::super::test_support::{
         child, document, element_under, overflow, style_of, with_config,
@@ -1136,7 +1138,7 @@ mod tests {
     }
 
     /// Both coordinator tags match `:defined`, as `scroll-view`'s check in
-    /// `scroll_container` has it. `dom` matches `:defined`
+    /// `scroll_container` has it. `terminus` matches `:defined`
     /// on every element, so this pins the selector's answer, not the
     /// definition; the definition is what `invoke` reaching
     /// `setFoldExpanded` on both tags shows.

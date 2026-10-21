@@ -4,19 +4,19 @@ The repository contains one standards-oriented DOM/CSS core, a rendered
 runtime core, and one Lynx policy layer above them:
 
 ```text
-bobcat-cli ───▶ bobcat-core ───▶ dom ─┬─▶ vendor/stylo
-                     ▲                ├─▶ hughie
+bobcat-cli ───▶ bobcat-core ───▶ terminus ─┬─▶ vendor/stylo
+                     ▲                ├─▶ seldon
    packages/bobcat-element            └─▶ vello/wgpu
    (embedded Element PAPI runtime,
     drives bobcat-core's tree module
     through `bobcat-internal:host` ESM imports)
 ```
 
-`dom` owns the generic document, styling, invalidation, layout seam, visual
+`terminus` owns the generic document, styling, invalidation, layout seam, visual
 order, and private paint pipeline.
 The Lynx runtime element layer is split across the boundary it crosses:
 `bobcat_core::tree` is the native half — Lynx page policy over
-`dom::Document<()>`: view/device configuration and UA defaults — and
+`terminus::link::Document<()>`: view/device configuration and UA defaults — and
 `packages/bobcat-element` is the script half, owning Element-PAPI member
 policy, tag vocabulary, and handle lifecycle, without moving any of those
 concerns into the standards core.
@@ -24,11 +24,11 @@ concerns into the standards core.
 re-exports no DOM/GPU or renderer conveniences.
 `bobcat-cli` is an independent product that embeds `bobcat-core` only through
 the opaque `LynxView` facade and its resource, draw-target, and OS host
-contracts. `dom`'s `render` module remains the internal DOM-free resource/GPU
+contracts. `terminus`'s `render` module remains the internal DOM-free resource/GPU
 floor; `bobcat-core` does not re-export it.
 
 The audited normal-build surface and every test-feature exception are listed
-in [dom-public-api.md](dom-public-api.md).
+in [terminus-link-api.md](terminus-link-api.md).
 See
 [`runtime-architecture.md`](runtime-architecture.md) for the full dependency,
 feature, and frame-flow walkthrough. Decoded `.web.bundle` style ingestion runs
@@ -36,7 +36,7 @@ through the rule-construction seam (`Document::build_style_rule` and friends,
 then `Document::append_rules`); `Document::add_stylesheet` remains the seam for
 CSS supplied as text.
 
-## The dom core: one tree, Document-mediated mutation
+## The terminus core: one tree, Document-mediated mutation
 
 - **One tree, four aligned arenas.** `Document<T>` owns a fixed-address boxed
   `TreeArenas<T>` whose primary `Slab<Node<T>>` selects every `NodeId`: slot
@@ -118,9 +118,9 @@ CSS supplied as text.
 
 | Layer | Owns | Must not own |
 | --- | --- | --- |
-| `dom` | `Document<T>` and its aligned arenas; DOM topology and attributes; private style context and damage harvest; invalidation-carrying mutation; inline parsing; matching, cascade, media evaluation, computed values; the concrete `hughie` host; private visual order, `Painter`, and retained Vello scene; the `ImageStore` contract the embedder implements | Pluggable renderer policy, Lynx tags or Element-PAPI opcodes, JS handle lifetime, payload semantics, `<page>` policy, bundle decoding/`StyleInfo` lowering, Lynx UA defaults, view metrics, GPU surface/window policy |
-| `bobcat-core` | Opaque `LynxView` and `Painter`; injected resource, image-store, draw-target, and OS-input contracts; private Lynx page policy (`page` root, device construction, UA stylesheet); private engine/tree/runtime; the crate-owned QuickJS realm; the native `bobcat-internal:host` ESM and embedded Element PAPI runtime | Re-exporting `dom`, exposing engine/tree/document/realm handles, bundle decoding or config parsing, an element-host trait, matcher/cascade/layout/paint algorithms, public `PaintOrder`, or the PAPI member surface itself (that is `packages/bobcat-element`'s) |
-| `dom::render` (the DOM-free floor) | The `ImageStore` trait an embedder implements; Vello version/re-export boundary; headed/headless GPU submission and readback helpers | `Document`, `NodeId`, computed styles, layout, paint order, Lynx runtime vocabulary, or DOM mutation policy |
+| `terminus` | `Document<T>` and its aligned arenas; DOM topology and attributes; private style context and damage harvest; invalidation-carrying mutation; inline parsing; matching, cascade, media evaluation, computed values; the concrete `seldon` host; private visual order, `Painter`, and retained Vello scene; the `ImageStore` contract the embedder implements | Pluggable renderer policy, Lynx tags or Element-PAPI opcodes, JS handle lifetime, payload semantics, `<page>` policy, bundle decoding/`StyleInfo` lowering, Lynx UA defaults, view metrics, GPU surface/window policy |
+| `bobcat-core` | Opaque `LynxView` and `Painter`; injected resource, image-store, draw-target, and OS-input contracts; private Lynx page policy (`page` root, device construction, UA stylesheet); private engine/tree/runtime; the crate-owned QuickJS realm; the native `bobcat-internal:host` ESM and embedded Element PAPI runtime | Re-exporting `terminus`, exposing engine/tree/document/realm handles, bundle decoding or config parsing, an element-host trait, matcher/cascade/layout/paint algorithms, public `PaintOrder`, or the PAPI member surface itself (that is `packages/bobcat-element`'s) |
+| `terminus::render` (the DOM-free floor) | The `ImageStore` trait an embedder implements; Vello version/re-export boundary; headed/headless GPU submission and readback helpers | `Document`, `NodeId`, computed styles, layout, paint order, Lynx runtime vocabulary, or DOM mutation policy |
 | `vendor/stylo` | CSS grammar, selector/rule-tree/cascade primitives, and the maintained Lynx CSS extension grammar behind the `lynx` feature | Runtime protocol, document ownership, bundle ingestion, or host policy |
 | `packages/bobcat-element` (the script half) | The `__*` Element-PAPI members and their arities; Lynx tag vocabulary; handle identity (one plain object per element, carrying its DOM `NodeId` under a realm-local symbol — web-core's `uniqueIdSymbol` shape); Snapshot property/query policy; realm-local event registration; direct named imports from `bobcat-internal:host`; the element ownership graph (a strong per-handle child set, so a connected element's handle is reachable from the permanent page handle) and the `FinalizationRegistry` drop path (cleanup calls the imported `dropElement` at host job checkpoints, which frees that node alone) | Native-ID validation, style/layout/paint behavior, direct DOM access, event-path construction, or any state the native side must gate presentation on |
 | `bobcat-source` | Bundle and XML decoding; `StyleInfo` lowering into `PreparsedStyleSheet`, including fragment order and css-id guard synthesis (`lower_style`) | Matching, cascade, runtime state, or reading `enableRemoveCSSScope` |
@@ -130,7 +130,7 @@ CSS supplied as text.
 
 1. The realm's boot module constructs a `Document`, whose host member builds
    the page: private `bobcat_core::tree::new_document` constructs a Stylo `Device` and creates
-   `dom::Document<()>` through `Document::new`, out of the ingredients the
+   `terminus::link::Document<()>` through `Document::new`, out of the ingredients the
    view's task staged before the realm opened. Device construction is deliberately outside the
    generic DOM because viewport, pointer, color, font-metric, and `rpx` policy
    belong to the runtime environment.
@@ -139,7 +139,7 @@ CSS supplied as text.
    `Document::add_stylesheet`, or — for CSS a host already parsed — build rules
    with `Document::build_style_rule`/`build_keyframes_rule`/`build_font_face_rule`
    and mount them with `Document::append_rules`. Locks and base URLs still never
-   cross the API: a `dom::CssRule` is opaque and carries the lock that minted
+   cross the API: a `terminus::link::CssRule` is opaque and carries the lock that minted
    it, and `append_rules` rejects a rule built by a different document.
 3. DOM mutation methods record snapshots/restyle hints internally.
    Selector-visible data lives in the real node fields and attribute map.
@@ -153,7 +153,7 @@ CSS supplied as text.
    and then clears Stylo's damage/restyle state. This clearing prevents old
    damage from triggering later no-op traversals.
 6. `Document::layout` then invokes the concrete
-   `hughie` host. Computed values are lent directly from each node's
+   `seldon` host. Computed values are lent directly from each node's
    Stylo `ElementData`, without an adapter-side style copy.
 7. Bobcat's private `Engine` asks the document-owned Painter (through
    the shared document) whether its retained scene is
@@ -192,7 +192,7 @@ What that covers, and what it does not:
 - view metrics and touch-first device construction (`Viewport::device`);
 - Lynx element identity as the DOM `NodeId`, with no separate id space; the
   native host boundary validates live IDs and mutation preconditions so
-  script misuse surfaces as a JavaScript exception before entering `dom`;
+  script misuse surfaces as a JavaScript exception before entering `terminus`;
 - plain JavaScript handle objects minted by the Element PAPI runtime, with
   `FinalizationRegistry` collection as the one way a handle lets go of its
   node (`Document::drop_element`, which frees that node and unlinks its
@@ -240,7 +240,7 @@ What that covers, and what it does not:
   `bobcat-source`'s `lower_style` repeats each selector of a scoped
   fragment's rule once per importing fragment with `:where([l-css-id="N"])`
   at the end of its subject compound, and `__SetCSSId` writes `l-css-id`.
-  `dom` is untouched: stylo's attribute matching and attribute invalidation
+  `terminus` is untouched: stylo's attribute matching and attribute invalidation
   do the scoping. No layer reads `enableRemoveCSSScope`; the entry-name
   guard and parent-component css-id inheritance are deliberately absent
   ([style-assumptions.md](style-assumptions.md) §D.16);
@@ -269,7 +269,7 @@ What that covers, and what it does not:
 
 These remain runtime-layer responsibilities, divided between
 `packages/bobcat-element` policy and `bobcat-core` composition rather than
-absorbed into `dom` or `hughie`.
+absorbed into `terminus` or `seldon`.
 
 ## Invariants
 
@@ -279,23 +279,23 @@ absorbed into `dom` or `hughie`.
 - A successful flush harvests and clears all traversal state it consumed.
 - Relayout damage is converted to layout invalidation during the internal
   harvest, before the style commit proceeds.
-- Standard CSS behavior belongs in `dom`; Lynx-only runtime policy belongs
+- Standard CSS behavior belongs in `terminus`; Lynx-only runtime policy belongs
   above it or in the maintained Stylo fork when it is grammar/value behavior.
 - Element handles wrap raw `NodeId`s in JavaScript; the private host boundary
-  validates live IDs and tree-mutation preconditions before entering `dom`,
+  validates live IDs and tree-mutation preconditions before entering `terminus`,
   and reports stale or fabricated IDs as JavaScript errors.
-- `PaintOrder` and Painter stay inside `dom`; the element layer has no
+- `PaintOrder` and Painter stay inside `terminus`; the element layer has no
   default scene/image/render delegation and builds input frames internally.
-- `dom::render` names no DOM vocabulary: no `Document`, `NodeId`, computed
+- `terminus::render` names no DOM vocabulary: no `Document`, `NodeId`, computed
   styles, layout, or paint order.
 
 ## Validation
 
-- Core tests: `cargo test -p dom`
+- Core tests: `cargo test -p terminus`
 - Element-layer tests: `cargo test -p bobcat-core` and
   `pnpm --filter bobcat-element test`
-- Core benchmarks: `cargo bench -p dom --bench css` and
-  `cargo bench -p dom --bench paint`
+- Core benchmarks: `cargo bench -p terminus --bench css` and
+  `cargo bench -p terminus --bench paint`
 - Workspace checks: `cargo fmt --check`, `cargo clippy --all-targets`, and
   `cargo test --workspace`
 

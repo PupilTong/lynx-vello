@@ -36,14 +36,14 @@ component_management:
         threshold: 1%
         informational: true
   individual_components:
-    - component_id: hughie
-      name: hughie
+    - component_id: seldon
+      name: seldon
       paths:
-        - crates/hughie/**
-    - component_id: dom
-      name: dom
+        - crates/seldon/**
+    - component_id: terminus
+      name: terminus
       paths:
-        - crates/dom/**
+        - crates/terminus/**
     - component_id: bobcat-core
       name: bobcat-core
       paths:
@@ -66,10 +66,10 @@ component_management:
       name: quickjs-rust-bridge
       paths:
         - crates/quickjs-rust-bridge/**
-    - component_id: flashbulb
-      name: flashbulb
+    - component_id: prime-radiant
+      name: prime-radiant
       paths:
-        - crates/flashbulb/**
+        - crates/prime-radiant/**
 
 comment:
   layout: "condensed_header, diff, components"

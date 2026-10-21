@@ -28,11 +28,11 @@ see [F](#f-recorded-deviations-not-gaps); and white space in a `text`, see
 
 | File | Cases | Passing | Gap-ignored |
 | --- | --- | --- | --- |
-| [`crates/hughie/tests/web_text_replication.rs`](../../crates/hughie/tests/web_text_replication.rs) | paragraph algorithm: clamping, cut points, tail fitting, word-break | 19 | 2 |
+| [`crates/seldon/tests/web_text_replication.rs`](../../crates/seldon/tests/web_text_replication.rs) | paragraph algorithm: clamping, cut points, tail fitting, word-break | 19 | 2 |
 | [`crates/bobcat-core/src/main/tree/web_text_replication.rs`](../../crates/bobcat-core/src/main/tree/web_text_replication.rs) | the `<text>` element, its UA sheet and its attributes | 46 | 4 |
 | [`crates/bobcat-core/src/main/runtime/web_text_replication.rs`](../../crates/bobcat-core/src/main/runtime/web_text_replication.rs) | the Element PAPI: content, restyle, truncation, `setNativeProps`, layout events | 17 | 4 |
-| [`crates/dom/tests/web_text_replication.rs`](../../crates/dom/tests/web_text_replication.rs) | relayout, percentage sizing, scroll targets, glyph, atom and inline-background paint | 27 | 0 |
-| [`crates/dom/tests/web_text_screenshots.rs`](../../crates/dom/tests/web_text_screenshots.rs) | golden screenshots — the originals' own oracle, for the cases whose claim is visual | 12 | 0 |
+| [`crates/terminus/tests/web_text_replication.rs`](../../crates/terminus/tests/web_text_replication.rs) | relayout, percentage sizing, scroll targets, glyph, atom and inline-background paint | 27 | 0 |
+| [`crates/terminus/tests/web_text_screenshots.rs`](../../crates/terminus/tests/web_text_screenshots.rs) | golden screenshots — the originals' own oracle, for the cases whose claim is visual | 12 | 0 |
 | [`crates/bobcat-source/tests/web_text_css_replication.rs`](../../crates/bobcat-source/tests/web_text_css_replication.rs) | text CSS across the `.web.bundle` wire | 10 | 0 |
 | **Total** | | **131** | **10** |
 
@@ -58,14 +58,14 @@ twelfth, `inline-text-background`, replicates no original: no web-elements
 fixture puts a background on inline text, so it pins the *behaviour* the
 reference implies instead
 (conflict [8](#8-inline-text-background-geometry)). Refresh with
-`FLASHBULB_UPDATE_SNAPSHOTS=1 cargo test -p dom --test web_text_screenshots`.
+`PRIME_RADIANT_UPDATE_SNAPSHOTS=1 cargo test -p terminus --test web_text_screenshots`.
 
 **A golden is committed only where the frame is right.** Where a case renders
 wrongly today it appears here only if the fixture can be built so the defective
 element is absent; a case whose whole frame is wrong gets no test in that file
 at all, because an `#[ignore]`d screenshot test is self-healing —
 `assert_golden` writes a missing PNG and fails only on that first run
-(`crates/flashbulb/src/golden.rs:100-103`), so the next run would pass against a
+(`crates/prime-radiant/src/golden.rs:100-103`), so the next run would pass against a
 golden of the defect. Those visual claims are carried by `#[ignore]`d metric
 siblings instead.
 
@@ -92,7 +92,7 @@ reads 115 / 12 because later rounds added the screenshots, closed the coverage
 holes below and closed further gaps; the twelve closures are that round's
 engine delta.)
 
-**All twelve trace to one commit**, d19cbea2 *"feat(dom): render element text
+**All twelve trace to one commit**, d19cbea2 *"feat(terminus): render element text
 content and migrate raw-text to CSS" (#227)*, in two clauses:
 
 - `text[text] { content: attr(text); }` added to the UA sheet
@@ -100,8 +100,8 @@ content and migrate raw-text to CSS" (#227)*, in two clauses:
   original assessment**: a `text` attribute written on a `<text>` element used to
   be inert, and since the ReactLynx compiler collapses a static text child into
   exactly that call, a typical card's whole body measured `0×0`. Four closures.
-- The `input.goal.commits()` branch into `hughie::compute::compute_inline_box_layout`
-  (`crates/dom/src/layout/text_block.rs:640-659`) closed the **atom-never-committed**
+- The `input.goal.commits()` branch into `seldon::compute::compute_inline_box_layout`
+  (`crates/terminus/src/layout/text_block.rs:640-659`) closed the **atom-never-committed**
   defect: an atomic inline box used to be laid out under `LayoutInput::measure`,
   which writes no layout, so `place_and_hide` copied an unwritten zero and every
   `<view>`/`<image>` inside a `<text>` ended the pass `0×0`. Eight closures.
@@ -115,8 +115,8 @@ row, since closed by the `inline-truncation` wiring below. None of #211–#226 o
 
 Four rows closed after that re-assessment. Two are written up where the gap
 they closed is listed — the nested-run gradient fill in [D. Paint —
-closed](#d-paint--closed) (#249, one dom row) and the overflow-driven ellipsis
-in [A2](#a-truncation--what-remains-open) (#250, one hughie row, which also
+closed](#d-paint--closed) (#249, one terminus row) and the overflow-driven ellipsis
+in [A2](#a-truncation--what-remains-open) (#250, one seldon row, which also
 re-labelled two `text-maxline="1"` tests GAP → DEVIATION). The third had no row
 of its own to close into, so it is written up here; the fourth — the custom
 `<inline-truncation>` wiring, which closed an [E](#e-absent-surfaces) absent
@@ -128,20 +128,20 @@ after this one to itself.
   surfaces](#e-absent-surfaces). A card-declared family now reaches shaping over
   the seam the rest of the resource system already uses:
   `StyleEngine::take_font_face_requests`
-  (`crates/dom/src/style/engine.rs:209`) reports each `@font-face` rule the
+  (`crates/terminus/src/style/engine.rs:209`) reports each `@font-face` rule the
   stylist collected once, as a family plus its `src` components in author order;
   `Document::take_font_face_requests` / `Document::register_font_face`
-  (`crates/dom/src/layout/mod.rs:213`, `:223`) are the embedder's two calls, and
-  no IO happens in `dom`; the page's epilogue spawns one `load_font_face`
+  (`crates/terminus/src/layout/mod.rs:213`, `:223`) are the embedder's two calls, and
+  no IO happens in `terminus`; the page's epilogue spawns one `load_font_face`
   (`crates/bobcat-core/src/main/page.rs:968`) per request over
   `SourceRequest::Font` (`crates/bobcat-core/src/resource.rs:131`);
   `bobcat-resources` serves that request through the existing transports with no
   charset decode and no UTF-8 check
   (`crates/bobcat-resources/src/sources.rs:267-268`); and
-  `TextContext::register_font_face` (`crates/hughie/src/text/context.rs:76`)
+  `TextContext::register_font_face` (`crates/seldon/src/text/context.rs:76`)
   files the blob under the **declared** family rather than the name inside the
   font file. `a_font_face_declared_family_shapes_the_text_that_names_it`
-  (`crates/dom/tests/web_text_replication.rs:1068`) is no longer `#[ignore]`d and
+  (`crates/terminus/tests/web_text_replication.rs:1068`) is no longer `#[ignore]`d and
   drives the whole seam, standing in for the embedder by reading the `file:` URL
   it was handed off the disk.
 
@@ -152,16 +152,16 @@ after this one to itself.
   | --- | --- |
   | `local()` sources are skipped — naming a platform-installed face needs a font enumerator this engine does not have, and the native Harmony loader refuses it too. They are still *reported*, so an enumerator would only have to change the loader. | `crates/bobcat-core/src/main/page.rs:965-967` |
   | A rule whose every `src` fails is dropped **silently**: nothing is waiting for a declared face, so the runs naming its family keep the fallback they already had. No log — the workspace has no logging facade — and no `EngineEvent`, whose every variant is either fatal or something a realm said. | `crates/bobcat-core/src/main/page.rs:957-963` |
-  | A relative `url()` does not resolve, because a document's base URL is `about:blank` (`crates/dom/src/tree/document.rs:26`) — pre-existing, not introduced here. An unresolved URL serializes empty and is dropped rather than handed to a fetcher that could only fail. | `crates/dom/src/style/engine.rs:135-137` |
-  | Shadow-scoped sheets are not walked: their rules live in a scoped `AuthorStyles` rather than in the stylist's origins, and no scoped sheet in this engine carries an `@font-face` yet. | `crates/dom/src/style/engine.rs:206-208` |
-  | `format()` / `tech()` hints and the matching descriptors (`font-style`, `font-weight`, `font-stretch`, `unicode-range`) are ignored. The first source that loads wins and registers under the declared family, so multiple faces for one family cannot be selected between — the CSS Fonts Level 4 §7 matching that [`css-at-rules.md`](css-at-rules.md) asks for is still absent. | `crates/dom/src/style/engine.rs:94-103`, `crates/hughie/src/text/context.rs:65-72` |
+  | A relative `url()` does not resolve, because a document's base URL is `about:blank` (`crates/terminus/src/tree/document.rs:26`) — pre-existing, not introduced here. An unresolved URL serializes empty and is dropped rather than handed to a fetcher that could only fail. | `crates/terminus/src/style/engine.rs:135-137` |
+  | Shadow-scoped sheets are not walked: their rules live in a scoped `AuthorStyles` rather than in the stylist's origins, and no scoped sheet in this engine carries an `@font-face` yet. | `crates/terminus/src/style/engine.rs:206-208` |
+  | `format()` / `tech()` hints and the matching descriptors (`font-style`, `font-weight`, `font-stretch`, `unicode-range`) are ignored. The first source that loads wins and registers under the declared family, so multiple faces for one family cannot be selected between — the CSS Fonts Level 4 §7 matching that [`css-at-rules.md`](css-at-rules.md) asks for is still absent. | `crates/terminus/src/style/engine.rs:94-103`, `crates/seldon/src/text/context.rs:65-72` |
 
 ### Custom `<inline-truncation>` content, and the `display: contents` wrapper
 
 Closed by *"feat(text): lay an `<inline-truncation>` subtree in at the clamp"*.
-The paragraph algorithm was already complete in `hughie`; what was missing was
+The paragraph algorithm was already complete in `seldon`; what was missing was
 the wiring above it, in two places. The UA sheet gave the tag `display: none`
-with nothing to lift it, and `crates/dom` passed `None` for `TextBlock::new`'s
+with nothing to lift it, and `crates/terminus` passed `None` for `TextBlock::new`'s
 truncation slice.
 
 - `text > inline-truncation { --lynx-inline-truncation: 1; }`
@@ -170,22 +170,22 @@ truncation slice.
   scope by its element kind. That is web-core's scope — `XTextTruncation.ts`
   queries `:scope > inline-truncation` — so a marker written through a wrapper
   or outside a paragraph is hidden (`:not(text) > inline-truncation { display: none; }`).
-- `crates/dom` keys on the flag rather than on the tag
-  (`is_truncation_marker`, `crates/dom/src/layout/text_block.rs:142`), collects
+- `crates/terminus` keys on the flag rather than on the tag
+  (`is_truncation_marker`, `crates/terminus/src/layout/text_block.rs:142`), collects
   the **first** such child's subtree as a second flow
   (`collect_block`, `:160`) and hands it to the paragraph (`:475-476`). The two
   flows share one box-id space, so one measurement pass, one placement pass and
   one fingerprint serve both, and
   `SourceItem::Truncation(i)` resolves through
   `Document::text_block_truncation_sources`
-  (`crates/dom/src/layout/mod.rs:283`, read at
-  `crates/dom/src/paint/text.rs:175`) so the marker paints in its own subtree's
+  (`crates/terminus/src/layout/mod.rs:283`, read at
+  `crates/terminus/src/paint/text.rs:175`) so the marker paints in its own subtree's
   colours.
 
 There is **no `x-show-inline-truncation` counterpart**. web-core lifts the
 `display: none` with that state once a clamp is found to overflow; here the
 child is a text scope unconditionally and `TextBlock::truncation_visible`
-(`crates/hughie/src/text/block/mod.rs:1101`) decides whether its content is laid
+(`crates/seldon/src/text/block/mod.rs:1101`) decides whether its content is laid
 in. The rendering is the same; the state is not observable in the cascade.
 Only the **first** such child is content, matching web-core, which slots only
 the first.
@@ -194,15 +194,15 @@ The same commit closed the `display: contents` wrapper row: `place_and_hide`
 used to hide every consumed child's whole subtree, which zeroed an atom under a
 wrapper and left the wrapper's own slot unwritten, so the rounding walk stopped
 there. A consumed element holding a placed atom now keeps an **empty** layout
-instead of a hidden one (`crates/dom/src/layout/text_block.rs:760,:842-862`),
+instead of a hidden one (`crates/terminus/src/layout/text_block.rs:760,:842-862`),
 which preserves paint order and keeps the walk descending. Four ignored tests
-un-ignored at the tree layer, one at the dom layer, and three new tests added
-(one at the tree layer, two at the dom layer).
+un-ignored at the tree layer, one at the terminus layer, and three new tests added
+(one at the tree layer, two at the terminus layer).
 
 The originals' own oracle for this feature was a picture, so the same commit
 carries one:
 `a_custom_truncation_marker_is_laid_in_at_the_clamp_in_its_own_colour`
-(`crates/dom/tests/web_text_screenshots.rs`) draws both
+(`crates/terminus/tests/web_text_screenshots.rs`) draws both
 `x-text/text-maxline-with-custom-truncation` and its control
 `x-text/text-no-maxline-do-not-show-inline-truncation` in one Ahem frame —
 three kept squares, a red marker square in the fourth, an empty fifth the
@@ -214,7 +214,7 @@ shows no marker at all.
 ### A0. Truncation marker gating — ruled, not a gap
 
 **Ruled (user, 2026-09-14): the engine's gating is the intended behavior.**
-`crates/hughie/src/text/block/truncate.rs:95` (the maxline retreat) and `:135`
+`crates/seldon/src/text/block/truncate.rs:95` (the maxline retreat) and `:135`
 (the `Tail` decision) both guard on `style.overflow == TextOverflow::Ellipsis`.
 `text-overflow`'s initial value is `clip` and the Lynx UA sheet never declares
 it, so a bare `text-maxline` or `text-maxlength` clamps with **no marker**; with
@@ -270,22 +270,22 @@ shared name-keyed dispatcher (user ruling, 2026-09-21), so the reflection is a
 itself (`crates/bobcat-core/src/main/tree/text.rs`, the `Text` component and
 `UA_RULES`);
 `LynxTextStyle::tail_color_convert` reads it back
-(`crates/hughie/src/style/text.rs:67`); `SourceItem::Ellipsis` names the content
-run the dots were shaped in (`crates/hughie/src/text/block/mod.rs:65`), so the
+(`crates/seldon/src/style/text.rs:67`); `SourceItem::Ellipsis` names the content
+run the dots were shaped in (`crates/seldon/src/text/block/mod.rs:65`), so the
 painter resolves them through that run's element and redirects only
 `RunPaint::fill_style` when the block converts
-(`crates/dom/src/paint/text.rs:116`, `:151-187`,
-`crates/dom/src/layout/style.rs:282`).
+(`crates/terminus/src/paint/text.rs:116`, `:151-187`,
+`crates/terminus/src/layout/style.rs:282`).
 
 Tests: `tail_color_convert_reflects_only_the_literal_true`
 (`crates/bobcat-core/src/main/tree/text.rs:386`) pins the reflection,
 `the_truncation_marker_wears_the_cut_run_s_colour_until_the_block_converts`
-(`crates/dom/tests/web_text_replication.rs:260`) pins both painted colours, and
+(`crates/terminus/tests/web_text_replication.rs:260`) pins both painted colours, and
 `the_truncation_tail_keeps_the_cut_run_s_font_under_the_native_default`
-(`crates/hughie/tests/web_text_replication.rs:1523`) pins the geometry the
+(`crates/seldon/tests/web_text_replication.rs:1523`) pins the geometry the
 colour-only rule implies. Its `web-core` twin
 `the_truncation_tail_takes_the_block_style_not_the_cut_runs`
-(`crates/hughie/tests/web_text_replication.rs:1471`) stays `#[ignore]`d and is
+(`crates/seldon/tests/web_text_replication.rs:1471`) stays `#[ignore]`d and is
 now labelled `DEVIATION:` rather than `GAP:`, so the divergence stays visible
 and reversible.
 
@@ -301,12 +301,12 @@ line wider than its measure is cut at the clip edge under
 neither `text-maxline` nor `text-maxlength` takes part, and the clamp path
 never saw the case because the one line had consumed all of its source.
 `TextBlock::overflow_cut`
-([`crates/hughie/src/text/block/mod.rs:778-876`](../../crates/hughie/src/text/block/mod.rs))
+([`crates/seldon/src/text/block/mod.rs:778-876`](../../crates/seldon/src/text/block/mod.rs))
 compares the line's visible advance against the constraint, keeps the widest
 prefix that still leaves room for the dots — shaped once in the run at that
 boundary by `measure_dots` (`:878-899`) — and hands the result to
 `truncate::plan` (`mod.rs:649`) as a third cut candidate beside the two clamps
-(`crates/hughie/src/text/block/truncate.rs:28-40,132-140`), so `ellipsis_count`,
+(`crates/seldon/src/text/block/truncate.rs:28-40,132-140`), so `ellipsis_count`,
 `truncated()` and the existing `CutPlan` path all hold unchanged. With
 truncation content present the cut retreats until the freed width covers it;
 under `text-overflow: clip` nothing is cut and the line simply overflows, which
@@ -317,7 +317,7 @@ line**. A cut drops every line past the one it falls in, which is right for the
 single unbroken line `nowrap` normally produces and wrong for the several a
 preserved newline can still leave, so that shape is left uncut rather than half
 served. `an_overflowing_nowrap_line_is_marked_by_text_overflow_ellipsis`
-(`crates/hughie/tests/web_text_replication.rs:1256-1290`) is un-ignored and
+(`crates/seldon/tests/web_text_replication.rs:1256-1290`) is un-ignored and
 passes.
 
 ### B. Atomic inline boxes — closed
@@ -329,12 +329,12 @@ coordinate system or a box edge that is easy to lose again.
 origin straight into `location`, which every reader takes as relative to the
 establishing element's *border* box: the frame builder adds it to that
 element's own border-box offset (`resolve_child`,
-`crates/dom/src/visual/build.rs:753-762`) while adding the content-box inset
+`crates/terminus/src/visual/build.rs:753-762`) while adding the content-box inset
 only to the glyphs (`push_paragraph`, `:810-815`, and the `DisplayMode::Text`
 branch of `collect_in_context`, `:916-927`). An atom therefore landed short by
 the block's border plus padding — `location == (0,0)` under 10px of padding.
 Placement now converts the space it is given into the space it is read in
-(`crates/dom/src/layout/text_block.rs`, `place_and_hide`): the element's
+(`crates/terminus/src/layout/text_block.rs`, `place_and_hide`): the element's
 content-box origin, plus the paragraph origin, plus the atom's own margin —
 and nothing else, an in-flow atom's `position: relative` insets being ignored
 (see the third defect below). A `display: contents` carrier and a nested text scope both keep
@@ -345,7 +345,7 @@ That fix needed the establishing element's own border and padding *during* its
 own pass, which the element's layout slot cannot supply: a parent writes a
 child's layout only once that child's `compute_layout` has returned, so the
 slot still holds the previous pass's box, or on a first flush none at all.
-`BlockBox` (`crates/dom/src/layout/text_block.rs:544-594`) resolves both from
+`BlockBox` (`crates/terminus/src/layout/text_block.rs:544-594`) resolves both from
 style against the same inline basis the box wrapper used, and takes the size
 from the output the pass just produced. The out-of-flow pass below it was
 reading exactly that stale slot, so **every absolutely positioned child of a
@@ -353,7 +353,7 @@ reading exactly that stale slot, so **every absolutely positioned child of a
 kept that answer for every later one; the same pass was also adding the block's
 border twice to the static position. Both are fixed, and
 `an_out_of_flow_child_of_a_text_resolves_against_the_blocks_padding_box`
-(`crates/dom/tests/web_text_replication.rs`) is the guard.
+(`crates/terminus/tests/web_text_replication.rs`) is the guard.
 
 **B2 is closed**, in two independent halves that the one fixture
 `x-text/inline-image-padding-and-margin` asserts together.
@@ -361,7 +361,7 @@ border twice to the static position. Both are fixed, and
 - *Margin.* Phase 2 of `compute_text_block_layout` used to hand the paragraph
   `output.size`, the atom's border box, so a margin reached neither the advance
   nor the placement. It now hands over the **margin** box
-  (`margin_box`, `crates/dom/src/layout/text_block.rs:593-605`) and placement
+  (`margin_box`, `crates/terminus/src/layout/text_block.rs:593-605`) and placement
   steps the border box back in by the same margins, which are resolved from
   style on the probe and the commit path alike (`:660`) — a measurement writes
   no layout, so a margin read back from a slot would be the previous pass's,
@@ -393,9 +393,9 @@ A third defect was found and closed with them, carried by no `#[ignore]`d test
 because no catalogued fixture covers it: a `position: relative` or `sticky`
 child of a `<text>` was treated as out of flow, so it left the line entirely
 and was laid out by the absolute pass. The paragraph's four position tests are
-now one `out_of_flow` helper (`crates/dom/src/layout/text_block.rs:115-133`),
+now one `out_of_flow` helper (`crates/terminus/src/layout/text_block.rs:115-133`),
 `Absolute | Fixed` only — the split `Document::layout_rect`
-(`crates/dom/src/layout/mod.rs:321-331`) and every hughie algorithm already
+(`crates/terminus/src/layout/mod.rs:321-331`) and every seldon algorithm already
 use. A relative atom advances the line, breaks with it and is placed exactly
 where a static one would be: **its own insets are ignored**, which is a
 native-versus-web-core conflict the user ruled for native on 2026-09-17 and
@@ -410,7 +410,7 @@ a text (`XText/x-text.css:90-93`). A relative *scope* (a nested
 `text`/`inline-text`, or a `display: contents` carrier) generates no box at
 all, so its insets never applied under either rule.
 `a_relative_atom_stays_in_the_line_and_only_absolute_leaves_it`
-(`crates/dom/tests/web_text_replication.rs`) covers all four values and the
+(`crates/terminus/tests/web_text_replication.rs`) covers all four values and the
 ignored inset. Worth knowing: native Lynx's default `position` is `relative`
 (`lynx/core/renderer/starlight/style/default_layout_style.h:65`), where this
 engine's — like web-core's, which declares `position` on `list-item` alone —
@@ -429,21 +429,21 @@ paragraph when that block was the paint root or its own stacking context:
 `build_stacking_context` pushed the paragraph and returned, so an atomic inline
 box or an out-of-flow child inside it was never emitted, while the in-context
 path did descend. It now pushes the paragraph and falls through to the same
-collection walk (`crates/dom/src/visual/build.rs:563-569`), which is also the
+collection walk (`crates/terminus/src/visual/build.rs:563-569`), which is also the
 in-context order — element box, paragraph, then the descent. The glyphs stay
-unique because `collect_child` (`crates/dom/src/visual/build.rs:829-872`) drops
+unique because `collect_child` (`crates/terminus/src/visual/build.rs:829-872`) drops
 text nodes and the layout slots `place_and_hide`
-(`crates/dom/src/layout/text_block.rs:723`) hid, so an absorbed nested scope
+(`crates/terminus/src/layout/text_block.rs:723`) hid, so an absorbed nested scope
 reaches no second record.
 `a_boxed_child_paints_from_a_text_block_that_is_its_own_context`
-(`crates/dom/tests/web_text_replication.rs:1232`) now runs in CI.
+(`crates/terminus/tests/web_text_replication.rs:1232`) now runs in CI.
 
 ### C. Shaping
 
 | # | Gap | Cause |
 | --- | --- | --- |
-| C1 | *Closed by the parley 0.12 upgrade:* a run's `line-height` was taken from the style of the **next** span | Parley 0.11's `shape/mod.rs:127-128` advanced `item.style_index` before flushing the pending item, so the last span's `line-height` governed every line — observed as a truncation flow's `line-height` rewriting lines *before* the cut. Parley 0.12 resolves each span's own box once per layout (`layout/style_metrics.rs`), so `a_runs_line_height_is_not_taken_from_the_span_after_it` (`crates/hughie/tests/web_text_replication.rs`) runs; its second half keeps the defect's own shape under a strut lower than both runs. |
-| C2 | *Ruled, not a gap (user, 2026-10-16):* a `<text>` keeps its leading spaces | A `<text>` does no CSS white-space processing, as on every native backend: its paragraph is built with `WhiteSpaceProcessing::Verbatim` (`crates/hughie/src/text/paragraph/content.rs`), as every Lynx paragraph is, so leading spaces, space runs, tabs and newlines all stay. `collapsible_whitespace_is_removed_at_the_start_of_a_line` keeps asserting web-core's 110 and is ignored as a DEVIATION; `leading_spaces_stay_in_a_text_the_way_native_lynx_keeps_them` asserts the 130 (`crates/hughie/tests/web_text_replication.rs`). The CSS inline formatting context (`hughie::text::inline`) processes with `WhiteSpaceProcessing::Css`, which removes the sequence. See [F](#f-recorded-deviations-not-gaps) and [conflict 9](#9-white-space-in-a-text). |
+| C1 | *Closed by the parley 0.12 upgrade:* a run's `line-height` was taken from the style of the **next** span | Parley 0.11's `shape/mod.rs:127-128` advanced `item.style_index` before flushing the pending item, so the last span's `line-height` governed every line — observed as a truncation flow's `line-height` rewriting lines *before* the cut. Parley 0.12 resolves each span's own box once per layout (`layout/style_metrics.rs`), so `a_runs_line_height_is_not_taken_from_the_span_after_it` (`crates/seldon/tests/web_text_replication.rs`) runs; its second half keeps the defect's own shape under a strut lower than both runs. |
+| C2 | *Ruled, not a gap (user, 2026-10-16):* a `<text>` keeps its leading spaces | A `<text>` does no CSS white-space processing, as on every native backend: its paragraph is built with `WhiteSpaceProcessing::Verbatim` (`crates/seldon/src/text/paragraph/content.rs`), as every Lynx paragraph is, so leading spaces, space runs, tabs and newlines all stay. `collapsible_whitespace_is_removed_at_the_start_of_a_line` keeps asserting web-core's 110 and is ignored as a DEVIATION; `leading_spaces_stay_in_a_text_the_way_native_lynx_keeps_them` asserts the 130 (`crates/seldon/tests/web_text_replication.rs`). The CSS inline formatting context (`seldon::text::inline`) processes with `WhiteSpaceProcessing::Css`, which removes the sequence. See [F](#f-recorded-deviations-not-gaps) and [conflict 9](#9-white-space-in-a-text). |
 
 ### Parley traps, re-checked on 0.12
 
@@ -470,7 +470,7 @@ element's own style, so a solid-coloured block resolved no tile at all and every
 nested run's gradient fell back to a solid fill.
 
 The tile is now per run, because `color` is a per-run property
-(`crates/dom/src/paint/text.rs:107-126`, `:215-269`): the establishing element
+(`crates/terminus/src/paint/text.rs:107-126`, `:215-269`): the establishing element
 keeps its padding box, and a nested element gets the union of its own line
 fragments — each fragment's advance horizontally, its line box vertically. That
 is the area `web-core`'s `color: transparent; background-clip: text` rewrite
@@ -481,7 +481,7 @@ than the ancestor's tile, which is also what `web-core` does:
 applies on every nested `x-text` (`x-text.css:7-31`).
 
 Asserted by `a_gradient_color_on_a_nested_run_fills_only_that_run`
-(`crates/dom/tests/web_text_replication.rs:923`), which was the gap-ignored test
+(`crates/terminus/tests/web_text_replication.rs:923`), which was the gap-ignored test
 for this row and now runs.
 
 A `background-color`/`background-image` on a nested scope used to paint nothing
@@ -493,7 +493,7 @@ is what `web-core` gets by making a nested `x-text`/`inline-text` a
 `display: inline` box (conflict [8](#8-inline-text-background-geometry)).
 Six replicas assert it, from
 `a_nested_scope_s_background_paints_behind_its_own_fragments_only`
-(`crates/dom/tests/web_text_replication.rs`), with the golden
+(`crates/terminus/tests/web_text_replication.rs`), with the golden
 `inline-text-background` beside them.
 
 That ruling narrows one older claim. An `inline-truncation` marker still gets
@@ -509,9 +509,9 @@ cut, past the paragraph, or on the line above it.
 Each blocks replicas that could not be written at all.
 
 - **The `layout` / `layoutchange` event.** *Closed 2026-10-20.* `layoutchange`
-  is delivered over `dom`'s ResizeObserver primitive by the adapter in
+  is delivered over `terminus`'s ResizeObserver primitive by the adapter in
   `crates/bobcat-core/src/main/layout_change.rs`, and a `text`'s `layout` is a
-  component event built from `dom`'s text layout report list and
+  component event built from `terminus`'s text layout report list and
   `Document::text_lines`. `widening_a_text_dispatches_a_layoutchange_carrying_its_geometry`
   and `a_wrapping_text_reports_its_line_count_and_line_ranges` are un-ignored and
   pass; the first now also asserts the `dataset` the detail carries
@@ -524,7 +524,7 @@ Each blocks replicas that could not be written at all.
   are specified but unwritable.
 - **`scrollIntoView`** and its CSSOM-View alignment computation. *Since
   2026-10-10 an entry point exists* (`Document::scroll_into_view`,
-  `crates/dom/src/scroll/into_view.rs:188`, and the `scrollIntoView` UI method
+  `crates/terminus/src/scroll/into_view.rs:188`, and the `scrollIntoView` UI method
   on every element); the replicas have not been written against it yet.
 
 ### F. Recorded deviations, not gaps
@@ -567,7 +567,7 @@ Each blocks replicas that could not be written at all.
   `tail-color-convert` defaults to false; `web-core` inverts that default. The
   full record is [A1](#a1-tail-color-convert--ruled-not-a-gap) above. The
   `web-core` replica `the_truncation_tail_takes_the_block_style_not_the_cut_runs`
-  (`crates/hughie/tests/web_text_replication.rs:1471`) stays `#[ignore]`d and
+  (`crates/seldon/tests/web_text_replication.rs:1471`) stays `#[ignore]`d and
   marked DEVIATION rather than GAP; its passing sibling
   `the_truncation_tail_keeps_the_cut_run_s_font_under_the_native_default` keeps
   the native geometry in CI.
@@ -587,7 +587,7 @@ Each blocks replicas that could not be written at all.
   No fixture pictures this, so there is no `#[ignore]`d `web-core` replica to
   mark DEVIATION; the native rule is asserted positively by
   `a_relative_atom_stays_in_the_line_and_only_absolute_leaves_it`
-  (`crates/dom/tests/web_text_replication.rs`), and reversing the ruling is one
+  (`crates/terminus/tests/web_text_replication.rs`), and reversing the ruling is one
   term in `place_and_hide`.
 - **A baseline-less atom sits with its bottom *margin* edge on the baseline.**
   The one deviation here that runs the other way: **ruled (user, 2026-09-17)
@@ -600,7 +600,7 @@ Each blocks replicas that could not be written at all.
   atom with `margin-bottom: 8px` makes a 68px line here and a 60px one there.
   Asserted by the `.down` block of
   `an_atoms_margins_reach_the_line_and_step_its_border_box_in`
-  (`crates/dom/tests/web_text_replication.rs`); see
+  (`crates/terminus/tests/web_text_replication.rs`); see
   [`deviations.md`](deviations.md).
 - **C2. A `<text>` keeps its white space verbatim.**
   **Ruled (user, 2026-10-16): this engine follows native Lynx here**
@@ -608,7 +608,7 @@ Each blocks replicas that could not be written at all.
   collapsing and stay `#[ignore]`d, marked DEVIATION rather than GAP, each with
   a passing native companion:
   `collapsible_whitespace_is_removed_at_the_start_of_a_line` (companion
-  `leading_spaces_stay_in_a_text_the_way_native_lynx_keeps_them`, hughie),
+  `leading_spaces_stay_in_a_text_the_way_native_lynx_keeps_them`, seldon),
   `a_text_nested_in_a_text_is_an_inline_run_that_scopes_only_its_own_colour`
   (companion `a_nested_text_run_keeps_the_markup_s_newlines_in_a_text`) and
   `adjacent_text_siblings_are_separate_blocks_and_collapse_their_own_newlines`
@@ -638,15 +638,15 @@ failure mode is easy to reintroduce.
   and now asserts the engine's own rule — the child is a text scope either way,
   and the paragraph's two measures are what differ. Its **positive twin**, the
   same paragraph with a `text-maxline` it overflows, is what pins the feature;
-  it and four more replicas (three at the tree layer, one at the dom layer) now
+  it and four more replicas (three at the tree layer, one at the terminus layer) now
   pass, and three further tests were added on top. See
   [Custom `<inline-truncation>` content](#custom-inline-truncation-content-and-the-display-contents-wrapper).
-- **`@font-face` → shaping** is now carried by a test in the dom file — written
+- **`@font-face` → shaping** is now carried by a test in the terminus file — written
   ignored against the gap, un-ignored when the loader seam closed it above — and
   the `bobcat-source` module doc states that its nine green tests cover the wire
   and lowering only.
 - **`scrollIntoView` could not be carried by a test** when this was written.
-  There was no entry point in `crates/dom/src/scroll/`, so a test could only
+  There was no entry point in `crates/terminus/src/scroll/`, so a test could only
   re-implement CSSOM-View inside itself and assert nothing about the engine.
   The entry point now exists (`Document::scroll_into_view`, 2026-10-10), and
   the replicas remain to be written against it; the two
@@ -692,7 +692,7 @@ follows the web form, with the web slow path's 3-unit retreat.
 | --- | --- | --- |
 | native | A BOOL defaulting to **false**: the truncation marker keeps the attributes of the run the cut landed in, and `true` rewrites only its foreground colour | `lynx/js_libraries/types/skills/text.md:71-76`; Android `TextRenderer.convertTailColor`; iOS `LynxTextRenderer.m overrideTruncatedAttrIfNeed` |
 | web-core | Defaults to **true**: the marker is a pseudo-element of the outer box and takes the block's whole style, and `="false"` selects a separate measured path that splices the dots into the cut run | `XTextTruncation.ts:88-104`; `x-text.css:200-241` |
-| lynx-vello | A boolean defaulting to false, converting the fill colour only — **matches native** | `crates/bobcat-core/src/main/tree/text.rs:26-41`; `crates/dom/src/paint/text.rs:151-187` |
+| lynx-vello | A boolean defaulting to false, converting the fill colour only — **matches native** | `crates/bobcat-core/src/main/tree/text.rs:26-41`; `crates/terminus/src/paint/text.rs:151-187` |
 
 **Decided (user, 2026-09-15): native wins.** Absent from the native C++ core, the
 attribute exists only in the Android/iOS shadow nodes; the ruling takes their
@@ -709,7 +709,7 @@ the image's intrinsic size (`css-text.md`).
 
 Native's textra applies `line-height` paragraph-wide; the web applies it
 per-run. This engine follows the web
-(`crates/hughie/src/text/paragraph/style.rs`).
+(`crates/seldon/src/text/paragraph/style.rs`).
 
 ### 6. The `text` attribute with children present
 
@@ -723,7 +723,7 @@ reflects unconditionally. Since #227 this engine follows `web-core`.
 | --- | --- | --- |
 | native | A one-line clamp of the paragraph as it normally wraps: the layout is built at the available width and told to keep one line | Android `TextRenderer.java:181-184,231-245`; iOS `LynxTextRenderer.m:1009-1031` |
 | web-core | A one-line *shape*: `white-space: nowrap` on the inner box and `max-width: -webkit-fill-available` on the host, so the line never breaks and runs to the parent's edge | `x-text.css:216-241` |
-| lynx-vello | Clamped — **matches native** | `crates/hughie/src/text/block/mod.rs` truncation path; the UA sheet declares neither |
+| lynx-vello | Clamped — **matches native** | `crates/seldon/src/text/block/mod.rs` truncation path; the UA sheet declares neither |
 
 **Decided (user, 2026-09-15): the clamp stays.** See
 [F](#f-recorded-deviations-not-gaps).
@@ -734,7 +734,7 @@ reflects unconditionally. Since #227 this engine follows `web-core`.
 | --- | --- | --- |
 | native | Fills the **line box**: an inline `text`'s background is a span over the paragraph's characters, drawn from the line's top to its bottom | Android — `InlineTextShadowNode.buildStyledSpan` attaches a `BackgroundColorSpan` for the colour and a `LynxTextBackgroundSpan` for the image (`platform/android/lynx_android/src/main/java/com/lynx/tasm/behavior/shadow/text/InlineTextShadowNode.java:97-105`), and the latter's `drawBackground` sets the drawable's bounds to `(start, top, end, bottom)` — the line's own top and bottom (`LynxTextBackgroundSpan.java:23-39`). iOS sets `NSBackgroundColorAttributeName` on the attributed string (`platform/darwin/ios/lynx/base/LynxTextStyle.m:269`), which `NSLayoutManager` fills over the line fragment |
 | web-core | The **inline box's** background area, one fragment per line over the font's content area — ascent above the baseline, descent below — because a nested `x-text`/`inline-text` is `display: inline` and the browser paints it as css-backgrounds-3 says | `packages/web-platform/web-elements/src/elements/XText/x-text.css:52-67`, which adds nothing to that but `background-clip: inherit` |
-| lynx-vello | One fragment per line over the content area — **matches web-core** | `crates/dom/src/paint/text.rs`'s `inline_background_fragments`; `crates/dom/src/paint/walker.rs`'s `paint_inline_backgrounds` |
+| lynx-vello | One fragment per line over the content area — **matches web-core** | `crates/terminus/src/paint/text.rs`'s `inline_background_fragments`; `crates/terminus/src/paint/walker.rs`'s `paint_inline_backgrounds` |
 
 **Decided (user, 2026-09-16): inline-text backgrounds are supported, and follow
 web-core.** The observable difference is the half-leading: with `line-height`
@@ -752,7 +752,7 @@ taller atom overflow the band.
 | --- | --- | --- |
 | native | None processed: the string reaches the platform engine as written, so space runs, leading spaces, tabs and newlines all stay; a tab stops every 20px on Android; `white-space` parses as `normal` or `nowrap` only, and under `nowrap` Android deletes everything from the first newline; a newline that ends the text leaves an empty last line in Android's `StaticLayout`, counted in the measured height | `lynx/core/renderer/dom/fiber/raw_text_element.cc:16-46`; `lynx/core/renderer/css/parser/enum_handler.cc:76-89`; Android `BaseTextShadowNode.java:494-498`, `TextRenderer.java:720`, `TextRenderer.java:850-867`; iOS `LynxBaseTextShadowNode.m:240-249`, `LynxTextRenderer.m:1024-1025`; textra `text_layout_textra.cc:569-575` |
 | web-core | css-text-3 in the browser: runs collapse, a space at a line start is removed, and only `raw-text` keeps newlines (`white-space-collapse: preserve-breaks`) | `packages/web-platform/web-elements/src/elements/XText/x-text.css:261-265` |
-| lynx-vello | Verbatim — **matches native** (Android for tabs, the `nowrap` cut and the empty last line) | `WhiteSpaceProcessing::Verbatim` in `crates/hughie/src/text/paragraph/content.rs`, `TabStops::Native` in `crates/hughie/src/text/paragraph/tab.rs`, the UA rule in `crates/bobcat-core/src/main/tree/text.rs` |
+| lynx-vello | Verbatim — **matches native** (Android for tabs, the `nowrap` cut and the empty last line) | `WhiteSpaceProcessing::Verbatim` in `crates/seldon/src/text/paragraph/content.rs`, `TabStops::Native` in `crates/seldon/src/text/paragraph/tab.rs`, the UA rule in `crates/bobcat-core/src/main/tree/text.rs` |
 
 **Decided (user, 2026-10-16): a `text` follows native.** `<markdown>`'s
 paragraphs are standard inline formatting contexts, not `text`, and keep
@@ -796,8 +796,8 @@ unconfirmed (`docs/tracking/deviations.md`, Text layout).
 ## Reproducing
 
 ```bash
-cargo test -p hughie --test web_text_replication
-cargo test -p dom --test web_text_replication
+cargo test -p seldon --test web_text_replication
+cargo test -p terminus --test web_text_replication
 cargo test -p bobcat-source --test web_text_css_replication
 cargo test -p bobcat-core --lib web_text_replication
 ```

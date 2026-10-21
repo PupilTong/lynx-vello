@@ -111,7 +111,7 @@ Shorthand `lynx/`, `lynx-stack/`, `Paws/`; absolute paths live once in AGENTS.md
 - `cargo test -p bobcat-source` and `cargo test -p bobcat-core --test web_bundle`.
 - TypeScript changes: `pnpm test:type` and `pnpm --filter bobcat-element test`.
   Example or Explorer changes: `pnpm build:examples` / `pnpm build:explorer`.
-- Screenshot goldens: `FLASHBULB_UPDATE_SNAPSHOTS=1` only after looking at the
+- Screenshot goldens: `PRIME_RADIANT_UPDATE_SNAPSHOTS=1` only after looking at the
   PNG; a newly created golden fails its own run by design.
 - The PR body needs before/after Mermaid diagrams
   (`.github/pull_request_template.md`, AGENTS.md "Pull-request descriptions")."""

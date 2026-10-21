@@ -32,7 +32,7 @@
 //! inner `scroll-view` at its top edge hands what it cannot take to `#container`, the inner
 //! scroller's flat-tree scroll parent, and the painter holds every container a drag moves until
 //! the release, then glides each to its snap position (`ScrollIntents::settle` in
-//! `crates/bobcat-core/src/paint/lib.rs`).
+//! `crates/terminus/src/painter/mod.rs`).
 //!
 //! # Slot assignment
 //!
@@ -103,9 +103,9 @@
 //! `index.ts:27-29`), none of which reads params, and [`RefreshView`]'s
 //! [`CustomElement::invoke`] answers each with code 0, whatever `params` is and on a view with no
 //! box too. Each is CSSOM-View's "scroll an element into view"
-//! ([`dom::Document::scroll_into_view`]) in the element's nearest scroll container, `#container`:
-//! smooth for the two finishing methods, instant for `autoStartRefresh`. A UI method never
-//! flushes, so the positions are the last completed layout's.
+//! ([`terminus::link::Document::scroll_into_view`]) in the element's nearest scroll container,
+//! `#container`: smooth for the two finishing methods, instant for `autoStartRefresh`. A UI method
+//! never flushes, so the positions are the last completed layout's.
 //!
 //! - `finishRefresh` and `finishLoadMore` ([`finish`]) smoothly scroll `#content` back into view at
 //!   `block: center`. web-core removes `x-magnet-enable` from the first header (footer), and the
@@ -127,7 +127,7 @@
 //!
 //! `autoStartRefresh` is instant where web-core's is smooth. The painter glides a smooth request
 //! to where the frame's at-rest snap rule would settle its target (`apply_request` in
-//! `crates/bobcat-core/src/paint/lib.rs`), and the header is a snap position only once it is at
+//! `crates/terminus/src/painter/mod.rs`), and the header is a snap position only once it is at
 //! least 90% visible. From rest it is not, so a smooth request to it would be settled back to
 //! `#content` and nothing would move. An instant request moves the document at once; the
 //! commit that carries it lays out, which re-samples the header's alignment animation at the new
@@ -156,12 +156,13 @@
 //! path ends at the view's shadow root, which delivers them to the view's
 //! [`CustomElement::handle_event`] in the capture pass; the component takes them when their target
 //! is `#container` and no other node. Each event is queued at the view — not bubbling —
-//! only when a listener on the view registered for its name ([`dom::Document::has_listener`]),
-//! a `{}` detail through [`ComponentEvents::queue`] and the others through
-//! [`ComponentEvents::queue_detailed`]; the latches are recorded whether or not anything listens.
-//! Geometry is the last completed layout's, read at the delivery, and never flushed: the header's
-//! and the footer's rectangles in `#container`'s scroll coordinates ([`rect_in_scroller`]; each is
-//! a box child of `#container` through its `display: contents` slot) and `#container`'s offset.
+//! only when a listener on the view registered for its name
+//! ([`terminus::link::Document::has_listener`]), a `{}` detail through [`ComponentEvents::queue`]
+//! and the others through [`ComponentEvents::queue_detailed`]; the latches are recorded whether or
+//! not anything listens. Geometry is the last completed layout's, read at the delivery, and never
+//! flushed: the header's and the footer's rectangles in `#container`'s scroll coordinates
+//! ([`rect_in_scroller`]; each is a box child of `#container` through its `display: contents` slot)
+//! and `#container`'s offset.
 //!
 //! How far an end shows is native's `pullingPercent`, the length of the end inside the scrollport
 //! over its height: `percent = (header.max_y - offset.y) / header.height` — 1 with the header's
@@ -219,13 +220,13 @@
 
 use std::cell::RefCell;
 
-use dom::event::{ElementEvent, EventPhase};
-use dom::scroll::{
-    ScrollBehavior, ScrollIntoViewContainer, ScrollIntoViewOptions, ScrollLogicalPosition,
-};
-use dom::{CustomElement, MethodCall, MethodOutcome, Node, NodeId, ShadowRootMode};
 use rustc_hash::FxHashMap;
 use smallvec::smallvec;
+use terminus::link::event::{ElementEvent, EventPhase};
+use terminus::link::scroll::{
+    ScrollBehavior, ScrollIntoViewContainer, ScrollIntoViewOptions, ScrollLogicalPosition,
+};
+use terminus::link::{CustomElement, MethodCall, MethodOutcome, Node, NodeId, ShadowRootMode};
 
 use super::scroll_container::{
     SCROLL_END_EVENT, SCROLL_EVENT, rect_in_scroller, rendered_scroll_box,
@@ -321,7 +322,7 @@ const LANDING_TOLERANCE: f64 = 1.0;
 
 /// Installs the `x-refresh-view` component, which queues its events on
 /// `events`. Must run before any element could carry the tag,
-/// [`Document::define`](dom::Document::define)'s own precondition.
+/// [`Document::define`](terminus::link::Document::define)'s own precondition.
 pub(super) fn define(document: &mut LynxDocument, events: ComponentEvents) {
     document.define(
         REFRESH_VIEW_TAG,
@@ -865,10 +866,10 @@ fn slotted(document: &LynxDocument, view: NodeId, name: &str) -> Option<NodeId> 
 mod tests {
     #![allow(clippy::float_cmp)] // Explicit pixel sizes lay out exactly.
 
-    use dom::scroll::ScrollBehavior;
-    use dom::stylo::properties::PropertyId;
-    use dom::stylo::values::computed::Display;
-    use dom::{MethodCall, MethodOutcome, NodeId, StylesheetOrigin, Vector2D};
+    use terminus::link::scroll::ScrollBehavior;
+    use terminus::link::stylo::properties::PropertyId;
+    use terminus::link::stylo::values::computed::Display;
+    use terminus::link::{MethodCall, MethodOutcome, NodeId, StylesheetOrigin, Vector2D};
 
     use super::super::test_support::{
         child, document, element_under, style_of, with_component_events,
@@ -1519,7 +1520,7 @@ mod tests {
 
     // --- the events ---------------------------------------------------------
 
-    use dom::event::EventDetail;
+    use terminus::link::event::EventDetail;
 
     use super::super::scroll_container::tests::{listen, scrolled};
     use super::super::test_support::touched;

@@ -12,7 +12,7 @@ subsystem from scratch in the main thread.
 
 - `lynx-css-engine` — StyleInfo decode/lowering, cascade, computed style,
   selectors, at-rules, UA sheet, the stylo fork's `lynx` grammar.
-- `lynx-layout-engine` — `hughie` and its `dom` host: Flexbox, Grid, Linear,
+- `lynx-layout-engine` — `seldon` and its `terminus` host: Flexbox, Grid, Linear,
   Relative, containment, the positioned pass.
 - `lynx-text-engine` — the `<text>` block on parley: shaping, truncation, fonts.
 - `lynx-render-engine` — stacking, paint order, the vello scene, committed

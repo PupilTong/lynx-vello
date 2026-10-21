@@ -19,7 +19,11 @@ use std::num::NonZeroUsize;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use dom::{FontBlob, FrameImages, ImageInbox, StylePool};
+/// View metrics, copied across the view's one thread boundary: the
+/// presenting painter's own.
+pub(crate) use terminus::link::painter::Viewport;
+pub use terminus::link::painter::{DrawTarget, FrameSize, PainterError, Screenshot, WindowTarget};
+use terminus::link::{FontBlob, FrameImages, ImageInbox, StylePool};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
@@ -31,44 +35,9 @@ pub use crate::main::configure_wasm_workers;
 use crate::main::tree::PageConfig;
 use crate::main::{GroupLink, spawn_group};
 use crate::native_module::{NativeModule, NativeModuleTable};
-pub use crate::paint::WindowTarget;
 use crate::resource::{ResourceFetcher, SourceCompletion, SourceRequest};
 use crate::script::ScriptError;
 use crate::threads::ThreadJoin;
-
-/// View metrics, copied across the view's one thread boundary.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct Viewport {
-    /// Viewport width in CSS pixels.
-    pub width: f32,
-    /// Viewport height in CSS pixels.
-    pub height: f32,
-    /// Physical pixels per CSS pixel.
-    pub device_pixel_ratio: f32,
-}
-
-impl Viewport {
-    /// Creates a viewport with a device-pixel ratio of 1.
-    #[must_use]
-    pub(crate) const fn new(width: f32, height: f32) -> Self {
-        Self {
-            width,
-            height,
-            device_pixel_ratio: 1.0,
-        }
-    }
-
-    /// Returns this viewport with a new device-pixel ratio.
-    #[must_use]
-    pub(crate) const fn with_device_pixel_ratio(mut self, device_pixel_ratio: f32) -> Self {
-        self.device_pixel_ratio = device_pixel_ratio;
-        self
-    }
-
-    pub(crate) fn device(self) -> dom::Device {
-        dom::Device::new(self.width, self.height, self.device_pixel_ratio)
-    }
-}
 
 /// The screen metrics `SystemInfo` reports: `pixelRatio`, `pixelWidth`,
 /// `pixelHeight`.
@@ -111,117 +80,6 @@ impl ScreenMetrics {
         }
     }
 }
-
-/// The physical pixel size of the render target.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct FrameSize {
-    pub width: u32,
-    pub height: u32,
-}
-
-impl FrameSize {
-    /// The physical target a CSS viewport at this device scale needs.
-    ///
-    /// The same computation [`Painter::new`](crate::Painter::new) and
-    /// [`Painter::resize`](crate::Painter::resize) make, exposed because a
-    /// host that owns the surface's backing store — a browser canvas — has to
-    /// size it before it hands a painter a target.
-    ///
-    /// # Errors
-    ///
-    /// [`EngineError::Viewport`] if the metrics are not finite and positive,
-    /// or if the physical target would exceed 16384 pixels on either axis.
-    pub fn for_viewport(
-        width: f32,
-        height: f32,
-        device_pixel_ratio: f32,
-    ) -> Result<Self, EngineError> {
-        if !width.is_finite()
-            || !height.is_finite()
-            || !device_pixel_ratio.is_finite()
-            || width <= 0.0
-            || height <= 0.0
-            || device_pixel_ratio <= 0.0
-        {
-            return Err(EngineError::Viewport(format!(
-                "CSS size and device-pixel ratio must be finite and positive, got \
-                 {width}\u{d7}{height} at {device_pixel_ratio}\u{d7}"
-            )));
-        }
-
-        let physical_width = f64::from(width) * f64::from(device_pixel_ratio);
-        let physical_height = f64::from(height) * f64::from(device_pixel_ratio);
-        if physical_width > f64::from(MAX_RENDER_DIMENSION)
-            || physical_height > f64::from(MAX_RENDER_DIMENSION)
-        {
-            return Err(EngineError::Viewport(format!(
-                "the physical render target may not exceed \
-                 {MAX_RENDER_DIMENSION}\u{d7}{MAX_RENDER_DIMENSION}, got \
-                 {physical_width:.0}\u{d7}{physical_height:.0}"
-            )));
-        }
-
-        #[allow(
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            reason = "finite positive values were bounded to 16384 immediately above"
-        )]
-        Ok(Self {
-            width: physical_width.round().max(1.0) as u32,
-            height: physical_height.round().max(1.0) as u32,
-        })
-    }
-}
-
-/// Where a painter's pixels go, named once and kept for its whole life.
-///
-/// There is no attaching a target later: [`Painter::new`](crate::Painter::new)
-/// builds it, on the thread that will draw into it, before the painter
-/// exists — and a painter then shows whichever views it attaches to through
-/// that one target.
-pub enum DrawTarget {
-    /// A window's presentation stack, built from a `'static` surface target —
-    /// a shared window handle or an owned canvas.
-    Window(WindowTarget),
-    /// A texture the painter owns and nothing displays.
-    /// [`Painter::draw_posted`](crate::Painter::draw_posted) renders into it
-    /// and [`Painter::capture`](crate::Painter::capture) reads it back.
-    ///
-    /// Native only in practice: building one blocks the calling thread on a
-    /// device request, and in a browser that thread is the one whose event
-    /// loop would answer it — so a Wasm painter is refused this target at
-    /// construction rather than hanging on it.
-    Offscreen,
-}
-
-impl DrawTarget {
-    /// A window target, from anything a surface can be built out of.
-    #[must_use]
-    pub fn window(target: impl Into<WindowTarget>) -> Self {
-        Self::Window(target.into())
-    }
-}
-
-// Hand-written: a `SurfaceTarget` carries a window handle or a canvas, and
-// neither is `Debug`. Which target this is, is the whole of what a formatter
-// can honestly say.
-impl fmt::Debug for DrawTarget {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::Window(_) => "DrawTarget::Window",
-            Self::Offscreen => "DrawTarget::Offscreen",
-        })
-    }
-}
-
-const MAX_RENDER_DIMENSION: u32 = 16_384;
-
-/// What a rendered target is identified by: the commit it came from, and
-/// the scroll generation it was composed at.
-///
-/// Images need no term of their own. A load that changes what a frame draws
-/// dirties the document, and every rebuild takes a new commit id.
-pub(crate) type ComposeKey = (u64, u64);
 
 #[derive(Clone, Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -268,6 +126,18 @@ pub enum EngineError {
     /// clash where the view is built is the whole of the resolution.
     #[error("two native modules are named `{0}`")]
     DuplicateNativeModule(String),
+}
+
+/// The presenting painter's failures, one variant each: its metrics, its
+/// GPU work and its rendering.
+impl From<PainterError> for EngineError {
+    fn from(error: PainterError) -> Self {
+        match error {
+            PainterError::Viewport(message) => Self::Viewport(message),
+            PainterError::Gpu(message) => Self::Gpu(message),
+            PainterError::Render(message) => Self::Render(message),
+        }
+    }
 }
 
 /// A view construction or startup failure. Construction reports target,
@@ -434,7 +304,7 @@ pub enum EngineEvent {
     /// input-method query (the candidate window's rectangle, the text around
     /// the caret) from it; the commands it sends back go through
     /// [`LynxView::edit`].
-    TextInputStateChanged(Box<dom::editing::TextInputState>),
+    TextInputStateChanged(Box<terminus::link::editing::TextInputState>),
     /// A realm's console output, delivered to the embedder that owns the view.
     /// `level` is the name of the console method that was called: `"log"`,
     /// `"info"`, `"debug"`, `"warn"` or `"error"`. Reported under the same
@@ -522,22 +392,6 @@ impl fmt::Display for WorkerId {
     }
 }
 
-/// One captured frame: tightly packed RGBA8 pixels at size.
-#[derive(Clone)]
-pub struct Screenshot {
-    pub size: FrameSize,
-    pub pixels: Vec<u8>,
-}
-
-impl fmt::Debug for Screenshot {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("Screenshot")
-            .field("size", &self.size)
-            .finish_non_exhaustive()
-    }
-}
-
 /// Wakes the embedder's thread, which parks on an event loop the engine does
 /// not own.
 ///
@@ -575,14 +429,14 @@ impl EventRequester for NoWakeup {
 /// construction-time choice.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum StyleThreads {
-    /// Stylo's own heuristic for this machine, under [`dom::MAX_STYLE_THREADS`].
+    /// Stylo's own heuristic for this machine, under [`terminus::link::MAX_STYLE_THREADS`].
     /// A machine whose parallelism the platform cannot answer for — Wasm,
     /// where the embedder passes it to [`StyleThreads::for_parallelism`]
     /// instead — resolves to [`StyleThreads::Sequential`].
     #[default]
     Auto,
     /// Exactly this many threads, `bobcat-main` included, so `Fixed(3)` is
-    /// the group's `bobcat-main` and two more. More than [`dom::MAX_STYLE_THREADS`] is a
+    /// the group's `bobcat-main` and two more. More than [`terminus::link::MAX_STYLE_THREADS`] is a
     /// construction error rather than a silent clamp: Stylo indexes its
     /// per-traversal thread-local storage by rayon thread index into an
     /// array that long.
@@ -932,7 +786,7 @@ impl LynxGroup {
     ) -> Result<LynxView<F>, LynxViewError>
     where
         F: ResourceFetcher + 'static,
-        B: FnOnce(dom::ImageReports) -> F,
+        B: FnOnce(terminus::link::ImageReports) -> F,
     {
         // Read once, before anything is sent: the table is what crosses, and
         // the modules themselves stay here.
@@ -953,7 +807,7 @@ impl LynxGroup {
         // containers cannot serve the family it named will never render, and
         // the requests below go out in this same call, so a check made
         // anywhere later would already be behind them. It needs no document —
-        // fonts and the default family are a `dom::TextContext`'s business,
+        // fonts and the default family are a `terminus::link::TextContext`'s business,
         // and a document only ever adopts a finished one.
         let default_font_family = sources.default_font_family.take();
         let text_context = stage_text_context(
@@ -1296,7 +1150,7 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
     ///
     /// Returns [`EngineError::NotReady`] before MTS boot is observed or after
     /// the view ends, like the page updates; the command is not queued.
-    pub fn edit(&self, command: dom::editing::Command) -> Result<(), EngineError> {
+    pub fn edit(&self, command: terminus::link::editing::Command) -> Result<(), EngineError> {
         if !self.is_ready() {
             return Err(EngineError::NotReady);
         }
@@ -1581,7 +1435,7 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
     }
 
     /// The newest committed frame this view has published.
-    pub(crate) fn published_frame(&mut self) -> Option<Arc<dom::CommittedFrame>> {
+    pub(crate) fn published_frame(&mut self) -> Option<Arc<terminus::link::CommittedFrame>> {
         self.frames.borrow_and_update().frame.clone()
     }
 }
@@ -1605,7 +1459,7 @@ pub(crate) struct ViewAttachment {
     /// This view's fonts and default family, already registered and
     /// validated on the embedder's thread. `None` is a view that named
     /// neither, which leaves the document's own lazy context alone.
-    pub(crate) text_context: Option<dom::TextContext>,
+    pub(crate) text_context: Option<terminus::link::TextContext>,
     /// The answers to the requests `create_lynx_view` already made.
     pub(crate) startup: StartupSources,
     /// The embedder's native modules as the BTS realm hears about them: one
@@ -1724,7 +1578,7 @@ pub(crate) fn resolve_startup_urls(sources: &mut ViewSources) -> Result<url::Url
 /// document exists and before anything has been fetched.
 ///
 /// Neither needs a document: fonts and the default family are a
-/// [`TextContext`](dom::TextContext)'s business, and a document only ever
+/// [`TextContext`](terminus::link::TextContext)'s business, and a document only ever
 /// adopts a finished one. Running it here, in `create_lynx_view`, is what
 /// keeps a family nothing provides a zero-fetch failure — the startup
 /// requests go out in that same call, so there is no later point at which
@@ -1737,11 +1591,11 @@ fn stage_text_context(
     fonts: Vec<FontBlob>,
     default_font_family: Option<&str>,
     fallback_fonts: Vec<FontBlob>,
-) -> Result<Option<dom::TextContext>, LynxViewError> {
+) -> Result<Option<terminus::link::TextContext>, LynxViewError> {
     if fonts.is_empty() && default_font_family.is_none() && fallback_fonts.is_empty() {
         return Ok(None);
     }
-    let mut text = dom::TextContext::new();
+    let mut text = terminus::link::TextContext::new();
     for font in fonts {
         text.register_fonts(font);
     }

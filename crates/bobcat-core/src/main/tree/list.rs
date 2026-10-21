@@ -14,7 +14,7 @@
 //! The component ([`List`]) adds five of the methods Lynx documents for the
 //! tag (lynxjs.org/api/elements/built-in/list), which the runtime's
 //! `callElementMethod` reaches through
-//! [`dom::Document::invoke_element_method`]: `scrollToPosition`
+//! [`terminus::link::Document::invoke_element_method`]: `scrollToPosition`
 //! ([`scroll_to_position`]), `scrollBy` and `autoScroll` (`scroll-view`'s
 //! own, [`super::scroll_container::scroll_by`] and
 //! [`super::scroll_container::auto_scroll`], on the list's axis),
@@ -89,7 +89,7 @@
 //!   is JavaScript-positioned and never a grid at all. Here the reset is load-bearing rather than
 //!   cosmetic: `grid-lanes` reads the *absence* of a column template as the statement that the
 //!   block axis carries the tracks (css-grid-3 §2.3's initial `grid-auto-flow: normal` behaviour,
-//!   `crates/hughie/src/compute/grid/lanes.rs:535-547`), so without it a horizontal waterfall would
+//!   `crates/seldon/src/compute/grid/lanes.rs:535-547`), so without it a horizontal waterfall would
 //!   stack downwards.
 //! - **`waterfall` is `display: grid-lanes`, not absolutely positioned cells.** web-core computes
 //!   the staggered placement in JavaScript and writes `left`/`top` onto absolutely positioned cells
@@ -129,14 +129,16 @@
 //! its style transformer renames the Lynx-only `list-main-axis-gap` /
 //! `list-cross-axis-gap` properties into custom properties; neither property
 //! exists in this engine's grammar, pinned by `list_main_axis_gap_is_absent`
-//! (`crates/dom/tests/grammar_layout.rs:342-351`), so there is nothing to
+//! (`crates/terminus/tests/grammar_layout.rs:342-351`), so there is nothing to
 //! rename and the real gap properties are what an author writes.
 
-use dom::event::ElementEvent;
-use dom::scroll::{ScrollBehavior, ScrollBox};
-use dom::stylo::values::computed::Display;
-use dom::{CustomElement, MethodCall, MethodError, MethodOutcome, NodeId, Rect, Size2D, Vector2D};
 use serde_json::{Map, Value};
+use terminus::link::event::ElementEvent;
+use terminus::link::scroll::{ScrollBehavior, ScrollBox};
+use terminus::link::stylo::values::computed::Display;
+use terminus::link::{
+    CustomElement, MethodCall, MethodError, MethodOutcome, NodeId, Rect, Size2D, Vector2D,
+};
 
 use super::scroll_container::{
     LOWER_THRESHOLD, SCROLL_EVENT, ScrollEdges, UPPER_THRESHOLD, Zones, along, auto_scroll,
@@ -253,7 +255,7 @@ const LOWER_THRESHOLD_ITEM_COUNT: &str = "lower-threshold-item-count";
 
 /// Installs the `list` component, which queues its threshold events on
 /// `events`. Must run before any element could carry the tag, which is
-/// [`Document::define`](dom::Document::define)'s own precondition.
+/// [`Document::define`](terminus::link::Document::define)'s own precondition.
 pub(super) fn define(document: &mut LynxDocument, events: ComponentEvents) {
     document.define(
         LIST_TAG,
@@ -410,7 +412,7 @@ fn overlaps_scrollport(
 fn generates_box(document: &LynxDocument, cell: NodeId) -> bool {
     document
         .get(cell)
-        .and_then(dom::Node::computed_style)
+        .and_then(terminus::link::Node::computed_style)
         .is_some_and(|style| {
             let display = *style.get_display();
             display != Display::None && display != Display::Contents
@@ -458,8 +460,8 @@ enum AlignTo {
 ///   to both axes (`XList.ts:84-87`).
 /// - `smooth` is read with JavaScript truthiness, as web-core's `smooth ? 'smooth' : 'auto'` reads
 ///   it, and a missing one is `false` (Android's default). A smooth scroll is the painter's to
-///   animate; an instant one moves the document at once ([`dom::Document::scroll_to_with`]). Either
-///   way the call answers at once.
+///   animate; an instant one moves the document at once
+///   ([`terminus::link::Document::scroll_to_with`]). Either way the call answers at once.
 ///
 /// The params are read in full before any box is looked at. Then a list
 /// with no box, or that is no scroll container, or a cell with no box (any
@@ -674,11 +676,11 @@ fn cells_record(cells: &[VisibleCell]) -> String {
 mod tests {
     #![allow(clippy::float_cmp)] // Ahem and explicit lane sizes have exact metrics.
 
-    use dom::scroll::ScrollBehavior;
-    use dom::stylo::computed_values::{flex_direction, linear_direction};
-    use dom::stylo::properties::PropertyId;
-    use dom::stylo::values::computed::{Display, Overflow};
-    use dom::{MethodCall, MethodError, MethodOutcome, NodeId, Rect, Size2D, Vector2D};
+    use terminus::link::scroll::ScrollBehavior;
+    use terminus::link::stylo::computed_values::{flex_direction, linear_direction};
+    use terminus::link::stylo::properties::PropertyId;
+    use terminus::link::stylo::values::computed::{Display, Overflow};
+    use terminus::link::{MethodCall, MethodError, MethodOutcome, NodeId, Rect, Size2D, Vector2D};
 
     use super::super::scroll_container::tests::{heard, listen, scrolled};
     use super::super::scroll_container::{SCROLL_TO_LOWER_EVENT, SCROLL_TO_UPPER_EVENT};
@@ -691,7 +693,7 @@ mod tests {
         visible_cells,
     };
 
-    const AHEM: &[u8] = include_bytes!("../../../../hughie/tests/fixtures/Ahem.ttf");
+    const AHEM: &[u8] = include_bytes!("../../../../seldon/tests/fixtures/Ahem.ttf");
 
     /// A 200x200 list under the page, with the font every cell's label is
     /// measured in already registered.
@@ -702,7 +704,10 @@ mod tests {
     /// browser.
     fn list_page(style: &str) -> (LynxDocument, NodeId) {
         let mut document = document();
-        assert_eq!(document.register_fonts(dom::FontBlob::from_static(AHEM)), 1);
+        assert_eq!(
+            document.register_fonts(terminus::link::FontBlob::from_static(AHEM)),
+            1
+        );
         let list = child(&mut document, "list", style);
         (document, list)
     }
@@ -1132,7 +1137,7 @@ mod tests {
         );
     }
 
-    /// A full-span waterfall cell is a definite span, which hughie's lanes
+    /// A full-span waterfall cell is a definite span, which seldon's lanes
     /// honour: it starts below the longest lane and leaves all of them level.
     #[test]
     fn a_full_span_waterfall_cell_levels_every_lane() {
@@ -1889,7 +1894,10 @@ mod tests {
             id: id.to_owned(),
             item_key: item_key.to_owned(),
             index,
-            rect: Rect::new(dom::Point2D::new(x, y), Size2D::new(width, height)),
+            rect: Rect::new(
+                terminus::link::Point2D::new(x, y),
+                Size2D::new(width, height),
+            ),
         }
     }
 

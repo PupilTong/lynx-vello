@@ -82,7 +82,7 @@ export default defineConfig({
           {
             from: path.resolve(
               packageDirectory,
-              '../hughie/tests/fixtures/Roboto-Regular.ttf',
+              '../seldon/tests/fixtures/Roboto-Regular.ttf',
             ),
             to: 'Roboto-Regular.ttf',
             info: { minimized: true },

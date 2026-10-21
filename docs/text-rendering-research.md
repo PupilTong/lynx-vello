@@ -1,6 +1,6 @@
 # High-performance DOM text rendering on wgpu/vello
 
-Research note, 2026-07-28; paths updated after painting moved into `dom`.
+Research note, 2026-07-28; paths updated after painting moved into `terminus`.
 Scope: how DOM's private painter should paint text nodes at speed, what the
 wgpu/Vello ecosystem offers, and what — if anything — we should adopt. Every
 claim about a crate here was read out of that crate's source at the version
@@ -31,7 +31,7 @@ COLR glyphs are untouched.
 
 ## Short answer
 
-Painting glyphs *correctly* is done: `dom::paint::text` already drives
+Painting glyphs *correctly* is done: `terminus::paint::text` already drives
 `Scene::draw_glyphs` from retained Parley layouts, with synthesis, decorations,
 shadow and stroke passes. Painting them *cheaply* is not, and it cannot be
 fixed inside vello 0.9.
@@ -58,7 +58,7 @@ beta. The compatibility facts are unusually favourable when that day comes
 
 ## 1. What DOM's painter does today
 
-`crates/dom/src/paint/text.rs` walks each committed Parley layout's lines →
+`crates/terminus/src/paint/text.rs` walks each committed Parley layout's lines →
 `PositionedLayoutItem::GlyphRun`, and per run calls `Scene::draw_glyphs` with
 the run's font, size, normalized coords, synthesis and brush. Decorations,
 `text-shadow` and `text-stroke` are extra passes over the same silhouette.
@@ -161,7 +161,7 @@ Framed as a taxonomy, so the options in §5 can be scored against it.
 | 2 | Outline → path | Re-walking `skrifa` outlines | ✓ | ✓ | ✓ |
 | 3 | Rasterized coverage | Re-rasterizing pixels | ✗ | ✓ | ✓ |
 
-We already have #1, from `dom`'s retained `TextLayout`. We get #2 free from
+We already have #1, from `terminus`'s retained `TextLayout`. We get #2 free from
 vello. **#3 is the missing one**, and it is the only one that scales with the
 number of glyphs actually on screen rather than the number of distinct glyphs.
 
@@ -213,11 +213,11 @@ Honest assessment: **there is almost nothing to win.**
 - `hint(false)` is already correct for our arbitrary transforms; turning hinting
   on would force the uniform-scale-only path in `resolve_patches`, buy nothing on
   a hidpi target, and make the cache key DPR-dependent for good measure.
-- Culling off-screen text before encoding is real but is a `dom`/paint-order
+- Culling off-screen text before encoding is real but is a `terminus`/paint-order
   concern, not a text concern.
 
 The one genuinely useful thing to do inside this option is **add a text
-benchmark** so that any future change has a before. `crates/dom/benches/paint.rs`
+benchmark** so that any future change has a before. `crates/terminus/benches/paint.rs`
 currently benchmarks a card page with no text at all, and it measures only the
 CPU encode — the half that turned out not to matter.
 
@@ -250,7 +250,7 @@ than one would expect.
 - Beta quality, by the maintainers' own description, and glifo is 0.1.x with
   "in development" on the tin.
 - It is a second renderer to keep conformant. Every golden in
-  `crates/dom/tests/screenshots/` is a vello-0.9 rasterization; a switch
+  `crates/terminus/tests/screenshots/` is a vello-0.9 rasterization; a switch
   re-baselines all of them, and the screenshot harness deliberately has no
   per-backend golden suffix.
 
@@ -289,7 +289,7 @@ maintained, ~1.08 M downloads.
 
 `glyphon` is built on `cosmic-text`, not Parley. We would be running two
 font-matching and shaping engines with two different sets of metrics, against a
-layout engine (`hughie`) whose closed leaf model is explicitly Parley. Text
+layout engine (`seldon`) whose closed leaf model is explicitly Parley. Text
 measured by one and painted by the other is a conformance bug generator. Its
 WGPU 30 dependency no longer aligns with this workspace's WGPU 29, so version
 skew is once again an independent blocker as well.
@@ -344,11 +344,11 @@ neighbouring glyph's pixels bleed in at strip-rasteriser overshoot.
 ## 7. Recommendation
 
 **Landed with this research:** the text screenshot goldens
-(`crates/dom/tests/text_screenshots.rs`), so any renderer or
+(`crates/terminus/tests/text_screenshots.rs`), so any renderer or
 atlas change has a reviewable visual before.
 
 **Not done, and the one thing worth doing next:** a **text** case in
-`crates/dom/benches/paint.rs` — and more importantly a GPU-side timing
+`crates/terminus/benches/paint.rs` — and more importantly a GPU-side timing
 harness, since §2 shows the existing CPU-only bench measures the half that does
 not matter. The §2 table came from a throwaway scaffold that was deleted; it
 should be a committed benchmark before anyone acts on it.

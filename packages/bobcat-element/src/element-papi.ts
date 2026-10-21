@@ -4261,7 +4261,7 @@ function dispatchEvent(
     // A non-bubbling event binds on its at-target steps alone — the target,
     // and any shadow host retargeting made stand in for it, which is the same
     // set the host would have sent had it built a non-bubbling path itself
-    // (`dom`'s `event_steps` keeps exactly the at-target entries). web-core,
+    // (`terminus`'s `event_steps` keeps exactly the at-target entries). web-core,
     // which has no retargeting to carry, narrows to the path's first entry.
     runPass(
       bubbles ? steps : steps.filter((step) => step.node === step.target),

@@ -3,7 +3,7 @@
 The `bobcat-cli` crate with feature `cli` builds the `bobcat` executable. It accepts either a local Lynx
 `.web.bundle` or a raw Lynx XML source document as a `file:///` URL and
 privately composes `bobcat-core/quickjs` →
-`dom`/`hughie`. The CLI is an independent product;
+`terminus`/`seldon`. The CLI is an independent product;
 its renderer is not exported from `bobcat-core` as an embedder façade.
 
 ```sh

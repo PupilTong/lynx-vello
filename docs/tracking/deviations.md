@@ -55,11 +55,11 @@ consequential choice about whether to follow the spec or the quirk.
   ruling, 2026-10-16)** — css-flexbox-1 §4 and css-grid-1 §6 wrap each
   contiguous sequence of a container's child text in an anonymous block
   container that is one item, and render nothing for a white-space-only
-  sequence. `dom` builds those boxes (`crates/dom/src/tree/anonymous.rs`)
+  sequence. `terminus` builds those boxes (`crates/terminus/src/tree/anonymous.rs`)
   for `flex`, `grid` and `grid-lanes` and, by ruling, for Lynx's `linear`
   and `relative`, which have no such rule of their own; each box is a
   `(block, flow)` block container laid out as a CSS inline formatting context
-  (`crates/dom/src/layout/inline_flow.rs`), never a Lynx text
+  (`crates/terminus/src/layout/inline_flow.rs`), never a Lynx text
   paragraph. On the Lynx side a `raw-text` renders as such text inside a tag
   that is not a Lynx tag (`div`, `span`, any other name), directly or
   through one `wrapper` (`crates/bobcat-core/src/main/tree/raw_text.rs`).
@@ -83,7 +83,7 @@ consequential choice about whether to follow the spec or the quirk.
   - a hit on the text targets the container, as a hit on a paragraph
     targets its element;
   - `linear` measures items at max-content on its main axis
-    (`crates/hughie/src/compute/linear.rs`), so text there does not wrap.
+    (`crates/seldon/src/compute/linear.rs`), so text there does not wrap.
 - **`overflow: auto` omitted** — CSS has it; this engine does not.
   **Decision (user, 2026-07-29): leave it out.** Nothing here paints
   scrollbars, so `auto` ("scrollbars only when needed") would behave exactly
@@ -103,7 +103,7 @@ consequential choice about whether to follow the spec or the quirk.
   container that itself scrolls
   ([csswg-drafts#9194](https://github.com/w3c/csswg-drafts/issues/9194),
   open); this engine does the same (`item_end_margin`,
-  `crates/hughie/src/compute/util.rs`), for Linear and Relative items too.
+  `crates/seldon/src/compute/util.rs`), for Linear and Relative items too.
   Details in [layout-architecture.md](../layout-architecture.md).
 - **`box-sizing` default** — Lynx defaults to `border-box`; CSS defaults to
   `content-box`. **Decision: match Lynx's default**, same reasoning as
@@ -127,7 +127,7 @@ consequential choice about whether to follow the spec or the quirk.
   native model. This engine says it structurally too: `text`, `inline-text`
   and `inline-truncation` are Lynx text elements by their definition
   (`CustomElement::is_lynx_text`, read once by `Document::define` and kept on
-  each element from its creation), and `dom::layout::display_mode` lays one
+  each element from its creation), and `terminus::link::layout::display_mode` lays one
   out as one flattened Lynx paragraph, or as a nested text scope of the
   paragraph around it, under every computed `display` but `none` and
   `contents`. Its subtree is inline content — runs, nested text scopes,
@@ -142,7 +142,7 @@ consequential choice about whether to follow the spec or the quirk.
   slot during style application, so a logical and physical declaration that
   target the same side are last-applied-wins. The stylo fork currently models
   the four logical variants as independent longhands, which discards that
-  cross-property source order before `hughie` lowers them. The current
+  cross-property source order before `seldon` lowers them. The current
   bridge consequently uses physical-wins-unless-sentinel. Direction comes
   from the item itself and the LTR/RTL mapping is otherwise exact. Exact
   bucket-2 parity requires changing the fork declarations into a true
@@ -170,7 +170,7 @@ consequential choice about whether to follow the spec or the quirk.
 - **css-anchor-position-1 (user-directed extension, 2026-09-29/30)** —
   neither native Lynx nor web-core has the module (web-core leaves it to the
   browser, so a web bundle gets Chrome's behaviour); this engine implements
-  the Editor's Draft in `hughie` and `dom`
+  the Editor's Draft in `seldon` and `terminus`
   ([style-assumptions.md](../style-assumptions.md) §28). What a page can
   observe differently from Chrome or from the ED:
   - **`position-visibility` is a paint-time flag.** A hidden box draws
@@ -233,7 +233,7 @@ consequential choice about whether to follow the spec or the quirk.
     back to end at the padding edge; WPT `grid-position-area-basic.html`'s
     reference leaves it overflowing (unverified in browsers).
 - **`first baseline` / `last baseline` self-alignment (user rulings,
-  2026-10-16 and 2026-10-17)** — `hughie` aligns flex and grid items by
+  2026-10-16 and 2026-10-17)** — `seldon` aligns flex and grid items by
   their last baselines (css-align-3 §9.3; css-flexbox-1 §8.3, §9.4 step 8
   and §8.5; css-grid-1 §10.6 and §11.5 step 1), and every box reports
   `LayoutOutput::last_baselines` beside its first baselines. The stylo
@@ -249,7 +249,7 @@ consequential choice about whether to follow the spec or the quirk.
   `first baseline` serializes as `baseline` (css-align-3 §4.2) and has to
   parse back — is a native-vs-web difference resolved toward web-core.
   `last_baseline_lines_anonymous_text_up_on_its_last_line` in
-  `crates/dom/src/tree/anonymous.rs` drives both through anonymous text
+  `crates/terminus/src/tree/anonymous.rs` drives both through anonymous text
   items. What is decided:
   - **Where a group sits in its flex line (user ruling, 2026-10-17: as
     browsers do).** The first-baseline group sits against the line's
@@ -279,8 +279,8 @@ consequential choice about whether to follow the spec or the quirk.
     `last baseline`: its own start or end edge, by its own `direction`, and
     the container's start edge once it overflows the line. Flex and grid
     both do this (`item_alignment_offset` in
-    `crates/hughie/src/compute/flexbox.rs` and
-    `crates/hughie/src/compute/grid/alignment.rs`). In flex this replaced
+    `crates/seldon/src/compute/flexbox.rs` and
+    `crates/seldon/src/compute/grid/alignment.rs`). In flex this replaced
     plain `end` for `last baseline` and the line's cross-start edge for
     `baseline`, so under `wrap-reverse` an unshared `baseline` item now sits
     at the start edge rather than at the cross-start edge, as Chromium's
@@ -358,7 +358,7 @@ consequential choice about whether to follow the spec or the quirk.
   `gfx::DiscreteFallback::kUseStart`); we animate `filter` as a real CSS
   filter list through stylo's own engine. `filter` is never exported as a
   composite curve, so an animated blur recommits and re-bakes every tick —
-  accepted, and recorded in `crates/dom/src/paint/painter.rs`'s v1 limits
+  accepted, and recorded in `crates/terminus/src/paint/painter.rs`'s v1 limits
   together with the approximations the offscreen implementation carries (one
   isotropic σ under a non-uniform scale or skew, an area budget past which a
   group renders *unblurred*, and several `blur()` functions folded into one).
@@ -376,8 +376,8 @@ consequential choice about whether to follow the spec or the quirk.
   it does not enlarge the element's ink overflow.
 
   It is **painted** as of 2026-09-19, as a prefix bake on the flat render
-  path (`crates/dom/src/paint/compose.rs`'s `PushBackdrop`,
-  `crates/dom/src/render/blur.rs`). The Backdrop Root Image of the document's
+  path (`crates/terminus/src/paint/compose.rs`'s `PushBackdrop`,
+  `crates/terminus/src/render/blur.rs`). The Backdrop Root Image of the document's
   root element holds the canvas: an element whose Backdrop Root is the
   document's bakes over the colour the painter clears its target to (white),
   and an element inside a group Backdrop Root over transparent black, since
@@ -393,7 +393,7 @@ consequential choice about whether to follow the spec or the quirk.
     `will-change` naming it, so a `backdrop-filter` element inside a `will-change: opacity`
     wrapper reads through that wrapper to the content behind it, where a browser would stop at
     it. That is the ruled trade — no layer per `will-change` element — and
-    `crates/dom/src/paint/walker.rs`'s `a_backdrops_range_begins_at_its_backdrop_root` pins it.
+    `crates/terminus/src/paint/walker.rs`'s `a_backdrops_range_begins_at_its_backdrop_root` pins it.
     The one `will-change` that is honored is the one Web Animations implies for a current
     `opacity` animation, exported or not: that element already paints a group, and it roots at
     every reading, 1 included (`a_fade_roots_a_backdrop_while_it_reads_1`).
@@ -483,7 +483,7 @@ consequential choice about whether to follow the spec or the quirk.
   (`lynx-stack/packages/web-platform/web-elements/src/elements/XText/x-text.css:261-265`).
   A user ruling of 2026-10-16 follows native. Every Lynx paragraph (a Lynx
   text element's) is built with `WhiteSpaceProcessing::Verbatim`
-  (`crates/hughie/src/text/paragraph/content.rs`, user ruling 2026-10-17:
+  (`crates/seldon/src/text/paragraph/content.rs`, user ruling 2026-10-17:
   no switch), so:
   space runs and leading spaces stay; every `\n`, in a `raw-text` carrier or
   a `text` attribute, is a forced break and the spaces after it stay; no
@@ -495,7 +495,7 @@ consequential choice about whether to follow the spec or the quirk.
   newline's break before any wrap opportunity, and a `<text>` hands every
   run parley's `collapse` hanging, which hangs line-end spaces
   unconditionally — before a newline and under `nowrap` too
-  (`white_space_hanging` in `crates/hughie/src/text/paragraph/mod.rs`). A tab advances to the
+  (`white_space_hanging` in `crates/seldon/src/text/paragraph/mod.rs`). A tab advances to the
   first multiple of 20px strictly past its position, Android's
   `Layout.TAB_INCREMENT` (AOSP `Layout.java:3714`), by Android's own
   `nextTab(h) = floor((h + 20) / 20) * 20` with no rounding tolerance. The
@@ -505,13 +505,13 @@ consequential choice about whether to follow the spec or the quirk.
   a margin outside the text Android's `TextLine` measures tabs in, so a tab at
   the start of a 15px-indented line runs to 35px, where css-text-3 measures
   from the content edge and stops at 20 (`TabStops::Native` in
-  `crates/hughie/src/text/paragraph/tab.rs`). iOS and Harmony leave tabs to
+  `crates/seldon/src/text/paragraph/tab.rs`). iOS and Harmony leave tabs to
   their platform engines and are not confirmed to match. Which lines carry the
   indent follows native too (user ruling 2026-10-17): Android gives a
   `LeadingMarginSpan`'s first-line margin to the first line of every
   paragraph, so a `<text>` indents its first line and every line that starts
   after a `\n` — css-text-3's `each-line` (`BlockStyle::indent_keywords` in
-  `crates/hughie/src/text/block/style.rs`) — and no soft-wrapped line; each
+  `crates/seldon/src/text/block/style.rs`) — and no soft-wrapped line; each
   indented line measures its tab stops from its own text start, after the
   indent. A `<markdown>` paragraph, a CSS inline formatting context, follows
   the author's `text-indent` keywords (its first line only by default).
@@ -536,7 +536,7 @@ consequential choice about whether to follow the spec or the quirk.
   `pre` is the one other keyword that computes `text-wrap-mode: nowrap`; a
   verbatim block tells it apart by its `white-space-collapse`, which is not
   `collapse`, and wraps (`wrap_mode` in
-  `crates/hughie/src/text/block/style.rs`, the one place the block's wrap
+  `crates/seldon/src/text/block/style.rs`, the one place the block's wrap
   mode is decided). A newline that ends the text adds an empty last line,
   as Android's `StaticLayout` does and Lynx measures through
   `Layout.getHeight` (`TextRenderer.java:720`), by the same ruling:
@@ -573,14 +573,14 @@ consequential choice about whether to follow the spec or the quirk.
   becoming justified — no console message, no computed-value difference to
   notice. Recorded, not fixed. Nothing below the parser is missing: Parley
   already implements `Alignment::Justify` (inter-cluster expansion on every
-  line but the last), and `hughie`'s `TextAlign` → `Alignment` map is a `match`
+  line but the last), and `seldon`'s `TextAlign` → `Alignment` map is a `match`
   with one arm to add. The whole cost is a fork patch un-gating the keyword,
   which is a change to the vendored submodule and its own review, so it is
   filed here rather than smuggled into an engine-side change.
 - **Paragraph base direction: the inline formatting context follows
   `direction`; a `<text>` stays first-strong** — parley 0.12 takes a base
   direction (`StyleRunBuilder::set_base_direction`, `parley::BaseDirection`).
-  The CSS block container's inline formatting context (`hughie::text::inline`)
+  The CSS block container's inline formatting context (`seldon::text::inline`)
   hands it the block's `direction`, as css-writing-modes-3 takes the bidi
   paragraph level from the block (`unicode-bidi: plaintext`, the one
   content-detected case, is not compiled under `lynx`): `text-align: start`,
@@ -592,7 +592,7 @@ consequential choice about whether to follow the spec or the quirk.
   run of the opposite direction stays at that run's level, inside the line,
   where L1 would move it to the paragraph level and hang it at the end edge
   (`an_rtl_container_sets_the_paragraph_level` in
-  `crates/hughie/tests/inline_flow.rs`).
+  `crates/seldon/tests/inline_flow.rs`).
 - **Inline formatting context: one line-break override per paragraph** —
   `word-break` is a per-run value there, and parley honours it per style, but
   the Chromium line-break override (a wrap opportunity after every space
@@ -600,7 +600,7 @@ consequential choice about whether to follow the spec or the quirk.
   paragraph with any `break-all` run is therefore analysed without the
   override, because the pair table would suppress the opportunities between
   ASCII letters `break-all` adds; the other runs of that paragraph fall back
-  to the UAX #14 opportunities alone (`crates/hughie/src/text/paragraph/shape.rs`,
+  to the UAX #14 opportunities alone (`crates/seldon/src/text/paragraph/shape.rs`,
   `shape`). A paragraph without `break-all` keeps the override, as `<text>`
   always has.
 - **Line boxes: `line-height: normal` and fallback fonts** — CSS 2.2
@@ -611,7 +611,7 @@ consequential choice about whether to follow the spec or the quirk.
   numeric or length `line-height` only the first available font sets the
   span's box, and glyphs from a fallback font overflow the line box. Metrics
   are not rounded to whole pixels as Chrome rounds them (the builder's
-  `quantize` is off, `crates/hughie/src/text/paragraph/shape.rs`).
+  `quantize` is off, `crates/seldon/src/text/paragraph/shape.rs`).
 - **Inline formatting context: `text-overflow` not implemented** — it
   applies only to a block whose `overflow` is not `visible` (css-overflow-3).
   The producers of this context — the anonymous block box around loose text,
@@ -619,7 +619,7 @@ consequential choice about whether to follow the spec or the quirk.
   `overflow: visible` or are unreachable by author CSS, so the property is
   not implemented, by the user's ruling of 2026-10-16; a block container
   that clipped would apply it per overflowing line box after the break
-  (`crates/hughie/src/text/inline/mod.rs`).
+  (`crates/seldon/src/text/inline/mod.rs`).
 - **Inline formatting context: a block-level box among inline content is an
   atomic inline (an engine decision in the plan the user adopted on
   2026-10-17)** — CSS 2.2 §9.2.1.1 breaks an
@@ -634,7 +634,7 @@ consequential choice about whether to follow the spec or the quirk.
   block container's content is one atomic inline box, laid out by its own
   display, placed on the line by its margin box and `vertical-align` as an
   `inline-block` would be, with the inline content continuing beside it on
-  the same line (`crates/dom/src/layout/inline_flow.rs`).
+  the same line (`crates/terminus/src/layout/inline_flow.rs`).
 - **Inline formatting context: its atoms follow CSS, a `<text>`'s follow
   native Lynx (2026-10-17)** — an atomic inline box of a block container's
   inline formatting context with an auto width shrinks to fit (CSS 2.2
@@ -642,15 +642,15 @@ consequential choice about whether to follow the spec or the quirk.
   block's content width, `min-width`, `max-width` and percentages included),
   so a wide one wraps its own content, and a `position: relative` one is
   painted, hit-tested and measured at its offset from its place on the line
-  (§9.4.3) (`crates/dom/src/layout/inline_flow.rs`, `size_atoms`,
+  (§9.4.3) (`crates/terminus/src/layout/inline_flow.rs`, `size_atoms`,
   `place_and_hide`). A Lynx `<text>`'s atoms still differ, as native Lynx
   does: measured once at max-content, so a wide one overflows its line, and
   placed with their relative insets ignored (the user's 2026-09-17 ruling,
   below).
 - **Inline formatting context: what an inline box and an atom do not do** —
   the full inline box model of CSS 2.2 §10.3.1 and §10.6.1 with
-  `box-decoration-break: slice` is implemented (`hughie::text::inline`,
-  `crates/hughie/src/text/inline/edge.rs`, `paint::walker`'s
+  `box-decoration-break: slice` is implemented (`seldon::text::inline`,
+  `crates/seldon/src/text/inline/edge.rs`, `paint::walker`'s
   `paint_inline_boxes`); these parts of it are not, each recorded rather than
   silently approximated:
   - `vertical-align` on a non-atomic inline box is not applied (its text sits
@@ -675,7 +675,7 @@ consequential choice about whether to follow the spec or the quirk.
     puts it below the line; and an inline box split across lines is the
     containing block of its absolutely positioned descendants as the bounding
     box of its first and last fragments' padding boxes, a case CSS 2.2
-    §10.1.4 leaves undefined (`crates/dom/src/layout/inline_flow.rs`,
+    §10.1.4 leaves undefined (`crates/terminus/src/layout/inline_flow.rs`,
     `out_of_flow_boxes`);
   - a box's edges sit beside the logical first and last characters of its
     content, so a box whose first or last character runs against the box's
@@ -715,7 +715,7 @@ consequential choice about whether to follow the spec or the quirk.
     line-by-line interleaving; and `Document::bounding_client_rect` of an
     inline box is its fragments' union unsnapped to device pixels.
 
-- **`hughie::text::block` ellipsis algorithm** — the standalone Lynx
+- **`seldon::text::block` ellipsis algorithm** — the standalone Lynx
   text-block module implements the web reference's *slow path*
   (`XTextTruncation.ts`, source-verified) for **every** ellipsis mode: back
   the maxline cut off three source units — fewer on a short line — and append
@@ -771,13 +771,13 @@ consequential choice about whether to follow the spec or the quirk.
   property, `--lynx-tail-color-convert`
   (`crates/bobcat-core/src/main/tree/text.rs:26-39`, `:116`), read back by
   `LynxTextStyle::tail_color_convert`
-  (`crates/hughie/src/style/text.rs:67`) and applied by `RunPaint::fill_style`
-  (`crates/dom/src/paint/text.rs:116`), so reversing the ruling is a change to
+  (`crates/seldon/src/style/text.rs:67`) and applied by `RunPaint::fill_style`
+  (`crates/terminus/src/paint/text.rs:116`), so reversing the ruling is a change to
   the painter and the default, not to shaping.
-- **`hughie::text::block` vertical alignment of atomic inlines** — parley
+- **`seldon::text::block` vertical alignment of atomic inlines** — parley
   0.12 aligns and places an atomic box itself, by CSS 2.2 §10.8.1 with
   css-inline-3's `alignment-baseline` plus `baseline-shift`
-  (`crates/hughie/src/text/paragraph/position.rs`): a box's part below its
+  (`crates/seldon/src/text/paragraph/position.rs`): a box's part below its
   baseline reserves descent, and a non-baseline value moves the line's
   baseline as CSS does. What remains approximate: every box aligns against
   the root inline box (a `StyleRunBuilder` box's parent span is always style
@@ -786,7 +786,7 @@ consequential choice about whether to follow the spec or the quirk.
   constants); a percentage is of the root's `line-height` — its font's
   ascent plus descent for `normal` — where CSS takes the box's own; and the
   Lynx-only `center` behaves as `middle`.
-- **`hughie::text::block` line-height scope** — per-run (the web target's CSS
+- **`seldon::text::block` line-height scope** — per-run (the web target's CSS
   inheritance behavior), not paragraph-wide as native textra applies it
   (`ApplyParagraphStyle`); the paragraph-wide behavior is the degenerate case
   where every run carries the same value, which inheritance produces on its
@@ -817,7 +817,7 @@ consequential choice about whether to follow the spec or the quirk.
   ruling is two UA declarations. Unaffected by it: an overflowing
   `white-space: nowrap` line *is* cut at the clip edge under
   `text-overflow: ellipsis` (`TextBlock::overflow_cut`,
-  `crates/hughie/src/text/block/mod.rs:778-876`), which is css-ui
+  `crates/seldon/src/text/block/mod.rs:778-876`), which is css-ui
   `text-overflow` in its own right and what both references do for a line that
   overflows its measure.
 - **A text tag is one Lynx paragraph whatever its `display` says, except
@@ -826,7 +826,7 @@ consequential choice about whether to follow the spec or the quirk.
   rather than by a `display` value. `text`, `inline-text` and
   `inline-truncation` are Lynx text elements
   (`CustomElement::is_lynx_text`, `crates/bobcat-core/src/main/tree/text.rs`),
-  which `dom::layout::display_mode` reads after `none` and `contents` and
+  which `terminus::link::layout::display_mode` reads after `none` and `contents` and
   before every other computed `display`. So an author `display: none` hides
   one in all three engines, and `<text style="display: flex">` is still one
   paragraph. **Native** ignores the value: a text's inline-ness is structural
@@ -869,10 +869,10 @@ consequential choice about whether to follow the spec or the quirk.
   authored inset. A nested `text`/`inline-text`, or a `display: contents`
   wrapper, generates no box at all, so its insets never applied in the first
   place and nothing changed for those. Reversing the ruling is one term in
-  `place_and_hide` (`crates/dom/src/layout/text_block.rs`) plus the inset
+  `place_and_hide` (`crates/terminus/src/layout/text_block.rs`) plus the inset
   resolution to feed it; the guard is
   `a_relative_atom_stays_in_the_line_and_only_absolute_leaves_it`
-  (`crates/dom/tests/web_text_replication.rs`).
+  (`crates/terminus/tests/web_text_replication.rs`).
 - **An atomic inline box with no baseline of its own sits with its bottom
   *margin* edge on the line's baseline** — CSS's and `web-core`'s rule for an
   inline-block with no in-flow line boxes, and a **ruled** deviation from
@@ -886,10 +886,10 @@ consequential choice about whether to follow the spec or the quirk.
   grows the line here and does not on native — a 40x60 atom with
   `margin-bottom: 8px` makes a 68px line here against native's 60. The wiring
   is one `max` in phase 2 of `compute_text_block_layout`
-  (`crates/dom/src/layout/text_block.rs`), which shifts the reported baseline
+  (`crates/terminus/src/layout/text_block.rs`), which shifts the reported baseline
   down with the margin box's top edge; the guard is the `.down` block of
   `an_atoms_margins_reach_the_line_and_step_its_border_box_in`
-  (`crates/dom/tests/web_text_replication.rs`).
+  (`crates/terminus/tests/web_text_replication.rs`).
 
 ## Event model & gestures (see [dom-events.md](dom-events.md))
 
@@ -904,7 +904,7 @@ consequential choice about whether to follow the spec or the quirk.
   while still being real `addEventListener` underneath.
 - **Each realm's Lynx walk runs at the path's top step (2026-10-18, user
   ruling: scheme D; every realm at the top, user ruling 2026-10-19).** The
-  kernel walks the path once (`MainThreadRuntime::dispatch` over `dom`'s
+  kernel walks the path once (`MainThreadRuntime::dispatch` over `terminus`'s
   `EventWalk`) and calls each realm that listens — the page realm, and each
   `frame`'s card in its `ShadowRealm` — once, at the path's first capture
   step, the page realm first, where that realm runs its whole Lynx walk
@@ -974,7 +974,7 @@ consequential choice about whether to follow the spec or the quirk.
     `defaultPrevented` answer back; both are gone. The only veto left on a
     default action is the embedder's `InputEvent::default_prevented`.
     Agreed future shape: a Rust component that needs to veto a default
-    action sets a `canceled` flag on `dom`'s `EventWalk` beside its stop
+    action sets a `canceled` flag on `terminus`'s `EventWalk` beside its stop
     flag, never a script channel.
 - **`tap` suppressed by `longpress`** — Lynx hardcodes "tap doesn't fire if
   longpress was consumed earlier in the same touch sequence," a global rule
@@ -983,7 +983,7 @@ consequential choice about whether to follow the spec or the quirk.
   recognizers) instead of a hardcoded cross-event rule, so apps that don't
   use the gesture API don't inherit an invisible suppression.
 - **`tap`/`longpress` synthesis semantics (user ruling 2026-08-21,
-  implemented in `crates/bobcat-core/src/paint/gesture.rs`)** — `tap` fires at
+  implemented in `crates/terminus/src/painter/gesture.rs`)** — `tap` fires at
   release with the native movement-cancel rule; `longpress` fires at a press
   held past 500ms (the native default on every platform). The recorded
   deviations inside that ruling:
@@ -1167,7 +1167,7 @@ consequential choice about whether to follow the spec or the quirk.
   `crates/bobcat-core/src/main/layout_change.rs`). web-core's event is a
   `ResizeObserver` on the element
   (`web-elements/src/elements/common/CommonEventsAndMethods.ts:23-58`), and
-  this one is the W3C primitive's (`crates/dom/src/visual/resize/`): an
+  this one is the W3C primitive's (`crates/terminus/src/visual/resize/`): an
   element whose border box changes size hears one event, and so does every
   element once on its first observation, a `0 × 0` one included. Native also
   fires when the element only moves within its parent or changes a padding,
@@ -1485,11 +1485,11 @@ consequential choice about whether to follow the spec or the quirk.
 - **A top-level `@font-face` is parsed, mounted, and then completely inert**
   — this one is ours, not Lynx's. The path runs end to end: the decoder
   surfaces `PreparsedRule::FontFace`, `bobcat_core::style::lower` turns it
-  into a rule through `Document::build_font_face_rule`, `dom` parses the
+  into a rule through `Document::build_font_face_rule`, `terminus` parses the
   descriptor block with stylo's own `parse_font_face_block`, and
   `append_rules` mounts the result in the stylist. Nothing then reads it.
   Fonts reach Parley by exactly one route — the embedder listing `FontBlob`s
-  in the `ViewSources::fonts` it builds a view from, which `hughie`'s
+  in the `ViewSources::fonts` it builds a view from, which `seldon`'s
   `TextContext` passes to Parley with no alias, so the families come from
   inside the font file —
   and family matching never consults a font-face rule. So `src` is never
@@ -1532,7 +1532,7 @@ consequential choice about whether to follow the spec or the quirk.
   policy's second bucket forbids "improving" a Lynx-only feature toward the
   W3C feature it resembles, and both references agree. Landed as
   `contain: size` in `bobcat_core`'s `tree::image` UA rules, with
-  `hughie::compute_leaf_layout` suppressing the natural aspect ratio under
+  `seldon::compute_leaf_layout` suppressing the natural aspect ratio under
   size containment so a single authored axis cannot derive the other.
   Two consequences worth knowing: `contain` is a property Lynx has no
   equivalent of at all, so an author's `contain: none` can switch this off in
@@ -1610,7 +1610,7 @@ consequential choice about whether to follow the spec or the quirk.
   `blur-radius` inert under `auto-size` (a side effect of the `::part(img)`
   rules its `display: contents` leaves unmatched, not a decision); native keeps
   them live and so does this engine, since nothing couples them. And a
-  `placeholder` can size an `auto-size` box here, because `dom` takes the
+  `placeholder` can size an `auto-size` box here, because `terminus` takes the
   natural size from whichever bitmap is drawn — iOS and web-core do the same,
   Android sizes from `src` alone.
 - **`<image mode>` loses to author CSS here and wins in web-core.** The three
@@ -1654,7 +1654,7 @@ consequential choice about whether to follow the spec or the quirk.
   (`XImage/ImageSrc.ts:28-31, 54-60`), so a placeholder that loads fires the
   host's `load`; here the two sources are concurrent requests under the native
   model the same ruling chose, and
-  `dom` has no variant naming a placeholder's outcome, so neither its load nor
+  `terminus` has no variant naming a placeholder's outcome, so neither its load nor
   its failure is an event. Native agrees with this engine: Android's
   `mPlaceHolderListener` (`platform/android/.../image/LynxImageManager.java:416-437`)
   sets the drawable on success and does nothing at all on failure, while only
@@ -1695,8 +1695,8 @@ consequential choice about whether to follow the spec or the quirk.
   `x-image` are shadow `<img>`s, so the browser renders SVG in
   `<svg src|content>`, `<image src>`, `background-image` and `mask-image`.
   Here the engine parses every SVG with its own converter
-  (`crates/dom/src/render/svg/`) and the painter rasterises each draw at its
-  device size (`crates/dom/src/render/vector_textures.rs`); design in
+  (`crates/terminus/src/render/svg/`) and the painter rasterises each draw at its
+  device size (`crates/terminus/src/render/vector_textures.rs`); design in
   `docs/svg-lynx-component-design.md`, pipeline in
   [media-resources.md](media-resources.md), status in
   [components.md](components.md)'s `x-svg` row. Where the references
@@ -1939,7 +1939,7 @@ consequential choice about whether to follow the spec or the quirk.
     one at or after the previous auto-placed item's end line; Lynx always takes
     the lowest index. No CSS value disables the cursor. Minimal case: two
     lanes, item heights `[100, 200, 100, X]`, gap 0 — Lynx puts `X` in lane 0,
-    grid-lanes in lane 1. The hughie test
+    grid-lanes in lane 1. The seldon test
     `flow_tolerance_decides_which_lanes_count_as_equally_short` pins the W3C
     outcome for a three-lane example.
   - (c) Main-axis margins: all three differ, and native vs web-core is a
@@ -1993,15 +1993,15 @@ consequential choice about whether to follow the spec or the quirk.
   only swaps a `flex-direction`, since web-core's waterfall is never a grid):
   grid-lanes reads the absence of a
   column template as the statement that the block axis carries the tracks
-  (`crates/hughie/src/compute/grid/lanes.rs:535-547`), so leaving the column
+  (`crates/seldon/src/compute/grid/lanes.rs:535-547`), so leaving the column
   template standing would stack a horizontal waterfall downwards.
   `list-main-axis-gap`/`list-cross-axis-gap` do not exist here
-  (`list_main_axis_gap_is_absent`, `crates/dom/tests/grammar_layout.rs`) and do
+  (`list_main_axis_gap_is_absent`, `crates/terminus/tests/grammar_layout.rs`) and do
   not exist as properties in web-core either — its style transformer renames
   both to custom properties
   (`.../web-core/src/style_transformer/rules.rs:20-21`); an author writes
   `row-gap`/`column-gap`. The scroll extent
-  needs nothing new: `crates/dom/src/scroll/mod.rs` derives it from the layout
+  needs nothing new: `crates/terminus/src/scroll/mod.rs` derives it from the layout
   algorithm's `content_size`.
   One further span-count divergence: the UA default here is **1**, where
   `x-list.css:11` writes `0`. `repeat(0, 1fr)` is an invalid track list, so
@@ -2061,7 +2061,7 @@ consequential choice about whether to follow the spec or the quirk.
     architect's decision, to be confirmed by the user.**
   - *`selectTab` scrolls the page into view* (2026-10-11): it is CSSOM-View's
     "scroll an element into view" (`Document::scroll_into_view`,
-    `crates/dom/src/scroll/into_view.rs:188`) on the pager's element child
+    `crates/terminus/src/scroll/into_view.rs:188`) on the pager's element child
     number `index`, with `inline: start`, `block: nearest` and
     `container: nearest`. So an out-of-range or negative index is code 4 and
     moves nothing (Android `LynxUIViewPager.kt:168-170`, Harmony
@@ -2210,10 +2210,10 @@ consequential choice about whether to follow the spec or the quirk.
     painter, which does not exist.
   - *`autoScroll({rate, start = false, autoStop = true})` (2026-10-13) is a
     motion of the painter, shared whole with `list`.* The document records
-    a change of the container's auto-scroll (`dom::Document::auto_scroll`,
-    `crates/dom/src/scroll/request.rs`), the committed frame carries it
+    a change of the container's auto-scroll (`terminus::link::Document::auto_scroll`,
+    `crates/terminus/src/scroll/request.rs`), the committed frame carries it
     beside its scroll slots, and the painter moves the scrolling axis on its
-    own clock (`crates/bobcat-core/src/paint/inertia.rs`). References: iOS
+    own clock (`crates/terminus/src/painter/inertia.rs`). References: iOS
     `LynxUIScroller.m:1337-1375,1975-2040`, Android
     `AndroidScrollView.java:142-235`, Harmony `ui/utils/auto_scroller.cc`,
     web-core `ScrollView.ts:84-112` and `XList.ts:118-205`. Where it leaves
@@ -2275,8 +2275,8 @@ consequential choice about whether to follow the spec or the quirk.
   method is the standard `scrollIntoView` of the CSSOM-View editor's draft
   (§"scroll an element into view", §"determine the scroll-into-view
   position") called with `container: "nearest"`, not an algorithm of its
-  own. `dom::Document::scroll_into_view`
-  (`crates/dom/src/scroll/into_view.rs:188`) is the algorithm, and the base
+  own. `terminus::link::Document::scroll_into_view`
+  (`crates/terminus/src/scroll/into_view.rs:188`) is the algorithm, and the base
   method (`crates/bobcat-core/src/main/tree/base_methods.rs:252`) reads the
   params into its options. References: iOS `LynxUI.m:1549-1615` and
   `scroll_view/LynxUIScroller.m:1027-1065`, Android `LynxBaseUI.java:1055-1119`
@@ -2323,7 +2323,7 @@ consequential choice about whether to follow the spec or the quirk.
   every element (`createInvokeUIMethod.ts:29-31`). The base method
   (`crates/bobcat-core/src/main/tree/base_methods.rs:143`) reads `params`
   as a `ScrollToOptions` dictionary and runs the standard steps over
-  `dom::Document::scroll_to_with`. Where it leaves the standard or web-core, and the rules a reader might not expect:
+  `terminus::link::Document::scroll_to_with`. Where it leaves the standard or web-core, and the rules a reader might not expect:
   - *`behavior: "auto"` is instant.* CSSOM-View's `auto` takes the
     element's computed `scroll-behavior`, and this engine has no
     `scroll-behavior` property, so `auto` is its initial value's instant
@@ -2403,8 +2403,8 @@ consequential choice about whether to follow the spec or the quirk.
 - **`text` UI methods (2026-10-11): `getTextBoundingRect({start, end})` on a
   `text` component's `CustomElement::invoke`
   (`crates/bobcat-core/src/main/tree/text.rs`), over
-  `Document::text_range_boxes` and `hughie`'s `TextBlock::range_boxes`
-  (`crates/hughie/src/text/block/range.rs`).** The architect's decision, to
+  `Document::text_range_boxes` and `seldon`'s `TextBlock::range_boxes`
+  (`crates/seldon/src/text/block/range.rs`).** The architect's decision, to
   be confirmed by the user. web-core's `XText` has none of the three text
   methods, so the references are the natives (iOS `LynxUIText.m:790-807`,
   `LynxTextView.m:205-235`; Android `UIText.java:343-364`,
@@ -2470,10 +2470,10 @@ consequential choice about whether to follow the spec or the quirk.
   as `user-select` in the UA sheet, a browser's gesture**
   (`crates/bobcat-core/src/main/tree/text.rs`,
   `crates/bobcat-core/src/main/runtime/editing.rs`,
-  `crates/dom/src/editing/mod.rs`). web-core's `x-text.css:147-181` is the
+  `crates/terminus/src/editing/mod.rs`). web-core's `x-text.css:147-181` is the
   shape: `text`, `inline-text` and `inline-truncation` are
   `user-select: none`, a `text-selection` text and the text elements inside
-  it `user-select: auto`, and `dom` resolves the used value as css-ui-4
+  it `user-select: auto`, and `terminus` resolves the used value as css-ui-4
   says (the root's `auto` is `text`). Where it leaves a reference:
   - *`text-selection="false"` does not select.* web-core's selector is
     `[text-selection]`, presence alone, so there the string `"false"` (what
@@ -2950,8 +2950,8 @@ consequential choice about whether to follow the spec or the quirk.
 
 - **`<dialog>` and the top layer (2026-10-07)** — W3C (bucket 1): web-core
   hands `<dialog>` to the browser, and native Lynx has neither a dialog nor a
-  top layer. Implemented in `dom` (the layer, `::backdrop`, inertness) and
-  `bobcat-core`'s `tree::dialog`
+  top layer. Implemented in `terminus` (the layer, `::backdrop`, inertness) and
+  `terminus::link::html::dialog`
   ([style-assumptions.md](../style-assumptions.md) §29). What a page can
   observe differently from a browser:
   - *Leaving the top layer is immediate.* There is no `overlay` property and
@@ -2977,7 +2977,7 @@ consequential choice about whether to follow the spec or the quirk.
     `flex`, the `lynx` grammar's initial display, where a browser computes
     `block`. The dialog renders as a `flex` box centred in the viewport
     (`a_display_contents_modal_dialog_is_blockified_and_renders` in
-    `tree::dialog`). An element `dom` puts in the top
+    bobcat-core's `dialog_tests.rs`). An element `terminus` puts in the top
     layer without such a UA rule is not adjusted: membership alone places it
     against the viewport, and a `display: contents` one renders nothing.
   - *`returnValue` is dropped.* `close(returnValue)` and
@@ -3061,7 +3061,7 @@ consequential choice about whether to follow the spec or the quirk.
     `web-core/css/index.css`); here the document's one device resolves every
     length, the frame's included.
   - *`@font-face` in a frame's sheets is not loaded.* A sheet a frame realm
-    adopts is mounted on the frame's shadow root, and `dom` loads no
+    adopts is mounted on the frame's shadow root, and `terminus` loads no
     `@font-face` rule of a shadow-tree sheet
     (`Document::append_shadow_rules`).
   - *No `load` event* yet, and a frame with no author height and no
@@ -3351,7 +3351,7 @@ consequential choice about whether to follow the spec or the quirk.
 - **`x-input` / `x-textarea` (2026-10-14, editable text E5)** — Lynx-only
   (bucket 2): web-core wraps a real `<input>`/`<textarea>` in a shadow
   tree; here the shadow tree holds one plain-text editing host over
-  `dom::editing` (`bobcat-core`'s `tree::text_field`,
+  `terminus::link::editing` (`bobcat-core`'s `tree::text_field`,
   `docs/editable-text-design.md` E5). Where native Lynx and web-core (or
   the Lynx typings) disagree, web-core was followed:
   - *`send-composing-input` is off by default* (web-core). Native sends
@@ -3413,7 +3413,7 @@ consequential choice about whether to follow the spec or the quirk.
     `font-family`, `font-weight` and `font-style` to the platform
     (`core/renderer/dom/fiber/pseudo_element.cc`). The placeholder's block
     carries `pseudo="-webkit-input-placeholder"`, as Blink's does, which is
-    what makes it the host's `::placeholder` to `dom`.
+    what makes it the host's `::placeholder` to `terminus`.
 
   Two differ from web-core by user ruling (2026-10-19):
   - *`input` and `textarea` are not text fields.* web-core's tag map sends

@@ -5,9 +5,9 @@
 //!
 //! Exposure is a Lynx-only extension (standards bucket 2): no W3C feature has
 //! its attributes, its events or its records. It lives here rather than in
-//! `dom`: each registered element is one intersection observer of `dom`'s
-//! (`dom::IntersectionEventHandler`), the W3C primitive with the target
-//! margin `dom` adds beside the root margin, and this module turns what
+//! `terminus`: each registered element is one intersection observer of `terminus`'s
+//! (`terminus::link::IntersectionEventHandler`), the W3C primitive with the target
+//! margin `terminus` adds beside the root margin, and this module turns what
 //! those observers deliver into exposure changes.
 //!
 //! # The rulings it is built on (user, 2026-10-11; the margin fold is the
@@ -166,11 +166,11 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use dom::{
+use rustc_hash::FxHashMap;
+use terminus::link::{
     IntersectionEventHandler, IntersectionMargin, IntersectionObserverEntry,
     IntersectionObserverId, IntersectionObserverInit, MarginLength, NodeId,
 };
-use rustc_hash::FxHashMap;
 
 use super::tree::LynxDocument;
 

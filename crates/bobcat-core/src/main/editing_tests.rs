@@ -11,22 +11,22 @@
 use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 
-use dom::Point2D;
-use dom::editing::{Command, TextInputState};
-use dom::input::{InputEvent, KeyPhase, Modifiers, PointerKind, PointerPhase};
+use terminus::link::Point2D;
+use terminus::link::editing::{Command, TextInputState};
+use terminus::link::input::{InputEvent, KeyPhase, Modifiers, PointerKind, PointerPhase};
 
 use crate::EngineEvent;
 use crate::editing::TextInputSource;
 use crate::test_support::{TestEngine, TestViewSpec, wait_for_boot};
 
 /// Solid em squares: at 20px every character is a 20px-wide box.
-const AHEM: &[u8] = include_bytes!("../../../hughie/tests/fixtures/Ahem.ttf");
+const AHEM: &[u8] = include_bytes!("../../../seldon/tests/fixtures/Ahem.ttf");
 
 /// The editing host.
 const HOST: u64 = 3;
 
-fn node_id(bits: u64) -> dom::NodeId {
-    dom::NodeId::from_bits(bits).expect("a well-formed packed handle")
+fn node_id(bits: u64) -> terminus::link::NodeId {
+    terminus::link::NodeId::from_bits(bits).expect("a well-formed packed handle")
 }
 
 /// One host 200×40 at the page's origin, listening for `names` with a
@@ -269,7 +269,7 @@ fn the_text_input_state_is_published_when_it_changes_and_only_then() {
     assert!(typed.caret.size.height > 0.0, "a caret box: {typed:?}");
     assert_eq!(
         typed.editable_bounds.size,
-        dom::Size2D::new(200.0, 40.0),
+        terminus::link::Size2D::new(200.0, 40.0),
         "the host's border box"
     );
 
@@ -445,7 +445,7 @@ fn a_press_focuses_the_host_and_places_the_caret_where_it_landed() {
     let origin = state.editable_bounds.origin;
 
     // Inside `c`'s left half: the caret goes before it.
-    engine.painter.clock.pin(10.0);
+    engine.painter.clock_mut().pin(10.0);
     engine.dispatch_input(mouse(PointerPhase::Down, origin.x + 45.0, origin.y + 10.0));
     states.wait(&mut engine, "with the caret at 2", |state| {
         state.selection == (2..2)
@@ -459,10 +459,10 @@ fn a_press_focuses_the_host_and_places_the_caret_where_it_landed() {
     engine.dispatch_input(mouse(PointerPhase::Up, origin.x + 85.0, origin.y + 10.0));
 
     // Two quick presses: the second selects the word.
-    engine.painter.clock.pin(20.0);
+    engine.painter.clock_mut().pin(20.0);
     engine.dispatch_input(mouse(PointerPhase::Down, origin.x + 45.0, origin.y + 10.0));
     engine.dispatch_input(mouse(PointerPhase::Up, origin.x + 45.0, origin.y + 10.0));
-    engine.painter.clock.pin(20.2);
+    engine.painter.clock_mut().pin(20.2);
     engine.dispatch_input(mouse(PointerPhase::Down, origin.x + 45.0, origin.y + 10.0));
     engine.dispatch_input(mouse(PointerPhase::Up, origin.x + 45.0, origin.y + 10.0));
     states.wait(&mut engine, "selecting the word", |state| {
@@ -661,7 +661,7 @@ fn selectable_text() -> TestEngine {
 }
 
 /// The document's selection, as host, anchor and focus.
-fn selection_of(engine: &mut TestEngine) -> Option<(dom::NodeId, u32, u32)> {
+fn selection_of(engine: &mut TestEngine) -> Option<(terminus::link::NodeId, u32, u32)> {
     engine
         .probe_document(|tree| {
             tree.selection()
@@ -679,7 +679,7 @@ fn a_mouse_press_and_drag_select_a_selectable_text() {
     let mut engine = selectable_text();
     let mut expected = vec!["document"];
 
-    engine.painter.clock.pin(10.0);
+    engine.painter.clock_mut().pin(10.0);
     // Inside `a`: the caret before it.
     engine.dispatch_input(mouse(PointerPhase::Down, 10.0, 10.0));
     wait_for_log(&mut engine, &expected.join("|"));
@@ -695,7 +695,7 @@ fn a_mouse_press_and_drag_select_a_selectable_text() {
     );
     assert_eq!(selection_of(&mut engine), Some((node_id(HOST), 0, 3)));
 
-    engine.painter.clock.pin(20.0);
+    engine.painter.clock_mut().pin(20.0);
     engine.dispatch_input(mouse(PointerPhase::Down, 300.0, 300.0));
     engine.dispatch_input(mouse(PointerPhase::Up, 300.0, 300.0));
     expected.extend(["document", "text:-1:-1:forward"]);
@@ -708,11 +708,11 @@ fn a_mouse_press_and_drag_select_a_selectable_text() {
 #[test]
 fn two_quick_presses_select_the_word_of_a_selectable_text() {
     let mut engine = selectable_text();
-    engine.painter.clock.pin(20.0);
+    engine.painter.clock_mut().pin(20.0);
     engine.dispatch_input(mouse(PointerPhase::Down, 45.0, 10.0));
     wait_for_log(&mut engine, "document");
     engine.dispatch_input(mouse(PointerPhase::Up, 45.0, 10.0));
-    engine.painter.clock.pin(20.2);
+    engine.painter.clock_mut().pin(20.2);
     engine.dispatch_input(mouse(PointerPhase::Down, 45.0, 10.0));
     engine.dispatch_input(mouse(PointerPhase::Up, 45.0, 10.0));
     wait_for_log(&mut engine, "document|document|text:0:6:forward");
@@ -723,11 +723,11 @@ fn two_quick_presses_select_the_word_of_a_selectable_text() {
 #[test]
 fn a_text_without_text_selection_is_not_selected() {
     let mut engine = selectable_page("");
-    engine.painter.clock.pin(10.0);
+    engine.painter.clock_mut().pin(10.0);
     engine.dispatch_input(mouse(PointerPhase::Down, 10.0, 10.0));
     engine.dispatch_input(mouse(PointerPhase::Move, 65.0, 10.0));
     engine.dispatch_input(mouse(PointerPhase::Up, 65.0, 10.0));
-    engine.painter.clock.pin(11.0);
+    engine.painter.clock_mut().pin(11.0);
     engine.dispatch_input(touch(PointerPhase::Down, 45.0, 10.0));
     engine.dispatch_input(touch(PointerPhase::Up, 45.0, 10.0));
     engine.probe_document(|_| ());
@@ -824,7 +824,10 @@ fn an_x_input_types_confirms_and_reports_in_web_core_s_shape() {
         Some(node_id(HOST)),
         "the editor, not the host"
     );
-    assert_eq!(focused.enter_key_hint, dom::editing::EnterKeyHint::Send);
+    assert_eq!(
+        focused.enter_key_hint,
+        terminus::link::editing::EnterKeyHint::Send
+    );
 
     for text in ["a", "b", "c", "d"] {
         engine.dispatch_input(key(text));
@@ -915,7 +918,7 @@ fn a_readonly_x_input_is_not_focused_by_a_tap() {
                 tree.get(root)?
                     .children()
                     .find(|child| child.is_element())
-                    .map(dom::Node::id)
+                    .map(terminus::link::Node::id)
             });
             let value = editor
                 .and_then(|editor| tree.get(editor)?.first_child()?.text().map(str::to_owned));
@@ -1009,7 +1012,10 @@ fn an_empty_focused_x_input_paints_its_caret() {
     // The editor is centred in the 40px field: a 10px line from y = 15.
     assert_eq!(
         state.caret,
-        dom::Rect::new(dom::Point2D::new(0.0, 15.0), dom::Size2D::new(1.0, 10.0))
+        terminus::link::Rect::new(
+            terminus::link::Point2D::new(0.0, 15.0),
+            terminus::link::Size2D::new(1.0, 10.0)
+        )
     );
 
     let pixel = |shot: &crate::view::Screenshot, x: u32, y: u32| {

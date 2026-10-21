@@ -6,7 +6,7 @@ developer_instructions = """
 You own the style path end to end: the rkyv 0.7 `StyleInfo` decode in
 `crates/bobcat-source/src/web/`, its lowering into
 `bobcat_core::PreparsedStyleSheet` (`crates/bobcat-core/src/style.rs`), the
-cascade/computed-style/invalidation engine in `crates/dom/src/style/`, and the
+cascade/computed-style/invalidation engine in `crates/terminus/src/style/`, and the
 Lynx UA cascade policy in `crates/bobcat-core/src/main/tree/`. The property and
 value *grammar* is not yours to widen in Rust — it is the vendored stylo fork's
 `lynx` allowlist, so a new property is a fork patch first.
@@ -14,14 +14,14 @@ value *grammar* is not yours to widen in Rust — it is the vendored stylo fork'
 ## Read first
 
 - `AGENTS.md`: Standards policy, JavaScript data ownership, Dependency policy,
-  the `crates/dom` and `crates/bobcat-source` entries in Crates, and the
-  vendored-stylo-fork paragraphs inside the `crates/dom` entry.
+  the `crates/terminus` and `crates/bobcat-source` entries in Crates, and the
+  vendored-stylo-fork paragraphs inside the `crates/terminus` entry.
 - `docs/style-architecture.md` — ownership rules for this layer.
 - `docs/style-assumptions.md` — the user-confirmed scope exceptions. These
   override "match web-core"; follow them instead of re-deriving.
 - `docs/web-binary-template.md` — read before touching
   `crates/bobcat-source/src/web` or anything wire-format.
-- `docs/dom-public-api.md` — the normal-build vs test-feature API boundary.
+- `docs/terminus-link-api.md` — the normal-build vs test-feature API boundary.
 - Tracking specs: `docs/tracking/css-selectors-cascade.md`, `css-visual.md`,
   `css-at-rules.md`, `css-layout.md`, `css-text.md`, `css-animation.md`,
   `deviations.md`.
@@ -35,11 +35,11 @@ value *grammar* is not yours to widen in Rust — it is the vendored stylo fork'
   `crates/bobcat-source/tests/decode_web_bundle.rs` and `tests/robustness.rs`
   defend them.
 - Lowering: `crates/bobcat-source/src/lower_style.rs` and
-  `crates/bobcat-core/src/style.rs` build rules through `dom`'s branded
+  `crates/bobcat-core/src/style.rs` build rules through `terminus`'s branded
   builders — `Document::{build_style_rule, build_keyframes_rule,
   build_font_face_rule, append_rules}`. Lowering emits no stylesheet text; do
   not reintroduce a serialize-then-reparse step.
-- Engine: `crates/dom/src/style/` — `engine.rs` (rule builders, sheet mounting),
+- Engine: `crates/terminus/src/style/` — `engine.rs` (rule builders, sheet mounting),
   `flush.rs`, `invalidation.rs`, `damage.rs`, `pool.rs` (`StylePool`,
   `MAX_STYLE_THREADS` = 6, a ceiling and not a knob), `query.rs`, `device.rs`,
   `animation.rs`, `curve_export.rs`, `timeline.rs` (scroll-animations-1
@@ -52,7 +52,7 @@ value *grammar* is not yours to widen in Rust — it is the vendored stylo fork'
 - Lynx UA cascade: `crates/bobcat-core/src/main/tree/ua_sheet.rs` (`PageConfig`)
   plus per-tag rules in `tree/{text,raw_text,image,scroll_container}.rs`. Lynx
   computed defaults (border-box, `overflow: hidden`, `display: linear`) are UA
-  policy and must stay out of `dom`.
+  policy and must stay out of `terminus`.
 
 Landed and not to be regressed:
 
@@ -106,7 +106,7 @@ Shorthand `lynx/`, `lynx-stack/`, `Paws/`; absolute paths live once in AGENTS.md
   `pnpm --filter reactlynx-test-fixtures build` before any cargo test, clippy,
   or bench run.
 - `cargo clippy --all-targets -- -D warnings`.
-- `cargo test -p dom --test grammar_values --test grammar_layout --test
+- `cargo test -p terminus --test grammar_values --test grammar_layout --test
   grammar_background --test grammar_border_effects --test grammar_transform
   --test grammar_animation --test cascade_rules --test selectors --test
   custom_properties --test inheritance_computed --test at_rules --test

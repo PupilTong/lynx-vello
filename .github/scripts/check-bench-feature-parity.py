@@ -28,21 +28,36 @@ import sys
 # production does not ship, and that is known and accepted. Adding one is a
 # decision about benchmark fidelity, so say what it costs.
 ACCEPTED: dict[str, dict[str, str]] = {
-    "dom": {
+    "terminus": {
         "layout-test-utils": (
-            "hughie dev-depends on dom/layout-test-utils for its bench harness, and "
-            "dom depends on hughie, so any build that includes bench targets "
-            "resolves the cycle by turning the feature on for dom's own library "
+            "seldon dev-depends on terminus/layout-test-utils for its bench harness, and "
+            "terminus depends on seldon, so any build that includes bench targets "
+            "resolves the cycle by turning the feature on for terminus's own library "
             "too. Cost: one `test_leaf_metrics()` probe per leaf in "
-            "crates/dom/src/layout/host.rs that a release build does not contain. "
-            "Breaking the cycle means moving hughie's dom-based benches into dom, "
+            "crates/terminus/src/layout/host.rs that a release build does not contain. "
+            "Breaking the cycle means moving seldon's terminus-based benches into terminus, "
             "which renumbers every CodSpeed benchmark id and discards its history. "
-            "See AGENTS.md, 'Benchmarks measure a debug-instrumented dom'."
-        )
+            "See AGENTS.md, 'Benchmarks measure a debug-instrumented terminus'."
+        ),
+        "painter-test-utils": (
+            "bobcat-core dev-depends on terminus/painter-test-utils for its painter "
+            "tests, so any build that includes bench targets unifies the feature into "
+            "terminus's own library. Cost, all in crates/terminus/src/painter/mod.rs: "
+            "`FrameClock` carries a `pinned: Option<f64>` and `now_seconds` tests it "
+            "before reading the system clock; `Output` gains the test-only `None` "
+            "variant, which adds one match arm to each dispatch on the draw target "
+            "(`forget`, `prepare_vectors`, `prepare_filters`, `render`, `capture`) and "
+            "a refusal check at the top of `capture`; and the doc-hidden test "
+            "accessors (`Painter::without_output`, `clock_mut`, `scroll_intents_mut`, "
+            "`ScrollIntentsTestUtils`, the two interval constants) are compiled in. "
+            "Nothing else on the compose or draw path changes. Dropping it means "
+            "moving bobcat-core's painter tests off the feature. See AGENTS.md, "
+            "'Benchmarks measure a debug-instrumented terminus'."
+        ),
     },
-    "hughie": {
+    "seldon": {
         "layout-test-utils": (
-            "Same cycle, seen from the other side. On hughie the feature only adds "
+            "Same cycle, seen from the other side. On seldon the feature only adds "
             "the `compute_leaf_layout_with_measurement_for_testing` wrapper; no "
             "hot path gains a branch, so this side is cost-free."
         )
@@ -53,7 +68,7 @@ ACCEPTED: dict[str, dict[str, str]] = {
 def shipped_libraries() -> set[str]:
     """Workspace libraries that something depends on outside of dev targets.
 
-    A crate every dependent lists under `[dev-dependencies]` — flashbulb, the
+    A crate every dependent lists under `[dev-dependencies]` — prime-radiant, the
     screenshot harness — has no shipped configuration to deviate from. It shows
     up in the production graph only because `cargo build --workspace` builds
     every member's library, and comparing against that is meaningless.

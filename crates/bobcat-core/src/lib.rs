@@ -66,8 +66,8 @@ mod view;
 /// Normalized host input vocabulary. No document or hit-test result crosses
 /// this boundary.
 pub mod input {
-    pub use dom::Point2D;
-    pub use dom::input::{
+    pub use terminus::link::Point2D;
+    pub use terminus::link::input::{
         InputEvent, InputKind, KeyPhase, Modifiers, PointerId, PointerKind, PointerPhase,
     };
 }
@@ -77,8 +77,8 @@ pub mod input {
 /// [`EngineEvent::TextInputStateChanged`] reports.
 pub mod editing {
     /// The rectangle [`TextInputState`]'s geometry is in (viewport CSS px).
-    pub use dom::Rect;
-    pub use dom::editing::{
+    pub use terminus::link::Rect;
+    pub use terminus::link::editing::{
         Command, Direction, EnterKeyHint, Granularity, InputMode, InputType, TextInputState,
     };
 
@@ -112,19 +112,19 @@ pub mod editing {
     }
 }
 
-pub use dom::{
-    DocumentKind, FontBlob, FrameImages, ImageEvent, ImageInbox, ImageReports, ImageSizeHint,
-    MAX_RENDERABLE_DIMENSION, MAX_STYLE_THREADS, NoImages, VectorDocument, is_renderable, vello,
-};
 pub use esm::{BTS_CHUNK_PREAMBLE, MTS_CHUNK_PREAMBLE};
 pub use main::tree::PageConfig;
 pub use native_module::{ModuleCall, ModuleCallback, NativeModule};
 pub use paint::{Painter, PostedFrame};
 pub use style::{PreparsedDeclaration, PreparsedKeyframe, PreparsedRule, PreparsedStyleSheet};
+pub use terminus::link::{
+    DocumentKind, FontBlob, FrameImages, ImageEvent, ImageInbox, ImageReports, ImageSizeHint,
+    MAX_RENDERABLE_DIMENSION, MAX_STYLE_THREADS, NoImages, VectorDocument, is_renderable, vello,
+};
 #[cfg(target_arch = "wasm32")]
 pub use view::configure_wasm_workers;
 pub use view::{
     DrawTarget, EngineError, EngineEvent, EventRequester, FrameSize, LynxGroup, LynxView,
-    LynxViewError, NoWakeup, ScreenMetrics, Screenshot, ScriptSource, StyleThreads, ViewSources,
-    WindowTarget, WorkerId,
+    LynxViewError, NoWakeup, PainterError, ScreenMetrics, Screenshot, ScriptSource, StyleThreads,
+    ViewSources, WindowTarget, WorkerId,
 };

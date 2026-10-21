@@ -35,7 +35,7 @@ async fn view(
 
 #[tokio::test]
 async fn host_capabilities_compose_into_the_opaque_view() {
-    let images = Rc::new(flashbulb::TestImages::new());
+    let images = Rc::new(prime_radiant::TestImages::new());
     images.insert_rgba8("app:///pixel.png", 1, 1, vec![0, 0, 0, 255]);
 
     let (mut view, painter) = view(

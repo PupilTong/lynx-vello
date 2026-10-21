@@ -52,11 +52,11 @@ cross-platform engine built on:
   the CSS 2.2 §10.8.1 line boxes both paragraph kinds report
 
 The from-scratch layout engine (successor to the C++ engine's `starlight`) is
-`crates/hughie` — its host protocol, shared layout machinery, and CSS
+`crates/seldon` — its host protocol, shared layout machinery, and CSS
 flexbox, Grid, CSS Grid Level 3 `display: grid-lanes`, and Starlight
 `display: relative` and `display: linear`
 algorithms are implemented as first-class peers. Its concrete document/stylo
-host lives in `crates/dom`'s `layout` module
+host lives in `crates/terminus`'s `layout` module
 (`Document::layout`, results queried by `NodeId` from the document); the Lynx-specific runtime
 policy layer remains pending, while W3C text nodes already use the concrete
 Parley path. See
@@ -153,9 +153,9 @@ Rust parses structured input only when Rust behavior actually needs its fields
 | `crates/bobcat-resources` | Reference resource system: transports, MIME pipeline, caches, platform image decoding. | [→](#cratesbobcat-resources) |
 | `crates/bobcat-cli` | The `bobcat` product (`cli`) and the `bobcat-server` screenshot service (`server`), both embedders. | [cli](#cratesbobcat-cli-cli-feature), [server](#cratesbobcat-cli-server-feature) |
 | `crates/bobcat-wasm` | The pure-Rust `wasm-bindgen` browser embedder and npm facade. | [→](#cratesbobcat-wasm) |
-| `crates/dom` | Generic W3C-DOM-subset document tree and standards-oriented CSS computation core. | [→](#cratesdom) |
-| `crates/hughie` | The from-scratch Flexbox, Grid, grid-lanes, and Starlight Relative and Linear layout engine. | [→](#crateshughie) |
-| `crates/flashbulb` | Screenshot testing: RGBA image, PNG codec, pixelmatch port, golden store. | [→](#cratesflashbulb) |
+| `crates/terminus` | Generic W3C-DOM-subset document tree and standards-oriented CSS computation core. | [→](#cratesterminus) |
+| `crates/seldon` | The from-scratch Flexbox, Grid, grid-lanes, and Starlight Relative and Linear layout engine. | [→](#cratesseldon) |
+| `crates/prime-radiant` | Screenshot testing: RGBA image, PNG codec, pixelmatch port, golden store. | [→](#cratesprime-radiant) |
 | `packages/bobcat-element` | Dependency-free TypeScript sources of the ESMs `bobcat-core` preloads into its realms. | [→](#packagesbobcat-element) |
 | `packages/reactlynx-test-fixtures` | ReactLynx source fixtures and bundle generators for Bobcat integration tests. | [→](#other-pnpm-packages) |
 | `packages/explorer-homepage` | The Lynx Explorer home screen, written in ReactLynx. | [→](#other-pnpm-packages) |
@@ -267,15 +267,13 @@ page and what it adds to the realm driver, `quickjs.rs`'s script engine,
 `runtime/` for realm integration, `workers.rs` for the `Worker` class, `tree/`
 for Lynx page policy.
 `background/` is the `bobcat-workers` thread and its worker realms. `view/` is
-the public view facade, `paint/` the `Painter` with its `gesture.rs` input
-router, `motion.rs` scroll kinematics (lynx-ui's rubber band, fling decay,
-bounce back, and the glide — the bounce back's spring toward a snap position
-or a smooth programmatic scroll's target) with `inertia.rs` running them over
-the scroll intents, beside the constant-rate motion of Lynx's `autoScroll`
-(which yields to every one of them and to a finger, writes at most about
-sixty times a second and a physical pixel at a time, and owes no frame while
-it cannot move),
-`images.rs` image protocol and `graphics.rs` GPU target. `link.rs` is
+the public view facade, `paint/` the `Painter` facade: its link to one view
+(the publication watch, the seat's mailbox, the events it sends to main) and
+Lynx's gesture policy (`LYNX_GESTURES`) with the provenance of the scroll
+physics. The engine half it wraps — the input router, the scroll kinematics
+and the motions run over the scroll intents (Lynx's `autoScroll` among them),
+the image protocol and the GPU target — is `terminus`'s `painter/`, reached
+through `terminus::link::painter`. `link.rs` is
 the one channel set a view spans its two threads with, `jobs.rs` the engine
 thread itself — its scheduler and its job queue — `lifetime.rs` the task set,
 token and latches a view and a worker are both built from, `realm/` the one
@@ -394,7 +392,7 @@ not. `ToMain` carries a `PageUpdate` (the data, global-prop, global-event and
 reload commands a host accepted after observing MTS boot, in host FIFO order),
 a `DispatchEvent` (one event's type and target, plus the payload the router
 decided as values: the position, the wheel delta, the timestamp and — for the
-four touch events — its touch points), an `Edit` (one `dom::editing::Command`
+four touch events — its touch points), an `Edit` (one `terminus::link::editing::Command`
 for the focused editing host, from `LynxView::edit`; main dispatches the
 `beforeinput`/`input`/`composition*` events it owes around the change, which
 no listener can stop), a `Vsync` (the display-frame reading a realm that called
@@ -432,7 +430,7 @@ arrives through `pump`; constructor errors cover attachment, an unknown default
 font family and two native modules claiming one name.
 
 **That same call hands the fetcher the view's startup sources.** It validates
-the fonts and default family first — a `dom::TextContext`'s business, with no
+the fonts and default family first — a `terminus::link::TextContext`'s business, with no
 document and zero fetches on failure, which is why the check has to be here
 rather than a turn later — and then requests each stylesheet in the order the
 view listed them, followed by the entry module, on the embedder's thread,
@@ -512,7 +510,7 @@ restyling in parallel, on the assumption that a person drives one view at a
 time. A host that needs two pages genuinely parallel gives them a group each,
 on a thread each.
 
-`bobcat-main` builds the group's one `dom::StylePool` — sized by the
+`bobcat-main` builds the group's one `terminus::link::StylePool` — sized by the
 `StyleThreads` passed to `LynxGroup::new`, `Auto` being the usual choice —
 before any view attaches, and every document it carries holds an `Rc` of it.
 Stylo's bloom filter and style-sharing cache are per-OS-thread borrows held for
@@ -533,7 +531,7 @@ group's rather than any view's.** A host that replaces groups — every
 linear memory. `StyleThreads::Sequential`, and `Auto` where the pool would have
 held `bobcat-main` and nothing else, gives a group no pool at all and traverses
 on `bobcat-main` alone, a configuration rather than a fallback.
-`dom::MAX_STYLE_THREADS` is six, counted the way Stylo counts its own six: a
+`terminus::link::MAX_STYLE_THREADS` is six, counted the way Stylo counts its own six: a
 ceiling, not a tuning knob, because Stylo indexes its per-traversal
 thread-local storage by Rayon thread index into an array that long, so a wider
 pool is a construction error rather than a silent clamp, reported by
@@ -559,7 +557,7 @@ stylesheet requests with CSS text or a `PreparsedStyleSheet`
 (`bobcat_core::style`) the host parsed itself, since a `.web.bundle` ships CSS
 a build step already tokenized and re-serializing it to a sheet blob is the
 startup cost the design rules out. Lowering it produces no stylesheet text:
-rules, keyframes and font-face rules are built through `dom`'s branded
+rules, keyframes and font-face rules are built through `terminus`'s branded
 `CssRule` builders, leaving stylo one selector-list parse per rule and one
 value parse per declaration — the floor, because the wire format keeps
 attribute selectors and functional pseudo-classes as text and stylo builds
@@ -591,7 +589,7 @@ own cache/retry policy.
 fetcher builder, and for the same reason: a module runs on the embedder's own
 thread, inside `LynxView::pump`, so it needs neither `Send` nor `Sync` and a
 Wasm module may hold `JsValue`s. One `dyn` handler per `NativeModules` key,
-`dom::CustomElement`'s shape: `name()` and `methods()` are read once at
+`terminus::link::CustomElement`'s shape: `name()` and `methods()` are read once at
 construction — two modules of one name is `EngineError::DuplicateNativeModule`,
 returned as `LynxViewError::Engine` — and the table crosses to the realm as
 data, so nothing asks a module a question while script is running. The call
@@ -1080,9 +1078,9 @@ and deliver nothing, and the module does not invent the background-only
 
 #### Painter, frames, pacing and images
 
-The core depends on `dom` and re-exports one seam: the `input` module
-republishes `dom::Point2D` and
-`dom::input::{InputEvent, InputKind, PointerId, PointerKind, PointerPhase}`.
+The core depends on `terminus` and re-exports one seam: the `input` module
+republishes `terminus::link::Point2D` and
+`terminus::link::input::{InputEvent, InputKind, PointerId, PointerKind, PointerPhase}`.
 Wheel deltas there are viewport CSS pixels; converting physical-pixel, line or
 page units is embedder policy. No document, node or hit-test result crosses.
 
@@ -1206,7 +1204,7 @@ canvas's backing store first.
 
 **Images are entirely the embedder's**; core fetches, decodes, caches and
 retains no pixel of its own. A view's one resource system — its
-`ResourceFetcher`, which is also its `dom::FrameImages`, owned by the
+`ResourceFetcher`, which is also its `terminus::link::FrameImages`, owned by the
 `LynxView` as an `Rc` and read by an attached painter through the view's seat —
 is asked for one image at a time by source string (the `url(…)` value CSS
 produced, or a replaced element's source): named through `request_image`,
@@ -1214,11 +1212,11 @@ answered through `ImageReports` with the intrinsic size layout needs, given its
 moment in every `LynxView::pump` through `service_images` (where a host whose
 loads complete off-thread forwards them into the reports), and read back
 synchronously when a painter adopts a commit through `FrameImages::read`, which
-carries a `dom::ImageSizeHint` — the largest device-pixel extent the frame
+carries a `terminus::link::ImageSizeHint` — the largest device-pixel extent the frame
 draws that source at, computed per draw under its transform and unioned per
 source — so a host decodes to the draw rather than to the file. No container
 sniffing, codec contract, cache policy or byte budget lives in `bobcat-core` or
-`dom`; `crates/bobcat-resources` is the reference implementation every shipped
+`terminus`; `crates/bobcat-resources` is the reference implementation every shipped
 embedder uses. `FrameImages::retain` — the sources one resolve pass met, in
 paint order — carries **no default body**, so every store writes its working
 set where someone can see it rather than inheriting a silent no-op.
@@ -1228,11 +1226,11 @@ them.
 **An SVG document is parsed by the host, where it decodes bitmaps**
 (`docs/svg-lynx-component-design.md`, revision 4.1, ruled 2026-10-10). A
 fetched SVG is parsed by the fetcher with the engine's own parser,
-`dom::ImageEvent::parse_document` (re-exported as `ImageEvent`; the converter
-in `dom::render::svg`, which shapes no text), and reported through
+`terminus::link::ImageEvent::parse_document` (re-exported as `ImageEvent`; the converter
+in `terminus`'s `render/svg`, which shapes no text), and reported through
 `ImageReports::parsed_document(source, Arc<VectorDocument>)`, or `failed`
 when it does not parse; the report applies through
-`MainThreadRuntime::apply_image_events` like every other, where `dom` shapes
+`MainThreadRuntime::apply_image_events` like every other, where `terminus` shapes
 the document's text and encodes its scene, so the registry, the natural-size
 relayout and the `load`/`error` follow the path every other report takes.
 The markup an `<svg content>` hands the document (`Document::set_image_document`)
@@ -1624,7 +1622,7 @@ registered for collection, like the page realm's. The four generic members:
 (`tree::frame::nested_page`), refusing a frame more than `MAX_FRAME_DEPTH`
 (8) frames deep over shadow-including ancestors, so a card that embeds itself
 stops; it keeps no state. `resetFrame(frame)` is `tree::frame::reset_frame`:
-it `drop_element`s the nested page (inside a shadow tree, so `dom` frees the
+it `drop_element`s the nested page (inside a shadow tree, so `terminus` frees the
 whole subtree, and each freed node's listener rows and intersection
 registrations leave through the free path), clears the frame's shadow-root
 sheets (`Document::clear_shadow_stylesheets`), and appends a fresh
@@ -1641,7 +1639,7 @@ looking, because its handles' finalizers may still run before the realm goes
 and name nodes `resetFrame` already freed. `dropElement` of a frame host does
 nothing frame-specific: its shadow tree goes with it. Nodes a closed child
 created and never attached stay until the view ends. A child's event
-registrations are filed in `dom`'s listener table under its
+registrations are filed in `terminus`'s listener table under its
 `RealmId::Child(key).listener_key()` (never `ListenerKey(0)`,
 `RealmId::Page`'s); the
 host keeps no record of which page a child renders, and a dispatch calls it
@@ -1833,7 +1831,7 @@ it refused, `7` for a state that refused it (a dialog's
 `boundingClientRect` included (`left`, `top`, `width`, `height`), answers a
 length-prefixed record whose first field is the code. It matches no name
 itself: every name is the element's component's
-`dom::CustomElement::invoke`, reached through
+`terminus::link::CustomElement::invoke`, reached through
 `Document::invoke_element_method`, and on its `NotFound` the base set every
 element has (`tree::base_methods`: `boundingClientRect`, `scrollIntoView`,
 `scrollTo`, `scrollBy`). The params cross as JSON text, and as the empty
@@ -1844,7 +1842,7 @@ style + layout + paint commit and publishes one immutable `Arc<CommittedFrame>`
 on the view's watch. `Node`'s arena backpointer is a raw pointer, so a
 `Document` is not `Send`, and its realm never leaves `bobcat-main`. The
 boundary validates primitive arguments, live IDs and tree-mutation
-preconditions before entering `dom`, returning misuse as a JavaScript exception
+preconditions before entering `terminus`, returning misuse as a JavaScript exception
 (unexpected internal panics remain fatal on abort-only Wasm). An unflushed
 batch may present once its evaluation ends — web-core's visibility model.
 
@@ -1961,7 +1959,7 @@ took and whether or not a `catch` ended the walk, so a global delivery has
 The kernel walks; each realm runs its Lynx walk over the steps it holds
 (scheme D, user ruling 2026-10-18; every realm at the path's top, user ruling
 2026-10-19). The host computes the event path while it holds the document and
-walks it once (`dom`'s `EventWalk`), and at the path's first capture step
+walks it once (`terminus`'s `EventWalk`), and at the path's first capture step
 releases the document and makes one call to each listening realm's Element
 module `__BobcatDispatchEvent` export, the page realm first, then the
 children in construction order — the page realm's through
@@ -2003,7 +2001,7 @@ own walk and no other realm's. In a `frame`'s card `x`/`y` are relative to
 the frame's border box (`boundingClientRect` on the frame, once per position
 dispatch); `clientX`/`clientY`/`pageX`/`pageY` stay the viewport's.
 
-Which realms are called is the host's, from `dom`'s listener table, decided
+Which realms are called is the host's, from `terminus`'s listener table, decided
 before the walk: a realm with a path registration for the name on the path
 in a pass its steps run (`Document::listeners_on_path`), or with a
 `global-bindEvent` for it that the path reaches
@@ -2035,7 +2033,7 @@ whatever a listener did. The one veto on a built-in behavior is the embedder's
 
 Editable text (`docs/editable-text-design.md`, E2) is wired here.
 `LynxView::edit` sends `ToMain::Edit`; `MainThreadRuntime::apply_edit`
-prepares the command in `dom`, dispatches the events before the change at the
+prepares the command in `terminus`, dispatches the events before the change at the
 host, commits, and dispatches the rest. A routed `keydown`/`keyup` is
 delivered at `Document::focused()` when there is one, and a `keydown` at a
 focused host runs the keyboard's editing command (`key_command`), which
@@ -2048,7 +2046,7 @@ line break as an edit), when a `keydown` only moves the selection and
 selects all; a mouse's primary `pointerdown`, or a finger's or pen's tap (the
 `click`), inside an editing host focuses it
 (dispatching `focus`/`focusin`, and `blur`/`focusout` at the host that lost
-it — drained from `dom` right after the press) and places the caret, a second
+it — drained from `terminus` right after the press) and places the caret, a second
 and third quick press select the word and the line, and a held mouse drag
 extends. The slot routes those names on an editing account of its own, by
 state (`editing::EditingRoute`), one more term of `DocumentSlot::routes_given`
@@ -2069,9 +2067,9 @@ they stay in that tree for its component; a press in a text field outside its
 editor focuses the editor (`tree::focus_delegate`); after every applied
 command `apply_edit` fires the engine-only `selectionchange` at the host
 through the Rust walk; and focus events a UI method's `focus()`/`blur()` left
-in `dom` are dispatched from the entry that delivers component events. That
+in `terminus` are dispatched from the entry that delivers component events. That
 entry also fires the W3C `selectionchange` at the document node (not
-bubbling) whenever `dom`'s flag is set, which `has_component_events` asks so
+bubbling) whenever `terminus`'s flag is set, which `has_component_events` asks so
 the epilogue posts the entry; the realm's boot-module `document` is the
 document node's handle and its `addEventListener` hears it. The `text`
 component's Lynx `selectionchange` (`{start, end, direction}` at `text` and
@@ -2080,17 +2078,17 @@ component's Lynx `selectionchange` (`{start, end, direction}` at `text` and
 
 That host side is one function, `MainThreadRuntime::dispatch`, the only place
 an event script hears is delivered. It computes the steps once and drives
-`dom`'s walk over them (`Document::event_walk`/`Document::advance`) step by
+`terminus`'s walk over them (`Document::event_walk`/`Document::advance`) step by
 step, so an engine component whose definition lists the type in
 `CustomElement::observed_events` hears it at its own step; a component's
 `stop_propagation` is the walk's one stop flag and ends the walk after its
 step, which keeps no realm from its call, every call being at the first. What
 the event carries
-is `dom::event::EventDetail` (one variant per payload shape), which the router
+is `terminus::link::event::EventDetail` (one variant per payload shape), which the router
 fills in, `ToMain::DispatchEvent` carries, the Rust walk lends out and
 `encode_detail` turns into the realm's numbers. A name a component observes is
 in the painter's name set while an element of that component exists, beside
-the listener table's names: `dom`'s `Document::take_observed_name_changes`
+the listener table's names: `terminus`'s `Document::take_observed_name_changes`
 reports each observed name that became live or stopped being, and
 `Document::take_pending_last_removals` each name whose last registration a
 freed node removed, both drained before each commit is published
@@ -2099,7 +2097,7 @@ CSSOM-View's `scroll` and `scrollend` are decided on this thread, never on
 the painter: `adopt_scroll_offsets` queues a `scroll` per container a post
 moved and a `scrollend` when a post names it at rest after it scrolled, and an
 instant scroll request — a script's, a component's, or the render's move to a
-new `scroll-initial-target` (`dom::Document::take_instant_scrolls`) — queues
+new `scroll-initial-target` (`terminus::link::Document::take_instant_scrolls`) — queues
 its `scroll` from its entry's epilogue, after the commit, and gets its
 `scrollend` from the painter's rest post after carrying the request out. A wheel gesture rests
 once, 100 ms after its last tick (`WHEEL_REST_SECONDS`). All are component
@@ -2111,12 +2109,12 @@ One event deliberately does **not** take that path, because it is the
 engine's own rather than script's: css-contain-2 §4.4's
 `contentvisibilityautostatechange`. The commit that determines
 `content-visibility: auto` relevance leaves the elements whose *skipping*
-changed in `dom`'s own queue; the page's epilogue posts **one fresh entry**
+changed in `terminus`'s own queue; the page's epilogue posts **one fresh entry**
 for the batch, which is the spec's "posting a task" — the event is never
 delivered inside the entry that committed — and that entry calls
 `Document::dispatch_content_visibility_changes`, which fires each one through
-`Document::dispatch_element_event`. The walk is `dom`'s, the listeners are
-`dom::CustomElement` definitions (the engine's components — `<image>` today,
+`Document::dispatch_element_event`. The walk is `terminus`'s, the listeners are
+`terminus::link::CustomElement` definitions (the engine's components — `<image>` today,
 `<list>` next) reached through `CustomElement::handle_event`, and **no realm
 is entered at all**: there is no export, no Lynx event name, no
 `__AddEvent`/worklet table consultation and no `global-bindEvent` pass, and a
@@ -2131,7 +2129,7 @@ the listener table's `RegistrationChange::{FirstAdded, LastRemoved}` are
 (`DocumentSlot::publish_route_changes`, `ViewOutbox::set_name_routed`).
 
 A second engine-decided path is the **W3C IntersectionObserver primitive**
-(`crates/dom/src/visual/intersection/`, user-directed 2026-10-08, Rust-only:
+(`crates/terminus/src/visual/intersection/`, user-directed 2026-10-08, Rust-only:
 no `IntersectionObserver` global and no `lynx.createIntersectionObserver`
 yet). The page's epilogue runs `Document::update_intersection_observations`
 right after its commit — whether or not that commit built a frame, because a
@@ -2146,7 +2144,7 @@ is bound to the element; the MTS binding's handler will queue
 `(observer, entries)` on a runtime queue the same entry drains into the realm
 after the loop. The update is the spec's §3.2.10 pass — threshold index and
 `isIntersecting` compared with the registration's previous pair — over
-transform-aware, clip-aware geometry; see `docs/dom-architecture.md`
+transform-aware, clip-aware geometry; see `docs/terminus-architecture.md`
 "Intersection observations".
 
 **Lynx exposure** (`crates/bobcat-core/src/main/exposure.rs`, user-directed
@@ -2231,7 +2229,7 @@ timer. The defaults where the references differ are in
 
 **Lynx layout events** (`crates/bobcat-core/src/main/layout_change.rs`,
 user-directed 2026-10-20, `docs/layout-observer-design.md` §5) are the
-second bucket-2 adapter, over two `dom` primitives. `layoutchange` is one
+second bucket-2 adapter, over two `terminus` primitives. `layoutchange` is one
 document-wide `ResizeObserver` (created on the first registration) of which
 every element with a `layoutchange` row in the listener table, any realm and
 any form, is a `border-box` target — an `overlay`'s or `x-overlay-ng`'s
@@ -2246,7 +2244,7 @@ of a live element, `TextLayoutReport` is
 `Document::set_text_layout_reporting` of a `text` element. Its handler, bound to no node, only records the targets; the
 epilogue runs `update_resize_observations` after its commit and posts the
 resize delivery entry (`Page::post_resize_notifications`, before the
-intersection one), which runs `dom`'s broadcast and then dispatches
+intersection one), which runs `terminus`'s broadcast and then dispatches
 `layoutchange` at each recorded target, not bubbling, not composed, with the
 extras `left`, `top`, `width`, `height` of `bounding_client_rect` (all `0`
 for a target with no box); `bobcat:element` (`layoutDetailOf`) builds
@@ -2326,7 +2324,7 @@ also by `upper-threshold-item-count`/`lower-threshold-item-count`;
 `scrollIntoView`, CSSOM-View's `Document::scroll_into_view` with
 `container: "nearest"`, and CSSOM-View's `scrollTo`/`scrollBy` with a
 `ScrollToOptions` dictionary over `Document::scroll_to_with`; `focus`/`blur`
-are not built, `dom` having no focus model), `tree::viewpager` (`viewpager`/`x-viewpager-ng` as a
+are not built, `terminus` having no focus model), `tree::viewpager` (`viewpager`/`x-viewpager-ng` as a
 horizontal scroll container that snaps page by page, its pages' row pinned in
 the cascade, the initial page (`select-index`/`initial-select-index`) as a
 typed `attr()` and an `if()` over `sibling-index()` into
@@ -2380,27 +2378,22 @@ slot for the fold order, and the structure pinned in the cascade; a component
 on the two coordinator tags whose only member is the `setFoldExpanded` UI
 method, its `CustomElement::invoke`, a scroll of the coordinator to `offset`
 clamped to the fold range; iOS's `getScrollInfo` and `scrollBy` are not
-built), `tree::dialog` (HTML's `<dialog>` on `dom`'s top
-layer: HTML's UA rules adapted — the display `defaultDisplayLinear` picks,
-`Canvas`/`CanvasText` (light scheme), `overflow: scroll` and `top`/`bottom`
-on `:modal`, `-servo-top-layer: auto` on `:modal` and `::backdrop` so Stylo's
-§3.1 position fixup runs, `::backdrop` with `display: flex` — a component with no per-element state whose `open`
-attribute callback is the one path that flips `:open` and, on removal or
-`"false"`, leaves the top layer; "modal" is `Document::blocks_document`; the
-four HTML methods as UI methods, the component's `CustomElement::invoke`, an
-`InvalidStateError` answering native's code 7 (a ruled deviation from
-web-core's 4) — `showModal()` also refusing
-a dialog showing as a popover; non-bubbling `close` and
-`cancel` on the shared `ComponentEvents` queue `tree/lib.rs` defines, which
-also carries an image's `load`/`error` and which the page's epilogue posts
-once per batch), `tree::popover` (HTML's popover UA rules over `dom`'s
-popover algorithms: hidden is `display: none`, the `[popover]` box,
-`:popover-open` on the top layer, and a transparent, untouchable
-`::backdrop` with HTML's one `!important`; no component), `tree::overlay` (`overlay`/`x-overlay-ng`, Lynx's modal
+built), HTML's `<dialog>` and popover UA rules, which are `terminus::link::html`'s
+(`new_document` calls `Document::define_html_elements` before it defines
+the overlays, which build a `dialog` in their shadow trees, and registers
+the shared `ComponentEvents` queue `tree/lib.rs` defines as the document's
+`QueuedEventSink`, so a dialog's non-bubbling `close` and `cancel` land on
+it in order with every component's events, beside an image's `load`/`error`,
+for the page's epilogue to post once per batch; `ua_sheet.rs` imports their
+rules and writes the display
+`defaultDisplayLinear` picks for `dialog` and `dialog:popover-open`; the
+dialog's four methods are UI methods, an `InvalidStateError` answering
+native's code 7, a ruled deviation from web-core's 4; `dialog_tests.rs` and
+`popover_tests.rs` test both under the Lynx sheet), `tree::overlay` (`overlay`/`x-overlay-ng`, Lynx's modal
 layer, built as web-core builds it: the host is `display: contents` and
 paints nothing, and a UA shadow tree `dialog#dialog[part=dialog] >
 div.overlay-inner > slot` carries the content — the dialog
-(`popover="manual"`) is `tree::dialog`'s own element, driven only through
+(`popover="manual"`) is `terminus::link::html::dialog`'s own element, driven only through
 HTML's API for it, as web-core drives its own: `visible` (present and not
 `"false"`) on a connected host shows it with `showModal()`, or — under
 `events-pass-through` — as a Manual popover, the top-layer element HTML does
@@ -2459,7 +2452,7 @@ E5: a UA shadow tree of one `contenteditable="plaintext-only"` editor — for
 context, `white-space: pre`; for `x-textarea` a Lynx `<text>`, whose Lynx
 paragraph lays the lines out — and a `#placeholder` shown while the editor
 is `:empty`, whose text block is the field's `::placeholder` (it carries
-`pseudo="-webkit-input-placeholder"`, `dom::PLACEHOLDER_PSEUDO_ID`, so an
+`pseudo="-webkit-input-placeholder"`, `terminus::link::PLACEHOLDER_PSEUDO_ID`, so an
 author's `.hint::placeholder` rule reaches it under css-pseudo-4's property
 restriction, and the UA sheet's `x-input::placeholder` rules lay it out);
 the host is the field's box; the placeholder style attributes
@@ -2483,7 +2476,7 @@ hints, the swiper's item count, the refresh view's slot
 assignment, the dialog's `:open`/`:modal` state, the overlay's shadow
 tree, its dialog's top-layer membership and its events, the markdown
 element's shadow tree, its rendering and its events, and the frame's
-shadow root need `dom::CustomElement` callbacks. Runtime attribute members perform
+shadow root need `terminus::link::CustomElement` callbacks. Runtime attribute members perform
 DOM mutations; Stylo tracks attribute dependencies and recascades on changes.
 HTML's own rules — the dialog's, the popover's and the display `dialog` maps
 `block` to — are written with their selectors inside `:where()` and ordered
@@ -2516,7 +2509,7 @@ without a box; `dispatch_component_events` tells it apart with
 component-event batch while its commit was skipped (`needs_render`, a listed
 author sheet still outstanding) and posts it after the first commit.
 
-The native host-module functions call `dom::Document` directly. Element
+The native host-module functions call `terminus::link::Document` directly. Element
 identity is the DOM `NodeId`, which is also the element's Lynx `unique_id` —
 one number, issued by the DOM, never reissued; the JS side mints no ids.
 
@@ -2532,11 +2525,11 @@ paragraph whatever `defaultDisplayLinear` says, `wrapper` is
 `display: contents`, and `raw-text` dissolves into the `text` it is written
 inside, or — a ruled deviation from web-core — into a tag that is not a Lynx
 tag (`div`, `span`, any other name; `tree::raw_text`'s `LYNX_TAGS`), there as
-loose text that `dom` boxes into anonymous items; under any other Lynx tag it is
+loose text that `terminus` boxes into anonymous items; under any other Lynx tag it is
 `display: none`. One `wrapper` level is looked through either way. A `text`
 keeps its text verbatim, as every native backend does (user ruling
 2026-10-16): every Lynx paragraph (a Lynx text element's) skips CSS white-space
-processing (`hughie::text::paragraph`'s `WhiteSpaceProcessing::Verbatim`; no
+processing (`seldon::text::paragraph`'s `WhiteSpaceProcessing::Verbatim`; no
 switch, user ruling 2026-10-17), so space runs, leading spaces, tabs (20px
 stops) and every newline stay, trailing spaces hang, a newline that ends the
 text adds an empty last line (Android's `StaticLayout`), and only
@@ -2559,7 +2552,7 @@ fractional counts and default to `-1` (unlimited). No numeric-prefix parsing or
 CSS expressions in attributes are supported. `text[tail-color-convert="true"]`
 sets `--lynx-tail-color-convert: 1`, otherwise its registered default is zero.
 A `text > inline-truncation` subtree carries `--lynx-inline-truncation` so
-`crates/dom` can lay it in at the clamp without naming a Lynx tag.
+`crates/terminus` can lay it in at the clamp without naming a Lynx tag.
 DOM's borrowed `StyleView` reads their computed values
 through `LynxTextStyle`, and `BlockStyle::from_container_style` consumes
 those inputs. Normal and animated style refreshes merge effective limit changes
@@ -3164,7 +3157,7 @@ as a `bobcat-edit` (`insertText`/`insertFromPaste` → `insert`, the line
 breaks, the deletions, `deleteByCut` → `deleteBackward`); a composition is
 `setComposition` per update, read at the `input` after it, and at its end a
 `finishComposition` (the end's text is the last update's) or a `commitText`. `BobcatRenderer::edit` reads the flat call back into
-`dom::editing::Command` (`src/text_input.rs`, natively tested) and drops it
+`terminus::link::editing::Command` (`src/text_input.rs`, natively tested) and drops it
 while the view cannot take edits. Every view is set to
 `TextInputSource::Commands`, so a key carries no text and its `keydown` only
 moves and selects all; the facade prevents the textarea's own handling of
@@ -3363,7 +3356,7 @@ elements are connected, so their handles are held above them.
 
 The JavaScript layer deliberately does not validate handles: a foreign handle
 resolves to `undefined`, which the private native boundary rejects as a
-JavaScript error before entering `dom`. Native access is limited to named
+JavaScript error before entering `terminus`. Native access is limited to named
 imports from the native `bobcat-internal:host` ESM; the realm has no
 `globalThis.bobcat`, no global `console`, and no DOM. Named exports are the only
 Element-PAPI surface for transformed MTS entries; a local named Lepus chunk
@@ -3428,14 +3421,28 @@ of the element path in the same file.
   of the `lynx-stack` source tree. See `examples/README.md` for the TypeScript
   arrangement each one needs.
 
-### crates/dom
+### crates/terminus
 
 Generic W3C-DOM-subset document tree and standards-oriented CSS computation
-core, on stylo's cascade. `docs/dom-public-api.md` is the authoritative
+core, on stylo's cascade. `docs/terminus-link-api.md` is the authoritative
 normal-build versus test-feature API boundary. It must not contain Lynx
 runtime-element vocabulary or Lynx device/unit policy: Lynx computed defaults
 (border-box, `overflow: clip`, `display: linear` on every element, …) stay
 embedder cascade policy in the UA sheet.
+
+Its one public module is `terminus::link` (`src/link.rs`). Every other module
+is private and the crate root re-exports nothing, so every crate built on it —
+the bobcat crates, `prime-radiant`, `seldon`'s benchmarks, and `terminus`'s own
+integration tests, benchmarks and examples — names an item as
+`terminus::link::…` (`terminus::link::Document`,
+`terminus::link::painter::Painter`, `terminus::link::html::dialog::show_modal`).
+The link re-exports each item by name, in submodules that keep the crate's
+module names (`editing`, `event`, `input`, `layout`, `render`, `scroll`,
+`html`, `painter`) with everything else at its top, and
+`#![deny(unreachable_pub)]` keeps it curated: a `pub` item the link does not
+reach fails the build, so it is on the link (a consumer names it, or a link
+item hands it out) or it is `pub(crate)`. A new consumer need is a new name on the link and in its row of
+`docs/terminus-link-api.md`.
 
 Subsystems:
 
@@ -3451,9 +3458,25 @@ Subsystems:
   css-grid-1 §6). `LayoutTree::children` answers the boxes in place of the
   text, they are re-derived after each style flush from what mutations
   recorded, and a hit on one targets its container.
+- `html/` — HTML elements `terminus` implements over its own tree, never
+  defined by `Document::new` (a test that builds a `<dialog>` by hand gets a
+  plain element) but by `Document::define_html_elements`, which an embedder
+  calls before any element carries their tags: `html::dialog` is HTML's
+  `<dialog>` — `UA_RULES` and `DIALOG_TAG`, a component with no per-element
+  state whose `open` attribute callback is the one path that flips `:open`
+  and, on removal or `"false"`, leaves the top layer, "modal" being
+  `Document::blocks_document`, and `show`/`show_modal`/`close`/`request_close`
+  (also the component's `CustomElement::invoke`, an `InvalidStateError`
+  answering `MethodError::InvalidState`); `html::popover::UA_RULES` is HTML's
+  popover rules over `tree/popover.rs`. Every rule is HTML's selector inside
+  `:where()`, `display` is the embedder's to write, and the module doc gives
+  the source order that keeps HTML's precedence. A dialog's `close` and
+  `cancel` go, at the moment they are queued, to the document's
+  `event::QueuedEventSink` (`Document::set_queued_event_sink`, registered
+  once by the embedder; with none they are dropped).
 - `style/` — the per-document `StyleEngine` (`Stylist`, cascade pipeline,
   device, stylesheet set, `SharedRwLock`), flush, invalidation, `StyleDamage`.
-- `layout/` — the concrete `hughie` host: `Document::layout`, the `LayoutTree`
+- `layout/` — the concrete `seldon` host: `Document::layout`, the `LayoutTree`
   impl, per-node `LayoutSlot`s in `DocumentLayoutState`, and the two
   per-element facts a `StyleView` answers with that no computed value carries:
   `content-visibility: auto` relevance (`relevance.rs`) and the css-sizing-4
@@ -3482,12 +3505,12 @@ Subsystems:
   `inline_source_range`, which the geometry APIs (`text_range_boxes`,
   `text_index_at_point`) answer from for either kind; `paragraph_kind` and
   `paragraph_line_count` say which kind a node established and how many
-  lines its last commit laid out. The `<text>` `layout` event's `dom` half
+  lines its last commit laid out. The `<text>` `layout` event's `terminus` half
   (`docs/layout-observer-design.md` §3.3): `Document::set_text_layout_reporting`
   puts a Lynx text element in `DocumentLayoutState::text_layout_reporters`
   (a node-keyed set, empty and unallocated on a page without one; a
   non-Lynx-text node panics); the committing branch of
-  `compute_text_block_layout`, reached only on a hughie cache miss, pushes a
+  `compute_text_block_layout`, reached only on a seldon cache miss, pushes a
   reporting element onto `text_layout_reports`;
   `Document::take_text_layout_reports` hands that list over deduplicated in
   first-occurrence order (one `layout()` can commit a paragraph in several
@@ -3500,11 +3523,11 @@ Subsystems:
   `RenderLayer` group effects, reverse-paint-order hit testing, and
   `content-visibility: auto` relevance determination (`relevance.rs`), which
   runs inside `render` between the paint-order build and the walk.
-- `paint/` — the document-owned private `Painter`, walker, fragment painters
+- `paint/` — the document-owned private `FramePainter`, walker, fragment painters
   and the retained `vello::Scene` a `commit` publishes as `CommittedFrame`.
 - `scroll/` — CSSOM-View geometry, per-node offsets, `scroll_to`/`scroll_by`/
   `scroll_chain`, and the one chain walk (`drive_chain`) both the document
-  and `bobcat-core`'s painter run: `overscroll-behavior` fences the reach,
+  and the presenting painter (`painter/`) run: `overscroll-behavior` fences the reach,
   the engine's own `scroll-capture-x` / `scroll-capture-y` (shorthand
   `scroll-capture`) hands a gesture to the container above first (per axis,
   for the named delta sign). `scroll/snap.rs` is css-scroll-snap-1 — positions from
@@ -3515,7 +3538,7 @@ Subsystems:
   position follows that area through a layout change (§4.1.3) instead of
   taking the position nearest its old offset: the document moves its own
   offset inside the render (`Document::resnap`, the committed frame's
-  positions against the newly built ones), and `bobcat-core`'s painter the
+  positions against the newly built ones), and the presenting painter the
   offset it holds when it adopts the commit, unless a drag, fling, bounce
   back or glide has the container.
   `scroll/request.rs` is CSSOM-View's `scrollTo({behavior})`: a script-facing
@@ -3547,7 +3570,7 @@ Subsystems:
   a flex host's loose text; a host's own paragraph keeps one empty line of
   its strut when empty, so the host is one line tall — with every offset
   converted through that paragraph's source map
-  (`hughie::text::paragraph::OffsetMap`), the
+  (`seldon::text::paragraph::OffsetMap`), the
   Chromium-shaped command set with
   its `beforeinput`/`input`/`composition*` events reported as data
   (`prepare_editing`/`commit_editing`), `TextInputState`, and the read-only
@@ -3580,6 +3603,15 @@ Subsystems:
   `backdrop-filter` bake at the document's root renders over the canvas
   colour its caller composites over, which `FilterTextures::prepare` and
   `Headless::prepare_filters` therefore take.
+- `painter/` — the presenting painter (`link::painter::Painter`), built on the
+  thread that draws and `!Send`: the input router and gesture synthesis on an
+  owner's `GesturePolicy` (`gesture.rs`), the scroll kinematics (`motion.rs`)
+  and the drags, flings, bounce backs, glides and auto-scrolls run over its
+  scroll intents (`inertia.rs`), the pixels an adopted frame draws
+  (`images.rs`) and the window target (`graphics.rs`). It composes each
+  committed frame at its own offsets and posts them back
+  (`Painter::drain_changed`); `bobcat-core`'s `Painter` facade is its link to
+  one view.
 
 **Vector images** (`docs/svg-lynx-component-design.md`): an SVG document used
 as an image — `<image src>`, `background-image`, `mask-image`, the Lynx
@@ -3588,7 +3620,7 @@ it decodes bitmaps, with `ImageEvent::parse_document(source, bytes, kind)`
 and reports `ImageReports::parsed_document(source, Arc<VectorDocument>)`,
 carried by `ImageEvent::ParsedDocument`, or `failed` (`DocumentKind`, what
 the host passes the parser, is `#[non_exhaustive]`, so a second engine-drawn
-format is one more variant). The parse is `dom`'s own
+format is one more variant). The parse is `terminus`'s own
 converter, `render/svg/` over `roxmltree` and `svgtypes` (no `usvg`; its
 module docs list the supported subset). It reads presentation attributes
 only: CSS inside an SVG document (a `<style>` element, a `style` attribute)
@@ -3599,9 +3631,9 @@ and brushes resolved and text collected but unshaped, so it needs no fonts and
 is `Send + Sync`; it is `pub` with no public member, and shared in an `Arc`
 so every report of one parse (one per view waiting on a load) holds one copy.
 `ImageEvent::parse_document` is the only entry to the converter from outside
-`dom`, and returns `ImageEvent::ParsedDocument` or `Failed`.
+`terminus`, and returns `ImageEvent::ParsedDocument` or `Failed`.
 `Document::apply_image_events` never parses. Applying a parsed document shapes its `<text>` through the document's own
-`TextContext` (`hughie::text::shape_line`; font family, weight, style,
+`TextContext` (`seldon::text::shape_line`; font family, weight, style,
 stretch and size come from the SVG's own attributes, not the host element's
 style) and encodes it once into a crate-private `VectorImage` (an
 `Arc<Scene>`, its viewport, its `preserveAspectRatio`, a process-unique key),
@@ -3632,7 +3664,7 @@ source, `svg-content:` and the 32 hex digits of a 128-bit SipHash-1-3 of the
 bytes (`siphasher`), so identical markup is one entry, one parse, one scene
 and one texture however many elements set it. An unknown source is created
 `Pending` and its bytes queued as a document request,
-`Document::take_document_requests` (`dom::DocumentRequest` tuples, drained
+`Document::take_document_requests` (`terminus::link::DocumentRequest` tuples, drained
 once, which the embedder hands the host to parse and report like a fetched
 document); a known one binds and settles at once. No bind and no walk ever
 asks the host to fetch a synthetic source, and its entry is forgotten when
@@ -3655,12 +3687,12 @@ Rulings and limits to know before touching it:
   container is no stacking context by itself, as on the web and web-core
   (user decision, 2026-09-24): native Lynx's `z-index` capping inside
   scroll views is deliberately not followed.
-- `content-visibility: auto` relevance is `dom`'s, determined once per commit
+- `content-visibility: auto` relevance is `terminus`'s, determined once per commit
   against the region the paint walk's culling admits, and stored as
   layout-side per-element state in a slot-keyed side table on `TreeArenas` —
-  never a Stylo `ElementState`, never a restyle trigger. `hughie` sees it only
+  never a Stylo `ElementState`, never a restyle trigger. `seldon` sees it only
   as `CoreStyle::skips_contents`. A relevance flip reveals inside the same
-  commit (`crates/dom/src/visual/relevance.rs`, at most four build passes
+  commit (`crates/terminus/src/visual/relevance.rs`, at most four build passes
   under one commit id), so no frame is published with a reveal pending.
 - Animations and transitions inside **skipped contents** are frozen
   (css-contain-2 §4): the driver carries their start times by each tick's
@@ -3670,9 +3702,9 @@ Rulings and limits to know before touching it:
   style is not skipped, so an animation that *starts* while skipped is created
   and frozen at its start rather than not created — is in
   `docs/style-assumptions.md` §19.
-- The css-sizing-4 **last remembered size** is `dom`'s in the same way, in a
+- The css-sizing-4 **last remembered size** is `terminus`'s in the same way, in a
   second slot-keyed side table on `TreeArenas`
-  (`crates/dom/src/layout/remembered.rs`): the layout host records a box's
+  (`crates/terminus/src/layout/remembered.rs`): the layout host records a box's
   content box after every committing run in which it had no size containment,
   and `StyleView` substitutes it into `CoreStyle::contain_intrinsic_{width,
   height}` once the box is skipping. That commit's layout run is the spec's
@@ -3680,7 +3712,7 @@ Rulings and limits to know before touching it:
   and deliver later, from a posted entry), and csswg-drafts
   #8407 (`content-visibility: auto` implies the `auto` keyword) is folded in
   here because the fork's own adjuster is `#[cfg(feature = "gecko")]`.
-  `hughie` is unchanged by either: it reads `AutoLength(l)` as `l` already.
+  `seldon` is unchanged by either: it reads `AutoLength(l)` as `l` already.
 - `position: sticky` stays in normal flow and resolves its inset/containing-block
   constraints in the retained frame at live scroll offsets; painting, hit
   testing and bounding rectangles share the same sticky geometry.
@@ -3698,7 +3730,7 @@ Rulings and limits to know before touching it:
 - The fork's `lynx` feature carries css-values-5 `if()` (an arbitrary
   substitution function with `style()` / `media()` / `supports()` tests) and
   `sibling-index()` / `sibling-count()`, neither of which Lynx has
-  (user-directed 2026-09-28). `dom` adds no code for them: a queried custom
+  (user-directed 2026-09-28). `terminus` adds no code for them: a queried custom
   property, an `attr()` read, a child-list change and a device change already
   recascade what depends on them, and the fork flags a style that reads a
   parent's non-inherited custom property `INHERITS_RESET_STYLE`. Scope,
@@ -3708,34 +3740,34 @@ Rulings and limits to know before touching it:
   2026-10-12; Lynx's CSS compiler drops the rule and the `.web.bundle` wire
   cannot carry it, so it reaches the engine through CSS-text sheets only).
   Matching, proximity, invalidation and the sharing cache's scope check are
-  stylo's. `dom` adds one thing: a shadow tree's sheets — CSS text through
+  stylo's. `terminus` adds one thing: a shadow tree's sheets — CSS text through
   `Document::add_shadow_stylesheet`, pre-built rules through
   `Document::append_shadow_rules` — are
-  `ShadowStyleSheet`s (`crates/dom/src/style/engine.rs`), whose implicit
+  `ShadowStyleSheet`s (`crates/terminus/src/style/engine.rs`), whose implicit
   `@scope` root is the shadow host (`ImplicitScopeRoot::Constructed`), where
   a document sheet's is the document element. WPT ports are in
-  `crates/dom/tests/scope.rs`; scope and rulings in
+  `crates/terminus/tests/scope.rs`; scope and rulings in
   `docs/style-assumptions.md` §33.
 - css-anchor-position-1 (the Editor's Draft module, user-directed
-  2026-09-29/30; not in Lynx) is `dom`'s host half: an anchor-name index and
+  2026-09-29/30; not in Lynx) is `terminus`'s host half: an anchor-name index and
   each element's position options (cascaded at the style harvest with the
   fork's `Stylist::resolve_position_try`) in `TreeArenas`' `AnchorRegistry`,
   the §2.3 target lookup, remembered scroll offsets, the last successful
   option recorded per rendering update, and a settle loop that re-runs
   layout at most once per anchor-positioned box whose read went stale
-  (`crates/dom/src/layout/anchors.rs`). The
+  (`crates/terminus/src/layout/anchors.rs`). The
   default scroll shift and `position-visibility` are one space-tree node per
   anchored box, sampled at compose and hit-test time
-  (`crates/dom/src/visual/anchored.rs`); a page without anchor positioning
+  (`crates/terminus/src/visual/anchored.rs`); a page without anchor positioning
   pays one `is_empty` test per run and per adopted scroll and three field
   reads per restyled element at the harvest. Scope, the "Out"
   list, approximations and gaps: `docs/style-assumptions.md` §28; the
   browser-visible differences: `docs/tracking/deviations.md`.
 - css-position-4's **top layer** is an ordered side table on `TreeArenas`
-  (`crates/dom/src/tree/top_layer.rs`), generic rather than dialog-specific:
+  (`crates/terminus/src/tree/top_layer.rs`), generic rather than dialog-specific:
   the embedder adds and removes entries (`add_to_top_layer(element,
   blocks_document)`, `remove_from_top_layer`), sets `:modal`/`:open` as
-  element state, and `dom` does the rest — `fixed` lowering against the
+  element state, and `terminus` does the rest — `fixed` lowering against the
   initial containing block with a static position of zero, a paint-order
   tail after the root stacking context, the inert floor below the topmost
   blocking entry for hit testing, relevance, and removal with the element
@@ -3745,11 +3777,11 @@ Rulings and limits to know before touching it:
   hit-tested as its element; it is never handed out. A side table, not a
   per-node bit: the layer is almost always empty and every per-box reader
   tests `is_empty` first. §3.1's computed-value fixups run where a UA rule
-  declares the UA-only `-servo-top-layer` (bobcat-core's `dialog:modal`,
-  `:popover-open` and `::backdrop`); membership, not the longhand, stays `dom`'s truth for the
-  containing block (see `docs/dom-architecture.md` "Top layer and
+  declares the UA-only `-servo-top-layer` (`terminus::link::html`'s `dialog:modal`,
+  `:popover-open` and `::backdrop`); membership, not the longhand, stays `terminus`'s truth for the
+  containing block (see `docs/terminus-architecture.md` "Top layer and
   `::backdrop`").
-- HTML's **popover** attribute is `dom`'s (`crates/dom/src/tree/popover.rs`),
+- HTML's **popover** attribute is `terminus`'s (`crates/terminus/src/tree/popover.rs`),
   because every element carries it: its four states (`PopoverState`), the
   visibility state as `ElementState::POPOVER_OPEN` (`:popover-open`, which
   only this module writes), and HTML's *show popover* / *hide popover*
@@ -3762,7 +3794,7 @@ Rulings and limits to know before touching it:
   differently (user ruling): Auto and Hint popovers are refused rather than
   shown, `beforetoggle`/`toggle` are the embedder's to fire, and no script
   reaches a popover (`docs/style-assumptions.md` §31).
-- A W3C **IntersectionObserver primitive** (`crates/dom/src/visual/intersection/`,
+- A W3C **IntersectionObserver primitive** (`crates/terminus/src/visual/intersection/`,
   user-directed 2026-10-08, Rust-only): observers carry a
   `Box<dyn IntersectionEventHandler<T>>` (user ruling 2026-10-10: `dyn` for
   simplicity, so one document holds any number of handler types with no new
@@ -3789,7 +3821,7 @@ Rulings and limits to know before touching it:
   never intersecting; `bounding_client_rect` keeps its transform-free walk.
   A page without observers pays one `is_empty` per freed node and one bool
   per render, moved scroll and epilogue.
-- A W3C **ResizeObserver primitive** (`crates/dom/src/visual/resize/`,
+- A W3C **ResizeObserver primitive** (`crates/terminus/src/visual/resize/`,
   Rust-only, `docs/layout-observer-design.md` §3.1 and §5): observers carry a
   `Box<dyn ResizeEventHandler<T>>` (the same `dyn` ruling) and the node it is
   bound to, and registrations of a target, an `ObservedBox` (content, border
@@ -3822,9 +3854,9 @@ Rulings and limits to know before touching it:
 - Confirm the vendored fork tip with `git -C vendor/stylo rev-parse --short
   HEAD` rather than trusting a written one.
 
-Everything else about the crate's internals is in `docs/dom-architecture.md`.
+Everything else about the crate's internals is in `docs/terminus-architecture.md`.
 
-### crates/hughie
+### crates/seldon
 
 The Flexbox, Grid, grid-lanes, and Starlight Relative and Linear engine:
 trait-based host⇄engine integration with static dispatch only (no `dyn`),
@@ -3892,7 +3924,7 @@ line sits, parley 0.12's own CSS 2.2 §10.8.1 line box — and `Paragraph`, whic
 owns one shaped natural layout and re-breaks it in place, starting every line
 with its root inline box (`ParagraphRoot`: the strut, which is parley's style
 0, the base direction, and whether content with no text and no box still
-lays out one empty line of the strut, which `dom` asks for an editing host's
+lays out one empty line of the strut, which `terminus` asks for an editing host's
 paragraph: `BlockStyle`/`InlineFlowStyle::strut_line_when_empty`). The core
 knows nothing of inline boxes; a
 consumer that lays text of its own into the content has four generic hooks,
@@ -3950,7 +3982,7 @@ cacheable (`docs/style-assumptions.md` §28, `docs/layout-architecture.md`).
 layout-containment baseline suppression, the skipped-contents pair
 `compute_skipped_contents_size` + `hide_skipped_contents` (whose "is this box
 skipping?" input is `CoreStyle::skips_contents`, defaulted to
-`content-visibility: hidden` and overridden by `dom` to fold in `auto`
+`content-visibility: hidden` and overridden by `terminus` to fold in `auto`
 relevance; the size is cacheable and goes through `compute_cached_layout`, the
 hide sweep answers to the box tree and runs on every committing call outside
 that cache), and
@@ -3975,10 +4007,10 @@ The runtime-layout integration — the `LayoutTree` host, display dispatch,
 hoisted out-of-flow box registry (their containing blocks lay them out),
 per-node cache storage, and the automatic
 style-damage→layout-invalidation wiring (boundary-stopped and engine-internal,
-not a runtime-adapter concern) — lives in `dom`; generic W3C text style,
+not a runtime-adapter concern) — lives in `terminus`; generic W3C text style,
 document context, and artifact storage live there too.
 
-### crates/flashbulb
+### crates/prime-radiant
 
 Screenshot testing infrastructure, and the only crate here that exists for the
 test suite rather than the product (`publish = false`, dev-dependency
@@ -3987,18 +4019,18 @@ algorithm Playwright compares screenshots with (squared-YIQ per-pixel distance
 against `35215 * threshold²`, anti-aliasing detection,
 `max_diff_pixels`/`max_diff_pixel_ratio` budgets), and `Screenshots`, the
 golden store: path resolution from a name-segment list,
-`FLASHBULB_UPDATE_SNAPSHOTS=1` to accept, and `-expected`/`-actual`/`-diff`
+`PRIME_RADIANT_UPDATE_SNAPSHOTS=1` to accept, and `-expected`/`-actual`/`-diff`
 PNGs written to a git-ignored `tests/artifacts/` on failure. A newly *created*
 golden fails its own run so an unreviewed baseline cannot pass; an explicitly
 *accepted* one does not.
 
 The optional `render` feature adds `capture_document` (`Document::render` →
-retained scene → `dom`'s headless GPU) over the whole painted frame, `viewport
+retained scene → `terminus`'s headless GPU) over the whole painted frame, `viewport
 * device_pixel_ratio` device pixels: the render floor scales the scene up by
 that ratio, so anything smaller is a crop. Playwright instead downsamples to
 CSS pixels; the two coincide at a ratio of 1, which lynx-stack pins for
 determinism and every viewport here uses. Its `TestImages` is the in-memory
-`dom::FrameImages` the image suites hand to a capture — the only image store in
+`terminus::link::FrameImages` the image suites hand to a capture — the only image store in
 this workspace, and deliberately a test double: it fetches, decodes and evicts
 nothing. `pump_images` drives one round of the document-to-host image protocol
 (every source `take_wanted_images` named and every document request
@@ -4007,11 +4039,11 @@ nothing. `pump_images` drives one round of the document-to-host image protocol
 `TestImages` parses SVG as a production host does, with the engine's
 `ImageEvent::parse_document`: `insert_svg(source, &str)` reports the parsed
 document through `parsed_document` (or `failed`), and `request_document`
-answers a document request the same way; flashbulb has no SVG parser
+answers a document request the same way; prime-radiant has no SVG parser
 dependency of its own.
 `headless` requires a usable GPU adapter and panics without one, so local and
 CI runs obey the same mandatory-GPU policy. DOM-aware screenshot suites live in
-`dom`, which also keeps the direct GPU smoke tests. Goldens are not
+`terminus`, which also keeps the direct GPU smoke tests. Goldens are not
 platform-suffixed: cross-platform rasterizer noise is absorbed by tolerance,
 not by per-platform baselines.
 
@@ -4040,12 +4072,12 @@ would host it:
   Underneath it, the data protocol —
   `__SetAttribute(element, "update-list-info", …)` — delivers a compiled
   `<list>`'s cells as real element children, which is the only path one
-  receives children on. `<list>` is a `dom::CustomElement` for its UI
+  receives children on. `<list>` is a `terminus::link::CustomElement` for its UI
   methods only (`scrollToPosition`, `scrollBy`, `autoScroll`,
   `getScrollContainerInfo`, `getVisibleCells`): there is no cell recycling,
   no threshold or scroll events, and no sticky-bottom or snap rules
   (`docs/tracking/deviations.md`).
-- **Gesture detectors and the arena.** `crates/bobcat-core/src/paint/gesture.rs`
+- **Gesture detectors and the arena.** `crates/terminus/src/painter/gesture.rs`
   has no fling or velocity, no `:active` driving, no `consume-slide-event`, no
   per-element `GestureDetector`/arena relations and no `pointerover`/`out`/
   `enter`/`leave`, mouse boundary events, `auxclick` or `contextmenu`
@@ -4079,7 +4111,7 @@ would host it:
   `takeScreenshot` (no pixel readback) and the rest of the per-component
   catalog — answers code 3, `METHOD_NOT_FOUND`. The rect itself ignores
   transforms and never flushes.
-- **The text `layout` event.** The per-line ranges `hughie`'s
+- **The text `layout` event.** The per-line ranges `seldon`'s
   `TextBlock::lines` reports have no delivery path.
 - **`rpx`-aware view/device policy** and the rest of the `<list>` component
   (scroll and threshold events, sticky cells and snapping; the
@@ -4150,10 +4182,10 @@ section is the only place the absolute paths are spelled out.
 - `docs/lynx-binary-template.md` — the *native* `.lynx.bundle` format ("lynx"
   target), implemented for source-based external bundles by
   `bobcat-source::native`.
-- `docs/dom-architecture.md` — `crates/dom`'s internals: arenas and identity,
+- `docs/terminus-architecture.md` — `crates/terminus`'s internals: arenas and identity,
   shadow DOM and custom elements, the style engine and invalidation, the
   layout host, visual order and the committed frame, scroll/input/event
-  paths, text, and the vendored stylo fork. The `crates/dom` section here
+  paths, text, and the vendored stylo fork. The `crates/terminus` section here
   keeps only the charter and the rulings.
 - `docs/tracking/` — the behavior/feature inventory (CSS properties, layout
   algorithms, DOM/event model, JS runtime APIs, `web-core` runtime
@@ -4307,7 +4339,7 @@ rejection and CSS fallback expansion cap.
 
 ### The unsafe floor
 
-`hughie`, `flashbulb`, and `bobcat-source` carry `#![forbid(unsafe_code)]`. The
+`seldon`, `prime-radiant`, and `bobcat-source` carry `#![forbid(unsafe_code)]`. The
 workspace-wide `unsafe_code = "warn"` is a lint any module can silence locally;
 `forbid` cannot be overridden from inside the crate, so `unsafe` appearing in
 one of these three has to be a deliberate edit to that line.
@@ -4315,45 +4347,50 @@ one of these three has to be a deliberate edit to that line.
 Where `unsafe` is unavoidable, the bar is a `SAFETY` comment per block,
 enforced by a crate-local `#![warn(clippy::undocumented_unsafe_blocks)]` in
 `bobcat-cli` (which now holds no `unsafe` at all, the lint standing as a bar
-for any that arrives) and in `dom` (its two). The lint is still crate-local
+for any that arrives) and in `terminus` (its two). The lint is still crate-local
 rather than workspace-wide because `quickjs-rust-bridge` (133 blocks) is the
 last holdout and is being restructured separately; raising it there is what
 would let this move into `[workspace.lints.clippy]`.
 
 One trap, worth knowing before writing the comment: the lint does **not** scan
 past an intervening attribute. Where an unsafe site carries
-`#[expect(unsafe_code, reason = …)]`, as every one in `dom` does, the
+`#[expect(unsafe_code, reason = …)]`, as every one in `terminus` does, the
 `// SAFETY:` comment has to sit *between* that attribute and the block —
 placing it above the attribute still trips the lint, and `cargo fmt` will not
 move it either way.
 
-### Benchmarks measure a debug-instrumented dom
+### Benchmarks measure a debug-instrumented terminus
 
 Cargo unifies the features of a package's dev-dependencies into that package's
-own library whenever dev targets are in the build. `hughie` dev-depends on
-`dom` with `layout-test-utils` for its bench harness and `dom` depends on
-`hughie`, so the cycle turns the feature on for both libraries in any build
+own library whenever dev targets are in the build. `seldon` dev-depends on
+`terminus` with `layout-test-utils` for its bench harness and `terminus` depends on
+`seldon`, so the cycle turns the feature on for both libraries in any build
 with bench targets:
 
 ```sh
-cargo build --unit-graph -Z unstable-options --workspace            # dom: []
-cargo build --unit-graph -Z unstable-options --workspace --benches  # dom: [layout-test-utils]
+cargo build --unit-graph -Z unstable-options --workspace            # terminus: []
+cargo build --unit-graph -Z unstable-options --workspace --benches  # terminus: [layout-test-utils]
 ```
 
 The second line is what `cargo codspeed build` and `cargo llvm-cov` resolve.
 The cost is one `test_leaf_metrics()` probe per leaf in
-`crates/dom/src/layout/host.rs` that a release build does not contain, so the
+`crates/terminus/src/layout/host.rs` that a release build does not contain, so the
 CodSpeed numbers — the authority for this repo, since single-run local walltime
-is noise — describe a `dom` one branch away from the shipped one. On the
-`hughie` side the feature only adds the
+is noise — describe a `terminus` one branch away from the shipped one. On the
+`seldon` side the feature only adds the
 `compute_leaf_layout_with_measurement_for_testing` wrapper and costs nothing.
 
-**This is accepted, not fixed.** Breaking the cycle means moving hughie's
-dom-based benches into `dom`, renumbering every CodSpeed benchmark id and
+**This is accepted, not fixed.** Breaking the cycle means moving seldon's
+terminus-based benches into `terminus`, renumbering every CodSpeed benchmark id and
 throwing away its history — a worse trade than one predictable branch.
+`bobcat-core`'s dev-dependency on `terminus` with `painter-test-utils` (for its
+painter tests) unifies that feature into `terminus` the same way; its cost is
+`FrameClock`'s pinned reading and branch in `now_seconds`, the test-only
+`Output::None` variant's match arms, and the doc-hidden test accessors in
+`crates/terminus/src/painter/mod.rs`, and it is accepted for the same reason.
 `.github/scripts/check-bench-feature-parity.py` runs in CI and holds the line:
-it diffs the two resolutions, prints the two recorded deviations, and fails on
-a third appearing or on a recorded one silently going away. Any new entry needs
+it diffs the two resolutions, prints the three recorded deviations, and fails on
+a new one appearing or on a recorded one silently going away. Any new entry needs
 a written reason for the same cost the existing ones state.
 
 ### Benchmarks are only the `benches/` targets
@@ -4403,7 +4440,7 @@ Treat that as a hypothesis to test, not the default explanation for a failure.
 
   ```sh
   cargo clippy --target wasm32-unknown-unknown --lib \
-    -p bobcat-wasm -p bobcat-resources -p bobcat-core -p dom -p hughie \
+    -p bobcat-wasm -p bobcat-resources -p bobcat-core -p terminus -p seldon \
     -p bobcat-source -p quickjs-rust-bridge -- -D warnings
   ```
 
@@ -4442,10 +4479,10 @@ ReactLynx configurations directly; examples use the workspace TypeScript version
 without a separate config-loader compiler.
 
 **Screenshot tests** live in `crates/*/tests/screenshots.rs` — plus per-topic
-siblings (`dom` also has `text_screenshots.rs`, `web_text_screenshots.rs`,
+siblings (`terminus` also has `text_screenshots.rs`, `web_text_screenshots.rs`,
 `blur_screenshots.rs` and `css_atlas.rs`) — with
 committed goldens in `crates/*/tests/screenshots/`, driven by
-`crates/flashbulb`. The ordinary suites share one capture harness in
+`crates/prime-radiant`. The ordinary suites share one capture harness in
 `tests/support/screenshot.rs`; the browser-referenced CSS atlas owns the
 separate workflow below. The golden store is per *crate*, so every screenshot
 binary in a crate writes into the same tree. They require a GPU adapter;
@@ -4455,7 +4492,7 @@ ordinary suites, look at the image first, then (dropping `--test` to catch
 every ordinary screenshot binary in the crate):
 
 ```sh
-FLASHBULB_UPDATE_SNAPSHOTS=1 cargo test -p <crate>
+PRIME_RADIANT_UPDATE_SNAPSHOTS=1 cargo test -p <crate>
 ```
 
 A golden that does not exist yet is written *and fails its run* — review it and
@@ -4463,7 +4500,7 @@ re-run. Failures write `-expected`/`-actual`/`-diff` PNGs to the git-ignored
 `crates/<crate>/tests/artifacts/`; the panic message names all three plus the
 exact differing-pixel count. Never accept a golden you have not looked at: a
 blank or all-white image compares happily against itself forever. Browser-owned
-suites can reject `FLASHBULB_UPDATE_SNAPSHOTS`; follow their checked capture
+suites can reject `PRIME_RADIANT_UPDATE_SNAPSHOTS`; follow their checked capture
 and audit workflow instead. The CSS paint atlas has two explicit reference
 owners: 666 Chromium matches remain browser-owned, while 145 W3C-correct
 differences (84 rasterization/sampling cases plus 61 standards-permitted UA

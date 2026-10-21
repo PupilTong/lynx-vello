@@ -13,7 +13,7 @@
 use std::rc::Rc;
 use std::sync::Arc;
 
-use dom::event::EventSteps;
+use terminus::link::event::EventSteps;
 use tokio::sync::{mpsc, watch};
 
 use crate::background::{WorkerCommand, WorkerEvent};
@@ -153,7 +153,8 @@ impl ScriptHarness {
     /// Panics if the id is malformed.
     #[must_use]
     pub fn event_path(&mut self, target: u64) -> EventSteps {
-        let target = dom::NodeId::from_bits(target).expect("a well-formed packed handle");
+        let target =
+            terminus::link::NodeId::from_bits(target).expect("a well-formed packed handle");
         self.with_document(|document| document.event_steps(target, true, true))
     }
 
@@ -169,12 +170,13 @@ impl ScriptHarness {
     ///
     /// Panics if a listener throws or the id is malformed.
     pub fn dispatch(&mut self, target: u64, name: &Arc<str>) -> bool {
-        let target = dom::NodeId::from_bits(target).expect("a well-formed packed handle");
+        let target =
+            terminus::link::NodeId::from_bits(target).expect("a well-formed packed handle");
         let payload = InputEventPayload {
-            detail: dom::event::EventDetail::Pointer {
-                position: dom::Point2D::new(123.5, 456.25),
+            detail: terminus::link::event::EventDetail::Pointer {
+                position: terminus::link::Point2D::new(123.5, 456.25),
                 id: 1,
-                device: dom::input::PointerKind::Touch,
+                device: terminus::link::input::PointerKind::Touch,
                 button: 0,
                 buttons: 0,
             },
@@ -208,8 +210,9 @@ impl ScriptHarness {
     /// Panics if an id is malformed or a listener throws.
     pub fn scroll_frame(&mut self, posts: &[ScrollPost]) -> bool {
         self.runtime.adopt_scroll_offsets(posts.iter().map(|post| {
-            let node = dom::NodeId::from_bits(post.node).expect("a well-formed packed handle");
-            let offset = dom::Vector2D::new(0.0, post.y);
+            let node =
+                terminus::link::NodeId::from_bits(post.node).expect("a well-formed packed handle");
+            let offset = terminus::link::Vector2D::new(0.0, post.y);
             let entry = ScrollEntry {
                 offset,
                 at: 0.0,
@@ -247,7 +250,7 @@ impl ScriptHarness {
     /// Panics if the id is malformed.
     #[must_use]
     pub fn inline_style(&mut self, node: u64) -> Option<String> {
-        let node = dom::NodeId::from_bits(node).expect("a well-formed packed handle");
+        let node = terminus::link::NodeId::from_bits(node).expect("a well-formed packed handle");
         self.with_document(|document| {
             document
                 .get(node)
@@ -270,10 +273,14 @@ impl ScriptHarness {
     /// Panics if the id is malformed.
     #[must_use]
     pub fn child(&mut self, parent: u64, index: usize) -> Option<u64> {
-        let parent = dom::NodeId::from_bits(parent).expect("a well-formed packed handle");
+        let parent =
+            terminus::link::NodeId::from_bits(parent).expect("a well-formed packed handle");
         self.with_document(|document| {
             let children = document.get(parent)?.child_ids();
-            children.get(index).copied().map(dom::NodeId::to_bits)
+            children
+                .get(index)
+                .copied()
+                .map(terminus::link::NodeId::to_bits)
         })
     }
 
@@ -284,7 +291,8 @@ impl ScriptHarness {
     /// Panics if the id is malformed.
     #[must_use]
     pub fn child_count(&mut self, parent: u64) -> usize {
-        let parent = dom::NodeId::from_bits(parent).expect("a well-formed packed handle");
+        let parent =
+            terminus::link::NodeId::from_bits(parent).expect("a well-formed packed handle");
         self.with_document(|document| {
             document
                 .get(parent)

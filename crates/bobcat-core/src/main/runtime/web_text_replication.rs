@@ -10,7 +10,7 @@
 //!
 //! One deliberate exception to that rule is on record. The truncation marker
 //! `text-maxlength` appends is gated on `text-overflow: ellipsis` here
-//! (`crates/hughie/src/text/block/truncate.rs`), which neither the initial
+//! (`crates/seldon/src/text/block/truncate.rs`), which neither the initial
 //! value `clip` nor the Lynx UA sheet ever sets, where both web-core and the
 //! native platforms append it unconditionally. The 2026-09-14 ruling adopts
 //! this engine's gating as the intended behavior, so the maxlength replicas
@@ -37,7 +37,7 @@
 //! asserts no text behaviour at all. Its rows are produced *by*
 //! `SelectorQuery`, so its screenshot cannot be reconstructed from the
 //! outside; what can be replicated of it is the selector matching (in
-//! `crates/dom`) and the 8px-on-10px row geometry (in the tree replicas),
+//! `crates/terminus`) and the 8px-on-10px row geometry (in the tree replicas),
 //! neither of which belongs here.
 //!
 //! `web-core-e2e/web-core/add-class-css-og-style-font-size` calls `__AddClass`,
@@ -64,8 +64,8 @@
 
 use std::time::Duration;
 
-use dom::stylo::color::AbsoluteColor;
-use dom::stylo::values::computed::FontStyle;
+use terminus::link::stylo::color::AbsoluteColor;
+use terminus::link::stylo::values::computed::FontStyle;
 use tokio::sync::mpsc;
 
 use super::*;
@@ -80,7 +80,7 @@ use crate::view::NoWakeup;
 
 /// Solid em squares, so a run's advance is its glyph count times its font
 /// size and every metric below is an exact number rather than a tolerance.
-const AHEM: &[u8] = include_bytes!("../../../../hughie/tests/fixtures/Ahem.ttf");
+const AHEM: &[u8] = include_bytes!("../../../../seldon/tests/fixtures/Ahem.ttf");
 
 /// How long a test waits for a thread that should already be working.
 const PATIENCE: Duration = Duration::from_secs(30);
@@ -109,8 +109,11 @@ impl DocumentProbe {
 
 /// A runtime over a document that can shape text.
 fn text_runtime() -> (ScriptRuntime, MainThreadRuntime, DocumentProbe) {
-    let mut text = dom::TextContext::new();
-    assert_eq!(text.register_fonts(dom::FontBlob::from_static(AHEM)), 1);
+    let mut text = terminus::link::TextContext::new();
+    assert_eq!(
+        text.register_fonts(terminus::link::FontBlob::from_static(AHEM)),
+        1
+    );
     let mut ingredients =
         DocumentIngredients::for_test(Viewport::new(393.0, 727.0), PageConfig::default());
     ingredients.text_context = Some(text);
@@ -214,8 +217,11 @@ fn background_pair(main: &str, background: &str) -> BackgroundPair {
         WorkerHome::with_entry_for_test((background.to_owned(), "test:bts-entry".to_owned()));
     let (outbox, view) = detached_outbox(Arc::new(NoWakeup));
     let mut js = build_runtime().expect("the test runtime builds");
-    let mut text = dom::TextContext::new();
-    assert_eq!(text.register_fonts(dom::FontBlob::from_static(AHEM)), 1);
+    let mut text = terminus::link::TextContext::new();
+    assert_eq!(
+        text.register_fonts(terminus::link::FontBlob::from_static(AHEM)),
+        1
+    );
     let mut ingredients =
         DocumentIngredients::for_test(Viewport::new(393.0, 727.0), PageConfig::default());
     ingredients.text_context = Some(text);
@@ -253,9 +259,13 @@ fn background_pair(main: &str, background: &str) -> BackgroundPair {
 /// Every descendant of `root` in document order — the sequence
 /// `querySelectorAll` walks, which is what the ported counting assertions
 /// depend on.
-fn descendants(tree: &LynxDocument, root: dom::NodeId, out: &mut Vec<dom::NodeId>) {
-    let children: Vec<dom::NodeId> = match tree.get(root) {
-        Some(node) => node.children().map(dom::Node::id).collect(),
+fn descendants(
+    tree: &LynxDocument,
+    root: terminus::link::NodeId,
+    out: &mut Vec<terminus::link::NodeId>,
+) {
+    let children: Vec<terminus::link::NodeId> = match tree.get(root) {
+        Some(node) => node.children().map(terminus::link::Node::id).collect(),
         None => return,
     };
     for child in children {
@@ -267,11 +277,11 @@ fn descendants(tree: &LynxDocument, root: dom::NodeId, out: &mut Vec<dom::NodeId
 /// What every `raw-text` under `root` currently carries, in document order.
 /// The ported tests read content off the carrier's `text` attribute rather
 /// than off `textContent`, so this is the same query they make.
-fn carrier_contents(tree: &LynxDocument, root: dom::NodeId) -> Vec<String> {
+fn carrier_contents(tree: &LynxDocument, root: terminus::link::NodeId) -> Vec<String> {
     let mut ids = Vec::new();
     descendants(tree, root, &mut ids);
     ids.into_iter()
-        .filter(|id| tree.get(*id).and_then(dom::Node::tag_name) == Some("raw-text"))
+        .filter(|id| tree.get(*id).and_then(terminus::link::Node::tag_name) == Some("raw-text"))
         .map(|id| {
             tree.get(id)
                 .and_then(|node| node.attribute("text"))
@@ -283,7 +293,7 @@ fn carrier_contents(tree: &LynxDocument, root: dom::NodeId) -> Vec<String> {
 
 /// The element script gave `id`, found without the test having to know which
 /// packed handle the PAPI minted for it.
-fn element_with_id(tree: &LynxDocument, id: &str) -> dom::NodeId {
+fn element_with_id(tree: &LynxDocument, id: &str) -> terminus::link::NodeId {
     let page = tree.document_element().id();
     let mut ids = vec![page];
     descendants(tree, page, &mut ids);
@@ -293,26 +303,26 @@ fn element_with_id(tree: &LynxDocument, id: &str) -> dom::NodeId {
 }
 
 /// The computed colour of a live element.
-fn color(tree: &LynxDocument, element: dom::NodeId) -> AbsoluteColor {
+fn color(tree: &LynxDocument, element: terminus::link::NodeId) -> AbsoluteColor {
     computed(tree, element).get_color().solid_color()
 }
 
 /// The computed font size, in CSS pixels.
-fn font_size(tree: &LynxDocument, element: dom::NodeId) -> f32 {
+fn font_size(tree: &LynxDocument, element: terminus::link::NodeId) -> f32 {
     computed(tree, element)
         .slow_clone_font_size()
         .computed_size()
         .px()
 }
 
-fn font_style(tree: &LynxDocument, element: dom::NodeId) -> FontStyle {
+fn font_style(tree: &LynxDocument, element: terminus::link::NodeId) -> FontStyle {
     *computed(tree, element).get_font_style()
 }
 
 fn computed(
     tree: &LynxDocument,
-    element: dom::NodeId,
-) -> dom::stylo::servo_arc::Arc<dom::stylo::properties::ComputedValues> {
+    element: terminus::link::NodeId,
+) -> terminus::link::stylo::servo_arc::Arc<terminus::link::stylo::properties::ComputedValues> {
     tree.get(element)
         .expect("a live element")
         .computed_style()
@@ -361,7 +371,7 @@ fn create_text_mints_an_element_tagged_text() {
     assert_eq!(
         tree.document_element()
             .first_child()
-            .and_then(dom::Node::tag_name),
+            .and_then(terminus::link::Node::tag_name),
         Some("text"),
         "and the host tree agrees with the tag script was handed"
     );
@@ -456,10 +466,13 @@ fn a_text_and_its_carrier_survive_a_flush_as_one_measured_paragraph() {
         .id();
     let text = tree
         .get(view)
-        .and_then(dom::Node::first_child)
+        .and_then(terminus::link::Node::first_child)
         .expect("the text")
         .id();
-    assert_eq!(tree.get(text).and_then(dom::Node::tag_name), Some("text"));
+    assert_eq!(
+        tree.get(text).and_then(terminus::link::Node::tag_name),
+        Some("text")
+    );
     assert_eq!(
         carrier_contents(&tree, text),
         vec!["Text Element".to_owned()],
@@ -518,7 +531,7 @@ fn setting_the_text_attribute_replaces_the_constructor_supplied_content() {
     );
     let carrier = tree
         .get(text)
-        .and_then(dom::Node::first_child)
+        .and_then(terminus::link::Node::first_child)
         .expect("the carrier")
         .id();
     assert!(
@@ -584,7 +597,9 @@ fn a_childless_text_exists_and_carries_no_content() {
         .expect("the text")
         .id();
     assert!(
-        tree.get(text).and_then(dom::Node::first_child).is_none(),
+        tree.get(text)
+            .and_then(terminus::link::Node::first_child)
+            .is_none(),
         "no substitute child stands in for the missing run"
     );
     let measured = tree.text_block_size(text).expect("a committed paragraph");
@@ -681,7 +696,10 @@ fn a_tagged_text_is_found_and_reads_its_content_back() {
         .query_selector(page, r#"[data-testid="count-value"]"#)
         .expect("the selector parses")
         .expect("the tagged text is found by its dataset entry");
-    assert_eq!(tree.get(text).and_then(dom::Node::tag_name), Some("text"));
+    assert_eq!(
+        tree.get(text).and_then(terminus::link::Node::tag_name),
+        Some("text")
+    );
     assert_eq!(carrier_contents(&tree, text), vec!["2".to_owned()]);
 }
 
@@ -1070,7 +1088,7 @@ fn card_paragraph_width(elements: &DocumentProbe) -> f32 {
 /// Lynx appends it unconditionally too ("Ellipsis will be appended
 /// disregarding the overflowing mode.", Android `TextRenderer.java:126-135`).
 /// This engine deliberately renders `12345` instead: the marker is gated on
-/// `text-overflow: ellipsis` (`crates/hughie/src/text/block/truncate.rs:135`),
+/// `text-overflow: ellipsis` (`crates/seldon/src/text/block/truncate.rs:135`),
 /// which this card leaves at its initial `clip`. On `text-maxlength` that
 /// gating matches *neither* reference; it is the intended behavior under the
 /// 2026-09-14 ruling and is recorded here rather than normalised away.
@@ -1095,7 +1113,7 @@ fn a_late_maxlength_clamp_ends_bare_where_web_core_ends_in_a_tail() {
 /// `a_late_maxlength_clamp_ends_bare_where_web_core_ends_in_a_tail`: the same
 /// card with `text-overflow: ellipsis` declared, which is the one state in
 /// which this engine emits the marker
-/// (`crates/hughie/src/text/block/truncate.rs:135`).
+/// (`crates/seldon/src/text/block/truncate.rs:135`).
 ///
 /// This reproduces what web-core renders for the fixture unconditionally, and
 /// keeps the marker machinery covered from the PAPI side: without it a
@@ -1424,7 +1442,7 @@ const COUNTDOWN_PUSH: &str = r"
             children: `text[text] { content: attr(text) }` \
             (crates/bobcat-core/src/main/tree/text.rs:126) is a CSS content \
             list, and a content list replaces rendered children \
-            (crates/dom/src/layout/paragraph.rs:259-261), where web-core's \
+            (crates/terminus/src/layout/paragraph.rs:259-261), where web-core's \
             `RawTextAttributes` appends the attribute's text node after them \
             (web-elements/src/elements/XText/RawText.ts:19-26)"]
 fn a_native_props_text_push_replaces_the_leading_raw_text_run() {
@@ -1463,7 +1481,7 @@ fn a_native_props_text_push_replaces_the_leading_raw_text_run() {
 /// appended disregarding the overflowing mode.", Android
 /// `TextRenderer.java:126-135`). This engine deliberately does not: the marker
 /// is gated on `text-overflow: ellipsis`
-/// (`crates/hughie/src/text/block/truncate.rs:135`), which this card leaves at
+/// (`crates/seldon/src/text/block/truncate.rs:135`), which this card leaves at
 /// its initial `clip`. On `text-maxlength` that gating matches *neither*
 /// reference — it is a Lynx-vello-specific behavior, intended under the
 /// 2026-09-14 ruling — so the width asserted here is web-core's eight em
@@ -1485,7 +1503,7 @@ fn a_native_props_text_push_replaces_the_leading_raw_text_run() {
             children rather than appending to them \
             (`text[text] { content: attr(text) }`, \
             crates/bobcat-core/src/main/tree/text.rs:126, through \
-            crates/dom/src/layout/paragraph.rs:259-261)"]
+            crates/terminus/src/layout/paragraph.rs:259-261)"]
 fn a_maxlength_clamps_the_text_a_native_props_push_delivers() {
     let mut pair = background_pair(&countdown_card(true, "5"), COUNTDOWN_PUSH);
     pair.deliver();
@@ -1532,7 +1550,7 @@ fn a_maxlength_clamps_the_text_a_native_props_push_delivers() {
             `text[text] { content: attr(text) }` \
             (crates/bobcat-core/src/main/tree/text.rs:126) is a CSS content \
             list, and a content list replaces rendered children \
-            (crates/dom/src/layout/paragraph.rs:259-261), so the push leaves \
+            (crates/terminus/src/layout/paragraph.rs:259-261), so the push leaves \
             the paragraph holding nothing but the pushed string — where \
             web-core's `RawTextAttributes` appends the attribute's text node \
             after the children it found \
@@ -1594,7 +1612,7 @@ fn a_native_props_text_push_appends_where_there_is_no_leading_run() {
             And the attribute it writes instead replaces the element's \
             children — `text[text] { content: attr(text) }` \
             (crates/bobcat-core/src/main/tree/text.rs:126) through \
-            crates/dom/src/layout/paragraph.rs:259-261 — so the re-rendered \
+            crates/terminus/src/layout/paragraph.rs:259-261 — so the re-rendered \
             slots stop rendering at all, where web-core appends the pushed \
             string after them \
             (web-elements/src/elements/XText/RawText.ts:19-26)"]

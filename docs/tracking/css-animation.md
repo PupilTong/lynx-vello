@@ -136,7 +136,7 @@ concretely, so the tables above are read as "the target" and this section as
   one deviation — an animation or transition that *starts* while skipped is
   created and frozen at its start rather than not created, because style is not
   skipped — is recorded in `style-assumptions.md` §19.
-- **Measured cost** (Apple silicon, `cargo bench -p dom --bench animation`, a
+- **Measured cost** (Apple silicon, `cargo bench -p terminus --bench animation`, a
   120-card page; medians). An idle page pays **6.9 ns** per frame — one bool
   and one epoch compare, so a document that never animates never pays for the
   driver. One `transform` frame costs **254 µs** with a single animating
@@ -148,8 +148,8 @@ concretely, so the tables above are read as "the target" and this section as
   `frame_shimmer_rows` time the frame the painter runs instead — a main-thread
   tick only when the committed frame asks for one, then the composition — over
   cards holding a `<text>` and over a list of 200 shimmering rows.
-- **Composite curve export** (`dom::style::curve_export` +
-  `dom::visual::curves`) closes §11's gap: at commit, an element whose
+- **Composite curve export** (`terminus::style::curve_export` +
+  `terminus::visual::curves`) closes §11's gap: at commit, an element whose
   animation set moves only `opacity`/`transform` is exported whole as an
   `AnimationSlot` curve on the committed frame — a clone of every non-canceled
   stylo `Animation` in the set's order. The painter samples the clones with
@@ -373,7 +373,7 @@ the specifications are silent or disagree.
   *progress-driven* (the fork's `Animation::is_progress_driven`): stylo
   cascades `Animation::timeline_sample`, the simple iteration progress plus
   the iteration's direction, and never iterates, ends or ticks it by the
-  clock. `dom::style::timeline` writes that sample: `ProgressTiming`
+  clock. `terminus::style::timeline` writes that sample: `ProgressTiming`
   normalizes the animation's range, delay and duration into scroll-offset px
   once per commit, and `iteration_progress` applies web-animations-1 §4.5-4.8
   (web-animations-2 §2.4.4's timeline-boundary rule included) to an offset.
@@ -534,7 +534,7 @@ the specifications are silent or disagree.
     scroll-animations-1 defines named ranges for view progress timelines only
     (§3.1), and Appendix A ("Named Timeline Range Keyframe Selectors") says a
     timeline without the named range ignores them. A scroll timeline's named
-    ranges are `NamedRanges::scroll` in `crates/dom/src/style/timeline.rs`,
+    ranges are `NamedRanges::scroll` in `crates/terminus/src/style/timeline.rs`,
     which `animation-range` resolves against and range keyframes are placed
     with.
   - Tied offsets follow the computed keyframe order (percentage keyframes

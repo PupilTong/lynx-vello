@@ -31,11 +31,11 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use dom::event::{EventDetail, ListenerKey, ListenerKinds, RegistrationChange};
-use dom::{MethodCall, MethodError, MethodOutcome, StylePool};
 use quickjs_rust_bridge::{HostArgument, HostValue};
 use rustc_hash::FxHashSet;
 use smallvec::SmallVec;
+use terminus::link::event::{EventDetail, ListenerKey, ListenerKinds, RegistrationChange};
+use terminus::link::{MethodCall, MethodError, MethodOutcome, StylePool};
 use tokio::sync::watch;
 
 use super::quickjs::{ScriptEngine, ScriptRuntime};
@@ -76,7 +76,7 @@ const EVENT_DISPATCH_EXPORT: &str = "__BobcatDispatchEvent";
 /// invited whatever tree the registering node is in, so a frame's card hears
 /// every key, whose target is the document element; every other global
 /// registration is reached only by a path through its node's tree root
-/// ([`dom::Document::global_registrants_on_path`]). See [`Invited`].
+/// ([`terminus::link::Document::global_registrants_on_path`]). See [`Invited`].
 const DOCUMENT_LEVEL_EVENTS: [&str; 2] = ["keydown", "keyup"];
 
 /// The internal events a `frame`'s connection and disconnection are: the
@@ -264,7 +264,7 @@ fn push_detail_extras<'a>(
 /// the realm's Lynx layer builds the objects (`AGENTS.md`, "JavaScript data
 /// ownership"); a string is how a list crosses the extras channel, which
 /// carries one primitive per key.
-fn text_lines_json(lines: &[dom::TextLineReport]) -> String {
+fn text_lines_json(lines: &[terminus::link::TextLineReport]) -> String {
     let mut text = String::with_capacity(2 + lines.len() * 12);
     text.push('[');
     for (index, line) in lines.iter().enumerate() {
@@ -310,12 +310,12 @@ type Arguments<'a> = SmallVec<[HostArgument<'a>; 15]>;
 /// The registrants a dispatch of `name` over `steps` invites, as the
 /// document's listener table holds them when this is read: each with a path
 /// registration for the name that the path's passes reach
-/// ([`dom::Document::listeners_on_path`]), or with a `global-bindEvent`
+/// ([`terminus::link::Document::listeners_on_path`]), or with a `global-bindEvent`
 /// registration for it that the path reaches — one whose node's tree root
 /// (the document node, or the shadow root it sits in) is a node of the path
-/// ([`dom::Document::global_registrants_on_path`]) — or, for a
+/// ([`terminus::link::Document::global_registrants_on_path`]) — or, for a
 /// [`DOCUMENT_LEVEL_EVENTS`] name, with a `global-bindEvent` registration
-/// for it anywhere ([`dom::Document::global_registrants`]), which includes
+/// for it anywhere ([`terminus::link::Document::global_registrants`]), which includes
 /// every one the path reaches.
 struct Invited {
     on_path: SmallVec<[ListenerKey; 2]>,
@@ -323,7 +323,11 @@ struct Invited {
 }
 
 impl Invited {
-    fn read(document: &LynxDocument, steps: &dom::event::EventSteps, name: &str) -> Self {
+    fn read(
+        document: &LynxDocument,
+        steps: &terminus::link::event::EventSteps,
+        name: &str,
+    ) -> Self {
         let globals = if DOCUMENT_LEVEL_EVENTS.contains(&name) {
             document.global_registrants(name)
         } else {
@@ -350,7 +354,7 @@ impl Invited {
 /// so they are read against the tree the path was computed over.
 fn realm_calls(
     document: &LynxDocument,
-    steps: &dom::event::EventSteps,
+    steps: &terminus::link::event::EventSteps,
     name: &str,
     registrants: impl Iterator<Item = ListenerKey>,
 ) -> SmallVec<[ListenerKey; 2]> {
@@ -376,7 +380,7 @@ struct EncodedPath {
 /// by tree: a realm is handed nodes it holds no handle for (another realm's,
 /// a UA component's shadow content) and skips them. A `NodeId` names one
 /// node for the life of the document, so liveness is one lookup per id.
-fn encode_path(document: &LynxDocument, steps: &dom::event::EventSteps) -> EncodedPath {
+fn encode_path(document: &LynxDocument, steps: &terminus::link::event::EventSteps) -> EncodedPath {
     let mut nodes = String::new();
     let mut targets = String::new();
     for step in steps.steps().iter().rev().filter(|step| {
@@ -414,17 +418,17 @@ fn encode_extras<'a>(extras: Extras<'a>, arguments: &mut Arguments<'a>) {
 }
 
 /// The W3C `PointerEvent.pointerType` of a device.
-fn pointer_type(device: dom::input::PointerKind) -> &'static str {
+fn pointer_type(device: terminus::link::input::PointerKind) -> &'static str {
     match device {
-        dom::input::PointerKind::Touch => "touch",
-        dom::input::PointerKind::Pen => "pen",
+        terminus::link::input::PointerKind::Touch => "touch",
+        terminus::link::input::PointerKind::Pen => "pen",
         _ => "mouse",
     }
 }
 
-/// The script boundary's encoding of `dom`'s [`EventDetail`]: the
+/// The script boundary's encoding of `terminus`'s [`EventDetail`]: the
 /// discriminator, then the values that kind spends, in the order the realm
-/// reads them. `dom`'s detail is the one description of what an event
+/// reads them. `terminus`'s detail is the one description of what an event
 /// carries; this is only how it crosses, and the object is built in the
 /// realm, because its shape is JavaScript's.
 ///
@@ -449,84 +453,85 @@ fn pointer_type(device: dom::input::PointerKind) -> &'static str {
 ///   `null` for an element script holds no handle of.
 /// - [`DETAIL_EMPTY`] for everything else: nothing.
 fn encode_detail<'a>(detail: &'a EventDetail, arguments: &mut Arguments<'a>) {
-    let (position, delta, pointer, points): (_, _, _, &[dom::event::TouchPoint]) = match detail {
-        EventDetail::Pointer {
-            position,
-            id,
-            device,
-            button,
-            buttons,
-        } => (
-            *position,
-            None,
-            Some((*button, *buttons, *id, pointer_type(*device))),
-            &[],
-        ),
-        EventDetail::Wheel { position, delta } => (*position, Some(*delta), None, &[]),
-        EventDetail::Touch { position, points } => (*position, None, None, points),
-        EventDetail::Exposure => {
-            arguments.push(HostArgument::Number(DETAIL_EXPOSURE));
-            return;
-        }
-        EventDetail::Input {
-            input_type,
-            data,
-            is_composing,
-        } => {
-            arguments.push(HostArgument::Number(DETAIL_INPUT));
-            arguments.push(HostArgument::String(input_type));
-            arguments.push(
-                data.as_deref()
-                    .map_or(HostArgument::Null, HostArgument::String),
-            );
-            arguments.push(HostArgument::Boolean(*is_composing));
-            return;
-        }
-        EventDetail::Composition { data } => {
-            arguments.push(HostArgument::Number(DETAIL_COMPOSITION));
-            arguments.push(HostArgument::String(data));
-            return;
-        }
-        EventDetail::Focus { related_target } => {
-            arguments.push(HostArgument::Number(DETAIL_FOCUS));
-            arguments.push(related_target.map_or(HostArgument::Null, |node| {
-                HostArgument::Number(packed_node_id(node))
-            }));
-            return;
-        }
-        // The typed `text` stays here: `KeyboardEvent` has no such member.
-        EventDetail::Key {
-            key,
-            code,
-            repeat,
-            modifiers,
-            text: _,
-        } => {
-            let mut bits = 0;
-            for (held, bit) in [
-                (modifiers.alt, MODIFIER_ALT),
-                (modifiers.ctrl, MODIFIER_CTRL),
-                (modifiers.meta, MODIFIER_META),
-                (modifiers.shift, MODIFIER_SHIFT),
-            ] {
-                if held {
-                    bits |= bit;
-                }
+    let (position, delta, pointer, points): (_, _, _, &[terminus::link::event::TouchPoint]) =
+        match detail {
+            EventDetail::Pointer {
+                position,
+                id,
+                device,
+                button,
+                buttons,
+            } => (
+                *position,
+                None,
+                Some((*button, *buttons, *id, pointer_type(*device))),
+                &[],
+            ),
+            EventDetail::Wheel { position, delta } => (*position, Some(*delta), None, &[]),
+            EventDetail::Touch { position, points } => (*position, None, None, points),
+            EventDetail::Exposure => {
+                arguments.push(HostArgument::Number(DETAIL_EXPOSURE));
+                return;
             }
-            arguments.push(HostArgument::Number(DETAIL_KEY));
-            arguments.push(HostArgument::String(key));
-            arguments.push(HostArgument::String(code));
-            arguments.push(HostArgument::Boolean(*repeat));
-            arguments.push(HostArgument::Number(f64::from(bits)));
-            return;
-        }
-        // `None`, and the engine's own `ContentVisibility`, which never
-        // reaches a realm.
-        _ => {
-            arguments.push(HostArgument::Number(DETAIL_EMPTY));
-            return;
-        }
-    };
+            EventDetail::Input {
+                input_type,
+                data,
+                is_composing,
+            } => {
+                arguments.push(HostArgument::Number(DETAIL_INPUT));
+                arguments.push(HostArgument::String(input_type));
+                arguments.push(
+                    data.as_deref()
+                        .map_or(HostArgument::Null, HostArgument::String),
+                );
+                arguments.push(HostArgument::Boolean(*is_composing));
+                return;
+            }
+            EventDetail::Composition { data } => {
+                arguments.push(HostArgument::Number(DETAIL_COMPOSITION));
+                arguments.push(HostArgument::String(data));
+                return;
+            }
+            EventDetail::Focus { related_target } => {
+                arguments.push(HostArgument::Number(DETAIL_FOCUS));
+                arguments.push(related_target.map_or(HostArgument::Null, |node| {
+                    HostArgument::Number(packed_node_id(node))
+                }));
+                return;
+            }
+            // The typed `text` stays here: `KeyboardEvent` has no such member.
+            EventDetail::Key {
+                key,
+                code,
+                repeat,
+                modifiers,
+                text: _,
+            } => {
+                let mut bits = 0;
+                for (held, bit) in [
+                    (modifiers.alt, MODIFIER_ALT),
+                    (modifiers.ctrl, MODIFIER_CTRL),
+                    (modifiers.meta, MODIFIER_META),
+                    (modifiers.shift, MODIFIER_SHIFT),
+                ] {
+                    if held {
+                        bits |= bit;
+                    }
+                }
+                arguments.push(HostArgument::Number(DETAIL_KEY));
+                arguments.push(HostArgument::String(key));
+                arguments.push(HostArgument::String(code));
+                arguments.push(HostArgument::Boolean(*repeat));
+                arguments.push(HostArgument::Number(f64::from(bits)));
+                return;
+            }
+            // `None`, and the engine's own `ContentVisibility`, which never
+            // reaches a realm.
+            _ => {
+                arguments.push(HostArgument::Number(DETAIL_EMPTY));
+                return;
+            }
+        };
     let number = |value: Option<f64>| value.map_or(HostArgument::Undefined, HostArgument::Number);
     arguments.push(HostArgument::Number(DETAIL_POSITION));
     arguments.push(HostArgument::Number(f64::from(position.x)));
@@ -688,10 +693,10 @@ pub(crate) struct DocumentIngredients {
     pub(crate) config: PageConfig,
     /// The fonts and the default family, already validated against a context
     /// of their own — see
-    /// [`adopt_text_context`](dom::Document::adopt_text_context). `None` is a
+    /// [`adopt_text_context`](terminus::link::Document::adopt_text_context). `None` is a
     /// view that named neither, which leaves the document's own lazy context
     /// alone.
-    pub(crate) text_context: Option<dom::TextContext>,
+    pub(crate) text_context: Option<terminus::link::TextContext>,
     pub(crate) style_pool: Option<Rc<StylePool>>,
 }
 
@@ -860,7 +865,7 @@ struct DocumentSlot {
     /// releases it — as it is, if the metrics match, or recomputed if they do
     /// not — and a newer commit published once bound drops it, so it is
     /// never published after a frame that superseded it.
-    held: Option<Arc<dom::CommittedFrame>>,
+    held: Option<Arc<terminus::link::CommittedFrame>>,
     /// The events the document's components owe script: an image's `load`s
     /// and `error`s, from the `image` component, which settles a `src` inside
     /// the `__SetAttribute` that wrote it, and from
@@ -881,21 +886,21 @@ struct DocumentSlot {
     /// script.
     ///
     /// Beside the document rather than inside it because exposure is Lynx's
-    /// and `dom` knows nothing of it: each registration is one of `dom`'s
+    /// and `terminus` knows nothing of it: each registration is one of `terminus`'s
     /// intersection observers, and what those deliver is turned into
     /// exposure here and drained into the realm by the intersection delivery
     /// entry ([`MainThreadRuntime::notify_intersection_observers`]).
     exposure: Exposure,
     /// The document's `layoutchange` observer and what it delivered, beside
     /// the document for the reason `exposure` is: `layoutchange` is Lynx's,
-    /// one of `dom`'s resize observers carries it, and what that observer
+    /// one of `terminus`'s resize observers carries it, and what that observer
     /// delivers is dispatched into the realm by the resize delivery entry
     /// ([`MainThreadRuntime::notify_resize_observers`]).
     layout_change: LayoutChangeObserver,
     /// Per text element, the last non-empty Lynx `selectionchange` record it
     /// was sent, which the `text` module compares the next one against
     /// ([`report_selection_changes`]). Beside the document for what
-    /// `exposure` is beside it for: the event is Lynx's, and `dom` keeps only
+    /// `exposure` is beside it for: the event is Lynx's, and `terminus` keeps only
     /// the W3C selection it is derived from. An entry exists only for an
     /// element that was sent a non-empty record, and leaves when the element
     /// is sent the empty record or nothing listens on it any more, so the
@@ -911,9 +916,9 @@ struct DocumentSlot {
     /// invitee [`realm_calls`] has no realm to call for.
     editing_routes: u8,
     /// The event names the document's components observe on an element that
-    /// exists, as [`dom::Document::take_observed_name_changes`] said when last
+    /// exists, as [`terminus::link::Document::take_observed_name_changes`] said when last
     /// drained ([`Self::sync_names`]). With the document's listener
-    /// table ([`dom::Document::has_listeners_for`]), what the painter routes
+    /// table ([`terminus::link::Document::has_listeners_for`]), what the painter routes
     /// against ([`Self::routes`]).
     observed: FxHashSet<&'static str>,
     /// The scroll containers that have scrolled since the painter last
@@ -922,15 +927,15 @@ struct DocumentSlot {
     /// `scrollend` listener added mid-scroll still hears the end; a rest
     /// takes a container out, and so does its node being freed. Bounded by
     /// the containers scrolling at once.
-    scrolling: SmallVec<[dom::NodeId; 4]>,
+    scrolling: SmallVec<[terminus::link::NodeId; 4]>,
     /// Where committed frames leave for the painting side.
     outbox: ViewOutbox,
 }
 
 /// A name a registration change carries to
 /// [`DocumentSlot::publish_route_changes`]: borrowed from a member call, or
-/// the document's own `Arc<str>` ([`dom::Document::take_pending_last_removals`],
-/// [`dom::Document::remove_listeners_of`]), which reaches the painter's set
+/// the document's own `Arc<str>` ([`terminus::link::Document::take_pending_last_removals`],
+/// [`terminus::link::Document::remove_listeners_of`]), which reaches the painter's set
 /// without a second allocation.
 trait RouteName {
     fn as_str(&self) -> &str;
@@ -1085,7 +1090,7 @@ impl DocumentSlot {
     }
 
     /// Queues a `scroll` at every container an instant scroll request
-    /// moved ([`dom::Document::take_instant_scrolls`]), if anything in the
+    /// moved ([`terminus::link::Document::take_instant_scrolls`]), if anything in the
     /// document hears the name ([`Self::listens`]), and records the
     /// container as scrolling. Its `scrollend` comes from the painter, which
     /// carries the request out and then posts the container at rest — or,
@@ -1111,7 +1116,7 @@ impl DocumentSlot {
     /// document's listener table, or an element of a component that observes
     /// it. Two lookups.
     ///
-    /// Not [`dom::Document::hears`], which reads the observing *definitions*
+    /// Not [`terminus::link::Document::hears`], which reads the observing *definitions*
     /// rather than their live elements: a UA definition that observes
     /// `scroll` would make every scroll owe an event whether or not an
     /// element of it exists. What is routed and what is queued follow the
@@ -1146,7 +1151,7 @@ impl DocumentSlot {
     /// unobserves it, `layout` turns a `text`'s layout report on or off.
     fn open_listener(
         &mut self,
-        node: dom::NodeId,
+        node: terminus::link::NodeId,
         name: &str,
         kinds: ListenerKinds,
         key: ListenerKey,
@@ -1171,7 +1176,7 @@ impl DocumentSlot {
     /// A realm's `listenerClosed`: `key` no longer listens for `name` on
     /// `node`, in any pass. As [`Self::open_listener`] for the registration
     /// change, for exposure and for the layout event registrations.
-    fn close_listener(&mut self, node: dom::NodeId, name: &str, key: ListenerKey) {
+    fn close_listener(&mut self, node: terminus::link::NodeId, name: &str, key: ListenerKey) {
         self.apply_pending_last_removals();
         let exposure = is_exposure_event(name);
         let layout = LayoutEventRegistration::of(name);
@@ -1197,11 +1202,11 @@ impl DocumentSlot {
     /// the element ([`LayoutChangeObserver::observe`],
     /// [`LayoutChangeObserver::unobserve`]).
     /// [`LayoutEventRegistration::TextLayoutReport`] turns a `text` element's
-    /// layout report on or off ([`dom::Document::set_text_layout_reporting`]);
+    /// layout report on or off ([`terminus::link::Document::set_text_layout_reporting`]);
     /// any other element is left alone.
     fn layout_registration_follows(
         &mut self,
-        node: dom::NodeId,
+        node: terminus::link::NodeId,
         registration: LayoutEventRegistration,
         before: bool,
     ) {
@@ -1212,7 +1217,11 @@ impl DocumentSlot {
         } = self;
         let document = document.as_mut().expect(DOCUMENT_EXISTS);
         let now = document.has_listener(node, registration.name());
-        if now == before || !document.get(node).is_some_and(dom::Node::is_element) {
+        if now == before
+            || !document
+                .get(node)
+                .is_some_and(terminus::link::Node::is_element)
+        {
             return;
         }
         match registration {
@@ -1232,7 +1241,7 @@ impl DocumentSlot {
 
     /// Tells exposure what the listener table now says of `node`
     /// ([`exposure_rows`]), when that is no longer `before`.
-    fn exposure_follows(&mut self, node: dom::NodeId, before: (bool, bool)) {
+    fn exposure_follows(&mut self, node: terminus::link::NodeId, before: (bool, bool)) {
         let Self {
             document, exposure, ..
         } = self;
@@ -1272,7 +1281,7 @@ impl DocumentSlot {
     }
 
     /// Applies the last removals the document's free path left waiting
-    /// ([`dom::Document::take_pending_last_removals`]): a node freed by a
+    /// ([`terminus::link::Document::take_pending_last_removals`]): a node freed by a
     /// removal or a handle's collection takes its registrations with it, and
     /// no caller was there to hand the registration change to. One length
     /// check when no freed node held a registration.
@@ -1504,7 +1513,7 @@ impl DocumentSlot {
 
     /// An exposure attribute of the live element `node` was written or
     /// removed; see [`Exposure::attribute_changed`].
-    fn exposure_attribute_changed(&mut self, node: dom::NodeId) {
+    fn exposure_attribute_changed(&mut self, node: terminus::link::NodeId) {
         let Self {
             document, exposure, ..
         } = self;
@@ -1514,7 +1523,12 @@ impl DocumentSlot {
     /// The realm's `switchExposure` for the elements `nodes`; answers how
     /// many records it queued. See [`Exposure::switch`]. An empty list asks
     /// nothing of the document.
-    fn switch_exposure(&mut self, on: bool, send_event: bool, nodes: &[dom::NodeId]) -> usize {
+    fn switch_exposure(
+        &mut self,
+        on: bool,
+        send_event: bool,
+        nodes: &[terminus::link::NodeId],
+    ) -> usize {
         if nodes.is_empty() {
             return 0;
         }
@@ -1732,7 +1746,7 @@ impl DocumentSlot {
     ///
     /// Empty before `createDocument`: there is no cascade yet, and the
     /// epilogue of the entry that mounts a sheet asks again.
-    fn take_font_face_requests(&mut self) -> Vec<dom::FontFaceRequest> {
+    fn take_font_face_requests(&mut self) -> Vec<terminus::link::FontFaceRequest> {
         self.document
             .as_mut()
             .map(LynxDocument::take_font_face_requests)
@@ -1830,14 +1844,14 @@ pub(crate) struct MainThreadRuntime {
     /// The last `click` that did not complete a `dblclick`: its resolved
     /// target and its timestamp. A second `click` at the same target within
     /// [`DOUBLE_CLICK_MILLISECONDS`] is a `dblclick`, and clears it.
-    last_click: Option<(dom::NodeId, f64)>,
+    last_click: Option<(terminus::link::NodeId, f64)>,
     /// What the pointer's editing default actions remember between events:
     /// the press a mouse drag extends, and the presses a quick second and
     /// third one count from.
     pointer_editing: editing::PointerEditing,
-    /// The last [`dom::editing::TextInputState`] published to the host; the
+    /// The last [`terminus::link::editing::TextInputState`] published to the host; the
     /// default ("nothing editable is focused") until the first focus.
-    text_input: dom::editing::TextInputState,
+    text_input: terminus::link::editing::TextInputState,
     /// Where the host's typed text comes from, which decides what a
     /// `keydown`'s editing default action does ([`editing::key_command`]).
     text_input_source: crate::editing::TextInputSource,
@@ -1948,7 +1962,7 @@ impl MainThreadRuntime {
                 timeline_milliseconds: 0.0,
                 last_click: None,
                 pointer_editing: editing::PointerEditing::default(),
-                text_input: dom::editing::TextInputState::default(),
+                text_input: terminus::link::editing::TextInputState::default(),
                 text_input_source: crate::editing::TextInputSource::default(),
                 screen: startup.screen,
                 config,
@@ -2132,7 +2146,7 @@ impl MainThreadRuntime {
     }
 
     /// Moves the document's animation clock to the painter's at the start of
-    /// an entry; see [`dom::Document::sync_animation_clock`].
+    /// an entry; see [`terminus::link::Document::sync_animation_clock`].
     pub(crate) fn sync_animation_clock(&mut self, now: f64) {
         self.slot
             .borrow_mut()
@@ -2203,21 +2217,21 @@ impl MainThreadRuntime {
     /// Writes the painter's scroll offsets into the document, which is how a
     /// user scroll reaches it. An offset inside the committed encode window
     /// commits nothing; one that has used half the window's headroom toward
-    /// an edge ([`dom::ScrollSlot::recenter_due`]) asks this entry's commit
+    /// an edge ([`terminus::link::ScrollSlot::recenter_due`]) asks this entry's commit
     /// to bake windows re-centered on it, and one past the window already
     /// did inside `scroll_to`. The scroll-driven animations those containers
     /// drive then re-sample, which is a commit only when one moved, and an
     /// anchor-positioned box the offsets shifted out of its inset-modified
     /// containing block is laid out again to pick a position fallback
-    /// ([`dom::Document::redetermine_scrolled_fallbacks`]) — also a commit
+    /// ([`terminus::link::Document::redetermine_scrolled_fallbacks`]) — also a commit
     /// only then.
     ///
     /// A post naming an older request than the container's pending one
-    /// ([`dom::Document::pending_scroll_request`]) is dropped: the painter
+    /// ([`terminus::link::Document::pending_scroll_request`]) is dropped: the painter
     /// made it before it saw the request, so it would write back the offset
     /// the request replaced. One that names the pending request, or a newer
     /// one, is adopted and acknowledges it. A pending auto-scroll change
-    /// ([`dom::Document::auto_scroll`]) moved no offset, so no post is
+    /// ([`terminus::link::Document::auto_scroll`]) moved no offset, so no post is
     /// dropped on its account: whichever names its serial acknowledges it.
     ///
     /// CSSOM-View's `scroll` and `scrollend` are decided here, never on the
@@ -2230,7 +2244,7 @@ impl MainThreadRuntime {
     /// listener added mid-scroll hears the end.
     pub(crate) fn adopt_scroll_offsets(
         &mut self,
-        entries: impl Iterator<Item = (dom::NodeId, crate::link::ScrollEntry)>,
+        entries: impl Iterator<Item = (terminus::link::NodeId, crate::link::ScrollEntry)>,
     ) {
         let mut slot = self.slot.borrow_mut();
         // Asked once per take: two set lookups each, and while neither name
@@ -2246,7 +2260,7 @@ impl MainThreadRuntime {
         let document = document.as_mut().expect(DOCUMENT_EXISTS);
         let frame = document.committed_frame();
         let mut recenter = false;
-        let mut moved: SmallVec<[dom::NodeId; 4]> = SmallVec::new();
+        let mut moved: SmallVec<[terminus::link::NodeId; 4]> = SmallVec::new();
         for (node, entry) in entries {
             if let Some(handled) = entry.request {
                 document.acknowledge_auto_scroll(node, handled);
@@ -2279,7 +2293,11 @@ impl MainThreadRuntime {
             {
                 scrolling.swap_remove(index);
                 if hears_end {
-                    component_events.queue_scroll(node, SCROLL_END_EVENT, dom::Vector2D::zero());
+                    component_events.queue_scroll(
+                        node,
+                        SCROLL_END_EVENT,
+                        terminus::link::Vector2D::zero(),
+                    );
                 }
             }
             moved.push(node);
@@ -2310,7 +2328,7 @@ impl MainThreadRuntime {
     /// producers answer the same way. The other one is the `image` component,
     /// which settles a `src` from inside the `__SetAttribute` that wrote it
     /// and may not re-enter the realm at all.
-    pub(crate) fn apply_image_events(&mut self, events: &[dom::ImageEvent]) {
+    pub(crate) fn apply_image_events(&mut self, events: &[terminus::link::ImageEvent]) {
         let mut slot = self.slot.borrow_mut();
         let outcomes = slot.document_mut().apply_image_events(events);
         slot.component_events.extend_images(outcomes);
@@ -2371,7 +2389,7 @@ impl MainThreadRuntime {
     ///
     /// Two flags of the document's count as well: focus events a UI method
     /// left, and the document's selection having changed
-    /// ([`dom::Document::has_pending_selectionchange`]), whose W3C
+    /// ([`terminus::link::Document::has_pending_selectionchange`]), whose W3C
     /// `selectionchange` that entry fires. Posting the entry is this
     /// engine's form of the Selection API's "queue a task", so every change
     /// before it runs owes one event.
@@ -2384,7 +2402,7 @@ impl MainThreadRuntime {
     }
 
     /// The Selection API's `selectionchange`, when the document's selection
-    /// changed since the last one ([`dom::Document::take_selectionchange`]):
+    /// changed since the last one ([`terminus::link::Document::take_selectionchange`]):
     /// one event per set flag, which is one task in the standard, fired at
     /// the document node, not bubbling and not cancelable (no event is
     /// cancelable here). The document node has no element, so no
@@ -2443,13 +2461,18 @@ impl MainThreadRuntime {
     /// `isDragging`, which this step reports false.
     fn push_scroll_extras(
         &mut self,
-        node: dom::NodeId,
-        delta: dom::Vector2D<f32>,
+        node: terminus::link::NodeId,
+        delta: terminus::link::Vector2D<f32>,
         extras: &mut SmallVec<[(&'static str, Extra<'_>); 7]>,
     ) {
         let scroll_box = self.slot.borrow_mut().document_mut().scroll_box(node);
         let (offset, size) = scroll_box.map_or_else(
-            || (dom::Vector2D::zero(), dom::Size2D::zero()),
+            || {
+                (
+                    terminus::link::Vector2D::zero(),
+                    terminus::link::Size2D::zero(),
+                )
+            },
             |scroll_box| (scroll_box.offset, scroll_box.scroll_size),
         );
         for (key, value) in [
@@ -2478,7 +2501,7 @@ impl MainThreadRuntime {
     ///
     /// Before the queue, after the focus events a UI method left: the W3C
     /// `selectionchange` at the document node when the document's selection
-    /// changed since the last one ([`dom::Document::take_selectionchange`]),
+    /// changed since the last one ([`terminus::link::Document::take_selectionchange`]),
     /// then the Lynx `selectionchange` at each `text` and `inline-text` whose
     /// record that changed, which the `text` module queues
     /// ([`report_selection_changes`]) for this same entry to deliver with the
@@ -2505,7 +2528,7 @@ impl MainThreadRuntime {
         js_runtime: &mut ScriptRuntime,
     ) -> Vec<MainThreadError> {
         let timestamp = self.timeline_milliseconds;
-        // Focus events a UI method's `focus()` or `blur()` left in `dom`
+        // Focus events a UI method's `focus()` or `blur()` left in `terminus`
         // first: they formed inside the JavaScript call, before anything
         // queued after it, and the component events they produce (an
         // `x-input`'s `focus`) join the queue for a turn of their own.
@@ -2543,7 +2566,7 @@ impl MainThreadRuntime {
             let lines_text: String;
             let mut extras: SmallVec<[(&'static str, Extra<'_>); 7]> = SmallVec::new();
             let (target, name, composed) = match *event {
-                ComponentEvent::Image(dom::ImageOutcome::Loaded {
+                ComponentEvent::Image(terminus::link::ImageOutcome::Loaded {
                     node,
                     width,
                     height,
@@ -2565,7 +2588,7 @@ impl MainThreadRuntime {
                     extras.push(("height", Extra::Number(height)));
                     (node, LOAD_EVENT, false)
                 }
-                ComponentEvent::Image(dom::ImageOutcome::Failed { node }) => {
+                ComponentEvent::Image(terminus::link::ImageOutcome::Failed { node }) => {
                     if is_svg(self.slot.borrow_mut().document_mut(), node) {
                         continue;
                     }
@@ -2664,10 +2687,10 @@ impl MainThreadRuntime {
     pub(crate) fn dispatch_input_event(
         &mut self,
         js_runtime: &mut ScriptRuntime,
-        target: dom::NodeId,
+        target: terminus::link::NodeId,
         name: &str,
         payload: &InputEventPayload,
-        release: Option<dom::NodeId>,
+        release: Option<terminus::link::NodeId>,
     ) -> Result<bool, ListenerFailures> {
         if let Some(release) = release {
             return self.dispatch_click(js_runtime, target, release, payload);
@@ -2693,7 +2716,7 @@ impl MainThreadRuntime {
     ///
     /// The target is the nearest common inclusive ancestor of the down's
     /// target and the release's, along the parents a composed event path
-    /// takes ([`dom::Document::nearest_common_event_ancestor`]); the painting
+    /// takes ([`terminus::link::Document::nearest_common_event_ancestor`]); the painting
     /// side has no tree to find it in. A second `click` at the same target
     /// within [`DOUBLE_CLICK_MILLISECONDS`] of the last one is then followed
     /// by a `dblclick` there, and a third starts over. The painting side sends
@@ -2704,8 +2727,8 @@ impl MainThreadRuntime {
     fn dispatch_click(
         &mut self,
         js_runtime: &mut ScriptRuntime,
-        down: dom::NodeId,
-        release: dom::NodeId,
+        down: terminus::link::NodeId,
+        release: terminus::link::NodeId,
         payload: &InputEventPayload,
     ) -> Result<bool, ListenerFailures> {
         let (target, click, double) = {
@@ -2781,16 +2804,16 @@ impl MainThreadRuntime {
     /// A target freed since the event formed resolves to nothing rather than
     /// a path — a `NodeId` names one node for the life of the document, so
     /// the check is one lookup and can never hit a stranger — and so does a
-    /// name nothing hears ([`dom::Document::hears`]: no registration and no
+    /// name nothing hears ([`terminus::link::Document::hears`]: no registration and no
     /// observing definition), which costs that one check and builds no path.
     ///
     /// **Which realms are called** is decided before the walk, from the
     /// document's listener table (`docs/tracking/deviations.md`): a realm is
     /// called when it holds a path registration for the name on a node of
     /// the path, in a pass that node's steps run
-    /// ([`dom::Document::listeners_on_path`]), or a `global-bindEvent`
+    /// ([`terminus::link::Document::listeners_on_path`]), or a `global-bindEvent`
     /// registration for the name the path reaches
-    /// ([`dom::Document::global_registrants_on_path`]): one whose node's
+    /// ([`terminus::link::Document::global_registrants_on_path`]): one whose node's
     /// tree root is a node of the path — the document node for the page's
     /// own and any light-tree node, which every connected composed path ends
     /// at; a frame's shadow root for a card's, so a card's global
@@ -2814,7 +2837,7 @@ impl MainThreadRuntime {
     /// constructed. A frame is a shadow tree like any other here: no record
     /// says which realm renders which nested page, and each realm finds its
     /// own steps in the path by the handles it holds. The walk is
-    /// [`dom::Document::advance`], one step at a time with the document
+    /// [`terminus::link::Document::advance`], one step at a time with the document
     /// borrowed for that step alone, so a realm's listeners may mutate the
     /// tree. A component's `stop_propagation` ends the walk after its step,
     /// so it keeps no realm from its call, every call being at the first
@@ -2882,12 +2905,12 @@ impl MainThreadRuntime {
     /// can know: nothing here says whether anything ran.
     #[allow(
         clippy::too_many_arguments,
-        reason = "the event's two flags, as `dom::Document::event_steps` takes them"
+        reason = "the event's two flags, as `terminus::link::Document::event_steps` takes them"
     )]
     fn dispatch(
         &mut self,
         js_runtime: &mut ScriptRuntime,
-        target: dom::NodeId,
+        target: terminus::link::NodeId,
         name: &str,
         bubbles: bool,
         composed: bool,
@@ -2918,7 +2941,7 @@ impl MainThreadRuntime {
     fn dispatch_checkpointed(
         &mut self,
         js_runtime: &mut ScriptRuntime,
-        target: dom::NodeId,
+        target: terminus::link::NodeId,
         name: &str,
         bubbles: bool,
         composed: bool,
@@ -3102,7 +3125,7 @@ impl MainThreadRuntime {
     /// with the inner node as `event.target()` — once in the capture pass and
     /// once in the bubble pass, as `slotchange` is heard. A component that
     /// observes `tap` therefore hears three deliveries of one tap: these two,
-    /// and the composed one at the host, [`dom::event::EventPhase::AtTarget`]
+    /// and the composed one at the host, [`terminus::link::event::EventPhase::AtTarget`]
     /// with `target()` the host itself, which a handler that wants the inner
     /// node ignores. A defined element inside the same shadow tree, on the
     /// path, hears it as well. A host hears nothing of a tap at its light-DOM
@@ -3116,7 +3139,12 @@ impl MainThreadRuntime {
     /// A type nothing observes returns after one set lookup, and a target
     /// outside every shadow tree after one walk up its ancestors, before any
     /// path is built, which is the whole cost of a tap at ordinary content.
-    fn tap_shadow_content(&mut self, target: dom::NodeId, detail: &EventDetail, timestamp: f64) {
+    fn tap_shadow_content(
+        &mut self,
+        target: terminus::link::NodeId,
+        detail: &EventDetail,
+        timestamp: f64,
+    ) {
         let mut slot = self.slot.borrow_mut();
         let document = slot.document_mut();
         if !document.observes_event(TAP_EVENT) || document.shadow_root_of(target).is_none() {
@@ -3132,19 +3160,19 @@ impl MainThreadRuntime {
     pub(crate) fn dispatch_for_test(
         &mut self,
         js_runtime: &mut ScriptRuntime,
-        target: dom::NodeId,
+        target: terminus::link::NodeId,
         name: &str,
-        position: dom::Point2D<f32>,
+        position: terminus::link::Point2D<f32>,
     ) -> Result<bool, ListenerFailures> {
         self.dispatch_input_event(
             js_runtime,
             target,
             name,
             &InputEventPayload {
-                detail: dom::event::EventDetail::Pointer {
+                detail: terminus::link::event::EventDetail::Pointer {
                     position,
                     id: 1,
-                    device: dom::input::PointerKind::Touch,
+                    device: terminus::link::input::PointerKind::Touch,
                     button: 0,
                     buttons: 0,
                 },
@@ -3172,9 +3200,9 @@ impl MainThreadRuntime {
     /// ([css-contain-2 §4.4](https://drafts.csswg.org/css-contain-2/#content-visibility-auto-state-change-event))
     /// per queued change, in frame order.
     ///
-    /// The whole dispatch is `dom`'s: it owns the path, the walk and the
+    /// The whole dispatch is `terminus`'s: it owns the path, the walk and the
     /// listeners, because the listeners are the engine's own components
-    /// (`dom::CustomElement` definitions — `<image>` today, `<list>` when it
+    /// (`terminus::link::CustomElement` definitions — `<image>` today, `<list>` when it
     /// exists) rather than anything in a realm. **No realm is entered**,
     /// which is why this takes no `ScriptRuntime`: the event has no script
     /// form, no Lynx event name, and nothing about it is published to the
@@ -3200,7 +3228,7 @@ impl MainThreadRuntime {
     /// entries queued afterwards — the page's cue to post a delivery.
     ///
     /// Asked once per entry, after its commit, and nearly always answered at
-    /// once: `dom` runs nothing when there are no observers or nothing went
+    /// once: `terminus` runs nothing when there are no observers or nothing went
     /// stale since the last update that ran — a frame built, an offset
     /// moved, a target observed. It reads the last completed layout and the
     /// live scroll offsets and runs no pass, so an entry whose scroll was
@@ -3237,16 +3265,16 @@ impl MainThreadRuntime {
     /// Delivers every observer's queued entries to its handler, in creation
     /// order — "notify intersection observers"
     /// ([§3.2.5](https://w3c.github.io/IntersectionObserver/#notify-intersection-observers-algo)),
-    /// which `dom` runs whole, call included — and then the exposure
+    /// which `terminus` runs whole, call included — and then the exposure
     /// changes that loop and the entries before it left, into the realm.
     ///
     /// Two kinds of observer exist today. An engine component's, a
-    /// `dom::CustomElement` definition's, carries a [`dom::ElementHandler`]:
-    /// `dom` calls that element's `intersections_changed` hook in its own
+    /// `terminus::link::CustomElement` definition's, carries a [`terminus::link::ElementHandler`]:
+    /// `terminus` calls that element's `intersections_changed` hook in its own
     /// `[CEReactions]` scope, and drops the entries if the element is not a
     /// constructed component; **no realm is entered** for one. An exposure
     /// registration's carries the exposure handler, which only records
-    /// changes: it cannot call the realm from inside `dom`'s loop, because
+    /// changes: it cannot call the realm from inside `terminus`'s loop, because
     /// the realm is not the document's to lend, so the realm half runs here,
     /// after the loop, with the document released. The MTS
     /// `IntersectionObserver` binding's handler, once it exists, is the same
@@ -3367,13 +3395,13 @@ impl MainThreadRuntime {
         failures
     }
 
-    /// Runs `dom`'s resize-observation update — the spec's "gather active
+    /// Runs `terminus`'s resize-observation update — the spec's "gather active
     /// observations" with the entries created
-    /// ([`dom::Document::update_resize_observations`]) — and answers whether
+    /// ([`terminus::link::Document::update_resize_observations`]) — and answers whether
     /// it queued any entry: the page's cue to post the resize delivery.
     ///
     /// Asked once per entry, after its commit, and nearly always answered at
-    /// once: `dom` runs nothing when there are no observers, when no layout
+    /// once: `terminus` runs nothing when there are no observers, when no layout
     /// pass ran and nothing was observed since the last update that ran, or
     /// before the document's first layout. It reads the last completed layout
     /// and runs no pass.
@@ -3398,13 +3426,13 @@ impl MainThreadRuntime {
 
     /// Delivers every resize observer's queued entries to its handler, in
     /// creation order — the broadcast of resize-observer-1 §3.4.5, which
-    /// `dom` runs whole ([`dom::Document::notify_resize_observers`]) — and
+    /// `terminus` runs whole ([`terminus::link::Document::notify_resize_observers`]) — and
     /// then dispatches `layoutchange` at every target the document's
     /// `layoutchange` observer delivered, in delivery order
     /// (`crate::main::layout_change`).
     ///
     /// The observer's handler only records the targets: it cannot call the
-    /// realm from inside `dom`'s loop, so the realm half runs here, after the
+    /// realm from inside `terminus`'s loop, so the realm half runs here, after the
     /// loop, with the document released, as
     /// [`Self::notify_intersection_observers`] runs exposure.
     ///
@@ -3416,7 +3444,7 @@ impl MainThreadRuntime {
     /// `commonComponentEventSetting` (`CommonEventsAndMethods.ts:23-58`),
     /// with four extras the realm's Lynx layer builds the detail
     /// `{id, dataset, width, height, left, top, right, bottom}` from: `left`,
-    /// `top`, `width` and `height` of [`dom::Document::bounding_client_rect`]
+    /// `top`, `width` and `height` of [`terminus::link::Document::bounding_client_rect`]
     /// read here, in the Lynx view's CSS px with nothing subtracted (user
     /// rulings 3 and 8 of 2026-10-20), or all four `0` when the target has no
     /// box any more. A target freed since its entry formed hears nothing, as
@@ -3497,7 +3525,7 @@ impl MainThreadRuntime {
 
     /// Queues the `layout` event of every reporting `text` whose paragraph a
     /// committing layout run recomputed since the last call
-    /// ([`dom::Document::take_text_layout_reports`]), with the lines and the
+    /// ([`terminus::link::Document::take_text_layout_reports`]), with the lines and the
     /// content box that commit left ([`ComponentEvent::TextLayout`]), in the
     /// order the runs first reached them. Asked by the page's epilogue after
     /// its commit, so the events join the component events the same entry
@@ -3527,7 +3555,7 @@ impl MainThreadRuntime {
             else {
                 continue;
             };
-            let dom::layout::Layout {
+            let terminus::link::layout::Layout {
                 size,
                 padding,
                 border,
@@ -3897,12 +3925,12 @@ await Promise.resolve().then(() => __FlushElementTree());
 
     /// The `@font-face` rules the sheets mounted so far declared and this
     /// realm has not reported before. Empty until a sheet is mounted.
-    pub(crate) fn take_font_face_requests(&mut self) -> Vec<dom::FontFaceRequest> {
+    pub(crate) fn take_font_face_requests(&mut self) -> Vec<terminus::link::FontFaceRequest> {
         self.slot.borrow_mut().take_font_face_requests()
     }
 
     /// Files one loaded `@font-face` source under its declared family.
-    pub(crate) fn register_font_face(&mut self, family: &str, data: dom::FontBlob) {
+    pub(crate) fn register_font_face(&mut self, family: &str, data: terminus::link::FontBlob) {
         self.slot
             .borrow_mut()
             .document_mut()
@@ -4154,7 +4182,7 @@ fn install_host_module(
             Ok(node_id_value(document.create_element(tag, ())))
         }
         fn parentNode(node: node_id_argument) |document| {
-            let parent = document.get(node).and_then(dom::Node::parent_id);
+            let parent = document.get(node).and_then(terminus::link::Node::parent_id);
             Ok(parent.map_or(HostValue::Null, node_id_value))
         }
         fn insertBefore(
@@ -4197,7 +4225,10 @@ fn install_host_module(
         let document = handle.document_mut();
         validate_removable(document, NAME, old_element)?;
         validate_live_element(document, NAME, new_element)?;
-        if let Some(parent) = document.get(old_element).and_then(dom::Node::parent_id) {
+        if let Some(parent) = document
+            .get(old_element)
+            .and_then(terminus::link::Node::parent_id)
+        {
             validate_insert(document, NAME, parent, new_element, Some(old_element))?;
             document.insert_before(parent, new_element, Some(old_element));
             document.remove_element(old_element);
@@ -4481,7 +4512,7 @@ fn is_exposure_event(name: &str) -> bool {
 /// filed the record listener ([`EXPOSURE_RECORD_EVENT`]) on it, which is what
 /// registers it, and whether it hears its element events
 /// ([`hears_exposure`]).
-fn exposure_rows(document: &LynxDocument, node: dom::NodeId) -> (bool, bool) {
+fn exposure_rows(document: &LynxDocument, node: terminus::link::NodeId) -> (bool, bool) {
     (
         document.has_listener(node, EXPOSURE_RECORD_EVENT),
         hears_exposure(document, node),
@@ -4497,7 +4528,7 @@ fn exposure_rows(document: &LynxDocument, node: dom::NodeId) -> (bool, bool) {
 /// exposure fires `uiappear` at an element whose event set has it
 /// (`UIExposure.java:543-547`). web-core marks an element from `__AddEvent`
 /// alone (`createElementAPI.ts:160-170`).
-fn hears_exposure(document: &LynxDocument, node: dom::NodeId) -> bool {
+fn hears_exposure(document: &LynxDocument, node: terminus::link::NodeId) -> bool {
     document.has_listener(node, APPEAR_EVENT) || document.has_listener(node, DISAPPEAR_EVENT)
 }
 
@@ -4596,7 +4627,7 @@ fn install_readback_members(
         let document = handle.document_mut();
         validate_live_element(document, NAME, node)?;
         // Every name is the element kind's own method first
-        // (`dom::CustomElement::invoke`, run by the kind's component in
+        // (`terminus::link::CustomElement::invoke`, run by the kind's component in
         // `tree`). The kinds' methods built are a pager's `selectTab`
         // (`tree::viewpager`), a `scroll-view`'s `scrollTo`, `scrollBy`
         // and `getScrollInfo` (`tree::scroll_container`), a `list`'s
@@ -4608,7 +4639,7 @@ fn install_readback_members(
         // `setFoldExpanded` (`tree::scroll_coordinator`), a `text`'s
         // `getTextBoundingRect` (`tree::text`), and a dialog's
         // `show`, `showModal`, `close` and `requestClose`
-        // (`tree::dialog`). On `NotFound` the shared base set every
+        // (`terminus::link::html::dialog`). On `NotFound` the shared base set every
         // element has answers (`tree::base_methods`): the documented UI
         // methods `boundingClientRect`, `scrollIntoView`,
         // `scrollTo`/`scrollBy` and `focus`/`blur` (user ruling
@@ -4918,8 +4949,8 @@ fn borrow_slot<'a>(
 fn validate_live_element<'a>(
     document: &'a LynxDocument,
     function: &str,
-    node: dom::NodeId,
-) -> Result<&'a dom::Node<()>, String> {
+    node: terminus::link::NodeId,
+) -> Result<&'a terminus::link::Node<()>, String> {
     let node = document
         .get(node)
         .ok_or_else(|| format!("{function} received a stale element id"))?;
@@ -4933,7 +4964,7 @@ fn validate_live_element<'a>(
 fn validate_removable(
     document: &LynxDocument,
     function: &str,
-    node: dom::NodeId,
+    node: terminus::link::NodeId,
 ) -> Result<(), String> {
     let live = document
         .get(node)
@@ -4950,9 +4981,9 @@ fn validate_removable(
 fn validate_insert(
     document: &LynxDocument,
     function: &str,
-    parent: dom::NodeId,
-    child: dom::NodeId,
-    reference: Option<dom::NodeId>,
+    parent: terminus::link::NodeId,
+    child: terminus::link::NodeId,
+    reference: Option<terminus::link::NodeId>,
 ) -> Result<(), String> {
     validate_live_element(document, function, parent)?;
     validate_removable(document, function, child)?;
@@ -4981,16 +5012,22 @@ fn validate_insert(
 fn validate_swap(
     document: &LynxDocument,
     function: &str,
-    a: dom::NodeId,
-    b: dom::NodeId,
+    a: terminus::link::NodeId,
+    b: terminus::link::NodeId,
 ) -> Result<(), String> {
     if a == b {
         return Err(format!("{function} requires distinct elements"));
     }
     validate_removable(document, function, a)?;
     validate_removable(document, function, b)?;
-    if document.get(a).and_then(dom::Node::parent_id).is_none()
-        || document.get(b).and_then(dom::Node::parent_id).is_none()
+    if document
+        .get(a)
+        .and_then(terminus::link::Node::parent_id)
+        .is_none()
+        || document
+            .get(b)
+            .and_then(terminus::link::Node::parent_id)
+            .is_none()
     {
         return Err(format!("{function} requires attached elements"));
     }
@@ -5022,13 +5059,13 @@ const MAX_EXACT_INTEGER: f64 = 9_007_199_254_740_992.0;
     clippy::cast_precision_loss,
     reason = "a packed handle is built to stay inside f64's exact-integer range"
 )]
-fn packed_node_id(node: dom::NodeId) -> f64 {
+fn packed_node_id(node: terminus::link::NodeId) -> f64 {
     node.to_bits() as f64
 }
 
 /// The same handle as a value a host callback returns, rather than as an
 /// argument the runtime lends into a call.
-fn node_id_value(node: dom::NodeId) -> HostValue {
+fn node_id_value(node: terminus::link::NodeId) -> HostValue {
     HostValue::Number(packed_node_id(node))
 }
 
@@ -5041,7 +5078,7 @@ fn node_id_argument(
     function: &str,
     arguments: &[HostValue],
     index: usize,
-) -> Result<dom::NodeId, String> {
+) -> Result<terminus::link::NodeId, String> {
     let HostValue::Number(value) = *argument(arguments, index) else {
         return Err(format!("{function} expects a number for argument {index}"));
     };
@@ -5050,7 +5087,7 @@ fn node_id_argument(
             "{function} expects a non-negative integer node id for argument {index}"
         ));
     }
-    dom::NodeId::from_bits(value as u64)
+    terminus::link::NodeId::from_bits(value as u64)
         .ok_or_else(|| format!("{function} got a number that is no element id: {value}"))
 }
 
@@ -5058,7 +5095,7 @@ fn optional_node_id_argument(
     function: &str,
     arguments: &[HostValue],
     index: usize,
-) -> Result<Option<dom::NodeId>, String> {
+) -> Result<Option<terminus::link::NodeId>, String> {
     match *argument(arguments, index) {
         HostValue::Undefined | HostValue::Null => Ok(None),
         _ => node_id_argument(function, arguments, index).map(Some),
@@ -5073,7 +5110,7 @@ fn node_ids_argument(
     function: &str,
     arguments: &[HostValue],
     index: usize,
-) -> Result<Vec<dom::NodeId>, String> {
+) -> Result<Vec<terminus::link::NodeId>, String> {
     let malformed = || format!("{function} expects comma-joined node ids for argument {index}");
     let HostValue::String(ids) = argument(arguments, index) else {
         return Err(malformed());
@@ -5085,7 +5122,7 @@ fn node_ids_argument(
         .map(|id| {
             id.parse::<u64>()
                 .ok()
-                .and_then(dom::NodeId::from_bits)
+                .and_then(terminus::link::NodeId::from_bits)
                 .ok_or_else(malformed)
         })
         .collect()

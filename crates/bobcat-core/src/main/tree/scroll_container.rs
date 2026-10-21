@@ -8,7 +8,7 @@
 //! four of the methods Lynx documents for the tag
 //! (lynxjs.org/api/elements/built-in/scroll-view), which the runtime's
 //! `callElementMethod` reaches through
-//! [`dom::Document::invoke_element_method`]: `scrollTo` ([`scroll_to`]),
+//! [`terminus::link::Document::invoke_element_method`]: `scrollTo` ([`scroll_to`]),
 //! `scrollBy` ([`scroll_by`]), `autoScroll` ([`auto_scroll`]) and
 //! `getScrollInfo` ([`scroll_info`]). It also fires the two threshold
 //! events, `scrolltoupper` and `scrolltolower`, from the `scroll` it
@@ -75,9 +75,9 @@
 //! nothing else, as native decides them: web-core's intersection observers
 //! also fire when a layout change or the first render moves a sentinel into
 //! the scrollport, which these never do. Geometry is the last completed
-//! layout's ([`dom::Document::scroll_box`]), read when the `scroll` is
+//! layout's ([`terminus::link::Document::scroll_box`]), read when the `scroll` is
 //! delivered. Each event is queued only when a listener on the element
-//! registered for its name ([`dom::Document::has_listener`]), at the
+//! registered for its name ([`terminus::link::Document::has_listener`]), at the
 //! element as the runtime queues a kernel `scroll` — not bubbling, not
 //! composed — so its `detail` is the same scroll metrics, read at its own
 //! delivery, with the change in offset since the element's previous
@@ -96,13 +96,13 @@
 
 use std::cell::RefCell;
 
-use dom::event::ElementEvent;
-use dom::scroll::{ScrollBehavior, ScrollBox, SnapAxis, SnapPoint};
-use dom::{
-    CustomElement, MethodCall, MethodError, MethodOutcome, NodeId, Point2D, Rect, Size2D, Vector2D,
-};
 use rustc_hash::FxHashMap;
 use serde_json::{Map, Value};
+use terminus::link::event::ElementEvent;
+use terminus::link::scroll::{ScrollBehavior, ScrollBox, SnapAxis, SnapPoint};
+use terminus::link::{
+    CustomElement, MethodCall, MethodError, MethodOutcome, NodeId, Point2D, Rect, Size2D, Vector2D,
+};
 
 use super::{ComponentEvents, InvalidParams, LynxDocument, element_child, is_truthy};
 use crate::main::record::write_record_field;
@@ -169,7 +169,7 @@ pub(super) const LOWER_THRESHOLD: &str = "lower-threshold";
 
 /// Installs the `scroll-view` component, which queues its threshold events
 /// on `events`. Must run before any element could carry the tag, which is
-/// [`Document::define`](dom::Document::define)'s own precondition.
+/// [`Document::define`](terminus::link::Document::define)'s own precondition.
 pub(super) fn define(document: &mut LynxDocument, events: ComponentEvents) {
     document.define(
         SCROLL_VIEW_TAG,
@@ -278,7 +278,7 @@ pub(super) fn is_own_scroll(element: NodeId, event: &ElementEvent<'_>) -> bool {
 }
 
 /// `scroller`'s scroll geometry from the last completed layout, or `None`
-/// when it has no box ([`dom::Document::bounding_client_rect`] is `None`:
+/// when it has no box ([`terminus::link::Document::bounding_client_rect`] is `None`:
 /// `display: none` itself or on an ancestor, or detached) or is no scroll
 /// container. Shared with `list` ([`super::list`]).
 pub(super) fn rendered_scroll_box(document: &LynxDocument, scroller: NodeId) -> Option<ScrollBox> {
@@ -481,8 +481,8 @@ pub(super) fn clamp_to_range(value: f64, max: f32) -> f32 {
 ///   it, and a missing one is `false` (Android `getBoolean("smooth", false)`, Harmony's
 ///   `smooth{false}`, which both read a boolean only). A smooth scroll is animated by the painter
 ///   and leaves the document's offset where it is until the painter posts it back; an instant one
-///   moves the document at once ([`dom::Document::scroll_to_with`]). Either way the call answers at
-///   once, as web-core's does; native answers a smooth scroll when its animation ends.
+///   moves the document at once ([`terminus::link::Document::scroll_to_with`]). Either way the call
+///   answers at once, as web-core's does; native answers a smooth scroll when its animation ends.
 ///
 /// A `display: none` `scroll-view` has a zero scrollport, so it scrolls to
 /// offset 0 in a request no frame carries, and one restyled into no scroll
@@ -635,7 +635,7 @@ impl ScrolledBy {
 /// missing one; Harmony reads a missing or non-numeric one as 0
 /// (`:139-142`), and web-core's `HTMLElement.scrollBy` reads no `offset` at
 /// all and scrolls nowhere. The scroll is instant, as every native's is,
-/// through [`dom::Document::scroll_to_with`], so the painter is told.
+/// through [`terminus::link::Document::scroll_to_with`], so the painter is told.
 ///
 /// The natives hand the one `offset` to both axes and scroll the scrolling
 /// one (Android `UIScrollView.java:1394-1423`). The answer is theirs: the
@@ -695,7 +695,7 @@ pub(super) fn scroll_by(
 /// the scrolling axis, read by the caller as for [`scroll_by`]; `list`
 /// shares this method whole ([`super::list`]).
 ///
-/// The motion is the painter's ([`dom::Document::auto_scroll`]): the offset
+/// The motion is the painter's ([`terminus::link::Document::auto_scroll`]): the offset
 /// changes on the painter's clock and comes back through its posts, so the
 /// `scroll` events and the `scrollend` at its end are a user scroll's. It
 /// yields to a finger and to every other motion and goes on afterwards, and
@@ -813,11 +813,11 @@ pub(super) fn scroll_info(document: &LynxDocument, view: NodeId) -> ScrollInfo {
 pub(super) mod tests {
     #![allow(clippy::float_cmp)] // Explicit pixel sizes lay out exactly.
 
-    use dom::event::{EventDetail, ListenerKey, ListenerKinds};
-    use dom::scroll::ScrollBehavior;
-    use dom::stylo::computed_values::{flex_direction, linear_direction};
-    use dom::stylo::values::computed::Overflow;
-    use dom::{MethodCall, MethodError, MethodOutcome, NodeId, Vector2D};
+    use terminus::link::event::{EventDetail, ListenerKey, ListenerKinds};
+    use terminus::link::scroll::ScrollBehavior;
+    use terminus::link::stylo::computed_values::{flex_direction, linear_direction};
+    use terminus::link::stylo::values::computed::Overflow;
+    use terminus::link::{MethodCall, MethodError, MethodOutcome, NodeId, Vector2D};
 
     use super::super::test_support::{
         child, document, element_under, overflow, style_of, with_component_events,
@@ -1887,7 +1887,7 @@ pub(super) mod tests {
     /// point's copy nearest the offset, read in one period.
     #[test]
     fn the_nearest_snap_position_wraps_on_a_circular_axis() {
-        use dom::scroll::{SnapAxis, SnapPoint, SnapStrictness};
+        use terminus::link::scroll::{SnapAxis, SnapPoint, SnapStrictness};
 
         use super::nearest_snap_position;
 

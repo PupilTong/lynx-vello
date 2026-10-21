@@ -6,8 +6,8 @@
 //! on it — while everything downstream speaks replaced content: the source
 //! reaches the host's resource system, the completed load reports an intrinsic
 //! size back, and the paint walk draws the bitmap into the content box. So
-//! this module owns both halves of the join: a [`dom::CustomElement`]
-//! reflecting the attributes into [`dom`], and the UA rules that decide what
+//! this module owns both halves of the join: a [`terminus::link::CustomElement`]
+//! reflecting the attributes into [`terminus`], and the UA rules that decide what
 //! shape the box it draws into has ([`UA_RULES`]).
 //!
 //! # Which attribute becomes what
@@ -16,15 +16,15 @@
 //! three different ways.
 //!
 //! `src` and `placeholder` are the two *sources*, reflected into the one
-//! [`dom::Document::set_image_source`] under [`dom::ImageRole::Source`] and
-//! [`dom::ImageRole::Placeholder`] respectively. They are concurrent, not a
-//! fallback chain — `dom` owns that model and `docs/tracking/media-resources.md`
+//! [`terminus::link::Document::set_image_source`] under [`terminus::link::ImageRole::Source`] and
+//! [`terminus::link::ImageRole::Placeholder`] respectively. They are concurrent, not a
+//! fallback chain — `terminus` owns that model and `docs/tracking/media-resources.md`
 //! carries the 2026-09-17 ruling behind it; this module only relays the strings,
 //! identically for both, with an empty value meaning no source at all.
 //!
 //! `mode`, `auto-size` and the rest of what a picture's *shape* depends on are
 //! attribute selectors in [`UA_RULES`], not node state. That is web-core's own
-//! spelling (`x-image.css`), it costs `dom` no per-node field, and it leaves
+//! spelling (`x-image.css`), it costs `terminus` no per-node field, and it leaves
 //! author CSS outranking the attribute the way PR #261 left `text-overflow`
 //! outranking its own.
 //!
@@ -75,7 +75,7 @@
 //!
 //! The natural size still arrives and still reaches the node. Containment
 //! removes its effect on layout, not the data: `object-fit: contain`/`cover` —
-//! what `mode` maps to — reads it at paint time, in `dom`'s
+//! what `mode` maps to — reads it at paint time, in `terminus`'s
 //! `paint_replaced_content`.
 //!
 //! # `auto-size` is the opt-out, and it is exactly a `<img>` again
@@ -103,7 +103,7 @@
 //! web-core's own e2e fixture has a 40px-wide, 200px-tall parent whose
 //! auto-size image comes out 40x200 with the bitmap stretched to fill it.
 //!
-//! The rule depends on `hughie` handing a stretched item's cross size to the
+//! The rule depends on `seldon` handing a stretched item's cross size to the
 //! measurement that produces its flex base size (css-flexbox-1 §9.8 with §9.2
 //! step B, PR #287), without which an auto-size image in a parent that
 //! stretches it reported its own pixels' main size and came out 40x400 where
@@ -134,7 +134,7 @@
 //! are Lynx text elements by their kind, and the sheet gives them no `display`
 //! of its own ([`super::text`]), so the `image > *` rule hides a `text`
 //! written inside an `image` too. A `src`
-//! would hide it regardless: an element with one is replaced, and `dom` hides
+//! would hide it regardless: an element with one is replaced, and `terminus` hides
 //! every child of a replaced box outright, whatever the cascade said.
 //!
 //! `text > image` is [`super::text`]'s rule, not this module's — an image
@@ -165,10 +165,10 @@
 //!   Ruled 2026-09-20 to stay so in this change; bitmap-only blur is a separate piece of paint
 //!   work, and needs a declaration other than `filter` for this module to write.
 //! - A `load` or an `error` is the *element's own source* settling. The placeholder produces
-//!   neither, which is `dom`'s rule rather than this module's: [`dom::ImageOutcome`] has no variant
-//!   naming a placeholder.
+//!   neither, which is `terminus`'s rule rather than this module's:
+//!   [`terminus::link::ImageOutcome`] has no variant naming a placeholder.
 
-use dom::{CustomElement, ImageRole, NodeId};
+use terminus::link::{CustomElement, ImageRole, NodeId};
 
 use super::{ComponentEvents, LynxDocument};
 
@@ -199,7 +199,7 @@ const FILTER_PROPERTY: &str = "filter";
 /// The child rule is `web-elements`' `x-image > * { display: none; }` and
 /// native's refusal to let an image take children at all, which makes
 /// leaf-ness a property of the tag rather than of whether a `src` happens to
-/// be set — `dom` hides a replaced element's children, but only once it is
+/// be set — `terminus` hides a replaced element's children, but only once it is
 /// replaced. It ties on specificity with the `display` rules `view`,
 /// `scroll-view`, `list`, `blur-view`, `x-blur-view` and `wrapper` carry, and
 /// wins on source order, which is why
@@ -253,7 +253,7 @@ image > * { display: none; }
 
 /// Installs the component, over the queue its bind-time outcomes go into. Must
 /// run before any element could carry the tag, which is
-/// [`Document::define`](dom::Document::define)'s own precondition.
+/// [`Document::define`](terminus::link::Document::define)'s own precondition.
 pub(super) fn define(document: &mut LynxDocument, outcomes: ComponentEvents) {
     document.define(IMAGE_TAG, Box::new(Image { outcomes }));
 }
@@ -266,7 +266,7 @@ pub(super) fn define(document: &mut LynxDocument, outcomes: ComponentEvents) {
 /// the source always comes later. Nothing runs on disconnect either — a
 /// removal frees nothing, so a detached image keeps its source and its request,
 /// and the path that does free it raises no reaction at all. The registry
-/// unbind that a free owes belongs where the free is, in `dom`.
+/// unbind that a free owes belongs where the free is, in `terminus`.
 struct Image {
     /// Where a `src` that settles at the bind leaves its outcome. The
     /// reaction runs inside a JavaScript call, so it cannot dispatch.
@@ -364,10 +364,10 @@ mod tests {
     // the exact zero Lynx's rule produces — no measurement, so no tolerance.
     #![allow(clippy::float_cmp)]
 
-    use dom::NodeId;
-    use dom::stylo::computed_values::box_sizing;
-    use dom::stylo::computed_values::object_fit::T as ObjectFit;
-    use dom::stylo::values::computed::{Contain, Display};
+    use terminus::link::NodeId;
+    use terminus::link::stylo::computed_values::box_sizing;
+    use terminus::link::stylo::computed_values::object_fit::T as ObjectFit;
+    use terminus::link::stylo::values::computed::{Contain, Display};
 
     use super::super::test_support::{
         child, display, document, element_under, style_of, with_config,
@@ -404,7 +404,9 @@ mod tests {
         document.set_attribute(element, SRC_ATTRIBUTE, SOURCE);
         document.set_natural_size(
             element,
-            dom::layout::NaturalSize::from_size(dom::layout::Size::new(NATURAL.0, NATURAL.1)),
+            terminus::link::layout::NaturalSize::from_size(terminus::link::layout::Size::new(
+                NATURAL.0, NATURAL.1,
+            )),
         );
         element
     }
@@ -611,7 +613,7 @@ mod tests {
 
     /// The sheet gives a `text` no `display` of its own, so the `image > *`
     /// rule reaches a `text` child like any other. With a `src` the
-    /// image is replaced, and `dom` hides its children on top of the cascade.
+    /// image is replaced, and `terminus` hides its children on top of the cascade.
     #[test]
     fn a_text_inside_an_image_is_suppressed_like_any_other_child() {
         let mut document = document();
@@ -690,7 +692,7 @@ mod tests {
 
     /// An empty `placeholder` is the same nothing a removed one is, and the
     /// place that shows is the box: under `auto-size` the natural size is a
-    /// layout input, and `dom` takes it from whichever bitmap the element
+    /// layout input, and `terminus` takes it from whichever bitmap the element
     /// draws — the placeholder's while `src` has no pixels.
     ///
     /// That a placeholder can size the box at all follows iOS and web-core;
@@ -703,7 +705,7 @@ mod tests {
         let element = element_under(&mut document, parent, IMAGE_TAG, "");
         document.set_attribute(element, AUTO_SIZE_ATTRIBUTE, "");
         document.set_attribute(element, PLACEHOLDER_ATTRIBUTE, PLACEHOLDER);
-        let _ = document.apply_image_events(&[dom::ImageEvent::Loaded {
+        let _ = document.apply_image_events(&[terminus::link::ImageEvent::Loaded {
             source: std::sync::Arc::from(PLACEHOLDER),
             width: NATURAL_PIXELS.0,
             height: NATURAL_PIXELS.1,
@@ -798,7 +800,7 @@ mod tests {
         document.add_class(element, "override");
         document.add_stylesheet(
             "@layer fits { .override { object-fit: cover; } }",
-            dom::StylesheetOrigin::Author,
+            terminus::link::StylesheetOrigin::Author,
         );
         document.layout();
         assert_eq!(object_fit(&document, element), ObjectFit::Cover);
@@ -891,7 +893,9 @@ mod tests {
             document.set_attribute(element, SRC_ATTRIBUTE, SOURCE);
             document.set_natural_size(
                 element,
-                dom::layout::NaturalSize::from_size(dom::layout::Size::new(NATURAL.0, NATURAL.1)),
+                terminus::link::layout::NaturalSize::from_size(terminus::link::layout::Size::new(
+                    NATURAL.0, NATURAL.1,
+                )),
             );
 
             assert_eq!(
@@ -924,7 +928,9 @@ mod tests {
             document.set_attribute(element, SRC_ATTRIBUTE, SOURCE);
             document.set_natural_size(
                 element,
-                dom::layout::NaturalSize::from_size(dom::layout::Size::new(NATURAL.0, NATURAL.1)),
+                terminus::link::layout::NaturalSize::from_size(terminus::link::layout::Size::new(
+                    NATURAL.0, NATURAL.1,
+                )),
             );
 
             assert_eq!(size_of(&mut document, element), expected, "{own:?}");
@@ -953,7 +959,7 @@ mod tests {
     /// The blur radius in the element's computed `filter`, in CSS pixels;
     /// `None` when the list holds no blur at all, the initial value included.
     fn blur(document: &LynxDocument, element: NodeId) -> Option<f32> {
-        use dom::stylo::values::computed::effects::Filter;
+        use terminus::link::stylo::values::computed::effects::Filter;
 
         match style_of(document, element).get_effects().filter.0.first() {
             Some(Filter::Blur(radius)) => Some(radius.0.px()),
@@ -1015,7 +1021,7 @@ mod tests {
         document.add_class(element, "override");
         document.add_stylesheet(
             "@layer blurs { .override { filter: none; } }",
-            dom::StylesheetOrigin::Author,
+            terminus::link::StylesheetOrigin::Author,
         );
         document.layout();
         assert_eq!(blur(&document, element), None);

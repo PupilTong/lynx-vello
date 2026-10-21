@@ -15,7 +15,7 @@ Multiplatform) carries a fallback path for exactly that case.
 
 Other rulings that shape the design:
 
-- `dom` follows the **browser standard**: HTML `contenteditable`, the
+- `terminus` follows the **browser standard**: HTML `contenteditable`, the
   Selection/caret model, `beforeinput`/`input` (`InputEvent.inputType`,
   `data`, `isComposing`), `compositionstart`/`compositionupdate`/
   `compositionend`, `focus`/`blur`. Lynx's `x-input`/`x-textarea` and their
@@ -35,7 +35,7 @@ Other rulings that shape the design:
   editing default actions run whatever a listener does. A Lynx event object
   has no `preventDefault`, and web-core's root listeners are
   `passive: true`. The embedder's `InputEvent::default_prevented` is the only
-  veto; a Rust component that ever needs one sets a `canceled` flag on `dom`'s
+  veto; a Rust component that ever needs one sets a `canceled` flag on `terminus`'s
   `EventWalk` beside its stop flag (`docs/tracking/deviations.md`).
 - Pointer events over an editing host are routed exactly like any other
   element's; the engine, not the host, turns them into caret placement.
@@ -56,7 +56,7 @@ every synchronous OS query from it with no wait.
 ```
           bobcat-main (Document, realm)                 host thread (Painter, LynxView::pump)
  ┌─────────────────────────────────────────┐    ┌──────────────────────────────────────────┐
- │ dom::editing                             │    │ embedder IME client                       │
+ │ terminus::link::editing                             │    │ embedder IME client                       │
  │  • editing host = contenteditable elem   │    │  macOS: winit Ime + KeyEvent.text         │
  │  • Selection/Cursor over the host's      │    │  wasm:  hidden <textarea> proxy in facade │
  │    paragraph (its own, or its anonymous  │    │  headless: test driver                    │
@@ -69,7 +69,7 @@ every synchronous OS query from it with no wait.
  └─────────────────────────────────────────┘
 ```
 
-### Editing host (`dom`)
+### Editing host (`terminus`)
 
 - An element is an **editing host** when its `contenteditable` attribute is
   present and not `"false"` (case-insensitive). `"true"`, `""` and
@@ -87,7 +87,7 @@ every synchronous OS query from it with no wait.
     `TextStore::Flow`;
   - any other element — a flex, grid, linear or relative `view` or `div` —
     lays its loose text out in the anonymous block box around it
-    (`dom::tree::anonymous`, #434), whose standard inline formatting context
+    (`terminus::tree::anonymous`, #434), whose standard inline formatting context
     is the paragraph. The host is that box's container.
 
   No `display` is forced: a `display: none` host is hidden and cannot be
@@ -107,7 +107,7 @@ every synchronous OS query from it with no wait.
   white space, an inline box's edges and a truncation tail move them. The
   paragraph's source units are the value's UTF-16 units, so every
   conversion goes value byte → UTF-16 unit → layout byte and back through
-  the paragraph's own source map (`hughie::text::paragraph::OffsetMap`).
+  the paragraph's own source map (`seldon::text::paragraph::OffsetMap`).
   Offsets published to the host are UTF-16 code units into the host's
   value.
 - `Document` gains a minimal **focus model**: one focused element, `focus(node)`
@@ -119,7 +119,7 @@ every synchronous OS query from it with no wait.
   the composition range. Caret blink is deferred (needs a painter-side toggle;
   a main-thread timer would recommit every 500 ms).
 
-### Commands (`dom::editing::Command`, applied on bobcat-main)
+### Commands (`terminus::link::editing::Command`, applied on bobcat-main)
 
 Chromium's set plus the local editing actions a keyboard produces:
 
@@ -166,7 +166,7 @@ geometry query over `CommittedFrame` is the recorded follow-up if that matters.
 
 `LynxView::edit(Command)` on the host thread sends a counted
 `ToMain::Edit(..)`, so it is ordered with pointer input and acknowledged by the
-next frame post (E2 named it after `dom::editing::Command`, which it carries
+next frame post (E2 named it after `terminus::link::editing::Command`, which it carries
 as it is, rather than `ime`/`ImeCommand`: the same call carries a host's own
 selection and editing commands). Keyboard keys travel as `InputKind::Key` (PR
 #407) with the **text the key typed** (`text`, since E3), which main inserts
@@ -184,7 +184,7 @@ winit's macOS backend sends no key event for them at all (E3).
 
 | PR | Crates | Scope | Depends on |
 |---|---|---|---|
-| **E1** | dom, bobcat-core (UA sheet) | editing host, focus model, selection/caret/composition state, commands, caret + selection + composition painting, `TextInputState`, unit tests + goldens | — |
+| **E1** | terminus, bobcat-core (UA sheet) | editing host, focus model, selection/caret/composition state, commands, caret + selection + composition painting, `TextInputState`, unit tests + goldens | — |
 | **E2** | bobcat-core, bobcat-element (dom: two small additions) | `ToMain::Edit`, `LynxView::edit`, `ViewNotice::TextInputState` → `EngineEvent::TextInputStateChanged`, standard events into the realm (`EventDetail::{Input, Composition, Focus}` with string data), no cancellation channel (ruled 2026-10-19), pointer → caret placement and keyboard default actions on the main thread | E1, #407 |
 | **E3** | bobcat-cli (macOS) | winit `Ime` → commands, `set_ime_allowed` / `set_ime_cursor_area` from the state, `KeyEvent.text` insertion, headless driver | E2 |
 | **E4** | bobcat-wasm (bobcat-core: the text-source flag) | hidden `<textarea>` proxy in the facade (`beforeinput`/`composition*` → `bobcat-edit` → `LynxView::edit`), keyboard focus, `TextInputState` → `bobcat-text-input`; `EditContext` recorded as the follow-up | E2 |
@@ -216,12 +216,12 @@ which web-core does not read.
 
 ## E1: what was built
 
-`dom::editing` (`crates/dom/src/editing/`; `paragraph.rs` resolves a host's
+`terminus::link::editing` (`crates/terminus/src/editing/`; `paragraph.rs` resolves a host's
 paragraph and converts offsets), the UA rule in
 `crates/bobcat-core/src/main/tree/ua_sheet.rs` (`EDITING_HOST_RULE`), the
-caret, selection and composition painting in `crates/dom/src/paint/text.rs`
-and `walker.rs`, and the offset bridge in `hughie`
-(`crates/hughie/src/text/paragraph/offsets.rs`). No host code, no realm
+caret, selection and composition painting in `crates/terminus/src/paint/text.rs`
+and `walker.rs`, and the offset bridge in `seldon`
+(`crates/seldon/src/text/paragraph/offsets.rs`). No host code, no realm
 code.
 
 Public surface:
@@ -233,19 +233,19 @@ Public surface:
   EditEvent, EditEventKind}`.
 - `Document::text_input_state`; `editing::{TextInputState, InputType,
   InputMode, EnterKeyHint}`.
-- `hughie::text::paragraph::OffsetMap` (`display_text`, `source_len`,
+- `seldon::text::paragraph::OffsetMap` (`display_text`, `source_len`,
   `cut_byte`, `truncated`, `unit_to_byte`, `unit_to_byte_or_end`,
   `byte_to_unit`, `unit_before`), from `TextBlock::offset_map` and
   `InlineFlow::offset_map`.
 
 ### Choices made where the design left one
 
-- **Focus events stay in `dom`.** `focus`/`blur` queue `FocusEvent`s
+- **Focus events stay in `terminus`.** `focus`/`blur` queue `FocusEvent`s
   (`blur`, `focusout`, `focus`, `focusin`, each with its `relatedTarget`) on
   the document, drained by `Document::take_focus_events`, the shape of
   `take_document_requests`. `bobcat-core`'s `ComponentEvents` is not touched:
   its drain dispatches every entry into the realm, and E1 wires nothing to
-  the realm. E2 drains the queue into its dispatch with no `dom` change.
+  the realm. E2 drains the queue into its dispatch with no `terminus` change.
 - **Focus fixup fires nothing.** A focused host that leaves the document
   (the removal path) or stops being a host (`contenteditable` removed or set
   to `"false"`) loses focus with no event, as HTML's focus fixup rule says.
@@ -260,7 +260,7 @@ Public surface:
   nothing.
 - **Points are host border-box CSS px.** `SelectFromPoint` and the other
   pointer commands take the point relative to the host's border-box origin,
-  the space `bounding_client_rect` puts the host in; `dom` subtracts the
+  the space `bounding_client_rect` puts the host in; `terminus` subtracts the
   border and padding.
 - **`CommitText`'s `relative_cursor` is Blink's**: relative to the end of the
   inserted text (`0` = just after it), in UTF-16 units, clamped to the value.
@@ -440,7 +440,7 @@ The realm and host wiring of E1's kernel, in `bobcat-core` and
 `TextInputState` publication), `LynxView::edit`, `ToMain::Edit`,
 `ViewNotice::TextInputState`, `EngineEvent::TextInputStateChanged`, the new
 detail kinds in `main/runtime/lib.rs` and `element-papi.ts`, and two small
-`dom` additions: `Document::has_editing_hosts` (removed 2026-10-21 with the
+`terminus` additions: `Document::has_editing_hosts` (removed 2026-10-21 with the
 read-only selection, which routes the press unconditionally) and
 `EventDetail::{Input, Composition, Focus}`.
 
@@ -451,8 +451,8 @@ Public surface:
   the page updates).
 - `EngineEvent::TextInputStateChanged(Box<bobcat_core::editing::TextInputState>)`.
 - `bobcat_core::editing::{Command, Direction, Granularity, TextInputState,
-  InputType, InputMode, EnterKeyHint}` (re-exports of `dom::editing`).
-- `dom::Document::has_editing_hosts`; `dom::event::EventDetail::{Input,
+  InputType, InputMode, EnterKeyHint}` (re-exports of `terminus::link::editing`).
+- `terminus::link::Document::has_editing_hosts`; `terminus::link::event::EventDetail::{Input,
   Composition, Focus}`.
 
 ### How an edit runs
@@ -480,10 +480,10 @@ pointer/wheel/touch kind was renamed `DETAIL_POSITION` to match the realm's.
 ### Choices made where the brief left one
 
 - **The command is `edit`, not `ime`.** `LynxView::edit(Command)` carries
-  `dom::editing::Command` unchanged, which holds the keyboard and selection
+  `terminus::link::editing::Command` unchanged, which holds the keyboard and selection
   commands as well as Chromium's IME set.
 - **Focus events are drained right after the press, not in the epilogue.**
-  `dom` queues focus events only from `Document::focus`/`blur`, which only the
+  `terminus` queues focus events only from `Document::focus`/`blur`, which only the
   press default action calls, and HTML runs the focus update inside the
   `mousedown` default action, before the `mouseup` and `click` of the same
   burst; draining in the epilogue would deliver `focus` after them. The fixup
@@ -491,7 +491,7 @@ pointer/wheel/touch kind was renamed `DETAIL_POSITION` to match the realm's.
   one. A future `focus()`/`blur()` element method (E5) drains its own.
 - **Routing: an editing account in the painter's name set, by state.** The
   painter forwards an event only when its name is in the published routed
-  set. Since #449 that set is derived from `dom`'s listener table and the
+  set. Since #449 that set is derived from `terminus`'s listener table and the
   components' observed names in one function, `DocumentSlot::routes_given`;
   the editing account (`EditingRoute`, a bit per route in
   `DocumentSlot::editing_routes`) is one more term of it. A route flipping
@@ -502,7 +502,7 @@ pointer/wheel/touch kind was renamed `DETAIL_POSITION` to match the realm's.
   listener table: a row of its would be an invitee the dispatch has no realm
   to call for. The routes:
   - `pointerdown` and `click` while `Document::has_editing_hosts` (a counter
-    `dom` kept in the `contenteditable` setters and `free_node`); since the
+    `terminus` kept in the `contenteditable` setters and `free_node`); since the
     read-only selection (2026-10-21) from the page's first epilogue on,
     with no counter ("Read-only text selection" below);
   - `keydown` while `Document::focused()` is some;
@@ -558,7 +558,7 @@ pointer/wheel/touch kind was renamed `DETAIL_POSITION` to match the realm's.
 
 - **No shift-click extension.** `InputKind::Pointer` carries no modifiers, so
   a press cannot say shift is held; extending by shift-click needs that field
-  in `dom::input` and every host filling it in.
+  in `terminus::link::input` and every host filling it in.
 - **No listener stops an edit or an editing default action** (the ruling):
   a browser's `beforeinput`, `keydown`, `pointerdown` or `mousedown` listener
   could.
@@ -574,15 +574,15 @@ pointer/wheel/touch kind was renamed `DETAIL_POSITION` to match the realm's.
 
 ## E3: what was built
 
-The key-text contract in `dom` and `bobcat-core`, the macOS window's input
+The key-text contract in `terminus` and `bobcat-core`, the macOS window's input
 method in `bobcat-cli` (`crates/bobcat-cli/src/cli/ime.rs`, `macos.rs`), and
 editing commands in the CLI prompt (`command.rs`, `headless.rs`).
 
 Public surface:
 
-- `dom::input::InputKind::Key::text: Option<Arc<str>>` and
+- `terminus::link::input::InputKind::Key::text: Option<Arc<str>>` and
   `InputEvent::with_text`; `InputEvent::key` builds a key that typed nothing.
-- `dom::event::EventDetail::Key::text`, read by the engine alone: the realm's
+- `terminus::link::event::EventDetail::Key::text`, read by the engine alone: the realm's
   `KeyboardEvent` is unchanged (`DETAIL_KEY` carries no text, W3C has no such
   member).
 - `key_command(key, text, modifiers)`: the typed text is inserted when it is
@@ -726,7 +726,7 @@ Public surface:
   `edit` it is taken before boot: it is a setting of the view's main thread,
   queued like every command, so a key routed after the call is decided by
   it. `NotReady` only once the view has ended.
-- `bobcat_core::editing::Rect` (re-export of `dom::Rect`, the type of
+- `bobcat_core::editing::Rect` (re-export of `terminus::link::Rect`, the type of
   `TextInputState`'s geometry).
 - Facade → Render Worker `bobcat-edit { command: EditCommand }`; Render
   Worker → facade `bobcat-text-input` (`TextInputFields`: `host`,
@@ -861,16 +861,16 @@ so the macOS host and the headless driver are unchanged.
 shadow rules, its tests), the event and focus plumbing in
 `main/runtime/editing.rs` and `main/runtime/lib.rs`, the `getValue` decoder in
 `packages/bobcat-element/src/element-papi.ts`, end-to-end tests in
-`main/editing_tests.rs`, and three small `dom` additions.
+`main/editing_tests.rs`, and three small `terminus` additions.
 
 Public surface:
 
-- `dom::Document::set_host_value(host, value, selection)`: a script's write to
+- `terminus::link::Document::set_host_value(host, value, selection)`: a script's write to
   a field's value — written as one text node, no event owed, and for the
   focused host the composition ended and the selection placed (UTF-16,
   rounded down inside a pair, clamped).
-- `dom::Document::has_focus_events()`.
-- `dom::Document::host_selection(host)`: a host's selection in UTF-16
+- `terminus::link::Document::has_focus_events()`.
+- `terminus::link::Document::host_selection(host)`: a host's selection in UTF-16
   units, the session's while focused and otherwise the one it retained
   (2026-10-19). A host keeps its selection while it is not focused, as a
   browser's text control does: losing focus retains it, `set_host_value` on
@@ -940,8 +940,8 @@ Public surface:
   invalid at computed-value time, so the placeholder inherits the host's).
   The component writes only the text. The block holding it is the field's
   `::placeholder` (2026-10-19): it carries `pseudo="-webkit-input-placeholder"`
-  (`dom::PLACEHOLDER_PSEUDO_ID`, Blink's name for the element behind
-  `::placeholder` in its UA shadow trees), which `dom` reports to Stylo as
+  (`terminus::link::PLACEHOLDER_PSEUDO_ID`, Blink's name for the element behind
+  `::placeholder` in its UA shadow trees), which `terminus` reports to Stylo as
   the element implementing the host's `::placeholder`, so an author's
   `.hint::placeholder { color: red }` reaches it, over the attribute
   defaults the box carries (an outer context's normal declaration wins, CSS
@@ -994,7 +994,7 @@ Public surface:
   reads `maxLines <= 0`). It runs last in the same after-the-edit pass:
   the corrected value is written, `Document::layout` runs, and when the
   editor's paragraph has more lines than the limit
-  (`Document::paragraph_line_count`, new in `dom`) the longest prefix of
+  (`Document::paragraph_line_count`, new in `terminus`) the longest prefix of
   what the edit inserted that lays out in the limit is kept, found by
   bisection over the inserted characters with one layout pass per probe
   (Android's `maxLinesFilter` bisects the same way; iOS trims from the end
@@ -1031,7 +1031,7 @@ Public surface:
 - **Methods.** `focus()` restores the selection the field kept since it
   lost focus or a script last wrote its value (a never-focused field gets
   the caret at the end) and queues the Lynx `focus` inside the call, so a
-  `setSelectionRange` in the same job reports after it; the standard focus events it leaves in `dom` are
+  `setSelectionRange` in the same job reports after it; the standard focus events it leaves in `terminus` are
   dispatched from the entry that delivers component events
   (`has_component_events` asks `has_focus_events`). `setSelectionRange`
   and `select` act only on a focused field.
@@ -1069,7 +1069,7 @@ Public surface:
 The Selection API's `selectionchange` at the document, and Lynx's `<text>`
 `selectionchange` (`bindselectionchange`) over it.
 
-### The document's selection and its flag (`dom`)
+### The document's selection and its flag (`terminus`)
 
 - The document has one selection, the Selection API's, and it is the focused
   editing host's session selection: `Document::selection()` answers
@@ -1159,7 +1159,7 @@ document's selection without being focused or editable, and so fires the
 same two `selectionchange` events; `getSelectedText()` and
 `setTextSelection(...)` read and set that selection.
 
-### The document's selection, generalized (`dom`)
+### The document's selection, generalized (`terminus`)
 
 - The document's one selection (`EditingState::session`) lives in a **selection host**: the focused
   editing host, as before, or a **selectable element** selected without focus. `Session::focused`
@@ -1199,7 +1199,7 @@ same two `selectionchange` events; `getSelectedText()` and
 - `Document::selected_text(root)` answers the selected text when the selection lies in `root`
   (atoms as U+FFFC), `None` otherwise. `Document::text_content_offset(paragraph, unit)` turns a
   source unit into an offset of the paragraph's text content, atoms counting none
-  (`hughie::text::paragraph::OffsetMap::boxes_before`), for web-core's `range.toString()` offsets.
+  (`seldon::text::paragraph::OffsetMap::boxes_before`), for web-core's `range.toString()` offsets.
 - Lifetime: a selectable root's session ends, with the flag set and no event, when the root leaves
   the document, stops being rendered or loses its paragraph (the focus fixup rule's shape,
   `fix_up_selection`, run where `fix_up_focus` ran) and, after the layout pass that shows it, when

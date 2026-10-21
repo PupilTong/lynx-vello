@@ -28,7 +28,7 @@ use bobcat_core::editing::{Command, EnterKeyHint, InputMode, InputType};
 /// | `insertLineBreak`, `deleteBackward`, `deleteForward`, `deleteWordBackward`, `deleteWordForward` | — | — | — |
 ///
 /// The selection is in UTF-16 units relative to the start of the
-/// composition, as [`Command::SetComposition`] takes it; `dom` clamps one
+/// composition, as [`Command::SetComposition`] takes it; `terminus` clamps one
 /// past the text's end.
 ///
 /// # Errors

@@ -65,7 +65,7 @@ pub trait NativeModule {
     /// [`Self::invoke`]: [`LynxView::pump`](crate::LynxView::pump) drops it,
     /// which releases its callbacks.
     ///
-    /// [`CustomElement::observed_attributes`]: dom::CustomElement::observed_attributes
+    /// [`CustomElement::observed_attributes`]: terminus::link::CustomElement::observed_attributes
     fn methods(&self) -> Vec<String>;
 
     /// One `NativeModules.<name>.<method>(...)` call, on the embedder's

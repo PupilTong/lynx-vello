@@ -2,11 +2,11 @@
 //! a document, a way to hang an element in it, and the computed style that
 //! comes back out.
 
-use dom::NodeId;
-use dom::event::EventDetail;
-use dom::stylo::properties::ComputedValues;
-use dom::stylo::servo_arc::Arc;
-use dom::stylo::values::computed::{Display, Overflow};
+use terminus::link::NodeId;
+use terminus::link::event::EventDetail;
+use terminus::link::stylo::properties::ComputedValues;
+use terminus::link::stylo::servo_arc::Arc;
+use terminus::link::stylo::values::computed::{Display, Overflow};
 
 use super::{
     Autoplays, ComponentDetail, ComponentEvent, ComponentEvents, Field, LynxDocument, PageConfig,

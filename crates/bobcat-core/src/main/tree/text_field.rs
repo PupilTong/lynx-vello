@@ -2,7 +2,7 @@
 //! (`web-elements/src/elements/XInput/XInput.ts`, `XTextarea/XTextarea.ts`) —
 //! and the `x-input-ng`/`x-textarea-ng` aliases web-core maps to them
 //! (`web-core/ts/constants.ts:105,107`), as Lynx elements over
-//! `dom::editing` (`docs/editable-text-design.md`, E5).
+//! `terminus::link::editing` (`docs/editable-text-design.md`, E5).
 //!
 //! **Lynx tags only** (user ruling 2026-10-19). `input` and `textarea` are
 //! HTML element names, and an element with an HTML name follows HTML, which
@@ -23,9 +23,10 @@
 //! [`TextField::constructed`] attaches a UA shadow tree of two elements:
 //!
 //! - `#input` (`#textarea` on a textarea), `part` of the same name: the **editor**, a
-//!   `contenteditable="plaintext-only"` element — one `dom` editing host. Its `enterkeyhint`,
+//!   `contenteditable="plaintext-only"` element — one `terminus` editing host. Its `enterkeyhint`,
 //!   `inputmode` and `type` carry what `confirm-type` and `type` say into
-//!   [`dom::editing::TextInputState`]. The two kinds lay the value out in different paragraphs:
+//!   [`terminus::link::editing::TextInputState`]. The two kinds lay the value out in different
+//!   paragraphs:
 //!   - `x-input`'s editor is a `div` the engine's shadow sheet makes `display: block`, so its own
 //!     standard inline formatting context lays out the one line, as a browser's `<input>` does. No
 //!     Lynx text semantics reach it.
@@ -38,9 +39,9 @@
 //!   holding one block with the `placeholder` text (for both kinds: it is not edited), shown by the
 //!   shadow sheet only while the editor is `:empty` (`.editor:empty ~ #placeholder`), so no
 //!   component code decides when it shows. The block is the field's **`::placeholder`**: it carries
-//!   `pseudo="-webkit-input-placeholder"` ([`dom::PLACEHOLDER_PSEUDO_ID`], Blink's name for the
-//!   element behind `::placeholder` in its own UA shadow trees), which makes it the host's
-//!   `::placeholder` pseudo-element to `dom` — an author's `.hint::placeholder { color: red }`
+//!   `pseudo="-webkit-input-placeholder"` ([`terminus::link::PLACEHOLDER_PSEUDO_ID`], Blink's name
+//!   for the element behind `::placeholder` in its own UA shadow trees), which makes it the host's
+//!   `::placeholder` pseudo-element to `terminus` — an author's `.hint::placeholder { color: red }`
 //!   reaches it, over the attribute-driven defaults the box carries (an outer context's normal
 //!   declaration wins, CSS Scoping §3.3). css-pseudo-4 §4.2 restricts what an author declares on
 //!   `::placeholder` to the `::first-line` properties, `opacity`, `text-align`, `text-overflow` and
@@ -59,9 +60,9 @@
 //!
 //! **One line when empty.** An empty editor lays out one empty line of its strut, so an
 //! unsized field is one line tall, as native measures a field at its editor's height
-//! (`LynxUIBaseInputShadowNode.kt`). An editing host has that line in `dom`; the editor
+//! (`LynxUIBaseInputShadowNode.kt`). An editing host has that line in `terminus`; the editor
 //! keeps it while `disabled` or `readonly` make it `contenteditable="false"`, because
-//! [`TextField::build`] gives it [`dom::Document::set_has_line_if_empty`], as Blink's
+//! [`TextField::build`] gives it [`terminus::link::Document::set_has_line_if_empty`], as Blink's
 //! text control inner editor carries the same bit in its UA style.
 //!
 //! **Single line.** An `x-input`'s editor is `white-space: pre`: every character kept and no
@@ -103,11 +104,11 @@
 //!
 //! # Edits: filters and `maxlength` after the fact
 //!
-//! `dom` runs the edit and the component cannot cancel it: its handler is the
+//! `terminus` runs the edit and the component cannot cancel it: its handler is the
 //! Rust walk of the standard `input` the editor dispatches, after the commit.
 //! So the component corrects the value afterwards, as web-core corrects its
 //! `<input>`'s in its `input` listener, and writes the result back with
-//! [`dom::Document::set_host_value`] with the caret moved by what was
+//! [`terminus::link::Document::set_host_value`] with the caret moved by what was
 //! removed before it. Outside a composition, after each `input` and at
 //! `compositionend`, in this order: line breaks (`x-input`), `maxlength`,
 //! the `number` filter, `input-filter`, `maxlines` (`x-textarea`).
@@ -121,7 +122,7 @@
 //! `maxLinesFilter` keeps the longest prefix of an insertion that lays out
 //! in the limit; `LynxUITextArea.m` trims to it): after the edit the value
 //! is written and laid out, and when the editor's Lynx paragraph has more
-//! lines than the limit ([`dom::Document::paragraph_line_count`]) the
+//! lines than the limit ([`terminus::link::Document::paragraph_line_count`]) the
 //! longest prefix of what the edit inserted that fits is kept — found by
 //! bisection over its characters, one layout pass per probe, so never half
 //! a surrogate pair — and the caret is placed after it. Lines are the
@@ -138,7 +139,7 @@
 //! (`MainThreadRuntime::apply_edit`, `dispatch_focus_events`: an editing
 //! host inside a UA shadow tree), so they stay in the shadow tree and only
 //! this component hears them, at its shadow root
-//! ([`dom::CustomElement::handle_event`]) — web-core stops its inner `<input>`'s
+//! ([`terminus::link::CustomElement::handle_event`]) — web-core stops its inner `<input>`'s
 //! `input` at its `#form` the same way. The component re-fires them at the
 //! host in web-core's shape, under the Lynx names (`bindinput` listens for
 //! `input`; web-core's DOM names `lynxinput`/`lynxfocus`/`lynxblur` exist
@@ -169,12 +170,12 @@
 //! `select()`, `addText({text})`, `sendDelEvent({action, length})` and
 //! `setInputFilter({pattern})`, web-core's set (`XInput.ts`,
 //! `XTextarea.ts`) plus the typings' `getValue` members. A method that
-//! focuses or blurs leaves its focus events queued in `dom`; the page
+//! focuses or blurs leaves its focus events queued in `terminus`; the page
 //! dispatches them from an entry of its own.
 //!
 //! A field keeps its selection while it is not focused, as a browser's
 //! `<input>` keeps `selectionStart`/`selectionEnd` across a blur
-//! ([`dom::Document::host_selection`]): `focus` restores the selection the
+//! ([`terminus::link::Document::host_selection`]): `focus` restores the selection the
 //! editor had when it lost focus, or the caret a script's value write
 //! (`value`, `setValue`, `addText`, `sendDelEvent`) placed since, and only
 //! a field never focused nor written gets a caret at the end of its value,
@@ -186,10 +187,12 @@ use std::cell::RefCell;
 use std::ops::Range;
 use std::rc::Rc;
 
-use dom::editing::Command;
-use dom::event::{ElementEvent, EventDetail, EventPhase};
-use dom::{CustomElement, MethodCall, MethodError, MethodOutcome, NodeId, ShadowRootMode};
 use serde_json::Value;
+use terminus::link::editing::Command;
+use terminus::link::event::{ElementEvent, EventDetail, EventPhase};
+use terminus::link::{
+    CustomElement, MethodCall, MethodError, MethodOutcome, NodeId, ShadowRootMode,
+};
 
 use super::text::TEXT_TAG;
 // `SELECTION_CHANGE` is the engine-only event the runtime fires at an editing
@@ -274,7 +277,7 @@ x-textarea[max-height], x-textarea-ng[max-height] {
 
 /// The shadow sheet common to both kinds; [`INPUT_SHADOW_RULES`] and
 /// [`TEXTAREA_SHADOW_RULES`] follow it. An engine sheet
-/// ([`dom::Document::add_engine_shadow_stylesheet`]): the input's editor is
+/// ([`terminus::link::Document::add_engine_shadow_stylesheet`]): the input's editor is
 /// `display: block`, which the `lynx` grammar keeps from author sheets. The
 /// placeholder's block has no rule here: it is the `::placeholder`, laid
 /// out by [`UA_RULES`] (module documentation). The editor sets no
@@ -403,7 +406,7 @@ fn editor(document: &LynxDocument, field: NodeId) -> Option<NodeId> {
         .get(root)?
         .children()
         .find(|child| child.is_element())
-        .map(dom::Node::id)
+        .map(terminus::link::Node::id)
 }
 
 /// The block holding the placeholder's text, the only child of
@@ -415,7 +418,7 @@ fn placeholder_block(document: &LynxDocument, field: NodeId) -> Option<NodeId> {
         .children()
         .filter(|child| child.is_element())
         .nth(1)?;
-    placeholder.first_child().map(dom::Node::id)
+    placeholder.first_child().map(terminus::link::Node::id)
 }
 
 /// The editing host a press at `node` focuses when `node` is in no editing
@@ -663,7 +666,7 @@ impl TextField {
         document.set_id_attribute(placeholder, Some(PLACEHOLDER_ID));
         document.set_attribute(placeholder, "part", PLACEHOLDER_ID);
         let block = document.create_element("div", ());
-        document.set_attribute(block, "pseudo", dom::PLACEHOLDER_PSEUDO_ID);
+        document.set_attribute(block, "pseudo", terminus::link::PLACEHOLDER_PSEUDO_ID);
         document.append_child(placeholder, block);
         document.append_child(shadow, placeholder);
     }
@@ -683,7 +686,7 @@ impl TextField {
 
     /// The value and the selection (UTF-16) of `editor`: the session's when
     /// it is focused, otherwise the one it kept since it lost focus or a
-    /// script last wrote its value ([`dom::Document::host_selection`]), as
+    /// script last wrote its value ([`terminus::link::Document::host_selection`]), as
     /// a browser's field keeps its selection across a blur; a caret at the
     /// end for a field that was never focused nor written.
     fn snapshot(document: &LynxDocument, editor: NodeId) -> (String, Range<u32>, bool) {
@@ -1095,7 +1098,7 @@ impl CustomElement<()> for TextField {
                 let existing = document
                     .get(block)
                     .and_then(|node| node.first_child())
-                    .map(dom::Node::id);
+                    .map(terminus::link::Node::id);
                 if let Some(node) = existing {
                     document.set_text_node_data(node, content);
                 } else {
@@ -1294,11 +1297,13 @@ mod tests {
 
     use std::sync::Arc;
 
-    use dom::editing::Command;
-    use dom::event::EventDetail;
-    use dom::layout::ParagraphKind;
-    use dom::stylo::properties::PropertyId;
-    use dom::{MethodCall, MethodError, MethodOutcome, NodeId, Point2D, StylesheetOrigin};
+    use terminus::link::editing::Command;
+    use terminus::link::event::EventDetail;
+    use terminus::link::layout::ParagraphKind;
+    use terminus::link::stylo::properties::PropertyId;
+    use terminus::link::{
+        MethodCall, MethodError, MethodOutcome, NodeId, Point2D, StylesheetOrigin,
+    };
 
     use super::super::test_support::{style_of, with_component_events};
     use super::super::{
@@ -1308,13 +1313,16 @@ mod tests {
         INPUT_TAGS, SELECTION_CHANGE, TEXTAREA_TAGS, editor, focus_delegate, placeholder_block,
     };
 
-    const AHEM: &[u8] = include_bytes!("../../../../hughie/tests/fixtures/Ahem.ttf");
+    const AHEM: &[u8] = include_bytes!("../../../../seldon/tests/fixtures/Ahem.ttf");
 
     /// A field of `tag`, 200×40 with 5px padding, in 10px Ahem with a 10px
     /// line, laid out.
     fn make(tag: &str, attributes: &[(&str, &str)]) -> (LynxDocument, ComponentEvents, NodeId) {
         let (mut document, events) = with_component_events(PageConfig::default());
-        assert_eq!(document.register_fonts(dom::FontBlob::from_static(AHEM)), 1);
+        assert_eq!(
+            document.register_fonts(terminus::link::FontBlob::from_static(AHEM)),
+            1
+        );
         let field = document.create_element(tag, ());
         for (name, value) in attributes {
             document.set_attribute(field, name, value);
@@ -1358,7 +1366,10 @@ mod tests {
 
     fn placeholder_box(document: &LynxDocument, field: NodeId) -> NodeId {
         let block = placeholder_block(document, field).expect("the placeholder's block");
-        document.get(block).and_then(dom::Node::parent_id).unwrap()
+        document
+            .get(block)
+            .and_then(terminus::link::Node::parent_id)
+            .unwrap()
     }
 
     /// The events queued since the last call, as `(name, detail)`.
@@ -1396,13 +1407,12 @@ mod tests {
         let outcome = document.apply_editing(command);
         for event in &outcome.events {
             let detail = match event.kind {
-                dom::editing::EditEventKind::BeforeInput | dom::editing::EditEventKind::Input => {
-                    EventDetail::Input {
-                        input_type: event.input_type,
-                        data: event.data.as_deref().map(Arc::from),
-                        is_composing: event.is_composing,
-                    }
-                }
+                terminus::link::editing::EditEventKind::BeforeInput
+                | terminus::link::editing::EditEventKind::Input => EventDetail::Input {
+                    input_type: event.input_type,
+                    data: event.data.as_deref().map(Arc::from),
+                    is_composing: event.is_composing,
+                },
                 _ => EventDetail::Composition {
                     data: Arc::from(event.data.as_deref().unwrap_or_default()),
                 },
@@ -1421,7 +1431,7 @@ mod tests {
         }
     }
 
-    /// Focus moves the way the runtime moves it: `dom` queues the events and
+    /// Focus moves the way the runtime moves it: `terminus` queues the events and
     /// they are dispatched, non-composed, at their targets.
     fn deliver_focus_events(document: &mut LynxDocument) {
         for event in document.take_focus_events() {
@@ -1627,7 +1637,7 @@ mod tests {
             let block = placeholder_block(&document, field).unwrap();
             assert_eq!(
                 document.get(block).unwrap().attribute("pseudo"),
-                Some(dom::PLACEHOLDER_PSEUDO_ID),
+                Some(terminus::link::PLACEHOLDER_PSEUDO_ID),
                 "{tag}"
             );
             assert_eq!(
@@ -1673,24 +1683,34 @@ mod tests {
         let (mut document, _, field) = make("x-input", &[("type", "password")]);
         focus(&mut document, field);
         let state = document.text_input_state();
-        assert_eq!(state.input_type, dom::editing::InputType::Password);
-        assert_eq!(state.enter_key_hint, dom::editing::EnterKeyHint::Send);
+        assert_eq!(
+            state.input_type,
+            terminus::link::editing::InputType::Password
+        );
+        assert_eq!(
+            state.enter_key_hint,
+            terminus::link::editing::EnterKeyHint::Send
+        );
         for (kind, mode) in [
-            ("number", dom::editing::InputMode::Decimal),
-            ("digit", dom::editing::InputMode::Numeric),
-            ("email", dom::editing::InputMode::Email),
-            ("tel", dom::editing::InputMode::Tel),
-            ("text", dom::editing::InputMode::Text),
+            ("number", terminus::link::editing::InputMode::Decimal),
+            ("digit", terminus::link::editing::InputMode::Numeric),
+            ("email", terminus::link::editing::InputMode::Email),
+            ("tel", terminus::link::editing::InputMode::Tel),
+            ("text", terminus::link::editing::InputMode::Text),
         ] {
             document.set_attribute(field, "type", kind);
             let state = document.text_input_state();
             assert_eq!(state.input_mode, mode, "{kind}");
-            assert_eq!(state.input_type, dom::editing::InputType::Text, "{kind}");
+            assert_eq!(
+                state.input_type,
+                terminus::link::editing::InputType::Text,
+                "{kind}"
+            );
         }
         document.set_attribute(field, "confirm-type", "search");
         assert_eq!(
             document.text_input_state().enter_key_hint,
-            dom::editing::EnterKeyHint::Search
+            terminus::link::editing::EnterKeyHint::Search
         );
     }
 

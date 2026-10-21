@@ -2,16 +2,16 @@
 
 use std::fmt::Write as _;
 
-use dom::event::EventDetail;
-use dom::input::PointerKind;
-use dom::stylo::properties::PropertyId;
-use dom::{MethodCall, MethodError, MethodOutcome, NodeId, Point2D};
+use terminus::link::event::EventDetail;
+use terminus::link::input::PointerKind;
+use terminus::link::stylo::properties::PropertyId;
+use terminus::link::{MethodCall, MethodError, MethodOutcome, NodeId, Point2D};
 
 use super::super::test_support::{child, style_of, with_component_events};
 use super::super::{ComponentDetail, ComponentEvent, ComponentEvents, LynxDocument, PageConfig};
 use super::{MARKDOWN_TAG, X_MARKDOWN_TAG, markdown_root};
 
-const AHEM: &[u8] = include_bytes!("../../../../../hughie/tests/fixtures/Ahem.ttf");
+const AHEM: &[u8] = include_bytes!("../../../../../seldon/tests/fixtures/Ahem.ttf");
 
 /// Ahem at 10px on a 300px-wide element: every glyph a 10px square, every
 /// line `1.4 × 10 = 14px` tall.
@@ -27,7 +27,7 @@ fn markdown(style: &str) -> (LynxDocument, ComponentEvents, NodeId) {
 
 fn markdown_tag(tag: &str, style: &str) -> (LynxDocument, ComponentEvents, NodeId) {
     let (mut document, events) = with_component_events(PageConfig::default());
-    document.register_fonts(dom::FontBlob::from_static(AHEM));
+    document.register_fonts(terminus::link::FontBlob::from_static(AHEM));
     let element = child(&mut document, tag, style);
     (document, events, element)
 }

@@ -58,14 +58,14 @@ async fn font(resources: &Resources, url: &str) -> Vec<u8> {
 }
 
 /// The vendored Ahem face, the one font fixture this workspace ships.
-const AHEM: &[u8] = include_bytes!("../../hughie/tests/fixtures/Ahem.ttf");
+const AHEM: &[u8] = include_bytes!("../../seldon/tests/fixtures/Ahem.ttf");
 
 #[tokio::test]
 async fn a_font_source_is_served_from_disk_without_utf8_validation() {
     let resources = resources();
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../hughie/tests/fixtures/Ahem.ttf"
+        "/../seldon/tests/fixtures/Ahem.ttf"
     );
 
     let bytes = font(&resources, &format!("file://{path}")).await;

@@ -73,8 +73,8 @@
 //!   `square`) or `N.` from the list's `start`, absolutely positioned at the item's start edge in
 //!   the list's 40px padding, as an outside marker sits. An approximation of the browser's markers:
 //!   a glyph rather than a drawn disc, its gap a padding.
-//! - **Tables** have no `display: table` in hughie. A `table` is a grid of `N` `auto` columns
-//!   (written out, hughie having no `repeat()`), shrink-wrapped, with the browser's 2px
+//! - **Tables** have no `display: table` in seldon. A `table` is a grid of `N` `auto` columns
+//!   (written out, seldon having no `repeat()`), shrink-wrapped, with the browser's 2px
 //!   `border-spacing` as gap and padding; `thead`, `tbody` and `tr` are `display: contents`, so the
 //!   cells are its grid items, placed row by row; `th` is bold and centred, a column's alignment an
 //!   inline `text-align` on its cells, as markdown-it's `style` attribute. An approximation: rows
@@ -130,8 +130,8 @@
 //!   when the hit node is inside an `a` (web-core's `closest('a')`), or when the tap lands on a
 //!   character of a paragraph that an `a` holds. A paragraph is one box here, its runs none, so the
 //!   second is how a tap on link text finds its anchor: the tap point in the paragraph's content
-//!   box, [`dom::Document::text_index_at_point`], and the innermost `a` whose
-//!   [`dom::Document::inline_source_range`] holds that unit.
+//!   box, [`terminus::link::Document::text_index_at_point`], and the innermost `a` whose
+//!   [`terminus::link::Document::inline_source_range`] holds that unit.
 //! - **`imageTap`** `{url, contentId}`, the image's `src`: when the hit node is an image not inside
 //!   a link.
 //!
@@ -149,7 +149,7 @@
 //!
 //! `tap` is routed per instance: the painter forwards taps to the main
 //! thread only while some element observing `tap` is alive
-//! ([`dom::Document::take_observed_name_changes`]), so a page with no markdown
+//! ([`terminus::link::Document::take_observed_name_changes`]), so a page with no markdown
 //! and no tap listener pays nothing for the component's definition.
 //!
 //! ## UI methods
@@ -175,8 +175,8 @@
 //! from, the elements each top-level block built, the `content-range` in
 //! force (an invalid value keeps the previous one, `_handleContentRange`,
 //! `XMarkdownAttributes.ts:1255-1282`) and the line breaks [`build`] recorded
-//! — keyed by the host's [`NodeId`], which `dom` never reissues. The entry
-//! goes when the host is freed ([`dom::CustomElement::freed`]), not when it
+//! — keyed by the host's [`NodeId`], which `terminus` never reissues. The entry
+//! goes when the host is freed ([`terminus::link::CustomElement::freed`]), not when it
 //! is disconnected: a removed element can come back with its shadow tree.
 //!
 //! # Deferred
@@ -199,7 +199,7 @@
 //! - `allow-break-around-punctuation`, `image-downsampling`, `text-mark-attachments` and
 //!   `markdown-max-height`: native-only attributes web-core does not read.
 //!
-//! [`NodeId`]: dom::NodeId
+//! [`NodeId`]: terminus::link::NodeId
 
 mod build;
 #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -213,9 +213,11 @@ mod tests;
 
 use std::cell::RefCell;
 
-use dom::event::{ElementEvent, EventPhase};
-use dom::{CustomElement, MethodCall, MethodError, MethodOutcome, NodeId, ShadowRootMode};
 use rustc_hash::FxHashMap;
+use terminus::link::event::{ElementEvent, EventPhase};
+use terminus::link::{
+    CustomElement, MethodCall, MethodError, MethodOutcome, NodeId, ShadowRootMode,
+};
 
 use self::build::{Builder, IMAGE_TAG, Newlines};
 use super::{ComponentDetail, ComponentEvents, InvalidParams, LynxDocument};
@@ -263,7 +265,7 @@ markdown::part(root), x-markdown::part(root) { width: 100%; }
 /// after the HTML rendering defaults it relies on. See the module
 /// documentation for the outline; each rule says where it comes from.
 ///
-/// It is the engine's own sheet ([`dom::Document::add_engine_shadow_stylesheet`]),
+/// It is the engine's own sheet ([`terminus::link::Document::add_engine_shadow_stylesheet`]),
 /// so it can write the flow layout `display: block` and `inline` that the
 /// `lynx` grammar keeps from authors, `markdown-style` included.
 ///
@@ -355,7 +357,7 @@ const SHADOW_RULES: &str = r#"
 /// Installs the component under both tag names, over the queue its events
 /// go into. Must run after [`super::image::define`], whose component the
 /// shadow tree's images are, and before any element could carry either tag,
-/// which is [`Document::define`](dom::Document::define)'s own precondition.
+/// which is [`Document::define`](terminus::link::Document::define)'s own precondition.
 pub(super) fn define(document: &mut LynxDocument, events: ComponentEvents) {
     document.define(MARKDOWN_TAG, Box::new(Markdown::new(events.clone())));
     document.define(X_MARKDOWN_TAG, Box::new(Markdown::new(events)));
@@ -480,7 +482,7 @@ impl Markdown {
             );
             return;
         }
-        if let Some(anchor) = anchor_at(document, target, dom::Point2D::new(x, y)) {
+        if let Some(anchor) = anchor_at(document, target, terminus::link::Point2D::new(x, y)) {
             self.queue_link(document, element, anchor);
         }
     }
@@ -588,7 +590,7 @@ impl CustomElement<()> for Markdown {
         if event.type_name() != TAP_EVENT {
             return;
         }
-        let Some(dom::Point2D { x, y, .. }) = event.detail().position() else {
+        let Some(terminus::link::Point2D { x, y, .. }) = event.detail().position() else {
             return;
         };
         let target = event.target();
@@ -655,7 +657,7 @@ fn markdown_root(document: &LynxDocument, element: NodeId) -> Option<NodeId> {
         .get(shadow)?
         .children()
         .find(|child| child.is_element())
-        .map(dom::Node::id)
+        .map(terminus::link::Node::id)
 }
 
 fn attribute<'a>(document: &'a LynxDocument, element: NodeId, name: &str) -> Option<&'a str> {
@@ -685,7 +687,11 @@ fn closest(document: &LynxDocument, node: NodeId, root: NodeId, tag: &str) -> Op
 
 /// The innermost `a` holding the character a tap at `point` (viewport CSS
 /// px) hits in the paragraph `target` belongs to.
-fn anchor_at(document: &LynxDocument, target: NodeId, point: dom::Point2D<f32>) -> Option<NodeId> {
+fn anchor_at(
+    document: &LynxDocument,
+    target: NodeId,
+    point: terminus::link::Point2D<f32>,
+) -> Option<NodeId> {
     let paragraph = document.paragraph_of(target)?;
     let origin = methods::content_origin(document, paragraph)?;
     let unit = document.text_index_at_point(paragraph, point - origin)?;

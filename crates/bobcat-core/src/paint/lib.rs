@@ -7,17 +7,36 @@
 //! else. [`Painter`] is `!Send` by construction, which is what makes the
 //! constructing thread the painting thread for its whole life.
 //!
-//! What it holds of a view is a receiver on the view's publication watch and
-//! a `Weak` on the view's [`ViewSeat`]. Neither owns anything: a painter
-//! observes a view; it does not keep one alive, cannot end one, and asks its
-//! host for nothing — servicing the resource protocol is
-//! [`crate::LynxView::pump`]'s alone.
-
-mod gesture;
-mod graphics;
-pub(crate) mod images;
-mod inertia;
-mod motion;
+//! Everything that turns frames into pixels — the gesture router, the scroll
+//! intents, the composition, the frame clock and the draw target — is
+//! `terminus`'s presenting painter ([`terminus::link::painter::Painter`]). This
+//! module is its link to one view: what it holds of a view is a receiver on
+//! the view's publication watch and a `Weak` on the view's [`ViewSeat`].
+//! Neither owns anything: a painter observes a view; it does not keep one
+//! alive, cannot end one, and asks its host for nothing — servicing the
+//! resource protocol is [`crate::LynxView::pump`]'s alone. It adopts what the
+//! view publishes into the presenting painter, sends the events that painter
+//! decides as [`ToMain::DispatchEvent`] commands — only those some listener
+//! in the document is registered for — posts its scroll offsets and frame
+//! requests into the view's mailbox, and delivers the script frame requests.
+//!
+//! Lynx's gesture vocabulary and thresholds are the policy the presenting
+//! painter is built with ([`LYNX_GESTURES`]).
+//!
+//! Its scroll physics are fixed in `terminus` rather than passed in, and
+//! they are lynx-ui's `useBounce`
+//! (`packages/lynx-ui-scroll-view/src/hooks/useBounce.tsx`), so a page that
+//! bounces through `overscroll-behavior: contain-bounce` and one that bounces
+//! through that hook's transforms move the same way: the rubber band's
+//! coefficient is its `rubberC` (`UIKit`'s), a fling's decay past a boundary
+//! its `flingDeceleratingRate`, the bounce back's stiffness its `beta`, and a
+//! fling past a boundary stretches raw up to one scrollport, as its overshoot
+//! does. A stretched fling ends once its velocity is under one physical
+//! pixel, lynx-ui's rule, so the bounce back starts promptly. lynx-ui leaves
+//! the in-range fling to the native scroller and names no rate of its own, so
+//! that decay is `UIKit`'s normal deceleration rate; and it springs only from
+//! rest, so the limit on a glide's initial velocity, which keeps the spring
+//! from crossing its target, is the engine's own.
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod animation_tests;
@@ -26,44 +45,91 @@ mod event_loop_tests;
 #[cfg(test)]
 mod tests;
 
-use std::cell::Cell;
 #[cfg(test)]
 use std::cell::RefCell;
-use std::marker::PhantomData;
-use std::num::NonZeroU64;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
 #[cfg(test)]
 use std::time::Duration;
 
-use dom::input::{InputEvent, InputKind, PointerId};
-use dom::render::gpu::Headless;
-use dom::scroll::{
-    AutoScrollRequest, ChainLink, ScrollAxes, ScrollBehavior, ScrollRequest, drive_chain,
-    settle_offset,
-};
-use dom::vello::Scene;
-use dom::vello::peniko::{Color, ImageData};
-use dom::{CommittedFrame, HitTarget, NodeId, Vector2D};
-use rustc_hash::FxHashMap;
-use smallvec::SmallVec;
+use terminus::link::CommittedFrame;
+use terminus::link::input::{InputEvent, InputKind};
+use terminus::link::painter::{EmitEvent, GesturePolicy};
+#[cfg(test)]
+use terminus::link::painter::{FrameClock, GestureRouter, InputDecisions, ScrollIntents};
 #[cfg(test)]
 use tokio::sync::mpsc;
 use tokio::sync::watch;
 
-pub(crate) use self::gesture::RouterHost;
-use self::gesture::{GestureRouter, InputDecision, InputDecisions};
-pub use self::graphics::WindowTarget;
-use self::graphics::{FrameAcquisition, WindowGraphics};
-use self::inertia::{AutoScroll, Axis, BounceBack, ChainOutcome, DragTrack, Fling, Glide};
-use self::motion::{ElasticStep, Motion, resolve_elastic_step, stretch_of, unwind_stretch};
+#[cfg(test)]
 use crate::clock::ClockInstant;
-use crate::link::{FramePost, InputEventPayload, Published, ScrollEntry, ToMain, ViewSeat};
+use crate::link::{FramePost, InputEventPayload, Published, ToMain, ViewSeat};
+#[cfg(test)]
 use crate::main::tree::Viewport;
 use crate::resource::ResourceFetcher;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::view::Screenshot;
-use crate::view::{ComposeKey, DrawTarget, EngineError, FrameSize, LynxView};
+use crate::view::{DrawTarget, EngineError, FrameSize, LynxView};
+
+/// How far a sequence may travel, in viewport CSS px, and still deliver `tap`.
+///
+/// Lynx reads this from the page config (`tapSlop`, default `"50px"`); wiring
+/// the config key is a recorded follow-up, so today every view uses the
+/// default.
+pub(crate) const TAP_SLOP: f32 = 50.0;
+
+/// Movement beyond this, in viewport CSS px, cancels a pending `longpress`.
+///
+/// Lynx cancels its long-press timer at the platform touch slop (nominally
+/// 8dp on Android) — the same threshold the drag recognizer latches at, so on
+/// scrollable content the long-press cancel and the scroll claim engage at
+/// the same travel.
+pub(crate) const LONG_PRESS_MOVE_SLOP: f32 = 8.0;
+
+/// How far a pointer drag travels before it starts scrolling, in viewport
+/// CSS px. The first movement subtracts the slop instead of jumping.
+pub(crate) const DRAG_SLOP: f32 = 8.0;
+
+/// How long a pointer must stay down before `longpress` fires.
+///
+/// Lynx's default on every platform (Android `getLongPressTimeout()`, iOS
+/// `minimumPressDuration`, Harmony). The page-config override
+/// (`longPressDuration`) is a recorded follow-up.
+pub(crate) const LONG_PRESS_SECONDS: f64 = 0.5;
+
+/// The event name a held sequence synthesizes.
+pub(crate) const LONG_PRESS_EVENT: &str = "longpress";
+
+/// The event name a released sequence synthesizes.
+pub(crate) const TAP_EVENT: &str = "tap";
+
+/// Lynx's gestures, synthesized per the 2026-08-21 ruling (recorded in
+/// `docs/tracking/deviations.md`).
+///
+/// `tap` fires at release, targeted at the down-routed node, unless the
+/// sequence travelled past the 50px radial [`TAP_SLOP`], the drag
+/// recognizer's scroll consumed (so a boundary drag that moves nothing keeps
+/// its tap — the Lynx Android behavior), a second pointer joined (Lynx
+/// delivers `tap` for single-finger sequences only), or a `longpress` was
+/// delivered. `longpress` fires [`LONG_PRESS_SECONDS`] into a hold that
+/// stayed within [`LONG_PRESS_MOVE_SLOP`], gated on a listener existing
+/// anywhere (name-level, a recorded approximation): the walk Lynx runs at that
+/// instant either finds a handler or the sequence's long-press half is over.
+/// A release delivers `pointerup`, `touchend`, `tap` — the order native Lynx
+/// and a browser both give.
+///
+/// The router's touch events report web-core's `{x, y}` detail — the first
+/// finger still down — and, once the last finger has lifted, the changed
+/// finger's own point (native Lynx's answer; web-core yields the number `0`
+/// there). A mouse produces no touch events, as in a browser and in web-core.
+pub(crate) const LYNX_GESTURES: GesturePolicy = GesturePolicy {
+    tap_slop: TAP_SLOP,
+    long_press_move_slop: LONG_PRESS_MOVE_SLOP,
+    drag_slop: DRAG_SLOP,
+    long_press_seconds: LONG_PRESS_SECONDS,
+    tap_event: TAP_EVENT,
+    long_press_event: LONG_PRESS_EVENT,
+};
 
 /// One frame an offscreen painter has posted to its view and not yet drawn:
 /// what [`Painter::post_frame`] answers, [`Painter::frame_serviced`] asks
@@ -77,86 +143,6 @@ pub struct PostedFrame {
     /// The post's sequence number, which the view acknowledges. `None` when
     /// nothing was posted: no view is attached, or its task has gone.
     seq: Option<u64>,
-}
-
-/// The painter's monotonic animation timeline. Its epoch is the construction
-/// of whichever view it is attached to, and one reading is shared by every
-/// operation in a frame.
-#[derive(Debug)]
-pub(crate) struct FrameClock {
-    epoch: ClockInstant,
-    #[cfg(test)]
-    pinned: Option<f64>,
-}
-
-impl FrameClock {
-    pub(crate) fn new() -> Self {
-        Self {
-            epoch: ClockInstant::now(),
-            #[cfg(test)]
-            pinned: None,
-        }
-    }
-
-    /// Moves the epoch onto a view's own timeline.
-    ///
-    /// A painter attaching to a fresh view reproduces the old semantics
-    /// exactly — the two instants are the same moment. A painter re-attached
-    /// to a document that has already been running keeps reading the time
-    /// that document's animations were started against, rather than restarting
-    /// them at whatever the painter's own age happens to be.
-    pub(crate) fn rebase(&mut self, epoch: ClockInstant) {
-        self.epoch = epoch;
-    }
-
-    pub(crate) fn now_seconds(&self) -> f64 {
-        #[cfg(test)]
-        if let Some(seconds) = self.pinned {
-            return seconds;
-        }
-        self.epoch.elapsed().as_secs_f64()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn pin(&mut self, seconds: f64) {
-        self.pinned = Some(seconds.max(0.0));
-    }
-}
-
-impl Default for FrameClock {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[cfg(test)]
-mod clock_tests {
-    use super::FrameClock;
-
-    #[test]
-    fn the_clock_starts_near_zero_and_never_goes_back() {
-        let clock = FrameClock::new();
-        let first = clock.now_seconds();
-        let second = clock.now_seconds();
-        assert!((0.0..1.0).contains(&first), "the epoch is clock creation");
-        assert!(second >= first, "and time only moves forward");
-    }
-
-    #[test]
-    fn a_pinned_clock_holds_the_instant_a_test_named() {
-        let mut clock = FrameClock::new();
-        clock.pin(1.5);
-        assert!((clock.now_seconds() - 1.5).abs() < 1e-9);
-        clock.pin(1.75);
-        assert!((clock.now_seconds() - 1.75).abs() < 1e-9);
-    }
-
-    #[test]
-    fn a_pinned_clock_never_reports_negative_time() {
-        let mut clock = FrameClock::new();
-        clock.pin(-5.0);
-        assert!((clock.now_seconds() - 0.0).abs() < f64::EPSILON);
-    }
 }
 
 /// A view's whole side of one link, for the tests that play that side by
@@ -178,215 +164,13 @@ pub(crate) struct FarEnd {
     notices: mpsc::UnboundedReceiver<crate::link::ViewNotice>,
 }
 
-/// The canvas colour: what a painter's target holds before a frame composes
-/// over it, and so what shows wherever the page painted nothing.
-///
-/// Named once because two renders read it. The composite render clears to
-/// it, and the bake of a `backdrop-filter` element at the document's root
-/// renders over it, since filter-effects-2's Backdrop Root Image of the root
-/// holds the canvas (see [`dom::render::blur`]).
-const CANVAS: Color = Color::WHITE;
-
-/// Where a painter's pixels go: a window's presentation stack, or a texture
-/// it owns and nothing displays. It is built with the painter and is the one
-/// it has for its whole life, whatever views come and go past it.
-pub(crate) enum Output {
-    /// A painter with nowhere to draw. Test-only, so a unit test that
-    /// exercises routing alone pays for no GPU device; production has
-    /// exactly the two targets an embedder can name.
-    #[cfg(test)]
-    None,
-    #[cfg_attr(
-        target_arch = "wasm32",
-        allow(
-            dead_code,
-            reason = "a browser view is refused this target at construction"
-        )
-    )]
-    Offscreen(Box<Headless>),
-    Window(Box<WindowGraphics>),
-}
-
-impl Output {
-    /// Builds the target an embedder named, on the thread that will draw into
-    /// it — the only thread macOS lets a surface be created from.
-    pub(crate) async fn build(
-        target: DrawTarget,
-        frame_size: FrameSize,
-    ) -> Result<Self, EngineError> {
-        match target {
-            DrawTarget::Window(target) => Ok(Self::Window(Box::new(
-                WindowGraphics::new(target, frame_size).await?,
-            ))),
-            DrawTarget::Offscreen => Self::offscreen(),
-        }
-    }
-
-    /// Gives up the frame a target that is itself the only copy of one holds.
-    ///
-    /// What a painter does when it points at a different document. A window
-    /// keeps its surface, because what is on screen is the previous page's
-    /// last frame and it stays there until the next one is presented. An
-    /// offscreen target is given up instead and rebuilt on the next render:
-    /// its texture is the only place a frame exists, so keeping it would hand
-    /// a reader the previous document's pixels as this one's.
-    fn forget(&mut self) {
-        match self {
-            #[cfg(test)]
-            Self::None => {}
-            Self::Offscreen(gpu) => gpu.forget(),
-            // A window keeps its surface and its last presented frame, but
-            // the filter bakes still have to forget which *frame* they belong
-            // to: commit ids restart at one per document.
-            Self::Window(graphics) => graphics.forget_filters(),
-        }
-    }
-
-    /// Bakes the textures of `frame`'s vector image draws not already
-    /// resident in this target's raster cache into `out`, index-parallel
-    /// with the frame's vector draws.
-    ///
-    /// Copied out for the same reason [`Self::prepare_filters`]'s table is.
-    ///
-    /// # Errors
-    ///
-    /// [`EngineError::Gpu`] if a bake render fails.
-    fn prepare_vectors(
-        &mut self,
-        frame: &CommittedFrame,
-        out: &mut Vec<Option<ImageData>>,
-    ) -> Result<(), EngineError> {
-        out.clear();
-        let baked = match self {
-            #[cfg(test)]
-            // A painter with nowhere to draw bakes nothing, so every vector
-            // draw encodes nothing — which is what a routing test wants: no
-            // device.
-            Self::None => return Ok(()),
-            Self::Offscreen(gpu) => gpu
-                .prepare_vectors(frame)
-                .map_err(|error| EngineError::Gpu(error.to_string()))?,
-            Self::Window(graphics) => graphics.prepare_vectors(frame)?,
-        };
-        out.extend(baked.iter().cloned());
-        Ok(())
-    }
-
-    /// Bakes `frame`'s `filter: blur()` groups and `backdrop-filter`
-    /// elements into `out`, index-parallel with the frame's filter entries.
-    /// `vectors` is the table [`Self::prepare_vectors`] filled for this
-    /// frame, since an entry's range may draw one.
-    ///
-    /// The table is copied out rather than borrowed because the very next
-    /// step needs the target mutably again to render; an `ImageData` is a
-    /// blob handle plus four fields, and `out` keeps its capacity across
-    /// frames, so the copy allocates nothing in the steady state.
-    ///
-    /// # Errors
-    ///
-    /// [`EngineError::Gpu`] if a bake render fails.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "one bake pre-step's full inputs: the frame, its two pixel tables, the three \
-                  compose readings, and the table it fills"
-    )]
-    fn prepare_filters(
-        &mut self,
-        frame: &CommittedFrame,
-        images: &[Option<ImageData>],
-        vectors: &[Option<ImageData>],
-        offset_of: &dyn Fn(&dom::ScrollSlot) -> Option<Vector2D<f32>>,
-        scroll_generation: u64,
-        animation_now: Option<f64>,
-        out: &mut Vec<Option<ImageData>>,
-    ) -> Result<(), EngineError> {
-        out.clear();
-        let baked = match self {
-            #[cfg(test)]
-            // A painter with nowhere to draw bakes nothing, so every entry
-            // falls back to replaying raw — which is what a routing test
-            // wants: no device.
-            Self::None => return Ok(()),
-            Self::Offscreen(gpu) => gpu
-                .prepare_filters(
-                    frame,
-                    images,
-                    vectors,
-                    offset_of,
-                    scroll_generation,
-                    animation_now,
-                    CANVAS,
-                )
-                .map_err(|error| EngineError::Gpu(error.to_string()))?,
-            Self::Window(graphics) => graphics.prepare_filters(
-                frame,
-                images,
-                vectors,
-                offset_of,
-                scroll_generation,
-                animation_now,
-            )?,
-        };
-        out.extend(baked.iter().cloned());
-        Ok(())
-    }
-
-    /// Renders one composed scene, drawing `images`, into this target at
-    /// `size`.
-    ///
-    /// A window renders into the texture it re-presents rather than into the
-    /// swap-chain image, which is what lets re-exposure present the same frame
-    /// again with a blit alone. Neither kind waits for the submitted work here:
-    /// a window presents, and an offscreen target's readback polls the device
-    /// itself — only [`Painter::draw_posted`], which renders offscreen and
-    /// reads nothing back, waits.
-    ///
-    /// The scene's bitmaps are named because a target tracks what its
-    /// renderer's image atlas still holds; see
-    /// [`dom::render::gpu::AtlasResidency`].
-    fn render(
-        &mut self,
-        scene: &Scene,
-        images: &[Option<ImageData>],
-        size: FrameSize,
-    ) -> Result<(), EngineError> {
-        match self {
-            #[cfg(test)]
-            Self::None => Ok(()),
-            Self::Offscreen(gpu) => gpu
-                .render_frame(scene, images, size.width, size.height, CANVAS)
-                .map_err(|error| EngineError::Gpu(error.to_string())),
-            Self::Window(graphics) => graphics.render_to_target(scene, images, size),
-        }
-    }
-
-    /// A windowless GPU target.
-    ///
-    /// `Headless::new` blocks on a device request, and a browser Worker is
-    /// the thread whose event loop would have answered it — so rather than
-    /// hang, a Wasm view is told no.
-    fn offscreen() -> Result<Self, EngineError> {
-        #[cfg(target_arch = "wasm32")]
-        return Err(EngineError::Gpu(
-            "an offscreen target blocks the thread that builds it on a device \
-             request; a browser Worker is the thread that would answer it"
-                .to_owned(),
-        ));
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let gpu = Headless::new().map_err(|error| EngineError::Gpu(error.to_string()))?;
-            Ok(Self::Offscreen(Box::new(gpu)))
-        }
-    }
-}
-
 /// One draw target and everything that turns a view's frames into pixels in
 /// it: the gesture router, the scroll intents, the composition, the frame
 /// clock.
 ///
-/// Kept on one thread by construction — the `Rc` marker makes the whole
-/// struct `!Send` — and that thread is the one that built it, which is
-/// therefore the one that draws.
+/// Kept on one thread by construction — the presenting painter it holds is
+/// `!Send` — and that thread is the one that built it, which is therefore the
+/// one that draws.
 ///
 /// It is built before any view exists and outlives every view it shows.
 /// [`Self::attach`] points it at one, [`Self::detach`] releases it, and
@@ -395,6 +179,9 @@ impl Output {
 /// painter. The draw target and what it holds do not: what was last drawn
 /// stays on screen, and stays capturable, across both.
 pub struct Painter {
+    /// The presenting painter: the draw target and everything that turns
+    /// adopted frames into pixels in it.
+    core: terminus::link::painter::Painter,
     /// The seat this painter took on the view it observes, if it observes one.
     /// Non-owning, and the only handle there is on a live view: an upgrade
     /// that fails is the view having been released, which is therefore a fact
@@ -407,897 +194,24 @@ pub struct Painter {
     /// frame to draw, so the receiver has to outlive the view it came from and
     /// the poll that notices the view is gone has to read it one last time.
     frames: Option<watch::Receiver<Published>>,
-    viewport: Viewport,
-    frame_size: FrameSize,
-    output: Output,
-    /// A window nobody can see draws nothing; the frame it owes stays owed.
-    occluded: bool,
-    /// A draw target that failed once cannot be reached again: it is reported
-    /// once, and nothing tries to paint it afterwards. Painter-lifetime state:
-    /// neither attaching nor detaching clears it, because neither replaces the
-    /// target that failed.
-    render_failed: bool,
-    /// The last snapshot adopted from the attached view's watch. Everything
-    /// routing and drawing read comes from here, so one pass sees one state —
-    /// and it survives the view, so a released view's last frame is still
-    /// drawable and capturable.
+    /// The last snapshot adopted from the attached view's watch: its frame is
+    /// the one the presenting painter adopted, and its listener names and
+    /// serviced frame post are what routing and the offscreen wait read, so
+    /// one pass sees one state — and it survives the view, so a released
+    /// view's last frame is still drawable and capturable.
     published: Published,
-    redraw_pending: Cell<bool>,
     begin_frames_sent: u64,
-    pub(super) gesture: GestureRouter,
-    pub(super) clock: FrameClock,
-    pub(super) scroll_intents: ScrollIntents,
-    /// What this painter's draw target holds: the compose key it was rendered
-    /// from, at the size it was rendered for. The one record of that — a
-    /// target has no second one of its own — so it says whether a frame may be
-    /// skipped and whether there is anything to capture.
-    ///
-    /// The target's, not the attachment's: what was drawn stays drawn across a
-    /// detach, and [`Painter::attach`] is what clears it.
-    composed: Option<(ComposeKey, FrameSize)>,
-    composed_scene: Scene,
-    /// The `filter: blur()` textures of the frame being composed, copied out
-    /// of the target's bake cache. Kept here so its capacity outlives a
-    /// frame.
-    composed_filters: Vec<Option<ImageData>>,
-    /// The vector image textures of the frame being composed, copied out of
-    /// the target's raster cache, for the same reason.
-    composed_vectors: Vec<Option<ImageData>>,
-    /// The pixels this commit draws, read out of the attached view's store.
-    images: images::PainterImages,
-    thread_bound: PhantomData<Rc<()>>,
 }
 
 impl std::fmt::Debug for Painter {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("Painter")
-            .field("viewport", &self.viewport)
-            .field("frame_size", &self.frame_size)
+            .field("viewport", &self.core.viewport())
+            .field("frame_size", &self.core.frame_size())
             .field("attached", &self.is_attached())
             .finish_non_exhaustive()
     }
-}
-
-#[derive(Debug, Default)]
-pub(super) struct ScrollIntents {
-    /// Each container's live offset where it differs from the committed
-    /// one. In range on every axis, except that a `contain-bounce` axis
-    /// may stand up to one scrollport past either edge while it is
-    /// stretched — a drag past the boundary, a fling's overshoot, or a
-    /// bounce back on its way home — and that an
-    /// `overscroll-behavior: circular` axis may stand anywhere: it has no
-    /// boundary, and its scrolling area repeats every
-    /// [`dom::ScrollSlot::wrap_period`]. Such an offset is composed, hit
-    /// tested and sampled modulo the period (`dom` normalizes it at every
-    /// entry point), posted modulo the period and unclamped, which the
-    /// document admits as it stands ([`Self::drain_changed`]), and brought
-    /// back into `[0, period)` by each rebase, which shifts the drag origins
-    /// and glide targets that refer to it by the same amount.
-    pub(super) offsets: FxHashMap<NodeId, Vector2D<f32>>,
-    rebased_commit: Option<u64>,
-    /// The snap area each container stood on, in the frame the offsets were
-    /// last rebased onto: read off that frame's positions as a newer commit
-    /// replaces it ([`Self::leave`]), and spent by the rebase onto that
-    /// commit, which moves each such container at rest onto its area's new
-    /// position (css-scroll-snap-1 §4.1.3). Empty outside that interval.
-    /// What a container is snapped to follows from its offset and the frame
-    /// it stands on, so nothing tracks it while that frame is at hand; this
-    /// holds it for the one step that no longer has the frame.
-    snapped: FxHashMap<NodeId, Snapped>,
-    generation: u64,
-    /// Where each drag found each container it moved: the offset before the
-    /// drag's first step on it, keyed by the pointer and the container. The
-    /// drag's end settles every entry of its pointer onto a snap position
-    /// from there ([`Self::settle`]), and while an entry exists the
-    /// container is held — a commit does not re-snap it under the finger.
-    /// A fling keeps its drag's entries until it ends.
-    gesture_origins: FxHashMap<(PointerId, NodeId), Vector2D<f32>>,
-    /// The flings in flight; see [`inertia`].
-    flings: SmallVec<[Fling; 1]>,
-    /// The stretched axes springing back; see [`inertia`].
-    bounce_backs: SmallVec<[BounceBack; 2]>,
-    /// The axes moving to a snap position or to a smooth scroll's target;
-    /// see [`inertia`].
-    glides: SmallVec<[Glide; 2]>,
-    /// The axes a script set moving at a constant rate (Lynx's
-    /// `autoScroll`); see [`inertia`]. A `Vec`, not an inline buffer: almost
-    /// no page has one, so the painter of a page without holds the three
-    /// words and nothing else.
-    auto_scrolls: Vec<AutoScroll>,
-    /// The newest programmatic scroll request or auto-scroll change handled
-    /// per container ([`dom::ScrollSlot::request`],
-    /// [`CommittedFrame::auto_scroll_requests`]), which every post for it
-    /// names. An
-    /// entry is written when a request is first seen and pruned by every
-    /// rebase to the containers the adopted frame still has a slot for, so
-    /// it is bounded by the live containers that ever received a request.
-    handled: FxHashMap<NodeId, NonZeroU64>,
-    /// The drags in progress, for their release velocity; see [`inertia`].
-    drags: FxHashMap<PointerId, DragTrack>,
-    /// The containers a wheel step moved, each with the clock reading of
-    /// its latest step: held off rest until
-    /// [`inertia::WHEEL_REST_SECONDS`] pass with no further step, so a wheel
-    /// gesture ends once rather than at every tick.
-    wheel_steps: SmallVec<[(NodeId, f64); 1]>,
-    /// The containers whose live offset changed, or whose hold a drag let
-    /// go, since the last publish; see [`Painter::publish_scroll`]. Bounded
-    /// by the containers one pass touches.
-    changed: SmallVec<[NodeId; 2]>,
-    /// The entries the last publish posted, kept for their capacity.
-    posting: SmallVec<[(NodeId, ScrollEntry); 2]>,
-}
-
-/// The snap area a container stood on, per axis; `None` on an axis where it
-/// stood on no position.
-#[derive(Debug, Clone, Copy)]
-struct Snapped {
-    x: Option<NodeId>,
-    y: Option<NodeId>,
-}
-
-impl ScrollIntents {
-    /// Reads, as a newer commit replaces `frame`, the snap area each
-    /// container stands on in it ([`dom::scroll::SnapAxis::snapped_area`],
-    /// from the live offset), for the rebase onto that commit to follow.
-    /// Every container is read, moving or not: whether one is at rest is
-    /// decided by that rebase.
-    ///
-    /// Offsets that never stood on `frame` — it was adopted and replaced
-    /// with no rebase between — are not read against its positions; what
-    /// the frame they do stand on left behind still holds.
-    fn leave(&mut self, frame: &CommittedFrame) {
-        if self.rebased_commit != Some(frame.commit_id()) {
-            return;
-        }
-        self.snapped.clear();
-        for slot in frame.scroll_slots() {
-            let (snap_x, snap_y) = frame.snap_axes(slot);
-            if snap_x.is_none() && snap_y.is_none() {
-                continue;
-            }
-            let offset = self.offsets.get(&slot.node).copied().unwrap_or(slot.offset);
-            let x = snap_x.and_then(|snap| snap.snapped_area(offset.x));
-            let y = snap_y.and_then(|snap| snap.snapped_area(offset.y));
-            if x.is_some() || y.is_some() {
-                self.snapped.insert(slot.node, Snapped { x, y });
-            }
-        }
-    }
-
-    /// Brings the intents onto a newly adopted `frame`, at `now`: re-clamps
-    /// every live offset to the frame's ranges — or, on a circular axis,
-    /// normalizes it into the period — drops what moves a container the
-    /// frame no longer has, carries out the requests the frame brings for
-    /// the first time, and settles the snapping containers at rest, each
-    /// onto the area it stood on where it stood on one.
-    ///
-    /// A normalization moves the live offset by whole periods, so the
-    /// drag origins and glide targets of that container move with it
-    /// ([`Self::shift_motion`]): a release still settles from where the
-    /// drag found the container, and a glide still ends on the position it
-    /// was aimed at, in the same unwrapped frame as the offset.
-    fn rebase(&mut self, frame: &CommittedFrame, now: f64) {
-        if self.rebased_commit == Some(frame.commit_id()) {
-            return;
-        }
-        self.rebased_commit = Some(frame.commit_id());
-        let changed = &mut self.changed;
-        let mut shifts: SmallVec<[(NodeId, Vector2D<f32>); 2]> = SmallVec::new();
-        self.offsets.retain(|node, offset| {
-            let Some(slot) = frame.slot_of(*node) else {
-                return false;
-            };
-            let slot = &frame.scroll_slots()[slot as usize];
-            let (period_x, period_y) = slot.wrap_period();
-            let wrapped = slot.wrap(*offset);
-            let axis = |value: f32,
-                        wrapped: f32,
-                        max: f32,
-                        extent: f32,
-                        bounces: bool,
-                        period: Option<f32>| {
-                match period {
-                    Some(_) => wrapped,
-                    None => clamp_intent_axis(value, max, extent, bounces),
-                }
-            };
-            let brought = Vector2D::new(
-                axis(
-                    offset.x,
-                    wrapped.x,
-                    slot.max_offset.x,
-                    slot.scrollport.width,
-                    slot.bounce.x,
-                    period_x,
-                ),
-                axis(
-                    offset.y,
-                    wrapped.y,
-                    slot.max_offset.y,
-                    slot.scrollport.height,
-                    slot.bounce.y,
-                    period_y,
-                ),
-            );
-            if brought != *offset {
-                // Whole periods on a circular axis, which what refers to
-                // the offset moves by too; a non-finite offset was nowhere,
-                // so nothing follows it.
-                let shift = |value: f32, brought: f32, period: Option<f32>| {
-                    if period.is_some() && value.is_finite() {
-                        brought - value
-                    } else {
-                        0.0
-                    }
-                };
-                let shift = Vector2D::new(
-                    shift(offset.x, brought.x, period_x),
-                    shift(offset.y, brought.y, period_y),
-                );
-                if shift != Vector2D::zero() {
-                    shifts.push((*node, shift));
-                }
-                *offset = brought;
-                note_changed(changed, *node);
-            }
-            *offset != slot.offset
-        });
-        self.gesture_origins
-            .retain(|(_, node), _| frame.slot_of(*node).is_some());
-        for (node, shift) in shifts {
-            self.shift_motion(node, shift);
-        }
-        self.retain_motion(frame);
-        self.apply_requests(frame, now);
-        self.settle_at_rest(frame);
-    }
-
-    /// Carries out each programmatic scroll and each auto-scroll change
-    /// `frame` brings that this painter has not handled yet: its serial is
-    /// newer than the one recorded for the container.
-    ///
-    /// The two do not replace one another — a scroll request says where the
-    /// container is, an auto-scroll change whether it moves on from there —
-    /// so one container's pair in one frame is both carried out, the scroll
-    /// first.
-    fn apply_requests(&mut self, frame: &CommittedFrame, now: f64) {
-        if !self.handled.is_empty() {
-            self.handled
-                .retain(|node, _| frame.slot_of(*node).is_some());
-        }
-        // Chosen against the serials as they stood before this frame: the
-        // scroll request below may raise a container's past an auto-scroll
-        // change made before it in the same turn.
-        let auto_scrolls: SmallVec<[(NodeId, AutoScrollRequest); 1]> = frame
-            .auto_scroll_requests()
-            .iter()
-            .filter(|(node, request)| {
-                self.handled
-                    .get(node)
-                    .is_none_or(|handled| *handled < request.serial)
-            })
-            .copied()
-            .collect();
-        for slot in frame.scroll_slots() {
-            let Some(request) = slot.request else {
-                continue;
-            };
-            if self
-                .handled
-                .get(&slot.node)
-                .is_some_and(|handled| *handled >= request.serial)
-            {
-                continue;
-            }
-            self.handled.insert(slot.node, request.serial);
-            self.apply_request(frame, slot, request, now);
-        }
-        for (node, request) in auto_scrolls {
-            let handled = self.handled.entry(node).or_insert(request.serial);
-            *handled = (*handled).max(request.serial);
-            self.apply_auto_scroll(node, request);
-        }
-    }
-
-    /// One programmatic scroll of `slot`'s container. The fling or bounce
-    /// back moving it stops ([`Self::stop_flings_and_bounces_on`]), while an
-    /// auto-scroll goes on from where the request leaves the container and
-    /// a glide is kept or ended below. One that yields to a pointer
-    /// ([`dom::Document::scroll_to_yielding`]) is dropped whole while a drag
-    /// holds the container. An instant one
-    /// puts the live offset on the target, where a drag holding the
-    /// container continues from; a smooth one glides there, to the position
-    /// the at-rest snap rule would move the target to, so a snapping
-    /// container does not jump at the end — from rest, unless a glide to
-    /// that position is already running, which goes on as it is
-    /// ([`Self::glide_to_or_keep`]). On a
-    /// circular axis the glide runs along the shorter arc of the circle
-    /// ([`nearest_copy`]), across the seam when that is shorter. Either way
-    /// the container is posted, naming the request.
-    fn apply_request(
-        &mut self,
-        frame: &CommittedFrame,
-        slot: &dom::ScrollSlot,
-        request: ScrollRequest,
-        now: f64,
-    ) {
-        let node = slot.node;
-        if request.yields_to_pointer && self.is_held(node) {
-            // A turn no script asked for, under a finger — or under the
-            // fling that finger let go, which keeps its holds: nothing
-            // moves. Posted all the same, so the request reads as handled.
-            note_changed(&mut self.changed, node);
-            return;
-        }
-        self.stop_flings_and_bounces_on(frame, node, now);
-        // The request decides where the container goes, not the area it
-        // stood on before.
-        self.snapped.remove(&node);
-        let live = self.offsets.get(&node).copied().unwrap_or(slot.offset);
-        match request.behavior {
-            ScrollBehavior::Instant => {
-                self.stop_glides(node);
-                for ((_, held), origin) in &mut self.gesture_origins {
-                    if *held == node {
-                        *origin = request.target;
-                    }
-                }
-                if request.target == slot.offset {
-                    self.offsets.remove(&node);
-                } else {
-                    self.offsets.insert(node, request.target);
-                }
-            }
-            ScrollBehavior::Smooth => {
-                let (snap_x, snap_y) = frame.snap_axes(slot);
-                let target = settle_offset(
-                    request.target,
-                    request.target,
-                    slot.scrollport,
-                    snap_x,
-                    snap_y,
-                );
-                // `live` is in the period: `rebase` normalizes before `apply_requests`.
-                let target = nearest_copy(slot, live, target);
-                self.glide_to_or_keep(frame, node, live, target, now);
-            }
-        }
-        note_changed(&mut self.changed, node);
-        self.generation += 1;
-    }
-
-    /// css-scroll-snap-1 §6.1: a snapping container must rest on a snap
-    /// position. Every commit publishes fresh positions — the first layout,
-    /// a relayout that moved the areas, a programmatic scroll the document
-    /// applied — so each snapping container no drag is holding, no fling is
-    /// driving and no bounce back or glide is moving settles from where it
-    /// stands, at once, as an intent like any other scroll.
-    ///
-    /// §4.1.3 comes first: a container that stood on an area's position in
-    /// the frame this one replaces ([`Self::leave`]) moves onto that area's
-    /// position here, and the at-rest rule then finds it on a position and
-    /// leaves it. A container something is moving follows nothing — where
-    /// it rests is decided when the drag, fling, bounce back or glide ends —
-    /// so what was read for it is dropped with the rest. A container with
-    /// an auto-scroll is not at rest either, even while that stands at its
-    /// edge for a range that grows: snapped away from the edge it would
-    /// move straight back.
-    fn settle_at_rest(&mut self, frame: &CommittedFrame) {
-        let mut snapped = std::mem::take(&mut self.snapped);
-        for slot in frame.scroll_slots() {
-            if self.is_held(slot.node)
-                || self.is_bouncing(slot.node)
-                || self.is_gliding(slot.node)
-                || self.has_auto_scroll(slot.node)
-            {
-                continue;
-            }
-            if let Some(snapped) = snapped.get(&slot.node) {
-                self.follow_snapped(frame, slot, *snapped);
-            }
-            self.settle_node_at_rest(frame, slot);
-        }
-        snapped.clear();
-        self.snapped = snapped;
-    }
-
-    /// css-scroll-snap-1 §4.1.3 for one container at rest: on each axis it
-    /// stood on an area's position, it moves to the position `frame` gives
-    /// that area ([`dom::scroll::SnapAxis::position_of`]), however far that
-    /// is and whatever the strictness. An axis whose area contributes no
-    /// position any more keeps its offset, for the at-rest rule. On a
-    /// circular axis the position is taken into the period, where the
-    /// rebase has just brought the offset: the old offset says nothing
-    /// about which copy is near under the new period, and nothing refers to
-    /// the offset of a container at rest.
-    fn follow_snapped(&mut self, frame: &CommittedFrame, slot: &dom::ScrollSlot, snapped: Snapped) {
-        let (snap_x, snap_y) = frame.snap_axes(slot);
-        let offset = self.offsets.get(&slot.node).copied().unwrap_or(slot.offset);
-        let axis = |area: Option<NodeId>, snap: Option<dom::scroll::SnapAxis<'_>>, offset: f32| {
-            area.zip(snap)
-                .and_then(|(area, snap)| snap.position_of(area, offset))
-                .unwrap_or(offset)
-        };
-        let followed = slot.wrap(Vector2D::new(
-            axis(snapped.x, snap_x, offset.x),
-            axis(snapped.y, snap_y, offset.y),
-        ));
-        if followed != offset {
-            self.write(slot.node, followed);
-            self.generation += 1;
-        }
-    }
-
-    /// The at-rest rule for one container: from where it stands to where it
-    /// stands, so a `mandatory` axis moves to its nearest position and a
-    /// `proximity` one only when within range. A stretched axis is left to
-    /// its bounce back.
-    fn settle_node_at_rest(&mut self, frame: &CommittedFrame, slot: &dom::ScrollSlot) {
-        let (snap_x, snap_y) = frame.snap_axes(slot);
-        if snap_x.is_none() && snap_y.is_none() {
-            return;
-        }
-        let offset = self.offsets.get(&slot.node).copied().unwrap_or(slot.offset);
-        let settled = settle_stretch_aware(offset, offset, slot, snap_x, snap_y);
-        if settled != offset {
-            self.write(slot.node, settled);
-            self.generation += 1;
-        }
-    }
-
-    /// Settles every container `pointer`'s drag moved onto a snap position,
-    /// from where the drag found it to where it left it, gliding there
-    /// ([`Self::glide_to`]), and releases the hold on them. A stretched axis
-    /// is not settled: it springs back first ([`Self::start_bounce_backs`])
-    /// and is re-snapped when it lands. An axis already gliding keeps its
-    /// glide.
-    fn settle(&mut self, frame: &CommittedFrame, pointer: PointerId, now: f64) {
-        self.rebase(frame, now);
-        let held: SmallVec<[(NodeId, Vector2D<f32>); 2]> = self
-            .gesture_origins
-            .iter()
-            .filter(|((held_by, _), _)| *held_by == pointer)
-            .map(|((_, node), origin)| (*node, *origin))
-            .collect();
-        for (node, origin) in held {
-            self.gesture_origins.remove(&(pointer, node));
-            let Some(index) = frame.slot_of(node) else {
-                continue;
-            };
-            // Let go whether or not it moves now, so its rest is posted.
-            note_changed(&mut self.changed, node);
-            let slot = &frame.scroll_slots()[index as usize];
-            let (snap_x, snap_y) = frame.snap_axes(slot);
-            let offset = self.offsets.get(&node).copied().unwrap_or(slot.offset);
-            let settled = settle_stretch_aware(origin, offset, slot, snap_x, snap_y);
-            self.glide_to(frame, node, offset, settled, now);
-        }
-    }
-
-    /// Drives one scroll step from the slot `from` names, outward along the
-    /// published chain, and reports per axis what was absorbed and where a
-    /// container is now stretched. Order and reach are `dom`'s
-    /// [`drive_chain`] over the slots' published policy, and each step
-    /// lands per [`resolve_elastic_step`] — [`dom::scroll::resolve_step`]'s
-    /// rule, the same walk the document runs over live geometry, plus the
-    /// `contain-bounce` stretch the document never takes. A drag or fling
-    /// step (`pointer` set) records where it found each container it moved,
-    /// and a drag step feeds its release velocity; a wheel step snaps as it
-    /// lands, and ends the glides on each container it moves, so where the
-    /// wheel put it stands rather than being overwritten by the glide's
-    /// next frame. Before the walk, a container on the chain already stretched
-    /// on an axis unwinds toward its edge first (Lynx's restore-first rule),
-    /// whatever the walk's order.
-    fn chain(
-        &mut self,
-        frame: &CommittedFrame,
-        from: NodeId,
-        delta: Vector2D<f32>,
-        motion: Motion,
-        pointer: Option<PointerId>,
-        at: f64,
-    ) -> ChainOutcome {
-        self.rebase(frame, at);
-        if motion == Motion::Drag
-            && let Some(pointer) = pointer
-        {
-            self.track_drag(frame, pointer, from, delta, at);
-        }
-        let slots = frame.scroll_slots();
-        let Some(start) = frame.slot_of(from) else {
-            return ChainOutcome::default();
-        };
-        let mut indices: SmallVec<[u32; 4]> = SmallVec::new();
-        let mut links: SmallVec<[ChainLink; 4]> = SmallVec::new();
-        let mut current = Some(start);
-        while let Some(index) = current {
-            let slot = &slots[index as usize];
-            indices.push(index);
-            links.push(slot.link());
-            current = slot.parent;
-        }
-        let mut stretched = ScrollAxes::NONE;
-        let mut unwound = Vector2D::zero();
-        let mut delta = delta;
-        for axis in Axis::BOTH {
-            if axis.of(delta) == 0.0 {
-                continue;
-            }
-            for &index in &indices {
-                let slot = &slots[index as usize];
-                if !axis.flag(slot.bounce) {
-                    continue;
-                }
-                let offset = self.offsets.get(&slot.node).copied().unwrap_or(slot.offset);
-                let (applied, absorbed) = unwind_stretch(
-                    motion,
-                    axis.of(offset),
-                    axis.of(delta),
-                    axis.of(slot.max_offset),
-                    axis.extent(slot.scrollport),
-                );
-                if absorbed == 0.0 {
-                    continue;
-                }
-                let mut moved = offset;
-                axis.set(&mut moved, applied);
-                if let Some(pointer) = pointer {
-                    self.gesture_origins
-                        .entry((pointer, slot.node))
-                        .or_insert(offset);
-                }
-                if motion == Motion::Wheel {
-                    self.stop_glides(slot.node);
-                    self.note_wheel_step(slot.node, at);
-                } else {
-                    self.end_wheel_steps(slot.node);
-                }
-                self.write(slot.node, moved);
-                if stretch_of(applied, axis.of(slot.max_offset)) != 0.0 {
-                    axis.raise(&mut stretched);
-                }
-                axis.set(&mut unwound, absorbed);
-                let remaining = axis.of(delta) - absorbed;
-                axis.set(&mut delta, remaining);
-                break;
-            }
-        }
-        let consumed = drive_chain(&links, delta, |link, admitted| {
-            let slot = &slots[indices[link] as usize];
-            let offset = self.offsets.get(&slot.node).copied().unwrap_or(slot.offset);
-            let step = slot_step(frame, slot, motion, offset, admitted);
-            stretched.x |= step.stretched.x;
-            stretched.y |= step.stretched.y;
-            if step.applied != offset {
-                if let Some(pointer) = pointer {
-                    self.gesture_origins
-                        .entry((pointer, slot.node))
-                        .or_insert(offset);
-                }
-                if motion == Motion::Wheel {
-                    self.stop_glides(slot.node);
-                    self.note_wheel_step(slot.node, at);
-                } else {
-                    self.end_wheel_steps(slot.node);
-                }
-                self.write(slot.node, step.applied);
-            }
-            step.absorbed
-        });
-        let outcome = ChainOutcome {
-            absorbed: unwound + consumed.map_or_else(Vector2D::zero, |(_, absorbed)| absorbed),
-            stretched,
-        };
-        if outcome.consumed() {
-            self.generation += 1;
-            // A step that landed a container back in range ends the
-            // bounce back that was bringing it there.
-            self.retain_motion(frame);
-        }
-        outcome
-    }
-
-    pub(super) fn offset_for(&self, node: NodeId) -> Option<Vector2D<f32>> {
-        self.offsets.get(&node).copied()
-    }
-
-    /// The one write of a live offset, which records the container for the
-    /// next publish.
-    pub(super) fn write(&mut self, node: NodeId, offset: Vector2D<f32>) {
-        self.offsets.insert(node, offset);
-        note_changed(&mut self.changed, node);
-    }
-
-    /// Hands the changed containers to `post` as main adopts them — clamped
-    /// to the committed range, and `rest` where nothing holds, flings,
-    /// bounces, glides or auto-scrolls them — and forgets them. A container `frame` no longer
-    /// carries is dropped. Both buffers keep their capacity.
-    ///
-    /// An axis with a [`dom::ScrollSlot::wrap_period`] is normalized into
-    /// its period and posted unclamped: the document admits the whole
-    /// period on such an axis, so while the scrollport straddles the seam —
-    /// the normalized offset past `max_offset` — main holds the offset the
-    /// screen shows, and its readbacks, its `scrollIntoView` and its scroll
-    /// timeline samples agree with the painter. Every other axis is clamped,
-    /// so main sees the edge a `contain-bounce` stretch stands past.
-    fn drain_changed(
-        &mut self,
-        frame: Option<&CommittedFrame>,
-        at: f64,
-    ) -> smallvec::Drain<'_, [(NodeId, ScrollEntry); 2]> {
-        let mut posting = std::mem::take(&mut self.posting);
-        if let Some(frame) = frame {
-            for &node in &self.changed {
-                let Some(index) = frame.slot_of(node) else {
-                    continue;
-                };
-                let slot = &frame.scroll_slots()[index as usize];
-                let live = slot.wrap(self.offsets.get(&node).copied().unwrap_or(slot.offset));
-                let wrap = wrap_axes(slot);
-                let axis = |value: f32, max: f32, wraps: bool| {
-                    if wraps {
-                        value
-                    } else {
-                        clamp_scroll_axis(value, max)
-                    }
-                };
-                let offset = Vector2D::new(
-                    axis(live.x, slot.max_offset.x, wrap.x),
-                    axis(live.y, slot.max_offset.y, wrap.y),
-                );
-                let moving = self.is_held(node)
-                    || self.is_flinging(frame, node)
-                    || self.is_bouncing(node)
-                    || self.is_gliding(node)
-                    || self.is_auto_scrolling_node(frame, node)
-                    || self.is_wheeling(node);
-                posting.push((
-                    node,
-                    ScrollEntry {
-                        offset,
-                        at,
-                        rest: (!moving).then_some(offset),
-                        request: self.handled.get(&node).copied(),
-                    },
-                ));
-            }
-        }
-        self.changed.clear();
-        self.posting = posting;
-        self.posting.drain(..)
-    }
-}
-
-/// Records `node` once among the containers a pass changed.
-fn note_changed(changed: &mut SmallVec<[NodeId; 2]>, node: NodeId) {
-    if !changed.contains(&node) {
-        changed.push(node);
-    }
-}
-
-fn clamp_scroll_axis(value: f32, max: f32) -> f32 {
-    if value.is_finite() {
-        value.clamp(0.0, max)
-    } else {
-        0.0
-    }
-}
-
-/// [`resolve_elastic_step`] for one chain step on `slot`'s container,
-/// standing at `offset`, over the slot's published geometry, policy and
-/// snap data.
-fn slot_step(
-    frame: &CommittedFrame,
-    slot: &dom::ScrollSlot,
-    motion: Motion,
-    offset: Vector2D<f32>,
-    admitted: Vector2D<f32>,
-) -> ElasticStep {
-    let (snap_x, snap_y) = frame.snap_axes(slot);
-    resolve_elastic_step(
-        motion,
-        offset,
-        admitted,
-        slot.max_offset,
-        slot.scrollport,
-        slot.bounce,
-        wrap_axes(slot),
-        snap_x,
-        snap_y,
-    )
-}
-
-/// `target` on each axis `slot` wraps, moved to its copy nearest `live`: a
-/// whole period down when it lies more than half a period ahead of `live`,
-/// a whole period up when more than half a period behind, and unchanged
-/// otherwise (a tie keeps it). A glide from `live` to the result runs along
-/// the shorter arc of the circle, across the seam when that is shorter; a
-/// glide target outside `[0, period)` is brought back with the offset by
-/// the next rebase ([`ScrollIntents::shift_motion`]). A bounded axis keeps
-/// its target.
-fn nearest_copy(
-    slot: &dom::ScrollSlot,
-    live: Vector2D<f32>,
-    target: Vector2D<f32>,
-) -> Vector2D<f32> {
-    let (period_x, period_y) = slot.wrap_period();
-    let axis = |live: f32, target: f32, period: Option<f32>| match period {
-        Some(period) if target - live > period / 2.0 => target - period,
-        Some(period) if target - live < -period / 2.0 => target + period,
-        _ => target,
-    };
-    Vector2D::new(
-        axis(live.x, target.x, period_x),
-        axis(live.y, target.y, period_y),
-    )
-}
-
-/// The axes on which `slot` wraps: circular, with content to scroll
-/// ([`dom::ScrollSlot::wrap_period`]). Everything the intents do treats
-/// only these as boundless; a circular axis without overflow clamps like
-/// any other.
-fn wrap_axes(slot: &dom::ScrollSlot) -> ScrollAxes {
-    let (x, y) = slot.wrap_period();
-    ScrollAxes {
-        x: x.is_some(),
-        y: y.is_some(),
-    }
-}
-
-/// Where an intent may stand on one bounded axis: in range, or — on a
-/// `contain-bounce` axis — up to one scrollport past either edge.
-fn clamp_intent_axis(value: f32, max: f32, extent: f32, bounces: bool) -> f32 {
-    if !value.is_finite() {
-        return 0.0;
-    }
-    if bounces {
-        value.clamp(-extent, max + extent)
-    } else {
-        value.clamp(0.0, max)
-    }
-}
-
-/// [`settle_offset`] over an intent that may be stretched: a stretched
-/// axis keeps its stretch (its bounce back settles it when it lands), and
-/// the rest settle from an in-range `start`.
-///
-/// A wrapped axis is never stretched and its `start` is not clamped: a
-/// drag origin there may stand outside `0..=max` in the same unwrapped
-/// frame as `offset`, and the axis's snap positions repeat every period,
-/// so the settle finds the copy nearest where the gesture ended.
-fn settle_stretch_aware(
-    start: Vector2D<f32>,
-    offset: Vector2D<f32>,
-    slot: &dom::ScrollSlot,
-    snap_x: Option<dom::scroll::SnapAxis<'_>>,
-    snap_y: Option<dom::scroll::SnapAxis<'_>>,
-) -> Vector2D<f32> {
-    let wrap = wrap_axes(slot);
-    let start_axis = |value: f32, max: f32, wraps: bool| {
-        if wraps && value.is_finite() {
-            value
-        } else {
-            clamp_scroll_axis(value, max)
-        }
-    };
-    let start = Vector2D::new(
-        start_axis(start.x, slot.max_offset.x, wrap.x),
-        start_axis(start.y, slot.max_offset.y, wrap.y),
-    );
-    let stretched_x = !wrap.x && stretch_of(offset.x, slot.max_offset.x) != 0.0;
-    let stretched_y = !wrap.y && stretch_of(offset.y, slot.max_offset.y) != 0.0;
-    let settled = settle_offset(
-        start,
-        Vector2D::new(
-            if stretched_x { start.x } else { offset.x },
-            if stretched_y { start.y } else { offset.y },
-        ),
-        slot.scrollport,
-        snap_x,
-        snap_y,
-    );
-    Vector2D::new(
-        if stretched_x { offset.x } else { settled.x },
-        if stretched_y { offset.y } else { settled.y },
-    )
-}
-
-/// Composes one frame and renders it into `output`, whatever kind of target
-/// that is.
-///
-/// The one render path: a frame is composed flat, with each scroll slot at
-/// the offset the intents carry for it. A frame whose whole program is one
-/// unscrolled fragment, asked for at no offset and no animation instant, is
-/// rendered straight out of the commit — composing it would copy it.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "one frame's whole path to pixels: the target, the three compose buffers, the \
-              frame, and the pixel table it draws from"
-)]
-fn compose_and_render(
-    output: &mut Output,
-    buffer: &mut Scene,
-    filtered: &mut Vec<Option<ImageData>>,
-    vectors: &mut Vec<Option<ImageData>>,
-    intents: &ScrollIntents,
-    frame: &CommittedFrame,
-    images: &[Option<ImageData>],
-    size: FrameSize,
-    animation_now: Option<f64>,
-) -> Result<(), EngineError> {
-    // The two optional pre-steps, each skipped on one test. A frame drawing
-    // no SVG document bakes no vector texture; a frame with no
-    // `filter: blur()` group and no `backdrop-filter` element — the
-    // overwhelming majority — bakes no filter and touches no offscreen
-    // texture at all. The vectors come first: a filter's range may draw one.
-    if frame.draws_vectors() {
-        output.prepare_vectors(frame, vectors)?;
-    } else {
-        vectors.clear();
-    }
-    if frame.filter_groups().is_empty() {
-        filtered.clear();
-    } else {
-        output.prepare_filters(
-            frame,
-            images,
-            vectors,
-            &|slot| intents.offset_for(slot.node),
-            intents.generation,
-            animation_now,
-            filtered,
-        )?;
-    }
-    let scene = if intents.offsets.is_empty()
-        && animation_now.is_none()
-        && let Some(scene) = frame.scene()
-    {
-        // A filtered frame is never one unscrolled fragment — it carries at
-        // least one filter bracket or backdrop op — so this fast path never
-        // skips a bake.
-        scene
-    } else {
-        buffer.reset();
-        frame.compose_into(
-            buffer,
-            images,
-            filtered,
-            vectors,
-            &|slot| intents.offset_for(slot.node),
-            animation_now,
-        );
-        &*buffer
-    };
-    output.render(scene, images, size)
-}
-
-fn route_published(
-    frame: Option<&CommittedFrame>,
-    intents: &ScrollIntents,
-    event: &InputEvent,
-    animation_now: Option<f64>,
-) -> Option<HitTarget> {
-    // A key event is not routed by position: the router targets it at the
-    // focus target itself.
-    if matches!(event.kind, InputKind::Key { .. }) {
-        return None;
-    }
-    let finite = event.position.x.is_finite()
-        && event.position.y.is_finite()
-        && match event.kind {
-            InputKind::Wheel { delta } => delta.x.is_finite() && delta.y.is_finite(),
-            _ => true,
-        };
-    if !finite {
-        debug_assert!(false, "host input events must be finite, got {event:?}");
-        return None;
-    }
-    frame?.hit(
-        event.position,
-        &|slot| intents.offset_for(slot.node),
-        animation_now,
-    )
 }
 
 impl Painter {
@@ -1318,33 +232,24 @@ impl Painter {
         height: f32,
         device_pixel_ratio: f32,
     ) -> Result<Self, EngineError> {
-        let frame_size = FrameSize::for_viewport(width, height, device_pixel_ratio)?;
-        let viewport = Viewport::new(width, height).with_device_pixel_ratio(device_pixel_ratio);
-        let output = Output::build(target, frame_size).await?;
-        Ok(Self::with_output(viewport, frame_size, output))
+        let core = terminus::link::painter::Painter::new(
+            target,
+            width,
+            height,
+            device_pixel_ratio,
+            LYNX_GESTURES,
+        )
+        .await?;
+        Ok(Self::with_core(core))
     }
 
-    fn with_output(viewport: Viewport, frame_size: FrameSize, output: Output) -> Self {
+    fn with_core(core: terminus::link::painter::Painter) -> Self {
         Self {
+            core,
             seat: Weak::new(),
             frames: None,
-            viewport,
-            frame_size,
-            output,
-            occluded: false,
-            render_failed: false,
             published: Published::default(),
-            redraw_pending: Cell::new(false),
             begin_frames_sent: 0,
-            gesture: GestureRouter::default(),
-            clock: FrameClock::new(),
-            scroll_intents: ScrollIntents::default(),
-            composed: None,
-            composed_scene: Scene::new(),
-            composed_filters: Vec::new(),
-            composed_vectors: Vec::new(),
-            images: images::PainterImages::default(),
-            thread_bound: PhantomData,
         }
     }
 
@@ -1353,10 +258,12 @@ impl Painter {
     /// build one.
     #[cfg(test)]
     pub(crate) fn without_output(width: f32, height: f32, device_pixel_ratio: f32) -> Self {
-        let frame_size = FrameSize::for_viewport(width, height, device_pixel_ratio)
-            .expect("an in-crate painter is built at a valid size");
-        let viewport = Viewport::new(width, height).with_device_pixel_ratio(device_pixel_ratio);
-        Self::with_output(viewport, frame_size, Output::None)
+        Self::with_core(terminus::link::painter::Painter::without_output(
+            width,
+            height,
+            device_pixel_ratio,
+            LYNX_GESTURES,
+        ))
     }
 
     /// A painter attached to a view nobody serves, so a test can play that
@@ -1385,7 +292,7 @@ impl Painter {
             frame_demand: RefCell::default(),
             commands: crate::link::CommandSender::new(commands),
             metrics: watch::channel(Some(viewport)).0,
-            images: Rc::new(dom::NoImages),
+            images: Rc::new(terminus::link::NoImages),
             scroll: Arc::clone(&scroll),
         });
         let mut painter = Self::without_output(width, height, 1.0);
@@ -1442,7 +349,7 @@ impl Painter {
         &mut self,
         view: &LynxView<F>,
     ) -> Result<(), EngineError> {
-        if self.render_failed {
+        if self.core.has_failed() {
             return Err(EngineError::Render(
                 "the painter's draw target failed".to_owned(),
             ));
@@ -1474,8 +381,8 @@ impl Painter {
         self.seat = Rc::downgrade(view.seat());
         self.frames = Some(frames);
         self.forget_view();
-        self.forget_target();
-        self.clock.rebase(view.timeline_epoch());
+        self.core.forget_target();
+        self.core.rebase_clock(view.timeline_epoch());
         self.bind_metrics();
         self.refresh();
         Ok(())
@@ -1491,7 +398,7 @@ impl Painter {
     /// painter went keeps the last metrics and never parks again.
     fn bind_metrics(&self) {
         if let Some(seat) = self.seat.upgrade() {
-            seat.metrics.send_replace(Some(self.viewport));
+            seat.metrics.send_replace(Some(self.core.viewport()));
         }
     }
 
@@ -1522,40 +429,23 @@ impl Painter {
     /// nothing further and refuses to attach.
     #[must_use]
     pub const fn has_failed(&self) -> bool {
-        self.render_failed
+        self.core.has_failed()
     }
 
     /// Drops everything derived from a view: what it published, where it was
     /// scrolled to, the gesture in progress, and the pixels resolved out of its
     /// host's store.
     ///
-    /// Not what the target holds — that is [`Self::forget_target`], and it
-    /// survives a detach, because so do the pixels on screen.
+    /// Not what the target holds — that is the presenting painter's
+    /// `forget_target`, and it survives a detach, because so do the pixels on
+    /// screen.
     ///
     /// What the intents had not published yet is dropped with them: nothing
     /// on main acts on a container coming to rest yet (a `scrollend` on
     /// detach is the scroll events' to decide).
     fn forget_view(&mut self) {
         self.published = Published::default();
-        self.scroll_intents = ScrollIntents::default();
-        self.gesture = GestureRouter::default();
-        self.images.forget();
-    }
-
-    /// Drops what the draw target holds: the key it was rendered from, and —
-    /// for an offscreen target, whose texture is the only copy of that frame —
-    /// the frame itself.
-    ///
-    /// One caller: pointing this painter at a different document. Commit ids
-    /// restart at one per document, so a key kept across the change would
-    /// answer the new page's first frame with the old page's work — which is
-    /// also why `Output::forget` gives up the target's `filter: blur()` bake
-    /// cache, keyed the same way.
-    fn forget_target(&mut self) {
-        self.composed = None;
-        self.composed_filters.clear();
-        self.composed_vectors.clear();
-        self.output.forget();
+        self.core.forget_view();
     }
 
     /// Adopts whatever the attached view has published since the last look —
@@ -1595,24 +485,13 @@ impl Painter {
         // out of the view's store through the same handle whose loss means the
         // view is gone, so the two can never disagree.
         let seat = self.seat.upgrade();
-        if latest.commit() != self.published.commit() {
-            if let Some(frame) = latest.frame.as_ref()
-                && !self.images.holds(frame.commit_id())
-            {
-                let Some(seat) = seat.as_ref() else {
-                    // The view is gone with its store, so this commit's pixels
-                    // can no longer be read. It is not adopted; the painter
-                    // keeps the last commit it did read, whole.
-                    self.release_seat();
-                    return;
-                };
-                self.images.resolve(frame, seat.images.as_ref());
-            }
-            // While the outgoing frame's snap positions can still be read.
-            if let Some(outgoing) = self.published.frame.as_deref() {
-                self.scroll_intents.leave(outgoing);
-            }
-            self.redraw_pending.set(true);
+        let store = seat.as_ref().map(|seat| seat.images.as_ref());
+        if !self.core.adopt(latest.frame.clone(), store) {
+            // The view is gone with its store, so this commit's pixels can no
+            // longer be read. It is not adopted; the painter keeps the last
+            // commit it did read, whole.
+            self.release_seat();
+            return;
         }
         self.published = latest;
         // Losing the view's seat is the view being released, which is the one
@@ -1652,16 +531,14 @@ impl Painter {
     /// nothing to post.
     fn publish_scroll(&mut self, now: f64, frame: Option<FramePost>) {
         let Some(seat) = self.seat.upgrade() else {
-            self.scroll_intents.changed.clear();
+            self.core.discard_changed();
             return;
         };
         seat.scroll.set_clock(now);
-        if self.scroll_intents.changed.is_empty() && frame.is_none() {
+        if !self.core.scroll_changed() && frame.is_none() {
             return;
         }
-        let entries = self
-            .scroll_intents
-            .drain_changed(self.published.frame.as_deref(), now);
+        let entries = self.core.drain_changed(now);
         if seat.scroll.post(entries, frame) {
             let _ = seat.commands.send(ToMain::Posted);
         }
@@ -1669,7 +546,18 @@ impl Painter {
 
     /// The newest committed frame this painter has adopted.
     fn frame(&self) -> Option<&Arc<CommittedFrame>> {
-        self.published.frame.as_ref()
+        self.core.frame()
+    }
+
+    /// Whether the attached view's scripts asked for a display frame
+    /// (`requestAnimationFrame` on any of its realms). The presenting painter
+    /// asks it only when the adopted frame's own animations do not already
+    /// answer, the order [`Self::is_animating`]'s terms have always had —
+    /// answering it sweeps the workers that have gone.
+    fn frame_demand_pending(&self) -> bool {
+        self.seat
+            .upgrade()
+            .is_some_and(|seat| seat.frame_demand.borrow_mut().is_pending())
     }
 
     /// Whether the engine owes the timeline another frame, as of the last
@@ -1679,17 +567,7 @@ impl Painter {
     /// A detached painter owes nothing: there is no timeline to be behind.
     #[must_use]
     pub fn is_animating(&self) -> bool {
-        self.is_attached()
-            && (self.frame().is_some_and(|frame| frame.animations_active())
-                || self
-                    .seat
-                    .upgrade()
-                    .is_some_and(|seat| seat.frame_demand.borrow_mut().is_pending())
-                || self.gesture.needs_frame()
-                || self.scroll_intents.is_animating()
-                || self
-                    .frame()
-                    .is_some_and(|frame| self.scroll_intents.is_auto_scrolling(frame)))
+        self.is_attached() && self.core.is_animating(|| self.frame_demand_pending())
     }
 
     /// Routes one normalized OS input event against the frame this painter
@@ -1707,35 +585,20 @@ impl Painter {
             return;
         }
         self.poll_link();
-        let at = self.clock.now_seconds();
-        // A key moves no scroll and is not routed by position: it is named
-        // and sent, and nothing of the pointer pipeline runs for it.
-        if matches!(event.kind, InputKind::Key { .. }) {
-            let mut decisions = InputDecisions::new();
-            self.gesture
-                .on_input(&event, None, at, &self.published, &mut decisions);
-            self.execute_decisions(&mut decisions, None, at);
-            return;
-        }
-        let published = self.frame().cloned();
-        if let Some(frame) = &published {
-            self.scroll_intents.rebase(frame, at);
-        }
-        let generation = self.scroll_intents.generation;
-        let frame = published.as_deref();
-        let animation_now = frame.and_then(|frame| frame.has_exported_curves().then_some(at));
-        let target = route_published(frame, &self.scroll_intents, &event, animation_now);
-        let mut decisions = InputDecisions::new();
-        self.gesture
-            .on_input(&event, target, at, &self.published, &mut decisions);
-        self.execute_decisions(&mut decisions, published.as_deref(), at);
-        self.publish_scroll(at, None);
-        if self.gesture.needs_frame() || self.scroll_intents.generation != generation {
-            self.refresh();
+        let mut emits = Vec::new();
+        let at = self.core.route_input(&event, &self.published, &mut emits);
+        self.send_events(emits, at);
+        // A key moves no scroll: its pass has no scroll state of its own to
+        // post.
+        if !matches!(event.kind, InputKind::Key { .. }) {
+            self.publish_scroll(at, None);
         }
     }
 
-    /// Executes one pass's decisions in order.
+    /// Sends the events one pass decided, in order, to the view: each as a
+    /// [`ToMain::DispatchEvent`], and only those the view has a listener for
+    /// anywhere — the painter's replica of the listener names, as of this
+    /// pass.
     ///
     /// `at_seconds` is the clock reading of the pass that produced them — an
     /// input event's arrival, or the tick's own `now` — and is what every
@@ -1743,50 +606,9 @@ impl Painter {
     /// reading for the whole pass, so a due `longpress` flushed ahead of the
     /// event that found it and the `tap` synthesized after it are stamped
     /// with that event's arrival, which is the moment they all belong to.
-    pub(super) fn execute_decisions(
-        &mut self,
-        decisions: &mut InputDecisions,
-        published: Option<&CommittedFrame>,
-        at_seconds: f64,
-    ) {
-        let mut dispatches = Vec::new();
-        {
-            let Self {
-                gesture,
-                scroll_intents,
-                ..
-            } = &mut *self;
-            for decision in decisions.drain(..) {
-                match decision {
-                    InputDecision::Scroll {
-                        pointer,
-                        from,
-                        delta,
-                    } => {
-                        let motion = match pointer {
-                            Some(_) => Motion::Drag,
-                            None => Motion::Wheel,
-                        };
-                        let consumed = published.is_some_and(|frame| {
-                            scroll_intents
-                                .chain(frame, from, delta, motion, pointer, at_seconds)
-                                .consumed()
-                        });
-                        if consumed && let Some(pointer) = pointer {
-                            gesture.note_scroll_consumed(pointer);
-                        }
-                    }
-                    InputDecision::ScrollEnd { pointer } => {
-                        if let Some(frame) = published {
-                            scroll_intents.end_drag(frame, pointer, at_seconds);
-                        }
-                    }
-                    InputDecision::Emit(event) => dispatches.push(event),
-                }
-            }
-        }
+    fn send_events(&mut self, emits: Vec<EmitEvent>, at_seconds: f64) {
         let timestamp = at_seconds * 1000.0;
-        for event in dispatches {
+        for event in emits {
             if !self.published.listeners.contains(event.name) {
                 continue;
             }
@@ -1805,6 +627,22 @@ impl Painter {
         }
     }
 
+    /// Executes one pass's decisions in order: the presenting painter applies
+    /// the scrolls, and the events they decided are sent
+    /// ([`Self::send_events`]).
+    #[cfg(test)]
+    pub(super) fn execute_decisions(
+        &mut self,
+        decisions: &mut InputDecisions,
+        published: Option<&CommittedFrame>,
+        at_seconds: f64,
+    ) {
+        let mut emits = Vec::new();
+        self.core
+            .apply_decisions(decisions, published, at_seconds, &mut emits);
+        self.send_events(emits, at_seconds);
+    }
+
     pub(super) fn service_gesture_clock(&mut self, now: f64) {
         self.poll_link();
         self.tick_gestures(now);
@@ -1815,15 +653,12 @@ impl Painter {
     /// while it holds a swap-chain image, and [`Self::poll_link`] may block
     /// on a store restoring an evicted bitmap.
     fn tick_gestures(&mut self, now: f64) {
-        let published = self.frame().cloned();
-        let mut decisions = InputDecisions::new();
-        self.gesture.on_tick(now, &self.published, &mut decisions);
-        self.execute_decisions(&mut decisions, published.as_deref(), now);
+        let mut emits = Vec::new();
+        self.core.tick_gestures(now, &self.published, &mut emits);
+        self.send_events(emits, now);
         // The flings and bounce backs advance on the same clock reading,
         // after any decision this tick made about them.
-        if let Some(frame) = &published {
-            self.scroll_intents.tick(frame, now);
-        }
+        self.core.tick_scroll(now);
     }
 
     /// Applies new device metrics, if they moved at all.
@@ -1844,26 +679,19 @@ impl Painter {
         height: f32,
         device_pixel_ratio: f32,
     ) -> Result<(), EngineError> {
-        let next_size = FrameSize::for_viewport(width, height, device_pixel_ratio)?;
-        let moved = self.viewport.width.to_bits() != width.to_bits()
-            || self.viewport.height.to_bits() != height.to_bits()
-            || self.viewport.device_pixel_ratio.to_bits() != device_pixel_ratio.to_bits();
-        if !moved {
-            return Ok(());
+        if self.core.resize(width, height, device_pixel_ratio)? {
+            // A detached painter has no seat to write, so it only records the
+            // new metrics and imposes them on whichever view it attaches to
+            // next.
+            self.bind_metrics();
         }
-        self.viewport = Viewport::new(width, height).with_device_pixel_ratio(device_pixel_ratio);
-        self.frame_size = next_size;
-        // A detached painter has no seat to write, so it only records the new
-        // metrics and imposes them on whichever view it attaches to next.
-        self.bind_metrics();
-        self.refresh();
         Ok(())
     }
 
     /// The physical pixel size of this painter's draw target.
     #[must_use]
     pub const fn frame_size(&self) -> FrameSize {
-        self.frame_size
+        self.core.frame_size()
     }
 
     /// Asks for a frame nothing else would have asked for.
@@ -1872,20 +700,13 @@ impl Painter {
     /// host is already making, so the turn that host is in is the turn that
     /// answers it.
     pub fn refresh(&self) {
-        self.redraw_pending.set(true);
-    }
-
-    fn take_redraw(&self) -> bool {
-        self.redraw_pending.replace(false)
+        self.core.refresh();
     }
 
     /// Reports whether the window is visible. A window nobody can see draws
     /// nothing, and un-occluding asks again for the frame that was held back.
     pub fn set_occluded(&mut self, occluded: bool) {
-        self.occluded = occluded;
-        if !occluded {
-            self.refresh();
-        }
+        self.core.set_occluded(occluded);
     }
 
     /// Runs one painter turn: adopt whatever the view published, and draw the
@@ -1903,24 +724,21 @@ impl Painter {
     /// this answers `Ok` and draws nothing.
     pub fn pump(&mut self) -> Result<(), EngineError> {
         self.poll_link();
-        if self.render_failed {
+        if self.core.has_failed() {
             return Ok(());
         }
-        match self.draw() {
-            Ok(()) => Ok(()),
-            Err(error) => {
-                self.render_failed = true;
-                Err(error)
-            }
-        }
+        // A draw that fails marks the target failed itself
+        // (`terminus::link::painter::Painter::has_failed`), so this is reported
+        // once.
+        self.draw()
     }
 
     /// Deliver an actual display vsync reported by the host. Pending requests
     /// participate in `owes_frame`; ordinary pumps and repaints deliver no rAF.
     pub fn vsync(&mut self) {
         self.poll_link();
-        if !self.render_failed && !self.occluded {
-            self.deliver_vsync(self.clock.now_seconds());
+        if !self.core.has_failed() && !self.core.is_occluded() {
+            self.deliver_vsync(self.core.now_seconds());
         }
     }
 
@@ -1966,113 +784,30 @@ impl Painter {
         post.map(|post| post.seq)
     }
 
-    /// Composes `frame` at `key` and renders it into the draw target,
-    /// answering whether it rendered anything.
-    ///
-    /// The one path from a published frame to pixels, whatever the target and
-    /// whoever asked: a window's draw, an offscreen tick, and a capture of
-    /// either. The caller passes the frame it derived `key` and `animation_now`
-    /// from, so what the record names and what the target holds cannot disagree.
-    ///
-    /// # Errors
-    ///
-    /// [`EngineError::Render`] or [`EngineError::Gpu`] if the target refuses
-    /// the scene, in which case it holds nothing: a failed render is allowed to
-    /// have dropped what was there.
-    fn render_frame(
-        &mut self,
-        frame: &CommittedFrame,
-        key: ComposeKey,
-        animation_now: Option<f64>,
-        force: bool,
-    ) -> Result<bool, EngineError> {
-        let size = self.frame_size;
-        if self.composed == Some((key, size)) && !force && animation_now.is_none() {
-            return Ok(false);
-        }
-        let Self {
-            output,
-            composed_scene,
-            composed_filters,
-            composed_vectors,
-            scroll_intents,
-            images,
-            ..
-        } = &mut *self;
-        let rendered = compose_and_render(
-            output,
-            composed_scene,
-            composed_filters,
-            composed_vectors,
-            scroll_intents,
-            frame,
-            images.resolved(),
-            size,
-            animation_now,
-        );
-        match rendered {
-            Ok(()) => {
-                self.composed = Some((key, size));
-                Ok(true)
-            }
-            Err(error) => {
-                self.composed = None;
-                Err(error)
-            }
-        }
-    }
-
+    /// One window frame: the swap-chain image first, then the gesture clock,
+    /// the scroll rebase and the frame post at the frame's own clock reading,
+    /// then the compose, render and present.
     fn draw(&mut self) -> Result<(), EngineError> {
-        if !matches!(self.output, Output::Window(_)) || self.occluded {
+        if !self.core.presents_to_window() || self.core.is_occluded() {
             return Ok(());
         }
-        if !self.take_redraw() && !self.is_animating() {
+        if !self.core.take_redraw() && !self.is_animating() {
             return Ok(());
         }
-        // Nothing has been committed yet, so there is nothing to put on the
-        // window. Acquiring an image for it would wait on vsync natively and,
-        // in a browser, present an untouched one — blanking whatever the
-        // previous page left on the canvas. The redraw this consumed comes
-        // back when the first commit arrives, which is a change of commit and
-        // so asks for one itself.
-        let Some(frame) = self.frame().cloned() else {
+        // Nothing committed yet, or no image this frame: the presenting
+        // painter keeps the frame owed, and the host takes it at its next
+        // display frame like any other.
+        let Some(window_frame) = self.core.begin_draw()? else {
             return Ok(());
         };
-        let size = self.frame_size;
-        let acquired = {
-            let Output::Window(graphics) = &mut self.output else {
-                unreachable!("the window output was just checked");
-            };
-            match graphics.acquire(size)? {
-                FrameAcquisition::Ready(acquired) => acquired,
-                // No image this frame, and no vsync was waited on to find
-                // that out. The frame stays owed and the host takes it at its
-                // next display frame, like any other — which is what keeps an
-                // empty swap chain from spinning: nothing here asks to come
-                // straight back.
-                FrameAcquisition::Retry => {
-                    self.refresh();
-                    return Ok(());
-                }
-            }
-        };
-        let now = self.clock.now_seconds();
+        let now = window_frame.now();
         self.tick_gestures(now);
         // Before the post, so a commit adopted this turn cannot re-snap an
         // offset after its state went out. The post is the pass's last
         // publish: nothing below moves an offset.
-        self.scroll_intents.rebase(&frame, now);
+        self.core.rebase_scroll(now);
         let _ = self.begin_frame(now, false);
-        let key: ComposeKey = (frame.commit_id(), self.scroll_intents.generation);
-        let animation_now = frame.has_live_curves().then_some(now);
-        self.render_frame(&frame, key, animation_now, false)?;
-        // Presented whether or not this turn rendered: a surface that was
-        // invalidated or re-exposed puts the retained frame up again with a
-        // blit alone.
-        let Output::Window(graphics) = &mut self.output else {
-            unreachable!("the window output was just checked");
-        };
-        graphics.present(acquired);
+        self.core.finish_draw(window_frame)?;
         Ok(())
     }
 
@@ -2089,41 +824,21 @@ impl Painter {
     /// up to the newest frame, or the read itself, fails.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn capture(&mut self) -> Result<Screenshot, EngineError> {
-        // Refused before anything is composed, so a painter with no target says
+        // Refused before anything is polled, so a painter with no target says
         // so rather than reporting the empty target a compose would leave.
         #[cfg(test)]
-        if matches!(self.output, Output::None) {
+        if !self.core.has_target() {
             return Err(EngineError::Render(
                 "this painter has no draw target to capture".to_owned(),
             ));
         }
-        let size = self.frame_size;
-        let now = self.clock.now_seconds();
+        let now = self.core.now_seconds();
         self.poll_link();
         // The newest frame is brought to the target first, so a capture is of
         // what this painter would draw rather than of whatever it last drew.
-        if let Some(frame) = self.frame().cloned() {
-            let key: ComposeKey = (frame.commit_id(), self.scroll_intents.generation);
-            let animation_now = frame.has_live_curves().then_some(now);
-            self.render_frame(&frame, key, animation_now, false)?;
-        }
-        // Read back only what the record names at the size being read: a
-        // record at another size is not this capture's pixels.
-        if !self.composed.is_some_and(|(_, rendered)| rendered == size) {
-            return Err(EngineError::Render(
-                "no frame has been rendered to capture".to_owned(),
-            ));
-        }
-        let pixels = match &mut self.output {
-            #[cfg(test)]
-            Output::None => unreachable!("a painter with no target was refused above"),
-            Output::Offscreen(gpu) => gpu
-                .read_pixels()
-                .map_err(|error| EngineError::Gpu(error.to_string()))?,
-            Output::Window(graphics) => graphics.capture_frame(size)?,
-        };
-        Ok(Screenshot { size, pixels })
+        Ok(self.core.capture(now)?)
     }
+
     /// Whether this painter has a frame to put on its window.
     ///
     /// A running animation, a swap chain that had no image to give, and a
@@ -2136,17 +851,10 @@ impl Painter {
     /// Always false for a window nobody can see, a target that failed, a
     /// painter observing no view, and one that presents to no window at all:
     /// an offscreen painter's frames are the host's to ask for through
-    /// [`Self::tick`].
+    /// [`Self::post_frame`].
     #[must_use]
     pub fn owes_frame(&self) -> bool {
-        if self.render_failed
-            || self.occluded
-            || !self.is_attached()
-            || !matches!(self.output, Output::Window(_))
-        {
-            return false;
-        }
-        self.is_animating() || self.redraw_pending.get()
+        self.is_attached() && self.core.owes_frame(|| self.frame_demand_pending())
     }
 
     /// The newest committed frame, for the seams outside this module that
@@ -2191,14 +899,12 @@ impl Painter {
     /// its frames come from [`Self::pump`], on the host's own clock, and it
     /// never waits for the view at all.
     pub fn post_frame(&mut self) -> Result<PostedFrame, EngineError> {
-        if !matches!(self.output, Output::Offscreen(_)) {
+        if !self.core.is_offscreen() {
             return Err(EngineError::NotOffscreen);
         }
-        let now = self.clock.now_seconds();
+        let now = self.core.now_seconds();
         self.service_gesture_clock(now);
-        if let Some(frame) = self.frame().cloned() {
-            self.scroll_intents.rebase(&frame, now);
-        }
+        self.core.rebase_scroll(now);
         self.deliver_vsync(now);
         let seq = self.begin_frame(now, true);
         Ok(PostedFrame { now, seq })
@@ -2240,33 +946,20 @@ impl Painter {
         reason = "a posted frame is drawn once, and taking it is what says so"
     )]
     pub fn draw_posted(&mut self, posted: PostedFrame, force: bool) -> Result<bool, EngineError> {
-        if !matches!(self.output, Output::Offscreen(_)) {
+        if !self.core.is_offscreen() {
             return Err(EngineError::NotOffscreen);
         }
         let PostedFrame { now, .. } = posted;
         self.poll_link();
-        let Some(frame) = self.frame().cloned() else {
+        if self.frame().is_none() {
             self.publish_scroll(now, None);
             return Ok(false);
-        };
+        }
         // The host's wait may have adopted a newer commit. What this rebase
         // changes is the pass's last publish; no send of the pass follows it.
-        self.scroll_intents.rebase(&frame, now);
+        self.core.rebase_scroll(now);
         self.publish_scroll(now, None);
-        let key: ComposeKey = (frame.commit_id(), self.scroll_intents.generation);
-        let animation_now = frame.has_live_curves().then_some(now);
-        let rendered = self.render_frame(&frame, key, animation_now, force)?;
-        if rendered {
-            // The submitted work is waited for here rather than in
-            // `Output::render`: a capture's readback polls the device itself,
-            // and this is the caller that asks for pixels nothing reads back.
-            let Output::Offscreen(gpu) = &self.output else {
-                unreachable!("the offscreen output was just checked");
-            };
-            gpu.wait_idle()
-                .map_err(|error| EngineError::Gpu(error.to_string()))?;
-        }
-        Ok(rendered)
+        Ok(self.core.draw_offscreen(now, force)?)
     }
 
     /// One whole offscreen frame with the wait in the middle blocked on, for
@@ -2322,5 +1015,42 @@ impl Painter {
         // still serviced it.
         self.poll_link();
         self.published.begin_frame_serviced >= seq
+    }
+}
+
+/// The presenting painter's insides, for the tests that pin its clock, drive
+/// its intents by hand, or read its router.
+#[cfg(test)]
+impl Painter {
+    pub(crate) fn clock_mut(&mut self) -> &mut FrameClock {
+        self.core.clock_mut()
+    }
+
+    pub(crate) fn now_seconds(&self) -> f64 {
+        self.core.now_seconds()
+    }
+
+    pub(crate) fn scroll_intents(&self) -> &ScrollIntents {
+        self.core.scroll_intents()
+    }
+
+    pub(crate) fn scroll_intents_mut(&mut self) -> &mut ScrollIntents {
+        self.core.scroll_intents_mut()
+    }
+
+    pub(crate) fn gesture(&self) -> &GestureRouter {
+        self.core.gesture()
+    }
+
+    pub(crate) fn take_redraw(&self) -> bool {
+        self.core.take_redraw()
+    }
+
+    pub(crate) fn redraw_pending(&self) -> bool {
+        self.core.redraw_pending()
+    }
+
+    pub(crate) fn set_frame_size(&mut self, size: FrameSize) {
+        self.core.set_frame_size(size);
     }
 }
