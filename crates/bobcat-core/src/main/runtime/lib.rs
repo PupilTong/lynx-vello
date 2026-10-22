@@ -152,25 +152,20 @@ const MODIFIER_CTRL: u8 = 2;
 const MODIFIER_META: u8 = 4;
 const MODIFIER_SHIFT: u8 = 8;
 
-/// One value of the extras channel: what a Lynx handler reads beside a W3C
+/// One dispatch's extras: names, each with its value. Empty for nearly
+/// every event.
+///
+/// The extras channel carries what a Lynx handler reads beside a W3C
 /// event's own payload, when it is cheap to compute here (a `load`'s size,
 /// a `scroll`'s metrics, an `x-input`'s `value`). The kernel's events stay
 /// W3C-shaped ([`EventDetail`]); the realm's Lynx layer turns a dispatch's
-/// extras into the Lynx `detail`.
-///
-/// `Str` borrows a component's string for the length of the dispatch: a
-/// [`ComponentDetail`]'s url, content or content id, or a text field's
-/// value.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) enum Extra<'a> {
-    Number(f64),
-    Bool(bool),
-    Str(&'a str),
-}
-
-/// One dispatch's extras: names, each with its value. Empty for nearly
-/// every event.
-type Extras<'a> = &'a [(&'static str, Extra<'a>)];
+/// extras into the Lynx `detail`, reading one primitive per key: only a
+/// [`HostArgument::Number`], a [`HostArgument::Boolean`] or a
+/// [`HostArgument::String`] crosses here, never a structured clone,
+/// `undefined` or `null`. A string borrows a component's for the length of
+/// the dispatch: a [`ComponentDetail`]'s url, content or content id, or a
+/// text field's value.
+type Extras<'a> = &'a [(&'static str, HostArgument<'a>)];
 
 /// Appends a [`ComponentDetail`] as extras, one per key of the Lynx
 /// `detail`, under the keys and in the member order web-core's details
@@ -187,11 +182,14 @@ type Extras<'a> = &'a [(&'static str, Extra<'a>)];
 /// they are, in its order.
 fn push_detail_extras<'a>(
     detail: &'a ComponentDetail,
-    extras: &mut SmallVec<[(&'static str, Extra<'a>); 7]>,
+    extras: &mut SmallVec<[(&'static str, HostArgument<'a>); 7]>,
 ) {
-    let unit = |offset: u32| Extra::Number(f64::from(offset));
-    let optional =
-        |key, value: &'a Option<String>| value.as_deref().map(|value| (key, Extra::Str(value)));
+    let unit = |offset: u32| HostArgument::Number(f64::from(offset));
+    let optional = |key, value: &'a Option<String>| {
+        value
+            .as_deref()
+            .map(|value| (key, HostArgument::String(value)))
+    };
     match detail {
         ComponentDetail::Id { id } => extras.extend(optional("id", id)),
         ComponentDetail::UrlContent {
@@ -199,14 +197,17 @@ fn push_detail_extras<'a>(
             content,
             content_id,
         } => {
-            extras.extend([("url", Extra::Str(url)), ("content", Extra::Str(content))]);
+            extras.extend([
+                ("url", HostArgument::String(url)),
+                ("content", HostArgument::String(content)),
+            ]);
             extras.extend(optional("contentId", content_id));
         }
         ComponentDetail::Url { url, content_id } => {
-            extras.push(("url", Extra::Str(url)));
+            extras.push(("url", HostArgument::String(url)));
             extras.extend(optional("contentId", content_id));
         }
-        ComponentDetail::Value { value } => extras.push(("value", Extra::Str(value))),
+        ComponentDetail::Value { value } => extras.push(("value", HostArgument::String(value))),
         ComponentDetail::Input {
             value,
             selection,
@@ -219,10 +220,10 @@ fn push_detail_extras<'a>(
             )]
             let length = length as f64;
             extras.extend([
-                ("value", Extra::Str(value)),
-                ("textLength", Extra::Number(length)),
+                ("value", HostArgument::String(value)),
+                ("textLength", HostArgument::Number(length)),
                 ("cursor", unit(selection.start)),
-                ("isComposing", Extra::Bool(*is_composing)),
+                ("isComposing", HostArgument::Boolean(*is_composing)),
                 ("selectionStart", unit(selection.start)),
                 ("selectionEnd", unit(selection.end)),
             ]);
@@ -234,23 +235,22 @@ fn push_detail_extras<'a>(
         ComponentDetail::Fields(fields) => {
             extras.extend(fields.iter().map(|&(key, field)| {
                 let value = match field {
-                    Field::Number(number) => Extra::Number(number),
-                    Field::Bool(flag) => Extra::Bool(flag),
+                    Field::Number(number) => HostArgument::Number(number),
+                    Field::Bool(flag) => HostArgument::Boolean(flag),
                 };
                 (key, value)
             }));
         }
         ComponentDetail::TextSelection { range, forward } => {
-            let (start, end) = range
-                .as_ref()
-                .map_or((Extra::Number(-1.0), Extra::Number(-1.0)), |range| {
-                    (unit(range.start), unit(range.end))
-                });
+            let (start, end) = range.as_ref().map_or(
+                (HostArgument::Number(-1.0), HostArgument::Number(-1.0)),
+                |range| (unit(range.start), unit(range.end)),
+            );
             let direction = if *forward { "forward" } else { "backward" };
             extras.extend([
                 ("start", start),
                 ("end", end),
-                ("direction", Extra::Str(direction)),
+                ("direction", HostArgument::String(direction)),
             ]);
         }
     }
@@ -285,7 +285,7 @@ fn push_text_layout_extras<'a>(
     lines: &'a str,
     width: f32,
     height: f32,
-    extras: &mut SmallVec<[(&'static str, Extra<'a>); 7]>,
+    extras: &mut SmallVec<[(&'static str, HostArgument<'a>); 7]>,
 ) {
     #[expect(
         clippy::cast_precision_loss,
@@ -293,18 +293,19 @@ fn push_text_layout_extras<'a>(
     )]
     let count = line_count as f64;
     extras.extend([
-        ("lineCount", Extra::Number(count)),
-        ("lines", Extra::Str(lines)),
-        ("width", Extra::Number(f64::from(width))),
-        ("height", Extra::Number(f64::from(height))),
+        ("lineCount", HostArgument::Number(count)),
+        ("lines", HostArgument::String(lines)),
+        ("width", HostArgument::Number(f64::from(width))),
+        ("height", HostArgument::Number(f64::from(height))),
     ]);
 }
 
 /// Inline arguments for one dispatch, in call order: the name, `bubbles`,
 /// the timestamp and the step count; two node ids per step; the extras
 /// count; an input event's discriminator and eight detail numbers. That is
-/// 31 for a position event over the eight steps [`EncodedPath`] keeps
-/// inline; extras, touch points and longer paths spill.
+/// 31 for a position event over eight steps; extras, touch points and
+/// longer paths spill. Encoded once per dispatch ([`encode_call`]) and lent
+/// to every realm it calls.
 type Arguments<'a> = SmallVec<[HostArgument<'a>; 32]>;
 
 /// The registrants a dispatch of `name` over `steps` invites, as the
@@ -348,7 +349,7 @@ impl Invited {
 /// they are called, which is the order of `registrants`: each one
 /// [`Invited`]. Every one is called at the path's top step — a path always
 /// has one capture step, its target's own — and handed the same
-/// [`EncodedPath`]. See [`MainThreadRuntime::dispatch`].
+/// [`Arguments`]. See [`MainThreadRuntime::dispatch`].
 ///
 /// Decided while the document is borrowed and before the walk takes a step,
 /// so they are read against the tree the path was computed over; the
@@ -364,32 +365,69 @@ fn realm_calls(
     (calls, invited)
 }
 
-/// The path every realm a dispatch calls is handed ([`encode_path`]): each
-/// step's node and the target that step sees, which cross as two packed ids
-/// per step ([`packed_node_id`]).
-type EncodedPath = SmallVec<[(terminus::link::NodeId, terminus::link::NodeId); 8]>;
+/// One realm call's arguments for a dispatch, which every realm it calls
+/// is lent: the name, `bubbles` and the timestamp, the path
+/// ([`encode_path`]), the extras ([`encode_extras`]) and the detail
+/// ([`encode_detail`]), last because a touch event's points make it the
+/// one part of variable length besides the extras before it.
+///
+/// Nothing here is read from the tree but the path, and that only at the
+/// path's top step, where every realm is called, so one encoding is the
+/// list every call of the dispatch would have built for itself.
+fn encode_call<'a>(
+    document: &LynxDocument,
+    steps: &terminus::link::event::EventSteps,
+    name: &'a str,
+    bubbles: bool,
+    timestamp: f64,
+    extras: Extras<'a>,
+    detail: &'a EventDetail,
+) -> Arguments<'a> {
+    let mut arguments = Arguments::new();
+    arguments.push(HostArgument::String(name));
+    arguments.push(HostArgument::Boolean(bubbles));
+    arguments.push(HostArgument::Number(timestamp));
+    encode_path(document, steps, &mut arguments);
+    encode_extras(extras, &mut arguments);
+    encode_detail(detail, &mut arguments);
+    arguments
+}
 
-/// The one encoding of a dispatch's path: the capture steps read backwards
-/// — the path, target first, whatever `bubbles` cut from the bubble pass —
-/// less every step whose node or target is no longer live and every step at
-/// a shadow root, which no realm can hold a handle for. Nothing is filtered
-/// by tree: a realm is handed nodes it holds no handle for (another realm's,
-/// a UA component's shadow content) and skips them. A `NodeId` names one
-/// node for the life of the document, so liveness is one lookup per id.
-fn encode_path(document: &LynxDocument, steps: &terminus::link::event::EventSteps) -> EncodedPath {
-    steps
-        .steps()
-        .iter()
-        .rev()
-        .filter(|step| {
-            step.capture
-                && document
-                    .get(step.node)
-                    .is_some_and(|node| !node.is_shadow_root())
-                && document.get(step.target).is_some()
-        })
-        .map(|step| (step.node, step.target))
-        .collect()
+/// The one encoding of a dispatch's path, appended as the step count and
+/// then two packed ids per step ([`packed_node_id`]), the step's node and
+/// the target that step sees: the capture steps read backwards — the path,
+/// target first, whatever `bubbles` cut from the bubble pass — less every
+/// step whose node or target is no longer live and every step at a shadow
+/// root, which no realm can hold a handle for. Nothing is filtered by tree:
+/// a realm is handed nodes it holds no handle for (another realm's, a UA
+/// component's shadow content) and skips them. A `NodeId` names one node for
+/// the life of the document, so liveness is one lookup per id.
+///
+/// The count leads but is known only once the filter has run, so it is
+/// written into the place kept for it, in the same one pass.
+fn encode_path(
+    document: &LynxDocument,
+    steps: &terminus::link::event::EventSteps,
+    arguments: &mut Arguments<'_>,
+) {
+    let count_at = arguments.len();
+    arguments.push(HostArgument::Number(0.0));
+    for step in steps.steps().iter().rev().filter(|step| {
+        step.capture
+            && document
+                .get(step.node)
+                .is_some_and(|node| !node.is_shadow_root())
+            && document.get(step.target).is_some()
+    }) {
+        arguments.push(HostArgument::Number(packed_node_id(step.node)));
+        arguments.push(HostArgument::Number(packed_node_id(step.target)));
+    }
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a path's steps, far inside an f64's integers"
+    )]
+    let count = ((arguments.len() - count_at - 1) / 2) as f64;
+    arguments[count_at] = HostArgument::Number(count);
 }
 
 /// Appends the extras channel: the count, then each name and its value.
@@ -399,13 +437,9 @@ fn encode_extras<'a>(extras: Extras<'a>, arguments: &mut Arguments<'a>) {
         reason = "a handful of extras, far inside an f64's integers"
     )]
     arguments.push(HostArgument::Number(extras.len() as f64));
-    for (name, value) in extras {
+    for &(name, value) in extras {
         arguments.push(HostArgument::String(name));
-        arguments.push(match *value {
-            Extra::Number(number) => HostArgument::Number(number),
-            Extra::Bool(flag) => HostArgument::Boolean(flag),
-            Extra::Str(text) => HostArgument::String(text),
-        });
+        arguments.push(value);
     }
 }
 
@@ -2651,7 +2685,7 @@ impl MainThreadRuntime {
         &mut self,
         node: terminus::link::NodeId,
         delta: terminus::link::Vector2D<f32>,
-        extras: &mut SmallVec<[(&'static str, Extra<'_>); 7]>,
+        extras: &mut SmallVec<[(&'static str, HostArgument<'_>); 7]>,
     ) {
         let scroll_box = self.slot.borrow_mut().document_mut().scroll_box(node);
         let (offset, size) = scroll_box.map_or_else(
@@ -2671,9 +2705,9 @@ impl MainThreadRuntime {
             ("deltaX", delta.x),
             ("deltaY", delta.y),
         ] {
-            extras.push((key, Extra::Number(f64::from(value))));
+            extras.push((key, HostArgument::Number(f64::from(value))));
         }
-        extras.push(("isDragging", Extra::Bool(false)));
+        extras.push(("isDragging", HostArgument::Boolean(false)));
     }
 
     /// Dispatches everything [`Self::apply_image_events`], the `image`,
@@ -2752,7 +2786,7 @@ impl MainThreadRuntime {
             // ([`push_text_layout_extras`]), written here, before the extras
             // that borrow it.
             let lines_text: String;
-            let mut extras: SmallVec<[(&'static str, Extra<'_>); 7]> = SmallVec::new();
+            let mut extras: SmallVec<[(&'static str, HostArgument<'_>); 7]> = SmallVec::new();
             let (target, name, composed) = match *event {
                 ComponentEvent::Image(terminus::link::ImageOutcome::Loaded {
                     node,
@@ -2772,8 +2806,8 @@ impl MainThreadRuntime {
                             (f64::from(width), f64::from(height))
                         }
                     };
-                    extras.push(("width", Extra::Number(width)));
-                    extras.push(("height", Extra::Number(height)));
+                    extras.push(("width", HostArgument::Number(width)));
+                    extras.push(("height", HostArgument::Number(height)));
                     (node, LOAD_EVENT, false)
                 }
                 ComponentEvent::Image(terminus::link::ImageOutcome::Failed { node }) => {
@@ -3034,8 +3068,9 @@ impl MainThreadRuntime {
     /// and `stopPropagation` end that realm's walk and nothing else, as
     /// web-core's do (user ruling, 2026-10-18).
     ///
-    /// **Each call** hands the realm the same path ([`encode_path`]), encoded
-    /// once, right before the first call: the standard's event path, the
+    /// **Each call** hands the realm the same argument list ([`encode_call`]),
+    /// encoded once, right before the first call. Its path ([`encode_path`])
+    /// is the standard's event path, the
     /// capture steps in target-first, root-last order, each with its
     /// shadow-retargeted target, less the steps whose node or target is no
     /// longer live and every shadow root, as the step count and then two
@@ -3195,10 +3230,15 @@ impl MainThreadRuntime {
                 continue;
             };
             // Encoded once, with the document borrowed for the encoding
-            // alone, and handed to every call.
-            let path = encode_path(
+            // alone, and lent to every call.
+            let arguments = encode_call(
                 self.slot.borrow().document.as_ref().expect(DOCUMENT_EXISTS),
                 &steps,
+                name,
+                bubbles,
+                timestamp,
+                extras,
+                detail,
             );
             // Who is still invited, read from the table as the calls before
             // left it: a realm no longer invited has nothing left to run. Read
@@ -3225,9 +3265,7 @@ impl MainThreadRuntime {
                     continue;
                 }
                 let defer = matches!(checkpoint, Checkpoint::Deferred(_));
-                match self.call_realm(
-                    js_runtime, key, &path, name, bubbles, timestamp, detail, extras, defer,
-                ) {
+                match self.call_realm(js_runtime, key, &arguments, defer) {
                     Ok(published) => called |= published,
                     Err(error) => failures.push(error),
                 }
@@ -3253,56 +3291,29 @@ impl MainThreadRuntime {
     }
 
     /// One realm's call in one dispatch: `__BobcatDispatchEvent(name,
-    /// bubbles, timestamp, stepCount, path…, extras…, detail…)` in the realm
-    /// whose registrations are filed under `key`
-    /// ([`RealmId::from_listener_key`]). A child already freed is not
-    /// called. With `defer`, the call has no checkpoint of its own
-    /// ([`Checkpoint::Deferred`]).
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "the dispatch's own arguments, which every call carries"
-    )]
+    /// bubbles, timestamp, stepCount, path…, extras…, detail…)`, the
+    /// dispatch's one [`encode_call`], in the realm whose registrations are
+    /// filed under `key` ([`RealmId::from_listener_key`]). A child already
+    /// freed is not called. With `defer`, the call has no checkpoint of its
+    /// own ([`Checkpoint::Deferred`]).
     fn call_realm(
         &mut self,
         js_runtime: &mut ScriptRuntime,
         key: ListenerKey,
-        path: &EncodedPath,
-        name: &str,
-        bubbles: bool,
-        timestamp: f64,
-        detail: &EventDetail,
-        extras: Extras<'_>,
+        arguments: &Arguments<'_>,
         defer: bool,
     ) -> Result<bool, MainThreadError> {
-        // The detail last, because a touch event's points make it the one
-        // part of variable length besides the extras before it.
-        let mut arguments = Arguments::new();
-        arguments.push(HostArgument::String(name));
-        arguments.push(HostArgument::Boolean(bubbles));
-        arguments.push(HostArgument::Number(timestamp));
-        #[expect(
-            clippy::cast_precision_loss,
-            reason = "a path's steps, far inside an f64's integers"
-        )]
-        arguments.push(HostArgument::Number(path.len() as f64));
-        for &(node, target) in path {
-            arguments.push(HostArgument::Number(packed_node_id(node)));
-            arguments.push(HostArgument::Number(packed_node_id(target)));
-        }
-        encode_extras(extras, &mut arguments);
-        encode_detail(detail, &mut arguments);
-
         let realm = RealmId::from_listener_key(key);
         let called = if defer {
             self.core.call_module_export_before_operation(
                 js_runtime,
                 realm,
                 Export::DispatchEvent,
-                &arguments,
+                arguments,
             )
         } else {
             self.core
-                .call_module_export(js_runtime, realm, Export::DispatchEvent, &arguments)
+                .call_module_export(js_runtime, realm, Export::DispatchEvent, arguments)
         };
         let Some(called) = called else {
             return Ok(false);
@@ -3527,9 +3538,9 @@ impl MainThreadRuntime {
                 continue;
             };
             let extras = [
-                ("exposureID", Extra::Str(id)),
-                ("exposureScene", Extra::Str(&change.scene)),
-                ("appeared", Extra::Bool(change.appeared)),
+                ("exposureID", HostArgument::String(id)),
+                ("exposureScene", HostArgument::String(&change.scene)),
+                ("appeared", HostArgument::Boolean(change.appeared)),
             ];
             if let Err(error) = self.dispatch_checkpointed(
                 js,
@@ -3648,10 +3659,10 @@ impl MainThreadRuntime {
                 )
             });
             let extras = [
-                ("left", Extra::Number(left)),
-                ("top", Extra::Number(top)),
-                ("width", Extra::Number(width)),
-                ("height", Extra::Number(height)),
+                ("left", HostArgument::Number(left)),
+                ("top", HostArgument::Number(top)),
+                ("width", HostArgument::Number(width)),
+                ("height", HostArgument::Number(height)),
             ];
             if let Err(error) = self.dispatch(
                 js,

@@ -10818,6 +10818,38 @@ fn whole_path_encoding(
         .collect()
 }
 
+/// The pairs [`encode_path`] writes after its step count, read back.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::float_cmp,
+    reason = "packed ids and a step count, exact in an f64"
+)]
+fn encoded_path(
+    document: &LynxDocument,
+    steps: &terminus::link::event::EventSteps,
+) -> Vec<(terminus::link::NodeId, terminus::link::NodeId)> {
+    let mut arguments = Arguments::new();
+    encode_path(document, steps, &mut arguments);
+    let numbers: Vec<f64> = arguments
+        .iter()
+        .map(|argument| match argument {
+            HostArgument::Number(number) => *number,
+            other => panic!("the path crosses as numbers: {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        numbers[0],
+        ((numbers.len() - 1) / 2) as f64,
+        "the step count"
+    );
+    numbers[1..]
+        .chunks(2)
+        .map(|pair| (node_id(pair[0] as u64), node_id(pair[1] as u64)))
+        .collect()
+}
+
 /// The one encoding every realm is handed is the page realm's call as it
 /// always was, for a target in the document tree and one in a detached
 /// tree: the whole path, called at its first step. For a target in a UA
@@ -10855,7 +10887,7 @@ fn the_page_realms_call_carries_exactly_the_path_it_always_did() {
     };
     let slot = elements.slot.borrow();
     let document = slot.document.as_ref().unwrap();
-    let encoded = |steps: &terminus::link::event::EventSteps| encode_path(document, steps).to_vec();
+    let encoded = |steps: &terminus::link::event::EventSteps| encoded_path(document, steps);
     for target in [inner, detached] {
         let steps = document.event_steps(target, true, true);
         let (calls, _) = realm_calls(document, &steps, "tap", std::iter::once(page_realm));
