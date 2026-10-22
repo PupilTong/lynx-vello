@@ -671,6 +671,35 @@ impl<T> Document<T> {
         (chain.end() == Some(ChainEnd::DocumentElement)).then(|| Rect::new(origin, size))
     }
 
+    /// Whether [`Self::bounding_client_rect`] answers a rect for `id`, without
+    /// computing one: the same tests — a styled element that generates a
+    /// box, laid out, its containing-block chain ending at the document
+    /// element — and none of the offset, sticky or anchor arithmetic, so no
+    /// scroll box is resolved for a scrolling ancestor. For a caller that
+    /// only asks whether an element is rendered.
+    #[must_use]
+    pub fn generates_rendered_box(&self, id: crate::tree::document::NodeId) -> bool {
+        let Some(node) = self.get(id) else {
+            return false;
+        };
+        if inline_flow::is_inline_box(node) {
+            return self.inline_box_client_rect(id).is_some();
+        }
+        let Some(style) = StyleView::try_of(node) else {
+            return false;
+        };
+        if matches!(
+            style.display_mode(),
+            DisplayMode::None | DisplayMode::Contents
+        ) || self.rounded_layout(id).is_none()
+        {
+            return false;
+        }
+        let mut chain = ContainingBlockChain::new(self, node, style.values());
+        for _step in &mut chain {}
+        chain.end() == Some(ChainEnd::DocumentElement)
+    }
+
     /// [`Self::bounding_client_rect`] of an inline box: its fragments'
     /// union, moved from the paragraph's content box to the viewport.
     fn inline_box_client_rect(&self, id: crate::tree::document::NodeId) -> Option<Rect<f32>> {

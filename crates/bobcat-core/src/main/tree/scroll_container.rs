@@ -335,12 +335,14 @@ pub(super) fn is_own_scroll(element: NodeId, event: &ElementEvent<'_>) -> bool {
 }
 
 /// `scroller`'s scroll geometry from the last completed layout, or `None`
-/// when it has no box ([`terminus::link::Document::bounding_client_rect`] is `None`:
-/// `display: none` itself or on an ancestor, or detached) or is no scroll
-/// container. Shared with `list` ([`super::list`]).
+/// when it has no box ([`terminus::link::Document::generates_rendered_box`] is
+/// false: `display: none` itself or on an ancestor, or detached) or is no
+/// scroll container. Shared with `list` ([`super::list`]).
 pub(super) fn rendered_scroll_box(document: &LynxDocument, scroller: NodeId) -> Option<ScrollBox> {
-    document.bounding_client_rect(scroller)?;
-    document.scroll_box(scroller)
+    document
+        .generates_rendered_box(scroller)
+        .then(|| document.scroll_box(scroller))
+        .flatten()
 }
 
 /// The snap position on `axis` nearest `offset`, as its index in

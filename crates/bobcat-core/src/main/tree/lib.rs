@@ -261,11 +261,13 @@ pub(super) fn element_child(document: &LynxDocument, parent: NodeId, index: f64)
 /// `parent`'s element children in tree order, a text node between two
 /// elements skipped; none when `parent` is not in the document. What
 /// [`element_child`] counts, and what `list`'s `scrollToPosition` searches
-/// for an `item-key` and its `getVisibleCells` filters for cells.
+/// for an `item-key` and its `getVisibleCells` filters for cells. Walked from
+/// the end too: `list`'s lower item-count zone takes its `count`th child from
+/// the end.
 pub(super) fn element_children(
     document: &LynxDocument,
     parent: NodeId,
-) -> impl Iterator<Item = NodeId> + '_ {
+) -> impl DoubleEndedIterator<Item = NodeId> + '_ {
     document
         .get(parent)
         .into_iter()

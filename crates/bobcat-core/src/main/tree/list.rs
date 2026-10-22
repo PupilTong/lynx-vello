@@ -447,9 +447,7 @@ fn zones(document: &LynxDocument, list: NodeId, scroll_box: &ScrollBox) -> Zones
             offset >= max - threshold_px(document, list, LOWER_THRESHOLD)
         }
         count => element_children(document, list)
-            .count()
-            .checked_sub(count)
-            .and_then(|index| element_children(document, list).nth(index))
+            .nth_back(count - 1)
             .is_some_and(|child| {
                 overlaps_scrollport(document, list, child, scroll_box, horizontal)
             }),
@@ -503,7 +501,9 @@ fn overlaps_scrollport(
 /// Whether `cell`, an element child of a list that has a box, generates one
 /// itself: its computed `display` is neither `none` (which the UA sheet
 /// gives every child that is no cell and no `wrapper`) nor `contents`.
-fn generates_box(document: &LynxDocument, cell: NodeId) -> bool {
+/// Shared with `refresh_view`, for a header or footer under its rendered
+/// `#container`.
+pub(super) fn generates_box(document: &LynxDocument, cell: NodeId) -> bool {
     document
         .get(cell)
         .and_then(terminus::link::Node::computed_style)
