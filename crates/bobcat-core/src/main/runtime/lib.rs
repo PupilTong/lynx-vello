@@ -813,6 +813,32 @@ impl Default for RealmStartup {
 /// binding is decided: the document is created at the create-time viewport
 /// and works at it until a painter writes the watch, and a flush before that
 /// holds its frame and parks.
+/// The deliveries one entry's [`MainThreadRuntime::settle_entry`] left
+/// owing, each of which the page posts as an entry of its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Deliveries(u8);
+
+impl Deliveries {
+    pub(crate) const NONE: Self = Self(0);
+    /// Resize observers have entries queued.
+    pub(crate) const RESIZE: Self = Self(1);
+    /// Intersection observers have entries queued, or exposure changes wait.
+    pub(crate) const INTERSECTION: Self = Self(1 << 1);
+    /// A `content-visibility: auto` skipping change is owed.
+    pub(crate) const CONTENT_VISIBILITY: Self = Self(1 << 2);
+    /// Component events are owed, and nothing is left uncommitted.
+    pub(crate) const COMPONENT_EVENTS: Self = Self(1 << 3);
+
+    const fn with(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    /// Whether every delivery `other` names is owed.
+    pub(crate) const fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+}
+
 struct DocumentSlot {
     /// What a `createDocument` builds from, taken by the first one that runs.
     ingredients: Option<DocumentIngredients>,
@@ -1735,6 +1761,178 @@ impl DocumentSlot {
         }
     }
 
+    /// Whether the document holds anything the last commit did not apply.
+    ///
+    /// After the epilogue's [`Self::commit_if_dirty`] this is `true` only
+    /// when that commit was skipped — a listed author sheet still
+    /// outstanding — and `false` with no document yet.
+    fn needs_render(&self) -> bool {
+        self.document
+            .as_ref()
+            .is_some_and(LynxDocument::needs_render)
+    }
+
+    /// Queues the `scroll` every instant scroll of this entry owes: a UI
+    /// method's `scrollTo`, `scrollBy` or `scrollIntoView`, a component's
+    /// own instant scroll, or the render's move to a new
+    /// `scroll-initial-target` (an `x-swiper`'s `current`, a `viewpager`'s
+    /// `select-index`). Asked by the page's epilogue after its commit, which
+    /// is where that last one happens, so it joins the component events
+    /// this entry produced; one length check when nothing scrolled. The
+    /// `scrollend` follows from the painter's post of the container at
+    /// rest.
+    fn queue_instant_scroll_events(&mut self) {
+        if self
+            .document
+            .as_ref()
+            .is_some_and(LynxDocument::has_instant_scrolls)
+        {
+            self.instant_scrolls();
+        }
+    }
+
+    /// Whether any producer has left a component event owing — the queue
+    /// [`MainThreadRuntime::dispatch_component_events`] drains, asked once
+    /// per entry.
+    ///
+    /// One `is_empty`, because nearly every entry's answer is no: an entry
+    /// during which no source settled and no dialog closed posts nothing. A
+    /// `load` handler that writes a `src` this document has already seen
+    /// settle gets its outcome at the bind, and a `close` handler can close
+    /// another dialog, so a delivery entry can leave the queue non-empty for
+    /// an entry of its own.
+    ///
+    /// Two flags of the document's count as well: focus events a UI method
+    /// left, and the document's selection having changed
+    /// ([`terminus::link::Document::has_pending_selectionchange`]), whose W3C
+    /// `selectionchange` that entry fires. Posting the entry is this
+    /// engine's form of the Selection API's "queue a task", so every change
+    /// before it runs owes one event.
+    fn has_component_events(&self) -> bool {
+        !self.component_events.is_empty()
+            || self.document.as_ref().is_some_and(|document| {
+                document.has_focus_events() || document.has_pending_selectionchange()
+            })
+    }
+
+    /// Whether the commits since the last delivery left any
+    /// `content-visibility: auto` skipping change owing — css-contain-2
+    /// §4.4's queue, asked once per entry.
+    ///
+    /// One `is_empty` on a `Vec`, because nearly every entry's answer is no:
+    /// a page whose `auto` boxes did not change state posts nothing.
+    fn has_pending_content_visibility_changes(&self) -> bool {
+        self.document
+            .as_ref()
+            .is_some_and(LynxDocument::has_pending_content_visibility_changes)
+    }
+
+    /// Runs the W3C "update intersection observations" steps
+    /// ([§3.2.10](https://w3c.github.io/IntersectionObserver/#update-intersection-observations-algo))
+    /// over the document's observers, and answers whether any of them has
+    /// entries queued afterwards — the page's cue to post a delivery.
+    ///
+    /// Asked once per entry, after its commit, and nearly always answered at
+    /// once: `terminus` runs nothing when there are no observers or nothing went
+    /// stale since the last update that ran — a frame built, an offset
+    /// moved, a target observed. It reads the last completed layout and the
+    /// live scroll offsets and runs no pass, so an entry whose scroll was
+    /// composed inside the encode window, and committed nothing, still
+    /// updates against the offset it adopted.
+    ///
+    /// Every entry it queues is stamped with `time`, the runtime's
+    /// [`MainThreadRuntime::timeline_milliseconds`]: the reading the latest
+    /// `vsync` or frame post handed this side, which is the
+    /// `DOMHighResTimeStamp` that frame's animation-frame callbacks were
+    /// called with and the one an image's `load` is stamped with. That is
+    /// HTML's order — the observations are updated in the same rendering
+    /// step as the callbacks, after them — so the entries' `time` compares
+    /// directly with every other time this side reports, and nothing takes a
+    /// second reading of the clock.
+    fn update_intersection_observations(&mut self, time: f64) -> bool {
+        self.document
+            .as_mut()
+            .is_some_and(|document| document.update_intersection_observations(time))
+    }
+
+    /// Whether exposure changes wait for a delivery entry — the page's
+    /// cue to post one even when no observer has entries queued: a
+    /// teardown, a `stopExposure` that sent records, or a freed element that
+    /// was exposed queues its change outside any update.
+    ///
+    /// One `is_empty`, because nearly every entry's answer is no.
+    fn has_pending_exposure(&self) -> bool {
+        self.exposure.has_changes()
+    }
+
+    /// Runs `terminus`'s resize-observation update — the spec's "gather active
+    /// observations" with the entries created
+    /// ([`terminus::link::Document::update_resize_observations`]) — and answers whether
+    /// it queued any entry: the page's cue to post the resize delivery.
+    ///
+    /// Asked once per entry, after its commit, and nearly always answered at
+    /// once: `terminus` runs nothing when there are no observers, when no layout
+    /// pass ran and nothing was observed since the last update that ran, or
+    /// before the document's first layout. It reads the last completed layout
+    /// and runs no pass.
+    fn update_resize_observations(&mut self) -> bool {
+        self.document
+            .as_mut()
+            .is_some_and(LynxDocument::update_resize_observations)
+    }
+
+    /// Whether any resize observer has entries queued — the page's cue to post
+    /// the resize delivery when the update itself queued nothing new, for
+    /// entries an earlier update left that no delivery has taken yet.
+    fn has_pending_resize_notifications(&self) -> bool {
+        self.document
+            .as_ref()
+            .is_some_and(LynxDocument::has_pending_resize_notifications)
+    }
+
+    /// Queues the `layout` event of every reporting `text` whose paragraph a
+    /// committing layout run recomputed since the last call
+    /// ([`terminus::link::Document::take_text_layout_reports`]), with the lines and the
+    /// content box that commit left ([`ComponentEvent::TextLayout`]), in the
+    /// order the runs first reached them. Asked by the page's epilogue after
+    /// its commit, so the events join the component events the same entry
+    /// posts; one `is_empty` when nothing reported.
+    ///
+    /// A node whose `layout` row left without the listener table telling
+    /// this side — its realm was forgotten — has its report turned off here
+    /// and queues nothing. A node whose paragraph has no committed lines (it
+    /// stopped establishing one) queues nothing either.
+    fn queue_text_layout_events(&mut self) {
+        let Self {
+            document,
+            component_events,
+            ..
+        } = self;
+        let Some(document) = document.as_mut() else {
+            return;
+        };
+        for node in document.take_text_layout_reports() {
+            if !document.has_listener(node, LayoutEventRegistration::TextLayoutReport.name()) {
+                document.set_text_layout_reporting(node, false);
+                continue;
+            }
+            let (Some(lines), Some(layout)) =
+                (document.text_lines(node), document.rounded_layout(node))
+            else {
+                continue;
+            };
+            let terminus::link::layout::Layout {
+                size,
+                padding,
+                border,
+                ..
+            } = layout;
+            let width = size.width - padding.left - padding.right - border.left - border.right;
+            let height = size.height - padding.top - padding.bottom - border.top - border.bottom;
+            component_events.queue_text_layout(node, lines, width, height);
+        }
+    }
+
     /// The `@font-face` rules the mounted sheets declared, once each.
     ///
     /// Empty before `createDocument`: there is no cascade yet, and the
@@ -2081,9 +2279,59 @@ impl MainThreadRuntime {
         called.map(|_| ()).and(finished)
     }
 
+    /// The page's half of an entry's epilogue, in its order, under one
+    /// borrow of the document: the documents an `<svg content>` handed over,
+    /// the editing routes, the commit, the instant scrolls' `scroll`s, the
+    /// text-input state, the `text` `layout` events, and the resize and
+    /// intersection updates. Answers which deliveries the entry left owing,
+    /// for the page to post.
+    ///
+    /// - The documents first, asked of the host as one [`ViewNotice::RequestDocuments`] beside the
+    ///   image sources the commit asks for; their reports come back as `ToMain::ImageEvents` and
+    ///   apply through [`Self::apply_image_events`]. Nothing on this thread parses.
+    /// - The editing routes before the commit, so the names an editing host needs routed are
+    ///   published with the frame that shows the host.
+    /// - An instant scroll this entry performed after the commit, which performs one of its own
+    ///   when it honours a new `scroll-initial-target`: its `scroll` joins this entry's component
+    ///   events, and its `scrollend` follows the painter's post of the container at rest.
+    /// - The text-input state after it, so the geometry the host is handed is the frame's.
+    /// - The `text` paragraphs it recomputed join this entry's component events as their `layout`
+    ///   events, after it too.
+    /// - The resize update before the intersection one, and each always: HTML gathers resize
+    ///   observations before it updates intersection observations, and the intersection update must
+    ///   run whether or not exposure changes are already waiting.
+    /// - Component events are owed only once nothing is left uncommitted: an `<svg>`'s `load` reads
+    ///   the element's layout box at delivery, which is stale until a commit applies the natural
+    ///   size its report set, so while the commit above was skipped the whole batch is held.
+    pub(crate) fn settle_entry(&mut self) -> Deliveries {
+        let time = self.timeline_milliseconds;
+        let mut slot = self.slot.borrow_mut();
+        slot.request_documents();
+        slot.sync_editing_routes();
+        slot.commit_if_dirty();
+        slot.queue_instant_scroll_events();
+        slot.publish_text_input_state(&mut self.text_input);
+        slot.queue_text_layout_events();
+        let mut owed = Deliveries::NONE;
+        if slot.update_resize_observations() || slot.has_pending_resize_notifications() {
+            owed = owed.with(Deliveries::RESIZE);
+        }
+        if slot.update_intersection_observations(time) || slot.has_pending_exposure() {
+            owed = owed.with(Deliveries::INTERSECTION);
+        }
+        if slot.has_pending_content_visibility_changes() {
+            owed = owed.with(Deliveries::CONTENT_VISIBILITY);
+        }
+        if slot.has_component_events() && !slot.needs_render() {
+            owed = owed.with(Deliveries::COMPONENT_EVENTS);
+        }
+        owed
+    }
+
     /// Adopts the painter's metrics, commits when anything is stale, and
-    /// publishes once a painter has bound. Called by the page's epilogue,
-    /// after every entry into the realm, and never waits.
+    /// publishes once a painter has bound: [`DocumentSlot::commit_if_dirty`],
+    /// the step of [`Self::settle_entry`] the benchmark harness and the
+    /// tests run on its own. Never waits.
     pub(crate) fn commit_if_dirty(&mut self) {
         self.slot.borrow_mut().commit_if_dirty();
     }
@@ -2323,71 +2571,23 @@ impl MainThreadRuntime {
         slot.component_events.extend_images(outcomes);
     }
 
-    /// Asks the host to parse the documents an `<svg content>` handed the
-    /// document since the last drain, as one
-    /// [`ViewNotice::RequestDocuments`]. Its reports come back as
-    /// `ToMain::ImageEvents` and apply through [`Self::apply_image_events`]
-    /// like every other report. Called by the page's epilogue before its
-    /// commit; nothing on this thread parses.
-    pub(crate) fn request_documents(&mut self) {
-        self.slot.borrow_mut().request_documents();
-    }
-
-    /// Whether the document holds anything the last commit did not apply.
-    ///
-    /// After the epilogue's [`Self::commit_if_dirty`] this is `true` only
-    /// when that commit was skipped — a listed author sheet still
-    /// outstanding — and `false` with no document yet.
+    /// Whether the document holds anything the last commit did not apply:
+    /// [`DocumentSlot::needs_render`], for the benchmark harness and the
+    /// tests, which run the epilogue's steps one at a time.
     pub(crate) fn needs_render(&self) -> bool {
-        self.slot
-            .borrow()
-            .document
-            .as_ref()
-            .is_some_and(LynxDocument::needs_render)
+        self.slot.borrow().needs_render()
     }
 
-    /// Queues the `scroll` every instant scroll of this entry owes: a UI
-    /// method's `scrollTo`, `scrollBy` or `scrollIntoView`, a component's
-    /// own instant scroll, or the render's move to a new
-    /// `scroll-initial-target` (an `x-swiper`'s `current`, a `viewpager`'s
-    /// `select-index`). Asked by the page's epilogue after its commit, which
-    /// is where that last one happens, so it joins the component events
-    /// this entry produced; one length check when nothing scrolled. The
-    /// `scrollend` follows from the painter's post of the container at
-    /// rest.
+    /// [`DocumentSlot::queue_instant_scroll_events`], for the benchmark
+    /// harness and the tests.
     pub(crate) fn queue_instant_scroll_events(&mut self) {
-        let mut slot = self.slot.borrow_mut();
-        if slot
-            .document
-            .as_ref()
-            .is_some_and(LynxDocument::has_instant_scrolls)
-        {
-            slot.instant_scrolls();
-        }
+        self.slot.borrow_mut().queue_instant_scroll_events();
     }
 
-    /// Whether any producer has left a component event owing — the queue
-    /// [`Self::dispatch_component_events`] drains, asked once per entry.
-    ///
-    /// One `is_empty`, because nearly every entry's answer is no: an entry
-    /// during which no source settled and no dialog closed posts nothing. A
-    /// `load` handler that writes a `src` this document has already seen
-    /// settle gets its outcome at the bind, and a `close` handler can close
-    /// another dialog, so a delivery entry can leave the queue non-empty for
-    /// an entry of its own.
-    ///
-    /// Two flags of the document's count as well: focus events a UI method
-    /// left, and the document's selection having changed
-    /// ([`terminus::link::Document::has_pending_selectionchange`]), whose W3C
-    /// `selectionchange` that entry fires. Posting the entry is this
-    /// engine's form of the Selection API's "queue a task", so every change
-    /// before it runs owes one event.
+    /// [`DocumentSlot::has_component_events`], for the benchmark harness and
+    /// the tests.
     pub(crate) fn has_component_events(&self) -> bool {
-        let slot = self.slot.borrow();
-        !slot.component_events.is_empty()
-            || slot.document.as_ref().is_some_and(|document| {
-                document.has_focus_events() || document.has_pending_selectionchange()
-            })
+        self.slot.borrow().has_component_events()
     }
 
     /// The Selection API's `selectionchange`, when the document's selection
@@ -3173,20 +3373,6 @@ impl MainThreadRuntime {
         )
     }
 
-    /// Whether the commits since the last delivery left any
-    /// `content-visibility: auto` skipping change owing — css-contain-2
-    /// §4.4's queue, asked once per entry.
-    ///
-    /// One `is_empty` on a `Vec`, because nearly every entry's answer is no:
-    /// a page whose `auto` boxes did not change state posts nothing.
-    pub(crate) fn has_pending_content_visibility_changes(&self) -> bool {
-        self.slot
-            .borrow()
-            .document
-            .as_ref()
-            .is_some_and(LynxDocument::has_pending_content_visibility_changes)
-    }
-
     /// Fires one `contentvisibilityautostatechange`
     /// ([css-contain-2 §4.4](https://drafts.csswg.org/css-contain-2/#content-visibility-auto-state-change-event))
     /// per queued change, in frame order.
@@ -3213,44 +3399,20 @@ impl MainThreadRuntime {
             .dispatch_content_visibility_changes(timestamp);
     }
 
-    /// Runs the W3C "update intersection observations" steps
-    /// ([§3.2.10](https://w3c.github.io/IntersectionObserver/#update-intersection-observations-algo))
-    /// over the document's observers, and answers whether any of them has
-    /// entries queued afterwards — the page's cue to post a delivery.
-    ///
-    /// Asked once per entry, after its commit, and nearly always answered at
-    /// once: `terminus` runs nothing when there are no observers or nothing went
-    /// stale since the last update that ran — a frame built, an offset
-    /// moved, a target observed. It reads the last completed layout and the
-    /// live scroll offsets and runs no pass, so an entry whose scroll was
-    /// composed inside the encode window, and committed nothing, still
-    /// updates against the offset it adopted.
-    ///
-    /// Every entry it queues is stamped with [`Self::timeline_milliseconds`]:
-    /// the reading the latest `vsync` or frame post handed this side, which
-    /// is the `DOMHighResTimeStamp` that frame's animation-frame callbacks
-    /// were called with and the one an image's `load` is stamped with. That
-    /// is HTML's order — the observations are updated in the same rendering
-    /// step as the callbacks, after them — so the entries' `time` compares
-    /// directly with every other time this side reports, and nothing takes a
-    /// second reading of the clock.
+    /// [`DocumentSlot::update_intersection_observations`] at
+    /// [`Self::timeline_milliseconds`], for the tests.
+    #[cfg(test)]
     pub(crate) fn update_intersection_observations(&mut self) -> bool {
         let time = self.timeline_milliseconds;
         self.slot
             .borrow_mut()
-            .document
-            .as_mut()
-            .is_some_and(|document| document.update_intersection_observations(time))
+            .update_intersection_observations(time)
     }
 
-    /// Whether exposure changes wait for a delivery entry — the page's
-    /// cue to post one even when no observer has entries queued: a
-    /// teardown, a `stopExposure` that sent records, or a freed element that
-    /// was exposed queues its change outside any update.
-    ///
-    /// One `is_empty`, because nearly every entry's answer is no.
+    /// [`DocumentSlot::has_pending_exposure`], for the tests.
+    #[cfg(test)]
     pub(crate) fn has_pending_exposure(&self) -> bool {
-        self.slot.borrow().exposure.has_changes()
+        self.slot.borrow().has_pending_exposure()
     }
 
     /// Delivers every observer's queued entries to its handler, in creation
@@ -3386,33 +3548,16 @@ impl MainThreadRuntime {
         failures
     }
 
-    /// Runs `terminus`'s resize-observation update — the spec's "gather active
-    /// observations" with the entries created
-    /// ([`terminus::link::Document::update_resize_observations`]) — and answers whether
-    /// it queued any entry: the page's cue to post the resize delivery.
-    ///
-    /// Asked once per entry, after its commit, and nearly always answered at
-    /// once: `terminus` runs nothing when there are no observers, when no layout
-    /// pass ran and nothing was observed since the last update that ran, or
-    /// before the document's first layout. It reads the last completed layout
-    /// and runs no pass.
+    /// [`DocumentSlot::update_resize_observations`], for the tests.
+    #[cfg(test)]
     pub(crate) fn update_resize_observations(&mut self) -> bool {
-        self.slot
-            .borrow_mut()
-            .document
-            .as_mut()
-            .is_some_and(LynxDocument::update_resize_observations)
+        self.slot.borrow_mut().update_resize_observations()
     }
 
-    /// Whether any resize observer has entries queued — the page's cue to post
-    /// the resize delivery when the update itself queued nothing new, for
-    /// entries an earlier update left that no delivery has taken yet.
+    /// [`DocumentSlot::has_pending_resize_notifications`], for the tests.
+    #[cfg(test)]
     pub(crate) fn has_pending_resize_notifications(&self) -> bool {
-        self.slot
-            .borrow()
-            .document
-            .as_ref()
-            .is_some_and(LynxDocument::has_pending_resize_notifications)
+        self.slot.borrow().has_pending_resize_notifications()
     }
 
     /// Delivers every resize observer's queued entries to its handler, in
@@ -3514,48 +3659,10 @@ impl MainThreadRuntime {
         failures
     }
 
-    /// Queues the `layout` event of every reporting `text` whose paragraph a
-    /// committing layout run recomputed since the last call
-    /// ([`terminus::link::Document::take_text_layout_reports`]), with the lines and the
-    /// content box that commit left ([`ComponentEvent::TextLayout`]), in the
-    /// order the runs first reached them. Asked by the page's epilogue after
-    /// its commit, so the events join the component events the same entry
-    /// posts; one `is_empty` when nothing reported.
-    ///
-    /// A node whose `layout` row left without the listener table telling
-    /// this side — its realm was forgotten — has its report turned off here
-    /// and queues nothing. A node whose paragraph has no committed lines (it
-    /// stopped establishing one) queues nothing either.
+    /// [`DocumentSlot::queue_text_layout_events`], for the tests.
+    #[cfg(test)]
     pub(crate) fn queue_text_layout_events(&mut self) {
-        let mut slot = self.slot.borrow_mut();
-        let DocumentSlot {
-            document,
-            component_events,
-            ..
-        } = &mut *slot;
-        let Some(document) = document.as_mut() else {
-            return;
-        };
-        for node in document.take_text_layout_reports() {
-            if !document.has_listener(node, LayoutEventRegistration::TextLayoutReport.name()) {
-                document.set_text_layout_reporting(node, false);
-                continue;
-            }
-            let (Some(lines), Some(layout)) =
-                (document.text_lines(node), document.rounded_layout(node))
-            else {
-                continue;
-            };
-            let terminus::link::layout::Layout {
-                size,
-                padding,
-                border,
-                ..
-            } = layout;
-            let width = size.width - padding.left - padding.right - border.left - border.right;
-            let height = size.height - padding.top - padding.bottom - border.top - border.bottom;
-            component_events.queue_text_layout(node, lines, width, height);
-        }
+        self.slot.borrow_mut().queue_text_layout_events();
     }
 
     /// When the earliest armed timer comes due, if one is armed, for a test

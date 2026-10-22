@@ -165,7 +165,7 @@ use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 use super::quickjs::{ScriptRuntime, SharedRuntime};
-use super::runtime::{DocumentIngredients, MainThreadRuntime, RealmStartup};
+use super::runtime::{Deliveries, DocumentIngredients, MainThreadRuntime, RealmStartup};
 use super::{AttachedView, GroupContext};
 use crate::background::WorkerEvent;
 use crate::clock::ClockInstant;
@@ -1021,51 +1021,25 @@ impl RealmOwner for Page {
     /// [`Page::post_content_visibility_changes`] and
     /// [`Page::post_component_events`].
     fn after_timers(page: &Rc<Self>, runtime: &mut MainThreadRuntime) {
-        runtime.request_documents();
-        // Before the commit, so the names an editing host needs routed are
-        // published with the frame that shows the host.
-        runtime.sync_editing_routes();
-        runtime.commit_if_dirty();
-        // An instant scroll this entry performed: its `scroll` joins this
-        // entry's component events, and its `scrollend` follows the
-        // painter's post of the container at rest. After the commit, which
-        // performs one of its own when it honours a new
-        // `scroll-initial-target`.
-        runtime.queue_instant_scroll_events();
-        // After it, so the geometry the host is handed is the frame's.
-        runtime.publish_text_input_state();
-        // After it too: the `text` paragraphs it recomputed join this entry's
-        // component events as their `layout` events.
-        runtime.queue_text_layout_events();
-        // The resize update first, always, as the intersection one below:
-        // HTML gathers resize observations before it updates intersection
-        // observations, so its delivery is posted first.
-        if (runtime.update_resize_observations() || runtime.has_pending_resize_notifications())
-            && !page.resizes_posted.replace(true)
-        {
+        // Posted in the order the settle decided them, resize first, as HTML
+        // gathers resize observations before it updates intersection ones.
+        // Each post queues a job behind this one, so posting after the whole
+        // settle rather than between its steps changes nothing they see. A
+        // held component-event batch is neither drained nor latched, so the
+        // first later epilogue whose commit runs posts it.
+        let owed = runtime.settle_entry();
+        if owed.contains(Deliveries::RESIZE) && !page.resizes_posted.replace(true) {
             page.post_resize_notifications();
         }
-        // The update first, always: it must run whether or not exposure
-        // changes are already waiting.
-        if (runtime.update_intersection_observations() || runtime.has_pending_exposure())
-            && !page.intersections_posted.replace(true)
-        {
+        if owed.contains(Deliveries::INTERSECTION) && !page.intersections_posted.replace(true) {
             page.post_intersection_notifications();
         }
-        if runtime.has_pending_content_visibility_changes()
+        if owed.contains(Deliveries::CONTENT_VISIBILITY)
             && !page.content_visibility_posted.replace(true)
         {
             page.post_content_visibility_changes();
         }
-        // Held while the commit above was skipped: an `<svg>`'s `load` reads
-        // the element's layout box at delivery, which is stale until a commit
-        // applies the natural size its report set. The hold covers the whole
-        // batch, so `<image>`, `<dialog>` and `<overlay>` events queued
-        // before the first flush are delayed to the first commit as well.
-        // The queue is not drained and the latch is not set while held, so
-        // the first later epilogue whose commit runs posts the batch.
-        if runtime.has_component_events()
-            && !runtime.needs_render()
+        if owed.contains(Deliveries::COMPONENT_EVENTS)
             && !page.component_events_posted.replace(true)
         {
             page.post_component_events();

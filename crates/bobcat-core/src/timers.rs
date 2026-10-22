@@ -127,6 +127,12 @@ impl TimerSchedule {
         id
     }
 
+    /// Whether any timer is armed: when none is, nothing can come due, and
+    /// whatever the heap still holds is leftovers.
+    pub(crate) fn is_armed(&self) -> bool {
+        !self.armed.is_empty()
+    }
+
     /// Disarms a timer, whether or not one is armed under that id.
     pub(crate) fn clear(&mut self, id: u32) {
         self.armed.remove(&id);
@@ -267,6 +273,11 @@ impl TimerState {
     pub(crate) fn next_deadline(&self) -> Option<ClockInstant> {
         self.schedule.borrow_mut().next_deadline()
     }
+
+    /// Whether any timer is armed here.
+    pub(crate) fn is_armed(&self) -> bool {
+        self.schedule.borrow().is_armed()
+    }
 }
 
 /// Runs every timer due now in one realm, in the order the standard fires
@@ -284,7 +295,16 @@ pub(crate) fn run_due_timers(
     js_runtime: &mut ScriptRuntime,
     timers: &TimerState,
 ) -> Option<Vec<ScriptError>> {
-    let due = timers.schedule.borrow_mut().take_due(ClockInstant::now());
+    let due = {
+        let mut schedule = timers.schedule.borrow_mut();
+        // No clock read for a realm with nothing armed, which is nearly every
+        // entry of nearly every realm: nothing can be due. The leftovers the
+        // heap may hold are dropped by the epilogue's `next_deadline`.
+        if !schedule.is_armed() {
+            return None;
+        }
+        schedule.take_due(ClockInstant::now())
+    };
     if due.is_empty() {
         return None;
     }

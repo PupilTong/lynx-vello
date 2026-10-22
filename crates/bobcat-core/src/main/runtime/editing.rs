@@ -66,8 +66,8 @@ use terminus::link::event::EventDetail;
 use terminus::link::input::{Modifiers, PointerId, PointerKind};
 
 use super::{
-    CLICK_EVENT, DOUBLE_CLICK_MILLISECONDS, ListenerFailures, MainThreadError, MainThreadRuntime,
-    ScriptRuntime,
+    CLICK_EVENT, DOUBLE_CLICK_MILLISECONDS, DocumentSlot, ListenerFailures, MainThreadError,
+    MainThreadRuntime, ScriptRuntime,
 };
 use crate::editing::TextInputSource;
 use crate::link::{InputEventPayload, ViewNotice};
@@ -713,31 +713,37 @@ impl MainThreadRuntime {
     }
 
     /// Opens [`EditingRoute::Pointer`] once the document exists, and opens
-    /// or closes [`EditingRoute::Focus`] as an element gains or loses focus.
-    /// Asked by the page's epilogue, once per entry, before the commit that
-    /// publishes the frame.
+    /// or closes [`EditingRoute::Focus`] as an element gains or loses focus:
+    /// the step of [`MainThreadRuntime::settle_entry`] the tests run on its
+    /// own.
+    #[cfg(test)]
     pub(crate) fn sync_editing_routes(&mut self) {
         self.slot.borrow_mut().sync_editing_routes();
     }
+}
 
+impl DocumentSlot {
     /// Publishes the focused host's [`TextInputState`](terminus::link::editing::TextInputState) to
-    /// the host when it differs from the last one published. Asked by the page's epilogue
-    /// after its commit, so the geometry is the committed frame's. Nothing is
-    /// computed while nothing is focused and nothing was.
-    pub(crate) fn publish_text_input_state(&mut self) {
-        let slot = self.slot.borrow();
-        let Some(document) = slot.document.as_ref() else {
+    /// the host when it differs from `published`, the last one published,
+    /// and records it there. Asked by the page's epilogue after its commit,
+    /// so the geometry is the committed frame's. Nothing is computed while
+    /// nothing is focused and nothing was.
+    pub(super) fn publish_text_input_state(
+        &self,
+        published: &mut terminus::link::editing::TextInputState,
+    ) {
+        let Some(document) = self.document.as_ref() else {
             return;
         };
-        if document.focused().is_none() && self.text_input.host.is_none() {
+        if document.focused().is_none() && published.host.is_none() {
             return;
         }
         let state = document.text_input_state();
-        if state == self.text_input {
+        if state == *published {
             return;
         }
-        self.text_input = state.clone();
-        slot.outbox
+        *published = state.clone();
+        self.outbox
             .notify(ViewNotice::TextInputState(Box::new(state)));
     }
 }

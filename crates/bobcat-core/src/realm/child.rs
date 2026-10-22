@@ -184,6 +184,12 @@ impl ChildRealms {
     pub(crate) fn run_due_timers(&self, js: &mut ScriptRuntime) -> Option<Vec<ScriptError>> {
         let mut failures: Option<Vec<ScriptError>> = None;
         for key in self.keys() {
+            // Detached only when it has a timer armed, asked as its turn
+            // comes, since an earlier child's callback can arm one in it: a
+            // child with none has nothing due, and is left in place.
+            if !self.has_armed_timer(key) {
+                continue;
+            }
             let ran = self.with_child(key, |child| {
                 crate::timers::run_due_timers(&mut child.engine, js, &child.timers)
             });
@@ -192,6 +198,13 @@ impl ChildRealms {
             }
         }
         failures
+    }
+
+    /// Whether the child under `key` is live and has a timer armed.
+    fn has_armed_timer(&self, key: ChildKey) -> bool {
+        let live = self.live.borrow();
+        live.binary_search_by_key(&key, |child| child.key)
+            .is_ok_and(|index| live[index].timers.is_armed())
     }
 
     /// Every module request a child's code left, each counted as in flight
