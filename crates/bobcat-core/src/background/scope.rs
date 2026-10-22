@@ -21,8 +21,6 @@ use crate::script::ScriptError;
 /// which every realm kind declares, with the member a native module call
 /// reaches the embedder through.
 const WORKER_HOST_MODULE_SPECIFIER: &str = "bobcat-internal:worker";
-/// Called on `bobcat:worker`, in a worker realm, with one message value.
-pub(super) const WORKER_DELIVER_EXPORT: &str = "__BobcatDeliverWorkerMessage";
 
 /// What a worker realm's own members report back to the thread: two flags,
 /// each written from inside the realm the thread acts on and read by the

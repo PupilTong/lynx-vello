@@ -27,9 +27,7 @@ use quickjs_rust_bridge::{HostArgument, HostValue};
 use tokio::sync::mpsc;
 
 use crate::background::{WorkerKey, WorkerMessage};
-use crate::esm::{
-    NATIVE_MODULE_CALLBACK_EXPORT, NATIVE_MODULES_HOST_SPECIFIER, NATIVE_MODULES_MODULE_SPECIFIER,
-};
+use crate::esm::{Export, NATIVE_MODULES_HOST_SPECIFIER};
 use crate::link::{HostOutbox, ToMain, ViewNotice};
 use crate::main::quickjs::{ScriptEngine, ScriptRuntime};
 use crate::script::ScriptError;
@@ -361,8 +359,7 @@ pub(crate) fn deliver(
     engine
         .call_module_export(
             js_runtime,
-            NATIVE_MODULES_MODULE_SPECIFIER,
-            NATIVE_MODULE_CALLBACK_EXPORT,
+            Export::NativeModuleCallback,
             &[
                 HostArgument::Number(call),
                 HostArgument::Number(f64::from(index)),

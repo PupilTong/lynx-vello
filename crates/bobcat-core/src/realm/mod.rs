@@ -42,7 +42,7 @@ use quickjs_rust_bridge::{HostArgument, HostValue};
 use self::child::{ChildHostModules, ChildKey, ChildRealms, ShadowRealmHook};
 use self::policy::context_of;
 use crate::background::WorkerKey;
-use crate::esm::HOST_MODULE_SPECIFIER;
+use crate::esm::{Export, HOST_MODULE_SPECIFIER};
 use crate::future::FutureTable;
 use crate::jobs::JsThreadHandle;
 use crate::link::{HostOutbox, ViewNotice};
@@ -124,21 +124,12 @@ impl RealmCore {
         &mut self,
         js: &mut ScriptRuntime,
         id: RealmId,
-        module_specifier: &str,
-        export_name: &str,
+        export: Export,
         arguments: &[HostArgument<'_>],
     ) -> Option<Result<bool, ScriptError>> {
         match id {
-            RealmId::Page => {
-                Some(
-                    self.engine
-                        .call_module_export(js, module_specifier, export_name, arguments),
-                )
-            }
-            RealmId::Child(key) => {
-                self.children
-                    .call_module_export(js, key, module_specifier, export_name, arguments)
-            }
+            RealmId::Page => Some(self.engine.call_module_export(js, export, arguments)),
+            RealmId::Child(key) => self.children.call_module_export(js, key, export, arguments),
         }
     }
 
@@ -151,24 +142,17 @@ impl RealmCore {
         &mut self,
         js: &mut ScriptRuntime,
         id: RealmId,
-        module_specifier: &str,
-        export_name: &str,
+        export: Export,
         arguments: &[HostArgument<'_>],
     ) -> Option<Result<bool, ScriptError>> {
         match id {
-            RealmId::Page => Some(self.engine.call_module_export_before_operation(
-                js,
-                module_specifier,
-                export_name,
-                arguments,
-            )),
-            RealmId::Child(key) => self.children.call_module_export_before_operation(
-                js,
-                key,
-                module_specifier,
-                export_name,
-                arguments,
+            RealmId::Page => Some(
+                self.engine
+                    .call_module_export_before_operation(js, export, arguments),
             ),
+            RealmId::Child(key) => self
+                .children
+                .call_module_export_before_operation(js, key, export, arguments),
         }
     }
 

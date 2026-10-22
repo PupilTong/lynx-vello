@@ -52,6 +52,7 @@ use quickjs_rust_bridge::HostArgument;
 
 use super::FrameDemand;
 use crate::clock::ClockInstant;
+use crate::esm::Export;
 use crate::future::{FutureTable, HostFuture, Outcome};
 use crate::jobs::JsThreadHandle;
 use crate::link::HostOutbox;
@@ -261,14 +262,11 @@ impl ChildRealms {
         &self,
         js: &mut ScriptRuntime,
         key: ChildKey,
-        module_specifier: &str,
-        export_name: &str,
+        export: Export,
         arguments: &[HostArgument<'_>],
     ) -> Option<Result<bool, ScriptError>> {
         self.with_child(key, |child| {
-            child
-                .engine
-                .call_module_export(js, module_specifier, export_name, arguments)
+            child.engine.call_module_export(js, export, arguments)
         })
     }
 
@@ -280,17 +278,13 @@ impl ChildRealms {
         &self,
         js: &mut ScriptRuntime,
         key: ChildKey,
-        module_specifier: &str,
-        export_name: &str,
+        export: Export,
         arguments: &[HostArgument<'_>],
     ) -> Option<Result<bool, ScriptError>> {
         self.with_child(key, |child| {
-            child.engine.call_module_export_before_operation(
-                js,
-                module_specifier,
-                export_name,
-                arguments,
-            )
+            child
+                .engine
+                .call_module_export_before_operation(js, export, arguments)
         })
     }
 

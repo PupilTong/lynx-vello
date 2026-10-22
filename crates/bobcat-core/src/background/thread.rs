@@ -60,9 +60,9 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::{self, JoinError, JoinSet};
 use tokio_util::sync::CancellationToken;
 
-use super::scope::{WORKER_DELIVER_EXPORT, install_worker_members};
+use super::scope::install_worker_members;
 use super::{WorkerCommand, WorkerEvent, WorkerKey, WorkerMessage, WorkerPayload, WorkerStart};
-use crate::esm::{WORKER_MODULE_SPECIFIER, build_runtime};
+use crate::esm::{Export, build_runtime};
 use crate::jobs::{JsThread, JsThreadHandle};
 use crate::lifetime::{Lifetime, run_job, serve_clock};
 use crate::link::HostOutbox;
@@ -682,8 +682,7 @@ fn deliver_vsync(worker: &Rc<Worker>, milliseconds: f64) {
     drop(owner::enter(worker, move |realm, js| {
         if let Err(error) = realm.core.engine.call_module_export(
             js,
-            crate::esm::ANIMATION_FRAME_MODULE_SPECIFIER,
-            "__BobcatBeginFrame",
+            Export::BeginFrame,
             &[HostArgument::Number(milliseconds)],
         ) {
             policy::report(&reporting, Scene::Frame, error);
@@ -825,8 +824,7 @@ fn deliver(
     }
     let delivered = realm.core.engine.call_module_export(
         js_runtime,
-        WORKER_MODULE_SPECIFIER,
-        WORKER_DELIVER_EXPORT,
+        Export::DeliverWorkerMessage,
         &[data.as_argument()],
     );
     if let Err(error) = delivered {

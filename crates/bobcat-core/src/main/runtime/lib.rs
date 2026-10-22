@@ -41,9 +41,8 @@ use tokio::sync::watch;
 use super::quickjs::{ScriptEngine, ScriptRuntime};
 use crate::clock::ClockInstant;
 use crate::esm::{
-    ANIMATION_FRAME_MODULE_SPECIFIER, BTS_MODULE_SPECIFIER, ELEMENT_MODULE_SPECIFIER,
-    FRAME_MODULE_SPECIFIER, HOST_MODULE_SPECIFIER, RUNTIME_MODULE_SPECIFIER,
-    TIMER_MODULE_SPECIFIER, WORKER_CLASS_MODULE_SPECIFIER,
+    BTS_MODULE_SPECIFIER, ELEMENT_MODULE_SPECIFIER, Export, FRAME_MODULE_SPECIFIER,
+    HOST_MODULE_SPECIFIER, RUNTIME_MODULE_SPECIFIER, TIMER_MODULE_SPECIFIER,
 };
 use crate::link::{InputEventPayload, ViewNotice, ViewOutbox};
 use crate::main::exposure::{Exposure, is_exposure_attribute};
@@ -65,7 +64,6 @@ use crate::timers::run_due_timers;
 use crate::view::{LynxViewError, ScreenMetrics, ScriptSource, StartupSource, Viewport};
 
 const BOOT_MODULE_SPECIFIER: &str = "bobcat:boot";
-const EVENT_DISPATCH_EXPORT: &str = "__BobcatDispatchEvent";
 
 /// web-core's rule for which events a nested card hears from the whole
 /// document: the names web-core listens for on `document` rather than on the
@@ -2063,8 +2061,7 @@ impl MainThreadRuntime {
         let called = match child {
             None => self.core.engine.call_module_export(
                 js_runtime,
-                WORKER_CLASS_MODULE_SPECIFIER,
-                "__BobcatDispatchWorkerEvent",
+                Export::DispatchWorkerEvent,
                 &arguments,
             ),
             // A child that is gone took its workers with it; what one said
@@ -2072,13 +2069,7 @@ impl MainThreadRuntime {
             Some(child) => self
                 .core
                 .children
-                .call_module_export(
-                    js_runtime,
-                    child,
-                    WORKER_CLASS_MODULE_SPECIFIER,
-                    "__BobcatDispatchWorkerEvent",
-                    &arguments,
-                )
+                .call_module_export(js_runtime, child, Export::DispatchWorkerEvent, &arguments)
                 .unwrap_or(Ok(false)),
         }
         .map_err(|error| MainThreadError::from_engine("delivering a worker event", error));
@@ -2100,12 +2091,12 @@ impl MainThreadRuntime {
     ) -> Result<(), MainThreadError> {
         use crate::link::PageUpdate;
 
-        let (export, arguments): (&str, &[HostArgument<'_>]) = match update {
+        let (export, arguments): (Export, &[HostArgument<'_>]) = match update {
             PageUpdate::Reload {
                 data,
                 processor_name,
             } => (
-                "__BobcatReload",
+                Export::Reload,
                 &[
                     HostArgument::String(data),
                     HostArgument::String(processor_name),
@@ -2116,7 +2107,7 @@ impl MainThreadRuntime {
                 processor_name,
                 reset,
             } => (
-                "__BobcatUpdateData",
+                Export::UpdateData,
                 &[
                     HostArgument::String(data),
                     HostArgument::String(processor_name),
@@ -2124,17 +2115,17 @@ impl MainThreadRuntime {
                 ],
             ),
             PageUpdate::GlobalProps(data) => {
-                ("__BobcatUpdateGlobalProps", &[HostArgument::String(data)])
+                (Export::UpdateGlobalProps, &[HostArgument::String(data)])
             }
             PageUpdate::GlobalEvent { name, arguments } => (
-                "__BobcatSendGlobalEvent",
+                Export::SendGlobalEvent,
                 &[HostArgument::String(name), HostArgument::String(arguments)],
             ),
         };
         let called = self
             .core
             .engine
-            .call_module_export(js, RUNTIME_MODULE_SPECIFIER, export, arguments)
+            .call_module_export(js, export, arguments)
             .map_err(|error| MainThreadError::from_engine("updating page data", error));
         let finished = self.finish_batch(js, called.is_ok());
         called.map(|_| ()).and(finished)
@@ -2187,8 +2178,7 @@ impl MainThreadRuntime {
             .engine
             .call_module_export(
                 js,
-                ANIMATION_FRAME_MODULE_SPECIFIER,
-                "__BobcatBeginFrame",
+                Export::BeginFrame,
                 &[HostArgument::Number(milliseconds)],
             )
             .map(|_| ())
@@ -3093,18 +3083,12 @@ impl MainThreadRuntime {
             self.core.call_module_export_before_operation(
                 js_runtime,
                 realm,
-                ELEMENT_MODULE_SPECIFIER,
-                EVENT_DISPATCH_EXPORT,
+                Export::DispatchEvent,
                 &arguments,
             )
         } else {
-            self.core.call_module_export(
-                js_runtime,
-                realm,
-                ELEMENT_MODULE_SPECIFIER,
-                EVENT_DISPATCH_EXPORT,
-                &arguments,
-            )
+            self.core
+                .call_module_export(js_runtime, realm, Export::DispatchEvent, &arguments)
         };
         let Some(called) = called else {
             return Ok(false);
@@ -3914,8 +3898,7 @@ await Promise.resolve().then(() => __FlushElementTree());
             .engine
             .call_module_export_before_operation(
                 js_runtime,
-                RUNTIME_MODULE_SPECIFIER,
-                "__BobcatInitEntry",
+                Export::InitEntry,
                 &[HostArgument::String(self.card.as_deref().unwrap_or(url))],
             )
             .map_err(starting)?;

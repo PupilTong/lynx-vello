@@ -50,7 +50,7 @@ use rustc_hash::FxHashMap;
 use tokio_util::sync::CancellationToken;
 
 use crate::clock::ClockInstant;
-use crate::esm::{FUTURE_MODULE_SPECIFIER, HOST_MODULE_SPECIFIER};
+use crate::esm::{Export, HOST_MODULE_SPECIFIER};
 use crate::jobs::JsThreadHandle;
 use crate::main::quickjs::{ScriptEngine, ScriptRuntime};
 use crate::script::ScriptError;
@@ -59,10 +59,6 @@ use crate::script::ScriptError;
 /// `long` ceiling, about 24 days, and short enough that no deadline built
 /// from it can overflow the clock.
 const MAX_TIMEOUT_MILLISECONDS: f64 = 2_147_483_647.0;
-
-/// Called on `bobcat:future` when a future the realm asked to settle
-/// asynchronously has settled.
-const SETTLE_EXPORT: &str = "__BobcatSettleFuture";
 
 /// One future's answer: the value it settled to, or why it will not settle.
 ///
@@ -273,8 +269,7 @@ pub(crate) fn deliver(
     engine
         .call_module_export(
             js_runtime,
-            FUTURE_MODULE_SPECIFIER,
-            SETTLE_EXPORT,
+            Export::SettleFuture,
             &[
                 HostArgument::Number(f64::from(id)),
                 HostArgument::Boolean(rejected),
