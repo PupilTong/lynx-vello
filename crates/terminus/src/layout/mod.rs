@@ -336,38 +336,43 @@ impl<T> Document<T> {
         role: ImageRole,
         value: Option<&str>,
     ) -> Option<ImageOutcome> {
-        let (changed, was_replaced, previous) = {
+        let was_replaced = {
             let node = self
-                .arenas_mut()
-                .get_mut(id)
+                .get(id)
                 .expect("stale NodeId passed to Document::set_image_source");
             assert!(
                 node.is_element(),
                 "non-element NodeId passed to Document::set_image_source"
             );
-            let was_replaced = node.is_replaced();
-            let previous = node.image_source(role).map(str::to_owned);
-            (node.set_image_source(role, value), was_replaced, previous)
+            // Writing the source an element holds changes nothing, and so
+            // does clearing one it never had: that is no conversion to or from
+            // replaced content (`Node::set_image_source`).
+            if node.image_source(role) == value {
+                return None;
+            }
+            node.is_replaced()
         };
-        if !changed {
-            return None;
-        }
         // The registry has to know which node presents which source, or a
-        // completed load has nobody to hand its intrinsic size to.
+        // completed load has nobody to hand its intrinsic size to. The node
+        // holds the registry's own key for the source, and the one it
+        // displaces is unbound after it.
+        let key = value.map(|value| self.images.bind_node(value, id, role));
+        let previous = self
+            .arenas_mut()
+            .get_mut(id)
+            .expect("the node was live a moment ago")
+            .set_image_source(role, key);
         if let Some(previous) = previous {
             self.images.unbind_node(&previous, id, role);
         }
-        let mut outcome = None;
-        if let Some(value) = value {
-            self.images.bind_node(value, id, role);
-            // Only the element's own source has an outcome to report: a
-            // placeholder is an interim picture the page did not ask about, so
-            // neither its load nor its failure is an event. `ImageOutcome` has
-            // no variant naming one, and this is where that stays true.
-            if role == ImageRole::Source {
-                outcome = self.images.outcome_for(value, id);
-            }
-        }
+        // Only the element's own source has an outcome to report: a
+        // placeholder is an interim picture the page did not ask about, so
+        // neither its load nor its failure is an event. `ImageOutcome` has
+        // no variant naming one, and this is where that stays true.
+        let outcome = match value {
+            Some(value) if role == ImageRole::Source => self.images.outcome_for(value, id),
+            _ => None,
+        };
         self.note_replaced_change(id, was_replaced);
         outcome
     }

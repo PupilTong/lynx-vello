@@ -107,12 +107,13 @@ struct Replaced {
     /// whichever source the element now draws.
     natural_size: NaturalSize,
     /// The image source the paint walk resolves against the document's
-    /// image registry.
-    source: Option<Box<str>>,
+    /// image registry: the registry's own key for it, shared rather than
+    /// copied, so every element presenting one URL holds one allocation.
+    source: Option<StdArc<str>>,
     /// The source drawn while `source` has no pixels, requested
     /// concurrently with it and never falling back from it: a source that
-    /// loads suppresses this one for good.
-    placeholder: Option<Box<str>>,
+    /// loads suppresses this one for good. Held as `source` is.
+    placeholder: Option<StdArc<str>>,
 }
 
 /// Per-node bits that each cost a padded byte of the node stride as a `bool`.
@@ -1027,80 +1028,73 @@ impl<T> Node<T> {
         matches!(self.content.as_deref(), Some(NodeContent::Replaced(_)))
     }
 
+    /// Puts `natural_size` on this element, making it replaced content if it
+    /// is not; written in place when it already is. Answers whether anything
+    /// changed.
     pub(crate) fn set_natural_size(&mut self, natural_size: NaturalSize) -> bool {
-        if self.natural_size() == natural_size && self.is_replaced() {
-            return false;
+        if let Some(NodeContent::Replaced(replaced)) = self.content.as_deref_mut() {
+            if replaced.natural_size == natural_size {
+                return false;
+            }
+            replaced.natural_size = natural_size;
+            return true;
         }
-        let (source, placeholder) = self.take_image_sources();
         self.content = Some(Box::new(NodeContent::Replaced(Box::new(Replaced {
             natural_size,
-            source,
-            placeholder,
+            source: None,
+            placeholder: None,
         }))));
         true
     }
 
-    /// Sets the URL this element holds in `role`, making it replaced content
-    /// — and, when it was the element's last source, ordinary content again.
+    /// Sets the URL this element holds in `role` — the image registry's key
+    /// for it — making it replaced content, and, when it was the element's
+    /// last source, ordinary content again. Answers the source it displaced.
     ///
     /// Either role alone is enough to make the element replaced, since a
-    /// placeholder is exactly a bitmap drawn in the content box.
+    /// placeholder is exactly a bitmap drawn in the content box. A replaced
+    /// element's source is written in place; its content is built only when
+    /// it becomes replaced, and dropped, natural size with it, when its last
+    /// source goes: `is_replaced` is a layout input — it forces
+    /// `DisplayMode::Leaf` and hides every child — so a box with no bitmap to
+    /// draw must not keep it.
     ///
-    /// Clearing a source a node never had is a no-op rather than a
-    /// conversion: `is_replaced` is a layout input — it forces
-    /// `DisplayMode::Leaf` and hides every child — so turning an ordinary
-    /// element into a childless replaced box is not what "there is no image
-    /// here" should mean. Which is the same reason taking the last source off
-    /// one undoes it: an element with no bitmap to draw is not a box drawing
-    /// nothing.
-    ///
-    /// An element made replaced by a natural size alone is left alone, since
-    /// clearing the source it never had changes nothing about it.
-    pub(crate) fn set_image_source(&mut self, role: ImageRole, value: Option<&str>) -> bool {
-        if self.image_source(role) == value && (self.is_replaced() || value.is_none()) {
-            return false;
+    /// The caller has checked that `value` is not what the element already
+    /// holds in `role` (`Document::set_image_source`), which is what makes
+    /// clearing a source a node never had a no-op rather than a conversion:
+    /// turning an ordinary element into a childless replaced box is not what
+    /// "there is no image here" should mean, and an element made replaced by
+    /// a natural size alone keeps that.
+    pub(crate) fn set_image_source(
+        &mut self,
+        role: ImageRole,
+        value: Option<StdArc<str>>,
+    ) -> Option<StdArc<str>> {
+        debug_assert!(
+            self.image_source(role) != value.as_deref(),
+            "the caller's no-op check keeps an unchanged source from reaching here"
+        );
+        if let Some(NodeContent::Replaced(replaced)) = self.content.as_deref_mut() {
+            let held = match role {
+                ImageRole::Source => &mut replaced.source,
+                ImageRole::Placeholder => &mut replaced.placeholder,
+            };
+            let previous = std::mem::replace(held, value);
+            if replaced.source.is_none() && replaced.placeholder.is_none() {
+                self.content = None;
+            }
+            return previous;
         }
-        let (source, placeholder) = self.take_image_sources();
-        let value = value.map(Box::from);
-        match role {
-            ImageRole::Source => self.set_image_sources(value, placeholder),
-            ImageRole::Placeholder => self.set_image_sources(source, value),
-        }
-        true
-    }
-
-    /// Installs both sources, keeping the natural size the document maintains
-    /// from whichever one is drawn.
-    ///
-    /// With neither source left the element stops being replaced, and its
-    /// natural size goes with the content it described: `is_replaced` forces
-    /// `DisplayMode::Leaf`, so a box with no bitmap to draw must not keep it.
-    fn set_image_sources(&mut self, source: Option<Box<str>>, placeholder: Option<Box<str>>) {
-        if source.is_none() && placeholder.is_none() {
-            debug_assert!(
-                self.is_replaced(),
-                "the no-op guards let only a replaced element reach here with no source"
-            );
-            self.content = None;
-            return;
-        }
-        let natural_size = self.natural_size();
+        let (source, placeholder) = match role {
+            ImageRole::Source => (value, None),
+            ImageRole::Placeholder => (None, value),
+        };
         self.content = Some(Box::new(NodeContent::Replaced(Box::new(Replaced {
-            natural_size,
+            natural_size: NaturalSize::NONE,
             source,
             placeholder,
         }))));
-    }
-
-    /// Moves both sources out of the current content, so rewriting one half of
-    /// a replaced element's state neither copies the strings nor drops them.
-    fn take_image_sources(&mut self) -> (Option<Box<str>>, Option<Box<str>>) {
-        match self.content.as_deref_mut() {
-            Some(NodeContent::Replaced(replaced)) => {
-                (replaced.source.take(), replaced.placeholder.take())
-            }
-            _ => (None, None),
-        }
+        None
     }
 
     #[cfg(feature = "layout-test-utils")]
