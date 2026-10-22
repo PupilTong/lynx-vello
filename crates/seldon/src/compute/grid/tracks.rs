@@ -312,6 +312,37 @@ pub(super) fn build_axis_tracks<'a>(
     (start, result)
 }
 
+/// Which tracks of `range` some area covers, in the axis `select` picks:
+/// what an `auto-fit` track reads to know whether it collapses.
+pub(super) fn occupied_tracks<Select>(
+    areas: &[placement::GridArea],
+    range: placement::TrackSpan,
+    select: Select,
+) -> Vec<bool>
+where
+    Select: Fn(&placement::GridArea) -> placement::TrackSpan,
+{
+    let len = range.len();
+    if len == 0 {
+        return Vec::new();
+    }
+    let mut differences = vec![0_i64; len + 1];
+    for area in areas {
+        let span = select(area);
+        let start = usize::try_from(span.start - range.start).unwrap();
+        let end = usize::try_from(span.end - range.start).unwrap();
+        differences[start] += 1;
+        differences[end] -= 1;
+    }
+    let mut occupied = Vec::with_capacity(len);
+    let mut covering = 0_i64;
+    for difference in differences.into_iter().take(len) {
+        covering += difference;
+        occupied.push(covering > 0);
+    }
+    occupied
+}
+
 #[inline]
 fn implicit_track(auto_tracks: &[TrackSize], coordinate: i32, explicit_len: usize) -> &TrackSize {
     if auto_tracks.is_empty() {

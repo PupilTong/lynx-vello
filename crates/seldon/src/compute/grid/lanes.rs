@@ -892,7 +892,12 @@ where
         .end
         .max(range.start.saturating_add(line_offset(largest_auto_span)))
         .min(GRID_LINE_LIMIT);
-    let occupied = auto_fit_occupancy(range, &placements, auto_span_total);
+    // Only an `auto-fit` track reads the occupancy.
+    let occupied = if explicit.auto_fit.is_some() {
+        auto_fit_occupancy(range, &placements, auto_span_total)
+    } else {
+        Vec::new()
+    };
     // A `grid-auto-*` list is read only for coordinates outside the explicit
     // grid.
     let auto_tracks = &match grid_axis {

@@ -30,7 +30,9 @@ use sizing::{
 use stylo::computed_values::direction;
 use stylo::values::computed::{Inset, PositionProperty, Size as StyleSize};
 use stylo::values::specified::align::AlignFlags;
-use tracks::{ExpandedTemplate, MAX_MATERIALIZED_TRACKS, build_axis_tracks, expand_template};
+use tracks::{
+    ExpandedTemplate, MAX_MATERIALIZED_TRACKS, build_axis_tracks, expand_template, occupied_tracks,
+};
 use types::{Axis, GridItem, MaxKind, MinKind, TrackSet};
 
 use super::util::{
@@ -1738,17 +1740,29 @@ where
     // grid.
     let auto_columns = &style.grid_auto_columns().0;
     let auto_rows = &style.grid_auto_rows().0;
+    // Only an `auto-fit` track reads the occupancy, to know whether it
+    // collapses.
+    let occupied_columns = if explicit_columns.auto_fit.is_some() {
+        occupied_tracks(&placement.areas, placement.column_range, |area| area.column)
+    } else {
+        Vec::new()
+    };
+    let occupied_rows = if explicit_rows.auto_fit.is_some() {
+        occupied_tracks(&placement.areas, placement.row_range, |area| area.row)
+    } else {
+        Vec::new()
+    };
     let (first_column, column_specs) = build_axis_tracks(
         &explicit_columns,
         &auto_columns[..auto_columns.len().min(MAX_MATERIALIZED_TRACKS)],
         placement.column_range,
-        &placement.occupied_columns,
+        &occupied_columns,
     );
     let (first_row, row_specs) = build_axis_tracks(
         &explicit_rows,
         &auto_rows[..auto_rows.len().min(MAX_MATERIALIZED_TRACKS)],
         placement.row_range,
-        &placement.occupied_rows,
+        &occupied_rows,
     );
     let mut items = in_flow
         .into_iter()

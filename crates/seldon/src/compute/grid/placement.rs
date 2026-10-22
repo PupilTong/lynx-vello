@@ -35,7 +35,7 @@ pub(super) struct TrackSpan {
 
 impl TrackSpan {
     #[inline]
-    fn len(self) -> usize {
+    pub(super) fn len(self) -> usize {
         usize::try_from(self.end - self.start).unwrap_or(0)
     }
 
@@ -65,8 +65,6 @@ pub(super) struct PlacementResult {
     pub(super) areas: Vec<GridArea>,
     pub(super) column_range: TrackSpan,
     pub(super) row_range: TrackSpan,
-    pub(super) occupied_columns: Vec<bool>,
-    pub(super) occupied_rows: Vec<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,7 +146,11 @@ pub(super) fn place_items<I: PlacementInput>(
     let explicit_row_range = explicit_range(explicit_rows);
 
     if inputs.is_empty() {
-        return finish_result(Vec::new(), explicit_column_range, explicit_row_range);
+        return PlacementResult {
+            areas: Vec::new(),
+            column_range: explicit_column_range,
+            row_range: explicit_row_range,
+        };
     }
 
     let mut items = Vec::with_capacity(inputs.len());
@@ -223,7 +225,11 @@ pub(super) fn place_items<I: PlacementInput>(
         } else {
             (primary_range, all_cross_range)
         };
-        return finish_result(areas, column_range, row_range);
+        return PlacementResult {
+            areas,
+            column_range,
+            row_range,
+        };
     }
 
     let occupancy_cross_min = all_cross_range.start.min(step_two_cross_range.start);
@@ -425,7 +431,11 @@ pub(super) fn place_items<I: PlacementInput>(
     } else {
         (primary_range, cross_range)
     };
-    finish_result(areas, column_range, row_range)
+    PlacementResult {
+        areas,
+        column_range,
+        row_range,
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -847,47 +857,6 @@ fn usize_to_i32(value: usize) -> i32 {
     i32::try_from(value).expect("grid track count is clamped to 20,000")
 }
 
-fn finish_result(
-    areas: Vec<GridArea>,
-    column_range: TrackSpan,
-    row_range: TrackSpan,
-) -> PlacementResult {
-    let occupied_columns = occupied_tracks(&areas, column_range, |area| area.column);
-    let occupied_rows = occupied_tracks(&areas, row_range, |area| area.row);
-    PlacementResult {
-        areas,
-        column_range,
-        row_range,
-        occupied_columns,
-        occupied_rows,
-    }
-}
-
-fn occupied_tracks<Select>(areas: &[GridArea], range: TrackSpan, select: Select) -> Vec<bool>
-where
-    Select: Fn(&GridArea) -> TrackSpan,
-{
-    let len = range.len();
-    if len == 0 {
-        return Vec::new();
-    }
-    let mut differences = vec![0_i64; len + 1];
-    for area in areas {
-        let span = select(area);
-        let start = usize::try_from(span.start - range.start).unwrap();
-        let end = usize::try_from(span.end - range.start).unwrap();
-        differences[start] += 1;
-        differences[end] -= 1;
-    }
-    let mut occupied = Vec::with_capacity(len);
-    let mut covering = 0_i64;
-    for difference in differences.into_iter().take(len) {
-        covering += difference;
-        occupied.push(covering > 0);
-    }
-    occupied
-}
-
 #[inline]
 fn bit_mask(start: usize, end: usize) -> u64 {
     debug_assert!(start < end && end <= u64::BITS as usize);
@@ -970,6 +939,7 @@ fn last_set_bit(words: &[u64], start: usize, end: usize) -> Option<usize> {
 mod tests {
     use GridPlacement::{Auto as A, Line as L, Span as S};
 
+    use super::super::tracks::occupied_tracks;
     use super::*;
 
     const fn tracks(start: i32, end: i32) -> TrackSpan {
@@ -1079,7 +1049,10 @@ mod tests {
         assert_eq!(result.column_range, tracks(-2, 2));
         assert_eq!(result.areas[0].column, tracks(-2, -1));
         assert_eq!(result.areas[1].column, tracks(-1, 0));
-        assert_eq!(result.occupied_columns, [true, true, false, false]);
+        assert_eq!(
+            occupied_tracks(&result.areas, result.column_range, |area| area.column),
+            [true, true, false, false]
+        );
     }
 
     #[test]
@@ -1093,8 +1066,14 @@ mod tests {
         let placed = input(L(1), L(3), L(1), L(2));
         let result = place_items(&[placed, placed], 2, 1, GridAutoFlow::ROW);
         assert_eq!(result.areas[0], result.areas[1]);
-        assert_eq!(result.occupied_columns, [true, true]);
-        assert_eq!(result.occupied_rows, [true]);
+        assert_eq!(
+            occupied_tracks(&result.areas, result.column_range, |area| area.column),
+            [true, true]
+        );
+        assert_eq!(
+            occupied_tracks(&result.areas, result.row_range, |area| area.row),
+            [true]
+        );
     }
 
     #[test]
