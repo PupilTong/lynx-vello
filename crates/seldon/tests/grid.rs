@@ -1957,6 +1957,29 @@ fn cross_size_dependent_ratio_item_forces_one_column_feedback_rerun() {
     assert_size(tree.layout(fixed).size, Size::new(40.0, 80.0));
 }
 
+/// css-grid-2 §12.1 step 3 for an item that does not stretch into its row:
+/// its percentage width, resolved against the column, gives it a height
+/// through its preferred aspect ratio, and that height transferred back is a
+/// min-content width other than the one the column was sized with, so the
+/// columns are sized again.
+#[test]
+fn unstretched_ratio_item_resolved_against_its_column_feeds_the_column_back() {
+    let mut tree = TestTree::default();
+    let style = TestStyle {
+        size: Size::new(size_pct(0.5), size_auto()),
+        aspect_ratio: ratio(1.0, 1.0),
+        align_self: self_align(AlignFlags::START),
+        justify_self: self_align(AlignFlags::START),
+        ..grid_default()
+    };
+    let item = tree.push_leaf(style, Size::new(10.0, 10.0), Size::new(30.0, 30.0));
+    let root = tree.push_grid(grid_style(&[support::track_min_content()], &[]), vec![item]);
+
+    definite_layout(&tree, root, 200.0, 200.0);
+
+    assert_size(tree.layout(item).size, Size::new(2.5, 2.5));
+}
+
 #[test]
 fn container_baseline_prefers_first_row_synthesis_over_later_baseline_group() {
     let mut tree = TestTree::default();

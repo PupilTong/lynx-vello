@@ -171,13 +171,7 @@ where
 
     let cross = axis.other();
     let cross_area = cross_area_size(item, axis, cross_tracks);
-    let cross_stretches = match cross {
-        Axis::Horizontal => item.justify_self,
-        Axis::Vertical => item.align_self,
-    } == AlignFlags::STRETCH
-        && cross.size(item.preferred_size).is_none()
-        && !item.margin_auto.start(cross)
-        && !item.margin_auto.end(cross);
+    let cross_stretches = item.stretches(cross);
     let mut known = crate::geometry::Size::NONE;
     let resolved_cross = cross
         .size(item.preferred_size)

@@ -1522,7 +1522,9 @@ dispatches to it.
    baseline shims, distribute item contributions in span order (including
    infinitely-growable and non-affected-track phases), maximize tracks,
    expand `fr` (§12.7), and stretch `auto` tracks. A bounded cross-axis
-   feedback pass detects contribution changes after row sizing. While
+   feedback pass detects contribution changes after row sizing, re-measuring
+   only the items whose min-content width can read the sized rows
+   (`column_feedback_reads_rows`). While
    columns are initially sized, only rows with definite max track sizing
    functions provide finite block-axis space; other rows are infinite per
    §12.1. This per-run columns→rows correction is independent of the outer

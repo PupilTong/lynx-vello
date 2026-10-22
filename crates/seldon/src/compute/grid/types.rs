@@ -49,6 +49,21 @@ impl<N> GridItem<N> {
         usize::try_from(span.end - span.start).unwrap_or(1).max(1)
     }
 
+    /// Whether the item's size in `axis` is its area's: it stretches there
+    /// (css-align-3 §6.1 `stretch`) with no preferred size and no `auto`
+    /// margin to take the space instead.
+    #[inline]
+    pub(super) fn stretches(&self, axis: Axis) -> bool {
+        let alignment = match axis {
+            Axis::Horizontal => self.justify_self,
+            Axis::Vertical => self.align_self,
+        };
+        alignment == AlignFlags::STRETCH
+            && axis.size(self.preferred_size).is_none()
+            && !self.margin_auto.start(axis)
+            && !self.margin_auto.end(axis)
+    }
+
     /// The row's baseline-sharing group the item joins (css-align-3 §9.2),
     /// if any: its `align-self` is `baseline` or `last baseline` and neither
     /// block-axis margin is `auto`, which would take the alignment instead.

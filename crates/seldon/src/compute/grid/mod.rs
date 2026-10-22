@@ -393,30 +393,19 @@ fn run_track_sizing<T>(
         .tracks
         .iter()
         .any(|track| track.min.is_intrinsic() || track.max.is_intrinsic() || track.is_flexible());
-    let mut before_row_min_content = Vec::new();
-    if needs_column_feedback {
-        before_row_min_content.reserve(items.len());
-        for item in items.iter_mut() {
-            let range = columns.span_indices(item.area.column.start, item.area.column.end);
-            let affects_intrinsic_column = columns.tracks[range].iter().any(|track| {
-                track.min.is_intrinsic() || track.max.is_intrinsic() || track.is_flexible()
-            });
-            before_row_min_content.push(
-                (affects_intrinsic_column && item.preferred_behaves_auto_or_depends.width).then(
-                    || {
-                        probe_raw_min_content(
-                            tree,
-                            state,
-                            item,
-                            Axis::Horizontal,
-                            Some(initial_column_cross_tracks),
-                        )
-                    },
-                ),
+    for item in items.iter_mut() {
+        // The min-content width the feedback check below compares with: the
+        // one against the row maximums, before the item is resolved against
+        // its column. Column sizing has usually measured it already.
+        if needs_column_feedback && column_feedback_reads_rows(item, columns) {
+            probe_raw_min_content(
+                tree,
+                state,
+                item,
+                Axis::Horizontal,
+                Some(initial_column_cross_tracks),
             );
         }
-    }
-    for item in items.iter_mut() {
         let width = columns.area_size(item.area.column.start, item.area.column.end);
         refresh_item_basis(tree, item, Size::new(Some(width), None));
         item.clear_contribution_cache(Axis::Vertical);
@@ -439,10 +428,15 @@ fn run_track_sizing<T>(
 
     let mut column_feedback_changed = false;
     if needs_column_feedback {
-        for (item, before) in items.iter_mut().zip(before_row_min_content) {
-            let Some(before) = before else {
+        for item in items.iter_mut() {
+            if !column_feedback_reads_rows(item, columns) {
                 continue;
-            };
+            }
+            // Row sizing reads and clears only the vertical measurements.
+            let before = item
+                .raw_min_content
+                .width
+                .expect("measured before row sizing");
             item.clear_contribution_cache(Axis::Horizontal);
             let after = probe_raw_min_content(
                 tree,
@@ -502,6 +496,37 @@ fn run_track_sizing<T>(
             scratch,
         );
     }
+}
+
+/// Whether css-grid-2 §12.1 step 3 re-measures the item: its min-content
+/// width feeds an intrinsic or flexible column, and measured against the
+/// sized rows it may differ from the measurement against the row maximums
+/// that sized the columns.
+///
+/// Between the two measurements only the row area and the item's resolved
+/// values can move. The row area reaches the item's min-content width as a
+/// known height only when the item stretches into it; as a parent height its
+/// own percentages are ignored under `SizingMode::IgnoreSizeStyles`, and as
+/// an available height no algorithm reads it for a box whose own height is
+/// indefinite. The resolved values move only for an item that is not
+/// basis-free, re-resolved against its column width in between: a height
+/// transferred through a preferred aspect ratio, a height an intrinsic
+/// keyword fills in during row sizing, or a preferred height that grows
+/// with a percentage padding under `box-sizing: content-box`. The answer is
+/// the same before and after row sizing, since a preferred height appears in
+/// between only through the ratio or the keyword.
+fn column_feedback_reads_rows<N>(item: &GridItem<N>, columns: &TrackSet) -> bool {
+    let range = columns.span_indices(item.area.column.start, item.area.column.end);
+    item.preferred_behaves_auto_or_depends.width
+        && columns.tracks[range].iter().any(|track| {
+            track.min.is_intrinsic() || track.max.is_intrinsic() || track.is_flexible()
+        })
+        && (item.stretches(Axis::Vertical)
+            || (!item.basis_free
+                && (item.aspect_ratio.is_some()
+                    || item.intrinsic.needs_min_content(Axis::Vertical)
+                    || item.intrinsic.needs_max_content(Axis::Vertical)
+                    || item.preferred_size.height.is_some())))
 }
 
 /// What one axis of the provisional track-sizing run was sized against, and
