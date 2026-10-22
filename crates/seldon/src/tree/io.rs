@@ -132,8 +132,10 @@ pub struct LayoutInput {
     /// measurement must report it exactly. Without the request a flex
     /// container's measurement may give the item its last baseline comes
     /// from one synthesized from that item's border box, when its cross-size
-    /// pass did not otherwise measure the item. A commit always reports the
-    /// last baseline exactly, from the committed children, and needs no
+    /// pass did not otherwise measure the item; without this request and
+    /// [`Self::reads_first_baseline`] it reports no baseline at all, and
+    /// returns as soon as its own size is decided. A commit always reports
+    /// the last baseline exactly, from the committed children, and needs no
     /// request.
     ///
     /// Set only by a caller that reads the value: a flex line's

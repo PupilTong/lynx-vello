@@ -1423,7 +1423,11 @@ the engine we're succeeding.
 4. **Resolving flexible lengths** (§9.7) — the freeze/unfreeze grow/shrink
    loop per line → target main sizes.
 5. **Cross sizing** (§9.4) — hypothetical cross sizes (probes with known
-   main size), line cross sizes, `align-content: stretch`.
+   main size), line cross sizes, `align-content: stretch`. The container's
+   own cross size is decided here, and with it its whole size: a
+   measurement whose caller reads neither baseline returns that size now,
+   before the second sizing pass an indefinite width runs and before the
+   alignment steps below, whose results only a commit or a baseline reads.
 6. **Main-axis alignment** (§9.5) — auto margins, then `justify-content`
    with `gap`.
 7. **Cross-axis alignment** (§9.6) — auto margins, `align-self`,

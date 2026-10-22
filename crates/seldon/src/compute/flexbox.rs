@@ -2398,6 +2398,18 @@ where
         axes.cross
             .set_size(&mut inner_size, Some((outer_cross - inset_cross).max(0.0)));
     }
+    // Both axes of the container's size are final here. What follows places
+    // the items in it and reads their baselines, so a measurement whose
+    // caller reads neither baseline has nothing left to compute: that skips
+    // the second sizing pass an indefinite width runs, and with it the
+    // children's measurements at the decided size.
+    if matches!(input.goal, LayoutGoal::Measure(_))
+        && !first_baseline_requested
+        && !last_baseline_requested
+    {
+        let outer_size = outer_size.unwrap_or(Size::ZERO);
+        return LayoutOutput::new(outer_size, padding_box_end(outer_size, border));
+    }
     if cross_was_definite {
         let resolved_cross_gap =
             resolve_gap_axis(axes.cross.size(gap_value), axes.cross.size(inner_size));
@@ -2500,6 +2512,7 @@ where
     let outer_size = outer_size.unwrap_or(Size::ZERO);
     let inner_size = inner_size.unwrap_or(Size::ZERO);
     let content_origin = Point::new(border.left + padding.left, border.top + padding.top);
+    // A measurement reaches here only when its caller reads a baseline.
     if matches!(input.goal, LayoutGoal::Measure(_)) {
         // Layout containment exports no baseline (css-contain-2 §3.2).
         let [first, last] = if layout_contained {
