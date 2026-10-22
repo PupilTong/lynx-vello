@@ -195,9 +195,13 @@ drained at the end of the public mutation that raised them (the standard's
 its handler lives inside the `Document` being mutated. Dispatch clones an
 `Rc<dyn CustomElement<T>>` out of the registry rather than vacating the slot,
 so a callback on `x-row` can create another `x-row` instead of hitting a
-re-entrancy panic. Scopes are watermarks into one flattened element queue while
-the per-element reaction queue is shared across them, reproducing a browser's
-`A.disc, A.conn, B.disc, B.conn` for a subtree move. Three `Node` fields carry
+re-entrancy panic. One queue holds every pending reaction with its element, in
+enqueue order, and a scope is a watermark into it: a scope runs its own tail in
+order, a nested scope's before the enclosing one resumes. That is not the
+standard's per-element grouping (user ruling, 2026-10-22): a subtree move runs
+`A.disc, B.disc, A.conn, B.conn` where a browser runs `A.disc, A.conn, B.disc,
+B.conn`, and a callback's mutation of an element whose reaction is still
+pending runs the new reaction first. Three `Node` fields carry
 the definition pointer, the `Uncustomized`/`Constructing`/`Custom` state and a
 conservative shadow-including-subtree summary; all fit in the existing tail
 padding (stride unchanged, asserted). The summary rejects a lifecycle walk at
