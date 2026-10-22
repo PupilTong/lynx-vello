@@ -109,9 +109,12 @@ impl ContainedAxes {
     }
 }
 
+/// The size-contained axes of a box whose effective containment is
+/// `containment` (its [`CoreStyle::containment`], which the caller derives
+/// once and reads for layout containment too), each with its
+/// `contain-intrinsic-size` substitute from `style`.
 #[must_use]
-pub(crate) fn contained_axes<S: CoreStyle>(style: &S) -> ContainedAxes {
-    let containment = style.containment();
+pub(crate) fn contained_axes<S: CoreStyle>(containment: Contain, style: &S) -> ContainedAxes {
     ContainedAxes(Size::new(
         containment
             .contains(Contain::INLINE_SIZE)
@@ -288,12 +291,12 @@ mod tests {
     #[test]
     #[allow(clippy::float_cmp)]
     fn contained_axes_projects_size_containment_per_axis() {
-        let both = contained_axes(&SizeContained);
+        let both = contained_axes(SizeContained.containment(), &SizeContained);
         assert_eq!(both.extents(), Size::new(Some(50.0), Some(30.0)));
         assert_eq!(both.all(), Some(Size::new(50.0, 30.0)));
         assert!(both.any());
 
-        let none = contained_axes(&LayoutOnly);
+        let none = contained_axes(LayoutOnly.containment(), &LayoutOnly);
         assert_eq!(none.extents(), Size::NONE);
         assert_eq!(none.all(), None);
         assert!(!none.any());
@@ -301,7 +304,7 @@ mod tests {
         // Only the width is contained, and the *height*'s
         // `contain-intrinsic-*` is not consulted for an axis that measures its
         // contents.
-        let inline = contained_axes(&InlineSizeOnly);
+        let inline = contained_axes(InlineSizeOnly.containment(), &InlineSizeOnly);
         assert_eq!(inline.width(), Some(0.0));
         assert_eq!(inline.height(), None);
         assert_eq!(inline.all(), None);

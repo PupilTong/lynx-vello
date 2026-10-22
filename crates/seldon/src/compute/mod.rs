@@ -36,7 +36,8 @@ where
     Style: crate::style::CoreStyle,
     Measure: FnMut(LeafMeasureInput) -> LeafMetrics,
 {
-    leaf::compute_leaf_layout_with_measurement(input, style, None, true, measure)
+    let contained = crate::style::containment::contained_axes(style.containment(), style);
+    leaf::compute_leaf_layout_with_measurement(input, style, contained, None, true, measure)
 }
 
 /// The used margins of a box whose placement its host performs itself.

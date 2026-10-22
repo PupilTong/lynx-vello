@@ -9,7 +9,7 @@ use super::util::{
 };
 use crate::geometry::{Edges, Point, Size};
 use crate::style::CoreStyle;
-use crate::style::containment::contained_axes;
+use crate::style::containment::{ContainedAxes, contained_axes};
 use crate::tree::{
     AvailableSpace, LayoutGoal, LayoutInput, LayoutOutput, RequestedAxis, SizingMode,
 };
@@ -32,7 +32,8 @@ pub fn compute_leaf_layout<Style: CoreStyle>(
     // `contain: inline-size` a natural ratio would carry an authored height
     // straight into the width the containment exists to keep contents out of.
     // An authored `aspect-ratio` is style rather than contents and survives.
-    let natural_aspect_ratio = if contained_axes(style).any() {
+    let contained = contained_axes(style.containment(), style);
+    let natural_aspect_ratio = if contained.any() {
         None
     } else {
         natural_size.aspect_ratio()
@@ -40,6 +41,7 @@ pub fn compute_leaf_layout<Style: CoreStyle>(
     compute_leaf_layout_with_measurement(
         input,
         style,
+        contained,
         natural_aspect_ratio,
         false,
         |measure_input| natural_size.measure(measure_input),
@@ -47,9 +49,12 @@ pub fn compute_leaf_layout<Style: CoreStyle>(
 }
 
 #[allow(clippy::too_many_lines)]
+/// `contained` is `style`'s size-contained axes, which the caller has
+/// already derived.
 pub(crate) fn compute_leaf_layout_with_measurement<Style, Measure>(
     input: LayoutInput,
     style: &Style,
+    contained: ContainedAxes,
     natural_aspect_ratio: Option<f32>,
     requires_known_measurement: bool,
     mut measure: Measure,
@@ -64,7 +69,6 @@ where
     };
 
     let LeafSizing {
-        margin,
         border,
         padding_border_size,
         content_origin,
@@ -82,7 +86,6 @@ where
         padding_border_size,
     );
 
-    let contained = contained_axes(style);
     if (measurement_axis.is_some_and(|axis| axis != RequestedAxis::Both)
         || (!requires_known_measurement && !contained.any()))
         && node_size.width.is_some()
@@ -101,6 +104,9 @@ where
         );
     }
 
+    // Read only by the measurement's available space, so resolved only once
+    // the box goes on to measure its contents.
+    let margin = auto_edges_to_zero(resolve_margins(style.margin(), input.parent_size.width));
     let mut measure_known_dimensions = Size::new(
         node_size
             .width
@@ -216,7 +222,14 @@ where
     Style: CoreStyle,
     Measure: FnMut(LeafMeasureInput) -> LeafMetrics,
 {
-    compute_leaf_layout_with_measurement(input, style, natural_aspect_ratio, true, measure)
+    compute_leaf_layout_with_measurement(
+        input,
+        style,
+        contained_axes(style.containment(), style),
+        natural_aspect_ratio,
+        true,
+        measure,
+    )
 }
 
 /// Content-box constraints consumed by seldon's closed leaf engines.
@@ -433,7 +446,6 @@ impl PreferredAspectRatio {
 /// Resolved box-model and sizing inputs reused throughout one leaf-layout
 /// call; all optional dimensions are border-box sizes.
 struct LeafSizing {
-    margin: Edges<f32>,
     border: Edges<f32>,
     padding_border_size: Size<f32>,
     content_origin: Point<f32>,
@@ -454,7 +466,6 @@ fn resolve_leaf_sizing(
     natural_aspect_ratio: Option<f32>,
 ) -> LeafSizing {
     let inline_basis = input.parent_size.width;
-    let margin = auto_edges_to_zero(resolve_margins(style.margin(), inline_basis));
     let padding = resolve_padding(style.padding(), inline_basis);
     let border = resolve_border(&style.border());
     let padding_border_size = Size::new(
@@ -522,7 +533,6 @@ fn resolve_leaf_sizing(
     };
 
     LeafSizing {
-        margin,
         border,
         padding_border_size,
         content_origin,
@@ -787,9 +797,14 @@ mod tests {
                 let mut measurer = CachingMeasurer {
                     artifacts: &mut state.artifacts,
                 };
-                compute_leaf_layout_with_measurement(input, &EmptyStyle, None, true, |input| {
-                    measurer.measure(input)
-                })
+                compute_leaf_layout_with_measurement(
+                    input,
+                    &EmptyStyle,
+                    contained_axes(EmptyStyle.containment(), &EmptyStyle),
+                    None,
+                    true,
+                    |input| measurer.measure(input),
+                )
             },
         );
         assert_eq!(state.artifacts.shape_calls, 1);
@@ -813,9 +828,14 @@ mod tests {
             let mut probe_measurer = CachingMeasurer {
                 artifacts: &mut state.artifacts,
             };
-            compute_leaf_layout_with_measurement(probe_input, &EmptyStyle, None, true, |input| {
-                probe_measurer.measure(input)
-            })
+            compute_leaf_layout_with_measurement(
+                probe_input,
+                &EmptyStyle,
+                contained_axes(EmptyStyle.containment(), &EmptyStyle),
+                None,
+                true,
+                |input| probe_measurer.measure(input),
+            )
         };
         assert_eq!(probe.size, committed.size);
         assert_eq!(state.artifacts.shape_calls, 2);
@@ -1067,6 +1087,7 @@ mod tests {
         let output = compute_leaf_layout_with_measurement(
             LayoutInput::default(),
             &padded,
+            contained_axes(padded.containment(), &padded),
             None,
             true,
             paragraph,
@@ -1085,6 +1106,7 @@ mod tests {
             let output = compute_leaf_layout_with_measurement(
                 LayoutInput::default(),
                 &contained,
+                contained_axes(contained.containment(), &contained),
                 None,
                 true,
                 paragraph,
@@ -1107,9 +1129,14 @@ mod tests {
             RequestedAxis::Horizontal,
         );
 
-        let output = compute_leaf_layout_with_measurement(input, &style, None, true, |_input| {
-            panic!("a fully resolved single-axis probe must not measure content")
-        });
+        let output = compute_leaf_layout_with_measurement(
+            input,
+            &style,
+            contained_axes(style.containment(), &style),
+            None,
+            true,
+            |_input| panic!("a fully resolved single-axis probe must not measure content"),
+        );
 
         assert_eq!(output.size, Size::new(40.0, 20.0));
     }
@@ -1125,9 +1152,14 @@ mod tests {
             Size::new(false, false),
         );
 
-        let output = compute_leaf_layout_with_measurement(input, &style, None, false, |_input| {
-            panic!("a fully known replaced leaf must not measure content")
-        });
+        let output = compute_leaf_layout_with_measurement(
+            input,
+            &style,
+            contained_axes(style.containment(), &style),
+            None,
+            false,
+            |_input| panic!("a fully known replaced leaf must not measure content"),
+        );
 
         assert_eq!(output.size, Size::new(4.0, 4.0));
         assert_eq!(output.content_size, Size::new(20.0, 20.0));

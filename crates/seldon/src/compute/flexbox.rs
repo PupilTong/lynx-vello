@@ -2139,8 +2139,10 @@ where
     T::Style<'tree>: FlexboxStyle,
 {
     let style = tree.style(node);
-    let contained = contained_axes(&style);
-    let layout_contained = style.containment().contains(Contain::LAYOUT);
+    let containment = style.containment();
+    let contained = contained_axes(containment, &style);
+    let layout_contained = containment.contains(Contain::LAYOUT);
+    let scroll_container = is_scroll_container(style.overflow());
     let flex_wrap = style.flex_wrap();
     let axes = flex_axes(style.flex_direction(), flex_wrap, style.direction());
     let rtl = style.direction() == direction::T::Rtl;
@@ -2517,7 +2519,6 @@ where
             .with_last_baseline(last);
     }
 
-    let scroll_container = is_scroll_container(style.overflow());
     let mut content_size = perform_in_flow_layout(
         tree,
         state,
@@ -2557,7 +2558,13 @@ where
         )
     };
     content_size = content_size.zip_map(absolute_content_size, f32::max);
-    let content_size = own_scrollable_overflow(&style, outer_size, border, content_size);
+    let content_size = own_scrollable_overflow(
+        layout_contained,
+        scroll_container,
+        outer_size,
+        border,
+        content_size,
+    );
 
     let [first, last] = if layout_contained {
         [None, None]

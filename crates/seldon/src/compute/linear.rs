@@ -1312,8 +1312,10 @@ where
     T::Style<'tree>: LinearStyle,
 {
     let style = tree.style(node);
-    let contained = contained_axes(&style);
-    let layout_contained = style.containment().contains(Contain::LAYOUT);
+    let containment = style.containment();
+    let contained = contained_axes(containment, &style);
+    let layout_contained = containment.contains(Contain::LAYOUT);
+    let scroll_container = is_scroll_container(style.overflow());
     let axes = linear_axes(style.linear_direction(), style.direction());
     let align_items = style.align_items();
     let main_gravity = computed_main_gravity(style.justify_content(), axes);
@@ -1566,7 +1568,6 @@ where
         }
     }
 
-    let scroll_container = is_scroll_container(style.overflow());
     let mut content_size = commit_in_flow(
         tree,
         state,
@@ -1602,7 +1603,13 @@ where
             ),
         );
     }
-    let content_size = own_scrollable_overflow(&style, final_outer_size, border, content_size);
+    let content_size = own_scrollable_overflow(
+        layout_contained,
+        scroll_container,
+        final_outer_size,
+        border,
+        content_size,
+    );
     let baseline = if layout_contained {
         None
     } else {

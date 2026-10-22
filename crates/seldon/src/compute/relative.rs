@@ -15,7 +15,9 @@ use super::util::{
 use super::{AbsoluteContainingBlock, compute_absolute_layout_in};
 use crate::geometry::{Edges, Line, Point, Size};
 use crate::style::containment::{ContainedAxes, contained_axes};
-use crate::style::{CoreStyle, RELATIVE_REFERENCE_NONE, RELATIVE_REFERENCE_PARENT, RelativeStyle};
+use crate::style::{
+    Contain, CoreStyle, RELATIVE_REFERENCE_NONE, RELATIVE_REFERENCE_PARENT, RelativeStyle,
+};
 use crate::tree::{
     AvailableSpace, LayoutGoal, LayoutInput, LayoutOutput, LayoutTree, RequestedAxis, SizingMode,
 };
@@ -1464,7 +1466,10 @@ where
     T::Style<'tree>: RelativeStyle,
 {
     let style = tree.style(node);
-    let contained = contained_axes(&style);
+    let containment = style.containment();
+    let contained = contained_axes(containment, &style);
+    let layout_contained = containment.contains(Contain::LAYOUT);
+    let scroll_container = is_scroll_container(style.overflow());
     let layout_once = style.relative_layout_once() == relative_layout_once::T::True;
     let ResolvedContainerBox {
         preferred_definite: style_definite,
@@ -1646,7 +1651,6 @@ where
     }
 
     let content_origin = Point::new(border.left + padding.left, border.top + padding.top);
-    let scroll_container = is_scroll_container(style.overflow());
     let mut scrollable_size = commit_in_flow(
         tree,
         state,
@@ -1681,7 +1685,13 @@ where
     };
     scrollable_size = scrollable_size.zip_map(out_of_flow_size, f32::max);
 
-    let scrollable_size = own_scrollable_overflow(&style, outer_size, border, scrollable_size);
+    let scrollable_size = own_scrollable_overflow(
+        layout_contained,
+        scroll_container,
+        outer_size,
+        border,
+        scrollable_size,
+    );
     LayoutOutput::new(outer_size, scrollable_size)
 }
 

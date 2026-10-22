@@ -12,7 +12,7 @@ use stylo::values::specified::align::AlignFlags;
 
 use super::anchor;
 use crate::geometry::{Edges, Point, Size};
-use crate::style::{Contain, CoreStyle};
+use crate::style::CoreStyle;
 use crate::tree::{AvailableSpace, LayoutInput, LayoutTree, RequestedAxis, SizingMode};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1259,7 +1259,6 @@ pub(super) fn resolve_container_box(
     let padding = resolve_padding(style.padding(), input.parent_size.width);
     let border = resolve_border(&style.border());
     let box_inset = box_inset_size(padding, border);
-    let margin = auto_edges_to_zero(resolve_margins(style.margin(), input.parent_size.width));
     let (preferred, min, max) = if input.sizing_mode == SizingMode::IgnoreSizeStyles {
         (Size::NONE, Size::NONE, Size::NONE)
     } else {
@@ -1302,26 +1301,37 @@ pub(super) fn resolve_container_box(
             .height
             .map(|value| (value - box_inset.height).max(0.0)),
     );
-    let available_inner = Size::new(
-        inner.width.map_or_else(
-            || {
-                subtract_available_space(
-                    input.available_space.width,
-                    margin.horizontal_sum() + box_inset.width,
-                )
-            },
-            AvailableSpace::Definite,
-        ),
-        inner.height.map_or_else(
-            || {
-                subtract_available_space(
-                    input.available_space.height,
-                    margin.vertical_sum() + box_inset.height,
-                )
-            },
-            AvailableSpace::Definite,
-        ),
-    );
+    // The margins are read only for an axis whose inner size is unsettled,
+    // so a box whose two sizes are settled (a committed child with both
+    // known dimensions) resolves none.
+    let available_inner = if let (Some(width), Some(height)) = (inner.width, inner.height) {
+        Size::new(
+            AvailableSpace::Definite(width),
+            AvailableSpace::Definite(height),
+        )
+    } else {
+        let margin = auto_edges_to_zero(resolve_margins(style.margin(), input.parent_size.width));
+        Size::new(
+            inner.width.map_or_else(
+                || {
+                    subtract_available_space(
+                        input.available_space.width,
+                        margin.horizontal_sum() + box_inset.width,
+                    )
+                },
+                AvailableSpace::Definite,
+            ),
+            inner.height.map_or_else(
+                || {
+                    subtract_available_space(
+                        input.available_space.height,
+                        margin.vertical_sum() + box_inset.height,
+                    )
+                },
+                AvailableSpace::Definite,
+            ),
+        )
+    };
 
     ResolvedContainerBox {
         preferred_definite,
@@ -1439,18 +1449,20 @@ pub(super) fn padding_box_end(outer: Size<f32>, border: Edges<f32>) -> Size<f32>
 
 /// A box's own `content_size` from the reach of its contents, `interior`
 /// (border-box coordinates, accumulated from zero): the union with its
-/// padding box ([`padding_box_end`]), or, for a layout-contained box that
-/// is not a scroll container, the padding box alone — its descendants'
-/// overflow is ink overflow (css-contain-2 §3.3).
+/// padding box ([`padding_box_end`]), or, for a layout-contained box
+/// (`layout_contained`) that is not a scroll container (`scroll_container`),
+/// the padding box alone — its descendants' overflow is ink overflow
+/// (css-contain-2 §3.3).
 #[inline]
-pub(super) fn own_scrollable_overflow<S: CoreStyle>(
-    style: &S,
+pub(super) fn own_scrollable_overflow(
+    layout_contained: bool,
+    scroll_container: bool,
     outer: Size<f32>,
     border: Edges<f32>,
     interior: Size<f32>,
 ) -> Size<f32> {
     let floor = padding_box_end(outer, border);
-    if style.containment().contains(Contain::LAYOUT) && !is_scroll_container(style.overflow()) {
+    if layout_contained && !scroll_container {
         floor
     } else {
         interior.zip_map(floor, f32::max)

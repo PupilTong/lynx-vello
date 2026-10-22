@@ -773,8 +773,10 @@ where
     T::Style<'tree>: GridLanesStyle,
 {
     let style = tree.style(node);
-    let contained = contained_axes(&style);
-    let layout_contained = style.containment().contains(Contain::LAYOUT);
+    let containment = style.containment();
+    let contained = contained_axes(containment, &style);
+    let layout_contained = containment.contains(Contain::LAYOUT);
+    let scroll_container = is_scroll_container(style.overflow());
     let gap_value = style.gap();
     let rtl = style.direction() == direction::T::Rtl;
     // §2.3: with the orientation property still unspecified, only its initial
@@ -1108,7 +1110,6 @@ where
     // A horizontal stacking axis under `direction: rtl` stacks from the
     // inline-start edge, which is the right one.
     let stacking_reverse = rtl && stacking_axis == Axis::Horizontal;
-    let scroll_container = is_scroll_container(style.overflow());
     let mut content_size = Size::ZERO;
     for placed in &mut pass.items {
         let physical = flow_to_physical(
@@ -1214,7 +1215,13 @@ where
             };
         content_size = content_size.zip_map(absolute_content_size, f32::max);
     }
-    let content_size = own_scrollable_overflow(&style, outer_size, metrics.border, content_size);
+    let content_size = own_scrollable_overflow(
+        layout_contained,
+        scroll_container,
+        outer_size,
+        metrics.border,
+        content_size,
+    );
     LayoutOutput::new(outer_size, content_size)
         .with_first_baseline(first_baseline)
         .with_last_baseline(last_baseline)

@@ -1687,8 +1687,10 @@ where
     T::Style<'tree>: GridStyle,
 {
     let style = tree.style(node);
-    let contained_size = contained_axes(&style);
-    let layout_contained = style.containment().contains(Contain::LAYOUT);
+    let containment = style.containment();
+    let contained_size = contained_axes(containment, &style);
+    let layout_contained = containment.contains(Contain::LAYOUT);
+    let scroll_container = is_scroll_container(style.overflow());
     let gap_value = style.gap();
     let auto_flow = style.grid_auto_flow();
     let direction = style.direction();
@@ -1961,7 +1963,7 @@ where
         input.reads_first_baseline && !commits_layout,
         input.reads_last_baseline && !commits_layout,
         rtl,
-        is_scroll_container(style.overflow()),
+        scroll_container,
     );
     if commits_layout {
         for (document_index, child) in hidden.expect("commit keeps hidden grid items") {
@@ -1994,7 +1996,7 @@ where
                     rtl,
                     item_defaults,
                     crate::compute::scrollable_containing_block(
-                        is_scroll_container(style.overflow()),
+                        scroll_container,
                         outer_size,
                         metrics.border,
                         content_size,
@@ -2003,7 +2005,13 @@ where
             };
         content_size = content_size.zip_map(absolute_content_size, f32::max);
     }
-    let content_size = own_scrollable_overflow(&style, outer_size, metrics.border, content_size);
+    let content_size = own_scrollable_overflow(
+        layout_contained,
+        scroll_container,
+        outer_size,
+        metrics.border,
+        content_size,
+    );
     // Layout containment exports no baseline (css-contain-2 §3.2).
     let [first, last] = if layout_contained {
         [None, None]
