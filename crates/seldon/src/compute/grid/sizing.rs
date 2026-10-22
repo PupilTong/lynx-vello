@@ -2395,7 +2395,6 @@ mod tests {
             direction: direction::T::Ltr,
             preferred_behaves_auto_or_depends: Size::new(true, true),
             minimum_is_auto: Size::new(true, true),
-            inset: crate::geometry::Edges::uniform(None),
             raw_min_content: Size::NONE,
             raw_max_content: Size::NONE,
             minimum_contribution: Size::NONE,

@@ -656,7 +656,7 @@ where
             *lane = true;
         }
 
-        let relative = relative_item_offset(item);
+        let relative = relative_item_offset(tree, item, area);
         let mut layout = Layout::with_order(item.key.layout_order);
         layout.size = output.size;
         layout.content_size = output.content_size;

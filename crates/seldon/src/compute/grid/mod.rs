@@ -28,7 +28,7 @@ use sizing::{
     resolve_item_intrinsic_dimensions, size_tracks,
 };
 use stylo::computed_values::direction;
-use stylo::values::computed::{Inset, PositionProperty, Size as StyleSize};
+use stylo::values::computed::{PositionProperty, Size as StyleSize};
 use stylo::values::specified::align::AlignFlags;
 use tracks::{
     ExpandedTemplate, MAX_MATERIALIZED_TRACKS, build_axis_tracks, expand_template, occupied_tracks,
@@ -221,18 +221,13 @@ where
     } else {
         defaults.justify_items
     };
-    let inset = style.inset();
-    // No size, min/max size, margin, padding or inset is a percentage (or an
-    // anchor function) and no size is an intrinsic keyword, so the geometry
-    // is the same against every basis and nothing fills it in later:
+    // No size, min/max size, margin or padding is a percentage (or an anchor
+    // function) and no size is an intrinsic keyword, so the geometry is the
+    // same against every basis and nothing fills it in later:
     // `refresh_item_basis` leaves it as it is.
     let mut geometry = geometry;
     geometry.basis_free = !geometry.intrinsic.has_intrinsic()
-        && !crate::style::box_model_reads_percentage_basis(style)
-        && !inset_reads_basis(inset.left)
-        && !inset_reads_basis(inset.right)
-        && !inset_reads_basis(inset.top)
-        && !inset_reads_basis(inset.bottom);
+        && !crate::style::box_model_reads_percentage_basis(style);
     GridItem {
         geometry,
         key,
@@ -259,7 +254,6 @@ where
             minimum_behaves_auto(raw_min_size.width),
             minimum_behaves_auto(raw_min_size.height),
         ),
-        inset: resolve_insets(inset, percentage_basis),
         raw_min_content: Size::NONE,
         raw_max_content: Size::NONE,
         minimum_contribution: Size::NONE,
@@ -268,19 +262,6 @@ where
         measured_baseline: None,
         measured_last_descent: None,
         baseline_shim: 0.0,
-    }
-}
-
-/// Whether an inset resolves against a percentage basis: a percentage, or
-/// (conservatively) an anchor function.
-#[inline]
-fn inset_reads_basis(value: &Inset) -> bool {
-    match value {
-        Inset::LengthPercentage(lp) => lp.has_percentage(),
-        Inset::Auto => false,
-        Inset::AnchorFunction(_)
-        | Inset::AnchorSizeFunction(_)
-        | Inset::AnchorContainingCalcFunction(_) => true,
     }
 }
 
@@ -356,13 +337,18 @@ fn run_track_sizing<T>(
     justify_content: AlignFlags,
     align_content: AlignFlags,
     scratch: &mut IntrinsicSizingScratch,
+    // The items are as `resolve_grid_item` built them — resolved against no
+    // basis, nothing measured — which every other run starts by restoring.
+    items_fresh: bool,
 ) where
     T: LayoutTree,
 {
-    for item in items.iter_mut() {
-        refresh_item_basis(tree, item, Size::NONE);
-        item.clear_contribution_cache(Axis::Horizontal);
-        item.clear_contribution_cache(Axis::Vertical);
+    if !items_fresh {
+        for item in items.iter_mut() {
+            refresh_item_basis(tree, item, Size::NONE);
+            item.clear_contribution_cache(Axis::Horizontal);
+            item.clear_contribution_cache(Axis::Vertical);
+        }
     }
     initialize_tracks(rows, row_specs, inner_basis.height, gap.height);
     let all_rows_definite = rows
@@ -955,7 +941,6 @@ fn refresh_item_basis<T>(
     }
     let style = tree.style(item.key.node);
     item.geometry = resolve_item_geometry(&style, percentage_basis);
-    item.inset = resolve_insets(style.inset(), percentage_basis);
 }
 
 fn physical_area<N>(
@@ -992,18 +977,23 @@ fn span_is_fixed(tracks: &TrackSet, span: crate::compute::grid::placement::Track
 }
 
 /// The visual offset `position: relative` adds to an item, taken from
-/// whichever inset of each pair is not `auto`.
-fn relative_item_offset<N>(item: &GridItem<N>) -> Point<f32> {
+/// whichever inset of each pair is not `auto`, its percentages resolved
+/// against `basis`, the item's area.
+fn relative_item_offset<T>(
+    tree: &T,
+    item: &GridItem<T::NodeId>,
+    basis: Size<Option<f32>>,
+) -> Point<f32>
+where
+    T: LayoutTree,
+{
     if item.position != PositionProperty::Relative {
         return Point::ZERO;
     }
+    let inset = resolve_insets(tree.style(item.key.node).inset(), basis);
     Point::new(
-        item.inset
-            .left
-            .unwrap_or_else(|| -item.inset.right.unwrap_or(0.0)),
-        item.inset
-            .top
-            .unwrap_or_else(|| -item.inset.bottom.unwrap_or(0.0)),
+        inset.left.unwrap_or_else(|| -inset.right.unwrap_or(0.0)),
+        inset.top.unwrap_or_else(|| -inset.bottom.unwrap_or(0.0)),
     )
 }
 
@@ -1272,7 +1262,11 @@ where
         let item_rtl = item.direction == direction::T::Rtl;
         let offset_x = item_alignment_offset(free_x, item.justify_self, rtl, item_rtl);
         let offset_y = item_alignment_offset(free_y, item.align_self, false, false);
-        let relative = relative_item_offset(item);
+        let relative = relative_item_offset(
+            tree,
+            item,
+            Size::new(Some(area_size.width), Some(area_size.height)),
+        );
         // Aligned in its area; a relative offset moves it afterwards without
         // moving anything aligned against it.
         let aligned = Point::new(
@@ -1782,6 +1776,7 @@ where
         ..TrackSet::default()
     };
     let mut intrinsic_scratch = IntrinsicSizingScratch::default();
+    let mut items_fresh = true;
     // The available grid space (css-grid-2 §12.1; see `ContainerPrologue`).
     // A width the container does not have under a definite available width
     // is its fit-content width, from track-sizing runs under the two intrinsic
@@ -1807,6 +1802,7 @@ where
                     justify_content,
                     align_content,
                     &mut intrinsic_scratch,
+                    core::mem::take(&mut items_fresh),
                 );
                 columns.used_size()
             })
@@ -1838,6 +1834,7 @@ where
             justify_content,
             align_content,
             &mut intrinsic_scratch,
+            core::mem::take(&mut items_fresh),
         );
     }
     let provisional_track_size = Size::new(columns.used_size(), rows.used_size());
@@ -1911,6 +1908,7 @@ where
             justify_content,
             align_content,
             &mut intrinsic_scratch,
+            core::mem::take(&mut items_fresh),
         );
     }
     align_tracks(&mut columns, final_inner.width, justify_content);

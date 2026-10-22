@@ -7,7 +7,7 @@ use stylo::values::specified::align::AlignFlags;
 use super::placement::GridArea;
 pub(super) use crate::compute::util::Axis;
 use crate::compute::util::{BaselineSet, ItemGeometry, ItemKey};
-use crate::geometry::{Edges, Size};
+use crate::geometry::Size;
 
 /// One placed in-flow item with resolved box values and local contribution
 /// caches.  Contributions are invalidated only for the bounded column/row
@@ -23,7 +23,6 @@ pub(super) struct GridItem<N> {
     pub(super) direction: direction::T,
     pub(super) preferred_behaves_auto_or_depends: Size<bool>,
     pub(super) minimum_is_auto: Size<bool>,
-    pub(super) inset: Edges<Option<f32>>,
     pub(super) raw_min_content: Size<Option<f32>>,
     pub(super) raw_max_content: Size<Option<f32>>,
     pub(super) minimum_contribution: Size<Option<f32>>,
