@@ -575,9 +575,15 @@ impl<T> Node<T> {
     /// Borrowed as stored, but for a `style` or `class` value that a write
     /// through the parsed form left to be serialized on read
     /// (`attribute_text`).
+    ///
+    /// The name is compared as text against each stored name, so a read mints
+    /// no atom: an atom's text is its identity within one atom set.
     #[must_use]
     pub fn attribute(&self, name: &str) -> Option<Cow<'_, str>> {
-        self.attr_local_name(&LocalName::from(name))
+        self.attrs
+            .iter()
+            .find(|(candidate, _)| AsRef::<str>::as_ref(&candidate.0) == name)
+            .map(|(name, stored)| self.attribute_text(name, stored))
     }
 
     pub(crate) fn attr_local_name(&self, name: &LocalName) -> Option<Cow<'_, str>> {
