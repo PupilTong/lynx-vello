@@ -21,7 +21,7 @@ use super::single_axis::{
     set_flow_start,
 };
 use super::util::{
-    Axis, BaselineSet, ItemGeometry, ItemKey, OrderedItem, ResolvedContainerBox,
+    Axis, BaselineSet, ItemGeometry, OrderedItem, PendingLayoutItem, ResolvedContainerBox,
     accumulate_scrollable_overflow, axis_has_intrinsic_style, axis_sizing_is_stable, clamp_axis,
     container_content_independence, debug_assert_tree_order, edges_depend_on_inline_basis,
     is_scroll_container, normalize_content_alignment, normalize_item_alignment_with_last_baseline,
@@ -92,11 +92,12 @@ fn flex_axes(
 )]
 struct FlexItem<N> {
     geometry: ItemGeometry,
-    key: ItemKey<N>,
+    key: OrderedItem<N>,
     direction: direction::T,
-    position: PositionProperty,
     align_self: AlignFlags,
-    inset: Edges<Option<f32>>,
+    /// The `position: relative` offset its insets resolve to; zero for any
+    /// other position.
+    relative_offset: Point<f32>,
     flex_grow: f32,
     flex_shrink: f32,
     flex_basis: f32,
@@ -143,6 +144,18 @@ struct FlexItem<N> {
     cross_values_stable: bool,
 }
 super::util::impl_item_geometry!(FlexItem);
+
+impl<N> PendingLayoutItem<N> for FlexItem<N> {
+    #[inline]
+    fn ordered(&self) -> &OrderedItem<N> {
+        &self.key
+    }
+
+    #[inline]
+    fn ordered_mut(&mut self) -> &mut OrderedItem<N> {
+        &mut self.key
+    }
+}
 
 /// One consecutive range in the order-modified item array plus its resolved
 /// cross-axis size and position.
@@ -265,8 +278,8 @@ fn item_alignment_offset(
 /// side: its `direction` is `rtl` and the cross axis is the horizontal one,
 /// a column container's. Block axes are never reversed here.
 #[inline]
-fn item_reverses_cross_axis<N>(item: &FlexItem<N>, axes: Axes) -> bool {
-    axes.cross == Axis::Horizontal && item.direction == direction::T::Rtl
+fn item_reverses_cross_axis(direction: direction::T, axes: Axes) -> bool {
+    axes.cross == Axis::Horizontal && direction == direction::T::Rtl
 }
 
 /// `flex-basis: auto`, or a value that behaves as it: the flex basis is the
@@ -291,7 +304,7 @@ fn resolve_flex_basis(value: &FlexBasis, basis: Option<f32>) -> Option<f32> {
 
 fn resolve_item<N, S>(
     style: &S,
-    key: ItemKey<N>,
+    key: OrderedItem<N>,
     container_inner_size: Size<Option<f32>>,
     axes: Axes,
     rtl: bool,
@@ -311,12 +324,20 @@ where
         "flex-shrink must be finite and non-negative"
     );
     let geometry = resolve_item_geometry(style, container_inner_size);
+    let direction = style.direction();
+    let relative_offset = if style.position() == PositionProperty::Relative {
+        relative_offset(
+            resolve_insets(style.inset(), container_inner_size),
+            direction,
+        )
+    } else {
+        Point::ZERO
+    };
     FlexItem {
         geometry,
         key,
-        direction: style.direction(),
-        position: style.position(),
-        inset: resolve_insets(style.inset(), container_inner_size),
+        direction,
+        relative_offset,
         align_self: normalize_item_alignment_with_last_baseline(
             style.align_self().0,
             axes.cross == Axis::Horizontal,
@@ -1796,7 +1817,7 @@ fn align_items_cross_axis<N>(items: &mut [FlexItem<N>], lines: &[FlexLine], axes
                 free,
                 axes.cross_reverse,
                 axes.base.cross,
-                item_reverses_cross_axis(item, axes),
+                item_reverses_cross_axis(item.direction, axes),
             );
             item.cross_position =
                 alignment_offset + flow_start(item.margin, axes.cross, axes.cross_reverse);
@@ -1906,15 +1927,10 @@ where
             item.measured_baseline = output.first_baseline;
             item.measured_last_baseline = output.last_baseline;
 
-            let offset = if item.position == PositionProperty::Relative {
-                relative_offset(item.inset, item.direction)
-            } else {
-                Point::ZERO
-            };
             let mut location =
                 item_border_box_location(item, *line, axes, inner_size, content_origin);
-            location.x += offset.x;
-            location.y += offset.y;
+            location.x += item.relative_offset.x;
+            location.y += item.relative_offset.y;
 
             store_committed_child(
                 tree,
@@ -1932,14 +1948,22 @@ where
     content_size
 }
 
-fn static_position_for_absolute<N>(
-    item: &FlexItem<N>,
+/// The static position of an absolutely positioned child whose margin box
+/// is `margin` around a border box of `target_main` by `target_cross`, as if
+/// it were the container's sole flex item (css-flexbox-1 §4.1).
+#[allow(clippy::too_many_arguments)]
+fn static_position_for_absolute(
+    margin: Edges<f32>,
+    target_main: f32,
+    target_cross: f32,
+    align_self: AlignFlags,
+    direction: direction::T,
     axes: Axes,
     inner_size: Size<f32>,
     content_origin: Point<f32>,
     justify_content: AlignFlags,
 ) -> Point<f32> {
-    let free_main = axes.main.size(inner_size) - item.target_main - axes.main.sum(item.margin);
+    let free_main = axes.main.size(inner_size) - target_main - axes.main.sum(margin);
     let (leading_main, _) = alignment_distribution(
         justify_content,
         free_main,
@@ -1947,27 +1971,27 @@ fn static_position_for_absolute<N>(
         axes.main_reverse,
         axes.base.main,
     );
-    let main_flow = leading_main + flow_start(item.margin, axes.main, axes.main_reverse);
+    let main_flow = leading_main + flow_start(margin, axes.main, axes.main_reverse);
 
-    let free_cross = axes.cross.size(inner_size) - item.target_cross - axes.cross.sum(item.margin);
+    let free_cross = axes.cross.size(inner_size) - target_cross - axes.cross.sum(margin);
     let cross_alignment = item_alignment_offset(
-        item.align_self,
+        align_self,
         free_cross,
         axes.cross_reverse,
         axes.base.cross,
-        item_reverses_cross_axis(item, axes),
+        item_reverses_cross_axis(direction, axes),
     );
-    let cross_flow = cross_alignment + flow_start(item.margin, axes.cross, axes.cross_reverse);
+    let cross_flow = cross_alignment + flow_start(margin, axes.cross, axes.cross_reverse);
 
     let main_border = flow_to_physical(
         main_flow,
-        item.target_main,
+        target_main,
         axes.main.size(inner_size),
         axes.main_reverse,
     ) + axes.main.point(content_origin);
     let cross_border = flow_to_physical(
         cross_flow,
-        item.target_cross,
+        target_cross,
         axes.cross.size(inner_size),
         axes.cross_reverse,
     ) + axes.cross.point(content_origin);
@@ -1975,10 +1999,7 @@ fn static_position_for_absolute<N>(
     axes.main.set_point(&mut border_origin, main_border);
     axes.cross.set_point(&mut border_origin, cross_border);
 
-    Point::new(
-        border_origin.x - item.margin.left,
-        border_origin.y - item.margin.top,
-    )
+    Point::new(border_origin.x - margin.left, border_origin.y - margin.top)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2013,43 +2034,56 @@ where
     let mut hoisted = super::HoistedPass::new(padding_box_size, border, rtl);
     for pending in absolute_items {
         hoisted.before(tree, state, node, pending.document_index);
-        let key = pending.key();
-        let style = tree.style(key.node);
+        let style = tree.style(pending.node);
         // The static position is read only on an axis whose insets are both
         // `auto` (`absolute_layout`), so a box inset on both axes skips the
         // static-position measurement of its subtree.
-        let static_axes = super::util::needs_static_position(tree, key.node, &style);
+        let static_axes = super::util::needs_static_position(tree, pending.node, &style);
         let static_position = if static_axes.width || static_axes.height {
-            let mut item = resolve_item(&style, key, parent_size, axes, rtl, default_alignment);
-            let mut known = item.preferred_size;
+            let geometry = resolve_item_geometry(&style, parent_size);
+            let align_self = normalize_item_alignment_with_last_baseline(
+                style.align_self().0,
+                axes.cross == Axis::Horizontal,
+                rtl,
+            )
+            .unwrap_or(default_alignment);
+            let mut known = geometry.preferred_size;
             let available = inner_size.map(AvailableSpace::Definite);
             let output = measure_child(
                 tree,
                 state,
-                key.node,
+                pending.node,
                 known,
-                item.preferred_definite,
+                geometry.preferred_definite,
                 parent_size,
                 available,
                 SizingMode::ApplySizeStyles,
                 RequestedAxis::Both,
             );
-            let inset_size = item.box_floor();
+            let inset_size = geometry.box_floor();
             known.width = Some(clamp_axis(
                 output.size.width,
-                item.min_size.width,
-                item.max_size.width,
+                geometry.min_size.width,
+                geometry.max_size.width,
                 inset_size.width,
             ));
             known.height = Some(clamp_axis(
                 output.size.height,
-                item.min_size.height,
-                item.max_size.height,
+                geometry.min_size.height,
+                geometry.max_size.height,
                 inset_size.height,
             ));
-            item.target_main = axes.main.size(known).unwrap_or(0.0);
-            item.target_cross = axes.cross.size(known).unwrap_or(0.0);
-            static_position_for_absolute(&item, axes, inner_size, content_origin, justify_content)
+            static_position_for_absolute(
+                geometry.margin,
+                axes.main.size(known).unwrap_or(0.0),
+                axes.cross.size(known).unwrap_or(0.0),
+                align_self,
+                style.direction(),
+                axes,
+                inner_size,
+                content_origin,
+                justify_content,
+            )
         } else {
             Point::ZERO
         };
@@ -2063,11 +2097,11 @@ where
                 let mut layout = compute_absolute_layout_in(
                     tree,
                     state,
-                    key.node,
+                    pending.node,
                     AbsoluteContainingBlock::padding_box(padding_box_size, rtl),
                     move |_, _| static_in_padding_space,
                 );
-                layout.order = key.layout_order;
+                layout.order = pending.layout_order;
                 layout.location.x += border.left;
                 layout.location.y += border.top;
                 accumulate_scrollable_overflow(
@@ -2078,79 +2112,17 @@ where
                     style.overflow(),
                     Size::ZERO,
                 );
-                tree.set_unrounded_layout(state, key.node, layout);
+                tree.set_unrounded_layout(state, pending.node, layout);
                 hoisted.inside(tree, state, node, pending.document_index);
             }
             PositionProperty::Fixed => {
-                tree.set_static_position(state, key.node, static_position);
+                tree.set_static_position(state, pending.node, static_position);
             }
             PositionProperty::Static | PositionProperty::Relative | PositionProperty::Sticky => {}
         }
     }
     hoisted.rest(tree, state, node);
     content_size
-}
-
-struct CollectedFlexItems<N> {
-    generated: Vec<OrderedItem<N>>,
-    absolute_items: SmallVec<[OrderedItem<N>; 1]>,
-    hidden: SmallVec<[(usize, N); 1]>,
-}
-
-fn collect_flex_items<T>(
-    tree: &T,
-    node: T::NodeId,
-    goal: LayoutGoal,
-) -> CollectedFlexItems<T::NodeId>
-where
-    T: LayoutTree,
-{
-    let commits_layout = goal.commits();
-    let children = tree.flattened_children(node);
-    let mut generated = Vec::with_capacity(children.capacity_hint());
-    let mut absolute_items = SmallVec::new();
-    let mut hidden = SmallVec::new();
-
-    for (document_index, (child, child_style, display)) in children.enumerate() {
-        if display.is_none() {
-            if commits_layout {
-                hidden.push((document_index, child));
-            }
-            continue;
-        }
-        let pending = OrderedItem {
-            node: child,
-            document_index,
-            css_order: child_style.order(),
-            layout_order: if commits_layout {
-                u32::try_from(document_index).unwrap_or(u32::MAX)
-            } else {
-                0
-            },
-        };
-        if matches!(
-            child_style.position(),
-            PositionProperty::Absolute | PositionProperty::Fixed
-        ) {
-            if commits_layout {
-                absolute_items.push(pending);
-            }
-        } else {
-            generated.push(pending);
-        }
-    }
-
-    if commits_layout {
-        sort_and_assign_layout_order(&mut generated, &mut absolute_items);
-    } else if generated.iter().any(|item| item.css_order != 0) {
-        generated.sort_unstable_by_key(|item| (item.css_order, item.document_index));
-    }
-
-    CollectedFlexItems {
-        generated,
-        absolute_items,
-        hidden,
-    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -2206,36 +2178,65 @@ where
     let main_percentage_basis_was_indefinite = !axes.main.size(outer_definite);
     let gap_value = style.gap();
     let mut gap = resolve_gap(gap_value, inner_size);
-    let CollectedFlexItems {
-        generated,
-        absolute_items,
-        hidden,
-    } = collect_flex_items(tree, node, input.goal);
     let percentage_basis = inner_size.zip_map(
         outer_definite,
         |size, definite| {
             if definite { size } else { None }
         },
     );
+    let commits_layout = input.goal.commits();
+    let children = tree.flattened_children(node);
+    let mut items = Vec::with_capacity(children.capacity_hint());
+    let mut absolute_items: SmallVec<[OrderedItem<T::NodeId>; 1]> = SmallVec::new();
+    let mut hidden: SmallVec<[(usize, T::NodeId); 1]> = SmallVec::new();
+    let mut has_nonzero_order = false;
     // Whether any item aligns by a baseline: a re-resolution below reads the
     // same styles, so it keeps the answer.
     let mut baseline_aligned = false;
-    let mut items = generated
-        .into_iter()
-        .map(|item| {
-            let key = item.key();
-            let item = resolve_item(
-                &tree.style(key.node),
-                key,
-                percentage_basis,
-                axes,
-                rtl,
-                align_items,
-            );
-            baseline_aligned |= BaselineSet::of_alignment(item.align_self).is_some();
-            item
-        })
-        .collect::<Vec<_>>();
+    for (document_index, (child, child_style, display)) in children.enumerate() {
+        if display.is_none() {
+            if commits_layout {
+                hidden.push((document_index, child));
+            }
+            continue;
+        }
+        let css_order = child_style.order();
+        let pending = OrderedItem {
+            node: child,
+            document_index,
+            css_order,
+            layout_order: if commits_layout {
+                u32::try_from(document_index).unwrap_or(u32::MAX)
+            } else {
+                0
+            },
+        };
+        if matches!(
+            child_style.position(),
+            PositionProperty::Absolute | PositionProperty::Fixed
+        ) {
+            if commits_layout {
+                absolute_items.push(pending);
+            }
+            continue;
+        }
+        has_nonzero_order |= css_order != 0;
+        let item = resolve_item(
+            &child_style,
+            pending,
+            percentage_basis,
+            axes,
+            rtl,
+            align_items,
+        );
+        baseline_aligned |= BaselineSet::of_alignment(item.align_self).is_some();
+        items.push(item);
+    }
+    if commits_layout {
+        sort_and_assign_layout_order(&mut items, &mut absolute_items);
+    } else if has_nonzero_order {
+        items.sort_unstable_by_key(|item| (item.key.css_order, item.key.document_index));
+    }
     determine_flex_base_sizes(
         tree,
         state,
@@ -2706,14 +2707,15 @@ mod tests {
                 margin_auto: crate::compute::util::EdgeMask::default(),
                 basis_free: false,
             },
-            key: ItemKey {
+            key: OrderedItem {
                 node: TestRef(0),
+                document_index: 0,
+                css_order: 0,
                 layout_order: 0,
             },
             direction: direction::T::Ltr,
-            position: PositionProperty::Relative,
             align_self: AlignFlags::STRETCH,
-            inset: Edges::uniform(None),
+            relative_offset: Point::ZERO,
             flex_grow: 0.0,
             flex_shrink: 1.0,
             flex_basis: main,
@@ -2822,54 +2824,17 @@ mod tests {
     }
 
     fn static_cross(alignment: AlignFlags, wrap: flex_wrap::T) -> Point<f32> {
-        let mut candidate = item(20.0, 10.0);
-        candidate.align_self = alignment;
         static_position_for_absolute(
-            &candidate,
+            Edges::ZERO,
+            20.0,
+            10.0,
+            alignment,
+            direction::T::Ltr,
             row_axes(wrap),
             Size::new(100.0, 50.0),
             Point::new(5.0, 7.0),
             AlignFlags::FLEX_START,
         )
-    }
-
-    #[test]
-    fn measure_collection_keeps_only_ordered_in_flow_items() {
-        let tree = TestTree;
-        let measured =
-            collect_flex_items(&tree, TestRef(0), LayoutGoal::Measure(RequestedAxis::Both));
-        assert!(measured.generated.iter().map(|item| item.node.0).eq([4, 1]));
-        assert!(measured.generated.iter().all(|item| item.layout_order == 0));
-        assert!(measured.absolute_items.is_empty());
-        assert!(measured.hidden.is_empty());
-        assert!(measured.generated.capacity() >= 4);
-        assert_eq!(
-            (
-                measured.absolute_items.inline_size(),
-                measured.hidden.inline_size()
-            ),
-            (1, 1)
-        );
-
-        let committed = collect_flex_items(&tree, TestRef(0), LayoutGoal::default());
-        assert!(
-            committed
-                .generated
-                .iter()
-                .map(|item| (item.node.0, item.layout_order))
-                .eq([(4, 0), (1, 2)])
-        );
-        assert!(
-            committed
-                .absolute_items
-                .iter()
-                .map(|item| (item.node.0, item.layout_order))
-                .eq([(2, 1)])
-        );
-        assert_eq!(committed.hidden[0].1.0, 3);
-        assert!(committed.generated.capacity() >= 4);
-        assert_eq!(committed.absolute_items.inline_size(), 1);
-        assert_eq!(committed.hidden.inline_size(), 1);
     }
 
     #[test]
