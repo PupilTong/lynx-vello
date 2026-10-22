@@ -346,23 +346,22 @@ impl Invited {
 
 /// The registrants a dispatch of `name` over `steps` calls, in the order
 /// they are called, which is the order of `registrants`: each one
-/// [`Invited`]. None for a path with no capture step. Every one is called at
-/// the path's top step and handed the same [`EncodedPath`]. See
-/// [`MainThreadRuntime::dispatch`].
+/// [`Invited`]. Every one is called at the path's top step — a path always
+/// has one capture step, its target's own — and handed the same
+/// [`EncodedPath`]. See [`MainThreadRuntime::dispatch`].
 ///
 /// Decided while the document is borrowed and before the walk takes a step,
-/// so they are read against the tree the path was computed over.
+/// so they are read against the tree the path was computed over; the
+/// [`Invited`] they were read from is answered beside them.
 fn realm_calls(
     document: &LynxDocument,
     steps: &terminus::link::event::EventSteps,
     name: &str,
     registrants: impl Iterator<Item = ListenerKey>,
-) -> SmallVec<[ListenerKey; 2]> {
-    if !steps.steps().iter().any(|step| step.capture) {
-        return SmallVec::new();
-    }
+) -> (SmallVec<[ListenerKey; 2]>, Invited) {
     let invited = Invited::read(document, steps, name);
-    registrants.filter(|&key| invited.contains(key)).collect()
+    let calls = registrants.filter(|&key| invited.contains(key)).collect();
+    (calls, invited)
 }
 
 /// The path every realm a dispatch calls is handed ([`encode_path`]): each
@@ -3153,22 +3152,25 @@ impl MainThreadRuntime {
         } else {
             name
         };
-        let registrants = self.core.realm_ids().map(RealmId::listener_key);
-        let (steps, calls) = {
+        let (steps, calls, invited) = {
             let slot = self.slot.borrow();
             let document = slot.document.as_ref().expect(DOCUMENT_EXISTS);
+            // A registration is filed under its lowercased name, and the
+            // components' walk looks a type up in its own spelling: those
+            // are the two questions, each asked once.
             if document.get(target).is_none()
-                || !(document.hears(registered) || document.observes_event(name))
+                || !(document.has_listeners_for(registered) || document.observes_event(name))
             {
                 return Ok(false);
             }
+            let registrants = self.core.realm_ids().map(RealmId::listener_key);
             let steps = document.event_steps(target, bubbles, composed);
-            let calls = realm_calls(document, &steps, registered, registrants);
-            (steps, calls)
+            let (calls, invited) = realm_calls(document, &steps, registered, registrants);
+            (steps, calls, invited)
         };
         // Taken at the first capture step, the path's top, where every
         // invited realm is called.
-        let mut calls = (!calls.is_empty()).then_some(calls);
+        let mut calls = (!calls.is_empty()).then_some((calls, invited));
 
         let mut walk = self
             .slot
@@ -3189,7 +3191,7 @@ impl MainThreadRuntime {
             if !outcome.capture {
                 continue;
             }
-            let Some(calls) = calls.take() else {
+            let Some((calls, invited)) = calls.take() else {
                 continue;
             };
             // Encoded once, with the document borrowed for the encoding
@@ -3202,7 +3204,15 @@ impl MainThreadRuntime {
             // left it: a realm no longer invited has nothing left to run. Read
             // once for every realm up to the next call that runs, since
             // between two calls only a call's listeners change the table.
-            let mut live: Option<Invited> = None;
+            //
+            // The first call starts from the read that chose the calls: the
+            // one thing that ran since is the first capture step's component
+            // handler, at the path's top, and none of today's components
+            // files or drops a registration or frees or moves a node there —
+            // a refresh view's, a swiper's or a text field's handler at its
+            // own shadow root reads the document and queues events. A
+            // handler that does must start this from `None`.
+            let mut live: Option<Invited> = Some(invited);
             for &key in &calls {
                 let invited = live.get_or_insert_with(|| {
                     Invited::read(

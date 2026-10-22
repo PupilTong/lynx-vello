@@ -10858,7 +10858,7 @@ fn the_page_realms_call_carries_exactly_the_path_it_always_did() {
     let encoded = |steps: &terminus::link::event::EventSteps| encode_path(document, steps).to_vec();
     for target in [inner, detached] {
         let steps = document.event_steps(target, true, true);
-        let calls = realm_calls(document, &steps, "tap", std::iter::once(page_realm));
+        let (calls, _) = realm_calls(document, &steps, "tap", std::iter::once(page_realm));
         assert_eq!(calls.as_slice(), [page_realm], "{target:?}");
         assert_eq!(
             encoded(&steps),
@@ -10868,7 +10868,9 @@ fn the_page_realms_call_carries_exactly_the_path_it_always_did() {
     }
     let steps = document.event_steps(shadowed, true, true);
     assert_eq!(
-        realm_calls(document, &steps, "tap", std::iter::once(page_realm)).len(),
+        realm_calls(document, &steps, "tap", std::iter::once(page_realm))
+            .0
+            .len(),
         1
     );
     let path = encoded(&steps);
@@ -10902,7 +10904,9 @@ fn the_page_realms_call_carries_exactly_the_path_it_always_did() {
     );
     let steps = document.event_steps(shadowed, true, false);
     assert!(
-        realm_calls(document, &steps, "tap", std::iter::once(page_realm)).is_empty(),
+        realm_calls(document, &steps, "tap", std::iter::once(page_realm))
+            .0
+            .is_empty(),
         "a non-composed path inside a shadow tree invites no realm with nothing there"
     );
 }
