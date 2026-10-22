@@ -166,6 +166,7 @@
 //!   all three are left out.
 
 use std::cell::RefCell;
+use std::rc::Rc;
 
 use rustc_hash::FxHashMap;
 use serde_json::Value;
@@ -227,12 +228,13 @@ pub(super) const CHANGE_EVENT: &str = "change";
 /// The event a pager fires when a finger lifts, with the page it heads for.
 pub(super) const WILL_CHANGE_EVENT: &str = "willchange";
 
-/// Installs the pager component under both of its tag names, queueing its
+/// Installs one pager component under both of its tag names, queueing its
 /// events on `events`. Must run before any element could carry either tag,
 /// which is [`Document::define`](terminus::link::Document::define)'s own precondition.
 pub(super) fn define(document: &mut LynxDocument, events: ComponentEvents) {
-    document.define(VIEWPAGER_TAG, Box::new(Viewpager::new(events.clone())));
-    document.define(X_VIEWPAGER_TAG, Box::new(Viewpager::new(events)));
+    let viewpager: Rc<dyn CustomElement<()>> = Rc::new(Viewpager::new(events));
+    document.define_shared(VIEWPAGER_TAG, Rc::clone(&viewpager));
+    document.define_shared(X_VIEWPAGER_TAG, viewpager);
 }
 
 /// The pager component: the `selectTab` method and the pager's events

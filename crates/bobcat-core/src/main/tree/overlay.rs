@@ -206,6 +206,7 @@
 
 use std::borrow::Cow;
 use std::cell::OnceCell;
+use std::rc::Rc;
 
 use terminus::link::html::dialog::{DIALOG_TAG, close, show_modal};
 use terminus::link::{CustomElement, Node, NodeId, ShadowRootMode, ShadowSheet};
@@ -262,14 +263,15 @@ const SHADOW_RULES: &str = r#"
 slot { display: contents; }
 "#;
 
-/// Installs the component under both tag names, over the queue its events go
+/// Installs one component under both tag names, over the queue its events go
 /// into. Must run after [`terminus::link::Document::define_html_elements`], whose
 /// `dialog` component the shadow dialog is, and before any element could
 /// carry either tag, which is
 /// [`Document::define`](terminus::link::Document::define)'s own precondition.
 pub(super) fn define(document: &mut LynxDocument, events: ComponentEvents) {
-    document.define(OVERLAY_TAG, Box::new(Overlay::new(events.clone())));
-    document.define(X_OVERLAY_TAG, Box::new(Overlay::new(events)));
+    let overlay: Rc<dyn CustomElement<()>> = Rc::new(Overlay::new(events));
+    document.define_shared(OVERLAY_TAG, Rc::clone(&overlay));
+    document.define_shared(X_OVERLAY_TAG, overlay);
 }
 
 /// The overlay component: builds the shadow tree when the element is
@@ -281,7 +283,7 @@ pub(super) fn define(document: &mut LynxDocument, events: ComponentEvents) {
 /// element is new and detached then, so every child arrives at the slot.
 struct Overlay {
     events: ComponentEvents,
-    /// [`SHADOW_RULES`], parsed by the first overlay of the definition and
+    /// [`SHADOW_RULES`], parsed by the first overlay of either tag and
     /// mounted on every one's shadow tree.
     shadow_sheet: OnceCell<ShadowSheet>,
 }

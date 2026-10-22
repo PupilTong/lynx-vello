@@ -165,14 +165,17 @@ no signal; a mutation pays one emptiness check.
 
 **Custom elements** (W3C behavior within a deliberately narrowed scope) are the
 other half of the component model. `Document::define(local_name, Box<dyn
-CustomElement<T>>)` registers one handler per tag — per-tag rather than the
+CustomElement<T>>)` registers one handler per tag (`define_shared` takes an
+`Rc<dyn CustomElement<T>>`, so one handler can serve several tags, each still
+its own definition) — per-tag rather than the
 standard's per-instance constructor, because this crate has no script realm to
 hold instances in, so every callback names its element by `NodeId` and
 per-element state belongs to the layer owning `T`. The handler receives
 `constructed`, `connected_callback`, `disconnected_callback` and
 `attribute_changed_callback`, the last filtered by an `observed_attributes`
 list read once at definition time, plus `handle_event` — not a lifecycle
-callback but the engine-side event hook, which is how a component hears
+callback but the engine-side event hook, called only for the types its
+`observed_events` names, which is how a component hears
 something the engine decided about it or about its descendants (see the
 `event` module above). **Scope: user-agent components, not
 script-defined elements.** Definitions come from the engine layer above, never
@@ -190,7 +193,7 @@ moves neither the trait nor the dispatch contract. What the narrowing does
 drained at the end of the public mutation that raised them (the standard's
 `[CEReactions]` boundary), because a lifecycle callback mutates the tree while
 its handler lives inside the `Document` being mutated. Dispatch clones an
-`Arc<dyn CustomElement<T>>` out of the registry rather than vacating the slot,
+`Rc<dyn CustomElement<T>>` out of the registry rather than vacating the slot,
 so a callback on `x-row` can create another `x-row` instead of hitting a
 re-entrancy panic. Scopes are watermarks into one flattened element queue while
 the per-element reaction queue is shared across them, reproducing a browser's
