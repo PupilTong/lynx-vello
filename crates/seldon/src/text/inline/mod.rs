@@ -362,6 +362,56 @@ impl InlineFlow {
         self.intrinsic = None;
     }
 
+    /// Whether this flow is the one [`Self::new`] would build from `style`
+    /// and `items`, given the same text: so a host holding the same content
+    /// needs no new flow, at most [`Self::set_style`].
+    ///
+    /// Compared against what the flow itself retains, by derived equality:
+    /// the strut, the direction and `strut_line_when_empty` of its style,
+    /// which are shaping inputs; each run's style and line breaking; each
+    /// atom's `vertical-align`; each inline box's font, line breaking,
+    /// direction and edges. The two item sequences must have the same
+    /// length and the same kinds. The runs' text, white space processing and
+    /// text security are the host's to compare: the flow keeps only their
+    /// normalized form.
+    #[must_use]
+    pub fn shaped_with(&self, style: &InlineFlowStyle, items: &[InlineFlowItem<'_>]) -> bool {
+        if self.style.strut != style.strut
+            || self.style.direction != style.direction
+            || self.style.strut_line_when_empty != style.strut_line_when_empty
+            || items.len() != self.breaking.len()
+        {
+            return false;
+        }
+        let built = &self.paragraph.content.items;
+        let mut specs = self.boxes.specs.iter();
+        for (index, item) in items.iter().enumerate() {
+            let breaking = self.breaking[index];
+            let same = match (item, &built[index]) {
+                (InlineFlowItem::Run(run), OwnedItem::Run { style, .. }) => {
+                    run.breaking == breaking && style == run.style
+                }
+                (InlineFlowItem::Atom(atom), OwnedItem::Box(spec)) => {
+                    spec.vertical_align == atom.vertical_align
+                }
+                (InlineFlowItem::Open(open), OwnedItem::Marker) => {
+                    specs.next().is_some_and(|spec| {
+                        open.breaking == breaking
+                            && spec.style == *open.style
+                            && spec.direction == open.direction
+                            && spec.edges == open.edges
+                    })
+                }
+                (InlineFlowItem::Close, OwnedItem::Marker) => true,
+                _ => false,
+            };
+            if !same {
+                return false;
+            }
+        }
+        specs.next().is_none()
+    }
+
     /// Reports `constraint`, answering from the memo when the same
     /// constraint was already asked, without moving the committed lines.
     pub fn probe(

@@ -209,10 +209,12 @@ impl TextBlock {
         truncation: Option<&[InlineItem<'_>]>,
     ) -> Self {
         // A block that keeps a line for empty content has a strut to make
-        // that line of, its own or the initial font.
+        // that line of, its own or the initial font. The root inline box is
+        // where the block keeps it: nothing reads the style's copy after this.
+        let mut block_style = block_style;
         let strut = block_style
             .strut
-            .clone()
+            .take()
             .or_else(|| block_style.strut_line_when_empty.then(RunStyle::default));
         // Native Lynx keeps a `<text>`'s bidi paragraph level first-strong
         // (its platform engines detect it), and so does this.
@@ -275,18 +277,65 @@ impl TextBlock {
     /// different paragraph and needs a new block — `text_wrap` and
     /// `verbatim` choose the white-space processing the text was normalized
     /// with, and `strut_line_when_empty` whether empty content is shaped at
-    /// all. The host decides which it has, because it is the one holding the
-    /// old style to compare.
+    /// all. The host asks [`Self::shaped_with`] which it has.
     ///
     /// Invalidates the break memo, since `text-align` moves line offsets and
     /// `max_lines` moves the reported size.
-    pub fn set_style(&mut self, style: BlockStyle) {
+    pub fn set_style(&mut self, mut style: BlockStyle) {
+        debug_assert!(
+            self.shaped_as(&style),
+            "a shaping input change needs a new block"
+        );
+        // The strut is the root inline box's since `new`; the block keeps no
+        // second copy.
+        style.strut = None;
         if self.style == style {
             return;
         }
         self.style = style;
         self.memo.forget();
         self.result = None;
+    }
+
+    /// Whether this block is the one [`Self::new`] would build from `style`
+    /// and content runs whose styles are `runs` — the content's, then the
+    /// truncation content's, in item order — so that a host holding the
+    /// same text and boxes needs no new block, at most [`Self::set_style`].
+    ///
+    /// Compared against what the block itself retains, by the derived
+    /// equality of [`RunStyle`] and [`BlockStyle::shapes_as`]: the run
+    /// styles its flows were shaped with and its root inline box's strut.
+    /// Both run sequences must end together. The text, the white space
+    /// processing and the boxes are the host's to compare: the block keeps
+    /// only their normalized form.
+    #[must_use]
+    pub fn shaped_with<'a>(
+        &self,
+        style: &BlockStyle,
+        runs: impl IntoIterator<Item = &'a RunStyle>,
+    ) -> bool {
+        let built = self
+            .paragraph
+            .content
+            .items
+            .iter()
+            .chain(
+                self.truncation
+                    .iter()
+                    .flat_map(|part| part.flow.items.iter()),
+            )
+            .filter_map(|item| match item {
+                OwnedItem::Run { style, .. } => Some(style),
+                OwnedItem::Box(_) | OwnedItem::Marker => None,
+            });
+        self.shaped_as(style) && built.eq(runs)
+    }
+
+    /// Whether `style`'s shaping inputs are the ones this block was built
+    /// with.
+    fn shaped_as(&self, style: &BlockStyle) -> bool {
+        let strut = self.paragraph.root.strut.as_ref().map(|(strut, _)| strut);
+        style.shapes_as(&self.style, strut)
     }
 
     /// Reports `constraint` without disturbing the committed line breaks when

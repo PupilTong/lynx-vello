@@ -70,6 +70,7 @@
 //! nothing: `overflow` and paint containment do not apply to a non-atomic
 //! inline box (css-overflow-3, css-contain-2 §3.3).
 
+use std::borrow::Cow;
 use std::hash::Hasher;
 
 use seldon::compute::LeafMeasureInput;
@@ -102,17 +103,6 @@ pub(crate) struct InlineBoxInsets {
     pub(crate) padding: Edges<f32>,
 }
 
-/// What one item was built from, compared rather than hashed: a missed
-/// rebuild would paint glyphs shaped at an old font, or an edge at an old
-/// width.
-#[derive(Debug, Clone, PartialEq)]
-enum ItemKey {
-    Run(RunStyle, BreakStyle),
-    Atom(VerticalAlign),
-    Open(RunStyle, BreakStyle, Direction, InlineEdges),
-    Close,
-}
-
 /// One block container's inline formatting context, plus the table that maps
 /// it back to the DOM.
 pub(crate) struct InlineFlowStore {
@@ -123,11 +113,12 @@ pub(crate) struct InlineFlowStore {
     pub(crate) source_ids: Vec<NodeId>,
     /// Each inline box's border and padding, in open order.
     pub(crate) insets: Vec<InlineBoxInsets>,
-    /// What the flow was built from, compared rather than hashed for style,
-    /// as the Lynx block's store does.
+    /// What the flow's content was built from: its structure and every run's
+    /// text. Style is compared rather than hashed, against what the flow
+    /// itself was shaped with ([`InlineFlow::shaped_with`]), as the Lynx
+    /// block's store does: a missed rebuild would paint glyphs shaped at an
+    /// old font, or an edge at an old width.
     fingerprint: u64,
-    style: InlineFlowStyle,
-    keys: Vec<ItemKey>,
     /// How many times this element's flow has been shaped from scratch.
     pub(crate) rebuilds: u32,
 }
@@ -223,7 +214,7 @@ fn collect_flow<T>(
     tree: &TreeArenas<T>,
     element: NodeSlot,
     basis: Option<f32>,
-) -> (Vec<Collected>, Vec<(NodeSlot, u32)>) {
+) -> (Vec<Collected<'_>>, Vec<(NodeSlot, u32)>) {
     let mut collected = Vec::new();
     let mut out_of_flow = Vec::new();
     if collect_generated(tree, element, &mut collected) {
@@ -250,7 +241,7 @@ fn collect_flow<T>(
             }
             collected.push(Collected {
                 item: OwnedItem::Run {
-                    text: text.to_owned(),
+                    text: Cow::Borrowed(text),
                     style: RunStyle::from_run_style(&TextRunView::of(node)),
                     white_space: run_white_space(node),
                     text_security: run_text_security(node),
@@ -313,7 +304,7 @@ fn collect_flow<T>(
 /// edges with percentages resolved against `basis` (CSS 2.2 §8.3, §8.4: the
 /// containing block's width). `auto` margins are zero on an inline box
 /// (§10.3.1).
-fn open_of<T>(view: &StyleView<'_, T>, basis: Option<f32>) -> OwnedItem {
+fn open_of<T>(view: &StyleView<'_, T>, basis: Option<f32>) -> OwnedItem<'static> {
     let (margin, border, padding) = used_insets(view, basis);
     let direction: Direction = view.direction().into();
     let (start, end) = match direction {
@@ -474,7 +465,7 @@ fn refresh<T>(
         hasher.finish()
     };
     let style = flow_style(tree, element);
-    let keys = keys_of(tree, &collected);
+    let items = items_of(tree, &collected);
     let atoms: Vec<(NodeSlot, u32)> = collected
         .iter()
         .enumerate()
@@ -494,16 +485,9 @@ fn refresh<T>(
     let needs_build = state
         .text_store(element)
         .and_then(TextStore::as_flow)
-        .is_none_or(|store| {
-            store.fingerprint != stamp
-                || store.keys != keys
-                || store.style.strut != style.strut
-                || store.style.direction != style.direction
-                || store.style.strut_line_when_empty != style.strut_line_when_empty
-        });
+        .is_none_or(|store| store.fingerprint != stamp || !store.flow.shaped_with(&style, &items));
 
     if needs_build {
-        let items = items_of(&collected, &keys);
         let source_ids = collected
             .iter()
             .map(|entry| tree.at(entry.source).id())
@@ -524,22 +508,19 @@ fn refresh<T>(
             .collect();
         let (context, slot) = state.text_store_parts(element);
         let rebuilds = slot.as_deref().map_or(0, |store| store.rebuilds() + 1);
-        let flow = InlineFlow::new(context, style.clone(), &items);
+        let flow = InlineFlow::new(context, style, &items);
         *slot = Some(Box::new(TextStore::Flow(InlineFlowStore {
             flow,
             source_ids,
             insets,
             fingerprint: stamp,
-            style,
-            keys,
             rebuilds,
         })));
     } else if let Some((_, store)) = context_and_store(state, element)
         && let Some(store) = store.as_flow_mut()
     {
         // Same content, possibly a different alignment or indent keyword.
-        store.flow.set_style(style.clone());
-        store.style = style;
+        store.flow.set_style(style);
     }
     Refreshed { atoms, out_of_flow }
 }
@@ -551,7 +532,7 @@ fn resolve_percent_alignments<T>(
     tree: &TreeArenas<T>,
     state: &mut DocumentLayoutState,
     element: NodeSlot,
-    collected: &mut [Collected],
+    collected: &mut [Collected<'_>],
 ) {
     for entry in collected {
         if let OwnedItem::Atom {
@@ -570,70 +551,45 @@ fn resolve_percent_alignments<T>(
     }
 }
 
-/// What each collected item was built from.
-fn keys_of<T>(tree: &TreeArenas<T>, collected: &[Collected]) -> Vec<ItemKey> {
+/// Borrows the collected items as the flow's input vocabulary, each run with
+/// the line breaking of the element its style came from.
+fn items_of<'a, T>(
+    tree: &TreeArenas<T>,
+    collected: &'a [Collected<'_>],
+) -> Vec<InlineFlowItem<'a>> {
     collected
         .iter()
         .map(|entry| match &entry.item {
-            OwnedItem::Run { style, .. } => {
-                let breaking = tree
+            OwnedItem::Run {
+                text,
+                style,
+                white_space,
+                text_security,
+            } => InlineFlowItem::Run(InlineRun {
+                text,
+                style,
+                white_space: *white_space,
+                text_security: *text_security,
+                breaking: tree
                     .at(entry.source)
                     .layout_computed_style()
-                    .map_or_else(BreakStyle::default, breaking_of);
-                ItemKey::Run(style.clone(), breaking)
-            }
-            OwnedItem::Atom { vertical_align } => ItemKey::Atom(*vertical_align),
+                    .map_or_else(BreakStyle::default, breaking_of),
+            }),
+            OwnedItem::Atom { vertical_align } => InlineFlowItem::Atom(InlineAtom {
+                vertical_align: *vertical_align,
+            }),
             OwnedItem::Open {
                 style,
                 breaking,
                 direction,
                 edges,
-            } => ItemKey::Open(style.clone(), *breaking, *direction, *edges),
-            OwnedItem::Close => ItemKey::Close,
-        })
-        .collect()
-}
-
-/// Borrows the collected items, with the run line breaking `keys` read, as
-/// the flow's input vocabulary.
-fn items_of<'a>(collected: &'a [Collected], keys: &'a [ItemKey]) -> Vec<InlineFlowItem<'a>> {
-    collected
-        .iter()
-        .zip(keys)
-        .map(|(entry, key)| match (&entry.item, key) {
-            (
-                OwnedItem::Run {
-                    text,
-                    white_space,
-                    text_security,
-                    ..
-                },
-                ItemKey::Run(run_style, breaking),
-            ) => InlineFlowItem::Run(InlineRun {
-                text,
-                style: run_style,
-                white_space: *white_space,
-                text_security: *text_security,
-                breaking: *breaking,
-            }),
-            (OwnedItem::Atom { vertical_align }, _) => InlineFlowItem::Atom(InlineAtom {
-                vertical_align: *vertical_align,
-            }),
-            (
-                OwnedItem::Open {
-                    style,
-                    breaking,
-                    direction,
-                    edges,
-                },
-                _,
-            ) => InlineFlowItem::Open(InlineBoxOpen {
+            } => InlineFlowItem::Open(InlineBoxOpen {
                 style,
                 breaking: *breaking,
                 direction: *direction,
                 edges: *edges,
             }),
-            _ => InlineFlowItem::Close,
+            OwnedItem::Close => InlineFlowItem::Close,
         })
         .collect()
 }

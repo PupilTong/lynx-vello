@@ -22,6 +22,7 @@
 //! - [`paragraph_of`] and [`inline_source_range`], which answer for either kind which paragraph a
 //!   node is content of and which source units an element contributes to it.
 
+use std::borrow::Cow;
 use std::hash::{Hash, Hasher};
 
 use seldon::compute::{LeafMeasureInput, LeafMetrics};
@@ -363,14 +364,18 @@ pub(crate) fn context_and_store(
 }
 
 /// One flattened item and the node behind it, before ownership is taken.
-pub(crate) struct Collected {
-    pub(crate) item: OwnedItem,
+///
+/// A run's text is borrowed from the text node it is read from, `'tree`
+/// long; only generated `content`, which is assembled from a list, owns its
+/// text.
+pub(crate) struct Collected<'tree> {
+    pub(crate) item: OwnedItem<'tree>,
     pub(crate) source: NodeSlot,
 }
 
-pub(crate) enum OwnedItem {
+pub(crate) enum OwnedItem<'tree> {
     Run {
-        text: String,
+        text: Cow<'tree, str>,
         style: RunStyle,
         white_space: WhiteSpaceCollapse,
         text_security: TextSecurity,
@@ -395,7 +400,7 @@ pub(crate) enum OwnedItem {
 /// boundaries contributing nothing. Its UTF-16 units are exactly the source
 /// units the paragraph built from `collected` counts: a run's units before
 /// white-space processing, an atom one unit.
-pub(crate) fn source_text_of(collected: &[Collected]) -> String {
+pub(crate) fn source_text_of(collected: &[Collected<'_>]) -> String {
     let mut text = String::new();
     for entry in collected {
         match &entry.item {
@@ -409,7 +414,7 @@ pub(crate) fn source_text_of(collected: &[Collected]) -> String {
 
 /// Hashes one flow's structure: its length, and per item the node behind it
 /// and a run's text, `white-space-collapse` and `-webkit-text-security`.
-pub(crate) fn hash_flow(collected: &[Collected], hasher: &mut impl Hasher) {
+pub(crate) fn hash_flow(collected: &[Collected<'_>], hasher: &mut impl Hasher) {
     collected.len().hash(hasher);
     for entry in collected {
         entry.source.hash(hasher);
@@ -480,7 +485,7 @@ pub(crate) fn replaces_children<T>(node: &Node<T>) -> bool {
 pub(crate) fn collect_generated<T>(
     tree: &TreeArenas<T>,
     slot: NodeSlot,
-    out: &mut Vec<Collected>,
+    out: &mut Vec<Collected<'_>>,
 ) -> bool {
     let node = tree.at(slot);
     let Some((style, items)) = generated_content(node) else {
@@ -496,7 +501,7 @@ pub(crate) fn collect_generated<T>(
     if !text.is_empty() {
         out.push(Collected {
             item: OwnedItem::Run {
-                text,
+                text: Cow::Owned(text),
                 style: RunStyle::from_run_style(&TextRunView::from_values(style)),
                 white_space: style_white_space(style),
                 text_security: style_text_security(style),
