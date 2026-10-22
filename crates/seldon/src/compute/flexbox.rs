@@ -2017,6 +2017,7 @@ fn perform_absolute_children<'tree, T>(
     border: Edges<f32>,
     justify_content: AlignFlags,
     default_alignment: AlignFlags,
+    scrollable: Option<Size<f32>>,
 ) -> Size<f32>
 where
     T: LayoutTree + 'tree,
@@ -2031,7 +2032,7 @@ where
     );
 
     debug_assert_tree_order(absolute_items.iter().map(|item| item.document_index));
-    let mut hoisted = super::HoistedPass::new(padding_box_size, border, rtl);
+    let mut hoisted = super::HoistedPass::new(padding_box_size, border, rtl, scrollable);
     for pending in absolute_items {
         hoisted.before(tree, state, node, pending.document_index);
         let style = tree.style(pending.node);
@@ -2098,7 +2099,8 @@ where
                     tree,
                     state,
                     pending.node,
-                    AbsoluteContainingBlock::padding_box(padding_box_size, rtl),
+                    AbsoluteContainingBlock::padding_box(padding_box_size, rtl)
+                        .with_scrollable(scrollable),
                     move |_, _| static_in_padding_space,
                 );
                 layout.order = pending.layout_order;
@@ -2515,6 +2517,7 @@ where
             .with_last_baseline(last);
     }
 
+    let scroll_container = is_scroll_container(style.overflow());
     let mut content_size = perform_in_flow_layout(
         tree,
         state,
@@ -2523,41 +2526,36 @@ where
         axes,
         inner_size,
         content_origin,
-        is_scroll_container(style.overflow()),
+        scroll_container,
     );
     for (document_index, child) in hidden {
         let order = u32::try_from(document_index).unwrap_or(u32::MAX);
         super::hide_child_at_order(tree, state, child, order);
     }
-    super::record_scrollable_containing_block(
-        tree,
-        state,
-        node,
-        &style,
-        outer_size,
-        border,
-        content_size,
-    );
     // With no out-of-flow box to lay out, the pass adds nothing.
-    let absolute_content_size =
-        if absolute_items.is_empty() && !tree.has_hoisted_children(state, node) {
-            Size::ZERO
-        } else {
-            perform_absolute_children(
-                tree,
-                state,
-                node,
-                &absolute_items,
-                axes,
-                rtl,
-                inner_size,
-                outer_size,
-                padding,
-                border,
-                justify_content,
-                align_items,
-            )
-        };
+    let absolute_content_size = if absolute_items.is_empty()
+        && !tree.has_hoisted_children(state, node)
+    {
+        Size::ZERO
+    } else {
+        let scrollable =
+            super::scrollable_containing_block(scroll_container, outer_size, border, content_size);
+        perform_absolute_children(
+            tree,
+            state,
+            node,
+            &absolute_items,
+            axes,
+            rtl,
+            inner_size,
+            outer_size,
+            padding,
+            border,
+            justify_content,
+            align_items,
+            scrollable,
+        )
+    };
     content_size = content_size.zip_map(absolute_content_size, f32::max);
     let content_size = own_scrollable_overflow(&style, outer_size, border, content_size);
 

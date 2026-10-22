@@ -185,15 +185,6 @@ impl<T> LayoutTree for TreeArenas<T> {
         hoisted::commit(self, state, containing_block, node, layout);
     }
 
-    fn set_scrollable_containing_block(
-        &self,
-        state: &mut Self::State,
-        node: NodeSlot,
-        size: Size<f32>,
-    ) {
-        state.scrollable_containing_blocks.insert(node, size);
-    }
-
     fn compute_layout(
         &self,
         state: &mut Self::State,
@@ -397,22 +388,6 @@ impl<T> LayoutTree for TreeArenas<T> {
         anchors::scrolls_with_default(named, default, axis)
     }
 
-    /// css-position-4's scrollable containing block, as the containing
-    /// block's algorithm recorded it in this run, before the absolute pass
-    /// that asks ([`LayoutTree::set_scrollable_containing_block`]): its
-    /// in-flow overflow only, so the box laid out against it cannot grow it.
-    /// The read is recorded like an anchor query, for a box whose containing
-    /// block was served from the cache.
-    fn scrollable_containing_block(
-        &self,
-        state: &Self::State,
-        node: NodeSlot,
-    ) -> Option<Size<f32>> {
-        self.anchor_query(state, node, 0, anchors::AnchorQuery::Scrollable)
-            .1
-            .map(|rect| rect.size)
-    }
-
     fn position_option_count(&self, node: NodeSlot) -> usize {
         self.anchors()
             .options(node)
@@ -599,7 +574,8 @@ pub(super) fn run_layout<T: Sync>(
     // and no container units nothing at all.
     let interleave = document.arenas().uses_container_units();
     let mut deferred = Vec::new();
-    let mut escalated = false;
+    // The in-place roots that fell back to the whole-tree pass.
+    let mut escalated: SmallVec<[NodeId; 2]> = SmallVec::new();
     {
         let (tree, state) = document.layout_parts();
         let root = tree.live_slot(root_id);
@@ -627,11 +603,15 @@ pub(super) fn run_layout<T: Sync>(
                 RelayoutKind::InPlace { previous } => {
                     let output = tree.compute_layout(state, slot, pending.input);
                     // A reproduced output proves nothing above this node
-                    // can observe the change; anything else falls back to
-                    // the whole-tree pass, which reuses the caches just
-                    // filled.
-                    if output != previous {
-                        escalated = true;
+                    // can observe the change, as long as every box hoisted
+                    // out of it can be placed late by the rounding tail;
+                    // anything else falls back to the whole-tree pass,
+                    // which reuses the caches just filled. The containing
+                    // blocks above the node then run their absolute passes,
+                    // so the tail places nothing late under it.
+                    if output != previous || hoisted::escapes_to_scrollable_block(tree, state, slot)
+                    {
+                        escalated.push(pending.node_id);
                         let mut current = tree.at(slot).flat_parent_slot();
                         while let Some(ancestor) = current {
                             // Geometry only: a paragraph an ancestor retains
@@ -655,7 +635,7 @@ pub(super) fn run_layout<T: Sync>(
         );
         state.take_container_deferrals(&mut deferred);
     }
-    let full = full || escalated;
+    let full = full || !escalated.is_empty();
     let settled = settle_deferred_containers(document, resized, &mut deferred);
     // A deferred container is a relayout boundary, so its own box did not move
     // and nothing above it has to be laid out again — but its subtree was
@@ -669,10 +649,16 @@ pub(super) fn run_layout<T: Sync>(
             }
         }
     }
-    // The parked subtrees this run relaid in place, before the root pass: a
-    // box under one of them that escapes to a containing block above it was
-    // laid out by nobody, and the tail places it (`hoisted::places_late`).
-    let relayed: FxHashSet<NodeId> = parked.iter().map(|&(_, pending)| pending.node_id).collect();
+    // The parked subtrees this run relaid in place, before the root pass, and
+    // did not escalate: a box under one of them that escapes to a containing
+    // block above it was laid out by nobody, and the tail places it
+    // (`hoisted::places_late`). Under an escalated root every containing
+    // block above it ran its own absolute pass.
+    let relayed: FxHashSet<NodeId> = parked
+        .iter()
+        .map(|&(_, pending)| pending.node_id)
+        .filter(|node| !escalated.contains(node))
+        .collect();
     {
         let (tree, state) = document.layout_parts();
         let root = tree.live_slot(root_id);

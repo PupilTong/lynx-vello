@@ -13,7 +13,7 @@ use std::hint::likely;
 use std::num::{NonZeroU32, NonZeroU64};
 
 use rustc_hash::{FxHashMap, FxHashSet};
-use seldon::geometry::{Edges, Size};
+use seldon::geometry::Edges;
 use seldon::text::TextContext;
 use seldon::tree::{LayoutInput, LayoutSlot};
 use slab::Slab;
@@ -654,16 +654,6 @@ pub(crate) struct DocumentLayoutState {
     /// containing block did not run) is written after the walk has already
     /// rounded the boxes above it and needs no marks on them.
     pub(crate) in_rounding_tail: bool,
-    /// Each scroll container's css-position-4 scrollable containing block
-    /// from its last committing run: its in-flow content's scrollable
-    /// overflow, the out-of-flow boxes' excluded
-    /// ([`seldon::tree::LayoutTree::set_scrollable_containing_block`]). A
-    /// side table because only scroll containers have one and only the
-    /// anchor-positioned boxes laid out against one read it — not a field
-    /// of every `Layout`, which would grow `LayoutSlot` for every node to
-    /// serve the few that scroll. An entry lives until its element is freed;
-    /// one that stops scrolling is never asked about again.
-    pub(crate) scrollable_containing_blocks: FxHashMap<NodeId, Size<f32>>,
     /// The Lynx text elements whose committing paragraph runs are reported
     /// ([`Self::note_text_layout`]), as the host set them through
     /// `Document::set_text_layout_reporting`. A side table keyed by node
@@ -728,7 +718,6 @@ impl DocumentLayoutState {
             anchor_buckets: AnchorBuckets::default(),
             hoisted_to: FxHashMap::default(),
             in_rounding_tail: false,
-            scrollable_containing_blocks: FxHashMap::default(),
             text_layout_reporters: FxHashSet::default(),
             text_layout_reports: Vec::new(),
         }
@@ -838,9 +827,6 @@ impl DocumentLayoutState {
         }
         self.register_hoisted(slot, None);
         self.hoisted_to.remove(&slot);
-        if !self.scrollable_containing_blocks.is_empty() {
-            self.scrollable_containing_blocks.remove(&slot);
-        }
         if !self.text_layout_reporters.is_empty() {
             self.text_layout_reporters.remove(&slot);
             self.text_layout_reports.retain(|node| *node != slot);
@@ -963,7 +949,6 @@ impl DocumentLayoutState {
             anchor_buckets: _,
             hoisted_to: _,
             in_rounding_tail: _,
-            scrollable_containing_blocks: _,
             text_layout_reporters: _,
             text_layout_reports: _,
         } = self;
@@ -1022,7 +1007,6 @@ impl DocumentLayoutState {
             anchor_buckets: _,
             hoisted_to: _,
             in_rounding_tail: _,
-            scrollable_containing_blocks: _,
             text_layout_reporters: _,
             text_layout_reports: _,
         } = self;

@@ -178,21 +178,11 @@ pub(super) struct AnchorMemo {
     /// Each answered anchor rectangle, per option and name (`None` is the
     /// default anchor), in host coordinates.
     rects: SmallVec<[MemoRect; 4]>,
-    /// The scrollable containing block, which no option changes, once asked.
-    scrollable: MemoScrollable,
 }
 
 /// One answered rectangle: the option, the name (`None` for the default
 /// anchor) and the host's answer.
 type MemoRect = (usize, Option<TreeScoped<DashedIdent>>, Option<Rect<f32>>);
-
-/// The scrollable containing block, before and after the host is asked.
-#[derive(Debug, Default, Clone, Copy)]
-enum MemoScrollable {
-    #[default]
-    Unasked,
-    Answered(Option<Size<f32>>),
-}
 
 impl AnchorMemo {
     fn rect<T: LayoutTree>(
@@ -226,20 +216,6 @@ impl AnchorMemo {
         );
         self.rects.push((option, name.cloned(), rect));
         rect
-    }
-
-    fn scrollable<T: LayoutTree>(
-        &mut self,
-        tree: &T,
-        state: &T::State,
-        node: T::NodeId,
-    ) -> Option<Size<f32>> {
-        if let MemoScrollable::Answered(answer) = self.scrollable {
-            return answer;
-        }
-        let answer = tree.scrollable_containing_block(state, node);
-        self.scrollable = MemoScrollable::Answered(answer);
-        answer
     }
 }
 
@@ -833,11 +809,9 @@ impl AnchoredGeometry {
         // same unless grid placement narrowed it to a grid area.
         let scrollable = match default_rect {
             Some(_) if containing_block.is_padding_box => {
-                let scrollable = memo.scrollable(tree, state, node);
-                // The host's entry is clamped against the same padding box
-                // by `record_scrollable_containing_block`, rewritten by every
-                // committing run of the scroll container, and a cached
-                // container keeps its padding box.
+                let scrollable = containing_block.scrollable;
+                // The generator's algorithm clamped it against the same
+                // padding box in this run (`scrollable_containing_block`).
                 debug_assert!(
                     scrollable
                         .is_none_or(|scrollable| scrollable.width >= containing_block.size.width

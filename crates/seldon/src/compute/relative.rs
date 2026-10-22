@@ -1393,6 +1393,7 @@ where
     scrollable_size
 }
 
+#[allow(clippy::too_many_arguments)]
 #[inline(never)]
 fn commit_out_of_flow<T>(
     tree: &T,
@@ -1402,6 +1403,7 @@ fn commit_out_of_flow<T>(
     container_size: Size<f32>,
     border: Edges<f32>,
     rtl: bool,
+    scrollable: Option<Size<f32>>,
 ) -> Size<f32>
 where
     T: LayoutTree,
@@ -1412,7 +1414,7 @@ where
     );
     let mut scrollable_size = Size::ZERO;
     super::util::debug_assert_tree_order(items.iter().map(|item| item.document_index));
-    let mut hoisted = super::HoistedPass::new(padding_box_size, border, rtl);
+    let mut hoisted = super::HoistedPass::new(padding_box_size, border, rtl, scrollable);
     for pending in items {
         hoisted.before(tree, state, node, pending.document_index);
         let style = tree.style(pending.node);
@@ -1422,7 +1424,8 @@ where
                     tree,
                     state,
                     pending.node,
-                    AbsoluteContainingBlock::lynx_padding_box(padding_box_size, rtl),
+                    AbsoluteContainingBlock::lynx_padding_box(padding_box_size, rtl)
+                        .with_scrollable(scrollable),
                     |_, _| Point::ZERO,
                 );
                 layout.order = pending.layout_order;
@@ -1643,27 +1646,19 @@ where
     }
 
     let content_origin = Point::new(border.left + padding.left, border.top + padding.top);
+    let scroll_container = is_scroll_container(style.overflow());
     let mut scrollable_size = commit_in_flow(
         tree,
         state,
         &mut items,
         content_size,
         content_origin,
-        is_scroll_container(style.overflow()),
+        scroll_container,
     );
     for (document_index, child) in hidden {
         let order = u32::try_from(document_index).unwrap_or(u32::MAX);
         super::hide_child_at_order(tree, state, child, order);
     }
-    super::record_scrollable_containing_block(
-        tree,
-        state,
-        node,
-        &style,
-        outer_size,
-        border,
-        scrollable_size,
-    );
     // With no out-of-flow box to lay out, the pass adds nothing.
     let out_of_flow_size = if absolute_items.is_empty() && !tree.has_hoisted_children(state, node) {
         Size::ZERO
@@ -1676,6 +1671,12 @@ where
             outer_size,
             border,
             style.direction() == direction::T::Rtl,
+            super::scrollable_containing_block(
+                scroll_container,
+                outer_size,
+                border,
+                scrollable_size,
+            ),
         )
     };
     scrollable_size = scrollable_size.zip_map(out_of_flow_size, f32::max);

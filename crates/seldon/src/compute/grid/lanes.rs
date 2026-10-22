@@ -1183,15 +1183,6 @@ where
         // needs its own count: the template's in the grid axis, one in the
         // stacking axis.
         let explicit_lines = grid_axis.pack(explicit_len, 1);
-        crate::compute::record_scrollable_containing_block(
-            tree,
-            state,
-            node,
-            &style,
-            outer_size,
-            metrics.border,
-            content_size,
-        );
         let absolute = absolute.expect("commit keeps out-of-flow grid-lanes items");
         // With no out-of-flow box to lay out, the pass adds nothing.
         let absolute_content_size =
@@ -1213,6 +1204,12 @@ where
                     metrics.border,
                     rtl,
                     item_defaults,
+                    crate::compute::scrollable_containing_block(
+                        scroll_container,
+                        outer_size,
+                        metrics.border,
+                        content_size,
+                    ),
                 )
             };
         content_size = content_size.zip_map(absolute_content_size, f32::max);

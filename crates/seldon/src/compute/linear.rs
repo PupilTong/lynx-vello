@@ -1200,6 +1200,7 @@ fn commit_non_in_flow_children<T>(
     main_gravity: AlignFlags,
     mut content_size: Size<f32>,
     rtl: bool,
+    scrollable: Option<Size<f32>>,
 ) -> Size<f32>
 where
     T: LayoutTree,
@@ -1215,7 +1216,7 @@ where
         super::hide_child_at_order(tree, state, key.node, key.layout_order);
     }
     super::util::debug_assert_tree_order(absolute_items.iter().map(|item| item.key.document_index));
-    let mut hoisted = super::HoistedPass::new(padding_box_size, border, rtl);
+    let mut hoisted = super::HoistedPass::new(padding_box_size, border, rtl, scrollable);
     for item in absolute_items {
         let AbsoluteItem {
             key,
@@ -1232,7 +1233,7 @@ where
                     tree,
                     state,
                     child,
-                    containing_block(padding_box_size),
+                    containing_block(padding_box_size).with_scrollable(scrollable),
                     |size, margin| {
                         let static_position = absolute_static_position(
                             axes,
@@ -1565,6 +1566,7 @@ where
         }
     }
 
+    let scroll_container = is_scroll_container(style.overflow());
     let mut content_size = commit_in_flow(
         tree,
         state,
@@ -1572,16 +1574,7 @@ where
         axes,
         final_inner_size,
         content_origin,
-        is_scroll_container(style.overflow()),
-    );
-    super::record_scrollable_containing_block(
-        tree,
-        state,
-        node,
-        &style,
-        final_outer_size,
-        border,
-        content_size,
+        scroll_container,
     );
     // A box this one is the containing block of may sit deeper than its
     // children (`LayoutTree::hoisted_children`).
@@ -1601,6 +1594,12 @@ where
             main_gravity,
             content_size,
             style.direction() == direction::T::Rtl,
+            super::scrollable_containing_block(
+                scroll_container,
+                final_outer_size,
+                border,
+                content_size,
+            ),
         );
     }
     let content_size = own_scrollable_overflow(&style, final_outer_size, border, content_size);

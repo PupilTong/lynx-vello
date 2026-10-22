@@ -19,8 +19,8 @@ mod support;
 use seldon::geometry::Rect;
 use seldon::prelude::*;
 use seldon::style::{
-    AlignFlags, Inset, LengthPercentage, PositionArea, PositionProperty, PositionTryOrder,
-    SelfAlignment, StyleSize, direction,
+    AlignFlags, Inset, LengthPercentage, Overflow, PositionArea, PositionProperty,
+    PositionTryOrder, SelfAlignment, StyleSize, direction,
 };
 use seldon::tree::AnchorOutcome;
 use style_traits::values::specified::AllowedNumericType;
@@ -600,13 +600,18 @@ fn explicit_alignment_overrides_the_area_default() {
 #[test]
 fn a_scrollable_containing_block_extends_the_position_area_grid() {
     let mut tree = with_default_anchor("--a", rect(100.0, 100.0, 50.0, 50.0));
-    // The host's area is never smaller than the padding box (its producer,
-    // `record_scrollable_containing_block`, clamps against it): content
-    // overflowing to 600 wide, none below.
-    tree.scrollable_containing_block = Some(Size::new(600.0, 300.0));
-    let layout = place(
-        &mut tree,
-        Size::new(300.0, 300.0),
+    // A 300px scroll container whose in-flow content overflows to 600 wide
+    // and not below: the area is that overflow, never smaller than the
+    // padding box, so 600 by 300.
+    let wide = tree.push_leaf(
+        TestStyle {
+            flex_shrink: nn(0.0),
+            ..container(600.0, 10.0)
+        },
+        Size::ZERO,
+        None,
+    );
+    let target = tree.push_leaf(
         TestStyle {
             position: PositionProperty::Absolute,
             align_self: align(AlignFlags::STRETCH),
@@ -614,8 +619,22 @@ fn a_scrollable_containing_block_extends_the_position_area_grid() {
             position_area: area(K::Right, K::None),
             ..TestStyle::default()
         },
+        Size::new(10.0, 10.0),
+        None,
     );
-    assert_box(&layout, (150.0, 0.0, 450.0, 300.0), "right of the anchor");
+    let root = tree.push_flex(
+        TestStyle {
+            overflow: Point::new(Overflow::Hidden, Overflow::Hidden),
+            ..container(300.0, 300.0)
+        },
+        vec![wide, target],
+    );
+    definite_layout(&tree, root, 300.0, 300.0);
+    assert_box(
+        &tree.layout(target),
+        (150.0, 0.0, 450.0, 300.0),
+        "right of the anchor",
+    );
 }
 
 // ---------------------------------------------------------------------------

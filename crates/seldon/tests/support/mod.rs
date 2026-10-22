@@ -1151,8 +1151,6 @@ pub(super) struct TestTree {
     pub(super) option_default_anchors: Vec<(usize, Option<&'static str>)>,
     /// Names whose nearest scroll container is the default anchor's.
     pub(super) scrolls_with_default: Vec<&'static str>,
-    /// The scrollable containing block size answered for every box.
-    pub(super) scrollable_containing_block: Option<Size<f32>>,
     /// Position options per node: the fallbacks, option 1 onwards.
     pub(super) position_options: Vec<(TestId, Vec<TestStyle>)>,
     /// Last successful position option per node.
@@ -1182,7 +1180,6 @@ impl Default for TestTree {
             default_anchor: None,
             option_default_anchors: Vec::new(),
             scrolls_with_default: Vec::new(),
-            scrollable_containing_block: None,
             position_options: Vec::new(),
             last_successful: Vec::new(),
             hoisted: Vec::new(),
@@ -1329,10 +1326,6 @@ impl LayoutTree for TestTree {
         self.scrolls_with_default
             .iter()
             .any(|shared| **shared == *name.value.0)
-    }
-
-    fn scrollable_containing_block(&self, _state: &TestState, _node: TestRef) -> Option<Size<f32>> {
-        self.scrollable_containing_block
     }
 
     fn position_option_count(&self, node: TestRef) -> usize {

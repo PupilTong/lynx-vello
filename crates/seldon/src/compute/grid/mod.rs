@@ -1565,6 +1565,7 @@ fn layout_absolute_items<'tree, T>(
     border: Edges<f32>,
     rtl: bool,
     defaults: ItemDefaults,
+    scrollable: Option<Size<f32>>,
 ) -> Size<f32>
 where
     T: LayoutTree + 'tree,
@@ -1582,7 +1583,7 @@ where
     crate::compute::util::debug_assert_tree_order(
         items.iter().map(|item| item.ordered.document_index),
     );
-    let mut hoisted = crate::compute::HoistedPass::new(padding_box_size, border, rtl);
+    let mut hoisted = crate::compute::HoistedPass::new(padding_box_size, border, rtl, scrollable);
     for pending in items {
         hoisted.before(tree, state, node, pending.ordered.document_index);
         let key = pending.key();
@@ -1637,6 +1638,7 @@ where
                         size: containing_size,
                         padding_box_size,
                         is_padding_box: x == 0.0 && y == 0.0 && containing_size == padding_box_size,
+                        scrollable,
                         rtl,
                         honors_self_alignment: true,
                     },
@@ -1970,15 +1972,6 @@ where
                 Layout::with_order(u32::try_from(document_index).unwrap_or(u32::MAX)),
             );
         }
-        crate::compute::record_scrollable_containing_block(
-            tree,
-            state,
-            node,
-            &style,
-            outer_size,
-            metrics.border,
-            content_size,
-        );
         let absolute = absolute.expect("commit keeps out-of-flow grid items");
         // With no out-of-flow box to lay out, the pass adds nothing.
         let absolute_content_size =
@@ -2000,6 +1993,12 @@ where
                     metrics.border,
                     rtl,
                     item_defaults,
+                    crate::compute::scrollable_containing_block(
+                        is_scroll_container(style.overflow()),
+                        outer_size,
+                        metrics.border,
+                        content_size,
+                    ),
                 )
             };
         content_size = content_size.zip_map(absolute_content_size, f32::max);

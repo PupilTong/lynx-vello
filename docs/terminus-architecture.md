@@ -323,7 +323,13 @@ css-anchor-position-1 acceptable anchor placed before its reader. A moved
 subtree, which keeps its caches, has its listed boxes relaid so they
 re-register; a box under a subtree relaid in place, whose containing block
 above it does not run, and a box whose containing block is the initial one are
-placed by the rounding tail. `display: contents` elements generate no box: the
+placed by the rounding tail. The exception is a box hoisted out of such a
+subtree that can have a default anchor and whose containing block is a scroll
+container: it is laid out against css-position-4's scrollable containing
+block, which only that container's own absolute pass computes, so the
+in-place relayout escalates to the whole-tree pass instead
+(`hoisted::escapes_to_scrollable_block`, answered from the hoisted-box table,
+which is keyed by containing block). `display: contents` elements generate no box: the
 engine's `flattened_children` splices them out of every item collection, and
 the host denies them containing-block, containment, skipped-contents, and
 hoisting status and zeroes their `LayoutSlot` in the rounding tail (the
@@ -413,9 +419,9 @@ whose moves surface in different runs goes stale twice even though §2.3's
 dependencies are acyclic; that repeat is invalidated without earning a run,
 which leaves the document dirty, so the next `layout()` continues instead of
 staying a commit behind. The scrollable
-containing block a box reads is the one its containing block recorded earlier
-in the same run (`DocumentLayoutState::scrollable_containing_blocks`, scroll
-containers only: their in-flow overflow, which no out-of-flow box can grow).
+containing block a box is laid out against is not a host query: the scroll
+container's own algorithm computes it (its in-flow overflow, which no
+out-of-flow box can grow) and hands it to its absolute pass in the same run.
 The same step records remembered scroll offsets at
 §3.3's recalculation points (a box's first report, and a fallback determination
 that switched options). The last successful position option is recorded at

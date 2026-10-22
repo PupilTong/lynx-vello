@@ -345,11 +345,7 @@ box in the padding-box coordinates of the element generating `node`'s
 containing block, with §3.3's remembered scroll offsets applied; with
 `AnchorSpec::Default`, `None` means the box has no default anchor —
 `anchor_scrolls_with_default` (§3.3's scroll-container
-condition), `scrollable_containing_block` (css-position-4: the area the
-containing block's own algorithm recorded through
-`set_scrollable_containing_block` between its in-flow commit and its absolute
-pass — its in-flow scrollable overflow, which no out-of-flow box can grow),
-`position_option_count`/`position_option_style` (the options list, each
+condition), `position_option_count`/`position_option_style` (the options list, each
 already cascaded with its try tactic; index 0 is the box's own style),
 `last_successful_option` (which the host records after layout, §6.5.1.1), and
 `set_anchor_outcome`, which hands back per box the chosen option, whether it
@@ -360,7 +356,14 @@ everything in flow under the containing block and every earlier box it is the
 containing block of — its own out-of-flow children and the hoisted ones alike
 — is already committed, and rebases the host's rectangles onto what it
 actually lays out against (a grid area, the scrollable containing block, a
-`position-area` region). Within one absolute layout of a box it asks each
+`position-area` region). The scrollable containing block (css-position-4:
+the scroll container's in-flow scrollable overflow, which no out-of-flow box
+can grow) is not asked: the container's own algorithm computes it between
+its in-flow commit and its absolute pass and hands it over in
+`AbsoluteContainingBlock`, so a page pays nothing for it per commit; a host
+that would place such a box itself (`compute_hoisted_layout`) cannot
+reproduce it and runs the container's pass instead. Within one absolute
+layout of a box it asks each
 question once per option (`AnchorMemo`), never across a pass. A box that uses
 none of it pays two style predicates, and a host call to count its options only
 when its `position-try-fallbacks` lists something; the anchored path is a

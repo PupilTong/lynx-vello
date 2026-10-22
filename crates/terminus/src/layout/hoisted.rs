@@ -24,7 +24,11 @@
 //!   lays every listed box inside a moved subtree out again, which re-registers it.
 //! - **In-place relayout** of a subtree whose hoisted box escapes it reaches no containing block
 //!   above it. The rounding tail places those boxes ([`places_late`]), with the same function the
-//!   containing block's pass would have used, so a box comes out the same either way.
+//!   containing block's pass would have used, so a box comes out the same either way. The one box
+//!   that function cannot reproduce — one with a default anchor whose containing block is a scroll
+//!   container, laid out against css-position-4's scrollable containing block, which only the
+//!   container's own pass computes — makes the relayout fall back to the whole-tree pass instead
+//!   ([`escapes_to_scrollable_block`]).
 
 use rustc_hash::FxHashSet;
 use seldon::geometry::Point;
@@ -223,6 +227,61 @@ pub(super) fn places_late<T>(
             return true;
         }
         current = tree.at(ancestor).flat_parent_slot();
+    }
+    false
+}
+
+/// Whether a box hoisted out of the subtree at `root`, which was just relaid
+/// in place, is listed under a scroll container above `root` and can have a
+/// default anchor. Its containing block's own absolute pass lays such a box
+/// out against css-position-4's scrollable containing block — the
+/// container's in-flow overflow, which that pass alone computes — so the
+/// rounding tail's late placement ([`places_late`]) cannot stand in for that
+/// pass, and the caller runs it instead.
+///
+/// Answered from [`DocumentLayoutState::hoisted_to`], which is keyed by
+/// containing block: a page with no hoisted box pays one `is_empty` test;
+/// otherwise each listed block costs one computed-style read, each box
+/// listed under a scroll container one `position-anchor` test over its style
+/// and position options, and each box that passes both a walk up its flat
+/// ancestors to the first of `block` and `root`. A stale listing (a box that
+/// no longer escapes to its block) can only make the answer `true` where
+/// `false` was enough, which costs a whole-tree pass, never a misplaced box.
+pub(super) fn escapes_to_scrollable_block<T>(
+    tree: &TreeArenas<T>,
+    state: &DocumentLayoutState,
+    root: NodeSlot,
+) -> bool {
+    if state.hoisted_to.is_empty() {
+        return false;
+    }
+    state.hoisted_to.iter().any(|(&block, listed)| {
+        block != root
+            && tree
+                .get(block)
+                .and_then(Node::layout_computed_style)
+                .is_some_and(crate::scroll::is_scroll_container)
+            && listed.iter().any(|&node| {
+                tree.get(node).is_some_and(|hoisted| {
+                    super::anchors::may_have_default_anchor(tree, hoisted)
+                        && below_root_under_block(hoisted, block, root)
+                })
+            })
+    })
+}
+
+/// Whether `root` lies strictly between `node` and its ancestor `block`:
+/// walking up from `node`, `root` comes before `block`.
+fn below_root_under_block<T>(node: &Node<T>, block: NodeSlot, root: NodeSlot) -> bool {
+    let mut current = node.flat_parent();
+    while let Some(ancestor) = current {
+        if ancestor.id() == block {
+            return false;
+        }
+        if ancestor.id() == root {
+            return true;
+        }
+        current = ancestor.flat_parent();
     }
     false
 }
