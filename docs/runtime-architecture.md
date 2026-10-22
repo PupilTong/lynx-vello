@@ -650,7 +650,10 @@ before it spawns anything and waits for none of the view's sources;
 `load_entry` completes the entry when its answer arrives; `consume_commands` is
 the one ordered consumer of the command channel; `consume_metrics` settles the
 page once per change of the painter's metrics; `consume_worker_events` is the
-one ordered consumer of this view's workers; the epilogue spawns one
+one ordered consumer of this view's workers, which, as `consume_commands` does,
+runs what is queued when it reads as one entry, each event delivered by its
+own call and checkpoint, and stops at an end served meanwhile; the epilogue
+spawns one
 `load_module` per resource load an import produced, one `settle_future` per
 `Future` a `.then` asked the realm to settle, and one `load_font_face` per
 `@font-face` rule a mounted sheet declared; `serve_clock` owns the realm's one

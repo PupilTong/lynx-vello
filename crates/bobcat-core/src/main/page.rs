@@ -160,6 +160,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
 use terminus::link::NodeId;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
@@ -1205,6 +1206,15 @@ pub(super) async fn serve_view(context: Rc<GroupContext>, view: AttachedView, ou
     owner::run_owner(&page).await;
 }
 
+/// `first` and every message already queued behind it when it was read: one
+/// burst, which one entry runs. What arrives while that entry runs is a later
+/// burst, read once this one is done.
+fn burst<T, C: FromIterator<T>>(receiver: &mut mpsc::UnboundedReceiver<T>, first: T) -> C {
+    let queued = receiver.len();
+    let rest = std::iter::from_fn(|| receiver.try_recv().ok()).take(queued);
+    std::iter::once(first).chain(rest).collect()
+}
+
 /// The one ordered consumer of this view's command stream.
 ///
 /// A burst rather than a command: the rest of what is already queued goes
@@ -1241,15 +1251,12 @@ async fn consume_commands(page: Rc<Page>, mut commands: mpsc::UnboundedReceiver<
             owner::end(&page);
             return;
         }
-        let queued = commands.len();
-        let rest = std::iter::from_fn(|| commands.try_recv().ok()).take(queued);
         // Collected rather than handed over as an iterator, because a job owns
-        // what it runs on: one allocation per burst, not per command.
-        let burst: Vec<ToMain> = std::iter::once(first).chain(rest).collect();
-        // Awaited, so the next burst is read only once this one has been
-        // applied — which is what makes what arrives meanwhile one later
-        // burst rather than a queue of entries.
-        page.apply(burst).await;
+        // what it runs on: one allocation per burst, not per command. Awaited,
+        // so the next burst is read only once this one has been applied —
+        // which is what makes what arrives meanwhile one later burst rather
+        // than a queue of entries.
+        page.apply(burst(&mut commands, first)).await;
     }
     // The embedder released this view. Everything it owns goes with the
     // tasks the owner is about to reclaim.
@@ -1413,6 +1420,14 @@ async fn load_font_face(page: Rc<Page>, request: terminus::link::FontFaceRequest
 /// The channel's senders are the realms' worker owners and this view's
 /// worker tasks, so it closes only once the realm is gone — which is to say,
 /// with the view.
+///
+/// One entry per burst, as [`consume_commands`] runs one per burst of
+/// commands: the event read and every event already queued behind it, each
+/// delivered by its own call with its own checkpoint, so what one message's
+/// handlers queued runs before the next message is delivered, and one
+/// epilogue after the last. A view the embedder released while an event's
+/// handler was parked on a synchronous wait has ended, and the rest of the
+/// burst is not delivered, as [`Page::apply`] stops a burst of commands.
 async fn consume_worker_events(page: Rc<Page>) {
     loop {
         let event = tokio::select! {
@@ -1426,9 +1441,17 @@ async fn consume_worker_events(page: Rc<Page>) {
                     .poll_recv(cx)
             }) => event,
         };
-        let Some(WorkerEvent { key, payload }) = event else {
+        let Some(first) = event else {
             return;
         };
+        // Inline for one event, the steady state of one message per turn.
+        let events: SmallVec<[WorkerEvent; 1]> = burst(
+            page.worker_events
+                .borrow_mut()
+                .as_mut()
+                .expect("the live realm installed its Worker inbox"),
+            first,
+        );
         // Reported inside the entry, before its epilogue, as every other kind
         // of entry reports its failure. Boot can settle in here, when the MTS
         // entry's top-level await was waiting on this worker, and the error
@@ -1437,8 +1460,13 @@ async fn consume_worker_events(page: Rc<Page>) {
         // on to report as StartupFailed too.
         let delivering = Rc::clone(&page);
         owner::enter(&page, move |runtime, js| {
-            if let Err(error) = runtime.dispatch_worker_event(js, key, payload) {
-                policy::report(&delivering, Scene::Listener, error.into_script_error());
+            for WorkerEvent { key, payload } in events {
+                if delivering.ended() {
+                    break;
+                }
+                if let Err(error) = runtime.dispatch_worker_event(js, key, payload) {
+                    policy::report(&delivering, Scene::Listener, error.into_script_error());
+                }
             }
         })
         .await;
