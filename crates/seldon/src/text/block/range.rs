@@ -14,9 +14,9 @@
 
 use core::ops::Range;
 
-use super::TextBlock;
+use super::{LineInfo, TextBlock};
 use crate::geometry::{Point, Rect};
-use crate::text::paragraph::query::{Displayed, LineSpan};
+use crate::text::paragraph::query::Displayed;
 
 impl TextBlock {
     /// The boxes the source range `[start, end)` occupies in the committed
@@ -54,9 +54,7 @@ impl TextBlock {
     /// [`Self::has_committed`] first, as for every other reader.
     #[must_use]
     pub fn range_boxes(&self, start: u32, end: u32) -> Option<Vec<Rect<f32>>> {
-        let lines = self.line_spans();
-        self.paragraph
-            .range_boxes_in(&self.displayed(&lines), start, end)
+        self.paragraph.range_boxes_in(&self.displayed(), start, end)
     }
 
     /// The source unit of the cluster or atomic box under `point` in the
@@ -98,9 +96,7 @@ impl TextBlock {
     /// [`Self::has_committed`] first, as for every other reader.
     #[must_use]
     pub fn index_at_point(&self, point: Point<f32>) -> Option<u32> {
-        let lines = self.line_spans();
-        self.paragraph
-            .index_at_point_in(&self.displayed(&lines), point)
+        self.paragraph.index_at_point_in(&self.displayed(), point)
     }
 
     /// The source units content item `item` contributed, in the units
@@ -119,23 +115,12 @@ impl TextBlock {
         self.paragraph.item_source_range(item)
     }
 
-    /// The reported lines' source ranges, for the core's range queries.
-    fn line_spans(&self) -> Vec<LineSpan> {
-        self.lines()
-            .iter()
-            .map(|line| LineSpan {
-                start: line.source_start,
-                end: line.source_end,
-            })
-            .collect()
-    }
-
     /// The display layout as the core's range queries read it.
     ///
     /// What is no source text is cut off here, once, for every reader: the
     /// tail past a truncation cut — the dots, and the inline-truncation
     /// content's clusters and boxes.
-    fn displayed<'a>(&'a self, lines: &'a [LineSpan]) -> Displayed<'a> {
+    fn displayed(&self) -> Displayed<'_, LineInfo> {
         let block = &self.paragraph.content.block;
         let (cut_byte, content_slots) = self
             .expect_result()
@@ -144,12 +129,14 @@ impl TextBlock {
             .map_or((block.text.len(), block.boxes.len()), |part| {
                 (part.cut_byte as usize, part.content_slots)
             });
-        // The display layout's lines are the reported lines, index for
-        // index: `assemble` builds one from the other.
+        // The reported lines are the display layout's, in order, each
+        // carrying its own line box: where `assemble` read a line from the
+        // natural layout because the display has none or a blank one there,
+        // the box is the natural line's, and the cluster walk, which zips the
+        // display's lines with the reported ones, stops at the shorter.
         Displayed {
             layout: self.display(),
-            lines,
-            geometry: self.line_geometry(),
+            lines: self.lines(),
             cut_byte,
             content_slots,
         }

@@ -46,6 +46,7 @@ pub use style::{BlockStyle, TextOverflow};
 use truncate::{CutPlan, OverflowCut, Tail};
 
 use super::paragraph::memo::{BreakMemo, Retained};
+use super::paragraph::query::ReportedLine;
 use super::paragraph::shape::{self, NaturalLine, ShapeSpan};
 use super::paragraph::style::resolve_alignment;
 pub use super::paragraph::{
@@ -101,6 +102,23 @@ pub struct LineInfo {
     pub advance: f32,
 }
 
+/// A reported line's box is its own: [`assemble`] read it from whichever
+/// layout holds the line ([`reported_line`]), the display's or, where the
+/// display has none there, the natural one's.
+impl ReportedLine for LineInfo {
+    fn source_range(&self) -> core::ops::Range<u32> {
+        self.source_start..self.source_end
+    }
+
+    fn line_box(&self, _layout: &Layout<TextBrush>, _index: usize) -> LineGeometry {
+        LineGeometry {
+            top: self.top,
+            height: self.height,
+            baseline: self.baseline,
+        }
+    }
+}
+
 /// Where one atomic box ended up.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PlacedBox {
@@ -134,9 +152,9 @@ struct LayoutResult {
     /// Boxed like [`TruncationFlow`], so that a block that does not truncate
     /// does not carry a display layout's worth of empty storage inline.
     display: Option<Box<DisplayPart>>,
+    /// The one per-line record: each line's source range, ellipsis and line
+    /// box.
     lines: Vec<LineInfo>,
-    /// The reported lines' placement, parley's own.
-    geometry: Vec<LineGeometry>,
     boxes: Vec<PlacedBox>,
     size: Size<f32>,
     first_baseline: Option<f32>,
@@ -528,7 +546,6 @@ impl TextBlock {
         LayoutResult {
             constraint,
             display: None,
-            geometry: parley_geometry(&lines),
             lines,
             boxes,
             size,
@@ -584,7 +601,6 @@ impl TextBlock {
                 cut_byte: plan.cut_byte,
                 content_slots,
             })),
-            geometry: parley_geometry(&lines),
             lines,
             boxes,
             size,
@@ -944,17 +960,11 @@ impl TextBlock {
         sources[usize::from(style_index)]
     }
 
-    /// The layout-event data: one entry per visible line.
+    /// The layout-event data and where each line sits: one entry per
+    /// visible line, its line box parley's own placement.
     #[must_use]
     pub fn lines(&self) -> &[LineInfo] {
         &self.expect_result().lines
-    }
-
-    /// Where each reported line sits: one entry per [`Self::lines`] entry,
-    /// parley's own placement.
-    #[must_use]
-    pub fn line_geometry(&self) -> &[LineGeometry] {
-        &self.expect_result().geometry
     }
 
     /// Every atomic box's outcome, visible boxes with vertical alignment
@@ -1109,23 +1119,35 @@ impl Retained for TextBlock {
     }
 }
 
-/// The reported lines' placement as parley laid them out.
-fn parley_geometry(lines: &[LineInfo]) -> Vec<LineGeometry> {
-    lines
-        .iter()
-        .map(|line| LineGeometry {
-            top: line.top,
-            height: line.height,
-            baseline: line.baseline,
-        })
-        .collect()
+/// The laid-out line reported line `index` is read from, and whether it is
+/// the natural layout's.
+///
+/// The display layout's line, unless it has none at `index` or a blank one
+/// where the natural line is not the empty last line a verbatim paragraph
+/// keeps: a cut at a line start can leave the display layout one line short
+/// of the visible count, or blank there. Then the natural layout — still
+/// broken at the same widths — supplies the line.
+fn reported_line<'a>(
+    final_layout: &'a Layout<TextBrush>,
+    natural_fallback: Option<&'a Layout<TextBrush>>,
+    natural_line: NaturalLine,
+    index: usize,
+) -> (parley::Line<'a, TextBrush>, bool) {
+    let rendered = final_layout
+        .get(index)
+        .filter(|line| natural_line.is_empty() || !shape::is_blank_line(line));
+    let fallback = rendered.is_none();
+    let line = rendered
+        .or_else(|| natural_fallback.and_then(|layout| layout.get(index)))
+        .expect("every visible line exists in one of the layouts");
+    (line, fallback)
 }
 
 /// Walks the final layout once, assembling line reports and box placements.
 ///
 /// A cut at a line start can leave the display layout one line short of the
 /// visible count; the natural layout — still committed at the same widths —
-/// supplies that line's geometry.
+/// supplies that line's geometry ([`reported_line`]).
 fn assemble(
     final_layout: &Layout<TextBrush>,
     natural_fallback: Option<&Layout<TextBrush>>,
@@ -1141,18 +1163,8 @@ fn assemble(
     let mut used_fallback = false;
 
     for (index, &natural_line) in natural_lines.iter().enumerate().take(visible) {
-        // A blank line stands only where the natural line is the empty last
-        // line a verbatim paragraph keeps; anywhere else it is a truncated
-        // layout's, and the natural line supplies the metrics.
-        let rendered = final_layout
-            .get(index)
-            .filter(|line| natural_line.is_empty() || !shape::is_blank_line(line));
-        if rendered.is_none() {
-            used_fallback = true;
-        }
-        let line = rendered
-            .or_else(|| natural_fallback.and_then(|layout| layout.get(index)))
-            .expect("every visible line exists in one of the layouts");
+        let (line, fallback) = reported_line(final_layout, natural_fallback, natural_line, index);
+        used_fallback |= fallback;
         // The one line-box definition every reader goes through, the inline
         // formatting context's included.
         let geometry = LineGeometry::of(&line);

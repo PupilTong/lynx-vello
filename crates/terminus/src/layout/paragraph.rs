@@ -32,7 +32,7 @@ use seldon::text::TextContext;
 use seldon::text::block::{BlockConstraint, BlockMetrics, PlacedBox, SourceItem, TextBlock};
 use seldon::text::inline::{FlowSource, InlineEdges, InlineFlow, InlineFragment};
 use seldon::text::paragraph::{
-    BreakStyle, Direction, LineGeometry, OffsetMap, RunStyle, TextSecurity, WhiteSpaceCollapse,
+    BreakStyle, Direction, OffsetMap, RunStyle, TextSecurity, WhiteSpaceCollapse,
 };
 use seldon::tree::AvailableSpace;
 use stylo::properties::ComputedValues;
@@ -147,7 +147,7 @@ impl TextStore {
                 let block = store.committed()?;
                 Some(PaintedParagraph {
                     layout: block.display(),
-                    lines: block.line_geometry(),
+                    line_count: block.lines().len(),
                     sources: &store.source_ids,
                     truncation_sources: &store.truncation_source_ids,
                     kind: PaintedKind::Block(block),
@@ -157,7 +157,7 @@ impl TextStore {
                 let flow = store.committed()?;
                 Some(PaintedParagraph {
                     layout: flow.display(),
-                    lines: flow.line_geometry(),
+                    line_count: flow.line_count(),
                     sources: &store.source_ids,
                     truncation_sources: &[],
                     kind: PaintedKind::Flow(flow, &store.insets),
@@ -261,8 +261,9 @@ pub(crate) struct EditableView<'a> {
 pub(crate) struct PaintedParagraph<'a> {
     /// The laid-out glyph runs, placed on their line boxes.
     pub(crate) layout: &'a parley::Layout<TextBrush>,
-    /// Where each reported line sits.
-    pub(crate) lines: &'a [LineGeometry],
+    /// How many lines the paragraph reports: a Lynx paragraph's visible
+    /// lines, an inline formatting context's line boxes.
+    pub(crate) line_count: usize,
     /// Item index → the node that contributed it, for
     /// [`SourceItem::Content`] and [`SourceItem::Ellipsis`].
     pub(crate) sources: &'a [NodeId],

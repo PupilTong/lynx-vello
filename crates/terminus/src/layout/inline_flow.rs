@@ -1025,7 +1025,7 @@ mod tests {
         doc.layout();
         // 10px glyphs on a 20px line box, on the block's 20px baseline.
         let flow = doc.inline_flow(block).expect("a committed flow");
-        let [line] = flow.line_geometry() else {
+        let [line] = flow.line_geometry()[..] else {
             panic!("one line expected")
         };
         assert_eq!((line.height, line.baseline), (20.0, 16.0));
@@ -1177,7 +1177,7 @@ mod tests {
         doc.layout();
 
         let flow = doc.inline_flow(p).expect("a committed flow");
-        let [line] = flow.line_geometry() else {
+        let [line] = flow.line_geometry()[..] else {
             panic!("one line expected")
         };
         // The 20px atom sits on the baseline: 20px above it, the strut's 2px
@@ -1609,7 +1609,7 @@ mod tests {
         doc.layout();
         let flow = doc.inline_flow(p).expect("a flow");
         // Raised 5px: the line's baseline drops from 20 to 25.
-        let [line] = flow.line_geometry() else {
+        let [line] = flow.line_geometry()[..] else {
             panic!("one line expected")
         };
         assert_eq!((line.height, line.baseline), (27.0, 25.0));
@@ -1633,7 +1633,7 @@ mod tests {
         let block = element(&mut doc, view, "b");
         text(&mut doc, block, "a");
         doc.layout();
-        let [line] = doc.inline_flow(p).expect("a flow").line_geometry() else {
+        let [line] = doc.inline_flow(p).expect("a flow").line_geometry()[..] else {
             panic!("one line expected")
         };
         assert_eq!((line.height, line.baseline), (20.0, 8.0));
@@ -1655,7 +1655,7 @@ mod tests {
         text(&mut doc, p, "aa");
         element(&mut doc, p, "view");
         doc.layout();
-        let [line] = doc.inline_flow(p).expect("a flow").line_geometry() else {
+        let [line] = doc.inline_flow(p).expect("a flow").line_geometry()[..] else {
             panic!("one line expected")
         };
         assert_eq!((line.height, line.baseline), (42.0, 25.0));
@@ -1670,7 +1670,7 @@ mod tests {
         text(&mut doc, p, "aa");
         element(&mut doc, p, "view");
         doc.layout();
-        let [line] = doc.inline_flow(p).expect("a flow").line_geometry() else {
+        let [line] = doc.inline_flow(p).expect("a flow").line_geometry()[..] else {
             panic!("one line expected")
         };
         assert_eq!((line.height, line.baseline), (47.0, 30.0));
@@ -1884,7 +1884,7 @@ mod tests {
         doc.layout();
         let flow = doc.inline_flow(p).expect("a flow");
         let atoms = flow.atoms().to_vec();
-        let lines = flow.line_geometry().to_vec();
+        let lines = flow.line_geometry();
         let shaped_lines = flow.display().lines().count();
         assert_eq!(size(&doc, wide), Size::new(100.0, 20.0));
 

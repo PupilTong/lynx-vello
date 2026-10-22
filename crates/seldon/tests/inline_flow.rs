@@ -129,10 +129,10 @@ fn the_strut_holds_a_line_of_smaller_text_at_the_containers_line_height() {
         &[run(&small, "aa")],
         None,
     );
-    let [line] = flow.line_geometry() else {
+    let [line] = flow.line_geometry()[..] else {
         panic!("one line expected, got {:?}", flow.line_geometry())
     };
-    assert_line(*line, 0.0, 20.0, 16.0);
+    assert_line(line, 0.0, 20.0, 16.0);
     let glyph_baseline = flow
         .display()
         .lines()
@@ -165,10 +165,10 @@ fn each_run_adds_its_own_half_leading_around_the_shared_baseline() {
         &[run(&tall_leading, "aa"), run(&big, "b")],
         None,
     );
-    let [line] = flow.line_geometry() else {
+    let [line] = flow.line_geometry()[..] else {
         panic!("one line expected")
     };
-    assert_line(*line, 0.0, 41.0, 24.0);
+    assert_line(line, 0.0, 41.0, 24.0);
     assert_close(flow.size().height, 41.0);
 }
 
@@ -555,12 +555,12 @@ fn empty_content_that_keeps_a_strut_line_lays_out_one_empty_line() {
             let mut context = text_context();
             let mut flow = InlineFlow::new(&mut context, keeping, &runs);
             flow.commit(&mut context, BlockConstraint::new(width, 0.0));
-            let [line] = flow.line_geometry() else {
+            let [line] = flow.line_geometry()[..] else {
                 panic!("one line expected, got {:?}", flow.line_geometry())
             };
             // Ahem's 10px em centred in the 24px line: 7px of half-leading
             // above its 8px ascent.
-            assert_line(*line, 0.0, 24.0, 15.0);
+            assert_line(line, 0.0, 24.0, 15.0);
             assert_close(flow.size().width, 0.0);
             assert_close(flow.size().height, 24.0);
             assert_eq!(flow.first_baseline(), Some(15.0));

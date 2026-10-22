@@ -777,7 +777,7 @@ impl<T> Document<T> {
     /// [`Self::paragraph_kind`]. Nothing here runs a pass.
     #[must_use]
     pub fn paragraph_line_count(&self, id: crate::tree::document::NodeId) -> Option<usize> {
-        Some(self.committed_paragraph(id)?.painted()?.lines.len())
+        Some(self.committed_paragraph(id)?.painted()?.line_count)
     }
 
     /// The lines the Lynx paragraph `id` establishes laid out at its last

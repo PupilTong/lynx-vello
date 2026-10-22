@@ -1888,7 +1888,7 @@ fn collect_text_clip_under<'doc, T>(
     });
     if visible
         && let Some(paragraph) = document.painted_paragraph(node)
-        && !paragraph.lines.is_empty()
+        && paragraph.line_count != 0
     {
         // An element with no runs still establishes a paragraph; it just has
         // no ink, and a silhouette of nothing would clip everything away.
