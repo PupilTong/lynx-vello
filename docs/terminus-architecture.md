@@ -17,8 +17,8 @@ mark a `::backdrop` box's node and an anonymous box's, so there is no second
 slab to keep in lockstep. A separate inline `DocumentLayoutState` owns the
 layout state of the nodes that lay out: a four-byte-per-key index into a dense
 entry vector, filed on a node's first layout write, so a node that is never
-laid out allocates no entry and a text node — whose box writes land in one
-shared sink nothing reads — never does. `Document::layout`/`render` size the
+laid out allocates no entry and a text node — which `LayoutTree::children`
+leaves out, so the engine never writes a box for it — never does. `Document::layout`/`render` size the
 index to the arena's slot bound in one resize, and a covered key with no entry
 reads as "never laid out" (an empty layout cache).
 

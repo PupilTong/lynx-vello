@@ -543,8 +543,8 @@ const NO_ENTRY: u32 = u32::MAX;
 /// for a key something wrote layout state for. The document node, a shadow
 /// root, an element no pass reached and a freed key that never laid out hold
 /// none, and neither does a text node: it is content of the paragraph above
-/// it, never a box, so the box writes seldon makes when it hides one land in
-/// one shared [`Self::text_sink`] that nothing reads.
+/// it, never a box, and `LayoutTree::children` leaves it out, so seldon never
+/// writes a box for one.
 ///
 /// `Document::layout` sizes `index` to the primary arena's slot bound before
 /// the engine reads slots wholesale; a key it covers with no entry reads as
@@ -557,9 +557,6 @@ pub(crate) struct DocumentLayoutState {
     entries: Vec<NodeLayoutState>,
     /// What a covered key with no entry reads as. Never written.
     vacant: NodeLayoutState,
-    /// Where a text node's layout writes land when it has no entry of its
-    /// own; see the type's documentation. Never read for any node.
-    text_sink: LayoutSlot,
     pub(crate) text_context: Option<Box<TextContext>>,
     /// Text nodes whose one retained Parley layout a probe re-broke away from
     /// its committed line break during the pass in flight. The pass owes them
@@ -701,7 +698,6 @@ impl DocumentLayoutState {
             index: Vec::new(),
             entries: Vec::new(),
             vacant: NodeLayoutState::default(),
-            text_sink: LayoutSlot::default(),
             text_context: None,
             probed_text: Vec::new(),
             interleaves_containers: false,
@@ -781,7 +777,7 @@ impl DocumentLayoutState {
     }
 
     /// Whether `slot` has an entry of its own.
-    #[inline]
+    #[cfg(test)]
     pub(crate) fn has_entry(&self, slot: NodeId) -> bool {
         self.entry_of(slot).is_some()
     }
@@ -903,18 +899,9 @@ impl DocumentLayoutState {
         self.entry_mut(slot)
     }
 
-    /// `slot`'s layout slot for a write: its entry, filed on first use —
-    /// unless it has none and `is_text_node` says it is a text node, whose
-    /// writes go to the [`Self::text_sink`] instead.
+    /// `slot`'s layout slot for a write: its entry, filed on first use.
     #[inline]
-    pub(crate) fn slot_mut(
-        &mut self,
-        slot: NodeId,
-        is_text_node: impl FnOnce() -> bool,
-    ) -> &mut LayoutSlot {
-        if !self.has_entry(slot) && is_text_node() {
-            return &mut self.text_sink;
-        }
+    pub(crate) fn slot_mut(&mut self, slot: NodeId) -> &mut LayoutSlot {
         &mut self.entry_mut(slot).slot
     }
 
@@ -932,7 +919,6 @@ impl DocumentLayoutState {
             index: _,
             entries,
             vacant: _,
-            text_sink: _,
             text_context,
             probed_text: _,
             interleaves_containers: _,
@@ -990,7 +976,6 @@ impl DocumentLayoutState {
             index,
             entries,
             vacant: _,
-            text_sink: _,
             text_context,
             probed_text: _,
             interleaves_containers: _,
@@ -1159,14 +1144,12 @@ mod tests {
             "covered with no entry: never laid out"
         );
         assert!(!layout.has_entry(element) && layout.entries.is_empty());
+        assert!(!layout.has_entry(run), "a text node is never written");
 
-        layout.slot_mut(run, || true).mark_hidden();
-        assert!(!layout.has_entry(run), "a text node's writes file nothing");
-        assert!(!layout.slot_at(run).is_hidden(), "and nothing reads them");
-
-        layout.slot_mut(element, || false).mark_hidden();
+        layout.slot_mut(element).mark_hidden();
         assert!(layout.has_entry(element));
         assert!(layout.slot_at(element).is_hidden());
+        assert!(!layout.has_entry(run));
         assert_eq!(layout.entries.len(), 1);
     }
 

@@ -48,20 +48,28 @@ impl<T> LayoutTree for TreeArenas<T> {
     where
         Self: 'tree;
     type ChildIter<'tree>
-        = core::iter::Copied<core::slice::Iter<'tree, NodeSlot>>
+        = BoxChildren<'tree, T>
     where
         Self: 'tree;
 
-    /// The flat children, except where loose text sits among them: there the
-    /// anonymous boxes that wrap it replace it (`tree::anonymous`).
+    /// The flat children that can generate a box, except where loose text
+    /// sits among them: there the anonymous boxes that wrap it replace it
+    /// (`tree::anonymous`). A text node is content of the paragraph above it
+    /// and never a box, so it is left out; the paragraph reads its own text
+    /// from the flat children.
     fn children(&self, node: NodeSlot) -> Self::ChildIter<'_> {
         let node_ref = self.at(node);
-        if node_ref.may_override_children()
+        let children = if node_ref.may_override_children()
             && let Some(children) = self.anonymous().layout_children(node)
         {
-            return children.iter().copied();
+            children
+        } else {
+            node_ref.flat_children()
+        };
+        BoxChildren {
+            tree: self,
+            children: children.iter(),
         }
-        node_ref.flat_children().iter().copied()
     }
 
     fn style(&self, node: NodeSlot) -> Self::Style<'_> {
@@ -72,14 +80,12 @@ impl<T> LayoutTree for TreeArenas<T> {
         state.slot_at(node)
     }
 
-    /// A text node's writes go to the state's shared sink: it is content of
-    /// the paragraph above it, and nothing reads its box.
     fn layout_mut<'state>(
         &self,
         state: &'state mut Self::State,
         node: NodeSlot,
     ) -> &'state mut LayoutSlot {
-        state.slot_mut(node, || self.at(node).is_text_node())
+        state.slot_mut(node)
     }
 
     fn set_sticky_containing_block(
@@ -192,9 +198,11 @@ impl<T> LayoutTree for TreeArenas<T> {
         input: LayoutInput,
     ) -> LayoutOutput {
         let node_ref = self.at(node);
-        let display = if node_ref.is_text_node() {
-            DisplayMode::Leaf
-        } else {
+        // Every caller reaches an element: a text node is never a box
+        // (`children` leaves it out), and the root, the parked roots, the
+        // atoms and the hoisted boxes are elements.
+        debug_assert!(node_ref.is_element(), "only an element is laid out");
+        let display = {
             let view = self.style(node);
             let display = view.display_mode();
             if display == DisplayMode::None {
@@ -287,28 +295,20 @@ impl<T> LayoutTree for TreeArenas<T> {
                 DisplayMode::Relative => compute_relative_layout(tree, state, node, input),
                 DisplayMode::Leaf => {
                     let node_ref = tree.at(node);
-                    // A text node is content of the paragraph above it, never
-                    // a box of its own: loose text among items reaches layout
-                    // through the anonymous box that wraps it
-                    // (`tree::anonymous`), never as an item itself.
-                    let output = if node_ref.is_text_node() {
-                        LayoutOutput::HIDDEN
+                    let view = tree.style(node);
+                    #[cfg(feature = "layout-test-utils")]
+                    let output = if let Some(metrics) = node_ref.test_leaf_metrics() {
+                        compute_leaf_layout_with_measurement_for_testing(
+                            input,
+                            &view,
+                            None,
+                            |_measure_input| metrics,
+                        )
                     } else {
-                        let view = tree.style(node);
-                        #[cfg(feature = "layout-test-utils")]
-                        if let Some(metrics) = node_ref.test_leaf_metrics() {
-                            compute_leaf_layout_with_measurement_for_testing(
-                                input,
-                                &view,
-                                None,
-                                |_measure_input| metrics,
-                            )
-                        } else {
-                            compute_leaf_layout(input, &view, node_ref.natural_size())
-                        }
-                        #[cfg(not(feature = "layout-test-utils"))]
                         compute_leaf_layout(input, &view, node_ref.natural_size())
                     };
+                    #[cfg(not(feature = "layout-test-utils"))]
+                    let output = compute_leaf_layout(input, &view, node_ref.natural_size());
                     if input.goal.commits() {
                         for grandchild in tree.children(node) {
                             hide_subtree(tree, state, grandchild);
@@ -439,6 +439,31 @@ impl<T> LayoutTree for TreeArenas<T> {
                 });
             }
         }
+    }
+}
+
+/// [`LayoutTree::children`] for the document: the children that can generate
+/// a box, text nodes left out.
+pub(crate) struct BoxChildren<'tree, T> {
+    tree: &'tree TreeArenas<T>,
+    children: core::slice::Iter<'tree, NodeSlot>,
+}
+
+impl<T> Iterator for BoxChildren<'_, T> {
+    type Item = NodeSlot;
+
+    #[inline]
+    fn next(&mut self) -> Option<NodeSlot> {
+        self.children
+            .by_ref()
+            .copied()
+            .find(|&child| !self.tree.at(child).is_text_node())
+    }
+
+    /// At most the children left; how many of them are text is unknown.
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (0, Some(self.children.len()))
     }
 }
 

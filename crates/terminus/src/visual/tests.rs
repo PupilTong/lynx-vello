@@ -664,6 +664,48 @@ fn text_runs_paint_with_their_element_and_hit_as_the_element() {
     );
 }
 
+/// A box hoisted out of a `<text>` (`position: absolute` under the static
+/// paragraph element) and a transformed atomic box after it inside the same
+/// paragraph paint in CSS2 Appendix E order: both sit in step 8 of the page's
+/// stacking context, in tree order, so the atom paints over the hoisted box.
+/// The text run before them is content of the paragraph and never a box, so
+/// it does not count toward the hoisted box's rank (user ruling, 2026-10-22;
+/// before, the run moved the hoisted box after the atom).
+#[test]
+fn a_box_hoisted_beside_text_runs_paints_in_tree_order_with_a_transformed_atom() {
+    let mut h = Harness::new(
+        "page { display: flex; position: relative; width: 800px; height: 600px; }
+         .label { width: 300px; height: 50px; font-family: Ahem; font-size: 20px; }
+         .a { display: flex; position: absolute; left: 0; top: 0;
+              width: 100px; height: 100px; }
+         .b { display: flex; width: 100px; height: 20px; transform: translateX(1px); }",
+    );
+    h.doc.define_lynx_text("text");
+    h.doc.dom.register_fonts(FontBlob::from_static(AHEM));
+    let root = h.root();
+    let label = h.el(root, "text.label");
+    let text = h.doc.dom.create_text_node("h", ());
+    h.doc.dom.append_child(label, text);
+    let a = h.el(label, "view.a");
+    let b = h.el(label, "view.b");
+    let order = h.element_order();
+    let at = |node| {
+        order
+            .iter()
+            .position(|&item| item == node)
+            .expect("painted")
+    };
+    assert!(at(a) < at(b), "{order:?}");
+    h.doc.dom.layout();
+    let rect = h.doc.dom.bounding_client_rect(b).expect("laid out");
+    let middle = (
+        rect.origin.x + rect.size.width / 2.0,
+        rect.origin.y + rect.size.height / 2.0,
+    );
+    assert!(middle.0 < 100.0 && middle.1 < 100.0, "{rect:?} overlaps a");
+    assert_eq!(h.hit(middle.0, middle.1), Some(b));
+}
+
 #[test]
 fn hit_outside_all_content_is_none() {
     let mut h = Harness::new("page { display: flex; width: 100px; height: 100px; }");

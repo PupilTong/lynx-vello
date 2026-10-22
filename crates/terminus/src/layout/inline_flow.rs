@@ -203,6 +203,11 @@ pub(crate) fn source_text<T>(tree: &TreeArenas<T>, element: NodeSlot) -> String 
     super::paragraph::source_text_of(&collect_flow(tree, element, None).0)
 }
 
+/// `node`'s flat children, text nodes included.
+fn flat_children<T>(tree: &TreeArenas<T>, node: NodeSlot) -> impl Iterator<Item = NodeSlot> + '_ {
+    tree.at(node).flat_children().iter().copied()
+}
+
 /// The block's content, in order: runs, atoms and inline box boundaries;
 /// and every out-of-flow box among it, with the index of the item that
 /// follows it.
@@ -220,7 +225,9 @@ fn collect_flow<T>(
     if collect_generated(tree, element, &mut collected) {
         return (collected, out_of_flow);
     }
-    let mut stack: Vec<Visit> = tree.children(element).map(Visit::Node).collect();
+    // The flat children, text included: `LayoutTree::children` answers only
+    // the ones that can generate a box, and the text is this paragraph's.
+    let mut stack: Vec<Visit> = flat_children(tree, element).map(Visit::Node).collect();
     stack.reverse();
     while let Some(visit) = stack.pop() {
         let slot = match visit {
@@ -262,7 +269,7 @@ fn collect_flow<T>(
             Role::Contents => {
                 if !collect_generated(tree, slot, &mut collected) {
                     let first = stack.len();
-                    stack.extend(tree.children(slot).map(Visit::Node));
+                    stack.extend(flat_children(tree, slot).map(Visit::Node));
                     stack[first..].reverse();
                 }
             }
@@ -281,7 +288,7 @@ fn collect_flow<T>(
                 } else {
                     stack.push(Visit::Close(slot));
                     let first = stack.len();
-                    stack.extend(tree.children(slot).map(Visit::Node));
+                    stack.extend(flat_children(tree, slot).map(Visit::Node));
                     stack[first..].reverse();
                 }
             }

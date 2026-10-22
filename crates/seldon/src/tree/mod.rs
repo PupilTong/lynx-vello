@@ -206,7 +206,9 @@ pub trait LayoutTree {
     where
         Self: 'tree;
 
-    /// Returns all source children, including nodes that generate no box.
+    /// Returns every source child that may own a box, `display: none` ones
+    /// included; a host leaves out the nodes that never own one (its text
+    /// nodes, which are content of the paragraph above them).
     fn children(&self, node: Self::NodeId) -> Self::ChildIter<'_>;
 
     /// Flattens `display: contents` subtrees while preserving source order.
@@ -564,11 +566,14 @@ impl<T: LayoutTree> core::fmt::Debug for FlattenedChildren<'_, T> {
 }
 
 impl<T: LayoutTree> FlattenedChildren<'_, T> {
-    /// Returns a buffer-capacity estimate for the flattened walk.
+    /// Returns a buffer-capacity estimate for the flattened walk: the upper
+    /// bound of the current level, since a host's child iterator may filter
+    /// (its lower bound is then zero).
     #[must_use]
     #[inline]
     pub fn capacity_hint(&self) -> usize {
-        self.level.size_hint().0
+        let (lower, upper) = self.level.size_hint();
+        upper.unwrap_or(lower)
     }
 }
 
