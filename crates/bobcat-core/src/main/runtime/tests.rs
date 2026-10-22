@@ -1904,15 +1904,19 @@ fn a_key_event_reaches_the_page_with_its_keyboard_members() {
         },
         timestamp: 0.0,
     };
-    runtime
-        .dispatch_input_event(
-            &mut js_runtime,
-            terminus::link::NodeId::DOCUMENT_ELEMENT,
-            "keydown",
-            &payload,
-            None,
-        )
-        .expect("dispatch");
+    let mut dispatch_failures = Vec::new();
+    runtime.dispatch_input_event(
+        &mut js_runtime,
+        terminus::link::NodeId::DOCUMENT_ELEMENT,
+        "keydown",
+        &payload,
+        None,
+        &mut dispatch_failures,
+    );
+    assert!(
+        dispatch_failures.is_empty(),
+        "dispatch: {dispatch_failures:?}"
+    );
     runtime
         .evaluate_module(
             &mut js_runtime,
@@ -1969,15 +1973,19 @@ fn a_click_targets_the_common_ancestor_and_two_make_a_dblclick() {
             },
             timestamp: at,
         };
-        runtime
-            .dispatch_input_event(
-                &mut js_runtime,
-                node_id(down),
-                "click",
-                &payload,
-                Some(node_id(release)),
-            )
-            .expect("dispatch");
+        let mut dispatch_failures = Vec::new();
+        runtime.dispatch_input_event(
+            &mut js_runtime,
+            node_id(down),
+            "click",
+            &payload,
+            Some(node_id(release)),
+            &mut dispatch_failures,
+        );
+        assert!(
+            dispatch_failures.is_empty(),
+            "dispatch: {dispatch_failures:?}"
+        );
     };
     click(4, 5, 0.0);
     click(5, 4, 300.0);
@@ -7859,7 +7867,12 @@ fn an_event_target_no_handle_names_is_an_error_not_a_silent_drop() {
     let error = runtime
         .dispatch_for_test(&mut js_runtime, run, &tap(), event_point())
         .expect_err("a target no handle names cannot be delivered");
-    assert!(error.to_string().contains("ownership graph"), "{error}");
+    let error = error
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("; ");
+    assert!(error.contains("ownership graph"), "{error}");
 }
 
 /// `__SetAttribute(list, "update-list-info", …)` against the real document,
@@ -11176,15 +11189,19 @@ fn a_key_calls_every_realm_that_registered_it() {
         },
         timestamp: 0.0,
     };
-    runtime
-        .dispatch_input_event(
-            &mut js,
-            terminus::link::NodeId::DOCUMENT_ELEMENT,
-            "keydown",
-            &payload,
-            None,
-        )
-        .expect("dispatch");
+    let mut dispatch_failures = Vec::new();
+    runtime.dispatch_input_event(
+        &mut js,
+        terminus::link::NodeId::DOCUMENT_ELEMENT,
+        "keydown",
+        &payload,
+        None,
+        &mut dispatch_failures,
+    );
+    assert!(
+        dispatch_failures.is_empty(),
+        "dispatch: {dispatch_failures:?}"
+    );
     assert_eq!(
         frame_lines(&mut js, &mut runtime),
         [
@@ -11541,7 +11558,7 @@ fn a_realm_that_throws_does_not_keep_the_next_from_hearing_the_event() {
     let failed = runtime
         .dispatch_for_test(&mut js, inner, &tap(), Point2D::new(30.0, 40.0))
         .expect_err("the page listener threw");
-    let failures: Vec<MainThreadError> = failed.into_errors().collect();
+    let failures: Vec<MainThreadError> = failed;
     assert_eq!(failures.len(), 1);
     assert!(
         failures[0].to_string().contains("page listener"),

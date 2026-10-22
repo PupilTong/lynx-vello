@@ -66,8 +66,8 @@ use terminus::link::event::EventDetail;
 use terminus::link::input::{Modifiers, PointerId, PointerKind};
 
 use super::{
-    CLICK_EVENT, DOUBLE_CLICK_MILLISECONDS, DocumentSlot, ListenerFailures, MainThreadError,
-    MainThreadRuntime, ScriptRuntime,
+    CLICK_EVENT, DOUBLE_CLICK_MILLISECONDS, DocumentSlot, MainThreadError, MainThreadRuntime,
+    ScriptRuntime,
 };
 use crate::editing::TextInputSource;
 use crate::link::{InputEventPayload, ViewNotice};
@@ -290,11 +290,14 @@ impl MainThreadRuntime {
     ) -> Vec<MainThreadError> {
         let mut failures = Vec::new();
         if let Some(release) = release {
-            if let Err(failed) =
-                self.dispatch_input_event(js_runtime, target, name, payload, Some(release))
-            {
-                failures.extend(failed.into_errors());
-            }
+            self.dispatch_input_event(
+                js_runtime,
+                target,
+                name,
+                payload,
+                Some(release),
+                &mut failures,
+            );
             // A finger's or a pen's tap is its press, as a touch browser
             // focuses and places the caret on the tap: at the release, where
             // the tap landed.
@@ -329,9 +332,7 @@ impl MainThreadRuntime {
             };
             (target, slot.editing_routes(name))
         };
-        if let Err(failed) = self.dispatch_input_event(js_runtime, target, name, payload, None) {
-            failures.extend(failed.into_errors());
-        }
+        self.dispatch_input_event(js_runtime, target, name, payload, None, &mut failures);
         if editing {
             self.input_default_action(js_runtime, target, name, payload, &mut failures);
         }
@@ -589,9 +590,7 @@ impl MainThreadRuntime {
         let events = edit.events().to_vec();
         let (before, after) = events.split_at(edit.commit_index());
         for event in before {
-            if let Err(failed) = self.dispatch_edit_event(js_runtime, host, event, timestamp) {
-                failures.extend(failed.into_errors());
-            }
+            self.dispatch_edit_event(js_runtime, host, event, timestamp, &mut failures);
         }
         if !self
             .slot
@@ -603,9 +602,7 @@ impl MainThreadRuntime {
             return failures;
         }
         for event in after {
-            if let Err(failed) = self.dispatch_edit_event(js_runtime, host, event, timestamp) {
-                failures.extend(failed.into_errors());
-            }
+            self.dispatch_edit_event(js_runtime, host, event, timestamp, &mut failures);
         }
         // The engine's own `selectionchange` at the host, after every
         // command that applied: no realm hears it, because
@@ -658,7 +655,8 @@ impl MainThreadRuntime {
         host: terminus::link::NodeId,
         event: &EditEvent,
         timestamp: f64,
-    ) -> Result<(), ListenerFailures> {
+        failures: &mut Vec<MainThreadError>,
+    ) {
         let composed = !is_shadow_content(self.slot.borrow().document_ref(), host);
         let detail = edit_detail(event);
         self.dispatch(
@@ -670,8 +668,8 @@ impl MainThreadRuntime {
             timestamp,
             &detail,
             &[],
-        )
-        .map(|_| ())
+            failures,
+        );
     }
 
     /// Dispatches the focus events `terminus` has queued, in the order they
@@ -696,7 +694,7 @@ impl MainThreadRuntime {
             let detail = EventDetail::Focus {
                 related_target: event.related_target,
             };
-            if let Err(error) = self.dispatch(
+            self.dispatch(
                 js_runtime,
                 event.target,
                 event.kind.name(),
@@ -705,9 +703,8 @@ impl MainThreadRuntime {
                 timestamp,
                 &detail,
                 &[],
-            ) {
-                failures.extend(error.into_errors());
-            }
+                &mut failures,
+            );
         }
         failures
     }

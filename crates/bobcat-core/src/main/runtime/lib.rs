@@ -637,44 +637,6 @@ enum Checkpoint<'a> {
     Deferred(&'a mut SmallVec<[RealmId; 2]>),
 }
 
-/// What one dispatch's listeners threw: one failure per realm call that
-/// failed, in the order the calls ran, never empty.
-///
-/// A dispatch calls each realm that listens on its path once, and a realm
-/// whose listener throws does not keep the rest of the walk — the other
-/// realms, the components after it — from running, so one dispatch can fail
-/// more than once. Every failure is kept, for the caller to report each.
-#[derive(Debug)]
-pub(crate) struct ListenerFailures(SmallVec<[MainThreadError; 1]>);
-
-impl ListenerFailures {
-    /// Every failure, in the order the calls that failed ran.
-    pub(crate) fn into_errors(self) -> impl Iterator<Item = MainThreadError> {
-        self.0.into_iter()
-    }
-
-    /// `failures` as a dispatch's answer: `Ok(called)` when there are none.
-    fn or_called(failures: SmallVec<[MainThreadError; 1]>, called: bool) -> Result<bool, Self> {
-        if failures.is_empty() {
-            Ok(called)
-        } else {
-            Err(Self(failures))
-        }
-    }
-}
-
-impl fmt::Display for ListenerFailures {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (index, failure) in self.0.iter().enumerate() {
-            if index > 0 {
-                formatter.write_str("; ")?;
-            }
-            write!(formatter, "{failure}")?;
-        }
-        Ok(())
-    }
-}
-
 impl std::error::Error for MainThreadError {}
 
 /// How many removals go by between collections.
@@ -2651,7 +2613,7 @@ impl MainThreadRuntime {
             return failures;
         }
         let document_node = self.slot.borrow().document_ref().root_node().id();
-        if let Err(error) = self.dispatch(
+        self.dispatch(
             js_runtime,
             document_node,
             SELECTION_CHANGE,
@@ -2660,9 +2622,8 @@ impl MainThreadRuntime {
             timestamp,
             &EventDetail::None,
             &[],
-        ) {
-            failures.extend(error.into_errors());
-        }
+            &mut failures,
+        );
         let mut slot = self.slot.borrow_mut();
         let DocumentSlot {
             document,
@@ -2857,7 +2818,7 @@ impl MainThreadRuntime {
             // None bubbles. Every one but a detailed event is not composed
             // either, as HTML and web-core fire them: one queued at a UA
             // shadow tree's node stays inside that tree.
-            if let Err(error) = self.dispatch(
+            self.dispatch(
                 js_runtime,
                 target,
                 name,
@@ -2866,9 +2827,8 @@ impl MainThreadRuntime {
                 timestamp,
                 &EventDetail::None,
                 &extras,
-            ) {
-                failures.extend(error.into_errors());
-            }
+                &mut failures,
+            );
             // A disconnection lets go of the frame's card, and may have
             // retired a child the release frees here, outside every call,
             // rather than waiting for the epilogue.
@@ -2906,6 +2866,9 @@ impl MainThreadRuntime {
     ///
     /// A `click` names the node its release routed to as well (`release`),
     /// and is [`Self::dispatch_click`].
+    ///
+    /// What the listeners threw is added to `failures`, as
+    /// [`Self::dispatch`] adds it.
     pub(crate) fn dispatch_input_event(
         &mut self,
         js_runtime: &mut ScriptRuntime,
@@ -2913,9 +2876,10 @@ impl MainThreadRuntime {
         name: &str,
         payload: &InputEventPayload,
         release: Option<terminus::link::NodeId>,
-    ) -> Result<bool, ListenerFailures> {
+        failures: &mut Vec<MainThreadError>,
+    ) -> bool {
         if let Some(release) = release {
-            return self.dispatch_click(js_runtime, target, release, payload);
+            return self.dispatch_click(js_runtime, target, release, payload, failures);
         }
         // The component whose UA shadow tree a tap hit hears it first, with
         // the shadow node it hit as the target.
@@ -2931,6 +2895,7 @@ impl MainThreadRuntime {
             payload.timestamp,
             &payload.detail,
             &[],
+            failures,
         )
     }
 
@@ -2952,11 +2917,12 @@ impl MainThreadRuntime {
         down: terminus::link::NodeId,
         release: terminus::link::NodeId,
         payload: &InputEventPayload,
-    ) -> Result<bool, ListenerFailures> {
+        failures: &mut Vec<MainThreadError>,
+    ) -> bool {
         let (target, click, double) = {
             let slot = self.slot.borrow();
             let Some(document) = slot.document.as_ref() else {
-                return Ok(false);
+                return false;
             };
             (
                 document.nearest_common_event_ancestor(down, release),
@@ -2966,11 +2932,11 @@ impl MainThreadRuntime {
         };
         let Some(target) = target else {
             self.last_click = None;
-            return Ok(false);
+            return false;
         };
         let at = payload.timestamp;
-        let clicked = if click {
-            self.dispatch(
+        let clicked = click
+            && self.dispatch(
                 js_runtime,
                 target,
                 CLICK_EVENT,
@@ -2979,10 +2945,8 @@ impl MainThreadRuntime {
                 at,
                 &payload.detail,
                 &[],
-            )
-        } else {
-            Ok(false)
-        };
+                failures,
+            );
         let completes = self
             .last_click
             .take_if(|(last, then)| *last == target && at - *then <= DOUBLE_CLICK_MILLISECONDS)
@@ -2991,8 +2955,10 @@ impl MainThreadRuntime {
             self.last_click = Some((target, at));
             return clicked;
         }
-        let doubled = if double {
-            self.dispatch(
+        // What a `click` listener threw does not keep the `dblclick` from
+        // running, and both are reported, the `click`'s first.
+        let doubled = double
+            && self.dispatch(
                 js_runtime,
                 target,
                 DOUBLE_CLICK_EVENT,
@@ -3001,20 +2967,9 @@ impl MainThreadRuntime {
                 at,
                 &payload.detail,
                 &[],
-            )
-        } else {
-            Ok(false)
-        };
-        // What a `click` listener threw does not keep the `dblclick` from
-        // running, and both are answered, the `click`'s first.
-        match (clicked, doubled) {
-            (Ok(clicked), Ok(doubled)) => Ok(clicked || doubled),
-            (Err(failed), Ok(_)) | (Ok(_), Err(failed)) => Err(failed),
-            (Err(mut clicked), Err(doubled)) => {
-                clicked.0.extend(doubled.0);
-                Err(clicked)
-            }
-        }
+                failures,
+            );
+        clicked || doubled
     }
 
     /// One whole dispatch, whatever produced it: the one place an event is
@@ -3118,7 +3073,7 @@ impl MainThreadRuntime {
     /// runs as one checkpoint per realm after the entry's last record.
     /// A call that throws is kept and the walk goes on, so every realm still
     /// hears the event; [`Self::finish_batch`] runs once, at the end; and
-    /// every failure is answered, in the order the calls ran.
+    /// every failure is added to `failures`, in the order the calls ran.
     ///
     /// No event is cancelable from script (the 2026-08-17 ruling stands,
     /// `docs/tracking/deviations.md`): no realm call answers anything about
@@ -3141,7 +3096,8 @@ impl MainThreadRuntime {
         timestamp: f64,
         detail: &EventDetail,
         extras: Extras<'_>,
-    ) -> Result<bool, ListenerFailures> {
+        failures: &mut Vec<MainThreadError>,
+    ) -> bool {
         self.dispatch_checkpointed(
             js_runtime,
             target,
@@ -3152,6 +3108,7 @@ impl MainThreadRuntime {
             detail,
             extras,
             Checkpoint::Each,
+            failures,
         )
     }
 
@@ -3173,7 +3130,8 @@ impl MainThreadRuntime {
         detail: &EventDetail,
         extras: Extras<'_>,
         mut checkpoint: Checkpoint<'_>,
-    ) -> Result<bool, ListenerFailures> {
+        failures: &mut Vec<MainThreadError>,
+    ) -> bool {
         // The realm files every name lowercased — `element-papi.ts`
         // lowercases both halves of a registration, and its dispatch the
         // name it is handed — so the listener table is asked in that
@@ -3196,7 +3154,7 @@ impl MainThreadRuntime {
             if document.get(target).is_none()
                 || !(document.has_listeners_for(registered) || document.observes_event(name))
             {
-                return Ok(false);
+                return false;
             }
             let registrants = self.core.realm_ids().map(RealmId::listener_key);
             let steps = document.event_steps(target, bubbles, composed);
@@ -3214,7 +3172,10 @@ impl MainThreadRuntime {
             .as_ref()
             .expect(DOCUMENT_EXISTS)
             .event_walk(&steps, name, detail, timestamp);
-        let mut failures: SmallVec<[MainThreadError; 1]> = SmallVec::new();
+        // What this dispatch's own calls threw is what follows this mark in
+        // the sink, which may already hold what the caller's earlier
+        // dispatches threw.
+        let before = failures.len();
         let mut called = false;
         loop {
             // The document is borrowed for one step's components alone: a
@@ -3265,10 +3226,7 @@ impl MainThreadRuntime {
                     continue;
                 }
                 let defer = matches!(checkpoint, Checkpoint::Deferred(_));
-                match self.call_realm(js_runtime, key, &arguments, defer) {
-                    Ok(published) => called |= published,
-                    Err(error) => failures.push(error),
-                }
+                called |= self.call_realm(js_runtime, key, &arguments, defer, failures);
                 if let Checkpoint::Deferred(realms) = &mut checkpoint {
                     let realm = RealmId::from_listener_key(key);
                     if !realms.contains(&realm) {
@@ -3283,11 +3241,11 @@ impl MainThreadRuntime {
         // the caller of a deferred run, after its checkpoints, since a
         // collection checkpoints too.
         if matches!(checkpoint, Checkpoint::Each)
-            && let Err(error) = self.finish_batch(js_runtime, failures.is_empty())
+            && let Err(error) = self.finish_batch(js_runtime, failures.len() == before)
         {
             failures.push(error);
         }
-        ListenerFailures::or_called(failures, called)
+        called
     }
 
     /// One realm's call in one dispatch: `__BobcatDispatchEvent(name,
@@ -3295,14 +3253,16 @@ impl MainThreadRuntime {
     /// dispatch's one [`encode_call`], in the realm whose registrations are
     /// filed under `key` ([`RealmId::from_listener_key`]). A child already
     /// freed is not called. With `defer`, the call has no checkpoint of its
-    /// own ([`Checkpoint::Deferred`]).
+    /// own ([`Checkpoint::Deferred`]). A call that failed is added to
+    /// `failures`.
     fn call_realm(
         &mut self,
         js_runtime: &mut ScriptRuntime,
         key: ListenerKey,
         arguments: &Arguments<'_>,
         defer: bool,
-    ) -> Result<bool, MainThreadError> {
+        failures: &mut Vec<MainThreadError>,
+    ) -> bool {
         let realm = RealmId::from_listener_key(key);
         let called = if defer {
             self.core.call_module_export_before_operation(
@@ -3315,10 +3275,14 @@ impl MainThreadRuntime {
             self.core
                 .call_module_export(js_runtime, realm, Export::DispatchEvent, arguments)
         };
-        let Some(called) = called else {
-            return Ok(false);
-        };
-        called.map_err(|error| MainThreadError::from_engine("delivering an event", error))
+        match called {
+            None => false,
+            Some(Ok(called)) => called,
+            Some(Err(error)) => {
+                failures.push(MainThreadError::from_engine("delivering an event", error));
+                false
+            }
+        }
     }
 
     /// Fires a non-composed `tap` at `target` for the engine's own
@@ -3375,8 +3339,9 @@ impl MainThreadRuntime {
         target: terminus::link::NodeId,
         name: &str,
         position: terminus::link::Point2D<f32>,
-    ) -> Result<bool, ListenerFailures> {
-        self.dispatch_input_event(
+    ) -> Result<bool, Vec<MainThreadError>> {
+        let mut failures = Vec::new();
+        let called = self.dispatch_input_event(
             js_runtime,
             target,
             name,
@@ -3391,7 +3356,13 @@ impl MainThreadRuntime {
                 ..InputEventPayload::default()
             },
             None,
-        )
+            &mut failures,
+        );
+        if failures.is_empty() {
+            Ok(called)
+        } else {
+            Err(failures)
+        }
     }
 
     /// Fires one `contentvisibilityautostatechange`
@@ -3509,7 +3480,7 @@ impl MainThreadRuntime {
             };
             // web-core's `bubbles: false, composed: false`
             // (`ExposureServices.ts:210-218`).
-            if let Err(error) = self.dispatch(
+            self.dispatch(
                 js,
                 change.node,
                 name,
@@ -3518,10 +3489,13 @@ impl MainThreadRuntime {
                 timestamp,
                 &EventDetail::Exposure,
                 &[],
-            ) {
-                failures.extend(error.into_errors());
-            }
+                &mut failures,
+            );
         }
+        // What the record dispatches and their checkpoints throw follows
+        // this mark; an appear or disappear listener that threw does not
+        // keep the batch below from being settled.
+        let records_from = failures.len();
         // What those listeners queued: records only, since only an
         // observer's report carries an element event.
         let late = self.slot.borrow().exposure.take_changes();
@@ -3532,7 +3506,6 @@ impl MainThreadRuntime {
         // records are in, so the realm sends one `exposure` and one
         // `disexposure` list.
         let mut realms = SmallVec::new();
-        let mut recorded = true;
         for change in &changes {
             let Some(id) = &change.exposure_id else {
                 continue;
@@ -3542,7 +3515,7 @@ impl MainThreadRuntime {
                 ("exposureScene", HostArgument::String(&change.scene)),
                 ("appeared", HostArgument::Boolean(change.appeared)),
             ];
-            if let Err(error) = self.dispatch_checkpointed(
+            self.dispatch_checkpointed(
                 js,
                 change.node,
                 EXPOSURE_RECORD_EVENT,
@@ -3552,17 +3525,15 @@ impl MainThreadRuntime {
                 &EventDetail::None,
                 &extras,
                 Checkpoint::Deferred(&mut realms),
-            ) {
-                recorded = false;
-                failures.extend(error.into_errors());
-            }
+                &mut failures,
+            );
         }
         for realm in realms {
             if let Some(Err(error)) = self.core.checkpoint_after_calls(js, realm) {
-                recorded = false;
                 failures.push(MainThreadError::from_engine("delivering an event", error));
             }
         }
+        let recorded = failures.len() == records_from;
         if let Err(error) = self.finish_batch(js, recorded) {
             failures.push(error);
         }
@@ -3664,7 +3635,7 @@ impl MainThreadRuntime {
                 ("width", HostArgument::Number(width)),
                 ("height", HostArgument::Number(height)),
             ];
-            if let Err(error) = self.dispatch(
+            self.dispatch(
                 js,
                 node,
                 LAYOUT_CHANGE_EVENT,
@@ -3673,9 +3644,8 @@ impl MainThreadRuntime {
                 timestamp,
                 &EventDetail::None,
                 &extras,
-            ) {
-                failures.extend(error.into_errors());
-            }
+                &mut failures,
+            );
         }
         failures
     }

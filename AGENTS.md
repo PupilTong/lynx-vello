@@ -2017,7 +2017,7 @@ a realm no longer invited when its call comes (the same three queries, read
 again after each call that ran) is skipped then. For a
 path in the document tree the page realm runs exactly the steps the one call
 before the table carried. Each call checkpoints on its own; a call that throws is
-collected and the walk goes on (`ListenerFailures`). The realm reports per
+collected into the caller's failure list and the walk goes on. The realm reports per
 (element, name) registrations with their passes: `listenerOpened(node, name,
 kinds)` (1 bubble, 2 capture, 4 global, or'ed; the host replaces the kinds on
 a repeat) and `listenerClosed(node, name)`, from `element-papi.ts`'s
