@@ -335,7 +335,7 @@ fn freeze_initial_index(document: &mut LynxDocument, list: NodeId) {
     let Some(index) = document
         .get(list)
         .and_then(|node| node.attribute(INITIAL_SCROLL_INDEX))
-        .map(initial_index)
+        .map(|value| initial_index(&value))
     else {
         return;
     };
