@@ -1510,7 +1510,7 @@ fn a_bts_that_throws_reports_worker_threw_from_the_background() {
 }
 
 /// A `Worker` is named by the key its `Worker` object holds and by its URL:
-/// the printed `WorkerId` is the key string the realm routed the event by,
+/// the printed `WorkerId` is the key number the realm routed the event by,
 /// the URL is the one its specifier joined to, and the `error` event
 /// reaching that object is what shows the realm holds it.
 #[test]

@@ -442,13 +442,13 @@ declare module "bobcat-internal:host" {
     url: string,
     name: string,
     baseUrl: string,
-  ): string | null;
+  ): number | null;
   /**
    * Posts one message to that worker. Any value the host boundary carries; a
    * value the engine's serializer refuses throws at this call.
    */
-  export function sendWorkerMessage(key: string, data: unknown): void;
-  export function terminateWorker(key: string): void;
+  export function sendWorkerMessage(key: number, data: unknown): void;
+  export function terminateWorker(key: number): void;
   export const createDocument: BobcatNative["createDocument"];
   export const createPage: BobcatNative["createPage"];
   export const createElement: BobcatNative["createElement"];

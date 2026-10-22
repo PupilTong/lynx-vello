@@ -17,8 +17,8 @@ import {
 // `undefined`, `NaN`, `Date`, `BigInt`, typed arrays, cycles and shared
 // references survive, and a value it refuses — a function, a `Symbol`, a `Map`
 // — throws synchronously here. Transfer lists remain unsupported.
-const workers: Map<string, WeakRef<Worker>> = new Map();
-const registry = new FinalizationRegistry<string>(key => {
+const workers: Map<number, WeakRef<Worker>> = new Map();
+const registry = new FinalizationRegistry<number>(key => {
   if (workers.delete(key)) terminateWorker(key);
 });
 
@@ -44,7 +44,7 @@ interface WorkerErrorEvent {
 
 /** Main-thread-only Worker context constructor. */
 export class Worker extends EventTarget {
-  #key: string;
+  #key: number;
   declare onmessage: ((event: WorkerMessageEvent) => void) | null;
   declare onerror: ((event: WorkerErrorEvent) => void) | null;
 
@@ -117,7 +117,7 @@ export class Worker extends EventTarget {
  * late events, including ones queued before terminate() on the other thread.
  */
 export function __BobcatDispatchWorkerEvent(
-  key: string,
+  key: number,
   kind: string,
   data: unknown,
   filename: string,

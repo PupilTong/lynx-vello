@@ -182,9 +182,10 @@ impl WorkerOwner {
                 let url = String::from(url);
                 let factory = &creator.view.factory;
                 let id = factory.next.get();
-                factory
-                    .next
-                    .set(id.checked_add(1).ok_or("worker ids exhausted")?);
+                if id > MAX_WORKER_KEY {
+                    return Err("worker ids exhausted".to_owned());
+                }
+                factory.next.set(id + 1);
                 let key = WorkerKey::new(id);
                 // Each worker's own end signal, which every request it makes
                 // of the host is cancelled with as well. The host is asked
@@ -203,7 +204,11 @@ impl WorkerOwner {
                     token,
                 };
                 creator.start(start, messages);
-                Ok(HostValue::String(id.to_string()))
+                #[expect(
+                    clippy::cast_precision_loss,
+                    reason = "at most `MAX_WORKER_KEY`, which an f64 holds exactly"
+                )]
+                Ok(HostValue::Number(id as f64))
             },
         )?;
         let sender = Rc::downgrade(self);
@@ -413,9 +418,29 @@ fn string<'a>(arguments: &[HostArgument<'a>], index: usize) -> Result<&'a str, S
     }
 }
 
+/// The largest key `createWorker` hands a realm. A key crosses as a number,
+/// and every integer up to this one is exact as an `f64`.
+const MAX_WORKER_KEY: u64 = 1 << 53;
+
+/// The key a realm names a worker by: the number `createWorker` answered, so
+/// an integer in `1..=MAX_WORKER_KEY`.
 fn key(arguments: &[HostArgument<'_>]) -> Result<WorkerKey, String> {
-    string(arguments, 0)?
-        .parse()
-        .map(WorkerKey::new)
-        .map_err(|_| "invalid worker key".to_owned())
+    let Some(&HostArgument::Number(value)) = arguments.first() else {
+        return Err("Worker host operation expects number argument 0".to_owned());
+    };
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "2^53, which an f64 holds exactly"
+    )]
+    let max = MAX_WORKER_KEY as f64;
+    if value >= 1.0 && value.fract() == 0.0 && value <= max {
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "an integer in 1..=2^53, checked above"
+        )]
+        Ok(WorkerKey::new(value as u64))
+    } else {
+        Err("invalid worker key".to_owned())
+    }
 }

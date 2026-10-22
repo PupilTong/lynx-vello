@@ -2049,9 +2049,13 @@ impl MainThreadRuntime {
         };
         let child = child_owner.as_ref().and_then(|owner| owner.realm());
         let location = location.as_ref();
-        let key = key.get().to_string();
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a key `createWorker` handed out, at most 2^53"
+        )]
+        let key = key.get() as f64;
         let arguments = [
-            HostArgument::String(&key),
+            HostArgument::Number(key),
             HostArgument::String(kind),
             data.as_argument(),
             HostArgument::String(location.and_then(|l| l.source.as_deref()).unwrap_or("")),
