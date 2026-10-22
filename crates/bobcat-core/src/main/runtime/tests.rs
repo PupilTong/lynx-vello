@@ -8749,7 +8749,10 @@ fn an_rpx_exposure_margin_resolves_against_the_viewport_width() {
         )
         .expect("removing the attribute");
     let rearmed = exposure_observer(&elements, view).expect("the listener keeps it registered");
-    assert_ne!(rearmed, observer, "the attribute write re-armed it");
+    assert_eq!(
+        rearmed, observer,
+        "the attribute write re-armed it on the observer of its options, which it did not change"
+    );
     runtime
         .evaluate_module(
             &mut js,
@@ -8842,7 +8845,10 @@ fn the_listener_members_register_exposure_and_switch_exposure_switches_detection
     );
     run("switchExposure(1, 0, `${view}`);");
     let resumed = exposure_observer(&elements, view).expect("resuming observes it again");
-    assert_ne!(resumed, first, "with an observer of its own");
+    assert_eq!(
+        resumed, first,
+        "on the observer of its options, which every element asking for them shares"
+    );
     run("listenerClosed(view, 'uiappear');");
     assert_eq!(
         exposure_observer(&elements, view),

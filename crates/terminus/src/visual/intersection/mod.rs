@@ -96,7 +96,9 @@
 //! registry: observers whose handler is bound to the node are dropped,
 //! handler and all (one whose notification is running loses its handler
 //! when that returns), the node leaves every target list, queued entries
-//! naming it are dropped (so every entry handed out names a live node), and
+//! naming it are dropped (so every entry handed out names a live node), the
+//! handler of each observer it left hears of it
+//! ([`IntersectionEventHandler::target_freed`]), and
 //! a root that was the node turns `Freed`, whose targets report one leave
 //! entry and then nothing. A node that is unlinked but alive stays observed:
 //! the unlink dirties layout, the render that follows sets the stale bit,
@@ -186,6 +188,13 @@ pub trait IntersectionEventHandler<T> {
     fn bound_to(&self) -> Option<NodeId> {
         None
     }
+
+    /// `node` is being freed, and the primitive has just taken it out of
+    /// this handler's observer: out of its targets and its queue. For a
+    /// handler that keeps state per target, the one place it hears of the
+    /// free; the default keeps none. Not called while the handler's own
+    /// notification runs, which is when it is out of its observer.
+    fn target_freed(&mut self, _node: NodeId) {}
 }
 
 /// `terminus`'s handler for an engine component: the element's
@@ -406,10 +415,16 @@ impl<T> IntersectionObservers<T> {
         self.observers
             .retain(|observer| observer.bound_to != Some(node));
         for observer in &mut self.observers {
+            let observed = observer.targets.len();
             observer
                 .targets
                 .retain(|registration| registration.target != node);
             observer.queue.retain(|entry| entry.target != node);
+            if observer.targets.len() != observed
+                && let Some(handler) = &mut observer.handler
+            {
+                handler.target_freed(node);
+            }
             if observer.root == IntersectionObserverRoot::Element(node) {
                 observer.root = IntersectionObserverRoot::Freed;
                 // Its targets owe a leave entry whether or not anything
@@ -564,6 +579,25 @@ impl<T> Document<T> {
             .get_mut(observer)
             .targets
             .retain(|registration| registration.target != target);
+    }
+
+    /// Stops observing `target` and discards the entries already queued for
+    /// it: [`Self::unobserve_intersection`] plus what the target's free does
+    /// to this observer's queue. Not a spec call: for a host that observes
+    /// `target` again under state of its own that changed, so that no entry
+    /// computed before reaches it after, and the next observe reports the
+    /// target as a new observer's first update would. A target it does not
+    /// observe is a no-op.
+    ///
+    /// # Panics
+    ///
+    /// When `observer` names no live observer.
+    pub fn forget_intersection_target(&mut self, observer: IntersectionObserverId, target: NodeId) {
+        let observer = self.intersections.get_mut(observer);
+        observer
+            .targets
+            .retain(|registration| registration.target != target);
+        observer.queue.retain(|entry| entry.target != target);
     }
 
     /// The spec's `disconnect()`: stops observing every target. Entries

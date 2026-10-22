@@ -867,9 +867,12 @@ from every target list, drops queued entries naming it, and turns an
 and reports not rendered at the next update.
 
 The first consumer is bobcat-core's Lynx exposure service
-(`crates/bobcat-core/src/main/exposure.rs`): one observer per exposed element,
-with a handler type of its own that records transitions for the delivery
-entry to drain; `terminus` holds nothing of it.
+(`crates/bobcat-core/src/main/exposure.rs`): one observer per set of exposure
+options, whose targets are the exposed elements asking for them, with a
+handler type of its own that records transitions for the delivery entry to
+drain and hears a target's free through `IntersectionEventHandler::target_freed`;
+a re-arm takes the element out with `forget_intersection_target` (unobserve plus
+its queued entries) and observes it again. `terminus` holds nothing of it.
 
 ## Resize observations
 
