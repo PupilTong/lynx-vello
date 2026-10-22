@@ -130,15 +130,16 @@ const DOTS: &str = "...";
 struct LayoutResult {
     constraint: BlockConstraint,
     /// The truncated display layout and its style/slot tables; absent when
-    /// the natural layout is the display.
-    display: Option<DisplayPart>,
+    /// the natural layout is the display, which is the untruncated case.
+    /// Boxed like [`TruncationFlow`], so that a block that does not truncate
+    /// does not carry a display layout's worth of empty storage inline.
+    display: Option<Box<DisplayPart>>,
     lines: Vec<LineInfo>,
     /// The reported lines' placement, parley's own.
     geometry: Vec<LineGeometry>,
     boxes: Vec<PlacedBox>,
     size: Size<f32>,
     first_baseline: Option<f32>,
-    truncated: bool,
     truncation_visible: bool,
 }
 
@@ -483,7 +484,6 @@ impl TextBlock {
             boxes,
             size,
             first_baseline,
-            truncated: false,
             truncation_visible: false,
         }
     }
@@ -529,18 +529,17 @@ impl TextBlock {
         );
         LayoutResult {
             constraint,
-            display: Some(DisplayPart {
+            display: Some(Box::new(DisplayPart {
                 layout: display,
                 sources,
                 cut_byte: plan.cut_byte,
                 content_slots,
-            }),
+            })),
             geometry: parley_geometry(&lines),
             lines,
             boxes,
             size,
             first_baseline,
-            truncated: true,
             truncation_visible: plan.truncation_visible,
         }
     }
@@ -937,10 +936,11 @@ impl TextBlock {
         self.expect_result().lines.last().map(|line| line.baseline)
     }
 
-    /// Whether a cut was applied.
+    /// Whether a cut was applied: a cut is what builds a display layout of
+    /// its own.
     #[must_use]
     pub fn truncated(&self) -> bool {
-        self.expect_result().truncated
+        self.expect_result().display.is_some()
     }
 
     /// Whether the inline-truncation content is shown — the web
