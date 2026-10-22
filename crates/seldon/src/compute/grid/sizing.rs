@@ -8,7 +8,7 @@ use stylo::values::specified::align::AlignFlags;
 
 use super::super::util::{BaselineSet, clamp, resolve_intrinsic, resolve_length_percentage};
 use super::placement::TrackSpan;
-use super::tracks::AxisTrackSpec;
+use super::tracks::{AxisTrackSpec, fit_content_limit, max_breadth, min_breadth};
 use super::types::{Axis, GridItem, MaxKind, MinKind, Track, TrackSet};
 use crate::style::CoreStyle;
 use crate::tree::{AvailableSpace, LayoutInput, LayoutTree, SizingMode};
@@ -30,7 +30,7 @@ fn available_for(kind: ContributionKind) -> AvailableSpace {
 
 pub(super) fn initialize_tracks(
     set: &mut TrackSet,
-    specs: &[AxisTrackSpec],
+    specs: &[AxisTrackSpec<'_>],
     percentage_basis: Option<f32>,
     gap: f32,
 ) {
@@ -38,28 +38,29 @@ pub(super) fn initialize_tracks(
     set.tracks
         .extend(specs.iter().map(|spec| plan_track(spec, percentage_basis)));
     set.gap = gap;
-    set.first_coordinate = specs.first().map_or(0, |spec| spec.coordinate);
     set.collapsed_line_positions = None;
 }
 
 /// §12.4: one track's sizing-function kinds and initial used state against
 /// one percentage basis.
-fn plan_track(spec: &AxisTrackSpec, percentage_basis: Option<f32>) -> Track {
-    let min_fixed = match &spec.sizing.min {
+fn plan_track(spec: &AxisTrackSpec<'_>, percentage_basis: Option<f32>) -> Track {
+    let minimum = min_breadth(spec.sizing);
+    let maximum = max_breadth(spec.sizing);
+    let min_fixed = match minimum {
         TrackBreadth::Breadth(value) => resolve_length_percentage(value, percentage_basis),
         _ => None,
     };
-    let max_fixed = match &spec.sizing.max {
+    let max_fixed = match maximum {
         TrackBreadth::Breadth(value) => resolve_length_percentage(value, percentage_basis),
         _ => None,
     };
-    let min = match &spec.sizing.min {
+    let min = match minimum {
         TrackBreadth::Breadth(_) if min_fixed.is_some() => MinKind::Fixed,
         TrackBreadth::Breadth(_) | TrackBreadth::Auto | TrackBreadth::Flex(_) => MinKind::Auto,
         TrackBreadth::MinContent => MinKind::MinContent,
         TrackBreadth::MaxContent => MinKind::MaxContent,
     };
-    let max = match &spec.sizing.max {
+    let max = match maximum {
         TrackBreadth::Breadth(_) => max_fixed.map_or(MaxKind::Auto, |maximum| {
             MaxKind::Fixed(maximum.max(min_fixed.unwrap_or(0.0)).max(0.0))
         }),
@@ -68,10 +69,9 @@ fn plan_track(spec: &AxisTrackSpec, percentage_basis: Option<f32>) -> Track {
         TrackBreadth::MaxContent => MaxKind::MaxContent,
         TrackBreadth::Flex(_) => MaxKind::Flex,
     };
-    let fit_content_limit = match &spec.sizing.fit_content {
-        Some(value) => resolve_length_percentage(value, percentage_basis).unwrap_or(f32::INFINITY),
-        None => f32::INFINITY,
-    };
+    let fit_content_limit = fit_content_limit(spec.sizing).map_or(f32::INFINITY, |value| {
+        resolve_length_percentage(value, percentage_basis).unwrap_or(f32::INFINITY)
+    });
     let collapsed = spec.collapsed;
     let base = if collapsed {
         0.0
@@ -86,7 +86,7 @@ fn plan_track(spec: &AxisTrackSpec, percentage_basis: Option<f32>) -> Track {
     let flex_factor = if collapsed {
         0.0
     } else {
-        match spec.sizing.max {
+        match maximum {
             TrackBreadth::Flex(flex) if flex.0.is_finite() && flex.0 > 0.0 => flex.0,
             _ => 0.0,
         }

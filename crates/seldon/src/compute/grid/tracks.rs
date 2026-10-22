@@ -2,28 +2,67 @@
 
 #![allow(clippy::cast_precision_loss)]
 
-use stylo::values::computed::{GridTemplateComponent, Length, LengthPercentage, TrackBreadth};
+use core::ops::Range;
+
+use stylo::values::computed::{
+    GridTemplateComponent, Length, LengthPercentage, TrackBreadth, TrackSize,
+};
 use stylo::values::generics::grid::{RepeatCount, TrackListValue};
 
 use super::placement;
-use super::types::TrackSizingFunction;
 
 pub(super) const GRID_LINE_LIMIT: i32 = 10_000;
 const MAX_AXIS_TRACKS: usize = 10_000;
 pub(super) const MAX_MATERIALIZED_TRACKS: usize = 20_000;
 const AUTO_REPEAT_TRACK_FLOOR: f64 = 1.0;
 
-/// A concrete explicit track list after expanding every `repeat()` group.
+/// The `auto` track size, which an empty `grid-auto-*` list stands for.
+const AUTO_TRACK: &TrackSize = &TrackSize::Breadth(TrackBreadth::Auto);
+
+/// The minimum half of a track size's `minmax()` form (css-grid-2 §7.2.1): a
+/// lone `<flex>` and `fit-content()` have an `auto` minimum.
+pub(super) fn min_breadth(size: &TrackSize) -> &TrackBreadth {
+    match size {
+        TrackSize::Breadth(TrackBreadth::Flex(_)) | TrackSize::FitContent(_) => &TrackBreadth::Auto,
+        TrackSize::Breadth(breadth) | TrackSize::Minmax(breadth, _) => breadth,
+    }
+}
+
+/// The maximum half of a track size's `minmax()` form: `fit-content()` has a
+/// `max-content` maximum, capped by [`fit_content_limit`].
+pub(super) fn max_breadth(size: &TrackSize) -> &TrackBreadth {
+    match size {
+        TrackSize::Breadth(breadth) | TrackSize::Minmax(_, breadth) => breadth,
+        TrackSize::FitContent(_) => &TrackBreadth::MaxContent,
+    }
+}
+
+/// The argument of a `fit-content()` track size.
+pub(super) fn fit_content_limit(size: &TrackSize) -> Option<&LengthPercentage> {
+    match size {
+        TrackSize::FitContent(TrackBreadth::Breadth(limit)) => Some(limit),
+        TrackSize::FitContent(_) => {
+            unreachable!("fit-content() stores a <length-percentage> breadth by construction")
+        }
+        TrackSize::Breadth(_) | TrackSize::Minmax(..) => None,
+    }
+}
+
+/// A concrete explicit track list after expanding every `repeat()` group:
+/// the style's own track sizes, and the range of tracks the `auto-fit`
+/// repetition expanded to, if the list has one (the grammar allows at most
+/// one automatic repetition).
 #[derive(Debug, Clone, Default)]
-pub(super) struct ExpandedTemplate {
-    pub(super) tracks: Vec<TrackSizingFunction>,
-    pub(super) auto_fit: Vec<bool>,
+pub(super) struct ExpandedTemplate<'a> {
+    pub(super) tracks: Vec<&'a TrackSize>,
+    pub(super) auto_fit: Option<Range<usize>>,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct AutoRepeat {
     start: usize,
     len: usize,
+    auto_fit: bool,
 }
 
 pub(super) fn expand_template(
@@ -31,7 +70,7 @@ pub(super) fn expand_template(
     definite_or_max_inner_size: Option<f32>,
     minimum_inner_size: Option<f32>,
     gap: f32,
-) -> ExpandedTemplate {
+) -> ExpandedTemplate<'_> {
     let list = match template {
         GridTemplateComponent::None => {
             return ExpandedTemplate::default();
@@ -43,30 +82,18 @@ pub(super) fn expand_template(
     };
 
     let mut tracks = Vec::new();
-    let mut auto_fit = Vec::new();
     let mut auto_repeat = None;
 
-    'components: for component in list.values.iter() {
+    for component in list.values.iter() {
         if tracks.len() >= MAX_AXIS_TRACKS {
             break;
         }
         match component {
-            TrackListValue::TrackSize(size) => {
-                push_track(
-                    &mut tracks,
-                    &mut auto_fit,
-                    TrackSizingFunction::from_style(size),
-                    false,
-                );
-            }
+            TrackListValue::TrackSize(size) => tracks.push(size),
             TrackListValue::TrackRepeat(repetition) => {
-                let repeated = repetition
-                    .track_sizes
-                    .iter()
-                    .map(TrackSizingFunction::from_style)
-                    .collect::<Vec<_>>();
+                let repeated = &repetition.track_sizes[..];
                 if repeated.is_empty() {
-                    continue 'components;
+                    continue;
                 }
 
                 match repetition.count {
@@ -74,22 +101,18 @@ pub(super) fn expand_template(
                         let repetitions = usize::try_from(count).unwrap_or(1).max(1);
                         let requested = repeated.len().saturating_mul(repetitions);
                         let append = requested.min(MAX_AXIS_TRACKS - tracks.len());
-                        tracks.extend(repeated.iter().cycle().take(append).cloned());
-                        auto_fit.resize(tracks.len(), false);
+                        tracks.extend(repeated.iter().cycle().take(append));
                     }
                     RepeatCount::AutoFill | RepeatCount::AutoFit => {
-                        let is_auto_fit = repetition.count == RepeatCount::AutoFit;
                         let start = tracks.len();
                         let append = repeated.len().min(MAX_AXIS_TRACKS - start);
-                        tracks.extend(repeated.into_iter().take(append));
-                        auto_fit.resize(tracks.len(), is_auto_fit);
-
-                        let group = AutoRepeat {
-                            start,
-                            len: tracks.len() - start,
-                        };
+                        tracks.extend(repeated.iter().take(append));
                         if auto_repeat.is_none() {
-                            auto_repeat = Some(group);
+                            auto_repeat = Some(AutoRepeat {
+                                start,
+                                len: tracks.len() - start,
+                                auto_fit: repetition.count == RepeatCount::AutoFit,
+                            });
                         }
                     }
                 }
@@ -97,12 +120,12 @@ pub(super) fn expand_template(
         }
     }
 
-    let Some(group) = auto_repeat else {
-        return ExpandedTemplate { tracks, auto_fit };
+    let Some(group) = auto_repeat.filter(|group| group.len > 0) else {
+        return ExpandedTemplate {
+            tracks,
+            auto_fit: None,
+        };
     };
-    if group.len == 0 {
-        return ExpandedTemplate { tracks, auto_fit };
-    }
 
     let repetitions = automatic_repetition_count(
         &tracks,
@@ -111,53 +134,32 @@ pub(super) fn expand_template(
         minimum_inner_size,
         gap,
     );
-    if repetitions == 1 {
-        return ExpandedTemplate { tracks, auto_fit };
-    }
-
-    let extra_tracks = group
-        .len
-        .checked_mul(repetitions - 1)
-        .expect("the repetition count is clamped to the track limit");
-    let final_len = tracks
-        .len()
-        .checked_add(extra_tracks)
-        .expect("the repetition count is clamped to the track limit");
-    debug_assert!(final_len <= MAX_AXIS_TRACKS);
-
     let group_end = group.start + group.len;
-    let mut expanded_tracks = Vec::with_capacity(final_len);
-    let mut expanded_auto_fit = Vec::with_capacity(final_len);
-    expanded_tracks.extend_from_slice(&tracks[..group_end]);
-    expanded_auto_fit.extend_from_slice(&auto_fit[..group_end]);
-    for _ in 1..repetitions {
-        expanded_tracks.extend_from_slice(&tracks[group.start..group_end]);
-        expanded_auto_fit.extend_from_slice(&auto_fit[group.start..group_end]);
+    if repetitions > 1 {
+        let extra_tracks = group
+            .len
+            .checked_mul(repetitions - 1)
+            .expect("the repetition count is clamped to the track limit");
+        debug_assert!(tracks.len() + extra_tracks <= MAX_AXIS_TRACKS);
+        // The extra repetitions follow the group, before the tracks after it.
+        let after = tracks.split_off(group_end);
+        tracks.reserve(extra_tracks + after.len());
+        for _ in 1..repetitions {
+            tracks.extend_from_within(group.start..group_end);
+        }
+        tracks.extend(after);
     }
-    expanded_tracks.extend_from_slice(&tracks[group_end..]);
-    expanded_auto_fit.extend_from_slice(&auto_fit[group_end..]);
 
     ExpandedTemplate {
-        tracks: expanded_tracks,
-        auto_fit: expanded_auto_fit,
-    }
-}
-
-#[inline]
-fn push_track(
-    tracks: &mut Vec<TrackSizingFunction>,
-    auto_fit: &mut Vec<bool>,
-    track: TrackSizingFunction,
-    is_auto_fit: bool,
-) {
-    if tracks.len() < MAX_AXIS_TRACKS {
-        tracks.push(track);
-        auto_fit.push(is_auto_fit);
+        tracks,
+        auto_fit: group
+            .auto_fit
+            .then(|| group.start..group.start + group.len * repetitions),
     }
 }
 
 fn automatic_repetition_count(
-    tracks: &[TrackSizingFunction],
+    tracks: &[&TrackSize],
     group: AutoRepeat,
     definite_or_max_inner_size: Option<f32>,
     minimum_inner_size: Option<f32>,
@@ -218,21 +220,16 @@ fn automatic_repetition_count(
 }
 
 #[inline]
-fn definite_repeat_breadth(track: &TrackSizingFunction, basis: f32) -> Option<f64> {
-    let minimum = match &track.min {
+fn definite_repeat_breadth(track: &TrackSize, basis: f32) -> Option<f64> {
+    let fixed = |breadth: &TrackBreadth| match breadth {
         TrackBreadth::Breadth(value) => resolve_fixed_breadth(value, basis),
         TrackBreadth::MinContent
         | TrackBreadth::MaxContent
         | TrackBreadth::Auto
         | TrackBreadth::Flex(_) => None,
     };
-    let maximum = match &track.max {
-        TrackBreadth::Breadth(value) => resolve_fixed_breadth(value, basis),
-        TrackBreadth::MinContent
-        | TrackBreadth::MaxContent
-        | TrackBreadth::Auto
-        | TrackBreadth::Flex(_) => None,
-    };
+    let minimum = fixed(min_breadth(track));
+    let maximum = fixed(max_breadth(track));
 
     match (minimum, maximum) {
         (Some(minimum), Some(maximum)) => Some(maximum.max(minimum)),
@@ -252,36 +249,35 @@ fn finite_non_negative(value: f32) -> Option<f64> {
     value.is_finite().then(|| f64::from(value.max(0.0)))
 }
 
-/// One concrete track spanning `coordinate..coordinate + 1`.
-#[derive(Debug, Clone, PartialEq)]
-pub(super) struct AxisTrackSpec {
-    pub(super) coordinate: i32,
-    pub(super) sizing: TrackSizingFunction,
-    pub(super) auto_fit: bool,
+/// One concrete track: its size, borrowed from the style, and whether it is
+/// an empty `auto-fit` track, which collapses.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct AxisTrackSpec<'a> {
+    pub(super) sizing: &'a TrackSize,
     pub(super) collapsed: bool,
 }
 
 /// Whether any track breadth or `fit-content()` limit is a percentage, which
 /// resolves against the container's inner size on the axis.
-pub(super) fn specs_depend_on_basis(specs: &[AxisTrackSpec]) -> bool {
+pub(super) fn specs_depend_on_basis(specs: &[AxisTrackSpec<'_>]) -> bool {
     let breadth_reads_basis = |breadth: &TrackBreadth| matches!(breadth, TrackBreadth::Breadth(lp) if lp.has_percentage());
     specs.iter().any(|spec| {
-        breadth_reads_basis(&spec.sizing.min)
-            || breadth_reads_basis(&spec.sizing.max)
-            || spec
-                .sizing
-                .fit_content
-                .as_ref()
-                .is_some_and(LengthPercentage::has_percentage)
+        breadth_reads_basis(min_breadth(spec.sizing))
+            || breadth_reads_basis(max_breadth(spec.sizing))
+            || fit_content_limit(spec.sizing).is_some_and(LengthPercentage::has_percentage)
     })
 }
 
-pub(super) fn build_axis_tracks(
-    explicit: &ExpandedTemplate,
-    auto_tracks: &[TrackSizingFunction],
+/// The concrete tracks of one axis, one per coordinate of `range` in order,
+/// and the coordinate of the first. `auto_tracks` is the `grid-auto-*` list
+/// and `occupied` the occupancy of `range`, which only an `auto-fit` track
+/// reads.
+pub(super) fn build_axis_tracks<'a>(
+    explicit: &ExpandedTemplate<'a>,
+    auto_tracks: &'a [TrackSize],
     range: placement::TrackSpan,
     occupied: &[bool],
-) -> Vec<AxisTrackSpec> {
+) -> (i32, Vec<AxisTrackSpec<'a>>) {
     debug_assert!(range.start >= -GRID_LINE_LIMIT && range.end <= GRID_LINE_LIMIT);
     debug_assert!(range.start <= range.end);
 
@@ -297,8 +293,11 @@ pub(super) fn build_axis_tracks(
             .filter(|&index| index < explicit_len);
         let (sizing, is_auto_fit) = if let Some(index) = explicit_index {
             (
-                explicit.tracks[index].clone(),
-                explicit.auto_fit.get(index).copied().unwrap_or(false),
+                explicit.tracks[index],
+                explicit
+                    .auto_fit
+                    .as_ref()
+                    .is_some_and(|auto_fit| auto_fit.contains(&index)),
             )
         } else {
             (implicit_track(auto_tracks, coordinate, explicit_len), false)
@@ -307,25 +306,16 @@ pub(super) fn build_axis_tracks(
         let occupied_index =
             usize::try_from(i64::from(coordinate) - i64::from(range.start)).unwrap_or(result_index);
         let collapsed = is_auto_fit && !occupied.get(occupied_index).copied().unwrap_or(false);
-        result.push(AxisTrackSpec {
-            coordinate,
-            sizing,
-            auto_fit: is_auto_fit,
-            collapsed,
-        });
+        result.push(AxisTrackSpec { sizing, collapsed });
     }
 
-    result
+    (start, result)
 }
 
 #[inline]
-fn implicit_track(
-    auto_tracks: &[TrackSizingFunction],
-    coordinate: i32,
-    explicit_len: usize,
-) -> TrackSizingFunction {
+fn implicit_track(auto_tracks: &[TrackSize], coordinate: i32, explicit_len: usize) -> &TrackSize {
     if auto_tracks.is_empty() {
-        return TrackSizingFunction::AUTO;
+        return AUTO_TRACK;
     }
 
     let pattern_len = i64::try_from(auto_tracks.len()).expect("track count fits in i64");
@@ -336,7 +326,7 @@ fn implicit_track(
         (coordinate - i64::try_from(explicit_len).expect("track count fits in i64"))
             .rem_euclid(pattern_len)
     };
-    auto_tracks[usize::try_from(index).expect("Euclidean remainder is non-negative")].clone()
+    &auto_tracks[usize::try_from(index).expect("Euclidean remainder is non-negative")]
 }
 
 #[cfg(test)]
@@ -345,7 +335,7 @@ mod tests {
     use stylo::Zero;
     use stylo::typed_om::NumericBaseType;
     use stylo::values::computed::length_percentage::{CalcNode, CalcPercentageLeaf, ComputedLeaf};
-    use stylo::values::computed::{Integer, Percentage, TrackList, TrackSize};
+    use stylo::values::computed::{Integer, Percentage, TrackList};
     use stylo::values::generics::Optional;
     use stylo::values::generics::grid::{Flex, TrackRepeat};
 
@@ -392,35 +382,36 @@ mod tests {
         }))
     }
 
-    fn px(value: f32) -> TrackSizingFunction {
-        TrackSizingFunction::from_style(&px_size(value))
+    fn px(value: f32) -> TrackSize {
+        px_size(value)
+    }
+
+    fn owned(tracks: &[&TrackSize]) -> Vec<TrackSize> {
+        tracks.iter().map(|&track| track.clone()).collect()
     }
 
     #[test]
     fn normalization_expands_the_single_value_forms() {
-        let fr =
-            TrackSizingFunction::from_style(&TrackSize::Breadth(TrackBreadth::Flex(Flex(2.0))));
-        assert_eq!(fr.min, TrackBreadth::Auto);
-        assert_eq!(fr.max, TrackBreadth::Flex(Flex(2.0)));
-        assert_eq!(fr.fit_content, None);
+        let fr = TrackSize::Breadth(TrackBreadth::Flex(Flex(2.0)));
+        assert_eq!(*min_breadth(&fr), TrackBreadth::Auto);
+        assert_eq!(*max_breadth(&fr), TrackBreadth::Flex(Flex(2.0)));
+        assert_eq!(fit_content_limit(&fr), None);
 
-        let fit = TrackSizingFunction::from_style(&TrackSize::FitContent(TrackBreadth::Breadth(
-            lp_px(40.0),
-        )));
-        assert_eq!(fit.min, TrackBreadth::Auto);
-        assert_eq!(fit.max, TrackBreadth::MaxContent);
-        assert_eq!(fit.fit_content, Some(lp_px(40.0)));
+        let fit = TrackSize::FitContent(TrackBreadth::Breadth(lp_px(40.0)));
+        assert_eq!(*min_breadth(&fit), TrackBreadth::Auto);
+        assert_eq!(*max_breadth(&fit), TrackBreadth::MaxContent);
+        assert_eq!(fit_content_limit(&fit), Some(&lp_px(40.0)));
 
         let fixed = px(10.0);
-        assert_eq!(fixed.min, TrackBreadth::Breadth(lp_px(10.0)));
-        assert_eq!(fixed.max, TrackBreadth::Breadth(lp_px(10.0)));
+        assert_eq!(*min_breadth(&fixed), TrackBreadth::Breadth(lp_px(10.0)));
+        assert_eq!(*max_breadth(&fixed), TrackBreadth::Breadth(lp_px(10.0)));
     }
 
     #[test]
     fn none_template_expands_to_no_tracks() {
         let expanded = expand_template(&GridTemplateComponent::None, Some(100.0), None, 0.0);
         assert!(expanded.tracks.is_empty());
-        assert!(expanded.auto_fit.is_empty());
+        assert_eq!(expanded.auto_fit, None);
     }
 
     #[test]
@@ -433,7 +424,7 @@ mod tests {
         let expanded = expand_template(&value, Some(500.0), None, 0.0);
 
         assert_eq!(
-            expanded.tracks,
+            owned(&expanded.tracks),
             vec![
                 px(10.0),
                 px(20.0),
@@ -445,7 +436,7 @@ mod tests {
                 px(40.0),
             ]
         );
-        assert_eq!(expanded.auto_fit, vec![false; 8]);
+        assert_eq!(expanded.auto_fit, None);
     }
 
     #[test]
@@ -467,9 +458,9 @@ mod tests {
         let expanded = expand_template(&value, Some(265.0), None, 5.0);
 
         assert_eq!(expanded.tracks.len(), 8);
-        assert_eq!(expanded.tracks[0], px(50.0));
-        assert_eq!(expanded.tracks[7], px(30.0));
-        assert!(expanded.auto_fit.iter().all(|is_auto_fit| !is_auto_fit));
+        assert_eq!(*expanded.tracks[0], px(50.0));
+        assert_eq!(*expanded.tracks[7], px(30.0));
+        assert_eq!(expanded.auto_fit, None);
     }
 
     #[test]
@@ -484,11 +475,11 @@ mod tests {
 
         let definite = expand_template(&value, Some(3.0), None, 0.0);
         assert_eq!(definite.tracks.len(), 3);
-        assert_eq!(definite.auto_fit, vec![true; 3]);
+        assert_eq!(definite.auto_fit, Some(0..3));
 
         let indefinite = expand_template(&value, None, None, 0.0);
         assert_eq!(indefinite.tracks.len(), 1);
-        assert_eq!(indefinite.auto_fit, vec![true]);
+        assert_eq!(indefinite.auto_fit, Some(0..1));
     }
 
     #[test]
@@ -527,9 +518,9 @@ mod tests {
         let expanded = expand_template(&value, Some(f32::MAX), None, 0.0);
 
         assert_eq!(expanded.tracks.len(), MAX_AXIS_TRACKS);
-        assert_eq!(expanded.auto_fit.len(), MAX_AXIS_TRACKS);
-        assert_eq!(expanded.tracks[MAX_AXIS_TRACKS - 2], px(1.0));
-        assert_eq!(expanded.tracks[MAX_AXIS_TRACKS - 1], px(2.0));
+        assert_eq!(expanded.auto_fit, None);
+        assert_eq!(*expanded.tracks[MAX_AXIS_TRACKS - 2], px(1.0));
+        assert_eq!(*expanded.tracks[MAX_AXIS_TRACKS - 1], px(2.0));
     }
 
     #[test]
@@ -540,28 +531,24 @@ mod tests {
         ]);
         let expanded = expand_template(&value, None, None, 0.0);
 
-        assert_eq!(expanded.tracks, vec![px(10.0)]);
+        assert_eq!(owned(&expanded.tracks), vec![px(10.0)]);
     }
 
     #[test]
     fn implicit_tracks_cycle_forward_and_backward() {
+        let (ten, twenty) = (px(10.0), px(20.0));
         let explicit = ExpandedTemplate {
-            tracks: vec![px(10.0), px(20.0)],
-            auto_fit: vec![true, false],
+            tracks: vec![&ten, &twenty],
+            auto_fit: Some(0..1),
         };
         let auto_tracks = [px(1.0), px(2.0), px(3.0)];
         let range = placement::TrackSpan { start: -3, end: 5 };
         let mut occupied = vec![false; 8];
         occupied[4] = true;
 
-        let tracks = build_axis_tracks(&explicit, &auto_tracks, range, &occupied);
-        assert_eq!(
-            tracks
-                .iter()
-                .map(|track| track.coordinate)
-                .collect::<Vec<_>>(),
-            vec![-3, -2, -1, 0, 1, 2, 3, 4]
-        );
+        let (first, tracks) = build_axis_tracks(&explicit, &auto_tracks, range, &occupied);
+        assert_eq!(first, -3);
+        assert_eq!(tracks.len(), 8);
         assert_eq!(
             tracks
                 .iter()
@@ -578,16 +565,14 @@ mod tests {
                 px(3.0),
             ]
         );
-        assert!(tracks[3].auto_fit);
         assert!(tracks[3].collapsed);
-        assert!(!tracks[4].auto_fit);
         assert!(!tracks[4].collapsed);
     }
 
     #[test]
     fn empty_auto_pattern_defaults_to_auto() {
         let explicit = ExpandedTemplate::default();
-        let tracks = build_axis_tracks(
+        let (_, tracks) = build_axis_tracks(
             &explicit,
             &[],
             placement::TrackSpan { start: -1, end: 2 },
@@ -596,7 +581,7 @@ mod tests {
         assert!(
             tracks
                 .iter()
-                .all(|track| track.sizing == TrackSizingFunction::AUTO)
+                .all(|track| *track.sizing == TrackSize::Breadth(TrackBreadth::Auto))
         );
     }
 }

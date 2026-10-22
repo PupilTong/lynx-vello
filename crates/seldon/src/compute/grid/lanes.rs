@@ -45,7 +45,7 @@ use super::sizing::{
 use super::tracks::{
     AxisTrackSpec, GRID_LINE_LIMIT, MAX_MATERIALIZED_TRACKS, build_axis_tracks, expand_template,
 };
-use super::types::{Axis, GridItem, Track, TrackSet, TrackSizingFunction};
+use super::types::{Axis, GridItem, Track, TrackSet};
 use super::{
     ContainerPrologue, ItemDefaults, clamped_inner_axis, classify_item, container_prologue,
     final_outer_axis, fit_content_inner_size, item_area_geometry, item_commit_independence,
@@ -123,8 +123,10 @@ fn auto_fit_occupancy(
 /// Whether a `span`-track window starting at `start` is free of collapsed
 /// lanes. A collapsed lane is zero-sized, so nothing may be placed across it.
 #[inline]
-fn window_is_open(collapsed: &[bool], start: usize, span: usize) -> bool {
-    !collapsed[start..start + span].iter().any(|&value| value)
+fn window_is_open(tracks: &[Track], start: usize, span: usize) -> bool {
+    !tracks[start..start + span]
+        .iter()
+        .any(|track| track.collapsed)
 }
 
 /// §4.4 step 1: the lane whose spanned tracks have the smallest maximum
@@ -133,7 +135,7 @@ fn window_is_open(collapsed: &[bool], start: usize, span: usize) -> bool {
 /// after the auto-placement cursor.
 fn choose_lane(
     running: &[f32],
-    collapsed: &[bool],
+    tracks: &[Track],
     span: usize,
     cursor: usize,
     tolerance: f32,
@@ -146,7 +148,7 @@ fn choose_lane(
             .copied()
             .fold(0.0_f32, f32::max)
     };
-    let open = || (0..=last_start).filter(|&start| window_is_open(collapsed, start, span));
+    let open = || (0..=last_start).filter(|&start| window_is_open(tracks, start, span));
     let best = open()
         .map(max_pos)
         .reduce(f32::min)
@@ -187,10 +189,10 @@ fn grid_axis_area(axis: Axis, span: TrackSpan) -> GridArea {
 /// span fits.
 fn candidate_positions<'a>(
     placements: &'a [AxisPlacement],
-    collapsed: &'a [bool],
+    tracks: &'a [Track],
     first_line: i32,
 ) -> impl Iterator<Item = (usize, TrackSpan)> + 'a {
-    let count = collapsed.len();
+    let count = tracks.len();
     placements
         .iter()
         .enumerate()
@@ -201,7 +203,7 @@ fn candidate_positions<'a>(
             };
             let auto_positions = auto_span.into_iter().flat_map(move |span| {
                 (0..=count - span)
-                    .filter(move |&start| window_is_open(collapsed, start, span))
+                    .filter(move |&start| window_is_open(tracks, start, span))
                     .map(move |start| {
                         let start_line = first_line + line_offset(start);
                         TrackSpan {
@@ -232,11 +234,10 @@ fn placement_span(placement: AxisPlacement, count: usize) -> usize {
 fn sizing_entries<N: Copy>(
     items: &[GridItem<N>],
     placements: &[AxisPlacement],
-    collapsed: &[bool],
     tracks: &TrackSet,
     axis: Axis,
 ) -> LaneSizingItems<N> {
-    let count = collapsed.len();
+    let count = tracks.tracks.len();
     let first_line = tracks.first_coordinate;
     let mut sizing = LaneSizingItems::empty();
     let mut definite = Vec::new();
@@ -251,7 +252,7 @@ fn sizing_entries<N: Copy>(
             AxisPlacement::Indefinite { .. } => sizing.pooled.push(work),
         }
     }
-    for (index, span) in candidate_positions(placements, collapsed, first_line) {
+    for (index, span) in candidate_positions(placements, &tracks.tracks, first_line) {
         if placement_span(placements[index], count) == 1 {
             continue;
         }
@@ -267,7 +268,7 @@ fn sizing_entries<N: Copy>(
             sizing.members.push(definite[next].1);
             next += 1;
         }
-        let pooled = !sizing.pooled.is_empty() && window_is_open(collapsed, track, 1);
+        let pooled = !sizing.pooled.is_empty() && window_is_open(&tracks.tracks, track, 1);
         if sizing.members.len() > first_member || pooled {
             let line = first_line + line_offset(track);
             sizing.entries.push(LaneEntry::Aggregate {
@@ -283,7 +284,7 @@ fn sizing_entries<N: Copy>(
     }
     // §12.5 step 4 reads the flex factors the per-position entries span,
     // summed in their order; the aggregates stand for several of them.
-    sizing.spanned_flex_sum = candidate_positions(placements, collapsed, first_line)
+    sizing.spanned_flex_sum = candidate_positions(placements, &tracks.tracks, first_line)
         .flat_map(|(_, span)| {
             tracks.tracks[tracks.span_indices(span.start, span.end)]
                 .iter()
@@ -301,11 +302,11 @@ fn sizing_entries<N: Copy>(
 fn per_position_items<N: Copy>(
     sizing: &LaneSizingItems<N>,
     placements: &[AxisPlacement],
-    collapsed: &[bool],
+    tracks: &[Track],
     first_line: i32,
     axis: Axis,
 ) -> Vec<GridItem<N>> {
-    let count = collapsed.len();
+    let count = tracks.len();
     let mut work_of = Vec::with_capacity(placements.len());
     let mut work = 0;
     for placement in placements {
@@ -320,7 +321,7 @@ fn per_position_items<N: Copy>(
         LaneEntry::Item(item) => Some(item),
         LaneEntry::Aggregate { .. } => None,
     });
-    candidate_positions(placements, collapsed, first_line)
+    candidate_positions(placements, tracks, first_line)
         .map(|(index, span)| match work_of[index] {
             Some(work) => {
                 let mut clone = sizing.work[work].clone();
@@ -348,8 +349,7 @@ fn size_grid_axis<T>(
     state: &mut T::State,
     axis: Axis,
     tracks: &mut TrackSet,
-    specs: &[AxisTrackSpec],
-    collapsed: &[bool],
+    specs: &[AxisTrackSpec<'_>],
     items: &[GridItem<T::NodeId>],
     placements: &[AxisPlacement],
     basis: Size<Option<f32>>,
@@ -366,7 +366,7 @@ fn size_grid_axis<T>(
     // condition is `size_tracks`'s own, borrowed rather than restated.
     let reads_items = track_sizing_reads_items(tracks);
     let mut sizing = if reads_items {
-        sizing_entries(items, placements, collapsed, tracks, axis)
+        sizing_entries(items, placements, tracks, axis)
     } else {
         LaneSizingItems::empty()
     };
@@ -389,11 +389,14 @@ fn size_grid_axis<T>(
         let mut per_position = per_position_items(
             &sizing,
             placements,
-            collapsed,
+            &tracks.tracks,
             tracks.first_coordinate,
             axis,
         );
-        let mut expected = TrackSet::default();
+        let mut expected = TrackSet {
+            first_coordinate: tracks.first_coordinate,
+            ..TrackSet::default()
+        };
         initialize_tracks(&mut expected, specs, axis.size(basis), gap);
         size_tracks(
             tree,
@@ -464,7 +467,6 @@ struct PlacedItem<N> {
 struct LanesContext<'a> {
     grid_axis: Axis,
     tracks: &'a TrackSet,
-    collapsed: &'a [bool],
     inner_grid: f32,
     content_origin: Point<f32>,
     stacking_gap: f32,
@@ -527,8 +529,13 @@ where
             ),
             AxisPlacement::Indefinite { span } => {
                 let span = span.min(count).max(1);
-                let start =
-                    choose_lane(&running, context.collapsed, span, cursor, context.tolerance);
+                let start = choose_lane(
+                    &running,
+                    &context.tracks.tracks,
+                    span,
+                    cursor,
+                    context.tolerance,
+                );
                 cursor = start + span;
                 (start, span, false)
             }
@@ -886,21 +893,19 @@ where
         .max(range.start.saturating_add(line_offset(largest_auto_span)))
         .min(GRID_LINE_LIMIT);
     let occupied = auto_fit_occupancy(range, &placements, auto_span_total);
-    let auto_tracks = if range.start < 0 || range.end > line_offset(explicit_len) {
-        match grid_axis {
-            Axis::Horizontal => style.grid_auto_columns(),
-            Axis::Vertical => style.grid_auto_rows(),
-        }
-        .0
-        .iter()
-        .take(MAX_MATERIALIZED_TRACKS)
-        .map(TrackSizingFunction::from_style)
-        .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
-    let specs = build_axis_tracks(&explicit, &auto_tracks, range, &occupied);
-    let collapsed = specs.iter().map(|spec| spec.collapsed).collect::<Vec<_>>();
+    // A `grid-auto-*` list is read only for coordinates outside the explicit
+    // grid.
+    let auto_tracks = &match grid_axis {
+        Axis::Horizontal => style.grid_auto_columns(),
+        Axis::Vertical => style.grid_auto_rows(),
+    }
+    .0;
+    let (first_line, specs) = build_axis_tracks(
+        &explicit,
+        &auto_tracks[..auto_tracks.len().min(MAX_MATERIALIZED_TRACKS)],
+        range,
+        &occupied,
+    );
 
     let mut items = in_flow
         .iter()
@@ -928,7 +933,10 @@ where
         })
         .collect::<Vec<_>>();
 
-    let mut tracks = TrackSet::default();
+    let mut tracks = TrackSet {
+        first_coordinate: first_line,
+        ..TrackSet::default()
+    };
     let mut scratch = IntrinsicSizingScratch::default();
     let grid_basis = grid_axis.size(percentage_basis);
     let grid_alignment = grid_axis.size(content_alignment);
@@ -952,7 +960,6 @@ where
                         grid_axis,
                         &mut tracks,
                         &specs,
-                        &collapsed,
                         &items,
                         &placements,
                         percentage_basis,
@@ -973,7 +980,6 @@ where
             grid_axis,
             &mut tracks,
             &specs,
-            &collapsed,
             &items,
             &placements,
             percentage_basis,
@@ -1008,7 +1014,6 @@ where
             grid_axis,
             &mut tracks,
             &specs,
-            &collapsed,
             &items,
             &placements,
             grid_axis.pack(Some(grid_inner), stacking_axis.size(percentage_basis)),
@@ -1033,7 +1038,6 @@ where
     let mut context = LanesContext {
         grid_axis,
         tracks: &tracks,
-        collapsed: &collapsed,
         inner_grid: grid_inner,
         content_origin: Point::new(
             metrics.border.left + metrics.padding.left,
@@ -1268,9 +1272,20 @@ mod tests {
         );
     }
 
+    /// One track per flag, collapsed where it is set.
+    fn lanes(collapsed: &[bool]) -> Vec<Track> {
+        collapsed
+            .iter()
+            .map(|&collapsed| Track {
+                collapsed,
+                ..Track::default()
+            })
+            .collect()
+    }
+
     #[test]
     fn choose_lane_takes_the_shortest_lane_then_the_cursor_within_tolerance() {
-        let open = [false, false, false];
+        let open = lanes(&[false, false, false]);
         // Exact shortest lane with no ties.
         assert_eq!(choose_lane(&[30.0, 10.0, 20.0], &open, 1, 0, 0.0), 1);
         // A tie ahead of the cursor wins over the same tie behind it.
@@ -1283,16 +1298,16 @@ mod tests {
         // A span takes the largest running position of the lanes it covers, so
         // the tall lane rules out both windows that reach it.
         assert_eq!(
-            choose_lane(&[0.0, 50.0, 10.0, 0.0], &[false; 4], 2, 0, 0.0),
+            choose_lane(&[0.0, 50.0, 10.0, 0.0], &lanes(&[false; 4]), 2, 0, 0.0),
             2
         );
         // Collapsed lanes are never spanned.
         assert_eq!(
-            choose_lane(&[0.0, 0.0, 10.0], &[false, true, false], 1, 0, 0.0),
+            choose_lane(&[0.0, 0.0, 10.0], &lanes(&[false, true, false]), 1, 0, 0.0),
             0
         );
         assert_eq!(
-            choose_lane(&[30.0, 0.0, 10.0], &[false, true, false], 1, 1, 0.0),
+            choose_lane(&[30.0, 0.0, 10.0], &lanes(&[false, true, false]), 1, 1, 0.0),
             2
         );
         // `infinite` makes every open lane possible, so the cursor decides.

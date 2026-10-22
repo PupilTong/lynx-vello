@@ -1,63 +1,13 @@
 //! Transient, algorithm-private Grid state.
 
 use stylo::computed_values::direction;
-use stylo::values::computed::{LengthPercentage, PositionProperty, TrackBreadth, TrackSize};
+use stylo::values::computed::PositionProperty;
 use stylo::values::specified::align::AlignFlags;
 
 use super::placement::GridArea;
 pub(super) use crate::compute::util::Axis;
 use crate::compute::util::{BaselineSet, ItemGeometry, ItemKey};
 use crate::geometry::{Edges, Size};
-
-/// The normalized `minmax()` halves of one track sizing function.
-#[derive(Debug, Clone, PartialEq)]
-pub(super) struct TrackSizingFunction {
-    pub(super) min: TrackBreadth,
-    pub(super) max: TrackBreadth,
-    pub(super) fit_content: Option<LengthPercentage>,
-}
-
-impl TrackSizingFunction {
-    pub(super) const AUTO: Self = Self {
-        min: TrackBreadth::Auto,
-        max: TrackBreadth::Auto,
-        fit_content: None,
-    };
-
-    pub(super) fn from_style(size: &TrackSize) -> Self {
-        match size {
-            TrackSize::Breadth(TrackBreadth::Flex(flex)) => Self {
-                min: TrackBreadth::Auto,
-                max: TrackBreadth::Flex(*flex),
-                fit_content: None,
-            },
-            TrackSize::Breadth(breadth) => Self {
-                min: breadth.clone(),
-                max: breadth.clone(),
-                fit_content: None,
-            },
-            TrackSize::Minmax(min, max) => Self {
-                min: min.clone(),
-                max: max.clone(),
-                fit_content: None,
-            },
-            TrackSize::FitContent(TrackBreadth::Breadth(limit)) => Self {
-                min: TrackBreadth::Auto,
-                max: TrackBreadth::MaxContent,
-                fit_content: Some(limit.clone()),
-            },
-            TrackSize::FitContent(_) => {
-                unreachable!("fit-content() stores a <length-percentage> breadth by construction")
-            }
-        }
-    }
-}
-
-impl Default for TrackSizingFunction {
-    fn default() -> Self {
-        Self::AUTO
-    }
-}
 
 /// One placed in-flow item with resolved box values and local contribution
 /// caches.  Contributions are invalidated only for the bounded column/row

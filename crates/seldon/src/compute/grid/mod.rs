@@ -31,7 +31,7 @@ use stylo::computed_values::direction;
 use stylo::values::computed::{Inset, PositionProperty, Size as StyleSize};
 use stylo::values::specified::align::AlignFlags;
 use tracks::{ExpandedTemplate, MAX_MATERIALIZED_TRACKS, build_axis_tracks, expand_template};
-use types::{Axis, GridItem, MaxKind, MinKind, TrackSet, TrackSizingFunction};
+use types::{Axis, GridItem, MaxKind, MinKind, TrackSet};
 
 use super::util::{
     BaselineSet, IntrinsicTag, ItemKey, OrderedItem, PendingLayoutItem, ResolvedContainerBox,
@@ -287,7 +287,7 @@ fn expand_explicit_tracks<S>(
     repeat_max_basis: Size<Option<f32>>,
     repeat_min_basis: Size<Option<f32>>,
     gap: Size<f32>,
-) -> (ExpandedTemplate, ExpandedTemplate)
+) -> (ExpandedTemplate<'_>, ExpandedTemplate<'_>)
 where
     S: GridStyle,
 {
@@ -345,8 +345,8 @@ fn run_track_sizing<T>(
     state: &mut T::State,
     columns: &mut TrackSet,
     rows: &mut TrackSet,
-    column_specs: &[tracks::AxisTrackSpec],
-    row_specs: &[tracks::AxisTrackSpec],
+    column_specs: &[tracks::AxisTrackSpec<'_>],
+    row_specs: &[tracks::AxisTrackSpec<'_>],
     items: &mut [GridItem<T::NodeId>],
     inner_basis: Size<Option<f32>>,
     available: Size<AvailableSpace>,
@@ -520,7 +520,7 @@ fn run_track_sizing<T>(
 /// the size the container settled on: whether sizing the tracks again at the
 /// final definite size ([`DefiniteRerun::moves_axis`]) could change them.
 struct DefiniteRerun<'a> {
-    specs: &'a [tracks::AxisTrackSpec],
+    specs: &'a [tracks::AxisTrackSpec<'a>],
     /// The provisional run's tracks.
     tracks: &'a TrackSet,
     /// The provisional run's percentage basis.
@@ -1734,46 +1734,19 @@ where
         explicit_rows.tracks.len(),
         auto_flow,
     );
-    let needs_auto_columns = placement.column_range.start < 0
-        || placement.column_range.end
-            > i32::try_from(explicit_columns.tracks.len()).unwrap_or(i32::MAX);
-    let needs_auto_rows = placement.row_range.start < 0
-        || placement.row_range.end > i32::try_from(explicit_rows.tracks.len()).unwrap_or(i32::MAX);
-    let (auto_columns, auto_rows) = {
-        let container = tree.style(node);
-        let auto_columns = if needs_auto_columns {
-            container
-                .grid_auto_columns()
-                .0
-                .iter()
-                .take(MAX_MATERIALIZED_TRACKS)
-                .map(TrackSizingFunction::from_style)
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
-        let auto_rows = if needs_auto_rows {
-            container
-                .grid_auto_rows()
-                .0
-                .iter()
-                .take(MAX_MATERIALIZED_TRACKS)
-                .map(TrackSizingFunction::from_style)
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
-        (auto_columns, auto_rows)
-    };
-    let column_specs = build_axis_tracks(
+    // A `grid-auto-*` list is read only for coordinates outside the explicit
+    // grid.
+    let auto_columns = &style.grid_auto_columns().0;
+    let auto_rows = &style.grid_auto_rows().0;
+    let (first_column, column_specs) = build_axis_tracks(
         &explicit_columns,
-        &auto_columns,
+        &auto_columns[..auto_columns.len().min(MAX_MATERIALIZED_TRACKS)],
         placement.column_range,
         &placement.occupied_columns,
     );
-    let row_specs = build_axis_tracks(
+    let (first_row, row_specs) = build_axis_tracks(
         &explicit_rows,
-        &auto_rows,
+        &auto_rows[..auto_rows.len().min(MAX_MATERIALIZED_TRACKS)],
         placement.row_range,
         &placement.occupied_rows,
     );
@@ -1786,8 +1759,14 @@ where
         })
         .collect::<Vec<_>>();
 
-    let mut columns = TrackSet::default();
-    let mut rows = TrackSet::default();
+    let mut columns = TrackSet {
+        first_coordinate: first_column,
+        ..TrackSet::default()
+    };
+    let mut rows = TrackSet {
+        first_coordinate: first_row,
+        ..TrackSet::default()
+    };
     let mut intrinsic_scratch = IntrinsicSizingScratch::default();
     // The available grid space (css-grid-2 §12.1; see `ContainerPrologue`).
     // A width the container does not have under a definite available width
