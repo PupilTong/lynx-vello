@@ -310,7 +310,7 @@ pub(crate) fn install(
         NATIVE_MODULES_HOST_SPECIFIER,
         "invokeNativeModule",
         5,
-        Box::new(move |arguments| {
+        move |arguments| {
             let call = call_id(arguments)?;
             let module = string(arguments, 1)?.to_owned();
             let method = string(arguments, 2)?.to_owned();
@@ -333,7 +333,7 @@ pub(crate) fn install(
                 callbacks,
             });
             Ok(HostValue::Undefined)
-        }),
+        },
     )
 }
 

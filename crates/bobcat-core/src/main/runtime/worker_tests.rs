@@ -3680,18 +3680,13 @@ fn bts_animation_frames_continue_while_an_mts_callback_is_blocked() {
         .unwrap()
         .core
         .engine
-        .register_host_module_function(
-            "test:gate",
-            "block",
-            0,
-            Box::new(move |_| {
-                blocked.send(()).unwrap();
-                released
-                    .recv_timeout(PATIENCE)
-                    .map_err(|error| error.to_string())?;
-                Ok(HostValue::Undefined)
-            }),
-        )
+        .register_host_module_function("test:gate", "block", 0, move |_| {
+            blocked.send(()).unwrap();
+            released
+                .recv_timeout(PATIENCE)
+                .map_err(|error| error.to_string())?;
+            Ok(HostValue::Undefined)
+        })
         .unwrap();
     pair.boot("import {block} from 'test:gate'; lynx.requestAnimationFrame(() => block());")
         .unwrap();

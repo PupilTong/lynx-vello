@@ -154,7 +154,7 @@ impl WorkerOwner {
             HOST_MODULE_SPECIFIER,
             "createWorker",
             3,
-            Box::new(move |arguments| {
+            move |arguments| {
                 let creator = creator
                     .upgrade()
                     .ok_or("the creating realm has been released")?;
@@ -204,14 +204,14 @@ impl WorkerOwner {
                 };
                 creator.start(start, messages);
                 Ok(HostValue::String(id.to_string()))
-            }),
+            },
         )?;
         let sender = Rc::downgrade(self);
         engine.register_host_module_function(
             HOST_MODULE_SPECIFIER,
             "sendWorkerMessage",
             2,
-            Box::new(move |arguments| {
+            move |arguments| {
                 let key = key(arguments)?;
                 // Any value the boundary carries. A value the serializer
                 // refuses throws in the realm that called `postMessage`, so
@@ -223,20 +223,20 @@ impl WorkerOwner {
                     sender.post(key, WorkerMessage::Post(data));
                 }
                 Ok(HostValue::Undefined)
-            }),
+            },
         )?;
         let terminator = Rc::downgrade(self);
         engine.register_host_module_function(
             HOST_MODULE_SPECIFIER,
             "terminateWorker",
             1,
-            Box::new(move |arguments| {
+            move |arguments| {
                 let key = key(arguments)?;
                 if let Some(terminator) = terminator.upgrade() {
                     terminator.terminate(key);
                 }
                 Ok(HostValue::Undefined)
-            }),
+            },
         )?;
         Ok(())
     }

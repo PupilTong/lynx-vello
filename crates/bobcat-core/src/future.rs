@@ -299,7 +299,7 @@ fn install_member(
     arity: u8,
     callback: impl FnMut(&[HostArgument<'_>]) -> Result<HostValue, String> + 'static,
 ) -> Result<(), ScriptError> {
-    engine.register_host_module_function(HOST_MODULE_SPECIFIER, name, arity, Box::new(callback))
+    engine.register_host_module_function(HOST_MODULE_SPECIFIER, name, arity, callback)
 }
 
 fn number_argument(

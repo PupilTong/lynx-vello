@@ -10,7 +10,7 @@
 //! namespace and the atom each [`Export`] is called through.
 
 use std::any::Any;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::fmt;
 use std::panic::{self, AssertUnwindSafe};
 use std::rc::{Rc, Weak};
@@ -25,16 +25,6 @@ use crate::jobs::JsThreadHandle;
 use crate::realm::child::ChildRealms;
 use crate::script::{ScriptError, ScriptErrorKind, ScriptErrorPhase, ScriptSourceLocation};
 
-/// A leaf host callback Bobcat installs in the realm.
-///
-/// The realm turns a returned message into a JavaScript exception. Values
-/// crossing either way are primitives or structured clones — the arguments
-/// lent for the call ([`quickjs::HostArgument`]), the answer owned
-/// ([`quickjs::HostValue`]) — so no realm handle and no DOM identity ever
-/// crosses as itself.
-pub(crate) type HostCallback =
-    Box<dyn FnMut(&[quickjs::HostArgument<'_>]) -> Result<quickjs::HostValue, String> + 'static>;
-
 /// The first panic a host function of one realm raised, kept until the
 /// operation that reached it ends.
 ///
@@ -43,7 +33,10 @@ pub(crate) type HostCallback =
 /// kept here instead of being lost, and the realm's next checkpoint resumes
 /// it: a host function that panics fails the entry it was called in as a
 /// panic, whatever the script did with the exception it was shown.
-type HostPanic = Rc<RefCell<Option<Box<dyn Any + Send>>>>;
+///
+/// Every use takes the whole value or sets it when empty, never holding it
+/// across a call, so a `Cell` is enough.
+type HostPanic = Rc<Cell<Option<Box<dyn Any + Send>>>>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct QuickJsConfig {
@@ -486,7 +479,13 @@ impl ScriptEngine {
     }
 
     /// Installs one Rust-backed function as a named export of a native ESM
-    /// module.
+    /// module: a leaf host callback.
+    ///
+    /// The realm turns a returned message into a JavaScript exception. Values
+    /// crossing either way are primitives or structured clones — the
+    /// arguments lent for the call ([`quickjs::HostArgument`]), the answer
+    /// owned ([`quickjs::HostValue`]) — so no realm handle and no DOM
+    /// identity ever crosses as itself.
     ///
     /// Every export must be registered before that module first loads, and a
     /// name cannot be replaced. Registration retains the callback without
@@ -498,13 +497,16 @@ impl ScriptEngine {
     /// A callback that panics throws "the host function panicked" into the
     /// script, and the panic itself is resumed by the checkpoint that ends
     /// the entry: see [`HostPanic`].
-    pub(crate) fn register_host_module_function(
+    pub(crate) fn register_host_module_function<F>(
         &mut self,
         module_specifier: &str,
         export_name: &str,
         arity: u8,
-        mut callback: HostCallback,
-    ) -> Result<(), ScriptError> {
+        mut callback: F,
+    ) -> Result<(), ScriptError>
+    where
+        F: FnMut(&[quickjs::HostArgument<'_>]) -> Result<quickjs::HostValue, String> + 'static,
+    {
         let host_panic = Rc::clone(&self.host_panic);
         self.realm
             .register_host_module_function(
@@ -841,7 +843,8 @@ fn keep_host_panic<T>(
     call: impl FnOnce() -> Result<T, String>,
 ) -> Result<T, String> {
     panic::catch_unwind(AssertUnwindSafe(call)).unwrap_or_else(|payload| {
-        host_panic.borrow_mut().get_or_insert(payload);
+        let kept = host_panic.take();
+        host_panic.set(kept.or(Some(payload)));
         Err(message.to_owned())
     })
 }
@@ -1104,12 +1107,9 @@ mod tests {
     fn host_functions_are_native_module_exports_not_globals() {
         let (mut runtime, mut engine) = engine();
         engine
-            .register_host_module_function(
-                "bobcat-internal:test",
-                "answer",
-                0,
-                Box::new(|_| Ok(quickjs::HostValue::Number(42.0))),
-            )
+            .register_host_module_function("bobcat-internal:test", "answer", 0, |_| {
+                Ok(quickjs::HostValue::Number(42.0))
+            })
             .expect("register");
         engine
             .execute_module(&mut runtime,
@@ -1242,21 +1242,16 @@ mod tests {
         let seen: Arc<Mutex<Vec<quickjs::HostValue>>> = Arc::new(Mutex::new(Vec::new()));
         let recorder = Arc::clone(&seen);
         engine
-            .register_host_module_function(
-                "bobcat-internal:test",
-                "echo",
-                1,
-                Box::new(move |arguments| {
-                    let value = arguments
-                        .first()
-                        .map_or(quickjs::HostValue::Undefined, |value| value.to_value());
-                    recorder
-                        .lock()
-                        .expect("the recorder is not poisoned")
-                        .push(value.clone());
-                    Ok(value)
-                }),
-            )
+            .register_host_module_function("bobcat-internal:test", "echo", 1, move |arguments| {
+                let value = arguments
+                    .first()
+                    .map_or(quickjs::HostValue::Undefined, |value| value.to_value());
+                recorder
+                    .lock()
+                    .expect("the recorder is not poisoned")
+                    .push(value.clone());
+                Ok(value)
+            })
             .expect("register");
 
         engine
@@ -1484,12 +1479,9 @@ mod tests {
     /// Gives `engine` one host function, `explode`, that panics.
     fn install_a_panicking_host_function(engine: &mut ScriptEngine) {
         engine
-            .register_host_module_function(
-                "bobcat-internal:test",
-                "explode",
-                0,
-                Box::new(|_| panic!("a host bug")),
-            )
+            .register_host_module_function("bobcat-internal:test", "explode", 0, |_| {
+                panic!("a host bug")
+            })
             .expect("register");
     }
 

@@ -82,17 +82,17 @@ pub(super) fn install_worker_members(
         WORKER_HOST_MODULE_SPECIFIER,
         "workerName",
         0,
-        Box::new(move |_arguments| {
+        move |_arguments| {
             installed.set(true);
             Ok(name.take().map_or(HostValue::Undefined, HostValue::String))
-        }),
+        },
     )?;
 
     engine.register_host_module_function(
         WORKER_HOST_MODULE_SPECIFIER,
         "postWorkerMessage",
         1,
-        Box::new(move |arguments| {
+        move |arguments| {
             // Any value the boundary carries, which for anything that is not a
             // primitive is the structured clone the realm's own serializer
             // made. A value it refuses never arrives here at all: the
@@ -103,7 +103,7 @@ pub(super) fn install_worker_members(
                     .map_or(HostValue::Undefined, |data| data.to_value()),
             );
             Ok(HostValue::Undefined)
-        }),
+        },
     )?;
 
     engine.register_host_module_shared_object(WORKER_HOST_MODULE_SPECIFIER, "sharedObject")?;
@@ -114,12 +114,12 @@ pub(super) fn install_worker_members(
         WORKER_HOST_MODULE_SPECIFIER,
         "closeWorker",
         0,
-        Box::new(move |_arguments| {
+        move |_arguments| {
             // A flag, not a teardown: this runs inside the realm it would
             // tear down, so the thread reads it once the task returns.
             closer.set(true);
             Ok(HostValue::Undefined)
-        }),
+        },
     )?;
     Ok(WorkerFlags {
         scope_installed,

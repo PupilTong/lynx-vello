@@ -4115,7 +4115,7 @@ fn install(
     callback: impl FnMut(&[HostArgument<'_>]) -> Result<HostValue, String> + 'static,
 ) -> Result<(), MainThreadError> {
     engine
-        .register_host_module_function(HOST_MODULE_SPECIFIER, name, arity, Box::new(callback))
+        .register_host_module_function(HOST_MODULE_SPECIFIER, name, arity, callback)
         .map_err(|error| MainThreadError::from_engine("installing the host module", error))
 }
 
