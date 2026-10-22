@@ -9,7 +9,7 @@ use stylo::values::specified::align::AlignFlags;
 use super::super::util::{BaselineSet, clamp, resolve_intrinsic, resolve_length_percentage};
 use super::placement::TrackSpan;
 use super::tracks::AxisTrackSpec;
-use super::types::{Axis, GridItem, Track, TrackSet, TrackSizingFunction};
+use super::types::{Axis, GridItem, MaxKind, MinKind, Track, TrackSet};
 use crate::style::CoreStyle;
 use crate::tree::{AvailableSpace, LayoutInput, LayoutTree, SizingMode};
 
@@ -34,98 +34,17 @@ pub(super) fn initialize_tracks(
     percentage_basis: Option<f32>,
     gap: f32,
 ) {
-    let reuse = set.tracks.len() == specs.len();
-    if !reuse {
-        set.tracks.clear();
-        set.tracks.reserve(specs.len());
-    }
-    for (index, spec) in specs.iter().enumerate() {
-        let plan = plan_track(spec, percentage_basis);
-        if reuse {
-            let track = &mut set.tracks[index];
-            if plan.min_behaves_auto {
-                if track.sizing.min != TrackBreadth::Auto {
-                    track.sizing.min = TrackBreadth::Auto;
-                }
-            } else if track.sizing.min != spec.sizing.min {
-                track.sizing.min.clone_from(&spec.sizing.min);
-            }
-            if plan.max_behaves_auto {
-                if track.sizing.max != TrackBreadth::Auto {
-                    track.sizing.max = TrackBreadth::Auto;
-                }
-            } else if track.sizing.max != spec.sizing.max {
-                track.sizing.max.clone_from(&spec.sizing.max);
-            }
-            if track.sizing.fit_content != spec.sizing.fit_content {
-                track
-                    .sizing
-                    .fit_content
-                    .clone_from(&spec.sizing.fit_content);
-            }
-            plan.apply_used_state(track);
-        } else {
-            let mut track = Track {
-                sizing: TrackSizingFunction {
-                    min: if plan.min_behaves_auto {
-                        TrackBreadth::Auto
-                    } else {
-                        spec.sizing.min.clone()
-                    },
-                    max: if plan.max_behaves_auto {
-                        TrackBreadth::Auto
-                    } else {
-                        spec.sizing.max.clone()
-                    },
-                    fit_content: spec.sizing.fit_content.clone(),
-                },
-                ..Track::default()
-            };
-            plan.apply_used_state(&mut track);
-            set.tracks.push(track);
-        }
-    }
+    set.tracks.clear();
+    set.tracks
+        .extend(specs.iter().map(|spec| plan_track(spec, percentage_basis)));
     set.gap = gap;
     set.first_coordinate = specs.first().map_or(0, |spec| spec.coordinate);
     set.collapsed_line_positions = None;
 }
 
-/// The §12.4 used state derived from one track spec against one percentage
-/// basis, separated from the (clone-carrying) effective sizing halves so
-/// reruns can refresh tracks in place.
-#[derive(Debug, Clone, Copy)]
-#[allow(clippy::struct_excessive_bools)]
-struct TrackInit {
-    min_behaves_auto: bool,
-    max_behaves_auto: bool,
-    base: f32,
-    growth_limit: f32,
-    fit_content_limit: f32,
-    flex_factor: f32,
-    flexible: bool,
-    intrinsic_min: bool,
-    intrinsic_max: bool,
-    auto_max: bool,
-    collapsed: bool,
-}
-
-impl TrackInit {
-    fn apply_used_state(self, track: &mut Track) {
-        track.base = self.base;
-        track.growth_limit = self.growth_limit;
-        track.fit_content_limit = self.fit_content_limit;
-        track.flex_factor = self.flex_factor;
-        track.flexible = self.flexible;
-        track.intrinsic_min = self.intrinsic_min;
-        track.intrinsic_max = self.intrinsic_max;
-        track.auto_max = self.auto_max;
-        track.infinitely_growable = false;
-        track.collapsed = self.collapsed;
-        track.position = 0.0;
-    }
-}
-
-fn plan_track(spec: &AxisTrackSpec, percentage_basis: Option<f32>) -> TrackInit {
+/// §12.4: one track's sizing-function kinds and initial used state against
+/// one percentage basis.
+fn plan_track(spec: &AxisTrackSpec, percentage_basis: Option<f32>) -> Track {
     let min_fixed = match &spec.sizing.min {
         TrackBreadth::Breadth(value) => resolve_length_percentage(value, percentage_basis),
         _ => None,
@@ -134,10 +53,21 @@ fn plan_track(spec: &AxisTrackSpec, percentage_basis: Option<f32>) -> TrackInit 
         TrackBreadth::Breadth(value) => resolve_length_percentage(value, percentage_basis),
         _ => None,
     };
-    let min_behaves_auto =
-        matches!(spec.sizing.min, TrackBreadth::Breadth(_)) && min_fixed.is_none();
-    let max_behaves_auto =
-        matches!(spec.sizing.max, TrackBreadth::Breadth(_)) && max_fixed.is_none();
+    let min = match &spec.sizing.min {
+        TrackBreadth::Breadth(_) if min_fixed.is_some() => MinKind::Fixed,
+        TrackBreadth::Breadth(_) | TrackBreadth::Auto | TrackBreadth::Flex(_) => MinKind::Auto,
+        TrackBreadth::MinContent => MinKind::MinContent,
+        TrackBreadth::MaxContent => MinKind::MaxContent,
+    };
+    let max = match &spec.sizing.max {
+        TrackBreadth::Breadth(_) => max_fixed.map_or(MaxKind::Auto, |maximum| {
+            MaxKind::Fixed(maximum.max(min_fixed.unwrap_or(0.0)).max(0.0))
+        }),
+        TrackBreadth::Auto => MaxKind::Auto,
+        TrackBreadth::MinContent => MaxKind::MinContent,
+        TrackBreadth::MaxContent => MaxKind::MaxContent,
+        TrackBreadth::Flex(_) => MaxKind::Flex,
+    };
     let fit_content_limit = match &spec.sizing.fit_content {
         Some(value) => resolve_length_percentage(value, percentage_basis).unwrap_or(f32::INFINITY),
         None => f32::INFINITY,
@@ -161,22 +91,16 @@ fn plan_track(spec: &AxisTrackSpec, percentage_basis: Option<f32>) -> TrackInit 
             _ => 0.0,
         }
     };
-    TrackInit {
-        min_behaves_auto,
-        max_behaves_auto,
+    Track {
+        min,
+        max,
         base,
         growth_limit,
         fit_content_limit,
         flex_factor,
-        flexible: !collapsed && matches!(spec.sizing.max, TrackBreadth::Flex(_)),
-        intrinsic_min: min_behaves_auto || !matches!(spec.sizing.min, TrackBreadth::Breadth(_)),
-        intrinsic_max: max_behaves_auto
-            || !matches!(
-                spec.sizing.max,
-                TrackBreadth::Breadth(_) | TrackBreadth::Flex(_)
-            ),
-        auto_max: max_behaves_auto || matches!(spec.sizing.max, TrackBreadth::Auto),
+        infinitely_growable: false,
         collapsed,
+        position: 0.0,
     }
 }
 
@@ -453,7 +377,6 @@ fn measure_contribution<T>(
     kind: ContributionKind,
     tracks: &TrackSet,
     cross_tracks: Option<CrossAxisTracks<'_>>,
-    inner_size: crate::geometry::Size<Option<f32>>,
 ) -> f32
 where
     T: LayoutTree,
@@ -490,7 +413,7 @@ where
                 {
                     let suggestion =
                         automatic_minimum_suggestion(tree, state, item, axis, cross_tracks);
-                    fixed_max_span_limit(axis, tracks, indexes, inner_size)
+                    fixed_max_span_limit(tracks, indexes)
                         .map_or(suggestion, |limit| suggestion.min(limit))
                 } else {
                     minimum_fallback(tree, state, item, axis, cross_tracks)
@@ -570,7 +493,7 @@ fn automatic_minimum_applies(
 ) -> bool {
     tracks.tracks[range.clone()]
         .iter()
-        .any(|track| matches!(track.sizing.min, TrackBreadth::Auto | TrackBreadth::Flex(_)))
+        .any(|track| track.min == MinKind::Auto)
         && (span == 1 || !tracks.tracks[range].iter().any(Track::is_flexible))
 }
 
@@ -638,30 +561,20 @@ fn span_gap(tracks: &TrackSet, range: core::ops::Range<usize>) -> f32 {
     tracks.gap * visible.saturating_sub(1) as f32
 }
 
-fn fixed_max_span_limit(
-    axis: Axis,
-    tracks: &TrackSet,
-    range: core::ops::Range<usize>,
-    inner_size: crate::geometry::Size<Option<f32>>,
-) -> Option<f32> {
+/// §6.6's fixed-maximum clamp of an automatic minimum across the tracks in
+/// `range`: their fixed maximums (each floored by its fixed minimum,
+/// [`MaxKind::Fixed`]) and the gutters between them, or `None` when a track
+/// that is not collapsed has no fixed maximum.
+fn fixed_max_span_limit(tracks: &TrackSet, range: core::ops::Range<usize>) -> Option<f32> {
     let mut limit = span_gap(tracks, range.clone());
-    let percentage_basis = axis.size(inner_size);
     for track in &tracks.tracks[range] {
         if track.collapsed {
             continue;
         }
-        let TrackBreadth::Breadth(maximum) = &track.sizing.max else {
+        let MaxKind::Fixed(maximum) = track.max else {
             return None;
         };
-        let maximum = resolve_length_percentage(maximum, percentage_basis)?;
-        let minimum = match &track.sizing.min {
-            TrackBreadth::Breadth(minimum) => resolve_length_percentage(minimum, percentage_basis)?,
-            TrackBreadth::Auto
-            | TrackBreadth::MinContent
-            | TrackBreadth::MaxContent
-            | TrackBreadth::Flex(_) => 0.0,
-        };
-        limit += maximum.max(minimum).max(0.0);
+        limit += maximum;
     }
     Some(limit)
 }
@@ -675,7 +588,6 @@ fn measure_limited_contribution<T>(
     kind: ContributionKind,
     tracks: &TrackSet,
     cross_tracks: Option<CrossAxisTracks<'_>>,
-    inner_size: crate::geometry::Size<Option<f32>>,
 ) -> f32
 where
     T: LayoutTree,
@@ -684,19 +596,10 @@ where
         kind,
         ContributionKind::MinContent | ContributionKind::MaxContent
     ));
-    let contribution = measure_contribution(
-        tree,
-        state,
-        item,
-        axis,
-        kind,
-        tracks,
-        cross_tracks,
-        inner_size,
-    );
+    let contribution = measure_contribution(tree, state, item, axis, kind, tracks, cross_tracks);
     let span = span_for(item, axis);
     let range = tracks.span_indices(span.start, span.end);
-    let fixed_limit = fixed_max_span_limit(axis, tracks, range.clone(), inner_size).or_else(|| {
+    let fixed_limit = fixed_max_span_limit(tracks, range.clone()).or_else(|| {
         (range.len() == 1)
             .then(|| tracks.tracks[range.start].fit_content_limit)
             .filter(|limit| limit.is_finite())
@@ -712,7 +615,6 @@ where
         ContributionKind::Minimum,
         tracks,
         cross_tracks,
-        inner_size,
     );
     contribution.min(limit).max(minimum)
 }
@@ -776,7 +678,9 @@ fn prepare_baseline_shims<T>(
                 .iter()
                 .any(|track| {
                     !track.collapsed
-                        && (track.intrinsic_min || track.intrinsic_max || track.is_flexible())
+                        && (track.min.is_intrinsic()
+                            || track.max.is_intrinsic()
+                            || track.is_flexible())
                 })
         });
         if group.len() > 1 && contribution_uses_shim {
@@ -1003,14 +907,13 @@ fn distribute_extra<P>(
             let track = &tracks.tracks[entry.index];
             match (affected_size, contribution_kind) {
                 (PlannedSize::Base, ContributionKind::Minimum | ContributionKind::MinContent) => {
-                    track.intrinsic_max
+                    track.max.is_intrinsic()
                 }
-                (PlannedSize::Base, ContributionKind::MaxContent) => matches!(
-                    track.sizing.max,
-                    TrackBreadth::MaxContent | TrackBreadth::Auto
-                ),
+                (PlannedSize::Base, ContributionKind::MaxContent) => {
+                    matches!(track.max, MaxKind::MaxContent | MaxKind::Auto)
+                }
                 (PlannedSize::GrowthLimit, _) => {
-                    track.intrinsic_max && track.fit_content_limit.is_infinite()
+                    track.max.is_intrinsic() && track.fit_content_limit.is_infinite()
                 }
             }
         };
@@ -1071,7 +974,6 @@ fn run_spanning_base_phase<T, I, P>(
     cross_tracks: Option<CrossAxisTracks<'_>>,
     items: &mut I,
     item_indices: &[usize],
-    inner_size: crate::geometry::Size<Option<f32>>,
     kind: ContributionKind,
     limited: bool,
     weighted_flex: bool,
@@ -1092,27 +994,9 @@ fn run_spanning_base_phase<T, I, P>(
             continue;
         }
         let contribution = if limited {
-            items.limited_contribution(
-                tree,
-                state,
-                item_index,
-                axis,
-                kind,
-                tracks,
-                cross_tracks,
-                inner_size,
-            )
+            items.limited_contribution(tree, state, item_index, axis, kind, tracks, cross_tracks)
         } else {
-            items.contribution(
-                tree,
-                state,
-                item_index,
-                axis,
-                kind,
-                tracks,
-                cross_tracks,
-                inner_size,
-            )
+            items.contribution(tree, state, item_index, axis, kind, tracks, cross_tracks)
         };
         let extra = contribution - span_affected_size(tracks, range.clone(), PlannedSize::Base);
         distribute_extra(
@@ -1141,7 +1025,6 @@ fn run_spanning_growth_phase<T, I, P>(
     cross_tracks: Option<CrossAxisTracks<'_>>,
     items: &mut I,
     item_indices: &[usize],
-    inner_size: crate::geometry::Size<Option<f32>>,
     kind: ContributionKind,
     eligible: P,
     scratch: &mut DistributionScratch,
@@ -1159,16 +1042,8 @@ fn run_spanning_growth_phase<T, I, P>(
         {
             continue;
         }
-        let contribution = items.contribution(
-            tree,
-            state,
-            item_index,
-            axis,
-            kind,
-            tracks,
-            cross_tracks,
-            inner_size,
-        );
+        let contribution =
+            items.contribution(tree, state, item_index, axis, kind, tracks, cross_tracks);
         let extra =
             contribution - span_affected_size(tracks, range.clone(), PlannedSize::GrowthLimit);
         distribute_extra(
@@ -1196,7 +1071,6 @@ fn resolve_intrinsic_sizes<T, I>(
     tracks: &mut TrackSet,
     cross_tracks: Option<CrossAxisTracks<'_>>,
     items: &mut I,
-    inner_size: crate::geometry::Size<Option<f32>>,
     available: AvailableSpace,
     scratch: &mut IntrinsicSizingScratch,
 ) where
@@ -1220,14 +1094,14 @@ fn resolve_intrinsic_sizes<T, I>(
         if track.collapsed || track.is_flexible() {
             continue;
         }
-        let max_kind = match &track.sizing.max {
-            TrackBreadth::Breadth(_) | TrackBreadth::Flex(_) => None,
-            TrackBreadth::MinContent => Some(ContributionKind::MinContent),
-            TrackBreadth::MaxContent | TrackBreadth::Auto => Some(ContributionKind::MaxContent),
+        let max_kind = match track.max {
+            MaxKind::Fixed(_) | MaxKind::Flex => None,
+            MaxKind::MinContent => Some(ContributionKind::MinContent),
+            MaxKind::MaxContent | MaxKind::Auto => Some(ContributionKind::MaxContent),
         };
-        let base = match &track.sizing.min {
-            TrackBreadth::Breadth(_) => track.base,
-            TrackBreadth::MinContent => items.contribution(
+        let base = match track.min {
+            MinKind::Fixed => track.base,
+            MinKind::MinContent => items.contribution(
                 tree,
                 state,
                 item,
@@ -1235,9 +1109,8 @@ fn resolve_intrinsic_sizes<T, I>(
                 ContributionKind::MinContent,
                 tracks,
                 cross_tracks,
-                inner_size,
             ),
-            TrackBreadth::MaxContent => items.contribution(
+            MinKind::MaxContent => items.contribution(
                 tree,
                 state,
                 item,
@@ -1245,37 +1118,26 @@ fn resolve_intrinsic_sizes<T, I>(
                 ContributionKind::MaxContent,
                 tracks,
                 cross_tracks,
-                inner_size,
             ),
-            TrackBreadth::Auto | TrackBreadth::Flex(_)
-                if available == AvailableSpace::MinContent =>
-            {
-                items.limited_contribution(
-                    tree,
-                    state,
-                    item,
-                    axis,
-                    ContributionKind::MinContent,
-                    tracks,
-                    cross_tracks,
-                    inner_size,
-                )
-            }
-            TrackBreadth::Auto | TrackBreadth::Flex(_)
-                if available == AvailableSpace::MaxContent =>
-            {
-                items.limited_contribution(
-                    tree,
-                    state,
-                    item,
-                    axis,
-                    ContributionKind::MaxContent,
-                    tracks,
-                    cross_tracks,
-                    inner_size,
-                )
-            }
-            TrackBreadth::Auto | TrackBreadth::Flex(_) => items.contribution(
+            MinKind::Auto if available == AvailableSpace::MinContent => items.limited_contribution(
+                tree,
+                state,
+                item,
+                axis,
+                ContributionKind::MinContent,
+                tracks,
+                cross_tracks,
+            ),
+            MinKind::Auto if available == AvailableSpace::MaxContent => items.limited_contribution(
+                tree,
+                state,
+                item,
+                axis,
+                ContributionKind::MaxContent,
+                tracks,
+                cross_tracks,
+            ),
+            MinKind::Auto => items.contribution(
                 tree,
                 state,
                 item,
@@ -1283,22 +1145,13 @@ fn resolve_intrinsic_sizes<T, I>(
                 ContributionKind::Minimum,
                 tracks,
                 cross_tracks,
-                inner_size,
             ),
         };
         tracks.tracks[index].base = tracks.tracks[index].base.max(base);
 
         if let Some(kind) = max_kind {
-            let contribution = items.contribution(
-                tree,
-                state,
-                item,
-                axis,
-                kind,
-                tracks,
-                cross_tracks,
-                inner_size,
-            );
+            let contribution =
+                items.contribution(tree, state, item, axis, kind, tracks, cross_tracks);
             let limit = contribution
                 .max(tracks.tracks[index].base)
                 .min(tracks.tracks[index].fit_content_limit);
@@ -1330,7 +1183,7 @@ fn resolve_intrinsic_sizes<T, I>(
         } else if items.entry_span_len(index, axis) > 1
             && tracks.tracks[range]
                 .iter()
-                .any(|track| track.intrinsic_min || track.intrinsic_max)
+                .any(|track| track.min.is_intrinsic() || track.max.is_intrinsic())
         {
             non_flexible.push(index);
         }
@@ -1366,11 +1219,10 @@ fn resolve_intrinsic_sizes<T, I>(
             cross_tracks,
             items,
             group,
-            inner_size,
             spanning_minimum_kind,
             use_limited_min_content,
             false,
-            |track| track.intrinsic_min,
+            |track| track.min.is_intrinsic(),
             distribution,
         );
         run_spanning_base_phase(
@@ -1381,16 +1233,10 @@ fn resolve_intrinsic_sizes<T, I>(
             cross_tracks,
             items,
             group,
-            inner_size,
             ContributionKind::MinContent,
             false,
             false,
-            |track| {
-                matches!(
-                    track.sizing.min,
-                    TrackBreadth::MinContent | TrackBreadth::MaxContent
-                )
-            },
+            |track| matches!(track.min, MinKind::MinContent | MinKind::MaxContent),
             distribution,
         );
         if available == AvailableSpace::MaxContent {
@@ -1402,16 +1248,10 @@ fn resolve_intrinsic_sizes<T, I>(
                 cross_tracks,
                 items,
                 group,
-                inner_size,
                 ContributionKind::MaxContent,
                 true,
                 false,
-                |track| {
-                    matches!(
-                        track.sizing.min,
-                        TrackBreadth::Auto | TrackBreadth::Flex(_) | TrackBreadth::MaxContent
-                    )
-                },
+                |track| matches!(track.min, MinKind::Auto | MinKind::MaxContent),
                 distribution,
             );
         }
@@ -1423,11 +1263,10 @@ fn resolve_intrinsic_sizes<T, I>(
             cross_tracks,
             items,
             group,
-            inner_size,
             ContributionKind::MaxContent,
             false,
             false,
-            |track| matches!(track.sizing.min, TrackBreadth::MaxContent),
+            |track| track.min == MinKind::MaxContent,
             distribution,
         );
         run_spanning_growth_phase(
@@ -1438,9 +1277,8 @@ fn resolve_intrinsic_sizes<T, I>(
             cross_tracks,
             items,
             group,
-            inner_size,
             ContributionKind::MinContent,
-            |track| track.intrinsic_max,
+            |track| track.max.is_intrinsic(),
             distribution,
         );
         run_spanning_growth_phase(
@@ -1451,14 +1289,8 @@ fn resolve_intrinsic_sizes<T, I>(
             cross_tracks,
             items,
             group,
-            inner_size,
             ContributionKind::MaxContent,
-            |track| {
-                matches!(
-                    track.sizing.max,
-                    TrackBreadth::MaxContent | TrackBreadth::Auto
-                )
-            },
+            |track| matches!(track.max, MaxKind::MaxContent | MaxKind::Auto),
             distribution,
         );
         for track in &mut tracks.tracks {
@@ -1483,7 +1315,6 @@ fn resolve_intrinsic_sizes<T, I>(
             cross_tracks,
             items,
             crosses_flexible,
-            inner_size,
             flexible_base_kind,
             use_limited_min_content,
             true,
@@ -1498,16 +1329,12 @@ fn resolve_intrinsic_sizes<T, I>(
             cross_tracks,
             items,
             crosses_flexible,
-            inner_size,
             ContributionKind::MinContent,
             false,
             true,
             |track| {
                 track.is_flexible()
-                    && matches!(
-                        track.sizing.min,
-                        TrackBreadth::MinContent | TrackBreadth::MaxContent
-                    )
+                    && matches!(track.min, MinKind::MinContent | MinKind::MaxContent)
             },
             distribution,
         );
@@ -1625,7 +1452,6 @@ fn expand_flexible_tracks<T, I>(
     tracks: &mut TrackSet,
     cross_tracks: Option<CrossAxisTracks<'_>>,
     items: &mut I,
-    inner_size: crate::geometry::Size<Option<f32>>,
     available: AvailableSpace,
     scratch: &mut Vec<(usize, f32)>,
 ) where
@@ -1672,7 +1498,6 @@ fn expand_flexible_tracks<T, I>(
                 ContributionKind::MaxContent,
                 tracks,
                 cross_tracks,
-                inner_size,
             );
             flex_fraction = flex_fraction.max(find_fr_size(tracks, range, contribution, scratch));
         }
@@ -1695,14 +1520,14 @@ fn stretch_auto_tracks(tracks: &mut TrackSet, available: AvailableSpace, alignme
     let count = tracks
         .tracks
         .iter()
-        .filter(|track| track.auto_max && !track.collapsed)
+        .filter(|track| track.max == MaxKind::Auto && !track.collapsed)
         .count();
     if count == 0 || free <= 0.0 {
         return;
     }
     let share = free / count as f32;
     for track in &mut tracks.tracks {
-        if track.auto_max && !track.collapsed {
+        if track.max == MaxKind::Auto && !track.collapsed {
             track.base += share;
             track.growth_limit = track.growth_limit.max(track.base);
         }
@@ -1723,7 +1548,7 @@ pub(super) fn track_sizing_reads_items(tracks: &TrackSet) -> bool {
     tracks
         .tracks
         .iter()
-        .any(|track| track.intrinsic_min || track.intrinsic_max || track.is_flexible())
+        .any(|track| track.min.is_intrinsic() || track.max.is_intrinsic() || track.is_flexible())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1759,7 +1584,6 @@ pub(super) fn size_tracks<T, I>(
         tracks,
         cross_tracks,
         items,
-        inner_size,
         available,
         scratch,
     );
@@ -1771,7 +1595,6 @@ pub(super) fn size_tracks<T, I>(
         tracks,
         cross_tracks,
         items,
-        inner_size,
         available,
         &mut scratch.track_distribution,
     );
@@ -1814,7 +1637,6 @@ pub(super) trait SizingItems<N> {
         kind: ContributionKind,
         tracks: &TrackSet,
         cross_tracks: Option<CrossAxisTracks<'_>>,
-        inner_size: crate::geometry::Size<Option<f32>>,
     ) -> f32
     where
         T: LayoutTree<NodeId = N>;
@@ -1829,7 +1651,6 @@ pub(super) trait SizingItems<N> {
         kind: ContributionKind,
         tracks: &TrackSet,
         cross_tracks: Option<CrossAxisTracks<'_>>,
-        inner_size: crate::geometry::Size<Option<f32>>,
     ) -> f32
     where
         T: LayoutTree<NodeId = N>;
@@ -1882,7 +1703,6 @@ impl<N> SizingItems<N> for [GridItem<N>] {
         kind: ContributionKind,
         tracks: &TrackSet,
         cross_tracks: Option<CrossAxisTracks<'_>>,
-        inner_size: crate::geometry::Size<Option<f32>>,
     ) -> f32
     where
         T: LayoutTree<NodeId = N>,
@@ -1895,7 +1715,6 @@ impl<N> SizingItems<N> for [GridItem<N>] {
             kind,
             tracks,
             cross_tracks,
-            inner_size,
         )
     }
 
@@ -1909,7 +1728,6 @@ impl<N> SizingItems<N> for [GridItem<N>] {
         kind: ContributionKind,
         tracks: &TrackSet,
         cross_tracks: Option<CrossAxisTracks<'_>>,
-        inner_size: crate::geometry::Size<Option<f32>>,
     ) -> f32
     where
         T: LayoutTree<NodeId = N>,
@@ -1922,7 +1740,6 @@ impl<N> SizingItems<N> for [GridItem<N>] {
             kind,
             tracks,
             cross_tracks,
-            inner_size,
         )
     }
 
@@ -2022,7 +1839,6 @@ impl GroupMaxima {
         axis: Axis,
         kind: ContributionKind,
         tracks: &TrackSet,
-        inner_size: crate::geometry::Size<Option<f32>>,
     ) -> Option<f32>
     where
         T: LayoutTree,
@@ -2034,16 +1850,7 @@ impl GroupMaxima {
         };
         slot.get_or_compute(|| {
             max_of(members.iter().map(|&member| {
-                measure_contribution(
-                    tree,
-                    state,
-                    &mut work[member],
-                    axis,
-                    kind,
-                    tracks,
-                    None,
-                    inner_size,
-                )
+                measure_contribution(tree, state, &mut work[member], axis, kind, tracks, None)
             }))
         })
     }
@@ -2206,7 +2013,6 @@ impl<N> LaneSizingItems<N> {
         axis: Axis,
         kind: ContributionKind,
         tracks: &TrackSet,
-        inner_size: crate::geometry::Size<Option<f32>>,
     ) -> f32
     where
         T: LayoutTree<NodeId = N>,
@@ -2232,24 +2038,15 @@ impl<N> LaneSizingItems<N> {
         let pool_members = if *includes_pool { &pooled[..] } else { &[] };
         match kind {
             ContributionKind::MinContent | ContributionKind::MaxContent => max_option(
-                pool.content(
-                    tree,
-                    state,
-                    work,
-                    pool_members,
-                    axis,
-                    kind,
-                    tracks,
-                    inner_size,
-                ),
-                maxima.content(tree, state, work, own, axis, kind, tracks, inner_size),
+                pool.content(tree, state, work, pool_members, axis, kind, tracks),
+                maxima.content(tree, state, work, own, axis, kind, tracks),
             ),
             ContributionKind::Minimum => {
                 let track = tracks.index_of(span.start);
                 let spanned = track..track + 1;
                 let automatic = if automatic_minimum_applies(tracks, spanned.clone(), 1) {
                     AutomaticMinimum::Applies {
-                        limit: fixed_max_span_limit(axis, tracks, spanned, inner_size),
+                        limit: fixed_max_span_limit(tracks, spanned),
                     }
                 } else {
                     AutomaticMinimum::DoesNotApply
@@ -2325,24 +2122,14 @@ impl<N> SizingItems<N> for LaneSizingItems<N> {
         kind: ContributionKind,
         tracks: &TrackSet,
         cross_tracks: Option<CrossAxisTracks<'_>>,
-        inner_size: crate::geometry::Size<Option<f32>>,
     ) -> f32
     where
         T: LayoutTree<NodeId = N>,
     {
         if let LaneEntry::Item(item) = &mut self.entries[index] {
-            return measure_contribution(
-                tree,
-                state,
-                item,
-                axis,
-                kind,
-                tracks,
-                cross_tracks,
-                inner_size,
-            );
+            return measure_contribution(tree, state, item, axis, kind, tracks, cross_tracks);
         }
-        self.aggregate_contribution(tree, state, index, axis, kind, tracks, inner_size)
+        self.aggregate_contribution(tree, state, index, axis, kind, tracks)
     }
 
     fn limited_contribution<T>(
@@ -2354,7 +2141,6 @@ impl<N> SizingItems<N> for LaneSizingItems<N> {
         kind: ContributionKind,
         tracks: &TrackSet,
         cross_tracks: Option<CrossAxisTracks<'_>>,
-        inner_size: crate::geometry::Size<Option<f32>>,
     ) -> f32
     where
         T: LayoutTree<NodeId = N>,
@@ -2368,7 +2154,6 @@ impl<N> SizingItems<N> for LaneSizingItems<N> {
                 kind,
                 tracks,
                 cross_tracks,
-                inner_size,
             );
         }
         // `measure_limited_contribution` for one track: each member's
@@ -2379,16 +2164,14 @@ impl<N> SizingItems<N> for LaneSizingItems<N> {
             kind,
             ContributionKind::MinContent | ContributionKind::MaxContent
         ));
-        let contribution =
-            self.aggregate_contribution(tree, state, index, axis, kind, tracks, inner_size);
+        let contribution = self.aggregate_contribution(tree, state, index, axis, kind, tracks);
         let span = self.entry_span(index, axis);
         let range = tracks.span_indices(span.start, span.end);
-        let fixed_limit =
-            fixed_max_span_limit(axis, tracks, range.clone(), inner_size).or_else(|| {
-                (range.len() == 1)
-                    .then(|| tracks.tracks[range.start].fit_content_limit)
-                    .filter(|limit| limit.is_finite())
-            });
+        let fixed_limit = fixed_max_span_limit(tracks, range.clone()).or_else(|| {
+            (range.len() == 1)
+                .then(|| tracks.tracks[range.start].fit_content_limit)
+                .filter(|limit| limit.is_finite())
+        });
         let Some(limit) = fixed_limit else {
             return contribution;
         };
@@ -2399,7 +2182,6 @@ impl<N> SizingItems<N> for LaneSizingItems<N> {
             axis,
             ContributionKind::Minimum,
             tracks,
-            inner_size,
         );
         contribution.min(limit).max(minimum)
     }
@@ -2422,16 +2204,14 @@ mod tests {
     use core::cell::RefCell;
     use core::marker::PhantomData;
 
-    use stylo::Zero;
     use stylo::computed_values::direction;
     use stylo::values::computed::{
         Display, GridTemplateComponent, ImplicitGridTracks, Length, LengthPercentage,
         MaxSize as StyleMaxSize, Overflow, PositionProperty, Size as StyleSize,
     };
     use stylo::values::generics::NonNegative;
-    use stylo::values::generics::grid::{Flex, ImplicitGridTracks as GenericImplicitGridTracks};
+    use stylo::values::generics::grid::ImplicitGridTracks as GenericImplicitGridTracks;
 
-    use super::super::types::TrackSizingFunction;
     use super::*;
     use crate::compute::grid::placement::{GridArea, TrackSpan};
     use crate::geometry::{Point, Size};
@@ -2629,18 +2409,25 @@ mod tests {
 
     fn test_track(base: f32, growth_limit: f32) -> Track {
         Track {
-            sizing: TrackSizingFunction::AUTO,
+            min: MinKind::Auto,
+            max: MaxKind::Auto,
             base,
             growth_limit,
             fit_content_limit: f32::INFINITY,
             flex_factor: 0.0,
-            flexible: false,
-            intrinsic_min: false,
-            intrinsic_max: false,
-            auto_max: false,
             infinitely_growable: false,
             collapsed: false,
             position: 0.0,
+        }
+    }
+
+    /// A track sized by its own function alone: `growth_limit` as both its
+    /// fixed minimum and maximum.
+    fn fixed_track(base: f32, growth_limit: f32) -> Track {
+        Track {
+            min: MinKind::Fixed,
+            max: MaxKind::Fixed(growth_limit),
+            ..test_track(base, growth_limit)
         }
     }
 
@@ -2829,8 +2616,7 @@ mod tests {
             1,
         );
         singleton.align_self = AlignFlags::BASELINE;
-        let mut intrinsic_track = test_track(0.0, f32::INFINITY);
-        intrinsic_track.intrinsic_min = true;
+        let intrinsic_track = test_track(0.0, f32::INFINITY);
         prepare_baseline_shims(
             &host,
             &mut state,
@@ -2861,7 +2647,7 @@ mod tests {
             &host,
             &mut state,
             Axis::Vertical,
-            &track_set(vec![test_track(10.0, 10.0)]),
+            &track_set(vec![fixed_track(10.0, 10.0)]),
             None,
             &mut fixed_items,
         );
@@ -2890,9 +2676,8 @@ mod tests {
             item.align_self = AlignFlags::BASELINE;
         }
         items[1].area.row.end = 2;
-        let fixed_track = test_track(10.0, 10.0);
-        let mut intrinsic_track = test_track(0.0, f32::INFINITY);
-        intrinsic_track.intrinsic_min = true;
+        let fixed_track = fixed_track(10.0, 10.0);
+        let intrinsic_track = test_track(0.0, f32::INFINITY);
 
         prepare_baseline_shims(
             &host,
@@ -2915,11 +2700,7 @@ mod tests {
         let mut state = LayoutSlot::default();
         let tree = TestTree::default();
         let mut items = vec![test_item(TestRef { tree: &tree }, 0, 1)];
-        let mut track = test_track(0.0, f32::INFINITY);
-        track.intrinsic_min = true;
-        track.intrinsic_max = true;
-        track.auto_max = true;
-        let mut tracks = track_set(vec![track]);
+        let mut tracks = track_set(vec![test_track(0.0, f32::INFINITY)]);
 
         size_tracks(
             &host,
@@ -2958,7 +2739,6 @@ mod tests {
             ContributionKind::Minimum,
             &tracks,
             None,
-            Size::NONE,
         );
         let maximum = measure_contribution(
             &host,
@@ -2968,7 +2748,6 @@ mod tests {
             ContributionKind::MaxContent,
             &tracks,
             None,
-            Size::NONE,
         );
         assert_eq!(minimum, 20.0);
         assert_eq!(maximum, 80.0);
@@ -3003,41 +2782,29 @@ mod tests {
         );
         assert!(touched.is_empty());
 
-        let fixed_zero = TrackSizingFunction {
-            min: TrackBreadth::Breadth(LengthPercentage::zero()),
-            max: TrackBreadth::Breadth(LengthPercentage::zero()),
-            fit_content: None,
-        };
         let cases = [
             (
                 PlannedSize::Base,
                 ContributionKind::Minimum,
-                TrackSizingFunction::AUTO,
-                true,
+                test_track(0.0, 0.0),
             ),
             (
                 PlannedSize::Base,
                 ContributionKind::MaxContent,
-                TrackSizingFunction::AUTO,
-                true,
+                test_track(0.0, 0.0),
             ),
             (
                 PlannedSize::GrowthLimit,
                 ContributionKind::MaxContent,
-                TrackSizingFunction::AUTO,
-                true,
+                test_track(0.0, 0.0),
             ),
             (
                 PlannedSize::Base,
                 ContributionKind::MaxContent,
-                fixed_zero,
-                false,
+                fixed_track(0.0, 0.0),
             ),
         ];
-        for (planned_size, kind, sizing, intrinsic_max) in cases {
-            let mut track = test_track(0.0, 0.0);
-            track.sizing = sizing;
-            track.intrinsic_max = intrinsic_max;
+        for (planned_size, kind, track) in cases {
             let tracks = track_set(vec![track]);
             let mut planned = vec![0.0];
             let mut touched = Vec::new();
@@ -3074,14 +2841,12 @@ mod tests {
         assert!(!finite_growth.tracks[0].infinitely_growable);
 
         let mut zero_factor = test_track(10.0, f32::INFINITY);
-        zero_factor.flexible = true;
+        zero_factor.max = MaxKind::Flex;
         let zero_factor = track_set(vec![zero_factor]);
         let fraction = find_fr_size(&zero_factor, 0..1, 50.0, &mut Vec::new());
         assert_eq!(fraction, 40.0);
 
-        let mut auto = test_track(10.0, 10.0);
-        auto.auto_max = true;
-        let mut tracks = track_set(vec![auto]);
+        let mut tracks = track_set(vec![test_track(10.0, 10.0)]);
         stretch_auto_tracks(
             &mut tracks,
             AvailableSpace::Definite(50.0),
@@ -3097,23 +2862,13 @@ mod tests {
         let mut state = LayoutSlot::default();
         let tree = TestTree::default();
         let node = TestRef { tree: &tree };
-        let fixed = test_track(10.0, 10.0);
+        let fixed = fixed_track(10.0, 10.0);
         let mut flexible = test_track(10.0, f32::INFINITY);
-        flexible.sizing = TrackSizingFunction {
-            min: TrackBreadth::Auto,
-            max: TrackBreadth::Flex(Flex(2.0)),
-            fit_content: None,
-        };
+        flexible.max = MaxKind::Flex;
         flexible.flex_factor = 2.0;
-        flexible.flexible = true;
         let mut subunit_flexible = test_track(7.0, f32::INFINITY);
-        subunit_flexible.sizing = TrackSizingFunction {
-            min: TrackBreadth::Auto,
-            max: TrackBreadth::Flex(Flex(0.5)),
-            fit_content: None,
-        };
+        subunit_flexible.max = MaxKind::Flex;
         subunit_flexible.flex_factor = 0.5;
-        subunit_flexible.flexible = true;
         let mut tracks = track_set(vec![fixed, flexible, subunit_flexible]);
         let mut items = vec![test_item(node, 0, 1), test_item(node, 1, 2)];
 
@@ -3124,7 +2879,6 @@ mod tests {
             &mut tracks,
             None,
             items.as_mut_slice(),
-            Size::NONE,
             AvailableSpace::MaxContent,
             &mut Vec::new(),
         );

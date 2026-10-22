@@ -128,28 +128,72 @@ impl<N> GridItem<N> {
     }
 }
 
-/// Cold style plus hot used values for one concrete explicit/implicit track.
-#[derive(Debug, Clone, Default)]
-#[allow(clippy::struct_excessive_bools)]
+/// A track's minimum sizing function as §12.4 initializes it: a
+/// `<length-percentage>` that resolves is `Fixed` (its value is the track's
+/// initial base size), one that does not — a percentage with no basis — is
+/// `Auto`. `minmax()` takes no `<flex>` minimum by grammar, and a lone
+/// `<flex>` or `fit-content()` has an `auto` one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) enum MinKind {
+    Fixed,
+    #[default]
+    Auto,
+    MinContent,
+    MaxContent,
+}
+
+impl MinKind {
+    /// An intrinsic sizing function (§12.4): anything but a fixed one.
+    #[inline]
+    pub(super) fn is_intrinsic(self) -> bool {
+        self != Self::Fixed
+    }
+}
+
+/// A track's maximum sizing function as §12.4 initializes it, a percentage
+/// with no basis being `Auto`. `Fixed` carries the resolved maximum floored
+/// by the resolved fixed minimum (zero for a non-fixed one) and by zero: the
+/// track's share of the fixed maximum that clamps an automatic minimum
+/// (§6.6), computed whether or not the track is collapsed.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub(super) enum MaxKind {
+    Fixed(f32),
+    #[default]
+    Auto,
+    MinContent,
+    MaxContent,
+    Flex,
+}
+
+impl MaxKind {
+    /// An intrinsic sizing function (§12.4): neither fixed nor flexible.
+    #[inline]
+    pub(super) fn is_intrinsic(self) -> bool {
+        matches!(self, Self::Auto | Self::MinContent | Self::MaxContent)
+    }
+}
+
+/// The sizing-function kinds and used values of one concrete explicit or
+/// implicit track.
+#[derive(Debug, Clone, Copy, Default)]
 pub(super) struct Track {
-    pub(super) sizing: TrackSizingFunction,
+    pub(super) min: MinKind,
+    pub(super) max: MaxKind,
     pub(super) base: f32,
     pub(super) growth_limit: f32,
     pub(super) fit_content_limit: f32,
     pub(super) flex_factor: f32,
-    pub(super) flexible: bool,
-    pub(super) intrinsic_min: bool,
-    pub(super) intrinsic_max: bool,
-    pub(super) auto_max: bool,
     pub(super) infinitely_growable: bool,
     pub(super) collapsed: bool,
     pub(super) position: f32,
 }
 
 impl Track {
+    /// A flexible track (§12.4): a `<flex>` maximum on a track that is not
+    /// collapsed.
     #[inline]
     pub(super) fn is_flexible(&self) -> bool {
-        self.flexible
+        !self.collapsed && self.max == MaxKind::Flex
     }
 }
 

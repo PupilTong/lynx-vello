@@ -28,10 +28,10 @@ use sizing::{
     resolve_item_intrinsic_dimensions, size_tracks,
 };
 use stylo::computed_values::direction;
-use stylo::values::computed::{Inset, PositionProperty, Size as StyleSize, TrackBreadth};
+use stylo::values::computed::{Inset, PositionProperty, Size as StyleSize};
 use stylo::values::specified::align::AlignFlags;
 use tracks::{ExpandedTemplate, MAX_MATERIALIZED_TRACKS, build_axis_tracks, expand_template};
-use types::{Axis, GridItem, TrackSet, TrackSizingFunction};
+use types::{Axis, GridItem, MaxKind, MinKind, TrackSet, TrackSizingFunction};
 
 use super::util::{
     BaselineSet, IntrinsicTag, ItemKey, OrderedItem, PendingLayoutItem, ResolvedContainerBox,
@@ -404,15 +404,15 @@ fn run_track_sizing<T>(
     let needs_column_feedback = columns
         .tracks
         .iter()
-        .any(|track| track.intrinsic_min || track.intrinsic_max || track.is_flexible());
+        .any(|track| track.min.is_intrinsic() || track.max.is_intrinsic() || track.is_flexible());
     let mut before_row_min_content = Vec::new();
     if needs_column_feedback {
         before_row_min_content.reserve(items.len());
         for item in items.iter_mut() {
             let range = columns.span_indices(item.area.column.start, item.area.column.end);
-            let affects_intrinsic_column = columns.tracks[range]
-                .iter()
-                .any(|track| track.intrinsic_min || track.intrinsic_max || track.is_flexible());
+            let affects_intrinsic_column = columns.tracks[range].iter().any(|track| {
+                track.min.is_intrinsic() || track.max.is_intrinsic() || track.is_flexible()
+            });
             before_row_min_content.push(
                 (affects_intrinsic_column && item.preferred_behaves_auto_or_depends.width).then(
                     || {
@@ -600,8 +600,7 @@ impl DefiniteRerun<'_> {
                 (self.final_inner - self.used).abs() > tolerance
                     || self.tracks.tracks.iter().any(|track| {
                         (track.is_flexible() && track.flex_factor < 1.0)
-                            || (matches!(track.sizing.min, TrackBreadth::Auto)
-                                && matches!(track.sizing.max, TrackBreadth::MinContent))
+                            || (track.min == MinKind::Auto && track.max == MaxKind::MinContent)
                     })
                     || items.iter().any(|item| {
                         let span = match axis {
@@ -614,7 +613,7 @@ impl DefiniteRerun<'_> {
                             && !spanned.iter().any(types::Track::is_flexible)
                             && spanned
                                 .iter()
-                                .any(|track| track.intrinsic_min || track.intrinsic_max)
+                                .any(|track| track.min.is_intrinsic() || track.max.is_intrinsic())
                     })
             }
         }
@@ -987,7 +986,7 @@ fn span_is_fixed(tracks: &TrackSet, span: crate::compute::grid::placement::Track
     let indices = tracks.span_indices(span.start, span.end);
     !tracks.tracks[indices]
         .iter()
-        .any(|track| track.intrinsic_min || track.intrinsic_max || track.is_flexible())
+        .any(|track| track.min.is_intrinsic() || track.max.is_intrinsic() || track.is_flexible())
 }
 
 /// The visual offset `position: relative` adds to an item, taken from

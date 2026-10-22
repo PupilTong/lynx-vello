@@ -1021,7 +1021,8 @@ where
     align_tracks(&mut tracks, grid_inner, grid_alignment);
 
     let all_tracks_fixed = !tracks.tracks.iter().any(|track| {
-        !track.collapsed && (track.intrinsic_min || track.intrinsic_max || track.is_flexible())
+        !track.collapsed
+            && (track.min.is_intrinsic() || track.max.is_intrinsic() || track.is_flexible())
     });
     let container_goal = container_content_independence(input, style_definite).map_or(
         input.goal,
