@@ -805,7 +805,7 @@ v1 box-layout effects:
   the contained one. An authored `aspect-ratio` is style rather than contents and survives. The
   skipped-contents path shares this sizing.
 - **Layout containment** (`containment().contains(LAYOUT)`) — the box exports **no** baseline
-  (`LayoutOutput::first_baselines` and `last_baselines` both `NONE` at each algorithm's output
+  (`LayoutOutput::first_baseline` and `last_baseline` both `None` at each algorithm's output
   construction; Relative already exports none), and it **changes scrollable overflow**: with `overflow: visible`, a layout-contained
   box's descendant overflow is *ink* overflow ([css-contain-2 §3.3](https://drafts.csswg.org/css-contain-2/#containment-layout),
   item 3), so its `content_size` collapses to its own padding box; a scroll container instead keeps
@@ -1152,12 +1152,10 @@ the painting — layout's job is to never be the frame's bottleneck.
   measurement slots inline, spilling to the heap up to
   `MEASURE_CACHE_LIMIT = 32`, plus one layout slot). Each entry packs its
   output into six `f32`s: the size, the content size, and two baseline slots
-  that hold the present baselines in a fixed order (first `x`, first `y`, last
-  `x`, last `y`) with their presence in the input's flag word. No producer
-  reports an `x` baseline (it belongs to vertical writing modes, which
-  nothing here lays out), so an output carries at most a first and a last `y`
-  and the last baselines cost no entry any bytes; an output with more is
-  marked and answers no request, which keeps the cache exact. Shape-aware replacement is
+  that hold the first and the last baseline with their presence in the
+  input's flag word. A `LayoutOutput` carries only the vertical position of
+  each (`first_baseline`, `last_baseline`): a horizontal baseline belongs to
+  vertical writing modes, which nothing here lays out. Shape-aware replacement is
   implemented; probe-trace validation and tuning remain L4 work. The key is
   **every `LayoutInput` field that decides geometry** — `goal` distinguishes
   side-effect-free measurements (including their requested axes) from geometry
@@ -1428,7 +1426,7 @@ the engine we're succeeding.
 7. **Cross-axis alignment** (§9.6) — auto margins, `align-self`,
    `align-content`. Baseline alignment (§8.3, §9.4 step 8, css-align-3 §9.3)
    forms two sharing groups per line of a row container, from the children's
-   `first_baselines` and `last_baselines`: `baseline` items flush with the
+   `first_baseline` and `last_baseline`: `baseline` items flush with the
    line's cross-start edge, `last baseline` items with its cross-end edge,
    which `wrap-reverse` exchanges (the browsers' reading; a group taller than
    its line overflows, with no implicit `safe`). An item with no baseline set

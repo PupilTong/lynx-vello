@@ -531,8 +531,7 @@ pub(crate) fn compute_text_block_layout<T>(
             // box being the margin box, is the bottom *margin* edge CSS asks
             // for an inline-block that has no baseline of its own.
             let baseline = output
-                .first_baselines
-                .y
+                .first_baseline
                 .map(|baseline| (baseline + margin.top).max(0.0));
             store
                 .block

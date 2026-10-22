@@ -781,7 +781,7 @@ fn measure_item<T>(
         axes.cross.size(item.max_size),
         cross_floor,
     );
-    item.baseline = output.first_baselines.y;
+    item.baseline = output.first_baseline;
     item.main_size_is_definite = forced_main.is_some() || axes.main.size(known_definite);
     item.cross_size_is_definite = axes.cross.size(known_definite);
 }
@@ -1207,7 +1207,7 @@ where
             .main
             .pack(item.main_size_is_definite, item.cross_size_is_definite);
         let output = tree.compute_layout(state, item.key.node, input);
-        item.baseline = output.first_baselines.y;
+        item.baseline = output.first_baseline;
 
         let offset = item.relative_offset;
         let mut location = item_location(item, axes, inner_size, content_origin);
@@ -1591,7 +1591,7 @@ where
             container_baseline(&items, axes, final_inner_size, content_origin)
         };
         return LayoutOutput::new(final_outer_size, padding_box_end(final_outer_size, border))
-            .with_first_baselines(Point::new(None, baseline));
+            .with_first_baseline(baseline);
     }
 
     if has_relative_basis_dependency {
@@ -1650,8 +1650,7 @@ where
     } else {
         container_baseline(&items, axes, final_inner_size, content_origin)
     };
-    LayoutOutput::new(final_outer_size, content_size)
-        .with_first_baselines(Point::new(None, baseline))
+    LayoutOutput::new(final_outer_size, content_size).with_first_baseline(baseline)
 }
 
 #[cfg(test)]

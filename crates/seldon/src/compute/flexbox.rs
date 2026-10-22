@@ -119,11 +119,11 @@ struct FlexItem<N> {
     /// The first baseline the item aligns by: measured, or synthesized from
     /// its border box's bottom edge (css-align-3 §9.1, the line-under edge).
     baseline: f32,
-    measured_baselines: Point<Option<f32>>,
+    measured_baseline: Option<f32>,
     /// The last baseline the item aligns by, measured or synthesized as
     /// `baseline` is.
     last_baseline: f32,
-    measured_last_baselines: Point<Option<f32>>,
+    measured_last_baseline: Option<f32>,
     frozen: bool,
     violation: f32,
     main_position: f32,
@@ -337,9 +337,9 @@ where
         hypothetical_cross: 0.0,
         target_cross: 0.0,
         baseline: 0.0,
-        measured_baselines: Point::NONE,
+        measured_baseline: None,
         last_baseline: 0.0,
-        measured_last_baselines: Point::NONE,
+        measured_last_baseline: None,
         frozen: false,
         violation: 0.0,
         main_position: 0.0,
@@ -1388,9 +1388,9 @@ fn determine_hypothetical_cross_sizes<T>(
                 }
                 item.hypothetical_cross = cross;
                 item.target_cross = cross;
-                item.measured_baselines = Point::NONE;
+                item.measured_baseline = None;
                 item.baseline = cross;
-                item.measured_last_baselines = Point::NONE;
+                item.measured_last_baseline = None;
                 item.last_baseline = cross;
                 continue;
             }
@@ -1438,21 +1438,20 @@ fn determine_hypothetical_cross_sizes<T>(
                 cross_floor,
             );
             item.target_cross = item.hypothetical_cross;
-            item.measured_baselines = output.first_baselines;
-            item.measured_last_baselines = output.last_baselines;
+            item.measured_baseline = output.first_baseline;
+            item.measured_last_baseline = output.last_baseline;
             // A box with no baseline set is aligned by one synthesized from
             // its border box's line-under edge, the bottom one (css-align-3
             // §9.1), for its first and last baselines alike.
             (item.baseline, item.last_baseline) = if axes.main == Axis::Horizontal {
                 (
-                    output.first_baselines.y.unwrap_or(output.size.height),
-                    output.last_baselines.y.unwrap_or(output.size.height),
+                    output.first_baseline.unwrap_or(output.size.height),
+                    output.last_baseline.unwrap_or(output.size.height),
                 )
             } else {
-                (
-                    output.first_baselines.x.unwrap_or(output.size.width),
-                    output.last_baselines.x.unwrap_or(output.size.width),
-                )
+                // A column's cross axis is horizontal, along which no box
+                // reports a baseline: both are synthesized.
+                (output.size.width, output.size.width)
             };
         }
     }
@@ -1861,8 +1860,8 @@ fn container_baselines<N>(
         let location =
             item_border_box_location(item, lines[line_index], axes, inner_size, content_origin);
         let measured = match set {
-            BaselineSet::First => item.measured_baselines.y,
-            BaselineSet::Last => item.measured_last_baselines.y,
+            BaselineSet::First => item.measured_baseline,
+            BaselineSet::Last => item.measured_last_baseline,
         };
         Some(
             location.y
@@ -1904,8 +1903,8 @@ where
             let output = tree.compute_layout(state, item.key.node, input);
             // The committed run's baselines replace the measured ones: the
             // container's own are read from these (`container_baselines`).
-            item.measured_baselines = output.first_baselines;
-            item.measured_last_baselines = output.last_baselines;
+            item.measured_baseline = output.first_baseline;
+            item.measured_last_baseline = output.last_baseline;
 
             let offset = if item.position == PositionProperty::Relative {
                 relative_offset(item.inset, item.direction)
@@ -2511,8 +2510,8 @@ where
             )
         };
         return LayoutOutput::new(outer_size, padding_box_end(outer_size, border))
-            .with_first_baselines(Point::new(None, first))
-            .with_last_baselines(Point::new(None, last));
+            .with_first_baseline(first)
+            .with_last_baseline(last);
     }
 
     let mut content_size = perform_in_flow_layout(
@@ -2574,8 +2573,8 @@ where
         )
     };
     LayoutOutput::new(outer_size, content_size)
-        .with_first_baselines(Point::new(None, first))
-        .with_last_baselines(Point::new(None, last))
+        .with_first_baseline(first)
+        .with_last_baseline(last)
 }
 
 #[cfg(test)]
@@ -2685,8 +2684,7 @@ mod tests {
             } else {
                 (0.0, None)
             };
-            LayoutOutput::new(Size::new(width, height), Size::ZERO)
-                .with_first_baselines(Point::new(None, baseline))
+            LayoutOutput::new(Size::new(width, height), Size::ZERO).with_first_baseline(baseline)
         }
     }
 
@@ -2730,9 +2728,9 @@ mod tests {
             hypothetical_cross: cross,
             target_cross: cross,
             baseline: cross,
-            measured_baselines: Point::NONE,
+            measured_baseline: None,
             last_baseline: cross,
-            measured_last_baselines: Point::NONE,
+            measured_last_baseline: None,
             frozen: false,
             violation: 0.0,
             main_position: 0.0,
@@ -3150,10 +3148,10 @@ mod tests {
             items.each_ref().map(|item| item.hypothetical_cross),
             [21.0, 22.0, 23.0]
         );
-        assert_eq!(items[0].measured_baselines, Point::NONE);
-        assert_eq!(items[1].measured_baselines.y, Some(7.0));
+        assert_eq!(items[0].measured_baseline, None);
+        assert_eq!(items[1].measured_baseline, Some(7.0));
         assert_eq!(items[1].baseline, 7.0);
-        assert_eq!(items[2].measured_baselines, Point::NONE);
+        assert_eq!(items[2].measured_baseline, None);
 
         let mut fallback = [item(10.0, 0.0), item(10.0, 0.0)];
         fallback[0].preferred_size.height = Some(18.0);
@@ -3161,8 +3159,8 @@ mod tests {
         configure_measurement(18.0, Some(6.0));
         measure_cross(&mut fallback, flex_wrap::T::WRAP, 50.0);
         assert_eq!(TEST_MEASURE_CALLS.get(), 1);
-        assert_eq!(fallback[0].measured_baselines.y, Some(6.0));
-        assert_eq!(fallback[1].measured_baselines, Point::NONE);
+        assert_eq!(fallback[0].measured_baseline, Some(6.0));
+        assert_eq!(fallback[1].measured_baseline, None);
     }
 
     #[test]
@@ -3210,7 +3208,7 @@ mod tests {
             items.each_ref().map(|item| item.hypothetical_cross),
             [13.0, 30.0, 40.0]
         );
-        assert_eq!(items[0].measured_baselines.y, Some(5.0));
+        assert_eq!(items[0].measured_baseline, Some(5.0));
         calculate_line_cross_sizes(&items, &mut lines, axes, flex_wrap::T::NOWRAP, Some(40.0));
         determine_used_cross_sizes(&mut items, &lines, axes, Some(true));
         assert_eq!(

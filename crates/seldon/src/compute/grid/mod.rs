@@ -1316,10 +1316,9 @@ where
         });
         let participation = item.baseline_participation();
         let item_baseline = output
-            .first_baselines
-            .y
+            .first_baseline
             .or_else(|| (item.align_self == AlignFlags::BASELINE).then_some(output.size.height));
-        let baselines = [item_baseline, output.last_baselines.y];
+        let baselines = [item_baseline, output.last_baseline];
         let Some(set) = participation else {
             candidates.offer(index, item.area, aligned.y, output.size.height, baselines);
             accumulate_scrollable_overflow(
@@ -2013,8 +2012,8 @@ where
         baselines
     };
     LayoutOutput::new(outer_size, content_size)
-        .with_first_baselines(Point::new(None, first))
-        .with_last_baselines(Point::new(None, last))
+        .with_first_baseline(first)
+        .with_last_baseline(last)
 }
 
 #[cfg(test)]

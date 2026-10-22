@@ -942,8 +942,8 @@ impl TestMeasure {
                     },
                 );
                 LeafMetrics::new(size)
-                    .with_first_baselines(Point::new(None, first_baseline))
-                    .with_last_baselines(Point::new(None, last_baseline))
+                    .with_first_baseline(first_baseline)
+                    .with_last_baseline(last_baseline)
             }
             Self::Function(measure) => measure(input),
             Self::ConstraintFunction { measure, baseline } => {
@@ -955,8 +955,7 @@ impl TestMeasure {
                     ),
                 );
                 let size = measure(constraints);
-                LeafMetrics::new(size)
-                    .with_first_baselines(Point::new(None, baseline.map(|baseline| baseline(size))))
+                LeafMetrics::new(size).with_first_baseline(baseline.map(|baseline| baseline(size)))
             }
             Self::Profile(profile) => {
                 let constraints = TestConstraints::new(
@@ -997,8 +996,7 @@ impl TestMeasure {
                     regular
                 };
                 return (
-                    LeafMetrics::new(size)
-                        .with_first_baselines(Point::new(None, profile.first_baseline)),
+                    LeafMetrics::new(size).with_first_baseline(profile.first_baseline),
                     Some(TestMeasureCall {
                         kind,
                         constraints,
@@ -1016,8 +1014,8 @@ impl TestMeasure {
                     .height
                     .unwrap_or(measured.size.height),
             ))
-            .with_first_baselines(measured.first_baselines)
-            .with_last_baselines(measured.last_baselines),
+            .with_first_baseline(measured.first_baseline)
+            .with_last_baseline(measured.last_baseline),
             None,
         )
     }

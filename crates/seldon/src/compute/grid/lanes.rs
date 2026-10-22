@@ -699,8 +699,8 @@ where
             last_track: start + span - 1,
             first_in_track,
             last_in_track: false,
-            baseline: output.first_baselines.y,
-            last_baseline: output.last_baselines.y,
+            baseline: output.first_baseline,
+            last_baseline: output.last_baseline,
             relative,
             overflow: item.overflow,
         });
@@ -1219,8 +1219,8 @@ where
     }
     let content_size = own_scrollable_overflow(&style, outer_size, metrics.border, content_size);
     LayoutOutput::new(outer_size, content_size)
-        .with_first_baselines(Point::new(None, first_baseline))
-        .with_last_baselines(Point::new(None, last_baseline))
+        .with_first_baseline(first_baseline)
+        .with_last_baseline(last_baseline)
 }
 
 #[cfg(test)]

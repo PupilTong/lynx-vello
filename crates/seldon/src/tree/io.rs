@@ -243,25 +243,25 @@ pub struct LayoutOutput {
     /// ends at the padding box's far edge at the least and never takes in
     /// the far border. See [`Layout::content_size`].
     pub content_size: Size<f32>,
-    /// The box's first baselines, measured from its border-box origin: `y`
-    /// is the alphabetic baseline of a horizontal first line (a distance
-    /// down from the top edge), `x` the same for a vertical one. `None` is a
-    /// box with no first baseline set (css-align-3 §9.1); whoever aligns it
-    /// synthesizes one.
-    pub first_baselines: Point<Option<f32>>,
-    /// The box's last baselines, in the same coordinates as
-    /// [`Self::first_baselines`]: the baseline set of its last line, which
+    /// The box's first baseline, measured from its border-box origin: the
+    /// alphabetic baseline of its horizontal first line, a distance down from
+    /// the top edge. Only horizontal writing modes are laid out, so no box
+    /// has a vertical baseline to report. `None` is a box with no first
+    /// baseline set (css-align-3 §9.1); whoever aligns it synthesizes one.
+    pub first_baseline: Option<f32>,
+    /// The box's last baseline, in the same coordinates as
+    /// [`Self::first_baseline`]: the baseline of its last line, which
     /// `last baseline` self-alignment and the containers' own last baselines
     /// read.
-    pub last_baselines: Point<Option<f32>>,
+    pub last_baseline: Option<f32>,
 }
 
 impl LayoutOutput {
     pub const HIDDEN: Self = Self {
         size: Size::ZERO,
         content_size: Size::ZERO,
-        first_baselines: Point::NONE,
-        last_baselines: Point::NONE,
+        first_baseline: None,
+        last_baseline: None,
     };
 
     #[must_use]
@@ -269,26 +269,26 @@ impl LayoutOutput {
         Self {
             size,
             content_size,
-            first_baselines: Point::NONE,
-            last_baselines: Point::NONE,
+            first_baseline: None,
+            last_baseline: None,
         }
     }
 
     #[must_use]
-    pub fn with_first_baselines(mut self, first_baselines: Point<Option<f32>>) -> Self {
-        self.first_baselines = first_baselines;
+    pub fn with_first_baseline(mut self, first_baseline: Option<f32>) -> Self {
+        self.first_baseline = first_baseline;
         self
     }
 
     #[must_use]
-    pub fn with_last_baselines(mut self, last_baselines: Point<Option<f32>>) -> Self {
-        self.last_baselines = last_baselines;
+    pub fn with_last_baseline(mut self, last_baseline: Option<f32>) -> Self {
+        self.last_baseline = last_baseline;
         self
     }
 }
 
 /// The durable, host-stored layout of one node.
-#[derive(Debug, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 #[non_exhaustive]
 pub struct Layout {
     pub order: u32,
@@ -374,10 +374,9 @@ mod tests {
             Some(Size::new(false, false))
         );
 
-        let baselines = Point::new(None, Some(14.0));
         let output = LayoutOutput::new(Size::new(100.0, 20.0), Size::new(120.0, 30.0))
-            .with_first_baselines(baselines);
-        assert_eq!(output.first_baselines, baselines);
+            .with_first_baseline(Some(14.0));
+        assert_eq!(output.first_baseline, Some(14.0));
         assert_eq!(Layout::with_order(7).order, 7);
     }
 
@@ -415,15 +414,15 @@ mod tests {
     }
 
     #[test]
-    fn last_baselines_are_their_own_field() {
+    fn the_last_baseline_is_its_own_field() {
         let output = LayoutOutput::new(Size::new(100.0, 40.0), Size::new(100.0, 40.0));
-        assert_eq!(output.last_baselines, Point::NONE);
-        assert_eq!(LayoutOutput::HIDDEN.last_baselines, Point::NONE);
+        assert_eq!(output.last_baseline, None);
+        assert_eq!(LayoutOutput::HIDDEN.last_baseline, None);
 
-        let first = Point::new(None, Some(14.0));
-        let last = Point::new(None, Some(34.0));
-        let output = output.with_first_baselines(first).with_last_baselines(last);
-        assert_eq!(output.first_baselines, first);
-        assert_eq!(output.last_baselines, last);
+        let output = output
+            .with_first_baseline(Some(14.0))
+            .with_last_baseline(Some(34.0));
+        assert_eq!(output.first_baseline, Some(14.0));
+        assert_eq!(output.last_baseline, Some(34.0));
     }
 }

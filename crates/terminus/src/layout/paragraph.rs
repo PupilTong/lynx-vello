@@ -608,8 +608,8 @@ pub(crate) fn measure<T>(
         store.probe(context, constraint)
     };
     LeafMetrics::new(metrics.size)
-        .with_first_baselines(Point::new(None, metrics.first_baseline))
-        .with_last_baselines(Point::new(None, metrics.last_baseline))
+        .with_first_baseline(metrics.first_baseline)
+        .with_last_baseline(metrics.last_baseline)
 }
 
 /// The element establishing the committed paragraph whose content `node` is
@@ -890,12 +890,7 @@ pub(crate) fn place_and_hide<T>(
             AtomOffset::Ignored => Point::ZERO,
         };
         let slot_layout = tree.layout_mut(state, atom.slot);
-        let mut placed_layout = seldon::tree::Layout::with_order(slot_layout.unrounded.order);
-        placed_layout.size = slot_layout.unrounded.size;
-        placed_layout.content_size = slot_layout.unrounded.content_size;
-        placed_layout.border = slot_layout.unrounded.border;
-        placed_layout.padding = slot_layout.unrounded.padding;
-        placed_layout.margin = slot_layout.unrounded.margin;
+        let mut placed_layout = slot_layout.unrounded.clone();
         // Two changes of space, in order. The paragraph's origin is the
         // element's *content* box, while `location` is read against its
         // border box; and the paragraph placed the atom's *margin* box, while

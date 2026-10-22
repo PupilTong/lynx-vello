@@ -217,10 +217,10 @@ where
         // A box with no baseline set is aligned by one synthesized from its
         // border box's bottom edge (css-align-3 §9.1).
         if item.align_self == AlignFlags::BASELINE {
-            item.measured_baseline = Some(output.first_baselines.y.unwrap_or(size.height));
+            item.measured_baseline = Some(output.first_baseline.unwrap_or(size.height));
         } else if item.align_self == AlignFlags::LAST_BASELINE {
             item.measured_last_descent =
-                Some(size.height - output.last_baselines.y.unwrap_or(size.height));
+                Some(size.height - output.last_baseline.unwrap_or(size.height));
         }
     }
     let mut measured = axis.size(size);
@@ -2205,7 +2205,7 @@ mod tests {
 
     use super::*;
     use crate::compute::grid::placement::{GridArea, TrackSpan};
-    use crate::geometry::{Point, Size};
+    use crate::geometry::Size;
     use crate::style::{CoreStyle, GridStyle};
     use crate::tree::{LayoutInput, LayoutOutput, LayoutSlot, LayoutTree};
 
@@ -2360,8 +2360,7 @@ mod tests {
                 input.known_dimensions.width.unwrap_or(measured.width),
                 input.known_dimensions.height.unwrap_or(measured.height),
             );
-            LayoutOutput::new(size, size)
-                .with_first_baselines(Point::new(None, node.tree.first_baseline))
+            LayoutOutput::new(size, size).with_first_baseline(node.tree.first_baseline)
         }
     }
 

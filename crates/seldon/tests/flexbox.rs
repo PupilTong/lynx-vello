@@ -494,7 +494,7 @@ mod alignment {
 
         assert_close(tree.layout(first).location.y + 15.0, 15.0);
         assert_close(tree.layout(second).location.y + 10.0, 15.0);
-        assert_eq!(output.first_baselines.y, Some(15.0));
+        assert_eq!(output.first_baseline, Some(15.0));
     }
 
     /// A `linear` column of one fixed-size box, whose first baseline is that
@@ -534,7 +534,7 @@ mod alignment {
         // baseline sits on it.
         assert_close(tree.layout(first).location.y, 0.0);
         assert_close(tree.layout(column).location.y, 8.0);
-        assert_eq!(output.first_baselines.y, Some(15.0));
+        assert_eq!(output.first_baseline, Some(15.0));
     }
 
     #[test]
@@ -558,7 +558,7 @@ mod alignment {
         };
 
         let (read, read_probes) = run(true);
-        assert_eq!(read.first_baselines.y, Some(7.0));
+        assert_eq!(read.first_baseline, Some(7.0));
         assert_eq!(read_probes, 1);
         // Unread, the column's fixed-size box is never measured for it.
         let (unread, unread_probes) = run(false);
@@ -1596,7 +1596,7 @@ fn natural_sized_leaf_has_no_content_baseline() {
     );
     assert_size(output.size, Size::new(100.0, 20.0));
     assert_size(output.content_size, Size::new(100.0, 20.0));
-    assert_eq!(output.first_baselines, Point::NONE);
+    assert_eq!(output.first_baseline, None);
 }
 
 #[test]
@@ -1621,7 +1621,7 @@ fn leaf_max_width_constrains_measurement_and_preserves_overflow_extent() {
     );
     assert_size(output.size, Size::new(120.0, 50.0));
     assert_size(output.content_size, Size::new(220.0, 50.0));
-    assert_eq!(output.first_baselines, Point::NONE);
+    assert_eq!(output.first_baseline, None);
 }
 
 #[test]
@@ -2909,8 +2909,8 @@ mod last_baseline {
         assert_close(tree.layout(short).location.y + 15.0, 54.0);
         // With no first-baseline group on the line, the container's first
         // baseline is the last-baseline group's (§8.5 step 2).
-        assert_eq!(output.first_baselines.y, Some(54.0));
-        assert_eq!(output.last_baselines.y, Some(54.0));
+        assert_eq!(output.first_baseline, Some(54.0));
+        assert_eq!(output.last_baseline, Some(54.0));
     }
 
     #[test]
@@ -2952,8 +2952,8 @@ mod last_baseline {
         assert_close(tree.layout(b).location.y + 8.0, 25.0);
         assert_close(tree.layout(c).location.y + 12.0, 60.0);
         assert_close(tree.layout(d).location.y + 30.0, 60.0);
-        assert_eq!(output.first_baselines.y, Some(25.0));
-        assert_eq!(output.last_baselines.y, Some(60.0));
+        assert_eq!(output.first_baseline, Some(25.0));
+        assert_eq!(output.last_baseline, Some(60.0));
 
         // A measurement reports the same pair as the commit.
         let measured = measure_layout(
@@ -2962,8 +2962,8 @@ mod last_baseline {
             Size::new(Some(50.0), None),
             Size::new(AvailableSpace::Definite(50.0), AvailableSpace::MaxContent),
         );
-        assert_eq!(measured.first_baselines.y, Some(25.0));
-        assert_eq!(measured.last_baselines.y, Some(60.0));
+        assert_eq!(measured.first_baseline, Some(25.0));
+        assert_eq!(measured.last_baseline, Some(60.0));
     }
 
     #[test]
@@ -3011,8 +3011,8 @@ mod last_baseline {
         assert_close(tree.layout(first).location.y, 0.0);
         assert_close(tree.layout(last).location.y, 30.0);
         assert_close(tree.layout(tall).location.y, 0.0);
-        assert_eq!(output.first_baselines.y, Some(10.0));
-        assert_eq!(output.last_baselines.y, Some(46.0));
+        assert_eq!(output.first_baseline, Some(10.0));
+        assert_eq!(output.last_baseline, Some(46.0));
     }
 
     #[test]
@@ -3077,7 +3077,7 @@ mod last_baseline {
         assert_close(tree.layout(high).location.y, 0.0);
         assert_close(tree.layout(low).location.y + 4.0, 28.0);
         assert_close(tree.layout(first).location.y, 4.0);
-        assert_eq!(output.last_baselines.y, Some(28.0));
+        assert_eq!(output.last_baseline, Some(28.0));
     }
 
     #[test]
@@ -3120,8 +3120,8 @@ mod last_baseline {
         assert_point(tree.layout(c).location, Point::new(0.0, 0.0));
         // The startmost (top) line is the second one, the endmost (bottom)
         // the first (css-flexbox-1 §8.5, csswg-drafts#995).
-        assert_eq!(output.first_baselines.y, Some(15.0));
-        assert_eq!(output.last_baselines.y, Some(40.0));
+        assert_eq!(output.first_baseline, Some(15.0));
+        assert_eq!(output.last_baseline, Some(40.0));
     }
 
     /// css-flexbox-1 §8.3: the first-baseline group sits against the line's
@@ -3172,8 +3172,8 @@ mod last_baseline {
             assert_close(tree.layout(last).location.y, last_y);
             // §8.5: the first baseline comes from the first-baseline group and
             // the last from the last-baseline group, wherever they sit.
-            assert_eq!(output.first_baselines.y, Some(first_y + 15.0));
-            assert_eq!(output.last_baselines.y, Some(last_y + 25.0));
+            assert_eq!(output.first_baseline, Some(first_y + 15.0));
+            assert_eq!(output.last_baseline, Some(last_y + 25.0));
         }
     }
 
@@ -3225,8 +3225,8 @@ mod last_baseline {
             assert_close(tree.layout(c).location.x, c_x);
             // The startmost line holds [a, b] unless `wrap-reverse` moved it
             // to the inline-end side; then [c]'s line is the startmost.
-            assert_eq!(output.first_baselines.y, Some(first), "{label}");
-            assert_eq!(output.last_baselines.y, Some(last), "{label}");
+            assert_eq!(output.first_baseline, Some(first), "{label}");
+            assert_eq!(output.last_baseline, Some(last), "{label}");
         }
     }
 
@@ -3255,8 +3255,8 @@ mod last_baseline {
         // aligned at the line's end, as `end` would put them.
         assert_close(tree.layout(tall).location.y, 20.0);
         assert_close(tree.layout(short).location.y, 40.0);
-        assert_eq!(output.first_baselines.y, Some(50.0));
-        assert_eq!(output.last_baselines.y, Some(50.0));
+        assert_eq!(output.first_baseline, Some(50.0));
+        assert_eq!(output.last_baseline, Some(50.0));
     }
 
     #[test]
@@ -3318,7 +3318,7 @@ mod last_baseline {
         // Group baseline: max(25, 40 - max(5, 10)) = 30.
         assert_close(tree.layout(shifted).location.y, 30.0 - 25.0 + 7.0);
         assert_close(tree.layout(other).location.y, 20.0);
-        assert_eq!(output.last_baselines.y, Some(30.0));
+        assert_eq!(output.last_baseline, Some(30.0));
     }
 
     #[test]
@@ -3363,8 +3363,8 @@ mod last_baseline {
         assert_point(tree.layout(first).location, Point::new(0.0, 10.0));
         // The cross-axis baseline sets: the topmost item's first baseline,
         // the bottommost item's last.
-        assert_eq!(output.first_baselines.y, Some(7.0));
-        assert_eq!(output.last_baselines.y, Some(27.0));
+        assert_eq!(output.first_baseline, Some(7.0));
+        assert_eq!(output.last_baseline, Some(27.0));
 
         let reversed = flex_container(
             &mut tree,
@@ -3381,8 +3381,8 @@ mod last_baseline {
             Size::new(AvailableSpace::Definite(100.0), AvailableSpace::MaxContent),
         );
         // `column-reverse` puts the last item on top.
-        assert_eq!(output.first_baselines.y, Some(5.0));
-        assert_eq!(output.last_baselines.y, Some(28.0));
+        assert_eq!(output.first_baseline, Some(5.0));
+        assert_eq!(output.last_baseline, Some(28.0));
     }
 
     /// An item that shares no baseline takes css-align-3 §4.2's fallback
@@ -3547,7 +3547,7 @@ mod last_baseline {
             assert_size(tree.layout(inner).size, Size::new(40.0, 22.0));
             assert_close(tree.layout(inner).location.y, inner_y);
             assert_close(tree.layout(beside).location.y, beside_y);
-            assert_eq!(output.last_baselines.y, Some(beside_y + 15.0));
+            assert_eq!(output.last_baseline, Some(beside_y + 15.0));
         }
     }
 
@@ -3587,12 +3587,12 @@ mod last_baseline {
             probes[0].goal,
             LayoutGoal::Measure(RequestedAxis::Horizontal)
         );
-        assert_eq!(measured.first_baselines.y, Some(5.0));
-        assert_eq!(measured.last_baselines.y, Some(30.0));
+        assert_eq!(measured.first_baseline, Some(5.0));
+        assert_eq!(measured.last_baseline, Some(30.0));
 
         let committed = perform_layout(&tree, root, Size::new(Some(100.0), None), constraint);
-        assert_eq!(committed.first_baselines.y, Some(5.0));
-        assert_eq!(committed.last_baselines.y, Some(25.0));
+        assert_eq!(committed.first_baseline, Some(5.0));
+        assert_eq!(committed.last_baseline, Some(25.0));
     }
 
     /// A measurement asked for an exact last baseline measures the item it
@@ -3640,8 +3640,8 @@ mod last_baseline {
                 .count(),
             1
         );
-        assert_eq!(requested.first_baselines.y, Some(5.0));
-        assert_eq!(requested.last_baselines.y, Some(25.0));
+        assert_eq!(requested.first_baseline, Some(5.0));
+        assert_eq!(requested.last_baseline, Some(25.0));
     }
 
     #[test]
@@ -3664,10 +3664,10 @@ mod last_baseline {
         );
 
         let committed = definite_layout(&tree, root, 100.0, 40.0);
-        assert_eq!(committed.first_baselines, Point::NONE);
-        assert_eq!(committed.last_baselines, Point::NONE);
+        assert_eq!(committed.first_baseline, None);
+        assert_eq!(committed.last_baseline, None);
         let measured = measure_layout(&tree, root, Size::NONE, Size::MAX_CONTENT);
-        assert_eq!(measured.last_baselines, Point::NONE);
+        assert_eq!(measured.last_baseline, None);
         // The item itself still aligns.
         assert_close(tree.layout(child).location.y, 20.0);
     }

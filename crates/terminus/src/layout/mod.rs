@@ -18,8 +18,6 @@ use rustc_hash::FxHashSet;
 use seldon::compute::LeafMetrics;
 pub use seldon::compute::NaturalSize;
 pub(crate) use seldon::geometry::Edges;
-#[cfg(feature = "layout-test-utils")]
-use seldon::geometry::Point;
 pub use seldon::geometry::Size;
 use seldon::invalidate::is_relayout_boundary;
 pub(crate) use seldon::style::TextBrush;
@@ -495,9 +493,7 @@ impl<T> Document<T> {
             node.is_element(),
             "non-element NodeId passed to Document::set_leaf_metrics_for_testing"
         );
-        node.set_test_leaf_metrics(
-            LeafMetrics::new(size).with_first_baselines(Point::new(None, first_baseline)),
-        );
+        node.set_test_leaf_metrics(LeafMetrics::new(size).with_first_baseline(first_baseline));
         self.invalidate_layout(id);
     }
 

@@ -400,11 +400,11 @@ fn atom_baseline<T>(node: &Node<T>, output: &seldon::tree::LayoutOutput) -> Opti
         DisplayMode::BlockFlow | DisplayMode::Text
     ) && !node.is_replaced();
     match view.values().get_box().baseline_source {
-        BaselineSource::Last => output.last_baselines.y,
+        BaselineSource::Last => output.last_baseline,
         BaselineSource::Auto if line_boxes => (!crate::scroll::is_scroll_container(view.values()))
-            .then_some(output.last_baselines.y)
+            .then_some(output.last_baseline)
             .flatten(),
-        BaselineSource::First | BaselineSource::Auto => output.first_baselines.y,
+        BaselineSource::First | BaselineSource::Auto => output.first_baseline,
     }
 }
 
