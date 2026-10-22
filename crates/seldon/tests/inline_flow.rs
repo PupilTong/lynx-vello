@@ -622,6 +622,39 @@ fn a_probe_never_moves_the_committed_lines_and_a_restore_puts_them_back() {
 }
 
 #[test]
+fn a_width_the_max_content_lines_fit_reuses_them() {
+    let style = ahem(10.0, LineHeight::Normal);
+    let mut context = text_context();
+    let mut flow = InlineFlow::new(
+        &mut context,
+        container(style.clone()),
+        &[run(&style, "aaaa bbbb")],
+    );
+    let max_content = flow.probe(&mut context, BlockConstraint::new(None, 0.0));
+    assert_close(max_content.size.width, 90.0);
+    let breaks = flow.break_count();
+
+    // The fit-content width at any width the max-content lines fit is the
+    // max-content width, so the max-content entry answers the probe and the
+    // retained lines answer the commit.
+    assert_eq!(
+        flow.probe(&mut context, BlockConstraint::new(Some(120.0), 0.0)),
+        max_content
+    );
+    assert_eq!(
+        flow.commit(&mut context, BlockConstraint::new(Some(90.0), 0.0)),
+        max_content
+    );
+    assert_eq!(flow.break_count(), breaks);
+    assert!(!flow.is_probe_dirty());
+    assert_eq!(flow.line_count(), 1);
+
+    // Narrower than the natural width re-breaks.
+    flow.probe(&mut context, BlockConstraint::new(Some(89.0), 0.0));
+    assert_eq!(flow.break_count(), breaks + 1);
+}
+
+#[test]
 fn a_new_alignment_applies_to_the_same_flow() {
     let style = ahem(10.0, LineHeight::Normal);
     let mut context = text_context();

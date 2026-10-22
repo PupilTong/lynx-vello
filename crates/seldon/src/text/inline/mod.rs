@@ -68,7 +68,7 @@ use std::sync::OnceLock;
 pub use boxes::InlineEdges;
 use boxes::{BoxSpec, InlineBoxes};
 use edge::EdgeAdditions;
-use parley::{AlignmentOptions, BaseDirection, Layout, PositionedLayoutItem};
+use parley::{Alignment, AlignmentOptions, BaseDirection, Layout, PositionedLayoutItem};
 
 use crate::geometry::{Point, Rect, Size};
 use crate::style::{TextBrush, TextContainerStyle, TextRunStyle};
@@ -1102,7 +1102,19 @@ impl Retained for InlineFlow {
     }
 
     fn layout_at(&mut self, context: &mut TextContext, constraint: BlockConstraint) {
-        if self.memo.holds(self.retained(), constraint) {
+        // A max-content result is a fitting width's too under left
+        // alignment, as for the Lynx block: the fit-content width it reports
+        // is the max-content width at every width from the natural one on.
+        let left =
+            resolve_alignment(self.style.text_align, self.style.direction) == Alignment::Left;
+        if self.memo.holds(
+            self.retained(),
+            self.fits_from().filter(|_| left),
+            constraint,
+        ) {
+            if let Some(result) = &mut self.result {
+                result.constraint = constraint;
+            }
             return;
         }
         let intrinsic = self.intrinsic(context, constraint.indent);
@@ -1146,5 +1158,16 @@ impl Retained for InlineFlow {
 
     fn reported(&self) -> BlockMetrics {
         self.expect_result().metrics
+    }
+
+    /// The flow never truncates. The natural layout is the retained
+    /// result's own: an intrinsic-width break drops the result.
+    fn fits_from(&self) -> Option<f32> {
+        let result = self.result.as_ref()?;
+        result
+            .constraint
+            .max_advance()
+            .is_none()
+            .then(|| self.paragraph.natural.width())
     }
 }

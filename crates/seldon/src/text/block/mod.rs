@@ -41,7 +41,7 @@ mod truncate;
 use core::fmt;
 use core::num::NonZeroU32;
 
-use parley::{AlignmentOptions, ContentWidths, Layout, PositionedLayoutItem};
+use parley::{Alignment, AlignmentOptions, ContentWidths, Layout, PositionedLayoutItem};
 pub use style::{BlockStyle, TextOverflow};
 use truncate::{CutPlan, OverflowCut, Tail};
 
@@ -1043,7 +1043,20 @@ impl Retained for TextBlock {
     /// Callers reach it through [`Self::probe`] or [`Self::commit`], which
     /// differ in what they are allowed to do with the memo.
     fn layout_at(&mut self, context: &mut TextContext, constraint: BlockConstraint) {
-        if self.memo.holds(self.retained(), constraint) {
+        // Under left alignment a max-content result's lines sit where a
+        // break at a width they fit puts them, so it is that width's result
+        // too: only the constraint it answers is recorded anew, and no
+        // restore follows a commit there.
+        let left =
+            resolve_alignment(self.style.text_align, self.style.direction) == Alignment::Left;
+        if self.memo.holds(
+            self.retained(),
+            self.fits_from().filter(|_| left),
+            constraint,
+        ) {
+            if let Some(result) = &mut self.result {
+                result.constraint = constraint;
+            }
             return;
         }
         self.memo.begin_break();
@@ -1116,6 +1129,14 @@ impl Retained for TextBlock {
             first_baseline: result.first_baseline,
             last_baseline: result.lines.last().map(|line| line.baseline),
         }
+    }
+
+    /// The natural layout is the retained result's own: only `layout_at`
+    /// breaks it.
+    fn fits_from(&self) -> Option<f32> {
+        let result = self.result.as_ref()?;
+        (result.constraint.max_advance().is_none() && result.display.is_none())
+            .then(|| self.paragraph.natural.width())
     }
 }
 
@@ -1347,6 +1368,123 @@ mod tests {
             4,
             "a new width rebuilds the display; the content width stays cached",
         );
+    }
+
+    fn ahem_run<'a>(text: &'a str, style: &'a RunStyle) -> InlineItem<'a> {
+        InlineItem::Run(TextRunItem {
+            text,
+            style,
+            white_space: WhiteSpaceCollapse::Collapse,
+            text_security: TextSecurity::None,
+        })
+    }
+
+    #[test]
+    fn a_width_the_max_content_lines_fit_reuses_them() {
+        let mut context = text_context();
+        let style = ahem_style();
+        let items = [ahem_run("aaaa aaaa", &style)];
+        let mut block = TextBlock::new(&mut context, BlockStyle::default(), &items, None);
+
+        let max_content = block.probe(&mut context, BlockConstraint::new(None, 0.0));
+        assert_eq!(block.break_count(), 1);
+        assert!((max_content.size.width - 90.0).abs() < f32::EPSILON);
+
+        // A probe at a width the max-content lines fit is answered by the
+        // max-content entry.
+        assert_eq!(
+            block.probe(&mut context, BlockConstraint::new(Some(120.0), 0.0)),
+            max_content
+        );
+        assert_eq!(block.break_count(), 1);
+
+        // A commit at one keeps the retained max-content lines and records
+        // its own constraint, so there is nothing to restore.
+        assert_eq!(
+            block.commit(&mut context, BlockConstraint::new(Some(90.0), 0.0)),
+            max_content
+        );
+        assert_eq!(block.break_count(), 1);
+        assert!(!block.is_probe_dirty());
+        assert!(!block.restore_committed(&mut context));
+        assert_eq!(block.lines().len(), 1);
+
+        // Narrower than the natural width, or at another indent, re-breaks.
+        let wrapped = block.probe(&mut context, BlockConstraint::new(Some(89.0), 0.0));
+        assert_eq!(block.break_count(), 2);
+        assert!(wrapped.size.height > max_content.size.height);
+        block.probe(&mut context, BlockConstraint::new(Some(120.0), 10.0));
+        assert_eq!(block.break_count(), 3);
+    }
+
+    #[test]
+    fn a_max_content_answer_moves_no_line_of_another_alignment() {
+        let mut context = text_context();
+        let style = ahem_style();
+        let items = [ahem_run("aaaa aaaa", &style)];
+        let centered = BlockStyle {
+            text_align: TextAlign::Center,
+            ..BlockStyle::default()
+        };
+        let mut block = TextBlock::new(&mut context, centered, &items, None);
+
+        let max_content = block.probe(&mut context, BlockConstraint::new(None, 0.0));
+        // The probe answers from the max-content entry: no metric depends
+        // on the alignment.
+        assert_eq!(
+            block.probe(&mut context, BlockConstraint::new(Some(120.0), 0.0)),
+            max_content
+        );
+        assert_eq!(block.break_count(), 1);
+        // A centred line moves with the width, so the commit re-breaks.
+        block.commit(&mut context, BlockConstraint::new(Some(120.0), 0.0));
+        assert_eq!(block.break_count(), 2);
+    }
+
+    #[test]
+    fn a_truncated_max_content_answer_is_no_other_widths_answer() {
+        let mut context = text_context();
+        let style = ahem_style();
+        let items = [ahem_run("aaaa aaaa", &style)];
+
+        // `text-maxlength`: the cut does not depend on the width, but the
+        // display it leaves is narrower than the natural line, which a width
+        // that only fits the display re-breaks.
+        let maxlength = BlockStyle {
+            max_chars: Some(4),
+            overflow: TextOverflow::Ellipsis,
+            ..BlockStyle::default()
+        };
+        let mut block = TextBlock::new(&mut context, maxlength, &items, None);
+        let max_content = block.probe(&mut context, BlockConstraint::new(None, 0.0));
+        assert!(block.truncated());
+        assert!(max_content.size.width < 90.0);
+        block.probe(
+            &mut context,
+            BlockConstraint::new(Some(max_content.size.width), 0.0),
+        );
+        assert_eq!(block.break_count(), 2);
+        block.commit(&mut context, BlockConstraint::new(Some(200.0), 0.0));
+        assert_eq!(block.break_count(), 3);
+
+        // `text-maxline` with inline-truncation content: at max-content the
+        // content shows, but at a width no wider than the content it is
+        // hidden and the cut moves to the line start.
+        let first_line = [ahem_run("Hi\nthere", &style)];
+        let tail = [ahem_run("XXXX", &style)];
+        let maxline = BlockStyle {
+            max_lines: NonZeroU32::new(1),
+            ..BlockStyle::default()
+        };
+        let mut block = TextBlock::new(&mut context, maxline, &first_line, Some(&tail));
+        let max_content = block.probe(&mut context, BlockConstraint::new(None, 0.0));
+        assert!(block.truncation_visible());
+        block.commit(
+            &mut context,
+            BlockConstraint::new(Some(max_content.size.width), 0.0),
+        );
+        assert_eq!(block.break_count(), 2);
+        assert!(!block.truncation_visible());
     }
 
     #[test]
