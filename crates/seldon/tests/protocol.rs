@@ -693,6 +693,52 @@ fn compute_cached_layout_runs_an_uncached_dispatch() {
 }
 
 #[test]
+fn a_box_that_reads_no_percentage_basis_is_cached_against_none() {
+    let run = |padding| {
+        let mut tree = MockTree::default();
+        let node = tree.push(
+            MockStyle {
+                padding: Edges::uniform(padding),
+                ..MockStyle::default()
+            },
+            vec![],
+        );
+        let mut state = tree.new_state();
+        let seen = core::cell::RefCell::new(Vec::new());
+        for basis in [Some(100.0), Some(200.0), None] {
+            compute_cached_layout(
+                &tree,
+                &mut state,
+                tree.node(node),
+                LayoutInput::measure(
+                    Size::NONE,
+                    Size::new(basis, Some(50.0)),
+                    Size::MAX_CONTENT,
+                    RequestedAxis::Both,
+                ),
+                |tree, state, node, input| {
+                    seen.borrow_mut().push(input.parent_size);
+                    LayoutTree::compute_layout(tree, state, node, input)
+                },
+            );
+        }
+        seen.into_inner()
+    };
+
+    // Lengths only: one computation, against no basis, answers all three.
+    assert_eq!(run(npx(5.0)), vec![Size::NONE]);
+    // A percentage padding reads the basis: each one is its own entry.
+    assert_eq!(
+        run(calc_lp(0.0, 0.1)),
+        vec![
+            Size::new(Some(100.0), Some(50.0)),
+            Size::new(Some(200.0), Some(50.0)),
+            Size::new(None, Some(50.0)),
+        ]
+    );
+}
+
+#[test]
 fn compute_absolute_layout_uses_the_static_position() {
     let (tree, mut state, root) = leaf_tree();
     let hoisted = tree.children(tree.node(root)).next().unwrap();

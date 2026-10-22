@@ -346,17 +346,16 @@ impl<'a, T: Sync> TElement for &'a Node<T> {
         self.set_dirty_descendants_bit(false);
     }
 
-    fn store_children_to_process(&self, n: isize) {
-        self.styling_data()
-            .children_to_process
-            .store(n, Ordering::SeqCst);
+    // Stylo calls these two only from the postorder step, which
+    // `RecalcStyle::needs_postorder_traversal()` turns off, so no node keeps
+    // a child counter.
+    fn store_children_to_process(&self, _: isize) {
+        debug_assert!(false, "needs_postorder_traversal() is false");
     }
 
     fn did_process_child(&self) -> isize {
-        self.styling_data()
-            .children_to_process
-            .fetch_sub(1, Ordering::SeqCst)
-            - 1
+        debug_assert!(false, "needs_postorder_traversal() is false");
+        0
     }
 
     unsafe fn ensure_data(&self) -> ElementDataMut<'_> {
@@ -525,7 +524,7 @@ impl<'a, T: Sync> TElement for &'a Node<T> {
     }
 
     fn get_attr(&self, attr: &LocalName, _namespace: &Namespace) -> Option<String> {
-        self.attr_local_name(attr).map(str::to_owned)
+        self.attr_local_name(attr).map(std::borrow::Cow::into_owned)
     }
 }
 
@@ -624,7 +623,7 @@ impl<T: Sync> Element for &Node<T> {
         operation: &AttrSelectorOperation<&AtomString>,
     ) -> bool {
         self.attr_local_name(local_name)
-            .is_some_and(|value| operation.eval_str(value))
+            .is_some_and(|value| operation.eval_str(&value))
     }
 
     fn match_non_ts_pseudo_class(

@@ -218,7 +218,7 @@
 //!   - `isDragging` is the view's touch count, not native's drag state.
 //!   - Native's `refreshstatechange` is not built; web-core has none.
 
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell};
 
 use rustc_hash::FxHashMap;
 use smallvec::smallvec;
@@ -226,7 +226,9 @@ use terminus::link::event::{ElementEvent, EventPhase};
 use terminus::link::scroll::{
     ScrollBehavior, ScrollIntoViewContainer, ScrollIntoViewOptions, ScrollLogicalPosition,
 };
-use terminus::link::{CustomElement, MethodCall, MethodOutcome, Node, NodeId, ShadowRootMode};
+use terminus::link::{
+    CustomElement, MethodCall, MethodOutcome, Node, NodeId, ShadowRootMode, ShadowSheet,
+};
 
 use super::scroll_container::{
     SCROLL_END_EVENT, SCROLL_EVENT, rect_in_scroller, rendered_scroll_box,
@@ -330,6 +332,7 @@ pub(super) fn define(document: &mut LynxDocument, events: ComponentEvents) {
             events,
             touch_count: TouchCount::default(),
             states: RefCell::default(),
+            shadow_sheet: OnceCell::new(),
         }),
     );
 }
@@ -349,6 +352,9 @@ struct RefreshView {
     touch_count: TouchCount,
     /// What each view's events remember, dropped when it is freed.
     states: RefCell<FxHashMap<NodeId, RefreshState>>,
+    /// [`SHADOW_RULES`], parsed by the first view of the document and
+    /// mounted on every view's shadow tree.
+    shadow_sheet: OnceCell<ShadowSheet>,
 }
 
 /// What a refresh view's events remember between two deliveries.
@@ -553,9 +559,9 @@ impl RefreshView {
         {
             self.events.queue(view, FOOTER_RELEASED_EVENT);
         }
-        let auto = document
-            .get(view)
-            .is_some_and(|element| element.attribute("enable-auto-loadmore") == Some("true"));
+        let auto = document.get(view).is_some_and(|element| {
+            element.attribute("enable-auto-loadmore").as_deref() == Some("true")
+        });
         if auto && pull.footer.is_some_and(Shown::showing) {
             let load = {
                 let mut states = self.states.borrow_mut();
@@ -641,7 +647,10 @@ impl CustomElement<()> for RefreshView {
 
     fn constructed(&self, document: &mut LynxDocument, element: NodeId) {
         let shadow = document.attach_shadow(element, ShadowRootMode::Open);
-        document.add_shadow_stylesheet(shadow, SHADOW_RULES);
+        let sheet = self
+            .shadow_sheet
+            .get_or_init(|| document.parse_shadow_stylesheet(SHADOW_RULES));
+        document.add_shadow_sheet(shadow, sheet);
         let container = div(document, "container");
         let top = div(document, "placeholder-top");
         let header = named_slot(document, "header");
@@ -829,7 +838,7 @@ fn content(document: &LynxDocument, view: NodeId) -> Option<NodeId> {
     document
         .get(container)?
         .children()
-        .find(|child| child.attribute("id") == Some("content"))
+        .find(|child| child.attribute("id").as_deref() == Some("content"))
         .map(Node::id)
 }
 
@@ -853,7 +862,9 @@ fn slotted(document: &LynxDocument, view: NodeId, name: &str) -> Option<NodeId> 
     let slot = document
         .get(container)?
         .children()
-        .find(|child| child.tag_name() == Some("slot") && child.attribute("name") == Some(name))?
+        .find(|child| {
+            child.tag_name() == Some("slot") && child.attribute("name").as_deref() == Some(name)
+        })?
         .id();
     document
         .assigned_nodes(slot)
@@ -1034,7 +1045,7 @@ mod tests {
                     node.tag_name().map(str::to_owned),
                     node.attribute("id")
                         .or(node.attribute("name"))
-                        .map(str::to_owned),
+                        .map(std::borrow::Cow::into_owned),
                 )
             })
             .collect();
@@ -1054,8 +1065,8 @@ mod tests {
         assert_eq!(document.assigned_nodes(default_slot), [built.content]);
         assert_eq!(document.assigned_nodes(parts[3]), [built.footer]);
         let slot_of = |node: NodeId| document.get(node).and_then(|node| node.attribute("slot"));
-        assert_eq!(slot_of(built.header), Some("header"));
-        assert_eq!(slot_of(built.footer), Some("footer"));
+        assert_eq!(slot_of(built.header).as_deref(), Some("header"));
+        assert_eq!(slot_of(built.footer).as_deref(), Some("footer"));
         assert_eq!(slot_of(built.content), None);
         for slot in [parts[1], default_slot, parts[3]] {
             assert_eq!(display(document, slot), Display::Contents);
@@ -1083,8 +1094,8 @@ mod tests {
         built.document.layout();
         let document = &built.document;
         let slot_of = |node: NodeId| document.get(node).and_then(|node| node.attribute("slot"));
-        assert_eq!(slot_of(second_header), Some("header"));
-        assert_eq!(slot_of(second_footer), Some("footer"));
+        assert_eq!(slot_of(second_header).as_deref(), Some("header"));
+        assert_eq!(slot_of(second_footer).as_deref(), Some("footer"));
         assert_eq!(slot_of(stray), None);
         for (element, expected) in [
             (built.header, Display::Linear),

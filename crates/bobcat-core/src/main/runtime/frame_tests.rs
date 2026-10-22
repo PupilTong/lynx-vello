@@ -704,7 +704,7 @@ fn nested_text(tree: &mut LynxDocument) -> Option<(terminus::link::NodeId, Strin
     let raw = text
         .children()
         .find(|child| child.tag_name() == Some("raw-text"))?;
-    Some((text.id(), raw.attribute("text")?.to_owned()))
+    Some((text.id(), raw.attribute("text")?.into_owned()))
 }
 
 /// Pumps until the frame's card shows `expected` — in a `text` other than
@@ -1206,7 +1206,7 @@ fn hit_ids(engine: &mut TestEngine, x: f32, y: f32) -> Option<(Option<String>, O
             let id = |node| {
                 tree.get(node)
                     .and_then(|live| live.attribute("id"))
-                    .map(str::to_owned)
+                    .map(std::borrow::Cow::into_owned)
             };
             let host = tree
                 .shadow_root_of(node)

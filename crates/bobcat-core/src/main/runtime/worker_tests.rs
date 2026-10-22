@@ -3918,7 +3918,7 @@ fn list_cells(document: &mut LynxDocument) -> Vec<String> {
             // where 0.126's output put the content in a child.
             let content = text
                 .attribute("text")
-                .map_or_else(|| generated_text(text), str::to_owned);
+                .map_or_else(|| generated_text(text), std::borrow::Cow::into_owned);
             format!(
                 "{}={content}",
                 cell.attribute("item-key").expect("every cell is keyed"),
@@ -3936,7 +3936,7 @@ fn generated_text(node: &terminus::link::Node<()>) -> String {
         if let Some(data) = child.text() {
             text.push_str(data);
         } else if let Some(attribute) = child.attribute("text") {
-            text.push_str(attribute);
+            text.push_str(&attribute);
         } else {
             text.push_str(&generated_text(child));
         }

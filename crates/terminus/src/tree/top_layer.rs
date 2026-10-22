@@ -30,8 +30,8 @@
 //! Each entry owns a real element node in the arenas, created by
 //! [`Document::add_to_top_layer`] and freed with the entry. It is never
 //! linked under a parent, so no style traversal, selector query, child
-//! list or flat-tree walk reaches it, and no script handle names it: its
-//! payload slot is [`PayloadSlot::Backdrop`], which is also what marks it.
+//! list or flat-tree walk reaches it, and no script handle names it: it
+//! carries no payload, and its node's backdrop flag is what marks it.
 //! What makes it a box is that the layout and paint tails name it from this
 //! table. A paint item for it carries
 //! [`PaintItemKind::Backdrop`](crate::visual::PaintItemKind::Backdrop), which
@@ -93,8 +93,8 @@ use stylo::values::computed::Content;
 
 use crate::layout::{DisplayMode, display_mode};
 use crate::style::damage::StyleDamage;
-use crate::tree::document::{Document, DocumentLayoutState, NodeId, PayloadSlot, TreeArenas};
-use crate::tree::node::Node;
+use crate::tree::document::{Document, DocumentLayoutState, NodeId, TreeArenas};
+use crate::tree::node::{Node, NodeFlags};
 
 /// One element of the top layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -223,8 +223,13 @@ impl<T> Document<T> {
         if self.arenas().top_layer().contains(element) {
             self.remove_from_top_layer(element);
         }
-        let backdrop = self.allocate_node(PayloadSlot::Backdrop, |owner, id| {
-            Node::new_element(owner, id, stylo::LocalName::from("::backdrop"))
+        let backdrop = self.allocate_node(|owner, id| {
+            Node::new_generated_element(
+                owner,
+                id,
+                stylo::LocalName::from("::backdrop"),
+                NodeFlags::BACKDROP,
+            )
         });
         let layer = self.arenas_mut().top_layer_mut();
         layer.entries.push(TopLayerEntry {

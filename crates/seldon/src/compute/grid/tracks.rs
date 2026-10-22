@@ -261,6 +261,21 @@ pub(super) struct AxisTrackSpec {
     pub(super) collapsed: bool,
 }
 
+/// Whether any track breadth or `fit-content()` limit is a percentage, which
+/// resolves against the container's inner size on the axis.
+pub(super) fn specs_depend_on_basis(specs: &[AxisTrackSpec]) -> bool {
+    let breadth_reads_basis = |breadth: &TrackBreadth| matches!(breadth, TrackBreadth::Breadth(lp) if lp.has_percentage());
+    specs.iter().any(|spec| {
+        breadth_reads_basis(&spec.sizing.min)
+            || breadth_reads_basis(&spec.sizing.max)
+            || spec
+                .sizing
+                .fit_content
+                .as_ref()
+                .is_some_and(LengthPercentage::has_percentage)
+    })
+}
+
 pub(super) fn build_axis_tracks(
     explicit: &ExpandedTemplate,
     auto_tracks: &[TrackSizingFunction],

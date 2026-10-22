@@ -642,7 +642,11 @@ impl<T: Sync> Document<T> {
     }
 
     /// Re-reads which animations demand frames and which are frozen, and
-    /// answers the former.
+    /// answers the former — and, given the frame about to be published,
+    /// whether anything ticking is *not* covered by one of its exported
+    /// curves: those elements still need per-frame ticks on this thread, so
+    /// the presenting side keeps sending frame posts. Both answers come from
+    /// one pass over the set map.
     ///
     /// Two things move this answer without a tick: a style flush, which is
     /// where animations start, stop and gain or lose a skipping ancestor; and
@@ -651,59 +655,49 @@ impl<T: Sync> Document<T> {
     /// change at all. So the render asks again once its frame is final, which
     /// is what makes a reveal start its animations in the very commit that
     /// revealed them.
-    pub(crate) fn refresh_animation_activity(&mut self) -> bool {
+    ///
+    /// Every exported element has exactly one set, found by key, so counting
+    /// the covered sets answers without scanning the slots per set. A slot is
+    /// never inside a skipped subtree — the build does not descend into one —
+    /// so a covered set is never a frozen one.
+    pub(crate) fn refresh_animation_activity(
+        &mut self,
+        frame: Option<&crate::visual::PaintOrder>,
+    ) -> (bool, bool) {
         let handle = self.animations().context_handle();
-        let (active, frozen) = {
+        let (active, frozen, needs_main_ticks) = {
             let sets = handle.sets.read();
-            let mut active = false;
             let mut frozen = false;
+            let mut ticking = 0usize;
             for (key, set) in &*sets {
                 let Some(id) = self.arenas().id_at_arena_key(key.node.0) else {
                     continue;
                 };
                 if self.in_skipped_subtree(id) {
                     frozen = true;
-                } else {
-                    active |= set.needs_animation_ticks();
+                } else if set.needs_animation_ticks() {
+                    ticking += 1;
                 }
             }
-            (active, frozen)
+            let covered = frame.map_or(0, |frame| {
+                frame
+                    .animations()
+                    .iter()
+                    .filter(|slot| {
+                        debug_assert!(!self.in_skipped_subtree(slot.node));
+                        let key =
+                            AnimationSetKey::new_for_non_pseudo(OpaqueNode(slot.node.arena_key()));
+                        sets.get(&key)
+                            .is_some_and(ElementAnimationSet::needs_animation_ticks)
+                    })
+                    .count()
+            });
+            (ticking > 0, frozen, frame.is_some() && ticking > covered)
         };
         let driver = self.animations_mut();
         driver.active = active;
         driver.frozen = frozen;
-        active
-    }
-
-    /// Whether anything animating is *not* covered by one of `frame`'s
-    /// exported curves — those elements still need per-frame ticks on this
-    /// thread, so the presenting side keeps sending frame posts.
-    ///
-    /// Every exported element has exactly one set, found by key, so counting
-    /// the covered sets answers without scanning the slots per set.
-    pub(crate) fn animation_needs_main_ticks(&self, frame: &crate::visual::PaintOrder) -> bool {
-        let handle = self.animations().context_handle();
-        let sets = handle.sets.read();
-        let arenas = self.arenas();
-        let ticks = |key: &AnimationSetKey, set: &ElementAnimationSet| {
-            // A frozen element's animations do not advance, and it has no
-            // curve either: the build never descends into a skipped subtree.
-            set.needs_animation_ticks()
-                && arenas
-                    .id_at_arena_key(key.node.0)
-                    .is_some_and(|id| !self.in_skipped_subtree(id))
-        };
-        let ticking = sets.iter().filter(|(key, set)| ticks(key, set)).count();
-        let covered = frame
-            .animations()
-            .iter()
-            .filter(|slot| {
-                let key = AnimationSetKey::new_for_non_pseudo(OpaqueNode(slot.node.arena_key()));
-                sets.get_key_value(&key)
-                    .is_some_and(|(key, set)| ticks(key, set))
-            })
-            .count();
-        ticking > covered
+        (active, needs_main_ticks)
     }
 
     /// Advances every live animation and transition to `now` — seconds on a
@@ -921,7 +915,7 @@ impl<T: Sync> Document<T> {
             }
         }
         self.animations_mut().flagged = flagged;
-        self.refresh_animation_activity();
+        self.refresh_animation_activity(None);
         relayout
     }
 
@@ -1315,10 +1309,6 @@ impl<T: Sync> Document<T> {
             }
             if damage.needs_relayout() {
                 tick.relayout = true;
-                // An animated `font-size` reaches its text through this
-                // harvest and no other, so the text children need the same
-                // two-level invalidation the style harvest gives them.
-                self.invalidate_text_children(current, refresh.shaping_changed);
                 self.invalidate_layout(current);
             }
         }

@@ -2445,6 +2445,10 @@ void qjs_runtime_set_host_dispatch(QjsRuntime *runtime,
 }
 
 #define QJS_HOST_INLINE_ARGS 8
+/* The JSValues `qjs_call_member` builds on the stack before it spills to the
+   heap: the Rust side's `CALL_INLINE_ARGS`, sized for the engine's event
+   dispatch, which takes two arguments per path step. */
+#define QJS_CALL_INLINE_ARGS 32
 
 static void qjs_host_describe(JSContext *raw_context, JSValueConst value,
                               QjsHostArg *slot) {
@@ -2469,7 +2473,10 @@ static void qjs_host_describe(JSContext *raw_context, JSValueConst value,
         slot->number = number;
     } else if (JS_IsString(value)) {
         size_t length;
-        const char *text = JS_ToCStringLen2(raw_context, &length, value, 1);
+        /* UTF-8, not CESU-8: a surrogate pair is one four-byte sequence, so
+           the host borrows these bytes as they are and only a lone
+           surrogate's bytes are not UTF-8. */
+        const char *text = JS_ToCStringLen2(raw_context, &length, value, 0);
         if (text == NULL) {
             slot->kind = QJS_ARG_UNSUPPORTED;
             return;
@@ -2546,7 +2553,7 @@ int qjs_call_member(QjsContext *context, const QjsValue *target, uint32_t atom,
                     size_t argument_count, const QjsHostArg *arguments,
                     QjsValue **result) {
     JSContext *raw_context = context->raw;
-    JSValue inline_argv[QJS_HOST_INLINE_ARGS];
+    JSValue inline_argv[QJS_CALL_INLINE_ARGS];
     JSValue *argv = inline_argv;
     JSValue member;
     JSValue returned;
@@ -2568,7 +2575,7 @@ int qjs_call_member(QjsContext *context, const QjsValue *target, uint32_t atom,
         JS_ThrowRangeError(raw_context, "too many call arguments");
         return -1;
     }
-    if (argument_count > QJS_HOST_INLINE_ARGS) {
+    if (argument_count > QJS_CALL_INLINE_ARGS) {
         argv = malloc(argument_count * sizeof(*argv));
         if (argv == NULL) {
             JS_FreeValue(raw_context, member);

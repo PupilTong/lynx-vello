@@ -43,6 +43,20 @@ impl ParentPerspective {
     }
 }
 
+/// `matrix`'s translation when it is exactly
+/// `Transform3D::translation(x, y, 0.0)`: every other entry the identity's,
+/// compared by bits, so rebuilding it from the answer loses nothing — not a
+/// signed zero, not a NaN.
+pub(crate) fn as_translation(matrix: &Transform3D<f32>) -> Option<euclid::default::Vector2D<f32>> {
+    let translation = Transform3D::translation(matrix.m41, matrix.m42, 0.0);
+    same_bits(matrix, &translation).then(|| euclid::vec2(matrix.m41, matrix.m42))
+}
+
+/// Whether `a` and `b` are the same sixteen `f32`s, bit for bit.
+pub(crate) fn same_bits(a: &Transform3D<f32>, b: &Transform3D<f32>) -> bool {
+    a.to_array().map(f32::to_bits) == b.to_array().map(f32::to_bits)
+}
+
 pub(crate) fn flatten(mut matrix: Transform3D<f32>) -> Transform3D<f32> {
     matrix.m13 = 0.0;
     matrix.m23 = 0.0;
@@ -232,5 +246,40 @@ fn individual_scale(scale: &Scale) -> Transform3D<f32> {
     match *scale {
         Scale::None => Transform3D::identity(),
         Scale::Scale(x, y, z) => Transform3D::scale(x, y, z),
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use euclid::default::Transform3D;
+
+    use super::as_translation;
+
+    /// A record's world is stored inline only when rebuilding it from the
+    /// translation gives back the same bits.
+    #[test]
+    fn only_an_exact_translation_is_stored_inline() {
+        let moved = Transform3D::translation(3.5, -0.0, 0.0);
+        let offset = as_translation(&moved).expect("a pure translation");
+        assert_eq!(
+            Transform3D::translation(offset.x, offset.y, 0.0)
+                .to_array()
+                .map(f32::to_bits),
+            moved.to_array().map(f32::to_bits),
+        );
+        let mut signed = Transform3D::translation(1.0, 2.0, 0.0);
+        signed.m12 = -0.0;
+        assert_eq!(as_translation(&signed), None, "a signed zero is kept");
+        assert_eq!(
+            as_translation(&Transform3D::translation(1.0, 2.0, 4.0)),
+            None,
+            "a z translation is kept",
+        );
+        assert_eq!(
+            as_translation(&Transform3D::scale(2.0, 1.0, 1.0)),
+            None,
+            "a scale is kept",
+        );
     }
 }

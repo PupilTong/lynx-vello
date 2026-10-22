@@ -6,7 +6,9 @@ use seldon::compute::{compute_absolute_layout, compute_leaf_layout};
 use seldon::prelude::*;
 use seldon::style::StyleSize;
 use stylo::computed_values::{box_sizing, direction, flex_direction, flex_wrap};
-use stylo::values::computed::{Display, FlexBasis, Margin, MaxSize, Overflow, PositionProperty};
+use stylo::values::computed::{
+    Display, FlexBasis, Inset, Margin, MaxSize, Overflow, PositionProperty,
+};
 use stylo::values::specified::align::AlignFlags;
 use support::*;
 
@@ -493,6 +495,75 @@ mod alignment {
         assert_close(tree.layout(first).location.y + 15.0, 15.0);
         assert_close(tree.layout(second).location.y + 10.0, 15.0);
         assert_eq!(output.first_baselines.y, Some(15.0));
+    }
+
+    /// A `linear` column of one fixed-size box, whose first baseline is that
+    /// box's 7px: given only when its caller reads it
+    /// (`LayoutInput::reads_first_baseline`), and synthesized from its own
+    /// 20px bottom edge otherwise.
+    fn linear_column_with_baseline(tree: &mut TestTree) -> (TestId, TestId) {
+        let inner = tree.push_leaf(
+            fixed_leaf_style(20.0, 20.0),
+            Size::new(20.0, 20.0),
+            Some(7.0),
+        );
+        (tree.push_linear(TestStyle::default(), vec![inner]), inner)
+    }
+
+    #[test]
+    fn a_first_baseline_group_reads_a_linear_item_s_own_baseline() {
+        let mut tree = TestTree::default();
+        let first = tree.push_leaf(
+            fixed_leaf_style(20.0, 20.0),
+            Size::new(20.0, 20.0),
+            Some(15.0),
+        );
+        let (column, _) = linear_column_with_baseline(&mut tree);
+        let root = flex_container(
+            &mut tree,
+            TestStyle {
+                align_items: items(AlignFlags::BASELINE),
+                ..TestStyle::default()
+            },
+            &[first, column],
+        );
+
+        let output = definite_layout(&tree, root, 100.0, 40.0);
+
+        // The shared baseline is the first item's 15px; the column's 7px
+        // baseline sits on it.
+        assert_close(tree.layout(first).location.y, 0.0);
+        assert_close(tree.layout(column).location.y, 8.0);
+        assert_eq!(output.first_baselines.y, Some(15.0));
+    }
+
+    #[test]
+    fn a_measured_container_asks_its_first_item_for_the_baseline_it_is_asked_for() {
+        let run = |reads_first_baseline| {
+            let mut tree = TestTree::default();
+            let (column, inner) = linear_column_with_baseline(&mut tree);
+            let root = flex_container(&mut tree, TestStyle::default(), &[column]);
+            // A definite width, so the cross sizes are resolved in one pass.
+            let output = tree.compute_layout(
+                root,
+                LayoutInput::measure(
+                    Size::new(Some(100.0), None),
+                    Size::new(Some(100.0), None),
+                    Size::new(AvailableSpace::Definite(100.0), AvailableSpace::MaxContent),
+                    RequestedAxis::Both,
+                )
+                .reading_first_baseline(reads_first_baseline),
+            );
+            (output, tree.measure_inputs(inner).len())
+        };
+
+        let (read, read_probes) = run(true);
+        assert_eq!(read.first_baselines.y, Some(7.0));
+        assert_eq!(read_probes, 1);
+        // Unread, the column's fixed-size box is never measured for it.
+        let (unread, unread_probes) = run(false);
+        assert_eq!(unread.size, read.size);
+        assert_eq!(unread_probes, 0);
     }
 }
 
@@ -1465,6 +1536,49 @@ fn absolute_children_use_order_zero_for_paint_order() {
     definite_layout(&tree, root, 100.0, 20.0);
     assert_eq!(tree.layout(absolute).order, 0);
     assert_eq!(tree.layout(inflow).order, 1);
+}
+
+/// The static position is read only on an axis whose insets are both `auto`,
+/// so a box inset on both axes is never measured for one: it is laid out
+/// once, by its commit.
+#[test]
+fn an_absolute_child_inset_on_both_axes_is_not_measured_for_a_static_position() {
+    fn content(_: LeafMeasureInput) -> LeafMetrics {
+        LeafMetrics::new(Size::new(30.0, 10.0))
+    }
+    let run = |inset: Edges<Inset>| {
+        let mut tree = TestTree::default();
+        let child = tree.push_measured_leaf(
+            TestStyle {
+                position: PositionProperty::Absolute,
+                inset,
+                ..TestStyle::default()
+            },
+            content,
+        );
+        let root = flex_container(&mut tree, TestStyle::default(), &[child]);
+        definite_layout(&tree, root, 100.0, 20.0);
+        let measurements = tree
+            .measure_inputs(child)
+            .iter()
+            .filter(|input| !input.goal.commits())
+            .count();
+        (tree.layout(child).location, measurements)
+    };
+
+    let inset = Edges {
+        left: inset_px(5.0),
+        right: inset_px(5.0),
+        top: inset_px(2.0),
+        bottom: inset_auto(),
+    };
+    let (location, measurements) = run(inset);
+    assert_point(location, Point::new(5.0, 2.0));
+    assert_eq!(measurements, 0);
+
+    let (location, measurements) = run(Edges::uniform(inset_auto()));
+    assert_point(location, Point::ZERO);
+    assert_eq!(measurements, 1);
 }
 
 #[test]

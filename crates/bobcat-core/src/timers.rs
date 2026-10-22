@@ -347,25 +347,36 @@ fn install(
     engine: &mut ScriptEngine,
     name: &str,
     arity: u8,
-    callback: impl FnMut(&[HostValue]) -> Result<HostValue, String> + 'static,
+    callback: impl FnMut(&[HostArgument<'_>]) -> Result<HostValue, String> + 'static,
 ) -> Result<(), ScriptError> {
     engine.register_host_module_function(HOST_MODULE_SPECIFIER, name, arity, Box::new(callback))
 }
 
-fn argument(arguments: &[HostValue], index: usize) -> &HostValue {
-    arguments.get(index).unwrap_or(&HostValue::Undefined)
+fn argument<'a>(arguments: &[HostArgument<'a>], index: usize) -> HostArgument<'a> {
+    arguments
+        .get(index)
+        .copied()
+        .unwrap_or(HostArgument::Undefined)
 }
 
-fn number_argument(function: &str, arguments: &[HostValue], index: usize) -> Result<f64, String> {
-    match *argument(arguments, index) {
-        HostValue::Number(value) => Ok(value),
+fn number_argument(
+    function: &str,
+    arguments: &[HostArgument<'_>],
+    index: usize,
+) -> Result<f64, String> {
+    match argument(arguments, index) {
+        HostArgument::Number(value) => Ok(value),
         _ => Err(format!("{function} expects a number for argument {index}")),
     }
 }
 
-fn boolean_argument(function: &str, arguments: &[HostValue], index: usize) -> Result<bool, String> {
-    match *argument(arguments, index) {
-        HostValue::Boolean(value) => Ok(value),
+fn boolean_argument(
+    function: &str,
+    arguments: &[HostArgument<'_>],
+    index: usize,
+) -> Result<bool, String> {
+    match argument(arguments, index) {
+        HostArgument::Boolean(value) => Ok(value),
         _ => Err(format!("{function} expects a boolean for argument {index}")),
     }
 }
@@ -375,7 +386,11 @@ fn boolean_argument(function: &str, arguments: &[HostValue], index: usize) -> Re
     clippy::cast_sign_loss,
     reason = "the integer and range checks above make the value a representable id"
 )]
-fn timer_id_argument(function: &str, arguments: &[HostValue], index: usize) -> Result<u32, String> {
+fn timer_id_argument(
+    function: &str,
+    arguments: &[HostArgument<'_>],
+    index: usize,
+) -> Result<u32, String> {
     let value = number_argument(function, arguments, index)?;
     if !value.is_finite() || value < 0.0 || value.fract() != 0.0 || value > f64::from(u32::MAX) {
         return Err(format!(

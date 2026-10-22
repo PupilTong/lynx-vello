@@ -139,6 +139,7 @@
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use rustc_hash::FxHashMap;
 use seldon::compute::{compute_skipped_contents_size, used_border, used_padding};
 use seldon::geometry::Size;
 use seldon::style::{Contain, ContainIntrinsicSize, ContainerType, ContentVisibility, CoreStyle};
@@ -220,8 +221,8 @@ impl CommittedBox {
     }
 }
 
-/// The slot-keyed table: a published half both readers see and a pending half
-/// the layout pass writes.
+/// The arena-key-keyed table: a published half both readers see and a pending
+/// half the layout pass writes.
 #[derive(Debug, Default)]
 pub(crate) struct CommittedBoxTable {
     /// What [`query_container_size`](stylo::dom::TElement::query_container_size)
@@ -229,9 +230,12 @@ pub(crate) struct CommittedBoxTable {
     /// through `&mut self`, so the parallel style traversal's reads are plain
     /// shared reads.
     ///
-    /// Lazily sized: an absent entry reads as "remembers nothing, contains
-    /// nothing", so a page with neither feature allocates nothing here.
-    entries: Vec<CommittedBox>,
+    /// Keyed by arena key, holding an entry only for an element whose last
+    /// record was not empty: an absent one reads as "remembers nothing,
+    /// contains nothing", so a page with neither feature allocates nothing
+    /// here, and a page with some holds one entry per recording element
+    /// rather than a slot for every key up to the highest one that recorded.
+    entries: FxHashMap<usize, CommittedBox>,
     /// One record per committing run of the layout pass in flight, waiting
     /// for [`Self::apply`].
     ///
@@ -253,7 +257,7 @@ pub(crate) struct CommittedBoxTable {
 impl CommittedBoxTable {
     #[inline]
     pub(crate) fn get(&self, key: usize) -> CommittedBox {
-        self.entries.get(key).copied().unwrap_or_default()
+        self.entries.get(&key).copied().unwrap_or_default()
     }
 
     /// Records `committed` for `id`, for [`Self::apply`] to publish.
@@ -290,13 +294,19 @@ impl CommittedBoxTable {
         let mut pending = std::mem::take(self.pending.get_mut());
         for (id, committed) in pending.drain(..) {
             let key = id.arena_key();
-            if self.entries.len() <= key {
-                if committed.is_empty() {
-                    continue;
+            if committed.is_empty() {
+                // An empty record publishes as no entry; dropping a container
+                // half is a move all the same.
+                if self
+                    .entries
+                    .remove(&key)
+                    .is_some_and(|old| !old.container.is_empty())
+                {
+                    resized.push(id);
                 }
-                self.entries.resize(key + 1, CommittedBox::default());
+                continue;
             }
-            let entry = &mut self.entries[key];
+            let entry = self.entries.entry(key).or_default();
             if entry.container != committed.container {
                 entry.container = committed.container;
                 resized.push(id);
@@ -309,8 +319,8 @@ impl CommittedBoxTable {
     /// Resets a freed slot, so the key's next occupant remembers nothing and
     /// is no container.
     pub(crate) fn reset(&mut self, key: usize) {
-        if let Some(entry) = self.entries.get_mut(key) {
-            *entry = CommittedBox::default();
+        if !self.entries.is_empty() {
+            self.entries.remove(&key);
         }
     }
 

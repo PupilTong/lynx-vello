@@ -99,7 +99,11 @@ pub(super) fn install_worker_members(
             // primitive is the structured clone the realm's own serializer
             // made. A value it refuses never arrives here at all: the
             // trampoline throws in the realm that called `postMessage`.
-            post(arguments.first().cloned().unwrap_or(HostValue::Undefined));
+            post(
+                arguments
+                    .first()
+                    .map_or(HostValue::Undefined, |data| data.to_value()),
+            );
             Ok(HostValue::Undefined)
         }),
     )?;

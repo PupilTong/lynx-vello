@@ -102,7 +102,10 @@ impl PaintOrder {
         // the item's space before inverting its own transform. A degenerate
         // space paints the item collapsed; nothing to hit.
         let unmoved = unmap(samples.css(item.space), point)?;
-        let local = item.transform.inverse()?.transform_point2d(unmoved)?;
+        let local = self
+            .matrix(item.transform)
+            .inverse()?
+            .transform_point2d(unmoved)?;
         if local.x >= item.size.width || local.y >= item.size.height {
             return None;
         }
@@ -127,7 +130,7 @@ impl PaintOrder {
         while let Some(index) = clip {
             let node = &self.clips[index];
             let Some(local) = unmap(samples.css(node.space), point).and_then(|unmoved| {
-                node.transform
+                self.matrix(node.transform)
                     .inverse()
                     .and_then(|inverse| inverse.transform_point2d(unmoved))
             }) else {

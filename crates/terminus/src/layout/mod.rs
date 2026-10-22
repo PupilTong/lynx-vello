@@ -33,7 +33,7 @@ use stylo::servo_arc::Arc;
 pub(crate) use self::style::{
     DisplayMode, StyleView, box_parent, converts_tail_color, display_mode,
     establishes_absolute_containing_block, establishes_fixed_containing_block, generates_no_box,
-    paragraph_limits_changed, shaping_inputs_changed, skips_contents,
+    paragraph_limits_changed, reads_percentage_basis, skips_contents,
 };
 use crate::render::image::{ImageOutcome, ImageRole};
 use crate::tree::document::{DOCUMENT_ELEMENT_NODE_ID, Document, NodeLayoutState, RelayoutKind};
@@ -156,8 +156,8 @@ impl<T: Sync> Document<T> {
     ) {
         let full = self.layout_requires_full_pass(viewport, scale);
         let rescale = self.layout_inputs_changed(viewport, scale);
-        let bound = self.arenas().slot_bound();
-        self.layout_state_mut().ensure_covers(bound);
+        let (bound, elements) = (self.arenas().slot_bound(), self.arenas().live_elements());
+        self.layout_state_mut().ensure_covers(bound, elements);
         host::run_layout(self, viewport, scale, full, rescale, resized);
         // Publishing is what makes the pass's sizes readable by the style
         // traversal, which is parallel, and by the pass after this one; see
@@ -1108,14 +1108,12 @@ impl<T> Document<T> {
     /// geometry could move because of it.
     ///
     /// **Box caches only.** A shaped paragraph is not geometry: it dies when
-    /// the text or the style it was shaped from changes, which is a different
-    /// question and has its own entry points
-    /// ([`Document::invalidate_text_children`] and
-    /// [`TreeArenas::clear_text_artifact`]). Clearing it here would be free
-    /// today — a text node is a leaf, and no element holds an artifact — but
-    /// it stops being free the moment a paragraph is owned by the element
-    /// that establishes it: every descendant mutation and every ancestor this
-    /// walk touches would re-shape a paragraph whose text never changed.
+    /// the text or the style it was shaped from changes, which the paragraph
+    /// checks against the content and styles it kept when it is next laid
+    /// out, or which [`Document::invalidate_text_artifact`] states outright.
+    /// Clearing it here would make every descendant mutation and every
+    /// ancestor this walk touches re-shape a paragraph, owned by the element
+    /// that establishes it, whose text never changed.
     pub(crate) fn invalidate_layout(&mut self, id: crate::tree::document::NodeId) {
         // Paragraph content (including generated runs) shares one cache. A
         // transparent scope has none, so starting the usual walk there would
@@ -1349,15 +1347,7 @@ impl<T> Document<T> {
     }
 
     pub(crate) fn invalidate_layout_all(&mut self) {
-        for (
-            _,
-            NodeLayoutState {
-                slot,
-                text,
-                scroll_offset: _,
-            },
-        ) in self.layout_data_mut()
-        {
+        for NodeLayoutState { slot, text } in self.layout_data_mut() {
             slot.clear_layout_cache();
             *text = None;
         }
@@ -1556,7 +1546,7 @@ mod tests {
         #[cfg(target_pointer_width = "64")]
         assert_eq!(
             current,
-            (if cfg!(debug_assertions) { 232 } else { 224 }, 336, 352),
+            (if cfg!(debug_assertions) { 224 } else { 216 }, 336, 344),
             "Node, LayoutSlot and NodeLayoutState sizes changed",
         );
     }

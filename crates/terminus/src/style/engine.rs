@@ -121,6 +121,57 @@ impl CssRule {
     }
 }
 
+/// One parsed shadow-tree stylesheet, branded with the document that parsed
+/// it, for mounting on any number of that document's shadow trees.
+///
+/// Every tree it is mounted on holds the same sheet, which is what lets
+/// stylo build the trees' rule data once: its cascade-data cache is keyed on
+/// sheet identity, so trees mounting the same sheets share one copy, where a
+/// sheet parsed per tree builds one per tree. A component whose instances all
+/// carry the same rules parses them once per document
+/// ([`Document::parse_shadow_stylesheet`]) and mounts the result on each
+/// instance ([`Document::add_shadow_sheet`]).
+///
+/// Like a [`CssRule`], it can only be mounted by the document that parsed it.
+#[derive(Clone, Debug)]
+pub struct ShadowSheet {
+    inner: ShadowStyleSheet,
+    owner: StdArc<SharedRwLock>,
+}
+
+/// One `setProperty` call, parsed and checked against the block it updates
+/// ([`StyleEngine::parse_style_update`]): it is known to change that block,
+/// and carries the positions in it the change lands on, so applying it
+/// ([`StyleEngine::apply_style_update`]) does not search the block again.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "one per call, on the stack; boxing the declarations would allocate on every write"
+)]
+pub(crate) enum PropertyUpdate {
+    Remove {
+        property: PropertyId,
+        first: usize,
+    },
+    Set {
+        source: SourcePropertyDeclaration,
+        updates: SourcePropertyDeclarationUpdate,
+    },
+}
+
+impl PropertyUpdate {
+    /// Applies the update to the block it was checked against, or to an
+    /// unchanged copy of it.
+    fn apply(self, block: &mut PropertyDeclarationBlock) {
+        match self {
+            Self::Remove { property, first } => block.remove_property(&property, first),
+            Self::Set {
+                mut source,
+                mut updates,
+            } => block.update(source.drain(), Importance::Normal, &mut updates),
+        }
+    }
+}
+
 /// What a change to the style context requires of the tree that was styled
 /// under the old one.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -320,75 +371,123 @@ impl StyleEngine {
         PropertyId::parse(property, &self.parser_context(CssRuleType::Style)).is_ok()
     }
 
-    /// Applies one CSSOM-style property update to a declaration block.
+    /// Parses one CSSOM-style property update — `setProperty`'s semantics:
+    /// an empty value removes the property — against the declaration block
+    /// an element holds.
     ///
-    /// Returning `None` means that the property name or value was invalid, or
-    /// that the requested update would not change the declaration block. An
-    /// empty value removes the property, matching
-    /// `CSSStyleDeclaration.setProperty`.
-    pub(crate) fn update_style_property(
+    /// Answers `None` for a property name or value that does not parse and
+    /// for an update that would not change the block, so a caller can return
+    /// before it records anything about the write.
+    pub(crate) fn parse_style_update(
         &self,
-        existing: Option<&Arc<Locked<PropertyDeclarationBlock>>>,
+        block: Option<&Arc<Locked<PropertyDeclarationBlock>>>,
         property: &str,
         value: &str,
-    ) -> Option<PropertyDeclarationBlock> {
+    ) -> Option<PropertyUpdate> {
         let context = self.parser_context(CssRuleType::Style);
         let property = PropertyId::parse(property, &context).ok()?;
-        let mut block = existing.map_or_else(PropertyDeclarationBlock::new, |existing| {
-            let guard = self.lock.read();
-            existing.read_with(&guard).clone()
-        });
-
         if value.is_empty() {
-            let first = block.first_declaration_to_remove(&property)?;
-            block.remove_property(&property, first);
-        } else {
-            let mut source = SourcePropertyDeclaration::default();
-            parse_one_declaration_into(
-                &mut source,
-                property,
-                value,
-                Origin::Author,
-                &self.url_data,
-                None,
-                ParsingMode::DEFAULT,
-                QuirksMode::NoQuirks,
-                CssRuleType::Style,
-            )
-            .ok()?;
-
-            let mut updates = SourcePropertyDeclarationUpdate::default();
-            if !block.prepare_for_update(&source, Importance::Normal, &mut updates) {
-                return None;
-            }
-            block.update(source.drain(), Importance::Normal, &mut updates);
+            let first = block?
+                .read_with(&self.lock.read())
+                .first_declaration_to_remove(&property)?;
+            return Some(PropertyUpdate::Remove { property, first });
         }
+        let mut source = SourcePropertyDeclaration::default();
+        parse_one_declaration_into(
+            &mut source,
+            property,
+            value,
+            Origin::Author,
+            &self.url_data,
+            None,
+            ParsingMode::DEFAULT,
+            QuirksMode::NoQuirks,
+            CssRuleType::Style,
+        )
+        .ok()?;
+        let guard = self.lock.read();
+        let mut updates = SourcePropertyDeclarationUpdate::default();
+        let empty;
+        let current = if let Some(block) = block {
+            block.read_with(&guard)
+        } else {
+            empty = PropertyDeclarationBlock::new();
+            &empty
+        };
+        current
+            .prepare_for_update(&source, Importance::Normal, &mut updates)
+            .then_some(PropertyUpdate::Set { source, updates })
+    }
 
-        Some(block)
+    /// Applies an update [`Self::parse_style_update`] checked against the
+    /// block in `slot`, which must not have changed since. `slot` then holds
+    /// the updated block, or `None` once it is empty.
+    ///
+    /// A block nothing else holds is updated where it is, keeping its
+    /// identity. One the rule tree holds — the block the element's computed
+    /// style was cascaded from — is copied and the copy is updated, as Gecko's
+    /// `DeclarationBlock::EnsureMutable` copies a block the rule tree holds,
+    /// for two reasons:
+    ///
+    /// - The flush finds a changed block by its identity. Replacing the style-attribute level of a
+    ///   rule node, Stylo's `update_rule_at_level` (`vendor/stylo/style/rule_tree/mod.rs`) takes
+    ///   the same `Arc` at that level for an unchanged block and keeps the old rule node, so a
+    ///   block updated where the rule tree holds it would never be cascaded again. A
+    ///   presentational-hint block is collected while matching, but it too is held by the rule node
+    ///   it was matched into.
+    /// - An animation tick before the next style flush cascades the element again from its rule
+    ///   node, and has to see the declarations the element had at the last flush, which only the
+    ///   flush replaces.
+    ///
+    /// Later writes before that flush find the copy unshared.
+    pub(crate) fn apply_style_update(
+        &self,
+        slot: &mut Option<Arc<Locked<PropertyDeclarationBlock>>>,
+        update: PropertyUpdate,
+    ) {
+        if let Some(block) = slot.as_ref().filter(|block| block.is_unique()) {
+            let mut guard = self.lock.write();
+            let declarations = block.write_with(&mut guard);
+            update.apply(declarations);
+            if declarations.is_empty() {
+                drop(guard);
+                *slot = None;
+            }
+            return;
+        }
+        let mut block = slot
+            .as_ref()
+            .map_or_else(PropertyDeclarationBlock::new, |shared| {
+                let guard = self.lock.read();
+                shared.read_with(&guard).clone()
+            });
+        update.apply(&mut block);
+        *slot = (!block.is_empty()).then(|| Arc::new(self.lock.wrap(block)));
     }
 
     /// Builds a complete inline declaration block from a record of
     /// name/value pairs.
     ///
     /// This is the batch counterpart of
-    /// [`Self::update_style_property`], for the setter whose semantics
+    /// [`Self::parse_style_update`], for the setter whose semantics
     /// are a *replacement* rather than a mutation. Building from an empty
-    /// block is what makes it linear: the per-property path has to clone and
-    /// re-serialize the whole block for each declaration, so replaying a
-    /// record of `n` declarations through it costs `O(n²)`.
+    /// block replaces the element's declarations in one pass, where the
+    /// per-property path merges each declaration into the block the element
+    /// already holds.
     ///
     /// Each declaration is parsed exactly as
-    /// [`Self::update_style_property`] parses one — a name that does
+    /// [`Self::parse_style_update`] parses one — a name that does
     /// not resolve, or a value that does not parse, drops that declaration
     /// and nothing else. An empty value is skipped: `setProperty` with an
     /// empty value removes a property, and there is nothing here to remove.
     ///
-    /// Returns the block (`None` when nothing parsed) and its serialization,
-    /// which is what the `style` attribute reads back as.
+    /// Returns the block, `None` when nothing parsed. The `style` attribute
+    /// reads back as its serialization, made when it is read
+    /// ([`Node::attribute`](crate::tree::node::Node::attribute)).
     pub(crate) fn build_inline_style_block<'a>(
         &self,
         declarations: impl IntoIterator<Item = (&'a str, &'a str)>,
-    ) -> (Option<Arc<Locked<PropertyDeclarationBlock>>>, String) {
+    ) -> Option<Arc<Locked<PropertyDeclarationBlock>>> {
         let context = self.parser_context(CssRuleType::Style);
         let mut block = PropertyDeclarationBlock::new();
         let mut source = SourcePropertyDeclaration::default();
@@ -425,12 +524,7 @@ impl StyleEngine {
             block.update(source.drain(), Importance::Normal, &mut updates);
         }
 
-        let mut css = String::new();
-        block
-            .to_css(&mut css)
-            .expect("serializing a declaration block into a String cannot fail");
-        let block = (!block.is_empty()).then(|| Arc::new(self.lock.wrap(block)));
-        (block, css)
+        (!block.is_empty()).then(|| Arc::new(self.lock.wrap(block)))
     }
 
     #[must_use]
@@ -491,32 +585,49 @@ impl StyleEngine {
         self.font_faces_dirty = true;
     }
 
-    pub(crate) fn add_scoped_stylesheet(
-        &mut self,
-        styles: &mut AuthorStyles<ShadowStyleSheet>,
-        css: &str,
-    ) {
-        let sheet = self.parse_stylesheet(css, Origin::Author);
-        self.add_scoped_sheet(styles, sheet);
+    /// Parses an author sheet for shadow trees.
+    fn parse_scoped_stylesheet(&self, css: &str) -> ShadowSheet {
+        self.shadow_sheet(self.parse_stylesheet(css, Origin::Author))
     }
 
-    /// [`Self::add_scoped_stylesheet`] for a sheet the engine wrote itself:
+    /// [`Self::parse_scoped_stylesheet`] for a sheet the engine wrote itself:
     /// an author sheet of the tree, parsed with chrome rules enabled.
-    pub(crate) fn add_engine_scoped_stylesheet(
-        &mut self,
-        styles: &mut AuthorStyles<ShadowStyleSheet>,
-        css: &str,
-    ) {
-        let sheet = self.parse_stylesheet_at(
+    fn parse_engine_scoped_stylesheet(&self, css: &str) -> ShadowSheet {
+        self.shadow_sheet(self.parse_stylesheet_at(
             css,
             Origin::Author,
             crate::tree::document::engine_url_data(),
-        );
-        self.add_scoped_sheet(styles, sheet);
+        ))
     }
 
-    fn add_scoped_sheet(&mut self, styles: &mut AuthorStyles<ShadowStyleSheet>, sheet: Stylesheet) {
-        let sheet = ShadowStyleSheet(Arc::new(sheet));
+    fn shadow_sheet(&self, sheet: Stylesheet) -> ShadowSheet {
+        ShadowSheet {
+            inner: ShadowStyleSheet(Arc::new(sheet)),
+            owner: StdArc::clone(&self.lock),
+        }
+    }
+
+    /// Appends a parsed sheet to one shadow tree's sheets, as it is: every
+    /// tree that mounts the same [`ShadowSheet`] shares its rule data.
+    ///
+    /// # Panics
+    ///
+    /// Panics if another engine parsed the sheet, or if the tree already
+    /// mounts it.
+    fn add_scoped_sheet(
+        &mut self,
+        styles: &mut AuthorStyles<ShadowStyleSheet>,
+        sheet: &ShadowSheet,
+    ) {
+        assert!(
+            StdArc::ptr_eq(&sheet.owner, &self.lock),
+            "ShadowSheet belongs to another Document"
+        );
+        let sheet = sheet.inner.clone();
+        assert!(
+            !styles.stylesheets.iter().any(|mounted| *mounted == sheet),
+            "a ShadowSheet is mounted at most once per shadow tree"
+        );
         let guard = self.lock.read();
         styles.stylesheets.append_stylesheet(sheet, &guard);
         let invalidations = styles.flush(&mut self.stylist, &guard);
@@ -589,7 +700,7 @@ impl StyleEngine {
 
     /// Installs rules this engine built as one author-origin sheet scoped to
     /// one shadow tree: built like [`Self::append_rules`], flushed like
-    /// [`Self::add_scoped_stylesheet`].
+    /// [`Self::add_scoped_sheet`].
     ///
     /// Like the text path, this leaves `font_faces_dirty` alone, so an
     /// `@font-face` rule in a shadow sheet is not loaded.
@@ -873,14 +984,68 @@ impl<T> Document<T> {
     }
 
     /// Adds an author stylesheet scoped to one shadow tree.
+    ///
+    /// This parses `css` for this one tree. Rules every instance of a
+    /// component carries are parsed once instead
+    /// ([`Self::parse_shadow_stylesheet`]) and mounted on each tree
+    /// ([`Self::add_shadow_sheet`]); the two cascade alike.
     pub fn add_shadow_stylesheet(&mut self, shadow_root: NodeId, css: &str) {
         let host = self
             .shadow_host(shadow_root)
             .expect("Document::add_shadow_stylesheet: not a live shadow root");
+        let sheet = self.style_engine().parse_scoped_stylesheet(css);
+        self.mount_shadow_sheet(shadow_root, host, &sheet);
+    }
+
+    /// Parses an author stylesheet for this document's shadow trees, to be
+    /// mounted on any number of them with [`Self::add_shadow_sheet`].
+    ///
+    /// The sheet cascades as one [`Self::add_shadow_stylesheet`] parses.
+    #[must_use]
+    pub fn parse_shadow_stylesheet(&self, css: &str) -> ShadowSheet {
+        self.style_engine().parse_scoped_stylesheet(css)
+    }
+
+    /// [`Self::parse_shadow_stylesheet`] for a stylesheet the engine itself
+    /// wrote: the sheet cascades as one
+    /// [`Self::add_engine_shadow_stylesheet`] parses.
+    #[must_use]
+    pub fn parse_engine_shadow_stylesheet(&self, css: &str) -> ShadowSheet {
+        self.style_engine().parse_engine_scoped_stylesheet(css)
+    }
+
+    /// Mounts a parsed stylesheet on one shadow tree, after the sheets the
+    /// tree already has.
+    ///
+    /// The tree holds the sheet itself rather than a copy, so the trees one
+    /// sheet is mounted on share the rule data stylo builds from it. It
+    /// cascades exactly as the same text added with
+    /// [`Self::add_shadow_stylesheet`] (or, for a sheet from
+    /// [`Self::parse_engine_shadow_stylesheet`],
+    /// [`Self::add_engine_shadow_stylesheet`]) would.
+    ///
+    /// Stylo reports the `@position-try` names a flush changed only when it
+    /// builds rule data, which a tree reusing another's skips. Nothing misses
+    /// them: the names reach only the tree and its host, and mounting restyles
+    /// the host's whole subtree, whose restyled elements re-cascade their
+    /// options whatever the report says.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `shadow_root` is not a live shadow root, if another document
+    /// parsed the sheet, or if the tree already mounts it.
+    pub fn add_shadow_sheet(&mut self, shadow_root: NodeId, sheet: &ShadowSheet) {
+        let host = self
+            .shadow_host(shadow_root)
+            .expect("Document::add_shadow_sheet: not a live shadow root");
+        self.mount_shadow_sheet(shadow_root, host, sheet);
+    }
+
+    fn mount_shadow_sheet(&mut self, shadow_root: NodeId, host: NodeId, sheet: &ShadowSheet) {
         self.note_visual_mutation();
         {
             let (engine, shadow) = self.shadow_style_parts(shadow_root);
-            engine.add_scoped_stylesheet(&mut shadow.styles, css);
+            engine.add_scoped_sheet(&mut shadow.styles, sheet);
         }
         self.mark_subtree_dirty(host);
     }
@@ -896,12 +1061,8 @@ impl<T> Document<T> {
         let host = self
             .shadow_host(shadow_root)
             .expect("Document::add_engine_shadow_stylesheet: not a live shadow root");
-        self.note_visual_mutation();
-        {
-            let (engine, shadow) = self.shadow_style_parts(shadow_root);
-            engine.add_engine_scoped_stylesheet(&mut shadow.styles, css);
-        }
-        self.mark_subtree_dirty(host);
+        let sheet = self.style_engine().parse_engine_scoped_stylesheet(css);
+        self.mount_shadow_sheet(shadow_root, host, &sheet);
     }
 
     /// Replaces the stylesheet at `index` among those
@@ -1157,5 +1318,98 @@ mod tests {
             .build_style_rule(".a", [declaration("width", "1px")])
             .expect("a style rule");
         document().append_rules(vec![rule]);
+    }
+
+    /// Every tree one parsed sheet is mounted on holds that sheet, so stylo
+    /// builds their rule data once and the trees share it; the rules match in
+    /// each tree as the text path's do.
+    #[test]
+    fn trees_mounting_one_parsed_sheet_share_its_rule_data() {
+        let mut doc = crate::test_common::Doc::new();
+        let root = doc.root;
+        let sheet = doc
+            .dom
+            .parse_shadow_stylesheet("view { color: rgb(255, 0, 0) }");
+        let mut trees = Vec::new();
+        for _ in 0..2 {
+            let host = doc.el(root, "view");
+            let shadow = doc
+                .dom
+                .attach_shadow(host, crate::tree::shadow::ShadowRootMode::Open);
+            doc.dom.add_shadow_sheet(shadow, &sheet);
+            let inner = doc.el(shadow, "view");
+            trees.push((shadow, inner));
+        }
+        doc.flush();
+
+        let data = |shadow: NodeId| {
+            doc.dom
+                .get(shadow)
+                .and_then(crate::tree::node::Node::shadow_data)
+                .expect("a shadow root")
+                .styles
+                .data
+                .clone()
+        };
+        assert!(Arc::ptr_eq(&data(trees[0].0), &data(trees[1].0)));
+        for (_, inner) in trees {
+            assert_eq!(doc.color(inner), crate::test_common::rgb(255, 0, 0));
+        }
+    }
+
+    /// Replacing a shared sheet on one tree leaves every other tree mounting
+    /// it with the shared sheet and the shared rule data.
+    #[test]
+    fn replacing_a_shared_sheet_on_one_tree_leaves_the_others_alone() {
+        let mut doc = crate::test_common::Doc::new();
+        let root = doc.root;
+        let sheet = doc
+            .dom
+            .parse_shadow_stylesheet("view { color: rgb(0, 0, 255) }");
+        let mut trees = Vec::new();
+        for _ in 0..2 {
+            let host = doc.el(root, "view");
+            let shadow = doc
+                .dom
+                .attach_shadow(host, crate::tree::shadow::ShadowRootMode::Open);
+            doc.dom.add_shadow_sheet(shadow, &sheet);
+            let inner = doc.el(shadow, "view");
+            trees.push((shadow, inner));
+        }
+        doc.flush();
+        let data = |doc: &crate::test_common::Doc, shadow: NodeId| {
+            doc.dom
+                .get(shadow)
+                .and_then(crate::tree::node::Node::shadow_data)
+                .expect("a shadow root")
+                .styles
+                .data
+                .clone()
+        };
+        let shared = data(&doc, trees[1].0);
+
+        doc.dom
+            .replace_shadow_stylesheet(trees[0].0, 0, "view { color: rgb(255, 0, 0) }");
+        doc.flush();
+
+        assert_eq!(doc.color(trees[0].1), crate::test_common::rgb(255, 0, 0));
+        assert_eq!(doc.color(trees[1].1), crate::test_common::rgb(0, 0, 255));
+        assert!(!Arc::ptr_eq(
+            &data(&doc, trees[0].0),
+            &data(&doc, trees[1].0)
+        ));
+        assert!(Arc::ptr_eq(&data(&doc, trees[1].0), &shared));
+    }
+
+    #[test]
+    #[should_panic(expected = "ShadowSheet belongs to another Document")]
+    fn a_shadow_sheet_from_another_document_is_refused() {
+        let sheet = document().parse_shadow_stylesheet("view { width: 1px }");
+        let mut document = document();
+        let host = document.create_element("view", ());
+        let root = document.document_element().id();
+        document.append_child(root, host);
+        let shadow = document.attach_shadow(host, crate::tree::shadow::ShadowRootMode::Open);
+        document.add_shadow_sheet(shadow, &sheet);
     }
 }

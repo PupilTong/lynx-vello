@@ -125,7 +125,7 @@ async fn text_and_preparsed_sheets_keep_cascade_order() {
     resources
         .register_style_sheet(
             "app:///second.css",
-            PreparsedStyleSheet {
+            Arc::new(PreparsedStyleSheet {
                 rules: vec![PreparsedRule::Style {
                     selectors: ".box".into(),
                     declarations: vec![PreparsedDeclaration {
@@ -134,7 +134,7 @@ async fn text_and_preparsed_sheets_keep_cascade_order() {
                         important: false,
                     }],
                 }],
-            },
+            }),
         )
         .unwrap();
     let (mut view, mut painter) = view(

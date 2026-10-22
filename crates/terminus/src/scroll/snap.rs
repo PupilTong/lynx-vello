@@ -77,12 +77,13 @@
 //! measurement in this crate.
 
 use euclid::default::{Point2D, Rect, Size2D, Vector2D};
+use stylo::properties::ComputedValues;
 use stylo::values::computed::{
     Length, NonNegativeLengthPercentageOrAuto, ScrollSnapAxis, ScrollSnapStop, ScrollSnapStrictness,
 };
 use stylo::values::specified::box_::ScrollSnapAlignKeyword;
 
-use super::{ScrollAxes, clamp_to, is_scroll_container, wrap_axis};
+use super::{ScrollAxes, ScrollBox, clamp_to, is_scroll_container, wrap_axis};
 use crate::layout::{DisplayMode, StyleView, box_parent};
 use crate::tree::document::{Document, NodeId};
 use crate::visual::PaintOrder;
@@ -560,8 +561,22 @@ impl<T> Document<T> {
     /// carries the period and its positions are normalized into it.
     #[must_use]
     pub fn snap_positions(&self, id: NodeId) -> Option<SnapPositions> {
-        let node = self.get(id)?;
-        let style = node.layout_computed_style()?;
+        let style = self.paint_style(id)?;
+        if style.get_scroll_snap_type().strictness() == ScrollSnapStrictness::None {
+            return None;
+        }
+        self.snap_positions_of(id, style, &self.scroll_box(id)?)
+    }
+
+    /// [`Self::snap_positions`] for a container whose computed style and
+    /// scroll geometry the caller already resolved — the paint build, which
+    /// resolves both for the container's scroll slot.
+    pub(crate) fn snap_positions_of(
+        &self,
+        id: NodeId,
+        style: &ComputedValues,
+        scroll_box: &ScrollBox,
+    ) -> Option<SnapPositions> {
         let snap_type = *style.get_scroll_snap_type();
         let strictness = match snap_type.strictness() {
             ScrollSnapStrictness::None => return None,
@@ -573,7 +588,7 @@ impl<T> Document<T> {
             ScrollSnapAxis::Y | ScrollSnapAxis::Block => (false, true),
             ScrollSnapAxis::Both => (true, true),
         };
-        let scroll_box = self.scroll_box(id)?;
+        let node = self.get(id)?;
         let port = scroll_box.scrollport;
         let max = scroll_box.max_offset();
         let (period_x, period_y) = scroll_box.wrap_period();

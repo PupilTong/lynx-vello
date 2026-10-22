@@ -3776,7 +3776,7 @@ Rulings and limits to know before touching it:
   tail after the root stacking context, the inert floor below the topmost
   blocking entry for hit testing, relevance, and removal with the element
   through the one unlink path. Each entry's `::backdrop` is a detached
-  element node (`PayloadSlot::Backdrop`) styled by Stylo's lazy pseudo
+  element node (marked by its node's backdrop flag) styled by Stylo's lazy pseudo
   cascade after each flush, laid out by a tail after the rounding tail, and
   hit-tested as its element; it is never handed out. A side table, not a
   per-node bit: the layer is almost always empty and every per-box reader

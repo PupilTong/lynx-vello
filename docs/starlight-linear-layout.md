@@ -377,6 +377,12 @@ item has no baseline, synthesize one at its bottom border edge, matching
 Starlight's `LayoutObject::GetOffsetFromTopMarginEdgeToBaseline`. If there are
 no in-flow items, the container has no exported baseline.
 
+A commit reads these baselines from the committed items. A measurement probes
+the items they come from — every item of a horizontal container, the first of
+a vertical one — only when its caller reads the container's first baseline
+(`LayoutInput::reads_first_baseline`); otherwise a fixed-size item is not
+probed and the reported baseline, which no caller reads, uses its border box.
+
 ### 8. Out-of-Flow Children
 
 Absolutely positioned children are not linear items. After the in-flow linear

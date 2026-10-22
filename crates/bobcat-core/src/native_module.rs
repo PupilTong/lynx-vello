@@ -372,9 +372,9 @@ pub(crate) fn deliver(
         .map(|_| ())
 }
 
-fn string(arguments: &[HostValue], index: usize) -> Result<&str, String> {
+fn string<'a>(arguments: &[HostArgument<'a>], index: usize) -> Result<&'a str, String> {
     match arguments.get(index) {
-        Some(HostValue::String(value)) => Ok(value),
+        Some(&HostArgument::String(value)) => Ok(value),
         _ => Err(format!(
             "bobcat-internal:native-modules.invokeNativeModule expects string argument {index}"
         )),
@@ -388,9 +388,9 @@ fn string(arguments: &[HostValue], index: usize) -> Result<&str, String> {
     clippy::cast_sign_loss,
     reason = "the checks below leave a whole, representable call number"
 )]
-fn call_id(arguments: &[HostValue]) -> Result<u64, String> {
+fn call_id(arguments: &[HostArgument<'_>]) -> Result<u64, String> {
     match arguments.first() {
-        Some(&HostValue::Number(value))
+        Some(&HostArgument::Number(value))
             if value.is_finite() && value >= 0.0 && value.fract() == 0.0 =>
         {
             Ok(value as u64)

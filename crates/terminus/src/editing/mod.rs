@@ -397,7 +397,7 @@ pub(crate) fn makes_host(value: Option<&str>) -> bool {
 /// Whether `node` is an editing host ([`Document::is_editing_host`]), read
 /// off the node itself.
 pub(crate) fn is_host_node<T>(node: &crate::tree::node::Node<T>) -> bool {
-    node.is_element() && makes_host(node.attribute(CONTENTEDITABLE))
+    node.is_element() && makes_host(node.attribute(CONTENTEDITABLE).as_deref())
 }
 
 /// Whether the paragraph `node` establishes keeps one empty line of its

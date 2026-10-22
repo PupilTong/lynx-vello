@@ -328,7 +328,7 @@ impl AnchorProbe {
         let item = &frame.items[self.item as usize];
         let Some(anchor) = bounds(
             samples.css(item.space),
-            &item.transform,
+            &frame.matrix(item.transform),
             Rect::from_size(item.size),
         ) else {
             return true;
@@ -338,8 +338,12 @@ impl AnchorProbe {
             .any(|&clip| {
                 let node = &frame.clips[clip as usize];
                 // A degenerate clip space collapses whatever it clips.
-                bounds(samples.css(node.space), &node.transform, node.rect)
-                    .is_none_or(|clip| fully_clipped(anchor, clip))
+                bounds(
+                    samples.css(node.space),
+                    &frame.matrix(node.transform),
+                    node.rect,
+                )
+                .is_none_or(|clip| fully_clipped(anchor, clip))
             })
     }
 }

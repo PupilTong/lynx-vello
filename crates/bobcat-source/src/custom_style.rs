@@ -166,7 +166,7 @@ fn declaration(property: String, source: &str) -> PreparsedDeclaration {
         }
     }
     PreparsedDeclaration {
-        property,
+        property: property.into(),
         value: source[..end].trim().to_owned(),
         important,
     }

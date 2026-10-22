@@ -735,6 +735,101 @@ fn baseline_group_aligns_items_and_sets_the_container_first_baseline() {
     assert_eq!(output.first_baselines.y, Some(15.0));
 }
 
+/// A `linear` column of one fixed-size box, whose first baseline is that
+/// box's 7px: given only when its caller reads it
+/// (`LayoutInput::reads_first_baseline`), and synthesized from its own 20px
+/// bottom edge otherwise.
+fn linear_column_with_baseline(tree: &mut TestTree) -> (TestId, TestId) {
+    let inner = fixed_leaf(tree, 20.0, 20.0);
+    tree.set_first_baseline(inner, 7.0);
+    (
+        tree.push_linear(support::TestStyle::default(), vec![inner]),
+        inner,
+    )
+}
+
+#[test]
+fn a_baseline_group_sizes_its_row_from_a_linear_item_s_own_baseline() {
+    let mut tree = TestTree::default();
+    let first = fixed_leaf(&mut tree, 20.0, 20.0);
+    tree.set_first_baseline(first, 15.0);
+    let (column, _) = linear_column_with_baseline(&mut tree);
+    let mut style = grid_style(&[px(50.0), px(50.0)], &[]);
+    style.align_items = ItemPlacement(AlignFlags::BASELINE);
+    style.justify_items = justify_items(AlignFlags::START);
+    let root = tree.push_grid(style, vec![first, column]);
+
+    let output = support::perform_layout(
+        &tree,
+        root,
+        Size::new(Some(100.0), None),
+        Size::new(AvailableSpace::Definite(100.0), AvailableSpace::MaxContent),
+    );
+
+    // The shared baseline is the first item's 15px; the column's 7px
+    // baseline sits on it, and its 13px below that size the auto row.
+    assert_close(tree.layout(first).location.y, 0.0);
+    assert_close(tree.layout(column).location.y, 8.0);
+    assert_close(output.size.height, 28.0);
+    assert_eq!(output.first_baselines.y, Some(15.0));
+}
+
+#[test]
+fn a_measured_grid_aligns_a_baseline_group_by_a_linear_item_s_own_baseline() {
+    let mut tree = TestTree::default();
+    let first = fixed_leaf(&mut tree, 20.0, 20.0);
+    tree.set_first_baseline(first, 15.0);
+    let (column, _) = linear_column_with_baseline(&mut tree);
+    // A 10px row the items overflow: their aligned positions are what the
+    // container's scrollable extent reaches.
+    let mut style = grid_style(&[px(50.0), px(50.0)], &[px(10.0)]);
+    style.align_items = ItemPlacement(AlignFlags::BASELINE);
+    style.justify_items = justify_items(AlignFlags::START);
+    let root = tree.push_grid(style, vec![first, column]);
+
+    let output = tree.compute_layout(
+        root,
+        LayoutInput::measure(
+            Size::NONE,
+            Size::NONE,
+            Size::MAX_CONTENT,
+            RequestedAxis::Both,
+        ),
+    );
+
+    // The column's 7px baseline sits on the first item's 15px: it spans
+    // 8–28px.
+    assert_close(output.content_size.height, 28.0);
+}
+
+#[test]
+fn a_measured_grid_asks_its_items_for_the_first_baseline_it_is_asked_for() {
+    let run = |reads_first_baseline| {
+        let mut tree = TestTree::default();
+        let (column, inner) = linear_column_with_baseline(&mut tree);
+        let root = tree.push_grid(grid_style(&[px(50.0)], &[]), vec![column]);
+        let output = tree.compute_layout(
+            root,
+            LayoutInput::measure(
+                Size::NONE,
+                Size::NONE,
+                Size::MAX_CONTENT,
+                RequestedAxis::Both,
+            )
+            .reading_first_baseline(reads_first_baseline),
+        );
+        (output, tree.measure_call_count(inner))
+    };
+
+    let (read, read_probes) = run(true);
+    assert_eq!(read.first_baselines.y, Some(7.0));
+    assert_eq!(read_probes, 1);
+    // Unread, the column's fixed-size box is never measured for it.
+    let (unread, unread_probes) = run(false);
+    assert_eq!(unread.size, read.size);
+    assert_eq!(unread_probes, 0);
+}
+
 #[test]
 fn block_axis_auto_margin_excludes_an_item_from_baseline_sharing() {
     let mut tree = TestTree::default();
@@ -3322,7 +3417,10 @@ fn only_a_fit_content_grid_runs_intrinsic_track_sizing() {
     assert_size(tree.layout(grid).size, Size::new(800.0, 600.0));
     assert_eq!(grid_track_sizing_runs(&tree, item), 1);
 
-    for (max_content, width, runs) in [(100.0, 100.0, 3), (1000.0, 800.0, 4)] {
+    // The fit-content runs decide the width, the provisional run sizes the
+    // rows at it, and no definite rerun follows: nothing reads a percentage
+    // basis and the max-content rows are the container's height.
+    for (max_content, width, runs) in [(100.0, 100.0, 2), (1000.0, 800.0, 3)] {
         let (tree, items, layout) = placed_grid(fit_content_box(auto_grid()), |tree| {
             vec![leaf(tree, max_content)]
         });
@@ -3660,4 +3758,149 @@ mod last_baseline {
         assert_close(tree.layout(other).location.y, 10.0);
         assert_eq!(output.last_baselines.y, Some(20.0));
     }
+}
+
+fn auto_height_layout(tree: &TestTree, root: TestId, width: f32) -> LayoutOutput {
+    support::perform_layout(
+        tree,
+        root,
+        Size::new(Some(width), None),
+        Size::new(AvailableSpace::Definite(width), AvailableSpace::MaxContent),
+    )
+}
+
+#[test]
+fn an_auto_height_grid_stretches_its_auto_rows_to_its_min_height() {
+    // css-grid-2 §12.8 stretches `auto` tracks into a definite min-height
+    // when the free space is otherwise indefinite. The max-content run sized
+    // the rows to 20 + 30; the container is 100 tall, so the definite rerun
+    // stays for this grid and shares the 50 left between the two rows.
+    let mut tree = TestTree::default();
+    let first = intrinsic_leaf(&mut tree, Size::new(10.0, 20.0), Size::new(10.0, 20.0));
+    let second = intrinsic_leaf(&mut tree, Size::new(10.0, 30.0), Size::new(10.0, 30.0));
+    let mut style = grid_style(&[px(50.0)], &[auto_track(), auto_track()]);
+    style.min_size.height = size_px(100.0);
+    let root = tree.push_grid(style, vec![first, second]);
+
+    let output = auto_height_layout(&tree, root, 50.0);
+
+    assert_size(output.size, Size::new(50.0, 100.0));
+    assert_size(tree.layout(first).size, Size::new(50.0, 45.0));
+    assert_point(tree.layout(second).location, Point::new(0.0, 45.0));
+    assert_size(tree.layout(second).size, Size::new(50.0, 55.0));
+}
+
+#[test]
+fn an_auto_height_grid_its_rows_fill_skips_the_definite_rerun() {
+    // The height the max-content run gave the rows is the container's, and
+    // nothing reads a percentage basis, so sizing the tracks again at that
+    // height could only repeat them: each item is measured for its row
+    // once, and committed once.
+    let mut tree = TestTree::default();
+    let first = intrinsic_leaf(&mut tree, Size::new(10.0, 20.0), Size::new(10.0, 20.0));
+    let second = intrinsic_leaf(&mut tree, Size::new(10.0, 30.0), Size::new(10.0, 30.0));
+    let style = grid_style(&[px(50.0)], &[auto_track(), auto_track()]);
+    let root = tree.push_grid(style, vec![first, second]);
+
+    let output = auto_height_layout(&tree, root, 50.0);
+
+    assert_size(output.size, Size::new(50.0, 50.0));
+    assert_size(tree.layout(first).size, Size::new(50.0, 20.0));
+    assert_point(tree.layout(second).location, Point::new(0.0, 20.0));
+    assert_eq!(tree.child_layout_calls.get(), 5);
+}
+
+#[test]
+fn a_percentage_row_keeps_the_definite_rerun_of_an_auto_height_grid() {
+    // The 50% row is `auto` while the height is indefinite and resolves
+    // against the final 40px height in the rerun, as css-grid-2 §7.2 asks.
+    let mut tree = TestTree::default();
+    let first = intrinsic_leaf(&mut tree, Size::new(10.0, 20.0), Size::new(10.0, 20.0));
+    let second = intrinsic_leaf(&mut tree, Size::new(10.0, 20.0), Size::new(10.0, 20.0));
+    let style = grid_style(&[px(50.0)], &[percent(0.5), auto_track()]);
+    let root = tree.push_grid(style, vec![first, second]);
+
+    let output = auto_height_layout(&tree, root, 50.0);
+
+    assert_size(output.size, Size::new(50.0, 40.0));
+    assert_size(tree.layout(first).size, Size::new(50.0, 20.0));
+    assert_point(tree.layout(second).location, Point::new(0.0, 20.0));
+}
+
+#[test]
+fn a_flex_factor_below_one_keeps_the_definite_rerun_of_an_intrinsic_grid() {
+    // Three items in one 0.5fr column: the spanned factors sum to 1.5, so the
+    // column's base is the items' 0 min-content, and under max-content the
+    // fr size is the 100px max-content contribution, which makes the column
+    // 50 wide. At that definite width §12.7.1 floors the factor sum at 1, so
+    // the fr size is 50 and the column takes 25: the rerun stays.
+    let mut tree = TestTree::default();
+    let mut children = Vec::new();
+    for _ in 0..3 {
+        children.push(intrinsic_leaf(
+            &mut tree,
+            Size::ZERO,
+            Size::new(100.0, 10.0),
+        ));
+    }
+    let root = tree.push_grid(grid_style(&[fr(0.5)], &[]), children.clone());
+
+    let output = intrinsic_layout(&tree, root);
+
+    assert_close(output.size.width, 50.0);
+    assert_close(tree.layout(children[0]).size.width, 25.0);
+}
+
+#[test]
+fn a_min_content_maximum_keeps_the_definite_rerun_of_an_intrinsic_grid() {
+    // Under max-content the `minmax(auto, min-content)` column's base is the
+    // item's 100px limited max-content contribution, which outgrows its 40px
+    // min-content growth limit; at the definite 100px the base is the 40px
+    // automatic minimum and stays there.
+    let mut tree = TestTree::default();
+    let child = intrinsic_leaf(&mut tree, Size::new(40.0, 10.0), Size::new(100.0, 10.0));
+    let column = minmax(TrackBreadth::Auto, TrackBreadth::MinContent);
+    let root = tree.push_grid(grid_style(&[column], &[px(20.0)]), vec![child]);
+
+    let output = intrinsic_layout(&tree, root);
+
+    assert_close(output.size.width, 100.0);
+    assert_close(tree.layout(child).size.width, 40.0);
+}
+
+#[test]
+fn a_min_content_constraint_keeps_the_definite_rerun() {
+    // Under a min-content constraint both `auto` columns are based on their
+    // items' 50px min-content contributions, 100 in all. At that definite
+    // width the first column's base is its item's 0 minimum, and maximizing
+    // shares the 50px left out equally up to the growth limits: the second
+    // column stops at its 60px max-content size and the first takes 40.
+    let mut tree = TestTree::default();
+    let first = tree.push_leaf(
+        TestStyle {
+            min_size: Size::new(size_px(0.0), size_auto()),
+            ..grid_default()
+        },
+        Size::new(50.0, 10.0),
+        Size::new(100.0, 10.0),
+    );
+    let second = intrinsic_leaf(&mut tree, Size::new(50.0, 10.0), Size::new(60.0, 10.0));
+    let root = tree.push_grid(
+        grid_style(&[auto_track(), auto_track()], &[px(10.0)]),
+        vec![first, second],
+    );
+
+    let output = tree.compute_layout(
+        root,
+        LayoutInput::commit(
+            Size::NONE,
+            Size::NONE,
+            Size::new(AvailableSpace::MinContent, AvailableSpace::MaxContent),
+            Size::new(false, false),
+        ),
+    );
+
+    assert_close(output.size.width, 100.0);
+    assert_close(tree.layout(first).size.width, 40.0);
+    assert_point(tree.layout(second).location, Point::new(40.0, 0.0));
 }

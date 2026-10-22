@@ -530,6 +530,12 @@ pub(super) struct ItemGeometry {
     pub(super) overflow: Point<Overflow>,
     pub(super) box_sizing: box_sizing::T,
     pub(super) margin_auto: EdgeMask,
+    /// Grid's: every value above, and the item's insets, came out the same
+    /// against any percentage basis, and nothing fills a value in later (no
+    /// intrinsic keyword), so re-resolving the item against another basis is
+    /// a no-op. Only `grid::resolve_grid_item` sets it; every other resolver
+    /// leaves it false. It sits in the struct's padding.
+    pub(super) basis_free: bool,
 }
 
 impl ItemGeometry {
@@ -871,56 +877,9 @@ pub(super) fn store_committed_child<T: crate::tree::LayoutTree>(
     );
 }
 
-/// Whether the sizing value resolves against a percentage basis, making it
-/// track the basis rather than stand on its own.
-#[inline]
-pub(super) fn style_size_depends_on_basis(value: &StyleSize) -> bool {
-    match value {
-        StyleSize::LengthPercentage(lp) => lp.0.has_percentage(),
-        StyleSize::FitContentFunction(limit) => limit.0.has_percentage(),
-        // Conservatively yes: the answer only withholds a stability claim or
-        // asks for a re-resolution, and a precise one would put a call on
-        // every box's path for a value no in-flow box carries in practice.
-        StyleSize::AnchorSizeFunction(_) | StyleSize::AnchorContainingCalcFunction(_) => true,
-        _ => false,
-    }
-}
-
-#[inline]
-pub(super) fn max_size_depends_on_basis(value: &MaxSize) -> bool {
-    match value {
-        MaxSize::LengthPercentage(lp) => lp.0.has_percentage(),
-        MaxSize::FitContentFunction(limit) => limit.0.has_percentage(),
-        // Conservatively yes: the answer only withholds a stability claim or
-        // asks for a re-resolution, and a precise one would put a call on
-        // every box's path for a value no in-flow box carries in practice.
-        MaxSize::AnchorSizeFunction(_) | MaxSize::AnchorContainingCalcFunction(_) => true,
-        _ => false,
-    }
-}
-
-/// Whether any margin or padding percentage resolves against the container's
-/// inline size.
-#[inline]
-pub(super) fn edges_depend_on_inline_basis(
-    margin: &Edges<&Margin>,
-    padding: &Edges<&NonNegativeLengthPercentage>,
-) -> bool {
-    let margin_depends = |value: &Margin| match value {
-        Margin::LengthPercentage(lp) => lp.has_percentage(),
-        Margin::Auto => false,
-        // Conservatively yes, as in `style_size_depends_on_basis`.
-        Margin::AnchorSizeFunction(_) | Margin::AnchorContainingCalcFunction(_) => true,
-    };
-    margin_depends(margin.left)
-        || margin_depends(margin.right)
-        || margin_depends(margin.top)
-        || margin_depends(margin.bottom)
-        || padding.left.0.has_percentage()
-        || padding.right.0.has_percentage()
-        || padding.top.0.has_percentage()
-        || padding.bottom.0.has_percentage()
-}
+pub(super) use crate::style::{
+    edges_depend_on_inline_basis, max_size_depends_on_basis, style_size_depends_on_basis,
+};
 
 /// Whether any of the item's own sizing values on this axis is an intrinsic
 /// keyword, which resolves by measuring the item's content.
@@ -1280,6 +1239,7 @@ pub(super) fn resolve_item_geometry_with_bases(
         overflow,
         box_sizing,
         margin_auto: EdgeMask::from_margins(margin_value),
+        basis_free: false,
     }
 }
 

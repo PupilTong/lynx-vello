@@ -143,6 +143,22 @@ pub struct LayoutInput {
     /// that carries it only from an entry computed with it, or from a
     /// commit.
     pub reads_last_baseline: bool,
+    /// The caller reads this box's first baseline from the output, so a
+    /// measurement must report it exactly. Without the request a linear
+    /// container's measurement skips the probes of its fixed-size items that
+    /// only its own first baseline would read, and reports one synthesized
+    /// from their border boxes instead. A commit always reports the first
+    /// baseline exactly, from the committed children, and needs no request.
+    ///
+    /// Set by every caller that reads the value from a measurement: a flex
+    /// or grid container measuring a first-baseline group member, a grid
+    /// row's baseline contributions, a flex, grid, grid-lanes or linear
+    /// container measuring the items its own requested first baseline comes
+    /// from, and a host's inline-level atoms. Never part of the computed
+    /// geometry; the cache
+    /// answers a request that carries it only from an entry computed with it,
+    /// or from a commit.
+    pub reads_first_baseline: bool,
 }
 
 impl LayoutInput {
@@ -162,6 +178,7 @@ impl LayoutInput {
             parent_size,
             available_space,
             reads_last_baseline: false,
+            reads_first_baseline: false,
         }
     }
 
@@ -170,6 +187,14 @@ impl LayoutInput {
     #[must_use]
     pub const fn reading_last_baseline(mut self, reads: bool) -> Self {
         self.reads_last_baseline = reads;
+        self
+    }
+
+    /// The same input, with [`Self::reads_first_baseline`] set as given.
+    #[inline]
+    #[must_use]
+    pub const fn reading_first_baseline(mut self, reads: bool) -> Self {
+        self.reads_first_baseline = reads;
         self
     }
 
@@ -370,6 +395,23 @@ mod tests {
         assert!(requested.reads_last_baseline);
         assert_eq!(requested.goal, measure.goal);
         assert!(!requested.reading_last_baseline(false).reads_last_baseline);
+    }
+
+    #[test]
+    fn a_first_baseline_request_is_opt_in() {
+        let measure = LayoutInput::measure(
+            Size::NONE,
+            Size::NONE,
+            Size::MAX_CONTENT,
+            RequestedAxis::Both,
+        );
+        assert!(!measure.reads_first_baseline);
+        assert!(!LayoutInput::default().reads_first_baseline);
+        let requested = measure.reading_first_baseline(true);
+        assert!(requested.reads_first_baseline);
+        assert!(!requested.reads_last_baseline);
+        assert_eq!(requested.goal, measure.goal);
+        assert!(!requested.reading_first_baseline(false).reads_first_baseline);
     }
 
     #[test]

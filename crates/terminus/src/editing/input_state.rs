@@ -298,9 +298,9 @@ impl<T> Document<T> {
 
         TextInputState {
             host: Some(host),
-            input_type: InputType::parse(node.attribute("type")),
-            input_mode: InputMode::parse(node.attribute("inputmode")),
-            enter_key_hint: EnterKeyHint::parse(node.attribute("enterkeyhint")),
+            input_type: InputType::parse(node.attribute("type").as_deref()),
+            input_mode: InputMode::parse(node.attribute("inputmode").as_deref()),
+            enter_key_hint: EnterKeyHint::parse(node.attribute("enterkeyhint").as_deref()),
             value,
             selection,
             composition,

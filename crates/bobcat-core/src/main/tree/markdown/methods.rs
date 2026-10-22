@@ -63,11 +63,11 @@ pub(super) fn get_content(
         clippy::cast_precision_loss,
         reason = "a string's UTF-16 length is far below 2^52"
     )]
-    let length = utf16_len(content) as f64;
+    let length = utf16_len(&content) as f64;
     let start = start.unwrap_or(0.0).max(0.0);
     let end = (end.unwrap_or(length - 1.0) + 1.0).min(length);
     let slice = if end >= start {
-        slice_utf16(content, to_offset(start), to_offset(end)).0
+        slice_utf16(&content, to_offset(start), to_offset(end)).0
     } else {
         ""
     };
@@ -90,7 +90,7 @@ pub(super) fn get_images(document: &LynxDocument, root: NodeId) -> String {
         if node.tag_name() == Some(IMAGE_TAG)
             && let Some(src) = node.attribute("src").filter(|src| !src.is_empty())
         {
-            images.push(src.to_owned());
+            images.push(src.into_owned());
         }
         stack.extend(node.child_ids().iter().rev().copied());
     }
@@ -173,7 +173,7 @@ pub(super) fn get_parse_result(
     });
     let mut record = String::new();
     let id = attribute(document, element, CONTENT_ID_ATTRIBUTE).unwrap_or_default();
-    write_record_field(&mut record, id);
+    write_record_field(&mut record, &id);
     write_record_field(&mut record, &names.len().to_string());
     for (index, name) in names.iter().enumerate() {
         let ranges: Vec<(usize, usize)> = found

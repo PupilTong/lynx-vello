@@ -285,8 +285,8 @@ fn carrier_contents(tree: &LynxDocument, root: terminus::link::NodeId) -> Vec<St
         .map(|id| {
             tree.get(id)
                 .and_then(|node| node.attribute("text"))
+                .map(std::borrow::Cow::into_owned)
                 .unwrap_or_default()
-                .to_owned()
         })
         .collect()
 }
@@ -298,7 +298,12 @@ fn element_with_id(tree: &LynxDocument, id: &str) -> terminus::link::NodeId {
     let mut ids = vec![page];
     descendants(tree, page, &mut ids);
     ids.into_iter()
-        .find(|node| tree.get(*node).and_then(|node| node.attribute("id")) == Some(id))
+        .find(|node| {
+            tree.get(*node)
+                .and_then(|node| node.attribute("id"))
+                .as_deref()
+                == Some(id)
+        })
         .unwrap_or_else(|| panic!("no element carries the id {id:?}"))
 }
 
@@ -1562,7 +1567,9 @@ fn a_native_props_text_push_appends_where_there_is_no_leading_run() {
     let tree = pair.tree();
     let target = element_with_id(&tree, "target");
     assert_eq!(
-        tree.get(target).and_then(|node| node.attribute("text")),
+        tree.get(target)
+            .and_then(|node| node.attribute("text"))
+            .as_deref(),
         Some("the count is:1"),
         "with no leading carrier to retarget to, the push is written on the \
          element itself"

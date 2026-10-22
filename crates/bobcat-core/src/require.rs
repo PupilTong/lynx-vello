@@ -44,7 +44,7 @@
 //! the message consumer reads during the wait, which ends the worker and
 //! cancels the token its own source requests carry.
 
-use quickjs_rust_bridge::{HostValue, RequiredKind, RequiredSource};
+use quickjs_rust_bridge::{HostArgument, HostValue, RequiredKind, RequiredSource};
 
 use crate::esm::HOST_MODULE_SPECIFIER;
 use crate::jobs::JsThreadHandle;
@@ -113,11 +113,11 @@ pub(crate) fn install(
 /// about.
 fn string_argument<'a>(
     function: &str,
-    arguments: &'a [HostValue],
+    arguments: &[HostArgument<'a>],
     index: usize,
 ) -> Result<&'a str, String> {
     match arguments.get(index) {
-        Some(HostValue::String(value)) => Ok(value),
+        Some(&HostArgument::String(value)) => Ok(value),
         _ => Err(format!("{function} expects a string for argument {index}")),
     }
 }

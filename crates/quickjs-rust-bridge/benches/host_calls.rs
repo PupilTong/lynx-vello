@@ -52,8 +52,8 @@ fn driver(install: impl FnOnce(&mut Context), call_expression: &str) -> (Context
     clippy::unnecessary_wraps,
     reason = "the signature is dictated by the host-function boundary"
 )]
-fn append_handler(arguments: &[HostValue]) -> Result<HostValue, HostFunctionError> {
-    Ok(arguments[1].clone())
+fn append_handler(arguments: &[HostArgument<'_>]) -> Result<HostValue, HostFunctionError> {
+    Ok(arguments[1].to_value())
 }
 
 #[divan::bench]

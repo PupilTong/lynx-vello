@@ -404,7 +404,7 @@ impl Sink for Resources {
         url: &Url,
         sheet: &Arc<PreparsedStyleSheet>,
     ) -> Result<(), RegisterError> {
-        self.register_style_sheet(url.as_str(), sheet.as_ref().clone())
+        self.register_style_sheet(url.as_str(), Arc::clone(sheet))
             .map(drop)
     }
 }

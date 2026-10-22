@@ -76,6 +76,24 @@ impl LayoutSlot {
         self.cache.store(input, output);
     }
 
+    /// Whether the node reads its percentage basis, as its cache entries
+    /// recorded it ([`Cache::recorded_reads_basis`]).
+    #[must_use]
+    pub(crate) fn recorded_reads_basis(&self) -> Option<bool> {
+        self.cache.recorded_reads_basis()
+    }
+
+    /// [`Self::store_cached_layout`], recording whether the node reads its
+    /// percentage basis ([`Cache::store_recording_basis`]).
+    pub(crate) fn store_cached_layout_recording_basis(
+        &mut self,
+        input: LayoutInput,
+        output: LayoutOutput,
+        reads_basis: bool,
+    ) {
+        self.cache.store_recording_basis(input, output, reads_basis);
+    }
+
     pub fn clear_layout_cache(&mut self) {
         self.cache.clear();
         // The node will be laid out again by whoever cleared this, and a node

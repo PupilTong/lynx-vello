@@ -1295,6 +1295,9 @@ fn determine_hypothetical_cross_sizes<T>(
     // `Some` only on a commit-goal pass, whose in-flow commit is the sole
     // consumer of the per-item flags this writes.
     container_independent: Option<Size<bool>>,
+    // The container's own measurement was asked for its first baseline
+    // (`LayoutInput::reads_first_baseline`); never set on a commit.
+    first_baseline_requested: bool,
     // The container's own measurement was asked for an exact last baseline
     // (`LayoutInput::reads_last_baseline`); never set on a commit.
     last_baseline_requested: bool,
@@ -1341,6 +1344,10 @@ fn determine_hypothetical_cross_sizes<T>(
             // baseline read this item's last baseline: ask for it exactly.
             let reads_last_baseline =
                 exported_last == Some(item_index) || participation == Some(BaselineSet::Last);
+            // A first-baseline group reads this item's first baseline, and so
+            // does the container's own first baseline when its caller reads it.
+            let reads_first_baseline = participation == Some(BaselineSet::First)
+                || (first_baseline_requested && exported_first == Some(item_index));
             let stretched_cross = nowrap_cross.filter(|_| {
                 item.align_self == AlignFlags::STRETCH
                     && axes.cross.size(item.size_is_auto)
@@ -1420,7 +1427,8 @@ fn determine_hypothetical_cross_sizes<T>(
                 child_available,
                 RequestedAxis::Both,
             )
-            .reading_last_baseline(reads_last_baseline);
+            .reading_last_baseline(reads_last_baseline)
+            .reading_first_baseline(reads_first_baseline);
             input.definite_dimensions = known_is_definite;
             let output = tree.compute_layout(state, item.key.node, input);
             item.hypothetical_cross = clamp_axis(
@@ -2008,37 +2016,44 @@ where
         hoisted.before(tree, state, node, pending.document_index);
         let key = pending.key();
         let style = tree.style(key.node);
-        let mut item = resolve_item(&style, key, parent_size, axes, rtl, default_alignment);
-        let mut known = item.preferred_size;
-        let available = inner_size.map(AvailableSpace::Definite);
-        let output = measure_child(
-            tree,
-            state,
-            key.node,
-            known,
-            item.preferred_definite,
-            parent_size,
-            available,
-            SizingMode::ApplySizeStyles,
-            RequestedAxis::Both,
-        );
-        let inset_size = item.box_floor();
-        known.width = Some(clamp_axis(
-            output.size.width,
-            item.min_size.width,
-            item.max_size.width,
-            inset_size.width,
-        ));
-        known.height = Some(clamp_axis(
-            output.size.height,
-            item.min_size.height,
-            item.max_size.height,
-            inset_size.height,
-        ));
-        item.target_main = axes.main.size(known).unwrap_or(0.0);
-        item.target_cross = axes.cross.size(known).unwrap_or(0.0);
-        let static_position =
-            static_position_for_absolute(&item, axes, inner_size, content_origin, justify_content);
+        // The static position is read only on an axis whose insets are both
+        // `auto` (`absolute_layout`), so a box inset on both axes skips the
+        // static-position measurement of its subtree.
+        let static_axes = super::util::needs_static_position(tree, key.node, &style);
+        let static_position = if static_axes.width || static_axes.height {
+            let mut item = resolve_item(&style, key, parent_size, axes, rtl, default_alignment);
+            let mut known = item.preferred_size;
+            let available = inner_size.map(AvailableSpace::Definite);
+            let output = measure_child(
+                tree,
+                state,
+                key.node,
+                known,
+                item.preferred_definite,
+                parent_size,
+                available,
+                SizingMode::ApplySizeStyles,
+                RequestedAxis::Both,
+            );
+            let inset_size = item.box_floor();
+            known.width = Some(clamp_axis(
+                output.size.width,
+                item.min_size.width,
+                item.max_size.width,
+                inset_size.width,
+            ));
+            known.height = Some(clamp_axis(
+                output.size.height,
+                item.min_size.height,
+                item.max_size.height,
+                inset_size.height,
+            ));
+            item.target_main = axes.main.size(known).unwrap_or(0.0);
+            item.target_cross = axes.cross.size(known).unwrap_or(0.0);
+            static_position_for_absolute(&item, axes, inner_size, content_origin, justify_content)
+        } else {
+            Point::ZERO
+        };
 
         match style.position() {
             PositionProperty::Absolute => {
@@ -2061,7 +2076,7 @@ where
                     layout.location,
                     layout.size,
                     layout.content_size,
-                    item.overflow,
+                    style.overflow(),
                     Size::ZERO,
                 );
                 tree.set_unrounded_layout(state, key.node, layout);
@@ -2187,6 +2202,7 @@ where
     // Only a measurement can be asked for an exact last baseline: a commit
     // reads the committed children and is exact anyway.
     let last_baseline_requested = input.reads_last_baseline && !input.goal.commits();
+    let first_baseline_requested = input.reads_first_baseline && !input.goal.commits();
     let item_inline_basis_was_indefinite = !outer_definite.width;
     let main_percentage_basis_was_indefinite = !axes.main.size(outer_definite);
     let gap_value = style.gap();
@@ -2348,6 +2364,7 @@ where
         inner_size,
         inner_available_space,
         container_independent,
+        first_baseline_requested,
         last_baseline_requested,
         baseline_aligned,
     );
@@ -2438,6 +2455,7 @@ where
             inner_size,
             final_available_space,
             container_independent,
+            first_baseline_requested,
             last_baseline_requested,
             baseline_aligned,
         );
@@ -2688,6 +2706,7 @@ mod tests {
                 overflow: Point::new(Overflow::Visible, Overflow::Visible),
                 box_sizing: box_sizing::T::ContentBox,
                 margin_auto: crate::compute::util::EdgeMask::default(),
+                basis_free: false,
             },
             key: ItemKey {
                 node: TestRef(0),
@@ -2789,6 +2808,7 @@ mod tests {
                 AvailableSpace::Definite(cross),
             ),
             Some(Size::new(false, false)),
+            false,
             false,
             true,
         );

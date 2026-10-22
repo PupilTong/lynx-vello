@@ -1,10 +1,10 @@
 //! [`Node`] — the unit the tree is composed of — and its `&Node` read/
 //! navigation handle.
 
+use std::borrow::Cow;
 use std::fmt;
-use std::marker::PhantomData;
 use std::sync::Arc as StdArc;
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
 #[cfg(feature = "layout-test-utils")]
 use seldon::compute::LeafMetrics;
@@ -23,7 +23,7 @@ use stylo_dom::ElementState;
 
 use crate::render::image::ImageRole;
 use crate::tree::custom::{CustomElementState, DefinitionId};
-use crate::tree::document::{DOCUMENT_NODE_ID, NodeId, NodeSlot, PayloadSlot, TreeArenas};
+use crate::tree::document::{DOCUMENT_NODE_ID, NodeId, NodeSlot, TreeArenas};
 use crate::tree::shadow::{ShadowLinks, ShadowRootData, ShadowRootMode};
 
 pub(crate) const SNAPSHOT_PRESENT: u8 = 1 << 0;
@@ -67,7 +67,6 @@ pub(crate) struct StylingData {
     /// them.
     pub(crate) animates: AtomicU8,
     pub(crate) snapshot_flags: AtomicU8,
-    pub(crate) children_to_process: AtomicIsize,
 }
 
 impl Default for StylingData {
@@ -79,36 +78,46 @@ impl Default for StylingData {
             may_have_animations: AtomicBool::new(false),
             animates: AtomicU8::new(0),
             snapshot_flags: AtomicU8::new(0),
-            children_to_process: AtomicIsize::new(0),
         }
     }
 }
 
+/// What a node holds besides its tree links, boxed on the node because most
+/// nodes hold nothing.
+///
+/// Every variant is one pointer wide or narrower, so the box a text node
+/// allocates is the 16 B of its text's fat pointer: the replaced and test
+/// variants box their wider payloads a second time rather than widen every
+/// text node's allocation to theirs.
 enum NodeContent {
-    Text(String),
-    Replaced {
-        /// The dimensions of the bitmap this element presents — whichever of
-        /// its two sources that is.
-        ///
-        /// Not independent of the sources: a completed load carries the
-        /// image's own dimensions, and the document recomputes this from
-        /// whichever source the element now draws.
-        natural_size: NaturalSize,
-        /// The image source the paint walk resolves against the document's
-        /// image registry.
-        source: Option<Box<str>>,
-        /// The source drawn while `source` has no pixels, requested
-        /// concurrently with it and never falling back from it: a source that
-        /// loads suppresses this one for good.
-        placeholder: Option<Box<str>>,
-    },
+    Text(Box<str>),
+    Replaced(Box<Replaced>),
     #[cfg(feature = "layout-test-utils")]
-    Test(LeafMetrics),
+    Test(Box<LeafMetrics>),
+}
+
+/// A replaced element's content: the bitmap it presents and where it comes
+/// from.
+struct Replaced {
+    /// The dimensions of the bitmap this element presents — whichever of
+    /// its two sources that is.
+    ///
+    /// Not independent of the sources: a completed load carries the
+    /// image's own dimensions, and the document recomputes this from
+    /// whichever source the element now draws.
+    natural_size: NaturalSize,
+    /// The image source the paint walk resolves against the document's
+    /// image registry.
+    source: Option<Box<str>>,
+    /// The source drawn while `source` has no pixels, requested
+    /// concurrently with it and never falling back from it: a source that
+    /// loads suppresses this one for good.
+    placeholder: Option<Box<str>>,
 }
 
 /// Per-node bits that each cost a padded byte of the node stride as a `bool`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct NodeFlags(u8);
+pub(crate) struct NodeFlags(u8);
 
 impl NodeFlags {
     const CUSTOM_SUBTREE_MAY_CONTAIN: u8 = 1 << 0;
@@ -116,6 +125,13 @@ impl NodeFlags {
     const LYNX_TEXT: u8 = 1 << 2;
     const PLACEHOLDER_PSEUDO: u8 = 1 << 3;
     const LINE_IF_EMPTY: u8 = 1 << 4;
+    /// A `::backdrop` box's node ([`crate::tree::top_layer`]).
+    pub(crate) const BACKDROP: u8 = 1 << 5;
+    /// An anonymous block box's node ([`crate::tree::anonymous`]).
+    pub(crate) const ANONYMOUS: u8 = 1 << 6;
+    /// The element's layout reads no percentage basis; see
+    /// [`Node::layout_reads_percentage_basis`].
+    const BASIS_FREE: u8 = 1 << 7;
 
     const fn get(self, bit: u8) -> bool {
         self.0 & bit != 0
@@ -142,7 +158,11 @@ pub struct Node<T> {
     /// to resolve through, which is what keeps a walk step to one load.
     id: NodeId,
     data: NodeData,
-    payload: PhantomData<T>,
+    /// What the embedder filed this node with: `Some` for every element and
+    /// text node it created, `None` for the nodes nobody hands out — the
+    /// document node, a shadow root, a `::backdrop` box's node, an anonymous
+    /// box's. A unit payload sits in the stride's padding.
+    payload: Option<T>,
 
     pub(crate) parent: Option<NodeSlot>,
     pub(crate) children: Vec<NodeSlot>,
@@ -178,9 +198,6 @@ pub struct Node<T> {
 pub(crate) struct StyleRefresh {
     /// Whether the element's computed style is a different `Arc` than before.
     pub(crate) changed: bool,
-    /// Whether anything a descendant text node is *shaped* from moved with
-    /// it. Only meaningful when `changed`.
-    pub(crate) shaping_changed: bool,
     /// Whether the paragraph's effective custom-property limits changed.
     /// These layout inputs are outside Stylo's longhand damage comparison.
     pub(crate) paragraph_limits_changed: bool,
@@ -200,7 +217,6 @@ pub(crate) struct StyleRefresh {
 impl StyleRefresh {
     pub(crate) const UNCHANGED: Self = Self {
         changed: false,
-        shaping_changed: false,
         paragraph_limits_changed: false,
         containing_block_changed: false,
         box_tree_changed: false,
@@ -238,8 +254,39 @@ impl<T> Node<T> {
         node
     }
 
-    pub(crate) fn new_text(owner: *mut TreeArenas<T>, id: NodeId, text: String) -> Self {
+    pub(crate) fn new_text(owner: *mut TreeArenas<T>, id: NodeId, text: Box<str>) -> Self {
         Self::new(owner, id, NodeData::Text, None, Some(text))
+    }
+
+    /// An element node the tree generates rather than an embedder creates —
+    /// a `::backdrop` box's or an anonymous box's — marked by `marker`
+    /// ([`NodeFlags::BACKDROP`] or [`NodeFlags::ANONYMOUS`]). It carries no
+    /// payload.
+    pub(crate) fn new_generated_element(
+        owner: *mut TreeArenas<T>,
+        id: NodeId,
+        local_name: LocalName,
+        marker: u8,
+    ) -> Self {
+        debug_assert!(
+            marker == NodeFlags::BACKDROP || marker == NodeFlags::ANONYMOUS,
+            "a generated element is a backdrop or an anonymous box"
+        );
+        let mut node = Self::new_element(owner, id, local_name);
+        node.flags.set(marker, true);
+        node
+    }
+
+    /// Files the embedder's payload on a node it creates.
+    #[must_use]
+    pub(crate) fn with_payload(mut self, payload: T) -> Self {
+        self.payload = Some(payload);
+        self
+    }
+
+    /// Takes the embedder's payload off a node the arenas have freed.
+    pub(crate) fn into_payload(self) -> Option<T> {
+        self.payload
     }
 
     pub(crate) fn new_shadow_root(
@@ -255,13 +302,13 @@ impl<T> Node<T> {
         id: NodeId,
         data: NodeData,
         local_name: Option<LocalName>,
-        text: Option<String>,
+        text: Option<Box<str>>,
     ) -> Self {
         Self {
             owner,
             id,
             data,
-            payload: PhantomData,
+            payload: None,
             parent: None,
             children: Vec::new(),
             local_name,
@@ -340,6 +387,10 @@ impl<T> Node<T> {
     /// called once, where the element is given its definition.
     pub(crate) fn mark_lynx_text(&mut self) {
         self.flags.set(NodeFlags::LYNX_TEXT, true);
+        // A Lynx text element establishes a paragraph whatever its display
+        // is, and an element may be given its definition after its first
+        // style: the basis bit reads the kind as well as the style.
+        self.refresh_basis_free();
     }
 
     /// Whether this element's own paragraph keeps one empty line when it
@@ -352,6 +403,19 @@ impl<T> Node<T> {
     /// Records [`Self::has_line_if_empty`], answering what it was.
     pub(crate) fn set_has_line_if_empty(&mut self, on: bool) -> bool {
         self.flags.set(NodeFlags::LINE_IF_EMPTY, on)
+    }
+
+    /// Whether this is a `::backdrop` box's node ([`crate::tree::top_layer`]).
+    #[must_use]
+    pub(crate) fn is_backdrop_node(&self) -> bool {
+        self.flags.get(NodeFlags::BACKDROP)
+    }
+
+    /// Whether this is an anonymous block box's node
+    /// ([`crate::tree::anonymous`]).
+    #[must_use]
+    pub(crate) fn is_anonymous_box(&self) -> bool {
+        self.flags.get(NodeFlags::ANONYMOUS)
     }
 
     pub(crate) fn owner_document(&self) -> &Node<T> {
@@ -506,16 +570,76 @@ impl<T> Node<T> {
         self.classes.iter().map(AsRef::as_ref)
     }
 
+    /// One attribute's value, as `getAttribute` reads it.
+    ///
+    /// Borrowed as stored, but for a `style` or `class` value that a write
+    /// through the parsed form left to be serialized on read
+    /// (`attribute_text`).
     #[must_use]
-    pub fn attribute(&self, name: &str) -> Option<&str> {
-        let name = LocalName::from(name);
-        self.attr_local_name(&name)
+    pub fn attribute(&self, name: &str) -> Option<Cow<'_, str>> {
+        self.attr_local_name(&LocalName::from(name))
     }
 
-    pub(crate) fn attr_local_name(&self, name: &LocalName) -> Option<&str> {
+    pub(crate) fn attr_local_name(&self, name: &LocalName) -> Option<Cow<'_, str>> {
+        self.attrs
+            .iter()
+            .find(|(candidate, _)| candidate == name)
+            .map(|(name, stored)| self.attribute_text(name, stored))
+    }
+
+    /// The value of an attribute whose text is always stored as written:
+    /// any attribute but `style` and `class` ([`Self::attribute_text`]).
+    pub(crate) fn plain_attr(&self, name: &LocalName) -> Option<&str> {
+        debug_assert!(
+            !matches!(name.0.as_ref(), "style" | "class"),
+            "`{}` text can be derived; read it with `attr_local_name`",
+            name.0
+        );
         self.attrs
             .iter()
             .find_map(|(candidate, value)| (candidate == name).then_some(value.as_str()))
+    }
+
+    /// An attribute's value, from what is stored for it.
+    ///
+    /// `style` and `class` each have a parsed form — the inline declaration
+    /// block, the class list — and their text is stored only while it is not
+    /// what that form serializes to: the text a `setAttribute` wrote, kept as
+    /// written. A write through the parsed form (one inline property, an
+    /// inline-style record, a single class) and a class list written in its
+    /// canonical form store an empty value instead, and the text is then the
+    /// block's CSSOM serialization or the class list joined by single spaces —
+    /// the text that write would otherwise have stored. An empty value with
+    /// nothing parsed behind it is the empty attribute.
+    pub(crate) fn attribute_text<'a>(&'a self, name: &LocalName, stored: &'a str) -> Cow<'a, str> {
+        if !stored.is_empty() {
+            return Cow::Borrowed(stored);
+        }
+        match name.0.as_ref() {
+            "style" => self
+                .parsed_inline_style
+                .as_ref()
+                .map_or(Cow::Borrowed(stored), |block| {
+                    let guard = self.document_lock().read();
+                    let mut css = String::new();
+                    block
+                        .read_with(&guard)
+                        .to_css(&mut css)
+                        .expect("serializing a declaration block into a String cannot fail");
+                    Cow::Owned(css)
+                }),
+            "class" if !self.classes.is_empty() => {
+                let mut text = String::new();
+                for (index, class) in self.classes.iter().enumerate() {
+                    if index > 0 {
+                        text.push(' ');
+                    }
+                    text.push_str(class);
+                }
+                Cow::Owned(text)
+            }
+            _ => Cow::Borrowed(stored),
+        }
     }
 
     pub(crate) fn set_attr_local_name(&mut self, name: LocalName, value: String) {
@@ -540,10 +664,17 @@ impl<T> Node<T> {
         }
     }
 
-    pub fn attributes(&self) -> impl ExactSizeIterator<Item = (&str, &str)> {
+    /// Every attribute with its value ([`Self::attribute`]), in the order
+    /// the element acquired them.
+    pub fn attributes(&self) -> impl ExactSizeIterator<Item = (&str, Cow<'_, str>)> {
         self.attrs
             .iter()
-            .map(|(name, value)| (name.0.as_ref(), value.as_str()))
+            .map(|(name, stored)| (name.0.as_ref(), self.attribute_text(name, stored)))
+    }
+
+    /// Every attribute's name, in the order the element acquired them.
+    pub fn attribute_names(&self) -> impl ExactSizeIterator<Item = &str> {
+        self.attrs.iter().map(|(name, _)| name.0.as_ref())
     }
 
     #[must_use]
@@ -569,6 +700,7 @@ impl<T> Node<T> {
             ("owner", size_of::<*mut TreeArenas<()>>(), false),
             ("id", size_of::<NodeId>(), false),
             ("data", size_of::<NodeData>(), false),
+            ("payload", size_of::<Option<()>>(), false),
             ("parent", size_of::<Option<NodeSlot>>(), false),
             ("children", size_of::<Vec<NodeSlot>>(), false),
             ("local_name", size_of::<Option<LocalName>>(), true),
@@ -607,21 +739,18 @@ impl<T> Node<T> {
 
     #[must_use]
     pub fn payload(&self) -> &T {
+        if let Some(payload) = &self.payload {
+            return payload;
+        }
         match &self.data {
+            NodeData::Element(_) if self.is_backdrop_node() => {
+                panic!("a `::backdrop` node has no payload and is never handed out")
+            }
+            NodeData::Element(_) if self.is_anonymous_box() => {
+                panic!("an anonymous box's node has no payload and is never handed out")
+            }
             NodeData::Element(_) | NodeData::Text => {
-                let arenas = self.arenas();
-                match arenas.payload_at(arenas.live_slot(self.id)) {
-                    PayloadSlot::Node(payload) => payload,
-                    PayloadSlot::Backdrop => {
-                        panic!("a `::backdrop` node has no payload and is never handed out")
-                    }
-                    PayloadSlot::Anonymous => {
-                        panic!("an anonymous box's node has no payload and is never handed out")
-                    }
-                    PayloadSlot::Document | PayloadSlot::ShadowRoot | PayloadSlot::Reserved => {
-                        unreachable!("payload-less sentinels belong to non-element nodes")
-                    }
-                }
+                unreachable!("the arena's key-zero placeholder is the one payload-less text node")
             }
             NodeData::Document(_) => panic!("the document node has no payload"),
             NodeData::ShadowRoot(_) => panic!("a shadow root has no payload"),
@@ -694,7 +823,6 @@ impl<T> Node<T> {
                 } else {
                     StyleRefresh {
                         changed: true,
-                        shaping_changed: crate::layout::shaping_inputs_changed(old, new),
                         paragraph_limits_changed: crate::layout::paragraph_limits_changed(old, new),
                         containing_block_changed: false,
                         box_tree_changed: *old.get_display() != *new.get_display()
@@ -706,7 +834,6 @@ impl<T> Node<T> {
             // descendants have never been laid out under it.
             _ => StyleRefresh {
                 changed: true,
-                shaping_changed: true,
                 paragraph_limits_changed: false,
                 containing_block_changed: false,
                 box_tree_changed: true,
@@ -730,7 +857,52 @@ impl<T> Node<T> {
             };
             refresh.containing_block_changed = role(&old) != role(new);
         }
+        self.refresh_basis_free();
         refresh
+    }
+
+    /// Whether this element's own layout reads the percentage basis its
+    /// parent hands it ([`seldon::style::CoreStyle::reads_percentage_basis`]),
+    /// as [`crate::layout::reads_percentage_basis`] answered it for the
+    /// element's layout style.
+    ///
+    /// A bit rather than an evaluation because `seldon` asks on every cache
+    /// lookup, and the answer reads the size, min-size, max-size, margin and
+    /// padding structs. Its only inputs are the element's own layout style
+    /// and its kind (whether it is a Lynx text element), and both writers of
+    /// those re-evaluate it: the style's — the damage harvest
+    /// ([`Self::refresh_layout_style`]) and a generated box's
+    /// [`Self::replace_pseudo_style`] — and the kind's, [`Self::mark_lynx_text`].
+    /// Nothing else can move it between them. A node with no layout style —
+    /// a text node, an element never styled — answers `true`, the
+    /// conservative answer: it is laid out against its basis.
+    #[inline]
+    pub(crate) fn layout_reads_percentage_basis(&self) -> bool {
+        !self.flags.get(NodeFlags::BASIS_FREE)
+    }
+
+    /// Whether a style view over this node reading `style` reads the
+    /// element's own layout style — the one
+    /// [`Self::layout_reads_percentage_basis`] was evaluated against — rather
+    /// than a position option's. A node holding none answers `true`: its view
+    /// reads the stand-in style, and the bit's conservative answer stands for
+    /// it.
+    #[inline]
+    pub(crate) fn views_own_layout_style(&self, style: &ComputedValues) -> bool {
+        match &self.data {
+            NodeData::Element(Some(own)) => std::ptr::eq(own.as_ref(), style),
+            _ => true,
+        }
+    }
+
+    /// Re-evaluates [`Self::layout_reads_percentage_basis`] against the
+    /// layout style the element holds now.
+    fn refresh_basis_free(&mut self) {
+        let free = match &self.data {
+            NodeData::Element(Some(style)) => !crate::layout::reads_percentage_basis(self, style),
+            _ => false,
+        };
+        self.flags.set(NodeFlags::BASIS_FREE, free);
     }
 
     /// [`Self::layout_computed_style`] as the `Arc` the snapshot holds, for a
@@ -785,13 +957,15 @@ impl<T> Node<T> {
         };
         *self.stylo_data_present.get_mut() = true;
         self.style_data.borrow_mut().styles.primary = Some(style.clone());
-        snapshot.replace(style)
+        let old = snapshot.replace(style);
+        self.refresh_basis_free();
+        old
     }
 
     #[must_use]
     pub(crate) fn natural_size(&self) -> NaturalSize {
         match self.content.as_deref() {
-            Some(NodeContent::Replaced { natural_size, .. }) => *natural_size,
+            Some(NodeContent::Replaced(replaced)) => replaced.natural_size,
             _ => NaturalSize::NONE,
         }
     }
@@ -799,17 +973,12 @@ impl<T> Node<T> {
     /// The URL this element holds in `role`, of the two it may hold at once.
     #[must_use]
     pub(crate) fn image_source(&self, role: ImageRole) -> Option<&str> {
-        let Some(NodeContent::Replaced {
-            source,
-            placeholder,
-            ..
-        }) = self.content.as_deref()
-        else {
+        let Some(NodeContent::Replaced(replaced)) = self.content.as_deref() else {
             return None;
         };
         match role {
-            ImageRole::Source => source.as_deref(),
-            ImageRole::Placeholder => placeholder.as_deref(),
+            ImageRole::Source => replaced.source.as_deref(),
+            ImageRole::Placeholder => replaced.placeholder.as_deref(),
         }
     }
 
@@ -849,7 +1018,7 @@ impl<T> Node<T> {
     }
 
     pub(crate) fn is_replaced(&self) -> bool {
-        matches!(self.content.as_deref(), Some(NodeContent::Replaced { .. }))
+        matches!(self.content.as_deref(), Some(NodeContent::Replaced(_)))
     }
 
     pub(crate) fn set_natural_size(&mut self, natural_size: NaturalSize) -> bool {
@@ -857,11 +1026,11 @@ impl<T> Node<T> {
             return false;
         }
         let (source, placeholder) = self.take_image_sources();
-        self.content = Some(Box::new(NodeContent::Replaced {
+        self.content = Some(Box::new(NodeContent::Replaced(Box::new(Replaced {
             natural_size,
             source,
             placeholder,
-        }));
+        }))));
         true
     }
 
@@ -910,22 +1079,20 @@ impl<T> Node<T> {
             return;
         }
         let natural_size = self.natural_size();
-        self.content = Some(Box::new(NodeContent::Replaced {
+        self.content = Some(Box::new(NodeContent::Replaced(Box::new(Replaced {
             natural_size,
             source,
             placeholder,
-        }));
+        }))));
     }
 
     /// Moves both sources out of the current content, so rewriting one half of
     /// a replaced element's state neither copies the strings nor drops them.
     fn take_image_sources(&mut self) -> (Option<Box<str>>, Option<Box<str>>) {
         match self.content.as_deref_mut() {
-            Some(NodeContent::Replaced {
-                source,
-                placeholder,
-                ..
-            }) => (source.take(), placeholder.take()),
+            Some(NodeContent::Replaced(replaced)) => {
+                (replaced.source.take(), replaced.placeholder.take())
+            }
             _ => (None, None),
         }
     }
@@ -933,17 +1100,17 @@ impl<T> Node<T> {
     #[cfg(feature = "layout-test-utils")]
     pub(crate) fn test_leaf_metrics(&self) -> Option<LeafMetrics> {
         match self.content.as_deref() {
-            Some(NodeContent::Test(metrics)) => Some(*metrics),
+            Some(NodeContent::Test(metrics)) => Some(**metrics),
             _ => None,
         }
     }
 
     #[cfg(feature = "layout-test-utils")]
     pub(crate) fn set_test_leaf_metrics(&mut self, metrics: LeafMetrics) {
-        self.content = Some(Box::new(NodeContent::Test(metrics)));
+        self.content = Some(Box::new(NodeContent::Test(Box::new(metrics))));
     }
 
-    pub(crate) fn set_literal_text(&mut self, text: Option<String>) {
+    pub(crate) fn set_literal_text(&mut self, text: Option<Box<str>>) {
         self.content = text.map(|value| Box::new(NodeContent::Text(value)));
     }
 
@@ -1215,6 +1382,8 @@ impl<T> ExactSizeIterator for ChildrenIter<'_, T> {}
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use std::sync::atomic::AtomicIsize;
+
     use seldon::text::FontBlob;
     use stylo::dom::TElement;
 
@@ -1233,9 +1402,10 @@ mod tests {
         // `Option<NodeId>` has a niche where `Option<usize>` had none, so the
         // parent link costs 8 bytes rather than 16. Presentational hints add
         // one optional Arc; the declaration block allocates only when used.
+        // No node keeps Stylo's postorder child counter (`StylingData`).
         assert_eq!(
             std::mem::size_of::<Node<()>>(),
-            if cfg!(debug_assertions) { 232 } else { 224 }
+            if cfg!(debug_assertions) { 224 } else { 216 }
         );
         assert!(
             std::mem::size_of::<NodeData>() < PRE_BOXING_NODE_DATA_SIZE,
@@ -1264,8 +1434,13 @@ mod tests {
         }
 
         assert_eq!(std::mem::size_of::<PreviousStylingData>(), 32);
-        assert_eq!(std::mem::size_of::<StylingData>(), 24);
-        assert_eq!(std::mem::size_of::<usize>(), 32 - 24);
+        assert_eq!(std::mem::size_of::<StylingData>(), 16);
+        // The snapshot pointer, and the postorder child counter no traversal
+        // here uses (`RecalcStyle::needs_postorder_traversal` is false).
+        assert_eq!(
+            std::mem::size_of::<usize>() + std::mem::size_of::<AtomicIsize>(),
+            32 - 16
+        );
     }
 
     #[test]
@@ -1376,5 +1551,41 @@ mod tests {
         // establishes it.
         let (_, slot) = document.layout_state_mut().text_store_parts(text_slot);
         assert!(slot.is_none());
+    }
+
+    /// The basis bit follows the element's style through the harvest: a
+    /// width that turns from a percentage into a length makes the element
+    /// basis-free, and back.
+    #[test]
+    fn the_harvest_reevaluates_whether_layout_reads_the_basis() {
+        let mut document = Document::new(crate::tree::document::tests::device(), "page", ());
+        let root = document.document_element().id();
+        let element = document.create_element("view", ());
+        document.append_child(root, element);
+        let run = document.create_text_node("run", ());
+        document.append_child(element, run);
+        let reads = |document: &Document<()>| {
+            document
+                .get(element)
+                .unwrap()
+                .layout_reads_percentage_basis()
+        };
+        assert!(reads(&document), "never styled: conservatively reads it");
+
+        document.set_inline_style(element, "display: flex; width: 50%");
+        document.layout();
+        assert!(reads(&document));
+        assert!(
+            document.get(run).unwrap().layout_reads_percentage_basis(),
+            "a text node has no style and reads it"
+        );
+
+        document.set_inline_style(element, "display: flex; width: 10px");
+        document.layout();
+        assert!(!reads(&document));
+
+        document.set_inline_style(element, "display: flex; width: 10px; padding-left: 5%");
+        document.layout();
+        assert!(reads(&document));
     }
 }

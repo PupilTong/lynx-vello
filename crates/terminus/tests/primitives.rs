@@ -318,7 +318,7 @@ fn inline_style_setter_parses_replaces_and_clears_observable_style() {
     doc.set_inline_style(view, "color: red; definitely-not-a-property: 1");
     doc.layout();
     assert_eq!(
-        doc.get(view).unwrap().attribute("style"),
+        doc.get(view).unwrap().attribute("style").as_deref(),
         Some("color: red; definitely-not-a-property: 1")
     );
     assert_eq!(
@@ -345,7 +345,10 @@ fn inline_style_setter_parses_replaces_and_clears_observable_style() {
 
     doc.set_inline_style(view, "");
     doc.layout();
-    assert_eq!(doc.get(view).unwrap().attribute("style"), Some(""));
+    assert_eq!(
+        doc.get(view).unwrap().attribute("style").as_deref(),
+        Some("")
+    );
     assert_ne!(
         doc.get(view)
             .unwrap()
@@ -383,10 +386,13 @@ fn inline_style_property_updates_merge_remove_and_reject_invalid_values() {
         common::rgb(0, 0, 255),
     );
 
-    let unchanged = style.to_owned();
+    let unchanged = style.into_owned();
     doc.set_inline_style_property(view, "definitely-not-a-property", "1");
     doc.set_inline_style_property(view, "color", "green !important");
-    assert_eq!(doc.get(view).unwrap().attribute("style"), Some(&*unchanged));
+    assert_eq!(
+        doc.get(view).unwrap().attribute("style").as_deref(),
+        Some(&*unchanged)
+    );
 
     doc.set_inline_style_property(view, "color", "");
     doc.layout();
@@ -404,7 +410,10 @@ fn inline_style_property_updates_merge_remove_and_reject_invalid_values() {
     );
 
     doc.set_inline_style_property(view, "width", "");
-    assert_eq!(doc.get(view).unwrap().attribute("style"), Some(""));
+    assert_eq!(
+        doc.get(view).unwrap().attribute("style").as_deref(),
+        Some("")
+    );
 }
 
 #[test]
@@ -550,7 +559,7 @@ fn attributes_come_only_from_the_real_map() {
     let ns = stylo::Namespace::default();
     let title = stylo::LocalName::from("title");
     assert_eq!(
-        elem.attribute("title"),
+        elem.attribute("title").as_deref(),
         Some("hi"),
         "the accessor sees the DOM attribute"
     );

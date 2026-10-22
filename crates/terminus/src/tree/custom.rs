@@ -1039,7 +1039,10 @@ impl<T> Document<T> {
         if !self.observes_attribute(element, name) {
             return;
         }
-        let old = self.live(element).attr_local_name(name).map(str::to_owned);
+        let old = self
+            .live(element)
+            .attr_local_name(name)
+            .map(std::borrow::Cow::into_owned);
         self.enqueue_reaction(
             element,
             Reaction::AttributeChanged {

@@ -8,12 +8,20 @@
 //! placement, stacking and the container's stacking-axis size are Level 3's
 //! own.
 //!
-//! §3.4.2's virtual-item grouping is deliberately not implemented. A
-//! contribution here depends on the tracks the item spans — both the automatic
-//! minimum and the fixed-maximum clamp read them — so a group maximum would
-//! have to be recomputed per candidate position anyway. The algorithm instead
-//! clones one sizing item per candidate start position, and builds no clones
-//! at all unless some track consults its items.
+//! Grid-axis sizing groups the span-1 items in the manner of §3.4.2's virtual
+//! items: every span-1 item that may sit in a track — the definite-position
+//! ones placed there and every auto-placed one — contributes through one
+//! aggregate entry per track, whose contributions are the maxima of its
+//! members' (`sizing::LaneSizingItems`). A contribution depends on the track
+//! only through the automatic minimum and the fixed-maximum clamp, which the
+//! aggregate keeps apart and applies per track, and every step that reads a
+//! span-1 contribution takes a maximum through monotone operations, so the
+//! tracks come out bit-for-bit as with one clone per candidate position — a
+//! debug build sizes both ways and compares. An item spanning several tracks
+//! is still cloned per candidate start position, since spreading a spanning
+//! contribution over its tracks is not shown to commute with the maximum in
+//! floating point. No entry is built at all unless some track consults its
+//! items.
 //!
 //! Also not implemented: `inline-grid-lanes`; an orientation property and
 //! `grid-auto-flow: normal`; `dense` backfilling (§4.4 step 4); §3.1.1's
@@ -31,8 +39,8 @@ use stylo::values::specified::align::AlignFlags;
 use super::alignment::{align_tracks, alignment_spacing_from_free_space, item_alignment_offset};
 use super::placement::{AxisPlacement, GridArea, TrackSpan, resolve_axis_placement};
 use super::sizing::{
-    CrossAxisTracks, IntrinsicSizingScratch, initialize_tracks, resolve_item_intrinsic_dimensions,
-    size_tracks, track_sizing_reads_items,
+    CrossAxisTracks, GroupMaxima, IntrinsicSizingScratch, LaneEntry, LaneSizingItems,
+    initialize_tracks, resolve_item_intrinsic_dimensions, size_tracks, track_sizing_reads_items,
 };
 use super::tracks::{
     AxisTrackSpec, GRID_LINE_LIMIT, MAX_MATERIALIZED_TRACKS, build_axis_tracks, expand_template,
@@ -174,44 +182,157 @@ fn grid_axis_area(axis: Axis, span: TrackSpan) -> GridArea {
     }
 }
 
-/// §3.4: a definite-position item contributes once, at its own span; an
-/// auto-placed item is assumed to sit at every start position its span fits
-/// and contributes once per position.
-fn sizing_items<N: Copy>(
+/// §3.4: every candidate position of every item, in item order: a
+/// definite-position item's own span, then each start an auto-placed item's
+/// span fits.
+fn candidate_positions<'a>(
+    placements: &'a [AxisPlacement],
+    collapsed: &'a [bool],
+    first_line: i32,
+) -> impl Iterator<Item = (usize, TrackSpan)> + 'a {
+    let count = collapsed.len();
+    placements
+        .iter()
+        .enumerate()
+        .flat_map(move |(index, placement)| {
+            let (definite, auto_span) = match *placement {
+                AxisPlacement::Definite(span) => (Some(span), None),
+                AxisPlacement::Indefinite { span } => (None, Some(span.min(count).max(1))),
+            };
+            let auto_positions = auto_span.into_iter().flat_map(move |span| {
+                (0..=count - span)
+                    .filter(move |&start| window_is_open(collapsed, start, span))
+                    .map(move |start| {
+                        let start_line = first_line + line_offset(start);
+                        TrackSpan {
+                            start: start_line,
+                            end: start_line + line_offset(span),
+                        }
+                    })
+            });
+            definite
+                .into_iter()
+                .chain(auto_positions)
+                .map(move |span| (index, span))
+        })
+}
+
+/// The number of tracks an item spans at each of its candidate positions.
+#[inline]
+fn placement_span(placement: AxisPlacement, count: usize) -> usize {
+    match placement {
+        AxisPlacement::Definite(span) => usize::try_from(span.end - span.start).unwrap_or(1).max(1),
+        AxisPlacement::Indefinite { span } => span.min(count).max(1),
+    }
+}
+
+/// §3.4's sizing entries (see the module docs): a working copy of every
+/// span-1 item, one aggregate per track any of them may sit in, and a clone
+/// of every spanning item at each of its candidate positions.
+fn sizing_entries<N: Copy>(
     items: &[GridItem<N>],
+    placements: &[AxisPlacement],
+    collapsed: &[bool],
+    tracks: &TrackSet,
+    axis: Axis,
+) -> LaneSizingItems<N> {
+    let count = collapsed.len();
+    let first_line = tracks.first_coordinate;
+    let mut sizing = LaneSizingItems::empty();
+    let mut definite = Vec::new();
+    for (item, placement) in items.iter().zip(placements) {
+        if placement_span(*placement, count) != 1 {
+            continue;
+        }
+        let work = sizing.work.len();
+        sizing.work.push(item.clone());
+        match *placement {
+            AxisPlacement::Definite(span) => definite.push((tracks.index_of(span.start), work)),
+            AxisPlacement::Indefinite { .. } => sizing.pooled.push(work),
+        }
+    }
+    for (index, span) in candidate_positions(placements, collapsed, first_line) {
+        if placement_span(placements[index], count) == 1 {
+            continue;
+        }
+        let mut clone = items[index].clone();
+        clone.area = grid_axis_area(axis, span);
+        sizing.entries.push(LaneEntry::Item(clone));
+    }
+    definite.sort_by_key(|&(track, _)| track);
+    let mut next = 0;
+    for track in 0..count {
+        let first_member = sizing.members.len();
+        while next < definite.len() && definite[next].0 == track {
+            sizing.members.push(definite[next].1);
+            next += 1;
+        }
+        let pooled = !sizing.pooled.is_empty() && window_is_open(collapsed, track, 1);
+        if sizing.members.len() > first_member || pooled {
+            let line = first_line + line_offset(track);
+            sizing.entries.push(LaneEntry::Aggregate {
+                span: TrackSpan {
+                    start: line,
+                    end: line + 1,
+                },
+                members: first_member..sizing.members.len(),
+                pooled,
+                maxima: GroupMaxima::default(),
+            });
+        }
+    }
+    // §12.5 step 4 reads the flex factors the per-position entries span,
+    // summed in their order; the aggregates stand for several of them.
+    sizing.spanned_flex_sum = candidate_positions(placements, collapsed, first_line)
+        .flat_map(|(_, span)| {
+            tracks.tracks[tracks.span_indices(span.start, span.end)]
+                .iter()
+                .filter(|track| track.is_flexible())
+                .map(|track| track.flex_factor)
+        })
+        .sum::<f32>();
+    sizing
+}
+
+/// The per-position clones `sizing_entries` stands for, one per item and
+/// candidate position in item order, copied from the run's working copies
+/// and spanning clones so that their measurements are not taken again.
+#[cfg(debug_assertions)]
+fn per_position_items<N: Copy>(
+    sizing: &LaneSizingItems<N>,
     placements: &[AxisPlacement],
     collapsed: &[bool],
     first_line: i32,
     axis: Axis,
 ) -> Vec<GridItem<N>> {
     let count = collapsed.len();
-    let mut sizing = Vec::with_capacity(items.len());
-    let mut push = |item: &GridItem<N>, span: TrackSpan| {
-        let mut clone = item.clone();
-        clone.area = grid_axis_area(axis, span);
-        sizing.push(clone);
-    };
-    for (item, placement) in items.iter().zip(placements) {
-        match *placement {
-            AxisPlacement::Definite(span) => push(item, span),
-            AxisPlacement::Indefinite { span } => {
-                let span = span.min(count).max(1);
-                for start in
-                    (0..=count - span).filter(|&start| window_is_open(collapsed, start, span))
-                {
-                    let start_line = first_line + line_offset(start);
-                    push(
-                        item,
-                        TrackSpan {
-                            start: start_line,
-                            end: start_line + line_offset(span),
-                        },
-                    );
-                }
-            }
+    let mut work_of = Vec::with_capacity(placements.len());
+    let mut work = 0;
+    for placement in placements {
+        if placement_span(*placement, count) == 1 {
+            work_of.push(Some(work));
+            work += 1;
+        } else {
+            work_of.push(None);
         }
     }
-    sizing
+    let mut spanning = sizing.entries.iter().filter_map(|entry| match entry {
+        LaneEntry::Item(item) => Some(item),
+        LaneEntry::Aggregate { .. } => None,
+    });
+    candidate_positions(placements, collapsed, first_line)
+        .map(|(index, span)| match work_of[index] {
+            Some(work) => {
+                let mut clone = sizing.work[work].clone();
+                clone.area = grid_axis_area(axis, span);
+                clone
+            }
+            None => spanning
+                .next()
+                .expect("one spanning clone per candidate position")
+                .clone(),
+        })
+        .collect()
 }
 
 #[inline]
@@ -240,13 +361,14 @@ fn size_grid_axis<T>(
     T: LayoutTree,
 {
     initialize_tracks(tracks, specs, axis.size(basis), gap);
-    // Nothing reads the per-position clones unless some track consults the
-    // items placed in it, so an all-fixed grid axis builds none of them. The
+    // Nothing reads the sizing entries unless some track consults the items
+    // placed in it, so an all-fixed grid axis builds none of them. The
     // condition is `size_tracks`'s own, borrowed rather than restated.
-    let mut sizing = if track_sizing_reads_items(tracks) {
-        sizing_items(items, placements, collapsed, tracks.first_coordinate, axis)
+    let reads_items = track_sizing_reads_items(tracks);
+    let mut sizing = if reads_items {
+        sizing_entries(items, placements, collapsed, tracks, axis)
     } else {
-        Vec::new()
+        LaneSizingItems::empty()
     };
     size_tracks(
         tree,
@@ -260,6 +382,49 @@ fn size_grid_axis<T>(
         alignment,
         scratch,
     );
+    // The aggregates must size the tracks exactly as one clone per candidate
+    // position would.
+    #[cfg(debug_assertions)]
+    if reads_items {
+        let mut per_position = per_position_items(
+            &sizing,
+            placements,
+            collapsed,
+            tracks.first_coordinate,
+            axis,
+        );
+        let mut expected = TrackSet::default();
+        initialize_tracks(&mut expected, specs, axis.size(basis), gap);
+        size_tracks(
+            tree,
+            state,
+            axis,
+            &mut expected,
+            None,
+            per_position.as_mut_slice(),
+            basis,
+            available,
+            alignment,
+            &mut IntrinsicSizingScratch::default(),
+        );
+        for (index, (track, expected)) in tracks.tracks.iter().zip(&expected.tracks).enumerate() {
+            // The aggregation is exact, not close: the same numbers.
+            #[allow(clippy::float_cmp)]
+            let same = track.base == expected.base
+                && track.growth_limit == expected.growth_limit
+                && track.position == expected.position;
+            debug_assert!(
+                same,
+                "grid-lanes track {index}: aggregated {} / {} at {}, per position {} / {} at {}",
+                track.base,
+                track.growth_limit,
+                track.position,
+                expected.base,
+                expected.growth_limit,
+                expected.position,
+            );
+        }
+    }
 }
 
 /// One in-flow item after placement, before the stacking-axis content
@@ -295,6 +460,7 @@ struct PlacedItem<N> {
 }
 
 /// Everything §4.4's pass reads that is fixed for the whole pass.
+#[allow(clippy::struct_excessive_bools)]
 struct LanesContext<'a> {
     grid_axis: Axis,
     tracks: &'a TrackSet,
@@ -313,6 +479,9 @@ struct LanesContext<'a> {
     /// so give that baseline (§6.5), is known only once every item is
     /// placed, so each item's measurement is asked for its own.
     reads_last_baseline: bool,
+    /// The container's own measurement was asked for its first baseline
+    /// (`LayoutInput::reads_first_baseline`), which any item may give.
+    reads_first_baseline: bool,
 }
 
 struct LanesPass<N> {
@@ -421,7 +590,8 @@ where
             state,
             item.key.node,
             LayoutInput::new(item_goal, known, area, available)
-                .reading_last_baseline(context.reads_last_baseline && !item_goal.commits()),
+                .reading_last_baseline(context.reads_last_baseline && !item_goal.commits())
+                .reading_first_baseline(context.reads_first_baseline && !item_goal.commits()),
         );
 
         // Auto margins take the grid-axis free space; in the stacking axis
@@ -874,6 +1044,7 @@ where
         goal: container_goal,
         all_tracks_fixed,
         reads_last_baseline: input.reads_last_baseline && !input.goal.commits(),
+        reads_first_baseline: input.reads_first_baseline && !input.goal.commits(),
     };
     let stacking_content = |range: f32| stacking_axis.size(contained.extents()).unwrap_or(range);
     // A percentage stacking gutter against an indefinite stacking size is

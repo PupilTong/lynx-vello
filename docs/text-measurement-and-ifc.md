@@ -190,70 +190,32 @@ geometry around a node moves; the shaped layout dies only when the text, or the
 style Parley shaped it from, changes. `clear_box_cache` and
 `clear_layout_cache` (`crates/terminus/src/tree/arena.rs`) are the two answers.
 
-The style harvest picks between them per relayout-damaged element
-(`Document::invalidate_text_children`). Text children *always* lose their box
-cache — `invalidate_layout` walks up, so nothing else clears a text child's
-committed measurement — and lose their shaped layout only when
-`shaping_inputs_changed` says so.
+A paragraph is retained by the element that establishes it, never by a text
+node: a text node is content of that paragraph, lays out as a hidden leaf, and
+files no layout state of its own. A relayout-damaged restyle therefore clears
+box caches only (`Document::invalidate_layout`, which walks up from the
+element). Whether the retained paragraph survives is the paragraph's own
+question, answered when it is next laid out.
 
-### 3.1 The two levels
+### 3.1 The paragraph's own check
 
-`shaping_inputs_changed` (`crates/terminus/src/layout/style.rs`):
-
-1. **Pointer comparison** on `get_font()` and `get_inherited_text()`. Stylo
-   allocates a fresh style struct only when the cascade actually applies a
-   declaration in it (`StyleStructRef::build` re-shares a borrowed struct as
-   the same allocation), so a purely geometric restyle answers here for free.
-   This is the same test Stylo's own generated damage functions use.
-2. **Field comparison**, only when a pointer differs, narrowed to the inputs
-   themselves. This is what earns level one its keep: `text-align`,
-   `text-indent`, `color`, `text-shadow` and the `-webkit-text-stroke` pair
-   share `InheritedText` with `letter-spacing`, `word-break`,
-   `text-wrap-mode` and `white-space-collapse`, so a struct-granular answer
-   alone would still re-shape a paragraph whose only change was its alignment.
-
-`direction` is deliberately absent: Parley is never told a base direction (bidi
-comes from the text), so `direction` only selects the alignment a commit
-re-applies anyway.
-
-The verdict has to be taken inside `Node::refresh_layout_style`, while the old
-and new styles are both alive. The caller sees only the new one, and the old
-structs can be freed — and their addresses reused — the moment the swap
-returns.
+Each retained paragraph keeps a hash of the flattened content it was shaped
+from and, compared by equality, the block and run styles Parley shapes from
+(`BlockStyle`, `RunStyle`). The next measurement rebuilds it when either
+differs (`text_block.rs`, `inline_flow.rs`). Alignment, indentation and
+truncation are applied to a finished layout, so a change there is a re-break
+at most.
 
 `a_relayout_keeps_shaped_text_unless_the_shaping_inputs_moved` pins the
 distinction property by property.
 
-### 3.2 The fingerprint
+### 3.2 An animated `font-size`
 
-Keeping an artifact across a restyle is exactly the optimisation that fails
-silently: a missed eviction paints stale glyphs and nothing else goes wrong.
-Debug builds therefore hash, on every measurement, precisely the content and
-style values that reach Parley's shaper — the run texts, `preserve_newlines`,
-each run's family/size/weight/style/letter-spacing/line-height/features/
-variations, and the container's `white-space-collapse`/`word-break`/
-`text-wrap-mode` — and assert the retained layout was shaped from the same
-ones. `a_retained_layout_that_outlived_its_content_is_caught` trips it
-deliberately.
-
-The fingerprint is the oracle for §3.1's field list. If a shaping input is
-added to `translate_run_style` and not to `shaping_inputs_changed`, this is
-what says so.
-
-### 3.3 A defect the fingerprint's premise found
-
-`harvest_animation_damage` mirrors the style harvest but omitted the
-text-children invalidation entirely, so an animated `font-size`,
-`letter-spacing` or `line-height` on a `text` element never re-measured its
-text child: the element restyled and re-laid-out while the child answered from
-the box cache it filled at the first font size. `@keyframes grow { from
-{ font-size: 16px } to { font-size: 32px } }` held the text at 16px for the
-whole animation.
-
-Fixed by routing both harvests through the same
-`invalidate_text_children`. `an_animated_font_size_remeasures_the_text_it_scales`
-(`crates/terminus/tests/animation_driver.rs`) fails on the pre-fix code with
-`80.0 != 120.0`.
+`harvest_animation_damage` mirrors the style harvest: an animated `font-size`,
+`letter-spacing` or `line-height` on a `text` element relays it out through
+`invalidate_layout`, and the paragraph's run styles move with the size.
+`an_animated_font_size_remeasures_the_text_it_scales`
+(`crates/terminus/tests/animation_driver.rs`) pins it.
 
 ---
 

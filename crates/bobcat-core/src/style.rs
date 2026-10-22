@@ -17,6 +17,8 @@
 //! parsing, and property-name resolution for the shorthand-expanding
 //! properties — is skipped.
 
+use std::borrow::Cow;
+
 use terminus::link::{CssDeclaration, CssKeyframe, CssRule, NodeId, StylesheetOrigin};
 
 use crate::main::tree::LynxDocument;
@@ -83,8 +85,10 @@ pub struct PreparsedKeyframe {
 /// One `property: value` declaration whose value text the host already has.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparsedDeclaration {
-    /// The property name.
-    pub property: String,
+    /// The property name. Borrowed when the host's decoder already holds it
+    /// as a `'static` name — an interned property id's canonical name — so a
+    /// lowered sheet does not allocate one string per declaration for it.
+    pub property: Cow<'static, str>,
     /// The value text, without a trailing `!important`.
     pub value: String,
     /// Whether the declaration carries `!important`.
@@ -93,7 +97,7 @@ pub struct PreparsedDeclaration {
 
 fn declarations(source: &[PreparsedDeclaration]) -> impl Iterator<Item = CssDeclaration<'_>> {
     source.iter().map(|declaration| CssDeclaration {
-        property: declaration.property.as_str(),
+        property: &declaration.property,
         value: declaration.value.as_str().into(),
         important: declaration.important,
     })
@@ -194,7 +198,7 @@ mod tests {
 
     fn declaration(property: &str, value: &str) -> PreparsedDeclaration {
         PreparsedDeclaration {
-            property: property.to_owned(),
+            property: property.to_owned().into(),
             value: value.to_owned(),
             important: false,
         }

@@ -255,7 +255,7 @@ impl ScriptHarness {
             document
                 .get(node)
                 .and_then(|node| node.attribute("style"))
-                .map(str::to_owned)
+                .map(std::borrow::Cow::into_owned)
         })
     }
 

@@ -758,17 +758,15 @@ fn measure_item<T>(
             AvailableSpace::Definite,
         ),
     );
-    let output = measure_child(
-        tree,
-        state,
-        item.key.node,
+    let mut input = LayoutInput::measure(
         known,
-        known_definite,
         percentage_basis,
         child_available,
-        SizingMode::ApplySizeStyles,
         RequestedAxis::Both,
-    );
+    )
+    .reading_first_baseline(needs_probe_baseline);
+    input.definite_dimensions = known_definite;
+    let output = tree.compute_layout(state, item.key.node, input);
     item.main_size = forced_main.unwrap_or_else(|| {
         clamp_axis(
             axes.main.size(output.size),
@@ -909,13 +907,17 @@ fn size_items<T>(
     constraint_inner_size: Size<Option<f32>>,
     available_space: Size<AvailableSpace>,
     weight_sum: f32,
-    needs_probe_baseline: bool,
+    first_baseline_requested: bool,
     container_independent: Option<Size<bool>>,
 ) where
     T: LayoutTree,
 {
+    // The items the container's first baseline is read from
+    // (`container_baseline`): every one in a row, the first in a column.
+    let needs_probe_baseline =
+        |index: usize| first_baseline_requested && (axes.main == Axis::Horizontal || index == 0);
     let constrained_main = axes.main.size(constraint_inner_size);
-    for item in items.iter_mut() {
+    for (index, item) in items.iter_mut().enumerate() {
         resolve_intrinsic_sizes(tree, state, item, percentage_basis);
         if !(constrained_main.is_some() && item.weight > 0.0) {
             measure_item(
@@ -927,7 +929,7 @@ fn size_items<T>(
                 constraint_inner_size,
                 available_space,
                 None,
-                needs_probe_baseline,
+                needs_probe_baseline(index),
                 container_independent,
             );
         }
@@ -935,7 +937,11 @@ fn size_items<T>(
 
     if let Some(inner_main) = constrained_main {
         distribute_weighted_items(items, axes, inner_main, weight_sum);
-        for item in items.iter_mut().filter(|item| item.weight > 0.0) {
+        for (index, item) in items
+            .iter_mut()
+            .enumerate()
+            .filter(|(_, item)| item.weight > 0.0)
+        {
             let resolved_main = item.main_size;
             measure_item(
                 tree,
@@ -946,7 +952,7 @@ fn size_items<T>(
                 constraint_inner_size,
                 available_space,
                 Some(resolved_main),
-                needs_probe_baseline,
+                needs_probe_baseline(index),
                 container_independent,
             );
         }
@@ -1526,7 +1532,10 @@ where
         inner_size,
         inner_available_space,
         weight_sum,
-        !commits_layout && !layout_contained,
+        // A measurement probes the items its first baseline is read from only
+        // when its caller reads that baseline; a commit reads the committed
+        // items' (`commit_in_flow`).
+        input.reads_first_baseline && !commits_layout && !layout_contained,
         container_independent,
     );
     let (natural, used_main) = natural_content_size(&items, axes);

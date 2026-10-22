@@ -40,7 +40,7 @@ use stylo::LocalName;
 use stylo::author_styles::AuthorStyles;
 
 use crate::style::engine::ShadowStyleSheet;
-use crate::tree::document::{Document, NodeId, NodeSlot, PayloadSlot};
+use crate::tree::document::{Document, NodeId, NodeSlot};
 use crate::tree::node::Node;
 
 static SLOT: LazyLock<LocalName> = LazyLock::new(|| LocalName::from("slot"));
@@ -249,7 +249,7 @@ impl<T> Node<T> {
 
     #[must_use]
     pub(crate) fn has_part_attr(&self) -> bool {
-        self.attr_local_name(&PART).is_some()
+        self.plain_attr(&PART).is_some()
     }
 
     #[must_use]
@@ -258,13 +258,13 @@ impl<T> Node<T> {
     }
 
     pub(crate) fn part_names(&self) -> impl Iterator<Item = &str> {
-        self.attr_local_name(&PART)
+        self.plain_attr(&PART)
             .unwrap_or_default()
             .split_whitespace()
     }
 
     fn exported_parts(&self) -> impl Iterator<Item = (&str, &str)> {
-        self.attr_local_name(&EXPORT_PARTS)
+        self.plain_attr(&EXPORT_PARTS)
             .unwrap_or_default()
             .split(',')
             .filter_map(|mapping| {
@@ -289,7 +289,7 @@ impl<T> Node<T> {
 
     #[must_use]
     pub(crate) fn exports_any_part(&self) -> bool {
-        self.attr_local_name(&EXPORT_PARTS).is_some()
+        self.plain_attr(&EXPORT_PARTS).is_some()
     }
 
     #[must_use]
@@ -321,7 +321,7 @@ impl<T> Document<T> {
             "Document::attach_shadow: the host already hosts a shadow root"
         );
         let host_slot = self.live_slot(host);
-        let root = self.allocate_node(PayloadSlot::ShadowRoot, |owner, id| {
+        let root = self.allocate_node(|owner, id| {
             Node::new_shadow_root(owner, id, ShadowRootData::new(host_slot, mode))
         });
         let root_slot = self.live_slot(root);
@@ -551,11 +551,11 @@ impl<T> Document<T> {
     }
 
     fn matching_slot(&self, shadow_root: NodeId, child: NodeId) -> Option<NodeId> {
-        let wanted = self.get(child)?.attr_local_name(&SLOT).unwrap_or_default();
+        let wanted = self.get(child)?.plain_attr(&SLOT).unwrap_or_default();
         let slots = self.get(shadow_root)?.shadow_data()?.slots.as_ref()?;
         slots.iter().copied().find(|&slot| {
             self.get(slot)
-                .is_some_and(|slot| slot.attr_local_name(&NAME).unwrap_or_default() == wanted)
+                .is_some_and(|slot| slot.plain_attr(&NAME).unwrap_or_default() == wanted)
         })
     }
 
@@ -640,7 +640,7 @@ impl<T> Document<T> {
             .map(|&slot| {
                 let name = self
                     .live(slot)
-                    .attr_local_name(&NAME)
+                    .plain_attr(&NAME)
                     .unwrap_or_default()
                     .to_owned();
                 (slot, name, Vec::new())
@@ -654,7 +654,7 @@ impl<T> Document<T> {
             if !(node.is_element() || node.is_text_node()) {
                 continue;
             }
-            let wanted = node.attr_local_name(&SLOT).unwrap_or_default();
+            let wanted = node.plain_attr(&SLOT).unwrap_or_default();
             let matched = slots.iter_mut().find(|(_, name, _)| name == wanted);
             match matched {
                 Some((slot, _, nodes)) => {

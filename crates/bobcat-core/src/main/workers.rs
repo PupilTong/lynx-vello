@@ -21,7 +21,7 @@ use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use quickjs_rust_bridge::HostValue;
+use quickjs_rust_bridge::{HostArgument, HostValue};
 use rustc_hash::FxHashMap;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -216,7 +216,9 @@ impl WorkerOwner {
                 // Any value the boundary carries. A value the serializer
                 // refuses throws in the realm that called `postMessage`, so
                 // nothing here has to decide what a message may be.
-                let data = arguments.get(1).cloned().unwrap_or(HostValue::Undefined);
+                let data = arguments
+                    .get(1)
+                    .map_or(HostValue::Undefined, |data| data.to_value());
                 if let Some(sender) = sender.upgrade() {
                     sender.post(key, WorkerMessage::Post(data));
                 }
@@ -402,16 +404,16 @@ impl Drop for WorkerOwner {
     }
 }
 
-fn string(arguments: &[HostValue], index: usize) -> Result<&str, String> {
+fn string<'a>(arguments: &[HostArgument<'a>], index: usize) -> Result<&'a str, String> {
     match arguments.get(index) {
-        Some(HostValue::String(value)) => Ok(value),
+        Some(&HostArgument::String(value)) => Ok(value),
         _ => Err(format!(
             "Worker host operation expects string argument {index}"
         )),
     }
 }
 
-fn key(arguments: &[HostValue]) -> Result<WorkerKey, String> {
+fn key(arguments: &[HostArgument<'_>]) -> Result<WorkerKey, String> {
     string(arguments, 0)?
         .parse()
         .map(WorkerKey::new)

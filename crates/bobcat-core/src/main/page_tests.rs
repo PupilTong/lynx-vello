@@ -752,7 +752,7 @@ impl terminus::link::CustomElement<()> for Recorder {
             .get(event.target())
             .and_then(|node| node.attribute("id"))
             .expect("every target here is a live row")
-            .to_owned();
+            .into_owned();
         let phase = match event.phase() {
             terminus::link::event::EventPhase::Capturing => "capture",
             terminus::link::event::EventPhase::AtTarget => "at-target",
@@ -2214,7 +2214,7 @@ fn data_updates_are_visible_to_the_next_command_and_commit_without_an_explicit_f
                 }),
                 ToMain::Probe(Box::new(|document| {
                     let node = document.document_element().children().next().unwrap();
-                    assert_eq!(node.attribute("data-value"), Some("7"));
+                    assert_eq!(node.attribute("data-value").as_deref(), Some("7"));
                 })),
             ])
             .await;
@@ -2264,7 +2264,7 @@ async fn image_attributes(page: &Rc<Page>, name: &'static str) -> Option<String>
             document
                 .get(image)
                 .and_then(|node| node.attribute(name))
-                .map(str::to_owned),
+                .map(std::borrow::Cow::into_owned),
         );
     }))])
     .await;
@@ -2519,7 +2519,7 @@ async fn images_seen(page: &Rc<Page>) -> Vec<Option<String>> {
                 document
                     .get(*image)
                     .and_then(|node| node.attribute("data-seen"))
-                    .map(str::to_owned)
+                    .map(std::borrow::Cow::into_owned)
             })
             .collect();
         let _ = answer.send(seen);
@@ -2778,7 +2778,7 @@ async fn page_children_seen(page: &Rc<Page>) -> Vec<Option<String>> {
                 document
                     .get(*child)
                     .and_then(|node| node.attribute("data-seen"))
-                    .map(str::to_owned)
+                    .map(std::borrow::Cow::into_owned)
             })
             .collect();
         let _ = answer.send(seen);
@@ -2858,7 +2858,7 @@ async fn first_child_seen(harness: &mut Harness) -> Option<String> {
                 document
                     .get(first)
                     .and_then(|node| node.attribute("data-seen"))
-                    .map(str::to_owned),
+                    .map(std::borrow::Cow::into_owned),
             );
         })))
         .expect("the view is serving");
@@ -3083,7 +3083,7 @@ fn a_page_update_that_fails_is_reported_and_the_next_one_applies() {
                 update_command(2),
                 ToMain::Probe(Box::new(|document| {
                     let node = document.document_element().children().next().unwrap();
-                    assert_eq!(node.attribute("data-value"), Some("2"));
+                    assert_eq!(node.attribute("data-value").as_deref(), Some("2"));
                 })),
             ])
             .await;

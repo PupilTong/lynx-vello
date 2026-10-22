@@ -177,6 +177,8 @@
 //! (`crates/terminus/tests/grammar_layout.rs:342-351`), so there is nothing to
 //! rename and the real gap properties are what an author writes.
 
+use std::borrow::Cow;
+
 use serde_json::{Map, Value};
 use terminus::link::event::ElementEvent;
 use terminus::link::scroll::{ScrollBehavior, ScrollBox};
@@ -421,7 +423,7 @@ impl CustomElement<()> for List {
 fn is_horizontal(document: &LynxDocument, list: NodeId) -> bool {
     document
         .get(list)
-        .is_some_and(|node| node.attribute("scroll-orientation") == Some("horizontal"))
+        .is_some_and(|node| node.attribute("scroll-orientation").as_deref() == Some("horizontal"))
 }
 
 /// The zones the offset `scroll_box` holds lies in, on `list`'s scrolling
@@ -469,7 +471,7 @@ fn item_count(document: &LynxDocument, list: NodeId, name: &str) -> usize {
     document
         .get(list)
         .and_then(|node| node.attribute(name))
-        .and_then(parse_int)
+        .and_then(|value| parse_int(&value))
         .filter(|count| *count > 0.0)
         .map_or(0, |count| count as usize)
 }
@@ -623,6 +625,7 @@ fn target_cell(
             document
                 .get(*child)
                 .and_then(|node| node.attribute("item-key"))
+                .as_deref()
                 == Some(key)
         });
         if let Some(cell) = keyed {
@@ -733,8 +736,14 @@ pub(super) fn visible_cells(document: &LynxDocument, list: NodeId) -> Vec<Visibl
             }
             let rect = rect_in_scroller(document, list, node.id())?.translate(-scroll_box.offset);
             rect.intersects(&scrollport).then(|| VisibleCell {
-                id: node.attribute("id").unwrap_or_default().to_owned(),
-                item_key: node.attribute("item-key").unwrap_or_default().to_owned(),
+                id: node
+                    .attribute("id")
+                    .map(Cow::into_owned)
+                    .unwrap_or_default(),
+                item_key: node
+                    .attribute("item-key")
+                    .map(Cow::into_owned)
+                    .unwrap_or_default(),
                 index,
                 rect,
             })

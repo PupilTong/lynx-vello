@@ -45,8 +45,8 @@ impl Harness {
             .iter()
             .find(|item| item.node == id && item.kind == PaintItemKind::ElementBox)
             .expect("node paints an element box");
-        let baked = item
-            .transform
+        let baked = frame
+            .matrix(item.transform)
             .transform_point2d(Point2D::zero())
             .expect("a paintable item has a non-singular matrix");
         let offsets =
