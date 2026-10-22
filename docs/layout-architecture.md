@@ -1612,7 +1612,7 @@ computed `font_size`.
    auto-placed item is assumed to sit at every start position its span fits
    and contributes once per position. The span-1 items are grouped as
    §3.4.2's virtual items are: `sizing::LaneSizingItems` measures each one
-   once through a working copy and gives track sizing one aggregate entry per
+   once, in place, and gives track sizing one aggregate entry per
    track, standing for the definite-position items placed there and every
    auto-placed one, whose contributions are the maxima of its members'
    (`GroupMaxima`). A contribution depends on the track only through the

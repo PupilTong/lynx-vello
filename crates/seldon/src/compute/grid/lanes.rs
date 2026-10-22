@@ -228,35 +228,33 @@ fn placement_span(placement: AxisPlacement, count: usize) -> usize {
     }
 }
 
-/// §3.4's sizing entries (see the module docs): a working copy of every
-/// span-1 item, one aggregate per track any of them may sit in, and a clone
-/// of every spanning item at each of its candidate positions.
-fn sizing_entries<N: Copy>(
-    items: &[GridItem<N>],
+/// §3.4's sizing entries (see the module docs): one aggregate per track any
+/// span-1 item may sit in, over the items themselves, and a clone of every
+/// spanning item at each of its candidate positions.
+fn sizing_entries<'a, N: Copy>(
+    items: &'a mut [GridItem<N>],
     placements: &[AxisPlacement],
     tracks: &TrackSet,
     axis: Axis,
-) -> LaneSizingItems<N> {
+) -> LaneSizingItems<'a, N> {
     let count = tracks.tracks.len();
     let first_line = tracks.first_coordinate;
-    let mut sizing = LaneSizingItems::empty();
+    let mut sizing = LaneSizingItems::new(items);
     let mut definite = Vec::new();
-    for (item, placement) in items.iter().zip(placements) {
+    for (index, placement) in placements.iter().enumerate() {
         if placement_span(*placement, count) != 1 {
             continue;
         }
-        let work = sizing.work.len();
-        sizing.work.push(item.clone());
         match *placement {
-            AxisPlacement::Definite(span) => definite.push((tracks.index_of(span.start), work)),
-            AxisPlacement::Indefinite { .. } => sizing.pooled.push(work),
+            AxisPlacement::Definite(span) => definite.push((tracks.index_of(span.start), index)),
+            AxisPlacement::Indefinite { .. } => sizing.pooled.push(index),
         }
     }
     for (index, span) in candidate_positions(placements, &tracks.tracks, first_line) {
         if placement_span(placements[index], count) == 1 {
             continue;
         }
-        let mut clone = items[index].clone();
+        let mut clone = sizing.items[index].clone();
         clone.area = grid_axis_area(axis, span);
         sizing.entries.push(LaneEntry::Item(clone));
     }
@@ -296,42 +294,34 @@ fn sizing_entries<N: Copy>(
 }
 
 /// The per-position clones `sizing_entries` stands for, one per item and
-/// candidate position in item order, copied from the run's working copies
-/// and spanning clones so that their measurements are not taken again.
+/// candidate position in item order, copied from the span-1 items the run
+/// measured and from its spanning clones so that their measurements are not
+/// taken again.
 #[cfg(debug_assertions)]
 fn per_position_items<N: Copy>(
-    sizing: &LaneSizingItems<N>,
+    sizing: &LaneSizingItems<'_, N>,
     placements: &[AxisPlacement],
     tracks: &[Track],
     first_line: i32,
     axis: Axis,
 ) -> Vec<GridItem<N>> {
     let count = tracks.len();
-    let mut work_of = Vec::with_capacity(placements.len());
-    let mut work = 0;
-    for placement in placements {
-        if placement_span(*placement, count) == 1 {
-            work_of.push(Some(work));
-            work += 1;
-        } else {
-            work_of.push(None);
-        }
-    }
     let mut spanning = sizing.entries.iter().filter_map(|entry| match entry {
         LaneEntry::Item(item) => Some(item),
         LaneEntry::Aggregate { .. } => None,
     });
     candidate_positions(placements, tracks, first_line)
-        .map(|(index, span)| match work_of[index] {
-            Some(work) => {
-                let mut clone = sizing.work[work].clone();
+        .map(|(index, span)| {
+            if placement_span(placements[index], count) == 1 {
+                let mut clone = sizing.items[index].clone();
                 clone.area = grid_axis_area(axis, span);
                 clone
+            } else {
+                spanning
+                    .next()
+                    .expect("one spanning clone per candidate position")
+                    .clone()
             }
-            None => spanning
-                .next()
-                .expect("one spanning clone per candidate position")
-                .clone(),
         })
         .collect()
 }
@@ -350,7 +340,10 @@ fn size_grid_axis<T>(
     axis: Axis,
     tracks: &mut TrackSet,
     specs: &[AxisTrackSpec<'_>],
-    items: &[GridItem<T::NodeId>],
+    items: &mut [GridItem<T::NodeId>],
+    // The items are as `resolve_grid_item` built them: resolved against no
+    // basis, nothing measured.
+    items_fresh: bool,
     placements: &[AxisPlacement],
     basis: Size<Option<f32>>,
     gap: f32,
@@ -365,10 +358,22 @@ fn size_grid_axis<T>(
     // placed in it, so an all-fixed grid axis builds none of them. The
     // condition is `size_tracks`'s own, borrowed rather than restated.
     let reads_items = track_sizing_reads_items(tracks);
+    if reads_items && !items_fresh {
+        // An earlier run measured the span-1 items in place: undo what it
+        // wrote. Only an intrinsic keyword had a size filled in, and the
+        // spanning clones below are taken from the items too.
+        for item in items.iter_mut() {
+            if item.intrinsic.has_intrinsic() {
+                refresh_item_basis(tree, item, Size::NONE);
+            }
+            item.clear_contribution_cache(Axis::Horizontal);
+            item.clear_contribution_cache(Axis::Vertical);
+        }
+    }
     let mut sizing = if reads_items {
         sizing_entries(items, placements, tracks, axis)
     } else {
-        LaneSizingItems::empty()
+        LaneSizingItems::new(items)
     };
     size_tracks(
         tree,
@@ -943,6 +948,7 @@ where
         ..TrackSet::default()
     };
     let mut scratch = IntrinsicSizingScratch::default();
+    let mut items_fresh = true;
     let grid_basis = grid_axis.size(percentage_basis);
     let grid_alignment = grid_axis.size(content_alignment);
     // The grid axis's available grid space (css-grid-2 §12.1; see
@@ -965,7 +971,8 @@ where
                         grid_axis,
                         &mut tracks,
                         &specs,
-                        &items,
+                        &mut items,
+                        core::mem::take(&mut items_fresh),
                         &placements,
                         percentage_basis,
                         grid_axis.size(initial_gap),
@@ -985,7 +992,8 @@ where
             grid_axis,
             &mut tracks,
             &specs,
-            &items,
+            &mut items,
+            core::mem::take(&mut items_fresh),
             &placements,
             percentage_basis,
             grid_axis.size(initial_gap),
@@ -1019,7 +1027,8 @@ where
             grid_axis,
             &mut tracks,
             &specs,
-            &items,
+            &mut items,
+            core::mem::take(&mut items_fresh),
             &placements,
             grid_axis.pack(Some(grid_inner), stacking_axis.size(percentage_basis)),
             grid_gap,

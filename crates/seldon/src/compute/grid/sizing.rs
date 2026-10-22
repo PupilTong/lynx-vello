@@ -1828,7 +1828,7 @@ impl GroupMaxima {
         &mut self,
         tree: &T,
         state: &mut T::State,
-        work: &mut [GridItem<T::NodeId>],
+        items: &mut [GridItem<T::NodeId>],
         members: &[usize],
         axis: Axis,
         kind: ContributionKind,
@@ -1844,7 +1844,7 @@ impl GroupMaxima {
         };
         slot.get_or_compute(|| {
             max_of(members.iter().map(|&member| {
-                measure_contribution(tree, state, &mut work[member], axis, kind, tracks, None)
+                measure_contribution(tree, state, &mut items[member], axis, kind, tracks, None)
             }))
         })
     }
@@ -1856,7 +1856,7 @@ impl GroupMaxima {
         &mut self,
         tree: &T,
         state: &mut T::State,
-        work: &mut [GridItem<T::NodeId>],
+        items: &mut [GridItem<T::NodeId>],
         members: &[usize],
         axis: Axis,
         automatic: AutomaticMinimum,
@@ -1866,7 +1866,7 @@ impl GroupMaxima {
     {
         let fixed = self.fixed_min.get_or_compute(|| {
             max_of(members.iter().filter_map(|&member| {
-                let item = &mut work[member];
+                let item = &mut items[member];
                 if minimum_may_be_automatic(item, axis) {
                     return None;
                 }
@@ -1890,7 +1890,7 @@ impl GroupMaxima {
             AutomaticMinimum::Applies { limit } => {
                 let candidate = self.auto_min_candidate.get_or_compute(|| {
                     max_of(members.iter().filter_map(|&member| {
-                        let item = &mut work[member];
+                        let item = &mut items[member];
                         if !minimum_may_be_automatic(item, axis) {
                             return None;
                         }
@@ -1913,7 +1913,7 @@ impl GroupMaxima {
             }
             AutomaticMinimum::DoesNotApply => self.auto_min_fallback.get_or_compute(|| {
                 max_of(members.iter().filter_map(|&member| {
-                    let item = &mut work[member];
+                    let item = &mut items[member];
                     if !minimum_may_be_automatic(item, axis) {
                         return None;
                     }
@@ -1959,20 +1959,20 @@ pub(super) enum LaneEntry<N> {
 /// Grid-lanes' grid-axis sizing entries: §3.4 has a definite-position item
 /// contribute at its own span and an auto-placed item at every start
 /// position its span fits. A spanning item is cloned per position
-/// ([`LaneEntry::Item`]); the span-1 items, measured once each through their
-/// working copies in `work`, contribute through one aggregate per track
+/// ([`LaneEntry::Item`]); the span-1 items, measured once each in place in
+/// `items`, contribute through one aggregate per track
 /// ([`LaneEntry::Aggregate`]), whose contributions are the maxima of its
 /// members' ([`GroupMaxima`]) — the same numbers the per-position clones
 /// give the tracks, which a debug build checks after every sizing run.
 #[derive(Debug)]
-pub(super) struct LaneSizingItems<N> {
-    /// A working copy of every span-1 item, in item order.
-    pub(super) work: Vec<GridItem<N>>,
-    /// The `work` indices of the auto-placed span-1 items.
+pub(super) struct LaneSizingItems<'a, N> {
+    /// Every in-flow item, in item order.
+    pub(super) items: &'a mut [GridItem<N>],
+    /// The `items` indices of the auto-placed span-1 items.
     pub(super) pooled: Vec<usize>,
     pub(super) pool: GroupMaxima,
-    /// The `work` indices of the definite-position span-1 items, grouped by
-    /// track; each aggregate names its range.
+    /// The `items` indices of the definite-position span-1 items, grouped
+    /// by track; each aggregate names its range.
     pub(super) members: Vec<usize>,
     pub(super) entries: Vec<LaneEntry<N>>,
     /// The per-position clones' flex sum (`SizingItems::spanned_flex_sum`),
@@ -1980,18 +1980,13 @@ pub(super) struct LaneSizingItems<N> {
     pub(super) spanned_flex_sum: f32,
 }
 
-impl<N> LaneSizingItems<N> {
-    pub(super) const fn empty() -> Self {
+impl<'a, N> LaneSizingItems<'a, N> {
+    /// No entry yet over `items`.
+    pub(super) fn new(items: &'a mut [GridItem<N>]) -> Self {
         Self {
-            work: Vec::new(),
+            items,
             pooled: Vec::new(),
-            pool: GroupMaxima {
-                min_content: LazyMaximum::Pending,
-                max_content: LazyMaximum::Pending,
-                fixed_min: LazyMaximum::Pending,
-                auto_min_candidate: LazyMaximum::Pending,
-                auto_min_fallback: LazyMaximum::Pending,
-            },
+            pool: GroupMaxima::default(),
             members: Vec::new(),
             entries: Vec::new(),
             spanned_flex_sum: 0.0,
@@ -2012,7 +2007,7 @@ impl<N> LaneSizingItems<N> {
         T: LayoutTree<NodeId = N>,
     {
         let Self {
-            work,
+            items,
             pooled,
             pool,
             members,
@@ -2032,8 +2027,8 @@ impl<N> LaneSizingItems<N> {
         let pool_members = if *includes_pool { &pooled[..] } else { &[] };
         match kind {
             ContributionKind::MinContent | ContributionKind::MaxContent => max_option(
-                pool.content(tree, state, work, pool_members, axis, kind, tracks),
-                maxima.content(tree, state, work, own, axis, kind, tracks),
+                pool.content(tree, state, items, pool_members, axis, kind, tracks),
+                maxima.content(tree, state, items, own, axis, kind, tracks),
             ),
             ContributionKind::Minimum => {
                 let track = tracks.index_of(span.start);
@@ -2046,8 +2041,8 @@ impl<N> LaneSizingItems<N> {
                     AutomaticMinimum::DoesNotApply
                 };
                 max_option(
-                    pool.minimum(tree, state, work, pool_members, axis, automatic),
-                    maxima.minimum(tree, state, work, own, axis, automatic),
+                    pool.minimum(tree, state, items, pool_members, axis, automatic),
+                    maxima.minimum(tree, state, items, own, axis, automatic),
                 )
             }
         }
@@ -2055,7 +2050,7 @@ impl<N> LaneSizingItems<N> {
     }
 }
 
-impl<N> SizingItems<N> for LaneSizingItems<N> {
+impl<N> SizingItems<N> for LaneSizingItems<'_, N> {
     #[inline]
     fn entry_count(&self) -> usize {
         self.entries.len()
@@ -2088,14 +2083,7 @@ impl<N> SizingItems<N> for LaneSizingItems<N> {
     ) where
         T: LayoutTree<NodeId = N>,
     {
-        let items = self
-            .work
-            .iter_mut()
-            .chain(self.entries.iter_mut().filter_map(|entry| match entry {
-                LaneEntry::Item(item) => Some(item),
-                LaneEntry::Aggregate { .. } => None,
-            }));
-        for item in items {
+        let mut prepare = |item: &mut GridItem<N>| {
             resolve_item_intrinsic_dimensions(tree, state, item, axis, cross_tracks, inner_size);
             // Grid lanes takes the fallback alignment for every baseline
             // value, so no item joins a baseline-sharing group and every
@@ -2103,6 +2091,15 @@ impl<N> SizingItems<N> for LaneSizingItems<N> {
             debug_assert!(item.baseline_participation().is_none());
             if axis == Axis::Vertical {
                 item.baseline_shim = 0.0;
+            }
+        };
+        // Every span-1 item is pooled or a member, once.
+        for &index in self.pooled.iter().chain(&self.members) {
+            prepare(&mut self.items[index]);
+        }
+        for entry in &mut self.entries {
+            if let LaneEntry::Item(item) = entry {
+                prepare(item);
             }
         }
     }
