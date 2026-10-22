@@ -3512,7 +3512,10 @@ impl MainThreadRuntime {
             };
             let extras = [
                 ("exposureID", HostArgument::String(id)),
-                ("exposureScene", HostArgument::String(&change.scene)),
+                (
+                    "exposureScene",
+                    HostArgument::String(change.scene.as_deref().unwrap_or("")),
+                ),
                 ("appeared", HostArgument::Boolean(change.appeared)),
             ];
             self.dispatch_checkpointed(

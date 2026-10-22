@@ -163,7 +163,6 @@
 //! element's free (`Document::drop_element`), so no borrow of the shared
 //! state is ever held across a `Document` call.
 
-use std::borrow::Cow;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -210,17 +209,21 @@ pub(crate) fn is_exposure_attribute(name: &str) -> bool {
 /// One element's exposure moving: it became visible (`appeared`) or stopped
 /// being so, or a teardown took it out of the exposed record.
 ///
-/// The id and the scene are copied when the change forms, because the
-/// element may be freed, or its attributes rewritten, before the delivery
-/// entry runs: a `disexposure` names what the element was exposed under.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The id and the scene are the registration's own, shared rather than
+/// copied when the change forms: the element may be freed, or its
+/// attributes rewritten, before the delivery entry runs, and a rewrite
+/// replaces the registration's strings rather than editing them, so a
+/// `disexposure` still names what the element was exposed under.
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct ExposureChange {
     pub(crate) node: NodeId,
     pub(crate) appeared: bool,
     /// The `exposure-id` this change is recorded under: `None` for an
     /// element registered only by its listener, which gets no record.
-    pub(crate) exposure_id: Option<String>,
-    pub(crate) scene: String,
+    pub(crate) exposure_id: Option<Rc<str>>,
+    /// The `exposure-scene`: `None` when absent or empty, which the record
+    /// carries as `""`.
+    pub(crate) scene: Option<Rc<str>>,
     /// Whether the element hears `uiappear`/`uidisappear` for it: false for
     /// a teardown and for `stopExposure`, which send records only.
     pub(crate) element_event: bool,
@@ -237,9 +240,10 @@ struct Entry {
     /// handler for one of them on it.
     element_event: bool,
     /// `exposure-id` when present and non-empty, copied so that a freed
-    /// element still names it.
-    exposure_id: Option<String>,
-    scene: String,
+    /// element still names it, and shared with every change it forms.
+    exposure_id: Option<Rc<str>>,
+    /// `exposure-scene` when present and non-empty, the same way.
+    scene: Option<Rc<str>>,
     /// `exposure-area` as a ratio in `[0, 1]`.
     area: f64,
     /// Recorded as exposed: the last change this registration queued was an
@@ -567,8 +571,8 @@ fn parse_float(text: &str) -> f64 {
 
 /// What one element's attributes ask for, read at an arm.
 struct Attributes {
-    exposure_id: Option<String>,
-    scene: String,
+    exposure_id: Option<Rc<str>>,
+    scene: Option<Rc<str>>,
     area: f64,
     margins: Margins,
 }
@@ -585,11 +589,11 @@ impl Attributes {
             exposure_id: element
                 .attribute(EXPOSURE_ID)
                 .filter(|id| !id.is_empty())
-                .map(Cow::into_owned),
+                .map(|id| Rc::from(&*id)),
             scene: element
                 .attribute(EXPOSURE_SCENE)
-                .map(Cow::into_owned)
-                .unwrap_or_default(),
+                .filter(|scene| !scene.is_empty())
+                .map(|scene| Rc::from(&*scene)),
             area: parse_area(element.attribute(EXPOSURE_AREA).as_deref()),
             margins: fold_margins(SCREEN_MARGINS.map(length), UI_MARGINS.map(length)),
         }
@@ -687,7 +691,7 @@ impl Exposure {
                 observer: None,
                 element_event,
                 exposure_id: None,
-                scene: String::new(),
+                scene: None,
                 area: 0.0,
                 exposed: false,
                 stopped: false,

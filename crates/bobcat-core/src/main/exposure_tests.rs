@@ -12,6 +12,8 @@
 
 #![allow(clippy::float_cmp)] // Authored pixel sizes and ratios are exact.
 
+use std::rc::Rc;
+
 use terminus::link::{IntersectionMargin, MarginLength, NodeId, Vector2D};
 
 use super::{Exposure, ExposureChange, Length, Margins, fold_margins, parse_area, parse_length};
@@ -102,8 +104,8 @@ fn record(node: NodeId, appeared: bool, id: &str) -> ExposureChange {
     ExposureChange {
         node,
         appeared,
-        exposure_id: Some(id.to_owned()),
-        scene: String::new(),
+        exposure_id: Some(Rc::from(id)),
+        scene: None,
         element_event: false,
     }
 }
@@ -711,8 +713,8 @@ fn removing_the_exposure_id_leaves_and_unregisters() {
         vec![ExposureChange {
             node,
             appeared: false,
-            exposure_id: Some("a".to_owned()),
-            scene: "feed".to_owned(),
+            exposure_id: Some(Rc::from("a")),
+            scene: Some(Rc::from("feed")),
             element_event: false,
         }]
     );
@@ -732,7 +734,7 @@ fn a_listener_alone_registers_and_hears_its_element_events() {
         node,
         appeared,
         exposure_id: None,
-        scene: String::new(),
+        scene: None,
         element_event: true,
     };
     assert_eq!(deliver(&exposure, &mut document), vec![event(true)]);
@@ -763,8 +765,8 @@ fn a_listener_and_an_id_make_one_change() {
         vec![ExposureChange {
             node,
             appeared: true,
-            exposure_id: Some("a".to_owned()),
-            scene: "feed".to_owned(),
+            exposure_id: Some(Rc::from("a")),
+            scene: Some(Rc::from("feed")),
             element_event: true,
         }]
     );
@@ -942,7 +944,7 @@ fn a_stop_answers_the_records_it_queued() {
             node: quiet,
             appeared: true,
             exposure_id: None,
-            scene: String::new(),
+            scene: None,
             element_event: true,
         }]
     );
