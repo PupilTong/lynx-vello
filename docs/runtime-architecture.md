@@ -889,7 +889,9 @@ and calls `bobcat:frame-boot`'s `boot` in it, which reads the nested page
 (`framePage`), makes it the child's page root (`__BobcatUsePageRoot`), mounts
 the card's sheet on the frame's shadow root (`adoptStyleSheet(url,
 shadowRoot)`), runs the card's `root` with the frame's `data` and
-`global-props` and connects the card's own BTS — a `Worker` at `bobcat:bts`
+`global-props`, dispatches the frame's `load` at the nested page (a bubbling,
+composed synthetic event, which the realm holding the frame's handle hears
+retargeted to the frame) and connects the card's own BTS — a `Worker` at `bobcat:bts`
 the child creates, its entry `U#background-thread` — whose `initialize`
 carries the view's native module table; later writes `bobcat:frame` hands the
 running child as its `updateData`/`updateGlobalProps`, which post to that BTS

@@ -41,11 +41,26 @@
 //    for it.
 // 3. Once it settles, a fresh `ShadowRealm` imports `bobcat:frame-boot`'s
 //    `boot`, `dispose`, `updateData` and `updateGlobalProps`, and calls
-//    `boot` with primitives alone — the frame's node id, `U`, the frame's
-//    `data` and `global-props` as they stand at that moment and `SystemInfo`,
-//    each as JSON text, and the view's native module table — which renders
-//    the card under the frame's nested page and connects the card's own BTS
-//    Worker, which the child realm creates and owns.
+//    `boot` with primitives alone — the frame's node id, `U`, `src` as
+//    written, the frame's `data` and `global-props` as they stand at that
+//    moment and `SystemInfo`, each as JSON text, and the view's native module
+//    table — which renders the card under the frame's nested page and
+//    connects the card's own BTS Worker, which the child realm creates and
+//    owns. The child's boot also fires the frame's `load`: once the card's
+//    entry has loaded, a throwing one included, it dispatches a bubbling,
+//    composed `load` at its nested page with the `detail`
+//    `{statusCode: 0, statusMessage: "success", url: src}`, whose path
+//    crosses the frame's shadow root, so this realm's `bindload` on the
+//    frame, its listeners on the frame's ancestors and its
+//    `global-bindEvent` for `load` hear it, retargeted to the frame, before
+//    the card's own listeners do. That is web-core's event
+//    (`dispatchLynxViewLoadEvent`, which also makes it cancelable and
+//    dispatches it inside the card's first flush) at native's time, before
+//    the card renders; native's `FrameElement::SendLoadEvent` does not
+//    bubble and is also sent for a failed fetch, with its error, and native
+//    adds a Lepus global `frameLoaded` event, neither of which is built: a
+//    failed fetch or import here, and a boot that fails before the entry
+//    loaded, fire nothing.
 // 4. A frame keeps its `data` and `global-props` as JSON text, `{}` until
 //    one is written. A write takes a plain object alone — a non-null,
 //    non-array object, which `bobcat:element` hands over as its JSON text,
@@ -130,6 +145,7 @@ import { SystemInfo, __BobcatNativeModuleTable } from "bobcat:runtime";
 type Boot = (
   frameId: number,
   url: string,
+  src: string,
   initData: string,
   globalProps: string,
   systemInfo: string,
@@ -390,7 +406,8 @@ function load(frameId: number, state: FrameState, src: string): void {
  * Creates the frame's realm and boots the card at `url` — `src` resolved —
  * in it, with the frame's `data` and `global-props` as they stand once the
  * import settled: a write while the fetch or the import was in flight is
- * what the card boots with. The card's BTS gets this realm's native module
+ * what the card boots with. `src` as written goes along, for the `url` of
+ * the frame's `load`. The card's BTS gets this realm's native module
  * table: a frame's card has the view's modules, as native's nested view
  * inherits its parent's.
  */
@@ -420,13 +437,15 @@ function startFrame(
     const booted = (boot as Boot)(
       frameId,
       url,
+      src,
       state.data,
       state.globalProps,
       JSON.stringify(SystemInfo),
       __BobcatNativeModuleTable(),
     );
-    // A `false` was reported in the child; there is nothing to add here, and
-    // nothing booted to update: later writes reach the next boot alone.
+    // A `false` was reported in the child, or is a card a `load` listener
+    // of this realm let go of during its boot; there is nothing to add here,
+    // and nothing booted to update: later writes reach the next boot alone.
     if (booted !== true || !current()) return;
     state.updateData = updateData as Update;
     state.updateGlobalProps = updateGlobalProps as Update;

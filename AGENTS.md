@@ -1700,9 +1700,10 @@ the generation, resolves `src` once with `resolveUrl` into `U` (against
 fetch settles — and when it settles (a probe hit's `true` in a microtask, a `Future` id through
 its `then`), once no card the frame let go of still owes its last list,
 creates a `ShadowRealm`, imports `bobcat:frame-boot`'s `boot`, `dispose`,
-`updateData` and `updateGlobalProps`, and calls `boot(frameId, U, data,
+`updateData` and `updateGlobalProps`, and calls `boot(frameId, U, src, data,
 globalProps, JSON.stringify(SystemInfo), __BobcatNativeModuleTable())` with
-the frame's `data` and `global-props` as they stand then. The frame keeps
+`src` as written and the frame's `data` and `global-props` as they stand
+then. The frame keeps
 `src` as written, which a later `src` is compared against and a failure
 names. A `data` or `global-props` write keeps
 text that parses to a plain object (a non-null, non-array object) and
@@ -1736,7 +1737,18 @@ page data, `SystemInfo` and native module table, `__BobcatInitEntry(U)` (so
 `adoptStyleSheet(bundleStyleSheetURL(U), parentNode(page))` — the frame's
 shadow root — when `hasStyleSheet` holds it,
 `loadModuleSync(sectionURL("root", U))` in a `try` of its own (a throwing
-root is reported and boot still renders), `__BobcatProcessInitData`,
+root is reported and boot still renders), then the frame's `load` — a
+bubbling, composed `__CreateEvent(8, "load", …, {statusCode: 0,
+statusMessage: "success", url: src})` dispatched at the nested page, whose
+path crosses the frame's shadow root, so the realm holding the frame's
+handle hears it retargeted to the frame (`bindload`, an ancestor's listener,
+a `global-bindEvent`) before the card's own listeners do, both called
+inside the host's `dispatchEvent` in the routed realm order (user rulings
+2026-10-21 and 2026-10-23; a listener's throw is its realm's failure, which
+the host reports, and boot goes on, unless a listener of the parent's let
+go of the card during it, a new `src` written in `bindload`, which stops
+boot there and answers `false`) —,
+`__BobcatProcessInitData`,
 `__BobcatConnectBackground(new Worker("bobcat:bts", {name: "lynx-bg"}),
 data, backgroundThreadURL(U))` — the card's own BTS, which the child creates
 and owns, so its messages are delivered to the child —, `__BobcatRenderPage`,

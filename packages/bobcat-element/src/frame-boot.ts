@@ -13,6 +13,34 @@
 // `global-props` as they stand when this card boots, `{}` for one the frame
 // was never given.
 //
+// Once the entry has loaded, a throwing one included, the boot dispatches
+// the frame's `load` at the nested page, this realm's page root (user
+// rulings 2026-10-21 and 2026-10-23): a `__CreateEvent` event, bubbling and
+// composed, whose `detail` is `{statusCode: 0, statusMessage: "success",
+// url}` with `url` the frame's `src` as written. Its path crosses the
+// frame's shadow root into the page, so the listener table invites the realm
+// that holds the frame's handle, whose `bindload` on the frame, listeners on
+// the frame's ancestors and `global-bindEvent` for `load` hear it with
+// `event.target` the frame; this realm's own listeners on its page hear it
+// after them, in the routed dispatch's realm order (the page realm first,
+// then the cards), all inside the host's `dispatchEvent` call. It is
+// web-core's event — `dispatchLynxViewLoadEvent`
+// (`web-core/ts/client/mainthread/elementAPIs/createElementAPI.ts`) dispatches
+// the same `load` at the nested `lynx-view`, inside the card's first
+// `__FlushElementTree`, and makes it cancelable, which nothing is here — at
+// native's time: `FrameElement::SendLoadEvent`
+// (`lynx/core/renderer/dom/fiber/frame_element.cc`) sends its `load` once the
+// bundle is loaded, before the nested instance renders, as this boot sends
+// it before `__BobcatRenderPage`. Native's does not bubble, is also sent for
+// a failed fetch with the error code and message, and comes with a Lepus
+// global `frameLoaded` event; the failure `load` and `frameLoaded` are not
+// built, so a boot that fails before the entry loaded, and a fetch or an
+// import `bobcat:frame` saw fail, dispatch nothing. What any realm's
+// listener throws is that realm's failure, which the host reports, and boot
+// goes on. The parent's listeners run inside the dispatch, so one of them can
+// let go of this card while it boots — a new `src` written in `bindload` —
+// and then boot stops there.
+//
 // The card has a background thread of its own, as a frame's card has in
 // native (a nested `LynxTemplateRender`) and in web-core (a nested
 // `lynx-view`'s `BackgroundThread`): this realm creates a `Worker` at
@@ -73,7 +101,10 @@ import {
   __BobcatAfterExposureRecords,
   __BobcatSwitchExposure,
   __BobcatUsePageRoot,
+  __CreateEvent,
+  __DispatchEvent,
   __FlushElementTree,
+  __GetPageElement,
 } from "bobcat:element";
 import { __BobcatCloseFrames } from "bobcat:frame";
 import { Worker } from "bobcat-internal";
@@ -88,8 +119,15 @@ import {
 import { backgroundThreadURL, bundleStyleSheetURL, sectionURL } from "bobcat:section-url";
 
 /**
+ * Whether `dispose` has run: the frame let go of this card, which a listener
+ * of the parent's can do from inside `boot`'s `load` dispatch.
+ */
+let disposed = false;
+
+/**
  * Boots the card at `url` into the frame `frameId`, and answers whether boot
- * ran through: `false` for a failure, which is reported here already.
+ * ran through: `false` for a failure, which is reported here already, and
+ * for a card the frame let go of during its own `load` dispatch.
  *
  * Every argument is a primitive, because only primitives cross into a
  * `ShadowRealm`'s wrapped function. `url` is the container URL — the frame's
@@ -97,15 +135,22 @@ import { backgroundThreadURL, bundleStyleSheetURL, sectionURL } from "bobcat:sec
  * `__Card__`, the `bundleName` every `chunkURL` and `styleSheetURL` of the
  * card is written from and the base its workers resolve against — so they
  * name the URLs the container's installer registered under the same string.
+ * `src` is the frame's `src` as written, which the frame's `load` names.
  * `nativeModuleTable` is the view's, as the parent realm holds it.
  *
  * The card's `root` is app code: what it throws is reported and boot goes
  * on to connect the BTS and render what it built, as the page's boot renders
- * a page whose entry threw.
+ * a page whose entry threw. Between the two, the frame's `load` is
+ * dispatched at the nested page ([`dispatchLoad`]); what that dispatch
+ * throws is reported the same way — a listener's throw never reaches it,
+ * being reported by the host — and boot goes on, unless a listener of the
+ * parent's let go of this card meanwhile: then boot stops there and answers
+ * `false`.
  */
 export function boot(
   frameId: number,
   url: string,
+  src: string,
   initDataJson: string,
   globalPropsJson: string,
   systemInfoJson: string,
@@ -135,6 +180,18 @@ export function boot(
     } catch (error) {
       _ReportError(error);
     }
+    // The entry has loaded, whether or not it threw.
+    try {
+      dispatchLoad(src);
+    } catch (error) {
+      _ReportError(error);
+    }
+    // The parent's listeners run inside that dispatch, and one that gives
+    // the frame a new `src` or lets go of it otherwise lets go of this card
+    // there: `dispose` has run, and the parent may have freed the nested
+    // page already. The card is gone, so boot stops: no BTS is connected and
+    // nothing renders into the freed page.
+    if (disposed) return false;
     data = __BobcatProcessInitData(data);
     // The card's BTS, after its `root` ran, so what the root sent before it
     // existed is flushed to it in order behind `initialize`, as on the page.
@@ -191,6 +248,25 @@ export function updateGlobalProps(json: string): void {
   }
 }
 
+/**
+ * Dispatches the frame's `load` at this realm's page root, the nested page
+ * `__BobcatUsePageRoot` chose: bubbling and composed, so the realm that holds
+ * the frame's handle hears it retargeted to the frame, with web-core's
+ * success `detail` and `src`, the frame's `src` as written — web-core's
+ * `host.url`, native's `data->src` — for its `url`.
+ */
+function dispatchLoad(src: string): void {
+  const event = __CreateEvent(
+    // Native's `Event::EventType::kCustomEvent`, which `__CreateEvent`
+    // accepts and ignores.
+    8,
+    "load",
+    { bubbles: true, composed: true },
+    { statusCode: 0, statusMessage: "success", url: src },
+  );
+  __DispatchEvent(__GetPageElement(), event);
+}
+
 /** The shadow root the nested page `page` sits in: its parent. */
 function shadowRootOf(page: number): number {
   const shadow = parentNode(page);
@@ -221,6 +297,7 @@ function shadowRootOf(page: number): number {
  * says from its disposal on.
  */
 export function dispose(done?: () => void): void {
+  disposed = true;
   let pending = 2;
   const arrive = () => {
     pending -= 1;
