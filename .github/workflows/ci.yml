@@ -80,6 +80,14 @@ jobs:
         with:
           tool: cargo-llvm-cov
 
+      # Han text with no `lang` falls back to the font CoreText picks for the
+      # process's preferred languages (fontique passes no locale), so the
+      # web-core e2e goldens that show Chinese depend on that list. They were
+      # recorded with this one; a stock runner has `en-US` alone and picks
+      # another face, with other line metrics.
+      - name: Preferred languages the goldens were recorded with
+        run: defaults write -g AppleLanguages -array en-US zh-Hans-US ja-US
+
       - name: Tests + coverage
         # One instrumented build and one run of every test. Per-crate coverage
         # is Codecov's job (`codecov.yml` names the components); there is no

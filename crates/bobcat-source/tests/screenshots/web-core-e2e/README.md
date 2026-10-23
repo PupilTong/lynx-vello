@@ -22,3 +22,12 @@ decision by whoever comes next.
 
 Accepting one is `PRIME_RADIANT_UPDATE_SNAPSHOTS=1` on that single test, after the
 reading, in the same change that moves the card into `verified!`.
+
+Cards that show Chinese text depend on the machine's preferred languages. Han
+text with no `lang` falls back to the face CoreText picks for the process's
+language list, since fontique passes no locale, and two faces differ in line
+metrics enough to move every line under them. These files were recorded with
+`en-US, zh-Hans-US, ja-US`, and CI sets the same list on its runner before the
+tests (`.github/workflows/ci.yml`). A machine with another list renders
+`basic-element-text-maxlength`, `-nest-image`, `-tail-color-convert`,
+`-word-break` and the two `x-overlay-ng` playground cards differently.
