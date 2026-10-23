@@ -42,7 +42,7 @@ use quickjs_rust_bridge::{HostArgument, HostValue};
 use self::child::{ChildHostModules, ChildKey, ChildRealms, ShadowRealmHook};
 use self::policy::context_of;
 use crate::background::WorkerKey;
-use crate::esm::HOST_MODULE_SPECIFIER;
+use crate::esm::{Export, HOST_MODULE_SPECIFIER};
 use crate::future::FutureTable;
 use crate::jobs::JsThreadHandle;
 use crate::link::{HostOutbox, ViewNotice};
@@ -124,21 +124,12 @@ impl RealmCore {
         &mut self,
         js: &mut ScriptRuntime,
         id: RealmId,
-        module_specifier: &str,
-        export_name: &str,
+        export: Export,
         arguments: &[HostArgument<'_>],
     ) -> Option<Result<bool, ScriptError>> {
         match id {
-            RealmId::Page => {
-                Some(
-                    self.engine
-                        .call_module_export(js, module_specifier, export_name, arguments),
-                )
-            }
-            RealmId::Child(key) => {
-                self.children
-                    .call_module_export(js, key, module_specifier, export_name, arguments)
-            }
+            RealmId::Page => Some(self.engine.call_module_export(js, export, arguments)),
+            RealmId::Child(key) => self.children.call_module_export(js, key, export, arguments),
         }
     }
 
@@ -151,24 +142,17 @@ impl RealmCore {
         &mut self,
         js: &mut ScriptRuntime,
         id: RealmId,
-        module_specifier: &str,
-        export_name: &str,
+        export: Export,
         arguments: &[HostArgument<'_>],
     ) -> Option<Result<bool, ScriptError>> {
         match id {
-            RealmId::Page => Some(self.engine.call_module_export_before_operation(
-                js,
-                module_specifier,
-                export_name,
-                arguments,
-            )),
-            RealmId::Child(key) => self.children.call_module_export_before_operation(
-                js,
-                key,
-                module_specifier,
-                export_name,
-                arguments,
+            RealmId::Page => Some(
+                self.engine
+                    .call_module_export_before_operation(js, export, arguments),
             ),
+            RealmId::Child(key) => self
+                .children
+                .call_module_export_before_operation(js, key, export, arguments),
         }
     }
 
@@ -321,33 +305,28 @@ fn install_diagnostics(
         ("logScriptMessage", false, source),
     ] {
         let reporting = host.clone();
-        engine.register_host_module_function(
-            HOST_MODULE_SPECIFIER,
-            name,
-            2,
-            Box::new(move |arguments| {
-                let level = string_argument(name, arguments, 0)?.to_owned();
-                let message = string_argument(name, arguments, 1)?.to_owned();
-                // The event owns its source and leaves this thread, so each
-                // takes a clone, which for a worker shares the URL rather
-                // than copying it.
-                let source = source.clone();
-                reporting.engine_event(if is_error {
-                    EngineEvent::ScriptReported {
-                        source,
-                        level,
-                        message,
-                    }
-                } else {
-                    EngineEvent::ConsoleMessage {
-                        source,
-                        level,
-                        message,
-                    }
-                });
-                Ok(HostValue::Undefined)
-            }),
-        )?;
+        engine.register_host_module_function(HOST_MODULE_SPECIFIER, name, 2, move |arguments| {
+            let level = string_argument(name, arguments, 0)?.to_owned();
+            let message = string_argument(name, arguments, 1)?.to_owned();
+            // The event owns its source and leaves this thread, so each
+            // takes a clone, which for a worker shares the URL rather
+            // than copying it.
+            let source = source.clone();
+            reporting.engine_event(if is_error {
+                EngineEvent::ScriptReported {
+                    source,
+                    level,
+                    message,
+                }
+            } else {
+                EngineEvent::ConsoleMessage {
+                    source,
+                    level,
+                    message,
+                }
+            });
+            Ok(HostValue::Undefined)
+        })?;
     }
     Ok(())
 }

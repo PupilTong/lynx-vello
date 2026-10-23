@@ -1187,8 +1187,8 @@ mod tests {
         assert_eq!(rect(&doc, anonymous), (0.0, 0.0, 20.0, 30.0));
         for id in [anonymous, row] {
             let output = committed_output(&doc, id);
-            assert_eq!(output.first_baselines.y, Some(8.0));
-            assert_eq!(output.last_baselines.y, Some(28.0));
+            assert_eq!(output.first_baseline, Some(8.0));
+            assert_eq!(output.last_baseline, Some(28.0));
         }
     }
 

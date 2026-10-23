@@ -684,7 +684,7 @@ fn measure_goal_has_no_durable_geometry_side_effects_or_baseline() {
     );
 
     assert_size(output.size, Size::new(10.0, 10.0));
-    assert_eq!(output.first_baselines, Point::NONE);
+    assert_eq!(output.first_baseline, None);
     assert_eq!(tree.layout_writes.get(), 0);
     assert_eq!(tree.layout(child), sentinel());
     assert_eq!(tree.layout(root), sentinel());

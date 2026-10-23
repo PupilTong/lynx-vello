@@ -14,12 +14,12 @@ pub(crate) fn install(
         crate::esm::HOST_MODULE_SPECIFIER,
         "requestScriptFrame",
         1,
-        Box::new(move |arguments| {
+        move |arguments| {
             let Some(&HostArgument::Boolean(pending)) = arguments.first() else {
                 return Err("requestScriptFrame expects a boolean".to_owned());
             };
             notify(pending);
             Ok(HostValue::Undefined)
-        }),
+        },
     )
 }

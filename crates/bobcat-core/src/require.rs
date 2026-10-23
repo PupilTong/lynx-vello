@@ -69,12 +69,12 @@ pub(crate) fn install(
         HOST_MODULE_SPECIFIER,
         RESOLVE_EXPORT,
         2,
-        Box::new(|arguments| {
+        |arguments| {
             const NAME: &str = "bobcat-internal:host.resolveModuleUrl";
             let base = string_argument(NAME, arguments, 0)?;
             let specifier = string_argument(NAME, arguments, 1)?;
             normalize_module_url(base, specifier).map(HostValue::String)
-        }),
+        },
     )?;
     let token = sources.token().clone();
     engine.register_synchronous_loader(HOST_MODULE_SPECIFIER, LOAD_EXPORT, move |url| {

@@ -100,6 +100,33 @@ impl BlockStyle {
             overflow_wrap: OverflowWrap::BreakWord,
         }
     }
+
+    /// Whether a block built with `self` would be shaped exactly as the
+    /// block built with `built` was, whose strut is `built_strut` — the
+    /// root inline box's, where a block keeps it once it is built
+    /// ([`super::TextBlock::new`]).
+    ///
+    /// The one rule for which fields are shaping inputs: `text_wrap`, which
+    /// also chooses whether native's `nowrap` cuts the text at its first
+    /// newline ([`Self::processing`]); `word_break`; the strut, which is
+    /// parley's style 0; and `strut_line_when_empty`, which decides whether
+    /// empty content is shaped into one line of that strut. Every other field
+    /// is applied to a finished layout, so a change there is
+    /// [`super::TextBlock::set_style`]'s, never a new block.
+    pub(in crate::text) fn shapes_as(&self, built: &Self, built_strut: Option<&RunStyle>) -> bool {
+        self.text_wrap == built.text_wrap
+            && self.word_break == built.word_break
+            && self.strut_line_when_empty == built.strut_line_when_empty
+            && match &self.strut {
+                Some(strut) => built_strut == Some(strut),
+                // The strut `TextBlock::new` takes for a block that keeps a
+                // line for empty content and names none.
+                None if self.strut_line_when_empty => {
+                    built_strut.is_some_and(|strut| *strut == RunStyle::default())
+                }
+                None => built_strut.is_none(),
+            }
+    }
 }
 
 /// Builds the paragraph parameters from a container's computed style.

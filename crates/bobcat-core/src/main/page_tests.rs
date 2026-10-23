@@ -4185,6 +4185,76 @@ lynx.getJSContext().addEventListener('flood', () => {
     });
 }
 
+/// The worker events read in one turn are one entry, each delivered on its
+/// own; a release served while one of their handlers waits ends the view,
+/// and the events behind that handler are not delivered.
+#[test]
+fn a_release_served_while_a_worker_event_waits_drops_the_rest_of_its_burst() {
+    on_a_js_thread(|thread| async move {
+        let (context, workers) = group(&thread);
+        let mut harness = Harness::new(context, workers);
+        harness
+            .until("entry request", |h| !h.sources.is_empty())
+            .await;
+        harness.answer_entry(
+            "app:///main.js",
+            r"__CreatePage();
+lynx.getJSContext().addEventListener('park', () => {
+    __AdoptStyleSheet(__LoadStyleSheet('CSS', '__Card__'));
+});
+lynx.getJSContext().addEventListener('after', () => {
+    console.log('delivered after the release');
+});",
+        );
+        harness
+            .until("MTS did not render", |h| {
+                h.view.published.commit().is_some()
+            })
+            .await;
+        let background = harness.background_worker();
+        harness
+            .until("MTS boot did not finish", |h| h.finished())
+            .await;
+        // Both queued before the view's worker-event task polls again: one
+        // burst.
+        for kind in ["park", "after"] {
+            background
+                .events
+                .send(crate::background::WorkerEvent {
+                    key: background.key,
+                    payload: crate::background::WorkerPayload::Message(
+                        crate::background::wire_value(&format!(
+                            r#"{{type:"{kind}",data:null,origin:"JSContext"}}"#
+                        )),
+                    ),
+                })
+                .unwrap();
+        }
+        harness
+            .until("the first event's handler never waited", |h| {
+                h.wants_a_style_sheet()
+            })
+            .await;
+        harness.view.token.cancel();
+        harness.background = Some(background);
+        harness
+            .until("the released view's owner never returned", |h| {
+                h.owner.is_finished()
+            })
+            .await;
+        (&mut harness.owner).await.expect("the owner did not trap");
+        assert!(
+            !harness.events.iter().any(|event| matches!(
+                event,
+                EngineEvent::ConsoleMessage { message, .. }
+                    if message.contains("delivered after the release")
+            )),
+            "the event behind the waiting handler reached the released view: {:?}",
+            harness.events
+        );
+    });
+}
+
 #[test]
 fn a_bts_worker_that_fails_reports_worker_ended_and_leaves_boot_alone() {
     on_a_js_thread(|thread| async move {

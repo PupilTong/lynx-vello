@@ -354,31 +354,29 @@ struct Reported {
     selection: Range<u32>,
 }
 
-/// State shared by the four definitions: the event queue and the focused
-/// editor's [`Reported`].
+/// State shared by the two kinds' components: the event queue and the
+/// focused editor's [`Reported`].
 #[derive(Default)]
 struct Shared {
     events: ComponentEvents,
     reported: RefCell<Option<Reported>>,
 }
 
-/// Installs the component under its four tag names. Must run before any
-/// element could carry them.
+/// Installs one component per kind, each under the kind's two tag names.
+/// Must run before any element could carry them.
 pub(super) fn define(document: &mut LynxDocument, events: ComponentEvents) {
     let shared = Rc::new(Shared {
         events,
         reported: RefCell::new(None),
     });
     for (tags, kind) in [(INPUT_TAGS, Kind::Input), (TEXTAREA_TAGS, Kind::Textarea)] {
+        let field: Rc<dyn CustomElement<()>> = Rc::new(TextField {
+            kind,
+            shared: Rc::clone(&shared),
+            shadow_sheet: OnceCell::new(),
+        });
         for tag in tags {
-            document.define(
-                tag,
-                Box::new(TextField {
-                    kind,
-                    shared: Rc::clone(&shared),
-                    shadow_sheet: OnceCell::new(),
-                }),
-            );
+            document.define_shared(tag, Rc::clone(&field));
         }
     }
 }
@@ -388,7 +386,7 @@ struct TextField {
     kind: Kind,
     shared: Rc<Shared>,
     /// [`SHADOW_RULES`] and the kind's rules, parsed by the first field of
-    /// the definition and mounted on every one's shadow tree.
+    /// the kind and mounted on every one's shadow tree.
     shadow_sheet: OnceCell<ShadowSheet>,
 }
 

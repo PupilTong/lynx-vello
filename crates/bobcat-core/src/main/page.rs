@@ -160,12 +160,13 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
 use terminus::link::NodeId;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 use super::quickjs::{ScriptRuntime, SharedRuntime};
-use super::runtime::{DocumentIngredients, MainThreadRuntime, RealmStartup};
+use super::runtime::{Deliveries, DocumentIngredients, MainThreadRuntime, RealmStartup};
 use super::{AttachedView, GroupContext};
 use crate::background::WorkerEvent;
 use crate::clock::ClockInstant;
@@ -1021,51 +1022,25 @@ impl RealmOwner for Page {
     /// [`Page::post_content_visibility_changes`] and
     /// [`Page::post_component_events`].
     fn after_timers(page: &Rc<Self>, runtime: &mut MainThreadRuntime) {
-        runtime.request_documents();
-        // Before the commit, so the names an editing host needs routed are
-        // published with the frame that shows the host.
-        runtime.sync_editing_routes();
-        runtime.commit_if_dirty();
-        // An instant scroll this entry performed: its `scroll` joins this
-        // entry's component events, and its `scrollend` follows the
-        // painter's post of the container at rest. After the commit, which
-        // performs one of its own when it honours a new
-        // `scroll-initial-target`.
-        runtime.queue_instant_scroll_events();
-        // After it, so the geometry the host is handed is the frame's.
-        runtime.publish_text_input_state();
-        // After it too: the `text` paragraphs it recomputed join this entry's
-        // component events as their `layout` events.
-        runtime.queue_text_layout_events();
-        // The resize update first, always, as the intersection one below:
-        // HTML gathers resize observations before it updates intersection
-        // observations, so its delivery is posted first.
-        if (runtime.update_resize_observations() || runtime.has_pending_resize_notifications())
-            && !page.resizes_posted.replace(true)
-        {
+        // Posted in the order the settle decided them, resize first, as HTML
+        // gathers resize observations before it updates intersection ones.
+        // Each post queues a job behind this one, so posting after the whole
+        // settle rather than between its steps changes nothing they see. A
+        // held component-event batch is neither drained nor latched, so the
+        // first later epilogue whose commit runs posts it.
+        let owed = runtime.settle_entry();
+        if owed.contains(Deliveries::RESIZE) && !page.resizes_posted.replace(true) {
             page.post_resize_notifications();
         }
-        // The update first, always: it must run whether or not exposure
-        // changes are already waiting.
-        if (runtime.update_intersection_observations() || runtime.has_pending_exposure())
-            && !page.intersections_posted.replace(true)
-        {
+        if owed.contains(Deliveries::INTERSECTION) && !page.intersections_posted.replace(true) {
             page.post_intersection_notifications();
         }
-        if runtime.has_pending_content_visibility_changes()
+        if owed.contains(Deliveries::CONTENT_VISIBILITY)
             && !page.content_visibility_posted.replace(true)
         {
             page.post_content_visibility_changes();
         }
-        // Held while the commit above was skipped: an `<svg>`'s `load` reads
-        // the element's layout box at delivery, which is stale until a commit
-        // applies the natural size its report set. The hold covers the whole
-        // batch, so `<image>`, `<dialog>` and `<overlay>` events queued
-        // before the first flush are delayed to the first commit as well.
-        // The queue is not drained and the latch is not set while held, so
-        // the first later epilogue whose commit runs posts the batch.
-        if runtime.has_component_events()
-            && !runtime.needs_render()
+        if owed.contains(Deliveries::COMPONENT_EVENTS)
             && !page.component_events_posted.replace(true)
         {
             page.post_component_events();
@@ -1231,6 +1206,15 @@ pub(super) async fn serve_view(context: Rc<GroupContext>, view: AttachedView, ou
     owner::run_owner(&page).await;
 }
 
+/// `first` and every message already queued behind it when it was read: one
+/// burst, which one entry runs. What arrives while that entry runs is a later
+/// burst, read once this one is done.
+fn burst<T, C: FromIterator<T>>(receiver: &mut mpsc::UnboundedReceiver<T>, first: T) -> C {
+    let queued = receiver.len();
+    let rest = std::iter::from_fn(|| receiver.try_recv().ok()).take(queued);
+    std::iter::once(first).chain(rest).collect()
+}
+
 /// The one ordered consumer of this view's command stream.
 ///
 /// A burst rather than a command: the rest of what is already queued goes
@@ -1267,15 +1251,12 @@ async fn consume_commands(page: Rc<Page>, mut commands: mpsc::UnboundedReceiver<
             owner::end(&page);
             return;
         }
-        let queued = commands.len();
-        let rest = std::iter::from_fn(|| commands.try_recv().ok()).take(queued);
         // Collected rather than handed over as an iterator, because a job owns
-        // what it runs on: one allocation per burst, not per command.
-        let burst: Vec<ToMain> = std::iter::once(first).chain(rest).collect();
-        // Awaited, so the next burst is read only once this one has been
-        // applied — which is what makes what arrives meanwhile one later
-        // burst rather than a queue of entries.
-        page.apply(burst).await;
+        // what it runs on: one allocation per burst, not per command. Awaited,
+        // so the next burst is read only once this one has been applied —
+        // which is what makes what arrives meanwhile one later burst rather
+        // than a queue of entries.
+        page.apply(burst(&mut commands, first)).await;
     }
     // The embedder released this view. Everything it owns goes with the
     // tasks the owner is about to reclaim.
@@ -1439,6 +1420,14 @@ async fn load_font_face(page: Rc<Page>, request: terminus::link::FontFaceRequest
 /// The channel's senders are the realms' worker owners and this view's
 /// worker tasks, so it closes only once the realm is gone — which is to say,
 /// with the view.
+///
+/// One entry per burst, as [`consume_commands`] runs one per burst of
+/// commands: the event read and every event already queued behind it, each
+/// delivered by its own call with its own checkpoint, so what one message's
+/// handlers queued runs before the next message is delivered, and one
+/// epilogue after the last. A view the embedder released while an event's
+/// handler was parked on a synchronous wait has ended, and the rest of the
+/// burst is not delivered, as [`Page::apply`] stops a burst of commands.
 async fn consume_worker_events(page: Rc<Page>) {
     loop {
         let event = tokio::select! {
@@ -1452,9 +1441,17 @@ async fn consume_worker_events(page: Rc<Page>) {
                     .poll_recv(cx)
             }) => event,
         };
-        let Some(WorkerEvent { key, payload }) = event else {
+        let Some(first) = event else {
             return;
         };
+        // Inline for one event, the steady state of one message per turn.
+        let events: SmallVec<[WorkerEvent; 1]> = burst(
+            page.worker_events
+                .borrow_mut()
+                .as_mut()
+                .expect("the live realm installed its Worker inbox"),
+            first,
+        );
         // Reported inside the entry, before its epilogue, as every other kind
         // of entry reports its failure. Boot can settle in here, when the MTS
         // entry's top-level await was waiting on this worker, and the error
@@ -1463,8 +1460,13 @@ async fn consume_worker_events(page: Rc<Page>) {
         // on to report as StartupFailed too.
         let delivering = Rc::clone(&page);
         owner::enter(&page, move |runtime, js| {
-            if let Err(error) = runtime.dispatch_worker_event(js, key, payload) {
-                policy::report(&delivering, Scene::Listener, error.into_script_error());
+            for WorkerEvent { key, payload } in events {
+                if delivering.ended() {
+                    break;
+                }
+                if let Err(error) = runtime.dispatch_worker_event(js, key, payload) {
+                    policy::report(&delivering, Scene::Listener, error.into_script_error());
+                }
             }
         })
         .await;

@@ -34,7 +34,7 @@ use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
 use crate::clock::ClockInstant;
-use crate::esm::{HOST_MODULE_SPECIFIER, TIMER_MODULE_SPECIFIER};
+use crate::esm::{Export, HOST_MODULE_SPECIFIER};
 use crate::main::quickjs::{ScriptEngine, ScriptRuntime};
 use crate::script::ScriptError;
 
@@ -125,6 +125,12 @@ impl TimerSchedule {
             },
         );
         id
+    }
+
+    /// Whether any timer is armed: when none is, nothing can come due, and
+    /// whatever the heap still holds is leftovers.
+    pub(crate) fn is_armed(&self) -> bool {
+        !self.armed.is_empty()
     }
 
     /// Disarms a timer, whether or not one is armed under that id.
@@ -238,9 +244,6 @@ fn effective_delay(requested: Duration, nesting: u32) -> Duration {
     }
 }
 
-/// Called on `bobcat:timers` when a timer this schedule armed comes due.
-const TIMER_RUN_EXPORT: &str = "__BobcatRunTimer";
-
 /// The timer schedule, and the nesting level the next timer inherits.
 ///
 /// Shared with the host members that maintain it, so it is `Rc`: the native
@@ -270,6 +273,11 @@ impl TimerState {
     pub(crate) fn next_deadline(&self) -> Option<ClockInstant> {
         self.schedule.borrow_mut().next_deadline()
     }
+
+    /// Whether any timer is armed here.
+    pub(crate) fn is_armed(&self) -> bool {
+        self.schedule.borrow().is_armed()
+    }
 }
 
 /// Runs every timer due now in one realm, in the order the standard fires
@@ -287,7 +295,16 @@ pub(crate) fn run_due_timers(
     js_runtime: &mut ScriptRuntime,
     timers: &TimerState,
 ) -> Option<Vec<ScriptError>> {
-    let due = timers.schedule.borrow_mut().take_due(ClockInstant::now());
+    let due = {
+        let mut schedule = timers.schedule.borrow_mut();
+        // No clock read for a realm with nothing armed, which is nearly every
+        // entry of nearly every realm: nothing can be due. The leftovers the
+        // heap may hold are dropped by the epilogue's `next_deadline`.
+        if !schedule.is_armed() {
+            return None;
+        }
+        schedule.take_due(ClockInstant::now())
+    };
     if due.is_empty() {
         return None;
     }
@@ -299,8 +316,7 @@ pub(crate) fn run_due_timers(
         timers.nesting.set(timer.nesting);
         let ran = engine.call_module_export(
             js_runtime,
-            TIMER_MODULE_SPECIFIER,
-            TIMER_RUN_EXPORT,
+            Export::RunTimer,
             &[HostArgument::Number(f64::from(timer.id))],
         );
         timers.nesting.set(0);
@@ -349,7 +365,7 @@ fn install(
     arity: u8,
     callback: impl FnMut(&[HostArgument<'_>]) -> Result<HostValue, String> + 'static,
 ) -> Result<(), ScriptError> {
-    engine.register_host_module_function(HOST_MODULE_SPECIFIER, name, arity, Box::new(callback))
+    engine.register_host_module_function(HOST_MODULE_SPECIFIER, name, arity, callback)
 }
 
 fn argument<'a>(arguments: &[HostArgument<'a>], index: usize) -> HostArgument<'a> {

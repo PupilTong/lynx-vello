@@ -5,10 +5,11 @@
 //!
 //! Exposure is a Lynx-only extension (standards bucket 2): no W3C feature has
 //! its attributes, its events or its records. It lives here rather than in
-//! `terminus`: each registered element is one intersection observer of `terminus`'s
-//! (`terminus::link::IntersectionEventHandler`), the W3C primitive with the target
-//! margin `terminus` adds beside the root margin, and this module turns what
-//! those observers deliver into exposure changes.
+//! `terminus`: each registered element is a target of one of `terminus`'s
+//! intersection observers (`terminus::link::IntersectionEventHandler`), the W3C
+//! primitive with the target margin `terminus` adds beside the root margin, one
+//! observer per set of options the elements' attributes ask for, and this
+//! module turns what those observers deliver into exposure changes.
 //!
 //! # The rulings it is built on (user, 2026-10-11; the margin fold is the
 //! architect's decision of 2026-10-12)
@@ -135,36 +136,44 @@
 //! `uidisappear` row on it. The host tells this module on each change of
 //! either answer, as the realm reports a registration
 //! (`listenerOpened`/`listenerClosed`); no attribute registers an element by
-//! itself. Each registration owns one observer — root the viewport, one threshold, the
-//! element's `exposure-area`, and the root and target margins its margins
-//! fold into — whose handler, [`ExposureHandler`], compares what the
-//! primitive reports with what was last recorded and queues a
-//! [`ExposureChange`] where they differ. One
-//! threshold at the area is enough: the primitive queues an entry exactly
-//! when the pair (threshold index, intersecting) changes, which is exactly
-//! when "intersecting with a ratio of at least the area" can change.
+//! itself. A registration is a target of the observer of its [`Options`] —
+//! root the viewport, one threshold, the element's `exposure-area`, and the
+//! root and target margins its margins fold into — which every element with
+//! the same options shares (a feed's cells usually all do), created by the
+//! first arm that asks for it and kept from then on. Its handler,
+//! [`ExposureHandler`], compares what the primitive reports for each target
+//! with what was last recorded and queues a [`ExposureChange`] where they
+//! differ. One threshold at the area is enough: the primitive queues an
+//! entry exactly when the pair (threshold index, intersecting) changes,
+//! which is exactly when "intersecting with a ratio of at least the area"
+//! can change.
 //!
-//! Every attribute change re-arms a registered element: the observer is
-//! dropped and created again from the attributes as they are now. The first update after an observe
+//! Every attribute change re-arms a registered element: it is taken out of
+//! its observer, entries already queued for it included
+//! (`Document::forget_intersection_target`), and observed again by the
+//! observer of the options its attributes ask for now. The first update after an observe
 //! always reports the element, so an element whose visibility did not move
 //! reports what was already recorded and queues nothing.
 //!
-//! A registration keeps its observer while it is stopped: the handler
-//! ignores what the primitive reports for a stopped element, and a resume
-//! re-arms it, so the fresh observer's first report is judged against the
-//! record again.
+//! A registration stays observed while it is stopped: the handler ignores
+//! what the primitive reports for a stopped element, and a resume re-arms
+//! it, so its first report after is judged against the record again.
 //!
-//! The handler is bound to its element, so the primitive drops it when the
-//! element is freed; that drop is how a freed element is noticed, and it
-//! only lets the registration go, whether or not it is stopped. Every drop
-//! this module makes itself clears the registration's observer first, so the
-//! handler's `Drop` tells the two apart. That `Drop` borrows the shared state
-//! and runs inside `Document::drop_intersection_observer` and inside an
+//! A freed element leaves its observer in the primitive, which tells the
+//! handler ([`IntersectionEventHandler::target_freed`]); that is how a freed
+//! element is noticed, and it only lets the registration go, whether or not
+//! it is stopped. The hook borrows the shared state and runs inside an
 //! element's free (`Document::drop_element`), so no borrow of the shared
 //! state is ever held across a `Document` call.
+//!
+//! One delivery hands each observer's entries to the handler in observer
+//! creation order, so within one delivery the changes of elements with one
+//! set of options come before those of the next set's, each set's in the
+//! order its elements were armed (user ruling, 2026-10-22: grouped by
+//! option set rather than in global arm order).
 
-use std::borrow::Cow;
 use std::cell::RefCell;
+use std::collections::hash_map;
 use std::rc::Rc;
 
 use rustc_hash::FxHashMap;
@@ -210,17 +219,21 @@ pub(crate) fn is_exposure_attribute(name: &str) -> bool {
 /// One element's exposure moving: it became visible (`appeared`) or stopped
 /// being so, or a teardown took it out of the exposed record.
 ///
-/// The id and the scene are copied when the change forms, because the
-/// element may be freed, or its attributes rewritten, before the delivery
-/// entry runs: a `disexposure` names what the element was exposed under.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The id and the scene are the registration's own, shared rather than
+/// copied when the change forms: the element may be freed, or its
+/// attributes rewritten, before the delivery entry runs, and a rewrite
+/// replaces the registration's strings rather than editing them, so a
+/// `disexposure` still names what the element was exposed under.
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct ExposureChange {
     pub(crate) node: NodeId,
     pub(crate) appeared: bool,
     /// The `exposure-id` this change is recorded under: `None` for an
     /// element registered only by its listener, which gets no record.
-    pub(crate) exposure_id: Option<String>,
-    pub(crate) scene: String,
+    pub(crate) exposure_id: Option<Rc<str>>,
+    /// The `exposure-scene`: `None` when absent or empty, which the record
+    /// carries as `""`.
+    pub(crate) scene: Option<Rc<str>>,
     /// Whether the element hears `uiappear`/`uidisappear` for it: false for
     /// a teardown and for `stopExposure`, which send records only.
     pub(crate) element_event: bool,
@@ -229,17 +242,16 @@ pub(crate) struct ExposureChange {
 /// One registered element.
 #[derive(Debug)]
 struct Entry {
-    /// The observer this registration owns. `None` before the first arm,
-    /// and cleared before every drop this module makes, which is what
-    /// [`ExposureHandler`]'s `Drop` reads.
-    observer: Option<IntersectionObserverId>,
+    /// The options it is armed with: which observer it is a target of.
+    options: Options,
     /// The element hears `uiappear`/`uidisappear`: some realm has filed a
     /// handler for one of them on it.
     element_event: bool,
     /// `exposure-id` when present and non-empty, copied so that a freed
-    /// element still names it.
-    exposure_id: Option<String>,
-    scene: String,
+    /// element still names it, and shared with every change it forms.
+    exposure_id: Option<Rc<str>>,
+    /// `exposure-scene` when present and non-empty, the same way.
+    scene: Option<Rc<str>>,
     /// `exposure-area` as a ratio in `[0, 1]`.
     area: f64,
     /// Recorded as exposed: the last change this registration queued was an
@@ -306,25 +318,22 @@ fn change(node: NodeId, entry: &Entry, appeared: bool, element_event: bool) -> E
     }
 }
 
-/// The handler of one registration's observer.
-///
-/// Bound to its element, so the primitive drops it when the element is
-/// freed; see its `Drop`.
+/// The handler of the observer of one set of [`Options`], shared state and
+/// nothing else: each entry it is handed names its target.
 #[derive(Debug)]
 struct ExposureHandler {
-    node: NodeId,
     shared: Rc<RefCell<Shared>>,
 }
 
 impl IntersectionEventHandler<()> for ExposureHandler {
-    /// Compares each entry with the recorded state and queues a change
-    /// where they differ, unless the registration is stopped. Touches no
-    /// `Document` method, which is what lets it hold the shared borrow for
-    /// the whole call.
+    /// Compares each entry with its target's recorded state and queues a
+    /// change where they differ, unless the registration is stopped.
+    /// Touches no `Document` method, which is what lets it hold the shared
+    /// borrow for the whole call.
     fn notify(
         &mut self,
         _document: &mut LynxDocument,
-        observer: IntersectionObserverId,
+        _observer: IntersectionObserverId,
         entries: Vec<IntersectionObserverEntry>,
     ) {
         let mut shared = self.shared.borrow_mut();
@@ -332,49 +341,37 @@ impl IntersectionEventHandler<()> for ExposureHandler {
             entries: registered,
             changes,
         } = &mut *shared;
-        let Some(entry) = registered.get_mut(&self.node) else {
-            return;
-        };
-        // Only the registration's current observer speaks for it; a dropped
-        // one cannot deliver, so this is a statement of the invariant more
-        // than a filter. A stopped element is not detected: what the
-        // primitive reports is ignored, and the resume re-arms it.
-        if entry.observer != Some(observer) || entry.stopped {
-            return;
-        }
         for observed in entries {
+            // Every target is registered under this observer's options: a
+            // re-arm and a teardown take the target out of the observer, its
+            // queued entries with it, and a free lets the registration go as
+            // the primitive forgets the target. A stopped element is not
+            // detected: what the primitive reports is ignored, and the
+            // resume re-arms it.
+            let node = observed.target;
+            let Some(entry) = registered.get_mut(&node) else {
+                continue;
+            };
+            if entry.stopped {
+                continue;
+            }
             // A ratio is never negative, so an area of 0 asks for nothing
             // but intersection.
             let visible = observed.is_intersecting && observed.intersection_ratio >= entry.area;
             let element_event = entry.element_event;
             if visible {
-                expose(changes, self.node, entry, element_event);
+                expose(changes, node, entry, element_event);
             } else {
-                disexpose(changes, self.node, entry, element_event);
+                disexpose(changes, node, entry, element_event);
             }
         }
     }
 
-    fn bound_to(&self) -> Option<NodeId> {
-        Some(self.node)
-    }
-}
-
-impl Drop for ExposureHandler {
-    /// The element was freed, when its registration still names an
-    /// observer: every drop this module makes clears that first. The
-    /// registration goes, and nothing is queued, whether or not it is
-    /// stopped: a freed element is no target, so there is nothing to
-    /// dispatch a record at.
-    fn drop(&mut self) {
-        let mut shared = self.shared.borrow_mut();
-        let freed = shared
-            .entries
-            .get(&self.node)
-            .is_some_and(|entry| entry.observer.is_some());
-        if freed {
-            shared.entries.remove(&self.node);
-        }
+    /// The element was freed: its registration goes, and nothing is queued,
+    /// whether or not it is stopped: a freed element is no target, so there
+    /// is nothing to dispatch a record at.
+    fn target_freed(&mut self, node: NodeId) {
+        self.shared.borrow_mut().entries.remove(&node);
     }
 }
 
@@ -565,10 +562,45 @@ fn parse_float(text: &str) -> f64 {
     text[..end].parse().unwrap_or(f64::NAN)
 }
 
+/// What an exposure observer is made with besides its handler — the root
+/// and target margins an element's margins fold into, and its
+/// `exposure-area`, the one threshold — as the key that elements asking for
+/// the same share one observer under. Compared by bits, `-0` read as `0`,
+/// since the two observe alike.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct Options {
+    /// The root margin's sides, then the target margin's, each top, right,
+    /// bottom, left: whether it is a percentage, and its number's bits.
+    margins: [(bool, u32); 8],
+    area: u64,
+}
+
+impl Options {
+    fn new(margins: &Margins, area: f64) -> Self {
+        // Adding `+0` turns `-0` into `+0` and leaves every other number as
+        // it is.
+        let side = |length: MarginLength| match length {
+            MarginLength::Px(px) => (false, (px + 0.0).to_bits()),
+            MarginLength::Percent(percent) => (true, (percent + 0.0).to_bits()),
+        };
+        let sides = |margin: &IntersectionMargin| {
+            [margin.top, margin.right, margin.bottom, margin.left].map(side)
+        };
+        let [root, target] = [sides(&margins.root), sides(&margins.target)];
+        let mut all = [(false, 0); 8];
+        all[..4].copy_from_slice(&root);
+        all[4..].copy_from_slice(&target);
+        Self {
+            margins: all,
+            area: (area + 0.0).to_bits(),
+        }
+    }
+}
+
 /// What one element's attributes ask for, read at an arm.
 struct Attributes {
-    exposure_id: Option<String>,
-    scene: String,
+    exposure_id: Option<Rc<str>>,
+    scene: Option<Rc<str>>,
     area: f64,
     margins: Margins,
 }
@@ -585,11 +617,11 @@ impl Attributes {
             exposure_id: element
                 .attribute(EXPOSURE_ID)
                 .filter(|id| !id.is_empty())
-                .map(Cow::into_owned),
+                .map(|id| Rc::from(&*id)),
             scene: element
                 .attribute(EXPOSURE_SCENE)
-                .map(Cow::into_owned)
-                .unwrap_or_default(),
+                .filter(|scene| !scene.is_empty())
+                .map(|scene| Rc::from(&*scene)),
             area: parse_area(element.attribute(EXPOSURE_AREA).as_deref()),
             margins: fold_margins(SCREEN_MARGINS.map(length), UI_MARGINS.map(length)),
         }
@@ -602,8 +634,12 @@ impl Attributes {
 /// Owned by the realm's document slot beside the document.
 #[derive(Debug)]
 pub(crate) struct Exposure {
-    /// Shared with every registration's [`ExposureHandler`].
+    /// Shared with every observer's [`ExposureHandler`].
     shared: Rc<RefCell<Shared>>,
+    /// The observer of each set of options an arm has asked for. Kept once
+    /// made: registrations come and go with a list's cells, and the
+    /// observer of their options is what the next one is armed under.
+    observers: FxHashMap<Options, IntersectionObserverId>,
 }
 
 impl Exposure {
@@ -611,6 +647,7 @@ impl Exposure {
     pub(crate) fn new() -> Self {
         Self {
             shared: Rc::default(),
+            observers: FxHashMap::default(),
         }
     }
 
@@ -661,12 +698,14 @@ impl Exposure {
 
     /// Registers `node`, or re-arms it, with `attributes`.
     ///
-    /// An existing observer is dropped. A registration recorded as exposed
-    /// under another id than the one it now has sends a `disexposure` under
-    /// the old id and is recorded as not exposed, so the new id gets an
-    /// exposure of its own. A fresh observer is created and observes the
-    /// element, whether or not the registration is stopped: the handler
-    /// ignores what it reports while it is.
+    /// A registered element is first taken out of its observer, the
+    /// entries already queued for it included. A registration recorded as
+    /// exposed under another id than the one it now has sends a
+    /// `disexposure` under the old id and is recorded as not exposed, so the
+    /// new id gets an exposure of its own. The observer of the options the
+    /// attributes ask for, made now if no arm asked for them before, then
+    /// observes the element afresh, whether or not the registration is
+    /// stopped: the handler ignores what it reports while it is.
     fn arm(
         &mut self,
         document: &mut LynxDocument,
@@ -680,68 +719,74 @@ impl Exposure {
             area,
             margins,
         } = attributes;
+        let options = Options::new(&margins, area);
         let previous = {
             let mut shared = self.shared.borrow_mut();
             let Shared { entries, changes } = &mut *shared;
-            let entry = entries.entry(node).or_insert(Entry {
-                observer: None,
-                element_event,
-                exposure_id: None,
-                scene: String::new(),
-                area: 0.0,
-                exposed: false,
-                stopped: false,
-            });
-            let previous = entry.observer.take();
+            let (entry, previous) = match entries.entry(node) {
+                hash_map::Entry::Occupied(registered) => {
+                    let entry = registered.into_mut();
+                    let previous = entry.options;
+                    (entry, Some(previous))
+                }
+                hash_map::Entry::Vacant(vacant) => (
+                    vacant.insert(Entry {
+                        options,
+                        element_event,
+                        exposure_id: None,
+                        scene: None,
+                        area: 0.0,
+                        exposed: false,
+                        stopped: false,
+                    }),
+                    None,
+                ),
+            };
             if entry.exposure_id != exposure_id {
                 disexpose(changes, node, entry, false);
             }
+            entry.options = options;
             entry.element_event = element_event;
             entry.exposure_id = exposure_id;
             entry.scene = scene;
             entry.area = area;
             previous
         };
-        if let Some(observer) = previous {
-            document.drop_intersection_observer(observer);
+        if let Some(previous) = previous {
+            document.forget_intersection_target(self.observers[&previous], node);
         }
-        let observer = document.create_intersection_observer(
-            Box::new(ExposureHandler {
-                node,
-                shared: Rc::clone(&self.shared),
-            }),
-            IntersectionObserverInit {
-                root: None,
-                root_margin: margins.root,
-                target_margin: margins.target,
-                thresholds: vec![area],
-            },
-        );
+        let shared = &self.shared;
+        let observer = *self.observers.entry(options).or_insert_with(|| {
+            document.create_intersection_observer(
+                Box::new(ExposureHandler {
+                    shared: Rc::clone(shared),
+                }),
+                IntersectionObserverInit {
+                    root: None,
+                    root_margin: margins.root,
+                    target_margin: margins.target,
+                    thresholds: vec![area],
+                },
+            )
+        });
         document.observe_intersection(observer, node);
-        self.shared
-            .borrow_mut()
-            .entries
-            .get_mut(&node)
-            .expect("the registration was just written")
-            .observer = Some(observer);
     }
 
-    /// Unregisters `node`: its observer is dropped, and if it was recorded
-    /// as exposed it sends a `disexposure` under the id it was exposed under,
-    /// with no element event.
+    /// Unregisters `node`: it is taken out of its observer, the entries
+    /// already queued for it included, and if it was recorded as exposed it
+    /// sends a `disexposure` under the id it was exposed under, with no
+    /// element event.
     fn teardown(&mut self, document: &mut LynxDocument, node: NodeId) {
-        let observer = {
+        let options = {
             let mut shared = self.shared.borrow_mut();
             let Shared { entries, changes } = &mut *shared;
             let Some(mut entry) = entries.remove(&node) else {
                 return;
             };
             disexpose(changes, node, &mut entry, false);
-            entry.observer
+            entry.options
         };
-        if let Some(observer) = observer {
-            document.drop_intersection_observer(observer);
-        }
+        document.forget_intersection_target(self.observers[&options], node);
     }
 
     /// `lynx.stopExposure({sendEvent})` (`on` false) and
@@ -751,22 +796,20 @@ impl Exposure {
     /// recorded as exposed under an `exposure-id` for a stop with
     /// `send_event`, and 0 for anything else.
     ///
-    /// Stopping marks each listed registration stopped: its observer stays,
-    /// and what it reports is ignored. With `send_event` each listed
+    /// Stopping marks each listed registration stopped: it stays observed,
+    /// and what its observer reports for it is ignored. With `send_event` each listed
     /// registration recorded as exposed sends one `disexposure` (records
     /// only) and is recorded as not exposed, whatever an earlier stop did;
     /// without it nothing is sent and the record is kept, so a resume that
     /// finds the element still visible sends nothing for it. Resuming clears
     /// the mark of each listed stopped registration and arms it again from
-    /// its attributes as they are now, so its fresh observer's first report
-    /// is judged against the record: one whose element did not move queues
-    /// nothing. A listed registration that is not stopped is running already
-    /// and is left alone.
+    /// its attributes as they are now, so its first report after is judged
+    /// against the record: one whose element did not move queues nothing. A listed registration
+    /// that is not stopped is running already and is left alone.
     ///
     /// A listed node that is not registered — never, no longer, or freed,
-    /// which lets its registration go with its handler, sending nothing — is
-    /// skipped. Registrations are visited in the order listed, so the records
-    /// one call sends come in the caller's order.
+    /// which lets its registration go, sending nothing — is skipped. Registrations are visited in
+    /// the order listed, so the records one call sends come in the caller's order.
     pub(crate) fn switch(
         &mut self,
         document: &mut LynxDocument,
@@ -815,15 +858,12 @@ impl Exposure {
         !self.shared.borrow().changes.is_empty()
     }
 
-    /// The observer `node`'s registration owns, if it is registered — for
-    /// the tests that read what an arm created.
+    /// The observer `node`'s registration is a target of, if it is
+    /// registered — for the tests that read what an arm asked for.
     #[cfg(test)]
     pub(crate) fn observer_of(&self, node: NodeId) -> Option<IntersectionObserverId> {
-        self.shared
-            .borrow()
-            .entries
-            .get(&node)
-            .and_then(|entry| entry.observer)
+        let options = self.shared.borrow().entries.get(&node)?.options;
+        self.observers.get(&options).copied()
     }
 
     /// Whether `node` is registered at all.

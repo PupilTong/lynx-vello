@@ -504,7 +504,7 @@ impl Placer<'_> {
             at: group.at,
             atoms_before: self.atoms_passed,
             text,
-            style: self.specs[style_span as usize].edge_style.clone(),
+            style: self.specs[style_span as usize].edge_style(),
             extra_spacing: boxes::edge_advance(self.specs, &edge),
             item: self.records[style_span as usize].item,
         });

@@ -1904,15 +1904,19 @@ fn a_key_event_reaches_the_page_with_its_keyboard_members() {
         },
         timestamp: 0.0,
     };
-    runtime
-        .dispatch_input_event(
-            &mut js_runtime,
-            terminus::link::NodeId::DOCUMENT_ELEMENT,
-            "keydown",
-            &payload,
-            None,
-        )
-        .expect("dispatch");
+    let mut dispatch_failures = Vec::new();
+    runtime.dispatch_input_event(
+        &mut js_runtime,
+        terminus::link::NodeId::DOCUMENT_ELEMENT,
+        "keydown",
+        &payload,
+        None,
+        &mut dispatch_failures,
+    );
+    assert!(
+        dispatch_failures.is_empty(),
+        "dispatch: {dispatch_failures:?}"
+    );
     runtime
         .evaluate_module(
             &mut js_runtime,
@@ -1969,15 +1973,19 @@ fn a_click_targets_the_common_ancestor_and_two_make_a_dblclick() {
             },
             timestamp: at,
         };
-        runtime
-            .dispatch_input_event(
-                &mut js_runtime,
-                node_id(down),
-                "click",
-                &payload,
-                Some(node_id(release)),
-            )
-            .expect("dispatch");
+        let mut dispatch_failures = Vec::new();
+        runtime.dispatch_input_event(
+            &mut js_runtime,
+            node_id(down),
+            "click",
+            &payload,
+            Some(node_id(release)),
+            &mut dispatch_failures,
+        );
+        assert!(
+            dispatch_failures.is_empty(),
+            "dispatch: {dispatch_failures:?}"
+        );
     };
     click(4, 5, 0.0);
     click(5, 4, 300.0);
@@ -7859,7 +7867,12 @@ fn an_event_target_no_handle_names_is_an_error_not_a_silent_drop() {
     let error = runtime
         .dispatch_for_test(&mut js_runtime, run, &tap(), event_point())
         .expect_err("a target no handle names cannot be delivered");
-    assert!(error.to_string().contains("ownership graph"), "{error}");
+    let error = error
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("; ");
+    assert!(error.contains("ownership graph"), "{error}");
 }
 
 /// `__SetAttribute(list, "update-list-info", …)` against the real document,
@@ -8736,7 +8749,10 @@ fn an_rpx_exposure_margin_resolves_against_the_viewport_width() {
         )
         .expect("removing the attribute");
     let rearmed = exposure_observer(&elements, view).expect("the listener keeps it registered");
-    assert_ne!(rearmed, observer, "the attribute write re-armed it");
+    assert_eq!(
+        rearmed, observer,
+        "the attribute write re-armed it on the observer of its options, which it did not change"
+    );
     runtime
         .evaluate_module(
             &mut js,
@@ -8829,7 +8845,10 @@ fn the_listener_members_register_exposure_and_switch_exposure_switches_detection
     );
     run("switchExposure(1, 0, `${view}`);");
     let resumed = exposure_observer(&elements, view).expect("resuming observes it again");
-    assert_ne!(resumed, first, "with an observer of its own");
+    assert_eq!(
+        resumed, first,
+        "on the observer of its options, which every element asking for them shares"
+    );
     run("listenerClosed(view, 'uiappear');");
     assert_eq!(
         exposure_observer(&elements, view),
@@ -10818,6 +10837,38 @@ fn whole_path_encoding(
         .collect()
 }
 
+/// The pairs [`encode_path`] writes after its step count, read back.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::float_cmp,
+    reason = "packed ids and a step count, exact in an f64"
+)]
+fn encoded_path(
+    document: &LynxDocument,
+    steps: &terminus::link::event::EventSteps,
+) -> Vec<(terminus::link::NodeId, terminus::link::NodeId)> {
+    let mut arguments = Arguments::new();
+    encode_path(document, steps, &mut arguments);
+    let numbers: Vec<f64> = arguments
+        .iter()
+        .map(|argument| match argument {
+            HostArgument::Number(number) => *number,
+            other => panic!("the path crosses as numbers: {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        numbers[0],
+        ((numbers.len() - 1) / 2) as f64,
+        "the step count"
+    );
+    numbers[1..]
+        .chunks(2)
+        .map(|pair| (node_id(pair[0] as u64), node_id(pair[1] as u64)))
+        .collect()
+}
+
 /// The one encoding every realm is handed is the page realm's call as it
 /// always was, for a target in the document tree and one in a detached
 /// tree: the whole path, called at its first step. For a target in a UA
@@ -10855,10 +10906,10 @@ fn the_page_realms_call_carries_exactly_the_path_it_always_did() {
     };
     let slot = elements.slot.borrow();
     let document = slot.document.as_ref().unwrap();
-    let encoded = |steps: &terminus::link::event::EventSteps| encode_path(document, steps).to_vec();
+    let encoded = |steps: &terminus::link::event::EventSteps| encoded_path(document, steps);
     for target in [inner, detached] {
         let steps = document.event_steps(target, true, true);
-        let calls = realm_calls(document, &steps, "tap", std::iter::once(page_realm));
+        let (calls, _) = realm_calls(document, &steps, "tap", std::iter::once(page_realm));
         assert_eq!(calls.as_slice(), [page_realm], "{target:?}");
         assert_eq!(
             encoded(&steps),
@@ -10868,7 +10919,9 @@ fn the_page_realms_call_carries_exactly_the_path_it_always_did() {
     }
     let steps = document.event_steps(shadowed, true, true);
     assert_eq!(
-        realm_calls(document, &steps, "tap", std::iter::once(page_realm)).len(),
+        realm_calls(document, &steps, "tap", std::iter::once(page_realm))
+            .0
+            .len(),
         1
     );
     let path = encoded(&steps);
@@ -10902,7 +10955,9 @@ fn the_page_realms_call_carries_exactly_the_path_it_always_did() {
     );
     let steps = document.event_steps(shadowed, true, false);
     assert!(
-        realm_calls(document, &steps, "tap", std::iter::once(page_realm)).is_empty(),
+        realm_calls(document, &steps, "tap", std::iter::once(page_realm))
+            .0
+            .is_empty(),
         "a non-composed path inside a shadow tree invites no realm with nothing there"
     );
 }
@@ -11140,15 +11195,19 @@ fn a_key_calls_every_realm_that_registered_it() {
         },
         timestamp: 0.0,
     };
-    runtime
-        .dispatch_input_event(
-            &mut js,
-            terminus::link::NodeId::DOCUMENT_ELEMENT,
-            "keydown",
-            &payload,
-            None,
-        )
-        .expect("dispatch");
+    let mut dispatch_failures = Vec::new();
+    runtime.dispatch_input_event(
+        &mut js,
+        terminus::link::NodeId::DOCUMENT_ELEMENT,
+        "keydown",
+        &payload,
+        None,
+        &mut dispatch_failures,
+    );
+    assert!(
+        dispatch_failures.is_empty(),
+        "dispatch: {dispatch_failures:?}"
+    );
     assert_eq!(
         frame_lines(&mut js, &mut runtime),
         [
@@ -11505,7 +11564,7 @@ fn a_realm_that_throws_does_not_keep_the_next_from_hearing_the_event() {
     let failed = runtime
         .dispatch_for_test(&mut js, inner, &tap(), Point2D::new(30.0, 40.0))
         .expect_err("the page listener threw");
-    let failures: Vec<MainThreadError> = failed.into_errors().collect();
+    let failures: Vec<MainThreadError> = failed;
     assert_eq!(failures.len(), 1);
     assert!(
         failures[0].to_string().contains("page listener"),

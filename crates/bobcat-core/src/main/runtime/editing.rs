@@ -66,7 +66,7 @@ use terminus::link::event::EventDetail;
 use terminus::link::input::{Modifiers, PointerId, PointerKind};
 
 use super::{
-    CLICK_EVENT, DOUBLE_CLICK_MILLISECONDS, ListenerFailures, MainThreadError, MainThreadRuntime,
+    CLICK_EVENT, DOUBLE_CLICK_MILLISECONDS, DocumentSlot, MainThreadError, MainThreadRuntime,
     ScriptRuntime,
 };
 use crate::editing::TextInputSource;
@@ -290,11 +290,14 @@ impl MainThreadRuntime {
     ) -> Vec<MainThreadError> {
         let mut failures = Vec::new();
         if let Some(release) = release {
-            if let Err(failed) =
-                self.dispatch_input_event(js_runtime, target, name, payload, Some(release))
-            {
-                failures.extend(failed.into_errors());
-            }
+            self.dispatch_input_event(
+                js_runtime,
+                target,
+                name,
+                payload,
+                Some(release),
+                &mut failures,
+            );
             // A finger's or a pen's tap is its press, as a touch browser
             // focuses and places the caret on the tap: at the release, where
             // the tap landed.
@@ -329,9 +332,7 @@ impl MainThreadRuntime {
             };
             (target, slot.editing_routes(name))
         };
-        if let Err(failed) = self.dispatch_input_event(js_runtime, target, name, payload, None) {
-            failures.extend(failed.into_errors());
-        }
+        self.dispatch_input_event(js_runtime, target, name, payload, None, &mut failures);
         if editing {
             self.input_default_action(js_runtime, target, name, payload, &mut failures);
         }
@@ -589,9 +590,7 @@ impl MainThreadRuntime {
         let events = edit.events().to_vec();
         let (before, after) = events.split_at(edit.commit_index());
         for event in before {
-            if let Err(failed) = self.dispatch_edit_event(js_runtime, host, event, timestamp) {
-                failures.extend(failed.into_errors());
-            }
+            self.dispatch_edit_event(js_runtime, host, event, timestamp, &mut failures);
         }
         if !self
             .slot
@@ -603,9 +602,7 @@ impl MainThreadRuntime {
             return failures;
         }
         for event in after {
-            if let Err(failed) = self.dispatch_edit_event(js_runtime, host, event, timestamp) {
-                failures.extend(failed.into_errors());
-            }
+            self.dispatch_edit_event(js_runtime, host, event, timestamp, &mut failures);
         }
         // The engine's own `selectionchange` at the host, after every
         // command that applied: no realm hears it, because
@@ -658,7 +655,8 @@ impl MainThreadRuntime {
         host: terminus::link::NodeId,
         event: &EditEvent,
         timestamp: f64,
-    ) -> Result<(), ListenerFailures> {
+        failures: &mut Vec<MainThreadError>,
+    ) {
         let composed = !is_shadow_content(self.slot.borrow().document_ref(), host);
         let detail = edit_detail(event);
         self.dispatch(
@@ -670,8 +668,8 @@ impl MainThreadRuntime {
             timestamp,
             &detail,
             &[],
-        )
-        .map(|_| ())
+            failures,
+        );
     }
 
     /// Dispatches the focus events `terminus` has queued, in the order they
@@ -696,7 +694,7 @@ impl MainThreadRuntime {
             let detail = EventDetail::Focus {
                 related_target: event.related_target,
             };
-            if let Err(error) = self.dispatch(
+            self.dispatch(
                 js_runtime,
                 event.target,
                 event.kind.name(),
@@ -705,39 +703,44 @@ impl MainThreadRuntime {
                 timestamp,
                 &detail,
                 &[],
-            ) {
-                failures.extend(error.into_errors());
-            }
+                &mut failures,
+            );
         }
         failures
     }
 
     /// Opens [`EditingRoute::Pointer`] once the document exists, and opens
-    /// or closes [`EditingRoute::Focus`] as an element gains or loses focus.
-    /// Asked by the page's epilogue, once per entry, before the commit that
-    /// publishes the frame.
+    /// or closes [`EditingRoute::Focus`] as an element gains or loses focus:
+    /// the step of [`MainThreadRuntime::settle_entry`] the tests run on its
+    /// own.
+    #[cfg(test)]
     pub(crate) fn sync_editing_routes(&mut self) {
         self.slot.borrow_mut().sync_editing_routes();
     }
+}
 
+impl DocumentSlot {
     /// Publishes the focused host's [`TextInputState`](terminus::link::editing::TextInputState) to
-    /// the host when it differs from the last one published. Asked by the page's epilogue
-    /// after its commit, so the geometry is the committed frame's. Nothing is
-    /// computed while nothing is focused and nothing was.
-    pub(crate) fn publish_text_input_state(&mut self) {
-        let slot = self.slot.borrow();
-        let Some(document) = slot.document.as_ref() else {
+    /// the host when it differs from `published`, the last one published,
+    /// and records it there. Asked by the page's epilogue after its commit,
+    /// so the geometry is the committed frame's. Nothing is computed while
+    /// nothing is focused and nothing was.
+    pub(super) fn publish_text_input_state(
+        &self,
+        published: &mut terminus::link::editing::TextInputState,
+    ) {
+        let Some(document) = self.document.as_ref() else {
             return;
         };
-        if document.focused().is_none() && self.text_input.host.is_none() {
+        if document.focused().is_none() && published.host.is_none() {
             return;
         }
         let state = document.text_input_state();
-        if state == self.text_input {
+        if state == *published {
             return;
         }
-        self.text_input = state.clone();
-        slot.outbox
+        *published = state.clone();
+        self.outbox
             .notify(ViewNotice::TextInputState(Box::new(state)));
     }
 }

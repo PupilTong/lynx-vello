@@ -96,23 +96,15 @@ pub(super) fn item_alignment_offset(
 #[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::float_cmp)]
 mod tests {
-    use super::super::types::TrackSizingFunction;
     use super::*;
 
     fn track(base: f32, collapsed: bool) -> super::super::types::Track {
         super::super::types::Track {
-            sizing: TrackSizingFunction::AUTO,
             base,
             growth_limit: base,
             fit_content_limit: f32::INFINITY,
-            flex_factor: 0.0,
-            flexible: false,
-            intrinsic_min: false,
-            intrinsic_max: false,
-            auto_max: false,
-            infinitely_growable: false,
             collapsed,
-            position: 0.0,
+            ..Default::default()
         }
     }
 

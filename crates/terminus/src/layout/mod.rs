@@ -18,8 +18,6 @@ use rustc_hash::FxHashSet;
 use seldon::compute::LeafMetrics;
 pub use seldon::compute::NaturalSize;
 pub(crate) use seldon::geometry::Edges;
-#[cfg(feature = "layout-test-utils")]
-use seldon::geometry::Point;
 pub use seldon::geometry::Size;
 use seldon::invalidate::is_relayout_boundary;
 pub(crate) use seldon::style::TextBrush;
@@ -336,38 +334,43 @@ impl<T> Document<T> {
         role: ImageRole,
         value: Option<&str>,
     ) -> Option<ImageOutcome> {
-        let (changed, was_replaced, previous) = {
+        let was_replaced = {
             let node = self
-                .arenas_mut()
-                .get_mut(id)
+                .get(id)
                 .expect("stale NodeId passed to Document::set_image_source");
             assert!(
                 node.is_element(),
                 "non-element NodeId passed to Document::set_image_source"
             );
-            let was_replaced = node.is_replaced();
-            let previous = node.image_source(role).map(str::to_owned);
-            (node.set_image_source(role, value), was_replaced, previous)
+            // Writing the source an element holds changes nothing, and so
+            // does clearing one it never had: that is no conversion to or from
+            // replaced content (`Node::set_image_source`).
+            if node.image_source(role) == value {
+                return None;
+            }
+            node.is_replaced()
         };
-        if !changed {
-            return None;
-        }
         // The registry has to know which node presents which source, or a
-        // completed load has nobody to hand its intrinsic size to.
+        // completed load has nobody to hand its intrinsic size to. The node
+        // holds the registry's own key for the source, and the one it
+        // displaces is unbound after it.
+        let key = value.map(|value| self.images.bind_node(value, id, role));
+        let previous = self
+            .arenas_mut()
+            .get_mut(id)
+            .expect("the node was live a moment ago")
+            .set_image_source(role, key);
         if let Some(previous) = previous {
             self.images.unbind_node(&previous, id, role);
         }
-        let mut outcome = None;
-        if let Some(value) = value {
-            self.images.bind_node(value, id, role);
-            // Only the element's own source has an outcome to report: a
-            // placeholder is an interim picture the page did not ask about, so
-            // neither its load nor its failure is an event. `ImageOutcome` has
-            // no variant naming one, and this is where that stays true.
-            if role == ImageRole::Source {
-                outcome = self.images.outcome_for(value, id);
-            }
-        }
+        // Only the element's own source has an outcome to report: a
+        // placeholder is an interim picture the page did not ask about, so
+        // neither its load nor its failure is an event. `ImageOutcome` has
+        // no variant naming one, and this is where that stays true.
+        let outcome = match value {
+            Some(value) if role == ImageRole::Source => self.images.outcome_for(value, id),
+            _ => None,
+        };
         self.note_replaced_change(id, was_replaced);
         outcome
     }
@@ -490,9 +493,7 @@ impl<T> Document<T> {
             node.is_element(),
             "non-element NodeId passed to Document::set_leaf_metrics_for_testing"
         );
-        node.set_test_leaf_metrics(
-            LeafMetrics::new(size).with_first_baselines(Point::new(None, first_baseline)),
-        );
+        node.set_test_leaf_metrics(LeafMetrics::new(size).with_first_baseline(first_baseline));
         self.invalidate_layout(id);
     }
 
@@ -671,6 +672,35 @@ impl<T> Document<T> {
         (chain.end() == Some(ChainEnd::DocumentElement)).then(|| Rect::new(origin, size))
     }
 
+    /// Whether [`Self::bounding_client_rect`] answers a rect for `id`, without
+    /// computing one: the same tests — a styled element that generates a
+    /// box, laid out, its containing-block chain ending at the document
+    /// element — and none of the offset, sticky or anchor arithmetic, so no
+    /// scroll box is resolved for a scrolling ancestor. For a caller that
+    /// only asks whether an element is rendered.
+    #[must_use]
+    pub fn generates_rendered_box(&self, id: crate::tree::document::NodeId) -> bool {
+        let Some(node) = self.get(id) else {
+            return false;
+        };
+        if inline_flow::is_inline_box(node) {
+            return self.inline_box_client_rect(id).is_some();
+        }
+        let Some(style) = StyleView::try_of(node) else {
+            return false;
+        };
+        if matches!(
+            style.display_mode(),
+            DisplayMode::None | DisplayMode::Contents
+        ) || self.rounded_layout(id).is_none()
+        {
+            return false;
+        }
+        let mut chain = ContainingBlockChain::new(self, node, style.values());
+        for _step in &mut chain {}
+        chain.end() == Some(ChainEnd::DocumentElement)
+    }
+
     /// [`Self::bounding_client_rect`] of an inline box: its fragments'
     /// union, moved from the paragraph's content box to the viewport.
     fn inline_box_client_rect(&self, id: crate::tree::document::NodeId) -> Option<Rect<f32>> {
@@ -743,7 +773,7 @@ impl<T> Document<T> {
     /// [`Self::paragraph_kind`]. Nothing here runs a pass.
     #[must_use]
     pub fn paragraph_line_count(&self, id: crate::tree::document::NodeId) -> Option<usize> {
-        Some(self.committed_paragraph(id)?.painted()?.lines.len())
+        Some(self.committed_paragraph(id)?.painted()?.line_count)
     }
 
     /// The lines the Lynx paragraph `id` establishes laid out at its last

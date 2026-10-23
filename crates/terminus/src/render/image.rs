@@ -869,24 +869,39 @@ impl ImageRegistry {
     /// for, so it binds nothing and files no entry: an entry without bytes
     /// would make the markup's own later [`ImageRegistry::insert_document`]
     /// read it as known and never queue its parse.
-    pub(crate) fn bind_node(&mut self, source: &str, node: NodeId, role: ImageRole) {
-        let known = self.entries.contains_key(source);
-        if !known && is_synthetic_source(source) {
-            return;
-        }
-        if !known {
+    ///
+    /// Answers the name for the node to hold: the map's own key, so every
+    /// binder of one source shares one allocation of it, or, for such an
+    /// unfiled synthetic source, a copy of `source`.
+    pub(crate) fn bind_node(&mut self, source: &str, node: NodeId, role: ImageRole) -> Arc<str> {
+        let key = if let Some((key, _)) = self.entries.get_key_value(source) {
+            Arc::clone(key)
+        } else if is_synthetic_source(source) {
+            return Arc::from(source);
+        } else {
             // Deduplicated against a walk that met the same source first and
             // whose request has not been drained yet, the same way `resolve`
-            // deduplicates against itself.
+            // deduplicates against itself, in discovery order. That request's
+            // name becomes the key; otherwise one name is minted for both.
             let wanted = self.wanted.get_mut();
-            if !wanted.iter().any(|pending| &**pending == source) {
-                wanted.push(Arc::from(source));
-            }
-        }
-        let entry = self.entry_for(source);
+            let key = if let Some(pending) = wanted.iter().find(|pending| &***pending == source) {
+                Arc::clone(pending)
+            } else {
+                let key = Arc::<str>::from(source);
+                wanted.push(Arc::clone(&key));
+                key
+            };
+            self.entries.insert(Arc::clone(&key), Entry::default());
+            key
+        };
+        let entry = self
+            .entries
+            .get_mut(source)
+            .expect("the entry was found or just filed");
         if !entry.nodes.contains(&(node, role)) {
             entry.nodes.push((node, role));
         }
+        key
     }
 
     /// Drops `node`'s claim on `source` in `role`. Its claim in the other

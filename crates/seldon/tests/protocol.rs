@@ -646,7 +646,7 @@ fn compute_leaf_layout_uses_internal_natural_size() {
 
     assert_eq!(output.size, Size::new(60.0, 27.0));
     assert_eq!(output.content_size, Size::new(60.0, 27.0));
-    assert_eq!(output.first_baselines, Point::NONE);
+    assert_eq!(output.first_baseline, None);
 }
 
 #[test]
@@ -1152,7 +1152,7 @@ fn skipped_contents_dispatch_sizes_from_intrinsic_and_hides_descendants() {
     );
 
     assert_eq!(output.size, Size::new(40.0, 24.0));
-    assert_eq!(output.first_baselines, Point::NONE);
+    assert_eq!(output.first_baseline, None);
     assert_eq!(tree.unrounded_layout(&state, child), &Layout::default());
     assert!(state.invalidated.contains(&child));
 }

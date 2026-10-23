@@ -27,6 +27,8 @@
 //! The last row is what makes an inline `<view>` atomic: its inner text can
 //! never join this paragraph, because the walk does not descend through a box.
 
+use std::borrow::Cow;
+
 use seldon::geometry::{Edges, Size};
 use seldon::style::{CoreStyle, PositionProperty};
 use seldon::text::block::{
@@ -57,18 +59,20 @@ pub(crate) struct TextBlockStore {
     /// `InlineBoxSpec::id` is offset past the content items, so the two share
     /// one box-id space and one placement pass.
     pub(crate) truncation_source_ids: Vec<NodeId>,
-    /// What the block was built from. A paragraph is rebuilt, never patched —
-    /// parley's own mutability contract — so this is the whole invalidation
-    /// question for the shaped half.
+    /// What the block's content was built from: the flattened structure and
+    /// every run's text. A paragraph is rebuilt, never patched — parley's own
+    /// mutability contract — so this and the block's own
+    /// [`TextBlock::shaped_with`] are the whole invalidation question for the
+    /// shaped half.
     ///
-    /// Style is compared, not hashed: `BlockStyle` and `RunStyle` both derive
-    /// `PartialEq` over exactly the values parley shapes from, so this cannot
-    /// drift the way a hand-maintained field list can. Getting it wrong is
-    /// invisible — the paragraph would keep painting glyphs shaped at the old
-    /// font — which is why it is an equality check rather than a digest.
+    /// Style is compared, not hashed, and against the styles the block itself
+    /// was shaped with: `RunStyle` derives `PartialEq` over exactly the values
+    /// parley shapes from, and `BlockStyle::shapes_as` is the one rule for
+    /// which paragraph fields are shaping inputs, so this cannot drift the way
+    /// a hand-maintained field list can. Getting it wrong is invisible — the
+    /// paragraph would keep painting glyphs shaped at the old font — which is
+    /// why it is an equality check rather than a digest.
     fingerprint: u64,
-    style: BlockStyle,
-    run_styles: Vec<RunStyle>,
     /// How many times this element's paragraph has been shaped from scratch.
     ///
     /// The observable that separates the two evictions: re-breaking is cheap
@@ -112,9 +116,9 @@ pub(crate) fn inline_scopes<T>(
 
 /// The establishing element's subtree, split into the two flows a paragraph
 /// takes: its own content, and the custom truncation content.
-struct Flattened {
-    content: Vec<Collected>,
-    truncation: Vec<Collected>,
+struct Flattened<'tree> {
+    content: Vec<Collected<'tree>>,
+    truncation: Vec<Collected<'tree>>,
     /// The direct flat children the truncation flow consumed — the first
     /// `inline-truncation` child, whose subtree became `truncation`, and any
     /// later one, which contributes nothing at all.
@@ -168,7 +172,7 @@ fn is_truncation_marker<T>(node: &Node<T>) -> bool {
 /// as on the web; later ones are excluded from the content walk and
 /// contribute nothing. Generated content on the establishing element replaces
 /// every child, marker included.
-fn collect_block<T>(tree: &TreeArenas<T>, element: NodeSlot) -> Flattened {
+fn collect_block<T>(tree: &TreeArenas<T>, element: NodeSlot) -> Flattened<'_> {
     let mut markers = Vec::new();
     if generated_content(tree.at(element)).is_none() {
         markers.extend(
@@ -204,11 +208,11 @@ pub(crate) fn source_text<T>(tree: &TreeArenas<T>, element: NodeSlot) -> String 
 ///
 /// Iterative rather than recursive: nesting depth is author-controlled, and a
 /// Lynx text scope may nest without limit.
-fn collect_content<T>(
-    tree: &TreeArenas<T>,
+fn collect_content<'tree, T>(
+    tree: &'tree TreeArenas<T>,
     element: NodeSlot,
     skip: &[NodeSlot],
-) -> Vec<Collected> {
+) -> Vec<Collected<'tree>> {
     let mut collected = Vec::new();
     if collect_generated(tree, element, &mut collected) {
         return collected;
@@ -235,7 +239,7 @@ fn collect_content<T>(
             let run = TextRunView::of(node);
             collected.push(Collected {
                 item: OwnedItem::Run {
-                    text: text.to_owned(),
+                    text: Cow::Borrowed(text),
                     style: RunStyle::from_run_style(&run),
                     white_space: run_white_space(node),
                     text_security: run_text_security(node),
@@ -291,7 +295,7 @@ fn collect_content<T>(
 ///
 /// Not a correctness mechanism — the eviction paths are — but a backstop that
 /// turns a missed invalidation into a rebuild rather than into stale glyphs.
-fn fingerprint(flat: &Flattened) -> u64 {
+fn fingerprint(flat: &Flattened<'_>) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = rustc_hash::FxHasher::default();
     // Both flows, and the marker list: gaining or losing an `inline-truncation`
@@ -308,7 +312,7 @@ fn fingerprint(flat: &Flattened) -> u64 {
 ///
 /// `id_offset` puts the truncation flow's box ids past the content flow's, so
 /// one id space and one placement pass serve both.
-fn as_items(collected: &[Collected], id_offset: usize) -> Vec<InlineItem<'_>> {
+fn as_items<'a>(collected: &'a [Collected<'_>], id_offset: usize) -> Vec<InlineItem<'a>> {
     collected
         .iter()
         .enumerate()
@@ -370,30 +374,23 @@ pub(crate) fn refresh<T>(
     let mut atoms = atoms_of(&flat.content, 0);
     atoms.extend(atoms_of(&flat.truncation, offset));
 
-    let run_styles: Vec<RunStyle> = flat
-        .content
-        .iter()
-        .chain(flat.truncation.iter())
-        .filter_map(|entry| match &entry.item {
-            OwnedItem::Run { style, .. } => Some(style.clone()),
-            _ => None,
-        })
-        .collect();
-
-    // Only the values parley *shapes* from force a new paragraph —
-    // `text-wrap-mode` among them, because it chooses whether native's
-    // `nowrap` cuts the text at its first newline, the strut, which is
-    // parley's style 0, and whether empty content is shaped into one line
-    // of that strut. Alignment and truncation are applied to a finished
-    // layout, so a change there is a re-break at most — which is the whole
-    // point of keeping the two evictions apart.
+    // Only the values parley *shapes* from force a new paragraph: the
+    // content's structure and text, every run's style, and the block's
+    // shaping fields (`BlockStyle::shapes_as`). Alignment and truncation are
+    // applied to a finished layout, so a change there is a re-break at most —
+    // which is the whole point of keeping the two evictions apart.
     let needs_build = state.text_block(element).is_none_or(|store| {
         store.fingerprint != stamp
-            || store.style.word_break != style.word_break
-            || store.style.text_wrap != style.text_wrap
-            || store.style.strut != style.strut
-            || store.style.strut_line_when_empty != style.strut_line_when_empty
-            || store.run_styles != run_styles
+            || !store.block.shaped_with(
+                &style,
+                flat.content
+                    .iter()
+                    .chain(&flat.truncation)
+                    .filter_map(|entry| match &entry.item {
+                        OwnedItem::Run { style, .. } => Some(style),
+                        _ => None,
+                    }),
+            )
     });
 
     if needs_build {
@@ -415,28 +412,25 @@ pub(crate) fn refresh<T>(
         // `inline-truncation` still suppresses the dots, which is what the web
         // reference does with the same subtree.
         let truncation = (!flat.markers.is_empty()).then_some(&truncation_items[..]);
-        let block = TextBlock::new(context, style.clone(), &items, truncation);
+        let block = TextBlock::new(context, style, &items, truncation);
         *slot = Some(Box::new(TextStore::Block(TextBlockStore {
             block,
             source_ids,
             truncation_source_ids,
             fingerprint: stamp,
-            style,
-            run_styles,
             rebuilds,
         })));
     } else if let Some((_, store)) = context_and_store(state, element)
         && let Some(store) = store.as_block_mut()
     {
         // Same paragraph, possibly different alignment or truncation.
-        store.block.set_style(style.clone());
-        store.style = style;
+        store.block.set_style(style);
     }
     atoms
 }
 
 /// The `(node, box id)` pairs of one flow's atomic boxes.
-fn atoms_of(collected: &[Collected], id_offset: usize) -> Vec<(NodeSlot, u64)> {
+fn atoms_of(collected: &[Collected<'_>], id_offset: usize) -> Vec<(NodeSlot, u64)> {
     collected
         .iter()
         .enumerate()
@@ -537,8 +531,7 @@ pub(crate) fn compute_text_block_layout<T>(
             // box being the margin box, is the bottom *margin* edge CSS asks
             // for an inline-block that has no baseline of its own.
             let baseline = output
-                .first_baselines
-                .y
+                .first_baseline
                 .map(|baseline| (baseline + margin.top).max(0.0));
             store
                 .block

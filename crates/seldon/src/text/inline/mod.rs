@@ -68,7 +68,7 @@ use std::sync::OnceLock;
 pub use boxes::InlineEdges;
 use boxes::{BoxSpec, InlineBoxes};
 use edge::EdgeAdditions;
-use parley::{AlignmentOptions, BaseDirection, Layout, PositionedLayoutItem};
+use parley::{Alignment, AlignmentOptions, BaseDirection, Layout, PositionedLayoutItem};
 
 use crate::geometry::{Point, Rect, Size};
 use crate::style::{TextBrush, TextContainerStyle, TextRunStyle};
@@ -76,7 +76,7 @@ use crate::text::TextContext;
 use crate::text::block::PlacedBox;
 use crate::text::paragraph::content::WhiteSpaceProcessing;
 use crate::text::paragraph::memo::{BreakMemo, Retained};
-use crate::text::paragraph::query::{Displayed, LineSpan};
+use crate::text::paragraph::query::Displayed;
 use crate::text::paragraph::shape::{self, NaturalLine};
 use crate::text::paragraph::style::resolve_alignment;
 use crate::text::paragraph::{
@@ -227,8 +227,9 @@ pub struct InlineFragment {
 /// What one layout produced.
 struct FlowResult {
     constraint: BlockConstraint,
-    lines: Vec<LineGeometry>,
-    /// The same lines in source space.
+    /// The laid-out lines in source space, one per CSS line box: the one
+    /// per-line record. A line's box is the natural layout's line at the
+    /// same index ([`LineGeometry::of`]).
     natural: Vec<NaturalLine>,
     metrics: BlockMetrics,
     /// Every atomic box's placement.
@@ -362,6 +363,56 @@ impl InlineFlow {
         self.intrinsic = None;
     }
 
+    /// Whether this flow is the one [`Self::new`] would build from `style`
+    /// and `items`, given the same text: so a host holding the same content
+    /// needs no new flow, at most [`Self::set_style`].
+    ///
+    /// Compared against what the flow itself retains, by derived equality:
+    /// the strut, the direction and `strut_line_when_empty` of its style,
+    /// which are shaping inputs; each run's style and line breaking; each
+    /// atom's `vertical-align`; each inline box's font, line breaking,
+    /// direction and edges. The two item sequences must have the same
+    /// length and the same kinds. The runs' text, white space processing and
+    /// text security are the host's to compare: the flow keeps only their
+    /// normalized form.
+    #[must_use]
+    pub fn shaped_with(&self, style: &InlineFlowStyle, items: &[InlineFlowItem<'_>]) -> bool {
+        if self.style.strut != style.strut
+            || self.style.direction != style.direction
+            || self.style.strut_line_when_empty != style.strut_line_when_empty
+            || items.len() != self.breaking.len()
+        {
+            return false;
+        }
+        let built = &self.paragraph.content.items;
+        let mut specs = self.boxes.specs.iter();
+        for (index, item) in items.iter().enumerate() {
+            let breaking = self.breaking[index];
+            let same = match (item, &built[index]) {
+                (InlineFlowItem::Run(run), OwnedItem::Run { style, .. }) => {
+                    run.breaking == breaking && style == run.style
+                }
+                (InlineFlowItem::Atom(atom), OwnedItem::Box(spec)) => {
+                    spec.vertical_align == atom.vertical_align
+                }
+                (InlineFlowItem::Open(open), OwnedItem::Marker) => {
+                    specs.next().is_some_and(|spec| {
+                        open.breaking == breaking
+                            && spec.style == *open.style
+                            && spec.direction == open.direction
+                            && spec.edges == open.edges
+                    })
+                }
+                (InlineFlowItem::Close, OwnedItem::Marker) => true,
+                _ => false,
+            };
+            if !same {
+                return false;
+            }
+        }
+        specs.next().is_none()
+    }
+
     /// Reports `constraint`, answering from the memo when the same
     /// constraint was already asked, without moving the committed lines.
     pub fn probe(
@@ -477,10 +528,22 @@ impl InlineFlow {
         OffsetMap::new(&block.text, &block.map, block.text.len())
     }
 
-    /// The CSS line boxes, one per laid-out line.
+    /// How many CSS line boxes the flow laid out.
     #[must_use]
-    pub fn line_geometry(&self) -> &[LineGeometry] {
-        &self.expect_result().lines
+    pub fn line_count(&self) -> usize {
+        self.expect_result().natural.len()
+    }
+
+    /// The CSS line boxes, one per laid-out line, read off the layout on
+    /// each call: nothing keeps a copy of them.
+    #[must_use]
+    pub fn line_geometry(&self) -> Vec<LineGeometry> {
+        self.paragraph
+            .natural
+            .lines()
+            .take(self.line_count())
+            .map(|line| LineGeometry::of(&line))
+            .collect()
     }
 
     /// The reported size: the fit-content width and the stacked line boxes'
@@ -664,7 +727,7 @@ impl InlineFlow {
             .or(cluster_at)
             .or(before.map(|(_, edge)| edge))
             .unwrap_or_else(|| line.metrics().offset);
-        Point::new(x, result.lines[index].top)
+        Point::new(x, LineGeometry::of(&line).top)
     }
 
     /// Every non-atomic inline box's fragments, by box in tree order and,
@@ -747,9 +810,7 @@ impl InlineFlow {
     /// lines. An inline box's edges are no source text and select nothing.
     #[must_use]
     pub fn range_boxes(&self, start: u32, end: u32) -> Option<Vec<Rect<f32>>> {
-        let lines = self.line_spans();
-        self.paragraph
-            .range_boxes_in(&self.displayed(&lines), start, end)
+        self.paragraph.range_boxes_in(&self.displayed(), start, end)
     }
 
     /// The source unit under `point`, in the paragraph's own coordinates:
@@ -757,28 +818,14 @@ impl InlineFlow {
     /// point on an inline box's edges is on no content.
     #[must_use]
     pub fn index_at_point(&self, point: Point<f32>) -> Option<u32> {
-        let lines = self.line_spans();
-        self.paragraph
-            .index_at_point_in(&self.displayed(&lines), point)
+        self.paragraph.index_at_point_in(&self.displayed(), point)
     }
 
-    fn line_spans(&self) -> Vec<LineSpan> {
-        self.expect_result()
-            .natural
-            .iter()
-            .map(|line| LineSpan {
-                start: line.start_unit,
-                end: line.end_unit,
-            })
-            .collect()
-    }
-
-    fn displayed<'a>(&'a self, lines: &'a [LineSpan]) -> Displayed<'a> {
+    fn displayed(&self) -> Displayed<'_, NaturalLine> {
         let block = &self.paragraph.content.block;
         Displayed {
             layout: &self.paragraph.natural,
-            lines,
-            geometry: &self.expect_result().lines,
+            lines: &self.expect_result().natural,
             cut_byte: block.text.len(),
             content_slots: block.boxes.len(),
         }
@@ -1055,7 +1102,19 @@ impl Retained for InlineFlow {
     }
 
     fn layout_at(&mut self, context: &mut TextContext, constraint: BlockConstraint) {
-        if self.memo.holds(self.retained(), constraint) {
+        // A max-content result is a fitting width's too under left
+        // alignment, as for the Lynx block: the fit-content width it reports
+        // is the max-content width at every width from the natural one on.
+        let left =
+            resolve_alignment(self.style.text_align, self.style.direction) == Alignment::Left;
+        if self.memo.holds(
+            self.retained(),
+            self.fits_from().filter(|_| left),
+            constraint,
+        ) {
+            if let Some(result) = &mut self.result {
+                result.constraint = constraint;
+            }
             return;
         }
         let intrinsic = self.intrinsic(context, constraint.indent);
@@ -1067,30 +1126,29 @@ impl Retained for InlineFlow {
         self.paragraph
             .natural
             .align(alignment, AlignmentOptions::default());
-        // Parley's lines are the CSS line boxes; the blank trailing lines it
-        // commits (`capture_lines`) are none of them.
-        let lines: Vec<LineGeometry> = self
-            .paragraph
-            .natural
-            .lines()
-            .take(natural.len())
-            .map(|line| LineGeometry::of(&line))
-            .collect();
         let atoms = self.place_atoms(natural.len());
         // css-sizing-3's fit-content size: the available width clamped between
         // the intrinsic widths. Max-content is the unconstrained answer.
         let width = constraint.max_advance().map_or(intrinsic.max, |available| {
             intrinsic.max.min(intrinsic.min.max(available))
         });
-        let height = lines.last().map_or(0.0, |line| line.top + line.height);
+        // Parley's lines are the CSS line boxes; the blank trailing lines it
+        // commits (`capture_lines`) are none of them.
+        let mut lines = self
+            .paragraph
+            .natural
+            .lines()
+            .take(natural.len())
+            .map(|line| LineGeometry::of(&line));
+        let first = lines.next();
+        let last = lines.next_back().or(first);
         let metrics = BlockMetrics {
-            size: Size::new(width, height),
-            first_baseline: lines.first().map(|line| line.baseline),
-            last_baseline: lines.last().map(|line| line.baseline),
+            size: Size::new(width, last.map_or(0.0, |line| line.top + line.height)),
+            first_baseline: first.map(|line| line.baseline),
+            last_baseline: last.map(|line| line.baseline),
         };
         self.result = Some(FlowResult {
             constraint,
-            lines,
             natural,
             metrics,
             atoms,
@@ -1100,5 +1158,16 @@ impl Retained for InlineFlow {
 
     fn reported(&self) -> BlockMetrics {
         self.expect_result().metrics
+    }
+
+    /// The flow never truncates. The natural layout is the retained
+    /// result's own: an intrinsic-width break drops the result.
+    fn fits_from(&self) -> Option<f32> {
+        let result = self.result.as_ref()?;
+        result
+            .constraint
+            .max_advance()
+            .is_none()
+            .then(|| self.paragraph.natural.width())
     }
 }

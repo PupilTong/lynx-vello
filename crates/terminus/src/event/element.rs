@@ -43,7 +43,8 @@
 //! analogue of `observed_attributes`; [`Document::define`](crate::tree::document::Document::define)
 //! unions them into one set for the document. A walk of a type no definition observes looks no
 //! component up on any step, and whether an element's component hears an event is its definition's
-//! answer alone — a script registration on the element changes nothing about it.
+//! answer alone — a script registration on the element changes nothing about it. A step whose
+//! definition does not name the type calls nothing and opens no reaction scope.
 //!
 //! # The walk
 //!
@@ -420,13 +421,13 @@ impl<T> Document<T> {
             // set per phase.
             return false;
         }
-        let (element, handler) = match self.custom_element_handler(node) {
+        let (element, handler) = match self.custom_element_hearing(node, type_name) {
             Some(handler) => (node, handler),
             // The shadow root a non-composed path ends at, whose host hears
             // the event in its place; see the module doc.
             None if walk.steps.boundary == Some(node) => {
                 let Some((host, handler)) = self.shadow_host(node).and_then(|host| {
-                    self.custom_element_handler(host)
+                    self.custom_element_hearing(host, type_name)
                         .map(|handler| (host, handler))
                 }) else {
                     return false;

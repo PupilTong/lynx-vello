@@ -12,6 +12,8 @@
 
 #![allow(clippy::float_cmp)] // Authored pixel sizes and ratios are exact.
 
+use std::rc::Rc;
+
 use terminus::link::{IntersectionMargin, MarginLength, NodeId, Vector2D};
 
 use super::{Exposure, ExposureChange, Length, Margins, fold_margins, parse_area, parse_length};
@@ -102,8 +104,8 @@ fn record(node: NodeId, appeared: bool, id: &str) -> ExposureChange {
     ExposureChange {
         node,
         appeared,
-        exposure_id: Some(id.to_owned()),
-        scene: String::new(),
+        exposure_id: Some(Rc::from(id)),
+        scene: None,
         element_event: false,
     }
 }
@@ -711,8 +713,8 @@ fn removing_the_exposure_id_leaves_and_unregisters() {
         vec![ExposureChange {
             node,
             appeared: false,
-            exposure_id: Some("a".to_owned()),
-            scene: "feed".to_owned(),
+            exposure_id: Some(Rc::from("a")),
+            scene: Some(Rc::from("feed")),
             element_event: false,
         }]
     );
@@ -732,7 +734,7 @@ fn a_listener_alone_registers_and_hears_its_element_events() {
         node,
         appeared,
         exposure_id: None,
-        scene: String::new(),
+        scene: None,
         element_event: true,
     };
     assert_eq!(deliver(&exposure, &mut document), vec![event(true)]);
@@ -763,8 +765,8 @@ fn a_listener_and_an_id_make_one_change() {
         vec![ExposureChange {
             node,
             appeared: true,
-            exposure_id: Some("a".to_owned()),
-            scene: "feed".to_owned(),
+            exposure_id: Some(Rc::from("a")),
+            scene: Some(Rc::from("feed")),
             element_event: true,
         }]
     );
@@ -942,7 +944,7 @@ fn a_stop_answers_the_records_it_queued() {
             node: quiet,
             appeared: true,
             exposure_id: None,
-            scene: String::new(),
+            scene: None,
             element_event: true,
         }]
     );
@@ -1108,4 +1110,36 @@ fn an_unlinked_element_leaves_through_the_primitive() {
         }]
     );
     assert!(exposure.is_registered(node));
+}
+
+// --- observers per option set --------------------------------------------
+
+/// Elements whose attributes fold to one set of options share one observer,
+/// and another set has its own. One delivery hands each observer's entries
+/// over in observer creation order, so its changes come grouped by option
+/// set, each set's in arm order (user ruling, 2026-10-22): `x`, `z` (area
+/// 50%) before `y` (area 0), though `y` was armed between them.
+#[test]
+fn one_observer_per_option_set_and_one_delivery_groups_by_it() {
+    let mut document = fresh_document();
+    let mut exposure = Exposure::new();
+    let x = boxed(&mut document, 0.0, 100.0);
+    let y = boxed(&mut document, 100.0, 100.0);
+    let z = boxed(&mut document, 200.0, 100.0);
+    for (node, id, area) in [(x, "x", Some("50%")), (y, "y", None), (z, "z", Some("50"))] {
+        if let Some(area) = area {
+            document.set_attribute(node, "exposure-area", area);
+        }
+        set(&mut exposure, &mut document, node, "exposure-id", id);
+    }
+    assert_eq!(exposure.observer_of(x), exposure.observer_of(z));
+    assert_ne!(exposure.observer_of(x), exposure.observer_of(y));
+    assert_eq!(
+        deliver(&exposure, &mut document),
+        vec![
+            record(x, true, "x"),
+            record(z, true, "z"),
+            record(y, true, "y")
+        ]
+    );
 }

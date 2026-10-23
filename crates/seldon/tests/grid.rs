@@ -732,7 +732,7 @@ fn baseline_group_aligns_items_and_sets_the_container_first_baseline() {
     assert_close(tree.layout(second).location.y, 5.0);
     assert_close(tree.layout(first).location.y + 15.0, 15.0);
     assert_close(tree.layout(second).location.y + 10.0, 15.0);
-    assert_eq!(output.first_baselines.y, Some(15.0));
+    assert_eq!(output.first_baseline, Some(15.0));
 }
 
 /// A `linear` column of one fixed-size box, whose first baseline is that
@@ -771,7 +771,7 @@ fn a_baseline_group_sizes_its_row_from_a_linear_item_s_own_baseline() {
     assert_close(tree.layout(first).location.y, 0.0);
     assert_close(tree.layout(column).location.y, 8.0);
     assert_close(output.size.height, 28.0);
-    assert_eq!(output.first_baselines.y, Some(15.0));
+    assert_eq!(output.first_baseline, Some(15.0));
 }
 
 #[test]
@@ -822,7 +822,7 @@ fn a_measured_grid_asks_its_items_for_the_first_baseline_it_is_asked_for() {
     };
 
     let (read, read_probes) = run(true);
-    assert_eq!(read.first_baselines.y, Some(7.0));
+    assert_eq!(read.first_baseline, Some(7.0));
     assert_eq!(read_probes, 1);
     // Unread, the column's fixed-size box is never measured for it.
     let (unread, unread_probes) = run(false);
@@ -865,7 +865,7 @@ fn container_baseline_comes_from_first_nonempty_row_with_synthesis() {
 
     let output = definite_layout(&tree, root, 20.0, 40.0);
 
-    assert_eq!(output.first_baselines.y, Some(10.0));
+    assert_eq!(output.first_baseline, Some(10.0));
     assert_close(tree.layout(second).location.y, 20.0);
 }
 
@@ -899,7 +899,7 @@ fn container_baseline_uses_grid_order_within_the_first_nonempty_row() {
 
     let output = definite_layout(&tree, root, 40.0, 20.0);
 
-    assert_eq!(output.first_baselines.y, Some(5.0));
+    assert_eq!(output.first_baseline, Some(5.0));
     assert_point(tree.layout(first_column).location, Point::new(0.0, 0.0));
     assert_point(tree.layout(second_column).location, Point::new(20.0, 0.0));
 }
@@ -1957,6 +1957,29 @@ fn cross_size_dependent_ratio_item_forces_one_column_feedback_rerun() {
     assert_size(tree.layout(fixed).size, Size::new(40.0, 80.0));
 }
 
+/// css-grid-2 §12.1 step 3 for an item that does not stretch into its row:
+/// its percentage width, resolved against the column, gives it a height
+/// through its preferred aspect ratio, and that height transferred back is a
+/// min-content width other than the one the column was sized with, so the
+/// columns are sized again.
+#[test]
+fn unstretched_ratio_item_resolved_against_its_column_feeds_the_column_back() {
+    let mut tree = TestTree::default();
+    let style = TestStyle {
+        size: Size::new(size_pct(0.5), size_auto()),
+        aspect_ratio: ratio(1.0, 1.0),
+        align_self: self_align(AlignFlags::START),
+        justify_self: self_align(AlignFlags::START),
+        ..grid_default()
+    };
+    let item = tree.push_leaf(style, Size::new(10.0, 10.0), Size::new(30.0, 30.0));
+    let root = tree.push_grid(grid_style(&[support::track_min_content()], &[]), vec![item]);
+
+    definite_layout(&tree, root, 200.0, 200.0);
+
+    assert_size(tree.layout(item).size, Size::new(2.5, 2.5));
+}
+
 #[test]
 fn container_baseline_prefers_first_row_synthesis_over_later_baseline_group() {
     let mut tree = TestTree::default();
@@ -1973,7 +1996,7 @@ fn container_baseline_prefers_first_row_synthesis_over_later_baseline_group() {
 
     let output = definite_layout(&tree, root, 50.0, 60.0);
 
-    assert_eq!(output.first_baselines.y, Some(10.0));
+    assert_eq!(output.first_baseline, Some(10.0));
     assert_close(tree.layout(bottom).location.y, 30.0);
 }
 
@@ -3558,7 +3581,7 @@ mod last_baseline {
         assert_size(tree.layout(grid).size, Size::new(40.0, 22.0));
         assert_close(tree.layout(grid).location.y, 0.0);
         assert_close(tree.layout(beside).location.y, 4.0);
-        assert_eq!(output.last_baselines.y, Some(19.0));
+        assert_eq!(output.last_baseline, Some(19.0));
     }
 
     /// §11.5 step 1's shims read a last-baseline group member's last baseline
@@ -3609,8 +3632,8 @@ mod last_baseline {
         assert_close(tree.layout(tall).location.y, 10.0);
         // The first row holds no first-baseline group, so the first baseline
         // is the last-baseline group's too (§10.6 step 2).
-        assert_eq!(output.first_baselines.y, Some(20.0));
-        assert_eq!(output.last_baselines.y, Some(20.0));
+        assert_eq!(output.first_baseline, Some(20.0));
+        assert_eq!(output.last_baseline, Some(20.0));
     }
 
     #[test]
@@ -3638,8 +3661,8 @@ mod last_baseline {
         assert_close(tree.layout(upper).location.y, 0.0);
         // First row: its first-baseline group. Last row: its last-baseline
         // group, which the spanning item joined.
-        assert_eq!(output.first_baselines.y, Some(6.0));
-        assert_eq!(output.last_baselines.y, Some(42.0));
+        assert_eq!(output.first_baseline, Some(6.0));
+        assert_eq!(output.last_baseline, Some(42.0));
     }
 
     #[test]
@@ -3734,8 +3757,8 @@ mod last_baseline {
 
         let output = definite_layout(&tree, root, 60.0, 40.0);
 
-        assert_eq!(output.first_baselines.y, Some(4.0));
-        assert_eq!(output.last_baselines.y, Some(29.0));
+        assert_eq!(output.first_baseline, Some(4.0));
+        assert_eq!(output.last_baseline, Some(29.0));
     }
 
     #[test]
@@ -3756,7 +3779,7 @@ mod last_baseline {
         // As without the offset (the group's baseline at 20), then 7 lower.
         assert_close(tree.layout(shifted).location.y, 5.0 + 7.0);
         assert_close(tree.layout(other).location.y, 10.0);
-        assert_eq!(output.last_baselines.y, Some(20.0));
+        assert_eq!(output.last_baseline, Some(20.0));
     }
 }
 

@@ -1235,7 +1235,7 @@ the document's text and encodes its scene, so the registry, the natural-size
 relayout and the `load`/`error` follow the path every other report takes.
 The markup an `<svg content>` hands the document (`Document::set_image_document`)
 reaches the host the same way: the page's epilogue calls
-`MainThreadRuntime::request_documents` before its commit, which drains
+`MainThreadRuntime::settle_entry`, whose first step, before its commit, drains
 `Document::take_document_requests` into one `ViewNotice::RequestDocuments`
 beside `RequestImages`, and `LynxView::pump` hands each
 `(source, bytes, kind)` to `ResourceFetcher::request_document` after
@@ -2017,7 +2017,7 @@ a realm no longer invited when its call comes (the same three queries, read
 again after each call that ran) is skipped then. For a
 path in the document tree the page realm runs exactly the steps the one call
 before the table carried. Each call checkpoints on its own; a call that throws is
-collected and the walk goes on (`ListenerFailures`). The realm reports per
+collected into the caller's failure list and the walk goes on. The realm reports per
 (element, name) registrations with their passes: `listenerOpened(node, name,
 kinds)` (1 bubble, 2 capture, 4 global, or'ed; the host replaces the kinds on
 a repeat) and `listenerClosed(node, name)`, from `element-papi.ts`'s
@@ -3973,8 +3973,7 @@ resolution, the `position-area` grid, `anchor-center`, the css-position-3
 host-placed boxes; Lynx `linear`/`relative` keep starlight's inset-only
 placement) and the §6.5 fallback loop (`compute/anchor.rs`,
 `anchor_area.rs`, `anchor_fallback.rs`), against `LayoutTree` methods whose
-defaults mean "no anchors" (`anchor_rect`,
-`scrollable_containing_block`, `position_option_style`,
+defaults mean "no anchors" (`anchor_rect`, `position_option_style`,
 `set_anchor_outcome`, …). A box that uses none of it pays two style
 predicates, and a `position_option_count` call only when it lists
 `position-try-fallbacks`; an anchored box's own run reads its base

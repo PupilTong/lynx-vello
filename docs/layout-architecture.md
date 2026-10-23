@@ -345,11 +345,7 @@ box in the padding-box coordinates of the element generating `node`'s
 containing block, with §3.3's remembered scroll offsets applied; with
 `AnchorSpec::Default`, `None` means the box has no default anchor —
 `anchor_scrolls_with_default` (§3.3's scroll-container
-condition), `scrollable_containing_block` (css-position-4: the area the
-containing block's own algorithm recorded through
-`set_scrollable_containing_block` between its in-flow commit and its absolute
-pass — its in-flow scrollable overflow, which no out-of-flow box can grow),
-`position_option_count`/`position_option_style` (the options list, each
+condition), `position_option_count`/`position_option_style` (the options list, each
 already cascaded with its try tactic; index 0 is the box's own style),
 `last_successful_option` (which the host records after layout, §6.5.1.1), and
 `set_anchor_outcome`, which hands back per box the chosen option, whether it
@@ -360,7 +356,14 @@ everything in flow under the containing block and every earlier box it is the
 containing block of — its own out-of-flow children and the hoisted ones alike
 — is already committed, and rebases the host's rectangles onto what it
 actually lays out against (a grid area, the scrollable containing block, a
-`position-area` region). Within one absolute layout of a box it asks each
+`position-area` region). The scrollable containing block (css-position-4:
+the scroll container's in-flow scrollable overflow, which no out-of-flow box
+can grow) is not asked: the container's own algorithm computes it between
+its in-flow commit and its absolute pass and hands it over in
+`AbsoluteContainingBlock`, so a page pays nothing for it per commit; a host
+that would place such a box itself (`compute_hoisted_layout`) cannot
+reproduce it and runs the container's pass instead. Within one absolute
+layout of a box it asks each
 question once per option (`AnchorMemo`), never across a pass. A box that uses
 none of it pays two style predicates, and a host call to count its options only
 when its `position-try-fallbacks` lists something; the anchored path is a
@@ -805,7 +808,7 @@ v1 box-layout effects:
   the contained one. An authored `aspect-ratio` is style rather than contents and survives. The
   skipped-contents path shares this sizing.
 - **Layout containment** (`containment().contains(LAYOUT)`) — the box exports **no** baseline
-  (`LayoutOutput::first_baselines` and `last_baselines` both `NONE` at each algorithm's output
+  (`LayoutOutput::first_baseline` and `last_baseline` both `None` at each algorithm's output
   construction; Relative already exports none), and it **changes scrollable overflow**: with `overflow: visible`, a layout-contained
   box's descendant overflow is *ink* overflow ([css-contain-2 §3.3](https://drafts.csswg.org/css-contain-2/#containment-layout),
   item 3), so its `content_size` collapses to its own padding box; a scroll container instead keeps
@@ -1152,12 +1155,10 @@ the painting — layout's job is to never be the frame's bottleneck.
   measurement slots inline, spilling to the heap up to
   `MEASURE_CACHE_LIMIT = 32`, plus one layout slot). Each entry packs its
   output into six `f32`s: the size, the content size, and two baseline slots
-  that hold the present baselines in a fixed order (first `x`, first `y`, last
-  `x`, last `y`) with their presence in the input's flag word. No producer
-  reports an `x` baseline (it belongs to vertical writing modes, which
-  nothing here lays out), so an output carries at most a first and a last `y`
-  and the last baselines cost no entry any bytes; an output with more is
-  marked and answers no request, which keeps the cache exact. Shape-aware replacement is
+  that hold the first and the last baseline with their presence in the
+  input's flag word. A `LayoutOutput` carries only the vertical position of
+  each (`first_baseline`, `last_baseline`): a horizontal baseline belongs to
+  vertical writing modes, which nothing here lays out. Shape-aware replacement is
   implemented; probe-trace validation and tuning remain L4 work. The key is
   **every `LayoutInput` field that decides geometry** — `goal` distinguishes
   side-effect-free measurements (including their requested axes) from geometry
@@ -1422,13 +1423,17 @@ the engine we're succeeding.
 4. **Resolving flexible lengths** (§9.7) — the freeze/unfreeze grow/shrink
    loop per line → target main sizes.
 5. **Cross sizing** (§9.4) — hypothetical cross sizes (probes with known
-   main size), line cross sizes, `align-content: stretch`.
+   main size), line cross sizes, `align-content: stretch`. The container's
+   own cross size is decided here, and with it its whole size: a
+   measurement whose caller reads neither baseline returns that size now,
+   before the second sizing pass an indefinite width runs and before the
+   alignment steps below, whose results only a commit or a baseline reads.
 6. **Main-axis alignment** (§9.5) — auto margins, then `justify-content`
    with `gap`.
 7. **Cross-axis alignment** (§9.6) — auto margins, `align-self`,
    `align-content`. Baseline alignment (§8.3, §9.4 step 8, css-align-3 §9.3)
    forms two sharing groups per line of a row container, from the children's
-   `first_baselines` and `last_baselines`: `baseline` items flush with the
+   `first_baseline` and `last_baseline`: `baseline` items flush with the
    line's cross-start edge, `last baseline` items with its cross-end edge,
    which `wrap-reverse` exchanges (the browsers' reading; a group taller than
    its line overflows, with no implicit `safe`). An item with no baseline set
@@ -1482,8 +1487,9 @@ The automatic minimum size (§4.5, `min-size: auto`) resolves inside steps
    or feed the new values back into the container/main total; this preserves
    Starlight's measured-once `UpdateContainerSize` behavior and call order.
    Dependency flags are Linear-owned: the shared box resolver returns only
-   resolved values, and compact item-local bits selectively refresh margin or
-   padding/border fields that depend on the newly available inline basis.
+   resolved values, and one item-local bit refreshes the margin and padding
+   of an item whose margin or padding depends on the newly available inline
+   basis.
    Preferred and min/max sizes remain measured-once; after item sizing they
    have no downstream consumer, so re-resolving them would be a dead update.
 5. **Alignment** — derive main-axis gravity from `justify-content` (the
@@ -1522,7 +1528,9 @@ dispatches to it.
    baseline shims, distribute item contributions in span order (including
    infinitely-growable and non-affected-track phases), maximize tracks,
    expand `fr` (§12.7), and stretch `auto` tracks. A bounded cross-axis
-   feedback pass detects contribution changes after row sizing. While
+   feedback pass detects contribution changes after row sizing, re-measuring
+   only the items whose min-content width can read the sized rows
+   (`column_feedback_reads_rows`). While
    columns are initially sized, only rows with definite max track sizing
    functions provide finite block-axis space; other rows are infinite per
    §12.1. This per-run columns→rows correction is independent of the outer
@@ -1610,7 +1618,7 @@ computed `font_size`.
    auto-placed item is assumed to sit at every start position its span fits
    and contributes once per position. The span-1 items are grouped as
    §3.4.2's virtual items are: `sizing::LaneSizingItems` measures each one
-   once through a working copy and gives track sizing one aggregate entry per
+   once, in place, and gives track sizing one aggregate entry per
    track, standing for the definite-position items placed there and every
    auto-placed one, whose contributions are the maxima of its members'
    (`GroupMaxima`). A contribution depends on the track only through the

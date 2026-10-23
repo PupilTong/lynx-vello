@@ -100,14 +100,10 @@ pub(crate) const RECORD_MODULE_SPECIFIER: &str = "bobcat:record";
 
 /// The native module transport, for every realm kind: `callNativeModule`,
 /// which hands one call to [`NATIVE_MODULES_HOST_SPECIFIER`]'s
-/// `invokeNativeModule`, and [`NATIVE_MODULE_CALLBACK_EXPORT`], which both
+/// `invokeNativeModule`, and [`Export::NativeModuleCallback`], which both
 /// engine threads call with a module's answer. `bobcat:bts-runtime` builds
 /// the BTS's `NativeModules` over it.
 pub(crate) const NATIVE_MODULES_MODULE_SPECIFIER: &str = "bobcat:native-modules";
-
-/// Called on [`NATIVE_MODULES_MODULE_SPECIFIER`] with one native module
-/// callback's answer.
-pub(crate) const NATIVE_MODULE_CALLBACK_EXPORT: &str = "__BobcatNativeModuleCallback";
 
 pub(crate) const GLOBAL_EVENT_MODULE_SPECIFIER: &str = "bobcat:global-event-emitter";
 
@@ -155,6 +151,83 @@ pub(crate) const WORKER_CLASS_MODULE_SPECIFIER: &str = "bobcat-internal";
 /// `bobcat:bts` does, and a realm in which it never ran has nothing that
 /// receives a message.
 pub(crate) const WORKER_MODULE_SPECIFIER: &str = "bobcat:worker";
+
+/// A function a built-in module exports for the host to call: every way the
+/// host calls into a realm, each named once with the module it lives on.
+///
+/// A realm resolves each one the first time the host calls it and keeps the
+/// namespace object and the interned name for every later call, in a table
+/// indexed by this enum (see `ScriptEngine::call_module_export`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Export {
+    /// `bobcat:timers`, when a timer the realm armed comes due.
+    RunTimer,
+    /// `bobcat:future`, when a future the realm asked to settle
+    /// asynchronously has settled.
+    SettleFuture,
+    /// [`NATIVE_MODULES_MODULE_SPECIFIER`], with one native module callback's
+    /// answer.
+    NativeModuleCallback,
+    /// [`ANIMATION_FRAME_MODULE_SPECIFIER`], at a vsync the realm asked for.
+    BeginFrame,
+    /// [`WORKER_MODULE_SPECIFIER`], in a worker realm, with one message
+    /// value.
+    DeliverWorkerMessage,
+    /// [`WORKER_CLASS_MODULE_SPECIFIER`], with one event of a worker the
+    /// realm created.
+    DispatchWorkerEvent,
+    /// [`RUNTIME_MODULE_SPECIFIER`], naming the MTS entry before it is
+    /// completed.
+    InitEntry,
+    /// [`RUNTIME_MODULE_SPECIFIER`]'s four page updates.
+    Reload,
+    UpdateData,
+    UpdateGlobalProps,
+    SendGlobalEvent,
+    /// [`ELEMENT_MODULE_SPECIFIER`], with one event and its whole path.
+    DispatchEvent,
+}
+
+impl Export {
+    /// How many exports there are: the length of a realm's table.
+    pub(crate) const COUNT: usize = Self::DispatchEvent as usize + 1;
+
+    /// The module the export is looked up on.
+    pub(crate) const fn specifier(self) -> &'static str {
+        match self {
+            Self::RunTimer => TIMER_MODULE_SPECIFIER,
+            Self::SettleFuture => FUTURE_MODULE_SPECIFIER,
+            Self::NativeModuleCallback => NATIVE_MODULES_MODULE_SPECIFIER,
+            Self::BeginFrame => ANIMATION_FRAME_MODULE_SPECIFIER,
+            Self::DeliverWorkerMessage => WORKER_MODULE_SPECIFIER,
+            Self::DispatchWorkerEvent => WORKER_CLASS_MODULE_SPECIFIER,
+            Self::InitEntry
+            | Self::Reload
+            | Self::UpdateData
+            | Self::UpdateGlobalProps
+            | Self::SendGlobalEvent => RUNTIME_MODULE_SPECIFIER,
+            Self::DispatchEvent => ELEMENT_MODULE_SPECIFIER,
+        }
+    }
+
+    /// The name the module exports it under.
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::RunTimer => "__BobcatRunTimer",
+            Self::SettleFuture => "__BobcatSettleFuture",
+            Self::NativeModuleCallback => "__BobcatNativeModuleCallback",
+            Self::BeginFrame => "__BobcatBeginFrame",
+            Self::DeliverWorkerMessage => "__BobcatDeliverWorkerMessage",
+            Self::DispatchWorkerEvent => "__BobcatDispatchWorkerEvent",
+            Self::InitEntry => "__BobcatInitEntry",
+            Self::Reload => "__BobcatReload",
+            Self::UpdateData => "__BobcatUpdateData",
+            Self::UpdateGlobalProps => "__BobcatUpdateGlobalProps",
+            Self::SendGlobalEvent => "__BobcatSendGlobalEvent",
+            Self::DispatchEvent => "__BobcatDispatchEvent",
+        }
+    }
+}
 
 /// The compiler factory ABI: what the BTS runtime's `lynx.requireModule` and
 /// its companions load a bundle body through.

@@ -17,8 +17,8 @@ mark a `::backdrop` box's node and an anonymous box's, so there is no second
 slab to keep in lockstep. A separate inline `DocumentLayoutState` owns the
 layout state of the nodes that lay out: a four-byte-per-key index into a dense
 entry vector, filed on a node's first layout write, so a node that is never
-laid out allocates no entry and a text node — whose box writes land in one
-shared sink nothing reads — never does. `Document::layout`/`render` size the
+laid out allocates no entry and a text node — which `LayoutTree::children`
+leaves out, so the engine never writes a box for it — never does. `Document::layout`/`render` size the
 index to the arena's slot bound in one resize, and a covered key with no entry
 reads as "never laid out" (an empty layout cache).
 
@@ -165,14 +165,17 @@ no signal; a mutation pays one emptiness check.
 
 **Custom elements** (W3C behavior within a deliberately narrowed scope) are the
 other half of the component model. `Document::define(local_name, Box<dyn
-CustomElement<T>>)` registers one handler per tag — per-tag rather than the
+CustomElement<T>>)` registers one handler per tag (`define_shared` takes an
+`Rc<dyn CustomElement<T>>`, so one handler can serve several tags, each still
+its own definition) — per-tag rather than the
 standard's per-instance constructor, because this crate has no script realm to
 hold instances in, so every callback names its element by `NodeId` and
 per-element state belongs to the layer owning `T`. The handler receives
 `constructed`, `connected_callback`, `disconnected_callback` and
 `attribute_changed_callback`, the last filtered by an `observed_attributes`
 list read once at definition time, plus `handle_event` — not a lifecycle
-callback but the engine-side event hook, which is how a component hears
+callback but the engine-side event hook, called only for the types its
+`observed_events` names, which is how a component hears
 something the engine decided about it or about its descendants (see the
 `event` module above). **Scope: user-agent components, not
 script-defined elements.** Definitions come from the engine layer above, never
@@ -190,11 +193,15 @@ moves neither the trait nor the dispatch contract. What the narrowing does
 drained at the end of the public mutation that raised them (the standard's
 `[CEReactions]` boundary), because a lifecycle callback mutates the tree while
 its handler lives inside the `Document` being mutated. Dispatch clones an
-`Arc<dyn CustomElement<T>>` out of the registry rather than vacating the slot,
+`Rc<dyn CustomElement<T>>` out of the registry rather than vacating the slot,
 so a callback on `x-row` can create another `x-row` instead of hitting a
-re-entrancy panic. Scopes are watermarks into one flattened element queue while
-the per-element reaction queue is shared across them, reproducing a browser's
-`A.disc, A.conn, B.disc, B.conn` for a subtree move. Three `Node` fields carry
+re-entrancy panic. One queue holds every pending reaction with its element, in
+enqueue order, and a scope is a watermark into it: a scope runs its own tail in
+order, a nested scope's before the enclosing one resumes. That is not the
+standard's per-element grouping (user ruling, 2026-10-22): a subtree move runs
+`A.disc, B.disc, A.conn, B.conn` where a browser runs `A.disc, A.conn, B.disc,
+B.conn`, and a callback's mutation of an element whose reaction is still
+pending runs the new reaction first. Three `Node` fields carry
 the definition pointer, the `Uncustomized`/`Constructing`/`Custom` state and a
 conservative shadow-including-subtree summary; all fit in the existing tail
 padding (stride unchanged, asserted). The summary rejects a lifecycle walk at
@@ -316,7 +323,13 @@ css-anchor-position-1 acceptable anchor placed before its reader. A moved
 subtree, which keeps its caches, has its listed boxes relaid so they
 re-register; a box under a subtree relaid in place, whose containing block
 above it does not run, and a box whose containing block is the initial one are
-placed by the rounding tail. `display: contents` elements generate no box: the
+placed by the rounding tail. The exception is a box hoisted out of such a
+subtree that can have a default anchor and whose containing block is a scroll
+container: it is laid out against css-position-4's scrollable containing
+block, which only that container's own absolute pass computes, so the
+in-place relayout escalates to the whole-tree pass instead
+(`hoisted::escapes_to_scrollable_block`, answered from the hoisted-box table,
+which is keyed by containing block). `display: contents` elements generate no box: the
 engine's `flattened_children` splices them out of every item collection, and
 the host denies them containing-block, containment, skipped-contents, and
 hoisting status and zeroes their `LayoutSlot` in the rounding tail (the
@@ -406,9 +419,9 @@ whose moves surface in different runs goes stale twice even though §2.3's
 dependencies are acyclic; that repeat is invalidated without earning a run,
 which leaves the document dirty, so the next `layout()` continues instead of
 staying a commit behind. The scrollable
-containing block a box reads is the one its containing block recorded earlier
-in the same run (`DocumentLayoutState::scrollable_containing_blocks`, scroll
-containers only: their in-flow overflow, which no out-of-flow box can grow).
+containing block a box is laid out against is not a host query: the scroll
+container's own algorithm computes it (its in-flow overflow, which no
+out-of-flow box can grow) and hands it to its absolute pass in the same run.
 The same step records remembered scroll offsets at
 §3.3's recalculation points (a box's first report, and a fallback determination
 that switched options). The last successful position option is recorded at
@@ -860,9 +873,12 @@ from every target list, drops queued entries naming it, and turns an
 and reports not rendered at the next update.
 
 The first consumer is bobcat-core's Lynx exposure service
-(`crates/bobcat-core/src/main/exposure.rs`): one observer per exposed element,
-with a handler type of its own that records transitions for the delivery
-entry to drain; `terminus` holds nothing of it.
+(`crates/bobcat-core/src/main/exposure.rs`): one observer per set of exposure
+options, whose targets are the exposed elements asking for them, with a
+handler type of its own that records transitions for the delivery entry to
+drain and hears a target's free through `IntersectionEventHandler::target_freed`;
+a re-arm takes the element out with `forget_intersection_target` (unobserve plus
+its queued entries) and observes it again. `terminus` holds nothing of it.
 
 ## Resize observations
 

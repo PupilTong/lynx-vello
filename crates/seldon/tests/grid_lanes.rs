@@ -112,7 +112,7 @@ fn a_container_without_items_or_tracks_is_its_own_box() {
 
     assert_size(output.size, Size::new(8.0, 8.0));
     assert_size(output.content_size, Size::new(8.0, 8.0));
-    assert_eq!(output.first_baselines.y, None);
+    assert_eq!(output.first_baseline, None);
 }
 
 #[test]
@@ -1224,7 +1224,7 @@ fn a_measured_container_asks_its_items_for_the_first_baseline_it_is_asked_for() 
     };
 
     let (read, read_probes) = run(true);
-    assert_eq!(read.first_baselines.y, Some(7.0));
+    assert_eq!(read.first_baseline, Some(7.0));
     assert_eq!(read_probes, 1);
     let (unread, unread_probes) = run(false);
     assert_eq!(unread.size, read.size);
@@ -1243,7 +1243,7 @@ fn the_first_baseline_comes_from_the_items_that_open_each_track() {
     );
 
     // The third item reopens no track, so its baseline never competes.
-    assert_eq!(auto_layout(&tree, root).first_baselines.y, Some(5.0));
+    assert_eq!(auto_layout(&tree, root).first_baseline, Some(5.0));
 
     let mut tree = TestTree::default();
     let first = fixed(&mut tree, 10.0, 30.0);
@@ -1251,7 +1251,7 @@ fn the_first_baseline_comes_from_the_items_that_open_each_track() {
     let root = tree.push_grid_lanes(lanes_style(&[px(50.0), px(50.0)], &[]), vec![first, second]);
 
     // An item without a baseline contributes none rather than its bottom edge.
-    assert_eq!(auto_layout(&tree, root).first_baselines.y, Some(8.0));
+    assert_eq!(auto_layout(&tree, root).first_baseline, Some(8.0));
 
     let mut tree = TestTree::default();
     let first = tree.push_leaf(leaf_style(30.0, 20.0), Size::new(30.0, 20.0), Some(15.0));
@@ -1259,7 +1259,7 @@ fn the_first_baseline_comes_from_the_items_that_open_each_track() {
     let root = tree.push_grid_lanes(lanes_style(&[], &[px(40.0), px(40.0)]), vec![first, second]);
 
     // Row lanes read the first item of the first non-empty track instead.
-    assert_eq!(auto_layout(&tree, root).first_baselines.y, Some(15.0));
+    assert_eq!(auto_layout(&tree, root).first_baseline, Some(15.0));
 }
 
 #[test]
@@ -1366,7 +1366,7 @@ fn layout_containment_suppresses_the_container_baseline() {
 
     let output = auto_layout(&tree, root);
 
-    assert_eq!(output.first_baselines.y, None);
+    assert_eq!(output.first_baseline, None);
     assert_size(output.content_size, Size::new(50.0, 30.0));
 }
 
@@ -2018,8 +2018,8 @@ fn the_last_baseline_comes_from_the_items_placed_last_in_each_track() {
     // 20 + 6; the first closes the first at 25. The lowest wins.
     let output = auto_layout(&tree, root);
     assert_point(tree.layout(third).location, Point::new(50.0, 20.0));
-    assert_eq!(output.first_baselines.y, Some(2.0));
-    assert_eq!(output.last_baselines.y, Some(26.0));
+    assert_eq!(output.first_baseline, Some(2.0));
+    assert_eq!(output.last_baseline, Some(26.0));
 
     let mut tree = TestTree::default();
     let first = leaf(&mut tree, 30.0, Some(25.0));
@@ -2032,7 +2032,7 @@ fn the_last_baseline_comes_from_the_items_placed_last_in_each_track() {
 
     // A last item without a baseline contributes none; the item above it is
     // no longer last in its track.
-    assert_eq!(auto_layout(&tree, root).last_baselines.y, Some(25.0));
+    assert_eq!(auto_layout(&tree, root).last_baseline, Some(25.0));
 
     let mut tree = TestTree::default();
     let first = tree.push_baseline_leaf(
@@ -2051,8 +2051,8 @@ fn the_last_baseline_comes_from_the_items_placed_last_in_each_track() {
 
     // Row lanes read the last item of the last track that received one.
     let output = auto_layout(&tree, root);
-    assert_eq!(output.first_baselines.y, Some(5.0));
-    assert_eq!(output.last_baselines.y, Some(48.0));
+    assert_eq!(output.first_baseline, Some(5.0));
+    assert_eq!(output.last_baseline, Some(48.0));
 }
 
 #[test]
@@ -2100,7 +2100,7 @@ fn layout_containment_suppresses_the_container_last_baseline() {
         vec![item],
     );
 
-    assert_eq!(auto_layout(&tree, root).last_baselines.y, None);
+    assert_eq!(auto_layout(&tree, root).last_baseline, None);
 }
 
 /// A grid-lanes container that is a last-baseline group member is asked for
@@ -2157,7 +2157,7 @@ fn a_requested_last_baseline_asks_the_items_that_may_close_a_track() {
 
     assert_size(tree.layout(lanes).size, Size::new(40.0, 22.0));
     assert_close(tree.layout(beside).location.y, 4.0);
-    assert_eq!(output.last_baselines.y, Some(19.0));
+    assert_eq!(output.last_baseline, Some(19.0));
 }
 
 /// The mix `aggregated_span_one_sizing_matches_per_position_sizing` sizes:

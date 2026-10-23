@@ -517,7 +517,7 @@ fn disconnect_is_gated_on_the_old_parents_connectedness() {
 }
 
 #[test]
-fn moving_a_two_element_subtree_batches_disconnect_and_connect_per_element() {
+fn moving_a_two_element_subtree_runs_its_reactions_in_enqueue_order() {
     let log = log();
     let mut doc = Doc::new();
     let root = doc.root;
@@ -533,11 +533,12 @@ fn moving_a_two_element_subtree_batches_disconnect_and_connect_per_element() {
         take(&log),
         vec![
             format!("x-item:disconnected#{first}"),
-            format!("x-item:connected#{first}"),
             format!("x-item:disconnected#{second}"),
+            format!("x-item:connected#{first}"),
             format!("x-item:connected#{second}"),
         ],
-        "per element FIFO, not a flat disc-disc-conn-conn"
+        "one queue in enqueue order, not the standard's per-element grouping (user ruling \
+         2026-10-22)"
     );
 }
 
@@ -942,7 +943,7 @@ fn a_callback_that_creates_another_element_of_its_own_tag_does_not_panic() {
 }
 
 #[test]
-fn removing_a_later_sibling_from_a_callback_drains_that_siblings_whole_queue() {
+fn removing_a_later_sibling_from_a_callback_runs_its_disconnect_before_its_pending_connect() {
     let log = log();
     let mut doc = Doc::new();
     let root = doc.root;
@@ -971,10 +972,10 @@ fn removing_a_later_sibling_from_a_callback_drains_that_siblings_whole_queue() {
         take(&log),
         vec![
             format!("x-item:connected#{first}"),
-            format!("x-item:connected#{second}"),
             format!("x-item:disconnected#{second}"),
         ],
-        "the nested scope runs the sibling's pending connect before its disconnect"
+        "the nested scope runs its own reaction first (user ruling 2026-10-22), and the \
+         sibling's pending connect then finds it freed and runs nothing"
     );
     assert!(doc.dom.get(second).is_none());
 }

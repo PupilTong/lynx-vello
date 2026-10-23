@@ -967,7 +967,11 @@ impl<T> Document<T> {
         }
         self.note_freed_editing_node(&node);
         self.layout.remove(slot);
-        self.forget_reactions(id);
+        // The pin preflight keeps a pinned node from reaching here. A
+        // reaction still queued for `id` stays queued and runs nothing: ids
+        // are never reissued, and every reaction looks its element up first.
+        #[cfg(debug_assertions)]
+        self.assert_not_pinned(id);
         // Every free comes through here, one node at a time, so a defined
         // element in a freed subtree or in a freed shadow tree is told once.
         self.note_custom_element_freed(id, node.custom_definition);

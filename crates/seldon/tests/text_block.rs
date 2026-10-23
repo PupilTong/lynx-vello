@@ -1076,10 +1076,6 @@ fn an_empty_block_that_keeps_a_strut_line_lays_out_one_empty_line() {
                     assert_close(line.top, 0.0);
                     assert_close(line.height, 24.0);
                     assert_close(line.baseline, 15.0);
-                    let [geometry] = block.line_geometry() else {
-                        panic!("one line geometry expected")
-                    };
-                    assert_close(geometry.height, 24.0);
                     assert_close(block.size().width, 0.0);
                     assert_close(block.size().height, 24.0);
                     assert_eq!(block.first_baseline(), Some(15.0));

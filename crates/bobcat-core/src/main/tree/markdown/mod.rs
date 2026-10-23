@@ -213,6 +213,7 @@ mod tests;
 
 use std::borrow::Cow;
 use std::cell::{OnceCell, RefCell};
+use std::rc::Rc;
 
 use rustc_hash::FxHashMap;
 use terminus::link::event::{ElementEvent, EventPhase};
@@ -355,13 +356,14 @@ const SHADOW_RULES: &str = r#"
 .markdown-body a { color: #0366d6; text-decoration: underline; }
 "#;
 
-/// Installs the component under both tag names, over the queue its events
+/// Installs one component under both tag names, over the queue its events
 /// go into. Must run after [`super::image::define`], whose component the
 /// shadow tree's images are, and before any element could carry either tag,
 /// which is [`Document::define`](terminus::link::Document::define)'s own precondition.
 pub(super) fn define(document: &mut LynxDocument, events: ComponentEvents) {
-    document.define(MARKDOWN_TAG, Box::new(Markdown::new(events.clone())));
-    document.define(X_MARKDOWN_TAG, Box::new(Markdown::new(events)));
+    let markdown: Rc<dyn CustomElement<()>> = Rc::new(Markdown::new(events));
+    document.define_shared(MARKDOWN_TAG, Rc::clone(&markdown));
+    document.define_shared(X_MARKDOWN_TAG, markdown);
 }
 
 /// The markdown component: builds the shadow tree, re-renders it on
@@ -373,7 +375,7 @@ struct Markdown {
     states: RefCell<FxHashMap<NodeId, State>>,
     /// The two sheets every shadow tree starts with, [`SHADOW_RULES`] and
     /// the empty one a `markdown-style` attribute replaces, parsed by the
-    /// first element of the definition and mounted on every one's tree.
+    /// first element of either tag and mounted on every one's tree.
     shadow_sheets: OnceCell<[ShadowSheet; 2]>,
 }
 

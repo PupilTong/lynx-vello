@@ -62,10 +62,6 @@ impl InlineEdges {
 pub(super) struct BoxSpec {
     /// The box's own font, whose content area its fragments cover.
     pub(super) style: RunStyle,
-    /// The style its edge clusters are shaped in: the box's font family at
-    /// size 0 with no line height and no spacing of its own, so a cluster
-    /// adds nothing but the advance it is given.
-    pub(super) edge_style: RunStyle,
     pub(super) direction: Direction,
     pub(super) edges: InlineEdges,
 }
@@ -74,14 +70,21 @@ impl BoxSpec {
     pub(super) fn new(style: &RunStyle, direction: Direction, edges: InlineEdges) -> Self {
         Self {
             style: style.clone(),
-            edge_style: RunStyle {
-                font_size: 0.0,
-                line_height: LineHeight::Px(0.0),
-                letter_spacing: 0.0,
-                ..style.clone()
-            },
             direction,
             edges,
+        }
+    }
+
+    /// The style the box's edge clusters are shaped in: its font family at
+    /// size 0 with no line height and no spacing of its own, so a cluster
+    /// adds nothing but the advance it is given. Read once per edge cluster,
+    /// when the edges are laid in.
+    pub(super) fn edge_style(&self) -> RunStyle {
+        RunStyle {
+            font_size: 0.0,
+            line_height: LineHeight::Px(0.0),
+            letter_spacing: 0.0,
+            ..self.style.clone()
         }
     }
 }

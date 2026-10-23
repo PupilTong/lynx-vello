@@ -28,10 +28,12 @@ use sizing::{
     resolve_item_intrinsic_dimensions, size_tracks,
 };
 use stylo::computed_values::direction;
-use stylo::values::computed::{Inset, PositionProperty, Size as StyleSize, TrackBreadth};
+use stylo::values::computed::{PositionProperty, Size as StyleSize};
 use stylo::values::specified::align::AlignFlags;
-use tracks::{ExpandedTemplate, MAX_MATERIALIZED_TRACKS, build_axis_tracks, expand_template};
-use types::{Axis, GridItem, TrackSet, TrackSizingFunction};
+use tracks::{
+    ExpandedTemplate, MAX_MATERIALIZED_TRACKS, build_axis_tracks, expand_template, occupied_tracks,
+};
+use types::{Axis, GridItem, MaxKind, MinKind, TrackSet};
 
 use super::util::{
     BaselineSet, IntrinsicTag, ItemKey, OrderedItem, PendingLayoutItem, ResolvedContainerBox,
@@ -219,18 +221,13 @@ where
     } else {
         defaults.justify_items
     };
-    let inset = style.inset();
-    // No size, min/max size, margin, padding or inset is a percentage (or an
-    // anchor function) and no size is an intrinsic keyword, so the geometry
-    // is the same against every basis and nothing fills it in later:
+    // No size, min/max size, margin or padding is a percentage (or an anchor
+    // function) and no size is an intrinsic keyword, so the geometry is the
+    // same against every basis and nothing fills it in later:
     // `refresh_item_basis` leaves it as it is.
     let mut geometry = geometry;
     geometry.basis_free = !geometry.intrinsic.has_intrinsic()
-        && !crate::style::box_model_reads_percentage_basis(style)
-        && !inset_reads_basis(inset.left)
-        && !inset_reads_basis(inset.right)
-        && !inset_reads_basis(inset.top)
-        && !inset_reads_basis(inset.bottom);
+        && !crate::style::box_model_reads_percentage_basis(style);
     GridItem {
         geometry,
         key,
@@ -257,7 +254,6 @@ where
             minimum_behaves_auto(raw_min_size.width),
             minimum_behaves_auto(raw_min_size.height),
         ),
-        inset: resolve_insets(inset, percentage_basis),
         raw_min_content: Size::NONE,
         raw_max_content: Size::NONE,
         minimum_contribution: Size::NONE,
@@ -269,25 +265,12 @@ where
     }
 }
 
-/// Whether an inset resolves against a percentage basis: a percentage, or
-/// (conservatively) an anchor function.
-#[inline]
-fn inset_reads_basis(value: &Inset) -> bool {
-    match value {
-        Inset::LengthPercentage(lp) => lp.has_percentage(),
-        Inset::Auto => false,
-        Inset::AnchorFunction(_)
-        | Inset::AnchorSizeFunction(_)
-        | Inset::AnchorContainingCalcFunction(_) => true,
-    }
-}
-
 fn expand_explicit_tracks<S>(
     style: &S,
     repeat_max_basis: Size<Option<f32>>,
     repeat_min_basis: Size<Option<f32>>,
     gap: Size<f32>,
-) -> (ExpandedTemplate, ExpandedTemplate)
+) -> (ExpandedTemplate<'_>, ExpandedTemplate<'_>)
 where
     S: GridStyle,
 {
@@ -345,8 +328,8 @@ fn run_track_sizing<T>(
     state: &mut T::State,
     columns: &mut TrackSet,
     rows: &mut TrackSet,
-    column_specs: &[tracks::AxisTrackSpec],
-    row_specs: &[tracks::AxisTrackSpec],
+    column_specs: &[tracks::AxisTrackSpec<'_>],
+    row_specs: &[tracks::AxisTrackSpec<'_>],
     items: &mut [GridItem<T::NodeId>],
     inner_basis: Size<Option<f32>>,
     available: Size<AvailableSpace>,
@@ -354,13 +337,18 @@ fn run_track_sizing<T>(
     justify_content: AlignFlags,
     align_content: AlignFlags,
     scratch: &mut IntrinsicSizingScratch,
+    // The items are as `resolve_grid_item` built them — resolved against no
+    // basis, nothing measured — which every other run starts by restoring.
+    items_fresh: bool,
 ) where
     T: LayoutTree,
 {
-    for item in items.iter_mut() {
-        refresh_item_basis(tree, item, Size::NONE);
-        item.clear_contribution_cache(Axis::Horizontal);
-        item.clear_contribution_cache(Axis::Vertical);
+    if !items_fresh {
+        for item in items.iter_mut() {
+            refresh_item_basis(tree, item, Size::NONE);
+            item.clear_contribution_cache(Axis::Horizontal);
+            item.clear_contribution_cache(Axis::Vertical);
+        }
     }
     initialize_tracks(rows, row_specs, inner_basis.height, gap.height);
     let all_rows_definite = rows
@@ -404,31 +392,20 @@ fn run_track_sizing<T>(
     let needs_column_feedback = columns
         .tracks
         .iter()
-        .any(|track| track.intrinsic_min || track.intrinsic_max || track.is_flexible());
-    let mut before_row_min_content = Vec::new();
-    if needs_column_feedback {
-        before_row_min_content.reserve(items.len());
-        for item in items.iter_mut() {
-            let range = columns.span_indices(item.area.column.start, item.area.column.end);
-            let affects_intrinsic_column = columns.tracks[range]
-                .iter()
-                .any(|track| track.intrinsic_min || track.intrinsic_max || track.is_flexible());
-            before_row_min_content.push(
-                (affects_intrinsic_column && item.preferred_behaves_auto_or_depends.width).then(
-                    || {
-                        probe_raw_min_content(
-                            tree,
-                            state,
-                            item,
-                            Axis::Horizontal,
-                            Some(initial_column_cross_tracks),
-                        )
-                    },
-                ),
+        .any(|track| track.min.is_intrinsic() || track.max.is_intrinsic() || track.is_flexible());
+    for item in items.iter_mut() {
+        // The min-content width the feedback check below compares with: the
+        // one against the row maximums, before the item is resolved against
+        // its column. Column sizing has usually measured it already.
+        if needs_column_feedback && column_feedback_reads_rows(item, columns) {
+            probe_raw_min_content(
+                tree,
+                state,
+                item,
+                Axis::Horizontal,
+                Some(initial_column_cross_tracks),
             );
         }
-    }
-    for item in items.iter_mut() {
         let width = columns.area_size(item.area.column.start, item.area.column.end);
         refresh_item_basis(tree, item, Size::new(Some(width), None));
         item.clear_contribution_cache(Axis::Vertical);
@@ -451,10 +428,15 @@ fn run_track_sizing<T>(
 
     let mut column_feedback_changed = false;
     if needs_column_feedback {
-        for (item, before) in items.iter_mut().zip(before_row_min_content) {
-            let Some(before) = before else {
+        for item in items.iter_mut() {
+            if !column_feedback_reads_rows(item, columns) {
                 continue;
-            };
+            }
+            // Row sizing reads and clears only the vertical measurements.
+            let before = item
+                .raw_min_content
+                .width
+                .expect("measured before row sizing");
             item.clear_contribution_cache(Axis::Horizontal);
             let after = probe_raw_min_content(
                 tree,
@@ -516,11 +498,42 @@ fn run_track_sizing<T>(
     }
 }
 
+/// Whether css-grid-2 §12.1 step 3 re-measures the item: its min-content
+/// width feeds an intrinsic or flexible column, and measured against the
+/// sized rows it may differ from the measurement against the row maximums
+/// that sized the columns.
+///
+/// Between the two measurements only the row area and the item's resolved
+/// values can move. The row area reaches the item's min-content width as a
+/// known height only when the item stretches into it; as a parent height its
+/// own percentages are ignored under `SizingMode::IgnoreSizeStyles`, and as
+/// an available height no algorithm reads it for a box whose own height is
+/// indefinite. The resolved values move only for an item that is not
+/// basis-free, re-resolved against its column width in between: a height
+/// transferred through a preferred aspect ratio, a height an intrinsic
+/// keyword fills in during row sizing, or a preferred height that grows
+/// with a percentage padding under `box-sizing: content-box`. The answer is
+/// the same before and after row sizing, since a preferred height appears in
+/// between only through the ratio or the keyword.
+fn column_feedback_reads_rows<N>(item: &GridItem<N>, columns: &TrackSet) -> bool {
+    let range = columns.span_indices(item.area.column.start, item.area.column.end);
+    item.preferred_behaves_auto_or_depends.width
+        && columns.tracks[range].iter().any(|track| {
+            track.min.is_intrinsic() || track.max.is_intrinsic() || track.is_flexible()
+        })
+        && (item.stretches(Axis::Vertical)
+            || (!item.basis_free
+                && (item.aspect_ratio.is_some()
+                    || item.intrinsic.needs_min_content(Axis::Vertical)
+                    || item.intrinsic.needs_max_content(Axis::Vertical)
+                    || item.preferred_size.height.is_some())))
+}
+
 /// What one axis of the provisional track-sizing run was sized against, and
 /// the size the container settled on: whether sizing the tracks again at the
 /// final definite size ([`DefiniteRerun::moves_axis`]) could change them.
 struct DefiniteRerun<'a> {
-    specs: &'a [tracks::AxisTrackSpec],
+    specs: &'a [tracks::AxisTrackSpec<'a>],
     /// The provisional run's tracks.
     tracks: &'a TrackSet,
     /// The provisional run's percentage basis.
@@ -600,8 +613,7 @@ impl DefiniteRerun<'_> {
                 (self.final_inner - self.used).abs() > tolerance
                     || self.tracks.tracks.iter().any(|track| {
                         (track.is_flexible() && track.flex_factor < 1.0)
-                            || (matches!(track.sizing.min, TrackBreadth::Auto)
-                                && matches!(track.sizing.max, TrackBreadth::MinContent))
+                            || (track.min == MinKind::Auto && track.max == MaxKind::MinContent)
                     })
                     || items.iter().any(|item| {
                         let span = match axis {
@@ -614,7 +626,7 @@ impl DefiniteRerun<'_> {
                             && !spanned.iter().any(types::Track::is_flexible)
                             && spanned
                                 .iter()
-                                .any(|track| track.intrinsic_min || track.intrinsic_max)
+                                .any(|track| track.min.is_intrinsic() || track.max.is_intrinsic())
                     })
             }
         }
@@ -954,7 +966,6 @@ fn refresh_item_basis<T>(
     }
     let style = tree.style(item.key.node);
     item.geometry = resolve_item_geometry(&style, percentage_basis);
-    item.inset = resolve_insets(style.inset(), percentage_basis);
 }
 
 fn physical_area<N>(
@@ -987,22 +998,27 @@ fn span_is_fixed(tracks: &TrackSet, span: crate::compute::grid::placement::Track
     let indices = tracks.span_indices(span.start, span.end);
     !tracks.tracks[indices]
         .iter()
-        .any(|track| track.intrinsic_min || track.intrinsic_max || track.is_flexible())
+        .any(|track| track.min.is_intrinsic() || track.max.is_intrinsic() || track.is_flexible())
 }
 
 /// The visual offset `position: relative` adds to an item, taken from
-/// whichever inset of each pair is not `auto`.
-fn relative_item_offset<N>(item: &GridItem<N>) -> Point<f32> {
+/// whichever inset of each pair is not `auto`, its percentages resolved
+/// against `basis`, the item's area.
+fn relative_item_offset<T>(
+    tree: &T,
+    item: &GridItem<T::NodeId>,
+    basis: Size<Option<f32>>,
+) -> Point<f32>
+where
+    T: LayoutTree,
+{
     if item.position != PositionProperty::Relative {
         return Point::ZERO;
     }
+    let inset = resolve_insets(tree.style(item.key.node).inset(), basis);
     Point::new(
-        item.inset
-            .left
-            .unwrap_or_else(|| -item.inset.right.unwrap_or(0.0)),
-        item.inset
-            .top
-            .unwrap_or_else(|| -item.inset.bottom.unwrap_or(0.0)),
+        inset.left.unwrap_or_else(|| -inset.right.unwrap_or(0.0)),
+        inset.top.unwrap_or_else(|| -inset.bottom.unwrap_or(0.0)),
     )
 }
 
@@ -1271,7 +1287,11 @@ where
         let item_rtl = item.direction == direction::T::Rtl;
         let offset_x = item_alignment_offset(free_x, item.justify_self, rtl, item_rtl);
         let offset_y = item_alignment_offset(free_y, item.align_self, false, false);
-        let relative = relative_item_offset(item);
+        let relative = relative_item_offset(
+            tree,
+            item,
+            Size::new(Some(area_size.width), Some(area_size.height)),
+        );
         // Aligned in its area; a relative offset moves it afterwards without
         // moving anything aligned against it.
         let aligned = Point::new(
@@ -1296,10 +1316,9 @@ where
         });
         let participation = item.baseline_participation();
         let item_baseline = output
-            .first_baselines
-            .y
+            .first_baseline
             .or_else(|| (item.align_self == AlignFlags::BASELINE).then_some(output.size.height));
-        let baselines = [item_baseline, output.last_baselines.y];
+        let baselines = [item_baseline, output.last_baseline];
         let Some(set) = participation else {
             candidates.offer(index, item.area, aligned.y, output.size.height, baselines);
             accumulate_scrollable_overflow(
@@ -1546,6 +1565,7 @@ fn layout_absolute_items<'tree, T>(
     border: Edges<f32>,
     rtl: bool,
     defaults: ItemDefaults,
+    scrollable: Option<Size<f32>>,
 ) -> Size<f32>
 where
     T: LayoutTree + 'tree,
@@ -1563,7 +1583,7 @@ where
     crate::compute::util::debug_assert_tree_order(
         items.iter().map(|item| item.ordered.document_index),
     );
-    let mut hoisted = crate::compute::HoistedPass::new(padding_box_size, border, rtl);
+    let mut hoisted = crate::compute::HoistedPass::new(padding_box_size, border, rtl, scrollable);
     for pending in items {
         hoisted.before(tree, state, node, pending.ordered.document_index);
         let key = pending.key();
@@ -1618,6 +1638,7 @@ where
                         size: containing_size,
                         padding_box_size,
                         is_padding_box: x == 0.0 && y == 0.0 && containing_size == padding_box_size,
+                        scrollable,
                         rtl,
                         honors_self_alignment: true,
                     },
@@ -1666,8 +1687,10 @@ where
     T::Style<'tree>: GridStyle,
 {
     let style = tree.style(node);
-    let contained_size = contained_axes(&style);
-    let layout_contained = style.containment().contains(Contain::LAYOUT);
+    let containment = style.containment();
+    let contained_size = contained_axes(containment, &style);
+    let layout_contained = containment.contains(Contain::LAYOUT);
+    let scroll_container = is_scroll_container(style.overflow());
     let gap_value = style.gap();
     let auto_flow = style.grid_auto_flow();
     let direction = style.direction();
@@ -1735,48 +1758,33 @@ where
         explicit_rows.tracks.len(),
         auto_flow,
     );
-    let needs_auto_columns = placement.column_range.start < 0
-        || placement.column_range.end
-            > i32::try_from(explicit_columns.tracks.len()).unwrap_or(i32::MAX);
-    let needs_auto_rows = placement.row_range.start < 0
-        || placement.row_range.end > i32::try_from(explicit_rows.tracks.len()).unwrap_or(i32::MAX);
-    let (auto_columns, auto_rows) = {
-        let container = tree.style(node);
-        let auto_columns = if needs_auto_columns {
-            container
-                .grid_auto_columns()
-                .0
-                .iter()
-                .take(MAX_MATERIALIZED_TRACKS)
-                .map(TrackSizingFunction::from_style)
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
-        let auto_rows = if needs_auto_rows {
-            container
-                .grid_auto_rows()
-                .0
-                .iter()
-                .take(MAX_MATERIALIZED_TRACKS)
-                .map(TrackSizingFunction::from_style)
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
-        (auto_columns, auto_rows)
+    // A `grid-auto-*` list is read only for coordinates outside the explicit
+    // grid.
+    let auto_columns = &style.grid_auto_columns().0;
+    let auto_rows = &style.grid_auto_rows().0;
+    // Only an `auto-fit` track reads the occupancy, to know whether it
+    // collapses.
+    let occupied_columns = if explicit_columns.auto_fit.is_some() {
+        occupied_tracks(&placement.areas, placement.column_range, |area| area.column)
+    } else {
+        Vec::new()
     };
-    let column_specs = build_axis_tracks(
+    let occupied_rows = if explicit_rows.auto_fit.is_some() {
+        occupied_tracks(&placement.areas, placement.row_range, |area| area.row)
+    } else {
+        Vec::new()
+    };
+    let (first_column, column_specs) = build_axis_tracks(
         &explicit_columns,
-        &auto_columns,
+        &auto_columns[..auto_columns.len().min(MAX_MATERIALIZED_TRACKS)],
         placement.column_range,
-        &placement.occupied_columns,
+        &occupied_columns,
     );
-    let row_specs = build_axis_tracks(
+    let (first_row, row_specs) = build_axis_tracks(
         &explicit_rows,
-        &auto_rows,
+        &auto_rows[..auto_rows.len().min(MAX_MATERIALIZED_TRACKS)],
         placement.row_range,
-        &placement.occupied_rows,
+        &occupied_rows,
     );
     let mut items = in_flow
         .into_iter()
@@ -1787,9 +1795,16 @@ where
         })
         .collect::<Vec<_>>();
 
-    let mut columns = TrackSet::default();
-    let mut rows = TrackSet::default();
+    let mut columns = TrackSet {
+        first_coordinate: first_column,
+        ..TrackSet::default()
+    };
+    let mut rows = TrackSet {
+        first_coordinate: first_row,
+        ..TrackSet::default()
+    };
     let mut intrinsic_scratch = IntrinsicSizingScratch::default();
+    let mut items_fresh = true;
     // The available grid space (css-grid-2 §12.1; see `ContainerPrologue`).
     // A width the container does not have under a definite available width
     // is its fit-content width, from track-sizing runs under the two intrinsic
@@ -1815,6 +1830,7 @@ where
                     justify_content,
                     align_content,
                     &mut intrinsic_scratch,
+                    core::mem::take(&mut items_fresh),
                 );
                 columns.used_size()
             })
@@ -1846,6 +1862,7 @@ where
             justify_content,
             align_content,
             &mut intrinsic_scratch,
+            core::mem::take(&mut items_fresh),
         );
     }
     let provisional_track_size = Size::new(columns.used_size(), rows.used_size());
@@ -1919,6 +1936,7 @@ where
             justify_content,
             align_content,
             &mut intrinsic_scratch,
+            core::mem::take(&mut items_fresh),
         );
     }
     align_tracks(&mut columns, final_inner.width, justify_content);
@@ -1945,7 +1963,7 @@ where
         input.reads_first_baseline && !commits_layout,
         input.reads_last_baseline && !commits_layout,
         rtl,
-        is_scroll_container(style.overflow()),
+        scroll_container,
     );
     if commits_layout {
         for (document_index, child) in hidden.expect("commit keeps hidden grid items") {
@@ -1956,15 +1974,6 @@ where
                 Layout::with_order(u32::try_from(document_index).unwrap_or(u32::MAX)),
             );
         }
-        crate::compute::record_scrollable_containing_block(
-            tree,
-            state,
-            node,
-            &style,
-            outer_size,
-            metrics.border,
-            content_size,
-        );
         let absolute = absolute.expect("commit keeps out-of-flow grid items");
         // With no out-of-flow box to lay out, the pass adds nothing.
         let absolute_content_size =
@@ -1986,11 +1995,23 @@ where
                     metrics.border,
                     rtl,
                     item_defaults,
+                    crate::compute::scrollable_containing_block(
+                        scroll_container,
+                        outer_size,
+                        metrics.border,
+                        content_size,
+                    ),
                 )
             };
         content_size = content_size.zip_map(absolute_content_size, f32::max);
     }
-    let content_size = own_scrollable_overflow(&style, outer_size, metrics.border, content_size);
+    let content_size = own_scrollable_overflow(
+        layout_contained,
+        scroll_container,
+        outer_size,
+        metrics.border,
+        content_size,
+    );
     // Layout containment exports no baseline (css-contain-2 §3.2).
     let [first, last] = if layout_contained {
         [None, None]
@@ -1998,8 +2019,8 @@ where
         baselines
     };
     LayoutOutput::new(outer_size, content_size)
-        .with_first_baselines(Point::new(None, first))
-        .with_last_baselines(Point::new(None, last))
+        .with_first_baseline(first)
+        .with_last_baseline(last)
 }
 
 #[cfg(test)]

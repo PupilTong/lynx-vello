@@ -230,6 +230,7 @@ use terminus::link::{
     CustomElement, MethodCall, MethodOutcome, Node, NodeId, ShadowRootMode, ShadowSheet,
 };
 
+use super::list::generates_box;
 use super::scroll_container::{
     SCROLL_END_EVENT, SCROLL_EVENT, rect_in_scroller, rendered_scroll_box,
 };
@@ -445,8 +446,10 @@ impl Pull {
         let top = f64::from(scroll_box.offset.y);
         let bottom = top + f64::from(scroll_box.scrollport.height);
         let rect = |end: Option<NodeId>| {
-            let end = end?;
-            document.bounding_client_rect(end)?;
+            // The end's box parent is `#container`, whose box
+            // `rendered_scroll_box` found rendered, so whether the end has a
+            // rendered box is whether it generates one.
+            let end = end.filter(|&end| generates_box(document, end))?;
             rect_in_scroller(document, container, end).filter(|rect| rect.height() > 0.0)
         };
         Some(Self {
