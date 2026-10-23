@@ -211,7 +211,7 @@ fn quickjs_date_formatting_uses_the_private_formatter() {
 
 #[test]
 fn quickjs_errors_preserve_formatted_arguments() {
-    let mut realm = Runtime::new()
+    let realm = Runtime::new()
         .expect("runtime should initialize")
         .create_context()
         .expect("realm should initialize");
@@ -230,7 +230,7 @@ fn quickjs_errors_preserve_formatted_arguments() {
 
 #[test]
 fn quickjs_regexp_errors_preserve_formatted_characters() {
-    let mut realm = Runtime::new()
+    let realm = Runtime::new()
         .expect("runtime should initialize")
         .create_context()
         .expect("realm should initialize");
@@ -246,7 +246,7 @@ fn quickjs_regexp_errors_preserve_formatted_characters() {
 
 #[test]
 fn quickjs_backtrace_expands_past_dbufs_stack_buffer() {
-    let mut realm = Runtime::new()
+    let realm = Runtime::new()
         .expect("runtime should initialize")
         .create_context()
         .expect("realm should initialize");

@@ -1563,9 +1563,10 @@ private callbacks as named exports of the native `bobcat-internal:host` ESM —
 the document member `createDocument`, the tree and attribute
 members, the two listener members (`listenerOpened`, `listenerClosed`, which
 file per-element registrations in the document's listener table), the
-synthetic dispatch pair (`dispatchEvent`, which runs the components' walk for
-an event `__CreateEvent` made, calls the other realms the listener table
-invites, re-entrantly, and answers its path, and
+synthetic dispatch pair (`dispatchEvent`, which runs the routed dispatch's
+own body for an event `__CreateEvent` made — the components' walk, and every
+realm the listener table invites, the calling one included, called
+re-entrantly with no checkpoint — and answers nothing, and
 `timelineMilliseconds`, which that event is stamped with), the
 exposure switch (`switchExposure`, over the comma-joined ids of the elements
 the calling realm registered, answering the records it queued), the two

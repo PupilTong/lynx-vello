@@ -257,7 +257,7 @@ pub(crate) fn install(
 /// Hands one settled outcome back to the realm that asked for it
 /// asynchronously.
 pub(crate) fn deliver(
-    engine: &mut ScriptEngine,
+    engine: &ScriptEngine,
     js_runtime: &mut ScriptRuntime,
     id: u32,
     outcome: Outcome,

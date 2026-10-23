@@ -7,15 +7,15 @@
 //! rather than as a silently growing process, which is what makes these
 //! assertions meaningful.
 
-use std::cell::{Cell, RefCell};
-use std::rc::Rc;
+use std::cell::{Cell, OnceCell, RefCell};
+use std::rc::{Rc, Weak};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
 use quickjs_rust_bridge::{
     CallOutcome, Context, EvalOptions, EvalSource, HostArgument, HostFunctionError, HostValue,
-    Runtime, RuntimeOptions,
+    Runtime, RuntimeOptions, Value,
 };
 
 fn realm() -> Context {
@@ -42,7 +42,7 @@ fn text(realm: &mut Context, source: &str) -> String {
 
 #[test]
 fn javascript_shared_memory_is_not_exposed() {
-    let mut realm = realm();
+    let realm = realm();
     let value = realm
         .evaluate(
             EvalSource::new(
@@ -101,7 +101,7 @@ fn string_round_trip_does_not_leak() {
 
 #[test]
 fn repeated_member_calls_do_not_leak() {
-    let mut realm = tight_realm();
+    let realm = tight_realm();
     let host = realm
         .evaluate(
             EvalSource::new(
@@ -146,7 +146,7 @@ fn repeated_member_calls_do_not_leak() {
 
 #[test]
 fn a_throwing_member_call_does_not_leak() {
-    let mut realm = tight_realm();
+    let realm = tight_realm();
     let host = realm
         .evaluate(
             EvalSource::new(
@@ -568,7 +568,7 @@ mod release {
     #[test]
     fn dropping_an_uninstalled_function_releases_its_closure() {
         let drops = Rc::new(Cell::new(0));
-        let (mut runtime, mut realm) = runtime_and_realm();
+        let (mut runtime, realm) = runtime_and_realm();
 
         let function = realm.function("gone", 0, tracking(&drops)).unwrap();
         assert_eq!(drops.get(), 0, "still referenced");
@@ -585,7 +585,7 @@ mod release {
     #[test]
     fn a_handler_owning_a_value_is_released_without_re_entering_the_collector() {
         let drops = Rc::new(Cell::new(0));
-        let (mut runtime, mut realm) = runtime_and_realm();
+        let (mut runtime, realm) = runtime_and_realm();
 
         let rooted = realm
             .evaluate(EvalSource::new("({})"), EvalOptions::default())
@@ -697,6 +697,40 @@ fn define_reentrant(
     realm.set_property(&global, name, &function).unwrap();
 }
 
+/// A realm its own host functions can reach while one of them runs: the
+/// handle the test holds, and the weak one each function is given once the
+/// realm is shared. Weak, as a host would hold it, since a function of the
+/// realm holding the realm would never let it be freed.
+type Reentry = Rc<OnceCell<Weak<Context>>>;
+
+/// Shares `realm` and points `reentry` at it.
+fn share(realm: Context, reentry: &Reentry) -> Rc<Context> {
+    let realm = Rc::new(realm);
+    assert!(reentry.set(Rc::downgrade(&realm)).is_ok());
+    realm
+}
+
+/// Evaluates `source` in the realm `reentry` names, from inside a host
+/// function of that realm, as a host function calling back into its realm
+/// does.
+fn evaluate_again(reentry: &Reentry, source: &str) -> Result<Value, HostFunctionError> {
+    let realm = reentry
+        .get()
+        .and_then(Weak::upgrade)
+        .expect("the realm is running this call");
+    realm
+        .evaluate(EvalSource::new(source), EvalOptions::default())
+        .map_err(|error| HostFunctionError::new(error.message))
+}
+
+/// [`text`] over a shared realm.
+fn shared_text(realm: &Context, source: &str) -> String {
+    let value = realm
+        .evaluate(EvalSource::new(source), EvalOptions::default())
+        .unwrap();
+    String::from_utf16(&value.to_utf16().unwrap()).unwrap()
+}
+
 /// A re-entrant host function runs again inside its own call: `nest(n)`
 /// evaluates `nest(n - 1)` in the realm it was called from before it answers,
 /// so each answer is written while every outer call is still running. Each
@@ -705,7 +739,8 @@ fn define_reentrant(
 #[test]
 fn a_reentrant_host_function_runs_again_inside_its_own_call() {
     let mut realm = realm();
-    let weak = realm.downgrade();
+    let reentry = Reentry::default();
+    let again = Rc::clone(&reentry);
     define_reentrant(&mut realm, "nest", 1, move |arguments| {
         let HostArgument::Number(depth) = arguments[0] else {
             return Err(HostFunctionError::new("expected a depth"));
@@ -713,18 +748,13 @@ fn a_reentrant_host_function_runs_again_inside_its_own_call() {
         if depth == 0.0 {
             return Ok(HostValue::String("0".repeat(64)));
         }
-        let mut realm = weak.upgrade().expect("the realm is running this call");
-        let inner = realm
-            .evaluate(
-                EvalSource::new(&format!("nest({})", depth - 1.0)),
-                EvalOptions::default(),
-            )
-            .map_err(|error| HostFunctionError::new(error.message))?;
+        let inner = evaluate_again(&again, &format!("nest({})", depth - 1.0))?;
         let inner = String::from_utf16(&inner.to_utf16().unwrap()).unwrap();
         Ok(HostValue::String(format!("{depth}[{inner}]")))
     });
+    let realm = share(realm, &reentry);
     assert_eq!(
-        text(&mut realm, "nest(3)"),
+        shared_text(&realm, "nest(3)"),
         format!("3[2[1[{}]]]", "0".repeat(64))
     );
 }
@@ -735,31 +765,30 @@ fn a_reentrant_host_function_runs_again_inside_its_own_call() {
 #[test]
 fn nested_host_calls_each_return_their_own_structured_clone() {
     let mut realm = realm();
-    let weak = realm.downgrade();
+    let reentry = Reentry::default();
+    let again = Rc::clone(&reentry);
     define_reentrant(&mut realm, "echo", 2, move |arguments| {
         let HostArgument::Number(depth) = arguments[1] else {
             return Err(HostFunctionError::new("expected a depth"));
         };
         if depth > 0.0 {
-            let mut realm = weak.upgrade().expect("the realm is running this call");
-            let inner = realm
-                .evaluate(
-                    EvalSource::new(&format!(
-                        "(() => {{ const d = {}; const o = echo({{ depth: d, text: 'y'.repeat(100 + d) }}, d); \
-                           if (o.depth !== d || o.text.length !== 100 + d) throw Error('inner ' + JSON.stringify(o)); \
-                           return o.depth; }})()",
-                        depth - 1.0
-                    )),
-                    EvalOptions::default(),
-                )
-                .map_err(|error| HostFunctionError::new(error.message))?;
+            let inner = evaluate_again(
+                &again,
+                &format!(
+                    "(() => {{ const d = {}; const o = echo({{ depth: d, text: 'y'.repeat(100 + d) }}, d); \
+                       if (o.depth !== d || o.text.length !== 100 + d) throw Error('inner ' + JSON.stringify(o)); \
+                       return o.depth; }})()",
+                    depth - 1.0
+                ),
+            )?;
             assert_eq!(inner.as_number(), Some(depth - 1.0));
         }
         Ok(arguments[0].to_value())
     });
+    let realm = share(realm, &reentry);
     assert_eq!(
-        text(
-            &mut realm,
+        shared_text(
+            &realm,
             "(() => { const o = echo({ depth: 4, text: 'z'.repeat(10) }, 4); \
                return o.depth + ':' + o.text; })()",
         ),
@@ -774,7 +803,8 @@ fn nested_host_calls_each_return_their_own_structured_clone() {
 #[test]
 fn an_exclusive_host_function_refuses_a_nested_call() {
     let mut realm = realm();
-    let weak = realm.downgrade();
+    let reentry = Reentry::default();
+    let again = Rc::clone(&reentry);
     realm
         .define_global_function("nest", 1, move |arguments| {
             let HostArgument::Number(depth) = arguments[0] else {
@@ -783,36 +813,14 @@ fn an_exclusive_host_function_refuses_a_nested_call() {
             if depth == 0.0 {
                 return Ok(HostValue::String("reached".to_owned()));
             }
-            let mut realm = weak.upgrade().expect("the realm is running this call");
-            let refused = realm
-                .evaluate(EvalSource::new("nest(0)"), EvalOptions::default())
-                .expect_err("the nested call is refused");
-            Ok(HostValue::String(refused.message))
+            let refused =
+                evaluate_again(&again, "nest(0)").expect_err("the nested call is refused");
+            Ok(HostValue::String(refused.to_string()))
         })
         .unwrap();
+    let realm = share(realm, &reentry);
     assert!(
-        text(&mut realm, "nest(1)").contains("cannot be called while it is already running"),
+        shared_text(&realm, "nest(1)").contains("cannot be called while it is already running"),
         "the nested call threw the refusal"
     );
-}
-
-/// A [`quickjs_rust_bridge::WeakContext`] answers its realm while a handle
-/// on it is held, and nothing once the last has dropped.
-#[test]
-fn a_weak_context_answers_its_realm_until_the_realm_is_freed() {
-    let mut realm = realm();
-    realm
-        .evaluate(
-            EvalSource::new("globalThis.mark = 7"),
-            EvalOptions::default(),
-        )
-        .unwrap();
-    let weak = realm.downgrade();
-    let mut again = weak.upgrade().expect("the realm is live");
-    let mark = again
-        .evaluate(EvalSource::new("mark"), EvalOptions::default())
-        .unwrap();
-    assert_eq!(mark.as_number(), Some(7.0));
-    drop((mark, again, realm));
-    assert!(weak.upgrade().is_none(), "the realm was freed");
 }

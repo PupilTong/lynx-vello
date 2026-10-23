@@ -67,7 +67,7 @@ mod implementation {
     use std::num::TryFromIntError;
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::ptr::{self, NonNull};
-    use std::rc::{Rc, Weak};
+    use std::rc::Rc;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, OnceLock};
     use std::time::Duration;
@@ -1629,47 +1629,7 @@ mod implementation {
         }
     }
 
-    /// A handle on a [`Context`] that does not keep it alive: what a host
-    /// keeps of a realm it may have to call from inside another realm's
-    /// call, where holding the realm itself would be a cycle — the host
-    /// function keeping the handle is freed only with the realm it is in.
-    ///
-    /// [`Self::upgrade`] answers the realm while some [`Context`] or
-    /// [`Value`] of it is still held anywhere, and `None` once the last of
-    /// them has dropped and the realm has been freed. A handle answers for
-    /// its own realm only: a later realm never reuses it.
-    #[derive(Clone)]
-    pub struct WeakContext {
-        inner: Weak<ContextInner>,
-    }
-
-    impl fmt::Debug for WeakContext {
-        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            formatter
-                .debug_struct("WeakContext")
-                .field("live", &(self.inner.strong_count() > 0))
-                .finish_non_exhaustive()
-        }
-    }
-
-    impl WeakContext {
-        /// The realm, as a handle of its own for as long as the caller holds
-        /// it, or `None` for a realm already freed.
-        #[must_use]
-        pub fn upgrade(&self) -> Option<Context> {
-            self.inner.upgrade().map(|inner| Context { inner })
-        }
-    }
-
     impl Context {
-        /// A [`WeakContext`] on this realm.
-        #[must_use]
-        pub fn downgrade(&self) -> WeakContext {
-            WeakContext {
-                inner: Rc::downgrade(&self.inner),
-            }
-        }
-
         /// Takes ownership of one C realm of `runtime`'s: from here on
         /// `qjs_context_free` runs when the last handle to it drops.
         fn adopt(raw: NonNull<ffi::QjsContext>, runtime: &Rc<RuntimeInner>) -> Self {
@@ -1791,7 +1751,8 @@ mod implementation {
 
         /// Takes one not-yet-dispatched module name. Repeated imports share
         /// one request and one module instance within this realm.
-        pub fn take_module_request(&mut self) -> Option<String> {
+        #[must_use]
+        pub fn take_module_request(&self) -> Option<String> {
             // SAFETY: C returns a borrowed, terminated name owned by this
             // context. Copy it before any further operation on the context.
             unsafe {
@@ -1803,7 +1764,7 @@ mod implementation {
         /// Supplies a realm-local module, or records its load failure. `url`
         /// is the response URL used as the base for its own imports.
         pub fn complete_module(
-            &mut self,
+            &self,
             name: &str,
             result: Result<(&str, &str), &str>,
         ) -> Result<(), Error> {
@@ -1850,7 +1811,7 @@ mod implementation {
 
         /// Retries suspended imports after completing their sources. This
         /// does not drain promise jobs. Further dependencies may be requested.
-        pub fn resume_module_loads(&mut self) -> Result<(), Error> {
+        pub fn resume_module_loads(&self) -> Result<(), Error> {
             let guard = self.begin();
             // SAFETY: continuations and their values belong to this context.
             unsafe {
@@ -1880,7 +1841,7 @@ mod implementation {
         /// drains the job queue, and nothing handles the promise: a rejection
         /// nothing awaits is reported by the next drain, as a rejected module
         /// evaluation is.
-        pub fn load_module(&mut self, name: &str) -> Result<Value, Error> {
+        pub fn load_module(&self, name: &str) -> Result<Value, Error> {
             self.reclaim();
             let name = CString::new(name).map_err(|_| {
                 Error::bridge(
@@ -1912,7 +1873,7 @@ mod implementation {
         /// source modules and native modules share one exact-name namespace
         /// and neither kind can replace the other.
         pub fn register_host_module_function<F>(
-            &mut self,
+            &self,
             module_name: &str,
             export_name: &str,
             arity: u32,
@@ -1931,7 +1892,7 @@ mod implementation {
         /// by [`Self::function_reentrant`]: one that may be called again
         /// while a call of it is running.
         pub fn register_host_module_function_reentrant<F>(
-            &mut self,
+            &self,
             module_name: &str,
             export_name: &str,
             arity: u32,
@@ -1949,7 +1910,7 @@ mod implementation {
         /// Adds a host function just made as the export the two names
         /// [`host_module_names`] checked name.
         fn add_host_module_function(
-            &mut self,
+            &self,
             (module_name_c, export_name_c): &(CString, CString),
             function: Result<Value, Error>,
         ) -> Result<(), Error> {
@@ -2090,7 +2051,7 @@ mod implementation {
         }
 
         /// Returns the namespace object of a module this realm has linked.
-        pub fn module_namespace(&mut self, name: &str) -> Result<Value, Error> {
+        pub fn module_namespace(&self, name: &str) -> Result<Value, Error> {
             self.reclaim();
             if name.is_empty() {
                 return Err(Error::bridge(
@@ -2168,7 +2129,7 @@ mod implementation {
         /// refused with an exception ("this host function cannot be called
         /// while it is already running"). [`Self::function_reentrant`] is
         /// the shape that allows one.
-        pub fn function<F>(&mut self, name: &str, arity: u32, handler: F) -> Result<Value, Error>
+        pub fn function<F>(&self, name: &str, arity: u32, handler: F) -> Result<Value, Error>
         where
             F: FnMut(&[HostArgument<'_>]) -> Result<HostValue, HostFunctionError> + 'static,
         {
@@ -2189,7 +2150,7 @@ mod implementation {
         /// enters JavaScript. The arguments each call is lent and the answer
         /// it returns are its own, nested or not (see `HostTable`).
         pub fn function_reentrant<F>(
-            &mut self,
+            &self,
             name: &str,
             arity: u32,
             handler: F,
@@ -2200,12 +2161,7 @@ mod implementation {
             self.host_function(name, arity, HostSlot::Reentrant(Box::new(handler)))
         }
 
-        fn host_function(
-            &mut self,
-            name: &str,
-            arity: u32,
-            slot: HostSlot,
-        ) -> Result<Value, Error> {
+        fn host_function(&self, name: &str, arity: u32, slot: HostSlot) -> Result<Value, Error> {
             self.reclaim();
             let name = property_name(name)?;
             let arity = i32::try_from(arity).map_err(int_conversion_error)?;
@@ -2335,7 +2291,7 @@ mod implementation {
         }
 
         pub fn evaluate(
-            &mut self,
+            &self,
             source: EvalSource<'_>,
             options: EvalOptions,
         ) -> Result<Value, Error> {
@@ -2427,7 +2383,7 @@ mod implementation {
         /// Returns a settled promise's result, or `None` while it is pending.
         ///
         /// A rejected promise is returned as a sanitized JavaScript error.
-        pub fn settled_promise_result(&mut self, promise: &Value) -> Result<Option<Value>, Error> {
+        pub fn settled_promise_result(&self, promise: &Value) -> Result<Option<Value>, Error> {
             self.reclaim();
             self.ensure_affinity(promise, ErrorPhase::Evaluate)?;
             let guard = self.begin();
@@ -2517,7 +2473,7 @@ mod implementation {
         /// Atoms belong to the runtime, so the returned [`Member`] resolves a
         /// property in every realm on this context's runtime — intern the
         /// name once, call it in as many realms as there are.
-        pub fn member(&mut self, name: &str) -> Result<Member, Error> {
+        pub fn member(&self, name: &str) -> Result<Member, Error> {
             self.reclaim();
             let atom = unsafe { ffi::qjs_atom_new(self.raw().as_ptr(), name.as_ptr(), name.len()) };
             if atom == JS_ATOM_NULL {
@@ -2544,7 +2500,7 @@ mod implementation {
         /// receiver does — the target names where to look the callable up,
         /// not what to bind it to.
         pub fn call_member(
-            &mut self,
+            &self,
             target: &Value,
             member: &Member,
             arguments: &[HostArgument<'_>],
@@ -3122,7 +3078,7 @@ mod implementation {
 
         #[test]
         fn preloaded_modules_support_dynamic_import_and_top_level_await() {
-            let (mut runtime, mut realm) = runtime_and_realm();
+            let (mut runtime, realm) = runtime_and_realm();
             runtime
                 .register_module_source("bobcat:answer", "export const answer = 42;")
                 .unwrap();
@@ -3573,7 +3529,7 @@ mod implementation {
         #[test]
         fn a_root_without_a_source_is_refused_where_module_loading_is_not_enabled() {
             let mut runtime = Runtime::new().unwrap();
-            let mut realm = runtime.create_context().unwrap();
+            let realm = runtime.create_context().unwrap();
             let load = realm.load_module("app:///worker.js").unwrap();
             let reported = runtime
                 .drain_pending_jobs(&realm)
@@ -3595,7 +3551,7 @@ mod implementation {
         /// the line it is on, under the name the root was loaded by.
         #[test]
         fn a_root_that_throws_rejects_its_load_and_the_drain_reports_it() {
-            let (mut runtime, mut realm) = import_test_realm();
+            let (mut runtime, realm) = import_test_realm();
             realm
                 .complete_module(
                     "app:///throws.js",
@@ -3626,7 +3582,7 @@ mod implementation {
         fn a_root_that_requires_itself_while_it_loads_is_refused() {
             let source = "import { loadModuleSync } from 'bobcat:module';\n\
                           loadModuleSync('app:///cycle.mjs', 'unread');";
-            let (mut runtime, mut realm, _host) =
+            let (mut runtime, realm, _host) =
                 loader_realm(RequireHost::default().module("app:///cycle.mjs", source));
             realm
                 .complete_module("app:///cycle.mjs", Ok(("app:///cycle.mjs", source)))
@@ -4640,7 +4596,7 @@ mod implementation {
         /// the source it was going to supply is the source that stands.
         #[test]
         fn completing_a_name_twice_leaves_the_first_source_standing() {
-            let (_runtime, mut realm, _host) = loader_realm(RequireHost::default());
+            let (_runtime, realm, _host) = loader_realm(RequireHost::default());
             realm
                 .complete_module("app:///a.mjs", Ok(("app:///a.mjs", "export const a = 1;")))
                 .unwrap();
@@ -4757,7 +4713,7 @@ mod implementation {
 
         #[test]
         fn realm_local_sources_cannot_shadow_shared_or_native_modules() {
-            let (mut runtime, mut realm) = import_test_realm();
+            let (mut runtime, realm) = import_test_realm();
             runtime
                 .register_module_source("shared", "export {};")
                 .unwrap();
@@ -4909,7 +4865,7 @@ mod implementation {
                 ..RuntimeOptions::default()
             })
             .unwrap();
-            let mut realm = runtime.create_context().unwrap();
+            let realm = runtime.create_context().unwrap();
             register_link_cycle(
                 &mut runtime,
                 "import { peer, readRoot } from 'test:peer';\n\
@@ -5080,7 +5036,7 @@ mod implementation {
 
         #[test]
         fn native_module_exports_are_unique_and_cannot_collide_with_source() {
-            let (mut runtime, mut realm) = runtime_and_realm();
+            let (mut runtime, realm) = runtime_and_realm();
             realm
                 .register_host_module_function("bobcat-internal:host", "call", 0, |_| {
                     Ok(HostValue::Undefined)
@@ -5114,7 +5070,7 @@ mod implementation {
 
         #[test]
         fn date_timezone_and_random_intrinsics_are_operational() {
-            let mut realm = single_realm();
+            let realm = single_realm();
             let result = realm
                 .evaluate(
                     EvalSource::new(
@@ -5134,7 +5090,7 @@ mod implementation {
 
         #[test]
         fn rust_stdlib_math_hooks_are_operational() {
-            let mut realm = single_realm();
+            let realm = single_realm();
             let atanh = realm
                 .evaluate(EvalSource::new("Math.atanh(0.5)"), EvalOptions::default())
                 .expect("Math.atanh should execute through its Rust hook")
@@ -5159,7 +5115,7 @@ mod implementation {
         #[test]
         fn times_out_infinite_evaluation_and_reuses_realm() {
             let (kind, phase, reused) = run_with_watchdog(|| {
-                let (_runtime, mut realm) = timed_realm();
+                let (_runtime, realm) = timed_realm();
                 let error = realm
                     .evaluate(EvalSource::new("for (;;) {}"), EvalOptions::default())
                     .expect_err("infinite evaluation must time out");
@@ -5203,7 +5159,7 @@ mod implementation {
         #[test]
         fn timeout_remains_active_while_sanitizing_exceptions() {
             let (kind, phase, reused) = run_with_watchdog(|| {
-                let (_runtime, mut realm) = timed_realm();
+                let (_runtime, realm) = timed_realm();
                 let error = realm
                     .evaluate(
                         EvalSource::new("throw new Proxy({}, { get() { while (true) {} } })"),
@@ -5225,7 +5181,7 @@ mod implementation {
         #[test]
         fn times_out_an_infinite_pending_job() {
             let (kind, phase, reused) = run_with_watchdog(|| {
-                let (mut runtime, mut realm) = timed_realm();
+                let (mut runtime, realm) = timed_realm();
                 realm
                     .evaluate(
                         EvalSource::new(
@@ -5252,7 +5208,7 @@ mod implementation {
         #[test]
         fn one_timeout_covers_an_entire_pending_job_drain() {
             let (kind, phase, reused) = run_with_watchdog(|| {
-                let (mut runtime, mut realm) = timed_realm();
+                let (mut runtime, realm) = timed_realm();
                 realm
                     .evaluate(
                         EvalSource::new(
@@ -5348,7 +5304,7 @@ mod implementation {
             fn assert_send_sync<T: Send + Sync>() {}
 
             assert_send_sync::<InterruptHandle>();
-            let (runtime, mut realm) = runtime_and_realm();
+            let (runtime, realm) = runtime_and_realm();
             let handle = runtime.interrupt_handle();
             assert!(!handle.request_interrupt_if_running());
             let result = realm
@@ -5507,8 +5463,8 @@ mod implementation {
 
         #[test]
         fn interned_member_names_serve_every_realm_on_a_runtime() {
-            let (runtime, mut first) = runtime_and_realm();
-            let mut second = runtime.create_context().unwrap();
+            let (runtime, first) = runtime_and_realm();
+            let second = runtime.create_context().unwrap();
             let answer = first.member("answer").unwrap();
             let here = first
                 .evaluate(
@@ -5653,7 +5609,7 @@ mod implementation {
         fn execution_limits_cover_realms_created_later() {
             let (kind, phase) = run_with_watchdog(|| {
                 let (runtime, _first) = timed_realm();
-                let mut second = runtime.create_context().expect("realm should initialize");
+                let second = runtime.create_context().expect("realm should initialize");
                 let error = second
                     .evaluate(EvalSource::new("for (;;) {}"), EvalOptions::default())
                     .expect_err("a later realm shares the runtime's deadline");
@@ -5673,7 +5629,7 @@ mod implementation {
 
         #[test]
         fn drains_pending_jobs() {
-            let (mut runtime, mut realm) = runtime_and_realm();
+            let (mut runtime, realm) = runtime_and_realm();
             realm
                 .evaluate(
                     EvalSource::new(
@@ -5692,7 +5648,7 @@ mod implementation {
 
         #[test]
         fn reports_sanitized_source_location_with_offset() {
-            let mut realm = single_realm();
+            let realm = single_realm();
             let error = realm
                 .evaluate(
                     EvalSource {
@@ -5722,7 +5678,7 @@ mod implementation {
 
         #[test]
         fn distinguishes_parse_errors_from_thrown_syntax_errors() {
-            let mut realm = single_realm();
+            let realm = single_realm();
             let parse_error = realm
                 .evaluate(EvalSource::new("const = 1"), EvalOptions::default())
                 .unwrap_err();
@@ -5744,7 +5700,7 @@ mod implementation {
         #[test]
         fn line_offset_preserves_hashbang_semantics() {
             for terminator in ["\n", "\r", "\r\n", "\u{2028}", "\u{2029}"] {
-                let mut realm = single_realm();
+                let realm = single_realm();
                 let text = format!("#!/usr/bin/env qjs{terminator}40 + 2");
                 let result = realm
                     .evaluate(
@@ -5777,7 +5733,7 @@ mod implementation {
 
         #[test]
         fn reports_unhandled_promise_rejections_at_checkpoint() {
-            let (mut runtime, mut realm) = runtime_and_realm();
+            let (mut runtime, realm) = runtime_and_realm();
             realm
                 .evaluate(
                     EvalSource::new("void Promise.reject(new Error('unhandled'))"),
@@ -5793,7 +5749,7 @@ mod implementation {
 
         #[test]
         fn clears_rejections_handled_before_checkpoint_finishes() {
-            let (mut runtime, mut realm) = runtime_and_realm();
+            let (mut runtime, realm) = runtime_and_realm();
             realm
                 .evaluate(
                     EvalSource::new(
@@ -5811,8 +5767,8 @@ mod implementation {
         fn a_rejection_is_reported_only_to_the_realm_that_left_it() {
             // One runtime, two realms — a group's views, or a page and its
             // workers. They share a job queue; they must not share a failure.
-            let (mut runtime, mut first) = runtime_and_realm();
-            let mut second = runtime.create_context().expect("a second realm");
+            let (mut runtime, first) = runtime_and_realm();
+            let second = runtime.create_context().expect("a second realm");
             first
                 .evaluate(
                     EvalSource::new("void Promise.reject(new Error('the first realm'))"),
@@ -5843,8 +5799,8 @@ mod implementation {
             // Queue order is the runtime's, so the sibling's rejection sits
             // in front of this realm's. Skipping it must not skip past the
             // realm's own.
-            let (mut runtime, mut first) = runtime_and_realm();
-            let mut second = runtime.create_context().expect("a second realm");
+            let (mut runtime, first) = runtime_and_realm();
+            let second = runtime.create_context().expect("a second realm");
             first
                 .evaluate(
                     EvalSource::new("void Promise.reject(new Error('first'))"),
@@ -5866,7 +5822,7 @@ mod implementation {
 
         #[test]
         fn preserves_multiple_unhandled_rejections() {
-            let (mut runtime, mut realm) = runtime_and_realm();
+            let (mut runtime, realm) = runtime_and_realm();
             realm
                 .evaluate(
                     EvalSource::new(
@@ -6145,7 +6101,7 @@ mod implementation {
 
         #[test]
         fn a_member_call_survives_more_arguments_than_the_inline_capacity() {
-            let mut realm = single_realm();
+            let realm = single_realm();
             let host = realm
                 .evaluate(
                     EvalSource::new(
@@ -6170,7 +6126,7 @@ mod implementation {
 
         #[test]
         fn an_unpublished_member_is_absent_rather_than_an_error() {
-            let mut realm = single_realm();
+            let realm = single_realm();
             let host = realm
                 .evaluate(
                     EvalSource::new("globalThis.host = { notAFunction: 7 }; globalThis.host"),
@@ -6186,7 +6142,7 @@ mod implementation {
 
         #[test]
         fn a_throwing_member_reports_its_exception() {
-            let mut realm = single_realm();
+            let realm = single_realm();
             let host = realm
                 .evaluate(
                     EvalSource::new(
@@ -6206,8 +6162,8 @@ mod implementation {
 
         #[test]
         fn a_member_name_from_another_realm_is_refused() {
-            let mut realm = single_realm();
-            let mut other = single_realm();
+            let realm = single_realm();
+            let other = single_realm();
             let host = realm.global_object().unwrap();
             let foreign = other.member("anything").unwrap();
             let error = realm
@@ -6219,7 +6175,7 @@ mod implementation {
         #[test]
         fn an_interned_member_outlives_its_realm_handle() {
             let member = {
-                let mut realm = single_realm();
+                let realm = single_realm();
                 realm.member("kept").unwrap()
             };
             drop(member);
@@ -6239,7 +6195,7 @@ mod implementation {
 
         #[test]
         fn a_property_name_with_a_nul_byte_is_rejected() {
-            let mut realm = single_realm();
+            let realm = single_realm();
             let error = realm
                 .function("bad\0name", 0, |_| Ok(HostValue::Undefined))
                 .expect_err("a NUL in the name");
@@ -6713,7 +6669,7 @@ mod implementation {
             let realms = Realms::default();
             let kept = Rc::downgrade(&realms);
             parent
-                .install_shadow_realm(move |mut child| {
+                .install_shadow_realm(move |child| {
                     child
                         .register_host_module_function("bobcat-internal:host", "answer", 0, |_| {
                             Ok(HostValue::Number(42.0))
@@ -6910,7 +6866,7 @@ mod implementation {
         #[test]
         fn shadow_realm_code_runs_under_the_parent_entrys_deadline() {
             let results = run_with_watchdog(|| {
-                let (_runtime, mut parent, _realms) = shadow_parent_with(RuntimeOptions {
+                let (_runtime, parent, _realms) = shadow_parent_with(RuntimeOptions {
                     execution_timeout: Some(TEST_EXECUTION_TIMEOUT),
                     ..RuntimeOptions::default()
                 });
@@ -7023,5 +6979,5 @@ pub use implementation::{
     CallOutcome, Context, Error, ErrorKind, ErrorPhase, EvalOptions, EvalSource, HostArgument,
     HostFunctionError, HostValue, InterruptHandle, Member, ModuleNormalizer, RequiredKind,
     RequiredSource, Runtime, RuntimeOptions, SourceLocation, SourceType, StructuredBytes,
-    StructuredClone, Value, ValueKind, WeakContext,
+    StructuredClone, Value, ValueKind,
 };

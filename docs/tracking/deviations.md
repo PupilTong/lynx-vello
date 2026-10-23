@@ -916,7 +916,10 @@ consequential choice about whether to follow the spec or the quirk.
   `global-bindEvent` is scoped as web-core's listener is: reached by an
   event whose path passes through the registering node's tree root (the
   document node, or a frame's shadow root for a card), and, for web-core's
-  document-level `keydown`/`keyup`, by every key. The recorded differences:
+  document-level `keydown`/`keyup`, by every key. An event script
+  dispatches with `__DispatchEvent` runs this same dispatch, the same code
+  (`run_dispatch`, user ruling 2026-10-23), so every difference below is
+  its too. The recorded differences:
   - **A realm's Lynx handlers run before every component handler on the
     path and cannot stop them.** Their call is at the path's top step, so
     the engine's own components on the steps after it (a swiper hearing a
@@ -947,32 +950,6 @@ consequential choice about whether to follow the spec or the quirk.
     the dispatch follows the standard (the path is fixed, a node's
     listeners are read when its step runs), because that walk is the
     realm's own.
-  - **A synthetic event reaches the components first, then the other
-    realms, then the dispatching realm (user rulings 2026-10-22 and
-    2026-10-23).** `__DispatchEvent` of an event `__CreateEvent` made
-    cannot enter `MainThreadRuntime::dispatch` from inside the JavaScript
-    call it runs in, so its host member `dispatchEvent` runs the
-    components' walk over the whole path to its end first, with an
-    `EventDetail::None`; then calls every other realm the listener table
-    invites, by the routed rule above, the page realm first and then the
-    cards in construction order, each with a structured clone of the
-    event's `detail`; and answers the path the dispatching realm runs its
-    own Lynx walk over, last. That is the reverse of the routed order
-    above, where every realm runs at the path's top step before every
-    component. The components go first because the Rust components are
-    part of the Lynx engine, not user components: native's
-    `EventDispatcher::DispatchEvent` (`lynx/core/event/event_dispatcher.cc`)
-    reaches the C++ listener map alone, which `__AddEventListener` closures
-    and the `__AddEvent` handlers synced into it fill, and never a platform
-    UI, so it has no order between the two to keep. The dispatching realm
-    goes last because it runs its walk after the member returns, which is
-    what keeps its event object's identity for its own listeners: the other
-    realms each build their own object around the clone, as a routed
-    dispatch's realms do. In native one propagation over one listener map
-    runs the page's and every card's handlers in path order instead. A
-    component's `stop_propagation` ends the components' walk alone and
-    keeps no Lynx handler from running; a realm's `catch` ends that realm's
-    walk alone, as for a routed event.
 - **`__CreateEvent`'s numeric `type`, `options.capture` and
   `options.cancelable` are accepted and ignored, and a synthetic event
   runs the routed walk's pass order (user rulings 2026-10-21/22).** Native

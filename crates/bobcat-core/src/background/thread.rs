@@ -427,7 +427,7 @@ impl Worker {
                         scope_installed: flags.scope_installed,
                         closing: flags.closing,
                     })
-                    .map(|mut realm| {
+                    .map(|realm| {
                         if let Err(error) = realm.core.engine.load_root_module(js, &self.url) {
                             // Nothing to clean up after: a throw at this module's
                             // top level rejects through the runtime's shared job
@@ -548,8 +548,8 @@ impl RealmOwner for Worker {
         &self.realm
     }
 
-    fn core(realm: &mut WorkerRealm) -> &mut RealmCore {
-        &mut realm.core
+    fn core(realm: &mut WorkerRealm) -> &RealmCore {
+        &realm.core
     }
 
     fn host(&self) -> &HostOutbox {
@@ -590,7 +590,7 @@ impl RealmOwner for Worker {
             return Vec::new();
         }
         let mut failures =
-            crate::timers::run_due_timers(&mut realm.core.engine, js, &realm.core.timers)
+            crate::timers::run_due_timers(&realm.core.engine, js, &realm.core.timers)
                 .unwrap_or_default();
         // A `ShadowRealm` child's timers are tasks of this worker's too, so a
         // `close()` stops them with the worker's own.
@@ -696,7 +696,7 @@ fn deliver_module_callback(worker: &Rc<Worker>, call: u64, index: u32, arguments
     let reporting = Rc::clone(worker);
     drop(owner::enter(worker, move |realm, js| {
         let delivered = crate::native_module::deliver(
-            &mut realm.core.engine,
+            &realm.core.engine,
             js,
             call,
             index,

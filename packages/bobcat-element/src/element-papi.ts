@@ -244,6 +244,9 @@ import { frameConnectionChanged, frameDataChanged, frameSourceChanged } from "bo
 //   one value, that realm's `event.detail` as the structured clone the host
 //   was handed, which becomes the `detail` as it is, with no member put on
 //   the event object.
+// - `DETAIL_DISPATCHED` — a synthetic event this realm dispatched (below):
+//   no values. The event walked is the object `__DispatchEvent` was given,
+//   which it left in `pendingSynthetic` for this call, `detail` and all.
 //
 // From there this file runs the standard's dispatch over that path: the
 // capture pass from the last entry to the first, the bubble pass from the
@@ -278,39 +281,37 @@ import { frameConnectionChanged, frameDataChanged, frameSourceChanged } from "bo
 // never reach the DOM event: the kernel's walk, the components' and the
 // other realms' go on.
 //
-// **A synthetic event runs the same walk, in every realm it reaches.**
-// `__CreateEvent(type, name, options, detail)` and `__DispatchEvent(element,
-// event)` are native's renderer functions of the same names
-// (`renderer_functions.cc:1216-1275`), which nothing in lynx-stack or
-// web-core has. `__CreateEvent` builds an event object of the shape above, in
-// no dispatch yet: `type` the name lowercased, `detail` the given object by
-// reference, `timestamp` read once from the host's `timelineMilliseconds`,
-// and `options.bubbles` and `options.composed` (both false unless given) kept
-// in its hidden state. Its numeric `type`, `options.capture` and
-// `options.cancelable` are accepted and ignored: the capture pass always
-// runs, as in web-core and DOM, and nothing is cancelable here (below).
-// `__DispatchEvent` hands the host's `dispatchEvent(node, name, bubbles,
-// composed, timestamp, detail)` the element, those facts and the event's
-// `detail`, which the call structured-clones, so a `detail` holding a
-// function throws there. The host computes the path, runs the engine
-// components' walk over it to its end, then calls `__BobcatDispatchEvent` in
-// every other realm the routed dispatch's rule invites — a registration for
-// the name on the path, or a `global-bindEvent` the path reaches — the page
-// realm first and then the frames' cards in construction order, each with
-// the same path and the clone as a `DETAIL_CLONED` detail, so the page
-// realm's `bindEvent` on a frame hears a card's `composed` event, retargeted
-// to the frame. What a listener of one of those realms throws is that
-// realm's failure, reported by the host, and does not reach this call. The
-// host answers the path as `"<nodes>;<targets>"`, and this file runs the walk
-// above over the steps it holds, last, with this realm's own event object,
-// the `global-bindEvent` pass included when the event bubbles, and answers
-// `true`, since nothing cancels. So for a synthetic event the components hear
-// it first, then the other realms, then this one: the reverse of a routed
-// dispatch, which calls the realms before the components (user rulings,
-// 2026-10-22 and 2026-10-23). A listener of another realm may dispatch an
-// event of its own from inside that call. An event whose dispatch is running
-// cannot be dispatched again (a `TypeError`, where DOM throws
-// `InvalidStateError`); a finished one can.
+// **A synthetic event is a routed one.** `__CreateEvent(type, name,
+// options, detail)` and `__DispatchEvent(element, event)` are native's
+// renderer functions of the same names (`renderer_functions.cc:1216-1275`),
+// which nothing in lynx-stack or web-core has. `__CreateEvent` builds an
+// event object of the shape above, in no dispatch yet: `type` the name
+// lowercased, `detail` the given object by reference, `timestamp` read once
+// from the host's `timelineMilliseconds`, and `options.bubbles` and
+// `options.composed` (both false unless given) kept in its hidden state. Its
+// numeric `type`, `options.capture` and `options.cancelable` are accepted
+// and ignored: the capture pass always runs, as in web-core and DOM, and
+// nothing is cancelable here (below). `__DispatchEvent` leaves the event in
+// `pendingSynthetic` and hands the host's `dispatchEvent(node, name,
+// bubbles, composed, timestamp, detail)` the element, those facts and the
+// event's `detail`, which the call structured-clones, so a `detail` holding
+// a function throws there. The host then runs the dispatch the kernel runs
+// for a routed event, the same code: the path, the components' walk, and at
+// the path's top step one `__BobcatDispatchEvent` call into each realm the
+// listener table invites, the page realm first and then the frames' cards in
+// construction order. Every other realm is handed the clone as a
+// `DETAIL_CLONED` detail, so the page realm's `bindEvent` on a frame hears a
+// card's `composed` event, retargeted to the frame. This realm is called in
+// its own place in that order, when it is invited, with `DETAIL_DISPATCHED`,
+// and walks the pending object rather than a new one, so its listeners see
+// the object `__DispatchEvent` was given and `__StopPropagation` on it ends
+// this walk. What any realm's listener throws, this realm's included, is
+// that realm's failure, reported by the host, and does not reach the
+// `__DispatchEvent` call, which answers `true`, since nothing cancels. A
+// listener may dispatch an event of its own from inside the walk, which
+// leaves its own pending object and puts the outer one back when it ends. An
+// event whose dispatch is running cannot be dispatched again (a `TypeError`,
+// where DOM throws `InvalidStateError`); a finished one can.
 //
 // **What the host learns is the registrations, minus the callbacks.** Per
 // (element, name), the passes this realm's registrations there run in:
@@ -3244,6 +3245,7 @@ const DETAIL_INPUT = 5;
 const DETAIL_COMPOSITION = 6;
 const DETAIL_FOCUS = 7;
 const DETAIL_CLONED = 8;
+const DETAIL_DISPATCHED = 9;
 
 /** The modifier bits a key event's last argument carries. */
 const MODIFIER_ALT = 1;
@@ -4045,6 +4047,17 @@ function handlerInPass(
  */
 const dispatchStateSymbol = Symbol("dispatchState");
 
+/**
+ * The event this realm's running `__DispatchEvent` handed the host, until
+ * the host calls this realm for it ([`dispatchHostEvent`] with
+ * `DETAIL_DISPATCHED`), which takes it out and walks it. A nested
+ * `__DispatchEvent` — from a listener, or from code another realm's
+ * listener reached through a `ShadowRealm` — leaves its own here and puts
+ * back what it found when it ends, so a call for the outer event, made
+ * after the nested dispatch has finished, still finds the outer event.
+ */
+let pendingSynthetic: DispatchedEvent | undefined;
+
 /** What [`dispatchStateSymbol`] holds. */
 interface DispatchState {
   /**
@@ -4152,8 +4165,8 @@ function firstHeldIndex(values: readonly unknown[], steps: number): number {
  * the standard's capture pass from the far end of the path inwards, its
  * bubble pass back out, then the `global-bindEvent` pass, which is not over
  * the path at all. A path with no step this realm holds runs the global
- * pass alone. The one walk both the host's dispatch
- * ([`dispatchHostEvent`]) and a synthetic one ([`__DispatchEvent`]) run.
+ * pass alone. The one walk every dispatch runs, a synthetic one
+ * ([`__DispatchEvent`]) included, through [`dispatchHostEvent`].
  *
  * The path is `steps` node/target pairs at the front of `values`,
  * target-first and root-last: the bubble order, which the capture pass reads
@@ -4382,6 +4395,13 @@ function dispatchHostEvent(
     : undefined;
   const detailKind = rest[extrasAt + pairs];
   const detailNumbers = rest.slice(extrasAt + pairs + 1);
+  const kind = Number(detailKind);
+  // This realm's own synthetic event, taken out first: a listener's nested
+  // `__DispatchEvent` leaves an event of its own there.
+  const dispatched = kind === DETAIL_DISPATCHED ? pendingSynthetic : undefined;
+  if (kind === DETAIL_DISPATCHED) {
+    pendingSynthetic = undefined;
+  }
   const first = firstHeldIndex(rest, steps);
   const firstTarget = first < steps ? Number(rest[2 * first + 1]) : undefined;
   if (firstTarget === undefined && !bubbles) {
@@ -4389,10 +4409,22 @@ function dispatchHostEvent(
   }
   const name = String(eventName).toLowerCase();
   const targetNodeId = firstTarget ?? NaN;
+  if (kind === DETAIL_DISPATCHED) {
+    // Nothing to walk without the object, which only a call the host makes
+    // for this realm's own dispatch can find here.
+    if (dispatched === undefined) {
+      return undefined;
+    }
+    // Its `type`, `detail` and `timestamp` are the ones `__CreateEvent`
+    // gave it; the target is this walk's, as a new event's would be.
+    dispatched.target = firstTarget === undefined
+      ? (null as unknown as DispatchedEvent["target"])
+      : targetInfo(targetNodeId);
+    return walkEvent(dispatched, name, rest, steps, first, Boolean(bubbles));
+  }
   // A reading the host could not take — a detached painter's, say — reports
   // the time origin rather than `NaN`.
   const stamp = Number(timestamp ?? 0);
-  const kind = Number(detailKind);
   // Read once, and only for a dispatch with a position to shape.
   const origin = kind === DETAIL_POSITION ? pageOrigin() : VIEW_ORIGIN;
   // The Lynx `detail`: the extras when the host sent any (built into the
@@ -4498,21 +4530,22 @@ export function __CreateEvent(
  * — native answers whether the event was not cancelled, and nothing here
  * cancels.
  *
- * The host's `dispatchEvent` computes the path from the element and the
- * event's `bubbles` and `composed`, runs the engine components' walk over it
- * first, then every other realm the listener table invites, each handed a
- * structured clone of `event.detail`, and answers the path as
- * `"<nodes>;<targets>"`, two comma-joined lists of node ids, target-first;
- * this file then runs the same Lynx walk the host's dispatch runs
- * ([`walkEvent`]) over the steps it holds, with `event.target` the target of
- * the first of them. A `detail` the clone refuses throws, before anything
- * hears the event.
+ * The host's `dispatchEvent` runs the dispatch the kernel runs for a routed
+ * event: it computes the path from the element and the event's `bubbles`
+ * and `composed`, runs the engine components' walk over it, and at the
+ * path's top step calls every realm the listener table invites, each other
+ * realm handed a structured clone of `event.detail` and this one, when it
+ * is invited, handed `DETAIL_DISPATCHED`, which walks this very object
+ * ([`pendingSynthetic`], [`dispatchHostEvent`]) with `event.target` the
+ * target of the first step this realm holds. A `detail` the clone refuses
+ * throws, before anything hears the event; what a listener throws, in any
+ * realm, is reported by the host and does not reach this call.
  *
  * A value that is not a handle, or not an event `__CreateEvent` made, is a
  * `TypeError`; so is an event whose dispatch is running — DOM's
  * `InvalidStateError` for a dispatch of a dispatching event, which this
  * realm has no `DOMException` to throw. A finished event may be dispatched
- * again, and starts with its stop flags clear.
+ * again, and starts with its stop flags clear and no target.
  */
 export function __DispatchEvent(element: unknown, event: unknown): boolean {
   if (
@@ -4533,11 +4566,15 @@ export function __DispatchEvent(element: unknown, event: unknown): boolean {
   state.dispatching = true;
   state.stopped = false;
   state.immediate = false;
+  // Set by this realm's walk, if the host calls this realm at all.
+  dispatched.target = null as unknown as DispatchedEvent["target"];
+  const outer = pendingSynthetic;
+  pendingSynthetic = dispatched;
   try {
     // The `detail` the event holds now, which a listener may have
     // replaced: the other realms are handed a structured clone of it, and
     // a value the clone refuses throws here, at the send.
-    const answer = dispatchEvent(
+    dispatchEvent(
       nodeIdOf(element),
       created.name,
       created.bubbles,
@@ -4545,25 +4582,10 @@ export function __DispatchEvent(element: unknown, event: unknown): boolean {
       created.timestamp,
       dispatched.detail,
     );
-    // `"<nodes>;<targets>"`, each half comma-joined and target-first, laid
-    // out here as the host lays a routed dispatch's path: one node/target
-    // pair per step. `";"` is a path of no step.
-    const separator = answer.indexOf(";");
-    const nodes = answer.slice(0, separator);
-    const targets = answer.slice(separator + 1).split(",");
-    const values: number[] = [];
-    if (nodes !== "") {
-      nodes.split(",").forEach((node, at) => {
-        values.push(Number(node), Number(targets[at]));
-      });
-    }
-    const steps = values.length / 2;
-    const first = firstHeldIndex(values, steps);
-    dispatched.target = first < steps
-      ? targetInfo(values[2 * first + 1] as number)
-      : (null as unknown as DispatchedEvent["target"]);
-    walkEvent(dispatched, created.name, values, steps, first, created.bubbles);
   } finally {
+    // What was here before this call. The slot holds this event still when
+    // the host did not call this realm for it, and nothing when it did.
+    pendingSynthetic = outer;
     dispatched.eventPhase = NONE;
     dispatched.currentTarget = null;
     state.dispatching = false;

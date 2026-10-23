@@ -112,7 +112,7 @@ pub(crate) trait RealmOwner: Sized + 'static {
 
     /// The core every realm has, out of this owner's realm: the engine and
     /// the timer and future tables its core members write to.
-    fn core(realm: &mut Self::Realm) -> &mut RealmCore;
+    fn core(realm: &mut Self::Realm) -> &RealmCore;
 
     /// What this owner's realm asks the view's host through, carrying the
     /// token its requests are cancelled with: the view's for a page, the
@@ -576,7 +576,7 @@ async fn settle_future<O: RealmOwner>(owner: Rc<O>, id: u32, future: HostFuture)
     let outcome = future.await;
     let settling = Rc::clone(&owner);
     enter(&owner, move |realm, js| {
-        let delivered = crate::future::deliver(&mut O::core(realm).engine, js, id, outcome);
+        let delivered = crate::future::deliver(&O::core(realm).engine, js, id, outcome);
         if let Err(error) = delivered {
             policy::report(&settling, Scene::Future, error);
         }

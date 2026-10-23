@@ -24,7 +24,7 @@ struct Driver {
 impl Driver {
     fn compile(body: &str) -> Self {
         let runtime = Runtime::new().expect("runtime");
-        let mut realm = runtime.create_context().expect("realm");
+        let realm = runtime.create_context().expect("realm");
         let source = format!("globalThis.run = function run() {{\n{body}\n}};\nglobalThis.run;");
         let run = realm
             .evaluate(

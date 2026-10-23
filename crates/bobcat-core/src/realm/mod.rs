@@ -59,6 +59,12 @@ use crate::view::{EngineEvent, ScriptSource};
 /// either table, before anything declared after it. `children` comes next:
 /// the realm's `ShadowRealm` objects and wrapped functions are freed with it,
 /// and then the children they named.
+///
+/// Every operation on it takes `&self`, down to the engines' own calls: a
+/// view's MTS realm shares its core with the synthetic dispatch member,
+/// which calls into these realms from inside a JavaScript call of one of
+/// them while an operation further up the stack is still calling it
+/// (`main/runtime/lib.rs`'s `run_dispatch`).
 pub(crate) struct RealmCore {
     pub(crate) engine: ScriptEngine,
     /// The realm's `ShadowRealm` children, grandchildren included, which the
@@ -121,7 +127,7 @@ impl RealmCore {
     /// that ends the call is that realm's. `None` is a child that is gone,
     /// which drops the call; the owner's own realm is always there.
     pub(crate) fn call_module_export(
-        &mut self,
+        &self,
         js: &mut ScriptRuntime,
         id: RealmId,
         export: Export,
@@ -139,7 +145,7 @@ impl RealmCore {
     /// for a child. The caller ends the run with
     /// [`Self::checkpoint_after_calls`] for each realm it called.
     pub(crate) fn call_module_export_before_operation(
-        &mut self,
+        &self,
         js: &mut ScriptRuntime,
         id: RealmId,
         export: Export,
@@ -156,11 +162,34 @@ impl RealmCore {
         }
     }
 
+    /// Calls an export of a module the realm `id` has loaded from inside a
+    /// JavaScript call of any realm of this core:
+    /// [`ScriptEngine::call_module_export_nested`] for the owner's own realm
+    /// and [`ChildRealms::call_module_export_nested`] for a child, with no
+    /// checkpoint. `None` is a child that is gone.
+    ///
+    /// Everything it reaches is borrowed shared, so the realm called may be
+    /// one whose own call is further up the stack — the one whose host
+    /// member made this call, say.
+    pub(crate) fn call_module_export_nested(
+        &self,
+        id: RealmId,
+        export: Export,
+        arguments: &[HostArgument<'_>],
+    ) -> Option<Result<bool, ScriptError>> {
+        match id {
+            RealmId::Page => Some(self.engine.call_module_export_nested(export, arguments)),
+            RealmId::Child(key) => self
+                .children
+                .call_module_export_nested(key, export, arguments),
+        }
+    }
+
     /// The checkpoint of the realm `id` that ends a run of
     /// [`Self::call_module_export_before_operation`] calls. `None` is a
     /// child that is gone.
     pub(crate) fn checkpoint_after_calls(
-        &mut self,
+        &self,
         js: &mut ScriptRuntime,
         id: RealmId,
     ) -> Option<Result<(), ScriptError>> {
