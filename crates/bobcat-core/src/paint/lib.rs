@@ -61,7 +61,6 @@ use terminus::link::painter::{FrameClock, GestureRouter, InputDecisions, ScrollI
 use tokio::sync::mpsc;
 use tokio::sync::watch;
 
-#[cfg(test)]
 use crate::clock::ClockInstant;
 use crate::link::{FramePost, InputEventPayload, Published, ToMain, ViewSeat};
 #[cfg(test)]
@@ -201,6 +200,19 @@ pub struct Painter {
     /// view's last frame is still drawable and capturable.
     published: Published,
     begin_frames_sent: u64,
+    /// What this painter last told the attached view's pipeline registry:
+    /// the instant of the present it reported, and whether it has reported
+    /// the view's first paint and first contentful paint. Cleared with
+    /// everything else derived from a view.
+    reported: PresentReport,
+}
+
+/// See [`Painter::reported`].
+#[derive(Clone, Copy, Debug, Default)]
+struct PresentReport {
+    presented: Option<ClockInstant>,
+    first_paint: bool,
+    first_contentful_paint: bool,
 }
 
 impl std::fmt::Debug for Painter {
@@ -250,6 +262,7 @@ impl Painter {
             frames: None,
             published: Published::default(),
             begin_frames_sent: 0,
+            reported: PresentReport::default(),
         }
     }
 
@@ -294,10 +307,12 @@ impl Painter {
             metrics: watch::channel(Some(viewport)).0,
             images: Rc::new(terminus::link::NoImages),
             scroll: Arc::clone(&scroll),
+            registry: crate::performance::PipelineRegistry::detached(),
         });
         let mut painter = Self::without_output(width, height, 1.0);
         painter.seat = Rc::downgrade(&seat);
         painter.frames = Some(frame_receiver);
+        let registry = Arc::clone(&seat.registry);
         (
             painter,
             FarEnd {
@@ -315,6 +330,7 @@ impl Painter {
                     None,
                     None,
                     crate::link::detached_base(),
+                    registry,
                 ),
                 notices: notice_receiver,
             },
@@ -445,7 +461,48 @@ impl Painter {
     /// detach is the scroll events' to decide).
     fn forget_view(&mut self) {
         self.published = Published::default();
+        self.reported = PresentReport::default();
         self.core.forget_view();
+    }
+
+    /// Tells the attached view's pipeline registry about a present it has not
+    /// heard of: the frame's commit id and its compose and present instants,
+    /// which complete the pipelines waiting on that commit, and the view's
+    /// first paint and first contentful paint once each exists. Each BTS
+    /// worker the completion owes entries to is sent one
+    /// `PerformanceReady`.
+    ///
+    /// A comparison of one instant when nothing new was presented; with a
+    /// new present and no pipeline waiting, two atomic accesses inside the
+    /// registry and no lock.
+    fn report_presentation(&mut self) {
+        let Some(frame) = self.core.last_presented() else {
+            return;
+        };
+        if self.reported.presented == Some(frame.presented) {
+            return;
+        }
+        let Some(seat) = self.seat.upgrade() else {
+            return;
+        };
+        self.reported.presented = Some(frame.presented);
+        let first_paint = self.core.first_paint();
+        let first_contentful_paint = self.core.first_contentful_paint();
+        if (!self.reported.first_paint && first_paint.is_some())
+            || (!self.reported.first_contentful_paint && first_contentful_paint.is_some())
+        {
+            self.reported.first_paint |= first_paint.is_some();
+            self.reported.first_contentful_paint |= first_contentful_paint.is_some();
+            seat.registry
+                .note_paint(first_paint, first_contentful_paint);
+        }
+        let owed = seat.registry.note_presented(frame);
+        if !owed.is_empty() {
+            let demand = seat.frame_demand.borrow();
+            for key in owed {
+                demand.notify_performance(key);
+            }
+        }
     }
 
     /// Adopts whatever the attached view has published since the last look —
@@ -724,6 +781,7 @@ impl Painter {
     /// this answers `Ok` and draws nothing.
     pub fn pump(&mut self) -> Result<(), EngineError> {
         self.poll_link();
+        self.report_presentation();
         if self.core.has_failed() {
             return Ok(());
         }
@@ -808,6 +866,7 @@ impl Painter {
         self.core.rebase_scroll(now);
         let _ = self.begin_frame(now, false);
         self.core.finish_draw(window_frame)?;
+        self.report_presentation();
         Ok(())
     }
 
@@ -903,6 +962,7 @@ impl Painter {
             return Err(EngineError::NotOffscreen);
         }
         let now = self.core.now_seconds();
+        self.report_presentation();
         self.service_gesture_clock(now);
         self.core.rebase_scroll(now);
         self.deliver_vsync(now);
@@ -959,7 +1019,9 @@ impl Painter {
         // changes is the pass's last publish; no send of the pass follows it.
         self.core.rebase_scroll(now);
         self.publish_scroll(now, None);
-        Ok(self.core.draw_offscreen(now, force)?)
+        let drew = self.core.draw_offscreen(now, force)?;
+        self.report_presentation();
+        Ok(drew)
     }
 
     /// One whole offscreen frame with the wait in the middle blocked on, for

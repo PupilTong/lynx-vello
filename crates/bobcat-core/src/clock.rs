@@ -1,12 +1,22 @@
 //! The one clock every realm's timers are armed against, and the one way to
-//! wait out a deadline on it.
+//! wait out a deadline on it; and the wall clock a view reads once, at its
+//! construction, to place that monotonic clock on the Unix timeline
+//! ([`crate::performance::TimeOrigin`]).
 
 use std::future::Future;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use std::time::Instant as ClockInstant;
+/// The wall clock: read once per view, beside a [`ClockInstant`], and the
+/// type the embedder's [`crate::performance::ExtraTiming`] marks arrive in.
+/// `std::time::SystemTime` panics on `wasm32-unknown-unknown` like `Instant`
+/// does, so that target reads `web_time`'s.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use std::time::SystemTime;
 
 #[cfg(target_arch = "wasm32")]
 pub(crate) use web_time::Instant as ClockInstant;
+#[cfg(target_arch = "wasm32")]
+pub(crate) use web_time::SystemTime;
 
 /// Resolves once `deadline` has passed.
 ///

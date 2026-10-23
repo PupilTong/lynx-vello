@@ -22,6 +22,7 @@ extern crate self as terminus;
 #[path = "../tests/common/mod.rs"]
 mod test_common;
 
+mod clock;
 mod editing;
 mod event;
 mod html;

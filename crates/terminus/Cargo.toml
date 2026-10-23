@@ -47,8 +47,8 @@ url = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 parley = { workspace = true }
-# The painter's frame clock: `std::time::Instant` panics on
-# wasm32-unknown-unknown.
+# The crate's monotonic clock (`src/clock.rs`): `std::time::Instant` panics
+# on wasm32-unknown-unknown.
 web-time = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

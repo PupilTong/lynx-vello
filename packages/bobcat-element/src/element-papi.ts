@@ -94,7 +94,7 @@ import { frameConnectionChanged, frameDataChanged, frameSourceChanged } from "bo
 // | `__QuerySelectorAll(element, selector, params)` | native `queryElementIds` export + this runtime's handle index |
 // | `__InvokeUIMethod(element, method, params, callback)` | native `callElementMethod` + `getAttribute` exports + this runtime's dataset store |
 // | `__GetComputedStyleByKey(element, key)` | native `getComputedStyleMap` export |
-// | `__FlushElementTree()` | native `flushElementTree` export |
+// | `__FlushElementTree(element?, options?)` | native `flushElementTree` export, with `options.pipelineOptions.pipelineID` and `options.__lynx_timing_flag` |
 //
 // Everything else — `__DropElement` (absent from every web-core
 // generation), `__AddClass`,
@@ -4705,8 +4705,21 @@ export function __QuerySelectorAll(
   return queryHandles(element, selector, 0);
 }
 
-export function __FlushElementTree(): undefined {
-  flushElementTree();
+/**
+ * Commits the tree. `element` is accepted and ignored: a flush commits the
+ * whole document, as native's does for the page. `options` is ReactLynx's
+ * flush options: its `pipelineOptions.pipelineID` names the pipeline this
+ * flush ends and its `__lynx_timing_flag` a flag the flush reports, both
+ * handed to the host as primitives (`0` and `""` for none), which binds
+ * them to the frame this flush commits. A list's own flush passes neither.
+ */
+export function __FlushElementTree(...args: [element?: unknown, options?: unknown]): undefined {
+  // Rest parameters keep the binding's arity at web-core's 0.
+  const [, options] = args;
+  const flushOptions = options as {pipelineOptions?: {pipelineID?: unknown}; __lynx_timing_flag?: unknown} | null | undefined;
+  const pipeline = Number(flushOptions?.pipelineOptions?.pipelineID ?? 0);
+  const flag = flushOptions?.__lynx_timing_flag;
+  flushElementTree(Number.isSafeInteger(pipeline) && pipeline > 0 ? pipeline : 0, typeof flag === "string" ? flag : "");
   return undefined;
 }
 

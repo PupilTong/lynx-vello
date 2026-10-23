@@ -387,6 +387,9 @@ pub struct CommittedFrame {
     pub(crate) earliest_expiry: Option<f64>,
     pub(crate) viewport: Size2D<f32>,
     pub(crate) device_pixel_ratio: f32,
+    /// Paint Timing's contentful test over what the walk encoded
+    /// ([`Self::paints_content`]).
+    pub(crate) paints_content: bool,
 }
 
 /// The split scene: fragments plus the program that assembles them.
@@ -698,6 +701,24 @@ impl CommittedFrame {
     #[must_use]
     pub fn commit_id(&self) -> u64 {
         self.order.commit_id()
+    }
+
+    /// Whether this frame puts contentful ink on the viewport, as Paint
+    /// Timing defines it for `first-contentful-paint`: text with a glyph that
+    /// is not white space, or an image whose pixels the document holds — an
+    /// image element's, a background image's, a vector (SVG) image's with
+    /// something to draw. A background colour, a gradient, a border, an
+    /// outline, a shadow, a `mask-image`, a `::backdrop` and white-space-only
+    /// text do not count, nor does anything inside an `opacity: 0` group
+    /// that no animation fades, nor anything the walk culled — an item whose
+    /// box cannot reach the viewport, or a text run whose clip chain admits
+    /// nothing.
+    ///
+    /// Decided by the walk that encodes the frame, as it encodes each item,
+    /// so asking costs nothing.
+    #[must_use]
+    pub const fn paints_content(&self) -> bool {
+        self.paints_content
     }
 
     /// Whether the document had a running animation at commit time — the

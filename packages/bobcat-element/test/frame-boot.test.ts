@@ -141,6 +141,7 @@ rstest.mockRequire("bobcat-internal", () => ({
       calls.push(["worker", url]);
     }
   },
+  __BobcatWorkerKey: () => 1,
 }));
 
 rstest.mockRequire("bobcat-internal:host", () => ({
@@ -158,6 +159,7 @@ rstest.mockRequire("bobcat-internal:host", () => ({
     calls.push(["loadModuleSync", url]);
     root();
   },
+  markLoadTiming() {},
   parentNode: (node: number) => node - 1,
   // What the real `bobcat:element` asks for the `load` and a listener.
   // The host computes the path and calls every realm the listener table

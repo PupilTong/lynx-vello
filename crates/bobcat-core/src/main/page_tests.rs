@@ -3764,6 +3764,7 @@ fn a_frame_post_pending_across_boot_is_acknowledged_after_the_boot_report_and_it
             None,
             None,
             detached_base(),
+            crate::performance::PipelineRegistry::detached(),
         );
         // Bound from the start, and no listed sheets: boot's own flush parks
         // on neither.

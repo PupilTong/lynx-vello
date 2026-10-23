@@ -53,6 +53,7 @@ pub use crate::visual::intersection::{
 pub use crate::visual::resize::{
     ObservedBox, ResizeEventHandler, ResizeObserver, ResizeObserverEntry, ResizeObserverId,
 };
+pub use crate::visual::timing::CommitTiming;
 pub use crate::visual::{
     AnimationSlot, CommittedFrame, ContentVisibilityChange, HitTarget, SceneRef, ScrollSlot,
     SnapSlot, SnapSlotAxis,
@@ -233,7 +234,7 @@ pub mod painter {
     };
     pub use crate::painter::{
         DrawTarget, EmitEvent, FrameClock, FrameSize, GesturePolicy, GestureRouter, InputDecision,
-        InputDecisions, Painter, PainterError, RouterHost, Screenshot, ScrollEntry, Viewport,
-        WindowFrame, WindowTarget,
+        InputDecisions, Painter, PainterError, PresentedFrame, RouterHost, Screenshot, ScrollEntry,
+        Viewport, WindowFrame, WindowTarget,
     };
 }

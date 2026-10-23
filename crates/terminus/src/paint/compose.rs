@@ -817,6 +817,11 @@ impl ComposeAssembly {
         self.push_op(ComposeOp::Image { index, space });
     }
 
+    /// How many image and vector draws this assembly holds.
+    pub(crate) fn content_draws(&self) -> usize {
+        self.image_draws.len() + self.vector_draws.len()
+    }
+
     /// Records one vector draw as a program op, sealing any open fragment
     /// first so the draw lands after the content already encoded.
     pub(crate) fn push_vector(&mut self, space: Option<u32>, draw: VectorDraw) {

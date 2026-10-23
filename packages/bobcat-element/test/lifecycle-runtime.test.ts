@@ -91,7 +91,21 @@ rstest.mockRequire("bobcat-internal:host", () => ({
   waitFuture: () => { throw new Error("no future in this suite"); },
   takeFuture: () => { throw new Error("no future in this suite"); },
   settleFuture: () => { throw new Error("no future in this suite"); },
+  // `lynx.performance`'s members, which the runtimes close over as each
+  // evaluates; no suite here observes a pipeline.
+  generatePipelineId: rstest.fn(() => 1),
+  onPipelineStart: rstest.fn(),
+  markPipelineTiming: rstest.fn(),
+  bindPipelineTimingFlag: rstest.fn(),
+  markLoadTiming: rstest.fn(() => false),
+  openNativePipeline: rstest.fn(),
+  connectBackground: rstest.fn(),
+  observePerformance: rstest.fn(),
+  takePerformanceEntries: rstest.fn(() => ""),
 }));
+// Pure: it imports nothing, so the real module stands in for itself.
+import * as performance from "../src/performance.ts";
+rstest.mockRequire("bobcat:performance", () => performance);
 
 // The runtime's shared object, which every worker realm of a group holds by
 // reference: a sibling view's BTS runs this same runtime against it, so the

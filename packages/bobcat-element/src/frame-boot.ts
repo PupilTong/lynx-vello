@@ -107,13 +107,14 @@ import {
   __GetPageElement,
 } from "bobcat:element";
 import { __BobcatCloseFrames } from "bobcat:frame";
-import { Worker } from "bobcat-internal";
+import { Worker, __BobcatWorkerKey } from "bobcat-internal";
 import {
   adoptStyleSheet,
   closeRealm,
   framePage,
   hasStyleSheet,
   loadModuleSync,
+  markLoadTiming,
   parentNode,
 } from "bobcat-internal:host";
 import { backgroundThreadURL, bundleStyleSheetURL, sectionURL } from "bobcat:section-url";
@@ -175,11 +176,15 @@ export function boot(
     // without one has none registered.
     const sheet = bundleStyleSheetURL(url);
     if (hasStyleSheet(sheet)) adoptStyleSheet(sheet, shadowRootOf(page));
+    // The card's load: it begins with its `root`'s evaluation, and ends at
+    // this realm's first flush after the render below.
+    markLoadTiming("vmExecuteStart", url);
     try {
       loadModuleSync(sectionURL("root", url), "module, exports");
     } catch (error) {
       _ReportError(error);
     }
+    markLoadTiming("vmExecuteEnd");
     // The entry has loaded, whether or not it threw.
     try {
       dispatchLoad(src);
@@ -195,10 +200,12 @@ export function boot(
     data = __BobcatProcessInitData(data);
     // The card's BTS, after its `root` ran, so what the root sent before it
     // existed is flushed to it in order behind `initialize`, as on the page.
+    const background = new Worker("bobcat:bts", { name: "lynx-bg" });
     __BobcatConnectBackground(
-      new Worker("bobcat:bts", { name: "lynx-bg" }),
+      background,
       data,
       backgroundThreadURL(url),
+      __BobcatWorkerKey(background),
     );
     __BobcatRenderPage(data);
     // Queued after the jobs the lifecycle hooks already scheduled, as the

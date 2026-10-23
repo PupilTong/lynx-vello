@@ -120,6 +120,7 @@ pub(crate) mod sticky;
 mod sticky_frame;
 #[cfg(test)]
 mod tests;
+pub(crate) mod timing;
 mod transform;
 
 use std::sync::Arc;
@@ -994,6 +995,9 @@ impl<T: Sync> Document<T> {
         // reads layout slots wholesale, so size them first.
         let (bound, elements) = (self.arenas().slot_bound(), self.arenas().live_elements());
         self.layout_state_mut().ensure_covers(bound, elements);
+        // A timed render's layout passes mark their phases from here to the
+        // frame build (`timing`); untimed, this is one `bool` test.
+        self.commit_timer.open();
         // Style and layout run before the claim: the flush's damage harvest
         // invalidates layout, which notes a visual mutation, so an id
         // claimed ahead of it would be stale the instant it was claimed.
@@ -1007,7 +1011,11 @@ impl<T: Sync> Document<T> {
             self.layout();
         }
         self.record_last_successful_options();
-        let _ = self.next_commit_id();
+        let commit_id = self.next_commit_id();
+        // The build's own layouts (relevance, an initial scroll target)
+        // belong to the frame build, so the style and layout marks close
+        // here.
+        let frame_build_start = self.commit_timer.close();
         let frame = self.build_frame_with_relevance();
         // A request is carried by the container's scroll slot, and an
         // auto-scroll change beside the slots, so one whose container this
@@ -1030,6 +1038,9 @@ impl<T: Sync> Document<T> {
             viewport,
             device_pixel_ratio,
         );
+        if let Some(start) = frame_build_start {
+            self.commit_timer.finish(commit_id, start);
+        }
         // A new frame is new geometry for every intersection observer:
         // layout moved, or the viewport did, or an animation ticked.
         self.note_intersections_stale();
