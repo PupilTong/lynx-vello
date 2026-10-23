@@ -33,4 +33,15 @@ let check = CTFontCreateForString(
     CFRange(location: 0, length: 3))
 let family = CTFontCopyFamilyName(check) as String
 print("Han fallback:", family)
+// What fontique scans: the available-font collection's descriptors and their
+// file paths, kept only when the file exists.
+let available = CTFontCollectionCreateFromAvailableFonts(nil)
+let descriptors = CTFontCollectionCreateMatchingFontDescriptors(available) as? [CTFontDescriptor] ?? []
+for d in descriptors {
+    guard let name = CTFontDescriptorCopyAttribute(d, kCTFontFamilyNameAttribute) as? String,
+          name.hasPrefix("PingFang") else { continue }
+    let url = CTFontDescriptorCopyAttribute(d, kCTFontURLAttribute) as? URL
+    let path = url?.path ?? "-"
+    print("available:", name, path, FileManager.default.fileExists(atPath: path))
+}
 exit(failed || family != "PingFang SC" ? 1 : 0)
