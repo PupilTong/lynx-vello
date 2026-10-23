@@ -42,6 +42,8 @@ declare global {
   var __RemoveEventListener: typeof elementPapi.__RemoveEventListener;
   var __StopPropagation: typeof elementPapi.__StopPropagation;
   var __StopImmediatePropagation: typeof elementPapi.__StopImmediatePropagation;
+  var __CreateEvent: typeof elementPapi.__CreateEvent;
+  var __DispatchEvent: typeof elementPapi.__DispatchEvent;
   var __GetPageElement: typeof elementPapi.__GetPageElement;
   var __QuerySelector: typeof elementPapi.__QuerySelector;
   var __QuerySelectorAll: typeof elementPapi.__QuerySelectorAll;

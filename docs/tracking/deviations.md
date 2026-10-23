@@ -947,6 +947,49 @@ consequential choice about whether to follow the spec or the quirk.
     the dispatch follows the standard (the path is fixed, a node's
     listeners are read when its step runs), because that walk is the
     realm's own.
+  - **A synthetic event reaches the components before the calling realm's
+    Lynx handlers (user ruling 2026-10-22).** `__DispatchEvent` of an
+    event `__CreateEvent` made cannot enter `MainThreadRuntime::dispatch`
+    from inside the JavaScript call it runs in, so its host member
+    `dispatchEvent` runs the components' walk over the whole path to its
+    end first, with an `EventDetail::None`, and the realm runs its Lynx
+    walk over the path that member answers afterwards. That is the reverse
+    of the routed order above, where the realms run at the path's top step
+    before every component. It was accepted because the Rust components
+    are part of the Lynx engine, not user components: native's
+    `EventDispatcher::DispatchEvent` (`lynx/core/event/event_dispatcher.cc`)
+    reaches the C++ listener map alone, which `__AddEventListener` closures
+    and the `__AddEvent` handlers synced into it fill, and never a platform
+    UI, so it has no order between the two to keep. A component's
+    `stop_propagation` ends the components' walk alone and keeps no Lynx
+    handler from running.
+  - **A frame card's `composed: true` synthetic event is heard by that card
+    alone.** The calling realm is the only realm `__DispatchEvent` calls;
+    the listener table is not read and no other realm is invited. In native
+    one propagation crosses the page and every card, so the page's handlers
+    on the frame and above it hear a card's composed event; here they do
+    not, and a card does not hear the page realm's synthetic events either.
+    The components on the whole path, the page's included, do hear it.
+- **`__CreateEvent`'s numeric `type`, `options.capture` and
+  `options.cancelable` are accepted and ignored, and a synthetic event
+  runs the routed walk's pass order (user rulings 2026-10-21/22).** Native
+  keeps all three on its `event::Event` (`renderer_functions.cc:1216-1255`),
+  and its `EventDispatcher::Dispatch` (`lynx/core/event/event_dispatcher.cc`)
+  runs the global pass first and whatever `bubbles` says
+  (`HandleGlobalEvent`, `:107-109`), the capture pass only for an event
+  created with `capture: true` (`:111-133`), then the target, then the
+  bubble pass when `bubbles`. Here the walk is the one a routed dispatch
+  runs, web-core's: the capture pass always, as in web-core and DOM, where
+  `capture` belongs to a listener and not to an event; the target and the
+  bubble pass, narrowed to the at-target steps when the event does not
+  bubble; and the `global-bindEvent` pass last, and only when it bubbles.
+  Nothing is cancelable (the 2026-08-17 ruling below, re-affirmed
+  2026-10-19), so `__DispatchEvent` always answers `true`, which is what
+  native answers for an event nothing cancelled. The type number selects
+  nothing on native's path for these events either: it is read only by
+  the compatibility path for a non-bubbling custom event from the
+  frontend (`event_dispatcher.cc:45-51`), and `FiberCreateEvent`'s event is
+  not marked as one. `options.bubbles` and `options.composed` are honored.
 - **No `preventDefault()`/`cancelable`** — Lynx's touch/tap/longpress events
   cannot be canceled by app code; built-in behavior suppression (e.g. scroll
   panning) goes through a separate gesture-arbitration API instead.

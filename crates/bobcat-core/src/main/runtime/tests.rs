@@ -8621,7 +8621,7 @@ fn a_frame_realm_declares_the_page_members() {
 
 /// The page realm's `bobcat-internal:host` exports, sorted as a namespace
 /// lists them.
-const MTS_HOST_MEMBERS: [&str; 51] = [
+const MTS_HOST_MEMBERS: [&str; 53] = [
     "adoptStyleSheet",
     "attributeNames",
     "callElementMethod",
@@ -8632,6 +8632,7 @@ const MTS_HOST_MEMBERS: [&str; 51] = [
     "createElement",
     "createPage",
     "createWorker",
+    "dispatchEvent",
     "dropElement",
     "fetchResource",
     "flushElementTree",
@@ -8672,6 +8673,7 @@ const MTS_HOST_MEMBERS: [&str; 51] = [
     "takeFuture",
     "terminateWorker",
     "testFuture",
+    "timelineMilliseconds",
     "waitFuture",
 ];
 
@@ -11891,4 +11893,262 @@ fn an_editing_host_routes_its_names_by_state() {
         ["click", "pointercancel", "pointerdown"],
         "the last host and the focus it held close the key alone"
     );
+}
+
+/// An engine component that observes the synthetic event `custom`. Records
+/// each delivery as `type:phase:target id:whether the detail is empty`,
+/// marks the target so script can tell it ran first, queues a `queued`
+/// event at the target through the document's component-event queue, and
+/// stops propagation — which must end only its own walk.
+struct SyntheticEventProbe {
+    log: Rc<RefCell<Vec<String>>>,
+    events: ComponentEvents,
+}
+
+impl terminus::link::CustomElement<()> for SyntheticEventProbe {
+    fn observed_events(&self) -> &'static [&'static str] {
+        &["custom"]
+    }
+
+    fn handle_event(
+        &self,
+        document: &mut LynxDocument,
+        _element: terminus::link::NodeId,
+        event: &mut terminus::link::event::ElementEvent<'_>,
+    ) {
+        let target = event.target();
+        let id = document
+            .get(target)
+            .and_then(|node| node.attribute("id"))
+            .map(std::borrow::Cow::into_owned)
+            .unwrap_or_default();
+        self.log.borrow_mut().push(format!(
+            "{}:{:?}:{id}:{}",
+            event.type_name(),
+            event.phase(),
+            matches!(event.detail(), EventDetail::None),
+        ));
+        document.set_attribute(target, "data-rust", "seen");
+        self.events.queue(target, "queued");
+        event.stop_propagation();
+    }
+}
+
+/// `__DispatchEvent` of an event `__CreateEvent` made: the host runs the
+/// engine components on the path first, with no detail — the script `detail`
+/// does not cross — and then the realm runs its Lynx walk, so a listener
+/// reads what the component wrote; the component's `stop_propagation` ends
+/// its own walk and keeps no listener of the realm from running. What the
+/// component queued during the walk is delivered by the component-events
+/// entry, as anything a member call queues is.
+#[test]
+fn a_synthetic_event_reaches_the_components_on_its_path_before_the_realms_listeners() {
+    let (mut js_runtime, mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.seen = [];
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  // Built later, once the test has defined the tag: a
+                  // definition never reaches an element created before it.
+                  globalThis.build = function () {
+                    const outer = __CreateElement('x-synthetic', 0);
+                    const inner = __CreateView(0);
+                    __AppendElement(page, outer);
+                    __AppendElement(outer, inner);
+                    __SetID(inner, 'inner');
+                    globalThis.held = [page, outer, inner];
+                    const note = (label) => (event) =>
+                      seen.push(
+                        label + ':' + event.eventPhase + ':' +
+                          __GetAttributeByName(inner, 'data-rust') + ':' + event.detail.item,
+                      );
+                    __AddEventListener(inner, 'custom', note('inner'), {});
+                    __AddEventListener(outer, 'custom', note('outer'), {});
+                    __AddEventListener(inner, 'queued', () => seen.push('queued'), {});
+                  };
+                };
+                ",
+            "app:///synthetic.js",
+        )
+        .expect("main-thread script");
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let events = runtime.slot.borrow().component_events.clone();
+    elements.tree().define(
+        "x-synthetic",
+        Box::new(SyntheticEventProbe {
+            log: Rc::clone(&log),
+            events,
+        }),
+    );
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            "globalThis.build();",
+            "app:///synthetic-tree.js",
+            "building",
+        )
+        .expect("the tree");
+
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+                import { __CreateEvent, __DispatchEvent } from 'bobcat:element';
+                const event = __CreateEvent(0, 'Custom', { bubbles: true }, { item: 7 });
+                if (__DispatchEvent(held[2], event) !== true) {
+                  throw new Error('a dispatch nothing cancels answers true');
+                }
+                ",
+            "app:///synthetic-dispatch.js",
+            "dispatching",
+        )
+        .expect("the dispatch");
+    assert_eq!(
+        *log.borrow(),
+        ["custom:Capturing:inner:true"],
+        "the component hears the capture step with no detail, and its stop ends its own walk \
+         before the bubble step"
+    );
+    assert!(
+        runtime.has_component_events(),
+        "the component's queued event waits for its entry"
+    );
+    let failures = runtime.dispatch_component_events(&mut js_runtime);
+    assert!(failures.is_empty(), "{failures:?}");
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+                // Both listeners ran, after the component marked the target,
+                // and the queued event reached the realm afterwards.
+                const expected = 'inner:2:seen:7|outer:3:seen:7|queued';
+                if (seen.join('|') !== expected) {
+                  throw new Error('unexpected deliveries: ' + seen.join('|'));
+                }
+                ",
+            "app:///synthetic-verify.js",
+            "verifying",
+        )
+        .expect("verification");
+}
+
+/// The host's `dispatchEvent` answers the path the realm walks, as
+/// `"<nodes>;<targets>"`: target first, the capture steps read backwards —
+/// so a non-bubbling event's answer is the bubbling one's — without the
+/// shadow roots, a name no component observes answered as any other; a
+/// non-composed event inside a shadow tree stops at its root, and a composed
+/// one goes on with the host as the target of the steps above it. It refuses
+/// a node that is not a live element and arguments that are not its shape.
+#[test]
+fn the_dispatch_event_member_answers_the_path_the_realm_walks() {
+    let (mut js_runtime, mut runtime, _elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+        import {
+          createElement, dispatchEvent, dropElement, framePage, insertBefore, parentNode,
+        } from 'bobcat-internal:host';
+        const pageHandle = __CreatePage('card', 0);
+        const outerHandle = __CreateView(0);
+        const innerHandle = __CreateView(0);
+        const frameHandle = __CreateFrame(0);
+        __AppendElement(pageHandle, outerHandle);
+        __AppendElement(outerHandle, innerHandle);
+        __AppendElement(pageHandle, frameHandle);
+        globalThis.held = [pageHandle, outerHandle, innerHandle, frameHandle];
+        const [page, outer, inner, frame] = held.map(__GetElementUniqueID);
+        const documentNode = parentNode(page);
+        const check = (actual, expected, what) => {
+          if (actual !== expected) throw Error(`${what}: ${actual}, not ${expected}`);
+        };
+
+        const light = `${inner},${outer},${page},${documentNode};${inner},${inner},${inner},${inner}`;
+        check(dispatchEvent(inner, 'nothing-hears-this', true, true, 0), light, 'a bubbling event');
+        check(dispatchEvent(inner, 'nothing-hears-this', false, true, 0), light, 'a non-bubbling one');
+
+        // An element of the frame's shadow tree, under its nested page.
+        const nested = framePage(frame);
+        const deep = createElement('view');
+        insertBefore(nested, deep, null);
+        check(
+          dispatchEvent(deep, 'custom', true, false, 0),
+          `${deep},${nested};${deep},${deep}`,
+          'a non-composed event in a shadow tree',
+        );
+        check(
+          dispatchEvent(deep, 'custom', true, true, 0),
+          `${deep},${nested},${frame},${page},${documentNode};${deep},${deep},${frame},${frame},${frame}`,
+          'a composed one',
+        );
+
+        const gone = createElement('view');
+        dropElement(gone);
+        for (const [call, expected] of [
+          [() => dispatchEvent(gone, 'custom', true, true, 0), 'stale element id'],
+          [() => dispatchEvent(documentNode, 'custom', true, true, 0), 'requires a live element id'],
+          [() => dispatchEvent(inner, 'custom', 1, true, 0), 'expects a boolean for argument 2'],
+          [() => dispatchEvent(inner, 'custom', true, 0, 0), 'expects a boolean for argument 3'],
+          [() => dispatchEvent(inner, 'custom', true, true, NaN), 'expects a finite number for argument 4'],
+          [() => dispatchEvent(inner, 'custom', true, true), 'expects a finite number for argument 4'],
+        ]) {
+          let thrown;
+          try { call(); } catch (error) { thrown = String(error?.message ?? error); }
+          if (thrown === undefined || !thrown.includes(expected)) {
+            throw Error(`expected a throw naming ${expected}, got ${thrown}`);
+          }
+        }
+    ",
+            "app:///dispatch-event-member.js",
+        )
+        .expect("main-thread script");
+}
+
+/// `timelineMilliseconds` answers the newest reading of the view's timeline
+/// the host was handed — the time origin before any, a frame post's `now`
+/// in milliseconds, a vsync's as it came — and `__CreateEvent` stamps the
+/// event it builds with it.
+#[test]
+fn timeline_milliseconds_answers_what_the_last_frame_or_vsync_set() {
+    let (mut js_runtime, mut runtime, _elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            "__CreatePage('card', 0);",
+            "app:///timeline.js",
+        )
+        .expect("main-thread script");
+    let expect_timeline =
+        |js_runtime: &mut ScriptRuntime, runtime: &mut MainThreadRuntime, milliseconds: f64| {
+            runtime
+                .evaluate_module(
+                    js_runtime,
+                    &format!(
+                        r"
+                    import {{ timelineMilliseconds }} from 'bobcat-internal:host';
+                    import {{ __CreateEvent }} from 'bobcat:element';
+                    if (timelineMilliseconds() !== {milliseconds}) {{
+                      throw new Error('the timeline reads ' + timelineMilliseconds());
+                    }}
+                    const stamp = __CreateEvent(0, 'custom', {{}}, {{}}).timestamp;
+                    if (stamp !== {milliseconds}) {{
+                      throw new Error('the event is stamped ' + stamp);
+                    }}
+                    "
+                    ),
+                    "app:///timeline-read.js",
+                    "reading the timeline",
+                )
+                .expect("the timeline read");
+        };
+    expect_timeline(&mut js_runtime, &mut runtime, 0.0);
+    runtime.begin_frame(1.25);
+    expect_timeline(&mut js_runtime, &mut runtime, 1250.0);
+    runtime
+        .vsync(&mut js_runtime, 2000.5)
+        .expect("the animation-frame callbacks");
+    expect_timeline(&mut js_runtime, &mut runtime, 2000.5);
 }

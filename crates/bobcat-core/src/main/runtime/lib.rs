@@ -393,15 +393,33 @@ fn encode_call<'a>(
     arguments
 }
 
-/// The one encoding of a dispatch's path, appended as the step count and
-/// then two packed ids per step ([`packed_node_id`]), the step's node and
-/// the target that step sees: the capture steps read backwards — the path,
-/// target first, whatever `bubbles` cut from the bubble pass — less every
-/// step whose node or target is no longer live and every step at a shadow
-/// root, which no realm can hold a handle for. Nothing is filtered by tree:
-/// a realm is handed nodes it holds no handle for (another realm's, a UA
-/// component's shadow content) and skips them. A `NodeId` names one node for
-/// the life of the document, so liveness is one lookup per id.
+/// The steps of a dispatch's path every realm is handed: the capture steps
+/// read backwards — the path, target first, whatever `bubbles` cut from the
+/// bubble pass — less every step whose node or target is no longer live and
+/// every step at a shadow root, which no realm can hold a handle for.
+/// Nothing is filtered by tree: a realm is handed nodes it holds no handle
+/// for (another realm's, a UA component's shadow content) and skips them. A
+/// `NodeId` names one node for the life of the document, so liveness is one
+/// lookup per id. [`encode_path`] writes them into a realm call, and the
+/// synthetic dispatch member answers them as text
+/// ([`install_synthetic_event_members`]).
+fn realm_path_steps<'a>(
+    document: &'a LynxDocument,
+    steps: &'a terminus::link::event::EventSteps,
+) -> impl Iterator<Item = &'a terminus::link::event::EventStep> + 'a {
+    steps.steps().iter().rev().filter(|step| {
+        step.capture
+            && document
+                .get(step.node)
+                .is_some_and(|node| !node.is_shadow_root())
+            && document.get(step.target).is_some()
+    })
+}
+
+/// The one encoding of a dispatch's path into a realm call, appended as the
+/// step count and then two packed ids per step ([`packed_node_id`]), the
+/// step's node and the target that step sees, for the steps
+/// [`realm_path_steps`] selects.
 ///
 /// The count leads but is known only once the filter has run, so it is
 /// written into the place kept for it, in the same one pass.
@@ -412,13 +430,7 @@ fn encode_path(
 ) {
     let count_at = arguments.len();
     arguments.push(HostArgument::Number(0.0));
-    for step in steps.steps().iter().rev().filter(|step| {
-        step.capture
-            && document
-                .get(step.node)
-                .is_some_and(|node| !node.is_shadow_root())
-            && document.get(step.target).is_some()
-    }) {
+    for step in realm_path_steps(document, steps) {
         arguments.push(HostArgument::Number(packed_node_id(step.node)));
         arguments.push(HostArgument::Number(packed_node_id(step.target)));
     }
@@ -942,6 +954,22 @@ struct DocumentSlot {
     /// takes a container out, and so does its node being freed. Bounded by
     /// the containers scrolling at once.
     scrolling: SmallVec<[terminus::link::NodeId; 4]>,
+    /// The newest reading of the view's timeline this side has been handed —
+    /// a frame post's `now` or a vsync's, both in milliseconds off the same
+    /// epoch, the view's construction.
+    ///
+    /// The timeline is read on the painting side, where the frame clock is, so
+    /// a routed event arrives carrying its own reading and this is never used
+    /// for one. What it stamps is an event this side originates — an image's
+    /// `load` or `error`, which settles between frames — with the last moment
+    /// the two sides agreed on, and with the time origin before the first
+    /// frame. One clock, one epoch; nothing here takes a second reading of its
+    /// own.
+    ///
+    /// On the slot rather than on [`MainThreadRuntime`] because a realm reads
+    /// it too, through `timelineMilliseconds`, and a member reaches the slot
+    /// alone: `__CreateEvent` stamps the event it builds with it.
+    timeline_milliseconds: f64,
     /// Where committed frames leave for the painting side.
     outbox: ViewOutbox,
 }
@@ -1011,6 +1039,7 @@ impl DocumentSlot {
             editing_routes: 0,
             observed: FxHashSet::default(),
             scrolling: SmallVec::new(),
+            timeline_milliseconds: 0.0,
             outbox,
         }))
     }
@@ -1835,8 +1864,9 @@ impl DocumentSlot {
     /// composed inside the encode window, and committed nothing, still
     /// updates against the offset it adopted.
     ///
-    /// Every entry it queues is stamped with `time`, the runtime's
-    /// [`MainThreadRuntime::timeline_milliseconds`]: the reading the latest
+    /// Every entry it queues is stamped with `time`, this slot's
+    /// [`Self::timeline_milliseconds`], which the runtime reads and hands in
+    /// before it borrows the slot: the reading the latest
     /// `vsync` or frame post handed this side, which is the
     /// `DOMHighResTimeStamp` that frame's animation-frame callbacks were
     /// called with and the one an image's `load` is stamped with. That is
@@ -1995,18 +2025,6 @@ pub(crate) struct MainThreadRuntime {
     /// worker, whose events go to that child.
     workers: Rc<super::workers::WorkerOwner>,
     slot: Rc<RefCell<DocumentSlot>>,
-    /// The newest reading of the view's timeline this side has been handed —
-    /// a frame post's `now` or a vsync's, both in milliseconds off the same
-    /// epoch, the view's construction.
-    ///
-    /// The timeline is read on the painting side, where the frame clock is, so
-    /// a routed event arrives carrying its own reading and this is never used
-    /// for one. What it stamps is an event this side originates — an image's
-    /// `load` or `error`, which settles between frames — with the last moment
-    /// the two sides agreed on, and with the time origin before the first
-    /// frame. One clock, one epoch; nothing here takes a second reading of its
-    /// own.
-    timeline_milliseconds: f64,
     /// The screen this realm's `SystemInfo` reports, as the embedder named
     /// it. Held from construction because boot writes the three numbers into
     /// its own module source, which runs after the realm exists.
@@ -2145,7 +2163,6 @@ impl MainThreadRuntime {
                 core,
                 workers,
                 slot,
-                timeline_milliseconds: 0.0,
                 last_click: None,
                 pointer_editing: editing::PointerEditing::default(),
                 text_input: terminus::link::editing::TextInputState::default(),
@@ -2299,7 +2316,7 @@ impl MainThreadRuntime {
     ///   the element's layout box at delivery, which is stale until a commit applies the natural
     ///   size its report set, so while the commit above was skipped the whole batch is held.
     pub(crate) fn settle_entry(&mut self) -> Deliveries {
-        let time = self.timeline_milliseconds;
+        let time = self.timeline_milliseconds();
         let mut slot = self.slot.borrow_mut();
         slot.request_documents();
         slot.sync_editing_routes();
@@ -2399,17 +2416,21 @@ impl MainThreadRuntime {
             .animation_clock()
     }
 
+    /// The newest reading of the view's timeline this side has been handed,
+    /// in milliseconds ([`DocumentSlot::timeline_milliseconds`]): what an
+    /// event this side originates is stamped with.
+    fn timeline_milliseconds(&self) -> f64 {
+        self.slot.borrow().timeline_milliseconds
+    }
+
     /// Advances the animation timeline to the painting side's clock
     /// reading. Whether anything changed is the next commit's business.
     pub(crate) fn begin_frame(&mut self, now: f64) {
         // Seconds here, as the animation timeline wants them; milliseconds is
         // what an event's `timestamp` is in.
-        self.timeline_milliseconds = now * 1000.0;
-        let _ = self
-            .slot
-            .borrow_mut()
-            .document_mut()
-            .advance_animations(now);
+        let mut slot = self.slot.borrow_mut();
+        slot.timeline_milliseconds = now * 1000.0;
+        let _ = slot.document_mut().advance_animations(now);
     }
 
     /// Runs the realm's animation-frame callbacks at the painting side's
@@ -2420,7 +2441,7 @@ impl MainThreadRuntime {
         js: &mut ScriptRuntime,
         milliseconds: f64,
     ) -> Result<(), MainThreadError> {
-        self.timeline_milliseconds = milliseconds;
+        self.slot.borrow_mut().timeline_milliseconds = milliseconds;
         self.core
             .engine
             .call_module_export(
@@ -2710,7 +2731,7 @@ impl MainThreadRuntime {
         &mut self,
         js_runtime: &mut ScriptRuntime,
     ) -> Vec<MainThreadError> {
-        let timestamp = self.timeline_milliseconds;
+        let timestamp = self.timeline_milliseconds();
         // Focus events a UI method's `focus()` or `blur()` left in `terminus`
         // first: they formed inside the JavaScript call, before anything
         // queued after it, and the component events they produce (an
@@ -3384,7 +3405,7 @@ impl MainThreadRuntime {
     /// starts, each step re-checks its node, and whatever a handler wrote is
     /// committed by this entry's own epilogue.
     pub(crate) fn dispatch_content_visibility_changes(&mut self) {
-        let timestamp = self.timeline_milliseconds;
+        let timestamp = self.timeline_milliseconds();
         self.slot
             .borrow_mut()
             .document_mut()
@@ -3395,7 +3416,7 @@ impl MainThreadRuntime {
     /// [`Self::timeline_milliseconds`], for the tests.
     #[cfg(test)]
     pub(crate) fn update_intersection_observations(&mut self) -> bool {
-        let time = self.timeline_milliseconds;
+        let time = self.timeline_milliseconds();
         self.slot
             .borrow_mut()
             .update_intersection_observations(time)
@@ -3470,7 +3491,7 @@ impl MainThreadRuntime {
         if changes.is_empty() {
             return Vec::new();
         }
-        let timestamp = self.timeline_milliseconds;
+        let timestamp = self.timeline_milliseconds();
         let mut failures = Vec::new();
         for change in changes.iter().filter(|change| change.element_event) {
             let name = if change.appeared {
@@ -3603,7 +3624,7 @@ impl MainThreadRuntime {
             document.notify_resize_observers();
             layout_change.take_resized(document)
         };
-        let timestamp = self.timeline_milliseconds;
+        let timestamp = self.timeline_milliseconds();
         let mut failures = Vec::new();
         for (target, node) in resized {
             let rect = {
@@ -4589,6 +4610,78 @@ fn install_event_members(
         Ok(HostValue::Undefined)
     })?;
 
+    install_synthetic_event_members(engine, handle)
+}
+
+/// Installs the two members a realm's `__CreateEvent` and `__DispatchEvent`
+/// are written over.
+///
+/// `timelineMilliseconds()` answers the newest reading of the view's
+/// timeline this side was handed ([`DocumentSlot::timeline_milliseconds`]),
+/// which `__CreateEvent` stamps the event it builds with: native stamps an
+/// event when it is created, as DOM does, and the realm has no clock on this
+/// timeline of its own.
+///
+/// `dispatchEvent(node, name, bubbles, composed, timestamp)` is the host's
+/// half of one synthetic dispatch at the element `node`. It computes the path
+/// once (`event_steps`), runs the engine components' walk over it to its end
+/// with an [`EventDetail::None`] — the script `detail` is a realm value and
+/// does not cross — and answers the path the realm then runs its own Lynx
+/// walk over, as one string: the steps [`realm_path_steps`] selects, the
+/// ones a routed dispatch hands each realm, as two comma-joined lists of
+/// decimal packed ids, nodes then targets, joined by `;` (`";"` for a path
+/// with no step a realm could hold). A string, because a member answers one
+/// value. So for a synthetic event the components hear it
+/// before the calling realm's Lynx handlers do, where a routed dispatch
+/// ([`MainThreadRuntime::dispatch`]) calls the realms at the path's top step
+/// first (the order a user ruling chose, 2026-10-22: the components are part
+/// of the engine, not of the app; `docs/tracking/deviations.md`). It is the
+/// walk split in two because a member runs inside a JavaScript call that
+/// already holds the runtime, so the routed dispatch, which calls realms,
+/// cannot be entered from here. No other realm is called. A component's
+/// `stop_propagation` ends the components' walk alone, and an event a
+/// component queues during it is delivered by the component-events entry the
+/// epilogue posts, as one queued inside any other member is.
+fn install_synthetic_event_members(
+    engine: &mut ScriptEngine,
+    handle: &Rc<RefCell<DocumentSlot>>,
+) -> Result<(), MainThreadError> {
+    let tree = Rc::clone(handle);
+    install(engine, "timelineMilliseconds", 0, move |_arguments| {
+        const NAME: &str = "bobcat-internal:host.timelineMilliseconds";
+        Ok(HostValue::Number(
+            borrow_slot(NAME, &tree)?.timeline_milliseconds,
+        ))
+    })?;
+
+    let tree = Rc::clone(handle);
+    install(engine, "dispatchEvent", 5, move |arguments| {
+        const NAME: &str = "bobcat-internal:host.dispatchEvent";
+        let target = node_id_argument(NAME, arguments, 0)?;
+        let name = string_argument(NAME, arguments, 1)?;
+        let bubbles = boolean_argument(NAME, arguments, 2)?;
+        let composed = boolean_argument(NAME, arguments, 3)?;
+        let timestamp = finite_number_argument(NAME, arguments, 4)?;
+        let mut slot = borrow_slot(NAME, &tree)?;
+        let document = slot.document_mut();
+        validate_live_element(document, NAME, target)?;
+        let steps = document.event_steps(target, bubbles, composed);
+        document.dispatch_element_event_over(&steps, name, &EventDetail::None, timestamp);
+        let mut nodes = String::new();
+        let mut targets = String::new();
+        for step in realm_path_steps(document, &steps) {
+            if !nodes.is_empty() {
+                nodes.push(',');
+                targets.push(',');
+            }
+            write!(nodes, "{}", step.node.to_bits()).expect("writing to a String");
+            write!(targets, "{}", step.target.to_bits()).expect("writing to a String");
+        }
+        nodes.push(';');
+        nodes.push_str(&targets);
+        Ok(HostValue::String(nodes))
+    })?;
+
     Ok(())
 }
 
@@ -5261,8 +5354,23 @@ fn kinds_argument(
     }
 }
 
+/// A finite JavaScript number: a synthetic event's timestamp, which
+/// `__CreateEvent` read off `timelineMilliseconds`.
+fn finite_number_argument(
+    function: &str,
+    arguments: &[HostArgument<'_>],
+    index: usize,
+) -> Result<f64, String> {
+    match argument(arguments, index) {
+        HostArgument::Number(value) if value.is_finite() => Ok(value),
+        _ => Err(format!(
+            "{function} expects a finite number for argument {index}"
+        )),
+    }
+}
+
 /// A JavaScript boolean, which is what the boot module hands `createDocument`
-/// its five switches as.
+/// its five switches as, and a synthetic event its two flags.
 fn boolean_argument(
     function: &str,
     arguments: &[HostArgument<'_>],

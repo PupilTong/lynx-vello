@@ -45,6 +45,8 @@ rstest.mockRequire("bobcat-internal:host", () => {
     flushElementTree: native.flushElementTree,
     listenerOpened: native.listenerOpened,
     listenerClosed: native.listenerClosed,
+    timelineMilliseconds: native.timelineMilliseconds,
+    dispatchEvent: native.dispatchEvent,
     switchExposure: native.switchExposure,
     setTimer: native.setTimer,
     clearTimer: native.clearTimer,
@@ -157,6 +159,22 @@ type MockBobcat = BobcatNative & {
     properties: string,
     resolved: 0 | 1,
   ) => string;
+  /**
+   * The path a synthetic dispatch is answered, in the host's
+   * `"<nodes>;<targets>"` shape. The real host computes it from the tree and
+   * runs the engine components' walk first, both of which
+   * crates/bobcat-core/src/main/runtime/tests.rs covers; the default is the
+   * empty path.
+   */
+  answerDispatch: (
+    nodeId: number,
+    eventName: string,
+    bubbles: boolean,
+    composed: boolean,
+    timestamp: number,
+  ) => string;
+  /** What `timelineMilliseconds` answers, which a test sets. */
+  timeline: number;
 };
 
 /**
@@ -474,6 +492,26 @@ function createMockBobcat(issuedIds?: number[]): MockBobcat {
     listenerClosed: (node: unknown, eventName: unknown) => {
       calls.push(["listenerClosed", nodeId("listenerClosed", node), eventName]);
     },
+    timeline: 0,
+    timelineMilliseconds: () => host.timeline,
+    answerDispatch: () => ";",
+    dispatchEvent: (
+      node: unknown,
+      eventName: unknown,
+      bubbles: unknown,
+      composed: unknown,
+      timestamp: unknown,
+    ) => {
+      const id = nodeId("dispatchEvent", node);
+      calls.push(["dispatchEvent", id, eventName, bubbles, composed, timestamp]);
+      return host.answerDispatch(
+        id,
+        eventName as string,
+        bubbles as boolean,
+        composed as boolean,
+        timestamp as number,
+      );
+    },
     // A stop with `sendEvent` answers one record per listed id, as if every
     // listed element were exposed under an `exposure-id`.
     switchExposure: (on: 0 | 1, sendEvent: 0 | 1, ids: string) => {
@@ -557,6 +595,8 @@ describe("installation", () => {
       ["__RemoveEventListener", 4],
       ["__StopPropagation", 1],
       ["__StopImmediatePropagation", 1],
+      ["__CreateEvent", 4],
+      ["__DispatchEvent", 2],
       ["__GetPageElement", 0],
       ["__QuerySelector", 3],
       ["__QuerySelectorAll", 3],
@@ -3450,6 +3490,259 @@ describe("timestamp and params", () => {
         params: {},
       }],
     ]);
+  });
+});
+
+/**
+ * Has the mock's `dispatchEvent` answer `path` (target first) and, position
+ * for position, `targets` — every step its own target unless given — in the
+ * host's `"<nodes>;<targets>"` shape.
+ */
+function answerPath(path: object[], targets?: object[]) {
+  const nodes = path.map((handle) => __GetElementUniqueID(handle));
+  const targeted = targets === undefined
+    ? nodes.map(() => nodes[0])
+    : targets.map((handle) => __GetElementUniqueID(handle));
+  mock.answerDispatch = () => `${nodes.join(",")};${targeted.join(",")}`;
+}
+
+describe("__CreateEvent and __DispatchEvent", () => {
+  it("creates an event in no dispatch yet, stamped on the view's timeline", () => {
+    mock.timeline = 1234.5;
+    const detail = { item: 3 };
+    const event = __CreateEvent(0, "MyEvent", {}, detail) as {
+      type: string;
+      eventPhase: number;
+      target: unknown;
+      currentTarget: unknown;
+      detail: unknown;
+      timestamp: number;
+      params: unknown;
+      stopPropagation: unknown;
+      stopImmediatePropagation: unknown;
+    };
+
+    // The shape every listener here is handed, with nothing else
+    // enumerable: the dispatch state is hidden.
+    expect(Object.keys(event)).toEqual([
+      "type",
+      "eventPhase",
+      "target",
+      "currentTarget",
+      "detail",
+      "timestamp",
+      "params",
+      "stopPropagation",
+      "stopImmediatePropagation",
+    ]);
+    expect(event.type).toBe("myevent");
+    expect(event.eventPhase).toBe(0);
+    expect(event.target).toBeNull();
+    expect(event.currentTarget).toBeNull();
+    expect(event.detail).toBe(detail);
+    expect(event.timestamp).toBe(1234.5);
+    expect(event.params).toEqual({});
+    expect(event.stopPropagation).toBeTypeOf("function");
+    expect(event.stopImmediatePropagation).toBeTypeOf("function");
+    // Asked once, at creation, and nothing else of the host.
+    expect(mock.calls).toEqual([]);
+  });
+
+  it("gives a nullish detail an empty object and refuses one that is no object", () => {
+    expect((__CreateEvent(0, "a", undefined, undefined) as { detail: unknown }).detail)
+      .toEqual({});
+    expect((__CreateEvent(0, "a", null, null) as { detail: unknown }).detail).toEqual({});
+    expect(() => __CreateEvent(0, "a", {}, 3)).toThrow(TypeError);
+    expect(() => __CreateEvent(0, "a", {}, "detail")).toThrow(TypeError);
+    expect(() => __CreateEvent(0, "a", true, {})).toThrow(TypeError);
+  });
+
+  it("hands the host the lowercased name, both flags and the creation timestamp", () => {
+    const { inner } = tree();
+    mock.timeline = 50;
+    const bubbling = __CreateEvent(1, "Custom", { bubbles: true, composed: true }, {});
+    // `capture` and `cancelable` are accepted and change nothing.
+    const plain = __CreateEvent(0, "custom", { capture: true, cancelable: true }, {});
+    mock.timeline = 99;
+
+    expect(__DispatchEvent(inner, bubbling)).toBe(true);
+    expect(__DispatchEvent(inner, plain)).toBe(true);
+
+    const uid = __GetElementUniqueID(inner);
+    expect(mock.named("dispatchEvent")).toEqual([
+      ["dispatchEvent", uid, "custom", true, true, 50],
+      ["dispatchEvent", uid, "custom", false, false, 50],
+    ]);
+  });
+
+  it("runs the capture, bubble and global passes over both registration forms", () => {
+    const { page, outer, inner } = tree();
+    const innerUid = __GetElementUniqueID(inner);
+    const outerUid = __GetElementUniqueID(outer);
+    const detail = { item: 3 };
+    const order: string[] = [];
+    __AddEventListener(page, "custom", (event: ListenerEvent) => {
+      order.push(`page-capture:${event.eventPhase}`);
+    }, { capture: true });
+    __AddEventListener(inner, "custom", (event: ListenerEvent) => {
+      order.push(`inner:${event.eventPhase}:${(event.detail as unknown) === detail}`);
+    }, {});
+    __AddEventListener(outer, "custom", (event: ListenerEvent) => {
+      order.push(`outer:${event.eventPhase}:${event.target.uid}`);
+    }, {});
+    __AddEvent(outer, "bindEvent", "custom", "outer:custom");
+    __AddEvent(page, "global-bindEvent", "custom", "page:global");
+    mock.timeline = 7;
+    const event = __CreateEvent(0, "custom", { bubbles: true }, detail) as ListenerEvent;
+    answerPath([inner, outer, page]);
+    mock.calls.length = 0;
+
+    expect(__DispatchEvent(inner, event)).toBe(true);
+
+    expect(order).toEqual([
+      `page-capture:${CAPTURING_PHASE}`,
+      `inner:${AT_TARGET}:true`,
+      `outer:${BUBBLING_PHASE}:${innerUid}`,
+    ]);
+    // The string handlers publish the event's snapshot: the bubble one on
+    // its step, before that node's closures, then the global one with no
+    // phase.
+    const target = { dataset: {}, id: null, uid: innerUid };
+    expect(mock.named("publishEvent")).toEqual([
+      ["publishEvent", undefined, "outer:custom", {
+        type: "custom",
+        eventPhase: BUBBLING_PHASE,
+        target,
+        currentTarget: { dataset: {}, id: null, uid: outerUid },
+        detail,
+        timestamp: 7,
+        params: {},
+      }],
+      ["publishEvent", undefined, "page:global", {
+        type: "custom",
+        eventPhase: 0,
+        target,
+        currentTarget: { dataset: {}, id: null, uid: __GetElementUniqueID(page) },
+        detail,
+        timestamp: 7,
+        params: {},
+      }],
+    ]);
+    // The standard's last dispatch step: the target stays, the rest is reset.
+    expect(event.eventPhase).toBe(0);
+    expect(event.currentTarget).toBeNull();
+    expect(event.target.uid).toBe(innerUid);
+    expect(event.detail as unknown).toBe(detail);
+  });
+
+  it("narrows a non-bubbling event to its at-target steps and runs no global pass", () => {
+    const { page, outer, inner } = tree();
+    const order: string[] = [];
+    __AddEventListener(page, "custom", () => order.push("page-capture"), { capture: true });
+    __AddEventListener(inner, "custom", () => order.push("inner"), {});
+    __AddEventListener(outer, "custom", () => order.push("outer"), {});
+    __AddEvent(page, "global-bindEvent", "custom", "page:global");
+    answerPath([inner, outer, page]);
+
+    __DispatchEvent(inner, __CreateEvent(0, "custom", {}, {}));
+
+    expect(order).toEqual(["page-capture", "inner"]);
+    expect(mock.named("publishEvent")).toEqual([]);
+  });
+
+  it("honors the two stop members, and a re-dispatch starts with them clear", () => {
+    const { outer, inner } = tree();
+    const order: string[] = [];
+    let stop: "propagation" | "immediate" | undefined = "propagation";
+    __AddEventListener(inner, "custom", (event: ListenerEvent) => {
+      order.push("inner-first");
+      if (stop === "propagation") {
+        __StopPropagation(event);
+      } else if (stop === "immediate") {
+        __StopImmediatePropagation(event);
+      }
+    }, {});
+    __AddEventListener(inner, "custom", () => order.push("inner-second"), {});
+    __AddEventListener(outer, "custom", () => order.push("outer"), {});
+    answerPath([inner, outer]);
+    const event = __CreateEvent(0, "custom", { bubbles: true }, {});
+
+    __DispatchEvent(inner, event);
+    expect(order).toEqual(["inner-first", "inner-second"]);
+
+    order.length = 0;
+    stop = "immediate";
+    __DispatchEvent(inner, event);
+    expect(order).toEqual(["inner-first"]);
+
+    order.length = 0;
+    stop = undefined;
+    __DispatchEvent(inner, event);
+    expect(order).toEqual(["inner-first", "inner-second", "outer"]);
+  });
+
+  it("refuses an event whose dispatch is running, and dispatches it again once it ends", () => {
+    const { outer, inner } = tree();
+    const thrown: unknown[] = [];
+    let runs = 0;
+    __AddEventListener(inner, "custom", (event: ListenerEvent) => {
+      runs += 1;
+      try {
+        __DispatchEvent(outer, event);
+      } catch (error) {
+        thrown.push(error);
+      }
+    }, {});
+    answerPath([inner]);
+    const event = __CreateEvent(0, "custom", { bubbles: true }, {});
+
+    __DispatchEvent(inner, event);
+    expect(runs).toBe(1);
+    expect(thrown).toHaveLength(1);
+    expect(thrown[0]).toBeInstanceOf(TypeError);
+    // The nested refusal asked the host for nothing.
+    expect(mock.named("dispatchEvent")).toHaveLength(1);
+
+    __DispatchEvent(inner, event);
+    expect(runs).toBe(2);
+    expect(mock.named("dispatchEvent")).toHaveLength(2);
+  });
+
+  it("ends the dispatch when a listener throws, so the event can be dispatched again", () => {
+    const { inner } = tree();
+    let fail = true;
+    __AddEventListener(inner, "custom", () => {
+      if (fail) {
+        throw new Error("listener failed");
+      }
+    }, {});
+    answerPath([inner]);
+    const event = __CreateEvent(0, "custom", {}, {}) as ListenerEvent;
+
+    expect(() => __DispatchEvent(inner, event)).toThrow("listener failed");
+    expect(event.eventPhase).toBe(0);
+    expect(event.currentTarget).toBeNull();
+
+    fail = false;
+    expect(__DispatchEvent(inner, event)).toBe(true);
+  });
+
+  it("refuses a value that is no handle, and an event __CreateEvent did not make", () => {
+    const { inner } = tree();
+    let routed: unknown;
+    __AddEventListener(inner, "tap", (event: unknown) => {
+      routed = event;
+    }, {});
+    dispatch([inner], "tap");
+    const event = __CreateEvent(0, "custom", {}, {});
+
+    expect(() => __DispatchEvent({}, event)).toThrow(TypeError);
+    expect(() => __DispatchEvent(null, event)).toThrow(TypeError);
+    expect(() => __DispatchEvent(inner, {})).toThrow(TypeError);
+    // An event the host dispatched: the realm was never told whether it is
+    // composed.
+    expect(() => __DispatchEvent(inner, routed)).toThrow(TypeError);
+    expect(mock.named("dispatchEvent")).toEqual([]);
   });
 });
 

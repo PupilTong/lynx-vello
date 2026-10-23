@@ -1506,7 +1506,8 @@ included; and `"bobcat-internal:native-modules"`, which every realm kind
 declares, the MTS realm included, for `invokeNativeModule` alone. The MTS
 members group as the document's own life, tree vocabulary over numeric
 `NodeId`s, attributes and style, selector queries, the commit, the event
-registrations (`listenerOpened`/`listenerClosed`), timers, the one-shot
+registrations (`listenerOpened`/`listenerClosed`), the synthetic dispatch
+pair (`dispatchEvent`, `timelineMilliseconds`), timers, the one-shot
 startup strings the realm alone reads (the page-data triple handed over as
 plain JSON and processor-name strings, and the native module table it posts
 unread to its BTS), the stylesheet pair, the diagnostics pair, the
@@ -1898,11 +1899,16 @@ dialog's `show`/`showModal`/`close`/`requestClose`, and
 — both read the last completed pass and leave the decision to flush to the
 caller; the event
 registration and propagation members, `__AddEvent` and `__AddEventListener`
-included; `__CreateList` with `__UpdateListCallbacks`; and
+included, with native's synthetic pair `__CreateEvent`/`__DispatchEvent`;
+`__CreateList` with `__UpdateListCallbacks`; and
 `__FlushElementTree`. Everything else is not implemented, `__DropElement`
 (which no web-core generation has) included; a bundle reaching
 for another member fails at the missing name with a precise `ReferenceError`,
-not silently.
+not silently. `__CreateEvent` stamps its event with the host member
+`timelineMilliseconds`, and `__DispatchEvent` calls the host member
+`dispatchEvent`, which runs the engine components' walk over the path first
+and answers the path the calling realm then runs its own Lynx walk over
+(`docs/tracking/dom-events.md`, "The synthetic dispatch entry").
 
 `__SetInlineStyles` keeps the whole-value policy in JavaScript: a string is one
 `style` attribute write, a record crosses in a single `setInlineStyles` call as

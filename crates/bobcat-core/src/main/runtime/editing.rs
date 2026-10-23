@@ -640,7 +640,7 @@ impl MainThreadRuntime {
         js_runtime: &mut ScriptRuntime,
         command: Command,
     ) -> Vec<MainThreadError> {
-        let timestamp = self.timeline_milliseconds;
+        let timestamp = self.timeline_milliseconds();
         self.apply_edit(js_runtime, command, timestamp)
     }
 
