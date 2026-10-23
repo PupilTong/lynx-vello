@@ -12,8 +12,6 @@
 pending! {
     "api-devtool-event" =>
         "IGNORED for now (user, 2026-10-23), the JS API is not being built yet: the card shows `ready` once it has a listener on `lynx.getDevtool()`, then the host's `sendDevtoolEvent` payload; it shows `waiting` because `lynx.getDevtool` does not exist (the background thread throws `TypeError: not a function`), and a view has no devtool-event call for a host to make",
-    "api-frame-bindload" =>
-        "`bindload` on a `<frame>` must deliver `statusCode: 0`, `success` and the bundle URL, printed in three texts. A frame has no `load` event (the ruling recorded with #409, unchanged by #425), so the texts keep `-1` and two empty strings",
     "api-lynx-performance" =>
         "IGNORED for now (user, 2026-10-23), the JS API is not being built yet: the box turns green once `lynx.performance.addTimingListener` has seen `__lynx_timing_actual_fmp` and a flagged update; `lynx.performance` is undefined on the background thread, so it stays pink. Upstream also reads the keys of the host's `timing` event, which the view does not report",
     "api-updateData-callback" =>

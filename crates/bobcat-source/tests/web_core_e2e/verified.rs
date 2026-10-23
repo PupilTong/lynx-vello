@@ -622,4 +622,6 @@ verified! {
     basic_element_x_swiper_bindscrollstart => "basic-element-x-swiper-bindscrollstart",
     // A 300x600 yellow `scroll-view` with `initial-scroll-to-index={1}` holding red, green and blue 300px views. It starts scrolled to its second child (#474, the attribute as a UA `scroll-initial-target` rule): green over blue, the scroll range's end, which is upstream's `green-blue` screenshot.
     basic_element_scroll_view_scroll_to_index => "basic-element-scroll-view-scroll-to-index",
+    // A 300x120 `<frame src='/dist/api-frame-inner.web.bundle'>` showing the nested card's `frame:ready`, `data:` and `global:`, with three result texts under it. The frame's `load` (#481: the card's boot dispatches it once its entry main-thread script has loaded) delivers `statusCode` 0, `statusMessage` `success` and the URL, and the texts read `0`, `success` and `/dist/api-frame-inner.web.bundle`, which is what upstream asserts.
+    api_frame_bindload => "api-frame-bindload",
 }
