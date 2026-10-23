@@ -439,6 +439,82 @@ impl<T> TreeArenas<T> {
             .expect("stale NodeId: its node was freed after the handle was taken")
     }
 
+    fn live_mut(&mut self, id: NodeId) -> &mut Node<T> {
+        self.get_mut(id)
+            .expect("internal tree link must resolve to a live node")
+    }
+
+    /// Puts `child` at `index` in `parent`'s child list and makes `parent`
+    /// its parent, keeping every child's stored position
+    /// ([`Node::index_in`]) current.
+    ///
+    /// The children on the shorter side of `index` are the ones rewritten, so
+    /// an insertion at either end of the list writes no sibling.
+    pub(crate) fn insert_child(&mut self, parent: NodeId, index: usize, child: NodeId) {
+        let parent_node = self.live_mut(parent);
+        let mut children = std::mem::take(&mut parent_node.children);
+        let mut base = parent_node.child_index_base;
+        if index < children.len() - index {
+            // Moving the base moves every position up by one; the children
+            // before `index` move back down to keep theirs.
+            base = base.wrapping_sub(1);
+            self.shift_child_indexes(&children[..index], u32::MAX);
+        } else {
+            self.shift_child_indexes(&children[index..], 1);
+        }
+        children.insert(index, child);
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "positions are stored modulo 2^32, like the base they are relative to"
+        )]
+        let position = index as u32;
+        let child_node = self.live_mut(child);
+        child_node.parent = Some(parent);
+        child_node.child_index = base.wrapping_add(position);
+        let parent_node = self.live_mut(parent);
+        parent_node.children = children;
+        parent_node.child_index_base = base;
+    }
+
+    /// Takes `child` out of `parent`'s child list and clears its parent,
+    /// answering the position it held. The children on the shorter side of
+    /// that position are the ones rewritten, as in [`Self::insert_child`].
+    pub(crate) fn remove_child(&mut self, parent: NodeId, child: NodeId) -> usize {
+        let parent_node = self.live(parent);
+        let index = self.live(child).index_in(parent_node);
+        assert_eq!(
+            parent_node.children.get(index),
+            Some(&child),
+            "child must appear in its parent's child list"
+        );
+        let parent_node = self.live_mut(parent);
+        let mut children = std::mem::take(&mut parent_node.children);
+        let mut base = parent_node.child_index_base;
+        children.remove(index);
+        if index < children.len() - index {
+            // Moving the base moves every position down by one; the children
+            // before `index` move back up to keep theirs.
+            base = base.wrapping_add(1);
+            self.shift_child_indexes(&children[..index], 1);
+        } else {
+            self.shift_child_indexes(&children[index..], u32::MAX);
+        }
+        self.live_mut(child).parent = None;
+        let parent_node = self.live_mut(parent);
+        parent_node.children = children;
+        parent_node.child_index_base = base;
+        index
+    }
+
+    /// Adds `by` to each listed child's stored position, wrapping, so
+    /// `u32::MAX` subtracts one.
+    fn shift_child_indexes(&mut self, children: &[NodeId], by: u32) {
+        for &slot in children {
+            let node = self.live_mut(slot);
+            node.child_index = node.child_index.wrapping_add(by);
+        }
+    }
+
     /// The node arena itself, for `Debug` only — its keys are arena keys.
     pub(crate) const fn nodes(&self) -> &Slab<Node<T>> {
         &self.nodes

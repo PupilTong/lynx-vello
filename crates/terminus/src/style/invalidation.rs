@@ -349,9 +349,10 @@ impl<T> Document<T> {
     fn sibling_position(&self, id: NodeId) -> Option<usize> {
         let tree = self.arenas();
         let node = tree.get(id)?;
-        let self_slot = tree.slot(id)?;
-        let siblings = tree.at(node.parent_slot()?).child_slots();
-        siblings.iter().position(|&slot| slot == self_slot)
+        let parent = tree.at(node.parent_slot()?);
+        let index = node.index_in(parent);
+        // A shadow root names its host as its parent without being listed.
+        (parent.child_slots().get(index) == Some(&id)).then_some(index)
     }
 
     /// The `position`th child of `id`'s parent, if there is one.
