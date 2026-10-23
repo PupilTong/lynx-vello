@@ -80,14 +80,6 @@ jobs:
         with:
           tool: cargo-llvm-cov
 
-      # PingFang SC is an on-demand macOS font asset a fresh runner lacks.
-      # Without it CoreText answers Han fallback with the private
-      # `.PingFang UI` face, which fontique cannot use, so the text falls back
-      # to Heiti SC, whose line metrics differ from the PingFang SC the
-      # web-core e2e goldens that show Chinese were recorded with.
-      - name: Download the PingFang SC font asset
-        run: swift .github/scripts/download-pingfang.swift
-
       - name: Tests + coverage
         # One instrumented build and one run of every test. Per-crate coverage
         # is Codecov's job (`codecov.yml` names the components); there is no

@@ -23,13 +23,13 @@ decision by whoever comes next.
 Accepting one is `PRIME_RADIANT_UPDATE_SNAPSHOTS=1` on that single test, after the
 reading, in the same change that moves the card into `verified!`.
 
-Cards that show Chinese text depend on one macOS font asset. Han text with no
-`lang` falls back to PingFang SC, an on-demand asset
-(`/System/Library/AssetsV2/com_apple_MobileAsset_Font8/…/PingFang.ttc`); where
-it has not been downloaded, CoreText answers with the private `.PingFang UI`
-face, which fontique cannot use, and the text falls back to Heiti SC, whose
-line metrics move every line under it. These files were recorded with
-PingFang SC, and CI downloads it before the tests
-(`.github/scripts/download-pingfang.swift`). Without it,
+Cards that show Chinese text depend on the machine's fonts. Han text with no
+`lang` falls back to the "PingFang SC" family, and a Mac holds it in one of two
+files with different line metrics: the on-demand font asset
+(`/System/Library/AssetsV2/com_apple_MobileAsset_Font8/…/PingFang.ttc`), when it
+has been downloaded, or the private `PingFangUI.ttc` every Mac has. Both carry
+the same PostScript names, so CoreText never downloads the asset where the
+private file already matches. These files were recorded on a Mac with the
+asset; a GitHub macOS runner has only the private file, and there
 `basic-element-text-maxlength`, `-nest-image`, `-tail-color-convert`,
 `-word-break` and the two `x-overlay-ng` playground cards render differently.
