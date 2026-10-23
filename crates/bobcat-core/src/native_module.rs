@@ -345,7 +345,7 @@ pub(crate) fn install(
 /// callback owes. A callback for a call the realm has forgotten is a no-op
 /// over there, so nothing here has to know which calls are outstanding.
 pub(crate) fn deliver(
-    engine: &mut ScriptEngine,
+    engine: &ScriptEngine,
     js_runtime: &mut ScriptRuntime,
     call: u64,
     index: u32,

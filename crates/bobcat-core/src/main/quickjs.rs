@@ -10,7 +10,7 @@
 //! namespace and the atom each [`Export`] is called through.
 
 use std::any::Any;
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::fmt;
 use std::panic::{self, AssertUnwindSafe};
 use std::rc::{Rc, Weak};
@@ -86,8 +86,16 @@ pub(crate) struct ScriptEngine {
     /// dozen fixed exports. `QuickJS` resolves a property by atom, and
     /// interning the name on every call would hash and allocate once per
     /// crossing, so the atom is kept, and the namespace object beside it.
-    exports: [Option<(quickjs::Value, quickjs::Member)>; Export::COUNT],
-    evaluation: Option<quickjs::Value>,
+    ///
+    /// One cell per export, each set once, so a call reads the pair through
+    /// a shared borrow of the engine: a realm is called again from inside
+    /// one of its own calls ([`Self::call_module_export_nested`]), and every
+    /// call into it takes `&self`.
+    exports: [OnceCell<(quickjs::Value, quickjs::Member)>; Export::COUNT],
+    /// The promise of the root module's evaluation, until it settles. Only
+    /// boot and [`Self::module_finished`] touch it, never from inside a
+    /// call, so the borrow is never contended.
+    evaluation: RefCell<Option<quickjs::Value>>,
     /// Per realm, like a rejection: a sibling's checkpoint may run this
     /// realm's promise jobs, and a panic one of them raised is this realm's
     /// to resume, not the sibling's. A `ShadowRealm` child shares its
@@ -242,8 +250,8 @@ impl ScriptEngine {
     fn adopt(realm: quickjs::Context, host_panic: HostPanic) -> Self {
         Self {
             realm,
-            exports: [const { None }; Export::COUNT],
-            evaluation: None,
+            exports: [const { OnceCell::new() }; Export::COUNT],
+            evaluation: RefCell::new(None),
             host_panic,
             children: Weak::new(),
         }
@@ -306,7 +314,7 @@ impl ScriptEngine {
     /// A panic one of this realm's host functions raised is resumed here, as
     /// [`Self::checkpoint`] resumes one.
     pub(crate) fn take_unhandled_rejection(
-        &mut self,
+        &self,
         runtime: &mut ScriptRuntime,
     ) -> Result<usize, ScriptError> {
         let drained = runtime.runtime.drain_pending_jobs(&self.realm);
@@ -346,7 +354,7 @@ impl ScriptEngine {
     /// refusing it in order to report an older error would leave whatever it
     /// was resuming pending for good.
     fn finish_operation<T>(
-        &mut self,
+        &self,
         runtime: &mut ScriptRuntime,
         result: Result<T, ScriptError>,
         phase: ScriptErrorPhase,
@@ -372,7 +380,7 @@ impl ScriptEngine {
     /// children's: the children's code ran inside this realm's entry, so what
     /// they left is part of the one failure reported, while a sibling's is
     /// still news to the sibling.
-    fn discard_leftover_rejections(&mut self, runtime: &mut ScriptRuntime) {
+    fn discard_leftover_rejections(&self, runtime: &mut ScriptRuntime) {
         self.discard_own_rejections(runtime);
         if let Some(children) = self.children.upgrade() {
             children.discard_rejections(runtime);
@@ -391,7 +399,7 @@ impl ScriptEngine {
     /// thread reports it as that entry's panic. Like a rejection, a panic a
     /// sibling's checkpoint ran into waits for this realm's own.
     fn checkpoint(
-        &mut self,
+        &self,
         runtime: &mut ScriptRuntime,
         phase: ScriptErrorPhase,
     ) -> Result<usize, ScriptError> {
@@ -413,10 +421,7 @@ impl ScriptEngine {
     /// A collection is the whole runtime's: in a group it walks every realm
     /// on it, and every view's finalizers run. One realm asks for it, though,
     /// and that realm is the one its checkpoints report to.
-    pub(crate) fn collect_garbage(
-        &mut self,
-        runtime: &mut ScriptRuntime,
-    ) -> Result<(), ScriptError> {
+    pub(crate) fn collect_garbage(&self, runtime: &mut ScriptRuntime) -> Result<(), ScriptError> {
         runtime.runtime.run_gc();
         self.checkpoint(runtime, ScriptErrorPhase::CollectGarbage)
             .map(|_| ())
@@ -426,7 +431,7 @@ impl ScriptEngine {
         self.realm.enable_module_loading(normalize_module_url);
     }
 
-    pub(crate) fn take_module_request(&mut self) -> Option<String> {
+    pub(crate) fn take_module_request(&self) -> Option<String> {
         self.realm.take_module_request()
     }
 
@@ -441,7 +446,7 @@ impl ScriptEngine {
     /// a response URL containing one fails the module instead, because the
     /// replaced URL would name an address the fetcher never answered for.
     pub(crate) fn complete_module(
-        &mut self,
+        &self,
         runtime: &mut ScriptRuntime,
         name: &str,
         result: Result<(&str, &str), &str>,
@@ -464,16 +469,18 @@ impl ScriptEngine {
         self.finish_operation(runtime, result, PHASE)
     }
 
-    pub(crate) fn module_finished(&mut self) -> Result<bool, ScriptError> {
-        let Some(evaluation) = self.evaluation.as_ref() else {
-            return Ok(true);
+    pub(crate) fn module_finished(&self) -> Result<bool, ScriptError> {
+        let result = {
+            let evaluation = self.evaluation.borrow();
+            let Some(evaluation) = evaluation.as_ref() else {
+                return Ok(true);
+            };
+            self.realm
+                .settled_promise_result(evaluation)
+                .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::ExecuteModule))
         };
-        let result = self
-            .realm
-            .settled_promise_result(evaluation)
-            .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::ExecuteModule));
         if !matches!(result, Ok(None)) {
-            self.evaluation = None;
+            *self.evaluation.borrow_mut() = None;
         }
         result.map(|value| value.is_some())
     }
@@ -498,7 +505,7 @@ impl ScriptEngine {
     /// script, and the panic itself is resumed by the checkpoint that ends
     /// the entry: see [`HostPanic`].
     pub(crate) fn register_host_module_function<F>(
-        &mut self,
+        &self,
         module_specifier: &str,
         export_name: &str,
         arity: u8,
@@ -510,6 +517,37 @@ impl ScriptEngine {
         let host_panic = Rc::clone(&self.host_panic);
         self.realm
             .register_host_module_function(
+                module_specifier,
+                export_name,
+                u32::from(arity),
+                move |arguments| {
+                    keep_host_panic(&host_panic, "the host function panicked", || {
+                        callback(arguments)
+                    })
+                    .map_err(quickjs::HostFunctionError::new)
+                },
+            )
+            .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::RegisterHostModuleFunction))
+    }
+
+    /// [`Self::register_host_module_function`] for an `Fn` callback, which
+    /// may be called again while a call of it is running: a member whose
+    /// callback calls into realms ([`Self::call_module_export_nested`])
+    /// whose code can reach the same member back. Everything the callback touches must be borrowed
+    /// per use and released before it calls into a realm.
+    pub(crate) fn register_reentrant_host_module_function<F>(
+        &self,
+        module_specifier: &str,
+        export_name: &str,
+        arity: u8,
+        callback: F,
+    ) -> Result<(), ScriptError>
+    where
+        F: Fn(&[quickjs::HostArgument<'_>]) -> Result<quickjs::HostValue, String> + 'static,
+    {
+        let host_panic = Rc::clone(&self.host_panic);
+        self.realm
+            .register_host_module_function_reentrant(
                 module_specifier,
                 export_name,
                 u32::from(arity),
@@ -568,7 +606,7 @@ impl ScriptEngine {
     /// state a realm invariant in a snippet and let a throw fail the test.
     #[cfg(test)]
     fn execute_script(
-        &mut self,
+        &self,
         runtime: &mut ScriptRuntime,
         source: &str,
         source_name: &str,
@@ -594,7 +632,7 @@ impl ScriptEngine {
     /// wait for resources or timers.
     #[cfg(test)]
     fn execute_module(
-        &mut self,
+        &self,
         runtime: &mut ScriptRuntime,
         source: &str,
         source_name: &str,
@@ -614,7 +652,7 @@ impl ScriptEngine {
     /// Starts module evaluation and retains its completion promise across
     /// resource and timer turns. `module_finished` observes its settlement.
     pub(crate) fn start_module(
-        &mut self,
+        &self,
         runtime: &mut ScriptRuntime,
         source: &str,
         source_name: &str,
@@ -634,7 +672,7 @@ impl ScriptEngine {
             )
             .map_err(|error| map_quickjs_error(error, PHASE));
         let evaluation = self.finish_operation(runtime, evaluation, PHASE)?;
-        self.evaluation = Some(evaluation);
+        *self.evaluation.borrow_mut() = Some(evaluation);
         self.module_finished().map(|_| ())
     }
 
@@ -650,7 +688,7 @@ impl ScriptEngine {
     /// [`Self::take_module_request`], and completing it is what goes on to
     /// load the rest of the graph and evaluate it.
     pub(crate) fn load_root_module(
-        &mut self,
+        &self,
         runtime: &mut ScriptRuntime,
         name: &str,
     ) -> Result<(), ScriptError> {
@@ -660,7 +698,7 @@ impl ScriptEngine {
             .load_module(name)
             .map_err(|error| map_quickjs_error(error, PHASE));
         let load = self.finish_operation(runtime, load, PHASE)?;
-        self.evaluation = Some(load);
+        *self.evaluation.borrow_mut() = Some(load);
         self.module_finished().map(|_| ())
     }
 
@@ -676,7 +714,7 @@ impl ScriptEngine {
     /// making it a return value would mean the host could only hear it once
     /// the callee finished.
     pub(crate) fn call_module_export(
-        &mut self,
+        &self,
         runtime: &mut ScriptRuntime,
         export: Export,
         arguments: &[quickjs::HostArgument<'_>],
@@ -693,14 +731,14 @@ impl ScriptEngine {
     /// modules export what no [`Export`] names.
     #[cfg(test)]
     fn call_named_export(
-        &mut self,
+        &self,
         runtime: &mut ScriptRuntime,
         specifier: &str,
         export_name: &str,
         arguments: &[quickjs::HostArgument<'_>],
     ) -> Result<bool, ScriptError> {
-        let (object, member) = resolve_export(&mut self.realm, specifier, export_name)?;
-        let result = call_resolved(&mut self.realm, &object, &member, arguments);
+        let (object, member) = resolve_export(&self.realm, specifier, export_name)?;
+        let result = call_resolved(&self.realm, &object, &member, arguments);
         self.finish_operation(runtime, result, ScriptErrorPhase::CallModuleExport)
     }
 
@@ -714,7 +752,7 @@ impl ScriptEngine {
     /// is finished the way [`Self::call_module_export`] finishes one, since
     /// its caller runs nothing after it.
     pub(crate) fn call_module_export_before_operation(
-        &mut self,
+        &self,
         runtime: &mut ScriptRuntime,
         export: Export,
         arguments: &[quickjs::HostArgument<'_>],
@@ -728,21 +766,21 @@ impl ScriptEngine {
     /// [`Self::call_module_export`].
     #[cfg(test)]
     fn call_named_export_before_operation(
-        &mut self,
+        &self,
         runtime: &mut ScriptRuntime,
         specifier: &str,
         export_name: &str,
         arguments: &[quickjs::HostArgument<'_>],
     ) -> Result<bool, ScriptError> {
-        let (object, member) = resolve_export(&mut self.realm, specifier, export_name)?;
-        let result = call_resolved(&mut self.realm, &object, &member, arguments);
+        let (object, member) = resolve_export(&self.realm, specifier, export_name)?;
+        let result = call_resolved(&self.realm, &object, &member, arguments);
         self.finish_call_before_operation(runtime, result)
     }
 
     /// A call made before an operation needs no checkpoint of its own unless
     /// it failed, in which case its caller runs nothing after it.
     fn finish_call_before_operation(
-        &mut self,
+        &self,
         runtime: &mut ScriptRuntime,
         result: Result<bool, ScriptError>,
     ) -> Result<bool, ScriptError> {
@@ -759,7 +797,7 @@ impl ScriptEngine {
     /// them: the one [`Self::call_module_export`] would have ended the last
     /// of them with, run on its own.
     pub(crate) fn checkpoint_after_calls(
-        &mut self,
+        &self,
         runtime: &mut ScriptRuntime,
     ) -> Result<(), ScriptError> {
         self.finish_operation(runtime, Ok(()), ScriptErrorPhase::CallModuleExport)
@@ -770,22 +808,45 @@ impl ScriptEngine {
     /// a lookup that failed before JavaScript ran, which needs no checkpoint;
     /// the inner result is the call's own.
     fn invoke_module_export(
-        &mut self,
+        &self,
         export: Export,
         arguments: &[quickjs::HostArgument<'_>],
     ) -> Result<Result<bool, ScriptError>, ScriptError> {
-        // The table and the realm are two fields: the pair stays borrowed from
-        // the one while the call runs in the other, and nothing is cloned.
-        let slot = &mut self.exports[export as usize];
-        if slot.is_none() {
-            *slot = Some(resolve_export(
-                &mut self.realm,
-                export.specifier(),
-                export.name(),
-            )?);
+        // The pair stays borrowed from its cell while the call runs, and
+        // nothing is cloned. A nested call of the same export finds the cell
+        // set; one that resolved it first, from inside the lookup, would
+        // have set it to the same pair.
+        let slot = &self.exports[export as usize];
+        if slot.get().is_none() {
+            let resolved = resolve_export(&self.realm, export.specifier(), export.name())?;
+            let _ = slot.set(resolved);
         }
-        let (object, member) = slot.as_ref().expect("the export was just resolved");
-        Ok(call_resolved(&mut self.realm, object, member, arguments))
+        let (object, member) = slot.get().expect("the export was just resolved");
+        Ok(call_resolved(&self.realm, object, member, arguments))
+    }
+
+    /// Calls a module export from inside a JavaScript call on this runtime,
+    /// where [`Self::call_module_export`] cannot be used: no
+    /// [`Self::finish_operation`] and no checkpoint, since draining the job
+    /// queue while the enclosing call is still on the stack would run
+    /// promise jobs re-entrantly. The enclosing operation's checkpoint
+    /// drains the runtime-wide queue, and a rejection this call left
+    /// unhandled is this realm's, reported by its own next checkpoint or
+    /// [`Self::take_unhandled_rejection`], as a `ShadowRealm` child's already
+    /// is. A panic of one of this realm's host functions is kept in its
+    /// [`HostPanic`] and resumed the same way.
+    ///
+    /// The caller may be a host function of this same realm: `QuickJS` lets
+    /// a host function on the owning thread call into any realm of its
+    /// runtime, its own included, and the bridge's execution guard counts
+    /// the depth, so the enclosing entry's limits cover the call. Its one
+    /// caller is the synthetic dispatch member (`main/runtime/lib.rs`).
+    pub(crate) fn call_module_export_nested(
+        &self,
+        export: Export,
+        arguments: &[quickjs::HostArgument<'_>],
+    ) -> Result<bool, ScriptError> {
+        self.invoke_module_export(export, arguments)?
     }
 }
 
@@ -796,7 +857,7 @@ impl ScriptEngine {
 /// namespace object one lookup answers is the one every later lookup would
 /// answer, and the pair can be kept.
 fn resolve_export(
-    realm: &mut quickjs::Context,
+    realm: &quickjs::Context,
     specifier: &str,
     export_name: &str,
 ) -> Result<(quickjs::Value, quickjs::Member), ScriptError> {
@@ -812,7 +873,7 @@ fn resolve_export(
 /// Calls `member` on a module's namespace `object` in `realm`: `Ok(false)`
 /// when the module exports no such function.
 fn call_resolved(
-    realm: &mut quickjs::Context,
+    realm: &quickjs::Context,
     object: &quickjs::Value,
     member: &quickjs::Member,
     arguments: &[quickjs::HostArgument<'_>],
@@ -995,7 +1056,7 @@ mod tests {
 
     #[test]
     fn a_realm_executes_named_scripts() {
-        let (mut runtime, mut engine) = engine();
+        let (mut runtime, engine) = engine();
         engine
             .execute_script(&mut runtime, "globalThis.answer = 42", "app:///main.js")
             .expect("execute");
@@ -1003,7 +1064,7 @@ mod tests {
 
     #[test]
     fn preloaded_entry_modules_finish_before_execute_module_returns() {
-        let (mut runtime, mut engine) = engine();
+        let (mut runtime, engine) = engine();
         runtime
             .register_module_source(
                 "app:///entry.js",
@@ -1028,7 +1089,7 @@ mod tests {
 
     #[test]
     fn synchronous_module_execution_still_rejects_a_pending_evaluation() {
-        let (mut runtime, mut engine) = engine();
+        let (mut runtime, engine) = engine();
         let error = engine
             .execute_module(
                 &mut runtime,
@@ -1041,7 +1102,7 @@ mod tests {
 
     #[test]
     fn a_missing_preloaded_module_is_a_named_module_error() {
-        let (mut runtime, mut engine) = engine();
+        let (mut runtime, engine) = engine();
         let error = engine
             .execute_module(
                 &mut runtime,
@@ -1105,7 +1166,7 @@ mod tests {
 
     #[test]
     fn host_functions_are_native_module_exports_not_globals() {
-        let (mut runtime, mut engine) = engine();
+        let (mut runtime, engine) = engine();
         engine
             .register_host_module_function("bobcat-internal:test", "answer", 0, |_| {
                 Ok(quickjs::HostValue::Number(42.0))
@@ -1124,7 +1185,7 @@ mod tests {
 
     #[test]
     fn rust_calls_back_through_a_loaded_source_module_export() {
-        let (mut runtime, mut engine) = engine();
+        let (mut runtime, engine) = engine();
         runtime
             .register_module_source(
                 "bobcat:callback",
@@ -1161,7 +1222,7 @@ mod tests {
 
     #[test]
     fn execute_runs_a_microtask_checkpoint() {
-        let (mut runtime, mut engine) = engine();
+        let (mut runtime, engine) = engine();
         engine
             .execute_script(
                 &mut runtime,
@@ -1180,7 +1241,7 @@ mod tests {
 
     #[test]
     fn source_name_is_preserved_in_sanitized_errors() {
-        let (mut runtime, mut engine) = engine();
+        let (mut runtime, engine) = engine();
         let error = engine
             .execute_script(&mut runtime, "const = 1", "app:///broken.js")
             .expect_err("syntax error");
@@ -1193,7 +1254,7 @@ mod tests {
 
     #[test]
     fn a_thrown_error_keeps_its_constructor_name_and_stays_an_exception() {
-        let (mut runtime, mut engine) = engine();
+        let (mut runtime, engine) = engine();
 
         let error = engine
             .execute_script(
@@ -1221,8 +1282,8 @@ mod tests {
     fn two_realms_do_not_share_globals() {
         // One runtime, two realms — the shape a group hands its views. They
         // share a heap and an atom table; they must not share a `globalThis`.
-        let (mut runtime, mut first) = engine();
-        let mut second = runtime.create_realm().expect("a second realm");
+        let (mut runtime, first) = engine();
+        let second = runtime.create_realm().expect("a second realm");
 
         first
             .execute_script(&mut runtime, "globalThis.answer = 42", "first.js")
@@ -1238,7 +1299,7 @@ mod tests {
 
     #[test]
     fn every_boundary_primitive_round_trips_through_a_host_function() {
-        let (mut runtime, mut engine) = engine();
+        let (mut runtime, engine) = engine();
         let seen: Arc<Mutex<Vec<quickjs::HostValue>>> = Arc::new(Mutex::new(Vec::new()));
         let recorder = Arc::clone(&seen);
         engine
@@ -1282,7 +1343,7 @@ mod tests {
 
     #[test]
     fn an_unhandled_rejection_fails_the_checkpoint_that_follows_the_script() {
-        let (mut runtime, mut engine) = engine();
+        let (mut runtime, engine) = engine();
         let error = engine
             .execute_script(
                 &mut runtime,
@@ -1298,7 +1359,7 @@ mod tests {
 
     #[test]
     fn a_checkpoint_error_beside_a_primary_one_is_dropped() {
-        let (mut runtime, mut engine) = engine();
+        let (mut runtime, engine) = engine();
         let primary = engine
             .execute_script(
                 &mut runtime,
@@ -1331,8 +1392,8 @@ mod tests {
         // that await rejects *through* the job queue rather than out of
         // `evaluate`, and leaves behind more than the one rejection its own
         // caller is handed. The rest is its realm's, and waits for it.
-        let (mut runtime, mut first) = engine();
-        let mut second = runtime.create_realm().expect("a second view's realm");
+        let (mut runtime, first) = engine();
+        let second = runtime.create_realm().expect("a second view's realm");
         runtime
             .register_module_source(
                 "app:///first-entry.js",
@@ -1380,7 +1441,7 @@ mod tests {
         // awaiting it. The caller hears one failure; handing out the rest one
         // entry at a time would make every later entry fail too — which is
         // what a worker whose script throws at load must not do.
-        let (mut runtime, mut engine) = engine();
+        let (mut runtime, engine) = engine();
         runtime
             .register_module_source(
                 "app:///thrower.js",
@@ -1414,7 +1475,7 @@ mod tests {
         // Only rejections are dropped. A job the failing entry queued is
         // still due, and that entry's own checkpoint runs it — before the
         // next entry's own code.
-        let (mut runtime, mut engine) = engine();
+        let (mut runtime, engine) = engine();
         engine
             .execute_script(
                 &mut runtime,
@@ -1444,7 +1505,7 @@ mod tests {
         // queue dry, however long it is, and jobs a job queues are part of
         // the same checkpoint. Nothing is left for the next entry to
         // inherit, so no entry can be spent finishing the last one's work.
-        let (mut runtime, mut engine) = engine();
+        let (mut runtime, engine) = engine();
         engine
             .execute_script(
                 &mut runtime,
@@ -1517,7 +1578,7 @@ mod tests {
     #[test]
     fn a_host_panic_a_siblings_checkpoint_ran_into_is_resumed_by_its_own_realm() {
         let (mut runtime, mut first) = engine();
-        let mut second = runtime.create_realm().expect("a second view's realm");
+        let second = runtime.create_realm().expect("a second view's realm");
         install_a_panicking_host_function(&mut first);
         runtime
             .register_module_source(
@@ -1553,7 +1614,7 @@ mod tests {
     #[test]
     fn an_execution_timeout_is_reported_and_leaves_the_engine_usable() {
         let (error, reusable) = with_watchdog(|| {
-            let (mut runtime, mut engine) = engine_with(
+            let (mut runtime, engine) = engine_with(
                 QuickJsConfig::default().with_execution_timeout(Some(Duration::from_millis(20))),
             );
             let error = engine

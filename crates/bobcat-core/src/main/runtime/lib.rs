@@ -25,10 +25,10 @@
 //! handle, which is when the `LynxDocument` drops. JavaScript goes first, then
 //! the Rust object it named.
 
-use std::cell::{Cell, RefCell, RefMut};
+use std::cell::{Cell, OnceCell, RefCell, RefMut};
 use std::fmt::{self, Write as _};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::sync::Arc;
 
 use quickjs_rust_bridge::{HostArgument, HostValue};
@@ -137,6 +137,11 @@ const TAP_EVENT: &str = "tap";
 /// realm reads the discriminator alone and the one dispatch export stays
 /// general. Mirrored by the realm's own `DETAIL_*` constants in
 /// `element-papi.ts`. (1 was a `load`'s size, which crosses as extras now.)
+/// [`DETAIL_CLONED`] and [`DETAIL_DISPATCHED`] are no [`EventDetail`]'s:
+/// they are a synthetic event's, the script `detail` as the structured clone
+/// the dispatching realm wrote for every other realm, and the mark that
+/// tells the dispatching realm to walk its own event object
+/// ([`CallDetail`]).
 const DETAIL_POSITION: f64 = 0.0;
 const DETAIL_EMPTY: f64 = 2.0;
 const DETAIL_EXPOSURE: f64 = 3.0;
@@ -144,6 +149,8 @@ const DETAIL_KEY: f64 = 4.0;
 const DETAIL_INPUT: f64 = 5.0;
 const DETAIL_COMPOSITION: f64 = 6.0;
 const DETAIL_FOCUS: f64 = 7.0;
+const DETAIL_CLONED: f64 = 8.0;
+const DETAIL_DISPATCHED: f64 = 9.0;
 
 /// The bits a key event's modifiers cross as, in [`DETAIL_KEY`]'s last
 /// number. Mirrored by `element-papi.ts`.
@@ -367,30 +374,251 @@ fn realm_calls(
 
 /// One realm call's arguments for a dispatch, which every realm it calls
 /// is lent: the name, `bubbles` and the timestamp, the path
-/// ([`encode_path`]), the extras ([`encode_extras`]) and the detail
-/// ([`encode_detail`]), last because a touch event's points make it the
-/// one part of variable length besides the extras before it.
+/// ([`encode_path`]), the extras ([`encode_extras`]) and the detail, last
+/// because a touch event's points make it the one part of variable length
+/// besides the extras before it.
 ///
 /// Nothing here is read from the tree but the path, and that only at the
 /// path's top step, where every realm is called, so one encoding is the
-/// list every call of the dispatch would have built for itself.
+/// list every call of the dispatch would have built for itself. A synthetic
+/// dispatch encodes a second one for the realm that dispatched it, which
+/// differs in the detail alone ([`CallDetail::Dispatched`]).
 fn encode_call<'a>(
     document: &LynxDocument,
     steps: &terminus::link::event::EventSteps,
     name: &'a str,
     bubbles: bool,
     timestamp: f64,
-    extras: Extras<'a>,
-    detail: &'a EventDetail,
+    detail: CallDetail<'a>,
 ) -> Arguments<'a> {
     let mut arguments = Arguments::new();
     arguments.push(HostArgument::String(name));
     arguments.push(HostArgument::Boolean(bubbles));
     arguments.push(HostArgument::Number(timestamp));
     encode_path(document, steps, &mut arguments);
-    encode_extras(extras, &mut arguments);
-    encode_detail(detail, &mut arguments);
+    match detail {
+        CallDetail::Event { detail, extras } => {
+            encode_extras(extras, &mut arguments);
+            encode_detail(detail, &mut arguments);
+        }
+        CallDetail::Cloned(detail) => {
+            encode_extras(&[], &mut arguments);
+            match detail {
+                Some(detail) => {
+                    arguments.push(HostArgument::Number(DETAIL_CLONED));
+                    arguments.push(detail);
+                }
+                None => arguments.push(HostArgument::Number(DETAIL_EMPTY)),
+            }
+        }
+        CallDetail::Dispatched => {
+            encode_extras(&[], &mut arguments);
+            arguments.push(HostArgument::Number(DETAIL_DISPATCHED));
+        }
+    }
     arguments
+}
+
+/// What one realm call of a dispatch carries after the path.
+#[derive(Clone, Copy)]
+enum CallDetail<'a> {
+    /// A routed event's extras ([`encode_extras`]) and W3C payload
+    /// ([`encode_detail`]).
+    Event {
+        detail: &'a EventDetail,
+        extras: Extras<'a>,
+    },
+    /// A synthetic event's script `detail`, for every realm but the one that
+    /// dispatched it: no extras, then [`DETAIL_CLONED`] and the value as the
+    /// dispatching realm lent it to its call — a structured clone for an
+    /// object, which each realm reads back as its own copy — or
+    /// [`DETAIL_EMPTY`] for an `undefined` or `null` one.
+    Cloned(Option<HostArgument<'a>>),
+    /// The same synthetic event, for the realm that dispatched it: no
+    /// extras, then [`DETAIL_DISPATCHED`] alone. That realm walks the event
+    /// object its `__DispatchEvent` was given, which it kept for this call,
+    /// so it is handed no copy of what that object already holds.
+    Dispatched,
+}
+
+/// The event one dispatch delivers: its target, its name, its two flags as
+/// [`terminus::link::Document::event_steps`] takes them, and its timestamp.
+struct Dispatch<'a> {
+    target: terminus::link::NodeId,
+    name: &'a str,
+    bubbles: bool,
+    composed: bool,
+    timestamp: f64,
+}
+
+/// Where a dispatch came from, which is all the detail its parts are
+/// handed depends on.
+enum DispatchDetail<'a> {
+    /// The kernel's ([`MainThreadRuntime::dispatch`]): the components' walk
+    /// hears `detail`, and every realm is handed it with `extras`
+    /// ([`CallDetail::Event`]).
+    Routed {
+        detail: &'a EventDetail,
+        extras: Extras<'a>,
+    },
+    /// A realm's `__DispatchEvent` ([`install_synthetic_event_members`]),
+    /// the realm filed under `own`: the components' walk hears
+    /// [`EventDetail::None`], since the script `detail` is a realm value;
+    /// `own` is handed [`CallDetail::Dispatched`] and every other realm
+    /// [`CallDetail::Cloned`] with `detail`.
+    Synthetic {
+        own: ListenerKey,
+        detail: Option<HostArgument<'a>>,
+    },
+}
+
+/// The one dispatch body, which the kernel's dispatches
+/// ([`MainThreadRuntime::dispatch_checkpointed`]) and a realm's synthetic
+/// ones (the `dispatchEvent` member, [`install_synthetic_event_members`])
+/// both run: what fires, in what order, is
+/// [`MainThreadRuntime::dispatch`]'s, written here once.
+///
+/// A target freed since the event formed, or a name nothing hears — no
+/// registration and no observing definition — answers `None` before any
+/// path is built. Otherwise the path is computed once, the realms to call
+/// are decided from the listener table against it ([`realm_calls`], over
+/// `realms` in its order: the owner's realm, then the children in
+/// construction order), and the walk ([`terminus::link::Document::advance`])
+/// runs the components' handlers one step at a time with the slot borrowed
+/// for that step alone. At the first capture step, the path's top, every
+/// invited realm is called through `call`, in that order, each still
+/// invited when its turn comes — re-read after each call that ran — and
+/// handed the one argument list ([`encode_call`]) encoded right before the
+/// first call; the realm that dispatched a synthetic event is handed its own
+/// ([`CallDetail::Dispatched`]). The answer is whether some call answered
+/// that the realm published the export.
+///
+/// `call` is the one thing the two entries differ in: the kernel's
+/// checkpoints each realm right after its call (or defers it), and collects
+/// what a call threw; the member's runs no checkpoint at all, since it runs
+/// inside a JavaScript call, and reports what a call threw itself. Nothing
+/// here holds the slot or anything of a realm's across `call`, so a
+/// listener may mutate the tree, and may dispatch again, which enters this
+/// body again from inside the call.
+fn run_dispatch(
+    slot: &RefCell<DocumentSlot>,
+    realms: &RealmCore,
+    event: &Dispatch<'_>,
+    detail: &DispatchDetail<'_>,
+    mut call: impl FnMut(ListenerKey, &Arguments<'_>) -> bool,
+) -> Option<bool> {
+    let &Dispatch {
+        target,
+        name,
+        bubbles,
+        composed,
+        timestamp,
+    } = event;
+    // The realm files every name lowercased — `element-papi.ts`
+    // lowercases both halves of a registration, and its dispatch the
+    // name it is handed — so the listener table is asked in that
+    // spelling; a component's own name (`parseEnd`) keeps its case for
+    // the components' walk. One scan, and no allocation for a name that
+    // is lowercase already, which every routed input name is.
+    let lowered;
+    let registered = if name.bytes().any(|byte| byte.is_ascii_uppercase()) {
+        lowered = name.to_ascii_lowercase();
+        lowered.as_str()
+    } else {
+        name
+    };
+    let (steps, calls, invited) = {
+        let slot = slot.borrow();
+        let document = slot.document.as_ref().expect(DOCUMENT_EXISTS);
+        // A registration is filed under its lowercased name, and the
+        // components' walk looks a type up in its own spelling: those
+        // are the two questions, each asked once.
+        if document.get(target).is_none()
+            || !(document.has_listeners_for(registered) || document.observes_event(name))
+        {
+            return None;
+        }
+        let registrants = realms.realm_ids().map(RealmId::listener_key);
+        let steps = document.event_steps(target, bubbles, composed);
+        let (calls, invited) = realm_calls(document, &steps, registered, registrants);
+        (steps, calls, invited)
+    };
+    // Taken at the first capture step, the path's top, where every
+    // invited realm is called.
+    let mut calls = (!calls.is_empty()).then_some((calls, invited));
+
+    let none = EventDetail::None;
+    let (heard, call_detail, own) = match *detail {
+        DispatchDetail::Routed { detail, extras } => {
+            (detail, CallDetail::Event { detail, extras }, None)
+        }
+        DispatchDetail::Synthetic { own, detail } => (&none, CallDetail::Cloned(detail), Some(own)),
+    };
+    let mut walk = slot
+        .borrow()
+        .document
+        .as_ref()
+        .expect(DOCUMENT_EXISTS)
+        .event_walk(&steps, name, heard, timestamp);
+    let mut called = false;
+    loop {
+        // The document is borrowed for one step's components alone: a
+        // realm call below runs listeners that mutate the tree.
+        let outcome = slot.borrow_mut().document_mut().advance(&mut walk);
+        let Some(outcome) = outcome else {
+            break;
+        };
+        if !outcome.capture {
+            continue;
+        }
+        let Some((calls, invited)) = calls.take() else {
+            continue;
+        };
+        // Encoded once, with the document borrowed for the encoding
+        // alone, and lent to every call; the dispatching realm's beside it,
+        // against the same tree.
+        let (arguments, dispatching) = {
+            let slot = slot.borrow();
+            let document = slot.document.as_ref().expect(DOCUMENT_EXISTS);
+            let encode = |detail| encode_call(document, &steps, name, bubbles, timestamp, detail);
+            let dispatching = own
+                .filter(|own| calls.contains(own))
+                .map(|own| (own, encode(CallDetail::Dispatched)));
+            (encode(call_detail), dispatching)
+        };
+        // Who is still invited, read from the table as the calls before
+        // left it: a realm no longer invited has nothing left to run. Read
+        // once for every realm up to the next call that runs, since
+        // between two calls only a call's listeners change the table.
+        //
+        // The first call starts from the read that chose the calls: the
+        // one thing that ran since is the first capture step's component
+        // handler, at the path's top, and none of today's components
+        // files or drops a registration or frees or moves a node there —
+        // a refresh view's, a swiper's or a text field's handler at its
+        // own shadow root reads the document and queues events. A
+        // handler that does must start this from `None`.
+        let mut live: Option<Invited> = Some(invited);
+        for &key in &calls {
+            let invited = live.get_or_insert_with(|| {
+                Invited::read(
+                    slot.borrow().document.as_ref().expect(DOCUMENT_EXISTS),
+                    &steps,
+                    registered,
+                )
+            });
+            if !invited.contains(key) {
+                continue;
+            }
+            let arguments = match &dispatching {
+                Some((own, arguments)) if *own == key => arguments,
+                _ => &arguments,
+            };
+            called |= call(key, arguments);
+            live = None;
+        }
+    }
+    Some(called)
 }
 
 /// The steps of a dispatch's path every realm is handed: the capture steps
@@ -400,9 +628,7 @@ fn encode_call<'a>(
 /// Nothing is filtered by tree: a realm is handed nodes it holds no handle
 /// for (another realm's, a UA component's shadow content) and skips them. A
 /// `NodeId` names one node for the life of the document, so liveness is one
-/// lookup per id. [`encode_path`] writes them into a realm call, and the
-/// synthetic dispatch member answers them as text
-/// ([`install_synthetic_event_members`]).
+/// lookup per id. [`encode_path`] writes them into a realm call.
 fn realm_path_steps<'a>(
     document: &'a LynxDocument,
     steps: &'a terminus::link::event::EventSteps,
@@ -2017,8 +2243,17 @@ fn construction_phase<T>(phase: &str, work: impl FnOnce() -> T) -> Result<T, Str
 /// child's own workers go with the child, inside `core`, before it.
 pub(crate) struct MainThreadRuntime {
     /// The realm and the members every realm has, which
-    /// [`crate::realm::open_realm`] installed.
-    core: RealmCore,
+    /// [`crate::realm::open_realm`] installed, with the realm's `ShadowRealm`
+    /// children: the one table of the realms over this view's document.
+    ///
+    /// Shared, because a dispatch runs from two places ([`run_dispatch`]):
+    /// the kernel's entries, which reach it here, and the synthetic dispatch
+    /// member, which runs inside a JavaScript call of one of these realms —
+    /// while an entry up the stack is still calling it — and reaches it
+    /// through a weak handle ([`SharedRealms`]). So everything a call into a
+    /// realm needs takes `&self`. This field holds the one strong handle,
+    /// and dropping it is what frees the realm.
+    core: Rc<RealmCore>,
     /// This realm's side of the workers it created, shared with the three
     /// host functions that drive them, and where a worker failure is reported
     /// from. It is also what finds the side of a child that created a
@@ -2128,6 +2363,7 @@ impl MainThreadRuntime {
             outbox,
             thread: thread.clone(),
             workers: Rc::downgrade(&view_workers),
+            realms: SharedRealms::default(),
         });
         let (core, ()) = open_realm(
             js_runtime,
@@ -2158,6 +2394,11 @@ impl MainThreadRuntime {
             },
         )
         .map_err(|error| MainThreadError::from_engine("opening the MTS realm", error))?;
+        // Shared from here on, with every realm's synthetic dispatch member
+        // holding it weakly; the boot module, the realm's first JavaScript,
+        // runs after this.
+        let core = Rc::new(core);
+        let _ = document.realms.set(Rc::downgrade(&core));
         Ok((
             Self {
                 core,
@@ -2180,8 +2421,8 @@ impl MainThreadRuntime {
     /// The realm and the two tables its core members write to, for the
     /// driver in [`crate::realm::owner`]: its epilogue, and the module loads
     /// and future settles that epilogue spawns.
-    pub(crate) fn core(&mut self) -> &mut RealmCore {
-        &mut self.core
+    pub(crate) fn core(&self) -> &RealmCore {
+        &self.core
     }
 
     /// How many `ShadowRealm` children this realm holds, grandchildren
@@ -2462,7 +2703,7 @@ impl MainThreadRuntime {
         index: u32,
         arguments: Option<&str>,
     ) -> Result<(), MainThreadError> {
-        crate::native_module::deliver(&mut self.core.engine, js, call, index, arguments).map_err(
+        crate::native_module::deliver(&self.core.engine, js, call, index, arguments).map_err(
             |error| MainThreadError::from_engine("running a native module callback", error),
         )
     }
@@ -3136,6 +3377,16 @@ impl MainThreadRuntime {
     /// [`Self::dispatch`], with its realm calls checkpointed as `checkpoint`
     /// says: each on its own, or none, for the caller to checkpoint once per
     /// realm after a run of dispatches.
+    ///
+    /// The kernel's entry into [`run_dispatch`], the one dispatch body, which
+    /// the synthetic dispatch member enters too
+    /// ([`install_synthetic_event_members`]). What is the kernel's is how a
+    /// realm is called — `__BobcatDispatchEvent(name, bubbles, timestamp,
+    /// stepCount, path…, extras…, detail…)` in the realm whose registrations
+    /// are filed under the key ([`RealmId::from_listener_key`]), ending in
+    /// that realm's checkpoint before the next realm is called, or with none
+    /// for [`Checkpoint::Deferred`], every failure added to `failures` — and
+    /// the [`Self::finish_batch`] that ends a dispatch that ran.
     #[allow(
         clippy::too_many_arguments,
         reason = "the dispatch's own arguments, and where its calls checkpoint"
@@ -3153,110 +3404,56 @@ impl MainThreadRuntime {
         mut checkpoint: Checkpoint<'_>,
         failures: &mut Vec<MainThreadError>,
     ) -> bool {
-        // The realm files every name lowercased — `element-papi.ts`
-        // lowercases both halves of a registration, and its dispatch the
-        // name it is handed — so the listener table is asked in that
-        // spelling; a component's own name (`parseEnd`) keeps its case for
-        // the components' walk. One scan, and no allocation for a name that
-        // is lowercase already, which every routed input name is.
-        let lowered;
-        let registered = if name.bytes().any(|byte| byte.is_ascii_uppercase()) {
-            lowered = name.to_ascii_lowercase();
-            lowered.as_str()
-        } else {
-            name
-        };
-        let (steps, calls, invited) = {
-            let slot = self.slot.borrow();
-            let document = slot.document.as_ref().expect(DOCUMENT_EXISTS);
-            // A registration is filed under its lowercased name, and the
-            // components' walk looks a type up in its own spelling: those
-            // are the two questions, each asked once.
-            if document.get(target).is_none()
-                || !(document.has_listeners_for(registered) || document.observes_event(name))
-            {
-                return false;
-            }
-            let registrants = self.core.realm_ids().map(RealmId::listener_key);
-            let steps = document.event_steps(target, bubbles, composed);
-            let (calls, invited) = realm_calls(document, &steps, registered, registrants);
-            (steps, calls, invited)
-        };
-        // Taken at the first capture step, the path's top, where every
-        // invited realm is called.
-        let mut calls = (!calls.is_empty()).then_some((calls, invited));
-
-        let mut walk = self
-            .slot
-            .borrow()
-            .document
-            .as_ref()
-            .expect(DOCUMENT_EXISTS)
-            .event_walk(&steps, name, detail, timestamp);
         // What this dispatch's own calls threw is what follows this mark in
         // the sink, which may already hold what the caller's earlier
         // dispatches threw.
         let before = failures.len();
-        let mut called = false;
-        loop {
-            // The document is borrowed for one step's components alone: a
-            // realm call below runs listeners that mutate the tree.
-            let outcome = self.slot.borrow_mut().document_mut().advance(&mut walk);
-            let Some(outcome) = outcome else {
-                break;
-            };
-            if !outcome.capture {
-                continue;
-            }
-            let Some((calls, invited)) = calls.take() else {
-                continue;
-            };
-            // Encoded once, with the document borrowed for the encoding
-            // alone, and lent to every call.
-            let arguments = encode_call(
-                self.slot.borrow().document.as_ref().expect(DOCUMENT_EXISTS),
-                &steps,
+        let realms = &*self.core;
+        let ran = run_dispatch(
+            &self.slot,
+            realms,
+            &Dispatch {
+                target,
                 name,
                 bubbles,
+                composed,
                 timestamp,
-                extras,
-                detail,
-            );
-            // Who is still invited, read from the table as the calls before
-            // left it: a realm no longer invited has nothing left to run. Read
-            // once for every realm up to the next call that runs, since
-            // between two calls only a call's listeners change the table.
-            //
-            // The first call starts from the read that chose the calls: the
-            // one thing that ran since is the first capture step's component
-            // handler, at the path's top, and none of today's components
-            // files or drops a registration or frees or moves a node there —
-            // a refresh view's, a swiper's or a text field's handler at its
-            // own shadow root reads the document and queues events. A
-            // handler that does must start this from `None`.
-            let mut live: Option<Invited> = Some(invited);
-            for &key in &calls {
-                let invited = live.get_or_insert_with(|| {
-                    Invited::read(
-                        self.slot.borrow().document.as_ref().expect(DOCUMENT_EXISTS),
-                        &steps,
-                        registered,
-                    )
-                });
-                if !invited.contains(key) {
-                    continue;
-                }
-                let defer = matches!(checkpoint, Checkpoint::Deferred(_));
-                called |= self.call_realm(js_runtime, key, &arguments, defer, failures);
-                if let Checkpoint::Deferred(realms) = &mut checkpoint {
-                    let realm = RealmId::from_listener_key(key);
-                    if !realms.contains(&realm) {
-                        realms.push(realm);
+            },
+            &DispatchDetail::Routed { detail, extras },
+            |key, arguments| {
+                let realm = RealmId::from_listener_key(key);
+                let called = match &mut checkpoint {
+                    Checkpoint::Each => realms.call_module_export(
+                        js_runtime,
+                        realm,
+                        Export::DispatchEvent,
+                        arguments,
+                    ),
+                    Checkpoint::Deferred(called) => {
+                        if !called.contains(&realm) {
+                            called.push(realm);
+                        }
+                        realms.call_module_export_before_operation(
+                            js_runtime,
+                            realm,
+                            Export::DispatchEvent,
+                            arguments,
+                        )
+                    }
+                };
+                match called {
+                    None => false,
+                    Some(Ok(called)) => called,
+                    Some(Err(error)) => {
+                        failures.push(MainThreadError::from_engine("delivering an event", error));
+                        false
                     }
                 }
-                live = None;
-            }
-        }
+            },
+        );
+        let Some(called) = ran else {
+            return false;
+        };
         // Listeners remove elements too; the count they ran up is settled
         // here, at the end of the dispatch, as long as nothing failed — or by
         // the caller of a deferred run, after its checkpoints, since a
@@ -3267,43 +3464,6 @@ impl MainThreadRuntime {
             failures.push(error);
         }
         called
-    }
-
-    /// One realm's call in one dispatch: `__BobcatDispatchEvent(name,
-    /// bubbles, timestamp, stepCount, path…, extras…, detail…)`, the
-    /// dispatch's one [`encode_call`], in the realm whose registrations are
-    /// filed under `key` ([`RealmId::from_listener_key`]). A child already
-    /// freed is not called. With `defer`, the call has no checkpoint of its
-    /// own ([`Checkpoint::Deferred`]). A call that failed is added to
-    /// `failures`.
-    fn call_realm(
-        &mut self,
-        js_runtime: &mut ScriptRuntime,
-        key: ListenerKey,
-        arguments: &Arguments<'_>,
-        defer: bool,
-        failures: &mut Vec<MainThreadError>,
-    ) -> bool {
-        let realm = RealmId::from_listener_key(key);
-        let called = if defer {
-            self.core.call_module_export_before_operation(
-                js_runtime,
-                realm,
-                Export::DispatchEvent,
-                arguments,
-            )
-        } else {
-            self.core
-                .call_module_export(js_runtime, realm, Export::DispatchEvent, arguments)
-        };
-        match called {
-            None => false,
-            Some(Ok(called)) => called,
-            Some(Err(error)) => {
-                failures.push(MainThreadError::from_engine("delivering an event", error));
-                false
-            }
-        }
     }
 
     /// Fires a non-composed `tap` at `target` for the engine's own
@@ -3703,7 +3863,7 @@ impl MainThreadRuntime {
     /// rides this entry's commit like a timer callback's mutation.
     pub(crate) fn run_due_timers(&mut self, js_runtime: &mut ScriptRuntime) -> Vec<ScriptError> {
         self.slot.borrow_mut().run_due_autoplays();
-        let own = run_due_timers(&mut self.core.engine, js_runtime, &self.core.timers);
+        let own = run_due_timers(&self.core.engine, js_runtime, &self.core.timers);
         let children = self.core.children.run_due_timers(js_runtime);
         if own.is_none() && children.is_none() {
             return Vec::new();
@@ -4165,7 +4325,22 @@ struct DocumentHost {
     /// What a child's worker owner is made from. Weak, as the thread handle
     /// is: the page realm's owner holds it, and goes with the page realm.
     workers: std::rc::Weak<super::workers::ViewWorkers>,
+    /// The page realm's core, which every realm's synthetic dispatch member
+    /// calls the invited realms through.
+    realms: SharedRealms,
 }
+
+/// The page realm's [`RealmCore`] — its engine and its `ShadowRealm`
+/// children, the one table of the realms over a view's document — as the
+/// host member `dispatchEvent` reaches it from inside a JavaScript call
+/// ([`install_synthetic_event_members`]).
+///
+/// Set once, by [`MainThreadRuntime::new`], as soon as the core exists:
+/// the members are installed while it is being built, and no JavaScript of
+/// the realm runs before it is set. Weak, because the members holding it
+/// live in the realms the core holds, which a strong handle would never let
+/// go; it answers nothing once the core has dropped, with the view.
+type SharedRealms = Rc<OnceCell<Weak<RealmCore>>>;
 
 impl DocumentHost {
     /// Installs the document members into one realm, with `startup` as its
@@ -4187,7 +4362,7 @@ impl DocumentHost {
             key,
             retired.clone(),
         )?;
-        install_event_members(engine, &self.slot, key, retired)?;
+        install_event_members(engine, &self.slot, key, retired, &self.realms, &self.outbox)?;
         style_sheets::install_styles(engine, &self.slot, &self.outbox, self.thread.clone())?;
         install_startup_strings(engine, startup)
     }
@@ -4242,6 +4417,19 @@ fn install(
 ) -> Result<(), MainThreadError> {
     engine
         .register_host_module_function(HOST_MODULE_SPECIFIER, name, arity, callback)
+        .map_err(|error| MainThreadError::from_engine("installing the host module", error))
+}
+
+/// [`install`] for a member that may be called again while a call of it is
+/// running ([`ScriptEngine::register_reentrant_host_module_function`]).
+fn install_reentrant(
+    engine: &mut ScriptEngine,
+    name: &str,
+    arity: u8,
+    callback: impl Fn(&[HostArgument<'_>]) -> Result<HostValue, String> + 'static,
+) -> Result<(), MainThreadError> {
+    engine
+        .register_reentrant_host_module_function(HOST_MODULE_SPECIFIER, name, arity, callback)
         .map_err(|error| MainThreadError::from_engine("installing the host module", error))
 }
 
@@ -4583,6 +4771,8 @@ fn install_event_members(
     handle: &Rc<RefCell<DocumentSlot>>,
     key: ListenerKey,
     retired: Option<Rc<Cell<bool>>>,
+    realms: &SharedRealms,
+    outbox: &ViewOutbox,
 ) -> Result<(), MainThreadError> {
     let tree = Rc::clone(handle);
     let closed = retired.clone();
@@ -4610,7 +4800,7 @@ fn install_event_members(
         Ok(HostValue::Undefined)
     })?;
 
-    install_synthetic_event_members(engine, handle)
+    install_synthetic_event_members(engine, handle, key, realms, outbox)
 }
 
 /// Installs the two members a realm's `__CreateEvent` and `__DispatchEvent`
@@ -4622,29 +4812,51 @@ fn install_event_members(
 /// event when it is created, as DOM does, and the realm has no clock on this
 /// timeline of its own.
 ///
-/// `dispatchEvent(node, name, bubbles, composed, timestamp)` is the host's
-/// half of one synthetic dispatch at the element `node`. It computes the path
-/// once (`event_steps`), runs the engine components' walk over it to its end
-/// with an [`EventDetail::None`] — the script `detail` is a realm value and
-/// does not cross — and answers the path the realm then runs its own Lynx
-/// walk over, as one string: the steps [`realm_path_steps`] selects, the
-/// ones a routed dispatch hands each realm, as two comma-joined lists of
-/// decimal packed ids, nodes then targets, joined by `;` (`";"` for a path
-/// with no step a realm could hold). A string, because a member answers one
-/// value. So for a synthetic event the components hear it
-/// before the calling realm's Lynx handlers do, where a routed dispatch
-/// ([`MainThreadRuntime::dispatch`]) calls the realms at the path's top step
-/// first (the order a user ruling chose, 2026-10-22: the components are part
-/// of the engine, not of the app; `docs/tracking/deviations.md`). It is the
-/// walk split in two because a member runs inside a JavaScript call that
-/// already holds the runtime, so the routed dispatch, which calls realms,
-/// cannot be entered from here. No other realm is called. A component's
-/// `stop_propagation` ends the components' walk alone, and an event a
-/// component queues during it is delivered by the component-events entry the
-/// epilogue posts, as one queued inside any other member is.
+/// `dispatchEvent(node, name, bubbles, composed, timestamp, detail)` is one
+/// synthetic dispatch at the element `node`, made by the realm filed under
+/// `own`, and it is the routed dispatch: the one body
+/// [`MainThreadRuntime::dispatch`] runs ([`run_dispatch`]), over the page
+/// realm's [`RealmCore`] — `realms`, the one table of the realms over the
+/// document — with the same path, the same invitation rule, the same order
+/// and the same realm calls. The components' walk hears an
+/// [`EventDetail::None`], since the script `detail` is a realm value; every
+/// realm the listener table invites is called at the path's top step, the
+/// page realm first and then the children in construction order, before the
+/// components on the steps below it. Each other realm is handed `detail` as
+/// the structured clone the dispatching realm's call wrote for it
+/// ([`CallDetail::Cloned`]); the dispatching realm itself is called like any
+/// other, in its place in that order, and handed [`CallDetail::Dispatched`],
+/// which tells it to walk the event object its `__DispatchEvent` kept for
+/// the call, so the object keeps its identity for its listeners. A realm the
+/// table does not invite is not called, the dispatching one included. The
+/// member answers `undefined`; a node that is not a live element, and
+/// arguments that are not its shape, throw.
+///
+/// What differs from the kernel's entry is the realm call alone. The member
+/// runs inside a JavaScript call, so no call checkpoints
+/// ([`RealmCore::call_module_export_nested`]): the enclosing operation's
+/// checkpoint drains the runtime-wide queue, and a rejection a callee left
+/// is the callee's. What a call throws is that realm's listener failure,
+/// sent as [`crate::view::EngineEvent::ListenerFailed`] on the view's
+/// engine-event channel, as a routed dispatch's is reported; it is never
+/// thrown into the dispatching realm, and the next realm is called all the
+/// same. Nothing ends the batch here either: the enclosing entry's
+/// [`MainThreadRuntime::finish_batch`] settles the removals. A component's
+/// `stop_propagation` ends the components' walk after its step, and an event
+/// a component queues during it is delivered by the component-events entry
+/// the epilogue posts, as one queued inside any other member is.
+///
+/// Registered re-entrant: a listener may dispatch an event of its own,
+/// synchronously, as DOM allows, and that dispatch can call any realm whose
+/// call is still running, this member's own included. The body borrows the
+/// slot per use and the realms only shared, and releases the slot before
+/// any realm is called.
 fn install_synthetic_event_members(
     engine: &mut ScriptEngine,
     handle: &Rc<RefCell<DocumentSlot>>,
+    own: ListenerKey,
+    realms: &SharedRealms,
+    outbox: &ViewOutbox,
 ) -> Result<(), MainThreadError> {
     let tree = Rc::clone(handle);
     install(engine, "timelineMilliseconds", 0, move |_arguments| {
@@ -4655,31 +4867,56 @@ fn install_synthetic_event_members(
     })?;
 
     let tree = Rc::clone(handle);
-    install(engine, "dispatchEvent", 5, move |arguments| {
+    let realms = Rc::clone(realms);
+    let outbox = outbox.clone();
+    install_reentrant(engine, "dispatchEvent", 6, move |arguments| {
         const NAME: &str = "bobcat-internal:host.dispatchEvent";
         let target = node_id_argument(NAME, arguments, 0)?;
         let name = string_argument(NAME, arguments, 1)?;
         let bubbles = boolean_argument(NAME, arguments, 2)?;
         let composed = boolean_argument(NAME, arguments, 3)?;
         let timestamp = finite_number_argument(NAME, arguments, 4)?;
-        let mut slot = borrow_slot(NAME, &tree)?;
-        let document = slot.document_mut();
-        validate_live_element(document, NAME, target)?;
-        let steps = document.event_steps(target, bubbles, composed);
-        document.dispatch_element_event_over(&steps, name, &EventDetail::None, timestamp);
-        let mut nodes = String::new();
-        let mut targets = String::new();
-        for step in realm_path_steps(document, &steps) {
-            if !nodes.is_empty() {
-                nodes.push(',');
-                targets.push(',');
-            }
-            write!(nodes, "{}", step.node.to_bits()).expect("writing to a String");
-            write!(targets, "{}", step.target.to_bits()).expect("writing to a String");
-        }
-        nodes.push(';');
-        nodes.push_str(&targets);
-        Ok(HostValue::String(nodes))
+        let detail = match arguments.get(5) {
+            None | Some(HostArgument::Undefined | HostArgument::Null) => None,
+            Some(&detail) => Some(detail),
+        };
+        validate_live_element(borrow_slot(NAME, &tree)?.document_mut(), NAME, target)?;
+        // Set before the realm's first JavaScript, and gone only with the
+        // view, while no JavaScript runs.
+        let core = realms
+            .get()
+            .and_then(Weak::upgrade)
+            .ok_or_else(|| format!("{NAME}: the view's realms have been released"))?;
+        run_dispatch(
+            &tree,
+            &core,
+            &Dispatch {
+                target,
+                name,
+                bubbles,
+                composed,
+                timestamp,
+            },
+            &DispatchDetail::Synthetic { own, detail },
+            |key, arguments| {
+                let realm = RealmId::from_listener_key(key);
+                match core.call_module_export_nested(realm, Export::DispatchEvent, arguments) {
+                    None => false,
+                    Some(Ok(called)) => called,
+                    Some(Err(error)) => {
+                        let error = MainThreadError::from_engine("delivering an event", error);
+                        outbox.engine_event(
+                            crate::realm::policy::main_thread(
+                                crate::realm::policy::Scene::Listener,
+                            )
+                            .event_for(error.into_script_error()),
+                        );
+                        false
+                    }
+                }
+            },
+        );
+        Ok(HostValue::Undefined)
     })?;
 
     Ok(())

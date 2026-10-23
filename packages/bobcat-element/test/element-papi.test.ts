@@ -160,11 +160,11 @@ type MockBobcat = BobcatNative & {
     resolved: 0 | 1,
   ) => string;
   /**
-   * The path a synthetic dispatch is answered, in the host's
-   * `"<nodes>;<targets>"` shape. The real host computes it from the tree and
-   * runs the engine components' walk first, both of which
-   * crates/bobcat-core/src/main/runtime/tests.rs covers; the default is the
-   * empty path.
+   * What a synthetic dispatch does in the host besides being recorded. The
+   * real host computes the path from the tree, runs the engine components'
+   * walk and calls each invited realm, all of which
+   * crates/bobcat-core/src/main/runtime/tests.rs covers; the default calls
+   * no realm, and `callsBack` calls this one as the host does.
    */
   answerDispatch: (
     nodeId: number,
@@ -172,7 +172,7 @@ type MockBobcat = BobcatNative & {
     bubbles: boolean,
     composed: boolean,
     timestamp: number,
-  ) => string;
+  ) => void;
   /** What `timelineMilliseconds` answers, which a test sets. */
   timeline: number;
 };
@@ -494,23 +494,34 @@ function createMockBobcat(issuedIds?: number[]): MockBobcat {
     },
     timeline: 0,
     timelineMilliseconds: () => host.timeline,
-    answerDispatch: () => ";",
+    // What the host does inside `dispatchEvent` besides recording it: by
+    // default nothing, a dispatch no realm's listener table invites this
+    // realm to; `callsBack` has it call this realm the way the host does.
+    answerDispatch: (
+      _node: number,
+      _eventName: string,
+      _bubbles: boolean,
+      _composed: boolean,
+      _timestamp: number,
+    ): void => {},
     dispatchEvent: (
       node: unknown,
       eventName: unknown,
       bubbles: unknown,
       composed: unknown,
       timestamp: unknown,
-    ) => {
+      detail: unknown,
+    ): undefined => {
       const id = nodeId("dispatchEvent", node);
-      calls.push(["dispatchEvent", id, eventName, bubbles, composed, timestamp]);
-      return host.answerDispatch(
+      calls.push(["dispatchEvent", id, eventName, bubbles, composed, timestamp, detail]);
+      host.answerDispatch(
         id,
         eventName as string,
         bubbles as boolean,
         composed as boolean,
         timestamp as number,
       );
+      return undefined;
     },
     // A stop with `sendEvent` answers one record per listed id, as if every
     // listed element were exposed under an `exposure-id`.
@@ -1624,6 +1635,8 @@ const DETAIL_KEY = 4;
 const DETAIL_INPUT = 5;
 const DETAIL_COMPOSITION = 6;
 const DETAIL_FOCUS = 7;
+const DETAIL_CLONED = 8;
+const DETAIL_DISPATCHED = 9;
 
 /**
  * What a test asks one dispatch's `detail` to be made of.
@@ -3494,16 +3507,40 @@ describe("timestamp and params", () => {
 });
 
 /**
- * Has the mock's `dispatchEvent` answer `path` (target first) and, position
- * for position, `targets` — every step its own target unless given — in the
- * host's `"<nodes>;<targets>"` shape.
+ * Has the mock's `dispatchEvent` do what the host does when the listener
+ * table invites this realm to its own synthetic event: call
+ * `__BobcatDispatchEvent` once, with the event's name, `bubbles` and
+ * timestamp, the path `path` (target first) and, position for position,
+ * `targets` — every step its own target unless given — no extras, and the
+ * `DETAIL_DISPATCHED` kind, which walks the event `__DispatchEvent` left
+ * pending. `before` runs first, inside the host's call, standing for the
+ * realms the host calls before this one. What the walk throws is kept in
+ * the answer rather than thrown, as the host reports a listener's failure
+ * instead of throwing it into the dispatching realm.
  */
-function answerPath(path: object[], targets?: object[]) {
+function callsBack(path: object[], targets?: object[], before?: () => void): unknown[] {
   const nodes = path.map((handle) => __GetElementUniqueID(handle));
   const targeted = targets === undefined
     ? nodes.map(() => nodes[0])
     : targets.map((handle) => __GetElementUniqueID(handle));
-  mock.answerDispatch = () => `${nodes.join(",")};${targeted.join(",")}`;
+  const reported: unknown[] = [];
+  mock.answerDispatch = (_node, eventName, bubbles, _composed, timestamp) => {
+    before?.();
+    try {
+      elementModule.__BobcatDispatchEvent(
+        eventName,
+        bubbles,
+        timestamp,
+        nodes.length,
+        ...nodes.flatMap((node, index) => [node, targeted[index] ?? node]),
+        0,
+        DETAIL_DISPATCHED,
+      );
+    } catch (error) {
+      reported.push(error);
+    }
+  };
+  return reported;
 }
 
 describe("__CreateEvent and __DispatchEvent", () => {
@@ -3560,19 +3597,83 @@ describe("__CreateEvent and __DispatchEvent", () => {
   it("hands the host the lowercased name, both flags and the creation timestamp", () => {
     const { inner } = tree();
     mock.timeline = 50;
-    const bubbling = __CreateEvent(1, "Custom", { bubbles: true, composed: true }, {});
+    const detail = { item: 3 };
+    const bubbling = __CreateEvent(1, "Custom", { bubbles: true, composed: true }, detail);
     // `capture` and `cancelable` are accepted and change nothing.
-    const plain = __CreateEvent(0, "custom", { capture: true, cancelable: true }, {});
+    const plain = __CreateEvent(0, "custom", { capture: true, cancelable: true }, null);
     mock.timeline = 99;
 
     expect(__DispatchEvent(inner, bubbling)).toBe(true);
     expect(__DispatchEvent(inner, plain)).toBe(true);
 
     const uid = __GetElementUniqueID(inner);
+    // The `detail` goes as the sixth argument, the event's own object, for
+    // the host to clone into the other realms it calls.
     expect(mock.named("dispatchEvent")).toEqual([
-      ["dispatchEvent", uid, "custom", true, true, 50],
-      ["dispatchEvent", uid, "custom", false, false, 50],
+      ["dispatchEvent", uid, "custom", true, true, 50, detail],
+      ["dispatchEvent", uid, "custom", false, false, 50, {}],
     ]);
+    expect(mock.named("dispatchEvent")[0]?.[6]).toBe(detail);
+  });
+
+  it("hands the host the detail the event holds when it is dispatched", () => {
+    const { inner } = tree();
+    const event = __CreateEvent(0, "custom", {}, { first: true }) as ListenerEvent;
+    const replaced = { second: true };
+    (event as { detail: unknown }).detail = replaced;
+
+    __DispatchEvent(inner, event);
+
+    expect(mock.named("dispatchEvent")[0]?.[6]).toBe(replaced);
+  });
+
+  it("lets a throw at the host's call propagate, before any listener runs", () => {
+    const { inner } = tree();
+    const runs: string[] = [];
+    __AddEventListener(inner, "custom", () => runs.push("inner"), {});
+    callsBack([inner]);
+    const callBack = mock.answerDispatch;
+    // What the bridge does with a value its structured clone refuses.
+    mock.answerDispatch = () => {
+      throw new TypeError("unsupported object class");
+    };
+    const event = __CreateEvent(0, "custom", {}, { callback: () => 1 }) as ListenerEvent;
+
+    expect(() => __DispatchEvent(inner, event)).toThrow(TypeError);
+    expect(runs).toEqual([]);
+    expect(event.eventPhase).toBe(0);
+    // Nothing was left pending: a dispatch of another event walks that one.
+    mock.answerDispatch = callBack;
+    const next = __CreateEvent(0, "custom", {}, {});
+    __AddEventListener(inner, "custom", (received: unknown) => {
+      runs.push(received === next ? "next" : "stale");
+    }, {});
+    __DispatchEvent(inner, next);
+    expect(runs).toEqual(["inner", "next"]);
+  });
+
+  it("makes another realm's cloned detail the event's detail, as it came", () => {
+    const { page, outer, inner } = tree();
+    const clone = { item: 3, nested: { list: [1, 2] } };
+    const seen: unknown[] = [];
+    __AddEventListener(outer, "custom", (event: ListenerEvent) => {
+      seen.push(event.detail, event.target.uid, event.eventPhase);
+    }, {});
+    const nodes = [inner, outer, page].map((handle) => __GetElementUniqueID(handle));
+
+    elementModule.__BobcatDispatchEvent(
+      "custom",
+      true,
+      5,
+      nodes.length,
+      ...nodes.flatMap((node) => [node, nodes[0]]),
+      0,
+      DETAIL_CLONED,
+      clone,
+    );
+
+    expect(seen).toEqual([clone, nodes[0], BUBBLING_PHASE]);
+    expect(seen[0]).toBe(clone);
   });
 
   it("runs the capture, bubble and global passes over both registration forms", () => {
@@ -3594,7 +3695,7 @@ describe("__CreateEvent and __DispatchEvent", () => {
     __AddEvent(page, "global-bindEvent", "custom", "page:global");
     mock.timeline = 7;
     const event = __CreateEvent(0, "custom", { bubbles: true }, detail) as ListenerEvent;
-    answerPath([inner, outer, page]);
+    callsBack([inner, outer, page]);
     mock.calls.length = 0;
 
     expect(__DispatchEvent(inner, event)).toBe(true);
@@ -3642,7 +3743,7 @@ describe("__CreateEvent and __DispatchEvent", () => {
     __AddEventListener(inner, "custom", () => order.push("inner"), {});
     __AddEventListener(outer, "custom", () => order.push("outer"), {});
     __AddEvent(page, "global-bindEvent", "custom", "page:global");
-    answerPath([inner, outer, page]);
+    callsBack([inner, outer, page]);
 
     __DispatchEvent(inner, __CreateEvent(0, "custom", {}, {}));
 
@@ -3664,7 +3765,7 @@ describe("__CreateEvent and __DispatchEvent", () => {
     }, {});
     __AddEventListener(inner, "custom", () => order.push("inner-second"), {});
     __AddEventListener(outer, "custom", () => order.push("outer"), {});
-    answerPath([inner, outer]);
+    callsBack([inner, outer]);
     const event = __CreateEvent(0, "custom", { bubbles: true }, {});
 
     __DispatchEvent(inner, event);
@@ -3693,7 +3794,7 @@ describe("__CreateEvent and __DispatchEvent", () => {
         thrown.push(error);
       }
     }, {});
-    answerPath([inner]);
+    callsBack([inner]);
     const event = __CreateEvent(0, "custom", { bubbles: true }, {});
 
     __DispatchEvent(inner, event);
@@ -3708,7 +3809,7 @@ describe("__CreateEvent and __DispatchEvent", () => {
     expect(mock.named("dispatchEvent")).toHaveLength(2);
   });
 
-  it("ends the dispatch when a listener throws, so the event can be dispatched again", () => {
+  it("ends the walk when a listener throws, which the host reports, and dispatches again", () => {
     const { inner } = tree();
     let fail = true;
     __AddEventListener(inner, "custom", () => {
@@ -3716,15 +3817,141 @@ describe("__CreateEvent and __DispatchEvent", () => {
         throw new Error("listener failed");
       }
     }, {});
-    answerPath([inner]);
+    const reported = callsBack([inner]);
     const event = __CreateEvent(0, "custom", {}, {}) as ListenerEvent;
 
-    expect(() => __DispatchEvent(inner, event)).toThrow("listener failed");
+    // The throw leaves this realm's walk through the host's call, which
+    // reports it; `__DispatchEvent` is not where it lands.
+    expect(__DispatchEvent(inner, event)).toBe(true);
+    expect(reported).toHaveLength(1);
+    expect(String(reported[0])).toContain("listener failed");
     expect(event.eventPhase).toBe(0);
     expect(event.currentTarget).toBeNull();
 
     fail = false;
     expect(__DispatchEvent(inner, event)).toBe(true);
+    expect(reported).toHaveLength(1);
+  });
+
+  it("does not walk the event itself: only the host's call for it runs the listeners", () => {
+    const { outer, inner } = tree();
+    const runs: string[] = [];
+    __AddEventListener(inner, "custom", () => runs.push("inner"), {});
+    const event = __CreateEvent(0, "custom", { bubbles: true }, {}) as ListenerEvent;
+
+    // A host that did not call this realm: no registration of its on the
+    // path, as the listener table says.
+    expect(__DispatchEvent(inner, event)).toBe(true);
+    expect(runs).toEqual([]);
+    expect(event.target).toBeNull();
+    expect(event.eventPhase).toBe(0);
+
+    // Nothing is left pending: a `DETAIL_DISPATCHED` call with no dispatch
+    // of this realm's running walks nothing.
+    const uid = __GetElementUniqueID(inner);
+    elementModule.__BobcatDispatchEvent(
+      "custom",
+      true,
+      0,
+      2,
+      uid,
+      uid,
+      __GetElementUniqueID(outer),
+      uid,
+      0,
+      DETAIL_DISPATCHED,
+    );
+    expect(runs).toEqual([]);
+  });
+
+  it("walks the very object it was given, so a stop on it ends that walk", () => {
+    const { page, outer, inner } = tree();
+    const seen: unknown[] = [];
+    const event = __CreateEvent(0, "custom", { bubbles: true }, { item: 1 }) as ListenerEvent;
+    __AddEventListener(inner, "custom", (received: ListenerEvent) => {
+      seen.push(received === event, received.target.uid, received.eventPhase);
+      __StopPropagation(event);
+    }, {});
+    __AddEventListener(outer, "custom", () => seen.push("outer"), {});
+    callsBack([inner, outer, page]);
+
+    expect(__DispatchEvent(inner, event)).toBe(true);
+
+    expect(seen).toEqual([true, __GetElementUniqueID(inner), AT_TARGET]);
+    expect(event.target.uid).toBe(__GetElementUniqueID(inner));
+  });
+
+  it("walks a nested dispatch's own object, and keeps the outer event's", () => {
+    const { page, outer, inner } = tree();
+    const seen: string[] = [];
+    const outerEvent = __CreateEvent(0, "first", { bubbles: true }, { n: 1 });
+    const nestedEvent = __CreateEvent(0, "second", { bubbles: true }, { n: 2 });
+    __AddEventListener(inner, "first", (received: unknown) => {
+      seen.push(`first-inner:${received === outerEvent}`);
+      __DispatchEvent(inner, nestedEvent);
+    }, {});
+    __AddEventListener(inner, "second", (received: unknown) => {
+      seen.push(`second-inner:${received === nestedEvent}`);
+    }, {});
+    __AddEventListener(outer, "first", (received: unknown) => {
+      seen.push(`first-outer:${received === outerEvent}`);
+    }, {});
+    callsBack([inner, outer, page]);
+
+    expect(__DispatchEvent(inner, outerEvent)).toBe(true);
+
+    expect(seen).toEqual([
+      "first-inner:true",
+      "second-inner:true",
+      "first-outer:true",
+    ]);
+  });
+
+  it("keeps its pending event across another realm's call and a dispatch made before its own call", () => {
+    const { page, outer, inner } = tree();
+    const seen: string[] = [];
+    const outerEvent = __CreateEvent(0, "first", { bubbles: true }, { n: 1 });
+    const nestedEvent = __CreateEvent(0, "second", { bubbles: true }, { n: 2 });
+    const uids = [inner, outer, page].map((handle) => __GetElementUniqueID(handle));
+    __AddEventListener(inner, "first", (received: unknown) => {
+      seen.push(`first:${received === outerEvent}`);
+    }, {});
+    __AddEventListener(inner, "second", (received: unknown) => {
+      seen.push(`second:${received === nestedEvent}`);
+    }, {});
+    __AddEventListener(inner, "keyup", (received: ListenerEvent) => {
+      seen.push(`keyup:${received !== outerEvent}:${JSON.stringify(received.detail)}`);
+    }, {});
+    let nesting = true;
+    callsBack([inner, outer, page], undefined, () => {
+      if (!nesting) {
+        return;
+      }
+      nesting = false;
+      // The realms the host calls before this one: one dispatches a `keyup`
+      // that reaches this realm with a clone, and one reaches this realm's
+      // code, which dispatches an event of its own.
+      elementModule.__BobcatDispatchEvent(
+        "keyup",
+        true,
+        0,
+        uids.length,
+        ...uids.flatMap((uid) => [uid, uids[0]]),
+        0,
+        DETAIL_CLONED,
+        { k: 1 },
+      );
+      __DispatchEvent(inner, nestedEvent);
+      nesting = true;
+    });
+
+    expect(__DispatchEvent(inner, outerEvent)).toBe(true);
+
+    expect(seen).toEqual([
+      'keyup:true:{"k":1}',
+      "second:true",
+      "first:true",
+    ]);
   });
 
   it("refuses a value that is no handle, and an event __CreateEvent did not make", () => {

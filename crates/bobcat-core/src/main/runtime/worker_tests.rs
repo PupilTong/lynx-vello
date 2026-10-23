@@ -3676,7 +3676,7 @@ fn bts_animation_frames_continue_while_an_mts_callback_is_blocked() {
     let (blocked, waiting) = std::sync::mpsc::channel();
     let (release, released) = std::sync::mpsc::channel();
     pair.runtime
-        .as_mut()
+        .as_ref()
         .unwrap()
         .core
         .engine

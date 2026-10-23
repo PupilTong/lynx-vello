@@ -291,7 +291,7 @@ impl TimerState {
 /// it nor ends the realm: the same standing an event listener that throws
 /// already has.
 pub(crate) fn run_due_timers(
-    engine: &mut ScriptEngine,
+    engine: &ScriptEngine,
     js_runtime: &mut ScriptRuntime,
     timers: &TimerState,
 ) -> Option<Vec<ScriptError>> {

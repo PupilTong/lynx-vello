@@ -916,7 +916,10 @@ consequential choice about whether to follow the spec or the quirk.
   `global-bindEvent` is scoped as web-core's listener is: reached by an
   event whose path passes through the registering node's tree root (the
   document node, or a frame's shadow root for a card), and, for web-core's
-  document-level `keydown`/`keyup`, by every key. The recorded differences:
+  document-level `keydown`/`keyup`, by every key. An event script
+  dispatches with `__DispatchEvent` runs this same dispatch, the same code
+  (`run_dispatch`, user ruling 2026-10-23), so every difference below is
+  its too. The recorded differences:
   - **A realm's Lynx handlers run before every component handler on the
     path and cannot stop them.** Their call is at the path's top step, so
     the engine's own components on the steps after it (a swiper hearing a
@@ -947,29 +950,6 @@ consequential choice about whether to follow the spec or the quirk.
     the dispatch follows the standard (the path is fixed, a node's
     listeners are read when its step runs), because that walk is the
     realm's own.
-  - **A synthetic event reaches the components before the calling realm's
-    Lynx handlers (user ruling 2026-10-22).** `__DispatchEvent` of an
-    event `__CreateEvent` made cannot enter `MainThreadRuntime::dispatch`
-    from inside the JavaScript call it runs in, so its host member
-    `dispatchEvent` runs the components' walk over the whole path to its
-    end first, with an `EventDetail::None`, and the realm runs its Lynx
-    walk over the path that member answers afterwards. That is the reverse
-    of the routed order above, where the realms run at the path's top step
-    before every component. It was accepted because the Rust components
-    are part of the Lynx engine, not user components: native's
-    `EventDispatcher::DispatchEvent` (`lynx/core/event/event_dispatcher.cc`)
-    reaches the C++ listener map alone, which `__AddEventListener` closures
-    and the `__AddEvent` handlers synced into it fill, and never a platform
-    UI, so it has no order between the two to keep. A component's
-    `stop_propagation` ends the components' walk alone and keeps no Lynx
-    handler from running.
-  - **A frame card's `composed: true` synthetic event is heard by that card
-    alone.** The calling realm is the only realm `__DispatchEvent` calls;
-    the listener table is not read and no other realm is invited. In native
-    one propagation crosses the page and every card, so the page's handlers
-    on the frame and above it hear a card's composed event; here they do
-    not, and a card does not hear the page realm's synthetic events either.
-    The components on the whole path, the page's included, do hear it.
 - **`__CreateEvent`'s numeric `type`, `options.capture` and
   `options.cancelable` are accepted and ignored, and a synthetic event
   runs the routed walk's pass order (user rulings 2026-10-21/22).** Native

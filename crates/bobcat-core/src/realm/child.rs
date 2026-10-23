@@ -41,9 +41,13 @@
 //! after a `frame`'s disconnection), and it is outside every JavaScript call,
 //! because freeing a realm collects the whole runtime.
 //!
-//! Every operation on one child detaches it from the list first and puts it
-//! back after, so a `new ShadowRealm()` the child's code makes pushes a
-//! grandchild without meeting a borrow of the list.
+//! Each child is kept behind an `Rc`, and every operation on one clones it
+//! out of the list under a borrow that ends before the child runs anything,
+//! then calls it through a shared borrow: a `new ShadowRealm()` the child's
+//! code makes pushes a grandchild without meeting a borrow of the list, and a
+//! call into a child from inside one of its own calls — a synthetic event
+//! the child dispatched, which invites the child itself — finds the child in
+//! the list, where it always is until its release.
 
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
@@ -107,7 +111,10 @@ pub(crate) struct ChildRealm {
 /// Every `ShadowRealm` child of one owner's realm, grandchildren included,
 /// in construction order.
 pub(crate) struct ChildRealms {
-    live: RefCell<Vec<ChildRealm>>,
+    /// In key order, which is construction order. Shared, so an operation
+    /// holds its child while the list is free for the child's code to push
+    /// to; only [`Self::release_unneeded`] takes one out.
+    live: RefCell<Vec<Rc<ChildRealm>>>,
     next: Cell<u64>,
 }
 
@@ -147,36 +154,30 @@ impl ChildRealms {
         self.live.borrow().iter().map(|child| child.key).collect()
     }
 
-    /// Runs `operation` on the child under `key`, detached from the list for
-    /// the length of the call; `None` is a child that is gone.
+    /// Runs `operation` on the child under `key`; `None` is a child that is
+    /// gone.
     ///
-    /// The child goes back afterwards, unwinding included: only the
-    /// epilogue's release step frees a child.
-    fn with_child<T>(
-        &self,
-        key: ChildKey,
-        operation: impl FnOnce(&mut ChildRealm) -> T,
-    ) -> Option<T> {
+    /// The child stays in the list: the list is borrowed only to clone the
+    /// child's handle out, and the operation runs with it released, so what
+    /// the child's code does to the list — a grandchild constructed, another
+    /// operation on this same child from inside this one — finds it free.
+    fn with_child<T>(&self, key: ChildKey, operation: impl FnOnce(&ChildRealm) -> T) -> Option<T> {
         let child = {
-            let mut live = self.live.borrow_mut();
+            let live = self.live.borrow();
             let index = live.binary_search_by_key(&key, |child| child.key).ok()?;
-            live.remove(index)
+            Rc::clone(&live[index])
         };
-        let mut detached = Detached {
-            list: self,
-            child: Some(child),
-        };
-        detached.child.as_mut().map(operation)
+        Some(operation(&child))
     }
 
-    /// Puts a child where its key sorts: a detached one back, or a new one
-    /// [`adopt`] furnished, under the key [`Self::allocate`] gave it.
-    fn reattach(&self, child: ChildRealm) {
+    /// Keeps a new child [`adopt`] furnished where its key sorts, under the
+    /// key [`Self::allocate`] gave it.
+    fn keep(&self, child: ChildRealm) {
         let mut live = self.live.borrow_mut();
         let index = live
             .binary_search_by_key(&child.key, |live| live.key)
             .unwrap_or_else(|index| index);
-        live.insert(index, child);
+        live.insert(index, Rc::new(child));
     }
 
     /// Runs every child's due timers, in construction order, and answers
@@ -184,14 +185,13 @@ impl ChildRealms {
     pub(crate) fn run_due_timers(&self, js: &mut ScriptRuntime) -> Option<Vec<ScriptError>> {
         let mut failures: Option<Vec<ScriptError>> = None;
         for key in self.keys() {
-            // Detached only when it has a timer armed, asked as its turn
-            // comes, since an earlier child's callback can arm one in it: a
-            // child with none has nothing due, and is left in place.
+            // Asked as its turn comes, since an earlier child's callback can
+            // arm one in it: a child with none has nothing due.
             if !self.has_armed_timer(key) {
                 continue;
             }
             let ran = self.with_child(key, |child| {
-                crate::timers::run_due_timers(&mut child.engine, js, &child.timers)
+                crate::timers::run_due_timers(&child.engine, js, &child.timers)
             });
             if let Some(Some(thrown)) = ran {
                 failures.get_or_insert_with(Vec::new).extend(thrown);
@@ -211,7 +211,7 @@ impl ChildRealms {
     /// for its child until [`Self::complete_module`] delivers it.
     pub(crate) fn take_module_requests(&self) -> Vec<(ChildKey, String)> {
         let mut requests = Vec::new();
-        for child in self.live.borrow_mut().iter_mut() {
+        for child in self.live.borrow().iter() {
             while let Some(url) = child.engine.take_module_request() {
                 child.in_flight.set(child.in_flight.get().saturating_add(1));
                 requests.push((child.key, url));
@@ -259,7 +259,7 @@ impl ChildRealms {
     ) -> Option<Result<(), ScriptError>> {
         self.with_child(key, |child| {
             child.landed();
-            crate::future::deliver(&mut child.engine, js, id, outcome)
+            crate::future::deliver(&child.engine, js, id, outcome)
         })
     }
 
@@ -301,6 +301,21 @@ impl ChildRealms {
         })
     }
 
+    /// [`Self::call_module_export`] from inside a JavaScript call: the
+    /// child's [`ScriptEngine::call_module_export_nested`], with no
+    /// checkpoint. `None` is a child that is gone, which drops the call. The
+    /// child may be the one whose own call is further up the stack.
+    pub(crate) fn call_module_export_nested(
+        &self,
+        key: ChildKey,
+        export: Export,
+        arguments: &[HostArgument<'_>],
+    ) -> Option<Result<bool, ScriptError>> {
+        self.with_child(key, |child| {
+            child.engine.call_module_export_nested(export, arguments)
+        })
+    }
+
     /// The child's [`ScriptEngine::checkpoint_after_calls`]; `None` is a
     /// child that is gone.
     pub(crate) fn checkpoint_after_calls(
@@ -331,12 +346,9 @@ impl ChildRealms {
     /// their owner that has already reported its failure. No JavaScript
     /// runs.
     pub(crate) fn discard_rejections(&self, js: &mut ScriptRuntime) {
-        // A child that is detached is the one running, and its own entry
-        // decides about its rejections.
-        let Ok(live) = self.live.try_borrow() else {
-            return;
-        };
-        for child in live.iter() {
+        // Never borrowed across anything that runs JavaScript, and this runs
+        // none, so the list is free here.
+        for child in self.live.borrow().iter() {
             child.engine.discard_own_rejections(js);
         }
     }
@@ -363,7 +375,7 @@ impl ChildRealms {
     pub(crate) fn release_unneeded(&self) -> usize {
         let mut released = 0usize;
         loop {
-            let freed: Vec<ChildRealm> = {
+            let freed: Vec<Rc<ChildRealm>> = {
                 let mut live = self.live.borrow_mut();
                 for child in live.iter() {
                     if child.unneeded() {
@@ -376,6 +388,10 @@ impl ChildRealms {
                 return released;
             }
             released = released.saturating_add(freed.len());
+            // Each is the last handle on its child: an operation's clone
+            // lives only as long as the operation, and this runs outside
+            // every JavaScript call, so no operation is in progress.
+            debug_assert!(freed.iter().all(|child| Rc::strong_count(child) == 1));
             // Outside the borrow: freeing a context runs finalizers, and
             // nothing they reach may find the list borrowed.
             drop(freed);
@@ -396,20 +412,6 @@ impl ChildRealm {
             && !self.engine.is_referenced_across_realms()
             && self.timers.next_deadline().is_none()
             && !self.state.as_ref().is_some_and(|state| state.is_busy())
-    }
-}
-
-/// A child taken out of the list for one operation, put back on drop.
-struct Detached<'a> {
-    list: &'a ChildRealms,
-    child: Option<ChildRealm>,
-}
-
-impl Drop for Detached<'_> {
-    fn drop(&mut self) {
-        if let Some(child) = self.child.take() {
-            self.list.reattach(child);
-        }
     }
 }
 
@@ -519,7 +521,7 @@ fn adopt(hook: &ShadowRealmHook, mut engine: ScriptEngine) -> Result<(), String>
             (unused.0, unused.1, Some(error.message.to_string()))
         }
     };
-    children.reattach(ChildRealm {
+    children.keep(ChildRealm {
         engine,
         key,
         timers,

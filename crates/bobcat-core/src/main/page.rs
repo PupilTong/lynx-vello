@@ -944,7 +944,7 @@ impl RealmOwner for Page {
         &self.realm
     }
 
-    fn core(runtime: &mut MainThreadRuntime) -> &mut RealmCore {
+    fn core(runtime: &mut MainThreadRuntime) -> &RealmCore {
         runtime.core()
     }
 

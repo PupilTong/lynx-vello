@@ -311,19 +311,25 @@ interface BobcatNative {
    */
   timelineMilliseconds(): number;
   /**
-   * The host's half of `__DispatchEvent`: computes the path of an event
-   * named `eventName` (lowercased, as the realm files every name) at the
-   * live element `nodeId` from its `bubbles` and `composed` flags, runs the
-   * engine components' walk over it with an empty detail and `timestamp`,
-   * and answers the path the realm runs its own walk over, as one string:
-   * the target-first node ids, comma-joined, then `;`, then each step's
-   * shadow-retargeted target, position for position — the steps
-   * `__BobcatDispatchEvent` is handed as node/target pairs, without the
-   * shadow roots, the bubble steps and the nodes no longer live; `";"` for
-   * none. So the components
-   * hear the event before this realm's listeners, and no other realm hears
-   * it. A node that is not a live element, and a timestamp that is not a
-   * finite number, throw.
+   * The host's half of `__DispatchEvent`: the dispatch the kernel runs for a
+   * routed event, the same code, for an event named `eventName` (lowercased,
+   * as the realm files every name) at the live element `nodeId`. It computes
+   * the path from `bubbles` and `composed`, runs the engine components' walk
+   * over it with an empty detail and `timestamp`, and at the path's top step
+   * calls `__BobcatDispatchEvent` once in each realm the listener table
+   * invites (a registration for the name on the path, or a
+   * `global-bindEvent` the path reaches), the page realm first and then the
+   * frames' cards in construction order, before the components on the steps
+   * below it. Every realm but this one is handed `detail` — the event's own,
+   * structured-cloned at this call, so a value the clone refuses throws here
+   * — as a `DETAIL_CLONED` detail, or a `DETAIL_EMPTY` one for `undefined`
+   * or `null`; this realm, when it is invited, is handed `DETAIL_DISPATCHED`
+   * and walks the event `__DispatchEvent` left pending. No call checkpoints,
+   * since this runs inside a JavaScript call. What any realm's listener
+   * throws is reported as that realm's listener failure and never reaches
+   * this call. A listener may call it again from inside a walk. A node that
+   * is not a live element, and a timestamp that is not a finite number,
+   * throw.
    */
   dispatchEvent(
     nodeId: number,
@@ -331,7 +337,8 @@ interface BobcatNative {
     bubbles: boolean,
     composed: boolean,
     timestamp: number,
-  ): string;
+    detail: unknown,
+  ): undefined;
   /**
    * `lynx.stopExposure({sendEvent})` (`on` `0`) and `lynx.resumeExposure()`
    * (`on` `1`), as native runs them for one card: for the elements `ids`

@@ -1507,7 +1507,8 @@ declares, the MTS realm included, for `invokeNativeModule` alone. The MTS
 members group as the document's own life, tree vocabulary over numeric
 `NodeId`s, attributes and style, selector queries, the commit, the event
 registrations (`listenerOpened`/`listenerClosed`), the synthetic dispatch
-pair (`dispatchEvent`, `timelineMilliseconds`), timers, the one-shot
+pair (`dispatchEvent`, `timelineMilliseconds`; `dispatchEvent` is the one
+member registered re-entrant, because it calls realms, its own included), timers, the one-shot
 startup strings the realm alone reads (the page-data triple handed over as
 plain JSON and processor-name strings, and the native module table it posts
 unread to its BTS), the stylesheet pair, the diagnostics pair, the
@@ -1548,7 +1549,11 @@ two things about a realm: the key its display-frame demand is reported under,
 diagnostics carry, `Main` for MTS and, for a worker, `Worker { id, url }`
 over its key and its URL, whatever that URL is. What it
 answers with, `RealmCore { engine, children, timers, futures }`, is the first
-field of both `MainThreadRuntime` and the worker thread's `WorkerRealm`.
+field of both `MainThreadRuntime` and the worker thread's `WorkerRealm`; the
+MTS realm holds it as an `Rc<RealmCore>`, the one strong handle, because its
+synthetic dispatch member reaches the same table through a `Weak` from inside
+a JavaScript call, so every call into a realm (`ScriptEngine`'s export calls,
+module loads, checkpoints) takes `&self`.
 
 The core ends with the TC39 **`ShadowRealm`** constructor, so it is a global
 of every realm kind — the MTS realm, the BTS and every plain `Worker` — a
@@ -1595,9 +1600,13 @@ same — outside every JavaScript call, because freeing a realm collects the
 whole runtime; nothing else frees a child while its owner lives but the
 release a frame's disconnection runs right after its disconnection event,
 which is the same step, and a child the hook could not furnish is kept retired for that step. A child's
-diagnostics carry the parent's `ScriptSource`. Each operation detaches the
-child from the list and puts it back after, so a `new ShadowRealm()` in the
-child's code meets no borrow.
+diagnostics carry the parent's `ScriptSource`. The list keeps each child as
+an `Rc` and never takes one out for an operation: the operation clones the
+child's handle under a short borrow and runs with the list free, so a
+`new ShadowRealm()` in the child's code meets no borrow, and a call into a
+child whose own operation is further up the stack (a synthetic dispatch from
+its timer callback that invites it) still finds it; only the release step
+takes a child out.
 
 **A `frame` is a custom-element ability** (user ruling 2026-10-14): what is
 frame-specific lives in the `tree::frame` component and in the JavaScript
@@ -1906,9 +1915,12 @@ included, with native's synthetic pair `__CreateEvent`/`__DispatchEvent`;
 for another member fails at the missing name with a precise `ReferenceError`,
 not silently. `__CreateEvent` stamps its event with the host member
 `timelineMilliseconds`, and `__DispatchEvent` calls the host member
-`dispatchEvent`, which runs the engine components' walk over the path first
-and answers the path the calling realm then runs its own Lynx walk over
-(`docs/tracking/dom-events.md`, "The synthetic dispatch entry").
+`dispatchEvent`, which runs the routed dispatch's own body (`run_dispatch`)
+over the page realm's `RealmCore`: every realm the listener table invites
+is called at the path's top step in the kernel's order, the calling realm
+included, which walks the very event object it left pending, the others a
+structured clone of the event's `detail`, and then the components on the
+steps below (`docs/tracking/dom-events.md`, "The synthetic dispatch entry").
 
 `__SetInlineStyles` keeps the whole-value policy in JavaScript: a string is one
 `style` attribute write, a record crosses in a single `setInlineStyles` call as
@@ -2699,8 +2711,15 @@ symbols, and ill-formed UTF-16 strings are rejected on the way in rather than
 lossily converted, element identity crosses as plain numbers, and handle
 objects never leave JavaScript — which keeps ordinary callbacks leaf
 operations. Their `FnMut` closure is borrowed through a `RefCell`, so reentry
-is refused rather than aliasing it; a panicking callback becomes a JS exception
-and leaves the slot usable.
+is refused rather than aliasing it; `function_reentrant` and
+`register_host_module_function_reentrant` take an `Fn` closure instead, which a
+nested call runs again (`bobcat-core`'s `dispatchEvent` is the one user). A
+`Context` is an `Rc` handle whose state is all interior, so the methods a
+call into a realm uses (`evaluate`, `module_namespace`, `member`,
+`call_member`, the module-loading members and the host-function
+registrations) take `&self`: a host function may call into any realm of the
+runtime, its own included, while a call further up the stack holds that
+realm. A panicking callback becomes a JS exception and leaves the slot usable.
 
 A closure's lifetime follows its JS function object rather than the realm: the
 closure sits at its own stable heap address, which a companion JS object holds

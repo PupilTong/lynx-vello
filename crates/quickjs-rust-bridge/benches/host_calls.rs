@@ -132,7 +132,7 @@ fn string_return(bencher: divan::Bencher) {
 /// driver is the host, so each iteration is `CALLS` boundary crossings made
 /// from Rust rather than from JavaScript.
 fn member_driver(body: &str) -> (Context, Value, quickjs_rust_bridge::Member) {
-    let mut realm = Runtime::new()
+    let realm = Runtime::new()
         .expect("runtime")
         .create_context()
         .expect("realm");
@@ -153,7 +153,7 @@ fn drive_member(
     body: &str,
     arguments: impl Fn() -> Vec<HostArgument<'static>> + Sync,
 ) {
-    let (mut realm, host, member) = member_driver(body);
+    let (realm, host, member) = member_driver(body);
     let arguments = arguments();
     bencher.bench_local(|| {
         for _ in 0..CALLS {
