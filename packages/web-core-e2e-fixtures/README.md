@@ -139,6 +139,16 @@ has no `ppx`), and the four `basic-element-text-set-native-props-*` cards
 (user, 2026-10-21: they test web-core retargeting a `setNativeProps({text})`
 push onto a text's leading `raw-text`, which this engine does not support).
 
+Also deleted by user ruling (2026-10-23):
+
+- the seven error-report and lifecycle cards — `api-error`, `api-error-bts`,
+  `api-error-mts`, `api-report-error`, `api-set-release`,
+  `api-set-release-bts` and `api-dispose`. What they assert is the host's
+  error report and what a released view reports, and the embedder traits
+  that carry both are being redesigned after native's embedder API;
+- `basic-element-x-webview-bindmessage` and `basic-element-x-audio-tt-play`:
+  `x-webview` and `x-audio-tt` are deferred.
+
 Every case that involves `enableCSSSelector: false` (user, 2026-10-13: the
 flag is no longer supported, so its cases are deleted rather than kept
 pending). That is 29 directories of upstream's `tests/reactlynx`:
@@ -154,7 +164,7 @@ Their three rspeedy config files (`config-css-selector-false.config.ts`,
 `basic-lazy-component-css-selector-false.config.ts`,
 `config-mixed-01.config.ts`) have no entry in `groups.js`. **A re-sync from
 upstream will bring the directories back; delete them again.** With them gone
-the corpus, less those six cards too, is 318 cards.
+the corpus, less those fifteen cards too, is 309 cards.
 
 ## What is not built
 

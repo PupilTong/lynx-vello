@@ -190,7 +190,7 @@ fn injected_style_rules() -> PreparsedStyleSheet {
         rules: vec![PreparsedRule::Style {
             selectors: ".injected-style-rules".to_owned(),
             declarations: vec![PreparsedDeclaration {
-                property: "background".to_owned(),
+                property: "background".into(),
                 value: "green".to_owned(),
                 important: false,
             }],
@@ -497,7 +497,7 @@ impl Card {
             // and names in `ViewSources::style_sheets`, which is the engine's
             // whole surface for it.
             let url = resources
-                .register_style_sheet("app:///injected.css", injected_style_rules())
+                .register_style_sheet("app:///injected.css", Arc::new(injected_style_rules()))
                 .expect("register the injected sheet");
             sources.style_sheets.push(url.to_string());
         }

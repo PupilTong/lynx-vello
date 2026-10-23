@@ -152,11 +152,6 @@ driven! {
     "api-nativemodules-call-delay" => [
         "answered": [Wait(3000)],
     ],
-    // `#target`. Upstream's assertions are on the host's `error` event; the frame is
-    // what the card shows once it has reported.
-    "api-report-error" => [
-        "error-reported": [Tap(50.0, 50.0)],
-    ],
     // `#start`, then `#stop`: once `loop` is on screen it pushes both buttons down a
     // line, which puts `#stop` where `#start` was.
     "api-requestAnimationFrame" => [
