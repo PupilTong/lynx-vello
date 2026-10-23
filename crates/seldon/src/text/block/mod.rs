@@ -560,6 +560,7 @@ impl TextBlock {
         plan: &CutPlan,
         natural_lines: &[NaturalLine],
         constraint: BlockConstraint,
+        recycled: Option<Box<DisplayPart>>,
     ) -> LayoutResult {
         let width = constraint.max_advance();
         let alignment = resolve_alignment(self.style.text_align, self.style.direction);
@@ -593,14 +594,25 @@ impl TextBlock {
             &slot_specs,
             hidden,
         );
+        let part = DisplayPart {
+            layout: display,
+            sources,
+            cut_byte: plan.cut_byte,
+            content_slots,
+        };
+        // The previous truncated result's box, emptied by `layout_at`, takes
+        // the new part: a re-break of a block that stays truncated allocates
+        // no box.
+        let display = match recycled {
+            Some(mut held) => {
+                *held = part;
+                held
+            }
+            None => Box::new(part),
+        };
         LayoutResult {
             constraint,
-            display: Some(Box::new(DisplayPart {
-                layout: display,
-                sources,
-                cut_byte: plan.cut_byte,
-                content_slots,
-            })),
+            display: Some(display),
             lines,
             boxes,
             size,
@@ -1060,6 +1072,19 @@ impl Retained for TextBlock {
             return;
         }
         self.memo.begin_break();
+        // The retained result is replaced below: release it before the new
+        // one is shaped, so two display layouts never coexist. A truncated
+        // result's display box is emptied here and refilled by
+        // `finish_truncated` rather than freed and allocated again.
+        let recycled = self
+            .result
+            .take()
+            .and_then(|result| result.display)
+            .map(|mut part| {
+                part.layout = Layout::default();
+                part.sources = Vec::new();
+                part
+            });
         let width = constraint.max_advance();
 
         let natural_lines = self.paragraph.break_lines(
@@ -1117,7 +1142,9 @@ impl Retained for TextBlock {
 
         let result = match plan {
             None => self.finish_untruncated(&natural_lines, constraint),
-            Some(plan) => self.finish_truncated(context, &plan, &natural_lines, constraint),
+            Some(plan) => {
+                self.finish_truncated(context, &plan, &natural_lines, constraint, recycled)
+            }
         };
         self.result = Some(result);
     }
