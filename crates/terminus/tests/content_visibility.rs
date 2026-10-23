@@ -891,7 +891,7 @@ impl CustomElement<()> for Recorder {
             .get(event.target())
             .and_then(|node| node.attribute("id"))
             .expect("every target here is a live element with an id")
-            .to_owned();
+            .into_owned();
         let phase = match event.phase() {
             EventPhase::Capturing => "capture",
             EventPhase::AtTarget => "at-target",
@@ -1101,7 +1101,12 @@ fn a_handler_that_mutates_the_tree_is_drained_before_the_next_step() {
     let scroller = Recorder::new("scroller", &log);
     let row = Recorder::new("row", &log).on_event(Box::new(|document, element, event| {
         // The first row only, so what the log shows is one step's worth.
-        if document.get(element).and_then(|node| node.attribute("id")) != Some("row0") {
+        if document
+            .get(element)
+            .and_then(|node| node.attribute("id"))
+            .as_deref()
+            != Some("row0")
+        {
             return;
         }
         document.set_inline_style(element, "width: 120px");

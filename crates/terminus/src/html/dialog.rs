@@ -295,7 +295,8 @@ fn is_open<T>(document: &Document<T>, dialog: NodeId) -> bool {
     opens(
         document
             .get(dialog)
-            .and_then(|node| node.attribute(OPEN_ATTRIBUTE)),
+            .and_then(|node| node.attribute(OPEN_ATTRIBUTE))
+            .as_deref(),
     )
 }
 

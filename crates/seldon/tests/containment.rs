@@ -245,7 +245,7 @@ fn leaf_size_containment_skips_the_measurer() {
     let output = perform_layout(&tree, leaf, Size::NONE, Size::MAX_CONTENT);
 
     assert_size(output.size, Size::new(50.0, 30.0));
-    assert_eq!(output.first_baselines, Point::NONE);
+    assert_eq!(output.first_baseline, None);
     assert_eq!(tree.leaf_measure_calls.get(), 0);
 }
 
@@ -286,15 +286,15 @@ fn flex_layout_containment_suppresses_the_exported_baseline() {
     let child = baseline_child(&mut tree);
     let container = flex_container(&mut tree, TestStyle::default(), &[child]);
     let normal = perform_layout(&tree, container, Size::NONE, Size::MAX_CONTENT);
-    assert!(normal.first_baselines.y.is_some());
+    assert!(normal.first_baseline.is_some());
 
     let mut tree = TestTree::default();
     let child = baseline_child(&mut tree);
     let container = flex_container(&mut tree, layout_contained(TestStyle::default()), &[child]);
     let committed = perform_layout(&tree, container, Size::NONE, Size::MAX_CONTENT);
-    assert_eq!(committed.first_baselines.y, None);
+    assert_eq!(committed.first_baseline, None);
     let measured = measure(&tree, container, Size::MAX_CONTENT);
-    assert_eq!(measured.first_baselines.y, None);
+    assert_eq!(measured.first_baseline, None);
 }
 
 #[test]
@@ -303,13 +303,13 @@ fn grid_layout_containment_suppresses_the_exported_baseline() {
     let child = baseline_child(&mut tree);
     let container = tree.push_grid(TestStyle::default(), vec![child]);
     let normal = perform_layout(&tree, container, Size::NONE, Size::MAX_CONTENT);
-    assert!(normal.first_baselines.y.is_some());
+    assert!(normal.first_baseline.is_some());
 
     let mut tree = TestTree::default();
     let child = baseline_child(&mut tree);
     let container = tree.push_grid(layout_contained(TestStyle::default()), vec![child]);
     let committed = perform_layout(&tree, container, Size::NONE, Size::MAX_CONTENT);
-    assert_eq!(committed.first_baselines.y, None);
+    assert_eq!(committed.first_baseline, None);
 }
 
 #[test]
@@ -318,15 +318,15 @@ fn linear_layout_containment_suppresses_the_exported_baseline() {
     let child = baseline_child(&mut tree);
     let container = linear_container(&mut tree, TestStyle::default(), &[child]);
     let normal = perform_layout(&tree, container, Size::NONE, Size::MAX_CONTENT);
-    assert!(normal.first_baselines.y.is_some());
+    assert!(normal.first_baseline.is_some());
 
     let mut tree = TestTree::default();
     let child = baseline_child(&mut tree);
     let container = linear_container(&mut tree, layout_contained(TestStyle::default()), &[child]);
     let committed = perform_layout(&tree, container, Size::NONE, Size::MAX_CONTENT);
-    assert_eq!(committed.first_baselines.y, None);
+    assert_eq!(committed.first_baseline, None);
     let measured = measure(&tree, container, Size::MAX_CONTENT);
-    assert_eq!(measured.first_baselines.y, None);
+    assert_eq!(measured.first_baseline, None);
 }
 
 fn two_baseline_child(tree: &mut TestTree) -> TestId {
@@ -348,22 +348,22 @@ fn layout_containment_suppresses_the_exported_last_baseline() {
     let child = two_baseline_child(&mut tree);
     let container = tree.push_grid(TestStyle::default(), vec![child]);
     let normal = perform_layout(&tree, container, Size::NONE, Size::MAX_CONTENT);
-    assert_eq!(normal.last_baselines.y, Some(16.0));
+    assert_eq!(normal.last_baseline, Some(16.0));
 
     let mut tree = TestTree::default();
     let child = two_baseline_child(&mut tree);
     let container = tree.push_grid(layout_contained(TestStyle::default()), vec![child]);
     let committed = perform_layout(&tree, container, Size::NONE, Size::MAX_CONTENT);
-    assert_eq!(committed.last_baselines, Point::NONE);
+    assert_eq!(committed.last_baseline, None);
     let measured = measure(&tree, container, Size::MAX_CONTENT);
-    assert_eq!(measured.last_baselines, Point::NONE);
+    assert_eq!(measured.last_baseline, None);
 
     let mut tree = TestTree::default();
     let child = two_baseline_child(&mut tree);
     let container = flex_container(&mut tree, layout_contained(TestStyle::default()), &[child]);
     assert_eq!(
-        perform_layout(&tree, container, Size::NONE, Size::MAX_CONTENT).last_baselines,
-        Point::NONE
+        perform_layout(&tree, container, Size::NONE, Size::MAX_CONTENT).last_baseline,
+        None
     );
 }
 
@@ -376,14 +376,14 @@ fn lynx_layouts_export_no_last_baseline() {
     let child = two_baseline_child(&mut tree);
     let container = linear_container(&mut tree, TestStyle::default(), &[child]);
     let output = perform_layout(&tree, container, Size::NONE, Size::MAX_CONTENT);
-    assert_eq!(output.first_baselines.y, Some(6.0));
-    assert_eq!(output.last_baselines, Point::NONE);
+    assert_eq!(output.first_baseline, Some(6.0));
+    assert_eq!(output.last_baseline, None);
 
     let mut tree = TestTree::default();
     let child = two_baseline_child(&mut tree);
     let container = relative_container(&mut tree, TestStyle::default(), &[child]);
     let output = perform_layout(&tree, container, Size::NONE, Size::MAX_CONTENT);
-    assert_eq!(output.last_baselines, Point::NONE);
+    assert_eq!(output.last_baseline, None);
 }
 
 #[test]
@@ -464,7 +464,7 @@ fn skipped_contents_size_from_intrinsic_and_hidden_children() {
     let output = perform_layout(&tree, container, Size::NONE, Size::MAX_CONTENT);
 
     assert_size(output.size, Size::new(60.0, 40.0));
-    assert_eq!(output.first_baselines, Point::NONE);
+    assert_eq!(output.first_baseline, None);
     assert_size(output.content_size, Size::new(60.0, 40.0));
     assert_eq!(tree.layout(child).size, Size::ZERO);
 }
@@ -723,12 +723,12 @@ fn leaf_block_size_containment_substitutes_the_height_and_drops_the_baseline() {
         ..TestStyle::default()
     };
     let leaf = tree.push_measured_leaf(style, |_input| {
-        LeafMetrics::new(Size::new(120.0, 999.0)).with_first_baselines(Point::new(None, Some(12.0)))
+        LeafMetrics::new(Size::new(120.0, 999.0)).with_first_baseline(Some(12.0))
     });
 
     let output = perform_layout(&tree, leaf, Size::NONE, Size::MAX_CONTENT);
 
     assert_size(output.size, Size::new(120.0, 30.0));
-    assert_eq!(output.first_baselines, Point::NONE);
+    assert_eq!(output.first_baseline, None);
     assert_eq!(tree.leaf_measure_calls.get(), 1);
 }

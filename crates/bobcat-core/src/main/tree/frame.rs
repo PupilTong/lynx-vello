@@ -258,7 +258,7 @@ mod tests {
         let page = nested_page(&document, frame).expect("a nested page");
         let node = document.get(page).expect("live");
         assert_eq!(node.tag_name(), Some(PAGE_TAG));
-        assert_eq!(node.attribute("part"), Some("page"));
+        assert_eq!(node.attribute("part").as_deref(), Some("page"));
         assert_eq!(document.get(shadow).unwrap().child_ids(), [page]);
         let view = child(&mut document, "view", "");
         assert_eq!(nested_page(&document, view), None, "a view is no frame");
@@ -285,7 +285,7 @@ mod tests {
         assert_eq!(document.get(shadow).unwrap().child_ids(), [page]);
         let node = document.get(page).expect("live");
         assert_eq!(node.tag_name(), Some(PAGE_TAG));
-        assert_eq!(node.attribute("part"), Some("page"));
+        assert_eq!(node.attribute("part").as_deref(), Some("page"));
         for freed in [old, content, deeper] {
             assert!(document.get(freed).is_none(), "{freed:?} was freed");
         }

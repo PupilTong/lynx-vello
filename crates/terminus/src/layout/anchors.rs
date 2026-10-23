@@ -3,14 +3,15 @@
 //! passes.
 //!
 //! `seldon` resolves every anchor function, `position-area`,
-//! `anchor-center` and the fallback loop; it asks this module four things
+//! `anchor-center` and the fallback loop; it asks this module three things
 //! through [`LayoutTree`](seldon::tree::LayoutTree) —
 //! [`target anchor element`](target_anchor) and its rectangle
-//! (`anchor_rect`), the [`default anchor`](default_anchor) (§2.4), whether a
-//! named anchor [scrolls with](scrolls_with_default) the default one (§3.3),
-//! and the [scrollable containing block](scrollable_containing_block)
-//! (css-position-4) — and hands back one [`AnchorOutcome`] per committed
-//! anchor-positioned box. The trait impl lives in `host.rs`; everything it
+//! (`anchor_rect`), the [`default anchor`](default_anchor) (§2.4), and whether
+//! a named anchor [scrolls with](scrolls_with_default) the default one (§3.3)
+//! — and hands back one [`AnchorOutcome`] per committed anchor-positioned
+//! box. css-position-4's scrollable containing block is not asked: the
+//! scroll container's own algorithm computes it and hands it to its absolute
+//! pass. The trait impl lives in `host.rs`; everything it
 //! calls is here.
 //!
 //! # Storage, and why each piece exists
@@ -331,8 +332,6 @@ pub(crate) enum AnchorQuery {
     Default,
     /// A tree-scoped `<anchor-name>`.
     Named(TreeScoped<DashedIdent>),
-    /// css-position-4's scrollable containing block.
-    Scrollable,
 }
 
 /// One anchor query a box's layout read, and what it was told.
@@ -913,6 +912,27 @@ pub(crate) fn default_anchor<'t, T>(
     }
 }
 
+/// Whether `node` can have a default anchor (§2.4) under its own style or
+/// any of its position options: one of them has a `position-anchor` that
+/// names an element (`CoreStyle::names_position_anchor`). Only such a box is
+/// laid out against css-position-4's scrollable containing block; whether
+/// the name finds an element is not asked, so the answer is a superset.
+pub(crate) fn may_have_default_anchor<T>(tree: &TreeArenas<T>, node: &Node<T>) -> bool {
+    let names = |style: &ComputedValues| {
+        !matches!(
+            style.get_position().position_anchor.value,
+            PositionAnchorKeyword::Normal
+                | PositionAnchorKeyword::None
+                | PositionAnchorKeyword::Auto
+        )
+    };
+    node.layout_computed_style().is_some_and(names)
+        || tree
+            .anchors()
+            .options(node.id())
+            .is_some_and(|options| options.styles.iter().any(|style| names(style)))
+}
+
 // ---------------------------------------------------------------------------
 // Geometry.
 
@@ -1005,7 +1025,12 @@ fn stored_displacement<T>(
                 .and_then(Node::layout_computed_style)
                 .zip(state.get(scroller))
                 .and_then(|(style, entry)| {
-                    crate::scroll::resolve(style, &entry.slot.unrounded, entry.scroll_offset)
+                    let offset = state
+                        .scroll_offsets
+                        .get(&scroller)
+                        .copied()
+                        .unwrap_or_default();
+                    crate::scroll::resolve(style, &entry.slot.unrounded, offset)
                 })
                 .map_or_else(Vector2D::zero, |scroll_box| scroll_box.offset);
             sum - offset
@@ -1042,27 +1067,6 @@ fn anchor_rect_of<T>(
         ),
         rect.size,
     )
-}
-
-/// css-position-4's scrollable containing block of a box whose containing
-/// block `containing_block` generates: that scroll container's in-flow
-/// scrollable overflow area measured from its padding-box origin, as its
-/// last committing run recorded it before laying its out-of-flow boxes out
-/// (the current run's, when the box is being laid out by that container's
-/// absolute pass). `None` when the generator is not a scroll container.
-fn scrollable_containing_block<T>(
-    tree: &TreeArenas<T>,
-    state: &DocumentLayoutState,
-    containing_block: Option<NodeId>,
-) -> Option<Size<f32>> {
-    let block = tree.get(containing_block?)?;
-    if !block
-        .layout_computed_style()
-        .is_some_and(crate::scroll::is_scroll_container)
-    {
-        return None;
-    }
-    state.scrollable_containing_blocks.get(&block.id()).copied()
 }
 
 /// The nearest scroll container on `node`'s containing-block chain whose
@@ -1200,10 +1204,6 @@ pub(crate) fn answer<T>(
 ) -> (Option<NodeId>, Option<Rect<f32>>) {
     let liveness = Liveness::Committed(state);
     let target = match query {
-        AnchorQuery::Scrollable => {
-            let size = scrollable_containing_block(tree, state, anchored.containing_block);
-            return (None, size.map(|size| Rect::new(Point::ZERO, size)));
-        }
         AnchorQuery::Default => option_style(tree, anchored.node, option)
             .and_then(|style| default_anchor(tree, anchored, style, liveness)),
         AnchorQuery::Named(name) => target_anchor(tree, anchored, name, liveness),
@@ -1239,7 +1239,6 @@ pub(crate) fn lookup_generation<T>(
             | PositionAnchorKeyword::None
             | PositionAnchorKeyword::Auto => None,
         },
-        AnchorQuery::Scrollable => None,
     }
 }
 
@@ -1901,7 +1900,6 @@ impl<T> crate::tree::document::Document<T> {
             }
             entry.reads.iter().any(|read| {
                 let target = match &read.query {
-                    AnchorQuery::Scrollable => None,
                     AnchorQuery::Named(name) => target_anchor(tree, &query, name, liveness),
                     AnchorQuery::Default => option_style(tree, node, read.option)
                         .and_then(|style| default_anchor(tree, &query, style, liveness)),
@@ -2022,8 +2020,9 @@ mod tests {
 
     #[test]
     fn a_scrollable_containing_block_settles_in_the_run_that_reads_it() {
-        // The scroller records its in-flow overflow before its absolute pass,
-        // so the box laid out against it reads this run's area.
+        // The scroller computes its in-flow overflow before its absolute
+        // pass and hands it to that pass, so the box laid out against it
+        // reads this run's area.
         let mut doc = doc(
             ".scroller { overflow: hidden; position: relative; width: 80px; height: 80px; }
              .filler { width: 180px; height: 180px; }

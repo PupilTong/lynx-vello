@@ -71,8 +71,8 @@ CSS supplied as text.
   existing sharing checks compare its hints. The block never serializes into
   `style`, so replacing inline declarations cannot erase attribute-derived
   values. Attribute interpretation remains embedder policy.
-- **Payloads are opaque.** The payload arena retains the `T` supplied for
-  each element/text node, and `Node<T>::payload` exposes a shared reference.
+- **Payloads are opaque.** Each element/text node retains the `T` supplied
+  for it, and `Node<T>::payload` exposes a shared reference.
   The DOM core neither mutates the payload nor derives selector-visible state
   from it. IDs, classes, inline style, CSS scope markers (the `l-css-id`
   attribute `__SetCSSId` writes), and dataset entries must be ordinary DOM

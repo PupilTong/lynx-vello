@@ -63,6 +63,7 @@ mod platform_time;
 mod implementation {
     use std::cell::{Cell, RefCell};
     use std::ffi::{CStr, CString, c_char, c_int, c_void};
+    use std::mem::MaybeUninit;
     use std::num::TryFromIntError;
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::ptr::{self, NonNull};
@@ -81,6 +82,14 @@ mod implementation {
     use super::ffi;
 
     const HOST_INLINE_ARGS: usize = 8;
+
+    /// The arguments a host->realm [`Context::call_member`] describes on the
+    /// stack before any spill to the heap; the shim's
+    /// `QJS_CALL_INLINE_ARGS` is the same number, for the `JSValue`s it
+    /// builds from them. Wider than [`HOST_INLINE_ARGS`] because the engine's
+    /// event dispatch is one such call with two arguments per path step: a
+    /// position event over eight steps is 31.
+    const CALL_INLINE_ARGS: usize = 32;
 
     /// `QuickJS`'s "no such atom" sentinel, returned when interning fails.
     const JS_ATOM_NULL: u32 = 0;
@@ -520,31 +529,41 @@ mod implementation {
         })
     }
 
-    fn read_host_arguments(
+    /// The arguments the trampoline described, lent for `'a`: the caller
+    /// chooses `'a` no longer than the dispatch, after which the trampoline
+    /// releases every string and clone they borrow.
+    fn read_host_arguments<'a>(
         count: usize,
         arguments: *const ffi::QjsHostArg,
-    ) -> Result<SmallVec<[HostValue; HOST_INLINE_ARGS]>, HostFunctionError> {
+    ) -> Result<SmallVec<[HostArgument<'a>; HOST_INLINE_ARGS]>, HostFunctionError> {
         if count == 0 || arguments.is_null() {
             return Ok(SmallVec::new());
         }
-        let raw = unsafe { std::slice::from_raw_parts(arguments, count) };
+        let raw: &'a [ffi::QjsHostArg] = unsafe { std::slice::from_raw_parts(arguments, count) };
         raw.iter().map(read_host_argument).collect()
     }
 
-    fn read_host_argument(argument: &ffi::QjsHostArg) -> Result<HostValue, HostFunctionError> {
+    /// One described argument, borrowing the bytes the trampoline holds for
+    /// it: a string is `JS_ToCStringLen2`'s UTF-8 — the realm's own bytes
+    /// for an ASCII string — and a structured clone `JS_WriteObject`'s
+    /// stream, so nothing is copied unless the host function keeps the value
+    /// ([`HostArgument::to_value`]).
+    fn read_host_argument(
+        argument: &ffi::QjsHostArg,
+    ) -> Result<HostArgument<'_>, HostFunctionError> {
         match argument.kind {
-            ffi::HOST_ARG_UNDEFINED => Ok(HostValue::Undefined),
-            ffi::HOST_ARG_NULL => Ok(HostValue::Null),
-            ffi::HOST_ARG_BOOLEAN => Ok(HostValue::Boolean(argument.number != 0.0)),
-            ffi::HOST_ARG_NUMBER => Ok(HostValue::Number(argument.number)),
+            ffi::HOST_ARG_UNDEFINED => Ok(HostArgument::Undefined),
+            ffi::HOST_ARG_NULL => Ok(HostArgument::Null),
+            ffi::HOST_ARG_BOOLEAN => Ok(HostArgument::Boolean(argument.number != 0.0)),
+            ffi::HOST_ARG_NUMBER => Ok(HostArgument::Number(argument.number)),
+            // The shim asks for UTF-8 rather than CESU-8, so a surrogate pair
+            // is one four-byte sequence and the only bytes that are not UTF-8
+            // are a lone surrogate's, which is the one string UTF-8 cannot
+            // carry.
             ffi::HOST_ARG_STRING => {
                 let bytes = unsafe { std::slice::from_raw_parts(argument.text, argument.text_len) };
-                if let Ok(text) = std::str::from_utf8(bytes) {
-                    return Ok(HostValue::String(text.to_owned()));
-                }
-                let units = decode_cesu8(bytes).map_err(HostFunctionError::new)?;
-                String::from_utf16(&units)
-                    .map(HostValue::String)
+                std::str::from_utf8(bytes)
+                    .map(HostArgument::String)
                     .map_err(|_| {
                         HostFunctionError::new(
                             "an ill-formed UTF-16 string cannot cross the host-function boundary",
@@ -557,9 +576,7 @@ mod implementation {
             // other kind this side does not write.
             ffi::HOST_ARG_STRUCTURED => {
                 let bytes = unsafe { std::slice::from_raw_parts(argument.text, argument.text_len) };
-                Ok(HostValue::Structured(StructuredClone {
-                    bytes: bytes.to_owned(),
-                }))
+                Ok(HostArgument::Structured(StructuredBytes::from_bytes(bytes)))
             }
             _ => Err(HostFunctionError::new(
                 "host functions accept undefined, null, Boolean, Number, String, and \
@@ -656,19 +673,64 @@ mod implementation {
         bytes: Vec<u8>,
     }
 
-    /// A value a host function receives or returns: a primitive, or an opaque
-    /// structured clone.
+    /// A structured clone's bytes, lent rather than owned: what a
+    /// [`HostArgument`] carries, whether the host lends a [`StructuredClone`]
+    /// it holds into a call or a host function is lent the clone the realm
+    /// wrote for its argument. As opaque as the owned form;
+    /// [`ToOwned::to_owned`] is its one copy, for a value the host keeps.
+    #[derive(Debug, PartialEq, Eq)]
+    #[repr(transparent)]
+    pub struct StructuredBytes {
+        bytes: [u8],
+    }
+
+    impl StructuredBytes {
+        fn from_bytes(bytes: &[u8]) -> &Self {
+            // SAFETY: `Self` is `repr(transparent)` over `[u8]`, so the two
+            // references share one layout and one length.
+            unsafe { &*(ptr::from_ref(bytes) as *const Self) }
+        }
+    }
+
+    impl ToOwned for StructuredBytes {
+        type Owned = StructuredClone;
+
+        fn to_owned(&self) -> StructuredClone {
+            StructuredClone {
+                bytes: self.bytes.to_vec(),
+            }
+        }
+    }
+
+    impl std::borrow::Borrow<StructuredBytes> for StructuredClone {
+        fn borrow(&self) -> &StructuredBytes {
+            self
+        }
+    }
+
+    impl std::ops::Deref for StructuredClone {
+        type Target = StructuredBytes;
+
+        fn deref(&self) -> &StructuredBytes {
+            StructuredBytes::from_bytes(&self.bytes)
+        }
+    }
+
+    /// A value a host function returns, or one the host keeps: a primitive,
+    /// or an opaque structured clone.
     ///
-    /// Owned, because both are values the boundary has just produced: an
-    /// argument was decoded out of the realm, a return value was built by the
-    /// host. Text is always well-formed UTF-8, which is what lets an outbound
-    /// string take `JS_NewStringLen` directly.
+    /// Owned, because it outlives the call that produced it: a return value
+    /// was built by the host, and an argument kept past its call
+    /// ([`HostArgument::to_value`]) — a message posted to another thread —
+    /// was copied out of it. Text is always well-formed UTF-8, which is what
+    /// lets an outbound string take `JS_NewStringLen` directly.
     ///
     /// A realm value still never crosses as itself. A [`StructuredClone`] is a
     /// copy the realm made, not a handle on anything in it.
     ///
-    /// [`HostArgument`] is the borrowed counterpart, for the other direction:
-    /// bytes the host already owns and only lends for the length of a call.
+    /// [`HostArgument`] is the borrowed counterpart: what a host function is
+    /// lent as its arguments, and what the host lends into a call of its own,
+    /// in both cases for the length of the call.
     #[derive(Clone, Debug, PartialEq)]
     #[non_exhaustive]
     pub enum HostValue {
@@ -698,13 +760,19 @@ mod implementation {
         }
     }
 
-    /// A value the host passes into the realm, borrowing its bytes.
+    /// A value lent across the boundary for the length of one call, borrowing
+    /// its bytes: an argument the host passes into the realm, or one a host
+    /// function is handed.
     ///
     /// Deliberately not [`HostValue`]. A caller of [`Context::call_member`]
     /// already owns the strings it is passing — an event's name and its JSON
     /// detail, held for the whole walk — and needs them only for the length
-    /// of the call, so it lends them. Owning them here would mean a copy per
-    /// argument per call.
+    /// of the call, so it lends them. A host function's arguments are the
+    /// trampoline's, which holds them until the function returns, and most
+    /// are read and dropped within the call — a node id, an attribute name —
+    /// so they are lent too, and only what the function keeps is copied
+    /// ([`Self::to_value`]). Owning them here would mean a copy per argument
+    /// per call.
     ///
     /// The alternative was to make [`HostValue`] itself reference-counted so
     /// both directions could share one type. Borrowing is strictly less work
@@ -721,36 +789,49 @@ mod implementation {
         Boolean(bool),
         Number(f64),
         String(&'a str),
-        Structured(&'a StructuredClone),
+        Structured(&'a StructuredBytes),
     }
 
     impl HostArgument<'_> {
-        /// Fills in one C-ABI argument descriptor borrowing this value.
-        fn describe(self, slot: &mut ffi::QjsHostArg) {
-            slot.number = 0.0;
-            slot.text = ptr::null();
-            slot.text_len = 0;
+        /// Copies this value out of the call it was lent for: what a host
+        /// function keeps of an argument, or sends to another thread.
+        #[must_use]
+        pub fn to_value(self) -> HostValue {
             match self {
-                Self::Undefined => slot.kind = ffi::HOST_ARG_UNDEFINED,
-                Self::Null => slot.kind = ffi::HOST_ARG_NULL,
-                Self::Boolean(value) => {
-                    slot.kind = ffi::HOST_ARG_BOOLEAN;
-                    slot.number = if value { 1.0 } else { 0.0 };
-                }
-                Self::Number(value) => {
-                    slot.kind = ffi::HOST_ARG_NUMBER;
-                    slot.number = value;
-                }
-                Self::String(value) => {
-                    slot.kind = ffi::HOST_ARG_STRING;
-                    slot.text = value.as_ptr();
-                    slot.text_len = value.len();
-                }
-                Self::Structured(value) => {
-                    slot.kind = ffi::HOST_ARG_STRUCTURED;
-                    slot.text = value.bytes.as_ptr();
-                    slot.text_len = value.bytes.len();
-                }
+                Self::Undefined => HostValue::Undefined,
+                Self::Null => HostValue::Null,
+                Self::Boolean(value) => HostValue::Boolean(value),
+                Self::Number(value) => HostValue::Number(value),
+                Self::String(value) => HostValue::String(value.to_owned()),
+                Self::Structured(value) => HostValue::Structured(value.to_owned()),
+            }
+        }
+
+        /// The C-ABI argument descriptor borrowing this value.
+        fn descriptor(self) -> ffi::QjsHostArg {
+            let (kind, number, text, text_len) = match self {
+                Self::Undefined => (ffi::HOST_ARG_UNDEFINED, 0.0, ptr::null(), 0),
+                Self::Null => (ffi::HOST_ARG_NULL, 0.0, ptr::null(), 0),
+                Self::Boolean(value) => (
+                    ffi::HOST_ARG_BOOLEAN,
+                    if value { 1.0 } else { 0.0 },
+                    ptr::null(),
+                    0,
+                ),
+                Self::Number(value) => (ffi::HOST_ARG_NUMBER, value, ptr::null(), 0),
+                Self::String(value) => (ffi::HOST_ARG_STRING, 0.0, value.as_ptr(), value.len()),
+                Self::Structured(value) => (
+                    ffi::HOST_ARG_STRUCTURED,
+                    0.0,
+                    value.bytes.as_ptr(),
+                    value.bytes.len(),
+                ),
+            };
+            ffi::QjsHostArg {
+                kind,
+                number,
+                text,
+                text_len,
             }
         }
     }
@@ -790,7 +871,7 @@ mod implementation {
 
     impl std::error::Error for HostFunctionError {}
 
-    type HostHandler = Box<dyn FnMut(&[HostValue]) -> Result<HostValue, HostFunctionError>>;
+    type HostHandler = Box<dyn FnMut(&[HostArgument<'_>]) -> Result<HostValue, HostFunctionError>>;
 
     struct HostSlot {
         handler: RefCell<HostHandler>,
@@ -1768,7 +1849,7 @@ mod implementation {
             handler: F,
         ) -> Result<(), Error>
         where
-            F: FnMut(&[HostValue]) -> Result<HostValue, HostFunctionError> + 'static,
+            F: FnMut(&[HostArgument<'_>]) -> Result<HostValue, HostFunctionError> + 'static,
         {
             self.reclaim();
             let (module_name_c, export_name_c) = host_module_names(module_name, export_name)?;
@@ -1985,7 +2066,7 @@ mod implementation {
         /// Creates a JavaScript callable backed by a Rust closure.
         pub fn function<F>(&mut self, name: &str, arity: u32, handler: F) -> Result<Value, Error>
         where
-            F: FnMut(&[HostValue]) -> Result<HostValue, HostFunctionError> + 'static,
+            F: FnMut(&[HostArgument<'_>]) -> Result<HostValue, HostFunctionError> + 'static,
         {
             self.reclaim();
             let name = property_name(name)?;
@@ -2013,7 +2094,7 @@ mod implementation {
             handler: F,
         ) -> Result<(), Error>
         where
-            F: FnMut(&[HostValue]) -> Result<HostValue, HostFunctionError> + 'static,
+            F: FnMut(&[HostArgument<'_>]) -> Result<HostValue, HostFunctionError> + 'static,
         {
             let function = self.function(name, arity, handler)?;
             let global = self.global_object()?;
@@ -2341,18 +2422,24 @@ mod implementation {
                     "member name belongs to a different QuickJS runtime",
                 ));
             }
-            let mut described: SmallVec<[ffi::QjsHostArg; HOST_INLINE_ARGS]> =
-                SmallVec::with_capacity(arguments.len());
-            for argument in arguments {
-                let mut slot = ffi::QjsHostArg {
-                    kind: ffi::HOST_ARG_UNDEFINED,
-                    number: 0.0,
-                    text: ptr::null(),
-                    text_len: 0,
-                };
-                argument.describe(&mut slot);
-                described.push(slot);
+            // The descriptors are written where they stay: in an array on
+            // this frame, or for a longer call in a vector's spare capacity.
+            // Not a `SmallVec`, which `with_capacity` builds and then moves,
+            // a copy of all `CALL_INLINE_ARGS` slots on every call.
+            let count = arguments.len();
+            let mut inline = [const { MaybeUninit::<ffi::QjsHostArg>::uninit() }; CALL_INLINE_ARGS];
+            let mut spilled: Vec<ffi::QjsHostArg> = Vec::new();
+            let slots = if count <= CALL_INLINE_ARGS {
+                &mut inline[..count]
+            } else {
+                spilled.reserve_exact(count);
+                &mut spilled.spare_capacity_mut()[..count]
+            };
+            for (slot, argument) in slots.iter_mut().zip(arguments) {
+                slot.write(argument.descriptor());
             }
+            // Every one of the `count` slots is written above.
+            let described = slots.as_ptr().cast::<ffi::QjsHostArg>();
 
             let guard = self.begin();
             let mut raw = ptr::null_mut();
@@ -2361,13 +2448,13 @@ mod implementation {
                     self.raw().as_ptr(),
                     target.inner.value.raw.as_ptr(),
                     member.atom,
-                    described.len(),
-                    described.as_ptr(),
+                    count,
+                    described,
                     &raw mut raw,
                 )
             };
             // The descriptors borrow `arguments`, which outlives the call.
-            drop(described);
+            drop(spilled);
             let result = match status {
                 0 => self
                     .value_or_exception(raw, ErrorPhase::Call)
@@ -4775,11 +4862,11 @@ mod implementation {
             realm
                 .register_host_module_function("bobcat-internal:host", "add", 2, |arguments| {
                     let left = match arguments.first() {
-                        Some(HostValue::Number(value)) => *value,
+                        Some(HostArgument::Number(value)) => *value,
                         _ => return Err(HostFunctionError::new("left must be a number")),
                     };
                     let right = match arguments.get(1) {
-                        Some(HostValue::Number(value)) => *value,
+                        Some(HostArgument::Number(value)) => *value,
                         _ => return Err(HostFunctionError::new("right must be a number")),
                     };
                     Ok(HostValue::Number(left + right))
@@ -5674,7 +5761,7 @@ mod implementation {
             let mut realm = single_realm();
             realm
                 .define_global_function("double", 1, |arguments| {
-                    let HostValue::Number(value) = arguments[0] else {
+                    let HostArgument::Number(value) = arguments[0] else {
                         return Err(HostFunctionError::new("expected a number"));
                     };
                     Ok(HostValue::Number(value * 2.0))
@@ -5702,12 +5789,12 @@ mod implementation {
             realm
                 .define_global_function("describe", 1, |arguments| {
                     Ok(HostValue::String(match &arguments[0] {
-                        HostValue::Undefined => "undefined".to_owned(),
-                        HostValue::Null => "null".to_owned(),
-                        HostValue::Boolean(value) => format!("boolean:{value}"),
-                        HostValue::Number(value) => format!("number:{value}"),
-                        HostValue::String(value) => format!("string:{value}"),
-                        HostValue::Structured(_) => "structured".to_owned(),
+                        HostArgument::Undefined => "undefined".to_owned(),
+                        HostArgument::Null => "null".to_owned(),
+                        HostArgument::Boolean(value) => format!("boolean:{value}"),
+                        HostArgument::Number(value) => format!("number:{value}"),
+                        HostArgument::String(value) => format!("string:{value}"),
+                        HostArgument::Structured(_) => "structured".to_owned(),
                     }))
                 })
                 .unwrap();
@@ -5804,7 +5891,7 @@ mod implementation {
             realm
                 .define_global_function("flaky", 1, move |arguments| {
                     calls += 1.0;
-                    if matches!(arguments[0], HostValue::Boolean(true)) {
+                    if matches!(arguments[0], HostArgument::Boolean(true)) {
                         panic!("host bug");
                     }
                     Ok(HostValue::Number(calls))
@@ -5933,14 +6020,16 @@ mod implementation {
                 )
                 .unwrap();
             let sum = realm.member("sum").unwrap();
-            let arguments: Vec<HostArgument<'_>> = (0..32)
+            // Past the descriptors' inline array and the shim's inline argv.
+            let count = u32::try_from(CALL_INLINE_ARGS).unwrap() + 8;
+            let arguments: Vec<HostArgument<'_>> = (0..count)
                 .map(|i| HostArgument::Number(f64::from(i)))
                 .collect();
             let CallOutcome::Called(total) = realm.call_member(&host, &sum, &arguments).unwrap()
             else {
                 panic!("the member ran");
             };
-            assert_eq!(total.as_number(), Some(496.0));
+            assert_eq!(total.as_number(), Some(f64::from(count * (count - 1) / 2)));
         }
 
         #[test]
@@ -6797,6 +6886,6 @@ mod implementation {
 pub use implementation::{
     CallOutcome, Context, Error, ErrorKind, ErrorPhase, EvalOptions, EvalSource, HostArgument,
     HostFunctionError, HostValue, InterruptHandle, Member, ModuleNormalizer, RequiredKind,
-    RequiredSource, Runtime, RuntimeOptions, SourceLocation, SourceType, StructuredClone, Value,
-    ValueKind,
+    RequiredSource, Runtime, RuntimeOptions, SourceLocation, SourceType, StructuredBytes,
+    StructuredClone, Value, ValueKind,
 };

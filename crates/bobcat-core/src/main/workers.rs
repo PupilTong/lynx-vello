@@ -21,7 +21,7 @@ use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use quickjs_rust_bridge::HostValue;
+use quickjs_rust_bridge::{HostArgument, HostValue};
 use rustc_hash::FxHashMap;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -154,7 +154,7 @@ impl WorkerOwner {
             HOST_MODULE_SPECIFIER,
             "createWorker",
             3,
-            Box::new(move |arguments| {
+            move |arguments| {
                 let creator = creator
                     .upgrade()
                     .ok_or("the creating realm has been released")?;
@@ -182,9 +182,10 @@ impl WorkerOwner {
                 let url = String::from(url);
                 let factory = &creator.view.factory;
                 let id = factory.next.get();
-                factory
-                    .next
-                    .set(id.checked_add(1).ok_or("worker ids exhausted")?);
+                if id > MAX_WORKER_KEY {
+                    return Err("worker ids exhausted".to_owned());
+                }
+                factory.next.set(id + 1);
                 let key = WorkerKey::new(id);
                 // Each worker's own end signal, which every request it makes
                 // of the host is cancelled with as well. The host is asked
@@ -203,38 +204,44 @@ impl WorkerOwner {
                     token,
                 };
                 creator.start(start, messages);
-                Ok(HostValue::String(id.to_string()))
-            }),
+                #[expect(
+                    clippy::cast_precision_loss,
+                    reason = "at most `MAX_WORKER_KEY`, which an f64 holds exactly"
+                )]
+                Ok(HostValue::Number(id as f64))
+            },
         )?;
         let sender = Rc::downgrade(self);
         engine.register_host_module_function(
             HOST_MODULE_SPECIFIER,
             "sendWorkerMessage",
             2,
-            Box::new(move |arguments| {
+            move |arguments| {
                 let key = key(arguments)?;
                 // Any value the boundary carries. A value the serializer
                 // refuses throws in the realm that called `postMessage`, so
                 // nothing here has to decide what a message may be.
-                let data = arguments.get(1).cloned().unwrap_or(HostValue::Undefined);
+                let data = arguments
+                    .get(1)
+                    .map_or(HostValue::Undefined, |data| data.to_value());
                 if let Some(sender) = sender.upgrade() {
                     sender.post(key, WorkerMessage::Post(data));
                 }
                 Ok(HostValue::Undefined)
-            }),
+            },
         )?;
         let terminator = Rc::downgrade(self);
         engine.register_host_module_function(
             HOST_MODULE_SPECIFIER,
             "terminateWorker",
             1,
-            Box::new(move |arguments| {
+            move |arguments| {
                 let key = key(arguments)?;
                 if let Some(terminator) = terminator.upgrade() {
                     terminator.terminate(key);
                 }
                 Ok(HostValue::Undefined)
-            }),
+            },
         )?;
         Ok(())
     }
@@ -402,18 +409,38 @@ impl Drop for WorkerOwner {
     }
 }
 
-fn string(arguments: &[HostValue], index: usize) -> Result<&str, String> {
+fn string<'a>(arguments: &[HostArgument<'a>], index: usize) -> Result<&'a str, String> {
     match arguments.get(index) {
-        Some(HostValue::String(value)) => Ok(value),
+        Some(&HostArgument::String(value)) => Ok(value),
         _ => Err(format!(
             "Worker host operation expects string argument {index}"
         )),
     }
 }
 
-fn key(arguments: &[HostValue]) -> Result<WorkerKey, String> {
-    string(arguments, 0)?
-        .parse()
-        .map(WorkerKey::new)
-        .map_err(|_| "invalid worker key".to_owned())
+/// The largest key `createWorker` hands a realm. A key crosses as a number,
+/// and every integer up to this one is exact as an `f64`.
+const MAX_WORKER_KEY: u64 = 1 << 53;
+
+/// The key a realm names a worker by: the number `createWorker` answered, so
+/// an integer in `1..=MAX_WORKER_KEY`.
+fn key(arguments: &[HostArgument<'_>]) -> Result<WorkerKey, String> {
+    let Some(&HostArgument::Number(value)) = arguments.first() else {
+        return Err("Worker host operation expects number argument 0".to_owned());
+    };
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "2^53, which an f64 holds exactly"
+    )]
+    let max = MAX_WORKER_KEY as f64;
+    if value >= 1.0 && value.fract() == 0.0 && value <= max {
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "an integer in 1..=2^53, checked above"
+        )]
+        Ok(WorkerKey::new(value as u64))
+    } else {
+        Err("invalid worker key".to_owned())
+    }
 }

@@ -373,6 +373,35 @@ fn class_id_and_style_fire_like_any_other_attribute() {
     );
 }
 
+/// The property and record setters report the `style` text before the write
+/// as the old value and the block's serialization after it as the new one,
+/// and a write that changes nothing reports nothing.
+#[test]
+fn style_property_and_record_writes_report_the_text_before_and_after() {
+    let log = log();
+    let mut doc = Doc::new();
+    let root = doc.root;
+    define(&mut doc, Probe::new("x-item", &log).observing(&["style"]));
+    let element = doc.el(root, "x-item");
+    doc.set_inline(element, "width: 1px");
+    let _ = take(&log);
+
+    doc.dom.set_inline_style_property(element, "height", "2px");
+    doc.dom
+        .set_inline_style_property(element, "height", "not-a-length");
+    doc.dom.set_inline_style_property(element, "top", "");
+    doc.dom
+        .set_inline_style_declarations(element, [("color", "red")]);
+
+    assert_eq!(
+        take(&log),
+        vec![
+            format!("x-item:attr#{element} style: width: 1px -> width: 1px; height: 2px;"),
+            format!("x-item:attr#{element} style: width: 1px; height: 2px; -> color: red;"),
+        ]
+    );
+}
+
 #[test]
 fn removing_an_attribute_reports_none_as_the_new_value() {
     let log = log();
@@ -415,7 +444,7 @@ fn an_attribute_written_inside_the_constructor_reports_nothing() {
         "a precustomized element is not custom, so its own writes raise nothing"
     );
     assert_eq!(
-        doc.dom.get(element).unwrap().attribute("value"),
+        doc.dom.get(element).unwrap().attribute("value").as_deref(),
         Some("from-constructor")
     );
 }
@@ -488,7 +517,7 @@ fn disconnect_is_gated_on_the_old_parents_connectedness() {
 }
 
 #[test]
-fn moving_a_two_element_subtree_batches_disconnect_and_connect_per_element() {
+fn moving_a_two_element_subtree_runs_its_reactions_in_enqueue_order() {
     let log = log();
     let mut doc = Doc::new();
     let root = doc.root;
@@ -504,11 +533,12 @@ fn moving_a_two_element_subtree_batches_disconnect_and_connect_per_element() {
         take(&log),
         vec![
             format!("x-item:disconnected#{first}"),
-            format!("x-item:connected#{first}"),
             format!("x-item:disconnected#{second}"),
+            format!("x-item:connected#{first}"),
             format!("x-item:connected#{second}"),
         ],
-        "per element FIFO, not a flat disc-disc-conn-conn"
+        "one queue in enqueue order, not the standard's per-element grouping (user ruling \
+         2026-10-22)"
     );
 }
 
@@ -913,7 +943,7 @@ fn a_callback_that_creates_another_element_of_its_own_tag_does_not_panic() {
 }
 
 #[test]
-fn removing_a_later_sibling_from_a_callback_drains_that_siblings_whole_queue() {
+fn removing_a_later_sibling_from_a_callback_runs_its_disconnect_before_its_pending_connect() {
     let log = log();
     let mut doc = Doc::new();
     let root = doc.root;
@@ -942,10 +972,10 @@ fn removing_a_later_sibling_from_a_callback_drains_that_siblings_whole_queue() {
         take(&log),
         vec![
             format!("x-item:connected#{first}"),
-            format!("x-item:connected#{second}"),
             format!("x-item:disconnected#{second}"),
         ],
-        "the nested scope runs the sibling's pending connect before its disconnect"
+        "the nested scope runs its own reaction first (user ruling 2026-10-22), and the \
+         sibling's pending connect then finds it freed and runs nothing"
     );
     assert!(doc.dom.get(second).is_none());
 }
@@ -1214,8 +1244,7 @@ impl CustomElement<()> for SlotHost {
         let slot = document
             .get(target)
             .and_then(|node| node.attribute("name"))
-            .unwrap_or("default")
-            .to_owned();
+            .map_or_else(|| "default".to_owned(), std::borrow::Cow::into_owned);
         let count = document.assigned_nodes(target).len();
         self.log
             .lock()
@@ -1626,8 +1655,8 @@ fn a_slot_signalled_by_a_slotchange_handler_fires_after_the_current_set() {
             let name = document
                 .get(slot)
                 .and_then(|node| node.attribute("name"))
-                .unwrap_or_default()
-                .to_owned();
+                .map(std::borrow::Cow::into_owned)
+                .unwrap_or_default();
             self.log
                 .lock()
                 .expect("the log is never poisoned")

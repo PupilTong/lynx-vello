@@ -2,10 +2,10 @@
 
 #![allow(clippy::cast_precision_loss)]
 
+use smallvec::SmallVec;
 use stylo::computed_values::{box_sizing, direction, linear_direction};
 use stylo::values::computed::{
-    ContentDistribution, Inset, ItemPlacement, LengthPercentage, Margin, PositionProperty,
-    SelfAlignment,
+    ContentDistribution, Inset, ItemPlacement, PositionProperty, SelfAlignment,
 };
 use stylo::values::specified::align::AlignFlags;
 
@@ -16,11 +16,11 @@ use super::single_axis::{
 use super::util::{
     Axis, EdgeMask, ItemGeometry, ItemKey as LayoutItemKey, OrderedItem, PendingLayoutItem,
     ResolvedContainerBox, accumulate_scrollable_overflow, apply_aspect_ratio, auto_edges_to_zero,
-    axis_has_intrinsic_style, clamp_axis, container_content_independence, is_scroll_container,
-    item_value_stability, mirror_ratio_definiteness, own_scrollable_overflow, padding_box_end,
-    relative_offset, resolve_container_box, resolve_insets, resolve_intrinsic,
-    resolve_item_geometry, resolve_margins, resolve_padding, sort_and_assign_layout_order,
-    store_committed_child,
+    axis_has_intrinsic_style, clamp_axis, container_content_independence,
+    edges_depend_on_inline_basis, is_scroll_container, item_value_stability,
+    mirror_ratio_definiteness, own_scrollable_overflow, padding_box_end, relative_offset,
+    resolve_container_box, resolve_insets, resolve_intrinsic, resolve_item_geometry,
+    resolve_margins, resolve_padding, sort_and_assign_layout_order, store_committed_child,
 };
 use super::{AbsoluteContainingBlock, compute_absolute_layout_in, measure_absolute_layout};
 use crate::geometry::{Edges, Point, Size};
@@ -64,7 +64,6 @@ struct AbsoluteItem<N> {
     key: OrderedItem<N>,
     position: PositionProperty,
     gravity: AlignFlags,
-    static_axes: Size<bool>,
 }
 
 impl<N> PendingLayoutItem<N> for AbsoluteItem<N> {
@@ -84,11 +83,11 @@ impl<N> PendingLayoutItem<N> for AbsoluteItem<N> {
 struct LinearItemFlags(u8);
 
 impl LinearItemFlags {
-    const MARGIN_REFRESH: u8 = 1 << 0;
-    const PADDING_REFRESH: u8 = 1 << 1;
-    const RELATIVE_OFFSET: u8 = 1 << 2;
-    const FROZEN: u8 = 1 << 3;
-    const BOX_REFRESH: u8 = Self::MARGIN_REFRESH | Self::PADDING_REFRESH;
+    /// A margin or padding percentage reads the container's inline size,
+    /// which was not known when the item was resolved.
+    const BOX_REFRESH: u8 = 1 << 0;
+    const RELATIVE_OFFSET: u8 = 1 << 1;
+    const FROZEN: u8 = 1 << 2;
 
     #[inline]
     const fn needs_box_refresh(self) -> bool {
@@ -98,16 +97,6 @@ impl LinearItemFlags {
     #[inline]
     const fn needs_relative_offset_refresh(self) -> bool {
         self.0 & Self::RELATIVE_OFFSET != 0
-    }
-
-    #[inline]
-    const fn needs_margin_refresh(self) -> bool {
-        self.0 & Self::MARGIN_REFRESH != 0
-    }
-
-    #[inline]
-    const fn needs_padding_refresh(self) -> bool {
-        self.0 & Self::PADDING_REFRESH != 0
     }
 
     #[inline]
@@ -229,33 +218,20 @@ fn computed_main_gravity(justify_content: ContentDistribution, axes: LinearAxes)
 }
 
 #[inline]
-fn lp_depends_on_basis(value: &LengthPercentage) -> bool {
-    value.has_percentage()
-}
-
-#[inline]
-fn margin_depends_on_basis(value: &Margin) -> bool {
-    match value {
-        Margin::LengthPercentage(lp) => lp_depends_on_basis(lp),
-        Margin::Auto => false,
-        // Conservatively yes: a refresh re-resolves the margin, whatever the
-        // unresolvable form turns out to be, and keeps a call off every item.
-        Margin::AnchorSizeFunction(_) | Margin::AnchorContainingCalcFunction(_) => true,
-    }
-}
-
-#[inline]
 fn inset_depends_on_basis(value: &Inset) -> bool {
     match value {
-        Inset::LengthPercentage(lp) => lp_depends_on_basis(lp),
+        Inset::LengthPercentage(lp) => lp.has_percentage(),
         Inset::Auto => false,
-        // Conservatively yes, as for margins above.
+        // Conservatively yes: a refresh re-resolves the inset, whatever the
+        // unresolvable form turns out to be, and keeps a call off every item.
         Inset::AnchorFunction(_)
         | Inset::AnchorSizeFunction(_)
         | Inset::AnchorContainingCalcFunction(_) => true,
     }
 }
 
+/// The item's refresh bits. `nudges` is set only for a `position: relative`
+/// item of a committing pass, the one pass that reads its offset.
 #[inline]
 fn initial_item_flags(
     style: &impl CoreStyle,
@@ -269,28 +245,11 @@ fn initial_item_flags(
             || inset_depends_on_basis(inset.top)
             || inset_depends_on_basis(inset.bottom)
     };
-    let (margin_refresh, padding_refresh) = if inline_basis.is_none() {
-        let margin = style.margin();
-        let padding = style.padding();
-        (
-            margin_depends_on_basis(margin.left)
-                || margin_depends_on_basis(margin.right)
-                || margin_depends_on_basis(margin.top)
-                || margin_depends_on_basis(margin.bottom),
-            lp_depends_on_basis(&padding.left.0)
-                || lp_depends_on_basis(&padding.right.0)
-                || lp_depends_on_basis(&padding.top.0)
-                || lp_depends_on_basis(&padding.bottom.0),
-        )
-    } else {
-        (false, false)
-    };
+    let box_refresh =
+        inline_basis.is_none() && edges_depend_on_inline_basis(&style.margin(), &style.padding());
     let mut flags = 0;
-    if margin_refresh {
-        flags |= LinearItemFlags::MARGIN_REFRESH;
-    }
-    if padding_refresh {
-        flags |= LinearItemFlags::PADDING_REFRESH;
+    if box_refresh {
+        flags |= LinearItemFlags::BOX_REFRESH;
     }
     if relative_offset {
         flags |= LinearItemFlags::RELATIVE_OFFSET;
@@ -353,21 +312,19 @@ fn resolve_item<N>(
     }
 }
 
+/// Resolves the item's margin and padding again against the inline size
+/// that is now known. A value with no percentage resolves to what it was.
 #[inline]
 fn refresh_item_edges<N>(
     style: impl CoreStyle,
     item: &mut LinearItem<N>,
     percentage_basis: Size<Option<f32>>,
 ) {
-    if item.flags.needs_padding_refresh() {
-        item.padding = resolve_padding(style.padding(), percentage_basis.width);
-    }
-    if item.flags.needs_margin_refresh() {
-        let margin_value = style.margin();
-        let optional_margin = resolve_margins(margin_value, percentage_basis.width);
-        item.margin = auto_edges_to_zero(optional_margin);
-        item.margin_auto = EdgeMask::from_margins(margin_value);
-    }
+    item.padding = resolve_padding(style.padding(), percentage_basis.width);
+    let margin_value = style.margin();
+    let optional_margin = resolve_margins(margin_value, percentage_basis.width);
+    item.margin = auto_edges_to_zero(optional_margin);
+    item.margin_auto = EdgeMask::from_margins(margin_value);
 }
 
 fn intrinsic_measurement<T>(
@@ -758,17 +715,15 @@ fn measure_item<T>(
             AvailableSpace::Definite,
         ),
     );
-    let output = measure_child(
-        tree,
-        state,
-        item.key.node,
+    let mut input = LayoutInput::measure(
         known,
-        known_definite,
         percentage_basis,
         child_available,
-        SizingMode::ApplySizeStyles,
         RequestedAxis::Both,
-    );
+    )
+    .reading_first_baseline(needs_probe_baseline);
+    input.definite_dimensions = known_definite;
+    let output = tree.compute_layout(state, item.key.node, input);
     item.main_size = forced_main.unwrap_or_else(|| {
         clamp_axis(
             axes.main.size(output.size),
@@ -783,7 +738,7 @@ fn measure_item<T>(
         axes.cross.size(item.max_size),
         cross_floor,
     );
-    item.baseline = output.first_baselines.y;
+    item.baseline = output.first_baseline;
     item.main_size_is_definite = forced_main.is_some() || axes.main.size(known_definite);
     item.cross_size_is_definite = axes.cross.size(known_definite);
 }
@@ -909,13 +864,17 @@ fn size_items<T>(
     constraint_inner_size: Size<Option<f32>>,
     available_space: Size<AvailableSpace>,
     weight_sum: f32,
-    needs_probe_baseline: bool,
+    first_baseline_requested: bool,
     container_independent: Option<Size<bool>>,
 ) where
     T: LayoutTree,
 {
+    // The items the container's first baseline is read from
+    // (`container_baseline`): every one in a row, the first in a column.
+    let needs_probe_baseline =
+        |index: usize| first_baseline_requested && (axes.main == Axis::Horizontal || index == 0);
     let constrained_main = axes.main.size(constraint_inner_size);
-    for item in items.iter_mut() {
+    for (index, item) in items.iter_mut().enumerate() {
         resolve_intrinsic_sizes(tree, state, item, percentage_basis);
         if !(constrained_main.is_some() && item.weight > 0.0) {
             measure_item(
@@ -927,7 +886,7 @@ fn size_items<T>(
                 constraint_inner_size,
                 available_space,
                 None,
-                needs_probe_baseline,
+                needs_probe_baseline(index),
                 container_independent,
             );
         }
@@ -935,7 +894,11 @@ fn size_items<T>(
 
     if let Some(inner_main) = constrained_main {
         distribute_weighted_items(items, axes, inner_main, weight_sum);
-        for item in items.iter_mut().filter(|item| item.weight > 0.0) {
+        for (index, item) in items
+            .iter_mut()
+            .enumerate()
+            .filter(|(_, item)| item.weight > 0.0)
+        {
             let resolved_main = item.main_size;
             measure_item(
                 tree,
@@ -946,7 +909,7 @@ fn size_items<T>(
                 constraint_inner_size,
                 available_space,
                 Some(resolved_main),
-                needs_probe_baseline,
+                needs_probe_baseline(index),
                 container_independent,
             );
         }
@@ -1201,7 +1164,7 @@ where
             .main
             .pack(item.main_size_is_definite, item.cross_size_is_definite);
         let output = tree.compute_layout(state, item.key.node, input);
-        item.baseline = output.first_baselines.y;
+        item.baseline = output.first_baseline;
 
         let offset = item.relative_offset;
         let mut location = item_location(item, axes, inner_size, content_origin);
@@ -1237,6 +1200,7 @@ fn commit_non_in_flow_children<T>(
     main_gravity: AlignFlags,
     mut content_size: Size<f32>,
     rtl: bool,
+    scrollable: Option<Size<f32>>,
 ) -> Size<f32>
 where
     T: LayoutTree,
@@ -1252,13 +1216,12 @@ where
         super::hide_child_at_order(tree, state, key.node, key.layout_order);
     }
     super::util::debug_assert_tree_order(absolute_items.iter().map(|item| item.key.document_index));
-    let mut hoisted = super::HoistedPass::new(padding_box_size, border, rtl);
+    let mut hoisted = super::HoistedPass::new(padding_box_size, border, rtl, scrollable);
     for item in absolute_items {
         let AbsoluteItem {
             key,
             position,
             gravity,
-            static_axes,
         } = *item;
         hoisted.before(tree, state, node, key.document_index);
         let child = key.node;
@@ -1270,7 +1233,7 @@ where
                     tree,
                     state,
                     child,
-                    containing_block(padding_box_size),
+                    containing_block(padding_box_size).with_scrollable(scrollable),
                     |size, margin| {
                         let static_position = absolute_static_position(
                             axes,
@@ -1302,6 +1265,8 @@ where
                 hoisted.inside(tree, state, node, key.document_index);
             }
             PositionProperty::Fixed => {
+                let static_axes =
+                    super::util::needs_static_position(tree, child, &tree.style(child));
                 let measured = match (static_axes.width, static_axes.height) {
                     (false, false) => Layout::default(),
                     (width, height) => measure_absolute_layout(
@@ -1347,8 +1312,10 @@ where
     T::Style<'tree>: LinearStyle,
 {
     let style = tree.style(node);
-    let contained = contained_axes(&style);
-    let layout_contained = style.containment().contains(Contain::LAYOUT);
+    let containment = style.containment();
+    let contained = contained_axes(containment, &style);
+    let layout_contained = containment.contains(Contain::LAYOUT);
+    let scroll_container = is_scroll_container(style.overflow());
     let axes = linear_axes(style.linear_direction(), style.direction());
     let align_items = style.align_items();
     let main_gravity = computed_main_gravity(style.justify_content(), axes);
@@ -1452,8 +1419,8 @@ where
 
     let children = tree.flattened_children(node);
     let mut items = Vec::with_capacity(children.capacity_hint());
-    let mut absolute_items = Vec::new();
-    let mut hidden_items = Vec::new();
+    let mut absolute_items: SmallVec<[AbsoluteItem<T::NodeId>; 1]> = SmallVec::new();
+    let mut hidden_items: SmallVec<[LayoutItemKey<T::NodeId>; 1]> = SmallVec::new();
     let mut has_nonzero_order = false;
     let mut has_box_basis_dependency = false;
     let mut has_relative_basis_dependency = false;
@@ -1483,14 +1450,15 @@ where
                     },
                     position,
                     gravity: computed_cross_gravity(child_style.align_self(), align_items, axes),
-                    static_axes: super::util::needs_static_position(tree, child, &child_style),
                 });
             }
             continue;
         }
         let css_order = child_style.order();
         has_nonzero_order |= css_order != 0;
-        let nudges = position == PositionProperty::Relative;
+        // Only a commit places the item, so only a commit reads its relative
+        // offset (`commit_in_flow`).
+        let nudges = commits_layout && position == PositionProperty::Relative;
         let flags = initial_item_flags(&child_style, percentage_basis.width, nudges);
         let item = resolve_item(
             child_style,
@@ -1526,7 +1494,10 @@ where
         inner_size,
         inner_available_space,
         weight_sum,
-        !commits_layout && !layout_contained,
+        // A measurement probes the items its first baseline is read from only
+        // when its caller reads that baseline; a commit reads the committed
+        // items' (`commit_in_flow`).
+        input.reads_first_baseline && !commits_layout && !layout_contained,
         container_independent,
     );
     let (natural, used_main) = natural_content_size(&items, axes);
@@ -1582,7 +1553,7 @@ where
             container_baseline(&items, axes, final_inner_size, content_origin)
         };
         return LayoutOutput::new(final_outer_size, padding_box_end(final_outer_size, border))
-            .with_first_baselines(Point::new(None, baseline));
+            .with_first_baseline(baseline);
     }
 
     if has_relative_basis_dependency {
@@ -1604,16 +1575,7 @@ where
         axes,
         final_inner_size,
         content_origin,
-        is_scroll_container(style.overflow()),
-    );
-    super::record_scrollable_containing_block(
-        tree,
-        state,
-        node,
-        &style,
-        final_outer_size,
-        border,
-        content_size,
+        scroll_container,
     );
     // A box this one is the containing block of may sit deeper than its
     // children (`LayoutTree::hoisted_children`).
@@ -1633,16 +1595,27 @@ where
             main_gravity,
             content_size,
             style.direction() == direction::T::Rtl,
+            super::scrollable_containing_block(
+                scroll_container,
+                final_outer_size,
+                border,
+                content_size,
+            ),
         );
     }
-    let content_size = own_scrollable_overflow(&style, final_outer_size, border, content_size);
+    let content_size = own_scrollable_overflow(
+        layout_contained,
+        scroll_container,
+        final_outer_size,
+        border,
+        content_size,
+    );
     let baseline = if layout_contained {
         None
     } else {
         container_baseline(&items, axes, final_inner_size, content_origin)
     };
-    LayoutOutput::new(final_outer_size, content_size)
-        .with_first_baselines(Point::new(None, baseline))
+    LayoutOutput::new(final_outer_size, content_size).with_first_baseline(baseline)
 }
 
 #[cfg(test)]
@@ -1653,7 +1626,8 @@ mod tests {
     use stylo::typed_om::NumericBaseType;
     use stylo::values::computed::length_percentage::{CalcNode, CalcPercentageLeaf, ComputedLeaf};
     use stylo::values::computed::{
-        Display, Length, MaxSize, NonNegativeLengthPercentage, Percentage, Size as StyleSize,
+        Display, Length, LengthPercentage, Margin, MaxSize, NonNegativeLengthPercentage,
+        Percentage, Size as StyleSize,
     };
     use stylo::values::generics::{NonNegative, Optional};
 
@@ -1732,7 +1706,7 @@ mod tests {
     }
 
     #[test]
-    fn edge_dependency_values_cover_percent_and_calc() {
+    fn inset_dependency_values_cover_percent_and_calc() {
         let length = LengthPercentage::new_length(Length::new(1.0));
         let mixed_calc = LengthPercentage::new_calc(
             CalcNode::Sum(
@@ -1757,20 +1731,15 @@ mod tests {
             ),
             AllowedNumericType::All,
         );
-        assert!(!lp_depends_on_basis(&length));
-        assert!(lp_depends_on_basis(&percent(0.5)));
-        assert!(lp_depends_on_basis(&mixed_calc));
-        assert!(!lp_depends_on_basis(&folded_calc));
-
-        assert!(!margin_depends_on_basis(&Margin::Auto));
-        assert!(!margin_depends_on_basis(&Margin::LengthPercentage(
-            length.clone()
-        )));
-        assert!(margin_depends_on_basis(&Margin::LengthPercentage(percent(
+        assert!(!inset_depends_on_basis(&Inset::LengthPercentage(length)));
+        assert!(inset_depends_on_basis(&Inset::LengthPercentage(percent(
             0.5
         ))));
-        assert!(!inset_depends_on_basis(&Inset::Auto));
         assert!(inset_depends_on_basis(&Inset::LengthPercentage(mixed_calc)));
+        assert!(!inset_depends_on_basis(&Inset::LengthPercentage(
+            folded_calc
+        )));
+        assert!(!inset_depends_on_basis(&Inset::Auto));
     }
 
     #[test]
@@ -1805,30 +1774,25 @@ mod tests {
             assert!(!initial_item_flags(&style, None, true).needs_box_refresh());
         }
 
-        for (style, expected_refresh) in [
-            (
-                DependencyStyle {
-                    margin: Edges {
-                        left: Margin::LengthPercentage(percent(0.5)),
-                        ..uniform(Margin::zero())
-                    },
-                    ..DependencyStyle::default()
+        for style in [
+            DependencyStyle {
+                margin: Edges {
+                    left: Margin::LengthPercentage(percent(0.5)),
+                    ..uniform(Margin::zero())
                 },
-                LinearItemFlags::MARGIN_REFRESH,
-            ),
-            (
-                DependencyStyle {
-                    padding: Edges {
-                        left: NonNegative(percent(0.5)),
-                        ..uniform(NonNegativeLengthPercentage::zero())
-                    },
-                    ..DependencyStyle::default()
+                ..DependencyStyle::default()
+            },
+            DependencyStyle {
+                padding: Edges {
+                    left: NonNegative(percent(0.5)),
+                    ..uniform(NonNegativeLengthPercentage::zero())
                 },
-                LinearItemFlags::PADDING_REFRESH,
-            ),
+                ..DependencyStyle::default()
+            },
         ] {
             let flags = initial_item_flags(&style, None, true);
-            assert_eq!(flags.0 & LinearItemFlags::BOX_REFRESH, expected_refresh);
+            assert!(flags.needs_box_refresh());
+            assert!(!flags.needs_relative_offset_refresh());
             assert!(!initial_item_flags(&style, Some(100.0), true).needs_box_refresh());
         }
 

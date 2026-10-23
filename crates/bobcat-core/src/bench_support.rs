@@ -182,9 +182,20 @@ impl ScriptHarness {
             },
             ..InputEventPayload::default()
         };
-        self.runtime
-            .dispatch_input_event(&mut self.js_runtime, target, name, &payload, None)
-            .expect("the benchmark dispatch completes")
+        let mut failures = Vec::new();
+        let called = self.runtime.dispatch_input_event(
+            &mut self.js_runtime,
+            target,
+            name,
+            &payload,
+            None,
+            &mut failures,
+        );
+        assert!(
+            failures.is_empty(),
+            "the benchmark dispatch completes: {failures:?}"
+        );
+        called
     }
 
     /// One frame of the painter's scroll posts, taken and delivered as the
@@ -255,7 +266,7 @@ impl ScriptHarness {
             document
                 .get(node)
                 .and_then(|node| node.attribute("style"))
-                .map(str::to_owned)
+                .map(std::borrow::Cow::into_owned)
         })
     }
 

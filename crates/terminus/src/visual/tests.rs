@@ -410,8 +410,8 @@ fn fixed_position_forms_a_context_and_reanchors_to_transformed_ancestors() {
         .iter()
         .find(|item| item.node == fixed)
         .expect("fixed box paints");
-    let mapped = item
-        .transform
+    let mapped = paint
+        .matrix(item.transform)
         .transform_point2d(Point2D::new(0.0, 0.0))
         .expect("affine world matrix");
     assert_eq!((mapped.x, mapped.y), (160.0, 110.0));
@@ -506,8 +506,8 @@ fn rotation_rotates_the_hit_region_about_the_transform_origin() {
         .iter()
         .find(|item| item.node == rotated)
         .unwrap();
-    let mapped = item
-        .transform
+    let mapped = paint
+        .matrix(item.transform)
         .transform_point2d(Point2D::new(100.0, 0.0))
         .expect("rotation is invertible");
     assert!((mapped.x - 100.0).abs() < 1e-4 && (mapped.y - 100.0).abs() < 1e-4);
@@ -554,12 +554,12 @@ fn perspective_projects_children_about_the_parent_center() {
     let c = h.el(p, "view.c");
     let paint = h.paint();
     let item = paint.items().iter().find(|item| item.node == c).unwrap();
-    let top_left = item
-        .transform
+    let top_left = paint
+        .matrix(item.transform)
         .transform_point2d(Point2D::new(0.0, 0.0))
         .unwrap();
-    let bottom_right = item
-        .transform
+    let bottom_right = paint
+        .matrix(item.transform)
         .transform_point2d(Point2D::new(50.0, 50.0))
         .unwrap();
     assert!((top_left.x - 50.0).abs() < 1e-3 && (top_left.y - 50.0).abs() < 1e-3);
@@ -662,6 +662,48 @@ fn text_runs_paint_with_their_element_and_hit_as_the_element() {
         h.doc.dom.elements_from_point(Point2D::new(10.0, 10.0)),
         vec![label, root]
     );
+}
+
+/// A box hoisted out of a `<text>` (`position: absolute` under the static
+/// paragraph element) and a transformed atomic box after it inside the same
+/// paragraph paint in CSS2 Appendix E order: both sit in step 8 of the page's
+/// stacking context, in tree order, so the atom paints over the hoisted box.
+/// The text run before them is content of the paragraph and never a box, so
+/// it does not count toward the hoisted box's rank (user ruling, 2026-10-22;
+/// before, the run moved the hoisted box after the atom).
+#[test]
+fn a_box_hoisted_beside_text_runs_paints_in_tree_order_with_a_transformed_atom() {
+    let mut h = Harness::new(
+        "page { display: flex; position: relative; width: 800px; height: 600px; }
+         .label { width: 300px; height: 50px; font-family: Ahem; font-size: 20px; }
+         .a { display: flex; position: absolute; left: 0; top: 0;
+              width: 100px; height: 100px; }
+         .b { display: flex; width: 100px; height: 20px; transform: translateX(1px); }",
+    );
+    h.doc.define_lynx_text("text");
+    h.doc.dom.register_fonts(FontBlob::from_static(AHEM));
+    let root = h.root();
+    let label = h.el(root, "text.label");
+    let text = h.doc.dom.create_text_node("h", ());
+    h.doc.dom.append_child(label, text);
+    let a = h.el(label, "view.a");
+    let b = h.el(label, "view.b");
+    let order = h.element_order();
+    let at = |node| {
+        order
+            .iter()
+            .position(|&item| item == node)
+            .expect("painted")
+    };
+    assert!(at(a) < at(b), "{order:?}");
+    h.doc.dom.layout();
+    let rect = h.doc.dom.bounding_client_rect(b).expect("laid out");
+    let middle = (
+        rect.origin.x + rect.size.width / 2.0,
+        rect.origin.y + rect.size.height / 2.0,
+    );
+    assert!(middle.0 < 100.0 && middle.1 < 100.0, "{rect:?} overlaps a");
+    assert_eq!(h.hit(middle.0, middle.1), Some(b));
 }
 
 #[test]
@@ -786,12 +828,12 @@ fn rotate_x_flattens_about_the_default_center_origin() {
     let rx = h.el(root, "view.rx");
     let paint = h.paint();
     let item = paint.items().iter().find(|item| item.node == rx).unwrap();
-    let top = item
-        .transform
+    let top = paint
+        .matrix(item.transform)
         .transform_point2d(Point2D::new(0.0, 0.0))
         .unwrap();
-    let bottom = item
-        .transform
+    let bottom = paint
+        .matrix(item.transform)
         .transform_point2d(Point2D::new(0.0, 100.0))
         .unwrap();
     assert!((top.x).abs() < 1e-3 && (top.y - 25.0).abs() < 1e-3);
@@ -815,8 +857,8 @@ fn transform_origin_defaults_to_the_border_box_center() {
         .iter()
         .find(|item| item.node == rotated)
         .unwrap();
-    let mapped = item
-        .transform
+    let mapped = paint
+        .matrix(item.transform)
         .transform_point2d(Point2D::new(0.0, 0.0))
         .unwrap();
     assert!((mapped.x - 250.0).abs() < 1e-3 && (mapped.y + 50.0).abs() < 1e-3);
@@ -990,12 +1032,12 @@ fn perspective_skips_non_direct_descendants() {
     let deep = h.el(mid, "view.deep");
     let paint = h.paint();
     let item = paint.items().iter().find(|item| item.node == deep).unwrap();
-    let top_left = item
-        .transform
+    let top_left = paint
+        .matrix(item.transform)
         .transform_point2d(Point2D::new(0.0, 0.0))
         .unwrap();
-    let bottom_right = item
-        .transform
+    let bottom_right = paint
+        .matrix(item.transform)
         .transform_point2d(Point2D::new(50.0, 50.0))
         .unwrap();
     assert!((top_left.x - 75.0).abs() < 1e-3 && (top_left.y - 75.0).abs() < 1e-3);
@@ -1150,8 +1192,8 @@ fn transform_and_overflow_are_inert_on_contents_elements() {
     let big = h.el(wrap, "view.big");
     let paint = h.paint();
     let item = paint.items().iter().find(|item| item.node == big).unwrap();
-    let mapped = item
-        .transform
+    let mapped = paint
+        .matrix(item.transform)
         .transform_point2d(Point2D::new(0.0, 0.0))
         .unwrap();
     assert_eq!((mapped.x, mapped.y), (0.0, 0.0));
@@ -1196,8 +1238,8 @@ fn perspective_applies_through_contents_wrappers() {
     let c = h.el(wrap, "view.c");
     let paint = h.paint();
     let item = paint.items().iter().find(|item| item.node == c).unwrap();
-    let top_left = item
-        .transform
+    let top_left = paint
+        .matrix(item.transform)
         .transform_point2d(Point2D::new(0.0, 0.0))
         .unwrap();
     assert!((top_left.x - 50.0).abs() < 1e-3 && (top_left.y - 50.0).abs() < 1e-3);
@@ -1359,8 +1401,8 @@ fn offset_path_translates_the_anchor_along_the_path() {
         .iter()
         .find(|item| item.node == mover)
         .unwrap();
-    let mapped = item
-        .transform
+    let mapped = paint
+        .matrix(item.transform)
         .transform_point2d(Point2D::new(0.0, 0.0))
         .unwrap();
     assert!((mapped.x - 50.0).abs() < 1e-3 && (mapped.y - -50.0).abs() < 1e-3);
@@ -1382,13 +1424,13 @@ fn offset_rotate_auto_follows_the_path_direction() {
         .iter()
         .find(|item| item.node == mover)
         .unwrap();
-    let corner = item
-        .transform
+    let corner = paint
+        .matrix(item.transform)
         .transform_point2d(Point2D::new(0.0, 0.0))
         .unwrap();
     assert!((corner.x - 50.0).abs() < 1e-3 && corner.y.abs() < 1e-3);
-    let far = item
-        .transform
+    let far = paint
+        .matrix(item.transform)
         .transform_point2d(Point2D::new(100.0, 0.0))
         .unwrap();
     assert!((far.x - 50.0).abs() < 1e-3 && (far.y - 100.0).abs() < 1e-3);
@@ -1411,8 +1453,8 @@ fn offset_rotate_fixed_angles_ignore_the_path_direction() {
         .iter()
         .find(|item| item.node == mover)
         .unwrap();
-    let mapped = item
-        .transform
+    let mapped = paint
+        .matrix(item.transform)
         .transform_point2d(Point2D::new(0.0, 0.0))
         .unwrap();
     assert!(
@@ -1440,8 +1482,8 @@ fn offset_rotate_reverse_is_not_in_the_lynx_grammar() {
         .iter()
         .find(|item| item.node == mover)
         .unwrap();
-    let mapped = item
-        .transform
+    let mapped = paint
+        .matrix(item.transform)
         .transform_point2d(Point2D::new(0.0, 0.0))
         .unwrap();
     assert!(
@@ -1472,8 +1514,8 @@ fn closed_paths_wrap_and_open_paths_clamp_the_offset_distance() {
         .iter()
         .find(|item| item.node == wrapping)
         .unwrap();
-    let mapped = item
-        .transform
+    let mapped = paint
+        .matrix(item.transform)
         .transform_point2d(Point2D::new(0.0, 0.0))
         .unwrap();
     assert!((mapped.x - 50.0).abs() < 1e-3 && mapped.y.abs() < 1e-3);
@@ -1482,8 +1524,8 @@ fn closed_paths_wrap_and_open_paths_clamp_the_offset_distance() {
         .iter()
         .find(|item| item.node == clamped)
         .unwrap();
-    let mapped = item
-        .transform
+    let mapped = paint
+        .matrix(item.transform)
         .transform_point2d(Point2D::new(0.0, 0.0))
         .unwrap();
     assert!((mapped.x - 50.0).abs() < 1e-3 && (mapped.y - -50.0).abs() < 1e-3);
@@ -1503,8 +1545,8 @@ fn circle_paths_start_rightmost_and_run_clockwise() {
         .iter()
         .find(|item| item.node == mover)
         .unwrap();
-    let mapped = item
-        .transform
+    let mapped = paint
+        .matrix(item.transform)
         .transform_point2d(Point2D::new(0.0, 0.0))
         .unwrap();
     assert!(mapped.x.abs() < 0.5 && (mapped.y - 50.0).abs() < 0.5);
@@ -1528,8 +1570,8 @@ fn inset_paths_start_at_the_top_edge_and_run_clockwise() {
         .iter()
         .find(|item| item.node == start)
         .unwrap();
-    let mapped = item
-        .transform
+    let mapped = paint
+        .matrix(item.transform)
         .transform_point2d(Point2D::new(0.0, 0.0))
         .unwrap();
     assert!((mapped.x - -40.0).abs() < 1e-3 && (mapped.y - -40.0).abs() < 1e-3);
@@ -1538,8 +1580,8 @@ fn inset_paths_start_at_the_top_edge_and_run_clockwise() {
         .iter()
         .find(|item| item.node == quarter)
         .unwrap();
-    let mapped = item
-        .transform
+    let mapped = paint
+        .matrix(item.transform)
         .transform_point2d(Point2D::new(0.0, 0.0))
         .unwrap();
     assert!((mapped.x - 40.0).abs() < 1e-3 && (mapped.y - -40.0).abs() < 1e-3);
@@ -1561,8 +1603,8 @@ fn svg_arc_commands_flatten_within_tolerance() {
         .iter()
         .find(|item| item.node == mover)
         .unwrap();
-    let mapped = item
-        .transform
+    let mapped = paint
+        .matrix(item.transform)
         .transform_point2d(Point2D::new(0.0, 0.0))
         .unwrap();
     assert!(mapped.x.abs() < 0.5 && (mapped.y - -50.0).abs() < 0.5);
@@ -1669,8 +1711,8 @@ fn hidden_group_root_still_layers_visible_content() {
     assert_eq!(layer.size.height, 100.0);
     assert_eq!(layer.radii.top_left.width, 8.0);
     assert_eq!(layer.radii.bottom_right.height, 8.0);
-    let origin = layer
-        .transform
+    let origin = paint
+        .matrix(layer.transform)
         .transform_point2d(Point2D::new(0.0, 0.0))
         .unwrap();
     assert_eq!((origin.x, origin.y), (20.0, 10.0));
@@ -1731,7 +1773,7 @@ fn fingerprint(paint: &PaintOrder) -> String {
             item.hit_testable,
             (item.size.width.to_bits(), item.size.height.to_bits()),
             radii_bits(&item.radii),
-            item.transform.to_array().map(f32::to_bits),
+            paint.matrix(item.transform).to_array().map(f32::to_bits),
         );
     }
     for clip in paint.clips() {
@@ -1746,7 +1788,7 @@ fn fingerprint(paint: &PaintOrder) -> String {
                 clip.rect.size.height.to_bits(),
             ),
             radii_bits(&clip.radii),
-            clip.transform.to_array().map(f32::to_bits),
+            paint.matrix(clip.transform).to_array().map(f32::to_bits),
         );
     }
     for layer in paint.layers() {
@@ -1758,7 +1800,7 @@ fn fingerprint(paint: &PaintOrder) -> String {
             layer.items,
             (layer.size.width.to_bits(), layer.size.height.to_bits()),
             radii_bits(&layer.radii),
-            layer.transform.to_array().map(f32::to_bits),
+            paint.matrix(layer.transform).to_array().map(f32::to_bits),
         );
     }
     out
@@ -1779,8 +1821,9 @@ fn radii_bits(radii: &crate::visual::CornerRadii) -> [u32; 8] {
 
 /// Every shape the build's buffer discipline has to survive: nested stacking
 /// contexts, a group effect, negative and positive stack levels, an escaping
-/// absolute inside a scrolled clipper, nested pseudo-contexts, reordered
-/// siblings, and a `display: none` sibling among them.
+/// absolute inside a scrolled clipper, nested pseudo-contexts, a rotated
+/// context (so the build interns a world matrix), reordered siblings, and a
+/// `display: none` sibling among them.
 fn reuse_harness() -> (Harness, NodeId) {
     let mut h = Harness::new(&format!(
         "{PAGE}
@@ -1794,7 +1837,8 @@ fn reuse_harness() -> (Harness, NodeId) {
          .tall {{ display: flex; flex-shrink: 0; width: 200px; height: 400px; }}
          .flow {{ display: flex; width: 30px; height: 12px; }}
          .first {{ order: -1; }}
-         .gone {{ display: none; }}"
+         .gone {{ display: none; }}
+         .turn {{ transform: rotate(10deg); }}"
     ));
     let root = h.root();
     let scroller = h.el(root, "view.box.rel.clip");
@@ -1806,7 +1850,7 @@ fn reuse_harness() -> (Harness, NodeId) {
     h.el(fade, "view.flow.first");
     h.el(fade, "view.flow.gone");
     let nested = h.el(fade, "view.box.rel");
-    h.el(nested, "view.box.rel");
+    h.el(nested, "view.box.rel.turn");
     h.el(root, "view.box.under");
     h.el(root, "view.box.over");
     // `scroll_to` clamps against the last committed layout, so a fixture that
@@ -1867,7 +1911,7 @@ fn a_warm_build_produces_the_paint_order_a_cold_build_produces() {
     assert!(cold.contains("layer"), "the fixture must exercise a group");
     assert!(cold.contains("clip"), "the fixture must exercise a clip");
     assert_eq!(
-        h.doc.dom.paint_storage_capacities()[7],
+        h.doc.dom.paint_storage_capacities()[8],
         0,
         "the first build has nothing to recycle",
     );
@@ -1876,7 +1920,7 @@ fn a_warm_build_produces_the_paint_order_a_cold_build_produces() {
         nudge(&mut h.doc.dom, scroller, true);
         h.doc.dom.render();
         assert!(
-            h.doc.dom.paint_storage_capacities()[7] > 0,
+            h.doc.dom.paint_storage_capacities()[8] > 0,
             "round {round} must have a retired frame to build into",
         );
         nudge(&mut h.doc.dom, scroller, false);
@@ -1904,7 +1948,7 @@ fn a_frame_held_elsewhere_is_reclaimed_one_retirement_late() {
     }
     let _ = published;
     assert!(
-        h.doc.dom.paint_storage_capacities()[7] > 0,
+        h.doc.dom.paint_storage_capacities()[8] > 0,
         "a frame retired while published must still come back as spare storage",
     );
 }
@@ -1953,15 +1997,15 @@ fn the_builder_stops_growing_its_buffers_once_the_page_shape_settles() {
         h.doc.dom.paint_storage_capacities(),
         "a settled page must reuse every buffer instead of growing a new one",
     );
-    // Indices 4 and 11 are the retained and spare animation-slot tables, 5
-    // and 12 the `content-visibility: auto` ones and 6 and 13 the snap-point
+    // Indices 4 and 12 are the retained and spare animation-slot tables, 5
+    // and 13 the `content-visibility: auto` ones and 6 and 14 the snap-point
     // ones, which this fixture — animating nothing, skipping nothing and
     // snapping nothing — never fills.
     assert!(
         settled
             .iter()
             .enumerate()
-            .all(|(index, &capacity)| capacity > 0 || matches!(index, 4 | 5 | 6 | 11 | 12 | 13)),
+            .all(|(index, &capacity)| capacity > 0 || matches!(index, 4..=6 | 12..=14)),
         "the fixture must exercise every buffer at least once, got {settled:?}",
     );
     assert!(
@@ -3529,7 +3573,7 @@ fn a_top_layer_element_escapes_its_ancestors_group_clip_and_transform() {
     assert_eq!(item.clip, None, "no ancestor clip chain");
     assert_eq!(item.space, None, "no ancestor space");
     assert_eq!(
-        item.transform,
+        paint.matrix(item.transform),
         euclid::default::Transform3D::identity(),
         "no ancestor transform, and a static position of zero"
     );
@@ -3725,7 +3769,7 @@ fn a_top_layer_element_ignores_its_ancestors_scroll_offset() {
     let item = &paint.items()[element_index(&paint, dialog)];
     assert_eq!(item.space, None);
     assert_eq!(
-        item.transform,
+        paint.matrix(item.transform),
         euclid::default::Transform3D::translation(300.0, 100.0, 0.0)
     );
     assert_eq!(h.hit(310.0, 110.0), Some(dialog));

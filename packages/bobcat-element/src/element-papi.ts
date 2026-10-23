@@ -151,16 +151,15 @@ import { frameConnectionChanged, frameDataChanged, frameSourceChanged } from "bo
 // once, in Rust: the engine's components hear each step there, and at the
 // path's top step the host releases the document and calls each realm that
 // listens once, the page realm first, with the whole path:
-// `__BobcatDispatchEvent(nodes, targets, name, bubbles, timestamp,
-// extraCount, ...extraNameValuePairs, detailKind, ...detailValues)`, where
-// `nodes` is the path in target-first order as comma-joined decimal node
-// ids — every step but the shadow roots and the nodes freed since the path
-// was computed — and `targets` carries, position for position, the
-// shadow-retargeted target of that step. Two strings because the boundary
-// takes primitives and structured clones only, a clone can be minted by the
-// realm alone, and a decimal id cannot contain the separator — the same
-// encoding `childElementIds` uses. Releasing the document before the call is
-// what lets a listener mutate the tree. This file runs the Lynx walk over
+// `__BobcatDispatchEvent(name, bubbles, timestamp, stepCount,
+// ...nodeTargetPairs, extraCount, ...extraNameValuePairs, detailKind,
+// ...detailValues)`, where the `stepCount` pairs are the path in
+// target-first order — every step but the shadow roots and the nodes freed
+// since the path was computed — each the step's node id and then the
+// shadow-retargeted target of that step. Numbers, as a touch event's points
+// cross, because the boundary takes primitives and structured clones only
+// and a clone can be minted by the realm alone. Releasing the document
+// before the call is what lets a listener mutate the tree. This file runs the Lynx walk over
 // the steps it holds handles for and skips the rest: in the page realm a UA
 // component's shadow content and every frame's card, in a frame's card
 // everything outside its nested page. `event.target` is the target of the
@@ -712,6 +711,9 @@ function valuesOf(element: unknown, key: typeof datasetSymbol | typeof attribute
 // Native keeps typed attribute/dataset values separately from DOM strings.
 // The typed value is what readback answers (`__GetDataset`, `fields`, an
 // event's `dataset`); the string on the node is what a selector matches.
+// A string attribute value is the node's string itself, so `__SetAttribute`
+// keeps one only where a reader takes it without asking the host
+// ([`keepsAttributeString`]).
 // Copy containers at assignment, retaining local functions as local values;
 // fields() filters function attributes and the BTS transport structure-clones
 // the remaining result. Assigning an attribute is not a cross-realm operation.
@@ -753,27 +755,15 @@ type OwnedChildren = Set<Handle>;
 const ownerSymbol = Symbol("owner");
 
 /**
- * What a handle leaves behind for the collection that frees its element:
- * its node id, and the kinds the host was last told it registered per event
- * name ([`reconcile`]).
+ * The kinds the host was last told this handle registered, per event name
+ * ([`reconcile`]): what a registration change is compared against, so a
+ * second handler of a form already reported crosses nothing.
  *
- * A record rather than the bare id, because a dead handle's entries in
- * [`globalNodes`] have to be pruned, and the cleanup runs when the handle —
- * and every map on it — is already unreachable. The host is told nothing
- * about the names: the element's rows in its listener table leave with the
- * element, in the free path `dropElement` runs. The handle points at this
- * record and the record never points back: a held value that reached its
- * target would keep it alive forever, and a `FinalizationRegistry` is
- * specified to reject exactly that.
- *
- * The `kinds` map is created on first registration. Most elements never get
- * one, so most handles pay this record and nothing more.
+ * Created on first registration. Most elements never get one. The
+ * collection that frees the element does not read it: what it prunes is
+ * found by the node id it is handed (see [`registry`]).
  */
-const collectedSymbol = Symbol("collected");
-interface Collected {
-  readonly nodeId: number;
-  kinds: Map<string, number> | undefined;
-}
+const kindsSymbol = Symbol("kinds");
 
 /**
  * A handle as this file sees it: the node id, plus whatever it has filed
@@ -783,7 +773,7 @@ interface Handle {
   readonly [nodeIdSymbol]: number;
   [listenersSymbol]?: ListenerLists;
   [handlersSymbol]?: HandlerMaps;
-  [collectedSymbol]?: Collected;
+  [kindsSymbol]?: Map<string, number>;
   [listCallbacksSymbol]?: ListCallbacks;
   [datasetSymbol]?: Map<string, unknown>;
   [attributeValuesSymbol]?: Map<string, unknown>;
@@ -799,18 +789,6 @@ function listenersOf(handle: Handle): ListenerLists | undefined {
 
 function handlersOf(handle: Handle): HandlerMaps | undefined {
   return handle[handlersSymbol];
-}
-
-/**
- * The record this handle's collection will hand the cleanup, created on
- * first use. The page handle never reaches a registry, and gets one all the
- * same: it is where its reported kinds live.
- */
-function collectedOf(handle: Handle): Collected {
-  return handle[collectedSymbol] ??= {
-    nodeId: nodeIdOf(handle),
-    kinds: undefined,
-  };
 }
 
 /**
@@ -837,17 +815,21 @@ const handlesByNodeId: Map<number, WeakRef<Handle>> = new Map();
  *
  * Its registrations died with the handle. The host's listener table drops
  * the element's rows itself when it frees the element, so nothing about them
- * crosses; what is pruned here is this realm's own global-bind registry.
+ * crosses; what is pruned here is this realm's own global-bind registry,
+ * every name of which the node is filed under. The held value is the node id
+ * alone, because the cleanup runs when the handle — and every map on it — is
+ * already unreachable, and a held value that reached its target would keep
+ * it alive forever, which a `FinalizationRegistry` is specified to reject.
+ * No handle is ever unregistered, so none is registered with a token.
  */
 const registry = new FinalizationRegistry(
-  (collected: Collected) => {
-    handlesByNodeId.delete(collected.nodeId);
-    exposureRegistered.delete(collected.nodeId);
-    for (const name of collected.kinds?.keys() ?? []) {
-      forgetGlobalNode(name, collected.nodeId);
+  (nodeId: number) => {
+    handlesByNodeId.delete(nodeId);
+    exposureRegistered.delete(nodeId);
+    for (const name of globalNodes.keys()) {
+      forgetGlobalNode(name, nodeId);
     }
-    collected.kinds = undefined;
-    dropElement(collected.nodeId);
+    dropElement(nodeId);
   },
 );
 
@@ -951,7 +933,7 @@ let pageRootHandle: Handle | undefined;
 function createHandle(nodeId: number): Handle {
   const handle: Handle = { [nodeIdSymbol]: nodeId };
   handlesByNodeId.set(nodeId, new WeakRef(handle));
-  registry.register(handle, collectedOf(handle), handle);
+  registry.register(handle, nodeId);
   return handle;
 }
 
@@ -1551,8 +1533,8 @@ function setDatasetValue(
  * a key absent from `dataset` keeps its value and its attribute.
  */
 export function __SetDataset(element: unknown, dataset: unknown) {
-  const values = valuesOf(element, datasetSymbol);
   if (dataset !== null && typeof dataset === "object") {
+    const values = valuesOf(element, datasetSymbol);
     const nodeId = nodeIdOf(element);
     for (const [key, value] of Object.entries(copyElementValue(dataset))) {
       setDatasetValue(nodeId, values, key, value);
@@ -1561,7 +1543,7 @@ export function __SetDataset(element: unknown, dataset: unknown) {
 }
 
 export function __GetDataset(element: unknown) {
-  return copyElementValue(Object.fromEntries(valuesOf(element, datasetSymbol)));
+  return copyElementValue(Object.fromEntries((element as Handle)[datasetSymbol] ?? []));
 }
 
 export function __AddDataset(element: unknown, key: string, value: unknown) {
@@ -2045,13 +2027,12 @@ export function __SetAttribute(
     return updateListInfo(element, value);
   }
   const nodeId = nodeIdOf(element);
-  const values = valuesOf(element, attributeValuesSymbol);
   let key = String(name);
   // The text the attribute now holds, or `null` once it is removed.
   let written: string | null = null;
   if (value === null || value === undefined) {
     removeAttribute(nodeId, key);
-    values.delete(key);
+    (element as Handle)[attributeValuesSymbol]?.delete(key);
   } else {
     let text: string | undefined;
     if (
@@ -2066,7 +2047,11 @@ export function __SetAttribute(
     }
     written = text ?? String(value);
     setAttribute(nodeId, key, written);
-    values.set(key, copyElementValue(value));
+    if (typeof value === "string" && !keepsAttributeString(key)) {
+      (element as Handle)[attributeValuesSymbol]?.delete(key);
+    } else {
+      valuesOf(element, attributeValuesSymbol).set(key, copyElementValue(value));
+    }
   }
   if (key === EXPOSURE_ID) {
     syncExposureListener(element as Handle);
@@ -2079,6 +2064,18 @@ export function __SetAttribute(
     }
   }
   return undefined;
+}
+
+/**
+ * Whether `__SetAttribute` keeps a string value under `name` as well as
+ * writing it to the node: a `data-*` attribute, which an event's `dataset`
+ * is built from without asking the host ([`datasetOf`]), and the
+ * `exposure-id`, which [`wantsExposureRecords`] reads. Every other reader of
+ * the kept values (`fields`' `name` and `attribute`) asks the host for a name
+ * with none kept, and the host answers the same string.
+ */
+function keepsAttributeString(name: string): boolean {
+  return name.startsWith("data-") || name === EXPOSURE_ID;
 }
 
 /** One UI method's answer: the status shape every `invoke` path reports. */
@@ -2349,14 +2346,14 @@ export function __InvokeUIMethod(
 
 function nodeFields(element: Handle, fields: string[]): QueryNode {
   const id = nodeIdOf(element);
-  const values = valuesOf(element, attributeValuesSymbol);
+  const values = element[attributeValuesSymbol];
   const result: QueryNode = {};
   for (const field of fields) {
     switch (field) {
       case "id": result['id'] = getAttribute(id, "id") ?? ""; break;
       case "tag": result['tag'] = tagName(id); break;
       case "unique_id": result['unique_id'] = id; break;
-      case "name": result['name'] = values.get("name") ?? getAttribute(id, "name") ?? ""; break;
+      case "name": result['name'] = values?.get("name") ?? getAttribute(id, "name") ?? ""; break;
       case "class": result['class'] = (getAttribute(id, "class") ?? "").split(/\s+/).filter(Boolean); break;
       case "dataset": case "dataSet": result[field] = __GetDataset(element); break;
       case "index": {
@@ -2369,7 +2366,7 @@ function nodeFields(element: Handle, fields: string[]): QueryNode {
       case "attribute": {
         const entries = splitRecord(attributeNames(id))
           .filter(key => key !== "id" && key !== "class" && key !== "style" && !key.startsWith("data-"))
-          .map(key => [key, values.has(key) ? values.get(key) : getAttribute(id, key)])
+          .map(key => [key, values?.has(key) ? values.get(key) : getAttribute(id, key)])
           .filter(([, value]) => value != null && typeof value !== "function");
         result['attribute'] = Object.fromEntries(entries);
         break;
@@ -2572,15 +2569,15 @@ function kindsOf(handle: Handle, name: string): number {
  * host's `hears_exposure`).
  */
 function reconcile(handle: Handle, name: string): undefined {
-  const collected = collectedOf(handle);
+  const told = handle[kindsSymbol];
   const kinds = kindsOf(handle, name);
-  if (kinds !== (collected.kinds?.get(name) ?? 0)) {
+  if (kinds !== (told?.get(name) ?? 0)) {
     if (kinds === 0) {
-      collected.kinds?.delete(name);
-      listenerClosed(collected.nodeId, name);
+      told?.delete(name);
+      listenerClosed(nodeIdOf(handle), name);
     } else {
-      (collected.kinds ??= new Map()).set(name, kinds);
-      listenerOpened(collected.nodeId, name, kinds);
+      (handle[kindsSymbol] ??= new Map()).set(name, kinds);
+      listenerOpened(nodeIdOf(handle), name, kinds);
     }
   }
   if ((kinds & KIND_GLOBAL) !== 0) {
@@ -3012,11 +3009,20 @@ function targetInfo(
  * camelCased spelling of its attribute (`fooBar` is not also `foobar`, and
  * `foo-bar` is not also `fooBar`).
  *
- * Read fresh at each use rather than kept, because web-core rebuilds the
+ * Read from the handle rather than the host. `__SetAttribute` is the one
+ * writer of a `data-*` attribute that is not such a reflection — no engine
+ * component writes one on an element script created — and it keeps every
+ * `data-*` value it writes ([`keepsAttributeString`]) in the order the
+ * element acquired the attributes, so the kept values are the node's own:
+ * a primitive's string is the text it wrote, and only an object or a
+ * function — whose kept copy has lost whatever `toString` it had, or whose
+ * `toString` is script's to run — asks the host for that text.
+ *
+ * Built fresh at each use rather than kept, because web-core rebuilds the
  * whole descriptor per listener invocation and a listener that writes a
  * `data-*` attribute is expected to be seen by the steps after it. A node
- * whose handle is gone has no typed values left to merge; its attributes
- * still answer, the reflected ones among them, as strings.
+ * whose handle is gone has no values left on this side; its attributes
+ * still answer from the host, the reflected ones among them, as strings.
  */
 function datasetOf(nodeId: number): Record<string, unknown> {
   // The document node: no attributes, and no element for the host's
@@ -3034,18 +3040,24 @@ function datasetOf(nodeId: number): Record<string, unknown> {
       reflected.add(datasetAttributeName(key));
     }
   }
-  const attributeDataset = Object.fromEntries(
-    splitRecord(attributeNames(nodeId))
-      .filter((name) =>
-        name.startsWith("data-") && !/[A-Z]/.test(name) && reflected?.has(name) !== true
-      )
-      .map((name): [string, string | null] => [
-        name.slice(5).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase()),
-        getAttribute(nodeId, name),
-      ]),
-  );
+  const attributeDataset: [string, unknown][] = [];
+  const names = handle === undefined
+    ? splitRecord(attributeNames(nodeId))
+    : handle[attributeValuesSymbol]?.keys() ?? [];
+  for (const name of names) {
+    if (!name.startsWith("data-") || /[A-Z]/.test(name) || reflected?.has(name) === true) {
+      continue;
+    }
+    const kept = handle?.[attributeValuesSymbol]?.get(name);
+    attributeDataset.push([
+      name.slice(5).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase()),
+      handle === undefined || typeof kept === "object" || typeof kept === "function"
+        ? getAttribute(nodeId, name)
+        : String(kept),
+    ]);
+  }
   return {
-    ...attributeDataset,
+    ...Object.fromEntries(attributeDataset),
     ...(handle === undefined ? {} : __GetDataset(handle)),
   };
 }
@@ -3994,37 +4006,6 @@ function runEventHandler(handler: unknown, event: DispatchedEvent): undefined {
 }
 
 /**
- * One step of the event path: the node visited, and the target the standard
- * reports there — the two differ only across a shadow boundary, where
- * retargeting hands the steps above it the node they can name.
- */
-interface PathStep {
-  node: number;
-  target: number;
-}
-
-/**
- * The path the host computed, from its two comma-joined id strings.
- *
- * Target-first, root-last: the bubble order, which the capture pass reads
- * backwards. Two strings rather than one structure because the boundary
- * carries primitives and structured clones only, and a decimal id cannot
- * contain the separator — `childElementIds` encodes a list the same way.
- */
-function pathSteps(pathIds: unknown, targetIds: unknown): PathStep[] {
-  const path = String(pathIds ?? "");
-  if (path === "") {
-    return [];
-  }
-  const targets = String(targetIds ?? "").split(",");
-  return path.split(",").map((field, index): PathStep => {
-    const node = Number(field);
-    const target = targets[index];
-    return { node, target: target === undefined ? node : Number(target) };
-  });
-}
-
-/**
  * The handler of one kind on a path step, or undefined when the one filed
  * belongs to the other pass.
  */
@@ -4133,14 +4114,21 @@ function dispatchStateOf(event: unknown): DispatchState | undefined {
 }
 
 /**
- * The first step of `steps` this realm holds a handle for, whose target is
- * this realm's `event.target`: the steps before it are another realm's or a
- * UA component's shadow content. None — a frame's card hearing a key at the
- * document element, which is no node of its tree, or a synthetic event whose
- * target a component freed — leaves a global pass to run, or nothing at all.
+ * The index of the first step this realm holds a handle for, whose target
+ * is this realm's `event.target`, or `steps` when there is none. Step `at`
+ * is read where it arrived, its node at `values[2 * at]` and the target it
+ * sees after it. The steps before the first held one are another realm's or
+ * a UA component's shadow content. None — a frame's card hearing a key at
+ * the document element, which is no node of its tree, or a synthetic event
+ * whose target a component freed — leaves a global pass to run, or nothing
+ * at all.
  */
-function firstHeldStep(steps: PathStep[]): PathStep | undefined {
-  return steps.find((step) => handleOf(step.node) !== undefined);
+function firstHeldIndex(values: readonly unknown[], steps: number): number {
+  let first = 0;
+  while (first < steps && handleOf(Number(values[2 * first])) === undefined) {
+    first++;
+  }
+  return first;
 }
 
 /**
@@ -4150,6 +4138,10 @@ function firstHeldStep(steps: PathStep[]): PathStep | undefined {
  * the path at all. A path with no step this realm holds runs the global
  * pass alone. The one walk both the host's dispatch
  * ([`dispatchHostEvent`]) and a synthetic one ([`__DispatchEvent`]) run.
+ *
+ * The path is `steps` node/target pairs at the front of `values`,
+ * target-first and root-last: the bubble order, which the capture pass reads
+ * backwards. `first` is [`firstHeldIndex`]'s answer for it.
  *
  * `bubbles` narrows the last two and never the first: a non-bubbling event
  * binds on its at-target steps alone and runs no global pass. See the header.
@@ -4169,16 +4161,18 @@ function firstHeldStep(steps: PathStep[]): PathStep | undefined {
 function walkEvent(
   event: DispatchedEvent,
   name: string,
-  steps: PathStep[],
-  first: PathStep | undefined,
+  values: readonly unknown[],
+  steps: number,
+  first: number,
   bubbles: boolean,
 ): undefined {
-  if (first === undefined && !bubbles) {
+  const firstTarget = first < steps ? Number(values[2 * first + 1]) : undefined;
+  if (firstTarget === undefined && !bubbles) {
     return undefined;
   }
   const state = dispatchStateOf(event) as DispatchState;
   // No node yet for a walk with no step held: its first delivery names one.
-  let targetNodeId = first?.target ?? NaN;
+  let targetNodeId = firstTarget ?? NaN;
 
   // Points the event at one delivery. `currentTarget` is rebuilt per step,
   // as web-core rebuilds it per listener invocation; `target` is kept while
@@ -4202,13 +4196,20 @@ function walkEvent(
 
   // The string handler, then the worklet, then the `__AddEventListener`
   // closures, which is web-core's per-node order in both its path walk and
-  // its global-bind delivery.
-  const runPass = (ordered: PathStep[], phase: 0 | 1): undefined => {
-    for (const step of ordered) {
+  // its global-bind delivery. The capture pass walks the path root-first,
+  // the bubble pass target-first.
+  const runPass = (phase: 0 | 1): undefined => {
+    for (let index = 0; index < steps; index++) {
       if (state.stopped) {
         return undefined;
       }
-      const handle = handleOf(step.node);
+      const at = phase === CAPTURE ? steps - 1 - index : index;
+      const node = Number(values[2 * at]);
+      const target = Number(values[2 * at + 1]);
+      if (phase === BUBBLE && !bubbles && node !== target) {
+        continue;
+      }
+      const handle = handleOf(node);
       if (handle === undefined) {
         continue;
       }
@@ -4227,7 +4228,7 @@ function walkEvent(
       ) {
         continue;
       }
-      aim(step.node, step.target, eventPhaseOf(step.node, step.target, phase));
+      aim(node, target, eventPhaseOf(node, target, phase));
       // Before either handler rather than after: a `catch` form ends the
       // walk because of what it is, so it has to end it even when its
       // handler is a background-thread name delivered asynchronously. Either
@@ -4298,7 +4299,7 @@ function walkEvent(
       if (published === undefined && worklet === undefined) {
         continue;
       }
-      aim(nodeId, first?.target ?? nodeId, NONE);
+      aim(nodeId, firstTarget ?? nodeId, NONE);
       if (published !== undefined) {
         runEventHandler(published.handler, event);
       }
@@ -4310,17 +4311,14 @@ function walkEvent(
   };
 
   try {
-    // The reversed copy is the capture order; a path is a handful of steps.
-    runPass(steps.slice().reverse(), CAPTURE);
-    // A non-bubbling event binds on its at-target steps alone — the target,
+    runPass(CAPTURE);
+    // A non-bubbling event binds on its at-target steps alone, the bubble
+    // pass skipping every other step — the target,
     // and any shadow host retargeting made stand in for it, which is the same
     // set the host would have sent had it built a non-bubbling path itself
     // (`terminus`'s `event_steps` keeps exactly the at-target entries). web-core,
     // which has no retargeting to carry, narrows to the path's first entry.
-    runPass(
-      bubbles ? steps : steps.filter((step) => step.node === step.target),
-      BUBBLE,
-    );
+    runPass(BUBBLE);
     if (bubbles) {
       runGlobalPass();
     }
@@ -4347,27 +4345,34 @@ function walkEvent(
  * at all.
  */
 function dispatchHostEvent(
-  pathIds: unknown,
-  targetIds: unknown,
   eventName: unknown,
   bubbles: unknown,
   timestamp: unknown,
-  extraCount: unknown,
+  stepCount: unknown,
   ...rest: unknown[]
 ): undefined {
-  // The extras' name/value pairs first, then the detail kind and its values,
-  // which run to the end because a touch event's points have no fixed count.
-  const pairs = Number(extraCount ?? 0) * 2;
-  const extras = pairs > 0 ? extrasOf(rest.slice(0, pairs)) : undefined;
-  const detailKind = rest[pairs];
-  const detailNumbers = rest.slice(pairs + 1);
-  const steps = pathSteps(pathIds, targetIds);
-  const first = firstHeldStep(steps);
-  if (first === undefined && !bubbles) {
+  // The path's node/target pairs first, then the extras' count and
+  // name/value pairs, then the detail kind and its values, which run to the
+  // end because a touch event's points have no fixed count. Step `at` is
+  // read where it arrived, its node at `rest[2 * at]` and the target it sees
+  // after it, target-first and root-last: the bubble order, which the
+  // capture pass reads backwards.
+  const steps = Number(stepCount ?? 0);
+  const stepValues = steps * 2;
+  const pairs = Number(rest[stepValues] ?? 0) * 2;
+  const extrasAt = stepValues + 1;
+  const extras = pairs > 0
+    ? extrasOf(rest.slice(extrasAt, extrasAt + pairs))
+    : undefined;
+  const detailKind = rest[extrasAt + pairs];
+  const detailNumbers = rest.slice(extrasAt + pairs + 1);
+  const first = firstHeldIndex(rest, steps);
+  const firstTarget = first < steps ? Number(rest[2 * first + 1]) : undefined;
+  if (firstTarget === undefined && !bubbles) {
     return undefined;
   }
   const name = String(eventName).toLowerCase();
-  const targetNodeId = first?.target ?? NaN;
+  const targetNodeId = firstTarget ?? NaN;
   // A reading the host could not take — a detached painter's, say — reports
   // the time origin rather than `NaN`.
   const stamp = Number(timestamp ?? 0);
@@ -4384,7 +4389,7 @@ function dispatchHostEvent(
     name,
     // With no step held, it is set by the first delivery, before any
     // listener reads it.
-    first === undefined
+    firstTarget === undefined
       ? (null as unknown as DispatchedEvent["target"])
       : targetInfo(targetNodeId),
     detail,
@@ -4415,7 +4420,7 @@ function dispatchHostEvent(
   if (editing !== undefined) {
     Object.assign(event, editing);
   }
-  return walkEvent(event, name, steps, first, Boolean(bubbles));
+  return walkEvent(event, name, rest, steps, first, Boolean(bubbles));
 }
 
 /**
@@ -4476,8 +4481,9 @@ export function __CreateEvent(
  *
  * The host's `dispatchEvent` computes the path from the element and the
  * event's `bubbles` and `composed`, runs the engine components' walk over it
- * first, and answers the path ([`pathSteps`]'s two lists, joined by `;`);
- * this file then runs the same Lynx walk the host's dispatch runs
+ * first, and answers the path as `"<nodes>;<targets>"`, two comma-joined
+ * lists of node ids, target-first; this file then runs the same Lynx walk
+ * the host's dispatch runs
  * ([`walkEvent`]) over the steps it holds, with `event.target` the target of
  * the first of them. No other realm hears the event.
  *
@@ -4514,13 +4520,24 @@ export function __DispatchEvent(element: unknown, event: unknown): boolean {
       created.composed,
       created.timestamp,
     );
+    // `"<nodes>;<targets>"`, each half comma-joined and target-first, laid
+    // out here as the host lays a routed dispatch's path: one node/target
+    // pair per step. `";"` is a path of no step.
     const separator = answer.indexOf(";");
-    const steps = pathSteps(answer.slice(0, separator), answer.slice(separator + 1));
-    const first = firstHeldStep(steps);
-    dispatched.target = first === undefined
-      ? (null as unknown as DispatchedEvent["target"])
-      : targetInfo(first.target);
-    walkEvent(dispatched, created.name, steps, first, created.bubbles);
+    const nodes = answer.slice(0, separator);
+    const targets = answer.slice(separator + 1).split(",");
+    const values: number[] = [];
+    if (nodes !== "") {
+      nodes.split(",").forEach((node, at) => {
+        values.push(Number(node), Number(targets[at]));
+      });
+    }
+    const steps = values.length / 2;
+    const first = firstHeldIndex(values, steps);
+    dispatched.target = first < steps
+      ? targetInfo(values[2 * first + 1] as number)
+      : (null as unknown as DispatchedEvent["target"]);
+    walkEvent(dispatched, created.name, values, steps, first, created.bubbles);
   } finally {
     dispatched.eventPhase = NONE;
     dispatched.currentTarget = null;

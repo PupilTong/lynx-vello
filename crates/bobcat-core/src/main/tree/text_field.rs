@@ -183,7 +183,8 @@
 //! `addText` and `sendDelEvent` on a field that is not focused read that
 //! kept selection.
 
-use std::cell::RefCell;
+use std::borrow::Cow;
+use std::cell::{OnceCell, RefCell};
 use std::ops::Range;
 use std::rc::Rc;
 
@@ -191,7 +192,7 @@ use serde_json::Value;
 use terminus::link::editing::Command;
 use terminus::link::event::{ElementEvent, EventDetail, EventPhase};
 use terminus::link::{
-    CustomElement, MethodCall, MethodError, MethodOutcome, NodeId, ShadowRootMode,
+    CustomElement, MethodCall, MethodError, MethodOutcome, NodeId, ShadowRootMode, ShadowSheet,
 };
 
 use super::text::TEXT_TAG;
@@ -277,7 +278,7 @@ x-textarea[max-height], x-textarea-ng[max-height] {
 
 /// The shadow sheet common to both kinds; [`INPUT_SHADOW_RULES`] and
 /// [`TEXTAREA_SHADOW_RULES`] follow it. An engine sheet
-/// ([`terminus::link::Document::add_engine_shadow_stylesheet`]): the input's editor is
+/// ([`terminus::link::Document::parse_engine_shadow_stylesheet`]): the input's editor is
 /// `display: block`, which the `lynx` grammar keeps from author sheets. The
 /// placeholder's block has no rule here: it is the `::placeholder`, laid
 /// out by [`UA_RULES`] (module documentation). The editor sets no
@@ -353,30 +354,29 @@ struct Reported {
     selection: Range<u32>,
 }
 
-/// State shared by the four definitions: the event queue and the focused
-/// editor's [`Reported`].
+/// State shared by the two kinds' components: the event queue and the
+/// focused editor's [`Reported`].
 #[derive(Default)]
 struct Shared {
     events: ComponentEvents,
     reported: RefCell<Option<Reported>>,
 }
 
-/// Installs the component under its four tag names. Must run before any
-/// element could carry them.
+/// Installs one component per kind, each under the kind's two tag names.
+/// Must run before any element could carry them.
 pub(super) fn define(document: &mut LynxDocument, events: ComponentEvents) {
     let shared = Rc::new(Shared {
         events,
         reported: RefCell::new(None),
     });
     for (tags, kind) in [(INPUT_TAGS, Kind::Input), (TEXTAREA_TAGS, Kind::Textarea)] {
+        let field: Rc<dyn CustomElement<()>> = Rc::new(TextField {
+            kind,
+            shared: Rc::clone(&shared),
+            shadow_sheet: OnceCell::new(),
+        });
         for tag in tags {
-            document.define(
-                tag,
-                Box::new(TextField {
-                    kind,
-                    shared: Rc::clone(&shared),
-                }),
-            );
+            document.define_shared(tag, Rc::clone(&field));
         }
     }
 }
@@ -385,6 +385,9 @@ pub(super) fn define(document: &mut LynxDocument, events: ComponentEvents) {
 struct TextField {
     kind: Kind,
     shared: Rc<Shared>,
+    /// [`SHADOW_RULES`] and the kind's rules, parsed by the first field of
+    /// the kind and mounted on every one's shadow tree.
+    shadow_sheet: OnceCell<ShadowSheet>,
 }
 
 /// The kind of a text field host, `None` for any other node.
@@ -438,7 +441,7 @@ pub(crate) fn focus_delegate(document: &LynxDocument, node: NodeId) -> Option<No
     None
 }
 
-fn attribute<'a>(document: &'a LynxDocument, element: NodeId, name: &str) -> Option<&'a str> {
+fn attribute<'a>(document: &'a LynxDocument, element: NodeId, name: &str) -> Option<Cow<'a, str>> {
     document.get(element).and_then(|node| node.attribute(name))
 }
 
@@ -589,7 +592,7 @@ fn max_length(document: &LynxDocument, field: NodeId) -> Option<usize> {
     let Some(text) = attribute(document, field, MAXLENGTH) else {
         return Some(DEFAULT_MAXLENGTH);
     };
-    let limit = parse_float(text)?;
+    let limit = parse_float(&text)?;
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
@@ -602,7 +605,7 @@ fn max_length(document: &LynxDocument, field: NodeId) -> Option<usize> {
 /// reads it, whole lines; `None` (no limit) when absent, unreadable or not
 /// positive, as native Lynx's `maxLinesFilter` reads `maxLines <= 0`.
 fn max_lines(document: &LynxDocument, field: NodeId) -> Option<usize> {
-    let limit = parse_float(attribute(document, field, MAXLINES)?)?;
+    let limit = parse_float(&attribute(document, field, MAXLINES)?)?;
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
@@ -645,11 +648,14 @@ impl TextField {
     /// Builds the shadow tree; see the module documentation.
     fn build(&self, document: &mut LynxDocument, element: NodeId) {
         let shadow = document.attach_shadow(element, ShadowRootMode::Open);
-        let kind_rules = match self.kind {
-            Kind::Input => INPUT_SHADOW_RULES,
-            Kind::Textarea => TEXTAREA_SHADOW_RULES,
-        };
-        document.add_engine_shadow_stylesheet(shadow, &format!("{SHADOW_RULES}{kind_rules}"));
+        let sheet = self.shadow_sheet.get_or_init(|| {
+            let kind_rules = match self.kind {
+                Kind::Input => INPUT_SHADOW_RULES,
+                Kind::Textarea => TEXTAREA_SHADOW_RULES,
+            };
+            document.parse_engine_shadow_stylesheet(&format!("{SHADOW_RULES}{kind_rules}"))
+        });
+        document.add_shadow_sheet(shadow, sheet);
         let editor = document.create_element(self.kind.editor_tag(), ());
         let id = self.kind.editor_id();
         document.set_id_attribute(editor, Some(id));
@@ -726,9 +732,11 @@ impl TextField {
             return;
         };
         let mut value = attribute(document, element, VALUE)
-            .unwrap_or_default()
-            .to_owned();
-        if let Some(limit) = attribute(document, element, MAXLENGTH).and_then(parse_float) {
+            .map(Cow::into_owned)
+            .unwrap_or_default();
+        if let Some(limit) =
+            attribute(document, element, MAXLENGTH).and_then(|text| parse_float(&text))
+        {
             #[expect(
                 clippy::cast_possible_truncation,
                 clippy::cast_sign_loss,
@@ -774,11 +782,12 @@ impl TextField {
                 fix.remove(std::slice::from_ref(&(start..end)));
             }
         }
-        if self.kind == Kind::Input && attribute(document, field, TYPE) == Some("number") {
+        if self.kind == Kind::Input && attribute(document, field, TYPE).as_deref() == Some("number")
+        {
             fix.remove(&number_rejects(&fix.value));
         }
         if let Some(pattern) = attribute(document, editor, PATTERN).filter(|p| !p.is_empty()) {
-            let rejects = filter_rejects(pattern, &fix.value);
+            let rejects = filter_rejects(&pattern, &fix.value);
             fix.remove(&rejects);
         }
         if fix.value != original {
@@ -953,7 +962,7 @@ impl TextField {
         };
         let editable = !flag(document, element, DISABLED) && !flag(document, element, READONLY);
         let value = if editable { "plaintext-only" } else { "false" };
-        if attribute(document, editor, "contenteditable") != Some(value) {
+        if attribute(document, editor, "contenteditable").as_deref() != Some(value) {
             document.set_attribute(editor, "contenteditable", value);
         }
     }
@@ -1485,7 +1494,10 @@ mod tests {
             } else {
                 "textarea"
             };
-            assert_eq!(document.get(editor).unwrap().attribute("part"), Some(id));
+            assert_eq!(
+                document.get(editor).unwrap().attribute("part").as_deref(),
+                Some(id)
+            );
             assert_eq!(value_of(&document, field, "font-size"), "10px", "{tag}");
         }
     }
@@ -1636,7 +1648,7 @@ mod tests {
             let placeholder = placeholder_box(&document, field);
             let block = placeholder_block(&document, field).unwrap();
             assert_eq!(
-                document.get(block).unwrap().attribute("pseudo"),
+                document.get(block).unwrap().attribute("pseudo").as_deref(),
                 Some(terminus::link::PLACEHOLDER_PSEUDO_ID),
                 "{tag}"
             );

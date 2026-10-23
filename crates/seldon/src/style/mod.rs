@@ -243,8 +243,85 @@ style_protocol! {
             has_position_try_fallbacks -> bool =
                 !style.computed_values().get_position().position_try_fallbacks.value.is_none(),
             order -> i32 = style.computed_values().get_position().order,
+            // Whether this box's own layout reads `LayoutInput::parent_size`
+            // at all. One that does not is laid out — and cached — against
+            // no basis, so an entry answers every basis its parent hands it.
+            // A host must answer `true` for a box its own dispatch lays out
+            // by reading the basis for anything besides the box model
+            // ([`box_model_reads_percentage_basis`]).
+            reads_percentage_basis -> bool = box_model_reads_percentage_basis(style),
         }
     }
+}
+
+/// Whether laying a box out reads the percentage basis its parent hands it
+/// ([`crate::tree::LayoutInput::parent_size`]) through its own box model: a
+/// percentage (or anchor-relative) size, min or max size, margin or padding.
+/// The default of [`CoreStyle::reads_percentage_basis`], which a host extends
+/// for a box whose layout reads the basis some other way.
+#[inline]
+pub fn box_model_reads_percentage_basis(style: &impl CoreStyle) -> bool {
+    let size = style.size();
+    let min_size = style.min_size();
+    let max_size = style.max_size();
+    style_size_depends_on_basis(size.width)
+        || style_size_depends_on_basis(size.height)
+        || style_size_depends_on_basis(min_size.width)
+        || style_size_depends_on_basis(min_size.height)
+        || max_size_depends_on_basis(max_size.width)
+        || max_size_depends_on_basis(max_size.height)
+        || edges_depend_on_inline_basis(&style.margin(), &style.padding())
+}
+
+/// Whether the sizing value resolves against a percentage basis, making it
+/// track the basis rather than stand on its own.
+#[inline]
+pub(crate) fn style_size_depends_on_basis(value: &StyleSize) -> bool {
+    match value {
+        StyleSize::LengthPercentage(lp) => lp.0.has_percentage(),
+        StyleSize::FitContentFunction(limit) => limit.0.has_percentage(),
+        // Conservatively yes: the answer only withholds a stability claim or
+        // asks for a re-resolution, and a precise one would put a call on
+        // every box's path for a value no in-flow box carries in practice.
+        StyleSize::AnchorSizeFunction(_) | StyleSize::AnchorContainingCalcFunction(_) => true,
+        _ => false,
+    }
+}
+
+#[inline]
+pub(crate) fn max_size_depends_on_basis(value: &MaxSize) -> bool {
+    match value {
+        MaxSize::LengthPercentage(lp) => lp.0.has_percentage(),
+        MaxSize::FitContentFunction(limit) => limit.0.has_percentage(),
+        // Conservatively yes: the answer only withholds a stability claim or
+        // asks for a re-resolution, and a precise one would put a call on
+        // every box's path for a value no in-flow box carries in practice.
+        MaxSize::AnchorSizeFunction(_) | MaxSize::AnchorContainingCalcFunction(_) => true,
+        _ => false,
+    }
+}
+
+/// Whether any margin or padding percentage resolves against the container's
+/// inline size.
+#[inline]
+pub(crate) fn edges_depend_on_inline_basis(
+    margin: &Edges<&Margin>,
+    padding: &Edges<&NonNegativeLengthPercentage>,
+) -> bool {
+    let margin_depends = |value: &Margin| match value {
+        Margin::LengthPercentage(lp) => lp.has_percentage(),
+        Margin::Auto => false,
+        // Conservatively yes, as in `style_size_depends_on_basis`.
+        Margin::AnchorSizeFunction(_) | Margin::AnchorContainingCalcFunction(_) => true,
+    };
+    margin_depends(margin.left)
+        || margin_depends(margin.right)
+        || margin_depends(margin.top)
+        || margin_depends(margin.bottom)
+        || padding.left.0.has_percentage()
+        || padding.right.0.has_percentage()
+        || padding.top.0.has_percentage()
+        || padding.bottom.0.has_percentage()
 }
 
 #[cfg(test)]

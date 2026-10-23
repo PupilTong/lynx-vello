@@ -204,8 +204,12 @@
 //!   not hit-testable, so every gesture outside the content, scrolls included, reaches what is
 //!   below, as in native (`LynxOverlayContainer.m:169-214`, `LynxOverlayView.kt:726-752`).
 
+use std::borrow::Cow;
+use std::cell::OnceCell;
+use std::rc::Rc;
+
 use terminus::link::html::dialog::{DIALOG_TAG, close, show_modal};
-use terminus::link::{CustomElement, Node, NodeId, ShadowRootMode};
+use terminus::link::{CustomElement, Node, NodeId, ShadowRootMode, ShadowSheet};
 
 use super::{ComponentEvents, LynxDocument};
 
@@ -259,19 +263,15 @@ const SHADOW_RULES: &str = r#"
 slot { display: contents; }
 "#;
 
-/// Installs the component under both tag names, over the queue its events go
+/// Installs one component under both tag names, over the queue its events go
 /// into. Must run after [`terminus::link::Document::define_html_elements`], whose
 /// `dialog` component the shadow dialog is, and before any element could
 /// carry either tag, which is
 /// [`Document::define`](terminus::link::Document::define)'s own precondition.
 pub(super) fn define(document: &mut LynxDocument, events: ComponentEvents) {
-    document.define(
-        OVERLAY_TAG,
-        Box::new(Overlay {
-            events: events.clone(),
-        }),
-    );
-    document.define(X_OVERLAY_TAG, Box::new(Overlay { events }));
+    let overlay: Rc<dyn CustomElement<()>> = Rc::new(Overlay::new(events));
+    document.define_shared(OVERLAY_TAG, Rc::clone(&overlay));
+    document.define_shared(X_OVERLAY_TAG, overlay);
 }
 
 /// The overlay component: builds the shadow tree when the element is
@@ -283,9 +283,19 @@ pub(super) fn define(document: &mut LynxDocument, events: ComponentEvents) {
 /// element is new and detached then, so every child arrives at the slot.
 struct Overlay {
     events: ComponentEvents,
+    /// [`SHADOW_RULES`], parsed by the first overlay of either tag and
+    /// mounted on every one's shadow tree.
+    shadow_sheet: OnceCell<ShadowSheet>,
 }
 
 impl Overlay {
+    fn new(events: ComponentEvents) -> Self {
+        Self {
+            events,
+            shadow_sheet: OnceCell::new(),
+        }
+    }
+
     /// Shows the shadow dialog the way the host's `events-pass-through`
     /// asks — `showModal()`, or as a Manual popover — and queues
     /// `showoverlay`.
@@ -297,7 +307,7 @@ impl Overlay {
 }
 
 fn show_dialog(document: &mut LynxDocument, overlay: NodeId, dialog: NodeId) {
-    if passes_through(attribute(document, overlay, EVENTS_PASS_THROUGH_ATTRIBUTE)) {
+    if passes_through(attribute(document, overlay, EVENTS_PASS_THROUGH_ATTRIBUTE).as_deref()) {
         document
             .show_popover(dialog)
             .expect("a hidden manual popover in a connected host shows");
@@ -331,7 +341,10 @@ impl CustomElement<()> for Overlay {
 
     fn constructed(&self, document: &mut LynxDocument, element: NodeId) {
         let shadow = document.attach_shadow(element, ShadowRootMode::Open);
-        document.add_shadow_stylesheet(shadow, SHADOW_RULES);
+        let sheet = self
+            .shadow_sheet
+            .get_or_init(|| document.parse_shadow_stylesheet(SHADOW_RULES));
+        document.add_shadow_sheet(shadow, sheet);
         let dialog = document.create_element(DIALOG_TAG, ());
         document.set_id_attribute(dialog, Some(DIALOG_ID));
         document.set_attribute(dialog, "part", DIALOG_ID);
@@ -347,7 +360,7 @@ impl CustomElement<()> for Overlay {
     /// A visible overlay entering the document enters the top layer: on
     /// first insertion, and again after a removal dropped its entry.
     fn connected_callback(&self, document: &mut LynxDocument, element: NodeId) {
-        if shows(attribute(document, element, VISIBLE_ATTRIBUTE))
+        if shows(attribute(document, element, VISIBLE_ATTRIBUTE).as_deref())
             && document.is_connected(element)
             && !document.in_top_layer(shadow_dialog(document, element))
         {
@@ -418,7 +431,7 @@ fn passes_through(value: Option<&str>) -> bool {
     shows(value)
 }
 
-fn attribute<'a>(document: &'a LynxDocument, element: NodeId, name: &str) -> Option<&'a str> {
+fn attribute<'a>(document: &'a LynxDocument, element: NodeId, name: &str) -> Option<Cow<'a, str>> {
     document.get(element).and_then(|node| node.attribute(name))
 }
 
@@ -536,11 +549,19 @@ mod tests {
             let slot = first_element(&document, inner);
             let node = document.get(dialog).expect("live");
             assert_eq!(node.tag_name(), Some("dialog"), "{tag}");
-            assert_eq!(node.attribute("id"), Some("dialog"), "{tag}");
-            assert_eq!(node.attribute("part"), Some("dialog"), "{tag}");
-            assert_eq!(node.attribute("popover"), Some("manual"), "{tag}");
+            assert_eq!(node.attribute("id").as_deref(), Some("dialog"), "{tag}");
+            assert_eq!(node.attribute("part").as_deref(), Some("dialog"), "{tag}");
             assert_eq!(
-                document.get(inner).expect("live").attribute("class"),
+                node.attribute("popover").as_deref(),
+                Some("manual"),
+                "{tag}"
+            );
+            assert_eq!(
+                document
+                    .get(inner)
+                    .expect("live")
+                    .attribute("class")
+                    .as_deref(),
                 Some("overlay-inner"),
                 "{tag}"
             );

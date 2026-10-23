@@ -1385,6 +1385,48 @@ fn an_escaping_box_follows_an_in_place_relayout() {
     assert_eq!(page.offset(escaping, cb), (3.0, 85.0, 10.0, 30.0));
 }
 
+/// A box with a default anchor that escapes a subtree relaid in place into a
+/// scroll container is laid out against css-position-4's scrollable
+/// containing block, as a whole-tree layout lays it out. Only the scroll
+/// container's own absolute pass knows that area (its in-flow overflow, here
+/// 300 wide where the padding box is 100), so the in-place relayout of
+/// `.frame` — a fixed-size box whose output the change does not move (its
+/// zero minimum sizes keep a flex item's automatic minimum, which reads
+/// content, out of its input) — falls back to the whole-tree pass rather than
+/// letting the rounding tail place the box against the padding box
+/// (`hoisted::escapes_to_scrollable_block`).
+#[test]
+fn an_anchored_box_escaping_an_in_place_relayout_keeps_its_scrollable_containing_block() {
+    const CSS: &str = ".scroller { overflow: hidden; width: 100px; height: 100px; }
+         .anchor { anchor-name: --a; width: 10px; height: 10px; }
+         .wide { width: 300px; height: 10px; }
+         .frame { width: 50px; height: 50px; min-width: 0px; min-height: 0px; }
+         .target { position: absolute; position-anchor: --a; left: 0px; right: 0px;
+                   height: 10px; }";
+    let build = |target_inline: &str| {
+        let mut page = Page::new(CSS);
+        let root = page.root();
+        let scroller = page.el(root, "view.cb.scroller", "");
+        page.el(scroller, "view.anchor", "");
+        page.el(scroller, "view.wide", "");
+        let frame = page.el(scroller, "view.frame", "");
+        let wrapper = page.el(frame, "view", "");
+        let target = page.el(wrapper, "view.target", target_inline);
+        page.layout();
+        (page, scroller, target)
+    };
+    let (mut page, scroller, target) = build("top: 0px");
+    assert_eq!(page.offset(target, scroller), (0.0, 0.0, 300.0, 10.0));
+    page.doc.set_inline(target, "top: 5px");
+    page.layout();
+    let (whole, whole_scroller, whole_target) = build("top: 5px");
+    assert_eq!(
+        page.offset(target, scroller),
+        whole.offset(whole_target, whole_scroller)
+    );
+    assert_eq!(page.offset(target, scroller), (0.0, 5.0, 300.0, 10.0));
+}
+
 /// A subtree moved under another containing block takes its escaping boxes
 /// with it, caches and all: they are laid out by the new one.
 #[test]

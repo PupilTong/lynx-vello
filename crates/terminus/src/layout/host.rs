@@ -48,20 +48,28 @@ impl<T> LayoutTree for TreeArenas<T> {
     where
         Self: 'tree;
     type ChildIter<'tree>
-        = core::iter::Copied<core::slice::Iter<'tree, NodeSlot>>
+        = BoxChildren<'tree, T>
     where
         Self: 'tree;
 
-    /// The flat children, except where loose text sits among them: there the
-    /// anonymous boxes that wrap it replace it (`tree::anonymous`).
+    /// The flat children that can generate a box, except where loose text
+    /// sits among them: there the anonymous boxes that wrap it replace it
+    /// (`tree::anonymous`). A text node is content of the paragraph above it
+    /// and never a box, so it is left out; the paragraph reads its own text
+    /// from the flat children.
     fn children(&self, node: NodeSlot) -> Self::ChildIter<'_> {
         let node_ref = self.at(node);
-        if node_ref.may_override_children()
+        let children = if node_ref.may_override_children()
             && let Some(children) = self.anonymous().layout_children(node)
         {
-            return children.iter().copied();
+            children
+        } else {
+            node_ref.flat_children()
+        };
+        BoxChildren {
+            tree: self,
+            children: children.iter(),
         }
-        node_ref.flat_children().iter().copied()
     }
 
     fn style(&self, node: NodeSlot) -> Self::Style<'_> {
@@ -69,7 +77,7 @@ impl<T> LayoutTree for TreeArenas<T> {
     }
 
     fn layout<'state>(&self, state: &'state Self::State, node: NodeSlot) -> &'state LayoutSlot {
-        &state.at(node).slot
+        state.slot_at(node)
     }
 
     fn layout_mut<'state>(
@@ -77,7 +85,7 @@ impl<T> LayoutTree for TreeArenas<T> {
         state: &'state mut Self::State,
         node: NodeSlot,
     ) -> &'state mut LayoutSlot {
-        &mut state.at_mut(node).slot
+        state.slot_mut(node)
     }
 
     fn set_sticky_containing_block(
@@ -183,15 +191,6 @@ impl<T> LayoutTree for TreeArenas<T> {
         hoisted::commit(self, state, containing_block, node, layout);
     }
 
-    fn set_scrollable_containing_block(
-        &self,
-        state: &mut Self::State,
-        node: NodeSlot,
-        size: Size<f32>,
-    ) {
-        state.scrollable_containing_blocks.insert(node, size);
-    }
-
     fn compute_layout(
         &self,
         state: &mut Self::State,
@@ -199,9 +198,11 @@ impl<T> LayoutTree for TreeArenas<T> {
         input: LayoutInput,
     ) -> LayoutOutput {
         let node_ref = self.at(node);
-        let display = if node_ref.is_text_node() {
-            DisplayMode::Leaf
-        } else {
+        // Every caller reaches an element: a text node is never a box
+        // (`children` leaves it out), and the root, the parked roots, the
+        // atoms and the hoisted boxes are elements.
+        debug_assert!(node_ref.is_element(), "only an element is laid out");
+        let display = {
             let view = self.style(node);
             let display = view.display_mode();
             if display == DisplayMode::None {
@@ -294,28 +295,20 @@ impl<T> LayoutTree for TreeArenas<T> {
                 DisplayMode::Relative => compute_relative_layout(tree, state, node, input),
                 DisplayMode::Leaf => {
                     let node_ref = tree.at(node);
-                    // A text node is content of the paragraph above it, never
-                    // a box of its own: loose text among items reaches layout
-                    // through the anonymous box that wraps it
-                    // (`tree::anonymous`), never as an item itself.
-                    let output = if node_ref.is_text_node() {
-                        LayoutOutput::HIDDEN
+                    let view = tree.style(node);
+                    #[cfg(feature = "layout-test-utils")]
+                    let output = if let Some(metrics) = node_ref.test_leaf_metrics() {
+                        compute_leaf_layout_with_measurement_for_testing(
+                            input,
+                            &view,
+                            None,
+                            |_measure_input| metrics,
+                        )
                     } else {
-                        let view = tree.style(node);
-                        #[cfg(feature = "layout-test-utils")]
-                        if let Some(metrics) = node_ref.test_leaf_metrics() {
-                            compute_leaf_layout_with_measurement_for_testing(
-                                input,
-                                &view,
-                                None,
-                                |_measure_input| metrics,
-                            )
-                        } else {
-                            compute_leaf_layout(input, &view, node_ref.natural_size())
-                        }
-                        #[cfg(not(feature = "layout-test-utils"))]
                         compute_leaf_layout(input, &view, node_ref.natural_size())
                     };
+                    #[cfg(not(feature = "layout-test-utils"))]
+                    let output = compute_leaf_layout(input, &view, node_ref.natural_size());
                     if input.goal.commits() {
                         for grandchild in tree.children(node) {
                             hide_subtree(tree, state, grandchild);
@@ -395,22 +388,6 @@ impl<T> LayoutTree for TreeArenas<T> {
         anchors::scrolls_with_default(named, default, axis)
     }
 
-    /// css-position-4's scrollable containing block, as the containing
-    /// block's algorithm recorded it in this run, before the absolute pass
-    /// that asks ([`LayoutTree::set_scrollable_containing_block`]): its
-    /// in-flow overflow only, so the box laid out against it cannot grow it.
-    /// The read is recorded like an anchor query, for a box whose containing
-    /// block was served from the cache.
-    fn scrollable_containing_block(
-        &self,
-        state: &Self::State,
-        node: NodeSlot,
-    ) -> Option<Size<f32>> {
-        self.anchor_query(state, node, 0, anchors::AnchorQuery::Scrollable)
-            .1
-            .map(|rect| rect.size)
-    }
-
     fn position_option_count(&self, node: NodeSlot) -> usize {
         self.anchors()
             .options(node)
@@ -462,6 +439,31 @@ impl<T> LayoutTree for TreeArenas<T> {
                 });
             }
         }
+    }
+}
+
+/// [`LayoutTree::children`] for the document: the children that can generate
+/// a box, text nodes left out.
+pub(crate) struct BoxChildren<'tree, T> {
+    tree: &'tree TreeArenas<T>,
+    children: core::slice::Iter<'tree, NodeSlot>,
+}
+
+impl<T> Iterator for BoxChildren<'_, T> {
+    type Item = NodeSlot;
+
+    #[inline]
+    fn next(&mut self) -> Option<NodeSlot> {
+        self.children
+            .by_ref()
+            .copied()
+            .find(|&child| !self.tree.at(child).is_text_node())
+    }
+
+    /// At most the children left; how many of them are text is unknown.
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (0, Some(self.children.len()))
     }
 }
 
@@ -597,7 +599,8 @@ pub(super) fn run_layout<T: Sync>(
     // and no container units nothing at all.
     let interleave = document.arenas().uses_container_units();
     let mut deferred = Vec::new();
-    let mut escalated = false;
+    // The in-place roots that fell back to the whole-tree pass.
+    let mut escalated: SmallVec<[NodeId; 2]> = SmallVec::new();
     {
         let (tree, state) = document.layout_parts();
         let root = tree.live_slot(root_id);
@@ -625,14 +628,21 @@ pub(super) fn run_layout<T: Sync>(
                 RelayoutKind::InPlace { previous } => {
                     let output = tree.compute_layout(state, slot, pending.input);
                     // A reproduced output proves nothing above this node
-                    // can observe the change; anything else falls back to
-                    // the whole-tree pass, which reuses the caches just
-                    // filled.
-                    if output != previous {
-                        escalated = true;
+                    // can observe the change, as long as every box hoisted
+                    // out of it can be placed late by the rounding tail;
+                    // anything else falls back to the whole-tree pass,
+                    // which reuses the caches just filled. The containing
+                    // blocks above the node then run their absolute passes,
+                    // so the tail places nothing late under it.
+                    if output != previous || hoisted::escapes_to_scrollable_block(tree, state, slot)
+                    {
+                        escalated.push(pending.node_id);
                         let mut current = tree.at(slot).flat_parent_slot();
                         while let Some(ancestor) = current {
-                            state.clear_layout_cache(ancestor);
+                            // Geometry only: a paragraph an ancestor retains
+                            // answers for itself whether what it was shaped
+                            // from moved, as under `Document::invalidate_layout`.
+                            state.clear_box_cache(ancestor);
                             current = tree.at(ancestor).flat_parent_slot();
                         }
                     }
@@ -650,7 +660,7 @@ pub(super) fn run_layout<T: Sync>(
         );
         state.take_container_deferrals(&mut deferred);
     }
-    let full = full || escalated;
+    let full = full || !escalated.is_empty();
     let settled = settle_deferred_containers(document, resized, &mut deferred);
     // A deferred container is a relayout boundary, so its own box did not move
     // and nothing above it has to be laid out again — but its subtree was
@@ -664,10 +674,16 @@ pub(super) fn run_layout<T: Sync>(
             }
         }
     }
-    // The parked subtrees this run relaid in place, before the root pass: a
-    // box under one of them that escapes to a containing block above it was
-    // laid out by nobody, and the tail places it (`hoisted::places_late`).
-    let relayed: FxHashSet<NodeId> = parked.iter().map(|&(_, pending)| pending.node_id).collect();
+    // The parked subtrees this run relaid in place, before the root pass, and
+    // did not escalate: a box under one of them that escapes to a containing
+    // block above it was laid out by nobody, and the tail places it
+    // (`hoisted::places_late`). Under an escalated root every containing
+    // block above it ran its own absolute pass.
+    let relayed: FxHashSet<NodeId> = parked
+        .iter()
+        .map(|&(_, pending)| pending.node_id)
+        .filter(|node| !escalated.contains(node))
+        .collect();
     {
         let (tree, state) = document.layout_parts();
         let root = tree.live_slot(root_id);
@@ -791,8 +807,9 @@ fn settle_deferred_containers<T: Sync>(
                 continue;
             }
             // The deferred run cached the size it published; the relay is the
-            // run that lays the contents out under it.
-            state.clear_layout_cache(slot);
+            // run that lays the contents out under it. A deferred container
+            // establishes no paragraph, so there is no shaped text to drop.
+            state.clear_box_cache(slot);
             let output = compute_boundary_relayout(tree, state, slot, input);
             tree.layout_mut(state, slot)
                 .set_unrounded_content_size(output.content_size);

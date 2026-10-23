@@ -6,7 +6,9 @@ use seldon::compute::{compute_absolute_layout, compute_leaf_layout};
 use seldon::prelude::*;
 use seldon::style::StyleSize;
 use stylo::computed_values::{box_sizing, direction, flex_direction, flex_wrap};
-use stylo::values::computed::{Display, FlexBasis, Margin, MaxSize, Overflow, PositionProperty};
+use stylo::values::computed::{
+    Display, FlexBasis, Inset, Margin, MaxSize, Overflow, PositionProperty,
+};
 use stylo::values::specified::align::AlignFlags;
 use support::*;
 
@@ -492,7 +494,76 @@ mod alignment {
 
         assert_close(tree.layout(first).location.y + 15.0, 15.0);
         assert_close(tree.layout(second).location.y + 10.0, 15.0);
-        assert_eq!(output.first_baselines.y, Some(15.0));
+        assert_eq!(output.first_baseline, Some(15.0));
+    }
+
+    /// A `linear` column of one fixed-size box, whose first baseline is that
+    /// box's 7px: given only when its caller reads it
+    /// (`LayoutInput::reads_first_baseline`), and synthesized from its own
+    /// 20px bottom edge otherwise.
+    fn linear_column_with_baseline(tree: &mut TestTree) -> (TestId, TestId) {
+        let inner = tree.push_leaf(
+            fixed_leaf_style(20.0, 20.0),
+            Size::new(20.0, 20.0),
+            Some(7.0),
+        );
+        (tree.push_linear(TestStyle::default(), vec![inner]), inner)
+    }
+
+    #[test]
+    fn a_first_baseline_group_reads_a_linear_item_s_own_baseline() {
+        let mut tree = TestTree::default();
+        let first = tree.push_leaf(
+            fixed_leaf_style(20.0, 20.0),
+            Size::new(20.0, 20.0),
+            Some(15.0),
+        );
+        let (column, _) = linear_column_with_baseline(&mut tree);
+        let root = flex_container(
+            &mut tree,
+            TestStyle {
+                align_items: items(AlignFlags::BASELINE),
+                ..TestStyle::default()
+            },
+            &[first, column],
+        );
+
+        let output = definite_layout(&tree, root, 100.0, 40.0);
+
+        // The shared baseline is the first item's 15px; the column's 7px
+        // baseline sits on it.
+        assert_close(tree.layout(first).location.y, 0.0);
+        assert_close(tree.layout(column).location.y, 8.0);
+        assert_eq!(output.first_baseline, Some(15.0));
+    }
+
+    #[test]
+    fn a_measured_container_asks_its_first_item_for_the_baseline_it_is_asked_for() {
+        let run = |reads_first_baseline| {
+            let mut tree = TestTree::default();
+            let (column, inner) = linear_column_with_baseline(&mut tree);
+            let root = flex_container(&mut tree, TestStyle::default(), &[column]);
+            // A definite width, so the cross sizes are resolved in one pass.
+            let output = tree.compute_layout(
+                root,
+                LayoutInput::measure(
+                    Size::new(Some(100.0), None),
+                    Size::new(Some(100.0), None),
+                    Size::new(AvailableSpace::Definite(100.0), AvailableSpace::MaxContent),
+                    RequestedAxis::Both,
+                )
+                .reading_first_baseline(reads_first_baseline),
+            );
+            (output, tree.measure_inputs(inner).len())
+        };
+
+        let (read, read_probes) = run(true);
+        assert_eq!(read.first_baseline, Some(7.0));
+        assert_eq!(read_probes, 1);
+        // Unread, the column's fixed-size box is never measured for it.
+        let (unread, unread_probes) = run(false);
+        assert_eq!(unread.size, read.size);
+        assert_eq!(unread_probes, 0);
     }
 }
 
@@ -1467,6 +1538,49 @@ fn absolute_children_use_order_zero_for_paint_order() {
     assert_eq!(tree.layout(inflow).order, 1);
 }
 
+/// The static position is read only on an axis whose insets are both `auto`,
+/// so a box inset on both axes is never measured for one: it is laid out
+/// once, by its commit.
+#[test]
+fn an_absolute_child_inset_on_both_axes_is_not_measured_for_a_static_position() {
+    fn content(_: LeafMeasureInput) -> LeafMetrics {
+        LeafMetrics::new(Size::new(30.0, 10.0))
+    }
+    let run = |inset: Edges<Inset>| {
+        let mut tree = TestTree::default();
+        let child = tree.push_measured_leaf(
+            TestStyle {
+                position: PositionProperty::Absolute,
+                inset,
+                ..TestStyle::default()
+            },
+            content,
+        );
+        let root = flex_container(&mut tree, TestStyle::default(), &[child]);
+        definite_layout(&tree, root, 100.0, 20.0);
+        let measurements = tree
+            .measure_inputs(child)
+            .iter()
+            .filter(|input| !input.goal.commits())
+            .count();
+        (tree.layout(child).location, measurements)
+    };
+
+    let inset = Edges {
+        left: inset_px(5.0),
+        right: inset_px(5.0),
+        top: inset_px(2.0),
+        bottom: inset_auto(),
+    };
+    let (location, measurements) = run(inset);
+    assert_point(location, Point::new(5.0, 2.0));
+    assert_eq!(measurements, 0);
+
+    let (location, measurements) = run(Edges::uniform(inset_auto()));
+    assert_point(location, Point::ZERO);
+    assert_eq!(measurements, 1);
+}
+
 #[test]
 fn natural_sized_leaf_has_no_content_baseline() {
     let style = fixed_leaf_style(100.0, 20.0);
@@ -1482,7 +1596,7 @@ fn natural_sized_leaf_has_no_content_baseline() {
     );
     assert_size(output.size, Size::new(100.0, 20.0));
     assert_size(output.content_size, Size::new(100.0, 20.0));
-    assert_eq!(output.first_baselines, Point::NONE);
+    assert_eq!(output.first_baseline, None);
 }
 
 #[test]
@@ -1507,7 +1621,7 @@ fn leaf_max_width_constrains_measurement_and_preserves_overflow_extent() {
     );
     assert_size(output.size, Size::new(120.0, 50.0));
     assert_size(output.content_size, Size::new(220.0, 50.0));
-    assert_eq!(output.first_baselines, Point::NONE);
+    assert_eq!(output.first_baseline, None);
 }
 
 #[test]
@@ -2795,8 +2909,8 @@ mod last_baseline {
         assert_close(tree.layout(short).location.y + 15.0, 54.0);
         // With no first-baseline group on the line, the container's first
         // baseline is the last-baseline group's (§8.5 step 2).
-        assert_eq!(output.first_baselines.y, Some(54.0));
-        assert_eq!(output.last_baselines.y, Some(54.0));
+        assert_eq!(output.first_baseline, Some(54.0));
+        assert_eq!(output.last_baseline, Some(54.0));
     }
 
     #[test]
@@ -2838,18 +2952,25 @@ mod last_baseline {
         assert_close(tree.layout(b).location.y + 8.0, 25.0);
         assert_close(tree.layout(c).location.y + 12.0, 60.0);
         assert_close(tree.layout(d).location.y + 30.0, 60.0);
-        assert_eq!(output.first_baselines.y, Some(25.0));
-        assert_eq!(output.last_baselines.y, Some(60.0));
+        assert_eq!(output.first_baseline, Some(25.0));
+        assert_eq!(output.last_baseline, Some(60.0));
 
-        // A measurement reports the same pair as the commit.
-        let measured = measure_layout(
-            &tree,
+        // A measurement that reads both baselines reports the same pair as
+        // the commit.
+        let constraint = Size::new(AvailableSpace::Definite(50.0), AvailableSpace::MaxContent);
+        let measured = tree.compute_layout(
             root,
-            Size::new(Some(50.0), None),
-            Size::new(AvailableSpace::Definite(50.0), AvailableSpace::MaxContent),
+            LayoutInput::measure(
+                Size::new(Some(50.0), None),
+                constraint.definite_values(),
+                constraint,
+                RequestedAxis::Both,
+            )
+            .reading_first_baseline(true)
+            .reading_last_baseline(true),
         );
-        assert_eq!(measured.first_baselines.y, Some(25.0));
-        assert_eq!(measured.last_baselines.y, Some(60.0));
+        assert_eq!(measured.first_baseline, Some(25.0));
+        assert_eq!(measured.last_baseline, Some(60.0));
     }
 
     #[test]
@@ -2897,8 +3018,8 @@ mod last_baseline {
         assert_close(tree.layout(first).location.y, 0.0);
         assert_close(tree.layout(last).location.y, 30.0);
         assert_close(tree.layout(tall).location.y, 0.0);
-        assert_eq!(output.first_baselines.y, Some(10.0));
-        assert_eq!(output.last_baselines.y, Some(46.0));
+        assert_eq!(output.first_baseline, Some(10.0));
+        assert_eq!(output.last_baseline, Some(46.0));
     }
 
     #[test]
@@ -2963,7 +3084,7 @@ mod last_baseline {
         assert_close(tree.layout(high).location.y, 0.0);
         assert_close(tree.layout(low).location.y + 4.0, 28.0);
         assert_close(tree.layout(first).location.y, 4.0);
-        assert_eq!(output.last_baselines.y, Some(28.0));
+        assert_eq!(output.last_baseline, Some(28.0));
     }
 
     #[test]
@@ -3006,8 +3127,8 @@ mod last_baseline {
         assert_point(tree.layout(c).location, Point::new(0.0, 0.0));
         // The startmost (top) line is the second one, the endmost (bottom)
         // the first (css-flexbox-1 §8.5, csswg-drafts#995).
-        assert_eq!(output.first_baselines.y, Some(15.0));
-        assert_eq!(output.last_baselines.y, Some(40.0));
+        assert_eq!(output.first_baseline, Some(15.0));
+        assert_eq!(output.last_baseline, Some(40.0));
     }
 
     /// css-flexbox-1 §8.3: the first-baseline group sits against the line's
@@ -3058,8 +3179,8 @@ mod last_baseline {
             assert_close(tree.layout(last).location.y, last_y);
             // §8.5: the first baseline comes from the first-baseline group and
             // the last from the last-baseline group, wherever they sit.
-            assert_eq!(output.first_baselines.y, Some(first_y + 15.0));
-            assert_eq!(output.last_baselines.y, Some(last_y + 25.0));
+            assert_eq!(output.first_baseline, Some(first_y + 15.0));
+            assert_eq!(output.last_baseline, Some(last_y + 25.0));
         }
     }
 
@@ -3111,8 +3232,8 @@ mod last_baseline {
             assert_close(tree.layout(c).location.x, c_x);
             // The startmost line holds [a, b] unless `wrap-reverse` moved it
             // to the inline-end side; then [c]'s line is the startmost.
-            assert_eq!(output.first_baselines.y, Some(first), "{label}");
-            assert_eq!(output.last_baselines.y, Some(last), "{label}");
+            assert_eq!(output.first_baseline, Some(first), "{label}");
+            assert_eq!(output.last_baseline, Some(last), "{label}");
         }
     }
 
@@ -3141,8 +3262,8 @@ mod last_baseline {
         // aligned at the line's end, as `end` would put them.
         assert_close(tree.layout(tall).location.y, 20.0);
         assert_close(tree.layout(short).location.y, 40.0);
-        assert_eq!(output.first_baselines.y, Some(50.0));
-        assert_eq!(output.last_baselines.y, Some(50.0));
+        assert_eq!(output.first_baseline, Some(50.0));
+        assert_eq!(output.last_baseline, Some(50.0));
     }
 
     #[test]
@@ -3204,7 +3325,7 @@ mod last_baseline {
         // Group baseline: max(25, 40 - max(5, 10)) = 30.
         assert_close(tree.layout(shifted).location.y, 30.0 - 25.0 + 7.0);
         assert_close(tree.layout(other).location.y, 20.0);
-        assert_eq!(output.last_baselines.y, Some(30.0));
+        assert_eq!(output.last_baseline, Some(30.0));
     }
 
     #[test]
@@ -3249,8 +3370,8 @@ mod last_baseline {
         assert_point(tree.layout(first).location, Point::new(0.0, 10.0));
         // The cross-axis baseline sets: the topmost item's first baseline,
         // the bottommost item's last.
-        assert_eq!(output.first_baselines.y, Some(7.0));
-        assert_eq!(output.last_baselines.y, Some(27.0));
+        assert_eq!(output.first_baseline, Some(7.0));
+        assert_eq!(output.last_baseline, Some(27.0));
 
         let reversed = flex_container(
             &mut tree,
@@ -3267,8 +3388,8 @@ mod last_baseline {
             Size::new(AvailableSpace::Definite(100.0), AvailableSpace::MaxContent),
         );
         // `column-reverse` puts the last item on top.
-        assert_eq!(output.first_baselines.y, Some(5.0));
-        assert_eq!(output.last_baselines.y, Some(28.0));
+        assert_eq!(output.first_baseline, Some(5.0));
+        assert_eq!(output.last_baseline, Some(28.0));
     }
 
     /// An item that shares no baseline takes css-align-3 §4.2's fallback
@@ -3433,7 +3554,7 @@ mod last_baseline {
             assert_size(tree.layout(inner).size, Size::new(40.0, 22.0));
             assert_close(tree.layout(inner).location.y, inner_y);
             assert_close(tree.layout(beside).location.y, beside_y);
-            assert_eq!(output.last_baselines.y, Some(beside_y + 15.0));
+            assert_eq!(output.last_baseline, Some(beside_y + 15.0));
         }
     }
 
@@ -3441,6 +3562,9 @@ mod last_baseline {
     /// item it comes from, which the cross pass did not measure, gives one
     /// synthesized from its border box's bottom edge, as a stretched item's
     /// first baseline is. A commit reads the committed children and is exact.
+    /// The measurement reads the first baseline, which is what makes it report
+    /// baselines at all, and not the last, whose request would make it exact
+    /// (`a_last_baseline_request_measures_the_skipped_item_once`).
     #[test]
     fn a_measurement_synthesizes_the_last_baseline_of_an_item_its_cross_pass_skipped() {
         let mut tree = TestTree::default();
@@ -3463,7 +3587,16 @@ mod last_baseline {
         let root = flex_container(&mut tree, row(AlignFlags::FLEX_START), &[first, last]);
         let constraint = Size::new(AvailableSpace::Definite(100.0), AvailableSpace::MaxContent);
 
-        let measured = measure_layout(&tree, root, Size::new(Some(100.0), None), constraint);
+        let measured = tree.compute_layout(
+            root,
+            LayoutInput::measure(
+                Size::new(Some(100.0), None),
+                constraint.definite_values(),
+                constraint,
+                RequestedAxis::Both,
+            )
+            .reading_first_baseline(true),
+        );
         // The last item's one measurement is the main-axis min-content probe
         // for its §4.5 automatic minimum; nothing measures it in both axes,
         // as a cross-size or baseline probe would.
@@ -3473,12 +3606,12 @@ mod last_baseline {
             probes[0].goal,
             LayoutGoal::Measure(RequestedAxis::Horizontal)
         );
-        assert_eq!(measured.first_baselines.y, Some(5.0));
-        assert_eq!(measured.last_baselines.y, Some(30.0));
+        assert_eq!(measured.first_baseline, Some(5.0));
+        assert_eq!(measured.last_baseline, Some(30.0));
 
         let committed = perform_layout(&tree, root, Size::new(Some(100.0), None), constraint);
-        assert_eq!(committed.first_baselines.y, Some(5.0));
-        assert_eq!(committed.last_baselines.y, Some(25.0));
+        assert_eq!(committed.first_baseline, Some(5.0));
+        assert_eq!(committed.last_baseline, Some(25.0));
     }
 
     /// A measurement asked for an exact last baseline measures the item it
@@ -3526,8 +3659,8 @@ mod last_baseline {
                 .count(),
             1
         );
-        assert_eq!(requested.first_baselines.y, Some(5.0));
-        assert_eq!(requested.last_baselines.y, Some(25.0));
+        assert_eq!(requested.first_baseline, Some(5.0));
+        assert_eq!(requested.last_baseline, Some(25.0));
     }
 
     #[test]
@@ -3550,11 +3683,302 @@ mod last_baseline {
         );
 
         let committed = definite_layout(&tree, root, 100.0, 40.0);
-        assert_eq!(committed.first_baselines, Point::NONE);
-        assert_eq!(committed.last_baselines, Point::NONE);
+        assert_eq!(committed.first_baseline, None);
+        assert_eq!(committed.last_baseline, None);
         let measured = measure_layout(&tree, root, Size::NONE, Size::MAX_CONTENT);
-        assert_eq!(measured.last_baselines, Point::NONE);
+        assert_eq!(measured.last_baseline, None);
         // The item itself still aligns.
         assert_close(tree.layout(child).location.y, 20.0);
+    }
+}
+
+/// The flex containers whose second sizing pass moves their items, for the
+/// measurement comparison below.
+mod unrequested_measurement {
+    use super::*;
+
+    /// A 2:1 bitmap stretched beside a paragraph: the second pass gives the
+    /// bitmap the line's cross size, and its main size follows.
+    pub(super) fn stretched_ratio_beside_paragraph(
+        tree: &mut TestTree,
+        direction: flex_direction::T,
+    ) -> TestId {
+        let text = paragraph(tree);
+        let image = tree.push_measured_leaf(TestStyle::default(), bitmap_leaf);
+        flex_container(
+            tree,
+            TestStyle {
+                flex_direction: direction,
+                ..TestStyle::default()
+            },
+            &[text, image],
+        )
+    }
+
+    /// An auto-size container holding an auto-width column holding a `width:
+    /// 100%` bitmap: the column's height is the bitmap's only once its width
+    /// is known.
+    pub(super) fn percentage_grandchild(
+        tree: &mut TestTree,
+        direction: flex_direction::T,
+    ) -> TestId {
+        let image = tree.push_measured_leaf(
+            TestStyle {
+                size: Size::new(size_pct(1.0), size_auto()),
+                ..TestStyle::default()
+            },
+            bitmap_leaf,
+        );
+        let wide = fixed_leaf(tree, 120.0, 10.0);
+        let view = flex_container(
+            tree,
+            TestStyle {
+                flex_direction: flex_direction::T::Column,
+                ..TestStyle::default()
+            },
+            &[image],
+        );
+        flex_container(
+            tree,
+            TestStyle {
+                flex_direction: direction,
+                ..TestStyle::default()
+            },
+            &[wide, view],
+        )
+    }
+
+    /// Items that carry `aspect-ratio` with automatic sizes, stretched to a
+    /// larger sibling.
+    pub(super) fn stretched_aspect_ratio(
+        tree: &mut TestTree,
+        direction: flex_direction::T,
+    ) -> TestId {
+        let tall = fixed_leaf(tree, 30.0, 60.0);
+        let square = tree.push_leaf(
+            TestStyle {
+                aspect_ratio: ratio(1.0),
+                ..TestStyle::default()
+            },
+            Size::ZERO,
+            None,
+        );
+        let wide = tree.push_leaf(
+            TestStyle {
+                aspect_ratio: ratio(2.0),
+                ..TestStyle::default()
+            },
+            Size::new(10.0, 5.0),
+            None,
+        );
+        flex_container(
+            tree,
+            TestStyle {
+                flex_direction: direction,
+                ..TestStyle::default()
+            },
+            &[tall, square, wide],
+        )
+    }
+
+    /// Percentage margins, padding, sizes and flex bases at two depths, under
+    /// a container whose own padding is a percentage.
+    pub(super) fn nested_percentages(tree: &mut TestTree, direction: flex_direction::T) -> TestId {
+        let leaf = tree.push_leaf(
+            TestStyle {
+                size: Size::new(size_pct(0.5), size_px(20.0)),
+                margin: Edges::uniform(margin_pct(0.1)),
+                padding: Edges::uniform(npct(0.05)),
+                ..TestStyle::default()
+            },
+            Size::new(40.0, 20.0),
+            None,
+        );
+        let text = paragraph(tree);
+        let inner = flex_container(
+            tree,
+            TestStyle {
+                flex_basis: basis_pct(0.6),
+                padding: Edges::uniform(npct(0.1)),
+                flex_wrap: flex_wrap::T::WRAP,
+                gap: Size::new(gap_pct(0.1), gap_pct(0.1)),
+                ..TestStyle::default()
+            },
+            &[leaf, text],
+        );
+        let sibling = tree.push_leaf(
+            TestStyle {
+                flex_basis: basis_pct(0.4),
+                min_size: Size::new(size_pct(0.2), size_auto()),
+                ..TestStyle::default()
+            },
+            Size::new(30.0, 30.0),
+            None,
+        );
+        flex_container(
+            tree,
+            TestStyle {
+                flex_direction: direction,
+                padding: Edges::uniform(npct(0.05)),
+                ..TestStyle::default()
+            },
+            &[inner, sibling],
+        )
+    }
+
+    /// Stretched items with a `min-height`, one of them a column holding a
+    /// paragraph, in a container that grows to the largest.
+    pub(super) fn stretched_min_height(
+        tree: &mut TestTree,
+        direction: flex_direction::T,
+    ) -> TestId {
+        let short = tree.push_leaf(
+            TestStyle {
+                min_size: Size::new(size_auto(), size_px(70.0)),
+                flex_grow: nn(1.0),
+                ..TestStyle::default()
+            },
+            Size::new(40.0, 10.0),
+            None,
+        );
+        let text = paragraph(tree);
+        let column = flex_container(
+            tree,
+            TestStyle {
+                flex_direction: flex_direction::T::Column,
+                min_size: Size::new(size_auto(), size_px(40.0)),
+                ..TestStyle::default()
+            },
+            &[text],
+        );
+        let image = tree.push_measured_leaf(TestStyle::default(), bitmap_leaf);
+        flex_container(
+            tree,
+            TestStyle {
+                flex_direction: direction,
+                ..TestStyle::default()
+            },
+            &[short, column, image],
+        )
+    }
+
+    /// A wrapping line of grown items, baseline-aligned ones among them.
+    pub(super) fn wrapping_baselines(tree: &mut TestTree, direction: flex_direction::T) -> TestId {
+        let mut children = Vec::new();
+        for (width, baseline) in [(80.0, Some(12.0)), (140.0, None), (60.0, Some(30.0))] {
+            children.push(tree.push_leaf(
+                TestStyle {
+                    flex_grow: nn(1.0),
+                    align_self: self_align(AlignFlags::BASELINE),
+                    ..fixed_leaf_style(width, 40.0)
+                },
+                Size::new(width, 40.0),
+                baseline,
+            ));
+        }
+        children.push(paragraph(tree));
+        flex_container(
+            tree,
+            TestStyle {
+                flex_direction: direction,
+                flex_wrap: flex_wrap::T::WRAP,
+                align_content: content(AlignFlags::SPACE_BETWEEN),
+                gap: Size::new(gap_px(5.0), gap_pct(0.1)),
+                ..TestStyle::default()
+            },
+            &children,
+        )
+    }
+}
+
+/// A flex container's measurement that reads no baseline returns once its own
+/// size is decided, skipping the second sizing pass that an indefinite width
+/// runs and the alignment only a commit reads. A measurement that reads a
+/// baseline still runs the whole pipeline, and a baseline request never moves
+/// geometry, so the two must agree on the size and the content size of
+/// every container shape whose second pass changes what its items measure
+/// at: stretched items, a ratio transferring a stretched cross size, and
+/// percentages that resolve only once the container's width is known. The
+/// commit that follows must not depend on which of the two warmed the cache.
+#[test]
+fn a_measurement_reading_no_baseline_agrees_with_the_full_pipeline() {
+    use unrequested_measurement::*;
+    type Shape = fn(&mut TestTree, flex_direction::T) -> TestId;
+    let shapes: [(&str, Shape); 6] = [
+        (
+            "stretched ratio beside a paragraph",
+            stretched_ratio_beside_paragraph,
+        ),
+        ("column with a percentage grandchild", percentage_grandchild),
+        ("stretched aspect-ratio", stretched_aspect_ratio),
+        ("nested percentages", nested_percentages),
+        ("stretched min-height row", stretched_min_height),
+        ("wrapping baseline row", wrapping_baselines),
+    ];
+    let constraints = [
+        (Size::NONE, Size::MAX_CONTENT),
+        (Size::NONE, Size::MIN_CONTENT),
+        (
+            Size::NONE,
+            Size::new(AvailableSpace::Definite(600.0), AvailableSpace::MaxContent),
+        ),
+        (
+            Size::NONE,
+            Size::new(
+                AvailableSpace::Definite(300.0),
+                AvailableSpace::Definite(90.0),
+            ),
+        ),
+        (
+            Size::new(None, Some(150.0)),
+            Size::new(AvailableSpace::MaxContent, AvailableSpace::Definite(150.0)),
+        ),
+        (
+            Size::new(Some(450.0), None),
+            Size::new(AvailableSpace::Definite(450.0), AvailableSpace::MaxContent),
+        ),
+    ];
+    for (label, build) in shapes {
+        for direction in [flex_direction::T::Row, flex_direction::T::Column] {
+            for (known, available) in constraints {
+                for axis in [
+                    RequestedAxis::Horizontal,
+                    RequestedAxis::Vertical,
+                    RequestedAxis::Both,
+                ] {
+                    for sizing_mode in [SizingMode::ApplySizeStyles, SizingMode::IgnoreSizeStyles] {
+                        let mut input = LayoutInput::measure(
+                            known,
+                            available.definite_values(),
+                            available,
+                            axis,
+                        );
+                        input.sizing_mode = sizing_mode;
+                        let run = |input: LayoutInput| {
+                            let mut tree = TestTree::default();
+                            tree.enable_cache();
+                            let root = build(&mut tree, direction);
+                            let output = tree.compute_layout(root, input);
+                            definite_layout(&tree, root, 500.0, 400.0);
+                            let layouts = (0..tree.nodes.len())
+                                .map(|id| tree.layout(id))
+                                .collect::<Vec<_>>();
+                            (output, layouts)
+                        };
+                        let (plain, plain_layouts) = run(input);
+                        let (full, full_layouts) = run(input
+                            .reading_first_baseline(true)
+                            .reading_last_baseline(true));
+                        let case = format!(
+                            "{label}, {direction:?}, {known:?} in {available:?}, \
+                             {axis:?}, {sizing_mode:?}"
+                        );
+                        assert_eq!(plain.size, full.size, "{case}");
+                        assert_eq!(plain.content_size, full.content_size, "{case}");
+                        assert_eq!(plain_layouts, full_layouts, "{case}");
+                    }
+                }
+            }
+        }
     }
 }

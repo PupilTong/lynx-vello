@@ -623,8 +623,13 @@ impl<T> Document<T> {
     /// Returns this node's scroll geometry when it is a scroll container.
     #[must_use]
     pub fn scroll_box(&self, id: NodeId) -> Option<ScrollBox> {
+        let style = self.paint_style(id)?;
+        // Ahead of the offset lookup: an ancestor walk asks every box.
+        if !is_scroll_container(style) {
+            return None;
+        }
         resolve(
-            self.paint_style(id)?,
+            style,
             self.rounded_layout(id)?,
             self.stored_scroll_offset(id),
         )
@@ -641,8 +646,9 @@ impl<T> Document<T> {
 
     fn stored_scroll_offset(&self, id: NodeId) -> Vector2D<f32> {
         self.slot(id)
-            .and_then(|slot| self.layout_state().get(slot))
-            .map_or_else(Vector2D::zero, |state| state.scroll_offset)
+            .and_then(|slot| self.layout_state().scroll_offsets.get(&slot))
+            .copied()
+            .unwrap_or_default()
     }
 
     /// Scrolls to `offset` as the box admits it ([`ScrollBox::admit`]) and
@@ -692,7 +698,9 @@ impl<T> Document<T> {
         let slot = self
             .slot(id)
             .expect("a scroll container is a live node with layout-arena state");
-        self.layout_state_mut().at_mut(slot).scroll_offset = admitted;
+        self.layout_state_mut()
+            .scroll_offsets
+            .insert(slot, admitted);
         admitted
     }
 

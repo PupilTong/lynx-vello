@@ -18,8 +18,6 @@ use rustc_hash::FxHashSet;
 use seldon::compute::LeafMetrics;
 pub use seldon::compute::NaturalSize;
 pub(crate) use seldon::geometry::Edges;
-#[cfg(feature = "layout-test-utils")]
-use seldon::geometry::Point;
 pub use seldon::geometry::Size;
 use seldon::invalidate::is_relayout_boundary;
 pub(crate) use seldon::style::TextBrush;
@@ -33,7 +31,7 @@ use stylo::servo_arc::Arc;
 pub(crate) use self::style::{
     DisplayMode, StyleView, box_parent, converts_tail_color, display_mode,
     establishes_absolute_containing_block, establishes_fixed_containing_block, generates_no_box,
-    paragraph_limits_changed, shaping_inputs_changed, skips_contents,
+    paragraph_limits_changed, reads_percentage_basis, skips_contents,
 };
 use crate::render::image::{ImageOutcome, ImageRole};
 use crate::tree::document::{DOCUMENT_ELEMENT_NODE_ID, Document, NodeLayoutState, RelayoutKind};
@@ -156,8 +154,8 @@ impl<T: Sync> Document<T> {
     ) {
         let full = self.layout_requires_full_pass(viewport, scale);
         let rescale = self.layout_inputs_changed(viewport, scale);
-        let bound = self.arenas().slot_bound();
-        self.layout_state_mut().ensure_covers(bound);
+        let (bound, elements) = (self.arenas().slot_bound(), self.arenas().live_elements());
+        self.layout_state_mut().ensure_covers(bound, elements);
         host::run_layout(self, viewport, scale, full, rescale, resized);
         // Publishing is what makes the pass's sizes readable by the style
         // traversal, which is parallel, and by the pass after this one; see
@@ -336,38 +334,43 @@ impl<T> Document<T> {
         role: ImageRole,
         value: Option<&str>,
     ) -> Option<ImageOutcome> {
-        let (changed, was_replaced, previous) = {
+        let was_replaced = {
             let node = self
-                .arenas_mut()
-                .get_mut(id)
+                .get(id)
                 .expect("stale NodeId passed to Document::set_image_source");
             assert!(
                 node.is_element(),
                 "non-element NodeId passed to Document::set_image_source"
             );
-            let was_replaced = node.is_replaced();
-            let previous = node.image_source(role).map(str::to_owned);
-            (node.set_image_source(role, value), was_replaced, previous)
+            // Writing the source an element holds changes nothing, and so
+            // does clearing one it never had: that is no conversion to or from
+            // replaced content (`Node::set_image_source`).
+            if node.image_source(role) == value {
+                return None;
+            }
+            node.is_replaced()
         };
-        if !changed {
-            return None;
-        }
         // The registry has to know which node presents which source, or a
-        // completed load has nobody to hand its intrinsic size to.
+        // completed load has nobody to hand its intrinsic size to. The node
+        // holds the registry's own key for the source, and the one it
+        // displaces is unbound after it.
+        let key = value.map(|value| self.images.bind_node(value, id, role));
+        let previous = self
+            .arenas_mut()
+            .get_mut(id)
+            .expect("the node was live a moment ago")
+            .set_image_source(role, key);
         if let Some(previous) = previous {
             self.images.unbind_node(&previous, id, role);
         }
-        let mut outcome = None;
-        if let Some(value) = value {
-            self.images.bind_node(value, id, role);
-            // Only the element's own source has an outcome to report: a
-            // placeholder is an interim picture the page did not ask about, so
-            // neither its load nor its failure is an event. `ImageOutcome` has
-            // no variant naming one, and this is where that stays true.
-            if role == ImageRole::Source {
-                outcome = self.images.outcome_for(value, id);
-            }
-        }
+        // Only the element's own source has an outcome to report: a
+        // placeholder is an interim picture the page did not ask about, so
+        // neither its load nor its failure is an event. `ImageOutcome` has
+        // no variant naming one, and this is where that stays true.
+        let outcome = match value {
+            Some(value) if role == ImageRole::Source => self.images.outcome_for(value, id),
+            _ => None,
+        };
         self.note_replaced_change(id, was_replaced);
         outcome
     }
@@ -490,9 +493,7 @@ impl<T> Document<T> {
             node.is_element(),
             "non-element NodeId passed to Document::set_leaf_metrics_for_testing"
         );
-        node.set_test_leaf_metrics(
-            LeafMetrics::new(size).with_first_baselines(Point::new(None, first_baseline)),
-        );
+        node.set_test_leaf_metrics(LeafMetrics::new(size).with_first_baseline(first_baseline));
         self.invalidate_layout(id);
     }
 
@@ -671,6 +672,35 @@ impl<T> Document<T> {
         (chain.end() == Some(ChainEnd::DocumentElement)).then(|| Rect::new(origin, size))
     }
 
+    /// Whether [`Self::bounding_client_rect`] answers a rect for `id`, without
+    /// computing one: the same tests — a styled element that generates a
+    /// box, laid out, its containing-block chain ending at the document
+    /// element — and none of the offset, sticky or anchor arithmetic, so no
+    /// scroll box is resolved for a scrolling ancestor. For a caller that
+    /// only asks whether an element is rendered.
+    #[must_use]
+    pub fn generates_rendered_box(&self, id: crate::tree::document::NodeId) -> bool {
+        let Some(node) = self.get(id) else {
+            return false;
+        };
+        if inline_flow::is_inline_box(node) {
+            return self.inline_box_client_rect(id).is_some();
+        }
+        let Some(style) = StyleView::try_of(node) else {
+            return false;
+        };
+        if matches!(
+            style.display_mode(),
+            DisplayMode::None | DisplayMode::Contents
+        ) || self.rounded_layout(id).is_none()
+        {
+            return false;
+        }
+        let mut chain = ContainingBlockChain::new(self, node, style.values());
+        for _step in &mut chain {}
+        chain.end() == Some(ChainEnd::DocumentElement)
+    }
+
     /// [`Self::bounding_client_rect`] of an inline box: its fragments'
     /// union, moved from the paragraph's content box to the viewport.
     fn inline_box_client_rect(&self, id: crate::tree::document::NodeId) -> Option<Rect<f32>> {
@@ -743,7 +773,7 @@ impl<T> Document<T> {
     /// [`Self::paragraph_kind`]. Nothing here runs a pass.
     #[must_use]
     pub fn paragraph_line_count(&self, id: crate::tree::document::NodeId) -> Option<usize> {
-        Some(self.committed_paragraph(id)?.painted()?.lines.len())
+        Some(self.committed_paragraph(id)?.painted()?.line_count)
     }
 
     /// The lines the Lynx paragraph `id` establishes laid out at its last
@@ -1108,14 +1138,12 @@ impl<T> Document<T> {
     /// geometry could move because of it.
     ///
     /// **Box caches only.** A shaped paragraph is not geometry: it dies when
-    /// the text or the style it was shaped from changes, which is a different
-    /// question and has its own entry points
-    /// ([`Document::invalidate_text_children`] and
-    /// [`TreeArenas::clear_text_artifact`]). Clearing it here would be free
-    /// today — a text node is a leaf, and no element holds an artifact — but
-    /// it stops being free the moment a paragraph is owned by the element
-    /// that establishes it: every descendant mutation and every ancestor this
-    /// walk touches would re-shape a paragraph whose text never changed.
+    /// the text or the style it was shaped from changes, which the paragraph
+    /// checks against the content and styles it kept when it is next laid
+    /// out, or which [`Document::invalidate_text_artifact`] states outright.
+    /// Clearing it here would make every descendant mutation and every
+    /// ancestor this walk touches re-shape a paragraph, owned by the element
+    /// that establishes it, whose text never changed.
     pub(crate) fn invalidate_layout(&mut self, id: crate::tree::document::NodeId) {
         // Paragraph content (including generated runs) shares one cache. A
         // transparent scope has none, so starting the usual walk there would
@@ -1349,15 +1377,7 @@ impl<T> Document<T> {
     }
 
     pub(crate) fn invalidate_layout_all(&mut self) {
-        for (
-            _,
-            NodeLayoutState {
-                slot,
-                text,
-                scroll_offset: _,
-            },
-        ) in self.layout_data_mut()
-        {
+        for NodeLayoutState { slot, text } in self.layout_data_mut() {
             slot.clear_layout_cache();
             *text = None;
         }
@@ -1556,7 +1576,7 @@ mod tests {
         #[cfg(target_pointer_width = "64")]
         assert_eq!(
             current,
-            (if cfg!(debug_assertions) { 232 } else { 224 }, 336, 352),
+            (if cfg!(debug_assertions) { 224 } else { 216 }, 336, 344),
             "Node, LayoutSlot and NodeLayoutState sizes changed",
         );
     }

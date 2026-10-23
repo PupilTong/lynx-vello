@@ -41,9 +41,8 @@ use tokio::sync::watch;
 use super::quickjs::{ScriptEngine, ScriptRuntime};
 use crate::clock::ClockInstant;
 use crate::esm::{
-    ANIMATION_FRAME_MODULE_SPECIFIER, BTS_MODULE_SPECIFIER, ELEMENT_MODULE_SPECIFIER,
-    FRAME_MODULE_SPECIFIER, HOST_MODULE_SPECIFIER, RUNTIME_MODULE_SPECIFIER,
-    TIMER_MODULE_SPECIFIER, WORKER_CLASS_MODULE_SPECIFIER,
+    BTS_MODULE_SPECIFIER, ELEMENT_MODULE_SPECIFIER, Export, FRAME_MODULE_SPECIFIER,
+    HOST_MODULE_SPECIFIER, RUNTIME_MODULE_SPECIFIER, TIMER_MODULE_SPECIFIER,
 };
 use crate::link::{InputEventPayload, ViewNotice, ViewOutbox};
 use crate::main::exposure::{Exposure, is_exposure_attribute};
@@ -65,7 +64,6 @@ use crate::timers::run_due_timers;
 use crate::view::{LynxViewError, ScreenMetrics, ScriptSource, StartupSource, Viewport};
 
 const BOOT_MODULE_SPECIFIER: &str = "bobcat:boot";
-const EVENT_DISPATCH_EXPORT: &str = "__BobcatDispatchEvent";
 
 /// web-core's rule for which events a nested card hears from the whole
 /// document: the names web-core listens for on `document` rather than on the
@@ -154,25 +152,20 @@ const MODIFIER_CTRL: u8 = 2;
 const MODIFIER_META: u8 = 4;
 const MODIFIER_SHIFT: u8 = 8;
 
-/// One value of the extras channel: what a Lynx handler reads beside a W3C
+/// One dispatch's extras: names, each with its value. Empty for nearly
+/// every event.
+///
+/// The extras channel carries what a Lynx handler reads beside a W3C
 /// event's own payload, when it is cheap to compute here (a `load`'s size,
 /// a `scroll`'s metrics, an `x-input`'s `value`). The kernel's events stay
 /// W3C-shaped ([`EventDetail`]); the realm's Lynx layer turns a dispatch's
-/// extras into the Lynx `detail`.
-///
-/// `Str` borrows a component's string for the length of the dispatch: a
-/// [`ComponentDetail`]'s url, content or content id, or a text field's
-/// value.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) enum Extra<'a> {
-    Number(f64),
-    Bool(bool),
-    Str(&'a str),
-}
-
-/// One dispatch's extras: names, each with its value. Empty for nearly
-/// every event.
-type Extras<'a> = &'a [(&'static str, Extra<'a>)];
+/// extras into the Lynx `detail`, reading one primitive per key: only a
+/// [`HostArgument::Number`], a [`HostArgument::Boolean`] or a
+/// [`HostArgument::String`] crosses here, never a structured clone,
+/// `undefined` or `null`. A string borrows a component's for the length of
+/// the dispatch: a [`ComponentDetail`]'s url, content or content id, or a
+/// text field's value.
+type Extras<'a> = &'a [(&'static str, HostArgument<'a>)];
 
 /// Appends a [`ComponentDetail`] as extras, one per key of the Lynx
 /// `detail`, under the keys and in the member order web-core's details
@@ -189,11 +182,14 @@ type Extras<'a> = &'a [(&'static str, Extra<'a>)];
 /// they are, in its order.
 fn push_detail_extras<'a>(
     detail: &'a ComponentDetail,
-    extras: &mut SmallVec<[(&'static str, Extra<'a>); 7]>,
+    extras: &mut SmallVec<[(&'static str, HostArgument<'a>); 7]>,
 ) {
-    let unit = |offset: u32| Extra::Number(f64::from(offset));
-    let optional =
-        |key, value: &'a Option<String>| value.as_deref().map(|value| (key, Extra::Str(value)));
+    let unit = |offset: u32| HostArgument::Number(f64::from(offset));
+    let optional = |key, value: &'a Option<String>| {
+        value
+            .as_deref()
+            .map(|value| (key, HostArgument::String(value)))
+    };
     match detail {
         ComponentDetail::Id { id } => extras.extend(optional("id", id)),
         ComponentDetail::UrlContent {
@@ -201,14 +197,17 @@ fn push_detail_extras<'a>(
             content,
             content_id,
         } => {
-            extras.extend([("url", Extra::Str(url)), ("content", Extra::Str(content))]);
+            extras.extend([
+                ("url", HostArgument::String(url)),
+                ("content", HostArgument::String(content)),
+            ]);
             extras.extend(optional("contentId", content_id));
         }
         ComponentDetail::Url { url, content_id } => {
-            extras.push(("url", Extra::Str(url)));
+            extras.push(("url", HostArgument::String(url)));
             extras.extend(optional("contentId", content_id));
         }
-        ComponentDetail::Value { value } => extras.push(("value", Extra::Str(value))),
+        ComponentDetail::Value { value } => extras.push(("value", HostArgument::String(value))),
         ComponentDetail::Input {
             value,
             selection,
@@ -221,10 +220,10 @@ fn push_detail_extras<'a>(
             )]
             let length = length as f64;
             extras.extend([
-                ("value", Extra::Str(value)),
-                ("textLength", Extra::Number(length)),
+                ("value", HostArgument::String(value)),
+                ("textLength", HostArgument::Number(length)),
                 ("cursor", unit(selection.start)),
-                ("isComposing", Extra::Bool(*is_composing)),
+                ("isComposing", HostArgument::Boolean(*is_composing)),
                 ("selectionStart", unit(selection.start)),
                 ("selectionEnd", unit(selection.end)),
             ]);
@@ -236,23 +235,22 @@ fn push_detail_extras<'a>(
         ComponentDetail::Fields(fields) => {
             extras.extend(fields.iter().map(|&(key, field)| {
                 let value = match field {
-                    Field::Number(number) => Extra::Number(number),
-                    Field::Bool(flag) => Extra::Bool(flag),
+                    Field::Number(number) => HostArgument::Number(number),
+                    Field::Bool(flag) => HostArgument::Boolean(flag),
                 };
                 (key, value)
             }));
         }
         ComponentDetail::TextSelection { range, forward } => {
-            let (start, end) = range
-                .as_ref()
-                .map_or((Extra::Number(-1.0), Extra::Number(-1.0)), |range| {
-                    (unit(range.start), unit(range.end))
-                });
+            let (start, end) = range.as_ref().map_or(
+                (HostArgument::Number(-1.0), HostArgument::Number(-1.0)),
+                |range| (unit(range.start), unit(range.end)),
+            );
             let direction = if *forward { "forward" } else { "backward" };
             extras.extend([
                 ("start", start),
                 ("end", end),
-                ("direction", Extra::Str(direction)),
+                ("direction", HostArgument::String(direction)),
             ]);
         }
     }
@@ -287,7 +285,7 @@ fn push_text_layout_extras<'a>(
     lines: &'a str,
     width: f32,
     height: f32,
-    extras: &mut SmallVec<[(&'static str, Extra<'a>); 7]>,
+    extras: &mut SmallVec<[(&'static str, HostArgument<'a>); 7]>,
 ) {
     #[expect(
         clippy::cast_precision_loss,
@@ -295,17 +293,20 @@ fn push_text_layout_extras<'a>(
     )]
     let count = line_count as f64;
     extras.extend([
-        ("lineCount", Extra::Number(count)),
-        ("lines", Extra::Str(lines)),
-        ("width", Extra::Number(f64::from(width))),
-        ("height", Extra::Number(f64::from(height))),
+        ("lineCount", HostArgument::Number(count)),
+        ("lines", HostArgument::String(lines)),
+        ("width", HostArgument::Number(f64::from(width))),
+        ("height", HostArgument::Number(f64::from(height))),
     ]);
 }
 
-/// Inline arguments for one dispatch: the six of the header, then an
-/// input event's discriminator and eight detail numbers. Extras and touch
-/// points spill.
-type Arguments<'a> = SmallVec<[HostArgument<'a>; 15]>;
+/// Inline arguments for one dispatch, in call order: the name, `bubbles`,
+/// the timestamp and the step count; two node ids per step; the extras
+/// count; an input event's discriminator and eight detail numbers. That is
+/// 31 for a position event over eight steps; extras, touch points and
+/// longer paths spill. Encoded once per dispatch ([`encode_call`]) and lent
+/// to every realm it calls.
+type Arguments<'a> = SmallVec<[HostArgument<'a>; 32]>;
 
 /// The registrants a dispatch of `name` over `steps` invites, as the
 /// document's listener table holds them when this is read: each with a path
@@ -346,58 +347,99 @@ impl Invited {
 
 /// The registrants a dispatch of `name` over `steps` calls, in the order
 /// they are called, which is the order of `registrants`: each one
-/// [`Invited`]. None for a path with no capture step. Every one is called at
-/// the path's top step and handed the same [`EncodedPath`]. See
-/// [`MainThreadRuntime::dispatch`].
+/// [`Invited`]. Every one is called at the path's top step — a path always
+/// has one capture step, its target's own — and handed the same
+/// [`Arguments`]. See [`MainThreadRuntime::dispatch`].
 ///
 /// Decided while the document is borrowed and before the walk takes a step,
-/// so they are read against the tree the path was computed over.
+/// so they are read against the tree the path was computed over; the
+/// [`Invited`] they were read from is answered beside them.
 fn realm_calls(
     document: &LynxDocument,
     steps: &terminus::link::event::EventSteps,
     name: &str,
     registrants: impl Iterator<Item = ListenerKey>,
-) -> SmallVec<[ListenerKey; 2]> {
-    if !steps.steps().iter().any(|step| step.capture) {
-        return SmallVec::new();
-    }
+) -> (SmallVec<[ListenerKey; 2]>, Invited) {
     let invited = Invited::read(document, steps, name);
-    registrants.filter(|&key| invited.contains(key)).collect()
+    let calls = registrants.filter(|&key| invited.contains(key)).collect();
+    (calls, invited)
 }
 
-/// The path every realm a dispatch calls is handed, as two comma-joined
-/// lists of packed node ids: each step's node, and the target that step
-/// sees ([`encode_path`]).
-struct EncodedPath {
-    nodes: String,
-    targets: String,
+/// One realm call's arguments for a dispatch, which every realm it calls
+/// is lent: the name, `bubbles` and the timestamp, the path
+/// ([`encode_path`]), the extras ([`encode_extras`]) and the detail
+/// ([`encode_detail`]), last because a touch event's points make it the
+/// one part of variable length besides the extras before it.
+///
+/// Nothing here is read from the tree but the path, and that only at the
+/// path's top step, where every realm is called, so one encoding is the
+/// list every call of the dispatch would have built for itself.
+fn encode_call<'a>(
+    document: &LynxDocument,
+    steps: &terminus::link::event::EventSteps,
+    name: &'a str,
+    bubbles: bool,
+    timestamp: f64,
+    extras: Extras<'a>,
+    detail: &'a EventDetail,
+) -> Arguments<'a> {
+    let mut arguments = Arguments::new();
+    arguments.push(HostArgument::String(name));
+    arguments.push(HostArgument::Boolean(bubbles));
+    arguments.push(HostArgument::Number(timestamp));
+    encode_path(document, steps, &mut arguments);
+    encode_extras(extras, &mut arguments);
+    encode_detail(detail, &mut arguments);
+    arguments
 }
 
-/// The one encoding of a dispatch's path: the capture steps read backwards
-/// — the path, target first, whatever `bubbles` cut from the bubble pass —
-/// less every step whose node or target is no longer live and every step at
-/// a shadow root, which no realm can hold a handle for. Nothing is filtered
-/// by tree: a realm is handed nodes it holds no handle for (another realm's,
-/// a UA component's shadow content) and skips them. A `NodeId` names one
-/// node for the life of the document, so liveness is one lookup per id.
-fn encode_path(document: &LynxDocument, steps: &terminus::link::event::EventSteps) -> EncodedPath {
-    let mut nodes = String::new();
-    let mut targets = String::new();
-    for step in steps.steps().iter().rev().filter(|step| {
+/// The steps of a dispatch's path every realm is handed: the capture steps
+/// read backwards — the path, target first, whatever `bubbles` cut from the
+/// bubble pass — less every step whose node or target is no longer live and
+/// every step at a shadow root, which no realm can hold a handle for.
+/// Nothing is filtered by tree: a realm is handed nodes it holds no handle
+/// for (another realm's, a UA component's shadow content) and skips them. A
+/// `NodeId` names one node for the life of the document, so liveness is one
+/// lookup per id. [`encode_path`] writes them into a realm call, and the
+/// synthetic dispatch member answers them as text
+/// ([`install_synthetic_event_members`]).
+fn realm_path_steps<'a>(
+    document: &'a LynxDocument,
+    steps: &'a terminus::link::event::EventSteps,
+) -> impl Iterator<Item = &'a terminus::link::event::EventStep> + 'a {
+    steps.steps().iter().rev().filter(|step| {
         step.capture
             && document
                 .get(step.node)
                 .is_some_and(|node| !node.is_shadow_root())
             && document.get(step.target).is_some()
-    }) {
-        if !nodes.is_empty() {
-            nodes.push(',');
-            targets.push(',');
-        }
-        write!(nodes, "{}", packed_node_id(step.node)).expect("writing to a String");
-        write!(targets, "{}", packed_node_id(step.target)).expect("writing to a String");
+    })
+}
+
+/// The one encoding of a dispatch's path into a realm call, appended as the
+/// step count and then two packed ids per step ([`packed_node_id`]), the
+/// step's node and the target that step sees, for the steps
+/// [`realm_path_steps`] selects.
+///
+/// The count leads but is known only once the filter has run, so it is
+/// written into the place kept for it, in the same one pass.
+fn encode_path(
+    document: &LynxDocument,
+    steps: &terminus::link::event::EventSteps,
+    arguments: &mut Arguments<'_>,
+) {
+    let count_at = arguments.len();
+    arguments.push(HostArgument::Number(0.0));
+    for step in realm_path_steps(document, steps) {
+        arguments.push(HostArgument::Number(packed_node_id(step.node)));
+        arguments.push(HostArgument::Number(packed_node_id(step.target)));
     }
-    EncodedPath { nodes, targets }
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a path's steps, far inside an f64's integers"
+    )]
+    let count = ((arguments.len() - count_at - 1) / 2) as f64;
+    arguments[count_at] = HostArgument::Number(count);
 }
 
 /// Appends the extras channel: the count, then each name and its value.
@@ -407,13 +449,9 @@ fn encode_extras<'a>(extras: Extras<'a>, arguments: &mut Arguments<'a>) {
         reason = "a handful of extras, far inside an f64's integers"
     )]
     arguments.push(HostArgument::Number(extras.len() as f64));
-    for (name, value) in extras {
+    for &(name, value) in extras {
         arguments.push(HostArgument::String(name));
-        arguments.push(match *value {
-            Extra::Number(number) => HostArgument::Number(number),
-            Extra::Bool(flag) => HostArgument::Boolean(flag),
-            Extra::Str(text) => HostArgument::String(text),
-        });
+        arguments.push(value);
     }
 }
 
@@ -611,44 +649,6 @@ enum Checkpoint<'a> {
     Deferred(&'a mut SmallVec<[RealmId; 2]>),
 }
 
-/// What one dispatch's listeners threw: one failure per realm call that
-/// failed, in the order the calls ran, never empty.
-///
-/// A dispatch calls each realm that listens on its path once, and a realm
-/// whose listener throws does not keep the rest of the walk — the other
-/// realms, the components after it — from running, so one dispatch can fail
-/// more than once. Every failure is kept, for the caller to report each.
-#[derive(Debug)]
-pub(crate) struct ListenerFailures(SmallVec<[MainThreadError; 1]>);
-
-impl ListenerFailures {
-    /// Every failure, in the order the calls that failed ran.
-    pub(crate) fn into_errors(self) -> impl Iterator<Item = MainThreadError> {
-        self.0.into_iter()
-    }
-
-    /// `failures` as a dispatch's answer: `Ok(called)` when there are none.
-    fn or_called(failures: SmallVec<[MainThreadError; 1]>, called: bool) -> Result<bool, Self> {
-        if failures.is_empty() {
-            Ok(called)
-        } else {
-            Err(Self(failures))
-        }
-    }
-}
-
-impl fmt::Display for ListenerFailures {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (index, failure) in self.0.iter().enumerate() {
-            if index > 0 {
-                formatter.write_str("; ")?;
-            }
-            write!(formatter, "{failure}")?;
-        }
-        Ok(())
-    }
-}
-
 impl std::error::Error for MainThreadError {}
 
 /// How many removals go by between collections.
@@ -820,6 +820,32 @@ impl Default for RealmStartup {
 /// binding is decided: the document is created at the create-time viewport
 /// and works at it until a painter writes the watch, and a flush before that
 /// holds its frame and parks.
+/// The deliveries one entry's [`MainThreadRuntime::settle_entry`] left
+/// owing, each of which the page posts as an entry of its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Deliveries(u8);
+
+impl Deliveries {
+    pub(crate) const NONE: Self = Self(0);
+    /// Resize observers have entries queued.
+    pub(crate) const RESIZE: Self = Self(1);
+    /// Intersection observers have entries queued, or exposure changes wait.
+    pub(crate) const INTERSECTION: Self = Self(1 << 1);
+    /// A `content-visibility: auto` skipping change is owed.
+    pub(crate) const CONTENT_VISIBILITY: Self = Self(1 << 2);
+    /// Component events are owed, and nothing is left uncommitted.
+    pub(crate) const COMPONENT_EVENTS: Self = Self(1 << 3);
+
+    const fn with(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    /// Whether every delivery `other` names is owed.
+    pub(crate) const fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+}
+
 struct DocumentSlot {
     /// What a `createDocument` builds from, taken by the first one that runs.
     ingredients: Option<DocumentIngredients>,
@@ -1759,6 +1785,179 @@ impl DocumentSlot {
         }
     }
 
+    /// Whether the document holds anything the last commit did not apply.
+    ///
+    /// After the epilogue's [`Self::commit_if_dirty`] this is `true` only
+    /// when that commit was skipped — a listed author sheet still
+    /// outstanding — and `false` with no document yet.
+    fn needs_render(&self) -> bool {
+        self.document
+            .as_ref()
+            .is_some_and(LynxDocument::needs_render)
+    }
+
+    /// Queues the `scroll` every instant scroll of this entry owes: a UI
+    /// method's `scrollTo`, `scrollBy` or `scrollIntoView`, a component's
+    /// own instant scroll, or the render's move to a new
+    /// `scroll-initial-target` (an `x-swiper`'s `current`, a `viewpager`'s
+    /// `select-index`). Asked by the page's epilogue after its commit, which
+    /// is where that last one happens, so it joins the component events
+    /// this entry produced; one length check when nothing scrolled. The
+    /// `scrollend` follows from the painter's post of the container at
+    /// rest.
+    fn queue_instant_scroll_events(&mut self) {
+        if self
+            .document
+            .as_ref()
+            .is_some_and(LynxDocument::has_instant_scrolls)
+        {
+            self.instant_scrolls();
+        }
+    }
+
+    /// Whether any producer has left a component event owing — the queue
+    /// [`MainThreadRuntime::dispatch_component_events`] drains, asked once
+    /// per entry.
+    ///
+    /// One `is_empty`, because nearly every entry's answer is no: an entry
+    /// during which no source settled and no dialog closed posts nothing. A
+    /// `load` handler that writes a `src` this document has already seen
+    /// settle gets its outcome at the bind, and a `close` handler can close
+    /// another dialog, so a delivery entry can leave the queue non-empty for
+    /// an entry of its own.
+    ///
+    /// Two flags of the document's count as well: focus events a UI method
+    /// left, and the document's selection having changed
+    /// ([`terminus::link::Document::has_pending_selectionchange`]), whose W3C
+    /// `selectionchange` that entry fires. Posting the entry is this
+    /// engine's form of the Selection API's "queue a task", so every change
+    /// before it runs owes one event.
+    fn has_component_events(&self) -> bool {
+        !self.component_events.is_empty()
+            || self.document.as_ref().is_some_and(|document| {
+                document.has_focus_events() || document.has_pending_selectionchange()
+            })
+    }
+
+    /// Whether the commits since the last delivery left any
+    /// `content-visibility: auto` skipping change owing — css-contain-2
+    /// §4.4's queue, asked once per entry.
+    ///
+    /// One `is_empty` on a `Vec`, because nearly every entry's answer is no:
+    /// a page whose `auto` boxes did not change state posts nothing.
+    fn has_pending_content_visibility_changes(&self) -> bool {
+        self.document
+            .as_ref()
+            .is_some_and(LynxDocument::has_pending_content_visibility_changes)
+    }
+
+    /// Runs the W3C "update intersection observations" steps
+    /// ([§3.2.10](https://w3c.github.io/IntersectionObserver/#update-intersection-observations-algo))
+    /// over the document's observers, and answers whether any of them has
+    /// entries queued afterwards — the page's cue to post a delivery.
+    ///
+    /// Asked once per entry, after its commit, and nearly always answered at
+    /// once: `terminus` runs nothing when there are no observers or nothing went
+    /// stale since the last update that ran — a frame built, an offset
+    /// moved, a target observed. It reads the last completed layout and the
+    /// live scroll offsets and runs no pass, so an entry whose scroll was
+    /// composed inside the encode window, and committed nothing, still
+    /// updates against the offset it adopted.
+    ///
+    /// Every entry it queues is stamped with `time`, this slot's
+    /// [`Self::timeline_milliseconds`], which the runtime reads and hands in
+    /// before it borrows the slot: the reading the latest
+    /// `vsync` or frame post handed this side, which is the
+    /// `DOMHighResTimeStamp` that frame's animation-frame callbacks were
+    /// called with and the one an image's `load` is stamped with. That is
+    /// HTML's order — the observations are updated in the same rendering
+    /// step as the callbacks, after them — so the entries' `time` compares
+    /// directly with every other time this side reports, and nothing takes a
+    /// second reading of the clock.
+    fn update_intersection_observations(&mut self, time: f64) -> bool {
+        self.document
+            .as_mut()
+            .is_some_and(|document| document.update_intersection_observations(time))
+    }
+
+    /// Whether exposure changes wait for a delivery entry — the page's
+    /// cue to post one even when no observer has entries queued: a
+    /// teardown, a `stopExposure` that sent records, or a freed element that
+    /// was exposed queues its change outside any update.
+    ///
+    /// One `is_empty`, because nearly every entry's answer is no.
+    fn has_pending_exposure(&self) -> bool {
+        self.exposure.has_changes()
+    }
+
+    /// Runs `terminus`'s resize-observation update — the spec's "gather active
+    /// observations" with the entries created
+    /// ([`terminus::link::Document::update_resize_observations`]) — and answers whether
+    /// it queued any entry: the page's cue to post the resize delivery.
+    ///
+    /// Asked once per entry, after its commit, and nearly always answered at
+    /// once: `terminus` runs nothing when there are no observers, when no layout
+    /// pass ran and nothing was observed since the last update that ran, or
+    /// before the document's first layout. It reads the last completed layout
+    /// and runs no pass.
+    fn update_resize_observations(&mut self) -> bool {
+        self.document
+            .as_mut()
+            .is_some_and(LynxDocument::update_resize_observations)
+    }
+
+    /// Whether any resize observer has entries queued — the page's cue to post
+    /// the resize delivery when the update itself queued nothing new, for
+    /// entries an earlier update left that no delivery has taken yet.
+    fn has_pending_resize_notifications(&self) -> bool {
+        self.document
+            .as_ref()
+            .is_some_and(LynxDocument::has_pending_resize_notifications)
+    }
+
+    /// Queues the `layout` event of every reporting `text` whose paragraph a
+    /// committing layout run recomputed since the last call
+    /// ([`terminus::link::Document::take_text_layout_reports`]), with the lines and the
+    /// content box that commit left ([`ComponentEvent::TextLayout`]), in the
+    /// order the runs first reached them. Asked by the page's epilogue after
+    /// its commit, so the events join the component events the same entry
+    /// posts; one `is_empty` when nothing reported.
+    ///
+    /// A node whose `layout` row left without the listener table telling
+    /// this side — its realm was forgotten — has its report turned off here
+    /// and queues nothing. A node whose paragraph has no committed lines (it
+    /// stopped establishing one) queues nothing either.
+    fn queue_text_layout_events(&mut self) {
+        let Self {
+            document,
+            component_events,
+            ..
+        } = self;
+        let Some(document) = document.as_mut() else {
+            return;
+        };
+        for node in document.take_text_layout_reports() {
+            if !document.has_listener(node, LayoutEventRegistration::TextLayoutReport.name()) {
+                document.set_text_layout_reporting(node, false);
+                continue;
+            }
+            let (Some(lines), Some(layout)) =
+                (document.text_lines(node), document.rounded_layout(node))
+            else {
+                continue;
+            };
+            let terminus::link::layout::Layout {
+                size,
+                padding,
+                border,
+                ..
+            } = layout;
+            let width = size.width - padding.left - padding.right - border.left - border.right;
+            let height = size.height - padding.top - padding.bottom - border.top - border.bottom;
+            component_events.queue_text_layout(node, lines, width, height);
+        }
+    }
+
     /// The `@font-face` rules the mounted sheets declared, once each.
     ///
     /// Empty before `createDocument`: there is no cascade yet, and the
@@ -2060,9 +2259,13 @@ impl MainThreadRuntime {
         };
         let child = child_owner.as_ref().and_then(|owner| owner.realm());
         let location = location.as_ref();
-        let key = key.get().to_string();
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a key `createWorker` handed out, at most 2^53"
+        )]
+        let key = key.get() as f64;
         let arguments = [
-            HostArgument::String(&key),
+            HostArgument::Number(key),
             HostArgument::String(kind),
             data.as_argument(),
             HostArgument::String(location.and_then(|l| l.source.as_deref()).unwrap_or("")),
@@ -2072,8 +2275,7 @@ impl MainThreadRuntime {
         let called = match child {
             None => self.core.engine.call_module_export(
                 js_runtime,
-                WORKER_CLASS_MODULE_SPECIFIER,
-                "__BobcatDispatchWorkerEvent",
+                Export::DispatchWorkerEvent,
                 &arguments,
             ),
             // A child that is gone took its workers with it; what one said
@@ -2081,13 +2283,7 @@ impl MainThreadRuntime {
             Some(child) => self
                 .core
                 .children
-                .call_module_export(
-                    js_runtime,
-                    child,
-                    WORKER_CLASS_MODULE_SPECIFIER,
-                    "__BobcatDispatchWorkerEvent",
-                    &arguments,
-                )
+                .call_module_export(js_runtime, child, Export::DispatchWorkerEvent, &arguments)
                 .unwrap_or(Ok(false)),
         }
         .map_err(|error| MainThreadError::from_engine("delivering a worker event", error));
@@ -2095,9 +2291,59 @@ impl MainThreadRuntime {
         called.map(|_| ()).and(finished)
     }
 
+    /// The page's half of an entry's epilogue, in its order, under one
+    /// borrow of the document: the documents an `<svg content>` handed over,
+    /// the editing routes, the commit, the instant scrolls' `scroll`s, the
+    /// text-input state, the `text` `layout` events, and the resize and
+    /// intersection updates. Answers which deliveries the entry left owing,
+    /// for the page to post.
+    ///
+    /// - The documents first, asked of the host as one [`ViewNotice::RequestDocuments`] beside the
+    ///   image sources the commit asks for; their reports come back as `ToMain::ImageEvents` and
+    ///   apply through [`Self::apply_image_events`]. Nothing on this thread parses.
+    /// - The editing routes before the commit, so the names an editing host needs routed are
+    ///   published with the frame that shows the host.
+    /// - An instant scroll this entry performed after the commit, which performs one of its own
+    ///   when it honours a new `scroll-initial-target`: its `scroll` joins this entry's component
+    ///   events, and its `scrollend` follows the painter's post of the container at rest.
+    /// - The text-input state after it, so the geometry the host is handed is the frame's.
+    /// - The `text` paragraphs it recomputed join this entry's component events as their `layout`
+    ///   events, after it too.
+    /// - The resize update before the intersection one, and each always: HTML gathers resize
+    ///   observations before it updates intersection observations, and the intersection update must
+    ///   run whether or not exposure changes are already waiting.
+    /// - Component events are owed only once nothing is left uncommitted: an `<svg>`'s `load` reads
+    ///   the element's layout box at delivery, which is stale until a commit applies the natural
+    ///   size its report set, so while the commit above was skipped the whole batch is held.
+    pub(crate) fn settle_entry(&mut self) -> Deliveries {
+        let time = self.timeline_milliseconds();
+        let mut slot = self.slot.borrow_mut();
+        slot.request_documents();
+        slot.sync_editing_routes();
+        slot.commit_if_dirty();
+        slot.queue_instant_scroll_events();
+        slot.publish_text_input_state(&mut self.text_input);
+        slot.queue_text_layout_events();
+        let mut owed = Deliveries::NONE;
+        if slot.update_resize_observations() || slot.has_pending_resize_notifications() {
+            owed = owed.with(Deliveries::RESIZE);
+        }
+        if slot.update_intersection_observations(time) || slot.has_pending_exposure() {
+            owed = owed.with(Deliveries::INTERSECTION);
+        }
+        if slot.has_pending_content_visibility_changes() {
+            owed = owed.with(Deliveries::CONTENT_VISIBILITY);
+        }
+        if slot.has_component_events() && !slot.needs_render() {
+            owed = owed.with(Deliveries::COMPONENT_EVENTS);
+        }
+        owed
+    }
+
     /// Adopts the painter's metrics, commits when anything is stale, and
-    /// publishes once a painter has bound. Called by the page's epilogue,
-    /// after every entry into the realm, and never waits.
+    /// publishes once a painter has bound: [`DocumentSlot::commit_if_dirty`],
+    /// the step of [`Self::settle_entry`] the benchmark harness and the
+    /// tests run on its own. Never waits.
     pub(crate) fn commit_if_dirty(&mut self) {
         self.slot.borrow_mut().commit_if_dirty();
     }
@@ -2109,12 +2355,12 @@ impl MainThreadRuntime {
     ) -> Result<(), MainThreadError> {
         use crate::link::PageUpdate;
 
-        let (export, arguments): (&str, &[HostArgument<'_>]) = match update {
+        let (export, arguments): (Export, &[HostArgument<'_>]) = match update {
             PageUpdate::Reload {
                 data,
                 processor_name,
             } => (
-                "__BobcatReload",
+                Export::Reload,
                 &[
                     HostArgument::String(data),
                     HostArgument::String(processor_name),
@@ -2125,7 +2371,7 @@ impl MainThreadRuntime {
                 processor_name,
                 reset,
             } => (
-                "__BobcatUpdateData",
+                Export::UpdateData,
                 &[
                     HostArgument::String(data),
                     HostArgument::String(processor_name),
@@ -2133,17 +2379,17 @@ impl MainThreadRuntime {
                 ],
             ),
             PageUpdate::GlobalProps(data) => {
-                ("__BobcatUpdateGlobalProps", &[HostArgument::String(data)])
+                (Export::UpdateGlobalProps, &[HostArgument::String(data)])
             }
             PageUpdate::GlobalEvent { name, arguments } => (
-                "__BobcatSendGlobalEvent",
+                Export::SendGlobalEvent,
                 &[HostArgument::String(name), HostArgument::String(arguments)],
             ),
         };
         let called = self
             .core
             .engine
-            .call_module_export(js, RUNTIME_MODULE_SPECIFIER, export, arguments)
+            .call_module_export(js, export, arguments)
             .map_err(|error| MainThreadError::from_engine("updating page data", error));
         let finished = self.finish_batch(js, called.is_ok());
         called.map(|_| ()).and(finished)
@@ -2200,8 +2446,7 @@ impl MainThreadRuntime {
             .engine
             .call_module_export(
                 js,
-                ANIMATION_FRAME_MODULE_SPECIFIER,
-                "__BobcatBeginFrame",
+                Export::BeginFrame,
                 &[HostArgument::Number(milliseconds)],
             )
             .map(|_| ())
@@ -2342,71 +2587,23 @@ impl MainThreadRuntime {
         slot.component_events.extend_images(outcomes);
     }
 
-    /// Asks the host to parse the documents an `<svg content>` handed the
-    /// document since the last drain, as one
-    /// [`ViewNotice::RequestDocuments`]. Its reports come back as
-    /// `ToMain::ImageEvents` and apply through [`Self::apply_image_events`]
-    /// like every other report. Called by the page's epilogue before its
-    /// commit; nothing on this thread parses.
-    pub(crate) fn request_documents(&mut self) {
-        self.slot.borrow_mut().request_documents();
-    }
-
-    /// Whether the document holds anything the last commit did not apply.
-    ///
-    /// After the epilogue's [`Self::commit_if_dirty`] this is `true` only
-    /// when that commit was skipped — a listed author sheet still
-    /// outstanding — and `false` with no document yet.
+    /// Whether the document holds anything the last commit did not apply:
+    /// [`DocumentSlot::needs_render`], for the benchmark harness and the
+    /// tests, which run the epilogue's steps one at a time.
     pub(crate) fn needs_render(&self) -> bool {
-        self.slot
-            .borrow()
-            .document
-            .as_ref()
-            .is_some_and(LynxDocument::needs_render)
+        self.slot.borrow().needs_render()
     }
 
-    /// Queues the `scroll` every instant scroll of this entry owes: a UI
-    /// method's `scrollTo`, `scrollBy` or `scrollIntoView`, a component's
-    /// own instant scroll, or the render's move to a new
-    /// `scroll-initial-target` (an `x-swiper`'s `current`, a `viewpager`'s
-    /// `select-index`). Asked by the page's epilogue after its commit, which
-    /// is where that last one happens, so it joins the component events
-    /// this entry produced; one length check when nothing scrolled. The
-    /// `scrollend` follows from the painter's post of the container at
-    /// rest.
+    /// [`DocumentSlot::queue_instant_scroll_events`], for the benchmark
+    /// harness and the tests.
     pub(crate) fn queue_instant_scroll_events(&mut self) {
-        let mut slot = self.slot.borrow_mut();
-        if slot
-            .document
-            .as_ref()
-            .is_some_and(LynxDocument::has_instant_scrolls)
-        {
-            slot.instant_scrolls();
-        }
+        self.slot.borrow_mut().queue_instant_scroll_events();
     }
 
-    /// Whether any producer has left a component event owing — the queue
-    /// [`Self::dispatch_component_events`] drains, asked once per entry.
-    ///
-    /// One `is_empty`, because nearly every entry's answer is no: an entry
-    /// during which no source settled and no dialog closed posts nothing. A
-    /// `load` handler that writes a `src` this document has already seen
-    /// settle gets its outcome at the bind, and a `close` handler can close
-    /// another dialog, so a delivery entry can leave the queue non-empty for
-    /// an entry of its own.
-    ///
-    /// Two flags of the document's count as well: focus events a UI method
-    /// left, and the document's selection having changed
-    /// ([`terminus::link::Document::has_pending_selectionchange`]), whose W3C
-    /// `selectionchange` that entry fires. Posting the entry is this
-    /// engine's form of the Selection API's "queue a task", so every change
-    /// before it runs owes one event.
+    /// [`DocumentSlot::has_component_events`], for the benchmark harness and
+    /// the tests.
     pub(crate) fn has_component_events(&self) -> bool {
-        let slot = self.slot.borrow();
-        !slot.component_events.is_empty()
-            || slot.document.as_ref().is_some_and(|document| {
-                document.has_focus_events() || document.has_pending_selectionchange()
-            })
+        self.slot.borrow().has_component_events()
     }
 
     /// The Selection API's `selectionchange`, when the document's selection
@@ -2437,7 +2634,7 @@ impl MainThreadRuntime {
             return failures;
         }
         let document_node = self.slot.borrow().document_ref().root_node().id();
-        if let Err(error) = self.dispatch(
+        self.dispatch(
             js_runtime,
             document_node,
             SELECTION_CHANGE,
@@ -2446,9 +2643,8 @@ impl MainThreadRuntime {
             timestamp,
             &EventDetail::None,
             &[],
-        ) {
-            failures.extend(error.into_errors());
-        }
+            &mut failures,
+        );
         let mut slot = self.slot.borrow_mut();
         let DocumentSlot {
             document,
@@ -2471,7 +2667,7 @@ impl MainThreadRuntime {
         &mut self,
         node: terminus::link::NodeId,
         delta: terminus::link::Vector2D<f32>,
-        extras: &mut SmallVec<[(&'static str, Extra<'_>); 7]>,
+        extras: &mut SmallVec<[(&'static str, HostArgument<'_>); 7]>,
     ) {
         let scroll_box = self.slot.borrow_mut().document_mut().scroll_box(node);
         let (offset, size) = scroll_box.map_or_else(
@@ -2491,9 +2687,9 @@ impl MainThreadRuntime {
             ("deltaX", delta.x),
             ("deltaY", delta.y),
         ] {
-            extras.push((key, Extra::Number(f64::from(value))));
+            extras.push((key, HostArgument::Number(f64::from(value))));
         }
-        extras.push(("isDragging", Extra::Bool(false)));
+        extras.push(("isDragging", HostArgument::Boolean(false)));
     }
 
     /// Dispatches everything [`Self::apply_image_events`], the `image`,
@@ -2572,7 +2768,7 @@ impl MainThreadRuntime {
             // ([`push_text_layout_extras`]), written here, before the extras
             // that borrow it.
             let lines_text: String;
-            let mut extras: SmallVec<[(&'static str, Extra<'_>); 7]> = SmallVec::new();
+            let mut extras: SmallVec<[(&'static str, HostArgument<'_>); 7]> = SmallVec::new();
             let (target, name, composed) = match *event {
                 ComponentEvent::Image(terminus::link::ImageOutcome::Loaded {
                     node,
@@ -2592,8 +2788,8 @@ impl MainThreadRuntime {
                             (f64::from(width), f64::from(height))
                         }
                     };
-                    extras.push(("width", Extra::Number(width)));
-                    extras.push(("height", Extra::Number(height)));
+                    extras.push(("width", HostArgument::Number(width)));
+                    extras.push(("height", HostArgument::Number(height)));
                     (node, LOAD_EVENT, false)
                 }
                 ComponentEvent::Image(terminus::link::ImageOutcome::Failed { node }) => {
@@ -2643,7 +2839,7 @@ impl MainThreadRuntime {
             // None bubbles. Every one but a detailed event is not composed
             // either, as HTML and web-core fire them: one queued at a UA
             // shadow tree's node stays inside that tree.
-            if let Err(error) = self.dispatch(
+            self.dispatch(
                 js_runtime,
                 target,
                 name,
@@ -2652,9 +2848,8 @@ impl MainThreadRuntime {
                 timestamp,
                 &EventDetail::None,
                 &extras,
-            ) {
-                failures.extend(error.into_errors());
-            }
+                &mut failures,
+            );
             // A disconnection lets go of the frame's card, and may have
             // retired a child the release frees here, outside every call,
             // rather than waiting for the epilogue.
@@ -2692,6 +2887,9 @@ impl MainThreadRuntime {
     ///
     /// A `click` names the node its release routed to as well (`release`),
     /// and is [`Self::dispatch_click`].
+    ///
+    /// What the listeners threw is added to `failures`, as
+    /// [`Self::dispatch`] adds it.
     pub(crate) fn dispatch_input_event(
         &mut self,
         js_runtime: &mut ScriptRuntime,
@@ -2699,9 +2897,10 @@ impl MainThreadRuntime {
         name: &str,
         payload: &InputEventPayload,
         release: Option<terminus::link::NodeId>,
-    ) -> Result<bool, ListenerFailures> {
+        failures: &mut Vec<MainThreadError>,
+    ) -> bool {
         if let Some(release) = release {
-            return self.dispatch_click(js_runtime, target, release, payload);
+            return self.dispatch_click(js_runtime, target, release, payload, failures);
         }
         // The component whose UA shadow tree a tap hit hears it first, with
         // the shadow node it hit as the target.
@@ -2717,6 +2916,7 @@ impl MainThreadRuntime {
             payload.timestamp,
             &payload.detail,
             &[],
+            failures,
         )
     }
 
@@ -2738,11 +2938,12 @@ impl MainThreadRuntime {
         down: terminus::link::NodeId,
         release: terminus::link::NodeId,
         payload: &InputEventPayload,
-    ) -> Result<bool, ListenerFailures> {
+        failures: &mut Vec<MainThreadError>,
+    ) -> bool {
         let (target, click, double) = {
             let slot = self.slot.borrow();
             let Some(document) = slot.document.as_ref() else {
-                return Ok(false);
+                return false;
             };
             (
                 document.nearest_common_event_ancestor(down, release),
@@ -2752,11 +2953,11 @@ impl MainThreadRuntime {
         };
         let Some(target) = target else {
             self.last_click = None;
-            return Ok(false);
+            return false;
         };
         let at = payload.timestamp;
-        let clicked = if click {
-            self.dispatch(
+        let clicked = click
+            && self.dispatch(
                 js_runtime,
                 target,
                 CLICK_EVENT,
@@ -2765,10 +2966,8 @@ impl MainThreadRuntime {
                 at,
                 &payload.detail,
                 &[],
-            )
-        } else {
-            Ok(false)
-        };
+                failures,
+            );
         let completes = self
             .last_click
             .take_if(|(last, then)| *last == target && at - *then <= DOUBLE_CLICK_MILLISECONDS)
@@ -2777,8 +2976,10 @@ impl MainThreadRuntime {
             self.last_click = Some((target, at));
             return clicked;
         }
-        let doubled = if double {
-            self.dispatch(
+        // What a `click` listener threw does not keep the `dblclick` from
+        // running, and both are reported, the `click`'s first.
+        let doubled = double
+            && self.dispatch(
                 js_runtime,
                 target,
                 DOUBLE_CLICK_EVENT,
@@ -2787,20 +2988,9 @@ impl MainThreadRuntime {
                 at,
                 &payload.detail,
                 &[],
-            )
-        } else {
-            Ok(false)
-        };
-        // What a `click` listener threw does not keep the `dblclick` from
-        // running, and both are answered, the `click`'s first.
-        match (clicked, doubled) {
-            (Ok(clicked), Ok(doubled)) => Ok(clicked || doubled),
-            (Err(failed), Ok(_)) | (Ok(_), Err(failed)) => Err(failed),
-            (Err(mut clicked), Err(doubled)) => {
-                clicked.0.extend(doubled.0);
-                Err(clicked)
-            }
-        }
+                failures,
+            );
+        clicked || doubled
     }
 
     /// One whole dispatch, whatever produced it: the one place an event is
@@ -2854,15 +3044,16 @@ impl MainThreadRuntime {
     /// and `stopPropagation` end that realm's walk and nothing else, as
     /// web-core's do (user ruling, 2026-10-18).
     ///
-    /// **Each call** hands the realm the same path ([`encode_path`]), encoded
-    /// once, right before the first call: the standard's event path, the
+    /// **Each call** hands the realm the same argument list ([`encode_call`]),
+    /// encoded once, right before the first call. Its path ([`encode_path`])
+    /// is the standard's event path, the
     /// capture steps in target-first, root-last order, each with its
     /// shadow-retargeted target, less the steps whose node or target is no
-    /// longer live and every shadow root, as two comma-joined decimal id
-    /// strings, which is how `childElementIds` carries a list already: the
-    /// boundary takes primitives and structured clones only, a clone can be
-    /// minted by the realm alone, and a decimal id cannot contain the
-    /// separator. A realm skips the steps it holds no handle for: the page
+    /// longer live and every shadow root, as the step count and then two
+    /// numbers per step, the node's packed id and its target's, the way a
+    /// touch event's points cross: the boundary takes primitives and
+    /// structured clones only, and a clone can be minted by the realm alone.
+    /// A realm skips the steps it holds no handle for: the page
     /// realm a UA component's shadow content, which script names no node of,
     /// and a frame's card; a card everything outside its nested page. Its
     /// `event.target` is the target of the first step it holds, so an event
@@ -2887,7 +3078,8 @@ impl MainThreadRuntime {
     /// tree its target is in (DOM's *get the parent*).
     ///
     /// Everything else crosses as primitives, and the realm builds the
-    /// objects, in this order: the `timestamp`; the extras channel
+    /// objects, in this order: the name, `bubbles` and the `timestamp`, then
+    /// the path; the extras channel
     /// ([`encode_extras`]: the count, then name/value pairs), which is what a
     /// Lynx handler reads beside the W3C payload and which the realm makes
     /// the Lynx `detail` whenever there are any; then the W3C payload as
@@ -2902,7 +3094,7 @@ impl MainThreadRuntime {
     /// runs as one checkpoint per realm after the entry's last record.
     /// A call that throws is kept and the walk goes on, so every realm still
     /// hears the event; [`Self::finish_batch`] runs once, at the end; and
-    /// every failure is answered, in the order the calls ran.
+    /// every failure is added to `failures`, in the order the calls ran.
     ///
     /// No event is cancelable from script (the 2026-08-17 ruling stands,
     /// `docs/tracking/deviations.md`): no realm call answers anything about
@@ -2925,7 +3117,8 @@ impl MainThreadRuntime {
         timestamp: f64,
         detail: &EventDetail,
         extras: Extras<'_>,
-    ) -> Result<bool, ListenerFailures> {
+        failures: &mut Vec<MainThreadError>,
+    ) -> bool {
         self.dispatch_checkpointed(
             js_runtime,
             target,
@@ -2936,6 +3129,7 @@ impl MainThreadRuntime {
             detail,
             extras,
             Checkpoint::Each,
+            failures,
         )
     }
 
@@ -2957,7 +3151,8 @@ impl MainThreadRuntime {
         detail: &EventDetail,
         extras: Extras<'_>,
         mut checkpoint: Checkpoint<'_>,
-    ) -> Result<bool, ListenerFailures> {
+        failures: &mut Vec<MainThreadError>,
+    ) -> bool {
         // The realm files every name lowercased — `element-papi.ts`
         // lowercases both halves of a registration, and its dispatch the
         // name it is handed — so the listener table is asked in that
@@ -2971,22 +3166,25 @@ impl MainThreadRuntime {
         } else {
             name
         };
-        let registrants = self.core.realm_ids().map(RealmId::listener_key);
-        let (steps, calls) = {
+        let (steps, calls, invited) = {
             let slot = self.slot.borrow();
             let document = slot.document.as_ref().expect(DOCUMENT_EXISTS);
+            // A registration is filed under its lowercased name, and the
+            // components' walk looks a type up in its own spelling: those
+            // are the two questions, each asked once.
             if document.get(target).is_none()
-                || !(document.hears(registered) || document.observes_event(name))
+                || !(document.has_listeners_for(registered) || document.observes_event(name))
             {
-                return Ok(false);
+                return false;
             }
+            let registrants = self.core.realm_ids().map(RealmId::listener_key);
             let steps = document.event_steps(target, bubbles, composed);
-            let calls = realm_calls(document, &steps, registered, registrants);
-            (steps, calls)
+            let (calls, invited) = realm_calls(document, &steps, registered, registrants);
+            (steps, calls, invited)
         };
         // Taken at the first capture step, the path's top, where every
         // invited realm is called.
-        let mut calls = (!calls.is_empty()).then_some(calls);
+        let mut calls = (!calls.is_empty()).then_some((calls, invited));
 
         let mut walk = self
             .slot
@@ -2995,7 +3193,10 @@ impl MainThreadRuntime {
             .as_ref()
             .expect(DOCUMENT_EXISTS)
             .event_walk(&steps, name, detail, timestamp);
-        let mut failures: SmallVec<[MainThreadError; 1]> = SmallVec::new();
+        // What this dispatch's own calls threw is what follows this mark in
+        // the sink, which may already hold what the caller's earlier
+        // dispatches threw.
+        let before = failures.len();
         let mut called = false;
         loop {
             // The document is borrowed for one step's components alone: a
@@ -3007,20 +3208,33 @@ impl MainThreadRuntime {
             if !outcome.capture {
                 continue;
             }
-            let Some(calls) = calls.take() else {
+            let Some((calls, invited)) = calls.take() else {
                 continue;
             };
             // Encoded once, with the document borrowed for the encoding
-            // alone, and handed to every call.
-            let path = encode_path(
+            // alone, and lent to every call.
+            let arguments = encode_call(
                 self.slot.borrow().document.as_ref().expect(DOCUMENT_EXISTS),
                 &steps,
+                name,
+                bubbles,
+                timestamp,
+                extras,
+                detail,
             );
             // Who is still invited, read from the table as the calls before
             // left it: a realm no longer invited has nothing left to run. Read
             // once for every realm up to the next call that runs, since
             // between two calls only a call's listeners change the table.
-            let mut live: Option<Invited> = None;
+            //
+            // The first call starts from the read that chose the calls: the
+            // one thing that ran since is the first capture step's component
+            // handler, at the path's top, and none of today's components
+            // files or drops a registration or frees or moves a node there —
+            // a refresh view's, a swiper's or a text field's handler at its
+            // own shadow root reads the document and queues events. A
+            // handler that does must start this from `None`.
+            let mut live: Option<Invited> = Some(invited);
             for &key in &calls {
                 let invited = live.get_or_insert_with(|| {
                     Invited::read(
@@ -3033,12 +3247,7 @@ impl MainThreadRuntime {
                     continue;
                 }
                 let defer = matches!(checkpoint, Checkpoint::Deferred(_));
-                match self.call_realm(
-                    js_runtime, key, &path, name, bubbles, timestamp, detail, extras, defer,
-                ) {
-                    Ok(published) => called |= published,
-                    Err(error) => failures.push(error),
-                }
+                called |= self.call_realm(js_runtime, key, &arguments, defer, failures);
                 if let Checkpoint::Deferred(realms) = &mut checkpoint {
                     let realm = RealmId::from_listener_key(key);
                     if !realms.contains(&realm) {
@@ -3053,68 +3262,48 @@ impl MainThreadRuntime {
         // the caller of a deferred run, after its checkpoints, since a
         // collection checkpoints too.
         if matches!(checkpoint, Checkpoint::Each)
-            && let Err(error) = self.finish_batch(js_runtime, failures.is_empty())
+            && let Err(error) = self.finish_batch(js_runtime, failures.len() == before)
         {
             failures.push(error);
         }
-        ListenerFailures::or_called(failures, called)
+        called
     }
 
-    /// One realm's call in one dispatch: `__BobcatDispatchEvent(nodes,
-    /// targets, name, bubbles, timestamp, extras…, detail…)` in the realm
-    /// whose registrations are filed under `key`
-    /// ([`RealmId::from_listener_key`]). A child already freed is not
-    /// called. With `defer`, the call has no checkpoint of its own
-    /// ([`Checkpoint::Deferred`]).
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "the dispatch's own arguments, which every call carries"
-    )]
+    /// One realm's call in one dispatch: `__BobcatDispatchEvent(name,
+    /// bubbles, timestamp, stepCount, path…, extras…, detail…)`, the
+    /// dispatch's one [`encode_call`], in the realm whose registrations are
+    /// filed under `key` ([`RealmId::from_listener_key`]). A child already
+    /// freed is not called. With `defer`, the call has no checkpoint of its
+    /// own ([`Checkpoint::Deferred`]). A call that failed is added to
+    /// `failures`.
     fn call_realm(
         &mut self,
         js_runtime: &mut ScriptRuntime,
         key: ListenerKey,
-        path: &EncodedPath,
-        name: &str,
-        bubbles: bool,
-        timestamp: f64,
-        detail: &EventDetail,
-        extras: Extras<'_>,
+        arguments: &Arguments<'_>,
         defer: bool,
-    ) -> Result<bool, MainThreadError> {
-        // The detail last, because a touch event's points make it the one
-        // part of variable length besides the extras before it.
-        let mut arguments = Arguments::new();
-        arguments.push(HostArgument::String(&path.nodes));
-        arguments.push(HostArgument::String(&path.targets));
-        arguments.push(HostArgument::String(name));
-        arguments.push(HostArgument::Boolean(bubbles));
-        arguments.push(HostArgument::Number(timestamp));
-        encode_extras(extras, &mut arguments);
-        encode_detail(detail, &mut arguments);
-
+        failures: &mut Vec<MainThreadError>,
+    ) -> bool {
         let realm = RealmId::from_listener_key(key);
         let called = if defer {
             self.core.call_module_export_before_operation(
                 js_runtime,
                 realm,
-                ELEMENT_MODULE_SPECIFIER,
-                EVENT_DISPATCH_EXPORT,
-                &arguments,
+                Export::DispatchEvent,
+                arguments,
             )
         } else {
-            self.core.call_module_export(
-                js_runtime,
-                realm,
-                ELEMENT_MODULE_SPECIFIER,
-                EVENT_DISPATCH_EXPORT,
-                &arguments,
-            )
+            self.core
+                .call_module_export(js_runtime, realm, Export::DispatchEvent, arguments)
         };
-        let Some(called) = called else {
-            return Ok(false);
-        };
-        called.map_err(|error| MainThreadError::from_engine("delivering an event", error))
+        match called {
+            None => false,
+            Some(Ok(called)) => called,
+            Some(Err(error)) => {
+                failures.push(MainThreadError::from_engine("delivering an event", error));
+                false
+            }
+        }
     }
 
     /// Fires a non-composed `tap` at `target` for the engine's own
@@ -3171,8 +3360,9 @@ impl MainThreadRuntime {
         target: terminus::link::NodeId,
         name: &str,
         position: terminus::link::Point2D<f32>,
-    ) -> Result<bool, ListenerFailures> {
-        self.dispatch_input_event(
+    ) -> Result<bool, Vec<MainThreadError>> {
+        let mut failures = Vec::new();
+        let called = self.dispatch_input_event(
             js_runtime,
             target,
             name,
@@ -3187,21 +3377,13 @@ impl MainThreadRuntime {
                 ..InputEventPayload::default()
             },
             None,
-        )
-    }
-
-    /// Whether the commits since the last delivery left any
-    /// `content-visibility: auto` skipping change owing — css-contain-2
-    /// §4.4's queue, asked once per entry.
-    ///
-    /// One `is_empty` on a `Vec`, because nearly every entry's answer is no:
-    /// a page whose `auto` boxes did not change state posts nothing.
-    pub(crate) fn has_pending_content_visibility_changes(&self) -> bool {
-        self.slot
-            .borrow()
-            .document
-            .as_ref()
-            .is_some_and(LynxDocument::has_pending_content_visibility_changes)
+            &mut failures,
+        );
+        if failures.is_empty() {
+            Ok(called)
+        } else {
+            Err(failures)
+        }
     }
 
     /// Fires one `contentvisibilityautostatechange`
@@ -3230,44 +3412,20 @@ impl MainThreadRuntime {
             .dispatch_content_visibility_changes(timestamp);
     }
 
-    /// Runs the W3C "update intersection observations" steps
-    /// ([§3.2.10](https://w3c.github.io/IntersectionObserver/#update-intersection-observations-algo))
-    /// over the document's observers, and answers whether any of them has
-    /// entries queued afterwards — the page's cue to post a delivery.
-    ///
-    /// Asked once per entry, after its commit, and nearly always answered at
-    /// once: `terminus` runs nothing when there are no observers or nothing went
-    /// stale since the last update that ran — a frame built, an offset
-    /// moved, a target observed. It reads the last completed layout and the
-    /// live scroll offsets and runs no pass, so an entry whose scroll was
-    /// composed inside the encode window, and committed nothing, still
-    /// updates against the offset it adopted.
-    ///
-    /// Every entry it queues is stamped with [`Self::timeline_milliseconds`]:
-    /// the reading the latest `vsync` or frame post handed this side, which
-    /// is the `DOMHighResTimeStamp` that frame's animation-frame callbacks
-    /// were called with and the one an image's `load` is stamped with. That
-    /// is HTML's order — the observations are updated in the same rendering
-    /// step as the callbacks, after them — so the entries' `time` compares
-    /// directly with every other time this side reports, and nothing takes a
-    /// second reading of the clock.
+    /// [`DocumentSlot::update_intersection_observations`] at
+    /// [`Self::timeline_milliseconds`], for the tests.
+    #[cfg(test)]
     pub(crate) fn update_intersection_observations(&mut self) -> bool {
         let time = self.timeline_milliseconds();
         self.slot
             .borrow_mut()
-            .document
-            .as_mut()
-            .is_some_and(|document| document.update_intersection_observations(time))
+            .update_intersection_observations(time)
     }
 
-    /// Whether exposure changes wait for a delivery entry — the page's
-    /// cue to post one even when no observer has entries queued: a
-    /// teardown, a `stopExposure` that sent records, or a freed element that
-    /// was exposed queues its change outside any update.
-    ///
-    /// One `is_empty`, because nearly every entry's answer is no.
+    /// [`DocumentSlot::has_pending_exposure`], for the tests.
+    #[cfg(test)]
     pub(crate) fn has_pending_exposure(&self) -> bool {
-        self.slot.borrow().exposure.has_changes()
+        self.slot.borrow().has_pending_exposure()
     }
 
     /// Delivers every observer's queued entries to its handler, in creation
@@ -3343,7 +3501,7 @@ impl MainThreadRuntime {
             };
             // web-core's `bubbles: false, composed: false`
             // (`ExposureServices.ts:210-218`).
-            if let Err(error) = self.dispatch(
+            self.dispatch(
                 js,
                 change.node,
                 name,
@@ -3352,10 +3510,13 @@ impl MainThreadRuntime {
                 timestamp,
                 &EventDetail::Exposure,
                 &[],
-            ) {
-                failures.extend(error.into_errors());
-            }
+                &mut failures,
+            );
         }
+        // What the record dispatches and their checkpoints throw follows
+        // this mark; an appear or disappear listener that threw does not
+        // keep the batch below from being settled.
+        let records_from = failures.len();
         // What those listeners queued: records only, since only an
         // observer's report carries an element event.
         let late = self.slot.borrow().exposure.take_changes();
@@ -3366,17 +3527,19 @@ impl MainThreadRuntime {
         // records are in, so the realm sends one `exposure` and one
         // `disexposure` list.
         let mut realms = SmallVec::new();
-        let mut recorded = true;
         for change in &changes {
             let Some(id) = &change.exposure_id else {
                 continue;
             };
             let extras = [
-                ("exposureID", Extra::Str(id)),
-                ("exposureScene", Extra::Str(&change.scene)),
-                ("appeared", Extra::Bool(change.appeared)),
+                ("exposureID", HostArgument::String(id)),
+                (
+                    "exposureScene",
+                    HostArgument::String(change.scene.as_deref().unwrap_or("")),
+                ),
+                ("appeared", HostArgument::Boolean(change.appeared)),
             ];
-            if let Err(error) = self.dispatch_checkpointed(
+            self.dispatch_checkpointed(
                 js,
                 change.node,
                 EXPOSURE_RECORD_EVENT,
@@ -3386,50 +3549,31 @@ impl MainThreadRuntime {
                 &EventDetail::None,
                 &extras,
                 Checkpoint::Deferred(&mut realms),
-            ) {
-                recorded = false;
-                failures.extend(error.into_errors());
-            }
+                &mut failures,
+            );
         }
         for realm in realms {
             if let Some(Err(error)) = self.core.checkpoint_after_calls(js, realm) {
-                recorded = false;
                 failures.push(MainThreadError::from_engine("delivering an event", error));
             }
         }
+        let recorded = failures.len() == records_from;
         if let Err(error) = self.finish_batch(js, recorded) {
             failures.push(error);
         }
         failures
     }
 
-    /// Runs `terminus`'s resize-observation update — the spec's "gather active
-    /// observations" with the entries created
-    /// ([`terminus::link::Document::update_resize_observations`]) — and answers whether
-    /// it queued any entry: the page's cue to post the resize delivery.
-    ///
-    /// Asked once per entry, after its commit, and nearly always answered at
-    /// once: `terminus` runs nothing when there are no observers, when no layout
-    /// pass ran and nothing was observed since the last update that ran, or
-    /// before the document's first layout. It reads the last completed layout
-    /// and runs no pass.
+    /// [`DocumentSlot::update_resize_observations`], for the tests.
+    #[cfg(test)]
     pub(crate) fn update_resize_observations(&mut self) -> bool {
-        self.slot
-            .borrow_mut()
-            .document
-            .as_mut()
-            .is_some_and(LynxDocument::update_resize_observations)
+        self.slot.borrow_mut().update_resize_observations()
     }
 
-    /// Whether any resize observer has entries queued — the page's cue to post
-    /// the resize delivery when the update itself queued nothing new, for
-    /// entries an earlier update left that no delivery has taken yet.
+    /// [`DocumentSlot::has_pending_resize_notifications`], for the tests.
+    #[cfg(test)]
     pub(crate) fn has_pending_resize_notifications(&self) -> bool {
-        self.slot
-            .borrow()
-            .document
-            .as_ref()
-            .is_some_and(LynxDocument::has_pending_resize_notifications)
+        self.slot.borrow().has_pending_resize_notifications()
     }
 
     /// Delivers every resize observer's queued entries to its handler, in
@@ -3510,12 +3654,12 @@ impl MainThreadRuntime {
                 )
             });
             let extras = [
-                ("left", Extra::Number(left)),
-                ("top", Extra::Number(top)),
-                ("width", Extra::Number(width)),
-                ("height", Extra::Number(height)),
+                ("left", HostArgument::Number(left)),
+                ("top", HostArgument::Number(top)),
+                ("width", HostArgument::Number(width)),
+                ("height", HostArgument::Number(height)),
             ];
-            if let Err(error) = self.dispatch(
+            self.dispatch(
                 js,
                 node,
                 LAYOUT_CHANGE_EVENT,
@@ -3524,55 +3668,16 @@ impl MainThreadRuntime {
                 timestamp,
                 &EventDetail::None,
                 &extras,
-            ) {
-                failures.extend(error.into_errors());
-            }
+                &mut failures,
+            );
         }
         failures
     }
 
-    /// Queues the `layout` event of every reporting `text` whose paragraph a
-    /// committing layout run recomputed since the last call
-    /// ([`terminus::link::Document::take_text_layout_reports`]), with the lines and the
-    /// content box that commit left ([`ComponentEvent::TextLayout`]), in the
-    /// order the runs first reached them. Asked by the page's epilogue after
-    /// its commit, so the events join the component events the same entry
-    /// posts; one `is_empty` when nothing reported.
-    ///
-    /// A node whose `layout` row left without the listener table telling
-    /// this side — its realm was forgotten — has its report turned off here
-    /// and queues nothing. A node whose paragraph has no committed lines (it
-    /// stopped establishing one) queues nothing either.
+    /// [`DocumentSlot::queue_text_layout_events`], for the tests.
+    #[cfg(test)]
     pub(crate) fn queue_text_layout_events(&mut self) {
-        let mut slot = self.slot.borrow_mut();
-        let DocumentSlot {
-            document,
-            component_events,
-            ..
-        } = &mut *slot;
-        let Some(document) = document.as_mut() else {
-            return;
-        };
-        for node in document.take_text_layout_reports() {
-            if !document.has_listener(node, LayoutEventRegistration::TextLayoutReport.name()) {
-                document.set_text_layout_reporting(node, false);
-                continue;
-            }
-            let (Some(lines), Some(layout)) =
-                (document.text_lines(node), document.rounded_layout(node))
-            else {
-                continue;
-            };
-            let terminus::link::layout::Layout {
-                size,
-                padding,
-                border,
-                ..
-            } = layout;
-            let width = size.width - padding.left - padding.right - border.left - border.right;
-            let height = size.height - padding.top - padding.bottom - border.top - border.bottom;
-            component_events.queue_text_layout(node, lines, width, height);
-        }
+        self.slot.borrow_mut().queue_text_layout_events();
     }
 
     /// When the earliest armed timer comes due, if one is armed, for a test
@@ -3919,8 +4024,7 @@ await Promise.resolve().then(() => __FlushElementTree());
             .engine
             .call_module_export_before_operation(
                 js_runtime,
-                RUNTIME_MODULE_SPECIFIER,
-                "__BobcatInitEntry",
+                Export::InitEntry,
                 &[HostArgument::String(self.card.as_deref().unwrap_or(url))],
             )
             .map_err(starting)?;
@@ -4134,10 +4238,10 @@ fn install(
     engine: &mut ScriptEngine,
     name: &str,
     arity: u8,
-    callback: impl FnMut(&[HostValue]) -> Result<HostValue, String> + 'static,
+    callback: impl FnMut(&[HostArgument<'_>]) -> Result<HostValue, String> + 'static,
 ) -> Result<(), MainThreadError> {
     engine
-        .register_host_module_function(HOST_MODULE_SPECIFIER, name, arity, Box::new(callback))
+        .register_host_module_function(HOST_MODULE_SPECIFIER, name, arity, callback)
         .map_err(|error| MainThreadError::from_engine("installing the host module", error))
 }
 
@@ -4523,9 +4627,11 @@ fn install_event_members(
 /// once (`event_steps`), runs the engine components' walk over it to its end
 /// with an [`EventDetail::None`] — the script `detail` is a realm value and
 /// does not cross — and answers the path the realm then runs its own Lynx
-/// walk over, as one string: the two comma-joined lists [`encode_path`]
-/// writes, nodes then targets, joined by `;` (`";"` for a path with no step
-/// a realm could hold). So for a synthetic event the components hear it
+/// walk over, as one string: the steps [`realm_path_steps`] selects, the
+/// ones a routed dispatch hands each realm, as two comma-joined lists of
+/// decimal packed ids, nodes then targets, joined by `;` (`";"` for a path
+/// with no step a realm could hold). A string, because a member answers one
+/// value. So for a synthetic event the components hear it
 /// before the calling realm's Lynx handlers do, where a routed dispatch
 /// ([`MainThreadRuntime::dispatch`]) calls the realms at the path's top step
 /// first (the order a user ruling chose, 2026-10-22: the components are part
@@ -4561,8 +4667,16 @@ fn install_synthetic_event_members(
         validate_live_element(document, NAME, target)?;
         let steps = document.event_steps(target, bubbles, composed);
         document.dispatch_element_event_over(&steps, name, &EventDetail::None, timestamp);
-        let EncodedPath { mut nodes, targets } = encode_path(document, &steps);
-        nodes.reserve(targets.len() + 1);
+        let mut nodes = String::new();
+        let mut targets = String::new();
+        for step in realm_path_steps(document, &steps) {
+            if !nodes.is_empty() {
+                nodes.push(',');
+                targets.push(',');
+            }
+            write!(nodes, "{}", step.node.to_bits()).expect("writing to a String");
+            write!(targets, "{}", step.target.to_bits()).expect("writing to a String");
+        }
         nodes.push(';');
         nodes.push_str(&targets);
         Ok(HostValue::String(nodes))
@@ -4832,7 +4946,7 @@ fn install_attribute_members(
         }
         fn getAttribute(node: node_id_argument, name: string_argument) |document| {
             let element = validate_live_element(document, NAME, node)?;
-            let value = element.attribute(name).map(str::to_owned);
+            let value = element.attribute(name).map(std::borrow::Cow::into_owned);
             Ok(value.map_or(HostValue::Null, HostValue::String))
         }
         fn tagName(node: node_id_argument) |document| {
@@ -4846,7 +4960,7 @@ fn install_attribute_members(
         fn attributeNames(node: node_id_argument) |document| {
             let element = validate_live_element(document, NAME, node)?;
             let mut record = String::new();
-            for (name, _) in element.attributes() {
+            for name in element.attribute_names() {
                 write_record_field(&mut record, name);
             }
             Ok(HostValue::String(record))
@@ -5107,8 +5221,11 @@ fn validate_swap(
     Ok(())
 }
 
-fn argument(arguments: &[HostValue], index: usize) -> &HostValue {
-    arguments.get(index).unwrap_or(&HostValue::Undefined)
+fn argument<'a>(arguments: &[HostArgument<'a>], index: usize) -> HostArgument<'a> {
+    arguments
+        .get(index)
+        .copied()
+        .unwrap_or(HostArgument::Undefined)
 }
 
 /// The largest integer an `f64` represents exactly. A packed `NodeId` is built
@@ -5146,10 +5263,10 @@ fn node_id_value(node: terminus::link::NodeId) -> HostValue {
 )]
 fn node_id_argument(
     function: &str,
-    arguments: &[HostValue],
+    arguments: &[HostArgument<'_>],
     index: usize,
 ) -> Result<terminus::link::NodeId, String> {
-    let HostValue::Number(value) = *argument(arguments, index) else {
+    let HostArgument::Number(value) = argument(arguments, index) else {
         return Err(format!("{function} expects a number for argument {index}"));
     };
     if !value.is_finite() || value < 0.0 || value.fract() != 0.0 || value >= MAX_EXACT_INTEGER {
@@ -5163,11 +5280,11 @@ fn node_id_argument(
 
 fn optional_node_id_argument(
     function: &str,
-    arguments: &[HostValue],
+    arguments: &[HostArgument<'_>],
     index: usize,
 ) -> Result<Option<terminus::link::NodeId>, String> {
-    match *argument(arguments, index) {
-        HostValue::Undefined | HostValue::Null => Ok(None),
+    match argument(arguments, index) {
+        HostArgument::Undefined | HostArgument::Null => Ok(None),
         _ => node_id_argument(function, arguments, index).map(Some),
     }
 }
@@ -5178,11 +5295,11 @@ fn optional_node_id_argument(
 /// element is the caller's to ask.
 fn node_ids_argument(
     function: &str,
-    arguments: &[HostValue],
+    arguments: &[HostArgument<'_>],
     index: usize,
 ) -> Result<Vec<terminus::link::NodeId>, String> {
     let malformed = || format!("{function} expects comma-joined node ids for argument {index}");
-    let HostValue::String(ids) = argument(arguments, index) else {
+    let HostArgument::String(ids) = argument(arguments, index) else {
         return Err(malformed());
     };
     if ids.is_empty() {
@@ -5200,10 +5317,14 @@ fn node_ids_argument(
 
 /// A flag the realm spells as `0` or `1`, which is every boolean a tree
 /// member takes.
-fn flag_argument(function: &str, arguments: &[HostValue], index: usize) -> Result<bool, String> {
-    match *argument(arguments, index) {
-        HostValue::Number(0.0) => Ok(false),
-        HostValue::Number(1.0) => Ok(true),
+fn flag_argument(
+    function: &str,
+    arguments: &[HostArgument<'_>],
+    index: usize,
+) -> Result<bool, String> {
+    match argument(arguments, index) {
+        HostArgument::Number(0.0) => Ok(false),
+        HostArgument::Number(1.0) => Ok(true),
         _ => Err(format!("{function} expects 0 or 1 for argument {index}")),
     }
 }
@@ -5214,11 +5335,11 @@ fn flag_argument(function: &str, arguments: &[HostValue], index: usize) -> Resul
 /// and every bit outside the three.
 fn kinds_argument(
     function: &str,
-    arguments: &[HostValue],
+    arguments: &[HostArgument<'_>],
     index: usize,
 ) -> Result<ListenerKinds, String> {
-    match *argument(arguments, index) {
-        HostValue::Number(value) if value.fract() == 0.0 && (1.0..=7.0).contains(&value) =>
+    match argument(arguments, index) {
+        HostArgument::Number(value) if value.fract() == 0.0 && (1.0..=7.0).contains(&value) =>
         {
             #[expect(
                 clippy::cast_possible_truncation,
@@ -5237,11 +5358,11 @@ fn kinds_argument(
 /// `__CreateEvent` read off `timelineMilliseconds`.
 fn finite_number_argument(
     function: &str,
-    arguments: &[HostValue],
+    arguments: &[HostArgument<'_>],
     index: usize,
 ) -> Result<f64, String> {
-    match *argument(arguments, index) {
-        HostValue::Number(value) if value.is_finite() => Ok(value),
+    match argument(arguments, index) {
+        HostArgument::Number(value) if value.is_finite() => Ok(value),
         _ => Err(format!(
             "{function} expects a finite number for argument {index}"
         )),
@@ -5250,9 +5371,13 @@ fn finite_number_argument(
 
 /// A JavaScript boolean, which is what the boot module hands `createDocument`
 /// its five switches as, and a synthetic event its two flags.
-fn boolean_argument(function: &str, arguments: &[HostValue], index: usize) -> Result<bool, String> {
-    match *argument(arguments, index) {
-        HostValue::Boolean(value) => Ok(value),
+fn boolean_argument(
+    function: &str,
+    arguments: &[HostArgument<'_>],
+    index: usize,
+) -> Result<bool, String> {
+    match argument(arguments, index) {
+        HostArgument::Boolean(value) => Ok(value),
         _ => Err(format!("{function} expects a boolean for argument {index}")),
     }
 }

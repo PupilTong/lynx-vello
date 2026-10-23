@@ -345,11 +345,7 @@ box in the padding-box coordinates of the element generating `node`'s
 containing block, with §3.3's remembered scroll offsets applied; with
 `AnchorSpec::Default`, `None` means the box has no default anchor —
 `anchor_scrolls_with_default` (§3.3's scroll-container
-condition), `scrollable_containing_block` (css-position-4: the area the
-containing block's own algorithm recorded through
-`set_scrollable_containing_block` between its in-flow commit and its absolute
-pass — its in-flow scrollable overflow, which no out-of-flow box can grow),
-`position_option_count`/`position_option_style` (the options list, each
+condition), `position_option_count`/`position_option_style` (the options list, each
 already cascaded with its try tactic; index 0 is the box's own style),
 `last_successful_option` (which the host records after layout, §6.5.1.1), and
 `set_anchor_outcome`, which hands back per box the chosen option, whether it
@@ -360,7 +356,14 @@ everything in flow under the containing block and every earlier box it is the
 containing block of — its own out-of-flow children and the hoisted ones alike
 — is already committed, and rebases the host's rectangles onto what it
 actually lays out against (a grid area, the scrollable containing block, a
-`position-area` region). Within one absolute layout of a box it asks each
+`position-area` region). The scrollable containing block (css-position-4:
+the scroll container's in-flow scrollable overflow, which no out-of-flow box
+can grow) is not asked: the container's own algorithm computes it between
+its in-flow commit and its absolute pass and hands it over in
+`AbsoluteContainingBlock`, so a page pays nothing for it per commit; a host
+that would place such a box itself (`compute_hoisted_layout`) cannot
+reproduce it and runs the container's pass instead. Within one absolute
+layout of a box it asks each
 question once per option (`AnchorMemo`), never across a pass. A box that uses
 none of it pays two style predicates, and a host call to count its options only
 when its `position-try-fallbacks` lists something; the anchored path is a
@@ -400,6 +403,29 @@ requested measurement replaces an unrequested one of the same input. It is a
 field rather than a payload of `LayoutGoal::Measure`, which the next paragraph
 would otherwise ask for, because it is harmless on a commit (exact anyway) and
 the variant's shape is matched at every measurement site.
+
+**`reads_first_baseline` is the same kind of request, for the first
+baseline.** A caller sets it when it reads the box's first baseline from a
+measurement, and passes it on only to the items its own requested first
+baseline is read from. A flex container's cross-size probe asks a
+first-baseline group member, and, when its own measurement was asked, the item
+its first baseline is exported from; a grid row's baseline contributions ask
+its `align-self: baseline` items in the row's track sizing; a grid measurement
+pass asks a first-baseline group member, and every item when its own
+measurement was asked (any of them may give the container's baseline); a
+grid-lanes measurement pass, which aligns by no baseline, asks every item only
+when its own measurement was asked; a linear container asks only under its own
+request, and then only the items its first baseline is read from — every item
+of a row, the first of a column; and the `terminus` host's inline-level atoms
+always ask, since a line box reads every atom's baseline. It changes one thing: a linear container's measurement
+probes a fixed-size item (both sizes known without its content) only when the
+request asks for the baseline that probe would supply; without it the item
+keeps its known size and the container reports a first baseline synthesized
+from that item's border box, which no caller reads. A commit lays every item
+out and reads the committed baselines, so it is exact either way. The cache
+keeps it beside the last-baseline request, in bit 21
+(`READS_FIRST_BASELINE`), under the same rule: an entry answers a request
+for either baseline only if it is a commit or was computed with that request.
 
 **`LayoutInput` stays one type, and the tree stays one trait.** The style
 surface splits per algorithm and the wire struct does not, for a structural
@@ -782,7 +808,7 @@ v1 box-layout effects:
   the contained one. An authored `aspect-ratio` is style rather than contents and survives. The
   skipped-contents path shares this sizing.
 - **Layout containment** (`containment().contains(LAYOUT)`) — the box exports **no** baseline
-  (`LayoutOutput::first_baselines` and `last_baselines` both `NONE` at each algorithm's output
+  (`LayoutOutput::first_baseline` and `last_baseline` both `None` at each algorithm's output
   construction; Relative already exports none), and it **changes scrollable overflow**: with `overflow: visible`, a layout-contained
   box's descendant overflow is *ink* overflow ([css-contain-2 §3.3](https://drafts.csswg.org/css-contain-2/#containment-layout),
   item 3), so its `content_size` collapses to its own padding box; a scroll container instead keeps
@@ -1129,12 +1155,10 @@ the painting — layout's job is to never be the frame's bottleneck.
   measurement slots inline, spilling to the heap up to
   `MEASURE_CACHE_LIMIT = 32`, plus one layout slot). Each entry packs its
   output into six `f32`s: the size, the content size, and two baseline slots
-  that hold the present baselines in a fixed order (first `x`, first `y`, last
-  `x`, last `y`) with their presence in the input's flag word. No producer
-  reports an `x` baseline (it belongs to vertical writing modes, which
-  nothing here lays out), so an output carries at most a first and a last `y`
-  and the last baselines cost no entry any bytes; an output with more is
-  marked and answers no request, which keeps the cache exact. Shape-aware replacement is
+  that hold the first and the last baseline with their presence in the
+  input's flag word. A `LayoutOutput` carries only the vertical position of
+  each (`first_baseline`, `last_baseline`): a horizontal baseline belongs to
+  vertical writing modes, which nothing here lays out. Shape-aware replacement is
   implemented; probe-trace validation and tuning remain L4 work. The key is
   **every `LayoutInput` field that decides geometry** — `goal` distinguishes
   side-effect-free measurements (including their requested axes) from geometry
@@ -1143,7 +1167,20 @@ the painting — layout's job is to never be the frame's bottleneck.
   definiteness independently from decided geometry, and `parent_size` is the
   percentage basis. All change results, so dropping any of them from the key
   would alias distinct layouts; matching may coalesce entries only under
-  provable equivalences (documented in the `cache` module). The `Commit` goal's
+  provable equivalences (documented in the `cache` module). The one
+  equivalence decided outside the cache is the basis itself:
+  `compute_cached_layout` lays a box whose layout reads no percentage basis
+  (`CoreStyle::reads_percentage_basis` — by default a percentage or
+  anchor-relative size, min/max size, margin or padding; `terminus` adds
+  every paragraph-establishing box, whose lines and atoms read the basis, and
+  answers from a node bit its style harvest evaluates rather than per lookup)
+  out against `parent_size: None`, so one entry answers every basis a parent
+  hands it instead of one entry per basis. The answer is asked of the style
+  only on a miss in an empty cache: each entry records it outside the key
+  (`BASIS_FREE`/`BASIS_READ`), a lookup in a basis-free cache drops the
+  request's basis, and a later miss reads the answer back — valid for as long
+  as the entries are, since the styles it reads are layout inputs whose change
+  clears the cache. The `Commit` goal's
   `content_independent` payload is the one field left out: it changes no
   result, so it is packed into the committed entry outside the key bits — two
   commits that differ only in it answer each other — and reads back whole
@@ -1257,8 +1294,12 @@ the painting — layout's job is to never be the frame's bottleneck.
   items, reverse dependency chains, duplicate ids, adversarial disjoint
   cycles, one-pass versus two-pass solving, nested cold layout, warm
   descendants, root cache hits, and auto-width refinement. The refinement
-  path preserves measurements for unchanged, definite fixed items while
-  percentage-dependent or newly double-anchored items remeasure. The Linear
+  path preserves measurements for unchanged, definite fixed items, and for
+  a basis-free auto-width item (no percentage basis read, no block-axis
+  intrinsic keyword) whose margin box the definite content width still fits
+  after it was measured at max-content or narrower than its available width,
+  while percentage-dependent or newly double-anchored items remeasure. The
+  Linear
   suite covers fixed stacks,
   weighted distribution and freeze paths, ordering, gravity matrices,
   measurement/stretch, and mixed hidden/absolute children. Each algorithm
@@ -1278,6 +1319,63 @@ the painting — layout's job is to never be the frame's bottleneck.
   this repository. Equivalent cross-engine studies for capabilities outside
   the common Flex subset remain future work — not to copy those engines'
   designs, but to keep "high-performance" falsifiable.
+
+### Workload model and optimization order
+
+What `seldon` and its `terminus` host optimize for, settled on 2026-10-21
+from Starlight (`lynx/core/renderer/starlight`), Yoga and taffy, and Blink
+LayoutNG. The three agree on the shape of the work, and so does this engine:
+
+- **Text measurement is the cost center.** Starlight treats the platform
+  text measure as the one slow operation (it forces a final measure to avoid
+  measuring twice and gives measure-function nodes a percentage-base veto
+  hook); Yoga's three "old result still fits" cache relaxations exist only
+  for leaf measure functions, whose output is monotone in the constraint;
+  Blink reuses inline-formatting-context lines. Here the paragraph's three
+  constraint memo and the `TextStore` play that role.
+- **Updates re-enter at the root and are pruned by the per-node cache.**
+  Starlight keeps up to eight constraint entries per node and a "subtree in
+  sync" bit; Yoga eight measurements plus a dirty bit that stops at the
+  first already-dirty ancestor; taffy nine shape slots. None has layout
+  roots; Blink and WebKit do (containment, SVG roots, and fixed-size
+  overflow-clipped boxes), and Blink additionally stops the dirty walk at an
+  already-marked ancestor and never dirties a container from an out-of-flow
+  child. Here: the measurement cache (one committed entry plus measurement
+  slots), relayout boundaries at `contain: strict` and skipped contents,
+  and `content_independent` in-place relayout.
+- **The percentage basis is a veto, not a key.** Starlight refuses a hit
+  when the node or any child reads a percent base; Yoga compares the owner
+  size only on an axis the style resolves against; Blink carries a
+  "depends on percentage block size" bit per fragment and per subtree. Here
+  a box whose own box model reads no basis is cached against none (the
+  harvested `BASIS_FREE` node bit, recorded in the cache entry so a lookup
+  never asks the style).
+- **Scroll never lays out; first screen is linear in boxes; a list is
+  bounded by its bound window plus preload with estimated cell sizes.**
+
+The order work is taken in, by how often a ReactLynx page hits each path:
+
+1. **The update path.** One attribute, class or inline-style write on a
+   leaf of a list page: the relayout must stop at the nearest fixed-size
+   overflow-clipped scroll container (`scroll-view`, `list`), which is a
+   layout root in Blink and WebKit and only a `contain: strict` boundary
+   here today, and the dirty walk must stop at an already-marked ancestor
+   without clearing every ancestor's cache again. Measured as the number of
+   boxes recomputed per leaf change.
+2. **Text.** A paragraph or replaced box measured at `MaxContent` with
+   result `w` answers a later `Definite(a)` with `a >= w` (Yoga's
+   relaxations, restricted to monotone leaves). Goal: at most one shaping
+   per paragraph per axis per layout.
+3. **First screen.** A subtree-level "depends on the percentage basis" bit
+   so a parent with basis-free content normalizes too; a list's unbound
+   cells never become boxes.
+
+Deliberately not pursued, because the shapes are rare on Lynx pages or the
+cost is high: sparse grids with large explicit line numbers, grid-lanes
+spanning items (span-1 items are grouped per css-grid-3 §3.4.2), further
+`display: relative` passes, and inline-formatting-context line reuse.
+Benchmarks are read common path first; a delta on a rare shape is recorded,
+not optimized for.
 
 ## Algorithms (Flex, Grid, grid lanes, Relative, and Linear implemented)
 
@@ -1325,13 +1423,17 @@ the engine we're succeeding.
 4. **Resolving flexible lengths** (§9.7) — the freeze/unfreeze grow/shrink
    loop per line → target main sizes.
 5. **Cross sizing** (§9.4) — hypothetical cross sizes (probes with known
-   main size), line cross sizes, `align-content: stretch`.
+   main size), line cross sizes, `align-content: stretch`. The container's
+   own cross size is decided here, and with it its whole size: a
+   measurement whose caller reads neither baseline returns that size now,
+   before the second sizing pass an indefinite width runs and before the
+   alignment steps below, whose results only a commit or a baseline reads.
 6. **Main-axis alignment** (§9.5) — auto margins, then `justify-content`
    with `gap`.
 7. **Cross-axis alignment** (§9.6) — auto margins, `align-self`,
    `align-content`. Baseline alignment (§8.3, §9.4 step 8, css-align-3 §9.3)
    forms two sharing groups per line of a row container, from the children's
-   `first_baselines` and `last_baselines`: `baseline` items flush with the
+   `first_baseline` and `last_baseline`: `baseline` items flush with the
    line's cross-start edge, `last baseline` items with its cross-end edge,
    which `wrap-reverse` exchanges (the browsers' reading; a group taller than
    its line overflows, with no implicit `safe`). An item with no baseline set
@@ -1385,8 +1487,9 @@ The automatic minimum size (§4.5, `min-size: auto`) resolves inside steps
    or feed the new values back into the container/main total; this preserves
    Starlight's measured-once `UpdateContainerSize` behavior and call order.
    Dependency flags are Linear-owned: the shared box resolver returns only
-   resolved values, and compact item-local bits selectively refresh margin or
-   padding/border fields that depend on the newly available inline basis.
+   resolved values, and one item-local bit refreshes the margin and padding
+   of an item whose margin or padding depends on the newly available inline
+   basis.
    Preferred and min/max sizes remain measured-once; after item sizing they
    have no downstream consumer, so re-resolving them would be a dead update.
 5. **Alignment** — derive main-axis gravity from `justify-content` (the
@@ -1425,13 +1528,28 @@ dispatches to it.
    baseline shims, distribute item contributions in span order (including
    infinitely-growable and non-affected-track phases), maximize tracks,
    expand `fr` (§12.7), and stretch `auto` tracks. A bounded cross-axis
-   feedback pass detects contribution changes after row sizing. While
+   feedback pass detects contribution changes after row sizing, re-measuring
+   only the items whose min-content width can read the sized rows
+   (`column_feedback_reads_rows`). While
    columns are initially sized, only rows with definite max track sizing
    functions provide finite block-axis space; other rows are infinite per
    §12.1. This per-run columns→rows correction is independent of the outer
    Grid layout phases: cyclic percentages are `auto` while finding an
    intrinsic container size, then resolve against that resulting size in a
-   final Grid sizing run.
+   final Grid sizing run. That run happens only when it can change the tracks
+   (`DefiniteRerun::moves_axis`): no provisional run sized the tracks at the
+   decided width, the gutter moved, or on some axis the percentage basis
+   moved and a track breadth, `fit-content()` limit, item `fit-content()`
+   size or (rows) a distributing `align-content` reads it, or the available
+   space moved from a min-content constraint, or from a max-content one
+   where the final size is not the tracks' used size (a `min-height`
+   stretching `auto` rows, a `max-height`, size containment), a flexible
+   track's factor is below 1, an `auto` minimum sits under a `min-content`
+   maximum, or an item spans several tracks none of them flexible.
+   Otherwise the run would repeat the provisional one up to float rounding,
+   and is skipped. An item whose geometry reads no percentage basis and
+   carries no intrinsic keyword (`GridItem::basis_free`) keeps its resolved
+   geometry across every refresh.
    The space the tracks are sized against is §12.1's available grid space,
    which has two cases only: the container's definite size, or the min- or
    max-content constraint it is measured under. A container whose size is
@@ -1498,16 +1616,29 @@ computed `font_size`.
    algorithm once over the grid axis with the stacking axis passed as
    indefinite. A definite-position item contributes at its own span; an
    auto-placed item is assumed to sit at every start position its span fits
-   and contributes once per position. Those per-position clones are built only
-   when track sizing reads its item list at all — the predicate is
-   `size_tracks`'s own `track_sizing_reads_items`, borrowed rather than
-   restated, and it holds whenever some track is intrinsic or flexible — so an
-   all-fixed-length grid axis builds none of them.
-   §3.4.2's virtual-item grouping, which would bound the clone count by
-   distinct spans rather than by items, is deliberately not implemented: a
-   contribution here depends on the tracks the item spans (both the automatic
-   minimum and the fixed-maximum clamp read them), so a group maximum would
-   have to be recomputed per candidate position anyway. The axis is re-sized
+   and contributes once per position. The span-1 items are grouped as
+   §3.4.2's virtual items are: `sizing::LaneSizingItems` measures each one
+   once, in place, and gives track sizing one aggregate entry per
+   track, standing for the definite-position items placed there and every
+   auto-placed one, whose contributions are the maxima of its members'
+   (`GroupMaxima`). A contribution depends on the track only through the
+   automatic minimum and the fixed-maximum clamp, so the aggregate keeps a
+   minimum in three parts (the members it never applies to; the
+   content-based minimum capped by each member's own maximum; the members'
+   contribution where it does not apply) and applies the track's test and
+   clamp per track. Every step that reads a span-1 contribution takes a
+   maximum through monotone float operations, so the tracks come out bit for
+   bit as with one clone per item and position — which a debug build checks
+   after every grid-axis run by sizing the clones too. An item spanning
+   several tracks is still cloned per candidate position: spreading its
+   contribution over the tracks (§12.5.1) is not shown to commute with the
+   maximum in floating point. The entries are built only when track sizing
+   reads its item list at all — the predicate is `size_tracks`'s own
+   `track_sizing_reads_items`, borrowed rather than restated, and it holds
+   whenever some track is intrinsic or flexible — so an all-fixed-length grid
+   axis builds none of them. Track sizing reads its items through
+   `sizing::SizingItems`, which Grid's own item slice implements as before.
+   The axis is re-sized
    once under its now-definite basis whenever that basis was missing or the
    gutter it feeds came out at a different value. Its available grid space
    follows regular Grid's rule (§12.1): with no size of its own under a

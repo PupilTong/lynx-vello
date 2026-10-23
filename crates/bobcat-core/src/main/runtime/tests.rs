@@ -84,7 +84,10 @@ fn boot_defers_flush_to_a_microtask_without_draining_between_hooks() {
     // The first render job precedes the queued flush; its nested job follows it.
     // This test drives the realm directly, before Page's dirty-commit epilogue.
     assert_eq!(tree.rounded_layout(view.id()).unwrap().size.width, 20.0);
-    assert_eq!(view.attribute("style"), Some("width:30px;height:10px"));
+    assert_eq!(
+        view.attribute("style").as_deref(),
+        Some("width:30px;height:10px")
+    );
     while let Ok(notice) = far.0.notices.try_recv() {
         assert!(
             !matches!(
@@ -1219,7 +1222,7 @@ fn classes_attributes_and_identity_queries_reach_the_private_document() {
     let view = elements.get(node_id(3)).expect("the view is live");
     assert_eq!(view.classes().collect::<Vec<_>>(), ["row", "bold"]);
     assert_eq!(view.id_attribute(), Some("header"));
-    assert_eq!(view.attribute("flex-grow"), Some("1"));
+    assert_eq!(view.attribute("flex-grow").as_deref(), Some("1"));
     assert_eq!(view.tag_name(), Some("view"));
 }
 
@@ -1253,7 +1256,7 @@ fn clearing_a_class_id_or_attribute_removes_it_from_the_private_document() {
     let view = elements.get(node_id(3)).expect("the view is live");
     assert_eq!(view.classes().len(), 0);
     assert_eq!(view.id_attribute(), None);
-    assert_eq!(view.attribute("text"), None);
+    assert_eq!(view.attribute("text").as_deref(), None);
 }
 
 /// The page configuration reaches the document through the realm.
@@ -1659,7 +1662,7 @@ fn clearing_inline_styles_removes_the_attribute_and_layout_effect() {
 
     let elements = elements.tree();
     let view = elements.get(node_id(3)).expect("the view is live");
-    assert_eq!(view.attribute("style"), None);
+    assert_eq!(view.attribute("style").as_deref(), None);
     let layout = elements
         .rounded_layout(node_id(3))
         .expect("the view is laid out");
@@ -1901,15 +1904,19 @@ fn a_key_event_reaches_the_page_with_its_keyboard_members() {
         },
         timestamp: 0.0,
     };
-    runtime
-        .dispatch_input_event(
-            &mut js_runtime,
-            terminus::link::NodeId::DOCUMENT_ELEMENT,
-            "keydown",
-            &payload,
-            None,
-        )
-        .expect("dispatch");
+    let mut dispatch_failures = Vec::new();
+    runtime.dispatch_input_event(
+        &mut js_runtime,
+        terminus::link::NodeId::DOCUMENT_ELEMENT,
+        "keydown",
+        &payload,
+        None,
+        &mut dispatch_failures,
+    );
+    assert!(
+        dispatch_failures.is_empty(),
+        "dispatch: {dispatch_failures:?}"
+    );
     runtime
         .evaluate_module(
             &mut js_runtime,
@@ -1966,15 +1973,19 @@ fn a_click_targets_the_common_ancestor_and_two_make_a_dblclick() {
             },
             timestamp: at,
         };
-        runtime
-            .dispatch_input_event(
-                &mut js_runtime,
-                node_id(down),
-                "click",
-                &payload,
-                Some(node_id(release)),
-            )
-            .expect("dispatch");
+        let mut dispatch_failures = Vec::new();
+        runtime.dispatch_input_event(
+            &mut js_runtime,
+            node_id(down),
+            "click",
+            &payload,
+            Some(node_id(release)),
+            &mut dispatch_failures,
+        );
+        assert!(
+            dispatch_failures.is_empty(),
+            "dispatch: {dispatch_failures:?}"
+        );
     };
     click(4, 5, 0.0);
     click(5, 4, 300.0);
@@ -6482,7 +6493,8 @@ fn a_listener_may_mutate_the_tree_it_was_dispatched_on() {
             .tree()
             .get(node_id(3))
             .expect("the view is live")
-            .attribute("tapped"),
+            .attribute("tapped")
+            .as_deref(),
         Some("yes")
     );
 }
@@ -6920,7 +6932,7 @@ fn a_raw_text_reaches_the_private_document_as_a_laid_out_run() {
     let tree = elements.tree();
     let carrier = tree.get(node_id(4)).expect("the raw-text is live");
     assert_eq!(carrier.tag_name(), Some("raw-text"));
-    assert_eq!(carrier.attribute("text"), Some("hello"));
+    assert_eq!(carrier.attribute("text").as_deref(), Some("hello"));
     assert!(
         carrier.child_ids().is_empty(),
         "generated text is absent from the DOM"
@@ -6975,7 +6987,7 @@ fn text_maxline_from_element_papi_limits_the_paragraph_and_its_box() {
         let id = tree
             .document_element()
             .children()
-            .find(|node| node.attribute("id") == Some(name))
+            .find(|node| node.attribute("id").as_deref() == Some(name))
             .expect("the text element")
             .id();
         assert_eq!(
@@ -7066,7 +7078,7 @@ fn replacing_inline_styles_preserves_attribute_text_limits() {
             .expect("main-thread script");
         let tree = elements.tree();
         for text in tree.document_element().children() {
-            assert_eq!(text.attribute(attribute), Some("1"));
+            assert_eq!(text.attribute(attribute).as_deref(), Some("1"));
             assert!(!text.attribute("style").unwrap().contains("--lynx-text-"));
             let paragraph = tree.text_block_size(text.id()).expect("paragraph");
             assert_eq!(paragraph.height, 21.0, "{attribute}");
@@ -7119,10 +7131,10 @@ fn the_text_overflow_attribute_from_papi_reaches_the_paragraph_marker() {
         let text = tree
             .document_element()
             .children()
-            .find(|node| node.attribute("id") == Some(name))
+            .find(|node| node.attribute("id").as_deref() == Some(name))
             .expect("the text element");
         assert_eq!(
-            text.attribute("text-overflow"),
+            text.attribute("text-overflow").as_deref(),
             Some(attribute),
             "{name}: the attribute reaches the document verbatim"
         );
@@ -7158,7 +7170,7 @@ fn rewriting_the_text_attribute_updates_generated_content() {
 
     let tree = elements.tree();
     let carrier = tree.get(node_id(4)).expect("carrier");
-    assert_eq!(carrier.attribute("text"), Some("hi"));
+    assert_eq!(carrier.attribute("text").as_deref(), Some("hi"));
     assert!(carrier.child_ids().is_empty());
     assert!(
         tree.text_block_size(node_id(3))
@@ -7187,7 +7199,12 @@ fn a_collected_raw_text_releases_its_attribute_content() {
         )
         .expect("main-thread script");
     assert_eq!(
-        elements.tree().get(node_id(4)).unwrap().attribute("text"),
+        elements
+            .tree()
+            .get(node_id(4))
+            .unwrap()
+            .attribute("text")
+            .as_deref(),
         Some("hello")
     );
     assert!(
@@ -7850,7 +7867,12 @@ fn an_event_target_no_handle_names_is_an_error_not_a_silent_drop() {
     let error = runtime
         .dispatch_for_test(&mut js_runtime, run, &tap(), event_point())
         .expect_err("a target no handle names cannot be delivered");
-    assert!(error.to_string().contains("ownership graph"), "{error}");
+    let error = error
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("; ");
+    assert!(error.contains("ownership graph"), "{error}");
 }
 
 /// `__SetAttribute(list, "update-list-info", …)` against the real document,
@@ -7938,21 +7960,25 @@ fn update_list_info_builds_and_retires_cells_through_the_filed_callbacks() {
     let list = tree
         .document_element()
         .children()
-        .find(|node| node.attribute("id") == Some("cells"))
+        .find(|node| node.attribute("id").as_deref() == Some("cells"))
         .expect("the list element");
     assert_eq!(
-        list.attribute("data-first-batch"),
+        list.attribute("data-first-batch").as_deref(),
         Some("4"),
         "every insertAction position built its cell"
     );
     assert_eq!(
-        list.attribute("data-retired"),
+        list.attribute("data-retired").as_deref(),
         Some("cell-1,cell-3"),
         "enqueueComponent is told the list and the sign of each cell removed"
     );
     let keys: Vec<_> = list
         .children()
         .map(|cell| (cell.tag_name(), cell.attribute("item-key")))
+        .collect();
+    let keys: Vec<_> = keys
+        .iter()
+        .map(|(tag, key)| (*tag, key.as_deref()))
         .collect();
     assert_eq!(
         keys,
@@ -8165,7 +8191,8 @@ fn a_timer_callback_mutates_the_document_the_realm_shares() {
             .tree()
             .get(node_id(3))
             .expect("the view is live")
-            .attribute("ticked"),
+            .attribute("ticked")
+            .as_deref(),
         Some("yes")
     );
 }
@@ -8724,7 +8751,10 @@ fn an_rpx_exposure_margin_resolves_against_the_viewport_width() {
         )
         .expect("removing the attribute");
     let rearmed = exposure_observer(&elements, view).expect("the listener keeps it registered");
-    assert_ne!(rearmed, observer, "the attribute write re-armed it");
+    assert_eq!(
+        rearmed, observer,
+        "the attribute write re-armed it on the observer of its options, which it did not change"
+    );
     runtime
         .evaluate_module(
             &mut js,
@@ -8817,7 +8847,10 @@ fn the_listener_members_register_exposure_and_switch_exposure_switches_detection
     );
     run("switchExposure(1, 0, `${view}`);");
     let resumed = exposure_observer(&elements, view).expect("resuming observes it again");
-    assert_ne!(resumed, first, "with an observer of its own");
+    assert_eq!(
+        resumed, first,
+        "on the observer of its options, which every element asking for them shares"
+    );
     run("listenerClosed(view, 'uiappear');");
     assert_eq!(
         exposure_observer(&elements, view),
@@ -10387,7 +10420,7 @@ fn frame_page_of(tree: &LynxDocument, frame: terminus::link::NodeId) -> terminus
     let page = nested_page(tree, frame).expect("a frame holds its nested page");
     let node = tree.get(page).expect("live");
     assert_eq!(node.tag_name(), Some("page"));
-    assert_eq!(node.attribute("part"), Some("page"));
+    assert_eq!(node.attribute("part").as_deref(), Some("page"));
     page
 }
 
@@ -10796,23 +10829,46 @@ fn a_frame_realm_closes_only_its_own_listener_names() {
 fn whole_path_encoding(
     document: &LynxDocument,
     steps: &terminus::link::event::EventSteps,
-) -> (String, String) {
-    let mut nodes = String::new();
-    let mut targets = String::new();
-    for step in steps
+) -> Vec<(terminus::link::NodeId, terminus::link::NodeId)> {
+    steps
         .steps()
         .iter()
         .rev()
         .filter(|step| step.capture && document.shadow_root_of(step.node).is_none())
-    {
-        if !nodes.is_empty() {
-            nodes.push(',');
-            targets.push(',');
-        }
-        write!(nodes, "{}", packed_node_id(step.node)).unwrap();
-        write!(targets, "{}", packed_node_id(step.target)).unwrap();
-    }
-    (nodes, targets)
+        .map(|step| (step.node, step.target))
+        .collect()
+}
+
+/// The pairs [`encode_path`] writes after its step count, read back.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::float_cmp,
+    reason = "packed ids and a step count, exact in an f64"
+)]
+fn encoded_path(
+    document: &LynxDocument,
+    steps: &terminus::link::event::EventSteps,
+) -> Vec<(terminus::link::NodeId, terminus::link::NodeId)> {
+    let mut arguments = Arguments::new();
+    encode_path(document, steps, &mut arguments);
+    let numbers: Vec<f64> = arguments
+        .iter()
+        .map(|argument| match argument {
+            HostArgument::Number(number) => *number,
+            other => panic!("the path crosses as numbers: {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        numbers[0],
+        ((numbers.len() - 1) / 2) as f64,
+        "the step count"
+    );
+    numbers[1..]
+        .chunks(2)
+        .map(|pair| (node_id(pair[0] as u64), node_id(pair[1] as u64)))
+        .collect()
 }
 
 /// The one encoding every realm is handed is the page realm's call as it
@@ -10852,13 +10908,10 @@ fn the_page_realms_call_carries_exactly_the_path_it_always_did() {
     };
     let slot = elements.slot.borrow();
     let document = slot.document.as_ref().unwrap();
-    let encoded = |steps: &terminus::link::event::EventSteps| {
-        let path = encode_path(document, steps);
-        (path.nodes, path.targets)
-    };
+    let encoded = |steps: &terminus::link::event::EventSteps| encoded_path(document, steps);
     for target in [inner, detached] {
         let steps = document.event_steps(target, true, true);
-        let calls = realm_calls(document, &steps, "tap", std::iter::once(page_realm));
+        let (calls, _) = realm_calls(document, &steps, "tap", std::iter::once(page_realm));
         assert_eq!(calls.as_slice(), [page_realm], "{target:?}");
         assert_eq!(
             encoded(&steps),
@@ -10868,32 +10921,25 @@ fn the_page_realms_call_carries_exactly_the_path_it_always_did() {
     }
     let steps = document.event_steps(shadowed, true, true);
     assert_eq!(
-        realm_calls(document, &steps, "tap", std::iter::once(page_realm)).len(),
+        realm_calls(document, &steps, "tap", std::iter::once(page_realm))
+            .0
+            .len(),
         1
     );
-    let (nodes, targets) = encoded(&steps);
-    let outside: (Vec<&str>, Vec<&str>) = nodes
-        .split(',')
-        .zip(targets.split(','))
-        .filter(|(node, _)| {
-            let id = steps
-                .steps()
-                .iter()
-                .find(|step| packed_node_id(step.node).to_string() == *node)
-                .unwrap()
-                .node;
-            document.shadow_root_of(id).is_none()
-        })
-        .unzip();
-    let (old_nodes, old_targets) = whole_path_encoding(document, &steps);
+    let path = encoded(&steps);
+    let outside: Vec<_> = path
+        .iter()
+        .copied()
+        .filter(|&(node, _)| document.shadow_root_of(node).is_none())
+        .collect();
+    let old = whole_path_encoding(document, &steps);
     assert_eq!(
-        (outside.0.join(","), outside.1.join(",")),
-        (old_nodes.clone(), old_targets),
+        outside, old,
         "less the shadow content, the steps the old call carried"
     );
     assert_eq!(
-        nodes.split(',').next(),
-        Some(packed_node_id(shadowed).to_string().as_str()),
+        path.first().map(|&(node, _)| node),
+        Some(shadowed),
         "the shadow content first, which the page realm skips"
     );
     assert!(
@@ -10901,19 +10947,19 @@ fn the_page_realms_call_carries_exactly_the_path_it_always_did() {
             .steps()
             .iter()
             .filter(|step| document.get(step.node).unwrap().is_shadow_root())
-            .all(|step| !nodes
-                .split(',')
-                .any(|id| id == packed_node_id(step.node).to_string())),
+            .all(|step| !path.iter().any(|&(node, _)| node == step.node)),
         "no shadow root"
     );
-    let page = packed_node_id(terminus::link::NodeId::DOCUMENT_ELEMENT).to_string();
     assert!(
-        old_nodes.split(',').any(|id| id == page),
+        old.iter()
+            .any(|&(node, _)| node == terminus::link::NodeId::DOCUMENT_ELEMENT),
         "the document element is on it, with the document node above it"
     );
     let steps = document.event_steps(shadowed, true, false);
     assert!(
-        realm_calls(document, &steps, "tap", std::iter::once(page_realm)).is_empty(),
+        realm_calls(document, &steps, "tap", std::iter::once(page_realm))
+            .0
+            .is_empty(),
         "a non-composed path inside a shadow tree invites no realm with nothing there"
     );
 }
@@ -11099,8 +11145,8 @@ fn frame_lines(js: &mut ScriptRuntime, runtime: &mut MainThreadRuntime) -> Vec<S
     let probe = runtime.with_document(|tree| {
         tree.document_element()
             .attribute("data-seen")
+            .map(std::borrow::Cow::into_owned)
             .unwrap_or_default()
-            .to_owned()
     });
     if probe.is_empty() {
         return Vec::new();
@@ -11151,15 +11197,19 @@ fn a_key_calls_every_realm_that_registered_it() {
         },
         timestamp: 0.0,
     };
-    runtime
-        .dispatch_input_event(
-            &mut js,
-            terminus::link::NodeId::DOCUMENT_ELEMENT,
-            "keydown",
-            &payload,
-            None,
-        )
-        .expect("dispatch");
+    let mut dispatch_failures = Vec::new();
+    runtime.dispatch_input_event(
+        &mut js,
+        terminus::link::NodeId::DOCUMENT_ELEMENT,
+        "keydown",
+        &payload,
+        None,
+        &mut dispatch_failures,
+    );
+    assert!(
+        dispatch_failures.is_empty(),
+        "dispatch: {dispatch_failures:?}"
+    );
     assert_eq!(
         frame_lines(&mut js, &mut runtime),
         [
@@ -11516,7 +11566,7 @@ fn a_realm_that_throws_does_not_keep_the_next_from_hearing_the_event() {
     let failed = runtime
         .dispatch_for_test(&mut js, inner, &tap(), Point2D::new(30.0, 40.0))
         .expect_err("the page listener threw");
-    let failures: Vec<MainThreadError> = failed.into_errors().collect();
+    let failures: Vec<MainThreadError> = failed;
     assert_eq!(failures.len(), 1);
     assert!(
         failures[0].to_string().contains("page listener"),
@@ -11870,8 +11920,8 @@ impl terminus::link::CustomElement<()> for SyntheticEventProbe {
         let id = document
             .get(target)
             .and_then(|node| node.attribute("id"))
-            .unwrap_or("")
-            .to_owned();
+            .map(std::borrow::Cow::into_owned)
+            .unwrap_or_default();
         self.log.borrow_mut().push(format!(
             "{}:{:?}:{id}:{}",
             event.type_name(),

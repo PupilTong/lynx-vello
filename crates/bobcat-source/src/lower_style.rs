@@ -51,13 +51,14 @@
 //! card's, and a lazy bundle's `StyleInfo` is not mounted
 //! (`docs/tracking/deviations.md`).
 
+use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use bobcat_core::{PreparsedDeclaration, PreparsedKeyframe, PreparsedRule, PreparsedStyleSheet};
 
 use crate::web::style_info::{
-    DeclarationBlock, Rule, RuleKind, RulePrelude, Selector, SimpleSelector, SimpleSelectorKind,
-    StyleInfo, StyleSheet,
+    CssPropertyId, DeclarationBlock, Rule, RuleKind, RulePrelude, Selector, SimpleSelector,
+    SimpleSelectorKind, StyleInfo, StyleSheet,
 };
 
 /// The attribute `__SetCSSId` writes; web-core's `CSS_ID_ATTRIBUTE`
@@ -241,7 +242,18 @@ fn scoped_selector_text(
     if prelude.selectors.is_empty() {
         return None;
     }
-    let mut text = String::new();
+    // Each component writes its value plus at most two characters of
+    // punctuation, and each copy adds a comma.
+    let len = |component: &SimpleSelector| component.value.len() + 2;
+    let selectors: usize = prelude
+        .selectors
+        .iter()
+        .flat_map(|s| &s.components)
+        .map(len)
+        .sum();
+    let guards: usize = scopes.iter().flatten().map(len).sum();
+    let count = prelude.selectors.len();
+    let mut text = String::with_capacity((selectors + count) * scopes.len() + guards * count);
     let mut first = true;
     for selector in &prelude.selectors {
         let at = guard_index(selector);
@@ -311,7 +323,10 @@ fn declarations(block: &DeclarationBlock) -> Vec<PreparsedDeclaration> {
             // the whole declaration.
             let (value, important) = declaration.value_and_importance();
             PreparsedDeclaration {
-                property: declaration.property.name().to_owned(),
+                property: match declaration.property.id {
+                    CssPropertyId::Unknown => Cow::Owned(declaration.property.name().to_owned()),
+                    id => Cow::Borrowed(id.name()),
+                },
                 value,
                 important,
             }
@@ -347,7 +362,7 @@ mod tests {
 
     fn preparsed(property: &str, value: &str) -> PreparsedDeclaration {
         PreparsedDeclaration {
-            property: property.to_owned(),
+            property: property.to_owned().into(),
             value: value.to_owned(),
             important: false,
         }

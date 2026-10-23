@@ -317,9 +317,10 @@ interface BobcatNative {
    * engine components' walk over it with an empty detail and `timestamp`,
    * and answers the path the realm runs its own walk over, as one string:
    * the target-first node ids, comma-joined, then `;`, then each step's
-   * shadow-retargeted target, position for position — the two lists
-   * `__BobcatDispatchEvent` is handed, without the shadow roots, the bubble
-   * steps and the nodes no longer live; `";"` for none. So the components
+   * shadow-retargeted target, position for position — the steps
+   * `__BobcatDispatchEvent` is handed as node/target pairs, without the
+   * shadow roots, the bubble steps and the nodes no longer live; `";"` for
+   * none. So the components
    * hear the event before this realm's listeners, and no other realm hears
    * it. A node that is not a live element, and a timestamp that is not a
    * finite number, throw.
@@ -470,13 +471,13 @@ declare module "bobcat-internal:host" {
     url: string,
     name: string,
     baseUrl: string,
-  ): string | null;
+  ): number | null;
   /**
    * Posts one message to that worker. Any value the host boundary carries; a
    * value the engine's serializer refuses throws at this call.
    */
-  export function sendWorkerMessage(key: string, data: unknown): void;
-  export function terminateWorker(key: string): void;
+  export function sendWorkerMessage(key: number, data: unknown): void;
+  export function terminateWorker(key: number): void;
   export const createDocument: BobcatNative["createDocument"];
   export const createPage: BobcatNative["createPage"];
   export const createElement: BobcatNative["createElement"];

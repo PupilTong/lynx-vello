@@ -21,7 +21,7 @@ use parley::PositionedLayoutItem;
 use super::edge::{EdgeRun, EdgeSide, SpanAt};
 use super::{FlowSource, InlineFlow, InlineFragment};
 use crate::geometry::{Point, Rect, Size};
-use crate::text::paragraph::{Additions, Direction};
+use crate::text::paragraph::{Additions, Direction, LineGeometry};
 
 /// Each box's inline extent on one line, if it has any.
 struct Extents<'a> {
@@ -58,13 +58,14 @@ impl InlineFlow {
         // Per box, its fragments in line order.
         let mut by_span: Vec<Vec<InlineFragment>> = vec![Vec::new(); boxes.spans.len()];
 
-        for (index, (line, geometry)) in self
+        for (index, line) in self
             .paragraph
             .natural
             .lines()
-            .zip(&result.lines)
+            .take(result.natural.len())
             .enumerate()
         {
+            let geometry = LineGeometry::of(&line);
             extents.extents.fill(None);
             self.line_extents(&line, &mut extents);
             let line_index = u32::try_from(index).expect("line count fits u32");

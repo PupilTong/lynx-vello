@@ -752,7 +752,7 @@ impl terminus::link::CustomElement<()> for Recorder {
             .get(event.target())
             .and_then(|node| node.attribute("id"))
             .expect("every target here is a live row")
-            .to_owned();
+            .into_owned();
         let phase = match event.phase() {
             terminus::link::event::EventPhase::Capturing => "capture",
             terminus::link::event::EventPhase::AtTarget => "at-target",
@@ -2214,7 +2214,7 @@ fn data_updates_are_visible_to_the_next_command_and_commit_without_an_explicit_f
                 }),
                 ToMain::Probe(Box::new(|document| {
                     let node = document.document_element().children().next().unwrap();
-                    assert_eq!(node.attribute("data-value"), Some("7"));
+                    assert_eq!(node.attribute("data-value").as_deref(), Some("7"));
                 })),
             ])
             .await;
@@ -2264,7 +2264,7 @@ async fn image_attributes(page: &Rc<Page>, name: &'static str) -> Option<String>
             document
                 .get(image)
                 .and_then(|node| node.attribute(name))
-                .map(str::to_owned),
+                .map(std::borrow::Cow::into_owned),
         );
     }))])
     .await;
@@ -2519,7 +2519,7 @@ async fn images_seen(page: &Rc<Page>) -> Vec<Option<String>> {
                 document
                     .get(*image)
                     .and_then(|node| node.attribute("data-seen"))
-                    .map(str::to_owned)
+                    .map(std::borrow::Cow::into_owned)
             })
             .collect();
         let _ = answer.send(seen);
@@ -2778,7 +2778,7 @@ async fn page_children_seen(page: &Rc<Page>) -> Vec<Option<String>> {
                 document
                     .get(*child)
                     .and_then(|node| node.attribute("data-seen"))
-                    .map(str::to_owned)
+                    .map(std::borrow::Cow::into_owned)
             })
             .collect();
         let _ = answer.send(seen);
@@ -2858,7 +2858,7 @@ async fn first_child_seen(harness: &mut Harness) -> Option<String> {
                 document
                     .get(first)
                     .and_then(|node| node.attribute("data-seen"))
-                    .map(str::to_owned),
+                    .map(std::borrow::Cow::into_owned),
             );
         })))
         .expect("the view is serving");
@@ -3083,7 +3083,7 @@ fn a_page_update_that_fails_is_reported_and_the_next_one_applies() {
                 update_command(2),
                 ToMain::Probe(Box::new(|document| {
                     let node = document.document_element().children().next().unwrap();
-                    assert_eq!(node.attribute("data-value"), Some("2"));
+                    assert_eq!(node.attribute("data-value").as_deref(), Some("2"));
                 })),
             ])
             .await;
@@ -4182,6 +4182,76 @@ lynx.getJSContext().addEventListener('flood', () => {
             .until("the owner never ended", |h| h.owner.is_finished())
             .await;
         harness.owner.await.unwrap();
+    });
+}
+
+/// The worker events read in one turn are one entry, each delivered on its
+/// own; a release served while one of their handlers waits ends the view,
+/// and the events behind that handler are not delivered.
+#[test]
+fn a_release_served_while_a_worker_event_waits_drops_the_rest_of_its_burst() {
+    on_a_js_thread(|thread| async move {
+        let (context, workers) = group(&thread);
+        let mut harness = Harness::new(context, workers);
+        harness
+            .until("entry request", |h| !h.sources.is_empty())
+            .await;
+        harness.answer_entry(
+            "app:///main.js",
+            r"__CreatePage();
+lynx.getJSContext().addEventListener('park', () => {
+    __AdoptStyleSheet(__LoadStyleSheet('CSS', '__Card__'));
+});
+lynx.getJSContext().addEventListener('after', () => {
+    console.log('delivered after the release');
+});",
+        );
+        harness
+            .until("MTS did not render", |h| {
+                h.view.published.commit().is_some()
+            })
+            .await;
+        let background = harness.background_worker();
+        harness
+            .until("MTS boot did not finish", |h| h.finished())
+            .await;
+        // Both queued before the view's worker-event task polls again: one
+        // burst.
+        for kind in ["park", "after"] {
+            background
+                .events
+                .send(crate::background::WorkerEvent {
+                    key: background.key,
+                    payload: crate::background::WorkerPayload::Message(
+                        crate::background::wire_value(&format!(
+                            r#"{{type:"{kind}",data:null,origin:"JSContext"}}"#
+                        )),
+                    ),
+                })
+                .unwrap();
+        }
+        harness
+            .until("the first event's handler never waited", |h| {
+                h.wants_a_style_sheet()
+            })
+            .await;
+        harness.view.token.cancel();
+        harness.background = Some(background);
+        harness
+            .until("the released view's owner never returned", |h| {
+                h.owner.is_finished()
+            })
+            .await;
+        (&mut harness.owner).await.expect("the owner did not trap");
+        assert!(
+            !harness.events.iter().any(|event| matches!(
+                event,
+                EngineEvent::ConsoleMessage { message, .. }
+                    if message.contains("delivered after the release")
+            )),
+            "the event behind the waiting handler reached the released view: {:?}",
+            harness.events
+        );
     });
 }
 

@@ -47,7 +47,7 @@
 
 use std::rc::Rc;
 
-use quickjs_rust_bridge::HostValue;
+use quickjs_rust_bridge::{HostArgument, HostValue};
 
 use crate::esm::HOST_MODULE_SPECIFIER;
 use crate::future::FutureTable;
@@ -120,18 +120,18 @@ fn install_member(
     engine: &mut ScriptEngine,
     name: &str,
     arity: u8,
-    callback: impl FnMut(&[HostValue]) -> Result<HostValue, String> + 'static,
+    callback: impl FnMut(&[HostArgument<'_>]) -> Result<HostValue, String> + 'static,
 ) -> Result<(), ScriptError> {
-    engine.register_host_module_function(HOST_MODULE_SPECIFIER, name, arity, Box::new(callback))
+    engine.register_host_module_function(HOST_MODULE_SPECIFIER, name, arity, callback)
 }
 
 fn string_argument<'a>(
     function: &str,
-    arguments: &'a [HostValue],
+    arguments: &[HostArgument<'a>],
     index: usize,
 ) -> Result<&'a str, String> {
     match arguments.get(index) {
-        Some(HostValue::String(value)) => Ok(value),
+        Some(&HostArgument::String(value)) => Ok(value),
         _ => Err(format!("{function} expects a string for argument {index}")),
     }
 }

@@ -12,7 +12,7 @@ use stylo::values::specified::align::AlignFlags;
 
 use super::anchor;
 use crate::geometry::{Edges, Point, Size};
-use crate::style::{Contain, CoreStyle};
+use crate::style::CoreStyle;
 use crate::tree::{AvailableSpace, LayoutInput, LayoutTree, RequestedAxis, SizingMode};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -530,6 +530,12 @@ pub(super) struct ItemGeometry {
     pub(super) overflow: Point<Overflow>,
     pub(super) box_sizing: box_sizing::T,
     pub(super) margin_auto: EdgeMask,
+    /// Grid's: every value above came out the same against any percentage
+    /// basis, and nothing fills a value in later (no intrinsic keyword), so
+    /// re-resolving the item against another basis is a no-op. Only
+    /// `grid::resolve_grid_item` sets it; every other resolver leaves it
+    /// false. It sits in the struct's padding.
+    pub(super) basis_free: bool,
 }
 
 impl ItemGeometry {
@@ -871,56 +877,9 @@ pub(super) fn store_committed_child<T: crate::tree::LayoutTree>(
     );
 }
 
-/// Whether the sizing value resolves against a percentage basis, making it
-/// track the basis rather than stand on its own.
-#[inline]
-pub(super) fn style_size_depends_on_basis(value: &StyleSize) -> bool {
-    match value {
-        StyleSize::LengthPercentage(lp) => lp.0.has_percentage(),
-        StyleSize::FitContentFunction(limit) => limit.0.has_percentage(),
-        // Conservatively yes: the answer only withholds a stability claim or
-        // asks for a re-resolution, and a precise one would put a call on
-        // every box's path for a value no in-flow box carries in practice.
-        StyleSize::AnchorSizeFunction(_) | StyleSize::AnchorContainingCalcFunction(_) => true,
-        _ => false,
-    }
-}
-
-#[inline]
-pub(super) fn max_size_depends_on_basis(value: &MaxSize) -> bool {
-    match value {
-        MaxSize::LengthPercentage(lp) => lp.0.has_percentage(),
-        MaxSize::FitContentFunction(limit) => limit.0.has_percentage(),
-        // Conservatively yes: the answer only withholds a stability claim or
-        // asks for a re-resolution, and a precise one would put a call on
-        // every box's path for a value no in-flow box carries in practice.
-        MaxSize::AnchorSizeFunction(_) | MaxSize::AnchorContainingCalcFunction(_) => true,
-        _ => false,
-    }
-}
-
-/// Whether any margin or padding percentage resolves against the container's
-/// inline size.
-#[inline]
-pub(super) fn edges_depend_on_inline_basis(
-    margin: &Edges<&Margin>,
-    padding: &Edges<&NonNegativeLengthPercentage>,
-) -> bool {
-    let margin_depends = |value: &Margin| match value {
-        Margin::LengthPercentage(lp) => lp.has_percentage(),
-        Margin::Auto => false,
-        // Conservatively yes, as in `style_size_depends_on_basis`.
-        Margin::AnchorSizeFunction(_) | Margin::AnchorContainingCalcFunction(_) => true,
-    };
-    margin_depends(margin.left)
-        || margin_depends(margin.right)
-        || margin_depends(margin.top)
-        || margin_depends(margin.bottom)
-        || padding.left.0.has_percentage()
-        || padding.right.0.has_percentage()
-        || padding.top.0.has_percentage()
-        || padding.bottom.0.has_percentage()
-}
+pub(super) use crate::style::{
+    edges_depend_on_inline_basis, max_size_depends_on_basis, style_size_depends_on_basis,
+};
 
 /// Whether any of the item's own sizing values on this axis is an intrinsic
 /// keyword, which resolves by measuring the item's content.
@@ -1280,6 +1239,7 @@ pub(super) fn resolve_item_geometry_with_bases(
         overflow,
         box_sizing,
         margin_auto: EdgeMask::from_margins(margin_value),
+        basis_free: false,
     }
 }
 
@@ -1299,7 +1259,6 @@ pub(super) fn resolve_container_box(
     let padding = resolve_padding(style.padding(), input.parent_size.width);
     let border = resolve_border(&style.border());
     let box_inset = box_inset_size(padding, border);
-    let margin = auto_edges_to_zero(resolve_margins(style.margin(), input.parent_size.width));
     let (preferred, min, max) = if input.sizing_mode == SizingMode::IgnoreSizeStyles {
         (Size::NONE, Size::NONE, Size::NONE)
     } else {
@@ -1342,26 +1301,37 @@ pub(super) fn resolve_container_box(
             .height
             .map(|value| (value - box_inset.height).max(0.0)),
     );
-    let available_inner = Size::new(
-        inner.width.map_or_else(
-            || {
-                subtract_available_space(
-                    input.available_space.width,
-                    margin.horizontal_sum() + box_inset.width,
-                )
-            },
-            AvailableSpace::Definite,
-        ),
-        inner.height.map_or_else(
-            || {
-                subtract_available_space(
-                    input.available_space.height,
-                    margin.vertical_sum() + box_inset.height,
-                )
-            },
-            AvailableSpace::Definite,
-        ),
-    );
+    // The margins are read only for an axis whose inner size is unsettled,
+    // so a box whose two sizes are settled (a committed child with both
+    // known dimensions) resolves none.
+    let available_inner = if let (Some(width), Some(height)) = (inner.width, inner.height) {
+        Size::new(
+            AvailableSpace::Definite(width),
+            AvailableSpace::Definite(height),
+        )
+    } else {
+        let margin = auto_edges_to_zero(resolve_margins(style.margin(), input.parent_size.width));
+        Size::new(
+            inner.width.map_or_else(
+                || {
+                    subtract_available_space(
+                        input.available_space.width,
+                        margin.horizontal_sum() + box_inset.width,
+                    )
+                },
+                AvailableSpace::Definite,
+            ),
+            inner.height.map_or_else(
+                || {
+                    subtract_available_space(
+                        input.available_space.height,
+                        margin.vertical_sum() + box_inset.height,
+                    )
+                },
+                AvailableSpace::Definite,
+            ),
+        )
+    };
 
     ResolvedContainerBox {
         preferred_definite,
@@ -1479,18 +1449,20 @@ pub(super) fn padding_box_end(outer: Size<f32>, border: Edges<f32>) -> Size<f32>
 
 /// A box's own `content_size` from the reach of its contents, `interior`
 /// (border-box coordinates, accumulated from zero): the union with its
-/// padding box ([`padding_box_end`]), or, for a layout-contained box that
-/// is not a scroll container, the padding box alone — its descendants'
-/// overflow is ink overflow (css-contain-2 §3.3).
+/// padding box ([`padding_box_end`]), or, for a layout-contained box
+/// (`layout_contained`) that is not a scroll container (`scroll_container`),
+/// the padding box alone — its descendants' overflow is ink overflow
+/// (css-contain-2 §3.3).
 #[inline]
-pub(super) fn own_scrollable_overflow<S: CoreStyle>(
-    style: &S,
+pub(super) fn own_scrollable_overflow(
+    layout_contained: bool,
+    scroll_container: bool,
     outer: Size<f32>,
     border: Edges<f32>,
     interior: Size<f32>,
 ) -> Size<f32> {
     let floor = padding_box_end(outer, border);
-    if style.containment().contains(Contain::LAYOUT) && !is_scroll_container(style.overflow()) {
+    if layout_contained && !scroll_container {
         floor
     } else {
         interior.zip_map(floor, f32::max)

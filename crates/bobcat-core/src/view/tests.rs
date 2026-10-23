@@ -110,7 +110,7 @@ fn a_view_runs_its_own_timers_with_no_host_call_behind_them() {
                 let page = tree.document_element().id();
                 let box_id = tree.get(page).expect("the page is live").child_ids()[0];
                 tree.get(box_id)
-                    .and_then(|live| live.attribute("ticked").map(str::to_owned))
+                    .and_then(|live| live.attribute("ticked").map(std::borrow::Cow::into_owned))
             })
             .expect("the view's task answers probes")
             .as_deref(),

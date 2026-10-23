@@ -6,12 +6,11 @@
 //! the promise-job queue is drained, which realm a drained failure is
 //! reported to, how a bridge failure becomes
 //! a sanitized [`ScriptError`], that a host function's panic is resumed as a
-//! panic once the entry that called it ends, and how a module namespace
-//! caches the atoms an export is looked up by.
+//! panic once the entry that called it ends, and how a realm keeps the
+//! namespace and the atom each [`Export`] is called through.
 
 use std::any::Any;
-use std::cell::RefCell;
-use std::collections::HashMap;
+use std::cell::{Cell, RefCell};
 use std::fmt;
 use std::panic::{self, AssertUnwindSafe};
 use std::rc::{Rc, Weak};
@@ -21,17 +20,10 @@ use std::time::Duration;
 
 use quickjs_rust_bridge as quickjs;
 
+use crate::esm::Export;
 use crate::jobs::JsThreadHandle;
 use crate::realm::child::ChildRealms;
 use crate::script::{ScriptError, ScriptErrorKind, ScriptErrorPhase, ScriptSourceLocation};
-
-/// A leaf host callback Bobcat installs in the realm.
-///
-/// The realm turns a returned message into a JavaScript exception. Values
-/// crossing either way are [`quickjs::HostValue`] primitives, so no realm
-/// handle and no DOM identity ever crosses as itself.
-pub(crate) type HostCallback =
-    Box<dyn FnMut(&[quickjs::HostValue]) -> Result<quickjs::HostValue, String> + 'static>;
 
 /// The first panic a host function of one realm raised, kept until the
 /// operation that reached it ends.
@@ -41,7 +33,10 @@ pub(crate) type HostCallback =
 /// kept here instead of being lost, and the realm's next checkpoint resumes
 /// it: a host function that panics fails the entry it was called in as a
 /// panic, whatever the script did with the exception it was shown.
-type HostPanic = Rc<RefCell<Option<Box<dyn Any + Send>>>>;
+///
+/// Every use takes the whole value or sets it when empty, never holding it
+/// across a call, so a `Cell` is enough.
+type HostPanic = Rc<Cell<Option<Box<dyn Any + Send>>>>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct QuickJsConfig {
@@ -69,18 +64,6 @@ impl Default for QuickJsConfig {
     }
 }
 
-/// One loaded module's namespace object, plus the export names already
-/// interned in it.
-///
-/// `QuickJS` resolves a property by atom. Interning the name on every call
-/// would hash and allocate once per crossing, so a namespace remembers the
-/// atom for each export the host has ever called through it — the event path
-/// calls exactly one, on every step of every walk.
-struct ModuleNamespace {
-    object: quickjs::Value,
-    exports: HashMap<Box<str>, Rc<quickjs::Member>>,
-}
-
 /// One realm on a [`ScriptRuntime`] — one view's global object, modules and
 /// host functions — with Bobcat's job policy on it.
 ///
@@ -94,7 +77,16 @@ struct ModuleNamespace {
 /// thread — and never moved off it, which is why nothing here is `Send`.
 pub(crate) struct ScriptEngine {
     realm: quickjs::Context,
-    module_namespaces: HashMap<String, ModuleNamespace>,
+    /// The namespace object and the interned name of every [`Export`] the
+    /// host has called in this realm, indexed by the export, each resolved
+    /// on its first call.
+    ///
+    /// One call per crossing into the realm — an event with its whole path,
+    /// a timer, a frame, a settle, a worker message — goes through one of a
+    /// dozen fixed exports. `QuickJS` resolves a property by atom, and
+    /// interning the name on every call would hash and allocate once per
+    /// crossing, so the atom is kept, and the namespace object beside it.
+    exports: [Option<(quickjs::Value, quickjs::Member)>; Export::COUNT],
     evaluation: Option<quickjs::Value>,
     /// Per realm, like a rejection: a sibling's checkpoint may run this
     /// realm's promise jobs, and a panic one of them raised is this realm's
@@ -250,7 +242,7 @@ impl ScriptEngine {
     fn adopt(realm: quickjs::Context, host_panic: HostPanic) -> Self {
         Self {
             realm,
-            module_namespaces: HashMap::new(),
+            exports: [const { None }; Export::COUNT],
             evaluation: None,
             host_panic,
             children: Weak::new(),
@@ -486,59 +478,14 @@ impl ScriptEngine {
         result.map(|value| value.is_some())
     }
 
-    fn module_namespace(&mut self, specifier: &str) -> Result<quickjs::Value, ScriptError> {
-        if let Some(entry) = self.module_namespaces.get(specifier) {
-            return Ok(entry.object.clone());
-        }
-        let object = self
-            .realm
-            .module_namespace(specifier)
-            .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::CallModuleExport))?;
-        self.module_namespaces.insert(
-            specifier.to_owned(),
-            ModuleNamespace {
-                object: object.clone(),
-                exports: HashMap::new(),
-            },
-        );
-        Ok(object)
-    }
-
-    /// Resolves a module export to the namespace object it lives on and the
-    /// interned name to look it up by, interning that name at most once per
-    /// export.
-    ///
-    /// A module namespace is an ordinary object to `QuickJS`, so the atom a
-    /// property lookup needs is the same one whatever the object is — which
-    /// is why the cache survived the move off `globalThis`.
-    fn module_export(
-        &mut self,
-        specifier: &str,
-        export_name: &str,
-    ) -> Result<(quickjs::Value, Rc<quickjs::Member>), ScriptError> {
-        let object = self.module_namespace(specifier)?;
-        if let Some(member) = self
-            .module_namespaces
-            .get(specifier)
-            .and_then(|entry| entry.exports.get(export_name))
-        {
-            return Ok((object, Rc::clone(member)));
-        }
-        let member = Rc::new(
-            self.realm
-                .member(export_name)
-                .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::CallModuleExport))?,
-        );
-        self.module_namespaces
-            .get_mut(specifier)
-            .expect("the module namespace was just ensured")
-            .exports
-            .insert(Box::from(export_name), Rc::clone(&member));
-        Ok((object, member))
-    }
-
     /// Installs one Rust-backed function as a named export of a native ESM
-    /// module.
+    /// module: a leaf host callback.
+    ///
+    /// The realm turns a returned message into a JavaScript exception. Values
+    /// crossing either way are primitives or structured clones — the
+    /// arguments lent for the call ([`quickjs::HostArgument`]), the answer
+    /// owned ([`quickjs::HostValue`]) — so no realm handle and no DOM
+    /// identity ever crosses as itself.
     ///
     /// Every export must be registered before that module first loads, and a
     /// name cannot be replaced. Registration retains the callback without
@@ -550,13 +497,16 @@ impl ScriptEngine {
     /// A callback that panics throws "the host function panicked" into the
     /// script, and the panic itself is resumed by the checkpoint that ends
     /// the entry: see [`HostPanic`].
-    pub(crate) fn register_host_module_function(
+    pub(crate) fn register_host_module_function<F>(
         &mut self,
         module_specifier: &str,
         export_name: &str,
         arity: u8,
-        mut callback: HostCallback,
-    ) -> Result<(), ScriptError> {
+        mut callback: F,
+    ) -> Result<(), ScriptError>
+    where
+        F: FnMut(&[quickjs::HostArgument<'_>]) -> Result<quickjs::HostValue, String> + 'static,
+    {
         let host_panic = Rc::clone(&self.host_panic);
         self.realm
             .register_host_module_function(
@@ -728,14 +678,29 @@ impl ScriptEngine {
     pub(crate) fn call_module_export(
         &mut self,
         runtime: &mut ScriptRuntime,
-        module_specifier: &str,
-        export_name: &str,
+        export: Export,
         arguments: &[quickjs::HostArgument<'_>],
     ) -> Result<bool, ScriptError> {
-        let result = self.invoke_module_export(module_specifier, export_name, arguments)?;
+        let result = self.invoke_module_export(export, arguments)?;
         // The checkpoint runs through `finish_operation`, never inline:
         // draining the job queue while this call is still on the stack would
         // run promise jobs re-entrantly, inside the very walk they belong to.
+        self.finish_operation(runtime, result, ScriptErrorPhase::CallModuleExport)
+    }
+
+    /// [`Self::call_module_export`] for an export of any loaded module, named
+    /// by its specifier and name and resolved on every call: the tests' own
+    /// modules export what no [`Export`] names.
+    #[cfg(test)]
+    fn call_named_export(
+        &mut self,
+        runtime: &mut ScriptRuntime,
+        specifier: &str,
+        export_name: &str,
+        arguments: &[quickjs::HostArgument<'_>],
+    ) -> Result<bool, ScriptError> {
+        let (object, member) = resolve_export(&mut self.realm, specifier, export_name)?;
+        let result = call_resolved(&mut self.realm, &object, &member, arguments);
         self.finish_operation(runtime, result, ScriptErrorPhase::CallModuleExport)
     }
 
@@ -751,11 +716,37 @@ impl ScriptEngine {
     pub(crate) fn call_module_export_before_operation(
         &mut self,
         runtime: &mut ScriptRuntime,
-        module_specifier: &str,
+        export: Export,
+        arguments: &[quickjs::HostArgument<'_>],
+    ) -> Result<bool, ScriptError> {
+        let result = self.invoke_module_export(export, arguments)?;
+        self.finish_call_before_operation(runtime, result)
+    }
+
+    /// [`Self::call_module_export_before_operation`] for an export no
+    /// [`Export`] names, as [`Self::call_named_export`] is for
+    /// [`Self::call_module_export`].
+    #[cfg(test)]
+    fn call_named_export_before_operation(
+        &mut self,
+        runtime: &mut ScriptRuntime,
+        specifier: &str,
         export_name: &str,
         arguments: &[quickjs::HostArgument<'_>],
     ) -> Result<bool, ScriptError> {
-        match self.invoke_module_export(module_specifier, export_name, arguments)? {
+        let (object, member) = resolve_export(&mut self.realm, specifier, export_name)?;
+        let result = call_resolved(&mut self.realm, &object, &member, arguments);
+        self.finish_call_before_operation(runtime, result)
+    }
+
+    /// A call made before an operation needs no checkpoint of its own unless
+    /// it failed, in which case its caller runs nothing after it.
+    fn finish_call_before_operation(
+        &mut self,
+        runtime: &mut ScriptRuntime,
+        result: Result<bool, ScriptError>,
+    ) -> Result<bool, ScriptError> {
+        match result {
             Ok(called) => Ok(called),
             failed @ Err(_) => {
                 self.finish_operation(runtime, failed, ScriptErrorPhase::CallModuleExport)
@@ -780,26 +771,65 @@ impl ScriptEngine {
     /// the inner result is the call's own.
     fn invoke_module_export(
         &mut self,
-        module_specifier: &str,
-        export_name: &str,
+        export: Export,
         arguments: &[quickjs::HostArgument<'_>],
     ) -> Result<Result<bool, ScriptError>, ScriptError> {
-        let (object, member) = self.module_export(module_specifier, export_name)?;
-        // One crossing carries the lookup and every argument, and nothing
-        // here allocates: the primitives are described in place and a string
-        // is lent, not copied — the caller holds it for the whole walk, and
-        // the realm needs it only for the length of this call.
-        Ok(self
-            .realm
-            .call_member(&object, &member, arguments)
-            .map(|outcome| match outcome {
-                // The realm published nothing here. Not an error: a bundle
-                // with no listener runtime simply has no member to call.
-                quickjs::CallOutcome::MemberAbsent => false,
-                quickjs::CallOutcome::Called(_) => true,
-            })
-            .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::CallModuleExport)))
+        // The table and the realm are two fields: the pair stays borrowed from
+        // the one while the call runs in the other, and nothing is cloned.
+        let slot = &mut self.exports[export as usize];
+        if slot.is_none() {
+            *slot = Some(resolve_export(
+                &mut self.realm,
+                export.specifier(),
+                export.name(),
+            )?);
+        }
+        let (object, member) = slot.as_ref().expect("the export was just resolved");
+        Ok(call_resolved(&mut self.realm, object, member, arguments))
     }
+}
+
+/// Resolves a module export to the namespace object it lives on and the
+/// interned name to look it up by.
+///
+/// A module a realm has loaded stays loaded for the realm's life, so the
+/// namespace object one lookup answers is the one every later lookup would
+/// answer, and the pair can be kept.
+fn resolve_export(
+    realm: &mut quickjs::Context,
+    specifier: &str,
+    export_name: &str,
+) -> Result<(quickjs::Value, quickjs::Member), ScriptError> {
+    let object = realm
+        .module_namespace(specifier)
+        .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::CallModuleExport))?;
+    let member = realm
+        .member(export_name)
+        .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::CallModuleExport))?;
+    Ok((object, member))
+}
+
+/// Calls `member` on a module's namespace `object` in `realm`: `Ok(false)`
+/// when the module exports no such function.
+fn call_resolved(
+    realm: &mut quickjs::Context,
+    object: &quickjs::Value,
+    member: &quickjs::Member,
+    arguments: &[quickjs::HostArgument<'_>],
+) -> Result<bool, ScriptError> {
+    // One crossing carries the lookup and every argument, and nothing here
+    // allocates: the primitives are described in place and a string is lent,
+    // not copied — the caller holds it for the whole walk, and the realm
+    // needs it only for the length of this call.
+    realm
+        .call_member(object, member, arguments)
+        .map(|outcome| match outcome {
+            // The realm published nothing here. Not an error: a bundle with
+            // no listener runtime simply has no member to call.
+            quickjs::CallOutcome::MemberAbsent => false,
+            quickjs::CallOutcome::Called(_) => true,
+        })
+        .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::CallModuleExport))
 }
 
 /// Runs one call the realm made into Rust, keeping the payload of a panic in
@@ -813,7 +843,8 @@ fn keep_host_panic<T>(
     call: impl FnOnce() -> Result<T, String>,
 ) -> Result<T, String> {
     panic::catch_unwind(AssertUnwindSafe(call)).unwrap_or_else(|payload| {
-        host_panic.borrow_mut().get_or_insert(payload);
+        let kept = host_panic.take();
+        host_panic.set(kept.or(Some(payload)));
         Err(message.to_owned())
     })
 }
@@ -1076,12 +1107,9 @@ mod tests {
     fn host_functions_are_native_module_exports_not_globals() {
         let (mut runtime, mut engine) = engine();
         engine
-            .register_host_module_function(
-                "bobcat-internal:test",
-                "answer",
-                0,
-                Box::new(|_| Ok(quickjs::HostValue::Number(42.0))),
-            )
+            .register_host_module_function("bobcat-internal:test", "answer", 0, |_| {
+                Ok(quickjs::HostValue::Number(42.0))
+            })
             .expect("register");
         engine
             .execute_module(&mut runtime,
@@ -1109,7 +1137,7 @@ mod tests {
 
         assert!(
             engine
-                .call_module_export(
+                .call_named_export(
                     &mut runtime,
                     "bobcat:callback",
                     "receive",
@@ -1119,7 +1147,7 @@ mod tests {
         );
         assert!(
             !engine
-                .call_module_export(&mut runtime, "bobcat:callback", "missing", &[])
+                .call_named_export(&mut runtime, "bobcat:callback", "missing", &[])
                 .expect("an absent export is not an engine failure")
         );
         engine
@@ -1214,22 +1242,16 @@ mod tests {
         let seen: Arc<Mutex<Vec<quickjs::HostValue>>> = Arc::new(Mutex::new(Vec::new()));
         let recorder = Arc::clone(&seen);
         engine
-            .register_host_module_function(
-                "bobcat-internal:test",
-                "echo",
-                1,
-                Box::new(move |arguments| {
-                    let value = arguments
-                        .first()
-                        .cloned()
-                        .unwrap_or(quickjs::HostValue::Undefined);
-                    recorder
-                        .lock()
-                        .expect("the recorder is not poisoned")
-                        .push(value.clone());
-                    Ok(value)
-                }),
-            )
+            .register_host_module_function("bobcat-internal:test", "echo", 1, move |arguments| {
+                let value = arguments
+                    .first()
+                    .map_or(quickjs::HostValue::Undefined, |value| value.to_value());
+                recorder
+                    .lock()
+                    .expect("the recorder is not poisoned")
+                    .push(value.clone());
+                Ok(value)
+            })
             .expect("register");
 
         engine
@@ -1341,7 +1363,7 @@ mod tests {
             .expect("the second view boots on a runtime the first one failed on");
         assert!(
             second
-                .call_module_export(&mut runtime, "app:///second-module.js", "ping", &[])
+                .call_named_export(&mut runtime, "app:///second-module.js", "ping", &[])
                 .expect("an event dispatch into the second view is not the first view's failure")
         );
 
@@ -1457,12 +1479,9 @@ mod tests {
     /// Gives `engine` one host function, `explode`, that panics.
     fn install_a_panicking_host_function(engine: &mut ScriptEngine) {
         engine
-            .register_host_module_function(
-                "bobcat-internal:test",
-                "explode",
-                0,
-                Box::new(|_| panic!("a host bug")),
-            )
+            .register_host_module_function("bobcat-internal:test", "explode", 0, |_| {
+                panic!("a host bug")
+            })
             .expect("register");
     }
 
@@ -1514,7 +1533,7 @@ mod tests {
         // is what runs the job.
         assert!(
             first
-                .call_module_export_before_operation(&mut runtime, "app:///arm.js", "arm", &[])
+                .call_named_export_before_operation(&mut runtime, "app:///arm.js", "arm", &[])
                 .expect("arm the job")
         );
 

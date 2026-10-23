@@ -108,7 +108,11 @@ impl<T> Document<T> {
     /// If `element` is not a live element.
     #[must_use]
     pub fn popover_state(&self, element: NodeId) -> PopoverState {
-        PopoverState::from_attribute(self.live_element(element).attribute(POPOVER_ATTRIBUTE))
+        PopoverState::from_attribute(
+            self.live_element(element)
+                .attribute(POPOVER_ATTRIBUTE)
+                .as_deref(),
+        )
     }
 
     /// Whether `element`'s popover visibility state is *showing*.

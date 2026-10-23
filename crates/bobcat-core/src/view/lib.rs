@@ -376,7 +376,8 @@ impl fmt::Display for ScriptSource {
 ///
 /// Opaque: ids are compared, hashed and printed, and nothing else. No two
 /// workers of one group share an id, including one that has ended. The
-/// printed form is the key the constructing realm's `Worker` object holds.
+/// printed form is the integer key the constructing realm's `Worker` object
+/// holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct WorkerId(u64);
 

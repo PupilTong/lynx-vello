@@ -1093,7 +1093,10 @@ mod tests {
             document.set_inline_style_property(text, property, value);
             assert_height(&mut document, text, height);
             assert_eq!(document.text_block_size(text).unwrap().width, width);
-            assert_eq!(document.get(text).unwrap().attribute(attribute), Some("1"));
+            assert_eq!(
+                document.get(text).unwrap().attribute(attribute).as_deref(),
+                Some("1")
+            );
         }
     }
 
@@ -1142,7 +1145,7 @@ mod tests {
                 42.0 + 7.0
             );
             assert_eq!(
-                document.get(text).unwrap().attribute(attribute),
+                document.get(text).unwrap().attribute(attribute).as_deref(),
                 Some(invalid)
             );
         }
@@ -1359,7 +1362,11 @@ mod tests {
                 "tail-color-convert={value:?}",
             );
             assert_eq!(
-                document.get(text).unwrap().attribute(TAIL_COLOR_CONVERT),
+                document
+                    .get(text)
+                    .unwrap()
+                    .attribute(TAIL_COLOR_CONVERT)
+                    .as_deref(),
                 value,
                 "and the attribute itself is never rewritten",
             );
@@ -1412,7 +1419,11 @@ mod tests {
                 "text-overflow={value:?}",
             );
             assert_eq!(
-                document.get(text).unwrap().attribute(TEXT_OVERFLOW),
+                document
+                    .get(text)
+                    .unwrap()
+                    .attribute(TEXT_OVERFLOW)
+                    .as_deref(),
                 value,
                 "and the attribute itself is never rewritten",
             );
@@ -1433,7 +1444,11 @@ mod tests {
         );
         assert_eq!(paragraph_width(&mut document, text), 20.0);
         assert_eq!(
-            document.get(text).unwrap().attribute(TEXT_OVERFLOW),
+            document
+                .get(text)
+                .unwrap()
+                .attribute(TEXT_OVERFLOW)
+                .as_deref(),
             Some("ellipsis"),
             "the author declaration wins the cascade without touching the attribute",
         );

@@ -457,7 +457,7 @@ impl CullPlan {
                     self.inner_blurs[parent],
                 )
             });
-            let sigma = layer_blur_sigma(document, layer);
+            let sigma = layer_blur_sigma(document, frame, layer);
             let blurs = (sigma > 0.0).then_some(index);
             self.layer_inflate.push(inflate + BLUR_INK_SIGMAS * sigma);
             self.blur_roots.push(root.or(blurs));
@@ -565,7 +565,7 @@ impl CullPlan {
         {
             let node = &frame.clips()[index];
             // A singular link is an empty clip: nothing passes it.
-            let Some(bounds) = clip_bounds(node) else {
+            let Some(bounds) = clip_bounds(frame, node) else {
                 return Admitted::Nothing;
             };
             if is_finite(bounds) {
@@ -596,7 +596,7 @@ impl CullPlan {
     /// switched off) answers `true`, because a cull needs a proof and
     /// relevance needs none.
     pub(crate) fn admits_auto_box(&self, frame: &PaintOrder, auto: &AutoBox) -> bool {
-        let Some(local) = convert::item_affine(&auto.transform, auto.size) else {
+        let Some(local) = convert::item_affine(&frame.matrix(auto.transform), auto.size) else {
             return true;
         };
         self.admitted_for(frame, auto.clip, auto.space, auto.layer)
@@ -927,7 +927,7 @@ fn resolve_clips(
         let inherited = admitted_under(windows, frame, out, root, clip.space, clip.parent);
         // `push_clip` pushes an empty clip for a singular transform, so
         // nothing under this chain reaches the scene at all.
-        let resolved = match clip_bounds(clip) {
+        let resolved = match clip_bounds(frame, clip) {
             None => Admitted::Nothing,
             Some(own) if !is_finite(own) => inherited,
             Some(own) => Admitted::Region(own).meet(inherited),
@@ -941,9 +941,9 @@ fn resolve_clips(
 /// Mirrors [`push_clip`], including its `Size2D`-only perspective fit, so this
 /// is never tighter than the clip the painter pushes; taking the bounding box
 /// of a rounded rect only widens it, which is the safe direction.
-fn clip_bounds(clip: &ClipNode) -> Option<Rect> {
+fn clip_bounds(frame: &PaintOrder, clip: &ClipNode) -> Option<Rect> {
     let size = euclid::default::Size2D::new(clip.rect.size.width, clip.rect.size.height);
-    let affine = convert::item_affine(&clip.transform, size)?;
+    let affine = convert::item_affine(&frame.matrix(clip.transform), size)?;
     Some(affine_rect(
         affine,
         Rect::new(
@@ -1138,7 +1138,7 @@ fn open_scope<T>(
         bounds,
     );
 
-    let local = convert::item_affine(&layer.transform, layer.size);
+    let local = convert::item_affine(&frame.matrix(layer.transform), layer.size);
     let fragment = document.rounded_layout(layer.node).map(|layout| {
         BoxFragment::new(
             scale * local.unwrap_or_default(),
@@ -1181,7 +1181,7 @@ fn open_scope<T>(
     // and to the element together.
     let content_start = sink.content_boundary();
     if let Some((root, end)) = backdrop_end
-        && let Some(entry) = backdrop_entry(style, layer, space, scale, ratio, root)
+        && let Some(entry) = backdrop_entry(style, frame, layer, space, scale, ratio, root)
     {
         sink.push_backdrop(entry, end, frame);
     }
@@ -1314,6 +1314,7 @@ fn is_backdrop_root(style: &stylo::properties::ComputedValues) -> bool {
 /// reflects at.
 fn backdrop_entry(
     style: &stylo::properties::ComputedValues,
+    frame: &PaintOrder,
     layer: &RenderLayer,
     space: Option<u32>,
     scale: Affine,
@@ -1324,7 +1325,7 @@ fn backdrop_entry(
     if list.is_empty() {
         return None;
     }
-    let local = convert::item_affine(&layer.transform, layer.size)?;
+    let local = convert::item_affine(&frame.matrix(layer.transform), layer.size)?;
     let transform = scale * local;
     if !(transform.determinant().is_finite() && transform.determinant() != 0.0) {
         return None;
@@ -1405,11 +1406,11 @@ fn push_output_clips(
         return 0;
     };
     for &index in outer.iter().rev() {
-        push_clip(sink, &clips[index], scale);
+        push_clip(sink, frame, &clips[index], scale);
     }
     let link = &clips[innermost];
     let isolating = BlendMode::new(Mix::Normal, Compose::SrcOver);
-    match clip_geometry(link, scale) {
+    match clip_geometry(frame, link, scale) {
         Some((transform, shape)) => {
             sink.push_layer_box(link.space, Fill::NonZero, isolating, 1.0, transform, shape);
         }
@@ -1887,7 +1888,7 @@ fn collect_text_clip_under<'doc, T>(
     });
     if visible
         && let Some(paragraph) = document.painted_paragraph(node)
-        && !paragraph.lines.is_empty()
+        && paragraph.line_count != 0
     {
         // An element with no runs still establishes a paragraph; it just has
         // no ink, and a silhouette of nothing would clip everything away.
@@ -1949,13 +1950,13 @@ fn sync_clips(
     pop_clips_to(sink, scratch, base + common);
     for position in common..scratch.chain.len() {
         let index = scratch.chain[position];
-        push_clip(sink, &frame.clips()[index], scale);
+        push_clip(sink, frame, &frame.clips()[index], scale);
         scratch.clip_stack.push(index);
     }
 }
 
-fn push_clip(sink: &mut WalkSink<'_>, clip: &ClipNode, scale: Affine) {
-    match clip_geometry(clip, scale) {
+fn push_clip(sink: &mut WalkSink<'_>, frame: &PaintOrder, clip: &ClipNode, scale: Affine) {
+    match clip_geometry(frame, clip, scale) {
         Some((transform, shape)) => sink.push_clip_box(clip.space, Fill::NonZero, transform, shape),
         None => sink.push_clip_empty(clip.space),
     }
@@ -1963,9 +1964,9 @@ fn push_clip(sink: &mut WalkSink<'_>, clip: &ClipNode, scale: Affine) {
 
 /// One clip node's rounded rect and its clip-local to device px map, or
 /// `None` for a singular transform, which has no shape to clip with.
-fn clip_geometry(clip: &ClipNode, scale: Affine) -> Option<(Affine, BoxShape)> {
+fn clip_geometry(frame: &PaintOrder, clip: &ClipNode, scale: Affine) -> Option<(Affine, BoxShape)> {
     let size = euclid::default::Size2D::new(clip.rect.size.width, clip.rect.size.height);
-    let local = convert::item_affine(&clip.transform, size)?;
+    let local = convert::item_affine(&frame.matrix(clip.transform), size)?;
     let rect = Rect::new(
         clip.rect.origin.x as f64,
         clip.rect.origin.y as f64,
@@ -2017,7 +2018,7 @@ fn plan_frame<T>(scratch: &mut Scratch, document: &Document<T>, frame: &PaintOrd
         }
         while next_open < layers.len() && layers[next_open].items.start == index {
             let layer = &layers[next_open];
-            scratch.bounds_acc[next_open] = layer_root_rect(layer).and_then(|rect| {
+            scratch.bounds_acc[next_open] = layer_root_rect(frame, layer).and_then(|rect| {
                 let moves = scratch.layer_moves[next_open];
                 held(
                     scratch,
@@ -2034,7 +2035,7 @@ fn plan_frame<T>(scratch: &mut Scratch, document: &Document<T>, frame: &PaintOrd
         // No `continue` on "outside every layer" here: those are precisely
         // the items no group has already clipped to the viewport, which are
         // the ones culling exists for.
-        let Some(local) = convert::item_affine(&item.transform, item.size) else {
+        let Some(local) = convert::item_affine(&frame.matrix(item.transform), item.size) else {
             // A singular transform encodes nothing.
             continue;
         };
@@ -2109,9 +2110,11 @@ fn reset_layers<T>(scratch: &mut Scratch, document: &Document<T>, frame: &PaintO
     scratch.bounds_acc.clear();
     scratch.bounds_acc.resize(layers.len(), None);
     scratch.layer_sigma.clear();
-    scratch
-        .layer_sigma
-        .extend(layers.iter().map(|layer| layer_blur_sigma(document, layer)));
+    scratch.layer_sigma.extend(
+        layers
+            .iter()
+            .map(|layer| layer_blur_sigma(document, frame, layer)),
+    );
     scratch.layer_live.clear();
     scratch.layer_live.extend(layers.iter().map(|layer| {
         document
@@ -2199,14 +2202,14 @@ const BLUR_INK_SIGMAS: f64 = 3.0;
 /// Exact for a rotation or a uniform scale, and one isotropic number where a
 /// non-uniform scale or a skew would make the spec's filter region
 /// anisotropic (recorded limit).
-fn layer_blur_sigma<T>(document: &Document<T>, layer: &RenderLayer) -> f64 {
+fn layer_blur_sigma<T>(document: &Document<T>, frame: &PaintOrder, layer: &RenderLayer) -> f64 {
     let Some(style) = document.paint_style(layer.node) else {
         return 0.0;
     };
     let Some(sigma) = filters::plan(&style.get_effects().filter.0).sigma else {
         return 0.0;
     };
-    let Some(affine) = convert::item_affine(&layer.transform, layer.size) else {
+    let Some(affine) = convert::item_affine(&frame.matrix(layer.transform), layer.size) else {
         // A singular map encodes nothing, so there is nothing to blur.
         return 0.0;
     };
@@ -2555,8 +2558,8 @@ fn carry(
     pull_back(windows, frame, Admitted::Region(carried), common, into)
 }
 
-fn layer_root_rect(layer: &RenderLayer) -> Option<Rect> {
-    let affine = convert::item_affine(&layer.transform, layer.size)?;
+fn layer_root_rect(frame: &PaintOrder, layer: &RenderLayer) -> Option<Rect> {
+    let affine = convert::item_affine(&frame.matrix(layer.transform), layer.size)?;
     Some(affine_rect(
         affine,
         Rect::new(0.0, 0.0, layer.size.width as f64, layer.size.height as f64),
@@ -2777,7 +2780,7 @@ mod tests {
         PaintItem {
             node: crate::tree::document::DOCUMENT_ELEMENT_NODE_ID,
             kind: PaintItemKind::ElementBox,
-            transform: Transform3D::translation(x, y, 0.0),
+            transform: crate::visual::ItemTransform::Translate(euclid::vec2(x, y)),
             clip: None,
             size: Size2D::new(size, size),
             radii: CornerRadii::ZERO,
@@ -2838,10 +2841,10 @@ mod tests {
         // Rotating about the box's own centre moves its corners outward, so
         // the mapped bound is wider than the box. The cull test uses the
         // painter's own matrix, so it sees exactly that.
-        let mut rotated = item(0.0, 0.0, 100.0);
-        rotated.transform = Transform3D::rotation(0.0, 0.0, 1.0, euclid::Angle::degrees(45.0));
+        let rotated = item(0.0, 0.0, 100.0);
+        let rotation = Transform3D::rotation(0.0, 0.0, 1.0, euclid::Angle::degrees(45.0));
         let upright = item_bounds(&item(0.0, 0.0, 100.0), Affine::IDENTITY, 0.0);
-        let affine = crate::paint::convert::item_affine(&rotated.transform, rotated.size)
+        let affine = crate::paint::convert::item_affine(&rotation, rotated.size)
             .expect("a rotation is invertible");
         let turned = item_bounds(&rotated, affine, 0.0);
         assert!(turned.width() > upright.width());

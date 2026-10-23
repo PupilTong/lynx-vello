@@ -1510,7 +1510,7 @@ fn a_bts_that_throws_reports_worker_threw_from_the_background() {
 }
 
 /// A `Worker` is named by the key its `Worker` object holds and by its URL:
-/// the printed `WorkerId` is the key string the realm routed the event by,
+/// the printed `WorkerId` is the key number the realm routed the event by,
 /// the URL is the one its specifier joined to, and the `error` event
 /// reaching that object is what shows the realm holds it.
 #[test]
@@ -3680,18 +3680,13 @@ fn bts_animation_frames_continue_while_an_mts_callback_is_blocked() {
         .unwrap()
         .core
         .engine
-        .register_host_module_function(
-            "test:gate",
-            "block",
-            0,
-            Box::new(move |_| {
-                blocked.send(()).unwrap();
-                released
-                    .recv_timeout(PATIENCE)
-                    .map_err(|error| error.to_string())?;
-                Ok(HostValue::Undefined)
-            }),
-        )
+        .register_host_module_function("test:gate", "block", 0, move |_| {
+            blocked.send(()).unwrap();
+            released
+                .recv_timeout(PATIENCE)
+                .map_err(|error| error.to_string())?;
+            Ok(HostValue::Undefined)
+        })
         .unwrap();
     pair.boot("import {block} from 'test:gate'; lynx.requestAnimationFrame(() => block());")
         .unwrap();
@@ -3918,7 +3913,7 @@ fn list_cells(document: &mut LynxDocument) -> Vec<String> {
             // where 0.126's output put the content in a child.
             let content = text
                 .attribute("text")
-                .map_or_else(|| generated_text(text), str::to_owned);
+                .map_or_else(|| generated_text(text), std::borrow::Cow::into_owned);
             format!(
                 "{}={content}",
                 cell.attribute("item-key").expect("every cell is keyed"),
@@ -3936,7 +3931,7 @@ fn generated_text(node: &terminus::link::Node<()>) -> String {
         if let Some(data) = child.text() {
             text.push_str(data);
         } else if let Some(attribute) = child.attribute("text") {
-            text.push_str(attribute);
+            text.push_str(&attribute);
         } else {
             text.push_str(&generated_text(child));
         }

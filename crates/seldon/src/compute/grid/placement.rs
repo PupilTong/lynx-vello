@@ -35,7 +35,7 @@ pub(super) struct TrackSpan {
 
 impl TrackSpan {
     #[inline]
-    fn len(self) -> usize {
+    pub(super) fn len(self) -> usize {
         usize::try_from(self.end - self.start).unwrap_or(0)
     }
 
@@ -65,8 +65,6 @@ pub(super) struct PlacementResult {
     pub(super) areas: Vec<GridArea>,
     pub(super) column_range: TrackSpan,
     pub(super) row_range: TrackSpan,
-    pub(super) occupied_columns: Vec<bool>,
-    pub(super) occupied_rows: Vec<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,9 +144,27 @@ pub(super) fn place_items<I: PlacementInput>(
     let dense = flow.contains(GridAutoFlow::DENSE);
     let explicit_column_range = explicit_range(explicit_columns);
     let explicit_row_range = explicit_range(explicit_rows);
+    // The physical area of a flow-relative (primary, cross) pair.
+    let physical = |primary: TrackSpan, cross: TrackSpan| {
+        if row_flow {
+            GridArea {
+                column: cross,
+                row: primary,
+            }
+        } else {
+            GridArea {
+                column: primary,
+                row: cross,
+            }
+        }
+    };
 
     if inputs.is_empty() {
-        return finish_result(Vec::new(), explicit_column_range, explicit_row_range);
+        return PlacementResult {
+            areas: Vec::new(),
+            column_range: explicit_column_range,
+            row_range: explicit_row_range,
+        };
     }
 
     let mut items = Vec::with_capacity(inputs.len());
@@ -212,18 +228,23 @@ pub(super) fn place_items<I: PlacementInput>(
     {
         let areas = items
             .iter()
-            .map(|item| LogicalArea {
-                primary: item.primary.definite().unwrap(),
-                cross: item.cross.definite().unwrap(),
+            .map(|item| {
+                physical(
+                    item.primary.definite().unwrap(),
+                    item.cross.definite().unwrap(),
+                )
             })
-            .map(|area| area.to_physical(row_flow))
             .collect();
         let (column_range, row_range) = if row_flow {
             (all_cross_range, primary_range)
         } else {
             (primary_range, all_cross_range)
         };
-        return finish_result(areas, column_range, row_range);
+        return PlacementResult {
+            areas,
+            column_range,
+            row_range,
+        };
     }
 
     let occupancy_cross_min = all_cross_range.start.min(step_two_cross_range.start);
@@ -252,17 +273,17 @@ pub(super) fn place_items<I: PlacementInput>(
             end: occupancy_cross_max,
         },
     );
-    let mut logical_areas = vec![LogicalArea::default(); items.len()];
-    let mut placed = vec![false; items.len()];
+    // Every item is written by exactly one step: step 1 places the items
+    // definite in both axes, step 2 those definite only in the primary axis,
+    // step 3 every item whose primary axis is indefinite.
+    let mut areas = vec![GridArea::default(); items.len()];
 
     for (index, item) in items.iter().copied().enumerate() {
         let (Some(primary), Some(cross)) = (item.primary.definite(), item.cross.definite()) else {
             continue;
         };
-        let area = LogicalArea { primary, cross };
-        occupancy.occupy(area);
-        logical_areas[index] = area;
-        placed[index] = true;
+        occupancy.occupy(primary, cross);
+        areas[index] = physical(primary, cross);
     }
 
     let has_locked_cross_item = items.iter().any(|item| {
@@ -273,9 +294,6 @@ pub(super) fn place_items<I: PlacementInput>(
     let mut placed_by_step_two_end = step_two_cross_range.end;
 
     for (index, item) in items.iter().copied().enumerate() {
-        if placed[index] {
-            continue;
-        }
         let (Some(primary), AxisPlacement::Indefinite { span }) =
             (item.primary.definite(), item.cross)
         else {
@@ -293,20 +311,16 @@ pub(super) fn place_items<I: PlacementInput>(
         let cross_start = occupancy
             .find_cross(primary, start, cross_span, occupancy.cross_range.end)
             .unwrap_or_else(|| occupancy.cross_range.end - usize_to_i32(cross_span));
-        let area = LogicalArea {
-            primary,
-            cross: TrackSpan {
-                start: cross_start,
-                end: cross_start + usize_to_i32(cross_span),
-            },
+        let cross = TrackSpan {
+            start: cross_start,
+            end: cross_start + usize_to_i32(cross_span),
         };
-        occupancy.occupy(area);
+        occupancy.occupy(primary, cross);
         if let Some(cursors) = sparse_locked_cursors.as_mut() {
-            cursors.raise(occupancy.primary_indices(primary), area.cross.end);
+            cursors.raise(occupancy.primary_indices(primary), cross.end);
         }
-        placed_by_step_two_end = placed_by_step_two_end.max(area.cross.end);
-        logical_areas[index] = area;
-        placed[index] = true;
+        placed_by_step_two_end = placed_by_step_two_end.max(cross.end);
+        areas[index] = physical(primary, cross);
     }
 
     let mut cross_range = all_cross_range;
@@ -322,7 +336,7 @@ pub(super) fn place_items<I: PlacementInput>(
     let mut cursor_cross = cross_range.start;
 
     for (index, item) in items.iter().copied().enumerate() {
-        if placed[index] {
+        if item.primary.definite().is_some() {
             continue;
         }
 
@@ -331,7 +345,7 @@ pub(super) fn place_items<I: PlacementInput>(
             .span()
             .min(occupancy.primary_range.len())
             .max(1);
-        let area = if let Some(cross) = item.cross.definite() {
+        let (primary, cross) = if let Some(cross) = item.cross.definite() {
             let mut primary_start = if dense {
                 primary_range.start
             } else {
@@ -348,13 +362,13 @@ pub(super) fn place_items<I: PlacementInput>(
             if !dense {
                 cursor_primary = primary_start;
             }
-            LogicalArea {
-                primary: TrackSpan {
+            (
+                TrackSpan {
                     start: primary_start,
                     end: primary_start + usize_to_i32(primary_span),
                 },
                 cross,
-            }
+            )
         } else {
             let cross_span = item.cross.span().min(cross_range.len()).max(1);
             let mut primary_start = if dense {
@@ -399,62 +413,36 @@ pub(super) fn place_items<I: PlacementInput>(
                 cursor_primary = primary.start;
                 cursor_cross = cross_start;
             }
-            LogicalArea {
+            (
                 primary,
-                cross: TrackSpan {
+                TrackSpan {
                     start: cross_start,
                     end: cross_start + usize_to_i32(cross_span),
                 },
-            }
+            )
         };
 
-        occupancy.occupy(area);
-        primary_range.end = primary_range.end.max(area.primary.end);
-        logical_areas[index] = area;
-        placed[index] = true;
+        occupancy.occupy(primary, cross);
+        primary_range.end = primary_range.end.max(primary.end);
+        areas[index] = physical(primary, cross);
     }
 
-    debug_assert!(placed.iter().all(|placed| *placed));
-
-    let areas = logical_areas
-        .into_iter()
-        .map(|area| area.to_physical(row_flow))
-        .collect();
     let (column_range, row_range) = if row_flow {
         (cross_range, primary_range)
     } else {
         (primary_range, cross_range)
     };
-    finish_result(areas, column_range, row_range)
+    PlacementResult {
+        areas,
+        column_range,
+        row_range,
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
 struct LogicalPlacement {
     primary: AxisPlacement,
     cross: AxisPlacement,
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-struct LogicalArea {
-    primary: TrackSpan,
-    cross: TrackSpan,
-}
-
-impl LogicalArea {
-    #[inline]
-    fn to_physical(self, row_flow: bool) -> GridArea {
-        if row_flow {
-            GridArea {
-                column: self.cross,
-                row: self.primary,
-            }
-        } else {
-            GridArea {
-                column: self.primary,
-                row: self.cross,
-            }
-        }
-    }
 }
 
 /// A flow-normalized occupancy matrix with dense and sparse storage.
@@ -514,10 +502,10 @@ impl Occupancy {
         usize::try_from(coordinate - self.cross_range.start).unwrap()
     }
 
-    fn occupy(&mut self, area: LogicalArea) {
-        let cross_start = self.cross_offset(area.cross.start);
-        let cross_end = self.cross_offset(area.cross.end);
-        let primary = self.primary_indices(area.primary);
+    fn occupy(&mut self, primary: TrackSpan, cross: TrackSpan) {
+        let cross_start = self.cross_offset(cross.start);
+        let cross_end = self.cross_offset(cross.end);
+        let primary = self.primary_indices(primary);
         match &mut self.storage {
             OccupancyStorage::Dense(words) => {
                 for primary in primary {
@@ -847,47 +835,6 @@ fn usize_to_i32(value: usize) -> i32 {
     i32::try_from(value).expect("grid track count is clamped to 20,000")
 }
 
-fn finish_result(
-    areas: Vec<GridArea>,
-    column_range: TrackSpan,
-    row_range: TrackSpan,
-) -> PlacementResult {
-    let occupied_columns = occupied_tracks(&areas, column_range, |area| area.column);
-    let occupied_rows = occupied_tracks(&areas, row_range, |area| area.row);
-    PlacementResult {
-        areas,
-        column_range,
-        row_range,
-        occupied_columns,
-        occupied_rows,
-    }
-}
-
-fn occupied_tracks<Select>(areas: &[GridArea], range: TrackSpan, select: Select) -> Vec<bool>
-where
-    Select: Fn(&GridArea) -> TrackSpan,
-{
-    let len = range.len();
-    if len == 0 {
-        return Vec::new();
-    }
-    let mut differences = vec![0_i64; len + 1];
-    for area in areas {
-        let span = select(area);
-        let start = usize::try_from(span.start - range.start).unwrap();
-        let end = usize::try_from(span.end - range.start).unwrap();
-        differences[start] += 1;
-        differences[end] -= 1;
-    }
-    let mut occupied = Vec::with_capacity(len);
-    let mut covering = 0_i64;
-    for difference in differences.into_iter().take(len) {
-        covering += difference;
-        occupied.push(covering > 0);
-    }
-    occupied
-}
-
 #[inline]
 fn bit_mask(start: usize, end: usize) -> u64 {
     debug_assert!(start < end && end <= u64::BITS as usize);
@@ -970,6 +917,7 @@ fn last_set_bit(words: &[u64], start: usize, end: usize) -> Option<usize> {
 mod tests {
     use GridPlacement::{Auto as A, Line as L, Span as S};
 
+    use super::super::tracks::occupied_tracks;
     use super::*;
 
     const fn tracks(start: i32, end: i32) -> TrackSpan {
@@ -1079,7 +1027,10 @@ mod tests {
         assert_eq!(result.column_range, tracks(-2, 2));
         assert_eq!(result.areas[0].column, tracks(-2, -1));
         assert_eq!(result.areas[1].column, tracks(-1, 0));
-        assert_eq!(result.occupied_columns, [true, true, false, false]);
+        assert_eq!(
+            occupied_tracks(&result.areas, result.column_range, |area| area.column),
+            [true, true, false, false]
+        );
     }
 
     #[test]
@@ -1093,8 +1044,14 @@ mod tests {
         let placed = input(L(1), L(3), L(1), L(2));
         let result = place_items(&[placed, placed], 2, 1, GridAutoFlow::ROW);
         assert_eq!(result.areas[0], result.areas[1]);
-        assert_eq!(result.occupied_columns, [true, true]);
-        assert_eq!(result.occupied_rows, [true]);
+        assert_eq!(
+            occupied_tracks(&result.areas, result.column_range, |area| area.column),
+            [true, true]
+        );
+        assert_eq!(
+            occupied_tracks(&result.areas, result.row_range, |area| area.row),
+            [true]
+        );
     }
 
     #[test]
@@ -1157,14 +1114,8 @@ mod tests {
         let mut occupancy = Occupancy::new(tracks(0, 500), tracks(-10_000, 10_000));
         assert!(matches!(occupancy.storage, OccupancyStorage::Sparse(_)));
 
-        occupancy.occupy(LogicalArea {
-            primary: tracks(7, 9),
-            cross: tracks(-20, 30),
-        });
-        occupancy.occupy(LogicalArea {
-            primary: tracks(7, 8),
-            cross: tracks(30, 45),
-        });
+        occupancy.occupy(tracks(7, 9), tracks(-20, 30));
+        occupancy.occupy(tracks(7, 8), tracks(30, 45));
 
         assert_eq!(
             occupancy.last_cross_collision(tracks(7, 8), -100, 100),

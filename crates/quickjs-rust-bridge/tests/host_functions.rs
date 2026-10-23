@@ -81,7 +81,7 @@ fn string_round_trip_does_not_leak() {
     let mut realm = tight_realm();
     realm
         .define_global_function("echo", 1, |arguments| {
-            let HostValue::String(value) = &arguments[0] else {
+            let HostArgument::String(value) = arguments[0] else {
                 return Err(HostFunctionError::new("expected a string"));
             };
             Ok(HostValue::String(value.repeat(4)))
@@ -194,7 +194,9 @@ fn an_object_comes_back_from_the_host_as_a_deep_copy() {
     // means the realm reads its own structured clone back as a deep copy.
     realm
         .define_global_function("echo", 1, |arguments| {
-            Ok(arguments.first().cloned().unwrap_or(HostValue::Undefined))
+            Ok(arguments
+                .first()
+                .map_or(HostValue::Undefined, |argument| argument.to_value()))
         })
         .unwrap();
     assert_eq!(
@@ -232,7 +234,7 @@ fn a_structured_clone_passes_back_into_the_realm_as_a_call_argument() {
     let sink = Rc::clone(&captured);
     realm
         .define_global_function("keep", 1, move |arguments| {
-            *sink.borrow_mut() = arguments.first().cloned();
+            *sink.borrow_mut() = arguments.first().map(|argument| argument.to_value());
             Ok(HostValue::Undefined)
         })
         .unwrap();
@@ -270,7 +272,7 @@ fn a_structured_clone_written_in_one_runtime_reads_in_another() {
     let sink = Rc::clone(&captured);
     writer
         .define_global_function("keep", 1, move |arguments| {
-            *sink.borrow_mut() = arguments.first().cloned();
+            *sink.borrow_mut() = arguments.first().map(|argument| argument.to_value());
             Ok(HostValue::Undefined)
         })
         .unwrap();
@@ -352,7 +354,9 @@ fn structured_round_trip_does_not_leak() {
     // means the realm reads its own structured clone back as a deep copy.
     realm
         .define_global_function("echo", 1, |arguments| {
-            Ok(arguments.first().cloned().unwrap_or(HostValue::Undefined))
+            Ok(arguments
+                .first()
+                .map_or(HostValue::Undefined, |argument| argument.to_value()))
         })
         .unwrap();
     let value = realm
@@ -436,7 +440,9 @@ fn a_realm_with_live_host_functions_drops_cleanly() {
         let mut realm = realm();
         realm
             .define_global_function("f", 1, |arguments| {
-                Ok(arguments.first().cloned().unwrap_or(HostValue::Null))
+                Ok(arguments
+                    .first()
+                    .map_or(HostValue::Null, |argument| argument.to_value()))
             })
             .unwrap();
         let _ = realm.evaluate(EvalSource::new("f('hi')"), EvalOptions::default());
@@ -532,7 +538,7 @@ mod release {
     use std::rc::Rc;
 
     use quickjs_rust_bridge::{
-        Context, EvalOptions, EvalSource, HostFunctionError, HostValue, Runtime,
+        Context, EvalOptions, EvalSource, HostArgument, HostFunctionError, HostValue, Runtime,
     };
 
     fn runtime_and_realm() -> (Runtime, Context) {
@@ -551,7 +557,7 @@ mod release {
 
     fn tracking(
         drops: &Rc<Cell<u32>>,
-    ) -> impl FnMut(&[HostValue]) -> Result<HostValue, HostFunctionError> + use<> {
+    ) -> impl FnMut(&[HostArgument<'_>]) -> Result<HostValue, HostFunctionError> + use<> {
         let tracked = Tracked(Rc::clone(drops));
         move |_| {
             let _ = &tracked;
@@ -651,7 +657,9 @@ mod release {
 
         realm
             .define_global_function("final", 1, |arguments| {
-                Ok(arguments.first().cloned().unwrap_or(HostValue::Null))
+                Ok(arguments
+                    .first()
+                    .map_or(HostValue::Null, |argument| argument.to_value()))
             })
             .unwrap();
         let value = realm

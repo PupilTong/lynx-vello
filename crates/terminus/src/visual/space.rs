@@ -472,15 +472,15 @@ impl<'a> SpaceSamples<'a> {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use euclid::default::{Point2D, Rect, Size2D, Transform3D, Vector2D};
+    use euclid::default::{Point2D, Rect, Size2D, Vector2D};
     use vello::kurbo::{Affine, Point};
 
     use super::{Space, SpaceKind, SpaceSamples};
     use crate::scroll::{CaptureAxes, ScrollAxes};
     use crate::tree::document::DOCUMENT_ELEMENT_NODE_ID;
     use crate::visual::{
-        AnimationSample, AnimationSamples, ClipNode, CornerRadii, PaintItem, PaintItemKind,
-        PaintOrder, ScrollSlot, SlotSamples, SnapSlot, StickySample, StickySamples,
+        AnimationSample, AnimationSamples, ClipNode, CornerRadii, ItemTransform, PaintItem,
+        PaintItemKind, PaintOrder, ScrollSlot, SlotSamples, SnapSlot, StickySample, StickySamples,
     };
 
     /// Scroller `R` at the root, an animated element `A` inside it, and a
@@ -683,7 +683,7 @@ mod tests {
         order.clips.push(ClipNode {
             parent: None,
             node: DOCUMENT_ELEMENT_NODE_ID,
-            transform: Transform3D::identity(),
+            transform: ItemTransform::Translate(Vector2D::zero()),
             rect: Rect::new(Point2D::new(0.0, 0.0), Size2D::new(100.0, 100.0)),
             radii: CornerRadii::ZERO,
             space: Some(1),
@@ -691,7 +691,7 @@ mod tests {
         order.items.extend(items.iter().map(|&(y, clip)| PaintItem {
             node: DOCUMENT_ELEMENT_NODE_ID,
             kind: PaintItemKind::ElementBox,
-            transform: Transform3D::translation(0.0, y, 0.0),
+            transform: ItemTransform::Translate(Vector2D::new(0.0, y)),
             clip,
             size: Size2D::new(10.0, 10.0),
             radii: CornerRadii::ZERO,

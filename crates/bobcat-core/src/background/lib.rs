@@ -227,7 +227,7 @@ pub(crate) fn wire_value(expression: &str) -> HostValue {
     let mut realm = runtime.create_context().expect("a throwaway realm");
     realm
         .define_global_function("__capture", 1, move |arguments| {
-            *sink.borrow_mut() = arguments.first().cloned();
+            *sink.borrow_mut() = arguments.first().map(|argument| argument.to_value());
             Ok(HostValue::Undefined)
         })
         .expect("installing the capture function");

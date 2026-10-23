@@ -211,12 +211,14 @@ pub(super) mod style;
 #[cfg(test)]
 mod tests;
 
-use std::cell::RefCell;
+use std::borrow::Cow;
+use std::cell::{OnceCell, RefCell};
+use std::rc::Rc;
 
 use rustc_hash::FxHashMap;
 use terminus::link::event::{ElementEvent, EventPhase};
 use terminus::link::{
-    CustomElement, MethodCall, MethodError, MethodOutcome, NodeId, ShadowRootMode,
+    CustomElement, MethodCall, MethodError, MethodOutcome, NodeId, ShadowRootMode, ShadowSheet,
 };
 
 use self::build::{Builder, IMAGE_TAG, Newlines};
@@ -260,12 +262,12 @@ markdown, x-markdown { display: flex; flex-direction: column; align-items: stret
 markdown::part(root), x-markdown::part(root) { width: 100%; }
 ";
 
-/// The shadow sheet, added first to each instance's shadow root: web-core's
+/// The shadow sheet, mounted first on each instance's shadow root: web-core's
 /// template `<style>` (`htmlTemplates.ts:280-362`) in this engine's boxes,
 /// after the HTML rendering defaults it relies on. See the module
 /// documentation for the outline; each rule says where it comes from.
 ///
-/// It is the engine's own sheet ([`terminus::link::Document::add_engine_shadow_stylesheet`]),
+/// It is the engine's own sheet ([`terminus::link::Document::parse_engine_shadow_stylesheet`]),
 /// so it can write the flow layout `display: block` and `inline` that the
 /// `lynx` grammar keeps from authors, `markdown-style` included.
 ///
@@ -354,13 +356,14 @@ const SHADOW_RULES: &str = r#"
 .markdown-body a { color: #0366d6; text-decoration: underline; }
 "#;
 
-/// Installs the component under both tag names, over the queue its events
+/// Installs one component under both tag names, over the queue its events
 /// go into. Must run after [`super::image::define`], whose component the
 /// shadow tree's images are, and before any element could carry either tag,
 /// which is [`Document::define`](terminus::link::Document::define)'s own precondition.
 pub(super) fn define(document: &mut LynxDocument, events: ComponentEvents) {
-    document.define(MARKDOWN_TAG, Box::new(Markdown::new(events.clone())));
-    document.define(X_MARKDOWN_TAG, Box::new(Markdown::new(events)));
+    let markdown: Rc<dyn CustomElement<()>> = Rc::new(Markdown::new(events));
+    document.define_shared(MARKDOWN_TAG, Rc::clone(&markdown));
+    document.define_shared(X_MARKDOWN_TAG, markdown);
 }
 
 /// The markdown component: builds the shadow tree, re-renders it on
@@ -370,6 +373,10 @@ pub(super) fn define(document: &mut LynxDocument, events: ComponentEvents) {
 struct Markdown {
     events: ComponentEvents,
     states: RefCell<FxHashMap<NodeId, State>>,
+    /// The two sheets every shadow tree starts with, [`SHADOW_RULES`] and
+    /// the empty one a `markdown-style` attribute replaces, parsed by the
+    /// first element of either tag and mounted on every one's tree.
+    shadow_sheets: OnceCell<[ShadowSheet; 2]>,
 }
 
 /// What one element's shadow tree was built from.
@@ -394,6 +401,7 @@ impl Markdown {
         Self {
             events,
             states: RefCell::new(FxHashMap::default()),
+            shadow_sheets: OnceCell::new(),
         }
     }
 
@@ -417,8 +425,8 @@ impl Markdown {
         };
         state.root = Some(root);
         let content = attribute(document, element, CONTENT_ATTRIBUTE)
-            .unwrap_or_default()
-            .to_owned();
+            .map(Cow::into_owned)
+            .unwrap_or_default();
         let parsed = if content.is_empty() {
             parse::MarkdownTree::default()
         } else {
@@ -470,8 +478,8 @@ impl Markdown {
         }
         if let Some(image) = closest(document, target, root, IMAGE_TAG) {
             let url = attribute(document, image, "src")
-                .unwrap_or_default()
-                .to_owned();
+                .map(Cow::into_owned)
+                .unwrap_or_default();
             self.events.queue_detailed(
                 element,
                 "imageTap",
@@ -489,8 +497,8 @@ impl Markdown {
 
     fn queue_link(&self, document: &LynxDocument, element: NodeId, anchor: NodeId) {
         let url = attribute(document, anchor, "href")
-            .unwrap_or_default()
-            .to_owned();
+            .map(Cow::into_owned)
+            .unwrap_or_default();
         self.events.queue_detailed(
             element,
             "link",
@@ -525,8 +533,14 @@ impl CustomElement<()> for Markdown {
 
     fn constructed(&self, document: &mut LynxDocument, element: NodeId) {
         let shadow = document.attach_shadow(element, ShadowRootMode::Open);
-        document.add_engine_shadow_stylesheet(shadow, SHADOW_RULES);
-        document.add_shadow_stylesheet(shadow, "");
+        let [rules, markdown_style] = self.shadow_sheets.get_or_init(|| {
+            [
+                document.parse_engine_shadow_stylesheet(SHADOW_RULES),
+                document.parse_shadow_stylesheet(""),
+            ]
+        });
+        document.add_shadow_sheet(shadow, rules);
+        document.add_shadow_sheet(shadow, markdown_style);
         let root = document.create_element("div", ());
         document.set_id_attribute(root, Some(ROOT_ID));
         document.set_attribute(root, "part", "root");
@@ -660,13 +674,13 @@ fn markdown_root(document: &LynxDocument, element: NodeId) -> Option<NodeId> {
         .map(terminus::link::Node::id)
 }
 
-fn attribute<'a>(document: &'a LynxDocument, element: NodeId, name: &str) -> Option<&'a str> {
+fn attribute<'a>(document: &'a LynxDocument, element: NodeId, name: &str) -> Option<Cow<'a, str>> {
     document.get(element).and_then(|node| node.attribute(name))
 }
 
 /// The `content-id` the events carry: the attribute, or no key at all.
 fn content_id(document: &LynxDocument, element: NodeId) -> Option<String> {
-    attribute(document, element, CONTENT_ID_ATTRIBUTE).map(str::to_owned)
+    attribute(document, element, CONTENT_ID_ATTRIBUTE).map(Cow::into_owned)
 }
 
 /// DOM's `closest(tag)` from `node`, stopping below `root`.

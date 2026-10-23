@@ -40,6 +40,22 @@ impl BlockConstraint {
     pub(in crate::text) fn max_advance(self) -> Option<f32> {
         self.max_advance.is_finite().then_some(self.max_advance)
     }
+
+    /// Whether a result laid out at `self` is also the answer at
+    /// `constraint`: the same constraint, or — for a max-content result
+    /// whose lines fit every width from `fits_from` on
+    /// ([`Retained::fits_from`]) — a definite width at least that wide at
+    /// the same indent, where the breaker takes no break max-content did not.
+    #[expect(
+        clippy::float_cmp,
+        reason = "the same indent is the exact equality the derived `PartialEq` compares"
+    )]
+    pub(in crate::text) fn answers(self, fits_from: Option<f32>, constraint: Self) -> bool {
+        self == constraint
+            || (self.max_advance == f32::INFINITY
+                && self.indent == constraint.indent
+                && fits_from.is_some_and(|width| width <= constraint.max_advance))
+    }
 }
 
 /// What one constraint reported, so a repeat answers without touching parley.
@@ -67,6 +83,9 @@ pub(in crate::text) const MEASURED_BREAKS: u8 = 3;
 struct MeasuredBreak {
     constraint: BlockConstraint,
     metrics: BlockMetrics,
+    /// [`Retained::fits_from`] of the result that answered: the narrowest
+    /// definite width this max-content answer is also the answer at.
+    fits_from: Option<f32>,
 }
 
 /// The memo and commit state of one retained paragraph.
@@ -109,24 +128,34 @@ impl BreakMemo {
         }
     }
 
-    /// The answer `constraint` already got, if the memo still holds it.
+    /// The answer `constraint` already got, if the memo still holds it: its
+    /// own, or a max-content answer whose lines fit it
+    /// ([`BlockConstraint::answers`]).
     pub(in crate::text) fn remembered(&self, constraint: BlockConstraint) -> Option<BlockMetrics> {
-        self.measured
-            .iter()
-            .flatten()
+        let entries = self.measured.iter().flatten();
+        entries
+            .clone()
             .find(|entry| entry.constraint == constraint)
+            .or_else(|| {
+                entries
+                    .clone()
+                    .find(|entry| entry.constraint.answers(entry.fits_from, constraint))
+            })
             .map(|entry| entry.metrics)
     }
 
     /// Records `metrics` as `constraint`'s answer and hands them back.
+    /// `fits_from` is the answering result's [`Retained::fits_from`].
     pub(in crate::text) fn remember(
         &mut self,
         constraint: BlockConstraint,
         metrics: BlockMetrics,
+        fits_from: Option<f32>,
     ) -> BlockMetrics {
         let entry = MeasuredBreak {
             constraint,
             metrics,
+            fits_from,
         };
         // Re-recording a constraint the memo already holds — a commit landing
         // on the width a probe asked about — overwrites that entry rather than
@@ -167,13 +196,18 @@ impl BreakMemo {
     }
 
     /// Whether the consumer's result at `retained` is already the answer for
-    /// `constraint`, so laying out again would change nothing.
+    /// `constraint`, so laying out again would change nothing: laid out at
+    /// it, or a max-content result whose lines fit it and sit where a break
+    /// at it would put them, for which the consumer passes `fits_from`
+    /// ([`BlockConstraint::answers`]).
     pub(in crate::text) fn holds(
         &self,
         retained: Option<BlockConstraint>,
+        fits_from: Option<f32>,
         constraint: BlockConstraint,
     ) -> bool {
-        !self.boxes_dirty && retained == Some(constraint)
+        !self.boxes_dirty
+            && retained.is_some_and(|retained| retained.answers(fits_from, constraint))
     }
 
     /// Marks the start of one real break: the retained layout is about to be
@@ -248,6 +282,24 @@ pub(in crate::text) trait Retained {
     /// What the current result reports.
     fn reported(&self) -> BlockMetrics;
 
+    /// For an untruncated max-content result, its natural layout's own
+    /// width; `None` for any other result.
+    ///
+    /// Every max-content line ends at a forced break or the content's end
+    /// and is at most that wide, so a break at a definite width at least
+    /// that wide, at the same indent, takes the same breaks: the result is
+    /// that width's answer too ([`BlockConstraint::answers`]). A truncated
+    /// result is not, because its cut can depend on the width: the
+    /// inline-truncation content shows only where it is narrower than the
+    /// width, and a `text-maxlength` cut leaves a display narrower than the
+    /// natural lines a narrower width re-breaks.
+    ///
+    /// Where parley's breaker would still wrap at exactly that width — its
+    /// fit test rounding a non-zero `text-indent` differently from its
+    /// width, or a cluster with a negative advance — the max-content lines
+    /// stand. The user ruled that change accepted (2026-10-22).
+    fn fits_from(&self) -> Option<f32>;
+
     /// Answers `constraint` from the memo when it can, and from a layout
     /// otherwise, recording the answer.
     fn probe(&mut self, context: &mut TextContext, constraint: BlockConstraint) -> BlockMetrics {
@@ -269,7 +321,8 @@ pub(in crate::text) trait Retained {
 
     fn remember(&mut self, constraint: BlockConstraint) -> BlockMetrics {
         let metrics = self.reported();
-        self.memo_mut().remember(constraint, metrics)
+        let fits_from = self.fits_from();
+        self.memo_mut().remember(constraint, metrics, fits_from)
     }
 
     fn is_probe_dirty(&self) -> bool {

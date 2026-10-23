@@ -341,6 +341,32 @@ impl<T> CoreStyle for StyleView<'_, T> {
     fn contain_intrinsic_height(&self) -> ContainIntrinsicSize {
         committed_box::contain_intrinsic_height(self.node, self.values())
     }
+
+    /// [`reads_percentage_basis`], as the node's own layout style answered
+    /// it at its last harvest ([`Node::layout_reads_percentage_basis`]); a
+    /// position option's style ([`Self::with_values`]) is evaluated here.
+    #[inline]
+    fn reads_percentage_basis(&self) -> bool {
+        if self.node.views_own_layout_style(self.style) {
+            self.node.layout_reads_percentage_basis()
+        } else {
+            reads_percentage_basis(self.node, self.style)
+        }
+    }
+}
+
+/// Whether laying `node` out under `style` reads the percentage basis its
+/// parent hands it: through its own box model
+/// ([`seldon::style::box_model_reads_percentage_basis`]), or because it
+/// establishes a paragraph, which reads the basis beyond its box model — as
+/// the width its lines fall back to, and as the basis of its atoms and inline
+/// boxes (`inline_flow`, `text_block`).
+///
+/// Reads nothing of `node` but its kind ([`Node::is_lynx_text`]), which is
+/// what lets the harvest store the answer as a node bit.
+pub(crate) fn reads_percentage_basis<T>(node: &Node<T>, style: &ComputedValues) -> bool {
+    super::paragraph::establishes_paragraph(display_mode(node, *style.get_display()))
+        || seldon::style::box_model_reads_percentage_basis(&StyleView::with_values(node, style))
 }
 
 // Every algorithm accessor reads computed values, including registered
@@ -358,55 +384,6 @@ impl<T> TextContainerStyle for StyleView<'_, T> {}
 impl<T> LynxTextStyle for StyleView<'_, T> {}
 
 impl<T> RelativeStyle for StyleView<'_, T> {}
-
-/// Whether a restyle changed anything Parley *shapes* from, and therefore
-/// whether a descendant text node's retained layout has to be thrown away
-/// rather than merely re-broken.
-///
-/// Two levels, the shape Stylo's own damage computation uses
-/// (`properties.mako.rs`, `restyle_damage_rebuild_box`): a pointer comparison
-/// on the two style structs that hold every shaping input, and — only when one
-/// of those differs — a field comparison narrowed to the inputs themselves.
-/// The second level is what earns the first its keep: `text-align`,
-/// `text-indent`, `-webkit-text-stroke-*` and `color` share `InheritedText`
-/// with `letter-spacing` and `word-break`, so a struct-granular answer alone
-/// would still re-shape a paragraph whose only change was its alignment.
-///
-/// The field list mirrors the paragraph's shaping inputs — what `seldon`'s
-/// `parley_style` and the normalizer read, and nothing else — plus
-/// `direction`, which a CSS block container's inline formatting context hands
-/// parley as its bidi paragraph level when it shapes (a Lynx `<text>` keeps
-/// first-strong detection and does not read it, so for one of those a change
-/// re-shapes needlessly). Keeping this list in step with the measurer is
-/// guarded in debug builds by the shaping fingerprint the retained layout
-/// carries, which panics if a kept artifact outlived its inputs.
-pub(crate) fn shaping_inputs_changed(old: &ComputedValues, new: &ComputedValues) -> bool {
-    let (old_font, new_font) = (old.get_font(), new.get_font());
-    let (old_text, new_text) = (old.get_inherited_text(), new.get_inherited_text());
-    let (old_box, new_box) = (old.get_inherited_box(), new.get_inherited_box());
-    if std::ptr::eq(old_font, new_font)
-        && std::ptr::eq(old_text, new_text)
-        && std::ptr::eq(old_box, new_box)
-    {
-        return false;
-    }
-    if !std::ptr::eq(old_box, new_box) && old_box.direction != new_box.direction {
-        return true;
-    }
-    (!std::ptr::eq(old_font, new_font)
-        && (old_font.font_family != new_font.font_family
-            || old_font.font_size != new_font.font_size
-            || old_font.font_weight != new_font.font_weight
-            || old_font.font_style != new_font.font_style
-            || old_font.line_height != new_font.line_height
-            || old_font.font_feature_settings != new_font.font_feature_settings
-            || old_font.font_variation_settings != new_font.font_variation_settings))
-        || (!std::ptr::eq(old_text, new_text)
-            && (old_text.letter_spacing != new_text.letter_spacing
-                || old_text.word_break != new_text.word_break
-                || old_text.text_wrap_mode != new_text.text_wrap_mode
-                || old_text.white_space_collapse != new_text.white_space_collapse))
-}
 
 /// Paragraph-level reads off bare computed values, for the callers that hold
 /// no node: the two registered limits and `tail-color-convert`.

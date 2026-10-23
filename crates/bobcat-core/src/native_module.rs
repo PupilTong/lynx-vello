@@ -27,9 +27,7 @@ use quickjs_rust_bridge::{HostArgument, HostValue};
 use tokio::sync::mpsc;
 
 use crate::background::{WorkerKey, WorkerMessage};
-use crate::esm::{
-    NATIVE_MODULE_CALLBACK_EXPORT, NATIVE_MODULES_HOST_SPECIFIER, NATIVE_MODULES_MODULE_SPECIFIER,
-};
+use crate::esm::{Export, NATIVE_MODULES_HOST_SPECIFIER};
 use crate::link::{HostOutbox, ToMain, ViewNotice};
 use crate::main::quickjs::{ScriptEngine, ScriptRuntime};
 use crate::script::ScriptError;
@@ -312,7 +310,7 @@ pub(crate) fn install(
         NATIVE_MODULES_HOST_SPECIFIER,
         "invokeNativeModule",
         5,
-        Box::new(move |arguments| {
+        move |arguments| {
             let call = call_id(arguments)?;
             let module = string(arguments, 1)?.to_owned();
             let method = string(arguments, 2)?.to_owned();
@@ -335,7 +333,7 @@ pub(crate) fn install(
                 callbacks,
             });
             Ok(HostValue::Undefined)
-        }),
+        },
     )
 }
 
@@ -361,8 +359,7 @@ pub(crate) fn deliver(
     engine
         .call_module_export(
             js_runtime,
-            NATIVE_MODULES_MODULE_SPECIFIER,
-            NATIVE_MODULE_CALLBACK_EXPORT,
+            Export::NativeModuleCallback,
             &[
                 HostArgument::Number(call),
                 HostArgument::Number(f64::from(index)),
@@ -372,9 +369,9 @@ pub(crate) fn deliver(
         .map(|_| ())
 }
 
-fn string(arguments: &[HostValue], index: usize) -> Result<&str, String> {
+fn string<'a>(arguments: &[HostArgument<'a>], index: usize) -> Result<&'a str, String> {
     match arguments.get(index) {
-        Some(HostValue::String(value)) => Ok(value),
+        Some(&HostArgument::String(value)) => Ok(value),
         _ => Err(format!(
             "bobcat-internal:native-modules.invokeNativeModule expects string argument {index}"
         )),
@@ -388,9 +385,9 @@ fn string(arguments: &[HostValue], index: usize) -> Result<&str, String> {
     clippy::cast_sign_loss,
     reason = "the checks below leave a whole, representable call number"
 )]
-fn call_id(arguments: &[HostValue]) -> Result<u64, String> {
+fn call_id(arguments: &[HostArgument<'_>]) -> Result<u64, String> {
     match arguments.first() {
-        Some(&HostValue::Number(value))
+        Some(&HostArgument::Number(value))
             if value.is_finite() && value >= 0.0 && value.fract() == 0.0 =>
         {
             Ok(value as u64)

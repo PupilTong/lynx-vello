@@ -1,63 +1,13 @@
 //! Transient, algorithm-private Grid state.
 
 use stylo::computed_values::direction;
-use stylo::values::computed::{LengthPercentage, PositionProperty, TrackBreadth, TrackSize};
+use stylo::values::computed::PositionProperty;
 use stylo::values::specified::align::AlignFlags;
 
 use super::placement::GridArea;
 pub(super) use crate::compute::util::Axis;
 use crate::compute::util::{BaselineSet, ItemGeometry, ItemKey};
-use crate::geometry::{Edges, Size};
-
-/// The normalized `minmax()` halves of one track sizing function.
-#[derive(Debug, Clone, PartialEq)]
-pub(super) struct TrackSizingFunction {
-    pub(super) min: TrackBreadth,
-    pub(super) max: TrackBreadth,
-    pub(super) fit_content: Option<LengthPercentage>,
-}
-
-impl TrackSizingFunction {
-    pub(super) const AUTO: Self = Self {
-        min: TrackBreadth::Auto,
-        max: TrackBreadth::Auto,
-        fit_content: None,
-    };
-
-    pub(super) fn from_style(size: &TrackSize) -> Self {
-        match size {
-            TrackSize::Breadth(TrackBreadth::Flex(flex)) => Self {
-                min: TrackBreadth::Auto,
-                max: TrackBreadth::Flex(*flex),
-                fit_content: None,
-            },
-            TrackSize::Breadth(breadth) => Self {
-                min: breadth.clone(),
-                max: breadth.clone(),
-                fit_content: None,
-            },
-            TrackSize::Minmax(min, max) => Self {
-                min: min.clone(),
-                max: max.clone(),
-                fit_content: None,
-            },
-            TrackSize::FitContent(TrackBreadth::Breadth(limit)) => Self {
-                min: TrackBreadth::Auto,
-                max: TrackBreadth::MaxContent,
-                fit_content: Some(limit.clone()),
-            },
-            TrackSize::FitContent(_) => {
-                unreachable!("fit-content() stores a <length-percentage> breadth by construction")
-            }
-        }
-    }
-}
-
-impl Default for TrackSizingFunction {
-    fn default() -> Self {
-        Self::AUTO
-    }
-}
+use crate::geometry::Size;
 
 /// One placed in-flow item with resolved box values and local contribution
 /// caches.  Contributions are invalidated only for the bounded column/row
@@ -73,7 +23,6 @@ pub(super) struct GridItem<N> {
     pub(super) direction: direction::T,
     pub(super) preferred_behaves_auto_or_depends: Size<bool>,
     pub(super) minimum_is_auto: Size<bool>,
-    pub(super) inset: Edges<Option<f32>>,
     pub(super) raw_min_content: Size<Option<f32>>,
     pub(super) raw_max_content: Size<Option<f32>>,
     pub(super) minimum_contribution: Size<Option<f32>>,
@@ -98,6 +47,21 @@ impl<N> GridItem<N> {
             Axis::Vertical => self.area.row,
         };
         usize::try_from(span.end - span.start).unwrap_or(1).max(1)
+    }
+
+    /// Whether the item's size in `axis` is its area's: it stretches there
+    /// (css-align-3 §6.1 `stretch`) with no preferred size and no `auto`
+    /// margin to take the space instead.
+    #[inline]
+    pub(super) fn stretches(&self, axis: Axis) -> bool {
+        let alignment = match axis {
+            Axis::Horizontal => self.justify_self,
+            Axis::Vertical => self.align_self,
+        };
+        alignment == AlignFlags::STRETCH
+            && axis.size(self.preferred_size).is_none()
+            && !self.margin_auto.start(axis)
+            && !self.margin_auto.end(axis)
     }
 
     /// The row's baseline-sharing group the item joins (css-align-3 §9.2),
@@ -128,28 +92,72 @@ impl<N> GridItem<N> {
     }
 }
 
-/// Cold style plus hot used values for one concrete explicit/implicit track.
-#[derive(Debug, Clone, Default)]
-#[allow(clippy::struct_excessive_bools)]
+/// A track's minimum sizing function as §12.4 initializes it: a
+/// `<length-percentage>` that resolves is `Fixed` (its value is the track's
+/// initial base size), one that does not — a percentage with no basis — is
+/// `Auto`. `minmax()` takes no `<flex>` minimum by grammar, and a lone
+/// `<flex>` or `fit-content()` has an `auto` one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) enum MinKind {
+    Fixed,
+    #[default]
+    Auto,
+    MinContent,
+    MaxContent,
+}
+
+impl MinKind {
+    /// An intrinsic sizing function (§12.4): anything but a fixed one.
+    #[inline]
+    pub(super) fn is_intrinsic(self) -> bool {
+        self != Self::Fixed
+    }
+}
+
+/// A track's maximum sizing function as §12.4 initializes it, a percentage
+/// with no basis being `Auto`. `Fixed` carries the resolved maximum floored
+/// by the resolved fixed minimum (zero for a non-fixed one) and by zero: the
+/// track's share of the fixed maximum that clamps an automatic minimum
+/// (§6.6), computed whether or not the track is collapsed.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub(super) enum MaxKind {
+    Fixed(f32),
+    #[default]
+    Auto,
+    MinContent,
+    MaxContent,
+    Flex,
+}
+
+impl MaxKind {
+    /// An intrinsic sizing function (§12.4): neither fixed nor flexible.
+    #[inline]
+    pub(super) fn is_intrinsic(self) -> bool {
+        matches!(self, Self::Auto | Self::MinContent | Self::MaxContent)
+    }
+}
+
+/// The sizing-function kinds and used values of one concrete explicit or
+/// implicit track.
+#[derive(Debug, Clone, Copy, Default)]
 pub(super) struct Track {
-    pub(super) sizing: TrackSizingFunction,
+    pub(super) min: MinKind,
+    pub(super) max: MaxKind,
     pub(super) base: f32,
     pub(super) growth_limit: f32,
     pub(super) fit_content_limit: f32,
     pub(super) flex_factor: f32,
-    pub(super) flexible: bool,
-    pub(super) intrinsic_min: bool,
-    pub(super) intrinsic_max: bool,
-    pub(super) auto_max: bool,
     pub(super) infinitely_growable: bool,
     pub(super) collapsed: bool,
     pub(super) position: f32,
 }
 
 impl Track {
+    /// A flexible track (§12.4): a `<flex>` maximum on a track that is not
+    /// collapsed.
     #[inline]
     pub(super) fn is_flexible(&self) -> bool {
-        self.flexible
+        !self.collapsed && self.max == MaxKind::Flex
     }
 }
 

@@ -50,7 +50,7 @@ use rustc_hash::FxHashMap;
 use tokio_util::sync::CancellationToken;
 
 use crate::clock::ClockInstant;
-use crate::esm::{FUTURE_MODULE_SPECIFIER, HOST_MODULE_SPECIFIER};
+use crate::esm::{Export, HOST_MODULE_SPECIFIER};
 use crate::jobs::JsThreadHandle;
 use crate::main::quickjs::{ScriptEngine, ScriptRuntime};
 use crate::script::ScriptError;
@@ -59,10 +59,6 @@ use crate::script::ScriptError;
 /// `long` ceiling, about 24 days, and short enough that no deadline built
 /// from it can overflow the clock.
 const MAX_TIMEOUT_MILLISECONDS: f64 = 2_147_483_647.0;
-
-/// Called on `bobcat:future` when a future the realm asked to settle
-/// asynchronously has settled.
-const SETTLE_EXPORT: &str = "__BobcatSettleFuture";
 
 /// One future's answer: the value it settled to, or why it will not settle.
 ///
@@ -273,8 +269,7 @@ pub(crate) fn deliver(
     engine
         .call_module_export(
             js_runtime,
-            FUTURE_MODULE_SPECIFIER,
-            SETTLE_EXPORT,
+            Export::SettleFuture,
             &[
                 HostArgument::Number(f64::from(id)),
                 HostArgument::Boolean(rejected),
@@ -302,14 +297,18 @@ fn install_member(
     engine: &mut ScriptEngine,
     name: &str,
     arity: u8,
-    callback: impl FnMut(&[HostValue]) -> Result<HostValue, String> + 'static,
+    callback: impl FnMut(&[HostArgument<'_>]) -> Result<HostValue, String> + 'static,
 ) -> Result<(), ScriptError> {
-    engine.register_host_module_function(HOST_MODULE_SPECIFIER, name, arity, Box::new(callback))
+    engine.register_host_module_function(HOST_MODULE_SPECIFIER, name, arity, callback)
 }
 
-fn number_argument(function: &str, arguments: &[HostValue], index: usize) -> Result<f64, String> {
+fn number_argument(
+    function: &str,
+    arguments: &[HostArgument<'_>],
+    index: usize,
+) -> Result<f64, String> {
     match arguments.get(index) {
-        Some(&HostValue::Number(value)) => Ok(value),
+        Some(&HostArgument::Number(value)) => Ok(value),
         _ => Err(format!("{function} expects a number for argument {index}")),
     }
 }
@@ -317,19 +316,23 @@ fn number_argument(function: &str, arguments: &[HostValue], index: usize) -> Res
 #[cfg(test)]
 fn string_argument<'a>(
     function: &str,
-    arguments: &'a [HostValue],
+    arguments: &[HostArgument<'a>],
     index: usize,
 ) -> Result<&'a str, String> {
     match arguments.get(index) {
-        Some(HostValue::String(value)) => Ok(value),
+        Some(&HostArgument::String(value)) => Ok(value),
         _ => Err(format!("{function} expects a string for argument {index}")),
     }
 }
 
 #[cfg(test)]
-fn boolean_argument(function: &str, arguments: &[HostValue], index: usize) -> Result<bool, String> {
+fn boolean_argument(
+    function: &str,
+    arguments: &[HostArgument<'_>],
+    index: usize,
+) -> Result<bool, String> {
     match arguments.get(index) {
-        Some(&HostValue::Boolean(value)) => Ok(value),
+        Some(&HostArgument::Boolean(value)) => Ok(value),
         _ => Err(format!("{function} expects a boolean for argument {index}")),
     }
 }
@@ -341,7 +344,7 @@ fn boolean_argument(function: &str, arguments: &[HostValue], index: usize) -> Re
 )]
 fn future_id_argument(
     function: &str,
-    arguments: &[HostValue],
+    arguments: &[HostArgument<'_>],
     index: usize,
 ) -> Result<u32, String> {
     let value = number_argument(function, arguments, index)?;

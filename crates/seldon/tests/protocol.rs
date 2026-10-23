@@ -646,7 +646,7 @@ fn compute_leaf_layout_uses_internal_natural_size() {
 
     assert_eq!(output.size, Size::new(60.0, 27.0));
     assert_eq!(output.content_size, Size::new(60.0, 27.0));
-    assert_eq!(output.first_baselines, Point::NONE);
+    assert_eq!(output.first_baseline, None);
 }
 
 #[test]
@@ -690,6 +690,52 @@ fn compute_cached_layout_runs_an_uncached_dispatch() {
     );
     assert_eq!(calls.get(), 1);
     assert_eq!(output, LayoutOutput::HIDDEN);
+}
+
+#[test]
+fn a_box_that_reads_no_percentage_basis_is_cached_against_none() {
+    let run = |padding| {
+        let mut tree = MockTree::default();
+        let node = tree.push(
+            MockStyle {
+                padding: Edges::uniform(padding),
+                ..MockStyle::default()
+            },
+            vec![],
+        );
+        let mut state = tree.new_state();
+        let seen = core::cell::RefCell::new(Vec::new());
+        for basis in [Some(100.0), Some(200.0), None] {
+            compute_cached_layout(
+                &tree,
+                &mut state,
+                tree.node(node),
+                LayoutInput::measure(
+                    Size::NONE,
+                    Size::new(basis, Some(50.0)),
+                    Size::MAX_CONTENT,
+                    RequestedAxis::Both,
+                ),
+                |tree, state, node, input| {
+                    seen.borrow_mut().push(input.parent_size);
+                    LayoutTree::compute_layout(tree, state, node, input)
+                },
+            );
+        }
+        seen.into_inner()
+    };
+
+    // Lengths only: one computation, against no basis, answers all three.
+    assert_eq!(run(npx(5.0)), vec![Size::NONE]);
+    // A percentage padding reads the basis: each one is its own entry.
+    assert_eq!(
+        run(calc_lp(0.0, 0.1)),
+        vec![
+            Size::new(Some(100.0), Some(50.0)),
+            Size::new(Some(200.0), Some(50.0)),
+            Size::new(None, Some(50.0)),
+        ]
+    );
 }
 
 #[test]
@@ -1106,7 +1152,7 @@ fn skipped_contents_dispatch_sizes_from_intrinsic_and_hides_descendants() {
     );
 
     assert_eq!(output.size, Size::new(40.0, 24.0));
-    assert_eq!(output.first_baselines, Point::NONE);
+    assert_eq!(output.first_baseline, None);
     assert_eq!(tree.unrounded_layout(&state, child), &Layout::default());
     assert!(state.invalidated.contains(&child));
 }

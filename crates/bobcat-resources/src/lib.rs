@@ -786,14 +786,14 @@ impl Resources {
     pub fn register_style_sheet(
         &self,
         url: &str,
-        sheet: PreparsedStyleSheet,
+        sheet: Arc<PreparsedStyleSheet>,
     ) -> Result<Url, RegisterError> {
         let url = parse_registration_url(url)?;
         self.style_cache.borrow_mut().remove(&url);
         self.shared
             .transports
             .registry
-            .insert(&url, Registered::StyleSheet(Arc::new(sheet)));
+            .insert(&url, Registered::StyleSheet(sheet));
         Ok(url)
     }
 

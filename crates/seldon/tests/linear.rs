@@ -651,18 +651,17 @@ fn responsive_measure(input: LeafMeasureInput) -> LeafMetrics {
         AvailableSpace::MaxContent => 80.0,
     };
     let height = input.known_dimensions.height.unwrap_or(10.0);
-    LeafMetrics::new(Size::new(width, height)).with_first_baselines(Point::new(None, Some(7.0)))
+    LeafMetrics::new(Size::new(width, height)).with_first_baseline(Some(7.0))
 }
 
 fn probe_only_baseline(input: LeafMeasureInput) -> LeafMetrics {
     let baseline = matches!(input.goal, LayoutGoal::Measure(_)).then_some(7.0);
-    LeafMetrics::new(Size::new(10.0, 10.0)).with_first_baselines(Point::new(None, baseline))
+    LeafMetrics::new(Size::new(10.0, 10.0)).with_first_baseline(baseline)
 }
 
 fn height_from_width(input: LeafMeasureInput) -> LeafMetrics {
     let width = input.known_dimensions.width.unwrap_or(10.0);
-    LeafMetrics::new(Size::new(width, 100.0 / width))
-        .with_first_baselines(Point::new(None, Some(4.0)))
+    LeafMetrics::new(Size::new(width, 100.0 / width)).with_first_baseline(Some(4.0))
 }
 
 #[test]
@@ -732,14 +731,14 @@ fn layout_contained_auto_measure_uses_known_child_size_without_a_probe() {
     let output = measure_layout(&tree, root, Size::NONE, Size::MAX_CONTENT);
 
     assert_size(output.size, Size::new(20.0, 10.0));
-    assert_eq!(output.first_baselines.y, None);
+    assert_eq!(output.first_baseline, None);
     assert_eq!(tree.child_layout_calls.get(), 1);
     assert!(tree.measure_inputs(child).is_empty());
 }
 
 #[test]
 fn content_independent_contained_measure_skips_children_but_noncontained_keeps_baseline() {
-    let run = |containment| {
+    let run = |containment, reads_first_baseline| {
         let mut tree = TestTree::default();
         let child = tree.push_leaf(fixed_style(10.0, 10.0), Size::new(10.0, 10.0), Some(7.0));
         let root = tree.push_linear(
@@ -750,17 +749,84 @@ fn content_independent_contained_measure_skips_children_but_noncontained_keeps_b
             },
             vec![child],
         );
-        let output = measure_layout(&tree, root, Size::NONE, Size::MAX_CONTENT);
+        let output = tree.compute_layout(
+            root,
+            LayoutInput::measure(
+                Size::NONE,
+                Size::NONE,
+                Size::MAX_CONTENT,
+                RequestedAxis::Both,
+            )
+            .reading_first_baseline(reads_first_baseline),
+        );
         (output, tree.child_layout_calls.get())
     };
 
-    let (noncontained, noncontained_calls) = run(Contain::empty());
-    assert_eq!(noncontained.first_baselines.y, Some(7.0));
+    // A caller that reads the first baseline gets the child's, probed.
+    let (noncontained, noncontained_calls) = run(Contain::empty(), true);
+    assert_eq!(noncontained.first_baseline, Some(7.0));
     assert_eq!(noncontained_calls, 2);
 
-    let (contained, contained_calls) = run(Contain::LAYOUT);
-    assert_eq!(contained.first_baselines.y, None);
-    assert_eq!(contained_calls, 1);
+    // One that does not read it gets no probe of the fixed-size child.
+    let (unread, unread_calls) = run(Contain::empty(), false);
+    assert_eq!(unread.size, noncontained.size);
+    assert_eq!(unread_calls, 1);
+
+    for reads_first_baseline in [true, false] {
+        let (contained, contained_calls) = run(Contain::LAYOUT, reads_first_baseline);
+        assert_eq!(contained.first_baseline, None);
+        assert_eq!(contained_calls, 1);
+    }
+}
+
+#[test]
+fn a_column_reads_only_its_first_item_s_baseline_and_a_row_every_item_s() {
+    let run = |linear_direction| {
+        let mut tree = TestTree::default();
+        let first = tree.push_leaf(fixed_style(10.0, 10.0), Size::new(10.0, 10.0), Some(7.0));
+        let second = tree.push_leaf(fixed_style(10.0, 10.0), Size::new(10.0, 10.0), Some(9.0));
+        let root = tree.push_linear(
+            TestStyle {
+                linear_direction,
+                ..TestStyle::default()
+            },
+            vec![first, second],
+        );
+        let output = tree.compute_layout(
+            root,
+            LayoutInput::measure(
+                Size::NONE,
+                Size::NONE,
+                Size::MAX_CONTENT,
+                RequestedAxis::Both,
+            )
+            .reading_first_baseline(true),
+        );
+        (output.first_baseline, tree.child_layout_calls.get())
+    };
+
+    assert_eq!(run(linear_direction::T::Column), (Some(7.0), 2));
+    assert_eq!(run(linear_direction::T::Row), (Some(9.0), 3));
+}
+
+#[test]
+fn a_probed_linear_item_is_asked_for_its_own_first_baseline() {
+    let mut tree = TestTree::default();
+    let leaf = tree.push_leaf(fixed_style(10.0, 10.0), Size::new(10.0, 10.0), Some(7.0));
+    let inner = tree.push_linear(TestStyle::default(), vec![leaf]);
+    let root = tree.push_linear(TestStyle::default(), vec![inner]);
+    let output = tree.compute_layout(
+        root,
+        LayoutInput::measure(
+            Size::NONE,
+            Size::NONE,
+            Size::MAX_CONTENT,
+            RequestedAxis::Both,
+        )
+        .reading_first_baseline(true),
+    );
+    // The leaf's 7px, not the inner column's synthesized 10px bottom edge.
+    assert_eq!(output.first_baseline, Some(7.0));
 }
 
 #[test]
@@ -899,7 +965,7 @@ mod baseline {
             vec![early, late],
         );
         let output = definite_layout(&row_tree, row, 100.0, 40.0);
-        assert_close(output.first_baselines.y.unwrap(), 15.0);
+        assert_close(output.first_baseline.unwrap(), 15.0);
     }
 
     #[test]
@@ -916,7 +982,7 @@ mod baseline {
             vec![first, second],
         );
         let output = definite_layout(&column_tree, column, 20.0, 100.0);
-        assert_close(output.first_baselines.y.unwrap(), 40.0);
+        assert_close(output.first_baseline.unwrap(), 40.0);
     }
 
     #[test]
@@ -924,7 +990,7 @@ mod baseline {
         let mut tree = TestTree::default();
         let empty = tree.push_linear(TestStyle::default(), Vec::new());
         let output = definite_layout(&tree, empty, 20.0, 20.0);
-        assert_eq!(output.first_baselines.y, None);
+        assert_eq!(output.first_baseline, None);
     }
 
     #[test]
@@ -935,7 +1001,7 @@ mod baseline {
 
         let output = definite_layout(&tree, root, 20.0, 20.0);
 
-        assert_eq!(output.first_baselines.y, Some(10.0));
+        assert_eq!(output.first_baseline, Some(10.0));
     }
 }
 

@@ -18,7 +18,7 @@ use crate::style::engine::StyleEngine;
 pub use crate::tree::arena::NodeId;
 pub(crate) use crate::tree::arena::{
     DOCUMENT_ELEMENT_NODE_ID, DOCUMENT_NODE_ID, DeferredContainer, DocumentLayoutState,
-    NodeLayoutState, NodeSlot, PayloadSlot, StickyContainingBlock, TreeArenas,
+    NodeLayoutState, NodeSlot, StickyContainingBlock, TreeArenas,
 };
 use crate::tree::custom::CustomElementRegistry;
 use crate::tree::node::Node;
@@ -140,9 +140,7 @@ impl<T> Document<T> {
         let url_data = style_engine.url_data();
         let mut tree = Box::new(TreeArenas::new());
         tree.reserve_zero();
-        let root = tree.insert_node(PayloadSlot::Document, |owner, id| {
-            Node::new_document(owner, id, lock, url_data)
-        });
+        let root = tree.insert_node(|owner, id| Node::new_document(owner, id, lock, url_data));
         assert_eq!(
             root, DOCUMENT_NODE_ID,
             "the DOM document node must take the first id the document ever issues"
@@ -257,6 +255,12 @@ impl<T> Document<T> {
 
     pub(crate) fn layout_needs_pass(&self, viewport: Size<f32>, scale: f32) -> bool {
         self.layout_dirty || self.last_layout_inputs != Some((viewport, scale))
+    }
+
+    /// Whether the next `layout()` has a flush or a pass to run at the
+    /// viewport and scale of the last pass.
+    pub(crate) fn layout_owed(&self) -> bool {
+        self.layout_dirty || self.document_element().needs_style_flush()
     }
 
     pub(crate) fn layout_requires_full_pass(&self, viewport: Size<f32>, scale: f32) -> bool {
@@ -381,16 +385,19 @@ impl<T> Document<T> {
         self.visual_dirty = false;
     }
 
-    /// Every live node's layout state, in arena order. The keys are arena
-    /// slots, not ids: this walks storage, not identity.
-    pub(crate) fn layout_data_mut(
-        &mut self,
-    ) -> impl Iterator<Item = (usize, &mut NodeLayoutState)> {
+    /// Every layout state entry, freed keys' included: this walks storage,
+    /// not identity.
+    pub(crate) fn layout_data_mut(&mut self) -> impl Iterator<Item = &mut NodeLayoutState> {
         self.layout.iter_mut()
     }
 
     pub(crate) fn snapshot_storage(&mut self) -> (&TreeArenas<T>, &mut SnapshotMap) {
         (&self.tree, &mut self.pending_snapshots)
+    }
+
+    /// Whether the element at `opaque` already has a snapshot pending.
+    pub(crate) fn has_pending_snapshot(&self, opaque: stylo::dom::OpaqueNode) -> bool {
+        self.pending_snapshots.contains_key(&opaque)
     }
 
     #[must_use]
@@ -425,9 +432,9 @@ impl<T> Document<T> {
     pub fn create_element(&mut self, tag: &str, payload: T) -> NodeId {
         let local_name = LocalName::from(tag);
         let base = self.begin_reactions();
-        let id = self.allocate_node(PayloadSlot::Node(payload), {
+        let id = self.allocate_node({
             let local_name = local_name.clone();
-            |owner, id| Node::new_element(owner, id, local_name)
+            |owner, id| Node::new_element(owner, id, local_name).with_payload(payload)
         });
         self.pin_node(id);
         self.note_custom_element_created(id, &local_name);
@@ -436,20 +443,17 @@ impl<T> Document<T> {
         id
     }
 
-    pub fn create_text_node(&mut self, text: impl Into<String>, payload: T) -> NodeId {
+    pub fn create_text_node(&mut self, text: impl Into<Box<str>>, payload: T) -> NodeId {
         let text = text.into();
-        self.allocate_node(PayloadSlot::Node(payload), |owner, id| {
-            Node::new_text(owner, id, text)
-        })
+        self.allocate_node(|owner, id| Node::new_text(owner, id, text).with_payload(payload))
     }
 
-    /// Files a node in all three arenas under one freshly issued id.
+    /// Files a node in the node arena under one freshly issued id.
     pub(crate) fn allocate_node(
         &mut self,
-        payload: PayloadSlot<T>,
         make: impl FnOnce(*mut TreeArenas<T>, NodeId) -> Node<T>,
     ) -> NodeId {
-        self.tree.insert_node(payload, make)
+        self.tree.insert_node(make)
     }
 
     #[must_use]
@@ -633,11 +637,7 @@ impl<T> Document<T> {
     /// removal bookkeeping runs against a node that exists — by
     /// [`Self::unlink_from_doomed_parent`], since everything this walk
     /// touches is detached already.
-    fn free_owned_subtree(
-        &mut self,
-        root: NodeId,
-        in_shadow_tree: bool,
-    ) -> (PayloadSlot<T>, usize) {
+    fn free_owned_subtree(&mut self, root: NodeId, in_shadow_tree: bool) -> (Option<T>, usize) {
         debug_assert!(
             self.live(root).parent_id().is_none(),
             "Document::free_owned_subtree frees detached nodes only"
@@ -662,10 +662,10 @@ impl<T> Document<T> {
             if let Some(shadow_root) = self.live(current).shadow_root_id() {
                 stack.push((shadow_root, true));
             }
-            let (_, slot) = self.free_node(current);
+            let node = self.free_node(current);
             freed += 1;
             if current == root {
-                payload = Some(slot);
+                payload = Some(node.into_payload());
             }
         }
         self.prune_relayout_roots();
@@ -801,14 +801,13 @@ impl<T> Document<T> {
         // No visual mutation is noted here. Every node this frees was either
         // detached already or detached by the unlink above, which noted one
         // itself; freeing what is not rendered changes no frame.
-        let payload = match self.free_owned_subtree(id, in_shadow_tree).0 {
-            PayloadSlot::Node(payload) => payload,
-            PayloadSlot::ShadowRoot => unreachable!("a shadow root is refused above"),
-            PayloadSlot::Backdrop => unreachable!("a `::backdrop` node is never handed out"),
-            PayloadSlot::Anonymous => unreachable!("an anonymous box's node is never handed out"),
-            PayloadSlot::Document => unreachable!("the document node is refused above"),
-            PayloadSlot::Reserved => unreachable!("no id resolves to the reservation"),
-        };
+        // The document node and a shadow root are refused above, and no
+        // generated node is ever handed out, so the root is an element or a
+        // text node an embedder created with a payload.
+        let payload = self
+            .free_owned_subtree(id, in_shadow_tree)
+            .0
+            .expect("a node an embedder can name carries its payload");
         // `slotchange` waits for the free: a handler run inside the removal
         // could re-attach the node about to go.
         self.fire_slot_changes();
@@ -836,7 +835,7 @@ impl<T> Document<T> {
         let mut removed = Vec::new();
         let mut stack = vec![id];
         while let Some(current) = stack.pop() {
-            let (node, payload) = self.free_node(current);
+            let node = self.free_node(current);
             // The node is already out of the arenas, so its child links have
             // to be turned back into ids before the walk can follow them.
             stack.extend(
@@ -847,15 +846,13 @@ impl<T> Document<T> {
             if let Some(root) = node.shadow_root_id() {
                 stack.push(root);
             }
-            match payload {
-                PayloadSlot::Node(payload) => removed.push(payload),
-                PayloadSlot::ShadowRoot => {}
-                PayloadSlot::Backdrop => unreachable!("a `::backdrop` node has no parent"),
-                PayloadSlot::Anonymous => {
-                    unreachable!("an anonymous box's node is in no child list")
-                }
-                PayloadSlot::Document => unreachable!("the document node cannot be removed"),
-                PayloadSlot::Reserved => unreachable!("no id resolves to the reservation"),
+            debug_assert!(
+                !node.is_backdrop_node() && !node.is_anonymous_box(),
+                "a generated box's node is in no child list"
+            );
+            // A shadow root is the one node here with no payload.
+            if let Some(payload) = node.into_payload() {
+                removed.push(payload);
             }
         }
         self.prune_relayout_roots();
@@ -899,8 +896,8 @@ impl<T> Document<T> {
         self.animations.forget(&subtree);
     }
 
-    /// Empties all three arenas of one node and retires its id.
-    pub(crate) fn free_node(&mut self, id: NodeId) -> (Node<T>, PayloadSlot<T>) {
+    /// Empties the arenas of one node and retires its id.
+    pub(crate) fn free_node(&mut self, id: NodeId) -> Node<T> {
         let removed_snapshot = self
             .pending_snapshots
             .remove(&OpaqueNode(id.arena_key()))
@@ -938,7 +935,7 @@ impl<T> Document<T> {
         // entry, which names a dead node from here on. One test when no
         // loose text was ever boxed.
         self.forget_anonymous_boxes(id);
-        let (node, payload) = self.tree.remove_node(id);
+        let node = self.tree.remove_node(id);
         // The image registry names replaced nodes so a completed load knows
         // whose natural size to set, and this is the one place a name stops
         // meaning anything: an id retired here is never reissued, so an entry
@@ -970,11 +967,15 @@ impl<T> Document<T> {
         }
         self.note_freed_editing_node(&node);
         self.layout.remove(slot);
-        self.forget_reactions(id);
+        // The pin preflight keeps a pinned node from reaching here. A
+        // reaction still queued for `id` stays queued and runs nothing: ids
+        // are never reissued, and every reaction looks its element up first.
+        #[cfg(debug_assertions)]
+        self.assert_not_pinned(id);
         // Every free comes through here, one node at a time, so a defined
         // element in a freed subtree or in a freed shadow tree is told once.
         self.note_custom_element_freed(id, node.custom_definition);
-        (node, payload)
+        node
     }
 
     fn prune_relayout_roots(&mut self) {
@@ -1057,14 +1058,6 @@ impl<T> Document<T> {
         });
     }
 
-    /// Invalidates an element's text children for a relayout of that element.
-    ///
-    /// `invalidate_layout` walks *up*, so nothing else clears a text child's
-    /// box cache — without this the child's committed measurement answers the
-    /// re-layout unchanged. The shaped layout behind it is a separate
-    /// question: it survives every change the element made to its own
-    /// geometry, and dies only when `shaping_changed` says Parley would shape
-    /// the paragraph differently.
     /// Drops the shaped text a node retains, keeping its box measurements.
     ///
     /// The explicit half of what `invalidate_layout` used to imply. Reshaping
@@ -1074,25 +1067,6 @@ impl<T> Document<T> {
     pub(crate) fn invalidate_text_artifact(&mut self, id: NodeId) {
         if let Some(slot) = self.tree.slot(id) {
             self.layout.clear_text_artifact(slot);
-        }
-    }
-
-    pub(crate) fn invalidate_text_children(&mut self, element: NodeId, shaping_changed: bool) {
-        let Some(node) = self.tree.get(element) else {
-            return;
-        };
-        let text_children: Vec<NodeSlot> = node
-            .flat_children()
-            .iter()
-            .copied()
-            .filter(|&slot| self.tree.at(slot).is_text_node())
-            .collect();
-        for slot in text_children {
-            if shaping_changed {
-                self.layout.clear_layout_cache(slot);
-            } else {
-                self.layout.clear_box_cache(slot);
-            }
         }
     }
 
@@ -1177,7 +1151,6 @@ impl<T> Document<T> {
                 containing_blocks.push(current);
             }
             if damage.needs_relayout() {
-                self.invalidate_text_children(current, refresh.shaping_changed);
                 // Reconstruction damage needs no second walk from the parent:
                 // this one already cleared the parent's cache (or stopped
                 // because it was empty, or because the parent skips its
@@ -1462,7 +1435,7 @@ pub(crate) mod tests {
         document.swap_element(attached, detached);
     }
 
-    /// The three arenas rise and fall together, the freed *storage* comes
+    /// A node's payload rises and falls with it, the freed *storage* comes
     /// back, and the freed *id* never does.
     #[test]
     fn arena_storage_is_reused_while_the_id_that_named_it_retires() {
@@ -1471,10 +1444,7 @@ pub(crate) mod tests {
         let slot = document.live_slot(id);
 
         assert!(document.contains_node(id));
-        assert!(matches!(
-            document.arenas().payload_at(slot),
-            PayloadSlot::Node(7)
-        ));
+        assert_eq!(document.get(id).map(Node::payload), Some(&7));
         assert!(document.layout_cache_is_empty(id).is_some());
 
         assert_eq!(document.drop_subtree(id), vec![7]);
@@ -1542,11 +1512,15 @@ pub(crate) mod tests {
         }
     }
 
+    /// The payload rides in its node rather than in a second slab kept in
+    /// lockstep with the first, and the unit payload every production
+    /// embedder files costs the stride nothing: it sits in the padding, so a
+    /// node is as wide as one whose payload type has no values at all.
     #[test]
-    fn payload_size_does_not_change_primary_node_stride() {
+    fn a_unit_payload_does_not_change_primary_node_stride() {
         assert_eq!(
             std::mem::size_of::<Node<()>>(),
-            std::mem::size_of::<Node<[u8; 1_024]>>()
+            std::mem::size_of::<Node<std::convert::Infallible>>()
         );
     }
 

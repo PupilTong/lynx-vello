@@ -8,6 +8,7 @@ use style_traits::ToCss;
 use stylo::computed_values::{text_wrap_mode, white_space_collapse};
 use stylo::custom_properties::Name;
 use stylo::properties::ComputedValues;
+use stylo::properties_and_values::value::ComputedValueComponent;
 use stylo::values::computed::{
     FontFamily, FontFeatureSettings, FontStyle, FontVariationSettings, FontWeight, LetterSpacing,
     LineHeight, TextAlign, TextIndent, TextOverflow, WordBreak,
@@ -21,17 +22,20 @@ static TAIL_COLOR_CONVERT: LazyLock<Name> = LazyLock::new(|| Name::from("lynx-ta
 static INLINE_TRUNCATION: LazyLock<Name> = LazyLock::new(|| Name::from("lynx-inline-truncation"));
 
 /// Read the UA-registered, non-inherited integer after CSS computation.
-/// Stylo has no public scalar accessor for registered values. `ToCss` exposes
-/// the computed integer after resolving `calc()` and animations.
+///
+/// The registered `<integer>` computes to one integer component, `calc()`
+/// and animations resolved, which is read as it is. Anything else in the
+/// map is read through its serialization, as an integer or not at all: the
+/// initial value's text a `var()` substitution that yields a CSS-wide
+/// keyword leaves there uncomputed, or what an author re-registration of the
+/// name computes to.
 fn paragraph_limit(style: &ComputedValues, name: &Name) -> Option<u32> {
-    let value = style
-        .custom_properties()
-        .non_inherited
-        .get(name)?
-        .to_css_string()
-        .parse::<i32>()
-        .ok()?;
-    u32::try_from(value).ok()
+    let value = style.custom_properties().non_inherited.get(name)?;
+    let integer = match value.as_component() {
+        Some(ComputedValueComponent::Integer(integer)) => *integer,
+        _ => value.to_css_string().parse::<i32>().ok()?,
+    };
+    u32::try_from(integer).ok()
 }
 
 style_protocol! {

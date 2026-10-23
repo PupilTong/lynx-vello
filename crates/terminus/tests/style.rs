@@ -100,12 +100,12 @@ fn presentational_hints_survive_inline_style_replacement_and_removal() {
     doc.set_presentational_hint(target, "color", "blue");
     assert_restyle_color(&mut doc, target, BLUE);
     assert_color!(doc, descendant, BLUE);
-    assert_eq!(doc.get(target).unwrap().attribute("style"), None);
+    assert_eq!(doc.get(target).unwrap().attribute("style").as_deref(), None);
 
     doc.set_inline_style(target, "width: 10px");
     assert_restyle_color(&mut doc, target, BLUE);
     assert_eq!(
-        doc.get(target).unwrap().attribute("style"),
+        doc.get(target).unwrap().attribute("style").as_deref(),
         Some("width: 10px")
     );
     doc.set_inline_style_declarations(target, [("height", "10px")]);
@@ -125,7 +125,7 @@ fn presentational_hints_survive_inline_style_replacement_and_removal() {
     doc.set_presentational_hint(target, "color", "");
     assert_restyle_color(&mut doc, target, GREEN);
     assert_color!(doc, descendant, GREEN);
-    assert_eq!(doc.get(target).unwrap().attribute("style"), None);
+    assert_eq!(doc.get(target).unwrap().attribute("style").as_deref(), None);
 }
 
 #[test]
@@ -202,7 +202,7 @@ fn id_class_and_style_attributes_are_reflected_dom_state() {
     let node = doc.get(target).unwrap();
     assert_eq!(node.id_attribute(), Some("target"));
     assert!(node.has_class("hot"));
-    assert_eq!(node.attribute("style"), Some("width: 10px"));
+    assert_eq!(node.attribute("style").as_deref(), Some("width: 10px"));
     assert_eq!(
         node.computed_style().unwrap().get_color().solid_color(),
         rgb(RED)
@@ -212,7 +212,7 @@ fn id_class_and_style_attributes_are_reflected_dom_state() {
     doc.layout();
     let node = doc.get(target).unwrap();
     assert!(!node.has_class("hot"));
-    assert_eq!(node.attribute("class"), None);
+    assert_eq!(node.attribute("class").as_deref(), None);
     assert_ne!(
         node.computed_style().unwrap().get_color().solid_color(),
         rgb(RED)
@@ -581,8 +581,12 @@ fn an_attribute_no_rule_mentions_is_matched_by_a_stylesheet_added_later() {
     doc.layout();
     assert_color!(doc, el, BLUE);
     assert_eq!(
-        doc.get(el).unwrap().attributes().collect::<Vec<_>>(),
-        [("data-state", "ready")],
+        doc.get(el)
+            .unwrap()
+            .attributes()
+            .map(|(name, value)| (name, value.into_owned()))
+            .collect::<Vec<_>>(),
+        [("data-state", "ready".to_owned())],
         "the attribute is on the element either way"
     );
 

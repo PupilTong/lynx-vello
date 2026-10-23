@@ -404,7 +404,7 @@ fn raw_html_keeps_span_and_p_with_their_classes_only() {
         .get(span)
         .unwrap()
         .attributes()
-        .map(|(name, value)| (name.to_owned(), value.to_owned()))
+        .map(|(name, value)| (name.to_owned(), value.into_owned()))
         .collect();
     assert_eq!(
         attributes,
@@ -463,11 +463,11 @@ fn an_image_is_an_auto_sized_image_element() {
     let image = first(&document, element, "image");
     let node = document.get(image).unwrap();
     assert_eq!(
-        node.attribute("src"),
+        node.attribute("src").as_deref(),
         Some("/tests/fixtures/resources/firefox-logo.png")
     );
-    assert_eq!(node.attribute("auto-size"), Some(""));
-    assert_eq!(node.attribute("alt"), Some("alt text"));
+    assert_eq!(node.attribute("auto-size").as_deref(), Some(""));
+    assert_eq!(node.attribute("alt").as_deref(), Some("alt text"));
     assert_eq!(node.parent().unwrap().tag_name(), Some("p"));
 }
 
@@ -487,7 +487,10 @@ fn an_inline_view_shows_its_slotted_child_in_the_line() {
     );
     document.layout();
     let slot = first(&document, element, "slot");
-    assert_eq!(document.get(slot).unwrap().attribute("name"), Some("badge"));
+    assert_eq!(
+        document.get(slot).unwrap().attribute("name").as_deref(),
+        Some("badge")
+    );
     let container = document.get(slot).unwrap().parent().unwrap();
     assert!(container.has_class("md-inline-view"));
     assert_eq!(container.parent().unwrap().tag_name(), Some("p"));

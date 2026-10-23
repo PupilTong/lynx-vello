@@ -51,6 +51,17 @@
 //! - **`connectedMoveCallback` has no move primitive.** `insert_before` detaches unconditionally,
 //!   so every move is disconnect-then-connect — which is exactly the fallback the standard
 //!   synthesizes for a definition that does not implement one.
+//! - **Reactions run in the order they were enqueued, not grouped per element** (user ruling,
+//!   2026-10-22). The standard gives each element its own reaction queue and, at a drain, empties
+//!   one element's queue before the next element's, a nested drain included. Here one queue holds
+//!   every pending reaction with its element, and a scope runs its tail of it in order. The two
+//!   differ where one scope queues reactions for two elements interleaved: moving a connected
+//!   subtree holding `A` and `B` runs `A` disconnected, `B` disconnected, `A` connected, `B`
+//!   connected, where the standard runs `A`'s two, then `B`'s. They also differ where a callback
+//!   mutates an element whose reaction is still pending in the enclosing scope: the callback's own
+//!   scope runs the new reaction first (an inserted visible overlay's shadow dialog hears `open`
+//!   change before it hears it is connected), and if the callback freed that element, its pending
+//!   reaction then runs nothing.
 //! - **Customized built-ins are absent.** The registry is keyed by local name alone, so there is no
 //!   `extends`, no `is` value, and no second name to store; *look up a custom element definition*
 //!   collapses to its autonomous arm.
@@ -103,10 +114,9 @@
 //!   next mutation discards the leftovers silently rather than blaming itself, while a scope in
 //!   this crate that simply forgot to drain still trips the debug assertion.
 
-use std::collections::VecDeque;
+use std::cell::Cell;
 use std::num::NonZeroU32;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::rc::Rc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
@@ -233,7 +243,8 @@ pub trait CustomElement<T> {
     /// script after a walk run to its end
     /// ([`Document::dispatch_element_event_over`]) runs it regardless. The
     /// listener table ([`Document::add_listener`]) is not consulted here:
-    /// whether a component hears an event is its definition's answer.
+    /// whether a component hears an event is its definition's answer, and
+    /// the walk calls this only for a type [`Self::observed_events`] names.
     ///
     /// Called *inline*, unlike a reaction: the walk has no queue of its own,
     /// because it is not inside a tree mutation that a callback could
@@ -397,7 +408,9 @@ struct Definition<T> {
     /// given the definition, uncounted where it is freed
     /// ([`CustomElement::freed`]'s call), which every such node reaches.
     instances: usize,
-    handler: Arc<dyn CustomElement<T>>,
+    /// Shared, not owned: one handler can be defined under several names
+    /// ([`Document::define_shared`]).
+    handler: Rc<dyn CustomElement<T>>,
 }
 
 /// Document-owned definitions and reaction queues.
@@ -414,17 +427,20 @@ pub(crate) struct CustomElementRegistry<T> {
     /// [`Document::take_observed_name_changes`], each at most once, with the
     /// liveness it changed to. A change that undoes a pending one removes it.
     observed_name_changes: Vec<(&'static str, bool)>,
-    element_queue: Vec<NodeId>,
-    reactions: FxHashMap<NodeId, VecDeque<Reaction>>,
+    /// Every pending reaction, in the order it was enqueued, with the
+    /// element it is for. A scope is the tail from its watermark
+    /// ([`Document::begin_reactions`]); an entry is `None` once it ran, so
+    /// an enclosing scope's cursor never runs it twice.
+    queue: Vec<(NodeId, Option<Reaction>)>,
     pinned: SmallVec<[NodeId; 4]>,
-    depth: Arc<AtomicUsize>,
-    abandoned: Arc<AtomicBool>,
+    depth: Rc<Cell<usize>>,
+    abandoned: Rc<Cell<bool>>,
     /// The standard's *signal slots*: slots whose assigned nodes changed, in
     /// signal order, each once, waiting for the drain boundary.
     signal_slots: Vec<NodeId>,
     /// Set while the signal slots are being fired, so a handler's own
     /// mutation leaves what it signals to the firing loop.
-    firing_slots: Arc<AtomicBool>,
+    firing_slots: Rc<Cell<bool>>,
 }
 
 impl<T> Default for CustomElementRegistry<T> {
@@ -435,13 +451,12 @@ impl<T> Default for CustomElementRegistry<T> {
             observed_events: FxHashSet::default(),
             live_observers: FxHashMap::default(),
             observed_name_changes: Vec::new(),
-            element_queue: Vec::new(),
-            reactions: FxHashMap::default(),
+            queue: Vec::new(),
             pinned: SmallVec::new(),
-            depth: Arc::new(AtomicUsize::new(0)),
-            abandoned: Arc::new(AtomicBool::new(false)),
+            depth: Rc::new(Cell::new(0)),
+            abandoned: Rc::new(Cell::new(false)),
             signal_slots: Vec::new(),
-            firing_slots: Arc::new(AtomicBool::new(false)),
+            firing_slots: Rc::new(Cell::new(false)),
         }
     }
 }
@@ -452,7 +467,7 @@ impl<T> CustomElementRegistry<T> {
     }
 
     fn is_draining(&self) -> bool {
-        self.depth.load(Ordering::Acquire) != 0
+        self.depth.get() != 0
     }
 
     /// One more element of `definition`. Its first makes live each name it
@@ -564,17 +579,18 @@ impl<T> Document<T> {
 /// Balances the reaction-depth counter on unwind, so a panicking callback does
 /// not leave every later drain reporting "recursed too deep".
 struct ReactionDepthToken {
-    depth: Arc<AtomicUsize>,
-    abandoned: Arc<AtomicBool>,
+    depth: Rc<Cell<usize>>,
+    abandoned: Rc<Cell<bool>>,
 }
 
 impl ReactionDepthToken {
-    fn enter(depth: &Arc<AtomicUsize>, abandoned: &Arc<AtomicBool>) -> Self {
+    fn enter(depth: &Rc<Cell<usize>>, abandoned: &Rc<Cell<bool>>) -> Self {
         let token = Self {
-            depth: Arc::clone(depth),
-            abandoned: Arc::clone(abandoned),
+            depth: Rc::clone(depth),
+            abandoned: Rc::clone(abandoned),
         };
-        let entered = token.depth.fetch_add(1, Ordering::AcqRel) + 1;
+        let entered = token.depth.get() + 1;
+        token.depth.set(entered);
         assert!(
             entered <= MAX_REACTION_DEPTH,
             "custom element reactions nested more than {MAX_REACTION_DEPTH} deep: a lifecycle \
@@ -586,26 +602,35 @@ impl ReactionDepthToken {
 
 impl Drop for ReactionDepthToken {
     fn drop(&mut self) {
-        self.depth.fetch_sub(1, Ordering::AcqRel);
+        self.depth.set(self.depth.get() - 1);
         if std::thread::panicking() {
-            self.abandoned.store(true, Ordering::Release);
+            self.abandoned.set(true);
         }
     }
 }
 
 /// Clears the firing flag on every exit, unwinding included, so a panicking
 /// `slotchange` handler does not stop every later one.
-struct FiringSlotsToken(Arc<AtomicBool>);
+struct FiringSlotsToken(Rc<Cell<bool>>);
 
 impl Drop for FiringSlotsToken {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
+        self.0.set(false);
     }
 }
 
 impl<T> Document<T> {
     /// Registers a tag's behavior before any matching element exists.
     pub fn define(&mut self, local_name: &str, element: Box<dyn CustomElement<T>>) {
+        self.define_shared(local_name, Rc::from(element));
+    }
+
+    /// [`Self::define`] for a handler the caller may also define under other
+    /// names: one instance then serves every name it is defined under, while
+    /// each name stays its own definition (its own instance count and
+    /// liveness), so a handler shared this way must key any per-element
+    /// state by element.
+    pub fn define_shared(&mut self, local_name: &str, element: Rc<dyn CustomElement<T>>) {
         assert!(
             !local_name.is_empty(),
             "Document::define: the local name cannot be empty"
@@ -637,7 +662,7 @@ impl<T> Document<T> {
             events,
             lynx_text,
             instances: 0,
-            handler: Arc::from(element),
+            handler: element,
         });
         self.custom_elements
             .by_name
@@ -677,21 +702,16 @@ impl<T> Document<T> {
     }
 
     pub(crate) fn begin_reactions(&mut self) -> usize {
-        if !self.custom_elements.element_queue.is_empty() && !self.custom_elements.is_draining() {
+        if !self.custom_elements.queue.is_empty() && !self.custom_elements.is_draining() {
             debug_assert!(
-                self.custom_elements.abandoned.load(Ordering::Acquire),
+                self.custom_elements.abandoned.get(),
                 "custom element reactions outlived the mutation that raised them"
             );
-            self.custom_elements.element_queue.clear();
-            self.custom_elements.reactions.clear();
+            self.custom_elements.queue.clear();
             self.custom_elements.pinned.clear();
         }
-        if self.custom_elements.abandoned.load(Ordering::Relaxed) {
-            self.custom_elements
-                .abandoned
-                .store(false, Ordering::Release);
-        }
-        self.custom_elements.element_queue.len()
+        self.custom_elements.abandoned.set(false);
+        self.custom_elements.queue.len()
     }
 
     /// Runs the reactions queued since `base`, then fires the signal slots
@@ -704,42 +724,34 @@ impl<T> Document<T> {
     /// The reaction half of [`Self::drain_reactions`] alone, for a removal
     /// that frees: it fires the signal slots itself once the free is done,
     /// so no `slotchange` handler runs with a free pending.
+    ///
+    /// Runs the scope's reactions in the order they were enqueued, a nested
+    /// scope's (a callback's own mutations) as soon as that callback's
+    /// mutation returns. See the module doc's recorded limit on the order.
     pub(crate) fn run_reactions(&mut self, base: usize) {
-        if self.custom_elements.element_queue.len() == base {
+        if self.custom_elements.queue.len() == base {
             return;
         }
         let _depth =
             ReactionDepthToken::enter(&self.custom_elements.depth, &self.custom_elements.abandoned);
         let mut budget = MAX_REACTIONS_PER_SCOPE;
         let mut cursor = base;
-        while cursor < self.custom_elements.element_queue.len() {
-            let element = self.custom_elements.element_queue[cursor];
+        // Indexed afresh each turn: a callback's mutation may push, which
+        // can move the buffer.
+        while cursor < self.custom_elements.queue.len() {
+            let (element, reaction) = &mut self.custom_elements.queue[cursor];
+            let (element, reaction) = (*element, reaction.take());
             cursor += 1;
-            loop {
-                let Some(reaction) = self
-                    .custom_elements
-                    .reactions
-                    .get_mut(&element)
-                    .and_then(VecDeque::pop_front)
-                else {
-                    break;
-                };
-                budget = budget.checked_sub(1).expect(
-                    "custom element reactions did not reach a fixpoint: a lifecycle callback \
-                     enqueues more work than it consumes",
-                );
-                self.invoke(element, reaction);
-            }
-            if self
-                .custom_elements
-                .reactions
-                .get(&element)
-                .is_some_and(VecDeque::is_empty)
-            {
-                self.custom_elements.reactions.remove(&element);
-            }
+            let Some(reaction) = reaction else {
+                continue;
+            };
+            budget = budget.checked_sub(1).expect(
+                "custom element reactions did not reach a fixpoint: a lifecycle callback \
+                 enqueues more work than it consumes",
+            );
+            self.invoke(element, reaction);
         }
-        self.custom_elements.element_queue.truncate(base);
+        self.custom_elements.queue.truncate(base);
     }
 
     /// The standard's *signal a slot change*: `slot`'s assigned nodes are no
@@ -766,14 +778,12 @@ impl<T> Document<T> {
     pub(crate) fn fire_slot_changes(&mut self) {
         if self.custom_elements.signal_slots.is_empty()
             || self.custom_elements.is_draining()
-            || self.custom_elements.firing_slots.load(Ordering::Acquire)
+            || self.custom_elements.firing_slots.get()
         {
             return;
         }
-        self.custom_elements
-            .firing_slots
-            .store(true, Ordering::Release);
-        let _firing = FiringSlotsToken(Arc::clone(&self.custom_elements.firing_slots));
+        self.custom_elements.firing_slots.set(true);
+        let _firing = FiringSlotsToken(Rc::clone(&self.custom_elements.firing_slots));
         let mut budget = MAX_REACTIONS_PER_SCOPE;
         while !self.custom_elements.signal_slots.is_empty() {
             let signalled = std::mem::take(&mut self.custom_elements.signal_slots);
@@ -795,12 +805,7 @@ impl<T> Document<T> {
     }
 
     fn enqueue_reaction(&mut self, element: NodeId, reaction: Reaction) {
-        self.custom_elements
-            .reactions
-            .entry(element)
-            .or_default()
-            .push_back(reaction);
-        self.custom_elements.element_queue.push(element);
+        self.custom_elements.queue.push((element, Some(reaction)));
     }
 
     fn invoke(&mut self, element: NodeId, reaction: Reaction) {
@@ -889,12 +894,32 @@ impl<T> Document<T> {
     pub(crate) fn custom_element_handler(
         &self,
         element: NodeId,
-    ) -> Option<Arc<dyn CustomElement<T>>> {
+    ) -> Option<Rc<dyn CustomElement<T>>> {
         let node = self.get(element)?;
         if node.custom_state != CustomElementState::Custom {
             return None;
         }
         self.dispatch_target(element)
+    }
+
+    /// [`Self::custom_element_handler`], for an element whose definition
+    /// names `type_name` in its [`CustomElement::observed_events`]: the
+    /// handler an event walk step delivers to. Every other step is skipped
+    /// without a call, a handler hearing only what its definition observes.
+    pub(crate) fn custom_element_hearing(
+        &self,
+        element: NodeId,
+        type_name: &str,
+    ) -> Option<Rc<dyn CustomElement<T>>> {
+        let node = self.get(element)?;
+        if node.custom_state != CustomElementState::Custom {
+            return None;
+        }
+        let definition = &self.custom_elements.definitions[node.custom_definition?.index()];
+        definition
+            .events
+            .contains(&type_name)
+            .then(|| Rc::clone(&definition.handler))
     }
 
     /// Runs `call` against `element`'s definition: [`CustomElement::invoke`]
@@ -920,9 +945,9 @@ impl<T> Document<T> {
         outcome
     }
 
-    fn dispatch_target(&self, element: NodeId) -> Option<Arc<dyn CustomElement<T>>> {
+    fn dispatch_target(&self, element: NodeId) -> Option<Rc<dyn CustomElement<T>>> {
         let definition = self.get(element)?.custom_definition?;
-        Some(Arc::clone(
+        Some(Rc::clone(
             &self.custom_elements.definitions[definition.index()].handler,
         ))
     }
@@ -936,7 +961,7 @@ impl<T> Document<T> {
             CustomElementState::Constructing,
             "construct_element runs once, on the element the creation path marked"
         );
-        let handler = Arc::clone(&self.custom_elements.definitions[definition.index()].handler);
+        let handler = Rc::clone(&self.custom_elements.definitions[definition.index()].handler);
         self.pin_node(element);
         handler.constructed(self, element);
         self.unpin_node(element);
@@ -1039,7 +1064,10 @@ impl<T> Document<T> {
         if !self.observes_attribute(element, name) {
             return;
         }
-        let old = self.live(element).attr_local_name(name).map(str::to_owned);
+        let old = self
+            .live(element)
+            .attr_local_name(name)
+            .map(std::borrow::Cow::into_owned);
         self.enqueue_reaction(
             element,
             Reaction::AttributeChanged {
@@ -1085,14 +1113,6 @@ impl<T> Document<T> {
                 .handler
                 .freed(element);
         }
-    }
-
-    pub(crate) fn forget_reactions(&mut self, element: NodeId) {
-        debug_assert!(
-            !self.custom_elements.pinned.contains(&element),
-            "the pin preflight let a pinned node reach the destroy loop"
-        );
-        self.custom_elements.reactions.remove(&element);
     }
 
     pub(crate) fn custom_elements_are_draining(&self) -> bool {

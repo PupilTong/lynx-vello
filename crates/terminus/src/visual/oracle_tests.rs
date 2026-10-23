@@ -411,7 +411,7 @@ impl Fixture {
                     .iter()
                     .find(|item| item.node == slot.node && item.kind == PaintItemKind::ElementBox)
                     .expect("the element paints its box");
-                (item.space, item.transform)
+                (item.space, frame.order.matrix(item.transform))
             };
             // An ancestor's curve moves the parent world the track holds
             // still; the geometry comparison covers that composition.
@@ -573,8 +573,8 @@ impl Fixture {
         for (a, b) in early_items.iter().zip(late_items) {
             assert_eq!((a.node, a.kind), (b.node, b.kind), "{label}: paint order");
             let (Some(a_local), Some(b_local)) = (
-                item_affine(&a.transform, a.size),
-                item_affine(&b.transform, b.size),
+                item_affine(&early.order.matrix(a.transform), a.size),
+                item_affine(&late.order.matrix(b.transform), b.size),
             ) else {
                 continue;
             };
@@ -592,8 +592,8 @@ impl Fixture {
         for (a, b) in early_clips.iter().zip(late_clips) {
             assert_eq!(a.node, b.node, "{label}: clip order");
             let (Some(a_local), Some(b_local)) = (
-                item_affine(&a.transform, a.rect.size),
-                item_affine(&b.transform, b.rect.size),
+                item_affine(&early.order.matrix(a.transform), a.rect.size),
+                item_affine(&late.order.matrix(b.transform), b.rect.size),
             ) else {
                 continue;
             };

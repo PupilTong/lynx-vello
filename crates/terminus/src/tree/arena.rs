@@ -13,7 +13,7 @@ use std::hint::likely;
 use std::num::{NonZeroU32, NonZeroU64};
 
 use rustc_hash::{FxHashMap, FxHashSet};
-use seldon::geometry::{Edges, Size};
+use seldon::geometry::Edges;
 use seldon::text::TextContext;
 use seldon::tree::{LayoutInput, LayoutSlot};
 use slab::Slab;
@@ -137,28 +137,13 @@ pub(crate) const DOCUMENT_NODE_ID: NodeId = NodeId::at_key(NonZeroU32::new(1).un
 pub(crate) const DOCUMENT_ELEMENT_NODE_ID: NodeId = NodeId::at_key(NonZeroU32::new(2).unwrap(), 0);
 const INITIAL_NODE_CAPACITY: usize = 8;
 
-pub(crate) enum PayloadSlot<T> {
-    /// Arena key zero's placeholder. Unreachable: no id resolves to it.
-    Reserved,
-    Document,
-    ShadowRoot,
-    /// A `::backdrop` box's node ([`crate::tree::top_layer`]): an element
-    /// node no embedder created, so it carries no payload. The variant is
-    /// also the mark that tells a backdrop node from every other element.
-    Backdrop,
-    /// An anonymous block box's node ([`crate::tree::anonymous`]): an
-    /// element node the box tree generated around loose text, with no
-    /// payload for the same reason, and marked by this variant the same way.
-    Anonymous,
-    Node(T),
-}
-
 /// The fixed-address, document-owned arena set.
 ///
-/// `nodes` and `payloads` are keyed by a [`NodeId`]'s arena key and
-/// insert/remove in exactly the same order, each asserting that its own free
-/// list returns the same key. `DocumentLayoutState::nodes` is the third arena
-/// in that lockstep — it lives beside the tree rather than in it.
+/// `nodes` is keyed by a [`NodeId`]'s arena key. An embedder's payload rides
+/// in its node ([`Node::payload`]), and so does what tells a generated node —
+/// a `::backdrop` box's, an anonymous box's — from the rest, so there is no
+/// second slab to keep in lockstep with it. `DocumentLayoutState` keys its
+/// entries by the same arena key, beside the tree rather than in it.
 ///
 /// `generations` is what makes a key checkable. It is indexed by key, so it is
 /// bounded by the peak number of live nodes rather than by how many nodes the
@@ -167,7 +152,6 @@ pub(crate) enum PayloadSlot<T> {
 /// after.
 pub(crate) struct TreeArenas<T> {
     nodes: Slab<Node<T>>,
-    payloads: Slab<PayloadSlot<T>>,
     generations: Vec<u32>,
     /// `content-visibility: auto` relevance, keyed by arena key. It lives
     /// here rather than in `DocumentLayoutState` because a
@@ -204,19 +188,26 @@ pub(crate) struct TreeArenas<T> {
     /// one reader on the layout path, reaches nothing but these arenas; see
     /// [`crate::tree::anonymous`].
     anonymous: AnonymousBoxes,
+    /// How many element nodes are live: the upper bound
+    /// [`DocumentLayoutState::ensure_covers`] reserves its entries to, since
+    /// only an element files one. Counted where [`Self::insert_node`] files a
+    /// node and [`Self::remove_node`] frees one, the only two places a node
+    /// enters or leaves the arena, and a node's kind never changes in
+    /// between.
+    live_elements: usize,
 }
 
 impl<T> TreeArenas<T> {
     pub(crate) fn new() -> Self {
         Self {
             nodes: Slab::with_capacity(INITIAL_NODE_CAPACITY),
-            payloads: Slab::with_capacity(INITIAL_NODE_CAPACITY),
             generations: Vec::with_capacity(INITIAL_NODE_CAPACITY),
             relevance: RelevanceTable::default(),
             committed_boxes: CommittedBoxTable::default(),
             anchors: AnchorRegistry::default(),
             top_layer: TopLayer::default(),
             anonymous: AnonymousBoxes::default(),
+            live_elements: 0,
         }
     }
 
@@ -235,11 +226,7 @@ impl<T> TreeArenas<T> {
     /// Whether `id` names an anonymous block box's node.
     #[inline]
     pub(crate) fn is_anonymous_box(&self, id: NodeId) -> bool {
-        self.slot_is_current(id)
-            && matches!(
-                self.payloads.get(id.arena_key()),
-                Some(PayloadSlot::Anonymous)
-            )
+        self.get(id).is_some_and(Node::is_anonymous_box)
     }
 
     /// The container of the anonymous box `id`: its parent, or the host of
@@ -360,10 +347,9 @@ impl<T> TreeArenas<T> {
         let placeholder = NodeId::at_key(NonZeroU32::new(1).expect("one is non-zero"), 0);
         assert_eq!(
             self.nodes
-                .insert(Node::new_text(owner, placeholder, String::new())),
+                .insert(Node::new_text(owner, placeholder, Box::default())),
             RESERVED
         );
-        assert_eq!(self.payloads.insert(PayloadSlot::Reserved), RESERVED);
         self.generations.push(0);
     }
 
@@ -372,6 +358,13 @@ impl<T> TreeArenas<T> {
     #[inline]
     pub(crate) fn slot_bound(&self) -> usize {
         self.generations.len()
+    }
+
+    /// How many element nodes are live — the bound the layout state reserves
+    /// its entries to.
+    #[inline]
+    pub(crate) const fn live_elements(&self) -> usize {
+        self.live_elements
     }
 
     /// Whether a handle still names the node it was made for.
@@ -446,17 +439,6 @@ impl<T> TreeArenas<T> {
             .expect("stale NodeId: its node was freed after the handle was taken")
     }
 
-    #[inline]
-    pub(crate) fn payload_at(&self, slot: NodeId) -> &PayloadSlot<T> {
-        assert!(
-            self.slot_is_current(slot),
-            "stale NodeId: its node was freed after the handle was taken"
-        );
-        self.payloads
-            .get(slot.arena_key())
-            .expect("live primary node must have matching payload-arena state")
-    }
-
     /// The node arena itself, for `Debug` only — its keys are arena keys.
     pub(crate) const fn nodes(&self) -> &Slab<Node<T>> {
         &self.nodes
@@ -478,19 +460,18 @@ impl<T> TreeArenas<T> {
         self.nodes.iter().skip(1).map(|(_, node)| node.id())
     }
 
-    /// Files a node in both tree arenas under a fresh handle.
+    /// Files a node in the node arena under a fresh handle.
     ///
     /// The key is whatever the free list offers — recycled the instant its
     /// previous node was freed — and the generation is what distinguishes this
     /// occupant from that one.
     #[expect(
         clippy::inline_always,
-        reason = "keep the synchronized slab inserts in the node-allocation hot path"
+        reason = "keep the slab insert in the node-allocation hot path"
     )]
     #[inline(always)]
     pub(crate) fn insert_node(
         &mut self,
-        payload: PayloadSlot<T>,
         make: impl FnOnce(*mut Self, NodeId) -> Node<T>,
     ) -> NodeId {
         let owner = std::ptr::from_mut::<Self>(self);
@@ -504,19 +485,18 @@ impl<T> TreeArenas<T> {
         }
         let id = NodeId::at_key(key, self.generations[arena_key]);
         let node = make(owner, id);
+        self.live_elements += usize::from(node.is_element());
         assert_eq!(self.nodes.insert(node), arena_key);
-        assert_eq!(self.payloads.vacant_key(), arena_key);
-        assert_eq!(self.payloads.insert(payload), arena_key);
         id
     }
 
-    /// Empties both tree arenas of one node and invalidates every handle to it.
+    /// Empties the node arena of one node and invalidates every handle to it.
     ///
     /// The key goes back on the free list, but its generation moves on, so
     /// anything still holding the old handle — a retained frame, a script
     /// handle whose finalizer has not run yet — resolves to nothing from here
     /// on, even once the key has a new occupant.
-    pub(crate) fn remove_node(&mut self, id: NodeId) -> (Node<T>, PayloadSlot<T>) {
+    pub(crate) fn remove_node(&mut self, id: NodeId) -> Node<T> {
         assert!(
             self.slot_is_current(id),
             "subtree links always resolve while removing"
@@ -525,10 +505,7 @@ impl<T> TreeArenas<T> {
             .nodes
             .try_remove(id.arena_key())
             .expect("a current handle always selects its node");
-        let payload = self
-            .payloads
-            .try_remove(id.arena_key())
-            .expect("removed element/text node must have payload-arena state");
+        self.live_elements -= usize::from(node.is_element());
         self.generations[id.arena_key()] = self.generations[id.arena_key()].wrapping_add(1);
         // A dropped node takes its relevance with it: the key is recycled,
         // and its next occupant must start undetermined rather than inherit
@@ -542,7 +519,7 @@ impl<T> TreeArenas<T> {
         // And whatever it declared for anchor positioning: a name index that
         // outlived its element would offer a dead candidate to every lookup.
         self.anchors.forget(id);
-        (node, payload)
+        node
     }
 }
 
@@ -552,17 +529,34 @@ pub(crate) struct NodeLayoutState {
     /// The paragraph a Lynx text element or a block container owns. A text node holds none: it is
     /// content of the paragraph above it, not a box.
     pub(crate) text: Option<Box<TextStore>>,
-    pub(crate) scroll_offset: euclid::default::Vector2D<f32>,
 }
 
-/// Slot-aligned layout/text state, sized lazily rather than kept in lockstep
-/// with the primary arena: creating a node costs nothing here, and a node that
-/// is never laid out never allocates layout state. `Document::layout` sizes
-/// the vector to the primary arena's slot bound before the engine reads slots
-/// wholesale; mutation entry points grow on demand, and an absent entry reads
-/// as "never laid out" (an empty cache) everywhere else.
+/// [`DocumentLayoutState::index`]'s mark for a key with no entry.
+const NO_ENTRY: u32 = u32::MAX;
+
+/// Layout/text state for the nodes that lay out, sized lazily rather than
+/// kept in lockstep with the primary arena: creating a node costs nothing
+/// here, and a node that is never laid out never allocates layout state.
+///
+/// Two levels. `index` is arena-key aligned at four bytes a key and names
+/// each key's position in `entries`, which holds a [`NodeLayoutState`] only
+/// for a key something wrote layout state for. The document node, a shadow
+/// root, an element no pass reached and a freed key that never laid out hold
+/// none, and neither does a text node: it is content of the paragraph above
+/// it, never a box, and `LayoutTree::children` leaves it out, so seldon never
+/// writes a box for one.
+///
+/// `Document::layout` sizes `index` to the primary arena's slot bound before
+/// the engine reads slots wholesale; a key it covers with no entry reads as
+/// [`Self::vacant`] — "never laid out", an empty cache — and a key past it
+/// reads as nothing, as before the split. An entry outlives its node: a freed
+/// key's entry is reset in place for the key's next occupant, never
+/// compacted.
 pub(crate) struct DocumentLayoutState {
-    nodes: Vec<NodeLayoutState>,
+    index: Vec<u32>,
+    entries: Vec<NodeLayoutState>,
+    /// What a covered key with no entry reads as. Never written.
+    vacant: NodeLayoutState,
     pub(crate) text_context: Option<Box<TextContext>>,
     /// Text nodes whose one retained Parley layout a probe re-broke away from
     /// its committed line break during the pass in flight. The pass owes them
@@ -590,6 +584,12 @@ pub(crate) struct DocumentLayoutState {
     /// acknowledgement, with its node ([`Self::remove`]), or at the first
     /// render whose frame has no scroll slot for it.
     pub(crate) scroll_requests: FxHashMap<NodeId, ScrollRequest>,
+    /// Each scroll container's stored scroll offset, as the last scroll
+    /// wrote it; see `Document::scroll_to`. A side table rather than a field
+    /// of every node's layout state because only scroll containers have one.
+    /// An entry lives until its element is freed ([`Self::remove`]); a key
+    /// with none reads as zero.
+    pub(crate) scroll_offsets: FxHashMap<NodeId, euclid::default::Vector2D<f32>>,
     /// The serial the next scroll request takes: one counter per document,
     /// so serials order every request against every post that names one.
     pub(crate) next_scroll_request: NonZeroU64,
@@ -651,16 +651,6 @@ pub(crate) struct DocumentLayoutState {
     /// containing block did not run) is written after the walk has already
     /// rounded the boxes above it and needs no marks on them.
     pub(crate) in_rounding_tail: bool,
-    /// Each scroll container's css-position-4 scrollable containing block
-    /// from its last committing run: its in-flow content's scrollable
-    /// overflow, the out-of-flow boxes' excluded
-    /// ([`seldon::tree::LayoutTree::set_scrollable_containing_block`]). A
-    /// side table because only scroll containers have one and only the
-    /// anchor-positioned boxes laid out against one read it — not a field
-    /// of every `Layout`, which would grow `LayoutSlot` for every node to
-    /// serve the few that scroll. An entry lives until its element is freed;
-    /// one that stops scrolling is never asked about again.
-    pub(crate) scrollable_containing_blocks: FxHashMap<NodeId, Size<f32>>,
     /// The Lynx text elements whose committing paragraph runs are reported
     /// ([`Self::note_text_layout`]), as the host set them through
     /// `Document::set_text_layout_reporting`. A side table keyed by node
@@ -705,13 +695,16 @@ pub(crate) struct DeferredContainer {
 impl DocumentLayoutState {
     pub(crate) fn new() -> Self {
         Self {
-            nodes: Vec::new(),
+            index: Vec::new(),
+            entries: Vec::new(),
+            vacant: NodeLayoutState::default(),
             text_context: None,
             probed_text: Vec::new(),
             interleaves_containers: false,
             container_deferrals: Vec::new(),
             initial_targets: Vec::new(),
             scroll_requests: FxHashMap::default(),
+            scroll_offsets: FxHashMap::default(),
             next_scroll_request: NonZeroU64::MIN,
             auto_scroll_requests: Vec::new(),
             instant_scrolls: SmallVec::new(),
@@ -721,7 +714,6 @@ impl DocumentLayoutState {
             anchor_buckets: AnchorBuckets::default(),
             hoisted_to: FxHashMap::default(),
             in_rounding_tail: false,
-            scrollable_containing_blocks: FxHashMap::default(),
             text_layout_reporters: FxHashSet::default(),
             text_layout_reports: Vec::new(),
         }
@@ -751,21 +743,77 @@ impl DocumentLayoutState {
         sink.append(&mut self.container_deferrals);
     }
 
-    /// Sizes the slot-aligned state to cover every key below `slots`.
-    pub(crate) fn ensure_covers(&mut self, slots: usize) {
-        if self.nodes.len() < slots {
-            self.nodes.resize_with(slots, NodeLayoutState::default);
+    /// Sizes the key-aligned index to cover every key below `slots`, and
+    /// makes room in `entries` for `elements` — the live element count,
+    /// which bounds the entries a pass can file, since a text node never
+    /// files one.
+    ///
+    /// Exact until the first entry is filed, so a page's first layout files
+    /// every entry into one allocation instead of doubling its way there
+    /// through `push` (a render reserves before the flush that may add
+    /// anonymous boxes, and the layout run after it reserves again, still
+    /// exactly); amortized as `Vec::reserve` is after that, so a page that
+    /// adds a few elements per layout is not reallocated exactly every time.
+    /// It never shrinks: an entry outlives its node.
+    pub(crate) fn ensure_covers(&mut self, slots: usize, elements: usize) {
+        if self.index.len() < slots {
+            self.index.resize(slots, NO_ENTRY);
         }
+        if self.entries.is_empty() {
+            self.entries.reserve_exact(elements);
+        } else {
+            self.entries
+                .reserve(elements.saturating_sub(self.entries.len()));
+        }
+    }
+
+    /// Where `slot`'s entry sits in `entries`, if it has one.
+    #[inline]
+    fn entry_of(&self, slot: NodeId) -> Option<usize> {
+        match self.index.get(slot.arena_key()) {
+            Some(&at) if at != NO_ENTRY => Some(at as usize),
+            _ => None,
+        }
+    }
+
+    /// Whether `slot` has an entry of its own.
+    #[cfg(test)]
+    pub(crate) fn has_entry(&self, slot: NodeId) -> bool {
+        self.entry_of(slot).is_some()
+    }
+
+    /// Where `slot`'s entry sits in `entries`, filing it on first use.
+    fn file_entry(&mut self, slot: NodeId) -> usize {
+        if let Some(at) = self.entry_of(slot) {
+            return at;
+        }
+        if self.index.len() <= slot.arena_key() {
+            self.index.resize(slot.arena_key() + 1, NO_ENTRY);
+        }
+        let at = self.entries.len();
+        self.index[slot.arena_key()] =
+            u32::try_from(at).expect("a document holds fewer than u32::MAX nodes");
+        self.entries.push(NodeLayoutState::default());
+        at
+    }
+
+    /// `slot`'s entry, filed on first use.
+    fn entry_mut(&mut self, slot: NodeId) -> &mut NodeLayoutState {
+        let at = self.file_entry(slot);
+        &mut self.entries[at]
     }
 
     /// Resets a freed slot so the key's next occupant starts clean. The entry
     /// itself stays: slot storage is recycled, never compacted.
     pub(crate) fn remove(&mut self, slot: NodeId) {
-        if let Some(entry) = self.nodes.get_mut(slot.arena_key()) {
-            *entry = NodeLayoutState::default();
+        if let Some(at) = self.entry_of(slot) {
+            self.entries[at] = NodeLayoutState::default();
         }
         if !self.scroll_requests.is_empty() {
             self.scroll_requests.remove(&slot);
+        }
+        if !self.scroll_offsets.is_empty() {
+            self.scroll_offsets.remove(&slot);
         }
         if !self.auto_scroll_requests.is_empty() {
             self.auto_scroll_requests.retain(|(node, _)| *node != slot);
@@ -775,9 +823,6 @@ impl DocumentLayoutState {
         }
         self.register_hoisted(slot, None);
         self.hoisted_to.remove(&slot);
-        if !self.scrollable_containing_blocks.is_empty() {
-            self.scrollable_containing_blocks.remove(&slot);
-        }
         if !self.text_layout_reporters.is_empty() {
             self.text_layout_reporters.remove(&slot);
             self.text_layout_reports.retain(|node| *node != slot);
@@ -823,26 +868,41 @@ impl DocumentLayoutState {
         }
     }
 
+    /// `slot`'s layout state: its entry, [`Self::vacant`] for a key the index
+    /// covers with none, and nothing for a key past it.
     #[inline]
     pub(crate) fn get(&self, slot: NodeId) -> Option<&NodeLayoutState> {
-        self.nodes.get(slot.arena_key())
+        let &at = self.index.get(slot.arena_key())?;
+        Some(if at == NO_ENTRY {
+            &self.vacant
+        } else {
+            &self.entries[at as usize]
+        })
     }
 
+    /// `slot`'s layout slot, a never-laid-out one when it has no entry.
     #[inline]
-    pub(crate) fn at(&self, slot: NodeId) -> &NodeLayoutState {
-        self.nodes
-            .get(slot.arena_key())
-            .expect("layout state must be sized to the arena before slot reads")
+    pub(crate) fn slot_at(&self, slot: NodeId) -> &LayoutSlot {
+        match self.entry_of(slot) {
+            Some(at) => &self.entries[at].slot,
+            None => &self.vacant.slot,
+        }
     }
 
-    pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = (usize, &mut NodeLayoutState)> {
-        self.nodes.iter_mut().enumerate()
+    /// Every entry, in no particular order.
+    pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = &mut NodeLayoutState> {
+        self.entries.iter_mut()
     }
 
     #[inline]
     pub(crate) fn at_mut(&mut self, slot: NodeId) -> &mut NodeLayoutState {
-        self.ensure_covers(slot.arena_key() + 1);
-        &mut self.nodes[slot.arena_key()]
+        self.entry_mut(slot)
+    }
+
+    /// `slot`'s layout slot for a write: its entry, filed on first use.
+    #[inline]
+    pub(crate) fn slot_mut(&mut self, slot: NodeId) -> &mut LayoutSlot {
+        &mut self.entry_mut(slot).slot
     }
 
     /// The shared shaping context beside one element's paragraph slot.
@@ -854,15 +914,18 @@ impl DocumentLayoutState {
         &mut self,
         slot: NodeId,
     ) -> (&mut TextContext, &mut Option<Box<TextStore>>) {
-        self.ensure_covers(slot.arena_key() + 1);
+        let at = self.file_entry(slot);
         let Self {
-            nodes,
+            index: _,
+            entries,
+            vacant: _,
             text_context,
             probed_text: _,
             interleaves_containers: _,
             container_deferrals: _,
             initial_targets: _,
             scroll_requests: _,
+            scroll_offsets: _,
             next_scroll_request: _,
             auto_scroll_requests: _,
             instant_scrolls: _,
@@ -872,21 +935,18 @@ impl DocumentLayoutState {
             anchor_buckets: _,
             hoisted_to: _,
             in_rounding_tail: _,
-            scrollable_containing_blocks: _,
             text_layout_reporters: _,
             text_layout_reports: _,
         } = self;
         let context = text_context
             .get_or_insert_with(|| Box::new(TextContext::new()))
             .as_mut();
-        (context, &mut nodes[slot.arena_key()].text)
+        (context, &mut entries[at].text)
     }
 
     /// The retained paragraph `slot` owns, of either kind.
     pub(crate) fn text_store(&self, slot: NodeId) -> Option<&TextStore> {
-        self.nodes
-            .get(slot.arena_key())
-            .and_then(|node| node.text.as_deref())
+        self.get(slot).and_then(|node| node.text.as_deref())
     }
 
     /// The Lynx paragraph `slot` owns, if it owns one.
@@ -899,12 +959,7 @@ impl DocumentLayoutState {
     /// is two comparisons, and only a probe that actually re-entered Parley
     /// enqueues anything.
     pub(crate) fn note_probed_text(&mut self, slot: NodeId) {
-        if self
-            .nodes
-            .get(slot.arena_key())
-            .and_then(|node| node.text.as_deref())
-            .is_some_and(TextStore::is_probe_dirty)
-        {
+        if self.text_store(slot).is_some_and(TextStore::is_probe_dirty) {
             self.probed_text.push(slot);
         }
     }
@@ -918,13 +973,16 @@ impl DocumentLayoutState {
     pub(crate) fn restore_probed_text(&mut self) {
         let mut probed = std::mem::take(&mut self.probed_text);
         let Self {
-            nodes,
+            index,
+            entries,
+            vacant: _,
             text_context,
             probed_text: _,
             interleaves_containers: _,
             container_deferrals: _,
             initial_targets: _,
             scroll_requests: _,
+            scroll_offsets: _,
             next_scroll_request: _,
             auto_scroll_requests: _,
             instant_scrolls: _,
@@ -934,7 +992,6 @@ impl DocumentLayoutState {
             anchor_buckets: _,
             hoisted_to: _,
             in_rounding_tail: _,
-            scrollable_containing_blocks: _,
             text_layout_reporters: _,
             text_layout_reports: _,
         } = self;
@@ -945,9 +1002,10 @@ impl DocumentLayoutState {
             .get_or_insert_with(|| Box::new(TextContext::new()))
             .as_mut();
         for slot in probed.drain(..) {
-            if let Some(store) = nodes
-                .get_mut(slot.arena_key())
-                .and_then(|node| node.text.as_deref_mut())
+            if let Some(store) = index
+                .get(slot.arena_key())
+                .filter(|&&at| at != NO_ENTRY)
+                .and_then(|&at| entries[at as usize].text.as_deref_mut())
             {
                 store.restore_committed(context);
             }
@@ -958,7 +1016,7 @@ impl DocumentLayoutState {
         // symptom. Debug builds re-derive the answer the expensive way.
         debug_assert!(
             !self
-                .nodes
+                .entries
                 .iter()
                 .filter_map(|node| node.text.as_deref())
                 .any(TextStore::is_probe_dirty),
@@ -974,9 +1032,12 @@ impl DocumentLayoutState {
     /// the shaped layout only dies when the text or the style Parley shaped it
     /// from changes. Re-shaping a paragraph to lay it out one pixel narrower
     /// is the single most expensive thing this engine can do for no reason.
+    ///
+    /// A node with no entry has an empty cache already, and nothing above it
+    /// reads the mark clearing sets before its first write files the entry.
     pub(crate) fn clear_box_cache(&mut self, slot: NodeId) {
-        if let Some(node) = self.nodes.get_mut(slot.arena_key()) {
-            node.slot.clear_layout_cache();
+        if let Some(at) = self.entry_of(slot) {
+            self.entries[at].slot.clear_layout_cache();
         }
     }
 
@@ -992,8 +1053,8 @@ impl DocumentLayoutState {
     /// A paragraph is rebuilt rather than patched — parley's own mutability
     /// contract — so eviction is simply dropping it.
     pub(crate) fn clear_text_artifact(&mut self, slot: NodeId) {
-        if let Some(node) = self.nodes.get_mut(slot.arena_key()) {
-            node.text = None;
+        if let Some(at) = self.entry_of(slot) {
+            self.entries[at].text = None;
         }
     }
 
@@ -1009,46 +1070,114 @@ impl DocumentLayoutState {
 mod tests {
     use super::*;
 
-    fn text(owner: *mut TreeArenas<u32>, id: NodeId) -> Node<u32> {
-        let _ = owner;
-        Node::new_text(owner, id, String::new())
+    fn text(payload: u32) -> impl FnOnce(*mut TreeArenas<u32>, NodeId) -> Node<u32> {
+        move |owner, id| Node::new_text(owner, id, Box::default()).with_payload(payload)
     }
 
-    /// The one property no caller can check for itself: the two tree arenas
-    /// hand out, and give back, the same key for the same node, and the
-    /// lazily sized layout state resets a freed key so its next occupant
-    /// starts clean.
+    /// The one property no caller can check for itself: a freed key comes
+    /// back with its payload gone and a fresh handle, and the lazily filed
+    /// layout state resets a freed key's entry so its next occupant starts
+    /// clean.
     #[test]
-    fn the_tree_arenas_stay_key_aligned_across_reuse() {
+    fn a_freed_key_comes_back_clean() {
         let mut arenas: TreeArenas<u32> = TreeArenas::new();
         arenas.reserve_zero();
         let mut layout = DocumentLayoutState::new();
         let mut issued = Vec::new();
         for payload in 0..4 {
-            let id = arenas.insert_node(PayloadSlot::Node(payload), text);
-            assert_eq!(arenas.nodes.len(), arenas.payloads.len());
+            let id = arenas.insert_node(text(payload));
+            assert_eq!(arenas.get(id).map(Node::payload), Some(&payload));
             issued.push(id);
         }
 
         let freed = issued[1];
-        layout.at_mut(freed).scroll_offset.x = 7.0;
-        let (_, payload) = arenas.remove_node(freed);
+        layout.at_mut(freed).slot.static_position.x = 7.0;
+        layout
+            .scroll_offsets
+            .insert(freed, euclid::default::Vector2D::new(7.0, 0.0));
+        let node = arenas.remove_node(freed);
         layout.remove(freed);
-        assert!(matches!(payload, PayloadSlot::Node(1)));
-        assert_eq!(arenas.nodes.len(), arenas.payloads.len());
+        assert_eq!(
+            node.into_payload(),
+            Some(1),
+            "the payload leaves with its node"
+        );
         assert_eq!(arenas.slot(freed), None);
 
-        let next = arenas.insert_node(PayloadSlot::Node(9), text);
+        let next = arenas.insert_node(text(9));
         assert_eq!(
             next.arena_key(),
             freed.arena_key(),
             "the freed storage comes back"
         );
         assert_ne!(next, freed, "but the handle to it does not");
+        assert_eq!(arenas.get(next).map(Node::payload), Some(&9));
         assert!(
-            layout.at(next).scroll_offset.x.to_bits() == 0,
+            layout.slot_at(next).static_position.x.to_bits() == 0,
             "reused storage must not inherit the freed node's layout state"
         );
+        assert!(
+            layout.scroll_offsets.is_empty(),
+            "a freed scroll container's offset leaves with it"
+        );
+    }
+
+    /// Layout state is filed only for the keys something writes: a covered
+    /// key with no entry reads as never laid out, a key past the index reads
+    /// as nothing, and a text node's box writes file no entry at all.
+    #[test]
+    fn layout_state_is_filed_only_for_the_nodes_that_lay_out() {
+        let mut arenas: TreeArenas<u32> = TreeArenas::new();
+        arenas.reserve_zero();
+        let mut layout = DocumentLayoutState::new();
+        let element = arenas.insert_node(|owner, id| {
+            Node::new_element(owner, id, stylo::LocalName::from("view")).with_payload(0)
+        });
+        let run = arenas.insert_node(text(1));
+        assert!(layout.get(element).is_none(), "past the index: nothing");
+
+        layout.ensure_covers(arenas.slot_bound(), arenas.live_elements());
+        assert!(
+            layout
+                .get(element)
+                .is_some_and(|state| state.slot.layout_cache_is_empty() && state.text.is_none()),
+            "covered with no entry: never laid out"
+        );
+        assert!(!layout.has_entry(element) && layout.entries.is_empty());
+        assert!(!layout.has_entry(run), "a text node is never written");
+
+        layout.slot_mut(element).mark_hidden();
+        assert!(layout.has_entry(element));
+        assert!(layout.slot_at(element).is_hidden());
+        assert!(!layout.has_entry(run));
+        assert_eq!(layout.entries.len(), 1);
+    }
+
+    /// A page's first layout files its entries into the one reservation the
+    /// live element count sizes, rather than doubling `entries` through
+    /// `push`: only elements file an entry, so the count bounds them.
+    #[test]
+    fn a_first_layout_files_its_entries_into_one_reservation() {
+        let mut document = crate::tree::document::Document::new(
+            crate::tree::document::tests::device(),
+            "page",
+            (),
+        );
+        let root = document.document_element().id();
+        for _ in 0..100 {
+            let view = document.create_element("view", ());
+            document.append_child(root, view);
+            let text = document.create_element("text", ());
+            document.append_child(view, text);
+            let run = document.create_text_node("run", ());
+            document.append_child(text, run);
+        }
+        document.layout();
+
+        let elements = document.arenas().live_elements();
+        let entries = &document.layout_state().entries;
+        assert!(entries.len() > 100 && entries.len() <= elements);
+        assert_eq!(entries.capacity(), elements, "one exact reservation");
     }
 
     /// A handle nobody ever made resolves to nothing rather than indexing past
@@ -1058,7 +1187,7 @@ mod tests {
     fn a_handle_that_was_never_issued_resolves_to_nothing() {
         let mut arenas: TreeArenas<u32> = TreeArenas::new();
         arenas.reserve_zero();
-        let id = arenas.insert_node(PayloadSlot::Node(0), text);
+        let id = arenas.insert_node(text(0));
         assert_eq!(id.arena_key(), 1, "key zero is reserved");
 
         let never_issued = [
@@ -1109,7 +1238,7 @@ mod tests {
     fn a_handle_held_across_its_nodes_free_is_refused_even_once_reused() {
         let mut arenas: TreeArenas<u32> = TreeArenas::new();
         arenas.reserve_zero();
-        let held = arenas.insert_node(PayloadSlot::Node(1), text);
+        let held = arenas.insert_node(text(1));
         assert!(arenas.slot_is_current(held));
         assert!(arenas.try_at(held).is_some());
 
@@ -1120,7 +1249,7 @@ mod tests {
         );
         assert!(arenas.try_at(held).is_none());
 
-        let reused = arenas.insert_node(PayloadSlot::Node(2), text);
+        let reused = arenas.insert_node(text(2));
         assert_eq!(
             reused.arena_key(),
             held.arena_key(),

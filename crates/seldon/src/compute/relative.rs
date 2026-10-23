@@ -15,7 +15,9 @@ use super::util::{
 use super::{AbsoluteContainingBlock, compute_absolute_layout_in};
 use crate::geometry::{Edges, Line, Point, Size};
 use crate::style::containment::{ContainedAxes, contained_axes};
-use crate::style::{CoreStyle, RELATIVE_REFERENCE_NONE, RELATIVE_REFERENCE_PARENT, RelativeStyle};
+use crate::style::{
+    Contain, CoreStyle, RELATIVE_REFERENCE_NONE, RELATIVE_REFERENCE_PARENT, RelativeStyle,
+};
 use crate::tree::{
     AvailableSpace, LayoutGoal, LayoutInput, LayoutOutput, LayoutTree, RequestedAxis, SizingMode,
 };
@@ -106,6 +108,7 @@ impl ResolvedReference {
 }
 
 #[derive(Debug)]
+#[allow(clippy::struct_excessive_bools)]
 struct RelativeItem<N> {
     geometry: ItemGeometry,
     key: ItemKey<N>,
@@ -133,6 +136,14 @@ struct RelativeItem<N> {
     values_stable: Size<bool>,
     /// No margin or padding percentage tracks a content-derived inline basis.
     edges_stable: bool,
+    /// The item's box reads no percentage basis
+    /// ([`CoreStyle::reads_percentage_basis`]) and probes no intrinsic size
+    /// in the block axis, so a definite container width found after the
+    /// first two passes changes nothing resolved here or by
+    /// `prepare_intrinsic_sizes`: `refresh_item_bases` keeps the item, and
+    /// `measure_item` may keep a measurement the new width still fits
+    /// ([`measurement_still_fits`]).
+    inline_basis_free: bool,
 }
 super::util::impl_item_geometry!(RelativeItem);
 
@@ -178,6 +189,11 @@ where
         .map_or((Size::new(false, false), false), |container| {
             item_value_stability(style, geometry.aspect_ratio, container)
         });
+    // A block-axis intrinsic probe measures the item at the container's
+    // available width, which the third pass moves.
+    let inline_basis_free = !geometry.intrinsic.needs_min_content(Axis::Vertical)
+        && !geometry.intrinsic.needs_max_content(Axis::Vertical)
+        && !style.reads_percentage_basis();
     RelativeItem {
         geometry,
         key,
@@ -201,6 +217,7 @@ where
         content_independent: Size::new(false, false),
         values_stable,
         edges_stable,
+        inline_basis_free,
     }
 }
 
@@ -830,6 +847,37 @@ where
     input
 }
 
+/// Whether a basis-free item's measurement under `previous` answers `input`
+/// too. Both fix the same sizes and modes and differ at most in the parent
+/// size, which a basis-free box never reads, and in the available width.
+///
+/// An auto width is a fit-content width — `clamp(min(max-content,
+/// max(min-content, available)))`, as every container algorithm and leaf
+/// sizes one — so a margin box narrower than the available width it was
+/// measured at (or measured at max-content) took its max-content width, or
+/// a maximum below the available width, and any other available width at
+/// least that wide gives the same width and so the same layout inside it.
+/// The block axis must match: nothing here proves an auto height stable
+/// under another available height.
+#[inline]
+fn measurement_still_fits(previous: &LayoutInput, input: &LayoutInput, outer_width: f32) -> bool {
+    previous.goal == input.goal
+        && previous.sizing_mode == input.sizing_mode
+        && previous.known_dimensions == input.known_dimensions
+        && previous.definite_dimensions == input.definite_dimensions
+        && previous.reads_first_baseline == input.reads_first_baseline
+        && previous.reads_last_baseline == input.reads_last_baseline
+        && previous.available_space.height == input.available_space.height
+        && (previous.available_space.width == input.available_space.width
+            || match (previous.available_space.width, input.available_space.width) {
+                (AvailableSpace::MaxContent, AvailableSpace::Definite(next)) => outer_width <= next,
+                (AvailableSpace::Definite(previous), AvailableSpace::Definite(next)) => {
+                    outer_width < previous && outer_width <= next
+                }
+                _ => false,
+            })
+}
+
 fn measure_item<T>(
     tree: &T,
     state: &mut T::State,
@@ -848,6 +896,16 @@ fn measure_item<T>(
             && previous.known_dimensions == input.known_dimensions
             && previous.definite_dimensions == input.definite_dimensions
             && previous.available_space == input.available_space
+        {
+            item.last_measure = Some(input);
+            return;
+        }
+        if item.inline_basis_free
+            && measurement_still_fits(
+                &previous,
+                &input,
+                item.output.size.width + item.margin.horizontal_sum(),
+            )
         {
             item.last_measure = Some(input);
             return;
@@ -1103,6 +1161,17 @@ fn refresh_item_bases<'tree, T>(
     T::Style<'tree>: RelativeStyle,
 {
     for item in items {
+        if item.inline_basis_free {
+            // Nothing the item resolved reads the moved width basis but a
+            // percentage inset, which only a relative offset applies.
+            if item.position == PositionProperty::Relative {
+                item.inset = super::util::resolve_insets(
+                    tree.style(item.key.node).inset(),
+                    size_percentage_basis,
+                );
+            }
+            continue;
+        }
         let mut refreshed = resolve_item(
             &tree.style(item.key.node),
             item.key,
@@ -1326,6 +1395,7 @@ where
     scrollable_size
 }
 
+#[allow(clippy::too_many_arguments)]
 #[inline(never)]
 fn commit_out_of_flow<T>(
     tree: &T,
@@ -1335,6 +1405,7 @@ fn commit_out_of_flow<T>(
     container_size: Size<f32>,
     border: Edges<f32>,
     rtl: bool,
+    scrollable: Option<Size<f32>>,
 ) -> Size<f32>
 where
     T: LayoutTree,
@@ -1345,7 +1416,7 @@ where
     );
     let mut scrollable_size = Size::ZERO;
     super::util::debug_assert_tree_order(items.iter().map(|item| item.document_index));
-    let mut hoisted = super::HoistedPass::new(padding_box_size, border, rtl);
+    let mut hoisted = super::HoistedPass::new(padding_box_size, border, rtl, scrollable);
     for pending in items {
         hoisted.before(tree, state, node, pending.document_index);
         let style = tree.style(pending.node);
@@ -1355,7 +1426,8 @@ where
                     tree,
                     state,
                     pending.node,
-                    AbsoluteContainingBlock::lynx_padding_box(padding_box_size, rtl),
+                    AbsoluteContainingBlock::lynx_padding_box(padding_box_size, rtl)
+                        .with_scrollable(scrollable),
                     |_, _| Point::ZERO,
                 );
                 layout.order = pending.layout_order;
@@ -1394,7 +1466,10 @@ where
     T::Style<'tree>: RelativeStyle,
 {
     let style = tree.style(node);
-    let contained = contained_axes(&style);
+    let containment = style.containment();
+    let contained = contained_axes(containment, &style);
+    let layout_contained = containment.contains(Contain::LAYOUT);
+    let scroll_container = is_scroll_container(style.overflow());
     let layout_once = style.relative_layout_once() == relative_layout_once::T::True;
     let ResolvedContainerBox {
         preferred_definite: style_definite,
@@ -1582,21 +1657,12 @@ where
         &mut items,
         content_size,
         content_origin,
-        is_scroll_container(style.overflow()),
+        scroll_container,
     );
     for (document_index, child) in hidden {
         let order = u32::try_from(document_index).unwrap_or(u32::MAX);
         super::hide_child_at_order(tree, state, child, order);
     }
-    super::record_scrollable_containing_block(
-        tree,
-        state,
-        node,
-        &style,
-        outer_size,
-        border,
-        scrollable_size,
-    );
     // With no out-of-flow box to lay out, the pass adds nothing.
     let out_of_flow_size = if absolute_items.is_empty() && !tree.has_hoisted_children(state, node) {
         Size::ZERO
@@ -1609,11 +1675,23 @@ where
             outer_size,
             border,
             style.direction() == direction::T::Rtl,
+            super::scrollable_containing_block(
+                scroll_container,
+                outer_size,
+                border,
+                scrollable_size,
+            ),
         )
     };
     scrollable_size = scrollable_size.zip_map(out_of_flow_size, f32::max);
 
-    let scrollable_size = own_scrollable_overflow(&style, outer_size, border, scrollable_size);
+    let scrollable_size = own_scrollable_overflow(
+        layout_contained,
+        scroll_container,
+        outer_size,
+        border,
+        scrollable_size,
+    );
     LayoutOutput::new(outer_size, scrollable_size)
 }
 

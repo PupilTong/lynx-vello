@@ -36,7 +36,8 @@ where
     Style: crate::style::CoreStyle,
     Measure: FnMut(LeafMeasureInput) -> LeafMetrics,
 {
-    leaf::compute_leaf_layout_with_measurement(input, style, None, true, measure)
+    let contained = crate::style::containment::contained_axes(style.containment(), style);
+    leaf::compute_leaf_layout_with_measurement(input, style, contained, None, true, measure)
 }
 
 /// The used margins of a box whose placement its host performs itself.
@@ -243,24 +244,46 @@ pub fn compute_boundary_relayout<T: LayoutTree>(
     tree.compute_layout(state, node, input)
 }
 
+/// Answers `input` from the node's cache, or runs `compute_uncached` and
+/// stores what it produced.
+///
+/// A box whose layout reads no percentage basis
+/// ([`CoreStyle::reads_percentage_basis`]) is computed and cached against
+/// none: the basis changes nothing it produces, so the entry then answers
+/// every basis a parent hands it — a flex base-size probe and the commit
+/// after it, or a grid track's probe and the next track's — instead of one
+/// entry per basis.
+///
+/// The question is asked of the style only on a miss in an empty cache:
+/// every entry records the answer it was stored under, so a lookup compares
+/// a basis-free entry without the request's basis, and a later miss reads
+/// the answer back. Both hold for as long as the entries do, since the styles
+/// the answer reads are layout inputs whose change clears the cache.
 pub fn compute_cached_layout<T, ComputeFn>(
     tree: &T,
     state: &mut T::State,
     node: T::NodeId,
-    input: LayoutInput,
+    mut input: LayoutInput,
     compute_uncached: ComputeFn,
 ) -> LayoutOutput
 where
     T: LayoutTree,
     ComputeFn: FnOnce(&T, &mut T::State, T::NodeId, LayoutInput) -> LayoutOutput,
 {
-    if let Some(output) = tree.layout(state, node).cached_layout(input) {
+    let cached = tree.layout(state, node);
+    if let Some(output) = cached.cached_layout(input) {
         return output;
+    }
+    let reads_basis = cached
+        .recorded_reads_basis()
+        .unwrap_or_else(|| tree.style(node).reads_percentage_basis());
+    if !reads_basis {
+        input.parent_size = Size::NONE;
     }
 
     let output = compute_uncached(tree, state, node, input);
     let slot = tree.layout_mut(state, node);
-    slot.store_cached_layout(input, output);
+    slot.store_cached_layout_recording_basis(input, output, reads_basis);
     if input.goal.commits() {
         // A commit that ran is the one thing that rewrites descendant boxes;
         // a measurement pass reads them and writes none. Marking here is what
@@ -404,7 +427,12 @@ pub fn compute_absolute_layout<T: LayoutTree>(
 /// reaches, for a host that has to place one whose containing block did not
 /// run: an in-place relayout of a subtree the box sits in, which its
 /// containing block above it never sees. Both read the same padding box, so
-/// they agree on the result.
+/// they agree on the result — except for a box with a default anchor whose
+/// containing block is a scroll container: the container's own pass lays it
+/// out against css-position-4's scrollable containing block, which only that
+/// pass knows (its in-flow overflow, [`AbsoluteContainingBlock::scrollable`]),
+/// and this function cannot. A host does not place such a box here; it runs
+/// the containing block's pass instead.
 pub fn compute_hoisted_layout<T: LayoutTree>(
     tree: &T,
     state: &mut T::State,
@@ -428,43 +456,40 @@ pub fn compute_hoisted_layout<T: LayoutTree>(
     );
 }
 
-/// Hands the host css-position-4's scrollable containing block of `node`
-/// when it is a scroll container: its in-flow content's scrollable overflow
-/// `in_flow` (border-box coordinates, before any out-of-flow child adds to
-/// it) measured from the padding-box origin, never smaller than the padding
-/// box. Each algorithm calls this between its in-flow commit and its
-/// absolute pass.
+/// css-position-4's scrollable containing block of a container whose border
+/// box is `outer` inside `border`, when it is a scroll container: its in-flow
+/// content's scrollable overflow `in_flow` (border-box coordinates, before
+/// any out-of-flow box adds to it) measured from the padding-box origin,
+/// never smaller than the padding box. Each algorithm computes it between its
+/// in-flow commit and its absolute pass, and hands it to that pass in
+/// [`AbsoluteContainingBlock::scrollable`]: the spec's area ignores
+/// absolutely positioned boxes, so a box laid out against it cannot grow it.
 #[inline]
-pub(super) fn record_scrollable_containing_block<T: LayoutTree>(
-    tree: &T,
-    state: &mut T::State,
-    node: T::NodeId,
-    style: &impl CoreStyle,
+pub(super) fn scrollable_containing_block(
+    scroll_container: bool,
     outer: Size<f32>,
     border: Edges<f32>,
     in_flow: Size<f32>,
-) {
-    if !util::is_scroll_container(style.overflow()) {
-        return;
+) -> Option<Size<f32>> {
+    if !scroll_container {
+        return None;
     }
     let padding_box = Size::new(
         (outer.width - border.horizontal_sum()).max(0.0),
         (outer.height - border.vertical_sum()).max(0.0),
     );
-    tree.set_scrollable_containing_block(
-        state,
-        node,
-        Size::new(
-            (in_flow.width - border.left).max(padding_box.width),
-            (in_flow.height - border.top).max(padding_box.height),
-        ),
-    );
+    Some(Size::new(
+        (in_flow.width - border.left).max(padding_box.width),
+        (in_flow.height - border.top).max(padding_box.height),
+    ))
 }
 
 /// Lays out every box [`LayoutTree::hoisted_children`] reports for `node`,
 /// whose padding box is `padding_box_size` inside `border`: the absolute
 /// pass of a host algorithm (a paragraph) that has no own out-of-flow
-/// children to interleave them with.
+/// children to interleave them with. A paragraph is laid out as no scroll
+/// container's algorithm, so the boxes see its padding box, never a
+/// scrollable containing block.
 pub fn compute_hoisted_children<T: LayoutTree>(
     tree: &T,
     state: &mut T::State,
@@ -473,7 +498,7 @@ pub fn compute_hoisted_children<T: LayoutTree>(
     border: Edges<f32>,
     rtl: bool,
 ) {
-    HoistedPass::new(padding_box_size, border, rtl).rest(tree, state, node);
+    HoistedPass::new(padding_box_size, border, rtl, None).rest(tree, state, node);
 }
 
 /// One hoisted box: its static position moved from its box parent's
@@ -522,11 +547,20 @@ pub(super) struct HoistedPass {
 }
 
 impl HoistedPass {
+    /// `scrollable` is the container's scrollable containing block
+    /// ([`scrollable_containing_block`]), `None` unless it is a scroll
+    /// container.
     #[inline]
-    pub(super) const fn new(padding_box_size: Size<f32>, border: Edges<f32>, rtl: bool) -> Self {
+    pub(super) const fn new(
+        padding_box_size: Size<f32>,
+        border: Edges<f32>,
+        rtl: bool,
+        scrollable: Option<Size<f32>>,
+    ) -> Self {
         Self {
             next: 0,
-            containing_block: AbsoluteContainingBlock::padding_box(padding_box_size, rtl),
+            containing_block: AbsoluteContainingBlock::padding_box(padding_box_size, rtl)
+                .with_scrollable(scrollable),
             border,
         }
     }
@@ -639,6 +673,13 @@ pub(super) struct AbsoluteContainingBlock {
     /// Whether it is its generator's whole padding box, the one
     /// css-position-4's scrollable containing block replaces.
     pub(super) is_padding_box: bool,
+    /// css-position-4's scrollable containing block, when its generator is a
+    /// scroll container: the size of its in-flow scrollable overflow area
+    /// measured from the padding-box origin, never smaller than the padding
+    /// box ([`scrollable_containing_block`]). The generator's own algorithm
+    /// computed it in this run, before this pass; a box with a default anchor
+    /// is laid out against it where [`Self::is_padding_box`] holds.
+    pub(super) scrollable: Option<Size<f32>>,
     /// Its `direction`: what `start`/`end` mean in the horizontal axis.
     pub(super) rtl: bool,
     /// Whether the author's `justify-self`/`align-self` place the box
@@ -657,9 +698,17 @@ impl AbsoluteContainingBlock {
             size,
             padding_box_size: size,
             is_padding_box: true,
+            scrollable: None,
             rtl,
             honors_self_alignment: true,
         }
+    }
+
+    /// This containing block with its generator's scrollable containing
+    /// block.
+    #[inline]
+    pub(super) const fn with_scrollable(self, scrollable: Option<Size<f32>>) -> Self {
+        Self { scrollable, ..self }
     }
 
     /// The original containing block in this one's coordinates.
@@ -2191,7 +2240,6 @@ mod tests {
             &name,
             crate::style::PhysicalAxis::Vertical,
         ));
-        assert_eq!(tree.scrollable_containing_block(&state, 1), None);
         assert_eq!(tree.position_option_count(1), 0);
         assert!(core::ptr::eq(
             tree.position_option_style(1, 0),
@@ -2219,7 +2267,6 @@ mod tests {
         hoisted.size = Size::new(3.0, 4.0);
         tree.set_hoisted_layout(&mut state, 0, 1, hoisted);
         assert_eq!(state[1].unrounded.size, Size::new(3.0, 4.0));
-        tree.set_scrollable_containing_block(&mut state, 1, Size::new(9.0, 9.0));
         compute_hoisted_children(&tree, &mut state, 0, Size::ZERO, Edges::ZERO, false);
     }
 

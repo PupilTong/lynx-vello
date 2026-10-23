@@ -28,7 +28,7 @@ fn attribute_of(engine: &mut TestEngine, node: u64, name: &'static str) -> Optio
     engine
         .probe_document(move |tree| {
             tree.get(node_id(node))
-                .and_then(|live| live.attribute(name).map(str::to_owned))
+                .and_then(|live| live.attribute(name).map(std::borrow::Cow::into_owned))
         })
         .flatten()
 }

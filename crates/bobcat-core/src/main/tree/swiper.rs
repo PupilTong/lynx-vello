@@ -25,8 +25,9 @@
 //! - `#indicator`, the dot strip, below.
 //!
 //! web-core's `#bounce-padding` and its two circular slots are left out. The
-//! shadow sheet ([`SHADOW_RULES`]) is added per instance and reaches the host
-//! through `:host(…)`; the light-DOM item rules stay in the UA sheet
+//! shadow sheet ([`SHADOW_RULES`]) is parsed once per document, mounted on every
+//! instance, and reaches the host through `:host(…)`; the light-DOM item rules
+//! stay in the UA sheet
 //! ([`UA_RULES`]) and match the items as the host's children, while their
 //! percentages resolve against `#content`, their flat-tree parent, which is the
 //! host's size. The host keeps the container defaults every tag gets
@@ -351,7 +352,7 @@
 //!   (`x-swiper.css:77-80`), `scrollbar-width` and the per-item `view-timeline-name` rules: a
 //!   browser shortcut, a scrollbar this engine does not draw, and web-core's per-dot timelines.
 
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -364,7 +365,8 @@ use terminus::link::scroll::{
 };
 use terminus::link::stylo::values::specified::box_::ScrollSnapAlignKeyword;
 use terminus::link::{
-    CustomElement, MethodCall, MethodError, MethodOutcome, Node, NodeId, ShadowRootMode, Vector2D,
+    CustomElement, MethodCall, MethodError, MethodOutcome, Node, NodeId, ShadowRootMode,
+    ShadowSheet, Vector2D,
 };
 
 use super::scroll_container::{
@@ -541,6 +543,7 @@ pub(super) fn define(document: &mut LynxDocument, autoplays: Autoplays, events: 
             events,
             touch_count: TouchCount::default(),
             states: RefCell::default(),
+            shadow_sheet: OnceCell::new(),
         }),
     );
 }
@@ -674,6 +677,9 @@ struct Swiper {
     /// What each connected swiper's events remember, dropped when it is
     /// freed.
     states: RefCell<FxHashMap<NodeId, SwiperState>>,
+    /// [`SHADOW_RULES`], parsed by the first swiper of the document and
+    /// mounted on every swiper's shadow tree.
+    shadow_sheet: OnceCell<ShadowSheet>,
 }
 
 /// What a swiper's events remember between two deliveries.
@@ -698,7 +704,7 @@ impl SwiperState {
             current: document
                 .get(swiper)
                 .and_then(|element| element.attribute("current"))
-                .and_then(parse_float)
+                .and_then(|value| parse_float(&value))
                 .unwrap_or(0.0),
             scrolling: false,
         }
@@ -717,7 +723,7 @@ impl Swiper {
         if flag(element, "autoplay") {
             self.autoplays.start(
                 swiper,
-                autoplay_period(element.attribute("interval")),
+                autoplay_period(element.attribute("interval").as_deref()),
                 ClockInstant::now(),
             );
         }
@@ -885,7 +891,10 @@ impl CustomElement<()> for Swiper {
 
     fn constructed(&self, document: &mut LynxDocument, element: NodeId) {
         let shadow = document.attach_shadow(element, ShadowRootMode::Open);
-        document.add_shadow_stylesheet(shadow, SHADOW_RULES);
+        let sheet = self
+            .shadow_sheet
+            .get_or_init(|| document.parse_shadow_stylesheet(SHADOW_RULES));
+        document.add_shadow_sheet(shadow, sheet);
         let content = document.create_element("div", ());
         document.set_id_attribute(content, Some(CONTENT_ID));
         let slot = document.create_element("slot", ());
@@ -2163,7 +2172,7 @@ mod tests {
         for (part, id) in [(content, "content"), (indicator, "indicator")] {
             let node = document.get(part).expect("a live part");
             assert_eq!(node.tag_name(), Some("div"));
-            assert_eq!(node.attribute("id"), Some(id));
+            assert_eq!(node.attribute("id").as_deref(), Some(id));
         }
         let slot = document.get(content).expect("live").child_ids()[0];
         assert_eq!(document.get(slot).expect("live").tag_name(), Some("slot"));

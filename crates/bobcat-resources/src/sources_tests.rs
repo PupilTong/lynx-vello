@@ -164,7 +164,10 @@ async fn cached_failures_and_registration_changes_keep_their_source_semantics() 
     resources.clear_registered();
     assert!(result(cached_style(&resources, url.clone())).await.is_err());
     resources
-        .register_style_sheet(url.as_str(), bobcat_core::PreparsedStyleSheet::default())
+        .register_style_sheet(
+            url.as_str(),
+            Arc::new(bobcat_core::PreparsedStyleSheet::default()),
+        )
         .unwrap();
     preload(&resources, SourceRequest::StyleSheet(url.to_string()));
     assert!(
@@ -514,7 +517,7 @@ fn the_style_sheet_probe_answers_from_the_registry_alone() {
     resources
         .register_style_sheet(
             "app:///page/child.bundle/custom_section/CSS.css",
-            bobcat_core::PreparsedStyleSheet { rules: Vec::new() },
+            Arc::new(bobcat_core::PreparsedStyleSheet { rules: Vec::new() }),
         )
         .unwrap();
     resources

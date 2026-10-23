@@ -898,7 +898,9 @@ and §D.16 with what the wire format actually permits.)*
     - **Not implemented:** `dense` backfilling (§4.4 step 4), §6.4
       stacking-axis self-alignment, baseline alignment and baseline sharing
       in either axis, §3.1.1's intrinsic `repeat(auto-fill, auto)`, §3.4.2's
-      virtual-item grouping, subgrid, and fragmentation.
+      virtual-item grouping for spanning items (span-1 items are grouped per
+      track, 2026-10-21, as an exact sizing optimization that changes no
+      result), subgrid, and fragmentation.
 
     The pipeline and what it reuses from Grid live in
     [layout-architecture.md](layout-architecture.md); the tracking rows are

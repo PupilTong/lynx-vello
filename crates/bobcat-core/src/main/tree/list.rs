@@ -73,6 +73,51 @@
 //! the authored `list` *is* the box, so every `::part(content)` declaration
 //! lands on the tag itself.
 //!
+//! # The initial cell
+//!
+//! `initial-scroll-index` names the cell the list starts scrolled to.
+//! web-core reads it once, in `connectedCallback`, and calls
+//! `scrollToPosition({position})` (`XListAttributes.ts:45-63`), which puts
+//! `children.item(position)`'s `offsetTop` and `offsetLeft` at the
+//! scrollport's start, and does nothing for a position at or past
+//! `childElementCount` (`XList.ts:89-115`). Native reads the same name once
+//! (`core/renderer/ui_component/list/list_container_impl.cc:397-400,543-548`).
+//!
+//! The cascade picks the target with `scroll-view`'s
+//! `initial-scroll-to-index` rule ([`super::scroll_container`]'s "The initial
+//! child"): each element child of a list that carries the attribute is its
+//! `scroll-initial-target` exactly when the registered, inherited `<integer>`
+//! `--list-initial-index` equals the child's `sibling-index() - 1`. Only the
+//! number differs. A `scroll-view` reads its live attribute with `attr()`, so
+//! every write names a new target; the list reads the attribute once (user
+//! ruling 2026-10-21, both references' behavior). [`List`]'s
+//! `connected_callback` parses it as `attr(… type(<integer>))` would
+//! ([`initial_index`]) and writes the number as a presentational hint of
+//! `--list-initial-index` on the list, which nothing else writes. The UA rule
+//! `list { --list-initial-index: -1 }` stands under it, so a list without the
+//! hint never inherits an outer list's number. Consequences:
+//!
+//! - A later write of the attribute changes no hint and so names no new target: the list stays
+//!   where it is. Removing the attribute leaves the children unmatched, so there is no target and
+//!   nothing moves; writing it again brings back the frozen target, which has already been
+//!   honoured, so nothing moves then either.
+//! - An attribute first written after connect gets no hint: `-1`, no target, as web-core reads
+//!   nothing then.
+//! - Each connect reads the attribute again, as web-core's `connectedCallback` runs again. A list
+//!   moved within the document is therefore reconnected with the attribute's value at that moment.
+//! - Cells that arrive after connect bring the target with them, honoured once, where web-core
+//!   waits a microtask and then polls each animation frame until the list has a height.
+//!
+//! A cell is a target by its own box, so a cell whose contents still skip —
+//! every cell past the first screen at the first commit — sets the position
+//! from its size or its estimate. Alignment and the index behave as on a
+//! `scroll-view`, with the list's own axis (`scroll-orientation`) for the
+//! inline-axis gap: a horizontal list's cell narrower than the scrollport is
+//! aligned `nearest`, recorded in `docs/tracking/deviations.md`. A `wrapper`
+//! child is the indexed child, as in web-core, and has no box of its own
+//! (`display: contents`), so an index naming one scrolls nothing; web-core
+//! reads its `offsetTop`, 0.
+//!
 //! # Where this deliberately leaves web-core
 //!
 //! - **The span count defaults to `1`, not `0`** (`x-list.css:11`). Zero is not a workable CSS
@@ -132,6 +177,8 @@
 //! (`crates/terminus/tests/grammar_layout.rs:342-351`), so there is nothing to
 //! rename and the real gap properties are what an author writes.
 
+use std::borrow::Cow;
+
 use serde_json::{Map, Value};
 use terminus::link::event::ElementEvent;
 use terminus::link::scroll::{ScrollBehavior, ScrollBox};
@@ -175,6 +222,13 @@ use crate::main::record::write_record_field;
 /// `contain: none` spelled the way a browser's author-origin sheet has to
 /// spell it.
 ///
+/// # The initial cell
+///
+/// `list[initial-scroll-index] > *` is [`super::scroll_container`]'s
+/// `initial-scroll-to-index` child rule over `--list-initial-index`, whose
+/// value is the hint [`List`] writes at connect, not the live attribute;
+/// the module documentation's "The initial cell" says why.
+///
 /// # Cascade notes
 ///
 /// `list > *:not(list-item):not(wrapper)` is specificity (0,0,3), so it
@@ -199,6 +253,12 @@ list[scroll-orientation="horizontal"] {
 }
 list[enable-scroll="false"] { overflow-y: hidden; }
 list[scroll-orientation="horizontal"][enable-scroll="false"] { overflow-x: hidden; }
+@property --list-initial-index { syntax: "<integer>"; inherits: true; initial-value: -1; }
+list { --list-initial-index: -1; }
+list[initial-scroll-index] > * {
+  scroll-initial-target:
+    if(style(--list-initial-index: calc(sibling-index() - 1)): nearest; else: none);
+}
 list > *:not(list-item):not(wrapper) { display: none; }
 list-item {
   content-visibility: auto; contain: layout paint;
@@ -253,6 +313,35 @@ const UPPER_THRESHOLD_ITEM_COUNT: &str = "upper-threshold-item-count";
 /// How many element children from the end the lower zone reaches.
 const LOWER_THRESHOLD_ITEM_COUNT: &str = "lower-threshold-item-count";
 
+/// The attribute naming the cell the list starts on, read at connect.
+const INITIAL_SCROLL_INDEX: &str = "initial-scroll-index";
+
+/// The registered property the child rule tests, which the component sets
+/// as a presentational hint at connect.
+const INITIAL_INDEX_PROPERTY: &str = "--list-initial-index";
+
+/// `initial-scroll-index` as `attr(initial-scroll-index type(<integer>), -1)`
+/// reads it: an integer with an optional sign and surrounding whitespace,
+/// else `-1`, which names no child.
+fn initial_index(value: &str) -> i32 {
+    value.trim().parse().unwrap_or(-1)
+}
+
+/// Freezes the list's `initial-scroll-index` into the
+/// `--list-initial-index` hint the UA child rule reads; a list without the
+/// attribute keeps whatever it has, as web-core's `connectedCallback` reads
+/// nothing then.
+fn freeze_initial_index(document: &mut LynxDocument, list: NodeId) {
+    let Some(index) = document
+        .get(list)
+        .and_then(|node| node.attribute(INITIAL_SCROLL_INDEX))
+        .map(|value| initial_index(&value))
+    else {
+        return;
+    };
+    document.set_presentational_hint(list, INITIAL_INDEX_PROPERTY, &index.to_string());
+}
+
 /// Installs the `list` component, which queues its threshold events on
 /// `events`. Must run before any element could carry the tag, which is
 /// [`Document::define`](terminus::link::Document::define)'s own precondition.
@@ -267,8 +356,9 @@ pub(super) fn define(document: &mut LynxDocument, events: ComponentEvents) {
 }
 
 /// The `list` component: `scrollToPosition`, `scrollBy`, `autoScroll`,
-/// `getScrollContainerInfo` and `getVisibleCells`, and the `scrolltoupper`
-/// and `scrolltolower` events.
+/// `getScrollContainerInfo` and `getVisibleCells`, the `scrolltoupper`
+/// and `scrolltolower` events, and `initial-scroll-index` read once at
+/// connect.
 struct List {
     events: ComponentEvents,
     edges: ScrollEdges,
@@ -277,6 +367,10 @@ struct List {
 impl CustomElement<()> for List {
     fn observed_events(&self) -> &'static [&'static str] {
         &[SCROLL_EVENT]
+    }
+
+    fn connected_callback(&self, document: &mut LynxDocument, element: NodeId) {
+        freeze_initial_index(document, element);
     }
 
     fn freed(&self, element: NodeId) {
@@ -329,7 +423,7 @@ impl CustomElement<()> for List {
 fn is_horizontal(document: &LynxDocument, list: NodeId) -> bool {
     document
         .get(list)
-        .is_some_and(|node| node.attribute("scroll-orientation") == Some("horizontal"))
+        .is_some_and(|node| node.attribute("scroll-orientation").as_deref() == Some("horizontal"))
 }
 
 /// The zones the offset `scroll_box` holds lies in, on `list`'s scrolling
@@ -353,9 +447,7 @@ fn zones(document: &LynxDocument, list: NodeId, scroll_box: &ScrollBox) -> Zones
             offset >= max - threshold_px(document, list, LOWER_THRESHOLD)
         }
         count => element_children(document, list)
-            .count()
-            .checked_sub(count)
-            .and_then(|index| element_children(document, list).nth(index))
+            .nth_back(count - 1)
             .is_some_and(|child| {
                 overlaps_scrollport(document, list, child, scroll_box, horizontal)
             }),
@@ -377,7 +469,7 @@ fn item_count(document: &LynxDocument, list: NodeId, name: &str) -> usize {
     document
         .get(list)
         .and_then(|node| node.attribute(name))
-        .and_then(parse_int)
+        .and_then(|value| parse_int(&value))
         .filter(|count| *count > 0.0)
         .map_or(0, |count| count as usize)
 }
@@ -409,7 +501,9 @@ fn overlaps_scrollport(
 /// Whether `cell`, an element child of a list that has a box, generates one
 /// itself: its computed `display` is neither `none` (which the UA sheet
 /// gives every child that is no cell and no `wrapper`) nor `contents`.
-fn generates_box(document: &LynxDocument, cell: NodeId) -> bool {
+/// Shared with `refresh_view`, for a header or footer under its rendered
+/// `#container`.
+pub(super) fn generates_box(document: &LynxDocument, cell: NodeId) -> bool {
     document
         .get(cell)
         .and_then(terminus::link::Node::computed_style)
@@ -531,6 +625,7 @@ fn target_cell(
             document
                 .get(*child)
                 .and_then(|node| node.attribute("item-key"))
+                .as_deref()
                 == Some(key)
         });
         if let Some(cell) = keyed {
@@ -641,8 +736,14 @@ pub(super) fn visible_cells(document: &LynxDocument, list: NodeId) -> Vec<Visibl
             }
             let rect = rect_in_scroller(document, list, node.id())?.translate(-scroll_box.offset);
             rect.intersects(&scrollport).then(|| VisibleCell {
-                id: node.attribute("id").unwrap_or_default().to_owned(),
-                item_key: node.attribute("item-key").unwrap_or_default().to_owned(),
+                id: node
+                    .attribute("id")
+                    .map(Cow::into_owned)
+                    .unwrap_or_default(),
+                item_key: node
+                    .attribute("item-key")
+                    .map(Cow::into_owned)
+                    .unwrap_or_default(),
                 index,
                 rect,
             })
@@ -2201,5 +2302,248 @@ mod tests {
         document.layout();
         scrolled(&mut document, list, y(0.0));
         assert_eq!(heard(&events, list), []);
+    }
+
+    // --- `initial-scroll-index` ---------------------------------------------
+
+    fn targets(document: &LynxDocument, cells: &[NodeId]) -> Vec<String> {
+        cells
+            .iter()
+            .map(|cell| value(document, *cell, "scroll-initial-target"))
+            .collect()
+    }
+
+    /// The style of a list [`indexed_list`] builds, and of its cells: 300x600
+    /// with cells 300px tall, or 300x300 with cells 300px wide — each as
+    /// wide as the scrollport — when `horizontal`.
+    fn indexed_styles(horizontal: bool) -> (&'static str, &'static str) {
+        if horizontal {
+            ("width: 300px; height: 300px", "width: 300px")
+        } else {
+            ("width: 300px; height: 600px", "height: 300px")
+        }
+    }
+
+    /// A list with `attributes`, written before it connects — the order a
+    /// compiled page creates an element in — and `count` cells
+    /// ([`indexed_styles`]), horizontal when
+    /// `scroll-orientation="horizontal"` is among the attributes.
+    fn indexed_list(
+        attributes: &[(&str, &str)],
+        count: usize,
+    ) -> (LynxDocument, NodeId, Vec<NodeId>) {
+        let horizontal = attributes.contains(&("scroll-orientation", "horizontal"));
+        let (list_style, cell_style) = indexed_styles(horizontal);
+        let mut document = document();
+        let list = document.create_element(LIST_TAG, ());
+        document.set_inline_style(list, list_style);
+        for (name, value) in attributes {
+            document.set_attribute(list, name, value);
+        }
+        let page = document.document_element().id();
+        document.append_child(page, list);
+        let cells = (0..count)
+            .map(|_| cell(&mut document, list, cell_style))
+            .collect();
+        (document, list, cells)
+    }
+
+    /// The first commit starts the list with the indexed cell at the
+    /// scrollport's start on either axis, web-core's
+    /// `scrollToPosition({position})` from `connectedCallback`
+    /// (`XListAttributes.ts:45-63`, `XList.ts:89-115`), and carries the
+    /// position to the painter as an instant request. Cells as long as the
+    /// scrollport or longer start at their start on x as on y, where the
+    /// initial target aligns the inline axis `nearest`.
+    #[test]
+    fn initial_scroll_index_starts_the_list_on_the_cell() {
+        for orientation in [None, Some(("scroll-orientation", "horizontal"))] {
+            for (index, offset) in [("0", 0.0), ("1", 300.0), ("2", 600.0)] {
+                let mut attributes = vec![("initial-scroll-index", index)];
+                attributes.extend(orientation);
+                let (mut document, list, cells) = indexed_list(&attributes, 4);
+                let expected_offset = if orientation.is_some() {
+                    Vector2D::new(offset, 0.0)
+                } else {
+                    Vector2D::new(0.0, offset)
+                };
+                let request = carried(&mut document, list);
+                assert_eq!(
+                    document.scroll_offset(list),
+                    expected_offset,
+                    "{attributes:?}"
+                );
+                assert_eq!(
+                    request,
+                    Some((expected_offset, ScrollBehavior::Instant)),
+                    "{attributes:?}"
+                );
+                assert_eq!(value(&document, list, "--list-initial-index"), index);
+                let expected: Vec<&str> = (0..4)
+                    .map(|cell| {
+                        if cell.to_string() == index {
+                            "nearest"
+                        } else {
+                            "none"
+                        }
+                    })
+                    .collect();
+                assert_eq!(targets(&document, &cells), expected, "{attributes:?}");
+            }
+        }
+    }
+
+    /// No attribute, or one that names no cell — negative, past the last
+    /// cell (web-core's `position < childElementCount`), or no integer —
+    /// scrolls nothing and records no request.
+    #[test]
+    fn an_initial_scroll_index_naming_no_cell_scrolls_nothing() {
+        for index in [None, Some("-1"), Some("4"), Some("10")]
+            .into_iter()
+            .chain(["abc", "1.5", ""].map(Some))
+        {
+            let attributes: Vec<(&str, &str)> = index
+                .map(|index| ("initial-scroll-index", index))
+                .into_iter()
+                .collect();
+            let (mut document, list, cells) = indexed_list(&attributes, 4);
+            assert_eq!(carried(&mut document, list), None, "{index:?}");
+            assert_eq!(document.scroll_offset(list), Vector2D::zero(), "{index:?}");
+            assert_eq!(targets(&document, &cells), ["none"; 4], "{index:?}");
+        }
+    }
+
+    /// The index counts the list's element children, web-core's
+    /// `children.item(position)`, so a child the list does not render still
+    /// takes a place.
+    #[test]
+    fn the_initial_scroll_index_counts_every_element_child() {
+        let (mut document, list, _) = indexed_list(&[("initial-scroll-index", "2")], 0);
+        let first = cell(&mut document, list, "height: 300px");
+        let hidden = element_under(&mut document, list, "view", "height: 300px");
+        let target = cell(&mut document, list, "height: 300px");
+        cell(&mut document, list, "height: 300px");
+        document.commit();
+        assert_eq!(display(&document, hidden), Display::None);
+        assert_eq!(targets(&document, &[first, target]), ["none", "nearest"]);
+        assert_eq!(document.scroll_offset(list), Vector2D::new(0.0, 300.0));
+    }
+
+    /// A list started on cell 1 whose first request the painter has
+    /// carried out and which the user then scrolled to 50, as main sees it.
+    fn scrolled_away_list() -> (LynxDocument, NodeId, Vec<NodeId>) {
+        let (mut document, list, cells) = indexed_list(&[("initial-scroll-index", "1")], 4);
+        document.commit();
+        assert_eq!(document.scroll_offset(list).y, 300.0);
+        // Where main writes the offset the painter posted for a drag.
+        document.scroll_to(list, Vector2D::new(0.0, 50.0));
+        let serial = document
+            .pending_scroll_request(list)
+            .expect("not yet acknowledged");
+        document.acknowledge_scroll_request(list, serial);
+        (document, list, cells)
+    }
+
+    /// The attribute is read once, at connect (user ruling 2026-10-21), as
+    /// web-core's `connectedCallback` and native
+    /// (`list_container_impl.cc:543-548`) read it: a later write names no
+    /// new target and moves nothing, and neither does an unrelated commit.
+    #[test]
+    fn a_later_initial_scroll_index_write_does_not_scroll_the_list() {
+        let (mut document, list, cells) = scrolled_away_list();
+        document.set_inline_style(cells[0], "height: 300px; opacity: 0.5");
+        assert_eq!(carried(&mut document, list), None);
+        assert_eq!(document.scroll_offset(list).y, 50.0);
+
+        for index in ["2", "0", "abc"] {
+            set_attribute(&mut document, list, "initial-scroll-index", Some(index));
+            assert_eq!(carried(&mut document, list), None, "{index}");
+            assert_eq!(document.scroll_offset(list).y, 50.0, "{index}");
+            assert_eq!(value(&document, list, "--list-initial-index"), "1");
+            assert_eq!(
+                targets(&document, &cells),
+                ["none", "nearest", "none", "none"],
+                "{index}"
+            );
+        }
+    }
+
+    /// Removing the attribute after connect leaves no target and moves
+    /// nothing; writing it again brings back the frozen target, already
+    /// honoured, so nothing moves then either.
+    #[test]
+    fn removing_initial_scroll_index_after_connect_does_not_scroll_the_list() {
+        let (mut document, list, cells) = scrolled_away_list();
+        set_attribute(&mut document, list, "initial-scroll-index", None);
+        assert_eq!(carried(&mut document, list), None);
+        assert_eq!(document.scroll_offset(list).y, 50.0);
+        assert_eq!(targets(&document, &cells), ["none"; 4]);
+
+        set_attribute(&mut document, list, "initial-scroll-index", Some("3"));
+        assert_eq!(carried(&mut document, list), None);
+        assert_eq!(document.scroll_offset(list).y, 50.0);
+        assert_eq!(
+            targets(&document, &cells),
+            ["none", "nearest", "none", "none"]
+        );
+    }
+
+    /// An attribute first written after the list connected is not read, as
+    /// web-core reads nothing then: the list's own `-1` stands, not an outer
+    /// list's number.
+    #[test]
+    fn an_initial_scroll_index_written_after_connect_is_not_read() {
+        let (mut document, outer, outer_cells) = indexed_list(&[("initial-scroll-index", "1")], 3);
+        let (list_style, cell_style) = indexed_styles(false);
+        let inner = element_under(&mut document, outer_cells[1], LIST_TAG, list_style);
+        let cells: Vec<NodeId> = (0..3)
+            .map(|_| cell(&mut document, inner, cell_style))
+            .collect();
+        set_attribute(&mut document, inner, "initial-scroll-index", Some("1"));
+        document.commit();
+        assert_eq!(value(&document, inner, "--list-initial-index"), "-1");
+        assert_eq!(targets(&document, &cells), ["none"; 3]);
+        assert_eq!(document.scroll_offset(inner), Vector2D::zero());
+        assert_eq!(document.scroll_offset(outer).y, 300.0);
+    }
+
+    /// Connect is when the list joins the document, not when it joins its
+    /// parent: a list built inside a detached subtree reads its attribute
+    /// when the subtree is attached.
+    #[test]
+    fn a_list_in_a_subtree_attached_later_reads_the_attribute_then() {
+        let mut document = document();
+        let holder = document.create_element("view", ());
+        let (list_style, cell_style) = indexed_styles(false);
+        let list = element_under(&mut document, holder, LIST_TAG, list_style);
+        document.set_attribute(list, "initial-scroll-index", "2");
+        for _ in 0..4 {
+            cell(&mut document, list, cell_style);
+        }
+        let page = document.document_element().id();
+        document.append_child(page, holder);
+        document.commit();
+        assert_eq!(value(&document, list, "--list-initial-index"), "2");
+        assert_eq!(document.scroll_offset(list), Vector2D::new(0.0, 600.0));
+    }
+
+    #[test]
+    fn initial_index_reads_an_integer_as_typed_attr_does() {
+        use super::initial_index;
+
+        for (value, expected) in [
+            ("0", 0),
+            ("2", 2),
+            ("+3", 3),
+            (" 4 ", 4),
+            ("-1", -1),
+            ("-7", -7),
+            ("1.5", -1),
+            ("1e1", -1),
+            ("abc", -1),
+            ("", -1),
+        ] {
+            assert_eq!(initial_index(value), expected, "{value:?}");
+        }
     }
 }

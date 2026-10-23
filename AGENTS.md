@@ -1235,7 +1235,7 @@ the document's text and encodes its scene, so the registry, the natural-size
 relayout and the `load`/`error` follow the path every other report takes.
 The markup an `<svg content>` hands the document (`Document::set_image_document`)
 reaches the host the same way: the page's epilogue calls
-`MainThreadRuntime::request_documents` before its commit, which drains
+`MainThreadRuntime::settle_entry`, whose first step, before its commit, drains
 `Document::take_document_requests` into one `ViewNotice::RequestDocuments`
 beside `RequestImages`, and `LynxView::pump` hands each
 `(source, bytes, kind)` to `ResourceFetcher::request_document` after
@@ -2023,7 +2023,7 @@ a realm no longer invited when its call comes (the same three queries, read
 again after each call that ran) is skipped then. For a
 path in the document tree the page realm runs exactly the steps the one call
 before the table carried. Each call checkpoints on its own; a call that throws is
-collected and the walk goes on (`ListenerFailures`). The realm reports per
+collected into the caller's failure list and the walk goes on. The realm reports per
 (element, name) registrations with their passes: `listenerOpened(node, name,
 kinds)` (1 bubble, 2 capture, 4 global, or'ed; the host replaces the kinds on
 a repeat) and `listenerClosed(node, name)`, from `element-papi.ts`'s
@@ -2309,15 +2309,19 @@ reflection and its UA box), `tree::scroll_container` (`scroll-view` and
 `list` as scroll containers — which axis scrolls, which one clips, and which
 way the subtree stacks, from `web-elements`' own `scroll-view.css` and
 `x-list.css`; `enable-scroll="false"` leaves the box a scroll container only
-script can move — and a `scroll-view` component whose `CustomElement::invoke`
+script can move; `initial-scroll-to-index` by the viewpager recipe, a typed
+`attr()` and an `if()` over `sibling-index()` into each child's
+`scroll-initial-target` — and a `scroll-view` component whose `CustomElement::invoke`
 answers the `scrollTo`, `scrollBy`, `autoScroll` and `getScrollInfo` UI
 methods on the axis the tag scrolls; `takeContentScreenshot` is not built —
 and fires `scrolltoupper`/`scrolltolower` from the `scroll` it observes,
 native's edge rule over `upper-threshold`/`lower-threshold`, the
 `ScrollEdges` `list` shares, and `nearest_snap_position`, the nearest snap
 position the swiper and the pager report by),
-`tree::list` (`list`'s scroll axis, `list-type` layout modes and cell
-virtualization as UA rules, and a `list` component whose `CustomElement::invoke`
+`tree::list` (`list`'s scroll axis, `list-type` layout modes, cell
+virtualization as UA rules, `initial-scroll-index` as `scroll-view`'s
+child rule over a `--list-initial-index` hint the component writes once, at
+connect, and a `list` component whose `CustomElement::invoke`
 answers `scrollToPosition`, `scrollBy` and `autoScroll` (`scroll-view`'s, on
 the list's axis), `getScrollContainerInfo` and `getVisibleCells`;
 `getScrollInfo` is not built, and the base set's `scrollTo` answers on a list;
@@ -2481,8 +2485,8 @@ attributes use UA `attr()` declarations and registered custom properties;
 hints, the swiper's item count, the refresh view's slot
 assignment, the dialog's `:open`/`:modal` state, the overlay's shadow
 tree, its dialog's top-layer membership and its events, the markdown
-element's shadow tree, its rendering and its events, and the frame's
-shadow root need `terminus::link::CustomElement` callbacks. Runtime attribute members perform
+element's shadow tree, its rendering and its events, the frame's
+shadow root, and the list's `initial-scroll-index`, read once at connect, need `terminus::link::CustomElement` callbacks. Runtime attribute members perform
 DOM mutations; Stylo tracks attribute dependencies and recascades on changes.
 HTML's own rules — the dialog's, the popover's and the display `dialog` maps
 `block` to — are written with their selectors inside `:where()` and ordered
@@ -3778,7 +3782,7 @@ Rulings and limits to know before touching it:
   tail after the root stacking context, the inert floor below the topmost
   blocking entry for hit testing, relevance, and removal with the element
   through the one unlink path. Each entry's `::backdrop` is a detached
-  element node (`PayloadSlot::Backdrop`) styled by Stylo's lazy pseudo
+  element node (marked by its node's backdrop flag) styled by Stylo's lazy pseudo
   cascade after each flush, laid out by a tail after the rounding tail, and
   hit-tested as its element; it is never handed out. A side table, not a
   per-node bit: the layer is almost always empty and every per-box reader
@@ -3975,8 +3979,7 @@ resolution, the `position-area` grid, `anchor-center`, the css-position-3
 host-placed boxes; Lynx `linear`/`relative` keep starlight's inset-only
 placement) and the §6.5 fallback loop (`compute/anchor.rs`,
 `anchor_area.rs`, `anchor_fallback.rs`), against `LayoutTree` methods whose
-defaults mean "no anchors" (`anchor_rect`,
-`scrollable_containing_block`, `position_option_style`,
+defaults mean "no anchors" (`anchor_rect`, `position_option_style`,
 `set_anchor_outcome`, …). A box that uses none of it pays two style
 predicates, and a `position_option_count` call only when it lists
 `position-try-fallbacks`; an anchored box's own run reads its base

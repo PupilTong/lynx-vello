@@ -650,7 +650,10 @@ before it spawns anything and waits for none of the view's sources;
 `load_entry` completes the entry when its answer arrives; `consume_commands` is
 the one ordered consumer of the command channel; `consume_metrics` settles the
 page once per change of the painter's metrics; `consume_worker_events` is the
-one ordered consumer of this view's workers; the epilogue spawns one
+one ordered consumer of this view's workers, which, as `consume_commands` does,
+runs what is queued when it reads as one entry, each event delivered by its
+own call and checkpoint, and stops at an end served meanwhile; the epilogue
+spawns one
 `load_module` per resource load an import produced, one `settle_future` per
 `Future` a `.then` asked the realm to settle, and one `load_font_face` per
 `@font-face` rule a mounted sheet declared; `serve_clock` owns the realm's one
@@ -1580,7 +1583,7 @@ once per listening realm per dispatch — the host's one walk over the path
 calls each realm the listener table says listens, at the path's top step
 (`MainThreadRuntime::dispatch`) — carrying the whole event path, which each
 realm walks over the steps it holds handles for,
-as two comma-joined id strings and everything else as primitives: whether the event bubbles — which decides how
+as its step count and two node ids per step, and everything else as primitives: whether the event bubbles — which decides how
 much of that path the bind pass runs on, and whether the `global-bindEvent`
 pass runs at all — the event's `timestamp`, and a numeric detail kind followed
 by the numbers that kind spends (a position and an optional wheel delta plus
