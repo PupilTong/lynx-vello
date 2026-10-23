@@ -88,6 +88,17 @@ jobs:
           cargo llvm-cov --workspace --lcov --output-path lcov.info \
             --ignore-filename-regex '(^|/)vendor(/|$)'
 
+      # A golden that differs leaves `-expected`/`-actual`/`-diff` PNGs beside
+      # its golden directory (`crates/*/tests/artifacts`); keep them, so a
+      # rendering that differs only on this runner can be read.
+      - name: Upload golden diffs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: golden-diffs
+          path: crates/*/tests/artifacts/
+          if-no-files-found: ignore
+
       - name: Stylo fork Lynx tests
         run: |
           targets=""
