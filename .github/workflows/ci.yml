@@ -80,13 +80,13 @@ jobs:
         with:
           tool: cargo-llvm-cov
 
-      # Han text with no `lang` falls back to the font CoreText picks for the
-      # process's preferred languages (fontique passes no locale), so the
-      # web-core e2e goldens that show Chinese depend on that list. They were
-      # recorded with this one; a stock runner has `en-US` alone and picks
-      # another face, with other line metrics.
-      - name: Preferred languages the goldens were recorded with
-        run: defaults write -g AppleLanguages -array en-US zh-Hans-US ja-US
+      # PingFang SC is an on-demand macOS font asset a fresh runner lacks.
+      # Without it CoreText answers Han fallback with the private
+      # `.PingFang UI` face, which fontique cannot use, so the text falls back
+      # to Heiti SC, whose line metrics differ from the PingFang SC the
+      # web-core e2e goldens that show Chinese were recorded with.
+      - name: Download the PingFang SC font asset
+        run: swift .github/scripts/download-pingfang.swift
 
       - name: Tests + coverage
         # One instrumented build and one run of every test. Per-crate coverage
