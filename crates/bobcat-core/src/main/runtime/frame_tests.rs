@@ -158,7 +158,12 @@ fn serving_the_card(src: &str) -> TestViewSpec {
 /// The same, with `root` as the card's root body. [`SECOND`] is served
 /// too, with its own root, its BTS boot and no page CSS.
 fn serving_a_root(src: &str, root: &str) -> TestViewSpec {
-    let spec = TestViewSpec::new(&host_entry(src))
+    serving_a_root_under(&host_entry(src), root)
+}
+
+/// [`serving_a_root`], with `entry` as the host page.
+fn serving_a_root_under(entry: &str, root: &str) -> TestViewSpec {
+    let spec = TestViewSpec::new(entry)
         .with_fetchable(CARD)
         .with_module(&format!("{CARD}/root.js"), &super::card_entry(root))
         .serving_style_sheet(&format!("{CARD}/style-info.css"), "text { color: red }")
@@ -478,6 +483,207 @@ fn a_throwing_root_is_reported_once_and_still_renders() {
             .any(|event| matches!(event, EngineEvent::ScriptRunError(_))),
         "the throw is not reported a second time: {events:?}"
     );
+}
+
+/// The host page with a page-realm registration of each kind for `load` —
+/// a `bindload` worklet and a listener on the frame, a listener on the page,
+/// a `global-bindEvent` on the host's own text — and a frame showing `src`.
+/// Each logs `load <label> <detail> <whether the target is the frame>
+/// <phase>`.
+fn load_host(src: &str) -> String {
+    host_page_with(
+        src,
+        true,
+        r"
+        globalThis.runWorklet = (value, params) => value.body(params[0]);
+        const heard = (label) => (event) => console.log('load ' + label + ' ' +
+            JSON.stringify(event.detail) + ' ' +
+            (event.target.uid === __GetElementUniqueID(frame)) + ' ' + event.eventPhase);
+        const worklet = (label) => ({ type: 'worklet', value: { body: heard(label) } });
+        __AddEvent(frame, 'bindEvent', 'load', worklet('bind'));
+        __AddEventListener(frame, 'load', heard('frame'), {});
+        __AddEventListener(page, 'load', heard('page'), {});
+        __AddEvent(own, 'global-bindEvent', 'load', worklet('global'));
+        ",
+    )
+}
+
+/// [`root`] for [`CARD`], whose `root` first files a listener for `load` on
+/// its own page, logging `load card <detail> <whether the target is the
+/// page> <phase>`, then runs `after`.
+fn load_root(after: &str) -> String {
+    format!(
+        "const cardPage = __CreatePage('0', 0); \
+        __AddEventListener(cardPage, 'load', (event) => console.log('load card ' + \
+            JSON.stringify(event.detail) + ' ' + \
+            (event.target.uid === __GetElementUniqueID(cardPage)) + ' ' + event.eventPhase), {{}}); \
+        {} {after}",
+        root(CARD)
+    )
+}
+
+/// The lines [`load_host`]'s and [`load_root`]'s registrations log for one
+/// `load` of a card loaded from `src` as written, in the order they run: the
+/// page realm's walk — the frame's worklet and listener at the target, the
+/// page's listener as it bubbles, the global pass with no phase — and then
+/// the card's own, the dispatching realm, at its page.
+fn load_lines(src: &str) -> [String; 5] {
+    let detail = format!(r#"{{"statusCode":0,"statusMessage":"success","url":"{src}"}}"#);
+    [
+        format!("load bind {detail} true 2"),
+        format!("load frame {detail} true 2"),
+        format!("load page {detail} true 3"),
+        format!("load global {detail} true 0"),
+        format!("load card {detail} true 2"),
+    ]
+}
+
+/// Every console message among `events` that starts with `load `.
+fn load_logged(events: &[EngineEvent]) -> Vec<&str> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            EngineEvent::ConsoleMessage { message, .. } if message.starts_with("load ") => {
+                Some(message.as_str())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Once a frame's card has loaded its root, its boot dispatches one `load`
+/// at its nested page (user rulings 2026-10-21 and 2026-10-23), bubbling and
+/// composed, with web-core's success `detail` and the frame's `src` as
+/// written: the page realm hears it on the frame, retargeted to the frame —
+/// its `bindload`, its listener there, its listener on the page as it
+/// bubbles and its `global-bindEvent` — each once, and then the card's own
+/// listener on its page.
+#[test]
+fn a_frames_card_fires_load_once_its_root_has_loaded() {
+    let src = "child.web.bundle";
+    let mut engine =
+        serving_a_root_under(&load_host(src), &load_root("")).create(Arc::new(NoWakeup));
+    let mut events = Vec::new();
+    let lines = load_lines(src);
+    pump_until_logged(&mut engine, &mut events, &lines[4]);
+    pump_until(
+        &mut engine,
+        &mut events,
+        "the nested card rendered",
+        |state| state.nested.len() == 2,
+    );
+    for _ in 0..20 {
+        events.extend(engine.pump());
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(load_logged(&events), lines.each_ref().map(String::as_str));
+    assert_eq!(reported(&events), Vec::<&str>::new());
+}
+
+/// A card whose `root` throws has still loaded it: the throw is reported
+/// once, in the card's realm, and the `load` is dispatched all the same.
+#[test]
+fn a_frames_card_whose_root_threw_still_fires_load() {
+    let mut engine = serving_a_root_under(
+        &load_host(CARD),
+        &load_root("throw Error('the root threw');"),
+    )
+    .create(Arc::new(NoWakeup));
+    let mut events = Vec::new();
+    let lines = load_lines(CARD);
+    pump_until_logged(&mut engine, &mut events, &lines[4]);
+    for _ in 0..20 {
+        events.extend(engine.pump());
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(load_logged(&events), lines.each_ref().map(String::as_str));
+    let messages = reported(&events);
+    assert_eq!(messages.len(), 1, "{events:?}");
+    assert!(messages[0].contains("the root threw"), "{messages:?}");
+}
+
+/// A `src` that does not fetch boots nothing and fires no `load`: its one
+/// diagnostic is all there is (native's failure `load` is not built).
+#[test]
+fn a_frame_src_that_does_not_fetch_fires_no_load() {
+    let missing = "app:///missing.web.bundle";
+    let mut engine =
+        serving_a_root_under(&load_host(missing), &load_root("")).create(Arc::new(NoWakeup));
+    let mut events = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let finished = |events: &[EngineEvent]| {
+        events
+            .iter()
+            .any(|event| matches!(event, EngineEvent::ScriptFinished))
+    };
+    while !finished(&events) || reported(&events).is_empty() {
+        for event in engine.pump() {
+            assert!(!event.is_fatal(), "the view ended: {event:?}");
+            events.push(event);
+        }
+        assert!(Instant::now() < deadline, "no diagnostic: {events:?}");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    for _ in 0..20 {
+        events.extend(engine.pump());
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(load_logged(&events), Vec::<&str>::new());
+    let messages = reported(&events);
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    assert!(
+        messages[0].contains(&format!("frame {missing}")),
+        "{messages:?}"
+    );
+}
+
+/// A page-realm `load` listener runs inside the card's boot, so one that
+/// gives the frame a new `src` lets go of the card that is still booting:
+/// that boot stops there, connecting no BTS and rendering nothing into the
+/// page the teardown freed, and the new `src`'s card boots into the fresh
+/// page and fires its own `load`.
+#[test]
+fn a_load_listener_that_writes_a_new_src_replaces_the_booting_card() {
+    let entry = host_page_with(
+        CARD,
+        true,
+        &format!(
+            r"
+            __AddEventListener(frame, 'load', (event) => {{
+                console.log('load ' + event.detail.url);
+                if (event.detail.url === '{CARD}') __SetAttribute(frame, 'src', '{SECOND}');
+            }}, {{}});
+            "
+        ),
+    );
+    let mut engine = serving_a_root_under(&entry, &root(CARD)).create(Arc::new(NoWakeup));
+    let mut events = Vec::new();
+    pump_until_logged(&mut engine, &mut events, &format!("load {SECOND}"));
+    pump_until_logged(
+        &mut engine,
+        &mut events,
+        &format!("bts {SECOND} booted undefined/undefined"),
+    );
+    pump_until(
+        &mut engine,
+        &mut events,
+        "the second card rendered",
+        |state| state.nested.len() == 2,
+    );
+    for _ in 0..20 {
+        events.extend(engine.pump());
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(
+        load_logged(&events),
+        [format!("load {CARD}"), format!("load {SECOND}")]
+    );
+    assert_eq!(
+        logged_times(&events, &format!("bts {CARD} booted undefined/undefined")),
+        0,
+        "the card let go of during its boot connected no BTS: {events:?}"
+    );
+    assert_eq!(reported(&events), Vec::<&str>::new());
 }
 
 /// A card whose `root` also logs `tick` every few milliseconds, for as long

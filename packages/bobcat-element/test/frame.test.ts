@@ -208,14 +208,14 @@ describe("frameSourceChanged", () => {
     future.__BobcatSettleFuture(id!, false, undefined);
     await drain();
     expect(FakeShadowRealm.created).toBe(1);
-    // The card boots at the resolved URL, with the view's module table for
-    // its BTS.
+    // The card boots at the resolved URL, with `src` as written for the
+    // `url` of its `load`, and the view's module table for its BTS.
     expect(calls.slice(3)).toEqual([
       ["importValue", "bobcat:frame-boot", "boot"],
       ["importValue", "bobcat:frame-boot", "dispose"],
       ["importValue", "bobcat:frame-boot", "updateData"],
       ["importValue", "bobcat:frame-boot", "updateGlobalProps"],
-      ["boot", 3, "app:///cards/child.web.bundle", "{}", "{}", SYSTEM_INFO, MODULE_TABLE],
+      ["boot", 3, "app:///cards/child.web.bundle", "child.web.bundle", "{}", "{}", SYSTEM_INFO, MODULE_TABLE],
     ]);
 
     // The frame keeps `src` as written: the same string again is unchanged.
@@ -244,7 +244,7 @@ describe("frameSourceChanged", () => {
     expect(FakeShadowRealm.created).toBe(0);
     await drain();
     expect(FakeShadowRealm.created).toBe(1);
-    expect(calls.at(-1)).toEqual(["boot", 3, "app:///cached.web.bundle", "{}", "{}", SYSTEM_INFO, MODULE_TABLE]);
+    expect(calls.at(-1)).toEqual(["boot", 3, "app:///cached.web.bundle", "app:///cached.web.bundle", "{}", "{}", SYSTEM_INFO, MODULE_TABLE]);
   });
 
   it("starts nothing for a stale generation", async () => {
@@ -260,7 +260,7 @@ describe("frameSourceChanged", () => {
     await drain();
     expect(FakeShadowRealm.created).toBe(1);
     expect(calls.filter(call => call[0] === "boot")).toEqual([
-      ["boot", 3, "app:///second.web.bundle", "{}", "{}", SYSTEM_INFO, MODULE_TABLE],
+      ["boot", 3, "app:///second.web.bundle", "app:///second.web.bundle", "{}", "{}", SYSTEM_INFO, MODULE_TABLE],
     ]);
   });
 
@@ -295,7 +295,7 @@ describe("frameSourceChanged", () => {
     await drain();
     expect(FakeShadowRealm.created).toBe(1);
     expect(calls.filter(call => call[0] === "boot")).toEqual([
-      ["boot", 3, "app:///child.web.bundle", "{}", "{}", SYSTEM_INFO, MODULE_TABLE],
+      ["boot", 3, "app:///child.web.bundle", "app:///child.web.bundle", "{}", "{}", SYSTEM_INFO, MODULE_TABLE],
     ]);
 
     // Nor does a removal undo what the next write compares against: the
@@ -329,7 +329,7 @@ describe("frameSourceChanged", () => {
     ]);
     await drain();
     expect(FakeShadowRealm.created).toBe(2);
-    expect(calls.at(-1)).toEqual(["boot", 3, "app:///second.web.bundle", "{}", "{}", SYSTEM_INFO, MODULE_TABLE]);
+    expect(calls.at(-1)).toEqual(["boot", 3, "app:///second.web.bundle", "app:///second.web.bundle", "{}", "{}", SYSTEM_INFO, MODULE_TABLE]);
   });
 
   it("does nothing for the src the frame already has, as native and web-core skip it", () => {
@@ -396,7 +396,7 @@ describe("connection", () => {
       ["resolveUrl", "app:///child.web.bundle"],
       ["fetchResource", "app:///child.web.bundle"],
     ]);
-    expect(calls.at(-1)).toEqual(["boot", 3, "app:///child.web.bundle", "{}", "{}", SYSTEM_INFO, MODULE_TABLE]);
+    expect(calls.at(-1)).toEqual(["boot", 3, "app:///child.web.bundle", "app:///child.web.bundle", "{}", "{}", SYSTEM_INFO, MODULE_TABLE]);
   });
 
   it("does not start a second load for a frame connected while its first is in flight", async () => {
@@ -494,7 +494,7 @@ describe("the last exposure list", () => {
       ["importValue", "bobcat:frame-boot", "dispose"],
       ["importValue", "bobcat:frame-boot", "updateData"],
       ["importValue", "bobcat:frame-boot", "updateGlobalProps"],
-      ["boot", 3, SECOND, "{}", "{}", SYSTEM_INFO, MODULE_TABLE],
+      ["boot", 3, SECOND, SECOND, "{}", "{}", SYSTEM_INFO, MODULE_TABLE],
     ]);
   });
 
@@ -518,7 +518,7 @@ describe("the last exposure list", () => {
     await drain();
     expect(calls.filter(call => call[0] === "resetFrame")).toEqual([["resetFrame", 3]]);
     expect(calls.filter(call => call[0] === "boot")).toEqual([
-      ["boot", 3, "app:///third.web.bundle", "{}", "{}", SYSTEM_INFO, MODULE_TABLE],
+      ["boot", 3, "app:///third.web.bundle", "app:///third.web.bundle", "{}", "{}", SYSTEM_INFO, MODULE_TABLE],
     ]);
   });
 
@@ -587,7 +587,7 @@ describe("data and global-props", () => {
     frameSourceChanged(frame, 3, CHILD);
     await drain();
     expect(boots()).toEqual([
-      ["boot", 3, CHILD, '{"label":"first"}', '{"theme":"dark"}', SYSTEM_INFO, MODULE_TABLE],
+      ["boot", 3, CHILD, CHILD, '{"label":"first"}', '{"theme":"dark"}', SYSTEM_INFO, MODULE_TABLE],
     ]);
     expect(updates()).toEqual([]);
   });
@@ -597,8 +597,8 @@ describe("data and global-props", () => {
       /** `boot`'s call for `src` with `json` as this attribute and `{}` as the other. */
       function booted(src: string, json: string): unknown[] {
         return name === "data"
-          ? ["boot", 3, src, json, "{}", SYSTEM_INFO, MODULE_TABLE]
-          : ["boot", 3, src, "{}", json, SYSTEM_INFO, MODULE_TABLE];
+          ? ["boot", 3, src, src, json, "{}", SYSTEM_INFO, MODULE_TABLE]
+          : ["boot", 3, src, src, "{}", json, SYSTEM_INFO, MODULE_TABLE];
       }
 
       it("hands every write after boot to the card's update, equal or not, and boots nothing", async () => {

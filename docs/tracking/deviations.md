@@ -3168,8 +3168,40 @@ consequential choice about whether to follow the spec or the quirk.
     adopts is mounted on the frame's shadow root, and `terminus` loads no
     `@font-face` rule of a shadow-tree sheet
     (`Document::append_shadow_rules`).
-  - *No `load` event* yet, and a frame with no author height and no
-    `auto-height` is 0 tall (strict containment).
+  - *The frame's `load` is dispatched by the card's own boot, at its
+    nested page (user rulings 2026-10-21 and 2026-10-23).* Once the card's
+    entry MTS has loaded — a throwing `root` included, which is reported
+    and boot goes on — `bobcat:frame-boot`'s `boot` dispatches
+    `__CreateEvent(8, "load", {bubbles: true, composed: true},
+    {statusCode: 0, statusMessage: "success", url: src})` at the nested
+    page with `__DispatchEvent`, `src` being the frame's `src` as written,
+    before `__BobcatProcessInitData` and the card's `renderPage`. The
+    path crosses the frame's shadow root, so the realm that holds the
+    frame's handle is invited by the listener table and hears it
+    retargeted to the frame — `bindload`, a listener on an ancestor, a
+    `global-bindEvent` for `load` — and the card's own listeners on its
+    page hear it after that realm's: the host's `dispatchEvent` calls both
+    realms in the routed dispatch's order, the page realm first and then
+    the cards, as for every synthetic event.
+    Native's `FrameElement::SendLoadEvent`
+    (`lynx/core/renderer/dom/fiber/frame_element.cc:158-182`) sends a
+    custom `load` that does not bubble, at the frame, with `{url,
+    statusCode, statusMessage}`, once the bundle is loaded and before the
+    nested instance renders, also for a failed fetch with its error code
+    and message, and a Lepus global `frameLoaded` event. web-core's
+    `dispatchLynxViewLoadEvent`
+    (`web-core/ts/client/mainthread/elementAPIs/createElementAPI.ts:65-78`,
+    called at `:657`) dispatches `new CustomEvent('load', {detail:
+    {statusCode: 0, statusMessage: 'success', url}, bubbles: true,
+    cancelable: true, composed: true})` at the nested `lynx-view`, on
+    success only, inside the card's first `__FlushElementTree`, after it
+    rendered. Here the event is web-core's — bubbling, composed, success
+    only — except that it is not cancelable (nothing is), at native's
+    time. Not built: the failure `load` (a failed fetch or import, and a
+    boot that fails before the entry loaded, fire nothing) and
+    `frameLoaded`.
+  - *A frame with no author height and no `auto-height` is 0 tall*
+    (strict containment).
   - *A `src` change keeps the frame's last `data` and `global-props`*
     (user ruling 2026-10-15): every boot — the first, a new `src`'s, a
     reconnected frame's — reads the last values written, as web-core's
