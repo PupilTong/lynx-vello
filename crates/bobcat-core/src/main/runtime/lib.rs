@@ -26,6 +26,7 @@
 //! the Rust object it named.
 
 use std::cell::{Cell, RefCell, RefMut};
+use std::collections::BTreeMap;
 use std::fmt::{self, Write as _};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
@@ -38,7 +39,7 @@ use terminus::link::event::{EventDetail, ListenerKey, ListenerKinds, Registratio
 use terminus::link::{MethodCall, MethodError, MethodOutcome, StylePool};
 use tokio::sync::watch;
 
-use super::quickjs::{ScriptEngine, ScriptRuntime};
+use super::quickjs::{RealmCaller, ScriptEngine, ScriptRuntime};
 use crate::clock::ClockInstant;
 use crate::esm::{
     BTS_MODULE_SPECIFIER, ELEMENT_MODULE_SPECIFIER, Export, FRAME_MODULE_SPECIFIER,
@@ -137,6 +138,9 @@ const TAP_EVENT: &str = "tap";
 /// realm reads the discriminator alone and the one dispatch export stays
 /// general. Mirrored by the realm's own `DETAIL_*` constants in
 /// `element-papi.ts`. (1 was a `load`'s size, which crosses as extras now.)
+/// [`DETAIL_CLONED`] is no [`EventDetail`]'s: it is a synthetic event's
+/// script `detail`, as the structured clone the dispatching realm wrote
+/// ([`encode_synthetic_call`]).
 const DETAIL_POSITION: f64 = 0.0;
 const DETAIL_EMPTY: f64 = 2.0;
 const DETAIL_EXPOSURE: f64 = 3.0;
@@ -144,6 +148,7 @@ const DETAIL_KEY: f64 = 4.0;
 const DETAIL_INPUT: f64 = 5.0;
 const DETAIL_COMPOSITION: f64 = 6.0;
 const DETAIL_FOCUS: f64 = 7.0;
+const DETAIL_CLONED: f64 = 8.0;
 
 /// The bits a key event's modifiers cross as, in [`DETAIL_KEY`]'s last
 /// number. Mirrored by `element-papi.ts`.
@@ -2128,6 +2133,7 @@ impl MainThreadRuntime {
             outbox,
             thread: thread.clone(),
             workers: Rc::downgrade(&view_workers),
+            callers: RealmCallers::default(),
         });
         let (core, ()) = open_realm(
             js_runtime,
@@ -4165,7 +4171,28 @@ struct DocumentHost {
     /// What a child's worker owner is made from. Weak, as the thread handle
     /// is: the page realm's owner holds it, and goes with the page realm.
     workers: std::rc::Weak<super::workers::ViewWorkers>,
+    /// Every realm over the document, by its listener key, which the
+    /// synthetic dispatch member calls the invited realms through.
+    callers: RealmCallers,
 }
+
+/// What calls each realm over a view's document from inside a JavaScript
+/// call: the page realm under [`ListenerKey`] 0 and each `frame`'s card
+/// under its child's [`RealmId::listener_key`], so the map's order is the
+/// order a routed dispatch calls them in — the page realm, then the children
+/// in construction order. The host member `dispatchEvent` is its one reader
+/// ([`install_synthetic_event_members`]).
+///
+/// Separate from the realm core's [`crate::realm::child::ChildRealms`],
+/// which detaches a child from its list for the length of each operation on
+/// it: a child in the middle of a call of its own — the one whose
+/// `__DispatchEvent` is running, say — is still here to be called.
+///
+/// A caller holds its realm weakly ([`RealmCaller`]), so nothing here keeps
+/// a realm alive: a child's entry leaves in [`ChildDocumentState`]'s drop,
+/// the same drop that releases its registrations, and an entry whose realm
+/// has been freed in the meantime answers nothing when it is called.
+type RealmCallers = Rc<RefCell<BTreeMap<ListenerKey, Rc<RealmCaller>>>>;
 
 impl DocumentHost {
     /// Installs the document members into one realm, with `startup` as its
@@ -4187,9 +4214,22 @@ impl DocumentHost {
             key,
             retired.clone(),
         )?;
-        install_event_members(engine, &self.slot, key, retired)?;
+        install_event_members(
+            engine,
+            &self.slot,
+            key,
+            retired,
+            &self.callers,
+            &self.outbox,
+        )?;
         style_sheets::install_styles(engine, &self.slot, &self.outbox, self.thread.clone())?;
-        install_startup_strings(engine, startup)
+        install_startup_strings(engine, startup)?;
+        // Last, so a realm whose members could not all be installed is never
+        // called. Weak: see [`RealmCallers`].
+        self.callers
+            .borrow_mut()
+            .insert(key, Rc::new(engine.caller()));
+        Ok(())
     }
 }
 
@@ -4217,18 +4257,34 @@ impl ChildHostModules for DocumentHost {
         .map_err(MainThreadError::into_script_error)?;
         // Gone only with the page realm's owner, while the page realm is
         // released, when no JavaScript runs to construct a child.
-        let view = self.workers.upgrade().ok_or_else(|| {
-            crate::threads::platform_script_error(
-                "the view's workers have been released".to_owned(),
-            )
-        })?;
-        let workers = view.owner(Some(key));
-        workers
-            .install(engine)
-            .map_err(|error| context_of("installing Worker", error))?;
+        let installed = self
+            .workers
+            .upgrade()
+            .ok_or_else(|| {
+                crate::threads::platform_script_error(
+                    "the view's workers have been released".to_owned(),
+                )
+            })
+            .and_then(|view| {
+                let workers = view.owner(Some(key));
+                workers
+                    .install(engine)
+                    .map_err(|error| context_of("installing Worker", error))?;
+                Ok(workers)
+            });
+        let workers = match installed {
+            Ok(workers) => workers,
+            Err(error) => {
+                // A child that could not be furnished is refused and never
+                // runs, so nothing is to call it.
+                self.callers.borrow_mut().remove(&listener_key);
+                return Err(error);
+            }
+        };
         Ok(Box::new(ChildDocumentState {
             workers: Box::new(workers),
             slot: Rc::clone(&self.slot),
+            callers: Rc::clone(&self.callers),
             key: listener_key,
         }))
     }
@@ -4242,6 +4298,19 @@ fn install(
 ) -> Result<(), MainThreadError> {
     engine
         .register_host_module_function(HOST_MODULE_SPECIFIER, name, arity, callback)
+        .map_err(|error| MainThreadError::from_engine("installing the host module", error))
+}
+
+/// [`install`] for a member that may be called again while a call of it is
+/// running ([`ScriptEngine::register_reentrant_host_module_function`]).
+fn install_reentrant(
+    engine: &mut ScriptEngine,
+    name: &str,
+    arity: u8,
+    callback: impl Fn(&[HostArgument<'_>]) -> Result<HostValue, String> + 'static,
+) -> Result<(), MainThreadError> {
+    engine
+        .register_reentrant_host_module_function(HOST_MODULE_SPECIFIER, name, arity, callback)
         .map_err(|error| MainThreadError::from_engine("installing the host module", error))
 }
 
@@ -4583,6 +4652,8 @@ fn install_event_members(
     handle: &Rc<RefCell<DocumentSlot>>,
     key: ListenerKey,
     retired: Option<Rc<Cell<bool>>>,
+    callers: &RealmCallers,
+    outbox: &ViewOutbox,
 ) -> Result<(), MainThreadError> {
     let tree = Rc::clone(handle);
     let closed = retired.clone();
@@ -4610,7 +4681,7 @@ fn install_event_members(
         Ok(HostValue::Undefined)
     })?;
 
-    install_synthetic_event_members(engine, handle)
+    install_synthetic_event_members(engine, handle, key, callers, outbox)
 }
 
 /// Installs the two members a realm's `__CreateEvent` and `__DispatchEvent`
@@ -4622,29 +4693,54 @@ fn install_event_members(
 /// event when it is created, as DOM does, and the realm has no clock on this
 /// timeline of its own.
 ///
-/// `dispatchEvent(node, name, bubbles, composed, timestamp)` is the host's
-/// half of one synthetic dispatch at the element `node`. It computes the path
-/// once (`event_steps`), runs the engine components' walk over it to its end
-/// with an [`EventDetail::None`] — the script `detail` is a realm value and
-/// does not cross — and answers the path the realm then runs its own Lynx
-/// walk over, as one string: the steps [`realm_path_steps`] selects, the
-/// ones a routed dispatch hands each realm, as two comma-joined lists of
-/// decimal packed ids, nodes then targets, joined by `;` (`";"` for a path
-/// with no step a realm could hold). A string, because a member answers one
-/// value. So for a synthetic event the components hear it
-/// before the calling realm's Lynx handlers do, where a routed dispatch
-/// ([`MainThreadRuntime::dispatch`]) calls the realms at the path's top step
-/// first (the order a user ruling chose, 2026-10-22: the components are part
-/// of the engine, not of the app; `docs/tracking/deviations.md`). It is the
-/// walk split in two because a member runs inside a JavaScript call that
-/// already holds the runtime, so the routed dispatch, which calls realms,
-/// cannot be entered from here. No other realm is called. A component's
+/// `dispatchEvent(node, name, bubbles, composed, timestamp, detail)` is the
+/// host's half of one synthetic dispatch at the element `node`, made by the
+/// realm filed under `own`. It runs inside a JavaScript call that already
+/// holds the runtime, so the routed dispatch ([`MainThreadRuntime::dispatch`])
+/// cannot be entered from here; it runs the same three parts in its own
+/// order instead.
+///
+/// - Under one slot borrow it computes the path once (`event_steps`), runs the engine components'
+///   walk over it to its end with an [`EventDetail::None`] — the script `detail` is a realm value —
+///   decides which other realms to call by the routed dispatch's rule ([`realm_calls`] over the
+///   listener table, every realm but `own`), and encodes their one argument list: the routed layout
+///   ([`encode_path`], no extras) with the `detail` behind [`DETAIL_CLONED`] as the structured
+///   clone the realm wrote for it, or [`DETAIL_EMPTY`] for an `undefined` or `null` one.
+/// - With the slot released, it calls each invited realm's `__BobcatDispatchEvent` through its
+///   [`RealmCaller`] in `callers`' order — the page realm, then the children in construction order
+///   — re-reading who is still invited after each call that ran, as the routed dispatch does, and
+///   skipping a realm no longer invited or no longer there. No call checkpoints: the enclosing
+///   operation's checkpoint drains the queue. What a call throws is that realm's listener failure,
+///   sent as [`crate::view::EngineEvent::ListenerFailed`] on the view's engine-event channel, as a
+///   routed dispatch's is reported; it is never thrown into the dispatching realm, and the next
+///   realm is called all the same.
+/// - It answers the path the dispatching realm then runs its own Lynx walk over, as one string: the
+///   steps [`realm_path_steps`] selected, the ones a routed dispatch hands each realm, as two
+///   comma-joined lists of decimal packed ids, nodes then targets, joined by `;` (`";"` for a path
+///   with no step a realm could hold). A string, because a member answers one value. The realm
+///   walks its own event object, which is what keeps that object's identity for its listeners.
+///
+/// So a synthetic event is heard by the components first, then by the other
+/// realms in the kernel's order, then by the dispatching realm, where a
+/// routed dispatch calls every realm at the path's top step before the
+/// components on the steps below it (the components-first order a user
+/// ruling chose, 2026-10-22, and the other realms a user ruling of
+/// 2026-10-23 added; `docs/tracking/deviations.md`). A component's
 /// `stop_propagation` ends the components' walk alone, and an event a
 /// component queues during it is delivered by the component-events entry the
 /// epilogue posts, as one queued inside any other member is.
+///
+/// Registered re-entrant: a listener of another realm may dispatch an event
+/// of its own, synchronously, as DOM allows, and that dispatch can call this
+/// member's realm again while this call is still running. Every piece of
+/// state here — the slot and `callers` — is borrowed per use and released
+/// before any realm is called.
 fn install_synthetic_event_members(
     engine: &mut ScriptEngine,
     handle: &Rc<RefCell<DocumentSlot>>,
+    own: ListenerKey,
+    callers: &RealmCallers,
+    outbox: &ViewOutbox,
 ) -> Result<(), MainThreadError> {
     let tree = Rc::clone(handle);
     install(engine, "timelineMilliseconds", 0, move |_arguments| {
@@ -4655,34 +4751,140 @@ fn install_synthetic_event_members(
     })?;
 
     let tree = Rc::clone(handle);
-    install(engine, "dispatchEvent", 5, move |arguments| {
+    let callers = Rc::clone(callers);
+    let outbox = outbox.clone();
+    install_reentrant(engine, "dispatchEvent", 6, move |arguments| {
         const NAME: &str = "bobcat-internal:host.dispatchEvent";
         let target = node_id_argument(NAME, arguments, 0)?;
         let name = string_argument(NAME, arguments, 1)?;
         let bubbles = boolean_argument(NAME, arguments, 2)?;
         let composed = boolean_argument(NAME, arguments, 3)?;
         let timestamp = finite_number_argument(NAME, arguments, 4)?;
-        let mut slot = borrow_slot(NAME, &tree)?;
-        let document = slot.document_mut();
-        validate_live_element(document, NAME, target)?;
-        let steps = document.event_steps(target, bubbles, composed);
-        document.dispatch_element_event_over(&steps, name, &EventDetail::None, timestamp);
-        let mut nodes = String::new();
-        let mut targets = String::new();
-        for step in realm_path_steps(document, &steps) {
-            if !nodes.is_empty() {
-                nodes.push(',');
-                targets.push(',');
+        let detail = match arguments.get(5) {
+            None | Some(HostArgument::Undefined | HostArgument::Null) => None,
+            Some(&detail) => Some(detail),
+        };
+        // The listener table files every name lowercased, as the routed
+        // dispatch asks it (`dispatch_checkpointed`); the components' walk
+        // looks the name up as given.
+        let lowered;
+        let registered = if name.bytes().any(|byte| byte.is_ascii_uppercase()) {
+            lowered = name.to_ascii_lowercase();
+            lowered.as_str()
+        } else {
+            name
+        };
+        let (answer, steps, calls, invited, call_arguments) = {
+            let mut slot = borrow_slot(NAME, &tree)?;
+            let document = slot.document_mut();
+            validate_live_element(document, NAME, target)?;
+            let steps = document.event_steps(target, bubbles, composed);
+            document.dispatch_element_event_over(&steps, name, &EventDetail::None, timestamp);
+            let document = &*document;
+            let registrants: SmallVec<[ListenerKey; 2]> = callers
+                .borrow()
+                .keys()
+                .copied()
+                .filter(|&key| key != own)
+                .collect();
+            let (calls, invited) =
+                realm_calls(document, &steps, registered, registrants.into_iter());
+            let call_arguments = (!calls.is_empty())
+                .then(|| encode_synthetic_call(document, &steps, name, bubbles, timestamp, detail));
+            (
+                synthetic_path_answer(document, &steps),
+                steps,
+                calls,
+                invited,
+                call_arguments,
+            )
+        };
+        let Some(call_arguments) = call_arguments else {
+            return Ok(HostValue::String(answer));
+        };
+        // Who is still invited, as the calls before left the table; read
+        // again only after a call that ran, as `dispatch_checkpointed` does.
+        let mut live = Some(invited);
+        for &key in &calls {
+            if live.is_none() {
+                let mut slot = borrow_slot(NAME, &tree)?;
+                live = Some(Invited::read(slot.document_mut(), &steps, registered));
             }
-            write!(nodes, "{}", step.node.to_bits()).expect("writing to a String");
-            write!(targets, "{}", step.target.to_bits()).expect("writing to a String");
+            let invited = live.as_ref().expect("read just above");
+            if !invited.contains(key) {
+                continue;
+            }
+            // Cloned out, so the map is not borrowed while the realm runs:
+            // a nested dispatch reads it too.
+            let Some(caller) = callers.borrow().get(&key).cloned() else {
+                continue;
+            };
+            live = None;
+            if let Some(Err(error)) = caller.call_dispatch_event(&call_arguments) {
+                let error = MainThreadError::from_engine("delivering an event", error);
+                outbox.engine_event(
+                    crate::realm::policy::main_thread(crate::realm::policy::Scene::Listener)
+                        .event_for(error.into_script_error()),
+                );
+            }
         }
-        nodes.push(';');
-        nodes.push_str(&targets);
-        Ok(HostValue::String(nodes))
+        Ok(HostValue::String(answer))
     })?;
 
     Ok(())
+}
+
+/// The argument list `dispatchEvent` calls every other invited realm's
+/// `__BobcatDispatchEvent` with: [`encode_call`]'s layout — the name,
+/// `bubbles`, the timestamp, the path ([`encode_path`]) and an empty extras
+/// channel — and then the script `detail`: [`DETAIL_CLONED`] and the value
+/// as the dispatching realm lent it, a structured clone for an object, which
+/// the realm reads back as its own copy; [`DETAIL_EMPTY`] when there is
+/// none.
+fn encode_synthetic_call<'a>(
+    document: &LynxDocument,
+    steps: &terminus::link::event::EventSteps,
+    name: &'a str,
+    bubbles: bool,
+    timestamp: f64,
+    detail: Option<HostArgument<'a>>,
+) -> Arguments<'a> {
+    let mut arguments = Arguments::new();
+    arguments.push(HostArgument::String(name));
+    arguments.push(HostArgument::Boolean(bubbles));
+    arguments.push(HostArgument::Number(timestamp));
+    encode_path(document, steps, &mut arguments);
+    encode_extras(&[], &mut arguments);
+    match detail {
+        Some(detail) => {
+            arguments.push(HostArgument::Number(DETAIL_CLONED));
+            arguments.push(detail);
+        }
+        None => arguments.push(HostArgument::Number(DETAIL_EMPTY)),
+    }
+    arguments
+}
+
+/// What `dispatchEvent` answers the dispatching realm: the steps
+/// [`realm_path_steps`] selects as `"<nodes>;<targets>"`, two comma-joined
+/// lists of decimal packed ids, target first.
+fn synthetic_path_answer(
+    document: &LynxDocument,
+    steps: &terminus::link::event::EventSteps,
+) -> String {
+    let mut nodes = String::new();
+    let mut targets = String::new();
+    for step in realm_path_steps(document, steps) {
+        if !nodes.is_empty() {
+            nodes.push(',');
+            targets.push(',');
+        }
+        write!(nodes, "{}", step.node.to_bits()).expect("writing to a String");
+        write!(targets, "{}", step.target.to_bits()).expect("writing to a String");
+    }
+    nodes.push(';');
+    nodes.push_str(&targets);
+    nodes
 }
 
 /// Whether a change of `name`'s registrations on an element can change what
@@ -4724,6 +4926,7 @@ fn hears_exposure(document: &LynxDocument, node: terminus::link::NodeId) -> bool
 struct ChildDocumentState {
     workers: Box<dyn ChildHostState>,
     slot: Rc<RefCell<DocumentSlot>>,
+    callers: RealmCallers,
     key: ListenerKey,
 }
 
@@ -4739,6 +4942,13 @@ impl Drop for ChildDocumentState {
         // core, never inside a member, so nothing holds the slot here.
         if let Ok(mut slot) = self.slot.try_borrow_mut() {
             slot.forget_realm(self.key);
+        }
+        // With its registrations, so no synthetic dispatch calls a child
+        // that is gone. The caller holds the realm weakly, so the entry keeps
+        // nothing alive either way. The member borrows the map only to clone
+        // an entry out, never across a drop.
+        if let Ok(mut callers) = self.callers.try_borrow_mut() {
+            callers.remove(&self.key);
         }
     }
 }

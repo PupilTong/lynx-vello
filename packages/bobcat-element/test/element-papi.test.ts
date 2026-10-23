@@ -501,9 +501,10 @@ function createMockBobcat(issuedIds?: number[]): MockBobcat {
       bubbles: unknown,
       composed: unknown,
       timestamp: unknown,
+      detail: unknown,
     ) => {
       const id = nodeId("dispatchEvent", node);
-      calls.push(["dispatchEvent", id, eventName, bubbles, composed, timestamp]);
+      calls.push(["dispatchEvent", id, eventName, bubbles, composed, timestamp, detail]);
       return host.answerDispatch(
         id,
         eventName as string,
@@ -1624,6 +1625,7 @@ const DETAIL_KEY = 4;
 const DETAIL_INPUT = 5;
 const DETAIL_COMPOSITION = 6;
 const DETAIL_FOCUS = 7;
+const DETAIL_CLONED = 8;
 
 /**
  * What a test asks one dispatch's `detail` to be made of.
@@ -3560,19 +3562,73 @@ describe("__CreateEvent and __DispatchEvent", () => {
   it("hands the host the lowercased name, both flags and the creation timestamp", () => {
     const { inner } = tree();
     mock.timeline = 50;
-    const bubbling = __CreateEvent(1, "Custom", { bubbles: true, composed: true }, {});
+    const detail = { item: 3 };
+    const bubbling = __CreateEvent(1, "Custom", { bubbles: true, composed: true }, detail);
     // `capture` and `cancelable` are accepted and change nothing.
-    const plain = __CreateEvent(0, "custom", { capture: true, cancelable: true }, {});
+    const plain = __CreateEvent(0, "custom", { capture: true, cancelable: true }, null);
     mock.timeline = 99;
 
     expect(__DispatchEvent(inner, bubbling)).toBe(true);
     expect(__DispatchEvent(inner, plain)).toBe(true);
 
     const uid = __GetElementUniqueID(inner);
+    // The `detail` goes as the sixth argument, the event's own object, for
+    // the host to clone into the other realms it calls.
     expect(mock.named("dispatchEvent")).toEqual([
-      ["dispatchEvent", uid, "custom", true, true, 50],
-      ["dispatchEvent", uid, "custom", false, false, 50],
+      ["dispatchEvent", uid, "custom", true, true, 50, detail],
+      ["dispatchEvent", uid, "custom", false, false, 50, {}],
     ]);
+    expect(mock.named("dispatchEvent")[0]?.[6]).toBe(detail);
+  });
+
+  it("hands the host the detail the event holds when it is dispatched", () => {
+    const { inner } = tree();
+    const event = __CreateEvent(0, "custom", {}, { first: true }) as ListenerEvent;
+    const replaced = { second: true };
+    (event as { detail: unknown }).detail = replaced;
+
+    __DispatchEvent(inner, event);
+
+    expect(mock.named("dispatchEvent")[0]?.[6]).toBe(replaced);
+  });
+
+  it("lets a throw at the host's call propagate, before any listener runs", () => {
+    const { inner } = tree();
+    const runs: string[] = [];
+    __AddEventListener(inner, "custom", () => runs.push("inner"), {});
+    // What the bridge does with a value its structured clone refuses.
+    mock.answerDispatch = () => {
+      throw new TypeError("unsupported object class");
+    };
+    const event = __CreateEvent(0, "custom", {}, { callback: () => 1 }) as ListenerEvent;
+
+    expect(() => __DispatchEvent(inner, event)).toThrow(TypeError);
+    expect(runs).toEqual([]);
+    expect(event.eventPhase).toBe(0);
+  });
+
+  it("makes another realm's cloned detail the event's detail, as it came", () => {
+    const { page, outer, inner } = tree();
+    const clone = { item: 3, nested: { list: [1, 2] } };
+    const seen: unknown[] = [];
+    __AddEventListener(outer, "custom", (event: ListenerEvent) => {
+      seen.push(event.detail, event.target.uid, event.eventPhase);
+    }, {});
+    const nodes = [inner, outer, page].map((handle) => __GetElementUniqueID(handle));
+
+    elementModule.__BobcatDispatchEvent(
+      "custom",
+      true,
+      5,
+      nodes.length,
+      ...nodes.flatMap((node) => [node, nodes[0]]),
+      0,
+      DETAIL_CLONED,
+      clone,
+    );
+
+    expect(seen).toEqual([clone, nodes[0], BUBBLING_PHASE]);
+    expect(seen[0]).toBe(clone);
   });
 
   it("runs the capture, bubble and global passes over both registration forms", () => {

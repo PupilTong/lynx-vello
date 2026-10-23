@@ -11113,7 +11113,21 @@ fn frame_calls() -> (
     terminus::link::NodeId,
     terminus::link::NodeId,
 ) {
-    let (mut js, mut runtime, elements) = runtime();
+    let (js, runtime, elements, _, frame, inner) = frame_calls_watching();
+    (js, runtime, elements, frame, inner)
+}
+
+/// [`frame_calls`], with the far end of the view's outbox, where what the
+/// engine reports arrives.
+fn frame_calls_watching() -> (
+    ScriptRuntime,
+    MainThreadRuntime,
+    DocumentProbe,
+    PublishedNames,
+    terminus::link::NodeId,
+    terminus::link::NodeId,
+) {
+    let (mut js, mut runtime, elements, far) = runtime_over_watching_names(ingredients());
     runtime
         .run_main_thread_script(
             &mut js,
@@ -11127,7 +11141,7 @@ fn frame_calls() -> (
         let page = frame_page_of(&tree, frame);
         (frame, tree.get(page).unwrap().child_ids()[0])
     };
-    (js, runtime, elements, frame, inner)
+    (js, runtime, elements, far, frame, inner)
 }
 
 /// What the realms of [`FRAME_CALLS`] reported, in order, and empties it.
@@ -11152,6 +11166,363 @@ fn frame_lines(js: &mut ScriptRuntime, runtime: &mut MainThreadRuntime) -> Vec<S
         return Vec::new();
     }
     probe.split('|').map(str::to_owned).collect()
+}
+
+/// For a synthetic `ping` over [`FRAME_CALLS`]: a page-realm
+/// `__AddEventListener` on the frame, which runs `page_extra` (the event is
+/// `e`) after it reports, a page `global-bindEvent` on the spacer, and the
+/// card's own `__AddEventListener` on its `inner`; each reports
+/// `<label> <type> <target uid> <detail as JSON>`. The card gets
+/// `dispatchAt(uid, name, composed, detail)`, which dispatches a bubbling
+/// event its `__CreateEvent` made, the `detail` named by a key of its
+/// `details`, and answers what `__DispatchEvent` answered, or the error it
+/// threw; `card_extra` runs in the card after that.
+fn file_ping_listeners(
+    js: &mut ScriptRuntime,
+    runtime: &mut MainThreadRuntime,
+    frame: terminus::link::NodeId,
+    inner: terminus::link::NodeId,
+    page_extra: &str,
+    card_extra: &str,
+) {
+    runtime
+        .evaluate_module(
+            js,
+            &format!(
+                r"
+import {{ __AddEvent, __AddEventListener, __BobcatHandleOf, __CreatePage, __GetChildren }}
+    from 'bobcat:element';
+const pingLine = (label, e) =>
+    label + ' ' + e.type + ' ' + e.target.uid + ' ' + JSON.stringify(e.detail);
+globalThis.pingLine = pingLine;
+globalThis.spacerHandle = __GetChildren(__CreatePage())[0];
+__AddEventListener(__BobcatHandleOf({frame}), 'ping', (e) => {{
+    report(pingLine('page-frame', e));
+    {page_extra}
+}}, {{}});
+__AddEvent(spacerHandle, 'global-bindEvent', 'ping', {{
+    type: 'worklet',
+    value: {{ body: (e) => report(pingLine('page-global', e)) }},
+}});
+globalThis.realm.evaluate(`(report) => {{
+    const pingLine = (label, e) =>
+        label + ' ' + e.type + ' ' + e.target.uid + ' ' + JSON.stringify(e.detail);
+    globalThis.pingLine = pingLine;
+    globalThis.innerHandle = E.__BobcatHandleOf({inner});
+    E.__AddEventListener(innerHandle, 'ping', (e) => report(pingLine('card-inner', e)), {{}});
+    const details = {{
+        plain: () => ({{ n: 5, list: [1, 2] }}),
+        refused: () => ({{ n: 1, f() {{}} }}),
+    }};
+    globalThis.dispatchAt = (uid, name, composed, detail) => {{
+        try {{
+            return String(E.__DispatchEvent(
+                E.__BobcatHandleOf(uid),
+                E.__CreateEvent(0, name, {{ bubbles: true, composed }}, details[detail]()),
+            ));
+        }} catch (error) {{
+            return error.constructor.name + ': ' + error.message;
+        }}
+    }};
+    {card_extra}
+}}`)((text) => report(text));
+",
+                frame = packed_node_id(frame),
+                inner = packed_node_id(inner),
+            ),
+            "app:///ping-listeners.js",
+            "filing the ping listeners",
+        )
+        .unwrap();
+}
+
+/// Has the card of [`FRAME_CALLS`] dispatch a synthetic bubbling `ping` at
+/// its `inner`, with `detail` one of [`file_ping_listeners`]' keys, and
+/// report `card-answer <what __DispatchEvent answered>`.
+fn card_pings(
+    js: &mut ScriptRuntime,
+    runtime: &mut MainThreadRuntime,
+    inner: terminus::link::NodeId,
+    composed: bool,
+    detail: &str,
+) {
+    runtime
+        .evaluate_module(
+            js,
+            &format!(
+                "report('card-answer ' + globalThis.realm.evaluate(
+                     'dispatchAt({inner}, \"ping\", {composed}, \"{detail}\")'));",
+                inner = packed_node_id(inner),
+            ),
+            "app:///card-pings.js",
+            "dispatching the card's ping",
+        )
+        .unwrap();
+}
+
+/// The listener failures the engine reported so far, by their messages.
+fn listener_failures(far: &mut PublishedNames) -> Vec<String> {
+    std::iter::from_fn(|| far.0.notices.try_recv().ok())
+        .filter_map(|notice| match notice {
+            ViewNotice::Engine(crate::EngineEvent::ListenerFailed(error)) => {
+                Some(error.message.to_string())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// A frame's card dispatching a composed synthetic event at its nested page
+/// reaches the page realm as a routed event does (user ruling, 2026-10-23):
+/// its `__AddEventListener` on the frame, the event retargeted to the frame,
+/// and its `global-bindEvent` for the name, whose tree root, the document
+/// node, is on the path. Each is handed the card's `detail` as a structured
+/// clone. The page realm runs first, as the kernel calls it first, and the
+/// dispatching card's own listener last.
+#[test]
+fn a_cards_composed_synthetic_event_reaches_the_page_realm_first() {
+    let (mut js, mut runtime, _elements, mut far, frame, inner) = frame_calls_watching();
+    file_ping_listeners(&mut js, &mut runtime, frame, inner, "", "");
+    card_pings(&mut js, &mut runtime, inner, true, "plain");
+    let detail = r#"{"n":5,"list":[1,2]}"#;
+    assert_eq!(
+        frame_lines(&mut js, &mut runtime),
+        [
+            format!("page-frame ping {} {detail}", packed_node_id(frame)),
+            format!("page-global ping {} {detail}", packed_node_id(frame)),
+            format!("card-inner ping {} {detail}", packed_node_id(inner)),
+            "card-answer true".to_owned(),
+        ]
+    );
+    assert!(listener_failures(&mut far).is_empty());
+}
+
+/// A non-composed synthetic event at a card's node ends at the frame's
+/// shadow root, so neither page-realm registration is reached: only the
+/// card's own listener hears it.
+#[test]
+fn a_cards_non_composed_synthetic_event_stays_in_the_card() {
+    let (mut js, mut runtime, _elements, frame, inner) = frame_calls();
+    file_ping_listeners(&mut js, &mut runtime, frame, inner, "", "");
+    card_pings(&mut js, &mut runtime, inner, false, "plain");
+    assert_eq!(
+        frame_lines(&mut js, &mut runtime),
+        [
+            format!(
+                "card-inner ping {} {}",
+                packed_node_id(inner),
+                r#"{"n":5,"list":[1,2]}"#
+            ),
+            "card-answer true".to_owned(),
+        ]
+    );
+}
+
+/// A page-realm synthetic event at an element outside the frame does not
+/// call the card, whose `global-bindEvent` for the name sits in the frame's
+/// shadow tree, off the path: the page realm's own walk alone runs.
+#[test]
+fn a_pages_synthetic_event_outside_a_frame_does_not_call_its_card() {
+    let (mut js, mut runtime, elements, frame, inner) = frame_calls();
+    file_ping_listeners(
+        &mut js,
+        &mut runtime,
+        frame,
+        inner,
+        "",
+        "E.__AddEvent(innerHandle, 'global-bindEvent', 'ping', {
+             type: 'worklet', value: { body: (e) => report(pingLine('card-global', e)) },
+         });",
+    );
+    let spacer = elements.tree().document_element().child_ids()[0];
+    runtime
+        .evaluate_module(
+            &mut js,
+            "import { __CreateEvent, __DispatchEvent } from 'bobcat:element';
+             report('page-answer ' + __DispatchEvent(
+                 spacerHandle, __CreateEvent(0, 'ping', { bubbles: true, composed: true }, {})));",
+            "app:///page-pings.js",
+            "dispatching the page's ping",
+        )
+        .unwrap();
+    assert_eq!(
+        frame_lines(&mut js, &mut runtime),
+        [
+            format!("page-global ping {} {{}}", packed_node_id(spacer)),
+            "page-answer true".to_owned(),
+        ]
+    );
+}
+
+/// What a listener of another realm throws is that realm's listener
+/// failure, reported on the view's engine-event channel: the dispatching
+/// realm's `__DispatchEvent` still answers `true`, and its own listeners
+/// still run.
+#[test]
+fn a_throwing_listener_of_another_realm_is_reported_and_the_dispatch_goes_on() {
+    let (mut js, mut runtime, _elements, mut far, frame, inner) = frame_calls_watching();
+    file_ping_listeners(
+        &mut js,
+        &mut runtime,
+        frame,
+        inner,
+        "throw new Error('the page listener failed');",
+        "",
+    );
+    card_pings(&mut js, &mut runtime, inner, true, "plain");
+    let detail = r#"{"n":5,"list":[1,2]}"#;
+    assert_eq!(
+        frame_lines(&mut js, &mut runtime),
+        [
+            // The throw ends the page realm's walk, its global pass included.
+            format!("page-frame ping {} {detail}", packed_node_id(frame)),
+            format!("card-inner ping {} {detail}", packed_node_id(inner)),
+            "card-answer true".to_owned(),
+        ]
+    );
+    let failures = listener_failures(&mut far);
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    assert!(
+        failures[0].contains("delivering an event")
+            && failures[0].contains("the page listener failed"),
+        "{failures:?}"
+    );
+}
+
+/// A listener of another realm may dispatch a synthetic event of its own
+/// from inside the call, and that dispatch may call back into the realm
+/// whose `__DispatchEvent` is still running, whose `dispatchEvent` member is
+/// then entered again: the page's listener on the frame dispatches a
+/// `keyup`, which calls the card by its document-level `global-bindEvent`,
+/// whose handler dispatches a `pong` in the card. Everything runs, inner
+/// dispatches to their end first.
+#[test]
+fn a_listener_of_another_realm_dispatches_into_the_dispatching_realm_again() {
+    let (mut js, mut runtime, _elements, mut far, frame, inner) = frame_calls_watching();
+    file_ping_listeners(
+        &mut js,
+        &mut runtime,
+        frame,
+        inner,
+        "const { __CreateEvent, __DispatchEvent } = globalThis.papi;
+         __DispatchEvent(spacerHandle, __CreateEvent(0, 'keyup', { bubbles: true }, { k: 1 }));",
+        &format!(
+            "E.__AddEventListener(innerHandle, 'pong', (e) => report(pingLine('card-pong', e)), {{}});
+             E.__AddEvent(innerHandle, 'global-bindEvent', 'keyup', {{
+                 type: 'worklet',
+                 value: {{ body: (e) => {{
+                     report(pingLine('card-keyup', e));
+                     report('card-pong-answer ' + dispatchAt({inner}, 'pong', false, 'plain'));
+                 }} }},
+             }});",
+            inner = packed_node_id(inner)
+        ),
+    );
+    runtime
+        .evaluate_module(
+            &mut js,
+            "import * as papi from 'bobcat:element'; globalThis.papi = papi;",
+            "app:///papi-global.js",
+            "exposing the PAPI",
+        )
+        .unwrap();
+    card_pings(&mut js, &mut runtime, inner, true, "plain");
+    let detail = r#"{"n":5,"list":[1,2]}"#;
+    assert_eq!(
+        frame_lines(&mut js, &mut runtime),
+        [
+            format!("page-frame ping {} {detail}", packed_node_id(frame)),
+            format!("card-keyup keyup {} {{\"k\":1}}", packed_node_id(inner)),
+            format!("card-pong pong {} {detail}", packed_node_id(inner)),
+            "card-pong-answer true".to_owned(),
+            format!("page-global ping {} {detail}", packed_node_id(frame)),
+            format!("card-inner ping {} {detail}", packed_node_id(inner)),
+            "card-answer true".to_owned(),
+        ]
+    );
+    assert!(listener_failures(&mut far).is_empty());
+}
+
+/// A detail the structured clone refuses — one holding a function — throws
+/// at `__DispatchEvent`, in the dispatching realm, before any realm hears
+/// the event.
+#[test]
+fn a_synthetic_detail_the_clone_refuses_throws_at_the_dispatch() {
+    let (mut js, mut runtime, _elements, frame, inner) = frame_calls();
+    file_ping_listeners(&mut js, &mut runtime, frame, inner, "", "");
+    card_pings(&mut js, &mut runtime, inner, true, "refused");
+    let lines = frame_lines(&mut js, &mut runtime);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].starts_with("card-answer TypeError"), "{lines:?}");
+}
+
+/// The invitees are read from the listener table again after each realm
+/// call that ran, so a realm an earlier call closed is skipped, and a realm
+/// freed since is not reached by a later dispatch. A second child, `other`, dispatches a `keyup` at
+/// an element of its own, outside every tree, so both the page realm and the card are
+/// invited by their document-level `global-bindEvent`s; the page's handler
+/// closes the card the first time.
+#[test]
+fn a_realm_closed_or_released_before_its_call_is_skipped() {
+    let (mut js, mut runtime, _elements, mut far, _frame, inner) = frame_calls_watching();
+    runtime
+        .evaluate_module(
+            &mut js,
+            &format!(
+                r"
+import {{ __AddEvent, __CreatePage }} from 'bobcat:element';
+{FRAME_REALM}
+__AddEvent(__CreatePage(), 'global-bindEvent', 'keyup', {{
+    type: 'worklet',
+    value: {{ body: () => {{
+        report('page-keyup');
+        if (!globalThis.closed) {{
+            globalThis.closed = true;
+            globalThis.realm.evaluate('H.closeRealm()');
+        }}
+    }} }},
+}});
+globalThis.realm.evaluate(`(report) => {{
+    E.__AddEvent(E.__BobcatHandleOf({inner}), 'global-bindEvent', 'keyup', {{
+        type: 'worklet', value: {{ body: () => report('card-keyup') }},
+    }});
+}}`)((text) => report(text));
+globalThis.other = await frameRealm();
+other.evaluate(`(report) => {{
+    globalThis.runWorklet = (value, params) => value.body(params[0]);
+    const own = E.__CreateView(0);
+    E.__AddEvent(own, 'global-bindEvent', 'keyup', {{
+        type: 'worklet', value: {{ body: () => report('other-keyup') }},
+    }});
+    globalThis.keyup = () => String(E.__DispatchEvent(own, E.__CreateEvent(0, 'keyup', {{ bubbles: true }}, {{}})));
+}}`)((text) => report(text));
+",
+                inner = packed_node_id(inner)
+            ),
+            "app:///closing-keyup.js",
+            "filing the keyup handlers",
+        )
+        .unwrap();
+    let keyup = |js: &mut ScriptRuntime, runtime: &mut MainThreadRuntime| {
+        runtime
+            .evaluate_module(
+                js,
+                "report('other-answer ' + globalThis.other.evaluate('keyup()'));",
+                "app:///other-keyup.js",
+                "dispatching the other child's keyup",
+            )
+            .unwrap();
+        frame_lines(js, runtime)
+    };
+    let expected = ["page-keyup", "other-keyup", "other-answer true"];
+    assert_eq!(keyup(&mut js, &mut runtime), expected);
+    assert_eq!(
+        runtime.core().children.release_unneeded(),
+        1,
+        "the closed card is freed"
+    );
+    assert_eq!(keyup(&mut js, &mut runtime), expected);
+    assert!(listener_failures(&mut far).is_empty());
 }
 
 /// A tap inside a frame's card calls the page realm at the path's top — its
@@ -11936,7 +12307,7 @@ impl terminus::link::CustomElement<()> for SyntheticEventProbe {
 
 /// `__DispatchEvent` of an event `__CreateEvent` made: the host runs the
 /// engine components on the path first, with no detail — the script `detail`
-/// does not cross — and then the realm runs its Lynx walk, so a listener
+/// is the realms' alone — and then the realm runs its Lynx walk, so a listener
 /// reads what the component wrote; the component's `stop_propagation` ends
 /// its own walk and keeps no listener of the realm from running. What the
 /// component queued during the walk is delivered by the component-events

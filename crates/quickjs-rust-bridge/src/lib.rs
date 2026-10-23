@@ -67,7 +67,7 @@ mod implementation {
     use std::num::TryFromIntError;
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::ptr::{self, NonNull};
-    use std::rc::Rc;
+    use std::rc::{Rc, Weak};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, OnceLock};
     use std::time::Duration;
@@ -613,12 +613,19 @@ mod implementation {
 
         let called = catch_unwind(AssertUnwindSafe(|| {
             let values = read_host_arguments(argument_count, arguments)?;
-            let Ok(mut handler) = slot.handler.try_borrow_mut() else {
-                return Err(HostFunctionError::new(
-                    "this host function cannot be called while it is already running",
-                ));
-            };
-            handler(&values)
+            match slot {
+                HostSlot::Exclusive(handler) => {
+                    let Ok(mut handler) = handler.try_borrow_mut() else {
+                        return Err(HostFunctionError::new(
+                            "this host function cannot be called while it is already running",
+                        ));
+                    };
+                    handler(&values)
+                }
+                // Nothing to borrow: a call made while this one runs is
+                // the handler's own business.
+                HostSlot::Reentrant(handler) => handler(&values),
+            }
         }));
 
         let returned = match called {
@@ -873,8 +880,20 @@ mod implementation {
 
     type HostHandler = Box<dyn FnMut(&[HostArgument<'_>]) -> Result<HostValue, HostFunctionError>>;
 
-    struct HostSlot {
-        handler: RefCell<HostHandler>,
+    type ReentrantHostHandler =
+        Box<dyn Fn(&[HostArgument<'_>]) -> Result<HostValue, HostFunctionError>>;
+
+    /// What one host function runs, in one of two shapes.
+    enum HostSlot {
+        /// An `FnMut` ([`Context::function`]), borrowed mutably for the
+        /// length of each call, so a call that reaches the same function
+        /// again while it runs — through JavaScript it calls back into — is
+        /// refused with an exception rather than aliasing its state.
+        Exclusive(RefCell<HostHandler>),
+        /// An `Fn` ([`Context::function_reentrant`]), which a nested call
+        /// runs again while the outer call is still on the stack. Whatever
+        /// state it keeps is its own to borrow per use.
+        Reentrant(ReentrantHostHandler),
     }
 
     struct HostTable {
@@ -888,6 +907,17 @@ mod implementation {
         /// what C reads are their own. Nothing is copied and nothing is
         /// re-encoded; the previous return value, already consumed, is
         /// released by the same write.
+        ///
+        /// One place serves nested calls too. A host function whose handler
+        /// calls into a realm that calls a host function again
+        /// ([`Context::function_reentrant`], or any host function another
+        /// realm's code reaches) has its inner call's answer written here
+        /// while the outer handler is still running; the trampoline turns it
+        /// into a `JSValue` (`qjs_host_build`, which copies the bytes) as soon
+        /// as `host_dispatch` returns, before any more JavaScript or Rust of
+        /// the outer call runs. The outer answer is written only once its
+        /// handler has returned, so it replaces bytes already read and never
+        /// bytes still to be read.
         return_bytes: RefCell<Option<Vec<u8>>>,
     }
 
@@ -1599,7 +1629,47 @@ mod implementation {
         }
     }
 
+    /// A handle on a [`Context`] that does not keep it alive: what a host
+    /// keeps of a realm it may have to call from inside another realm's
+    /// call, where holding the realm itself would be a cycle — the host
+    /// function keeping the handle is freed only with the realm it is in.
+    ///
+    /// [`Self::upgrade`] answers the realm while some [`Context`] or
+    /// [`Value`] of it is still held anywhere, and `None` once the last of
+    /// them has dropped and the realm has been freed. A handle answers for
+    /// its own realm only: a later realm never reuses it.
+    #[derive(Clone)]
+    pub struct WeakContext {
+        inner: Weak<ContextInner>,
+    }
+
+    impl fmt::Debug for WeakContext {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter
+                .debug_struct("WeakContext")
+                .field("live", &(self.inner.strong_count() > 0))
+                .finish_non_exhaustive()
+        }
+    }
+
+    impl WeakContext {
+        /// The realm, as a handle of its own for as long as the caller holds
+        /// it, or `None` for a realm already freed.
+        #[must_use]
+        pub fn upgrade(&self) -> Option<Context> {
+            self.inner.upgrade().map(|inner| Context { inner })
+        }
+    }
+
     impl Context {
+        /// A [`WeakContext`] on this realm.
+        #[must_use]
+        pub fn downgrade(&self) -> WeakContext {
+            WeakContext {
+                inner: Rc::downgrade(&self.inner),
+            }
+        }
+
         /// Takes ownership of one C realm of `runtime`'s: from here on
         /// `qjs_context_free` runs when the last handle to it drops.
         fn adopt(raw: NonNull<ffi::QjsContext>, runtime: &Rc<RuntimeInner>) -> Self {
@@ -1852,13 +1922,41 @@ mod implementation {
             F: FnMut(&[HostArgument<'_>]) -> Result<HostValue, HostFunctionError> + 'static,
         {
             self.reclaim();
-            let (module_name_c, export_name_c) = host_module_names(module_name, export_name)?;
-            let function = self
-                .function(export_name, arity, handler)
-                .map_err(|mut error| {
-                    error.phase = ErrorPhase::RegisterModule;
-                    error
-                })?;
+            let names = host_module_names(module_name, export_name)?;
+            let function = self.function(export_name, arity, handler);
+            self.add_host_module_function(&names, function)
+        }
+
+        /// [`Self::register_host_module_function`] for an `Fn` closure, made
+        /// by [`Self::function_reentrant`]: one that may be called again
+        /// while a call of it is running.
+        pub fn register_host_module_function_reentrant<F>(
+            &mut self,
+            module_name: &str,
+            export_name: &str,
+            arity: u32,
+            handler: F,
+        ) -> Result<(), Error>
+        where
+            F: Fn(&[HostArgument<'_>]) -> Result<HostValue, HostFunctionError> + 'static,
+        {
+            self.reclaim();
+            let names = host_module_names(module_name, export_name)?;
+            let function = self.function_reentrant(export_name, arity, handler);
+            self.add_host_module_function(&names, function)
+        }
+
+        /// Adds a host function just made as the export the two names
+        /// [`host_module_names`] checked name.
+        fn add_host_module_function(
+            &mut self,
+            (module_name_c, export_name_c): &(CString, CString),
+            function: Result<Value, Error>,
+        ) -> Result<(), Error> {
+            let function = function.map_err(|mut error| {
+                error.phase = ErrorPhase::RegisterModule;
+                error
+            })?;
             let status = unsafe {
                 ffi::qjs_context_add_host_module_export(
                     self.raw().as_ptr(),
@@ -2064,16 +2162,54 @@ mod implementation {
         }
 
         /// Creates a JavaScript callable backed by a Rust closure.
+        ///
+        /// The closure is borrowed mutably for the length of each call, so a
+        /// call that reaches this same function again while it runs is
+        /// refused with an exception ("this host function cannot be called
+        /// while it is already running"). [`Self::function_reentrant`] is
+        /// the shape that allows one.
         pub fn function<F>(&mut self, name: &str, arity: u32, handler: F) -> Result<Value, Error>
         where
             F: FnMut(&[HostArgument<'_>]) -> Result<HostValue, HostFunctionError> + 'static,
         {
+            self.host_function(
+                name,
+                arity,
+                HostSlot::Exclusive(RefCell::new(Box::new(handler))),
+            )
+        }
+
+        /// [`Self::function`] for an `Fn` closure, which may be called again
+        /// while a call of it is running: a handler that calls into a realm
+        /// whose code calls this same function back runs both calls, the
+        /// inner one to its end inside the outer.
+        ///
+        /// Nothing is borrowed for the call, so every piece of state the
+        /// handler touches must be borrowed per use and released before it
+        /// enters JavaScript. The arguments each call is lent and the answer
+        /// it returns are its own, nested or not (see `HostTable`).
+        pub fn function_reentrant<F>(
+            &mut self,
+            name: &str,
+            arity: u32,
+            handler: F,
+        ) -> Result<Value, Error>
+        where
+            F: Fn(&[HostArgument<'_>]) -> Result<HostValue, HostFunctionError> + 'static,
+        {
+            self.host_function(name, arity, HostSlot::Reentrant(Box::new(handler)))
+        }
+
+        fn host_function(
+            &mut self,
+            name: &str,
+            arity: u32,
+            slot: HostSlot,
+        ) -> Result<Value, Error> {
             self.reclaim();
             let name = property_name(name)?;
             let arity = i32::try_from(arity).map_err(int_conversion_error)?;
-            let slot = Box::into_raw(Box::new(HostSlot {
-                handler: RefCell::new(Box::new(handler)),
-            }));
+            let slot = Box::into_raw(Box::new(slot));
             let raw = unsafe {
                 ffi::qjs_new_host_function(self.raw().as_ptr(), name.as_ptr(), arity, slot.cast())
             };
@@ -6887,5 +7023,5 @@ pub use implementation::{
     CallOutcome, Context, Error, ErrorKind, ErrorPhase, EvalOptions, EvalSource, HostArgument,
     HostFunctionError, HostValue, InterruptHandle, Member, ModuleNormalizer, RequiredKind,
     RequiredSource, Runtime, RuntimeOptions, SourceLocation, SourceType, StructuredBytes,
-    StructuredClone, Value, ValueKind,
+    StructuredClone, Value, ValueKind, WeakContext,
 };

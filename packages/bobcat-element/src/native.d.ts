@@ -315,14 +315,20 @@ interface BobcatNative {
    * named `eventName` (lowercased, as the realm files every name) at the
    * live element `nodeId` from its `bubbles` and `composed` flags, runs the
    * engine components' walk over it with an empty detail and `timestamp`,
-   * and answers the path the realm runs its own walk over, as one string:
-   * the target-first node ids, comma-joined, then `;`, then each step's
-   * shadow-retargeted target, position for position — the steps
+   * then calls `__BobcatDispatchEvent` in every other realm the routed
+   * dispatch's rule invites (a registration for the name on the path, or a
+   * `global-bindEvent` the path reaches), the page realm first and then the
+   * frames' cards in construction order, with `detail` — the event's own,
+   * structured-cloned at this call, so a value the clone refuses throws
+   * here — as a `DETAIL_CLONED` detail, or a `DETAIL_EMPTY` one for
+   * `undefined` or `null`. What one of those realms' listeners throws is
+   * reported as that realm's listener failure and never reaches this call.
+   * It answers the path this realm runs its own walk over, last, as one
+   * string: the target-first node ids, comma-joined, then `;`, then each
+   * step's shadow-retargeted target, position for position — the steps
    * `__BobcatDispatchEvent` is handed as node/target pairs, without the
    * shadow roots, the bubble steps and the nodes no longer live; `";"` for
-   * none. So the components
-   * hear the event before this realm's listeners, and no other realm hears
-   * it. A node that is not a live element, and a timestamp that is not a
+   * none. A node that is not a live element, and a timestamp that is not a
    * finite number, throw.
    */
   dispatchEvent(
@@ -331,6 +337,7 @@ interface BobcatNative {
     bubbles: boolean,
     composed: boolean,
     timestamp: number,
+    detail: unknown,
   ): string;
   /**
    * `lynx.stopExposure({sendEvent})` (`on` `0`) and `lynx.resumeExposure()`

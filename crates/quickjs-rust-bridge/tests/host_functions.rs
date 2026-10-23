@@ -683,3 +683,136 @@ mod release {
         assert_eq!(drops.get(), 1, "teardown must release the remainder");
     }
 }
+
+/// Installs `handler` as the global `name`, made by
+/// [`Context::function_reentrant`].
+fn define_reentrant(
+    realm: &mut Context,
+    name: &str,
+    arity: u32,
+    handler: impl Fn(&[HostArgument<'_>]) -> Result<HostValue, HostFunctionError> + 'static,
+) {
+    let function = realm.function_reentrant(name, arity, handler).unwrap();
+    let global = realm.global_object().unwrap();
+    realm.set_property(&global, name, &function).unwrap();
+}
+
+/// A re-entrant host function runs again inside its own call: `nest(n)`
+/// evaluates `nest(n - 1)` in the realm it was called from before it answers,
+/// so each answer is written while every outer call is still running. Each
+/// inner string is read by the call that asked for it before the outer one
+/// writes its own, so every level reads its own and the answers compose.
+#[test]
+fn a_reentrant_host_function_runs_again_inside_its_own_call() {
+    let mut realm = realm();
+    let weak = realm.downgrade();
+    define_reentrant(&mut realm, "nest", 1, move |arguments| {
+        let HostArgument::Number(depth) = arguments[0] else {
+            return Err(HostFunctionError::new("expected a depth"));
+        };
+        if depth == 0.0 {
+            return Ok(HostValue::String("0".repeat(64)));
+        }
+        let mut realm = weak.upgrade().expect("the realm is running this call");
+        let inner = realm
+            .evaluate(
+                EvalSource::new(&format!("nest({})", depth - 1.0)),
+                EvalOptions::default(),
+            )
+            .map_err(|error| HostFunctionError::new(error.message))?;
+        let inner = String::from_utf16(&inner.to_utf16().unwrap()).unwrap();
+        Ok(HostValue::String(format!("{depth}[{inner}]")))
+    });
+    assert_eq!(
+        text(&mut realm, "nest(3)"),
+        format!("3[2[1[{}]]]", "0".repeat(64))
+    );
+}
+
+/// The same for structured clones: each level answers the object it was
+/// handed after a nested call has answered a different one, and every level
+/// reads back exactly its own.
+#[test]
+fn nested_host_calls_each_return_their_own_structured_clone() {
+    let mut realm = realm();
+    let weak = realm.downgrade();
+    define_reentrant(&mut realm, "echo", 2, move |arguments| {
+        let HostArgument::Number(depth) = arguments[1] else {
+            return Err(HostFunctionError::new("expected a depth"));
+        };
+        if depth > 0.0 {
+            let mut realm = weak.upgrade().expect("the realm is running this call");
+            let inner = realm
+                .evaluate(
+                    EvalSource::new(&format!(
+                        "(() => {{ const d = {}; const o = echo({{ depth: d, text: 'y'.repeat(100 + d) }}, d); \
+                           if (o.depth !== d || o.text.length !== 100 + d) throw Error('inner ' + JSON.stringify(o)); \
+                           return o.depth; }})()",
+                        depth - 1.0
+                    )),
+                    EvalOptions::default(),
+                )
+                .map_err(|error| HostFunctionError::new(error.message))?;
+            assert_eq!(inner.as_number(), Some(depth - 1.0));
+        }
+        Ok(arguments[0].to_value())
+    });
+    assert_eq!(
+        text(
+            &mut realm,
+            "(() => { const o = echo({ depth: 4, text: 'z'.repeat(10) }, 4); \
+               return o.depth + ':' + o.text; })()",
+        ),
+        format!("4:{}", "z".repeat(10))
+    );
+}
+
+/// A host function made by [`Context::function`] is borrowed for its call,
+/// so a call that reaches it again while it runs is refused with an
+/// exception in the realm, which the outer call sees as the inner
+/// evaluation's failure.
+#[test]
+fn an_exclusive_host_function_refuses_a_nested_call() {
+    let mut realm = realm();
+    let weak = realm.downgrade();
+    realm
+        .define_global_function("nest", 1, move |arguments| {
+            let HostArgument::Number(depth) = arguments[0] else {
+                return Err(HostFunctionError::new("expected a depth"));
+            };
+            if depth == 0.0 {
+                return Ok(HostValue::String("reached".to_owned()));
+            }
+            let mut realm = weak.upgrade().expect("the realm is running this call");
+            let refused = realm
+                .evaluate(EvalSource::new("nest(0)"), EvalOptions::default())
+                .expect_err("the nested call is refused");
+            Ok(HostValue::String(refused.message))
+        })
+        .unwrap();
+    assert!(
+        text(&mut realm, "nest(1)").contains("cannot be called while it is already running"),
+        "the nested call threw the refusal"
+    );
+}
+
+/// A [`quickjs_rust_bridge::WeakContext`] answers its realm while a handle
+/// on it is held, and nothing once the last has dropped.
+#[test]
+fn a_weak_context_answers_its_realm_until_the_realm_is_freed() {
+    let mut realm = realm();
+    realm
+        .evaluate(
+            EvalSource::new("globalThis.mark = 7"),
+            EvalOptions::default(),
+        )
+        .unwrap();
+    let weak = realm.downgrade();
+    let mut again = weak.upgrade().expect("the realm is live");
+    let mark = again
+        .evaluate(EvalSource::new("mark"), EvalOptions::default())
+        .unwrap();
+    assert_eq!(mark.as_number(), Some(7.0));
+    drop((mark, again, realm));
+    assert!(weak.upgrade().is_none(), "the realm was freed");
+}

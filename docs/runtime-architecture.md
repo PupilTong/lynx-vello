@@ -1564,7 +1564,8 @@ the document member `createDocument`, the tree and attribute
 members, the two listener members (`listenerOpened`, `listenerClosed`, which
 file per-element registrations in the document's listener table), the
 synthetic dispatch pair (`dispatchEvent`, which runs the components' walk for
-an event `__CreateEvent` made and answers its path, and
+an event `__CreateEvent` made, calls the other realms the listener table
+invites, re-entrantly, and answers its path, and
 `timelineMilliseconds`, which that event is stamped with), the
 exposure switch (`switchExposure`, over the comma-joined ids of the elements
 the calling realm registered, answering the records it queued), the two

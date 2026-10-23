@@ -1507,7 +1507,8 @@ declares, the MTS realm included, for `invokeNativeModule` alone. The MTS
 members group as the document's own life, tree vocabulary over numeric
 `NodeId`s, attributes and style, selector queries, the commit, the event
 registrations (`listenerOpened`/`listenerClosed`), the synthetic dispatch
-pair (`dispatchEvent`, `timelineMilliseconds`), timers, the one-shot
+pair (`dispatchEvent`, `timelineMilliseconds`; `dispatchEvent` is the one
+member registered re-entrant, because it calls other realms), timers, the one-shot
 startup strings the realm alone reads (the page-data triple handed over as
 plain JSON and processor-name strings, and the native module table it posts
 unread to its BTS), the stylesheet pair, the diagnostics pair, the
@@ -1906,8 +1907,10 @@ included, with native's synthetic pair `__CreateEvent`/`__DispatchEvent`;
 for another member fails at the missing name with a precise `ReferenceError`,
 not silently. `__CreateEvent` stamps its event with the host member
 `timelineMilliseconds`, and `__DispatchEvent` calls the host member
-`dispatchEvent`, which runs the engine components' walk over the path first
-and answers the path the calling realm then runs its own Lynx walk over
+`dispatchEvent`, which runs the engine components' walk over the path first,
+then every other realm the listener table invites, in the kernel's realm
+order and with a structured clone of the event's `detail`, and answers the
+path the calling realm then runs its own Lynx walk over, last
 (`docs/tracking/dom-events.md`, "The synthetic dispatch entry").
 
 `__SetInlineStyles` keeps the whole-value policy in JavaScript: a string is one
@@ -2699,8 +2702,11 @@ symbols, and ill-formed UTF-16 strings are rejected on the way in rather than
 lossily converted, element identity crosses as plain numbers, and handle
 objects never leave JavaScript — which keeps ordinary callbacks leaf
 operations. Their `FnMut` closure is borrowed through a `RefCell`, so reentry
-is refused rather than aliasing it; a panicking callback becomes a JS exception
-and leaves the slot usable.
+is refused rather than aliasing it; `function_reentrant` and
+`register_host_module_function_reentrant` take an `Fn` closure instead, which a
+nested call runs again (`bobcat-core`'s `dispatchEvent` is the one user, and
+`WeakContext` is how it reaches other realms without keeping them alive); a
+panicking callback becomes a JS exception and leaves the slot usable.
 
 A closure's lifetime follows its JS function object rather than the realm: the
 closure sits at its own stable heap address, which a companion JS object holds

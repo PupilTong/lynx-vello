@@ -10,7 +10,7 @@
 //! namespace and the atom each [`Export`] is called through.
 
 use std::any::Any;
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::fmt;
 use std::panic::{self, AssertUnwindSafe};
 use std::rc::{Rc, Weak};
@@ -523,6 +523,46 @@ impl ScriptEngine {
             .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::RegisterHostModuleFunction))
     }
 
+    /// [`Self::register_host_module_function`] for an `Fn` callback, which
+    /// may be called again while a call of it is running: a member whose
+    /// callback calls into realms ([`RealmCaller`]) whose code can reach the
+    /// same member back. Everything the callback touches must be borrowed
+    /// per use and released before it calls into a realm.
+    pub(crate) fn register_reentrant_host_module_function<F>(
+        &mut self,
+        module_specifier: &str,
+        export_name: &str,
+        arity: u8,
+        callback: F,
+    ) -> Result<(), ScriptError>
+    where
+        F: Fn(&[quickjs::HostArgument<'_>]) -> Result<quickjs::HostValue, String> + 'static,
+    {
+        let host_panic = Rc::clone(&self.host_panic);
+        self.realm
+            .register_host_module_function_reentrant(
+                module_specifier,
+                export_name,
+                u32::from(arity),
+                move |arguments| {
+                    keep_host_panic(&host_panic, "the host function panicked", || {
+                        callback(arguments)
+                    })
+                    .map_err(quickjs::HostFunctionError::new)
+                },
+            )
+            .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::RegisterHostModuleFunction))
+    }
+
+    /// What calls this realm's `__BobcatDispatchEvent` from inside a
+    /// JavaScript call of any realm on this runtime ([`RealmCaller`]).
+    pub(crate) fn caller(&self) -> RealmCaller {
+        RealmCaller {
+            realm: self.realm.downgrade(),
+            member: OnceCell::new(),
+        }
+    }
+
     /// Adds the runtime's shared object as a named export of a native ESM
     /// module: the one object every realm of this runtime it is added to
     /// holds by reference, so what one realm stores on it another reads as
@@ -786,6 +826,72 @@ impl ScriptEngine {
         }
         let (object, member) = slot.as_ref().expect("the export was just resolved");
         Ok(call_resolved(&mut self.realm, object, member, arguments))
+    }
+}
+
+/// Calls one realm's `__BobcatDispatchEvent` from inside a JavaScript call,
+/// which is where [`ScriptEngine::call_module_export`] cannot be used: the
+/// call already holds the [`ScriptRuntime`] and, up the stack, the engine of
+/// the realm it runs in, and it must not drain the job queue.
+///
+/// Its one caller is the host member `dispatchEvent`
+/// (`main/runtime/lib.rs`'s `install_synthetic_event_members`), which calls
+/// the other realms a synthetic event invites before the realm that
+/// dispatched it runs its own walk. `QuickJS` lets a host function on the
+/// owning thread call into any realm of its runtime — a `ShadowRealm`'s
+/// wrapped functions and `loadModuleSync` nest the same way — and the
+/// bridge's execution guard counts the depth, so the enclosing entry's
+/// limits cover the call.
+///
+/// Weak, because the member that holds it lives in a realm: a strong handle
+/// on the page realm, kept by a function of the page realm, would never let
+/// it be freed. A realm already freed answers `None`. The interned name is
+/// kept once resolved; the namespace object is looked up on each call,
+/// since keeping it would hold the realm.
+pub(crate) struct RealmCaller {
+    realm: quickjs::WeakContext,
+    member: OnceCell<quickjs::Member>,
+}
+
+impl RealmCaller {
+    /// Calls the realm's `__BobcatDispatchEvent` with `arguments`, as
+    /// [`ScriptEngine::call_module_export`] does for [`Export::DispatchEvent`]
+    /// but with no checkpoint and no [`ScriptEngine::finish_operation`]:
+    /// draining the job queue inside the JavaScript call this runs in would
+    /// run promise jobs re-entrantly. The enclosing operation's checkpoint
+    /// drains the runtime-wide queue, and a rejection the callee left
+    /// unhandled is the callee's, reported by its own next checkpoint or
+    /// [`ScriptEngine::take_unhandled_rejection`], as a `ShadowRealm`
+    /// child's already are. A panic of the callee's host functions is kept
+    /// in its [`HostPanic`] and resumed the same way.
+    ///
+    /// `None` is a realm already freed; `Ok(false)` one whose module exports
+    /// no such function.
+    pub(crate) fn call_dispatch_event(
+        &self,
+        arguments: &[quickjs::HostArgument<'_>],
+    ) -> Option<Result<bool, ScriptError>> {
+        let mut realm = self.realm.upgrade()?;
+        Some(self.call(&mut realm, arguments))
+    }
+
+    fn call(
+        &self,
+        realm: &mut quickjs::Context,
+        arguments: &[quickjs::HostArgument<'_>],
+    ) -> Result<bool, ScriptError> {
+        let export = Export::DispatchEvent;
+        let object = realm
+            .module_namespace(export.specifier())
+            .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::CallModuleExport))?;
+        if self.member.get().is_none() {
+            let member = realm
+                .member(export.name())
+                .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::CallModuleExport))?;
+            let _ = self.member.set(member);
+        }
+        let member = self.member.get().expect("the name was just interned");
+        call_resolved(realm, &object, member, arguments)
     }
 }
 
