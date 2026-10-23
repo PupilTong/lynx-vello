@@ -188,11 +188,7 @@ impl<T> Document<T> {
         );
         let document_slot = document.live_slot(DOCUMENT_NODE_ID);
         let root_slot = document.live_slot(root);
-        document
-            .live_node_mut(DOCUMENT_NODE_ID)
-            .children
-            .push(root_slot);
-        document.live_node_mut(root).parent = Some(document_slot);
+        document.tree.insert_child(document_slot, 0, root_slot);
         document.mark_subtree_dirty(root);
         document.invalidate_layout(root);
         document
@@ -504,11 +500,9 @@ impl<T> Document<T> {
 
     #[must_use]
     pub(crate) fn child_position(&self, parent: NodeId, child: NodeId) -> Option<usize> {
-        let child = self.slot(child)?;
-        self.get(parent)?
-            .child_slots()
-            .iter()
-            .position(|&candidate| candidate == child)
+        let parent = self.get(parent)?;
+        let index = self.get(child)?.index_in(parent);
+        (parent.child_slots().get(index) == Some(&child)).then_some(index)
     }
 
     #[must_use]
@@ -564,11 +558,8 @@ impl<T> Document<T> {
 
         let parent_slot = self.live_slot(parent);
         let child_slot = self.live_slot(child);
-        self.live_node_mut(parent)
-            .children
-            .insert(index, child_slot);
-        self.live_node_mut(child).parent = Some(parent_slot);
-        let appended = index + 1 == self.live_node_mut(parent).children.len();
+        self.tree.insert_child(parent_slot, index, child_slot);
+        let appended = index + 1 == self.live(parent).children.len();
         let contains_custom_elements = self.note_custom_subtree_inserted(child);
 
         self.note_moved_subtree(child);
@@ -591,22 +582,11 @@ impl<T> Document<T> {
     pub fn swap_element(&mut self, a: NodeId, b: NodeId) {
         assert_ne!(a, b, "swap_element: the operands must differ");
         let position = |document: &Self, node: NodeId| {
-            let parent = document
-                .get(node)
-                .expect("swap_element: stale NodeId")
+            let node = document.get(node).expect("swap_element: stale NodeId");
+            let parent = node
                 .parent_id()
                 .expect("swap_element: both operands must be attached");
-            let node_slot = document.live_slot(node);
-            let parent_node = document.get(parent).expect("a child's parent is live");
-            let siblings = parent_node.child_slots();
-            let index = siblings
-                .iter()
-                .position(|&sibling| sibling == node_slot)
-                .expect("a child appears in its parent's child list");
-            let next = siblings
-                .get(index + 1)
-                .map(|&slot| document.arenas().at(slot).id());
-            (parent, next)
+            (parent, node.next_sibling().map(Node::id))
         };
         let (parent_a, next_a) = position(self, a);
         let (parent_b, next_b) = position(self, b);
@@ -698,18 +678,7 @@ impl<T> Document<T> {
     /// changed. The removal that detached the subtree recorded all of it
     /// already, for the subtree as a whole.
     fn unlink_from_doomed_parent(&mut self, child: NodeId, parent: NodeId) {
-        let child_slot = self.live_slot(child);
-        let parent_node = self
-            .tree
-            .get_mut(parent)
-            .expect("internal tree link must resolve to a live node");
-        let index = parent_node
-            .children
-            .iter()
-            .position(|&candidate| candidate == child_slot)
-            .expect("child must appear in its parent's child list");
-        parent_node.children.remove(index);
-        self.live_node_mut(child).parent = None;
+        self.tree.remove_child(parent, child);
         self.note_slot_assignment_removed(parent, child);
     }
 
@@ -738,21 +707,7 @@ impl<T> Document<T> {
         self.cancel_animations_in_subtree(child);
         self.invalidate_layout(child);
 
-        let child_slot = self.live_slot(child);
-        let removed_index = {
-            let parent_node = self
-                .tree
-                .get_mut(parent)
-                .expect("internal tree link must resolve to a live node");
-            let index = parent_node
-                .children
-                .iter()
-                .position(|&candidate| candidate == child_slot)
-                .expect("child must appear in its parent's child list");
-            parent_node.children.remove(index);
-            index
-        };
-        self.live_node_mut(child).parent = None;
+        let removed_index = self.tree.remove_child(parent, child);
         self.note_slot_assignment_removed(parent, child);
 
         debug_assert_ne!(
@@ -1273,6 +1228,124 @@ pub(crate) mod tests {
         }]);
         assert!(document.needs_render());
         assert!(document.render());
+    }
+
+    /// Checks every child of `parent` against `expected`: the child list, and
+    /// each child's siblings and position as read from its stored index.
+    fn assert_children(document: &Document<()>, parent: NodeId, expected: &[NodeId]) {
+        assert_eq!(document.live(parent).child_ids(), expected);
+        for (index, &child) in expected.iter().enumerate() {
+            let node = document.live(child);
+            assert_eq!(node.parent_id(), Some(parent));
+            assert_eq!(document.child_position(parent, child), Some(index));
+            assert_eq!(
+                node.previous_sibling().map(Node::id),
+                index.checked_sub(1).map(|before| expected[before])
+            );
+            assert_eq!(
+                node.next_sibling().map(Node::id),
+                expected.get(index + 1).copied()
+            );
+        }
+    }
+
+    #[test]
+    fn sibling_navigation_follows_every_child_list_change_under_a_wide_parent() {
+        let mut document: Document<()> = Document::new(device(), "page", ());
+        let page = document.document_element().id();
+        let wide = document.create_element("view", ());
+        let other = document.create_element("view", ());
+        document.append_child(page, wide);
+        document.append_child(page, other);
+        assert_children(&document, page, &[wide, other]);
+
+        let mut model: Vec<NodeId> = Vec::new();
+        let mut other_model: Vec<NodeId> = Vec::new();
+        // Appends, then insertions before the first child, then insertions
+        // in the middle, so both sides of an insertion point get moved.
+        for _ in 0..64 {
+            let child = document.create_element("view", ());
+            document.append_child(wide, child);
+            model.push(child);
+        }
+        for _ in 0..64 {
+            let child = document.create_element("view", ());
+            document.insert_before(wide, child, Some(model[0]));
+            model.insert(0, child);
+        }
+        for step in 0..64 {
+            let at = (step * 37) % model.len();
+            let child = document.create_element("view", ());
+            document.insert_before(wide, child, Some(model[at]));
+            model.insert(at, child);
+        }
+        assert_children(&document, wide, &model);
+
+        // Removals from the front, the back, and positions on either side of
+        // the middle.
+        for step in 0..48 {
+            let at = match step % 4 {
+                0 => 0,
+                1 => model.len() - 1,
+                2 => model.len() / 3,
+                _ => model.len() * 2 / 3,
+            };
+            document.remove_element(model.remove(at));
+        }
+        assert_children(&document, wide, &model);
+
+        // Moves within the parent, forward and backward, and to the end.
+        for step in 0..48 {
+            let from = (step * 29 + 5) % model.len();
+            let child = model.remove(from);
+            if step % 3 == 2 {
+                document.append_child(wide, child);
+                model.push(child);
+            } else {
+                let to = (step * 53 + 11) % model.len();
+                document.insert_before(wide, child, Some(model[to]));
+                model.insert(to, child);
+            }
+        }
+        assert_children(&document, wide, &model);
+
+        // Moves to another parent and back.
+        for step in 0..24 {
+            let child = model.remove((step * 17) % model.len());
+            document.append_child(other, child);
+            other_model.push(child);
+        }
+        for step in 0..8 {
+            let child = other_model.remove(step % other_model.len());
+            let to = (step * 41) % model.len();
+            document.insert_before(wide, child, Some(model[to]));
+            model.insert(to, child);
+        }
+        assert_children(&document, wide, &model);
+        assert_children(&document, other, &other_model);
+
+        // Swaps, adjacent and apart, within and across parents.
+        let pairs = [(0, 1), (5, 90), (model.len() - 1, 3)];
+        for (x, y) in pairs {
+            document.swap_element(model[x], model[y]);
+            model.swap(x, y);
+        }
+        document.swap_element(model[10], other_model[0]);
+        std::mem::swap(&mut model[10], &mut other_model[0]);
+        assert_children(&document, wide, &model);
+        assert_children(&document, other, &other_model);
+
+        // Dropping a parent leaves its element children detached roots, and
+        // they insert anywhere afresh.
+        document.drop_element(other);
+        for (step, &child) in other_model.iter().enumerate() {
+            assert_eq!(document.live(child).parent_id(), None);
+            let to = (step * 13) % model.len();
+            document.insert_before(wide, child, Some(model[to]));
+            model.insert(to, child);
+        }
+        assert_children(&document, wide, &model);
+        assert_children(&document, page, &[wide]);
     }
 
     #[test]
