@@ -35,6 +35,7 @@ pub use crate::main::configure_wasm_workers;
 use crate::main::tree::PageConfig;
 use crate::main::{GroupLink, spawn_group};
 use crate::native_module::{NativeModule, NativeModuleTable};
+use crate::performance::{EntryTypes, ExtraTiming, PerformanceEntry, PipelineRegistry, TimeOrigin};
 use crate::resource::{ResourceFetcher, SourceCompletion, SourceRequest};
 use crate::script::ScriptError;
 use crate::threads::ThreadJoin;
@@ -314,6 +315,14 @@ pub enum EngineEvent {
         level: String,
         message: String,
     },
+    /// One performance entry of a type the embedder subscribed to with
+    /// [`LynxView::observe_performance`]: a load, a reload, or a pipeline
+    /// that carried a `__lynx_timing_flag`, reported once the frame that
+    /// carried it was presented. Assembled in the [`LynxView::pump`] that
+    /// returns it, on the embedder's thread; nothing is built for a view
+    /// that subscribed to nothing. Not fatal, and nothing a view does
+    /// depends on it being read.
+    Performance(PerformanceEntry),
 }
 
 impl EngineEvent {
@@ -789,6 +798,11 @@ impl LynxGroup {
         F: ResourceFetcher + 'static,
         B: FnOnce(terminus::link::ImageReports) -> F,
     {
+        // First, before anything else this call does: the two clocks every
+        // performance timestamp of the view is placed by, and the start of
+        // its `createLynx` span.
+        let time_origin = TimeOrigin::now();
+        let registry = Arc::new(PipelineRegistry::new(time_origin));
         // Read once, before anything is sent: the table is what crosses, and
         // the modules themselves stay here.
         let mut table = NativeModuleTable::with_capacity(native_modules.len());
@@ -889,11 +903,14 @@ impl LynxGroup {
                 fetch_probe: fetcher.fetch_probe(),
                 style_sheet_probe: fetcher.style_sheet_probe(),
                 base_url,
+                registry: Arc::clone(&registry),
             })))
             .map_err(|_| EngineError::Thread {
                 name: "script",
                 message: "the group's Lynx main thread is gone".to_owned(),
             })?;
+        // The end of `createLynx`: what is left is building the handle.
+        registry.set_root_create_lynx(time_origin.instant().instant(), ClockInstant::now());
         Ok(LynxView {
             cancel,
             // The seat a painter observes this view through: both halves of it
@@ -905,6 +922,7 @@ impl LynxGroup {
                 metrics,
                 images: Rc::clone(&fetcher) as Rc<dyn FrameImages>,
                 scroll,
+                registry,
             }),
             notices: notice_receiver,
             frames: frame_receiver,
@@ -917,7 +935,11 @@ impl LynxGroup {
                 .zip(table.into_iter().map(|(_, methods)| methods))
                 .collect(),
             state: ViewState::Loading,
-            timeline_epoch: ClockInstant::now(),
+            // The view's one origin: its animations' timeline and its
+            // performance timestamps start at the same instant.
+            timeline_epoch: time_origin.instant().instant(),
+            time_origin,
+            performance_generation: 0,
             group: Rc::clone(&self.inner),
         })
     }
@@ -977,6 +999,12 @@ pub struct LynxView<F> {
     /// are timed against. A painter adopts it at `attach`, so a painter that
     /// changes views does not restart the new one's timeline.
     timeline_epoch: ClockInstant,
+    /// Where this view's monotonic clock sits on the Unix timeline: the
+    /// conversion every performance timestamp of the view reports through.
+    time_origin: TimeOrigin,
+    /// The registry's completion count as of the last [`Self::pump`] that
+    /// took its entries: a turn with nothing completed takes no lock.
+    performance_generation: u64,
     /// The group whose thread carries this view. Held rather than read: it is
     /// what keeps that thread — and the runtime and pool on it — alive for as
     /// long as any view built from the group is, in whatever order the
@@ -1338,6 +1366,7 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
                 self.fetcher.request_document(&source, bytes, kind);
             }
         }
+        self.take_performance_entries(&mut events);
         // Drained either way, so what a host reported before the failure is
         // discarded here rather than left to accumulate behind a view that
         // will never commit again.
@@ -1346,6 +1375,69 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
             let _ = self.seat.commands.send(ToMain::ImageEvents(reports));
         }
         events
+    }
+
+    /// Hands `events` the performance entries completed since the last turn,
+    /// and tells each BTS worker owed some that they are ready. One atomic
+    /// read on a turn where nothing completed.
+    fn take_performance_entries(&mut self, events: &mut Vec<EngineEvent>) {
+        let registry = &self.seat.registry;
+        let generation = registry.generation();
+        if generation == self.performance_generation {
+            return;
+        }
+        self.performance_generation = generation;
+        let wakes = registry.take_wakes();
+        if !wakes.is_empty() {
+            let demand = self.seat.frame_demand.borrow();
+            for key in wakes {
+                demand.notify_performance(key);
+            }
+        }
+        if self.state != ViewState::Failed {
+            events.extend(
+                registry
+                    .take_completed_for_rust()
+                    .into_iter()
+                    .map(EngineEvent::Performance),
+            );
+        }
+    }
+
+    /// Which performance entries [`Self::pump`] reports, as
+    /// [`EngineEvent::Performance`]: the types in `types`, replacing what
+    /// was asked before. A view starts with none, and assembles nothing for
+    /// a type nobody asked for. A record completed before the call is
+    /// reported only to the audiences it had then; a load completes once
+    /// its first frame is presented and its BTS has loaded its entry, so a
+    /// call right after [`LynxGroup::create_lynx_view`] receives it.
+    pub fn observe_performance(&self, types: EntryTypes) {
+        self.seat.registry.observe_rust(types);
+    }
+
+    /// The host's marks around this view (Lynx's `setExtraTiming`): when
+    /// its container was opened and initialized and its template prepared,
+    /// on the wall clock. Each key is taken once; a key set again changes
+    /// nothing. A load already reported is reported again — to the
+    /// embedder and to the BTS observers — with `fcp` and `totalFcp`
+    /// filled, as Lynx re-sends its load entry.
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::NotReady`] once the view has ended.
+    pub fn set_extra_timing(&self, timing: ExtraTiming) -> Result<(), EngineError> {
+        if self.cancel.is_cancelled() {
+            return Err(EngineError::NotReady);
+        }
+        self.seat.registry.set_extra_timing(&timing);
+        Ok(())
+    }
+
+    /// Where this view's clock sits on the Unix timeline, which every
+    /// [`crate::performance::Timestamp`] it reports converts through.
+    #[must_use]
+    pub const fn time_origin(&self) -> TimeOrigin {
+        self.time_origin
     }
 
     /// Warms `sources` in the store, ahead of any paint walk meeting them.
@@ -1492,6 +1584,8 @@ pub(crate) struct ViewAttachment {
     /// [`ViewSources::base_url`], parsed by `create_lynx_view`: what every
     /// realm of this view resolves a synchronous load's URL against.
     pub(crate) base_url: Arc<url::Url>,
+    /// The view's pipeline registry, shared with its seat.
+    pub(crate) registry: Arc<PipelineRegistry>,
 }
 
 /// The answers to the requests [`LynxGroup::create_lynx_view`] made on the
@@ -1611,5 +1705,7 @@ fn stage_text_context(
     Ok(Some(text))
 }
 
+#[cfg(test)]
+mod performance_tests;
 #[cfg(test)]
 mod tests;

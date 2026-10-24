@@ -154,6 +154,7 @@ impl FramePainter {
             &frame,
             document.images(),
         );
+        let paints_content = self.scratch.paints_content();
         let crate::paint::compose::Finished {
             fragments,
             program,
@@ -186,6 +187,7 @@ impl FramePainter {
             earliest_expiry,
             viewport,
             device_pixel_ratio,
+            paints_content,
         });
         // Reclaiming here, past the point where the walk can fail, is what
         // keeps a frame retained at every instant. A frame still shared at

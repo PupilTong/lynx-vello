@@ -531,6 +531,30 @@ fn union_into(
     }
 }
 
+/// Whether `paragraph` shapes a glyph that is not white space: Paint
+/// Timing's test for a contentful text node. A space, a no-break space and a
+/// hard line break are white space; a cluster with no glyph, and the edge
+/// and strut runs [`PaintedParagraph::draws`] skips, are no ink at all.
+/// Stops at the first such glyph, which on a page of text is in the first
+/// run it reads.
+pub(crate) fn has_visible_glyph(paragraph: &PaintedParagraph<'_>) -> bool {
+    paragraph.layout.lines().any(|line| {
+        line.items().any(|item| {
+            let PositionedLayoutItem::GlyphRun(glyph_run) = item else {
+                return false;
+            };
+            let style_index = glyph_run.style_index();
+            paragraph.draws(style_index)
+                && glyph_run.run().clusters().any(|cluster| {
+                    cluster.style_index() == style_index
+                        && !cluster.is_space_or_nbsp()
+                        && !cluster.is_hard_line_break()
+                        && cluster.glyphs().next().is_some()
+                })
+        })
+    })
+}
+
 pub(crate) fn paint(
     scene: &mut Scene,
     paragraph: &PaintedParagraph<'_>,

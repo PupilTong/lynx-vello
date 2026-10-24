@@ -1007,10 +1007,20 @@ fn imported_runtime_bindings_supply_bridges_without_globals() {
                 }
 
                 if (lynx.performance.isProfileRecording() !== false ||
-                    lynx.performance.profileFlowId() !== 0 ||
-                    lynx.performance._generatePipelineOptions() !== undefined) {
-                  throw new Error('the performance shell must stay inert');
+                    lynx.performance.profileFlowId() !== 0) {
+                  throw new Error('the profile members must stay inert');
                 }
+                // The pipeline hooks are backed by the view's registry: a
+                // fresh decimal id per call, carrying no timestamps.
+                const first = lynx.performance._generatePipelineOptions();
+                const second = lynx.performance._generatePipelineOptions();
+                if (typeof first.pipelineID !== 'string' || first.needTimestamps !== false ||
+                    Object.keys(first).join() !== 'pipelineID,needTimestamps' ||
+                    Number(second.pipelineID) !== Number(first.pipelineID) + 1) {
+                  throw new Error('pipeline options: ' + JSON.stringify([first, second]));
+                }
+                lynx.performance._onPipelineStart(first.pipelineID, first);
+                lynx.performance._markTiming(first.pipelineID, 'diffVdomStart');
                 _AddEventListener('ignored', function () {});
                 _ReportError(new Error('ignored'));
                 _SetSourceMapRelease({ release: 'ignored' });
@@ -8631,13 +8641,15 @@ fn a_frame_realm_declares_the_page_members() {
 
 /// The page realm's `bobcat-internal:host` exports, sorted as a namespace
 /// lists them.
-const MTS_HOST_MEMBERS: [&str; 53] = [
+const MTS_HOST_MEMBERS: [&str; 60] = [
     "adoptStyleSheet",
     "attributeNames",
+    "bindPipelineTimingFlag",
     "callElementMethod",
     "childElementIds",
     "clearTimer",
     "closeRealm",
+    "connectBackground",
     "createDocument",
     "createElement",
     "createPage",
@@ -8647,6 +8659,7 @@ const MTS_HOST_MEMBERS: [&str; 53] = [
     "fetchResource",
     "flushElementTree",
     "framePage",
+    "generatePipelineId",
     "getAttribute",
     "getComputedStyleMap",
     "globalProps",
@@ -8658,7 +8671,11 @@ const MTS_HOST_MEMBERS: [&str; 53] = [
     "listenerOpened",
     "loadModuleSync",
     "logScriptMessage",
+    "markLoadTiming",
+    "markPipelineTiming",
     "nativeModuleTable",
+    "onPipelineStart",
+    "openNativePipeline",
     "parentNode",
     "preloadStyleSheet",
     "queryElementIds",
@@ -12773,4 +12790,93 @@ fn timeline_milliseconds_answers_what_the_last_frame_or_vsync_set() {
         .vsync(&mut js_runtime, 2000.5)
         .expect("the animation-frame callbacks");
     expect_timeline(&mut js_runtime, &mut runtime, 2000.5);
+}
+
+/// A `__lynx_timing_flag` attribute binds the next flush to the frame it
+/// commits, with that commit's timing; a flush with no flag records nothing
+/// and leaves the document's last commit timing as it was.
+#[test]
+fn a_timing_flag_attribute_binds_the_next_flush_to_its_commit() {
+    let (mut js, mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js,
+            r"
+        globalThis.renderPage = function () {
+            const page = __CreatePage('card', 0);
+            globalThis.view = __CreateView(0);
+            __AppendElement(page, view);
+        };
+    ",
+            "app:///timing-flag.js",
+        )
+        .unwrap();
+    let registry = Arc::clone(elements.slot.borrow().outbox.registry());
+    // Boot's own flush ended the page's load, which waits for a present no
+    // painter here makes.
+    let records = registry.records_for_test();
+    assert!(
+        records
+            .iter()
+            .any(|record| record.load && record.commit_id.is_some()),
+        "{records:?}"
+    );
+    let flagged = || -> Vec<_> {
+        registry
+            .records_for_test()
+            .into_iter()
+            .filter(|record| !record.load)
+            .collect()
+    };
+    let before = elements
+        .tree()
+        .last_commit_timing()
+        .map(|timing| timing.commit_id);
+    let step = |runtime: &mut MainThreadRuntime, js: &mut ScriptRuntime, source: &str| {
+        runtime
+            .evaluate_module(
+                js,
+                &format!("{}{source}", crate::esm::MTS_CHUNK_PREAMBLE),
+                "app:///timing-step.js",
+                "a timing step",
+            )
+            .unwrap();
+    };
+    step(
+        &mut runtime,
+        &mut js,
+        "__SetInlineStyles(view, 'width:5px;height:5px'); __FlushElementTree();",
+    );
+    assert!(flagged().is_empty());
+    assert_eq!(
+        elements
+            .tree()
+            .last_commit_timing()
+            .map(|timing| timing.commit_id),
+        before,
+        "an unflagged flush takes no timing"
+    );
+    step(
+        &mut runtime,
+        &mut js,
+        "__SetAttribute(view, '__lynx_timing_flag', 'f1'); \
+         __SetInlineStyles(view, 'width:6px;height:5px'); __FlushElementTree();",
+    );
+    let committed = elements
+        .tree()
+        .committed_frame()
+        .expect("the flush committed")
+        .commit_id();
+    let [record] = flagged().try_into().expect("one flagged record");
+    assert_eq!(record.flags, ["f1"]);
+    // No pipeline named it and none was opened natively: the flag's own.
+    assert_eq!(
+        record.origin,
+        crate::performance::PipelineOrigin::UpdateTriggeredByNative
+    );
+    assert_eq!(record.commit_id, Some(committed));
+    let timing = record.timing.expect("the flush timed its commit");
+    assert_eq!(timing.commit_id, committed);
+    assert!(timing.style_start <= timing.style_end);
+    assert!(timing.frame_build_start <= timing.frame_build_end);
 }

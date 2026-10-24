@@ -38,6 +38,7 @@ use terminus::link::event::{EventDetail, ListenerKey, ListenerKinds, Registratio
 use terminus::link::{MethodCall, MethodError, MethodOutcome, StylePool};
 use tokio::sync::watch;
 
+use self::pipelines::{FlushRequest, RealmTiming, TIMING_FLAG_ATTRIBUTE};
 use super::quickjs::{ScriptEngine, ScriptRuntime};
 use crate::clock::ClockInstant;
 use crate::esm::{
@@ -56,6 +57,7 @@ use crate::main::tree::{
     invoke_base_method, is_svg, is_text, nested_page, new_document, report_selection_changes,
     reset_frame,
 };
+use crate::performance::OpenerId;
 use crate::realm::child::{ChildHostModules, ChildHostState, ChildKey};
 use crate::realm::policy::context_of;
 use crate::realm::{RealmCore, RealmId, open_realm, string_argument};
@@ -821,6 +823,7 @@ fn encode_detail<'a>(detail: &'a EventDetail, arguments: &mut Arguments<'a>) {
 const INLINE_DECLARATIONS: usize = 16;
 
 mod editing;
+mod pipelines;
 mod style_sheets;
 
 /// A card's MTS body as the entry `bobcat-source` registers for it:
@@ -1196,6 +1199,13 @@ struct DocumentSlot {
     /// it too, through `timelineMilliseconds`, and a member reaches the slot
     /// alone: `__CreateEvent` stamps the event it builds with it.
     timeline_milliseconds: f64,
+    /// The `__lynx_timing_flag` attribute values written since the last
+    /// timed flush, which the next flush binds to its commit
+    /// ([`pipelines`]). Empty on a page that sets none.
+    pending_flags: Vec<Arc<str>>,
+    /// The native-triggered pipelines opened since the last timed flush —
+    /// a flagged update, a reload — which the next flush binds.
+    native_pipelines: Vec<u64>,
     /// Where committed frames leave for the painting side.
     outbox: ViewOutbox,
 }
@@ -1266,6 +1276,8 @@ impl DocumentSlot {
             observed: FxHashSet::default(),
             scrolling: SmallVec::new(),
             timeline_milliseconds: 0.0,
+            pending_flags: Vec::new(),
+            native_pipelines: Vec::new(),
             outbox,
         }))
     }
@@ -1866,7 +1878,10 @@ impl DocumentSlot {
     ///
     /// Only the first binding is waited for. A painter that detaches leaves
     /// the last metrics behind, so every flush after it publishes at once.
-    fn flush(&mut self, thread: &crate::jobs::JsThreadHandle) -> Result<(), String> {
+    ///
+    /// Answers the commit id of the frame it published or holds, which a
+    /// timed flush binds its pipelines to ([`pipelines`]).
+    fn commit_flush(&mut self, thread: &crate::jobs::JsThreadHandle) -> Result<u64, String> {
         // The sheets first, then the metrics: a painter that binds while a
         // sheet is still in flight is adopted before the commit below, which
         // is then already at its size rather than held and recomputed.
@@ -1874,13 +1889,14 @@ impl DocumentSlot {
         self.adopt_metrics();
         self.sync_names();
         let frame = self.document_mut().commit();
+        let mut commit_id = frame.commit_id();
         if self.bound {
             // A frame held from before the binding is older than this one, and
             // publishing it after this one would put the stale frame back.
             self.held = None;
             self.outbox.publish_frame(frame);
             self.request_wanted_images();
-            return Ok(());
+            return Ok(commit_id);
         }
         self.held = Some(frame);
         // Asked for before the wait rather than after it: the view's own
@@ -1903,10 +1919,11 @@ impl DocumentSlot {
             self.held = Some(self.document_mut().commit());
         }
         if let Some(frame) = self.held.take() {
+            commit_id = frame.commit_id();
             self.outbox.publish_frame(frame);
         }
         self.request_wanted_images();
-        Ok(())
+        Ok(commit_id)
     }
 
     /// Mounts every listed author sheet not mounted yet, in listed order,
@@ -2381,6 +2398,7 @@ impl MainThreadRuntime {
                         startup_strings(&mut startup),
                         RealmId::Page.listener_key(),
                         None,
+                        &RealmTiming::new(OpenerId::PAGE),
                     )
                     .map_err(MainThreadError::into_script_error)?;
                 // The transport alone: the view's modules are the BTS's, and
@@ -3956,6 +3974,7 @@ impl MainThreadRuntime {
         let boot = format!(
             r#"import {{ lynx, __BobcatConnectBackground, __BobcatInitializeMTS, __BobcatProcessInitData, __BobcatRenderPage }} from "{RUNTIME_MODULE_SPECIFIER}";
 import {{ Document, __FlushElementTree }} from "{ELEMENT_MODULE_SPECIFIER}";
+import {{ markLoadTiming }} from "{HOST_MODULE_SPECIFIER}";
 // Imported for its effect: it installs the timer globals, and a static
 // import runs before the entry this module then loads.
 import "{TIMER_MODULE_SPECIFIER}";
@@ -3994,12 +4013,18 @@ let data = lynx.__initData;
 // rejection nothing handles, which the checkpoint of this entry into the
 // realm reports, and boot goes on past it: the BTS is connected, the page
 // rendered and flushed, as a native MTS renders a page whose script threw.
+//
+// The view's load begins here (`loadBundleStart`, `vmExecuteStart`), and
+// ends at the first flush after the render below.
+markLoadTiming("vmExecuteStart", {entry});
 try {{ await import({entry}); }} catch (error) {{ void Promise.reject(error); }}
-const {{ Worker }} = await import("bobcat-internal");
+markLoadTiming("vmExecuteEnd");
+const {{ Worker, __BobcatWorkerKey }} = await import("bobcat-internal");
 data = __BobcatProcessInitData(data);
 // The BTS's own entry, by the URL the view named it by, is the BTS's to
 // import: this call posts that URL to the BTS in the `initialize` message.
-__BobcatConnectBackground(new Worker("{BTS_MODULE_SPECIFIER}", {{ name: "lynx-bg" }}), data, {background_entry});
+const background = new Worker("{BTS_MODULE_SPECIFIER}", {{ name: "lynx-bg" }});
+__BobcatConnectBackground(background, data, {background_entry}, __BobcatWorkerKey(background));
 
 // Queue the flush after jobs already scheduled by the lifecycle hooks.
 __BobcatRenderPage(data);
@@ -4354,6 +4379,7 @@ impl DocumentHost {
         startup: [(&'static str, Option<String>); 4],
         key: ListenerKey,
         retired: Option<Rc<Cell<bool>>>,
+        timing: &Rc<RealmTiming>,
     ) -> Result<(), MainThreadError> {
         install_host_module(
             engine,
@@ -4361,7 +4387,9 @@ impl DocumentHost {
             self.thread.clone(),
             key,
             retired.clone(),
+            timing,
         )?;
+        pipelines::install_realm_members(engine, &self.slot, timing)?;
         install_event_members(engine, &self.slot, key, retired, &self.realms, &self.outbox)?;
         style_sheets::install_styles(engine, &self.slot, &self.outbox, self.thread.clone())?;
         install_startup_strings(engine, startup)
@@ -4382,12 +4410,17 @@ impl ChildHostModules for DocumentHost {
         key: ChildKey,
         retired: Rc<Cell<bool>>,
     ) -> Result<Box<dyn ChildHostState>, ScriptError> {
+        let created = ClockInstant::now();
         let listener_key = RealmId::Child(key).listener_key();
+        // The card's realm is its own opener of pipelines, as a nested
+        // card is its own `LynxTemplateRender` in native.
+        let timing = RealmTiming::new(self.outbox.registry().allocate_opener());
         self.install_members(
             engine,
             STARTUP_STRINGS.map(|name| (name, None)),
             listener_key,
             Some(retired),
+            &timing,
         )
         .map_err(MainThreadError::into_script_error)?;
         // Gone only with the page realm's owner, while the page realm is
@@ -4401,6 +4434,7 @@ impl ChildHostModules for DocumentHost {
         workers
             .install(engine)
             .map_err(|error| context_of("installing Worker", error))?;
+        timing.set_created(created, ClockInstant::now());
         Ok(Box::new(ChildDocumentState {
             workers: Box::new(workers),
             slot: Rc::clone(&self.slot),
@@ -4473,6 +4507,8 @@ fn install_host_module(
     // A child's own release flag, which its `closeRealm` sets; `None` in the
     // page realm.
     retired: Option<Rc<Cell<bool>>>,
+    // The realm's own timing state, which its flushes bind as.
+    timing: &Rc<RealmTiming>,
 ) -> Result<(), MainThreadError> {
     tree_members! { engine, handle;
         fn createPage() |document| {
@@ -4578,9 +4614,18 @@ fn install_host_module(
         Ok(HostValue::Undefined)
     })?;
 
+    // `(pipelineId, timingFlag)`: the flush's `pipelineOptions.pipelineID`
+    // (0 for none) and its `__lynx_timing_flag` option (`""` for none).
     let tree = Rc::clone(handle);
-    install(engine, "flushElementTree", 0, move |_arguments| {
-        borrow_slot("bobcat-internal:host.flushElementTree", &tree)?.flush(&thread)?;
+    let realm = Rc::clone(timing);
+    install(engine, "flushElementTree", 2, move |arguments| {
+        const NAME: &str = "bobcat-internal:host.flushElementTree";
+        let request = FlushRequest {
+            realm: &realm,
+            pipeline: crate::performance::pipeline_argument(arguments, 0),
+            flag: string_argument(NAME, arguments, 1)?,
+        };
+        borrow_slot(NAME, &tree)?.flush(&thread, &request)?;
         Ok(HostValue::Undefined)
     })?;
 
@@ -5247,6 +5292,9 @@ fn install_attribute_writes(
         document.set_attribute(node, name, value);
         if is_exposure_attribute(name) {
             handle.exposure_attribute_changed(node);
+        } else if name == TIMING_FLAG_ATTRIBUTE && !value.is_empty() {
+            // Lynx's timing flag: bound to the next flush's commit.
+            handle.pending_flags.push(Arc::from(value));
         }
         Ok(HostValue::Undefined)
     })?;

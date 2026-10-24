@@ -112,6 +112,10 @@ pub struct Document<T> {
     /// The id the most recently built frame carries; monotone per build, so
     /// it orders commits for every consumer of published frames.
     commit_id: u64,
+    /// Whether renders record their phases' instants, and the last record
+    /// ([`crate::visual::timing`]). Beside `commit_id` because a record is
+    /// one commit's.
+    pub(crate) commit_timer: crate::visual::timing::CommitTimer,
     /// Whether anything visually observable changed since the retained
     /// frame was built. This is the whole invalidation state: one bit, not
     /// a counter — a frame's identity is its commit id.
@@ -166,6 +170,7 @@ impl<T> Document<T> {
             custom_elements: CustomElementRegistry::default(),
             animations: crate::style::animation::AnimationDriver::default(),
             commit_id: 0,
+            commit_timer: crate::visual::timing::CommitTimer::default(),
             visual_dirty: true,
             layout_dirty: false,
             layout_root_dirty: false,
