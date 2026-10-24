@@ -114,3 +114,10 @@
   height: 75px;
   background-color: green;
 }
+
+/* Vendored rewrite (user, 2026-10-24): the Han text names a font every Mac has,
+   so its fallback does not depend on whether the on-demand PingFang asset was
+   downloaded. Latin text keeps the generic family. */
+text {
+  font-family: sans-serif, "Hiragino Sans GB";
+}

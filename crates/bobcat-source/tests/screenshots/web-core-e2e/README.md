@@ -23,13 +23,10 @@ decision by whoever comes next.
 Accepting one is `PRIME_RADIANT_UPDATE_SNAPSHOTS=1` on that single test, after the
 reading, in the same change that moves the card into `verified!`.
 
-Cards that show Chinese text depend on the machine's fonts. Han text with no
-`lang` falls back to the "PingFang SC" family, and a Mac holds it in one of two
-files with different line metrics: the on-demand font asset
-(`/System/Library/AssetsV2/com_apple_MobileAsset_Font8/…/PingFang.ttc`), when it
-has been downloaded, or the private `PingFangUI.ttc` every Mac has. Both carry
-the same PostScript names, so CoreText never downloads the asset where the
-private file already matches. These files were recorded on a Mac with the
-asset; a GitHub macOS runner has only the private file, and there
-`basic-element-text-maxlength`, `-nest-image`, `-tail-color-convert`,
-`-word-break` and the two `x-overlay-ng` playground cards render differently.
+Han text with no font of its own falls back to "PingFang SC", which a Mac
+holds either in the on-demand font asset or in the private `PingFangUI.ttc`,
+with different line metrics, so a golden showing it depends on the machine.
+The cards whose Chinese text is on screen name `"Hiragino Sans GB"` after the
+generic family instead (a vendored rewrite, see the fixtures README), a font
+in `/System/Library/Fonts` on every Mac. A new card with Chinese text needs the
+same before its rendering is pinned.

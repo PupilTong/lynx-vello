@@ -3,6 +3,7 @@
 // LICENSE file in the root directory of this source tree.
 import Image from './images/5a076f79f05c644487d688bba0817195.png';
 import { root } from '@lynx-js/react';
+import './index.css';
 function App() {
   return (
     <view>

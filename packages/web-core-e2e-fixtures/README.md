@@ -21,10 +21,10 @@ scope decision, will not. Upstream's own `dist/` is built without an
 this engine has no intention of serving. Compiled here at `4.1.0`, the same
 sources exercise the path it does.
 
-The cards, their CSS and their assets are otherwise upstream's, with nine
+The cards, their CSS and their assets are otherwise upstream's, with ten
 rewrites applied to the vendored text by user ruling (the first two on
 2026-09-25, the third on 2026-10-08, the fourth on 2026-10-15, the fifth on
-2026-10-16, the last four on 2026-10-20):
+2026-10-16, the next four on 2026-10-20, the last on 2026-10-24):
 
 - **`direction: lynx-rtl` becomes `direction: rtl`** (24 files). `lynx-rtl` is
   a value the fork's grammar rejects, so upstream's own spelling left every
@@ -81,7 +81,17 @@ rewrites applied to the vendored text by user ruling (the first two on
   array as `{path}` and leaves such an `id` undefined. The card reads `res`
   and expects `id: ''` for the two nodes without one.
 
-All nine are recorded here rather than absorbed silently, because a re-sync
+- **Six cards with Chinese text name a font for it** (6 files:
+  `basic-element-text-maxlength`, `-nest-image`, `-tail-color-convert`,
+  `-word-break`, and the two `x-overlay-ng` playground cards). Each gets
+  `text { font-family: sans-serif, "Hiragino Sans GB"; }`. Han text with no
+  family of its own fell back to "PingFang SC", which a Mac holds either in
+  the on-demand font asset or in the private `PingFangUI.ttc`, with
+  different line metrics; a GitHub macOS runner has only the second, so the
+  cards rendered differently there. Hiragino Sans GB is in
+  `/System/Library/Fonts` on every Mac; Latin text keeps the generic family.
+
+All ten are recorded here rather than absorbed silently, because a re-sync
 from upstream will bring the original text back.
 
 ## Building

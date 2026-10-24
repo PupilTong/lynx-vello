@@ -4,6 +4,7 @@
 // LICENSE file in the root directory of this source tree.
 */
 import { Component, root } from '@lynx-js/react';
+import './index.css';
 
 export default class App extends Component {
   render() {
