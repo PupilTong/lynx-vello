@@ -242,6 +242,25 @@ non-empty text run at non-zero opacity, an image whose pixels are resolved
 content — not a background color or a border, which count for
 `first_paint` only (`CommittedFrame::paints_content`, decided during the
 paint-order build, which already classifies every item, so no extra walk).
+**Comparability of the two marks (recorded 2026-10-25).** Lynx native's
+`fcp`/`lynxFcp`/`totalFcp` inspect nothing that was drawn: `paintEnd` is
+marked at the end of the first screen's draw pass whenever the pipeline
+carries timestamps (`UIBody.dispatchDraw` → `markPaintEndTimingIfNeeded`
+on Android; the transaction commit on iOS), so a first frame of one colored
+`<view>` has an `fcp`. That is Paint Timing's `first-paint`, and
+`first_paint` is the one mark comparable with native. `first_contentful_paint`
+follows the specification's own contentful algorithm (Paint Timing
+Editor's Draft §2: a text node with at least one non-white-space character
+at used opacity above zero, an available image, canvas, video, SVG with
+rendered content, a contentful background or border image; not a background
+colour or a border) rather than any one browser's behavior. It has no Lynx
+counterpart — Lynx's "meaningful content" classification
+(`ILynxUIMeaningfulContent`: a `<text>` with a renderer, an `<image>` with
+its bitmap, no white-space or opacity test) feeds `metric.fsp`, not `fcp` —
+and browsers' measured FCP values are approximations of the same definition
+under different painting strategies (WebKit gates its first paint on
+heuristics, Blink does not), so a `first_contentful_paint` here is comparable
+with a browser's only as the same definition, never as an exact number.
 Lynx's `fcp` is `first_paint`; the renaming is `bobcat-core`'s (§6.3), and
 `terminus` never spells `fcp`.
 
@@ -649,8 +668,22 @@ Each phase is one PR series; no stacking across phases.
 
 ## 11. Decisions
 
-User rulings, 2026-10-23. All six questions are closed; nothing in this
-design waits on a ruling.
+User rulings, 2026-10-23. The six questions below are closed; Q7 was raised
+on 2026-10-25 and is open.
+
+- **Q7 (open). On-demand contentful detection.** As built, the paint walk
+  decides `paints_content` on every frame (`Scratch::contentful` is reset
+  per walk; `paint_item` tests each item until the first contentful one,
+  `has_visible_glyph` scans the first text item, `open_scope`/`close_scope`
+  keep `transparent_depth`), although its only consumer is
+  `first_contentful_paint`, which the painter fixes once and which only the
+  Rust `LoadBundle` entry reports. Proposal: a document switch
+  (`Document::set_content_detection(bool)`, default off) that `bobcat-core`
+  turns on when the Rust embedder subscribes to `LOAD_BUNDLE` and off again
+  once the registry has recorded `first_contentful_paint`; off, every site
+  above reads one `bool`, and a view nobody observes runs none of it, as
+  goal 4 asks. `first_paint`, Lynx's `fcp`, needs no detection and stays
+  free either way.
 
 1. **Q1, entry transport.** Neither JSON text nor primitive arguments built
    on the main thread: a consumer that is not the main thread gets no
