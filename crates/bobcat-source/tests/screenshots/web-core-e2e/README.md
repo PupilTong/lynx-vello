@@ -1,0 +1,32 @@
+# Renderings that were judged right
+
+One PNG per card in `packages/web-core-e2e-fixtures` whose case someone read,
+whose behaviour they decided this engine answers correctly, and whose rendering
+this is. `crates/bobcat-source/tests/web_core_e2e.rs` holds each card to its
+file; `web_core_e2e/verified.rs` says, per card, what the case tests.
+
+They are **not** web-core's screenshots. Comparing against those directly was
+tried and dropped: the two stacks rasterize text differently, and several cases
+are about behaviour an image only indirectly shows, so a pixel distance to
+chromium answers a question nobody asked. web-core's rendering is evidence
+while reading a case, never the criterion.
+
+`<case>.png` is a card's first screen. A card upstream drives further has one
+more file per frame, `<case>.<label>.png`, taken after the steps
+`web_core_e2e/driven.rs` lists under that label.
+
+A card with no file here is in `web_core_e2e/pending.rs` with a reason, and
+`no_pending_case_has_a_golden` fails if one gains a file without moving. That
+is the point: a picture of a rendering nobody has judged would be read as a
+decision by whoever comes next.
+
+Accepting one is `PRIME_RADIANT_UPDATE_SNAPSHOTS=1` on that single test, after the
+reading, in the same change that moves the card into `verified!`.
+
+Han text with no font of its own falls back to "PingFang SC", which a Mac
+holds either in the on-demand font asset or in the private `PingFangUI.ttc`,
+with different line metrics, so a golden showing it depends on the machine.
+The cards whose Chinese text is on screen name `"Hiragino Sans GB"` after the
+generic family instead (a vendored rewrite, see the fixtures README), a font
+in `/System/Library/Fonts` on every Mac. A new card with Chinese text needs the
+same before its rendering is pinned.

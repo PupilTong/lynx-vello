@@ -15,12 +15,20 @@ the semantics are stylo's.** Everything below refines that sentence.
 ## Settled before this session (not re-decided)
 
 - stylo is the cascade engine, layered `future runtime adapter → terminus →
-  vendor/stylo` (fork with the `lynx` feature; Lynx-only properties and
-  `rpx`/`ppx`/`sp` units are first-class grammar in the fork, no side-channel
-  tricks — and since 2026-09-21 the fork's `lynx` length surface also admits
-  the W3C `cqw`/`cqh` container units, see the containment scope note below
-  for what every unit resolves against). The runtime-adapter layer is not
-  currently implemented.
+  vendor/stylo` (fork with the `lynx` feature; Lynx-only properties and the
+  `rpx` unit are first-class grammar in the fork, no side-channel tricks —
+  and since 2026-09-21 the fork's `lynx` length surface also admits the W3C
+  `cqw`/`cqh` container units, see the containment scope note below for what
+  every unit resolves against). The other two Lynx length units are
+  **deliberately absent**: `vendor/stylo/style/tests/lynx_lengths.rs`'s
+  `rejects_invalid_or_removed_units` asserts that `ppx` and `sp` fail to
+  parse, so a declaration using either is dropped as invalid and the property
+  keeps its inherited or initial value (the corpus card `basic-ppx-unit` was
+  deleted for this, user ruling 2026-10-20). Admitting `ppx` means a fork
+  patch adding a length unit that resolves against the device pixel ratio,
+  the way `rpx` resolves against the design width; tracked in
+  [`tracking/css-layout.md`](tracking/css-layout.md). The runtime-adapter
+  layer is not currently implemented.
 - Compat target is **web-core / `.web.bundle`** behavior, not native
   `.lynx.bundle`.
 - W3C-correct semantics for real spec features; faithful cloning for
@@ -999,7 +1007,10 @@ and §D.16 with what the wire format actually permits.)*
       at its original position only, so an element the copy shows measures
       one period from where it is drawn; and the copy's offset is snapped
       to device pixels on its own, so with a non-integer period × device
-      pixel ratio the two copies may meet one device pixel apart.
+      pixel ratio the two copies may meet one device pixel apart (accepted
+      by the user 2026-10-13: a circular `flat-coverflow` swiper of 60% items
+      on a 393px viewport, period 943.2px, shows one column of its own
+      background at the seam).
       `x-swiper[circular]` is wired to it
       (`crates/bobcat-core/src/main/tree/swiper.rs`).
     - **Inertia** (user-directed 2026-09-22, the same change): a scrolling

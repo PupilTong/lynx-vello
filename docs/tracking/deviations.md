@@ -30,6 +30,36 @@ consequential choice about whether to follow the spec or the quirk.
   algorithm** (reuse stylo/Servo's existing stacking-context logic) —
   apps relying on Lynx's actual buggy z-index behavior may render
   differently, and that's intentional.
+- **`justify-content: start | end` mean different things in flex and in
+  linear (user, 2026-09-25)** — css-align-3 resolves them against the writing
+  mode, so on a `*-reverse` container `start` sits at the opposite end from
+  `flex-start`. Lynx's own value table instead aliases them to `flex-start`
+  and `flex-end` (`css_defines/58-justify-content.json` gives `start` the
+  align-type `flex-start`), and web-core rewrites the declaration outright —
+  `("start", &[("justify-content", "flex-start")])` in its
+  `style_transformer/rules.rs`, which also poisons `left`/`right` into
+  `--lynx-invalid-invalid-invalid`. **Decision: flexbox implements the W3C
+  meaning; `display: linear` keeps Lynx's.** `linear` is a layout mode only
+  Lynx has, so its keywords mean what Lynx says they mean, while `flex` is a
+  CSS box and answers to CSS. The two therefore differ on a reversed
+  container, which is the only place either pair parts, and
+  `computed_main_gravity` in `crates/seldon/src/compute/linear.rs` is where
+  the alias lives.
+- **`defaultOverflowVisible` never reaches `page` (user, 2026-09-25)** — the
+  switch releases `view` and the two blur-view tags back to `visible`, and
+  nothing else. Both references pin the page: native calls
+  `SetDefaultOverflow(false)` in `PageElement`'s constructor under the comment
+  "make sure page's default overflow is hidden" and reads the config in
+  `ViewElement` (and `ComponentElement`) alone; web-core's page is a plain
+  `div` with no UA overflow, and its release selector is
+  `[lynx-default-overflow-visible="true"] x-view`, so the root clip comes from
+  `lynx-view { contain: strict }` instead. A card asking for visible overflow
+  asks it of its views, not of the window it is drawn in. Two related
+  divergences between the references, not resolved here because nothing in
+  this engine reaches them yet: native's decoder *raises* an absent key to
+  true for any `targetSdkVersion >= 2.0`, where web-core needs the key to say
+  `"true"` (this engine follows web-core — an absent key is false); and native
+  also applies the switch to `<component>`, which has no DOM counterpart.
 - **`overflow`/`overflow-x`/`overflow-y` default** — Lynx defaults to
   `hidden`; CSS defaults to `visible`. **Decision: match Lynx's default**,
   not CSS's — this is a values/defaults divergence, not an algorithm one,
@@ -1375,6 +1405,18 @@ consequential choice about whether to follow the spec or the quirk.
   native-Lynx gate is documented as a config-gated fallback design
   (doctored parent `ComputedValues`, allowlist mask) but not implemented.
   Custom properties inherit unconditionally in both worlds.
+  **The premise no longer holds for the flag set to `true` (found
+  2026-10-06):** since lynx-stack #3907 (`8d0b358bf`, 2026-09-11) web-core
+  writes `lynx-enable-css-inheritance="true"` on the page and
+  `web-core/css/in_shadow.css` then lets a `<text>` directly under a `<view>`
+  inherit `color`, the gradient text colour and a typography list. This engine
+  still resets `color` unconditionally (`text { color: initial }` in
+  `crates/bobcat-core/src/main/tree/text.rs`) and reads no such flag, so
+  `config-css-inheritance-true` in the web-core-e2e corpus paints black where
+  native and web-core both paint the view's red. The decision above was made
+  against a web-core that ignored the flag and has not been looked at again;
+  the corpus's three `config-css-inheritance-*` cards stay pending until it
+  is.
   **Landed 2026-08-21** in `bobcat_core::tree`'s UA sheet, which had carried
   the decision unimplemented until then — until it landed an ancestor `view`'s
   `color` really did reach the text under it. The port is `color: initial` on
@@ -1455,6 +1497,15 @@ consequential choice about whether to follow the spec or the quirk.
   `direction`), which stylo does whatever the page config says. web-core is
   this project's default resolution of such conflicts (AGENTS.md); none of
   these has been put to a ruling.
+  **A decoration under a gradient `color` is black (accepted by the user,
+  2026-10-13).** A text decoration takes the `color` of its decorating box,
+  and where that `color` is a gradient the line is painted black: the
+  underline of a text that has a gradient `color` of its own or inherits one
+  with the switch on, and the underline a view with a gradient `color`
+  propagates to its texts with the switch off. web-core lowers a gradient
+  `color` to transparent glyphs over a background clipped to the text. The
+  three `config-css-inheritance-*` cards of the web-core-e2e corpus are
+  pinned on the black line.
 
 - **`:is()`, `:where()`, `:has()`, `:nth-child()` family, `:first-child`/`:last-child`/`:only-child`/`:empty`**
   — all are *parsed* by Lynx's selector grammar but have **no matcher case at
@@ -3551,7 +3602,7 @@ consequential choice about whether to follow the spec or the quirk.
     carries `pseudo="-webkit-input-placeholder"`, as Blink's does, which is
     what makes it the host's `::placeholder` to `terminus`.
 
-  Two differ from web-core by user ruling (2026-10-19):
+  Three differ from web-core by user ruling (2026-10-19, 2026-10-20):
   - *`input` and `textarea` are not text fields.* web-core's tag map sends
     the JSX tags `input` and `textarea` to `x-input`/`x-textarea`
     (`web-core/ts/constants.ts:104,106`), and native Lynx registers its
@@ -3570,8 +3621,48 @@ consequential choice about whether to follow the spec or the quirk.
     lines, which is not built. The lines are the editor's Lynx paragraph's
     (the textarea's editor is a Lynx `<text>`; web-core's is a browser
     `<textarea>`), so the empty line after a trailing break counts.
+  - *An `x-textarea` with no author height is as tall as its lines*
+    (native; user, 2026-10-20). Native measures an unsized field at the
+    height its editor reports (`LynxUIBaseInputShadowNode.kt:22-29`,
+    `mUIHeight`), so an empty one is one line tall, which is what the empty
+    editing host's strut line gives here. web-core's inner `<textarea>`
+    keeps the browser's default two rows (`rows=2`), about 36px at 14px.
 
 ## JS runtime & APIs (see [js-runtime.md](js-runtime.md), [accessibility.md](accessibility.md))
+
+- **Main-thread code that names a browser global throws, as on native**
+  (user, 2026-10-20). `MTS_CHUNK_PREAMBLE`
+  (`crates/bobcat-core/src/esm.rs`) declares none of `navigator`,
+  `postMessage` or `window`, so reading one is a ReferenceError: native
+  declares them neither in the compiler (the toolchain's
+  `RuntimeWrapperWebpackPlugin` list skips main-thread chunks) nor in the
+  runtime (the main-thread global object, `quick_context.cc`,
+  `mts_runtime.cc`), and PrimJS throws for an undeclared global. web-core
+  wraps main-thread code in `const navigator=void 0,postMessage=void 0;
+  let window=void 0` (`decode.worker.ts`), because its main thread runs in
+  an iframe that has the browser's own. The background thread's list
+  (`BTS_CHUNK_PREAMBLE`) is web-core's and shadows `postMessage` too;
+  whether native's background thread does is not established.
+- **One handler per element and event name, as on native** (user,
+  2026-10-20; `fileEvent` in `packages/bobcat-element/src/element-papi.ts`).
+  A `capture-bindtap` and a `bindtap` on one element share the name `tap`,
+  so the one filed second replaces the first, as native's
+  `AttributeHolder::SetStaticEvent` (`insert_or_assign`) does on its
+  default event path. web-core keys handlers by name and type
+  (`element_data.rs`), so both run there, capture first.
+
+- **`NodesRef.path()` answers as native does** (user, 2026-10-20;
+  `nodeFields` and `__BobcatQueryNodes` in
+  `packages/bobcat-element/src/element-papi.ts`). The callback gets the
+  node array itself, target first, each node
+  `{tag, id, dataSet, index, class}` with `id` the empty string when the
+  node has none and `class` an array: native's `lynx-core` calls
+  `cb(res.data, res.status)` (`js_libraries/lynx-core/src/modules/selectorQuery/SelectorQuery.ts`)
+  over `FiberNodeInfo::GetNodesInfo` (`core/renderer/dom/fiber/fiber_node_info.cc`).
+  web-core wraps the array as `{path}`, leaves an absent `id` and `class`
+  undefined and `class` a string (`registerGetPathInfoHandler.ts`). The
+  API page on lynxjs.org shows the `{path}` wrapper with native's field
+  values, which matches neither implementation.
 
 - **`ShadowRealm` children have no animation frames, and report under their
   parent's source** (2026-10-13; `crates/bobcat-core/src/realm/child.rs`).
@@ -3650,7 +3741,9 @@ consequential choice about whether to follow the spec or the quirk.
   is the element (two elements with one id+scene are two records), a
   teardown or an `exposure-id` change emits a `disexposure` record with the
   old id and no `uidisappear`, `exposure-area` is `parseFloat(value) / 100`,
-  zero-area and edge-adjacent targets count as intersecting,
+  zero-area and edge-adjacent targets count as intersecting (confirmed by the
+  user 2026-10-13 for a pager's hidden page, which starts on the pager's edge
+  and is therefore exposed, where both references leave it unexposed),
   `visibility: hidden`/`opacity: 0` do not hide (native checks alpha and
   hidden), and a freed exposed element emits nothing (since 2026-10-20: a
   record is a `bobcat:exposure` event dispatched at its element, and a
@@ -3900,6 +3993,21 @@ consequential choice about whether to follow the spec or the quirk.
   here (`lower_style`), the `l-e-name` guard is not, and `__SetCSSId`
   ignores its `entryName`. A container's `config` is ignored too: page policy
   is the page's.
+  **On the web target this needs an encoder that keeps the section
+  (lynx-stack #4142, 2026-10-13).** A lazy container compiled on the
+  `lynx.fetchBundle` path carries its CSS as the `CSS` custom section. Before
+  #4142 `WebEncodePlugin.routeSections` (`@lynx-js/template-webpack-plugin`)
+  moved that section into the `.web.bundle`'s `StyleInfo` under css id 0 and
+  wrote no custom section, so `__LoadStyleSheet('CSS', …)` answered `null`
+  here and none of a web lazy component's class rules applied; since #4142 it
+  is also written into `CustomSectionsStyleInfo` (label 7) under its name,
+  which is where this engine reads it (see the next entry). A container built
+  by an older encoder still has the rules in `StyleInfo` alone and is not
+  answered from there. An adopted sheet is page-wide: two bundles compiled
+  unscoped collide on equal selectors, the later adoption winning. The user
+  ruled that the expected result (2026-10-13: the isolation between a card's
+  sheet and a lazy bundle's has been removed), and `basic-lazy-component-css`
+  and `-css-blank` of the web-core-e2e corpus are pinned on it.
 - **CSS custom sections are read from the `CustomSectionsStyleInfo` section
   *and* from the legacy JSON form** — since lynx-stack#4138 (75c770fe)
   web-core's encoder writes every `encoding: 'CSS'` custom section into

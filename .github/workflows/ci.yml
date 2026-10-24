@@ -28,6 +28,9 @@ jobs:
         uses: ./.github/actions/setup-javascript
         with:
           fixtures: true
+          # This job is the one that runs tests, so it is the one that needs
+          # the corpus `crates/bobcat-source/tests/web_core_e2e.rs` boots.
+          corpus: true
 
       - name: Install pinned toolchain
         run: rustup toolchain install
@@ -84,6 +87,17 @@ jobs:
         run: |
           cargo llvm-cov --workspace --lcov --output-path lcov.info \
             --ignore-filename-regex '(^|/)vendor(/|$)'
+
+      # A golden that differs leaves `-expected`/`-actual`/`-diff` PNGs beside
+      # its golden directory (`crates/*/tests/artifacts`); keep them, so a
+      # rendering that differs only on this runner can be read.
+      - name: Upload golden diffs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: golden-diffs
+          path: crates/*/tests/artifacts/
+          if-no-files-found: ignore
 
       - name: Stylo fork Lynx tests
         run: |

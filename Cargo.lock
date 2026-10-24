@@ -438,6 +438,7 @@ dependencies = [
  "codspeed-divan-compat",
  "cssparser",
  "percent-encoding",
+ "prime-radiant",
  "rkyv",
  "serde_json",
  "thiserror 2.0.18",

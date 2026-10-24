@@ -101,7 +101,10 @@
 //! - **The primitive's edge cases stand**: a zero-area element that is intersecting has ratio 1, an
 //!   element that only touches an edge is intersecting, and `visibility: hidden` or `opacity: 0`
 //!   hides nothing from it — where native reports a zero-sized element hidden
-//!   (`LynxUIExposure.m:373-375`), needs strict overlap and walks `isVisible`.
+//!   (`LynxUIExposure.m:373-375`), needs strict overlap and walks `isVisible`. The user confirmed
+//!   the edge rule for the case it shows in (2026-10-13): the page of a pager that is not shown
+//!   starts exactly on the pager's edge, so it is exposed and never disexposed, where both
+//!   references leave it unexposed.
 //! - **Lengths**: `<n>px`, `<n>rpx` (1rpx is the viewport width over 750, stylo's rule), and a bare
 //!   number as px (`UnitUtils.java:59-86`). `<n>%` is of the rect the margin lands on, resolved by
 //!   the primitive at every update, top and bottom of its height, left and right of its width: a ui

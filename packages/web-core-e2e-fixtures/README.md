@@ -1,0 +1,185 @@
+# web-core-e2e-fixtures
+
+`lynx-stack`'s web-core end-to-end cards, vendored as ReactLynx source and
+compiled here for the engine version this repository targets.
+
+The cards come from `packages/web-platform/web-core-e2e/tests/reactlynx` and
+keep their Apache-2.0 headers; `NOTICE.lynx-stack` and `LICENSE.lynx-stack`
+carry the notice, as they do for `packages/reactlynx-test-fixtures`. Playwright's
+screenshots of web-core rendering these same cards stay upstream, so this
+package holds sources and a build, never goldens. The goldens that are kept
+are of this engine's own renderings, beside the suite that judges them:
+`crates/bobcat-source/tests/web_core_e2e.rs`.
+
+## Why vendor them rather than build them upstream
+
+ReactLynx picks its lazy-bundle implementation at compile time. Only
+`engineVersion` 3.9 and above compile against `lynx.fetchBundle`; below that the
+card calls `__QueryComponent`, which this engine does not implement and, by the
+scope decision, will not. Upstream's own `dist/` is built without an
+`engineVersion`, so its whole `basic-lazy-component-*` family exercises a path
+this engine has no intention of serving. Compiled here at `4.1.0`, the same
+sources exercise the path it does.
+
+The cards, their CSS and their assets are otherwise upstream's, with ten
+rewrites applied to the vendored text by user ruling (the first two on
+2026-09-25, the third on 2026-10-08, the fourth on 2026-10-15, the fifth on
+2026-10-16, the next four on 2026-10-20, the last on 2026-10-24):
+
+- **`direction: lynx-rtl` becomes `direction: rtl`** (24 files). `lynx-rtl` is
+  a value the fork's grammar rejects, so upstream's own spelling left every
+  right-to-left case testing nothing here. The standard value is what this
+  engine implements.
+- **`<x-text>` becomes `<text>`** (5 files). `x-text` is web-core's DOM name
+  for the Lynx tag; written literally in JSX it reaches this engine as a tag
+  no sheet has a rule for, and the run disappears. `<x-textarea>` is a
+  different tag and is untouched.
+- **`linear-gravity` and `linear-cross-gravity` become `justify-content` and
+  `align-items` in `basic-element-x-overlay-ng-playground-test`** (1 file, the
+  value `center` in each). The two are deprecated longhands this engine drops
+  (`docs/tracking/deviations.md`), and that card is about overlays: its
+  panel only has to be centred. Upstream's own sheet carries the modern
+  spellings beside them, commented out. The cards whose subject *is* the
+  deprecated family — the `basic-linear-*-graverty-*`, `*-cross-gravity` and
+  `*-layout-gravity` ones — keep it, and are judged as dropping it.
+
+- **Two cards whose subject had no size or colour get both** (2 files).
+  Upstream asserts their computed style, and nothing on their screen showed
+  it. In `basic-element-svg-bindload` the `#result` view whose colour the
+  `bindload` handler turns green gets 100x100. In
+  `basic-flex-nested-linear-setting` the flex parent gets a 300px height and a
+  yellow background, the linear child a red one and two 20x20 blue children,
+  so the child's main axis and its distribution of children are visible.
+
+- **`api-frame-auto-width`'s frame gets a yellow background, and its parent
+  stops stretching it** (1 file). Upstream reads the frame's width back, and
+  nothing on the screen showed it: the frame painted nothing of its own, and
+  its parent `<view>` stretched it across the page, which a frame's
+  `auto-width` yields to on native too. The parent is now a column flex box
+  with `align-items: flex-start`, so the yellow box is as wide as the nested
+  card's widest line.
+
+- **`<input>` becomes `<x-input>` in `basic-element-input-bindinput`** (1
+  file). web-core maps the JSX tag `input` to `x-input`; here `input` is an
+  HTML element name, and HTML's `<input>` is not a text field
+  (`docs/tracking/deviations.md`), so upstream's spelling gave the card no
+  field to fill.
+
+- **`basic-element-x-textarea-focus`'s block is 20% of the page, not 90%**
+  (1 file). At 90% of the 1000px page the block was 900px tall and the
+  three textareas the card is about lay below the viewport.
+
+- **`SystemInfo.platform` is asked to be a string, not `'web'`** (2 files:
+  `api-SystemInfo`, `basic-mts-systeminfo`). web-core hard-codes `'web'`;
+  native reports its build platform, and this engine its host's. What the
+  cards may rely on is that the member is a string.
+
+- **`api-get-path-info` reads `path()`'s answer as native gives it** (1
+  file). Native's `lynx-core` calls the callback with the node array itself
+  (`cb(res.data, res.status)`, `SelectorQuery.ts`), each node's `id` the
+  empty string when it has none (`fiber_node_info.cc`); web-core wraps the
+  array as `{path}` and leaves such an `id` undefined. The card reads `res`
+  and expects `id: ''` for the two nodes without one.
+
+- **Six cards with Chinese text name a font for it** (6 files:
+  `basic-element-text-maxlength`, `-nest-image`, `-tail-color-convert`,
+  `-word-break`, and the two `x-overlay-ng` playground cards). Each gets
+  `text { font-family: sans-serif, "Hiragino Sans GB"; }`. Han text with no
+  family of its own fell back to "PingFang SC", which a Mac holds either in
+  the on-demand font asset or in the private `PingFangUI.ttc`, with
+  different line metrics; a GitHub macOS runner has only the second, so the
+  cards rendered differently there. Hiragino Sans GB is in
+  `/System/Library/Fonts` on every Mac; Latin text keeps the generic family.
+
+All ten are recorded here rather than absorbed silently, because a re-sync
+from upstream will bring the original text back.
+
+## Building
+
+```sh
+pnpm --filter web-core-e2e-fixtures build          # every group
+node scripts/build.js default                      # one group
+E2E_GROUP=default npx rsbuild build                # one group, directly
+```
+
+Output is `dist/<case>.web.bundle`, the layout upstream's goldens were taken
+against and the one `crates/bobcat-source/tests/web_core_e2e.rs` reads. Two families
+sit elsewhere:
+
+- the three `config-splitchunk-*` cards and `config-mode-dev-with-all-in-one`
+  write into `dist/<case>/`, because they load further chunks by relative path;
+- `config-lazy-component-*` writes into `dist/containers/`. Those are
+  lazy-bundle containers rather than cards — they carry no `lepusCode.root`,
+  and upstream's spec never opens one — so keeping them out of `dist/`'s top
+  level is what makes "every `dist/*.web.bundle`" mean "every page".
+
+Cards reach their own bitmaps and fonts through `file:` URLs pointing into this
+`dist/`, which the engine's resource transport reads directly — upstream points
+the same setting at its dev server. Nothing has to be served for a card to
+resolve its assets, and because `dist/` is never committed, the absolute path
+baked into a bundle belongs to the machine that built it.
+
+This build is not part of `pnpm --filter reactlynx-test-fixtures build`, which
+the Rust tests need before every `cargo` run. Hundreds of cards are minutes of
+work, and one suite reads them:
+`crates/bobcat-source/tests/web_core_e2e.rs`, which holds each card to a
+rendering someone read the case for and judged right. CI builds the corpus in
+the job that runs tests and nowhere else.
+
+## `groups.js`
+
+Upstream expresses per-case compiler configuration as 21 rspeedy config files:
+six that glob a family, fifteen that sit beside a single case. This repository
+builds ReactLynx with Rsbuild directly, so that information lives in
+`groups.js` as one entry per distinct configuration, matched by case name —
+`enableRemoveCSSScope: false`,
+`experimental_isLazyBundle: true`, the two `enableCSSInheritance` variants, the
+split-chunk presets, and the development-mode card whose asset prefix points at
+a host that does not resolve.
+
+**When re-syncing `src/` from upstream, re-read those config files.** A case
+whose family moved would otherwise compile with the wrong switches, and the
+suite would blame the engine for it.
+
+## What is not vendored
+
+`api-frame-element-map` (user, 2026-10-16: the test is deleted), and
+`basic-ppx-unit` (user, 2026-10-20: the test is deleted; the fork's grammar
+has no `ppx`), and the four `basic-element-text-set-native-props-*` cards
+(user, 2026-10-21: they test web-core retargeting a `setNativeProps({text})`
+push onto a text's leading `raw-text`, which this engine does not support).
+
+Also deleted by user ruling (2026-10-23):
+
+- the seven error-report and lifecycle cards — `api-error`, `api-error-bts`,
+  `api-error-mts`, `api-report-error`, `api-set-release`,
+  `api-set-release-bts` and `api-dispose`. What they assert is the host's
+  error report and what a released view reports, and the embedder traits
+  that carry both are being redesigned after native's embedder API;
+- `basic-element-x-webview-bindmessage` and `basic-element-x-audio-tt-play`:
+  `x-webview` and `x-audio-tt` are deferred.
+
+Every case that involves `enableCSSSelector: false` (user, 2026-10-13: the
+flag is no longer supported, so its cases are deleted rather than kept
+pending). That is 29 directories of upstream's `tests/reactlynx`:
+
+- the ten `config-css-selector-false-*` cards and `config-mixed-01`, which are
+  compiled with the flag;
+- the nine `basic-lazy-component-css-selector-false-*` cards, compiled with it
+  too;
+- the nine `config-lazy-component-css-selector-false-*` lazy containers, which
+  only those nine cards load.
+
+Their three rspeedy config files (`config-css-selector-false.config.ts`,
+`basic-lazy-component-css-selector-false.config.ts`,
+`config-mixed-01.config.ts`) have no entry in `groups.js`. **A re-sync from
+upstream will bring the directories back; delete them again.** With them gone
+the corpus, less those fifteen cards too, is 309 cards.
+
+## What is not built
+
+`external-bundle` needs `external-libs/greeting`, an external bundle upstream
+builds with `@lynx-js/lynx-bundle-rslib-config` and serves from its own
+`resources/`. That library is not vendored here, so the card's source is
+present and unbuilt. It is the one card in the corpus that exercises
+`lynx.fetchBundle` against a foreign container rather than a lazy child.
