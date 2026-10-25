@@ -36,10 +36,10 @@ The entries that are not deprecated:
 | `pipeline.loadBundle` (`LoadBundleEntry`) | the first-screen pipeline | phase 1 |
 | `pipeline.reloadBundleFromNative`, `pipeline.reloadBundleFromBts` (`ReloadBundleEntry`) | a reload | phase 1 |
 | `pipeline.updateTriggeredByBts`, `.updateTriggeredByNative`, `.updateGlobalProps`, `.setNativeProps`, `.reactLynxHydrate` (`PipelineEntry`) | a flush bound to a `__lynx_timing_flag` | phase 1 |
-| `resource.lazyBundle` | a lazy bundle load | phase 2 |
-| `container` (W3C Container Timing, no Lynx equivalent) | a presented frame that grew a `containertiming` root's painted region | phase 2 |
-| `memory.memory` | the memory monitor, when enabled | phase 2 |
-| `js_blocking` | the JS blocking monitor, when enabled | phase 2 |
+| `resource.lazyBundle` | a lazy bundle load | phase 2, built 2026-10-26 |
+| `container` (W3C Container Timing, no Lynx equivalent) | a presented frame that grew a `containertiming` root's painted region | phase 2, built 2026-10-26 |
+| `memory.memory` | the memory monitor, when enabled | phase 2, built 2026-10-26 |
+| `js_blocking` | the JS blocking monitor, when enabled | phase 2, built 2026-10-26 |
 | `metric.fsp` | the First Stable Paint tracer, when enabled | phase 3 |
 
 Deprecated in Lynx and **not built** (ruling Q2 covers the last three): the
@@ -329,15 +329,26 @@ Attribution runs in the paint-order build over the flat tree, the tree the
 build already walks: a node bit `self_or_ancestor_has_container_timing`
 is set when a root is marked and propagated at insertion (Blink's
 `SelfOrAncestorHasContainerTiming`), so a page without a marked root pays
-one bit test per painted item and nothing else; a painted item under a root
-walks up to its nearest marked ancestor and adds its device rect to that
-root's region (a `Region` union, as Blink's `cc::Region`). The painter
-reports a root when a presented frame grew its region. Two deviations from
-the draft, recorded in `docs/tracking/deviations.md`: nested roots are
-defined (the nearest marked ancestor wins), and a shadow tree is inside
-its host's container because the flat tree is what paints — the "shadowed"
-model the Web Performance WG leaned to on 2025-09-11
-(`w3c/element-timing#3`), with `last_painted` retargeted to the host.
+one `bool` test per painted item and nothing else (the walk copies "some
+root is marked" into its scratch once per walk); a contentful paint under a
+root — text with a non-whitespace glyph, an image or vector with pixels,
+outside a still `opacity: 0` group, the same test `paints_content` makes —
+walks up its shadow-including ancestor chain and adds its device rect to
+every root it passes (a disjoint-rect region, as Blink's `cc::Region`),
+stopping at a root that carries `containertimingignore`. That is the
+draft's own nesting rule as of its 2026-10-01 text ("maybe update the last
+new painted area" passes a paint outward), so the plan's "nearest marked
+ancestor wins" was not built; `last_painted` is the node that added the
+most new area in that frame, as the draft now defines it, and `name` is
+`""`, as the draft's getter answers. The painter reports a root when a
+presented frame grew its region. Recording stops at the first pointer down,
+wheel or key down, requested by the painter and applied by the main thread
+before its next commit; a root marked afterwards records again, which the
+draft leaves undefined. One deviation from the draft, recorded in
+`docs/tracking/deviations.md`: a shadow tree is inside its host's container
+because the flat tree is what paints — the "shadowed" model the Web
+Performance WG leaned to on 2025-09-11 (`w3c/element-timing#3`), with
+`last_painted` retargeted to the host. Built 2026-10-26 (phase 2).
 
 ### 5.4 Not in `terminus`
 
@@ -404,8 +415,8 @@ pub enum PerformanceEntry {
     /// `entryType` "paint", `name` the W3C name; `lynx_fields` = `entryType`, `name`, `startTime`.
     Paint(PaintEntry),
     /// W3C Container Timing, from `terminus`'s `ContainerPaint`; `identifier` is the root's `containertiming` attribute.
-    Container(ContainerTiming),
-    LazyBundle(LazyBundleTiming), Memory(MemoryUsage), JsBlocking(JsBlocking), LongTask(LongTask),
+    Container(ContainerEntry),
+    LazyBundle(LazyBundleEntry), Memory(MemoryEntry), JsBlocking(JsBlockingEntry), LongTask(LongTaskEntry),
 }
 pub enum LynxValue<'a> { Number(f64), Text(&'a str), Metric(&'a Metric), Map(&'a [(&'a str, LynxValue<'a>)]) }
 impl PerformanceEntry {
@@ -596,39 +607,100 @@ shadow tree, and `w3c/element-timing#3` (open since 2019, last discussed
 2025-09-11) has settled on nothing beyond preferring a container-style,
 host-level view for component users.
 
-## 7. Monitors (phase 2)
+## 7. Monitors (phase 2, built 2026-10-26)
 
-All off by default; each is a `LynxView` setter taking `Option<Config>`.
+All off by default; each is a `LynxView` setter taking `Option<Config>`,
+and each switch is one relaxed atomic in the registry, which is all a hot
+path reads while the monitor is off. Turning a monitor on does not by
+itself make `pump()` report: the embedder also asks for the entry type
+through `observe_performance`, and a record nobody asked for is dropped
+where it would be made.
 
-- **Long tasks**: `jobs.rs` runs every piece of JavaScript as one job. With
-  the monitor on, the loop takes two instants per job and reports a job of
-  `≥ threshold` (default 50 ms, Lynx's) as `LongTask { start, duration,
-  kind: JobKind, thread: Main | Workers }`. `JobKind` is the job's own enum
-  (entry, timer, command, event, posted, module callback), which is the
-  attribution Lynx's `task_type`/`task_name` give; W3C's `longtask` has
-  `name`/`startTime`/`duration` and is what `entry_type()` answers
-  (`"longtask"`). The record is written into the registry by the job loop
-  and taken by `pump()`; Lynx's `lynxsdk_long_batched_tasks_timing` (a 1 s
-  window at 80 % busy) is not built; the per-job entries let an embedder
-  compute it.
-- **Memory**: on the interval Lynx uses (`memory_report_interval_sec`), the
-  main thread reads `JS_ComputeMemoryUsage` for the MTS realm, the BTS worker
-  its own, and the document sizes itself (`TreeArenas` slots, `TextStore`s,
-  the committed frame's scenes) — the three Lynx categories
-  `mainThreadScriptingEngine`, `backgroundThreadScriptingEngine`,
-  `lynxTasmElement`, plus `committedFrame` as this engine's own. Each writer
-  puts its number in the registry; `pump()` emits when the total moved by
-  more than `change_threshold` since the last report. The readings are the
-  measurement; nothing else runs on the measuring thread.
-- **JS blocking**: with the monitor on, each command the BTS consumer queues
-  carries its enqueue instant; the job that runs it adds
-  `run_start − enqueued` above `threshold` (default 20 ms) to a running sum
-  in the registry, which `pump()` emits per `report_interval` (default 5 s)
-  as Lynx's `{stage: loadBundle | timer, total_blocking_time,
-  total_blocking_count, total_duration, blocking_ratio, avg_blocking_time}`.
-- **Lazy bundle**: `resource.rs`'s lazy bundle load already has request and
-  decode points; the entry is `{componentUrl, size, sync, loadSuccess,
-  requireStart/End, decodeStart/End}` and costs two instants per lazy load.
+- **Long tasks** (`set_long_task_monitor`, `LongTaskConfig { threshold }`,
+  default 50 ms, Lynx's `duration_threshold_ms_`): every realm job is
+  queued through `lifetime::run_job` with the `JobKind` it was queued for
+  (18 variants over the 17 call sites: `Start`, `Entry`, `Module`, `Future`,
+  `Timer`, `Settle`, `Command`, `ContentVisibility`, `Intersection`,
+  `ResizeObserver`, `ComponentEvent`, `FontFace`, `WorkerEvent`, `Post`,
+  `AnimationFrame`, `ModuleCallback`, `Performance`, `Release`); with the
+  monitor on, `run_job` times the job around its `catch_unwind` and keeps a
+  record at or over the threshold. `PerformanceEntry::LongTask { start,
+  end, thread: Main | Workers, kind }`; `entry_type()` is W3C's `"longtask"`,
+  `name()` the kind, and the JSON carries Long Tasks' `startTime`/`duration`
+  plus the keys of Lynx's `lynxsdk_long_task_timing` event (`thread_name`
+  `Lynx_TASM`/`Lynx_JS`, `task_type` mapped from the kind to Lynx's
+  `k…Task` constants, `task_name`, `duration_ms`). Rust audience only:
+  Lynx reports long tasks through its event tracker, not as an entry.
+  Lynx's `lynxsdk_long_batched_tasks_timing` (a 1 s window at 80 % busy) is
+  not built; the per-job entries let an embedder compute it. Off: one
+  relaxed load per job, no clock.
+- **Memory** (`set_memory_monitor`, `MemoryConfig { report_interval,
+  acquisition_delay, change_threshold }`, Lynx's defaults 20 min, 2 s,
+  0 bytes): a view task on `bobcat-main` samples on the interval. Four
+  categories, each written by the thread that holds what it measures:
+  `mainThreadScriptingEngine` (the `QuickJS` runtime of `bobcat-main`,
+  `Runtime::memory_usage()` over `JS_ComputeMemoryUsage` through the
+  bridge's shim; `size_bytes` = `malloc_size`, the other counters as
+  detail), `backgroundThreadScriptingEngine` (the same reading by the
+  view's BTS worker, asked by `WorkerMessage::MemorySample`),
+  `lynxTasmElement` (`Document::memory_footprint()`: live elements × the
+  node stride, Lynx's `singleElementSizeBytes`/`elementCount` detail) and
+  this engine's own `committedFrame` (`CommittedFrame::encoded_bytes()`,
+  read by the painter when a sample set its flag). Both runtimes are shared
+  by every realm on their thread, which the detail says (`sharedRuntime:
+  "thread"`); Lynx's are per view or group. Reporting mirrors
+  `MemoryMonitor::UpdateMemoryUsage`/`ReportMemory`: a reading that changes
+  a category reports when the total moved by at least the threshold (0 =
+  every change), the first after enabling forced; the JSON nests
+  `detail.<category>.{category, sizeBytes, instanceCount, detail}`.
+  Audiences: Rust (`EntryTypes::MEMORY`) and, as an opt-in extra, a BTS
+  `observe(['memory'])` — native sends `memory` to the platform alone
+  (`kEventTypePlatform`), see §11. Off: nothing is read; the painter's
+  `pump` pays one seat upgrade and one relaxed load.
+- **JS blocking** (`set_js_blocking_monitor`, `JsBlockingConfig {
+  threshold, report_interval }`, Lynx's defaults 20 ms and 5 s): each
+  `WorkerMessage` that queues a job of a worker (`Post`, `Vsync`,
+  `ModuleCallback`, `PerformanceReady`) carries its `enqueued` instant while
+  the monitor is on; the delivering job adds its wait at or over the
+  threshold to the totals, messages held before boot included. Reports
+  follow Lynx's `JSBlockingMonitor` exactly: `stage: "loadBundle"` when the
+  page's load record completes, then `stage: "timer"` reports by a view
+  task on `bobcat-main` at 1, 3, 6, 10 … intervals after it
+  (`ReportWithTimer(i)` schedules the next `(i+1)·interval` later); each
+  report made resets the totals (`// Reset after reporting`), a report with
+  nothing counted is skipped and does not restart the span; keys
+  `total_blocking_time`, `total_blocking_count`, `total_duration` (ints,
+  ms), `blocking_ratio`, `avg_blocking_time` (doubles), and for `timer`
+  `time_after_load_bundle` (the YAML spells it `time_after_fcp`; the
+  writer is followed). Rust audience only (`x-lang` lists no JavaScript).
+  Every worker of the view is counted, the BTS and a `<frame>` card's
+  among them. Off: one relaxed load per send, no clock.
+- **Lazy bundle** (`EntryTypes::RESOURCE`, BTS `observe(['resource'])`;
+  no setter — it is an entry, on while someone observes it):
+  `fetchResource(url, true)`, which `lynx.fetchBundle` makes, is timed
+  while someone observes `resource`: `requireStart` at the call, the
+  request asks the fetcher for its readings (`SourceRequest::Fetch { timed }`
+  → `FetchOutcome { size_bytes, received, installed }`), and the outcome's
+  delivery to the realm completes `PerformanceEntry::LazyBundle` with
+  Lynx's keys `componentUrl`, `mode` (`"normal"`, the only value native's
+  dispatched entries carry), `size`, `loadSuccess`, `requireStart/End`,
+  `decodeStart/End` (the container installer's span). A URL already
+  fetched is native's cache hit and reports nothing; `sync` is in the YAML
+  but never written by native's writer, so it is not written here. Native
+  makes this entry only on its `__QueryComponent` path
+  (`LazyBundleLifecycleOption`), which this engine does not have;
+  `fetchBundle` is the analogue, and a `<frame>`'s fetch of its card is
+  untimed as native's frame load reports none. Delivered to Rust and to the
+  BTS of the realm that fetched (`kEventTypeAll` in native). Off: one
+  relaxed load per `fetchBundle`, no instant, no allocation.
+- **`<frame>` `loadmetrics`** (§6.5; moved here from phase 1, where it was
+  listed and not built): when a nested card realm's `pipeline.loadBundle`
+  record completes, the embedder's `pump` writes the entry's JSON and sends
+  `ToMain::FrameLoadMetrics { card, json }`; the card realm's
+  `__BobcatLoadMetrics` dispatches `loadmetrics` at its page root, bubbling
+  and composed like `load`, with native's detail `{url, mode: "standard",
+  entry}` (`LynxFrameView.buildFrameLoadMetricsDetail`). Once per card
+  load, whatever the host observes.
 - **First Stable Paint** (phase 3): the painter has, per presented frame,
   the paint order and the viewport, so Lynx's algorithm (meaningful-content
   rects projected onto 256-bit X and Y masks, "valuable" when fill ≥ 30 %,
@@ -676,8 +748,9 @@ test `the performance shell must stay inert` keeps holding for that build.
 
 Entry delivery to the BTS, with no main-thread part and no JSON (ruling
 Q1): the first `observe()` with a non-empty list calls the host function
-`observePerformance(1, paint)`, which adds the worker to the registry's
-observing set (the last `disconnect()` calls `observePerformance(0, 0)`).
+`observePerformance(1, paint, memory, resource, container)`, which adds the
+worker to the registry's observing set (the last `disconnect()` calls it with
+every flag `0`).
 `paint` is `1` while some active observer's list names `paint` or a
 `paint.` name, and the realm calls the host again only when either bit
 changes; the registry keeps the `paint` observers in a set of their own,
@@ -711,13 +784,15 @@ open-source build delivers entries to the MTS only in Air mode.
    the painter's completion step, `PerformanceEntry::{Pipeline, LoadBundle,
    ReloadBundle}`, `EngineEvent::Performance`, `observe_performance`,
    `set_extra_timing`; BTS/MTS `lynx.performance` hooks,
-   `PerformanceObserver`, `takePerformanceEntries`; the `<frame>`
-   `loadmetrics` event; the two bench cases; a golden-style test that a
-   flagged `<view>` yields one `pipeline.updateTriggeredByBts` entry whose
-   `identifier` is the flag and whose stages are ordered.
+   `PerformanceObserver`, `takePerformanceEntries`; the two bench cases; a
+   golden-style test that a flagged `<view>` yields one
+   `pipeline.updateTriggeredByBts` entry whose `identifier` is the flag and
+   whose stages are ordered. Built 2026-10-23 (PR #483; the `<frame>`
+   `loadmetrics` event listed here at first moved to phase 2).
 2. **Phase 2 — monitors and Container Timing**: long task, memory, JS
-   blocking, lazy bundle; the `containertiming` primitive and its
-   `container` entries.
+   blocking, lazy bundle, `loadmetrics` (§7); the `containertiming`
+   primitive and its `container` entries (§5.3). Built 2026-10-26, one PR
+   on top of #483.
 3. **Phase 3 — FSP and tracing feature**: `metric.fsp`; the `trace` cargo
    feature and the `profile*` host functions over `tracing`.
 
@@ -773,3 +848,29 @@ questions are closed.
    is pipeline provenance by realm, and the Rust stream carries every
    record of the view with `url` on `LoadBundle`. Ruled on the platform
    research in §6.5 (2026-10-23).
+
+Phase 2 decisions, 2026-10-26, made while building §7 and §5.3 and open to
+the user's review:
+
+- **BTS observation of `memory` and `resource`.** Native sends `memory` to
+  the platform alone (`kEventTypePlatform`, `memory_monitor.cc`), so a
+  native BTS `observe(['memory'])` receives nothing; here it receives the
+  entry as an opt-in extra, on the Q6 pattern (an extra entry nobody asks
+  for costs nothing). `resource.lazyBundle` is `kEventTypeAll` in native and
+  reaches the BTS there too. `longtask` and `js_blocking` reach Rust alone,
+  as native keeps them off the BTS.
+- **`lazyBundle` on `fetchBundle`.** Native makes the entry only on
+  `__QueryComponent`, which this engine does not have; `lynx.fetchBundle` is
+  the one lazy bundle load here and carries the entry. `sync` is not
+  written (native's writer never writes it); `mode` is `"normal"`.
+- **Container Timing follows the draft's current text**, not §5.3's first
+  premise: a paint counts toward every root on its ancestor chain, stopping
+  at a root with `containertimingignore`; `lastPaintedElement` is the node
+  that added the most area; `name` is `""`. The one deviation kept is the
+  host-level model for shadow trees. The BTS entry omits `rootElement` and
+  `lastPaintedElement` (the BTS has no element objects) and is routed to
+  every BTS observing `container`, since the painter does not know which
+  realm marked a root.
+- **JS blocking reports mirror Lynx's reset and cadence** (totals reset per
+  report made; `timer` reports at 1, 3, 6, 10 … intervals), which the first
+  draft of §7 had wrong.
