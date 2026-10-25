@@ -67,6 +67,7 @@ use crate::jobs::{JsThread, JsThreadHandle};
 use crate::lifetime::{Lifetime, run_job, serve_clock};
 use crate::link::HostOutbox;
 use crate::main::quickjs::{ScriptRuntime, SharedRuntime, mark_checkpoint_later};
+use crate::performance::WorkerLoadMark;
 use crate::realm::owner::{self, RealmOwner};
 use crate::realm::policy::{self, Row, Scene};
 use crate::realm::{self, RealmCore};
@@ -284,6 +285,11 @@ struct WorkerRealm {
     /// teardown because it is written from inside the realm it would tear
     /// down: the task reads it once the call that set it has returned.
     closing: Rc<Cell<bool>>,
+    /// Set by `observePerformance` while the realm has a `lynx.performance`
+    /// observer: what a `PerformanceReady` is delivered to. Only
+    /// `bobcat:bts-runtime` calls that member, so a realm with the flag set
+    /// has that module, whose export the delivery calls.
+    performance_observed: Rc<Cell<bool>>,
 }
 
 /// One worker: what its tasks act on, driven through [`owner`] as a view is.
@@ -388,6 +394,13 @@ impl Worker {
         if self.ended() {
             return None;
         }
+        // Lynx's `loadCoreStart`: the background runtime begins to open.
+        // Every worker marks it, since nothing here tells the BTS apart; a
+        // load reads the marks of the worker its realm connected.
+        let _ = self
+            .host
+            .registry()
+            .mark_worker_load(self.key, WorkerLoadMark::CoreStart);
         let opened = {
             let mut runtime = self.js.borrow_mut();
             match runtime.as_mut() {
@@ -414,18 +427,29 @@ impl Worker {
                         |engine| {
                             let events = self.events.clone();
                             let key = self.key;
-                            install_worker_members(engine, key, &self.host, name, move |data| {
-                                let _ = events.send(WorkerEvent {
-                                    key,
-                                    payload: WorkerPayload::Message(data),
-                                });
-                            })
+                            let flags = install_worker_members(
+                                engine,
+                                key,
+                                &self.host,
+                                name,
+                                move |data| {
+                                    let _ = events.send(WorkerEvent {
+                                        key,
+                                        payload: WorkerPayload::Message(data),
+                                    });
+                                },
+                            )?;
+                            let performance = crate::performance::install_worker_members(
+                                engine, &self.host, key,
+                            )?;
+                            Ok((flags, performance))
                         },
                     )
-                    .map(|(core, flags)| WorkerRealm {
+                    .map(|(core, (flags, performance_observed))| WorkerRealm {
                         core,
                         scope_installed: flags.scope_installed,
                         closing: flags.closing,
+                        performance_observed,
                     })
                     .map(|realm| {
                         if let Err(error) = realm.core.engine.load_root_module(js, &self.url) {
@@ -629,9 +653,13 @@ async fn serve_worker(js: SharedRuntime, start: WorkerStart, thread: JsThreadHan
         token,
         sources,
     } = start;
+    let registry = Arc::clone(sources.registry());
     let worker = Worker::new(js, key, url, events, token, sources, thread);
     owner::spawn(&worker, boot_worker(Rc::clone(&worker), name, messages));
     owner::run_owner(&worker).await;
+    // Its marks, its observer and its connection go with it, and a load
+    // that waited for its entry reports without them.
+    registry.forget_worker(key);
 }
 
 /// The worker's boot future: queue the worker's first job, which opens its
@@ -749,11 +777,17 @@ async fn consume_messages(
     // What is posted before the root module has finished; `None` once it has
     // and what was held has been delivered.
     let mut held: Option<Vec<HostValue>> = Some(Vec::new());
+    // A `PerformanceReady` read before the root module finished, delivered
+    // once with what was held: one take drains every entry owed.
+    let mut performance_held = false;
     let mut ready = worker.boot_finished.subscribe();
     loop {
         if let Some(queued) = held.take_if(|_| *ready.borrow_and_update()) {
             for data in queued {
                 deliver_post(&worker, data);
+            }
+            if std::mem::take(&mut performance_held) {
+                deliver_performance(&worker);
             }
         }
         tokio::select! {
@@ -767,6 +801,11 @@ async fn consume_messages(
                     None => deliver_post(&worker, data),
                 },
                 Some(WorkerMessage::Vsync(milliseconds)) => deliver_vsync(&worker, milliseconds),
+                Some(WorkerMessage::PerformanceReady) => if held.is_some() {
+                    performance_held = true;
+                } else {
+                    deliver_performance(&worker);
+                },
                 // Immediately, like a frame and unlike a post: the entry that
                 // has not finished importing may itself be awaiting this
                 // answer, so queuing it behind boot would deadlock the call.
@@ -778,6 +817,26 @@ async fn consume_messages(
         }
     }
     owner::end(&worker);
+}
+
+/// Queues the delivery of this worker's ready performance entries: one call
+/// of `bobcat:bts-runtime`'s `__BobcatPerformanceReady`, which takes them
+/// and emits each to the realm's observers. A realm with no observer, which
+/// may not have that module at all, is called nothing.
+fn deliver_performance(worker: &Rc<Worker>) {
+    let reporting = Rc::clone(worker);
+    drop(owner::enter(worker, move |realm, js| {
+        if realm.closing.get() || !realm.performance_observed.get() {
+            return;
+        }
+        if let Err(error) = realm
+            .core
+            .engine
+            .call_module_export(js, Export::PerformanceReady, &[])
+        {
+            policy::report(&reporting, Scene::Listener, error);
+        }
+    }));
 }
 
 /// Queues one posted value for this worker's realm.
@@ -923,6 +982,7 @@ mod tests {
                 token,
                 None,
                 crate::link::detached_base(),
+                crate::performance::PipelineRegistry::detached(),
             ),
             thread.clone(),
         );
@@ -1149,6 +1209,7 @@ mod tests {
                 token,
                 None,
                 crate::link::detached_base(),
+                crate::performance::PipelineRegistry::detached(),
             ),
         }
     }

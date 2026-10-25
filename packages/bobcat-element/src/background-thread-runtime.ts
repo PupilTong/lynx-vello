@@ -19,6 +19,16 @@ import type { TimerGlobals } from "bobcat:timers";
 import { cancelAnimationFrame, clearAnimationFrames, requestAnimationFrame } from "bobcat:animation-frame";
 import { createSystemInfo } from "bobcat:system-info";
 import { sharedObject } from "bobcat-internal:worker";
+import {
+  bindPipelineTimingFlag,
+  generatePipelineId,
+  markLoadTiming,
+  markPipelineTiming,
+  observePerformance,
+  onPipelineStart,
+  takePerformanceEntries,
+} from "bobcat-internal:host";
+import { createPerformanceObservers, createPipelineHooks } from "bobcat:performance";
 
 const timers = globalThis as unknown as TimerGlobals;
 
@@ -32,6 +42,9 @@ const coreContext = createCrossThreadContext();
 
 type AppHook = (...args: unknown[]) => unknown;
 const emitter = new GlobalEventEmitter();
+// `lynx.performance`'s hooks, and its observers over this worker's entries.
+const pipelineHooks = createPipelineHooks({ generatePipelineId, onPipelineStart, markPipelineTiming, bindPipelineTimingFlag });
+const performanceObservers = createPerformanceObservers({ observePerformance, takePerformanceEntries }, emitter, splitRecord);
 const jsModules = new Map<string, unknown>([["GlobalEventEmitter", emitter]]);
 // The embedder's `NativeModule`s, as the objects a card calls: one property
 // per module the view was built with, filled in by `__BobcatInitializeBTS`
@@ -184,6 +197,12 @@ const nativeApp = {
     return observer;
   },
 
+  // Native's `nativeApp` names for the four pipeline hooks.
+  generatePipelineOptions: pipelineHooks._generatePipelineOptions,
+  onPipelineStart: pipelineHooks._onPipelineStart,
+  markPipelineTiming: pipelineHooks._markTiming,
+  bindPipelineIdWithTimingFlag: pipelineHooks._bindPipelineIdWithTimingFlag,
+
   callLepusMethod(
     name: string,
     data: unknown,
@@ -281,8 +300,26 @@ function notifySharedDataObservers(change: Record<PropertyKey, unknown>) {
 export function __BobcatStartBTS(loadEntry: (options: InitializeOptions) => Promise<unknown>) {
   startBackground = async options => {
     __BobcatInitializeBTS(options);
-    await loadEntry(options);
+    // Lynx's background load marks: the runtime is up once `initialize`
+    // is handled, and the entry loads from here until it settles.
+    markLoadTiming("loadCoreEnd");
+    markLoadTiming("loadBackgroundStart");
+    try {
+      await loadEntry(options);
+    } finally {
+      // The view's load waits for this mark, so its entry reaches the
+      // observers the entry just created: taken here when it completed now.
+      if (markLoadTiming("loadBackgroundEnd")) performanceObservers.deliver();
+    }
   };
+}
+
+/**
+ * The host's `PerformanceReady`: entries this realm's observers receive are
+ * ready. Each is emitted as `lynx.performance.onPerformanceEvent`.
+ */
+export function __BobcatPerformanceReady() {
+  performanceObservers.deliver();
 }
 
 scope.addEventListener("message", (event: { data: FromMainThread }): void | Promise<void> => {
@@ -495,6 +532,24 @@ export const lynx = {
   },
   getCoreContext() {
     return coreContext;
+  },
+  /**
+   * Lynx's `lynx.performance`: `createObserver` and the four pipeline hooks
+   * ReactLynx calls. The `profile*` members are inert until a tracing build
+   * exists; the legacy Timing API is not built.
+   */
+  performance: {
+    createObserver: performanceObservers.createObserver,
+    ...pipelineHooks,
+    profileStart: noop,
+    profileEnd: noop,
+    profileMark: noop,
+    profileFlowId() {
+      return 0;
+    },
+    isProfileRecording() {
+      return false;
+    },
   },
 };
 

@@ -282,8 +282,16 @@ interface BobcatNative {
    * failed to load throws `loading stylesheet <url>: <reason>`. Before a
    * painter has bound the view it then waits for the binding. The same in
    * every realm, a frame's `ShadowRealm` child included.
+   *
+   * `pipelineId` is the `pipelineOptions.pipelineID` the flush was called
+   * with, as a number (`0` for none), and `timingFlag` its
+   * `__lynx_timing_flag` option (`""` for none). A flush that names a
+   * pipeline carrying timestamps, carries a flag, follows a
+   * `__lynx_timing_flag` attribute, a native pipeline or the realm's first
+   * render records the commit's timing and binds those pipelines to the
+   * frame it committed; any other flush reads one flag and records nothing.
    */
-  flushElementTree(): void;
+  flushElementTree(pipelineId: number, timingFlag: string): void;
   /**
    * Records that this realm listens for `eventName` on the element in the
    * passes `kinds` names, replacing what it reported there before: the or of
@@ -507,6 +515,65 @@ declare module "bobcat-internal:host" {
   export const swapElement: BobcatNative["swapElement"];
   export const dropElement: BobcatNative["dropElement"];
   export const flushElementTree: BobcatNative["flushElementTree"];
+  /**
+   * A fresh pipeline id, from one atomic increment. Every realm kind.
+   */
+  export function generatePipelineId(): number;
+  /**
+   * `_onPipelineStart`: opens the pipeline's record now. `origin` is a Lynx
+   * origin name (`""` for the realm kind's own), `needTimestamps` `0` or
+   * `1`; a pipeline that carries none is recorded only while something
+   * observes. Every realm kind.
+   */
+  export function onPipelineStart(
+    id: number,
+    origin: string,
+    dsl: string,
+    stage: string,
+    needTimestamps: 0 | 1,
+  ): void;
+  /**
+   * `_markTiming`: `mtsRenderStart`/`mtsRenderEnd` are the pipeline's
+   * render, every other key a framework mark. Every realm kind.
+   */
+  export function markPipelineTiming(id: number, key: string): void;
+  /** `_bindPipelineIdWithTimingFlag`. Every realm kind. */
+  export function bindPipelineTimingFlag(id: number, flag: string): void;
+  /**
+   * One of the realm's load milestones. In a main-thread realm:
+   * `vmExecuteStart` (the load begins, of the bundle at `url`),
+   * `vmExecuteEnd` and `mtsRenderStart`; the load ends at the realm's next
+   * flush. In a worker realm: `loadCoreEnd`, `loadBackgroundStart` and
+   * `loadBackgroundEnd`, the last answering whether the mark completed
+   * entries this worker's observers are owed. Any other key does nothing
+   * and answers `false`.
+   */
+  export function markLoadTiming(key: string, url?: string): boolean | undefined;
+  /**
+   * Main-thread realms: a native update, global-props update or reload
+   * arrived — `origin` its Lynx origin name, `flag` its
+   * `__lynx_timing_flag` (`""` for none). The realm's next flush binds it.
+   */
+  export function openNativePipeline(origin: string, flag: string): void;
+  /**
+   * Main-thread realms: the worker under `key` is this realm's BTS, whose
+   * observers hear the pipelines this realm opens.
+   */
+  export function connectBackground(key: number): void;
+  /**
+   * Worker realms: the realm has a `lynx.performance` observer (`on` `1`),
+   * or no longer has one (`0`), and one of its observers asked for `paint`
+   * entries (`paint` `1`) or none did (`0`). Nothing is sent to a worker
+   * without an observer, and no `paint` entry to one without a `paint`
+   * observer.
+   */
+  export function observePerformance(on: 0 | 1, paint: 0 | 1): void;
+  /**
+   * Worker realms: every performance entry this worker is owed, as one
+   * record (`bobcat:record`): per entry its pair count, then a key field and
+   * a value field per pair, the value `n<number>` or `s<text>`.
+   */
+  export function takePerformanceEntries(): string;
   /**
    * The `NodeId` of the nested page (`page[part=page]`) the `frame` element
    * `frame` holds in its shadow root now, which belongs to the card rendered

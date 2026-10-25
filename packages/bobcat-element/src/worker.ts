@@ -42,9 +42,25 @@ interface WorkerErrorEvent {
   target: Worker;
 }
 
+/** Reads a `Worker`'s host key; set by the class's static block below. */
+let keyOfWorker: (worker: Worker) => number;
+
+/**
+ * The key the host names `worker` by, for the boots that connect it as a
+ * card's BTS (`__BobcatConnectBackground`): an engine export, not part of
+ * the W3C class.
+ */
+export function __BobcatWorkerKey(worker: Worker): number {
+  return keyOfWorker(worker);
+}
+
 /** Main-thread-only Worker context constructor. */
 export class Worker extends EventTarget {
   #key: number;
+
+  static {
+    keyOfWorker = worker => worker.#key;
+  }
   declare onmessage: ((event: WorkerMessageEvent) => void) | null;
   declare onerror: ((event: WorkerErrorEvent) => void) | null;
 

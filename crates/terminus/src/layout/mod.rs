@@ -33,6 +33,7 @@ pub(crate) use self::style::{
     establishes_absolute_containing_block, establishes_fixed_containing_block, generates_no_box,
     paragraph_limits_changed, reads_percentage_basis, skips_contents,
 };
+use crate::clock::ClockInstant;
 use crate::render::image::{ImageOutcome, ImageRole};
 use crate::tree::document::{DOCUMENT_ELEMENT_NODE_ID, Document, NodeLayoutState, RelayoutKind};
 
@@ -124,8 +125,17 @@ impl<T: Sync> Document<T> {
 
     /// One flush and one layout, publishing the query-container sizes the
     /// pass committed into `resized`.
+    ///
+    /// Inside a timed render ([`crate::visual::timing`]) the pass marks its
+    /// flush and its layout run; anywhere else it reads that one `bool` and
+    /// takes no instant.
     fn layout_pass(&mut self, resized: &mut Vec<crate::tree::document::NodeId>) {
+        let timed = self.commit_timer.marking();
+        let style_start = timed.then(ClockInstant::now);
         self.flush_styles_with_damage_sink(&mut |_, _| {});
+        if let Some(start) = style_start {
+            self.commit_timer.mark_style(start, ClockInstant::now());
+        }
 
         let viewport_size = self.device().viewport_size();
         let viewport = Size::new(viewport_size.width, viewport_size.height);
@@ -135,12 +145,16 @@ impl<T: Sync> Document<T> {
             return;
         }
 
+        let layout_start = timed.then(ClockInstant::now);
         self.run_layout_once(viewport, scale, resized);
         // css-anchor-position-1's settle loop (`layout::anchors`), out of
         // line: a page with no anchor-positioned box pays this one test.
         let state = self.layout_state_mut();
         if !state.anchored.is_empty() || !state.anchor_pending.get_mut().is_empty() {
             self.settle_anchor_runs(viewport, scale, resized);
+        }
+        if let Some(start) = layout_start {
+            self.commit_timer.mark_layout(start, ClockInstant::now());
         }
     }
 

@@ -267,3 +267,57 @@ fn register_then_drop_row_listeners(bencher: divan::Bencher) {
             harness
         });
 }
+
+/// One plain attribute written on one row, then a flush with `ReactLynx`'s
+/// options object and no pipeline: the shape of an update nothing times.
+///
+/// The gate for "no cost when nothing observes": this flush reads one
+/// `bool` of the realm, two lengths of the slot, and nothing of the
+/// performance registry, so it must not move when timing is added.
+#[divan::bench]
+fn flush_one_attribute_update(bencher: divan::Bencher) {
+    let source = snapshot_source(ROWS);
+    bencher
+        .with_inputs(|| {
+            let mut harness = ScriptHarness::new();
+            harness.boot(&source);
+            harness
+        })
+        .bench_local_refs(|harness| {
+            harness.evaluate(
+                r"
+                globalThis.tick = (globalThis.tick ?? 0) + 1;
+                __SetAttribute(rows[0], 'title', 'row ' + tick);
+                __FlushElementTree(page, {});
+                ",
+            );
+        });
+}
+
+/// The same update observed end to end on the main thread's side: a
+/// pipeline opened through `lynx.performance`, a `__lynx_timing_flag`
+/// attribute, and a flush handed the pipeline's options, which times its
+/// commit and binds the record.
+#[divan::bench]
+fn flush_one_update_with_timing_flag(bencher: divan::Bencher) {
+    let source = snapshot_source(ROWS);
+    bencher
+        .with_inputs(|| {
+            let mut harness = ScriptHarness::new();
+            harness.boot(&source);
+            harness
+        })
+        .bench_local_refs(|harness| {
+            harness.evaluate(
+                r"
+                globalThis.tick = (globalThis.tick ?? 0) + 1;
+                const options = lynx.performance._generatePipelineOptions();
+                options.needTimestamps = true;
+                lynx.performance._onPipelineStart(options.pipelineID, options);
+                __SetAttribute(rows[0], '__lynx_timing_flag', 'bench');
+                __SetAttribute(rows[0], 'title', 'row ' + tick);
+                __FlushElementTree(page, { pipelineOptions: options });
+                ",
+            );
+        });
+}

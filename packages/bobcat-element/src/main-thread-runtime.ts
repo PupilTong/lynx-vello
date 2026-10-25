@@ -64,7 +64,9 @@ import type { NodeQueryRequest } from "bobcat:selector-query";
 import "bobcat:timers";
 import { cancelAnimationFrame, clearAnimationFrames, requestAnimationFrame } from "bobcat:animation-frame";
 import { createSystemInfo } from "bobcat:system-info";
-import { initialProcessor as getInitialProcessor, globalProps, initData, loadModuleSync, nativeModuleTable, hasStyleSheet, preloadStyleSheet, adoptStyleSheet } from "bobcat-internal:host";
+import { initialProcessor as getInitialProcessor, globalProps, initData, loadModuleSync, nativeModuleTable, hasStyleSheet, preloadStyleSheet, adoptStyleSheet,
+  generatePipelineId, onPipelineStart, markPipelineTiming, bindPipelineTimingFlag, markLoadTiming, openNativePipeline, connectBackground } from "bobcat-internal:host";
+import { createPipelineHooks } from "bobcat:performance";
 import { reportError as _ReportError, console } from "bobcat:diagnostics";
 import { sectionURL, styleSheetURL as sectionStyleSheetURL } from "bobcat:section-url";
 import { type BundleHandle, createBundleFetches } from "bobcat:bundle-fetch";
@@ -247,12 +249,18 @@ async function callLepusMethod(message: LepusMethodCall) {
  * `entry` is the BTS entry's URL as boot wrote it, already absolute, or
  * `undefined` for a view that named none. It is not this realm's to import:
  * the `initialize` message carries it to the BTS, which imports it.
+ *
+ * `key` is the worker's host key (`bobcat-internal`'s `__BobcatWorkerKey`),
+ * which tells the host the worker is this realm's BTS: its
+ * `lynx.performance` observers hear the pipelines this realm opens, and
+ * this realm's load waits for its entry to load before it is reported.
  */
-export function __BobcatConnectBackground(worker: Worker, data: unknown, entry?: string) {
+export function __BobcatConnectBackground(worker: Worker, data: unknown, entry?: string, key?: number) {
   if (backgroundDisposal) {
     worker.terminate();
     return;
   }
+  if (typeof key === "number") connectBackground(key);
   worker.addEventListener("__bobcat:close", () => {
     // The Worker stays this realm's BTS Worker. What changes is that no reply
     // can come from it any more, so a disposal waiting for one settles now.
@@ -373,11 +381,11 @@ const globalEventEmitter = {
   toggle: noop,
 };
 
+// ReactLynx's main-thread patch path marks `mtsRenderStart`/`mtsRenderEnd`
+// on the pipeline its BTS opened through these. This realm has no
+// `createObserver`: Lynx delivers entries to a main thread only in Air mode.
 const runtimePerformance = {
-  _generatePipelineOptions: noop,
-  _onPipelineStart: noop,
-  _bindPipelineIdWithTimingFlag: noop,
-  _markTiming: noop,
+  ...createPipelineHooks({ generatePipelineId, onPipelineStart, markPipelineTiming, bindPipelineTimingFlag }),
   profileStart: noop,
   profileEnd: noop,
   profileMark: noop,
@@ -477,6 +485,8 @@ export function __BobcatProcessData(data: unknown, processorName = "") {
 }
 
 export function __BobcatRenderPage(data: unknown) {
+  // The load's `mtsRenderStart`: the realm's next flush ends its load.
+  markLoadTiming("mtsRenderStart");
   const options = {preLoadTemplate:false, ...processorOptions(initialProcessor)};
   try {
     if (hasEventListener(engineContext, "__RenderPage")) engineContext.dispatchEvent({type: '__RenderPage', data: [data, options]});
@@ -516,13 +526,29 @@ function reloadPage(data: unknown, fromJS: boolean, processorName = "") {
   updatePage(processed, options);
 }
 
+/**
+ * Opens the native-triggered pipeline a host update starts, which the
+ * realm's next flush binds: every reload, and an update or a global-props
+ * update whose data carries a `__lynx_timing_flag`, which the pipeline then
+ * reports, as native's `TemplateData` flag does.
+ */
+function openHostPipeline(origin: string, data: unknown, always: boolean) {
+  const flag = (data as {__lynx_timing_flag?: unknown} | null | undefined)?.__lynx_timing_flag;
+  const timingFlag = typeof flag === "string" ? flag : "";
+  if (always || timingFlag !== "") openNativePipeline(origin, timingFlag);
+}
+
 export function __BobcatReload(json: string, processorName: string) {
-  reloadPage(JSON.parse(json), false, processorName);
+  const data = JSON.parse(json);
+  openHostPipeline("reloadBundleFromNative", data, true);
+  reloadPage(data, false, processorName);
 }
 
 export function __BobcatUpdateData(json: string, processorName: string, reset: boolean) {
+  const data = JSON.parse(json);
+  openHostPipeline("updateTriggeredByNative", data, false);
   // The compiled MTS entry owns processData/updatePage and its data model.
-  const processed = __BobcatProcessData(JSON.parse(json), processorName);
+  const processed = __BobcatProcessData(data, processorName);
   updatePage(processed, {resetPageData:reset, reloadFromJS:false, reloadTemplate:false, nativeUpdateDataOrder:0, ...processorOptions(processorName)});
   // React's BTS registerDataProcessors is a no-op: its hook must receive
   // the same processed data as MTS, even if the MTS update reported an error.
@@ -578,6 +604,7 @@ function sendsDisexposure(options: unknown): boolean {
 
 export function __BobcatUpdateGlobalProps(json: string) {
   const data = JSON.parse(json);
+  openHostPipeline("updateGlobalProps", data, false);
   // Native's host merges literal top-level keys; TemplateAssembler receives
   // the complete props, not the diff. Notify BTS before entering MTS hooks.
   hostGlobalPropsJson = JSON.stringify({...JSON.parse(hostGlobalPropsJson), ...data});

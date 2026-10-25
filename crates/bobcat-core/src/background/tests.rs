@@ -299,6 +299,7 @@ impl Group {
             token.clone(),
             None,
             Arc::clone(&self.views[view].base),
+            crate::performance::PipelineRegistry::detached(),
         );
         self.tell(WorkerCommand::Start(WorkerStart {
             key,
@@ -1826,10 +1827,16 @@ fn a_worker_realm_declares_these_host_members() {
     ",
     );
     let host = [
+        "bindPipelineTimingFlag",
         "clearTimer",
         "fetchResource",
+        "generatePipelineId",
         "loadModuleSync",
         "logScriptMessage",
+        "markLoadTiming",
+        "markPipelineTiming",
+        "observePerformance",
+        "onPipelineStart",
         "reportScriptError",
         "requestScriptFrame",
         "resolveModuleUrl",
@@ -1837,6 +1844,7 @@ fn a_worker_realm_declares_these_host_members() {
         "setTimer",
         "settleFuture",
         "takeFuture",
+        "takePerformanceEntries",
         "testFuture",
         "waitFuture",
     ];

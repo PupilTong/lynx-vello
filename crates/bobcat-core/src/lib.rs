@@ -50,6 +50,9 @@ mod main;
 pub mod native_module;
 #[path = "paint/lib.rs"]
 mod paint;
+/// Lynx's performance entries: what [`EngineEvent::Performance`] carries,
+/// and the clock it is measured on.
+pub mod performance;
 mod realm;
 mod require;
 pub mod resource;

@@ -50,6 +50,7 @@ use crate::background::{WorkerKey, WorkerMessage};
 #[cfg(test)]
 use crate::main::tree::LynxDocument;
 use crate::native_module::ModuleReply;
+use crate::performance::PipelineRegistry;
 use crate::resource::{FetchProbe, LoadedSource, SourceCompletion, SourceRequest, StyleSheetProbe};
 use crate::view::{EngineEvent, EventRequester, LynxViewError, Viewport};
 
@@ -74,6 +75,10 @@ pub(crate) struct HostOutbox {
     /// which a synchronous load's URL is resolved against before it is
     /// requested. The same for every realm of the view, a Worker's included.
     base: Arc<Url>,
+    /// The view's pipeline registry, which every realm of the view writes
+    /// its `lynx.performance` marks into: a worker's realm reaches it
+    /// through this outbox, as it reaches the fetch probe.
+    registry: Arc<PipelineRegistry>,
 }
 
 impl HostOutbox {
@@ -83,6 +88,7 @@ impl HostOutbox {
         token: CancellationToken,
         probe: Option<FetchProbe>,
         base: Arc<Url>,
+        registry: Arc<PipelineRegistry>,
     ) -> Self {
         Self {
             notices,
@@ -90,7 +96,20 @@ impl HostOutbox {
             token,
             probe,
             base,
+            registry,
         }
+    }
+
+    /// The view's pipeline registry.
+    pub(crate) const fn registry(&self) -> &Arc<PipelineRegistry> {
+        &self.registry
+    }
+
+    /// Wakes the embedder's thread for a turn that has something to report
+    /// without a notice of its own: a performance entry this thread
+    /// completed, which `LynxView::pump` takes from the registry.
+    pub(crate) fn wake(&self) {
+        self.requester.request_event();
     }
 
     /// `url` resolved against the view's base by URL rules, in its WHATWG
@@ -579,6 +598,18 @@ impl FrameDemand {
         self.main || self.workers.values().any(|(_, pending)| *pending)
     }
 
+    /// Tells the worker `key` that performance entries it observes are
+    /// ready to be taken (`WorkerMessage::PerformanceReady`), through the
+    /// handle `WorkerCreated` registered. A worker this view no longer
+    /// holds is told nothing.
+    pub(crate) fn notify_performance(&self, key: WorkerKey) {
+        if let Some((messages, _)) = self.workers.get(&key)
+            && let Some(messages) = messages.upgrade()
+        {
+            let _ = messages.send(WorkerMessage::PerformanceReady);
+        }
+    }
+
     pub(crate) fn dispatch(&mut self, milliseconds: f64, main: &CommandSender) {
         if std::mem::take(&mut self.main) {
             let _ = main.send(ToMain::Vsync(milliseconds));
@@ -631,6 +662,9 @@ pub(crate) struct ViewSeat {
     /// clock. Main holds a clone of its own: the seat never leaves this
     /// thread.
     pub(crate) scroll: Arc<ScrollMailbox>,
+    /// The view's pipeline registry, which the painter tells what it
+    /// presented and when ([`PipelineRegistry::note_presented`]).
+    pub(crate) registry: Arc<PipelineRegistry>,
 }
 
 /// The view task's sending end: what the runtime, the tree and the listener
@@ -663,9 +697,17 @@ pub(crate) struct ViewOutbox {
     /// This view's base URL, parsed on the embedder's thread at construction
     /// and handed to every realm of the view.
     base: Arc<Url>,
+    /// This view's pipeline registry, made by `create_lynx_view` and shared
+    /// with every realm of the view, its workers' through
+    /// [`HostOutbox::registry`].
+    registry: Arc<PipelineRegistry>,
 }
 
 impl ViewOutbox {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one per part of the view's link, each named at its one construction"
+    )]
     pub(crate) fn new(
         notices: mpsc::UnboundedSender<ViewNotice>,
         frames: watch::Sender<Published>,
@@ -674,6 +716,7 @@ impl ViewOutbox {
         probe: Option<FetchProbe>,
         style_sheet_probe: Option<StyleSheetProbe>,
         base: Arc<Url>,
+        registry: Arc<PipelineRegistry>,
     ) -> Self {
         Self {
             notices,
@@ -683,7 +726,18 @@ impl ViewOutbox {
             probe,
             style_sheet_probe,
             base,
+            registry,
         }
+    }
+
+    /// This view's pipeline registry.
+    pub(crate) const fn registry(&self) -> &Arc<PipelineRegistry> {
+        &self.registry
+    }
+
+    /// Wakes the embedder's thread: see [`HostOutbox::wake`].
+    pub(crate) fn wake(&self) {
+        self.requester.request_event();
     }
 
     /// Whether this view's fetcher can say a stylesheet is held without
@@ -704,6 +758,7 @@ impl ViewOutbox {
             token,
             self.probe.clone(),
             Arc::clone(&self.base),
+            Arc::clone(&self.registry),
         )
     }
 
@@ -907,6 +962,7 @@ pub(crate) fn detached_outbox_probing_style_sheets(
             None,
             style_sheet_probe,
             detached_base(),
+            PipelineRegistry::detached(),
         ),
         DetachedView {
             notices: notice_receiver,

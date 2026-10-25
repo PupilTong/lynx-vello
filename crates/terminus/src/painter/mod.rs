@@ -34,16 +34,12 @@ use std::marker::PhantomData;
 use std::num::NonZeroU64;
 use std::rc::Rc;
 use std::sync::Arc;
-#[cfg(not(target_arch = "wasm32"))]
-use std::time::Instant as ClockInstant;
 
 use euclid::default::Vector2D;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use vello::Scene;
 use vello::peniko::{Color, ImageData};
-#[cfg(target_arch = "wasm32")]
-use web_time::Instant as ClockInstant;
 
 pub use self::gesture::{
     EmitEvent, GesturePolicy, GestureRouter, InputDecision, InputDecisions, RouterHost,
@@ -52,6 +48,7 @@ pub use self::graphics::WindowTarget;
 use self::graphics::{AcquiredFrame, FrameAcquisition, WindowGraphics};
 use self::inertia::{AutoScroll, Axis, BounceBack, ChainOutcome, DragTrack, Fling, Glide};
 use self::motion::{ElasticStep, Motion, resolve_elastic_step, stretch_of, unwind_stretch};
+use crate::clock::ClockInstant;
 use crate::input::{InputEvent, InputKind, PointerId};
 use crate::render::gpu::Headless;
 use crate::render::image::FrameImages;
@@ -561,6 +558,95 @@ impl Output {
     }
 }
 
+/// When one committed frame was composed and presented by this painter: the
+/// presentation half of a frame's timing, beside the commit half the document
+/// records (`Document::last_commit_timing`), which it meets on `commit_id`.
+///
+/// `compose_start..compose_end` brackets the frame's composition through the
+/// GPU encode and submit — the vector and `filter: blur()` bakes, the compose
+/// program's replay at the live scroll offsets and animation reading, and the
+/// render. `presented` is the instant the window's present call returned, or
+/// the instant an offscreen draw's submitted work finished: after the frame
+/// was handed on, not after a display showed it, which is what Lynx's
+/// `paintEnd` measures too.
+#[derive(Clone, Copy, Debug)]
+pub struct PresentedFrame {
+    /// The presented frame's commit id ([`CommittedFrame::commit_id`]).
+    pub commit_id: u64,
+    /// Composition started.
+    pub compose_start: ClockInstant,
+    /// The GPU work was encoded and submitted.
+    pub compose_end: ClockInstant,
+    /// The present call returned, or the offscreen draw finished.
+    pub presented: ClockInstant,
+}
+
+/// What [`Painter::render_frame`] measured of a render that produced an
+/// image: when composition started and when the render was submitted.
+#[derive(Clone, Copy)]
+struct ComposeSpan {
+    start: ClockInstant,
+    end: ClockInstant,
+}
+
+/// What [`Painter::render_frame`] answers of a render that produced an
+/// image: its [`ComposeSpan`], or `None` when presentation timing was off
+/// ([`Painter::set_presentation_timing`]) and nothing was measured.
+#[derive(Clone, Copy)]
+struct Rendered {
+    span: Option<ComposeSpan>,
+}
+
+/// The presentation records of the view a painter shows: the last presented
+/// frame and Paint Timing's two first marks, and whether draws record them.
+#[derive(Clone, Copy, Debug)]
+struct PaintTiming {
+    /// [`Painter::set_presentation_timing`]. Painter-lifetime, like the
+    /// target: forgetting the view keeps it.
+    enabled: bool,
+    last_presented: Option<PresentedFrame>,
+    first_paint: Option<PresentedFrame>,
+    first_contentful_paint: Option<PresentedFrame>,
+}
+
+impl Default for PaintTiming {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            last_presented: None,
+            first_paint: None,
+            first_contentful_paint: None,
+        }
+    }
+}
+
+impl PaintTiming {
+    /// The records of a new view, with the switch as it was.
+    fn forget(&mut self) {
+        *self = Self {
+            enabled: self.enabled,
+            ..Self::default()
+        };
+    }
+
+    /// Records the presentation of `frame`.
+    fn note(&mut self, frame: &CommittedFrame, span: ComposeSpan, presented: ClockInstant) {
+        let record = PresentedFrame {
+            commit_id: frame.commit_id(),
+            compose_start: span.start,
+            compose_end: span.end,
+            presented,
+        };
+        self.last_presented = Some(record);
+        if self.first_paint.is_none() {
+            self.first_paint = Some(record);
+        }
+        if self.first_contentful_paint.is_none() && frame.paints_content() {
+            self.first_contentful_paint = Some(record);
+        }
+    }
+}
+
 /// One draw target and everything that turns a document's frames into pixels
 /// in it: the gesture router, the scroll intents, the composition, the frame
 /// clock.
@@ -612,6 +698,10 @@ pub struct Painter {
     composed_vectors: Vec<Option<ImageData>>,
     /// The pixels the adopted commit draws, read out of the host's store.
     images: images::PainterImages,
+    /// The shown view's presentation records ([`Self::last_presented`],
+    /// [`Self::first_paint`], [`Self::first_contentful_paint`]). The view's,
+    /// not the target's: [`Self::forget_view`] clears them.
+    paint_timing: PaintTiming,
     thread_bound: PhantomData<Rc<()>>,
 }
 
@@ -1590,6 +1680,7 @@ impl Painter {
             composed_filters: Vec::new(),
             composed_vectors: Vec::new(),
             images: images::PainterImages::default(),
+            paint_timing: PaintTiming::default(),
             thread_bound: PhantomData,
         }
     }
@@ -1701,12 +1792,70 @@ impl Painter {
     /// Not what the target holds — that is [`Self::forget_target`], because
     /// the pixels on screen survive the document they came from.
     ///
-    /// What the intents had not drained yet is dropped with them.
+    /// What the intents had not drained yet is dropped with them, and so are
+    /// the presentation records ([`Self::last_presented`],
+    /// [`Self::first_paint`], [`Self::first_contentful_paint`]): they are on
+    /// the shown view's timeline, so a painter attached to another view
+    /// starts that view's first paint afresh.
     pub fn forget_view(&mut self) {
         self.frame = None;
         self.scroll_intents = ScrollIntents::new();
         self.gesture = GestureRouter::new(self.gesture.policy());
         self.images.forget();
+        self.paint_timing.forget();
+    }
+
+    /// Turns the presentation records ([`Self::last_presented`],
+    /// [`Self::first_paint`], [`Self::first_contentful_paint`]) on or off for
+    /// the draws that follow. On by default.
+    ///
+    /// Off, a draw reads no clock for them and records nothing: the records
+    /// stay as they were, and a frame drawn while it was off is never
+    /// recorded, not even as a first mark once it is turned on again — the
+    /// next frame drawn while it is on is. An embedder that reports
+    /// presentation times turns it on while something waits for one.
+    pub fn set_presentation_timing(&mut self, enabled: bool) {
+        self.paint_timing.enabled = enabled;
+    }
+
+    /// Whether draws record their presentation
+    /// ([`Self::set_presentation_timing`]).
+    #[must_use]
+    pub const fn presentation_timing(&self) -> bool {
+        self.paint_timing.enabled
+    }
+
+    /// The last frame this painter presented ([`PresentedFrame`]): a window
+    /// draw that rendered, or an offscreen draw that did. A window draw that
+    /// re-presents the frame its target holds, a capture, a draw that
+    /// failed and a draw while presentation timing was off
+    /// ([`Self::set_presentation_timing`]) record nothing. `None` until the
+    /// shown view's first such draw.
+    #[must_use]
+    pub const fn last_presented(&self) -> Option<PresentedFrame> {
+        self.paint_timing.last_presented
+    }
+
+    /// Paint Timing's `first-paint`: the first frame this painter presented
+    /// for the shown view, whatever it drew, among the frames drawn while
+    /// presentation timing was on ([`Self::set_presentation_timing`]). Set
+    /// once per view ([`Self::forget_view`] clears it).
+    #[must_use]
+    pub const fn first_paint(&self) -> Option<PresentedFrame> {
+        self.paint_timing.first_paint
+    }
+
+    /// Paint Timing's `first-contentful-paint`: the first frame this painter
+    /// presented for the shown view, while presentation timing was on
+    /// ([`Self::set_presentation_timing`]), whose commit
+    /// [`paints_content`](CommittedFrame::paints_content). A commit built
+    /// while its document's content detection was off
+    /// (`Document::set_content_detection`) answers `false`, so this stays
+    /// `None` until a frame built with detection on is presented. Set once
+    /// per view ([`Self::forget_view`] clears it).
+    #[must_use]
+    pub const fn first_contentful_paint(&self) -> Option<PresentedFrame> {
+        self.paint_timing.first_contentful_paint
     }
 
     /// Drops what the draw target holds: the key it was rendered from, and —
@@ -1965,7 +2114,7 @@ impl Painter {
     }
 
     /// Composes `frame` at `key` and renders it into the draw target,
-    /// answering whether it rendered anything.
+    /// answering when it composed if it rendered anything.
     ///
     /// The one path from a committed frame to pixels, whatever the target and
     /// whoever asked: a window's draw, an offscreen draw, and a capture of
@@ -1984,11 +2133,12 @@ impl Painter {
         key: ComposeKey,
         animation_now: Option<f64>,
         force: bool,
-    ) -> Result<bool, PainterError> {
+    ) -> Result<Option<Rendered>, PainterError> {
         let size = self.frame_size;
         if self.composed == Some((key, size)) && !force && animation_now.is_none() {
-            return Ok(false);
+            return Ok(None);
         }
+        let start = self.paint_timing.enabled.then(ClockInstant::now);
         let Self {
             output,
             composed_scene,
@@ -2011,8 +2161,12 @@ impl Painter {
         );
         match rendered {
             Ok(()) => {
+                let span = start.map(|start| ComposeSpan {
+                    start,
+                    end: ClockInstant::now(),
+                });
                 self.composed = Some((key, size));
-                Ok(true)
+                Ok(Some(Rendered { span }))
             }
             Err(error) => {
                 self.composed = None;
@@ -2087,14 +2241,20 @@ impl Painter {
         } = window_frame;
         let key: ComposeKey = (frame.commit_id(), self.scroll_intents.generation);
         let animation_now = frame.has_live_curves().then_some(now);
-        if let Err(error) = self.render_frame(&frame, key, animation_now, false) {
-            self.render_failed = true;
-            return Err(error);
-        }
+        let rendered = match self.render_frame(&frame, key, animation_now, false) {
+            Ok(rendered) => rendered,
+            Err(error) => {
+                self.render_failed = true;
+                return Err(error);
+            }
+        };
         let Output::Window(graphics) = &mut self.output else {
             unreachable!("a window frame is only begun on a window");
         };
         graphics.present(acquired);
+        if let Some(span) = rendered.and_then(|rendered| rendered.span) {
+            self.paint_timing.note(&frame, span, ClockInstant::now());
+        }
         Ok(())
     }
 
@@ -2120,15 +2280,18 @@ impl Painter {
         };
         let key: ComposeKey = (frame.commit_id(), self.scroll_intents.generation);
         let animation_now = frame.has_live_curves().then_some(now);
-        let rendered = self.render_frame(&frame, key, animation_now, force)?;
-        if rendered {
-            let Output::Offscreen(gpu) = &self.output else {
-                unreachable!("the offscreen output was just checked");
-            };
-            gpu.wait_idle()
-                .map_err(|error| PainterError::Gpu(error.to_string()))?;
+        let Some(rendered) = self.render_frame(&frame, key, animation_now, force)? else {
+            return Ok(false);
+        };
+        let Output::Offscreen(gpu) = &self.output else {
+            unreachable!("the offscreen output was just checked");
+        };
+        gpu.wait_idle()
+            .map_err(|error| PainterError::Gpu(error.to_string()))?;
+        if let Some(span) = rendered.span {
+            self.paint_timing.note(&frame, span, ClockInstant::now());
         }
-        Ok(rendered)
+        Ok(true)
     }
 
     /// Reads back what this painter's target holds, after bringing it up to

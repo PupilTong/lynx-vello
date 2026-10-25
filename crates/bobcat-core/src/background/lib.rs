@@ -168,6 +168,14 @@ pub(crate) enum WorkerMessage {
         index: u32,
         arguments: Option<String>,
     },
+    /// Performance entries this worker's `lynx.performance` observers
+    /// receive are ready to be taken: sent by the painter, or the view's
+    /// pump, once a pipeline the worker's realm opened, or the realm it
+    /// belongs to opened, has completed. Held until the root module has
+    /// finished, as a post is, and delivered as one job that calls the BTS
+    /// runtime's `__BobcatPerformanceReady`; a realm with no observer drops
+    /// it.
+    PerformanceReady,
     /// Explicit termination or GC of the MTS Worker object: end it between
     /// tasks and discard what was queued behind this.
     Terminate,

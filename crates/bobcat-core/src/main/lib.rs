@@ -229,7 +229,7 @@ async fn group_task(context: Rc<GroupContext>, mut attach: mpsc::UnboundedReceiv
                     let ViewAttachment {
                         viewport, sources, text_context, startup, native_modules, commands,
                         metrics, scroll, notices, frames, cancel, fetch_probe,
-                        style_sheet_probe, base_url,
+                        style_sheet_probe, base_url, registry,
                     } = *attachment;
                     let outbox = ViewOutbox::new(
                         notices,
@@ -239,6 +239,7 @@ async fn group_task(context: Rc<GroupContext>, mut attach: mpsc::UnboundedReceiv
                         fetch_probe,
                         style_sheet_probe,
                         base_url,
+                        registry,
                     );
                     #[cfg(all(target_arch = "wasm32", panic = "abort"))]
                     crate::threads::add_script_panic_reporter({

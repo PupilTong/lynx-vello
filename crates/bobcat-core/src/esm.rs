@@ -176,6 +176,9 @@ pub(crate) enum Export {
     /// [`WORKER_CLASS_MODULE_SPECIFIER`], with one event of a worker the
     /// realm created.
     DispatchWorkerEvent,
+    /// [`BTS_RUNTIME_MODULE_SPECIFIER`], in a worker realm with a
+    /// `lynx.performance` observer, when entries it observes are ready.
+    PerformanceReady,
     /// [`RUNTIME_MODULE_SPECIFIER`], naming the MTS entry before it is
     /// completed.
     InitEntry,
@@ -201,6 +204,7 @@ impl Export {
             Self::BeginFrame => ANIMATION_FRAME_MODULE_SPECIFIER,
             Self::DeliverWorkerMessage => WORKER_MODULE_SPECIFIER,
             Self::DispatchWorkerEvent => WORKER_CLASS_MODULE_SPECIFIER,
+            Self::PerformanceReady => BTS_RUNTIME_MODULE_SPECIFIER,
             Self::InitEntry
             | Self::Reload
             | Self::UpdateData
@@ -219,6 +223,7 @@ impl Export {
             Self::BeginFrame => "__BobcatBeginFrame",
             Self::DeliverWorkerMessage => "__BobcatDeliverWorkerMessage",
             Self::DispatchWorkerEvent => "__BobcatDispatchWorkerEvent",
+            Self::PerformanceReady => "__BobcatPerformanceReady",
             Self::InitEntry => "__BobcatInitEntry",
             Self::Reload => "__BobcatReload",
             Self::UpdateData => "__BobcatUpdateData",
@@ -318,6 +323,11 @@ pub(crate) const SECTION_URL_MODULE_SPECIFIER: &str = "bobcat:section-url";
 /// [`Future`]: crate::future
 pub(crate) const BUNDLE_FETCH_MODULE_SPECIFIER: &str = "bobcat:bundle-fetch";
 
+/// `lynx.performance`'s JavaScript half, for both realm kinds: the pipeline
+/// hooks over the four host members [`crate::performance`] installs, and the
+/// BTS's `PerformanceObserver` over the entries its worker takes.
+pub(crate) const PERFORMANCE_MODULE_SPECIFIER: &str = "bobcat:performance";
+
 /// BTS query builders carry selection tokens across Worker messages.
 pub(crate) const SELECTOR_QUERY_SPECIFIER: &str = "bobcat:selector-query";
 
@@ -352,6 +362,7 @@ pub(crate) const BUILTIN_MODULES: &[BuiltinModule] = &[
     builtin_module!(ANIMATION_FRAME_MODULE_SPECIFIER, "animation-frame"),
     builtin_module!(SYSTEM_INFO_MODULE_SPECIFIER, "system-info"),
     builtin_module!(RECORD_MODULE_SPECIFIER, "record"),
+    builtin_module!(PERFORMANCE_MODULE_SPECIFIER, "performance"),
     builtin_module!(NATIVE_MODULES_MODULE_SPECIFIER, "native-modules"),
     builtin_module!(CONTEXT_MODULE_SPECIFIER, "cross-thread-context"),
     builtin_module!(WORKER_CLASS_MODULE_SPECIFIER, "worker"),

@@ -289,7 +289,12 @@ the one member a realm fetches a URL through, `esm.rs` the built-in module
 table both runtimes register (`BUILTIN_MODULES`), `build_runtime` that
 registers it, and the engine's module names and reserved prefixes, `script.rs`
 the sanitized error a failure is reported with, `style.rs` the
-`PreparsedStyleSheet` vocabulary, `resource.rs` the host protocol, and
+`PreparsedStyleSheet` vocabulary, `resource.rs` the host protocol,
+`performance/` the public `performance` module — the Lynx-shaped
+`PerformanceEntry` types, the per-view `PipelineRegistry` every thread of a
+view writes its marks into, and the host members both realm kinds' `lynx.performance`
+is written over (`docs/performance-observation-design.md`; the main-thread
+flush binding is `main/runtime/pipelines.rs`) — and
 `threads.rs` the two engine threads.
 
 #### Public surface and the two engine threads
@@ -3288,7 +3293,7 @@ browser WebGPU completion is Promise-driven.
 
 The dependency-free TypeScript sources of the ESMs `bobcat-core` preloads into
 its QuickJS realms, one file per module. Both of a group's runtimes register
-all twenty-three, as `esm.rs`'s `BUILTIN_MODULES` lists them in the order of
+all twenty-four, as `esm.rs`'s `BUILTIN_MODULES` lists them in the order of
 `src/tsconfig.json`'s `paths` (a unit test holds the two equal):
 `src/lynx-modules.ts` as `bobcat:lynx-modules`, `src/global-event-emitter.ts`
 as `bobcat:global-event-emitter`, `src/selector-query.ts` as
@@ -3321,8 +3326,14 @@ answers, and the native module table the BTS is posted in `initialize`),
 transport every realm kind links: `callNativeModule` over
 `invokeNativeModule`, and the `__BobcatNativeModuleCallback` both engine
 threads call with an answer), `src/cross-thread-context.ts` as
-`bobcat:cross-thread-context`, `src/worker.ts` as the `Worker` class under
-`bobcat-internal`, `src/worker-runtime.ts` as `bobcat:worker`,
+`bobcat:cross-thread-context`, `src/performance.ts` as `bobcat:performance`
+(`lynx.performance`'s JavaScript half for both realm kinds: the four pipeline
+hooks ReactLynx calls, unpacked into primitive host arguments, and the BTS's
+`createObserver` over the `lynx.performance.onPerformanceEvent` global event,
+whose entries the worker's `PerformanceReady` takes from the host as one
+record string and folds into objects; see
+`docs/performance-observation-design.md`), `src/worker.ts` as the `Worker`
+class under `bobcat-internal`, `src/worker-runtime.ts` as `bobcat:worker`,
 `src/background-thread-runtime.ts` as `bobcat:bts-runtime` and `src/bts.ts` as
 `bobcat:bts` (the BTS bootstrap and a BTS realm's root module: it imports
 `bobcat:worker` and `bobcat:timers` itself and hands `bobcat:bts-runtime` the
