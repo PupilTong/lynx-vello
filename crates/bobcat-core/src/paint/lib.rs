@@ -61,6 +61,7 @@ use terminus::link::painter::{FrameClock, GestureRouter, InputDecisions, ScrollI
 use tokio::sync::mpsc;
 use tokio::sync::watch;
 
+use crate::background::WorkerKey;
 use crate::clock::ClockInstant;
 use crate::link::{FramePost, InputEventPayload, Published, ToMain, ViewSeat};
 #[cfg(test)]
@@ -493,15 +494,53 @@ impl Painter {
         {
             self.reported.first_paint |= first_paint.is_some();
             self.reported.first_contentful_paint |= first_contentful_paint.is_some();
-            seat.registry
+            let owed = seat
+                .registry
                 .note_paint(first_paint, first_contentful_paint);
+            Self::notify_owed(&seat, owed);
         }
         let owed = seat.registry.note_presented(frame);
+        Self::notify_owed(&seat, owed);
+    }
+
+    /// Sends each BTS worker in `owed` one `PerformanceReady`.
+    fn notify_owed(seat: &ViewSeat, owed: Vec<WorkerKey>) {
         if !owed.is_empty() {
             let demand = seat.frame_demand.borrow();
             for key in owed {
                 demand.notify_performance(key);
             }
+        }
+    }
+
+    /// Sets the presenting painter's presentation timing from the attached
+    /// view's registry before a draw
+    /// ([`crate::performance::PipelineRegistry::wants_presentation_timing`]:
+    /// a record waits for a present, the document detects content, or the
+    /// view's first paint is not recorded yet), and answers the seat and
+    /// the commit the draw will present when the switch is off, which
+    /// [`Self::report_untimed_present`] tells the registry of. A detached
+    /// painter leaves the switch as it is.
+    fn sync_presentation_timing(&mut self) -> Option<(Rc<ViewSeat>, u64)> {
+        let seat = self.seat.upgrade()?;
+        let timed = seat.registry.wants_presentation_timing();
+        self.core.set_presentation_timing(timed);
+        if timed {
+            return None;
+        }
+        let commit_id = self.frame()?.commit_id();
+        Some((seat, commit_id))
+    }
+
+    /// After a draw made with presentation timing off: the commit it
+    /// presented, which a flush may have bound a record to since the switch
+    /// was read — that record completes now rather than waiting for a
+    /// present that nothing may ever ask for. Two atomic accesses when no
+    /// record waits.
+    fn report_untimed_present(untimed: Option<(Rc<ViewSeat>, u64)>) {
+        if let Some((seat, commit_id)) = untimed {
+            let owed = seat.registry.note_untimed_present(commit_id);
+            Self::notify_owed(&seat, owed);
         }
     }
 
@@ -865,8 +904,10 @@ impl Painter {
         // publish: nothing below moves an offset.
         self.core.rebase_scroll(now);
         let _ = self.begin_frame(now, false);
+        let untimed = self.sync_presentation_timing();
         self.core.finish_draw(window_frame)?;
         self.report_presentation();
+        Self::report_untimed_present(untimed);
         Ok(())
     }
 
@@ -1019,8 +1060,12 @@ impl Painter {
         // changes is the pass's last publish; no send of the pass follows it.
         self.core.rebase_scroll(now);
         self.publish_scroll(now, None);
+        let untimed = self.sync_presentation_timing();
         let drew = self.core.draw_offscreen(now, force)?;
         self.report_presentation();
+        if drew {
+            Self::report_untimed_present(untimed);
+        }
         Ok(drew)
     }
 

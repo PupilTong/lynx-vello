@@ -92,11 +92,48 @@ describe("observers", () => {
     const second = observers.createObserver(() => {});
     first.observe(["pipeline"]);
     second.observe(["pipeline.loadBundle"]);
-    expect(host.observePerformance.mock.calls).toEqual([[1]]);
+    expect(host.observePerformance.mock.calls).toEqual([[1, 0]]);
     first.disconnect();
-    expect(host.observePerformance.mock.calls).toEqual([[1]]);
+    expect(host.observePerformance.mock.calls).toEqual([[1, 0]]);
     second.observe([]);
-    expect(host.observePerformance.mock.calls).toEqual([[1], [0]]);
+    expect(host.observePerformance.mock.calls).toEqual([[1, 0], [0, 0]]);
+  });
+
+  it("tell the host when an observer asks for paint entries and when none does", () => {
+    const { host, observers } = setup("");
+    const pipelines = observers.createObserver(() => {});
+    const paints = observers.createObserver(() => {});
+    pipelines.observe(["pipeline"]);
+    paints.observe(["paint"]);
+    expect(host.observePerformance.mock.calls).toEqual([[1, 0], [1, 1]]);
+    paints.observe(["paint.first-contentful-paint", "pipeline"]);
+    expect(host.observePerformance.mock.calls).toEqual([[1, 0], [1, 1]]);
+    paints.observe(["pipeline"]);
+    expect(host.observePerformance.mock.calls).toEqual([[1, 0], [1, 1], [1, 0]]);
+    paints.observe(["paint"]);
+    pipelines.disconnect();
+    paints.disconnect();
+    expect(host.observePerformance.mock.calls).toEqual([[1, 0], [1, 1], [1, 0], [1, 1], [0, 0]]);
+  });
+
+  it("receive paint entries by type and by type and name", () => {
+    const record = entryRecord([["entryType", "spaint"], ["name", "sfirst-paint"], ["startTime", "n1739594612307.429"]])
+      + entryRecord([
+        ["entryType", "spaint"],
+        ["name", "sfirst-contentful-paint"],
+        ["startTime", "n1739594612310.000"],
+      ]);
+    const { observers } = setup(record);
+    const all: unknown[] = [];
+    const contentful: unknown[] = [];
+    observers.createObserver(entry => all.push(entry)).observe(["paint"]);
+    observers.createObserver(entry => contentful.push(entry.name)).observe(["paint.first-contentful-paint"]);
+    observers.deliver();
+    expect(all).toEqual([
+      { entryType: "paint", name: "first-paint", startTime: 1739594612307.429 },
+      { entryType: "paint", name: "first-contentful-paint", startTime: 1739594612310 },
+    ]);
+    expect(contentful).toEqual(["first-contentful-paint"]);
   });
 
   it("receive the entries whose type or type and name they observe", () => {

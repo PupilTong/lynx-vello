@@ -388,7 +388,7 @@ pub struct CommittedFrame {
     pub(crate) viewport: Size2D<f32>,
     pub(crate) device_pixel_ratio: f32,
     /// Paint Timing's contentful test over what the walk encoded
-    /// ([`Self::paints_content`]).
+    /// ([`Self::paints_content`]); `false` when the walk did not test.
     pub(crate) paints_content: bool,
 }
 
@@ -715,7 +715,10 @@ impl CommittedFrame {
     /// nothing.
     ///
     /// Decided by the walk that encodes the frame, as it encodes each item,
-    /// so asking costs nothing.
+    /// and only while the document's content detection is on
+    /// ([`Document::set_content_detection`](crate::link::Document::set_content_detection)):
+    /// a frame built while it was off answers `false` whatever it draws, and
+    /// its walk tested nothing. Reading the answer costs nothing either way.
     #[must_use]
     pub const fn paints_content(&self) -> bool {
         self.paints_content

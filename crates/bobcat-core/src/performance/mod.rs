@@ -1,7 +1,9 @@
 //! Lynx's performance entries, as this engine measures them: the
 //! `pipeline` entries Lynx native's `onPerformanceEvent` reports
 //! (`loadBundle`, the reloads and the flagged updates), shaped as Rust
-//! types, and the one table that spells them in Lynx's names.
+//! types, and the one table that spells them in Lynx's names; and, opt-in
+//! beside them, Paint Timing's two `paint` entries (`first-paint`,
+//! `first-contentful-paint`), which Lynx does not report.
 //!
 //! The measurements underneath are `terminus`'s, in the browser's vocabulary:
 //! a commit's style, layout and frame-build marks
@@ -376,10 +378,6 @@ pub struct LoadBundleTiming {
     pub fcp: Option<Metric>,
     /// The first paint minus `openTime`, once the host set it.
     pub total_fcp: Option<Metric>,
-    /// Paint Timing's `first-contentful-paint` of the view, which Lynx does
-    /// not report: the first presented frame with contentful ink. `None` on
-    /// a `<frame>` card's load, and while no such frame has been presented.
-    pub first_contentful_paint: Option<Timestamp>,
 }
 
 /// Lynx's `ReloadBundleEntry`.
@@ -399,6 +397,45 @@ pub struct ReloadBundleTiming {
     pub total_fcp: Option<Metric>,
 }
 
+/// Which of Paint Timing's two marks a [`PaintEntry`] is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PaintName {
+    /// The view's first presented frame, whatever it drew. The same instant
+    /// Lynx's `fcp`, `lynxFcp` and `totalFcp` end at.
+    FirstPaint,
+    /// The view's first presented frame with contentful ink, as Paint
+    /// Timing defines it: a text glyph that is not white space at a used
+    /// opacity above zero, an image whose pixels are available, an SVG with
+    /// something to draw — not a background colour or a border. Lynx has no
+    /// counterpart.
+    FirstContentfulPaint,
+}
+
+impl PaintName {
+    /// The Performance Timeline name: `"first-paint"` or
+    /// `"first-contentful-paint"`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::FirstPaint => "first-paint",
+            Self::FirstContentfulPaint => "first-contentful-paint",
+        }
+    }
+}
+
+/// W3C Paint Timing's `PerformancePaintTiming`: one of the view's two first
+/// marks, reported once each to an observer of [`EntryTypes::PAINT`] (or a
+/// BTS `observe(['paint'])`) that was observing when the mark was
+/// recorded. Its `duration` is zero, as the standard's is, so it is not
+/// carried.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PaintEntry {
+    pub name: PaintName,
+    /// When the frame's present call returned (Paint Timing's
+    /// presentation time).
+    pub start: Timestamp,
+}
+
 /// One performance entry, as [`crate::EngineEvent::Performance`] reports it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -406,6 +443,8 @@ pub enum PerformanceEntry {
     LoadBundle(Box<LoadBundleTiming>),
     ReloadBundle(Box<ReloadBundleTiming>),
     Pipeline(Box<PipelineTiming>),
+    /// W3C Paint Timing, behind [`EntryTypes::PAINT`].
+    Paint(PaintEntry),
 }
 
 /// Which entries an observer receives. Empty by default: an embedder that
@@ -420,8 +459,12 @@ impl EntryTypes {
     pub const PIPELINE: Self = Self(1);
     /// [`PerformanceEntry::LoadBundle`] and [`PerformanceEntry::ReloadBundle`].
     pub const LOAD_BUNDLE: Self = Self(1 << 1);
+    /// [`PerformanceEntry::Paint`]: `first-paint` and
+    /// `first-contentful-paint`. Asking for it is what turns on the paint
+    /// walk's contentful test, until `first-contentful-paint` is recorded.
+    pub const PAINT: Self = Self(1 << 2);
     /// Every type.
-    pub const ALL: Self = Self(Self::PIPELINE.0 | Self::LOAD_BUNDLE.0);
+    pub const ALL: Self = Self(Self::PIPELINE.0 | Self::LOAD_BUNDLE.0 | Self::PAINT.0);
 
     #[must_use]
     pub const fn union(self, other: Self) -> Self {
@@ -466,25 +509,36 @@ pub enum LynxValue<'a> {
 pub(crate) const ACTUAL_FMP_FLAG: &str = "__lynx_timing_actual_fmp";
 
 impl PerformanceEntry {
-    /// Lynx's `entryType`: `"pipeline"` for all three.
+    /// The entry's `entryType`: Lynx's `"pipeline"` for the three pipeline
+    /// entries, Paint Timing's `"paint"` for a [`Self::Paint`].
     #[must_use]
     pub const fn entry_type(&self) -> &'static str {
-        "pipeline"
+        match self {
+            Self::LoadBundle(_) | Self::ReloadBundle(_) | Self::Pipeline(_) => "pipeline",
+            Self::Paint(_) => "paint",
+        }
     }
 
-    /// Lynx's `name`: the pipeline's origin.
+    /// The entry's `name`: the pipeline's origin, or the paint mark's
+    /// Performance Timeline name.
     #[must_use]
     pub fn name(&self) -> &str {
-        self.pipeline().origin.lynx_name()
+        match self {
+            Self::Paint(paint) => paint.name.as_str(),
+            Self::LoadBundle(_) | Self::ReloadBundle(_) | Self::Pipeline(_) => self
+                .pipeline()
+                .map_or("", |pipeline| pipeline.origin.lynx_name()),
+        }
     }
 
-    /// The pipeline every entry carries.
+    /// The pipeline a pipeline entry carries; `None` for a [`Self::Paint`].
     #[must_use]
-    pub fn pipeline(&self) -> &PipelineTiming {
+    pub fn pipeline(&self) -> Option<&PipelineTiming> {
         match self {
-            Self::LoadBundle(load) => &load.pipeline,
-            Self::ReloadBundle(reload) => &reload.pipeline,
-            Self::Pipeline(pipeline) => pipeline,
+            Self::LoadBundle(load) => Some(&load.pipeline),
+            Self::ReloadBundle(reload) => Some(&reload.pipeline),
+            Self::Pipeline(pipeline) => Some(pipeline),
+            Self::Paint(_) => None,
         }
     }
 
@@ -496,17 +550,28 @@ impl PerformanceEntry {
     /// `lynxFcp.duration`), and each object's members are adjacent. A field
     /// whose value this engine does not have is left out, not zeroed.
     ///
+    /// A [`Self::Paint`] is `entryType`, `name` and `startTime` alone.
+    /// Its `startTime` is Unix milliseconds like every other timestamp here,
+    /// not the standard's milliseconds after `timeOrigin`: the absolute
+    /// reading is what compares with the pipeline entries' marks (a
+    /// `first-paint`'s `startTime` is the page load's `lynxFcp` end).
+    ///
     /// The one place a Lynx key is spelled: [`Self::write_lynx_json`] and
     /// the BTS's `lynx.performance` entries are both written from this.
     pub fn lynx_fields(
         &self,
         origin: &TimeOrigin,
     ) -> impl Iterator<Item = (Cow<'static, str>, LynxValue<'_>)> {
+        let pipeline = match self {
+            Self::Paint(paint) => return paint_fields(paint, origin).into_iter(),
+            Self::LoadBundle(load) => &load.pipeline,
+            Self::ReloadBundle(reload) => &reload.pipeline,
+            Self::Pipeline(pipeline) => pipeline,
+        };
         let mut fields = Fields {
             origin: *origin,
             list: Vec::with_capacity(48),
         };
-        let pipeline = self.pipeline();
         fields.text("entryType", self.entry_type());
         fields.text("name", self.name());
         fields.text(
@@ -568,7 +633,7 @@ impl PerformanceEntry {
                 fields.optional_metric("fcp", reload.fcp.as_ref());
                 fields.optional_metric("totalFcp", reload.total_fcp.as_ref());
             }
-            Self::Pipeline(_) => {}
+            Self::Pipeline(_) | Self::Paint(_) => {}
         }
         let framework = &pipeline.framework_rendering_timing;
         if let Some(dsl) = &framework.dsl {
@@ -645,6 +710,22 @@ impl PerformanceEntry {
         }
         out.push('}');
     }
+}
+
+/// A [`PerformanceEntry::Paint`]'s fields: `entryType`, `name`,
+/// `startTime`.
+fn paint_fields<'a>(
+    paint: &PaintEntry,
+    origin: &TimeOrigin,
+) -> Vec<(Cow<'static, str>, LynxValue<'a>)> {
+    let mut fields = Fields {
+        origin: *origin,
+        list: Vec::with_capacity(3),
+    };
+    fields.text("entryType", "paint");
+    fields.text("name", paint.name.as_str());
+    fields.time("startTime", paint.start);
+    fields.list
 }
 
 /// A value as JSON: a number with three decimals, or a string.

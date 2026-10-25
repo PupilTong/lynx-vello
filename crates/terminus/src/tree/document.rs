@@ -116,6 +116,10 @@ pub struct Document<T> {
     /// ([`crate::visual::timing`]). Beside `commit_id` because a record is
     /// one commit's.
     pub(crate) commit_timer: crate::visual::timing::CommitTimer,
+    /// Whether the paint walk decides Paint Timing's contentful test
+    /// ([`Self::set_content_detection`]). Off by default: the walk then
+    /// tests one `bool` per item and nothing else.
+    pub(crate) content_detection: crate::visual::timing::ContentDetection,
     /// Whether anything visually observable changed since the retained
     /// frame was built. This is the whole invalidation state: one bit, not
     /// a counter — a frame's identity is its commit id.
@@ -171,6 +175,7 @@ impl<T> Document<T> {
             animations: crate::style::animation::AnimationDriver::default(),
             commit_id: 0,
             commit_timer: crate::visual::timing::CommitTimer::default(),
+            content_detection: crate::visual::timing::ContentDetection::Off,
             visual_dirty: true,
             layout_dirty: false,
             layout_root_dirty: false,

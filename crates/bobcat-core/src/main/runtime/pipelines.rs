@@ -124,6 +124,21 @@ impl DocumentSlot {
     }
 }
 
+impl DocumentSlot {
+    /// Turns the document's Paint Timing contentful test on while the
+    /// registry wants it ([`crate::performance::PipelineRegistry::wants_content_detection`]:
+    /// someone observes `paint` and `first-contentful-paint` has not been
+    /// recorded) and off otherwise, before a commit. One atomic load and one
+    /// `bool` compare per commit; the document is written only on a change.
+    pub(super) fn sync_content_detection(&mut self) {
+        let wanted = self.outbox.registry().wants_content_detection();
+        if wanted != self.content_detection {
+            self.document_mut().set_content_detection(wanted);
+            self.content_detection = wanted;
+        }
+    }
+}
+
 /// Installs a main-thread realm's performance members: the four pipeline
 /// hooks every realm kind has, opening records as this realm, and
 ///

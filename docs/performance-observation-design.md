@@ -162,11 +162,30 @@ pipelines, which always do. Everything else below is behind that bit.
   record only on `_onPipelineStart` of a pipeline that will carry timestamps.
   For an unflagged update that is one atomic increment and one host call
   returning a small object.
-- **Painter**: after a present it compares the adopted `commit_id` with the
-  registry's `oldest_waiting_commit` (one relaxed atomic load); only when a
-  record waits does it lock, complete the record and, if a BTS observer
-  exists (one `AtomicBool`), send one `WorkerMessage`. No new channel, no
-  new wakeup on a page that flagged nothing.
+- **Painter**: `Painter::set_presentation_timing(bool)` (`terminus`, on by
+  default) is the switch for every presentation record. `bobcat-core`'s
+  painter facade sets it before each draw from the registry's
+  `wants_presentation_timing()` — a bound record waits for a present
+  (`oldest_waiting_commit`), the document detects content, or the view's
+  first paint is not recorded yet — two relaxed atomic loads, no lock. Off,
+  a draw reads no clock and records nothing, and the facade tells the
+  registry only the commit id it drew (one `fetch_max` and one load), so a
+  record a flush bound to that commit meanwhile completes at once. On,
+  after a present it compares the adopted `commit_id` with the registry's
+  `oldest_waiting_commit` (one relaxed atomic load); only when a record
+  waits does it lock, complete the record and, if a BTS observer exists
+  (one `AtomicBool`), send one `WorkerMessage`. No new channel, no new
+  wakeup on a page that flagged nothing; a view nobody observes times its
+  presents only until its first paint is recorded and while its load
+  waits for its present.
+- **Content detection**: Paint Timing's contentful test runs in the paint
+  walk only behind `Document::set_content_detection(bool)` (`terminus`, off
+  by default). `bobcat-core`'s flush sets it before each commit from the
+  registry's `wants_content_detection()` — the Rust embedder observes
+  `EntryTypes::PAINT` or a BTS observer asked for `paint`, and
+  `first-contentful-paint` is not recorded yet — one relaxed load and one
+  `bool` compare per commit, a document write only on a change. Off, the
+  walk tests one `bool` per item and per scope and nothing else.
 - **Consumers**: `pump()` reads one generation counter; the BTS worker runs
   one job per wake, which drains every completed record its realm opened at
   once.
@@ -220,6 +239,8 @@ engine can) rather than Lynx's.
 ```rust
 pub struct PresentedFrame { pub commit_id: u64, pub compose_start: Instant, pub compose_end: Instant, pub presented: Instant }
 impl Painter {
+    /// On by default; off, a draw reads no clock and records nothing (§4).
+    pub fn set_presentation_timing(&mut self, enabled: bool);
     pub fn last_presented(&self) -> Option<PresentedFrame>;
     /// Paint Timing's two marks, as the painter saw them: the first frame it presented, and the first one that put ink on the viewport.
     pub fn first_paint(&self) -> Option<PresentedFrame>;
@@ -240,8 +261,14 @@ frame whose paint order holds contentful ink as Paint Timing defines it: a
 non-empty text run at non-zero opacity, an image whose pixels are resolved
 (an `<image>`, a background image, a vector image), an SVG with rendered
 content — not a background color or a border, which count for
-`first_paint` only (`CommittedFrame::paints_content`, decided during the
-paint-order build, which already classifies every item, so no extra walk).
+`first_paint` only. The test is `CommittedFrame::paints_content`, decided
+by the paint walk as it encodes each item, until the first item answers
+it — the glyph scan of a text run, the image and vector draw count of an
+item, the `opacity: 0` scope depth — and only while the document's content
+detection is on (`Document::set_content_detection`, ruling Q7); a frame
+built with it off answers `false` and its walk tested nothing, so
+`first_contentful_paint` is fixed only from a frame built while detection
+was on.
 **Comparability of the two marks (recorded 2026-10-25).** Lynx native's
 `fcp`/`lynxFcp`/`totalFcp` inspect nothing that was drawn: `paintEnd` is
 marked at the end of the first screen's draw pass whenever the pipeline
@@ -363,22 +390,27 @@ pub struct LoadBundleTiming {         // Lynx LoadBundleEntry = PipelineTiming +
     pub create_lynx: Range<Timestamp>,
     pub extra: ExtraTiming,                                // from LynxView::set_extra_timing
     pub lynx_fcp: Metric, pub fcp: Option<Metric>, pub total_fcp: Option<Metric>,   // from terminus first_paint
-    pub first_contentful_paint: Option<Timestamp>,         // terminus's, not in Lynx (Q6)
 }
 pub struct ReloadBundleTiming { /* the reload analogue */ }
+
+/// W3C Paint Timing's `PerformancePaintTiming`, behind `EntryTypes::PAINT` (Q6, amended).
+pub enum PaintName { FirstPaint, FirstContentfulPaint }   // as_str(): "first-paint", "first-contentful-paint"
+pub struct PaintEntry { pub name: PaintName, pub start: Timestamp }
 
 #[non_exhaustive]
 pub enum PerformanceEntry {
     LoadBundle(Box<LoadBundleTiming>), ReloadBundle(Box<ReloadBundleTiming>),
     Pipeline(Box<PipelineTiming>),
+    /// `entryType` "paint", `name` the W3C name; `lynx_fields` = `entryType`, `name`, `startTime`.
+    Paint(PaintEntry),
     /// W3C Container Timing, from `terminus`'s `ContainerPaint`; `identifier` is the root's `containertiming` attribute.
     Container(ContainerTiming),
     LazyBundle(LazyBundleTiming), Memory(MemoryUsage), JsBlocking(JsBlocking), LongTask(LongTask),
 }
 pub enum LynxValue<'a> { Number(f64), Text(&'a str), Metric(&'a Metric), Map(&'a [(&'a str, LynxValue<'a>)]) }
 impl PerformanceEntry {
-    pub fn entry_type(&self) -> &'static str;   // "pipeline", "resource", …
-    pub fn name(&self) -> &str;                 // "loadBundle", "updateTriggeredByBts", …
+    pub fn entry_type(&self) -> &'static str;   // "pipeline", "paint", "resource", …
+    pub fn name(&self) -> &str;                 // "loadBundle", "updateTriggeredByBts", "first-paint", …
     /// Lynx's attributes in Lynx's names, in a fixed order: the one place `paintingUiOperationExecuteStart` is spelled.
     pub fn lynx_fields(&self, epoch: &TimeOrigin) -> impl Iterator<Item = (&'static str, LynxValue<'_>)>;
     /// `{entryType, name, …}` from `lynx_fields`, for an embedder that reports or compares; never called by the engine.
@@ -393,10 +425,15 @@ variants (they are the `name` values) and `lynx_fields`, which both the JSON
 writer and the BTS binding (§9) iterate, so the key table exists once and
 no engine thread serializes anything.
 
+A `paint` entry's `startTime` is Unix milliseconds like every other
+timestamp here, not the standard's milliseconds after `timeOrigin`: the
+absolute reading is what compares with the pipeline entries' marks (a
+`first-paint`'s `startTime` is the page load's `lynxFcp` end).
+
 ### 6.2 Registration and delivery
 
 ```rust
-bitflags! { pub struct EntryTypes: u8 { const PIPELINE; const LOAD_BUNDLE; const CONTAINER; const RESOURCE; const MEMORY; const JS_BLOCKING; const LONG_TASK; } }
+bitflags! { pub struct EntryTypes: u8 { const PIPELINE; const LOAD_BUNDLE; const PAINT; const CONTAINER; const RESOURCE; const MEMORY; const JS_BLOCKING; const LONG_TASK; } }
 impl<F> LynxView<F> {
     /// Which entries `pump` reports as `EngineEvent::Performance`. Default: empty (ruling Q3): nothing is assembled until an embedder asks.
     pub fn observe_performance(&self, types: EntryTypes);
@@ -416,6 +453,15 @@ type's records are released at completion. `ExtraTiming` is Lynx's five
 container keys as `Option<SystemTime>`; setting it after the load pipeline
 completed re-emits the `LoadBundle` entry with `fcp`/`totalFcp` filled, as
 Lynx does.
+
+`EntryTypes::PAINT` is the one type whose subscription turns work on: it
+makes the registry answer `wants_content_detection()` until
+`first-contentful-paint` is recorded (§4). Each of the two marks becomes one
+completed `paint` record the first time the painter reports it, for the
+audiences asking for `paint` then — the Rust embedder, and every BTS worker
+with a `paint` observer (the marks are the view's, so no provenance
+applies) — and none at all when nobody asks; an observer that subscribes
+after a mark was recorded does not receive it (no `buffered` replay).
 
 ### 6.3 Where each Lynx key is marked
 
@@ -485,6 +531,13 @@ A record's life:
 4. **Taken** by each audience: `pump()` for the Rust embedder, the BTS
    worker's job for its observers. A record is freed when every audience
    that existed at completion has taken it.
+
+A `paint` record skips the first three steps: it is made complete when the
+painter first reports its mark, one per audience asking for `paint` then
+(§6.2). The registry also keeps the two switch answers of §4 as relaxed
+atomics, recomputed under the lock whenever the subscriptions or the paint
+marks change: `wants_content_detection()` and the half of
+`wants_presentation_timing()` that `oldest_waiting_commit` does not cover.
 
 ### 6.5 Nested cards (`<frame>`), as Lynx has them
 
@@ -612,7 +665,7 @@ test `the performance shell must stay inert` keeps holding for that build.
 
 | Member | Implementation |
 | --- | --- |
-| `createObserver(cb) → PerformanceObserver {observe(names), disconnect()}` | pure TS, filters `entryType` / `entryType.name`; entries are emitted as `lynx.performance.onPerformanceEvent` on the realm's `GlobalEventEmitter`, so `lynx.getJSModule('GlobalEventEmitter').addListener(...)` also works, as on native. `observe(['container'])` adds W3C Container Timing entries (`entryType: "container"`, the draft's field names), which native has no equivalent of |
+| `createObserver(cb) → PerformanceObserver {observe(names), disconnect()}` | pure TS, filters `entryType` / `entryType.name`; entries are emitted as `lynx.performance.onPerformanceEvent` on the realm's `GlobalEventEmitter`, so `lynx.getJSModule('GlobalEventEmitter').addListener(...)` also works, as on native. `observe(['paint'])` (or `paint.first-paint` / `paint.first-contentful-paint`) adds W3C Paint Timing's two entries, `{entryType: "paint", name: "first-paint" \| "first-contentful-paint", startTime}` (Unix ms), which native has no equivalent of. `observe(['container'])` adds W3C Container Timing entries (`entryType: "container"`, the draft's field names), likewise |
 | `_generatePipelineOptions()` → `{pipelineID, needTimestamps: false}` | host function (`PipelineRegistry` id) |
 | `_onPipelineStart(id, options)` | host function; opens the record with `pipelineStart`, `pipelineOrigin`, `dsl`, `stage`, `needTimestamps` |
 | `_markTiming(id, key)` | host function; one instant into the record's marks |
@@ -623,8 +676,12 @@ test `the performance shell must stay inert` keeps holding for that build.
 
 Entry delivery to the BTS, with no main-thread part and no JSON (ruling
 Q1): the first `observe()` with a non-empty list calls the host function
-`observePerformance(true)`, which sets the registry's `bts_observing`
-(the last `disconnect()` clears it). The painter, on completing a record of
+`observePerformance(1, paint)`, which adds the worker to the registry's
+observing set (the last `disconnect()` calls `observePerformance(0, 0)`).
+`paint` is `1` while some active observer's list names `paint` or a
+`paint.` name, and the realm calls the host again only when either bit
+changes; the registry keeps the `paint` observers in a set of their own,
+which is what turns content detection on. The painter, on completing a record of
 that card, sends `WorkerMessage::PerformanceReady` to the worker; the job it
 runs calls `takePerformanceEntries()`, a host function that, on the worker
 thread, drains the card's completed records and answers one flat array per
@@ -668,22 +725,25 @@ Each phase is one PR series; no stacking across phases.
 
 ## 11. Decisions
 
-User rulings, 2026-10-23. The six questions below are closed; Q7 was raised
-on 2026-10-25 and is open.
+User rulings, 2026-10-23; Q7 and the amendment to Q6, 2026-10-25. All seven
+questions are closed.
 
-- **Q7 (open). On-demand contentful detection.** As built, the paint walk
-  decides `paints_content` on every frame (`Scratch::contentful` is reset
-  per walk; `paint_item` tests each item until the first contentful one,
-  `has_visible_glyph` scans the first text item, `open_scope`/`close_scope`
-  keep `transparent_depth`), although its only consumer is
-  `first_contentful_paint`, which the painter fixes once and which only the
-  Rust `LoadBundle` entry reports. Proposal: a document switch
-  (`Document::set_content_detection(bool)`, default off) that `bobcat-core`
-  turns on when the Rust embedder subscribes to `LOAD_BUNDLE` and off again
-  once the registry has recorded `first_contentful_paint`; off, every site
-  above reads one `bool`, and a view nobody observes runs none of it, as
-  goal 4 asks. `first_paint`, Lynx's `fcp`, needs no detection and stays
-  free either way.
+- **Q7, on-demand contentful detection and presentation timing.** The W3C
+  paint marks stay, as an opt-in entry of their own (Q6, amended), and every
+  piece of `terminus` logic that exists only for them, or only for timing,
+  costs nothing unless something asked for it. Built as two switches:
+  `Document::set_content_detection(bool)` (off by default; off, `paint_item`,
+  `open_scope` and `close_scope` each test one `bool` and
+  `has_visible_glyph` is never reached), which `bobcat-core`'s flush sets
+  before each commit from the registry's `wants_content_detection()` —
+  `EntryTypes::PAINT` or a BTS `paint` observer, until
+  `first-contentful-paint` is recorded; and
+  `Painter::set_presentation_timing(bool)` (on by default, so `terminus`
+  alone keeps recording), which the painter facade sets before each draw
+  from `wants_presentation_timing()` — a record waits for a present,
+  content detection is on, or the view's first paint (which every load's
+  `lynxFcp` ends at) is not recorded yet. A view nobody observes therefore
+  times its presents only until its first paint and while a record waits.
 
 1. **Q1, entry transport.** Neither JSON text nor primitive arguments built
    on the main thread: a consumer that is not the main thread gets no
@@ -698,7 +758,10 @@ on 2026-10-25 and is open.
    `first_contentful_paint`; Lynx's `fcp` is `first_paint` renamed in
    `bobcat-core` (or the element API's JavaScript), and
    `first_contentful_paint` stays on the Rust entry as this engine's extra
-   field.
+   field. *Amended 2026-10-25:* the standard marks are a `paint` entry
+   (`PerformanceEntry::Paint`, `first-paint` and `first-contentful-paint`)
+   behind `EntryTypes::PAINT` / `observe(['paint'])`, not a `LoadBundle`
+   field; `LoadBundleTiming` has no `first_contentful_paint`.
 
 5. **Q3, default `EntryTypes`.** Opt-in: the default is empty, and an
    embedder that wants Lynx's data calls `observe_performance`. A

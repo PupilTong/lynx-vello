@@ -1206,6 +1206,10 @@ struct DocumentSlot {
     /// The native-triggered pipelines opened since the last timed flush —
     /// a flagged update, a reload — which the next flush binds.
     native_pipelines: Vec<u64>,
+    /// What the document's content detection was last set to
+    /// ([`Self::sync_content_detection`]), so a commit writes the document
+    /// only when the registry's answer changed.
+    content_detection: bool,
     /// Where committed frames leave for the painting side.
     outbox: ViewOutbox,
 }
@@ -1278,6 +1282,7 @@ impl DocumentSlot {
             timeline_milliseconds: 0.0,
             pending_flags: Vec::new(),
             native_pipelines: Vec::new(),
+            content_detection: false,
             outbox,
         }))
     }
@@ -1888,6 +1893,7 @@ impl DocumentSlot {
         self.settle_sheets(thread)?;
         self.adopt_metrics();
         self.sync_names();
+        self.sync_content_detection();
         let frame = self.document_mut().commit();
         let mut commit_id = frame.commit_id();
         if self.bound {
@@ -1982,6 +1988,7 @@ impl DocumentSlot {
         }
         self.adopt_metrics();
         if self.document_mut().needs_render() {
+            self.sync_content_detection();
             let frame = self.document_mut().commit();
             if self.bound {
                 // Superseded, as in `flush`: the held frame is older.

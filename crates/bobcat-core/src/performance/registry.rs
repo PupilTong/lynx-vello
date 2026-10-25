@@ -22,6 +22,18 @@
 //! 4. **Completed**: its audiences are fixed — the Rust embedder when it subscribed to the record's
 //!    types, the BTS worker of the realm that opened it when that worker observes — and each takes
 //!    it once. A record no audience wants is freed at once.
+//!
+//! A `paint` record (Paint Timing's `first-paint`, `first-contentful-paint`)
+//! skips the first three: it is completed when the painter first reports the
+//! mark, for the Rust embedder when it subscribed to [`EntryTypes::PAINT`]
+//! and for each BTS worker whose observers asked for `paint`, and is not
+//! made at all when nobody did.
+//!
+//! The registry also answers the two switches that keep the painting side's
+//! timing work off when nothing needs it, each a relaxed atomic read:
+//! [`PipelineRegistry::wants_content_detection`], the document's contentful
+//! test, and [`PipelineRegistry::wants_presentation_timing`], the painter's
+//! presentation records.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -33,8 +45,8 @@ use terminus::link::painter::PresentedFrame;
 
 use super::{
     ACTUAL_FMP_FLAG, ActualFmp, EntryTypes, ExtraTiming, FrameworkTiming, LoadBundleTiming, Metric,
-    PainterTiming, PerformanceEntry, PipelineOrigin, PipelineTiming, ReloadBundleTiming,
-    TimeOrigin, Timestamp,
+    PaintEntry, PaintName, PainterTiming, PerformanceEntry, PipelineOrigin, PipelineTiming,
+    ReloadBundleTiming, TimeOrigin, Timestamp,
 };
 use crate::background::WorkerKey;
 use crate::clock::{ClockInstant, SystemTime};
@@ -148,6 +160,13 @@ pub(crate) struct PipelineRegistry {
     observed: AtomicBool,
     /// How many records exist: a flush or a mark with none takes no lock.
     live_records: AtomicUsize,
+    /// [`Self::wants_content_detection`]: someone observes `paint` and
+    /// `first-contentful-paint` has not been recorded.
+    content_detection: AtomicBool,
+    /// Whether a paint mark still needs the painter's presentation records:
+    /// [`Self::content_detection`], or the view's first paint not recorded
+    /// yet. Half of [`Self::wants_presentation_timing`].
+    marks_wanted: AtomicBool,
     inner: Mutex<Inner>,
 }
 
@@ -162,6 +181,8 @@ struct Inner {
     bindings: FxHashMap<WorkerKey, OpenerId>,
     /// The workers with a `lynx.performance` observer.
     observing: FxHashSet<WorkerKey>,
+    /// The workers among them whose observers asked for `paint` entries.
+    observing_paint: FxHashSet<WorkerKey>,
     /// Completed records some audience has not taken yet, in completion
     /// order.
     completed: Vec<u64>,
@@ -184,6 +205,9 @@ enum Kind {
     Update,
     Load,
     Reload,
+    /// A Paint Timing mark, completed when it is made; its instant is the
+    /// record's `start`.
+    Paint(PaintName),
 }
 
 #[derive(Clone, Copy)]
@@ -246,6 +270,9 @@ impl Record {
 
     /// The entry types the record yields.
     fn types(&self) -> EntryTypes {
+        if matches!(self.kind, Kind::Paint(_)) {
+            return EntryTypes::PAINT;
+        }
         let mut types = EntryTypes::NONE;
         if self.kind != Kind::Update {
             types = types | EntryTypes::LOAD_BUNDLE;
@@ -299,6 +326,9 @@ impl PipelineRegistry {
             generation: AtomicU64::new(0),
             observed: AtomicBool::new(false),
             live_records: AtomicUsize::new(0),
+            content_detection: AtomicBool::new(false),
+            // The view's first paint is not recorded yet.
+            marks_wanted: AtomicBool::new(true),
             inner: Mutex::new(Inner::default()),
         }
     }
@@ -327,6 +357,38 @@ impl PipelineRegistry {
             !inner.rust_types.is_empty() || !inner.observing.is_empty(),
             Ordering::Relaxed,
         );
+        let detect = Self::paint_wanted(inner) && inner.first_contentful_paint.is_none();
+        self.content_detection.store(detect, Ordering::Relaxed);
+        self.marks_wanted
+            .store(detect || inner.first_paint.is_none(), Ordering::Relaxed);
+    }
+
+    /// Whether anyone asked for `paint` entries.
+    fn paint_wanted(inner: &Inner) -> bool {
+        inner.rust_types.contains(EntryTypes::PAINT) || !inner.observing_paint.is_empty()
+    }
+
+    /// Whether the view's document should decide Paint Timing's contentful
+    /// test as it builds frames (`terminus`'s
+    /// `Document::set_content_detection`): someone observes `paint` — the
+    /// Rust embedder through [`EntryTypes::PAINT`], or a BTS observer of
+    /// `paint` — and `first-contentful-paint` has not been recorded. One
+    /// relaxed load, which every commit reads.
+    pub(crate) fn wants_content_detection(&self) -> bool {
+        self.content_detection.load(Ordering::Relaxed)
+    }
+
+    /// Whether the view's painter should record its presentations
+    /// (`terminus`'s `Painter::set_presentation_timing`): a bound record
+    /// waits for a present, the document detects content, or the view's
+    /// first paint — which every load entry's `lynxFcp` ends at, and the
+    /// `first-paint` entry reports — has not been recorded yet. Two relaxed
+    /// loads and no lock, which every draw reads; a view nobody observes
+    /// answers `false` from its first recorded present on, except while a
+    /// record waits.
+    pub(crate) fn wants_presentation_timing(&self) -> bool {
+        self.oldest_waiting_commit.load(Ordering::Relaxed) != NO_COMMIT
+            || self.marks_wanted.load(Ordering::Relaxed)
     }
 
     /// A fresh pipeline id: one atomic increment and nothing else.
@@ -729,19 +791,91 @@ impl PipelineRegistry {
         std::mem::take(&mut inner.wakes)
     }
 
+    /// The painter drew the frame of `commit_id` while its presentation
+    /// timing was off ([`Self::wants_presentation_timing`] said no record
+    /// waited). A flush may have bound a record to that commit since the
+    /// painter asked: then the record completes here, presented now, as a
+    /// binding to an already presented frame does. Without a waiting record
+    /// it is two atomic accesses and no lock, as [`Self::note_presented`]
+    /// is.
+    pub(crate) fn note_untimed_present(&self, commit_id: u64) -> Vec<WorkerKey> {
+        self.last_presented_commit
+            .fetch_max(commit_id, Ordering::SeqCst);
+        if self.oldest_waiting_commit.load(Ordering::SeqCst) > commit_id {
+            return Vec::new();
+        }
+        let now = ClockInstant::now();
+        let mut inner = self.lock();
+        self.present_through(
+            &mut inner,
+            PresentedFrame {
+                commit_id,
+                compose_start: now,
+                compose_end: now,
+                presented: now,
+            },
+        );
+        std::mem::take(&mut inner.wakes)
+    }
+
     /// The view's Paint Timing marks, as the painter first saw them. Each
-    /// is kept once.
+    /// is kept once, and the first time each is seen it completes one
+    /// `paint` record for every audience that asks for `paint` then.
+    /// Answers the workers owed a `PerformanceReady` for them.
     pub(crate) fn note_paint(
         &self,
         first_paint: Option<PresentedFrame>,
         first_contentful_paint: Option<PresentedFrame>,
-    ) {
-        let mut inner = self.lock();
-        if inner.first_paint.is_none() {
-            inner.first_paint = first_paint.map(|frame| frame.presented);
+    ) -> Vec<WorkerKey> {
+        let mut guard = self.lock();
+        let inner = &mut *guard;
+        if inner.first_paint.is_none()
+            && let Some(frame) = first_paint
+        {
+            inner.first_paint = Some(frame.presented);
+            self.complete_paint(inner, PaintName::FirstPaint, frame.presented);
         }
-        if inner.first_contentful_paint.is_none() {
-            inner.first_contentful_paint = first_contentful_paint.map(|frame| frame.presented);
+        if inner.first_contentful_paint.is_none()
+            && let Some(frame) = first_contentful_paint
+        {
+            inner.first_contentful_paint = Some(frame.presented);
+            self.complete_paint(inner, PaintName::FirstContentfulPaint, frame.presented);
+        }
+        self.update_observed(inner);
+        std::mem::take(&mut inner.wakes)
+    }
+
+    /// One completed `paint` record per audience: the Rust embedder's, when
+    /// it subscribed to [`EntryTypes::PAINT`], and one per worker observing
+    /// `paint` — the mark is the view's, so every such worker hears it. No
+    /// record at all when nobody asks.
+    fn complete_paint(&self, inner: &mut Inner, name: PaintName, at: ClockInstant) {
+        let mut audiences: SmallVec<[(u8, Option<WorkerKey>); 2]> = SmallVec::new();
+        if inner.rust_types.contains(EntryTypes::PAINT) {
+            audiences.push((RUST, None));
+        }
+        let mut workers: SmallVec<[WorkerKey; 2]> = inner.observing_paint.iter().copied().collect();
+        workers.sort_unstable();
+        audiences.extend(workers.into_iter().map(|key| (WORKER, Some(key))));
+        for (audience, worker) in audiences {
+            let mut record = Record::new(
+                Kind::Paint(name),
+                PipelineOrigin::LoadBundle,
+                Opener::Realm(OpenerId::PAGE),
+                at,
+            );
+            record.done = true;
+            record.audience = audience;
+            record.worker = worker;
+            let id = self.generate_id();
+            self.insert(inner, id, record);
+            inner.completed.push(id);
+            if let Some(worker) = worker
+                && !inner.wakes.contains(&worker)
+            {
+                inner.wakes.push(worker);
+            }
+            self.generation.fetch_add(1, Ordering::Release);
         }
     }
 
@@ -912,6 +1046,7 @@ impl PipelineRegistry {
         let mut guard = self.lock();
         let inner = &mut *guard;
         inner.observing.remove(&key);
+        inner.observing_paint.remove(&key);
         inner.worker_loads.remove(&key);
         inner.wakes.retain(|worker| *worker != key);
         if let Some(realm) = inner.bindings.remove(&key)
@@ -922,13 +1057,20 @@ impl PipelineRegistry {
         self.update_observed(inner);
     }
 
-    /// Whether the worker `key` has a `lynx.performance` observer.
-    pub(crate) fn observe_worker(&self, key: WorkerKey, observing: bool) {
+    /// Whether the worker `key` has a `lynx.performance` observer, and
+    /// whether one of its observers asked for `paint` entries (which only an
+    /// observing worker can have).
+    pub(crate) fn observe_worker(&self, key: WorkerKey, observing: bool, paint: bool) {
         let mut inner = self.lock();
         if observing {
             inner.observing.insert(key);
         } else {
             inner.observing.remove(&key);
+        }
+        if observing && paint {
+            inner.observing_paint.insert(key);
+        } else {
+            inner.observing_paint.remove(&key);
         }
         self.update_observed(&inner);
     }
@@ -1019,7 +1161,6 @@ impl PipelineRegistry {
                 load,
                 extra: inner.extra,
                 first_paint: inner.first_paint,
-                first_contentful_paint: inner.first_contentful_paint,
             });
             if let Some(record) = inner.records.get_mut(&id) {
                 record.audience &= !bit;
@@ -1103,7 +1244,6 @@ struct Taken {
     load: Option<LoadSnapshot>,
     extra: ExtraTiming,
     first_paint: Option<ClockInstant>,
-    first_contentful_paint: Option<ClockInstant>,
 }
 
 fn range(span: (Option<ClockInstant>, Option<ClockInstant>)) -> Option<std::ops::Range<Timestamp>> {
@@ -1135,6 +1275,15 @@ impl Taken {
     fn assemble(&self, types: EntryTypes, origin: &TimeOrigin) -> SmallVec<[PerformanceEntry; 2]> {
         let mut entries = SmallVec::new();
         let record = &self.record;
+        if let Kind::Paint(name) = record.kind {
+            if types.contains(EntryTypes::PAINT) {
+                entries.push(PerformanceEntry::Paint(PaintEntry {
+                    name,
+                    start: Timestamp(record.start),
+                }));
+            }
+            return entries;
+        }
         let (Some(commit), Some(presented)) = (record.commit, record.presented) else {
             return entries;
         };
@@ -1181,7 +1330,7 @@ impl Taken {
                         },
                     )));
                 }
-                Kind::Update => {}
+                Kind::Update | Kind::Paint(_) => {}
             }
         }
         if !record.load_only && types.contains(EntryTypes::PIPELINE) {
@@ -1303,11 +1452,6 @@ impl Taken {
             },
             fcp: paint_metric("fcp", "prepareTemplateStart", prepare, first_paint),
             total_fcp: paint_metric("totalFcp", "openTime", open, first_paint),
-            first_contentful_paint: load
-                .page
-                .then_some(self.first_contentful_paint)
-                .flatten()
-                .map(Timestamp),
             pipeline,
         }
     }

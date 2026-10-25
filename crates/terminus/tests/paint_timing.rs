@@ -1,9 +1,11 @@
 //! Rendering timing: the document's commit timing
 //! (`Document::set_commit_timing`, `Document::last_commit_timing`), Paint
 //! Timing's contentful test on a committed frame
-//! (`CommittedFrame::paints_content`), and the presenting painter's
+//! (`CommittedFrame::paints_content`, behind
+//! `Document::set_content_detection`), and the presenting painter's
 //! presentation records (`Painter::last_presented`, `Painter::first_paint`,
-//! `Painter::first_contentful_paint`) over an offscreen target.
+//! `Painter::first_contentful_paint`, behind
+//! `Painter::set_presentation_timing`) over an offscreen target.
 
 mod paint_common;
 
@@ -27,8 +29,15 @@ const ICON: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="12" height=
 </svg>"#;
 
 /// A page styled by `css` after [`PAGE`], where a `text` element is a Lynx
-/// text element and Ahem is the one face.
+/// text element and Ahem is the one face, with content detection on.
 fn page(css: &str) -> Doc {
+    let mut doc = undetected_page(css);
+    doc.dom.set_content_detection(true);
+    doc
+}
+
+/// [`page`] with content detection as a document starts: off.
+fn undetected_page(css: &str) -> Doc {
     let mut doc = Doc::with_css(&format!("{PAGE} {css}"));
     doc.define_lynx_text("text");
     doc.dom.register_fonts(FontBlob::from_static(AHEM));
@@ -117,6 +126,25 @@ fn a_render_after_timing_is_turned_off_keeps_the_last_record() {
         frame.commit_id() > kept.commit_id,
         "the untimed render published a later commit than the record names"
     );
+}
+
+#[test]
+fn content_detection_is_off_by_default() {
+    let mut doc = undetected_page("");
+    text(&mut doc, "", "Hello");
+    assert!(
+        !paints_content(&mut doc),
+        "a frame built with detection off is never contentful"
+    );
+
+    // Turned on, the next frame built is decided; turned off again, the
+    // next is not.
+    doc.dom.set_content_detection(true);
+    text(&mut doc, "", "World");
+    assert!(paints_content(&mut doc));
+    doc.dom.set_content_detection(false);
+    text(&mut doc, "", "Again");
+    assert!(!paints_content(&mut doc));
 }
 
 #[test]
@@ -372,6 +400,56 @@ fn a_draw_of_the_frame_already_held_records_nothing_new() {
     );
     let again = painter.last_presented().expect("kept");
     assert_eq!(again.presented, presented.presented);
+}
+
+#[test]
+fn without_content_detection_first_contentful_paint_never_comes() {
+    let mut painter = offscreen_painter();
+    let mut doc = undetected_page("");
+    text(&mut doc, "", "Hello");
+    let commit = present(&mut painter, &mut doc);
+    assert_eq!(
+        painter
+            .first_paint()
+            .expect("first paint needs no detection")
+            .commit_id,
+        commit
+    );
+    assert!(painter.first_contentful_paint().is_none());
+}
+
+#[test]
+fn presentation_timing_off_records_nothing_and_on_again_records() {
+    let mut painter = offscreen_painter();
+    assert!(painter.presentation_timing(), "on by default");
+    painter.set_presentation_timing(false);
+    let mut doc = page("");
+    text(&mut doc, "", "Hello");
+    present(&mut painter, &mut doc);
+    assert!(painter.last_presented().is_none());
+    assert!(painter.first_paint().is_none());
+    assert!(painter.first_contentful_paint().is_none());
+
+    // The switch outlives the view it was set for.
+    painter.forget_view();
+    assert!(!painter.presentation_timing());
+
+    painter.set_presentation_timing(true);
+    text(&mut doc, "", "World");
+    let commit = present(&mut painter, &mut doc);
+    let presented = painter.last_presented().expect("recorded once on");
+    assert_eq!(presented.commit_id, commit);
+    assert_eq!(
+        painter.first_paint().expect("the first recorded").commit_id,
+        commit
+    );
+    assert_eq!(
+        painter
+            .first_contentful_paint()
+            .expect("the first recorded with content")
+            .commit_id,
+        commit
+    );
 }
 
 #[test]

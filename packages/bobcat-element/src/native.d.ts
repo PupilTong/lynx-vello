@@ -561,10 +561,13 @@ declare module "bobcat-internal:host" {
    */
   export function connectBackground(key: number): void;
   /**
-   * Worker realms: the realm has a `lynx.performance` observer (`1`), or no
-   * longer has one (`0`). Nothing is sent to a worker without one.
+   * Worker realms: the realm has a `lynx.performance` observer (`on` `1`),
+   * or no longer has one (`0`), and one of its observers asked for `paint`
+   * entries (`paint` `1`) or none did (`0`). Nothing is sent to a worker
+   * without an observer, and no `paint` entry to one without a `paint`
+   * observer.
    */
-  export function observePerformance(on: 0 | 1): void;
+  export function observePerformance(on: 0 | 1, paint: 0 | 1): void;
   /**
    * Worker realms: every performance entry this worker is owed, as one
    * record (`bobcat:record`): per entry its pair count, then a key field and

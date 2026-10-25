@@ -386,18 +386,25 @@ pub(crate) struct Scratch {
     /// The per-frame cull geometry, shared with the relevance pass.
     plan: CullPlan,
     paths: PathScratch,
+    /// Whether this walk decides [`Self::contentful`]: the document's
+    /// content detection (`Document::set_content_detection`), read once per
+    /// walk. Off, [`paint_item`], [`open_scope`] and [`close_scope`] each
+    /// test this one `bool` and do nothing else for Paint Timing.
+    detect_content: bool,
     /// Whether the last walk encoded contentful ink, as Paint Timing defines
     /// it (`CommittedFrame::paints_content`): a text run with a glyph that is
     /// not white space, or an image or vector draw of an element box or a
     /// text run's inline boxes, outside any `::backdrop` and any
     /// transparent scope ([`Self::transparent_depth`]). Set by
     /// [`paint_item`] as it encodes, so deciding it walks nothing; once set,
-    /// no later item tests again.
+    /// no later item tests again. Always `false` after a walk with
+    /// [`Self::detect_content`] off.
     contentful: bool,
     /// The depth of `scopes`, counting the scope itself, of the outermost
     /// open scope that is `opacity: 0` with no animation to fade it, or
     /// `None` while no such scope is open. Everything inside one paints at a
     /// used opacity of zero, which Paint Timing does not count as content.
+    /// Kept only while [`Self::detect_content`] is on.
     transparent_depth: Option<usize>,
 }
 
@@ -871,6 +878,8 @@ fn walk_within<T>(
     scratch.clip_stack.clear();
     scratch.chain.clear();
     scratch.scopes.clear();
+    scratch.detect_content =
+        document.content_detection == crate::visual::timing::ContentDetection::On;
     scratch.contentful = false;
     scratch.transparent_depth = None;
     scratch.plan.resolve(document, frame, cull);
@@ -1238,7 +1247,8 @@ fn open_scope<T>(
     });
     // An exported or main-thread opacity animation can raise the alpha
     // without a commit, so only a still zero is transparent.
-    if scratch.transparent_depth.is_none()
+    if scratch.detect_content
+        && scratch.transparent_depth.is_none()
         && effects.opacity <= 0.0
         && alpha_animation.is_none()
         && !fades
@@ -1514,9 +1524,10 @@ fn close_scope<T>(sink: &mut WalkSink<'_>, scratch: &mut Scratch, painting: Pain
         .scopes
         .pop()
         .expect("close_scope is only called with an open scope");
-    if scratch
-        .transparent_depth
-        .is_some_and(|depth| scratch.scopes.len() < depth)
+    if scratch.detect_content
+        && scratch
+            .transparent_depth
+            .is_some_and(|depth| scratch.scopes.len() < depth)
     {
         scratch.transparent_depth = None;
     }
@@ -1585,9 +1596,11 @@ fn paint_item<T>(
     let space = item.space;
     let transform = scale * local;
     // Paint Timing's contentful test (`Scratch::contentful`), asked only
-    // until the first item answers it: the draws an item adds are its image
-    // and vector draws, since a mask's are made by its scope, not its items.
-    let counts = !scratch.contentful
+    // while the document detects content and until the first item answers
+    // it: the draws an item adds are its image and vector draws, since a
+    // mask's are made by its scope, not its items.
+    let counts = scratch.detect_content
+        && !scratch.contentful
         && !matches!(item.kind, PaintItemKind::Backdrop { .. })
         && scratch.transparent_depth.is_none();
     let draws_before = counts.then(|| sink.content_draws());

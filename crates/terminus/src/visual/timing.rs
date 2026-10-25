@@ -119,6 +119,15 @@ impl CommitTimer {
     }
 }
 
+/// Whether a document's paint walk decides Paint Timing's contentful test
+/// ([`Document::set_content_detection`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ContentDetection {
+    #[default]
+    Off,
+    On,
+}
+
 impl<T> Document<T> {
     /// Turns commit timing on or off for the renders that follow.
     ///
@@ -129,6 +138,29 @@ impl<T> Document<T> {
     /// frame since published.
     pub fn set_commit_timing(&mut self, enabled: bool) {
         self.commit_timer.enabled = enabled;
+    }
+
+    /// Turns Paint Timing's contentful test on or off for the frames built
+    /// after it.
+    ///
+    /// While it is on, the paint walk decides, as it encodes each item,
+    /// whether the frame puts contentful ink on the viewport
+    /// ([`crate::visual::frame::CommittedFrame::paints_content`]), which is what a
+    /// presenting painter's `first_contentful_paint` is fixed from. Off by
+    /// default, and off, the walk reads one `bool` per item and every frame
+    /// it builds answers `paints_content() == false`. Turning it on does not
+    /// rebuild the retained frame: the next commit that builds one is the
+    /// first to be decided.
+    ///
+    /// Its one consumer is an observer of `first-contentful-paint`, so an
+    /// embedder turns it on while one is waiting for that mark and off once
+    /// it has been recorded.
+    pub fn set_content_detection(&mut self, enabled: bool) {
+        self.content_detection = if enabled {
+            ContentDetection::On
+        } else {
+            ContentDetection::Off
+        };
     }
 
     /// The timing of the last [`Self::render`] that built a frame while

@@ -190,7 +190,7 @@ fn a_worker_observer_is_owed_the_entries_of_its_realm() {
     let registry = PipelineRegistry::detached();
     let worker = WorkerKey::new(7);
     registry.bind_worker(worker, OpenerId::PAGE);
-    registry.observe_worker(worker, true);
+    registry.observe_worker(worker, true, false);
     registry.bind_commit(flush(OpenerId::PAGE, 0, &["mine"], 1));
     assert_eq!(registry.note_presented(frame(1)), vec![worker]);
     assert!(registry.take_completed_for_rust().is_empty());
@@ -239,4 +239,120 @@ fn a_load_waits_for_its_background_entry_and_reports_extra_timing_again() {
     };
     assert!(load.fcp.is_some() && load.total_fcp.is_some());
     assert!(!registry.set_extra_timing(&extra), "a key is set once");
+}
+
+#[test]
+fn a_paint_entry_writes_its_three_fields() {
+    let origin = TimeOrigin::now();
+    let entry = PerformanceEntry::Paint(PaintEntry {
+        name: PaintName::FirstContentfulPaint,
+        start: at(&origin, 4),
+    });
+    assert_eq!(entry.entry_type(), "paint");
+    assert_eq!(entry.name(), "first-contentful-paint");
+    assert!(entry.pipeline().is_none());
+    let keys: Vec<_> = entry
+        .lynx_fields(&origin)
+        .map(|(key, _)| key.into_owned())
+        .collect();
+    assert_eq!(keys, ["entryType", "name", "startTime"]);
+    let mut json = String::new();
+    entry.write_lynx_json(&origin, &mut json);
+    let value: serde_json::Value = serde_json::from_str(&json).expect("the entry is JSON");
+    assert_eq!(value["entryType"], "paint");
+    assert_eq!(value["name"], "first-contentful-paint");
+    let start = value["startTime"].as_f64().expect("a number");
+    assert!((start - origin.unix_millis() - 4.0).abs() < 1e-6);
+    assert_eq!(PaintName::FirstPaint.as_str(), "first-paint");
+    let record = encode_entries(&[entry], &origin);
+    assert!(record.starts_with("1:3"), "{record}");
+    assert!(record.contains("9:entryType6:spaint"), "{record}");
+}
+
+#[test]
+fn paint_marks_complete_once_for_whoever_asked_for_paint() {
+    let registry = PipelineRegistry::detached();
+    let worker = WorkerKey::new(3);
+    let other = WorkerKey::new(4);
+    registry.observe_rust(EntryTypes::PAINT);
+    registry.observe_worker(worker, true, true);
+    registry.observe_worker(other, true, false);
+    assert!(registry.wants_content_detection());
+    let first = frame(1);
+    assert_eq!(registry.note_paint(Some(first), None), vec![worker]);
+    assert!(
+        registry.wants_content_detection(),
+        "no contentful paint yet"
+    );
+    let contentful = frame(2);
+    assert_eq!(
+        registry.note_paint(Some(first), Some(contentful)),
+        vec![worker]
+    );
+    assert!(!registry.wants_content_detection());
+    assert!(
+        registry
+            .note_paint(Some(first), Some(contentful))
+            .is_empty()
+    );
+    let names = |entries: Vec<PerformanceEntry>| -> Vec<(PaintName, Timestamp)> {
+        entries
+            .into_iter()
+            .map(|entry| match entry {
+                PerformanceEntry::Paint(paint) => (paint.name, paint.start),
+                entry => panic!("a paint entry: {entry:?}"),
+            })
+            .collect()
+    };
+    let expected = vec![
+        (PaintName::FirstPaint, Timestamp(first.presented)),
+        (
+            PaintName::FirstContentfulPaint,
+            Timestamp(contentful.presented),
+        ),
+    ];
+    assert_eq!(names(registry.take_completed_for_rust()), expected);
+    assert_eq!(names(registry.take_completed_for_worker(worker)), expected);
+    assert!(registry.take_completed_for_worker(other).is_empty());
+    assert!(registry.records_for_test().is_empty(), "taken and freed");
+}
+
+#[test]
+fn paint_marks_nobody_asked_for_make_no_record_and_no_detection() {
+    let registry = PipelineRegistry::detached();
+    registry.observe_rust(EntryTypes::LOAD_BUNDLE | EntryTypes::PIPELINE);
+    assert!(!registry.wants_content_detection());
+    assert!(
+        registry.wants_presentation_timing(),
+        "the first paint is not recorded yet"
+    );
+    registry.note_paint(Some(frame(1)), None);
+    assert!(!registry.wants_presentation_timing());
+    assert_eq!(registry.generation(), 0);
+    assert!(registry.records_for_test().is_empty());
+    // A worker that observes pipelines only asks for no detection either.
+    registry.observe_worker(WorkerKey::new(1), true, false);
+    assert!(!registry.wants_content_detection());
+    // Asking for paint turns detection on until the contentful paint.
+    registry.observe_worker(WorkerKey::new(1), true, true);
+    assert!(registry.wants_content_detection());
+    assert!(registry.wants_presentation_timing());
+    registry.forget_worker(WorkerKey::new(1));
+    assert!(!registry.wants_content_detection());
+    assert!(!registry.wants_presentation_timing());
+}
+
+#[test]
+fn a_waiting_record_wants_presentation_timing_and_an_untimed_present_completes_it() {
+    let registry = PipelineRegistry::detached();
+    registry.observe_rust(EntryTypes::PIPELINE);
+    registry.note_paint(Some(frame(1)), None);
+    assert!(!registry.wants_presentation_timing());
+    registry.bind_commit(flush(OpenerId::PAGE, 0, &["waits"], 2));
+    assert!(registry.wants_presentation_timing());
+    // The painter drew commit 2 before it read the switch on.
+    assert!(registry.note_untimed_present(2).is_empty());
+    assert_eq!(registry.generation(), 1);
+    assert!(!registry.wants_presentation_timing());
+    assert_eq!(registry.take_completed_for_rust().len(), 1);
 }

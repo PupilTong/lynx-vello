@@ -128,8 +128,18 @@ export interface PerformanceObserver {
 
 /** The worker realm's two observer members. */
 export interface ObserverHost {
-  observePerformance(on: 0 | 1): void;
+  /**
+   * The realm has an observer (`on`), and one of its observers asked for
+   * `paint` entries (`paint`), which is what turns the paint walk's
+   * contentful test on.
+   */
+  observePerformance(on: 0 | 1, paint: 0 | 1): void;
   takePerformanceEntries(): string;
+}
+
+/** Whether `names` asks for W3C Paint Timing's `paint` entries. */
+function asksForPaint(names: readonly string[]): boolean {
+  return names.some(name => name === "paint" || name.startsWith("paint."));
 }
 
 /** The part of `GlobalEventEmitter` the observers use. */
@@ -144,21 +154,32 @@ export interface PerformanceEmitter {
  * `PerformanceReady` runs. Each observer is one listener on `emitter`'s
  * `lynx.performance.onPerformanceEvent`, so a
  * `GlobalEventEmitter` listener hears the same entries, as on native. The
- * host is told only when the realm goes from no observer to one and back:
- * until then nothing is sent to this worker or assembled for it.
+ * host is told only when the realm goes from no observer to one and back,
+ * or from no observer of `paint` (`observe(['paint'])`, W3C Paint Timing's
+ * `first-paint` and `first-contentful-paint`) to one and back: until then
+ * nothing is sent to this worker or assembled for it.
  */
 export function createPerformanceObservers(
   host: ObserverHost,
   emitter: PerformanceEmitter,
   split: (record: string) => string[],
 ) {
-  const active = new Set<PerformanceObserver>();
+  const active = new Map<PerformanceObserver, readonly string[]>();
   let observing = false;
+  let observingPaint = false;
   function sync() {
     const next = active.size > 0;
-    if (next === observing) return;
+    let paint = false;
+    for (const names of active.values()) {
+      if (asksForPaint(names)) {
+        paint = true;
+        break;
+      }
+    }
+    if (next === observing && paint === observingPaint) return;
     observing = next;
-    host.observePerformance(next ? 1 : 0);
+    observingPaint = paint;
+    host.observePerformance(next ? 1 : 0, paint ? 1 : 0);
   }
   function createObserver(callback: (entry: PerformanceEntry) => void): PerformanceObserver {
     if (typeof callback !== "function") {
@@ -179,9 +200,9 @@ export function createPerformanceObservers(
           return;
         }
         if (!active.has(observer)) {
-          active.add(observer);
           emitter.addListener(PERFORMANCE_EVENT, listener);
         }
+        active.set(observer, names);
         sync();
       },
       disconnect() {
