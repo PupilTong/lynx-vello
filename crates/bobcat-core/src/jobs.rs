@@ -62,6 +62,117 @@ use tokio::task::{JoinSet, LocalSet};
 /// One unit of JavaScript-touching work, as the queue holds it.
 type Job = Box<dyn FnOnce()>;
 
+/// Which of the two engine threads a job ran on, as a long task reports it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum JsThreadName {
+    /// `bobcat-main`: a view's document and its MTS realm, Lynx's TASM
+    /// thread.
+    Main,
+    /// `bobcat-workers`: every worker realm of the group, the BTS among
+    /// them, Lynx's JS thread.
+    Workers,
+}
+
+impl JsThreadName {
+    /// The name Lynx's `LongTaskMonitor` reports for the thread in the same
+    /// role (`thread_name`, `base::GetCurrentThreadName()`), from Lynx's
+    /// `task_runner_manufactor.cc`: `"Lynx_TASM"` for the thread that owns
+    /// the element tree and runs the main-thread script, `"Lynx_JS"` for the
+    /// background script's.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Main => "Lynx_TASM",
+            Self::Workers => "Lynx_JS",
+        }
+    }
+}
+
+/// What one realm job was queued to do: the attribution a long task carries.
+///
+/// One variant per place a job of a page or a worker is queued
+/// ([`crate::lifetime::run_job`] and the entries over it), so a job's kind is
+/// fixed where it is queued and costs nothing to carry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum JobKind {
+    /// A realm opening: a view's first job, which runs its boot module, or a
+    /// worker's, which loads its root module.
+    Start,
+    /// The view's MTS entry completed into its realm and evaluated, with the
+    /// rest of boot behind it.
+    Entry,
+    /// A module the realm imported, or a worker's own script, completed
+    /// into the realm (or into one of its `ShadowRealm` children).
+    Module,
+    /// A `Future` the realm read with `then` settled into it.
+    Future,
+    /// The epilogue alone, for a timer deadline that came due: the realm's
+    /// due timers run in it.
+    Timer,
+    /// The epilogue alone, for a wake that carries no operation and no
+    /// deadline: a sibling realm's microtask checkpoint, or a painter's new
+    /// viewport.
+    Settle,
+    /// A burst of the embedder's and the painter's commands to a view: data
+    /// and global-props updates, input events, edits, a frame post.
+    Command,
+    /// A commit's `contentvisibilityautostatechange` deliveries.
+    ContentVisibility,
+    /// The intersection observers' and the exposure deliveries.
+    Intersection,
+    /// The resize observers' (`layoutchange`) deliveries.
+    ResizeObserver,
+    /// The component events the runtime queued: an `<image>`'s `load` or
+    /// `error`, a `<dialog>`'s `cancel` or `close`.
+    ComponentEvent,
+    /// An `@font-face` source that loaded, registered with the document.
+    FontFace,
+    /// What a view's workers said back to it: their messages, errors and
+    /// ends.
+    WorkerEvent,
+    /// A message posted to a worker.
+    Post,
+    /// A display opportunity delivered to a worker's animation frame
+    /// callbacks.
+    AnimationFrame,
+    /// An embedder's native module answering a call a worker made.
+    ModuleCallback,
+    /// Performance entries delivered to a worker's `lynx.performance`
+    /// observers.
+    Performance,
+    /// What runs against a realm after its owner ended: the disposal before
+    /// the release, and the release itself.
+    Release,
+}
+
+impl JobKind {
+    /// The kind's name, which a long task entry carries as its `name`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Start => "start",
+            Self::Entry => "entry",
+            Self::Module => "module",
+            Self::Future => "future",
+            Self::Timer => "timer",
+            Self::Settle => "settle",
+            Self::Command => "command",
+            Self::ContentVisibility => "contentVisibility",
+            Self::Intersection => "intersection",
+            Self::ResizeObserver => "resizeObserver",
+            Self::ComponentEvent => "componentEvent",
+            Self::FontFace => "fontFace",
+            Self::WorkerEvent => "workerEvent",
+            Self::Post => "post",
+            Self::AnimationFrame => "animationFrame",
+            Self::ModuleCallback => "moduleCallback",
+            Self::Performance => "performance",
+            Self::Release => "release",
+        }
+    }
+}
+
 /// One engine thread: its scheduler, and the jobs it runs between two turns of
 /// it.
 pub(crate) struct JsThread {

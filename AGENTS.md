@@ -292,9 +292,13 @@ the sanitized error a failure is reported with, `style.rs` the
 `PreparsedStyleSheet` vocabulary, `resource.rs` the host protocol,
 `performance/` the public `performance` module — the Lynx-shaped
 `PerformanceEntry` types, the per-view `PipelineRegistry` every thread of a
-view writes its marks into, and the host members both realm kinds' `lynx.performance`
-is written over (`docs/performance-observation-design.md`; the main-thread
-flush binding is `main/runtime/pipelines.rs`) — and
+view writes its marks into, the host members both realm kinds' `lynx.performance`
+is written over, and the two job monitors in `monitors.rs` (the long task
+monitor `run_job` times every job for, and the JS blocking monitor over the
+enqueue instants `WorkerMessage`s carry; both off unless the embedder turns
+them on, and both reported to it alone); see
+`docs/performance-observation-design.md`, and `main/runtime/pipelines.rs` for
+the main-thread flush binding — and
 `threads.rs` the two engine threads.
 
 #### Public surface and the two engine threads
@@ -336,7 +340,8 @@ which is what lets one park: `JsThread::wait` is a fresh `block_on` of the same
 `LocalSet`, so during a synchronous stylesheet adoption or a `require` every
 task on the thread goes on running while no other job does. Queued jobs run in FIFO order once the
 waiting one returns, so an entry may hold the shared runtime and its realm
-across its own wait.
+across its own wait. Every job of a page or a worker is queued with the
+`JobKind` it was queued for, which a long task reports.
 
 Each asynchronous wait is a task of its own. A view's tasks are its owner
 (`serve_view`, whose one wait is the view's end), one task for the entry,

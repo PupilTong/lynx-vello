@@ -47,6 +47,7 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use crate::background::{WorkerKey, WorkerMessage};
+use crate::clock::ClockInstant;
 #[cfg(test)]
 use crate::main::tree::LynxDocument;
 use crate::native_module::ModuleReply;
@@ -220,6 +221,15 @@ pub(crate) enum ToMain {
         call: u64,
         index: u32,
         arguments: Option<String>,
+    },
+    /// The JS blocking monitor was turned on, or changed, by
+    /// [`LynxView::set_js_blocking_monitor`](crate::LynxView::set_js_blocking_monitor):
+    /// start the view's task that makes its `timer` reports every
+    /// `interval`, Lynx's way, for as long as the configuration of `epoch`
+    /// is the current one.
+    ReportJsBlocking {
+        epoch: u64,
+        interval: std::time::Duration,
     },
     #[cfg(test)]
     Probe(Box<dyn FnOnce(&mut LynxDocument) + Send>),
@@ -547,9 +557,29 @@ impl CommandSender {
 pub(crate) struct FrameDemand {
     main: bool,
     workers: FxHashMap<WorkerKey, (mpsc::WeakUnboundedSender<WorkerMessage>, bool)>,
+    /// The view's pipeline registry, whose JS blocking monitor decides
+    /// whether a message sent to a worker from here carries its enqueue
+    /// instant. `None` for a table no view built, which stamps nothing.
+    registry: Option<Arc<PipelineRegistry>>,
 }
 
 impl FrameDemand {
+    /// The table of a view whose registry is `registry`.
+    pub(crate) fn new(registry: Arc<PipelineRegistry>) -> Self {
+        Self {
+            registry: Some(registry),
+            ..Self::default()
+        }
+    }
+
+    /// The enqueue instant of a message sent now: see
+    /// [`PipelineRegistry::js_blocking_stamp`].
+    fn stamp(&self) -> Option<ClockInstant> {
+        self.registry
+            .as_ref()
+            .and_then(|registry| registry.js_blocking_stamp())
+    }
+
     pub(crate) fn register_worker(
         &mut self,
         key: WorkerKey,
@@ -576,7 +606,10 @@ impl FrameDemand {
             Some(key) => self
                 .workers
                 .get(&key)
-                .map(|(messages, _)| ModuleReply::Worker(messages.clone())),
+                .map(|(messages, _)| ModuleReply::Worker {
+                    messages: messages.clone(),
+                    registry: self.registry.clone(),
+                }),
             None => Some(ModuleReply::Main(main.uncounted())),
         }
     }
@@ -606,7 +639,9 @@ impl FrameDemand {
         if let Some((messages, _)) = self.workers.get(&key)
             && let Some(messages) = messages.upgrade()
         {
-            let _ = messages.send(WorkerMessage::PerformanceReady);
+            let _ = messages.send(WorkerMessage::PerformanceReady {
+                enqueued: self.stamp(),
+            });
         }
     }
 
@@ -614,11 +649,15 @@ impl FrameDemand {
         if std::mem::take(&mut self.main) {
             let _ = main.send(ToMain::Vsync(milliseconds));
         }
+        let registry = self.registry.as_deref();
         for (messages, pending) in self.workers.values_mut() {
             if std::mem::take(pending)
                 && let Some(messages) = messages.upgrade()
             {
-                let _ = messages.send(WorkerMessage::Vsync(milliseconds));
+                let _ = messages.send(WorkerMessage::Vsync {
+                    milliseconds,
+                    enqueued: registry.and_then(PipelineRegistry::js_blocking_stamp),
+                });
             }
         }
     }

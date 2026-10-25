@@ -356,3 +356,334 @@ fn a_waiting_record_wants_presentation_timing_and_an_untimed_present_completes_i
     assert!(!registry.wants_presentation_timing());
     assert_eq!(registry.take_completed_for_rust().len(), 1);
 }
+
+fn long_task(start: ClockInstant, millis: u64, kind: JobKind) -> LongTaskRecord {
+    LongTaskRecord {
+        start,
+        end: start + Duration::from_millis(millis),
+        thread: JsThreadName::Workers,
+        kind,
+    }
+}
+
+#[test]
+fn the_long_task_switch_is_off_by_default_and_keeps_a_zero_threshold() {
+    let registry = PipelineRegistry::detached();
+    assert_eq!(registry.long_task_threshold(), None);
+    registry.set_long_task_threshold(Some(Duration::ZERO));
+    assert_eq!(registry.long_task_threshold(), Some(Duration::ZERO));
+    registry.set_long_task_threshold(Some(Duration::from_millis(50)));
+    assert_eq!(
+        registry.long_task_threshold(),
+        Some(Duration::from_millis(50))
+    );
+    registry.set_long_task_threshold(None);
+    assert_eq!(registry.long_task_threshold(), None);
+    assert_eq!(
+        LongTaskConfig::default().threshold,
+        Duration::from_millis(50)
+    );
+}
+
+#[test]
+fn a_long_task_is_kept_only_for_an_embedder_observing_long_tasks() {
+    let registry = PipelineRegistry::detached();
+    let start = ClockInstant::now();
+    // Nobody observes: dropped as it is made, and nothing to wake for.
+    assert!(!registry.note_long_task(long_task(start, 60, JobKind::Post)));
+    assert_eq!(registry.generation(), 0);
+    registry.observe_rust(EntryTypes::PIPELINE);
+    assert!(!registry.note_long_task(long_task(start, 60, JobKind::Post)));
+    registry.observe_rust(EntryTypes::LONG_TASK);
+    assert!(registry.note_long_task(long_task(start, 60, JobKind::Timer)));
+    assert_eq!(registry.generation(), 1);
+    let entries = registry.take_completed_for_rust();
+    let [PerformanceEntry::LongTask(task)] = entries.as_slice() else {
+        panic!("one long task: {entries:?}");
+    };
+    assert_eq!(task.kind, JobKind::Timer);
+    assert_eq!(task.thread, JsThreadName::Workers);
+    assert_eq!(task.start, Timestamp(start));
+    assert_eq!(task.duration(), Duration::from_millis(60));
+    assert!(registry.take_completed_for_rust().is_empty(), "taken once");
+}
+
+#[test]
+fn long_tasks_are_bounded_oldest_first() {
+    let registry = PipelineRegistry::detached();
+    registry.observe_rust(EntryTypes::LONG_TASK);
+    let start = ClockInstant::now();
+    for millis in 0..1005 {
+        assert!(registry.note_long_task(long_task(start, millis, JobKind::Command)));
+    }
+    let entries = registry.take_completed_for_rust();
+    assert_eq!(entries.len(), 1000);
+    let PerformanceEntry::LongTask(first) = &entries[0] else {
+        panic!("a long task: {:?}", entries[0]);
+    };
+    assert_eq!(
+        first.duration(),
+        Duration::from_millis(5),
+        "the five oldest went"
+    );
+}
+
+#[test]
+fn a_long_task_entry_writes_long_tasks_and_lynx_s_keys() {
+    let origin = TimeOrigin::now();
+    let entry = PerformanceEntry::LongTask(LongTaskEntry {
+        start: at(&origin, 10),
+        end: at(&origin, 72),
+        thread: JsThreadName::Main,
+        kind: JobKind::Command,
+    });
+    assert_eq!(entry.entry_type(), "longtask");
+    assert_eq!(entry.name(), "command");
+    let keys: Vec<_> = entry
+        .lynx_fields(&origin)
+        .map(|(key, _)| key.into_owned())
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            "entryType",
+            "name",
+            "startTime",
+            "duration",
+            "thread_name",
+            "task_type",
+            "task_name",
+            "duration_ms"
+        ]
+    );
+    let mut json = String::new();
+    entry.write_lynx_json(&origin, &mut json);
+    let value: serde_json::Value = serde_json::from_str(&json).expect("the entry is JSON");
+    assert_eq!(value["entryType"], "longtask");
+    assert_eq!(value["name"], "command");
+    assert_eq!(value["thread_name"], "Lynx_TASM");
+    assert_eq!(value["task_type"], "native_func_task");
+    assert_eq!(value["task_name"], "command");
+    assert!((value["duration"].as_f64().unwrap() - 62.0).abs() < 1e-6);
+    assert!((value["duration_ms"].as_f64().unwrap() - 62.0).abs() < 1e-6);
+    let start = value["startTime"].as_f64().expect("a number");
+    assert!((start - origin.unix_millis() - 10.0).abs() < 1e-6);
+    // A kind Lynx files under no category leaves `task_type` out.
+    let settle = PerformanceEntry::LongTask(LongTaskEntry {
+        start: at(&origin, 0),
+        end: at(&origin, 1),
+        thread: JsThreadName::Workers,
+        kind: JobKind::Settle,
+    });
+    let mut json = String::new();
+    settle.write_lynx_json(&origin, &mut json);
+    let value: serde_json::Value = serde_json::from_str(&json).expect("the entry is JSON");
+    assert_eq!(value["thread_name"], "Lynx_JS");
+    assert!(value.get("task_type").is_none());
+}
+
+fn blocking(threshold_millis: u64) -> JsBlockingConfig {
+    JsBlockingConfig {
+        threshold: Duration::from_millis(threshold_millis),
+        report_interval: Duration::from_secs(5),
+    }
+}
+
+fn blocking_entries(registry: &PipelineRegistry) -> Vec<JsBlockingEntry> {
+    registry
+        .take_completed_for_rust()
+        .into_iter()
+        .map(|entry| match entry {
+            PerformanceEntry::JsBlocking(report) => report,
+            entry => panic!("a js_blocking entry: {entry:?}"),
+        })
+        .collect()
+}
+
+#[test]
+fn the_js_blocking_monitor_stamps_and_counts_only_while_on() {
+    let registry = PipelineRegistry::detached();
+    assert_eq!(registry.js_blocking_stamp(), None, "off by default");
+    registry.note_js_blocking(Duration::from_secs(1));
+    let config = JsBlockingConfig::default();
+    assert_eq!(config.threshold, Duration::from_millis(20));
+    assert_eq!(config.report_interval, Duration::from_secs(5));
+    let epoch = registry.set_js_blocking_monitor(Some(config));
+    assert!(epoch.is_some());
+    assert!(registry.js_blocking_stamp().is_some());
+    assert_eq!(registry.js_blocking_signal().borrow().anchor, None);
+    assert_eq!(registry.set_js_blocking_monitor(None), None);
+    assert_eq!(registry.js_blocking_stamp(), None);
+    assert!(registry.js_blocking_signal().borrow().epoch > epoch.unwrap());
+}
+
+#[test]
+fn js_blocking_reports_follow_lynx_s_formulas() {
+    let registry = PipelineRegistry::detached();
+    registry.observe_rust(EntryTypes::JS_BLOCKING);
+    let start = ClockInstant::now();
+    registry.set_js_blocking_monitor_at(Some(blocking(20)), start);
+    // Under the threshold: not counted.
+    registry.note_js_blocking(Duration::from_millis(19));
+    // Nothing counted: no report, and the span is not restarted.
+    assert!(!registry.report_js_blocking_at(JsBlockingStage::LoadBundle, start));
+    registry.note_js_blocking(Duration::from_millis(20));
+    registry.note_js_blocking(Duration::from_millis(40));
+    let load = start + Duration::from_millis(200);
+    assert!(registry.report_js_blocking_at(JsBlockingStage::LoadBundle, load));
+    let [report] = blocking_entries(&registry)[..] else {
+        panic!("one report");
+    };
+    assert_eq!(report.stage, JsBlockingStage::LoadBundle);
+    assert_eq!(report.total_blocking_time, Duration::from_millis(60));
+    assert_eq!(report.total_blocking_count, 2);
+    assert_eq!(report.total_duration, Duration::from_millis(200));
+    assert!((report.blocking_ratio - 0.3).abs() < 1e-9);
+    assert_eq!(report.avg_blocking_time, Duration::from_millis(30));
+    assert_eq!(report.time_after_load_bundle, None);
+    // Lynx resets the totals after a report: a timer report with nothing
+    // counted since is not made.
+    let first_timer = load + Duration::from_secs(5);
+    assert!(!registry.report_js_blocking_at(JsBlockingStage::Timer, first_timer));
+    registry.note_js_blocking(Duration::from_millis(100));
+    let second_timer = load + Duration::from_secs(15);
+    assert!(registry.report_js_blocking_at(JsBlockingStage::Timer, second_timer));
+    let [report] = blocking_entries(&registry)[..] else {
+        panic!("one report");
+    };
+    assert_eq!(report.stage, JsBlockingStage::Timer);
+    assert_eq!(report.total_blocking_time, Duration::from_millis(100));
+    assert_eq!(report.total_blocking_count, 1);
+    // From the last report made, which the skipped one was not.
+    assert_eq!(report.total_duration, Duration::from_secs(15));
+    assert!((report.blocking_ratio - 0.1 / 15.0).abs() < 1e-9);
+    assert_eq!(report.avg_blocking_time, Duration::from_millis(100));
+    assert_eq!(report.time_after_load_bundle, Some(Duration::from_secs(15)));
+}
+
+#[test]
+fn a_js_blocking_report_nobody_observes_is_made_and_dropped() {
+    let registry = PipelineRegistry::detached();
+    let start = ClockInstant::now();
+    registry.set_js_blocking_monitor_at(Some(blocking(0)), start);
+    registry.note_js_blocking(Duration::from_millis(5));
+    assert!(!registry.report_js_blocking_at(JsBlockingStage::LoadBundle, start));
+    assert_eq!(registry.generation(), 0);
+    // The report was made: its totals were spent.
+    registry.observe_rust(EntryTypes::JS_BLOCKING);
+    assert!(!registry.report_js_blocking_at(JsBlockingStage::Timer, start));
+    assert!(registry.take_completed_for_rust().is_empty());
+}
+
+#[test]
+fn the_page_load_makes_the_load_bundle_report_and_anchors_the_timer() {
+    let registry = PipelineRegistry::detached();
+    registry.observe_rust(EntryTypes::JS_BLOCKING);
+    let epoch = registry
+        .set_js_blocking_monitor(Some(blocking(0)))
+        .expect("on");
+    registry.note_js_blocking(Duration::from_millis(1));
+    registry.open_load(OpenerId::PAGE, "app:///main.js", None);
+    assert!(registry.mark_load(OpenerId::PAGE, LoadMark::MtsRenderStart));
+    let mut binding = flush(OpenerId::PAGE, 0, &[], 1);
+    binding.load = true;
+    registry.bind_commit(binding);
+    registry.note_presented(frame(1));
+    let signal = *registry.js_blocking_signal().borrow();
+    assert_eq!(signal.epoch, epoch);
+    assert!(signal.anchor.is_some(), "the timer starts at the load");
+    let [report] = blocking_entries(&registry)[..] else {
+        panic!("the loadBundle report");
+    };
+    assert_eq!(report.stage, JsBlockingStage::LoadBundle);
+    assert_eq!(report.total_blocking_count, 1);
+    // A report task of an earlier configuration reports nothing.
+    registry.note_js_blocking(Duration::from_millis(1));
+    assert!(!registry.report_js_blocking(epoch + 1));
+    assert!(registry.report_js_blocking(epoch));
+    let [report] = blocking_entries(&registry)[..] else {
+        panic!("the timer report");
+    };
+    assert_eq!(report.stage, JsBlockingStage::Timer);
+    assert!(report.time_after_load_bundle.is_some());
+    // Turned on again after the load: no `loadBundle` report, the timer
+    // anchored at once.
+    registry.set_js_blocking_monitor(None);
+    let again = registry
+        .set_js_blocking_monitor(Some(blocking(0)))
+        .expect("on");
+    let signal = *registry.js_blocking_signal().borrow();
+    assert_eq!(signal.epoch, again);
+    assert!(signal.anchor.is_some());
+}
+
+#[test]
+fn a_js_blocking_entry_writes_lynx_s_keys_and_types() {
+    let origin = TimeOrigin::now();
+    let entry = PerformanceEntry::JsBlocking(JsBlockingEntry {
+        stage: JsBlockingStage::Timer,
+        total_blocking_time: Duration::from_millis(45),
+        total_blocking_count: 2,
+        total_duration: Duration::from_secs(5),
+        blocking_ratio: 0.009,
+        avg_blocking_time: Duration::from_micros(22_500),
+        time_after_load_bundle: Some(Duration::from_millis(5_001)),
+    });
+    assert_eq!(entry.entry_type(), "js_blocking");
+    assert_eq!(entry.name(), "js_blocking");
+    let keys: Vec<_> = entry
+        .lynx_fields(&origin)
+        .map(|(key, _)| key.into_owned())
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            "entryType",
+            "name",
+            "stage",
+            "total_blocking_time",
+            "total_blocking_count",
+            "total_duration",
+            "blocking_ratio",
+            "avg_blocking_time",
+            "time_after_load_bundle"
+        ]
+    );
+    let mut json = String::new();
+    entry.write_lynx_json(&origin, &mut json);
+    let value: serde_json::Value = serde_json::from_str(&json).expect("the entry is JSON");
+    assert_eq!(value["entryType"], "js_blocking");
+    assert_eq!(value["name"], "js_blocking");
+    assert_eq!(value["stage"], "timer");
+    assert_eq!(value["total_blocking_time"].as_i64(), Some(45));
+    assert_eq!(value["total_blocking_count"].as_i64(), Some(2));
+    assert_eq!(value["total_duration"].as_i64(), Some(5_000));
+    assert_eq!(value["time_after_load_bundle"].as_i64(), Some(5_001));
+    assert!((value["blocking_ratio"].as_f64().unwrap() - 0.009).abs() < 1e-12);
+    assert!((value["avg_blocking_time"].as_f64().unwrap() - 22.5).abs() < 1e-9);
+    // A `loadBundle` report has no `time_after_load_bundle`, and a ratio
+    // over a zero span is `null` rather than invalid JSON.
+    let load = PerformanceEntry::JsBlocking(JsBlockingEntry {
+        stage: JsBlockingStage::LoadBundle,
+        total_duration: Duration::ZERO,
+        blocking_ratio: f64::INFINITY,
+        time_after_load_bundle: None,
+        ..match entry {
+            PerformanceEntry::JsBlocking(report) => report,
+            _ => unreachable!(),
+        }
+    });
+    let mut json = String::new();
+    load.write_lynx_json(&origin, &mut json);
+    let value: serde_json::Value = serde_json::from_str(&json).expect("the entry is JSON");
+    assert_eq!(value["stage"], "loadBundle");
+    assert!(value["blocking_ratio"].is_null());
+    assert!(value.get("time_after_load_bundle").is_none());
+}
+
+#[test]
+fn every_type_includes_the_two_monitors() {
+    assert!(EntryTypes::ALL.contains(EntryTypes::LONG_TASK));
+    assert!(EntryTypes::ALL.contains(EntryTypes::JS_BLOCKING));
+    assert!(!EntryTypes::LONG_TASK.intersects(EntryTypes::JS_BLOCKING));
+}

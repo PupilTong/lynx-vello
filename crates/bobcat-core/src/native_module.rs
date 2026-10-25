@@ -23,6 +23,8 @@
 //! `initialize` message. A plain `Worker` is posted no table, and the MTS
 //! realm has no `NativeModules`.
 
+use std::sync::Arc;
+
 use quickjs_rust_bridge::{HostArgument, HostValue};
 use tokio::sync::mpsc;
 
@@ -30,6 +32,7 @@ use crate::background::{WorkerKey, WorkerMessage};
 use crate::esm::{Export, NATIVE_MODULES_HOST_SPECIFIER};
 use crate::link::{HostOutbox, ToMain, ViewNotice};
 use crate::main::quickjs::{ScriptEngine, ScriptRuntime};
+use crate::performance::PipelineRegistry;
 use crate::script::ScriptError;
 
 /// One embedder-owned module, reachable as `NativeModules.<name>` in the BTS
@@ -238,8 +241,13 @@ pub(crate) enum ModuleReply {
     /// hands out.
     Main(mpsc::WeakUnboundedSender<ToMain>),
     /// The calling worker's inbox, as the view registered it from
-    /// `WorkerCreated`.
-    Worker(mpsc::WeakUnboundedSender<WorkerMessage>),
+    /// `WorkerCreated`, and the view's pipeline registry, whose JS blocking
+    /// monitor decides whether the answer carries its enqueue instant
+    /// (`None` stamps nothing).
+    Worker {
+        messages: mpsc::WeakUnboundedSender<WorkerMessage>,
+        registry: Option<Arc<PipelineRegistry>>,
+    },
 }
 
 impl ModuleReply {
@@ -257,12 +265,15 @@ impl ModuleReply {
                     });
                 }
             }
-            Self::Worker(messages) => {
+            Self::Worker { messages, registry } => {
                 if let Some(messages) = messages.upgrade() {
                     let _ = messages.send(WorkerMessage::ModuleCallback {
                         call,
                         index,
                         arguments,
+                        enqueued: registry
+                            .as_deref()
+                            .and_then(PipelineRegistry::js_blocking_stamp),
                     });
                 }
             }
@@ -274,7 +285,9 @@ impl ModuleReply {
     fn is_closed(&self) -> bool {
         match self {
             Self::Main(commands) => commands.upgrade().is_none_or(|sender| sender.is_closed()),
-            Self::Worker(messages) => messages.upgrade().is_none_or(|sender| sender.is_closed()),
+            Self::Worker { messages, .. } => {
+                messages.upgrade().is_none_or(|sender| sender.is_closed())
+            }
         }
     }
 }
@@ -450,7 +463,10 @@ mod tests {
             "ping".to_owned(),
             "[null,null]".to_owned(),
             &[2, 3],
-            &ModuleReply::Worker(sender.downgrade()),
+            &ModuleReply::Worker {
+                messages: sender.downgrade(),
+                registry: None,
+            },
         );
         assert_eq!(
             call.callbacks
@@ -470,6 +486,7 @@ mod tests {
                     call,
                     index,
                     arguments,
+                    ..
                 } => (call, index, arguments),
                 _ => panic!("a module callback is the only message here"),
             })
@@ -483,7 +500,14 @@ mod tests {
         // The reply handle is what a module reads before doing work it would
         // only do to answer a realm that is still there: the worker's
         // receiving end drops with its task, and that is the whole of it.
-        let live = ModuleCallback::new(7, 4, ModuleReply::Worker(sender.downgrade()));
+        let live = ModuleCallback::new(
+            7,
+            4,
+            ModuleReply::Worker {
+                messages: sender.downgrade(),
+                registry: None,
+            },
+        );
         assert!(!live.is_cancelled());
         drop(inbox);
         assert!(live.is_cancelled());

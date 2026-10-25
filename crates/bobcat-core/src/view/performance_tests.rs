@@ -560,3 +560,139 @@ fn an_unobserved_view_stops_timing_its_presents_once_its_load_completed() {
         assert!(!registry.wants_presentation_timing());
     }
 }
+
+/// A BTS entry whose evaluation holds the worker thread for 20 ms: one job
+/// of `bobcat-workers` that runs long.
+const SPINNING_BTS: &str = r"
+    const until = Date.now() + 20;
+    while (Date.now() < until) {}
+";
+
+fn long_tasks(events: &[EngineEvent]) -> Vec<crate::performance::LongTaskEntry> {
+    performance(events)
+        .filter_map(|entry| match entry {
+            PerformanceEntry::LongTask(task) => Some(*task),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_bts_job_that_runs_long_is_a_long_task_on_the_workers_thread() {
+    use crate::performance::{JobKind, JsThreadName, LongTaskConfig};
+
+    let mut engine = engine(Some(SPINNING_BTS));
+    // Before the first turn, which is what serves the BTS entry's request.
+    engine.view.set_long_task_monitor(Some(LongTaskConfig {
+        threshold: Duration::from_millis(15),
+    }));
+    engine
+        .view
+        .observe_performance(EntryTypes::LONG_TASK | EntryTypes::LOAD_BUNDLE);
+    let mut events = Vec::new();
+    // The BTS entry is evaluated in the job that completes the module its
+    // import asked for. Another job may run long too in a debug build, the
+    // boot jobs most of all, so the spinning one is picked by its kind.
+    let spinning = |task: &crate::performance::LongTaskEntry| {
+        task.thread == JsThreadName::Workers && task.kind == JobKind::Module
+    };
+    drive_until(&mut engine, &mut events, |events| {
+        long_tasks(events).iter().any(spinning) && !load_entries(events).is_empty()
+    });
+    let task = long_tasks(&events)
+        .into_iter()
+        .find(spinning)
+        .expect("the spinning job");
+    // At least the threshold: `Date.now()` reads whole milliseconds, so
+    // the 20 ms spin itself can come out a little short.
+    assert!(task.duration() >= Duration::from_millis(15), "{task:?}");
+    assert!(task.start <= task.end);
+    let entry = PerformanceEntry::LongTask(task);
+    assert_eq!(entry.entry_type(), "longtask");
+    assert_eq!(entry.name(), "module");
+}
+
+#[test]
+fn with_the_long_task_monitor_off_nothing_is_a_long_task() {
+    let mut engine = engine(Some(SPINNING_BTS));
+    engine.view.observe_performance(EntryTypes::ALL);
+    let mut events = Vec::new();
+    drive_until(&mut engine, &mut events, |events| {
+        !load_entries(events).is_empty()
+    });
+    for _ in 0..3 {
+        turn(&mut engine, &mut events);
+    }
+    assert!(long_tasks(&events).is_empty(), "{events:?}");
+    assert_eq!(engine.view.seat().registry.long_task_threshold(), None);
+}
+
+/// A BTS whose entry waits for a native module's answer before it finishes
+/// loading — an answer the view sends it as one message, after the
+/// embedder's first turn — and then keeps one answer in flight every 5 ms.
+const WAITING_BTS: &str = r"
+    import { NativeModules } from 'bobcat:bts-runtime';
+    await new Promise(resolve => NativeModules.Echo.echo('first', resolve));
+    setInterval(() => NativeModules.Echo.echo('tick', () => {}), 5);
+";
+
+fn blocking_reports(events: &[EngineEvent]) -> Vec<crate::performance::JsBlockingEntry> {
+    performance(events)
+        .filter_map(|entry| match entry {
+            PerformanceEntry::JsBlocking(report) => Some(*report),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn the_js_blocking_monitor_reports_at_the_load_and_then_on_its_timer() {
+    use crate::performance::{JsBlockingConfig, JsBlockingStage};
+
+    let interval = Duration::from_millis(100);
+    let mut engine = TestViewSpec::new(CARD)
+        .offscreen(32.0, 24.0)
+        .with_background_entry(WAITING_BTS)
+        .with_echo_module("Echo")
+        .create(Arc::new(NoWakeup));
+    // Before the first turn, which is what invokes the module and sends
+    // its answer to the BTS.
+    engine
+        .view
+        .set_js_blocking_monitor(Some(JsBlockingConfig {
+            threshold: Duration::ZERO,
+            report_interval: interval,
+        }))
+        .expect("a live view");
+    engine
+        .view
+        .observe_performance(EntryTypes::JS_BLOCKING | EntryTypes::LOAD_BUNDLE);
+    let mut events = Vec::new();
+    drive_until(&mut engine, &mut events, |events| {
+        blocking_reports(events)
+            .iter()
+            .any(|report| report.stage == JsBlockingStage::Timer)
+    });
+    let reports = blocking_reports(&events);
+    let load = reports.first().expect("the first report");
+    assert_eq!(load.stage, JsBlockingStage::LoadBundle, "{reports:?}");
+    assert!(
+        load.total_blocking_count >= 1,
+        "the module's answer waited: {load:?}"
+    );
+    assert_eq!(load.time_after_load_bundle, None);
+    assert_eq!(load_entries(&events).len(), 1);
+    let timer = reports
+        .iter()
+        .find(|report| report.stage == JsBlockingStage::Timer)
+        .expect("a timer report");
+    assert!(timer.total_blocking_count >= 1, "{timer:?}");
+    let after = timer.time_after_load_bundle.expect("a timer report's");
+    assert!(after >= interval, "{timer:?}");
+    // Off: the task ends, and nothing more is stamped.
+    engine
+        .view
+        .set_js_blocking_monitor(None)
+        .expect("a live view");
+    assert_eq!(engine.view.seat().registry.js_blocking_stamp(), None);
+}

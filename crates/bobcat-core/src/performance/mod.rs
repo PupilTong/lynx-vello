@@ -27,8 +27,16 @@
 //! the entries' `name`s, and [`PerformanceEntry::lynx_fields`], the key
 //! table both [`PerformanceEntry::write_lynx_json`] and the BTS's entries are
 //! written from.
+//!
+//! Beside the entries sit the two monitors over the engine threads' jobs
+//! (`monitors`): the long task monitor, which reports a job that ran long
+//! as a `longtask` entry, and the JS blocking monitor, which reports how
+//! long the messages sent to the view's workers waited for their thread as
+//! Lynx's `js_blocking` entries. Both are off unless the Rust embedder
+//! turns them on, and both report to it alone.
 
 mod members;
+mod monitors;
 mod registry;
 
 use std::borrow::Cow;
@@ -40,10 +48,15 @@ use std::time::Duration;
 pub(crate) use self::members::{
     install_pipeline_members, install_worker_members, pipeline_argument,
 };
+pub use self::monitors::{
+    JsBlockingConfig, JsBlockingEntry, JsBlockingStage, LongTaskConfig, LongTaskEntry,
+};
+pub(crate) use self::monitors::{LongTaskRecord, serve_js_blocking_reports};
 pub(crate) use self::registry::{
     FlushBinding, LoadMark, Opener, OpenerId, PipelineRegistry, WorkerLoadMark,
 };
 use crate::clock::{ClockInstant, SystemTime};
+pub use crate::jobs::{JobKind, JsThreadName};
 
 /// One instant on the engine's monotonic clock, comparable across every
 /// thread of the process: a mark taken on the main thread, one taken on a
@@ -437,7 +450,7 @@ pub struct PaintEntry {
 }
 
 /// One performance entry, as [`crate::EngineEvent::Performance`] reports it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum PerformanceEntry {
     LoadBundle(Box<LoadBundleTiming>),
@@ -445,6 +458,20 @@ pub enum PerformanceEntry {
     Pipeline(Box<PipelineTiming>),
     /// W3C Paint Timing, behind [`EntryTypes::PAINT`].
     Paint(PaintEntry),
+    /// A job that ran long, behind [`EntryTypes::LONG_TASK`] and
+    /// [`crate::LynxView::set_long_task_monitor`]: W3C Long Tasks'
+    /// `longtask`, attributed as Lynx's `lynxsdk_long_task_timing` event is.
+    ///
+    /// A deviation from both: Lynx reports a long task through its event
+    /// tracker, not as a performance entry, and a page's script observes
+    /// none (W3C's `PerformanceObserver` does), so this entry reaches the
+    /// Rust embedder alone and no BTS observer receives it.
+    LongTask(LongTaskEntry),
+    /// Lynx's `js_blocking` entry, behind [`EntryTypes::JS_BLOCKING`] and
+    /// [`crate::LynxView::set_js_blocking_monitor`]. Lynx reports it to the
+    /// platform alone (`x-lang` lists no JavaScript), and so does this
+    /// engine: no BTS observer receives it.
+    JsBlocking(JsBlockingEntry),
 }
 
 /// Which entries an observer receives. Empty by default: an embedder that
@@ -463,8 +490,21 @@ impl EntryTypes {
     /// `first-contentful-paint`. Asking for it is what turns on the paint
     /// walk's contentful test, until `first-contentful-paint` is recorded.
     pub const PAINT: Self = Self(1 << 2);
+    /// [`PerformanceEntry::LongTask`]. Asking for it turns nothing on: the
+    /// long task monitor is [`crate::LynxView::set_long_task_monitor`]'s.
+    pub const LONG_TASK: Self = Self(1 << 3);
+    /// [`PerformanceEntry::JsBlocking`]. Asking for it turns nothing on:
+    /// the JS blocking monitor is
+    /// [`crate::LynxView::set_js_blocking_monitor`]'s.
+    pub const JS_BLOCKING: Self = Self(1 << 4);
     /// Every type.
-    pub const ALL: Self = Self(Self::PIPELINE.0 | Self::LOAD_BUNDLE.0 | Self::PAINT.0);
+    pub const ALL: Self = Self(
+        Self::PIPELINE.0
+            | Self::LOAD_BUNDLE.0
+            | Self::PAINT.0
+            | Self::LONG_TASK.0
+            | Self::JS_BLOCKING.0,
+    );
 
     #[must_use]
     pub const fn union(self, other: Self) -> Self {
@@ -502,6 +542,12 @@ pub enum LynxValue<'a> {
     /// A timestamp (Unix milliseconds) or a duration (milliseconds), each
     /// with three decimals.
     Number(f64),
+    /// A whole number, where Lynx writes an `int64` (`PushInt64ToMap`): a
+    /// count, or a duration in whole milliseconds.
+    Integer(i64),
+    /// A number at full precision, where Lynx writes a `double`
+    /// (`PushDoubleToMap`). One that is not finite is JSON's `null`.
+    Double(f64),
     Text(&'a str),
 }
 
@@ -510,35 +556,42 @@ pub(crate) const ACTUAL_FMP_FLAG: &str = "__lynx_timing_actual_fmp";
 
 impl PerformanceEntry {
     /// The entry's `entryType`: Lynx's `"pipeline"` for the three pipeline
-    /// entries, Paint Timing's `"paint"` for a [`Self::Paint`].
+    /// entries, Paint Timing's `"paint"` for a [`Self::Paint`], Long Tasks'
+    /// `"longtask"` for a [`Self::LongTask`], and Lynx's `"js_blocking"`
+    /// (`kJSBlockingEntryType`) for a [`Self::JsBlocking`].
     #[must_use]
     pub const fn entry_type(&self) -> &'static str {
         match self {
             Self::LoadBundle(_) | Self::ReloadBundle(_) | Self::Pipeline(_) => "pipeline",
             Self::Paint(_) => "paint",
+            Self::LongTask(_) => "longtask",
+            Self::JsBlocking(_) => JS_BLOCKING_ENTRY_TYPE,
         }
     }
 
-    /// The entry's `name`: the pipeline's origin, or the paint mark's
-    /// Performance Timeline name.
+    /// The entry's `name`: the pipeline's origin, the paint mark's
+    /// Performance Timeline name, the long task's [`JobKind`], or for a
+    /// [`Self::JsBlocking`] its entry type again, as Lynx names it.
     #[must_use]
     pub fn name(&self) -> &str {
         match self {
             Self::Paint(paint) => paint.name.as_str(),
+            Self::LongTask(task) => task.kind.as_str(),
+            Self::JsBlocking(_) => JS_BLOCKING_ENTRY_TYPE,
             Self::LoadBundle(_) | Self::ReloadBundle(_) | Self::Pipeline(_) => self
                 .pipeline()
                 .map_or("", |pipeline| pipeline.origin.lynx_name()),
         }
     }
 
-    /// The pipeline a pipeline entry carries; `None` for a [`Self::Paint`].
+    /// The pipeline a pipeline entry carries; `None` for any other.
     #[must_use]
     pub fn pipeline(&self) -> Option<&PipelineTiming> {
         match self {
             Self::LoadBundle(load) => Some(&load.pipeline),
             Self::ReloadBundle(reload) => Some(&reload.pipeline),
             Self::Pipeline(pipeline) => Some(pipeline),
-            Self::Paint(_) => None,
+            Self::Paint(_) | Self::LongTask(_) | Self::JsBlocking(_) => None,
         }
     }
 
@@ -556,6 +609,21 @@ impl PerformanceEntry {
     /// reading is what compares with the pipeline entries' marks (a
     /// `first-paint`'s `startTime` is the page load's `lynxFcp` end).
     ///
+    /// A [`Self::LongTask`] is `entryType`, `name`, then Long Tasks'
+    /// `startTime` (Unix milliseconds, as above) and `duration`, then the
+    /// keys Lynx's `lynxsdk_long_task_timing` event carries
+    /// (`long_task_monitor.cc`): `thread_name`, `task_type` (Lynx's category
+    /// for a task of that kind, left out where Lynx has none), `task_name`
+    /// (the [`JobKind`]) and `duration_ms`. Lynx's `task_info` and
+    /// `duration_threshold_ms` are not carried.
+    ///
+    /// A [`Self::JsBlocking`] is `entryType`, `name` and the keys Lynx's
+    /// `JSBlockingMonitor::ReportBlockingInfo` writes, in its order and
+    /// types: `stage`, the integers `total_blocking_time`,
+    /// `total_blocking_count` and `total_duration` (whole milliseconds), the
+    /// doubles `blocking_ratio` and `avg_blocking_time`, and for a `timer`
+    /// report the integer `time_after_load_bundle`.
+    ///
     /// The one place a Lynx key is spelled: [`Self::write_lynx_json`] and
     /// the BTS's `lynx.performance` entries are both written from this.
     pub fn lynx_fields(
@@ -564,6 +632,8 @@ impl PerformanceEntry {
     ) -> impl Iterator<Item = (Cow<'static, str>, LynxValue<'_>)> {
         let pipeline = match self {
             Self::Paint(paint) => return paint_fields(paint, origin).into_iter(),
+            Self::LongTask(task) => return long_task_fields(task, origin).into_iter(),
+            Self::JsBlocking(report) => return js_blocking_fields(report, origin).into_iter(),
             Self::LoadBundle(load) => &load.pipeline,
             Self::ReloadBundle(reload) => &reload.pipeline,
             Self::Pipeline(pipeline) => pipeline,
@@ -633,7 +703,7 @@ impl PerformanceEntry {
                 fields.optional_metric("fcp", reload.fcp.as_ref());
                 fields.optional_metric("totalFcp", reload.total_fcp.as_ref());
             }
-            Self::Pipeline(_) | Self::Paint(_) => {}
+            Self::Pipeline(_) | Self::Paint(_) | Self::LongTask(_) | Self::JsBlocking(_) => {}
         }
         let framework = &pipeline.framework_rendering_timing;
         if let Some(dsl) = &framework.dsl {
@@ -728,12 +798,120 @@ fn paint_fields<'a>(
     fields.list
 }
 
-/// A value as JSON: a number with three decimals, or a string.
+/// Lynx's `kJSBlockingEntryType`, which is the entry's `name` as well.
+const JS_BLOCKING_ENTRY_TYPE: &str = "js_blocking";
+
+/// A [`PerformanceEntry::LongTask`]'s fields.
+fn long_task_fields<'a>(
+    task: &LongTaskEntry,
+    origin: &TimeOrigin,
+) -> Vec<(Cow<'static, str>, LynxValue<'a>)> {
+    let mut fields = Fields {
+        origin: *origin,
+        list: Vec::with_capacity(8),
+    };
+    let duration = round_millis(millis(task.duration()));
+    fields.text("entryType", "longtask");
+    fields.text("name", task.kind.as_str());
+    fields.time("startTime", task.start);
+    fields.number("duration", duration);
+    fields.text("thread_name", task.thread.as_str());
+    if let Some(task_type) = lynx_task_type(task.kind, task.thread) {
+        fields.text("task_type", task_type);
+    }
+    fields.text("task_name", task.kind.as_str());
+    fields.number("duration_ms", duration);
+    fields.list
+}
+
+/// The category Lynx's `LongTaskMonitor` files a task of this kind under
+/// (`task_type`, the `k…Task` constants of `long_task_monitor.h`), from
+/// where Lynx opens a `LongTaskMonitor::Scope` for the same work: a
+/// template's or a background bundle's load, a timer, a call into script,
+/// a native operation, an animation frame, an update the background thread
+/// sent. `None` where Lynx times no such task.
+const fn lynx_task_type(kind: JobKind, thread: JsThreadName) -> Option<&'static str> {
+    Some(match kind {
+        // `LynxEngine::LoadTemplate` on the TASM thread, the background
+        // bundle's evaluation (`BTSRuntime`, `kLoadJSTask`) on the JS one.
+        JobKind::Start => match thread {
+            JsThreadName::Main => "load_template_task",
+            JsThreadName::Workers => "load_js_task",
+        },
+        JobKind::Entry => "load_template_task",
+        JobKind::Module => "load_js_task",
+        JobKind::Timer => "timer_task",
+        // `JSClosureEventListener::Invoke`, `App::SendPageEvent`,
+        // `JSProxy::CallJSFunction`: script called from outside it.
+        JobKind::ContentVisibility
+        | JobKind::Intersection
+        | JobKind::ResizeObserver
+        | JobKind::ComponentEvent
+        | JobKind::Post
+        | JobKind::ModuleCallback
+        | JobKind::Performance => "js_func_task",
+        // `LynxEngine::CallLepusMethod`, `DidLoadComponent`: a native
+        // operation on the engine.
+        JobKind::Command | JobKind::Future | JobKind::FontFace => "native_func_task",
+        // `LynxEngine::UpdateDataByJS`: what the background thread sent.
+        JobKind::WorkerEvent => "update_data_by_js_task",
+        // `ElementVsyncProxy::TickAllElement`.
+        JobKind::AnimationFrame => "animation_task",
+        JobKind::Settle | JobKind::Release => return None,
+    })
+}
+
+/// A [`PerformanceEntry::JsBlocking`]'s fields, in
+/// `ReportBlockingInfo`'s order.
+fn js_blocking_fields<'a>(
+    report: &JsBlockingEntry,
+    origin: &TimeOrigin,
+) -> Vec<(Cow<'static, str>, LynxValue<'a>)> {
+    let mut fields = Fields {
+        origin: *origin,
+        list: Vec::with_capacity(9),
+    };
+    fields.text("entryType", JS_BLOCKING_ENTRY_TYPE);
+    fields.text("name", JS_BLOCKING_ENTRY_TYPE);
+    fields.text("stage", report.stage.as_str());
+    fields.integer(
+        "total_blocking_time",
+        whole_millis(report.total_blocking_time),
+    );
+    fields.integer(
+        "total_blocking_count",
+        i64::from(report.total_blocking_count),
+    );
+    fields.integer("total_duration", whole_millis(report.total_duration));
+    fields.double("blocking_ratio", report.blocking_ratio);
+    fields.double("avg_blocking_time", millis(report.avg_blocking_time));
+    // Lynx's YAML (`JSBlockingEntry.yml`) names this `time_after_fcp`; its
+    // monitor writes `time_after_load_bundle`, which is what is followed.
+    if let Some(after) = report.time_after_load_bundle {
+        fields.integer("time_after_load_bundle", whole_millis(after));
+    }
+    fields.list
+}
+
+/// A duration in whole milliseconds, as Lynx's millisecond clock reads one.
+fn whole_millis(duration: Duration) -> i64 {
+    i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
+}
+
+/// A value as JSON: a number with three decimals, a whole number, a number
+/// at full precision (`null` when it is not finite), or a string.
 fn write_lynx_value(out: &mut String, value: LynxValue<'_>) {
     match value {
         LynxValue::Number(number) => {
             write!(out, "{number:.3}").expect("writing to a String cannot fail");
         }
+        LynxValue::Integer(number) => {
+            write!(out, "{number}").expect("writing to a String cannot fail");
+        }
+        LynxValue::Double(number) if number.is_finite() => {
+            write!(out, "{number}").expect("writing to a String cannot fail");
+        }
+        LynxValue::Double(_) => out.push_str("null"),
         LynxValue::Text(text) => write_json_string(out, text),
     }
 }
@@ -771,6 +949,14 @@ impl<'a> Fields<'a> {
 
     fn number(&mut self, key: impl Into<Cow<'static, str>>, value: f64) {
         self.list.push((key.into(), LynxValue::Number(value)));
+    }
+
+    fn integer(&mut self, key: &'static str, value: i64) {
+        self.list.push((key.into(), LynxValue::Integer(value)));
+    }
+
+    fn double(&mut self, key: &'static str, value: f64) {
+        self.list.push((key.into(), LynxValue::Double(value)));
     }
 
     fn time(&mut self, key: impl Into<Cow<'static, str>>, at: Timestamp) {
@@ -822,6 +1008,12 @@ pub(crate) fn encode_entries(entries: &[PerformanceEntry], origin: &TimeOrigin) 
             match value {
                 LynxValue::Number(number) => {
                     write!(scratch, "n{number:.3}").expect("writing to a String cannot fail");
+                }
+                LynxValue::Integer(number) => {
+                    write!(scratch, "n{number}").expect("writing to a String cannot fail");
+                }
+                LynxValue::Double(number) => {
+                    write!(scratch, "n{number}").expect("writing to a String cannot fail");
                 }
                 LynxValue::Text(text) => {
                     scratch.push('s');

@@ -85,13 +85,15 @@ use std::future::{Future, poll_fn};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::pin;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use tokio::sync::watch;
 use tokio::task::{JoinError, JoinSet};
 use tokio_util::sync::CancellationToken;
 
 use crate::clock::ClockInstant;
-use crate::jobs::JsThreadHandle;
+use crate::jobs::{JobKind, JsThreadHandle, JsThreadName};
+use crate::performance::{LongTaskRecord, PipelineRegistry};
 
 /// The tasks that act on one realm-owning object, the one signal that ends
 /// them, and the latch that says whether this thread has ended it.
@@ -311,7 +313,8 @@ impl Lifetime {
 
 /// What [`serve_clock`], [`EndOnUnwind`] and [`run_job`] need of the object
 /// they serve: its [`Lifetime`], the epilogue a wake that carries no operation
-/// runs, the end, and how a panic in one of its jobs is reported.
+/// runs, the end, how a panic in one of its jobs is reported, and where a job
+/// that ran long is recorded.
 ///
 /// Implemented once, by a blanket impl over every
 /// [`RealmOwner`](crate::realm::owner::RealmOwner) beside the driver functions
@@ -322,11 +325,22 @@ impl Lifetime {
 pub(crate) trait Settles: Sized + 'static {
     fn lifetime(&self) -> &Lifetime;
 
+    /// The view's pipeline registry, which holds the long task monitor's
+    /// switch and takes what it records.
+    fn registry(&self) -> &Arc<PipelineRegistry>;
+
+    /// The engine thread this object's jobs run on.
+    fn thread_name(&self) -> JsThreadName;
+
+    /// Wakes the embedder's thread for a turn of `LynxView::pump`, which
+    /// takes what a job recorded in the registry.
+    fn wake_embedder(&self);
+
     /// Runs the epilogue alone, for a wake that carries no operation of its
-    /// own. A job, so the caller waits for it: see [`serve_clock`]. `None` is
-    /// an epilogue that never ran, which the one caller has nothing to do
-    /// about.
-    fn settle(owner: &Rc<Self>) -> impl Future<Output = Option<()>>;
+    /// own, as a job of `kind`. A job, so the caller waits for it: see
+    /// [`serve_clock`]. `None` is an epilogue that never ran, which the one
+    /// caller has nothing to do about.
+    fn settle(owner: &Rc<Self>, kind: JobKind) -> impl Future<Output = Option<()>>;
 
     /// Ends the object and everything that end owes.
     fn end(owner: &Rc<Self>);
@@ -335,14 +349,20 @@ pub(crate) trait Settles: Sized + 'static {
     fn trapped(owner: &Rc<Self>, payload: &(dyn Any + Send));
 }
 
-/// Queues one job of `owner`'s and answers with what it returned.
+/// Queues one job of `owner`'s, of `kind`, and answers with what it
+/// returned.
 ///
 /// The whole body runs under one `catch_unwind`, because a job runs in the
 /// engine thread's top loop rather than inside a task: an escaping panic would
 /// unwind the thread instead of the one object it belongs to. `None` is a job
 /// that trapped, or one that never ran because the thread was already over.
+///
+/// The long task monitor times the job here, around the `catch_unwind`, so a
+/// job that trapped is recorded too when it ran long. With the monitor off
+/// this is one atomic load per job and no clock reading.
 pub(crate) fn run_job<S, T, B>(
     owner: &Rc<S>,
+    kind: JobKind,
     body: B,
 ) -> impl Future<Output = Option<T>> + use<S, T, B>
 where
@@ -352,15 +372,33 @@ where
 {
     let thread = owner.lifetime().thread().clone();
     let owner = Rc::clone(owner);
-    let answer = thread.run(
-        move || match catch_unwind(AssertUnwindSafe(|| body(&owner))) {
+    let answer = thread.run(move || {
+        let timed = owner
+            .registry()
+            .long_task_threshold()
+            .map(|threshold| (threshold, ClockInstant::now()));
+        let value = match catch_unwind(AssertUnwindSafe(|| body(&owner))) {
             Ok(value) => value,
             Err(payload) => {
                 S::trapped(&owner, payload.as_ref());
                 None
             }
-        },
-    );
+        };
+        if let Some((threshold, start)) = timed {
+            let end = ClockInstant::now();
+            if end.saturating_duration_since(start) >= threshold
+                && owner.registry().note_long_task(LongTaskRecord {
+                    start,
+                    end,
+                    thread: owner.thread_name(),
+                    kind,
+                })
+            {
+                owner.wake_embedder();
+            }
+        }
+        value
+    });
     async move { answer.await.flatten() }
 }
 
@@ -411,7 +449,7 @@ pub(crate) async fn serve_clock<S: Settles>(
                 // Consumed: the next turn arms a wait of its own rather than
                 // polling this one again.
                 armed = None;
-                let _ = S::settle(&owner).await;
+                let _ = S::settle(&owner, JobKind::Timer).await;
             }
             changed = deadlines.changed() => if changed.is_err() { return },
             changed = checkpoints.changed() => {
@@ -421,7 +459,7 @@ pub(crate) async fn serve_clock<S: Settles>(
                 if *checkpoints.borrow_and_update() == owner.lifetime().own_checkpoint.get() {
                     continue;
                 }
-                let _ = S::settle(&owner).await;
+                let _ = S::settle(&owner, JobKind::Settle).await;
             }
         }
     }
