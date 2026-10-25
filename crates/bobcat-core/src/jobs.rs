@@ -141,6 +141,10 @@ pub enum JobKind {
     /// Performance entries delivered to a worker's `lynx.performance`
     /// observers.
     Performance,
+    /// A memory monitor sample: the main thread's reading of its script
+    /// runtime and its document, or a BTS worker's of its script runtime.
+    /// No JavaScript runs in it.
+    Memory,
     /// What runs against a realm after its owner ended: the disposal before
     /// the release, and the release itself.
     Release,
@@ -168,6 +172,7 @@ impl JobKind {
             Self::AnimationFrame => "animationFrame",
             Self::ModuleCallback => "moduleCallback",
             Self::Performance => "performance",
+            Self::Memory => "memory",
             Self::Release => "release",
         }
     }

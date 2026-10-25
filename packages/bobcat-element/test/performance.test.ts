@@ -76,6 +76,63 @@ describe("entries", () => {
   });
 });
 
+describe("memory entries", () => {
+  it("fold a key path of any depth into nested objects", () => {
+    // As the host writes a `memory` entry: one object per category under
+    // `detail`, each with its own string `detail`, then the total.
+    const record = entryRecord([
+      ["entryType", "smemory"],
+      ["name", "smemory"],
+      ["detail.mainThreadScriptingEngine.category", "smainThreadScriptingEngine"],
+      ["detail.mainThreadScriptingEngine.sizeBytes", "n4096"],
+      ["detail.mainThreadScriptingEngine.instanceCount", "n1"],
+      ["detail.mainThreadScriptingEngine.detail.obj_count", "s12"],
+      ["detail.mainThreadScriptingEngine.detail.sharedRuntime", "sthread"],
+      ["detail.lynxTasmElement.category", "slynxTasmElement"],
+      ["detail.lynxTasmElement.sizeBytes", "n640"],
+      ["detail.lynxTasmElement.instanceCount", "n2"],
+      ["detail.lynxTasmElement.detail.elementCount", "s2"],
+      ["detail.lynxTasmElement.detail.singleElementSizeBytes", "s320"],
+      ["sizeBytes", "n4736"],
+    ]);
+    expect(decodeEntries(record, splitRecord)).toEqual([
+      {
+        entryType: "memory",
+        name: "memory",
+        detail: {
+          mainThreadScriptingEngine: {
+            category: "mainThreadScriptingEngine",
+            sizeBytes: 4096,
+            instanceCount: 1,
+            detail: { obj_count: "12", sharedRuntime: "thread" },
+          },
+          lynxTasmElement: {
+            category: "lynxTasmElement",
+            sizeBytes: 640,
+            instanceCount: 2,
+            detail: { elementCount: "2", singleElementSizeBytes: "320" },
+          },
+        },
+        sizeBytes: 4736,
+      },
+    ]);
+  });
+
+  it("keep an escaped dot or backslash inside one name", () => {
+    const record = entryRecord([
+      ["entryType", "spipeline"],
+      ["frameworkRenderingTiming.mark\\.with\\.dots", "n1.500"],
+      ["frameworkRenderingTiming.back\\\\slash", "n2"],
+    ]);
+    expect(decodeEntries(record, splitRecord)).toEqual([
+      {
+        entryType: "pipeline",
+        frameworkRenderingTiming: { "mark.with.dots": 1.5, "back\\slash": 2 },
+      },
+    ]);
+  });
+});
+
 describe("observers", () => {
   function setup(record: string) {
     const host = {
@@ -92,11 +149,11 @@ describe("observers", () => {
     const second = observers.createObserver(() => {});
     first.observe(["pipeline"]);
     second.observe(["pipeline.loadBundle"]);
-    expect(host.observePerformance.mock.calls).toEqual([[1, 0]]);
+    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0]]);
     first.disconnect();
-    expect(host.observePerformance.mock.calls).toEqual([[1, 0]]);
+    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0]]);
     second.observe([]);
-    expect(host.observePerformance.mock.calls).toEqual([[1, 0], [0, 0]]);
+    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0], [0, 0, 0]]);
   });
 
   it("tell the host when an observer asks for paint entries and when none does", () => {
@@ -105,15 +162,64 @@ describe("observers", () => {
     const paints = observers.createObserver(() => {});
     pipelines.observe(["pipeline"]);
     paints.observe(["paint"]);
-    expect(host.observePerformance.mock.calls).toEqual([[1, 0], [1, 1]]);
+    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0], [1, 1, 0]]);
     paints.observe(["paint.first-contentful-paint", "pipeline"]);
-    expect(host.observePerformance.mock.calls).toEqual([[1, 0], [1, 1]]);
+    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0], [1, 1, 0]]);
     paints.observe(["pipeline"]);
-    expect(host.observePerformance.mock.calls).toEqual([[1, 0], [1, 1], [1, 0]]);
+    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0], [1, 1, 0], [1, 0, 0]]);
     paints.observe(["paint"]);
     pipelines.disconnect();
     paints.disconnect();
-    expect(host.observePerformance.mock.calls).toEqual([[1, 0], [1, 1], [1, 0], [1, 1], [0, 0]]);
+    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0], [1, 1, 0], [1, 0, 0], [1, 1, 0], [0, 0, 0]]);
+  });
+
+  it("tell the host when an observer asks for memory entries and when none does", () => {
+    const { host, observers } = setup("");
+    const pipelines = observers.createObserver(() => {});
+    const memory = observers.createObserver(() => {});
+    pipelines.observe(["pipeline", "paint"]);
+    memory.observe(["memory"]);
+    expect(host.observePerformance.mock.calls).toEqual([[1, 1, 0], [1, 1, 1]]);
+    memory.observe(["memory.memory", "pipeline"]);
+    expect(host.observePerformance.mock.calls).toEqual([[1, 1, 0], [1, 1, 1]]);
+    memory.disconnect();
+    expect(host.observePerformance.mock.calls).toEqual([[1, 1, 0], [1, 1, 1], [1, 1, 0]]);
+    pipelines.disconnect();
+    expect(host.observePerformance.mock.calls).toEqual([[1, 1, 0], [1, 1, 1], [1, 1, 0], [0, 0, 0]]);
+  });
+
+  it("receive memory entries by type and by type and name", () => {
+    const record = entryRecord([
+      ["entryType", "smemory"],
+      ["name", "smemory"],
+      ["detail.committedFrame.category", "scommittedFrame"],
+      ["detail.committedFrame.sizeBytes", "n100"],
+      ["detail.committedFrame.instanceCount", "n1"],
+      ["detail.committedFrame.detail.fragments", "s1"],
+      ["sizeBytes", "n100"],
+    ]) + entryRecord([["entryType", "spipeline"], ["name", "sloadBundle"]]);
+    const { observers } = setup(record);
+    const memory: unknown[] = [];
+    const named: unknown[] = [];
+    observers.createObserver(entry => memory.push(entry)).observe(["memory"]);
+    observers.createObserver(entry => named.push(entry.entryType)).observe(["memory.memory"]);
+    observers.deliver();
+    expect(memory).toEqual([
+      {
+        entryType: "memory",
+        name: "memory",
+        detail: {
+          committedFrame: {
+            category: "committedFrame",
+            sizeBytes: 100,
+            instanceCount: 1,
+            detail: { fragments: "1" },
+          },
+        },
+        sizeBytes: 100,
+      },
+    ]);
+    expect(named).toEqual(["memory"]);
   });
 
   it("receive paint entries by type and by type and name", () => {

@@ -503,6 +503,31 @@ impl Painter {
         Self::notify_owed(&seat, owed);
     }
 
+    /// The memory monitor's `committedFrame` reading, when a sample on the
+    /// view's main thread asked for one since the last: the encoded bytes
+    /// of the adopted frame's scene fragments, written to the registry. A
+    /// painter with no frame yet writes nothing, and the next sample asks
+    /// again.
+    ///
+    /// The one cost this adds to every `pump`: a `Weak` upgrade of the seat
+    /// (a non-atomic count) and one relaxed atomic load, which is all a
+    /// view whose monitor is off ever pays here.
+    fn report_memory(&self) {
+        let Some(seat) = self.seat.upgrade() else {
+            return;
+        };
+        if !seat.registry.take_frame_memory_sample() {
+            return;
+        }
+        if let Some(frame) = self.frame() {
+            let item = crate::performance::MemoryItem::committed_frame(
+                frame.encoded_bytes(),
+                frame.fragment_count(),
+            );
+            seat.registry.note_memory(item);
+        }
+    }
+
     /// Sends each BTS worker in `owed` one `PerformanceReady`.
     fn notify_owed(seat: &ViewSeat, owed: Vec<WorkerKey>) {
         if !owed.is_empty() {
@@ -821,6 +846,7 @@ impl Painter {
     pub fn pump(&mut self) -> Result<(), EngineError> {
         self.poll_link();
         self.report_presentation();
+        self.report_memory();
         if self.core.has_failed() {
             return Ok(());
         }

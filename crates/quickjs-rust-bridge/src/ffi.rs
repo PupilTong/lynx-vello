@@ -104,6 +104,39 @@ pub(crate) struct QjsValue {
     _private: [u8; 0],
 }
 
+/// `QuickJS`'s `JSMemoryUsage` (`quickjs.h`), field for field, as
+/// `JS_ComputeMemoryUsage` fills it.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct JsMemoryUsage {
+    pub(crate) malloc_size: i64,
+    pub(crate) malloc_limit: i64,
+    pub(crate) memory_used_size: i64,
+    pub(crate) malloc_count: i64,
+    pub(crate) memory_used_count: i64,
+    pub(crate) atom_count: i64,
+    pub(crate) atom_size: i64,
+    pub(crate) str_count: i64,
+    pub(crate) str_size: i64,
+    pub(crate) obj_count: i64,
+    pub(crate) obj_size: i64,
+    pub(crate) prop_count: i64,
+    pub(crate) prop_size: i64,
+    pub(crate) shape_count: i64,
+    pub(crate) shape_size: i64,
+    pub(crate) js_func_count: i64,
+    pub(crate) js_func_size: i64,
+    pub(crate) js_func_code_size: i64,
+    pub(crate) js_func_pc2line_count: i64,
+    pub(crate) js_func_pc2line_size: i64,
+    pub(crate) c_func_count: i64,
+    pub(crate) array_count: i64,
+    pub(crate) fast_array_count: i64,
+    pub(crate) fast_array_elements: i64,
+    pub(crate) binary_object_count: i64,
+    pub(crate) binary_object_size: i64,
+}
+
 unsafe extern "C" {
     pub(crate) fn qjs_host_owner_class_id_new() -> u32;
     pub(crate) fn qjs_runtime_new(
@@ -140,6 +173,12 @@ unsafe extern "C" {
         name: *const c_char,
     ) -> *mut QjsValue;
     pub(crate) fn qjs_runtime_run_gc(runtime: *mut QjsRuntime);
+    /// `JS_ComputeMemoryUsage` on the runtime's `JSRuntime`: a walk of the
+    /// whole heap, which fills `usage`.
+    pub(crate) fn qjs_runtime_compute_memory_usage(
+        runtime: *mut QjsRuntime,
+        usage: *mut JsMemoryUsage,
+    );
     pub(crate) fn qjs_runtime_set_memory_limit(runtime: *mut QjsRuntime, limit: usize);
     pub(crate) fn qjs_runtime_set_max_stack_size(runtime: *mut QjsRuntime, size: usize);
     pub(crate) fn qjs_runtime_set_interrupt_handler(

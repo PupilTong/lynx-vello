@@ -43,6 +43,12 @@
 //! while its monitor is off. Their records are the Rust embedder's alone,
 //! made only while it observes their type, and taken with the pipeline
 //! records by [`PipelineRegistry::take_completed_for_rust`].
+//!
+//! The memory monitor's readings land here too
+//! ([`PipelineRegistry::note_memory`]): each category's latest one, and the
+//! `memory` entries reported from them, for the Rust embedder when it
+//! observes [`EntryTypes::MEMORY`] and for each BTS worker whose observers
+//! asked for `memory`.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -55,6 +61,7 @@ use terminus::link::CommitTiming;
 use terminus::link::painter::PresentedFrame;
 use tokio::sync::watch;
 
+use super::memory::{MemoryCategory, MemoryConfig, MemoryEntry, MemoryItem};
 use super::monitors::{
     JsBlockingRecord, JsBlockingSignal, LongTaskRecord, decode_threshold, encode_threshold,
 };
@@ -191,6 +198,13 @@ pub(crate) struct PipelineRegistry {
     /// What the JS blocking monitor's report task watches: the current
     /// configuration's epoch, and when its timer reports count from.
     js_blocking_signal: watch::Sender<JsBlockingSignal>,
+    /// The memory monitor's configuration epoch, bumped by every
+    /// [`Self::set_memory_monitor`]: what its sampling task watches to end.
+    memory_epoch: watch::Sender<u64>,
+    /// Set by a memory sample on the main thread, cleared by the painter
+    /// once it has read the committed frame for it: the painter's one
+    /// relaxed load per `pump`.
+    frame_memory_sample: AtomicBool,
     inner: Mutex<Inner>,
 }
 
@@ -234,6 +248,31 @@ struct Inner {
     /// The JS blocking reports the Rust embedder has not taken, oldest
     /// first, at most [`MAX_RECORDS`].
     js_blocking_reports: VecDeque<JsBlockingRecord>,
+    /// The memory monitor's readings; `None` while it is off.
+    memory: Option<MemoryState>,
+    /// The `memory` entries the Rust embedder has not taken, oldest first,
+    /// at most [`MAX_RECORDS`].
+    memory_reports: VecDeque<MemoryEntry>,
+    /// The workers among the observing ones whose observers asked for
+    /// `memory` entries.
+    observing_memory: FxHashSet<WorkerKey>,
+    /// The `memory` entries each such worker has not taken, oldest first,
+    /// at most [`MAX_RECORDS`] each.
+    worker_memory: FxHashMap<WorkerKey, VecDeque<MemoryEntry>>,
+}
+
+/// The memory monitor's state: Lynx's `MemoryMonitor` members.
+struct MemoryState {
+    /// `memory_records_`: each category's latest reading, by
+    /// [`MemoryCategory::index`].
+    records: [Option<MemoryItem>; 4],
+    /// `last_reported_size_bytes_`: the total the last report carried.
+    last_reported_total: u64,
+    /// The smallest change of the total that is reported, in bytes.
+    threshold: u64,
+    /// Whether the next reading is reported whatever it changed: the first
+    /// one after the monitor was turned on.
+    force_next: bool,
 }
 
 /// The JS blocking monitor's state between two reports: Lynx's
@@ -385,6 +424,8 @@ impl PipelineRegistry {
             long_task_threshold: AtomicU64::new(0),
             js_blocking_threshold: AtomicU64::new(0),
             js_blocking_signal: watch::channel(JsBlockingSignal::default()).0,
+            memory_epoch: watch::channel(0).0,
+            frame_memory_sample: AtomicBool::new(false),
             inner: Mutex::new(Inner::default()),
         }
     }
@@ -1259,6 +1300,131 @@ impl PipelineRegistry {
         true
     }
 
+    /// Turns the memory monitor on with `config`, or off, and answers the
+    /// epoch a sampling task for the new configuration watches for — `None`
+    /// when it is off. Each call starts the readings afresh: the categories
+    /// read so far are dropped and the next reading is reported whatever it
+    /// changed.
+    pub(crate) fn set_memory_monitor(&self, config: Option<MemoryConfig>) -> Option<u64> {
+        let mut inner = self.lock();
+        inner.memory = config.map(|config| MemoryState {
+            records: Default::default(),
+            last_reported_total: 0,
+            threshold: config.change_threshold,
+            force_next: true,
+        });
+        if config.is_none() {
+            self.frame_memory_sample.store(false, Ordering::Relaxed);
+        }
+        let mut epoch = 0;
+        self.memory_epoch.send_modify(|current| {
+            *current += 1;
+            epoch = *current;
+        });
+        config.map(|_| epoch)
+    }
+
+    /// A reader of the memory monitor's configuration epoch.
+    pub(crate) fn memory_epochs(&self) -> watch::Receiver<u64> {
+        self.memory_epoch.subscribe()
+    }
+
+    /// Whether `epoch` is the memory monitor's current configuration and the
+    /// monitor is on: what a sample checks before it reads anything.
+    pub(crate) fn memory_sampling(&self, epoch: u64) -> bool {
+        *self.memory_epoch.borrow() == epoch && self.lock().memory.is_some()
+    }
+
+    /// Asks the painter for the committed frame's reading at its next
+    /// `pump`.
+    pub(crate) fn request_frame_memory_sample(&self) {
+        self.frame_memory_sample.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether the painter owes the committed frame's reading, clearing the
+    /// request when it does: one relaxed load, which every `pump` of the
+    /// painter reads, and a swap only when a sample asked.
+    pub(crate) fn take_frame_memory_sample(&self) -> bool {
+        self.frame_memory_sample.load(Ordering::Relaxed)
+            && self.frame_memory_sample.swap(false, Ordering::Relaxed)
+    }
+
+    /// The BTS worker of the view's page realm, which a memory sample asks
+    /// for the background thread's reading.
+    pub(crate) fn page_background(&self) -> Option<WorkerKey> {
+        Self::background_of(&self.lock(), OpenerId::PAGE)
+    }
+
+    /// One category's reading: Lynx's `UpdateMemoryUsage` and then
+    /// `ReportMemory`. A reading whose size is the one its category last
+    /// had is kept out, as Lynx keeps it, unless it is the first since the
+    /// monitor was turned on; any other replaces the category's reading, and
+    /// a report of every category's latest one is made when the total moved
+    /// by at least the threshold since the last report (or the total is 0,
+    /// or the reading is the first). The report is kept for the Rust
+    /// embedder when it observes [`EntryTypes::MEMORY`] and for each worker
+    /// whose observers asked for `memory`, each bounded by [`MAX_RECORDS`].
+    /// Answers whether one was kept, which is when the embedder is owed a
+    /// wake. Nothing at all while the monitor is off.
+    pub(crate) fn note_memory(&self, item: MemoryItem) -> bool {
+        let mut guard = self.lock();
+        let inner = &mut *guard;
+        let Some(state) = inner.memory.as_mut() else {
+            return false;
+        };
+        let force = std::mem::take(&mut state.force_next);
+        let slot = &mut state.records[item.category.index()];
+        if !force
+            && slot
+                .as_ref()
+                .is_some_and(|last| last.size_bytes == item.size_bytes)
+        {
+            return false;
+        }
+        *slot = Some(item);
+        let total = state
+            .records
+            .iter()
+            .flatten()
+            .fold(0_u64, |total, item| total.saturating_add(item.size_bytes));
+        if !force && total > 0 && total.abs_diff(state.last_reported_total) < state.threshold {
+            return false;
+        }
+        state.last_reported_total = total;
+        let rust = inner.rust_types.contains(EntryTypes::MEMORY);
+        if !rust && inner.observing_memory.is_empty() {
+            return false;
+        }
+        let entry = MemoryEntry {
+            size_bytes: total,
+            items: MemoryCategory::ALL
+                .iter()
+                .filter_map(|category| state.records[category.index()].clone())
+                .collect(),
+        };
+        let mut workers: SmallVec<[WorkerKey; 2]> =
+            inner.observing_memory.iter().copied().collect();
+        workers.sort_unstable();
+        for key in workers {
+            let queue = inner.worker_memory.entry(key).or_default();
+            if queue.len() >= MAX_RECORDS {
+                queue.pop_front();
+            }
+            queue.push_back(entry.clone());
+            if !inner.wakes.contains(&key) {
+                inner.wakes.push(key);
+            }
+        }
+        if rust {
+            if inner.memory_reports.len() >= MAX_RECORDS {
+                inner.memory_reports.pop_front();
+            }
+            inner.memory_reports.push_back(entry);
+        }
+        self.generation.fetch_add(1, Ordering::Release);
+        true
+    }
+
     /// A reader of what the JS blocking monitor's report task watches.
     pub(crate) fn js_blocking_signal(&self) -> watch::Receiver<JsBlockingSignal> {
         self.js_blocking_signal.subscribe()
@@ -1308,6 +1474,8 @@ impl PipelineRegistry {
         let inner = &mut *guard;
         inner.observing.remove(&key);
         inner.observing_paint.remove(&key);
+        inner.observing_memory.remove(&key);
+        inner.worker_memory.remove(&key);
         inner.worker_loads.remove(&key);
         inner.wakes.retain(|worker| *worker != key);
         if let Some(realm) = inner.bindings.remove(&key)
@@ -1319,9 +1487,16 @@ impl PipelineRegistry {
     }
 
     /// Whether the worker `key` has a `lynx.performance` observer, and
-    /// whether one of its observers asked for `paint` entries (which only an
-    /// observing worker can have).
-    pub(crate) fn observe_worker(&self, key: WorkerKey, observing: bool, paint: bool) {
+    /// whether one of its observers asked for `paint` entries, and one for
+    /// `memory` entries (which only an observing worker can have). A worker
+    /// that stops asking for `memory` drops the ones it had not taken.
+    pub(crate) fn observe_worker(
+        &self,
+        key: WorkerKey,
+        observing: bool,
+        paint: bool,
+        memory: bool,
+    ) {
         let mut inner = self.lock();
         if observing {
             inner.observing.insert(key);
@@ -1332,6 +1507,12 @@ impl PipelineRegistry {
             inner.observing_paint.insert(key);
         } else {
             inner.observing_paint.remove(&key);
+        }
+        if observing && memory {
+            inner.observing_memory.insert(key);
+        } else {
+            inner.observing_memory.remove(&key);
+            inner.worker_memory.remove(&key);
         }
         self.update_observed(&inner);
     }
@@ -1372,15 +1553,17 @@ impl PipelineRegistry {
     /// Every completed entry the Rust embedder has not taken, assembled on
     /// the caller's thread, of the types it subscribes to: the pipeline and
     /// paint records in completion order, then the long tasks, then the JS
-    /// blocking reports, each in the order they were made.
+    /// blocking reports, then the memory reports, each in the order they
+    /// were made.
     pub(crate) fn take_completed_for_rust(&self) -> Vec<PerformanceEntry> {
-        let (taken, long_tasks, blocking, types) = {
+        let (taken, long_tasks, blocking, memory, types) = {
             let mut inner = self.lock();
             let types = inner.rust_types;
             (
                 Self::take_completed(&mut inner, RUST, None),
                 std::mem::take(&mut inner.long_tasks),
                 std::mem::take(&mut inner.js_blocking_reports),
+                std::mem::take(&mut inner.memory_reports),
                 types,
             )
         };
@@ -1402,16 +1585,25 @@ impl PipelineRegistry {
                     .map(|report| PerformanceEntry::JsBlocking(report.entry())),
             );
         }
+        if types.contains(EntryTypes::MEMORY) {
+            entries.extend(memory.into_iter().map(PerformanceEntry::Memory));
+        }
         entries
     }
 
     /// Every completed entry the worker `key` is owed, assembled on its
-    /// own thread.
+    /// own thread: the pipeline and paint records, then its `memory`
+    /// reports.
     pub(crate) fn take_completed_for_worker(&self, key: WorkerKey) -> Vec<PerformanceEntry> {
-        let taken = Self::take_completed(&mut self.lock(), WORKER, Some(key));
+        let (taken, memory) = {
+            let mut inner = self.lock();
+            let taken = Self::take_completed(&mut inner, WORKER, Some(key));
+            (taken, inner.worker_memory.remove(&key).unwrap_or_default())
+        };
         taken
             .iter()
             .flat_map(|completed| completed.assemble(EntryTypes::ALL, &self.origin))
+            .chain(memory.into_iter().map(PerformanceEntry::Memory))
             .collect()
     }
 

@@ -1008,6 +1008,79 @@ mod implementation {
         }
     }
 
+    /// What a [`Runtime`]'s heap holds, as `QuickJS`'s `JS_ComputeMemoryUsage`
+    /// reports it ([`Runtime::memory_usage`]): every field is `QuickJS`'s
+    /// `JSMemoryUsage` member of the same name, a byte size or a count.
+    ///
+    /// The heap is the runtime's, so the numbers cover every realm on it.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct MemoryUsage {
+        /// Bytes the runtime's allocator holds, its per-allocation overhead
+        /// included.
+        pub malloc_size: i64,
+        /// The runtime's memory limit; `-1` when it has none.
+        pub malloc_limit: i64,
+        /// Bytes of the objects the walk found, by `QuickJS`'s own estimate.
+        pub memory_used_size: i64,
+        /// Live allocations.
+        pub malloc_count: i64,
+        pub memory_used_count: i64,
+        pub atom_count: i64,
+        pub atom_size: i64,
+        pub str_count: i64,
+        pub str_size: i64,
+        pub obj_count: i64,
+        pub obj_size: i64,
+        pub prop_count: i64,
+        pub prop_size: i64,
+        pub shape_count: i64,
+        pub shape_size: i64,
+        pub js_func_count: i64,
+        pub js_func_size: i64,
+        pub js_func_code_size: i64,
+        pub js_func_pc2line_count: i64,
+        pub js_func_pc2line_size: i64,
+        pub c_func_count: i64,
+        pub array_count: i64,
+        pub fast_array_count: i64,
+        pub fast_array_elements: i64,
+        pub binary_object_count: i64,
+        pub binary_object_size: i64,
+    }
+
+    impl From<ffi::JsMemoryUsage> for MemoryUsage {
+        fn from(usage: ffi::JsMemoryUsage) -> Self {
+            Self {
+                malloc_size: usage.malloc_size,
+                malloc_limit: usage.malloc_limit,
+                memory_used_size: usage.memory_used_size,
+                malloc_count: usage.malloc_count,
+                memory_used_count: usage.memory_used_count,
+                atom_count: usage.atom_count,
+                atom_size: usage.atom_size,
+                str_count: usage.str_count,
+                str_size: usage.str_size,
+                obj_count: usage.obj_count,
+                obj_size: usage.obj_size,
+                prop_count: usage.prop_count,
+                prop_size: usage.prop_size,
+                shape_count: usage.shape_count,
+                shape_size: usage.shape_size,
+                js_func_count: usage.js_func_count,
+                js_func_size: usage.js_func_size,
+                js_func_code_size: usage.js_func_code_size,
+                js_func_pc2line_count: usage.js_func_pc2line_count,
+                js_func_pc2line_size: usage.js_func_pc2line_size,
+                c_func_count: usage.c_func_count,
+                array_count: usage.array_count,
+                fast_array_count: usage.fast_array_count,
+                fast_array_elements: usage.fast_array_elements,
+                binary_object_count: usage.binary_object_count,
+                binary_object_size: usage.binary_object_size,
+            }
+        }
+    }
+
     /// An owner-thread-bound `QuickJS` runtime.
     ///
     /// One JavaScript heap, one atom table, one promise-job queue, and one
@@ -1214,6 +1287,20 @@ mod implementation {
                     "QuickJS could not retain the module prefix",
                 ))
             }
+        }
+
+        /// What the runtime's heap holds now: `JS_ComputeMemoryUsage`, which
+        /// walks every object, string, shape and function of every realm on
+        /// the runtime. It runs no JavaScript and collects nothing, but its
+        /// cost grows with the heap, so it is a sampler's call, not a hot
+        /// path's.
+        #[must_use]
+        pub fn memory_usage(&self) -> MemoryUsage {
+            let mut usage = ffi::JsMemoryUsage::default();
+            unsafe {
+                ffi::qjs_runtime_compute_memory_usage(self.inner.raw.as_ptr(), &raw mut usage);
+            }
+            MemoryUsage::from(usage)
         }
 
         /// Runs a full garbage collection and reclaims host closures.
@@ -2986,6 +3073,38 @@ mod implementation {
             let runtime = Runtime::new().expect("runtime should initialize");
             let realm = runtime.create_context().expect("realm should initialize");
             (runtime, realm)
+        }
+
+        #[test]
+        fn memory_usage_counts_the_heap_and_grows_with_what_a_realm_allocates() {
+            let (runtime, realm) = runtime_and_realm();
+            let before = runtime.memory_usage();
+            assert!(before.malloc_size > 0, "{before:?}");
+            assert!(before.malloc_count > 0, "{before:?}");
+            assert!(before.obj_count > 0, "{before:?}");
+            assert!(before.atom_count > 0, "{before:?}");
+            realm
+                .evaluate(
+                    EvalSource::new(
+                        "globalThis.kept = Array.from({ length: 10000 }, (_, i) => ({ i, text: 'x' + i }));",
+                    ),
+                    EvalOptions::default(),
+                )
+                .expect("the script allocates");
+            let after = runtime.memory_usage();
+            assert!(
+                after.malloc_size > before.malloc_size,
+                "{before:?} {after:?}"
+            );
+            assert!(
+                after.obj_count >= before.obj_count + 10_000,
+                "{before:?} {after:?}"
+            );
+            assert!(after.str_count > before.str_count, "{before:?} {after:?}");
+            assert!(
+                after.array_count > before.array_count,
+                "{before:?} {after:?}"
+            );
         }
 
         fn timed_realm() -> (Runtime, Context) {
@@ -6977,7 +7096,7 @@ mod implementation {
 
 pub use implementation::{
     CallOutcome, Context, Error, ErrorKind, ErrorPhase, EvalOptions, EvalSource, HostArgument,
-    HostFunctionError, HostValue, InterruptHandle, Member, ModuleNormalizer, RequiredKind,
-    RequiredSource, Runtime, RuntimeOptions, SourceLocation, SourceType, StructuredBytes,
-    StructuredClone, Value, ValueKind,
+    HostFunctionError, HostValue, InterruptHandle, Member, MemoryUsage, ModuleNormalizer,
+    RequiredKind, RequiredSource, Runtime, RuntimeOptions, SourceLocation, SourceType,
+    StructuredBytes, StructuredClone, Value, ValueKind,
 };

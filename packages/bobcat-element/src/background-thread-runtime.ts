@@ -535,8 +535,10 @@ export const lynx = {
   },
   /**
    * Lynx's `lynx.performance`: `createObserver` and the four pipeline hooks
-   * ReactLynx calls. The `profile*` members are inert until a tracing build
-   * exists; the legacy Timing API is not built.
+   * ReactLynx calls. An observer receives `pipeline` entries, and `paint`
+   * and `memory` entries when it names them; a `memory` entry exists only
+   * while the embedder's memory monitor is on. The `profile*` members are
+   * inert until a tracing build exists; the legacy Timing API is not built.
    */
   performance: {
     createObserver: performanceObservers.createObserver,

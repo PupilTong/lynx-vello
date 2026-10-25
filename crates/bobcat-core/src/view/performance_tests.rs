@@ -696,3 +696,149 @@ fn the_js_blocking_monitor_reports_at_the_load_and_then_on_its_timer() {
         .expect("a live view");
     assert_eq!(engine.view.seat().registry.js_blocking_stamp(), None);
 }
+
+/// A BTS that logs every `memory` entry its observer receives, and says
+/// once it observes.
+const MEMORY_BTS: &str = r"
+    import { lynx, console } from 'bobcat:bts-runtime';
+    lynx.performance.createObserver(entry => {
+      console.log('memory ' + JSON.stringify(entry));
+    }).observe(['memory']);
+    console.log('observing memory');
+";
+
+fn memory_entries(events: &[EngineEvent]) -> Vec<&crate::performance::MemoryEntry> {
+    performance(events)
+        .filter_map(|entry| match entry {
+            PerformanceEntry::Memory(memory) => Some(memory),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The first `memory` entry with every category read, each a size above
+/// zero.
+fn complete_memory(events: &[EngineEvent]) -> Option<&crate::performance::MemoryEntry> {
+    use crate::performance::MemoryCategory;
+    memory_entries(events).into_iter().find(|entry| {
+        [
+            MemoryCategory::MainThreadScriptingEngine,
+            MemoryCategory::BackgroundThreadScriptingEngine,
+            MemoryCategory::LynxTasmElement,
+            MemoryCategory::CommittedFrame,
+        ]
+        .into_iter()
+        .all(|category| entry.item(category).is_some_and(|item| item.size_bytes > 0))
+    })
+}
+
+/// The first `memory` entry the BTS observer logged, as the JSON it saw.
+fn bts_memory(events: &[EngineEvent]) -> Option<serde_json::Value> {
+    events.iter().find_map(|event| match event {
+        EngineEvent::ConsoleMessage { message, .. } => message
+            .strip_prefix("memory ")
+            .map(|json| serde_json::from_str(json).expect("an entry is JSON")),
+        _ => None,
+    })
+}
+
+fn logged(events: &[EngineEvent], text: &str) -> bool {
+    events.iter().any(
+        |event| matches!(event, EngineEvent::ConsoleMessage { message, .. } if message == text),
+    )
+}
+
+#[test]
+fn the_memory_monitor_reports_every_category_to_rust_and_to_a_bts_observer() {
+    use crate::performance::{MemoryCategory, MemoryConfig};
+
+    let mut engine = engine(Some(MEMORY_BTS));
+    engine.view.observe_performance(EntryTypes::MEMORY);
+    let mut events = Vec::new();
+    // Turned on once the BTS observes, so the forced first report and each
+    // category's first reading reach its observer too.
+    drive_until(&mut engine, &mut events, |events| {
+        logged(events, "observing memory")
+    });
+    engine
+        .view
+        .set_memory_monitor(Some(MemoryConfig {
+            report_interval: Duration::from_millis(50),
+            acquisition_delay: Duration::from_millis(10),
+            change_threshold: 0,
+        }))
+        .expect("a live view");
+    drive_until(&mut engine, &mut events, |events| {
+        complete_memory(events).is_some() && bts_memory(events).is_some()
+    });
+
+    let entry = complete_memory(&events).expect("every category");
+    assert_eq!(
+        entry.size_bytes,
+        entry.items.iter().map(|item| item.size_bytes).sum::<u64>()
+    );
+    let elements = entry
+        .item(MemoryCategory::LynxTasmElement)
+        .expect("the document's reading");
+    assert!(elements.instance_count >= 1, "{elements:?}");
+    let detail = |item: &crate::performance::MemoryItem, key: &str| {
+        item.detail
+            .iter()
+            .find(|(name, _)| &**name == key)
+            .map(|(_, value)| value.to_string())
+    };
+    assert_eq!(
+        detail(elements, "elementCount"),
+        Some(elements.instance_count.to_string())
+    );
+    let main = entry
+        .item(MemoryCategory::MainThreadScriptingEngine)
+        .expect("the main thread's runtime");
+    assert_eq!(detail(main, "sharedRuntime").as_deref(), Some("thread"));
+    let frame = entry
+        .item(MemoryCategory::CommittedFrame)
+        .expect("the painter's frame");
+    assert!(frame.instance_count >= 1, "{frame:?}");
+    let as_json = PerformanceEntry::Memory(entry.clone());
+    let mut json = String::new();
+    as_json.write_lynx_json(&engine.view.time_origin(), &mut json);
+    let value: serde_json::Value = serde_json::from_str(&json).expect("the entry is JSON");
+    assert_eq!(value["entryType"], "memory");
+    assert!(value["detail"]["committedFrame"]["sizeBytes"].as_i64() > Some(0));
+
+    // The BTS's observer received an entry as Lynx's JSON, nested by
+    // category.
+    let seen = bts_memory(&events).expect("the BTS logged one");
+    assert_eq!(seen["entryType"], "memory");
+    assert_eq!(seen["name"], "memory");
+    assert!(
+        seen["detail"]["mainThreadScriptingEngine"]["sizeBytes"].as_f64() > Some(0.0),
+        "{seen}"
+    );
+    assert_eq!(
+        seen["detail"]["mainThreadScriptingEngine"]["category"],
+        "mainThreadScriptingEngine"
+    );
+    assert!(seen["sizeBytes"].as_f64() > Some(0.0), "{seen}");
+
+    // Off: the sampling task ends and nothing more is read.
+    engine.view.set_memory_monitor(None).expect("a live view");
+    assert!(!engine.view.seat().registry.take_frame_memory_sample());
+}
+
+#[test]
+fn with_the_memory_monitor_off_nothing_is_a_memory_entry() {
+    let mut engine = engine(Some(MEMORY_BTS));
+    engine.view.observe_performance(EntryTypes::ALL);
+    let mut events = Vec::new();
+    drive_until(&mut engine, &mut events, |events| {
+        !load_entries(events).is_empty() && logged(events, "observing memory")
+    });
+    let until = Instant::now() + Duration::from_millis(100);
+    while Instant::now() < until {
+        turn(&mut engine, &mut events);
+        std::thread::yield_now();
+    }
+    assert!(memory_entries(&events).is_empty(), "{events:?}");
+    assert!(bts_memory(&events).is_none(), "{events:?}");
+}

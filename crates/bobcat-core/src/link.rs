@@ -231,6 +231,14 @@ pub(crate) enum ToMain {
         epoch: u64,
         interval: std::time::Duration,
     },
+    /// The memory monitor was turned on, or changed, by
+    /// [`LynxView::set_memory_monitor`](crate::LynxView::set_memory_monitor):
+    /// start the view's task that samples on `config`'s schedule, for as
+    /// long as the configuration of `epoch` is the current one.
+    SampleMemory {
+        epoch: u64,
+        config: crate::performance::MemoryConfig,
+    },
     #[cfg(test)]
     Probe(Box<dyn FnOnce(&mut LynxDocument) + Send>),
     /// The one command that is not the realm's: it spawns a task of the view

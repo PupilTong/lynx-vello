@@ -709,6 +709,46 @@ impl CommittedFrame {
         self.order.commit_id()
     }
 
+    /// How many scene fragments the frame is carried in: one for the common
+    /// whole-frame shape, one more per scroll container or group effect
+    /// that splits it.
+    #[must_use]
+    pub fn fragment_count(&self) -> usize {
+        self.presentation.fragments.len()
+    }
+
+    /// The bytes of the frame's encoded scene fragments: the lengths of each
+    /// fragment's encoding streams (path tags and data, draw tags and data,
+    /// transforms, styles) and late-bound resources (patches, gradient
+    /// stops, glyphs, glyph runs, variable-font coordinates), each times its
+    /// element size. What a stream reserved beyond its length, the vector
+    /// image scenes the frame draws, and the paint order beside the scenes
+    /// are not counted. A sum over the fragments' vector lengths, which
+    /// allocates nothing.
+    #[must_use]
+    pub fn encoded_bytes(&self) -> usize {
+        use std::mem::size_of_val;
+        self.presentation
+            .fragments
+            .iter()
+            .map(|fragment| {
+                let encoding = fragment.encoding();
+                let resources = &encoding.resources;
+                size_of_val(encoding.path_tags.as_slice())
+                    + size_of_val(encoding.path_data.as_slice())
+                    + size_of_val(encoding.draw_tags.as_slice())
+                    + size_of_val(encoding.draw_data.as_slice())
+                    + size_of_val(encoding.transforms.as_slice())
+                    + size_of_val(encoding.styles.as_slice())
+                    + size_of_val(resources.patches.as_slice())
+                    + size_of_val(resources.color_stops.as_slice())
+                    + size_of_val(resources.glyphs.as_slice())
+                    + size_of_val(resources.glyph_runs.as_slice())
+                    + size_of_val(resources.normalized_coords.as_slice())
+            })
+            .sum()
+    }
+
     /// Whether this frame puts contentful ink on the viewport, as Paint
     /// Timing defines it for `first-contentful-paint`: text with a glyph that
     /// is not white space, or an image whose pixels the document holds — an

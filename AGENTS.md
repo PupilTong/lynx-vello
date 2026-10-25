@@ -296,7 +296,13 @@ view writes its marks into, the host members both realm kinds' `lynx.performance
 is written over, and the two job monitors in `monitors.rs` (the long task
 monitor `run_job` times every job for, and the JS blocking monitor over the
 enqueue instants `WorkerMessage`s carry; both off unless the embedder turns
-them on, and both reported to it alone); see
+them on, and both reported to it alone), and the memory monitor in
+`memory.rs` (a sampling task of the view on `bobcat-main` that reads the
+main thread's QuickJS runtime and the document's element arena, asks the
+BTS for `bobcat-workers`' runtime with `WorkerMessage::MemorySample` and the
+painter's `pump` for the committed frame's scene bytes; off unless the
+embedder turns it on, and reported to it and to the BTS observers of
+`memory`); see
 `docs/performance-observation-design.md`, and `main/runtime/pipelines.rs` for
 the main-thread flush binding — and
 `threads.rs` the two engine threads.

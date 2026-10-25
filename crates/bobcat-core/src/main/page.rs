@@ -155,7 +155,7 @@
 //! the only things boot waits on.
 
 use std::cell::{Cell, RefCell};
-use std::future::poll_fn;
+use std::future::{Future, poll_fn};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -173,7 +173,9 @@ use crate::clock::ClockInstant;
 use crate::jobs::{JobKind, JsThreadName};
 use crate::lifetime::{Lifetime, Settles, run_job, serve_clock};
 use crate::link::{FramePost, HostOutbox, ScrollEntry, ScrollMailbox, ToMain, ViewOutbox};
-use crate::performance::serve_js_blocking_reports;
+use crate::performance::{
+    MemoryCategory, MemoryItem, serve_js_blocking_reports, serve_memory_samples,
+};
 use crate::realm::RealmCore;
 use crate::realm::owner::{self, RealmOwner};
 use crate::realm::policy::{self, Row, Scene};
@@ -328,6 +330,42 @@ impl Page {
 
     fn ended(&self) -> bool {
         self.lifetime.ended()
+    }
+
+    /// Queues one memory monitor sample for the configuration of `epoch`,
+    /// as an entry of this view's: the main thread's two readings — the
+    /// script runtime this view's realm runs on
+    /// (`mainThreadScriptingEngine`, a walk of the whole heap) and the
+    /// document's element arena (`lynxTasmElement`, three field reads) —
+    /// written to the registry, then the view's BTS asked for its runtime's
+    /// reading ([`WorkerMessage::MemorySample`]) and the painter for the
+    /// committed frame's. Runs no JavaScript. An entry rather than a bare
+    /// job because it reads the document, which only an entry does; a
+    /// sample for a configuration no longer current reads nothing.
+    ///
+    /// [`WorkerMessage::MemorySample`]: crate::background::WorkerMessage::MemorySample
+    fn sample_memory(page: &Rc<Self>, epoch: u64) -> impl Future<Output = Option<()>> + use<> {
+        let registry = Arc::clone(page.host.registry());
+        owner::enter(page, JobKind::Memory, move |runtime, js| {
+            if !registry.memory_sampling(epoch) {
+                return;
+            }
+            registry.note_memory(MemoryItem::scripting_engine(
+                MemoryCategory::MainThreadScriptingEngine,
+                &js.memory_usage(),
+            ));
+            let footprint = runtime.with_document(|document| document.memory_footprint());
+            registry.note_memory(MemoryItem::elements(&footprint));
+            if let Some(key) = registry.page_background() {
+                runtime.send_to_worker(
+                    key,
+                    crate::background::WorkerMessage::MemorySample {
+                        enqueued: registry.js_blocking_stamp(),
+                    },
+                );
+            }
+            registry.request_frame_memory_sample();
+        })
     }
 
     /// Queues the entry that delivers one commit's
@@ -686,6 +724,20 @@ impl Page {
                 self,
                 serve_js_blocking_reports(self.host.clone(), epoch, interval),
             ),
+            // The same: a task of this view's, ended by the view or by the
+            // next configuration; each sample it takes is a job of its own.
+            ToMain::SampleMemory { epoch, config } => {
+                let sampling = Rc::clone(self);
+                owner::spawn(
+                    self,
+                    serve_memory_samples(self.host.clone(), epoch, config, move || {
+                        let job = Self::sample_memory(&sampling, epoch);
+                        async move {
+                            job.await;
+                        }
+                    }),
+                );
+            }
             #[cfg(test)]
             ToMain::Probe(probe) => runtime.with_document(probe),
             #[cfg(test)]

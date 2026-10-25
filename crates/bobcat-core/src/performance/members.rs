@@ -123,8 +123,9 @@ pub(crate) fn install_pipeline_members(
 /// realm's `bobcat:bts-runtime` has an observer, which is what a
 /// `PerformanceReady` is delivered to.
 ///
-/// - `observePerformance(on, paint)`: the realm has an observer (`on` `1`) or no longer has one
-///   (`0`), and one of its observers asked for `paint` entries (`paint` `1`) or none did (`0`);
+/// - `observePerformance(on, paint, memory)`: the realm has an observer (`on` `1`) or no longer has
+///   one (`0`), one of its observers asked for `paint` entries (`paint` `1`) or none did (`0`), and
+///   one asked for `memory` entries (`memory` `1`) or none did (`0`) — which turns no monitor on;
 /// - `takePerformanceEntries()`: every entry this worker is owed, assembled here on the worker's
 ///   thread, as one record string — per entry its pair count, then key and value fields, a value
 ///   `n<number>` or `s<text>`;
@@ -141,11 +142,12 @@ pub(crate) fn install_worker_members(
     let observed = Rc::new(Cell::new(false));
     let pipelines = Arc::clone(registry);
     let setting = Rc::clone(&observed);
-    register(engine, "observePerformance", 2, move |arguments| {
+    register(engine, "observePerformance", 3, move |arguments| {
         let on = flag_argument(arguments, 0);
         let paint = flag_argument(arguments, 1);
+        let memory = flag_argument(arguments, 2);
         setting.set(on);
-        pipelines.observe_worker(key, on, paint);
+        pipelines.observe_worker(key, on, paint, memory);
         Ok(HostValue::Undefined)
     })?;
     let pipelines = Arc::clone(registry);

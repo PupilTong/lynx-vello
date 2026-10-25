@@ -190,7 +190,7 @@ fn a_worker_observer_is_owed_the_entries_of_its_realm() {
     let registry = PipelineRegistry::detached();
     let worker = WorkerKey::new(7);
     registry.bind_worker(worker, OpenerId::PAGE);
-    registry.observe_worker(worker, true, false);
+    registry.observe_worker(worker, true, false, false);
     registry.bind_commit(flush(OpenerId::PAGE, 0, &["mine"], 1));
     assert_eq!(registry.note_presented(frame(1)), vec![worker]);
     assert!(registry.take_completed_for_rust().is_empty());
@@ -275,8 +275,8 @@ fn paint_marks_complete_once_for_whoever_asked_for_paint() {
     let worker = WorkerKey::new(3);
     let other = WorkerKey::new(4);
     registry.observe_rust(EntryTypes::PAINT);
-    registry.observe_worker(worker, true, true);
-    registry.observe_worker(other, true, false);
+    registry.observe_worker(worker, true, true, false);
+    registry.observe_worker(other, true, false, false);
     assert!(registry.wants_content_detection());
     let first = frame(1);
     assert_eq!(registry.note_paint(Some(first), None), vec![worker]);
@@ -331,10 +331,10 @@ fn paint_marks_nobody_asked_for_make_no_record_and_no_detection() {
     assert_eq!(registry.generation(), 0);
     assert!(registry.records_for_test().is_empty());
     // A worker that observes pipelines only asks for no detection either.
-    registry.observe_worker(WorkerKey::new(1), true, false);
+    registry.observe_worker(WorkerKey::new(1), true, false, false);
     assert!(!registry.wants_content_detection());
     // Asking for paint turns detection on until the contentful paint.
-    registry.observe_worker(WorkerKey::new(1), true, true);
+    registry.observe_worker(WorkerKey::new(1), true, true, false);
     assert!(registry.wants_content_detection());
     assert!(registry.wants_presentation_timing());
     registry.forget_worker(WorkerKey::new(1));
@@ -686,4 +686,278 @@ fn every_type_includes_the_two_monitors() {
     assert!(EntryTypes::ALL.contains(EntryTypes::LONG_TASK));
     assert!(EntryTypes::ALL.contains(EntryTypes::JS_BLOCKING));
     assert!(!EntryTypes::LONG_TASK.intersects(EntryTypes::JS_BLOCKING));
+}
+
+#[test]
+fn every_type_includes_memory() {
+    assert!(EntryTypes::ALL.contains(EntryTypes::MEMORY));
+    assert!(!EntryTypes::MEMORY.intersects(EntryTypes::JS_BLOCKING | EntryTypes::LONG_TASK));
+}
+
+fn memory(threshold: u64) -> MemoryConfig {
+    MemoryConfig {
+        change_threshold: threshold,
+        ..MemoryConfig::default()
+    }
+}
+
+fn reading(category: MemoryCategory, size_bytes: u64) -> MemoryItem {
+    MemoryItem {
+        category,
+        size_bytes,
+        instance_count: 1,
+        detail: vec![(Arc::from("key"), Arc::from(size_bytes.to_string()))],
+    }
+}
+
+fn memory_entries(registry: &PipelineRegistry) -> Vec<MemoryEntry> {
+    registry
+        .take_completed_for_rust()
+        .into_iter()
+        .filter_map(|entry| match entry {
+            PerformanceEntry::Memory(memory) => Some(memory),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn the_memory_monitor_reads_nothing_while_off() {
+    let registry = PipelineRegistry::detached();
+    registry.observe_rust(EntryTypes::ALL);
+    assert!(!registry.note_memory(reading(MemoryCategory::LynxTasmElement, 10)));
+    assert!(!registry.take_frame_memory_sample());
+    registry.request_frame_memory_sample();
+    let epoch = registry.set_memory_monitor(Some(memory(0))).expect("on");
+    assert!(registry.memory_sampling(epoch));
+    assert_eq!(registry.set_memory_monitor(None), None);
+    assert!(!registry.memory_sampling(epoch));
+    assert!(!registry.memory_sampling(epoch + 1));
+    assert!(
+        !registry.take_frame_memory_sample(),
+        "turning the monitor off withdraws the painter's request"
+    );
+    assert!(!registry.note_memory(reading(MemoryCategory::LynxTasmElement, 10)));
+    assert!(memory_entries(&registry).is_empty());
+    assert_eq!(registry.generation(), 0);
+}
+
+#[test]
+fn the_frame_sample_request_is_taken_once() {
+    let registry = PipelineRegistry::detached();
+    assert!(!registry.take_frame_memory_sample());
+    registry.request_frame_memory_sample();
+    assert!(registry.take_frame_memory_sample());
+    assert!(!registry.take_frame_memory_sample());
+}
+
+#[test]
+fn a_zero_threshold_reports_every_reading_that_changes_a_category() {
+    let registry = PipelineRegistry::detached();
+    registry.observe_rust(EntryTypes::MEMORY);
+    registry.set_memory_monitor(Some(memory(0)));
+    assert!(registry.note_memory(reading(MemoryCategory::MainThreadScriptingEngine, 100)));
+    assert!(registry.note_memory(reading(MemoryCategory::LynxTasmElement, 20)));
+    assert!(registry.note_memory(reading(MemoryCategory::MainThreadScriptingEngine, 101)));
+    // Lynx's `UpdateMemoryUsage`: a category whose size did not change is
+    // not a report, and its reading is not replaced.
+    let mut same = reading(MemoryCategory::LynxTasmElement, 20);
+    same.detail = Vec::new();
+    assert!(!registry.note_memory(same));
+    let entries = memory_entries(&registry);
+    let totals: Vec<u64> = entries.iter().map(|entry| entry.size_bytes).collect();
+    assert_eq!(totals, [100, 120, 121]);
+    let last = entries.last().expect("three reports");
+    let categories: Vec<MemoryCategory> = last.items.iter().map(|item| item.category).collect();
+    assert_eq!(
+        categories,
+        [
+            MemoryCategory::MainThreadScriptingEngine,
+            MemoryCategory::LynxTasmElement
+        ]
+    );
+    let elements = last.item(MemoryCategory::LynxTasmElement).expect("read");
+    assert_eq!(
+        elements.detail.len(),
+        1,
+        "the unchanged reading was kept out"
+    );
+}
+
+#[test]
+fn a_threshold_holds_back_a_small_change_and_passes_a_large_one() {
+    let registry = PipelineRegistry::detached();
+    registry.observe_rust(EntryTypes::MEMORY);
+    registry.set_memory_monitor(Some(memory(1_000)));
+    // The first reading is reported whatever it changed.
+    assert!(registry.note_memory(reading(MemoryCategory::MainThreadScriptingEngine, 10)));
+    // Kept, not reported: the total moved by less than the threshold.
+    assert!(!registry.note_memory(reading(MemoryCategory::LynxTasmElement, 500)));
+    assert!(!registry.note_memory(reading(MemoryCategory::CommittedFrame, 400)));
+    // This one takes the total 1 000 past the last report's.
+    assert!(registry.note_memory(reading(
+        MemoryCategory::BackgroundThreadScriptingEngine,
+        100
+    )));
+    // A drop counts as much as a rise, measured from the last report.
+    assert!(!registry.note_memory(reading(MemoryCategory::CommittedFrame, 0)));
+    assert!(!registry.note_memory(reading(MemoryCategory::LynxTasmElement, 0)));
+    assert!(registry.note_memory(reading(MemoryCategory::BackgroundThreadScriptingEngine, 0)));
+    let entries = memory_entries(&registry);
+    let totals: Vec<u64> = entries.iter().map(|entry| entry.size_bytes).collect();
+    assert_eq!(totals, [10, 1_010, 10]);
+    assert_eq!(entries[1].items.len(), 4, "every category's latest reading");
+    // A new configuration starts afresh: its first reading is forced again.
+    registry.set_memory_monitor(Some(memory(1_000)));
+    assert!(registry.note_memory(reading(MemoryCategory::LynxTasmElement, 1)));
+    let [entry] = &memory_entries(&registry)[..] else {
+        panic!("the forced first reading");
+    };
+    assert_eq!(entry.items.len(), 1);
+}
+
+#[test]
+fn memory_reports_reach_the_embedder_and_the_workers_that_ask() {
+    let registry = PipelineRegistry::detached();
+    let asking = WorkerKey::new(3);
+    let other = WorkerKey::new(4);
+    registry.observe_worker(asking, true, false, true);
+    registry.observe_worker(other, true, false, false);
+    registry.set_memory_monitor(Some(memory(0)));
+    // Nobody asks the Rust side; the asking worker is owed it.
+    assert!(registry.note_memory(reading(MemoryCategory::MainThreadScriptingEngine, 5)));
+    assert_eq!(registry.take_wakes(), vec![asking]);
+    assert!(memory_entries(&registry).is_empty());
+    assert!(registry.take_completed_for_worker(other).is_empty());
+    let entries = registry.take_completed_for_worker(asking);
+    let [PerformanceEntry::Memory(entry)] = &entries[..] else {
+        panic!("one memory entry: {entries:?}");
+    };
+    assert_eq!(entry.size_bytes, 5);
+    // A worker that stops asking drops what it had not taken.
+    assert!(registry.note_memory(reading(MemoryCategory::MainThreadScriptingEngine, 6)));
+    registry.observe_worker(asking, true, false, false);
+    assert!(registry.take_completed_for_worker(asking).is_empty());
+    // Nobody asks at all: kept as the latest reading, reported to no one.
+    let generation = registry.generation();
+    assert!(!registry.note_memory(reading(MemoryCategory::MainThreadScriptingEngine, 7)));
+    assert_eq!(registry.generation(), generation);
+}
+
+fn memory_entry() -> PerformanceEntry {
+    PerformanceEntry::Memory(MemoryEntry {
+        size_bytes: 4_736,
+        items: vec![
+            MemoryItem {
+                category: MemoryCategory::MainThreadScriptingEngine,
+                size_bytes: 4_096,
+                instance_count: 1,
+                detail: vec![
+                    (Arc::from("obj_count"), Arc::from("12")),
+                    (Arc::from("sharedRuntime"), Arc::from("thread")),
+                ],
+            },
+            MemoryItem {
+                category: MemoryCategory::LynxTasmElement,
+                size_bytes: 640,
+                instance_count: 2,
+                detail: vec![
+                    (Arc::from("elementCount"), Arc::from("2")),
+                    (Arc::from("singleElementSizeBytes"), Arc::from("320")),
+                ],
+            },
+        ],
+    })
+}
+
+#[test]
+fn a_memory_entry_writes_lynx_s_nested_maps() {
+    let origin = TimeOrigin::now();
+    let entry = memory_entry();
+    assert_eq!(entry.entry_type(), "memory");
+    assert_eq!(entry.name(), "memory");
+    assert!(entry.pipeline().is_none());
+    let mut json = String::new();
+    entry.write_lynx_json(&origin, &mut json);
+    let value: serde_json::Value = serde_json::from_str(&json).expect("the entry is JSON");
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "entryType": "memory",
+            "name": "memory",
+            "detail": {
+                "mainThreadScriptingEngine": {
+                    "category": "mainThreadScriptingEngine",
+                    "sizeBytes": 4_096,
+                    "instanceCount": 1,
+                    "detail": { "obj_count": "12", "sharedRuntime": "thread" },
+                },
+                "lynxTasmElement": {
+                    "category": "lynxTasmElement",
+                    "sizeBytes": 640,
+                    "instanceCount": 2,
+                    "detail": { "elementCount": "2", "singleElementSizeBytes": "320" },
+                },
+            },
+            "sizeBytes": 4_736,
+        })
+    );
+    // `detail` comes before the total, as `ReportMemory` pushes it.
+    assert!(json.find("\"detail\"") < json.find(",\"sizeBytes\":4736}"));
+}
+
+/// The fields of a record whose text is ASCII, where a UTF-16 count is a
+/// byte count.
+fn ascii_fields(mut record: &str) -> Vec<String> {
+    let mut fields = Vec::new();
+    while let Some((count, rest)) = record.split_once(':') {
+        let length: usize = count.parse().expect("a field length");
+        fields.push(rest[..length].to_owned());
+        record = &rest[length..];
+    }
+    fields
+}
+
+#[test]
+fn the_record_encoding_carries_a_memory_entry_s_key_paths() {
+    let origin = TimeOrigin::now();
+    let record = encode_entries(&[memory_entry()], &origin);
+    assert!(record.is_ascii());
+    let fields = ascii_fields(&record);
+    let pairs: Vec<(&str, &str)> = fields[1..]
+        .chunks(2)
+        .map(|pair| (pair[0].as_str(), pair[1].as_str()))
+        .collect();
+    assert_eq!(fields[0], pairs.len().to_string());
+    assert_eq!(pairs[0], ("entryType", "smemory"));
+    assert!(pairs.contains(&("detail.lynxTasmElement.sizeBytes", "n640")));
+    assert!(pairs.contains(&("detail.lynxTasmElement.instanceCount", "n2")));
+    assert!(pairs.contains(&(
+        "detail.mainThreadScriptingEngine.detail.sharedRuntime",
+        "sthread"
+    )));
+    assert_eq!(pairs.last(), Some(&("sizeBytes", "n4736")));
+}
+
+#[test]
+fn a_framework_mark_with_a_dot_stays_one_member() {
+    let origin = TimeOrigin::now();
+    let mut timing = pipeline(&origin);
+    timing.framework_rendering_timing.marks = vec![
+        (Arc::from("a.b"), at(&origin, 1)),
+        (Arc::from("c\\d"), at(&origin, 2)),
+    ];
+    let entry = PerformanceEntry::Pipeline(Box::new(timing));
+    let keys: Vec<String> = entry
+        .lynx_fields(&origin)
+        .map(|(key, _)| key.into_owned())
+        .collect();
+    assert!(keys.contains(&"frameworkRenderingTiming.a\\.b".to_owned()));
+    assert!(keys.contains(&"frameworkRenderingTiming.c\\\\d".to_owned()));
+    let mut json = String::new();
+    entry.write_lynx_json(&origin, &mut json);
+    let value: serde_json::Value = serde_json::from_str(&json).expect("the entry is JSON");
+    assert!(value["frameworkRenderingTiming"]["a.b"].is_number());
+    assert!(value["frameworkRenderingTiming"]["c\\d"].is_number());
+    assert!(value["frameworkRenderingTiming"].get("a").is_none());
 }

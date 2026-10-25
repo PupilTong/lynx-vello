@@ -3139,6 +3139,16 @@ impl MainThreadRuntime {
         failures
     }
 
+    /// Sends `message` to the worker under `key`, when this realm created it
+    /// and still holds it: the memory monitor's request to the view's BTS.
+    pub(crate) fn send_to_worker(
+        &self,
+        key: crate::background::WorkerKey,
+        message: crate::background::WorkerMessage,
+    ) {
+        self.workers.post(key, message);
+    }
+
     /// Runs `probe` against the realm's document — the observation seam for
     /// everything outside this thread.
     pub(crate) fn with_document<T>(&mut self, probe: impl FnOnce(&mut LynxDocument) -> T) -> T {

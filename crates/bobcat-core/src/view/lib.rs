@@ -36,8 +36,8 @@ use crate::main::tree::PageConfig;
 use crate::main::{GroupLink, spawn_group};
 use crate::native_module::{NativeModule, NativeModuleTable};
 use crate::performance::{
-    EntryTypes, ExtraTiming, JsBlockingConfig, LongTaskConfig, PerformanceEntry, PipelineRegistry,
-    TimeOrigin,
+    EntryTypes, ExtraTiming, JsBlockingConfig, LongTaskConfig, MemoryConfig, PerformanceEntry,
+    PipelineRegistry, TimeOrigin,
 };
 use crate::resource::{ResourceFetcher, SourceCompletion, SourceRequest};
 use crate::script::ScriptError;
@@ -1503,6 +1503,50 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
                 epoch,
                 interval: config.report_interval,
             });
+        }
+        Ok(())
+    }
+
+    /// Turns the memory monitor on with `config`, or off with `None`:
+    /// Lynx's `enable_memory_monitor`. Off by default. While it is on, a
+    /// task of the view's samples `config.acquisition_delay` after the call
+    /// and then every `config.report_interval`: the main thread reads the
+    /// script runtime its realm runs on (`mainThreadScriptingEngine`) and
+    /// the document's elements (`lynxTasmElement`), the view's BTS worker
+    /// the runtime of `bobcat-workers` (`backgroundThreadScriptingEngine`),
+    /// and the attached painter, in its next [`crate::Painter::pump`], the
+    /// committed frame's encoded scenes (`committedFrame`, this engine's
+    /// own). Each reading replaces its category's last one, and when it
+    /// moved the total by at least `config.change_threshold` bytes — or is
+    /// the first since the call — a [`PerformanceEntry::Memory`] carries
+    /// every category's latest reading, as Lynx's `MemoryMonitor` reports.
+    /// Both script runtimes are shared by every realm on their thread, so
+    /// their readings cover the group's other views too.
+    ///
+    /// The entries reach an embedder that also observes
+    /// [`EntryTypes::MEMORY`] through [`Self::observe_performance`], and the
+    /// BTS observers that `observe(['memory'])`; one made while nobody asks
+    /// is dropped. Observing turns nothing on: only this does. Each call
+    /// starts the readings afresh, and the next call, or the view's end,
+    /// stops the sampling task. Off, nothing is read and no clock is
+    /// touched; the painter's `pump` reads one relaxed atomic.
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::NotReady`] once the view has ended.
+    pub fn set_memory_monitor(&self, config: Option<MemoryConfig>) -> Result<(), EngineError> {
+        if self.cancel.is_cancelled() {
+            return Err(EngineError::NotReady);
+        }
+        let epoch = self.seat.registry.set_memory_monitor(config);
+        if let (Some(epoch), Some(config)) = (epoch, config) {
+            // The sampling task is the view's own, on `bobcat-main`, so it
+            // ends with the view; a send that fails is a view that has
+            // ended since the check above.
+            let _ = self
+                .seat
+                .commands
+                .send(ToMain::SampleMemory { epoch, config });
         }
         Ok(())
     }

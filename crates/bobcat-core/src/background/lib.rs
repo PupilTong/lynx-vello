@@ -192,6 +192,11 @@ pub(crate) enum WorkerMessage {
     /// runtime's `__BobcatPerformanceReady`; a realm with no observer drops
     /// it.
     PerformanceReady { enqueued: Option<ClockInstant> },
+    /// The view's memory monitor asks this worker — the view's BTS — for
+    /// the reading of its thread's script runtime. Sent by the main
+    /// thread's sampling job, and delivered as one job that runs no
+    /// JavaScript, whether or not the realm has finished loading.
+    MemorySample { enqueued: Option<ClockInstant> },
     /// Explicit termination or GC of the MTS Worker object: end it between
     /// tasks and discard what was queued behind this.
     Terminate,

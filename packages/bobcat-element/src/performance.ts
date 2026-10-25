@@ -81,10 +81,62 @@ export interface PerformanceEntry {
 }
 
 /**
+ * One category of a `memory` entry: Lynx's `MemoryUsageItem`
+ * (`MemoryUsageItem.yml`), with the `instanceCount` Lynx's
+ * `MemoryMonitor::ReportMemory` writes beside it.
+ */
+export interface MemoryUsageItem {
+  category: string;
+  sizeBytes: number;
+  instanceCount: number;
+  detail?: Record<string, string>;
+}
+
+/**
+ * Lynx's `memory` entry (`MemoryUsageEntry.yml`): every category's latest
+ * reading under its name, and their sum. Categories are
+ * `mainThreadScriptingEngine`, `backgroundThreadScriptingEngine`,
+ * `lynxTasmElement` and this engine's own `committedFrame`.
+ */
+export interface MemoryUsageEntry extends PerformanceEntry {
+  entryType: "memory";
+  name: "memory";
+  sizeBytes: number;
+  detail?: Record<string, MemoryUsageItem>;
+}
+
+/**
+ * A record key's path: split at every `.` no `\` escapes, each segment
+ * unescaped (`frameworkRenderingTiming.a\.b` is `["frameworkRenderingTiming",
+ * "a.b"]`).
+ */
+function keyPath(key: string): string[] {
+  if (!key.includes("\\")) return key.split(".");
+  const path: string[] = [];
+  let segment = "";
+  for (let index = 0; index < key.length; index += 1) {
+    const character = key[index]!;
+    if (character === "\\") {
+      index += 1;
+      segment += key[index] ?? "";
+    } else if (character === ".") {
+      path.push(segment);
+      segment = "";
+    } else {
+      segment += character;
+    }
+  }
+  path.push(segment);
+  return path;
+}
+
+/**
  * The entries one `takePerformanceEntries` record holds: per entry, its
  * pair count, then a key field and a value field per pair, the value `n`
- * and a number or `s` and a string. A dotted key is a member of the object
- * its first segment names (`frameworkRenderingTiming.diffVdomStart`).
+ * and a number or `s` and a string. A key is a path: each `.` opens one
+ * nested object (`frameworkRenderingTiming.diffVdomStart`,
+ * `detail.lynxTasmElement.detail.elementCount`), and a `.` or `\` inside a
+ * name is escaped with `\`.
  */
 export function decodeEntries(record: string, split: (record: string) => string[]): PerformanceEntry[] {
   const fields = split(record);
@@ -97,14 +149,13 @@ export function decodeEntries(record: string, split: (record: string) => string[
       const key = fields[index++]!;
       const raw = fields[index++]!;
       const value = raw.startsWith("n") ? Number(raw.slice(1)) : raw.slice(1);
-      const dot = key.indexOf(".");
-      if (dot === -1) {
-        entry[key] = value;
-      } else {
-        const outer = key.slice(0, dot);
-        const object = (entry[outer] ??= {}) as Record<string, unknown>;
-        object[key.slice(dot + 1)] = value;
+      const path = keyPath(key);
+      const leaf = path.pop()!;
+      let object = entry;
+      for (const segment of path) {
+        object = (object[segment] ??= {}) as Record<string, unknown>;
       }
+      object[leaf] = value;
     }
     entries.push(entry as PerformanceEntry);
   }
@@ -129,17 +180,21 @@ export interface PerformanceObserver {
 /** The worker realm's two observer members. */
 export interface ObserverHost {
   /**
-   * The realm has an observer (`on`), and one of its observers asked for
+   * The realm has an observer (`on`), one of its observers asked for
    * `paint` entries (`paint`), which is what turns the paint walk's
-   * contentful test on.
+   * contentful test on, and one asked for `memory` entries (`memory`).
+   * Asking for `memory` turns no monitor on: the memory monitor is the
+   * embedder's (`LynxView::set_memory_monitor`), and an observer of
+   * `memory` receives what it reports while it is on, and nothing while it
+   * is off.
    */
-  observePerformance(on: 0 | 1, paint: 0 | 1): void;
+  observePerformance(on: 0 | 1, paint: 0 | 1, memory: 0 | 1): void;
   takePerformanceEntries(): string;
 }
 
-/** Whether `names` asks for W3C Paint Timing's `paint` entries. */
-function asksForPaint(names: readonly string[]): boolean {
-  return names.some(name => name === "paint" || name.startsWith("paint."));
+/** Whether `names` asks for entries of `entryType`. */
+function asksFor(names: readonly string[], entryType: string): boolean {
+  return names.some(name => name === entryType || name.startsWith(`${entryType}.`));
 }
 
 /** The part of `GlobalEventEmitter` the observers use. */
@@ -155,9 +210,11 @@ export interface PerformanceEmitter {
  * `lynx.performance.onPerformanceEvent`, so a
  * `GlobalEventEmitter` listener hears the same entries, as on native. The
  * host is told only when the realm goes from no observer to one and back,
- * or from no observer of `paint` (`observe(['paint'])`, W3C Paint Timing's
- * `first-paint` and `first-contentful-paint`) to one and back: until then
- * nothing is sent to this worker or assembled for it.
+ * from no observer of `paint` (`observe(['paint'])`, W3C Paint Timing's
+ * `first-paint` and `first-contentful-paint`) to one and back, or from no
+ * observer of `memory` (`observe(['memory'])`, Lynx's `memory` entry) to
+ * one and back: until then nothing is sent to this worker or assembled for
+ * it.
  */
 export function createPerformanceObservers(
   host: ObserverHost,
@@ -167,19 +224,20 @@ export function createPerformanceObservers(
   const active = new Map<PerformanceObserver, readonly string[]>();
   let observing = false;
   let observingPaint = false;
+  let observingMemory = false;
   function sync() {
     const next = active.size > 0;
     let paint = false;
+    let memory = false;
     for (const names of active.values()) {
-      if (asksForPaint(names)) {
-        paint = true;
-        break;
-      }
+      paint ||= asksFor(names, "paint");
+      memory ||= asksFor(names, "memory");
     }
-    if (next === observing && paint === observingPaint) return;
+    if (next === observing && paint === observingPaint && memory === observingMemory) return;
     observing = next;
     observingPaint = paint;
-    host.observePerformance(next ? 1 : 0, paint ? 1 : 0);
+    observingMemory = memory;
+    host.observePerformance(next ? 1 : 0, paint ? 1 : 0, memory ? 1 : 0);
   }
   function createObserver(callback: (entry: PerformanceEntry) => void): PerformanceObserver {
     if (typeof callback !== "function") {

@@ -34,8 +34,14 @@
 //! long the messages sent to the view's workers waited for their thread as
 //! Lynx's `js_blocking` entries. Both are off unless the Rust embedder
 //! turns them on, and both report to it alone.
+//!
+//! And the memory monitor (`memory`): Lynx's `memory` entry, which reads the
+//! two script runtimes, the document's elements and the committed frame on
+//! the monitor's interval. Off unless the Rust embedder turns it on; its
+//! entries reach the embedder and the BTS observers that ask for `memory`.
 
 mod members;
+mod memory;
 mod monitors;
 mod registry;
 
@@ -45,9 +51,13 @@ use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
 
+use smallvec::SmallVec;
+
 pub(crate) use self::members::{
     install_pipeline_members, install_worker_members, pipeline_argument,
 };
+pub(crate) use self::memory::serve_memory_samples;
+pub use self::memory::{MemoryCategory, MemoryConfig, MemoryEntry, MemoryItem};
 pub use self::monitors::{
     JsBlockingConfig, JsBlockingEntry, JsBlockingStage, LongTaskConfig, LongTaskEntry,
 };
@@ -55,7 +65,11 @@ pub(crate) use self::monitors::{LongTaskRecord, serve_js_blocking_reports};
 pub(crate) use self::registry::{
     FlushBinding, LoadMark, Opener, OpenerId, PipelineRegistry, WorkerLoadMark,
 };
-use crate::clock::{ClockInstant, SystemTime};
+use crate::clock::ClockInstant;
+/// The wall-clock type [`ExtraTiming`]'s marks are: `std::time::SystemTime`
+/// natively and `web_time::SystemTime` on wasm32, so an embedder builds an
+/// `ExtraTiming` without depending on `web-time` itself.
+pub use crate::clock::SystemTime;
 pub use crate::jobs::{JobKind, JsThreadName};
 
 /// One instant on the engine's monotonic clock, comparable across every
@@ -472,6 +486,11 @@ pub enum PerformanceEntry {
     /// platform alone (`x-lang` lists no JavaScript), and so does this
     /// engine: no BTS observer receives it.
     JsBlocking(JsBlockingEntry),
+    /// Lynx's `memory` entry, behind [`EntryTypes::MEMORY`] and
+    /// [`crate::LynxView::set_memory_monitor`]: every category's latest
+    /// reading, reported when the total moved by the monitor's threshold. A
+    /// BTS observer of `memory` receives it too.
+    Memory(MemoryEntry),
 }
 
 /// Which entries an observer receives. Empty by default: an embedder that
@@ -497,13 +516,17 @@ impl EntryTypes {
     /// the JS blocking monitor is
     /// [`crate::LynxView::set_js_blocking_monitor`]'s.
     pub const JS_BLOCKING: Self = Self(1 << 4);
+    /// [`PerformanceEntry::Memory`]. Asking for it turns nothing on: the
+    /// memory monitor is [`crate::LynxView::set_memory_monitor`]'s.
+    pub const MEMORY: Self = Self(1 << 5);
     /// Every type.
     pub const ALL: Self = Self(
         Self::PIPELINE.0
             | Self::LOAD_BUNDLE.0
             | Self::PAINT.0
             | Self::LONG_TASK.0
-            | Self::JS_BLOCKING.0,
+            | Self::JS_BLOCKING.0
+            | Self::MEMORY.0,
     );
 
     #[must_use]
@@ -557,8 +580,9 @@ pub(crate) const ACTUAL_FMP_FLAG: &str = "__lynx_timing_actual_fmp";
 impl PerformanceEntry {
     /// The entry's `entryType`: Lynx's `"pipeline"` for the three pipeline
     /// entries, Paint Timing's `"paint"` for a [`Self::Paint`], Long Tasks'
-    /// `"longtask"` for a [`Self::LongTask`], and Lynx's `"js_blocking"`
-    /// (`kJSBlockingEntryType`) for a [`Self::JsBlocking`].
+    /// `"longtask"` for a [`Self::LongTask`], Lynx's `"js_blocking"`
+    /// (`kJSBlockingEntryType`) for a [`Self::JsBlocking`], and Lynx's
+    /// `"memory"` (`kMemoryEntryType`) for a [`Self::Memory`].
     #[must_use]
     pub const fn entry_type(&self) -> &'static str {
         match self {
@@ -566,18 +590,21 @@ impl PerformanceEntry {
             Self::Paint(_) => "paint",
             Self::LongTask(_) => "longtask",
             Self::JsBlocking(_) => JS_BLOCKING_ENTRY_TYPE,
+            Self::Memory(_) => MEMORY_ENTRY_TYPE,
         }
     }
 
     /// The entry's `name`: the pipeline's origin, the paint mark's
     /// Performance Timeline name, the long task's [`JobKind`], or for a
-    /// [`Self::JsBlocking`] its entry type again, as Lynx names it.
+    /// [`Self::JsBlocking`] and a [`Self::Memory`] its entry type again, as
+    /// Lynx names them.
     #[must_use]
     pub fn name(&self) -> &str {
         match self {
             Self::Paint(paint) => paint.name.as_str(),
             Self::LongTask(task) => task.kind.as_str(),
             Self::JsBlocking(_) => JS_BLOCKING_ENTRY_TYPE,
+            Self::Memory(_) => MEMORY_ENTRY_TYPE,
             Self::LoadBundle(_) | Self::ReloadBundle(_) | Self::Pipeline(_) => self
                 .pipeline()
                 .map_or("", |pipeline| pipeline.origin.lynx_name()),
@@ -591,17 +618,20 @@ impl PerformanceEntry {
             Self::LoadBundle(load) => Some(&load.pipeline),
             Self::ReloadBundle(reload) => Some(&reload.pipeline),
             Self::Pipeline(pipeline) => Some(pipeline),
-            Self::Paint(_) | Self::LongTask(_) | Self::JsBlocking(_) => None,
+            Self::Paint(_) | Self::LongTask(_) | Self::JsBlocking(_) | Self::Memory(_) => None,
         }
     }
 
     /// The entry in Lynx's keys and Lynx's units, in a fixed order:
     /// `entryType`, `name` and `identifier` (`""` for none) first, then the
     /// pipeline's marks, the load's or reload's, the metrics, and the two
-    /// nested objects. A key with a dot is a member of the object its first
-    /// segment names (`frameworkRenderingTiming.diffVdomStart`,
-    /// `lynxFcp.duration`), and each object's members are adjacent. A field
-    /// whose value this engine does not have is left out, not zeroed.
+    /// nested objects. A key is a path: each `.` in it opens one nested
+    /// object, so `frameworkRenderingTiming.diffVdomStart` is a member of
+    /// `frameworkRenderingTiming` and `detail.lynxTasmElement.sizeBytes` one
+    /// of `detail`'s `lynxTasmElement`. A `.` or `\` that is part of a name —
+    /// a framework mark's own key — is written `\.` or `\\`. The members of
+    /// each object are adjacent. A field whose value this engine does not
+    /// have is left out, not zeroed.
     ///
     /// A [`Self::Paint`] is `entryType`, `name` and `startTime` alone.
     /// Its `startTime` is Unix milliseconds like every other timestamp here,
@@ -624,6 +654,13 @@ impl PerformanceEntry {
     /// doubles `blocking_ratio` and `avg_blocking_time`, and for a `timer`
     /// report the integer `time_after_load_bundle`.
     ///
+    /// A [`Self::Memory`] is what Lynx's `MemoryMonitor::ReportMemory`
+    /// writes, in its order and types: `entryType`, `name`, then under
+    /// `detail` one object per category read, keyed by the category's name,
+    /// with its `category`, the integers `sizeBytes` and `instanceCount`,
+    /// and its own `detail`, a map of strings; then the integer `sizeBytes`,
+    /// the categories' sum.
+    ///
     /// The one place a Lynx key is spelled: [`Self::write_lynx_json`] and
     /// the BTS's `lynx.performance` entries are both written from this.
     pub fn lynx_fields(
@@ -634,6 +671,7 @@ impl PerformanceEntry {
             Self::Paint(paint) => return paint_fields(paint, origin).into_iter(),
             Self::LongTask(task) => return long_task_fields(task, origin).into_iter(),
             Self::JsBlocking(report) => return js_blocking_fields(report, origin).into_iter(),
+            Self::Memory(memory) => return memory_fields(memory, origin).into_iter(),
             Self::LoadBundle(load) => &load.pipeline,
             Self::ReloadBundle(reload) => &reload.pipeline,
             Self::Pipeline(pipeline) => pipeline,
@@ -703,22 +741,13 @@ impl PerformanceEntry {
                 fields.optional_metric("fcp", reload.fcp.as_ref());
                 fields.optional_metric("totalFcp", reload.total_fcp.as_ref());
             }
-            Self::Pipeline(_) | Self::Paint(_) | Self::LongTask(_) | Self::JsBlocking(_) => {}
+            Self::Pipeline(_)
+            | Self::Paint(_)
+            | Self::LongTask(_)
+            | Self::JsBlocking(_)
+            | Self::Memory(_) => {}
         }
-        let framework = &pipeline.framework_rendering_timing;
-        if let Some(dsl) = &framework.dsl {
-            fields.text("frameworkRenderingTiming.dsl", dsl);
-        }
-        if let Some(stage) = &framework.stage {
-            fields.text("frameworkRenderingTiming.stage", stage);
-        }
-        if let Some(execute) = vm_execute {
-            fields.time("frameworkRenderingTiming.vmExecuteStart", execute.start);
-            fields.time("frameworkRenderingTiming.vmExecuteEnd", execute.end);
-        }
-        for (key, at) in &framework.marks {
-            fields.time(format!("frameworkRenderingTiming.{key}"), *at);
-        }
+        fields.framework(&pipeline.framework_rendering_timing, vm_execute);
         fields.text("hostPlatformTiming.hostPlatformType", "vello");
         let compose = &pipeline.host_platform_timing.compose;
         fields.time("hostPlatformTiming.composeStart", compose.start);
@@ -733,53 +762,92 @@ impl PerformanceEntry {
 
     /// The entry as the JSON object Lynx's `onPerformanceEvent` hands a
     /// host, written from [`Self::lynx_fields`] into `out`: numbers with
-    /// three decimals, dotted keys as nested objects. For an embedder that
-    /// reports or compares entries; the engine itself never calls it.
+    /// three decimals, each key's path as nested objects. For an embedder
+    /// that reports or compares entries; the engine itself never calls it.
     pub fn write_lynx_json(&self, origin: &TimeOrigin, out: &mut String) {
         out.push('{');
-        let mut first = true;
-        let mut open: Option<Cow<'static, str>> = None;
-        let mut first_member = true;
+        // The objects open around the member being written, outermost
+        // first, and whether each has a member yet; the entry itself is the
+        // first.
+        let mut open: Vec<String> = Vec::new();
+        let mut has_member: Vec<bool> = vec![false];
         for (key, value) in self.lynx_fields(origin) {
-            let (outer, inner) = match key.split_once('.') {
-                Some((outer, inner)) => (Some(outer), inner),
-                None => (None, key.as_ref()),
-            };
-            if open.as_deref() != outer {
-                if open.take().is_some() {
-                    out.push('}');
-                }
-                if let Some(outer) = outer {
-                    if !first {
-                        out.push(',');
-                    }
-                    first = false;
-                    write_json_string(out, outer);
-                    out.push_str(":{");
-                    open = Some(Cow::Owned(outer.to_owned()));
-                    first_member = true;
-                }
+            let path = key_path(&key);
+            let (leaf, objects) = path.split_last().expect("a key has at least one segment");
+            let shared = open
+                .iter()
+                .zip(objects)
+                .take_while(|(open, wanted)| open.as_str() == wanted.as_ref())
+                .count();
+            while open.len() > shared {
+                open.pop();
+                has_member.pop();
+                out.push('}');
             }
-            if outer.is_some() {
-                if !first_member {
-                    out.push(',');
-                }
-                first_member = false;
-            } else {
-                if !first {
-                    out.push(',');
-                }
-                first = false;
+            for object in &objects[shared..] {
+                member_separator(out, &mut has_member);
+                write_json_string(out, object);
+                out.push_str(":{");
+                open.push(object.clone().into_owned());
+                has_member.push(false);
             }
-            write_json_string(out, inner);
+            member_separator(out, &mut has_member);
+            write_json_string(out, leaf);
             out.push(':');
             write_lynx_value(out, value);
         }
-        if open.is_some() {
+        for _ in open {
             out.push('}');
         }
         out.push('}');
     }
+}
+
+/// A comma before every member of the innermost open object but its first.
+fn member_separator(out: &mut String, has_member: &mut [bool]) {
+    if let Some(innermost) = has_member.last_mut() {
+        if *innermost {
+            out.push(',');
+        }
+        *innermost = true;
+    }
+}
+
+/// A name as one segment of a [`PerformanceEntry::lynx_fields`] key: its
+/// `\` and `.` escaped, so it nests nothing.
+fn escape_segment(name: &str) -> Cow<'_, str> {
+    if !name.contains(['.', '\\']) {
+        return Cow::Borrowed(name);
+    }
+    let mut escaped = String::with_capacity(name.len() + 2);
+    for character in name.chars() {
+        if matches!(character, '.' | '\\') {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    Cow::Owned(escaped)
+}
+
+/// A [`PerformanceEntry::lynx_fields`] key's segments, unescaped: split at
+/// every `.` that no `\` escapes.
+fn key_path(key: &str) -> SmallVec<[Cow<'_, str>; 4]> {
+    let mut path = SmallVec::new();
+    if !key.contains('\\') {
+        path.extend(key.split('.').map(Cow::Borrowed));
+        return path;
+    }
+    let mut segment = String::new();
+    let mut characters = key.chars();
+    while let Some(character) = characters.next() {
+        match character {
+            '\\' => segment.extend(characters.next()),
+            '.' => path.push(Cow::Owned(std::mem::take(&mut segment))),
+            other => segment.push(other),
+        }
+    }
+    path.push(Cow::Owned(segment));
+    path
 }
 
 /// A [`PerformanceEntry::Paint`]'s fields: `entryType`, `name`,
@@ -800,6 +868,9 @@ fn paint_fields<'a>(
 
 /// Lynx's `kJSBlockingEntryType`, which is the entry's `name` as well.
 const JS_BLOCKING_ENTRY_TYPE: &str = "js_blocking";
+
+/// Lynx's `kMemoryEntryType`, which is the entry's `name` as well.
+const MEMORY_ENTRY_TYPE: &str = "memory";
 
 /// A [`PerformanceEntry::LongTask`]'s fields.
 fn long_task_fields<'a>(
@@ -852,7 +923,10 @@ const fn lynx_task_type(kind: JobKind, thread: JsThreadName) -> Option<&'static 
         | JobKind::Performance => "js_func_task",
         // `LynxEngine::CallLepusMethod`, `DidLoadComponent`: a native
         // operation on the engine.
-        JobKind::Command | JobKind::Future | JobKind::FontFace => "native_func_task",
+        // The memory monitor's sample: a native reading, no script.
+        JobKind::Command | JobKind::Future | JobKind::FontFace | JobKind::Memory => {
+            "native_func_task"
+        }
         // `LynxEngine::UpdateDataByJS`: what the background thread sent.
         JobKind::WorkerEvent => "update_data_by_js_task",
         // `ElementVsyncProxy::TickAllElement`.
@@ -890,6 +964,43 @@ fn js_blocking_fields<'a>(
     if let Some(after) = report.time_after_load_bundle {
         fields.integer("time_after_load_bundle", whole_millis(after));
     }
+    fields.list
+}
+
+/// A [`PerformanceEntry::Memory`]'s fields, in `ReportMemory`'s order:
+/// `detail` before the total `sizeBytes`.
+fn memory_fields<'a>(
+    memory: &'a MemoryEntry,
+    origin: &TimeOrigin,
+) -> Vec<(Cow<'static, str>, LynxValue<'a>)> {
+    let mut fields = Fields {
+        origin: *origin,
+        list: Vec::with_capacity(3 + memory.items.len() * 12),
+    };
+    fields.text("entryType", MEMORY_ENTRY_TYPE);
+    fields.text("name", MEMORY_ENTRY_TYPE);
+    for item in &memory.items {
+        let category = item.category.as_str();
+        fields.text(format!("detail.{category}.category"), category);
+        fields.integer(
+            format!("detail.{category}.sizeBytes"),
+            i64::try_from(item.size_bytes).unwrap_or(i64::MAX),
+        );
+        fields.integer(
+            format!("detail.{category}.instanceCount"),
+            i64::from(item.instance_count),
+        );
+        for (key, value) in &item.detail {
+            fields.text(
+                format!("detail.{category}.detail.{}", escape_segment(key)),
+                value,
+            );
+        }
+    }
+    fields.integer(
+        "sizeBytes",
+        i64::try_from(memory.size_bytes).unwrap_or(i64::MAX),
+    );
     fields.list
 }
 
@@ -951,7 +1062,7 @@ impl<'a> Fields<'a> {
         self.list.push((key.into(), LynxValue::Number(value)));
     }
 
-    fn integer(&mut self, key: &'static str, value: i64) {
+    fn integer(&mut self, key: impl Into<Cow<'static, str>>, value: i64) {
         self.list.push((key.into(), LynxValue::Integer(value)));
     }
 
@@ -981,6 +1092,28 @@ impl<'a> Fields<'a> {
         self.number(format!("{key}.endTimestamp"), end);
     }
 
+    /// `frameworkRenderingTiming`: the framework's `dsl` and `stage`, a
+    /// load's `vmExecute*`, and the framework's marks, each mark's key one
+    /// escaped segment.
+    fn framework(&mut self, framework: &'a FrameworkTiming, vm_execute: Option<&Range<Timestamp>>) {
+        if let Some(dsl) = &framework.dsl {
+            self.text("frameworkRenderingTiming.dsl", dsl);
+        }
+        if let Some(stage) = &framework.stage {
+            self.text("frameworkRenderingTiming.stage", stage);
+        }
+        if let Some(execute) = vm_execute {
+            self.time("frameworkRenderingTiming.vmExecuteStart", execute.start);
+            self.time("frameworkRenderingTiming.vmExecuteEnd", execute.end);
+        }
+        for (key, at) in &framework.marks {
+            self.time(
+                format!("frameworkRenderingTiming.{}", escape_segment(key)),
+                *at,
+            );
+        }
+    }
+
     fn optional_metric(&mut self, key: &'static str, metric: Option<&'a Metric>) {
         if let Some(metric) = metric {
             self.metric(key, metric);
@@ -992,7 +1125,8 @@ impl<'a> Fields<'a> {
 /// BTS's `takePerformanceEntries`: per entry, its pair count, then each of
 /// [`PerformanceEntry::lynx_fields`]'s pairs as a key field and a value
 /// field, the value prefixed `n` for a number (three decimals) and `s` for
-/// text. `bobcat:performance` folds the dotted keys back into objects.
+/// text. `bobcat:performance` folds each key's path back into nested
+/// objects, the way [`PerformanceEntry::write_lynx_json`] writes them.
 pub(crate) fn encode_entries(entries: &[PerformanceEntry], origin: &TimeOrigin) -> String {
     use crate::main::record::write_record_field;
     let mut record = String::new();
