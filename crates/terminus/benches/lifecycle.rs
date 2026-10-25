@@ -1,4 +1,4 @@
-//! Node lifecycle benchmarks: what removing and freeing cost.
+//! Node lifecycle benchmarks: what inserting, removing and freeing cost.
 //!
 //! A node is kept allocated by the one owner outside the tree that names it —
 //! in Bobcat, its script handle. A removal only unlinks; a `Document::drop_element`
@@ -15,6 +15,11 @@
 //!   subtree — one walk, no per-node unlink — is the floor both are measured against, and the
 //!   difference between them is what the handle-per-node model costs.
 //! * `drop_element_one_node` — a single leaf freed: what one finalizer pays.
+//! * `insert_*` and `move_last_to_front` — one child-list change under a parent with 256 or 4096
+//!   children, at the positions a list update produces: after the last child (loading more), before
+//!   the first (a new item at the top), in the middle (a keyed insert), and an existing child moved
+//!   from the end to the front (a keyed reorder). Each inserted node is removed again in the same
+//!   iteration, so the list keeps its width.
 
 use divan::black_box;
 use divan::counter::ItemsCount;
@@ -30,7 +35,7 @@ use stylo::values::computed::font::GenericFontFamily;
 use stylo::values::computed::{CSSPixelLength, Length};
 use stylo::values::specified::font::{FONT_MEDIUM_PX, QueryFontMetricsFlags};
 use stylo_traits::{CSSPixel, DevicePixel};
-use terminus::link::{Document, NodeId, StylesheetOrigin};
+use terminus::link::{Document, Node, NodeId, StylesheetOrigin};
 
 fn main() {
     divan::main();
@@ -188,4 +193,72 @@ fn drop_element_one_node(bencher: divan::Bencher) {
             doc.drop_element(black_box(ids[SUBTREE - 1]));
             black_box(doc)
         });
+}
+
+/// A laid-out page whose document element holds `width` leaf children;
+/// returns the page and those children in order.
+fn wide_page(width: usize) -> (Document<()>, Vec<NodeId>) {
+    let mut doc = page();
+    let page_root = doc.document_element().id();
+    let children = (0..width)
+        .map(|_| {
+            let leaf = doc.create_element("leaf", ());
+            doc.append_child(page_root, leaf);
+            leaf
+        })
+        .collect();
+    doc.layout();
+    (doc, children)
+}
+
+/// Inserts a fresh node before `reference` (after the last child when
+/// `None`) and removes it again.
+fn bench_insert(
+    bencher: divan::Bencher,
+    width: usize,
+    reference: impl Fn(&[NodeId]) -> Option<NodeId>,
+) {
+    let (mut doc, children) = wide_page(width);
+    let page_root = doc.document_element().id();
+    let reference = reference(&children);
+    let inserted = doc.create_element("leaf", ());
+    bencher.bench_local(|| {
+        doc.insert_before(page_root, black_box(inserted), reference);
+        doc.remove_element(black_box(inserted));
+    });
+}
+
+#[divan::bench(args = [256, 4_096])]
+fn insert_append(bencher: divan::Bencher, width: usize) {
+    bench_insert(bencher, width, |_| None);
+}
+
+#[divan::bench(args = [256, 4_096])]
+fn insert_prepend(bencher: divan::Bencher, width: usize) {
+    bench_insert(bencher, width, |children| children.first().copied());
+}
+
+#[divan::bench(args = [256, 4_096])]
+fn insert_middle(bencher: divan::Bencher, width: usize) {
+    bench_insert(bencher, width, |children| {
+        Some(children[children.len() / 2])
+    });
+}
+
+/// The last child moved before the first: one removal at the end and one
+/// insertion at the front. Repeating it rotates the list, which keeps its
+/// width.
+#[divan::bench(args = [256, 4_096])]
+fn move_last_to_front(bencher: divan::Bencher, width: usize) {
+    let (mut doc, _) = wide_page(width);
+    let page_root = doc.document_element().id();
+    bencher.bench_local(|| {
+        let parent = doc.get(page_root).expect("the document element is live");
+        let first = parent.first_child().map(Node::id);
+        let last = parent
+            .last_child()
+            .map(Node::id)
+            .expect("the list is not empty");
+        doc.insert_before(page_root, black_box(last), first);
+    });
 }

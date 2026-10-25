@@ -167,6 +167,21 @@ pub struct Node<T> {
 
     pub(crate) parent: Option<NodeSlot>,
     pub(crate) children: Vec<NodeSlot>,
+    /// This node's position in `parent`'s `children`, stored relative to that
+    /// parent's `child_index_base`: the position is
+    /// `child_index - parent.child_index_base`, wrapping. A sibling step reads
+    /// it instead of scanning the parent's list. Only
+    /// [`TreeArenas::insert_child`] and [`TreeArenas::remove_child`] write it.
+    /// Meaningless while `parent` is `None`, and for the two nodes `parent`
+    /// names without appearing in its `children`: a shadow root and an
+    /// anonymous box.
+    pub(crate) child_index: u32,
+    /// The value every child's `child_index` is relative to. An insertion or
+    /// a removal moves either the children before it or the children after
+    /// it; moving the earlier ones changes this value and rewrites only the
+    /// children that keep their position, so a change at either end of the
+    /// list writes no sibling at all.
+    pub(crate) child_index_base: u32,
     pub(crate) local_name: Option<LocalName>,
     pub(crate) classes: SmallVec<[Atom; 2]>,
     pub(crate) id_attribute: Option<Atom>,
@@ -312,6 +327,8 @@ impl<T> Node<T> {
             payload: None,
             parent: None,
             children: Vec::new(),
+            child_index: 0,
+            child_index_base: 0,
             local_name,
             classes: SmallVec::new(),
             id_attribute: None,
@@ -710,6 +727,8 @@ impl<T> Node<T> {
             ("payload", size_of::<Option<()>>(), false),
             ("parent", size_of::<Option<NodeSlot>>(), false),
             ("children", size_of::<Vec<NodeSlot>>(), false),
+            ("child_index", size_of::<u32>(), false),
+            ("child_index_base", size_of::<u32>(), false),
             ("local_name", size_of::<Option<LocalName>>(), true),
             ("classes", size_of::<SmallVec<[Atom; 2]>>(), true),
             ("id_attribute", size_of::<Option<Atom>>(), true),
@@ -1264,13 +1283,23 @@ impl<T> Node<T> {
             return None;
         }
         let tree = self.arenas();
-        let siblings = &tree.at(self.parent?).children;
-        let pos = siblings
-            .iter()
-            .position(|&c| c == self.id)
-            .expect("node must appear in its parent's child list");
-        let sibling = *siblings.get(pos.checked_add_signed(offset)?)?;
+        let parent = tree.at(self.parent?);
+        let index = self.index_in(parent);
+        debug_assert_eq!(
+            parent.children.get(index),
+            Some(&self.id),
+            "node must appear in its parent's child list at its stored index"
+        );
+        let sibling = *parent.children.get(index.checked_add_signed(offset)?)?;
         Some(tree.at(sibling))
+    }
+
+    /// This node's position in `parent`'s child list, when `parent` lists it.
+    /// For any other `parent` the answer is some number; a caller that does
+    /// not know the node is listed checks the slot it names.
+    #[inline]
+    pub(crate) fn index_in(&self, parent: &Self) -> usize {
+        self.child_index.wrapping_sub(parent.child_index_base) as usize
     }
 
     #[must_use]
@@ -1403,9 +1432,11 @@ mod tests {
         // parent link costs 8 bytes rather than 16. Presentational hints add
         // one optional Arc; the declaration block allocates only when used.
         // No node keeps Stylo's postorder child counter (`StylingData`).
+        // The two `u32` child-list positions add 8 bytes: they make a sibling
+        // step one index instead of a scan of the parent's child list.
         assert_eq!(
             std::mem::size_of::<Node<()>>(),
-            if cfg!(debug_assertions) { 224 } else { 216 }
+            if cfg!(debug_assertions) { 232 } else { 224 }
         );
         assert!(
             std::mem::size_of::<NodeData>() < PRE_BOXING_NODE_DATA_SIZE,
