@@ -4,6 +4,7 @@ import type {
   EditCommand,
   FacadeMessage,
   InitMessage,
+  LoadTimingFields,
   RenderWorkerMessage,
   RequestMessage,
   TextInputFields,
@@ -22,6 +23,9 @@ let scriptCompletion: Promise<void> | undefined
 let engineEventGeneration = 0
 let requestQueue: Promise<void> = Promise.resolve()
 let stopFrameRate: (() => void) | undefined
+// Whether the page asked for performance entries. When it did not, no view
+// observes anything and no `setExtraTiming` is sent either.
+let observePerformance = false
 
 const MAX_SCRIPT_BYTES = 16 * 1024 * 1024
 const MAX_STYLE_SHEET_BYTES = 16 * 1024 * 1024
@@ -136,6 +140,15 @@ function postTextInputState(fields: TextInputFields): void {
   } satisfies RenderWorkerMessage)
 }
 
+// One performance entry, written by the engine as Lynx's
+// `onPerformanceEvent` JSON on this Worker; the facade parses it.
+function postPerformanceEntry(entry: string): void {
+  self.postMessage({
+    entry,
+    type: 'bobcat-performance',
+  } satisfies RenderWorkerMessage)
+}
+
 // One `bobcat-edit` as the engine's flat call: the command's name, its text,
 // and two numbers whose meaning the name decides (`src/text_input.rs`).
 function applyEdit(command: EditCommand): void {
@@ -192,7 +205,9 @@ async function initialize(message: InitMessage): Promise<void> {
     nativeModuleMethods,
     postNativeModuleCall,
     postTextInputState,
+    message.observePerformance ? postPerformanceEntry : undefined,
   )
+  observePerformance = message.observePerformance
   running = true
   if (message.measureFrameRate) {
     const report = (fps: number | null): void => {
@@ -345,6 +360,30 @@ function trackScriptCompletion(request: number): void {
     .catch(reportFatal)
 }
 
+// Lynx's `prepareTemplateStart`/`End` for one load: from the moment this
+// Worker takes the request to the moment its sources are fetched and
+// registered, just before the view is built. The fetch runs here, not on the
+// page's thread, so this is where it is timed; `Date.now()` reads the same
+// wall clock on both. A ZIP's bytes arrive already read, so its span is the
+// registration alone.
+interface PrepareTiming {
+  start: number
+  end: number
+}
+
+// The host's five marks, once the view exists to take them. A load entry the
+// engine already reported is reported again with `fcp` and `totalFcp`.
+function reportExtraTiming(timing: LoadTimingFields, prepare: PrepareTiming): void {
+  if (!observePerformance) return
+  renderer!.setExtraTiming(
+    timing.openTime,
+    timing.containerInitStart,
+    timing.containerInitEnd,
+    prepare.start,
+    prepare.end,
+  )
+}
+
 // A view is its page: its sources are construction inputs, so loading a page
 // builds a fresh native view and drops the previous one. Sources are fetched
 // and registered before that happens, so a load that cannot fetch leaves the
@@ -352,6 +391,8 @@ function trackScriptCompletion(request: number): void {
 async function replaceNativeView(
   request: number,
   load: () => Promise<void>,
+  timing: LoadTimingFields,
+  prepare: PrepareTiming,
 ): Promise<void> {
   if (scriptCompletion !== undefined) {
     try {
@@ -372,6 +413,7 @@ async function replaceNativeView(
     void servePage(engineEventGeneration).catch(reportFatal)
     throw error
   }
+  reportExtraTiming(timing, prepare)
   trackScriptCompletion(request)
 }
 
@@ -381,17 +423,29 @@ async function dispatchRequest(message: RequestMessage): Promise<void> {
   }
 
   const { operation, request } = message
+  // The span ends when the operation's sources are in hand: before the
+  // view is built, and before waiting out the previous page's boot.
+  const prepareStart = Date.now()
+  const prepare = (): PrepareTiming => ({ start: prepareStart, end: Date.now() })
   switch (operation) {
     case 'loadZip': {
-      await replaceNativeView(request, () =>
-        renderer!.loadZip(message.url, message.bytes, message.globalProps),
+      await replaceNativeView(
+        request,
+        () =>
+          renderer!.loadZip(message.url, message.bytes, message.globalProps),
+        message.timing,
+        prepare(),
       )
       break
     }
     case 'loadTemplate': {
       const entry = await fetchSource('template', message.url, MAX_SCRIPT_BYTES)
-      await replaceNativeView(request, () =>
-        renderer!.loadTemplate(entry.url, entry.bytes, message.globalProps),
+      await replaceNativeView(
+        request,
+        () =>
+          renderer!.loadTemplate(entry.url, entry.bytes, message.globalProps),
+        message.timing,
+        prepare(),
       )
       break
     }
@@ -411,13 +465,12 @@ async function dispatchRequest(message: RequestMessage): Promise<void> {
       // given: it imports what it uses from `bobcat:runtime` and
       // `bobcat:element` itself.
       const entryUrl = renderer.registerScript(entry.url, entry.bytes)
-      await replaceNativeView(request, () =>
-        renderer!.load(
-          entryUrl,
-          styleSheetUrls,
-          undefined,
-          message.globalProps,
-        ),
+      await replaceNativeView(
+        request,
+        () =>
+          renderer!.load(entryUrl, styleSheetUrls, undefined, message.globalProps),
+        message.timing,
+        prepare(),
       )
       break
     }
@@ -434,12 +487,15 @@ async function dispatchRequest(message: RequestMessage): Promise<void> {
       }
       await replaceNativeView(
         request,
-        () => renderer!.load(
-          mainThreadScriptUrl,
-          styleSheetUrl === null ? [] : [styleSheetUrl],
-          backgroundThreadScriptUrl,
-          message.globalProps,
-        ),
+        () =>
+          renderer!.load(
+            mainThreadScriptUrl,
+            styleSheetUrl === null ? [] : [styleSheetUrl],
+            backgroundThreadScriptUrl,
+            message.globalProps,
+          ),
+        message.timing,
+        prepare(),
       )
       break
     }

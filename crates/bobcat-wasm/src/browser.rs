@@ -1,4 +1,18 @@
 //! Shared-memory browser composition exported through `wasm-bindgen`.
+//!
+//! Lynx performance entries reach the page only when it asks for them. The
+//! facade sets `observePerformance` in the init message when the page passed
+//! `onPerformanceEntry`; the Render Worker then hands
+//! [`BobcatRenderer::create`] a callback, and each view this renderer builds
+//! is told to [`LynxView::observe_performance`] every entry type. Without the
+//! callback no view is asked, and the engine assembles nothing. Each
+//! [`EngineEvent::Performance`] that [`BobcatRenderer::pump`] drains is
+//! written here, on the Render Worker, as the JSON object Lynx native's
+//! `onPerformanceEvent` hands a host
+//! ([`PerformanceEntry::write_lynx_json`]), and crosses as one string; the
+//! facade parses it. The host's own marks around a view (Lynx's
+//! `setExtraTiming`) come back the other way through
+//! [`BobcatRenderer::set_extra_timing`] as Unix milliseconds.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -8,10 +22,12 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
+use std::time::Duration;
 use std::{fmt, mem};
 
 use bobcat_core::editing::{Rect, TextInputSource, TextInputState};
 use bobcat_core::input::{InputEvent, KeyPhase, Modifiers, Point2D, PointerKind, PointerPhase};
+use bobcat_core::performance::{EntryTypes, ExtraTiming, PerformanceEntry, TimeOrigin};
 use bobcat_core::{
     DrawTarget, EngineEvent, EventRequester, FontBlob, FrameSize, LynxGroup, LynxView, ModuleCall,
     ModuleCallback, NativeModule, PageConfig, Painter, ScreenMetrics, StyleThreads, ViewSources,
@@ -24,6 +40,7 @@ use url::Url;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::future_to_promise;
 use web_sys::OffscreenCanvas;
+use web_time::SystemTime;
 
 use crate::text_input::{edit_command, enter_key_hint_name, input_mode_name, input_type_name};
 
@@ -290,6 +307,13 @@ pub struct BobcatRenderer {
     /// says nothing is, since the next view publishes none until it focuses
     /// a host of its own.
     text_input_focused: bool,
+    /// The Render Worker's `postPerformanceEntry`, when the page asked for
+    /// performance entries: each [`EngineEvent::Performance`] as Lynx's
+    /// `onPerformanceEvent` JSON text. `None` is the page that did not ask,
+    /// whose views are never told to observe anything.
+    on_performance: Option<js_sys::Function>,
+    /// Reused for every entry [`Self::pump`] writes.
+    performance_json: String,
     /// The group the current view belongs to, and the one thing that ends its
     /// two Workers: the Lynx-main one, and the worker-realm one after it.
     ///
@@ -318,7 +342,11 @@ impl BobcatRenderer {
     ///
     /// No native view exists until [`Self::load`] builds one.
     #[wasm_bindgen(js_name = create)]
-    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "the internal wasm-bindgen seam carries the whole init message flat"
+    )]
     pub async fn create(
         canvas: OffscreenCanvas,
         width: f32,
@@ -342,6 +370,8 @@ impl BobcatRenderer {
         // Called with each published `TextInputState` as one plain object of
         // `js/protocol.d.ts`'s `TextInputFields`.
         on_text_input: js_sys::Function,
+        // Each performance entry as Lynx's JSON text; `None` observes none.
+        on_performance: Option<js_sys::Function>,
     ) -> Result<BobcatRenderer, JsValue> {
         FrameSize::for_viewport(width, height, device_pixel_ratio).map_err(js_error)?;
         if worker_url.is_empty() {
@@ -452,6 +482,8 @@ impl BobcatRenderer {
                 }),
                 on_text_input,
                 text_input_focused: false,
+                on_performance,
+                performance_json: String::new(),
                 script_finished: false,
                 disposed: false,
             })
@@ -714,9 +746,18 @@ impl BobcatRenderer {
         // Only the newest state of a turn reaches the facade: each one is the
         // whole of it, so an older one says nothing the newest does not.
         let mut text_input = None;
+        let origin = view.time_origin();
         for event in view.pump() {
             match event {
                 EngineEvent::TextInputStateChanged(state) => text_input = Some(state),
+                EngineEvent::Performance(entry) => {
+                    post_performance(
+                        self.on_performance.as_ref(),
+                        &mut self.performance_json,
+                        &entry,
+                        &origin,
+                    );
+                }
                 EngineEvent::ScriptFinished => {
                     self.script_finished = true;
                     boot_finished = true;
@@ -1002,6 +1043,40 @@ impl BobcatRenderer {
         }
     }
 
+    /// Report the host's marks around the current view, Lynx's
+    /// `setExtraTiming`: when the user opened the page, when the container
+    /// (this canvas) was initialized, and when the template was prepared,
+    /// each as Unix milliseconds on the wall clock. `NaN` or a negative
+    /// value leaves that mark unset. A mark the view already has is kept,
+    /// and a load entry already reported is reported again with `fcp` and
+    /// `totalFcp` filled.
+    ///
+    /// A call before any view exists, or after the view ended, reports
+    /// nothing: there is no load for the marks to belong to.
+    #[wasm_bindgen(js_name = setExtraTiming)]
+    pub fn set_extra_timing(
+        &self,
+        open_time: f64,
+        container_init_start: f64,
+        container_init_end: f64,
+        prepare_template_start: f64,
+        prepare_template_end: f64,
+    ) -> Result<(), JsValue> {
+        self.ensure_running()?;
+        let Some(view) = self.view.as_ref() else {
+            return Ok(());
+        };
+        // `NotReady` is the only failure: the view has ended.
+        let _ = view.set_extra_timing(ExtraTiming {
+            open_time: wall_clock(open_time),
+            container_init_start: wall_clock(container_init_start),
+            container_init_end: wall_clock(container_init_end),
+            prepare_template_start: wall_clock(prepare_template_start),
+            prepare_template_end: wall_clock(prepare_template_end),
+        });
+        Ok(())
+    }
+
     /// Apply browser device metrics and resize the Worker-owned surface.
     /// Metrics that arrive before a page is loaded become the next view's.
     #[wasm_bindgen(js_name = resize)]
@@ -1158,6 +1233,12 @@ impl BobcatRenderer {
         // one. Refused only by a view that has already ended, which takes
         // no key either.
         let _ = view.set_text_input_source(TextInputSource::Commands);
+        // Asked before the boot can complete a load, so the load's own entry
+        // is among those reported. A page that passed no callback asks for
+        // nothing, and the view assembles nothing.
+        if self.on_performance.is_some() {
+            view.observe_performance(EntryTypes::ALL);
+        }
         if let Some(painter) = self.painter.as_mut() {
             // Attaching imposes the painter's metrics on the view, so a page
             // built at the wrapper's size lays out at the canvas's. It is
@@ -1213,6 +1294,36 @@ impl BobcatRenderer {
             Ok(())
         }
     }
+}
+
+/// Hands one performance entry to the Render Worker as Lynx's
+/// `onPerformanceEvent` JSON text, written into `json`. A callback that threw
+/// is reported and the page goes on: the panel that reads entries is the
+/// page's, not the view.
+fn post_performance(
+    callback: Option<&js_sys::Function>,
+    json: &mut String,
+    entry: &PerformanceEntry,
+    origin: &TimeOrigin,
+) {
+    let Some(callback) = callback else {
+        return;
+    };
+    json.clear();
+    entry.write_lynx_json(origin, json);
+    if let Err(error) = callback.call1(&JsValue::NULL, &JsValue::from_str(json)) {
+        console_error(&error);
+    }
+}
+
+/// A Unix-millisecond reading from the facade as a wall-clock instant;
+/// `None` for `NaN`, a negative value or one past what the clock holds.
+fn wall_clock(unix_millis: f64) -> Option<SystemTime> {
+    if !unix_millis.is_finite() || unix_millis < 0.0 {
+        return None;
+    }
+    let since_epoch = Duration::try_from_secs_f64(unix_millis / 1000.0).ok()?;
+    SystemTime::UNIX_EPOCH.checked_add(since_epoch)
 }
 
 /// Surfaces what the resource system recorded — an image that failed, a

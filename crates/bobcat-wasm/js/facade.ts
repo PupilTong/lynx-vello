@@ -1,4 +1,5 @@
 import { ImageDecoder } from './image-decoder.ts'
+import { parsePerformanceEntry, type LynxPerformanceEntry } from './performance.ts'
 import { TextInputProxy, keyFields } from './text-input.ts'
 import type {
   EditCommand,
@@ -6,6 +7,7 @@ import type {
   InitMessage,
   KeyFields,
   KeyMessage,
+  LoadTimingFields,
   NativeModuleCallMessage,
   NativeModuleCallbackMessage,
   Operation,
@@ -39,6 +41,8 @@ const WHEEL_LINE_CSS_PX = 40
 
 let initialization: Promise<void> | undefined
 
+export * from './performance.ts'
+
 export interface PageConfig {
   defaultDisplayLinear: boolean
   defaultOverflowVisible: boolean
@@ -67,6 +71,13 @@ export interface BobcatCanvasOptions {
   /** Opt-in Painter-thread rAF cadence, reported twice a second. This is
    * not a count of GPU presents; null means Worker rAF is unavailable. */
   onFrameRate?: (fps: number | null) => void
+  /**
+   * Opt-in Lynx performance entries, each as the object Lynx native's
+   * `onPerformanceEvent` hands a host: a page's `loadBundle`, every pipeline
+   * that carried a `__lynx_timing_flag`, and the `first-paint` and
+   * `first-contentful-paint` marks. Without it no view observes anything.
+   */
+  onPerformanceEntry?: (entry: LynxPerformanceEntry) => void
 }
 
 /** What one load hands the page it builds. */
@@ -76,6 +87,12 @@ export interface LoadOptions {
    * the engine carries as text and never reads.
    */
   globalProps?: unknown
+  /**
+   * Lynx's `openTime` for this load, as `Date.now()` Unix milliseconds: when
+   * the user asked for the page — clicked Load, or navigated. It is what
+   * `totalFcp` starts at; without it the load reports no `totalFcp`.
+   */
+  openTime?: number
 }
 
 /** web-core raw-loader defaults; callers may spread this object to override. */
@@ -220,6 +237,13 @@ function globalPropsText(value: unknown): string | undefined {
  * The `globalProps` field a load message carries, or no field at all: a page
  * given none and a page given `undefined` are the same page.
  */
+/** A `Date.now()` reading as the protocol carries one: `NaN` for none. */
+function unixMillis(value: number | undefined): number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? value
+    : Number.NaN
+}
+
 function globalPropsFields(options: LoadOptions): { globalProps?: string } {
   if (options === null || typeof options !== 'object') {
     throw new TypeError('Bobcat load options must be an object')
@@ -681,11 +705,17 @@ class RenderWorkerClient {
   #readySettled = false
   #worker: Worker
   #onFrameRate: BobcatCanvasOptions['onFrameRate']
+  #onPerformanceEntry: BobcatCanvasOptions['onPerformanceEntry']
   /** The canvas's text proxy, once the canvas exists. */
   onTextInput: ((state: TextInputFields) => void) | undefined
 
-  constructor(worker: Worker, modules: NativeModules, onFrameRate: BobcatCanvasOptions['onFrameRate']) {
-    this.#onFrameRate = onFrameRate
+  constructor(
+    worker: Worker,
+    modules: NativeModules,
+    options: Pick<BobcatCanvasOptions, 'onFrameRate' | 'onPerformanceEntry'>,
+  ) {
+    this.#onFrameRate = options.onFrameRate
+    this.#onPerformanceEntry = options.onPerformanceEntry
     this.#modules = modules
     this.#worker = worker
     this.#ready = new Promise((resolve, reject) => {
@@ -740,6 +770,19 @@ class RenderWorkerClient {
         this.#onFrameRate?.(message.fps)
       } catch (error) {
         console.error('Bobcat frame rate callback threw', error)
+      }
+      return
+    }
+    if (message?.type === 'bobcat-performance') {
+      const entry = parsePerformanceEntry(message.entry)
+      if (entry === undefined) {
+        console.warn('Bobcat received an unreadable performance entry', message.entry)
+        return
+      }
+      try {
+        this.#onPerformanceEntry?.(entry)
+      } catch (error) {
+        console.error('Bobcat performance entry callback threw', error)
       }
       return
     }
@@ -931,6 +974,13 @@ export class BobcatCanvas {
   #decoder: ImageDecoder
   #disposed = false
   #fatalError: Error | undefined
+  /**
+   * Lynx's `containerInitStart`/`End`: `create` from its call to its
+   * Worker's ready, as `Date.now()` readings. A canvas is initialized once,
+   * so only its first load reports them; a later page reuses the container
+   * and reports none rather than marks from long before it was opened.
+   */
+  #containerInit: { start: number; end: number } | undefined
   #pointerInput: CanvasPointerInput
   #textInput: TextInputProxy
   #unsubscribeFatal: () => void
@@ -943,8 +993,10 @@ export class BobcatCanvas {
     width: number,
     height: number,
     decoder: ImageDecoder,
+    containerInit: { start: number; end: number },
   ) {
     this.#client = client
+    this.#containerInit = containerInit
     this.#decoder = decoder
     const pointerInput = new CanvasPointerInput(
       canvas,
@@ -998,6 +1050,7 @@ export class BobcatCanvas {
     pageConfig: PageConfig,
     options: BobcatCanvasOptions = {},
   ): Promise<BobcatCanvas> {
+    const containerInitStart = Date.now()
     await init()
     if (
       typeof globalThis.HTMLCanvasElement !== 'function' ||
@@ -1044,7 +1097,7 @@ export class BobcatCanvas {
         name: 'bobcat-render',
         type: 'module',
       })
-      client = new RenderWorkerClient(worker, modules, options.onFrameRate)
+      client = new RenderWorkerClient(worker, modules, options)
       worker.postMessage(
         {
           type: 'bobcat-init',
@@ -1056,6 +1109,7 @@ export class BobcatCanvas {
           hardwareConcurrency: hardwareConcurrency(),
           nativeModules,
           measureFrameRate: options.onFrameRate !== undefined,
+          observePerformance: options.onPerformanceEntry !== undefined,
           screenPixelHeight: screen.height,
           screenPixelWidth: screen.width,
           workerUrl: THREAD_WORKER_URL,
@@ -1073,7 +1127,10 @@ export class BobcatCanvas {
         { cause: error },
       )
     }
-    return new BobcatCanvas(client, canvas, width, height, decoder)
+    return new BobcatCanvas(client, canvas, width, height, decoder, {
+      start: containerInitStart,
+      end: Date.now(),
+    })
   }
 
   get error(): Error | undefined {
@@ -1093,6 +1150,17 @@ export class BobcatCanvas {
     return this.#client.request(operation, values)
   }
 
+  /** The marks this side knows for one load: see `LoadTimingFields`. */
+  #loadTiming(options: LoadOptions): LoadTimingFields {
+    const container = this.#containerInit
+    this.#containerInit = undefined
+    return {
+      openTime: unixMillis(options?.openTime),
+      containerInitStart: unixMillis(container?.start),
+      containerInitEnd: unixMillis(container?.end),
+    }
+  }
+
   /**
    * Fetch a page's author stylesheets and its main-thread entry script, then
    * show it.
@@ -1110,7 +1178,8 @@ export class BobcatCanvas {
    * previous page running if the fetch was what failed. Relative URLs resolve
    * against this document's base URL. Nothing here imposes a deadline.
    *
-   * `options.globalProps` becomes the page's `lynx.__globalProps`.
+   * `options.globalProps` becomes the page's `lynx.__globalProps`, and
+   * `options.openTime` its Lynx `openTime`.
    */
   async load(
     url: string | URL,
@@ -1125,6 +1194,7 @@ export class BobcatCanvas {
     await this.#request('load', {
       ...globalPropsFields(options),
       styleSheetUrls: styleSheetUrls.map(documentUrl),
+      timing: this.#loadTiming(options),
       url: documentUrl(url),
     })
   }
@@ -1146,6 +1216,7 @@ export class BobcatCanvas {
     this.#textInput.reset()
     await this.#request('loadLynxXml', {
       ...globalPropsFields(options),
+      timing: this.#loadTiming(options),
       url: documentUrl(url),
     })
   }
@@ -1161,6 +1232,7 @@ export class BobcatCanvas {
     this.#textInput.reset()
     await this.#request('loadTemplate', {
       ...globalPropsFields(options),
+      timing: this.#loadTiming(options),
       url: documentUrl(url),
     })
   }
@@ -1188,6 +1260,7 @@ export class BobcatCanvas {
     await this.#request('loadZip', {
       ...globalPropsFields(options),
       bytes: new Uint8Array(data),
+      timing: this.#loadTiming(options),
       url: String(entryUrl),
     })
   }
