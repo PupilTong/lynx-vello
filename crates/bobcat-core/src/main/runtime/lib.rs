@@ -32,7 +32,7 @@ use std::rc::{Rc, Weak};
 use std::sync::Arc;
 
 use quickjs_rust_bridge::{HostArgument, HostValue};
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 use terminus::link::event::{EventDetail, ListenerKey, ListenerKinds, RegistrationChange};
 use terminus::link::{MethodCall, MethodError, MethodOutcome, StylePool};
@@ -57,10 +57,10 @@ use crate::main::tree::{
     invoke_base_method, is_svg, is_text, nested_page, new_document, report_selection_changes,
     reset_frame,
 };
-use crate::performance::OpenerId;
+use crate::performance::{Opener, OpenerId};
 use crate::realm::child::{ChildHostModules, ChildHostState, ChildKey};
 use crate::realm::policy::context_of;
-use crate::realm::{RealmCore, RealmId, open_realm, string_argument};
+use crate::realm::{RealmCore, RealmId, RealmNames, open_realm, string_argument};
 use crate::script::ScriptError;
 use crate::timers::run_due_timers;
 use crate::view::{LynxViewError, ScreenMetrics, ScriptSource, StartupSource, Viewport};
@@ -1210,6 +1210,11 @@ struct DocumentSlot {
     /// ([`Self::sync_content_detection`]), so a commit writes the document
     /// only when the registry's answer changed.
     content_detection: bool,
+    /// Each `<frame>` card's realm, by what it is to the view's performance
+    /// records: where a card's `loadmetrics` is delivered
+    /// ([`MainThreadRuntime::deliver_frame_load_metrics`]). An entry leaves
+    /// with its child.
+    card_realms: FxHashMap<OpenerId, ChildKey>,
     /// Where committed frames leave for the painting side.
     outbox: ViewOutbox,
 }
@@ -1283,6 +1288,7 @@ impl DocumentSlot {
             pending_flags: Vec::new(),
             native_pipelines: Vec::new(),
             content_detection: false,
+            card_realms: FxHashMap::default(),
             outbox,
         }))
     }
@@ -2394,7 +2400,10 @@ impl MainThreadRuntime {
             &host,
             thread,
             None,
-            ScriptSource::Main,
+            RealmNames {
+                source: ScriptSource::Main,
+                opener: Opener::Realm(OpenerId::PAGE),
+            },
             // Every child gets the same document members, and `Worker`
             // members of its own.
             Some(Rc::clone(&document) as Rc<dyn ChildHostModules>),
@@ -2553,6 +2562,38 @@ impl MainThreadRuntime {
                 .unwrap_or(Ok(false)),
         }
         .map_err(|error| MainThreadError::from_engine("delivering a worker event", error));
+        let finished = self.finish_batch(js_runtime, called.is_ok());
+        called.map(|_| ()).and(finished)
+    }
+
+    /// Hands a `<frame>` card's realm its load entry, `json` (Lynx's
+    /// `pipeline.loadBundle` entry as JSON text), which `bobcat:frame-boot`
+    /// dispatches at the card's page as the frame's `loadmetrics`. A card
+    /// whose realm is gone — released since its load completed — is handed
+    /// nothing. What a listener throws is that realm's failure, reported by
+    /// the dispatch; what the call itself left unhandled is the card's.
+    pub(crate) fn deliver_frame_load_metrics(
+        &mut self,
+        js_runtime: &mut ScriptRuntime,
+        card: OpenerId,
+        json: &str,
+    ) -> Result<(), MainThreadError> {
+        let Some(child) = self.slot.borrow().card_realms.get(&card).copied() else {
+            return Ok(());
+        };
+        let called = self
+            .core
+            .children
+            .call_module_export(
+                js_runtime,
+                child,
+                Export::LoadMetrics,
+                &[HostArgument::String(json)],
+            )
+            .unwrap_or(Ok(false))
+            .map_err(|error| {
+                MainThreadError::from_engine("delivering a frame's loadmetrics", error)
+            });
         let finished = self.finish_batch(js_runtime, called.is_ok());
         called.map(|_| ()).and(finished)
     }
@@ -4421,24 +4462,31 @@ impl DocumentHost {
 }
 
 impl ChildHostModules for DocumentHost {
+    /// The card's realm is its own opener of pipelines, as a nested card is
+    /// its own `LynxTemplateRender` in native.
+    fn allocate_opener(&self) -> OpenerId {
+        self.outbox.registry().allocate_opener()
+    }
+
     /// A child's members: the page realm's, with no startup strings, which
     /// are the page's, its event registrations filed under its
-    /// [`RealmId::listener_key`], and a `closeRealm` that retires the child;
-    /// then the `Worker` members over a worker owner of the child's, recorded
-    /// under `key` so the workers it creates are delivered to it. What the
-    /// child keeps is that owner and the release of its registrations
+    /// [`RealmId::listener_key`], its records opened as `opener`, and a
+    /// `closeRealm` that retires the child; then the `Worker` members over a
+    /// worker owner of the child's, recorded under `key` so the workers it
+    /// creates are delivered to it. The slot records `opener` as `key`'s, so
+    /// the card's `loadmetrics` finds its realm. What the child keeps is
+    /// that owner and the release of its registrations and of that record
     /// ([`ChildDocumentState`]).
     fn install(
         &self,
         engine: &mut ScriptEngine,
         key: ChildKey,
+        opener: OpenerId,
         retired: Rc<Cell<bool>>,
     ) -> Result<Box<dyn ChildHostState>, ScriptError> {
         let created = ClockInstant::now();
         let listener_key = RealmId::Child(key).listener_key();
-        // The card's realm is its own opener of pipelines, as a nested
-        // card is its own `LynxTemplateRender` in native.
-        let timing = RealmTiming::new(self.outbox.registry().allocate_opener());
+        let timing = RealmTiming::new(opener);
         self.install_members(
             engine,
             STARTUP_STRINGS.map(|name| (name, None)),
@@ -4459,10 +4507,12 @@ impl ChildHostModules for DocumentHost {
             .install(engine)
             .map_err(|error| context_of("installing Worker", error))?;
         timing.set_created(created, ClockInstant::now());
+        self.slot.borrow_mut().card_realms.insert(opener, key);
         Ok(Box::new(ChildDocumentState {
             workers: Box::new(workers),
             slot: Rc::clone(&self.slot),
             key: listener_key,
+            opener,
         }))
     }
 }
@@ -5031,6 +5081,9 @@ struct ChildDocumentState {
     workers: Box<dyn ChildHostState>,
     slot: Rc<RefCell<DocumentSlot>>,
     key: ListenerKey,
+    /// The child's realm to the view's performance records, which the slot
+    /// maps to it for its `loadmetrics`.
+    opener: OpenerId,
 }
 
 impl ChildHostState for ChildDocumentState {
@@ -5044,6 +5097,7 @@ impl Drop for ChildDocumentState {
         // A child is freed by the owner's release step or with the realm
         // core, never inside a member, so nothing holds the slot here.
         if let Ok(mut slot) = self.slot.try_borrow_mut() {
+            slot.card_realms.remove(&self.opener);
             slot.forget_realm(self.key);
         }
     }

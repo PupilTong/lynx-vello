@@ -2448,3 +2448,115 @@ fn a_cards_stop_exposure_leaves_the_pages_exposure_running() {
     );
     assert_eq!(reported(&events), Vec::<&str>::new());
 }
+
+/// The host page for `loadmetrics`: a `bindloadmetrics` worklet on the frame
+/// and a listener on the page, each logging `loadmetrics <label> <what it
+/// heard>` — the detail's `url` and `mode`, its entry's `entryType`, `name`
+/// and the type of its `loadBundleStart`, and whether the target is the
+/// frame.
+fn load_metrics_host(src: &str) -> String {
+    host_page_with(
+        src,
+        true,
+        r"
+        globalThis.runWorklet = (value, params) => value.body(params[0]);
+        const heard = (label) => (event) => console.log('loadmetrics ' + label + ' ' +
+            JSON.stringify({
+                url: event.detail.url,
+                mode: event.detail.mode,
+                entryType: event.detail.entry.entryType,
+                name: event.detail.entry.name,
+                loadBundleStart: typeof event.detail.entry.loadBundleStart,
+                frame: event.target.uid === __GetElementUniqueID(frame),
+            }));
+        __AddEvent(frame, 'bindEvent', 'loadmetrics', { type: 'worklet', value: { body: heard('bind') } });
+        __AddEventListener(page, 'loadmetrics', heard('page'), {});
+        ",
+    )
+}
+
+/// A card root with no `SystemInfo` check, for a view whose painter draws
+/// into a small texture of its own.
+fn drawn_root() -> String {
+    "globalThis.renderPage = () => { const p = __CreatePage('0', 0); \
+     const t = __CreateText(0); __AppendElement(t, __CreateRawText('nested')); \
+     __AppendElement(p, t); };"
+        .to_owned()
+}
+
+/// Every console message among `events` that starts with `loadmetrics `.
+fn load_metrics_logged(events: &[EngineEvent]) -> Vec<&str> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            EngineEvent::ConsoleMessage { message, .. } if message.starts_with("loadmetrics ") => {
+                Some(message.as_str())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Once a frame's card has loaded — its first frame presented and its BTS's
+/// entry loaded — the card's realm dispatches the frame's `loadmetrics`
+/// (Lynx's `LynxFrameView.onFrameLoadMetricsEvent`) at its page, bubbling
+/// and composed, with native's detail: the frame's `src` as written,
+/// `mode: "standard"`, and the card's `pipeline.loadBundle` entry. The
+/// frame's `bindloadmetrics` hears it retargeted to the frame and the page's
+/// listener as it bubbles, once each, whether or not the host observes the
+/// load; the page's own load fires none. The frame's fetch of its card is no
+/// lazy bundle load, as native's `kFrame` fetch is not: a host observing
+/// `resource` hears nothing of it.
+#[test]
+fn a_frames_card_fires_loadmetrics_once_its_load_completes() {
+    let src = "child.web.bundle";
+    let mut engine = serving_a_root_under(&load_metrics_host(src), &drawn_root())
+        .offscreen(120.0, 80.0)
+        .create(Arc::new(NoWakeup));
+    engine
+        .view
+        .observe_performance(crate::performance::EntryTypes::RESOURCE);
+    let mut events = Vec::new();
+    let heard = format!(
+        r#"{{"url":"{src}","mode":"standard","entryType":"pipeline","name":"loadBundle","loadBundleStart":"number","frame":true}}"#
+    );
+    let lines = [
+        format!("loadmetrics bind {heard}"),
+        format!("loadmetrics page {heard}"),
+    ];
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !logged(&events, &lines[1]) {
+        let _ = engine.tick(true);
+        for event in engine.pump() {
+            assert!(!event.is_fatal(), "the view ended: {event:?}");
+            events.push(event);
+        }
+        assert!(Instant::now() < deadline, "no loadmetrics: {events:?}");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    // Long enough for any second one, the page's own load's included.
+    for _ in 0..40 {
+        let _ = engine.tick(true);
+        events.extend(engine.pump());
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(
+        load_metrics_logged(&events),
+        lines.each_ref().map(String::as_str)
+    );
+    assert_eq!(reported(&events), Vec::<&str>::new());
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, EngineEvent::Performance(_))),
+        "{events:?}"
+    );
+    let fetches = engine
+        .view
+        .fetcher()
+        .fetch_requests
+        .lock()
+        .expect("never poisoned")
+        .clone();
+    assert_eq!(fetches, [(CARD.to_owned(), false)]);
+}

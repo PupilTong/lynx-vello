@@ -718,6 +718,11 @@ impl Page {
                 }
             }
             ToMain::ImageEvents(events) => runtime.apply_image_events(&events),
+            ToMain::FrameLoadMetrics { card, json } => {
+                if let Err(error) = runtime.deliver_frame_load_metrics(js, card, &json) {
+                    policy::report(self, Scene::HostCall, error.into_script_error());
+                }
+            }
             // A task of this view's, so the view's end reaps it; it enters
             // no realm, and the next configuration ends it.
             ToMain::ReportJsBlocking { epoch, interval } => owner::spawn(

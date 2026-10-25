@@ -133,6 +133,55 @@ describe("memory entries", () => {
   });
 });
 
+describe("resource entries", () => {
+  it("read booleans back and keep a lazy bundle's keys flat", () => {
+    // As the host writes a `resource.lazyBundle` entry.
+    const record = entryRecord([
+      ["entryType", "sresource"],
+      ["name", "slazyBundle"],
+      ["componentUrl", "sapp:///lazy.bundle"],
+      ["size", "n2048"],
+      ["loadSuccess", "b1"],
+      ["mode", "snormal"],
+      ["decodeStart", "n1739594612310.000"],
+      ["decodeEnd", "n1739594612311.500"],
+      ["requireStart", "n1739594612300.000"],
+      ["requireEnd", "n1739594612309.250"],
+    ]) + entryRecord([
+      ["entryType", "sresource"],
+      ["name", "slazyBundle"],
+      ["componentUrl", "sapp:///missing.bundle"],
+      ["loadSuccess", "b0"],
+      ["mode", "snormal"],
+      ["requireStart", "n1"],
+      ["requireEnd", "n2"],
+    ]);
+    expect(decodeEntries(record, splitRecord)).toEqual([
+      {
+        entryType: "resource",
+        name: "lazyBundle",
+        componentUrl: "app:///lazy.bundle",
+        size: 2048,
+        loadSuccess: true,
+        mode: "normal",
+        decodeStart: 1739594612310,
+        decodeEnd: 1739594612311.5,
+        requireStart: 1739594612300,
+        requireEnd: 1739594612309.25,
+      },
+      {
+        entryType: "resource",
+        name: "lazyBundle",
+        componentUrl: "app:///missing.bundle",
+        loadSuccess: false,
+        mode: "normal",
+        requireStart: 1,
+        requireEnd: 2,
+      },
+    ]);
+  });
+});
+
 describe("observers", () => {
   function setup(record: string) {
     const host = {
@@ -149,11 +198,11 @@ describe("observers", () => {
     const second = observers.createObserver(() => {});
     first.observe(["pipeline"]);
     second.observe(["pipeline.loadBundle"]);
-    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0]]);
+    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0, 0]]);
     first.disconnect();
-    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0]]);
+    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0, 0]]);
     second.observe([]);
-    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0], [0, 0, 0]]);
+    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0, 0], [0, 0, 0, 0]]);
   });
 
   it("tell the host when an observer asks for paint entries and when none does", () => {
@@ -162,15 +211,15 @@ describe("observers", () => {
     const paints = observers.createObserver(() => {});
     pipelines.observe(["pipeline"]);
     paints.observe(["paint"]);
-    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0], [1, 1, 0]]);
+    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0, 0], [1, 1, 0, 0]]);
     paints.observe(["paint.first-contentful-paint", "pipeline"]);
-    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0], [1, 1, 0]]);
+    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0, 0], [1, 1, 0, 0]]);
     paints.observe(["pipeline"]);
-    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0], [1, 1, 0], [1, 0, 0]]);
+    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0, 0], [1, 1, 0, 0], [1, 0, 0, 0]]);
     paints.observe(["paint"]);
     pipelines.disconnect();
     paints.disconnect();
-    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0], [1, 1, 0], [1, 0, 0], [1, 1, 0], [0, 0, 0]]);
+    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0, 0], [1, 1, 0, 0], [1, 0, 0, 0], [1, 1, 0, 0], [0, 0, 0, 0]]);
   });
 
   it("tell the host when an observer asks for memory entries and when none does", () => {
@@ -179,13 +228,33 @@ describe("observers", () => {
     const memory = observers.createObserver(() => {});
     pipelines.observe(["pipeline", "paint"]);
     memory.observe(["memory"]);
-    expect(host.observePerformance.mock.calls).toEqual([[1, 1, 0], [1, 1, 1]]);
+    expect(host.observePerformance.mock.calls).toEqual([[1, 1, 0, 0], [1, 1, 1, 0]]);
     memory.observe(["memory.memory", "pipeline"]);
-    expect(host.observePerformance.mock.calls).toEqual([[1, 1, 0], [1, 1, 1]]);
+    expect(host.observePerformance.mock.calls).toEqual([[1, 1, 0, 0], [1, 1, 1, 0]]);
     memory.disconnect();
-    expect(host.observePerformance.mock.calls).toEqual([[1, 1, 0], [1, 1, 1], [1, 1, 0]]);
+    expect(host.observePerformance.mock.calls).toEqual([[1, 1, 0, 0], [1, 1, 1, 0], [1, 1, 0, 0]]);
     pipelines.disconnect();
-    expect(host.observePerformance.mock.calls).toEqual([[1, 1, 0], [1, 1, 1], [1, 1, 0], [0, 0, 0]]);
+    expect(host.observePerformance.mock.calls).toEqual([[1, 1, 0, 0], [1, 1, 1, 0], [1, 1, 0, 0], [0, 0, 0, 0]]);
+  });
+
+  it("tell the host when an observer asks for resource entries and when none does", () => {
+    const { host, observers } = setup("");
+    const pipelines = observers.createObserver(() => {});
+    const resources = observers.createObserver(() => {});
+    pipelines.observe(["pipeline"]);
+    resources.observe(["resource.lazyBundle"]);
+    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0, 0], [1, 0, 0, 1]]);
+    resources.observe(["resource", "pipeline"]);
+    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0, 0], [1, 0, 0, 1]]);
+    resources.disconnect();
+    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0, 0], [1, 0, 0, 1], [1, 0, 0, 0]]);
+    pipelines.disconnect();
+    expect(host.observePerformance.mock.calls).toEqual([
+      [1, 0, 0, 0],
+      [1, 0, 0, 1],
+      [1, 0, 0, 0],
+      [0, 0, 0, 0],
+    ]);
   });
 
   it("receive memory entries by type and by type and name", () => {

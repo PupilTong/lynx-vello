@@ -619,7 +619,7 @@ pub(crate) fn module_answer(
         LoadedSource::Module { source, url } => return Ok((url, source)),
         LoadedSource::StyleSheet(_) => "stylesheet",
         LoadedSource::Font(_) => "font",
-        LoadedSource::Fetched => "plain fetch",
+        LoadedSource::Fetched(_) => "plain fetch",
     };
     Err(format!("the fetcher returned a {kind} for {requested}"))
 }
@@ -720,7 +720,7 @@ mod tests {
     use tokio::sync::oneshot;
 
     use super::*;
-    use crate::resource::{ResourceErrorKind, StyleSheetSource};
+    use crate::resource::{FetchOutcome, ResourceErrorKind, StyleSheetSource};
     use crate::test_support::block_on;
 
     const REQUESTED: &str = "app:///dep.js";
@@ -757,7 +757,10 @@ mod tests {
                 LoadedSource::Font(terminus::link::FontBlob::from_static(b"not a font")),
                 "font",
             ),
-            (LoadedSource::Fetched, "plain fetch"),
+            (
+                LoadedSource::Fetched(FetchOutcome::default()),
+                "plain fetch",
+            ),
         ] {
             let answered = module_answer(REQUESTED, answer);
             assert_eq!(

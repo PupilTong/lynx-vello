@@ -239,6 +239,15 @@ pub(crate) enum ToMain {
         epoch: u64,
         config: crate::performance::MemoryConfig,
     },
+    /// A `<frame>` card's load completed: its `pipeline.loadBundle` entry
+    /// as Lynx's JSON text (`json`), written on the embedder's thread by
+    /// `LynxView::pump`, for the card's realm (`card`) to dispatch at its
+    /// page as Lynx's `loadmetrics` component event, which the frame's
+    /// `bindloadmetrics` hears. A card whose realm is gone drops it.
+    FrameLoadMetrics {
+        card: crate::performance::OpenerId,
+        json: String,
+    },
     #[cfg(test)]
     Probe(Box<dyn FnOnce(&mut LynxDocument) + Send>),
     /// The one command that is not the realm's: it spawns a task of the view

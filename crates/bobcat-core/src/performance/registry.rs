@@ -49,6 +49,16 @@
 //! `memory` entries reported from them, for the Rust embedder when it
 //! observes [`EntryTypes::MEMORY`] and for each BTS worker whose observers
 //! asked for `memory`.
+//!
+//! So do the `resource.lazyBundle` entries a realm's `fetchResource`
+//! completes ([`PipelineRegistry::note_lazy_bundle`]), made only while the
+//! Rust embedder observes [`EntryTypes::RESOURCE`] or a BTS observer asked
+//! for `resource` ([`PipelineRegistry::times_resources`], one relaxed load
+//! per fetch).
+//!
+//! And the `<frame>` cards' loads: each nested card's completed load record
+//! is owed to that card's realm as Lynx's `loadmetrics` component event
+//! ([`PipelineRegistry::take_frame_loads`]), whoever observes.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -67,8 +77,9 @@ use super::monitors::{
 };
 use super::{
     ACTUAL_FMP_FLAG, ActualFmp, EntryTypes, ExtraTiming, FrameworkTiming, JsBlockingConfig,
-    JsBlockingStage, LoadBundleTiming, Metric, PaintEntry, PaintName, PainterTiming,
-    PerformanceEntry, PipelineOrigin, PipelineTiming, ReloadBundleTiming, TimeOrigin, Timestamp,
+    JsBlockingStage, LazyBundleEntry, LoadBundleTiming, Metric, PaintEntry, PaintName,
+    PainterTiming, PerformanceEntry, PipelineOrigin, PipelineTiming, ReloadBundleTiming,
+    TimeOrigin, Timestamp,
 };
 use crate::background::WorkerKey;
 use crate::clock::{ClockInstant, SystemTime};
@@ -205,6 +216,9 @@ pub(crate) struct PipelineRegistry {
     /// once it has read the committed frame for it: the painter's one
     /// relaxed load per `pump`.
     frame_memory_sample: AtomicBool,
+    /// [`Self::times_resources`]: the Rust embedder observes
+    /// [`EntryTypes::RESOURCE`] or a BTS observer asked for `resource`.
+    resource_observed: AtomicBool,
     inner: Mutex<Inner>,
 }
 
@@ -259,6 +273,18 @@ struct Inner {
     /// The `memory` entries each such worker has not taken, oldest first,
     /// at most [`MAX_RECORDS`] each.
     worker_memory: FxHashMap<WorkerKey, VecDeque<MemoryEntry>>,
+    /// The workers among the observing ones whose observers asked for
+    /// `resource` entries.
+    observing_resource: FxHashSet<WorkerKey>,
+    /// The `resource.lazyBundle` entries the Rust embedder has not taken,
+    /// oldest first, at most [`MAX_RECORDS`].
+    resource_reports: VecDeque<LazyBundleEntry>,
+    /// The `resource.lazyBundle` entries each worker observing `resource`
+    /// has not taken, oldest first, at most [`MAX_RECORDS`] each.
+    worker_resources: FxHashMap<WorkerKey, VecDeque<LazyBundleEntry>>,
+    /// The `<frame>` card realms whose load completed and whose `loadmetrics`
+    /// the embedder's next `pump` has not sent yet, in completion order.
+    frame_loads_owed: Vec<OpenerId>,
 }
 
 /// The memory monitor's state: Lynx's `MemoryMonitor` members.
@@ -426,6 +452,7 @@ impl PipelineRegistry {
             js_blocking_signal: watch::channel(JsBlockingSignal::default()).0,
             memory_epoch: watch::channel(0).0,
             frame_memory_sample: AtomicBool::new(false),
+            resource_observed: AtomicBool::new(false),
             inner: Mutex::new(Inner::default()),
         }
     }
@@ -452,6 +479,10 @@ impl PipelineRegistry {
     fn update_observed(&self, inner: &Inner) {
         self.observed.store(
             !inner.rust_types.is_empty() || !inner.observing.is_empty(),
+            Ordering::Relaxed,
+        );
+        self.resource_observed.store(
+            inner.rust_types.contains(EntryTypes::RESOURCE) || !inner.observing_resource.is_empty(),
             Ordering::Relaxed,
         );
         let detect = Self::paint_wanted(inner) && inner.first_contentful_paint.is_none();
@@ -1080,13 +1111,29 @@ impl PipelineRegistry {
         record.audience = audience;
         record.worker = worker;
         let mut page_loaded = None;
+        let mut frame_load = None;
         if record.kind == Kind::Load && !record.load_only {
             let snapshot = record.clone();
-            if realm == Some(OpenerId::PAGE) {
-                page_loaded = record.presented.map(|frame| frame.presented);
+            match realm {
+                Some(OpenerId::PAGE) => {
+                    page_loaded = record.presented.map(|frame| frame.presented);
+                }
+                // A `<frame>` card's own load: Lynx's `FramePerformanceClient`
+                // forwards exactly this entry to the frame as `loadmetrics`
+                // (`LynxFrameView.java:456-477`), whatever the host observes,
+                // so it is owed whoever observes — one per card load.
+                Some(card) => frame_load = Some(card),
+                None => {}
             }
             if let Some(load) = realm.and_then(|realm| inner.loads.get_mut(&realm)) {
                 load.completed = Some(snapshot);
+            }
+        }
+        if let Some(card) = frame_load {
+            inner.frame_loads_owed.push(card);
+            if audience == 0 {
+                // What the embedder's next `pump` reads to look at all.
+                self.generation.fetch_add(1, Ordering::Release);
             }
         }
         if audience == 0 {
@@ -1476,6 +1523,8 @@ impl PipelineRegistry {
         inner.observing_paint.remove(&key);
         inner.observing_memory.remove(&key);
         inner.worker_memory.remove(&key);
+        inner.observing_resource.remove(&key);
+        inner.worker_resources.remove(&key);
         inner.worker_loads.remove(&key);
         inner.wakes.retain(|worker| *worker != key);
         if let Some(realm) = inner.bindings.remove(&key)
@@ -1486,17 +1535,18 @@ impl PipelineRegistry {
         self.update_observed(inner);
     }
 
-    /// Whether the worker `key` has a `lynx.performance` observer, and
-    /// whether one of its observers asked for `paint` entries, and one for
-    /// `memory` entries (which only an observing worker can have). A worker
-    /// that stops asking for `memory` drops the ones it had not taken.
-    pub(crate) fn observe_worker(
-        &self,
-        key: WorkerKey,
-        observing: bool,
-        paint: bool,
-        memory: bool,
-    ) {
+    /// Whether the worker `key` has a `lynx.performance` observer — `None`
+    /// for none — and, when it has, which of the types a worker opts into
+    /// one of its observers asked for: [`EntryTypes::PAINT`],
+    /// [`EntryTypes::MEMORY`] and [`EntryTypes::RESOURCE`]; any other bit
+    /// means nothing here. A worker that stops asking for `memory` or
+    /// `resource` drops the ones it had not taken.
+    pub(crate) fn observe_worker(&self, key: WorkerKey, asked: Option<EntryTypes>) {
+        let observing = asked.is_some();
+        let asked = asked.unwrap_or(EntryTypes::NONE);
+        let paint = asked.contains(EntryTypes::PAINT);
+        let memory = asked.contains(EntryTypes::MEMORY);
+        let resource = asked.contains(EntryTypes::RESOURCE);
         let mut inner = self.lock();
         if observing {
             inner.observing.insert(key);
@@ -1514,7 +1564,107 @@ impl PipelineRegistry {
             inner.observing_memory.remove(&key);
             inner.worker_memory.remove(&key);
         }
+        if observing && resource {
+            inner.observing_resource.insert(key);
+        } else {
+            inner.observing_resource.remove(&key);
+            inner.worker_resources.remove(&key);
+        }
         self.update_observed(&inner);
+    }
+
+    /// Whether a `fetchResource` is timed: the Rust embedder observes
+    /// [`EntryTypes::RESOURCE`] or a BTS observer asked for `resource`. One
+    /// relaxed load, which is all a fetch reads while nobody does.
+    pub(crate) fn times_resources(&self) -> bool {
+        self.resource_observed.load(Ordering::Relaxed)
+    }
+
+    /// One timed fetch completed, opened by `opener`: a `resource.lazyBundle`
+    /// entry, kept for the Rust embedder when it observes
+    /// [`EntryTypes::RESOURCE`] and for the BTS worker of the realm that
+    /// fetched — the worker itself, or the BTS its main-thread realm
+    /// connected — when its observers asked for `resource`, each bounded by
+    /// [`MAX_RECORDS`]. Answers whether it was kept anywhere, which is when
+    /// the embedder is owed a wake.
+    pub(crate) fn note_lazy_bundle(&self, opener: Opener, entry: LazyBundleEntry) -> bool {
+        let mut guard = self.lock();
+        let inner = &mut *guard;
+        let rust = inner.rust_types.contains(EntryTypes::RESOURCE);
+        let worker = match opener {
+            Opener::Worker(key) => Some(key),
+            Opener::Realm(realm) => Self::background_of(inner, realm),
+        }
+        .filter(|key| inner.observing_resource.contains(key));
+        if !rust && worker.is_none() {
+            return false;
+        }
+        if let Some(key) = worker {
+            let queue = inner.worker_resources.entry(key).or_default();
+            if queue.len() >= MAX_RECORDS {
+                queue.pop_front();
+            }
+            queue.push_back(entry.clone());
+            if !inner.wakes.contains(&key) {
+                inner.wakes.push(key);
+            }
+        }
+        if rust {
+            if inner.resource_reports.len() >= MAX_RECORDS {
+                inner.resource_reports.pop_front();
+            }
+            inner.resource_reports.push_back(entry);
+        }
+        self.generation.fetch_add(1, Ordering::Release);
+        true
+    }
+
+    /// Every `<frame>` card's load entry owed to its realm as `loadmetrics`
+    /// since the last call, in completion order, assembled on the caller's
+    /// thread — the embedder's, in `pump` — from the record its completion
+    /// kept.
+    pub(crate) fn take_frame_loads(&self) -> Vec<(OpenerId, LoadBundleTiming)> {
+        let taken: Vec<(OpenerId, Taken)> = {
+            let mut guard = self.lock();
+            let inner = &mut *guard;
+            if inner.frame_loads_owed.is_empty() {
+                return Vec::new();
+            }
+            let owed = std::mem::take(&mut inner.frame_loads_owed);
+            owed.into_iter()
+                .filter_map(|card| {
+                    let load = inner.loads.get(&card)?;
+                    let record = load.completed.clone()?;
+                    let snapshot = LoadSnapshot {
+                        url: Arc::clone(&load.url),
+                        create_lynx: load.create_lynx,
+                        vm_execute: load.vm_execute,
+                        page: false,
+                    };
+                    Some((
+                        card,
+                        Taken {
+                            record,
+                            load: Some(snapshot),
+                            extra: inner.extra,
+                            first_paint: inner.first_paint,
+                        },
+                    ))
+                })
+                .collect()
+        };
+        taken
+            .into_iter()
+            .filter_map(|(card, taken)| {
+                taken
+                    .assemble(EntryTypes::LOAD_BUNDLE, &self.origin)
+                    .into_iter()
+                    .find_map(|entry| match entry {
+                        PerformanceEntry::LoadBundle(load) => Some((card, *load)),
+                        _ => None,
+                    })
+            })
+            .collect()
     }
 
     /// What the Rust embedder subscribes to.
@@ -1553,10 +1703,10 @@ impl PipelineRegistry {
     /// Every completed entry the Rust embedder has not taken, assembled on
     /// the caller's thread, of the types it subscribes to: the pipeline and
     /// paint records in completion order, then the long tasks, then the JS
-    /// blocking reports, then the memory reports, each in the order they
-    /// were made.
+    /// blocking reports, then the memory reports, then the lazy bundles,
+    /// each in the order they were made.
     pub(crate) fn take_completed_for_rust(&self) -> Vec<PerformanceEntry> {
-        let (taken, long_tasks, blocking, memory, types) = {
+        let (taken, long_tasks, blocking, memory, resources, types) = {
             let mut inner = self.lock();
             let types = inner.rust_types;
             (
@@ -1564,6 +1714,7 @@ impl PipelineRegistry {
                 std::mem::take(&mut inner.long_tasks),
                 std::mem::take(&mut inner.js_blocking_reports),
                 std::mem::take(&mut inner.memory_reports),
+                std::mem::take(&mut inner.resource_reports),
                 types,
             )
         };
@@ -1588,22 +1739,30 @@ impl PipelineRegistry {
         if types.contains(EntryTypes::MEMORY) {
             entries.extend(memory.into_iter().map(PerformanceEntry::Memory));
         }
+        if types.contains(EntryTypes::RESOURCE) {
+            entries.extend(resources.into_iter().map(PerformanceEntry::LazyBundle));
+        }
         entries
     }
 
     /// Every completed entry the worker `key` is owed, assembled on its
     /// own thread: the pipeline and paint records, then its `memory`
-    /// reports.
+    /// reports, then its lazy bundles.
     pub(crate) fn take_completed_for_worker(&self, key: WorkerKey) -> Vec<PerformanceEntry> {
-        let (taken, memory) = {
+        let (taken, memory, resources) = {
             let mut inner = self.lock();
             let taken = Self::take_completed(&mut inner, WORKER, Some(key));
-            (taken, inner.worker_memory.remove(&key).unwrap_or_default())
+            (
+                taken,
+                inner.worker_memory.remove(&key).unwrap_or_default(),
+                inner.worker_resources.remove(&key).unwrap_or_default(),
+            )
         };
         taken
             .iter()
             .flat_map(|completed| completed.assemble(EntryTypes::ALL, &self.origin))
             .chain(memory.into_iter().map(PerformanceEntry::Memory))
+            .chain(resources.into_iter().map(PerformanceEntry::LazyBundle))
             .collect()
     }
 

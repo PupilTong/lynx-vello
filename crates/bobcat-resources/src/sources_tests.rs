@@ -272,10 +272,10 @@ async fn a_fetch_completes_where_the_host_installs_no_containers() {
         result(load(
             &resources,
             "app:///page/lazy.bundle",
-            SourceKind::Fetch
+            SourceKind::Fetch { timed: false }
         ))
         .await,
-        Ok(LoadedSource::Fetched)
+        Ok(LoadedSource::Fetched(_))
     ));
 }
 
@@ -292,8 +292,13 @@ async fn an_unrecognized_body_completes_the_fetch_and_registers_nothing() {
         .unwrap();
 
     assert!(matches!(
-        result(load(&resources, "app:///page/photo.png", SourceKind::Fetch)).await,
-        Ok(LoadedSource::Fetched)
+        result(load(
+            &resources,
+            "app:///page/photo.png",
+            SourceKind::Fetch { timed: false }
+        ))
+        .await,
+        Ok(LoadedSource::Fetched(_))
     ));
     // Offered the bytes, and wrote nothing: the section URL a container would
     // have answered at is still nothing.
@@ -329,10 +334,10 @@ async fn an_installed_container_answers_the_module_requests_it_registered() {
         result(load(
             &resources,
             "app:///lazy-bundle/child.bundle",
-            SourceKind::Fetch
+            SourceKind::Fetch { timed: false }
         ))
         .await,
-        Ok(LoadedSource::Fetched)
+        Ok(LoadedSource::Fetched(_))
     ));
 
     let Ok(LoadedSource::Module { source, url }) = result(load(
@@ -400,7 +405,7 @@ async fn an_installer_that_refuses_the_bytes_reports_its_own_message() {
     let Err(LynxViewError::Resource(error)) = result(load(
         &resources,
         "app:///page/bad.bundle",
-        SourceKind::Fetch,
+        SourceKind::Fetch { timed: false },
     ))
     .await
     else {
@@ -438,10 +443,10 @@ async fn a_completed_fetch_is_what_the_probe_answers_true_for() {
         result(load(
             &resources,
             "app:///lazy-bundle/child.bundle",
-            SourceKind::Fetch
+            SourceKind::Fetch { timed: false }
         ))
         .await,
-        Ok(LoadedSource::Fetched)
+        Ok(LoadedSource::Fetched(_))
     ));
 
     // The URL the realm passed, and the rooted spelling of it a compiled card
@@ -477,7 +482,7 @@ async fn a_failed_fetch_and_every_other_kind_leave_the_probe_false() {
         result(load(
             &resources,
             "app:///page/gone.bundle",
-            SourceKind::Fetch
+            SourceKind::Fetch { timed: false }
         ))
         .await
         .is_err()

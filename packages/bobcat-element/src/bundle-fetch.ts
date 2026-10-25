@@ -209,7 +209,9 @@ export function createBundleFetches(options: BundleFetchOptions) {
     if (typeof url !== "string") {
       throw new TypeError("fetchBundle requires a URL string");
     }
-    const started = fetchResource(url);
+    // A lazy bundle load, which a `resource.lazyBundle` entry reports while
+    // someone observes `resource`.
+    const started = fetchResource(url, true);
     if (started === true) {
       return handleOf({
         url,

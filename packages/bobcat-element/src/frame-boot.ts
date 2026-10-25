@@ -52,6 +52,21 @@
 // table, as native's nested view inherits both; its `lynx.setSharedData` is
 // the group's, which every BTS shares.
 //
+// Once the card's load has completed — its first frame presented and its
+// BTS's entry loaded — the host hands this realm the card's
+// `pipeline.loadBundle` performance entry as JSON text, and
+// `__BobcatLoadMetrics` dispatches it at the nested page as Lynx's
+// `loadmetrics` component event, bubbling and composed like `load`, so the
+// parent realm's `bindloadmetrics` on the frame hears it retargeted to the
+// frame. Its `detail` is native's (`LynxFrameView.java`
+// `buildFrameLoadMetricsDetail`): `{url, mode, entry}`, `url` the frame's
+// `src` as written (native's `mUrl`), `mode` always `"standard"` — this
+// engine has no embedded mode — and `entry` the entry's own object. It is
+// sent for every card load, whatever the host observes, as native's
+// `FramePerformanceClient` is attached to every frame's render; native
+// checks for a `loadmetrics` listener before it sends, which the dispatch
+// here needs no check for.
+//
 // `updateData` and `updateGlobalProps` take each later write of the frame's
 // `data` and `global-props` while this card runs, as the page's own
 // `__BobcatUpdateData` and `__BobcatUpdateGlobalProps` take the view's
@@ -125,6 +140,9 @@ import { backgroundThreadURL, bundleStyleSheetURL, sectionURL } from "bobcat:sec
  */
 let disposed = false;
 
+/** The frame's `src` as written, which `loadmetrics` names: set by `boot`. */
+let frameSrc = "";
+
 /**
  * Boots the card at `url` into the frame `frameId`, and answers whether boot
  * ran through: `false` for a failure, which is reported here already, and
@@ -157,6 +175,7 @@ export function boot(
   systemInfoJson: string,
   nativeModuleTable: string,
 ): boolean {
+  frameSrc = src;
   try {
     // Refused past eight frames deep, so a card that embeds itself stops.
     const page = framePage(frameId);
@@ -272,6 +291,32 @@ function dispatchLoad(src: string): void {
     { statusCode: 0, statusMessage: "success", url: src },
   );
   __DispatchEvent(__GetPageElement(), event);
+}
+
+/**
+ * Dispatches the frame's `loadmetrics` at this realm's page root, as
+ * [`dispatchLoad`] dispatches `load`: the host calls it once the card's
+ * load has completed, with `json`, the card's `pipeline.loadBundle` entry
+ * as Lynx's JSON text, which becomes the detail's `entry` object here, in
+ * the realm that reads it. A card the frame let go of dispatches nothing.
+ * What the dispatch throws is reported here; a listener's throw is reported
+ * by the host, in the listener's realm.
+ */
+export function __BobcatLoadMetrics(json: string): void {
+  if (disposed) return;
+  try {
+    const event = __CreateEvent(
+      8,
+      "loadmetrics",
+      { bubbles: true, composed: true },
+      // This engine has no embedded mode, so every card is native's
+      // `standard` one.
+      { url: frameSrc, mode: "standard", entry: JSON.parse(json) as unknown },
+    );
+    __DispatchEvent(__GetPageElement(), event);
+  } catch (error) {
+    _ReportError(error);
+  }
 }
 
 /** The shadow root the nested page `page` sits in: its parent. */

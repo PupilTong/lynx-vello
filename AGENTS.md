@@ -302,7 +302,13 @@ main thread's QuickJS runtime and the document's element arena, asks the
 BTS for `bobcat-workers`' runtime with `WorkerMessage::MemorySample` and the
 painter's `pump` for the committed frame's scene bytes; off unless the
 embedder turns it on, and reported to it and to the BTS observers of
-`memory`); see
+`memory`); `resource.lazyBundle` entries, which `fetch.rs`'s
+`fetchResource` times (one relaxed load while nobody observes `resource`,
+a `timed` flag on `SourceRequest::Fetch` and the fetcher's `FetchOutcome`
+otherwise); and each `<frame>` card's completed load, which `LynxView::pump`
+writes as JSON and sends the card's realm as the frame's `loadmetrics`
+(`ToMain::FrameLoadMetrics`, `bobcat:frame-boot`'s `__BobcatLoadMetrics`);
+see
 `docs/performance-observation-design.md`, and `main/runtime/pipelines.rs` for
 the main-thread flush binding — and
 `threads.rs` the two engine threads.
@@ -834,7 +840,9 @@ relative one is a `TypeError`.
 **`lynx.fetchBundle(url, options?)` is a plain fetch**, in both realm kinds:
 apart from being waitable it does what `fetch(image_url)` does. Core's whole
 half is `fetchResource(url)` — one `SourceRequest::Fetch`, which answers
-`LoadedSource::Fetched` and carries nothing back — so **`bobcat-core` holds no
+`LoadedSource::Fetched` and carries nothing back about the bytes (only, for a
+`timed` request, the `FetchOutcome` a `resource.lazyBundle` entry reports:
+their length, when they arrived, the install's span) — so **`bobcat-core` holds no
 bundle-specific code at all**: no installed set, no record JSON, and no
 knowledge of what the bytes were. Whether they were a Lynx container whose
 sections get registered at the URLs a later

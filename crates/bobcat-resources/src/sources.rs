@@ -2,9 +2,10 @@
 
 use std::sync::Arc;
 
+use bobcat_core::performance::Instant;
 use bobcat_core::resource::{
-    LoadedSource, ResourceErrorKind, ResourceErrorPhase, SourceCompletion, SourceRequest,
-    StyleSheetSource,
+    FetchOutcome, LoadedSource, ResourceErrorKind, ResourceErrorPhase, SourceCompletion,
+    SourceRequest, StyleSheetSource,
 };
 use bobcat_core::{FontBlob, LynxViewError};
 use http::HeaderMap;
@@ -33,8 +34,12 @@ enum SourceKind {
     /// A plain fetch, the way an image source is fetched: the bytes are
     /// offered to the [`ContainerInstaller`](crate::ContainerInstaller) if
     /// this host has one and go nowhere else, so nothing is decoded as text
-    /// and nothing comes back but the fact that the fetch is over.
-    Fetch,
+    /// and nothing comes back but the fact that the fetch is over — and,
+    /// when `timed`, the [`FetchOutcome`] this fetcher measured: the body's
+    /// length, when it arrived and the installer's span.
+    Fetch {
+        timed: bool,
+    },
 }
 
 enum Destination {
@@ -115,7 +120,7 @@ pub(crate) fn request(resources: &Resources, request: SourceRequest, completion:
         SourceRequest::StyleSheet(url) => (url, SourceKind::StyleSheet),
         SourceRequest::Module(url) => (url, SourceKind::Script),
         SourceRequest::Font { url } => (url, SourceKind::Font),
-        SourceRequest::Fetch { url } => (url, SourceKind::Fetch),
+        SourceRequest::Fetch { url, timed } => (url, SourceKind::Fetch { timed }),
     };
     let url = match resources
         .shared
@@ -191,13 +196,14 @@ fn spawn(resources: &Resources, url: Url, kind: SourceKind, completion: Destinat
                 return;
             }
         };
+        let received = arrival(kind);
         if completion.is_cancelled() {
             return;
         }
         let prepared = crate::executor::blocking(&handle, "source load", {
             let url = url.clone();
             let shared = SharedHandle::clone(&shared);
-            move || prepare(fetched, &url, kind, &shared)
+            move || prepare(fetched, &url, kind, received, &shared)
         })
         .await;
         completion.complete(match prepared {
@@ -228,10 +234,17 @@ async fn run(shared: SharedHandle, url: Url, kind: SourceKind, completion: Desti
         .transports
         .fetch(&url, CachePolicy::Default, &HeaderMap::new())
         .await;
+    let received = arrival(kind);
     if completion.is_cancelled() {
         return;
     }
-    completion.complete(prepare(fetched, &url, kind, &shared));
+    completion.complete(prepare(fetched, &url, kind, received, &shared));
+}
+
+/// When a load's bytes arrived, read only for a timed fetch: every other
+/// load reads no clock.
+fn arrival(kind: SourceKind) -> Option<Instant> {
+    matches!(kind, SourceKind::Fetch { timed: true }).then(Instant::now)
 }
 
 /// The CPU half of a source load: preprocessing and the UTF-8 check the
@@ -244,6 +257,7 @@ fn prepare(
     fetched: Result<crate::Fetched, error::Failure>,
     url: &Url,
     kind: SourceKind,
+    received: Option<Instant>,
     shared: &SharedHandle,
 ) -> Result<LoadedSource, LynxViewError> {
     // A plain fetch takes neither preprocessing nor a UTF-8 check: the bytes
@@ -253,24 +267,39 @@ fn prepare(
     // container's section URLs from the string it passed, which this fetcher
     // resolves the same way, so a redirect — the transport's business — must
     // not move where the sections were registered.
-    if kind == SourceKind::Fetch {
+    if let SourceKind::Fetch { timed } = kind {
         let bytes = fetched
             .map_err(|failure| {
                 LynxViewError::from(failure.into_error(Some(Arc::from(url.as_str()))))
             })?
             .bytes;
+        // The installer's span, for a timed fetch alone: Lynx's
+        // `decodeStart`/`decodeEnd`.
+        let install_start = timed.then(Instant::now);
         return shared
             .install_container(url, &bytes)
             // Registered or not, the fetch is over; only a container that
             // would not decode fails it.
-            .map(|_installed| {
+            .map(|installed| {
                 // Remembered only now, after the installer ran: a repeat
                 // fetch of this URL answers `true` through the probe, and so
                 // settles in the realm's own job — which is what a cached
                 // fetch is to a card. A failed fetch or a failed install
                 // never reaches here and so is never remembered.
                 shared.fetches.remember(url);
-                LoadedSource::Fetched
+                LoadedSource::Fetched(if timed {
+                    FetchOutcome {
+                        size_bytes: u64::try_from(bytes.len()).ok(),
+                        received,
+                        // Only a body something was installed from was
+                        // decoded.
+                        installed: install_start
+                            .filter(|_| installed)
+                            .map(|start| start..Instant::now()),
+                    }
+                } else {
+                    FetchOutcome::default()
+                })
             })
             .map_err(|message| {
                 error::Failure::new(

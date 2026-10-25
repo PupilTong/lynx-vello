@@ -842,3 +842,152 @@ fn with_the_memory_monitor_off_nothing_is_a_memory_entry() {
     assert!(memory_entries(&events).is_empty(), "{events:?}");
     assert!(bts_memory(&events).is_none(), "{events:?}");
 }
+
+/// A BTS that observes `resource` and logs every entry it receives, then
+/// fetches a bundle the host serves and one it does not, logging each
+/// outcome.
+const RESOURCE_BTS: &str = r"
+    import { lynx, console } from 'bobcat:bts-runtime';
+    lynx.performance.createObserver(entry => {
+      console.log('resource ' + JSON.stringify(entry));
+    }).observe(['resource']);
+    for (const url of ['app:///lazy.bundle', 'app:///missing.bundle']) {
+      lynx.fetchBundle(url, {}).then(info => console.log('fetched ' + url + ' ' + info.code));
+    }
+";
+
+/// A BTS that fetches the same two bundles with nobody observing anything.
+const UNOBSERVED_FETCH_BTS: &str = r"
+    import { lynx, console } from 'bobcat:bts-runtime';
+    for (const url of ['app:///lazy.bundle', 'app:///missing.bundle']) {
+      lynx.fetchBundle(url, {}).then(info => console.log('fetched ' + url + ' ' + info.code));
+    }
+";
+
+/// A view whose host serves `app:///lazy.bundle` as a fetch, with one module
+/// under it standing in for what a container installer registers.
+fn fetching_engine(background: &str) -> TestEngine {
+    TestViewSpec::new(CARD)
+        .offscreen(32.0, 24.0)
+        .with_background_entry(background)
+        .with_fetchable("app:///lazy.bundle")
+        .with_module("app:///lazy.bundle/root.js", "export default 'lazy';")
+        .create(Arc::new(NoWakeup))
+}
+
+fn lazy_bundles(events: &[EngineEvent]) -> Vec<&crate::performance::LazyBundleEntry> {
+    performance(events)
+        .filter_map(|entry| match entry {
+            PerformanceEntry::LazyBundle(bundle) => Some(bundle),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Every `resource` entry the BTS observer logged, as the JSON it saw.
+fn bts_resources(events: &[EngineEvent]) -> Vec<serde_json::Value> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            EngineEvent::ConsoleMessage { message, .. } => message
+                .strip_prefix("resource ")
+                .map(|json| serde_json::from_str(json).expect("an entry is JSON")),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_bts_fetch_bundle_reports_one_lazy_bundle_entry_to_rust_and_to_the_bts() {
+    let mut engine = fetching_engine(RESOURCE_BTS);
+    engine.view.observe_performance(EntryTypes::RESOURCE);
+    let mut events = Vec::new();
+    drive_until(&mut engine, &mut events, |events| {
+        lazy_bundles(events).len() == 2 && bts_resources(events).len() == 2
+    });
+
+    let entries = lazy_bundles(&events);
+    let fetched = entries
+        .iter()
+        .find(|entry| &*entry.component_url == "app:///lazy.bundle")
+        .expect("the served bundle's entry");
+    assert!(fetched.load_success);
+    assert!(fetched.require.start <= fetched.require.end, "{fetched:?}");
+    let decode = fetched.decode.clone().expect("the host installed it");
+    assert!(fetched.require.end <= decode.start && decode.start <= decode.end);
+    assert_eq!(
+        fetched.size_bytes,
+        Some("export default 'lazy';".len() as u64)
+    );
+    let failed = entries
+        .iter()
+        .find(|entry| &*entry.component_url == "app:///missing.bundle")
+        .expect("the missing bundle's entry");
+    assert!(!failed.load_success);
+    assert!(failed.require.start <= failed.require.end);
+    assert_eq!((failed.size_bytes, failed.decode.clone()), (None, None));
+
+    // The BTS's observer received both, as Lynx's JSON.
+    let seen = bts_resources(&events);
+    let served = seen
+        .iter()
+        .find(|entry| entry["componentUrl"] == "app:///lazy.bundle")
+        .expect("the BTS saw the served bundle");
+    assert_eq!(served["entryType"], "resource");
+    assert_eq!(served["name"], "lazyBundle");
+    assert_eq!(served["loadSuccess"], true);
+    assert_eq!(served["mode"], "normal");
+    assert!(served["decodeStart"].as_f64() <= served["decodeEnd"].as_f64());
+    assert!(served["requireStart"].as_f64() <= served["requireEnd"].as_f64());
+    let missing = seen
+        .iter()
+        .find(|entry| entry["componentUrl"] == "app:///missing.bundle")
+        .expect("the BTS saw the missing bundle");
+    assert_eq!(missing["loadSuccess"], false);
+    assert!(missing.get("size").is_none(), "{missing}");
+
+    // Both requests asked the fetcher for its readings.
+    let requests = engine
+        .view
+        .fetcher
+        .fetch_requests
+        .lock()
+        .expect("never poisoned")
+        .clone();
+    assert_eq!(
+        requests,
+        [
+            ("app:///lazy.bundle".to_owned(), true),
+            ("app:///missing.bundle".to_owned(), true),
+        ]
+    );
+}
+
+#[test]
+fn a_fetch_nobody_observes_is_not_timed_and_reports_nothing() {
+    let mut engine = fetching_engine(UNOBSERVED_FETCH_BTS);
+    // Every type but `resource`: a fetch is still not timed.
+    engine
+        .view
+        .observe_performance(EntryTypes::PIPELINE | EntryTypes::LOAD_BUNDLE);
+    let mut events = Vec::new();
+    drive_until(&mut engine, &mut events, |events| {
+        logged(events, "fetched app:///lazy.bundle 0")
+            && logged(events, "fetched app:///missing.bundle -1")
+    });
+    let requests = engine
+        .view
+        .fetcher
+        .fetch_requests
+        .lock()
+        .expect("never poisoned")
+        .clone();
+    assert_eq!(
+        requests,
+        [
+            ("app:///lazy.bundle".to_owned(), false),
+            ("app:///missing.bundle".to_owned(), false),
+        ]
+    );
+    assert!(lazy_bundles(&events).is_empty(), "{events:?}");
+}
