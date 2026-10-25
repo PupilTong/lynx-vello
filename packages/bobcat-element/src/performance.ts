@@ -126,6 +126,30 @@ export interface LazyBundleEntry extends PerformanceEntry {
 }
 
 /**
+ * W3C Container Timing's `PerformanceContainerTiming` (WICG draft,
+ * https://w3c.github.io/container-timing/), in its own field names: a
+ * presented frame grew the painted region of an element carrying a
+ * `containertiming` attribute. `name` is `""`, as the draft's is, and
+ * `identifier` the attribute's value; `startTime` and `firstRenderTime` are
+ * Unix milliseconds, as every timestamp of this API is; `intersectionRect`
+ * (the region's bounding box) is in viewport CSS pixels and `size` (the
+ * region's area) in square CSS pixels.
+ *
+ * `rootElement` and `lastPaintedElement` are elements in the standard, and
+ * a background thread has no element objects, so neither key is present.
+ */
+export interface ContainerTimingEntry extends PerformanceEntry {
+  entryType: "container";
+  name: "";
+  identifier: string;
+  startTime: number;
+  duration: 0;
+  firstRenderTime: number;
+  size: number;
+  intersectionRect: { x: number; y: number; width: number; height: number };
+}
+
+/**
  * One value field of a record: `n` and a number, `b1` or `b0` for a
  * boolean, or `s` and a string.
  */
@@ -217,14 +241,18 @@ export interface ObserverHost {
   /**
    * The realm has an observer (`on`), one of its observers asked for
    * `paint` entries (`paint`), which is what turns the paint walk's
-   * contentful test on, one asked for `memory` entries (`memory`), and one
+   * contentful test on, one asked for `memory` entries (`memory`), one
    * asked for `resource` entries (`resource`), which is what times the
-   * view's `fetchBundle`s. Asking for `memory` turns no monitor on: the
-   * memory monitor is the embedder's (`LynxView::set_memory_monitor`), and
-   * an observer of `memory` receives what it reports while it is on, and
-   * nothing while it is off.
+   * view's `fetchBundle`s, and one asked for `container` entries
+   * (`container`). Asking for `memory` turns no monitor on: the memory
+   * monitor is the embedder's (`LynxView::set_memory_monitor`), and an
+   * observer of `memory` receives what it reports while it is on, and
+   * nothing while it is off. Asking for `container` turns nothing on
+   * either: a `containertiming` attribute is what makes the paint walk
+   * record, and an observer of `container` receives every root's entries,
+   * the page's and every `<frame>` card's.
    */
-  observePerformance(on: 0 | 1, paint: 0 | 1, memory: 0 | 1, resource: 0 | 1): void;
+  observePerformance(on: 0 | 1, paint: 0 | 1, memory: 0 | 1, resource: 0 | 1, container: 0 | 1): void;
   takePerformanceEntries(): string;
 }
 
@@ -249,9 +277,11 @@ export interface PerformanceEmitter {
  * from no observer of `paint` (`observe(['paint'])`, W3C Paint Timing's
  * `first-paint` and `first-contentful-paint`) to one and back, from no
  * observer of `memory` (`observe(['memory'])`, Lynx's `memory` entry) to
- * one and back, or from no observer of `resource` (`observe(['resource'])`,
- * Lynx's `resource.lazyBundle`) to one and back: until then nothing is sent
- * to this worker or assembled for it.
+ * one and back, from no observer of `resource` (`observe(['resource'])`,
+ * Lynx's `resource.lazyBundle`) to one and back, or from no observer of
+ * `container` (`observe(['container'])`, W3C Container Timing's
+ * `container`) to one and back: until then nothing is sent to this worker
+ * or assembled for it.
  */
 export function createPerformanceObservers(
   host: ObserverHost,
@@ -263,27 +293,38 @@ export function createPerformanceObservers(
   let observingPaint = false;
   let observingMemory = false;
   let observingResource = false;
+  let observingContainer = false;
   function sync() {
     const next = active.size > 0;
     let paint = false;
     let memory = false;
     let resource = false;
+    let container = false;
     for (const names of active.values()) {
       paint ||= asksFor(names, "paint");
       memory ||= asksFor(names, "memory");
       resource ||= asksFor(names, "resource");
+      container ||= asksFor(names, "container");
     }
     if (
       next === observing
       && paint === observingPaint
       && memory === observingMemory
       && resource === observingResource
+      && container === observingContainer
     ) return;
     observing = next;
     observingPaint = paint;
     observingMemory = memory;
     observingResource = resource;
-    host.observePerformance(next ? 1 : 0, paint ? 1 : 0, memory ? 1 : 0, resource ? 1 : 0);
+    observingContainer = container;
+    host.observePerformance(
+      next ? 1 : 0,
+      paint ? 1 : 0,
+      memory ? 1 : 0,
+      resource ? 1 : 0,
+      container ? 1 : 0,
+    );
   }
   function createObserver(callback: (entry: PerformanceEntry) => void): PerformanceObserver {
     if (typeof callback !== "function") {

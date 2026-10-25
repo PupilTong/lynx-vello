@@ -991,3 +991,192 @@ fn a_fetch_nobody_observes_is_not_timed_and_reports_nothing() {
     );
     assert!(lazy_bundles(&events).is_empty(), "{events:?}");
 }
+
+/// A card whose first screen is a `containertiming="hero"` view holding one
+/// text, and whose every `updatePage` adds another text under it, below the
+/// last, with a timing flag `update-<n>` — the pipeline entry that says the
+/// update's frame was presented.
+const CONTAINER_CARD: &str = r"
+    let updates = 0;
+    function line(content) {
+      const text = __CreateText(0);
+      __AppendElement(text, __CreateRawText(content));
+      __AppendElement(hero, text);
+      return text;
+    }
+    globalThis.renderPage = function () {
+      globalThis.page = __CreatePage('card', 0);
+      globalThis.hero = __CreateView(0);
+      __SetInlineStyles(hero, 'width:64px;height:48px;display:flex;flex-direction:column');
+      __SetAttribute(hero, 'containertiming', 'hero');
+      line('Hi');
+      __AppendElement(page, hero);
+    };
+    globalThis.updatePage = function () {
+      updates += 1;
+      __SetAttribute(line('Hey'), '__lynx_timing_flag', 'update-' + updates);
+      __FlushElementTree();
+    };
+";
+
+/// A BTS that logs every `container` entry it observes, having said it
+/// observes.
+const CONTAINER_BTS: &str = r"
+    import { lynx, console } from 'bobcat:bts-runtime';
+    lynx.performance.createObserver(entry => {
+      console.log('container ' + JSON.stringify(entry));
+    }).observe(['container']);
+    console.log('observing container');
+";
+
+fn container_engine(background: Option<&str>) -> TestEngine {
+    let mut spec = TestViewSpec::new(CONTAINER_CARD)
+        .offscreen(64.0, 48.0)
+        .with_default_font("Ahem", AHEM);
+    if let Some(background) = background {
+        spec = spec.with_background_entry(background);
+    }
+    spec.create(Arc::new(NoWakeup))
+}
+
+fn container_entries(events: &[EngineEvent]) -> Vec<&crate::performance::ContainerEntry> {
+    performance(events)
+        .filter_map(|entry| match entry {
+            PerformanceEntry::Container(container) => Some(container),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_container_root_reports_its_paints_until_the_first_pointer_down() {
+    let mut engine = container_engine(None);
+    engine
+        .view
+        .observe_performance(EntryTypes::CONTAINER | EntryTypes::PIPELINE);
+    let mut events = Vec::new();
+    drive_until(&mut engine, &mut events, |events| {
+        !container_entries(events).is_empty()
+    });
+    let [first] = container_entries(&events)[..] else {
+        panic!("one container entry: {events:?}");
+    };
+    assert_eq!(&*first.identifier, "hero");
+    assert!(first.size > 0.0, "{first:?}");
+    assert_eq!(first.first_render, first.start);
+    let first = first.clone();
+    let mut json = String::new();
+    PerformanceEntry::Container(first.clone())
+        .write_lynx_json(&engine.view.seat().registry.time_origin(), &mut json);
+    let value: serde_json::Value = serde_json::from_str(&json).expect("JSON");
+    assert_eq!(value["entryType"], "container");
+    assert_eq!(value["identifier"], "hero");
+
+    // A text below the first grows the region.
+    engine
+        .view
+        .update_data("{}".to_owned(), String::new())
+        .expect("the view is ready");
+    drive_until(&mut engine, &mut events, |events| {
+        pipeline_named(events, "update-1").is_some()
+    });
+    for _ in 0..3 {
+        turn(&mut engine, &mut events);
+    }
+    let entries = container_entries(&events);
+    let [_, grown] = entries[..] else {
+        panic!("two container entries: {events:?}");
+    };
+    assert!(grown.size > first.size, "{grown:?} after {first:?}");
+    assert_eq!(grown.first_render, first.first_render);
+    assert!(grown.start > first.start);
+    assert!(grown.intersection_rect.size.height > first.intersection_rect.size.height);
+
+    // The first pointer down stops recording: a later text under the root
+    // paints, and reports nothing.
+    engine.dispatch_input(terminus::link::input::InputEvent::pointer(
+        terminus::link::Point2D::new(60.0, 44.0),
+        1,
+        terminus::link::input::PointerKind::Touch,
+        terminus::link::input::PointerPhase::Down,
+    ));
+    engine
+        .view
+        .update_data("{}".to_owned(), String::new())
+        .expect("the view is ready");
+    drive_until(&mut engine, &mut events, |events| {
+        pipeline_named(events, "update-2").is_some()
+    });
+    for _ in 0..3 {
+        turn(&mut engine, &mut events);
+    }
+    assert_eq!(container_entries(&events).len(), 2, "{events:?}");
+}
+
+#[test]
+fn a_bts_container_observer_receives_the_entry_with_its_intersection_rect() {
+    let mut engine = container_engine(Some(CONTAINER_BTS));
+    let mut events = Vec::new();
+    let logged = |events: &[EngineEvent]| -> Vec<serde_json::Value> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                EngineEvent::ConsoleMessage { message, .. } => message
+                    .strip_prefix("container ")
+                    .map(|entry| serde_json::from_str(entry).expect("an entry is JSON")),
+                _ => None,
+            })
+            .collect()
+    };
+    // The view's own turns alone until the BTS observes, so the first frame
+    // is presented only once it does.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !super::performance_tests::logged(&events, "observing container") {
+        assert!(
+            Instant::now() < deadline,
+            "the BTS never observed: {events:?}"
+        );
+        events.extend(engine.view.pump());
+        std::thread::yield_now();
+    }
+    drive_until(&mut engine, &mut events, |events| {
+        !logged(events).is_empty()
+    });
+    for _ in 0..3 {
+        turn(&mut engine, &mut events);
+    }
+    let entries = logged(&events);
+    let [entry] = &entries[..] else {
+        panic!("one container entry: {entries:?}");
+    };
+    let object = entry.as_object().expect("an object");
+    let mut keys: Vec<_> = object.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "duration",
+            "entryType",
+            "firstRenderTime",
+            "identifier",
+            "intersectionRect",
+            "name",
+            "size",
+            "startTime",
+        ],
+        "{entry}"
+    );
+    assert_eq!(entry["entryType"], "container");
+    assert_eq!(entry["name"], "");
+    assert_eq!(entry["identifier"], "hero");
+    assert_eq!(entry["duration"], 0);
+    let rect = &entry["intersectionRect"];
+    for member in ["x", "y", "width", "height"] {
+        assert!(rect[member].is_number(), "{entry}");
+    }
+    assert!(rect["width"].as_f64().expect("a number") > 0.0, "{entry}");
+    assert!(entry["size"].as_f64().expect("a number") > 0.0, "{entry}");
+    assert_eq!(entry["startTime"], entry["firstRenderTime"]);
+    // The Rust embedder asked for nothing.
+    assert!(performance(&events).next().is_none(), "{events:?}");
+}

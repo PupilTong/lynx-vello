@@ -564,13 +564,21 @@ declare module "bobcat-internal:host" {
    * Worker realms: the realm has a `lynx.performance` observer (`on` `1`),
    * or no longer has one (`0`), one of its observers asked for `paint`
    * entries (`paint` `1`) or none did (`0`), one asked for `memory`
-   * entries (`memory` `1`) or none did (`0`), and one asked for `resource`
-   * entries (`resource` `1`) or none did (`0`). Nothing is sent to a worker
-   * without an observer, and no `paint`, `memory` or `resource` entry to
-   * one without an observer of it. Asking for `memory` turns no monitor
-   * on; asking for `resource` times every `fetchBundle` of the view.
+   * entries (`memory` `1`) or none did (`0`), one asked for `resource`
+   * entries (`resource` `1`) or none did (`0`), and one asked for
+   * `container` entries (`container` `1`) or none did (`0`). Nothing is sent
+   * to a worker without an observer, and no `paint`, `memory`, `resource`
+   * or `container` entry to one without an observer of it. Asking for
+   * `memory` turns no monitor on; asking for `resource` times every
+   * `fetchBundle` of the view.
    */
-  export function observePerformance(on: 0 | 1, paint: 0 | 1, memory: 0 | 1, resource: 0 | 1): void;
+  export function observePerformance(
+    on: 0 | 1,
+    paint: 0 | 1,
+    memory: 0 | 1,
+    resource: 0 | 1,
+    container: 0 | 1,
+  ): void;
   /**
    * Worker realms: every performance entry this worker is owed, as one
    * record (`bobcat:record`): per entry its pair count, then a key field and

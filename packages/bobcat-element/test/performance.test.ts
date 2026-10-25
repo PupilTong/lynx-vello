@@ -198,11 +198,11 @@ describe("observers", () => {
     const second = observers.createObserver(() => {});
     first.observe(["pipeline"]);
     second.observe(["pipeline.loadBundle"]);
-    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0, 0]]);
+    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0, 0, 0]]);
     first.disconnect();
-    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0, 0]]);
+    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0, 0, 0]]);
     second.observe([]);
-    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0, 0], [0, 0, 0, 0]]);
+    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0, 0, 0], [0, 0, 0, 0, 0]]);
   });
 
   it("tell the host when an observer asks for paint entries and when none does", () => {
@@ -211,15 +211,15 @@ describe("observers", () => {
     const paints = observers.createObserver(() => {});
     pipelines.observe(["pipeline"]);
     paints.observe(["paint"]);
-    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0, 0], [1, 1, 0, 0]]);
+    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0, 0, 0], [1, 1, 0, 0, 0]]);
     paints.observe(["paint.first-contentful-paint", "pipeline"]);
-    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0, 0], [1, 1, 0, 0]]);
+    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0, 0, 0], [1, 1, 0, 0, 0]]);
     paints.observe(["pipeline"]);
-    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0, 0], [1, 1, 0, 0], [1, 0, 0, 0]]);
+    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0, 0, 0], [1, 1, 0, 0, 0], [1, 0, 0, 0, 0]]);
     paints.observe(["paint"]);
     pipelines.disconnect();
     paints.disconnect();
-    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0, 0], [1, 1, 0, 0], [1, 0, 0, 0], [1, 1, 0, 0], [0, 0, 0, 0]]);
+    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0, 0, 0], [1, 1, 0, 0, 0], [1, 0, 0, 0, 0], [1, 1, 0, 0, 0], [0, 0, 0, 0, 0]]);
   });
 
   it("tell the host when an observer asks for memory entries and when none does", () => {
@@ -228,13 +228,13 @@ describe("observers", () => {
     const memory = observers.createObserver(() => {});
     pipelines.observe(["pipeline", "paint"]);
     memory.observe(["memory"]);
-    expect(host.observePerformance.mock.calls).toEqual([[1, 1, 0, 0], [1, 1, 1, 0]]);
+    expect(host.observePerformance.mock.calls).toEqual([[1, 1, 0, 0, 0], [1, 1, 1, 0, 0]]);
     memory.observe(["memory.memory", "pipeline"]);
-    expect(host.observePerformance.mock.calls).toEqual([[1, 1, 0, 0], [1, 1, 1, 0]]);
+    expect(host.observePerformance.mock.calls).toEqual([[1, 1, 0, 0, 0], [1, 1, 1, 0, 0]]);
     memory.disconnect();
-    expect(host.observePerformance.mock.calls).toEqual([[1, 1, 0, 0], [1, 1, 1, 0], [1, 1, 0, 0]]);
+    expect(host.observePerformance.mock.calls).toEqual([[1, 1, 0, 0, 0], [1, 1, 1, 0, 0], [1, 1, 0, 0, 0]]);
     pipelines.disconnect();
-    expect(host.observePerformance.mock.calls).toEqual([[1, 1, 0, 0], [1, 1, 1, 0], [1, 1, 0, 0], [0, 0, 0, 0]]);
+    expect(host.observePerformance.mock.calls).toEqual([[1, 1, 0, 0, 0], [1, 1, 1, 0, 0], [1, 1, 0, 0, 0], [0, 0, 0, 0, 0]]);
   });
 
   it("tell the host when an observer asks for resource entries and when none does", () => {
@@ -243,17 +243,68 @@ describe("observers", () => {
     const resources = observers.createObserver(() => {});
     pipelines.observe(["pipeline"]);
     resources.observe(["resource.lazyBundle"]);
-    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0, 0], [1, 0, 0, 1]]);
+    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0, 0, 0], [1, 0, 0, 1, 0]]);
     resources.observe(["resource", "pipeline"]);
-    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0, 0], [1, 0, 0, 1]]);
+    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0, 0, 0], [1, 0, 0, 1, 0]]);
     resources.disconnect();
-    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0, 0], [1, 0, 0, 1], [1, 0, 0, 0]]);
+    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0, 0, 0], [1, 0, 0, 1, 0], [1, 0, 0, 0, 0]]);
     pipelines.disconnect();
     expect(host.observePerformance.mock.calls).toEqual([
-      [1, 0, 0, 0],
-      [1, 0, 0, 1],
-      [1, 0, 0, 0],
-      [0, 0, 0, 0],
+      [1, 0, 0, 0, 0],
+      [1, 0, 0, 1, 0],
+      [1, 0, 0, 0, 0],
+      [0, 0, 0, 0, 0],
+    ]);
+  });
+
+  it("tell the host when an observer asks for container entries and when none does", () => {
+    const { host, observers } = setup("");
+    const pipelines = observers.createObserver(() => {});
+    const containers = observers.createObserver(() => {});
+    pipelines.observe(["pipeline"]);
+    containers.observe(["container"]);
+    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0, 0, 0], [1, 0, 0, 0, 1]]);
+    containers.observe(["container", "pipeline"]);
+    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0, 0, 0], [1, 0, 0, 0, 1]]);
+    containers.disconnect();
+    pipelines.disconnect();
+    expect(host.observePerformance.mock.calls).toEqual([
+      [1, 0, 0, 0, 0],
+      [1, 0, 0, 0, 1],
+      [1, 0, 0, 0, 0],
+      [0, 0, 0, 0, 0],
+    ]);
+  });
+
+  it("receive container entries with intersectionRect as an object", () => {
+    const record = entryRecord([
+      ["entryType", "scontainer"],
+      ["name", "s"],
+      ["startTime", "n1739594612310.000"],
+      ["duration", "n0"],
+      ["identifier", "shero"],
+      ["intersectionRect.x", "n10"],
+      ["intersectionRect.y", "n20"],
+      ["intersectionRect.width", "n40.5"],
+      ["intersectionRect.height", "n20"],
+      ["size", "n810"],
+      ["firstRenderTime", "n1739594612307.429"],
+    ]);
+    const { observers } = setup(record);
+    const heard: unknown[] = [];
+    observers.createObserver(entry => heard.push(entry)).observe(["container"]);
+    observers.deliver();
+    expect(heard).toEqual([
+      {
+        entryType: "container",
+        name: "",
+        startTime: 1739594612310,
+        duration: 0,
+        identifier: "hero",
+        intersectionRect: { x: 10, y: 20, width: 40.5, height: 20 },
+        size: 810,
+        firstRenderTime: 1739594612307.429,
+      },
     ]);
   });
 

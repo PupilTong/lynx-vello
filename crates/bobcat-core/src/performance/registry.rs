@@ -59,6 +59,22 @@
 //! And the `<frame>` cards' loads: each nested card's completed load record
 //! is owed to that card's realm as Lynx's `loadmetrics` component event
 //! ([`PipelineRegistry::take_frame_loads`]), whoever observes.
+//!
+//! And Container Timing's `container` entries
+//! ([`PipelineRegistry::note_container_paints`]): the identifier each
+//! `containertiming` attribute names its root by, and an entry per report
+//! the painter takes, for the Rust embedder when it observes
+//! [`EntryTypes::CONTAINER`] and for every BTS worker whose observers asked
+//! for `container`. Every worker: a root belongs to the view's one document,
+//! and nothing on the painting side says which realm's script marked it, so
+//! a `<frame>` card's BTS observer of `container` hears the page's roots as
+//! well as its own, and the page's hears the card's (the `paint` entries
+//! reach every BTS observer of `paint` for the same reason). And the stop:
+//! the painter facade asks for it once, at the view's first pointer down,
+//! wheel or key down ([`PipelineRegistry::request_container_stop`]), and
+//! the main thread's next commit ends every root
+//! ([`PipelineRegistry::take_container_stop`]). A scroll by script stops
+//! nothing.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -67,8 +83,8 @@ use std::time::Duration;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
-use terminus::link::CommitTiming;
 use terminus::link::painter::PresentedFrame;
+use terminus::link::{CommitTiming, ContainerPaint, NodeId};
 use tokio::sync::watch;
 
 use super::memory::{MemoryCategory, MemoryConfig, MemoryEntry, MemoryItem};
@@ -76,9 +92,9 @@ use super::monitors::{
     JsBlockingRecord, JsBlockingSignal, LongTaskRecord, decode_threshold, encode_threshold,
 };
 use super::{
-    ACTUAL_FMP_FLAG, ActualFmp, EntryTypes, ExtraTiming, FrameworkTiming, JsBlockingConfig,
-    JsBlockingStage, LazyBundleEntry, LoadBundleTiming, Metric, PaintEntry, PaintName,
-    PainterTiming, PerformanceEntry, PipelineOrigin, PipelineTiming, ReloadBundleTiming,
+    ACTUAL_FMP_FLAG, ActualFmp, ContainerEntry, EntryTypes, ExtraTiming, FrameworkTiming,
+    JsBlockingConfig, JsBlockingStage, LazyBundleEntry, LoadBundleTiming, Metric, PaintEntry,
+    PaintName, PainterTiming, PerformanceEntry, PipelineOrigin, PipelineTiming, ReloadBundleTiming,
     TimeOrigin, Timestamp,
 };
 use crate::background::WorkerKey;
@@ -219,6 +235,15 @@ pub(crate) struct PipelineRegistry {
     /// [`Self::times_resources`]: the Rust embedder observes
     /// [`EntryTypes::RESOURCE`] or a BTS observer asked for `resource`.
     resource_observed: AtomicBool,
+    /// Whether anyone observes `container` entries: the Rust embedder
+    /// observes [`EntryTypes::CONTAINER`] or a BTS observer asked for
+    /// `container`. What [`Self::note_container_paints`] reads before it
+    /// locks.
+    container_observed: AtomicBool,
+    /// Set once by the painter facade at the view's first pointer down,
+    /// wheel or key down; taken by the main thread's next commit, which
+    /// ends Container Timing ([`Self::take_container_stop`]).
+    container_stop: AtomicBool,
     inner: Mutex<Inner>,
 }
 
@@ -285,6 +310,17 @@ struct Inner {
     /// The `<frame>` card realms whose load completed and whose `loadmetrics`
     /// the embedder's next `pump` has not sent yet, in completion order.
     frame_loads_owed: Vec<OpenerId>,
+    /// Each Container Timing root's `containertiming` value, by the root.
+    container_identifiers: FxHashMap<NodeId, Arc<str>>,
+    /// The workers among the observing ones whose observers asked for
+    /// `container` entries.
+    observing_container: FxHashSet<WorkerKey>,
+    /// The `container` entries the Rust embedder has not taken, oldest
+    /// first, at most [`MAX_RECORDS`].
+    container_reports: VecDeque<ContainerEntry>,
+    /// The `container` entries each worker observing `container` has not
+    /// taken, oldest first, at most [`MAX_RECORDS`] each.
+    worker_containers: FxHashMap<WorkerKey, VecDeque<ContainerEntry>>,
 }
 
 /// The memory monitor's state: Lynx's `MemoryMonitor` members.
@@ -453,6 +489,8 @@ impl PipelineRegistry {
             memory_epoch: watch::channel(0).0,
             frame_memory_sample: AtomicBool::new(false),
             resource_observed: AtomicBool::new(false),
+            container_observed: AtomicBool::new(false),
+            container_stop: AtomicBool::new(false),
             inner: Mutex::new(Inner::default()),
         }
     }
@@ -483,6 +521,11 @@ impl PipelineRegistry {
         );
         self.resource_observed.store(
             inner.rust_types.contains(EntryTypes::RESOURCE) || !inner.observing_resource.is_empty(),
+            Ordering::Relaxed,
+        );
+        self.container_observed.store(
+            inner.rust_types.contains(EntryTypes::CONTAINER)
+                || !inner.observing_container.is_empty(),
             Ordering::Relaxed,
         );
         let detect = Self::paint_wanted(inner) && inner.first_contentful_paint.is_none();
@@ -1525,6 +1568,8 @@ impl PipelineRegistry {
         inner.worker_memory.remove(&key);
         inner.observing_resource.remove(&key);
         inner.worker_resources.remove(&key);
+        inner.observing_container.remove(&key);
+        inner.worker_containers.remove(&key);
         inner.worker_loads.remove(&key);
         inner.wakes.retain(|worker| *worker != key);
         if let Some(realm) = inner.bindings.remove(&key)
@@ -1538,15 +1583,17 @@ impl PipelineRegistry {
     /// Whether the worker `key` has a `lynx.performance` observer — `None`
     /// for none — and, when it has, which of the types a worker opts into
     /// one of its observers asked for: [`EntryTypes::PAINT`],
-    /// [`EntryTypes::MEMORY`] and [`EntryTypes::RESOURCE`]; any other bit
-    /// means nothing here. A worker that stops asking for `memory` or
-    /// `resource` drops the ones it had not taken.
+    /// [`EntryTypes::MEMORY`], [`EntryTypes::RESOURCE`] and
+    /// [`EntryTypes::CONTAINER`]; any other bit means nothing here. A worker
+    /// that stops asking for `memory`, `resource` or `container` drops the
+    /// ones it had not taken.
     pub(crate) fn observe_worker(&self, key: WorkerKey, asked: Option<EntryTypes>) {
         let observing = asked.is_some();
         let asked = asked.unwrap_or(EntryTypes::NONE);
         let paint = asked.contains(EntryTypes::PAINT);
         let memory = asked.contains(EntryTypes::MEMORY);
         let resource = asked.contains(EntryTypes::RESOURCE);
+        let container = asked.contains(EntryTypes::CONTAINER);
         let mut inner = self.lock();
         if observing {
             inner.observing.insert(key);
@@ -1569,6 +1616,12 @@ impl PipelineRegistry {
         } else {
             inner.observing_resource.remove(&key);
             inner.worker_resources.remove(&key);
+        }
+        if observing && container {
+            inner.observing_container.insert(key);
+        } else {
+            inner.observing_container.remove(&key);
+            inner.worker_containers.remove(&key);
         }
         self.update_observed(&inner);
     }
@@ -1617,6 +1670,81 @@ impl PipelineRegistry {
         }
         self.generation.fetch_add(1, Ordering::Release);
         true
+    }
+
+    /// `node`'s `containertiming` attribute was set to `identifier`, or
+    /// removed (`None`): what its `container` entries name it by.
+    pub(crate) fn set_container_identifier(&self, node: NodeId, identifier: Option<&str>) {
+        let mut inner = self.lock();
+        match identifier {
+            Some(identifier) => {
+                inner
+                    .container_identifiers
+                    .insert(node, Arc::from(identifier));
+            }
+            None => {
+                inner.container_identifiers.remove(&node);
+            }
+        }
+    }
+
+    /// The painter's Container Timing reports since the last call: one
+    /// `container` entry each, kept for the Rust embedder when it observes
+    /// [`EntryTypes::CONTAINER`] and for every worker whose observers asked
+    /// for `container` (the module doc says why every one), each bounded by
+    /// [`MAX_RECORDS`]. Answers the workers owed a `PerformanceReady`. One
+    /// relaxed load and no lock while nobody observes `container`; the
+    /// reports are then dropped.
+    pub(crate) fn note_container_paints(&self, paints: &[ContainerPaint]) -> Vec<WorkerKey> {
+        if paints.is_empty() || !self.container_observed.load(Ordering::Relaxed) {
+            return Vec::new();
+        }
+        let mut guard = self.lock();
+        let inner = &mut *guard;
+        let rust = inner.rust_types.contains(EntryTypes::CONTAINER);
+        let mut workers: SmallVec<[WorkerKey; 2]> =
+            inner.observing_container.iter().copied().collect();
+        workers.sort_unstable();
+        if !rust && workers.is_empty() {
+            return Vec::new();
+        }
+        for paint in paints {
+            let identifier = inner
+                .container_identifiers
+                .get(&paint.root)
+                .cloned()
+                .unwrap_or_else(|| Arc::from(""));
+            let entry = ContainerEntry::from_paint(paint, identifier);
+            for &key in &workers {
+                let queue = inner.worker_containers.entry(key).or_default();
+                if queue.len() >= MAX_RECORDS {
+                    queue.pop_front();
+                }
+                queue.push_back(entry.clone());
+            }
+            if rust {
+                if inner.container_reports.len() >= MAX_RECORDS {
+                    inner.container_reports.pop_front();
+                }
+                inner.container_reports.push_back(entry);
+            }
+        }
+        self.generation.fetch_add(1, Ordering::Release);
+        workers.into_vec()
+    }
+
+    /// Asks the main thread to end Container Timing at its next commit: the
+    /// painter facade's call at the view's first pointer down, wheel or key
+    /// down.
+    pub(crate) fn request_container_stop(&self) {
+        self.container_stop.store(true, Ordering::Release);
+    }
+
+    /// Whether Container Timing is to end now, once: the main thread's one
+    /// relaxed load per commit.
+    pub(crate) fn take_container_stop(&self) -> bool {
+        self.container_stop.load(Ordering::Relaxed)
+            && self.container_stop.swap(false, Ordering::Acquire)
     }
 
     /// Every `<frame>` card's load entry owed to its realm as `loadmetrics`
@@ -1704,9 +1832,9 @@ impl PipelineRegistry {
     /// the caller's thread, of the types it subscribes to: the pipeline and
     /// paint records in completion order, then the long tasks, then the JS
     /// blocking reports, then the memory reports, then the lazy bundles,
-    /// each in the order they were made.
+    /// then the container reports, each in the order they were made.
     pub(crate) fn take_completed_for_rust(&self) -> Vec<PerformanceEntry> {
-        let (taken, long_tasks, blocking, memory, resources, types) = {
+        let (taken, long_tasks, blocking, memory, resources, containers, types) = {
             let mut inner = self.lock();
             let types = inner.rust_types;
             (
@@ -1715,6 +1843,7 @@ impl PipelineRegistry {
                 std::mem::take(&mut inner.js_blocking_reports),
                 std::mem::take(&mut inner.memory_reports),
                 std::mem::take(&mut inner.resource_reports),
+                std::mem::take(&mut inner.container_reports),
                 types,
             )
         };
@@ -1742,20 +1871,24 @@ impl PipelineRegistry {
         if types.contains(EntryTypes::RESOURCE) {
             entries.extend(resources.into_iter().map(PerformanceEntry::LazyBundle));
         }
+        if types.contains(EntryTypes::CONTAINER) {
+            entries.extend(containers.into_iter().map(PerformanceEntry::Container));
+        }
         entries
     }
 
     /// Every completed entry the worker `key` is owed, assembled on its
     /// own thread: the pipeline and paint records, then its `memory`
-    /// reports, then its lazy bundles.
+    /// reports, then its lazy bundles, then its container reports.
     pub(crate) fn take_completed_for_worker(&self, key: WorkerKey) -> Vec<PerformanceEntry> {
-        let (taken, memory, resources) = {
+        let (taken, memory, resources, containers) = {
             let mut inner = self.lock();
             let taken = Self::take_completed(&mut inner, WORKER, Some(key));
             (
                 taken,
                 inner.worker_memory.remove(&key).unwrap_or_default(),
                 inner.worker_resources.remove(&key).unwrap_or_default(),
+                inner.worker_containers.remove(&key).unwrap_or_default(),
             )
         };
         taken
@@ -1763,6 +1896,7 @@ impl PipelineRegistry {
             .flat_map(|completed| completed.assemble(EntryTypes::ALL, &self.origin))
             .chain(memory.into_iter().map(PerformanceEntry::Memory))
             .chain(resources.into_iter().map(PerformanceEntry::LazyBundle))
+            .chain(containers.into_iter().map(PerformanceEntry::Container))
             .collect()
     }
 

@@ -491,6 +491,66 @@ consequential choice about whether to follow the spec or the quirk.
   [css-animation.md](css-animation.md#scroll-driven-animations)) fill their
   range with it. On the document timeline it still means `0s`.
 
+- **W3C Container Timing** (`containertiming`, `containertimingignore`,
+  `container` entries; 2026-10-26; `crates/terminus/src/visual/container_timing.rs`,
+  `crates/bobcat-core/src/performance/`). Built from the WICG draft
+  (`https://w3c.github.io/container-timing/`, its 2026-10-01 text). Lynx has
+  no counterpart, so the draft is the only reference. Where this differs
+  from it, or decides what it leaves open:
+  - **A shadow tree paints inside its host's containers.** The draft's
+    "contributes to container timing" answers `false` for every element in a
+    shadow tree, so a component's content never counts toward a container
+    around its host, and a root inside a shadow tree records nothing. Here a
+    paint counts toward the roots on its **shadow-including** ancestor chain
+    (a shadow root's parent is its host), because the flat tree is what
+    paints: a paint inside a shadow tree counts toward the roots around its
+    host, and its `lastPaintedElement` is **retargeted** to the host that is
+    in the root's tree (DOM retargeting); a root inside a shadow tree records
+    its own subtree. This is the host-level ("shadowed") model the Web
+    Performance WG leaned to on 2025-09-11 (`w3c/element-timing#3`), and it is
+    what lets `<frame containertiming="…">` time a nested card
+    (`docs/performance-observation-design.md` §6.5, ruling Q4). A slotted node
+    counts toward its light-tree ancestors (its host and above), not toward a
+    root inside the shadow tree around its slot.
+  - **Nested roots follow the draft, not the plan.** The design
+    (`docs/performance-observation-design.md` §5.3) planned "the nearest marked
+    ancestor wins" on the premise that the draft leaves nesting undefined. The
+    draft defines it: "maybe update the last new painted area" passes each
+    paint from a root on to the next root out, unless that root itself carries
+    `containertimingignore`. That is what is built — an outer root's region
+    includes its inner roots' paints, and an inner root marked ignored keeps
+    its paints to itself.
+  - **What stops recording.** The draft stops at any trusted `scroll` event
+    or `keydown`/`mousedown`/`pointerdown`/`click`. Here the view's first
+    pointer down, wheel or key down that the host routes to the painter stops
+    it, whatever it hits and whether or not a listener hears it; a scroll by
+    script (`scrollTo`, `scrollIntoView`, `autoScroll`) does not. The stop
+    reaches the document at its next commit, so a frame committed before it
+    and presented after it is still counted, as the draft keeps "entries
+    already pending for the current frame".
+  - **Re-enabling** is undefined in the draft (its two flags never reset):
+    here a root marked after the stop, or whose attribute is removed and set
+    again, is recorded again from an empty region. A root removed from the
+    tree and inserted again keeps its region, where the draft starts a new
+    record at reconnection.
+  - **What a paint is**: Paint Timing's contentful content, which is what the
+    draft's "each image or text node that paints" amounts to — text with a
+    glyph that is not white space, an image, background image or SVG whose
+    pixels are held, outside any `opacity: 0` group no animation fades. A
+    text run counts by its paragraph's box rather than the union of its line
+    boxes; every rect is the box's bounding box under its matrix, cut by its
+    clip chain's bounding boxes and the viewport at the committed scroll
+    offsets, and an element's painted region does not follow it when it moves
+    (the draft's "previously accumulated rectangles are not adjusted").
+  - **The BTS entry has no `rootElement` or `lastPaintedElement`**: they are
+    elements, and a background thread has no element objects. The Rust
+    entry carries both as `NodeId`s. `name` is `""` and `duration` 0, as the
+    draft's are; `startTime` and `firstRenderTime` are Unix milliseconds, as
+    every timestamp of `lynx.performance` is, not milliseconds after
+    `timeOrigin`. Every BTS observer of `container` hears every root, the
+    page's and each `<frame>` card's: nothing on the painting side says
+    which realm's script marked a root.
+
 ## Text layout (see [css-text.md](css-text.md))
 
 - **The `text-overflow` *attribute* on `<text>` is honoured, where web-core

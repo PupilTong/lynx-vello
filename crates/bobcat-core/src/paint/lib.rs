@@ -202,9 +202,10 @@ pub struct Painter {
     published: Published,
     begin_frames_sent: u64,
     /// What this painter last told the attached view's pipeline registry:
-    /// the instant of the present it reported, and whether it has reported
-    /// the view's first paint and first contentful paint. Cleared with
-    /// everything else derived from a view.
+    /// the instant of the present it reported, whether it has reported the
+    /// view's first paint and first contentful paint, and whether it has
+    /// asked for Container Timing's stop. Cleared with everything else
+    /// derived from a view.
     reported: PresentReport,
 }
 
@@ -214,6 +215,10 @@ struct PresentReport {
     presented: Option<ClockInstant>,
     first_paint: bool,
     first_contentful_paint: bool,
+    /// Whether the view's first pointer down, wheel or key down has asked
+    /// the registry to end Container Timing
+    /// ([`Painter::stop_container_timing_on`]).
+    container_timing_stopped: bool,
 }
 
 impl std::fmt::Debug for Painter {
@@ -477,6 +482,7 @@ impl Painter {
     /// new present and no pipeline waiting, two atomic accesses inside the
     /// registry and no lock.
     fn report_presentation(&mut self) {
+        self.report_container_paints();
         let Some(frame) = self.core.last_presented() else {
             return;
         };
@@ -501,6 +507,44 @@ impl Painter {
         }
         let owed = seat.registry.note_presented(frame);
         Self::notify_owed(&seat, owed);
+    }
+
+    /// Hands the presenting painter's Container Timing reports to the
+    /// attached view's registry, which makes the `container` entries of
+    /// whoever observes them and names the BTS workers to wake. One
+    /// `is_empty` on a view with no `containertiming` root, whose painter
+    /// never reports any; a detached painter's reports are dropped.
+    fn report_container_paints(&mut self) {
+        let paints = self.core.take_container_paints();
+        if paints.is_empty() {
+            return;
+        }
+        if let Some(seat) = self.seat.upgrade() {
+            let owed = seat.registry.note_container_paints(&paints);
+            Self::notify_owed(&seat, owed);
+        }
+    }
+
+    /// Container Timing stops at the first scroll or input the window
+    /// dispatches; for a view that is the first pointer down, wheel or key
+    /// down the host routes to it, whatever it hits and whether or not a
+    /// listener hears it. Asks the registry once per view, which the main
+    /// thread's next commit acts on; every later event reads one `bool`.
+    fn stop_container_timing_on(&mut self, event: &InputEvent) {
+        use terminus::link::input::{KeyPhase, PointerPhase};
+        if self.reported.container_timing_stopped {
+            return;
+        }
+        let interacts = match &event.kind {
+            InputKind::Pointer { phase, .. } => *phase == PointerPhase::Down,
+            InputKind::Wheel { .. } => true,
+            InputKind::Key { phase, .. } => *phase == KeyPhase::Down,
+            _ => false,
+        };
+        if interacts && let Some(seat) = self.seat.upgrade() {
+            self.reported.container_timing_stopped = true;
+            seat.registry.request_container_stop();
+        }
     }
 
     /// The memory monitor's `committedFrame` reading, when a sample on the
@@ -706,6 +750,7 @@ impl Painter {
             return;
         }
         self.poll_link();
+        self.stop_container_timing_on(&event);
         let mut emits = Vec::new();
         let at = self.core.route_input(&event, &self.published, &mut emits);
         self.send_events(emits, at);
