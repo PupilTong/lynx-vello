@@ -522,12 +522,94 @@ h3 {
   background: #c8f560;
 }
 
-.waterfall-bar[data-kind="load"] {
-  background: #9d94ff;
+/* One colour per thread a mark is taken on, shared by the bars, the fcp
+   breakdown's parts and the legend swatches. */
+[data-thread="page"] {
+  --thread-colour: #8d95a2;
 }
 
-.waterfall-bar[data-kind="host"] {
-  background: #6fb7ff;
+[data-thread="render"] {
+  --thread-colour: #6fb7ff;
+}
+
+[data-thread="main"] {
+  --thread-colour: #c8f560;
+}
+
+[data-thread="background"] {
+  --thread-colour: #9d94ff;
+}
+
+.waterfall-bar[data-thread],
+.fcp-segment,
+.thread-swatch {
+  background: var(--thread-colour, #c8f560);
+}
+
+.performance-subhead {
+  margin: 0 0 6px;
+  color: #7e8796;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.68rem;
+}
+
+.fcp-track {
+  height: 14px;
+  overflow: hidden;
+}
+
+.fcp-segment {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  /* A dark seam keeps two parts of one colour apart. */
+  box-shadow: inset -1px 0 0 #10141b;
+}
+
+.fcp-span-track {
+  height: 8px;
+  background: none;
+}
+
+/* A bracket under the parts the metric covers. */
+.fcp-span {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border: 1px solid #a8afbb;
+  border-top: 0;
+  border-radius: 0 0 3px 3px;
+}
+
+.fcp-parts,
+.thread-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin: 6px 0 0;
+  padding: 0;
+  color: #a8afbb;
+  font-size: 0.7rem;
+  list-style: none;
+}
+
+.fcp-parts li,
+.thread-legend li {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.fcp-parts strong {
+  color: #f6f0e8;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.thread-swatch {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
 }
 
 .waterfall-duration {
@@ -559,7 +641,7 @@ h3 {
 
 .waterfall-marker-name {
   position: absolute;
-  bottom: calc((var(--marker-rows) - 1 - var(--marker-row)) * 14px + 18px);
+  bottom: calc((var(--marker-rows) - 1 - var(--marker-row)) * 14px + 22px);
   padding: 0 4px;
   color: #ff9a76;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
@@ -581,7 +663,7 @@ h3 {
   justify-content: space-between;
   margin: 0 calc(var(--waterfall-duration) + var(--waterfall-gap)) 0
     calc(var(--waterfall-name) + var(--waterfall-gap));
-  padding-top: calc(var(--marker-rows) * 14px + 4px);
+  padding-top: calc(var(--marker-rows) * 14px + 8px);
   border-top: 1px solid #2b313d;
   color: #7e8796;
   font-variant-numeric: tabular-nums;

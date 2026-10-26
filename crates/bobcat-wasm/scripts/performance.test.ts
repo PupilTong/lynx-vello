@@ -3,6 +3,7 @@ import test from 'node:test'
 
 import {
   PerformanceTimeline,
+  fcpBreakdown,
   isLoadEntry,
   isPaintEntry,
   isPipelineEntry,
@@ -10,6 +11,7 @@ import {
   pipelineDuration,
   pipelineStages,
   pipelineWaterfall,
+  stageThread,
   type LynxPaintEntry,
   type LynxPerformanceEntry,
   type LynxPipelineEntry,
@@ -63,6 +65,13 @@ function load(overrides: Partial<LynxPipelineEntry> = {}): LynxPipelineEntry {
   return { ...entry, ...overrides }
 }
 
+// The load entry with `keys` absent, as an entry the engine wrote without them.
+function without(...keys: (keyof LynxPipelineEntry)[]): LynxPipelineEntry {
+  const entry = load()
+  for (const key of keys) delete entry[key]
+  return entry
+}
+
 function pipeline(identifier: string, start: number): LynxPipelineEntry {
   return {
     entryType: 'pipeline',
@@ -109,8 +118,6 @@ test('lists the stage pairs present, ordered by start, and skips missing ones', 
   assert.deepEqual(
     stages.map((stage) => stage.name),
     [
-      'prepareTemplate',
-      'createLynx',
       'loadBundle',
       'mtsRender',
       'loadBackground',
@@ -128,22 +135,20 @@ test('lists the stage pairs present, ordered by start, and skips missing ones', 
   assert.equal(pipelineDuration(load()), 100)
 })
 
-test('lays a load out from its fetch to paintEnd, with paint markers', () => {
+test('lays a load out from loadBundleStart to paintEnd, with paint markers', () => {
   const { axis, bars, markers } = pipelineWaterfall(load(), [
     paint('first-paint', 1100),
     paint('first-contentful-paint', 1100),
   ])
-  // `prepareTemplateStart`, where `fcp` starts, not `loadBundleStart`.
-  assert.deepEqual(axis, { start: 960, end: 1100 })
-  const fetch = bars.find((bar) => bar.name === 'prepareTemplate')!
-  assert.equal(fetch.left, 0)
-  assert.equal(fetch.duration, 15)
+  // The host's marks before `loadBundleStart` are the breakdown's, not bars.
+  assert.deepEqual(axis, { start: 1010, end: 1100 })
+  assert.ok(!bars.some((bar) => bar.name === 'prepareTemplate' || bar.name === 'createLynx'))
   const loadBundle = bars.find((bar) => bar.name === 'loadBundle')!
-  assert.ok(Math.abs(loadBundle.left - (50 / 140) * 100) < 1e-9)
+  assert.equal(loadBundle.left, 0)
   assert.equal(loadBundle.duration, 70)
-  assert.ok(Math.abs(loadBundle.width - (70 / 140) * 100) < 1e-9)
+  assert.ok(Math.abs(loadBundle.width - (70 / 90) * 100) < 1e-9)
   const layout = bars.find((bar) => bar.name === 'layout')!
-  assert.ok(Math.abs(layout.left - (100 / 140) * 100) < 1e-9)
+  assert.ok(Math.abs(layout.left - (50 / 90) * 100) < 1e-9)
   assert.deepEqual(
     markers.map((marker) => [marker.name, marker.left]),
     [
@@ -155,7 +160,7 @@ test('lays a load out from its fetch to paintEnd, with paint markers', () => {
 
 test('widens the axis for a paint mark past paintEnd and aligns a pipeline to its start', () => {
   const late = pipelineWaterfall(load(), [paint('first-contentful-paint', 1190)])
-  assert.deepEqual(late.axis, { start: 960, end: 1190 })
+  assert.deepEqual(late.axis, { start: 1010, end: 1190 })
   assert.equal(late.markers[0]!.left, 100)
 
   const update = pipelineWaterfall(pipeline('tap', 5000))
@@ -228,4 +233,77 @@ test('caps the rows of a load and the number of loads kept', () => {
   )
   const other: LynxPerformanceEntry = { entryType: 'resource', name: 'x' }
   assert.equal(timeline.add(other), undefined)
+})
+
+test('names the thread each stage is marked on', () => {
+  assert.equal(stageThread('loadBundle'), 'main')
+  assert.equal(stageThread('layout'), 'main')
+  assert.equal(stageThread('loadBackground'), 'background')
+  assert.equal(stageThread('loadCore'), 'background')
+  assert.equal(stageThread('layoutUiOperationExecute'), 'render')
+  assert.equal(stageThread('prepareTemplate'), 'render')
+})
+
+test('breaks totalFcp down at each host and engine mark, with the three spans over it', () => {
+  const metric = (name: string, start: number) => ({
+    name,
+    duration: 1100 - start,
+    startTimestampName: '',
+    startTimestamp: start,
+    endTimestampName: 'paintEnd',
+    endTimestamp: 1100,
+  })
+  const entry = load({
+    openTime: 950,
+    fcp: metric('fcp', 960),
+    totalFcp: metric('totalFcp', 950),
+  })
+  const breakdown = fcpBreakdown(entry)!
+  assert.deepEqual(breakdown.axis, { start: 950, end: 1100 })
+  assert.deepEqual(
+    breakdown.segments.map((segment) => [segment.name, segment.thread, segment.duration]),
+    [
+      ['open', 'page', 10],
+      ['fetchBundle', 'render', 15],
+      ['prepare', 'render', 15],
+      ['createLynx', 'render', 15],
+      ['viewBoot', 'main', 5],
+      ['lynxFcp', 'main', 90],
+    ],
+  )
+  // The segments tile the axis.
+  const total = breakdown.segments.reduce((sum, segment) => sum + segment.width, 0)
+  assert.ok(Math.abs(total - 100) < 1e-9)
+  assert.deepEqual(
+    breakdown.spans.map((span) => [span.name, span.duration]),
+    [
+      ['totalFcp', 150],
+      ['fcp', 140],
+      ['lynxFcp', 90],
+    ],
+  )
+  const fcp = breakdown.spans.find((span) => span.name === 'fcp')!
+  assert.ok(Math.abs(fcp.left - (10 / 150) * 100) < 1e-9)
+})
+
+test('merges a missing mark into the segment before and needs prepareTemplateStart', () => {
+  const entry = without('createLynxStart', 'createLynxEnd')
+  const breakdown = fcpBreakdown(entry)!
+  assert.deepEqual(
+    breakdown.segments.map((segment) => [segment.name, segment.duration]),
+    [
+      ['fetchBundle', 15],
+      ['prepare', 35],
+      ['lynxFcp', 90],
+    ],
+  )
+  assert.deepEqual(breakdown.spans.map((span) => span.name), ['fcp', 'lynxFcp'])
+  assert.equal(fcpBreakdown(without('prepareTemplateStart')), undefined)
+})
+
+test('keeps a segment a clock offset made negative, drawn with no width', () => {
+  const breakdown = fcpBreakdown(load({ createLynxEnd: 1012 }))!
+  const boot = breakdown.segments.find((segment) => segment.name === 'viewBoot')!
+  assert.equal(boot.duration, -2)
+  assert.equal(boot.width, 0)
 })
