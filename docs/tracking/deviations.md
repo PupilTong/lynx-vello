@@ -143,6 +143,19 @@ consequential choice about whether to follow the spec or the quirk.
   dichotomy. Model our own `display` computation to expose both: the
   Lynx-compatible internal mode apps' CSS actually selects, plus (opt-in)
   real external display type if we ever need it.
+- **`page` layout defaults (user decision, 2026-10-26)** — match native's
+  default `flex-direction: column` on the root while keeping its display
+  controlled by `defaultDisplayLinear`: `linear` when true, `flex` when
+  false. Both remain author-overridable UA defaults. Native sets the
+  direction in `Element::MarkAsLayoutRoot`
+  (`core/renderer/dom/fiber/fiber_element.cc`) and
+  `LayoutContext::SetRootInner`
+  (`core/renderer/ui_wrapper/layout/layout_context.cc`), while
+  `LayoutComputedStyle::GetDisplay` resolves auto display from configuration.
+  Web-core's ordinary `div[part="page"]` defaults to block layout; this
+  root layout-mode difference is intentional. The column default prevents
+  auto-width root scrollers, including `bg_gradient`'s, from shrinking on
+  a flex row's main axis. See [style assumptions §14](../style-assumptions.md#d-integration--configuration).
 - **`display: linear` / `display: relative` and their `linear-*`/`relative-*`
   properties** — genuine Lynx-only layout algorithms (Android
   `LinearLayout`/`RelativeLayout`-derived) with no CSS equivalent at all;
