@@ -47,7 +47,9 @@ use crate::clock::{ClockInstant, SystemTime};
 
 /// One instant on the engine's monotonic clock, comparable across every
 /// thread of the process: a mark taken on the main thread, one taken on a
-/// worker and one taken by the painter subtract.
+/// worker and one taken by the painter subtract (on wasm32 because each
+/// engine thread's clock is aligned to the embedder thread's, see
+/// `crate::clock`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Timestamp(ClockInstant);
 
@@ -85,6 +87,11 @@ impl Timestamp {
 /// Every timestamp an entry reports is converted through it, once, which is
 /// what makes Lynx's `totalFcp = paintEnd − openTime` meaningful: `openTime`
 /// is a host's wall-clock reading from before the view existed.
+///
+/// Both readings are taken on the embedder's thread, the one every engine
+/// thread's clock is aligned to (`crate::clock`), so the monotonic one
+/// needs no correction of its own, and the wall clock is read here and
+/// nowhere else: no sample is ever a wall-clock reading.
 #[derive(Clone, Copy, Debug)]
 pub struct TimeOrigin {
     instant: ClockInstant,

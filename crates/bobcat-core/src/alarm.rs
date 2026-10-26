@@ -16,9 +16,10 @@
 //!
 //! A registration outlives the poll that made it, so the two facts a driver
 //! owes have to be readable from both ends of it. The state flag is what the
-//! woken task reads instead of the clock — a Worker's `performance.timeOrigin`
-//! is its own, so a wake can land while the task's own reading of the time is
-//! still behind the deadline, and a future that trusted the clock there would
+//! woken task reads instead of the clock — the thread's clock is aligned to
+//! its starter's to within half a round trip ([`crate::clock`]), not exactly,
+//! so a wake can land while the task's own reading of the time is still
+//! behind the deadline, and a future that trusted the clock there would
 //! return `Pending` without re-registering and never be woken again. The
 //! cancellation the flag also carries is what keeps the heap bounded: a
 //! `Sleep` that is dropped un-fired — which is every re-armed wait in the
@@ -34,7 +35,9 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::task::{Context, Poll, Waker};
 use std::thread;
 
-use crate::clock::ClockInstant;
+use terminus::link::clock::{AnswerWhenReady, alignment_channel};
+
+use crate::clock::{ALIGNMENT_PATIENCE, ClockInstant};
 use crate::view::EngineError;
 
 /// Waiting for its deadline, and the only state a registration is wakeable in.
@@ -126,7 +129,8 @@ static ALARMS: OnceLock<Registry> = OnceLock::new();
 /// Whether the thread reading the registry has been spawned.
 static STARTED: Mutex<bool> = Mutex::new(false);
 
-/// Boots the alarm thread, once per process.
+/// Boots the alarm thread, once per process, and hands back the answer to its
+/// clock alignment for the caller to await; `None` when it is already running.
 ///
 /// Called by [`crate::LynxGroup::new`] on the embedder's thread, before the
 /// group's own threads, rather than left to the first timer a card arms:
@@ -137,21 +141,32 @@ static STARTED: Mutex<bool> = Mutex::new(false);
 /// while it awaits and an engine thread, parked in its scheduler, never
 /// does: spawned from `bobcat-main`, this thread never ran, and no realm
 /// timer on wasm32 ever fired.
-pub(crate) fn start() -> Result<(), EngineError> {
+///
+/// The thread compares deadlines armed on the engine threads with its own
+/// clock, so its first statement aligns that clock to the embedder thread's
+/// ([`crate::clock`]), the one every engine thread is aligned to. A thread
+/// that does not align runs on its own clock, and what is lost is accuracy
+/// alone: a wake lands early or late by the Workers' offset, and the `FIRED`
+/// flag still ends the wait.
+pub(crate) fn start() -> Result<Option<AnswerWhenReady>, EngineError> {
     let mut started = lock(&STARTED);
     if *started {
-        return Ok(());
+        return Ok(None);
     }
     let registry = registrations();
+    let (clock, clock_end) = alignment_channel();
     wasm_thread::Builder::new()
         .name("bobcat-alarm".to_owned())
-        .spawn(move || run(registry))
+        .spawn(move || {
+            clock_end.align_to_spawner();
+            run(registry);
+        })
         .map_err(|error| EngineError::Thread {
             name: "alarm",
             message: error.to_string(),
         })?;
     *started = true;
-    Ok(())
+    Ok(Some(clock.answer(ALIGNMENT_PATIENCE)))
 }
 
 /// The registry. A registration made before the thread runs waits in it, and
@@ -252,8 +267,7 @@ impl Sleep {
     /// — which is every timer the engine finds due — must resolve with no
     /// round trip at all. The flag second, because the clock alone is not
     /// enough: it is read here on the waiting Worker and there on the alarm
-    /// thread, and the two `performance.timeOrigin`s they are relative to are
-    /// not the same one.
+    /// thread, and the two agree only to within the alignment's error.
     fn elapsed(&self) -> bool {
         ClockInstant::now() >= self.deadline
             || self.slot.as_ref().is_some_and(|slot| slot.state() == FIRED)

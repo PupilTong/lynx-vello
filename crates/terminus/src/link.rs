@@ -59,6 +59,26 @@ pub use crate::visual::{
     SnapSlot, SnapSlotAxis,
 };
 
+/// The engine's monotonic clock, and the alignment that keeps it one clock
+/// across threads.
+///
+/// Every instant this crate takes is a
+/// [`ClockInstant`](crate::link::clock::ClockInstant). Natively that is
+/// `std::time::Instant`, one clock for the whole process. On wasm32 each
+/// Worker's clock starts from its own `performance.timeOrigin`, so a thread
+/// that reads instants another thread subtracts is aligned once, at its
+/// start, to the thread that spawned it: the spawner makes an
+/// [`alignment_channel`](crate::link::clock::alignment_channel), the new
+/// thread's first statement is
+/// [`SpawnedClock::align_to_spawner`](crate::link::clock::SpawnedClock::align_to_spawner),
+/// and the spawner answers through its
+/// [`SpawnerClock`](crate::link::clock::SpawnerClock).
+pub mod clock {
+    pub use crate::clock::{
+        Alignment, AnswerWhenReady, ClockInstant, SpawnedClock, SpawnerClock, alignment_channel,
+    };
+}
+
 /// Focus, the editing commands a host sends a focused editing host, and the
 /// text-input state it reports.
 ///

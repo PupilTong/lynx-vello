@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use quickjs_rust_bridge::HostValue;
 use rustc_hash::FxHashMap;
+use terminus::link::clock::{Alignment, alignment_channel};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use url::Url;
@@ -31,6 +32,16 @@ use crate::resource::{
 };
 
 impl WorkerHome {
+    /// Starts the thread as `LynxGroup::new` does, answering its clock
+    /// alignment, and hands back what the thread measured.
+    pub(crate) fn start_aligned_for_test() -> (Self, Option<Alignment>) {
+        let (clock, clock_end) = alignment_channel();
+        let home = Self::start(clock_end).expect("the worker thread starts");
+        let alignment = block_on_deadline(clock.answer(PATIENCE), ClockInstant::now() + PATIENCE)
+            .expect("the worker thread runs");
+        (home, alignment)
+    }
+
     pub(crate) fn with_entry_for_test(entry: (String, String)) -> Self {
         let (commands, receiver) = mpsc::unbounded_channel();
         let trapped = Arc::new(AtomicBool::new(false));
@@ -188,7 +199,7 @@ struct Group {
 
 impl Group {
     fn new() -> Self {
-        let home = WorkerHome::start().expect("the worker thread starts");
+        let (home, _) = WorkerHome::start_aligned_for_test();
         Self {
             commands: Some(home.commands()),
             home,

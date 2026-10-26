@@ -2678,7 +2678,9 @@ the same reason a group starts those eagerly — a card's first `setTimeout`
 must wait out its own delay rather than a Worker's cold start. Not by
 `bobcat-main`: a Worker does not start until the thread that created it
 returns to its event loop, and an engine thread parked in its scheduler never
-does. The tokio feature set follows: `rt`, `sync` and `macros`
+does. Each of the three aligns its monotonic clock to the embedder thread's as
+its first statement (`crate::clock`), since every Worker's
+`performance.timeOrigin` is its own. The tokio feature set follows: `rt`, `sync` and `macros`
 everywhere, `time` only under `cfg(not(target_arch = "wasm32"))`.
 
 On Wasm, `configure_wasm_workers(worker_script_url)` is the OS bootstrap

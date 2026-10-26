@@ -115,11 +115,20 @@ the BTS. The main-thread epilogue gains no step.
 ## 3. Clock and timestamps
 
 **One monotonic clock, converted once.** Marks are `ClockInstant`
-(`std::time::Instant` natively, `web_time::Instant` on Wasm — the pair
-`crate::clock` already names). They are taken on whichever thread the event
-happens on; `Instant` is comparable across threads of one process, which is
-what makes a BTS-side `diffVdomStart` and a painter-side `paintEnd`
-subtractable. A view records, at construction and beside the
+(`terminus::link::clock`, which `crate::clock` re-exports: a newtype over
+`std::time::Instant` natively and `web_time::Instant` on Wasm). They are
+taken on whichever thread the event happens on. Natively `Instant` is one
+clock for every thread of a process. On Wasm each Worker's instant is its own
+`performance.timeOrigin + performance.now()`, and two Workers disagree by how
+far the system and monotonic clocks drifted apart between their creations
+(NTP slewing, a sleep), so every engine thread aligns its clock once, as its
+first statement, to the thread that spawned it (one NTP-style exchange;
+`bobcat-main`, `bobcat-workers` and the process's alarm thread are all
+spawned and answered by the embedder's thread in `LynxGroup::new`), and adds
+that offset
+to every later reading. Either way readings are comparable across threads,
+which is what makes a BTS-side `diffVdomStart` and a painter-side `paintEnd`
+subtractable. No sample is a wall-clock reading. A view records, at construction and beside the
 `timeline_epoch` it already keeps, one `SystemTime` reading taken at the
 same moment. Every entry handed out converts
 `unix = epoch_unix + (instant - epoch_instant)`.

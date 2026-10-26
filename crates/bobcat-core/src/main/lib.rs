@@ -48,6 +48,7 @@ use std::thread::Builder as ThreadBuilder;
 
 use rustc_hash::FxHashMap;
 use terminus::link::StylePool;
+use terminus::link::clock::SpawnedClock;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::{self, JoinError, JoinSet};
 use tokio_util::sync::CancellationToken;
@@ -85,6 +86,9 @@ pub(crate) struct GroupLink {
     /// after that fails at once instead of being sent to a thread that will
     /// never read it.
     pub(crate) workers_trapped: Arc<AtomicBool>,
+    /// This thread's end of its clock alignment, used as its first statement
+    /// ([`crate::clock`]); the group's constructor answers the other end.
+    pub(crate) clock: SpawnedClock,
 }
 
 /// What every view on this thread shares.
@@ -162,7 +166,10 @@ fn run_group(style_threads: StyleThreads, link: GroupLink) {
         ready,
         workers,
         workers_trapped,
+        clock,
     } = link;
+    // First, so every instant this thread takes is on its spawner's clock.
+    clock.align_to_spawner();
     #[cfg(all(target_arch = "wasm32", panic = "abort"))]
     crate::threads::install_script_panic_hook();
 

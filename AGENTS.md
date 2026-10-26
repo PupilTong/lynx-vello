@@ -1189,8 +1189,19 @@ deadline moves and fed by the watch that realm's epilogue publishes. Natively
 that sleep is tokio's own time driver; on wasm32, where tokio's reads
 `std::time::Instant` and would panic, `src/alarm.rs` serves it — one
 process-wide `bobcat-alarm` Worker holding a heap of deadlines and the wakers
-waiting on them, parked with `park_timeout` — and `crate::clock::sleep_until`
-picks between the two by `cfg`. A draw that fails is the return value of
+waiting on them, parked with `park_timeout`, started by the first
+`LynxGroup::new` on the embedder's thread — and `crate::clock::sleep_until`
+picks between the two by `cfg`. **One clock across threads**: every instant
+is `terminus::link::clock::ClockInstant`, which `crate::clock` re-exports.
+Natively it is `std::time::Instant` and nothing else; on wasm32 each Worker's
+`web_time::Instant` starts from its own `performance.timeOrigin`, so
+`bobcat-main`, `bobcat-workers` and `bobcat-alarm` each align their clock to
+the embedder thread's as their first statement (one NTP-style exchange, which
+`LynxGroup::new` answers with `SpawnerClock::answer`) and add that offset to
+every later reading. A thread that must be aligned is spawned by the
+embedder's thread: a Worker does not start until its creator returns to its
+event loop, which an engine thread parked in its scheduler never does. A
+draw that fails is the return value of
 `Painter::{pump, tick, capture}`, reported once because there is no recovering
 a lost surface; there is no `RenderFailed` event.
 

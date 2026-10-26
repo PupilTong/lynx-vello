@@ -399,3 +399,54 @@ fn a_source_prints_as_main_or_as_a_workers_id_and_url() {
         "a second worker over the same URL"
     );
 }
+
+/// Each of a group's two threads aligns its clock to the thread that spawned
+/// it as its first statement, `bobcat-main` before it reports startup. The
+/// exchange runs natively too, where its offset is measured and not applied:
+/// one process clock, so what it measures is the estimate's own error.
+#[test]
+fn both_group_threads_align_their_clocks_as_they_start() {
+    let patience = Duration::from_secs(30);
+    let (workers, workers_alignment) = WorkerHome::start_aligned_for_test();
+    let (attach, attachments) = mpsc::unbounded_channel();
+    let (ready, started) = oneshot::channel();
+    let (clock, clock_end) = alignment_channel();
+    let home = spawn_group(
+        StyleThreads::Sequential,
+        GroupLink {
+            attach: attachments,
+            requester: Arc::new(NoWakeup),
+            ready,
+            workers: workers.commands(),
+            workers_trapped: workers.trapped(),
+            clock: clock_end,
+        },
+    )
+    .expect("bobcat-main starts");
+    let main_alignment = crate::link::block_on_deadline(
+        clock.answer(patience),
+        crate::clock::ClockInstant::now() + patience,
+    )
+    .expect("bobcat-main runs");
+    assert!(
+        matches!(started.blocking_recv(), Ok(Ok(()))),
+        "bobcat-main reports startup after aligning"
+    );
+    // The group's teardown order: the attach sender, then bobcat-main, then
+    // bobcat-workers.
+    drop(attach);
+    drop(home);
+    drop(workers);
+    for (thread, alignment) in [
+        ("bobcat-workers", workers_alignment),
+        ("bobcat-main", main_alignment),
+    ] {
+        let alignment = alignment.unwrap_or_else(|| panic!("{thread} aligned its clock"));
+        let error = i64::try_from(alignment.round_trip().as_nanos() / 2).unwrap() + 1;
+        assert!(
+            alignment.offset_nanos().abs() <= error,
+            "{thread}: one process clock, so the offset is within half the round trip: {alignment:?}"
+        );
+        assert!(alignment.round_trip() < patience);
+    }
+}
