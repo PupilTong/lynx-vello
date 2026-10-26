@@ -189,12 +189,6 @@ fn run_group(style_threads: StyleThreads, link: GroupLink) {
             return;
         }
     };
-    // The one thread this one does start, and for the same reason the group
-    // starts its two eagerly: a card's first `setTimeout` must wait out its
-    // own delay rather than a Worker's cold start. Natively tokio's timer is
-    // the engine thread's own and there is nothing to start.
-    #[cfg(target_arch = "wasm32")]
-    crate::alarm::start();
     if ready.send(Ok(())).is_err() {
         return;
     }
