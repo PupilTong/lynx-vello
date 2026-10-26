@@ -94,7 +94,7 @@ import { frameConnectionChanged, frameDataChanged, frameSourceChanged } from "bo
 // | `__QuerySelectorAll(element, selector, params)` | native `queryElementIds` export + this runtime's handle index |
 // | `__InvokeUIMethod(element, method, params, callback)` | native `callElementMethod` + `getAttribute` exports + this runtime's dataset store |
 // | `__GetComputedStyleByKey(element, key)` | native `getComputedStyleMap` export |
-// | `__FlushElementTree(element?, options?)` | native `flushElementTree` export, with `options.pipelineOptions.pipelineID` and `options.__lynx_timing_flag` |
+// | `__FlushElementTree(element?, options?)` | native `flushElementTree` export, with `options.pipelineOptions.pipelineID` and `options.__lynx_timing_flag`; a list cell's flush (`options.listID`) commits nothing |
 //
 // Everything else — `__DropElement` (absent from every web-core
 // generation), `__AddClass`,
@@ -4711,12 +4711,26 @@ export function __QuerySelectorAll(
  * flush options: its `pipelineOptions.pipelineID` names the pipeline this
  * flush ends and its `__lynx_timing_flag` a flag the flush reports, both
  * handed to the host as primitives (`0` and `""` for none), which binds
- * them to the frame this flush commits. A list's own flush passes neither.
+ * them to the frame this flush commits.
+ *
+ * A list cell's flush commits nothing. `componentAtIndex` flushes each cell
+ * it builds with the cell's `listID` (`snapshot/list/list.ts`), which native
+ * answers by laying that one cell out for the list to measure; here a commit
+ * lays out the whole document, so a list of a thousand cells would commit a
+ * thousand times in one task. Nothing reads the cell back before the task
+ * ends, and the entry's epilogue commits whatever the task left, once — as a
+ * browser renders web-core's cells at its next frame.
  */
 export function __FlushElementTree(...args: [element?: unknown, options?: unknown]): undefined {
   // Rest parameters keep the binding's arity at web-core's 0.
   const [, options] = args;
-  const flushOptions = options as {pipelineOptions?: {pipelineID?: unknown}; __lynx_timing_flag?: unknown} | null | undefined;
+  const flushOptions = options as
+    | {pipelineOptions?: {pipelineID?: unknown}; __lynx_timing_flag?: unknown; listID?: unknown}
+    | null
+    | undefined;
+  if (flushOptions?.listID !== undefined) {
+    return undefined;
+  }
   const pipeline = Number(flushOptions?.pipelineOptions?.pipelineID ?? 0);
   const flag = flushOptions?.__lynx_timing_flag;
   flushElementTree(Number.isSafeInteger(pipeline) && pipeline > 0 ? pipeline : 0, typeof flag === "string" ? flag : "");
