@@ -1,6 +1,33 @@
+// The GitHub Pages Lynx Explorer: the page shell, the canvas it hands to a
+// `BobcatCanvas`, the Explorer homepage's `NativeModules`, and the Lynx XML
+// editor, all on the page's main thread.
+//
+// The Lynx performance panel under the Canvas FPS row reads the same entries
+// a native LynxView hands its host's `onPerformanceEvent`. The page passes
+// `onPerformanceEntry` to `BobcatCanvas.create`, which is what has the Render
+// Worker tell each view to observe; the engine writes each entry as Lynx's
+// JSON on that Worker, the facade parses it, and `PerformanceTimeline` (from
+// bobcat-wasm) files it under the load it belongs to. Every load the page
+// starts — the Load button, a navigation, an Explorer `openSchema`, a Lynx
+// XML render — begins a group and passes `openTime`, the instant it was asked
+// for, so the load entry reports `totalFcp`; the facade adds the canvas's
+// `containerInit` marks and the Render Worker the `prepareTemplate` marks
+// around its fetch.
+
 import './styles.css';
 
-import type { BobcatCanvas, NativeModules, PageConfig } from 'bobcat-wasm';
+import type {
+  BobcatCanvas,
+  LynxPaintEntry,
+  LynxPerformanceEntry,
+  LynxPerformanceMetric,
+  LynxPipelineEntry,
+  NativeModules,
+  PageConfig,
+  PerformanceLoad,
+  PerformanceTimeline,
+  Waterfall,
+} from 'bobcat-wasm';
 
 const MAX_LYNX_XML_BYTES = 16 * 1024 * 1024;
 const RELOAD_MARKER = `bobcat-coi-reload:${new URL('.', document.baseURI).pathname}`;
@@ -18,6 +45,11 @@ const WEB_BUNDLE_SUFFIX = '.web.bundle';
 // One namespace for everything the demo's ExplorerModule stores, so the page
 // shares no key with anything else served from this origin.
 const STORAGE_PREFIX = 'bobcat-explorer:';
+// Whether the Lynx performance panel is open, under that same namespace.
+const PERFORMANCE_PANEL_KEY = `${STORAGE_PREFIX}performance-panel`;
+// The pipeline log keeps this many rows per load; older ones are dropped and
+// counted.
+const PERFORMANCE_ROW_CAP = 200;
 
 type IndicatorState = 'pending' | 'ok' | 'error';
 type SourceState = 'idle' | 'pending' | 'ok' | 'error';
@@ -30,9 +62,29 @@ interface Indicator {
 
 type BobcatCanvasFactory = Pick<typeof BobcatCanvas, 'create'>;
 
+/** The parts of bobcat-wasm the performance panel draws with. */
+type PerformanceKit = Pick<
+  typeof import('bobcat-wasm'),
+  'PerformanceTimeline' | 'pipelineDuration' | 'pipelineWaterfall'
+>;
+
+interface PerformanceShell {
+  readonly panel: HTMLDetailsElement;
+  readonly counters: HTMLElement;
+  readonly fcp: HTMLElement;
+  readonly lynxFcp: HTMLElement;
+  readonly totalFcp: HTMLElement;
+  readonly waterfall: HTMLElement;
+  readonly loadRaw: HTMLElement;
+  readonly filter: HTMLInputElement;
+  readonly log: HTMLTableSectionElement;
+  readonly loads: HTMLSelectElement;
+}
+
 interface Shell {
   readonly sourcePanel: HTMLElement;
   readonly frameRate: HTMLElement;
+  readonly performance: PerformanceShell;
   readonly navigation: HTMLSelectElement;
   readonly navigationPosition: HTMLElement;
   readonly backButton: HTMLButtonElement;
@@ -142,6 +194,46 @@ function mountShell(): Shell {
                 <span class="status-label" title="Sampled with requestAnimationFrame on the Painter thread; not GPU presents">Canvas FPS <span class="frame-rate-method">/ rAF</span></span>
                 <span class="frame-rate-value" id="frame-rate" aria-live="off">—</span>
               </div>
+              <details class="performance-panel" id="performance-panel" open>
+                <summary class="performance-heading">
+                  <span class="status-label" title="The entries a native LynxView hands its host's onPerformanceEvent">Lynx performance</span>
+                  <span id="performance-counters" class="performance-counters">No load yet</span>
+                </summary>
+                <div class="performance-body">
+                  <dl class="performance-figures">
+                    <div class="performance-figure"><dt>fcp</dt><dd id="performance-fcp">—</dd></div>
+                    <div class="performance-figure"><dt>lynxFcp</dt><dd id="performance-lynx-fcp">—</dd></div>
+                    <div class="performance-figure"><dt>totalFcp</dt><dd id="performance-total-fcp">—</dd></div>
+                  </dl>
+                  <div id="performance-waterfall" class="performance-waterfall-host"></div>
+                  <div id="performance-load-raw"></div>
+                  <div class="performance-log-heading">
+                    <span class="status-label">Pipeline log</span>
+                    <input id="performance-filter" type="search" placeholder="Filter name or identifier" aria-label="Filter the pipeline log by name or identifier" autocomplete="off" spellcheck="false">
+                  </div>
+                  <div class="performance-log" tabindex="0" aria-label="Pipeline log">
+                    <table>
+                      <colgroup>
+                        <col class="performance-col-name">
+                        <col class="performance-col-identifier">
+                        <col class="performance-col-origin">
+                        <col class="performance-col-duration">
+                        <col class="performance-col-expand">
+                      </colgroup>
+                      <thead>
+                        <tr>
+                          <th scope="col">name</th>
+                          <th scope="col">identifier</th>
+                          <th scope="col" title="Lynx reports a pipeline's origin as its name; this is the framework's frameworkRenderingTiming.dsl and stage">dsl · stage</th>
+                          <th scope="col" class="performance-numeric" title="paintEnd − pipelineStart">duration</th>
+                          <th scope="col"><span class="visually-hidden">Stages</span></th>
+                        </tr>
+                      </thead>
+                      <tbody id="performance-log"></tbody>
+                    </table>
+                  </div>
+                </div>
+              </details>
               <div class="navigation-heading">
                 <label for="navigation-stack" class="status-label">Navigation stack</label>
                 <span id="navigation-position" class="field-help">0 / 0</span>
@@ -151,6 +243,9 @@ function mountShell(): Shell {
                 <button id="navigate-forward" type="button" aria-label="Go forward" title="Go forward" disabled>→</button>
                 <select id="navigation-stack" aria-describedby="navigation-position" disabled>
                   <option>No pages yet</option>
+                </select>
+                <select id="performance-loads" aria-label="Lynx performance: the load shown" title="The load the Lynx performance panel shows" disabled>
+                  <option>No loads yet</option>
                 </select>
               </div>
             </section>
@@ -242,6 +337,18 @@ function mountShell(): Shell {
   return {
     sourcePanel: requiredElement<HTMLElement>(root, '#source-panel'),
     frameRate: requiredElement<HTMLElement>(root, '#frame-rate'),
+    performance: {
+      panel: requiredElement<HTMLDetailsElement>(root, '#performance-panel'),
+      counters: requiredElement<HTMLElement>(root, '#performance-counters'),
+      fcp: requiredElement<HTMLElement>(root, '#performance-fcp'),
+      lynxFcp: requiredElement<HTMLElement>(root, '#performance-lynx-fcp'),
+      totalFcp: requiredElement<HTMLElement>(root, '#performance-total-fcp'),
+      waterfall: requiredElement<HTMLElement>(root, '#performance-waterfall'),
+      loadRaw: requiredElement<HTMLElement>(root, '#performance-load-raw'),
+      filter: requiredElement<HTMLInputElement>(root, '#performance-filter'),
+      log: requiredElement<HTMLTableSectionElement>(root, '#performance-log'),
+      loads: requiredElement<HTMLSelectElement>(root, '#performance-loads'),
+    },
     navigation: requiredElement<HTMLSelectElement>(root, '#navigation-stack'),
     navigationPosition: requiredElement<HTMLElement>(root, '#navigation-position'),
     backButton: requiredElement<HTMLButtonElement>(root, '#navigate-back'),
@@ -770,12 +877,354 @@ function createExplorerModule(
   };
 }
 
+// Stage pairs that belong to the load or reload itself, drawn in the second
+// bar colour; every other stage is the pipeline's.
+const LOAD_STAGES: ReadonlySet<string> = new Set([
+  'loadBundle',
+  'reloadBundle',
+  'parse',
+  'loadBackground',
+  'reloadBackground',
+]);
+
+function performanceMetric(entry: LynxPipelineEntry | undefined, key: string): LynxPerformanceMetric | undefined {
+  const value = entry?.[key];
+  return typeof value === 'object' && value !== null && typeof (value as { duration?: unknown }).duration === 'number'
+    ? (value as LynxPerformanceMetric)
+    : undefined;
+}
+
+function millis(value: number): string {
+  return `${value.toFixed(1)} ms`;
+}
+
+function frameworkStage(entry: LynxPipelineEntry): string {
+  const timing = entry.frameworkRenderingTiming;
+  return [timing?.['dsl'], timing?.['stage']]
+    .filter((part): part is string => typeof part === 'string' && part !== '')
+    .join(' · ');
+}
+
+function readPanelOpen(): boolean {
+  try {
+    return localStorage.getItem(PERFORMANCE_PANEL_KEY) !== 'closed';
+  } catch {
+    return true;
+  }
+}
+
+function storePanelOpen(open: boolean): void {
+  try {
+    localStorage.setItem(PERFORMANCE_PANEL_KEY, open ? 'open' : 'closed');
+  } catch {
+    // The panel opens by default where storage is blocked.
+  }
+}
+
+function element<K extends keyof HTMLElementTagNameMap>(
+  tag: K,
+  className?: string,
+  text?: string,
+): HTMLElementTagNameMap[K] {
+  const node = document.createElement(tag);
+  if (className !== undefined) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+/**
+ * The entry as received, pretty-printed in a `<details>` with a Copy button:
+ * the shape is Lynx native's, and the point is comparing it with a native
+ * LynxView's `onPerformanceEvent` output. `open` keeps a details the user
+ * opened open across redraws.
+ */
+function rawEntry(entry: LynxPerformanceEntry, open: WeakSet<object>): HTMLDetailsElement {
+  const details = element('details', 'performance-raw');
+  details.open = open.has(entry);
+  details.addEventListener('toggle', () => {
+    if (details.open) open.add(entry);
+    else open.delete(entry);
+  });
+  const summary = element('summary', undefined, 'Raw entry');
+  const json = JSON.stringify(entry, null, 2);
+  const copy = element('button', 'performance-copy', 'Copy');
+  copy.type = 'button';
+  const text = element('pre', 'performance-json', json);
+  copy.addEventListener('click', () => {
+    void navigator.clipboard.writeText(json).then(
+      () => {
+        copy.textContent = 'Copied';
+      },
+      () => {
+        // Without clipboard access the text is selected for the user to copy.
+        const selection = window.getSelection();
+        selection?.selectAllChildren(text);
+        copy.textContent = 'Selected';
+      },
+    );
+    window.setTimeout(() => {
+      copy.textContent = 'Copy';
+    }, 1500);
+  });
+  details.append(summary, copy, text);
+  return details;
+}
+
+/**
+ * One stage waterfall: a row per stage pair, its bar placed on the shared
+ * axis, the stage name at the left and its duration at the right, and the
+ * `paint` marks as vertical lines across every row.
+ */
+function waterfallElement(waterfall: Waterfall, label: string): HTMLElement {
+  const root = element('div', 'performance-waterfall');
+  root.setAttribute('role', 'group');
+  root.setAttribute('aria-label', label);
+  const { axis } = waterfall;
+  const offset = (time: number): string => `+${(time - axis.start).toFixed(1)} ms`;
+  for (const bar of waterfall.bars) {
+    const row = element('div', 'waterfall-row');
+    row.title = `${bar.name}\nstart ${bar.start.toFixed(3)} (${offset(bar.start)})\nend ${bar.end.toFixed(3)} (${offset(bar.end)})\nduration ${millis(bar.duration)}`;
+    const name = element('span', 'waterfall-name', bar.name);
+    const track = element('span', 'waterfall-track');
+    const fill = element('span', 'waterfall-bar');
+    fill.dataset['kind'] = LOAD_STAGES.has(bar.name) ? 'load' : 'pipeline';
+    fill.style.left = `${bar.left}%`;
+    fill.style.width = `${bar.width}%`;
+    track.append(fill);
+    row.append(name, track, element('span', 'waterfall-duration', millis(bar.duration)));
+    root.append(row);
+  }
+  const markers = element('div', 'waterfall-markers');
+  markers.setAttribute('aria-hidden', 'true');
+  for (const [index, marker] of waterfall.markers.entries()) {
+    const line = element('span', 'waterfall-marker');
+    line.style.left = `${marker.left}%`;
+    line.title = `${marker.name}\nstartTime ${marker.time.toFixed(3)} (${offset(marker.time)})`;
+    const name = element('span', 'waterfall-marker-name', marker.name);
+    // Marks that fall together stack their labels instead of overlapping;
+    // past the middle a label reads leftwards from its line.
+    name.style.setProperty('--marker-row', String(index));
+    name.dataset['side'] = marker.left > 50 ? 'end' : 'start';
+    line.append(name);
+    markers.append(line);
+  }
+  markers.style.setProperty('--marker-rows', String(waterfall.markers.length));
+  const scale = element('div', 'waterfall-scale');
+  scale.style.setProperty('--marker-rows', String(waterfall.markers.length));
+  scale.append(
+    element('span', undefined, '0'),
+    element('span', undefined, millis(axis.end - axis.start)),
+  );
+  root.append(markers, scale);
+  return root;
+}
+
+/**
+ * The Lynx performance section: the current load's `fcp`, `lynxFcp` and
+ * `totalFcp`, its stage waterfall with the `paint` marks, and a log of every
+ * pipeline entry. Earlier loads stay selectable beside the navigation stack.
+ *
+ * Draws at most once per animation frame however many entries arrive, and
+ * not at all while the section is collapsed.
+ */
+class PerformancePanel {
+  readonly #shell: PerformanceShell;
+  readonly #kit: PerformanceKit;
+  readonly #timeline: PerformanceTimeline;
+  /** The load shown, or `undefined` to follow the newest. */
+  #viewing: PerformanceLoad | undefined;
+  readonly #expanded = new WeakSet<object>();
+  readonly #rawOpen = new WeakSet<object>();
+  /** What the summary last drew, so a log-only change leaves it alone. */
+  #summaryDrawn: { load: PerformanceLoad | undefined; entry: unknown; paints: number } | undefined;
+  #frame = 0;
+
+  constructor(shell: PerformanceShell, kit: PerformanceKit) {
+    this.#shell = shell;
+    this.#kit = kit;
+    this.#timeline = new kit.PerformanceTimeline(PERFORMANCE_ROW_CAP);
+    shell.panel.open = readPanelOpen();
+    shell.panel.addEventListener('toggle', () => {
+      storePanelOpen(shell.panel.open);
+      this.#schedule();
+    });
+    shell.filter.addEventListener('input', () => this.#schedule());
+    shell.loads.addEventListener('change', () => {
+      const loads = this.#timeline.loads;
+      const index = Number(shell.loads.value);
+      this.#viewing = index >= loads.length - 1 ? undefined : loads[index];
+      this.#schedule();
+    });
+    this.#draw();
+  }
+
+  /** Starts the group a page load's entries are filed under. */
+  begin(label: string): void {
+    const current = this.#timeline.current;
+    // Following the newest load stays on it; a user looking back at an older
+    // one is left there.
+    this.#timeline.begin(label);
+    if (this.#viewing === current) this.#viewing = undefined;
+    this.#schedule();
+  }
+
+  add(entry: LynxPerformanceEntry): void {
+    this.#timeline.add(entry);
+    this.#schedule();
+  }
+
+  #schedule(): void {
+    if (this.#frame !== 0) return;
+    this.#frame = window.requestAnimationFrame(() => {
+      this.#frame = 0;
+      this.#draw();
+    });
+  }
+
+  #draw(): void {
+    this.#drawLoads();
+    const load = this.#viewing ?? this.#timeline.current;
+    const shell = this.#shell;
+    shell.counters.textContent = load === undefined
+      ? 'No load yet'
+      : `${String(load.pipelineCount)} pipeline${load.pipelineCount === 1 ? '' : 's'} · ${String(load.dropped)} dropped`;
+    if (!shell.panel.open) {
+      // Collapsed sections draw nothing; the summary is redrawn on opening.
+      this.#summaryDrawn = undefined;
+      return;
+    }
+    this.#drawSummary(load);
+    this.#drawLog(load);
+  }
+
+  #drawLoads(): void {
+    const loads = this.#timeline.loads;
+    const select = this.#shell.loads;
+    if (loads.length === 0) {
+      select.replaceChildren(new Option('No loads yet'));
+      select.disabled = true;
+      return;
+    }
+    const shown = this.#viewing ?? loads.at(-1);
+    select.replaceChildren(...loads.map((load, index) => {
+      const lynxFcp = performanceMetric(load.load, 'lynxFcp');
+      const label = load.label.startsWith(document.baseURI) ? load.label.slice(document.baseURI.length) : load.label;
+      const live = index === loads.length - 1 ? ' (live)' : '';
+      const figure = lynxFcp === undefined ? '' : ` · ${millis(lynxFcp.duration)}`;
+      const option = new Option(`Load ${String(index + 1)}${live} · ${label}${figure}`, String(index));
+      option.selected = load === shown;
+      return option;
+    }));
+    select.disabled = false;
+    select.title = shown?.label ?? '';
+  }
+
+  #drawSummary(load: PerformanceLoad | undefined): void {
+    const shell = this.#shell;
+    const entry = load?.load;
+    const drawn = this.#summaryDrawn;
+    if (drawn?.load === load && drawn?.entry === entry && drawn?.paints === load?.paints.length) {
+      return;
+    }
+    this.#summaryDrawn = { load, entry, paints: load?.paints.length ?? 0 };
+    for (const [target, key] of [
+      [shell.fcp, 'fcp'],
+      [shell.lynxFcp, 'lynxFcp'],
+      [shell.totalFcp, 'totalFcp'],
+    ] as const) {
+      const metric = performanceMetric(entry, key);
+      target.textContent = metric === undefined ? '—' : millis(metric.duration);
+      target.title = metric === undefined
+        ? `${key}: not reported for this load`
+        : `${key}: ${metric.endTimestampName} − ${metric.startTimestampName}`;
+    }
+    if (entry === undefined) {
+      const note = element(
+        'p',
+        'field-help',
+        load === undefined ? 'Load a page to see its stages.' : 'Waiting for the load entry…',
+      );
+      shell.waterfall.replaceChildren(note);
+      shell.loadRaw.replaceChildren();
+      return;
+    }
+    const paints: LynxPaintEntry[] = load?.paints ?? [];
+    shell.waterfall.replaceChildren(
+      waterfallElement(this.#kit.pipelineWaterfall(entry, paints), `${entry.name} stages`),
+    );
+    shell.loadRaw.replaceChildren(rawEntry(entry, this.#rawOpen));
+  }
+
+  #drawLog(load: PerformanceLoad | undefined): void {
+    const body = this.#shell.log;
+    const filter = this.#shell.filter.value.trim().toLowerCase();
+    const rows: HTMLTableRowElement[] = [];
+    const pipelines = load?.pipelines ?? [];
+    for (let index = pipelines.length - 1; index >= 0; index -= 1) {
+      const entry = pipelines[index]!;
+      if (
+        filter !== '' &&
+        !entry.name.toLowerCase().includes(filter) &&
+        !entry.identifier.toLowerCase().includes(filter)
+      ) {
+        continue;
+      }
+      rows.push(...this.#logRows(entry));
+    }
+    if (rows.length === 0) {
+      const row = element('tr', 'performance-empty');
+      const cell = element('td', undefined, pipelines.length === 0 ? 'No pipelines yet' : 'No pipeline matches the filter');
+      cell.colSpan = 5;
+      row.append(cell);
+      rows.push(row);
+    }
+    body.replaceChildren(...rows);
+  }
+
+  #logRows(entry: LynxPipelineEntry): HTMLTableRowElement[] {
+    const row = element('tr');
+    const duration = this.#kit.pipelineDuration(entry);
+    const stage = frameworkStage(entry);
+    const cells = [
+      element('td', 'performance-mono', entry.name),
+      element('td', 'performance-mono', entry.identifier),
+      element('td', undefined, stage),
+      element('td', 'performance-numeric', millis(duration)),
+    ];
+    for (const cell of cells) cell.title = cell.textContent ?? '';
+    const toggleCell = element('td');
+    const toggle = element('button', 'performance-expand', '▸');
+    toggle.type = 'button';
+    const open = this.#expanded.has(entry);
+    toggle.setAttribute('aria-expanded', String(open));
+    toggle.setAttribute('aria-label', `Stages of ${entry.name}${entry.identifier === '' ? '' : ` ${entry.identifier}`}`);
+    toggle.addEventListener('click', () => {
+      if (this.#expanded.has(entry)) this.#expanded.delete(entry);
+      else this.#expanded.add(entry);
+      this.#schedule();
+    });
+    toggleCell.append(toggle);
+    row.append(...cells, toggleCell);
+    if (!open) return [row];
+    const detail = element('tr', 'performance-detail');
+    const cell = element('td');
+    cell.colSpan = 5;
+    cell.append(
+      waterfallElement(this.#kit.pipelineWaterfall(entry, [], entry.pipelineStart), `${entry.name} stages`),
+      rawEntry(entry, this.#rawOpen),
+    );
+    detail.append(cell);
+    return [row, detail];
+  }
+}
+
 class PreviewRenderer {
   readonly #config: PageConfig;
   readonly #factory: BobcatCanvasFactory;
   readonly #fallbackFonts: readonly Uint8Array[];
   readonly #fontBytes: Uint8Array;
   readonly #nativeModules: NativeModules;
+  readonly #onPerformanceEntry: (entry: LynxPerformanceEntry) => void;
   readonly #reportFatal: (error: Error) => void;
   readonly #resizeObserver: ResizeObserver;
   readonly #shell: Shell;
@@ -793,9 +1242,11 @@ class PreviewRenderer {
     fontBytes: Uint8Array,
     fallbackFonts: readonly Uint8Array[],
     nativeModules: NativeModules,
+    onPerformanceEntry: (entry: LynxPerformanceEntry) => void,
     reportFatal: (error: Error) => void,
   ) {
     this.#shell = shell;
+    this.#onPerformanceEntry = onPerformanceEntry;
     this.#factory = factory;
     this.#config = config;
     this.#fontBytes = fontBytes;
@@ -808,7 +1259,8 @@ class PreviewRenderer {
     window.addEventListener('resize', this.#windowResize, { passive: true });
   }
 
-  async render(source: string): Promise<void> {
+  /** `openTime` is Lynx's: when the render was asked for (`Date.now()`). */
+  async render(source: string, openTime: number): Promise<void> {
     if (source.trim().length === 0) {
       throw new Error('Lynx XML source cannot be empty');
     }
@@ -821,13 +1273,13 @@ class PreviewRenderer {
 
     const sourceUrl = URL.createObjectURL(sourceBlob);
     try {
-      await this.#load((view) => view.loadLynxXml(sourceUrl));
+      await this.#load((view) => view.loadLynxXml(sourceUrl, { openTime }));
     } finally {
       URL.revokeObjectURL(sourceUrl);
     }
   }
 
-  async renderTemplate(entry: string, file?: File): Promise<void> {
+  async renderTemplate(entry: string, file: File | undefined, openTime: number): Promise<void> {
     if (entry.trim() === '') {
       throw new Error('Enter a template URL');
     }
@@ -839,14 +1291,14 @@ class PreviewRenderer {
       if (entryUrl.protocol === 'zip:') {
         throw new Error('Choose a ZIP file to load a zip:/// template URL');
       }
-      await this.#load((view) => view.loadTemplate(entryUrl));
+      await this.#load((view) => view.loadTemplate(entryUrl, { openTime }));
       return;
     }
     if (file.size > 64 * 1024 * 1024) {
       throw new Error('ZIP exceeds the 64 MiB upload limit');
     }
     const bytes = await file.arrayBuffer();
-    await this.#load((view) => view.loadZip(bytes, entryUrl));
+    await this.#load((view) => view.loadZip(bytes, entryUrl, { openTime }));
   }
 
   // This demo hands its pages no `globalProps`; see `createExplorerModule`.
@@ -876,6 +1328,15 @@ class PreviewRenderer {
             onFrameRate: (fps) => {
               if (this.#canvas === canvas) {
                 this.#shell.frameRate.textContent = fps === null ? 'Unavailable' : fps.toFixed(1);
+              }
+            },
+            // Passed even while the performance section is collapsed: it is
+            // what turns observation on, and a page whose load entry was not
+            // observed cannot report it later. The engine's cost of
+            // assembling entries nobody looks at is accepted on this demo.
+            onPerformanceEntry: (entry) => {
+              if (this.#canvas === canvas) {
+                this.#onPerformanceEntry(entry);
               }
             },
           },
@@ -1016,6 +1477,7 @@ function setSourceStatus(
 function installSources(
   shell: Shell,
   renderer: PreviewRenderer,
+  performancePanel: PerformancePanel,
 ): (label: string, template?: boolean) => Promise<void> {
   let rendering = false;
   const entries: string[] = [];
@@ -1040,6 +1502,9 @@ function installSources(
     if (rendering) {
       return;
     }
+    // Lynx's `openTime`: the instant the page was asked for, before anything
+    // of the load has run.
+    const openTime = Date.now();
     rendering = true;
     updateNavigation();
     const entry = shell.entryInput.value.trim();
@@ -1061,9 +1526,10 @@ function installSources(
     setIndicator(shell.renderer, 'Rendering…', 'pending');
     shell.message.textContent = `Preparing the native Lynx view for ${label}…`;
 
+    performancePanel.begin(template ? entry : label);
     try {
       if (template) {
-        await renderer.renderTemplate(entry, shell.zipInput.files?.[0]);
+        await renderer.renderTemplate(entry, shell.zipInput.files?.[0], openTime);
         if (target === undefined) {
           entries.splice(position + 1, entries.length, entry);
           position = entries.length - 1;
@@ -1071,7 +1537,7 @@ function installSources(
           position = target;
         }
       } else {
-        await renderer.render(shell.editor.value);
+        await renderer.render(shell.editor.value, openTime);
         // Submitted XML has no reloadable URL.
         entries.length = 0;
         position = -1;
@@ -1172,8 +1638,8 @@ async function start(shell: Shell, router: TabRouter): Promise<void> {
     fontPromise,
     import(/* webpackIgnore: true */ bobcatModuleUrl),
   ]);
-  const { BobcatCanvas, LYNX_XML_PAGE_CONFIG, default: init } =
-    bobcatModule as typeof import('bobcat-wasm');
+  const kit = bobcatModule as typeof import('bobcat-wasm');
+  const { BobcatCanvas, LYNX_XML_PAGE_CONFIG, default: init } = kit;
 
   await init();
 
@@ -1189,6 +1655,7 @@ async function start(shell: Shell, router: TabRouter): Promise<void> {
   // loader it uses is the page's, and exists only once `installSources` has
   // built it below.
   const loader: TemplateLoader = {};
+  const performancePanel = new PerformancePanel(shell.performance, kit);
   const renderer = new PreviewRenderer(
     shell,
     BobcatCanvas,
@@ -1196,6 +1663,7 @@ async function start(shell: Shell, router: TabRouter): Promise<void> {
     fontBytes,
     fallbackFonts,
     createExplorerModule(shell, loader),
+    (entry) => performancePanel.add(entry),
     (error) => {
       setIndicator(shell.renderer, 'Failed', 'error');
       setSourceStatus(shell, `Renderer failed: ${error.message}`, 'error');
@@ -1210,7 +1678,7 @@ async function start(shell: Shell, router: TabRouter): Promise<void> {
     { once: true },
   );
   router.subscribe(() => renderer.scheduleResize());
-  const renderSource = installSources(shell, renderer);
+  const renderSource = installSources(shell, renderer, performancePanel);
   loader.load = renderSource;
   const initialTab = workspaceTab(
     new URL(window.location.href).searchParams.get(TAB_PARAMETER),

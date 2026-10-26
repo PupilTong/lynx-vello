@@ -12,5 +12,5 @@
     "rootDir": ".",
     "outDir": "../dist"
   },
-  "files": ["facade.ts", "image-decoder.ts", "protocol.d.ts", "text-input.ts"]
+  "files": ["facade.ts", "image-decoder.ts", "performance.ts", "protocol.d.ts", "text-input.ts"]
 }

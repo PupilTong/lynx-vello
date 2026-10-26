@@ -70,6 +70,11 @@ export interface InitMessage {
   nativeModules: Record<string, string[]>
   measureFrameRate: boolean
   /**
+   * Whether the page passed `onPerformanceEntry`. Only then is each view told
+   * to observe Lynx performance entries; otherwise the engine assembles none.
+   */
+  observePerformance: boolean
+  /**
    * The screen `SystemInfo` reports, in physical pixels: `screen.availWidth`
    * and `screen.availHeight` multiplied by `devicePixelRatio`, which is
    * web-core's own algorithm. Measured on the page's main thread, the one
@@ -185,28 +190,45 @@ export interface WheelMessage extends WheelFields {
 }
 
 /**
+ * The host's marks around one load that the page's thread knows (Lynx's
+ * `setExtraTiming`), as `Date.now()` Unix milliseconds, `NaN` for unset.
+ * The Render Worker adds `prepareTemplateStart`/`End` itself, around the
+ * fetch it runs, and reports all five once the view exists.
+ */
+export interface LoadTimingFields {
+  openTime: number
+  containerInitStart: number
+  containerInitEnd: number
+}
+
+/**
  * What each operation carries besides `type`, `operation` and `request`.
  *
  * Every load carries an optional `globalProps`: the JSON text the facade
- * serialized for `lynx.__globalProps`, which Rust hands to the page unread.
+ * serialized for `lynx.__globalProps`, which Rust hands to the page unread,
+ * and its `timing`.
  */
 export interface RequestFields {
   load: {
     globalProps?: string
     styleSheetUrls: string[]
+    timing: LoadTimingFields
     url: string
   }
   loadLynxXml: {
     globalProps?: string
+    timing: LoadTimingFields
     url: string
   }
   loadTemplate: {
     globalProps?: string
+    timing: LoadTimingFields
     url: string
   }
   loadZip: {
     bytes: Uint8Array
     globalProps?: string
+    timing: LoadTimingFields
     url: string
   }
   registerFonts: {
@@ -353,6 +375,16 @@ export interface TextInputMessage extends TextInputFields {
   type: 'bobcat-text-input'
 }
 
+/**
+ * One Lynx performance entry, as the JSON text Lynx native's
+ * `onPerformanceEvent` hands a host. Posted only when the init message set
+ * `observePerformance`.
+ */
+export interface PerformanceMessage {
+  type: 'bobcat-performance'
+  entry: string
+}
+
 /** The outcome of the request with the same number. */
 export type ResponseMessage =
   | {
@@ -371,6 +403,7 @@ export type RenderWorkerMessage =
   | { type: 'bobcat-frame-rate'; fps: number | null }
   | ErrorMessage
   | NativeModuleCallMessage
+  | PerformanceMessage
   | ReadyMessage
   | ResponseMessage
   | TextInputMessage
