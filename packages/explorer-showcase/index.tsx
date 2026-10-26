@@ -23,6 +23,11 @@ import ViewIconDark from '@assets/images/view-dark.png?inline';
 
 const ITEMS: ItemProps[] = [
   {
+    title: 'Benchmark',
+    description: 'Lynx Vello workloads for lists, images, text and updates',
+    url: 'file://lynx?local://showcase/menu/benchmark.lynx.bundle',
+  },
+  {
     title: 'Animation',
     description: 'Some examples show how to use CSS Animation',
     url: 'file://lynx?local://showcase/menu/animation.lynx.bundle',

@@ -7,6 +7,8 @@ import { pluginReactLynx } from '@lynx-js/react-rsbuild-plugin';
 import { defineConfig } from '@rsbuild/core';
 import { pluginSass } from '@rsbuild/plugin-sass';
 
+import { benchmarkCases } from './benchmark/catalog.ts';
+
 import { disableLynxBackgroundBytecode } from '../../scripts/lynx-bytecode.ts';
 
 export default defineConfig({
@@ -14,6 +16,10 @@ export default defineConfig({
   source: {
     entry: {
       main: './index.tsx',
+      benchmark: './sub-menu/benchmark.tsx',
+      ...Object.fromEntries(
+        benchmarkCases.map(({ id, entry }) => [`benchmark/${id}`, entry]),
+      ),
       animation: './sub-menu/animation.tsx',
       css: './sub-menu/css.tsx',
       layout: './sub-menu/layout.tsx',

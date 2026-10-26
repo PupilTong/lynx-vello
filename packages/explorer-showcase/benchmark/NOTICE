@@ -1,0 +1,8 @@
+Benchmark case TSX/CSS and numeric workload fixtures adapted from
+CrossPlatformBenchmark/lynx/cases and common/res (local source snapshot).
+Copyright 2025 The Lynx Authors. Licensed under Apache-2.0; see ../LICENSE.lynx.
+
+Modified for Lynx Vello: ReactLynx hooks, standalone update triggers, typed
+fixtures, local bundle routing, and neutral Explorer text and PNG patterns.
+No original native hosts, package manifests, build outputs or image library
+are included. Pattern images and post content were created for this showcase.

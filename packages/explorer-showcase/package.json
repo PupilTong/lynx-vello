@@ -2,7 +2,7 @@
   "name": "@explorer/showcase",
   "version": "0.0.0",
   "private": true,
-  "description": "The Lynx Explorer showcase menu, written in ReactLynx, and the @lynx-example packages it opens.",
+  "description": "The Lynx Explorer showcase menu, written in ReactLynx, with local Lynx Vello benchmarks and the @lynx-example packages it opens.",
   "license": "Apache-2.0",
   "type": "module",
   "scripts": {
