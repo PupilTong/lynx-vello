@@ -126,6 +126,10 @@ impl Default for PageConfig {
 /// (`docs/tracking/deviations.md`). `text` is a text block whatever the switch
 /// says, and `wrapper` generates no box — both from `web-elements`' own sheet,
 /// where the linear toggle covers container tags only.
+/// The page's flex direction defaults to column independently of that
+/// switch, as native sets it in `Element::MarkAsLayoutRoot` and
+/// `LayoutContext::SetRootInner`. It is an author-overridable UA default;
+/// ordinary views keep the initial row direction.
 /// `dialog` follows the switch's display too — HTML's `block` has no box in
 /// this engine, and the switch is what picks a page's block-like container —
 /// and nothing else of the common block: a browser gives it HTML's defaults
@@ -270,7 +274,7 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
          position: relative; overflow: clip; min-width: 0; min-height: 0; }}\n\
          {display}\
          {overflow}\
-         page {{ width: 100%; height: 100%; font-family: sans-serif; }}\n\
+         page {{ width: 100%; height: 100%; flex-direction: column; font-family: sans-serif; }}\n\
          wrapper {{ display: contents; }}\n\
          {scrollers}\
          {lists}\
@@ -336,7 +340,7 @@ pub(super) const EDITING_HOST_RULE: &str =
 
 #[cfg(test)]
 mod tests {
-    use terminus::link::stylo::computed_values::{box_sizing, position};
+    use terminus::link::stylo::computed_values::{box_sizing, flex_direction, position};
     use terminus::link::stylo::values::computed::font::{FontFamily, GenericFontFamily};
     use terminus::link::stylo::values::computed::{
         BorderStyle, CSSPixelLength, Display, Overflow, Size,
@@ -350,7 +354,9 @@ mod tests {
         X_FOLDVIEW_HEADER_TAG, X_FOLDVIEW_SLOT_DRAG_TAG, X_FOLDVIEW_SLOT_TAG, X_FOLDVIEW_TAG,
         X_FOLDVIEW_TOOLBAR_TAG,
     };
-    use super::super::test_support::{child, document, overflow, style_of, with_config};
+    use super::super::test_support::{
+        child, document, element_under, overflow, style_of, with_config,
+    };
     use super::{
         BLUR_VIEW_TAG, DIALOG_TAG, PageConfig, REFRESH_FOOTER_TAG, REFRESH_HEADER_TAG,
         SWIPER_ITEM_TAG, SWIPER_TAG, VIEWPAGER_ITEM_TAG, VIEWPAGER_TAG, X_BLUR_VIEW_TAG,
@@ -539,6 +545,102 @@ mod tests {
                 "a scroller follows `defaultDisplayLinear` the way a view does: {tag}"
             );
             assert_eq!(*style.get_box_sizing(), box_sizing::T::BorderBox, "{tag}");
+        }
+    }
+
+    #[test]
+    fn the_page_defaults_to_column_under_both_display_modes_and_allows_author_override() {
+        for (linear, expected) in [(true, Display::Linear), (false, Display::Flex)] {
+            let mut document = with_config(PageConfig {
+                default_display_linear: linear,
+                ..PageConfig::default()
+            });
+            let page = document.document_element().id();
+            let view = child(&mut document, "view", "");
+            document.layout();
+
+            let style = style_of(&document, page);
+            assert_eq!(*style.get_display(), expected);
+            assert_eq!(*style.get_flex_direction(), flex_direction::T::Column);
+            assert_eq!(
+                *style_of(&document, view).get_flex_direction(),
+                flex_direction::T::Row,
+                "the root default does not change ordinary views"
+            );
+
+            document.add_stylesheet(
+                "page { flex-direction: row; }",
+                terminus::link::StylesheetOrigin::Author,
+            );
+            document.layout();
+            let style = style_of(&document, page);
+            assert_eq!(*style.get_display(), expected);
+            assert_eq!(*style.get_flex_direction(), flex_direction::T::Row);
+        }
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)] // Pixel-rounded sizes are exact integers.
+    fn gradient_showcase_rectangles_resolve_against_the_page_width() {
+        let mut document = with_config(PageConfig {
+            default_display_linear: false,
+            ..PageConfig::default()
+        });
+        let page = document.document_element().id();
+        document.set_inline_style(page, "width: 400px; height: 600px");
+        let scroller = child(&mut document, "scroll-view", "");
+        document.set_attribute(scroller, "scroll-orientation", "vertical");
+        let area = element_under(
+            &mut document,
+            scroller,
+            "view",
+            "height: 480px; flex-direction: column",
+        );
+        let gradients: &[&[&str]] = &[
+            &["linear-gradient(red, yellow)"],
+            &[
+                "linear-gradient(green 40%, yellow 30%, blue 70%)",
+                "linear-gradient(green 40%, yellow 40%, blue 70%)",
+            ],
+            &[
+                "radial-gradient(red, green)",
+                "radial-gradient(circle at 100%, #333, #333 50%, #eee 75%, #333 75%)",
+            ],
+        ];
+        let mut rectangles = Vec::new();
+        let mut fills = Vec::new();
+        for row in gradients {
+            let rectangle = element_under(
+                &mut document,
+                area,
+                "view",
+                "margin: 5px; text-align: center; border: 1px solid red; width: 50%; height: 100px",
+            );
+            rectangles.push(rectangle);
+            for gradient in *row {
+                fills.push(element_under(
+                    &mut document,
+                    rectangle,
+                    "view",
+                    &format!("width: 50%; background-image: {gradient}"),
+                ));
+            }
+        }
+        document.layout();
+
+        for node in [scroller, area] {
+            let layout = document.rounded_layout(node).expect("a laid-out container");
+            assert_eq!(layout.size.width, 400.0);
+        }
+        for rectangle in rectangles {
+            let layout = document
+                .rounded_layout(rectangle)
+                .expect("a laid-out rectangle");
+            assert_eq!((layout.size.width, layout.size.height), (200.0, 100.0));
+        }
+        for fill in fills {
+            let layout = document.rounded_layout(fill).expect("a laid-out gradient");
+            assert_eq!((layout.size.width, layout.size.height), (99.0, 98.0));
         }
     }
 
