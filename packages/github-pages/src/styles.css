@@ -247,6 +247,9 @@ h3 {
 .workspace-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  /* The row is the grid's height, so the source column scrolls inside it
+     rather than growing past it. */
+  grid-template-rows: minmax(0, 1fr);
   height: clamp(540px, 54vw, 650px);
   background: #10141b;
 }
@@ -264,18 +267,22 @@ h3 {
   margin: 0;
 }
 
+/* One scrolling column: the canvas tools, the source, then the Lynx
+   performance section, each at its own height. The canvas beside it keeps
+   its size whatever the column holds. */
 .source-panel {
-  display: grid;
-  /* The tools take what they need up to whatever leaves the source form or
-     the XML editor its 20rem, and scroll past that; the canvas beside them
-     keeps its size. */
-  grid-template-rows: minmax(0, auto) minmax(20rem, 1fr);
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   border-right: 1px solid #2b313d;
 }
 
+.source-panel > * {
+  flex: none;
+}
+
 .canvas-tools {
-  min-height: 0;
-  overflow-y: auto;
   padding: 16px 20px;
   border-bottom: 1px solid #2b313d;
   background: #151922;
@@ -309,7 +316,7 @@ h3 {
 
 .navigation-controls {
   display: grid;
-  grid-template-columns: 36px 36px minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: 36px 36px minmax(0, 1fr);
   gap: 6px;
   margin-top: 8px;
 }
@@ -353,8 +360,14 @@ h3 {
 
 /* The Lynx performance section. Its pipeline log has a fixed height and
    scrolls, so rows arriving never move anything around it. */
+.performance-tools {
+  padding: 16px 20px;
+  border-top: 1px solid #2b313d;
+  background: #151922;
+}
+
 .performance-panel {
-  margin: 0 0 14px;
+  margin: 0;
   border: 1px solid #2b313d;
   border-radius: 12px;
   background: #10141b;
@@ -402,6 +415,36 @@ h3 {
   gap: 12px;
   min-width: 0;
   padding: 2px 12px 12px;
+}
+
+.performance-load-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.performance-load-row select {
+  flex: 1;
+  width: 100%;
+  min-width: 0;
+  min-height: 32px;
+  padding: 4px 10px;
+  border: 1px solid #39404d;
+  border-radius: 8px;
+  color: #f6f0e8;
+  background: #1b202a;
+  font-size: 0.76rem;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.performance-load-row select:enabled:hover {
+  border-color: #c8f560;
+}
+
+.performance-load-row select:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 
 .performance-figures {
@@ -481,6 +524,10 @@ h3 {
 
 .waterfall-bar[data-kind="load"] {
   background: #9d94ff;
+}
+
+.waterfall-bar[data-kind="host"] {
+  background: #6fb7ff;
 }
 
 .waterfall-duration {
@@ -723,16 +770,15 @@ h3 {
 .upload-panel,
 .editor-panel {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto auto;
   background: #10141b;
 }
 
 .upload-fields {
   display: flex;
   flex-direction: column;
-  gap: 32px;
-  padding: 24px;
-  overflow: auto;
+  gap: 24px;
+  padding: 20px 24px;
 }
 
 .source-field {
@@ -916,6 +962,7 @@ h3 {
 
 #lynx-xml-editor {
   width: 100%;
+  height: 26rem;
   min-width: 0;
   min-height: 0;
   margin: 0;
@@ -1117,6 +1164,7 @@ h3 {
 @media (max-width: 900px) {
   .workspace-grid {
     grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto;
     height: auto;
   }
 
@@ -1201,10 +1249,6 @@ h3 {
 @media (max-width: 470px) {
   .app-shell {
     width: min(100% - 20px, 680px);
-  }
-
-  .navigation-controls #performance-loads {
-    grid-column: 1 / -1;
   }
 
   .performance-waterfall {
