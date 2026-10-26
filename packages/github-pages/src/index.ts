@@ -19,10 +19,12 @@ import './styles.css';
 
 import type {
   BobcatCanvas,
+  FcpBreakdown,
   LynxPaintEntry,
   LynxPerformanceEntry,
   LynxPerformanceMetric,
   LynxPipelineEntry,
+  LynxThread,
   NativeModules,
   PageConfig,
   PerformanceLoad,
@@ -66,7 +68,11 @@ type BobcatCanvasFactory = Pick<typeof BobcatCanvas, 'create'>;
 /** The parts of bobcat-wasm the performance panel draws with. */
 type PerformanceKit = Pick<
   typeof import('bobcat-wasm'),
-  'PerformanceTimeline' | 'pipelineDuration' | 'pipelineWaterfall'
+  | 'PerformanceTimeline'
+  | 'fcpBreakdown'
+  | 'pipelineDuration'
+  | 'pipelineWaterfall'
+  | 'stageThread'
 >;
 
 interface PerformanceShell {
@@ -75,6 +81,7 @@ interface PerformanceShell {
   readonly fcp: HTMLElement;
   readonly lynxFcp: HTMLElement;
   readonly totalFcp: HTMLElement;
+  readonly breakdown: HTMLElement;
   readonly waterfall: HTMLElement;
   readonly loadRaw: HTMLElement;
   readonly filter: HTMLInputElement;
@@ -278,6 +285,7 @@ function mountShell(): Shell {
                     <div class="performance-figure"><dt>lynxFcp</dt><dd id="performance-lynx-fcp">—</dd></div>
                     <div class="performance-figure"><dt>totalFcp</dt><dd id="performance-total-fcp">—</dd></div>
                   </dl>
+                  <div id="performance-breakdown"></div>
                   <div id="performance-waterfall" class="performance-waterfall-host"></div>
                   <div id="performance-load-raw"></div>
                   <div class="performance-log-heading">
@@ -350,6 +358,7 @@ function mountShell(): Shell {
       fcp: requiredElement<HTMLElement>(root, '#performance-fcp'),
       lynxFcp: requiredElement<HTMLElement>(root, '#performance-lynx-fcp'),
       totalFcp: requiredElement<HTMLElement>(root, '#performance-total-fcp'),
+      breakdown: requiredElement<HTMLElement>(root, '#performance-breakdown'),
       waterfall: requiredElement<HTMLElement>(root, '#performance-waterfall'),
       loadRaw: requiredElement<HTMLElement>(root, '#performance-load-raw'),
       filter: requiredElement<HTMLInputElement>(root, '#performance-filter'),
@@ -884,24 +893,24 @@ function createExplorerModule(
   };
 }
 
-// Stage pairs the host marks around the view, drawn in a colour of their own:
-// the template's preparation and the view's construction.
-const HOST_STAGES: ReadonlySet<string> = new Set(['prepareTemplate', 'createLynx']);
-// What the waterfall calls a stage whose Lynx key says less than the page can:
-// `prepareTemplate` is the template fetch this page's Render Worker runs.
-const STAGE_LABELS: Readonly<Record<string, string>> = {
-  prepareTemplate: 'fetchBundle',
+// Every bar is coloured by the thread its marks are taken on, and the
+// legend names them.
+const THREAD_LABELS: Readonly<Record<LynxThread, string>> = {
+  page: 'Page',
+  render: 'Render Worker',
+  main: 'Lynx main thread',
+  background: 'Background thread (BTS)',
 };
 
-// Stage pairs that belong to the load or reload itself, drawn in the second
-// bar colour; every other stage is the pipeline's.
-const LOAD_STAGES: ReadonlySet<string> = new Set([
-  'loadBundle',
-  'reloadBundle',
-  'parse',
-  'loadBackground',
-  'reloadBackground',
-]);
+// The fcp breakdown's segments, and the marks each runs between.
+const SEGMENT_LABELS: Readonly<Record<string, { label: string; marks: string }>> = {
+  open: { label: 'open → fetch', marks: 'openTime → prepareTemplateStart' },
+  fetchBundle: { label: 'fetchBundle', marks: 'prepareTemplateStart → prepareTemplateEnd: the template fetch' },
+  prepare: { label: 'decode + group', marks: 'prepareTemplateEnd → createLynxStart: the bundle decode and the view\'s group' },
+  createLynx: { label: 'createLynx', marks: 'createLynxStart → createLynxEnd' },
+  viewBoot: { label: 'view boot', marks: 'createLynxEnd → loadBundleStart: the realm boot up to the entry\'s evaluation' },
+  lynxFcp: { label: 'lynxFcp', marks: 'loadBundleStart → paintEnd' },
+};
 
 function performanceMetric(entry: LynxPipelineEntry | undefined, key: string): LynxPerformanceMetric | undefined {
   const value = entry?.[key];
@@ -991,7 +1000,11 @@ function rawEntry(entry: LynxPerformanceEntry, open: WeakSet<object>): HTMLDetai
  * axis, the stage name at the left and its duration at the right, and the
  * `paint` marks as vertical lines across every row.
  */
-function waterfallElement(waterfall: Waterfall, label: string): HTMLElement {
+function waterfallElement(
+  waterfall: Waterfall,
+  label: string,
+  threadOf: (stage: string) => LynxThread,
+): HTMLElement {
   const root = element('div', 'performance-waterfall');
   root.setAttribute('role', 'group');
   root.setAttribute('aria-label', label);
@@ -999,14 +1012,12 @@ function waterfallElement(waterfall: Waterfall, label: string): HTMLElement {
   const offset = (time: number): string => `+${(time - axis.start).toFixed(1)} ms`;
   for (const bar of waterfall.bars) {
     const row = element('div', 'waterfall-row');
-    const label = STAGE_LABELS[bar.name] ?? bar.name;
-    row.title = `${label} (${bar.name}Start → ${bar.name}End)\nstart ${bar.start.toFixed(3)} (${offset(bar.start)})\nend ${bar.end.toFixed(3)} (${offset(bar.end)})\nduration ${millis(bar.duration)}`;
-    const name = element('span', 'waterfall-name', label);
+    const thread = threadOf(bar.name);
+    row.title = `${bar.name} · ${THREAD_LABELS[thread]}\nstart ${bar.start.toFixed(3)} (${offset(bar.start)})\nend ${bar.end.toFixed(3)} (${offset(bar.end)})\nduration ${millis(bar.duration)}`;
+    const name = element('span', 'waterfall-name', bar.name);
     const track = element('span', 'waterfall-track');
     const fill = element('span', 'waterfall-bar');
-    fill.dataset['kind'] = HOST_STAGES.has(bar.name)
-      ? 'host'
-      : LOAD_STAGES.has(bar.name) ? 'load' : 'pipeline';
+    fill.dataset['thread'] = thread;
     fill.style.left = `${bar.left}%`;
     fill.style.width = `${bar.width}%`;
     track.append(fill);
@@ -1035,13 +1046,89 @@ function waterfallElement(waterfall: Waterfall, label: string): HTMLElement {
     element('span', undefined, millis(axis.end - axis.start)),
   );
   root.append(markers, scale);
+  const threads = new Set(waterfall.bars.map((bar) => threadOf(bar.name)));
+  root.append(threadLegend([...threads]));
+  return root;
+}
+
+/** Swatches naming the threads `threads` lists, in the order given. */
+function threadLegend(threads: readonly LynxThread[]): HTMLElement {
+  const legend = element('ul', 'thread-legend');
+  legend.setAttribute('aria-label', 'Threads');
+  for (const thread of threads) {
+    const item = element('li');
+    const swatch = element('span', 'thread-swatch');
+    swatch.dataset['thread'] = thread;
+    item.append(swatch, document.createTextNode(THREAD_LABELS[thread]));
+    legend.append(item);
+  }
+  return legend;
+}
+
+/**
+ * The load's `totalFcp` as one bar cut at each host and engine mark, with
+ * `totalFcp`, `fcp` and `lynxFcp` as spans under it and each part's time
+ * listed below, so the three figures read as parts of one span.
+ */
+function breakdownElement(breakdown: FcpBreakdown): HTMLElement {
+  const root = element('div', 'performance-waterfall fcp-breakdown');
+  root.setAttribute('role', 'group');
+  root.setAttribute('aria-label', 'fcp breakdown');
+  const bar = element('div', 'waterfall-row');
+  const track = element('span', 'waterfall-track fcp-track');
+  for (const segment of breakdown.segments) {
+    const part = element('span', 'fcp-segment');
+    part.dataset['thread'] = segment.thread;
+    part.style.left = `${segment.left}%`;
+    part.style.width = `${segment.width}%`;
+    const labels = SEGMENT_LABELS[segment.name];
+    part.title = `${labels?.label ?? segment.name}: ${millis(segment.duration)}\n${labels?.marks ?? ''}\n${THREAD_LABELS[segment.thread]}`;
+    track.append(part);
+  }
+  bar.append(
+    element('span', 'waterfall-name', 'parts'),
+    track,
+    element('span', 'waterfall-duration', millis(breakdown.axis.end - breakdown.axis.start)),
+  );
+  root.append(bar);
+  for (const span of breakdown.spans) {
+    const row = element('div', 'waterfall-row');
+    const spanTrack = element('span', 'waterfall-track fcp-span-track');
+    const line = element('span', 'fcp-span');
+    line.style.left = `${span.left}%`;
+    line.style.width = `${span.width}%`;
+    spanTrack.append(line);
+    row.append(
+      element('span', 'waterfall-name', span.name),
+      spanTrack,
+      element('span', 'waterfall-duration', millis(span.duration)),
+    );
+    root.append(row);
+  }
+  const parts = element('ul', 'fcp-parts');
+  for (const segment of breakdown.segments) {
+    const item = element('li');
+    const labels = SEGMENT_LABELS[segment.name];
+    item.title = `${labels?.marks ?? ''}\n${THREAD_LABELS[segment.thread]}`;
+    const swatch = element('span', 'thread-swatch');
+    swatch.dataset['thread'] = segment.thread;
+    item.append(
+      swatch,
+      document.createTextNode(labels?.label ?? segment.name),
+      element('strong', undefined, millis(segment.duration)),
+    );
+    parts.append(item);
+  }
+  root.append(parts);
   return root;
 }
 
 /**
  * The Lynx performance section: the current load's `fcp`, `lynxFcp` and
- * `totalFcp`, its stage waterfall from the template fetch (`fetchBundle`) to
- * `paintEnd` with the `paint` marks, and a log of every pipeline entry.
+ * `totalFcp` with the breakdown of the span they cover (the template fetch,
+ * `fetchBundle`, among its parts), its engine stages from `loadBundleStart`
+ * to `paintEnd` with the `paint` marks, coloured by thread, and a log of
+ * every pipeline entry.
  * Earlier loads stay selectable in the section's own Load picker.
  *
  * Draws at most once per animation frame however many entries arrive, and
@@ -1164,13 +1251,25 @@ class PerformancePanel {
         'field-help',
         load === undefined ? 'Load a page to see its stages.' : 'Waiting for the load entry…',
       );
+      shell.breakdown.replaceChildren();
       shell.waterfall.replaceChildren(note);
       shell.loadRaw.replaceChildren();
       return;
     }
     const paints: LynxPaintEntry[] = load?.paints ?? [];
+    const breakdown = this.#kit.fcpBreakdown(entry);
+    shell.breakdown.replaceChildren(
+      ...(breakdown === undefined
+        ? []
+        : [element('p', 'performance-subhead', 'fcp breakdown'), breakdownElement(breakdown)]),
+    );
     shell.waterfall.replaceChildren(
-      waterfallElement(this.#kit.pipelineWaterfall(entry, paints), `${entry.name} stages`),
+      element('p', 'performance-subhead', `${entry.name === 'loadBundle' ? 'lynxFcp' : entry.name} stages`),
+      waterfallElement(
+        this.#kit.pipelineWaterfall(entry, paints),
+        `${entry.name} stages`,
+        (stage) => this.#kit.stageThread(stage),
+      ),
     );
     shell.loadRaw.replaceChildren(rawEntry(entry, this.#rawOpen));
   }
@@ -1230,7 +1329,11 @@ class PerformancePanel {
     const cell = element('td');
     cell.colSpan = 5;
     cell.append(
-      waterfallElement(this.#kit.pipelineWaterfall(entry, [], entry.pipelineStart), `${entry.name} stages`),
+      waterfallElement(
+        this.#kit.pipelineWaterfall(entry, [], entry.pipelineStart),
+        `${entry.name} stages`,
+        (stage) => this.#kit.stageThread(stage),
+      ),
       rawEntry(entry, this.#rawOpen),
     );
     detail.append(cell);

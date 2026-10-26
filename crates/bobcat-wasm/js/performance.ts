@@ -136,16 +136,54 @@ export interface Waterfall {
 }
 
 /**
- * The stage pairs a waterfall draws, in Lynx's order: the host's template
- * preparation (its fetch) and the view's construction, the load's or
- * reload's own marks, then the pipeline's.
+ * The thread a mark is taken on in the browser embedder: the page's own
+ * (`openTime`), the Render Worker (the host's template fetch and the view's
+ * construction, and the painter's compose and present), the Lynx main
+ * thread, or the background thread (BTS).
+ */
+export type LynxThread = 'page' | 'render' | 'main' | 'background'
+
+/**
+ * One part of `totalFcp`, from one host or engine mark to the next: the
+ * wait before the fetch (`open`), the template fetch (`fetchBundle`), its
+ * decode and the view's group (`prepare`), `createLynx`, the view's boot up
+ * to the entry's evaluation (`viewBoot`), and `lynxFcp`.
+ */
+export interface FcpSegment {
+  name: 'open' | 'fetchBundle' | 'prepare' | 'createLynx' | 'viewBoot' | 'lynxFcp'
+  thread: LynxThread
+  start: number
+  end: number
+  duration: number
+  left: number
+  width: number
+}
+
+/** One of Lynx's three load metrics, drawn as a span over the segments. */
+export interface FcpSpan {
+  name: 'totalFcp' | 'fcp' | 'lynxFcp'
+  duration: number
+  left: number
+  width: number
+}
+
+export interface FcpBreakdown {
+  axis: WaterfallAxis
+  segments: FcpSegment[]
+  spans: FcpSpan[]
+}
+
+/**
+ * The engine's stage pairs a waterfall draws, in Lynx's order: the load's
+ * or reload's own marks, the background thread's, then the pipeline's. The
+ * host's marks before `loadBundleStart` are not stages of this waterfall;
+ * `fcpBreakdown` draws them.
  */
 const STAGE_NAMES = [
-  'prepareTemplate',
-  'createLynx',
   'loadBundle',
   'reloadBundle',
   'parse',
+  'loadCore',
   'loadBackground',
   'reloadBackground',
   'mtsRender',
@@ -154,6 +192,25 @@ const STAGE_NAMES = [
   'paintingUiOperationExecute',
   'layoutUiOperationExecute',
 ] as const
+
+/** Where each stage pair is marked. */
+const STAGE_THREADS: Readonly<Record<string, LynxThread>> = {
+  prepareTemplate: 'render',
+  createLynx: 'render',
+  loadBundle: 'main',
+  reloadBundle: 'main',
+  // The bundle's decode runs in the embedder's fetcher.
+  parse: 'render',
+  loadCore: 'background',
+  loadBackground: 'background',
+  reloadBackground: 'background',
+  mtsRender: 'main',
+  resolve: 'main',
+  layout: 'main',
+  paintingUiOperationExecute: 'main',
+  // The painter's compose of the presented frame.
+  layoutUiOperationExecute: 'render',
+}
 
 /** The pipeline names whose entry is a page's own load. */
 const LOAD_NAMES: ReadonlySet<string> = new Set([
@@ -212,6 +269,11 @@ function loadStart(entry: LynxPipelineEntry): number {
   return entry.loadBundleStart ?? entry.reloadBundleStart ?? entry.pipelineStart
 }
 
+/** The thread a stage pair is marked on; the Lynx main thread when unknown. */
+export function stageThread(name: string): LynxThread {
+  return STAGE_THREADS[name] ?? 'main'
+}
+
 /** `paintEnd − pipelineStart`, the pipeline's whole span. */
 export function pipelineDuration(entry: LynxPipelineEntry): number {
   return entry.paintEnd - entry.pipelineStart
@@ -238,8 +300,7 @@ export function pipelineStages(entry: LynxPipelineEntry): LynxStage[] {
  * The stage waterfall of `entry`, on one axis from `start` (by default the
  * load's `loadBundleStart`, or `pipelineStart` for any other pipeline) to its
  * `paintEnd`. The axis widens to take in any stage or `paints` mark that
- * falls outside it, so nothing is drawn off its edge: a load whose host set
- * `prepareTemplateStart` is drawn from there, which is where `fcp` starts.
+ * falls outside it, so nothing is drawn off its edge.
  */
 export function pipelineWaterfall(
   entry: LynxPipelineEntry,
@@ -274,6 +335,78 @@ export function pipelineWaterfall(
       left: percent(paint.startTime),
     })),
   }
+}
+
+/** The marks `fcpBreakdown` cuts at, each starting the segment it names. */
+const FCP_MARKS: readonly (readonly [FcpSegment['name'], string, LynxThread])[] = [
+  ['open', 'openTime', 'page'],
+  ['fetchBundle', 'prepareTemplateStart', 'render'],
+  ['prepare', 'prepareTemplateEnd', 'render'],
+  ['createLynx', 'createLynxStart', 'render'],
+  ['viewBoot', 'createLynxEnd', 'main'],
+  ['lynxFcp', 'loadBundleStart', 'main'],
+]
+
+function metricOf(entry: LynxPipelineEntry, key: string): LynxPerformanceMetric | undefined {
+  const value = entry[key]
+  return isRecord(value) && finite(value['duration']) && finite(value['endTimestamp'])
+    ? (value as unknown as LynxPerformanceMetric)
+    : undefined
+}
+
+/**
+ * A load's `totalFcp` cut at each host and engine mark it carries, from
+ * `openTime` (or `prepareTemplateStart` when the host set no `openTime`) to
+ * the first paint every metric ends at, on one axis, with the spans of
+ * `totalFcp`, `fcp` and `lynxFcp` over it. A mark the entry lacks merges its
+ * segment into the one before. `undefined` for an entry without
+ * `prepareTemplateStart`, which has no `fcp` to break down.
+ *
+ * Segments are measured as reported. Marks taken on different threads can
+ * disagree by a clock offset, so a segment can come out negative; it is then
+ * drawn with no width.
+ */
+export function fcpBreakdown(entry: LynxPipelineEntry): FcpBreakdown | undefined {
+  const lynxFcp = metricOf(entry, 'lynxFcp')
+  if (!finite(entry.prepareTemplateStart) || !finite(entry.loadBundleStart)) {
+    return undefined
+  }
+  const end = lynxFcp?.endTimestamp ?? entry.paintEnd
+  const marks = FCP_MARKS.flatMap(([name, key, thread]) => {
+    const at = entry[key]
+    return finite(at) ? [{ name, at, thread }] : []
+  })
+  const axisStart = Math.min(...marks.map((mark) => mark.at))
+  const axisEnd = Math.max(end, ...marks.map((mark) => mark.at))
+  const span = axisEnd - axisStart
+  const percent = (time: number): number =>
+    span > 0 ? ((time - axisStart) / span) * 100 : 0
+  const segments = marks.map((mark, index): FcpSegment => {
+    const segmentEnd = marks[index + 1]?.at ?? end
+    return {
+      name: mark.name,
+      thread: mark.thread,
+      start: mark.at,
+      end: segmentEnd,
+      duration: segmentEnd - mark.at,
+      left: percent(mark.at),
+      width: Math.max(0, percent(segmentEnd) - percent(mark.at)),
+    }
+  })
+  const spans: FcpSpan[] = []
+  const spanOf = (name: FcpSpan['name'], start: unknown): void => {
+    if (!finite(start)) return
+    spans.push({
+      name,
+      duration: metricOf(entry, name)?.duration ?? end - start,
+      left: percent(start),
+      width: Math.max(0, percent(end) - percent(start)),
+    })
+  }
+  spanOf('totalFcp', entry.openTime)
+  spanOf('fcp', entry.prepareTemplateStart)
+  spanOf('lynxFcp', entry.loadBundleStart)
+  return { axis: { start: axisStart, end: axisEnd }, segments, spans }
 }
 
 /** The entries of one page load, from its load entry to the next load's. */
