@@ -240,10 +240,16 @@ driven! {
         "scrolled-to-position": [Tap(196.5, 508.0)],
     ],
     // Upstream's CDP swipe from (100, 300) up 100px over the 300x600 scroll-view, then
-    // the `scroll` event the card logs and keeps.
+    // the `scroll` event the card logs and keeps. Upstream asserts on that event
+    // alone. A fast lift would fling, and a fling's reach depends on the wall-clock
+    // spacing of the moves (the coverage-instrumented CI build once stopped at
+    // `scrollTop` 92 where the golden had reached 300), so the finger stays still
+    // before it lifts: no fling, and the frame is the same every run.
     "basic-element-scroll-view-event-scroll" => [
         "swiped": [
-            Drag((100.0, 300.0), (100.0, 200.0)),
+            Hold((100.0, 300.0), (100.0, 200.0)),
+            Wait(300),
+            Release(100.0, 200.0),
             Wait(100),
             LoggedStart("{\"type\":\"scroll\","),
         ],
