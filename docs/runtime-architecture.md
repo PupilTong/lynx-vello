@@ -2672,10 +2672,13 @@ deadlines. Natively they enable tokio's time driver. On wasm32 that driver reads
 panics there, so `crate::clock::sleep_until` is served instead by `alarm.rs`:
 one process-wide `bobcat-alarm` `wasm_thread` Worker holding a heap of
 deadlines and the wakers waiting on them, parked with `park_timeout`, which
-needs no clock the platform does not have. It is started by the first group's
-`bobcat-main` for the same reason a group starts its own two threads eagerly —
-a card's first `setTimeout` must wait out its own delay rather than a Worker's
-cold start. The tokio feature set follows: `rt`, `sync` and `macros`
+needs no clock the platform does not have. It is started by the first
+`LynxGroup::new`, on the embedder's thread and before the group's own two, for
+the same reason a group starts those eagerly — a card's first `setTimeout`
+must wait out its own delay rather than a Worker's cold start. Not by
+`bobcat-main`: a Worker does not start until the thread that created it
+returns to its event loop, and an engine thread parked in its scheduler never
+does. The tokio feature set follows: `rt`, `sync` and `macros`
 everywhere, `time` only under `cfg(not(target_arch = "wasm32"))`.
 
 On Wasm, `configure_wasm_workers(worker_script_url)` is the OS bootstrap

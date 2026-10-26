@@ -683,6 +683,12 @@ impl LynxGroup {
         event_requester: Arc<R>,
         style_threads: StyleThreads,
     ) -> Result<Self, LynxViewError> {
+        // The thread every engine thread's timers wait on, started here on the
+        // embedder's thread and before the group's own (`crate::alarm`):
+        // natively tokio's timer is each engine thread's own and there is
+        // nothing to start.
+        #[cfg(target_arch = "wasm32")]
+        crate::alarm::start()?;
         // The group's second runtime, started here beside `bobcat-main`
         // rather than by it: `bobcat-main` is handed one sender on it and its
         // trap flag, and nothing else. First, because a `bobcat-main` that

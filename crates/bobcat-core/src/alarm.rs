@@ -35,6 +35,7 @@ use std::task::{Context, Poll, Waker};
 use std::thread;
 
 use crate::clock::ClockInstant;
+use crate::view::EngineError;
 
 /// Waiting for its deadline, and the only state a registration is wakeable in.
 const ARMED: u8 = 0;
@@ -119,32 +120,44 @@ struct Arrivals {
     thread: Option<thread::Thread>,
 }
 
-/// The registry, and the thread reading it.
-///
-/// Two statics rather than one so the thread is handed the registry
-/// directly: it must never reach back through an initializer it may itself
-/// be inside.
+/// The registry every engine thread registers with.
 static ALARMS: OnceLock<Registry> = OnceLock::new();
-static STARTED: OnceLock<()> = OnceLock::new();
 
-/// Boots the alarm thread.
+/// Whether the thread reading the registry has been spawned.
+static STARTED: Mutex<bool> = Mutex::new(false);
+
+/// Boots the alarm thread, once per process.
 ///
-/// Called with the group that will use it rather than left to the first timer
-/// a card arms: starting a Worker is not free, and a page whose first
-/// `setTimeout` paid for one would wait out a cold start it never asked for.
-pub(crate) fn start() {
-    let _registry = registrations();
+/// Called by [`crate::LynxGroup::new`] on the embedder's thread, before the
+/// group's own threads, rather than left to the first timer a card arms:
+/// starting a Worker is not free, and a page whose first `setTimeout` paid
+/// for one would wait out a cold start it never asked for. And from the
+/// embedder's thread because a Worker does not start until the thread that
+/// created it returns to its event loop, which the embedder's thread does
+/// while it awaits and an engine thread, parked in its scheduler, never
+/// does: spawned from `bobcat-main`, this thread never ran, and no realm
+/// timer on wasm32 ever fired.
+pub(crate) fn start() -> Result<(), EngineError> {
+    let mut started = lock(&STARTED);
+    if *started {
+        return Ok(());
+    }
+    let registry = registrations();
+    wasm_thread::Builder::new()
+        .name("bobcat-alarm".to_owned())
+        .spawn(move || run(registry))
+        .map_err(|error| EngineError::Thread {
+            name: "alarm",
+            message: error.to_string(),
+        })?;
+    *started = true;
+    Ok(())
 }
 
+/// The registry. A registration made before the thread runs waits in it, and
+/// is read on the thread's first pass.
 fn registrations() -> &'static Registry {
-    let registry = ALARMS.get_or_init(Registry::default);
-    STARTED.get_or_init(|| {
-        wasm_thread::Builder::new()
-            .name("bobcat-alarm".to_owned())
-            .spawn(move || run(registry))
-            .expect("the alarm thread starts");
-    });
-    registry
+    ALARMS.get_or_init(Registry::default)
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
