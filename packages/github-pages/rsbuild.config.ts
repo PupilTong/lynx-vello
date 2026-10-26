@@ -11,8 +11,8 @@ const packageDirectory = path.resolve(
 );
 const showcaseDirectory = path.resolve(pagesDirectory, '../explorer-showcase');
 
-// The showcase menus the Explorer homepage navigates to, one bundle per
-// ReactLynx entry, published as `showcase/menu/<name>.web.bundle`.
+// The showcase menus and local benchmark cases, one bundle per ReactLynx
+// entry, published under `showcase/menu/` with nested paths preserved.
 const showcaseMenus = path.join(showcaseDirectory, 'dist');
 
 // The demo categories, taken from the showcase's own `@lynx-example`
@@ -100,8 +100,9 @@ export default defineConfig({
             // The homepage's showcase menus. `ExplorerModule.openSchema` is
             // handed `showcase/menu/<name>.lynx.bundle` and loads the web
             // sibling, so only that flavour is published here.
-            from: path.join(showcaseMenus, '*.web.bundle'),
-            to: 'showcase/menu/[name][ext]',
+            from: '**/*.web.bundle',
+            context: showcaseMenus,
+            to: 'showcase/menu/[path][name][ext]',
             info: { minimized: true },
           },
           ...showcaseCategories.map(({ from, to }) => ({

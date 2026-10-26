@@ -1,0 +1,37 @@
+/**
+ * Copyright 2025 The Lynx Authors. All rights reserved.
+ * Licensed under the Apache License Version 2.0 that can be found in the
+ * LICENSE file in the root directory of this source tree.
+ */
+
+.app-container {
+  height: 100%;
+  width: 100%;
+}
+
+@keyframes opacity-ani {
+  0% {
+    opacity: 0.1;
+  }
+  100% {
+    opacity: 1;
+  }
+}
+
+@keyframes scaleXY-ani {
+  0% {
+    transform: scale(0.1, 0.1);
+  }
+  100% {
+    transform: scale(1, 1);
+  }
+}
+
+@keyframes rotateZ-ani {
+  0% {
+    transform: rotateZ(0);
+  }
+  100% {
+    transform: rotateZ(360deg);
+  }
+}

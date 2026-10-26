@@ -12,5 +12,5 @@
       "@assets/*": ["./assets/*"],
     },
   },
-  "include": ["index.tsx", "typing.d.ts", "components", "sub-menu", "rsbuild.config.ts"],
+  "include": ["index.tsx", "typing.d.ts", "components", "sub-menu", "benchmark", "rsbuild.config.ts"],
 }
