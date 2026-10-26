@@ -957,8 +957,9 @@ impl<T: Sync> Document<T> {
             frame = self.build_frame();
             self.clear_visual_dirty();
         }
-        let mut pass = 1;
-        while pass < relevance::RELEVANCE_PASSES && self.determine_relevance(&mut scratch, &frame) {
+        let mut builds = 1;
+        let mut owed = false;
+        while self.determine_relevance(&mut scratch, &frame) {
             // The frame the flips were decided on is void; its storage is
             // not, so it goes back to the painter for the pass that replaces
             // it.
@@ -971,9 +972,14 @@ impl<T: Sync> Document<T> {
             // just above is its answer, so it is spent — no second commit id
             // is claimed, because this is still the same commit.
             self.clear_visual_dirty();
-            pass += 1;
+            builds += 1;
+            if builds == relevance::RELEVANCE_PASSES {
+                owed = self.relevance_pending(&mut scratch, &frame);
+                break;
+            }
         }
         self.settle_relevance();
+        self.arenas_mut().set_relevance_owed(owed);
         self.painter.get_mut().restore_relevance_scratch(scratch);
         frame
     }
@@ -1030,6 +1036,9 @@ impl<T: Sync> Document<T> {
         let (animations_active, needs_main_ticks) = self.refresh_animation_activity(Some(&frame));
         let viewport = self.viewport_size();
         let device_pixel_ratio = self.device_pixel_ratio();
+        // A reveal left owed rides the same request as a main-thread
+        // animation: one frame tick, then `resume_relevance`.
+        let needs_main_ticks = needs_main_ticks || self.arenas().relevance_owed();
         self.painter.borrow_mut().paint(
             self,
             frame,
@@ -1289,6 +1298,22 @@ impl<T> Document<T> {
             self.note_visual_mutation();
         }
         outcomes
+    }
+
+    /// Continues a `content-visibility: auto` determination the last render
+    /// stopped at its pass cap: the retained frame goes stale, so the next
+    /// render reveals what that one could not. Called at a frame tick — the
+    /// frame asked for one through [`CommittedFrame::needs_main_ticks`] — and
+    /// a no-op otherwise.
+    ///
+    /// The frame is not marked stale at the end of the render itself: a
+    /// document the host sees dirty right after a commit holds back work that
+    /// waits for a settled frame, and HTML lets a later determination wait
+    /// for the next rendering opportunity.
+    pub fn resume_relevance(&mut self) {
+        if self.arenas_mut().take_relevance_owed() {
+            self.note_visual_mutation();
+        }
     }
 
     /// Invalidates the retained frame because composition has moved a scroll

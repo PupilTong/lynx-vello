@@ -2690,13 +2690,17 @@ impl MainThreadRuntime {
     }
 
     /// Advances the animation timeline to the painting side's clock
-    /// reading. Whether anything changed is the next commit's business.
+    /// reading, and continues a `content-visibility: auto` determination the
+    /// last commit stopped at its pass cap. Whether anything changed is the
+    /// next commit's business.
     pub(crate) fn begin_frame(&mut self, now: f64) {
         // Seconds here, as the animation timeline wants them; milliseconds is
         // what an event's `timestamp` is in.
         let mut slot = self.slot.borrow_mut();
         slot.timeline_milliseconds = now * 1000.0;
-        let _ = slot.document_mut().advance_animations(now);
+        let document = slot.document_mut();
+        let _ = document.advance_animations(now);
+        document.resume_relevance();
     }
 
     /// Runs the realm's animation-frame callbacks at the painting side's

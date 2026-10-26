@@ -51,15 +51,32 @@ impl Relevance {
     }
 }
 
+/// How far the render in flight has determined one element.
+///
+/// A commit runs the determination once per build pass, and each pass may
+/// move what the next one sees: a revealed box takes its real size in place
+/// of its `contain-intrinsic-size`, which moves every box after it. A box an
+/// earlier pass decided is therefore asked again only when the answer can
+/// still go one way — from skipped to relevant — so every element's bit moves
+/// at most once per commit, whatever the later layouts moved.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum Freshness {
+    /// Not determined by the render in flight.
+    #[default]
+    Stale,
+    /// Determined skipped by the render in flight, as it already was before
+    /// it: a later pass may still reveal it, once the reveals before it have
+    /// moved it into the region.
+    Revealable,
+    /// Determined by the render in flight, and final for it: relevant, or
+    /// skipped by a flip this render made.
+    Final,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct Entry {
     state: Relevance,
-    /// Whether the render currently in flight already determined this
-    /// element. A commit runs the determination once per build pass, and a
-    /// node determined by an earlier pass is deliberately not re-asked by a
-    /// later one — that is what makes the pass loop terminate whatever the
-    /// second layout moved.
-    fresh: bool,
+    freshness: Freshness,
 }
 
 /// The slot-keyed relevance table.
@@ -70,10 +87,13 @@ struct Entry {
 #[derive(Debug, Default)]
 pub(crate) struct RelevanceTable {
     entries: Vec<Entry>,
-    /// The keys whose `fresh` bit is set, so clearing them at the end of a
+    /// The keys this render determined, so clearing them at the end of a
     /// render costs one walk of what this render determined rather than one
     /// walk of the document.
     fresh: Vec<usize>,
+    /// Whether the last render stopped at its pass cap with a reveal still
+    /// owed; the next frame tick takes it.
+    owed: bool,
 }
 
 impl RelevanceTable {
@@ -84,13 +104,35 @@ impl RelevanceTable {
             .map_or(Relevance::default(), |entry| entry.state)
     }
 
-    /// Whether the render in flight has already determined this element.
+    /// Whether the last render left a reveal owed.
     #[inline]
-    pub(crate) fn is_fresh(&self, key: usize) -> bool {
-        self.entries.get(key).is_some_and(|entry| entry.fresh)
+    pub(crate) const fn owed(&self) -> bool {
+        self.owed
     }
 
-    /// Records `state` for `key` and marks it determined for this render.
+    /// Records whether the render in flight leaves a reveal owed.
+    #[inline]
+    pub(crate) fn set_owed(&mut self, owed: bool) {
+        self.owed = owed;
+    }
+
+    /// Takes the owed reveal, answering whether there was one.
+    #[inline]
+    pub(crate) fn take_owed(&mut self) -> bool {
+        std::mem::take(&mut self.owed)
+    }
+
+    /// How far the render in flight has determined this element.
+    #[inline]
+    pub(crate) fn freshness(&self, key: usize) -> Freshness {
+        self.entries
+            .get(key)
+            .map_or(Freshness::Stale, |entry| entry.freshness)
+    }
+
+    /// Records `state` for `key` and marks it determined for this render:
+    /// [`Freshness::Revealable`] when it confirms a skip, otherwise
+    /// [`Freshness::Final`].
     ///
     /// Returns whether *skipping* changed — the caller's signal that layout
     /// under this node has to be redone. Undetermined and skipped both skip,
@@ -103,10 +145,14 @@ impl RelevanceTable {
         let entry = &mut self.entries[key];
         let flipped = entry.state.skips() != state.skips();
         entry.state = state;
-        if !entry.fresh {
-            entry.fresh = true;
+        if entry.freshness == Freshness::Stale {
             self.fresh.push(key);
         }
+        entry.freshness = if state.skips() && !flipped {
+            Freshness::Revealable
+        } else {
+            Freshness::Final
+        };
         flipped
     }
 
@@ -115,7 +161,7 @@ impl RelevanceTable {
     pub(crate) fn settle(&mut self) {
         for key in self.fresh.drain(..) {
             if let Some(entry) = self.entries.get_mut(key) {
-                entry.fresh = false;
+                entry.freshness = Freshness::Stale;
             }
         }
     }
@@ -135,14 +181,14 @@ impl RelevanceTable {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use super::{Relevance, RelevanceTable};
+    use super::{Freshness, Relevance, RelevanceTable};
 
     #[test]
     fn an_undetermined_element_skips_its_contents() {
         let table = RelevanceTable::default();
         assert_eq!(table.state(7), Relevance::Undetermined);
         assert!(table.state(7).skips());
-        assert!(!table.is_fresh(7));
+        assert_eq!(table.freshness(7), Freshness::Stale);
         assert!(Relevance::Skipped.skips());
         assert!(!Relevance::Relevant.skips());
         assert_eq!(Relevance::of(true), Relevance::Relevant);
@@ -156,24 +202,37 @@ mod tests {
             !table.determine(1, Relevance::Skipped),
             "confirming what an undetermined box already assumed is not a flip"
         );
-        assert!(table.is_fresh(1), "and it still counts as determined");
+        assert_eq!(
+            table.freshness(1),
+            Freshness::Revealable,
+            "and it still counts as determined, revealable by a later pass"
+        );
         assert!(
             table.determine(3, Relevance::Relevant),
             "undetermined -> relevant flips"
         );
-        assert!(table.is_fresh(3));
+        assert_eq!(table.freshness(3), Freshness::Final);
         assert!(
             !table.determine(3, Relevance::Relevant),
             "re-determining the same state is not a flip"
         );
         table.settle();
-        assert!(!table.is_fresh(3), "settling releases the render's marks");
+        assert_eq!(
+            table.freshness(3),
+            Freshness::Stale,
+            "settling releases the render's marks"
+        );
         assert_eq!(
             table.state(3),
             Relevance::Relevant,
             "the state itself survives"
         );
         assert!(table.determine(3, Relevance::Skipped));
+        assert_eq!(
+            table.freshness(3),
+            Freshness::Final,
+            "a box this render skipped stays skipped for it"
+        );
         table.reset(3);
         assert_eq!(table.state(3), Relevance::Undetermined);
         table.settle();

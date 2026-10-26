@@ -59,12 +59,24 @@
 //! the render — the overwhelmingly common case, and the reason an idle
 //! document still builds exactly once. A pass that flips something invalidates
 //! layout at the flipped nodes through the ordinary relayout machinery and the
-//! frame is rebuilt; the next pass then asks only about boxes this render has
-//! *not* determined yet, which are exactly the nested `auto` boxes that only
-//! now got an item. So each box's bit moves at most once per commit, the
-//! number of passes is bounded by nesting depth, and
-//! [`RELEVANCE_PASSES`] caps it regardless. The published frame is always the
-//! last pass's, so no frame is ever published with a flip pending.
+//! frame is rebuilt. The next pass asks the boxes this render has not
+//! determined yet — the nested `auto` boxes that only now got an item — and
+//! asks again the ones an earlier pass skipped, but only whether they are now
+//! relevant: a reveal swaps a box's `contain-intrinsic-size` for its real
+//! size, which moves every box after it, and a skipped box the move brought
+//! into the region must not stay blank there. Nothing this render revealed or
+//! newly skipped is asked again ([`Freshness`]), so each box's bit moves at
+//! most once per commit and the loop ends.
+//!
+//! [`RELEVANCE_PASSES`] caps the builds one commit spends. A frame published
+//! at the cap still carries a skipped box the region admits whenever a list
+//! of placeholders reveals a few boxes per pass — an estimate one scrollport
+//! tall, the `<list>` default, reveals about three. Such a frame says so
+//! ([`Document::relevance_pending`]): it asks for main-thread ticks, and the
+//! host's next frame tick calls [`Document::resume_relevance`], whose render
+//! continues where this one stopped. HTML's rendering update does the same:
+//! a determination other than the initial one "take[s] effect at the next
+//! rendering opportunity".
 //!
 //! # What the commit leaves for the event
 //!
@@ -90,20 +102,18 @@
 //! it. A node freed in between stays queued and resolves to nothing at
 //! dispatch — a [`NodeId`] is retired on free and never reissued.
 
-use crate::layout::relevance::Relevance;
+use crate::layout::relevance::{Freshness, Relevance};
 use crate::paint::walker::CullPlan;
 use crate::tree::document::{Document, NodeId};
-use crate::visual::PaintOrder;
+use crate::visual::{AutoBox, PaintOrder};
 
 /// How many times one render may build the paint order.
 ///
-/// A flip only ever reveals *nested* `auto` boxes — a newly skipped box hides
-/// its subtree, which cannot introduce an undetermined box — so the passes
-/// needed equal the depth of the deepest chain of `auto` boxes that all
-/// reveal at once. Four covers every page anyone has, and the cap is what
-/// makes the loop's termination a property of the code rather than of the
-/// content: past it the last frame built is published with whatever the bits
-/// say, one commit behind at worst.
+/// Every pass past the first answers a move the one before made: a nested
+/// `auto` box a reveal gave an item, or a skipped box a reveal's size change
+/// brought into the region. The cap bounds what one commit spends on them;
+/// past it the frame is published, and asks for the next frame tick to go on
+/// ([`Document::relevance_pending`]).
 pub(crate) const RELEVANCE_PASSES: u32 = 4;
 
 /// [css-contain-2 §4.4](https://drafts.csswg.org/css-contain-2/#content-visibility-auto-state-change-event)'s
@@ -156,22 +166,19 @@ impl<T: Sync> Document<T> {
             let Some(slot) = self.slot(auto.node) else {
                 continue;
             };
-            // Determined by an earlier pass of *this* render: its answer
-            // stands, whatever a later layout moved, which is what bounds
-            // the loop.
-            if self.arenas().relevance_is_fresh(slot) {
+            // Decided by an earlier pass of *this* render: a reveal or a new
+            // skip stands, whatever a later layout moved; a confirmed skip is
+            // asked again only whether it is now relevant. That is what
+            // bounds the loop.
+            let freshness = self.arenas().relevance_freshness(slot);
+            if freshness == Freshness::Final {
                 continue;
             }
-            // css-anchor-position-1 §2.5: an `auto` box holding the target
-            // anchor of a positioned box outside it that is itself shown is
-            // relevant, wherever it is. Asked only of a box about to skip,
-            // and only on a page with anchor-positioned boxes.
-            // css-contain-2 §4: an element in the top layer is relevant.
-            let state = Relevance::of(
-                scratch.plan.admits_auto_box(frame, auto)
-                    || self.anchor_keeps_relevant(auto.node)
-                    || self.in_top_layer(auto.node),
-            );
+            let relevant = self.is_relevant(&scratch.plan, frame, auto);
+            if freshness == Freshness::Revealable && !relevant {
+                continue;
+            }
+            let state = Relevance::of(relevant);
             if self.arenas_mut().determine_relevance(slot, state) {
                 scratch.flips.push(auto.node);
                 // css-contain-2 §4.4: the skipping state changed, so this
@@ -197,6 +204,42 @@ impl<T: Sync> Document<T> {
             self.invalidate_layout(node);
         }
         true
+    }
+
+    /// Whether a pass over `frame` would reveal a box: one this render has
+    /// not decided for good, still skipping, that the region now admits.
+    /// Asked of the frame a render publishes at [`RELEVANCE_PASSES`], whose
+    /// own determination never ran.
+    pub(crate) fn relevance_pending(
+        &mut self,
+        scratch: &mut RelevanceScratch,
+        frame: &PaintOrder,
+    ) -> bool {
+        if frame.auto_boxes().is_empty() {
+            return false;
+        }
+        scratch.plan.resolve_for(self, frame);
+        frame.auto_boxes().iter().any(|auto| {
+            self.slot(auto.node).is_some_and(|slot| {
+                self.arenas().relevance_freshness(slot) != Freshness::Final
+                    && self.arenas().relevance(slot).skips()
+                    && self.is_relevant(&scratch.plan, frame, auto)
+            })
+        })
+    }
+
+    /// css-contain-2 §4.1's relevance of one `auto` box: the region admits
+    /// it, or one of the conditions that hold wherever it is.
+    ///
+    /// css-anchor-position-1 §2.5: an `auto` box holding the target anchor of
+    /// a positioned box outside it that is itself shown is relevant, wherever
+    /// it is — asked only of a box the region rejects, and only on a page
+    /// with anchor-positioned boxes. css-contain-2 §4: an element in the top
+    /// layer is relevant.
+    fn is_relevant(&self, plan: &CullPlan, frame: &PaintOrder, auto: &AutoBox) -> bool {
+        plan.admits_auto_box(frame, auto)
+            || self.anchor_keeps_relevant(auto.node)
+            || self.in_top_layer(auto.node)
     }
 
     /// Ends the render: the determinations it made stop being *this*

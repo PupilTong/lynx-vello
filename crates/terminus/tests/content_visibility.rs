@@ -301,6 +301,46 @@ fn a_nested_auto_box_is_determined_in_the_same_commit() {
 }
 
 #[test]
+fn rows_a_reveal_moves_into_the_window_are_revealed_too() {
+    // Each placeholder is one scrollport tall and each real row a fifth of
+    // that, as a `<list>` cell with no estimate is: every reveal pulls the
+    // rows after it up into the window, as rows this render already skipped.
+    let mut page = Page::new(".row { contain-intrinsic-size: 200px 100px; }");
+    assert!(page.doc.dom.render());
+    let first = page.laid_out_rows();
+    assert!(
+        first.len() > 3,
+        "the passes after the first revealed the rows the first one moved in: {first:?}",
+    );
+    assert!(
+        page.doc.dom.committed_frame().unwrap().needs_main_ticks(),
+        "the pass cap stopped this commit with a reveal owed, and its frame asks for a tick",
+    );
+    assert!(
+        !page.doc.dom.needs_render(),
+        "the document itself is not left dirty by the commit that published it",
+    );
+
+    // Each frame tick resumes it, until the window holds no skipped row.
+    let mut commits = 1;
+    while page.doc.dom.committed_frame().unwrap().needs_main_ticks() {
+        page.doc.dom.resume_relevance();
+        assert!(page.doc.dom.render(), "a resumed determination commits");
+        commits += 1;
+        assert!(commits < 10, "the determination settles");
+    }
+    let admitted = admitted_rows(0.0, VIEWPORT_HEIGHT);
+    assert_eq!(page.laid_out_rows(), admitted);
+    assert_eq!(
+        page.changes(),
+        admitted.iter().map(|&row| (row, false)).collect::<Vec<_>>(),
+        "every row revealed once, over however many commits it took",
+    );
+    page.doc.dom.resume_relevance();
+    assert!(!page.doc.dom.needs_render(), "a settled frame owes nothing");
+}
+
+#[test]
 fn an_auto_box_outside_every_scroller_follows_the_viewport() {
     let mut doc = Doc::with_device(device(200.0, VIEWPORT_HEIGHT));
     doc.define_lynx_text("text");
