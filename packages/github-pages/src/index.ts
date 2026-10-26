@@ -2,12 +2,13 @@
 // `BobcatCanvas`, the Explorer homepage's `NativeModules`, and the Lynx XML
 // editor, all on the page's main thread.
 //
-// The Lynx performance panel under the Canvas FPS row reads the same entries
-// a native LynxView hands its host's `onPerformanceEvent`. The page passes
-// `onPerformanceEntry` to `BobcatCanvas.create`, which is what has the Render
-// Worker tell each view to observe; the engine writes each entry as Lynx's
-// JSON on that Worker, the facade parses it, and `PerformanceTimeline` (from
-// bobcat-wasm) files it under the load it belongs to. Every load the page
+// The Lynx performance section, below the source in the same scrolling
+// column, reads the same entries a native LynxView hands its host's
+// `onPerformanceEvent`. The page passes `onPerformanceEntry` to
+// `BobcatCanvas.create`, which is what has the Render Worker tell each view
+// to observe; the engine writes each entry as Lynx's JSON on that Worker, the
+// facade parses it, and `PerformanceTimeline` (from bobcat-wasm) files it
+// under the load it belongs to. Every load the page
 // starts — the Load button, a navigation, an Explorer `openSchema`, a Lynx
 // XML render — begins a group and passes `openTime`, the instant it was asked
 // for, so the load entry reports `totalFcp`; the facade adds the canvas's
@@ -194,46 +195,6 @@ function mountShell(): Shell {
                 <span class="status-label" title="Sampled with requestAnimationFrame on the Painter thread; not GPU presents">Canvas FPS <span class="frame-rate-method">/ rAF</span></span>
                 <span class="frame-rate-value" id="frame-rate" aria-live="off">—</span>
               </div>
-              <details class="performance-panel" id="performance-panel" open>
-                <summary class="performance-heading">
-                  <span class="status-label" title="The entries a native LynxView hands its host's onPerformanceEvent">Lynx performance</span>
-                  <span id="performance-counters" class="performance-counters">No load yet</span>
-                </summary>
-                <div class="performance-body">
-                  <dl class="performance-figures">
-                    <div class="performance-figure"><dt>fcp</dt><dd id="performance-fcp">—</dd></div>
-                    <div class="performance-figure"><dt>lynxFcp</dt><dd id="performance-lynx-fcp">—</dd></div>
-                    <div class="performance-figure"><dt>totalFcp</dt><dd id="performance-total-fcp">—</dd></div>
-                  </dl>
-                  <div id="performance-waterfall" class="performance-waterfall-host"></div>
-                  <div id="performance-load-raw"></div>
-                  <div class="performance-log-heading">
-                    <span class="status-label">Pipeline log</span>
-                    <input id="performance-filter" type="search" placeholder="Filter name or identifier" aria-label="Filter the pipeline log by name or identifier" autocomplete="off" spellcheck="false">
-                  </div>
-                  <div class="performance-log" tabindex="0" aria-label="Pipeline log">
-                    <table>
-                      <colgroup>
-                        <col class="performance-col-name">
-                        <col class="performance-col-identifier">
-                        <col class="performance-col-origin">
-                        <col class="performance-col-duration">
-                        <col class="performance-col-expand">
-                      </colgroup>
-                      <thead>
-                        <tr>
-                          <th scope="col">name</th>
-                          <th scope="col">identifier</th>
-                          <th scope="col" title="Lynx reports a pipeline's origin as its name; this is the framework's frameworkRenderingTiming.dsl and stage">dsl · stage</th>
-                          <th scope="col" class="performance-numeric" title="paintEnd − pipelineStart">duration</th>
-                          <th scope="col"><span class="visually-hidden">Stages</span></th>
-                        </tr>
-                      </thead>
-                      <tbody id="performance-log"></tbody>
-                    </table>
-                  </div>
-                </div>
-              </details>
               <div class="navigation-heading">
                 <label for="navigation-stack" class="status-label">Navigation stack</label>
                 <span id="navigation-position" class="field-help">0 / 0</span>
@@ -243,9 +204,6 @@ function mountShell(): Shell {
                 <button id="navigate-forward" type="button" aria-label="Go forward" title="Go forward" disabled>→</button>
                 <select id="navigation-stack" aria-describedby="navigation-position" disabled>
                   <option>No pages yet</option>
-                </select>
-                <select id="performance-loads" aria-label="Lynx performance: the load shown" title="The load the Lynx performance panel shows" disabled>
-                  <option>No loads yet</option>
                 </select>
               </div>
             </section>
@@ -301,6 +259,55 @@ function mountShell(): Shell {
                 <span id="source-metrics">—</span>
               </div>
             </form>
+
+            <section class="performance-tools" aria-label="Lynx performance">
+              <details class="performance-panel" id="performance-panel" open>
+                <summary class="performance-heading">
+                  <span class="status-label" title="The entries a native LynxView hands its host's onPerformanceEvent">Lynx performance</span>
+                  <span id="performance-counters" class="performance-counters">No load yet</span>
+                </summary>
+                <div class="performance-body">
+                  <div class="performance-load-row">
+                    <label for="performance-loads" class="status-label">Load</label>
+                    <select id="performance-loads" title="The load the Lynx performance panel shows" disabled>
+                      <option>No loads yet</option>
+                    </select>
+                  </div>
+                  <dl class="performance-figures">
+                    <div class="performance-figure"><dt>fcp</dt><dd id="performance-fcp">—</dd></div>
+                    <div class="performance-figure"><dt>lynxFcp</dt><dd id="performance-lynx-fcp">—</dd></div>
+                    <div class="performance-figure"><dt>totalFcp</dt><dd id="performance-total-fcp">—</dd></div>
+                  </dl>
+                  <div id="performance-waterfall" class="performance-waterfall-host"></div>
+                  <div id="performance-load-raw"></div>
+                  <div class="performance-log-heading">
+                    <span class="status-label">Pipeline log</span>
+                    <input id="performance-filter" type="search" placeholder="Filter name or identifier" aria-label="Filter the pipeline log by name or identifier" autocomplete="off" spellcheck="false">
+                  </div>
+                  <div class="performance-log" tabindex="0" aria-label="Pipeline log">
+                    <table>
+                      <colgroup>
+                        <col class="performance-col-name">
+                        <col class="performance-col-identifier">
+                        <col class="performance-col-origin">
+                        <col class="performance-col-duration">
+                        <col class="performance-col-expand">
+                      </colgroup>
+                      <thead>
+                        <tr>
+                          <th scope="col">name</th>
+                          <th scope="col">identifier</th>
+                          <th scope="col" title="Lynx reports a pipeline's origin as its name; this is the framework's frameworkRenderingTiming.dsl and stage">dsl · stage</th>
+                          <th scope="col" class="performance-numeric" title="paintEnd − pipelineStart">duration</th>
+                          <th scope="col"><span class="visually-hidden">Stages</span></th>
+                        </tr>
+                      </thead>
+                      <tbody id="performance-log"></tbody>
+                    </table>
+                  </div>
+                </div>
+              </details>
+            </section>
 
           </div>
           <section class="preview-panel" aria-labelledby="canvas-title">
@@ -877,6 +884,15 @@ function createExplorerModule(
   };
 }
 
+// Stage pairs the host marks around the view, drawn in a colour of their own:
+// the template's preparation and the view's construction.
+const HOST_STAGES: ReadonlySet<string> = new Set(['prepareTemplate', 'createLynx']);
+// What the waterfall calls a stage whose Lynx key says less than the page can:
+// `prepareTemplate` is the template fetch this page's Render Worker runs.
+const STAGE_LABELS: Readonly<Record<string, string>> = {
+  prepareTemplate: 'fetchBundle',
+};
+
 // Stage pairs that belong to the load or reload itself, drawn in the second
 // bar colour; every other stage is the pipeline's.
 const LOAD_STAGES: ReadonlySet<string> = new Set([
@@ -983,11 +999,14 @@ function waterfallElement(waterfall: Waterfall, label: string): HTMLElement {
   const offset = (time: number): string => `+${(time - axis.start).toFixed(1)} ms`;
   for (const bar of waterfall.bars) {
     const row = element('div', 'waterfall-row');
-    row.title = `${bar.name}\nstart ${bar.start.toFixed(3)} (${offset(bar.start)})\nend ${bar.end.toFixed(3)} (${offset(bar.end)})\nduration ${millis(bar.duration)}`;
-    const name = element('span', 'waterfall-name', bar.name);
+    const label = STAGE_LABELS[bar.name] ?? bar.name;
+    row.title = `${label} (${bar.name}Start → ${bar.name}End)\nstart ${bar.start.toFixed(3)} (${offset(bar.start)})\nend ${bar.end.toFixed(3)} (${offset(bar.end)})\nduration ${millis(bar.duration)}`;
+    const name = element('span', 'waterfall-name', label);
     const track = element('span', 'waterfall-track');
     const fill = element('span', 'waterfall-bar');
-    fill.dataset['kind'] = LOAD_STAGES.has(bar.name) ? 'load' : 'pipeline';
+    fill.dataset['kind'] = HOST_STAGES.has(bar.name)
+      ? 'host'
+      : LOAD_STAGES.has(bar.name) ? 'load' : 'pipeline';
     fill.style.left = `${bar.left}%`;
     fill.style.width = `${bar.width}%`;
     track.append(fill);
@@ -1021,8 +1040,9 @@ function waterfallElement(waterfall: Waterfall, label: string): HTMLElement {
 
 /**
  * The Lynx performance section: the current load's `fcp`, `lynxFcp` and
- * `totalFcp`, its stage waterfall with the `paint` marks, and a log of every
- * pipeline entry. Earlier loads stay selectable beside the navigation stack.
+ * `totalFcp`, its stage waterfall from the template fetch (`fetchBundle`) to
+ * `paintEnd` with the `paint` marks, and a log of every pipeline entry.
+ * Earlier loads stay selectable in the section's own Load picker.
  *
  * Draws at most once per animation frame however many entries arrive, and
  * not at all while the section is collapsed.

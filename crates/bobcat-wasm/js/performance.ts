@@ -136,10 +136,13 @@ export interface Waterfall {
 }
 
 /**
- * The stage pairs a waterfall draws, in Lynx's order: the load's or
+ * The stage pairs a waterfall draws, in Lynx's order: the host's template
+ * preparation (its fetch) and the view's construction, the load's or
  * reload's own marks, then the pipeline's.
  */
 const STAGE_NAMES = [
+  'prepareTemplate',
+  'createLynx',
   'loadBundle',
   'reloadBundle',
   'parse',
@@ -235,7 +238,8 @@ export function pipelineStages(entry: LynxPipelineEntry): LynxStage[] {
  * The stage waterfall of `entry`, on one axis from `start` (by default the
  * load's `loadBundleStart`, or `pipelineStart` for any other pipeline) to its
  * `paintEnd`. The axis widens to take in any stage or `paints` mark that
- * falls outside it, so nothing is drawn off its edge.
+ * falls outside it, so nothing is drawn off its edge: a load whose host set
+ * `prepareTemplateStart` is drawn from there, which is where `fcp` starts.
  */
 export function pipelineWaterfall(
   entry: LynxPipelineEntry,

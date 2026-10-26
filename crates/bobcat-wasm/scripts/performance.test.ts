@@ -40,6 +40,8 @@ const LOAD_JSON = JSON.stringify({
   loadBackgroundEnd: 1070.0,
   createLynxStart: 990.0,
   createLynxEnd: 1005.0,
+  prepareTemplateStart: 960.0,
+  prepareTemplateEnd: 975.0,
   lynxFcp: {
     name: 'lynxFcp',
     duration: 90.0,
@@ -107,6 +109,8 @@ test('lists the stage pairs present, ordered by start, and skips missing ones', 
   assert.deepEqual(
     stages.map((stage) => stage.name),
     [
+      'prepareTemplate',
+      'createLynx',
       'loadBundle',
       'mtsRender',
       'loadBackground',
@@ -124,18 +128,22 @@ test('lists the stage pairs present, ordered by start, and skips missing ones', 
   assert.equal(pipelineDuration(load()), 100)
 })
 
-test('lays a load out from loadBundleStart to paintEnd, with paint markers', () => {
+test('lays a load out from its fetch to paintEnd, with paint markers', () => {
   const { axis, bars, markers } = pipelineWaterfall(load(), [
     paint('first-paint', 1100),
     paint('first-contentful-paint', 1100),
   ])
-  assert.deepEqual(axis, { start: 1010, end: 1100 })
+  // `prepareTemplateStart`, where `fcp` starts, not `loadBundleStart`.
+  assert.deepEqual(axis, { start: 960, end: 1100 })
+  const fetch = bars.find((bar) => bar.name === 'prepareTemplate')!
+  assert.equal(fetch.left, 0)
+  assert.equal(fetch.duration, 15)
   const loadBundle = bars.find((bar) => bar.name === 'loadBundle')!
-  assert.equal(loadBundle.left, 0)
+  assert.ok(Math.abs(loadBundle.left - (50 / 140) * 100) < 1e-9)
   assert.equal(loadBundle.duration, 70)
-  assert.ok(Math.abs(loadBundle.width - (70 / 90) * 100) < 1e-9)
+  assert.ok(Math.abs(loadBundle.width - (70 / 140) * 100) < 1e-9)
   const layout = bars.find((bar) => bar.name === 'layout')!
-  assert.ok(Math.abs(layout.left - (50 / 90) * 100) < 1e-9)
+  assert.ok(Math.abs(layout.left - (100 / 140) * 100) < 1e-9)
   assert.deepEqual(
     markers.map((marker) => [marker.name, marker.left]),
     [
@@ -147,7 +155,7 @@ test('lays a load out from loadBundleStart to paintEnd, with paint markers', () 
 
 test('widens the axis for a paint mark past paintEnd and aligns a pipeline to its start', () => {
   const late = pipelineWaterfall(load(), [paint('first-contentful-paint', 1190)])
-  assert.deepEqual(late.axis, { start: 1010, end: 1190 })
+  assert.deepEqual(late.axis, { start: 960, end: 1190 })
   assert.equal(late.markers[0]!.left, 100)
 
   const update = pipelineWaterfall(pipeline('tap', 5000))
