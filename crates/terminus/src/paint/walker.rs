@@ -117,6 +117,7 @@ use crate::paint::{
 };
 use crate::render::image::ImageRegistry;
 use crate::tree::document::Document;
+use crate::visual::container_timing::{ContainerHit, ContainerRect};
 use crate::visual::space::{self, SpaceKind, nearest_scroll, nearest_sticky};
 use crate::visual::{AutoBox, ClipNode, PaintItem, PaintItemKind, PaintOrder, RenderLayer};
 
@@ -355,6 +356,11 @@ impl WalkSink<'_> {
 
 /// Reused per-frame buffers.
 #[derive(Debug, Default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent per-walk switches and answers the walk reads one by one, not a state \
+              machine"
+)]
 pub(crate) struct Scratch {
     clip_stack: Vec<usize>,
     chain: Vec<usize>,
@@ -404,14 +410,35 @@ pub(crate) struct Scratch {
     /// open scope that is `opacity: 0` with no animation to fade it, or
     /// `None` while no such scope is open. Everything inside one paints at a
     /// used opacity of zero, which Paint Timing does not count as content.
-    /// Kept only while [`Self::detect_content`] is on.
+    /// Kept only while [`Self::track_transparent`] is on.
     transparent_depth: Option<usize>,
+    /// Whether this walk attributes contentful paints to Container Timing
+    /// roots: whether the document has any root
+    /// ([`crate::visual::container_timing`]), read once per walk. Off,
+    /// [`paint_item`] tests this one `bool` and does nothing else for
+    /// Container Timing.
+    container_timing: bool,
+    /// Whether [`Self::transparent_depth`] is kept: either
+    /// [`Self::detect_content`] or [`Self::container_timing`] is on.
+    /// [`open_scope`] and [`close_scope`] test this one `bool`.
+    track_transparent: bool,
+    /// The contentful paints the last walk attributed to Container Timing
+    /// roots, one per paint and root. Always empty after a walk with
+    /// [`Self::container_timing`] off.
+    container_hits: Vec<ContainerHit>,
 }
 
 impl Scratch {
     /// Whether the last walk encoded contentful ink ([`Self::contentful`]).
     pub(crate) const fn paints_content(&self) -> bool {
         self.contentful
+    }
+
+    /// Whether the last walk attributed paints to Container Timing roots at
+    /// all ([`Self::container_timing`]).
+    #[cfg(test)]
+    pub(crate) const fn times_containers(&self) -> bool {
+        self.container_timing
     }
 }
 
@@ -882,6 +909,9 @@ fn walk_within<T>(
         document.content_detection == crate::visual::timing::ContentDetection::On;
     scratch.contentful = false;
     scratch.transparent_depth = None;
+    scratch.container_timing = document.container_roots.any();
+    scratch.track_transparent = scratch.detect_content || scratch.container_timing;
+    scratch.container_hits.clear();
     scratch.plan.resolve(document, frame, cull);
     plan_frame(scratch, document, frame);
 
@@ -1247,7 +1277,7 @@ fn open_scope<T>(
     });
     // An exported or main-thread opacity animation can raise the alpha
     // without a commit, so only a still zero is transparent.
-    if scratch.detect_content
+    if scratch.track_transparent
         && scratch.transparent_depth.is_none()
         && effects.opacity <= 0.0
         && alpha_animation.is_none()
@@ -1524,7 +1554,7 @@ fn close_scope<T>(sink: &mut WalkSink<'_>, scratch: &mut Scratch, painting: Pain
         .scopes
         .pop()
         .expect("close_scope is only called with an open scope");
-    if scratch.detect_content
+    if scratch.track_transparent
         && scratch
             .transparent_depth
             .is_some_and(|depth| scratch.scopes.len() < depth)
@@ -1595,15 +1625,11 @@ fn paint_item<T>(
     sync_clips(sink, scratch, frame, item, scale);
     let space = item.space;
     let transform = scale * local;
-    // Paint Timing's contentful test (`Scratch::contentful`), asked only
-    // while the document detects content and until the first item answers
-    // it: the draws an item adds are its image and vector draws, since a
-    // mask's are made by its scope, not its items.
-    let counts = scratch.detect_content
-        && !scratch.contentful
-        && !matches!(item.kind, PaintItemKind::Backdrop { .. })
-        && scratch.transparent_depth.is_none();
-    let draws_before = counts.then(|| sink.content_draws());
+    // The draws an item adds are its image and vector draws, since a mask's
+    // are made by its scope, not its items.
+    let (counts, attributes) = contentful_tests(scratch, document, item);
+    let draws_before = (counts || attributes).then(|| sink.content_draws());
+    let mut painted_text = false;
 
     match item.kind {
         PaintItemKind::ElementBox | PaintItemKind::Backdrop { .. } => {
@@ -1696,9 +1722,7 @@ fn paint_item<T>(
                 text::paint_selection(sink.scene_for(space), paragraph.layout, transform, editing);
             }
             text::paint(sink.scene_for(space), &paragraph, transform, &runs);
-            if counts && text::has_visible_glyph(&paragraph) {
-                scratch.contentful = true;
-            }
+            painted_text = (counts || attributes) && text::has_visible_glyph(&paragraph);
             if let Some(editing) = &editing {
                 text::paint_caret_and_composition(
                     sink.scene_for(space),
@@ -1709,9 +1733,117 @@ fn paint_item<T>(
             }
         }
     }
-    if draws_before.is_some_and(|before| sink.content_draws() > before) {
+    let drew = painted_text || draws_before.is_some_and(|before| sink.content_draws() > before);
+    if counts && drew {
         scratch.contentful = true;
     }
+    if attributes && drew {
+        attribute_to_containers(scratch, document, item, local);
+    }
+}
+
+/// Which of the walk's two contentful tests ask about `item`: Paint Timing's
+/// (`Scratch::contentful`), while the document detects content and until the
+/// first item answers it, and Container Timing's attribution, while the
+/// document has a root (`Scratch::container_timing`) and the item's node
+/// carries `SelfOrAncestorHasContainerTiming` — or is an anonymous box, in
+/// no child list, which the ancestor walk answers for by its container.
+/// Neither counts a `::backdrop` or a still `opacity: 0` group. With both
+/// off, two `bool` tests.
+#[inline]
+fn contentful_tests<T>(
+    scratch: &Scratch,
+    document: &Document<T>,
+    item: &PaintItem,
+) -> (bool, bool) {
+    let content = || {
+        !matches!(item.kind, PaintItemKind::Backdrop { .. }) && scratch.transparent_depth.is_none()
+    };
+    let counts = scratch.detect_content && !scratch.contentful && content();
+    let attributes = scratch.container_timing
+        && content()
+        && document.get(item.node).is_some_and(|node| {
+            node.self_or_ancestor_has_container_timing() || node.is_anonymous_box()
+        });
+    (counts, attributes)
+}
+
+/// Records `item`'s contentful paint for every Container Timing root it
+/// counts toward: its box under `local`, before its clips.
+fn attribute_to_containers<T>(
+    scratch: &mut Scratch,
+    document: &Document<T>,
+    item: &PaintItem,
+    local: Affine,
+) {
+    let rect = box_bounds(local, item.size, 0.0);
+    let hits = &mut scratch.container_hits;
+    document.for_each_container_root(item.node, |root, marking, painted| {
+        hits.push(ContainerHit {
+            root,
+            marking,
+            painted,
+            space: item.space,
+            clip: item.clip,
+            rect,
+        });
+    });
+}
+
+/// The rects of the paints the last walk attributed to Container Timing
+/// roots ([`Scratch::container_hits`]), each cut by its clip chain and the
+/// viewport at the committed state — scroll offsets, sticky shifts and
+/// anchored shifts as committed, curves at their committed values — in CSS
+/// px of the viewport. Empty, and nothing computed, after a walk that
+/// attributed nothing.
+///
+/// A clip's rect is its bounding box under its matrix, as the cull test
+/// takes it, so a rounded or rotated clip cuts no tighter than its box. A
+/// circular scroll container's seam copy is not counted.
+pub(crate) fn container_rects(
+    scratch: &Scratch,
+    frame: &PaintOrder,
+    viewport: Size2D<f32>,
+    ratio: f32,
+) -> Vec<ContainerRect> {
+    fn committed(_: &crate::visual::ScrollSlot) -> Option<Vector2D<f32>> {
+        None
+    }
+    if scratch.container_hits.is_empty() {
+        return Vec::new();
+    }
+    let animations = frame.sample_animations(None, &committed);
+    let stickies = frame.sample_stickies(ratio, &committed);
+    let anchored = frame.sample_anchored(&animations, &stickies, ratio, &committed);
+    let samples = frame.space_samples(&animations, &stickies, &anchored, ratio, &committed);
+    let viewport = Rect::new(
+        0.0,
+        0.0,
+        f64::from(viewport.width),
+        f64::from(viewport.height),
+    );
+    let mut rects = Vec::with_capacity(scratch.container_hits.len());
+    for hit in &scratch.container_hits {
+        let mut rect = affine_rect(samples.css(hit.space), hit.rect).intersect(viewport);
+        let mut next = hit.clip;
+        while let Some(index) = next {
+            let clip = &frame.clips()[index];
+            rect = match clip_bounds(frame, clip) {
+                Some(bounds) => rect.intersect(affine_rect(samples.css(clip.space), bounds)),
+                None => Rect::ZERO,
+            };
+            next = clip.parent;
+        }
+        if rect.width() > 0.0 && rect.height() > 0.0 {
+            rects.push(ContainerRect {
+                root: hit.root,
+                marking: hit.marking,
+                painted: hit.painted,
+                rect,
+            });
+        }
+    }
+    rects
 }
 
 /// Paints every inline box of an inline formatting context — its background
@@ -2808,6 +2940,41 @@ mod tests {
         };
         assert_eq!((offset.x, offset.y), (20.0, 0.0), "after the 20px view");
         assert_eq!(layout.len(), 1);
+    }
+
+    /// Container Timing's attribution is one `bool` in the walk's scratch,
+    /// off for a document with no root and on only while one is marked.
+    #[test]
+    fn container_timing_is_off_in_the_walk_until_a_root_is_marked() {
+        let mut doc = Doc::with_css(PAGE);
+        let root = doc.root;
+        let holder = doc.el(root, "view.box");
+        let walk_once = |doc: &mut Doc| {
+            let frame = doc.dom.build_paint_order();
+            let images = crate::render::image::ImageRegistry::default();
+            let mut scratch = Scratch::default();
+            walk(
+                &mut Scene::default(),
+                &mut scratch,
+                &doc.dom,
+                &frame,
+                &images,
+                &crate::render::image::NoImages,
+            );
+            scratch
+        };
+        let scratch = walk_once(&mut doc);
+        assert!(!scratch.times_containers());
+        assert!(scratch.container_hits.is_empty());
+
+        doc.dom.set_container_timing(holder, true);
+        assert!(walk_once(&mut doc).times_containers());
+        doc.dom.stop_container_timing();
+        assert!(!walk_once(&mut doc).times_containers());
+        // A freed root is no longer counted.
+        doc.dom.set_container_timing(holder, true);
+        doc.dom.drop_subtree(holder);
+        assert!(!walk_once(&mut doc).times_containers());
     }
 
     fn walk_twice(doc: &mut Doc) -> Frames {

@@ -37,6 +37,11 @@
 //! And Lynx's `resource.lazyBundle` entry, one per `lynx.fetchBundle` that
 //! made a request ([`LazyBundleEntry`]), recorded only while someone
 //! observes `resource`.
+//!
+//! And W3C Container Timing's `container` entry ([`ContainerEntry`]), which
+//! Lynx does not have: one per presented frame that grew the painted region
+//! of an element carrying a `containertiming` attribute, from `terminus`'s
+//! primitive ([`terminus::link::ContainerPaint`]).
 
 mod members;
 mod memory;
@@ -55,6 +60,12 @@ use std::time::Duration;
 pub use std::time::Instant;
 
 use smallvec::SmallVec;
+/// The id of an element, as a [`ContainerEntry`] names its root and its last
+/// painted element: the number a script sees as the element's unique id.
+pub use terminus::link::NodeId;
+/// The rectangle a [`ContainerEntry`]'s `intersection_rect` is, in viewport
+/// CSS px.
+pub use terminus::link::Rect;
 #[cfg(target_arch = "wasm32")]
 pub use web_time::Instant;
 
@@ -554,6 +565,68 @@ impl LazyBundleEntry {
     }
 }
 
+/// W3C Container Timing's `PerformanceContainerTiming` (WICG draft,
+/// `https://wicg.github.io/container-timing/`): a presented frame grew the
+/// painted region of the element carrying a `containertiming` attribute,
+/// reported to the Rust embedder when it observes [`EntryTypes::CONTAINER`].
+/// Lynx has no counterpart, and a background thread's `lynx.performance`
+/// does not receive it.
+///
+/// The region is everything contentful painted under the root since its
+/// first paint — text with a glyph that is not white space and images whose
+/// pixels are available, as Paint Timing counts content — cut by its clips
+/// and the viewport, except what an element carrying `containertimingignore`
+/// cuts out; a shadow tree paints inside its host's roots
+/// (`docs/tracking/deviations.md`). Recording stops at the view's first
+/// pointer down, wheel or key down, which is what the draft's "has
+/// dispatched input event" and "has dispatched scroll event" are for a
+/// view: a later paint under the root reports nothing.
+///
+/// `rootElement` and `lastPaintedElement` are elements in the standard;
+/// this entry carries their [`NodeId`]s.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ContainerEntry {
+    /// The `containertiming` attribute's value; `""` for an empty one.
+    pub identifier: Arc<str>,
+    /// The element carrying the attribute (`rootElement`).
+    pub root: NodeId,
+    /// When the first frame that painted anything under the root was
+    /// presented (`firstRenderTime`).
+    pub first_render: Timestamp,
+    /// When the frame that grew the region was presented (`startTime`).
+    pub start: Timestamp,
+    /// The painted region's area in square CSS px (`size`): the area of the
+    /// union of what was painted, not of its bounding box.
+    pub size: f32,
+    /// The painted region's bounding box in viewport CSS px
+    /// (`intersectionRect`).
+    pub intersection_rect: Rect<f32>,
+    /// Of the elements the frame painted under the root, the one whose paint
+    /// added the most new area (`lastPaintedElement`), retargeted to the
+    /// root's tree: an element inside a shadow tree the root is not in is
+    /// reported as that tree's host.
+    pub last_painted: NodeId,
+}
+
+impl ContainerEntry {
+    /// The entry of one `terminus` report, for the root whose attribute
+    /// value is `identifier`.
+    pub(crate) const fn from_paint(
+        paint: &terminus::link::ContainerPaint,
+        identifier: Arc<str>,
+    ) -> Self {
+        Self {
+            identifier,
+            root: paint.root,
+            first_render: Timestamp(paint.first_render),
+            start: Timestamp(paint.latest),
+            size: paint.size,
+            intersection_rect: paint.painted,
+            last_painted: paint.last_painted,
+        }
+    }
+}
+
 /// One performance entry, as [`crate::EngineEvent::Performance`] reports it.
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
@@ -584,6 +657,9 @@ pub enum PerformanceEntry {
     /// background thread included, so the BTS observer of `resource` of the
     /// realm that fetched receives it too.
     LazyBundle(LazyBundleEntry),
+    /// W3C Container Timing, behind [`EntryTypes::CONTAINER`]: one root's
+    /// painted region grew. The Rust embedder alone receives it.
+    Container(ContainerEntry),
 }
 
 /// Which entries an observer receives. Empty by default: an embedder that
@@ -612,6 +688,10 @@ impl EntryTypes {
     /// `fetchBundle`: two instants per fetch, and the fetcher's own
     /// readings.
     pub const RESOURCE: Self = Self(1 << 6);
+    /// [`PerformanceEntry::Container`]. Asking for it turns nothing on in the
+    /// document: an element's `containertiming` attribute is what makes the
+    /// paint walk attribute paints, observed or not.
+    pub const CONTAINER: Self = Self(1 << 7);
     /// Every type.
     pub const ALL: Self = Self(
         Self::PIPELINE.0
@@ -620,7 +700,8 @@ impl EntryTypes {
             | Self::LONG_TASK.0
             | Self::JS_BLOCKING.0
             | Self::MEMORY.0
-            | Self::RESOURCE.0,
+            | Self::RESOURCE.0
+            | Self::CONTAINER.0,
     );
 
     #[must_use]
@@ -672,8 +753,9 @@ pub(crate) const ACTUAL_FMP_FLAG: &str = "__lynx_timing_actual_fmp";
 
 impl PerformanceEntry {
     /// The entry's `entryType`: Lynx's `"pipeline"` for the three pipeline
-    /// entries, Paint Timing's `"paint"`, Long Tasks' `"longtask"`, and
-    /// Lynx's `"js_blocking"`, `"memory"` and `"resource"`.
+    /// entries, Paint Timing's `"paint"`, Long Tasks' `"longtask"`, Lynx's
+    /// `"js_blocking"`, `"memory"` and `"resource"`, and Container Timing's
+    /// `"container"`.
     #[must_use]
     pub const fn entry_type(&self) -> &'static str {
         match self {
@@ -683,15 +765,19 @@ impl PerformanceEntry {
             Self::JsBlocking(_) => "js_blocking",
             Self::Memory(_) => "memory",
             Self::LazyBundle(_) => RESOURCE_ENTRY_TYPE,
+            Self::Container(_) => CONTAINER_ENTRY_TYPE,
         }
     }
 
     /// The entry's `name`: the pipeline's origin, the paint mark's
     /// Performance Timeline name, the long task's [`JobKind`], Lynx's
-    /// `"js_blocking"` or `"memory"` again, or Lynx's `"lazyBundle"`.
+    /// `"js_blocking"` or `"memory"` again, Lynx's `"lazyBundle"`, or for a
+    /// [`Self::Container`] the empty string, as the draft's `name` getter
+    /// answers (the root's identifier is its `identifier`).
     #[must_use]
     pub fn name(&self) -> &str {
         match self {
+            Self::Container(_) => "",
             Self::Paint(paint) => paint.name.as_str(),
             Self::LongTask(task) => task.kind.as_str(),
             Self::JsBlocking(_) => "js_blocking",
@@ -714,7 +800,8 @@ impl PerformanceEntry {
             | Self::LongTask(_)
             | Self::JsBlocking(_)
             | Self::Memory(_)
-            | Self::LazyBundle(_) => None,
+            | Self::LazyBundle(_)
+            | Self::Container(_) => None,
         }
     }
 
@@ -755,6 +842,15 @@ impl PerformanceEntry {
     /// for a fetch nothing was installed from) and `requireStart`/
     /// `requireEnd`. No `sync`: native's writer leaves it out.
     ///
+    /// A [`Self::Container`] is the draft's `PerformanceContainerTiming` in
+    /// its own names and its `toJSON` order: `entryType`, `name` (`""`),
+    /// `startTime` and `duration` (0), then `identifier`, the four members
+    /// of `intersectionRect` (`x`, `y`, `width`, `height`, CSS px, at full
+    /// precision), `size` (square CSS px, full precision) and
+    /// `firstRenderTime`. Both times are Unix milliseconds, as a `paint`
+    /// entry's are. `rootElement` and `lastPaintedElement` are elements
+    /// and are not written.
+    ///
     /// The one place a Lynx key is spelled: [`Self::write_lynx_json`] and
     /// the BTS's `lynx.performance` entries are both written from this.
     pub fn lynx_fields(
@@ -767,6 +863,7 @@ impl PerformanceEntry {
             Self::JsBlocking(report) => return js_blocking_fields(report, origin).into_iter(),
             Self::Memory(memory) => return memory_fields(memory, origin).into_iter(),
             Self::LazyBundle(bundle) => return lazy_bundle_fields(bundle, origin).into_iter(),
+            Self::Container(container) => return container_fields(container, origin).into_iter(),
             Self::LoadBundle(load) => &load.pipeline,
             Self::ReloadBundle(reload) => &reload.pipeline,
             Self::Pipeline(pipeline) => pipeline,
@@ -841,7 +938,8 @@ impl PerformanceEntry {
             | Self::LongTask(_)
             | Self::JsBlocking(_)
             | Self::Memory(_)
-            | Self::LazyBundle(_) => {}
+            | Self::LazyBundle(_)
+            | Self::Container(_) => {}
         }
         fields.framework(&pipeline.framework_rendering_timing, vm_execute);
         fields.text("hostPlatformTiming.hostPlatformType", "vello");
@@ -1147,6 +1245,34 @@ fn lazy_bundle_fields<'a>(
         fields.range("decodeStart", "decodeEnd", decode);
     }
     fields.range("requireStart", "requireEnd", &bundle.require);
+    fields.list
+}
+
+/// Container Timing's `entryType`.
+const CONTAINER_ENTRY_TYPE: &str = "container";
+
+/// A [`PerformanceEntry::Container`]'s fields, in the draft's IDL order
+/// after `PerformanceEntry`'s own.
+fn container_fields<'a>(
+    container: &'a ContainerEntry,
+    origin: &TimeOrigin,
+) -> Vec<(Cow<'static, str>, LynxValue<'a>)> {
+    let mut fields = Fields {
+        origin: *origin,
+        list: Vec::with_capacity(11),
+    };
+    let rect = container.intersection_rect;
+    fields.text("entryType", CONTAINER_ENTRY_TYPE);
+    fields.text("name", "");
+    fields.time("startTime", container.start);
+    fields.double("duration", 0.0);
+    fields.text("identifier", &container.identifier);
+    fields.double("intersectionRect.x", f64::from(rect.origin.x));
+    fields.double("intersectionRect.y", f64::from(rect.origin.y));
+    fields.double("intersectionRect.width", f64::from(rect.size.width));
+    fields.double("intersectionRect.height", f64::from(rect.size.height));
+    fields.double("size", f64::from(container.size));
+    fields.time("firstRenderTime", container.first_render);
     fields.list
 }
 

@@ -37,7 +37,7 @@ The entries that are not deprecated:
 | `pipeline.reloadBundleFromNative`, `pipeline.reloadBundleFromBts` (`ReloadBundleEntry`) | a reload | phase 1 |
 | `pipeline.updateTriggeredByBts`, `.updateTriggeredByNative`, `.updateGlobalProps`, `.setNativeProps`, `.reactLynxHydrate` (`PipelineEntry`) | a flush bound to a `__lynx_timing_flag` | phase 1 |
 | `resource.lazyBundle` | a lazy bundle load | phase 2 |
-| `container` (W3C Container Timing, no Lynx equivalent) | a presented frame that grew a `containertiming` root's painted region | phase 2 |
+| `container` (W3C Container Timing, no Lynx equivalent) | a presented frame that grew a `containertiming` root's painted region | phase 2, built 2026-10-27 (Rust only) |
 | `memory.memory` | the memory monitor, when enabled | phase 2 |
 | `js_blocking` | the JS blocking monitor, when enabled | phase 2 |
 | `metric.fsp` | the First Stable Paint tracer, when enabled | phase 3 |
@@ -189,7 +189,7 @@ pipelines, which always do. Everything else below is behind that bit.
 - **Consumers**: `pump()` reads one generation counter; the BTS worker runs
   one job per wake, which drains every completed record its realm opened at
   once.
-- **Container Timing**: one node bit per painted item on a page with no
+- **Container Timing**: one `bool` test per painted item on a page with no
   `containertiming` attribute; the region union and the ancestor walk exist
   only under a marked root.
 - **Monitors** (§7) are off unless the Rust embedder turns them on, as
@@ -296,21 +296,22 @@ Lynx's `fcp` is `first_paint`; the renaming is `bobcat-core`'s (§6.3), and
 The standard's answer to "when did this part of the tree paint" is WICG
 Container Timing (`https://wicg.github.io/container-timing/`; Chrome origin
 trial 148–153, Firefox 156 behind a flag): a `containertiming` attribute
-marks a subtree root, every paint inside the subtree is attributed to its
-nearest marked ancestor, and a `container` entry
+marks a subtree root, every paint inside the subtree is attributed to each
+marked root on its ancestor chain (the draft's 2026-10-01 text; an earlier
+draft left nesting undefined), and a `container` entry
 `{identifier, rootElement, firstRenderTime, startTime, size,
 intersectionRect, lastPaintedElement}` is queued at a presentation whose
 paints grew the root's painted region; `containertimingignore` cuts a
 subtree out; recording stops at the first scroll or interaction. The draft
-leaves shadow DOM and nested containers undefined.
+leaves shadow DOM undefined.
 
 `terminus` builds it as the primitive, in its own vocabulary:
 
 ```rust
 pub struct ContainerPaint {
     pub root: NodeId,
-    pub commit_id: u64,
-    /// Device-space union of everything painted under `root` so far, and its area.
+    /// Bounding box (viewport CSS px) of everything painted under `root` so far,
+    /// and the area of the disjoint-rect region itself, not of the box.
     pub painted: Rect, pub size: f32,
     pub first_render: Instant, pub latest: Instant,
     pub last_painted: NodeId,   // retargeted to `root`'s nearest shadow host when inside a shadow tree
@@ -318,6 +319,8 @@ pub struct ContainerPaint {
 impl<T> Document<T> {
     pub fn set_container_timing(&mut self, root: NodeId, enabled: bool);
     pub fn set_container_timing_ignored(&mut self, node: NodeId, ignored: bool);
+    /// The first pointer down, wheel or key down: unmarks every root.
+    pub fn stop_container_timing(&mut self);
 }
 impl Painter {
     /// The containers whose painted region grew in the last presented frame.
@@ -329,15 +332,29 @@ Attribution runs in the paint-order build over the flat tree, the tree the
 build already walks: a node bit `self_or_ancestor_has_container_timing`
 is set when a root is marked and propagated at insertion (Blink's
 `SelfOrAncestorHasContainerTiming`), so a page without a marked root pays
-one bit test per painted item and nothing else; a painted item under a root
-walks up to its nearest marked ancestor and adds its device rect to that
-root's region (a `Region` union, as Blink's `cc::Region`). The painter
-reports a root when a presented frame grew its region. Two deviations from
-the draft, recorded in `docs/tracking/deviations.md`: nested roots are
-defined (the nearest marked ancestor wins), and a shadow tree is inside
-its host's container because the flat tree is what paints — the "shadowed"
+one `bool` test per painted item and nothing else (the walk copies "some
+root is marked" into its scratch once per walk); a contentful paint under a
+root — text with a non-whitespace glyph, an image or vector with pixels,
+outside a still `opacity: 0` group, the same test `paints_content` makes —
+walks up its shadow-including ancestor chain and adds its rect, in viewport
+CSS px, to every root it passes (a disjoint-rect region, as Blink's
+`cc::Region`), stopping at a root that carries `containertimingignore`.
+That is the draft's own nesting rule as of its 2026-10-01 text ("maybe
+update the last new painted area" passes a paint outward), so the plan's
+"nearest marked ancestor wins" was not built; `last_painted` is the node
+that added the most new area in that frame, as the draft now defines it,
+and `name` is `""`, as the draft's getter answers. The painter reports a
+root when a presented frame grew its region. Recording stops at the first
+pointer down, wheel or key down, requested by the painter and applied by
+the main thread before its next commit; a root marked afterwards records
+again, which the draft leaves undefined. One deviation from the draft,
+recorded in `docs/tracking/deviations.md`: a shadow tree is inside its
+host's container because the flat tree is what paints — the "shadowed"
 model the Web Performance WG leaned to on 2025-09-11
 (`w3c/element-timing#3`), with `last_painted` retargeted to the host.
+A node's custom element state and the three Container Timing bits share
+a two-byte `NodeFlags`, so the node stride is unchanged. Built 2026-10-27
+(phase 2); the `container` entry reaches the Rust embedder alone.
 
 ### 5.4 Not in `terminus`
 
@@ -404,8 +421,8 @@ pub enum PerformanceEntry {
     /// `entryType` "paint", `name` the W3C name; `lynx_fields` = `entryType`, `name`, `startTime`.
     Paint(PaintEntry),
     /// W3C Container Timing, from `terminus`'s `ContainerPaint`; `identifier` is the root's `containertiming` attribute.
-    Container(ContainerTiming),
-    LazyBundle(LazyBundleTiming), Memory(MemoryUsage), JsBlocking(JsBlocking), LongTask(LongTask),
+    Container(ContainerEntry),
+    LazyBundle(LazyBundleEntry), Memory(MemoryEntry), JsBlocking(JsBlockingEntry), LongTask(LongTaskEntry),
 }
 pub enum LynxValue<'a> { Number(f64), Text(&'a str), Metric(&'a Metric), Map(&'a [(&'a str, LynxValue<'a>)]) }
 impl PerformanceEntry {
@@ -542,7 +559,8 @@ marks change: `wants_content_detection()` and the half of
 An entry that is whole where it is produced — a monitor's (§7), and the
 later resource entries — skips the record life: it is built there as a plain
 struct (`PerformanceEntry::LongTask`, `PerformanceEntry::JsBlocking`,
-`PerformanceEntry::Memory`, `PerformanceEntry::LazyBundle`) and handed to
+`PerformanceEntry::Memory`, `PerformanceEntry::LazyBundle`,
+`PerformanceEntry::Container`) and handed to
 the registry's one delivery path,
 `deliver(entry, kind, workers)`.
 That queues it on `owed_rust` when the embedder observes `kind`, and on
@@ -591,9 +609,9 @@ uses:
   card's load from the root's.
 - **Container Timing** (§5.3) is the standard's unit for "this part of the
   tree": an author who wants a child card's paint timing writes
-  `<frame containertiming="child">` and observes `container` entries, in
-  the BTS (`observe(['container'])`, W3C field names) or in Rust
-  (`EntryTypes::CONTAINER`). The frame's shadow tree paints inside its
+  `<frame containertiming="child">` and observes `container` entries in
+  Rust (`EntryTypes::CONTAINER`); the BTS does not receive them (ruled
+  2026-10-27). The frame's shadow tree paints inside its
   host's container because the flat tree is what paints; the same attribute
   on a `<view>` times that view's subtree the same way.
 - **Lynx's `loadmetrics`** stays as a component event the `<frame>`
@@ -759,7 +777,7 @@ test `the performance shell must stay inert` keeps holding for that build.
 
 | Member | Implementation |
 | --- | --- |
-| `createObserver(cb) → PerformanceObserver {observe(names), disconnect()}` | pure TS, filters `entryType` / `entryType.name`; entries are emitted as `lynx.performance.onPerformanceEvent` on the realm's `GlobalEventEmitter`, so `lynx.getJSModule('GlobalEventEmitter').addListener(...)` also works, as on native. `observe(['paint'])` (or `paint.first-paint` / `paint.first-contentful-paint`) adds W3C Paint Timing's two entries, `{entryType: "paint", name: "first-paint" \| "first-contentful-paint", startTime}` (Unix ms), which native has no equivalent of. `observe(['container'])` adds W3C Container Timing entries (`entryType: "container"`, the draft's field names), likewise |
+| `createObserver(cb) → PerformanceObserver {observe(names), disconnect()}` | pure TS, filters `entryType` / `entryType.name`; entries are emitted as `lynx.performance.onPerformanceEvent` on the realm's `GlobalEventEmitter`, so `lynx.getJSModule('GlobalEventEmitter').addListener(...)` also works, as on native. `observe(['paint'])` (or `paint.first-paint` / `paint.first-contentful-paint`) adds W3C Paint Timing's two entries, `{entryType: "paint", name: "first-paint" \| "first-contentful-paint", startTime}` (Unix ms), which native has no equivalent of |
 | `_generatePipelineOptions()` → `{pipelineID, needTimestamps: false}` | host function (`PipelineRegistry` id) |
 | `_onPipelineStart(id, options)` | host function; opens the record with `pipelineStart`, `pipelineOrigin`, `dsl`, `stage`, `needTimestamps` |
 | `_markTiming(id, key)` | host function; one instant into the record's marks |
@@ -815,7 +833,9 @@ open-source build delivers entries to the MTS only in Air mode.
    blocking, lazy bundle; the `containertiming` primitive and its
    `container` entries. It ships as four sequential PRs, the first being
    the two job monitors (long task and JS blocking, §7), which also build
-   the delivery path (§6.4) and the monitor task the later three reuse.
+   the delivery path (§6.4) and the monitor task the later three reuse;
+   the fourth is Container Timing (§5.3), built 2026-10-27, its entries
+   delivered to the Rust embedder alone.
 3. **Phase 3 — FSP and tracing feature**: `metric.fsp`; the `trace` cargo
    feature and the `profile*` host functions over `tracing`.
 
@@ -872,8 +892,8 @@ questions are closed.
    record of the view with `url` on `LoadBundle`. Ruled on the platform
    research in §6.5 (2026-10-23).
 
-Phase 2 decisions, 2026-10-27, made while building §7 and open to the
-user's review:
+Phase 2 decisions, 2026-10-27, made while building §7 and §5.3 and open
+to the user's review:
 
 - **`memory` is not delivered to the BTS**, following native, which
   sends it to the platform alone (ruled 2026-10-27, with the
@@ -884,6 +904,13 @@ user's review:
   the entry, to Rust and to the fetching realm's BTS, as native's
   `kEventTypeAll` does. `sync` is not written (native's writer never
   writes it); `mode` is `"normal"`.
+- **Container Timing follows the draft's current text**, not §5.3's first
+  premise: a paint counts toward every root on its ancestor chain, stopping
+  at a root with `containertimingignore`; `lastPaintedElement` is the node
+  that added the most area; `name` is `""`. The one deviation kept is the
+  host-level model for shadow trees. Rust audience only; BTS delivery not
+  built (ruled 2026-10-27): `PerformanceEntry::Container` goes through the
+  delivery path with `WorkerAudience::None`.
 - **JS blocking reports mirror Lynx's reset and cadence** (totals reset per
   report made; `timer` reports at 1, 3, 6, 10 … intervals), which the first
   draft of §7 had wrong.

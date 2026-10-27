@@ -56,6 +56,16 @@
 //! And the `<frame>` cards' loads: each nested card's completed load record
 //! is owed to that card's realm as Lynx's `loadmetrics` component event
 //! ([`PipelineRegistry::take_frame_loads`]), whoever observes.
+//!
+//! And Container Timing's `container` entries
+//! ([`PipelineRegistry::note_container_paints`]): the identifier each
+//! `containertiming` attribute names its root by, and an entry per report
+//! the painter takes, through the same delivery path, for the Rust embedder
+//! alone. And the stop: the painter facade asks for it once, at the view's
+//! first pointer down, wheel or key down
+//! ([`PipelineRegistry::request_container_stop`]), and the main thread's
+//! next commit ends every root ([`PipelineRegistry::take_container_stop`]).
+//! A scroll by script stops nothing.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -64,17 +74,17 @@ use std::time::Duration;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
-use terminus::link::CommitTiming;
 use terminus::link::painter::PresentedFrame;
+use terminus::link::{CommitTiming, ContainerPaint, NodeId};
 use tokio::sync::watch;
 
 use super::memory::{MemoryCategory, MemoryConfig, MemoryEntry, MemoryItem};
 use super::monitors::{decode_threshold, encode_threshold};
 use super::{
-    ACTUAL_FMP_FLAG, ActualFmp, EntryTypes, ExtraTiming, FrameworkTiming, JsBlockingConfig,
-    JsBlockingEntry, JsBlockingStage, LazyBundleEntry, LoadBundleTiming, Metric, PaintEntry,
-    PaintName, PainterTiming, PerformanceEntry, PipelineOrigin, PipelineTiming, ReloadBundleTiming,
-    TimeOrigin, Timestamp,
+    ACTUAL_FMP_FLAG, ActualFmp, ContainerEntry, EntryTypes, ExtraTiming, FrameworkTiming,
+    JsBlockingConfig, JsBlockingEntry, JsBlockingStage, LazyBundleEntry, LoadBundleTiming, Metric,
+    PaintEntry, PaintName, PainterTiming, PerformanceEntry, PipelineOrigin, PipelineTiming,
+    ReloadBundleTiming, TimeOrigin, Timestamp,
 };
 use crate::background::WorkerKey;
 use crate::clock::{ClockInstant, SystemTime};
@@ -171,7 +181,11 @@ pub(crate) enum WorkerAudience {
     /// Every worker of the view: an entry about the view as a whole.
     #[cfg_attr(
         not(test),
-        allow(dead_code, reason = "the `container` entries of phase 2 carry it")
+        allow(
+            dead_code,
+            reason = "no phase-2 entry goes to every worker; a future BTS audience of an entry \
+                      about the whole view would"
+        )
     )]
     Every,
 }
@@ -226,6 +240,13 @@ pub(crate) struct PipelineRegistry {
     /// [`Self::times_resources`]: the Rust embedder observes
     /// [`EntryTypes::RESOURCE`] or a BTS observer asked for `resource`.
     resource_observed: AtomicBool,
+    /// Whether the Rust embedder observes [`EntryTypes::CONTAINER`]: what
+    /// [`Self::note_container_paints`] reads before it locks.
+    container_observed: AtomicBool,
+    /// Set once by the painter facade at the view's first pointer down,
+    /// wheel or key down; taken by the main thread's next commit, which
+    /// ends Container Timing ([`Self::take_container_stop`]).
+    container_stop: AtomicBool,
     inner: Mutex<Inner>,
 }
 
@@ -272,6 +293,8 @@ struct Inner {
     /// The `<frame>` card realms whose load completed and whose `loadmetrics`
     /// the embedder's next `pump` has not sent yet, in completion order.
     frame_loads_owed: Vec<OpenerId>,
+    /// Each Container Timing root's `containertiming` value, by the root.
+    container_identifiers: FxHashMap<NodeId, Arc<str>>,
 }
 
 /// The memory monitor's state: Lynx's `MemoryMonitor` members.
@@ -443,6 +466,8 @@ impl PipelineRegistry {
             js_blocking_threshold: AtomicU64::new(0),
             monitor_epochs: watch::channel(0).0,
             resource_observed: AtomicBool::new(false),
+            container_observed: AtomicBool::new(false),
+            container_stop: AtomicBool::new(false),
             inner: Mutex::new(Inner::default()),
         }
     }
@@ -473,6 +498,10 @@ impl PipelineRegistry {
         );
         self.resource_observed
             .store(Self::wanted(inner, EntryTypes::RESOURCE), Ordering::Relaxed);
+        self.container_observed.store(
+            inner.rust_types.contains(EntryTypes::CONTAINER),
+            Ordering::Relaxed,
+        );
         let detect =
             Self::wanted(inner, EntryTypes::PAINT) && inner.first_contentful_paint.is_none();
         self.content_detection.store(detect, Ordering::Relaxed);
@@ -1574,6 +1603,65 @@ impl PipelineRegistry {
             EntryTypes::RESOURCE,
             background.map_or(WorkerAudience::None, WorkerAudience::One),
         )
+    }
+
+    /// `node`'s `containertiming` attribute was set to `identifier`, or
+    /// removed (`None`): what its `container` entries name it by.
+    pub(crate) fn set_container_identifier(&self, node: NodeId, identifier: Option<&str>) {
+        let mut inner = self.lock();
+        match identifier {
+            Some(identifier) => {
+                inner
+                    .container_identifiers
+                    .insert(node, Arc::from(identifier));
+            }
+            None => {
+                inner.container_identifiers.remove(&node);
+            }
+        }
+    }
+
+    /// The painter's Container Timing reports since the last call: one
+    /// `container` entry each, delivered to the Rust embedder alone, which a
+    /// background thread does not receive (it holds no element to name).
+    /// One relaxed load and no lock while the embedder does not observe
+    /// [`EntryTypes::CONTAINER`]; the reports are then dropped. Answers
+    /// whether any was delivered.
+    pub(crate) fn note_container_paints(&self, paints: &[ContainerPaint]) -> bool {
+        if paints.is_empty() || !self.container_observed.load(Ordering::Relaxed) {
+            return false;
+        }
+        let mut guard = self.lock();
+        let inner = &mut *guard;
+        let mut delivered = false;
+        for paint in paints {
+            let identifier = inner
+                .container_identifiers
+                .get(&paint.root)
+                .cloned()
+                .unwrap_or_else(|| Arc::from(""));
+            delivered |= self.deliver(
+                inner,
+                PerformanceEntry::Container(ContainerEntry::from_paint(paint, identifier)),
+                EntryTypes::CONTAINER,
+                WorkerAudience::None,
+            );
+        }
+        delivered
+    }
+
+    /// Asks the main thread to end Container Timing at its next commit: the
+    /// painter facade's call at the view's first pointer down, wheel or key
+    /// down.
+    pub(crate) fn request_container_stop(&self) {
+        self.container_stop.store(true, Ordering::Release);
+    }
+
+    /// Whether Container Timing is to end now, once: the main thread's one
+    /// relaxed load per commit.
+    pub(crate) fn take_container_stop(&self) -> bool {
+        self.container_stop.load(Ordering::Relaxed)
+            && self.container_stop.swap(false, Ordering::Acquire)
     }
 
     /// Every `<frame>` card's load entry owed to its realm as `loadmetrics`

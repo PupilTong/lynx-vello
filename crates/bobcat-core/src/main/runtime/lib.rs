@@ -38,7 +38,10 @@ use terminus::link::event::{EventDetail, ListenerKey, ListenerKinds, Registratio
 use terminus::link::{MethodCall, MethodError, MethodOutcome, StylePool};
 use tokio::sync::watch;
 
-use self::pipelines::{FlushRequest, RealmTiming, TIMING_FLAG_ATTRIBUTE};
+use self::pipelines::{
+    CONTAINER_TIMING_ATTRIBUTE, CONTAINER_TIMING_IGNORE_ATTRIBUTE, FlushRequest, RealmTiming,
+    TIMING_FLAG_ATTRIBUTE,
+};
 use super::quickjs::{ScriptEngine, ScriptRuntime};
 use crate::clock::ClockInstant;
 use crate::esm::{
@@ -1910,6 +1913,7 @@ impl DocumentSlot {
         self.adopt_metrics();
         self.sync_names();
         self.sync_content_detection();
+        self.sync_container_timing();
         let frame = self.document_mut().commit();
         let mut commit_id = frame.commit_id();
         if self.bound {
@@ -2005,6 +2009,7 @@ impl DocumentSlot {
         self.adopt_metrics();
         if self.document_mut().needs_render() {
             self.sync_content_detection();
+            self.sync_container_timing();
             let frame = self.document_mut().commit();
             if self.bound {
                 // Superseded, as in `flush`: the held frame is older.
@@ -5383,7 +5388,7 @@ fn install_attribute_members(
 
 /// Installs `setAttribute` and `removeAttribute`, written out rather than
 /// generated because each tells the slot when the name is an exposure
-/// attribute.
+/// attribute, the timing flag, or a Container Timing attribute.
 ///
 /// That is the one exception to "this layer knows no attribute names". The
 /// exposure attributes (`exposure-id`, `exposure-scene`, `exposure-area`, the
@@ -5412,6 +5417,12 @@ fn install_attribute_writes(
         } else if name == TIMING_FLAG_ATTRIBUTE && !value.is_empty() {
             // Lynx's timing flag: bound to the next flush's commit.
             handle.pending_flags.push(Arc::from(value));
+        } else if name == CONTAINER_TIMING_ATTRIBUTE {
+            handle.container_timing_changed(node, Some(value));
+        } else if name == CONTAINER_TIMING_IGNORE_ATTRIBUTE {
+            handle
+                .document_mut()
+                .set_container_timing_ignored(node, true);
         }
         Ok(HostValue::Undefined)
     })?;
@@ -5427,6 +5438,12 @@ fn install_attribute_writes(
         document.remove_attribute(node, name);
         if is_exposure_attribute(name) {
             handle.exposure_attribute_changed(node);
+        } else if name == CONTAINER_TIMING_ATTRIBUTE {
+            handle.container_timing_changed(node, None);
+        } else if name == CONTAINER_TIMING_IGNORE_ATTRIBUTE {
+            handle
+                .document_mut()
+                .set_container_timing_ignored(node, false);
         }
         Ok(HostValue::Undefined)
     })?;

@@ -58,6 +58,7 @@ use crate::scroll::{
 };
 use crate::style::device::Device;
 use crate::tree::document::NodeId;
+use crate::visual::container_timing::{ContainerPaint, ContainerTimer};
 use crate::visual::{CommittedFrame, HitTarget};
 
 /// View metrics: the CSS size a document lays out at, and the device scale
@@ -708,6 +709,10 @@ pub struct Painter {
     /// [`Self::first_paint`], [`Self::first_contentful_paint`]). The view's,
     /// not the target's: [`Self::forget_view`] clears them.
     paint_timing: PaintTiming,
+    /// The shown view's Container Timing roots' painted regions and the
+    /// reports not taken yet ([`Self::take_container_paints`]). The
+    /// view's: [`Self::forget_view`] clears them.
+    container_timer: ContainerTimer,
     thread_bound: PhantomData<Rc<()>>,
 }
 
@@ -1719,6 +1724,7 @@ impl Painter {
             composed_vectors: Vec::new(),
             images: images::PainterImages::default(),
             paint_timing: PaintTiming::default(),
+            container_timer: ContainerTimer::default(),
             thread_bound: PhantomData,
         }
     }
@@ -1832,15 +1838,18 @@ impl Painter {
     ///
     /// What the intents had not drained yet is dropped with them, and so are
     /// the presentation records ([`Self::last_presented`],
-    /// [`Self::first_paint`], [`Self::first_contentful_paint`]): they are on
-    /// the shown view's timeline, so a painter attached to another view
-    /// starts that view's first paint afresh.
+    /// [`Self::first_paint`], [`Self::first_contentful_paint`]) and the
+    /// Container Timing regions and reports
+    /// ([`Self::take_container_paints`]): they are on the shown view's
+    /// timeline, so a painter attached to another view starts that view's
+    /// first paint afresh.
     pub fn forget_view(&mut self) {
         self.frame = None;
         self.scroll_intents = ScrollIntents::new();
         self.gesture = GestureRouter::new(self.gesture.policy());
         self.images.forget();
         self.paint_timing.forget();
+        self.container_timer.forget();
     }
 
     /// Turns the presentation records ([`Self::last_presented`],
@@ -2290,8 +2299,8 @@ impl Painter {
             unreachable!("a window frame is only begun on a window");
         };
         graphics.present(acquired);
-        if let Some(span) = rendered.and_then(|rendered| rendered.span) {
-            self.paint_timing.note(&frame, span, ClockInstant::now());
+        if let Some(rendered) = rendered {
+            self.note_presented(&frame, rendered);
         }
         Ok(())
     }
@@ -2326,10 +2335,39 @@ impl Painter {
         };
         gpu.wait_idle()
             .map_err(|error| PainterError::Gpu(error.to_string()))?;
-        if let Some(span) = rendered.span {
-            self.paint_timing.note(&frame, span, ClockInstant::now());
-        }
+        self.note_presented(&frame, rendered);
         Ok(true)
+    }
+
+    /// Records a rendered frame's presentation, which has just happened: its
+    /// [`PresentedFrame`] when presentation timing measured the render, and
+    /// what it painted under Container Timing roots when it painted
+    /// anything there. One clock reading for both, and none for a frame
+    /// that needs neither.
+    fn note_presented(&mut self, frame: &CommittedFrame, rendered: Rendered) {
+        let containers = frame.paints_under_containers();
+        if rendered.span.is_none() && !containers {
+            return;
+        }
+        let presented = ClockInstant::now();
+        if let Some(span) = rendered.span {
+            self.paint_timing.note(frame, span, presented);
+        }
+        if containers {
+            self.container_timer.note(frame, presented);
+        }
+    }
+
+    /// The Container Timing reports made since the last call, oldest
+    /// first: one per presented frame and root whose painted region the
+    /// frame grew ([`ContainerPaint`]). A frame is counted once, at its
+    /// first present after its commit — a window draw or an offscreen draw
+    /// that rendered, whether or not presentation timing is on — and a
+    /// capture counts nothing. Empty for a document with no root, where
+    /// nothing is ever recorded. At most 1024 reports wait; past that the
+    /// oldest go.
+    pub fn take_container_paints(&mut self) -> Vec<ContainerPaint> {
+        self.container_timer.take()
     }
 
     /// Reads back what this painter's target holds, after bringing it up to
