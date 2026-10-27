@@ -235,3 +235,99 @@ fn rows_revealed_above_the_scrollport_do_not_move_what_it_shows() {
         page.on_screen(20),
     );
 }
+
+/// A host that builds content where its placeholders turn relevant: each
+/// round, every placeholder a commit revealed is replaced by a new row that
+/// skips at the same one-scrollport estimate and is 20px once revealed — a
+/// `<list>` whose cells are built lazily, without the list's own rules.
+///
+/// Anchored to the first box the scrollport shows, that box is the next
+/// placeholder below the rows just built, each new row pushes it a scrollport
+/// down, and the offset follows it to the last row. A skipping box is no
+/// anchor, so the rows land where the placeholders were and the scrollport
+/// fills.
+#[test]
+fn a_skipping_box_is_no_anchor_so_building_at_revealed_placeholders_settles() {
+    let mut page = page(
+        ".row { height: auto; flex-direction: column; content-visibility: auto;
+                contain-intrinsic-size: none auto 100px; }
+         .cell { height: 20px; }",
+    );
+    // One commit per round, as a host's frame tick and the task that
+    // delivers the reveals alternate.
+    let commit = |page: &mut Page| {
+        page.doc.dom.resume_relevance();
+        page.render();
+    };
+    let mut placeholders: Vec<bool> = vec![true; page.rows.len()];
+    let mut build = |page: &mut Page, placeholders: &mut Vec<bool>| {
+        let revealed: Vec<NodeId> = page
+            .doc
+            .dom
+            .take_content_visibility_changes()
+            .into_iter()
+            .filter(|change| !change.skipped)
+            .map(|change| change.node)
+            .collect();
+        let mut built = 0;
+        for node in revealed {
+            let Some(index) = page.rows.iter().position(|&row| row == node) else {
+                continue;
+            };
+            if !placeholders[index] {
+                continue;
+            }
+            let cell = page.doc.el(page.scroller, "view.row");
+            page.doc.el(cell, "view.cell");
+            page.doc.dom.insert_before(page.scroller, cell, Some(node));
+            page.doc.dom.remove_element(node);
+            page.rows[index] = cell;
+            placeholders[index] = false;
+            built += 1;
+        }
+        built
+    };
+    // Every row starts empty; the first screen's rows are built first.
+    for _ in 0..8 {
+        build(&mut page, &mut placeholders);
+        commit(&mut page);
+    }
+    // Into the placeholders, as a fling past the built rows leaves it.
+    let y = page
+        .doc
+        .dom
+        .rounded_layout(page.rows[20])
+        .unwrap()
+        .location
+        .y;
+    page.scroll(y);
+    for _ in 0..16 {
+        build(&mut page, &mut placeholders);
+        commit(&mut page);
+    }
+    assert!(
+        placeholders[29],
+        "building stopped before the last row: {:?}",
+        placeholders
+            .iter()
+            .map(|&p| u8::from(!p))
+            .collect::<Vec<_>>(),
+    );
+    let shown: Vec<usize> = (0..30)
+        .filter(|&row| {
+            let top = page.on_screen(row);
+            let height = page
+                .doc
+                .dom
+                .rounded_layout(page.rows[row])
+                .unwrap()
+                .size
+                .height;
+            height > 0.0 && top + height > 0.0 && top < 100.0
+        })
+        .collect();
+    assert!(
+        !shown.is_empty() && shown.iter().all(|&row| !placeholders[row]),
+        "the scrollport shows built rows only: {shown:?}",
+    );
+}

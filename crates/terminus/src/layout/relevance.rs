@@ -166,24 +166,6 @@ impl RelevanceTable {
         }
     }
 
-    /// Gives `key` the relevance `from` was last determined to have, when
-    /// `key` has none of its own yet; answers whether it took one.
-    ///
-    /// Only a relevant answer is taken: an undetermined box already skips,
-    /// so a skipped one would change nothing. Freshness is left alone,
-    /// because no render is in flight between two commits, which is the
-    /// only time a host hands an answer over.
-    pub(crate) fn inherit(&mut self, key: usize, from: usize) -> bool {
-        if self.state(key) != Relevance::Undetermined || self.state(from) != Relevance::Relevant {
-            return false;
-        }
-        if self.entries.len() <= key {
-            self.entries.resize(key + 1, Entry::default());
-        }
-        self.entries[key].state = Relevance::Relevant;
-        true
-    }
-
     /// Resets a freed slot, so the key's next occupant starts undetermined.
     ///
     /// The key may still be listed in `fresh`; clearing an already-clear bit
@@ -211,32 +193,6 @@ mod tests {
         assert!(!Relevance::Relevant.skips());
         assert_eq!(Relevance::of(true), Relevance::Relevant);
         assert_eq!(Relevance::of(false), Relevance::Skipped);
-    }
-
-    #[test]
-    fn only_a_relevant_answer_passes_to_an_undetermined_element() {
-        let mut table = RelevanceTable::default();
-        table.determine(1, Relevance::Relevant);
-        table.determine(2, Relevance::Skipped);
-        table.settle();
-        assert!(
-            !table.inherit(5, 2),
-            "a skip changes nothing an undetermined box assumed"
-        );
-        assert!(!table.inherit(5, 9), "nor does an undetermined one");
-        assert_eq!(table.state(5), Relevance::Undetermined);
-        assert!(table.inherit(5, 1));
-        assert_eq!(table.state(5), Relevance::Relevant);
-        assert_eq!(
-            table.freshness(5),
-            Freshness::Stale,
-            "no render is in flight"
-        );
-        assert!(
-            !table.inherit(2, 1),
-            "a determined element keeps its own answer"
-        );
-        assert_eq!(table.state(2), Relevance::Skipped);
     }
 
     #[test]

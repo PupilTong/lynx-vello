@@ -38,7 +38,6 @@ rstest.mockRequire("bobcat-internal:host", () => {
     childElementIds: native.childElementIds,
     parentNode: native.parentNode,
     childIndex: native.childIndex,
-    inheritRelevance: native.inheritRelevance,
     insertBefore: native.insertBefore,
     removeElement: native.removeElement,
     replaceElement: native.replaceElement,
@@ -423,9 +422,6 @@ function createMockBobcat(issuedIds?: number[]): MockBobcat {
       calls.push(["childIndex", id]);
       const parent = parents.get(id);
       return parent === undefined ? -1 : (childOrder.get(parent) ?? []).indexOf(id);
-    },
-    inheritRelevance: (node: unknown, from: unknown) => {
-      calls.push(["inheritRelevance", nodeId("inheritRelevance", node), nodeId("inheritRelevance", from)]);
     },
     insertBefore: (parent: unknown, child: unknown, reference: unknown) => {
       const parentId = nodeId("insertBefore", parent);
@@ -4924,6 +4920,33 @@ describe("update-list-info", () => {
     expect(__GetAttributeByName(placeholders[0]!, "type")).toBe(null);
   });
 
+  it("marks the list as building its cells lazily, once, before its first placeholder", async () => {
+    const { list, componentAtIndex, enqueueComponent } = listFixture(2);
+    const listId = __GetElementUniqueID(list);
+    __SetAttribute(list, "update-list-info", { insertAction: [{ position: 0 }], removeAction: [] });
+    __UpdateListCallbacks(list, componentAtIndex, enqueueComponent, null);
+    await drain();
+    __SetAttribute(list, "update-list-info", { insertAction: [{ position: 1 }], removeAction: [] });
+    __UpdateListCallbacks(list, componentAtIndex, enqueueComponent, null);
+    await drain();
+
+    const marks = mock.calls.filter(
+      ([name, node, attribute]) => name === "setAttribute" && node === listId && attribute === "l-lazy-cells",
+    );
+    expect(marks).toEqual([["setAttribute", listId, "l-lazy-cells", ""]]);
+    const first = mock.calls.findIndex((call) => call === marks[0]);
+    const firstInsert = mock.calls.findIndex(([name, parent]) => name === "insertBefore" && parent === listId);
+    expect(first).toBeLessThan(firstInsert);
+  });
+
+  it("leaves a list unmarked when a batch inserts nothing", async () => {
+    // No callbacks are filed, so the batch builds and inserts nothing.
+    const { list } = listFixture(0);
+    __SetAttribute(list, "update-list-info", { insertAction: [{ position: 0 }], removeAction: [] });
+    await drain();
+    expect(__GetAttributeByName(list, "l-lazy-cells")).toBe(null);
+  });
+
   it("builds a cell when its placeholder stops skipping, at the placeholder's index", async () => {
     const { list, cells, calls, componentAtIndex, enqueueComponent } = listFixture(3);
     __SetAttribute(list, "update-list-info", {
@@ -4933,19 +4956,11 @@ describe("update-list-info", () => {
     __UpdateListCallbacks(list, componentAtIndex, enqueueComponent, null);
     await drain();
     const [, second] = __GetChildren(list);
-    const placeholderId = __GetElementUniqueID(second!);
 
     reveal(list, second!);
 
     expect(calls).toEqual([
       ["componentAtIndex", __GetElementUniqueID(list), 1, 0, false],
-    ]);
-    // The cell takes the placeholder's relevance before its place, so the
-    // commit lays it out at its own size, not skipped at `100cqh`.
-    const cellId = __GetElementUniqueID(cells[1]!);
-    expect(mock.calls.filter(([name]) => name === "inheritRelevance" || name === "replaceElement")).toEqual([
-      ["inheritRelevance", cellId, placeholderId],
-      ["replaceElement", cellId, placeholderId],
     ]);
     // The cell took the placeholder's place; the others are still waiting.
     const children = __GetChildren(list);

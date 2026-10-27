@@ -287,12 +287,6 @@ impl<T> TreeArenas<T> {
         flipped
     }
 
-    /// Gives `slot` the relevance `from` was last determined to have; see
-    /// [`RelevanceTable::inherit`].
-    pub(crate) fn inherit_relevance(&mut self, slot: NodeId, from: NodeId) -> bool {
-        self.relevance.inherit(slot.arena_key(), from.arena_key())
-    }
-
     /// Whether the last render left a reveal owed; see
     /// [`RelevanceTable::owed`].
     #[inline]

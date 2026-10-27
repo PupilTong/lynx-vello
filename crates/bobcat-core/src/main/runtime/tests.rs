@@ -8678,7 +8678,7 @@ fn a_frame_realm_declares_the_page_members() {
 
 /// The page realm's `bobcat-internal:host` exports, sorted as a namespace
 /// lists them.
-const MTS_HOST_MEMBERS: [&str; 62] = [
+const MTS_HOST_MEMBERS: [&str; 61] = [
     "adoptStyleSheet",
     "attributeNames",
     "bindPipelineTimingFlag",
@@ -8702,7 +8702,6 @@ const MTS_HOST_MEMBERS: [&str; 62] = [
     "getComputedStyleMap",
     "globalProps",
     "hasStyleSheet",
-    "inheritRelevance",
     "initData",
     "initialProcessor",
     "insertBefore",

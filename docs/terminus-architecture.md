@@ -480,12 +480,7 @@ once per commit. A frame published at the cap with a reveal still owed asks
 for main-thread ticks (`CommittedFrame::needs_main_ticks`), and the host's
 next frame tick calls `Document::resume_relevance` to continue it: a `<list>`
 whose cells have no size estimate reveals about three placeholder rows per
-pass, so filling the window can take several ticks. A host that puts a new
-`auto` box in a revealed one's place between commits — the `<list>` building
-a placeholder's cell — calls `Document::inherit_relevance`, so the newcomer is
-laid out relevant at its own size rather than skipped at its
-`contain-intrinsic-size` before any pass could decide it; the handover queues
-the newcomer's `skipped: false` change like any first determination. The bit
+pass, so filling the window can take several ticks. The bit
 itself is layout-side per-element state in a slot-keyed side table on
 `TreeArenas` (`layout/relevance.rs`) — never a Stylo `ElementState` and never a
 restyle trigger — read through `StyleView`'s `CoreStyle::skips_contents`
@@ -1030,6 +1025,10 @@ paint-order build when an offset moved), and the painter the offset it holds.
   auto` reveal above the scrollport moves nothing the user sees. An anchor that
   was still at its placeholder size stops where its bottom meets the
   scrollport's top.
+- **Skipped boxes.** A `content-visibility: auto` box that skips its contents
+  is no candidate, nor is anything under it, and a kept anchor that has come to
+  skip is dropped: its size is an estimate and it shows nothing. Blink selects
+  such a box; this is a recorded deviation (`docs/tracking/deviations.md`).
 - **Clearing.** A scroll anchoring did not make clears the anchor.
 - **Declined.** Containers that snap on the block axis, and containers with a
   pending request, are left alone.

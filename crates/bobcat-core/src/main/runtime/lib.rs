@@ -5300,12 +5300,6 @@ fn install_attribute_members(
             )]
             Ok(index.map_or(HostValue::Number(-1.0), |index| HostValue::Number(index as f64)))
         }
-        fn inheritRelevance(node: node_id_argument, from: node_id_argument) |document| {
-            validate_live_element(document, NAME, node)?;
-            validate_live_element(document, NAME, from)?;
-            document.inherit_relevance(node, from);
-            Ok(HostValue::Undefined)
-        }
         fn childElementIds(node: node_id_argument) |document| {
             let element = validate_live_element(document, NAME, node)?;
             let mut ids = String::new();

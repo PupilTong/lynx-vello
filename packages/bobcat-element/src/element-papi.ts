@@ -11,7 +11,6 @@ import {
   flushElementTree,
   getAttribute,
   getComputedStyleMap,
-  inheritRelevance,
   insertBefore,
   listenerClosed,
   listenerOpened,
@@ -806,6 +805,7 @@ interface Handle {
   [exposureSymbol]?: ExposureState;
   [placeholderSymbol]?: true | undefined;
   [placeholderCountSymbol]?: number;
+  [lazyCellsSymbol]?: true | undefined;
 }
 
 function listenersOf(handle: Handle): ListenerLists | undefined {
@@ -1855,6 +1855,21 @@ const placeholderSymbol = Symbol("placeholder");
 /** On a list's handle: how many placeholders the list holds. */
 const placeholderCountSymbol = Symbol("placeholderCount");
 
+/** On a list's handle: the list carries [`LAZY_CELLS_ATTRIBUTE`]. */
+const lazyCellsSymbol = Symbol("lazyCells");
+
+/**
+ * Written onto a list the first time a batch inserts placeholders into it,
+ * and never removed: the UA sheet's rules for a list whose cells are built
+ * lazily key on it (`crates/bobcat-core/src/main/tree/list.rs`). A built
+ * cell there carries no size estimate, because it is built only once its
+ * placeholder is relevant and so is laid out at its own size in the next
+ * commit; a list whose cells a card appends itself keeps the estimate for
+ * every cell. Written before the first placeholder goes in, so setting it
+ * restyles no cell.
+ */
+const LAZY_CELLS_ATTRIBUTE = "l-lazy-cells";
+
 /**
  * css-contain-2 §4.4's event, which tells this file a placeholder stopped
  * skipping.
@@ -1931,14 +1946,7 @@ function countPlaceholders(list: Handle, delta: number): undefined {
  * `componentAtIndex` appends a cell it builds (ReactLynx's `list.ts:202`)
  * and answers a reused one detached; `replaceElement` moves either into the
  * placeholder's place and removes the placeholder, which nothing holds once
- * it is disowned here. The cell first takes the placeholder's relevance
- * (`inheritRelevance`), so the next commit lays it out at its own size
- * rather than skipped at `100cqh`: nine fresh cells a viewport tall each
- * would push what the list's scroll anchor shows nine viewports down, past
- * the encode window, onto placeholders the next reveal builds again —
- * which walked a fast scroll down to the list's last row. It also queues the
- * cell's own `contentvisibilityautostatechange` (`skipped: false`), so a
- * card that listens on its cells hears each one shown. A placeholder the event reaches from a nested list
+ * it is disowned here. A placeholder the event reaches from a nested list
  * is that list's, and one already built or moved out of the list is left
  * alone. A list whose callbacks are cleared keeps its placeholders.
  */
@@ -1974,7 +1982,6 @@ function buildRevealedCell(event: DispatchedEvent): undefined {
     return undefined;
   }
   const cell = listChildHandle(sign, "componentAtIndex answered");
-  inheritRelevance(sign, placeholderNodeId);
   replaceElement(sign, placeholderNodeId);
   adopt(list, cell);
   disown(placeholder);
@@ -2090,6 +2097,10 @@ function updateListInfo(list: unknown, operations: unknown): undefined {
         removed.add(childNodeId);
       }
       children = children.filter((childNodeId) => !removed.has(childNodeId));
+    }
+    if (insertions.length > 0 && handle[lazyCellsSymbol] !== true) {
+      setAttribute(listNodeId, LAZY_CELLS_ATTRIBUTE, "");
+      handle[lazyCellsSymbol] = true;
     }
     // Ascending positions, so each one is an index into the list as the
     // insertions before it have already left it.

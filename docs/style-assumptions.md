@@ -840,6 +840,12 @@ and §D.16 with what the wire format actually permits.)*
       The consequence is the one a browser has too: a size query container is
       a contained box, so a list's own size never answers to its cells and a
       list with no declared size is a zero-height scroller.
+      Under `list[l-lazy-cells]` (2026-10-27), a list whose cells
+      `update-list-info` builds lazily, the estimate is the empty
+      placeholder's alone: `list-item:not(:empty)` is `contain-intrinsic-size:
+      none auto none` (`auto none none` horizontally) and `list-item:empty`
+      is `overflow-anchor: none`. A list whose cells a card appends keeps the
+      estimate on every cell.
     - **Per-attribute UA `display` rules select the layout mode.**
       `list[list-type="flow"] { display: grid }` and
       `list[list-type="waterfall"] { display: grid-lanes }` are plain

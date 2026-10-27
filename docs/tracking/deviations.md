@@ -2004,6 +2004,15 @@ consequential choice about whether to follow the spec or the quirk.
     engine reads.
   - Not built: §2.2's `scroll` event for an adjustment, and the suppression trigger for a box in
     the container toggling absolute positioning.
+  - **A `content-visibility: auto` box that skips its contents is no anchor (2026-10-27, user
+    ruling).** Neither is anything under it, and a kept anchor that has come to skip is dropped.
+    §2.1's excluded subtrees are a closed list without this, and Blink, Gecko and WebKit all
+    select such a box. Its size is an estimate and it shows nothing, so keeping its block-start
+    in place keeps nothing the user saw; anchored to one, a page that builds content where its
+    placeholders turn relevant chases the next placeholder for as long as it builds, as Chrome
+    does with the same page (measured headless: still blank, still scrolling, after 200 frames;
+    scrolling back up does not recover either). Filling the screen after a long scroll is put
+    ahead of where that screen lands.
 - **`scroll-view`'s `initial-scroll-to-index` and `list`'s
   `initial-scroll-index` (2026-10-21).** The `viewpager` recipe
   ([style-assumptions.md](../style-assumptions.md) §27) picks the target:
@@ -2097,10 +2106,9 @@ consequential choice about whether to follow the spec or the quirk.
   current index and swaps it in. A placeholder stops skipping when a commit
   finds it inside the encode window, so a cell is built about a scrollport
   before it is on screen, one entry after the commit that found it. The
-  cell takes over its placeholder's relevance (`inheritRelevance`), so the
-  next commit lays it out at its own size rather than skipped at the
-  estimate, and owes its own `contentvisibilityautostatechange`
-  (`skipped: false`), as an undetermined box's first determination does.
+  list's first placeholder batch writes `l-lazy-cells` onto it, and under
+  that attribute the UA sheet gives the estimate to placeholders alone and
+  makes them no scroll anchor (`crates/bobcat-core/src/main/tree/list.rs`).
   What a card can observe differently from web-core:
   - `__GetChildren(list)`, `getVisibleCells` and selector queries see
     placeholders for cells not built yet: a plain `list-item` with the
@@ -2113,6 +2121,18 @@ consequential choice about whether to follow the spec or the quirk.
     web-core, whose cell exists, uses its own height even while skipped
     (accepted by the user, 2026-10-27; the
     `basic-element-list-estimated-main-axis-size-px` frames show it).
+  - The list carries an `l-lazy-cells` attribute the card never wrote, which
+    `__GetAttributes` and selectors see.
+  - A built cell carries no size estimate (`contain-intrinsic-size: none auto
+    none`), where web-core's cell keeps `estimated-main-axis-size-px` or
+    `100cqh`. It is built because its placeholder was relevant and is laid
+    out at its own size in the next commit; one whose first determination
+    finds it outside the window (the scroll moved on) stands at 0 until it
+    enters it, and skipped later it keeps its last remembered size. Standing
+    at `100cqh` instead, nine cells built in one delivery pushed what the
+    list's scroll anchor showed nine scrollports down, and anchoring followed:
+    a fast fling then built every row down to the last before anything showed.
+    A placeholder is `overflow-anchor: none`.
   - A removed placeholder is not handed to `enqueueComponent`, since no cell
     was built for it; ReactLynx's `enqueueComponent` returns early for a sign
     it never issued anyway.
