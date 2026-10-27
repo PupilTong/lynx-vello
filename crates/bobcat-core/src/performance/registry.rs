@@ -34,19 +34,31 @@
 //! [`PipelineRegistry::wants_content_detection`], the document's contentful
 //! test, and [`PipelineRegistry::wants_presentation_timing`], the painter's
 //! presentation records.
+//!
+//! Beside the records sits one delivery path for every entry made whole
+//! where it is produced, a monitor's among them
+//! ([`PipelineRegistry::deliver`]): one queue for the Rust embedder and one
+//! per worker, each bounded by [`MAX_RECORDS`], which the takes append to
+//! the records' entries in the order they were made. And the two monitors'
+//! switches, each one relaxed atomic, and the JS blocking monitor's state.
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 use terminus::link::CommitTiming;
 use terminus::link::painter::PresentedFrame;
+use tokio::sync::watch;
 
+use super::monitors::{decode_threshold, encode_threshold};
 use super::{
-    ACTUAL_FMP_FLAG, ActualFmp, EntryTypes, ExtraTiming, FrameworkTiming, LoadBundleTiming, Metric,
-    PaintEntry, PaintName, PainterTiming, PerformanceEntry, PipelineOrigin, PipelineTiming,
-    ReloadBundleTiming, TimeOrigin, Timestamp,
+    ACTUAL_FMP_FLAG, ActualFmp, EntryTypes, ExtraTiming, FrameworkTiming, JsBlockingConfig,
+    JsBlockingEntry, JsBlockingStage, LoadBundleTiming, Metric, PaintEntry, PaintName,
+    PainterTiming, PerformanceEntry, PipelineOrigin, PipelineTiming, ReloadBundleTiming,
+    TimeOrigin, Timestamp,
 };
 use crate::background::WorkerKey;
 use crate::clock::{ClockInstant, SystemTime};
@@ -131,7 +143,28 @@ pub(crate) struct Completion {
     pub(crate) owed_to_caller: bool,
 }
 
-/// Lynx's bound on its timing map (`timing_map_exceeded_size`).
+/// Which workers an entry handed to [`PipelineRegistry::deliver`] may
+/// reach besides the Rust embedder, each only when its observers asked for
+/// the entry's type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "`One` and `Every` carry the later phase 2 entries"
+    )
+)]
+pub(crate) enum WorkerAudience {
+    /// The Rust embedder alone.
+    None,
+    /// The BTS of the realm that produced the entry.
+    One(WorkerKey),
+    /// Every worker of the view: an entry about the view as a whole.
+    Every,
+}
+
+/// Lynx's bound on its timing map (`timing_map_exceeded_size`), and on
+/// each queue of [`PipelineRegistry::deliver`].
 const MAX_RECORDS: usize = 1000;
 /// `oldest_waiting_commit` when no record waits for a present.
 const NO_COMMIT: u64 = u64::MAX;
@@ -167,6 +200,16 @@ pub(crate) struct PipelineRegistry {
     /// [`Self::content_detection`], or the view's first paint not recorded
     /// yet. Half of [`Self::wants_presentation_timing`].
     marks_wanted: AtomicBool,
+    /// The long task monitor's threshold (`monitors::encode_threshold`),
+    /// 0 while it is off: every job reads it once.
+    long_task_threshold: AtomicU64,
+    /// The JS blocking monitor's, likewise: every message to a worker
+    /// reads it once.
+    js_blocking_threshold: AtomicU64,
+    /// Bumped by every monitor setter, the new value being the new
+    /// configuration's epoch, and notified without a bump when a monitor's
+    /// state changes in a way its task waits for.
+    monitor_epochs: watch::Sender<u64>,
     inner: Mutex<Inner>,
 }
 
@@ -179,10 +222,10 @@ struct Inner {
     worker_loads: FxHashMap<WorkerKey, WorkerLoadMarks>,
     /// Which realm each BTS worker belongs to (`connectBackground`).
     bindings: FxHashMap<WorkerKey, OpenerId>,
-    /// The workers with a `lynx.performance` observer.
-    observing: FxHashSet<WorkerKey>,
-    /// The workers among them whose observers asked for `paint` entries.
-    observing_paint: FxHashSet<WorkerKey>,
+    /// The workers with a `lynx.performance` observer, each with the types
+    /// its observers opt into beyond its realm's pipeline entries, which
+    /// every observing worker receives.
+    worker_types: FxHashMap<WorkerKey, EntryTypes>,
     /// Completed records some audience has not taken yet, in completion
     /// order.
     completed: Vec<u64>,
@@ -198,6 +241,36 @@ struct Inner {
     first_contentful_paint: Option<ClockInstant>,
     /// `create_lynx_view`'s span, which the page realm's load reports.
     root_create_lynx: Option<(ClockInstant, ClockInstant)>,
+    /// The present the page realm's load waited for, which a JS blocking
+    /// monitor turned on after it counts `time_after_load_bundle` from.
+    page_loaded: Option<ClockInstant>,
+    /// The JS blocking monitor's running state; `None` while it is off.
+    js_blocking: Option<JsBlockingState>,
+    /// The delivered entries the Rust embedder has not taken, oldest first,
+    /// at most [`MAX_RECORDS`].
+    owed_rust: VecDeque<PerformanceEntry>,
+    /// The delivered entries each worker has not taken, likewise.
+    owed_workers: FxHashMap<WorkerKey, VecDeque<PerformanceEntry>>,
+}
+
+/// The JS blocking monitor's state between two reports: Lynx's
+/// `JSBlockingMonitor` members.
+struct JsBlockingState {
+    /// The configuration this state belongs to: its monitor epoch.
+    epoch: u64,
+    /// `total_blocking_time_`: the waits counted since the last report.
+    total_time: Duration,
+    /// `total_blocking_count_`.
+    total_count: u32,
+    /// `last_report_time_`: the last report made, or the monitor's start.
+    last_report: ClockInstant,
+    /// `load_bundle_time_`: the `loadBundle` report's instant, or the
+    /// page's load for a monitor turned on after it.
+    load_bundle: Option<ClockInstant>,
+    /// What the `timer` reports are scheduled from: the `loadBundle`
+    /// report's instant, or the configuration's for a monitor turned on or
+    /// changed after the page's load; `None` while neither has happened.
+    timer_anchor: Option<ClockInstant>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -329,6 +402,9 @@ impl PipelineRegistry {
             content_detection: AtomicBool::new(false),
             // The view's first paint is not recorded yet.
             marks_wanted: AtomicBool::new(true),
+            long_task_threshold: AtomicU64::new(0),
+            js_blocking_threshold: AtomicU64::new(0),
+            monitor_epochs: watch::channel(0).0,
             inner: Mutex::new(Inner::default()),
         }
     }
@@ -354,7 +430,7 @@ impl PipelineRegistry {
 
     fn update_observed(&self, inner: &Inner) {
         self.observed.store(
-            !inner.rust_types.is_empty() || !inner.observing.is_empty(),
+            !inner.rust_types.is_empty() || !inner.worker_types.is_empty(),
             Ordering::Relaxed,
         );
         let detect = Self::paint_wanted(inner) && inner.first_contentful_paint.is_none();
@@ -365,7 +441,11 @@ impl PipelineRegistry {
 
     /// Whether anyone asked for `paint` entries.
     fn paint_wanted(inner: &Inner) -> bool {
-        inner.rust_types.contains(EntryTypes::PAINT) || !inner.observing_paint.is_empty()
+        inner.rust_types.contains(EntryTypes::PAINT)
+            || inner
+                .worker_types
+                .values()
+                .any(|types| types.contains(EntryTypes::PAINT))
     }
 
     /// Whether the view's document should decide Paint Timing's contentful
@@ -854,8 +934,7 @@ impl PipelineRegistry {
         if inner.rust_types.contains(EntryTypes::PAINT) {
             audiences.push((RUST, None));
         }
-        let mut workers: SmallVec<[WorkerKey; 2]> = inner.observing_paint.iter().copied().collect();
-        workers.sort_unstable();
+        let workers = Self::workers_asking(inner, EntryTypes::PAINT);
         audiences.extend(workers.into_iter().map(|key| (WORKER, Some(key))));
         for (audience, worker) in audiences {
             let mut record = Record::new(
@@ -963,7 +1042,7 @@ impl PipelineRegistry {
             Opener::Worker(key) => Some(key),
             Opener::Realm(realm) => Self::background_of(inner, realm),
         }
-        .filter(|key| inner.observing.contains(key));
+        .filter(|key| inner.worker_types.contains_key(key));
         let rust_types = inner.rust_types;
         let Some(record) = inner.records.get_mut(&id) else {
             return;
@@ -982,8 +1061,12 @@ impl PipelineRegistry {
         }
         record.audience = audience;
         record.worker = worker;
+        let mut page_loaded = None;
         if record.kind == Kind::Load && !record.load_only {
             let snapshot = record.clone();
+            if realm == Some(OpenerId::PAGE) {
+                page_loaded = record.presented.map(|frame| frame.presented);
+            }
             if let Some(load) = realm.and_then(|realm| inner.loads.get_mut(&realm)) {
                 load.completed = Some(snapshot);
             }
@@ -1001,6 +1084,255 @@ impl PipelineRegistry {
             self.generation.fetch_add(1, Ordering::Release);
         }
         self.count(inner);
+        if let Some(presented) = page_loaded {
+            self.page_loaded(inner, presented);
+        }
+    }
+
+    /// The page realm's load completed, presented at `presented`: Lynx's
+    /// `JSBlockingMonitor::OnPerformanceEvent`, which makes the `loadBundle`
+    /// report and starts the timer from now. Once: a load entry sent again
+    /// by `set_extra_timing` starts no second timer, as Lynx's would.
+    fn page_loaded(&self, inner: &mut Inner, presented: ClockInstant) {
+        if inner.page_loaded.is_some() {
+            return;
+        }
+        inner.page_loaded = Some(presented);
+        let now = ClockInstant::now();
+        let Some(state) = inner.js_blocking.as_mut() else {
+            return;
+        };
+        state.timer_anchor = Some(now);
+        self.report_blocking(inner, JsBlockingStage::LoadBundle, now);
+        // Wakes the report task, which waits for the anchor.
+        self.monitor_epochs.send_modify(|_| {});
+    }
+
+    /// The workers whose observers asked for `kind`, in key order.
+    fn workers_asking(inner: &Inner, kind: EntryTypes) -> SmallVec<[WorkerKey; 2]> {
+        let mut workers: SmallVec<[WorkerKey; 2]> = inner
+            .worker_types
+            .iter()
+            .filter(|(_, types)| types.contains(kind))
+            .map(|(key, _)| *key)
+            .collect();
+        workers.sort_unstable();
+        workers
+    }
+
+    /// The one delivery path for an entry made whole where it was produced:
+    /// queued for the Rust embedder when it observes `kind`, and for each
+    /// worker of `workers` that asked for `kind`, which is then owed a
+    /// `PerformanceReady` ([`Self::take_wakes`]). Answers whether it was
+    /// queued anywhere, which is when the caller wakes the embedder.
+    fn deliver(
+        &self,
+        inner: &mut Inner,
+        entry: PerformanceEntry,
+        kind: EntryTypes,
+        workers: WorkerAudience,
+    ) -> bool {
+        let workers = match workers {
+            WorkerAudience::None => SmallVec::new(),
+            WorkerAudience::One(key) => Self::workers_asking(inner, kind)
+                .into_iter()
+                .filter(|asking| *asking == key)
+                .collect(),
+            WorkerAudience::Every => Self::workers_asking(inner, kind),
+        };
+        let rust = inner.rust_types.contains(kind);
+        if !rust && workers.is_empty() {
+            return false;
+        }
+        for key in workers {
+            push_bounded(inner.owed_workers.entry(key).or_default(), entry.clone());
+            if !inner.wakes.contains(&key) {
+                inner.wakes.push(key);
+            }
+        }
+        if rust {
+            push_bounded(&mut inner.owed_rust, entry);
+        }
+        self.generation.fetch_add(1, Ordering::Release);
+        true
+    }
+
+    /// [`Self::deliver`] under a lock of its own.
+    pub(crate) fn deliver_entry(
+        &self,
+        entry: PerformanceEntry,
+        kind: EntryTypes,
+        workers: WorkerAudience,
+    ) -> bool {
+        self.deliver(&mut self.lock(), entry, kind, workers)
+    }
+
+    /// A new monitor configuration's epoch; every monitor task wakes.
+    fn next_monitor_epoch(&self) -> u64 {
+        let mut epoch = 0;
+        self.monitor_epochs.send_modify(|current| {
+            *current += 1;
+            epoch = *current;
+        });
+        epoch
+    }
+
+    /// A reader of the monitor epochs, which a monitor task waits on.
+    pub(crate) fn monitor_epochs(&self) -> watch::Receiver<u64> {
+        self.monitor_epochs.subscribe()
+    }
+
+    /// The long task monitor's threshold, `None` while it is off: one
+    /// relaxed load, which every job of the view's realms reads.
+    pub(crate) fn long_task_threshold(&self) -> Option<Duration> {
+        decode_threshold(self.long_task_threshold.load(Ordering::Relaxed))
+    }
+
+    /// Turns the long task monitor on with `threshold`, or off.
+    pub(crate) fn set_long_task_threshold(&self, threshold: Option<Duration>) {
+        self.long_task_threshold
+            .store(encode_threshold(threshold), Ordering::Relaxed);
+        self.next_monitor_epoch();
+    }
+
+    /// The instant a message sent to a worker now carries for the JS
+    /// blocking monitor, `None` while it is off: one relaxed load, and a
+    /// clock reading only while it is on.
+    pub(crate) fn js_blocking_stamp(&self) -> Option<ClockInstant> {
+        (self.js_blocking_threshold.load(Ordering::Relaxed) != 0).then(ClockInstant::now)
+    }
+
+    /// A message's job waited `wait` for its worker's thread: Lynx's
+    /// `AddJSBlockingTime`, which counts a wait of at least the threshold.
+    pub(crate) fn note_js_blocking(&self, wait: Duration) {
+        let Some(threshold) = decode_threshold(self.js_blocking_threshold.load(Ordering::Relaxed))
+        else {
+            return;
+        };
+        if wait < threshold {
+            return;
+        }
+        if let Some(state) = self.lock().js_blocking.as_mut() {
+            state.total_time = state.total_time.saturating_add(wait);
+            state.total_count = state.total_count.saturating_add(1);
+        }
+    }
+
+    /// Turns the JS blocking monitor on with `config` at `now`, or off, and
+    /// answers the epoch a report task for the new configuration serves —
+    /// `None` when it is off. Turning it on starts its totals and its first
+    /// report's span; changing a monitor that is on keeps them.
+    pub(crate) fn set_js_blocking_monitor(
+        &self,
+        config: Option<JsBlockingConfig>,
+        now: ClockInstant,
+    ) -> Option<u64> {
+        let mut inner = self.lock();
+        self.js_blocking_threshold.store(
+            encode_threshold(config.map(|config| config.threshold)),
+            Ordering::Relaxed,
+        );
+        // Under the lock, so a task that wakes for the bump reads the new
+        // state.
+        let epoch = self.next_monitor_epoch();
+        if config.is_none() {
+            inner.js_blocking = None;
+            return None;
+        }
+        let page_loaded = inner.page_loaded;
+        let state = inner.js_blocking.get_or_insert(JsBlockingState {
+            epoch,
+            total_time: Duration::ZERO,
+            total_count: 0,
+            last_report: now,
+            load_bundle: page_loaded,
+            timer_anchor: None,
+        });
+        state.epoch = epoch;
+        // The timer reports start at the `loadBundle` report, which is still
+        // to come while the page has not loaded. A monitor turned on, or
+        // changed, after it — which Lynx, whose monitor exists from the
+        // start, never has — starts them from now.
+        state.timer_anchor = state.load_bundle.map(|_| now);
+        Some(epoch)
+    }
+
+    /// Whether `epoch` is the JS blocking monitor's current configuration.
+    pub(crate) fn js_blocking_is_current(&self, epoch: u64) -> bool {
+        self.lock()
+            .js_blocking
+            .as_ref()
+            .is_some_and(|state| state.epoch == epoch)
+    }
+
+    /// The instant the `timer` reports of the configuration of `epoch` are
+    /// scheduled from, once there is one; `None` too when that
+    /// configuration is not the current one.
+    pub(crate) fn js_blocking_anchor(&self, epoch: u64) -> Option<ClockInstant> {
+        self.lock()
+            .js_blocking
+            .as_ref()
+            .filter(|state| state.epoch == epoch)
+            .and_then(|state| state.timer_anchor)
+    }
+
+    /// The JS blocking monitor's report task, for the configuration of
+    /// `epoch`, owes a `timer` report now. Answers whether one was kept
+    /// for the Rust embedder, which is when it is owed a wake.
+    pub(crate) fn report_js_blocking(&self, epoch: u64) -> bool {
+        let mut inner = self.lock();
+        let current = inner.js_blocking.as_ref().map(|state| state.epoch) == Some(epoch);
+        current && self.report_blocking(&mut inner, JsBlockingStage::Timer, ClockInstant::now())
+    }
+
+    /// A report of `stage` at `now`, for a test that drives the monitor
+    /// with instants of its own.
+    #[cfg(test)]
+    pub(crate) fn report_js_blocking_at(&self, stage: JsBlockingStage, now: ClockInstant) -> bool {
+        let mut inner = self.lock();
+        self.report_blocking(&mut inner, stage, now)
+    }
+
+    /// Lynx's `ReportBlockingInfo`: nothing, and the span not restarted,
+    /// when nothing was counted; otherwise one report, for the Rust embedder
+    /// alone, after which the totals and the span start again at `now`, as
+    /// Lynx resets them. Answers [`Self::deliver`]'s answer.
+    fn report_blocking(
+        &self,
+        inner: &mut Inner,
+        stage: JsBlockingStage,
+        now: ClockInstant,
+    ) -> bool {
+        let Some(monitor) = inner.js_blocking.as_mut() else {
+            return false;
+        };
+        if stage == JsBlockingStage::LoadBundle {
+            monitor.load_bundle = Some(now);
+        }
+        if monitor.total_count == 0 || monitor.total_time.is_zero() {
+            return false;
+        }
+        let entry = JsBlockingEntry::from_totals(
+            stage,
+            monitor.total_time,
+            monitor.total_count,
+            now.saturating_duration_since(monitor.last_report),
+            match stage {
+                JsBlockingStage::LoadBundle => None,
+                JsBlockingStage::Timer => monitor
+                    .load_bundle
+                    .map(|load| now.saturating_duration_since(load)),
+            },
+        );
+        monitor.last_report = now;
+        monitor.total_time = Duration::ZERO;
+        monitor.total_count = 0;
+        self.deliver(
+            inner,
+            PerformanceEntry::JsBlocking(entry),
+            EntryTypes::JS_BLOCKING,
+            WorkerAudience::None,
+        )
     }
 
     /// One of a BTS worker's load marks. `loadBackgroundEnd` is the load's
@@ -1045,8 +1377,8 @@ impl PipelineRegistry {
     pub(crate) fn forget_worker(&self, key: WorkerKey) {
         let mut guard = self.lock();
         let inner = &mut *guard;
-        inner.observing.remove(&key);
-        inner.observing_paint.remove(&key);
+        inner.worker_types.remove(&key);
+        inner.owed_workers.remove(&key);
         inner.worker_loads.remove(&key);
         inner.wakes.retain(|worker| *worker != key);
         if let Some(realm) = inner.bindings.remove(&key)
@@ -1057,20 +1389,18 @@ impl PipelineRegistry {
         self.update_observed(inner);
     }
 
-    /// Whether the worker `key` has a `lynx.performance` observer, and
-    /// whether one of its observers asked for `paint` entries (which only an
-    /// observing worker can have).
-    pub(crate) fn observe_worker(&self, key: WorkerKey, observing: bool, paint: bool) {
+    /// Whether the worker `key` has a `lynx.performance` observer — `None`
+    /// for none — and, when it has, the types its observers opt into
+    /// beyond its realm's pipeline entries ([`EntryTypes::PAINT`] is the
+    /// one there is). A worker that stops observing drops the delivered
+    /// entries it had not taken.
+    pub(crate) fn observe_worker(&self, key: WorkerKey, asked: Option<EntryTypes>) {
         let mut inner = self.lock();
-        if observing {
-            inner.observing.insert(key);
+        if let Some(types) = asked {
+            inner.worker_types.insert(key, types);
         } else {
-            inner.observing.remove(&key);
-        }
-        if observing && paint {
-            inner.observing_paint.insert(key);
-        } else {
-            inner.observing_paint.remove(&key);
+            inner.worker_types.remove(&key);
+            inner.owed_workers.remove(&key);
         }
         self.update_observed(&inner);
     }
@@ -1108,27 +1438,36 @@ impl PipelineRegistry {
         self.generation.load(Ordering::Relaxed) != generation
     }
 
-    /// Every completed entry the Rust embedder has not taken, assembled on
-    /// the caller's thread, of the types it subscribes to.
+    /// Every completed entry the Rust embedder has not taken, of the types
+    /// it subscribes to: the pipeline and paint records in completion
+    /// order, assembled on the caller's thread, then the delivered entries
+    /// in the order they were made.
     pub(crate) fn take_completed_for_rust(&self) -> Vec<PerformanceEntry> {
-        let (taken, types) = {
+        let (taken, owed, types) = {
             let mut inner = self.lock();
             let types = inner.rust_types;
-            (Self::take_completed(&mut inner, RUST, None), types)
+            let taken = Self::take_completed(&mut inner, RUST, None);
+            (taken, std::mem::take(&mut inner.owed_rust), types)
         };
         taken
             .iter()
             .flat_map(|completed| completed.assemble(types, &self.origin))
+            .chain(owed)
             .collect()
     }
 
     /// Every completed entry the worker `key` is owed, assembled on its
-    /// own thread.
+    /// own thread, then the entries delivered to it.
     pub(crate) fn take_completed_for_worker(&self, key: WorkerKey) -> Vec<PerformanceEntry> {
-        let taken = Self::take_completed(&mut self.lock(), WORKER, Some(key));
+        let (taken, owed) = {
+            let mut inner = self.lock();
+            let taken = Self::take_completed(&mut inner, WORKER, Some(key));
+            (taken, inner.owed_workers.remove(&key).unwrap_or_default())
+        };
         taken
             .iter()
             .flat_map(|completed| completed.assemble(EntryTypes::ALL, &self.origin))
+            .chain(owed)
             .collect()
     }
 
@@ -1244,6 +1583,14 @@ struct Taken {
     load: Option<LoadSnapshot>,
     extra: ExtraTiming,
     first_paint: Option<ClockInstant>,
+}
+
+/// Queues `entry`, dropping the oldest beyond [`MAX_RECORDS`].
+fn push_bounded(queue: &mut VecDeque<PerformanceEntry>, entry: PerformanceEntry) {
+    if queue.len() >= MAX_RECORDS {
+        queue.pop_front();
+    }
+    queue.push_back(entry);
 }
 
 fn range(span: (Option<ClockInstant>, Option<ClockInstant>)) -> Option<std::ops::Range<Timestamp>> {

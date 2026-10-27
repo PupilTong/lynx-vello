@@ -170,6 +170,7 @@ use super::runtime::{Deliveries, DocumentIngredients, MainThreadRuntime, RealmSt
 use super::{AttachedView, GroupContext};
 use crate::background::WorkerEvent;
 use crate::clock::ClockInstant;
+use crate::jobs::{JobKind, JsThreadName};
 use crate::lifetime::{Lifetime, Settles, run_job, serve_clock};
 use crate::link::{FramePost, HostOutbox, ScrollEntry, ScrollMailbox, ToMain, ViewOutbox};
 use crate::realm::RealmCore;
@@ -364,7 +365,7 @@ impl Page {
     /// rest of the batch into it would be worse than stopping.
     fn post_content_visibility_changes(self: &Rc<Self>) {
         let page = Rc::clone(self);
-        drop(owner::enter(self, move |runtime, js| {
+        owner::queue(self, JobKind::ContentVisibility, move |runtime, js| {
             // Cleared before the walk, not after: what a handler's own
             // mutation leaves for this entry's epilogue to commit is a batch
             // of its own, and it owes an entry of its own too.
@@ -372,7 +373,7 @@ impl Page {
             for failure in runtime.dispatch_content_visibility_changes(js) {
                 policy::report(&page, Scene::Listener, failure.into_script_error());
             }
-        }));
+        });
     }
 
     /// Queues the entry that delivers what the update just queued on `terminus`'s
@@ -420,7 +421,7 @@ impl Page {
     /// `catch_unwind`.
     fn post_intersection_notifications(self: &Rc<Self>) {
         let page = Rc::clone(self);
-        drop(owner::enter(self, move |runtime, js| {
+        owner::queue(self, JobKind::Intersection, move |runtime, js| {
             // Cleared before the loop, not after: what a hook moves is a
             // batch of this entry's own epilogue, which owes an entry of
             // its own.
@@ -428,7 +429,7 @@ impl Page {
             for failure in runtime.notify_intersection_observers(js) {
                 policy::report(&page, Scene::Listener, failure.into_script_error());
             }
-        }));
+        });
     }
 
     /// Queues the entry that delivers what `terminus`'s resize observers queued —
@@ -457,12 +458,12 @@ impl Page {
     /// whose border-box size differs from the one it last reported.
     fn post_resize_notifications(self: &Rc<Self>) {
         let page = Rc::clone(self);
-        drop(owner::enter(self, move |runtime, js| {
+        owner::queue(self, JobKind::ResizeObserver, move |runtime, js| {
             page.resizes_posted.set(false);
             for failure in runtime.notify_resize_observers(js) {
                 policy::report(&page, Scene::Listener, failure.into_script_error());
             }
-        }));
+        });
     }
 
     /// Queues the entry that delivers one batch of component events —
@@ -518,12 +519,12 @@ impl Page {
     /// `close`, either of which is a new batch that owes an entry of its own.
     fn post_component_events(self: &Rc<Self>) {
         let page = Rc::clone(self);
-        drop(owner::enter(self, move |runtime, js| {
+        owner::queue(self, JobKind::ComponentEvent, move |runtime, js| {
             page.component_events_posted.set(false);
             for failure in runtime.dispatch_component_events(js) {
                 policy::report(&page, Scene::Listener, failure.into_script_error());
             }
-        }));
+        });
     }
 
     /// Applies one burst of commands: one entry, one commit, one
@@ -565,7 +566,7 @@ impl Page {
         #[cfg(test)]
         let commands = self.take_test_seams(commands);
         let page = Rc::clone(self);
-        owner::enter(self, move |runtime, js| {
+        owner::enter(self, JobKind::Command, move |runtime, js| {
             if page.outbox.is_cancelled() {
                 owner::end(&page);
                 return;
@@ -664,6 +665,9 @@ impl Page {
                 }
             }
             ToMain::ImageEvents(events) => runtime.apply_image_events(&events),
+            // A task of this view's, so the view's end reaps it; it enters
+            // no realm, and the next configuration ends it.
+            ToMain::StartMonitorTask(task) => owner::spawn(self, task.serve(self.host.clone())),
             #[cfg(test)]
             ToMain::Probe(probe) => runtime.with_document(probe),
             #[cfg(test)]
@@ -924,6 +928,7 @@ impl Page {
 impl RealmOwner for Page {
     type Realm = MainThreadRuntime;
     type Event = EngineEvent;
+    const THREAD: JsThreadName = JsThreadName::Main;
 
     /// A rejection of boot's own module is the engine's code failing, not
     /// the app's: boot catches what the entry's evaluation throws (see
@@ -1181,7 +1186,7 @@ pub(super) async fn serve_view(context: Rc<GroupContext>, view: AttachedView, ou
     // builds this view's painter. The answer is dropped because there is
     // nothing to do with it — a job is queued by the call rather than by the
     // future it hands back, and `run_job` is what reports a trap inside it.
-    drop(run_job(&page, move |page| {
+    drop(run_job(&page, JobKind::Start, move |page| {
         page.open_realm(
             ingredients,
             RealmStartup {
@@ -1291,7 +1296,7 @@ async fn consume_metrics(page: Rc<Page>, mut metrics: watch::Receiver<Option<Vie
                 return;
             },
         }
-        <Page as Settles>::settle(&page).await;
+        <Page as Settles>::settle(&page, JobKind::Settle).await;
     }
 }
 
@@ -1338,7 +1343,7 @@ async fn load_entry(page: Rc<Page>, entry: StartupSource) {
             .map_err(|reason| LynxViewError::Script(platform_script_error(reason)))
     });
     let completing = Rc::clone(&page);
-    owner::enter(&page, move |runtime, js| {
+    owner::enter(&page, JobKind::Entry, move |runtime, js| {
         let completed = answered
             .and_then(|(response_url, source)| runtime.complete_entry(js, &response_url, &source));
         match completed {
@@ -1410,7 +1415,7 @@ async fn load_font_face(page: Rc<Page>, request: terminus::link::FontFaceRequest
     };
     // The entry's own epilogue commits: registering a face invalidates the
     // layout of every run that names it.
-    owner::enter(&page, move |runtime, _| {
+    owner::enter(&page, JobKind::FontFace, move |runtime, _| {
         runtime.register_font_face(&family, blob);
     })
     .await;
@@ -1462,7 +1467,7 @@ async fn consume_worker_events(page: Rc<Page>) {
         // throw where it threw, or boot's own failure, which the epilogue goes
         // on to report as StartupFailed too.
         let delivering = Rc::clone(&page);
-        owner::enter(&page, move |runtime, js| {
+        owner::enter(&page, JobKind::WorkerEvent, move |runtime, js| {
             for WorkerEvent { key, payload } in events {
                 if delivering.ended() {
                     break;
