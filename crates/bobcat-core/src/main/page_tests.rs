@@ -568,6 +568,7 @@ impl OwnedPage {
                 rest: Some(offset),
                 request: None,
                 anchor_shift: terminus::link::Vector2D::zero(),
+                reach: terminus::link::Vector2D::zero(),
             },
         )
         .await;
@@ -1535,6 +1536,7 @@ fn a_post_older_than_the_pending_scroll_request_is_dropped() {
             rest: None,
             request,
             anchor_shift: terminus::link::Vector2D::zero(),
+            reach: terminus::link::Vector2D::zero(),
         };
 
         owned.post(scroller, entry(40.0, None)).await;
@@ -1609,6 +1611,7 @@ fn a_post_made_before_an_anchoring_shift_is_completed_by_it() {
             rest: None,
             request: None,
             anchor_shift: terminus::link::Vector2D::new(0.0, applied),
+            reach: terminus::link::Vector2D::zero(),
         };
 
         owned.post(scroller, entry(160.0, 0.0)).await;
@@ -1711,6 +1714,7 @@ fn a_current_written_without_a_flush_fires_the_swipers_events_from_its_epilogue(
                     rest: Some(offset),
                     request: Some(serial),
                     anchor_shift: terminus::link::Vector2D::zero(),
+                    reach: terminus::link::Vector2D::zero(),
                 },
             )
             .await;

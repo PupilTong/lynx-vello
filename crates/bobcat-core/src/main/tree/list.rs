@@ -228,8 +228,10 @@ use crate::main::record::write_record_field;
 /// list the first time `update-list-info` inserts placeholders into it: an
 /// empty `list-item` per cell, which becomes the cell `componentAtIndex`
 /// builds once it stops skipping. Under that attribute the estimate belongs
-/// to the placeholder alone. A built cell is built because its placeholder
-/// was relevant, so the next commit lays it out at its own size; standing at
+/// to the placeholder alone. A built cell is built because its placeholder,
+/// or one near it in the run the protocol builds with it (`fillAround`), was
+/// relevant, so the next commit lays it out at its own size, or at 0 if it
+/// lies past the relevance region until the region reaches it; standing at
 /// `100cqh` first would push every box after it down by a scrollport per cell
 /// before any determination took it back, and scroll anchoring would follow.
 /// Skipped later, it keeps its last remembered size (`auto`). A placeholder

@@ -38,6 +38,7 @@ rstest.mockRequire("bobcat-internal:host", () => {
     childElementIds: native.childElementIds,
     parentNode: native.parentNode,
     childIndex: native.childIndex,
+    scrollRelevanceSpan: native.scrollRelevanceSpan,
     insertBefore: native.insertBefore,
     removeElement: native.removeElement,
     replaceElement: native.replaceElement,
@@ -160,6 +161,11 @@ type MockBobcat = BobcatNative & {
     properties: string,
     resolved: 0 | 1,
   ) => string;
+  /**
+   * What `scrollRelevanceSpan` answers, scripted the same way: the default
+   * is the empty answer of a scroller with no rendered box.
+   */
+  answerScrollRelevanceSpan: (scrollerId: number, childId: number) => string;
   /**
    * What a synthetic dispatch does in the host besides being recorded. The
    * real host computes the path from the tree, runs the engine components'
@@ -422,6 +428,15 @@ function createMockBobcat(issuedIds?: number[]): MockBobcat {
       calls.push(["childIndex", id]);
       const parent = parents.get(id);
       return parent === undefined ? -1 : (childOrder.get(parent) ?? []).indexOf(id);
+    },
+    // No layout here: every scroller answers no span until a test scripts
+    // one.
+    answerScrollRelevanceSpan: () => "",
+    scrollRelevanceSpan: (scroller: unknown, child: unknown) => {
+      const scrollerId = nodeId("scrollRelevanceSpan", scroller);
+      const childId = nodeId("scrollRelevanceSpan", child);
+      calls.push(["scrollRelevanceSpan", scrollerId, childId]);
+      return host.answerScrollRelevanceSpan(scrollerId, childId);
     },
     insertBefore: (parent: unknown, child: unknown, reference: unknown) => {
       const parentId = nodeId("insertBefore", parent);
@@ -5269,6 +5284,182 @@ describe("update-list-info", () => {
 
     expect(() => reveal(list, placeholder!)).toThrow("no live handle names");
     expect(__GetChildren(list)).toEqual([placeholder]);
+  });
+});
+
+/**
+ * A list of `count` placeholders whose callbacks are filed, for the
+ * fill-ahead cases: every built cell measures `size` px on both axes, and
+ * the relevance span is the empty answer until a test scripts one.
+ */
+async function lazyList(count: number, size = 20) {
+  const fixture = listFixture(count);
+  __SetAttribute(fixture.list, "update-list-info", {
+    insertAction: Array.from({ length: count }, (_, position) => ({ position })),
+    removeAction: [],
+  });
+  __UpdateListCallbacks(fixture.list, fixture.componentAtIndex, fixture.enqueueComponent, null);
+  await drain();
+  mock.answerElementMethod = (_id, method) =>
+    method === "boundingClientRect"
+      ? styleRecord("0", "0", "0", String(size), String(size))
+      : 3;
+  return { ...fixture, placeholders: __GetChildren(fixture.list) };
+}
+
+/** The indices `componentAtIndex` was asked for, in call order. */
+function builtIndices(calls: unknown[][]): number[] {
+  return calls.filter((call) => call[0] === "componentAtIndex").map((call) => call[2] as number);
+}
+
+/** `from`, `from + step`, … for `count` numbers. */
+function run(from: number, count: number, step = 1): number[] {
+  return Array.from({ length: count }, (_, offset) => from + offset * step);
+}
+
+describe("update-list-info fill-ahead", () => {
+  it("builds the run the relevance span covers at a built sibling's size, after and then before", async () => {
+    const { list, cells, calls, placeholders } = await lazyList(300);
+    // A built sibling at 99: revealed while the span is empty, so alone.
+    reveal(list, placeholders[99]!);
+    expect(builtIndices(calls)).toEqual([99]);
+    calls.length = 0;
+    mock.calls.length = 0;
+
+    // ahead_y 2100px and behind_y 700px of a placeholder at 100.
+    mock.answerScrollRelevanceSpan = () => styleRecord("0", "0", "2100", "700");
+    reveal(list, placeholders[100]!);
+
+    // ceil((2100 - 20) / 20) = 104 children after; ceil((700 - 20) / 20) = 34
+    // before, of which 99 is the built sibling, counted and left alone.
+    expect(builtIndices(calls)).toEqual([100, ...run(101, 104), ...run(98, 33, -1)]);
+    const children = __GetChildren(list);
+    expect(children.slice(66, 205)).toEqual(cells.slice(66, 205));
+    expect(children[65]).toBe(placeholders[65]);
+    expect(children[205]).toBe(placeholders[205]);
+    // The span is read once, on the revealed placeholder's box.
+    expect(mock.named("scrollRelevanceSpan")).toEqual([
+      ["scrollRelevanceSpan", __GetElementUniqueID(list), __GetElementUniqueID(placeholders[100]!)],
+    ]);
+  });
+
+  it("builds only the revealed cell when no built sibling has a box", async () => {
+    const { list, calls, placeholders } = await lazyList(50);
+    mock.answerScrollRelevanceSpan = () => styleRecord("0", "0", "2100", "700");
+    reveal(list, placeholders[10]!);
+
+    expect(builtIndices(calls)).toEqual([10]);
+    // Placeholders are no reference, so nothing is measured.
+    expect(mock.named("callElementMethod")).toEqual([]);
+
+    // A built sibling the last layout has no box for answers zeros, and is
+    // no reference either.
+    mock.answerElementMethod = () => styleRecord("0", "0", "0", "0", "0");
+    calls.length = 0;
+    reveal(list, placeholders[11]!);
+    expect(builtIndices(calls)).toEqual([11]);
+  });
+
+  it("counts a built cell inside the run without rebuilding it", async () => {
+    const { list, calls, placeholders } = await lazyList(20);
+    reveal(list, placeholders[4]!);
+    reveal(list, placeholders[7]!);
+    calls.length = 0;
+
+    // ceil((80 - 20) / 20) = 3 after: 6, 7 (built) and 8; ceil((60 - 20) / 20)
+    // = 2 before: 4 (built) and 3.
+    mock.answerScrollRelevanceSpan = () => styleRecord("0", "0", "80", "60");
+    reveal(list, placeholders[5]!);
+
+    expect(builtIndices(calls)).toEqual([5, 6, 8, 3]);
+    expect(__GetChildren(list)[9]).toBe(placeholders[9]);
+    expect(__GetChildren(list)[2]).toBe(placeholders[2]);
+  });
+
+  it("stops a run at the list's end and at its start", async () => {
+    const { list, cells, calls, placeholders } = await lazyList(10);
+    reveal(list, placeholders[4]!);
+    calls.length = 0;
+
+    mock.answerScrollRelevanceSpan = () => styleRecord("0", "0", "5000", "5000");
+    reveal(list, placeholders[5]!);
+
+    expect(builtIndices(calls)).toEqual([5, 6, 7, 8, 9, 3, 2, 1, 0]);
+    expect(__GetChildren(list)).toEqual(cells);
+    expect(mock.named("listenerClosed").filter(
+      (call) => call[2] === "contentvisibilityautostatechange",
+    )).toHaveLength(1);
+  });
+
+  it("ends a run on the side where componentAtIndex answers no number", async () => {
+    const { list, cells, calls, placeholders } = await lazyList(10);
+    reveal(list, placeholders[4]!);
+    calls.length = 0;
+    const answerAt = (index: number) => {
+      calls.push(["componentAtIndex", 0, index]);
+      if (index === 7) {
+        return undefined;
+      }
+      __AppendElement(list, cells[index]!);
+      return __GetElementUniqueID(cells[index]!);
+    };
+    __UpdateListCallbacks(
+      list,
+      (_list: unknown, _id: unknown, index: unknown) => answerAt(index as number),
+      null,
+      null,
+    );
+
+    mock.answerScrollRelevanceSpan = () => styleRecord("0", "0", "5000", "60");
+    reveal(list, placeholders[5]!);
+
+    // 7 answers nothing: 8 and 9 are not asked; the run before still runs.
+    expect(builtIndices(calls)).toEqual([5, 6, 7, 3]);
+    expect(__GetChildren(list)[7]).toBe(placeholders[7]);
+  });
+
+  it("reads nothing for a later reveal of a placeholder the fill already built", async () => {
+    const { list, calls, placeholders } = await lazyList(300);
+    reveal(list, placeholders[99]!);
+    mock.answerScrollRelevanceSpan = () => styleRecord("0", "0", "2100", "700");
+    reveal(list, placeholders[100]!);
+    calls.length = 0;
+    mock.calls.length = 0;
+
+    // The same commit's later reveals, delivered in the same task.
+    reveal(list, placeholders[101]!);
+    reveal(list, placeholders[150]!);
+
+    expect(calls).toEqual([]);
+    expect(mock.named("childElementIds")).toEqual([]);
+    expect(mock.named("scrollRelevanceSpan")).toEqual([]);
+    expect(mock.named("callElementMethod")).toEqual([]);
+  });
+
+  it("reads one child list per fill", async () => {
+    const { list, placeholders } = await lazyList(300);
+    reveal(list, placeholders[99]!);
+    mock.answerScrollRelevanceSpan = () => styleRecord("0", "0", "2100", "700");
+    mock.calls.length = 0;
+    reveal(list, placeholders[100]!);
+
+    expect(mock.named("childElementIds")).toHaveLength(1);
+  });
+
+  it("reads the x span and the width of a horizontal list", async () => {
+    const { list, calls, placeholders } = await lazyList(50);
+    __SetAttribute(list, "scroll-orientation", "horizontal");
+    reveal(list, placeholders[9]!);
+    calls.length = 0;
+    // 20px wide and 500px tall.
+    mock.answerElementMethod = (_id, method) =>
+      method === "boundingClientRect" ? styleRecord("0", "0", "0", "20", "500") : 3;
+
+    // ahead_x 100, behind_x 0: ceil((100 - 20) / 20) = 4 after, none before.
+    mock.answerScrollRelevanceSpan = () => styleRecord("100", "0", "2100", "700");
+    reveal(list, placeholders[10]!);
+
+    expect(builtIndices(calls)).toEqual([10, 11, 12, 13, 14]);
   });
 });
 

@@ -694,15 +694,26 @@ and §D.16 with what the wire format actually permits.)*
       `StyleView` folds it into `CoreStyle::skips_contents`, which `effective_containment` turns
       into the `SIZE` bit a skipped box gains. An element no rendering update has reached yet is
       *undetermined* and skips, matching the spec's "determined in the next rendering update".
-      - **The margin is the painter's encode window** (`ScrollSlot::encode_window`,
-        `ENCODE_WINDOW_SCROLLPORTS = 1.0`), which is exactly the region the walk's culling
-        admits and the compositor may scroll to without a new commit; the main thread, adopting
-        the painter's posted offsets, recommits to re-center it once an offset has used half the
-        headroom toward an edge (`ScrollSlot::recenter_due`). The relevance test is the
-        walker's own `CullPlan::admits_border_box`, so "relevant wherever its contents could
-        paint" holds by construction rather than by agreement. Anything undecidable — a singular
-        transform, a non-finite bound, an item on a chain a sampled animation delta moves —
-        counts as relevant.
+      - **The margin is the painter's encode window, stretched toward where the container is
+        going** (`ScrollSlot::relevance_window`). The encode window (`ScrollSlot::encode_window`,
+        `ENCODE_WINDOW_SCROLLPORTS = 1.0`) is exactly the region the walk's culling admits and
+        the compositor may scroll to without a new commit; the main thread, adopting the
+        painter's posted offsets, recommits to re-center it once an offset has used half the
+        headroom toward an edge (`ScrollSlot::recenter_due`). The relevance region is that window
+        stretched on the side the container is moving to: by the target of its pending
+        programmatic scroll request, else by the reach the painter last posted for it
+        (`ScrollEntry::reach`: a fling's remaining travel at its current velocity, a glide's
+        remaining distance; zero for a drag, a wheel step, a bounce back, an auto-scroll and a
+        container at rest), at most `RELEVANCE_REACH_SCROLLPORTS = 3.0` and never past the
+        scroll range; an axis with a wrap period keeps its whole-area window. The document keeps
+        the reach per container (`Document::set_scroll_reach`, overwritten by every adopted post)
+        and the build publishes it on the slot (`ScrollSlot::reach`); the commits the scroll
+        itself asks for are the ones that read it. The stretch only grows the region, so the
+        relevance region always contains the encode window, and the relevance test is the
+        walker's own `CullPlan::admits_auto_box` over that region, so "relevant wherever its
+        contents could paint" still holds by construction rather than by agreement. Anything
+        undecidable — a singular transform, a non-finite bound, an item on a chain a sampled
+        animation delta moves — counts as relevant.
       - **Reveal is same-commit.** A flip invalidates layout at the flipped nodes through the
         ordinary relayout machinery and the frame is rebuilt inside the same `render()`, under
         the same commit id; a later pass only determines elements this commit has not determined

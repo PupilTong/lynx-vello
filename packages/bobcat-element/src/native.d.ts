@@ -257,6 +257,23 @@ interface BobcatNative {
    * counted, or -1 for a detached element. Kept on the node, so O(1).
    */
   childIndex(nodeId: number): number;
+  /**
+   * How far the scroller's `content-visibility: auto` relevance region
+   * reaches past one of its children, as one record payload of four decimal
+   * numbers in CSS px: `ahead_x`, `behind_x`, `ahead_y`, `behind_y`. The
+   * region is the offset range the next commit decides relevance against —
+   * the encode window around the scroller's offset, stretched toward where a
+   * fling, a glide or a pending scroll request is carrying it — and `ahead`
+   * is the distance from the child's start edge to the region's far edge,
+   * `behind` from the region's near edge to the child's end edge, both read
+   * on the child's border box in the scroller's unscrolled coordinates.
+   * Empty when the scroller is no rendered scroll container or the child has
+   * no rendered box. A stale or non-element id on either side throws.
+   *
+   * Runs no style, layout or paint: it reads the last completed pass, as
+   * `boundingClientRect` does.
+   */
+  scrollRelevanceSpan(scrollerId: number, childId: number): string;
   /** Reparenting insert; appends when `reference` is null. */
   insertBefore(parent: number, child: number, reference: number | null): void;
   /**
@@ -515,6 +532,7 @@ declare module "bobcat-internal:host" {
   export const childElementIds: BobcatNative["childElementIds"];
   export const parentNode: BobcatNative["parentNode"];
   export const childIndex: BobcatNative["childIndex"];
+  export const scrollRelevanceSpan: BobcatNative["scrollRelevanceSpan"];
   export const insertBefore: BobcatNative["insertBefore"];
   export const removeElement: BobcatNative["removeElement"];
   export const replaceElement: BobcatNative["replaceElement"];

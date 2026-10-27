@@ -1975,7 +1975,10 @@ handed to `enqueueComponent` first, the i-th removal taking the child at
 `position - i`. A placeholder becomes its cell only when it stops skipping:
 the list listens for `contentvisibilityautostatechange` while it holds
 placeholders, and its listener calls `componentAtIndex` with the
-placeholder's current index and swaps the cell in. The first placeholder batch
+placeholder's current index and swaps the cell in, then builds the run of
+placeholders after and before it that the relevance region covers, counted at
+a built sibling's size from the host's `scrollRelevanceSpan` (`fillAround`).
+The first placeholder batch
 writes `l-lazy-cells` onto the list, under which the UA sheet keeps the size
 estimate for placeholders alone and makes them no scroll anchor (user ruling 2026-10-27,
 native's lazy `componentAtIndex` rather than web-core's build-everything;

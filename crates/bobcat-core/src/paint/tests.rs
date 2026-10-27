@@ -865,6 +865,7 @@ fn a_drag_queues_one_marker_until_main_takes() {
                 rest: None,
                 request: None,
                 anchor_shift: terminus::link::Vector2D::zero(),
+                reach: terminus::link::Vector2D::zero(),
             }
         )],
         "one entry at the latest offset, held by the finger"
@@ -941,6 +942,103 @@ fn a_spent_fling_posts_its_rest() {
         moving += 1;
     }
     panic!("the fling never came to rest");
+}
+
+/// A fling in flight posts its reach: how much farther its curve carries the
+/// container at the velocity it has now, clamped to the range — so the
+/// offset plus the reach of every post is where the fling comes to rest. A
+/// fling short of the end lands inside the range, one strong enough to pass
+/// it reaches exactly `max_offset` (800 here). The post that carries the
+/// rest posts no reach.
+#[test]
+#[allow(
+    clippy::float_cmp,
+    reason = "a fling into the end rests exactly on it, and x never moves"
+)]
+fn a_fling_posts_its_remaining_travel_as_its_reach() {
+    use terminus::link::input::PointerPhase::{Down, Move, Up};
+
+    for (step, reaches_the_end) in [(20.0, false), (40.0, true)] {
+        let (mut painter, main, scroller) = scrolling("");
+        for (at, phase, y) in [
+            (0.0, Down, 190.0),
+            (0.016, Move, 190.0 - step),
+            (0.032, Move, 190.0 - 2.0 * step),
+            (0.048, Move, 190.0 - 3.0 * step),
+            (0.05, Up, 190.0 - 3.0 * step),
+        ] {
+            painter.clock_mut().pin(at);
+            touch(&mut painter, phase, y);
+        }
+        let _ = take(&main);
+        let mut posts = Vec::new();
+        let mut rest = None;
+        for frame in 1..600_u16 {
+            let now = 0.05 + f64::from(frame) / 60.0;
+            painter.service_gesture_clock(now);
+            painter.publish_scroll(now, None);
+            let (entries, _) = take(&main);
+            let Some((_, entry)) = entries.into_iter().find(|(node, _)| *node == scroller) else {
+                continue;
+            };
+            if let Some(at) = entry.rest {
+                assert_eq!(
+                    entry.reach,
+                    terminus::link::Vector2D::zero(),
+                    "a post at rest reaches nowhere"
+                );
+                rest = Some(at);
+                break;
+            }
+            posts.push(entry);
+        }
+        let rest = rest.expect("the fling came to rest");
+        assert!(posts.len() > 2, "the fling moved over several frames");
+        assert_eq!(
+            rest.y == 800.0,
+            reaches_the_end,
+            "step {step}: landed at {rest:?}"
+        );
+        for entry in &posts {
+            assert_eq!(entry.reach.x, 0.0, "nothing moves on x");
+            // The step that meets the end stands on it with nowhere left to
+            // go; the rest follows it in a post of its own.
+            assert!(
+                entry.reach.y > 0.0 || entry.offset.y == 800.0,
+                "a forward fling reaches ahead"
+            );
+            let landing = entry.offset.y + entry.reach.y;
+            assert!(
+                landing <= 800.0,
+                "clamped to the range: {} + {}",
+                entry.offset.y,
+                entry.reach.y
+            );
+            assert!(
+                (landing - rest.y).abs() < 1.5,
+                "step {step}: {} + {} lands at {}, the fling at {}",
+                entry.offset.y,
+                entry.reach.y,
+                landing,
+                rest.y
+            );
+        }
+    }
+}
+
+/// A wheel step carries the container no farther than where it puts it:
+/// its post reaches nowhere.
+#[test]
+fn a_wheel_step_posts_no_reach() {
+    let (mut painter, main, scroller) = scrolling("");
+    wheel(&mut painter, 30.0);
+    let (entries, _) = take(&main);
+    let (_, entry) = entries
+        .into_iter()
+        .find(|(node, _)| *node == scroller)
+        .expect("the wheel moved the scroller");
+    assert_eq!(entry.offset, terminus::link::Vector2D::new(0.0, 30.0));
+    assert_eq!(entry.reach, terminus::link::Vector2D::zero());
 }
 
 /// A `contain-bounce` stretch is the painter's alone: what it posts is the
@@ -1520,15 +1618,17 @@ fn a_bounce_back_a_commit_ends_posts_its_rest() {
                 rest: Some(stretched),
                 request: None,
                 anchor_shift: terminus::link::Vector2D::zero(),
+                reach: terminus::link::Vector2D::zero(),
             }
         )],
         "posted in range, at rest"
     );
 }
 
-/// A smooth request's glide posts each step naming the request, and its
-/// landing at rest; a post made before the painter saw the request names
-/// none, which is what lets main drop it.
+/// A smooth request's glide posts each step naming the request, with the
+/// remaining distance to its target as its reach, and its landing at rest;
+/// a post made before the painter saw the request names none, which is what
+/// lets main drop it.
 #[test]
 fn a_smooth_request_posts_its_serial_and_lands_at_rest() {
     let mut document = document();
@@ -1580,9 +1680,11 @@ fn a_smooth_request_posts_its_serial_and_lands_at_rest() {
                 rest: None,
                 request: Some(serial),
                 anchor_shift: terminus::link::Vector2D::zero(),
+                reach: terminus::link::Vector2D::new(0.0, 270.0),
             }
         )],
-        "posted at once, from where the wheel left it, naming the request"
+        "posted at once, from where the wheel left it, naming the request, \
+         reaching the glide's target"
     );
 
     for step in 1..120_u16 {
@@ -1601,9 +1703,14 @@ fn a_smooth_request_posts_its_serial_and_lands_at_rest() {
                 "landed exactly"
             );
             assert!(!painter.scroll_intents().is_animating());
+            assert_eq!(entry.reach, terminus::link::Vector2D::zero());
             return;
         }
         assert!(entry.offset.y > 30.0 && entry.offset.y < 300.0);
+        assert!(
+            (entry.offset.y + entry.reach.y - 300.0).abs() < 1.0e-3,
+            "a glide reaches its target: {entry:?}"
+        );
     }
     panic!("the glide never came to rest");
 }
@@ -1711,6 +1818,7 @@ fn a_resized_scroller_stays_on_the_page_the_painter_showed() {
                 rest: Some(terminus::link::Vector2D::new(0.0, 600.0)),
                 request: None,
                 anchor_shift: terminus::link::Vector2D::zero(),
+                reach: terminus::link::Vector2D::zero(),
             }
         )],
     );
@@ -1931,6 +2039,7 @@ fn an_auto_scroll_moves_at_its_rate_and_ends_on_its_edge() {
                 rest: None,
                 request: Some(serial),
                 anchor_shift: terminus::link::Vector2D::zero(),
+                reach: terminus::link::Vector2D::zero(),
             }
         )],
         "posted at once, unmoved, naming the change"

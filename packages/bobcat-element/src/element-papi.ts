@@ -18,6 +18,7 @@ import {
   removeAttribute,
   removeElement,
   replaceElement,
+  scrollRelevanceSpan,
   setAttribute,
   setInlineStyles,
   setInlineStyleProperty,
@@ -1933,22 +1934,29 @@ function countPlaceholders(list: Handle, delta: number): undefined {
 /**
  * The list's listener for its cells' `contentvisibilityautostatechange`:
  * when a placeholder stops skipping, `componentAtIndex` builds its cell and
- * the cell takes the placeholder's place.
+ * the cell takes the placeholder's place ([`buildCell`]), and then the run
+ * of placeholders after and before it that the relevance region covers is
+ * built in the same task ([`fillAround`]).
  *
- * A placeholder stops skipping when a commit finds it inside the encode
- * window — one scrollport past the scrollport each way — so a cell is built
- * a scrollport before it scrolls into view, and in the commit after the one
- * that found it, since the event is delivered by a task of its own. The
- * index `componentAtIndex` is asked for is the placeholder's position among
- * the list's children when it is built, which is the cell's index in the
- * card's list as the batches so far have left it.
+ * A placeholder stops skipping when a commit finds it inside the relevance
+ * region — the encode window, one scrollport past the scrollport each way,
+ * stretched toward where a fling or a scroll request is carrying the list —
+ * so a cell is built before it scrolls into view, and in the commit after
+ * the one that found it, since the event is delivered by a task of its own.
+ * The index `componentAtIndex` is asked for is the placeholder's position
+ * among the list's children when it is built, which is the cell's index in
+ * the card's list as the batches so far have left it.
  *
- * `componentAtIndex` appends a cell it builds (ReactLynx's `list.ts:202`)
- * and answers a reused one detached; `replaceElement` moves either into the
- * placeholder's place and removes the placeholder, which nothing holds once
- * it is disowned here. A placeholder the event reaches from a nested list
- * is that list's, and one already built or moved out of the list is left
- * alone. A list whose callbacks are cleared keeps its placeholders.
+ * The span [`fillAround`] sizes its run by is read here, on the
+ * placeholder's own box, before the cell replaces it: the cell has no box
+ * until the next layout, and the placeholder's start and end edges are
+ * where the cell's are measured from.
+ *
+ * A placeholder the event reaches from a nested list is that list's, and
+ * one already built — by an earlier event's fill in the same task, which
+ * is how most of a commit's reveals end — or moved out of the list is left
+ * alone before any host read beyond its parent. A list whose callbacks are
+ * cleared keeps its placeholders.
  */
 function buildRevealedCell(event: DispatchedEvent): undefined {
   if (event.skipped !== false || event.currentTarget === null) {
@@ -1964,6 +1972,39 @@ function buildRevealedCell(event: DispatchedEvent): undefined {
   ) {
     return undefined;
   }
+  if (typeof list[listCallbacksSymbol]?.componentAtIndex !== "function") {
+    return undefined;
+  }
+  const span = scrollRelevanceSpan(listNodeId, placeholderNodeId);
+  const index = childIndex(placeholderNodeId);
+  const sign = buildCell(list, listNodeId, placeholder, placeholderNodeId, index);
+  if (sign !== undefined) {
+    fillAround(list, listNodeId, sign, index, span);
+  }
+  return undefined;
+}
+
+/**
+ * Builds the cell for the placeholder at `index` of `list`'s children and
+ * puts it in the placeholder's place, answering the cell's sign, or
+ * undefined when the list has no `componentAtIndex` or it answered no
+ * number, in which case the placeholder stays.
+ *
+ * `componentAtIndex` appends a cell it builds (ReactLynx's `list.ts:202`)
+ * and answers a reused one detached; `replaceElement` moves either into the
+ * placeholder's place and removes the placeholder, which nothing holds once
+ * it is disowned here. Either way the list's children keep their positions,
+ * with the cell where the placeholder was, so a caller holding the list's
+ * children ([`listChildren`]) keeps them in step by writing the sign at
+ * `index`.
+ */
+function buildCell(
+  list: Handle,
+  listNodeId: number,
+  placeholder: Handle,
+  placeholderNodeId: number,
+  index: number,
+): number | undefined {
   const componentAtIndex = list[listCallbacksSymbol]?.componentAtIndex as ListCallback;
   if (typeof componentAtIndex !== "function") {
     return undefined;
@@ -1971,7 +2012,7 @@ function buildRevealedCell(event: DispatchedEvent): undefined {
   const sign = componentAtIndex(
     list,
     listNodeId,
-    childIndex(placeholderNodeId),
+    index,
     // The operation id, which no readback here consumes, and
     // `enableReuseNotification`, which needs the recycling pool this engine
     // does not have. web-core passes the same two constants.
@@ -1987,6 +2028,167 @@ function buildRevealedCell(event: DispatchedEvent): undefined {
   disown(placeholder);
   placeholder[placeholderSymbol] = undefined;
   countPlaceholders(list, -1);
+  return sign;
+}
+
+/**
+ * How many children before or after a revealed cell [`fillAround`] looks
+ * through for a built sibling to size its run by, in each direction.
+ */
+const FILL_REFERENCE_REACH = 64;
+
+/**
+ * The list's preload: after the cell at `index` was built for a revealed
+ * placeholder, builds the placeholders after and before it whose count, at
+ * the size of a built sibling, covers the relevance region.
+ *
+ * Without it a commit reveals only the few placeholders the region holds
+ * at their estimate — a cell without `estimated-main-axis-size-px` stands
+ * at a whole scrollport (`100cqh`) — and each built cell's real size is
+ * known only a commit later, so one commit and one delivery build about a
+ * dozen cells. A list of short cells scrolled faster than that, a fling
+ * over a long feed, shows the list's background between the built cells
+ * and the scrollport's edge until the scroll slows. Building the run here
+ * fills the region in one delivery instead.
+ *
+ * The geometry is the engine's: `span` is `scrollRelevanceSpan`'s answer for
+ * the placeholder, read before it was replaced — how far the region the next
+ * commit decides relevance against reaches past the placeholder's start
+ * (`ahead`) and before its end (`behind`) on the list's axis, a fling's or a
+ * request's reach included. The count is this protocol's: the run is
+ * `ceil((ahead - size) / size)` children after the cell and
+ * `ceil((behind - size) / size)` before it, `size` being the border-box
+ * extent on the axis of the nearest built sibling with a box, looked for
+ * first before the cell, then after it, [`FILL_REFERENCE_REACH`] children
+ * each way. Every child of the run counts, built or not, and only its
+ * placeholders are built, each by its own index; a `componentAtIndex` that
+ * answers no number ends the run on that side. With no measured sibling —
+ * the list's first delivery — the cell is built alone, and the next
+ * delivery has one. The size is at least 1px, so a degenerate measurement
+ * cannot make the run longer than the span is in px.
+ *
+ * A cell this builds past the region carries no estimate under
+ * `l-lazy-cells`, so it skips and stands at 0 until the region reaches it;
+ * one inside it is laid out at its own size in the next commit. A run sized
+ * from a sibling of a different height under- or overshoots, and the next
+ * reveal corrects it from the cells then laid out.
+ *
+ * web-core has no such step, because it builds every cell inside the batch.
+ * Native's list lays cells out from an anchor until its visible area is
+ * filled, measuring each, and then builds `preload-buffer-count` more on the
+ * side it is moving to (`GetTargetIndexForPreloadBuffer` in
+ * `lynx/core/list/decoupled_linear_layout_manager.cc`); here the cells'
+ * sizes are known only after a commit, so the count comes from a sibling
+ * measured in the last one.
+ */
+function fillAround(
+  list: Handle,
+  listNodeId: number,
+  sign: number,
+  index: number,
+  span: string,
+): undefined {
+  if (span === "") {
+    return undefined;
+  }
+  const fields = splitRecord(span);
+  const horizontal = getAttribute(listNodeId, "scroll-orientation") === "horizontal";
+  const ahead = Number(fields[horizontal ? 0 : 2]);
+  const behind = Number(fields[horizontal ? 1 : 3]);
+  const children = listChildren(listNodeId);
+  const at = children[index] === sign ? index : children.indexOf(sign);
+  if (at < 0) {
+    return undefined;
+  }
+  const size = referenceSize(children, at, horizontal);
+  if (size === undefined) {
+    return undefined;
+  }
+  fillRun(list, listNodeId, children, at, 1, runLength(ahead, size));
+  fillRun(list, listNodeId, children, at, -1, runLength(behind, size));
+  return undefined;
+}
+
+/**
+ * How many children past the revealed cell a `span` of px covers at `size`
+ * px each, the revealed cell's own `size` taken off; 0 for a span the cell
+ * already covers or one that is not a number.
+ */
+function runLength(span: number, size: number): number {
+  const count = Math.ceil((span - size) / size);
+  return Number.isFinite(count) && count > 0 ? count : 0;
+}
+
+/**
+ * The extent on the list's axis of the built child nearest `index`, looked
+ * for before it and then after it, or undefined when none within
+ * [`FILL_REFERENCE_REACH`] has a box with a positive extent in the last
+ * layout. A placeholder is no reference: it stands at its estimate, not at
+ * a cell's size.
+ */
+function referenceSize(children: number[], index: number, horizontal: boolean): number | undefined {
+  for (const step of [-1, 1]) {
+    for (let distance = 1; distance <= FILL_REFERENCE_REACH; distance += 1) {
+      const nodeId = children[index + step * distance];
+      if (nodeId === undefined) {
+        break;
+      }
+      if (handleOf(nodeId)?.[placeholderSymbol] === true) {
+        continue;
+      }
+      const size = laidOutExtent(nodeId, horizontal);
+      if (size !== undefined) {
+        return Math.max(size, 1);
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
+ * A child's border-box width or height in the last layout, from the base
+ * set's `boundingClientRect` (status code, `left`, `top`, `width`,
+ * `height`), or undefined for one with no box, which answers zeros.
+ */
+function laidOutExtent(nodeId: number, horizontal: boolean): number | undefined {
+  const answer = callElementMethod(nodeId, "boundingClientRect", "");
+  if (typeof answer === "number") {
+    return undefined;
+  }
+  const fields = splitRecord(answer);
+  if (fields[0] !== "0") {
+    return undefined;
+  }
+  const size = Number(fields[horizontal ? 3 : 4]);
+  return Number.isFinite(size) && size > 0 ? size : undefined;
+}
+
+/**
+ * Builds the placeholders among the `count` children after (`step` 1) or
+ * before (`step` -1) the one at `index`, keeping `children` in step.
+ */
+function fillRun(
+  list: Handle,
+  listNodeId: number,
+  children: number[],
+  index: number,
+  step: 1 | -1,
+  count: number,
+): undefined {
+  let remaining = count;
+  for (let at = index + step; remaining > 0 && at >= 0 && at < children.length; at += step) {
+    remaining -= 1;
+    const nodeId = children[at]!;
+    const child = handleOf(nodeId);
+    if (child === undefined || child[placeholderSymbol] !== true) {
+      continue;
+    }
+    const sign = buildCell(list, listNodeId, child, nodeId, at);
+    if (sign === undefined) {
+      return undefined;
+    }
+    children[at] = sign;
+  }
   return undefined;
 }
 
@@ -2003,9 +2205,10 @@ function buildRevealedCell(event: DispatchedEvent): undefined {
  * platform info ([`createPlaceholder`]), and each removal hands a built cell
  * to `enqueueComponent` and removes it — the tree edits being ordinary
  * `insertBefore` and `removeElement` calls. A placeholder becomes its cell
- * only when it stops skipping ([`buildRevealedCell`]), so `componentAtIndex`
- * runs for the cells a scroll reaches, as native's list calls it for the
- * cells its layout reaches, and not for every cell up front.
+ * only when it, or a placeholder near it, stops skipping
+ * ([`buildRevealedCell`], [`fillAround`]), so `componentAtIndex` runs for
+ * the cells a scroll reaches, as native's list calls it for the cells its
+ * layout and preload reach, and not for every cell up front.
  *
  * web-core's `client/mainthread/elementAPIs/createElementAPI.ts:461-499`
  * builds every cell inside the batch instead, so its list's children are

@@ -95,6 +95,15 @@ pub struct ScrollSlot {
     ///
     /// [`Document::scroll_anchor_shift`]: crate::tree::document::Document::scroll_anchor_shift
     pub anchor_shift: Vector2D<f32>,
+    /// How much farther the painter's own motion — a fling, a glide — was
+    /// carrying the container past its offset when the painter last posted
+    /// it ([`ScrollEntry::reach`](crate::painter::ScrollEntry::reach)), as the
+    /// document kept it ([`Document::scroll_reach`]). Zero for a container at
+    /// rest. It stretches [`Self::relevance_window`] and nothing else: the
+    /// encode window, and so the compose headroom, is the offset's alone.
+    ///
+    /// [`Document::scroll_reach`]: crate::tree::document::Document::scroll_reach
+    pub reach: Vector2D<f32>,
 }
 
 /// Where compose puts a frame's scroll slots at one instant: `offset_of`'s
@@ -234,44 +243,56 @@ impl ScrollSlot {
     /// makes every `content-visibility: auto` box on that axis relevant.
     #[must_use]
     pub fn encode_window(&self) -> (Vector2D<f32>, Vector2D<f32>) {
-        let slack = Vector2D::new(
-            if self.max_offset.x > 0.0 {
-                self.scrollport.width * ENCODE_WINDOW_SCROLLPORTS
-            } else {
-                0.0
-            },
-            if self.max_offset.y > 0.0 {
-                self.scrollport.height * ENCODE_WINDOW_SCROLLPORTS
-            } else {
-                0.0
-            },
-        );
         let (wrap_x, wrap_y) = self.wrap_period();
-        let low = Vector2D::new(
-            if wrap_x.is_some() {
-                0.0
-            } else {
-                (self.offset.x - slack.x).max(0.0)
-            },
-            if wrap_y.is_some() {
-                0.0
-            } else {
-                (self.offset.y - slack.y).max(0.0)
-            },
+        let (low_x, high_x) = encode_window_axis(
+            self.offset.x,
+            self.max_offset.x,
+            self.scrollport.width,
+            wrap_x.is_some(),
         );
-        let high = Vector2D::new(
-            if wrap_x.is_some() {
-                self.max_offset.x
-            } else {
-                (self.offset.x + slack.x).min(self.max_offset.x)
-            },
-            if wrap_y.is_some() {
-                self.max_offset.y
-            } else {
-                (self.offset.y + slack.y).min(self.max_offset.y)
-            },
+        let (low_y, high_y) = encode_window_axis(
+            self.offset.y,
+            self.max_offset.y,
+            self.scrollport.height,
+            wrap_y.is_some(),
         );
-        (low, high)
+        (Vector2D::new(low_x, low_y), Vector2D::new(high_x, high_y))
+    }
+
+    /// The offset range whose content the commit treats as relevant to the
+    /// user (css-contain-2 §4.1): [`Self::encode_window`], stretched on each
+    /// axis toward where the container is going — a pending
+    /// [`Self::request`]'s target, else the painter's [`Self::reach`] — by at
+    /// most [`RELEVANCE_REACH_SCROLLPORTS`], and never past the range. Only
+    /// ever wider than the encode window, never narrower; an axis with a
+    /// [`Self::wrap_period`], or with nothing to scroll, is the encode
+    /// window's.
+    ///
+    /// `content-visibility: auto` is decided against this, so the boxes a
+    /// fling or a jump is about to show stop skipping in the commit before
+    /// the container gets there; compose and culling keep the encode window.
+    #[must_use]
+    pub fn relevance_window(&self) -> (Vector2D<f32>, Vector2D<f32>) {
+        let (low, high) = self.encode_window();
+        let (wrap_x, wrap_y) = self.wrap_period();
+        let toward = self
+            .request
+            .map_or(self.reach, |request| request.target - self.offset);
+        let (low_x, high_x) = relevance_window_axis(
+            (low.x, high.x),
+            toward.x,
+            self.max_offset.x,
+            self.scrollport.width,
+            wrap_x.is_some(),
+        );
+        let (low_y, high_y) = relevance_window_axis(
+            (low.y, high.y),
+            toward.y,
+            self.max_offset.y,
+            self.scrollport.height,
+            wrap_y.is_some(),
+        );
+        (Vector2D::new(low_x, low_y), Vector2D::new(high_x, high_y))
     }
 
     /// Whether a scroll to `offset` has used more than half the headroom
@@ -322,6 +343,68 @@ impl ScrollSlot {
 /// the encode covers — the compose headroom before a recentering commit is
 /// due.
 pub const ENCODE_WINDOW_SCROLLPORTS: f32 = 1.0;
+
+/// How far past the committed offset, in scrollports per axis, the relevance
+/// region may stretch toward where the painter's own motion — a fling, a
+/// glide, a pending request — will carry the container
+/// ([`ScrollSlot::relevance_window`]). A fling's remaining travel at the
+/// painter's decay rate is its velocity times about half a second, so three
+/// scrollports admit the whole landing of a fling slower than about six
+/// scrollports per second, and of a faster one (or of a jump) the next three
+/// scrollports of its way: the recentering commits that motion asks for
+/// every half scrollport each stretch again from where the container then
+/// stands, so the region stays that far ahead of it. Bounded, because what it
+/// reveals is laid out: an unbounded stretch would let one jump across a
+/// long list lay out everything between.
+pub const RELEVANCE_REACH_SCROLLPORTS: f32 = 3.0;
+
+/// One axis of [`ScrollSlot::encode_window`]: `offset` plus and minus
+/// [`ENCODE_WINDOW_SCROLLPORTS`] scrollports of `extent`, clamped to
+/// `0..=max`; the whole range `0..=max` when the axis `wraps`. An axis with
+/// nothing to scroll is the one offset.
+pub(crate) fn encode_window_axis(offset: f32, max: f32, extent: f32, wraps: bool) -> (f32, f32) {
+    if wraps {
+        return (0.0, max);
+    }
+    let slack = if max > 0.0 {
+        extent * ENCODE_WINDOW_SCROLLPORTS
+    } else {
+        0.0
+    };
+    ((offset - slack).max(0.0), (offset + slack).min(max))
+}
+
+/// One axis of [`ScrollSlot::relevance_window`], shared with the document's
+/// own [`Document::scroll_relevance_window`]: `window` (the encode window's
+/// `(low, high)` on the axis) stretched by `toward` — where the container is
+/// going, less where it is — on the side it points to, `toward` capped at
+/// [`RELEVANCE_REACH_SCROLLPORTS`] scrollports of `extent`, the stretched
+/// edge kept inside `0..=max`. Unchanged when the axis `wraps` (its window is
+/// already the whole area), has nothing to scroll, or `toward` is zero or not
+/// finite.
+///
+/// [`Document::scroll_relevance_window`]: crate::tree::document::Document::scroll_relevance_window
+pub(crate) fn relevance_window_axis(
+    window: (f32, f32),
+    toward: f32,
+    max: f32,
+    extent: f32,
+    wraps: bool,
+) -> (f32, f32) {
+    let (low, high) = window;
+    if wraps || max <= 0.0 || !toward.is_finite() {
+        return window;
+    }
+    let cap = (RELEVANCE_REACH_SCROLLPORTS * extent).max(0.0);
+    let toward = toward.clamp(-cap, cap);
+    if toward > 0.0 {
+        (low, (high + toward).min(max).max(high))
+    } else if toward < 0.0 {
+        ((low + toward).max(0.0).min(low), high)
+    } else {
+        window
+    }
+}
 
 /// The largest area, in viewports, of an element's `max(size, content_size)`
 /// that still exports a transform curve. Culling bounds a moving subtree by
@@ -1053,6 +1136,7 @@ mod tests {
             viewport_axes: [Vector2D::new(1.0, 0.0), Vector2D::new(0.0, 1.0)],
             request: None,
             anchor_shift: Vector2D::zero(),
+            reach: Vector2D::zero(),
         }
     }
 
@@ -1130,6 +1214,113 @@ mod tests {
         assert!(
             slot.recenter_due(Vector2D::new(290.0, 200.0)),
             "the bounded axis still recenters"
+        );
+    }
+
+    /// A 100×100 scrollport over 2100 px of content on y (max 2000),
+    /// nothing to scroll on x, standing at `offset_y` with `reach_y` posted:
+    /// at 500 its encode window on y is `400..=600`.
+    fn tall_slot(offset_y: f32, reach_y: f32) -> ScrollSlot {
+        ScrollSlot {
+            circular: ScrollAxes::NONE,
+            offset: Vector2D::new(0.0, offset_y),
+            max_offset: Vector2D::new(0.0, 2000.0),
+            reach: Vector2D::new(0.0, reach_y),
+            ..circular_y_slot()
+        }
+    }
+
+    #[test]
+    fn a_zero_reach_relevance_window_is_the_encode_window() {
+        let slot = tall_slot(500.0, 0.0);
+        assert_eq!(
+            slot.encode_window(),
+            (Vector2D::new(0.0, 400.0), Vector2D::new(0.0, 600.0))
+        );
+        assert_eq!(slot.relevance_window(), slot.encode_window());
+    }
+
+    #[test]
+    fn a_forward_reach_stretches_the_relevance_window_ahead_only() {
+        let slot = tall_slot(500.0, 150.0);
+        assert_eq!(
+            slot.relevance_window(),
+            (Vector2D::new(0.0, 400.0), Vector2D::new(0.0, 750.0))
+        );
+        assert_eq!(
+            slot.encode_window(),
+            (Vector2D::new(0.0, 400.0), Vector2D::new(0.0, 600.0)),
+            "the encode window is the offset's alone"
+        );
+    }
+
+    #[test]
+    fn a_backward_reach_stretches_the_relevance_window_behind_only() {
+        let slot = tall_slot(500.0, -150.0);
+        assert_eq!(
+            slot.relevance_window(),
+            (Vector2D::new(0.0, 250.0), Vector2D::new(0.0, 600.0))
+        );
+        assert_eq!(
+            tall_slot(500.0, -1000.0).relevance_window().0,
+            Vector2D::new(0.0, 100.0),
+            "capped at three scrollports behind"
+        );
+        assert_eq!(
+            tall_slot(150.0, -300.0).relevance_window().0,
+            Vector2D::zero(),
+            "and never before the start"
+        );
+    }
+
+    #[test]
+    fn the_relevance_reach_is_capped_at_three_scrollports() {
+        assert_eq!(
+            tall_slot(500.0, 1000.0).relevance_window(),
+            (Vector2D::new(0.0, 400.0), Vector2D::new(0.0, 900.0))
+        );
+    }
+
+    #[test]
+    fn the_relevance_window_never_passes_the_scroll_range() {
+        let slot = tall_slot(1700.0, 300.0);
+        assert_eq!(slot.encode_window().1, Vector2D::new(0.0, 1800.0));
+        assert_eq!(slot.relevance_window().1, Vector2D::new(0.0, 2000.0));
+    }
+
+    #[test]
+    fn a_pending_request_target_wins_over_the_reach() {
+        let slot = ScrollSlot {
+            request: Some(crate::scroll::ScrollRequest {
+                serial: std::num::NonZeroU64::MIN,
+                target: Vector2D::new(0.0, 300.0),
+                behavior: crate::scroll::ScrollBehavior::Instant,
+                yields_to_pointer: false,
+            }),
+            ..tall_slot(500.0, 150.0)
+        };
+        assert_eq!(
+            slot.relevance_window(),
+            (Vector2D::new(0.0, 200.0), Vector2D::new(0.0, 600.0)),
+            "the request goes back 200 px; the forward reach is not applied"
+        );
+    }
+
+    #[test]
+    fn a_circular_axis_relevance_window_ignores_the_reach() {
+        let slot = ScrollSlot {
+            reach: Vector2D::new(0.0, 150.0),
+            ..circular_y_slot()
+        };
+        assert_eq!(slot.relevance_window(), slot.encode_window());
+        let slot = ScrollSlot {
+            reach: Vector2D::new(50.0, 150.0),
+            ..circular_y_slot()
+        };
+        assert_eq!(
+            slot.relevance_window(),
+            (Vector2D::new(100.0, 0.0), Vector2D::new(350.0, 400.0)),
+            "the bounded x axis stretches, the circular y does not"
         );
     }
 

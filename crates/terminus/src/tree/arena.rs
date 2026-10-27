@@ -691,6 +691,13 @@ pub(crate) struct DocumentLayoutState {
     /// one, and bounded by the containers that were ever scrolled away from
     /// their block start.
     pub(crate) scroll_anchors: FxHashMap<NodeId, crate::scroll::anchoring::ScrollAnchor>,
+    /// Each scroll container's reach as the painter last posted it — how
+    /// much farther its fling or glide will carry it — keyed as
+    /// `scroll_offsets` is; see `Document::set_scroll_reach`. A side table
+    /// for the reason `scroll_offsets` is one, and emptier still: a zero
+    /// reach removes the entry, so it holds only the containers in motion,
+    /// and a settled page holds none.
+    pub(crate) scroll_reaches: FxHashMap<NodeId, euclid::default::Vector2D<f32>>,
     /// The serial the next scroll request takes: one counter per document,
     /// so serials order every request against every post that names one.
     pub(crate) next_scroll_request: NonZeroU64,
@@ -807,6 +814,7 @@ impl DocumentLayoutState {
             scroll_requests: FxHashMap::default(),
             scroll_offsets: FxHashMap::default(),
             scroll_anchors: FxHashMap::default(),
+            scroll_reaches: FxHashMap::default(),
             next_scroll_request: NonZeroU64::MIN,
             auto_scroll_requests: Vec::new(),
             instant_scrolls: SmallVec::new(),
@@ -920,6 +928,9 @@ impl DocumentLayoutState {
         if !self.scroll_anchors.is_empty() {
             self.scroll_anchors.remove(&slot);
         }
+        if !self.scroll_reaches.is_empty() {
+            self.scroll_reaches.remove(&slot);
+        }
         if !self.auto_scroll_requests.is_empty() {
             self.auto_scroll_requests.retain(|(node, _)| *node != slot);
         }
@@ -1032,6 +1043,7 @@ impl DocumentLayoutState {
             scroll_requests: _,
             scroll_offsets: _,
             scroll_anchors: _,
+            scroll_reaches: _,
             next_scroll_request: _,
             auto_scroll_requests: _,
             instant_scrolls: _,
@@ -1090,6 +1102,7 @@ impl DocumentLayoutState {
             scroll_requests: _,
             scroll_offsets: _,
             scroll_anchors: _,
+            scroll_reaches: _,
             next_scroll_request: _,
             auto_scroll_requests: _,
             instant_scrolls: _,
@@ -1202,6 +1215,9 @@ mod tests {
         layout
             .scroll_offsets
             .insert(freed, euclid::default::Vector2D::new(7.0, 0.0));
+        layout
+            .scroll_reaches
+            .insert(freed, euclid::default::Vector2D::new(0.0, 120.0));
         let node = arenas.remove_node(freed);
         layout.remove(freed);
         assert_eq!(
@@ -1227,6 +1243,7 @@ mod tests {
             layout.scroll_offsets.is_empty(),
             "a freed scroll container's offset leaves with it"
         );
+        assert!(layout.scroll_reaches.is_empty(), "and so does its reach");
     }
 
     /// Layout state is filed only for the keys something writes: a covered

@@ -340,6 +340,120 @@ fn rows_a_reveal_moves_into_the_window_are_revealed_too() {
     assert!(!page.doc.dom.needs_render(), "a settled frame owes nothing");
 }
 
+/// [`admitted_rows`] with the relevance region stretched by the reach the
+/// painter posted: `reach` capped at three scrollports, added to the window's
+/// `high` when positive and its `low` when negative, the stretched edge kept
+/// in the scroll range. Derived from the stretch's definition, so the
+/// implementation has to agree with it.
+fn admitted_rows_reaching(offset: f32, scrollport: f32, reach: f32) -> Vec<usize> {
+    let content = ROW_HEIGHT * ROWS as f32;
+    let max_offset = (content - scrollport).max(0.0);
+    let reach = reach.clamp(-3.0 * scrollport, 3.0 * scrollport);
+    let mut low = (offset - scrollport).max(0.0);
+    let mut high = (offset + scrollport).min(max_offset);
+    if reach > 0.0 {
+        high = (high + reach).min(max_offset);
+    } else {
+        low = (low + reach).max(0.0);
+    }
+    let (top, bottom) = (low, scrollport + high);
+    (0..ROWS)
+        .filter(|&row| {
+            let y = ROW_HEIGHT * row as f32;
+            y <= bottom && y + ROW_HEIGHT >= top
+        })
+        .collect()
+}
+
+/// css-contain-2 §4.1's implementation-defined margin, stretched toward
+/// where the painter's own motion is carrying the scroller: the commit after
+/// a reach is recorded reveals the rows past the encode window that the reach
+/// covers, three scrollports of it at most, and leaves the encode window — so
+/// what the frame composes — as it was. A zero reach puts the region back on
+/// the encode window, and the rows it alone admitted skip again.
+#[test]
+fn a_reach_reveals_rows_past_the_encode_window_up_to_three_scrollports() {
+    const SCROLLPORT: f32 = 40.0;
+    let mut page = Page::new(".scroller { height: 40px; }");
+    let scroller = page.scroller;
+    assert!(page.doc.dom.render());
+    let still = admitted_rows(0.0, SCROLLPORT);
+    assert_eq!(page.laid_out_rows(), still);
+
+    let commit_with_reach = |page: &mut Page, reach: f32| {
+        page.doc
+            .dom
+            .set_scroll_reach(scroller, Vector2D::new(0.0, reach));
+        assert_eq!(
+            page.doc.dom.scroll_reach(scroller),
+            Vector2D::new(0.0, reach)
+        );
+        // A recorded reach schedules nothing; the recentering commit a moving
+        // scroller asks for is the one that reads it.
+        assert!(
+            !page.doc.dom.needs_render(),
+            "recording a reach owes no frame"
+        );
+        page.doc.dom.note_scroll_windows_stale();
+        assert!(page.doc.dom.render());
+        page.laid_out_rows()
+    };
+
+    let reached = commit_with_reach(&mut page, 60.0);
+    assert_eq!(reached, admitted_rows_reaching(0.0, SCROLLPORT, 60.0));
+    assert!(
+        reached.len() > still.len(),
+        "the reach revealed rows past the encode window: {still:?} -> {reached:?}",
+    );
+    let frame = page.doc.dom.committed_frame().unwrap();
+    let slot = frame.scroll_slots()[frame.slot_of(scroller).unwrap() as usize];
+    assert_eq!(
+        slot.reach,
+        Vector2D::new(0.0, 60.0),
+        "the slot publishes it"
+    );
+    assert!(
+        !frame.covers_scroll_offset(scroller, Vector2D::new(0.0, 60.0)),
+        "the encode window is the offset's alone",
+    );
+
+    let capped = commit_with_reach(&mut page, 1000.0);
+    assert_eq!(capped, admitted_rows_reaching(0.0, SCROLLPORT, 1000.0));
+    assert!(
+        capped.last().is_some_and(|&last| last < ROWS - 1),
+        "a row past three scrollports of reach stays skipped: {capped:?}",
+    );
+
+    assert_eq!(commit_with_reach(&mut page, 0.0), still);
+    assert_eq!(
+        page.doc.dom.committed_frame().unwrap().scroll_slots()[0].reach,
+        Vector2D::zero()
+    );
+}
+
+/// A reach toward the start stretches the region's near edge only.
+#[test]
+fn a_backward_reach_reveals_rows_before_the_encode_window() {
+    const SCROLLPORT: f32 = 40.0;
+    let mut page = Page::new(".scroller { height: 40px; }");
+    let scroller = page.scroller;
+    assert!(page.doc.dom.render());
+    assert_eq!(page.scroll_to(240.0).y, 240.0);
+    assert!(page.doc.dom.render());
+    let still = admitted_rows(240.0, SCROLLPORT);
+    assert_eq!(page.laid_out_rows(), still);
+
+    page.doc
+        .dom
+        .set_scroll_reach(scroller, Vector2D::new(0.0, -80.0));
+    page.doc.dom.note_scroll_windows_stale();
+    assert!(page.doc.dom.render());
+    let reached = page.laid_out_rows();
+    assert_eq!(reached, admitted_rows_reaching(240.0, SCROLLPORT, -80.0));
+    assert!(reached.first() < still.first(), "{still:?} -> {reached:?}");
+    assert_eq!(reached.last(), still.last(), "nothing ahead moved");
+}
+
 #[test]
 fn an_auto_box_outside_every_scroller_follows_the_viewport() {
     let mut doc = Doc::with_device(device(200.0, VIEWPORT_HEIGHT));

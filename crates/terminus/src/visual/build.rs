@@ -556,6 +556,12 @@ impl<'doc, T: Sync> Builder<'doc, T> {
                 Vector2D::zero,
                 crate::scroll::anchoring::ScrollAnchor::shift,
             ),
+            reach: self
+                .state
+                .scroll_reaches
+                .get(&slot)
+                .copied()
+                .unwrap_or_default(),
         });
         Some(
             u32::try_from(self.slots.len() - 1)
