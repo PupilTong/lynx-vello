@@ -1806,15 +1806,12 @@ type ListCallback = ((...args: unknown[]) => unknown) | null | undefined;
 /**
  * A list's element children right now, by node id.
  *
- * Read fresh at every step of the two loops in [`updateListInfo`] and never
- * cached, because both mutate the tree as they go and web-core reads
- * `element.children` — a *live* `HTMLCollection` — the same way. It matters
- * twice over: `removeAction` positions are indices into the pre-removal
- * child list, which is why the i-th removal looks at `position - i`; and
- * `componentAtIndex` appends the cell it built (ReactLynx's
- * `snapshot/list/list.ts:202`, `__AppendElement(list, root)`) before it
- * answers, so a snapshot taken before an insertion step is already stale by
- * the time the step needs it.
+ * web-core reads `element.children`, a *live* `HTMLCollection`, at every
+ * step of the two loops in [`updateListInfo`]. Here one read is a host call
+ * that joins every child's id and a split that parses them back, so reading
+ * it per step made a batch of N insertions cost O(N²). A batch therefore
+ * reads it once and keeps that array in step with the tree itself — see
+ * [`updateListInfo`] for the two edits it has to account for.
  */
 function listChildren(listNodeId: number): number[] {
   const record = childElementIds(listNodeId);
@@ -1889,6 +1886,20 @@ function listChildHandle(nodeId: number, what: string): Handle {
  * `updateAction` is ignored: web-core's accepted payload type has only
  * `insertAction` and `removeAction`, and what an update carries is the
  * platform info of a cell that stayed where it was.
+ *
+ * The list's children are read once per batch ([`listChildren`]) and kept
+ * up to date here rather than read at every step, which keeps a batch
+ * linear in the list's length:
+ *
+ * - `removeAction` holds ascending indices into the pre-removal list, so
+ *   the i-th removal's `position - i` in the list as it then stands is
+ *   `position` in the list the batch started with.
+ * - `componentAtIndex` appends the cell it built before it answers
+ *   (ReactLynx's `snapshot/list/list.ts:202`, `__AppendElement(list, root)`);
+ *   a reused cell comes back detached. So a sign whose parent is now the
+ *   list, and which the array does not hold, is the list's last child. A
+ *   sign the array already holds was moved by the card itself, and the
+ *   batch reads the list again.
  */
 function updateListInfo(list: unknown, operations: unknown): undefined {
   const handle = list as Handle;
@@ -1904,26 +1915,32 @@ function updateListInfo(list: unknown, operations: unknown): undefined {
     const callbacks = handle[listCallbacksSymbol];
     const componentAtIndex = callbacks?.componentAtIndex as ListCallback;
     const enqueueComponent = callbacks?.enqueueComponent as ListCallback;
-    if (Array.isArray(removeAction)) {
-      // Ascending old indices, so the i-th removal has shifted i places.
-      removeAction.forEach((position: unknown, removed: number) => {
-        const childNodeId =
-          listChildren(listNodeId)[Number(position) - removed];
-        if (childNodeId === undefined) {
-          return;
+    const removals: unknown[] = Array.isArray(removeAction) ? removeAction : [];
+    const insertions: unknown[] = Array.isArray(insertAction) ? insertAction : [];
+    if (removals.length === 0 && insertions.length === 0) {
+      return;
+    }
+    let children = listChildren(listNodeId);
+    if (removals.length > 0) {
+      const removed = new Set<number>();
+      for (const position of removals) {
+        const childNodeId = children[Number(position)];
+        if (childNodeId === undefined || removed.has(childNodeId)) {
+          continue;
         }
         const child = listChildHandle(childNodeId, "the list holds child");
         enqueueComponent?.(handle, listNodeId, childNodeId);
         removeElement(childNodeId);
         disown(child);
-      });
+        removed.add(childNodeId);
+      }
+      children = children.filter((childNodeId) => !removed.has(childNodeId));
     }
-    if (!Array.isArray(insertAction)) {
-      return;
-    }
+    // The ids `children` holds, for the membership tests below.
+    let held = new Set(children);
     // Ascending positions, so each one is an index into the list as the
     // insertions before it have already left it.
-    for (const action of insertAction) {
+    for (const action of insertions) {
       const position = Number((action as { position?: unknown })?.position);
       const sign = componentAtIndex?.(
         handle,
@@ -1939,7 +1956,14 @@ function updateListInfo(list: unknown, operations: unknown): undefined {
         continue;
       }
       const child = listChildHandle(sign, "componentAtIndex answered");
-      const reference = listChildren(listNodeId)[position];
+      if (held.has(sign)) {
+        children = listChildren(listNodeId);
+        held = new Set(children);
+      } else if (parentNode(sign) === listNodeId) {
+        children.push(sign);
+        held.add(sign);
+      }
+      const reference = children[position];
       // `componentAtIndex` appended the cell, so it may already *be* the
       // child at that index — for an append-only batch it always is, and
       // moving it would be a host call that changed nothing.
@@ -1948,6 +1972,18 @@ function updateListInfo(list: unknown, operations: unknown): undefined {
       }
       insertBefore(listNodeId, sign, reference ?? null);
       adopt(handle, child);
+      // Where the cell was: last when `componentAtIndex` appended it, which
+      // the search from the end finds at once.
+      const from = held.has(sign) ? children.lastIndexOf(sign) : -1;
+      if (from !== -1) {
+        children.splice(from, 1);
+      }
+      if (reference === undefined) {
+        children.push(sign);
+      } else {
+        children.splice(from !== -1 && from < position ? position - 1 : position, 0, sign);
+      }
+      held.add(sign);
     }
   });
   return undefined;

@@ -1961,8 +1961,10 @@ operations are therefore the ones that serve it — every `insertAction`
 position is built by `componentAtIndex` and inserted at that index unless it
 is already there, and every `removeAction` child is handed to
 `enqueueComponent` and removed, the i-th removal taking the child at
-`position - i`. `updateAction` is ignored and `componentAtIndexes` is filed
-and never called, as in web-core. Cell *recycling* — a pool, a window,
+`position - i`. Where web-core reads the live `children` at every step, a
+batch here reads the list's children once and keeps that copy in step with its
+own edits, so a batch is linear in the list's length. `updateAction` is ignored
+and `componentAtIndexes` is filed and never called, as in web-core. Cell *recycling* — a pool, a window,
 `enableReuseNotification` — remains part of the unimplemented list surface.
 
 An element handle is an `EventTarget`, and the registration half lives in

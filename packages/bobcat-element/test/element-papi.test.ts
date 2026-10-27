@@ -4975,6 +4975,65 @@ describe("update-list-info", () => {
     ]);
   });
 
+  it("reads the list's children once per batch, not once per step", async () => {
+    const { list, cells, componentAtIndex, enqueueComponent } = listFixture(4);
+    __AppendElement(list, cells[3]!);
+    mock.calls.length = 0;
+    __SetAttribute(list, "update-list-info", {
+      insertAction: [{ position: 0 }, { position: 1 }, { position: 2 }],
+      removeAction: [0],
+    });
+    __UpdateListCallbacks(list, componentAtIndex, enqueueComponent, null);
+    await drain();
+
+    expect(mock.named("childElementIds")).toHaveLength(1);
+    expect(childIds(list)).toEqual(cells.slice(0, 3).map(__GetElementUniqueID));
+  });
+
+  it("puts a reused cell, which comes back detached, at its position", async () => {
+    const { list, cells, enqueueComponent } = listFixture(3);
+    __AppendElement(list, cells[0]!);
+    __AppendElement(list, cells[2]!);
+    // ReactLynx's reuse path answers a cell from its pool without appending
+    // it; the protocol's own removal left that cell detached.
+    const componentAtIndex = () => __GetElementUniqueID(cells[1]!);
+    __SetAttribute(list, "update-list-info", {
+      insertAction: [{ position: 1 }],
+      removeAction: [],
+    });
+    __UpdateListCallbacks(list, componentAtIndex, enqueueComponent, null);
+    await drain();
+
+    expect(childIds(list)).toEqual(cells.map(__GetElementUniqueID));
+  });
+
+  it("reads the list again when componentAtIndex moves a cell it holds", async () => {
+    const { list, cells, enqueueComponent } = listFixture(3);
+    for (const cell of cells) {
+      __AppendElement(list, cell);
+    }
+    // Not ReactLynx's behaviour: this card moves the first cell to the end
+    // and answers it, so the array the batch keeps would be wrong.
+    const componentAtIndex = () => {
+      __AppendElement(list, cells[0]!);
+      return __GetElementUniqueID(cells[0]!);
+    };
+    mock.calls.length = 0;
+    __SetAttribute(list, "update-list-info", {
+      insertAction: [{ position: 1 }, { position: 2 }],
+      removeAction: [],
+    });
+    __UpdateListCallbacks(list, componentAtIndex, enqueueComponent, null);
+    await drain();
+
+    // Step 1: [1, 2, 0] → the cell goes before 2 → [1, 0, 2]. Step 2:
+    // [1, 2, 0] again → it is already at index 2.
+    expect(mock.named("childElementIds")).toHaveLength(3);
+    expect(childIds(list)).toEqual(
+      [cells[1]!, cells[2]!, cells[0]!].map(__GetElementUniqueID),
+    );
+  });
+
   it("shifts each removal by the removals before it", async () => {
     const { list, cells, calls, componentAtIndex, enqueueComponent } =
       listFixture(5);
