@@ -19,6 +19,7 @@ use std::num::NonZeroUsize;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use terminus::link::clock::alignment_channel;
 /// View metrics, copied across the view's one thread boundary: the
 /// presenting painter's own.
 pub(crate) use terminus::link::painter::Viewport;
@@ -28,7 +29,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::background::{WorkerHome, WorkerKey};
-use crate::clock::ClockInstant;
+use crate::clock::{ALIGNMENT_PATIENCE, ClockInstant};
 use crate::link::{Published, ScrollMailbox, SourceAnswer, ToMain, ViewNotice, ViewSeat};
 #[cfg(target_arch = "wasm32")]
 pub use crate::main::configure_wasm_workers;
@@ -664,7 +665,8 @@ impl fmt::Debug for LynxGroup {
 
 impl LynxGroup {
     /// Starts this group's two threads — `bobcat-main` and `bobcat-workers` —
-    /// and waits until the style pool `bobcat-main` shares out is up.
+    /// and waits until each has aligned its clock to this thread's
+    /// and the style pool `bobcat-main` shares out is up.
     ///
     /// All of it is ready before views attach. A thread or a style worker that
     /// cannot start fails the group here, rather than whichever view or
@@ -676,28 +678,32 @@ impl LynxGroup {
     ///
     /// # Errors
     ///
-    /// [`LynxViewError::Engine`] if `bobcat-main`, `bobcat-workers` or a style
-    /// worker will not start — asking for more workers than Stylo indexes is
-    /// one such refusal.
+    /// [`LynxViewError::Engine`] if `bobcat-main`, `bobcat-workers`, a style
+    /// worker or, on wasm32, the process's alarm thread will not start —
+    /// asking for more workers than Stylo indexes is one such refusal.
     pub async fn new<R: EventRequester>(
         event_requester: Arc<R>,
         style_threads: StyleThreads,
     ) -> Result<Self, LynxViewError> {
-        // The thread every engine thread's timers wait on, started here on the
-        // embedder's thread and before the group's own (`crate::alarm`):
-        // natively tokio's timer is each engine thread's own and there is
-        // nothing to start.
+        // On wasm32 the process's alarm thread, which serves every engine
+        // thread's timers there (`crate::alarm`), is started by the first
+        // group, here on the embedder's thread rather than by `bobcat-main`:
+        // a Worker does not start until the thread that created it returns to
+        // its event loop, which this thread does at its first await and
+        // `bobcat-main`, parked in its scheduler, never does.
         #[cfg(target_arch = "wasm32")]
-        crate::alarm::start()?;
+        let alarm_clock = crate::alarm::start()?;
         // The group's second runtime, started here beside `bobcat-main`
         // rather than by it: `bobcat-main` is handed one sender on it and its
         // trap flag, and nothing else. First, because a `bobcat-main` that
         // will not spawn leaves this local to end the worker thread — its
         // sender drops before its own `ThreadJoin` — rather than a thread
         // parked on a channel nobody holds.
-        let workers = WorkerHome::start()?;
+        let (workers_clock, workers_clock_end) = alignment_channel();
+        let workers = WorkerHome::start(workers_clock_end)?;
         let (attach, attachments) = mpsc::unbounded_channel();
         let (ready, started) = oneshot::channel();
+        let (main_clock, main_clock_end) = alignment_channel();
         let home = spawn_group(
             style_threads,
             GroupLink {
@@ -706,6 +712,7 @@ impl LynxGroup {
                 ready,
                 workers: workers.commands(),
                 workers_trapped: workers.trapped(),
+                clock: main_clock_end,
             },
         )?;
         // Into the handle before the first await, so every exit path from
@@ -717,6 +724,18 @@ impl LynxGroup {
                 workers,
             }),
         };
+        // Each thread's first statement waits for this one to answer its
+        // clock alignment ([`crate::clock`]): without blocking until it runs,
+        // since a Worker does not start until its creator returns to its event
+        // loop, then blocking for one round trip. `bobcat-main` cannot report
+        // startup before its answer, so the order is the one it would wait in
+        // anyway. A thread whose alignment fails runs on its own clock.
+        #[cfg(target_arch = "wasm32")]
+        if let Some(answer) = alarm_clock {
+            answer.await;
+        }
+        workers_clock.answer(ALIGNMENT_PATIENCE).await;
+        main_clock.answer(ALIGNMENT_PATIENCE).await;
         match started.await {
             Ok(Ok(())) => Ok(group),
             Ok(Err(error)) => Err(error.into()),

@@ -208,7 +208,7 @@ impl Pair {
             Some(source) => {
                 WorkerHome::with_entry_for_test((source.to_owned(), "test:bts-entry".to_owned()))
             }
-            None => WorkerHome::start().unwrap(),
+            None => WorkerHome::start_aligned_for_test().0,
         };
         let (outbox, view) = detached_outbox(Arc::new(NoWakeup));
         let cancel = view.token.clone();

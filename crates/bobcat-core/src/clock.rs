@@ -2,10 +2,18 @@
 //! wait out a deadline on it; and the wall clock a view reads once, at its
 //! construction, to place that monotonic clock on the Unix timeline
 //! ([`crate::performance::TimeOrigin`]).
+//!
+//! The monotonic clock is `terminus`'s
+//! ([`terminus::link::clock::ClockInstant`]), so an instant `terminus` takes
+//! — a commit's timing marks, a presented frame's — and one this crate takes
+//! are the same type and subtract. On wasm32 each engine thread is aligned to
+//! the thread that spawned it as its first statement, so every engine
+//! thread reads the embedder thread's clock: `bobcat-main` and
+//! `bobcat-workers` by [`crate::LynxGroup::new`], the alarm thread by
+//! whichever engine thread starts it ([`crate::alarm`]).
 
 use std::future::Future;
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) use std::time::Instant as ClockInstant;
+use std::time::Duration;
 /// The wall clock: read once per view, beside a [`ClockInstant`], and the
 /// type the embedder's [`crate::performance::ExtraTiming`] marks arrive in.
 /// `std::time::SystemTime` panics on `wasm32-unknown-unknown` like `Instant`
@@ -13,10 +21,14 @@ pub(crate) use std::time::Instant as ClockInstant;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use std::time::SystemTime;
 
-#[cfg(target_arch = "wasm32")]
-pub(crate) use web_time::Instant as ClockInstant;
+pub(crate) use terminus::link::clock::ClockInstant;
 #[cfg(target_arch = "wasm32")]
 pub(crate) use web_time::SystemTime;
+
+/// How long a spawner waits for a thread it spawned to align its clock
+/// before letting it run on its own. Only reached by a thread that does not
+/// start: the exchange itself is one round trip between two threads.
+pub(crate) const ALIGNMENT_PATIENCE: Duration = Duration::from_secs(2);
 
 /// Resolves once `deadline` has passed.
 ///
@@ -27,7 +39,7 @@ pub(crate) use web_time::SystemTime;
 /// heap of deadlines and the wakers waiting on them.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn sleep_until(deadline: ClockInstant) -> impl Future<Output = ()> {
-    tokio::time::sleep_until(tokio::time::Instant::from_std(deadline))
+    tokio::time::sleep_until(tokio::time::Instant::from_std(deadline.into_std()))
 }
 
 #[cfg(target_arch = "wasm32")]
