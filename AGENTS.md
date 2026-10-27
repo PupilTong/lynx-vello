@@ -293,10 +293,12 @@ the sanitized error a failure is reported with, `style.rs` the
 `performance/` the public `performance` module — the Lynx-shaped
 `PerformanceEntry` types, the per-view `PipelineRegistry` every thread of a
 view writes its marks into, the host members both realm kinds' `lynx.performance`
-is written over, and the two job monitors in `monitors.rs` (the long task
+is written over, the two job monitors in `monitors.rs` (the long task
 monitor `run_job` times every job for, and the JS blocking monitor over the
-enqueue instants `WorkerMessage`s carry; both off unless the embedder turns
-them on, and both reported to it alone); see
+enqueue instants `WorkerMessage`s carry), and the memory monitor in
+`memory.rs` (each script runtime and the document's element arena read by
+its own thread on the monitor's interval); all three off unless the
+embedder turns them on, and reported to it alone; see
 `docs/performance-observation-design.md`, and `main/runtime/pipelines.rs` for
 the main-thread flush binding — and
 `threads.rs` the two engine threads.

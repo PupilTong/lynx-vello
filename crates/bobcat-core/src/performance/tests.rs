@@ -670,3 +670,193 @@ fn a_js_blocking_entry_writes_lynx_s_keys_and_types() {
     assert!(value["blocking_ratio"].is_null());
     assert!(value.get("time_after_load_bundle").is_none());
 }
+
+fn memory(threshold: u64) -> MemoryConfig {
+    MemoryConfig {
+        change_threshold: threshold,
+        ..MemoryConfig::default()
+    }
+}
+
+fn reading(category: MemoryCategory, size_bytes: u64) -> MemoryItem {
+    MemoryItem {
+        category,
+        size_bytes,
+        instance_count: 1,
+        detail: vec![(Arc::from("key"), Arc::from(size_bytes.to_string()))],
+    }
+}
+
+fn memory_entries(registry: &PipelineRegistry) -> Vec<MemoryEntry> {
+    registry
+        .take_completed_for_rust()
+        .into_iter()
+        .filter_map(|entry| match entry {
+            PerformanceEntry::Memory(memory) => Some(memory),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn the_memory_monitor_is_off_by_default_and_reads_nothing() {
+    assert!(EntryTypes::ALL.contains(EntryTypes::MEMORY));
+    let config = MemoryConfig::default();
+    assert_eq!(config.report_interval, Duration::from_mins(20));
+    assert_eq!(config.acquisition_delay, Duration::from_secs(2));
+    assert_eq!(config.change_threshold, 0);
+    let registry = PipelineRegistry::detached();
+    registry.observe_rust(EntryTypes::ALL);
+    assert!(!registry.note_memory(reading(MemoryCategory::LynxTasmElement, 10)));
+    let epoch = registry.set_memory_monitor(Some(memory(0))).expect("on");
+    assert!(registry.memory_is_current(epoch));
+    // Another monitor's setter leaves the memory monitor's epoch current.
+    registry.set_long_task_threshold(None);
+    assert!(registry.memory_is_current(epoch));
+    assert_eq!(registry.set_memory_monitor(None), None);
+    assert!(!registry.memory_is_current(epoch));
+    assert!(!registry.note_memory(reading(MemoryCategory::LynxTasmElement, 10)));
+    assert!(memory_entries(&registry).is_empty());
+    assert_eq!(registry.generation(), 0);
+}
+
+#[test]
+fn memory_reports_follow_lynx_s_change_rule() {
+    let registry = PipelineRegistry::detached();
+    registry.observe_rust(EntryTypes::MEMORY);
+    // A zero threshold reports every reading that changes a category.
+    registry.set_memory_monitor(Some(memory(0)));
+    assert!(registry.note_memory(reading(MemoryCategory::MainThreadScriptingEngine, 100)));
+    assert!(registry.note_memory(reading(MemoryCategory::LynxTasmElement, 20)));
+    assert!(registry.note_memory(reading(MemoryCategory::MainThreadScriptingEngine, 101)));
+    // Lynx's `UpdateMemoryUsage`: a category whose size did not change is
+    // not a report, and its reading is not replaced.
+    let mut same = reading(MemoryCategory::LynxTasmElement, 20);
+    same.detail = Vec::new();
+    assert!(!registry.note_memory(same));
+    let entries = memory_entries(&registry);
+    let totals: Vec<u64> = entries.iter().map(|entry| entry.size_bytes).collect();
+    assert_eq!(totals, [100, 120, 121]);
+    let last = entries.last().expect("three reports");
+    let categories: Vec<MemoryCategory> = last.items.iter().map(|item| item.category).collect();
+    assert_eq!(
+        categories,
+        [
+            MemoryCategory::MainThreadScriptingEngine,
+            MemoryCategory::LynxTasmElement
+        ]
+    );
+    let elements = last.item(MemoryCategory::LynxTasmElement).expect("read");
+    assert_eq!(
+        elements.detail.len(),
+        1,
+        "the unchanged reading was dropped"
+    );
+
+    // A threshold: the first reading after turning the monitor on is
+    // reported whatever it changed, and starts afresh.
+    registry.set_memory_monitor(Some(memory(1_000)));
+    assert!(registry.note_memory(reading(MemoryCategory::MainThreadScriptingEngine, 10)));
+    // Kept, not reported: the total moved by less than the threshold.
+    assert!(!registry.note_memory(reading(MemoryCategory::LynxTasmElement, 900)));
+    // This one takes the total 1 000 past the last report's.
+    assert!(registry.note_memory(reading(
+        MemoryCategory::BackgroundThreadScriptingEngine,
+        100
+    )));
+    // A drop counts as much as a rise, measured from the last report.
+    assert!(!registry.note_memory(reading(MemoryCategory::LynxTasmElement, 0)));
+    assert!(registry.note_memory(reading(MemoryCategory::BackgroundThreadScriptingEngine, 0)));
+    let entries = memory_entries(&registry);
+    let totals: Vec<u64> = entries.iter().map(|entry| entry.size_bytes).collect();
+    assert_eq!(totals, [10, 1_010, 10]);
+    assert_eq!(entries[0].items.len(), 1, "the readings started afresh");
+    assert_eq!(entries[1].items.len(), 3, "every category's latest reading");
+}
+
+#[test]
+fn a_memory_entry_writes_lynx_s_nested_maps_and_a_mark_stays_one_member() {
+    let origin = TimeOrigin::now();
+    let entry = PerformanceEntry::Memory(MemoryEntry {
+        size_bytes: 4_736,
+        items: vec![
+            MemoryItem {
+                category: MemoryCategory::MainThreadScriptingEngine,
+                size_bytes: 4_096,
+                instance_count: 1,
+                detail: vec![
+                    (Arc::from("obj_count"), Arc::from("12")),
+                    (Arc::from("sharedRuntime"), Arc::from("thread")),
+                ],
+            },
+            MemoryItem {
+                category: MemoryCategory::LynxTasmElement,
+                size_bytes: 640,
+                instance_count: 2,
+                detail: vec![
+                    (Arc::from("elementCount"), Arc::from("2")),
+                    (Arc::from("singleElementSizeBytes"), Arc::from("320")),
+                ],
+            },
+        ],
+    });
+    assert_eq!((entry.entry_type(), entry.name()), ("memory", "memory"));
+    assert!(entry.pipeline().is_none());
+    let mut json = String::new();
+    entry.write_lynx_json(&origin, &mut json);
+    let value: serde_json::Value = serde_json::from_str(&json).expect("the entry is JSON");
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "entryType": "memory",
+            "name": "memory",
+            "detail": {
+                "mainThreadScriptingEngine": {
+                    "category": "mainThreadScriptingEngine",
+                    "sizeBytes": 4_096,
+                    "instanceCount": 1,
+                    "detail": { "obj_count": "12", "sharedRuntime": "thread" },
+                },
+                "lynxTasmElement": {
+                    "category": "lynxTasmElement",
+                    "sizeBytes": 640,
+                    "instanceCount": 2,
+                    "detail": { "elementCount": "2", "singleElementSizeBytes": "320" },
+                },
+            },
+            "sizeBytes": 4_736,
+        })
+    );
+    // `detail` comes before the total, as `ReportMemory` pushes it.
+    assert!(json.find("\"detail\"") < json.find(",\"sizeBytes\":4736}"));
+
+    // A framework mark's own `.` and `\` nest nothing in the JSON, and the
+    // BTS's record carries the mark's name as it was.
+    let mut timing = pipeline(&origin);
+    timing.framework_rendering_timing.marks = vec![
+        (Arc::from("a.b"), at(&origin, 1)),
+        (Arc::from("c\\d"), at(&origin, 2)),
+    ];
+    let entry = PerformanceEntry::Pipeline(Box::new(timing));
+    let mut json = String::new();
+    entry.write_lynx_json(&origin, &mut json);
+    let value: serde_json::Value = serde_json::from_str(&json).expect("the entry is JSON");
+    assert!(
+        value["frameworkRenderingTiming"]["a.b"].is_number(),
+        "{value}"
+    );
+    assert!(
+        value["frameworkRenderingTiming"]["c\\d"].is_number(),
+        "{value}"
+    );
+    assert!(value["frameworkRenderingTiming"].get("a").is_none());
+    let record = encode_entries(&[entry], &origin);
+    assert!(
+        record.contains("28:frameworkRenderingTiming.a.b"),
+        "{record}"
+    );
+    assert!(
+        record.contains("28:frameworkRenderingTiming.c\\d"),
+        "{record}"
+    );
+}

@@ -2112,6 +2112,10 @@ void qjs_runtime_run_gc(QjsRuntime *runtime) {
     JS_RunGC(runtime->raw);
 }
 
+void qjs_runtime_compute_memory_usage(QjsRuntime *runtime, JSMemoryUsage *usage) {
+    JS_ComputeMemoryUsage(runtime->raw, usage);
+}
+
 void qjs_runtime_set_memory_limit(QjsRuntime *runtime, size_t limit) {
     JS_SetMemoryLimit(runtime->raw, limit);
 }

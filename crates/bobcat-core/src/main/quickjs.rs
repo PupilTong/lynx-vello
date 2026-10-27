@@ -170,6 +170,13 @@ impl ScriptRuntime {
             .send_modify(|generation| *generation = generation.wrapping_add(1));
     }
 
+    /// What the runtime's heap holds now, for the memory monitor: a walk of
+    /// the whole heap — every realm on the thread — that runs no
+    /// JavaScript. Called only by a memory sample.
+    pub(crate) fn memory_usage(&self) -> quickjs::MemoryUsage {
+        self.runtime.memory_usage()
+    }
+
     /// Opens one realm on this runtime. Every view in a group gets its own.
     pub(crate) fn create_realm(&self) -> Result<ScriptEngine, ScriptError> {
         let realm = self
