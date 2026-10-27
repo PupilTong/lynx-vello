@@ -223,9 +223,13 @@ driven! {
     ],
     // Upstream scrolls the list to offset 5000, past its end, and reads the last
     // cell's computed height before and after. Here the wheel is turned that far
-    // over the list, twice: the first turn stops where the extent ended while the
-    // last cell was still its 100px estimate, the second reaches the end once the
-    // cell has its real 200px.
+    // over the list, twice. Cells are built lazily (user ruling 2026-10-27), so a
+    // cell not built yet is a placeholder sized by its estimate alone, and the
+    // first fourteen, whose 300px is their own `height` and who carry no
+    // estimate, stand at `100cqh` (500px): the first turn stops mid-list, among
+    // the cells it revealed. The second reaches the end while the last cell is
+    // still its 100px estimate; once built it grows to 200px below the anchored
+    // rows, 100px of it in view.
     "basic-element-list-estimated-main-axis-size-px" => [
         "reached": [Wheel((196.5, 250.0), (0.0, 5000.0))],
         "measured": [Wheel((196.5, 250.0), (0.0, 5000.0))],

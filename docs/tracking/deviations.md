@@ -2102,6 +2102,13 @@ consequential choice about whether to follow the spec or the quirk.
     placeholders for cells not built yet: a plain `list-item` with the
     platform-info attributes and no content, id or class of the card's own.
     `scrollToPosition` by index or `item-key` still finds the right child.
+  - A placeholder is sized by the estimate alone: its `item-key`'s cell's own
+    CSS is not on the tree until `componentAtIndex` builds it, so a cell that
+    sizes itself (a `height` on the `list-item`) and carries no
+    `estimated-main-axis-size-px` stands at `100cqh` until built, where
+    web-core, whose cell exists, uses its own height even while skipped
+    (accepted by the user, 2026-10-27; the
+    `basic-element-list-estimated-main-axis-size-px` frames show it).
   - A removed placeholder is not handed to `enqueueComponent`, since no cell
     was built for it; ReactLynx's `enqueueComponent` returns early for a sign
     it never issued anyway.
