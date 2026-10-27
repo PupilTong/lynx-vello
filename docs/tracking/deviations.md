@@ -1988,6 +1988,22 @@ consequential choice about whether to follow the spec or the quirk.
   virtualized cell keeps its element and skips its contents, which is
   web-core's model too (`components.md` row 23). `initial-scroll-index` is
   built (2026-10-21, next entry).
+- **Scroll anchoring is css-scroll-anchoring-1, not native `list`'s anchor
+  manager (2026-10-27).** Ruled: web-core's model, which gets anchoring from
+  the browser's default `overflow-anchor: auto`
+  (`crates/terminus/src/scroll/anchoring.rs`).
+  - Every scroll container anchors, `scroll-view` included, and `overflow-anchor: none` opts one
+    out (stylo fork, `lynx_properties.txt`).
+  - The anchor is the deepest box the scrollport shows first in tree order, as in Blink.
+  - Nothing is anchored at block offset 0, and only the block axis moves.
+  - Containers that snap on the block axis, and containers with a pending programmatic scroll,
+    are left to re-snapping and to the request.
+  - Native's list-only anchor manager (`core/renderer/ui_component/list/list_anchor_manager.cc`)
+    differs: it anchors whole items, also at offset 0, never anchors a `scroll-view`, and honours
+    `anchor-priority`, `anchor-align` and `anchor-visibility`, which neither web-core nor this
+    engine reads.
+  - Not built: §2.2's `scroll` event for an adjustment, and the suppression trigger for a box in
+    the container toggling absolute positioning.
 - **`scroll-view`'s `initial-scroll-to-index` and `list`'s
   `initial-scroll-index` (2026-10-21).** The `viewpager` recipe
   ([style-assumptions.md](../style-assumptions.md) §27) picks the target:

@@ -270,6 +270,12 @@ pub struct ScrollEntry {
     /// pending request, which it was made before the painter saw, and
     /// acknowledges the request with one that names it.
     pub request: Option<NonZeroU64>,
+    /// The scroll anchoring shift the painter had applied to the container
+    /// when it posted ([`crate::visual::ScrollSlot::anchor_shift`]). The
+    /// document adds whatever of its own shift this lacks
+    /// ([`crate::tree::document::Document::scroll_anchor_shift`]): the post was made
+    /// before the painter saw that part.
+    pub anchor_shift: Vector2D<f32>,
 }
 
 /// The painter's monotonic animation timeline. Its epoch is the start of
@@ -814,6 +820,10 @@ pub struct ScrollIntents {
     /// rebase to the containers the adopted frame still has a slot for, so
     /// it is bounded by the live containers that ever received a request.
     handled: FxHashMap<NodeId, NonZeroU64>,
+    /// The scroll anchoring shift applied per container
+    /// ([`crate::visual::ScrollSlot::anchor_shift`]), which every post for it
+    /// names. Pruned by every rebase as `handled` is.
+    anchor_shifts: FxHashMap<NodeId, Vector2D<f32>>,
     /// The drags in progress, for their release velocity; see [`inertia`].
     drags: FxHashMap<PointerId, DragTrack>,
     /// The containers a wheel step moved, each with the clock reading of
@@ -851,6 +861,7 @@ impl ScrollIntents {
             glides: SmallVec::new(),
             auto_scrolls: Vec::new(),
             handled: FxHashMap::default(),
+            anchor_shifts: FxHashMap::default(),
             drags: FxHashMap::default(),
             wheel_steps: SmallVec::new(),
             changed: SmallVec::new(),
@@ -903,8 +914,30 @@ impl ScrollIntents {
             return;
         }
         self.rebased_commit = Some(frame.commit_id());
-        let changed = &mut self.changed;
+        // css-scroll-anchoring-1 first: the document moved its offset by the
+        // part of the shift this painter has not applied, so the live offset
+        // moves by the same distance before it is re-clamped below, and what
+        // refers to it moves along. A container this painter meets for the
+        // first time took its offset from a frame that already held its
+        // shift.
         let mut shifts: SmallVec<[(NodeId, Vector2D<f32>); 2]> = SmallVec::new();
+        for slot in frame.scroll_slots() {
+            let applied = self
+                .anchor_shifts
+                .entry(slot.node)
+                .or_insert(slot.anchor_shift);
+            let shift = slot.anchor_shift - *applied;
+            *applied = slot.anchor_shift;
+            if shift != Vector2D::zero()
+                && let Some(offset) = self.offsets.get_mut(&slot.node)
+            {
+                *offset += shift;
+                shifts.push((slot.node, shift));
+            }
+        }
+        self.anchor_shifts
+            .retain(|node, _| frame.slot_of(*node).is_some());
+        let changed = &mut self.changed;
         self.offsets.retain(|node, offset| {
             let Some(slot) = frame.slot_of(*node) else {
                 return false;
@@ -1391,6 +1424,11 @@ impl ScrollIntents {
                         at,
                         rest: (!moving).then_some(offset),
                         request: self.handled.get(&node).copied(),
+                        anchor_shift: self
+                            .anchor_shifts
+                            .get(&node)
+                            .copied()
+                            .unwrap_or(slot.anchor_shift),
                     },
                 ));
             }

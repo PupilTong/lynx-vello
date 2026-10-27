@@ -106,6 +106,9 @@ impl<T: Sync> Document<T> {
     /// tick can precede, so that one is spelled the way
     /// `Document::mark_subtree_recascade` spells it.
     pub fn layout(&mut self) {
+        // css-scroll-anchoring-1 around the whole call: the anchors are read
+        // from the layout this one replaces (`scroll::anchoring`).
+        let anchors = self.select_scroll_anchors();
         let mut resized = Vec::new();
         for pass in 0..committed_box::CONTAINER_PASSES {
             self.layout_pass(&mut resized);
@@ -117,6 +120,9 @@ impl<T: Sync> Document<T> {
             if !timelines && !containers {
                 break;
             }
+        }
+        if !anchors.is_empty() {
+            self.adjust_scroll_anchors(anchors);
         }
         // The focused host's selection follows the layout it was placed in
         // (`editing`): re-snapped, or rebuilt from the offsets an edit left.

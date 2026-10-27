@@ -89,6 +89,12 @@ pub struct ScrollSlot {
     /// acknowledges it, and handled by the painter once per serial
     /// ([`Document::scroll_to_with`](crate::tree::document::Document::scroll_to_with)).
     pub request: Option<ScrollRequest>,
+    /// The sum of every adjustment css-scroll-anchoring-1 has made to the
+    /// container's offset ([`Document::scroll_anchor_shift`]). The painter
+    /// moves its own offset by the part of it it has not applied yet.
+    ///
+    /// [`Document::scroll_anchor_shift`]: crate::tree::document::Document::scroll_anchor_shift
+    pub anchor_shift: Vector2D<f32>,
 }
 
 /// Where compose puts a frame's scroll slots at one instant: `offset_of`'s
@@ -1046,6 +1052,7 @@ mod tests {
             scrollport: euclid::default::Size2D::new(100.0, 100.0),
             viewport_axes: [Vector2D::new(1.0, 0.0), Vector2D::new(0.0, 1.0)],
             request: None,
+            anchor_shift: Vector2D::zero(),
         }
     }
 
