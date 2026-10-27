@@ -189,11 +189,15 @@ pub(crate) enum Export {
     SendGlobalEvent,
     /// [`ELEMENT_MODULE_SPECIFIER`], with one event and its whole path.
     DispatchEvent,
+    /// [`FRAME_BOOT_MODULE_SPECIFIER`], in a `<frame>` card's realm, with
+    /// the card's load entry as Lynx's JSON, which it dispatches at its page
+    /// as the frame's `loadmetrics`.
+    LoadMetrics,
 }
 
 impl Export {
     /// How many exports there are: the length of a realm's table.
-    pub(crate) const COUNT: usize = Self::DispatchEvent as usize + 1;
+    pub(crate) const COUNT: usize = Self::LoadMetrics as usize + 1;
 
     /// The module the export is looked up on.
     pub(crate) const fn specifier(self) -> &'static str {
@@ -211,6 +215,7 @@ impl Export {
             | Self::UpdateGlobalProps
             | Self::SendGlobalEvent => RUNTIME_MODULE_SPECIFIER,
             Self::DispatchEvent => ELEMENT_MODULE_SPECIFIER,
+            Self::LoadMetrics => FRAME_BOOT_MODULE_SPECIFIER,
         }
     }
 
@@ -230,6 +235,7 @@ impl Export {
             Self::UpdateGlobalProps => "__BobcatUpdateGlobalProps",
             Self::SendGlobalEvent => "__BobcatSendGlobalEvent",
             Self::DispatchEvent => "__BobcatDispatchEvent",
+            Self::LoadMetrics => "__BobcatLoadMetrics",
         }
     }
 }

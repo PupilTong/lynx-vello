@@ -542,7 +542,8 @@ marks change: `wants_content_detection()` and the half of
 An entry that is whole where it is produced — a monitor's (§7), and the
 later resource entries — skips the record life: it is built there as a plain
 struct (`PerformanceEntry::LongTask`, `PerformanceEntry::JsBlocking`,
-`PerformanceEntry::Memory`) and handed to the registry's one delivery path,
+`PerformanceEntry::Memory`, `PerformanceEntry::LazyBundle`) and handed to
+the registry's one delivery path,
 `deliver(entry, kind, workers)`.
 That queues it on `owed_rust` when the embedder observes `kind`, and on
 `owed_workers[key]` for each worker of `workers` (`WorkerAudience::None`,
@@ -597,9 +598,9 @@ uses:
   on a `<view>` times that view's subtree the same way.
 - **Lynx's `loadmetrics`** stays as a component event the `<frame>`
   component fires, with the child realm's completed `LoadBundle` entry as
-  its `entry` detail (`lynx_fields`), when the element carries that
-  listener. It is Lynx compatibility at the component layer, not a timing
-  concept.
+  its `entry` detail (Lynx's JSON, parsed in the card's realm), for every
+  card load (built as §7 describes). It is Lynx compatibility at the
+  component layer, not a timing concept.
 
 Other platform attribution mechanisms were checked and do not apply: Long
 Animation Frames attribute scripts to a `Window` (`windowAttribution`), not
@@ -609,7 +610,7 @@ shadow tree, and `w3c/element-timing#3` (open since 2019, last discussed
 2025-09-11) has settled on nothing beyond preferring a container-style,
 host-level view for component users.
 
-## 7. Monitors (phase 2; the job monitors built 2026-10-27)
+## 7. Monitors (phase 2; the job monitors, memory, the lazy bundle and `loadmetrics` built 2026-10-27)
 
 All off by default; each is a `LynxView` setter taking `Option<Config>`,
 and each switch is one relaxed atomic in the registry, which is all a hot
@@ -686,9 +687,42 @@ end or once its configuration's epoch is no longer its monitor's.
   writer is followed). Rust audience only (`x-lang` lists no JavaScript).
   Every worker of the view is counted, the BTS and a `<frame>` card's
   among them. Off: one relaxed load per send, no clock.
-- **Lazy bundle**: `resource.rs`'s lazy bundle load already has request and
-  decode points; the entry is `{componentUrl, size, sync, loadSuccess,
-  requireStart/End, decodeStart/End}` and costs two instants per lazy load.
+- **Lazy bundle** (`EntryTypes::RESOURCE`, BTS `observe(['resource'])`;
+  no setter — it is an entry, on while someone observes it):
+  `fetchResource(url, true)`, which `lynx.fetchBundle` makes, is timed
+  while someone observes `resource` (the registry's `resource_observed`,
+  one relaxed atomic set from `rust_types` and `worker_types`):
+  `requireStart` at the call, the request asks the fetcher for its
+  readings (`SourceRequest::Fetch { url, timed }` → `LoadedSource::Fetched(
+  FetchOutcome { size_bytes, received, installed })`, which the reference
+  fetcher in `bobcat-resources` fills only for a timed request), and the
+  outcome's delivery to the realm builds `PerformanceEntry::LazyBundle`
+  with Lynx's keys `componentUrl`, `mode` (`"normal"`, the only value
+  native's dispatched entries carry), `size`, `loadSuccess`,
+  `requireStart/End`, `decodeStart/End` (the container installer's span).
+  A URL already fetched is native's cache hit and reports nothing; `sync`
+  is in the YAML but native's writer never writes it, so it is not written
+  here. Native makes this entry only on its `__QueryComponent` path
+  (`LazyBundleLifecycleOption`), which this engine does not have;
+  `fetchBundle` is the analogue, and a `<frame>`'s fetch of its card is
+  untimed, as native's frame load reports none. Delivered through
+  `deliver(entry, RESOURCE, WorkerAudience::One(bts))`, `bts` being the
+  realm that fetched when it is a worker and otherwise the BTS its realm
+  connected (`background_of`): native sends it with `kEventTypeAll`, so
+  the BTS receives it too. Off: one relaxed load per `fetchBundle`, no
+  instant, no allocation, and the fetcher reads no clock.
+- **`<frame>` `loadmetrics`** (§6.5; listed in phase 1 and built here):
+  when a nested card realm's `pipeline.loadBundle` record completes, the
+  registry notes the card in `frame_loads_owed` and the embedder's `pump`
+  takes them (`take_frame_loads`, the entry assembled on its thread),
+  writes each entry's JSON and sends `ToMain::FrameLoadMetrics { card,
+  json }`; the main thread hands it to the card's realm
+  (`DocumentSlot.card_realms`), whose `bobcat:frame-boot`
+  `__BobcatLoadMetrics` dispatches `loadmetrics` at its page root,
+  bubbling and composed like `load`, with native's detail `{url, mode:
+  "standard", entry}` (`LynxFrameView.buildFrameLoadMetricsDetail`). Once
+  per card load, whatever the host observes; a load sent again after
+  `set_extra_timing` is not owed again, and the page's own load sends none.
 - **First Stable Paint** (phase 3): the painter has, per presented frame,
   the paint order and the viewport, so Lynx's algorithm (meaningful-content
   rects projected onto 256-bit X and Y masks, "valuable" when fill ≥ 30 %,
@@ -736,12 +770,14 @@ test `the performance shell must stay inert` keeps holding for that build.
 
 Entry delivery to the BTS, with no main-thread part and no JSON (ruling
 Q1): the first `observe()` with a non-empty list calls the host function
-`observePerformance(1, paint)`, which records the worker in the registry's
-`worker_types` (the last `disconnect()` calls `observePerformance(0, 0)`).
-`paint` is `1` while some active observer's list names `paint` or a
-`paint.` name, and the realm calls the host again only when either bit
-changes; `paint` is `EntryTypes::PAINT` in that worker's types, which is
-what turns content detection on. The painter, on completing a record of
+`observePerformance(1, paint, resource)`, which records the worker in the
+registry's `worker_types` (the last `disconnect()` calls
+`observePerformance(0, 0, 0)`). `paint` is `1` while some active observer's
+list names `paint` or a `paint.` name, `resource` likewise for `resource`,
+and the realm calls the host again only when a bit changes; `paint` is
+`EntryTypes::PAINT` in that worker's types, which is what turns content
+detection on, and `resource` is `EntryTypes::RESOURCE`, which is what
+times the view's `fetchBundle`s. The painter, on completing a record of
 that card, sends `WorkerMessage::PerformanceReady` to the worker; the job it
 runs calls `takePerformanceEntries()`, a host function that, on the worker
 thread, drains the card's completed records and answers one flat array per
@@ -842,6 +878,12 @@ user's review:
 - **`memory` is not delivered to the BTS**, following native, which
   sends it to the platform alone (ruled 2026-10-27, with the
   `committedFrame` category dropped: three categories, Lynx's).
+- **`lazyBundle` on `fetchBundle`.** Native makes the entry only on
+  `__QueryComponent`, which this engine does not have; `lynx.fetchBundle`
+  is the one lazy bundle load here (`fetchResource(url, true)`) and carries
+  the entry, to Rust and to the fetching realm's BTS, as native's
+  `kEventTypeAll` does. `sync` is not written (native's writer never
+  writes it); `mode` is `"normal"`.
 - **JS blocking reports mirror Lynx's reset and cadence** (totals reset per
   report made; `timer` reports at 1, 3, 6, 10 … intervals), which the first
   draft of §7 had wrong.

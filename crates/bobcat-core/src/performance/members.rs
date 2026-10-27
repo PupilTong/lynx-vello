@@ -123,11 +123,13 @@ pub(crate) fn install_pipeline_members(
 /// realm's `bobcat:bts-runtime` has an observer, which is what a
 /// `PerformanceReady` is delivered to.
 ///
-/// - `observePerformance(on, paint)`: the realm has an observer (`on` `1`) or no longer has one
-///   (`0`), and one of its observers asked for `paint` entries (`paint` `1`) or none did (`0`);
+/// - `observePerformance(on, paint, resource)`: the realm has an observer (`on` `1`) or no longer
+///   has one (`0`), one of its observers asked for `paint` entries (`paint` `1`) or none did (`0`),
+///   and one asked for `resource` entries (`resource` `1`), which times every `lynx.fetchBundle`
+///   the view's realms make, or none did (`0`);
 /// - `takePerformanceEntries()`: every entry this worker is owed, assembled here on the worker's
 ///   thread, as one record string — per entry its pair count, then key and value fields, a value
-///   `n<number>` or `s<text>`;
+///   `n<number>`, `b1`/`b0` or `s<text>`;
 /// - `markLoadTiming(key)`: `loadCoreEnd`, `loadBackgroundStart` or `loadBackgroundEnd` (anything
 ///   else does nothing), answering whether the mark completed entries this realm is owed — the load
 ///   waits for `loadBackgroundEnd` — so the caller can take them at once.
@@ -141,15 +143,14 @@ pub(crate) fn install_worker_members(
     let observed = Rc::new(Cell::new(false));
     let pipelines = Arc::clone(registry);
     let setting = Rc::clone(&observed);
-    register(engine, "observePerformance", 2, move |arguments| {
+    register(engine, "observePerformance", 3, move |arguments| {
         let on = flag_argument(arguments, 0);
-        let paint = flag_argument(arguments, 1);
+        let asked = [EntryTypes::PAINT, EntryTypes::RESOURCE]
+            .into_iter()
+            .enumerate()
+            .filter(|&(index, _)| flag_argument(arguments, index + 1))
+            .fold(EntryTypes::NONE, |asked, (_, kind)| asked | kind);
         setting.set(on);
-        let asked = if paint {
-            EntryTypes::PAINT
-        } else {
-            EntryTypes::NONE
-        };
         pipelines.observe_worker(key, on.then_some(asked));
         Ok(HostValue::Undefined)
     })?;

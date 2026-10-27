@@ -259,13 +259,19 @@ waitable, it does what `fetch(image_url)` does — and nothing about a Lynx
 container is `bobcat-core`'s business. It exists in both realm kinds, because
 either thread's half of a ReactLynx `lazy()` may be the one that asks.
 
-**The request.** `SourceRequest::Fetch { url }` carries the string the card
-passed; resolution is the fetcher's, against its own base, as it is for a
+**The request.** `SourceRequest::Fetch { url, timed }` carries the string the
+card passed; resolution is the fetcher's, against its own base, as it is for a
 stylesheet. A host
-answers `LoadedSource::Fetched` — which carries nothing — once the fetch is
-over, or fails the request. Core never learns what came back, and there is no
-`Bundle` request, no installed set and no record JSON anywhere in it: the one
-member is `fetchResource(url)`, which answers the id of the `bobcat:future`
+answers `LoadedSource::Fetched` once the fetch is over, or fails the request.
+What that carries is a `FetchOutcome`, which says nothing about the bytes'
+content: for a request that is `timed` — a `lynx.fetchBundle`, which passes
+`fetchResource(url, true)`, while someone observes the view's `resource`
+performance entries; never a `<frame>`'s fetch of its card — the body's
+length, when it arrived and the span of the install, which the realm's
+`resource.lazyBundle` entry reports; for any other, nothing. Core never
+learns what came back, and there is no `Bundle` request, no installed set
+and no record JSON anywhere in it: the one member is `fetchResource(url,
+lazyBundle?)`, which answers the id of the `bobcat:future`
 `Future` that fetch settles, or `true` for a URL the fetcher says this view
 already has (`crates/bobcat-core/src/fetch.rs`).
 

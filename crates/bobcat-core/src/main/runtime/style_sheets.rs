@@ -115,7 +115,7 @@ pub(super) fn settle_style_sheet(
         Ok(LoadedSource::StyleSheet(sheet)) => Ok(sheet),
         Ok(LoadedSource::Module { .. }) => Err("the fetcher returned a script".to_owned()),
         Ok(LoadedSource::Font(_)) => Err("the fetcher returned a font".to_owned()),
-        Ok(LoadedSource::Fetched) => Err("the fetcher returned a plain fetch".to_owned()),
+        Ok(LoadedSource::Fetched(_)) => Err("the fetcher returned a plain fetch".to_owned()),
         Err(reason) => Err(reason),
     }
     .map_err(|reason| format!("loading stylesheet {url}: {reason}"))?;

@@ -1404,7 +1404,21 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
                 demand.notify_performance(key);
             }
         }
+        // Each `<frame>` card's completed load, owed to its realm as
+        // `loadmetrics` whoever observes: written here, on the embedder's
+        // thread, so the main thread only dispatches what it is handed.
+        let frame_loads = registry.take_frame_loads();
         if self.state != ViewState::Failed {
+            for (card, load) in frame_loads {
+                let mut json = String::new();
+                PerformanceEntry::LoadBundle(Box::new(load))
+                    .write_lynx_json(&self.time_origin, &mut json);
+                // A send that fails is a view that has ended.
+                let _ = self
+                    .seat
+                    .commands
+                    .send(ToMain::FrameLoadMetrics { card, json });
+            }
             events.extend(
                 registry
                     .take_completed_for_rust()

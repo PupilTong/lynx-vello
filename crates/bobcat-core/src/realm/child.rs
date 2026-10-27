@@ -54,13 +54,14 @@ use std::rc::{Rc, Weak};
 
 use quickjs_rust_bridge::HostArgument;
 
-use super::FrameDemand;
+use super::{FrameDemand, RealmNames};
 use crate::clock::ClockInstant;
 use crate::esm::Export;
 use crate::future::{FutureTable, HostFuture, Outcome};
 use crate::jobs::JsThreadHandle;
 use crate::link::HostOutbox;
 use crate::main::quickjs::{ScriptEngine, ScriptRuntime};
+use crate::performance::{Opener, OpenerId};
 use crate::script::ScriptError;
 use crate::timers::TimerState;
 use crate::view::ScriptSource;
@@ -430,10 +431,18 @@ impl ChildRealm {
 /// Whatever implements this is held by every realm's hook for the owner's
 /// life, so it must hold nothing that holds an engine of the owner's.
 pub(crate) trait ChildHostModules {
+    /// The realm a new child is to its view's performance records — what
+    /// its pipelines, its load and its fetches are opened as — allocated
+    /// before its core is installed and handed to [`Self::install`]. A
+    /// `<frame>` card's realm is one of its own, as a nested card is its
+    /// own `LynxTemplateRender` in native.
+    fn allocate_opener(&self) -> OpenerId;
+
     fn install(
         &self,
         engine: &mut ScriptEngine,
         key: ChildKey,
+        opener: OpenerId,
         retired: Rc<Cell<bool>>,
     ) -> Result<Box<dyn ChildHostState>, ScriptError>;
 }
@@ -452,8 +461,9 @@ pub(crate) trait ChildHostState {
 }
 
 /// What every `new ShadowRealm()` in one owner's realms is furnished from:
-/// the list it joins, what its core members reach the host through, and the
-/// owner's [`ChildHostModules`], if it has any.
+/// the list it joins, what its core members reach the host through, the
+/// realm its fetches are timed as unless its modules name one of its own,
+/// and the owner's [`ChildHostModules`], if it has any.
 ///
 /// The list is held weakly: a strong one would be a cycle no drop ends — the
 /// list holds the child's engine, the engine holds this hook, and the hook
@@ -463,6 +473,9 @@ pub(crate) struct ShadowRealmHook {
     pub(crate) host: HostOutbox,
     pub(crate) thread: JsThreadHandle,
     pub(crate) source: ScriptSource,
+    /// The constructing realm's own: what a child of a realm whose owner
+    /// names no [`ChildHostModules`] — a worker's — is timed as.
+    pub(crate) opener: Opener,
     pub(crate) child_hosts: Option<Rc<dyn ChildHostModules>>,
 }
 
@@ -495,18 +508,25 @@ fn adopt(hook: &ShadowRealmHook, mut engine: ScriptEngine) -> Result<(), String>
     // it read one flag.
     let retired = Rc::new(Cell::new(false));
     let mut state = None;
+    let own_opener = hook
+        .child_hosts
+        .as_ref()
+        .map(|modules| modules.allocate_opener());
     let installed = super::install_realm_core(
         &mut engine,
         &hook.host,
         hook.thread.clone(),
         FrameDemand::Ignored,
-        hook.source.clone(),
+        RealmNames {
+            source: hook.source.clone(),
+            opener: own_opener.map_or(hook.opener, Opener::Realm),
+        },
         &hook.children,
         hook.child_hosts.clone(),
     )
     .and_then(|tables| {
-        if let Some(modules) = &hook.child_hosts {
-            state = Some(modules.install(&mut engine, key, Rc::clone(&retired))?);
+        if let (Some(modules), Some(opener)) = (&hook.child_hosts, own_opener) {
+            state = Some(modules.install(&mut engine, key, opener, Rc::clone(&retired))?);
         }
         Ok(tables)
     });
