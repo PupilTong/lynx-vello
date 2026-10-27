@@ -541,8 +541,9 @@ marks change: `wants_content_detection()` and the half of
 
 An entry that is whole where it is produced — a monitor's (§7), and the
 later resource entries — skips the record life: it is built there as a plain
-struct (`PerformanceEntry::LongTask`, `PerformanceEntry::JsBlocking`) and
-handed to the registry's one delivery path, `deliver(entry, kind, workers)`.
+struct (`PerformanceEntry::LongTask`, `PerformanceEntry::JsBlocking`,
+`PerformanceEntry::Memory`) and handed to the registry's one delivery path,
+`deliver(entry, kind, workers)`.
 That queues it on `owed_rust` when the embedder observes `kind`, and on
 `owed_workers[key]` for each worker of `workers` (`WorkerAudience::None`,
 `One(key)` for the BTS of the realm that produced it, or `Every`) whose
@@ -623,11 +624,11 @@ end or once its configuration's epoch is no longer its monitor's.
 - **Long tasks** (`set_long_task_monitor`, `LongTaskConfig { threshold }`,
   default 50 ms, Lynx's `duration_threshold_ms_`): every realm job is
   queued through `lifetime::run_job` with the `JobKind` it was queued for
-  (18 variants over the 17 call sites: `Start`, `Entry`, `Module`, `Future`,
+  (19 variants over the 19 call sites: `Start`, `Entry`, `Module`, `Future`,
   `Timer`, `Settle`, `Command`, `ContentVisibility`, `Intersection`,
   `ResizeObserver`, `ComponentEvent`, `FontFace`, `WorkerEvent`, `Post`,
-  `AnimationFrame`, `ModuleCallback`, `Performance`, `Release`); with the
-  monitor on, `run_job` times the job around its `catch_unwind` and, at or
+  `AnimationFrame`, `ModuleCallback`, `Performance`, `Memory`, `Release`);
+  with the monitor on, `run_job` times the job around its `catch_unwind` and, at or
   over the threshold, builds `PerformanceEntry::LongTask { start, end,
   thread: Main | Workers, kind }` and delivers it. `entry_type()` is W3C's
   `"longtask"`, `name()` the kind, and the JSON carries Long Tasks'
@@ -639,15 +640,33 @@ end or once its configuration's epoch is no longer its monitor's.
   `lynxsdk_long_batched_tasks_timing` (a 1 s window at 80 % busy) is not
   built; the per-job entries let an embedder compute it. Off: one relaxed
   load per job, no clock.
-- **Memory**: on the interval Lynx uses (`memory_report_interval_sec`), the
-  main thread reads `JS_ComputeMemoryUsage` for the MTS realm, the BTS worker
-  its own, and the document sizes itself (`TreeArenas` slots, `TextStore`s,
-  the committed frame's scenes) — the three Lynx categories
-  `mainThreadScriptingEngine`, `backgroundThreadScriptingEngine`,
-  `lynxTasmElement`, plus `committedFrame` as this engine's own. Each writer
-  puts its number in the registry; `pump()` emits when the total moved by
-  more than `change_threshold` since the last report. The readings are the
-  measurement; nothing else runs on the measuring thread.
+- **Memory** (`set_memory_monitor`, `MemoryConfig { report_interval,
+  acquisition_delay, change_threshold }`, Lynx's defaults 20 min, 2 s and
+  0 bytes from `lynx_env.cc`): the view's `MonitorTask::MemorySamples`
+  waits `acquisition_delay`, then every `report_interval` queues one page
+  job (`JobKind::Memory`, through `owner::queue`) that reads no
+  JavaScript. Each of the three Lynx categories is read by the thread that
+  holds it: the page job reads `mainThreadScriptingEngine` (the bridge's
+  `Runtime::memory_usage()`, `JS_ComputeMemoryUsage` over bobcat-main's
+  runtime: `malloc_size` as `sizeBytes`, its counters as `detail`) and
+  `lynxTasmElement` (`terminus`'s `Document::memory_footprint()`: live
+  elements times the arena node's size, with Lynx's `elementCount` and
+  `singleElementSizeBytes`), then sends `WorkerMessage::MemorySample` to
+  the page's BTS, whose own `JobKind::Memory` job reads
+  `backgroundThreadScriptingEngine` from the `bobcat-workers` runtime.
+  Both runtimes are shared by every realm on their thread (the group's
+  other views, `ShadowRealm` children, every worker), which each reading's
+  detail says as `sharedRuntime: "thread"`. Each reading goes to
+  `PipelineRegistry::note_memory`, which follows Lynx's `UpdateMemoryUsage`
+  and `ReportMemory`: a reading whose size equals its category's last is
+  dropped; otherwise it replaces it, and a `PerformanceEntry::Memory` with
+  every category's latest reading and their sum is delivered when the
+  total moved by at least `change_threshold` since the last report (0
+  reports every change), the first reading after the setter always. JSON
+  is `ReportMemory`'s: `detail.<category>.{category, sizeBytes,
+  instanceCount, detail}`, then `sizeBytes`. Rust audience only
+  (`WorkerAudience::None`), as native sends `memory` to the platform alone.
+  Off: nothing is read, no clock, no task.
 - **JS blocking** (`set_js_blocking_monitor`, `JsBlockingConfig {
   threshold, report_interval }`, Lynx's defaults 20 ms and 5 s): each
   `WorkerMessage` that queues a job of a worker (`Post`, `Vsync`,
@@ -820,6 +839,9 @@ questions are closed.
 Phase 2 decisions, 2026-10-27, made while building §7 and open to the
 user's review:
 
+- **`memory` is not delivered to the BTS**, following native, which
+  sends it to the platform alone (ruled 2026-10-27, with the
+  `committedFrame` category dropped: three categories, Lynx's).
 - **JS blocking reports mirror Lynx's reset and cadence** (totals reset per
   report made; `timer` reports at 1, 3, 6, 10 … intervals), which the first
   draft of §7 had wrong.

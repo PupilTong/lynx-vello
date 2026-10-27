@@ -11,12 +11,12 @@ pub(crate) use std::time::Instant as ClockInstant;
 /// `std::time::SystemTime` panics on `wasm32-unknown-unknown` like `Instant`
 /// does, so that target reads `web_time`'s.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) use std::time::SystemTime;
+pub use std::time::SystemTime;
 
 #[cfg(target_arch = "wasm32")]
 pub(crate) use web_time::Instant as ClockInstant;
 #[cfg(target_arch = "wasm32")]
-pub(crate) use web_time::SystemTime;
+pub use web_time::SystemTime;
 
 /// Resolves once `deadline` has passed.
 ///

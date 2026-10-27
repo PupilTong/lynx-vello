@@ -104,6 +104,47 @@ pub(crate) struct QjsValue {
     _private: [u8; 0],
 }
 
+/// What a runtime's heap holds, as `QuickJS`'s `JS_ComputeMemoryUsage`
+/// reports it (`Runtime::memory_usage`): `QuickJS`'s `JSMemoryUsage`
+/// (`quickjs.h`), field for field and member for member, each a byte size
+/// or a count. The heap is the runtime's, so the numbers cover every realm
+/// on it.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MemoryUsage {
+    /// Bytes the runtime's allocator holds, its per-allocation overhead
+    /// included.
+    pub malloc_size: i64,
+    /// The runtime's memory limit; `-1` when it has none.
+    pub malloc_limit: i64,
+    /// Bytes of the objects the walk found, by `QuickJS`'s own estimate.
+    pub memory_used_size: i64,
+    /// Live allocations.
+    pub malloc_count: i64,
+    pub memory_used_count: i64,
+    pub atom_count: i64,
+    pub atom_size: i64,
+    pub str_count: i64,
+    pub str_size: i64,
+    pub obj_count: i64,
+    pub obj_size: i64,
+    pub prop_count: i64,
+    pub prop_size: i64,
+    pub shape_count: i64,
+    pub shape_size: i64,
+    pub js_func_count: i64,
+    pub js_func_size: i64,
+    pub js_func_code_size: i64,
+    pub js_func_pc2line_count: i64,
+    pub js_func_pc2line_size: i64,
+    pub c_func_count: i64,
+    pub array_count: i64,
+    pub fast_array_count: i64,
+    pub fast_array_elements: i64,
+    pub binary_object_count: i64,
+    pub binary_object_size: i64,
+}
+
 unsafe extern "C" {
     pub(crate) fn qjs_host_owner_class_id_new() -> u32;
     pub(crate) fn qjs_runtime_new(
@@ -140,6 +181,12 @@ unsafe extern "C" {
         name: *const c_char,
     ) -> *mut QjsValue;
     pub(crate) fn qjs_runtime_run_gc(runtime: *mut QjsRuntime);
+    /// `JS_ComputeMemoryUsage` on the runtime's `JSRuntime`: a walk of the
+    /// whole heap, which fills `usage`.
+    pub(crate) fn qjs_runtime_compute_memory_usage(
+        runtime: *mut QjsRuntime,
+        usage: *mut MemoryUsage,
+    );
     pub(crate) fn qjs_runtime_set_memory_limit(runtime: *mut QjsRuntime, limit: usize);
     pub(crate) fn qjs_runtime_set_max_stack_size(runtime: *mut QjsRuntime, size: usize);
     pub(crate) fn qjs_runtime_set_interrupt_handler(
