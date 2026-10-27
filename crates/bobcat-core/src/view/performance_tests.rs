@@ -859,3 +859,101 @@ fn a_bts_fetch_bundle_is_one_lazy_bundle_entry_to_rust_and_the_bts_while_observe
     );
     assert!(lazy_bundles(&events).is_empty(), "{events:?}");
 }
+
+/// A card whose first screen is a `containertiming="hero"` view holding one
+/// text, and whose every `updatePage` adds another text under it, below the
+/// last, with a timing flag `update-<n>` — the pipeline entry that says the
+/// update's frame was presented.
+const CONTAINER_CARD: &str = r"
+    let updates = 0;
+    function line(content) {
+      const text = __CreateText(0);
+      __AppendElement(text, __CreateRawText(content));
+      __AppendElement(hero, text);
+      return text;
+    }
+    globalThis.renderPage = function () {
+      globalThis.page = __CreatePage('card', 0);
+      globalThis.hero = __CreateView(0);
+      __SetInlineStyles(hero, 'width:64px;height:48px;display:flex;flex-direction:column');
+      __SetAttribute(hero, 'containertiming', 'hero');
+      line('Hi');
+      __AppendElement(page, hero);
+    };
+    globalThis.updatePage = function () {
+      updates += 1;
+      __SetAttribute(line('Hey'), '__lynx_timing_flag', 'update-' + updates);
+      __FlushElementTree();
+    };
+";
+
+fn container_entries(events: &[EngineEvent]) -> Vec<&crate::performance::ContainerEntry> {
+    performance(events)
+        .filter_map(|entry| match entry {
+            PerformanceEntry::Container(container) => Some(container),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_container_root_reports_its_paints_until_the_first_pointer_down() {
+    let mut engine = TestViewSpec::new(CONTAINER_CARD)
+        .offscreen(64.0, 48.0)
+        .with_default_font("Ahem", AHEM)
+        .create(Arc::new(NoWakeup));
+    engine
+        .view
+        .observe_performance(EntryTypes::CONTAINER | EntryTypes::PIPELINE);
+    let mut events = Vec::new();
+    drive_until(&mut engine, &mut events, |events| {
+        !container_entries(events).is_empty()
+    });
+    let [first] = container_entries(&events)[..] else {
+        panic!("one container entry: {events:?}");
+    };
+    assert_eq!(&*first.identifier, "hero");
+    assert!(first.size > 0.0, "{first:?}");
+    assert_eq!(first.first_render, first.start);
+    let first = first.clone();
+
+    // A text below the first grows the region.
+    engine
+        .view
+        .update_data("{}".to_owned(), String::new())
+        .expect("the view is ready");
+    drive_until(&mut engine, &mut events, |events| {
+        pipeline_named(events, "update-1").is_some()
+    });
+    for _ in 0..3 {
+        turn(&mut engine, &mut events);
+    }
+    let entries = container_entries(&events);
+    let [_, grown] = entries[..] else {
+        panic!("two container entries: {events:?}");
+    };
+    assert!(grown.size > first.size, "{grown:?} after {first:?}");
+    assert_eq!(grown.first_render, first.first_render);
+    assert!(grown.start > first.start);
+    assert!(grown.intersection_rect.size.height > first.intersection_rect.size.height);
+
+    // The first pointer down stops recording: a later text under the root
+    // paints, and reports nothing.
+    engine.dispatch_input(terminus::link::input::InputEvent::pointer(
+        terminus::link::Point2D::new(60.0, 44.0),
+        1,
+        terminus::link::input::PointerKind::Touch,
+        terminus::link::input::PointerPhase::Down,
+    ));
+    engine
+        .view
+        .update_data("{}".to_owned(), String::new())
+        .expect("the view is ready");
+    drive_until(&mut engine, &mut events, |events| {
+        pipeline_named(events, "update-2").is_some()
+    });
+    for _ in 0..3 {
+        turn(&mut engine, &mut events);
+    }
+    assert_eq!(container_entries(&events).len(), 2, "{events:?}");
+}
