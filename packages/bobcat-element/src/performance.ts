@@ -81,10 +81,26 @@ export interface PerformanceEntry {
 }
 
 /**
+ * One value field of a record: `n` and a number, `b1` or `b0` for a
+ * boolean, or `s` and a string.
+ */
+function fieldValue(raw: string): unknown {
+  switch (raw[0]) {
+    case "n":
+      return Number(raw.slice(1));
+    case "b":
+      return raw === "b1";
+    default:
+      return raw.slice(1);
+  }
+}
+
+/**
  * The entries one `takePerformanceEntries` record holds: per entry, its
  * pair count, then a key field and a value field per pair, the value `n`
- * and a number or `s` and a string. A dotted key is a member of the object
- * its first segment names (`frameworkRenderingTiming.diffVdomStart`).
+ * and a number, `b1` or `b0` for a boolean, or `s` and a string. A dotted
+ * key is a member of the object its first segment names
+ * (`frameworkRenderingTiming.diffVdomStart`).
  */
 export function decodeEntries(record: string, split: (record: string) => string[]): PerformanceEntry[] {
   const fields = split(record);
@@ -96,7 +112,7 @@ export function decodeEntries(record: string, split: (record: string) => string[
     for (let pair = 0; pair < pairs; pair += 1) {
       const key = fields[index++]!;
       const raw = fields[index++]!;
-      const value = raw.startsWith("n") ? Number(raw.slice(1)) : raw.slice(1);
+      const value = fieldValue(raw);
       const dot = key.indexOf(".");
       if (dot === -1) {
         entry[key] = value;
@@ -129,17 +145,21 @@ export interface PerformanceObserver {
 /** The worker realm's two observer members. */
 export interface ObserverHost {
   /**
-   * The realm has an observer (`on`), and one of its observers asked for
+   * The realm has an observer (`on`), one of its observers asked for
    * `paint` entries (`paint`), which is what turns the paint walk's
-   * contentful test on.
+   * contentful test on, and one asked for `resource` entries
+   * (`resource`), which is what times the view's `fetchBundle`s.
    */
-  observePerformance(on: 0 | 1, paint: 0 | 1): void;
+  observePerformance(on: 0 | 1, paint: 0 | 1, resource: 0 | 1): void;
   takePerformanceEntries(): string;
 }
 
-/** Whether `names` asks for W3C Paint Timing's `paint` entries. */
-function asksForPaint(names: readonly string[]): boolean {
-  return names.some(name => name === "paint" || name.startsWith("paint."));
+/**
+ * Whether `names` asks for the entries of `entryType`: W3C Paint Timing's
+ * `paint`, or Lynx's `resource`.
+ */
+function asksFor(names: readonly string[], entryType: string): boolean {
+  return names.some(name => name === entryType || name.startsWith(`${entryType}.`));
 }
 
 /** The part of `GlobalEventEmitter` the observers use. */
@@ -155,9 +175,11 @@ export interface PerformanceEmitter {
  * `lynx.performance.onPerformanceEvent`, so a
  * `GlobalEventEmitter` listener hears the same entries, as on native. The
  * host is told only when the realm goes from no observer to one and back,
- * or from no observer of `paint` (`observe(['paint'])`, W3C Paint Timing's
- * `first-paint` and `first-contentful-paint`) to one and back: until then
- * nothing is sent to this worker or assembled for it.
+ * from no observer of `paint` (`observe(['paint'])`, W3C Paint Timing's
+ * `first-paint` and `first-contentful-paint`) to one and back, or from no
+ * observer of `resource` (`observe(['resource'])`, Lynx's
+ * `resource.lazyBundle`) to one and back: until then nothing is sent to
+ * this worker or assembled for it.
  */
 export function createPerformanceObservers(
   host: ObserverHost,
@@ -167,19 +189,20 @@ export function createPerformanceObservers(
   const active = new Map<PerformanceObserver, readonly string[]>();
   let observing = false;
   let observingPaint = false;
+  let observingResource = false;
   function sync() {
     const next = active.size > 0;
     let paint = false;
+    let resource = false;
     for (const names of active.values()) {
-      if (asksForPaint(names)) {
-        paint = true;
-        break;
-      }
+      paint ||= asksFor(names, "paint");
+      resource ||= asksFor(names, "resource");
     }
-    if (next === observing && paint === observingPaint) return;
+    if (next === observing && paint === observingPaint && resource === observingResource) return;
     observing = next;
     observingPaint = paint;
-    host.observePerformance(next ? 1 : 0, paint ? 1 : 0);
+    observingResource = resource;
+    host.observePerformance(next ? 1 : 0, paint ? 1 : 0, resource ? 1 : 0);
   }
   function createObserver(callback: (entry: PerformanceEntry) => void): PerformanceObserver {
     if (typeof callback !== "function") {

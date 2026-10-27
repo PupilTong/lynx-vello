@@ -76,6 +76,29 @@ describe("entries", () => {
   });
 });
 
+describe("resource entries", () => {
+  it("read booleans back and keep a lazy bundle's keys flat", () => {
+    // As the host writes a `resource.lazyBundle` entry.
+    const record = entryRecord([
+      ["entryType", "sresource"],
+      ["componentUrl", "sapp:///lazy.bundle"],
+      ["size", "n2048"],
+      ["loadSuccess", "b1"],
+      ["requireEnd", "n1739594612309.250"],
+    ]) + entryRecord([["entryType", "sresource"], ["loadSuccess", "b0"]]);
+    expect(decodeEntries(record, splitRecord)).toEqual([
+      {
+        entryType: "resource",
+        componentUrl: "app:///lazy.bundle",
+        size: 2048,
+        loadSuccess: true,
+        requireEnd: 1739594612309.25,
+      },
+      { entryType: "resource", loadSuccess: false },
+    ]);
+  });
+});
+
 describe("observers", () => {
   function setup(record: string) {
     const host = {
@@ -92,11 +115,11 @@ describe("observers", () => {
     const second = observers.createObserver(() => {});
     first.observe(["pipeline"]);
     second.observe(["pipeline.loadBundle"]);
-    expect(host.observePerformance.mock.calls).toEqual([[1, 0]]);
+    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0]]);
     first.disconnect();
-    expect(host.observePerformance.mock.calls).toEqual([[1, 0]]);
+    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0]]);
     second.observe([]);
-    expect(host.observePerformance.mock.calls).toEqual([[1, 0], [0, 0]]);
+    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0], [0, 0, 0]]);
   });
 
   it("tell the host when an observer asks for paint entries and when none does", () => {
@@ -105,15 +128,30 @@ describe("observers", () => {
     const paints = observers.createObserver(() => {});
     pipelines.observe(["pipeline"]);
     paints.observe(["paint"]);
-    expect(host.observePerformance.mock.calls).toEqual([[1, 0], [1, 1]]);
+    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0], [1, 1, 0]]);
     paints.observe(["paint.first-contentful-paint", "pipeline"]);
-    expect(host.observePerformance.mock.calls).toEqual([[1, 0], [1, 1]]);
+    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0], [1, 1, 0]]);
     paints.observe(["pipeline"]);
-    expect(host.observePerformance.mock.calls).toEqual([[1, 0], [1, 1], [1, 0]]);
+    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0], [1, 1, 0], [1, 0, 0]]);
     paints.observe(["paint"]);
     pipelines.disconnect();
     paints.disconnect();
-    expect(host.observePerformance.mock.calls).toEqual([[1, 0], [1, 1], [1, 0], [1, 1], [0, 0]]);
+    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0], [1, 1, 0], [1, 0, 0], [1, 1, 0], [0, 0, 0]]);
+  });
+
+  it("tell the host when an observer asks for resource entries and when none does", () => {
+    const { host, observers } = setup("");
+    const pipelines = observers.createObserver(() => {});
+    const resources = observers.createObserver(() => {});
+    pipelines.observe(["pipeline"]);
+    resources.observe(["resource.lazyBundle"]);
+    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0], [1, 0, 1]]);
+    resources.observe(["resource", "pipeline"]);
+    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0], [1, 0, 1]]);
+    resources.disconnect();
+    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0], [1, 0, 1], [1, 0, 0]]);
+    pipelines.disconnect();
+    expect(host.observePerformance.mock.calls).toEqual([[1, 0, 0], [1, 0, 1], [1, 0, 0], [0, 0, 0]]);
   });
 
   it("receive paint entries by type and by type and name", () => {

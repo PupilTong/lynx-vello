@@ -18,8 +18,9 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::paint::Painter;
 use crate::resource::{
-    LoadedSource, ResourceError, ResourceErrorKind, ResourceErrorPhase, ResourceFetcher,
-    RetryAdvice, SourceCompletion, SourceRequest, StyleSheetProbe, StyleSheetSource,
+    FetchOutcome, LoadedSource, ResourceError, ResourceErrorKind, ResourceErrorPhase,
+    ResourceFetcher, RetryAdvice, SourceCompletion, SourceRequest, StyleSheetProbe,
+    StyleSheetSource,
 };
 use crate::style::PreparsedStyleSheet;
 use crate::view::{
@@ -88,6 +89,9 @@ pub(crate) struct InlineFetcher {
     /// the sheets it holds, by absolute URL. Without one, every
     /// `hasStyleSheet` is `true`.
     probes_style_sheets: bool,
+    /// Every [`SourceRequest::Fetch`] this host was asked, in order: its URL
+    /// as the realm named it and whether it was timed.
+    pub(crate) fetch_requests: Mutex<Vec<(String, bool)>>,
 }
 
 /// `url` resolved against [`BASE`], as a fetcher resolves the stylesheets
@@ -131,14 +135,19 @@ impl ResourceFetcher for InlineFetcher {
                     url,
                 })
             }
-            SourceRequest::Fetch { url } if self.fetchable.contains(&resolved(&url)) => {
+            SourceRequest::Fetch { url, timed } if self.fetchable.contains(&resolved(&url)) => {
+                self.note_fetch(&url, timed);
                 if let Some(fetched) = &self.fetched {
                     fetched
                         .lock()
                         .expect("the fetched set is never poisoned")
                         .insert(resolved(&url));
                 }
-                Ok(LoadedSource::Fetched)
+                Ok(LoadedSource::Fetched(self.fetch_outcome(&url, timed)))
+            }
+            SourceRequest::Fetch { url, timed } => {
+                self.note_fetch(&url, timed);
+                Err(missing(&url))
             }
             SourceRequest::StyleSheet(url) => match self.sheets.get(&resolved(&url)) {
                 Some(TestSheet::Text(css)) => Ok(LoadedSource::StyleSheet(StyleSheetSource::Text(
@@ -155,7 +164,7 @@ impl ResourceFetcher for InlineFetcher {
             ),
             // This double serves no module but the two entries and the ones it
             // was given, and no plain fetch but the ones it was told succeed.
-            SourceRequest::Module(url) | SourceRequest::Fetch { url } => Err(missing(&url)),
+            SourceRequest::Module(url) => Err(missing(&url)),
         };
         completion.complete(answer);
     }
@@ -181,6 +190,39 @@ impl ResourceFetcher for InlineFetcher {
             .map(|(url, _)| url.clone())
             .collect();
         Some(Arc::new(move |url: &str| held.contains(&resolved(url))))
+    }
+}
+
+impl InlineFetcher {
+    fn note_fetch(&self, url: &str, timed: bool) {
+        self.fetch_requests
+            .lock()
+            .expect("the fetch log is never poisoned")
+            .push((url.to_owned(), timed));
+    }
+
+    /// What a timed fetch of `url` reports, as a fetcher with a container
+    /// installer would: the bytes it stands in for are the modules served
+    /// under the URL, which arrived now and were installed in no time.
+    /// Nothing for an untimed one.
+    fn fetch_outcome(&self, url: &str, timed: bool) -> FetchOutcome {
+        if !timed {
+            return FetchOutcome::default();
+        }
+        let prefix = resolved(url);
+        let size = self
+            .modules
+            .iter()
+            .filter(|(served, _)| served.starts_with(&prefix))
+            .filter_map(|(_, source)| u64::try_from(source.len()).ok())
+            .sum();
+        let arrived = crate::performance::Instant::now();
+        let installed = crate::performance::Instant::now();
+        FetchOutcome {
+            size_bytes: Some(size),
+            received: Some(arrived),
+            installed: Some(arrived..installed),
+        }
     }
 }
 
@@ -518,6 +560,7 @@ impl TestViewSpec {
             fetchable,
             fetched: probes_fetches.then(Arc::default),
             probes_style_sheets,
+            fetch_requests: Mutex::default(),
         });
         block_on(async move {
             let group = LynxGroup::new(requester, StyleThreads::Sequential)

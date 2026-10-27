@@ -2448,3 +2448,76 @@ fn a_cards_stop_exposure_leaves_the_pages_exposure_running() {
     );
     assert_eq!(reported(&events), Vec::<&str>::new());
 }
+
+/// Once a frame's card has loaded — its first frame presented and its BTS's
+/// entry loaded — the card's realm dispatches the frame's `loadmetrics`
+/// (Lynx's `LynxFrameView.onFrameLoadMetricsEvent`) at its page, bubbling
+/// and composed, with native's detail: the frame's `src` as written,
+/// `mode: "standard"`, and the card's `pipeline.loadBundle` entry. The
+/// frame's `bindloadmetrics` hears it retargeted to the frame and the page's
+/// listener as it bubbles, once each, with nobody observing performance;
+/// the page's own load fires none.
+#[test]
+fn a_frames_card_fires_loadmetrics_once_its_load_completes() {
+    let src = "child.web.bundle";
+    let host = host_page_with(
+        src,
+        true,
+        r"
+        globalThis.runWorklet = (value, params) => value.body(params[0]);
+        const heard = (label) => (event) => console.log('loadmetrics ' + label + ' ' +
+            JSON.stringify({
+                url: event.detail.url,
+                mode: event.detail.mode,
+                entryType: event.detail.entry.entryType,
+                name: event.detail.entry.name,
+                frame: event.target.uid === __GetElementUniqueID(frame),
+            }));
+        __AddEvent(frame, 'bindEvent', 'loadmetrics', { type: 'worklet', value: { body: heard('bind') } });
+        __AddEventListener(page, 'loadmetrics', heard('page'), {});
+        ",
+    );
+    // No `SystemInfo` check: this view's painter draws into a small
+    // texture of its own, which a load waits to present.
+    let root = "globalThis.renderPage = () => { const p = __CreatePage('0', 0); \
+                const t = __CreateText(0); __AppendElement(t, __CreateRawText('nested')); \
+                __AppendElement(p, t); };";
+    let mut engine = serving_a_root_under(&host, root)
+        .offscreen(120.0, 80.0)
+        .create(Arc::new(NoWakeup));
+    let heard = format!(
+        r#"{{"url":"{src}","mode":"standard","entryType":"pipeline","name":"loadBundle","frame":true}}"#
+    );
+    let lines = [
+        format!("loadmetrics bind {heard}"),
+        format!("loadmetrics page {heard}"),
+    ];
+    let mut events = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !logged(&events, &lines[1]) {
+        let _ = engine.tick(true);
+        for event in engine.pump() {
+            assert!(!event.is_fatal(), "the view ended: {event:?}");
+            events.push(event);
+        }
+        assert!(Instant::now() < deadline, "no loadmetrics: {events:?}");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    // Long enough for any second one, the page's own load's included.
+    for _ in 0..40 {
+        let _ = engine.tick(true);
+        events.extend(engine.pump());
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let heard: Vec<&str> = events
+        .iter()
+        .filter_map(|event| match event {
+            EngineEvent::ConsoleMessage { message, .. } if message.starts_with("loadmetrics ") => {
+                Some(message.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(heard, lines.each_ref().map(String::as_str));
+    assert_eq!(reported(&events), Vec::<&str>::new());
+}

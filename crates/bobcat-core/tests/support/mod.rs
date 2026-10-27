@@ -287,7 +287,7 @@ impl FetcherDouble {
                 .into());
             }
             // Nor a plain fetch: this double has nothing to fetch from.
-            SourceRequest::Fetch { url } => {
+            SourceRequest::Fetch { url, .. } => {
                 return Err(ResourceError {
                     kind: ResourceErrorKind::NotFound,
                     phase: ResourceErrorPhase::Resolve,

@@ -427,3 +427,33 @@ describe("dispose", () => {
     ]);
   });
 });
+
+describe("__BobcatLoadMetrics", () => {
+  /** A card's load entry, as the host writes it. */
+  const ENTRY = { entryType: "pipeline", name: "loadBundle", loadBundleStart: 1.5 };
+
+  it("dispatches the frame's loadmetrics at the nested page, with native's detail", () => {
+    boot();
+    frameBoot.__BobcatLoadMetrics(JSON.stringify(ENTRY));
+    expect(calls).toEqual([
+      // Bubbling and composed, as `load` is, naming `src` as written.
+      [
+        "dispatchEvent",
+        PAGE,
+        "loadmetrics",
+        true,
+        true,
+        TIMELINE,
+        { url: SRC, mode: "standard", entry: ENTRY },
+      ],
+    ]);
+  });
+
+  it("dispatches nothing for a card the frame let go of", () => {
+    boot();
+    frameBoot.dispose(done);
+    calls.length = 0;
+    frameBoot.__BobcatLoadMetrics(JSON.stringify(ENTRY));
+    expect(calls).toEqual([]);
+  });
+});

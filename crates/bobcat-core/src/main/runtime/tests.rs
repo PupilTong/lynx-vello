@@ -8545,7 +8545,7 @@ fn a_fetch_reaches_the_fetcher_as_the_realm_wrote_it() {
     let url = loop {
         match far.0.notices.try_recv().expect("the fetch was requested") {
             ViewNotice::RequestSource {
-                request: crate::resource::SourceRequest::Fetch { url },
+                request: crate::resource::SourceRequest::Fetch { url, .. },
                 ..
             } => break url,
             ViewNotice::RequestSource { request, .. } => panic!("expected a fetch: {request:?}"),

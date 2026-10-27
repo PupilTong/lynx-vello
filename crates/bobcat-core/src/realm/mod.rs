@@ -20,10 +20,11 @@
 //! worker realm's are the members of `bobcat-internal:worker`. Both kinds
 //! also install `bobcat-internal:native-modules` through
 //! [`crate::native_module::install`], the same member in each. Nothing here
-//! names a kind or branches on one. The core is told two things about its
+//! names a kind or branches on one. The core is told three things about its
 //! realm: the key its display-frame demand is reported under — `None` for a
-//! view's MTS realm and the worker's own key for a worker realm — and the
-//! [`ScriptSource`] its diagnostics name.
+//! view's MTS realm and the worker's own key for a worker realm — the
+//! [`ScriptSource`] its diagnostics name, and the [`Opener`] its fetches are
+//! timed as.
 //!
 //! Once a realm is open, its owner — a view's page or a worker — drives it
 //! through [`owner`]: the tasks, the one job per entry, the epilogue with the
@@ -47,6 +48,7 @@ use crate::future::FutureTable;
 use crate::jobs::JsThreadHandle;
 use crate::link::{HostOutbox, ViewNotice};
 use crate::main::quickjs::{ScriptEngine, ScriptRuntime};
+use crate::performance::Opener;
 use crate::script::ScriptError;
 use crate::timers::{TimerState, install_timer_members};
 use crate::view::{EngineEvent, ScriptSource};
@@ -208,16 +210,17 @@ impl RealmCore {
 /// end signal a `Future.wait` and a `require` park against: the view's for an
 /// MTS realm, the worker's own for a worker realm, so a wait ends with the
 /// realm that asked. `thread` is the engine thread whose jobs this realm's
-/// entries are. `source` is what this realm's console output and reports are
-/// named by when they reach the embedder. `child_hosts` is what every
-/// `ShadowRealm` child of this realm, and of its children, gets beyond the
-/// core.
+/// entries are. `names` is what this realm's console output and reports are
+/// named by when they reach the embedder, and the realm its fetches are
+/// timed as: the page realm's [`crate::performance::OpenerId::PAGE`], or the
+/// worker. `child_hosts` is what every `ShadowRealm` child of this realm, and
+/// of its children, gets beyond the core.
 pub(crate) fn open_realm<T>(
     js: &mut ScriptRuntime,
     host: &HostOutbox,
     thread: JsThreadHandle,
     frame_target: Option<WorkerKey>,
-    source: ScriptSource,
+    names: RealmNames,
     child_hosts: Option<Rc<dyn ChildHostModules>>,
     host_modules: impl FnOnce(&mut ScriptEngine) -> Result<T, ScriptError>,
 ) -> Result<(RealmCore, T), ScriptError> {
@@ -235,7 +238,7 @@ pub(crate) fn open_realm<T>(
         host,
         thread,
         FrameDemand::Report(frame_target),
-        source,
+        names,
         &Rc::downgrade(&children),
         child_hosts,
     )?;
@@ -263,23 +266,32 @@ pub(crate) enum FrameDemand {
     Ignored,
 }
 
+/// What a realm is named by outside itself: the [`ScriptSource`] its
+/// diagnostics carry, and the [`Opener`] its fetches are timed as.
+pub(crate) struct RealmNames {
+    pub(crate) source: ScriptSource,
+    pub(crate) opener: Opener,
+}
+
 /// Installs the members every realm has, the `ShadowRealm` constructor last,
 /// and answers with the two tables they write to.
 ///
 /// One function for an owner's realm and for each `ShadowRealm` child, which
-/// differ only in `frames`. A child is furnished from inside its parent's
-/// JavaScript, which is why nothing here takes the runtime. `children` is the
-/// list every `new ShadowRealm()` of this realm, and of its children, joins,
-/// and `child_hosts` what each of them gets beyond the core.
+/// differ only in `frames` and in `names`' opener. A child is furnished from
+/// inside its parent's JavaScript, which is why nothing here takes the
+/// runtime. `children` is the list every `new ShadowRealm()` of this realm,
+/// and of its children, joins, and `child_hosts` what each of them gets
+/// beyond the core.
 fn install_realm_core(
     engine: &mut ScriptEngine,
     host: &HostOutbox,
     thread: JsThreadHandle,
     frames: FrameDemand,
-    source: ScriptSource,
+    names: RealmNames,
     children: &Weak<ChildRealms>,
     child_hosts: Option<Rc<dyn ChildHostModules>>,
 ) -> Result<(Rc<TimerState>, Rc<FutureTable>), ScriptError> {
+    let RealmNames { source, opener } = names;
     let notices = host.clone();
     crate::script_frames::install(engine, move |pending| {
         if let FrameDemand::Report(worker) = frames {
@@ -295,7 +307,7 @@ fn install_realm_core(
         .map_err(|error| context_of("installing Future", error))?;
     // Over the table above rather than a wait of its own: what a fetch hands
     // JavaScript is a future of this realm's. `resolveUrl` beside it.
-    crate::fetch::install(engine, host, &futures)
+    crate::fetch::install(engine, host, &futures, opener)
         .map_err(|error| context_of("installing fetchResource", error))?;
     crate::require::install(engine, host.clone(), thread.clone())
         .map_err(|error| context_of("installing require", error))?;
@@ -308,6 +320,7 @@ fn install_realm_core(
             host: host.clone(),
             thread,
             source,
+            opener,
             child_hosts,
         },
     )

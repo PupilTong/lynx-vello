@@ -568,16 +568,18 @@ declare module "bobcat-internal:host" {
   export function connectBackground(key: number): void;
   /**
    * Worker realms: the realm has a `lynx.performance` observer (`on` `1`),
-   * or no longer has one (`0`), and one of its observers asked for `paint`
-   * entries (`paint` `1`) or none did (`0`). Nothing is sent to a worker
-   * without an observer, and no `paint` entry to one without a `paint`
-   * observer.
+   * or no longer has one (`0`), one of its observers asked for `paint`
+   * entries (`paint` `1`) or none did (`0`), and one asked for `resource`
+   * entries (`resource` `1`) or none did (`0`). Nothing is sent to a worker
+   * without an observer, and no `paint` or `resource` entry to one without
+   * an observer of it. Asking for `resource` times every `fetchBundle` of
+   * the view.
    */
-  export function observePerformance(on: 0 | 1, paint: 0 | 1): void;
+  export function observePerformance(on: 0 | 1, paint: 0 | 1, resource: 0 | 1): void;
   /**
    * Worker realms: every performance entry this worker is owed, as one
    * record (`bobcat:record`): per entry its pair count, then a key field and
-   * a value field per pair, the value `n<number>` or `s<text>`.
+   * a value field per pair, the value `n<number>`, `b1`/`b0` or `s<text>`.
    */
   export function takePerformanceEntries(): string;
   /**
@@ -624,8 +626,14 @@ declare module "bobcat-internal:host" {
    * Nothing about the bytes comes back and nothing is evaluated. What the
    * host made of them is its own — a fetched Lynx container's sections answer
    * the later loads `lynx.loadScript` and `__AdoptStyleSheet` make by URL.
+   *
+   * `lazyBundle` `true` names the fetch a lazy bundle load
+   * (`lynx.fetchBundle`): while someone observes the view's `resource`
+   * entries, one that makes a request is reported as a `resource.lazyBundle`
+   * entry. A `<frame>`'s fetch of its card leaves it out, as native reports
+   * no such entry for a frame's bundle.
    */
-  export function fetchResource(url: string): number | true;
+  export function fetchResource(url: string, lazyBundle?: boolean): number | true;
   /**
    * `url` resolved against the view's base URL by URL rules, in its WHATWG
    * serialization: what a fetch of `url` names, since the view's fetcher

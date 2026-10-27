@@ -33,6 +33,10 @@
 //! monitor (`memory`), which reads the two script runtimes and the
 //! document's elements on its interval: off unless the Rust embedder turns
 //! them on, and reported to it alone.
+//!
+//! And Lynx's `resource.lazyBundle` entry, one per `lynx.fetchBundle` that
+//! made a request ([`LazyBundleEntry`]), recorded only while someone
+//! observes `resource`.
 
 mod members;
 mod memory;
@@ -44,8 +48,15 @@ use std::fmt::Write as _;
 use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
+/// The engine's monotonic instant, which a [`Timestamp`] holds and a fetcher
+/// reports a [`crate::resource::FetchOutcome`] in: `std::time::Instant`
+/// natively and `web_time::Instant` on wasm32, where `std`'s panics.
+#[cfg(not(target_arch = "wasm32"))]
+pub use std::time::Instant;
 
 use smallvec::SmallVec;
+#[cfg(target_arch = "wasm32")]
+pub use web_time::Instant;
 
 pub(crate) use self::members::{
     install_pipeline_members, install_worker_members, pipeline_argument,
@@ -456,6 +467,93 @@ pub struct PaintEntry {
     pub start: Timestamp,
 }
 
+/// Lynx's `LazyBundleEntry` (`entryType` `"resource"`, `name`
+/// `"lazyBundle"`): one bundle `lynx.fetchBundle` fetched, from the call to
+/// the fetcher's answer.
+///
+/// Native fills it in `LazyBundleLifecycleOption::GetLazyBundleEntry`
+/// (`lynx/core/resource/lazy_bundle/lazy_bundle_lifecycle_option.cc:138-168`)
+/// for a load that made a request, and makes none for one served from what
+/// the engine already held (`mode == STATE_CACHE`, line 139); a bundle a
+/// view has already fetched is that here — `fetchBundle` answers it at once
+/// through the fetcher's probe, requests nothing, and reports nothing.
+/// `mode` is a constant: `"normal"` for every entry native sends
+/// ([`Self::MODE`]). `sync`, which `LazyBundleEntry.yml` lists, is not
+/// carried, because native's writer never writes it (lines 154-165): it is
+/// the old `perf_info` record's flag — the resource loader answered inside
+/// the require call itself (`LazyBundleLoader::SyncRequiring`,
+/// `lazy_bundle_loader.cc:66,312-316`) — and a fetch here always answers
+/// later, through the realm's future, so it would be `false` every time.
+///
+/// A deviation in what produces it: native sends it for a load through the
+/// engine's own lazy bundle path (`__QueryComponent`, a radon lazy
+/// component: `TemplateAssembler::RequireTemplateEntry`,
+/// `lynx/core/renderer/template_assembler.cc`) and none for `fetchBundle`
+/// (`TemplateAssembler::FetchBundle` and `LazyBundleLoader::DidFetchBundle`
+/// touch no lifecycle option). This engine has no `__QueryComponent`, so
+/// `fetchBundle`, which is how `ReactLynx` loads a lazy bundle here, is what
+/// makes it. A `<frame>`'s fetch of its card makes none, as native's frame
+/// load (`LazyBundleLoader::LoadFrameBundle`, `kFrame`) makes none.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LazyBundleEntry {
+    /// The URL the script passed (`componentUrl`).
+    pub component_url: Arc<str>,
+    /// The body's length in bytes (`size`), when the fetch succeeded and the
+    /// fetcher reported it. Native writes 0 where it has none; this leaves
+    /// the key out.
+    pub size_bytes: Option<u64>,
+    /// Whether the fetch succeeded (`loadSuccess`).
+    pub load_success: bool,
+    /// From the `fetchBundle` call to the bytes having arrived at the
+    /// fetcher — or, when the fetcher reported no arrival, to the outcome's
+    /// delivery to the realm (`requireStart`/`requireEnd`). Native's starts
+    /// at the request (`LazyBundleLoader::StartRecordRequireTime`,
+    /// `lazy_bundle_loader.cc:88,318-324`) and ends when the response
+    /// reaches the engine thread (`EndRecordRequireTime`, lines 75 and
+    /// 326-337).
+    pub require: Range<Timestamp>,
+    /// The fetcher's install of the bundle — the reference fetcher's
+    /// container decode and the registration of its sections
+    /// (`decodeStart`/`decodeEnd`), native's template entry build
+    /// (`template_assembler.cc:1444-1455`). `None` when nothing was
+    /// installed or the fetcher did not say.
+    pub decode: Option<Range<Timestamp>>,
+}
+
+impl LazyBundleEntry {
+    /// Lynx's `mode` for every entry it sends: `GenerateModeInfo`
+    /// (`lynx/core/resource/lazy_bundle/lazy_bundle_utils.cc:110-120`) names
+    /// `preload`, `cache` and `normal`, but a cached load sends no entry and
+    /// a preloaded one sets its mode on an option that is never dispatched
+    /// (`template_assembler.cc:2785-2786`), so what reaches an observer is
+    /// `normal`. This engine has no preloading of lazy bundles either.
+    pub const MODE: &'static str = "normal";
+
+    /// The entry of one timed `fetchResource` of `url`: called at `started`,
+    /// its outcome delivered to the realm at `delivered`, with the fetcher's
+    /// readings when it succeeded (`outcome`), `None` when it failed.
+    pub(crate) fn from_fetch(
+        url: Arc<str>,
+        started: ClockInstant,
+        delivered: ClockInstant,
+        outcome: Option<&crate::resource::FetchOutcome>,
+    ) -> Self {
+        let received = outcome
+            .and_then(|outcome| outcome.received)
+            .unwrap_or(delivered)
+            .max(started);
+        Self {
+            component_url: url,
+            size_bytes: outcome.and_then(|outcome| outcome.size_bytes),
+            load_success: outcome.is_some(),
+            require: Timestamp(started)..Timestamp(received),
+            decode: outcome
+                .and_then(|outcome| outcome.installed.clone())
+                .map(|installed| Timestamp(installed.start)..Timestamp(installed.end)),
+        }
+    }
+}
+
 /// One performance entry, as [`crate::EngineEvent::Performance`] reports it.
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
@@ -479,6 +577,13 @@ pub enum PerformanceEntry {
     /// the monitor's threshold, to the embedder alone as Lynx reports it to
     /// the platform alone.
     Memory(MemoryEntry),
+    /// Lynx's `resource.lazyBundle` entry, behind [`EntryTypes::RESOURCE`]:
+    /// one `lynx.fetchBundle` that made a request. Native sends it to every
+    /// audience (`kEventTypeAll`,
+    /// `lynx/core/resource/lazy_bundle/lazy_bundle_loader.cc:169`), its
+    /// background thread included, so the BTS observer of `resource` of the
+    /// realm that fetched receives it too.
+    LazyBundle(LazyBundleEntry),
 }
 
 /// Which entries an observer receives. Empty by default: an embedder that
@@ -503,6 +608,10 @@ impl EntryTypes {
     pub const JS_BLOCKING: Self = Self(1 << 4);
     /// [`PerformanceEntry::Memory`]; asking for it turns no monitor on.
     pub const MEMORY: Self = Self(1 << 5);
+    /// [`PerformanceEntry::LazyBundle`]. Asking for it is what times a
+    /// `fetchBundle`: two instants per fetch, and the fetcher's own
+    /// readings.
+    pub const RESOURCE: Self = Self(1 << 6);
     /// Every type.
     pub const ALL: Self = Self(
         Self::PIPELINE.0
@@ -510,7 +619,8 @@ impl EntryTypes {
             | Self::PAINT.0
             | Self::LONG_TASK.0
             | Self::JS_BLOCKING.0
-            | Self::MEMORY.0,
+            | Self::MEMORY.0
+            | Self::RESOURCE.0,
     );
 
     #[must_use]
@@ -552,6 +662,8 @@ pub enum LynxValue<'a> {
     /// A number at full precision, where Lynx writes an `int64` or a
     /// `double`; one that is not finite is JSON's `null`.
     Double(f64),
+    /// Where Lynx writes a `bool` (`PushBoolToMap`).
+    Boolean(bool),
     Text(&'a str),
 }
 
@@ -561,7 +673,7 @@ pub(crate) const ACTUAL_FMP_FLAG: &str = "__lynx_timing_actual_fmp";
 impl PerformanceEntry {
     /// The entry's `entryType`: Lynx's `"pipeline"` for the three pipeline
     /// entries, Paint Timing's `"paint"`, Long Tasks' `"longtask"`, and
-    /// Lynx's `"js_blocking"` and `"memory"`.
+    /// Lynx's `"js_blocking"`, `"memory"` and `"resource"`.
     #[must_use]
     pub const fn entry_type(&self) -> &'static str {
         match self {
@@ -570,12 +682,13 @@ impl PerformanceEntry {
             Self::LongTask(_) => "longtask",
             Self::JsBlocking(_) => "js_blocking",
             Self::Memory(_) => "memory",
+            Self::LazyBundle(_) => RESOURCE_ENTRY_TYPE,
         }
     }
 
     /// The entry's `name`: the pipeline's origin, the paint mark's
-    /// Performance Timeline name, the long task's [`JobKind`], or Lynx's
-    /// `"js_blocking"` or `"memory"` again.
+    /// Performance Timeline name, the long task's [`JobKind`], Lynx's
+    /// `"js_blocking"` or `"memory"` again, or Lynx's `"lazyBundle"`.
     #[must_use]
     pub fn name(&self) -> &str {
         match self {
@@ -583,6 +696,7 @@ impl PerformanceEntry {
             Self::LongTask(task) => task.kind.as_str(),
             Self::JsBlocking(_) => "js_blocking",
             Self::Memory(_) => "memory",
+            Self::LazyBundle(_) => LAZY_BUNDLE_NAME,
             Self::LoadBundle(_) | Self::ReloadBundle(_) | Self::Pipeline(_) => self
                 .pipeline()
                 .map_or("", |pipeline| pipeline.origin.lynx_name()),
@@ -596,7 +710,11 @@ impl PerformanceEntry {
             Self::LoadBundle(load) => Some(&load.pipeline),
             Self::ReloadBundle(reload) => Some(&reload.pipeline),
             Self::Pipeline(pipeline) => Some(pipeline),
-            Self::Paint(_) | Self::LongTask(_) | Self::JsBlocking(_) | Self::Memory(_) => None,
+            Self::Paint(_)
+            | Self::LongTask(_)
+            | Self::JsBlocking(_)
+            | Self::Memory(_)
+            | Self::LazyBundle(_) => None,
         }
     }
 
@@ -629,6 +747,14 @@ impl PerformanceEntry {
     /// `category`, `sizeBytes`, `instanceCount` and its own `detail`, a map
     /// of strings; then `sizeBytes`, the categories' sum.
     ///
+    /// A [`Self::LazyBundle`] is what Lynx's
+    /// `LazyBundleLifecycleOption::GetLazyBundleEntry` writes, in its order
+    /// and types: `entryType`, `name`, `componentUrl`, the integer `size`
+    /// (left out when the fetcher did not report one), the boolean
+    /// `loadSuccess`, then `mode`, then `decodeStart`/`decodeEnd` (left out
+    /// for a fetch nothing was installed from) and `requireStart`/
+    /// `requireEnd`. No `sync`: native's writer leaves it out.
+    ///
     /// The one place a Lynx key is spelled: [`Self::write_lynx_json`] and
     /// the BTS's `lynx.performance` entries are both written from this.
     pub fn lynx_fields(
@@ -640,6 +766,7 @@ impl PerformanceEntry {
             Self::LongTask(task) => return long_task_fields(task, origin).into_iter(),
             Self::JsBlocking(report) => return js_blocking_fields(report, origin).into_iter(),
             Self::Memory(memory) => return memory_fields(memory, origin).into_iter(),
+            Self::LazyBundle(bundle) => return lazy_bundle_fields(bundle, origin).into_iter(),
             Self::LoadBundle(load) => &load.pipeline,
             Self::ReloadBundle(reload) => &reload.pipeline,
             Self::Pipeline(pipeline) => pipeline,
@@ -713,7 +840,8 @@ impl PerformanceEntry {
             | Self::Paint(_)
             | Self::LongTask(_)
             | Self::JsBlocking(_)
-            | Self::Memory(_) => {}
+            | Self::Memory(_)
+            | Self::LazyBundle(_) => {}
         }
         fields.framework(&pipeline.framework_rendering_timing, vm_execute);
         fields.text("hostPlatformTiming.hostPlatformType", "vello");
@@ -853,6 +981,11 @@ fn paint_fields<'a>(
     fields.list
 }
 
+/// Lynx's `kTypeResource` and `kNameLazyBundle`
+/// (`lynx/core/resource/lazy_bundle/lazy_bundle_lifecycle_option.cc:143-144`).
+const RESOURCE_ENTRY_TYPE: &str = "resource";
+const LAZY_BUNDLE_NAME: &str = "lazyBundle";
+
 /// A [`PerformanceEntry::LongTask`]'s fields.
 fn long_task_fields<'a>(
     task: &LongTaskEntry,
@@ -988,6 +1121,35 @@ fn memory_fields<'a>(
     fields.list
 }
 
+/// A [`PerformanceEntry::LazyBundle`]'s fields, in `GetLazyBundleEntry`'s
+/// order.
+fn lazy_bundle_fields<'a>(
+    bundle: &'a LazyBundleEntry,
+    origin: &TimeOrigin,
+) -> Vec<(Cow<'static, str>, LynxValue<'a>)> {
+    let mut fields = Fields {
+        origin: *origin,
+        list: Vec::with_capacity(10),
+    };
+    fields.text("entryType", RESOURCE_ENTRY_TYPE);
+    fields.text("name", LAZY_BUNDLE_NAME);
+    fields.text("componentUrl", &bundle.component_url);
+    if let Some(size) = bundle.size_bytes {
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "a body past 2^53 bytes is not a fetch this engine makes"
+        )]
+        fields.double("size", size as f64);
+    }
+    fields.boolean("loadSuccess", bundle.load_success);
+    fields.text("mode", LazyBundleEntry::MODE);
+    if let Some(decode) = &bundle.decode {
+        fields.range("decodeStart", "decodeEnd", decode);
+    }
+    fields.range("requireStart", "requireEnd", &bundle.require);
+    fields.list
+}
+
 /// A duration in whole milliseconds, as Lynx's millisecond clock reads one.
 fn whole_millis(duration: Duration) -> f64 {
     u32::try_from(duration.as_millis()).map_or(f64::from(u32::MAX), f64::from)
@@ -1004,6 +1166,7 @@ fn write_lynx_value(out: &mut String, value: LynxValue<'_>) {
             write!(out, "{number}").expect("writing to a String cannot fail");
         }
         LynxValue::Double(_) => out.push_str("null"),
+        LynxValue::Boolean(value) => out.push_str(if value { "true" } else { "false" }),
         LynxValue::Text(text) => write_json_string(out, text),
     }
 }
@@ -1045,6 +1208,10 @@ impl<'a> Fields<'a> {
 
     fn double(&mut self, key: impl Into<Cow<'static, str>>, value: f64) {
         self.list.push((key.into(), LynxValue::Double(value)));
+    }
+
+    fn boolean(&mut self, key: &'static str, value: bool) {
+        self.list.push((key.into(), LynxValue::Boolean(value)));
     }
 
     fn time(&mut self, key: impl Into<Cow<'static, str>>, at: Timestamp) {
@@ -1101,9 +1268,10 @@ impl<'a> Fields<'a> {
 /// Every entry in `entries` as one `<utf16Length>:<text>` record, for the
 /// BTS's `takePerformanceEntries`: per entry, its pair count, then each of
 /// [`PerformanceEntry::lynx_fields`]'s pairs as a key field and a value
-/// field, the value prefixed `n` for a number (three decimals) and `s` for
-/// text. Each key is written by [`record_key`], and `bobcat:performance`
-/// folds it back into the object its first segment names.
+/// field, the value prefixed `n` for a number (three decimals), `b` for a
+/// boolean (`b1` or `b0`) and `s` for text. Each key is written by
+/// [`record_key`], and `bobcat:performance` folds it back into the object
+/// its first segment names.
 pub(crate) fn encode_entries(entries: &[PerformanceEntry], origin: &TimeOrigin) -> String {
     use crate::main::record::write_record_field;
     let mut record = String::new();
@@ -1123,6 +1291,7 @@ pub(crate) fn encode_entries(entries: &[PerformanceEntry], origin: &TimeOrigin) 
                 LynxValue::Double(number) => {
                     write!(scratch, "n{number}").expect("writing to a String cannot fail");
                 }
+                LynxValue::Boolean(value) => scratch.push_str(if value { "b1" } else { "b0" }),
                 LynxValue::Text(text) => {
                     scratch.push('s');
                     scratch.push_str(text);

@@ -90,7 +90,7 @@ impl ResourceFetcher for Entries {
             SourceRequest::Module(url)
             | SourceRequest::StyleSheet(url)
             | SourceRequest::Font { url }
-            | SourceRequest::Fetch { url } => url.clone(),
+            | SourceRequest::Fetch { url, .. } => url.clone(),
         };
         completion.complete(Self::source(&specifier).map_or_else(
             || {

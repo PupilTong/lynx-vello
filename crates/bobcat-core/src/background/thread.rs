@@ -429,9 +429,12 @@ impl Worker {
                         &self.host,
                         self.lifetime.thread().clone(),
                         Some(self.key),
-                        crate::ScriptSource::Worker {
-                            id: crate::WorkerId::from(self.key),
-                            url: Arc::from(self.url.as_str()),
+                        realm::RealmNames {
+                            source: crate::ScriptSource::Worker {
+                                id: crate::WorkerId::from(self.key),
+                                url: Arc::from(self.url.as_str()),
+                            },
+                            opener: crate::performance::Opener::Worker(self.key),
                         },
                         // A worker's children get the core alone.
                         None,

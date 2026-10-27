@@ -13,7 +13,7 @@
 import { beforeEach, describe, expect, it, rstest } from "@rstest/core";
 
 rstest.mockRequire("bobcat-internal:host", () => ({
-  fetchResource: (url: string): number | true => host.fetch(url),
+  fetchResource: (url: string, lazyBundle?: boolean): number | true => host.fetch(url, lazyBundle),
   waitFuture: (id: number, timeoutMs: number): boolean => host.wait(id, timeoutMs),
   takeFuture: (id: number): unknown => host.take(id),
   settleFuture: (id: number): undefined => host.settle(id),
@@ -40,14 +40,17 @@ const host = {
   loads: new Map<number, Load>(),
   /** Every URL `fetchResource` was asked for, in order. */
   fetches: [] as string[],
+  /** Whether each of those fetches was named a lazy bundle load. */
+  lazyBundles: [] as (boolean | undefined)[],
   /** Every `(id, timeoutMs)` a `wait` asked for, in order. */
   waits: [] as [number, number][],
   /** Every id `.then` asked to settle asynchronously, in order. */
   settles: [] as number[],
   next: 1,
 
-  fetch(url: string): number | true {
+  fetch(url: string, lazyBundle?: boolean): number | true {
     this.fetches.push(url);
+    this.lazyBundles.push(lazyBundle);
     // The fetcher's probe: already fetched, so nothing is requested.
     if (this.already.has(url)) return true;
     const id = this.next++;
@@ -98,6 +101,7 @@ const host = {
     this.already.clear();
     this.loads.clear();
     this.fetches.length = 0;
+    this.lazyBundles.length = 0;
     this.waits.length = 0;
     this.settles.length = 0;
     this.next = 1;
@@ -147,6 +151,8 @@ describe("the handle lynx.fetchBundle answers with", () => {
     // Nothing here memoizes: both calls reach the host, which is what lets
     // the *fetcher* be the one thing that knows what it has.
     expect(host.fetches).toEqual([LAZY, LAZY]);
+    // Each a lazy bundle load, which a `resource.lazyBundle` entry reports.
+    expect(host.lazyBundles).toEqual([true, true]);
   });
 
   it("settles at once for a URL the fetcher already holds, and runs .then through later", () => {
