@@ -38,6 +38,7 @@ rstest.mockRequire("bobcat-internal:host", () => {
     childElementIds: native.childElementIds,
     parentNode: native.parentNode,
     childIndex: native.childIndex,
+    inheritRelevance: native.inheritRelevance,
     insertBefore: native.insertBefore,
     removeElement: native.removeElement,
     replaceElement: native.replaceElement,
@@ -422,6 +423,9 @@ function createMockBobcat(issuedIds?: number[]): MockBobcat {
       calls.push(["childIndex", id]);
       const parent = parents.get(id);
       return parent === undefined ? -1 : (childOrder.get(parent) ?? []).indexOf(id);
+    },
+    inheritRelevance: (node: unknown, from: unknown) => {
+      calls.push(["inheritRelevance", nodeId("inheritRelevance", node), nodeId("inheritRelevance", from)]);
     },
     insertBefore: (parent: unknown, child: unknown, reference: unknown) => {
       const parentId = nodeId("insertBefore", parent);
@@ -4929,11 +4933,19 @@ describe("update-list-info", () => {
     __UpdateListCallbacks(list, componentAtIndex, enqueueComponent, null);
     await drain();
     const [, second] = __GetChildren(list);
+    const placeholderId = __GetElementUniqueID(second!);
 
     reveal(list, second!);
 
     expect(calls).toEqual([
       ["componentAtIndex", __GetElementUniqueID(list), 1, 0, false],
+    ]);
+    // The cell takes the placeholder's relevance before its place, so the
+    // commit lays it out at its own size, not skipped at `100cqh`.
+    const cellId = __GetElementUniqueID(cells[1]!);
+    expect(mock.calls.filter(([name]) => name === "inheritRelevance" || name === "replaceElement")).toEqual([
+      ["inheritRelevance", cellId, placeholderId],
+      ["replaceElement", cellId, placeholderId],
     ]);
     // The cell took the placeholder's place; the others are still waiting.
     const children = __GetChildren(list);

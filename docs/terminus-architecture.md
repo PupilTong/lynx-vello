@@ -480,7 +480,12 @@ once per commit. A frame published at the cap with a reveal still owed asks
 for main-thread ticks (`CommittedFrame::needs_main_ticks`), and the host's
 next frame tick calls `Document::resume_relevance` to continue it: a `<list>`
 whose cells have no size estimate reveals about three placeholder rows per
-pass, so filling the window can take several ticks. The bit
+pass, so filling the window can take several ticks. A host that puts a new
+`auto` box in a revealed one's place between commits — the `<list>` building
+a placeholder's cell — calls `Document::inherit_relevance`, so the newcomer is
+laid out relevant at its own size rather than skipped at its
+`contain-intrinsic-size` before any pass could decide it; the handover queues
+the newcomer's `skipped: false` change like any first determination. The bit
 itself is layout-side per-element state in a slot-keyed side table on
 `TreeArenas` (`layout/relevance.rs`) — never a Stylo `ElementState` and never a
 restyle trigger — read through `StyleView`'s `CoreStyle::skips_contents`

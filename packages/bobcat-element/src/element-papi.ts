@@ -11,6 +11,7 @@ import {
   flushElementTree,
   getAttribute,
   getComputedStyleMap,
+  inheritRelevance,
   insertBefore,
   listenerClosed,
   listenerOpened,
@@ -1930,7 +1931,14 @@ function countPlaceholders(list: Handle, delta: number): undefined {
  * `componentAtIndex` appends a cell it builds (ReactLynx's `list.ts:202`)
  * and answers a reused one detached; `replaceElement` moves either into the
  * placeholder's place and removes the placeholder, which nothing holds once
- * it is disowned here. A placeholder the event reaches from a nested list
+ * it is disowned here. The cell first takes the placeholder's relevance
+ * (`inheritRelevance`), so the next commit lays it out at its own size
+ * rather than skipped at `100cqh`: nine fresh cells a viewport tall each
+ * would push what the list's scroll anchor shows nine viewports down, past
+ * the encode window, onto placeholders the next reveal builds again —
+ * which walked a fast scroll down to the list's last row. It also queues the
+ * cell's own `contentvisibilityautostatechange` (`skipped: false`), so a
+ * card that listens on its cells hears each one shown. A placeholder the event reaches from a nested list
  * is that list's, and one already built or moved out of the list is left
  * alone. A list whose callbacks are cleared keeps its placeholders.
  */
@@ -1966,6 +1974,7 @@ function buildRevealedCell(event: DispatchedEvent): undefined {
     return undefined;
   }
   const cell = listChildHandle(sign, "componentAtIndex answered");
+  inheritRelevance(sign, placeholderNodeId);
   replaceElement(sign, placeholderNodeId);
   adopt(list, cell);
   disown(placeholder);

@@ -2096,8 +2096,12 @@ consequential choice about whether to follow the spec or the quirk.
   `contentvisibilityautostatechange` builds the cell with the placeholder's
   current index and swaps it in. A placeholder stops skipping when a commit
   finds it inside the encode window, so a cell is built about a scrollport
-  before it is on screen, one entry after the commit that found it. What a
-  card can observe differently from web-core:
+  before it is on screen, one entry after the commit that found it. The
+  cell takes over its placeholder's relevance (`inheritRelevance`), so the
+  next commit lays it out at its own size rather than skipped at the
+  estimate, and owes its own `contentvisibilityautostatechange`
+  (`skipped: false`), as an undetermined box's first determination does.
+  What a card can observe differently from web-core:
   - `__GetChildren(list)`, `getVisibleCells` and selector queries see
     placeholders for cells not built yet: a plain `list-item` with the
     platform-info attributes and no content, id or class of the card's own.

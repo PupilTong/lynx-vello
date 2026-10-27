@@ -257,6 +257,14 @@ interface BobcatNative {
    * counted, or -1 for a detached element. Kept on the node, so O(1).
    */
   childIndex(nodeId: number): number;
+  /**
+   * Lets `nodeId`, which no commit has determined yet, start out as relevant
+   * to the user as `from` was last found, and queues the
+   * `contentvisibilityautostatechange` that first determination owes. For a
+   * `content-visibility: auto` box built to take another's place: it is laid
+   * out at its real size, not its `contain-intrinsic-size`.
+   */
+  inheritRelevance(nodeId: number, from: number): void;
   /** Reparenting insert; appends when `reference` is null. */
   insertBefore(parent: number, child: number, reference: number | null): void;
   /**
@@ -515,6 +523,7 @@ declare module "bobcat-internal:host" {
   export const childElementIds: BobcatNative["childElementIds"];
   export const parentNode: BobcatNative["parentNode"];
   export const childIndex: BobcatNative["childIndex"];
+  export const inheritRelevance: BobcatNative["inheritRelevance"];
   export const insertBefore: BobcatNative["insertBefore"];
   export const removeElement: BobcatNative["removeElement"];
   export const replaceElement: BobcatNative["replaceElement"];

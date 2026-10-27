@@ -244,6 +244,34 @@ impl<T: Sync> Document<T> {
             || self.in_top_layer(auto.node)
     }
 
+    /// Lets `node` start out relevant when the last rendering update found
+    /// `from` relevant and nothing has determined `node` yet.
+    ///
+    /// For a host that puts one `auto` box in another's place between two
+    /// commits: a `<list>` building the cell its placeholder was revealed
+    /// for. Left undetermined, the newcomer would be laid out skipped, at its
+    /// `contain-intrinsic-size`, in the layout that places everything after
+    /// it, and scroll anchoring would follow that size before the
+    /// determination later in the same render could take it back.
+    ///
+    /// The handover is the newcomer's first determination, so it queues the
+    /// `contentvisibilityautostatechange` (`skipped: false`) that one owes:
+    /// an undetermined box skips, and this one no longer does. The next
+    /// render determines it as it does every box.
+    pub fn inherit_relevance(&mut self, node: NodeId, from: NodeId) {
+        let (Some(slot), Some(from)) = (self.slot(node), self.slot(from)) else {
+            return;
+        };
+        if self.arenas_mut().inherit_relevance(slot, from) {
+            self.content_visibility_changes
+                .push(ContentVisibilityChange {
+                    node,
+                    skipped: false,
+                });
+            self.invalidate_layout(node);
+        }
+    }
+
     /// Ends the render: the determinations it made stop being *this*
     /// render's, so the next one asks again.
     pub(crate) fn settle_relevance(&mut self) {
