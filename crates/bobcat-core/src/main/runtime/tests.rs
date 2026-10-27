@@ -7900,16 +7900,24 @@ fn an_event_target_no_handle_names_is_an_error_not_a_silent_drop() {
 }
 
 /// `__SetAttribute(list, "update-list-info", …)` against the real document,
-/// which is where the protocol's two primitives actually live: the child at
-/// an index (`childElementIds`) and the tree edits decided from it.
+/// where the protocol's primitives live: the list's children
+/// (`childElementIds`), the tree edits, the placeholders' relevance and the
+/// `contentvisibilityautostatechange` that builds a cell.
 ///
 /// The batch is serviced in a microtask, so the callbacks a card files
-/// *after* writing the operations are the ones that serve it — which is the
-/// order `ReactLynx`'s own `ListUpdateInfoRecording.flush` writes in. Boot ends
-/// in a checkpoint, so by the time this returns the queue has drained; what
-/// the microtasks found is written back onto the list as attributes, since
-/// the document is the only thing this test can read.
+/// *after* writing the operations are the ones that serve it — the order
+/// `ReactLynx`'s own `ListUpdateInfoRecording.flush` writes in. It inserts a
+/// placeholder per position and builds nothing; the commit then finds the
+/// placeholders inside the encode window, and the delivery of that commit's
+/// state changes is where `componentAtIndex` runs, one cell per placeholder.
+/// A timer then removes old indices 1 and 3. What the script found is
+/// written back onto the list as attributes, since the document is the only
+/// thing this test can read.
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one batch, one reveal and one removal batch"
+)]
 fn update_list_info_builds_and_retires_cells_through_the_filed_callbacks() {
     let (mut js_runtime, mut runtime, elements) = runtime();
     runtime
@@ -7920,6 +7928,7 @@ fn update_list_info_builds_and_retires_cells_through_the_filed_callbacks() {
                   const page = __CreatePage('card', 0);
                   const list = __CreateList(0, null, null);
                   __SetID(list, 'cells');
+                  __SetInlineStyles(list, 'width:100px;height:100px');
                   __AppendElement(page, list);
                   const listId = __GetElementUniqueID(list);
                   const keys = new Map();
@@ -7929,15 +7938,20 @@ fn update_list_info_builds_and_retires_cells_through_the_filed_callbacks() {
                     keys.set(__GetElementUniqueID(cell), 'cell-' + index);
                     return cell;
                   });
+                  const built = () => __GetChildren(list)
+                    .filter(child => keys.has(__GetElementUniqueID(child))).length;
                   const retired = [];
                   const retire = (element, id, sign) =>
                     retired.push(element === list && id === listId
                       ? keys.get(sign) ?? sign
                       : 'wrong-list');
 
-                  // First batch: four cells, appended in position order.
+                  // Four cells, each a 10px placeholder until it is revealed.
                   __SetAttribute(list, 'update-list-info', {
-                    insertAction: [0, 1, 2, 3].map(position => ({ position })),
+                    insertAction: [0, 1, 2, 3].map(position => ({
+                      position,
+                      'estimated-main-axis-size-px': 10,
+                    })),
                     removeAction: [],
                     // Ignored, as web-core's accepted payload ignores it.
                     updateAction: [{ from: 0, to: 0, type: 'x', flush: false }],
@@ -7955,14 +7969,15 @@ fn update_list_info_builds_and_retires_cells_through_the_filed_callbacks() {
                     retire,
                     () => { throw Error('componentAtIndexes is never called'); },
                   );
-                  if (__GetChildren(list).length !== 0)
-                    throw Error('the protocol ran before its microtask');
-
-                  // Second batch, behind the first: old indices 1 and 3 go,
-                  // and the cell that was at 2 is left between them.
                   Promise.resolve().then(() => {
-                    __SetAttribute(list, 'data-first-batch',
-                      __GetChildren(list).map(__GetElementUniqueID).length);
+                    __SetAttribute(list, 'data-placeholders', __GetChildren(list).length);
+                    __SetAttribute(list, 'data-built-by-batch', built());
+                  });
+
+                  // After the commit and the delivery: old indices 1 and 3
+                  // go, and the cell that was at 2 is left between them.
+                  setTimeout(() => {
+                    __SetAttribute(list, 'data-built', built());
                     __SetAttribute(list, 'update-list-info', {
                       insertAction: [],
                       removeAction: [1, 3],
@@ -7973,12 +7988,20 @@ fn update_list_info_builds_and_retires_cells_through_the_filed_callbacks() {
                     Promise.resolve().then(() => {
                       __SetAttribute(list, 'data-retired', retired.join(','));
                     });
-                  });
+                  }, 0);
                 };
                 ",
             "app:///list.js",
         )
         .expect("the list protocol");
+    runtime.commit_if_dirty();
+    assert!(
+        runtime
+            .dispatch_content_visibility_changes(&mut js_runtime)
+            .is_empty(),
+        "building the revealed cells throws nothing",
+    );
+    assert!(runtime.run_due_timers(&mut js_runtime).is_empty());
 
     let tree = elements.tree();
     let list = tree
@@ -7987,9 +8010,19 @@ fn update_list_info_builds_and_retires_cells_through_the_filed_callbacks() {
         .find(|node| node.attribute("id").as_deref() == Some("cells"))
         .expect("the list element");
     assert_eq!(
-        list.attribute("data-first-batch").as_deref(),
+        list.attribute("data-placeholders").as_deref(),
         Some("4"),
-        "every insertAction position built its cell"
+        "every insertAction position has its placeholder"
+    );
+    assert_eq!(
+        list.attribute("data-built-by-batch").as_deref(),
+        Some("0"),
+        "the batch builds no cell"
+    );
+    assert_eq!(
+        list.attribute("data-built").as_deref(),
+        Some("4"),
+        "the delivery of the commit's state changes built every revealed cell"
     );
     assert_eq!(
         list.attribute("data-retired").as_deref(),
@@ -8645,12 +8678,13 @@ fn a_frame_realm_declares_the_page_members() {
 
 /// The page realm's `bobcat-internal:host` exports, sorted as a namespace
 /// lists them.
-const MTS_HOST_MEMBERS: [&str; 60] = [
+const MTS_HOST_MEMBERS: [&str; 61] = [
     "adoptStyleSheet",
     "attributeNames",
     "bindPipelineTimingFlag",
     "callElementMethod",
     "childElementIds",
+    "childIndex",
     "clearTimer",
     "closeRealm",
     "connectBackground",

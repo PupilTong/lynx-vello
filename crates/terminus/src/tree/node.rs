@@ -1268,6 +1268,17 @@ impl<T> Node<T> {
         self.children.last().map(|&slot| self.arenas().at(slot))
     }
 
+    /// This node's position in its parent's child list, nodes of every kind
+    /// counted; `None` for a node with no parent and for a shadow root. One
+    /// subtraction: the position is kept on the node.
+    #[must_use]
+    pub fn index_in_parent(&self) -> Option<usize> {
+        if self.is_shadow_root() {
+            return None;
+        }
+        Some(self.index_in(self.arenas().at(self.parent?)))
+    }
+
     #[must_use]
     pub fn next_sibling(&self) -> Option<&Node<T>> {
         self.sibling_at(1)

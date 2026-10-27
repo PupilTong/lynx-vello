@@ -354,7 +354,7 @@ verified! {
     config_css_default_display_linear_false => "config-css-default-display-linear-false",
     // With `enableRemoveCSSScope: true` both files' `.basic` are one global sheet and the later `sub.css` wins on both views: green 100x100. `#sub` covers `#index` exactly, so the frame shows the winner on `#sub`; `#index` matches the same two rules.
     config_css_remove_scope_true => "config-css-remove-scope-true",
-    // A cell not reached yet is sized by `estimated-main-axis-size-px` and takes its real size once reached: the first scroll to the end stops with 100px of the last cell in view, because the extent counted its 100px estimate, and a second one shows all 200px of it.
+    // A cell not built yet is a placeholder sized by its estimate alone (lazy cells, user ruling 2026-10-27; deviations.md): the first fourteen carry none, so they stand at `100cqh`, 500px, rather than their own 300px `height`, and the first 5000px wheel stops mid-list on cells 8 and 9. The second reaches the end with the last cell still at its 100px `estimated-main-axis-size-px`; built, it grows to 200px below the anchored rows, so 100px of it is in view.
     basic_element_list_estimated_main_axis_size_px => "basic-element-list-estimated-main-axis-size-px",
     // The default mode: one item fills the swiper, the dot strip is centred under it, and `current` set to the last item shows the yellow one with the fourth dot lit.
     basic_element_x_swiper_mode_normal => "basic-element-x-swiper-mode-normal",

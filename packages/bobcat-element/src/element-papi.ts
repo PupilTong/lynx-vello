@@ -2,6 +2,7 @@ import {
   attributeNames,
   callElementMethod,
   childElementIds,
+  childIndex,
   createDocument,
   createElement,
   createPage,
@@ -240,6 +241,11 @@ import { frameConnectionChanged, frameDataChanged, frameSourceChanged } from "bo
 //   event of its own, `bobcat:exposure`, dispatched at the element, not
 //   bubbling, with three extras (`exposureID`, `exposureScene`, `appeared`)
 //   — see "Exposure records" below.
+// - `DETAIL_CONTENT_VISIBILITY` — `contentvisibilityautostatechange`
+//   (css-contain-2 §4.4): `skipped` as a boolean, which becomes
+//   `ContentVisibilityAutoStateChangeEvent.skipped` on the event object; the
+//   `detail` is `{}`, as web-core's cross-thread event has it. It bubbles
+//   and is targeted at the `content-visibility: auto` element itself.
 // - `DETAIL_CLONED` — a synthetic event another realm dispatched (below):
 //   one value, that realm's `event.detail` as the structured clone the host
 //   was handed, which becomes the `detail` as it is, with no member put on
@@ -797,6 +803,8 @@ interface Handle {
   [ownerSymbol]?: number | undefined;
   [frameSymbol]?: true;
   [exposureSymbol]?: ExposureState;
+  [placeholderSymbol]?: true | undefined;
+  [placeholderCountSymbol]?: number;
 }
 
 function listenersOf(handle: Handle): ListenerLists | undefined {
@@ -1806,15 +1814,11 @@ type ListCallback = ((...args: unknown[]) => unknown) | null | undefined;
 /**
  * A list's element children right now, by node id.
  *
- * Read fresh at every step of the two loops in [`updateListInfo`] and never
- * cached, because both mutate the tree as they go and web-core reads
- * `element.children` — a *live* `HTMLCollection` — the same way. It matters
- * twice over: `removeAction` positions are indices into the pre-removal
- * child list, which is why the i-th removal looks at `position - i`; and
- * `componentAtIndex` appends the cell it built (ReactLynx's
- * `snapshot/list/list.ts:202`, `__AppendElement(list, root)`) before it
- * answers, so a snapshot taken before an insertion step is already stale by
- * the time the step needs it.
+ * web-core reads `element.children`, a *live* `HTMLCollection`, at every
+ * step of the two loops in [`updateListInfo`]. Here one read is a host call
+ * that joins every child's id and a split that parses them back, so reading
+ * it per step made a batch of N insertions cost O(N²). A batch therefore
+ * reads it once and keeps that array in step with its own edits.
  */
 function listChildren(listNodeId: number): number[] {
   const record = childElementIds(listNodeId);
@@ -1842,6 +1846,135 @@ function listChildHandle(nodeId: number, what: string): Handle {
 }
 
 /**
+ * Set on the handle of a cell's placeholder: a `list-item` this file
+ * inserted where `componentAtIndex` has not built the cell yet.
+ */
+const placeholderSymbol = Symbol("placeholder");
+
+/** On a list's handle: how many placeholders the list holds. */
+const placeholderCountSymbol = Symbol("placeholderCount");
+
+/**
+ * css-contain-2 §4.4's event, which tells this file a placeholder stopped
+ * skipping.
+ */
+const CONTENT_VISIBILITY_EVENT = "contentvisibilityautostatechange";
+
+/**
+ * The platform info a placeholder carries as attributes: the keys
+ * ReactLynx writes onto a built cell's element (`platformInfoAttributes` in
+ * `snapshot/snapshot/platformInfo.ts`, less `reuse-identifier` and
+ * `recyclable`, which it never writes). They are what sizes and places a
+ * cell before it is built — `estimated-main-axis-size-px` its
+ * `contain-intrinsic-size`, `full-span` and the sticky pair its placement —
+ * and `item-key`, which `scrollToPosition` and `getVisibleCells` read.
+ */
+const PLACEHOLDER_ATTRIBUTES = [
+  "item-key",
+  "full-span",
+  "sticky-top",
+  "sticky-bottom",
+  "estimated-height",
+  "estimated-height-px",
+  "estimated-main-axis-size-px",
+] as const;
+
+/** A new placeholder for the cell one `insertAction` entry describes. */
+function createPlaceholder(action: unknown): Handle {
+  const nodeId = createElement("list-item");
+  const placeholder = createHandle(nodeId);
+  placeholder[placeholderSymbol] = true;
+  if (typeof action === "object" && action !== null) {
+    const info = action as Record<string, unknown>;
+    for (const key of PLACEHOLDER_ATTRIBUTES) {
+      const value = info[key];
+      if (value !== undefined && value !== null) {
+        setAttribute(nodeId, key, String(value));
+      }
+    }
+  }
+  return placeholder;
+}
+
+/**
+ * Moves a list's placeholder count by `delta`, filing [`buildRevealedCell`]
+ * as the list's listener while the count is above zero, so a list whose
+ * cells are all built makes the host call this realm for none of its
+ * cells' state changes.
+ */
+function countPlaceholders(list: Handle, delta: number): undefined {
+  const before = list[placeholderCountSymbol] ?? 0;
+  const after = before + delta;
+  list[placeholderCountSymbol] = after;
+  if (before === 0 && after > 0) {
+    addListener(list, CONTENT_VISIBILITY_EVENT, buildRevealedCell, undefined);
+  } else if (before > 0 && after === 0) {
+    removeListener(list, CONTENT_VISIBILITY_EVENT, buildRevealedCell, undefined);
+  }
+  return undefined;
+}
+
+/**
+ * The list's listener for its cells' `contentvisibilityautostatechange`:
+ * when a placeholder stops skipping, `componentAtIndex` builds its cell and
+ * the cell takes the placeholder's place.
+ *
+ * A placeholder stops skipping when a commit finds it inside the encode
+ * window — one scrollport past the scrollport each way — so a cell is built
+ * a scrollport before it scrolls into view, and in the commit after the one
+ * that found it, since the event is delivered by a task of its own. The
+ * index `componentAtIndex` is asked for is the placeholder's position among
+ * the list's children when it is built, which is the cell's index in the
+ * card's list as the batches so far have left it.
+ *
+ * `componentAtIndex` appends a cell it builds (ReactLynx's `list.ts:202`)
+ * and answers a reused one detached; `replaceElement` moves either into the
+ * placeholder's place and removes the placeholder, which nothing holds once
+ * it is disowned here. A placeholder the event reaches from a nested list
+ * is that list's, and one already built or moved out of the list is left
+ * alone. A list whose callbacks are cleared keeps its placeholders.
+ */
+function buildRevealedCell(event: DispatchedEvent): undefined {
+  if (event.skipped !== false || event.currentTarget === null) {
+    return undefined;
+  }
+  const list = event.currentTarget.elementRefptr as Handle;
+  const placeholder = event.target.elementRefptr as Handle;
+  const placeholderNodeId = event.target.uid;
+  const listNodeId = event.currentTarget.uid;
+  if (
+    placeholder[placeholderSymbol] !== true ||
+    parentNode(placeholderNodeId) !== listNodeId
+  ) {
+    return undefined;
+  }
+  const componentAtIndex = list[listCallbacksSymbol]?.componentAtIndex as ListCallback;
+  if (typeof componentAtIndex !== "function") {
+    return undefined;
+  }
+  const sign = componentAtIndex(
+    list,
+    listNodeId,
+    childIndex(placeholderNodeId),
+    // The operation id, which no readback here consumes, and
+    // `enableReuseNotification`, which needs the recycling pool this engine
+    // does not have. web-core passes the same two constants.
+    0,
+    false,
+  );
+  if (typeof sign !== "number") {
+    return undefined;
+  }
+  const cell = listChildHandle(sign, "componentAtIndex answered");
+  replaceElement(sign, placeholderNodeId);
+  adopt(list, cell);
+  disown(placeholder);
+  placeholder[placeholderSymbol] = undefined;
+  countPlaceholders(list, -1);
+  return undefined;
+}
+
+/**
  * `__SetAttribute(list, "update-list-info", operations)` — the list data
  * protocol, which is how a compiled ReactLynx `<list>` gets its cells.
  *
@@ -1849,13 +1982,21 @@ function listChildHandle(nodeId: number, what: string): Handle {
  * insertions and removals against *indices*, writes the batch here, and
  * files a fresh `componentAtIndex`/`enqueueComponent` pair immediately
  * afterwards (`ListUpdateInfoRecording.flush`, ReactLynx's
- * `snapshot/list/listUpdateInfo.ts`). This member replays the batch through
- * that pair: `componentAtIndex` builds and appends the cell for an index and
- * answers its `unique_id`, `enqueueComponent` is told which cell is going
- * away, and the tree edits in between are ordinary `insertBefore` and
- * `removeElement` calls. web-core's
- * `client/mainthread/elementAPIs/createElementAPI.ts:461-499` is the
- * algorithm being matched, step for step.
+ * `snapshot/list/listUpdateInfo.ts`). This member replays the batch: each
+ * insertion is a placeholder `list-item` at its index, carrying the entry's
+ * platform info ([`createPlaceholder`]), and each removal hands a built cell
+ * to `enqueueComponent` and removes it — the tree edits being ordinary
+ * `insertBefore` and `removeElement` calls. A placeholder becomes its cell
+ * only when it stops skipping ([`buildRevealedCell`]), so `componentAtIndex`
+ * runs for the cells a scroll reaches, as native's list calls it for the
+ * cells its layout reaches, and not for every cell up front.
+ *
+ * web-core's `client/mainthread/elementAPIs/createElementAPI.ts:461-499`
+ * builds every cell inside the batch instead, so its list's children are
+ * all built cells. Here a list's children are cells and placeholders, in
+ * the card's order; a placeholder is a plain `list-item` with no content,
+ * so `__GetChildren` answers it and a query by a cell's own id or class
+ * does not find a cell not yet built (docs/tracking/deviations.md).
  *
  * **It runs in a microtask, and that is load-bearing.** `flush()` writes the
  * operations *before* it files the callbacks, so a batch serviced
@@ -1874,7 +2015,7 @@ function listChildHandle(nodeId: number, what: string): Handle {
  * job leaves an unhandled rejection, which the realm reports through the
  * runtime's rejection tracker.
  *
- * Two deliberate deviations from web-core:
+ * Deliberate deviations from web-core besides the placeholders:
  *
  * - A `null` or non-object payload is a no-op. web-core destructures the
  *   value at the call and so throws a `TypeError` naming neither the list
@@ -1883,12 +2024,19 @@ function listChildHandle(nodeId: number, what: string): Handle {
  * - A sign `componentAtIndex` answers that no live handle names is a throw.
  *   web-core skips it (`if (childElement)`), because its handle index is a
  *   `WeakRef` table it treats as best-effort. Here it is the ownership graph
- *   and the tree disagreeing about an element this very call just built, and
- *   nothing after it in the batch can be trusted.
+ *   and the tree disagreeing about an element this very call just built.
+ * - A batch serviced while the list has no `componentAtIndex` inserts
+ *   nothing, as web-core's `componentAtIndex?.(…)` builds nothing.
  *
  * `updateAction` is ignored: web-core's accepted payload type has only
  * `insertAction` and `removeAction`, and what an update carries is the
  * platform info of a cell that stayed where it was.
+ *
+ * The list's children are read once per batch ([`listChildren`]) and kept
+ * up to date here rather than read at every step, which keeps a batch
+ * linear in the list's length. `removeAction` holds ascending indices into
+ * the pre-removal list, so the i-th removal's `position - i` in the list as
+ * it then stands is `position` in the list the batch started with.
  */
 function updateListInfo(list: unknown, operations: unknown): undefined {
   const handle = list as Handle;
@@ -1904,51 +2052,53 @@ function updateListInfo(list: unknown, operations: unknown): undefined {
     const callbacks = handle[listCallbacksSymbol];
     const componentAtIndex = callbacks?.componentAtIndex as ListCallback;
     const enqueueComponent = callbacks?.enqueueComponent as ListCallback;
-    if (Array.isArray(removeAction)) {
-      // Ascending old indices, so the i-th removal has shifted i places.
-      removeAction.forEach((position: unknown, removed: number) => {
-        const childNodeId =
-          listChildren(listNodeId)[Number(position) - removed];
-        if (childNodeId === undefined) {
-          return;
+    const removals: unknown[] = Array.isArray(removeAction) ? removeAction : [];
+    const insertions: unknown[] =
+      Array.isArray(insertAction) && typeof componentAtIndex === "function" ? insertAction : [];
+    if (removals.length === 0 && insertions.length === 0) {
+      return;
+    }
+    let children = listChildren(listNodeId);
+    let placeholders = 0;
+    if (removals.length > 0) {
+      const removed = new Set<number>();
+      for (const position of removals) {
+        const childNodeId = children[Number(position)];
+        if (childNodeId === undefined || removed.has(childNodeId)) {
+          continue;
         }
         const child = listChildHandle(childNodeId, "the list holds child");
-        enqueueComponent?.(handle, listNodeId, childNodeId);
+        // A placeholder is no cell the card built, so it has nothing to
+        // enqueue.
+        if (child[placeholderSymbol] === true) {
+          child[placeholderSymbol] = undefined;
+          placeholders -= 1;
+        } else {
+          enqueueComponent?.(handle, listNodeId, childNodeId);
+        }
         removeElement(childNodeId);
         disown(child);
-      });
-    }
-    if (!Array.isArray(insertAction)) {
-      return;
+        removed.add(childNodeId);
+      }
+      children = children.filter((childNodeId) => !removed.has(childNodeId));
     }
     // Ascending positions, so each one is an index into the list as the
     // insertions before it have already left it.
-    for (const action of insertAction) {
+    for (const action of insertions) {
       const position = Number((action as { position?: unknown })?.position);
-      const sign = componentAtIndex?.(
-        handle,
-        listNodeId,
-        position,
-        // The operation id, which no readback here consumes, and
-        // `enableReuseNotification`, which needs the recycling pool this
-        // engine does not have. web-core passes the same two constants.
-        0,
-        false,
-      );
-      if (typeof sign !== "number") {
-        continue;
+      const placeholder = createPlaceholder(action);
+      const placeholderNodeId = nodeIdOf(placeholder);
+      const reference = children[position];
+      insertBefore(listNodeId, placeholderNodeId, reference ?? null);
+      adopt(handle, placeholder);
+      if (reference === undefined) {
+        children.push(placeholderNodeId);
+      } else {
+        children.splice(position, 0, placeholderNodeId);
       }
-      const child = listChildHandle(sign, "componentAtIndex answered");
-      const reference = listChildren(listNodeId)[position];
-      // `componentAtIndex` appended the cell, so it may already *be* the
-      // child at that index — for an append-only batch it always is, and
-      // moving it would be a host call that changed nothing.
-      if (reference === sign) {
-        continue;
-      }
-      insertBefore(listNodeId, sign, reference ?? null);
-      adopt(handle, child);
+      placeholders += 1;
     }
+    countPlaceholders(handle, placeholders);
   });
   return undefined;
 }
@@ -3141,6 +3291,9 @@ interface DispatchedEvent {
   isComposing?: boolean;
   // `FocusEvent.relatedTarget`, on the four focus events alone.
   relatedTarget?: ReturnType<typeof targetInfo> | null;
+  // `ContentVisibilityAutoStateChangeEvent.skipped`, on
+  // `contentvisibilityautostatechange` alone.
+  skipped?: boolean;
 }
 
 /**
@@ -3246,6 +3399,7 @@ const DETAIL_COMPOSITION = 6;
 const DETAIL_FOCUS = 7;
 const DETAIL_CLONED = 8;
 const DETAIL_DISPATCHED = 9;
+const DETAIL_CONTENT_VISIBILITY = 10;
 
 /** The modifier bits a key event's last argument carries. */
 const MODIFIER_ALT = 1;
@@ -3445,10 +3599,12 @@ function keyMembers(values: unknown[]): {
 }
 
 /**
- * The members one `DETAIL_INPUT`, `DETAIL_COMPOSITION` or `DETAIL_FOCUS`
- * dispatch puts on its event: `InputEvent`'s `inputType`, `data` and
- * `isComposing`; `CompositionEvent.data`; `FocusEvent.relatedTarget`, as the
- * related element's descriptor or null. Undefined for every other kind.
+ * The members one `DETAIL_INPUT`, `DETAIL_COMPOSITION`, `DETAIL_FOCUS` or
+ * `DETAIL_CONTENT_VISIBILITY` dispatch puts on its event: `InputEvent`'s
+ * `inputType`, `data` and `isComposing`; `CompositionEvent.data`;
+ * `FocusEvent.relatedTarget`, as the related element's descriptor or null;
+ * `ContentVisibilityAutoStateChangeEvent.skipped`. Undefined for every other
+ * kind.
  */
 function editingMembers(
   kind: number,
@@ -3463,6 +3619,9 @@ function editingMembers(
   }
   if (kind === DETAIL_COMPOSITION) {
     return { data: String(values[0] ?? "") };
+  }
+  if (kind === DETAIL_CONTENT_VISIBILITY) {
+    return { skipped: values[0] === true };
   }
   if (kind === DETAIL_FOCUS) {
     const related = values[0];
@@ -3500,7 +3659,8 @@ function detailOf(
 ): EventDetail {
   if (
     kind === DETAIL_EMPTY || kind === DETAIL_KEY || kind === DETAIL_INPUT ||
-    kind === DETAIL_COMPOSITION || kind === DETAIL_FOCUS
+    kind === DETAIL_COMPOSITION || kind === DETAIL_FOCUS ||
+    kind === DETAIL_CONTENT_VISIBILITY
   ) {
     return {};
   }

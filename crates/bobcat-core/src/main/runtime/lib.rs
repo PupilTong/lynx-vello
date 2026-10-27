@@ -153,6 +153,11 @@ const DETAIL_COMPOSITION: f64 = 6.0;
 const DETAIL_FOCUS: f64 = 7.0;
 const DETAIL_CLONED: f64 = 8.0;
 const DETAIL_DISPATCHED: f64 = 9.0;
+const DETAIL_CONTENT_VISIBILITY: f64 = 10.0;
+
+/// [css-contain-2 §4.4](https://drafts.csswg.org/css-contain-2/#content-visibility-auto-state-change-event)'s
+/// event type.
+const CONTENT_VISIBILITY_AUTO_STATE_CHANGE_EVENT: &str = "contentvisibilityautostatechange";
 
 /// The bits a key event's modifiers cross as, in [`DETAIL_KEY`]'s last
 /// number. Mirrored by `element-papi.ts`.
@@ -717,6 +722,8 @@ fn pointer_type(device: terminus::link::input::PointerKind) -> &'static str {
 /// - [`DETAIL_FOCUS`] for `focus`/`blur`/`focusin`/`focusout`: the `relatedTarget`'s packed node
 ///   id, or `null` when there is none. The realm resolves it to the element's descriptor, or to
 ///   `null` for an element script holds no handle of.
+/// - [`DETAIL_CONTENT_VISIBILITY`] for `contentvisibilityautostatechange`: `skipped` as a boolean,
+///   `ContentVisibilityAutoStateChangeEvent.skipped` on the event object.
 /// - [`DETAIL_EMPTY`] for everything else: nothing.
 fn encode_detail<'a>(detail: &'a EventDetail, arguments: &mut Arguments<'a>) {
     let (position, delta, pointer, points): (_, _, _, &[terminus::link::event::TouchPoint]) =
@@ -791,8 +798,11 @@ fn encode_detail<'a>(detail: &'a EventDetail, arguments: &mut Arguments<'a>) {
                 arguments.push(HostArgument::Number(f64::from(bits)));
                 return;
             }
-            // `None`, and the engine's own `ContentVisibility`, which never
-            // reaches a realm.
+            EventDetail::ContentVisibility { skipped } => {
+                arguments.push(HostArgument::Number(DETAIL_CONTENT_VISIBILITY));
+                arguments.push(HostArgument::Boolean(*skipped));
+                return;
+            }
             _ => {
                 arguments.push(HostArgument::Number(DETAIL_EMPTY));
                 return;
@@ -3580,28 +3590,49 @@ impl MainThreadRuntime {
 
     /// Fires one `contentvisibilityautostatechange`
     /// ([css-contain-2 §4.4](https://drafts.csswg.org/css-contain-2/#content-visibility-auto-state-change-event))
-    /// per queued change, in frame order.
+    /// per queued change, in frame order, through [`Self::dispatch`]: the
+    /// engine's components on the path and every realm registered on it hear
+    /// it, as a browser's script does. `bobcat-element`'s list protocol is
+    /// one such listener — it builds a cell when the cell's placeholder stops
+    /// skipping — and so is a card's own `addEventListener` for the name.
     ///
-    /// The whole dispatch is `terminus`'s: it owns the path, the walk and the
-    /// listeners, because the listeners are the engine's own components
-    /// (`terminus::link::CustomElement` definitions — `<image>` today, `<list>` when it
-    /// exists) rather than anything in a realm. **No realm is entered**,
-    /// which is why this takes no `ScriptRuntime`: the event has no script
-    /// form, no Lynx event name, and nothing about it is published to the
-    /// painting or the background side. What this method adds is *when*: the
-    /// spec dispatches the event "by posting a task at the time when the
-    /// state change occurs", and the entry the page posts for it is that
-    /// task.
+    /// It bubbles (Chromium's choice, where the spec is silent), is not
+    /// composed, and carries `skipped` as the W3C member. What this method
+    /// adds is *when*: the spec dispatches the event "by posting a task at
+    /// the time when the state change occurs", and the entry the page posts
+    /// for it is that task. A listener may mutate the tree — the changes are
+    /// taken before the first dispatch, a target freed by an earlier
+    /// listener delivers nothing, and whatever a listener wrote is committed
+    /// by this entry's own epilogue.
     ///
-    /// A handler may mutate the tree — the changes are taken before the walk
-    /// starts, each step re-checks its node, and whatever a handler wrote is
-    /// committed by this entry's own epilogue.
-    pub(crate) fn dispatch_content_visibility_changes(&mut self) {
-        let timestamp = self.timeline_milliseconds();
-        self.slot
+    /// Returns what the listeners threw.
+    pub(crate) fn dispatch_content_visibility_changes(
+        &mut self,
+        js: &mut ScriptRuntime,
+    ) -> Vec<MainThreadError> {
+        let changes = self
+            .slot
             .borrow_mut()
             .document_mut()
-            .dispatch_content_visibility_changes(timestamp);
+            .take_content_visibility_changes();
+        let timestamp = self.timeline_milliseconds();
+        let mut failures = Vec::new();
+        for change in changes {
+            self.dispatch(
+                js,
+                change.node,
+                CONTENT_VISIBILITY_AUTO_STATE_CHANGE_EVENT,
+                true,
+                false,
+                timestamp,
+                &EventDetail::ContentVisibility {
+                    skipped: change.skipped,
+                },
+                &[],
+                &mut failures,
+            );
+        }
+        failures
     }
 
     /// [`DocumentSlot::update_intersection_observations`] at
@@ -5260,6 +5291,14 @@ fn install_attribute_members(
                 write_record_field(&mut record, name);
             }
             Ok(HostValue::String(record))
+        }
+        fn childIndex(node: node_id_argument) |document| {
+            let index = document.get(node).and_then(terminus::link::Node::index_in_parent);
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "a child list never nears 2^53 entries"
+            )]
+            Ok(index.map_or(HostValue::Number(-1.0), |index| HostValue::Number(index as f64)))
         }
         fn childElementIds(node: node_id_argument) |document| {
             let element = validate_live_element(document, NAME, node)?;

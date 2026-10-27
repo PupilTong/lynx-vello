@@ -1955,14 +1955,21 @@ unsupported on both surfaces. `__CreateList` consumes only its numeric
 parent-component argument; the callbacks it and `__UpdateListCallbacks` file
 are read by `__SetAttribute(list, "update-list-info", …)`, the one name that is
 a list command rather than an attribute. That member is the list *data*
-protocol and it is web-core's, step for step: the batch is serviced in a
-microtask — the callbacks a card files immediately after writing the
-operations are therefore the ones that serve it — every `insertAction`
-position is built by `componentAtIndex` and inserted at that index unless it
-is already there, and every `removeAction` child is handed to
-`enqueueComponent` and removed, the i-th removal taking the child at
-`position - i`. `updateAction` is ignored and `componentAtIndexes` is filed
-and never called, as in web-core. Cell *recycling* — a pool, a window,
+protocol: the batch is serviced in a microtask — the callbacks a card files
+immediately after writing the operations are therefore the ones that serve it
+— every `insertAction` position gets a placeholder `list-item` carrying the
+entry's platform info (`item-key`, `estimated-main-axis-size-px`, `full-span`,
+the sticky pair), and every `removeAction` child is removed, a built cell
+handed to `enqueueComponent` first, the i-th removal taking the child at
+`position - i`. A placeholder becomes its cell only when it stops skipping:
+the list listens for `contentvisibilityautostatechange` while it holds
+placeholders, and its listener calls `componentAtIndex` with the
+placeholder's current index and swaps the cell in (user ruling 2026-10-27,
+native's lazy `componentAtIndex` rather than web-core's build-everything;
+recorded in `docs/tracking/deviations.md`). A batch reads the list's children
+once and keeps that copy in step with its own edits, so it is linear in the
+list's length. `updateAction` is ignored and `componentAtIndexes` is filed and
+never called, as in web-core. Cell *recycling* — a pool, a window,
 `enableReuseNotification` — remains part of the unimplemented list surface.
 
 An element handle is an `EventTarget`, and the registration half lives in
@@ -2141,22 +2148,19 @@ events, non-bubbling, with Lynx's scroll metrics as extras, queued only for a na
 listener or a component hears at that moment; which containers are scrolling
 is tracked regardless.
 
-One event deliberately does **not** take that path, because it is the
-engine's own rather than script's: css-contain-2 §4.4's
-`contentvisibilityautostatechange`. The commit that determines
+css-contain-2 §4.4's `contentvisibilityautostatechange` takes the same
+dispatch, from an entry of its own. The commit that determines
 `content-visibility: auto` relevance leaves the elements whose *skipping*
 changed in `terminus`'s own queue; the page's epilogue posts **one fresh entry**
 for the batch, which is the spec's "posting a task" — the event is never
 delivered inside the entry that committed — and that entry calls
-`Document::dispatch_content_visibility_changes`, which fires each one through
-`Document::dispatch_element_event`. The walk is `terminus`'s, the listeners are
-`terminus::link::CustomElement` definitions (the engine's components — `<image>` today,
-`<list>` next) reached through `CustomElement::handle_event`, and **no realm
-is entered at all**: there is no export, no Lynx event name, no
-`__AddEvent`/worklet table consultation and no `global-bindEvent` pass, and a
-card's own `addEventListener` for that name never runs (user ruling,
-2026-09-21). `bubbles = true` is a recorded choice where the spec is silent
-(Chromium bubbles, WebKit and Gecko do not); `composed = false`; nothing
+`MainThreadRuntime::dispatch_content_visibility_changes`, which fires each one
+through `MainThreadRuntime::dispatch`: components observing the name hear it,
+and so does every realm registered on the path, a card's own
+`addEventListener` included (user ruling 2026-10-27, revoking the 2026-09-21
+one that kept it from script). `skipped` is the event's W3C member and the
+Lynx `detail` is `{}`. `bubbles = true` is a recorded choice where the spec is
+silent (Chromium bubbles, WebKit and Gecko do not); `composed = false`; nothing
 cancelable. The painting
 side routes against the *name* set, and the painter is told whether a name
 is routed only when the name's document-wide registration count crosses

@@ -715,17 +715,18 @@ and §D.16 with what the wire format actually permits.)*
         model, no selection, and no view transitions. The fourth is honoured: an element in the
         top layer (§29 — a `<dialog>` opened with `showModal()`; there is no fullscreen) is
         relevant whatever its geometry.
-      - **`contentvisibilityautostatechange` (§4.4) is fired, Rust-side and engine-internal**
-        *(2026-09-21, user ruling)*. The commit that determines relevance queues every element
-        whose *skipping* changed — which is why the spec's "first observation" case needs no rule
-        of its own: an undetermined box already skips, so the first determination of an on-screen
-        box is a change and that of an off-screen box is not. The event is then delivered by
-        `terminus` itself, over `Document::event_steps`' path, to the **engine's own components** — a
-        defined `terminus::link::CustomElement`, which is what the built-in `<list>` will be — through
-        `CustomElement::handle_event`. It is **never dispatched to JavaScript**: no realm is
-        entered, a card's `addEventListener` for the same name never runs, and there is no Lynx
-        event name, string-handler, worklet or `global-bindEvent` form of it. `bobcat-core`'s
-        only part is *when*: after the commit it posts **one entry of its own** for the batch,
+      - **`contentvisibilityautostatechange` (§4.4) is fired to components and realms**
+        *(user ruling 2026-10-27, revoking the 2026-09-21 one that kept it engine-internal)*.
+        The commit that determines relevance queues every element whose *skipping* changed —
+        which is why the spec's "first observation" case needs no rule of its own: an
+        undetermined box already skips, so the first determination of an on-screen box is a
+        change and that of an off-screen box is not. `bobcat-core` then fires each one through
+        the one dispatch every engine-originated event takes (`MainThreadRuntime::dispatch`): the
+        engine's components on the path that observe the name hear it through
+        `CustomElement::handle_event`, and every realm registered on the path is called, so a
+        card's `addEventListener` for the name runs and reads `event.skipped`. `bobcat-element`'s
+        list protocol is the listener this was opened for (lazy cells, `components.md`). After
+        the commit `bobcat-core` posts **one entry of its own** for the batch,
         which is the spec's "dispatched by posting a task at the time when the state change
         occurs". `bubbles` is `true` where the spec is silent (Chromium bubbles; WebKit and Gecko
         do not — w3c/csswg-drafts#11310 is open), `composed` and `cancelable` are false. See

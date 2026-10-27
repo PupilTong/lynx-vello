@@ -19,9 +19,9 @@
 //!   reported.
 //! - [`Document::dispatch_element_event_over`] drives that walk to its end, for a caller with
 //!   nothing of its own per step.
-//! - [`Document::dispatch_element_event`] computes the path itself and walks it, for an event only
-//!   the engine hears: `slotchange` and `contentvisibilityautostatechange`, which never reach a
-//!   realm.
+//! - [`Document::dispatch_element_event`] computes the path itself and walks it, for an event the
+//!   engine fires to its components alone: `slotchange`, and `contentvisibilityautostatechange`
+//!   when a host does not also take it to script (`bobcat-core` does, through its own dispatch).
 //!
 //! [`CustomElement::handle_event`](crate::tree::custom::CustomElement::handle_event) is invoked on
 //! every step whose node is a defined custom element. An event is identified by its W3C type name
@@ -284,9 +284,10 @@ impl<T> Document<T> {
     /// on every step whose node is a defined custom element — and, for a
     /// non-composed event, on the host of the shadow root its path ends at.
     ///
-    /// The entry point of an event only the engine hears (`slotchange`,
-    /// `contentvisibilityautostatechange`): nothing about this reaches
-    /// script. `timestamp` is [`ElementEvent::timestamp`].
+    /// The entry point of an event fired to the engine's components alone
+    /// (`slotchange`, and `contentvisibilityautostatechange` for a host that
+    /// does not take it to script): nothing about this walk reaches script.
+    /// `timestamp` is [`ElementEvent::timestamp`].
     ///
     /// A name no definition observes
     /// ([`CustomElement::observed_events`](crate::tree::custom::CustomElement::observed_events))
