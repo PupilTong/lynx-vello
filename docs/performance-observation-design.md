@@ -539,6 +539,18 @@ atomics, recomputed under the lock whenever the subscriptions or the paint
 marks change: `wants_content_detection()` and the half of
 `wants_presentation_timing()` that `oldest_waiting_commit` does not cover.
 
+An entry that is whole where it is produced — a monitor's (§7), and the
+later resource entries — skips the record life: it is built there as a plain
+struct (`PerformanceEntry::LongTask`, `PerformanceEntry::JsBlocking`) and
+handed to the registry's one delivery path, `deliver(entry, kind, workers)`.
+That queues it on `owed_rust` when the embedder observes `kind`, and on
+`owed_workers[key]` for each worker of `workers` (`WorkerAudience::None`,
+`One(key)` for the BTS of the realm that produced it, or `Every`) whose
+observers asked for `kind` (`worker_types`, which `observePerformance`
+writes), each queue bounded by 1000, oldest dropped. `pump()` and the
+worker's take append the queue to the records' entries, so each audience
+receives one path's entries in the order they were made.
+
 ### 6.5 Nested cards (`<frame>`), as Lynx has them
 
 In Lynx native a `<frame>`'s card is its own `LynxTemplateRender`
@@ -596,21 +608,37 @@ shadow tree, and `w3c/element-timing#3` (open since 2019, last discussed
 2025-09-11) has settled on nothing beyond preferring a container-style,
 host-level view for component users.
 
-## 7. Monitors (phase 2)
+## 7. Monitors (phase 2; the job monitors built 2026-10-27)
 
-All off by default; each is a `LynxView` setter taking `Option<Config>`.
+All off by default; each is a `LynxView` setter taking `Option<Config>`,
+and each switch is one relaxed atomic in the registry, which is all a hot
+path reads while the monitor is off. Turning a monitor on does not by
+itself make `pump()` report: the embedder also asks for the entry type
+through `observe_performance`, and an entry nobody asked for is dropped at
+`deliver` (§6.4). A monitor that needs a task runs it on `bobcat-main` as
+the view's own (`ToMain::StartMonitorTask(MonitorTask)`); every monitor
+setter bumps the registry's `monitor_epochs`, and a task ends at the view's
+end or once its configuration's epoch is no longer its monitor's.
 
-- **Long tasks**: `jobs.rs` runs every piece of JavaScript as one job. With
-  the monitor on, the loop takes two instants per job and reports a job of
-  `≥ threshold` (default 50 ms, Lynx's) as `LongTask { start, duration,
-  kind: JobKind, thread: Main | Workers }`. `JobKind` is the job's own enum
-  (entry, timer, command, event, posted, module callback), which is the
-  attribution Lynx's `task_type`/`task_name` give; W3C's `longtask` has
-  `name`/`startTime`/`duration` and is what `entry_type()` answers
-  (`"longtask"`). The record is written into the registry by the job loop
-  and taken by `pump()`; Lynx's `lynxsdk_long_batched_tasks_timing` (a 1 s
-  window at 80 % busy) is not built; the per-job entries let an embedder
-  compute it.
+- **Long tasks** (`set_long_task_monitor`, `LongTaskConfig { threshold }`,
+  default 50 ms, Lynx's `duration_threshold_ms_`): every realm job is
+  queued through `lifetime::run_job` with the `JobKind` it was queued for
+  (18 variants over the 17 call sites: `Start`, `Entry`, `Module`, `Future`,
+  `Timer`, `Settle`, `Command`, `ContentVisibility`, `Intersection`,
+  `ResizeObserver`, `ComponentEvent`, `FontFace`, `WorkerEvent`, `Post`,
+  `AnimationFrame`, `ModuleCallback`, `Performance`, `Release`); with the
+  monitor on, `run_job` times the job around its `catch_unwind` and, at or
+  over the threshold, builds `PerformanceEntry::LongTask { start, end,
+  thread: Main | Workers, kind }` and delivers it. `entry_type()` is W3C's
+  `"longtask"`, `name()` the kind, and the JSON carries Long Tasks'
+  `startTime`/`duration` plus the keys of Lynx's `lynxsdk_long_task_timing`
+  event (`thread_name` `Lynx_TASM`/`Lynx_JS`, `task_type` mapped from the
+  kind to Lynx's `k…Task` constants, `task_name`, `duration_ms`). Rust
+  audience only (`WorkerAudience::None`): Lynx reports long tasks through
+  its event tracker, not as an entry. Lynx's
+  `lynxsdk_long_batched_tasks_timing` (a 1 s window at 80 % busy) is not
+  built; the per-job entries let an embedder compute it. Off: one relaxed
+  load per job, no clock.
 - **Memory**: on the interval Lynx uses (`memory_report_interval_sec`), the
   main thread reads `JS_ComputeMemoryUsage` for the MTS realm, the BTS worker
   its own, and the document sizes itself (`TreeArenas` slots, `TextStore`s,
@@ -620,12 +648,25 @@ All off by default; each is a `LynxView` setter taking `Option<Config>`.
   puts its number in the registry; `pump()` emits when the total moved by
   more than `change_threshold` since the last report. The readings are the
   measurement; nothing else runs on the measuring thread.
-- **JS blocking**: with the monitor on, each command the BTS consumer queues
-  carries its enqueue instant; the job that runs it adds
-  `run_start − enqueued` above `threshold` (default 20 ms) to a running sum
-  in the registry, which `pump()` emits per `report_interval` (default 5 s)
-  as Lynx's `{stage: loadBundle | timer, total_blocking_time,
-  total_blocking_count, total_duration, blocking_ratio, avg_blocking_time}`.
+- **JS blocking** (`set_js_blocking_monitor`, `JsBlockingConfig {
+  threshold, report_interval }`, Lynx's defaults 20 ms and 5 s): each
+  `WorkerMessage` that queues a job of a worker (`Post`, `Vsync`,
+  `ModuleCallback`, `PerformanceReady`) carries its `enqueued` instant while
+  the monitor is on; the delivering job adds its wait at or over the
+  threshold to the totals, messages held before boot included. Reports
+  follow Lynx's `JSBlockingMonitor` exactly: `stage: "loadBundle"` when the
+  page's load record completes, then `stage: "timer"` reports by the view's
+  `MonitorTask::JsBlockingReports` at 1, 3, 6, 10 … intervals after it
+  (`ReportWithTimer(i)` schedules the next `(i+1)·interval` later); each
+  report made resets the totals (`// Reset after reporting`), a report with
+  nothing counted is skipped and does not restart the span. Each report is
+  built as `PerformanceEntry::JsBlocking` from the totals and delivered;
+  keys `total_blocking_time`, `total_blocking_count`, `total_duration`
+  (whole ms), `blocking_ratio`, `avg_blocking_time`, and for `timer`
+  `time_after_load_bundle` (the YAML spells it `time_after_fcp`; the
+  writer is followed). Rust audience only (`x-lang` lists no JavaScript).
+  Every worker of the view is counted, the BTS and a `<frame>` card's
+  among them. Off: one relaxed load per send, no clock.
 - **Lazy bundle**: `resource.rs`'s lazy bundle load already has request and
   decode points; the entry is `{componentUrl, size, sync, loadSuccess,
   requireStart/End, decodeStart/End}` and costs two instants per lazy load.
@@ -676,12 +717,12 @@ test `the performance shell must stay inert` keeps holding for that build.
 
 Entry delivery to the BTS, with no main-thread part and no JSON (ruling
 Q1): the first `observe()` with a non-empty list calls the host function
-`observePerformance(1, paint)`, which adds the worker to the registry's
-observing set (the last `disconnect()` calls `observePerformance(0, 0)`).
+`observePerformance(1, paint)`, which records the worker in the registry's
+`worker_types` (the last `disconnect()` calls `observePerformance(0, 0)`).
 `paint` is `1` while some active observer's list names `paint` or a
 `paint.` name, and the realm calls the host again only when either bit
-changes; the registry keeps the `paint` observers in a set of their own,
-which is what turns content detection on. The painter, on completing a record of
+changes; `paint` is `EntryTypes::PAINT` in that worker's types, which is
+what turns content detection on. The painter, on completing a record of
 that card, sends `WorkerMessage::PerformanceReady` to the worker; the job it
 runs calls `takePerformanceEntries()`, a host function that, on the worker
 thread, drains the card's completed records and answers one flat array per
@@ -717,7 +758,9 @@ open-source build delivers entries to the MTS only in Air mode.
    `identifier` is the flag and whose stages are ordered.
 2. **Phase 2 — monitors and Container Timing**: long task, memory, JS
    blocking, lazy bundle; the `containertiming` primitive and its
-   `container` entries.
+   `container` entries. It ships as four sequential PRs, the first being
+   the two job monitors (long task and JS blocking, §7), which also build
+   the delivery path (§6.4) and the monitor task the later three reuse.
 3. **Phase 3 — FSP and tracing feature**: `metric.fsp`; the `trace` cargo
    feature and the `profile*` host functions over `tracing`.
 
@@ -773,3 +816,10 @@ questions are closed.
    is pipeline provenance by realm, and the Rust stream carries every
    record of the view with `url` on `LoadBundle`. Ruled on the platform
    research in §6.5 (2026-10-23).
+
+Phase 2 decisions, 2026-10-27, made while building §7 and open to the
+user's review:
+
+- **JS blocking reports mirror Lynx's reset and cadence** (totals reset per
+  report made; `timer` reports at 1, 3, 6, 10 … intervals), which the first
+  draft of §7 had wrong.
