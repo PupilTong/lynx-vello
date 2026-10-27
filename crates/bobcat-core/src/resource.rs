@@ -266,6 +266,12 @@ pub enum SourceRequest {
     /// Complete with [`LoadedSource::Fetched`].
     Fetch {
         url: String,
+        /// Whether someone observes this view's `resource` entries (Lynx's
+        /// `resource.lazyBundle`), so the fetch is one: then a fetcher that
+        /// can tell fills the [`FetchOutcome`] it answers with when the
+        /// bytes arrived, how many there were and when it installed them.
+        /// `false` asks for nothing, and a fetcher reads no clock for it.
+        timed: bool,
     },
     /// One `src: url(...)` of an `@font-face` rule, already resolved against
     /// the document's base URL. Complete with [`LoadedSource::Font`]; the
@@ -303,10 +309,33 @@ pub enum LoadedSource {
     /// so nothing here decodes or transcodes it. The font backend is what
     /// rejects bytes that are not a face.
     Font(terminus::link::FontBlob),
-    /// A [`SourceRequest::Fetch`] that is over. It carries nothing: the
-    /// bytes stayed with the fetcher, and whatever it made of them is
-    /// reachable only as the source requests it now answers.
-    Fetched,
+    /// A [`SourceRequest::Fetch`] that is over. The bytes stayed with the
+    /// fetcher, and whatever it made of them is reachable only as the source
+    /// requests it now answers; what comes back is only how the fetch went,
+    /// for a timed request.
+    Fetched(FetchOutcome),
+}
+
+/// How one [`SourceRequest::Fetch`] went, as the fetcher measured it: what
+/// a `resource.lazyBundle` performance entry reports beyond the realm's own
+/// call and delivery. Filled only for a request that was
+/// [`timed`](SourceRequest::Fetch::timed), and only as far as the fetcher
+/// can tell; [`FetchOutcome::default`] — every field `None` — is always a
+/// correct answer, and the one for an untimed request, which takes no
+/// instant and counts nothing.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FetchOutcome {
+    /// The body's length in bytes, as it arrived: Lynx's `size`
+    /// (`binary_size`, the response data's size,
+    /// `lynx/core/resource/lazy_bundle/lazy_bundle_loader.cc:333-335`).
+    pub size_bytes: Option<u64>,
+    /// When the bytes had arrived at the fetcher: Lynx's `requireEnd`.
+    pub received: Option<crate::performance::Instant>,
+    /// The fetcher's install of what it fetched — the reference fetcher's
+    /// container decode and registration of its sections: Lynx's
+    /// `decodeStart`/`decodeEnd`. `None` for a body nothing was installed
+    /// from.
+    pub installed: Option<std::ops::Range<crate::performance::Instant>>,
 }
 
 /// The concrete, transferable right to answer one source request.

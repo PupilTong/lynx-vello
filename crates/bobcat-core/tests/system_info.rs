@@ -66,7 +66,7 @@ impl ResourceFetcher for Entries {
             SourceRequest::Module(url)
             | SourceRequest::StyleSheet(url)
             | SourceRequest::Font { url }
-            | SourceRequest::Fetch { url } => url.clone(),
+            | SourceRequest::Fetch { url, .. } => url.clone(),
         };
         // The main-thread entry is a card's MTS body, served as
         // `bobcat-source` registers a card's root.
