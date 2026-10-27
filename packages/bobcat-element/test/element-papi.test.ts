@@ -1578,6 +1578,14 @@ describe("__FlushElementTree", () => {
     __FlushElementTree();
     expect(mock.named("flushElementTree")).toHaveLength(1);
   });
+
+  it("leaves a list cell's flush to the entry's commit", () => {
+    const page = __CreatePage("card", 0);
+    __FlushElementTree(page, { triggerLayout: true, operationID: 1, elementID: 2, listID: 3 });
+    expect(mock.named("flushElementTree")).toHaveLength(0);
+    __FlushElementTree(page, { pipelineOptions: { pipelineID: 7 } });
+    expect(mock.named("flushElementTree")).toHaveLength(1);
+  });
 });
 
 
