@@ -80,6 +80,7 @@ use std::sync::atomic::AtomicBool;
 use std::thread::Builder as ThreadBuilder;
 
 use quickjs_rust_bridge::HostValue;
+use terminus::link::clock::SpawnedClock;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 #[cfg(target_arch = "wasm32")]
@@ -332,18 +333,24 @@ impl WorkerHome {
     /// Starting it on the first worker instead would buy that back with a
     /// lock, a state machine and a second way for a worker to fail.
     ///
+    /// The thread's first statement aligns its clock through `clock`
+    /// ([`crate::clock`]), whose other end the spawner answers.
+    ///
     /// # Errors
     ///
     /// [`EngineError::Thread`] if the thread will not start, which is a
     /// failure to build the group.
-    pub(crate) fn start() -> Result<Self, EngineError> {
+    pub(crate) fn start(clock: SpawnedClock) -> Result<Self, EngineError> {
         let (commands, command_receiver) = mpsc::unbounded_channel();
         let trapped = Arc::new(AtomicBool::new(false));
         let thread = ThreadBuilder::new()
             .name("bobcat-workers".to_owned())
             .spawn({
                 let trapped = Arc::clone(&trapped);
-                move || thread::run(command_receiver, &trapped)
+                move || {
+                    clock.align_to_spawner();
+                    thread::run(command_receiver, &trapped);
+                }
             })
             .map_err(|error| EngineError::Thread {
                 name: "worker",
