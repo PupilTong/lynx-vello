@@ -2791,6 +2791,117 @@ fn synchronized_tick(engine: &mut TestEngine, now: f64) {
     );
 }
 
+/// The heights of the `.row`s, in tree order, from the view's own thread.
+fn row_heights(engine: &mut TestEngine) -> Vec<f32> {
+    engine
+        .probe_document(|document| {
+            let page = document.document_element().id();
+            document
+                .query_selector_all(page, ".row")
+                .expect("a valid selector")
+                .into_iter()
+                .map(|row| {
+                    document
+                        .rounded_layout(row)
+                        .expect("a live row")
+                        .size
+                        .height
+                })
+                .collect()
+        })
+        .expect("the view's task answers probes")
+}
+
+/// A `content-visibility: auto` reveal the pass cap left owed goes on at the
+/// next frame ticks, end to end. Each placeholder is one scrollport tall and
+/// each row a fifth of that, as a `<list>` cell with no estimate is, so every
+/// reveal pulls more rows into the window than one commit's passes reach: the
+/// boot frame asks for main-thread ticks, and each tick's commit reveals on
+/// until no skipped row is left in the window.
+#[test]
+fn a_reveal_owed_at_the_pass_cap_continues_on_the_next_ticks() {
+    let mut engine = TestViewSpec::new(
+        r"
+        globalThis.renderPage = function () {
+          const page = __CreatePage('card', 0);
+          const list = __CreateView(0);
+          __SetClasses(list, 'list');
+          __AppendElement(page, list);
+          globalThis.held = [page, list];
+          for (let i = 0; i < 40; i++) {
+            const row = __CreateView(0);
+            const cell = __CreateView(0);
+            __SetClasses(row, 'row');
+            __SetClasses(cell, 'cell');
+            __AppendElement(row, cell);
+            __AppendElement(list, row);
+            held.push(row, cell);
+          }
+          __FlushElementTree();
+        };
+        ",
+    )
+    .with_style_sheet(
+        ".list { display: flex; flex-direction: column; overflow: scroll;
+                 width: 200px; height: 100px; }
+         .row { display: flex; flex-direction: column; flex-shrink: 0;
+                content-visibility: auto; contain-intrinsic-size: none auto 100px; }
+         .cell { height: 20px; }",
+    )
+    .boot();
+    // The painter's adopted frame, not the view's: the post below is decided
+    // on what the painter holds, so each turn polls the link first.
+    let boot = engine
+        .painter
+        .published_frame()
+        .expect("the boot flush published");
+    assert!(
+        boot.needs_main_ticks(),
+        "the boot commit stopped at the pass cap with a reveal owed"
+    );
+
+    let mut now = 0.0;
+    while engine
+        .painter
+        .published_frame()
+        .expect("still published")
+        .needs_main_ticks()
+    {
+        now += 0.016;
+        assert!(now < 0.5, "the reveals settle within a few ticks");
+        // Not forced: the frame's own request is what makes the post cross.
+        let seq = engine
+            .painter
+            .begin_frame(now, false)
+            .expect("a frame owing a reveal asks for the tick");
+        assert!(
+            engine
+                .painter
+                .wait_begin_frame(seq, Duration::from_secs(30)),
+            "the view's task services the tick"
+        );
+    }
+    assert!(
+        engine.painter.begin_frame(now + 0.016, false).is_none(),
+        "a settled frame asks for no more ticks"
+    );
+    // The window is the scrollport and one more below it, 0..=200px: the
+    // rows starting inside it are revealed, every later one still waits.
+    let heights = row_heights(&mut engine);
+    assert!(
+        heights[..=10]
+            .iter()
+            .all(|&height| (height - 20.0).abs() < 0.5),
+        "every row inside the window is revealed: {heights:?}"
+    );
+    assert!(
+        heights[11..]
+            .iter()
+            .all(|&height| (height - 100.0).abs() < 0.5),
+        "and no row past it: {heights:?}"
+    );
+}
+
 /// An exported curve animates on the painting side: after the tick
 /// that promotes it to running, the committed frame carries the curve,
 /// wants no per-frame main-thread ticks, and `begin_frame` sends

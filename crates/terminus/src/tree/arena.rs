@@ -22,7 +22,7 @@ use smallvec::SmallVec;
 use crate::layout::anchors::{AnchorBuckets, AnchorRegistry, AnchoredBox, PendingReads};
 use crate::layout::committed_box::{CommittedBox, CommittedBoxTable};
 use crate::layout::paragraph::TextStore;
-use crate::layout::relevance::{Relevance, RelevanceTable};
+use crate::layout::relevance::{Freshness, Relevance, RelevanceTable};
 use crate::layout::text_block::TextBlockStore;
 use crate::scroll::{AutoScrollRequest, ScrollRequest};
 use crate::tree::anonymous::AnonymousBoxes;
@@ -271,11 +271,11 @@ impl<T> TreeArenas<T> {
         self.relevance.state(slot.arena_key())
     }
 
-    /// Whether the render in flight has already determined this element's
-    /// relevance, and so must not determine it a second time.
+    /// How far the render in flight has determined this element's
+    /// relevance.
     #[inline]
-    pub(crate) fn relevance_is_fresh(&self, slot: NodeId) -> bool {
-        self.relevance.is_fresh(slot.arena_key())
+    pub(crate) fn relevance_freshness(&self, slot: NodeId) -> Freshness {
+        self.relevance.freshness(slot.arena_key())
     }
 
     /// Records one determination, answering whether the bit moved.
@@ -285,6 +285,25 @@ impl<T> TreeArenas<T> {
             self.anchors.note_relevance_flip();
         }
         flipped
+    }
+
+    /// Whether the last render left a reveal owed; see
+    /// [`RelevanceTable::owed`].
+    #[inline]
+    pub(crate) const fn relevance_owed(&self) -> bool {
+        self.relevance.owed()
+    }
+
+    /// Records whether the render in flight leaves a reveal owed.
+    #[inline]
+    pub(crate) fn set_relevance_owed(&mut self, owed: bool) {
+        self.relevance.set_owed(owed);
+    }
+
+    /// Takes the owed reveal, answering whether there was one.
+    #[inline]
+    pub(crate) fn take_relevance_owed(&mut self) -> bool {
+        self.relevance.take_owed()
     }
 
     /// Ends a render's determinations; see [`RelevanceTable::settle`].
