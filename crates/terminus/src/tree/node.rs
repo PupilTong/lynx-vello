@@ -116,37 +116,76 @@ struct Replaced {
     placeholder: Option<StdArc<str>>,
 }
 
-/// Per-node bits that each cost a padded byte of the node stride as a `bool`.
+/// Per-node bits that each cost a padded byte of the node stride as a `bool`,
+/// and the element's custom element state.
+///
+/// Two bytes: the first eight bits filled the first, and the Container
+/// Timing bits joined the custom element state, which had a byte of its own
+/// for three values, in the second. The node has no padding to spare, so
+/// that is what keeps the stride where it was
+/// (`document_only_state_stays_out_of_the_primary_node_stride`). Held as
+/// two bytes rather than a `u16` so the pair is byte-aligned, as the two
+/// `u8` fields it replaces were.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct NodeFlags(u8);
+pub(crate) struct NodeFlags([u8; 2]);
 
 impl NodeFlags {
-    const CUSTOM_SUBTREE_MAY_CONTAIN: u8 = 1 << 0;
-    const MAY_OVERRIDE_CHILDREN: u8 = 1 << 1;
-    const LYNX_TEXT: u8 = 1 << 2;
-    const PLACEHOLDER_PSEUDO: u8 = 1 << 3;
-    const LINE_IF_EMPTY: u8 = 1 << 4;
+    const CUSTOM_SUBTREE_MAY_CONTAIN: u16 = 1 << 0;
+    const MAY_OVERRIDE_CHILDREN: u16 = 1 << 1;
+    const LYNX_TEXT: u16 = 1 << 2;
+    const PLACEHOLDER_PSEUDO: u16 = 1 << 3;
+    const LINE_IF_EMPTY: u16 = 1 << 4;
     /// A `::backdrop` box's node ([`crate::tree::top_layer`]).
-    pub(crate) const BACKDROP: u8 = 1 << 5;
+    pub(crate) const BACKDROP: u16 = 1 << 5;
     /// An anonymous block box's node ([`crate::tree::anonymous`]).
-    pub(crate) const ANONYMOUS: u8 = 1 << 6;
+    pub(crate) const ANONYMOUS: u16 = 1 << 6;
     /// The element's layout reads no percentage basis; see
     /// [`Node::layout_reads_percentage_basis`].
-    const BASIS_FREE: u8 = 1 << 7;
+    const BASIS_FREE: u16 = 1 << 7;
+    /// The element is a Container Timing root
+    /// ([`crate::visual::container_timing`]).
+    const CONTAINER_TIMING_ROOT: u16 = 1 << 8;
+    /// The element cuts its subtree out of every Container Timing root above
+    /// it (`containertimingignore`).
+    const CONTAINER_TIMING_IGNORE: u16 = 1 << 9;
+    /// Blink's `SelfOrAncestorHasContainerTiming`: the node or one of its
+    /// shadow-including ancestors may be a Container Timing root. Never
+    /// stale `false`; it may stay `true` after the root above it is
+    /// unmarked or after the node moves out from under it, which costs only
+    /// an ancestor walk that finds nothing.
+    const SELF_OR_ANCESTOR_HAS_CONTAINER_TIMING: u16 = 1 << 10;
+    /// The element's [`CustomElementState`], two bits from
+    /// [`Self::CUSTOM_STATE_SHIFT`].
+    const CUSTOM_STATE: u16 = 0b11 << Self::CUSTOM_STATE_SHIFT;
+    const CUSTOM_STATE_SHIFT: u16 = 11;
 
-    const fn get(self, bit: u8) -> bool {
-        self.0 & bit != 0
+    const fn get(self, bit: u16) -> bool {
+        u16::from_le_bytes(self.0) & bit != 0
     }
 
     /// Sets `bit` to `on`, answering what it was.
-    fn set(&mut self, bit: u8, on: bool) -> bool {
-        let was = self.get(bit);
-        if on {
-            self.0 |= bit;
-        } else {
-            self.0 &= !bit;
+    fn set(&mut self, bit: u16, on: bool) -> bool {
+        let bits = u16::from_le_bytes(self.0);
+        self.0 = if on { bits | bit } else { bits & !bit }.to_le_bytes();
+        bits & bit != 0
+    }
+
+    const fn custom_state(self) -> CustomElementState {
+        match (u16::from_le_bytes(self.0) & Self::CUSTOM_STATE) >> Self::CUSTOM_STATE_SHIFT {
+            0 => CustomElementState::Uncustomized,
+            1 => CustomElementState::Constructing,
+            _ => CustomElementState::Custom,
         }
-        was
+    }
+
+    fn set_custom_state(&mut self, state: CustomElementState) {
+        let value: u16 = match state {
+            CustomElementState::Uncustomized => 0,
+            CustomElementState::Constructing => 1,
+            CustomElementState::Custom => 2,
+        };
+        let bits = u16::from_le_bytes(self.0) & !Self::CUSTOM_STATE;
+        self.0 = (bits | value << Self::CUSTOM_STATE_SHIFT).to_le_bytes();
     }
 }
 
@@ -189,7 +228,7 @@ pub struct Node<T> {
     pub(crate) element_state: ElementState,
 
     pub(crate) custom_definition: Option<DefinitionId>,
-    pub(crate) custom_state: CustomElementState,
+    /// Its bits and the custom element state ([`Self::custom_state`]).
     flags: NodeFlags,
 
     pub(crate) parsed_inline_style: Option<Arc<Locked<PropertyDeclarationBlock>>>,
@@ -282,7 +321,7 @@ impl<T> Node<T> {
         owner: *mut TreeArenas<T>,
         id: NodeId,
         local_name: LocalName,
-        marker: u8,
+        marker: u16,
     ) -> Self {
         debug_assert!(
             marker == NodeFlags::BACKDROP || marker == NodeFlags::ANONYMOUS,
@@ -335,7 +374,6 @@ impl<T> Node<T> {
             attrs: Vec::new(),
             element_state: ElementState::empty(),
             custom_definition: None,
-            custom_state: CustomElementState::default(),
             flags: NodeFlags::default(),
             parsed_inline_style: None,
             presentational_hints: None,
@@ -434,6 +472,57 @@ impl<T> Node<T> {
     #[must_use]
     pub(crate) fn is_anonymous_box(&self) -> bool {
         self.flags.get(NodeFlags::ANONYMOUS)
+    }
+
+    /// Where the element is in the custom element lifecycle.
+    #[must_use]
+    pub(crate) const fn custom_state(&self) -> CustomElementState {
+        self.flags.custom_state()
+    }
+
+    pub(crate) fn set_custom_state(&mut self, state: CustomElementState) {
+        self.flags.set_custom_state(state);
+    }
+
+    /// Whether this element is a Container Timing root
+    /// ([`crate::visual::container_timing`]).
+    #[must_use]
+    pub(crate) const fn is_container_timing_root(&self) -> bool {
+        self.flags.get(NodeFlags::CONTAINER_TIMING_ROOT)
+    }
+
+    /// Marks or unmarks this element as a Container Timing root, answering
+    /// whether it was one.
+    pub(crate) fn set_container_timing_root(&mut self, on: bool) -> bool {
+        self.flags.set(NodeFlags::CONTAINER_TIMING_ROOT, on)
+    }
+
+    /// Whether this element cuts its subtree out of the Container Timing
+    /// roots above it (`containertimingignore`).
+    #[must_use]
+    pub(crate) const fn is_container_timing_ignored(&self) -> bool {
+        self.flags.get(NodeFlags::CONTAINER_TIMING_IGNORE)
+    }
+
+    pub(crate) fn set_container_timing_ignored(&mut self, on: bool) {
+        self.flags.set(NodeFlags::CONTAINER_TIMING_IGNORE, on);
+    }
+
+    /// Blink's `SelfOrAncestorHasContainerTiming`: this node or one of its
+    /// shadow-including ancestors may be a Container Timing root. A
+    /// conservative bit: never `false` under a root, possibly `true` where
+    /// no root is left.
+    #[must_use]
+    pub(crate) const fn self_or_ancestor_has_container_timing(&self) -> bool {
+        self.flags
+            .get(NodeFlags::SELF_OR_ANCESTOR_HAS_CONTAINER_TIMING)
+    }
+
+    /// Sets [`Self::self_or_ancestor_has_container_timing`], answering
+    /// whether it was already set.
+    pub(crate) fn note_container_timing_ancestor(&mut self) -> bool {
+        self.flags
+            .set(NodeFlags::SELF_OR_ANCESTOR_HAS_CONTAINER_TIMING, true)
     }
 
     pub(crate) fn owner_document(&self) -> &Node<T> {
@@ -735,7 +824,7 @@ impl<T> Node<T> {
             ("attrs", size_of::<Vec<(LocalName, String)>>(), true),
             ("element_state", size_of::<ElementState>(), true),
             ("custom_definition", size_of::<Option<DefinitionId>>(), true),
-            ("custom_state", size_of::<CustomElementState>(), true),
+            // The custom element state is two bits of `flags`.
             ("flags", size_of::<NodeFlags>(), false),
             (
                 "parsed_inline_style",

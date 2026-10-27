@@ -396,6 +396,10 @@ pub struct CommittedFrame {
     /// Paint Timing's contentful test over what the walk encoded
     /// ([`Self::paints_content`]); `false` when the walk did not test.
     pub(crate) paints_content: bool,
+    /// What the walk painted under Container Timing roots
+    /// ([`crate::visual::container_timing`]); empty, and unallocated, on a
+    /// document with no root.
+    pub(crate) container_rects: Vec<crate::visual::container_timing::ContainerRect>,
 }
 
 /// The split scene: fragments plus the program that assembles them.
@@ -728,6 +732,20 @@ impl CommittedFrame {
     #[must_use]
     pub const fn paints_content(&self) -> bool {
         self.paints_content
+    }
+
+    /// What this frame painted under Container Timing roots, one rect per
+    /// contentful paint and root, in CSS px of the viewport.
+    pub(crate) fn container_rects(&self) -> &[crate::visual::container_timing::ContainerRect] {
+        &self.container_rects
+    }
+
+    /// Whether this frame painted anything under a Container Timing root:
+    /// whether presenting it can grow a root's painted region
+    /// ([`crate::visual::container_timing`]). Answers `false` for every
+    /// frame of a document with no root.
+    pub(crate) fn paints_under_containers(&self) -> bool {
+        !self.container_rects.is_empty()
     }
 
     /// Whether the document had a running animation at commit time — the
