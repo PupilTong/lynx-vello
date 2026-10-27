@@ -173,6 +173,7 @@ use crate::clock::ClockInstant;
 use crate::jobs::{JobKind, JsThreadName};
 use crate::lifetime::{Lifetime, Settles, run_job, serve_clock};
 use crate::link::{FramePost, HostOutbox, ScrollEntry, ScrollMailbox, ToMain, ViewOutbox};
+use crate::performance::{MemoryCategory, MemoryItem};
 use crate::realm::RealmCore;
 use crate::realm::owner::{self, RealmOwner};
 use crate::realm::policy::{self, Row, Scene};
@@ -327,6 +328,45 @@ impl Page {
 
     fn ended(&self) -> bool {
         self.lifetime.ended()
+    }
+
+    /// Queues one memory monitor sample for the configuration of `epoch`,
+    /// as an entry of this view's: the main thread's two readings — the
+    /// script runtime this view's realm runs on
+    /// (`mainThreadScriptingEngine`, a walk of the whole heap) and the
+    /// document's element arena (`lynxTasmElement`, three field reads) —
+    /// written to the registry, then the view's BTS asked for its runtime's
+    /// reading ([`WorkerMessage::MemorySample`]). Runs no JavaScript. An
+    /// entry rather than a bare job because it reads the document, which
+    /// only an entry does; a sample for a configuration no longer current
+    /// reads nothing.
+    ///
+    /// [`WorkerMessage::MemorySample`]: crate::background::WorkerMessage::MemorySample
+    fn sample_memory(self: &Rc<Self>, epoch: u64) {
+        let page = Rc::clone(self);
+        owner::queue(self, JobKind::Memory, move |runtime, js| {
+            let registry = page.host.registry();
+            if !registry.memory_is_current(epoch) {
+                return;
+            }
+            let mut reported = registry.note_memory(MemoryItem::scripting_engine(
+                MemoryCategory::MainThreadScriptingEngine,
+                &js.memory_usage(),
+            ));
+            let footprint = runtime.with_document(|document| document.memory_footprint());
+            reported |= registry.note_memory(MemoryItem::elements(&footprint));
+            if let Some(key) = registry.page_background() {
+                runtime.send_to_worker(
+                    key,
+                    crate::background::WorkerMessage::MemorySample {
+                        enqueued: registry.js_blocking_stamp(),
+                    },
+                );
+            }
+            if reported {
+                page.host.wake();
+            }
+        });
     }
 
     /// Queues the entry that delivers one commit's
@@ -666,8 +706,15 @@ impl Page {
             }
             ToMain::ImageEvents(events) => runtime.apply_image_events(&events),
             // A task of this view's, so the view's end reaps it; it enters
-            // no realm, and the next configuration ends it.
-            ToMain::StartMonitorTask(task) => owner::spawn(self, task.serve(self.host.clone())),
+            // no realm itself — a memory sample is a job it queues — and
+            // the next configuration ends it.
+            ToMain::StartMonitorTask(task) => {
+                let page = Rc::clone(self);
+                owner::spawn(
+                    self,
+                    task.serve(self.host.clone(), move |epoch| page.sample_memory(epoch)),
+                );
+            }
             #[cfg(test)]
             ToMain::Probe(probe) => runtime.with_document(probe),
             #[cfg(test)]

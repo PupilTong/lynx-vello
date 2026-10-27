@@ -19,11 +19,11 @@ use std::time::Duration;
 /// `std::time::SystemTime` panics on `wasm32-unknown-unknown` like `Instant`
 /// does, so that target reads `web_time`'s.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) use std::time::SystemTime;
+pub use std::time::SystemTime;
 
 pub(crate) use terminus::link::clock::ClockInstant;
 #[cfg(target_arch = "wasm32")]
-pub(crate) use web_time::SystemTime;
+pub use web_time::SystemTime;
 
 /// How long a spawner waits for a thread it spawned to align its clock
 /// before letting it run on its own. Only reached by a thread that does not
