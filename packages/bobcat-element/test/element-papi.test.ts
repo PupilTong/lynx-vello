@@ -37,6 +37,7 @@ rstest.mockRequire("bobcat-internal:host", () => {
     getComputedStyleMap: native.getComputedStyleMap,
     childElementIds: native.childElementIds,
     parentNode: native.parentNode,
+    childIndex: native.childIndex,
     insertBefore: native.insertBefore,
     removeElement: native.removeElement,
     replaceElement: native.replaceElement,
@@ -415,6 +416,12 @@ function createMockBobcat(issuedIds?: number[]): MockBobcat {
       const id = nodeId("parentNode", node);
       calls.push(["parentNode", id]);
       return parents.get(id) ?? null;
+    },
+    childIndex: (node: unknown) => {
+      const id = nodeId("childIndex", node);
+      calls.push(["childIndex", id]);
+      const parent = parents.get(id);
+      return parent === undefined ? -1 : (childOrder.get(parent) ?? []).indexOf(id);
     },
     insertBefore: (parent: unknown, child: unknown, reference: unknown) => {
       const parentId = nodeId("insertBefore", parent);
@@ -1645,6 +1652,7 @@ const DETAIL_COMPOSITION = 6;
 const DETAIL_FOCUS = 7;
 const DETAIL_CLONED = 8;
 const DETAIL_DISPATCHED = 9;
+const DETAIL_CONTENT_VISIBILITY = 10;
 
 /**
  * What a test asks one dispatch's `detail` to be made of.
@@ -1694,6 +1702,8 @@ interface DispatchPayload {
    * or null.
    */
   related?: number | null;
+  /** A `contentvisibilityautostatechange`: the `DETAIL_CONTENT_VISIBILITY` kind — `skipped`. */
+  skipped?: boolean;
 }
 
 /**
@@ -1735,6 +1745,9 @@ function detailArguments(payload: DispatchPayload): [number, ...unknown[]] {
   }
   if (payload.related !== undefined) {
     return [DETAIL_FOCUS, payload.related];
+  }
+  if (payload.skipped !== undefined) {
+    return [DETAIL_CONTENT_VISIBILITY, payload.skipped];
   }
   return [
     DETAIL_POSITION,
@@ -4824,8 +4837,8 @@ describe("list callbacks", () => {
  * assertions read.
  *
  * `componentAtIndex` stands in for ReactLynx's: it appends the cell for an
- * index before answering its sign, which is what makes the "already in
- * place" check below a real case rather than a hypothetical one.
+ * index before answering its sign, and the protocol moves it into its
+ * placeholder's place.
  */
 function listFixture(cellCount: number) {
   const list = __CreateList(0, null, null) as object;
@@ -4863,62 +4876,166 @@ function drain(): Promise<void> {
 }
 
 /**
- * The rejections `run` leaves behind.
- *
- * The microtask is fire-and-forget, so a throw inside it becomes an
- * unhandled rejection rather than something a caller can catch — which is
- * exactly what the realm's rejection tracker reports it as. The runner's own
- * listener is stood down for the duration and put back afterwards, because
- * an expected rejection is not a failed test file; the timer is the turn
- * Node reports rejections on, which is after the microtask queue drains.
+ * Delivers the host's `contentvisibilityautostatechange` at `child`, a
+ * child of `list`, as the commit that changed its skipping would: bubbling,
+ * with `skipped` as its one detail value.
  */
-async function collectRejections(
-  run: () => Promise<void>,
-): Promise<unknown[]> {
-  const failures: unknown[] = [];
-  const record = (error: unknown) => failures.push(error);
-  const runners = process.listeners("unhandledRejection");
-  process.removeAllListeners("unhandledRejection");
-  process.on("unhandledRejection", record);
-  try {
-    await run();
-    await new Promise((resolve) => setTimeout(resolve, 0));
-  } finally {
-    process.off("unhandledRejection", record);
-    for (const listener of runners) {
-      process.on("unhandledRejection", listener);
-    }
-  }
-  return failures;
+function reveal(list: object, child: object, skipped = false) {
+  dispatch([child, list], "contentvisibilityautostatechange", { skipped });
 }
 
 describe("update-list-info", () => {
-  it("inserts the cells componentAtIndex builds, in position order", async () => {
-    const { list, cells, calls, componentAtIndex, enqueueComponent } =
-      listFixture(3);
+  it("inserts a placeholder per insertion, in position order, and builds nothing", async () => {
+    const { list, calls, componentAtIndex, enqueueComponent } = listFixture(3);
     __SetAttribute(list, "update-list-info", {
-      insertAction: [{ position: 0 }, { position: 1 }, { position: 2 }],
+      insertAction: [
+        { position: 0, type: "row", "item-key": "a", "estimated-main-axis-size-px": 40 },
+        { position: 1, type: "row", "item-key": "b", "full-span": true },
+        { position: 2, type: "row", "item-key": "c" },
+      ],
       removeAction: [],
       updateAction: [],
     });
     __UpdateListCallbacks(list, componentAtIndex, enqueueComponent, () => []);
 
     // Nothing before the microtask: the callbacks are filed after the write.
-    expect(calls).toEqual([]);
     expect(childIds(list)).toEqual([]);
 
     await drain();
-    expect(calls).toEqual([
-      ["componentAtIndex", __GetElementUniqueID(list), 0, 0, false],
-      ["componentAtIndex", __GetElementUniqueID(list), 1, 0, false],
-      ["componentAtIndex", __GetElementUniqueID(list), 2, 0, false],
+    expect(calls).toEqual([]);
+    const placeholders = __GetChildren(list);
+    expect(placeholders.map((child) => __GetTag(child))).toEqual([
+      "list-item",
+      "list-item",
+      "list-item",
     ]);
+    // The platform info a built cell would carry, and nothing else.
+    expect(placeholders.map((child) => __GetAttributeByName(child, "item-key"))).toEqual([
+      "a",
+      "b",
+      "c",
+    ]);
+    expect(__GetAttributeByName(placeholders[0]!, "estimated-main-axis-size-px")).toBe("40");
+    expect(__GetAttributeByName(placeholders[1]!, "full-span")).toBe("true");
+    expect(__GetAttributeByName(placeholders[0]!, "type")).toBe(null);
+  });
+
+  it("builds a cell when its placeholder stops skipping, at the placeholder's index", async () => {
+    const { list, cells, calls, componentAtIndex, enqueueComponent } = listFixture(3);
+    __SetAttribute(list, "update-list-info", {
+      insertAction: [{ position: 0 }, { position: 1 }, { position: 2 }],
+      removeAction: [],
+    });
+    __UpdateListCallbacks(list, componentAtIndex, enqueueComponent, null);
+    await drain();
+    const [, second] = __GetChildren(list);
+
+    reveal(list, second!);
+
+    expect(calls).toEqual([
+      ["componentAtIndex", __GetElementUniqueID(list), 1, 0, false],
+    ]);
+    // The cell took the placeholder's place; the others are still waiting.
+    const children = __GetChildren(list);
+    expect(children[1]).toBe(cells[1]);
+    expect(children.filter((child) => child === cells[0] || child === cells[2])).toEqual([]);
+    expect(children).toHaveLength(3);
+  });
+
+  it("ignores a placeholder that starts skipping, and a built cell", async () => {
+    const { list, cells, calls, componentAtIndex, enqueueComponent } = listFixture(1);
+    __SetAttribute(list, "update-list-info", {
+      insertAction: [{ position: 0 }],
+      removeAction: [],
+    });
+    __UpdateListCallbacks(list, componentAtIndex, enqueueComponent, null);
+    await drain();
+    const [placeholder] = __GetChildren(list);
+
+    reveal(list, placeholder!, true);
+    expect(calls).toEqual([]);
+
+    reveal(list, placeholder!);
+    reveal(list, cells[0]!);
+    expect(calls).toHaveLength(1);
+    expect(childIds(list)).toEqual([__GetElementUniqueID(cells[0]!)]);
+  });
+
+  it("listens on the list only while it holds placeholders", async () => {
+    const { list, componentAtIndex, enqueueComponent } = listFixture(2);
+    const listId = __GetElementUniqueID(list);
+    const listening = () =>
+      mock.calls.filter(
+        (call) =>
+          (call[0] === "listenerOpened" || call[0] === "listenerClosed") &&
+          call[1] === listId &&
+          call[2] === "contentvisibilityautostatechange",
+      ).map((call) => call[0]);
+    __SetAttribute(list, "update-list-info", {
+      insertAction: [{ position: 0 }, { position: 1 }],
+      removeAction: [],
+    });
+    __UpdateListCallbacks(list, componentAtIndex, enqueueComponent, null);
+    await drain();
+    expect(listening()).toEqual(["listenerOpened"]);
+
+    const [first, second] = __GetChildren(list);
+    reveal(list, first!);
+    expect(listening()).toEqual(["listenerOpened"]);
+    reveal(list, second!);
+    expect(listening()).toEqual(["listenerOpened", "listenerClosed"]);
+  });
+
+  it("puts a reused cell, which comes back detached, in its placeholder's place", async () => {
+    const { list, cells, enqueueComponent } = listFixture(3);
+    __AppendElement(list, cells[0]!);
+    __AppendElement(list, cells[2]!);
+    // ReactLynx's reuse path answers a cell from its pool without appending
+    // it.
+    const componentAtIndex = () => __GetElementUniqueID(cells[1]!);
+    __SetAttribute(list, "update-list-info", {
+      insertAction: [{ position: 1 }],
+      removeAction: [],
+    });
+    __UpdateListCallbacks(list, componentAtIndex, enqueueComponent, null);
+    await drain();
+    reveal(list, __GetChildren(list)[1]!);
+
     expect(childIds(list)).toEqual(cells.map(__GetElementUniqueID));
   });
 
-  it("reads the callbacks the flush filed after the write, not the ones before it", async () => {
-    const { list, cells, calls, componentAtIndex, enqueueComponent } =
-      listFixture(1);
+  it("leaves a nested list's placeholder to that list", async () => {
+    const outer = listFixture(1);
+    const inner = listFixture(1);
+    outer.cells[0] = inner.list;
+    __SetAttribute(outer.list, "update-list-info", {
+      insertAction: [{ position: 0 }],
+      removeAction: [],
+    });
+    __UpdateListCallbacks(outer.list, outer.componentAtIndex, outer.enqueueComponent, null);
+    __SetAttribute(inner.list, "update-list-info", {
+      insertAction: [{ position: 0 }],
+      removeAction: [],
+    });
+    __UpdateListCallbacks(inner.list, inner.componentAtIndex, inner.enqueueComponent, null);
+    await drain();
+    reveal(outer.list, __GetChildren(outer.list)[0]!);
+    expect(__GetChildren(outer.list)).toEqual([inner.list]);
+
+    // The inner placeholder's event bubbles through both lists; each builds
+    // only its own.
+    dispatch(
+      [__GetChildren(inner.list)[0]!, inner.list, outer.list],
+      "contentvisibilityautostatechange",
+      { skipped: false },
+    );
+    expect(inner.calls).toHaveLength(1);
+    expect(outer.calls).toHaveLength(1);
+    expect(__GetChildren(inner.list)).toEqual([inner.cells[0]]);
+  });
+
+  it("reads the callbacks at the reveal, not at the write", async () => {
+    const { list, cells, calls, componentAtIndex, enqueueComponent } = listFixture(1);
     const stale = () => {
       throw new Error("the stale componentAtIndex ran");
     };
@@ -4929,55 +5046,20 @@ describe("update-list-info", () => {
       removeAction: [],
     });
     // ReactLynx's `flush()` order: the operations, then the pair that serves
-    // them. The microtask is what makes the two one operation.
+    // them.
     __UpdateListCallbacks(list, componentAtIndex, enqueueComponent, () => []);
-
     await drain();
+    reveal(list, __GetChildren(list)[0]!);
+
     expect(calls).toEqual([
       ["componentAtIndex", __GetElementUniqueID(list), 0, 0, false],
     ]);
     expect(childIds(list)).toEqual([__GetElementUniqueID(cells[0]!)]);
   });
 
-  it("does not move a cell componentAtIndex already appended in place", async () => {
-    const { list, componentAtIndex, enqueueComponent } = listFixture(2);
-    __SetAttribute(list, "update-list-info", {
-      insertAction: [{ position: 0 }, { position: 1 }],
-      removeAction: [],
-    });
-    __UpdateListCallbacks(list, componentAtIndex, enqueueComponent, null);
-    await drain();
-
-    // Every append landed at its own position, so the protocol made no tree
-    // call of its own: only the two `insertBefore`s the appends were.
-    expect(mock.named("insertBefore")).toHaveLength(2);
-    expect(mock.named("insertBefore").map((call) => call[3])).toEqual([
-      null,
-      null,
-    ]);
-  });
-
-  it("moves a cell appended past its position back to it", async () => {
-    const { list, cells, componentAtIndex, enqueueComponent } = listFixture(2);
-    // The list already holds the second cell, so building the first appends
-    // it *after* that one and it has to be moved before it.
-    __AppendElement(list, cells[1]!);
-    __SetAttribute(list, "update-list-info", {
-      insertAction: [{ position: 0 }],
-      removeAction: [],
-    });
-    __UpdateListCallbacks(list, componentAtIndex, enqueueComponent, null);
-    await drain();
-
-    expect(childIds(list)).toEqual([
-      __GetElementUniqueID(cells[0]!),
-      __GetElementUniqueID(cells[1]!),
-    ]);
-  });
-
   it("reads the list's children once per batch, not once per step", async () => {
-    const { list, cells, componentAtIndex, enqueueComponent } = listFixture(4);
-    __AppendElement(list, cells[3]!);
+    const { list, cells, componentAtIndex, enqueueComponent } = listFixture(1);
+    __AppendElement(list, cells[0]!);
     mock.calls.length = 0;
     __SetAttribute(list, "update-list-info", {
       insertAction: [{ position: 0 }, { position: 1 }, { position: 2 }],
@@ -4987,51 +5069,8 @@ describe("update-list-info", () => {
     await drain();
 
     expect(mock.named("childElementIds")).toHaveLength(1);
-    expect(childIds(list)).toEqual(cells.slice(0, 3).map(__GetElementUniqueID));
-  });
-
-  it("puts a reused cell, which comes back detached, at its position", async () => {
-    const { list, cells, enqueueComponent } = listFixture(3);
-    __AppendElement(list, cells[0]!);
-    __AppendElement(list, cells[2]!);
-    // ReactLynx's reuse path answers a cell from its pool without appending
-    // it; the protocol's own removal left that cell detached.
-    const componentAtIndex = () => __GetElementUniqueID(cells[1]!);
-    __SetAttribute(list, "update-list-info", {
-      insertAction: [{ position: 1 }],
-      removeAction: [],
-    });
-    __UpdateListCallbacks(list, componentAtIndex, enqueueComponent, null);
-    await drain();
-
-    expect(childIds(list)).toEqual(cells.map(__GetElementUniqueID));
-  });
-
-  it("reads the list again when componentAtIndex moves a cell it holds", async () => {
-    const { list, cells, enqueueComponent } = listFixture(3);
-    for (const cell of cells) {
-      __AppendElement(list, cell);
-    }
-    // Not ReactLynx's behaviour: this card moves the first cell to the end
-    // and answers it, so the array the batch keeps would be wrong.
-    const componentAtIndex = () => {
-      __AppendElement(list, cells[0]!);
-      return __GetElementUniqueID(cells[0]!);
-    };
-    mock.calls.length = 0;
-    __SetAttribute(list, "update-list-info", {
-      insertAction: [{ position: 1 }, { position: 2 }],
-      removeAction: [],
-    });
-    __UpdateListCallbacks(list, componentAtIndex, enqueueComponent, null);
-    await drain();
-
-    // Step 1: [1, 2, 0] → the cell goes before 2 → [1, 0, 2]. Step 2:
-    // [1, 2, 0] again → it is already at index 2.
-    expect(mock.named("childElementIds")).toHaveLength(3);
-    expect(childIds(list)).toEqual(
-      [cells[1]!, cells[2]!, cells[0]!].map(__GetElementUniqueID),
-    );
+    expect(childIds(list)).toHaveLength(3);
+    expect(childIds(list)).not.toContain(__GetElementUniqueID(cells[0]!));
   });
 
   it("shifts each removal by the removals before it", async () => {
@@ -5062,6 +5101,30 @@ describe("update-list-info", () => {
     ]);
   });
 
+  it("removes a placeholder without enqueueing it", async () => {
+    const { list, calls, componentAtIndex, enqueueComponent } = listFixture(1);
+    __SetAttribute(list, "update-list-info", {
+      insertAction: [{ position: 0 }],
+      removeAction: [],
+    });
+    __UpdateListCallbacks(list, componentAtIndex, enqueueComponent, null);
+    await drain();
+    __SetAttribute(list, "update-list-info", {
+      insertAction: [],
+      removeAction: [0],
+    });
+    __UpdateListCallbacks(list, componentAtIndex, enqueueComponent, null);
+    await drain();
+
+    expect(calls).toEqual([]);
+    expect(childIds(list)).toEqual([]);
+    expect(
+      mock.named("listenerClosed").filter(
+        (call) => call[2] === "contentvisibilityautostatechange",
+      ),
+    ).toHaveLength(1);
+  });
+
   it("removes before it inserts, and skips a removal past the end", async () => {
     const { list, cells, calls, componentAtIndex, enqueueComponent } =
       listFixture(3);
@@ -5080,8 +5143,8 @@ describe("update-list-info", () => {
         __GetElementUniqueID(list),
         __GetElementUniqueID(cells[2]!),
       ],
-      ["componentAtIndex", __GetElementUniqueID(list), 0, 0, false],
     ]);
+    reveal(list, __GetChildren(list)[0]!);
     expect(childIds(list)).toEqual([__GetElementUniqueID(cells[0]!)]);
   });
 
@@ -5110,6 +5173,7 @@ describe("update-list-info", () => {
     });
     __UpdateListCallbacks(list, componentAtIndex, enqueueComponent, batch);
     await drain();
+    reveal(list, __GetChildren(list)[0]!);
 
     expect(childIds(list)).toHaveLength(1);
   });
@@ -5126,8 +5190,8 @@ describe("update-list-info", () => {
     mock.calls.length = 0;
     await drain();
 
-    // No `componentAtIndex` is no sign, so nothing is built and nothing is
-    // moved — web-core's `componentAtIndex?.(…)` answering undefined.
+    // No `componentAtIndex` is nothing to build, so no placeholder either —
+    // web-core's `componentAtIndex?.(…)` answering undefined.
     expect(childIds(list)).toEqual([]);
     expect(mock.named("insertBefore")).toEqual([]);
   });
@@ -5163,27 +5227,21 @@ describe("update-list-info", () => {
     expect(childIds(list)).toHaveLength(1);
   });
 
-  it("refuses a sign no live handle names, and stops the batch", async () => {
-    const { list, cells, enqueueComponent } = listFixture(1);
+  it("refuses a sign no live handle names, and keeps the placeholder", async () => {
+    const { list, enqueueComponent } = listFixture(1);
     // 4242 is no element of this document: the ownership graph and the tree
     // would disagree about a cell this very call built. web-core skips such
     // a sign; this throws, which is the recorded deviation.
-    const signs = [4242, __GetElementUniqueID(cells[0]!)];
     __SetAttribute(list, "update-list-info", {
-      insertAction: [{ position: 0 }, { position: 1 }],
+      insertAction: [{ position: 0 }],
       removeAction: [],
     });
-    __UpdateListCallbacks(list, () => signs.shift(), enqueueComponent, null);
+    __UpdateListCallbacks(list, () => 4242, enqueueComponent, null);
+    await drain();
+    const [placeholder] = __GetChildren(list);
 
-    const failures = await collectRejections(async () => {
-      await drain();
-    });
-
-    expect(String(failures[0])).toContain("4242");
-    expect(String(failures[0])).toContain("no live handle names");
-    // The throw ended the microtask, so the second insertion never ran.
-    expect(signs).toEqual([__GetElementUniqueID(cells[0]!)]);
-    expect(childIds(list)).toEqual([]);
+    expect(() => reveal(list, placeholder!)).toThrow("no live handle names");
+    expect(__GetChildren(list)).toEqual([placeholder]);
   });
 });
 

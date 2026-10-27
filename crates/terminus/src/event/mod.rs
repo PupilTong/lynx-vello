@@ -54,9 +54,10 @@
 //! every defined element along the path, before [`Document::advance`]
 //! reports the step. [`Document::dispatch_element_event_over`] drives a walk
 //! to its end for a caller with nothing of its own per step, and
-//! [`Document::dispatch_element_event`] computes the steps itself, for the
-//! two events only the engine hears (`slotchange`,
-//! `contentvisibilityautostatechange`). [`ElementEvent`] is what a handler is
+//! [`Document::dispatch_element_event`] computes the steps itself, for an
+//! event fired to the components alone (`slotchange`, and
+//! `contentvisibilityautostatechange` for a host that does not take it to
+//! script). [`ElementEvent`] is what a handler is
 //! given: the W3C type name, an [`EventDetail`] (one variant per payload
 //! shape, owned by this crate and carried unchanged by every layer above),
 //! the timestamp, and the stop methods, which end the walk — the host's

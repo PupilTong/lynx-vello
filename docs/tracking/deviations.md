@@ -2084,6 +2084,30 @@ consequential choice about whether to follow the spec or the quirk.
   (`lynx/clay/ui/component/scroll_view.cc:329-372`). **User ruling
   2026-10-21: clay's spelling is not read on a `scroll-view`;
   `initial-scroll-to-index` is the only name.**
+- **List cells are built lazily, as native builds them, not up front as
+  web-core does (user ruling, 2026-10-27).** web-core's `update-list-info`
+  calls `componentAtIndex` for every `insertAction` inside the batch
+  (`createElementAPI.ts:461-499`), so a 10,000-row list builds 10,000 cells
+  before its first frame. Here each insertion is a placeholder `list-item`
+  carrying the entry's platform info (`item-key`,
+  `estimated-main-axis-size-px`, `full-span`, `sticky-top`, `sticky-bottom`,
+  `estimated-height`, `estimated-height-px`), and `componentAtIndex` runs
+  when the placeholder stops skipping: the list's listener for
+  `contentvisibilityautostatechange` builds the cell with the placeholder's
+  current index and swaps it in. A placeholder stops skipping when a commit
+  finds it inside the encode window, so a cell is built about a scrollport
+  before it is on screen, one entry after the commit that found it. What a
+  card can observe differently from web-core:
+  - `__GetChildren(list)`, `getVisibleCells` and selector queries see
+    placeholders for cells not built yet: a plain `list-item` with the
+    platform-info attributes and no content, id or class of the card's own.
+    `scrollToPosition` by index or `item-key` still finds the right child.
+  - A removed placeholder is not handed to `enqueueComponent`, since no cell
+    was built for it; ReactLynx's `enqueueComponent` returns early for a sign
+    it never issued anyway.
+  - Native's `list` builds cells the same way, from its layout's preload
+    window, and also recycles them; recycling (`enqueueComponent` when a cell
+    leaves, a reuse pool) is not built here.
 - **List waterfall over `display: grid-lanes` — path assessment
   (2026-09-18).** The layout mode landed
   ([style-assumptions.md](../style-assumptions.md) §24); this records how far
@@ -2098,11 +2122,12 @@ consequential choice about whether to follow the spec or the quirk.
   as a real DOM child inside a microtask, removing each `removeAction` child
   after handing it to `enqueueComponent`
   (`.../web-core/ts/client/mainthread/elementAPIs/createElementAPI.ts:461-499`);
-  it keeps no virtualization of its own. This engine now implements that same
-  algorithm over the `childElementIds`, `insertBefore` and `removeElement` host
-  members (`packages/bobcat-element/src/element-papi.ts`, `updateListInfo`), so
-  a list's cells are real element children under every layout mode and what is
-  left here is layout and placement alone.
+  it keeps no virtualization of its own. This engine services the same batch
+  over the `childElementIds`, `insertBefore` and `removeElement` host members
+  (`packages/bobcat-element/src/element-papi.ts`, `updateListInfo`), with
+  placeholders standing in for cells not built yet (the entry below), so a
+  list's children are real elements under every layout mode and what is left
+  here is layout and placement alone.
   **The placement rule native and web-core agree on**: shortest lane, exact
   float comparison, lowest lane index on a tie; a full-span item goes at the
   maximum of every lane and resets them all to that maximum plus its own

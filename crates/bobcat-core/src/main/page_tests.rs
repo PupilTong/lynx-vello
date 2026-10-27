@@ -675,20 +675,36 @@ globalThis.renderPage = function () {
 };
 ";
 
-/// A page that is nothing but its root, with a JavaScript listener on it for
-/// the very event the engine fires Rust-side.
-///
-/// That listener is the pin for the ruling: `contentvisibilityautostatechange`
-/// is delivered to engine components and to nothing else, so a realm
-/// registration for it — on an ancestor of every row, in the phase a bubbling
-/// event would reach — must never run. It would mark the page element if it
-/// did.
-const LISTENING_PAGE: &str = r"
+/// A page that is nothing but its sized root, under which the probes below
+/// build elements Rust-side for engine components to hear.
+const SIZED_PAGE: &str = r"
 globalThis.renderPage = function () {
   const page = __CreatePage('card', 0);
   __SetInlineStyles(page, 'display:flex;width:200px;height:240px;align-items:flex-start');
-  __AddEventListener(page, 'contentvisibilityautostatechange', () => {
-    __SetAttribute(page, 'data-js-heard', 'yes');
+};
+";
+
+/// The same scroller and rows as [`build_scrolling_rows`], built by script,
+/// with a JavaScript listener for `contentvisibilityautostatechange` on the
+/// page element, which writes what it heard — each target's id and
+/// `skipped` — to the page's `data-js-heard`.
+const LISTENING_ROWS_PAGE: &str = r"
+globalThis.renderPage = function () {
+  const page = __CreatePage('card', 0);
+  __SetInlineStyles(page, 'display:flex;width:200px;height:240px;align-items:flex-start');
+  const scroller = __CreateView(0);
+  __SetInlineStyles(scroller, 'display:flex;flex-direction:column;overflow:hidden;width:200px;height:100px;align-items:flex-start');
+  __AppendElement(page, scroller);
+  for (let index = 0; index < 20; index++) {
+    const row = __CreateView(0);
+    __SetID(row, 'row' + index);
+    __SetInlineStyles(row, 'display:flex;width:200px;height:20px;flex-shrink:0;content-visibility:auto;contain-intrinsic-size:200px 20px');
+    __AppendElement(scroller, row);
+  }
+  const heard = [];
+  __AddEventListener(page, 'contentvisibilityautostatechange', (event) => {
+    heard.push(event.target.id + ':' + event.skipped);
+    __SetAttribute(page, 'data-js-heard', heard.join(','));
   }, {});
 };
 ";
@@ -826,15 +842,15 @@ async fn build_scrolling_rows(page: &Rc<Page>, log: &Log) -> terminus::link::Nod
     built.try_recv().expect("the probe ran")
 }
 
-/// Whether the realm's listener for the same event name ever ran.
-async fn js_heard(page: &Rc<Page>) -> bool {
+/// What [`LISTENING_ROWS_PAGE`]'s listener heard, as it wrote it.
+async fn js_heard(page: &Rc<Page>) -> Option<String> {
     let (answer, heard) = std::sync::mpsc::channel();
     page.apply(vec![ToMain::Probe(Box::new(move |document| {
         let _ = answer.send(
             document
                 .document_element()
                 .attribute("data-js-heard")
-                .is_some(),
+                .map(std::borrow::Cow::into_owned),
         );
     }))])
     .await;
@@ -855,7 +871,7 @@ fn a_commit_delivers_its_state_changes_in_an_entry_of_its_own() {
     on_a_js_thread(|thread| async move {
         let (context, _workers) = group(&thread);
         let mut owned = OwnedPage::new(context);
-        owned.boot(LISTENING_PAGE).await;
+        owned.boot(SIZED_PAGE).await;
         let log: Log = Arc::default();
         let settled = owned.page.epilogue_count();
 
@@ -877,11 +893,6 @@ fn a_commit_delivers_its_state_changes_in_an_entry_of_its_own() {
             "every revealed row, in frame order, over the whole path: the \
              scroller inbound, the row itself, the scroller outbound",
         );
-        assert!(
-            !js_heard(&owned.page).await,
-            "the realm's own listener for the same name never runs: this \
-             event is fired Rust-side and reaches engine components alone",
-        );
     });
 }
 
@@ -893,7 +904,7 @@ fn a_scroll_past_the_window_delivers_both_directions_in_the_entry_after_its_comm
     on_a_js_thread(|thread| async move {
         let (context, _workers) = group(&thread);
         let mut owned = OwnedPage::new(context);
-        owned.boot(LISTENING_PAGE).await;
+        owned.boot(SIZED_PAGE).await;
         let log: Log = Arc::default();
         let scroller = build_scrolling_rows(&owned.page, &log).await;
         let before = admitted_rows(0);
@@ -921,7 +932,24 @@ fn a_scroll_past_the_window_delivers_both_directions_in_the_entry_after_its_comm
             "the case is only worth anything if both directions happened: {expected:?}",
         );
         assert_eq!(take(&log), expected);
-        assert!(!js_heard(&owned.page).await);
+    });
+}
+
+/// The event reaches script too (user ruling, 2026-10-27): it bubbles to a
+/// realm's listener on an ancestor of every row, in frame order, with the
+/// state each row changed to as `skipped`, from the entry the page posts
+/// after the commit that decided it.
+#[test]
+fn a_realm_listener_hears_each_state_change_with_skipped() {
+    on_a_js_thread(|thread| async move {
+        let (context, _workers) = group(&thread);
+        let mut owned = OwnedPage::new(context);
+        owned.boot(LISTENING_ROWS_PAGE).await;
+        let expected: Vec<String> = admitted_rows(0)
+            .into_iter()
+            .map(|row| format!("row{row}:false"))
+            .collect();
+        assert_eq!(js_heard(&owned.page).await, Some(expected.join(",")));
     });
 }
 
@@ -1026,7 +1054,7 @@ fn intersection_entries_are_delivered_by_an_entry_after_the_update() {
     on_a_js_thread(|thread| async move {
         let (context, _workers) = group(&thread);
         let mut owned = OwnedPage::new(context);
-        owned.boot(LISTENING_PAGE).await;
+        owned.boot(SIZED_PAGE).await;
         let log: WatcherLog = Arc::default();
         let settled = owned.page.epilogue_count();
 
@@ -1093,13 +1121,6 @@ fn intersection_entries_are_delivered_by_an_entry_after_the_update() {
         );
         assert_eq!(take_watched(&log), Vec::<String>::new());
         assert_eq!(owned.view.published.commit(), committed);
-
-        // The attribute the realm's listener would write stays written once
-        // set, so one read at the end covers every entry above.
-        assert!(
-            !js_heard(&owned.page).await,
-            "no realm is entered for an engine component's observer",
-        );
     });
 }
 
@@ -1112,7 +1133,7 @@ fn an_intersection_hook_that_mutates_gets_its_own_commit_and_no_second_delivery(
     on_a_js_thread(|thread| async move {
         let (context, _workers) = group(&thread);
         let mut owned = OwnedPage::new(context);
-        owned.boot(LISTENING_PAGE).await;
+        owned.boot(SIZED_PAGE).await;
         let log: WatcherLog = Arc::default();
         let watcher = IntersectionWatcher::new(&log);
         let mutate = Arc::clone(&watcher.mutate);
@@ -1159,7 +1180,6 @@ fn an_intersection_hook_that_mutates_gets_its_own_commit_and_no_second_delivery(
             "the marker and the delivery, and no third entry: the update \
              after the hook's commit found no row's observation moved",
         );
-        assert!(!js_heard(&owned.page).await);
     });
 }
 

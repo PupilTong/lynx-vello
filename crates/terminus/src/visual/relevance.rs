@@ -92,10 +92,12 @@
 //! determination of an off-screen box is not.
 //!
 //! Every such change is queued as a [`ContentVisibilityChange`], in frame
-//! order, and fired by
-//! [`Document::dispatch_content_visibility_changes`] — a walk over the
-//! standard's path to the engine's own components, never to script (see
-//! [`crate::event`]). *When* it is called is not this module's and not this
+//! order, for the host: it drains them with
+//! [`Document::take_content_visibility_changes`] and fires each through its
+//! own dispatch (`bobcat-core` reaches components and realms alike), or has
+//! [`Document::dispatch_content_visibility_changes`] fire them over the
+//! standard's path to the engine's own components alone (see
+//! [`crate::event`]). *When* that happens is not this module's and not this
 //! crate's: the spec dispatches the event "by posting a task at the time
 //! when the state change occurs", so the host calls it from the task it
 //! posts and the event is never delivered inside the commit that produced

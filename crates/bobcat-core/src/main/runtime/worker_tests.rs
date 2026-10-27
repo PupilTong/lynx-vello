@@ -183,8 +183,25 @@ impl Pair {
     /// opened.
     fn unbooted_with_config(
         background_source: Option<&str>,
+        startup: RealmStartup,
+        config: crate::main::tree::PageConfig,
+    ) -> Self {
+        Self::unbooted_over(
+            background_source,
+            startup,
+            config,
+            crate::view::Viewport::new(32.0, 24.0),
+        )
+    }
+
+    /// The same, over a viewport of the test's own: what a frame's
+    /// `content-visibility: auto` relevance and encode window are relative
+    /// to.
+    fn unbooted_over(
+        background_source: Option<&str>,
         mut startup: RealmStartup,
         config: crate::main::tree::PageConfig,
+        viewport: crate::view::Viewport,
     ) -> Self {
         startup.background_entry = background_source.map(|_| "test:bts-entry".to_owned());
         let home = match background_source {
@@ -196,13 +213,12 @@ impl Pair {
         let (outbox, view) = detached_outbox(Arc::new(NoWakeup));
         let cancel = view.token.clone();
         let mut js = build_runtime().unwrap();
-        let ingredients =
-            DocumentIngredients::for_test(crate::view::Viewport::new(32.0, 24.0), config);
+        let ingredients = DocumentIngredients::for_test(viewport, config);
         let thread = JsThread::new();
         let (runtime, events) = MainThreadRuntime::new(
             &mut js,
             ingredients,
-            crate::main::runtime::bound_metrics(crate::view::Viewport::new(32.0, 24.0)),
+            crate::main::runtime::bound_metrics(viewport),
             outbox,
             &WorkerFactory::new(home.commands(), home.trapped()),
             thread.handle(),
@@ -3818,21 +3834,26 @@ fn a_compiled_react_list_receives_its_cells_and_a_tap_edits_them() {
          lynx.requireModule('/app-service.js');",
         url = serde_json::to_string(BUNDLE_URL).unwrap(),
     );
-    let mut pair = Pair::unbooted_with_data(Some(&background), RealmStartup::default());
+    // A phone's viewport, so the list's first cells are on screen: under a
+    // smaller one the card's header would hide them all, and nothing would
+    // be revealed.
+    let mut pair = Pair::unbooted_over(
+        Some(&background),
+        RealmStartup::default(),
+        crate::main::tree::PageConfig::default(),
+        crate::view::Viewport::new(393.0, 727.0),
+    );
     pair.boot(&template.lepus_code["react-list__main-thread"])
         .unwrap();
 
     // The first screen is the main thread's own render, and it ends in the
-    // checkpoint that drains the protocol's microtask: the forty cells are
-    // there before the background thread has been asked for anything.
+    // checkpoint that drains the protocol's microtask: the forty cells'
+    // placeholders are there before the background thread has been asked
+    // for anything, and the commit's state changes build the ones it
+    // reveals.
+    reveal_list_cells(&mut pair);
     let first_screen = pair.runtime.as_mut().unwrap().with_document(list_cells);
-    assert_eq!(first_screen.len(), 40, "{first_screen:?}");
-    assert_eq!(
-        first_screen,
-        (0..40)
-            .map(|row| format!("cell-{row}=row {row}"))
-            .collect::<Vec<_>>(),
-    );
+    assert_listed(&first_screen, &(0..40).collect::<Vec<_>>());
 
     // In the order the card asks for them, each a worker job parked on this
     // answer.
@@ -3853,6 +3874,7 @@ fn a_compiled_react_list_receives_its_cells_and_a_tap_edits_them() {
             .expect("a valid selector")
             .expect("the card's header")
     });
+    let edited_rows: Vec<usize> = (0..41).filter(|row| ![1, 3, 5].contains(row)).collect();
     let edited: Vec<String> = [1, 3, 5]
         .iter()
         .fold(
@@ -3884,13 +3906,58 @@ fn a_compiled_react_list_receives_its_cells_and_a_tap_edits_them() {
         );
         pair.deliver();
         assert!(worker_failures(pair.notices()).is_empty());
-        if pair.runtime.as_mut().unwrap().with_document(list_cells) == edited {
+        reveal_list_cells(&mut pair);
+        let cells = pair.runtime.as_mut().unwrap().with_document(list_cells);
+        if cells.len() == edited.len()
+            && cells
+                .iter()
+                .zip(&edited)
+                .all(|(cell, row)| cell == row || placeholder_of(row) == *cell)
+        {
+            assert_listed(&cells, &edited_rows);
             break;
         }
     }
 }
 
-/// Every element child of the card's list, as `<item-key>=<its text>`.
+/// Commits the card and delivers each commit's
+/// `contentvisibilityautostatechange`s until a commit decides none — which
+/// is how the list's placeholders inside the encode window become cells.
+fn reveal_list_cells(pair: &mut Pair) {
+    let runtime = pair.runtime.as_mut().unwrap();
+    for _ in 0..8 {
+        runtime.commit_if_dirty();
+        let failures = runtime.dispatch_content_visibility_changes(&mut pair.js);
+        assert!(failures.is_empty(), "{failures:?}");
+    }
+}
+
+/// What [`list_cells`] lists for a row whose cell is still a placeholder.
+fn placeholder_of(row: &str) -> String {
+    format!("{}=", row.split('=').next().unwrap_or_default())
+}
+
+/// `cells` lists `rows` in order, each built (`cell-N=row N`) or still a
+/// placeholder (`cell-N=`), with the built ones first and at least one.
+fn assert_listed(cells: &[String], rows: &[usize]) {
+    let expected: Vec<String> = rows
+        .iter()
+        .map(|row| format!("cell-{row}=row {row}"))
+        .collect();
+    assert_eq!(cells.len(), expected.len(), "{cells:?}");
+    let built = cells
+        .iter()
+        .zip(&expected)
+        .take_while(|(cell, row)| cell == row)
+        .count();
+    assert!(built > 0, "the window reveals the first cells: {cells:?}");
+    for (cell, row) in cells.iter().zip(&expected).skip(built) {
+        assert_eq!(*cell, placeholder_of(row), "{cells:?}");
+    }
+}
+
+/// Every element child of the card's list, as `<item-key>=<its text>`, or
+/// `<item-key>=` for a cell whose placeholder has not been revealed.
 ///
 /// Asserting the shape here rather than in the test body keeps the two
 /// call sites reading as the orders they are about.
@@ -3904,7 +3971,10 @@ fn list_cells(document: &mut LynxDocument) -> Vec<String> {
     list.children()
         .map(|cell| {
             assert_eq!(cell.tag_name(), Some("list-item"));
-            let text = cell.children().next().expect("the cell's own text");
+            let key = cell.attribute("item-key").expect("every cell is keyed");
+            let Some(text) = cell.children().next() else {
+                return format!("{key}=");
+            };
             assert_eq!(text.tag_name(), Some("text"));
             // A `<text>`'s own `text` attribute replaces its children's
             // content (`tree/raw_text.rs`); the `ReactLynx` 0.127 compiler
@@ -3914,10 +3984,7 @@ fn list_cells(document: &mut LynxDocument) -> Vec<String> {
             let content = text
                 .attribute("text")
                 .map_or_else(|| generated_text(text), std::borrow::Cow::into_owned);
-            format!(
-                "{}={content}",
-                cell.attribute("item-key").expect("every cell is keyed"),
-            )
+            format!("{key}={content}")
         })
         .collect()
 }

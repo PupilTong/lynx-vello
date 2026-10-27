@@ -252,6 +252,11 @@ interface BobcatNative {
   childElementIds(nodeId: number): string;
   /** The parent's `NodeId`, or null for a detached element. */
   parentNode(nodeId: number): number | null;
+  /**
+   * The node's position in its parent's child list, nodes of every kind
+   * counted, or -1 for a detached element. Kept on the node, so O(1).
+   */
+  childIndex(nodeId: number): number;
   /** Reparenting insert; appends when `reference` is null. */
   insertBefore(parent: number, child: number, reference: number | null): void;
   /**
@@ -509,6 +514,7 @@ declare module "bobcat-internal:host" {
   export const getComputedStyleMap: BobcatNative["getComputedStyleMap"];
   export const childElementIds: BobcatNative["childElementIds"];
   export const parentNode: BobcatNative["parentNode"];
+  export const childIndex: BobcatNative["childIndex"];
   export const insertBefore: BobcatNative["insertBefore"];
   export const removeElement: BobcatNative["removeElement"];
   export const replaceElement: BobcatNative["replaceElement"];

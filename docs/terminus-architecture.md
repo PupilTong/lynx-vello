@@ -1173,9 +1173,12 @@ is fed per instance, while the walk's gate (`observes_event`) stays per
 definition. The
 engine-only types are css-contain-2 §4.4's
 `contentvisibilityautostatechange` (`EventDetail::ContentVisibility {
-skipped }`), which `Document::dispatch_content_visibility_changes` fires from
-the queue the relevance pass filled — `bubbles`, not composed, not cancelable,
-and never reaching a realm — and DOM's `slotchange`, fired by the slot
+skipped }`), queued by the relevance pass — `bubbles`, not composed, not
+cancelable — which `Document::dispatch_content_visibility_changes` fires
+through the components alone; `bobcat-core` takes the queue instead
+(`Document::take_content_visibility_changes`) and fires each change through
+its one dispatch, which calls the realms on the path too (user ruling
+2026-10-27) — and DOM's `slotchange`, fired by the slot
 assignment paths above. One routed event is also dispatched this way:
 `bobcat-core` fires a non-composed `tap` (`EventDetail::Pointer`) at a tap's
 hit node, before its one dispatch of the same `tap`, when that node is UA

@@ -364,12 +364,14 @@ impl Page {
     /// rest of the batch into it would be worse than stopping.
     fn post_content_visibility_changes(self: &Rc<Self>) {
         let page = Rc::clone(self);
-        drop(owner::enter(self, move |runtime, _js| {
+        drop(owner::enter(self, move |runtime, js| {
             // Cleared before the walk, not after: what a handler's own
             // mutation leaves for this entry's epilogue to commit is a batch
             // of its own, and it owes an entry of its own too.
             page.content_visibility_posted.set(false);
-            runtime.dispatch_content_visibility_changes();
+            for failure in runtime.dispatch_content_visibility_changes(js) {
+                policy::report(&page, Scene::Listener, failure.into_script_error());
+            }
         }));
     }
 
