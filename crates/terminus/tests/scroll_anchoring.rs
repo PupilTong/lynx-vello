@@ -260,7 +260,7 @@ fn a_skipping_box_is_no_anchor_so_building_at_revealed_placeholders_settles() {
         page.render();
     };
     let mut placeholders: Vec<bool> = vec![true; page.rows.len()];
-    let mut build = |page: &mut Page, placeholders: &mut Vec<bool>| {
+    let build = |page: &mut Page, placeholders: &mut Vec<bool>| {
         let revealed: Vec<NodeId> = page
             .doc
             .dom

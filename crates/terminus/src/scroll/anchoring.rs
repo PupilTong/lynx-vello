@@ -36,7 +36,7 @@
 //!   Its size is its `contain-intrinsic-size` or its last remembered size, never a layout of what
 //!   it holds, and it shows nothing, so keeping its block-start in place keeps nothing the user
 //!   saw. Anchored to one, a page that builds content where its placeholders turn relevant chases
-//!   the next placeholder down for as long as it builds: Chrome does, Gecko and WebKit select the
+//!   the next placeholder down for as long as it builds: Chrome does, Firefox and Safari select the
 //!   same anchors, and css-scroll-anchoring-1 §2.1's excluded subtrees do not include it. The
 //!   choice puts filling the screen after a long scroll ahead of where that screen lands. Recorded
 //!   in `docs/tracking/deviations.md`.
