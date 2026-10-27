@@ -36,7 +36,7 @@
 //! in their containing-block chain. Both escapes are the same rule, which is
 //! why one struct carries both.
 
-use euclid::default::{Point2D, Rect, Size2D, Transform3D};
+use euclid::default::{Point2D, Rect, Size2D, Transform3D, Vector2D};
 use seldon::style::containment::effective_containment;
 use seldon::style::{Contain, ContentVisibility, Overflow, PositionProperty, visibility};
 use seldon::tree::{Layout, LayoutTree};
@@ -552,6 +552,10 @@ impl<'doc, T: Sync> Builder<'doc, T> {
                 euclid::vec2(world.m21, world.m22),
             ],
             request,
+            anchor_shift: self.state.scroll_anchors.get(&slot).map_or_else(
+                Vector2D::zero,
+                crate::scroll::anchoring::ScrollAnchor::shift,
+            ),
         });
         Some(
             u32::try_from(self.slots.len() - 1)

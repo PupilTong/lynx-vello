@@ -127,6 +127,7 @@ pub struct ScrollAxes {
     pub y: bool,
 }
 
+pub(crate) mod anchoring;
 #[cfg(test)]
 mod behavior_tests;
 pub(crate) mod initial_target;
@@ -684,6 +685,9 @@ impl<T> Document<T> {
         };
         let admitted = scroll_box.admit(offset);
         if admitted != scroll_box.offset {
+            // css-scroll-anchoring-1 §2.1.1: a scroll anchoring did not make
+            // selects a new anchor at the new offset.
+            self.clear_scroll_anchor(id);
             // Intersection observations move with the offset whether or not
             // the frame does: a scroll the retained frame composes commits
             // nothing, so no render would say so.

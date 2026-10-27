@@ -1013,6 +1013,27 @@ committed frame's positions and the offset with no record kept: the document
 moves its own offset in the render that builds the new positions
 (`Document::resnap`, before the initial scroll targets, with one more
 paint-order build when an offset moved), and the painter the offset it holds.
+`scroll/anchoring.rs` is css-scroll-anchoring-1 as Blink implements it:
+- **Selection.** Before a `layout()` with work to do, each container scrolled
+  away from its block start selects an anchor if it has none. That is the
+  first box in tree order the scrollport (inset by `scroll-padding`) shows, or
+  the deepest such box inside a partly shown one.
+- **Adjustment.** After the layout, the block offset moves by however far the
+  anchor's top moved, unless a computed change on the anchor-to-container path
+  suppresses it.
+- **The relevance loop.** It lays out once per pass, so a `content-visibility:
+  auto` reveal above the scrollport moves nothing the user sees. An anchor that
+  was still at its placeholder size stops where its bottom meets the
+  scrollport's top.
+- **Clearing.** A scroll anchoring did not make clears the anchor.
+- **Declined.** Containers that snap on the block axis, and containers with a
+  pending request, are left alone.
+- **The painter.** It owns its own offset, so each container keeps the sum of
+  its adjustments. The scroll slot carries the sum; the painter moves its
+  offset, drag origins and glide targets by the part it has not applied when it
+  rebases. Every post names the sum it had applied, and the runtime adds what a
+  post lacks.
+
 Only
 `overflow: scroll` is user-scrollable; `hidden` is a scroll container that
 moves only programmatically (load-bearing here, because the Lynx UA cascade

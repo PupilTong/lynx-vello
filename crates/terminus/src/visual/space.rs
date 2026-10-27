@@ -515,6 +515,7 @@ mod tests {
             scrollport: Size2D::new(100.0, 100.0),
             viewport_axes: [Vector2D::new(1.0, 0.0), Vector2D::new(0.0, 1.0)],
             request: None,
+            anchor_shift: Vector2D::zero(),
         }
     }
 

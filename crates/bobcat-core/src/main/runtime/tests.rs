@@ -2067,6 +2067,7 @@ fn adopted_offsets_queue_scroll_events_only_for_a_name_something_hears() {
                 at: 0.0,
                 rest: Some(terminus::link::Vector2D::new(0.0, y)),
                 request: None,
+                anchor_shift: terminus::link::Vector2D::zero(),
             },
         )
     };
@@ -2118,6 +2119,7 @@ fn scroll_post(
             at: 0.0,
             rest: rest.then(|| terminus::link::Vector2D::new(0.0, y)),
             request: None,
+            anchor_shift: terminus::link::Vector2D::zero(),
         },
     )
 }
@@ -2470,6 +2472,7 @@ fn rest_after_request(
                 at: 0.0,
                 rest: Some(offset),
                 request: Some(request),
+                anchor_shift: terminus::link::Vector2D::zero(),
             },
         )]
         .into_iter(),
@@ -2937,6 +2940,7 @@ fn scroll_metrics_and_a_load_size_reach_the_lynx_detail_as_extras() {
                 at: 0.0,
                 rest: rest.then_some(terminus::link::Vector2D::new(0.0, y)),
                 request: None,
+                anchor_shift: terminus::link::Vector2D::zero(),
             },
         )
     };

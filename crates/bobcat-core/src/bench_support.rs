@@ -229,6 +229,7 @@ impl ScriptHarness {
                 at: 0.0,
                 rest: post.rest.then_some(offset),
                 request: None,
+                anchor_shift: terminus::link::Vector2D::zero(),
             };
             (node, entry)
         }));

@@ -2795,7 +2795,10 @@ impl MainThreadRuntime {
                 document.acknowledge_scroll_request(node, handled);
             }
             let before = document.scroll_offset(node);
-            let applied = document.scroll_to(node, entry.offset);
+            // css-scroll-anchoring-1: a post made before the painter applied
+            // an adjustment the document has since made lacks it.
+            let unapplied = document.scroll_anchor_shift(node) - entry.anchor_shift;
+            let applied = document.scroll_to(node, entry.offset + unapplied);
             // CSSOM-View: a container whose offset this post moved fires one
             // `scroll` (the mailbox holds one entry per container, so one per
             // take), and has scrolled until it comes to rest — in this post or

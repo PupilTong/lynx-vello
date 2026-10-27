@@ -864,6 +864,7 @@ fn a_drag_queues_one_marker_until_main_takes() {
                 at: 0.0,
                 rest: None,
                 request: None,
+                anchor_shift: terminus::link::Vector2D::zero(),
             }
         )],
         "one entry at the latest offset, held by the finger"
@@ -1195,6 +1196,83 @@ fn a_rebase_wraps_a_held_offset_and_its_drag_origin_together() {
     );
 }
 
+/// css-scroll-anchoring-1 on the painting side: a commit that anchored the
+/// container the finger holds moves the held offset and its drag origin by
+/// the shift, and the posts after it name the shift the painter applied.
+#[test]
+fn an_anchoring_shift_moves_the_held_offset_and_its_drag_origin() {
+    use terminus::link::input::PointerPhase::{Down, Move};
+
+    let mut document = document();
+    let root = document.document_element().id();
+    let scroller = document.create_element("view", ());
+    document.set_inline_style(
+        scroller,
+        "display:flex;flex-direction:column;overflow:scroll;width:200px;height:200px",
+    );
+    document.append_child(root, scroller);
+    let rows: Vec<_> = (0..10)
+        .map(|_| {
+            let row = document.create_element("view", ());
+            document.set_inline_style(row, "flex-shrink:0;width:200px;height:100px");
+            document.append_child(scroller, row);
+            row
+        })
+        .collect();
+    let (mut painter, main) = detached();
+    main.outbox.publish_frame(document.commit());
+    painter.poll_link();
+    painter.clock_mut().pin(0.0);
+
+    touch(&mut painter, Down, 190.0);
+    touch(&mut painter, Move, 40.0);
+    let held = painter
+        .scroll_intents()
+        .offset_for(scroller)
+        .expect("the drag moved the scroller");
+    let origin: Vec<_> = painter.scroll_intents().drag_origins(scroller).collect();
+
+    // The document adopts the drag, then lays out a taller first row.
+    document.scroll_to(scroller, held);
+    document.set_inline_style(rows[0], "flex-shrink:0;width:200px;height:150px");
+    let frame = document.commit();
+    let shift = terminus::link::Vector2D::new(0.0, 50.0);
+    assert_eq!(document.scroll_anchor_shift(scroller), shift);
+    main.outbox.publish_frame(Arc::clone(&frame));
+    painter.poll_link();
+    painter.scroll_intents_mut().rebase(&frame, 0.0);
+    // No live offset of its own is the committed one, where the document's
+    // adoption plus the shift put it.
+    let slot = &frame.scroll_slots()[frame.slot_of(scroller).expect("a slot") as usize];
+    assert_eq!(slot.offset, held + shift);
+    assert_eq!(
+        painter
+            .scroll_intents()
+            .offset_for(scroller)
+            .unwrap_or(slot.offset),
+        held + shift,
+        "the held offset moved with the shift"
+    );
+    let moved: Vec<_> = painter.scroll_intents().drag_origins(scroller).collect();
+    assert_eq!(
+        moved,
+        origin
+            .iter()
+            .map(|origin| *origin + shift)
+            .collect::<Vec<_>>(),
+        "and the drag origin with it"
+    );
+
+    let _ = take(&main);
+    touch(&mut painter, Move, 30.0);
+    let (entries, _) = take(&main);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+        entries[0].1.anchor_shift, shift,
+        "a post after the rebase names the shift it applied"
+    );
+}
+
 /// Frame posts coalesce to the latest clock and the greatest sequence, and
 /// every post answers its own sequence number whether or not it sent the
 /// marker.
@@ -1441,6 +1519,7 @@ fn a_bounce_back_a_commit_ends_posts_its_rest() {
                 at: 0.016,
                 rest: Some(stretched),
                 request: None,
+                anchor_shift: terminus::link::Vector2D::zero(),
             }
         )],
         "posted in range, at rest"
@@ -1500,6 +1579,7 @@ fn a_smooth_request_posts_its_serial_and_lands_at_rest() {
                 at: 0.0,
                 rest: None,
                 request: Some(serial),
+                anchor_shift: terminus::link::Vector2D::zero(),
             }
         )],
         "posted at once, from where the wheel left it, naming the request"
@@ -1630,6 +1710,7 @@ fn a_resized_scroller_stays_on_the_page_the_painter_showed() {
                 at: 0.0,
                 rest: Some(terminus::link::Vector2D::new(0.0, 600.0)),
                 request: None,
+                anchor_shift: terminus::link::Vector2D::zero(),
             }
         )],
     );
@@ -1849,6 +1930,7 @@ fn an_auto_scroll_moves_at_its_rate_and_ends_on_its_edge() {
                 at: 0.0,
                 rest: None,
                 request: Some(serial),
+                anchor_shift: terminus::link::Vector2D::zero(),
             }
         )],
         "posted at once, unmoved, naming the change"

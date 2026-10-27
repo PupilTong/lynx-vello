@@ -567,6 +567,7 @@ impl OwnedPage {
                 at: 0.0,
                 rest: Some(offset),
                 request: None,
+                anchor_shift: terminus::link::Vector2D::zero(),
             },
         )
         .await;
@@ -1513,6 +1514,7 @@ fn a_post_older_than_the_pending_scroll_request_is_dropped() {
             at: 0.0,
             rest: None,
             request,
+            anchor_shift: terminus::link::Vector2D::zero(),
         };
 
         owned.post(scroller, entry(40.0, None)).await;
@@ -1534,6 +1536,73 @@ fn a_post_older_than_the_pending_scroll_request_is_dropped() {
             scroll_state(&owned.page, scroller).await,
             (terminus::link::Vector2D::new(0.0, 60.0), None),
             "with nothing pending every post is adopted"
+        );
+    });
+}
+
+/// css-scroll-anchoring-1 across the threads: a post the painter made
+/// before it applied an adjustment the document has since made names the
+/// smaller shift, and the document adds the part it lacks. One naming the
+/// whole shift is adopted as it is.
+#[test]
+fn a_post_made_before_an_anchoring_shift_is_completed_by_it() {
+    on_a_js_thread(|thread| async move {
+        let (context, _workers) = group(&thread);
+        let mut owned = OwnedPage::new(context);
+        owned.boot(ONE_BOX).await;
+        let (answer, built) = std::sync::mpsc::channel();
+        owned
+            .page
+            .apply(vec![ToMain::Probe(Box::new(move |document| {
+                let root = document.document_element().id();
+                let scroller = document.create_element("view", ());
+                document.set_inline_style(
+                    scroller,
+                    "display:flex;flex-direction:column;overflow:scroll;width:200px;height:200px",
+                );
+                document.append_child(root, scroller);
+                let rows: Vec<_> = (0..10)
+                    .map(|_| {
+                        let row = document.create_element("view", ());
+                        document.set_inline_style(row, "flex-shrink:0;width:200px;height:100px");
+                        document.append_child(scroller, row);
+                        row
+                    })
+                    .collect();
+                document.layout();
+                document.scroll_to(scroller, terminus::link::Vector2D::new(0.0, 150.0));
+                document.set_inline_style(rows[0], "flex-shrink:0;width:200px;height:150px");
+                document.layout();
+                let _ = answer.send((scroller, document.scroll_anchor_shift(scroller)));
+            }))])
+            .await;
+        let (scroller, shift) = built.try_recv().expect("the probe ran");
+        assert_eq!(shift, terminus::link::Vector2D::new(0.0, 50.0));
+        assert_eq!(
+            scroll_state(&owned.page, scroller).await.0,
+            terminus::link::Vector2D::new(0.0, 200.0),
+            "row 0 grew 50px above the anchor"
+        );
+        let entry = |offset: f32, applied: f32| ScrollEntry {
+            offset: terminus::link::Vector2D::new(0.0, offset),
+            at: 0.0,
+            rest: None,
+            request: None,
+            anchor_shift: terminus::link::Vector2D::new(0.0, applied),
+        };
+
+        owned.post(scroller, entry(160.0, 0.0)).await;
+        assert_eq!(
+            scroll_state(&owned.page, scroller).await.0,
+            terminus::link::Vector2D::new(0.0, 210.0),
+            "the painter moved 10px before it saw the shift: both count"
+        );
+
+        owned.post(scroller, entry(215.0, 50.0)).await;
+        assert_eq!(
+            scroll_state(&owned.page, scroller).await.0,
+            terminus::link::Vector2D::new(0.0, 215.0),
+            "a post that names the whole shift is adopted as it is"
         );
     });
 }
@@ -1621,6 +1690,7 @@ fn a_current_written_without_a_flush_fires_the_swipers_events_from_its_epilogue(
                     at: 0.0,
                     rest: Some(offset),
                     request: Some(serial),
+                    anchor_shift: terminus::link::Vector2D::zero(),
                 },
             )
             .await;

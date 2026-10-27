@@ -685,6 +685,12 @@ pub(crate) struct DocumentLayoutState {
     /// An entry lives until its element is freed ([`Self::remove`]); a key
     /// with none reads as zero.
     pub(crate) scroll_offsets: FxHashMap<NodeId, euclid::default::Vector2D<f32>>,
+    /// Each scroll container that scroll anchoring has anchored or adjusted,
+    /// with its anchor and the sum of its adjustments; see
+    /// `scroll::anchoring`. A side table for the reason `scroll_offsets` is
+    /// one, and bounded by the containers that were ever scrolled away from
+    /// their block start.
+    pub(crate) scroll_anchors: FxHashMap<NodeId, crate::scroll::anchoring::ScrollAnchor>,
     /// The serial the next scroll request takes: one counter per document,
     /// so serials order every request against every post that names one.
     pub(crate) next_scroll_request: NonZeroU64,
@@ -800,6 +806,7 @@ impl DocumentLayoutState {
             initial_targets: Vec::new(),
             scroll_requests: FxHashMap::default(),
             scroll_offsets: FxHashMap::default(),
+            scroll_anchors: FxHashMap::default(),
             next_scroll_request: NonZeroU64::MIN,
             auto_scroll_requests: Vec::new(),
             instant_scrolls: SmallVec::new(),
@@ -909,6 +916,9 @@ impl DocumentLayoutState {
         }
         if !self.scroll_offsets.is_empty() {
             self.scroll_offsets.remove(&slot);
+        }
+        if !self.scroll_anchors.is_empty() {
+            self.scroll_anchors.remove(&slot);
         }
         if !self.auto_scroll_requests.is_empty() {
             self.auto_scroll_requests.retain(|(node, _)| *node != slot);
@@ -1021,6 +1031,7 @@ impl DocumentLayoutState {
             initial_targets: _,
             scroll_requests: _,
             scroll_offsets: _,
+            scroll_anchors: _,
             next_scroll_request: _,
             auto_scroll_requests: _,
             instant_scrolls: _,
@@ -1078,6 +1089,7 @@ impl DocumentLayoutState {
             initial_targets: _,
             scroll_requests: _,
             scroll_offsets: _,
+            scroll_anchors: _,
             next_scroll_request: _,
             auto_scroll_requests: _,
             instant_scrolls: _,
