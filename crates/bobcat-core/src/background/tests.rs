@@ -263,7 +263,7 @@ impl Group {
         let url = format!("app:///bts{}.js", key.get());
         self.send(
             key,
-            WorkerMessage::Post(wire_value(&format!(
+            WorkerMessage::post(wire_value(&format!(
                 r#"({{bobcat: "runtime", method: "initialize", entry: "{url}"}})"#
             ))),
         );
@@ -281,7 +281,7 @@ impl Group {
     fn global_event(&self, key: WorkerKey, name: &str) {
         self.send(
             key,
-            WorkerMessage::Post(wire_value(&format!(
+            WorkerMessage::post(wire_value(&format!(
                 r#"({{bobcat: "runtime", method: "sendGlobalEvent", name: "{name}", args: []}})"#
             ))),
         );
@@ -369,12 +369,12 @@ impl Group {
     }
 
     fn post(&self, key: WorkerKey, data: &str) {
-        self.send(key, WorkerMessage::Post(wire(data)));
+        self.send(key, WorkerMessage::post(wire(data)));
     }
 
     /// Posts whatever the test built, for the structured-clone cases.
     fn post_value(&self, key: WorkerKey, data: HostValue) {
-        self.send(key, WorkerMessage::Post(data));
+        self.send(key, WorkerMessage::post(data));
     }
 
     fn send(&self, key: WorkerKey, message: WorkerMessage) {
@@ -397,7 +397,7 @@ impl Group {
         for view in &mut self.views {
             if let Some(messages) = view.messages.remove(&key) {
                 let _ = messages.send(WorkerMessage::Terminate);
-                let _ = messages.send(WorkerMessage::Post(wire("after terminate")));
+                let _ = messages.send(WorkerMessage::post(wire("after terminate")));
                 drop(messages);
                 return;
             }
@@ -633,7 +633,7 @@ fn a_bts_imports_its_entry_through_bobcat_bts_once_initialized() {
     let key = group.construct_background(0);
     group.send(
         key,
-        WorkerMessage::Post(wire_value(
+        WorkerMessage::post(wire_value(
             r#"({bobcat: "runtime", method: "initialize", entry: "app:///bts.js"})"#,
         )),
     );
@@ -663,7 +663,7 @@ fn an_initialize_posted_before_the_bts_starts_waits_for_bobcat_bts() {
     let mut group = Group::new();
     group.construct_background_after(
         0,
-        vec![WorkerMessage::Post(wire_value(
+        vec![WorkerMessage::post(wire_value(
             r#"({bobcat: "runtime", method: "initialize", entry: "app:///bts.js"})"#,
         ))],
     );
@@ -694,7 +694,7 @@ fn a_bts_reads_its_screen_and_native_modules_from_initialize() {
     let table = serde_json::to_string(&crate::native_module::encode_table(&table)).unwrap();
     group.send(
         key,
-        WorkerMessage::Post(wire_value(&format!(
+        WorkerMessage::post(wire_value(&format!(
             r#"({{bobcat: "runtime", method: "initialize", updateData: {{}}, entry: "app:///bts.js",
                 systemInfo: {{platform: "headless", pixelRatio: 3, pixelWidth: 1170, pixelHeight: 2532}},
                 nativeModuleTable: {table}}})"#

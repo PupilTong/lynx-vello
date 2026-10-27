@@ -86,6 +86,7 @@ use tokio_util::sync::CancellationToken;
 #[cfg(target_arch = "wasm32")]
 use wasm_thread::Builder as ThreadBuilder;
 
+use crate::clock::ClockInstant;
 use crate::script::ScriptError;
 use crate::threads::ThreadJoin;
 use crate::view::EngineError;
@@ -154,11 +155,21 @@ pub(crate) enum WorkerCommand {
 }
 
 /// Everything one worker in particular is ever told.
+///
+/// A message that queues a job carries `enqueued`, its send instant, while
+/// the view's JS blocking monitor is on: the job measures how long it waited
+/// for the worker thread, as Lynx's `MarkJSTaskEnqueue` does.
 pub(crate) enum WorkerMessage {
     /// A display opportunity from the painter, handled even while entry awaits.
-    Vsync(f64),
+    Vsync {
+        milliseconds: f64,
+        enqueued: Option<ClockInstant>,
+    },
     /// One value, primitive or structured clone, for the worker's realm.
-    Post(HostValue),
+    Post {
+        data: HostValue,
+        enqueued: Option<ClockInstant>,
+    },
     /// An embedder's native module answering one function argument of one
     /// call: the call the realm numbered, which argument it was, and the JSON
     /// array text to spread — or `None`, which releases the function
@@ -168,6 +179,7 @@ pub(crate) enum WorkerMessage {
         call: u64,
         index: u32,
         arguments: Option<String>,
+        enqueued: Option<ClockInstant>,
     },
     /// Performance entries this worker's `lynx.performance` observers
     /// receive are ready to be taken: sent by the painter, or the view's
@@ -176,10 +188,22 @@ pub(crate) enum WorkerMessage {
     /// finished, as a post is, and delivered as one job that calls the BTS
     /// runtime's `__BobcatPerformanceReady`; a realm with no observer drops
     /// it.
-    PerformanceReady,
+    PerformanceReady { enqueued: Option<ClockInstant> },
     /// Explicit termination or GC of the MTS Worker object: end it between
     /// tasks and discard what was queued behind this.
     Terminate,
+}
+
+impl WorkerMessage {
+    /// A post carrying no enqueue instant, for the tests that play the
+    /// creating realm by hand.
+    #[cfg(test)]
+    pub(crate) const fn post(data: HostValue) -> Self {
+        Self::Post {
+            data,
+            enqueued: None,
+        }
+    }
 }
 
 /// One worker realm → the view whose realm created it.

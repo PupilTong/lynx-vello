@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use quickjs_rust_bridge::{HostArgument, HostValue};
 
-use super::{Opener, PipelineOrigin, PipelineRegistry, WorkerLoadMark, encode_entries};
+use super::{EntryTypes, Opener, PipelineOrigin, PipelineRegistry, WorkerLoadMark, encode_entries};
 use crate::background::WorkerKey;
 use crate::esm::HOST_MODULE_SPECIFIER;
 use crate::link::HostOutbox;
@@ -145,7 +145,12 @@ pub(crate) fn install_worker_members(
         let on = flag_argument(arguments, 0);
         let paint = flag_argument(arguments, 1);
         setting.set(on);
-        pipelines.observe_worker(key, on, paint);
+        let asked = if paint {
+            EntryTypes::PAINT
+        } else {
+            EntryTypes::NONE
+        };
+        pipelines.observe_worker(key, on.then_some(asked));
         Ok(HostValue::Undefined)
     })?;
     let pipelines = Arc::clone(registry);
