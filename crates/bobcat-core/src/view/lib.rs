@@ -35,7 +35,10 @@ pub use crate::main::configure_wasm_workers;
 use crate::main::tree::PageConfig;
 use crate::main::{GroupLink, spawn_group};
 use crate::native_module::{NativeModule, NativeModuleTable};
-use crate::performance::{EntryTypes, ExtraTiming, PerformanceEntry, PipelineRegistry, TimeOrigin};
+use crate::performance::{
+    EntryTypes, ExtraTiming, JsBlockingConfig, LongTaskConfig, MonitorTask, PerformanceEntry,
+    PipelineRegistry, TimeOrigin,
+};
 use crate::resource::{ResourceFetcher, SourceCompletion, SourceRequest};
 use crate::script::ScriptError;
 use crate::threads::ThreadJoin;
@@ -318,10 +321,10 @@ pub enum EngineEvent {
     /// One performance entry of a type the embedder subscribed to with
     /// [`LynxView::observe_performance`]: a load, a reload, or a pipeline
     /// that carried a `__lynx_timing_flag`, reported once the frame that
-    /// carried it was presented. Assembled in the [`LynxView::pump`] that
-    /// returns it, on the embedder's thread; nothing is built for a view
-    /// that subscribed to nothing. Not fatal, and nothing a view does
-    /// depends on it being read.
+    /// carried it was presented; a paint mark; or a monitor's entry.
+    /// Assembled in the [`LynxView::pump`] that returns it, on the
+    /// embedder's thread; nothing is built for a view that subscribed to
+    /// nothing. Not fatal, and nothing a view does depends on it being read.
     Performance(PerformanceEntry),
 }
 
@@ -923,7 +926,7 @@ impl LynxGroup {
             // are this view's, and the view is the only holder of a strong
             // reference to it.
             seat: Rc::new(ViewSeat {
-                frame_demand: RefCell::default(),
+                frame_demand: RefCell::new(crate::link::FrameDemand::new(Arc::clone(&registry))),
                 commands: crate::link::CommandSender::new(commands),
                 metrics,
                 images: Rc::clone(&fetcher) as Rc<dyn FrameImages>,
@@ -1271,7 +1274,8 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
                     // built with, which its own task is waiting on.
                     if event.is_fatal() {
                         self.state = ViewState::Failed;
-                        *self.seat.frame_demand.borrow_mut() = crate::link::FrameDemand::default();
+                        *self.seat.frame_demand.borrow_mut() =
+                            crate::link::FrameDemand::new(Arc::clone(&self.seat.registry));
                         self.cancel.cancel();
                     }
                     if matches!(event, EngineEvent::ScriptFinished) {
@@ -1436,6 +1440,54 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
             return Err(EngineError::NotReady);
         }
         self.seat.registry.set_extra_timing(&timing);
+        Ok(())
+    }
+
+    /// Turns the long task monitor on with `config`, or off with `None`
+    /// (Lynx's `enable_long_task_timing`; off by default): every job of
+    /// this view's realms, on either engine thread, that runs at least
+    /// `config.threshold` is a [`PerformanceEntry::LongTask`], reported to
+    /// an embedder that observes [`EntryTypes::LONG_TASK`] and dropped
+    /// otherwise. Off, a job reads one atomic and no clock.
+    pub fn set_long_task_monitor(&self, config: Option<LongTaskConfig>) {
+        self.seat
+            .registry
+            .set_long_task_threshold(config.map(|config| config.threshold));
+    }
+
+    /// Turns the JS blocking monitor on with `config`, or off with `None`
+    /// (Lynx's `enable_js_blocking_monitor`; off by default). While it is
+    /// on, each message sent to one of this view's workers carries its send
+    /// instant, and a wait for the worker thread of at least
+    /// `config.threshold` adds to running totals, reported as
+    /// [`PerformanceEntry::JsBlocking`] to an embedder that observes
+    /// [`EntryTypes::JS_BLOCKING`]: at the view's load (`loadBundle`), then
+    /// 1, 3, 6, 10 … intervals after it (`timer`). A monitor turned on after
+    /// the load makes no `loadBundle` report and counts its timer from the
+    /// call. Every worker of the view is counted, the BTS among them.
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::NotReady`] once the view has ended.
+    pub fn set_js_blocking_monitor(
+        &self,
+        config: Option<JsBlockingConfig>,
+    ) -> Result<(), EngineError> {
+        if self.cancel.is_cancelled() {
+            return Err(EngineError::NotReady);
+        }
+        let now = crate::clock::ClockInstant::now();
+        let epoch = self.seat.registry.set_js_blocking_monitor(config, now);
+        if let (Some(epoch), Some(config)) = (epoch, config) {
+            // A task of the view's on `bobcat-main`, so it ends with it.
+            let _ =
+                self.seat
+                    .commands
+                    .send(ToMain::StartMonitorTask(MonitorTask::JsBlockingReports {
+                        epoch,
+                        interval: config.report_interval,
+                    }));
+        }
         Ok(())
     }
 
