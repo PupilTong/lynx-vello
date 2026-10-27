@@ -1025,6 +1025,10 @@ paint-order build when an offset moved), and the painter the offset it holds.
   auto` reveal above the scrollport moves nothing the user sees. An anchor that
   was still at its placeholder size stops where its bottom meets the
   scrollport's top.
+- **Skipped boxes.** A `content-visibility: auto` box that skips its contents
+  is no candidate, nor is anything under it, and a kept anchor that has come to
+  skip is dropped: its size is an estimate and it shows nothing. Blink selects
+  such a box; this is a recorded deviation (`docs/tracking/deviations.md`).
 - **Clearing.** A scroll anchoring did not make clears the anchor.
 - **Declined.** Containers that snap on the block axis, and containers with a
   pending request, are left alone.

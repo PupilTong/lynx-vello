@@ -31,6 +31,15 @@
 //!   the block axis, which css-scroll-snap-1 §4.1.3 re-snapping keeps on its area
 //!   ([`crate::scroll::snap`]), and one with a pending programmatic scroll, whose target owns its
 //!   position until the painter has carried it out ([`crate::scroll::ScrollRequest`]).
+//! - **Not Blink, and not the draft:** a `content-visibility: auto` box that skips its contents is
+//!   no candidate, nor is anything under it, and a kept anchor that has come to skip is dropped.
+//!   Its size is its `contain-intrinsic-size` or its last remembered size, never a layout of what
+//!   it holds, and it shows nothing, so keeping its block-start in place keeps nothing the user
+//!   saw. Anchored to one, a page that builds content where its placeholders turn relevant chases
+//!   the next placeholder down for as long as it builds: Chrome does, Firefox and Safari select the
+//!   same anchors, and css-scroll-anchoring-1 §2.1's excluded subtrees do not include it. The
+//!   choice puts filling the screen after a long scroll ahead of where that screen lands. Recorded
+//!   in `docs/tracking/deviations.md`.
 //! - An anchor that is a `content-visibility: auto` box whose size this layout changed was still
 //!   standing at its placeholder size when it was chosen. Keeping its block-start edge in place is
 //!   then no promise about its contents: if the adjustment would leave it wholly above the
@@ -171,7 +180,9 @@ impl<T: Sync> Document<T> {
             .scroll_anchors
             .get(&scroller)
             .and_then(|entry| entry.node)
-            .filter(|&anchor| self.anchors_within(anchor, scroller));
+            .filter(|&anchor| {
+                self.anchors_within(anchor, scroller) && !self.skips_auto_contents(anchor)
+            });
         let anchor = match kept {
             Some(anchor) => anchor,
             None => self.find_scroll_anchor(scroller, style, &scroll_box)?,
@@ -317,6 +328,9 @@ impl<T: Sync> Document<T> {
         if values.get_box().overflow_anchor == OverflowAnchor::None {
             return Candidate::Skip;
         }
+        if self.skips_auto_contents(id) {
+            return Candidate::Skip;
+        }
         match *values.get_box().get_position() {
             PositionProperty::Fixed | PositionProperty::Sticky => return Candidate::Skip,
             PositionProperty::Absolute if self.nearest_scroll_container(id) != Some(scroller) => {
@@ -386,6 +400,19 @@ impl<T: Sync> Document<T> {
                 return true;
             };
             !Arc::ptr_eq(old, new) && triggers_suppression(old, new)
+        })
+    }
+
+    /// Whether `id` is a `content-visibility: auto` box that skips its
+    /// contents: undetermined, or determined not relevant. Its size is then
+    /// its `contain-intrinsic-size` or last remembered size, never a layout
+    /// of what it holds.
+    fn skips_auto_contents(&self, id: NodeId) -> bool {
+        self.get(id).is_some_and(|node| {
+            node.layout_computed_style().is_some_and(|style| {
+                *style.get_content_visibility() == ContentVisibility::Auto
+                    && crate::layout::skips_contents(node, style)
+            })
         })
     }
 

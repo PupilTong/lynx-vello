@@ -222,6 +222,22 @@ use crate::main::record::write_record_field;
 /// `contain: none` spelled the way a browser's author-origin sheet has to
 /// spell it.
 ///
+/// # A list whose cells are built lazily
+///
+/// `packages/bobcat-element/src/element-papi.ts` writes `l-lazy-cells` onto a
+/// list the first time `update-list-info` inserts placeholders into it: an
+/// empty `list-item` per cell, which becomes the cell `componentAtIndex`
+/// builds once it stops skipping. Under that attribute the estimate belongs
+/// to the placeholder alone. A built cell is built because its placeholder
+/// was relevant, so the next commit lays it out at its own size; standing at
+/// `100cqh` first would push every box after it down by a scrollport per cell
+/// before any determination took it back, and scroll anchoring would follow.
+/// Skipped later, it keeps its last remembered size (`auto`). A placeholder
+/// is no anchor (`overflow-anchor: none`): it shows nothing to keep in place.
+/// A list whose cells a card appends itself never gets the attribute and
+/// keeps the estimate for every cell, so its first commit reveals only the
+/// rows the window holds.
+///
 /// # The initial cell
 ///
 /// `list[initial-scroll-index] > *` is [`super::scroll_container`]'s
@@ -269,6 +285,11 @@ list[scroll-orientation="horizontal"] list-item {
   contain-intrinsic-size: auto attr(estimated-main-axis-size-px px, 100cqw) none;
 }
 list-item[recyclable="false"] { content-visibility: visible; contain: none; }
+list[l-lazy-cells] > list-item:not(:empty) { contain-intrinsic-size: none auto none; }
+list[l-lazy-cells][scroll-orientation="horizontal"] > list-item:not(:empty) {
+  contain-intrinsic-size: auto none none;
+}
+list[l-lazy-cells] > list-item:empty { overflow-anchor: none; }
 list-item[sticky-top="true"] {
   position: sticky; top: max(0px, var(--list-item-sticky-offset)); z-index: 1;
 }
@@ -1122,6 +1143,53 @@ mod tests {
         );
         assert_eq!(value(&document, bare, "contain-intrinsic-height"), "none");
         assert_eq!(rect(&document, estimated).2, 42.0);
+    }
+
+    /// Under `l-lazy-cells` the estimate is the placeholder's alone: an
+    /// empty cell keeps it and is no scroll anchor, a built one has none. A
+    /// list without the attribute keeps the estimate on every cell.
+    #[test]
+    fn a_lazy_lists_built_cells_carry_no_estimate_and_its_placeholders_anchor_nothing() {
+        let (mut document, lazy) = list_page("width: 300px; height: 200px");
+        document.set_attribute(lazy, "l-lazy-cells", "");
+        let placeholder = cell(&mut document, lazy, "");
+        let built = cell(&mut document, lazy, "");
+        element_under(&mut document, built, "view", "height: 20px");
+        let eager = child(&mut document, "list", "width: 300px; height: 200px");
+        let card_cell = cell(&mut document, eager, "");
+        element_under(&mut document, card_cell, "view", "height: 20px");
+        let horizontal = child(&mut document, "list", "width: 300px; height: 200px");
+        document.set_attribute(horizontal, "scroll-orientation", "horizontal");
+        document.set_attribute(horizontal, "l-lazy-cells", "");
+        let built_across = cell(&mut document, horizontal, "");
+        element_under(&mut document, built_across, "view", "width: 20px");
+        document.layout();
+
+        assert_eq!(
+            value(&document, placeholder, "contain-intrinsic-height"),
+            "auto 200px"
+        );
+        assert_eq!(value(&document, placeholder, "overflow-anchor"), "none");
+        assert_eq!(
+            value(&document, built, "contain-intrinsic-height"),
+            "auto none",
+            "a built cell is laid out at its own size before it can skip",
+        );
+        assert_eq!(value(&document, built, "overflow-anchor"), "auto");
+        assert_eq!(
+            value(&document, card_cell, "contain-intrinsic-height"),
+            "auto 200px",
+            "a list whose cells a card appends keeps the estimate",
+        );
+        assert_eq!(value(&document, card_cell, "overflow-anchor"), "auto");
+        assert_eq!(
+            value(&document, built_across, "contain-intrinsic-width"),
+            "auto none"
+        );
+        assert_eq!(
+            value(&document, built_across, "contain-intrinsic-height"),
+            "none"
+        );
     }
 
     // --- what generates a box inside a list -------------------------------

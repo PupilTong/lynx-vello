@@ -4920,6 +4920,33 @@ describe("update-list-info", () => {
     expect(__GetAttributeByName(placeholders[0]!, "type")).toBe(null);
   });
 
+  it("marks the list as building its cells lazily, once, before its first placeholder", async () => {
+    const { list, componentAtIndex, enqueueComponent } = listFixture(2);
+    const listId = __GetElementUniqueID(list);
+    __SetAttribute(list, "update-list-info", { insertAction: [{ position: 0 }], removeAction: [] });
+    __UpdateListCallbacks(list, componentAtIndex, enqueueComponent, null);
+    await drain();
+    __SetAttribute(list, "update-list-info", { insertAction: [{ position: 1 }], removeAction: [] });
+    __UpdateListCallbacks(list, componentAtIndex, enqueueComponent, null);
+    await drain();
+
+    const marks = mock.calls.filter(
+      ([name, node, attribute]) => name === "setAttribute" && node === listId && attribute === "l-lazy-cells",
+    );
+    expect(marks).toEqual([["setAttribute", listId, "l-lazy-cells", ""]]);
+    const first = mock.calls.findIndex((call) => call === marks[0]);
+    const firstInsert = mock.calls.findIndex(([name, parent]) => name === "insertBefore" && parent === listId);
+    expect(first).toBeLessThan(firstInsert);
+  });
+
+  it("leaves a list unmarked when a batch inserts nothing", async () => {
+    // No callbacks are filed, so the batch builds and inserts nothing.
+    const { list } = listFixture(0);
+    __SetAttribute(list, "update-list-info", { insertAction: [{ position: 0 }], removeAction: [] });
+    await drain();
+    expect(__GetAttributeByName(list, "l-lazy-cells")).toBe(null);
+  });
+
   it("builds a cell when its placeholder stops skipping, at the placeholder's index", async () => {
     const { list, cells, calls, componentAtIndex, enqueueComponent } = listFixture(3);
     __SetAttribute(list, "update-list-info", {

@@ -805,6 +805,7 @@ interface Handle {
   [exposureSymbol]?: ExposureState;
   [placeholderSymbol]?: true | undefined;
   [placeholderCountSymbol]?: number;
+  [lazyCellsSymbol]?: true | undefined;
 }
 
 function listenersOf(handle: Handle): ListenerLists | undefined {
@@ -1854,6 +1855,21 @@ const placeholderSymbol = Symbol("placeholder");
 /** On a list's handle: how many placeholders the list holds. */
 const placeholderCountSymbol = Symbol("placeholderCount");
 
+/** On a list's handle: the list carries [`LAZY_CELLS_ATTRIBUTE`]. */
+const lazyCellsSymbol = Symbol("lazyCells");
+
+/**
+ * Written onto a list the first time a batch inserts placeholders into it,
+ * and never removed: the UA sheet's rules for a list whose cells are built
+ * lazily key on it (`crates/bobcat-core/src/main/tree/list.rs`). A built
+ * cell there carries no size estimate, because it is built only once its
+ * placeholder is relevant and so is laid out at its own size in the next
+ * commit; a list whose cells a card appends itself keeps the estimate for
+ * every cell. Written before the first placeholder goes in, so setting it
+ * restyles no cell.
+ */
+const LAZY_CELLS_ATTRIBUTE = "l-lazy-cells";
+
 /**
  * css-contain-2 §4.4's event, which tells this file a placeholder stopped
  * skipping.
@@ -2081,6 +2097,10 @@ function updateListInfo(list: unknown, operations: unknown): undefined {
         removed.add(childNodeId);
       }
       children = children.filter((childNodeId) => !removed.has(childNodeId));
+    }
+    if (insertions.length > 0 && handle[lazyCellsSymbol] !== true) {
+      setAttribute(listNodeId, LAZY_CELLS_ATTRIBUTE, "");
+      handle[lazyCellsSymbol] = true;
     }
     // Ascending positions, so each one is an index into the list as the
     // insertions before it have already left it.
