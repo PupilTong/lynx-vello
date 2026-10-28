@@ -56,26 +56,33 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use bobcat_core::{PreparsedDeclaration, PreparsedKeyframe, PreparsedRule, PreparsedStyleSheet};
 
+use crate::web::css_property::DeclarationRead;
 use crate::web::style_info::{
-    CssPropertyId, DeclarationBlock, Rule, RuleKind, RulePrelude, Selector, SimpleSelector,
-    SimpleSelectorKind, StyleInfo, StyleSheet,
+    ComponentRead, CssPropertyId, RuleKind, RuleRead, SelectorRead, SimpleSelector,
+    SimpleSelectorKind, StyleInfoRead, StyleSheetRead,
 };
 
 /// The attribute `__SetCSSId` writes; web-core's `CSS_ID_ATTRIBUTE`
 /// (`packages/web-platform/web-core/src/constants.rs:9`).
 const CSS_ID_ATTRIBUTE: &str = "l-css-id";
 
-/// Lowers every fragment of a decoded `StyleInfo` into one pre-parsed sheet.
+/// A fragment's rule type.
+type RuleOf<S> = <<S as StyleInfoRead>::Sheet as StyleSheetRead>::Rule;
+
+/// Lowers every fragment of a decoded `StyleInfo`, owned or still archived,
+/// into one pre-parsed sheet.
 #[must_use]
-pub(crate) fn to_preparsed_style_sheet(style_info: &StyleInfo) -> PreparsedStyleSheet {
+pub(crate) fn to_preparsed_style_sheet(style_info: &impl StyleInfoRead) -> PreparsedStyleSheet {
     let mut importers = imported_by(style_info);
     let mut rules = Vec::new();
     for css_id in fragment_order(style_info) {
-        let sheet = &style_info.css_id_to_style_sheet[&css_id];
+        let Some(sheet) = style_info.sheet(css_id) else {
+            continue;
+        };
         let scopes = scopes(importers.remove(&css_id).unwrap_or_default());
         rules.extend(
             sheet
-                .rules
+                .rules()
                 .iter()
                 .filter_map(|rule| convert_rule(rule, &scopes)),
         );
@@ -90,9 +97,8 @@ pub(crate) fn to_preparsed_style_sheet(style_info: &StyleInfo) -> PreparsedStyle
 /// Fragments left in an import cycle are emitted last, in id order, rather
 /// than dropped: web-core's Kahn pass silently loses them, and losing author
 /// CSS is worse than an arbitrary but deterministic position.
-fn fragment_order(style_info: &StyleInfo) -> Vec<i32> {
-    let sheets = &style_info.css_id_to_style_sheet;
-    let mut ids: Vec<i32> = sheets.keys().copied().collect();
+fn fragment_order(style_info: &impl StyleInfoRead) -> Vec<i32> {
+    let mut ids: Vec<i32> = style_info.sheets().map(|(id, _)| id).collect();
     ids.sort_unstable();
 
     // What each fragment is still waiting on. Edges live in a set, so a
@@ -100,7 +106,7 @@ fn fragment_order(style_info: &StyleInfo) -> Vec<i32> {
     // in-degree counter does.
     let mut blocking: HashMap<i32, BTreeSet<i32>> = ids
         .iter()
-        .map(|id| (*id, live_imports(sheets, *id).collect()))
+        .map(|id| (*id, live_imports(style_info, *id).collect()))
         .collect();
 
     let mut ordered = Vec::with_capacity(ids.len());
@@ -127,16 +133,15 @@ fn fragment_order(style_info: &StyleInfo) -> Vec<i32> {
 /// Built by walking down from each fragment rather than by web-core's
 /// topological pass, so a fragment in an import cycle is not lost: the
 /// members of a cycle each count the others as importers.
-fn imported_by(style_info: &StyleInfo) -> HashMap<i32, BTreeSet<i32>> {
-    let sheets = &style_info.css_id_to_style_sheet;
+fn imported_by(style_info: &impl StyleInfoRead) -> HashMap<i32, BTreeSet<i32>> {
     let mut importers: HashMap<i32, BTreeSet<i32>> = HashMap::new();
-    for &importer in sheets.keys() {
+    for (importer, _) in style_info.sheets() {
         let mut reached = HashSet::new();
         let mut pending = vec![importer];
         while let Some(id) = pending.pop() {
             if reached.insert(id) {
                 importers.entry(id).or_default().insert(importer);
-                pending.extend(live_imports(sheets, id));
+                pending.extend(live_imports(style_info, id));
             }
         }
     }
@@ -174,47 +179,51 @@ fn scopes(importers: BTreeSet<i32>) -> Vec<Option<SimpleSelector>> {
 ///
 /// Its rules stay unscoped: a named section is loaded as a stylesheet of its
 /// own, not mounted as the `css_id` fragment an element's `l-css-id` names.
-pub(crate) fn fragment_rules(style_info: &StyleInfo, root: i32) -> impl Iterator<Item = &Rule> {
+pub(crate) fn fragment_rules<S: StyleInfoRead>(
+    style_info: &S,
+    root: i32,
+) -> impl Iterator<Item = &RuleOf<S>> {
     let mut reachable = HashSet::new();
     let mut pending = vec![root];
     while let Some(id) = pending.pop() {
         if reachable.insert(id) {
-            pending.extend(live_imports(&style_info.css_id_to_style_sheet, id));
+            pending.extend(live_imports(style_info, id));
         }
     }
     fragment_order(style_info)
         .into_iter()
         .filter(move |id| reachable.contains(id))
-        .flat_map(|id| style_info.css_id_to_style_sheet[&id].rules.iter())
+        .filter_map(|id| style_info.sheet(id))
+        .flat_map(|sheet| sheet.rules().iter())
 }
 
 /// The imports of `id` that name a fragment this bundle actually carries.
-fn live_imports(sheets: &HashMap<i32, StyleSheet>, id: i32) -> impl Iterator<Item = i32> + '_ {
-    sheets
-        .get(&id)
+fn live_imports(style_info: &impl StyleInfoRead, id: i32) -> impl Iterator<Item = i32> + '_ {
+    style_info
+        .sheet(id)
         .into_iter()
-        .flat_map(|sheet| sheet.imports.iter().copied())
-        .filter(move |import| *import != id && sheets.contains_key(import))
+        .flat_map(|sheet| sheet.imports().iter().copied())
+        .filter(move |import| *import != id && style_info.sheet(*import).is_some())
 }
 
 /// `scopes` are the rule's fragment's [`scopes`]; only a style rule uses them.
-fn convert_rule(rule: &Rule, scopes: &[Option<SimpleSelector>]) -> Option<PreparsedRule> {
-    match rule.kind {
+fn convert_rule(rule: &impl RuleRead, scopes: &[Option<SimpleSelector>]) -> Option<PreparsedRule> {
+    match rule.kind() {
         RuleKind::Style => Some(PreparsedRule::Style {
-            selectors: scoped_selector_text(&rule.prelude, scopes)?,
-            declarations: declarations(&rule.declaration_block),
+            selectors: scoped_selector_text(rule.selectors(), scopes)?,
+            declarations: declarations(rule.declarations()),
         }),
         RuleKind::Keyframes => Some(PreparsedRule::Keyframes {
             // A keyframes prelude is a single `UnknownText` component holding
             // the animation name.
-            name: selector_text(&rule.prelude)?,
+            name: selector_text(rule.selectors())?,
             keyframes: rule
-                .children
+                .children()
                 .iter()
                 .filter_map(|keyframe| {
                     Some(PreparsedKeyframe {
-                        selector: selector_text(&keyframe.prelude)?,
-                        declarations: declarations(&keyframe.declaration_block),
+                        selector: selector_text(keyframe.selectors())?,
+                        declarations: declarations(keyframe.declarations()),
                     })
                 })
                 .collect(),
@@ -222,40 +231,39 @@ fn convert_rule(rule: &Rule, scopes: &[Option<SimpleSelector>]) -> Option<Prepar
         // A font-face rule has an empty prelude by construction, and its
         // descriptors are not CSS properties.
         RuleKind::FontFace => Some(PreparsedRule::FontFace {
-            descriptors: descriptor_text(&rule.declaration_block),
+            descriptors: descriptor_text(rule.declarations()),
         }),
     }
 }
 
 /// The rule's selector list as CSS text, or `None` when it has no selectors.
-fn selector_text(prelude: &RulePrelude) -> Option<String> {
-    scoped_selector_text(prelude, &[None])
+fn selector_text(selectors: &[impl SelectorRead]) -> Option<String> {
+    scoped_selector_text(selectors, &[None])
 }
 
 /// The rule's selector list with every selector repeated once per scope, in
 /// web-core's order — each selector's copies together, in `scopes` order —
 /// or `None` when it has no selectors.
 fn scoped_selector_text(
-    prelude: &RulePrelude,
+    selectors: &[impl SelectorRead],
     scopes: &[Option<SimpleSelector>],
 ) -> Option<String> {
-    if prelude.selectors.is_empty() {
+    if selectors.is_empty() {
         return None;
     }
     // Each component writes its value plus at most two characters of
     // punctuation, and each copy adds a comma.
-    let len = |component: &SimpleSelector| component.value.len() + 2;
-    let selectors: usize = prelude
-        .selectors
+    let len = |component: &dyn ComponentRead| component.value().len() + 2;
+    let selector_len: usize = selectors
         .iter()
-        .flat_map(|s| &s.components)
-        .map(len)
+        .flat_map(SelectorRead::components)
+        .map(|component| len(component))
         .sum();
-    let guards: usize = scopes.iter().flatten().map(len).sum();
-    let count = prelude.selectors.len();
-    let mut text = String::with_capacity((selectors + count) * scopes.len() + guards * count);
+    let guards: usize = scopes.iter().flatten().map(|guard| len(guard)).sum();
+    let count = selectors.len();
+    let mut text = String::with_capacity((selector_len + count) * scopes.len() + guards * count);
     let mut first = true;
-    for selector in &prelude.selectors {
+    for selector in selectors {
         let at = guard_index(selector);
         for scope in scopes {
             if !first {
@@ -265,11 +273,11 @@ fn scoped_selector_text(
             match scope {
                 None => selector.write_css_string(&mut text),
                 Some(guard) => {
-                    let (before, after) = selector.components.split_at(at);
+                    let (before, after) = selector.components().split_at(at);
                     for component in before {
                         component.write_css_string(&mut text);
                     }
-                    guard.write_css_string(&mut text);
+                    ComponentRead::write_css_string(guard, &mut text);
                     for component in after {
                         component.write_css_string(&mut text);
                     }
@@ -293,13 +301,13 @@ fn scoped_selector_text(
 /// csstree node types there, and the native decoder emits it only for a
 /// keyframes name or key (`native/style.rs`) — so what such text would hold is
 /// unknown; it is not known to be compound content.
-fn guard_index(selector: &Selector) -> usize {
+fn guard_index(selector: &impl SelectorRead) -> usize {
     selector
-        .components
+        .components()
         .iter()
         .rposition(|component| {
             matches!(
-                component.kind,
+                component.kind(),
                 SimpleSelectorKind::Class
                     | SimpleSelectorKind::Id
                     | SimpleSelectorKind::Attribute
@@ -311,11 +319,10 @@ fn guard_index(selector: &Selector) -> usize {
         .map_or(0, |index| index + 1)
 }
 
-fn declarations(block: &DeclarationBlock) -> Vec<PreparsedDeclaration> {
+fn declarations(block: &[impl DeclarationRead]) -> Vec<PreparsedDeclaration> {
     block
-        .declarations
         .iter()
-        .filter(|declaration| !declaration.property.name().is_empty())
+        .filter(|declaration| !declaration.name().is_empty())
         .map(|declaration| {
             // The wire leaves `is_important` false and appends the marker to
             // the value instead, so the decoder splits it back out at token
@@ -323,8 +330,8 @@ fn declarations(block: &DeclarationBlock) -> Vec<PreparsedDeclaration> {
             // the whole declaration.
             let (value, important) = declaration.value_and_importance();
             PreparsedDeclaration {
-                property: match declaration.property.id {
-                    CssPropertyId::Unknown => Cow::Owned(declaration.property.name().to_owned()),
+                property: match declaration.property_id() {
+                    CssPropertyId::Unknown => Cow::Owned(declaration.name().to_owned()),
                     id => Cow::Borrowed(id.name()),
                 },
                 value,
@@ -334,10 +341,10 @@ fn declarations(block: &DeclarationBlock) -> Vec<PreparsedDeclaration> {
         .collect()
 }
 
-fn descriptor_text(block: &DeclarationBlock) -> String {
+fn descriptor_text(block: &[impl DeclarationRead]) -> String {
     let mut text = String::new();
-    for declaration in &block.declarations {
-        let name = declaration.property.name();
+    for declaration in block {
+        let name = declaration.name();
         if name.is_empty() {
             continue;
         }
@@ -356,8 +363,9 @@ fn descriptor_text(block: &DeclarationBlock) -> String {
 mod tests {
     use super::*;
     use crate::web::style_info::{
-        CssProperty, CssPropertyId, ParsedDeclaration, Selector, SimpleSelector,
-        SimpleSelectorKind, ValueToken, token_types,
+        CssProperty, CssPropertyId, DeclarationBlock, ParsedDeclaration, Rule, RulePrelude,
+        Selector, SimpleSelector, SimpleSelectorKind, StyleInfo, StyleSheet, ValueToken,
+        token_types,
     };
 
     fn preparsed(property: &str, value: &str) -> PreparsedDeclaration {
@@ -441,7 +449,7 @@ mod tests {
             fragment(4, vec![]),
         ]);
         let names = fragment_rules(&info, 1)
-            .map(|rule| selector_text(&rule.prelude).unwrap())
+            .map(|rule| selector_text(&rule.prelude.selectors).unwrap())
             .collect::<Vec<_>>();
         assert_eq!(names, [".s3", ".s2", ".s1"]);
         assert_eq!(fragment_rules(&info, 99).count(), 0);

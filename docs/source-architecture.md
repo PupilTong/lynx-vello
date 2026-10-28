@@ -194,6 +194,42 @@ loader; see [named stylesheet loading](named-styles-runtime.md) and
 [worker resources](worker-resources-runtime.md) "Lazy containers".
 Source decoding executes no scripts and fetches no lazy bundles.
 
+### Reading a `.web.bundle` in place
+
+`ContainerSources::from_bytes` reads a `.web.bundle` where it lies
+(`web::Sections`): each string-map body is borrowed from the bundle and
+copied once, into the text registered for it, and the registry shares that
+text rather than copying it again. The `StyleInfo` and
+`CustomSectionsStyleInfo` sections are validated in their archived form and
+lowered from it through the read traits in `web/style_info.rs`
+(`StyleInfoRead` and the rest, implemented by the owned model and its
+archived form alike), so no owned rule tree is built and dropped around a
+lowering. Only the five page flags are read from `Configurations`
+(`web/config.rs`). It fails exactly where `web::decode` fails, which
+`container.rs`'s tests hold it to over every compiled fixture and thousands of
+damaged ones; `web::decode` keeps building the owned `WebTemplate` for the
+converter, the examples and the tests.
+
+### Booting while the bundle is decoded
+
+`PageSource::defer(input, bytes)` returns a `DeferredPage`. For a
+`.web.bundle` it reads only the header, every section's label and length,
+`Configurations` and the `LepusCode` keys (`web::scan`), which is all its
+`view_sources` needs. `DeferredPage::register_in_background(resources)` then
+hands the whole decode, lowering and registration to
+`Resources::register_in_background`, which runs it on the resource system's
+blocking pool natively (a task of the Render Worker in the browser) and holds
+every source request for a URL under the container until it has run. The
+embedder creates its group, view and painter meanwhile; the view's first loads
+of `root.js`, `style-info.css` and the BTS boot wait for the install and are
+answered from what it registered, or fail with its decode error. One
+difference from `PageSource::from_bytes`: a `StyleInfo` section is listed as
+the author sheet whether or not it holds a rule, since that is known only
+after the decode, and one that holds none is registered as an empty sheet.
+Lynx XML and native bundles are decoded by `defer` itself. The CLI, the
+capture server and `bobcat-wasm`'s `loadTemplate` boot this way, and so does
+the web-core e2e golden suite.
+
 ```sh
 cargo run -p bobcat-source \
   --example convert -- input.lynx.bundle output.web.bundle
@@ -241,7 +277,8 @@ CacheStorage or service-worker route.
   checked against bytes remaining. Legacy Lepus and real QuickJS bytecode are
   explicit errors; only the exact known inert external-root stubs are allowed.
 - Web StyleInfo validation and decoding run on the calling thread on every
-  platform. The 1 MiB section cap bounds the archive copy;
+  platform (for a deferred page that is the thread the resource system runs
+  the install on). The 1 MiB section cap bounds the archive copy;
   `ArchiveValidator::with_max_depth` bounds recursive byte checking to 72
   subtree levels before deserialization. The returned tree still has a
   64-level rule cap (the extra subtree allowance covers containers and leaf

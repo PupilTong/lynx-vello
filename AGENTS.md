@@ -182,7 +182,14 @@ files into that same model and can explicitly encode a web bundle; it rejects
 real QuickJS/Lepus bytecode rather than executing or decompiling it. Named
 external modules are preserved and acquire no invented page root.
 `PageSource::from_native_bundle` requires an explicit entry name, `from_bytes`
-a `root` for binary page inputs.
+a `root` for binary page inputs. A `.web.bundle` is read in place: bodies are
+borrowed and copied once, into their registered text, and each `StyleInfo` is
+lowered from its validated archive through the `StyleInfoRead` traits, never
+deserialized into an owned tree on that path. `PageSource::defer` scans only
+the section table, so a view boots from its `DeferredPage::view_sources` while
+`register_in_background` decodes and registers the bundle through
+`Resources::register_in_background` (`docs/source-architecture.md`, "Booting
+while the bundle is decoded").
 
 **The import wrappers of a card's bodies are this crate's.** The engine adds
 nothing to a script, so every card body `bobcat-source` registers carries the
@@ -2793,6 +2800,15 @@ URLs, `file:` URLs natively, and `http(s)` through the platform's own client:
 libcurl loaded at runtime with `libloading` on macOS and Linux (no build-time
 link, no bundled HTTP or TLS stack; a host without it gets a precise
 `Unavailable`), and the Render Worker's `fetch` in the browser.
+
+**Background installs**: `Resources::register_in_background(container,
+install)` runs `install` with a `Registrar` off the embedder's thread (the
+blocking pool natively, a local task in the browser) and holds every source
+request for a URL whose path is the container's or under it until it has run;
+a held load is then answered from the registry, a pre-parsed sheet directly,
+or fails with the install's message, which is also noted. The registry keeps
+the running installs beside its entries, and resolution accepts a held URL
+whatever its scheme.
 
 **The `FetchIndex`**: the base URL relative stylesheet, fetch and image URLs
 resolve against by URL rules (a font URL arrives absolute, and so does every

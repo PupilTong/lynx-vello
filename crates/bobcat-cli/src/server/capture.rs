@@ -20,7 +20,7 @@ use bobcat_core::{
     Screenshot, StyleThreads,
 };
 use bobcat_resources::{Resources, ResourcesConfig, ViewResources};
-use bobcat_source::{PageSource, ZipSource};
+use bobcat_source::{DeferredPage, PageSource, ZipSource};
 use tokio::sync::oneshot;
 use url::Url;
 
@@ -311,10 +311,11 @@ fn run_capture_worker(jobs: &Mutex<Receiver<CaptureJob>>) {
 
 fn prepare_source(
     request: &CaptureRequest,
-) -> Result<(PageSource, Option<ZipSource>), CaptureFailure> {
+) -> Result<(DeferredPage, Option<ZipSource>), CaptureFailure> {
     let mut archive = None;
     let page = match &request.input {
-        CaptureInput::Bytes(bytes) => PageSource::from_bytes(&request.url, bytes),
+        // Decoded while the view boots: only the section table is read here.
+        CaptureInput::Bytes(bytes) => PageSource::defer(&request.url, bytes.clone()),
         CaptureInput::Zip(bytes) => {
             let zip = ZipSource::from_bytes(bytes).map_err(|source| CaptureFailure::Zip {
                 url: request.url.clone(),
@@ -327,7 +328,7 @@ fn prepare_source(
                     source: Box::new(source),
                 })?;
             archive = Some(zip);
-            Ok(page)
+            Ok(page.into())
         }
     }
     .map_err(|source| CaptureFailure::Source {
@@ -352,7 +353,7 @@ async fn capture_page(request: &CaptureRequest) -> Result<Screenshot, CaptureFai
                 source: Box::new(source),
             })?;
     }
-    page.register_with(&resources);
+    page.register_in_background(&resources);
     for note in resources.take_notes() {
         eprintln!("bobcat-server: warning: {note}");
     }
@@ -430,7 +431,7 @@ async fn capture_page(request: &CaptureRequest) -> Result<Screenshot, CaptureFai
     Ok(screenshot)
 }
 
-fn resources_config(page: &PageSource, timeout: Duration) -> ResourcesConfig {
+fn resources_config(page: &DeferredPage, timeout: Duration) -> ResourcesConfig {
     ResourcesConfig {
         base_url: Some(page.input_url().clone()),
         request_timeout: timeout,

@@ -4,10 +4,15 @@
 //! This CLI remains the embedder: it reads the file, configures the shared
 //! reference resource system, registers the decoded in-memory sources, and
 //! chooses the cache and wakeup policy for the view it owns.
+//!
+//! A `.web.bundle` is decoded while its view boots: loading reads only its
+//! section table ([`PageSource::defer`]), and the decode and registration run
+//! on the resource system's blocking pool from [`Program::resources`] on,
+//! while the group, the view and the painter are built.
 
 use bobcat_core::{ScreenMetrics, ViewSources};
 use bobcat_resources::{DiskCacheConfig, Resources, ResourcesConfig};
-use bobcat_source::PageSource;
+use bobcat_source::{DeferredPage, PageSource};
 use url::Url;
 
 use crate::cli::CliError;
@@ -18,7 +23,7 @@ const DISK_CACHE_BUDGET: u64 = 256 * 1024 * 1024;
 #[derive(Debug)]
 pub(crate) struct Program {
     pub(crate) input: String,
-    source: PageSource,
+    source: DeferredPage,
 }
 
 impl Program {
@@ -30,11 +35,11 @@ impl Program {
             path: path.clone(),
             source,
         })?;
-        Self::from_bytes(input, &bytes)
+        Self::from_bytes(input, bytes)
     }
 
-    fn from_bytes(input: &Url, bytes: &[u8]) -> Result<Self, CliError> {
-        let source = PageSource::from_bytes(input, bytes)?;
+    fn from_bytes(input: &Url, bytes: Vec<u8>) -> Result<Self, CliError> {
+        let source = PageSource::defer(input, bytes)?;
         Ok(Self {
             input: source.input_url().to_string(),
             source,
@@ -74,7 +79,7 @@ impl Program {
             },
             wakeup,
         );
-        self.source.register_with(&resources);
+        self.source.register_in_background(&resources);
         for note in resources.take_notes() {
             eprintln!("bobcat: warning: {note}");
         }
@@ -97,7 +102,8 @@ mod tests {
     fn the_program_registers_its_sources_with_the_resource_system() {
         let program = Program::from_bytes(
             &input_url(),
-            b"<lynx engine-version=\"4.2\"><style>a{}</style><script thread=\"main\">main</script></lynx>",
+            b"<lynx engine-version=\"4.2\"><style>a{}</style><script thread=\"main\">main</script></lynx>"
+                .to_vec(),
         )
         .expect("valid XML program");
         let resources = program.resources_with(None, || {});

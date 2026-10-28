@@ -458,7 +458,10 @@ impl Card {
             )
         });
         let input = Url::parse(&format!("app:///{case}.web.bundle")).unwrap();
-        let page = PageSource::from_bytes(&input, &bytes).expect("decode the compiled card");
+        // Booted as an embedder boots it: the view is created from the
+        // bundle's scanned section table while the bundle itself is decoded
+        // and registered in the background, its first loads waiting for that.
+        let page = PageSource::defer(&input, bytes).expect("scan the compiled card");
         // The fetcher resolves against the view's own base, which is the
         // card's URL — the contract `ResourcesConfig::base_url` states.
         // Without it a card that writes a relative `src` as a plain string
@@ -475,7 +478,7 @@ impl Card {
             },
             || {},
         );
-        page.register_with(&resources);
+        page.register_in_background(&resources);
         mount_resources(&resources);
         mount_bundles(&resources);
 
