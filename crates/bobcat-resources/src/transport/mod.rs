@@ -112,7 +112,10 @@ impl Transports {
                 format!("`{specifier}` is not a URL: {error}"),
             )
         })?;
-        if self.registry.contains(&url) || Self::serves_scheme(url.scheme()) {
+        if self.registry.contains(&url)
+            || self.registry.install_covering(&url).is_some()
+            || Self::serves_scheme(url.scheme())
+        {
             Ok(url)
         } else {
             Err(Failure::new(

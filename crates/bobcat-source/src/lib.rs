@@ -22,3 +22,31 @@ mod fixtures;
 pub use archive::*;
 pub use container::{BundleInstaller, ContainerSources};
 pub use page::*;
+
+/// Every compiled web bundle the fixture packages built, from disk.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+fn compiled_web_bundles() -> Vec<(String, Vec<u8>)> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packages");
+    let mut bundles = Vec::new();
+    let mut pending = vec![
+        root.join("reactlynx-test-fixtures/dist"),
+        root.join("web-core-e2e-fixtures/dist"),
+    ];
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if let Ok(bytes) = std::fs::read(&path)
+                && page::looks_like_web_bundle(&bytes)
+            {
+                bundles.push((path.display().to_string(), bytes));
+            }
+        }
+    }
+    bundles.sort();
+    bundles
+}

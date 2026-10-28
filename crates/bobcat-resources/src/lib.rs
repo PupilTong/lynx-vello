@@ -463,6 +463,18 @@ impl Shared {
         )
     }
 
+    /// Keeps `message` for [`Resources::take_notes`], logging it if this
+    /// system logs.
+    fn note(&self, message: String) {
+        if self.log_to_stderr {
+            eprintln!("bobcat-resources: {message}");
+        }
+        self.notes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(message);
+    }
+
     fn complete(&self, completion: Completion) {
         let _ = self.completions.send(completion);
         (self.wakeup)();
@@ -797,6 +809,57 @@ impl Resources {
         Ok(url)
     }
 
+    /// Runs `install` off this thread with a [`Registrar`] onto this
+    /// system, and holds every source request for a URL under `container`
+    /// until it has run: such a request is then answered from what it
+    /// registered, or fails with the message it failed with.
+    ///
+    /// This is how a view boots while its container is still being decoded:
+    /// the embedder names the container's URLs to the view, creates it, and
+    /// the view's first loads of them wait here rather than fail. A URL is
+    /// under `container` when, its query and fragment aside, it is the
+    /// container URL's path or below it — every URL one container registers
+    /// is (`bobcat-source`'s container URL rule).
+    ///
+    /// Natively `install` runs on the blocking pool; in the browser, as a
+    /// task of this thread, after the caller yields.
+    pub fn register_in_background(
+        &self,
+        container: &Url,
+        install: impl FnOnce(&Registrar) -> Result<(), String> + Send + 'static,
+    ) {
+        static NEXT_INSTALL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = NEXT_INSTALL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let (sender, done) = tokio::sync::watch::channel(None);
+        self.shared.transports.registry.hold(id, container, done);
+        let shared = SharedHandle::clone(&self.shared);
+        let registrar = Registrar {
+            shared: SharedHandle::clone(&shared),
+        };
+        let finish = move |result: Result<(), String>| {
+            if let Err(message) = &result {
+                shared.note(format!("a container could not be registered: {message}"));
+            }
+            // Released only once everything is registered: a request that no
+            // longer finds the hold finds the registrations, and one that
+            // found it waits for this answer.
+            shared.transports.registry.release(id);
+            let _ = sender.send(Some(result.map_err(Arc::from)));
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let handle = self.executor.handle();
+            self.executor.spawn(async move {
+                let result =
+                    executor::blocking(&handle, "container install", move || install(&registrar))
+                        .await;
+                finish(result.and_then(|installed| installed));
+            });
+        }
+        #[cfg(target_arch = "wasm32")]
+        wasm_bindgen_futures::spawn_local(async move { finish(install(&registrar)) });
+    }
+
     /// Forgets a registration and its cached stylesheet response.
     /// Images already decoded from it stay decoded.
     #[must_use = "the answer says whether anything was registered under the URL"]
@@ -906,14 +969,7 @@ impl Resources {
     }
 
     pub(crate) fn note(&self, message: String) {
-        if self.shared.log_to_stderr {
-            eprintln!("bobcat-resources: {message}");
-        }
-        self.shared
-            .notes
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(message);
+        self.shared.note(message);
     }
 }
 

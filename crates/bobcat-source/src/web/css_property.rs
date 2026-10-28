@@ -348,10 +348,7 @@ impl ParsedDeclaration {
 
     /// Appends [`Self::value_text`] to `out`, without allocating a temporary.
     pub fn write_value_text(&self, out: &mut String) {
-        out.reserve(self.value_text_len());
-        for token in &self.value_tokens {
-            out.push_str(&token.value);
-        }
+        DeclarationRead::write_value_text(self, out);
     }
 
     /// The value with any trailing `!important` removed, plus whether the
@@ -372,52 +369,140 @@ impl ParsedDeclaration {
     /// containing the word, is left alone.
     #[must_use]
     pub fn value_and_importance(&self) -> (String, bool) {
-        let end = self.value_end_before_important();
-        let important = end < self.value_tokens.len();
-        let mut text = String::with_capacity(self.value_text_len());
-        for token in &self.value_tokens[..end] {
-            text.push_str(&token.value);
+        DeclarationRead::value_and_importance(self)
+    }
+}
+
+/// Read access to one declaration, which the owned model and its archived
+/// form both give (`style_info::StyleInfoRead`).
+pub(crate) trait DeclarationRead {
+    type Token: TokenRead;
+    fn property_id(&self) -> CssPropertyId;
+    /// The raw name of an `Unknown` property.
+    fn unknown_name(&self) -> Option<&str>;
+    fn tokens(&self) -> &[Self::Token];
+    fn is_important(&self) -> bool;
+
+    /// [`CssProperty::name`].
+    fn name(&self) -> &str {
+        match self.property_id() {
+            CssPropertyId::Unknown => self.unknown_name().unwrap_or(""),
+            id => id.name(),
         }
-        (text, important || self.is_important)
+    }
+
+    /// [`ParsedDeclaration::write_value_text`].
+    fn write_value_text(&self, out: &mut String) {
+        out.reserve(self.value_text_len());
+        for token in self.tokens() {
+            out.push_str(token.value());
+        }
+    }
+
+    /// [`ParsedDeclaration::value_and_importance`].
+    fn value_and_importance(&self) -> (String, bool) {
+        let end = self.value_end_before_important();
+        let tokens = self.tokens();
+        let important = end < tokens.len();
+        let mut text = String::with_capacity(self.value_text_len());
+        for token in &tokens[..end] {
+            text.push_str(token.value());
+        }
+        (text, important || self.is_important())
     }
 
     fn value_text_len(&self) -> usize {
-        self.value_tokens
-            .iter()
-            .map(|token| token.value.len())
-            .sum()
+        self.tokens().iter().map(|token| token.value().len()).sum()
     }
 
     /// The token count remaining once a trailing `!important` is removed, or
     /// the full count when there is none.
     fn value_end_before_important(&self) -> usize {
+        let tokens = self.tokens();
         let significant = |index: usize| {
-            self.value_tokens[..index].iter().rposition(|token| {
+            tokens[..index].iter().rposition(|token| {
                 !matches!(
-                    token.token_type,
+                    token.token_type(),
                     token_types::WHITESPACE_TOKEN | token_types::COMMENT_TOKEN
                 )
             })
         };
-        let all = self.value_tokens.len();
+        let all = tokens.len();
         let Some(keyword) = significant(all) else {
             return all;
         };
-        let token = &self.value_tokens[keyword];
-        if token.token_type != token_types::IDENT_TOKEN
-            || !token.value.eq_ignore_ascii_case("important")
+        let token = &tokens[keyword];
+        if token.token_type() != token_types::IDENT_TOKEN
+            || !token.value().eq_ignore_ascii_case("important")
         {
             return all;
         }
         let Some(bang) = significant(keyword) else {
             return all;
         };
-        let token = &self.value_tokens[bang];
-        if token.token_type != token_types::DELIM_TOKEN || token.value != "!" {
+        let token = &tokens[bang];
+        if token.token_type() != token_types::DELIM_TOKEN || token.value() != "!" {
             return all;
         }
         // Drop the whitespace that separated the marker from the value too.
         significant(bang).map_or(0, |last| last + 1)
+    }
+}
+
+/// Read access to one value token.
+pub(crate) trait TokenRead {
+    fn token_type(&self) -> u8;
+    fn value(&self) -> &str;
+}
+
+impl DeclarationRead for ParsedDeclaration {
+    type Token = ValueToken;
+    fn property_id(&self) -> CssPropertyId {
+        self.property.id
+    }
+    fn unknown_name(&self) -> Option<&str> {
+        self.property.unknown_name.as_deref()
+    }
+    fn tokens(&self) -> &[ValueToken] {
+        &self.value_tokens
+    }
+    fn is_important(&self) -> bool {
+        self.is_important
+    }
+}
+
+impl DeclarationRead for ArchivedParsedDeclaration {
+    type Token = ArchivedValueToken;
+    fn property_id(&self) -> CssPropertyId {
+        let Ok(id) = RkyvDeserialize::deserialize(&self.property.id, &mut rkyv::Infallible);
+        id
+    }
+    fn unknown_name(&self) -> Option<&str> {
+        self.property.unknown_name.as_deref()
+    }
+    fn tokens(&self) -> &[ArchivedValueToken] {
+        &self.value_tokens
+    }
+    fn is_important(&self) -> bool {
+        self.is_important
+    }
+}
+
+impl TokenRead for ValueToken {
+    fn token_type(&self) -> u8 {
+        self.token_type
+    }
+    fn value(&self) -> &str {
+        &self.value
+    }
+}
+
+impl TokenRead for ArchivedValueToken {
+    fn token_type(&self) -> u8 {
+        self.token_type
+    }
+    fn value(&self) -> &str {
+        &self.value
     }
 }
 

@@ -533,6 +533,10 @@ impl BobcatRenderer {
     /// Decode a fetched page container through the shared source adapter.
     /// Bundle configuration belongs to this page; subsequent raw loads still
     /// use the host configuration. Relative assets resolve against the input.
+    ///
+    /// A `.web.bundle` is decoded while the view boots: only its section
+    /// table is read before the view is created, and its decode runs as a
+    /// task of this Worker that the view's first loads wait for.
     #[wasm_bindgen(js_name = loadTemplate)]
     pub async fn load_template(
         &mut self,
@@ -542,8 +546,8 @@ impl BobcatRenderer {
     ) -> Result<(), JsValue> {
         self.ensure_running()?;
         let input = Url::parse(&url).map_err(js_error)?;
-        let page = PageSource::from_bytes(&input, &bytes).map_err(js_error)?;
-        page.register_with(&self.resources);
+        let page = PageSource::defer(&input, bytes).map_err(js_error)?;
+        page.register_in_background(&self.resources);
         self.load_sources(page.view_sources(self.screen), global_props)
             .await
     }

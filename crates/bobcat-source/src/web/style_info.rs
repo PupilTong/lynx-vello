@@ -8,6 +8,7 @@ use rkyv::validation::check_archived_root_with_context;
 use rkyv::validation::validators::ArchiveValidator;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
+use super::css_property::{ArchivedParsedDeclaration, DeclarationRead};
 pub use super::css_property::{
     CssProperty, CssPropertyId, ParsedDeclaration, STYLE_PROPERTY_MAP, ValueToken, token_types,
 };
@@ -102,9 +103,7 @@ impl Selector {
     /// Appends [`Self::to_css_string`] to `buf`, without allocating a
     /// temporary for each selector of a list.
     pub fn write_css_string(&self, buf: &mut String) {
-        for component in &self.components {
-            component.write_css_string(buf);
-        }
+        SelectorRead::write_css_string(self, buf);
     }
 }
 
@@ -122,45 +121,7 @@ impl SimpleSelector {
     /// component can be spliced into a selector by writing it between two
     /// runs of the selector's own components.
     pub fn write_css_string(&self, buf: &mut String) {
-        match self.kind {
-            SimpleSelectorKind::Type | SimpleSelectorKind::UnknownText => {
-                buf.push_str(&self.value);
-            }
-            SimpleSelectorKind::Class => {
-                buf.push('.');
-                buf.push_str(&self.value);
-            }
-            SimpleSelectorKind::Id => {
-                buf.push('#');
-                buf.push_str(&self.value);
-            }
-            SimpleSelectorKind::Attribute => {
-                // The encoder stores the generated attribute-selector text
-                // with its brackets already included (`[type=submit]`).
-                buf.push_str(&self.value);
-            }
-            SimpleSelectorKind::PseudoClass => {
-                buf.push(':');
-                buf.push_str(&self.value);
-            }
-            SimpleSelectorKind::PseudoElement => {
-                buf.push_str("::");
-                buf.push_str(&self.value);
-            }
-            SimpleSelectorKind::Universal => {
-                buf.push('*');
-            }
-            SimpleSelectorKind::Combinator => {
-                // The descendant combinator is encoded as a single space.
-                if self.value.trim().is_empty() {
-                    buf.push(' ');
-                } else {
-                    buf.push(' ');
-                    buf.push_str(&self.value);
-                    buf.push(' ');
-                }
-            }
-        }
+        ComponentRead::write_css_string(self, buf);
     }
 }
 
@@ -201,10 +162,8 @@ const MAX_RULE_DEPTH: usize = 64;
 const MAX_VALIDATION_DEPTH: usize = MAX_RULE_DEPTH + 8;
 
 pub(crate) fn decode_style_info(bytes: &[u8]) -> Result<StyleInfo, DecodeError> {
-    let style_info: StyleInfo =
-        decode_archive(bytes, MAX_VALIDATION_DEPTH).map_err(DecodeError::StyleInfo)?;
-    check_rule_depth(&style_info).map_err(DecodeError::StyleInfo)?;
-    Ok(style_info)
+    let section = AlignedSection::new(bytes).map_err(DecodeError::StyleInfo)?;
+    deserialize(check_style_info(&section)?).map_err(DecodeError::StyleInfo)
 }
 
 /// Decodes the `CustomSectionsStyleInfo` section under the same bounds as
@@ -212,41 +171,74 @@ pub(crate) fn decode_style_info(bytes: &[u8]) -> Result<StyleInfo, DecodeError> 
 /// validation level more for the map around the `StyleInfo`s, and the rule
 /// depth limit for every entry.
 pub(crate) fn decode_style_info_map(bytes: &[u8]) -> Result<StyleInfoMap, DecodeError> {
-    let map: StyleInfoMap = decode_archive(bytes, MAX_VALIDATION_DEPTH + 1)
+    let section = AlignedSection::new(bytes).map_err(DecodeError::CustomSectionsStyleInfo)?;
+    deserialize(check_style_info_map(&section)?).map_err(DecodeError::CustomSectionsStyleInfo)
+}
+
+/// One rkyv section, copied to the alignment validation and every archived
+/// read need, and refused over [`MAX_SECTION_LEN`] before it is copied.
+pub(crate) struct AlignedSection(rkyv::AlignedVec);
+
+impl AlignedSection {
+    pub(crate) fn new(bytes: &[u8]) -> Result<Self, String> {
+        if bytes.len() > MAX_SECTION_LEN {
+            return Err(format!(
+                "section is {} bytes, over the {MAX_SECTION_LEN}-byte limit",
+                bytes.len()
+            ));
+        }
+        let mut aligned = rkyv::AlignedVec::with_capacity(bytes.len());
+        aligned.extend_from_slice(bytes);
+        Ok(Self(aligned))
+    }
+}
+
+/// The `StyleInfo` section validated in place: what lowering reads, with no
+/// owned tree built and dropped around it.
+pub(crate) fn check_style_info(
+    section: &AlignedSection,
+) -> Result<&ArchivedStyleInfo, DecodeError> {
+    let style_info = check_archive::<StyleInfo>(section, MAX_VALIDATION_DEPTH)
+        .map_err(DecodeError::StyleInfo)?;
+    check_rule_depth(style_info).map_err(DecodeError::StyleInfo)?;
+    Ok(style_info)
+}
+
+/// The `CustomSectionsStyleInfo` section validated in place, one validation
+/// level more for the map around the `StyleInfo`s and the rule depth limit
+/// for every entry.
+pub(crate) fn check_style_info_map(
+    section: &AlignedSection,
+) -> Result<&ArchivedStyleInfoMap, DecodeError> {
+    let map = check_archive::<StyleInfoMap>(section, MAX_VALIDATION_DEPTH + 1)
         .map_err(DecodeError::CustomSectionsStyleInfo)?;
-    for (name, style_info) in &map.name_to_style_info {
+    for (name, style_info) in map.name_to_style_info.iter() {
         check_rule_depth(style_info).map_err(|reason| {
-            DecodeError::CustomSectionsStyleInfo(format!("{name:?}: {reason}"))
+            DecodeError::CustomSectionsStyleInfo(format!("{:?}: {reason}", name.as_str()))
         })?;
     }
     Ok(map)
 }
 
-/// Validates and deserializes one rkyv root, refusing a section over
-/// [`MAX_SECTION_LEN`] before copying it and bounding validation recursion by
-/// `max_depth`.
-fn decode_archive<T>(bytes: &[u8], max_depth: usize) -> Result<T, String>
+/// Validates one rkyv root, bounding validation recursion by `max_depth`.
+fn check_archive<T>(section: &AlignedSection, max_depth: usize) -> Result<&T::Archived, String>
 where
     T: Archive,
-    for<'a> T::Archived: bytecheck::CheckBytes<ArchiveValidator<'a>>
-        + RkyvDeserialize<T, rkyv::de::deserializers::SharedDeserializeMap>,
+    for<'a> T::Archived: bytecheck::CheckBytes<ArchiveValidator<'a>>,
     for<'a> <T::Archived as bytecheck::CheckBytes<ArchiveValidator<'a>>>::Error: std::fmt::Display,
 {
-    if bytes.len() > MAX_SECTION_LEN {
-        return Err(format!(
-            "section is {} bytes, over the {MAX_SECTION_LEN}-byte limit",
-            bytes.len()
-        ));
-    }
-
-    let mut aligned = rkyv::AlignedVec::with_capacity(bytes.len());
-    aligned.extend_from_slice(bytes);
     // This model contains no shared pointers, so ArchiveValidator supplies
     // every check it needs. No platform-specific threads or unsafe access:
     // excessive nesting fails during validation on the calling thread.
-    let mut validator = ArchiveValidator::with_max_depth(&aligned, max_depth);
-    let archived = check_archived_root_with_context::<T, _>(&aligned, &mut validator)
-        .map_err(|e| e.to_string())?;
+    let mut validator = ArchiveValidator::with_max_depth(&section.0, max_depth);
+    check_archived_root_with_context::<T, _>(&section.0, &mut validator).map_err(|e| e.to_string())
+}
+
+/// An owned copy of a validated archive.
+fn deserialize<T, A>(archived: &A) -> Result<T, String>
+where
+    A: RkyvDeserialize<T, rkyv::de::deserializers::SharedDeserializeMap>,
+{
     archived
         .deserialize(&mut rkyv::de::deserializers::SharedDeserializeMap::new())
         .map_err(|e| format!("{e:?}"))
@@ -255,7 +247,7 @@ where
 /// Refuses a rule tree deeper than [`MAX_RULE_DEPTH`]. Validation already
 /// bounded the tree; rejecting and dropping it here cannot recurse to an
 /// input-controlled depth.
-fn check_rule_depth(style_info: &StyleInfo) -> Result<(), String> {
+fn check_rule_depth(style_info: &impl StyleInfoRead) -> Result<(), String> {
     let depth = nesting_depth(style_info);
     if depth > MAX_RULE_DEPTH {
         return Err(format!(
@@ -266,18 +258,223 @@ fn check_rule_depth(style_info: &StyleInfo) -> Result<(), String> {
 }
 
 /// Deepest `children` chain in the section, counted without recursion.
-fn nesting_depth(style_info: &StyleInfo) -> usize {
+fn nesting_depth<S: StyleInfoRead>(style_info: &S) -> usize {
     let mut deepest = 0;
-    let mut pending: Vec<(&Rule, usize)> = style_info
-        .css_id_to_style_sheet
-        .values()
-        .flat_map(|sheet| sheet.rules.iter().map(|rule| (rule, 1)))
+    let mut pending: Vec<(&<S::Sheet as StyleSheetRead>::Rule, usize)> = style_info
+        .sheets()
+        .flat_map(|(_, sheet)| sheet.rules().iter().map(|rule| (rule, 1)))
         .collect();
     while let Some((rule, depth)) = pending.pop() {
         deepest = deepest.max(depth);
-        pending.extend(rule.children.iter().map(|child| (child, depth + 1)));
+        pending.extend(rule.children().iter().map(|child| (child, depth + 1)));
     }
     deepest
+}
+
+// Read access. The owned model and its archived form both implement these, so
+// lowering reads a section where it lies instead of from a deserialized copy.
+
+/// Read access to a `StyleInfo`: its fragments by css id.
+pub(crate) trait StyleInfoRead {
+    type Sheet: StyleSheetRead;
+    fn sheet(&self, css_id: i32) -> Option<&Self::Sheet>;
+    fn sheets(&self) -> impl Iterator<Item = (i32, &Self::Sheet)>;
+}
+
+/// Read access to one fragment.
+pub(crate) trait StyleSheetRead {
+    type Rule: RuleRead;
+    fn imports(&self) -> &[i32];
+    fn rules(&self) -> &[Self::Rule];
+}
+
+/// Read access to one rule.
+pub(crate) trait RuleRead: Sized {
+    type Selector: SelectorRead;
+    type Declaration: DeclarationRead;
+    fn kind(&self) -> RuleKind;
+    fn selectors(&self) -> &[Self::Selector];
+    fn declarations(&self) -> &[Self::Declaration];
+    fn children(&self) -> &[Self];
+}
+
+/// Read access to one complex selector.
+pub(crate) trait SelectorRead {
+    type Component: ComponentRead;
+    fn components(&self) -> &[Self::Component];
+
+    /// [`Selector::write_css_string`].
+    fn write_css_string(&self, buf: &mut String) {
+        for component in self.components() {
+            component.write_css_string(buf);
+        }
+    }
+}
+
+/// Read access to one simple selector or combinator.
+pub(crate) trait ComponentRead {
+    fn kind(&self) -> SimpleSelectorKind;
+    fn value(&self) -> &str;
+
+    /// [`SimpleSelector::write_css_string`].
+    fn write_css_string(&self, buf: &mut String) {
+        let value = self.value();
+        match self.kind() {
+            SimpleSelectorKind::Type | SimpleSelectorKind::UnknownText => {
+                buf.push_str(value);
+            }
+            SimpleSelectorKind::Class => {
+                buf.push('.');
+                buf.push_str(value);
+            }
+            SimpleSelectorKind::Id => {
+                buf.push('#');
+                buf.push_str(value);
+            }
+            SimpleSelectorKind::Attribute => {
+                // The encoder stores the generated attribute-selector text
+                // with its brackets already included (`[type=submit]`).
+                buf.push_str(value);
+            }
+            SimpleSelectorKind::PseudoClass => {
+                buf.push(':');
+                buf.push_str(value);
+            }
+            SimpleSelectorKind::PseudoElement => {
+                buf.push_str("::");
+                buf.push_str(value);
+            }
+            SimpleSelectorKind::Universal => {
+                buf.push('*');
+            }
+            SimpleSelectorKind::Combinator => {
+                // The descendant combinator is encoded as a single space.
+                if value.trim().is_empty() {
+                    buf.push(' ');
+                } else {
+                    buf.push(' ');
+                    buf.push_str(value);
+                    buf.push(' ');
+                }
+            }
+        }
+    }
+}
+
+impl StyleInfoRead for StyleInfo {
+    type Sheet = StyleSheet;
+    fn sheet(&self, css_id: i32) -> Option<&StyleSheet> {
+        self.css_id_to_style_sheet.get(&css_id)
+    }
+    fn sheets(&self) -> impl Iterator<Item = (i32, &StyleSheet)> {
+        self.css_id_to_style_sheet
+            .iter()
+            .map(|(id, sheet)| (*id, sheet))
+    }
+}
+
+impl StyleInfoRead for ArchivedStyleInfo {
+    type Sheet = ArchivedStyleSheet;
+    fn sheet(&self, css_id: i32) -> Option<&ArchivedStyleSheet> {
+        self.css_id_to_style_sheet.get(&css_id)
+    }
+    fn sheets(&self) -> impl Iterator<Item = (i32, &ArchivedStyleSheet)> {
+        self.css_id_to_style_sheet
+            .iter()
+            .map(|(id, sheet)| (*id, sheet))
+    }
+}
+
+impl StyleSheetRead for StyleSheet {
+    type Rule = Rule;
+    fn imports(&self) -> &[i32] {
+        &self.imports
+    }
+    fn rules(&self) -> &[Rule] {
+        &self.rules
+    }
+}
+
+impl StyleSheetRead for ArchivedStyleSheet {
+    type Rule = ArchivedRule;
+    fn imports(&self) -> &[i32] {
+        &self.imports
+    }
+    fn rules(&self) -> &[ArchivedRule] {
+        &self.rules
+    }
+}
+
+impl RuleRead for Rule {
+    type Selector = Selector;
+    type Declaration = ParsedDeclaration;
+    fn kind(&self) -> RuleKind {
+        self.kind
+    }
+    fn selectors(&self) -> &[Selector] {
+        &self.prelude.selectors
+    }
+    fn declarations(&self) -> &[ParsedDeclaration] {
+        &self.declaration_block.declarations
+    }
+    fn children(&self) -> &[Self] {
+        &self.children
+    }
+}
+
+impl RuleRead for ArchivedRule {
+    type Selector = ArchivedSelector;
+    type Declaration = ArchivedParsedDeclaration;
+    fn kind(&self) -> RuleKind {
+        unarchive(&self.kind)
+    }
+    fn selectors(&self) -> &[ArchivedSelector] {
+        &self.prelude.selectors
+    }
+    fn declarations(&self) -> &[ArchivedParsedDeclaration] {
+        &self.declaration_block.declarations
+    }
+    fn children(&self) -> &[Self] {
+        &self.children
+    }
+}
+
+impl SelectorRead for Selector {
+    type Component = SimpleSelector;
+    fn components(&self) -> &[SimpleSelector] {
+        &self.components
+    }
+}
+
+impl SelectorRead for ArchivedSelector {
+    type Component = ArchivedSimpleSelector;
+    fn components(&self) -> &[ArchivedSimpleSelector] {
+        &self.components
+    }
+}
+
+impl ComponentRead for SimpleSelector {
+    fn kind(&self) -> SimpleSelectorKind {
+        self.kind
+    }
+    fn value(&self) -> &str {
+        &self.value
+    }
+}
+
+impl ComponentRead for ArchivedSimpleSelector {
+    fn kind(&self) -> SimpleSelectorKind {
+        unarchive(&self.kind)
+    }
+    fn value(&self) -> &str {
+        &self.value
+    }
+}
+
+/// A field-less archived enum's value.
+fn unarchive<T, A: RkyvDeserialize<T, rkyv::Infallible>>(archived: &A) -> T {
+    let Ok(value) = archived.deserialize(&mut rkyv::Infallible);
+    value
 }
 
 #[cfg(test)]

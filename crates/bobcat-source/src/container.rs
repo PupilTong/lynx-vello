@@ -72,11 +72,13 @@
 //! embedder gives its fetcher the view's base — the CLI, the server and the
 //! browser name a page's input URL as both.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use bobcat_core::{MTS_CHUNK_PREAMBLE, PageConfig, PreparsedStyleSheet};
 use bobcat_resources::{ContainerInstaller, RegisterError, Registrar, Resources};
+use bytes::Bytes;
 use url::Url;
 
 use crate::page::{
@@ -84,9 +86,11 @@ use crate::page::{
     diagnostic_url, looks_like_lynx_xml, looks_like_native_bundle, looks_like_web_bundle,
     mts_entry_source,
 };
+use crate::web::style_info::{self, AlignedSection};
+use crate::web::{DecodeError, Sections};
 
 /// The Lepus chunk a container's entry is.
-const ROOT: &str = "root";
+pub(crate) const ROOT: &str = "root";
 /// The section name a lazy container's MTS body carries, and the suffix
 /// `native::decode` sorts a main-thread source by.
 const MAIN_THREAD_SECTION: &str = "main-thread";
@@ -130,12 +134,7 @@ impl ContainerSources {
         if looks_like_native_bundle(bytes) {
             return Self::from_template(url, &decode_native(url, bytes)?, BundleTarget::Lynx, None);
         }
-        let template =
-            crate::web::decode(bytes).map_err(|source| SourceError::DecodeWebBundle {
-                input: diagnostic_url(url),
-                source,
-            })?;
-        Self::from_template(url, &template, BundleTarget::Web, None)
+        Self::from_web_bundle(url, bytes)
     }
 
     /// Decodes a source-based `.lynx.bundle` whose entry is the main-thread
@@ -156,9 +155,90 @@ impl ContainerSources {
         )
     }
 
+    /// A `.web.bundle`, read where it lies: every body is copied once, into
+    /// the text registered for it, and each `StyleInfo` is validated and
+    /// lowered in its archived form, with no owned rule tree built for it.
+    /// It fails exactly where [`crate::web::decode`] fails.
+    fn from_web_bundle(url: &Url, bytes: &[u8]) -> Result<Self, SourceError> {
+        let error = |source| SourceError::DecodeWebBundle {
+            input: diagnostic_url(url),
+            source,
+        };
+        let sections = Sections::<PageConfig>::decode(bytes).map_err(error)?;
+        let style_info = sections
+            .style_info
+            .map(|bytes| AlignedSection::new(bytes).map_err(DecodeError::StyleInfo))
+            .transpose()
+            .map_err(error)?;
+        let style_info = style_info
+            .as_ref()
+            .map(style_info::check_style_info)
+            .transpose()
+            .map_err(error)?;
+        let named = sections
+            .custom_sections_style_info
+            .map(|bytes| AlignedSection::new(bytes).map_err(DecodeError::CustomSectionsStyleInfo))
+            .transpose()
+            .map_err(error)?;
+        let named = named
+            .as_ref()
+            .map(style_info::check_style_info_map)
+            .transpose()
+            .map_err(error)?;
+        let parts = Parts {
+            config: sections.page_config(),
+            style_info: style_info.map(crate::lower_style::to_preparsed_style_sheet),
+            style_sheets: crate::custom_style::named_style_sheets(
+                sections.custom_sections.as_ref(),
+                named
+                    .into_iter()
+                    .flat_map(|map| map.name_to_style_info.iter())
+                    .map(|(name, style_info)| (name.as_str(), style_info)),
+            ),
+            lepus_code: sections.lepus_code,
+            manifest: sections.manifest,
+            custom_sections: sections.custom_sections.as_ref(),
+        };
+        Self::from_parts(url, parts, BundleTarget::Web, None)
+    }
+
+    /// A container from a decoded template: a `.lynx.bundle`'s, or one a
+    /// test built.
     pub(crate) fn from_template(
         url: &Url,
         template: &crate::web::WebTemplate,
+        target: BundleTarget,
+        entry: Option<&str>,
+    ) -> Result<Self, SourceError> {
+        let parts = Parts {
+            lepus_code: borrowed(&template.lepus_code),
+            manifest: borrowed(&template.manifest),
+            custom_sections: template.custom_sections.as_ref(),
+            config: PageConfig {
+                default_display_linear: template.config_flag("defaultDisplayLinear"),
+                default_overflow_visible: template.config_flag("defaultOverflowVisible"),
+                enable_css_selector: template.config_flag("enableCSSSelector"),
+                enable_js_data_processor: template.config_flag("enableJSDataProcessor"),
+                enable_css_inheritance: template.config_flag("enableCSSInheritance"),
+            },
+            style_info: template
+                .style_info
+                .as_ref()
+                .map(crate::lower_style::to_preparsed_style_sheet),
+            style_sheets: crate::custom_style::named_style_sheets(
+                template.custom_sections.as_ref(),
+                template
+                    .custom_sections_style_info
+                    .iter()
+                    .map(|(name, style_info)| (name.as_str(), style_info)),
+            ),
+        };
+        Self::from_parts(url, parts, target, entry)
+    }
+
+    fn from_parts(
+        url: &Url,
+        parts: Parts<'_>,
         target: BundleTarget,
         entry: Option<&str>,
     ) -> Result<Self, SourceError> {
@@ -166,18 +246,18 @@ impl ContainerSources {
             return Err(SourceError::OpaqueContainerUrl(diagnostic_url(url)));
         }
         let entry_name = match entry {
-            Some(name) if template.lepus_code.contains_key(name) => Some(name),
+            Some(name) if parts.lepus_code.contains_key(name) => Some(name),
             Some(name) => {
                 return Err(SourceError::MissingNativeEntry {
                     input: diagnostic_url(url),
                     entry: bounded_diagnostic(name.to_owned()),
                 });
             }
-            None => template.lepus_code.contains_key(ROOT).then_some(ROOT),
+            None => parts.lepus_code.contains_key(ROOT).then_some(ROOT),
         };
 
         let mut scripts = Scripts::new(url);
-        for (name, body) in &template.lepus_code {
+        for (name, body) in &parts.lepus_code {
             scripts.insert(named_chunk_url(url, name), lepus_source(name, body))?;
         }
         // A native entry named explicitly is the entry at `root.js` as well
@@ -185,10 +265,10 @@ impl ContainerSources {
         if let Some(name) = entry_name.filter(|name| *name != ROOT) {
             scripts.insert(
                 named_chunk_url(url, ROOT),
-                mts_entry_source(&template.lepus_code[name]),
+                mts_entry_source(parts.lepus_code[name]),
             )?;
         }
-        if let Some(serde_json::Value::Object(sections)) = template.custom_sections.as_ref() {
+        if let Some(serde_json::Value::Object(sections)) = parts.custom_sections {
             for (name, section) in sections {
                 // A section whose content is not a string carries no body — a
                 // named stylesheet's is an object — and so is no script.
@@ -200,7 +280,7 @@ impl ContainerSources {
                 }
             }
         }
-        for (path, body) in &template.manifest {
+        for (path, body) in &parts.manifest {
             scripts.insert(bundle_path_url(url, path), body_source(target, path, body))?;
         }
         // A `.web.bundle` with no entry was assembled from custom sections,
@@ -213,7 +293,7 @@ impl ContainerSources {
         // `.lynx.bundle`'s section has. A path with an extension is a file the
         // manifest carries (`/answer.js`), never a section's name.
         if target == BundleTarget::Web && entry_name.is_none() {
-            for (path, body) in &template.manifest {
+            for (path, body) in &parts.manifest {
                 let name = bare(path);
                 if !name.is_empty() && !name.contains(['/', '.']) {
                     scripts.insert(named_chunk_url(url, name), body_source(target, name, body))?;
@@ -229,7 +309,7 @@ impl ContainerSources {
             let boot = background_boot_url(url);
             scripts.insert(
                 boot.clone(),
-                background_boot_source(url, template.manifest.contains_key("/app-service.js")),
+                background_boot_source(url, parts.manifest.contains_key("/app-service.js")),
             )?;
             Some(boot)
         } else {
@@ -237,15 +317,13 @@ impl ContainerSources {
         };
         let scripts = scripts.finish();
 
-        let style_sheets: Vec<(Url, Arc<PreparsedStyleSheet>)> =
-            crate::custom_style::named_style_sheets(template)
-                .into_iter()
-                .map(|(key, sheet)| (named_style_url(url, &key), sheet))
-                .collect();
-        let style_info = template
+        let style_sheets: Vec<(Url, Arc<PreparsedStyleSheet>)> = parts
+            .style_sheets
+            .into_iter()
+            .map(|(key, sheet)| (named_style_url(url, &key), sheet))
+            .collect();
+        let style_info = parts
             .style_info
-            .as_ref()
-            .map(crate::lower_style::to_preparsed_style_sheet)
             .filter(|sheet| !sheet.is_empty())
             .map(|sheet| (bundle_style_url(url), Arc::new(sheet)));
         for (sheet_url, _) in style_sheets.iter().chain(&style_info) {
@@ -265,13 +343,7 @@ impl ContainerSources {
             style_info,
             entry,
             background_entry,
-            config: PageConfig {
-                default_display_linear: template.config_flag("defaultDisplayLinear"),
-                default_overflow_visible: template.config_flag("defaultOverflowVisible"),
-                enable_css_selector: template.config_flag("enableCSSSelector"),
-                enable_js_data_processor: template.config_flag("enableJSDataProcessor"),
-                enable_css_inheritance: template.config_flag("enableCSSInheritance"),
-            },
+            config: parts.config,
         })
     }
 
@@ -354,7 +426,7 @@ impl ContainerSources {
     fn register(&self, sink: &impl Sink) -> Result<(), RegisterError> {
         for registration in self.registrations() {
             match registration {
-                Registration::Script(url, source) => sink.script(url, source)?,
+                Registration::Script(url, source) => sink.script(url, script_bytes(source))?,
                 Registration::StyleSheet(url, sheet) => sink.style_sheet(url, sheet)?,
             }
         }
@@ -377,26 +449,22 @@ impl ContainerSources {
 }
 
 enum Registration<'a> {
-    Script(&'a Url, &'a str),
+    Script(&'a Url, &'a Arc<str>),
     StyleSheet(&'a Url, &'a Arc<PreparsedStyleSheet>),
 }
 
 /// What a registration is written into: the embedder's [`Resources`], or a
 /// [`ContainerInstaller`]'s [`Registrar`].
 trait Sink {
-    fn script(&self, url: &Url, source: &str) -> Result<(), RegisterError>;
+    fn script(&self, url: &Url, source: Bytes) -> Result<(), RegisterError>;
     fn style_sheet(&self, url: &Url, sheet: &Arc<PreparsedStyleSheet>)
     -> Result<(), RegisterError>;
 }
 
 impl Sink for Resources {
-    fn script(&self, url: &Url, source: &str) -> Result<(), RegisterError> {
-        self.register(
-            url.as_str(),
-            source.as_bytes().to_vec(),
-            Some(SCRIPT_MEDIA_TYPE),
-        )
-        .map(drop)
+    fn script(&self, url: &Url, source: Bytes) -> Result<(), RegisterError> {
+        self.register(url.as_str(), source, Some(SCRIPT_MEDIA_TYPE))
+            .map(drop)
     }
 
     fn style_sheet(
@@ -410,13 +478,9 @@ impl Sink for Resources {
 }
 
 impl Sink for Registrar {
-    fn script(&self, url: &Url, source: &str) -> Result<(), RegisterError> {
-        self.register(
-            url.as_str(),
-            source.as_bytes().to_vec(),
-            Some(SCRIPT_MEDIA_TYPE),
-        )
-        .map(drop)
+    fn script(&self, url: &Url, source: Bytes) -> Result<(), RegisterError> {
+        self.register(url.as_str(), source, Some(SCRIPT_MEDIA_TYPE))
+            .map(drop)
     }
 
     fn style_sheet(
@@ -427,6 +491,37 @@ impl Sink for Registrar {
         self.register_style_sheet(url.as_str(), Arc::clone(sheet))
             .map(drop)
     }
+}
+
+fn borrowed(map: &BTreeMap<String, String>) -> BTreeMap<&str, &str> {
+    map.iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect()
+}
+
+/// What a container is registered from, whichever decoder read it: its
+/// bodies borrowed, its stylesheets already lowered.
+struct Parts<'t> {
+    lepus_code: BTreeMap<&'t str, &'t str>,
+    manifest: BTreeMap<&'t str, &'t str>,
+    custom_sections: Option<&'t serde_json::Value>,
+    config: PageConfig,
+    /// The container's own `StyleInfo`, lowered.
+    style_info: Option<PreparsedStyleSheet>,
+    /// The named stylesheets, by section name.
+    style_sheets: BTreeMap<String, Arc<PreparsedStyleSheet>>,
+}
+
+/// A script's text as the bytes registered for it, shared rather than
+/// copied: the registry and this container hold one buffer.
+fn script_bytes(source: &Arc<str>) -> Bytes {
+    struct Text(Arc<str>);
+    impl AsRef<[u8]> for Text {
+        fn as_ref(&self) -> &[u8] {
+            self.0.as_bytes()
+        }
+    }
+    Bytes::from_owner(Text(Arc::clone(source)))
 }
 
 /// The script set being collected: one text per URL, an equal text for an
@@ -444,7 +539,9 @@ impl<'a> Scripts<'a> {
         }
     }
 
-    fn insert(&mut self, url: Url, source: String) -> Result<(), SourceError> {
+    /// `source` is copied into the set once, borrowed or not.
+    fn insert<'s>(&mut self, url: Url, source: impl Into<Cow<'s, str>>) -> Result<(), SourceError> {
+        let source = source.into();
         match self.scripts.get(&url) {
             Some(existing) if **existing == *source => Ok(()),
             Some(_) => Err(conflict(self.container, &url)),
@@ -489,14 +586,14 @@ fn is_main_thread(name: &str) -> bool {
 /// otherwise the chunk verbatim, because the realm compiles a named chunk as
 /// a function body whose parameters are the bindings `MTS_CHUNK_PREAMBLE`
 /// gives the entry — so an `import` could not appear in it anyway.
-fn lepus_source(name: &str, body: &str) -> String {
+fn lepus_source<'b>(name: &str, body: &'b str) -> Cow<'b, str> {
     let name = bare(name);
     if name == ROOT {
-        mts_entry_source(body)
+        Cow::Owned(mts_entry_source(body))
     } else if is_main_thread(name) {
-        main_thread_source(body)
+        Cow::Owned(main_thread_source(body))
     } else {
-        body.to_owned()
+        Cow::Borrowed(body)
     }
 }
 
@@ -507,14 +604,14 @@ fn lepus_source(name: &str, body: &str) -> String {
 /// - a **`.json`** body is a value, registered verbatim, its own URL telling the loader to parse
 ///   it;
 /// - everything else is a BTS body, through [`bts_module_source`].
-fn body_source(target: BundleTarget, name: &str, body: &str) -> String {
+fn body_source<'b>(target: BundleTarget, name: &str, body: &'b str) -> Cow<'b, str> {
     let name = bare(name);
     if is_main_thread(name) {
-        main_thread_source(body)
+        Cow::Owned(main_thread_source(body))
     } else if json_path(name) {
-        body.to_owned()
+        Cow::Borrowed(body)
     } else {
-        bts_module_source(target, body)
+        Cow::Owned(bts_module_source(target, body))
     }
 }
 
@@ -566,7 +663,7 @@ fn encoded(name: &str) -> String {
 
 /// `P/<encoded name>.js S`: a Lepus chunk or a custom section, one leading
 /// `/` stripped first — `sectionURL` in `section-url.ts`.
-fn named_chunk_url(container: &Url, name: &str) -> Url {
+pub(crate) fn named_chunk_url(container: &Url, name: &str) -> Url {
     under(container, &format!("{}.js", encoded(bare(name))))
 }
 
@@ -585,13 +682,13 @@ fn named_style_url(container: &Url, key: &str) -> Url {
 
 /// `P/style-info.css S`: the container's own `StyleInfo` —
 /// `bundleStyleSheetURL` in `section-url.ts`.
-fn bundle_style_url(container: &Url) -> Url {
+pub(crate) fn bundle_style_url(container: &Url) -> Url {
     under(container, "style-info.css")
 }
 
 /// `U#background-thread`: the BTS boot script, the container URL with its
 /// fragment replaced — `backgroundThreadURL` in `section-url.ts`.
-fn background_boot_url(container: &Url) -> Url {
+pub(crate) fn background_boot_url(container: &Url) -> Url {
     let mut url = container.clone();
     url.set_fragment(Some("background-thread"));
     url
@@ -1131,6 +1228,82 @@ mod tests {
             b"<view></view>".as_slice(),
         ] {
             assert!(!looks_like_web_bundle(bytes) && !looks_like_native_bundle(bytes));
+        }
+    }
+
+    /// What the owned decode registers for `bytes`: the reference the
+    /// borrowed, archived path is held to.
+    fn decoded(url: &Url, bytes: &[u8]) -> Result<ContainerSources, String> {
+        let template = crate::web::decode(bytes).map_err(|source| {
+            SourceError::DecodeWebBundle {
+                input: diagnostic_url(url),
+                source,
+            }
+            .to_string()
+        })?;
+        ContainerSources::from_template(url, &template, BundleTarget::Web, None)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Reading a `.web.bundle` where it lies registers exactly what the owned
+    /// decode of it registers, for every bundle the fixtures compile.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn a_web_bundle_read_in_place_registers_what_its_decode_registers() {
+        let bundles = crate::compiled_web_bundles();
+        assert!(
+            bundles.len() > 300,
+            "run `pnpm --filter reactlynx-test-fixtures build` and `pnpm --filter web-core-e2e-fixtures build` first"
+        );
+        let container = url(BUNDLE);
+        for (path, bytes) in &bundles {
+            let read = ContainerSources::from_bytes(&container, bytes).map_err(|e| e.to_string());
+            assert_eq!(read, decoded(&container, bytes), "{path}");
+        }
+    }
+
+    /// It fails where the owned decode fails, with the same error — up to
+    /// the addresses rkyv names, which are its copy's — for every truncation
+    /// and a spread of single-byte corruptions of real bundles.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn a_damaged_web_bundle_fails_as_its_decode_fails() {
+        fn unaddressed(
+            result: Result<ContainerSources, String>,
+        ) -> Result<ContainerSources, String> {
+            result.map_err(|message| {
+                let mut words: Vec<&str> = message.split(' ').collect();
+                for word in &mut words {
+                    if word.starts_with("0x") {
+                        *word = "0x…";
+                    }
+                }
+                words.join(" ")
+            })
+        }
+        let container = url(BUNDLE);
+        for name in ["basic-class-selector", "css-custom-sections"] {
+            let bytes = crate::fixtures::fixture(name).page;
+            let step = (bytes.len() / 2000).max(1);
+            for at in (0..bytes.len()).step_by(step) {
+                let truncated = &bytes[..at];
+                let read =
+                    ContainerSources::from_bytes(&container, truncated).map_err(|e| e.to_string());
+                assert_eq!(
+                    unaddressed(read),
+                    unaddressed(decoded(&container, truncated)),
+                    "{name} cut at {at}"
+                );
+                let mut flipped = bytes.to_vec();
+                flipped[at] ^= 0xA5;
+                let read =
+                    ContainerSources::from_bytes(&container, &flipped).map_err(|e| e.to_string());
+                assert_eq!(
+                    unaddressed(read),
+                    unaddressed(decoded(&container, &flipped)),
+                    "{name} flipped at {at}"
+                );
+            }
         }
     }
 }

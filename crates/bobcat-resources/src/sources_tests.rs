@@ -542,3 +542,149 @@ fn the_style_sheet_probe_answers_from_the_registry_alone() {
     assert!(resources.unregister("app:///page/text.css"));
     assert!(!probe("app:///page/text.css"));
 }
+
+/// A background install whose body waits for the test to let it go, so a
+/// request can be shown waiting on it.
+fn install_held(
+    resources: &Resources,
+    container: &str,
+    outcome: Result<(), String>,
+) -> mpsc::Sender<()> {
+    let (release, released) = mpsc::channel::<()>();
+    let container = Url::parse(container).unwrap();
+    let section = format!("{container}/root.js");
+    let sheet = format!("{container}/style-info.css");
+    resources.register_in_background(&container, move |registrar| {
+        released.recv().expect("the test lets the install go");
+        registrar
+            .register(
+                &section,
+                b"export default 2;".to_vec(),
+                Some("text/javascript"),
+            )
+            .unwrap();
+        registrar
+            .register_style_sheet(
+                &sheet,
+                Arc::new(bobcat_core::PreparsedStyleSheet::default()),
+            )
+            .unwrap();
+        outcome
+    });
+    release
+}
+
+/// A view boots while its container is still being registered: a load of a
+/// URL under the container waits for the install, then finds what it
+/// registered — a module as bytes, a stylesheet pre-parsed.
+#[tokio::test]
+async fn a_load_under_a_container_being_registered_waits_for_it() {
+    let resources = resources();
+    let release = install_held(&resources, "app:///page/card.web.bundle", Ok(()));
+
+    let mut module = load(
+        &resources,
+        "app:///page/card.web.bundle/root.js",
+        SourceKind::Script,
+    );
+    let sheet = load(
+        &resources,
+        "app:///page/card.web.bundle/style-info.css",
+        SourceKind::StyleSheet,
+    );
+    // A custom scheme no transport serves resolves while it is held.
+    resources
+        .shared
+        .transports
+        .resolve(
+            "/page/card.web.bundle/root.js",
+            resources.base_url().as_ref(),
+        )
+        .expect("a held URL resolves");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), module.changed())
+            .await
+            .is_err(),
+        "the load waits while the install runs"
+    );
+
+    release.send(()).unwrap();
+    let Ok(LoadedSource::Module { source, .. }) = result(module).await else {
+        panic!("the held load answers what the install registered");
+    };
+    assert_eq!(source, "export default 2;");
+    assert!(matches!(
+        result(sheet).await,
+        Ok(LoadedSource::StyleSheet(StyleSheetSource::Preparsed(_)))
+    ));
+    // Released: what the install registered is an ordinary registration now.
+    assert!(
+        resources
+            .shared
+            .transports
+            .registry
+            .install_covering(&Url::parse("app:///page/card.web.bundle/root.js").unwrap())
+            .is_none()
+    );
+}
+
+/// An install that fails fails every load it held, with its own message,
+/// and leaves a note.
+#[tokio::test]
+async fn a_failed_install_fails_the_loads_it_held() {
+    let resources = resources();
+    let release = install_held(
+        &resources,
+        "app:///page/card.web.bundle",
+        Err("the bundle would not decode".to_owned()),
+    );
+    let module = load(
+        &resources,
+        "app:///page/card.web.bundle/root.js",
+        SourceKind::Script,
+    );
+    release.send(()).unwrap();
+
+    let Err(LynxViewError::Resource(error)) = result(module).await else {
+        panic!("the install's failure is the load's");
+    };
+    assert_eq!(error.kind, ResourceErrorKind::ResponseBody);
+    assert!(
+        error.message.contains("would not decode"),
+        "{}",
+        error.message
+    );
+    assert!(
+        resources
+            .take_notes()
+            .iter()
+            .any(|note| note.contains("would not decode"))
+    );
+}
+
+/// What an install covers is its container's path and what is under it,
+/// whatever the query and fragment: the BTS boot at `U#background-thread`
+/// is held, a sibling path that merely starts with the same text is not.
+#[test]
+fn an_install_holds_its_container_path_and_nothing_beside_it() {
+    let resources = resources();
+    let release = install_held(&resources, "app:///page/card.web.bundle?v=1", Ok(()));
+    let held = |url: &str| {
+        resources
+            .shared
+            .transports
+            .registry
+            .install_covering(&Url::parse(url).unwrap())
+            .is_some()
+    };
+    assert!(held("app:///page/card.web.bundle?v=1"));
+    assert!(held("app:///page/card.web.bundle?v=1#background-thread"));
+    assert!(held("app:///page/card.web.bundle/root.js?v=1"));
+    assert!(held(
+        "app:///page/card.web.bundle/custom_section/CSS.css?v=1"
+    ));
+    assert!(!held("app:///page/card.web.bundle2/root.js"));
+    assert!(!held("app:///page/other.js"));
+    assert!(!held("other:///page/card.web.bundle/root.js"));
+    drop(release);
+}

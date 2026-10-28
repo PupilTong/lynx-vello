@@ -19,7 +19,11 @@ use std::sync::Arc;
 use bobcat_core::{PreparsedDeclaration, PreparsedKeyframe, PreparsedRule, PreparsedStyleSheet};
 use serde_json::Value;
 
-/// Every named stylesheet a template carries, by section name.
+use crate::web::style_info::StyleInfoRead;
+
+/// Every named stylesheet a template carries, by section name: the legacy
+/// JSON descriptors among its `custom_sections`, and `style_infos`, its
+/// `CustomSectionsStyleInfo` entries, owned or still archived.
 ///
 /// A name the `CustomSectionsStyleInfo` section carries wins over a legacy
 /// JSON descriptor of the same name; an encoder writes a CSS section in only
@@ -27,12 +31,11 @@ use serde_json::Value;
 /// section holds css id 0 only, so no `l-css-id` guard appears, and a
 /// hand-made section carrying other ids is scoped the way any fragment is.
 /// Invalid legacy descriptors remain un-loadable.
-pub(crate) fn named_style_sheets(
-    template: &crate::web::WebTemplate,
+pub(crate) fn named_style_sheets<'s, S: StyleInfoRead + 's>(
+    custom_sections: Option<&Value>,
+    style_infos: impl IntoIterator<Item = (&'s str, &'s S)>,
 ) -> BTreeMap<String, Arc<PreparsedStyleSheet>> {
-    let mut sheets: BTreeMap<String, Arc<PreparsedStyleSheet>> = template
-        .custom_sections
-        .as_ref()
+    let mut sheets: BTreeMap<String, Arc<PreparsedStyleSheet>> = custom_sections
         .and_then(Value::as_object)
         .into_iter()
         .flat_map(|sections| sections.iter())
@@ -41,17 +44,12 @@ pub(crate) fn named_style_sheets(
             Some((name.clone(), Arc::new(decode(section.get("content")?)?)))
         })
         .collect();
-    sheets.extend(
-        template
-            .custom_sections_style_info
-            .iter()
-            .map(|(name, style_info)| {
-                (
-                    name.clone(),
-                    Arc::new(crate::lower_style::to_preparsed_style_sheet(style_info)),
-                )
-            }),
-    );
+    sheets.extend(style_infos.into_iter().map(|(name, style_info)| {
+        (
+            name.to_owned(),
+            Arc::new(crate::lower_style::to_preparsed_style_sheet(style_info)),
+        )
+    }));
     sheets
 }
 
@@ -239,7 +237,13 @@ mod tests {
             ]),
             ..crate::web::WebTemplate::default()
         };
-        let sheets = named_style_sheets(&template);
+        let sheets = named_style_sheets(
+            template.custom_sections.as_ref(),
+            template
+                .custom_sections_style_info
+                .iter()
+                .map(|(name, style_info)| (name.as_str(), style_info)),
+        );
         assert_eq!(
             sheets.keys().map(String::as_str).collect::<Vec<_>>(),
             ["A &/中", "CSS", "legacy-only"]

@@ -59,8 +59,9 @@
 
 use std::sync::Arc;
 
-use bobcat_core::{PageConfig, ScreenMetrics, ViewSources};
-use bobcat_resources::Resources;
+use bobcat_core::{PageConfig, PreparsedStyleSheet, ScreenMetrics, ViewSources};
+use bobcat_resources::{Registrar, Resources};
+use bytes::Bytes;
 use thiserror::Error;
 use url::Url;
 
@@ -404,6 +405,204 @@ impl PageSource {
             },
         }
     }
+}
+
+/// A page whose view can start before its container is decoded: what
+/// [`PageSource::defer`] returns.
+///
+/// For a `.web.bundle` it holds the bytes and only what a view is created
+/// from — the page flags and which of the entry, the boot script and the
+/// `StyleInfo` it names — read by scanning the section table. The decode
+/// itself, the `StyleInfo` lowering and the registration run off the
+/// embedder's thread, through
+/// [`Resources::register_in_background`](bobcat_resources::Resources::register_in_background),
+/// while the view boots; its first loads of the container's URLs wait for
+/// them there. Every other input is decoded when it is deferred, and
+/// registered when asked.
+///
+/// The page is the one [`PageSource::from_bytes`] decodes, with one
+/// difference: a `StyleInfo` section is listed as the view's author sheet
+/// whether or not it holds a rule, since that is not known until it is
+/// decoded, and one that holds none is registered as an empty sheet.
+#[derive(Clone, Debug)]
+pub struct DeferredPage {
+    input_url: Url,
+    page: Deferred,
+}
+
+#[derive(Clone, Debug)]
+enum Deferred {
+    /// Decoded already: Lynx XML, or a native bundle.
+    Decoded(Box<PageSource>),
+    /// A `.web.bundle`, scanned and not yet decoded.
+    Web {
+        bytes: Bytes,
+        config: PageConfig,
+        has_style_info: bool,
+    },
+}
+
+impl PageSource {
+    /// Prepares a page to boot while its container is decoded: a
+    /// `.web.bundle`'s section table is scanned here and the rest is left to
+    /// [`DeferredPage::register_in_background`]; any other input is decoded
+    /// here.
+    ///
+    /// # Errors
+    ///
+    /// For a `.web.bundle`, a header, section table or `Configurations`
+    /// section that would not decode, [`SourceError::MissingRoot`] and
+    /// [`SourceError::OpaqueContainerUrl`]; every other decode error is the
+    /// failure of the loads the view makes. For any other input, every error
+    /// [`Self::from_bytes`] has.
+    pub fn defer(input: &Url, bytes: impl Into<Bytes>) -> Result<DeferredPage, SourceError> {
+        let bytes = bytes.into();
+        let page = if looks_like_native_bundle(&bytes) || looks_like_lynx_xml(&bytes) {
+            Deferred::Decoded(Box::new(Self::from_bytes(input, &bytes)?))
+        } else {
+            if input.cannot_be_a_base() {
+                return Err(SourceError::OpaqueContainerUrl(diagnostic_url(input)));
+            }
+            let scan = crate::web::scan(&bytes).map_err(|source| SourceError::DecodeWebBundle {
+                input: diagnostic_url(input),
+                source,
+            })?;
+            if !scan.has_root {
+                return Err(SourceError::MissingRoot(diagnostic_url(input)));
+            }
+            Deferred::Web {
+                bytes,
+                config: scan.config,
+                has_style_info: scan.has_style_info,
+            }
+        };
+        Ok(DeferredPage {
+            input_url: input.clone(),
+            page,
+        })
+    }
+}
+
+/// A page decoded already, which defers nothing.
+impl From<PageSource> for DeferredPage {
+    fn from(page: PageSource) -> Self {
+        Self {
+            input_url: page.input_url.clone(),
+            page: Deferred::Decoded(Box::new(page)),
+        }
+    }
+}
+
+impl DeferredPage {
+    /// The URL that identifies the input.
+    #[must_use]
+    pub const fn input_url(&self) -> &Url {
+        &self.input_url
+    }
+
+    /// Page policy decoded from this input's configuration.
+    #[must_use]
+    pub const fn config(&self) -> PageConfig {
+        match &self.page {
+            Deferred::Decoded(page) => page.config(),
+            Deferred::Web { config, .. } => *config,
+        }
+    }
+
+    /// The sources a view for this input is built from, as
+    /// [`PageSource::view_sources`] names them.
+    #[must_use]
+    pub fn view_sources(&self, screen: ScreenMetrics) -> ViewSources {
+        match &self.page {
+            Deferred::Decoded(page) => page.view_sources(screen),
+            Deferred::Web {
+                config,
+                has_style_info,
+                ..
+            } => {
+                let input = &self.input_url;
+                ViewSources {
+                    config: *config,
+                    background_entry: Some(
+                        crate::container::background_boot_url(input).to_string(),
+                    ),
+                    style_sheets: has_style_info
+                        .then(|| crate::container::bundle_style_url(input).to_string())
+                        .into_iter()
+                        .collect(),
+                    card_url: Some(input.to_string()),
+                    ..ViewSources::new(
+                        input.to_string(),
+                        crate::container::named_chunk_url(input, crate::container::ROOT)
+                            .to_string(),
+                        screen,
+                    )
+                }
+            }
+        }
+    }
+
+    /// Registers the page's scripts and stylesheets with `resources`: a
+    /// `.web.bundle`'s decoded, lowered and registered off this thread, with
+    /// every load of its URLs held until they are; any other page's at once,
+    /// as [`PageSource::register_with`] does. A container that fails to
+    /// decode fails those loads with its decode error.
+    pub fn register_in_background(&self, resources: &Resources) {
+        match &self.page {
+            Deferred::Decoded(page) => page.register_with(resources),
+            Deferred::Web {
+                bytes,
+                has_style_info,
+                ..
+            } => {
+                let input = self.input_url.clone();
+                let bytes = bytes.clone();
+                let has_style_info = *has_style_info;
+                resources.register_in_background(&self.input_url, move |registrar| {
+                    register_web_page(&input, &bytes, has_style_info, registrar)
+                });
+            }
+        }
+    }
+}
+
+/// A deferred `.web.bundle`'s whole decode and registration, as one
+/// background install. The `StyleInfo` URL the view was given always
+/// answers: with an empty sheet when the section held no rule.
+fn register_web_page(
+    input: &Url,
+    bytes: &[u8],
+    listed_style_info: bool,
+    registrar: &Registrar,
+) -> Result<(), String> {
+    let container =
+        ContainerSources::from_bytes(input, bytes).map_err(|error| error.to_string())?;
+    if container.entry().is_none() {
+        return Err(SourceError::MissingRoot(diagnostic_url(input)).to_string());
+    }
+    let empty_sheet = (listed_style_info && container.style_info().is_none())
+        .then(|| crate::container::bundle_style_url(input));
+    if let Some(url) = &empty_sheet
+        && container
+            .scripts()
+            .binary_search_by(|(script, _)| script.cmp(url))
+            .is_ok()
+    {
+        return Err(SourceError::ConflictingSection {
+            input: diagnostic_url(input),
+            url: diagnostic_url(url),
+        }
+        .to_string());
+    }
+    container
+        .register_through(registrar)
+        .map_err(|error| error.to_string())?;
+    if let Some(url) = empty_sheet {
+        registrar
+            .register_style_sheet(url.as_str(), Arc::new(PreparsedStyleSheet::default()))
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 /// Which compiler built one container, and so what shape its bodies arrive in.
@@ -1687,5 +1886,156 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// A deferred page names the view the sources the decoded page names,
+    /// for every bundle the fixtures compile — except a `StyleInfo` section
+    /// with no rule, which only the decode can tell is empty.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn a_deferred_page_names_the_sources_its_decode_names() {
+        let screen = ScreenMetrics::for_viewport(32.0, 24.0, 1.0);
+        let input = Url::parse("https://cdn.test/app/card.web.bundle?rev=1").unwrap();
+        let bundles = crate::compiled_web_bundles();
+        assert!(bundles.len() > 300, "build the fixture packages first");
+        for (path, bytes) in bundles {
+            let Ok(page) = PageSource::from_bytes(&input, &bytes) else {
+                // A lazy bundle has no root, and is no page either way.
+                assert!(
+                    matches!(
+                        PageSource::defer(&input, bytes),
+                        Err(SourceError::MissingRoot(_))
+                    ),
+                    "{path}"
+                );
+                continue;
+            };
+            let deferred = PageSource::defer(&input, bytes).expect("a page defers");
+            let mut expected = page.view_sources(screen);
+            let empty_style_info = page.container().unwrap().style_info().is_none();
+            if empty_style_info && !deferred.view_sources(screen).style_sheets.is_empty() {
+                expected.style_sheets = vec![format!(
+                    "https://cdn.test/app/card.web.bundle/style-info.css?rev=1"
+                )];
+            }
+            assert_eq!(
+                format!("{:?}", deferred.view_sources(screen)),
+                format!("{expected:?}"),
+                "{path}"
+            );
+            assert_eq!(deferred.config(), page.config(), "{path}");
+        }
+    }
+
+    /// What the scan alone can refuse is refused when the page is deferred.
+    #[test]
+    fn a_deferred_page_refuses_what_its_scan_can_tell() {
+        let input = input_url();
+        assert!(matches!(
+            PageSource::defer(&input, web_bundle(None)),
+            Err(SourceError::MissingRoot(_))
+        ));
+        assert!(matches!(
+            PageSource::defer(
+                &Url::parse("data:text/plain,card").unwrap(),
+                web_bundle(Some("x"))
+            ),
+            Err(SourceError::OpaqueContainerUrl(_))
+        ));
+        let mut unknown = web_bundle(Some("x"));
+        push_section(&mut unknown, 99, b"");
+        assert!(matches!(
+            PageSource::defer(&input, unknown),
+            Err(SourceError::DecodeWebBundle {
+                source: crate::web::DecodeError::UnknownSection(99),
+                ..
+            })
+        ));
+        let mut truncated = web_bundle(Some("x"));
+        truncated.truncate(truncated.len() - 1);
+        assert!(PageSource::defer(&input, truncated).is_err());
+        assert!(matches!(
+            PageSource::defer(&input, web_bundle_with_config("[]", Some("x"))),
+            Err(SourceError::DecodeWebBundle { .. })
+        ));
+    }
+
+    /// Waits for what a background install leaves: `done` is polled until it
+    /// holds.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn eventually(mut done: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !done() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the background install finished"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn quiet_resources() -> Resources {
+        Resources::new(
+            bobcat_resources::ResourcesConfig {
+                log_to_stderr: false,
+                ..bobcat_resources::ResourcesConfig::default()
+            },
+            || {},
+        )
+    }
+
+    /// The background install registers what the decoded page registers,
+    /// and an empty sheet at a listed `StyleInfo` that held no rule.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn a_deferred_page_registers_its_container_in_the_background() {
+        let input = Url::parse("https://cdn.test/app/basic-bindtap.web.bundle").unwrap();
+        let bytes = crate::fixtures::fixture("basic-bindtap").page;
+        let decoded = PageSource::from_bytes(&input, bytes).unwrap();
+        let container = decoded.container().unwrap();
+        assert!(
+            container.style_info().is_none(),
+            "the card's StyleInfo is empty"
+        );
+        let deferred = PageSource::defer(&input, bytes.to_vec()).unwrap();
+        let screen = ScreenMetrics::for_viewport(32.0, 24.0, 1.0);
+        let sheet = "https://cdn.test/app/basic-bindtap.web.bundle/style-info.css";
+        assert_eq!(deferred.view_sources(screen).style_sheets, [sheet]);
+
+        let resources = quiet_resources();
+        deferred.register_in_background(&resources);
+        eventually(|| resources.unregister(sheet));
+        for (url, _) in container.scripts() {
+            assert!(resources.unregister(url.as_str()), "{url}");
+        }
+        assert!(resources.take_notes().is_empty());
+    }
+
+    /// A bundle whose sections fail to decode is deferred all the same; its
+    /// install fails, registers nothing, and says why.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn a_deferred_page_that_fails_to_decode_registers_nothing() {
+        let input = input_url();
+        let mut bytes = web_bundle(Some("export {};"));
+        push_section(
+            &mut bytes,
+            crate::web::SectionLabel::StyleInfo as u32,
+            &[0xFF; 64],
+        );
+        let deferred = PageSource::defer(&input, bytes).expect("the scan reads no StyleInfo");
+        let resources = quiet_resources();
+        deferred.register_in_background(&resources);
+        let mut notes = Vec::new();
+        eventually(|| {
+            notes.extend(resources.take_notes());
+            !notes.is_empty()
+        });
+        assert!(notes[0].contains("invalid StyleInfo section"), "{notes:?}");
+        let entry = deferred
+            .view_sources(ScreenMetrics::for_viewport(1.0, 1.0, 1.0))
+            .entry;
+        assert!(!resources.unregister(&entry));
     }
 }
