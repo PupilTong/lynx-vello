@@ -1024,6 +1024,54 @@ impl ScrollIntents {
             .any(|fling| chain_nodes(frame, fling.from).contains(&node))
     }
 
+    /// How much farther the painter's own motion will carry `slot`'s
+    /// container past `offset` on each axis ([`super::ScrollEntry::reach`]):
+    /// the remaining travel of a fling whose chain runs through it, at the
+    /// velocity the fling has now, or else a glide's remaining distance to
+    /// its target. Zero on an axis nothing of the sort moves — a drag, a
+    /// wheel step, a bounce back and an auto-scroll carry the container no
+    /// farther than where they put it — and on an axis with a wrap period,
+    /// whose encode window is already the whole scrolling area. Clamped so
+    /// `offset + reach` stays in `0..=max_offset`: a fling into an edge
+    /// reaches the edge and no farther.
+    #[must_use]
+    pub(super) fn reach_of(
+        &self,
+        frame: &CommittedFrame,
+        slot: &crate::visual::ScrollSlot,
+        offset: Vector2D<f32>,
+    ) -> Vector2D<f32> {
+        let node = slot.node;
+        let fling = self
+            .flings
+            .iter()
+            .find(|fling| chain_nodes(frame, fling.from).contains(&node));
+        let wraps = wrap_axes(slot);
+        let mut reach = Vector2D::zero();
+        for axis in Axis::BOTH {
+            if axis.flag(wraps) {
+                continue;
+            }
+            let travel = match fling {
+                Some(fling) => fling_travel(axis.of(fling.velocity), fling.rate(axis)),
+                None => self
+                    .glides
+                    .iter()
+                    .find(|glide| glide.node == node && glide.axis == axis)
+                    .map_or(0.0, |glide| glide.target - axis.of(offset)),
+            };
+            let at = axis.of(offset);
+            let landing = at + travel;
+            let clamped = if landing.is_finite() {
+                landing.clamp(0.0, axis.of(slot.max_offset).max(0.0))
+            } else {
+                at
+            };
+            axis.set(&mut reach, clamped - at);
+        }
+        reach
+    }
+
     /// Whether a bounce back is moving `node`.
     #[must_use]
     pub(super) fn is_bouncing(&self, node: NodeId) -> bool {

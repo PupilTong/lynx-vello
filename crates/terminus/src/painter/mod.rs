@@ -276,6 +276,21 @@ pub struct ScrollEntry {
     /// ([`crate::tree::document::Document::scroll_anchor_shift`]): the post was made
     /// before the painter saw that part.
     pub anchor_shift: Vector2D<f32>,
+    /// How much farther the painter's own motion will carry the container
+    /// past `offset` on each axis, in CSS px: a fling's remaining travel at
+    /// the velocity it has now, a glide's remaining distance to its target.
+    /// Zero for a container the finger holds, a wheel step, a bounce back,
+    /// an auto-scroll, and a container at rest. Clamped so `offset + reach`
+    /// stays inside `0..=max_offset`; zero on an axis with a
+    /// [`wrap_period`](crate::visual::ScrollSlot::wrap_period), whose window
+    /// is already the whole area. The document keeps it per container
+    /// ([`Document::set_scroll_reach`]) and stretches the
+    /// `content-visibility: auto` relevance region by it
+    /// ([`crate::visual::ScrollSlot::relevance_window`]), so content the
+    /// motion is about to show is revealed ahead of it.
+    ///
+    /// [`Document::set_scroll_reach`]: crate::tree::document::Document::set_scroll_reach
+    pub reach: Vector2D<f32>,
 }
 
 /// The painter's monotonic animation timeline. Its epoch is the start of
@@ -1429,6 +1444,7 @@ impl ScrollIntents {
                             .get(&node)
                             .copied()
                             .unwrap_or(slot.anchor_shift),
+                        reach: self.reach_of(frame, slot, offset),
                     },
                 ));
             }

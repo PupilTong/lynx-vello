@@ -708,6 +708,93 @@ impl<T> Document<T> {
         admitted
     }
 
+    /// Records how much farther the painter's own motion will carry `id`
+    /// past its offset ([`ScrollEntry::reach`]), as the painter's newest post
+    /// says: every adopted post overwrites it, so a drag or a wheel step after
+    /// a fling, which posts zero, ends it. A zero reach removes the entry, so
+    /// a page at rest keeps none. The next commit publishes it on the
+    /// container's slot ([`ScrollSlot::reach`]) and decides
+    /// `content-visibility: auto` against the window it stretches
+    /// ([`ScrollSlot::relevance_window`]); recording it schedules nothing —
+    /// the commits the scroll itself asks for are the ones that read it.
+    /// A node that is not live is ignored.
+    ///
+    /// [`ScrollEntry::reach`]: crate::painter::ScrollEntry::reach
+    /// [`ScrollSlot::reach`]: crate::visual::ScrollSlot::reach
+    /// [`ScrollSlot::relevance_window`]: crate::visual::ScrollSlot::relevance_window
+    pub fn set_scroll_reach(&mut self, id: NodeId, reach: Vector2D<f32>) {
+        let Some(slot) = self.slot(id) else {
+            return;
+        };
+        let reaches = &mut self.layout_state_mut().scroll_reaches;
+        if reach == Vector2D::zero() || !reach.x.is_finite() || !reach.y.is_finite() {
+            if !reaches.is_empty() {
+                reaches.remove(&slot);
+            }
+        } else {
+            reaches.insert(slot, reach);
+        }
+    }
+
+    /// The reach [`Self::set_scroll_reach`] last recorded for `id`; zero when
+    /// none is.
+    #[must_use]
+    pub fn scroll_reach(&self, id: NodeId) -> Vector2D<f32> {
+        self.slot(id)
+            .and_then(|slot| self.layout_state().scroll_reaches.get(&slot))
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// The offset range, `(low, high)` per axis, whose content the next
+    /// commit treats as relevant to the user for `id`'s scrolling: the
+    /// committed frame's [`ScrollSlot::relevance_window`] as the document's
+    /// own state answers it — the encode window around the stored offset,
+    /// stretched toward the pending request's target if `id` has one, else
+    /// by its [`Self::scroll_reach`], over current geometry. `None` when `id`
+    /// is no scroll container. Like every post-layout query, it reads the
+    /// last committed layout.
+    ///
+    /// [`ScrollSlot::relevance_window`]: crate::visual::ScrollSlot::relevance_window
+    #[must_use]
+    pub fn scroll_relevance_window(&self, id: NodeId) -> Option<(Vector2D<f32>, Vector2D<f32>)> {
+        use crate::visual::frame::{encode_window_axis, relevance_window_axis};
+        let scroll_box = self.scroll_box(id)?;
+        let max = scroll_box.max_offset();
+        let wraps = scroll_box.wrap_axes();
+        let offset = scroll_box.offset;
+        // Re-admitted as the build re-admits it into the slot: the geometry
+        // may have changed since the request was recorded.
+        let toward = self.layout_state().scroll_requests.get(&id).map_or_else(
+            || self.scroll_reach(id),
+            |request| scroll_box.admit(request.target) - offset,
+        );
+        let axis = |offset: f32, toward: f32, max: f32, extent: f32, wraps: bool| {
+            relevance_window_axis(
+                encode_window_axis(offset, max, extent, wraps),
+                toward,
+                max,
+                extent,
+                wraps,
+            )
+        };
+        let (low_x, high_x) = axis(
+            offset.x,
+            toward.x,
+            max.x,
+            scroll_box.scrollport.width,
+            wraps.x,
+        );
+        let (low_y, high_y) = axis(
+            offset.y,
+            toward.y,
+            max.y,
+            scroll_box.scrollport.height,
+            wraps.y,
+        );
+        Some((Vector2D::new(low_x, low_y), Vector2D::new(high_x, high_y)))
+    }
+
     /// Scrolls by a delta and returns the unconsumed remainder. An axis with
     /// a [`ScrollBox::wrap_period`] has no boundary, so it consumes its
     /// whole delta and leaves no remainder.

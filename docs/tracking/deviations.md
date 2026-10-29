@@ -2103,9 +2103,12 @@ consequential choice about whether to follow the spec or the quirk.
   `estimated-height`, `estimated-height-px`), and `componentAtIndex` runs
   when the placeholder stops skipping: the list's listener for
   `contentvisibilityautostatechange` builds the cell with the placeholder's
-  current index and swaps it in. A placeholder stops skipping when a commit
-  finds it inside the encode window, so a cell is built about a scrollport
-  before it is on screen, one entry after the commit that found it. The
+  current index and swaps it in, then builds the run of placeholders around
+  it that the relevance region covers (below). A placeholder stops skipping
+  when a commit finds it inside the relevance region — the encode window,
+  stretched toward where a fling or a scroll request is carrying the list —
+  so a cell is built at least a scrollport before it is on screen, one entry
+  after the commit that found it. The
   list's first placeholder batch writes `l-lazy-cells` onto it, and under
   that attribute the UA sheet gives the estimate to placeholders alone and
   makes them no scroll anchor (`crates/bobcat-core/src/main/tree/list.rs`).
@@ -2133,6 +2136,24 @@ consequential choice about whether to follow the spec or the quirk.
     list's scroll anchor showed nine scrollports down, and anchoring followed:
     a fast fling then built every row down to the last before anything showed.
     A placeholder is `overflow-anchor: none`.
+  - A delivery builds more cells than the commit revealed: the list's
+    listener reads how far the relevance region reaches ahead of and behind
+    the revealed placeholder (the host's `scrollRelevanceSpan`) and builds
+    as many children after and before it as that span holds at the size of
+    the nearest built sibling with a box (`fillAround` in
+    `packages/bobcat-element/src/element-papi.ts`). So `componentAtIndex`
+    runs for cells no commit found relevant yet, a hundred or more per
+    delivery for a list of short cells, and `__GetChildren(list)` answers
+    them as built cells; one past the region stands at 0 until the region
+    reaches it. A run is sized by count, not measured cell by cell: cells
+    of mixed heights build fewer or more than the region holds, and the next
+    reveal builds the rest. The list's first delivery has no built sibling
+    and builds the revealed cells alone. web-core has no counterpart, since
+    it builds every cell up front; native's `list` builds
+    `preload-buffer-count` cells past its filled visible area
+    (`lynx/core/list/decoupled_linear_layout_manager.cc`,
+    `GetTargetIndexForPreloadBuffer`), and this list reads no
+    `preload-buffer-count`.
   - A removed placeholder is not handed to `enqueueComponent`, since no cell
     was built for it; ReactLynx's `enqueueComponent` returns early for a sign
     it never issued anyway.

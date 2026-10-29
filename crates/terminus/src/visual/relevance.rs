@@ -6,8 +6,8 @@
 //! # What "relevant" means here
 //!
 //! The spec's relevance test is "intersects the viewport, *or* an
-//! implementation-defined margin around it". This engine's margin is the
-//! painter's **encode window**: the region
+//! implementation-defined margin around it". This engine's margin starts at
+//! the painter's **encode window**: the region
 //! [`ScrollSlot::encode_window`](crate::visual::ScrollSlot::encode_window)
 //! admits around every enclosing scroll container's committed offset, which
 //! is exactly the region the walk's culling admits and the compositor may
@@ -16,7 +16,25 @@
 //! could reach the scene"* true by construction rather than by agreement:
 //! the test is [`CullPlan::admits_auto_box`], the very call
 //! [`plan_frame`](crate::paint::walker) makes for its own first cull test,
-//! over the same resolved clip chains, encode windows and group blur reaches.
+//! over the same resolved clip chains, windows and group blur reaches.
+//!
+//! The region is then stretched toward where each container is going
+//! ([`ScrollSlot::relevance_window`](crate::visual::ScrollSlot::relevance_window)):
+//! by the target of its pending programmatic scroll, else by the reach the
+//! painter last posted for it — a fling's remaining travel, a glide's
+//! remaining distance
+//! ([`ScrollEntry::reach`](crate::painter::ScrollEntry::reach)) — on the
+//! side it points to, at most
+//! [`RELEVANCE_REACH_SCROLLPORTS`](crate::visual::frame::RELEVANCE_REACH_SCROLLPORTS)
+//! and never past the range. The stretch only ever grows the region, so the
+//! relevance region always contains the encode window and the sentence
+//! above still holds by construction; what it adds is the margin chosen from
+//! where the container is going. A fling's landing is decided relevant in
+//! the commit the fling's own recentering asks for, so the boxes it is about
+//! to show have their real sizes before it gets there, and a jump's landing
+//! in the commit that carries the request. The walk itself keeps the encode
+//! window; this pass alone resolves the stretched one
+//! ([`CullPlan::resolve_for_relevance`]).
 //!
 //! The element's own border box is the right box to ask about, because
 //! `content-visibility: auto` implies `contain: paint`: descendants are
@@ -162,7 +180,7 @@ impl<T: Sync> Document<T> {
         if frame.auto_boxes().is_empty() {
             return false;
         }
-        scratch.plan.resolve_for(self, frame);
+        scratch.plan.resolve_for_relevance(self, frame);
         scratch.flips.clear();
         for auto in frame.auto_boxes() {
             let Some(slot) = self.slot(auto.node) else {
@@ -220,7 +238,7 @@ impl<T: Sync> Document<T> {
         if frame.auto_boxes().is_empty() {
             return false;
         }
-        scratch.plan.resolve_for(self, frame);
+        scratch.plan.resolve_for_relevance(self, frame);
         frame.auto_boxes().iter().any(|auto| {
             self.slot(auto.node).is_some_and(|slot| {
                 self.arenas().relevance_freshness(slot) != Freshness::Final

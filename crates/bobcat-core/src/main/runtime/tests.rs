@@ -2068,6 +2068,7 @@ fn adopted_offsets_queue_scroll_events_only_for_a_name_something_hears() {
                 rest: Some(terminus::link::Vector2D::new(0.0, y)),
                 request: None,
                 anchor_shift: terminus::link::Vector2D::zero(),
+                reach: terminus::link::Vector2D::zero(),
             },
         )
     };
@@ -2120,6 +2121,7 @@ fn scroll_post(
             rest: rest.then(|| terminus::link::Vector2D::new(0.0, y)),
             request: None,
             anchor_shift: terminus::link::Vector2D::zero(),
+            reach: terminus::link::Vector2D::zero(),
         },
     )
 }
@@ -2473,6 +2475,7 @@ fn rest_after_request(
                 rest: Some(offset),
                 request: Some(request),
                 anchor_shift: terminus::link::Vector2D::zero(),
+                reach: terminus::link::Vector2D::zero(),
             },
         )]
         .into_iter(),
@@ -2941,6 +2944,7 @@ fn scroll_metrics_and_a_load_size_reach_the_lynx_detail_as_extras() {
                 rest: rest.then_some(terminus::link::Vector2D::new(0.0, y)),
                 request: None,
                 anchor_shift: terminus::link::Vector2D::zero(),
+                reach: terminus::link::Vector2D::zero(),
             },
         )
     };
@@ -4757,6 +4761,82 @@ fn a_list_answers_its_methods_and_the_base_set_answers_scroll_to() {
     assert_eq!(
         elements.tree().scroll_offset(list),
         terminus::link::Vector2D::new(0.0, 50.0)
+    );
+}
+
+/// `scrollRelevanceSpan(list, cell)` answers how far the list's
+/// `content-visibility: auto` relevance region reaches past the cell, as
+/// `[ahead_x, behind_x, ahead_y, behind_y]`. The list is 100px tall over ten
+/// 40px cells (a range of 300) at offset 0, so its window on y is `0..=100`
+/// and the region's far edge is 200: cell 3 (120..160) reads 80 ahead and
+/// 160 behind; on x, where nothing scrolls, the cell's own 100px both ways.
+/// A reach of 120 the painter posted stretches the far edge to 320, so 200
+/// ahead, and runs no pipeline step to do it. A node that is no scroll
+/// container answers the empty string.
+#[test]
+fn scroll_relevance_span_reads_the_region_past_a_cell_and_grows_by_the_reach() {
+    let (mut js_runtime, mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const list = __CreateElement('list', 0);
+                  __SetInlineStyles(list, 'width:100px;height:100px');
+                  __AppendElement(page, list);
+                  const cells = [];
+                  for (let i = 0; i < 10; i++) {
+                    const cell = __CreateElement('list-item', 0);
+                    __SetInlineStyles(cell, 'height:40px');
+                    __AppendElement(list, cell);
+                    cells.push(cell);
+                  }
+                  globalThis.held = [page, list, cells];
+                };
+                ",
+            "app:///list.js",
+        )
+        .expect("main-thread script");
+    let span_is = |runtime: &mut MainThreadRuntime, js_runtime: &mut ScriptRuntime, expected| {
+        runtime
+            .evaluate_module(
+                js_runtime,
+                &format!(
+                    r"
+                    import {{ scrollRelevanceSpan }} from 'bobcat-internal:host';
+                    import {{ splitRecord }} from 'bobcat:record';
+                    import {{ __FlushElementTree, __GetElementUniqueID }} from 'bobcat:element';
+                    __FlushElementTree();
+                    const list = __GetElementUniqueID(held[1]);
+                    const cell = __GetElementUniqueID(held[2][3]);
+                    const span = JSON.stringify(splitRecord(scrollRelevanceSpan(list, cell))
+                      .map(Number));
+                    if (span !== '{expected}') throw new Error('span ' + span);
+                    if (scrollRelevanceSpan(cell, cell) !== '')
+                      throw new Error('a cell is no scroll container');
+                    "
+                ),
+                "app:///span.js",
+                "the span",
+            )
+            .expect("the span");
+    };
+    span_is(&mut runtime, &mut js_runtime, "[100,100,80,160]");
+
+    let list = {
+        let tree = elements.tree();
+        let page = tree.document_element().id();
+        tree.get(page).expect("the page").child_ids()[0]
+    };
+    elements
+        .tree()
+        .set_scroll_reach(list, terminus::link::Vector2D::new(0.0, 120.0));
+    span_is(&mut runtime, &mut js_runtime, "[100,100,200,160]");
+    assert_eq!(
+        elements.tree().scroll_offset(list),
+        terminus::link::Vector2D::zero(),
+        "reading the span moved nothing"
     );
 }
 
@@ -8047,6 +8127,106 @@ fn update_list_info_builds_and_retires_cells_through_the_filed_callbacks() {
     );
 }
 
+/// The list protocol's fill-ahead against the real document: a delivery
+/// builds the run of placeholders the relevance region covers, counted at a
+/// built sibling's size, not only the placeholders the commit revealed.
+///
+/// The list is 100px tall over 400 placeholders with no estimate, so each
+/// stands at `100cqh` (100px) and a commit reveals only the few the region
+/// holds, collapsing each to nothing once revealed, up to the relevance
+/// passes' cap. The first delivery has no built sibling to count by and
+/// builds those alone. The second commit lays them out at 5px each, and its
+/// delivery reads `scrollRelevanceSpan` on the first placeholder past them:
+/// at offset 0 the region is `0..=200` (the window `0..=100` and a
+/// scrollport), so it builds every cell up to 200px, 40 cells in all, where
+/// building the revealed placeholders alone would stop at the passes' cap
+/// again.
+#[test]
+fn update_list_info_builds_the_run_the_relevance_region_covers() {
+    const CELLS: usize = 400;
+    const CELL_HEIGHT: f32 = 5.0;
+    const PORT: f32 = 100.0;
+    let (mut js_runtime, mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            &format!(
+                r"
+                globalThis.renderPage = function () {{
+                  const page = __CreatePage('card', 0);
+                  const list = __CreateList(0, null, null);
+                  __SetID(list, 'cells');
+                  __SetInlineStyles(list, 'width:100px;height:{PORT}px');
+                  __AppendElement(page, list);
+                  __SetAttribute(list, 'update-list-info', {{
+                    insertAction: Array.from({{ length: {CELLS} }}, (_, position) => ({{ position }})),
+                    removeAction: [],
+                  }});
+                  __UpdateListCallbacks(
+                    list,
+                    (element, id, index) => {{
+                      const cell = __CreateElement('list-item', 0);
+                      const row = __CreateView(0);
+                      __SetInlineStyles(row, 'height:{CELL_HEIGHT}px');
+                      __AppendElement(cell, row);
+                      __AppendElement(element, cell);
+                      return __GetElementUniqueID(cell);
+                    }},
+                    () => undefined,
+                    null,
+                  );
+                }};
+                "
+            ),
+            "app:///list.js",
+        )
+        .expect("the list protocol");
+    let built = || {
+        let tree = elements.tree();
+        let list = tree
+            .document_element()
+            .children()
+            .find(|node| node.attribute("id").as_deref() == Some("cells"))
+            .expect("the list element");
+        list.children()
+            .filter(|cell| cell.children().next().is_some())
+            .count()
+    };
+    let mut round = || {
+        runtime.commit_if_dirty();
+        assert!(
+            runtime
+                .dispatch_content_visibility_changes(&mut js_runtime)
+                .is_empty(),
+            "building the revealed cells throws nothing",
+        );
+        built()
+    };
+    let first = round();
+    let second = round();
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "two small positive whole numbers"
+    )]
+    let covered = (2.0 * PORT / CELL_HEIGHT) as usize;
+    assert!(
+        first > 0 && first < covered,
+        "the first delivery has no built sibling to count by, so it builds the \
+         revealed placeholders alone: {first}"
+    );
+    assert!(
+        second >= covered,
+        "the second delivery builds the run the region covers, {covered} cells \
+         of {CELL_HEIGHT}px over 0..={}: {second} (first delivery {first})",
+        2.0 * PORT,
+    );
+    assert!(
+        second < 2 * covered,
+        "a run stops about where the region ends, not at the list's end: {second}"
+    );
+}
+
 /// The realm's timers, from the four globals a card calls to the schedule a
 /// page's epilogue runs. A zero delay is due the moment it is armed, so a
 /// test spends a turn by asking the runtime to run what is due — which is
@@ -8678,7 +8858,7 @@ fn a_frame_realm_declares_the_page_members() {
 
 /// The page realm's `bobcat-internal:host` exports, sorted as a namespace
 /// lists them.
-const MTS_HOST_MEMBERS: [&str; 61] = [
+const MTS_HOST_MEMBERS: [&str; 62] = [
     "adoptStyleSheet",
     "attributeNames",
     "bindPipelineTimingFlag",
@@ -8725,6 +8905,7 @@ const MTS_HOST_MEMBERS: [&str; 61] = [
     "resetFrame",
     "resolveModuleUrl",
     "resolveUrl",
+    "scrollRelevanceSpan",
     "sendWorkerMessage",
     "setAttribute",
     "setInlineStyleProperty",

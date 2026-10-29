@@ -128,6 +128,7 @@ use terminus::link::{Document, ImageOutcome, NodeId, StylesheetOrigin};
 
 pub(crate) use self::base_methods::invoke_base_method;
 pub(crate) use self::frame::{MAX_FRAME_DEPTH, frame_depth, nested_page, reset_frame};
+pub(crate) use self::scroll_container::relevance_span;
 pub(crate) use self::svg::is_svg;
 pub(crate) use self::swiper::Autoplays;
 pub(crate) use self::text::{SelectionReports, is_text, report_selection_changes};

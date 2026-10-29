@@ -439,9 +439,11 @@ pub(crate) struct CullPlan {
     /// a transform curve whose scale range reaches 0 moves the chain.
     /// Index-parallel with [`PaintOrder::clips`].
     clip_bounds: Vec<Admitted>,
-    /// Per scroll slot, the committed encode window `(low, high)` — the
-    /// offset range the culled encode must stay valid for. Index-parallel
-    /// with [`PaintOrder::slots`].
+    /// Per scroll slot, the offset range `(low, high)` the plan must stay
+    /// valid for: the committed encode window for the paint walk, the wider
+    /// relevance window for the `content-visibility: auto` determination
+    /// ([`Self::resolve_for_relevance`]). Index-parallel with
+    /// [`PaintOrder::slots`].
     slot_windows: Vec<(Vector2D<f32>, Vector2D<f32>)>,
     /// Per clip node, what its chain alone admits in its own space, with no
     /// viewport — resolved only when a transform curve can move content,
@@ -468,18 +470,28 @@ pub(crate) struct CullPlan {
     inner_blurs: Vec<Option<usize>>,
 }
 
+/// Which offset range [`CullPlan::resolve`] takes each scroll slot to
+/// stand anywhere in: [`ScrollSlot::encode_window`] or
+/// [`ScrollSlot::relevance_window`].
+///
+/// [`ScrollSlot::encode_window`]: crate::visual::ScrollSlot::encode_window
+/// [`ScrollSlot::relevance_window`]: crate::visual::ScrollSlot::relevance_window
+type SlotWindow = fn(&crate::visual::ScrollSlot) -> (Vector2D<f32>, Vector2D<f32>);
+
 impl CullPlan {
     /// Resolves the whole plan for one frame against an admitted region, in
-    /// viewport CSS px, or `None` to admit everything.
-    fn resolve<T>(&mut self, document: &Document<T>, frame: &PaintOrder, cull: Option<Rect>) {
+    /// viewport CSS px, or `None` to admit everything, with each scroll
+    /// slot standing anywhere in the offset range `window` answers for it.
+    fn resolve<T>(
+        &mut self,
+        document: &Document<T>,
+        frame: &PaintOrder,
+        cull: Option<Rect>,
+        window: SlotWindow,
+    ) {
         self.cull = cull;
         self.slot_windows.clear();
-        self.slot_windows.extend(
-            frame
-                .slots()
-                .iter()
-                .map(crate::visual::ScrollSlot::encode_window),
-        );
+        self.slot_windows.extend(frame.slots().iter().map(window));
         self.layer_inflate.clear();
         self.blur_roots.clear();
         self.inner_blurs.clear();
@@ -526,14 +538,32 @@ impl CullPlan {
     }
 
     /// The same plan, resolved from a document's own device metrics — the
-    /// cull rect the production walk uses.
+    /// cull rect the production walk uses — over each slot's
+    /// [`encode_window`](crate::visual::ScrollSlot::encode_window): the
+    /// plan the production walk resolves for itself, for the tests that ask
+    /// it directly.
+    #[cfg(test)]
     pub(crate) fn resolve_for<T>(&mut self, document: &Document<T>, frame: &PaintOrder) {
+        self.resolve_with(document, frame, crate::visual::ScrollSlot::encode_window);
+    }
+
+    /// [`Self::resolve_for`] over each slot's
+    /// [`relevance_window`](crate::visual::ScrollSlot::relevance_window)
+    /// instead: the region css-contain-2 §4.1's relevance is decided against,
+    /// which contains the encode window and stretches toward where each
+    /// container is going (`visual::relevance`).
+    pub(crate) fn resolve_for_relevance<T>(&mut self, document: &Document<T>, frame: &PaintOrder) {
+        self.resolve_with(document, frame, crate::visual::ScrollSlot::relevance_window);
+    }
+
+    fn resolve_with<T>(&mut self, document: &Document<T>, frame: &PaintOrder, window: SlotWindow) {
         let device = document.device();
         let ratio = f64::from(device.device_pixel_ratio().get());
         self.resolve(
             document,
             frame,
             Some(cull_rect(device.viewport_size(), ratio)),
+            window,
         );
     }
 
@@ -882,7 +912,12 @@ fn walk_within<T>(
         document.content_detection == crate::visual::timing::ContentDetection::On;
     scratch.contentful = false;
     scratch.transparent_depth = None;
-    scratch.plan.resolve(document, frame, cull);
+    scratch.plan.resolve(
+        document,
+        frame,
+        cull,
+        crate::visual::ScrollSlot::encode_window,
+    );
     plan_frame(scratch, document, frame);
 
     let painting = Painting {

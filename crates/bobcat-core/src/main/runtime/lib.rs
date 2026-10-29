@@ -54,8 +54,8 @@ use crate::main::record::write_record_field;
 use crate::main::tree::{
     Autoplays, ComponentDetail, ComponentEvent, ComponentEvents, Field, LynxDocument,
     MAX_FRAME_DEPTH, PageConfig, SELECTION_CHANGE, SelectionReports, frame_depth,
-    invoke_base_method, is_svg, is_text, nested_page, new_document, report_selection_changes,
-    reset_frame,
+    invoke_base_method, is_svg, is_text, nested_page, new_document, relevance_span,
+    report_selection_changes, reset_frame,
 };
 use crate::performance::OpenerId;
 use crate::realm::child::{ChildHostModules, ChildHostState, ChildKey};
@@ -2809,6 +2809,10 @@ impl MainThreadRuntime {
             // an adjustment the document has since made lacks it.
             let unapplied = document.scroll_anchor_shift(node) - entry.anchor_shift;
             let applied = document.scroll_to(node, entry.offset + unapplied);
+            // Every adopted post overwrites the reach, so a drag or a wheel
+            // step after a fling (which post zero) ends it; the next commit
+            // stretches the `content-visibility: auto` relevance region by it.
+            document.set_scroll_reach(node, entry.reach);
             // CSSOM-View: a container whose offset this post moved fires one
             // `scroll` (the mailbox holds one entry per container, so one per
             // take), and has scrolled until it comes to rest — in this post or
@@ -5104,10 +5108,14 @@ fn method_answer(outcome: MethodOutcome) -> HostValue {
     })
 }
 
-/// Installs the two members that read geometry and style back out of the
-/// document, one of which also runs the UI methods.
+/// Installs the three members that read geometry and style back out of the
+/// document, one of which also runs the UI methods; the third,
+/// `scrollRelevanceSpan`, answers how far a scroller's
+/// `content-visibility: auto` relevance region reaches past one of its
+/// children (`tree::scroll_container::relevance_span`), for the list
+/// protocol's fill-ahead.
 ///
-/// Neither runs a pipeline step. Both read what the last completed pass
+/// None runs a pipeline step. All read what the last completed pass
 /// left behind, `boundingClientRect` and a `text`'s `getTextBoundingRect`
 /// included, and the realm decides when the next one runs by calling
 /// `__FlushElementTree` — measuring must not be able to move layout out from
@@ -5119,7 +5127,7 @@ fn method_answer(outcome: MethodOutcome) -> HostValue {
 /// `autoStartRefresh`, a scroll coordinator's `setFoldExpanded`, and every
 /// element's `scrollIntoView`, `scrollTo` and `scrollBy` a scroll request, a
 /// dialog's four an attribute, a state bit and top-layer membership, and
-/// `close`/`requestClose` the events they queue for an entry of their own. Both still go through
+/// `close`/`requestClose` the events they queue for an entry of their own. All still go through
 /// [`validate_live_element`], so a freed element is a script error rather than a zero rect or an
 /// empty style.
 fn install_readback_members(
@@ -5176,6 +5184,17 @@ fn install_readback_members(
     })?;
 
     tree_members! { engine, handle;
+        fn scrollRelevanceSpan(scroller: node_id_argument, child: node_id_argument) |document| {
+            validate_live_element(document, NAME, scroller)?;
+            validate_live_element(document, NAME, child)?;
+            // `ahead_x`, `behind_x`, `ahead_y`, `behind_y`, the order
+            // `element-papi.ts` reads them in; empty when there is no span.
+            let mut record = String::new();
+            for value in relevance_span(document, scroller, child).into_iter().flatten() {
+                write_record_field(&mut record, &value.to_string());
+            }
+            Ok(HostValue::String(record))
+        }
         fn getComputedStyleMap(
             node: node_id_argument,
             properties: string_argument,

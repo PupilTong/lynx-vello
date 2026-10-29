@@ -632,6 +632,43 @@ pub(super) fn rect_in_scroller(
     ))
 }
 
+/// How far the `content-visibility: auto` relevance region of `scroller`
+/// reaches past `child`, in CSS px: `[ahead_x, behind_x, ahead_y,
+/// behind_y]`. With the region's offset range `(low, high)` per axis
+/// ([`terminus::link::Document::scroll_relevance_window`]: the encode window
+/// stretched toward where the container is going) and `child`'s border box
+/// in the scroller's unscrolled coordinates ([`rect_in_scroller`]), `ahead`
+/// is the distance from the child's start edge to the far edge of the region
+/// (`high` plus the scrollport) and `behind` the distance from the region's
+/// near edge (`low`) to the child's end edge. A child the region covers
+/// reads positive on both sides of the axis, one wholly past it a negative
+/// `ahead` or `behind`.
+///
+/// The list protocol in `element-papi.ts` reads it (`scrollRelevanceSpan`)
+/// to size how many placeholders after and before a revealed one it builds
+/// in the same task; the geometry is the engine's, the count is the
+/// protocol's. `None` when `scroller` is no rendered scroll container or
+/// `child` has no rendered box. It reads the last completed layout and runs
+/// no pipeline step, as every readback does.
+pub(crate) fn relevance_span(
+    document: &LynxDocument,
+    scroller: NodeId,
+    child: NodeId,
+) -> Option<[f32; 4]> {
+    let scroll_box = rendered_scroll_box(document, scroller)?;
+    if !document.generates_rendered_box(child) {
+        return None;
+    }
+    let (low, high) = document.scroll_relevance_window(scroller)?;
+    let rect = rect_in_scroller(document, scroller, child)?;
+    Some([
+        high.x + scroll_box.scrollport.width - rect.min_x(),
+        rect.max_x() - low.x,
+        high.y + scroll_box.scrollport.height - rect.min_y(),
+        rect.max_y() - low.y,
+    ])
+}
+
 /// A `scrollTo` offset in CSS px: a JSON number as given, or a string that
 /// is a number followed by `px`, `rpx` (the viewport width over 750, the
 /// unit [`super::blur_view`] also resolves), `ppx` (device pixels, divided
