@@ -2,9 +2,10 @@
 //! kinds of realm agree on.
 //!
 //! Both engine threads register the whole of [`BUILTIN_MODULES`] on their
-//! runtime, so a group holds each source twice: once on the runtime its views'
-//! realms share, once on the one its workers share. What a realm can use of
-//! them is decided by the host modules it declares: an import of a host module
+//! runtime, as the bytecode `build.rs` compiled each module to: a realm that
+//! imports one reads the module back rather than compiling its text, and the
+//! bytes themselves are this binary's, borrowed by every runtime. What a realm
+//! can use of them is decided by the host modules it declares: an import of a host module
 //! the realm does not declare fails with a `ReferenceError`, and an import of a
 //! member its host module lacks fails at link with a `SyntaxError`. A name
 //! under [`ENGINE_MODULE_PREFIXES`] that is neither registered nor declared
@@ -17,11 +18,13 @@ use std::sync::Arc;
 use crate::main::quickjs::ScriptRuntime;
 use crate::script::ScriptError;
 
-/// The `packages/bobcat-element/src` module `$name` as the JavaScript a realm
-/// evaluates, compiled by `build.rs` into this Cargo build's `OUT_DIR`.
-macro_rules! runtime_source {
+/// The `packages/bobcat-element/src` module `$name` as the `QuickJS` bytecode
+/// a realm reads it from, which `build.rs` compiled into this Cargo build's
+/// `OUT_DIR`: the TypeScript to JavaScript, and that, under the module's
+/// specifier, to bytecode.
+macro_rules! runtime_bytecode {
     ($name:literal) => {
-        include_str!(concat!(env!("OUT_DIR"), "/runtime/", $name, ".js"))
+        include_bytes!(concat!(env!("OUT_DIR"), "/runtime/", $name, ".qbc"))
     };
 }
 
@@ -31,19 +34,23 @@ pub(crate) struct BuiltinModule {
     pub(crate) specifier: &'static str,
     /// The `packages/bobcat-element/src` file it is compiled from.
     pub(crate) file: &'static str,
-    /// The JavaScript `build.rs` compiled that file to.
-    pub(crate) source: &'static str,
+    /// The bytecode `build.rs` compiled that file to, under
+    /// [`Self::specifier`]: what every realm that imports the specifier
+    /// reads its own instance of the module from.
+    pub(crate) bytecode: &'static [u8],
 }
 
 /// The [`BuiltinModule`] compiled from `packages/bobcat-element/src/$name.ts`,
-/// imported as `$specifier`. The file name and the source are both written
-/// from `$name`, so the two cannot name different files.
+/// imported as `$specifier`. The file name and the bytecode are both written
+/// from `$name`, so the two cannot name different files; `build.rs` compiles
+/// the bytecode under the specifier `tsconfig.json` maps to that file, and
+/// the test below holds this table to that same mapping.
 macro_rules! builtin_module {
     ($specifier:expr, $name:literal) => {
         BuiltinModule {
             specifier: $specifier,
             file: concat!($name, ".ts"),
-            source: runtime_source!($name),
+            bytecode: runtime_bytecode!($name),
         }
     };
 }
@@ -380,14 +387,16 @@ pub(crate) const BUILTIN_MODULES: &[BuiltinModule] = &[
 /// than failing the group: it is the failure of every view or worker that
 /// asks that runtime for a realm, each of which reports it as its own.
 ///
-/// Sources are registered once per runtime rather than once per realm: a
-/// runtime holds one source per name and compiles it into a module per realm,
-/// so a second registration of a name would refuse the second realm.
+/// Modules are registered once per runtime rather than once per realm: a
+/// runtime holds one bytecode per name and reads it into a module per realm,
+/// so a second registration of a name would refuse the second realm. The
+/// bytecode is the binary's own ([`BuiltinModule::bytecode`]), so
+/// registering it copies nothing.
 pub(crate) fn build_runtime() -> Result<ScriptRuntime, ScriptError> {
     let mut runtime = ScriptRuntime::new()?;
     for module in BUILTIN_MODULES {
         runtime
-            .register_module_source(module.specifier, module.source)
+            .register_module_bytecode(module.specifier, module.bytecode)
             .map_err(|mut error| {
                 error.message = Arc::from(format!(
                     "registering {} ({}): {}",

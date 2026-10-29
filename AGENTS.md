@@ -862,7 +862,7 @@ See `crates/bobcat-core/src/fetch.rs` and `docs/worker-resources-runtime.md`.
 #### Realm, document and boot
 
 The crate-private `quickjs::ScriptEngine` is the whole script surface: it
-installs named host callbacks, registers named preloaded ESM source, evaluates
+installs named host callbacks, registers named preloaded ESM bytecode, evaluates
 a module through its TLA completion promise, calls an export the realm
 published back, and provides the GC seam. Created on the engine-owned Lynx main
 thread and never leaving it, nothing about it is `Send`. Values crossing it are
@@ -3382,19 +3382,30 @@ host modules' contracts and is the authoritative list of what
 `bobcat-internal:host`, `bobcat-internal:worker` and
 `bobcat-internal:native-modules` export.
 
-What core embeds, with `include_str!`, is the JavaScript TypeScript 7 compiles
-from `src/*.ts` during the Cargo build, at `target: es2025` — the language
-level the pinned QuickJS implements, so nothing is lowered. Nothing later is
-written: the engine has no explicit resource management (`using`,
-`Symbol.dispose`), decorators or `accessor`. `bobcat-core/build.rs` invokes the
-package's build script with an output directory under Cargo's `OUT_DIR`, so
-each target/profile owns its emit and parallel builds never share a source
-directory. Cargo tracks the sources, build script, TypeScript configuration and
-pnpm dependency files. Run `pnpm install --frozen-lockfile` before Cargo; Node
-is a build dependency for native and Wasm consumers alike. Generated JS is not
-committed; `pnpm --filter bobcat-element build` emits an ignored `dist/` for
-local inspection, and QuickJS error lines refer to emitted JS, not TS. The
-Rstest suite imports the same modules and verifies every named export.
+What core embeds, with `include_bytes!`, is QuickJS bytecode: TypeScript 7
+compiles `src/*.ts` to JavaScript during the Cargo build, at `target: es2025`
+— the language level the pinned QuickJS implements, so nothing is lowered.
+Nothing later is written: the engine has no explicit resource management
+(`using`, `Symbol.dispose`), decorators or `accessor`.
+`bobcat-core/build.rs` then compiles each emitted module, under the specifier
+`src/tsconfig.json`'s `paths` maps to it, to bytecode with the same
+`quickjs-rust-bridge` the engine links, built for the build machine as a
+build dependency (`Context::compile_module_bytecode`, source text stripped,
+line information kept). A runtime registers the bytecode
+(`Runtime::register_module_bytecode`, borrowed, never copied) and a realm that
+imports a built-in reads it back (`JS_ReadObject`) instead of parsing and
+compiling the text — about 25× cheaper, which is most of what made a realm's
+boot cheap. QuickJS bytecode names atoms by text and has no pointer-sized or
+endian-specific layout, so bytecode written on the build machine reads on
+every target, Wasm included. `build.rs` invokes the package's build script
+with an output directory under Cargo's `OUT_DIR`, so each target/profile owns
+its emit and parallel builds never share a source directory. Cargo tracks the
+sources, build script, TypeScript configuration and pnpm dependency files. Run
+`pnpm install --frozen-lockfile` before Cargo; Node is a build dependency for
+native and Wasm consumers alike. Generated JS and bytecode are not committed;
+`pnpm --filter bobcat-element build` emits an ignored `dist/` for local
+inspection, and QuickJS error lines refer to emitted JS, not TS. The Rstest
+suite imports the same modules and verifies every named export.
 
 The package owns the supported `__*` PAPI members and their web-core arities,
 plus the Lynx tag vocabulary
@@ -3607,7 +3618,10 @@ Subsystems:
   `event::QueuedEventSink` (`Document::set_queued_event_sink`, registered
   once by the embedder; with none they are dropped).
 - `style/` — the per-document `StyleEngine` (`Stylist`, cascade pipeline,
-  device, stylesheet set, `SharedRwLock`), flush, invalidation, `StyleDamage`.
+  device, stylesheet set, the document's own `SharedRwLock` for its author
+  sheets and inline styles, and the one process-wide lock every user-agent
+  sheet is parsed under, which is what lets `UserAgentStylesheet` be parsed
+  once and mounted by every document), flush, invalidation, `StyleDamage`.
 - `layout/` — the concrete `seldon` host: `Document::layout`, the `LayoutTree`
   impl, per-node `LayoutSlot`s in `DocumentLayoutState`, and the two
   per-element facts a `StyleView` answers with that no computed value carries:
@@ -4343,7 +4357,8 @@ section is the only place the absolute paths are spelled out.
   its `.ts` scripts directly by type stripping.
 - Cargo builds of `bobcat-core` require Node and a prior
   `pnpm install --frozen-lockfile`; the built-in JS runtime is compiled into
-  `OUT_DIR` during the build, including for Wasm targets.
+  `OUT_DIR` during the build — to JavaScript, and on to QuickJS bytecode by
+  a host build of `quickjs-rust-bridge` — including for Wasm targets.
 - `cargo clippy`, `cargo test`, `cargo bench` (CodSpeed-compatible `divan`
   benches).
 - **Formatting: `cargo fmt -p <crate>` for the crates you touched, then

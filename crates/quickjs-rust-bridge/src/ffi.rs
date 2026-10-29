@@ -153,6 +153,21 @@ unsafe extern "C" {
         source: *const u8,
         source_length: usize,
     ) -> c_int;
+    pub(crate) fn qjs_runtime_add_module_bytecode(
+        runtime: *mut QjsRuntime,
+        name: *const c_char,
+        bytecode: *const u8,
+        length: usize,
+    ) -> c_int;
+    pub(crate) fn qjs_runtime_set_strip_info(runtime: *mut QjsRuntime, flags: c_int);
+    pub(crate) fn qjs_context_compile_module_bytecode(
+        context: *mut QjsContext,
+        source: *const u8,
+        source_length: usize,
+        name: *const c_char,
+        out_length: *mut usize,
+    ) -> *mut u8;
+    pub(crate) fn qjs_bytecode_free(context: *mut QjsContext, bytes: *mut u8);
     pub(crate) fn qjs_runtime_reserve_module_prefix(
         runtime: *mut QjsRuntime,
         prefix: *const c_char,

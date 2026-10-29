@@ -58,6 +58,11 @@ prime-radiant = { workspace = true, features = ["render"] }
 bobcat-source = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
 
+# `build.rs` compiles the built-in modules to QuickJS bytecode with the same
+# bridge the engine runs them on, built for the build machine.
+[build-dependencies]
+quickjs-rust-bridge = { workspace = true }
+
 [[bench]]
 name = "script_boundary"
 harness = false

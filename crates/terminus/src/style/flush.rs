@@ -7,7 +7,6 @@ use stylo::context::{
 };
 use stylo::dom::{TElement, TNode};
 use stylo::driver;
-use stylo::shared_lock::StylesheetGuards;
 use stylo::thread_state::{self, ThreadState};
 use stylo::traversal::{DomTraversal, recalc_style_at};
 use stylo::traversal_flags::TraversalFlags;
@@ -159,12 +158,12 @@ impl<T: Sync> Document<T> {
             let root_ref = self
                 .get(root)
                 .expect("the root element child is kept live or absent");
-            let guard = self.style_engine().shared_lock().read();
+            let guards = self.style_engine().rule_guards();
             let shared = SharedStyleContext {
                 stylist: self.style_engine().stylist(),
                 visited_styles_enabled: false,
                 options: StyleSystemOptions::default(),
-                guards: StylesheetGuards::same(&guard),
+                guards: guards.guards(),
                 current_time_for_animations: self.animations().now(),
                 traversal_flags: TraversalFlags::empty(),
                 snapshot_map: &snapshots,

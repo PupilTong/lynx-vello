@@ -78,7 +78,7 @@ use super::{
 };
 
 /// Page configuration for the Lynx runtime and UA cascade.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[expect(
     clippy::struct_excessive_bools,
     reason = "independent Lynx page configuration switches"

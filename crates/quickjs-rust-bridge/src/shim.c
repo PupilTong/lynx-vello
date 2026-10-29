@@ -11,6 +11,8 @@ _Static_assert(JS_EVAL_TYPE_GLOBAL == 0,
                "Rust JS_EVAL_TYPE_GLOBAL must match quickjs.h");
 _Static_assert(JS_EVAL_TYPE_MODULE == 1,
                "Rust JS_EVAL_TYPE_MODULE must match quickjs.h");
+_Static_assert(JS_STRIP_SOURCE == 1,
+               "Rust JS_STRIP_SOURCE must match quickjs.h");
 _Static_assert(JS_EVAL_FLAG_STRICT == (1 << 3),
                "Rust JS_EVAL_FLAG_STRICT must match quickjs.h");
 _Static_assert(JS_EVAL_FLAG_BACKTRACE_BARRIER == (1 << 6),
@@ -48,11 +50,22 @@ typedef struct QjsModuleSource {
     char *name;
     uint8_t *source;
     size_t source_length;
+    /* The module already compiled, in place of its text: `JS_WriteObject`'s
+       bytes of an unlinked module, which each realm reads back with
+       `JS_ReadObject` instead of parsing the text again. The host's bytes,
+       borrowed for the runtime's life (`qjs_runtime_add_module_bytecode`). */
+    const uint8_t *bytecode;
+    size_t bytecode_length;
     char *url;
     char *error;
     int requested;
     struct QjsModuleSource *next;
 } QjsModuleSource;
+
+/* Whether the host has supplied this source, as text or as bytecode. */
+static int qjs_source_is_answered(const QjsModuleSource *source) {
+    return source->source != NULL || source->bytecode != NULL;
+}
 
 /* `JSModuleDef` lives on `JSContext.loaded_modules`, so what a source
    compiles to is per-context state, not runtime state. */
@@ -779,8 +792,9 @@ static int qjs_set_import_meta_url(JSContext *raw, JSModuleDef *definition,
     return status;
 }
 
-/* Compiles one source this realm has into a module of it, and remembers the
-   instance.
+/* Compiles one source this realm has into a module of it — or reads the
+   module back from the bytecode the source carries instead of text — and
+   remembers the instance.
 
    `linked` resolves every import during the compile, through this same
    loader, which is what an inline link — a `require` — needs and what an
@@ -805,10 +819,30 @@ static JSModuleDef *qjs_compile_module_source(QjsContext *context,
         JS_ThrowOutOfMemory(raw_context);
         return NULL;
     }
-    compiled = JS_Eval(raw_context, (const char *)source->source,
-                       source->source_length, source->name,
-                       JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY |
-                       (linked ? 0 : JS_EVAL_FLAG_COMPILE_UNLINKED));
+    if (source->bytecode != NULL) {
+        /* Read bytecode is a module nothing has resolved, as a compile
+           under JS_EVAL_FLAG_COMPILE_UNLINKED leaves one; an inline link
+           resolves it here, as that compile would have. */
+        compiled = JS_ReadObject(raw_context, source->bytecode,
+                                 source->bytecode_length, JS_READ_OBJ_BYTECODE);
+        if (!JS_IsException(compiled) &&
+            JS_VALUE_GET_TAG(compiled) != JS_TAG_MODULE) {
+            JS_FreeValue(raw_context, compiled);
+            compiled = JS_ThrowTypeError(
+                raw_context, "the bytecode registered as '%s' is not a module",
+                source->name);
+        }
+        if (!JS_IsException(compiled) && linked &&
+            JS_ResolveModule(raw_context, compiled) < 0) {
+            JS_FreeValue(raw_context, compiled);
+            compiled = JS_EXCEPTION;
+        }
+    } else {
+        compiled = JS_Eval(raw_context, (const char *)source->source,
+                           source->source_length, source->name,
+                           JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY |
+                           (linked ? 0 : JS_EVAL_FLAG_COMPILE_UNLINKED));
+    }
     if (JS_IsException(compiled)) {
         free(instance);
         return NULL;
@@ -939,7 +973,7 @@ static JSModuleDef *qjs_module_loader(JSContext *raw_context,
         JS_ThrowTypeError(raw_context, "%s", source->error);
         return NULL;
     }
-    if (source != NULL && source->source == NULL) {
+    if (source != NULL && !qjs_source_is_answered(source)) {
         /* A source the host has yet to answer. An import being linked inline
            cannot wait for that fetch, so it asks the same synchronous loader
            the `require` underneath it came through; the answer completes the
@@ -1238,6 +1272,71 @@ int qjs_runtime_add_module(QjsRuntime *runtime, const char *name,
     module->next = runtime->module_sources;
     runtime->module_sources = module;
     return 0;
+}
+
+/* Registers one module as bytecode `qjs_context_compile_module_bytecode`
+   wrote, borrowed from the host until the runtime is freed. Same name rules
+   and statuses as `qjs_runtime_add_module`. */
+int qjs_runtime_add_module_bytecode(QjsRuntime *runtime, const char *name,
+                                    const uint8_t *bytecode, size_t length) {
+    QjsModuleSource *module;
+
+    if (qjs_find_module_source(runtime, name) != NULL ||
+        qjs_find_host_module_name(runtime, name) != NULL) {
+        return -2;
+    }
+    module = calloc(1, sizeof(*module));
+    if (module == NULL) {
+        return -1;
+    }
+    module->name = qjs_strdup(name);
+    if (module->name == NULL) {
+        free(module);
+        return -1;
+    }
+    module->bytecode = bytecode;
+    module->bytecode_length = length;
+    module->next = runtime->module_sources;
+    runtime->module_sources = module;
+    return 0;
+}
+
+/* `JS_SetStripInfo`: what the runtime leaves out of the functions it
+   compiles, and so out of the bytecode `qjs_context_compile_module_bytecode`
+   writes of them. */
+void qjs_runtime_set_strip_info(QjsRuntime *runtime, int flags) {
+    JS_SetStripInfo(runtime->raw, flags);
+}
+
+/* Compiles module source text to the bytecode a runtime registers through
+   `qjs_runtime_add_module_bytecode`, or a realm reads for itself: the
+   module is compiled unlinked, as a deferred import's is, and written with
+   `JS_WriteObject`. The module stays loaded in this realm under `name`, so
+   a realm compiles a name once. The bytes are `js_malloc`'d: free them with
+   `qjs_bytecode_free`. NULL leaves the failure as this realm's pending
+   exception. */
+uint8_t *qjs_context_compile_module_bytecode(QjsContext *context,
+                                             const uint8_t *source,
+                                             size_t source_length,
+                                             const char *name,
+                                             size_t *out_length) {
+    JSValue compiled;
+    uint8_t *bytes;
+
+    compiled = JS_Eval(context->raw, (const char *)source, source_length, name,
+                       JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY |
+                           JS_EVAL_FLAG_COMPILE_UNLINKED);
+    if (JS_IsException(compiled)) {
+        return NULL;
+    }
+    bytes = JS_WriteObject(context->raw, out_length, compiled,
+                           JS_WRITE_OBJ_BYTECODE);
+    JS_FreeValue(context->raw, compiled);
+    return bytes;
+}
+
+void qjs_bytecode_free(QjsContext *context, uint8_t *bytes) {
+    js_free(context->raw, bytes);
 }
 
 QjsContext *qjs_context_new(QjsRuntime *runtime) {
@@ -1787,7 +1886,7 @@ static JSValue qjs_require_module(QjsContext *context, const char *requested,
         return JS_ThrowInternalError(raw, "module '%s' was not stored",
                                      requested);
     }
-    if (source->source == NULL) {
+    if (!qjs_source_is_answered(source)) {
         /* This URL is already recorded as a load that failed — an import of
            it the host refused — and a source table entry is not replaced.
            The `require` fails the way that import did. */
@@ -2012,7 +2111,7 @@ int qjs_context_register_synchronous_loader(QjsContext *context,
 const char *qjs_context_take_module_request(QjsContext *context) {
     QjsModuleSource *source;
     for (source = context->module_sources; source != NULL; source = source->next) {
-        if (source->source == NULL && source->error == NULL && !source->requested) {
+        if (!qjs_source_is_answered(source) && source->error == NULL && !source->requested) {
             source->requested = 1;
             return source->name;
         }
@@ -2031,7 +2130,7 @@ int qjs_context_complete_module(QjsContext *context, const char *name,
        the same host, out of band of the request the host took, so the fetch
        that was already running finds the source it was going to supply
        standing: nothing is replaced, and nothing is wrong. */
-    if (source != NULL && (source->source != NULL || source->error != NULL))
+    if (source != NULL && (qjs_source_is_answered(source) || source->error != NULL))
         return -5;
     if (source == NULL) {
         source = calloc(1, sizeof(*source));

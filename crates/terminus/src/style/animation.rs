@@ -121,7 +121,6 @@ use stylo::servo::animation::{
     Animation, AnimationSetKey, AnimationState, DocumentAnimationSet, ElementAnimationSet,
     Transition,
 };
-use stylo::shared_lock::StylesheetGuards;
 use stylo::traversal_flags::TraversalFlags;
 use stylo_atoms::Atom;
 
@@ -1178,12 +1177,12 @@ impl<T: Sync> Document<T> {
             let root_ref = self
                 .get(root)
                 .expect("the document element is never removed");
-            let guard = self.style_engine().shared_lock().read();
+            let guards = self.style_engine().rule_guards();
             let shared = SharedStyleContext {
                 stylist: self.style_engine().stylist(),
                 visited_styles_enabled: false,
                 options: StyleSystemOptions::default(),
-                guards: StylesheetGuards::same(&guard),
+                guards: guards.guards(),
                 current_time_for_animations: now,
                 // Deliberately not `FinalAnimationTraversal`: that flag wipes
                 // `ElementData::damage` before the harvest can read it.

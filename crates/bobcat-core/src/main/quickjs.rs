@@ -59,6 +59,7 @@ impl Default for QuickJsConfig {
                 memory_limit: None,
                 max_stack_size: None,
                 execution_timeout: None,
+                strip_source: false,
             },
         }
     }
@@ -189,6 +190,11 @@ impl ScriptRuntime {
     /// JavaScript, so there is neither work to finish on some realm's behalf
     /// nor a realm to report a pending failure to. The entry that imports the
     /// name reports it, on its own realm.
+    ///
+    /// The engine registers its built-ins as bytecode
+    /// ([`Self::register_module_bytecode`]); registering text is what this
+    /// module's own tests do.
+    #[cfg(test)]
     pub(crate) fn register_module_source(
         &mut self,
         specifier: &str,
@@ -196,6 +202,21 @@ impl ScriptRuntime {
     ) -> Result<(), ScriptError> {
         self.runtime
             .register_module_source(specifier, source)
+            .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::RegisterModule))
+    }
+
+    /// Registers one module on the runtime as bytecode, for every realm on
+    /// it: [`Self::register_module_source`] with the module already compiled,
+    /// which is how the built-ins arrive (`crate::esm`). A realm that imports
+    /// the name reads the module back instead of compiling it, and the bytes,
+    /// `'static`, are borrowed rather than copied.
+    pub(crate) fn register_module_bytecode(
+        &mut self,
+        specifier: &str,
+        bytecode: &'static [u8],
+    ) -> Result<(), ScriptError> {
+        self.runtime
+            .register_module_bytecode(specifier, bytecode)
             .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::RegisterModule))
     }
 

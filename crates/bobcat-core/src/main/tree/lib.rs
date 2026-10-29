@@ -121,10 +121,11 @@ mod web_text_replication;
 use std::cell::RefCell;
 use std::ops::Range;
 use std::rc::Rc;
+use std::sync::Mutex;
 
 use smallvec::SmallVec;
 use terminus::link::event::QueuedEventSink;
-use terminus::link::{Document, ImageOutcome, NodeId, StylesheetOrigin};
+use terminus::link::{Document, ImageOutcome, NodeId, UserAgentStylesheet};
 
 pub(crate) use self::base_methods::invoke_base_method;
 pub(crate) use self::frame::{MAX_FRAME_DEPTH, frame_depth, nested_page, reset_frame};
@@ -214,11 +215,30 @@ pub(crate) fn new_document(
     // tree.
     overlay::define(&mut document, events.clone());
     frame::define(&mut document, events);
-    document.add_stylesheet(
-        &ua_sheet::ua_stylesheet(config),
-        StylesheetOrigin::UserAgent,
-    );
+    document.add_user_agent_stylesheet(&ua_stylesheet(config));
     document
+}
+
+/// The UA sheet for `config`, parsed once per process and mounted by every
+/// document built with that configuration.
+///
+/// The sheet's text is a function of the five page switches alone, so the
+/// parse is too: the first document of a configuration parses it, and every
+/// later one mounts the parsed sheet ([`terminus::link::UserAgentStylesheet`]),
+/// which stylo's user-agent cascade cache then answers without building the
+/// cascade data again. That parse was most of a document's construction
+/// time, and it is the same for every view of a page configuration.
+fn ua_stylesheet(config: PageConfig) -> UserAgentStylesheet {
+    static PARSED: Mutex<Vec<(PageConfig, UserAgentStylesheet)>> = Mutex::new(Vec::new());
+    let mut parsed = PARSED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((_, sheet)) = parsed.iter().find(|(known, _)| *known == config) {
+        return sheet.clone();
+    }
+    let sheet = UserAgentStylesheet::parse(&ua_sheet::ua_stylesheet(config));
+    parsed.push((config, sheet.clone()));
+    sheet
 }
 
 /// A UI method's params do not have the shape it reads, or name nothing it

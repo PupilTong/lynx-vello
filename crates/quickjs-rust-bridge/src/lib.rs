@@ -96,6 +96,9 @@ mod implementation {
 
     const JS_EVAL_TYPE_GLOBAL: i32 = 0;
     const JS_EVAL_TYPE_MODULE: i32 = 1;
+    /// `quickjs.h`'s `JS_STRIP_SOURCE`, checked against the header by a
+    /// static assertion in `shim.c`.
+    const JS_STRIP_SOURCE: c_int = 1;
     const JS_EVAL_FLAG_STRICT: i32 = 1 << 3;
     const JS_EVAL_FLAG_BACKTRACE_BARRIER: i32 = 1 << 6;
     const JS_EVAL_FLAG_ASYNC: i32 = 1 << 7;
@@ -112,13 +115,19 @@ mod implementation {
 
     /// Limits and timeout applied when a runtime is created.
     ///
-    /// All three are `QuickJS` runtime settings, so they bound every realm
+    /// All of them are `QuickJS` runtime settings, so they bound every realm
     /// on the runtime together.
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
     pub struct RuntimeOptions {
         pub memory_limit: Option<usize>,
         pub max_stack_size: Option<usize>,
         pub execution_timeout: Option<Duration>,
+        /// Compile functions without their source text, so
+        /// `Function.prototype.toString` answers a placeholder and the
+        /// bytecode [`Context::compile_module_bytecode`] writes carries none
+        /// of it. Line and column information is kept either way. For a
+        /// runtime that only compiles bytecode for others to run.
+        pub strip_source: bool,
     }
 
     /// JavaScript source text and diagnostic metadata.
@@ -1069,6 +1078,9 @@ mod implementation {
                 if let Some(size) = options.max_stack_size {
                     ffi::qjs_runtime_set_max_stack_size(raw.as_ptr(), size);
                 }
+                if options.strip_source {
+                    ffi::qjs_runtime_set_strip_info(raw.as_ptr(), JS_STRIP_SOURCE);
+                }
                 let interrupt = Rc::new(InterruptState::new(options.execution_timeout));
                 ffi::qjs_runtime_set_interrupt_handler(
                     raw.as_ptr(),
@@ -1162,6 +1174,72 @@ mod implementation {
                     ErrorKind::OutOfMemory,
                     ErrorPhase::RegisterModule,
                     "QuickJS could not retain the module source",
+                )),
+                -2 => Err(Error::bridge(
+                    ErrorKind::InvalidInput,
+                    ErrorPhase::RegisterModule,
+                    "module name is already registered",
+                )),
+                _ => Err(Error::bridge(
+                    ErrorKind::Engine,
+                    ErrorPhase::RegisterModule,
+                    "QuickJS returned an unknown module-registration status",
+                )),
+            }
+        }
+
+        /// Adds one module to this runtime's synchronous loader as bytecode
+        /// rather than text: the bytes [`Context::compile_module_bytecode`]
+        /// wrote of it, on any runtime built from the same `QuickJS` sources.
+        ///
+        /// Everything else is as [`Self::register_module_source`]: the name
+        /// is exact, registered once, and instantiated per realm. Each realm
+        /// that imports the name reads the bytecode back (`JS_ReadObject`)
+        /// instead of parsing and compiling the text, which is the point —
+        /// reading is an order of magnitude cheaper than compiling. The bytes
+        /// are borrowed for the runtime's life, which is why they are
+        /// `'static`: the runtime copies nothing, and neither does a realm
+        /// until it reads them.
+        ///
+        /// The bytes are trusted as `QuickJS` trusts its own bytecode:
+        /// nothing verifies them beyond the format's own checks, so only
+        /// bytecode this process or its build wrote belongs here.
+        pub fn register_module_bytecode(
+            &mut self,
+            name: &str,
+            bytecode: &'static [u8],
+        ) -> Result<(), Error> {
+            self.inner.reclaim();
+            if name.is_empty() {
+                return Err(Error::bridge(
+                    ErrorKind::InvalidInput,
+                    ErrorPhase::RegisterModule,
+                    "module name is empty",
+                ));
+            }
+            let name = CString::new(name).map_err(|_| {
+                Error::bridge(
+                    ErrorKind::InvalidInput,
+                    ErrorPhase::RegisterModule,
+                    "module name contains a NUL byte",
+                )
+            })?;
+            // SAFETY: the name lives through the call, which copies it; the
+            // bytecode is `'static`, and the runtime borrows it for its life.
+            let status = unsafe {
+                ffi::qjs_runtime_add_module_bytecode(
+                    self.inner.raw.as_ptr(),
+                    name.as_ptr(),
+                    bytecode.as_ptr(),
+                    bytecode.len(),
+                )
+            };
+            match status {
+                0 => Ok(()),
+                -1 => Err(Error::bridge(
+                    ErrorKind::OutOfMemory,
+                    ErrorPhase::RegisterModule,
+                    "QuickJS could not retain the module bytecode",
                 )),
                 -2 => Err(Error::bridge(
                     ErrorKind::InvalidInput,
@@ -1807,6 +1885,62 @@ mod implementation {
                 )),
                 _ => Err(capture_exception(self.raw(), ErrorPhase::RegisterModule)),
             }
+        }
+
+        /// Compiles module source text to bytecode, for
+        /// [`Runtime::register_module_bytecode`] on any runtime built from
+        /// the same `QuickJS` sources, this one included.
+        ///
+        /// `name` is what the module is known by: the specifier an import of
+        /// it normalizes to, which is what its errors and stack frames name
+        /// and what it is registered under. The module is compiled unlinked —
+        /// its imports are resolved by whichever realm reads it, against
+        /// that realm's modules — and never evaluated here. It stays loaded
+        /// in this realm under `name`, so a realm compiles each name once; a
+        /// compiler that sees the same name again uses a fresh realm.
+        ///
+        /// What the bytecode carries of the source is the runtime's
+        /// [`RuntimeOptions::strip_source`] choice. A syntax error is this
+        /// call's `Err`, with [`ErrorKind::Syntax`].
+        pub fn compile_module_bytecode(&self, name: &str, source: &str) -> Result<Vec<u8>, Error> {
+            self.reclaim();
+            let name = CString::new(name).map_err(|_| {
+                Error::bridge(
+                    ErrorKind::InvalidInput,
+                    ErrorPhase::RegisterModule,
+                    "module name contains a NUL byte",
+                )
+            })?;
+            // `JS_Eval` reads one byte past the length it is given, which
+            // must be a NUL: the parser's lookahead ends on it.
+            let mut terminated = Vec::with_capacity(source.len() + 1);
+            terminated.extend_from_slice(source.as_bytes());
+            terminated.push(0);
+            let mut length = 0usize;
+            // SAFETY: the source and the name live through the call, which
+            // copies what it keeps; the bytes come back `js_malloc`'d and are
+            // copied out and freed below, in this same call.
+            let bytes = unsafe {
+                ffi::qjs_context_compile_module_bytecode(
+                    self.raw().as_ptr(),
+                    terminated.as_ptr(),
+                    source.len(),
+                    name.as_ptr(),
+                    &raw mut length,
+                )
+            };
+            let Some(bytes) = NonNull::new(bytes) else {
+                return Err(capture_exception_with_syntax(
+                    self.raw(),
+                    ErrorPhase::RegisterModule,
+                    true,
+                ));
+            };
+            // SAFETY: `length` bytes were written at `bytes`, which nothing
+            // else holds.
+            let bytecode = unsafe { std::slice::from_raw_parts(bytes.as_ptr(), length) }.to_vec();
+            unsafe { ffi::qjs_bytecode_free(self.raw().as_ptr(), bytes.as_ptr()) };
+            Ok(bytecode)
         }
 
         /// Retries suspended imports after completing their sources. This
@@ -5459,6 +5593,185 @@ mod implementation {
                     Some(2.0)
                 );
             }
+        }
+
+        /// Compiles `source` as the module `name` on a scratch runtime that
+        /// keeps no source text, the way a build compiles the engine's
+        /// built-ins, and leaks the bytes so a runtime can borrow them for
+        /// its life.
+        fn compiled_module(name: &str, source: &str) -> &'static [u8] {
+            let compiler = Runtime::with_options(RuntimeOptions {
+                strip_source: true,
+                ..RuntimeOptions::default()
+            })
+            .unwrap();
+            let scratch = compiler.create_context().unwrap();
+            let bytecode = scratch.compile_module_bytecode(name, source).unwrap();
+            Box::leak(bytecode.into_boxed_slice())
+        }
+
+        #[test]
+        fn registered_bytecode_instantiates_once_per_realm_like_source() {
+            let counter = compiled_module(
+                "app:///counter.js",
+                "let count = 0;\n\
+                 export function bump() { return ++count; }\n\
+                 export const url = import.meta.url;\n\
+                 export const text = String(bump);",
+            );
+            let entry = compiled_module(
+                "app:///entry.js",
+                "import { bump, url, text } from 'app:///counter.js';\n\
+                 export const first = bump();\n\
+                 export const second = bump();\n\
+                 export { url, text };",
+            );
+            let (mut runtime, mut first) = runtime_and_realm();
+            let mut second = runtime.create_context().unwrap();
+            runtime
+                .register_module_bytecode("app:///counter.js", counter)
+                .unwrap();
+            runtime
+                .register_module_bytecode("app:///entry.js", entry)
+                .unwrap();
+            assert_eq!(
+                runtime
+                    .register_module_source("app:///entry.js", "")
+                    .unwrap_err()
+                    .kind,
+                ErrorKind::InvalidInput,
+                "a name registered as bytecode is registered"
+            );
+
+            for realm in [&mut first, &mut second] {
+                let evaluation = realm
+                    .evaluate(
+                        EvalSource {
+                            text: "await import('app:///entry.js');",
+                            name: Some("bobcat:boot"),
+                            line_offset: 0,
+                        },
+                        EvalOptions {
+                            source_type: SourceType::Module,
+                            ..EvalOptions::default()
+                        },
+                    )
+                    .expect("boot module should start");
+                runtime
+                    .drain_pending_jobs(realm)
+                    .expect("module jobs should settle");
+                assert!(
+                    realm
+                        .settled_promise_result(&evaluation)
+                        .expect("module evaluation should fulfill")
+                        .is_some()
+                );
+                // One registered bytecode, but each realm counts from zero,
+                // as it does from a registered source.
+                let namespace = realm.module_namespace("app:///entry.js").unwrap();
+                assert_eq!(
+                    realm.property(&namespace, "first").unwrap().as_number(),
+                    Some(1.0)
+                );
+                assert_eq!(
+                    realm.property(&namespace, "second").unwrap().as_number(),
+                    Some(2.0)
+                );
+                // The module is known by its registered name, as a source
+                // module is, and its source text was stripped at compile.
+                let mut text = |name: &str| {
+                    let value = realm.property(&namespace, name).unwrap();
+                    String::from_utf16(&value.to_utf16().unwrap()).unwrap()
+                };
+                assert_eq!(text("url"), "app:///counter.js");
+                assert!(
+                    !text("text").contains("++count"),
+                    "the source text is not in the bytecode"
+                );
+            }
+        }
+
+        #[test]
+        fn bytecode_keeps_the_line_of_a_throw() {
+            let thrower: &'static [u8] = compiled_module(
+                "app:///thrower.js",
+                "export function boom() {\n\
+                   throw new Error('from bytecode');\n\
+                 }\n\
+                 boom();",
+            );
+            let (mut runtime, realm) = runtime_and_realm();
+            runtime
+                .register_module_bytecode("app:///thrower.js", thrower)
+                .unwrap();
+            let evaluation = realm
+                .evaluate(
+                    EvalSource {
+                        text: "await import('app:///thrower.js');",
+                        name: Some("bobcat:boot"),
+                        line_offset: 0,
+                    },
+                    EvalOptions {
+                        source_type: SourceType::Module,
+                        ..EvalOptions::default()
+                    },
+                )
+                .expect("boot module should start");
+            // The throw rejects the boot module's evaluation, which nothing
+            // handles: the drain that runs it reports it.
+            let error = match runtime.drain_pending_jobs(&realm) {
+                Err(error) => error,
+                Ok(_) => realm
+                    .settled_promise_result(&evaluation)
+                    .expect_err("the module's throw rejects the import"),
+            };
+            assert!(error.message.contains("from bytecode"), "{error:?}");
+            let location = error.location.expect("the throw has a location");
+            assert_eq!(location.source.as_deref(), Some("app:///thrower.js"));
+            assert_eq!(location.line, Some(2));
+        }
+
+        #[test]
+        fn a_compile_to_bytecode_reports_a_syntax_error() {
+            let (runtime, realm) = runtime_and_realm();
+            let error = realm
+                .compile_module_bytecode("app:///broken.js", "export let let = 1;")
+                .unwrap_err();
+            assert_eq!(error.kind, ErrorKind::Syntax);
+            drop(runtime);
+        }
+
+        #[test]
+        fn bytecode_that_is_not_a_module_fails_the_import_in_the_realm() {
+            let (mut runtime, realm) = runtime_and_realm();
+            runtime
+                .register_module_bytecode("app:///garbage.js", b"not bytecode at all")
+                .unwrap();
+            let evaluation = realm
+                .evaluate(
+                    EvalSource {
+                        text: "await import('app:///garbage.js');",
+                        name: Some("bobcat:boot"),
+                        line_offset: 0,
+                    },
+                    EvalOptions {
+                        source_type: SourceType::Module,
+                        ..EvalOptions::default()
+                    },
+                )
+                .expect("boot module should start");
+            let error = match runtime.drain_pending_jobs(&realm) {
+                Err(error) => error,
+                Ok(_) => realm
+                    .settled_promise_result(&evaluation)
+                    .expect_err("unreadable bytecode rejects the import"),
+            };
+            assert_eq!(error.name.as_deref(), Some("SyntaxError"), "{error:?}");
+            // The realm is still usable afterwards.
+            let value = realm
+                .evaluate(EvalSource::new("1 + 1"), EvalOptions::default())
+                .unwrap();
+            assert_eq!(value.as_number(), Some(2.0));
         }
 
         #[test]

@@ -247,7 +247,10 @@ according to its `NodeData` (styling runs in place, no mirror tree),
 inline-style parsing, and a private per-document `StyleEngine` containing the
 `Stylist`, cascade pipeline, device, stylesheet set, and `SharedRwLock`.
 `Document::new` creates that context afresh, so different documents cannot
-share stylesheets. Author CSS enters either as text (`add_stylesheet`) or, for
+share author stylesheets; user-agent sheets they can, because every one is
+parsed under a single process-wide lock: `UserAgentStylesheet::parse` once,
+`add_user_agent_stylesheet` on each document (see `style-architecture.md`).
+Author CSS enters either as text (`add_stylesheet`) or, for
 CSS a host already parsed, as rules the document itself builds —
 `build_style_rule` / `build_keyframes_rule` / `build_font_face_rule` mint an
 opaque `CssRule` branded with the lock that created it, and `append_rules`
