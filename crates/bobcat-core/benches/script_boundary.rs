@@ -59,6 +59,20 @@ fn snapshot_source(rows: usize) -> String {
     )
 }
 
+/// A realm's whole boot over an entry that renders nothing: the runtime and
+/// the realm opened, the host members installed, the built-in modules read
+/// into the realm and evaluated, the document created, the MTS initialized,
+/// and the entry imported and flushed: the work a view does before its own
+/// code runs, with none of that code in it.
+#[divan::bench]
+fn boot_realm_over_empty_entry(bencher: divan::Bencher) {
+    bencher.bench_local(|| {
+        let mut harness = ScriptHarness::new();
+        harness.boot("");
+        harness
+    });
+}
+
 /// The first render: `ROWS` rows created, styled, attributed and appended,
 /// then committed through style and layout.
 ///

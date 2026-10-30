@@ -1552,7 +1552,11 @@ Worker events until its TLA completes before releasing MTS. See
 Its script surface covers:
 
 - register a Rust-backed named function export in a native ESM module;
-- register UTF-8 source under an exact preloaded module specifier;
+- register a module under an exact preloaded module specifier, as UTF-8
+  source or as the bytecode the bridge compiled it to
+  (`Context::compile_module_bytecode`), which a realm reads back instead of
+  compiling — how every built-in arrives, compiled by `bobcat-core`'s
+  `build.rs`;
 - start an ESM entry and retain its evaluation promise until it settles;
 - take module source requests, complete them, and resume suspended imports;
 - call a named export of an already-loaded source module;

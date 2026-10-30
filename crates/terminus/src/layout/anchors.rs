@@ -1463,8 +1463,8 @@ impl<T: Sync> crate::tree::document::Document<T> {
             return None;
         }
         let engine = self.style_engine();
-        let guard = engine.shared_lock().read();
-        let guards = stylo::shared_lock::StylesheetGuards::same(&guard);
+        let guards = engine.rule_guards();
+        let guards = guards.guards();
         let styles = fallbacks
             .value
             .0

@@ -87,7 +87,6 @@
 
 use stylo::selector_parser::PseudoElement;
 use stylo::servo::restyle_damage::ServoRestyleDamage;
-use stylo::shared_lock::StylesheetGuards;
 use stylo::stylist::RuleInclusion;
 use stylo::values::computed::Content;
 
@@ -392,10 +391,9 @@ impl<T: Sync> Document<T> {
         let element = self.arenas().get(entry.element)?;
         let primary = element.layout_computed_style()?;
         let engine = self.style_engine();
-        let guard = engine.shared_lock().read();
-        let guards = StylesheetGuards::same(&guard);
+        let guards = engine.rule_guards();
         engine.stylist().lazily_compute_pseudo_element_style(
-            &guards,
+            &guards.guards(),
             element,
             &PseudoElement::Backdrop,
             RuleInclusion::All,

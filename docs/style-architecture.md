@@ -50,8 +50,18 @@ CSS supplied as text.
   durable rounded/unrounded layouts live in each state-owned `LayoutSlot`.
 - **Each document owns its style context.** `Document::new` constructs a private
   style engine containing the `Stylist`, device, stylesheet set, cascade
-  pipeline, base URL, and `SharedRwLock`. Documents cannot share or exchange
-  stylesheets, rule objects, or locks accidentally.
+  pipeline, base URL, and the `SharedRwLock` its author sheets and inline
+  styles are under. Documents cannot share or exchange author stylesheets,
+  rule objects, or that lock accidentally. User-agent sheets are the one
+  exception, by design: every one is parsed under a single process-wide lock
+  (`style/engine.rs`'s `USER_AGENT_LOCK`, the lock Gecko's UA sheets share),
+  so a `UserAgentStylesheet` parsed once is mounted by every document, and
+  stylo's user-agent cascade-data cache answers a new document with the
+  cascade data an earlier one built from the same sheet. Stylo already reads each origin
+  under its own guard (`StylesheetGuards::ua_or_user` against `::author`),
+  which `StyleEngine::rule_guards` fills from the two locks. Nothing writes
+  under the user-agent lock: stylo's lock is a borrow counter, so a write
+  while another thread reads would panic.
 - **Mutation carries invalidation.** Matching-relevant setters such as
   `set_classes`, `set_attribute`, `add_element_state`,
   `remove_element_state`, `set_inline_style`, `set_inline_style_property`,

@@ -1,8 +1,8 @@
 //! Standards-oriented CSS parsing, selector matching, and cascade execution.
 
 use std::borrow::Cow;
-use std::sync::Arc as StdArc;
 use std::sync::atomic::AtomicBool;
+use std::sync::{Arc as StdArc, LazyLock};
 
 use cssparser::Parser;
 use rustc_hash::FxHashSet;
@@ -99,6 +99,109 @@ pub struct CssKeyframe<'a> {
     pub selector: &'a str,
     /// The declarations of this keyframe block.
     pub declarations: Vec<CssDeclaration<'a>>,
+}
+
+/// The lock every user-agent stylesheet is parsed and read under: one for
+/// the process, as Gecko's is, rather than one per document like the lock an
+/// engine's author sheets and inline styles take.
+///
+/// The one lock is what allows sharing. A sheet's rules are [`Locked`] to the
+/// lock they were parsed under, and a stylist reads them with a guard of that
+/// lock, so a sheet parsed under this one can be mounted by every document in
+/// the process — the engine's UA sheet, parsed once per page configuration
+/// instead of once per document ([`UserAgentStylesheet`]) — and stylo's
+/// cascade-data cache for the user-agent origin, keyed by the sheet contents
+/// mounted, then answers a new document with the cascade data an earlier one
+/// built.
+/// Stylo reads each origin's rules with the guard of its own lock
+/// ([`StylesheetGuards`]`::ua_or_user` against `::author`), which is why a
+/// second lock costs nothing in the style system itself.
+///
+/// Nothing writes under this lock: a user-agent sheet is never edited after it
+/// is parsed. That matters because stylo's lock is a borrow counter, not a
+/// mutex — a write while any thread holds a read is a panic — and documents on
+/// different threads read under it at once.
+static USER_AGENT_LOCK: LazyLock<SharedRwLock> = LazyLock::new(SharedRwLock::new);
+
+/// A read of both locks a stylist's rules are under, held together: the
+/// process-wide [`USER_AGENT_LOCK`] and one engine's own author lock. Every
+/// stylist operation that reads rules of more than one origin — a flush, a
+/// traversal, a media change — takes its [`StylesheetGuards`] from here.
+pub(crate) struct RuleGuards<'a> {
+    user_agent: SharedRwLockReadGuard<'static>,
+    author: SharedRwLockReadGuard<'a>,
+}
+
+impl RuleGuards<'_> {
+    /// Both guards, as stylo takes them.
+    pub(crate) fn guards(&self) -> StylesheetGuards<'_> {
+        StylesheetGuards {
+            ua_or_user: &self.user_agent,
+            author: &self.author,
+        }
+    }
+
+    /// The guard that reads rules of `origin`.
+    fn for_origin(&self, origin: Origin) -> &SharedRwLockReadGuard<'_> {
+        match origin {
+            Origin::UserAgent | Origin::User => &self.user_agent,
+            Origin::Author => &self.author,
+        }
+    }
+}
+
+/// Reads [`USER_AGENT_LOCK`] and `author` together.
+pub(crate) fn rule_guards(author: &SharedRwLock) -> RuleGuards<'_> {
+    RuleGuards {
+        user_agent: USER_AGENT_LOCK.read(),
+        author: author.read(),
+    }
+}
+
+/// A user-agent stylesheet parsed once, for any number of documents to mount.
+///
+/// Parsed under the process-wide user-agent lock, so every document reads it
+/// with the guard it already takes for the user-agent origin, and mounting
+/// it copies nothing: the documents share the one parsed sheet, and, through
+/// stylo's user-agent cascade-data cache, the cascade data built from it.
+/// This is how an embedder that opens many documents over one UA sheet —
+/// one per page configuration — parses it once.
+#[derive(Clone, Debug)]
+pub struct UserAgentStylesheet(Arc<Stylesheet>);
+
+impl UserAgentStylesheet {
+    /// Parses `css` as a user-agent sheet. Its base URL is `about:blank`,
+    /// as every document's own is.
+    #[must_use]
+    pub fn parse(css: &str) -> Self {
+        Self(Arc::new(parse_stylesheet_under(
+            &USER_AGENT_LOCK,
+            css,
+            Origin::UserAgent,
+            crate::tree::document::about_blank_url_data(),
+        )))
+    }
+}
+
+/// Parses one stylesheet whose rules are locked under `lock`.
+fn parse_stylesheet_under(
+    lock: &SharedRwLock,
+    css: &str,
+    origin: Origin,
+    url_data: UrlExtraData,
+) -> Stylesheet {
+    let media = Arc::new(lock.wrap(MediaList::empty()));
+    Stylesheet::from_str(
+        css,
+        url_data,
+        origin,
+        media,
+        lock.clone(),
+        None,
+        None,
+        QuirksMode::NoQuirks,
+        AllowImportRules::Yes,
+    )
 }
 
 /// One pre-built CSS rule, branded with the document context that parsed and
@@ -326,12 +429,12 @@ impl StyleEngine {
         if !std::mem::take(&mut self.font_faces_dirty) {
             return Vec::new();
         }
-        let guard = self.lock.read();
-        let invalidations = self.stylist.flush(&StylesheetGuards::same(&guard));
+        let guards = rule_guards(&self.lock);
+        let invalidations = self.stylist.flush(&guards.guards());
         Self::note_flush(&mut self.changed_position_try_names, &invalidations);
         let mut requests = Vec::new();
         let mut reported = Vec::new();
-        for (data, _) in self.stylist.iter_extra_data_origins() {
+        for (data, origin) in self.stylist.iter_extra_data_origins() {
             for (rule, _) in data.font_faces.iter() {
                 if self
                     .reported_font_faces
@@ -341,12 +444,13 @@ impl StyleEngine {
                     continue;
                 }
                 reported.push(rule.clone());
-                if let Some(request) = font_face_request(rule.read_with(&guard)) {
+                if let Some(request) = font_face_request(rule.read_with(guards.for_origin(origin)))
+                {
                     requests.push(request);
                 }
             }
         }
-        drop(guard);
+        drop(guards);
         self.reported_font_faces.extend(reported);
         requests
     }
@@ -363,8 +467,17 @@ impl StyleEngine {
         &self.stylist
     }
 
+    /// The engine's own lock: what its author sheets, its shadow trees'
+    /// sheets and its inline styles are locked under. User-agent sheets are
+    /// under [`USER_AGENT_LOCK`] instead; [`Self::rule_guards`] reads both.
     pub(crate) fn shared_lock(&self) -> &SharedRwLock {
         &self.lock
+    }
+
+    /// A read of both locks this engine's rules are under, for a stylist
+    /// operation that reads rules of every origin.
+    pub(crate) fn rule_guards(&self) -> RuleGuards<'_> {
+        rule_guards(&self.lock)
     }
 
     pub(crate) fn supports_property(&self, property: &str) -> bool {
@@ -560,27 +673,37 @@ impl StyleEngine {
         self.parse_stylesheet_at(css, origin, self.url_data.clone())
     }
 
+    /// Parses one sheet under the lock its origin reads with: the
+    /// process-wide user-agent lock for a user-agent sheet, this engine's
+    /// own for an author sheet.
     fn parse_stylesheet_at(&self, css: &str, origin: Origin, url_data: UrlExtraData) -> Stylesheet {
-        let media = Arc::new(self.lock.wrap(MediaList::empty()));
-        Stylesheet::from_str(
-            css,
-            url_data,
-            origin,
-            media,
-            self.lock.as_ref().clone(),
-            None,
-            None,
-            QuirksMode::NoQuirks,
-            AllowImportRules::Yes,
-        )
+        let lock = match origin {
+            Origin::UserAgent | Origin::User => &*USER_AGENT_LOCK,
+            Origin::Author => self.lock.as_ref(),
+        };
+        parse_stylesheet_under(lock, css, origin, url_data)
     }
 
     pub(crate) fn add_stylesheet(&mut self, css: &str, origin: Origin) {
         let sheet = DocumentStyleSheet(Arc::new(self.parse_stylesheet(css, origin)));
-        let guard = self.lock.read();
-        self.stylist.append_stylesheet(sheet, &guard);
-        let invalidations = self.stylist.flush(&StylesheetGuards::same(&guard));
-        drop(guard);
+        self.mount_document_sheet(sheet, origin);
+    }
+
+    /// Mounts a user-agent sheet parsed once for every document
+    /// ([`UserAgentStylesheet`]), as the one `add_stylesheet` parses for this
+    /// document alone would be.
+    pub(crate) fn add_user_agent_stylesheet(&mut self, sheet: &UserAgentStylesheet) {
+        self.mount_document_sheet(DocumentStyleSheet(Arc::clone(&sheet.0)), Origin::UserAgent);
+    }
+
+    /// Appends one document-level sheet of `origin` to the stylist and
+    /// flushes it.
+    fn mount_document_sheet(&mut self, sheet: DocumentStyleSheet, origin: Origin) {
+        let guards = rule_guards(&self.lock);
+        self.stylist
+            .append_stylesheet(sheet, guards.for_origin(origin));
+        let invalidations = self.stylist.flush(&guards.guards());
+        drop(guards);
         Self::note_flush(&mut self.changed_position_try_names, &invalidations);
         self.font_faces_dirty = true;
     }
@@ -738,13 +861,7 @@ impl StyleEngine {
     /// Installs rules this engine built as one author-origin sheet.
     pub(crate) fn append_rules(&mut self, rules: Vec<CssRule>) {
         let sheet = self.stylesheet_from_rules(rules);
-        let guard = self.lock.read();
-        self.stylist
-            .append_stylesheet(DocumentStyleSheet(Arc::new(sheet)), &guard);
-        let invalidations = self.stylist.flush(&StylesheetGuards::same(&guard));
-        drop(guard);
-        Self::note_flush(&mut self.changed_position_try_names, &invalidations);
-        self.font_faces_dirty = true;
+        self.mount_document_sheet(DocumentStyleSheet(Arc::new(sheet)), Origin::Author);
     }
 
     #[must_use]
@@ -885,17 +1002,16 @@ impl StyleEngine {
     /// read the device — viewport units, `rpx`, resolution-dependent images,
     /// snapped border widths — have to be produced again.
     fn refresh_device(&mut self) -> StyleInvalidation {
-        let guard = self.lock.read();
-        let guards = StylesheetGuards::same(&guard);
+        let guards = rule_guards(&self.lock);
         let changed = self
             .stylist
-            .media_features_change_changed_style(&guards, self.stylist.device());
+            .media_features_change_changed_style(&guards.guards(), self.stylist.device());
         if changed.is_empty() {
             return StyleInvalidation::Recascade;
         }
         self.stylist.force_stylesheet_origins_dirty(changed);
-        let invalidations = self.stylist.flush(&guards);
-        drop(guard);
+        let invalidations = self.stylist.flush(&guards.guards());
+        drop(guards);
         Self::note_flush(&mut self.changed_position_try_names, &invalidations);
         StyleInvalidation::Rematch
     }
@@ -930,6 +1046,15 @@ impl<T> Document<T> {
 
     pub fn add_stylesheet(&mut self, css: &str, origin: Origin) {
         self.change_style_rules(|engine| engine.add_stylesheet(css, origin));
+    }
+
+    /// Mounts a user-agent sheet parsed once for every document
+    /// ([`UserAgentStylesheet::parse`]), where [`Self::add_stylesheet`] with
+    /// [`Origin::UserAgent`] parses one for this document alone. Same
+    /// cascade, same order rules: a later sheet cascades over an earlier
+    /// one.
+    pub fn add_user_agent_stylesheet(&mut self, sheet: &UserAgentStylesheet) {
+        self.change_style_rules(|engine| engine.add_user_agent_stylesheet(sheet));
     }
 
     /// Appends rules this document built as one author-origin stylesheet.

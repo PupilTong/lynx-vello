@@ -48,7 +48,6 @@
 use stylo::dom::OpaqueNode;
 use stylo::properties::{LonghandId, PropertyDeclarationId};
 use stylo::servo::animation::{Animation, AnimationSetKey, AnimationState, Transition};
-use stylo::shared_lock::StylesheetGuards;
 
 use crate::style::animation::{AnimationDriver, animation_has_side_effects};
 use crate::style::timeline::Binding;
@@ -130,10 +129,10 @@ impl<T: Sync> Document<T> {
             return None;
         }
 
-        let guard = self.style_engine().shared_lock().read();
+        let guards = self.style_engine().rule_guards();
         let (overriding, _) = style
             .rules()
-            .get_properties_overriding_animations(&StylesheetGuards::same(&guard));
+            .get_properties_overriding_animations(&guards.guards());
         let held = |animated: bool, longhand: LonghandId| {
             animated && overriding.contains(longhand) && !transitioned(longhand)
         };
