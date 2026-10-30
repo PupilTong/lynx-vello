@@ -729,7 +729,7 @@ declare module "bobcat-internal:host" {
 
 /**
  * The TC39 `ShadowRealm`, a global of every realm this engine builds,
- * installed by the host rather than by ES2023: `bobcat:frame` creates one per
+ * installed by the host rather than by ES2025: `bobcat:frame` creates one per
  * card a `frame` loads. Only primitives and callables cross: an object
  * crossing either way is a `TypeError`, and a callable crosses as a wrapped
  * function of the other realm.

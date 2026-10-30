@@ -3383,7 +3383,10 @@ host modules' contracts and is the authoritative list of what
 `bobcat-internal:native-modules` export.
 
 What core embeds, with `include_str!`, is the JavaScript TypeScript 7 compiles
-from `src/*.ts` during the Cargo build. `bobcat-core/build.rs` invokes the
+from `src/*.ts` during the Cargo build, at `target: es2025` — the language
+level the pinned QuickJS implements, so nothing is lowered. Nothing later is
+written: the engine has no explicit resource management (`using`,
+`Symbol.dispose`), decorators or `accessor`. `bobcat-core/build.rs` invokes the
 package's build script with an output directory under Cargo's `OUT_DIR`, so
 each target/profile owns its emit and parallel builds never share a source
 directory. Cargo tracks the sources, build script, TypeScript configuration and
@@ -3479,7 +3482,7 @@ Element-PAPI surface for transformed MTS entries; a local named Lepus chunk
 receives the same names as the parameters of the body it is compiled as.
 Rstest imports
 the TypeScript directly, and TypeScript 7 checks the sources as a program with
-`lib: es2023` and no ambient types, resolving each `bobcat:*` specifier to its
+`lib: es2025` and no ambient types, resolving each `bobcat:*` specifier to its
 file through `paths` and declaring the three host modules' contracts in a
 `.d.ts`.
 

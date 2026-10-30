@@ -1,16 +1,18 @@
 {
   "$schema": "https://www.schemastore.org/tsconfig",
   // The modules `bobcat-core` strips and preloads into its QuickJS realms:
-  // ES2023 with no DOM and no Node globals. There is no ambient `console`
-  // either: a module that logs imports `bobcat:diagnostics`'s, which is also
-  // the one `bobcat:worker` installs on a worker realm's global. `paths`
-  // resolves each specifier core registers to the file it registers under it;
-  // the three host modules — `bobcat-internal:host`, `bobcat-internal:worker`
-  // and `bobcat-internal:native-modules` — have no source and are declared in
+  // ES2025, the library the pinned QuickJS implements (it has no `using`,
+  // decorators or `accessor`, so not `esnext`), with no DOM and no Node
+  // globals. There is no ambient `console` either: a module that logs imports
+  // `bobcat:diagnostics`'s, which is also the one `bobcat:worker` installs on
+  // a worker realm's global. `paths` resolves each specifier core registers to
+  // the file it registers under it; the three host modules —
+  // `bobcat-internal:host`, `bobcat-internal:worker` and
+  // `bobcat-internal:native-modules` — have no source and are declared in
   // `native.d.ts`.
   "extends": "../../../tsconfig.base.json",
   "compilerOptions": {
-    "lib": ["es2023"],
+    "lib": ["es2025"],
     "types": [],
     "paths": {
       "bobcat:lynx-modules": ["./lynx-modules.ts"],

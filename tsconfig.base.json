@@ -27,8 +27,8 @@
     // downstream can work it out.
     // Relative imports name the `.ts` file, which is the file Node loads;
     // emit rewrites them to `.js`.
-    "target": "es2023",
-    "lib": ["es2023"],
+    "target": "es2025",
+    "lib": ["es2025"],
     "types": [],
     "module": "esnext",
     "moduleResolution": "bundler",
