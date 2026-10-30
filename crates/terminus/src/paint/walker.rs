@@ -33,7 +33,21 @@
 //!    share their parent's buffer, so a blend directly inside one reads
 //!    pixels outside the clip. Fragment painters that need a blend under an
 //!    item clip (inset shadows) interpose their own full `SrcOver` layer
-//!    first.
+//!    first. **A pushed link is cut to what it holds.** Vello allocates a clip
+//!    layer's tiles over the whole bounding box of its shape, whatever lies
+//!    inside it, and the chain restarts around every group scope, so a page
+//!    of small faded boxes inside one page-sized `overflow` clip re-pushed
+//!    that clip once per box and exceeded vello's fixed tile budget
+//!    (`1 << 21` tiles): every stage after `tile_alloc` is skipped and the frame is
+//!    transparent. [`plan_clip_pushes`] replays the stack discipline once per
+//!    frame and records, per push, the region the items painted inside it can
+//!    put ink in — each item's layer bound, carried into the link's space
+//!    through every scroll window, sticky range and curve reach between them
+//!    — and [`push_clip`] pushes the link's rect cut to that region grown by
+//!    [`HOLD_SLACK_CSS_PX`]: a plain rect when the cut stays clear of the
+//!    link's rounded corners, the link's whole shape otherwise. Nothing inside
+//!    the link reaches outside the region, so the picture is the same, and the
+//!    cost is the content's.
 //! 2. **Group scopes** ([`crate::visual::RenderLayer`]) — a stacking context with group effects
 //!    pushes, outermost to innermost: the effect layer (blend mode + `opacity` alpha, clipped to
 //!    the group's prepass-computed content bounds), a `clip-path` layer (a full `push_layer`, not a
@@ -359,6 +373,17 @@ pub(crate) struct Scratch {
     clip_stack: Vec<usize>,
     chain: Vec<usize>,
     scopes: Vec<Scope>,
+    /// Per clip link the walk pushes, in push order: the link's index and
+    /// the region the content inside it can put ink in, in the link's space
+    /// (viewport CSS px, committed). Filled by [`plan_clip_pushes`],
+    /// consumed by [`push_clip`] through [`Self::push_cursor`].
+    push_holds: Vec<(usize, Hold)>,
+    push_cursor: usize,
+    /// Per layer, whether its element has `filter` or `backdrop-filter`,
+    /// which makes its scope open inside its own chain and its items push
+    /// only the links below ([`open_scope`]). Index-parallel with
+    /// [`PaintOrder::layers`].
+    layer_floored: Vec<bool>,
     layer_bounds: Vec<Rect>,
     open_layers: Vec<usize>,
     bounds_acc: Vec<Option<Rect>>,
@@ -775,6 +800,39 @@ impl<T> Clone for Painting<'_, T> {
 }
 
 impl<T> Copy for Painting<'_, T> {}
+
+/// What one pushed clip link holds, in the link's space.
+#[derive(Debug, Clone, Copy)]
+enum Hold {
+    /// No item has been accumulated yet.
+    Nothing,
+    /// Every item inside it puts ink within this region.
+    Region(Rect),
+    /// Content with no bound — a curve whose scale range reaches 0, a
+    /// non-finite bound, or the output clips of a filtered group, which hold
+    /// the whole group.
+    Everything,
+}
+
+impl Hold {
+    /// This hold widened to take in `region`.
+    fn with(self, region: Admitted) -> Self {
+        match (self, region) {
+            (Self::Everything, _) | (_, Admitted::Everything | Admitted::Nothing) => {
+                Self::Everything
+            }
+            (_, Admitted::Region(region)) if !is_finite(region) => Self::Everything,
+            (Self::Nothing, Admitted::Region(region)) => Self::Region(region),
+            (Self::Region(held), Admitted::Region(region)) => Self::Region(held.union(region)),
+        }
+    }
+}
+
+/// CSS px added around what a pushed clip link holds before the link is cut
+/// to it, so the cut edge never lies on an edge of the content: two
+/// anti-aliased edges on one pixel multiply their coverage, and a link cut
+/// exactly to a fractional box would lighten that box's edge.
+const HOLD_SLACK_CSS_PX: f64 = 2.0;
 
 #[derive(Debug)]
 struct Scope {
@@ -1489,11 +1547,12 @@ fn push_output_clips(
         next == floor,
         "an element inside a filtered group extends the group's clip chain",
     );
-    let Some((&innermost, outer)) = scratch.chain.split_first() else {
+    let Some(&innermost) = scratch.chain.first() else {
         return 0;
     };
-    for &index in outer.iter().rev() {
-        push_clip(sink, frame, &clips[index], scale);
+    for position in (1..scratch.chain.len()).rev() {
+        let index = scratch.chain[position];
+        push_clip(sink, scratch, frame, index, scale);
     }
     let link = &clips[innermost];
     let isolating = BlendMode::new(Mix::Normal, Compose::SrcOver);
@@ -2059,16 +2118,118 @@ fn sync_clips(
     pop_clips_to(sink, scratch, base + common);
     for position in common..scratch.chain.len() {
         let index = scratch.chain[position];
-        push_clip(sink, frame, &frame.clips()[index], scale);
+        push_clip(sink, scratch, frame, index, scale);
         scratch.clip_stack.push(index);
     }
 }
 
-fn push_clip(sink: &mut WalkSink<'_>, frame: &PaintOrder, clip: &ClipNode, scale: Affine) {
-    match clip_geometry(frame, clip, scale) {
-        Some((transform, shape)) => sink.push_clip_box(clip.space, Fill::NonZero, transform, shape),
-        None => sink.push_clip_empty(clip.space),
+/// Pushes clip link `index`, cut to what [`plan_clip_pushes`] recorded it
+/// holds (see the module doc). The plan's entries are consumed in push
+/// order; one missing or naming another link is a mismatch between the plan
+/// and the walk, which debug builds report and release builds answer with
+/// the whole link, the picture either way.
+fn push_clip(
+    sink: &mut WalkSink<'_>,
+    scratch: &mut Scratch,
+    frame: &PaintOrder,
+    index: usize,
+    scale: Affine,
+) {
+    let planned = scratch.push_holds.get(scratch.push_cursor).copied();
+    scratch.push_cursor += 1;
+    debug_assert_eq!(
+        planned.map(|(link, _)| link),
+        Some(index),
+        "the clip push plan names the link the walk pushes",
+    );
+    let hold = match planned {
+        Some((link, hold)) if link == index => hold,
+        _ => Hold::Everything,
+    };
+    let clip = &frame.clips()[index];
+    let Some((transform, shape)) = clip_geometry(frame, clip, scale) else {
+        sink.push_clip_empty(clip.space);
+        return;
+    };
+    let shape = match held_shape(frame, clip, hold) {
+        Some(cut) => BoxShape::Rect(cut),
+        None => shape,
+    };
+    sink.push_clip_box(clip.space, Fill::NonZero, transform, shape);
+}
+
+/// The rect, in `clip`'s local units, that clips exactly what `hold` lets
+/// through of `clip`'s shape — or `None` when the whole shape is wanted: an
+/// unbounded hold, or a cut that meets one of the shape's rounded corners,
+/// where a rect would square the corner off.
+///
+/// A hold the clip's rect does not meet at all is an empty rect: the content
+/// never reaches the clip, and an empty clip draws exactly that.
+fn held_shape(frame: &PaintOrder, clip: &ClipNode, hold: Hold) -> Option<Rect> {
+    let region = match hold {
+        Hold::Region(region) => inflate_rect(region, HOLD_SLACK_CSS_PX),
+        Hold::Nothing | Hold::Everything => return None,
+    };
+    let size = euclid::default::Size2D::new(clip.rect.size.width, clip.rect.size.height);
+    let local = convert::item_affine(&frame.matrix(clip.transform), size)?;
+    let rect = Rect::new(
+        clip.rect.origin.x as f64,
+        clip.rect.origin.y as f64,
+        (clip.rect.origin.x + clip.rect.size.width) as f64,
+        (clip.rect.origin.y + clip.rect.size.height) as f64,
+    );
+    let cut = rect.intersect(affine_rect(local.inverse(), region));
+    if !is_finite(cut) {
+        return None;
     }
+    if cut.width() <= 0.0 || cut.height() <= 0.0 {
+        return Some(Rect::ZERO);
+    }
+    if cut == rect {
+        // Nothing to gain, and the shape stays the author's.
+        return None;
+    }
+    clear_of_corners(rect, &clip.radii, cut).then_some(cut)
+}
+
+/// Whether `cut`, inside `rect`, stays out of every rounded corner of
+/// `rect`: the corner boxes `radii` spans, which are the only places the
+/// rounded shape and the rect differ.
+fn clear_of_corners(rect: Rect, radii: &crate::visual::CornerRadii, cut: Rect) -> bool {
+    let corners = [
+        Rect::new(
+            rect.x0,
+            rect.y0,
+            rect.x0 + f64::from(radii.top_left.width),
+            rect.y0 + f64::from(radii.top_left.height),
+        ),
+        Rect::new(
+            rect.x1 - f64::from(radii.top_right.width),
+            rect.y0,
+            rect.x1,
+            rect.y0 + f64::from(radii.top_right.height),
+        ),
+        Rect::new(
+            rect.x1 - f64::from(radii.bottom_right.width),
+            rect.y1 - f64::from(radii.bottom_right.height),
+            rect.x1,
+            rect.y1,
+        ),
+        Rect::new(
+            rect.x0,
+            rect.y1 - f64::from(radii.bottom_left.height),
+            rect.x0 + f64::from(radii.bottom_left.width),
+            rect.y1,
+        ),
+    ];
+    corners.iter().all(|corner| {
+        corner.width() <= 0.0
+            || corner.height() <= 0.0
+            || cut.x0 >= corner.x1
+            || cut.x1 <= corner.x0
+            || cut.y0 >= corner.y1
+            || cut.y1 <= corner.y0
+    })
 }
 
 /// One clip node's rounded rect and its clip-local to device px map, or
@@ -2208,6 +2369,113 @@ fn plan_frame<T>(scratch: &mut Scratch, document: &Document<T>, frame: &PaintOrd
     while !scratch.open_layers.is_empty() {
         close(scratch);
     }
+    plan_clip_pushes(scratch, document, frame);
+}
+
+/// The second prepass: what every clip link the walk will push holds, in the
+/// order [`push_clip`] consumes it (see the module doc's "a pushed link is
+/// cut to what it holds").
+///
+/// It replays the walk's stack discipline over [`plan_frame`]'s results: a
+/// scope opens where `layer_live` says one will and pops the chain, its items
+/// push theirs again inside it, a filtered scope pushes its output clips at
+/// open — through [`push_clip`] too, so they take entries here, unbounded,
+/// since they hold the whole group — and everything is popped at close. Each
+/// item the walk paints widens every link on the stack by its layer bound
+/// carried into the link's space; a scope's base is the walk's, so a link
+/// never holds a scope, only items.
+fn plan_clip_pushes<T>(scratch: &mut Scratch, document: &Document<T>, frame: &PaintOrder) {
+    let items = frame.items();
+    let layers = frame.layers();
+    let clips = frame.clips();
+    scratch.push_holds.clear();
+    scratch.push_cursor = 0;
+    // Open scopes, as `(layer, floor)`, and the pushed links, as
+    // `(link, entry)` into `push_holds` — the walk's `scopes` and
+    // `clip_stack`.
+    let mut scopes: smallvec::SmallVec<[(usize, Option<usize>); 8]> = smallvec::SmallVec::new();
+    let mut stack: smallvec::SmallVec<[(usize, usize); 8]> = smallvec::SmallVec::new();
+    let mut next_open = 0_usize;
+    for (index, item) in items.iter().enumerate() {
+        while scopes
+            .last()
+            .is_some_and(|&(layer, _)| layers[layer].items.end == index)
+        {
+            scopes.pop();
+            // `close_scope` pops to the scope's base, which is the walk's root.
+            stack.clear();
+        }
+        while next_open < layers.len() && layers[next_open].items.start == index {
+            if scratch.layer_live[next_open] {
+                let layer = &layers[next_open];
+                let enclosing_floor = scopes.last().and_then(|&(_, floor)| floor);
+                // `open_scope` pops to its base, the walk's root, first.
+                stack.clear();
+                let floor = if scratch.layer_floored[next_open] {
+                    // `push_output_clips`: every link of the element's chain
+                    // below the enclosing floor but the innermost, outermost
+                    // first, each holding the whole group.
+                    scratch.chain.clear();
+                    let mut next = layer.clip;
+                    while let Some(link) = next
+                        && next != enclosing_floor
+                    {
+                        scratch.chain.push(link);
+                        next = clips[link].parent;
+                    }
+                    for position in (1..scratch.chain.len()).rev() {
+                        scratch
+                            .push_holds
+                            .push((scratch.chain[position], Hold::Everything));
+                    }
+                    layer.clip
+                } else {
+                    enclosing_floor
+                };
+                scopes.push((next_open, floor));
+            }
+            next_open += 1;
+        }
+        let Some(local) = scratch.item_plan[index] else {
+            continue;
+        };
+        if matches!(item.kind, PaintItemKind::InlineFragment { .. }) {
+            continue;
+        }
+        // `sync_clips`.
+        let floor = scopes.last().and_then(|&(_, floor)| floor);
+        scratch.chain.clear();
+        let mut next = item.clip;
+        while let Some(link) = next
+            && next != floor
+        {
+            scratch.chain.push(link);
+            next = clips[link].parent;
+        }
+        scratch.chain.reverse();
+        let common = stack
+            .iter()
+            .zip(scratch.chain.iter())
+            .take_while(|((pushed, _), wanted)| pushed == *wanted)
+            .count();
+        stack.truncate(common);
+        for &link in &scratch.chain[common..] {
+            scratch.push_holds.push((link, Hold::Nothing));
+            stack.push((link, scratch.push_holds.len() - 1));
+        }
+        let bounds = item_bounds(item, local, extents(document, item).layer);
+        for &(link, entry) in &stack {
+            let carried = carry(
+                &scratch.plan.slot_windows,
+                frame,
+                bounds,
+                item.space,
+                clips[link].space,
+            );
+            let hold = &mut scratch.push_holds[entry].1;
+            *hold = hold.with(carried);
+        }
+    }
 }
 
 /// Resets the per-layer state [`plan_frame`] fills: bounds, blur sigma,
@@ -2225,11 +2493,21 @@ fn reset_layers<T>(scratch: &mut Scratch, document: &Document<T>, frame: &PaintO
             .map(|layer| layer_blur_sigma(document, frame, layer)),
     );
     scratch.layer_live.clear();
-    scratch.layer_live.extend(layers.iter().map(|layer| {
-        document
-            .paint_style(layer.node)
-            .is_some_and(|style| !style.get_effects().backdrop_filter.0.is_empty())
-    }));
+    scratch.layer_floored.clear();
+    for layer in layers {
+        let (backdrop, filtered) =
+            document
+                .paint_style(layer.node)
+                .map_or((false, false), |style| {
+                    let effects = style.get_effects();
+                    (
+                        !effects.backdrop_filter.0.is_empty(),
+                        !effects.filter.0.is_empty(),
+                    )
+                });
+        scratch.layer_live.push(backdrop);
+        scratch.layer_floored.push(backdrop || filtered);
+    }
     scratch.layer_moves.clear();
     scratch
         .layer_moves
@@ -2788,8 +3066,9 @@ mod tests {
     use vello::kurbo::Affine;
 
     use super::{
-        ComposeAssembly, ComposeOp, CullPlan, PaintItem, PaintItemKind, Rect, Scene, Scratch,
-        can_reach, cull_rect, item_bounds, walk, walk_compose, walk_uncultured,
+        BoxShape, CapturedShape, ComposeAssembly, ComposeOp, CullPlan, PaintItem, PaintItemKind,
+        Rect, Scene, Scratch, can_reach, cull_rect, item_bounds, walk, walk_compose,
+        walk_uncultured,
     };
     use crate::paint::equivalence::assert_scenes_identical;
     use crate::test_common::Doc;
@@ -4340,6 +4619,83 @@ mod tests {
             "while a filter grows the same box by 3 sigma ({:?} vs {:?})",
             bounds[2],
             bounds[0],
+        );
+    }
+
+    /// The clip-link pushes of a composed page: the rect of each plain rect
+    /// push, `None` for any other shape.
+    fn clip_pushes(finished: &crate::paint::compose::Finished) -> Vec<Option<Rect>> {
+        finished
+            .program
+            .iter()
+            .filter_map(|op| match op {
+                ComposeOp::Push {
+                    clip_only: true,
+                    shape,
+                    ..
+                } => Some(match shape {
+                    CapturedShape::Rect(rect) | CapturedShape::Box(BoxShape::Rect(rect)) => {
+                        Some(*rect)
+                    }
+                    CapturedShape::Box(_) => None,
+                }),
+                _ => None,
+            })
+            .collect()
+    }
+
+    const CLIPPED: &str = "page { display: flex; position: relative; width: 800px; height: 600px; }
+         .clip { display: flex; position: relative; overflow: hidden;
+                 width: 400px; height: 400px; }
+         .box { display: flex; position: absolute; width: 100px; height: 100px;
+                background-color: teal; }";
+
+    /// A page of `css` with one clipping box holding one `box` styled by
+    /// `inline`, composed; the clip's pushes.
+    fn clipped_box(css: &str, inline: &str, animated: bool) -> Vec<Option<Rect>> {
+        let mut doc = Doc::with_css(css);
+        let root = doc.root;
+        let clip = doc.el(root, "view.clip");
+        let inner = doc.el(clip, "view.box");
+        doc.set_inline(inner, inline);
+        if animated {
+            run_animations(&mut doc);
+            assert_eq!(doc.dom.build_paint_order().animations().len(), 1);
+        }
+        let (finished, _) = compose(&mut doc);
+        clip_pushes(&finished)
+    }
+
+    /// A pushed link is cut to the box it holds, grown by the slack.
+    #[test]
+    fn a_pushed_link_is_cut_to_what_it_holds() {
+        assert_eq!(
+            clipped_box(CLIPPED, "left: 10px; top: 20px;", false),
+            [Some(Rect::new(8.0, 18.0, 112.0, 122.0))],
+        );
+    }
+
+    /// A rounded link is cut to a plain rect only where the cut stays clear
+    /// of its corners; content at a corner keeps the rounded shape.
+    #[test]
+    fn a_rounded_link_keeps_its_shape_where_a_corner_is_met() {
+        let css = format!("{CLIPPED} .clip {{ border-radius: 40px; }}");
+        assert_eq!(
+            clipped_box(&css, "left: 150px; top: 150px;", false),
+            [Some(Rect::new(148.0, 148.0, 252.0, 252.0))],
+        );
+        assert_eq!(clipped_box(&css, "left: 0px; top: 0px;", false), [None]);
+    }
+
+    /// A link holding a box a transform curve slides is cut to the whole
+    /// reach of the slide, not the box's committed place.
+    #[test]
+    fn a_link_holds_a_sliding_box_over_its_whole_reach() {
+        let css = format!("{CLIPPED} {SLIDE} .box {{ animation: slide 1s linear infinite; }}");
+        // 10..110 carried 0..600 px to the right, cut to the 400 px clip.
+        assert_eq!(
+            clipped_box(&css, "left: 10px; top: 20px;", true),
+            [Some(Rect::new(8.0, 18.0, 400.0, 122.0))],
         );
     }
 }

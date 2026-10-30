@@ -2497,7 +2497,17 @@ raw fallback and the backdrop once, after the filter; content just past the
 edge still blurs ink back inside it; and a nested backdrop reads its root's
 content uncut by the root's ancestors. Every other group re-pushes whole
 chains, which lets a fixed descendant of an `opacity` group escape the
-group's ancestors' clips.
+group's ancestors' clips. Every pushed link is cut to the region the items
+inside it can put ink in — each item's layer bound, carried into the link's
+space through the scroll windows, sticky ranges and curve reaches between
+them, grown by 2 CSS px — pushed as a plain rect where the cut stays clear of
+the link's rounded corners and as the link's whole shape otherwise
+(`paint::walker::plan_clip_pushes`, a second prepass over the walk's stack
+discipline). Vello allocates a clip layer's tiles over its whole shape, and
+the chain restarts around every group, so without the cut a page of small
+faded boxes inside one page-sized `overflow` clip costs a viewport of tiles
+per box and exceeds vello's fixed tile budget (`1 << 21` tiles), after which
+every stage past `tile_alloc` is skipped and the frame is transparent.
 
 The device side is `terminus::link::render::blur::FilterTextures`, one per
 `vello::Renderer`, owned beside that renderer's `AtlasResidency` by `Headless`
