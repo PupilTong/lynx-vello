@@ -103,6 +103,13 @@ pub enum EngineError {
     /// is never built and never fetches.
     #[error("no registered or system font family is named `{0}`")]
     UnknownFontFamily(String),
+    /// The locale a view named is not a well-formed BCP-47 language tag. A
+    /// construction failure of the same kind as [`Self::UnknownFontFamily`]:
+    /// [`LynxGroup::create_lynx_view`] validates it before it hands the
+    /// fetcher anything, so a view that fails this is never built and never
+    /// fetches.
+    #[error("`{0}` is not a BCP-47 language tag")]
+    InvalidLocale(String),
     /// A view's [`base_url`](ViewSources::base_url) is not an absolute URL,
     /// or its entry or BTS entry does not resolve against it; `url` is the
     /// string that failed. A construction failure of the same kind as
@@ -491,9 +498,10 @@ impl StyleThreads {
 /// one: the host's fetcher belongs to the view, is passed to
 /// [`LynxGroup::create_lynx_view`] separately, and stays on that thread.
 ///
-/// Five of these fields are spent where the value is handed over rather than
+/// Seven of these fields are spent where the value is handed over rather than
 /// crossing to `bobcat-main`: [`Self::base_url`] resolves the entries,
-/// [`Self::fonts`] and [`Self::default_font_family`] become the view's text
+/// [`Self::fonts`], [`Self::default_font_family`], [`Self::fallback_fonts`]
+/// and [`Self::locale`] become the view's text
 /// context, and [`Self::style_sheets`] and [`Self::entry`] become the
 /// requests `create_lynx_view` hands the fetcher before it returns. What
 /// crosses of them is the parsed base, the built context and the answers. The
@@ -525,6 +533,20 @@ pub struct ViewSources {
     /// fallback otherwise; a script listed here stops asking the platform for
     /// its own.
     pub fallback_fonts: Vec<FontBlob>,
+    /// The language of the view's text, as a BCP-47 tag: `zh-Hant`, `ja`,
+    /// `en-US`. What the platform's per-script font fallback is asked with,
+    /// so that a Han cluster no family of its own `font-family` covers is set
+    /// in the Traditional, Japanese or Korean face the language calls for
+    /// rather than in the platform's default one, and so is the CJK
+    /// punctuation of a run with no Han character in it. Lynx's
+    /// `LynxEnv.locale`: a value the host sets for the process, from the
+    /// OS's preferred language unless it names its own, which Lynx iOS reads
+    /// for this same choice. The embedder names it here; the engine derives
+    /// none, and script is not told it, since Lynx's `SystemInfo` has no
+    /// language field. `None` leaves the platform's default. A tag that
+    /// does not parse is refused by `create_lynx_view` as
+    /// [`EngineError::InvalidLocale`], before anything is requested.
+    pub locale: Option<String>,
     pub style_sheets: Vec<String>,
     /// The MTS entry's URL, which may be relative: `create_lynx_view`
     /// resolves it against [`Self::base_url`], and both the fetcher's request
@@ -600,6 +622,7 @@ impl ViewSources {
             fonts: Vec::new(),
             default_font_family: None,
             fallback_fonts: Vec::new(),
+            locale: None,
             style_sheets: Vec::new(),
             entry: entry.into(),
             card_url: None,
@@ -850,10 +873,12 @@ impl LynxGroup {
         // fonts and the default family are a `terminus::link::TextContext`'s business,
         // and a document only ever adopts a finished one.
         let default_font_family = sources.default_font_family.take();
+        let locale = sources.locale.take();
         let text_context = stage_text_context(
             std::mem::take(&mut sources.fonts),
             default_font_family.as_deref(),
             std::mem::take(&mut sources.fallback_fonts),
+            locale.as_deref(),
         )?;
         let viewport = Viewport::new(width, height).with_device_pixel_ratio(device_pixel_ratio);
         // One view, one set of channels and one end signal: nothing here is
@@ -1702,10 +1727,10 @@ pub(crate) fn resolve_startup_urls(sources: &mut ViewSources) -> Result<url::Url
 /// process shares that one discovery. Without this call it happens inside the
 /// first call that needs a context: [`LynxGroup::create_lynx_view`], on the
 /// embedder's thread, for a view that names [`ViewSources::fonts`],
-/// [`ViewSources::default_font_family`] or [`ViewSources::fallback_fonts`];
-/// otherwise the first layout that shapes text, on the group's Lynx main
-/// thread, where it delays that view's first frame and every entry of every
-/// other view of the group.
+/// [`ViewSources::default_font_family`], [`ViewSources::fallback_fonts`] or
+/// [`ViewSources::locale`]; otherwise the first layout that shapes text, on
+/// the group's Lynx main thread, where it delays that view's first frame and
+/// every entry of every other view of the group.
 ///
 /// An embedder calls this once, early, on a thread of its own, so the
 /// discovery overlaps the rest of its startup; the group and the views need
@@ -1714,30 +1739,41 @@ pub(crate) fn resolve_startup_urls(sources: &mut ViewSources) -> Result<url::Url
 /// call waits for it, so a view built before the preload finishes is correct
 /// and merely waits. Not covered: a view's own fonts and `@font-face` sources,
 /// which are registered per view, and the platform's per-script fallback
-/// lookup, which each view makes itself the first time it shapes a script.
+/// lookup, which each view makes itself: for the Han and Latin fallback of a
+/// view that names [`ViewSources::locale`], when the view is built; for every
+/// other script, the first time the view shapes it.
 pub fn preload_system_fonts() {
     terminus::link::TextContext::preload_system_fonts();
 }
 
-/// Registers a view's fonts and selects its default family, before any
-/// document exists and before anything has been fetched.
+/// Registers a view's fonts, selects its default family and sets its
+/// locale, before any document exists and before anything has been fetched.
 ///
-/// Neither needs a document: fonts and the default family are a
-/// [`TextContext`](terminus::link::TextContext)'s business, and a document only ever
-/// adopts a finished one. Running it here, in `create_lynx_view`, is what
-/// keeps a family nothing provides a zero-fetch failure — the startup
-/// requests go out in that same call, so there is no later point at which
-/// this check would still be ahead of them.
+/// None of them needs a document: fonts, the default family and the locale
+/// are a [`TextContext`](terminus::link::TextContext)'s business, and a
+/// document only ever adopts a finished one. Running it here, in
+/// `create_lynx_view`, is what keeps a family nothing provides, or a tag that
+/// is not a language, a zero-fetch failure — the startup requests go out in
+/// that same call, so there is no later point at which this check would
+/// still be ahead of them.
 ///
-/// `None` is a view that named neither, which leaves the document's own lazy
-/// context alone. `Err` is a default family neither the containers nor the
-/// platform has, which is a failure to build the view rather than to run it.
+/// `None` is a view that named none of them, which leaves the document's own
+/// lazy context alone. `Err` is a default family neither the containers nor
+/// the platform has, or a locale that is not a BCP-47 tag: a failure to
+/// build the view rather than to run it. The locale is set last, after the
+/// fallback containers, so that the language's own fallback keys reach the
+/// families those containers hold.
 fn stage_text_context(
     fonts: Vec<FontBlob>,
     default_font_family: Option<&str>,
     fallback_fonts: Vec<FontBlob>,
+    locale: Option<&str>,
 ) -> Result<Option<terminus::link::TextContext>, LynxViewError> {
-    if fonts.is_empty() && default_font_family.is_none() && fallback_fonts.is_empty() {
+    if fonts.is_empty()
+        && default_font_family.is_none()
+        && fallback_fonts.is_empty()
+        && locale.is_none()
+    {
         return Ok(None);
     }
     let mut text = terminus::link::TextContext::new();
@@ -1751,6 +1787,11 @@ fn stage_text_context(
         && !text.set_default_font_family(family)
     {
         return Err(EngineError::UnknownFontFamily(family.to_owned()).into());
+    }
+    if let Some(locale) = locale
+        && !text.set_locale(locale)
+    {
+        return Err(EngineError::InvalidLocale(locale.to_owned()).into());
     }
     Ok(Some(text))
 }

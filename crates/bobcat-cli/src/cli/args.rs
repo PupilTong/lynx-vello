@@ -23,6 +23,10 @@ pub(crate) struct Options {
     pub(crate) viewport_width: f32,
     pub(crate) viewport_height: f32,
     pub(crate) device_pixel_ratio: f32,
+    /// The language of the page's text, as a BCP-47 tag: `--locale`, else
+    /// the POSIX locale environment (`LC_ALL`, `LC_CTYPE`, `LANG`) as a tag,
+    /// else none.
+    pub(crate) locale: Option<String>,
 }
 
 #[derive(Debug)]
@@ -32,6 +36,7 @@ pub(crate) enum Invocation {
     Version,
 }
 
+#[allow(clippy::too_many_lines, reason = "one match arm per option")]
 pub(crate) fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Invocation, CliError> {
     let mut arguments = arguments.into_iter().collect::<VecDeque<_>>();
     let mut input = None;
@@ -42,6 +47,7 @@ pub(crate) fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Inv
     let mut viewport_set = false;
     let mut device_pixel_ratio = DEFAULT_DEVICE_PIXEL_RATIO;
     let mut dpr_set = false;
+    let mut locale: Option<String> = None;
 
     while let Some(argument) = arguments.pop_front() {
         let Some(argument_text) = argument.to_str() else {
@@ -90,6 +96,10 @@ pub(crate) fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Inv
                 device_pixel_ratio = parse_dpr(&value)?;
                 dpr_set = true;
             }
+            "--locale" => set_locale(&mut locale, &next_utf8(&mut arguments, "--locale")?)?,
+            _ if argument_text.starts_with("--locale=") => {
+                set_locale(&mut locale, &argument_text["--locale=".len()..])?;
+            }
             _ if argument_text.starts_with("--input=") => {
                 if input.is_some() {
                     return Err(CliError::arguments("the input URL was provided twice"));
@@ -133,9 +143,11 @@ pub(crate) fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Inv
         viewport,
         device_pixel_ratio,
         dpr_set,
+        locale,
     )
 }
 
+#[allow(clippy::too_many_arguments, reason = "one parsed option each")]
 fn finish(
     input: Option<Url>,
     headless: bool,
@@ -144,6 +156,7 @@ fn finish(
     viewport: (f32, f32),
     device_pixel_ratio: f32,
     dpr_set: bool,
+    locale: Option<String>,
 ) -> Result<Invocation, CliError> {
     let input = input.ok_or_else(|| CliError::arguments("missing `-i <file:///...>`"))?;
     if vsync_set && !headless {
@@ -164,7 +177,51 @@ fn finish(
         viewport_width: viewport.0,
         viewport_height: viewport.1,
         device_pixel_ratio,
+        locale: locale.or_else(environment_locale),
     }))
+}
+
+/// Stores `--locale`'s value, once.
+fn set_locale(locale: &mut Option<String>, value: &str) -> Result<(), CliError> {
+    if locale.is_some() {
+        return Err(CliError::arguments("`--locale` was provided twice"));
+    }
+    *locale = Some(parse_locale(value)?);
+    Ok(())
+}
+
+/// `--locale`'s value: a BCP-47 tag, checked here only for shape (no
+/// whitespace, nothing but letters, digits and hyphens); the engine refuses
+/// one that is not a language when the view is built.
+fn parse_locale(value: &str) -> Result<String, CliError> {
+    let value = value.trim();
+    if value.is_empty() || !value.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return Err(CliError::arguments(format!(
+            "`--locale` must be a BCP-47 language tag such as zh-Hant: `{value}`"
+        )));
+    }
+    Ok(value.to_owned())
+}
+
+/// The POSIX locale environment as a BCP-47 tag, what Lynx's `LynxEnv`
+/// defaults its locale from on the platforms that have one: the first of
+/// `LC_ALL`, `LC_CTYPE` and `LANG` that is set, with its encoding and
+/// modifier dropped and `_` read as `-` (`zh_CN.UTF-8` is `zh-CN`). `C` and
+/// `POSIX` name no language.
+fn environment_locale() -> Option<String> {
+    ["LC_ALL", "LC_CTYPE", "LANG"]
+        .iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .find(|value| !value.is_empty())
+        .and_then(|value| {
+            let tag = value
+                .split(['.', '@'])
+                .next()
+                .unwrap_or_default()
+                .replace('_', "-");
+            (!matches!(tag.as_str(), "" | "C" | "POSIX") && parse_locale(&tag).is_ok())
+                .then_some(tag)
+        })
 }
 
 fn next_utf8(arguments: &mut VecDeque<OsString>, option: &str) -> Result<String, CliError> {
@@ -267,6 +324,49 @@ mod tests {
         assert_eq!(options.vsync_hz.get(), 120);
         assert_eq!(options.viewport_width.to_bits(), 800.0_f32.to_bits());
         assert_eq!(options.viewport_height.to_bits(), 600.0_f32.to_bits());
+    }
+
+    #[test]
+    fn parses_a_locale_and_refuses_one_that_is_not_a_tag() {
+        let Invocation::Run(options) = parse(args(&[
+            "-i",
+            "file:///tmp/card.web.bundle",
+            "--locale=zh-Hant",
+        ]))
+        .unwrap() else {
+            panic!("expected a runnable invocation");
+        };
+        assert_eq!(options.locale.as_deref(), Some("zh-Hant"));
+
+        let Invocation::Run(options) = parse(args(&[
+            "-i",
+            "file:///tmp/card.web.bundle",
+            "--locale",
+            "ja",
+        ]))
+        .unwrap() else {
+            panic!("expected a runnable invocation");
+        };
+        assert_eq!(options.locale.as_deref(), Some("ja"));
+
+        assert!(
+            parse(args(&[
+                "-i",
+                "file:///tmp/card.web.bundle",
+                "--locale",
+                "not a tag"
+            ]))
+            .is_err()
+        );
+        assert!(
+            parse(args(&[
+                "-i",
+                "file:///tmp/card.web.bundle",
+                "--locale=ja",
+                "--locale=ko"
+            ]))
+            .is_err()
+        );
     }
 
     #[test]

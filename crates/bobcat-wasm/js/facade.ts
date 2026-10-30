@@ -1294,6 +1294,20 @@ export class BobcatCanvas {
     await this.#request('registerFallbackFonts', { bytes: fontBytes(data) })
   }
 
+  /**
+   * Name the language of every page this canvas loads, as a BCP-47 tag such
+   * as `zh-Hant` or `ja`: what the per-script font fallback is asked with, so
+   * a Han character no family of its own font-family covers is set in the
+   * face that language calls for. A tag that is not a language makes the
+   * next load reject. Call before a load.
+   */
+  async setLocale(tag: string): Promise<void> {
+    if (typeof tag !== 'string' || tag.trim() === '') {
+      throw new TypeError('BobcatCanvas.setLocale requires a non-empty tag')
+    }
+    await this.#request('setLocale', { tag: tag.trim() })
+  }
+
   async resize(
     width: number,
     height: number,

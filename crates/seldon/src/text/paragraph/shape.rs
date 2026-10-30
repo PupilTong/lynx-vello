@@ -218,6 +218,7 @@ fn build_into_scratch<S: Copy>(
     }
     #[cfg(test)]
     context.record_shape();
+    let locale = context.locale();
     let (font_context, layout_context, scratch) = context.shaping_parts();
     // `text` is already whitespace-normalized by `super::content::normalize`,
     // and `style_run_builder` takes it verbatim — parley's own
@@ -251,7 +252,9 @@ fn build_into_scratch<S: Copy>(
     builder.set_base_direction(root.direction);
     builder.reserve(spans.len() + 1, spans.len());
     if let Some((strut, source)) = root.strut {
-        let index = builder.push_style(super::style::parley_style(strut, BreakStyle::default()));
+        let mut style = super::style::parley_style(strut, BreakStyle::default());
+        style.locale = locale;
+        let index = builder.push_style(style);
         debug_assert_eq!(index, 0, "the strut is parley's style 0");
         sources.push(source);
     } else if spans.is_empty() {
@@ -267,6 +270,7 @@ fn build_into_scratch<S: Copy>(
     }
     for span in spans {
         let mut style = super::style::parley_style(span.style, span.breaking);
+        style.locale = locale;
         style.letter_spacing += span.extra_spacing;
         style.white_space_collapse = span.hanging;
         let index = builder.push_style(style);

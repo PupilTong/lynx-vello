@@ -4,7 +4,8 @@ use core::fmt;
 use std::sync::OnceLock;
 
 use parley::fontique::{
-    Collection, CollectionOptions, FontInfoOverride, GenericFamily, Script, ScriptExt, SourceCache,
+    Collection, CollectionOptions, FallbackKey, FamilyId, FontInfoOverride, GenericFamily,
+    Language, Script, ScriptExt, SourceCache,
 };
 use parley::{FontContext, Layout, LayoutContext};
 
@@ -39,6 +40,13 @@ pub struct TextContext {
     /// nothing. Its own buffers serve the next shaping, and a paragraph
     /// larger than [`SCRATCH_KEEP_BYTES`] does not leave them behind.
     scratch: Layout<TextBrush>,
+    /// The language of the text this context shapes, which every shaping
+    /// hands parley as the run's locale; see [`Self::set_locale`].
+    locale: Option<Language>,
+    /// The families [`Self::register_fallback_fonts`] appended to every
+    /// script's fallback list, kept so that a locale set later can file them
+    /// under its own keys too.
+    fallback_families: Vec<FamilyId>,
     #[cfg(test)]
     shape_count: usize,
 }
@@ -50,6 +58,8 @@ impl TextContext {
             font: system_font_template().clone(),
             layout: LayoutContext::new(),
             scratch: Layout::default(),
+            locale: None,
+            fallback_families: Vec::new(),
             #[cfg(test)]
             shape_count: 0,
         }
@@ -69,7 +79,9 @@ impl TextContext {
     /// at once, and one that overlaps the building call waits for it. What
     /// it does not cover: a context's own registered fonts, and the
     /// platform's per-script fallback lookup, which each context makes
-    /// itself the first time it shapes a script.
+    /// itself: [`Self::set_locale`] makes the Han and Latin lookup for its
+    /// language at once; every other script is looked up the first time the
+    /// context shapes it.
     pub fn preload_system_fonts() {
         let _ = system_font_template();
     }
@@ -86,6 +98,8 @@ impl TextContext {
             },
             layout: LayoutContext::new(),
             scratch: Layout::default(),
+            locale: None,
+            fallback_families: Vec::new(),
             #[cfg(test)]
             shape_count: 0,
         }
@@ -172,12 +186,94 @@ impl TextContext {
     /// [`Self::register_fonts`].
     pub fn register_fallback_fonts(&mut self, data: FontBlob) -> usize {
         let registered = self.font.collection.register_fonts(data.into_inner(), None);
+        let families: Vec<FamilyId> = registered.iter().map(|(family, _)| *family).collect();
         for &(script, _) in Script::all_samples() {
             self.font
                 .collection
-                .append_fallbacks(script, registered.iter().map(|(family, _)| *family));
+                .append_fallbacks(script, families.iter().copied());
         }
+        if let Some(locale) = self.locale {
+            self.append_locale_fallbacks(&families, &locale);
+        }
+        self.fallback_families.extend(families);
         registered.iter().map(|(_, fonts)| fonts.len()).sum()
+    }
+
+    /// Appends `families` under `locale`'s key for every script fontique
+    /// keeps a separate list for that script and language (Han for `ja`,
+    /// `ko` and the `zh` regions, among others), so that a run shaped with
+    /// the locale reaches them as a run shaped without one does. Like the
+    /// language-less keys, a key given a list this way no longer asks the
+    /// platform for its own.
+    fn append_locale_fallbacks(&mut self, families: &[FamilyId], locale: &Language) {
+        for &(script, _) in Script::all_samples() {
+            let key = FallbackKey::new(script, Some(locale));
+            if !key.is_default() {
+                self.font
+                    .collection
+                    .append_fallbacks(key, families.iter().copied());
+            }
+        }
+    }
+
+    /// Sets the language of the text this context shapes, as a BCP-47 tag
+    /// such as `zh-Hant`, `ja` or `en-US`.
+    ///
+    /// Every shaping hands it to parley as the run's locale, and parley
+    /// passes it on to fontique's fallback key, so the platform's per-script
+    /// fallback is asked with it: on Apple platforms CoreText then answers a
+    /// Han cluster with `PingFang TC` for `zh-Hant`, `PingFang HK` for `zh-HK`,
+    /// Hiragino Sans for `ja` and Apple SD Gothic Neo for `ko`, where without
+    /// a language it answers `PingFang SC` for all of them. What Lynx iOS does
+    /// with its locale-chosen cascade family, here for every script fontique
+    /// distinguishes by language.
+    ///
+    /// Two lookups are made now rather than at the first shaping: the Han
+    /// and Latin fallback for the language, which are what fontique asks for
+    /// at the start of every Han and Latin segment. The language's Han
+    /// fallback is also filed under the language-less Han key, the one
+    /// fontique appends to every query so that Common-script punctuation in
+    /// a run with no Han character still has a CJK face: the punctuation of
+    /// a Traditional Chinese page is then set in the Traditional face rather
+    /// than the platform's default. Families already registered through
+    /// [`Self::register_fallback_fonts`] are filed under the language's keys
+    /// first, so those lookups find them and, as under the language-less
+    /// keys, ask the platform for nothing.
+    ///
+    /// Returns `false`, without changing anything, when `tag` is not a
+    /// well-formed BCP-47 language tag.
+    pub fn set_locale(&mut self, tag: &str) -> bool {
+        let Ok(locale) = Language::parse(tag) else {
+            return false;
+        };
+        self.locale = Some(locale);
+        let fallback_families = std::mem::take(&mut self.fallback_families);
+        self.append_locale_fallbacks(&fallback_families, &locale);
+        self.fallback_families = fallback_families;
+        let han = Script::from_bytes(*b"Hani");
+        let latin = Script::from_bytes(*b"Latn");
+        let han_families: Vec<FamilyId> = self
+            .font
+            .collection
+            .fallback_families(FallbackKey::new(han, Some(&locale)))
+            .collect();
+        let _ = self
+            .font
+            .collection
+            .fallback_families(FallbackKey::new(latin, Some(&locale)))
+            .count();
+        if self.fallback_families.is_empty() && !han_families.is_empty() {
+            self.font
+                .collection
+                .set_fallbacks(han, han_families.into_iter());
+        }
+        true
+    }
+
+    /// The language [`Self::set_locale`] set, as parley takes it.
+    #[must_use]
+    pub fn locale(&self) -> Option<Language> {
+        self.locale
     }
 
     /// The parley contexts and the scratch layout a shaping builds into.
@@ -363,6 +459,135 @@ mod tests {
                 .is_none(),
             "a fallback family is not a generic family"
         );
+    }
+
+    #[test]
+    fn a_locale_must_be_a_language_tag() {
+        let mut context = TextContext::without_system_fonts();
+        assert!(context.locale().is_none());
+        assert!(!context.set_locale("not a tag"));
+        assert!(context.locale().is_none());
+        assert!(context.set_locale("zh-Hant"));
+        assert_eq!(
+            context.locale().map(|locale| locale.as_str().to_owned()),
+            Some("zh-Hant".to_owned())
+        );
+    }
+
+    /// Fontique keeps a separate Han fallback list per language, so a
+    /// fallback container registered under the language-less keys has to be
+    /// filed under the language's too, whichever of the two is set first.
+    #[test]
+    fn fallback_containers_serve_the_locale_in_either_order() {
+        let han = Script::from_bytes(*b"Hani");
+        let japanese = Language::parse("ja").expect("a tag");
+        let key = || FallbackKey::new(han, Some(&japanese));
+        assert!(
+            !key().is_default(),
+            "the test needs a language fontique distinguishes"
+        );
+
+        let mut fonts_first = TextContext::without_system_fonts();
+        assert_eq!(
+            fonts_first.register_fallback_fonts(FontBlob::from_static(AHEM)),
+            1
+        );
+        assert!(fonts_first.set_locale("ja"));
+        let ahem = fonts_first
+            .font
+            .collection
+            .family_id("Ahem")
+            .expect("registered");
+        assert_eq!(
+            fonts_first
+                .font
+                .collection
+                .fallback_families(key())
+                .collect::<Vec<_>>(),
+            vec![ahem]
+        );
+        assert_eq!(
+            fonts_first
+                .font
+                .collection
+                .fallback_families(han)
+                .collect::<Vec<_>>(),
+            vec![ahem]
+        );
+
+        let mut locale_first = TextContext::without_system_fonts();
+        assert!(locale_first.set_locale("ja"));
+        assert_eq!(
+            locale_first.register_fallback_fonts(FontBlob::from_static(AHEM)),
+            1
+        );
+        let ahem = locale_first
+            .font
+            .collection
+            .family_id("Ahem")
+            .expect("registered");
+        assert_eq!(
+            locale_first
+                .font
+                .collection
+                .fallback_families(key())
+                .collect::<Vec<_>>(),
+            vec![ahem]
+        );
+        assert_eq!(
+            locale_first
+                .font
+                .collection
+                .fallback_families(han)
+                .collect::<Vec<_>>(),
+            vec![ahem]
+        );
+    }
+
+    /// On a Mac the platform answers a Han cluster differently per language,
+    /// and the language-less Han key, the one fontique appends to every
+    /// query, follows the language set. Skipped where the platform does not
+    /// have the faces.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_platform_han_fallback_follows_the_locale() {
+        let han = Script::from_bytes(*b"Hani");
+        let family_names = |context: &mut TextContext, tag: &str| -> Vec<String> {
+            let language = Language::parse(tag).expect("a tag");
+            let ids: Vec<_> = context
+                .font
+                .collection
+                .fallback_families(FallbackKey::new(han, Some(&language)))
+                .collect();
+            ids.iter()
+                .filter_map(|id| context.font.collection.family_name(*id).map(str::to_owned))
+                .collect()
+        };
+        let mut traditional = TextContext::new();
+        assert!(traditional.set_locale("zh-Hant"));
+        let mut japanese = TextContext::new();
+        assert!(japanese.set_locale("ja"));
+        let traditional_han = family_names(&mut traditional, "zh-Hant");
+        let japanese_han = family_names(&mut japanese, "ja");
+        if traditional_han.is_empty() || japanese_han.is_empty() {
+            return;
+        }
+        assert_ne!(traditional_han, japanese_han);
+        let default_han: Vec<String> = traditional
+            .font
+            .collection
+            .fallback_families(han)
+            .collect::<Vec<_>>()
+            .iter()
+            .filter_map(|id| {
+                traditional
+                    .font
+                    .collection
+                    .family_name(*id)
+                    .map(str::to_owned)
+            })
+            .collect();
+        assert_eq!(default_han, traditional_han);
     }
 
     #[test]
