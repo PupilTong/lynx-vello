@@ -2376,7 +2376,7 @@ const STRUCTURED_PROPERTIES: ReadonlyMap<string, ReadonlyMap<string, string>> = 
  * of these asks the host for the element's tag.
  */
 const STRUCTURED_PROPERTY_NAMES: ReadonlySet<string> = new Set(
-  [...STRUCTURED_PROPERTIES.values()].flatMap(properties => [...properties.keys()]),
+  STRUCTURED_PROPERTIES.values().flatMap(properties => properties.keys()),
 );
 
 /**
@@ -3424,10 +3424,7 @@ function datasetOf(nodeId: number): Record<string, unknown> {
   // Most elements have no typed dataset, and then nothing is reflected.
   let reflected: Set<string> | undefined;
   if (typed !== undefined && typed.size !== 0) {
-    reflected = new Set();
-    for (const key of typed.keys()) {
-      reflected.add(datasetAttributeName(key));
-    }
+    reflected = new Set(typed.keys().map(datasetAttributeName));
   }
   const attributeDataset: [string, unknown][] = [];
   const names = handle === undefined

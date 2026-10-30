@@ -169,13 +169,7 @@ export function createPerformanceObservers(
   let observingPaint = false;
   function sync() {
     const next = active.size > 0;
-    let paint = false;
-    for (const names of active.values()) {
-      if (asksForPaint(names)) {
-        paint = true;
-        break;
-      }
-    }
+    const paint = active.values().some(asksForPaint);
     if (next === observing && paint === observingPaint) return;
     observing = next;
     observingPaint = paint;

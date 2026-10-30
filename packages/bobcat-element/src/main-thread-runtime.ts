@@ -339,10 +339,10 @@ function disposeBackground(): Promise<void> {
   // An ended Worker gets no `dispose`: nothing over there could run it, and
   // no acknowledgement could come back. Terminating it again is a no-op.
   const ended = worker === undefined || backgroundEnded;
-  backgroundDisposal = new Promise<void>(resolve => {
-    if (ended) resolve();
-    else acknowledgeDisposal = resolve;
-  }).finally(() => {
+  const { promise, resolve } = Promise.withResolvers<void>();
+  if (ended) resolve();
+  else acknowledgeDisposal = resolve;
+  backgroundDisposal = promise.finally(() => {
     worker?.terminate();
     acknowledgeDisposal = undefined;
   });
