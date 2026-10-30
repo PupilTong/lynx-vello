@@ -286,6 +286,9 @@ pub struct BobcatRenderer {
     /// registered. The browser gives this target no system-font backend, so
     /// these are the only fallback a view this renderer builds has.
     fallback_fonts: Vec<FontBlob>,
+    /// The language of every page's text, as a BCP-47 tag, read once at
+    /// construction like the fonts. `None` leaves the engine's default.
+    locale: Option<String>,
     /// The Stylo worker count each group this renderer builds gets. The
     /// workers themselves are the group's and retire with it; only the size
     /// is wrapper state.
@@ -473,6 +476,7 @@ impl BobcatRenderer {
                 fonts: Vec::new(),
                 default_font_family: None,
                 fallback_fonts: Vec::new(),
+                locale: None,
                 style_threads,
                 native_modules,
                 module_bridge: Rc::new(HostModuleBridge {
@@ -686,6 +690,17 @@ impl BobcatRenderer {
     pub fn register_fallback_fonts(&mut self, bytes: Vec<u8>) -> Result<(), JsValue> {
         self.ensure_running()?;
         self.fallback_fonts.push(FontBlob::new(bytes));
+        Ok(())
+    }
+
+    /// Name the language of every page this renderer builds, as a BCP-47
+    /// tag (`zh-Hant`, `ja`): what the per-script font fallback is asked
+    /// with. Checked at construction: [`Self::load`] fails if it is not a
+    /// language tag.
+    #[wasm_bindgen(js_name = setLocale)]
+    pub fn set_locale(&mut self, tag: String) -> Result<(), JsValue> {
+        self.ensure_running()?;
+        self.locale = Some(tag);
         Ok(())
     }
 
@@ -1176,6 +1191,7 @@ impl BobcatRenderer {
         sources.fonts = self.fonts.clone();
         sources.default_font_family = self.default_font_family.clone();
         sources.fallback_fonts = self.fallback_fonts.clone();
+        sources.locale = self.locale.clone();
         // JSON text the host serialized and Rust never reads.
         sources.global_props = global_props;
         // A draw target that failed cannot be reached again, so a page loaded

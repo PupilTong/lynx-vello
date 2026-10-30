@@ -48,6 +48,8 @@ Options:
       --vsync FPS       headless frame-clock rate, 1..1000 (default: 60)
       --viewport WxH    initial CSS-pixel viewport (default: 393x727)
       --dpr RATIO       headless device-pixel ratio (default: 1)
+      --locale TAG      BCP-47 language of the page's text, for font fallback
+                        (default: the LC_ALL, LC_CTYPE or LANG environment)
   -h, --help            show this help
   -V, --version         show the version
 

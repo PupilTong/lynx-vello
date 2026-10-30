@@ -243,7 +243,14 @@ exports of `bobcat:element`. `registerFonts(bytes)`,
 wrapper state: faces are registered, and the family checked against them,
 inside the call that builds a view, so all three must precede a load, and a
 family nothing provides makes that load reject with the construction error
-rather than through a lifecycle event. The default family is what the generic
+rather than through a lifecycle event. `setLocale(tag)` is wrapper state of
+the same kind: the BCP-47 language of every page's text, set on the view's
+text context at construction and checked there, so a tag that is not a
+language makes the load reject too. It is what the per-script font fallback
+is asked with, which matters once a fallback container holds faces for more
+than one CJK language or the Local Font Access API has supplied them; the
+browser is not asked for `navigator.language`, as web-core never reads it,
+so a site that wants the user's language names it. The default family is what the generic
 `system-ui`, `sans-serif` and `serif` name; a fallback container's families
 shape text that no family of its own `font-family` covers, in any script — the
 browser gives the engine no system fonts, so a script neither covers renders

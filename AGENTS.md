@@ -481,6 +481,22 @@ with a system font read through the Local Font Access API. A script given a
 list stops asking the platform for its own, so an embedder with system fonts
 leaves the field empty. A default family name neither the containers nor the
 platform has fails the construction with `EngineError::UnknownFontFamily`.
+`ViewSources::locale` is the language of the view's text as a BCP-47 tag,
+Lynx's `LynxEnv.locale`: the host sets it for the process, from the OS's
+preferred language unless it names its own, and Lynx iOS reads it to choose
+the CJK cascade family (`LynxFontFaceManager.m:440-462`). Here it becomes the
+locale of every parley run, which fontique's fallback key carries to the
+platform, so a Han cluster no family of the run's own `font-family` covers is
+set in PingFang TC for `zh-Hant`, PingFang HK for `zh-HK`, Hiragino Sans for
+`ja` and Apple SD Gothic Neo for `ko` where the platform's default is PingFang
+SC; the language's Han fallback is also filed under the language-less Han key
+fontique appends to every query (its workaround for Common-script punctuation
+in a run with no Han character), so that punctuation is set in the same face.
+Lynx has no `lang` attribute and no `SystemInfo` language field, so nothing
+per element overrides it and script is not told it. A tag that does not parse
+fails the construction with `EngineError::InvalidLocale`. `bobcat` names it
+from `--locale`, else from the POSIX locale environment; the Wasm facade from
+`setLocale(tag)`.
 
 Dropping a loading view marks source work cancelled and stops that view before
 QuickJS begins. One `tokio_util::sync::CancellationToken` per view is minted on

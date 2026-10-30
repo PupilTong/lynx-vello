@@ -377,6 +377,76 @@ fn only_fatal_events_end_the_view() {
     }
 }
 
+/// A view that names a locale builds its text context on the embedder's
+/// thread and boots on it like any other: the locale changes which face a
+/// fallback cluster is set in, not whether the view starts.
+#[test]
+fn a_view_with_a_locale_boots() {
+    let mut engine = TestViewSpec::new(
+        r"
+        globalThis.renderPage = function () {
+          const page = __CreatePage('card', 0);
+          const text = __CreateText(0);
+          __AppendElement(text, __CreateRawText('繁體中文 and Latin'));
+          __AppendElement(page, text);
+        };
+        ",
+    )
+    .with_locale("zh-Hant")
+    .create(Arc::new(NoWakeup));
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while engine.published_frame().is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "boot never published a frame with a locale set"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let mut booted = false;
+    while !booted {
+        for event in engine.pump() {
+            match event {
+                EngineEvent::ScriptFinished => booted = true,
+                EngineEvent::StartupFailed(error) => panic!("the view did not boot: {error}"),
+                EngineEvent::ScriptRunError(error) => panic!("the entry failed: {error}"),
+                EngineEvent::Panicked(error) => panic!("the engine panicked: {error}"),
+                _ => {}
+            }
+        }
+        assert!(Instant::now() < deadline, "the view never finished booting");
+        std::thread::yield_now();
+    }
+}
+
+/// A view's locale is validated where its fonts are, before anything is
+/// requested: a tag that is not a language is `InvalidLocale`, and a locale
+/// alone is reason enough to build the view's text context, since the
+/// document's lazy one would not carry it.
+#[test]
+fn a_locale_is_validated_with_the_fonts_before_anything_is_requested() {
+    let error = stage_text_context(Vec::new(), None, Vec::new(), Some("not a tag"))
+        .expect_err("a tag with a space is not a language");
+    assert!(
+        matches!(&error, LynxViewError::Engine(EngineError::InvalidLocale(tag)) if tag == "not a tag"),
+        "{error:?}"
+    );
+
+    let context = stage_text_context(Vec::new(), None, Vec::new(), Some("zh-Hant"))
+        .expect("a well-formed tag")
+        .expect("a locale alone builds the context");
+    assert_eq!(
+        context.locale().map(|locale| locale.as_str().to_owned()),
+        Some("zh-Hant".to_owned())
+    );
+    assert!(
+        stage_text_context(Vec::new(), None, Vec::new(), None)
+            .expect("nothing to validate")
+            .is_none(),
+        "a view naming nothing keeps the document's lazy context"
+    );
+}
+
 /// What an embedder prints a script event's source as: `main`, or `worker`
 /// with the worker's id and its script URL. The view's background thread is
 /// printed as the worker it is, at the URL `bobcat:bts`, and the id is what

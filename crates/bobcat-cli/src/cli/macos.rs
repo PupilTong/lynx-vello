@@ -116,6 +116,8 @@ struct MacApplication {
     input: String,
     initial_width: f32,
     initial_height: f32,
+    /// The language of the page's text, handed to the view's sources.
+    locale: Option<String>,
     /// This window's display clock, running only while a frame is owed.
     /// Declared before both of the two below so it is stopped — and its
     /// callback proven finished — before what it wakes goes away.
@@ -153,6 +155,7 @@ impl std::fmt::Debug for MacApplication {
             .field("input", &self.input)
             .field("initial_width", &self.initial_width)
             .field("initial_height", &self.initial_height)
+            .field("locale", &self.locale)
             .field("has_error", &self.error.is_some())
             .finish_non_exhaustive()
     }
@@ -170,6 +173,7 @@ impl MacApplication {
             program: Some(program),
             initial_width: options.viewport_width,
             initial_height: options.viewport_height,
+            locale: options.locale.clone(),
             vsync: None,
             painter: None,
             view: None,
@@ -248,7 +252,8 @@ impl MacApplication {
                 || ScreenMetrics::for_viewport(css_width, css_height, scale_factor),
                 screen_metrics,
             );
-        let sources = program.sources(screen);
+        let mut sources = program.sources(screen);
+        sources.locale.clone_from(&self.locale);
         let view = group
             .create_lynx_view(
                 css_width,

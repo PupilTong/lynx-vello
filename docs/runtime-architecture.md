@@ -9,7 +9,7 @@ only capabilities and OS facts:
 
 - a `ViewSources` — the required base URL the view's entries and every
   realm's synchronous loads resolve against, page config, owned font bytes, an optional default font
-  family, author stylesheet URLs, the one entry MTS
+  family, an optional BCP-47 locale the per-script font fallback is asked with, author stylesheet URLs, the one entry MTS
   module URL, optional `init_data` and `global_props` JSON text, and the
   required `screen` metrics `SystemInfo` reports — and,
   as a separate argument, the builder of the view's
@@ -473,7 +473,11 @@ this workspace does. Fonts
 and the default family come next, validated against a `terminus::link::TextContext` of
 their own: they are a text context's business, no document exists yet, and an
 unknown default family is therefore a zero-fetch, synchronous
-`EngineError::UnknownFontFamily` rather than a later `StartupFailed`. Then each
+`EngineError::UnknownFontFamily` rather than a later `StartupFailed`. The
+locale is set on that same context, last, so that its language-specific
+fallback keys reach the fallback containers registered before it, and a tag
+that is not a language is refused the same way, as
+`EngineError::InvalidLocale`. Then each
 author stylesheet in the order the view listed them, by the string it was
 listed as, then the entry, by its resolved URL, handed straight to
 `ResourceFetcher::request_source` on the embedder's own thread — the fetcher

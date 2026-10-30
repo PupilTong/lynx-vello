@@ -80,7 +80,8 @@ pub(crate) fn run(program: &Program, options: &Options) -> Result<(), CliError> 
         options.viewport_height,
         options.device_pixel_ratio,
     );
-    let sources = program.sources(ScreenMetrics::for_viewport(width, height, ratio));
+    let mut sources = program.sources(ScreenMetrics::for_viewport(width, height, ratio));
+    sources.locale.clone_from(&options.locale);
     let mut view = group
         .create_lynx_view(
             width,

@@ -511,6 +511,10 @@ async function dispatchRequest(message: RequestMessage): Promise<void> {
       renderer.registerFallbackFonts(message.bytes)
       postResponse(request, true)
       break
+    case 'setLocale':
+      renderer.setLocale(message.tag)
+      postResponse(request, true)
+      break
     case 'resize':
       renderer.resize(
         message.width,
