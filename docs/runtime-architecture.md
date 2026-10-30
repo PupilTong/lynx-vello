@@ -473,7 +473,14 @@ this workspace does. Fonts
 and the default family come next, validated against a `terminus::link::TextContext` of
 their own: they are a text context's business, no document exists yet, and an
 unknown default family is therefore a zero-fetch, synchronous
-`EngineError::UnknownFontFamily` rather than a later `StartupFailed`. Then each
+`EngineError::UnknownFontFamily` rather than a later `StartupFailed`. Building
+that context is also where the platform's fonts are discovered, once per
+process, when no earlier context has: a view that names none of the three
+font fields builds no context here and discovers them in its first
+text-shaping layout on `bobcat-main` instead. `bobcat_core::preload_system_fonts()`
+runs the discovery ahead of either, on whichever thread the embedder calls it
+from; it is process-wide and idempotent, and a context built while it is
+still running waits for it. Then each
 author stylesheet in the order the view listed them, by the string it was
 listed as, then the entry, by its resolved URL, handed straight to
 `ResourceFetcher::request_source` on the embedder's own thread — the fetcher

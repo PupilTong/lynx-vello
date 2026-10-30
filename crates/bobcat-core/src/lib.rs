@@ -129,5 +129,5 @@ pub use view::configure_wasm_workers;
 pub use view::{
     DrawTarget, EngineError, EngineEvent, EventRequester, FrameSize, LynxGroup, LynxView,
     LynxViewError, NoWakeup, PainterError, ScreenMetrics, Screenshot, ScriptSource, StyleThreads,
-    ViewSources, WindowTarget, WorkerId,
+    ViewSources, WindowTarget, WorkerId, preload_system_fonts,
 };

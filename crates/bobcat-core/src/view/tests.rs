@@ -377,6 +377,15 @@ fn only_fatal_events_end_the_view() {
     }
 }
 
+#[test]
+fn preloading_fonts_is_idempotent_from_any_thread() {
+    preload_system_fonts();
+    std::thread::spawn(preload_system_fonts)
+        .join()
+        .expect("the preloading thread finishes");
+    preload_system_fonts();
+}
+
 /// What an embedder prints a script event's source as: `main`, or `worker`
 /// with the worker's id and its script URL. The view's background thread is
 /// printed as the worker it is, at the URL `bobcat:bts`, and the id is what

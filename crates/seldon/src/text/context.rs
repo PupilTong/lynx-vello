@@ -55,6 +55,25 @@ impl TextContext {
         }
     }
 
+    /// Discovers the platform's fonts before the first context that needs
+    /// them.
+    ///
+    /// Every [`Self::new`] clones one process-wide template, and the first
+    /// call builds it: fontique enumerates the platform's font files and
+    /// reads each one's name table, tens to hundreds of milliseconds on a
+    /// desktop. Without this call that work runs inside whichever call first
+    /// needs a context, on that call's thread. This call runs it here
+    /// instead, on the calling thread, and returns once the template exists.
+    ///
+    /// Idempotent, from any thread: a call after the template exists returns
+    /// at once, and one that overlaps the building call waits for it. What
+    /// it does not cover: a context's own registered fonts, and the
+    /// platform's per-script fallback lookup, which each context makes
+    /// itself the first time it shapes a script.
+    pub fn preload_system_fonts() {
+        let _ = system_font_template();
+    }
+
     #[must_use]
     pub fn without_system_fonts() -> Self {
         Self {
@@ -351,6 +370,26 @@ mod tests {
         let context = TextContext::default();
         assert_eq!(context.shape_count(), 0);
         assert!(format!("{context:?}").starts_with("TextContext"));
+    }
+
+    #[test]
+    fn preloading_builds_the_template_every_system_context_clones() {
+        TextContext::preload_system_fonts();
+        TextContext::preload_system_fonts();
+        let families_from_another_thread = std::thread::spawn(|| {
+            TextContext::preload_system_fonts();
+            TextContext::new().font.collection.family_names().count()
+        })
+        .join()
+        .expect("the preloading thread finishes");
+
+        let mut context = TextContext::new();
+
+        assert_eq!(
+            context.font.collection.family_names().count(),
+            families_from_another_thread,
+            "a context built after a preload from another thread sees the same families"
+        );
     }
 
     #[test]

@@ -1694,6 +1694,31 @@ pub(crate) fn resolve_startup_urls(sources: &mut ViewSources) -> Result<url::Url
     Ok(base)
 }
 
+/// Discovers the platform's fonts before any view needs them.
+///
+/// The first text context built in a process discovers the platform's fonts
+/// (fontique enumerates every installed font file and reads its name table,
+/// tens to hundreds of milliseconds on a desktop), and every view of the
+/// process shares that one discovery. Without this call it happens inside the
+/// first call that needs a context: [`LynxGroup::create_lynx_view`], on the
+/// embedder's thread, for a view that names [`ViewSources::fonts`],
+/// [`ViewSources::default_font_family`] or [`ViewSources::fallback_fonts`];
+/// otherwise the first layout that shapes text, on the group's Lynx main
+/// thread, where it delays that view's first frame and every entry of every
+/// other view of the group.
+///
+/// An embedder calls this once, early, on a thread of its own, so the
+/// discovery overlaps the rest of its startup; the group and the views need
+/// not exist yet. Process-wide and idempotent: a call after the discovery
+/// returns at once, from any thread, and one that overlaps the discovering
+/// call waits for it, so a view built before the preload finishes is correct
+/// and merely waits. Not covered: a view's own fonts and `@font-face` sources,
+/// which are registered per view, and the platform's per-script fallback
+/// lookup, which each view makes itself the first time it shapes a script.
+pub fn preload_system_fonts() {
+    terminus::link::TextContext::preload_system_fonts();
+}
+
 /// Registers a view's fonts and selects its default family, before any
 /// document exists and before anything has been fetched.
 ///

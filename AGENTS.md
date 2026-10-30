@@ -481,6 +481,14 @@ with a system font read through the Local Font Access API. A script given a
 list stops asking the platform for its own, so an embedder with system fonts
 leaves the field empty. A default family name neither the containers nor the
 platform has fails the construction with `EngineError::UnknownFontFamily`.
+The platform's own fonts are discovered once per process, by the first text
+context built — inside `create_lynx_view` for a view that names any of the
+three font fields, otherwise inside the first layout that shapes text, on
+`bobcat-main` — and `bobcat_core::preload_system_fonts()` lets an embedder run
+that discovery early, on a thread of its own: process-wide and idempotent, and
+a view built before it finishes waits for it rather than discovering again.
+Both native embedders in this workspace call it at startup, `bobcat` before it
+decodes its input and `bobcat-server` before it binds.
 
 Dropping a loading view marks source work cancelled and stops that view before
 QuickJS begins. One `tokio_util::sync::CancellationToken` per view is minted on
