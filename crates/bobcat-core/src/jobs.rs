@@ -62,6 +62,98 @@ use tokio::task::{JoinSet, LocalSet};
 /// One unit of JavaScript-touching work, as the queue holds it.
 type Job = Box<dyn FnOnce()>;
 
+/// Which of the two engine threads a job ran on, as a long task reports it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum JsThreadName {
+    /// `bobcat-main`: a view's document and its MTS realm.
+    Main,
+    /// `bobcat-workers`: every worker realm of the group, the BTS among them.
+    Workers,
+}
+
+impl JsThreadName {
+    /// The name Lynx's `LongTaskMonitor` reports for the thread in the same
+    /// role (`task_runner_manufactor.cc`): `"Lynx_TASM"` for the thread that
+    /// owns the element tree, `"Lynx_JS"` for the background script's.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Main => "Lynx_TASM",
+            Self::Workers => "Lynx_JS",
+        }
+    }
+}
+
+/// What one realm job was queued to do, fixed where it is queued
+/// ([`crate::lifetime::run_job`]): the attribution a long task carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum JobKind {
+    /// A realm opening: a view's boot module, or a worker's root module.
+    Start,
+    /// The view's MTS entry completed into its realm and evaluated.
+    Entry,
+    /// An imported module, or a worker's own script, completed.
+    Module,
+    /// A `Future` the realm read with `then` settled.
+    Future,
+    /// The epilogue alone, for a timer deadline that came due.
+    Timer,
+    /// The epilogue alone, for a wake with no operation and no deadline.
+    Settle,
+    /// A burst of the embedder's and the painter's commands to a view.
+    Command,
+    /// A commit's `contentvisibilityautostatechange` deliveries.
+    ContentVisibility,
+    /// The intersection observers' and the exposure deliveries.
+    Intersection,
+    /// The resize observers' (`layoutchange`) deliveries.
+    ResizeObserver,
+    /// The component events the runtime queued (`<image>`, `<dialog>`).
+    ComponentEvent,
+    /// An `@font-face` source that loaded.
+    FontFace,
+    /// What a view's workers said back to it.
+    WorkerEvent,
+    /// A message posted to a worker.
+    Post,
+    /// A display opportunity delivered to a worker.
+    AnimationFrame,
+    /// An embedder's native module answering a worker's call.
+    ModuleCallback,
+    /// Performance entries delivered to a worker's observers.
+    Performance,
+    /// The disposal and release of a realm whose owner ended.
+    Release,
+}
+
+impl JobKind {
+    /// The kind's name, which a long task entry carries as its `name`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Start => "start",
+            Self::Entry => "entry",
+            Self::Module => "module",
+            Self::Future => "future",
+            Self::Timer => "timer",
+            Self::Settle => "settle",
+            Self::Command => "command",
+            Self::ContentVisibility => "contentVisibility",
+            Self::Intersection => "intersection",
+            Self::ResizeObserver => "resizeObserver",
+            Self::ComponentEvent => "componentEvent",
+            Self::FontFace => "fontFace",
+            Self::WorkerEvent => "workerEvent",
+            Self::Post => "post",
+            Self::AnimationFrame => "animationFrame",
+            Self::ModuleCallback => "moduleCallback",
+            Self::Performance => "performance",
+            Self::Release => "release",
+        }
+    }
+}
+
 /// One engine thread: its scheduler, and the jobs it runs between two turns of
 /// it.
 pub(crate) struct JsThread {

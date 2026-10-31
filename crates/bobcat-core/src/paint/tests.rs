@@ -80,7 +80,7 @@ fn worker_frame_demand_notifies_only_that_worker_and_does_not_keep_it_alive() {
     painter.vsync();
     assert!(matches!(
         worker.try_recv().unwrap(),
-        crate::background::WorkerMessage::Vsync(_)
+        crate::background::WorkerMessage::Vsync { .. }
     ));
     assert!(
         main.commands.try_recv().is_err(),
