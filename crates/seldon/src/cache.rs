@@ -82,10 +82,26 @@ const BASIS_FREE: u32 = 1 << 22;
 /// the other answer [`BASIS_FREE`] records. An entry stored with neither
 /// ([`Cache::store`]) records no answer.
 const BASIS_READ: u32 = 1 << 23;
+/// The entry was stored for a box whose layout reads no
+/// [`LayoutInput::definite_dimensions`] and was computed with none, so it
+/// answers a request whatever definiteness that carries. Recorded beside the
+/// basis answer, under the same terms.
+const DEFINITENESS_FREE: u32 = 1 << 24;
 const INPUT_FLAGS: u32 = EXACT_INPUT_FLAGS
     | (AVAILABLE_TAG_MASK << AVAILABLE_WIDTH_SHIFT)
     | (AVAILABLE_TAG_MASK << AVAILABLE_HEIGHT_SHIFT)
     | (GOAL_MASK << GOAL_SHIFT);
+
+/// What a node's layout reads of a [`LayoutInput`] beyond the fields every
+/// cache key compares exactly, recorded with the entries
+/// `compute_cached_layout` stores.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InputReads {
+    /// [`LayoutInput::parent_size`], its percentage basis.
+    pub basis: bool,
+    /// [`LayoutInput::definite_dimensions`].
+    pub definiteness: bool,
+}
 
 /// A lossless compact representation of [`LayoutInput`]. Every field round
 /// trips, including the `LayoutGoal::Commit` independence payload, which rides
@@ -222,6 +238,13 @@ impl PackedLayoutInput {
         self.values[2] = 0.0;
         self.values[3] = 0.0;
         self.flags &= !(PARENT_WIDTH_PRESENT | PARENT_HEIGHT_PRESENT);
+        self
+    }
+
+    /// The same input with no definite dimensions.
+    #[inline]
+    fn without_definiteness(mut self) -> Self {
+        self.flags &= !(DEFINITE_WIDTH | DEFINITE_HEIGHT);
         self
     }
 
@@ -379,8 +402,12 @@ impl Cache {
     #[must_use]
     pub fn get(&self, input: LayoutInput) -> Option<LayoutOutput> {
         let mut requested = PackedLayoutInput::new(input);
-        if self.recorded_reads_basis() == Some(false) {
+        let recorded = self.recorded_flags();
+        if recorded & BASIS_FREE != 0 {
             requested = requested.without_basis();
+        }
+        if recorded & DEFINITENESS_FREE != 0 {
+            requested = requested.without_definiteness();
         }
         if let Some(slot) = self.committed
             && packed_inputs_match(slot.input, requested)
@@ -398,23 +425,31 @@ impl Cache {
             .map(|slot| slot.unpack_output())
     }
 
+    /// The flags of the entry that speaks for all of them, or none.
+    #[inline]
+    fn recorded_flags(&self) -> u32 {
+        self.committed
+            .or_else(|| self.measurements.first().copied())
+            .map_or(0, |slot| slot.input.flags)
+    }
+
     /// Whether the node reads its percentage basis, as the entries stored
-    /// through [`Self::store_recording_basis`] recorded it; `None` when no
+    /// through [`Self::store_recording_reads`] recorded it; `None` when no
     /// entry recorded an answer.
     #[must_use]
     pub fn recorded_reads_basis(&self) -> Option<bool> {
-        let flags = self
-            .committed
-            .or_else(|| self.measurements.first().copied())?
-            .input
-            .flags;
-        if flags & BASIS_FREE != 0 {
-            Some(false)
-        } else if flags & BASIS_READ != 0 {
-            Some(true)
-        } else {
-            None
-        }
+        self.recorded_reads().map(|reads| reads.basis)
+    }
+
+    /// What the node's layout reads beyond the key, as the entries recorded
+    /// it; `None` when no entry recorded an answer.
+    #[must_use]
+    pub fn recorded_reads(&self) -> Option<InputReads> {
+        let flags = self.recorded_flags();
+        (flags & (BASIS_FREE | BASIS_READ) != 0).then_some(InputReads {
+            basis: flags & BASIS_READ != 0,
+            definiteness: flags & DEFINITENESS_FREE == 0,
+        })
     }
 
     pub fn store(&mut self, input: LayoutInput, output: LayoutOutput) {
@@ -432,12 +467,39 @@ impl Cache {
         output: LayoutOutput,
         reads_basis: bool,
     ) {
+        self.store_recording_reads(
+            input,
+            output,
+            InputReads {
+                basis: reads_basis,
+                definiteness: true,
+            },
+        );
+    }
+
+    /// [`Self::store_recording_basis`], also recording whether the node
+    /// reads its definite dimensions: an entry for a box that reads none is
+    /// computed with none and answers every definiteness
+    /// ([`DEFINITENESS_FREE`]).
+    pub fn store_recording_reads(
+        &mut self,
+        input: LayoutInput,
+        output: LayoutOutput,
+        reads: InputReads,
+    ) {
         debug_assert!(
-            reads_basis || input.parent_size == Size::NONE,
+            reads.basis || input.parent_size == Size::NONE,
             "a basis-free entry is computed against no basis"
         );
+        debug_assert!(
+            reads.definiteness || input.definite_dimensions == Size::new(false, false),
+            "a definiteness-free entry is computed with none"
+        );
         let mut slot = MeasurementSlot::new(input, output);
-        slot.input.flags |= if reads_basis { BASIS_READ } else { BASIS_FREE };
+        slot.input.flags |= if reads.basis { BASIS_READ } else { BASIS_FREE };
+        if !reads.definiteness {
+            slot.input.flags |= DEFINITENESS_FREE;
+        }
         self.store_slot(slot, input.goal);
     }
 

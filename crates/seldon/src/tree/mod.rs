@@ -7,7 +7,7 @@ pub use io::{
 };
 use smallvec::SmallVec;
 
-use crate::cache::Cache;
+use crate::cache::{Cache, InputReads};
 use crate::geometry::{Edges, Point, Rect, Size};
 use crate::style::{CoreStyle, DashedIdent, Display, PhysicalAxis, TreeScoped};
 
@@ -76,22 +76,22 @@ impl LayoutSlot {
         self.cache.store(input, output);
     }
 
-    /// Whether the node reads its percentage basis, as its cache entries
-    /// recorded it ([`Cache::recorded_reads_basis`]).
+    /// What the node's layout reads beyond the cache key, as its cache
+    /// entries recorded it ([`Cache::recorded_reads`]).
     #[must_use]
-    pub(crate) fn recorded_reads_basis(&self) -> Option<bool> {
-        self.cache.recorded_reads_basis()
+    pub(crate) fn recorded_reads(&self) -> Option<InputReads> {
+        self.cache.recorded_reads()
     }
 
-    /// [`Self::store_cached_layout`], recording whether the node reads its
-    /// percentage basis ([`Cache::store_recording_basis`]).
-    pub(crate) fn store_cached_layout_recording_basis(
+    /// [`Self::store_cached_layout`], recording what the node's layout reads
+    /// ([`Cache::store_recording_reads`]).
+    pub(crate) fn store_cached_layout_recording_reads(
         &mut self,
         input: LayoutInput,
         output: LayoutOutput,
-        reads_basis: bool,
+        reads: InputReads,
     ) {
-        self.cache.store_recording_basis(input, output, reads_basis);
+        self.cache.store_recording_reads(input, output, reads);
     }
 
     pub fn clear_layout_cache(&mut self) {
@@ -287,6 +287,16 @@ pub trait LayoutTree {
     ) -> SmallVec<[HoistedChild<Self::NodeId>; 2]> {
         let _ = (state, node);
         SmallVec::new()
+    }
+
+    /// Whether `node`'s layout reads [`LayoutInput::definite_dimensions`].
+    /// Only a container's algorithm does, for its children; a host answers
+    /// `false` for the boxes it lays out without one, so that one cache entry
+    /// answers every definiteness. The answer is cached with the entries, so
+    /// it may change only with something that clears the node's cache.
+    fn reads_definiteness(&self, node: Self::NodeId) -> bool {
+        let _ = node;
+        true
     }
 
     /// Whether [`Self::hoisted_children`] may report a box for `node`: what
