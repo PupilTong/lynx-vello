@@ -48,6 +48,8 @@ Options:
       --vsync FPS       headless frame-clock rate, 1..1000 (default: 60)
       --viewport WxH    initial CSS-pixel viewport (default: 393x727)
       --dpr RATIO       headless device-pixel ratio (default: 1)
+      --locale TAG      BCP-47 language of the page's text, for font fallback
+                        (default: the LC_ALL, LC_CTYPE or LANG environment)
   -h, --help            show this help
   -V, --version         show the version
 
@@ -153,6 +155,14 @@ pub fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<(), CliError
             Ok(())
         }
         args::Invocation::Run(options) => {
+            // The platform's fonts are discovered once per process, and the
+            // first layout that shapes text would otherwise do it on the Lynx
+            // main thread. Started here so it overlaps decoding the input and
+            // booting the view; a thread that could not be started leaves
+            // that discovery to the first layout, which is still correct.
+            let _ = std::thread::Builder::new()
+                .name("bobcat-fonts".to_owned())
+                .spawn(bobcat_core::preload_system_fonts);
             let program = page::Program::load(&options.input)?;
             if options.headless {
                 headless::run(&program, &options)

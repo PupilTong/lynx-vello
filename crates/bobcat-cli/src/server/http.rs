@@ -141,6 +141,11 @@ impl IntoResponse for ApiError {
 /// queue to the thread that owns the non-`Send` Bobcat view handle.
 pub async fn serve(port: &str) -> Result<(), ServerError> {
     let port = parse_port(port)?;
+    // The platform's fonts are discovered once per process, and the first
+    // capture's layout would otherwise do it on the Lynx main thread, inside
+    // that request's deadline. Started here so it overlaps binding and the
+    // capture thread's startup; a capture that arrives first waits for it.
+    tokio::task::spawn_blocking(bobcat_core::preload_system_fonts);
     let screenshot_store = ScreenshotStore::from_env()?;
     let (ipv4_listener, ipv6_listener) = bind_listeners(port)?;
     let headless = Arc::new(CaptureExecutor::new()?);

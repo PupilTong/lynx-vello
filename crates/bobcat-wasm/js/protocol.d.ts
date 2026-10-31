@@ -240,6 +240,9 @@ export interface RequestFields {
   registerFallbackFonts: {
     bytes: Uint8Array
   }
+  setLocale: {
+    tag: string
+  }
   resize: {
     devicePixelRatio: number
     height: number

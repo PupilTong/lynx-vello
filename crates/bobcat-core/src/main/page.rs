@@ -1154,6 +1154,7 @@ pub(super) async fn serve_view(context: Rc<GroupContext>, view: AttachedView, ou
         fonts: _,
         default_font_family: _,
         fallback_fonts: _,
+        locale: _,
         style_sheets: _,
         entry: _,
         card_url,

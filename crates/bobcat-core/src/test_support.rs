@@ -279,6 +279,7 @@ pub(crate) struct TestViewSpec {
     /// A face the view registers at construction and its family, the page's
     /// default font.
     default_font: Option<(String, terminus::link::FontBlob)>,
+    locale: Option<String>,
     fetchable: FxHashSet<String>,
     probes_fetches: bool,
     probes_style_sheets: bool,
@@ -327,6 +328,7 @@ impl TestViewSpec {
             served_sheets: Vec::new(),
             fonts: Vec::new(),
             default_font: None,
+            locale: None,
             fetchable: FxHashSet::default(),
             probes_fetches: false,
             probes_style_sheets: false,
@@ -377,6 +379,13 @@ impl TestViewSpec {
             family.to_owned(),
             terminus::link::FontBlob::from_static(bytes),
         ));
+        self
+    }
+
+    /// The language of the view's text, as an embedder's
+    /// `ViewSources::locale` names it.
+    pub(crate) fn with_locale(mut self, tag: &str) -> Self {
+        self.locale = Some(tag.to_owned());
         self
     }
 
@@ -485,6 +494,7 @@ impl TestViewSpec {
             served_sheets,
             fonts,
             default_font,
+            locale,
             fetchable,
             probes_fetches,
             probes_style_sheets,
@@ -501,6 +511,7 @@ impl TestViewSpec {
             config,
             fonts: registered,
             default_font_family,
+            locale,
             style_sheets: sheets.iter().map(|(url, _)| url.clone()).collect(),
             background_entry: background.as_ref().map(|_| BACKGROUND_ENTRY.to_owned()),
             ..ViewSources::new(

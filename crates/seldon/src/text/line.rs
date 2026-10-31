@@ -103,8 +103,10 @@ pub fn shape_line(
     }
     // Shaped in the context's scratch layout, whose buffers the next shaping
     // reuses: the line keeps its own glyph copies, not the layout.
+    let locale = context.locale();
     let (font_context, layout_context, layout) = context.shaping_parts();
     let mut builder = layout_context.ranged_builder(font_context, text, 1.0, false);
+    builder.push_default(StyleProperty::<TextBrush>::Locale(locale));
     builder.push_default(StyleProperty::<TextBrush>::FontFamily(family_list(
         &font.families,
     )));
