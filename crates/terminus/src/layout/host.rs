@@ -14,7 +14,7 @@ use rustc_hash::FxHashSet;
 #[cfg(feature = "layout-test-utils")]
 use seldon::compute::compute_leaf_layout_with_measurement_for_testing;
 use seldon::compute::{
-    compute_absolute_layout, compute_boundary_relayout, compute_cached_layout,
+    NaturalSize, compute_absolute_layout, compute_boundary_relayout, compute_cached_layout,
     compute_flexbox_layout, compute_grid_lanes_layout, compute_grid_layout, compute_hoisted_layout,
     compute_leaf_layout, compute_linear_layout, compute_relative_layout, compute_root_layout,
     compute_skipped_contents_size, hide_skipped_contents, hide_subtree,
@@ -28,6 +28,7 @@ use seldon::tree::{
     LayoutSlot, LayoutTree,
 };
 use smallvec::SmallVec;
+use stylo::values::generics::position::PreferredRatio;
 
 use super::inline_flow::compute_inline_flow_layout;
 use super::paragraph::{establishes_paragraph, replaces_children};
@@ -165,6 +166,30 @@ impl<T> LayoutTree for TreeArenas<T> {
         hoisted::children_of(self, state, node)
     }
 
+    /// Only a container that places boxes reads its definiteness: its
+    /// algorithm hands it to its children. A paragraph or block flow builds
+    /// its atoms' inputs from none of it. An empty flex, linear or relative
+    /// box lays out as a leaf ([`lays_out_as_empty_leaf`]) but still answers
+    /// `true`: being empty is a fact about its contents, and a relayout
+    /// re-runs it under its committed input once children arrive.
+    fn reads_definiteness(&self, node: NodeSlot) -> bool {
+        if self.at(node).is_replaced() {
+            return false;
+        }
+        match self.style(node).display_mode() {
+            DisplayMode::Grid
+            | DisplayMode::GridLanes
+            | DisplayMode::Flex
+            | DisplayMode::Linear
+            | DisplayMode::Relative => true,
+            DisplayMode::Text
+            | DisplayMode::BlockFlow
+            | DisplayMode::Leaf
+            | DisplayMode::None
+            | DisplayMode::Contents => false,
+        }
+    }
+
     /// A listed block is not proof of a box: `hoisted::children_of`
     /// re-derives each listed box's containing block and skips stale ones.
     #[inline]
@@ -285,6 +310,11 @@ impl<T> LayoutTree for TreeArenas<T> {
             let output = match display {
                 DisplayMode::None | DisplayMode::Contents => {
                     unreachable!("a box-less element has no box to lay out")
+                }
+                DisplayMode::Flex | DisplayMode::Linear | DisplayMode::Relative
+                    if lays_out_as_empty_leaf(tree, node) =>
+                {
+                    compute_leaf_layout(input, &tree.style(node), NaturalSize::NONE)
                 }
                 DisplayMode::Flex => compute_flexbox_layout(tree, state, node, input),
                 DisplayMode::Text => compute_text_block_layout(tree, state, node, input),
@@ -521,6 +551,17 @@ impl<T> TreeArenas<T> {
         ));
         (target, rect)
     }
+}
+
+/// Whether a flex, linear or relative `node` lays out as a leaf with no
+/// contents, which is what its algorithm computes for it: it has no child
+/// that may own a box, `display: none` ones included, and no preferred
+/// aspect ratio, which those algorithms do not apply to an automatic size
+/// and the leaf would.
+#[inline]
+fn lays_out_as_empty_leaf<T>(tree: &TreeArenas<T>, node: NodeSlot) -> bool {
+    tree.children(node).next().is_none()
+        && matches!(tree.style(node).aspect_ratio().ratio, PreferredRatio::None)
 }
 
 #[cfg(test)]

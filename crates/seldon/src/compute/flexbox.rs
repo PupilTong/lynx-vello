@@ -1327,16 +1327,19 @@ fn determine_hypothetical_cross_sizes<T>(
 ) where
     T: LayoutTree,
 {
-    // The item the container's first baseline comes from is measured
-    // whatever decides its cross size: nothing else knows its baseline. The
-    // item its last baseline is read from is measured the same way, and asked
-    // for that last baseline, only when the container's own measurement was
-    // asked for it; otherwise a measurement reads the baseline synthesized
-    // from its border box, and a commit the committed run's
-    // (`container_baselines`).
-    let exported_first =
+    // The items the container's baselines come from are measured whatever
+    // decides their cross sizes, nothing else knowing their baselines, but
+    // only when the container's own measurement was asked for a baseline:
+    // a measurement asked for either reports both, one asked for neither
+    // returns before reading them, and a commit reads the committed run's
+    // (`container_baselines`). The last-baseline item is also asked for
+    // that last baseline.
+    let exported_first = if first_baseline_requested || last_baseline_requested {
         exported_baseline_item(items, lines, axes, BaselineSet::First, baseline_aligned)
-            .map(|(_, index, _)| index);
+            .map(|(_, index, _)| index)
+    } else {
+        None
+    };
     let exported_last = if last_baseline_requested {
         exported_baseline_item(items, lines, axes, BaselineSet::Last, baseline_aligned)
             .filter(|&(_, _, set)| set == BaselineSet::Last)
@@ -2810,7 +2813,27 @@ mod tests {
         TEST_CROSS_BASELINE.set(baseline);
     }
 
+    /// The cross pass of a commit, which reads no baseline of its own.
     fn measure_cross(items: &mut [FlexItem<TestRef>], wrap: flex_wrap::T, cross: f32) {
+        cross_pass(items, wrap, cross, Some(Size::new(false, false)), false);
+    }
+
+    /// The cross pass of a measurement whose caller reads its first baseline.
+    fn measure_cross_reading_first_baseline(
+        items: &mut [FlexItem<TestRef>],
+        wrap: flex_wrap::T,
+        cross: f32,
+    ) {
+        cross_pass(items, wrap, cross, None, true);
+    }
+
+    fn cross_pass(
+        items: &mut [FlexItem<TestRef>],
+        wrap: flex_wrap::T,
+        cross: f32,
+        container_independent: Option<Size<bool>>,
+        first_baseline_requested: bool,
+    ) {
         let tree = TestTree;
         let mut state = TestState::default();
         determine_hypothetical_cross_sizes(
@@ -2825,8 +2848,8 @@ mod tests {
                 AvailableSpace::Definite(100.0),
                 AvailableSpace::Definite(cross),
             ),
-            Some(Size::new(false, false)),
-            false,
+            container_independent,
+            first_baseline_requested,
             false,
             true,
         );
@@ -3136,14 +3159,26 @@ mod tests {
         assert_eq!(items[1].baseline, 7.0);
         assert_eq!(items[2].measured_baseline, None);
 
-        let mut fallback = [item(10.0, 0.0), item(10.0, 0.0)];
-        fallback[0].preferred_size.height = Some(18.0);
-        fallback[1].preferred_size.height = Some(19.0);
+        // With no baseline-aligned item the container's first baseline is
+        // its first item's, measured only for a caller that reads it.
+        let fallback = || {
+            let mut items = [item(10.0, 0.0), item(10.0, 0.0)];
+            items[0].preferred_size.height = Some(18.0);
+            items[1].preferred_size.height = Some(19.0);
+            items
+        };
+        let mut committed = fallback();
         configure_measurement(18.0, Some(6.0));
-        measure_cross(&mut fallback, flex_wrap::T::WRAP, 50.0);
+        measure_cross(&mut committed, flex_wrap::T::WRAP, 50.0);
+        assert_eq!(TEST_MEASURE_CALLS.get(), 0);
+        assert_eq!(committed[0].measured_baseline, None);
+
+        let mut read = fallback();
+        configure_measurement(18.0, Some(6.0));
+        measure_cross_reading_first_baseline(&mut read, flex_wrap::T::WRAP, 50.0);
         assert_eq!(TEST_MEASURE_CALLS.get(), 1);
-        assert_eq!(fallback[0].measured_baseline, Some(6.0));
-        assert_eq!(fallback[1].measured_baseline, None);
+        assert_eq!(read[0].measured_baseline, Some(6.0));
+        assert_eq!(read[1].measured_baseline, None);
     }
 
     #[test]
@@ -3167,25 +3202,41 @@ mod tests {
         configure_measurement(25.0, None);
         measure_cross(&mut items, flex_wrap::T::WRAP, 50.0);
 
-        assert_eq!(TEST_MEASURE_CALLS.get(), 3);
+        // The first item's style pins its cross size: it is not measured.
+        assert_eq!(TEST_MEASURE_CALLS.get(), 2);
         assert_eq!(
             items.each_ref().map(|item| item.hypothetical_cross),
-            [25.0, 25.0, 25.0]
+            [10.0, 25.0, 25.0]
         );
     }
 
     #[test]
     fn definite_nowrap_stretch_elides_only_overwritten_cross_probes() {
         let axes = row_axes(flex_wrap::T::NOWRAP);
-        let mut items = [item(10.0, 0.0), item(10.0, 0.0), item(10.0, 0.0)];
-        items[1].margin.top = 2.0;
-        items[1].margin.bottom = 3.0;
-        items[1].max_size.height = Some(30.0);
+        let stretched = || {
+            let mut items = [item(10.0, 0.0), item(10.0, 0.0), item(10.0, 0.0)];
+            items[1].margin.top = 2.0;
+            items[1].margin.bottom = 3.0;
+            items[1].max_size.height = Some(30.0);
+            items
+        };
         let mut lines = [test_line(3, 0.0)];
 
+        // A commit stretches every item without measuring one.
+        let mut committed = stretched();
         configure_measurement(13.0, Some(5.0));
-        measure_cross(&mut items, flex_wrap::T::NOWRAP, 40.0);
+        measure_cross(&mut committed, flex_wrap::T::NOWRAP, 40.0);
+        assert_eq!(TEST_MEASURE_CALLS.get(), 0);
+        assert_eq!(
+            committed.each_ref().map(|item| item.hypothetical_cross),
+            [40.0, 30.0, 40.0]
+        );
+        assert_eq!(committed[0].measured_baseline, None);
 
+        // A caller reading the first baseline has its item measured.
+        let mut items = stretched();
+        configure_measurement(13.0, Some(5.0));
+        measure_cross_reading_first_baseline(&mut items, flex_wrap::T::NOWRAP, 40.0);
         assert_eq!(TEST_MEASURE_CALLS.get(), 1);
         assert_eq!(
             items.each_ref().map(|item| item.hypothetical_cross),
