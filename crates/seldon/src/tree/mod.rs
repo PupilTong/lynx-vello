@@ -293,7 +293,11 @@ pub trait LayoutTree {
     /// Only a container's algorithm does, for its children; a host answers
     /// `false` for the boxes it lays out without one, so that one cache entry
     /// answers every definiteness. The answer is cached with the entries, so
-    /// it may change only with something that clears the node's cache.
+    /// it may change only with something that clears the node's cache, and
+    /// it may not depend on the node's contents: a relayout re-runs the node
+    /// under its committed input ([`LayoutSlot::committed_input`]) after its
+    /// contents change, and that input carries no definiteness when the
+    /// answer was `false`.
     fn reads_definiteness(&self, node: Self::NodeId) -> bool {
         let _ = node;
         true

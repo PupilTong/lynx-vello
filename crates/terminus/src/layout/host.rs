@@ -167,18 +167,21 @@ impl<T> LayoutTree for TreeArenas<T> {
     }
 
     /// Only a container that places boxes reads its definiteness: its
-    /// algorithm hands it to its children. An empty flex, linear or relative
-    /// box lays out as a leaf ([`lays_out_as_empty_leaf`]), and a paragraph
-    /// or block flow builds its atoms' inputs from none of it.
+    /// algorithm hands it to its children. A paragraph or block flow builds
+    /// its atoms' inputs from none of it. An empty flex, linear or relative
+    /// box lays out as a leaf ([`lays_out_as_empty_leaf`]) but still answers
+    /// `true`: being empty is a fact about its contents, and a relayout
+    /// re-runs it under its committed input once children arrive.
     fn reads_definiteness(&self, node: NodeSlot) -> bool {
         if self.at(node).is_replaced() {
             return false;
         }
         match self.style(node).display_mode() {
-            DisplayMode::Grid | DisplayMode::GridLanes => true,
-            DisplayMode::Flex | DisplayMode::Linear | DisplayMode::Relative => {
-                !lays_out_as_empty_leaf(self, node)
-            }
+            DisplayMode::Grid
+            | DisplayMode::GridLanes
+            | DisplayMode::Flex
+            | DisplayMode::Linear
+            | DisplayMode::Relative => true,
             DisplayMode::Text
             | DisplayMode::BlockFlow
             | DisplayMode::Leaf

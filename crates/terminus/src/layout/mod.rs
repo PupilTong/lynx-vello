@@ -3473,6 +3473,38 @@ mod tests {
         );
     }
 
+    /// An empty linear box lays out as a leaf, but its committed input keeps
+    /// the definiteness its parent gave it. A linear parent commits a child
+    /// with its size styles ignored, and the children a contained scroller
+    /// gains later, as a pager's pages arrive, are laid out in place under
+    /// that input: without it their percentages resolve to nothing.
+    #[test]
+    fn an_empty_linear_box_that_gains_children_lays_them_out_under_its_definite_size() {
+        let mut doc: Document<()> =
+            Document::new(crate::tree::document::tests::device(), "page", ());
+        doc.add_stylesheet(
+            "page { display: linear; linear-direction: column; width: 300px; height: 300px; }
+             .box { display: linear; linear-direction: row; overflow-x: scroll; overflow-y: clip; contain: content; width: 100px; height: 40px; }
+             .item { width: 50%; height: 100%; contain: content; }",
+            StylesheetOrigin::Author,
+        );
+        let root = doc.document_element().id();
+        let container = doc.create_element("view", ());
+        doc.add_class(container, "box");
+        doc.append_child(root, container);
+        doc.layout();
+
+        let item = doc.create_element("view", ());
+        doc.add_class(item, "item");
+        doc.append_child(container, item);
+        doc.flush_styles_with_damage_sink(&mut |_, _| {});
+        assert_eq!(doc.relayout_roots().len(), 1, "the box relays out in place");
+        doc.layout();
+
+        let rect = doc.bounding_client_rect(item).expect("the item has a box");
+        assert_eq!((rect.size.width, rect.size.height), (50.0, 40.0));
+    }
+
     /// A whole-tree run: a change reached the root while a containment
     /// boundary parked under a box whose own cache stayed warm. The root
     /// pass answers that box from its cache and never descends, so the
