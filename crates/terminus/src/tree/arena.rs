@@ -1089,6 +1089,11 @@ impl DocumentLayoutState {
     /// measures but never commits, whose committed layout painting still
     /// reads.
     pub(crate) fn restore_probed_text(&mut self) {
+        // Nothing probed needs no context: building one is the system font
+        // scan, which a pass that shaped no text must not pay.
+        if self.probed_text.is_empty() {
+            return;
+        }
         let mut probed = std::mem::take(&mut self.probed_text);
         let Self {
             index,

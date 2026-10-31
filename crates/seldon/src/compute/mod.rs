@@ -89,6 +89,7 @@ use self::util::{
     resolve_max_sizes, resolve_padding, resolve_quantitative_max_sizes, resolve_quantitative_sizes,
     resolve_size, style_size_behaves_auto, used_aspect_ratio,
 };
+use crate::cache::InputReads;
 use crate::geometry::{Edges, Point, Rect, Size};
 use crate::invalidate::is_relayout_boundary;
 use crate::style::CoreStyle;
@@ -274,16 +275,20 @@ where
     if let Some(output) = cached.cached_layout(input) {
         return output;
     }
-    let reads_basis = cached
-        .recorded_reads_basis()
-        .unwrap_or_else(|| tree.style(node).reads_percentage_basis());
-    if !reads_basis {
+    let reads = cached.recorded_reads().unwrap_or_else(|| InputReads {
+        basis: tree.style(node).reads_percentage_basis(),
+        definiteness: tree.reads_definiteness(node),
+    });
+    if !reads.basis {
         input.parent_size = Size::NONE;
+    }
+    if !reads.definiteness {
+        input.definite_dimensions = Size::new(false, false);
     }
 
     let output = compute_uncached(tree, state, node, input);
     let slot = tree.layout_mut(state, node);
-    slot.store_cached_layout_recording_basis(input, output, reads_basis);
+    slot.store_cached_layout_recording_reads(input, output, reads);
     if input.goal.commits() {
         // A commit that ran is the one thing that rewrites descendant boxes;
         // a measurement pass reads them and writes none. Marking here is what
