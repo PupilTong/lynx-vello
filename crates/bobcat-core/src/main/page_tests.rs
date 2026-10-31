@@ -61,7 +61,7 @@ async fn open_realm(page: &Rc<Page>, entry: &str, url: &str) {
         entry: url.to_owned(),
         ..RealmStartup::default()
     };
-    crate::lifetime::run_job(page, move |page| {
+    crate::lifetime::run_job(page, JobKind::Start, move |page| {
         page.open_realm(ingredients(), startup);
         Some(())
     })
@@ -450,7 +450,7 @@ impl Harness {
 }
 
 fn is_dispose(message: &WorkerMessage) -> bool {
-    matches!(message, WorkerMessage::Post(data)
+    matches!(message, WorkerMessage::Post { data, .. }
     if crate::background::wire_matches(
         data,
         r#"(m) => m?.bobcat === "runtime" && m.method === "dispose""#,
@@ -1951,13 +1951,17 @@ fn a_job_entered_at_the_painter_clock_sees_the_timeline_there() {
         let (context, _workers) = group(&thread);
         let mut owned = OwnedPage::new(context);
         owned.boot(ONE_BOX).await;
-        let clock = |page: &Rc<Page>| owner::enter(page, |runtime, _| runtime.animation_clock());
+        let clock = |page: &Rc<Page>| {
+            owner::enter(page, JobKind::Command, |runtime, _| {
+                runtime.animation_clock()
+            })
+        };
 
         owned.scroll.set_clock(2.5);
         assert_eq!(clock(&owned.page).await, Some(2.5));
 
         owned.scroll.set_clock(3.0);
-        assert_eq!(Page::settle(&owned.page).await, Some(()));
+        assert_eq!(Page::settle(&owned.page, JobKind::Settle).await, Some(()));
         owned.scroll.set_clock(1.0);
         assert_eq!(
             clock(&owned.page).await,
@@ -3097,7 +3101,10 @@ fn a_failed_module_is_reported_once_and_the_view_goes_on() {
             .await;
         let mut background = harness.background_worker();
         assert!(
-            matches!(background.messages.try_recv(), Ok(WorkerMessage::Post(_))),
+            matches!(
+                background.messages.try_recv(),
+                Ok(WorkerMessage::Post { .. })
+            ),
             "boot supplies BTS initial data through its first Worker message"
         );
         harness
@@ -3646,7 +3653,7 @@ fn a_startup_failure_acknowledges_the_frame_post_a_painter_is_blocked_on() {
             entry: "app:///main.js".to_owned(),
             ..RealmStartup::default()
         };
-        crate::lifetime::run_job(&owned.page, move |page| {
+        crate::lifetime::run_job(&owned.page, JobKind::Command, move |page| {
             page.open_realm(ingredients(), startup);
             Some(())
         })
@@ -3875,7 +3882,7 @@ fn a_frame_post_pending_across_boot_is_acknowledged_after_the_boot_report_and_it
             entry: "app:///main.js".to_owned(),
             ..RealmStartup::default()
         };
-        crate::lifetime::run_job(&page, move |page| {
+        crate::lifetime::run_job(&page, JobKind::Command, move |page| {
             page.open_realm(ingredients(), startup);
             Some(())
         })
@@ -5356,7 +5363,7 @@ fn console_messages(events: &[EngineEvent]) -> Vec<String> {
 
 /// How many `ShadowRealm` children the page's realm holds.
 async fn child_realms(page: &Rc<Page>) -> Option<usize> {
-    owner::enter(page, |runtime, _| runtime.child_realms()).await
+    owner::enter(page, JobKind::Command, |runtime, _| runtime.child_realms()).await
 }
 
 /// A `ShadowRealm` child's timer is the owner's to fire: armed in the child's
@@ -5474,7 +5481,7 @@ globalThis.updatePage = () => {{
         owned.page.apply(vec![update_command(1)]).await;
         // A collection, for a `ShadowRealm` object that is only cyclic
         // garbage: the epilogue after it is what releases the child.
-        owner::enter(&owned.page, |runtime, js| {
+        owner::enter(&owned.page, JobKind::Command, |runtime, js| {
             runtime.core().engine.collect_garbage(js)
         })
         .await
