@@ -37,10 +37,7 @@ use std::sync::Arc;
 
 use bobcat_core::editing::{Command as EditCommand, TextInputState};
 use bobcat_core::input::{InputEvent, KeyPhase, Modifiers, Point2D, PointerKind, PointerPhase};
-use bobcat_core::{
-    DrawTarget, EngineEvent, EventRequester, LynxGroup, LynxView, Painter, ScreenMetrics,
-    StyleThreads,
-};
+use bobcat_core::{DrawTarget, EngineEvent, EventRequester, LynxView, Painter, ScreenMetrics};
 use bobcat_resources::ViewResources;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize};
@@ -118,6 +115,8 @@ struct MacApplication {
     initial_height: f32,
     /// The language of the page's text, handed to the view's sources.
     locale: Option<String>,
+    /// The scripts the group preloads before the view is built.
+    preload_scripts: Vec<String>,
     /// This window's display clock, running only while a frame is owed.
     /// Declared before both of the two below so it is stopped — and its
     /// callback proven finished — before what it wakes goes away.
@@ -156,6 +155,7 @@ impl std::fmt::Debug for MacApplication {
             .field("initial_width", &self.initial_width)
             .field("initial_height", &self.initial_height)
             .field("locale", &self.locale)
+            .field("preload_scripts", &self.preload_scripts)
             .field("has_error", &self.error.is_some())
             .finish_non_exhaustive()
     }
@@ -174,6 +174,7 @@ impl MacApplication {
             initial_width: options.viewport_width,
             initial_height: options.viewport_height,
             locale: options.locale.clone(),
+            preload_scripts: options.preload_scripts.clone(),
             vsync: None,
             painter: None,
             view: None,
@@ -231,14 +232,12 @@ impl MacApplication {
         });
         // One window, so one group: its Lynx main thread and its Stylo workers
         // exist for this view alone, and the view is what keeps them alive.
-        let group = pollster::block_on(LynxGroup::new(
+        let group = super::start_group(
             Arc::clone(&self.event_requester),
-            StyleThreads::Auto,
-        ))
-        .map_err(|source| CliError::StartView {
-            input: program.input.clone(),
-            source,
-        })?;
+            self.locale.as_deref(),
+            &self.preload_scripts,
+            &program.input,
+        )?;
         // The screen `SystemInfo` reports is the monitor this window is on,
         // in physical pixels: `MonitorHandle::size()` is already physical, so
         // the scale factor multiplies nothing here. A window winit cannot

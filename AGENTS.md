@@ -522,8 +522,10 @@ punctuation in the language's face.
 Lynx has no `lang` attribute and no `SystemInfo` language field, so nothing
 per element overrides it and script is not told it. A tag that does not parse
 fails the construction with `EngineError::InvalidLocale`. `bobcat` names it
-from `--locale`, else from the POSIX locale environment; the Wasm facade from
-`setLocale(tag)`.
+from `--locale`, else from the POSIX locale environment, and preloads the
+scripts `--preload-scripts` names (comma-separated ISO 15924 codes, none by
+default) through its group before building the view; the Wasm facade names it
+from `setLocale(tag)`.
 
 Dropping a loading view marks source work cancelled and stops that view before
 QuickJS begins. One `tokio_util::sync::CancellationToken` per view is minted on

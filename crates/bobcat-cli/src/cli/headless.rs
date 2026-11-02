@@ -20,10 +20,7 @@ use std::time::{Duration, Instant};
 
 use bobcat_core::editing::{Command as EditCommand, TextInputState};
 use bobcat_core::input::{InputEvent, KeyPhase, Modifiers, Point2D, PointerKind, PointerPhase};
-use bobcat_core::{
-    DrawTarget, EngineEvent, EventRequester, LynxGroup, LynxView, Painter, ScreenMetrics,
-    StyleThreads,
-};
+use bobcat_core::{DrawTarget, EngineEvent, EventRequester, LynxView, Painter, ScreenMetrics};
 use bobcat_resources::ViewResources;
 use flume::RecvTimeoutError;
 
@@ -65,11 +62,11 @@ pub(crate) fn run(program: &Program, options: &Options) -> Result<(), CliError> 
     // One page, so one group: its Lynx main thread and its Stylo workers exist
     // for this view alone. The handle is dropped as this scope ends — the view
     // holds the group's thread alive by itself.
-    let group = pollster::block_on(LynxGroup::new(event_requester, StyleThreads::Auto)).map_err(
-        |source| CliError::StartView {
-            input: program.input.clone(),
-            source,
-        },
+    let group = super::start_group(
+        event_requester,
+        options.locale.as_deref(),
+        &options.preload_scripts,
+        &program.input,
     )?;
     // Two constructions: the view, which is the page and its resources, and
     // the painter over the windowless GPU target it renders into.
