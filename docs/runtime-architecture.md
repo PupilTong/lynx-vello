@@ -484,7 +484,14 @@ context here and discovers them in its first text-shaping layout on
 `bobcat-main` instead. `bobcat_core::preload_system_fonts()` runs the
 discovery ahead of either, on whichever thread the embedder calls it from; it
 is process-wide and idempotent, and a context built while it is still running
-waits for it. Then each
+waits for it. It also makes the platform's first language-less fallback
+lookup, CoreText's once-per-process build of its default cascade list (about
+8 ms on a Mac). `LynxGroup::preload_text(locale)` does the same from the
+group, synchronously on the calling thread, for a host whose first view comes
+later than its group, and for a locale also asks the platform for every
+script fontique looks up with that language, answers seldon then keeps for
+the process: CoreText does not cache a lookup that names a language, so
+without it every view with that locale would ask again. Then each
 author stylesheet in the order the view listed them, by the string it was
 listed as, then the entry, by its resolved URL, handed straight to
 `ResourceFetcher::request_source` on the embedder's own thread — the fetcher

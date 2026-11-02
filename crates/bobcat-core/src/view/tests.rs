@@ -386,6 +386,23 @@ fn preloading_fonts_is_idempotent_from_any_thread() {
     preload_system_fonts();
 }
 
+/// A group does the text work its views would do first, before any view
+/// exists, and refuses a locale every view would refuse, having done
+/// nothing.
+#[test]
+fn a_group_preloads_text_before_its_first_view() {
+    let group =
+        crate::test_support::block_on(LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Sequential))
+            .expect("the group starts");
+    assert!(matches!(
+        group.preload_text(Some("not a tag")),
+        Err(LynxViewError::Engine(EngineError::InvalidLocale(tag))) if tag == "not a tag"
+    ));
+    group.preload_text(None).expect("no locale to refuse");
+    group.preload_text(Some("zh-Hant")).expect("a language tag");
+    group.preload_text(Some("zh-Hant")).expect("a second call");
+}
+
 /// A view that names a locale builds its text context on the embedder's
 /// thread and boots on it like any other: the locale changes which face a
 /// fallback cluster is set in, not whether the view starts.

@@ -1,7 +1,8 @@
 //! Reusable Parley font and layout contexts.
 
 use core::fmt;
-use std::sync::OnceLock;
+use std::collections::HashMap;
+use std::sync::{Mutex, Once, OnceLock, PoisonError};
 
 use parley::fontique::{
     Collection, CollectionOptions, FallbackKey, FamilyId, FontInfoOverride, GenericFamily,
@@ -12,10 +13,32 @@ use parley::{FontContext, Layout, LayoutContext};
 use super::FontBlob;
 use crate::style::TextBrush;
 
+const HAN: Script = Script::from_bytes(*b"Hani");
+
 fn system_font_template() -> &'static FontContext {
     static TEMPLATE: OnceLock<FontContext> = OnceLock::new();
 
     TEMPLATE.get_or_init(FontContext::new)
+}
+
+/// The platform's fallback for every key that names a language, as the
+/// first context in the process to ask for it was answered, keyed by
+/// fontique's normalized key so that `zh-Hant` and `zh-TW` are one entry.
+///
+/// Fontique keeps what the platform answers in the context that asked, and
+/// every context clones the template, so without this each one asks again.
+/// For a key that names no language that costs microseconds: CoreText keeps
+/// that answer for the process after its first. For one that names a
+/// language it does not, and every call is a fresh lookup, tens to a few
+/// hundred microseconds depending on the language. Which scripts fontique
+/// asks with a language is fontique's table, not this context's: `Hani` for
+/// `zh`, `ja` and `ko`, `Arab` for `ar`, `fa` and `ur`, and a few more. The
+/// families are the template's system families, the same in every context
+/// cloned from it.
+fn platform_fallbacks() -> &'static Mutex<HashMap<FallbackKey, Vec<FamilyId>>> {
+    static FALLBACKS: OnceLock<Mutex<HashMap<FallbackKey, Vec<FamilyId>>>> = OnceLock::new();
+
+    FALLBACKS.get_or_init(Mutex::default)
 }
 
 /// The largest text, in UTF-8 bytes, whose shaping buffers the scratch
@@ -47,6 +70,10 @@ pub struct TextContext {
     /// script's fallback list, kept so that a locale set later can file them
     /// under its own keys too.
     fallback_families: Vec<FamilyId>,
+    /// Whether this context was cloned from the system-font template, and so
+    /// asks the platform for what no registered family covers; see
+    /// [`platform_fallbacks`].
+    system_fonts: bool,
     #[cfg(test)]
     shape_count: usize,
 }
@@ -60,30 +87,75 @@ impl TextContext {
             scratch: Layout::default(),
             locale: None,
             fallback_families: Vec::new(),
+            system_fonts: true,
             #[cfg(test)]
             shape_count: 0,
         }
     }
 
-    /// Discovers the platform's fonts before the first context that needs
-    /// them.
+    /// Discovers the platform's fonts, and readies its fallback, before the
+    /// first context that needs them.
     ///
     /// Every [`Self::new`] clones one process-wide template, and the first
     /// call builds it: fontique enumerates the platform's font files and
     /// reads each one's name table, tens to hundreds of milliseconds on a
-    /// desktop. Without this call that work runs inside whichever call first
-    /// needs a context, on that call's thread. This call runs it here
-    /// instead, on the calling thread, and returns once the template exists.
+    /// desktop. The platform's fallback has a first-call cost of its own,
+    /// paid by the first lookup in the process that names no language,
+    /// whatever its script: CoreText builds its whole default cascade list
+    /// then, about 8 ms on a Mac, and answers every later such lookup from
+    /// it in microseconds. A context without a locale makes one at its first
+    /// shaping, because fontique appends the language-less Han fallback to
+    /// every segment's list, and a context with one at the first script
+    /// fontique keeps no list per language for, such as Hangul under
+    /// `zh-Hant`. Without this call both costs land inside whichever
+    /// call first needs them, on that call's thread, and every context that
+    /// gets there before they are paid waits for them. This call pays them
+    /// here instead, on the calling thread, and returns once both are paid.
     ///
-    /// Idempotent, from any thread: a call after the template exists returns
-    /// at once, and one that overlaps the building call waits for it. What
-    /// it does not cover: a context's own registered fonts, and the
-    /// platform's per-script fallback lookup, which each context makes
-    /// itself: [`Self::set_locale`] makes the Han and Latin lookup for its
-    /// language at once; every other script is looked up the first time the
-    /// context shapes it.
+    /// Idempotent, from any thread: a call after both are paid returns at
+    /// once, and one that overlaps the paying call waits for it. What it does
+    /// not cover: a context's own registered fonts, and the fallback for a
+    /// language, which is [`Self::preload_locale`]'s.
     pub fn preload_system_fonts() {
-        let _ = system_font_template();
+        static PLATFORM_FALLBACK: Once = Once::new();
+
+        PLATFORM_FALLBACK.call_once(|| {
+            let _ = Self::new()
+                .font
+                .collection
+                .fallback_families(FallbackKey::new(HAN, None))
+                .count();
+        });
+    }
+
+    /// Asks the platform, once for the whole process, for the fallback of
+    /// every script whose lookup names `tag`'s language, so that no context's
+    /// [`Self::set_locale`] with that language asks it again.
+    ///
+    /// A lookup that names a language takes the platform up to a few
+    /// milliseconds the first time in the process and up to a few hundred
+    /// microseconds every time after, uncached. Its answer is kept
+    /// process-wide and every context's `set_locale` reads it from there.
+    /// Runs [`Self::preload_system_fonts`] first, which also shortens this
+    /// call's own lookups.
+    ///
+    /// Returns `false`, having done nothing, when `tag` is not a well-formed
+    /// BCP-47 language tag.
+    #[must_use]
+    pub fn preload_locale(tag: &str) -> bool {
+        let Ok(locale) = Language::parse(tag) else {
+            return false;
+        };
+        Self::preload_system_fonts();
+        Self::new().resolve_locale_fallbacks(&locale);
+        true
+    }
+
+    /// Whether `tag` is a tag [`Self::set_locale`] and
+    /// [`Self::preload_locale`] accept: a well-formed BCP-47 language tag.
+    #[must_use]
+    pub fn is_locale(tag: &str) -> bool {
+        Language::parse(tag).is_ok()
     }
 
     #[must_use]
@@ -100,6 +172,7 @@ impl TextContext {
             scratch: Layout::default(),
             locale: None,
             fallback_families: Vec::new(),
+            system_fonts: false,
             #[cfg(test)]
             shape_count: 0,
         }
@@ -228,17 +301,20 @@ impl TextContext {
     /// with its locale-chosen cascade family, here for every script fontique
     /// distinguishes by language.
     ///
-    /// Two lookups are made now rather than at the first shaping: the Han
-    /// and Latin fallback for the language, which are what fontique asks for
-    /// at the start of every Han and Latin segment. The language's Han
-    /// fallback is also filed under the language-less Han key, the one
-    /// fontique appends to every query so that Common-script punctuation in
-    /// a run with no Han character still has a CJK face: the punctuation of
-    /// a Traditional Chinese page is then set in the Traditional face rather
-    /// than the platform's default. Families already registered through
+    /// The fallback of every script whose lookup names the language is
+    /// resolved now rather than at the first shaping. The platform is asked
+    /// for it once per process, by the first context to set the language or
+    /// by [`Self::preload_locale`]; every later context takes the answer from
+    /// there. Families already registered through
     /// [`Self::register_fallback_fonts`] are filed under the language's keys
-    /// first, so those lookups find them and, as under the language-less
-    /// keys, ask the platform for nothing.
+    /// first and answer for this context alone, which then asks the platform
+    /// for nothing, as under the language-less keys.
+    ///
+    /// The language's Han fallback is also filed under the language-less Han
+    /// key, the one fontique appends to every query so that Common-script
+    /// punctuation in a run with no Han character still has a CJK face: the
+    /// punctuation of a Traditional Chinese page is then set in the
+    /// Traditional face rather than the platform's default.
     ///
     /// Returns `false`, without changing anything, when `tag` is not a
     /// well-formed BCP-47 language tag.
@@ -250,24 +326,58 @@ impl TextContext {
         let fallback_families = std::mem::take(&mut self.fallback_families);
         self.append_locale_fallbacks(&fallback_families, &locale);
         self.fallback_families = fallback_families;
-        let han = Script::from_bytes(*b"Hani");
-        let latin = Script::from_bytes(*b"Latn");
-        let han_families: Vec<FamilyId> = self
-            .font
-            .collection
-            .fallback_families(FallbackKey::new(han, Some(&locale)))
-            .collect();
-        let _ = self
-            .font
-            .collection
-            .fallback_families(FallbackKey::new(latin, Some(&locale)))
-            .count();
-        if self.fallback_families.is_empty() && !han_families.is_empty() {
-            self.font
-                .collection
-                .set_fallbacks(han, han_families.into_iter());
+        self.resolve_locale_fallbacks(&locale);
+        let han = FallbackKey::new(HAN, Some(&locale));
+        if self.fallback_families.is_empty() && han.locale().is_some() {
+            let han_families: Vec<FamilyId> = self.font.collection.fallback_families(han).collect();
+            if !han_families.is_empty() {
+                self.font
+                    .collection
+                    .set_fallbacks(HAN, han_families.into_iter());
+            }
         }
         true
+    }
+
+    /// Files the platform's fallback for every script whose lookup names
+    /// `locale`'s language, from the process-wide answer, asking the
+    /// platform for those not answered yet.
+    ///
+    /// Only where the platform is the one to answer: this context has system
+    /// fonts and no fallback container of its own, whose families would be
+    /// the answer instead and belong to this context alone. A key that names
+    /// no language is left to the first shaping, which the platform answers
+    /// from its own process-wide cache.
+    fn resolve_locale_fallbacks(&mut self, locale: &Language) {
+        if !self.system_fonts || !self.fallback_families.is_empty() {
+            return;
+        }
+        for &(script, _) in Script::all_samples() {
+            let key = FallbackKey::new(script, Some(locale));
+            if key.locale().is_none() {
+                continue;
+            }
+            let known = platform_fallbacks()
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(&key)
+                .cloned();
+            if let Some(families) = known {
+                self.font
+                    .collection
+                    .set_fallbacks(key, families.into_iter());
+                continue;
+            }
+            // Asked without the lock held: two contexts that miss at once
+            // both ask, and both answers are the same.
+            let families: Vec<FamilyId> = self.font.collection.fallback_families(key).collect();
+            if !families.is_empty() {
+                platform_fallbacks()
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(key, families);
+            }
+        }
     }
 
     /// The language [`Self::set_locale`] set, as parley takes it.
@@ -588,6 +698,80 @@ mod tests {
             })
             .collect();
         assert_eq!(default_han, traditional_han);
+    }
+
+    fn known_fallback(script: Script, tag: &str) -> Option<Vec<FamilyId>> {
+        let language = Language::parse(tag).expect("a tag");
+        platform_fallbacks()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&FallbackKey::new(script, Some(&language)))
+            .cloned()
+    }
+
+    #[test]
+    fn a_locale_to_preload_must_be_a_language_tag() {
+        assert!(!TextContext::is_locale("not a tag"));
+        assert!(!TextContext::preload_locale("not a tag"));
+        assert!(TextContext::is_locale("zh-Hant"));
+    }
+
+    /// The platform is asked once per process for every script whose lookup
+    /// names a language, whichever script that is: a context set to the
+    /// language afterwards is answered from that, under the same normalized
+    /// key whichever tag spelled it. Skipped for a key the platform has no
+    /// answer for.
+    #[test]
+    fn a_preloaded_locale_serves_every_later_context() {
+        for (tag, script) in [("zh-HK", HAN), ("fa", Script::from_bytes(*b"Arab"))] {
+            let language = Language::parse(tag).expect("a tag");
+            assert!(
+                FallbackKey::new(script, Some(&language)).locale().is_some(),
+                "the test needs a key fontique asks with a language"
+            );
+            assert!(TextContext::preload_locale(tag));
+            let Some(known) = known_fallback(script, tag) else {
+                continue;
+            };
+            let mut context = TextContext::new();
+            assert!(context.set_locale(tag));
+            assert_eq!(
+                context
+                    .font
+                    .collection
+                    .fallback_families(FallbackKey::new(script, Some(&language)))
+                    .collect::<Vec<_>>(),
+                known,
+                "{tag}"
+            );
+            if script == HAN {
+                assert_eq!(
+                    context
+                        .font
+                        .collection
+                        .fallback_families(HAN)
+                        .collect::<Vec<_>>(),
+                    known,
+                    "the language-less Han key follows the language"
+                );
+            }
+        }
+    }
+
+    /// A context's own fallback containers answer for it alone, and a
+    /// context without system fonts has no platform to ask: neither leaves
+    /// an answer for the process.
+    #[test]
+    fn only_the_platform_answer_is_kept_for_the_process() {
+        let mut containers = TextContext::new();
+        assert_eq!(
+            containers.register_fallback_fonts(FontBlob::from_static(AHEM)),
+            1
+        );
+        assert!(containers.set_locale("zh-SG"));
+        let mut no_system = TextContext::without_system_fonts();
+        assert!(no_system.set_locale("zh-SG"));
+        assert_eq!(known_fallback(HAN, "zh-SG"), None);
     }
 
     #[test]
