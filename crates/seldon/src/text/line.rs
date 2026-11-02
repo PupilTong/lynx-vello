@@ -16,6 +16,7 @@
 
 use std::borrow::Cow;
 
+use parley::fontique::Attributes;
 use parley::{
     FontFamily, FontFamilyName, FontStyle as ParleyFontStyle, FontWeight as ParleyFontWeight,
     FontWidth, PositionedLayoutItem, StyleProperty,
@@ -104,24 +105,25 @@ pub fn shape_line(
     // Shaped in the context's scratch layout, whose buffers the next shaping
     // reuses: the line keeps its own glyph copies, not the layout.
     let locale = context.locale();
+    let families = family_list(&font.families);
+    let attributes = Attributes {
+        width: FontWidth::from_ratio(font.stretch),
+        weight: ParleyFontWeight::new(f32::from(font.weight)),
+        style: match font.style {
+            ResolvedFontStyle::Normal => ParleyFontStyle::Normal,
+            ResolvedFontStyle::Italic => ParleyFontStyle::Italic,
+            ResolvedFontStyle::Oblique => ParleyFontStyle::Oblique(None),
+        },
+    };
+    context.cover(text, [(0..text.len(), &families, attributes)]);
     let (font_context, layout_context, layout) = context.shaping_parts();
     let mut builder = layout_context.ranged_builder(font_context, text, 1.0, false);
     builder.push_default(StyleProperty::<TextBrush>::Locale(locale));
-    builder.push_default(StyleProperty::<TextBrush>::FontFamily(family_list(
-        &font.families,
-    )));
+    builder.push_default(StyleProperty::<TextBrush>::FontFamily(families.clone()));
     builder.push_default(StyleProperty::FontSize(font.size));
-    builder.push_default(StyleProperty::FontWeight(ParleyFontWeight::new(f32::from(
-        font.weight,
-    ))));
-    builder.push_default(StyleProperty::FontStyle(match font.style {
-        ResolvedFontStyle::Normal => ParleyFontStyle::Normal,
-        ResolvedFontStyle::Italic => ParleyFontStyle::Italic,
-        ResolvedFontStyle::Oblique => ParleyFontStyle::Oblique(None),
-    }));
-    builder.push_default(StyleProperty::FontWidth(FontWidth::from_ratio(
-        font.stretch,
-    )));
+    builder.push_default(StyleProperty::FontWeight(attributes.weight));
+    builder.push_default(StyleProperty::FontStyle(attributes.style));
+    builder.push_default(StyleProperty::FontWidth(attributes.width));
     builder.push_default(StyleProperty::LetterSpacing(letter_spacing));
     builder.build_into(layout, text);
     layout.break_all_lines(None);

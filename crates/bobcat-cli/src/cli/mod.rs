@@ -49,7 +49,8 @@ Options:
       --viewport WxH    initial CSS-pixel viewport (default: 393x727)
       --dpr RATIO       headless device-pixel ratio (default: 1)
       --locale TAG      BCP-47 language of the page's text, for font fallback
-                        (default: the LC_ALL, LC_CTYPE or LANG environment)
+                        (default: the LC_ALL, LC_CTYPE or LANG environment,
+                        else en-US)
       --preload-scripts CODES
                         ISO 15924 scripts (e.g. Hani,Latn) whose platform
                         font fallback is asked for in the locale's language
@@ -184,7 +185,7 @@ pub fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<(), CliError
 /// font discovery the startup thread runs is not waited for here.
 fn start_group<R: bobcat_core::EventRequester>(
     event_requester: std::sync::Arc<R>,
-    locale: Option<&str>,
+    locale: &str,
     scripts: &[String],
     input: &str,
 ) -> Result<bobcat_core::LynxGroup, CliError> {

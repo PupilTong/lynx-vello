@@ -114,7 +114,7 @@ struct MacApplication {
     initial_width: f32,
     initial_height: f32,
     /// The language of the page's text, handed to the view's sources.
-    locale: Option<String>,
+    locale: String,
     /// The scripts the group preloads before the view is built.
     preload_scripts: Vec<String>,
     /// This window's display clock, running only while a frame is owed.
@@ -234,7 +234,7 @@ impl MacApplication {
         // exist for this view alone, and the view is what keeps them alive.
         let group = super::start_group(
             Arc::clone(&self.event_requester),
-            self.locale.as_deref(),
+            &self.locale,
             &self.preload_scripts,
             &program.input,
         )?;
@@ -251,8 +251,7 @@ impl MacApplication {
                 || ScreenMetrics::for_viewport(css_width, css_height, scale_factor),
                 screen_metrics,
             );
-        let mut sources = program.sources(screen);
-        sources.locale.clone_from(&self.locale);
+        let sources = program.sources(screen, &self.locale);
         let view = group
             .create_lynx_view(
                 css_width,

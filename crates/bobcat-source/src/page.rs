@@ -372,8 +372,10 @@ impl PageSource {
     /// The screen is the host's to name, since no input carries one: the
     /// monitor or browser screen it measured, or
     /// [`ScreenMetrics::for_viewport`] of its capture size where it has none.
+    /// So is the locale ([`ViewSources::locale`]): no input carries one
+    /// either.
     #[must_use]
-    pub fn view_sources(&self, screen: ScreenMetrics) -> ViewSources {
+    pub fn view_sources(&self, screen: ScreenMetrics, locale: &str) -> ViewSources {
         let input = self.input_url.to_string();
         match &self.page {
             Page::Container(container) => {
@@ -389,7 +391,7 @@ impl PageSource {
                         .into_iter()
                         .collect(),
                     card_url: Some(container.url().to_string()),
-                    ..ViewSources::new(input, entry.to_string(), screen)
+                    ..ViewSources::new(input, entry.to_string(), screen, locale)
                 }
             }
             Page::Xml(xml) => ViewSources {
@@ -401,7 +403,7 @@ impl PageSource {
                     .map(|(url, _)| url.to_string())
                     .into_iter()
                     .collect(),
-                ..ViewSources::new(input, xml.entry.0.to_string(), screen)
+                ..ViewSources::new(input, xml.entry.0.to_string(), screen, locale)
             },
         }
     }
@@ -512,9 +514,9 @@ impl DeferredPage {
     /// The sources a view for this input is built from, as
     /// [`PageSource::view_sources`] names them.
     #[must_use]
-    pub fn view_sources(&self, screen: ScreenMetrics) -> ViewSources {
+    pub fn view_sources(&self, screen: ScreenMetrics, locale: &str) -> ViewSources {
         match &self.page {
-            Deferred::Decoded(page) => page.view_sources(screen),
+            Deferred::Decoded(page) => page.view_sources(screen, locale),
             Deferred::Web {
                 config,
                 has_style_info,
@@ -536,6 +538,7 @@ impl DeferredPage {
                         crate::container::named_chunk_url(input, crate::container::ROOT)
                             .to_string(),
                         screen,
+                        locale,
                     )
                 }
             }
@@ -924,12 +927,12 @@ mod tests {
 
     /// The text a page registers for its view's entry.
     fn entry_script(page: &PageSource) -> &str {
-        script_at(page, &page.view_sources(SCREEN).entry)
+        script_at(page, &page.view_sources(SCREEN, "en-US").entry)
     }
 
     /// The text a page registers for its view's BTS entry, if it has one.
     fn background_script(page: &PageSource) -> Option<&str> {
-        page.view_sources(SCREEN)
+        page.view_sources(SCREEN, "en-US")
             .background_entry
             .map(|url| script_at(page, &url))
     }
@@ -1039,7 +1042,7 @@ mod tests {
                 enable_css_inheritance: false,
             }
         );
-        let sources = page.view_sources(SCREEN);
+        let sources = page.view_sources(SCREEN, "en-US");
         assert_eq!(sources.base_url, page.input_url().as_str());
         assert_eq!(sources.config, page.config());
         assert_eq!(
@@ -1076,7 +1079,7 @@ mod tests {
         let page = PageSource::from_template_with_background(&input, template, BundleTarget::Web)
             .expect("a manifest page");
 
-        let sources = page.view_sources(SCREEN);
+        let sources = page.view_sources(SCREEN, "en-US");
         assert_eq!(
             sources.background_entry.as_deref(),
             Some("https://cdn.example/app/card.web.bundle#background-thread")
@@ -1482,7 +1485,7 @@ mod tests {
                     1.0,
                     resources.builder(),
                     Vec::new(),
-                    page.view_sources(SCREEN),
+                    page.view_sources(SCREEN, "en-US"),
                 )
                 .unwrap();
             // Boot's first flush waits for a painter to bind the view.
@@ -1607,7 +1610,7 @@ mod tests {
         }));
         let page =
             PageSource::from_template_with_background(&input, template, BundleTarget::Web).unwrap();
-        let sources = page.view_sources(SCREEN);
+        let sources = page.view_sources(SCREEN, "en-US");
         assert_eq!(
             sources.entry,
             "https://cdn.test/app/card.web.bundle/root.js?rev=1"
@@ -1667,7 +1670,9 @@ mod tests {
 
             assert_eq!(page.config().enable_css_inheritance, expected, "{config}");
             assert_eq!(
-                page.view_sources(SCREEN).config.enable_css_inheritance,
+                page.view_sources(SCREEN, "en-US")
+                    .config
+                    .enable_css_inheritance,
                 expected,
                 "the view is built with the page's switch: {config}"
             );
@@ -1708,8 +1713,8 @@ mod tests {
             background_script(&page),
             Some(bts_module_source(BundleTarget::Web, "").as_str())
         );
-        assert!(page.view_sources(SCREEN).card_url.is_none());
-        let sources = page.view_sources(SCREEN);
+        assert!(page.view_sources(SCREEN, "en-US").card_url.is_none());
+        let sources = page.view_sources(SCREEN, "en-US");
         assert_eq!(sources.base_url, page.input_url().as_str());
         assert_eq!(sources.config, page.config());
         assert_eq!(sources.entry, "bobcat-memory://lynx-xml/main-thread.js");
@@ -1783,9 +1788,13 @@ mod tests {
 
         assert!(xml(&page).style.is_none());
         assert!(xml(&page).background.is_none());
-        assert!(page.view_sources(SCREEN).background_entry.is_none());
+        assert!(
+            page.view_sources(SCREEN, "en-US")
+                .background_entry
+                .is_none()
+        );
         assert_eq!(
-            page.view_sources(SCREEN).entry,
+            page.view_sources(SCREEN, "en-US").entry,
             "bobcat-memory://lynx-xml/main-thread.js"
         );
     }
@@ -1911,15 +1920,20 @@ mod tests {
                 continue;
             };
             let deferred = PageSource::defer(&input, bytes).expect("a page defers");
-            let mut expected = page.view_sources(screen);
+            let mut expected = page.view_sources(screen, "en-US");
             let empty_style_info = page.container().unwrap().style_info().is_none();
-            if empty_style_info && !deferred.view_sources(screen).style_sheets.is_empty() {
+            if empty_style_info
+                && !deferred
+                    .view_sources(screen, "en-US")
+                    .style_sheets
+                    .is_empty()
+            {
                 expected.style_sheets = vec![format!(
                     "https://cdn.test/app/card.web.bundle/style-info.css?rev=1"
                 )];
             }
             assert_eq!(
-                format!("{:?}", deferred.view_sources(screen)),
+                format!("{:?}", deferred.view_sources(screen, "en-US")),
                 format!("{expected:?}"),
                 "{path}"
             );
@@ -2001,7 +2015,7 @@ mod tests {
         let deferred = PageSource::defer(&input, bytes.to_vec()).unwrap();
         let screen = ScreenMetrics::for_viewport(32.0, 24.0, 1.0);
         let sheet = "https://cdn.test/app/basic-bindtap.web.bundle/style-info.css";
-        assert_eq!(deferred.view_sources(screen).style_sheets, [sheet]);
+        assert_eq!(deferred.view_sources(screen, "en-US").style_sheets, [sheet]);
 
         let resources = quiet_resources();
         deferred.register_in_background(&resources);
@@ -2034,7 +2048,7 @@ mod tests {
         });
         assert!(notes[0].contains("invalid StyleInfo section"), "{notes:?}");
         let entry = deferred
-            .view_sources(ScreenMetrics::for_viewport(1.0, 1.0, 1.0))
+            .view_sources(ScreenMetrics::for_viewport(1.0, 1.0, 1.0), "en-US")
             .entry;
         assert!(!resources.unregister(&entry));
     }

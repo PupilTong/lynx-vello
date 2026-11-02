@@ -267,8 +267,9 @@ fn text_runtime() -> (ScriptRuntime, MainThreadRuntime, DocumentProbe) {
         text.register_fonts(terminus::link::FontBlob::from_static(AHEM)),
         1
     );
+    assert!(text.set_locale("en-US"));
     runtime_over(DocumentIngredients {
-        text_context: Some(text),
+        text_context: text,
         ..ingredients()
     })
 }

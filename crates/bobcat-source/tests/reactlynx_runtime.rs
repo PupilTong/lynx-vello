@@ -29,7 +29,7 @@ async fn boot(bytes: &[u8], name: &str) {
     .expect("decode compiled card");
     let resources = Resources::new(ResourcesConfig::default(), || {});
     page.register_with(&resources);
-    boot_registered(page.view_sources(SCREEN), resources, name).await;
+    boot_registered(page.view_sources(SCREEN, "en-US"), resources, name).await;
 }
 
 async fn boot_registered(sources: bobcat_core::ViewSources, resources: Resources, name: &str) {
@@ -117,7 +117,7 @@ async fn real_native_background_runs_from_its_preserved_custom_section() {
         .unwrap();
     let resources = Resources::new(ResourcesConfig::default(), || {});
     page.register_with(&resources);
-    let mut sources = page.view_sources(SCREEN);
+    let mut sources = page.view_sources(SCREEN, "en-US");
     let entry = serde_json::to_string(sources.background_entry.as_ref().unwrap()).unwrap();
     let key = serde_json::to_string(key).unwrap();
     // Keep PageSource's actual section registration and the compiled factory.
@@ -244,7 +244,7 @@ async fn compiled_cards_share_data_across_their_group() {
                 1.0,
                 resources.builder(),
                 Vec::new(),
-                page.view_sources(SCREEN),
+                page.view_sources(SCREEN, "en-US"),
             )
             .unwrap();
         let mut painter = Painter::new(DrawTarget::Offscreen, 240.0, 240.0, 1.0)
@@ -452,7 +452,7 @@ async fn compiled_scroll_coordinator_folds_its_header_before_the_content() {
             1.0,
             resources.builder(),
             Vec::new(),
-            page.view_sources(SCREEN),
+            page.view_sources(SCREEN, "en-US"),
         )
         .unwrap();
     let mut painter = Painter::new(DrawTarget::Offscreen, width, height, 1.0)
@@ -543,7 +543,7 @@ async fn compiled_swipers_start_on_current() {
             1.0,
             resources.builder(),
             Vec::new(),
-            page.view_sources(SCREEN),
+            page.view_sources(SCREEN, "en-US"),
         )
         .unwrap();
     let mut painter = Painter::new(DrawTarget::Offscreen, width, height, 1.0)
@@ -608,7 +608,7 @@ async fn compiled_refresh_view_holds_a_pulled_header() {
             1.0,
             resources.builder(),
             Vec::new(),
-            page.view_sources(SCREEN),
+            page.view_sources(SCREEN, "en-US"),
         )
         .unwrap();
     let mut painter = Painter::new(DrawTarget::Offscreen, width, height, 1.0)
@@ -746,7 +746,7 @@ async fn paint_and_tap(
     let resources = Resources::new(ResourcesConfig::default(), || {});
     page.register_with(&resources);
     paint_registered(
-        page.view_sources(SCREEN),
+        page.view_sources(SCREEN, "en-US"),
         resources,
         point,
         colors,
@@ -773,7 +773,7 @@ async fn paint_and_sample(bytes: &[u8], expected: &[(u16, u16, [u8; 4])]) {
             1.0,
             resources.builder(),
             Vec::new(),
-            page.view_sources(SCREEN),
+            page.view_sources(SCREEN, "en-US"),
         )
         .unwrap();
     let mut painter = Painter::new(DrawTarget::Offscreen, 240.0, 240.0, 1.0)

@@ -119,7 +119,7 @@ async fn public_updates_require_mts_boot_then_preserve_order() {
     page.register_with(&resources);
     let released = Rc::new(Cell::new(false));
     let pending = Rc::default();
-    let mut sources = page.view_sources(SCREEN);
+    let mut sources = page.view_sources(SCREEN, "en-US");
     sources.init_data = Some(json!({"raw":1}).to_string());
     sources.global_props = Some(json!({"theme":"light","keep":1}).to_string());
     let background = sources.background_entry.clone().unwrap();

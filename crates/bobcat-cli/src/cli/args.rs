@@ -14,6 +14,9 @@ pub(crate) const DEFAULT_VSYNC_HZ: NonZeroU32 =
     NonZeroU32::new(60).expect("the default frame rate is non-zero");
 pub(crate) const DEFAULT_DEVICE_PIXEL_RATIO: f32 = 1.0;
 const MAX_VSYNC_HZ: u32 = 1_000;
+/// The locale of a run that names none and runs in no POSIX locale
+/// environment that names a language.
+pub(crate) const DEFAULT_LOCALE: &str = "en-US";
 
 #[derive(Clone, Debug)]
 pub(crate) struct Options {
@@ -25,8 +28,8 @@ pub(crate) struct Options {
     pub(crate) device_pixel_ratio: f32,
     /// The language of the page's text, as a BCP-47 tag: `--locale`, else
     /// the POSIX locale environment (`LC_ALL`, `LC_CTYPE`, `LANG`) as a tag,
-    /// else none.
-    pub(crate) locale: Option<String>,
+    /// else [`DEFAULT_LOCALE`]. Every view names one.
+    pub(crate) locale: String,
     /// The scripts whose platform font fallback is asked for before the view
     /// is built, in the locale's language: `--preload-scripts`, ISO 15924
     /// codes such as `Hani`; none by default.
@@ -194,7 +197,9 @@ fn finish(
         viewport_width: viewport.0,
         viewport_height: viewport.1,
         device_pixel_ratio,
-        locale: locale.or_else(environment_locale),
+        locale: locale
+            .or_else(environment_locale)
+            .unwrap_or_else(|| DEFAULT_LOCALE.to_owned()),
         preload_scripts,
     }))
 }
@@ -379,7 +384,7 @@ mod tests {
         .unwrap() else {
             panic!("expected a runnable invocation");
         };
-        assert_eq!(options.locale.as_deref(), Some("zh-Hant"));
+        assert_eq!(options.locale, "zh-Hant");
 
         let Invocation::Run(options) = parse(args(&[
             "-i",
@@ -390,7 +395,7 @@ mod tests {
         .unwrap() else {
             panic!("expected a runnable invocation");
         };
-        assert_eq!(options.locale.as_deref(), Some("ja"));
+        assert_eq!(options.locale, "ja");
 
         assert!(
             parse(args(&[

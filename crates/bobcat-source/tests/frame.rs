@@ -93,7 +93,7 @@ fn registered(host: &str, inner: Option<&str>) -> (bobcat_core::ViewSources, Res
             )
             .expect("the inner card's URL is a URL");
     }
-    (page.view_sources(SCREEN), resources)
+    (page.view_sources(SCREEN, "en-US"), resources)
 }
 
 /// One pixel of a capture, as RGBA.

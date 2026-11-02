@@ -64,7 +64,7 @@ pub(crate) fn run(program: &Program, options: &Options) -> Result<(), CliError> 
     // holds the group's thread alive by itself.
     let group = super::start_group(
         event_requester,
-        options.locale.as_deref(),
+        &options.locale,
         &options.preload_scripts,
         &program.input,
     )?;
@@ -77,8 +77,8 @@ pub(crate) fn run(program: &Program, options: &Options) -> Result<(), CliError> 
         options.viewport_height,
         options.device_pixel_ratio,
     );
-    let mut sources = program.sources(ScreenMetrics::for_viewport(width, height, ratio));
-    sources.locale.clone_from(&options.locale);
+    let screen = ScreenMetrics::for_viewport(width, height, ratio);
+    let sources = program.sources(screen, &options.locale);
     let mut view = group
         .create_lynx_view(
             width,

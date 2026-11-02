@@ -395,19 +395,19 @@ fn a_group_preloads_the_scripts_its_host_names() {
         crate::test_support::block_on(LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Sequential))
             .expect("the group starts");
     assert!(matches!(
-        group.preload_text(Some("not a tag"), &["Hani"]),
+        group.preload_text("not a tag", &["Hani"]),
         Err(LynxViewError::Engine(EngineError::InvalidLocale(tag))) if tag == "not a tag"
     ));
     assert!(matches!(
-        group.preload_text(Some("zh-Hant"), &["Hani", "Han"]),
+        group.preload_text("zh-Hant", &["Hani", "Han"]),
         Err(LynxViewError::Engine(EngineError::UnknownScript(script))) if script == "Han"
     ));
-    group.preload_text(None, &[]).expect("nothing to refuse");
+    group.preload_text("en-US", &[]).expect("nothing to refuse");
     group
-        .preload_text(Some("zh-Hant"), &["Hani", "Latn"])
+        .preload_text("zh-Hant", &["Hani", "Latn"])
         .expect("a language tag and two scripts");
     group
-        .preload_text(Some("zh-Hant"), &["Hani"])
+        .preload_text("zh-Hant", &["Hani"])
         .expect("a second call");
 }
 
@@ -454,30 +454,22 @@ fn a_view_with_a_locale_boots() {
 }
 
 /// A view's locale is validated where its fonts are, before anything is
-/// requested: a tag that is not a language is `InvalidLocale`, and a locale
-/// alone is reason enough to build the view's text context, since the
-/// document's lazy one would not carry it.
+/// requested: a tag that is not a language is `InvalidLocale`, and every view
+/// builds its text context with the locale it names.
 #[test]
 fn a_locale_is_validated_with_the_fonts_before_anything_is_requested() {
-    let error = stage_text_context(Vec::new(), None, Vec::new(), Some("not a tag"))
+    let error = stage_text_context(Vec::new(), None, Vec::new(), "not a tag")
         .expect_err("a tag with a space is not a language");
     assert!(
         matches!(&error, LynxViewError::Engine(EngineError::InvalidLocale(tag)) if tag == "not a tag"),
         "{error:?}"
     );
 
-    let context = stage_text_context(Vec::new(), None, Vec::new(), Some("zh-Hant"))
-        .expect("a well-formed tag")
-        .expect("a locale alone builds the context");
+    let context =
+        stage_text_context(Vec::new(), None, Vec::new(), "zh-Hant").expect("a well-formed tag");
     assert_eq!(
         context.locale().map(|locale| locale.as_str().to_owned()),
         Some("zh-Hant".to_owned())
-    );
-    assert!(
-        stage_text_context(Vec::new(), None, Vec::new(), None)
-            .expect("nothing to validate")
-            .is_none(),
-        "a view naming nothing keeps the document's lazy context"
     );
 }
 

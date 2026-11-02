@@ -307,9 +307,9 @@ fn finish_view(
 struct AttachedView {
     viewport: Viewport,
     sources: ViewSources,
-    /// This view's fonts and default family, validated on the embedder's
-    /// thread before anything was requested.
-    text_context: Option<terminus::link::TextContext>,
+    /// This view's fonts, default family and locale, validated on the
+    /// embedder's thread before anything was requested.
+    text_context: terminus::link::TextContext,
     /// The answers to the startup requests `create_lynx_view` already made:
     /// the author sheets in the order the view listed them, and the entry.
     startup: StartupSources,

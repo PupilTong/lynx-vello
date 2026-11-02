@@ -73,7 +73,8 @@ impl ScriptHarness {
         let ingredients = DocumentIngredients {
             viewport,
             config: PageConfig::default(),
-            text_context: None,
+            text_context: crate::view::stage_text_context(Vec::new(), None, Vec::new(), "en-US")
+                .expect("en-US is a language tag"),
             style_pool: None,
         };
         let (outbox, view) = detached_outbox(Arc::new(NoWakeup));

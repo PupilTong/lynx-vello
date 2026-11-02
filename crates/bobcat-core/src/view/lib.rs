@@ -539,20 +539,19 @@ pub struct ViewSources {
     /// its own.
     pub fallback_fonts: Vec<FontBlob>,
     /// The language of the view's text, as a BCP-47 tag: `zh-Hant`, `ja`,
-    /// `en-US`. What the platform's per-script font fallback is asked with,
-    /// so that a Han cluster no family of its own `font-family` covers is set
-    /// in the Traditional, Japanese or Korean face the language calls for
-    /// rather than in the platform's default one; the CJK punctuation of a
-    /// run with no Han character in it follows too once the host preloads
-    /// `Hani` for the language ([`LynxGroup::preload_text`]). Lynx's
-    /// `LynxEnv.locale`: a value the host sets for the process, from the
-    /// OS's preferred language unless it names its own, which Lynx iOS reads
-    /// for this same choice. The embedder names it here; the engine derives
-    /// none, and script is not told it, since Lynx's `SystemInfo` has no
-    /// language field. `None` leaves the platform's default. A tag that
-    /// does not parse is refused by `create_lynx_view` as
-    /// [`EngineError::InvalidLocale`], before anything is requested.
-    pub locale: Option<String>,
+    /// `en-US`. Required: every host names one ([`Self::new`]). What the
+    /// platform's per-script font fallback is asked with, so that a Han
+    /// cluster no family of its own `font-family` covers is set in the
+    /// Traditional, Japanese or Korean face the language calls for rather
+    /// than in the platform's default one, and so is the CJK punctuation of a
+    /// run with no Han character in it. Lynx's `LynxEnv.locale`: a value the
+    /// host sets for the process, from the OS's preferred language unless it
+    /// names its own, which Lynx iOS reads for this same choice. The engine
+    /// derives none, and script is not told it, since Lynx's `SystemInfo`
+    /// has no language field. A tag that does not parse is refused by
+    /// `create_lynx_view` as [`EngineError::InvalidLocale`], before anything
+    /// is requested.
+    pub locale: String,
     pub style_sheets: Vec<String>,
     /// The MTS entry's URL, which may be relative: `create_lynx_view`
     /// resolves it against [`Self::base_url`], and both the fetcher's request
@@ -614,13 +613,14 @@ pub struct ViewSources {
 
 impl ViewSources {
     /// The sources of a view over `entry`, resolved against `base_url`,
-    /// reporting `screen` as its `SystemInfo`, with every other field at its
-    /// default.
+    /// reporting `screen` as its `SystemInfo`, its text in `locale`'s
+    /// language, with every other field at its default.
     #[must_use]
     pub fn new(
         base_url: impl Into<String>,
         entry: impl Into<String>,
         screen: ScreenMetrics,
+        locale: impl Into<String>,
     ) -> Self {
         Self {
             base_url: base_url.into(),
@@ -628,7 +628,7 @@ impl ViewSources {
             fonts: Vec::new(),
             default_font_family: None,
             fallback_fonts: Vec::new(),
-            locale: None,
+            locale: locale.into(),
             style_sheets: Vec::new(),
             entry: entry.into(),
             card_url: None,
@@ -782,20 +782,16 @@ impl LynxGroup {
     ///
     /// For a host whose first view comes later than its group, or only on
     /// some condition: the group is what it builds up front, so the group is
-    /// where this work can be done ahead of that view. `scripts` are ISO
-    /// 15924 codes such as `Hani`, `Arab` or `Thai`, and which ones are worth
-    /// paying for is the host's to say — nothing is asked that it did not
-    /// name. It runs [`preload_system_fonts`], then asks the platform for each
-    /// script once for the process: every view whose
-    /// [`ViewSources::locale`] is that language, in this group or any other,
-    /// takes the answer from there instead of asking the platform itself,
-    /// both for the script and for its language-less lookup, which is how
-    /// Common-script punctuation in a run with no Han character follows a
-    /// Traditional Chinese locale once the host names `Hani`. `None` asks
-    /// without a language, the lookup of a view that names none. On a Mac the
-    /// first lookup that names no language in a process has CoreText build
-    /// its whole default cascade list, about 8 ms whatever the script, and a
-    /// lookup that names a language is not cached by CoreText at all.
+    /// where this work can be done ahead of that view. A view asks the
+    /// platform for a script's fallback only when a character of it is
+    /// missing from its run's own families, and the first view in the
+    /// process to miss a (script, language) pays for the lookup: on a Mac up
+    /// to a few milliseconds, about 8 ms for the first lookup in the process
+    /// that names no language. Every later view, in this group or any other,
+    /// takes the answer from the process's one table. This pays that first
+    /// lookup here instead, for the scripts the host names — ISO 15924 codes
+    /// such as `Hani`, `Arab` or `Thai`; nothing is asked that it did not
+    /// name. It runs [`preload_system_fonts`] first.
     ///
     /// Process-wide and idempotent like [`preload_system_fonts`]; nothing of
     /// it is the group's own. Tens to hundreds of milliseconds the first time
@@ -808,14 +804,8 @@ impl LynxGroup {
     /// a BCP-47 language tag, the same refusal
     /// [`Self::create_lynx_view`] gives it, and [`EngineError::UnknownScript`]
     /// if a script is not one the platform can be asked for.
-    pub fn preload_text(
-        &self,
-        locale: Option<&str>,
-        scripts: &[&str],
-    ) -> Result<(), LynxViewError> {
-        if let Some(locale) = locale
-            && !terminus::link::TextContext::is_locale(locale)
-        {
+    pub fn preload_text(&self, locale: &str, scripts: &[&str]) -> Result<(), LynxViewError> {
+        if !terminus::link::TextContext::is_locale(locale) {
             return Err(EngineError::InvalidLocale(locale.to_owned()).into());
         }
         if let Some(script) = scripts
@@ -824,6 +814,7 @@ impl LynxGroup {
         {
             return Err(EngineError::UnknownScript((*script).to_owned()).into());
         }
+        terminus::link::TextContext::preload_system_fonts();
         let preloaded = terminus::link::TextContext::preload_fallbacks(locale, scripts);
         debug_assert!(preloaded, "the locale and the scripts were checked above");
         Ok(())
@@ -932,12 +923,11 @@ impl LynxGroup {
         // fonts and the default family are a `terminus::link::TextContext`'s business,
         // and a document only ever adopts a finished one.
         let default_font_family = sources.default_font_family.take();
-        let locale = sources.locale.take();
         let text_context = stage_text_context(
             std::mem::take(&mut sources.fonts),
             default_font_family.as_deref(),
             std::mem::take(&mut sources.fallback_fonts),
-            locale.as_deref(),
+            &sources.locale,
         )?;
         let viewport = Viewport::new(width, height).with_device_pixel_ratio(device_pixel_ratio);
         // One view, one set of channels and one end signal: nothing here is
@@ -1658,10 +1648,9 @@ pub(crate) enum GroupCommand {
 pub(crate) struct ViewAttachment {
     pub(crate) viewport: Viewport,
     pub(crate) sources: ViewSources,
-    /// This view's fonts and default family, already registered and
-    /// validated on the embedder's thread. `None` is a view that named
-    /// neither, which leaves the document's own lazy context alone.
-    pub(crate) text_context: Option<terminus::link::TextContext>,
+    /// This view's fonts, default family and locale, already registered and
+    /// validated on the embedder's thread.
+    pub(crate) text_context: terminus::link::TextContext,
     /// The answers to the requests `create_lynx_view` already made.
     pub(crate) startup: StartupSources,
     /// The embedder's native modules as the BTS realm hears about them: one
@@ -1815,25 +1804,16 @@ pub fn preload_system_fonts() {
 /// that same call, so there is no later point at which this check would
 /// still be ahead of them.
 ///
-/// `None` is a view that named none of them, which leaves the document's own
-/// lazy context alone. `Err` is a default family neither the containers nor
-/// the platform has, or a locale that is not a BCP-47 tag: a failure to
-/// build the view rather than to run it. The locale is set last, after the
-/// fallback containers, so that the language's own fallback keys reach the
-/// families those containers hold.
-fn stage_text_context(
+/// `Err` is a default family neither the containers nor the platform has, or
+/// a locale that is not a BCP-47 tag: a failure to build the view rather than
+/// to run it. The locale is set last, after the fallback containers, so that
+/// the language's own fallback keys reach the families those containers hold.
+pub(crate) fn stage_text_context(
     fonts: Vec<FontBlob>,
     default_font_family: Option<&str>,
     fallback_fonts: Vec<FontBlob>,
-    locale: Option<&str>,
-) -> Result<Option<terminus::link::TextContext>, LynxViewError> {
-    if fonts.is_empty()
-        && default_font_family.is_none()
-        && fallback_fonts.is_empty()
-        && locale.is_none()
-    {
-        return Ok(None);
-    }
+    locale: &str,
+) -> Result<terminus::link::TextContext, LynxViewError> {
     let mut text = terminus::link::TextContext::new();
     for font in fonts {
         text.register_fonts(font);
@@ -1846,12 +1826,10 @@ fn stage_text_context(
     {
         return Err(EngineError::UnknownFontFamily(family.to_owned()).into());
     }
-    if let Some(locale) = locale
-        && !text.set_locale(locale)
-    {
+    if !text.set_locale(locale) {
         return Err(EngineError::InvalidLocale(locale.to_owned()).into());
     }
-    Ok(Some(text))
+    Ok(text)
 }
 
 #[cfg(test)]

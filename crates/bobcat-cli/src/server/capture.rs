@@ -359,11 +359,14 @@ async fn capture_page(request: &CaptureRequest) -> Result<Screenshot, CaptureFai
     }
     // A capture has no screen, so `SystemInfo` reports the requested capture
     // size in physical pixels, named as such.
-    let sources = page.view_sources(ScreenMetrics::for_viewport(
-        f32::from(request.width),
-        f32::from(request.height),
-        DEVICE_PIXEL_RATIO,
-    ));
+    let sources = page.view_sources(
+        ScreenMetrics::for_viewport(
+            f32::from(request.width),
+            f32::from(request.height),
+            DEVICE_PIXEL_RATIO,
+        ),
+        "en-US",
+    );
     drop(page);
 
     let startup_deadline = tokio::time::Instant::now() + request.timeout;

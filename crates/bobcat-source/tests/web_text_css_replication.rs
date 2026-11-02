@@ -515,7 +515,11 @@ fn registered_style_sheet(style_info: &StyleInfo) -> Option<String> {
     );
     card.register_with(&resources);
 
-    let url = card.view_sources(SCREEN).style_sheets.first().cloned();
+    let url = card
+        .view_sources(SCREEN, "en-US")
+        .style_sheets
+        .first()
+        .cloned();
     if let Some(url) = url.as_deref() {
         assert!(
             resources.unregister(url),
@@ -1110,7 +1114,7 @@ fn a_lynx_xml_envelope_carries_its_style_section_verbatim() {
     let url = Url::parse("bobcat-test://card/app.lynx.xml").expect("a valid URL");
     let card = PageSource::from_bytes(&url, source.as_bytes()).expect("the card decodes");
     assert_eq!(
-        card.view_sources(SCREEN).style_sheets.len(),
+        card.view_sources(SCREEN, "en-US").style_sheets.len(),
         1,
         "the card registers its author stylesheet"
     );

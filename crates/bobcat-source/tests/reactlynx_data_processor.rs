@@ -35,7 +35,7 @@ async fn compiled_processors_feed_initial_data_updates_reset_and_reload() {
         .unwrap();
         let resources = Resources::new(ResourcesConfig::default(), || {});
         page.register_with(&resources);
-        let mut sources = page.view_sources(SCREEN);
+        let mut sources = page.view_sources(SCREEN, "en-US");
         sources.initial_processor = processor.to_owned();
         sources.init_data = Some(r#"{"rawSeed":0,"rawColor":"first","rawKeep":"retained"}"#.into());
         let group = LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Sequential)
