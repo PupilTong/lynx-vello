@@ -25,7 +25,7 @@ async fn view(
         1.0,
         DrawTarget::Offscreen,
         |_reports| fetcher,
-        ViewSources::new("app:///", "app:///main.js", SCREEN),
+        ViewSources::new("app:///", "app:///main.js", SCREEN, "en-US"),
     )
     .await
 }

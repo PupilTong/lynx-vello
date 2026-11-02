@@ -92,7 +92,7 @@ async fn resource_completion_reaches_main_without_another_painter_turn() {
         1.0,
         DrawTarget::Offscreen,
         |_reports| fetcher,
-        ViewSources::new("app:///", "app:///main.js", SCREEN),
+        ViewSources::new("app:///", "app:///main.js", SCREEN, "en-US"),
     )
     .await
     .expect("startup completes");
@@ -279,7 +279,7 @@ async fn dropping_loading_view_cancels_resource_and_reaps_main_body() {
         1.0,
         DrawTarget::Offscreen,
         |_reports| fetcher,
-        ViewSources::new("app:///", "app:///main.js", SCREEN),
+        ViewSources::new("app:///", "app:///main.js", SCREEN, "en-US"),
     )
     .await
     .expect("creation returns a loading view even when the fetch never answers");
@@ -345,7 +345,7 @@ async fn metrics_that_arrive_before_the_document_are_what_it_is_created_at() {
             1.0,
             DrawTarget::Offscreen,
             |_| Rc::clone(&fetcher),
-            ViewSources::new("app:///", "app:///main.js", SCREEN),
+            ViewSources::new("app:///", "app:///main.js", SCREEN, "en-US"),
         )
         .await
         .expect("creation returns a loading view");
@@ -415,7 +415,7 @@ async fn an_unknown_font_family_fails_construction_without_fetching() {
             |_| fetcher.clone(),
             ViewSources {
                 default_font_family: Some("no-such-family".to_owned()),
-                ..ViewSources::new("app:///", "app:///main.js", SCREEN)
+                ..ViewSources::new("app:///", "app:///main.js", SCREEN, "en-US")
             },
         )
         .await
@@ -446,14 +446,17 @@ async fn an_unresolvable_url_fails_construction_without_fetching() {
         let cases = [
             (
                 "not a URL",
-                ViewSources::new("not a URL", "main.js", SCREEN),
+                ViewSources::new("not a URL", "main.js", SCREEN, "en-US"),
             ),
-            ("http://[", ViewSources::new("app:///", "http://[", SCREEN)),
+            (
+                "http://[",
+                ViewSources::new("app:///", "http://[", SCREEN, "en-US"),
+            ),
             (
                 "http://[",
                 ViewSources {
                     background_entry: Some("http://[".to_owned()),
-                    ..ViewSources::new("app:///", "main.js", SCREEN)
+                    ..ViewSources::new("app:///", "main.js", SCREEN, "en-US")
                 },
             ),
         ];
@@ -511,7 +514,7 @@ async fn a_resolution_failure_is_one_event_whatever_else_failed() {
         |_| fetcher.clone(),
         ViewSources {
             style_sheets: vec!["first.css".into(), "second.css".into()],
-            ..ViewSources::new("app:///", "app:///main.js", SCREEN)
+            ..ViewSources::new("app:///", "app:///main.js", SCREEN, "en-US")
         },
     )
     .await
@@ -590,7 +593,7 @@ async fn a_pending_view_does_not_block_a_sibling_in_the_same_group() {
                 1.0,
                 |_| Rc::clone(&fetcher),
                 Vec::new(),
-                ViewSources::new("app:///", "app:///pending.js", SCREEN),
+                ViewSources::new("app:///", "app:///pending.js", SCREEN, "en-US"),
             )
             .expect("pending view");
         // Issued inside the construction above, so the fetcher is already
@@ -606,7 +609,7 @@ async fn a_pending_view_does_not_block_a_sibling_in_the_same_group() {
                 1.0,
                 |_| FetcherDouble::new(Vec::new()),
                 Vec::new(),
-                ViewSources::new("app:///", "app:///sibling.js", SCREEN),
+                ViewSources::new("app:///", "app:///sibling.js", SCREEN, "en-US"),
             )
             .expect("sibling view");
         let mut sibling_painter = bobcat_core::Painter::new(DrawTarget::Offscreen, 32.0, 24.0, 1.0)
@@ -774,7 +777,7 @@ fn dropping_the_group_joins_both_of_its_threads() {
                                 })
                             },
                             Vec::new(),
-                            ViewSources::new("app:///", "app:///main.js", SCREEN),
+                            ViewSources::new("app:///", "app:///main.js", SCREEN, "en-US"),
                         )
                         .expect("the view is created");
                     // Boot's first flush waits for a painter to bind the

@@ -567,7 +567,7 @@ fn external_page_entry_must_be_selected_explicitly() {
     let page = bobcat_source::PageSource::from_native_bundle(&url, &bytes, "library__main-thread")
         .unwrap();
     assert!(page.config().enable_css_selector);
-    assert!(!page.view_sources(SCREEN).entry.is_empty());
+    assert!(!page.view_sources(SCREEN, "en-US").entry.is_empty());
 }
 
 #[test]
@@ -760,7 +760,7 @@ async fn named_lepus_chunks_load_and_run_on_every_call() {
             1.0,
             resources.builder(),
             Vec::new(),
-            page.view_sources(SCREEN),
+            page.view_sources(SCREEN, "en-US"),
         )
         .unwrap();
     // Boot's first flush waits for a painter to bind the view, and this waits
@@ -824,7 +824,7 @@ async fn named_css_is_loaded_by_url_after_native_web_conversion() {
         ])]);
         for web in [false, true] {
             let page = default_page(&native, web);
-            let mut sources = page.view_sources(SCREEN);
+            let mut sources = page.view_sources(SCREEN, "en-US");
             // Isolate explicit named-sheet loading from ordinary boot styles.
             sources.style_sheets.clear();
             let resources = Resources::new(ResourcesConfig::default(), || {});
@@ -888,7 +888,7 @@ fn native_js_data_processor_requires_a_boolean_and_survives_web_conversion() {
         for web in [false, true] {
             assert_eq!(
                 default_page(&native, web)
-                    .view_sources(SCREEN)
+                    .view_sources(SCREEN, "en-US")
                     .config
                     .enable_js_data_processor,
                 expected,

@@ -930,12 +930,10 @@ pub(crate) struct DocumentIngredients {
     /// What the document is actually built with is therefore the realm's
     /// copy, not this one.
     pub(crate) config: PageConfig,
-    /// The fonts and the default family, already validated against a context
-    /// of their own — see
-    /// [`adopt_text_context`](terminus::link::Document::adopt_text_context). `None` is a
-    /// view that named neither, which leaves the document's own lazy context
-    /// alone.
-    pub(crate) text_context: Option<terminus::link::TextContext>,
+    /// The fonts, the default family and the locale, already validated
+    /// against a context of their own — see
+    /// [`adopt_text_context`](terminus::link::Document::adopt_text_context).
+    pub(crate) text_context: terminus::link::TextContext,
     pub(crate) style_pool: Option<Rc<StylePool>>,
 }
 
@@ -959,7 +957,8 @@ impl DocumentIngredients {
         Self {
             viewport,
             config,
-            text_context: None,
+            text_context: crate::view::stage_text_context(Vec::new(), None, Vec::new(), "en-US")
+                .expect("en-US is a language tag"),
             style_pool: None,
         }
     }
@@ -1373,9 +1372,7 @@ impl DocumentSlot {
             if let Some(pool) = style_pool {
                 document.set_style_pool(pool);
             }
-            if let Some(context) = text_context {
-                document.adopt_text_context(context);
-            }
+            document.adopt_text_context(text_context);
             document
         })?;
         // Nothing of the components' is published here: a name they observe

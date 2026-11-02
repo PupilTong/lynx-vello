@@ -51,7 +51,7 @@ fn registered(name: &str) -> (bobcat_core::ViewSources, Resources) {
             .register(&format!("{ORIGIN}/{chunk}"), *bytes, None)
             .expect("a chunk URL is a URL");
     }
-    (page.view_sources(SCREEN), resources)
+    (page.view_sources(SCREEN, "en-US"), resources)
 }
 
 /// The 80px `.lazy-box` of `react-lazy-child.css`, sampled 40×40 into the

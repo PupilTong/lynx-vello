@@ -106,7 +106,7 @@ impl PropsView {
         let resources = Resources::new(ResourcesConfig::default(), || {});
         page.register_with(&resources);
         resources.set_base_url(Some(input));
-        let mut sources = page.view_sources(SCREEN);
+        let mut sources = page.view_sources(SCREEN, "en-US");
         sources.global_props =
             Some(json!({"seed":3,"color":"green","keep":"retained"}).to_string());
         let background = sources.background_entry.clone().unwrap();

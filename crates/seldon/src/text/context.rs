@@ -1,13 +1,21 @@
 //! Reusable Parley font and layout contexts.
 
 use core::fmt;
-use std::sync::OnceLock;
+use core::ops::Range;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
-use parley::fontique::{
-    Collection, CollectionOptions, FallbackKey, FamilyId, FontInfoOverride, GenericFamily,
-    Language, Script, ScriptExt, SourceCache,
+use icu_properties::props::{
+    DefaultIgnorableCodePoint, EmojiPresentation, GeneralCategory, Script as UnicodeScript,
+    WhiteSpace,
 };
-use parley::{FontContext, Layout, LayoutContext};
+use icu_properties::script::ScriptWithExtensions;
+use icu_properties::{CodePointMapData, CodePointSetData, PropertyNamesShort};
+use parley::fontique::{
+    Attributes, Collection, CollectionOptions, FallbackKey, FamilyId, FontInfoOverride,
+    GenericFamily, Language, QueryFamily, QueryFont, QueryStatus, Script, ScriptExt, SourceCache,
+};
+use parley::{FontContext, FontFamily, FontFamilyName, Layout, LayoutContext};
 
 use super::FontBlob;
 use crate::style::TextBrush;
@@ -16,6 +24,169 @@ fn system_font_template() -> &'static FontContext {
     static TEMPLATE: OnceLock<FontContext> = OnceLock::new();
 
     TEMPLATE.get_or_init(FontContext::new)
+}
+
+/// The script fontique adds the language-less fallback list of to every
+/// segment's query, whatever the segment's script (fontique 0.12
+/// `collection/query.rs:105-111`, its workaround for parley#597): the list a
+/// Common-script character with no script of its own, `★` or a CJK
+/// punctuation mark in a Latin run, is found in. Not a choice made here; it
+/// is what fontique would consult for any character the run's own families
+/// lack, so a missing character asks for it too ([`TextContext::cover`]).
+const FONTIQUE_EVERY_SEGMENT_SCRIPT: Script = Script::from_bytes(*b"Hani");
+
+/// A script and the language its fallback lookup names, `None` for a lookup
+/// that names none: fontique's normalized key, without the bookkeeping its
+/// `FallbackKey` adds, so that `zh-Hant` and `zh-TW` are one entry and a
+/// language fontique does not distinguish for the script is no language.
+type PlatformKey = (Script, Option<Language>);
+
+/// The platform's fallback for every (script, language) any context in the
+/// process asked for: one table for the process.
+///
+/// Fontique keeps what the platform answers in the context that asked, and
+/// every context clones the template, so without this each one asks again —
+/// and CoreText keeps no answer to a lookup that names a language, so each
+/// such ask is paid again too. The families are the template's system
+/// families, the same in every context cloned from it.
+fn platform_fallbacks() -> &'static Mutex<HashMap<PlatformKey, Arc<[FamilyId]>>> {
+    static FALLBACKS: OnceLock<Mutex<HashMap<PlatformKey, Arc<[FamilyId]>>>> = OnceLock::new();
+
+    FALLBACKS.get_or_init(Mutex::default)
+}
+
+fn platform_key(script: Script, locale: &Language) -> PlatformKey {
+    (script, FallbackKey::new(script, Some(locale)).locale())
+}
+
+/// The platform's fallback for `script` in `locale`'s language, asked of the
+/// platform the first time any context in the process needs it and read
+/// from [`platform_fallbacks`] every time after.
+fn platform_fallback(script: Script, locale: &Language) -> Arc<[FamilyId]> {
+    let key = platform_key(script, locale);
+    let known = platform_fallbacks()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&key)
+        .cloned();
+    if let Some(families) = known {
+        return families;
+    }
+    // Asked without the lock held, of a clone of the template that has no
+    // key filled: two contexts that miss at once both ask, and both answers
+    // are the same.
+    let families: Arc<[FamilyId]> = system_font_template()
+        .clone()
+        .collection
+        .fallback_families(FallbackKey::new(script, key.1.as_ref()))
+        .collect();
+    platform_fallbacks()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .entry(key)
+        .or_insert(families)
+        .clone()
+}
+
+/// The script fontique keeps a fallback list for that `unicode` names, if
+/// any: none for Common, Inherited and Unknown.
+fn fontique_script(unicode: UnicodeScript) -> Option<Script> {
+    if matches!(
+        unicode,
+        UnicodeScript::Common | UnicodeScript::Inherited | UnicodeScript::Unknown
+    ) {
+        return None;
+    }
+    let code = PropertyNamesShort::<UnicodeScript>::new().get(unicode)?;
+    let bytes = <[u8; 4]>::try_from(code.as_bytes()).ok()?;
+    Some(Script::from_bytes(bytes))
+}
+
+/// The scripts of `text`'s characters that have one of their own, in the
+/// order they first appear: the scripts parley can itemize its segments in.
+fn scripts_in(text: &str) -> Vec<Script> {
+    let map = CodePointMapData::<UnicodeScript>::new();
+    let mut scripts = Vec::new();
+    for script in text.chars().filter_map(|ch| fontique_script(map.get(ch))) {
+        if !scripts.contains(&script) {
+            scripts.push(script);
+        }
+    }
+    scripts
+}
+
+/// The scripts whose fallback list fontique could find `ch` in, inside a
+/// span whose characters with a script of their own are in `span_scripts`.
+///
+/// A character with a script of its own is in a segment of that script. A
+/// Common or Inherited one takes the script of the characters around it, so
+/// its segment's script is one of its `Script_Extensions` that the span also
+/// holds; fontique adds [`FONTIQUE_EVERY_SEGMENT_SCRIPT`]'s language-less list
+/// to every segment besides, which the caller adds.
+fn scripts_of(ch: char, span_scripts: &[Script], scripts: &mut Vec<Script>) {
+    let push = |script: Script, scripts: &mut Vec<Script>| {
+        if !scripts.contains(&script) {
+            scripts.push(script);
+        }
+    };
+    if let Some(script) = fontique_script(CodePointMapData::<UnicodeScript>::new().get(ch)) {
+        push(script, scripts);
+        return;
+    }
+    for unicode in ScriptWithExtensions::new()
+        .get_script_extensions_val(ch)
+        .iter()
+    {
+        if let Some(script) = fontique_script(unicode)
+            && span_scripts.contains(&script)
+        {
+            push(script, scripts);
+        }
+    }
+}
+
+/// The families a `font-family` value names in `collection`, in order, as
+/// parley resolves them: a name to its family, a generic to the families it
+/// maps to.
+fn resolve_families(
+    collection: &mut Collection,
+    family: &FontFamily<'_>,
+    families: &mut Vec<FamilyId>,
+) {
+    let mut push = |name: &FontFamilyName<'_>| match name {
+        FontFamilyName::Named(name) => families.extend(collection.family_id(name)),
+        FontFamilyName::Generic(generic) => {
+            families.extend(collection.generic_families(*generic));
+        }
+    };
+    match family {
+        FontFamily::Source(source) => {
+            for name in FontFamilyName::parse_css_list(source).map_while(Result::ok) {
+                push(&name);
+            }
+        }
+        FontFamily::Single(name) => push(name),
+        FontFamily::List(names) => names.iter().for_each(push),
+    }
+}
+
+/// Whether `ch` needs no glyph of a font for the coverage check: white
+/// space, controls and default-ignorable code points, which no font is asked
+/// to draw, and emoji-presentation characters, which parley sets in the
+/// emoji family whatever the run's own families are.
+fn needs_no_glyph(ch: char) -> bool {
+    CodePointSetData::new::<WhiteSpace>().contains(ch)
+        || CodePointSetData::new::<DefaultIgnorableCodePoint>().contains(ch)
+        || CodePointSetData::new::<EmojiPresentation>().contains(ch)
+        || CodePointMapData::<GeneralCategory>::new().get(ch) == GeneralCategory::Control
+}
+
+/// The script an ISO 15924 code names, when fontique has sample text to ask
+/// the platform for its fallback with.
+fn parse_script(code: &str) -> Option<Script> {
+    let bytes: [u8; 4] = code.as_bytes().try_into().ok()?;
+    let script = Script::from_bytes(bytes);
+    script.sample().is_some().then_some(script)
 }
 
 /// The largest text, in UTF-8 bytes, whose shaping buffers the scratch
@@ -47,6 +218,19 @@ pub struct TextContext {
     /// script's fallback list, kept so that a locale set later can file them
     /// under its own keys too.
     fallback_families: Vec<FamilyId>,
+    /// Whether this context was cloned from the system-font template, and so
+    /// asks the platform for what no registered family covers; see
+    /// [`platform_fallbacks`].
+    system_fonts: bool,
+    /// Whether the platform's fallback is asked only for a character the
+    /// run's own families lack ([`Self::cover`]): set by
+    /// [`Self::set_locale`] for a context the platform answers, one with
+    /// system fonts and no fallback container of its own.
+    fallback_on_miss: bool,
+    /// The scripts whose fallback lists in this context already hold the
+    /// platform's answer rather than the empty list
+    /// [`Self::set_locale`] files.
+    answered_scripts: Vec<Script>,
     #[cfg(test)]
     shape_count: usize,
 }
@@ -60,6 +244,9 @@ impl TextContext {
             scratch: Layout::default(),
             locale: None,
             fallback_families: Vec::new(),
+            system_fonts: true,
+            fallback_on_miss: false,
+            answered_scripts: Vec::new(),
             #[cfg(test)]
             shape_count: 0,
         }
@@ -78,12 +265,59 @@ impl TextContext {
     /// Idempotent, from any thread: a call after the template exists returns
     /// at once, and one that overlaps the building call waits for it. What
     /// it does not cover: a context's own registered fonts, and the
-    /// platform's per-script fallback lookup, which each context makes
-    /// itself: [`Self::set_locale`] makes the Han and Latin lookup for its
-    /// language at once; every other script is looked up the first time the
-    /// context shapes it.
+    /// platform's per-script fallback, which [`Self::preload_fallbacks`]
+    /// asks for the scripts an embedder names.
     pub fn preload_system_fonts() {
         let _ = system_font_template();
+    }
+
+    /// Asks the platform for the fallback of each of `scripts`, ISO 15924
+    /// codes such as `Hani` or `Arab`, in `locale`'s language, ahead of the
+    /// first context that would, into the process's one table.
+    ///
+    /// A context asks only when a character is missing from its run's own
+    /// families ([`Self::cover`]), and the first context in the process to
+    /// ask for a (script, language) pays the platform for it: on a Mac up to
+    /// a few milliseconds, about 8 ms for the first lookup in the process
+    /// that names no language, which has CoreText build its whole default
+    /// cascade list. This pays it here instead, for the scripts the embedder
+    /// names. Builds the template first, as [`Self::preload_system_fonts`]
+    /// does; a script already answered for the language is not asked again.
+    ///
+    /// Returns `false`, having done nothing, when `locale` is not a
+    /// well-formed BCP-47 language tag or a script is not one
+    /// [`Self::is_script`] accepts.
+    #[must_use]
+    pub fn preload_fallbacks(locale: &str, scripts: &[&str]) -> bool {
+        let Ok(locale) = Language::parse(locale) else {
+            return false;
+        };
+        let Some(scripts) = scripts
+            .iter()
+            .map(|code| parse_script(code))
+            .collect::<Option<Vec<Script>>>()
+        else {
+            return false;
+        };
+        for script in scripts {
+            let _ = platform_fallback(script, &locale);
+        }
+        true
+    }
+
+    /// Whether `tag` is a tag [`Self::set_locale`] and
+    /// [`Self::preload_fallbacks`] accept: a well-formed BCP-47 language tag.
+    #[must_use]
+    pub fn is_locale(tag: &str) -> bool {
+        Language::parse(tag).is_ok()
+    }
+
+    /// Whether `code` is a script [`Self::preload_fallbacks`] accepts: an
+    /// ISO 15924 code, spelled as the standard spells it, such as `Hani`,
+    /// that fontique has sample text to ask the platform with.
+    #[must_use]
+    pub fn is_script(code: &str) -> bool {
+        parse_script(code).is_some()
     }
 
     #[must_use]
@@ -100,6 +334,9 @@ impl TextContext {
             scratch: Layout::default(),
             locale: None,
             fallback_families: Vec::new(),
+            system_fonts: false,
+            fallback_on_miss: false,
+            answered_scripts: Vec::new(),
             #[cfg(test)]
             shape_count: 0,
         }
@@ -228,17 +465,24 @@ impl TextContext {
     /// with its locale-chosen cascade family, here for every script fontique
     /// distinguishes by language.
     ///
-    /// Two lookups are made now rather than at the first shaping: the Han
-    /// and Latin fallback for the language, which are what fontique asks for
-    /// at the start of every Han and Latin segment. The language's Han
-    /// fallback is also filed under the language-less Han key, the one
-    /// fontique appends to every query so that Common-script punctuation in
-    /// a run with no Han character still has a CJK face: the punctuation of
-    /// a Traditional Chinese page is then set in the Traditional face rather
-    /// than the platform's default. Families already registered through
+    /// The platform is asked for nothing here, and the fallback lists of
+    /// every script are filed empty, under the language's keys and the
+    /// language-less ones alike: fontique, which looks a segment's list up
+    /// at the start of every segment whether a character in it is missing
+    /// or not, then finds one and asks the platform for nothing. A script's
+    /// list is filled with the platform's answer only when a shaping finds
+    /// a character of it that the run's own families lack ([`Self::cover`]),
+    /// from the process's one table, which asks the platform the first time
+    /// any context in the process needs it. The answer is filed under the
+    /// script's language-less key too, which is how, on a Traditional
+    /// Chinese page, Common-script punctuation in a run with no Han
+    /// character is set in the Traditional face: fontique appends the
+    /// language-less Han list to every query.
+    ///
+    /// Families already registered through
     /// [`Self::register_fallback_fonts`] are filed under the language's keys
-    /// first, so those lookups find them and, as under the language-less
-    /// keys, ask the platform for nothing.
+    /// instead, and answer for this context alone, which then asks the
+    /// platform for nothing, as under the language-less keys.
     ///
     /// Returns `false`, without changing anything, when `tag` is not a
     /// well-formed BCP-47 language tag.
@@ -250,24 +494,102 @@ impl TextContext {
         let fallback_families = std::mem::take(&mut self.fallback_families);
         self.append_locale_fallbacks(&fallback_families, &locale);
         self.fallback_families = fallback_families;
-        let han = Script::from_bytes(*b"Hani");
-        let latin = Script::from_bytes(*b"Latn");
-        let han_families: Vec<FamilyId> = self
-            .font
-            .collection
-            .fallback_families(FallbackKey::new(han, Some(&locale)))
-            .collect();
-        let _ = self
-            .font
-            .collection
-            .fallback_families(FallbackKey::new(latin, Some(&locale)))
-            .count();
-        if self.fallback_families.is_empty() && !han_families.is_empty() {
-            self.font
-                .collection
-                .set_fallbacks(han, han_families.into_iter());
+        self.answered_scripts.clear();
+        self.fallback_on_miss = self.system_fonts && self.fallback_families.is_empty();
+        if self.fallback_on_miss {
+            for &(script, _) in Script::all_samples() {
+                let key = FallbackKey::new(script, Some(&locale));
+                if key.locale().is_some() {
+                    self.font.collection.set_fallbacks(key, core::iter::empty());
+                }
+                self.font
+                    .collection
+                    .set_fallbacks(script, core::iter::empty());
+            }
         }
         true
+    }
+
+    /// Fills, before a shaping, the fallback list of every script a
+    /// character of `text` is written in that its span's own families lack,
+    /// with the platform's answer from the process's one table
+    /// ([`platform_fallback`]); nothing for a context whose locale did not
+    /// set it up ([`Self::fallback_on_miss`]).
+    ///
+    /// `spans` are each span's byte range in `text`, its `font-family` and
+    /// its font attributes, as parley will shape it. A character is missing
+    /// when no face that family list matches at those attributes maps it to
+    /// a glyph, the test parley's own font selection makes; white space,
+    /// controls, default-ignorable code points and emoji-presentation
+    /// characters are not tested ([`needs_no_glyph`]). The lists filled for
+    /// a missing character are the ones fontique would look it up in: its
+    /// segment's script ([`scripts_of`]) and the script fontique adds to
+    /// every query ([`FONTIQUE_EVERY_SEGMENT_SCRIPT`]).
+    pub(in crate::text) fn cover<'span, 'family: 'span>(
+        &mut self,
+        text: &str,
+        spans: impl IntoIterator<Item = (Range<usize>, &'span FontFamily<'family>, Attributes)>,
+    ) {
+        if !self.fallback_on_miss {
+            return;
+        }
+        let mut wanted: Vec<Script> = Vec::new();
+        let mut families: Vec<FamilyId> = Vec::new();
+        let mut fonts: Vec<QueryFont> = Vec::new();
+        for (bytes, family, attributes) in spans {
+            let Some(span) = text.get(bytes) else {
+                continue;
+            };
+            if span.chars().all(needs_no_glyph) {
+                continue;
+            }
+            families.clear();
+            resolve_families(&mut self.font.collection, family, &mut families);
+            fonts.clear();
+            let mut query = self.font.collection.query(&mut self.font.source_cache);
+            query.set_families(families.iter().copied().map(QueryFamily::Id));
+            query.set_attributes(attributes);
+            query.matches_with(|font| {
+                fonts.push(font.clone());
+                QueryStatus::Continue
+            });
+            drop(query);
+            let charmaps: Vec<_> = fonts.iter().filter_map(QueryFont::charmap).collect();
+            let mut span_scripts = None;
+            for ch in span.chars() {
+                if needs_no_glyph(ch)
+                    || charmaps
+                        .iter()
+                        .any(|charmap| charmap.map(ch).is_some_and(|glyph| glyph != 0))
+                {
+                    continue;
+                }
+                let span_scripts = span_scripts.get_or_insert_with(|| scripts_in(span));
+                scripts_of(ch, span_scripts, &mut wanted);
+                if !wanted.contains(&FONTIQUE_EVERY_SEGMENT_SCRIPT) {
+                    wanted.push(FONTIQUE_EVERY_SEGMENT_SCRIPT);
+                }
+            }
+        }
+        let Some(locale) = self.locale else {
+            return;
+        };
+        for script in wanted {
+            if self.answered_scripts.contains(&script) {
+                continue;
+            }
+            let answer = platform_fallback(script, &locale);
+            let key = FallbackKey::new(script, Some(&locale));
+            if key.locale().is_some() {
+                self.font
+                    .collection
+                    .set_fallbacks(key, answer.iter().copied());
+            }
+            self.font
+                .collection
+                .set_fallbacks(script, answer.iter().copied());
+            self.answered_scripts.push(script);
+        }
     }
 
     /// The language [`Self::set_locale`] set, as parley takes it.
@@ -544,50 +866,185 @@ mod tests {
         );
     }
 
+    fn known_fallback(script: &str, tag: &str) -> Option<Vec<FamilyId>> {
+        let language = Language::parse(tag).expect("a tag");
+        let script = parse_script(script).expect("a script");
+        platform_fallbacks()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&platform_key(script, &language))
+            .map(|families| families.to_vec())
+    }
+
+    fn fallback_of(context: &mut TextContext, script: &str, tag: Option<&str>) -> Vec<FamilyId> {
+        let language = tag.map(|tag| Language::parse(tag).expect("a tag"));
+        let script = parse_script(script).expect("a script");
+        context
+            .font
+            .collection
+            .fallback_families(FallbackKey::new(script, language.as_ref()))
+            .collect()
+    }
+
+    /// A system context that knows Ahem, the family every coverage test
+    /// shapes in: it maps ASCII and nothing a fallback is asked for.
+    fn system_context_with_ahem(tag: &str) -> TextContext {
+        let mut context = TextContext::new();
+        assert_eq!(context.register_fonts(FontBlob::from_static(AHEM)), 1);
+        assert!(context.set_locale(tag));
+        context
+    }
+
+    fn cover_in_ahem(context: &mut TextContext, text: &str) {
+        let ahem = FontFamily::Single(FontFamilyName::Named("Ahem".into()));
+        context.cover(text, [(0..text.len(), &ahem, Attributes::default())]);
+    }
+
+    #[test]
+    fn a_preload_names_a_language_and_scripts() {
+        assert!(!TextContext::is_locale("not a tag"));
+        assert!(TextContext::is_locale("zh-Hant"));
+        assert!(TextContext::is_script("Arab"));
+        assert!(
+            !TextContext::is_script("arab"),
+            "spelled as ISO 15924 spells it"
+        );
+        assert!(!TextContext::is_script("Han"));
+        assert!(!TextContext::preload_fallbacks("not a tag", &["Arab"]));
+        assert!(!TextContext::preload_fallbacks("ko", &["Hang", "Han"]));
+        assert_eq!(
+            known_fallback("Hang", "ko"),
+            None,
+            "a refused preload asks for nothing"
+        );
+        assert!(TextContext::preload_fallbacks("en-US", &[]));
+    }
+
+    /// Setting a locale asks the platform for nothing: every script's list
+    /// is filed empty, so a shaping whose characters the run's families all
+    /// map asks for nothing either.
+    #[test]
+    fn nothing_is_asked_while_the_runs_own_families_cover_the_text() {
+        let mut context = system_context_with_ahem("ko");
+        assert!(fallback_of(&mut context, "Hang", Some("ko")).is_empty());
+        assert!(fallback_of(&mut context, "Hani", None).is_empty());
+        cover_in_ahem(&mut context, "Ahem covers this, \n and its space.");
+        assert!(context.answered_scripts.is_empty());
+        assert_eq!(known_fallback("Hang", "ko"), None);
+    }
+
+    /// A character the run's families lack fills its script's list with the
+    /// platform's answer, from the process's one table, under the
+    /// language's key and the language-less one, whatever the script.
+    /// Skipped where the platform has no answer.
+    #[test]
+    fn a_missing_character_fills_its_scripts_list_from_the_process_table() {
+        for (tag, script, text) in [
+            ("zh-HK", "Hani", "今"),
+            ("fa", "Arab", "ب"),
+            ("th", "Thai", "ก"),
+        ] {
+            let mut context = system_context_with_ahem(tag);
+            cover_in_ahem(&mut context, text);
+            let known = known_fallback(script, tag).expect("asked once for the process");
+            assert_eq!(fallback_of(&mut context, script, Some(tag)), known, "{tag}");
+            assert_eq!(
+                fallback_of(&mut context, script, None),
+                known,
+                "{tag}: the language-less key follows the language"
+            );
+            let mut later = system_context_with_ahem(tag);
+            cover_in_ahem(&mut later, text);
+            assert_eq!(
+                fallback_of(&mut later, script, Some(tag)),
+                known,
+                "{tag}: reused"
+            );
+        }
+    }
+
+    /// A Common-script character is looked for only where fontique looks
+    /// for it: the list it adds to every query, and its segment's script,
+    /// one of its `Script_Extensions` the text around it is written in — not
+    /// every script it may be written in, which for a CJK comma includes
+    /// Hangul, Bopomofo and Yi.
+    #[test]
+    fn a_missing_common_character_asks_only_where_fontique_looks() {
+        let mut context = system_context_with_ahem("zh-MO");
+        cover_in_ahem(&mut context, "★");
+        assert_eq!(context.answered_scripts, [FONTIQUE_EVERY_SEGMENT_SCRIPT]);
+        let mut context = system_context_with_ahem("zh-MO");
+        cover_in_ahem(&mut context, "abc，");
+        assert_eq!(context.answered_scripts, [FONTIQUE_EVERY_SEGMENT_SCRIPT]);
+        let mut context = system_context_with_ahem("th");
+        cover_in_ahem(&mut context, "ก，");
+        assert_eq!(
+            context.answered_scripts,
+            [
+                parse_script("Thai").expect("a script"),
+                FONTIQUE_EVERY_SEGMENT_SCRIPT
+            ]
+        );
+    }
+
+    /// A preload fills the process's table ahead of the first context to
+    /// miss, which then takes the answer from there.
+    #[test]
+    fn a_preloaded_script_is_taken_from_the_table() {
+        assert!(TextContext::preload_fallbacks("zh-SG", &["Hani"]));
+        let known = known_fallback("Hani", "zh-SG").expect("preloaded");
+        let mut context = system_context_with_ahem("zh-SG");
+        cover_in_ahem(&mut context, "今");
+        assert_eq!(fallback_of(&mut context, "Hani", Some("zh-SG")), known);
+    }
+
+    /// A context's own fallback containers answer for it alone, and a
+    /// context without system fonts has no platform: neither files empty
+    /// lists nor asks.
+    #[test]
+    fn only_a_context_the_platform_answers_asks_on_a_miss() {
+        let mut containers = TextContext::new();
+        assert_eq!(
+            containers.register_fallback_fonts(FontBlob::from_static(AHEM)),
+            1
+        );
+        assert!(containers.set_locale("ja"));
+        assert!(!containers.fallback_on_miss);
+        let ahem = containers
+            .font
+            .collection
+            .family_id("Ahem")
+            .expect("registered");
+        assert_eq!(fallback_of(&mut containers, "Hani", Some("ja")), vec![ahem]);
+        let mut no_system = TextContext::without_system_fonts();
+        assert!(no_system.set_locale("ja"));
+        assert!(!no_system.fallback_on_miss);
+    }
+
     /// On a Mac the platform answers a Han cluster differently per language,
     /// and the language-less Han key, the one fontique appends to every
-    /// query, follows the language set. Skipped where the platform does not
-    /// have the faces.
+    /// query, follows the language set once a Han character is missing.
+    /// Skipped where the platform does not have the faces.
     #[cfg(target_os = "macos")]
     #[test]
     fn the_platform_han_fallback_follows_the_locale() {
-        let han = Script::from_bytes(*b"Hani");
-        let family_names = |context: &mut TextContext, tag: &str| -> Vec<String> {
-            let language = Language::parse(tag).expect("a tag");
-            let ids: Vec<_> = context
-                .font
-                .collection
-                .fallback_families(FallbackKey::new(han, Some(&language)))
-                .collect();
+        let family_names = |context: &mut TextContext, tag: Option<&str>| -> Vec<String> {
+            let ids = fallback_of(context, "Hani", tag);
             ids.iter()
                 .filter_map(|id| context.font.collection.family_name(*id).map(str::to_owned))
                 .collect()
         };
-        let mut traditional = TextContext::new();
-        assert!(traditional.set_locale("zh-Hant"));
-        let mut japanese = TextContext::new();
-        assert!(japanese.set_locale("ja"));
-        let traditional_han = family_names(&mut traditional, "zh-Hant");
-        let japanese_han = family_names(&mut japanese, "ja");
+        let mut traditional = system_context_with_ahem("zh-Hant");
+        cover_in_ahem(&mut traditional, "今");
+        let mut japanese = system_context_with_ahem("ja");
+        cover_in_ahem(&mut japanese, "今");
+        let traditional_han = family_names(&mut traditional, Some("zh-Hant"));
+        let japanese_han = family_names(&mut japanese, Some("ja"));
         if traditional_han.is_empty() || japanese_han.is_empty() {
             return;
         }
         assert_ne!(traditional_han, japanese_han);
-        let default_han: Vec<String> = traditional
-            .font
-            .collection
-            .fallback_families(han)
-            .collect::<Vec<_>>()
-            .iter()
-            .filter_map(|id| {
-                traditional
-                    .font
-                    .collection
-                    .family_name(*id)
-                    .map(str::to_owned)
-            })
-            .collect();
-        assert_eq!(default_han, traditional_han);
+        assert_eq!(family_names(&mut traditional, None), traditional_han);
     }
 
     #[test]

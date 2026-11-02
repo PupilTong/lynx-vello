@@ -279,7 +279,7 @@ pub(crate) struct TestViewSpec {
     /// A face the view registers at construction and its family, the page's
     /// default font.
     default_font: Option<(String, terminus::link::FontBlob)>,
-    locale: Option<String>,
+    locale: String,
     fetchable: FxHashSet<String>,
     probes_fetches: bool,
     probes_style_sheets: bool,
@@ -328,7 +328,7 @@ impl TestViewSpec {
             served_sheets: Vec::new(),
             fonts: Vec::new(),
             default_font: None,
-            locale: None,
+            locale: "en-US".to_owned(),
             fetchable: FxHashSet::default(),
             probes_fetches: false,
             probes_style_sheets: false,
@@ -385,7 +385,7 @@ impl TestViewSpec {
     /// The language of the view's text, as an embedder's
     /// `ViewSources::locale` names it.
     pub(crate) fn with_locale(mut self, tag: &str) -> Self {
-        self.locale = Some(tag.to_owned());
+        tag.clone_into(&mut self.locale);
         self
     }
 
@@ -518,6 +518,7 @@ impl TestViewSpec {
                 BASE,
                 ENTRY,
                 crate::ScreenMetrics::for_viewport(width, height, 1.0),
+                "en-US",
             )
         };
         let fetcher = Rc::new(InlineFetcher {

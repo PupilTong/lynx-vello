@@ -14,6 +14,9 @@ pub(crate) const DEFAULT_VSYNC_HZ: NonZeroU32 =
     NonZeroU32::new(60).expect("the default frame rate is non-zero");
 pub(crate) const DEFAULT_DEVICE_PIXEL_RATIO: f32 = 1.0;
 const MAX_VSYNC_HZ: u32 = 1_000;
+/// The locale of a run that names none and runs in no POSIX locale
+/// environment that names a language.
+pub(crate) const DEFAULT_LOCALE: &str = "en-US";
 
 #[derive(Clone, Debug)]
 pub(crate) struct Options {
@@ -25,8 +28,12 @@ pub(crate) struct Options {
     pub(crate) device_pixel_ratio: f32,
     /// The language of the page's text, as a BCP-47 tag: `--locale`, else
     /// the POSIX locale environment (`LC_ALL`, `LC_CTYPE`, `LANG`) as a tag,
-    /// else none.
-    pub(crate) locale: Option<String>,
+    /// else [`DEFAULT_LOCALE`]. Every view names one.
+    pub(crate) locale: String,
+    /// The scripts whose platform font fallback is asked for before the view
+    /// is built, in the locale's language: `--preload-scripts`, ISO 15924
+    /// codes such as `Hani`; none by default.
+    pub(crate) preload_scripts: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -48,6 +55,7 @@ pub(crate) fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Inv
     let mut device_pixel_ratio = DEFAULT_DEVICE_PIXEL_RATIO;
     let mut dpr_set = false;
     let mut locale: Option<String> = None;
+    let mut preload_scripts: Option<Vec<String>> = None;
 
     while let Some(argument) = arguments.pop_front() {
         let Some(argument_text) = argument.to_str() else {
@@ -100,6 +108,16 @@ pub(crate) fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Inv
             _ if argument_text.starts_with("--locale=") => {
                 set_locale(&mut locale, &argument_text["--locale=".len()..])?;
             }
+            "--preload-scripts" => set_preload_scripts(
+                &mut preload_scripts,
+                &next_utf8(&mut arguments, "--preload-scripts")?,
+            )?,
+            _ if argument_text.starts_with("--preload-scripts=") => {
+                set_preload_scripts(
+                    &mut preload_scripts,
+                    &argument_text["--preload-scripts=".len()..],
+                )?;
+            }
             _ if argument_text.starts_with("--input=") => {
                 if input.is_some() {
                     return Err(CliError::arguments("the input URL was provided twice"));
@@ -144,6 +162,7 @@ pub(crate) fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Inv
         device_pixel_ratio,
         dpr_set,
         locale,
+        preload_scripts.unwrap_or_default(),
     )
 }
 
@@ -157,6 +176,7 @@ fn finish(
     device_pixel_ratio: f32,
     dpr_set: bool,
     locale: Option<String>,
+    preload_scripts: Vec<String>,
 ) -> Result<Invocation, CliError> {
     let input = input.ok_or_else(|| CliError::arguments("missing `-i <file:///...>`"))?;
     if vsync_set && !headless {
@@ -177,8 +197,36 @@ fn finish(
         viewport_width: viewport.0,
         viewport_height: viewport.1,
         device_pixel_ratio,
-        locale: locale.or_else(environment_locale),
+        locale: locale
+            .or_else(environment_locale)
+            .unwrap_or_else(|| DEFAULT_LOCALE.to_owned()),
+        preload_scripts,
     }))
+}
+
+/// Stores `--preload-scripts`' value, once: comma-separated ISO 15924 codes,
+/// checked here only for shape (four ASCII letters each); the engine refuses
+/// a code the platform cannot be asked for when the group preloads.
+fn set_preload_scripts(scripts: &mut Option<Vec<String>>, value: &str) -> Result<(), CliError> {
+    if scripts.is_some() {
+        return Err(CliError::arguments(
+            "`--preload-scripts` was provided twice",
+        ));
+    }
+    let parsed: Vec<String> = value
+        .split(',')
+        .map(|code| code.trim().to_owned())
+        .collect();
+    if let Some(code) = parsed
+        .iter()
+        .find(|code| code.len() != 4 || !code.chars().all(|c| c.is_ascii_alphabetic()))
+    {
+        return Err(CliError::arguments(format!(
+            "`--preload-scripts` takes comma-separated ISO 15924 codes such as Hani,Latn: `{code}`"
+        )));
+    }
+    *scripts = Some(parsed);
+    Ok(())
 }
 
 /// Stores `--locale`'s value, once.
@@ -336,7 +384,7 @@ mod tests {
         .unwrap() else {
             panic!("expected a runnable invocation");
         };
-        assert_eq!(options.locale.as_deref(), Some("zh-Hant"));
+        assert_eq!(options.locale, "zh-Hant");
 
         let Invocation::Run(options) = parse(args(&[
             "-i",
@@ -347,7 +395,7 @@ mod tests {
         .unwrap() else {
             panic!("expected a runnable invocation");
         };
-        assert_eq!(options.locale.as_deref(), Some("ja"));
+        assert_eq!(options.locale, "ja");
 
         assert!(
             parse(args(&[
@@ -364,6 +412,57 @@ mod tests {
                 "file:///tmp/card.web.bundle",
                 "--locale=ja",
                 "--locale=ko"
+            ]))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn parses_the_scripts_to_preload_and_refuses_what_is_not_a_code() {
+        let Invocation::Run(options) = parse(args(&["-i", "file:///tmp/card.web.bundle"])).unwrap()
+        else {
+            panic!("expected a runnable invocation");
+        };
+        assert!(options.preload_scripts.is_empty());
+
+        let Invocation::Run(options) = parse(args(&[
+            "-i",
+            "file:///tmp/card.web.bundle",
+            "--preload-scripts=Hani,Latn",
+        ]))
+        .unwrap() else {
+            panic!("expected a runnable invocation");
+        };
+        assert_eq!(options.preload_scripts, ["Hani", "Latn"]);
+
+        let Invocation::Run(options) = parse(args(&[
+            "-i",
+            "file:///tmp/card.web.bundle",
+            "--preload-scripts",
+            "Arab",
+        ]))
+        .unwrap() else {
+            panic!("expected a runnable invocation");
+        };
+        assert_eq!(options.preload_scripts, ["Arab"]);
+
+        for bad in ["Han", "Hani,", "Hani,Lat1", ""] {
+            assert!(
+                parse(args(&[
+                    "-i",
+                    "file:///tmp/card.web.bundle",
+                    &format!("--preload-scripts={bad}"),
+                ]))
+                .is_err(),
+                "{bad}"
+            );
+        }
+        assert!(
+            parse(args(&[
+                "-i",
+                "file:///tmp/card.web.bundle",
+                "--preload-scripts=Hani",
+                "--preload-scripts=Arab"
             ]))
             .is_err()
         );

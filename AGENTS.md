@@ -319,7 +319,8 @@ default font family, author stylesheet URLs, the entry MTS module URL
 (relative allowed), optional
 `init_data` and `global_props` JSON text only the realm parses, and the
 required `screen` metrics `SystemInfo` reports
-(`ViewSources::new(base_url, entry, screen)`; a host with no screen — a
+and the required BCP-47 `locale` of its text
+(`ViewSources::new(base_url, entry, screen, locale)`; a host with no screen — a
 headless or offscreen capture — names `ScreenMetrics::for_viewport` of its
 capture size explicitly) — plus a builder
 turning the view's `ImageReports` into its `ResourceFetcher`; both go to
@@ -482,13 +483,33 @@ list stops asking the platform for its own, so an embedder with system fonts
 leaves the field empty. A default family name neither the containers nor the
 platform has fails the construction with `EngineError::UnknownFontFamily`.
 The platform's own fonts are discovered once per process, by the first text
-context built — inside `create_lynx_view` for a view that names any of the
-three font fields or a locale, otherwise inside the first layout that shapes
-text, on `bobcat-main` — and `bobcat_core::preload_system_fonts()` lets an
+context built — inside `create_lynx_view`, which builds every view's — and
+`bobcat_core::preload_system_fonts()` lets an
 embedder run that discovery early, on a thread of its own: process-wide and
 idempotent, and a view built before it finishes waits for it rather than
 discovering again. Both native embedders in this workspace call it at startup,
 `bobcat` before it decodes its input and `bobcat-server` before it binds.
+The platform's per-script fallback is asked only for a character the run's
+own families lack: `TextContext::set_locale` files every script's fallback
+list empty, so fontique, which looks a segment's list up at every segment
+start, asks the platform for nothing; before each shaping seldon tests the
+text against the faces its spans' own `font-family` lists match
+(`TextContext::cover`), and fills the list of each script a missing
+character is written in (its Script_Extensions), plus the list fontique adds
+to every query (`(Hani, None)`, fontique's own constant, the one a
+Common-script character such as `★` is found in), from one table for the
+process. That table asks the platform the first time any context in the
+process needs a (script, language) and answers every later view from there;
+the answer goes under the script's language-named key and its language-less
+one, for every script alike. On a Mac that first ask is up to a few
+milliseconds, about 8 ms for the first language-less one in the process,
+which has CoreText build its whole default cascade list. A page whose text
+its fonts cover asks nothing. `LynxGroup::preload_text(locale, scripts)` —
+synchronous on the calling thread, for a host whose first view comes later
+than its group or only on some condition — runs the discovery and pays those
+first asks for the scripts the host names (ISO 15924: `Hani`, `Arab`,
+`Thai`, …). A context with fallback containers of its own, or without system
+fonts, files nothing empty and asks nothing.
 
 `ViewSources::locale` is the language of the view's text as a BCP-47 tag,
 Lynx's `LynxEnv.locale`: the host sets it for the process, from the OS's
@@ -498,14 +519,20 @@ locale of every parley run, which fontique's fallback key carries to the
 platform, so a Han cluster no family of the run's own `font-family` covers is
 set in PingFang TC for `zh-Hant`, PingFang HK for `zh-HK`, Hiragino Sans for
 `ja` and Apple SD Gothic Neo for `ko` where the platform's default is PingFang
-SC; the language's Han fallback is also filed under the language-less Han key
-fontique appends to every query (its workaround for Common-script punctuation
-in a run with no Han character), so that punctuation is set in the same face.
+SC. Each script's answer for the language is also filed under the script's
+language-less key, for every script alike; that is how the language-less Han
+key fontique appends to every query (its workaround for Common-script
+punctuation in a run with no Han character) sets that punctuation in the
+language's face once such a character is missing from the run's fonts.
+Every embedder names one: `ViewSources::new` takes it.
 Lynx has no `lang` attribute and no `SystemInfo` language field, so nothing
 per element overrides it and script is not told it. A tag that does not parse
 fails the construction with `EngineError::InvalidLocale`. `bobcat` names it
-from `--locale`, else from the POSIX locale environment; the Wasm facade from
-`setLocale(tag)`.
+from `--locale`, else from the POSIX locale environment, else `en-US`, and
+preloads the
+scripts `--preload-scripts` names (comma-separated ISO 15924 codes, none by
+default) through its group before building the view; `bobcat-server` names
+`en-US`; the Wasm facade names `en-US` until `setLocale(tag)` names another.
 
 Dropping a loading view marks source work cancelled and stops that view before
 QuickJS begins. One `tokio_util::sync::CancellationToken` per view is minted on

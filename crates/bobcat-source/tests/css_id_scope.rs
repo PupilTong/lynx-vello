@@ -222,7 +222,7 @@ async fn css_id_selects_the_fragment_an_element_matches() {
             1.0,
             resources.builder(),
             Vec::new(),
-            page.view_sources(SCREEN),
+            page.view_sources(SCREEN, "en-US"),
         )
         .expect("a view");
     // Boot's first flush waits for a painter to bind the view.

@@ -112,7 +112,7 @@ async fn printed(
     let group = LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Sequential)
         .await
         .expect("the group starts");
-    let mut sources = ViewSources::new(base, main, screen);
+    let mut sources = ViewSources::new(base, main, screen, "en-US");
     sources.background_entry = Some(background.to_owned());
     let mut view = group
         .create_lynx_view(

@@ -47,9 +47,9 @@ impl Program {
     }
 
     /// The sources of this program's view, reporting `screen` as its
-    /// `SystemInfo`.
-    pub(crate) fn sources(&self, screen: ScreenMetrics) -> ViewSources {
-        self.source.view_sources(screen)
+    /// `SystemInfo`, its text in `locale`'s language.
+    pub(crate) fn sources(&self, screen: ScreenMetrics, locale: &str) -> ViewSources {
+        self.source.view_sources(screen, locale)
     }
 
     /// Builds this embedder's resource system and registers the script and
@@ -111,7 +111,7 @@ mod tests {
         // The view resolves against the base the fetcher was given.
         let screen = ScreenMetrics::for_viewport(32.0, 24.0, 1.0);
         assert_eq!(
-            Some(program.sources(screen).base_url),
+            Some(program.sources(screen, "en-US").base_url),
             resources.base_url().map(String::from)
         );
         assert!(resources.unregister("bobcat-memory://lynx-xml/main-thread.js"));

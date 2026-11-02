@@ -6,6 +6,7 @@
 
 use core::ops::Range;
 
+use parley::fontique::Attributes;
 use parley::{
     BaseDirection, CHROMIUM_LINE_BREAK_OVERRIDE, InlineBox, Layout, LineBreakOverrideFn,
     LineHeight as ParleyLineHeight, PositionedLayoutItem, TextStyle as ParleyTextStyle,
@@ -219,6 +220,24 @@ fn build_into_scratch<S: Copy>(
     #[cfg(test)]
     context.record_shape();
     let locale = context.locale();
+    let styles: Vec<_> = spans
+        .iter()
+        .map(|span| super::style::parley_style(span.style, span.breaking))
+        .collect();
+    context.cover(
+        text,
+        spans.iter().zip(&styles).map(|(span, style)| {
+            (
+                span.bytes.clone(),
+                &style.font_family,
+                Attributes {
+                    width: style.font_width,
+                    weight: style.font_weight,
+                    style: style.font_style,
+                },
+            )
+        }),
+    );
     let (font_context, layout_context, scratch) = context.shaping_parts();
     // `text` is already whitespace-normalized by `super::content::normalize`,
     // and `style_run_builder` takes it verbatim — parley's own
@@ -268,8 +287,7 @@ fn build_into_scratch<S: Copy>(
             ..ParleyTextStyle::default()
         });
     }
-    for span in spans {
-        let mut style = super::style::parley_style(span.style, span.breaking);
+    for (span, mut style) in spans.iter().zip(styles) {
         style.locale = locale;
         style.letter_spacing += span.extra_spacing;
         style.white_space_collapse = span.hanging;

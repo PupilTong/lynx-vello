@@ -170,7 +170,7 @@ impl Harness {
         Self::serving(
             context,
             workers,
-            ViewSources::new("app:///", "app:///main.js", SCREEN),
+            ViewSources::new("app:///", "app:///main.js", SCREEN, "en-US"),
         )
     }
 
@@ -181,7 +181,7 @@ impl Harness {
         Self::binding(
             context,
             workers,
-            ViewSources::new("app:///", "app:///main.js", SCREEN),
+            ViewSources::new("app:///", "app:///main.js", SCREEN, "en-US"),
             None,
         )
     }
@@ -249,7 +249,8 @@ impl Harness {
         let attached = AttachedView {
             viewport: CREATE_VIEWPORT,
             sources,
-            text_context: None,
+            text_context: crate::view::stage_text_context(Vec::new(), None, Vec::new(), "en-US")
+                .expect("en-US is a language tag"),
             startup: StartupSources { sheets, entry },
             native_modules: String::new(),
             commands: incoming,
@@ -1983,7 +1984,7 @@ fn page_data_reaches_the_realm_it_was_given_to() {
             ViewSources {
                 init_data: Some(r#"{"boxes": 2}"#.to_owned()),
                 global_props: Some(r#"{"theme": "dark"}"#.to_owned()),
-                ..ViewSources::new("app:///", "app:///main.js", SCREEN)
+                ..ViewSources::new("app:///", "app:///main.js", SCREEN, "en-US")
             },
         );
         harness
@@ -2980,7 +2981,7 @@ fn an_svg_load_settled_before_the_first_commit_waits_for_it() {
             workers,
             ViewSources {
                 style_sheets: vec!["app:///a.css".to_owned()],
-                ..ViewSources::new("app:///", "app:///main.js", SCREEN)
+                ..ViewSources::new("app:///", "app:///main.js", SCREEN, "en-US")
             },
         );
         harness
@@ -4173,7 +4174,7 @@ fn script_finished_is_published_once_without_any_bts_acknowledgement() {
     // nothing at all — and the view is ready anyway, exactly once.
     on_a_js_thread(|thread| async move {
         let (context, workers) = group(&thread);
-        let mut sources = ViewSources::new("app:///", "app:///main.js", SCREEN);
+        let mut sources = ViewSources::new("app:///", "app:///main.js", SCREEN, "en-US");
         sources.background_entry = Some("app:///background.js".into());
         let mut harness = Harness::serving(context, workers, sources);
         harness
@@ -4354,7 +4355,7 @@ lynx.getJSContext().addEventListener('after', () => {
 fn a_bts_worker_that_fails_reports_worker_ended_and_leaves_boot_alone() {
     on_a_js_thread(|thread| async move {
         let (context, workers) = group(&thread);
-        let mut sources = ViewSources::new("app:///", "app:///main.js", SCREEN);
+        let mut sources = ViewSources::new("app:///", "app:///main.js", SCREEN, "en-US");
         sources.background_entry = Some("app:///background.js".into());
         let mut harness = Harness::serving(context, workers, sources);
         harness
@@ -4490,7 +4491,7 @@ fn a_card_url_is_what_the_card_is_named_by() {
             workers,
             ViewSources {
                 card_url: Some("cards/card.bundle".to_owned()),
-                ..ViewSources::new("app:///", "app:///main.js", SCREEN)
+                ..ViewSources::new("app:///", "app:///main.js", SCREEN, "en-US")
             },
         );
         harness
@@ -4549,7 +4550,7 @@ fn a_card_url_is_what_the_card_is_named_by() {
 fn a_card_url_that_does_not_resolve_is_an_invalid_url() {
     let mut sources = ViewSources {
         card_url: Some("https://[".to_owned()),
-        ..ViewSources::new("app:///", "app:///main.js", SCREEN)
+        ..ViewSources::new("app:///", "app:///main.js", SCREEN, "en-US")
     };
     let error = resolve_startup_urls(&mut sources).expect_err("the card URL does not resolve");
     assert!(
@@ -4777,7 +4778,7 @@ fn author_sheets_cascade_in_listed_order_and_boot_waits_for_all_of_them() {
             workers,
             ViewSources {
                 style_sheets: vec!["app:///a.css".to_owned(), "app:///b.css".to_owned()],
-                ..ViewSources::new("app:///", "app:///main.js", SCREEN)
+                ..ViewSources::new("app:///", "app:///main.js", SCREEN, "en-US")
             },
         );
         harness
@@ -4833,7 +4834,7 @@ fn boot_publishes_nothing_until_a_withheld_sheet_arrives() {
             workers,
             ViewSources {
                 style_sheets: vec!["app:///a.css".to_owned()],
-                ..ViewSources::new("app:///", "app:///main.js", SCREEN)
+                ..ViewSources::new("app:///", "app:///main.js", SCREEN, "en-US")
             },
         );
         harness
@@ -4900,7 +4901,7 @@ fn a_listed_sheet_that_fails_to_load_fails_the_boot_naming_it() {
             workers,
             ViewSources {
                 style_sheets: vec!["app:///a.css".to_owned()],
-                ..ViewSources::new("app:///", "app:///main.js", SCREEN)
+                ..ViewSources::new("app:///", "app:///main.js", SCREEN, "en-US")
             },
         );
         harness
@@ -4964,7 +4965,7 @@ fn a_listed_sheet_that_app_code_settles_first_still_fails_the_boot() {
                 workers,
                 ViewSources {
                     style_sheets: vec!["app:///a.css".to_owned()],
-                    ..ViewSources::new("app:///", "app:///main.js", SCREEN)
+                    ..ViewSources::new("app:///", "app:///main.js", SCREEN, "en-US")
                 },
             );
             harness
@@ -5039,7 +5040,7 @@ fn an_entry_a_worker_event_resumes_reports_its_throw_before_boots_failure() {
             workers,
             ViewSources {
                 style_sheets: vec!["app:///a.css".to_owned()],
-                ..ViewSources::new("app:///", "app:///main.js", SCREEN)
+                ..ViewSources::new("app:///", "app:///main.js", SCREEN, "en-US")
             },
         );
         harness
@@ -5149,7 +5150,7 @@ fn a_synchronous_adoption_parks_javascript_and_leaves_a_siblings_tasks_running()
             context,
             ViewSources {
                 style_sheets: vec!["app:///b.css".to_owned()],
-                ..ViewSources::new("app:///", "app:///b.js", SCREEN)
+                ..ViewSources::new("app:///", "app:///b.js", SCREEN, "en-US")
             },
         );
         // Both of B's startup requests are outstanding from its construction,

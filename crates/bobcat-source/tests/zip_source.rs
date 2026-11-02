@@ -65,7 +65,7 @@ fn loads_xml_and_registers_encoded_resource_paths_on_both_hosts() {
             let resources = resources();
             zip.register_with(&resources, &input).unwrap();
             page.register_with(&resources);
-            assert!(resources.unregister(&page.view_sources(SCREEN).entry));
+            assert!(resources.unregister(&page.view_sources(SCREEN, "en-US").entry));
             let mut asset = input.clone();
             asset.set_query(None);
             asset.set_fragment(None);
@@ -94,14 +94,14 @@ fn selects_real_binary_bundle_through_the_shared_page_adapter() {
         .page(&Url::parse("https://cdn.example/dist/main.web.bundle").unwrap())
         .unwrap();
     assert_eq!(
-        page.view_sources(SCREEN).entry,
+        page.view_sources(SCREEN, "en-US").entry,
         "https://cdn.example/dist/main.web.bundle/root.js"
     );
     assert_eq!(
-        page.view_sources(SCREEN).card_url.as_deref(),
+        page.view_sources(SCREEN, "en-US").card_url.as_deref(),
         Some("https://cdn.example/dist/main.web.bundle")
     );
-    assert!(!page.view_sources(SCREEN).style_sheets.is_empty());
+    assert!(!page.view_sources(SCREEN, "en-US").style_sheets.is_empty());
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

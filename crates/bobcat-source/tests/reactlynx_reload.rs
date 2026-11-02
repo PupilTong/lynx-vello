@@ -174,7 +174,7 @@ async fn prepare_view(before_background: bool, development: bool) -> ReloadView 
     let resources = Resources::new(ResourcesConfig::default(), || {});
     page.register_with(&resources);
     resources.set_base_url(Some(input));
-    let mut sources = page.view_sources(SCREEN);
+    let mut sources = page.view_sources(SCREEN, "en-US");
     sources.init_data = Some(json!({"seed":0,"keep":"retained"}).to_string());
     let background = sources.background_entry.clone().unwrap();
     let released = Rc::new(Cell::new(!before_background));

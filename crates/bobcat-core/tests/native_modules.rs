@@ -289,7 +289,7 @@ impl NativeModule for Twin {
 }
 
 fn sources(background: &str) -> ViewSources {
-    let mut sources = ViewSources::new("app:///", MAIN_URL, SCREEN);
+    let mut sources = ViewSources::new("app:///", MAIN_URL, SCREEN, "en-US");
     sources.background_entry = Some(background.to_owned());
     sources
 }
@@ -398,7 +398,7 @@ async fn a_main_thread_call_is_answered_back_to_the_main_thread() {
             1.0,
             |_reports| Entries,
             vec![Box::new(Shared(Rc::clone(&echo))) as Box<dyn NativeModule>],
-            ViewSources::new("app:///", MAIN_CALLER_URL, SCREEN),
+            ViewSources::new("app:///", MAIN_CALLER_URL, SCREEN, "en-US"),
         )
         .expect("the view is built");
     // The answer is applied by a job of the view, which runs once boot's

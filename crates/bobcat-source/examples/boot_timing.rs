@@ -46,7 +46,7 @@ async fn boot(input: &Url, bytes: &[u8], deferred: bool) -> Boot {
     let registered = Arc::new(Mutex::new(None));
     let sources = if deferred {
         let page = PageSource::defer(input, bytes.to_vec()).expect("the card defers");
-        let sources = page.view_sources(screen);
+        let sources = page.view_sources(screen, "en-US");
         // The install `DeferredPage::register_in_background` runs, with the
         // time it finished recorded.
         let (url, bytes, done) = (input.clone(), bytes.to_vec(), Arc::clone(&registered));
@@ -63,7 +63,7 @@ async fn boot(input: &Url, bytes: &[u8], deferred: bool) -> Boot {
         let page = PageSource::from_bytes(input, bytes).expect("the card decodes");
         page.register_with(&resources);
         *registered.lock().unwrap() = Some(start.elapsed());
-        page.view_sources(screen)
+        page.view_sources(screen, "en-US")
     };
     let group = LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Auto)
         .await

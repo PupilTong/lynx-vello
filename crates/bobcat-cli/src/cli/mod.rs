@@ -49,7 +49,12 @@ Options:
       --viewport WxH    initial CSS-pixel viewport (default: 393x727)
       --dpr RATIO       headless device-pixel ratio (default: 1)
       --locale TAG      BCP-47 language of the page's text, for font fallback
-                        (default: the LC_ALL, LC_CTYPE or LANG environment)
+                        (default: the LC_ALL, LC_CTYPE or LANG environment,
+                        else en-US)
+      --preload-scripts CODES
+                        ISO 15924 scripts (e.g. Hani,Latn) whose platform
+                        font fallback is asked for in the locale's language
+                        before the view is built (default: none)
   -h, --help            show this help
   -V, --version         show the version
 
@@ -171,6 +176,34 @@ pub fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<(), CliError
             }
         }
     }
+}
+
+/// Starts the page's group, then has it ask the platform for the font
+/// fallback of the scripts `--preload-scripts` named, in the page's
+/// language, before the view is built — through the group, as a host whose
+/// view comes later would. Nothing is preloaded when none are named, so the
+/// font discovery the startup thread runs is not waited for here.
+fn start_group<R: bobcat_core::EventRequester>(
+    event_requester: std::sync::Arc<R>,
+    locale: &str,
+    scripts: &[String],
+    input: &str,
+) -> Result<bobcat_core::LynxGroup, CliError> {
+    let start = || {
+        let group = pollster::block_on(bobcat_core::LynxGroup::new(
+            event_requester,
+            bobcat_core::StyleThreads::Auto,
+        ))?;
+        if !scripts.is_empty() {
+            let scripts: Vec<&str> = scripts.iter().map(String::as_str).collect();
+            group.preload_text(locale, &scripts)?;
+        }
+        Ok(group)
+    };
+    start().map_err(|source| CliError::StartView {
+        input: input.to_owned(),
+        source,
+    })
 }
 
 #[cfg(target_os = "macos")]

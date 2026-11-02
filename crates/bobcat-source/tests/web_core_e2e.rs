@@ -483,7 +483,7 @@ impl Card {
         mount_bundles(&resources);
 
         let (width, height) = VIEWPORT;
-        let mut sources = page.view_sources(screen(case));
+        let mut sources = page.view_sources(screen(case), "en-US");
         // The page data every card was written against. Upstream's shell sets
         // these on the host element before it loads any card
         // (`shell-project/index.ts`), so `useInitData().mockData` is

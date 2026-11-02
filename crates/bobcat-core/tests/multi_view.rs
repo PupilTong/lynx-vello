@@ -93,7 +93,7 @@ fn fetcher(entry_url: &str, color: &str) -> Rc<FetcherDouble> {
 fn sources(entry_url: &str) -> ViewSources {
     ViewSources {
         style_sheets: vec![STYLE_URL.to_owned()],
-        ..ViewSources::new("app:///", entry_url, SCREEN)
+        ..ViewSources::new("app:///", entry_url, SCREEN, "en-US")
     }
 }
 
@@ -300,7 +300,7 @@ async fn a_job_parked_on_one_views_host_holds_up_a_siblings_frame_without_blocki
                 1.0,
                 |_reports| fetcher,
                 Vec::new(),
-                ViewSources::new("app:///", entry_url, SCREEN),
+                ViewSources::new("app:///", entry_url, SCREEN, "en-US"),
             )
             .expect("the view is built on the group's thread");
         let mut painter = Painter::new(DrawTarget::Offscreen, 32.0, 24.0, 1.0)

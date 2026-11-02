@@ -54,6 +54,9 @@ extern "C" {
     fn console_log(value: &JsValue);
 }
 
+/// The language a page's text is in until the host names another
+/// ([`BobcatRenderer::set_locale`]): every view names one.
+const DEFAULT_LOCALE: &str = "en-US";
 const POINTER_DEVICE_MOUSE: u8 = 0;
 const POINTER_DEVICE_TOUCH: u8 = 1;
 const POINTER_DEVICE_PEN: u8 = 2;
@@ -287,8 +290,9 @@ pub struct BobcatRenderer {
     /// these are the only fallback a view this renderer builds has.
     fallback_fonts: Vec<FontBlob>,
     /// The language of every page's text, as a BCP-47 tag, read once at
-    /// construction like the fonts. `None` leaves the engine's default.
-    locale: Option<String>,
+    /// construction like the fonts: `en-US` until [`Self::set_locale`] names
+    /// another, since every view names one.
+    locale: String,
     /// The Stylo worker count each group this renderer builds gets. The
     /// workers themselves are the group's and retire with it; only the size
     /// is wrapper state.
@@ -476,7 +480,7 @@ impl BobcatRenderer {
                 fonts: Vec::new(),
                 default_font_family: None,
                 fallback_fonts: Vec::new(),
-                locale: None,
+                locale: DEFAULT_LOCALE.to_owned(),
                 style_threads,
                 native_modules,
                 module_bridge: Rc::new(HostModuleBridge {
@@ -529,7 +533,7 @@ impl BobcatRenderer {
             config: self.config,
             style_sheets: style_sheet_urls,
             background_entry: background_entry_url,
-            ..ViewSources::new(entry_url.clone(), entry_url, self.screen)
+            ..ViewSources::new(entry_url.clone(), entry_url, self.screen, &self.locale)
         };
         self.load_sources(sources, global_props).await
     }
@@ -552,7 +556,7 @@ impl BobcatRenderer {
         let input = Url::parse(&url).map_err(js_error)?;
         let page = PageSource::defer(&input, bytes).map_err(js_error)?;
         page.register_in_background(&self.resources);
-        self.load_sources(page.view_sources(self.screen), global_props)
+        self.load_sources(page.view_sources(self.screen, &self.locale), global_props)
             .await
     }
 
@@ -572,7 +576,7 @@ impl BobcatRenderer {
             .register_with(&self.resources, &input)
             .map_err(js_error)?;
         page.register_with(&self.resources);
-        self.load_sources(page.view_sources(self.screen), global_props)
+        self.load_sources(page.view_sources(self.screen, &self.locale), global_props)
             .await
     }
 
@@ -695,12 +699,12 @@ impl BobcatRenderer {
 
     /// Name the language of every page this renderer builds, as a BCP-47
     /// tag (`zh-Hant`, `ja`): what the per-script font fallback is asked
-    /// with. Checked at construction: [`Self::load`] fails if it is not a
-    /// language tag.
+    /// with. `en-US` until this is called. Checked at construction:
+    /// [`Self::load`] fails if it is not a language tag.
     #[wasm_bindgen(js_name = setLocale)]
     pub fn set_locale(&mut self, tag: String) -> Result<(), JsValue> {
         self.ensure_running()?;
-        self.locale = Some(tag);
+        self.locale = tag;
         Ok(())
     }
 
@@ -1191,7 +1195,7 @@ impl BobcatRenderer {
         sources.fonts = self.fonts.clone();
         sources.default_font_family = self.default_font_family.clone();
         sources.fallback_fonts = self.fallback_fonts.clone();
-        sources.locale = self.locale.clone();
+        sources.locale.clone_from(&self.locale);
         // JSON text the host serialized and Rust never reads.
         sources.global_props = global_props;
         // A draw target that failed cannot be reached again, so a page loaded

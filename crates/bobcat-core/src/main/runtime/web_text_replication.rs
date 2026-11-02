@@ -108,7 +108,8 @@ fn text_runtime() -> (ScriptRuntime, MainThreadRuntime, DocumentProbe) {
     );
     let mut ingredients =
         DocumentIngredients::for_test(Viewport::new(393.0, 727.0), PageConfig::default());
-    ingredients.text_context = Some(text);
+    assert!(text.set_locale("en-US"));
+    ingredients.text_context = text;
     runtime_over(ingredients)
 }
 

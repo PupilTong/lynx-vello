@@ -167,7 +167,7 @@ async fn booted_with_sheet_at(
         height,
         ViewSources {
             style_sheets: vec!["app:///author.css".to_owned()],
-            ..ViewSources::new("app:///", SCRIPT_URL, SCREEN)
+            ..ViewSources::new("app:///", SCRIPT_URL, SCREEN, "en-US")
         },
     )
     .await
@@ -312,7 +312,7 @@ fn checker_store() -> Rc<prime_radiant::TestImages> {
 async fn fetched_script_reaches_the_offscreen_draw_target() {
     let (_view, mut painter) = booted(
         fetcher(MAIN_THREAD_SCRIPT.as_bytes()),
-        ViewSources::new("app:///", SCRIPT_URL, SCREEN),
+        ViewSources::new("app:///", SCRIPT_URL, SCREEN, "en-US"),
     )
     .await;
 
@@ -347,7 +347,7 @@ async fn an_embedder_image_store_reaches_the_private_painter() {
                     .serving(sink),
             )
         },
-        ViewSources::new("app:///", SCRIPT_URL, SCREEN),
+        ViewSources::new("app:///", SCRIPT_URL, SCREEN, "en-US"),
     )
     .await;
     settle_images(&mut view, &mut painter, &images);
@@ -381,7 +381,7 @@ async fn an_image_element_loads_and_paints_from_its_src() {
                     .serving(sink),
             )
         },
-        ViewSources::new("app:///", SCRIPT_URL, SCREEN),
+        ViewSources::new("app:///", SCRIPT_URL, SCREEN, "en-US"),
     )
     .await;
     settle_images(&mut view, &mut painter, &images);
@@ -402,7 +402,7 @@ async fn raw_text_reaches_the_private_painter_as_glyphs() {
         ViewSources {
             fonts: vec![FontBlob::from_static(ROBOTO)],
             default_font_family: Some("Roboto".to_owned()),
-            ..ViewSources::new("app:///", SCRIPT_URL, SCREEN)
+            ..ViewSources::new("app:///", SCRIPT_URL, SCREEN, "en-US")
         },
     )
     .await;
@@ -458,7 +458,7 @@ globalThis.renderPage = function renderPage() {
         ViewSources {
             fonts: vec![FontBlob::from_static(ROBOTO)],
             default_font_family: Some("Roboto".to_owned()),
-            ..ViewSources::new("app:///", SCRIPT_URL, SCREEN)
+            ..ViewSources::new("app:///", SCRIPT_URL, SCREEN, "en-US")
         },
     )
     .await
@@ -495,7 +495,7 @@ globalThis.renderPage = function () {
         ViewSources {
             fonts: vec![FontBlob::from_static(AHEM)],
             default_font_family: Some("Ahem".to_owned()),
-            ..ViewSources::new("app:///", SCRIPT_URL, SCREEN)
+            ..ViewSources::new("app:///", SCRIPT_URL, SCREEN, "en-US")
         },
     )
     .await
@@ -561,7 +561,7 @@ globalThis.renderPage = function () {
         ViewSources {
             fonts: vec![FontBlob::from_static(AHEM)],
             default_font_family: Some("Ahem".to_owned()),
-            ..ViewSources::new("app:///", SCRIPT_URL, SCREEN)
+            ..ViewSources::new("app:///", SCRIPT_URL, SCREEN, "en-US")
         },
     )
     .await
@@ -613,7 +613,7 @@ globalThis.renderPage = function () {
             fonts: vec![FontBlob::from_static(AHEM)],
             default_font_family: Some("Ahem".to_owned()),
             style_sheets: vec!["app:///author.css".to_owned()],
-            ..ViewSources::new("app:///", SCRIPT_URL, SCREEN)
+            ..ViewSources::new("app:///", SCRIPT_URL, SCREEN, "en-US")
         },
     )
     .await;
@@ -885,7 +885,7 @@ async fn booted_with_images(
                     .serving(sink),
             )
         },
-        ViewSources::new("app:///", SCRIPT_URL, SCREEN),
+        ViewSources::new("app:///", SCRIPT_URL, SCREEN, "en-US"),
     )
     .await
     .expect("view");
@@ -1415,7 +1415,7 @@ async fn a_blurred_card_reaches_the_offscreen_draw_target() {
             style_sheets: vec!["app:///author.css".to_owned()],
             fonts: vec![FontBlob::from_static(ROBOTO)],
             default_font_family: Some("Roboto".to_owned()),
-            ..ViewSources::new("app:///", SCRIPT_URL, SCREEN)
+            ..ViewSources::new("app:///", SCRIPT_URL, SCREEN, "en-US")
         },
     )
     .await;
@@ -1574,7 +1574,7 @@ async fn a_backdrop_filtered_card_reaches_the_offscreen_draw_target() {
             style_sheets: vec!["app:///author.css".to_owned()],
             fonts: vec![FontBlob::from_static(ROBOTO)],
             default_font_family: Some("Roboto".to_owned()),
-            ..ViewSources::new("app:///", SCRIPT_URL, SCREEN)
+            ..ViewSources::new("app:///", SCRIPT_URL, SCREEN, "en-US")
         },
     )
     .await;
@@ -1723,7 +1723,7 @@ async fn a_blur_view_reaches_the_offscreen_draw_target() {
             style_sheets: vec!["app:///author.css".to_owned()],
             fonts: vec![FontBlob::from_static(ROBOTO)],
             default_font_family: Some("Roboto".to_owned()),
-            ..ViewSources::new("app:///", SCRIPT_URL, SCREEN)
+            ..ViewSources::new("app:///", SCRIPT_URL, SCREEN, "en-US")
         },
     )
     .await;

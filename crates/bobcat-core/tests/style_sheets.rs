@@ -73,7 +73,7 @@ fn basic_sheet() -> PreparsedStyleSheet {
 fn sources(style_sheets: &[&str]) -> ViewSources {
     ViewSources {
         style_sheets: style_sheets.iter().map(|url| (*url).to_owned()).collect(),
-        ..ViewSources::new("app:///", SCRIPT_URL, SCREEN)
+        ..ViewSources::new("app:///", SCRIPT_URL, SCREEN, "en-US")
     }
 }
 
