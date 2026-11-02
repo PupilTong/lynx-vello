@@ -487,16 +487,22 @@ three font fields or a locale, otherwise inside the first layout that shapes
 text, on `bobcat-main` — and `bobcat_core::preload_system_fonts()` lets an
 embedder run that discovery early, on a thread of its own: process-wide and
 idempotent, and a view built before it finishes waits for it rather than
-discovering again. It also pays the platform fallback's own once-per-process
-cost: the first lookup that names no language (a view without a locale makes
-one at its first shaping) has CoreText build its whole default cascade list,
-about 8 ms on a Mac, and every view that gets there first waits for it. Both
-native embedders in this workspace call it at startup, `bobcat` before it
-decodes its input and `bobcat-server` before it binds. A host whose first view
-comes later than its group, or only on some condition, does the same work
-through the group: `LynxGroup::preload_text(locale)`, synchronous on the
-calling thread, runs it and, for a locale, asks the platform once for the
-process for every script fontique looks up with that language.
+discovering again. Both native embedders in this workspace call it at startup,
+`bobcat` before it decodes its input and `bobcat-server` before it binds.
+The platform's per-script fallback is not part of it: what is asked ahead of a
+view is the host's to name. `LynxGroup::preload_text(locale, scripts)` —
+synchronous on the calling thread, for a host whose first view comes later
+than its group or only on some condition — runs the discovery and asks the
+platform for each named script (ISO 15924: `Hani`, `Arab`, `Thai`, …) in the
+locale's language, once for the process; seldon keeps the answers, and every
+view set to that language takes them, under the script's language-named key
+and its language-less one, instead of asking. Nothing is asked that the host
+did not name, and no script is treated apart. On a Mac it matters twice: the
+first language-less lookup in a process has CoreText build its whole default
+cascade list (about 8 ms, whatever the script), and a lookup that names a
+language is not cached by CoreText at all, so without a preload every view
+with that locale asks again. A context with fallback containers of its own,
+or without system fonts, takes nothing preloaded.
 
 `ViewSources::locale` is the language of the view's text as a BCP-47 tag,
 Lynx's `LynxEnv.locale`: the host sets it for the process, from the OS's
@@ -506,19 +512,13 @@ locale of every parley run, which fontique's fallback key carries to the
 platform, so a Han cluster no family of the run's own `font-family` covers is
 set in PingFang TC for `zh-Hant`, PingFang HK for `zh-HK`, Hiragino Sans for
 `ja` and Apple SD Gothic Neo for `ko` where the platform's default is PingFang
-SC; the language's Han fallback is also filed under the language-less Han key
-fontique appends to every query (its workaround for Common-script punctuation
-in a run with no Han character), so that punctuation is set in the same face.
-CoreText does not cache a lookup that names a language (tens to a few
-hundred microseconds each time, up to a few milliseconds the first), so seldon
-keeps the platform's answer for every key fontique asks with a language — no
-script singled out: which scripts those are is fontique's table (`Hani` for
-`zh`/`ja`/`ko`, `Arab` for `ar`/`fa`/`ur`, a few more) — for the process. The
-first context set to the language, or `LynxGroup::preload_text`, asks, and
-every later view takes it from there. A key that names no language is left to
-the first shaping, which CoreText answers from its own process-wide cache. A
-context with fallback containers of its own, or without system fonts, neither
-reads nor writes it.
+SC. `set_locale` asks the platform for nothing itself: each script is asked
+at its first shaping unless the host preloaded it. A preloaded script's
+answer for the language is also filed under the script's language-less key,
+for every script alike; that is how, once the host preloads `Hani`, the
+language-less Han key fontique appends to every query (its workaround for
+Common-script punctuation in a run with no Han character) sets that
+punctuation in the language's face.
 Lynx has no `lang` attribute and no `SystemInfo` language field, so nothing
 per element overrides it and script is not told it. A tag that does not parse
 fails the construction with `EngineError::InvalidLocale`. `bobcat` names it

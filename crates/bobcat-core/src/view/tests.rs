@@ -386,21 +386,29 @@ fn preloading_fonts_is_idempotent_from_any_thread() {
     preload_system_fonts();
 }
 
-/// A group does the text work its views would do first, before any view
-/// exists, and refuses a locale every view would refuse, having done
-/// nothing.
+/// A group asks the platform for the scripts the host names before any view
+/// exists, and refuses a locale every view would refuse or a script the
+/// platform cannot be asked for, having done nothing.
 #[test]
-fn a_group_preloads_text_before_its_first_view() {
+fn a_group_preloads_the_scripts_its_host_names() {
     let group =
         crate::test_support::block_on(LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Sequential))
             .expect("the group starts");
     assert!(matches!(
-        group.preload_text(Some("not a tag")),
+        group.preload_text(Some("not a tag"), &["Hani"]),
         Err(LynxViewError::Engine(EngineError::InvalidLocale(tag))) if tag == "not a tag"
     ));
-    group.preload_text(None).expect("no locale to refuse");
-    group.preload_text(Some("zh-Hant")).expect("a language tag");
-    group.preload_text(Some("zh-Hant")).expect("a second call");
+    assert!(matches!(
+        group.preload_text(Some("zh-Hant"), &["Hani", "Han"]),
+        Err(LynxViewError::Engine(EngineError::UnknownScript(script))) if script == "Han"
+    ));
+    group.preload_text(None, &[]).expect("nothing to refuse");
+    group
+        .preload_text(Some("zh-Hant"), &["Hani", "Latn"])
+        .expect("a language tag and two scripts");
+    group
+        .preload_text(Some("zh-Hant"), &["Hani"])
+        .expect("a second call");
 }
 
 /// A view that names a locale builds its text context on the embedder's

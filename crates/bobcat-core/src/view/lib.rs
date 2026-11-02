@@ -110,6 +110,11 @@ pub enum EngineError {
     /// fetches.
     #[error("`{0}` is not a BCP-47 language tag")]
     InvalidLocale(String),
+    /// A script a host asked [`LynxGroup::preload_text`] for is not an ISO
+    /// 15924 code, spelled as the standard spells it (`Hani`), that the
+    /// platform's font fallback can be asked for.
+    #[error("`{0}` is not a script whose font fallback can be preloaded")]
+    UnknownScript(String),
     /// A view's [`base_url`](ViewSources::base_url) is not an absolute URL,
     /// or its entry or BTS entry does not resolve against it; `url` is the
     /// string that failed. A construction failure of the same kind as
@@ -537,8 +542,9 @@ pub struct ViewSources {
     /// `en-US`. What the platform's per-script font fallback is asked with,
     /// so that a Han cluster no family of its own `font-family` covers is set
     /// in the Traditional, Japanese or Korean face the language calls for
-    /// rather than in the platform's default one, and so is the CJK
-    /// punctuation of a run with no Han character in it. Lynx's
+    /// rather than in the platform's default one; the CJK punctuation of a
+    /// run with no Han character in it follows too once the host preloads
+    /// `Hani` for the language ([`LynxGroup::preload_text`]). Lynx's
     /// `LynxEnv.locale`: a value the host sets for the process, from the
     /// OS's preferred language unless it names its own, which Lynx iOS reads
     /// for this same choice. The embedder names it here; the engine derives
@@ -770,39 +776,57 @@ impl LynxGroup {
         }
     }
 
-    /// Does the text work every view of this group would otherwise do first,
-    /// on the calling thread, before any view exists.
+    /// Asks the platform, on the calling thread and before any view exists,
+    /// for the font fallback of the `scripts` the host names, in `locale`'s
+    /// language.
     ///
     /// For a host whose first view comes later than its group, or only on
     /// some condition: the group is what it builds up front, so the group is
-    /// where this work can be done ahead of that view. It is
-    /// [`preload_system_fonts`] — the platform's fonts and its language-less
-    /// fallback — and, for a `locale`, the platform's fallback for every
-    /// script looked up with that language, asked once for the process:
-    /// every view whose [`ViewSources::locale`] is that language, in this
-    /// group or any other, then takes it from there instead of asking the
-    /// platform itself.
+    /// where this work can be done ahead of that view. `scripts` are ISO
+    /// 15924 codes such as `Hani`, `Arab` or `Thai`, and which ones are worth
+    /// paying for is the host's to say — nothing is asked that it did not
+    /// name. It runs [`preload_system_fonts`], then asks the platform for each
+    /// script once for the process: every view whose
+    /// [`ViewSources::locale`] is that language, in this group or any other,
+    /// takes the answer from there instead of asking the platform itself,
+    /// both for the script and for its language-less lookup, which is how
+    /// Common-script punctuation in a run with no Han character follows a
+    /// Traditional Chinese locale once the host names `Hani`. `None` asks
+    /// without a language, the lookup of a view that names none. On a Mac the
+    /// first lookup that names no language in a process has CoreText build
+    /// its whole default cascade list, about 8 ms whatever the script, and a
+    /// lookup that names a language is not cached by CoreText at all.
+    ///
     /// Process-wide and idempotent like [`preload_system_fonts`]; nothing of
-    /// it is the group's own, and a view built while it runs waits for what
-    /// it is still paying. Tens to hundreds of milliseconds the first time in
-    /// a process, so a host calls it where that wait is not in front of a
+    /// it is the group's own. Tens to hundreds of milliseconds the first time
+    /// in a process, so a host calls it where that wait is not in front of a
     /// frame.
     ///
     /// # Errors
     ///
-    /// [`EngineError::InvalidLocale`], having done nothing, if `locale` is
-    /// not a BCP-47 language tag: the same tag would fail
-    /// [`Self::create_lynx_view`].
-    pub fn preload_text(&self, locale: Option<&str>) -> Result<(), LynxViewError> {
-        let Some(locale) = locale else {
-            terminus::link::TextContext::preload_system_fonts();
-            return Ok(());
-        };
-        if terminus::link::TextContext::preload_locale(locale) {
-            Ok(())
-        } else {
-            Err(EngineError::InvalidLocale(locale.to_owned()).into())
+    /// Having done nothing: [`EngineError::InvalidLocale`] if `locale` is not
+    /// a BCP-47 language tag, the same refusal
+    /// [`Self::create_lynx_view`] gives it, and [`EngineError::UnknownScript`]
+    /// if a script is not one the platform can be asked for.
+    pub fn preload_text(
+        &self,
+        locale: Option<&str>,
+        scripts: &[&str],
+    ) -> Result<(), LynxViewError> {
+        if let Some(locale) = locale
+            && !terminus::link::TextContext::is_locale(locale)
+        {
+            return Err(EngineError::InvalidLocale(locale.to_owned()).into());
         }
+        if let Some(script) = scripts
+            .iter()
+            .find(|script| !terminus::link::TextContext::is_script(script))
+        {
+            return Err(EngineError::UnknownScript((*script).to_owned()).into());
+        }
+        let preloaded = terminus::link::TextContext::preload_fallbacks(locale, scripts);
+        debug_assert!(preloaded, "the locale and the scripts were checked above");
+        Ok(())
     }
 
     /// Returns a loading view on the calling thread.
@@ -1754,8 +1778,7 @@ pub(crate) fn resolve_startup_urls(sources: &mut ViewSources) -> Result<url::Url
     Ok(base)
 }
 
-/// Discovers the platform's fonts, and readies its fallback, before any view
-/// needs them.
+/// Discovers the platform's fonts before any view needs them.
 ///
 /// The first text context built in a process discovers the platform's fonts
 /// (fontique enumerates every installed font file and reads its name table,
@@ -1766,23 +1789,17 @@ pub(crate) fn resolve_startup_urls(sources: &mut ViewSources) -> Result<url::Url
 /// [`ViewSources::default_font_family`], [`ViewSources::fallback_fonts`] or
 /// [`ViewSources::locale`]; otherwise the first layout that shapes text, on
 /// the group's Lynx main thread, where it delays that view's first frame and
-/// every entry of every other view of the group. The platform's fallback has
-/// a once-per-process cost of the same kind: the first lookup that names no
-/// language — a view without a locale makes one at its first shaping, a view
-/// with one at the first script fontique keeps no list per language for, such
-/// as Hangul under `zh-Hant` — has CoreText build
-/// its whole default cascade list, about 8 ms on a Mac, and every view that
-/// gets there before it is built waits for it. This call pays both.
+/// every entry of every other view of the group.
 ///
 /// An embedder calls this once, early, on a thread of its own, so the
-/// work overlaps the rest of its startup; the group and the views need
-/// not exist yet. Process-wide and idempotent: a call after the work is done
-/// returns at once, from any thread, and one that overlaps the working
+/// discovery overlaps the rest of its startup; the group and the views need
+/// not exist yet. Process-wide and idempotent: a call after the discovery
+/// returns at once, from any thread, and one that overlaps the discovering
 /// call waits for it, so a view built before the preload finishes is correct
 /// and merely waits. Not covered: a view's own fonts and `@font-face` sources,
-/// which are registered per view, and the platform's fallback for the
-/// scripts looked up with a language, which [`LynxGroup::preload_text`] asks
-/// for ahead of the first view that names [`ViewSources::locale`].
+/// which are registered per view, and the platform's per-script fallback,
+/// which [`LynxGroup::preload_text`] asks for the scripts the host names and
+/// each view otherwise asks for the first time it shapes a script.
 pub fn preload_system_fonts() {
     terminus::link::TextContext::preload_system_fonts();
 }
