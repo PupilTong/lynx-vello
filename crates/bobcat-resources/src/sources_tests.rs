@@ -77,6 +77,34 @@ async fn a_font_source_is_served_from_disk_without_utf8_validation() {
 }
 
 #[tokio::test]
+async fn every_view_loading_one_font_file_is_handed_the_same_mapping() {
+    let resources = resources();
+    let url = format!(
+        "file://{}",
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../seldon/tests/fixtures/Ahem.ttf"
+        )
+    );
+    let blob = async |resources: &Resources| match result(load(resources, &url, SourceKind::Font))
+        .await
+        .unwrap()
+    {
+        LoadedSource::Font(blob) => blob,
+        source => panic!("expected font bytes, got {source:?}"),
+    };
+
+    // Two views' scopes, as two `LynxView`s on one system hold.
+    let first = blob(&resources).await;
+    let second = blob(&resources.new_scope()).await;
+
+    assert_eq!(first.as_ref(), AHEM);
+    // Not a heap copy each: the file's one mapping, which `FontBlob::new`
+    // answers with one blob.
+    assert_eq!(first.as_ref().as_ptr(), second.as_ref().as_ptr());
+}
+
+#[tokio::test]
 async fn a_font_source_is_served_from_a_data_url() {
     let resources = resources();
 

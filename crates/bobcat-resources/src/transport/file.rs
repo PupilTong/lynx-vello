@@ -8,10 +8,11 @@ use bytes::Bytes;
 use url::Url;
 
 use crate::error::Failure;
+use crate::file_body::{self, Body};
 use crate::mime;
 
-/// Reads the file `url` names.
-pub(crate) fn read(url: &Url) -> Result<(Bytes, Option<mime::MediaType>), Failure> {
+/// Reads the file `url` names, handed over as `body` says.
+pub(crate) fn read(url: &Url, body: Body) -> Result<(Bytes, Option<mime::MediaType>), Failure> {
     let path = url.to_file_path().map_err(|()| {
         Failure::new(
             ResourceErrorKind::InvalidUrl,
@@ -19,7 +20,7 @@ pub(crate) fn read(url: &Url) -> Result<(Bytes, Option<mime::MediaType>), Failur
             "the file URL has no local path",
         )
     })?;
-    let bytes = std::fs::read(&path).map_err(|error| {
+    let bytes = file_body::read(&path, body).map_err(|error| {
         let kind = match error.kind() {
             io::ErrorKind::NotFound => ResourceErrorKind::NotFound,
             io::ErrorKind::PermissionDenied => ResourceErrorKind::PermissionDenied,
@@ -32,7 +33,7 @@ pub(crate) fn read(url: &Url) -> Result<(Bytes, Option<mime::MediaType>), Failur
         )
     })?;
     let media_type = mime::from_extension(url.path());
-    Ok((Bytes::from(bytes), media_type))
+    Ok((bytes, media_type))
 }
 
 #[cfg(test)]
@@ -47,7 +48,7 @@ mod tests {
         let path = dir.join("style.css");
         std::fs::write(&path, b"a{}").expect("write");
         let url = Url::from_file_path(&path).expect("a file URL");
-        let (bytes, media_type) = read(&url).expect("read");
+        let (bytes, media_type) = read(&url, Body::Read).expect("read");
         assert_eq!(&bytes[..], b"a{}");
         assert_eq!(
             media_type
@@ -57,7 +58,7 @@ mod tests {
         );
 
         let missing = Url::from_file_path(dir.join("missing.png")).expect("a file URL");
-        let failure = read(&missing).expect_err("missing");
+        let failure = read(&missing, Body::Mapped).expect_err("missing");
         assert_eq!(failure.kind, ResourceErrorKind::NotFound);
         assert_eq!(failure.phase, ResourceErrorPhase::Open);
         let _ = std::fs::remove_dir_all(&dir);

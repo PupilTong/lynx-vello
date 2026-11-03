@@ -1202,8 +1202,9 @@ into. A text node generates no box and retains nothing: it is content of the
 block above it, and its run reads inherited font/text values from its innermost
 element ancestor. Font registration takes the shared `FontBlob` resource
 through `Engine` → `Document` → `TextContext`; an owned loader buffer moves
-into Parley without copying its payload, while `FontBlob::copy_from_slice` is
-the explicit copying fallback. Relayout damage on an element evicts its direct
+into Parley without copying its payload, bytes a live blob already wraps come
+back as that blob (one blob per payload, process-wide, so views share it), and
+`FontBlob::copy_from_slice` is the explicit copying fallback. Relayout damage on an element evicts its direct
 text children's measurement caches and retained artifacts, because text nodes
 have no Stylo damage record of their own. Parley is unconditional and there is
 no arbitrary payload callback.

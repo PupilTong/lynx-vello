@@ -23,6 +23,8 @@ use http::{HeaderMap, StatusCode};
 use url::Url;
 
 use crate::error::Failure;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::file_body::Body;
 use crate::mime::MediaType;
 use crate::registry::{Registered, Registry};
 use crate::{CachePolicy, data_url};
@@ -176,24 +178,29 @@ impl Transports {
     /// blocking-pool thread for a background job, and the painter's own for
     /// the synchronous restore inside `FrameImages::read`, which has to
     /// answer within the call and so cannot await anything.
+    ///
+    /// `body` is how bytes this tier reads from a file — the `file:` URL's,
+    /// or the disk tier's copy of a response — are handed over. Registered
+    /// and `data:` bytes are already in memory and come as they are.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn fetch_blocking(
         &self,
         url: &Url,
         policy: CachePolicy,
         headers: &HeaderMap,
+        body: Body,
     ) -> Result<Fetched, Failure> {
         if let Some(local) = self.local(url) {
             return local;
         }
         match url.scheme() {
-            "file" => file::read(url).map(|(bytes, media_type)| Fetched {
+            "file" => file::read(url, body).map(|(bytes, media_type)| Fetched {
                 bytes,
                 media_type,
                 url: url.clone(),
                 restorable: true,
             }),
-            "http" | "https" => self.http_blocking(url, policy, headers),
+            "http" | "https" => self.http_blocking(url, policy, headers, body),
             other => Err(Failure::new(
                 ResourceErrorKind::UnsupportedScheme,
                 ResourceErrorPhase::Open,
@@ -210,6 +217,7 @@ impl Transports {
         url: &Url,
         policy: CachePolicy,
         headers: &HeaderMap,
+        body: Body,
     ) -> Result<Fetched, Failure> {
         use std::time::SystemTime;
 
@@ -220,7 +228,7 @@ impl Transports {
         let stored = self.disk.as_ref().and_then(|disk| disk.entry(key));
         let mut plan = plan(policy, stored.as_ref().map(|entry| &entry.response), now);
         if matches!(plan, Plan::UseStored) {
-            match self.disk.as_ref().and_then(|disk| disk.get(key)) {
+            match self.disk.as_ref().and_then(|disk| disk.get(key, body)) {
                 Some((entry, bytes)) => {
                     return Self::stored_response(url, &entry, bytes);
                 }
@@ -251,7 +259,7 @@ impl Transports {
         {
             let refreshed = entry.response.refreshed_by(&response.headers, now);
             let _ = disk.update_response(key, &refreshed);
-            if let Some((entry, bytes)) = disk.get(key) {
+            if let Some((entry, bytes)) = disk.get(key, body) {
                 return Self::stored_response(url, &entry, bytes);
             }
         }
@@ -283,8 +291,15 @@ impl Transports {
         if let Some(failure) = status_failure(response.status) {
             return Err(failure);
         }
+        // Bytes to be retained are handed over as the stored copy's mapping
+        // once there is one, so the download's buffer is dropped here rather
+        // than held as long as the bytes are.
+        let mapped = (stored_on_disk && body == Body::Mapped)
+            .then(|| self.disk.as_ref()?.get(key, Body::Mapped))
+            .flatten()
+            .map(|(_, bytes)| bytes);
         Ok(Fetched {
-            bytes: Bytes::from(response.body),
+            bytes: mapped.unwrap_or_else(|| Bytes::from(response.body)),
             media_type,
             url: Url::parse(&response.effective_url).unwrap_or_else(|_| url.clone()),
             restorable: stored_on_disk,
@@ -317,7 +332,7 @@ impl Transports {
     fn stored_response(
         url: &Url,
         entry: &crate::cache::disk::DiskEntry,
-        bytes: Vec<u8>,
+        bytes: Bytes,
     ) -> Result<Fetched, Failure> {
         let status = StatusCode::from_u16(entry.response.status).ok();
         if let Some(failure) = status.and_then(status_failure) {
@@ -337,7 +352,7 @@ impl Transports {
             })
             .or_else(|| crate::mime::from_extension(url.path()));
         Ok(Fetched {
-            bytes: Bytes::from(bytes),
+            bytes,
             media_type,
             url: url.clone(),
             restorable: true,

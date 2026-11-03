@@ -72,6 +72,8 @@ pub mod data_url;
 pub mod decode;
 mod error;
 mod executor;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod file_body;
 pub mod image_header;
 mod images;
 pub mod mime;
@@ -487,6 +489,7 @@ impl Shared {
         url: &Url,
         policy: CachePolicy,
         headers: &http::HeaderMap,
+        body: file_body::Body,
     ) -> Result<Fetched, error::Failure> {
         #[cfg(test)]
         {
@@ -499,7 +502,7 @@ impl Shared {
                 hook(url);
             }
         }
-        self.transports.fetch_blocking(url, policy, headers)
+        self.transports.fetch_blocking(url, policy, headers, body)
     }
 
     /// The decode a background job runs while holding its permit.
