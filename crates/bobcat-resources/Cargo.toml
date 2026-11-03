@@ -28,6 +28,8 @@ url = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 libloading = { workspace = true }
+# Retained resources — fonts — are handed over as shared read-only mappings.
+memmap2 = { workspace = true }
 # The executor's stop signal. Native only: the browser has no runtime here.
 tokio-util = { workspace = true }
 

@@ -20,11 +20,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use bytes::Bytes;
 use http::header::{HeaderMap, HeaderName, HeaderValue};
 use rustc_hash::FxHashMap;
 use serde_json::{Value, json};
 
 use crate::cache::http::StoredResponse;
+use crate::file_body::{self, Body};
 
 /// The record kept beside a stored body.
 #[derive(Clone, Debug)]
@@ -114,17 +116,18 @@ impl DiskCache {
         self.index().entries.get(key).cloned()
     }
 
-    /// The record and body for `key`, marking it most recently used.
+    /// The record and body for `key`, marking it most recently used, the
+    /// body handed over as `body` says.
     ///
     /// Any inconsistency — a missing or unreadable body, a record whose key
     /// is another URL's — reads as a miss, and the broken pair is removed
     /// so it cannot mislead a later lookup either.
     #[must_use]
-    pub fn get(&self, key: &str) -> Option<(DiskEntry, Vec<u8>)> {
+    pub fn get(&self, key: &str, body: Body) -> Option<(DiskEntry, Bytes)> {
         let mut index = self.index();
         let entry = index.entries.get_mut(key)?;
         let path = self.body_path(key);
-        match fs::read(&path) {
+        match file_body::read(&path, body) {
             Ok(bytes) if bytes.len() as u64 == entry.len => {
                 entry.last_used = SystemTime::now();
                 let entry = entry.clone();
@@ -481,15 +484,15 @@ mod tests {
             .expect("put");
         assert_eq!(cache.len(), 1);
         assert_eq!(cache.used_bytes(), 6);
-        let (entry, bytes) = cache.get("https://a.test/x.png").expect("hit");
-        assert_eq!(bytes, b"pixels");
+        let (entry, bytes) = cache.get("https://a.test/x.png", Body::Read).expect("hit");
+        assert_eq!(&bytes[..], b"pixels");
         assert_eq!(entry.media_type.as_deref(), Some("image/png"));
         assert_eq!(entry.response.headers.get("etag").unwrap(), "\"1\"");
         assert_eq!(
             entry.response.stored_at,
             UNIX_EPOCH + Duration::from_secs(1_000_000)
         );
-        assert!(cache.get("https://a.test/other").is_none());
+        assert!(cache.get("https://a.test/other", Body::Read).is_none());
 
         // A fresh open rebuilds the index from disk.
         drop(cache);
@@ -553,7 +556,7 @@ mod tests {
 
         // A body that vanished after open reads as a miss and drops the entry.
         fs::remove_file(dir.0.join(format!("{}.bin", hash_key("https://a.test/a")))).expect("rm");
-        assert!(reopened.get("https://a.test/a").is_none());
+        assert!(reopened.get("https://a.test/a", Body::Mapped).is_none());
         assert!(reopened.is_empty());
         assert_eq!(reopened.used_bytes(), 0);
     }
@@ -567,7 +570,7 @@ mod tests {
         cache.put("b", None, &response(&[]), b"bbbb").expect("put");
         std::thread::sleep(Duration::from_millis(5));
         assert!(
-            cache.get("a").is_some(),
+            cache.get("a", Body::Read).is_some(),
             "touching `a` makes `b` the oldest"
         );
         std::thread::sleep(Duration::from_millis(5));
@@ -590,11 +593,17 @@ mod tests {
         let dir = TempDir::new();
         let cache = DiskCache::open(&dir.0, 1024).expect("open");
         cache.put("k", None, &response(&[]), b"12345").expect("put");
+        let (_, held) = cache.get("k", Body::Mapped).expect("hit");
         cache
             .put("k", Some("text/plain"), &response(&[]), b"12")
             .expect("replace");
         assert_eq!(cache.used_bytes(), 2);
-        assert_eq!(cache.get("k").unwrap().1, b"12");
+        assert_eq!(&cache.get("k", Body::Mapped).unwrap().1[..], b"12");
+        assert_eq!(
+            &held[..],
+            b"12345",
+            "a replacement is renamed into place, so a held mapping keeps the old body"
+        );
         cache
             .update_response("k", &response(&[("etag", "\"new\"")]))
             .expect("update");
@@ -609,7 +618,7 @@ mod tests {
             "\"new\""
         );
         assert_eq!(
-            cache.get("k").unwrap().1,
+            &cache.get("k", Body::Read).unwrap().1[..],
             b"12",
             "the body is untouched by a record update"
         );

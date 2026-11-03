@@ -632,8 +632,13 @@ advance), so a change to one is a rebuild, decided by the host's item
 comparison like a font change.
 Font registration takes a `FontBlob`: the caller moves an owned byte container
 into Parley's shared resource handle, so resource-loader buffers are retained
-without copying their payload. `FontBlob::copy_from_slice` names the unavoidable
-copying fallback for a caller that owns only a temporary borrow.
+without copying their payload. One payload is one blob, process-wide:
+`FontBlob::new` over bytes a live blob already wraps (the same shared buffer or
+file mapping) returns that blob, so every view registering one font shares its
+id-keyed caches. `bobcat-resources` hands a font read from a file or its disk
+tier over as that file's shared read-only mapping rather than a heap copy.
+`FontBlob::copy_from_slice` names the unavoidable copying fallback for a caller
+that owns only a temporary borrow.
 The `terminus` host drives a block by borrowing immutable text/style content and
 the separately mutable layout state. That state lazily boxes one document
 `TextContext` and one `TextStore` — a `TextBlockStore` or an

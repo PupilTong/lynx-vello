@@ -414,6 +414,7 @@ dependencies = [
  "http 1.4.2",
  "js-sys",
  "libloading",
+ "memmap2",
  "png",
  "prime-radiant",
  "rustc-hash 2.1.3",

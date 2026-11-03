@@ -37,6 +37,20 @@ enum SourceKind {
     Fetch,
 }
 
+impl SourceKind {
+    /// How a file this source is read from is handed over: a font is
+    /// retained for its view's lifetime, so it is mapped and shared rather
+    /// than copied; text is decoded on arrival and fetched bytes go no
+    /// further than the installer, so those are read.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn body(self) -> crate::file_body::Body {
+        match self {
+            Self::Font => crate::file_body::Body::Mapped,
+            Self::StyleSheet | Self::Script | Self::Fetch => crate::file_body::Body::Read,
+        }
+    }
+}
+
 enum Destination {
     Request(SourceCompletion),
     Cache(watch::Sender<Option<SourceResult>>),
@@ -184,7 +198,7 @@ fn spawn(resources: &Resources, url: Url, kind: SourceKind, completion: Destinat
             let shared = SharedHandle::clone(&shared);
             let url = url.clone();
             crate::executor::blocking(&handle, "source load", move || {
-                shared.fetch_job(&url, CachePolicy::Default, &HeaderMap::new())
+                shared.fetch_job(&url, CachePolicy::Default, &HeaderMap::new(), kind.body())
             })
             .await
         };
@@ -282,7 +296,9 @@ async fn after_install(shared: &SharedHandle, url: &Url, kind: SourceKind) -> Op
 ///
 /// A font takes neither: its bytes go to the font backend as they arrived,
 /// without a copy — `Bytes` is already a shared, thread-safe buffer, which is
-/// what a [`FontBlob`] retains.
+/// what a [`FontBlob`] retains. Read from a file, they are that file's shared
+/// mapping, so every view loading the font is handed the same memory and
+/// [`FontBlob::new`] answers each with the one blob.
 fn prepare(
     fetched: Result<crate::Fetched, error::Failure>,
     url: &Url,
