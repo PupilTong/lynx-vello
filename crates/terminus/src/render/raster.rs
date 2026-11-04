@@ -84,6 +84,13 @@ impl Raster {
     /// # Errors
     ///
     /// [`GpuError::Render`] if vello refuses to build its pipelines.
+    #[cfg_attr(
+        feature = "vello_gpu",
+        expect(
+            clippy::unnecessary_wraps,
+            reason = "only the default rasterizer's pipelines can fail to build"
+        )
+    )]
     pub(crate) fn new(device: &wgpu::Device) -> Result<Self, GpuError> {
         #[cfg(not(feature = "vello_gpu"))]
         {
@@ -174,6 +181,13 @@ impl Raster {
     /// Says the texture bound to `handle` was drawn into since the last
     /// render. vello re-copies it into its atlas; `vello_gpu` samples the
     /// texture itself and owes nothing.
+    #[cfg_attr(
+        feature = "vello_gpu",
+        expect(
+            clippy::unused_self,
+            reason = "only the default rasterizer has an atlas to re-copy into"
+        )
+    )]
     pub(crate) fn mark_override_image_dirty(&mut self, handle: &ImageData) {
         #[cfg(not(feature = "vello_gpu"))]
         self.renderer.mark_override_image_dirty(handle);

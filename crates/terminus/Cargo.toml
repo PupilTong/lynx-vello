@@ -67,6 +67,11 @@ html5ever = { workspace = true }
 markup5ever_rcdom = { workspace = true }
 png = { workspace = true }
 
+# The painter's window stack is tested over a bare `CAMetalLayer` surface
+# (`painter/graphics.rs`), which needs no window and no main thread.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+objc2-quartz-core = { workspace = true }
+
 [[bench]]
 name = "animation"
 harness = false

@@ -13,6 +13,9 @@ cargo build -p bobcat-cli --all-features --bins
   See [CLI usage](CLI.md).
 - `server`: the `bobcat-server` binary, HTTP screenshot endpoint and BMP output.
   See [server usage](SERVER.md).
+- `vello_gpu` (off by default): either product rasterizes with `vello_gpu`'s
+  sparse strips instead of vello's compute pipeline, window and headless
+  alike (`bobcat-core`'s, and so `terminus`'s, `vello_gpu` feature).
 
 Each binary requires its corresponding feature. Both products use the full
 `bobcat-source` and `bobcat-resources` implementations; neither duplicates the

@@ -27,6 +27,12 @@
 //! for as long as it is attached to one — at most one painter per view. A
 //! view can run with none, and a painter goes on showing its last frame after
 //! the view it was watching is gone.
+//!
+//! # Features
+//!
+//! - `vello_gpu`: every painter, on a window or offscreen, rasterizes with `vello_gpu`'s sparse
+//!   strips on its wgpu backend instead of vello's compute pipeline (`terminus`'s `vello_gpu`
+//!   feature). On Wasm that backend is WebGPU; its WebGL backend is not enabled.
 
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
