@@ -6,9 +6,11 @@
 //! [`VectorDraw`]: the document's scene, its identity, and the device
 //! geometry of one draw. Nothing in it is a GPU resource, so the frame stays
 //! device-free and `Send + Sync`. [`VectorTextures`] is where the device
-//! side lives: one per [`vello::Renderer`], owned beside that renderer's
-//! [`AtlasResidency`] and [`super::blur::FilterTextures`], persisting across
-//! frames and documents, and asked once per rendered frame for the table of
+//! side lives: one per render target, owned beside its
+//! [`super::blur::FilterTextures`] and registering its textures with the
+//! process's shared [`vello::Renderer`]
+//! ([`crate::render::gpu::SharedGpu`]), persisting across frames and
+//! documents, and asked once per rendered frame for the table of
 //! textures the compose program indexes by draw
 //! ([`crate::visual::CommittedFrame::compose_into`]'s `vectors`).
 //!
@@ -234,6 +236,17 @@ impl VectorTextures {
     #[must_use]
     pub(crate) fn resident(&self) -> usize {
         self.entries.len()
+    }
+
+    /// Unregisters every resident texture from `renderer`, leaving the bank
+    /// empty, for a target that is going away: the shared renderer outlives
+    /// it, and its override table would otherwise keep the textures alive.
+    pub(crate) fn release(&mut self, renderer: &mut vello::Renderer) {
+        for (_, entry) in self.entries.drain() {
+            renderer.override_image(&entry.handle, None);
+        }
+        self.images.clear();
+        self.bytes = 0;
     }
 
     /// Evicts unpinned entries, least recently used first, until the total

@@ -13,9 +13,11 @@
 //! px, the device rect to bake, and the program ops that make up what is
 //! baked. Nothing in that record is a GPU resource, so the commit stays
 //! device-free and the frame stays `Send + Sync`. [`FilterTextures`] is
-//! where the device side lives: one per [`vello::Renderer`], owned beside
-//! that renderer's [`AtlasResidency`], and asked once per rendered frame for
-//! the table of baked textures the compose program indexes by entry.
+//! where the device side lives: one per render target, registering its
+//! textures with the process's shared [`vello::Renderer`] beside that
+//! renderer's [`AtlasResidency`] ([`crate::render::gpu::SharedGpu`]), and
+//! asked once per rendered frame for the table of baked textures the compose
+//! program indexes by entry.
 //!
 //! The two differ in four places and nowhere else. A `filter: blur()`
 //! group's rect carries a 3σ transparent margin and its sampler is
@@ -866,6 +868,17 @@ impl FilterTextures {
     /// page's groups will want textures of their own.
     pub(crate) fn forget(&mut self) {
         self.commit = None;
+    }
+
+    /// Unregisters every bank's texture from `renderer` and drops the banks,
+    /// for a target that is going away: the shared renderer outlives it, and
+    /// its override table would otherwise keep the textures alive.
+    pub(crate) fn release(&mut self, renderer: &mut vello::Renderer) {
+        for bank in self.banks.drain(..).flatten() {
+            renderer.override_image(&bank.handle, None);
+        }
+        self.images.clear();
+        self.forget();
     }
 
     /// Records the canvas colour this prepare bakes over, forgetting the
