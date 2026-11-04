@@ -29,6 +29,7 @@ use vello::util::RenderContext;
 use vello::wgpu;
 
 use super::blur::FilterTextures;
+use super::raster::{Drawn, Raster};
 use super::vector_textures::VectorTextures;
 use crate::visual::{CommittedFrame, ScrollSlot};
 
@@ -36,8 +37,7 @@ use crate::visual::{CommittedFrame, ScrollSlot};
 pub struct Headless {
     context: RenderContext,
     device_index: usize,
-    renderer: vello::Renderer,
-    atlas: AtlasResidency,
+    raster: Raster,
     filters: FilterTextures,
     vectors: VectorTextures,
     target: Option<RenderTarget>,
@@ -60,12 +60,20 @@ pub struct Headless {
 /// Nothing is owed for an image vello has evicted and will reinsert, or has
 /// never seen: both enter the cache dirty by construction, so a skipped mark
 /// cannot cost pixels.
+#[cfg_attr(
+    feature = "vello_gpu",
+    allow(dead_code, reason = "the default rasterizer's")
+)]
 #[derive(Debug, Default)]
 pub(crate) struct AtlasResidency {
     /// Blob ids ([`vello::peniko::Blob::id`]) marked since the last loss.
     reuploaded: FxHashSet<u64>,
 }
 
+#[cfg_attr(
+    feature = "vello_gpu",
+    allow(dead_code, reason = "the default rasterizer's")
+)]
 impl AtlasResidency {
     /// Brings `renderer` up to a render of `scene` drawing three tables: the
     /// bitmaps a frame's image draws resolved, the textures its
@@ -160,6 +168,10 @@ impl std::error::Error for GpuError {}
 /// area-only antialiasing. Windowed embedders building their own
 /// [`vello::Renderer`] must construct it with these options to match the
 /// headless path.
+#[cfg_attr(
+    feature = "vello_gpu",
+    allow(dead_code, reason = "the default rasterizer's")
+)]
 #[must_use]
 pub(crate) fn renderer_options() -> vello::RendererOptions {
     vello::RendererOptions {
@@ -169,6 +181,10 @@ pub(crate) fn renderer_options() -> vello::RendererOptions {
 }
 
 /// Per-frame render parameters for that same policy over `base_color`.
+#[cfg_attr(
+    feature = "vello_gpu",
+    allow(dead_code, reason = "the default rasterizer's")
+)]
 #[must_use]
 pub(crate) fn render_params(
     base_color: vello::peniko::Color,
@@ -193,13 +209,11 @@ impl Headless {
         let mut context = RenderContext::new();
         let device_index = pollster::block_on(context.device(None)).ok_or(GpuError::NoAdapter)?;
         let handle = &context.devices[device_index];
-        let renderer = vello::Renderer::new(&handle.device, renderer_options())
-            .map_err(|error| GpuError::Render(error.to_string()))?;
+        let raster = Raster::new(&handle.device)?;
         Ok(Self {
             context,
             device_index,
-            renderer,
-            atlas: AtlasResidency::default(),
+            raster,
             filters: FilterTextures::default(),
             vectors: VectorTextures::default(),
             target: None,
@@ -256,13 +270,12 @@ impl Headless {
         let Self {
             context,
             device_index,
-            renderer,
-            atlas,
+            raster,
             vectors,
             ..
         } = self;
         let handle = &context.devices[*device_index];
-        vectors.prepare(frame, renderer, &handle.device, &handle.queue, atlas)
+        vectors.prepare(frame, raster, &handle.device, &handle.queue)
     }
 
     /// Bakes `frame`'s `filter: blur()` groups and `backdrop-filter`
@@ -298,17 +311,15 @@ impl Headless {
         let Self {
             context,
             device_index,
-            renderer,
-            atlas,
+            raster,
             filters,
             ..
         } = self;
         let handle = &context.devices[*device_index];
         filters.prepare(
-            renderer,
+            raster,
             &handle.device,
             &handle.queue,
-            atlas,
             frame,
             images,
             vectors,
@@ -351,31 +362,38 @@ impl Headless {
         let Self {
             context,
             device_index,
-            renderer,
-            atlas,
+            raster,
             filters,
             vectors,
             target,
             ..
         } = self;
-        // The bakes this renderer holds are override images the composite
-        // render may draw, so they are named here too — the residency has to
-        // see every image a render touches or a post-loss repair is missed.
-        atlas.prepare_all(renderer, scene, images, filters.images(), vectors.images());
         let handle = &context.devices[*device_index];
         let view = &target
             .as_ref()
             .expect("ensure_target installs a render target")
             .view;
-        if let Err(error) = renderer.render_to_texture(
+        // The bakes this renderer holds are override images the composite
+        // render may draw, so they are named here too — the default
+        // rasterizer's residency has to see every image a render touches or
+        // a post-loss repair is missed.
+        let drawn = Drawn {
+            images,
+            filtered: filters.images(),
+            vectors: vectors.images(),
+        };
+        if let Err(error) = raster.render_to_texture(
             &handle.device,
             &handle.queue,
             scene,
             view,
-            &render_params(base_color, width, height),
+            width,
+            height,
+            base_color,
+            drawn,
         ) {
             *target = None;
-            return Err(GpuError::Render(error.to_string()));
+            return Err(error);
         }
         Ok(())
     }
@@ -510,7 +528,7 @@ impl Headless {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
+            usage: Raster::TARGET_USAGE.union(wgpu::TextureUsages::COPY_SRC),
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());

@@ -110,6 +110,9 @@ web-sys = "0.3"
 winit = { version = "0.30.13", default-features = false, features = ["rwh_06"] }
 
 vello = { version = "0.11", default-features = false }
+# `terminus`'s `vello_gpu` feature: sparse-strip rasterization on wgpu only.
+vello_gpu = { version = "0.3", default-features = false, features = ["wgpu", "text"] }
+glifo = { version = "0.4", default-features = false }
 # SVG documents as vector images: terminus's `render/svg` parses the XML with
 # `roxmltree` and its attribute values with `svgtypes` into a vello scene;
 # CSS inside an SVG is not read (docs/svg-lynx-component-design.md).

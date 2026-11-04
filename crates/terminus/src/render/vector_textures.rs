@@ -67,10 +67,11 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 use vello::kurbo::Size;
-use vello::peniko::{Blob, Color, ImageAlphaType, ImageData, ImageFormat};
+use vello::peniko::{Blob, Color, ImageData, ImageFormat};
 use vello::wgpu;
 
-use super::gpu::{AtlasResidency, GpuError, render_params};
+use super::gpu::GpuError;
+use super::raster::{Drawn, Raster};
 use crate::paint::compose::VectorDraw;
 use crate::visual::CommittedFrame;
 
@@ -164,10 +165,9 @@ impl VectorTextures {
     pub(crate) fn prepare(
         &mut self,
         frame: &CommittedFrame,
-        renderer: &mut vello::Renderer,
+        raster: &mut Raster,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        atlas: &mut AtlasResidency,
     ) -> Result<&[Option<ImageData>], GpuError> {
         let draws = frame.vector_draws();
         self.images.clear();
@@ -190,16 +190,7 @@ impl VectorTextures {
                 self.images.push(Some(entry.handle.clone()));
                 continue;
             }
-            let handle = bake(
-                &mut self.bake,
-                draw,
-                width,
-                height,
-                renderer,
-                device,
-                queue,
-                atlas,
-            )?;
+            let handle = bake(&mut self.bake, draw, width, height, raster, device, queue)?;
             self.entries.insert(
                 key,
                 Entry {
@@ -211,7 +202,7 @@ impl VectorTextures {
             self.bytes += bytes;
             self.images.push(Some(handle));
         }
-        self.evict(renderer);
+        self.evict(raster);
         Ok(&self.images)
     }
 
@@ -238,7 +229,7 @@ impl VectorTextures {
 
     /// Evicts unpinned entries, least recently used first, until the total
     /// is within the budget or only pinned entries remain.
-    fn evict(&mut self, renderer: &mut vello::Renderer) {
+    fn evict(&mut self, raster: &mut Raster) {
         while self.bytes > self.budget {
             let victim = self
                 .entries
@@ -253,7 +244,7 @@ impl VectorTextures {
                 .entries
                 .remove(&key)
                 .expect("the victim was just found in the table");
-            renderer.override_image(&entry.handle, None);
+            raster.override_image(&entry.handle, None);
             self.bytes -= entry.bytes;
         }
     }
@@ -262,20 +253,14 @@ impl VectorTextures {
 /// Renders `draw`'s scene into a new `width` × `height` texture and
 /// registers it as an override image, answering the handle it is drawn
 /// through.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "one bake's full inputs: the scratch scene, the draw, its size, and the renderer's \
-              three device handles plus the residency it shares"
-)]
 fn bake(
     scene: &mut vello::Scene,
     draw: &VectorDraw,
     width: u32,
     height: u32,
-    renderer: &mut vello::Renderer,
+    raster: &mut Raster,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    atlas: &mut AtlasResidency,
 ) -> Result<ImageData, GpuError> {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("dom vector texture"),
@@ -288,9 +273,8 @@ fn bake(
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Rgba8Unorm,
-        // vello renders through a storage binding and copies an override
-        // into its atlas with a texture-to-texture copy.
-        usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
+        // Rendered into by the rasterizer, then bound as an override image.
+        usage: Raster::TARGET_USAGE.union(Raster::BOUND_USAGE),
         view_formats: &[],
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -303,19 +287,19 @@ fn bake(
             Size::new(f64::from(width), f64::from(height)),
         )),
     );
-    // Every render through this renderer owes the residency a pass,
-    // including a bake: a patch-free bake frees the whole image atlas, which
-    // is exactly the loss `AtlasResidency` repairs.
-    atlas.prepare_all(renderer, scene, &[], &[], &[]);
-    renderer
-        .render_to_texture(
-            device,
-            queue,
-            scene,
-            &view,
-            &render_params(Color::TRANSPARENT, width, height),
-        )
-        .map_err(|error| GpuError::Render(error.to_string()))?;
+    // Every render through the rasterizer names what it may draw, a bake
+    // included: for the default one, a patch-free bake frees the whole image
+    // atlas, which is exactly the loss its residency repairs.
+    raster.render_to_texture(
+        device,
+        queue,
+        scene,
+        &view,
+        width,
+        height,
+        Color::TRANSPARENT,
+        Drawn::default(),
+    )?;
 
     // `Renderer::register_texture` builds a handle like this one; it is
     // built here so the alpha type is named where the render that fills the
@@ -324,19 +308,11 @@ fn bake(
     let handle = ImageData {
         data: Blob::new(Arc::new([])),
         format: ImageFormat::Rgba8,
-        alpha_type: ImageAlphaType::Alpha,
+        alpha_type: Raster::OUTPUT_ALPHA,
         width,
         height,
     };
-    renderer.override_image(
-        &handle,
-        Some(wgpu::TexelCopyTextureInfoBase {
-            texture,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        }),
-    );
+    raster.override_image(&handle, Some(texture));
     Ok(handle)
 }
 

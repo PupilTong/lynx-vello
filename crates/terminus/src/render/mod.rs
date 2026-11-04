@@ -17,5 +17,8 @@
 pub(crate) mod blur;
 pub(crate) mod gpu;
 pub(crate) mod image;
+pub(crate) mod raster;
+#[cfg(feature = "vello_gpu")]
+pub(crate) mod sparse;
 pub(crate) mod svg;
 pub(crate) mod vector_textures;

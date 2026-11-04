@@ -133,7 +133,8 @@ use euclid::default::Vector2D;
 use vello::peniko::{Blob, Color, ImageAlphaType, ImageData, ImageFormat};
 use vello::wgpu;
 
-use super::gpu::{AtlasResidency, GpuError, render_params};
+use super::gpu::GpuError;
+use super::raster::{Drawn, Raster};
 use crate::visual::{CommittedFrame, ScrollSlot};
 
 /// Largest per-axis device-pixel count one filter bake may have.
@@ -434,7 +435,7 @@ const OUTPUT_USAGE: wgpu::TextureUsages = wgpu::TextureUsages::RENDER_ATTACHMENT
     .union(wgpu::TextureUsages::COPY_SRC);
 
 impl Bank {
-    fn new(renderer: &mut vello::Renderer, device: &wgpu::Device, width: u32, height: u32) -> Self {
+    fn new(raster: &mut Raster, device: &wgpu::Device, width: u32, height: u32) -> Self {
         let target = Plane::new(device, "dom filter bake", width, height, BAKE_USAGE);
         let output = Plane::new(device, "dom filter output", width, height, OUTPUT_USAGE);
         // `Renderer::register_texture` builds this handle too, but hardcodes
@@ -449,15 +450,7 @@ impl Bank {
             width: output.width,
             height: output.height,
         };
-        renderer.override_image(
-            &handle,
-            Some(wgpu::TexelCopyTextureInfoBase {
-                texture: output.texture.clone(),
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            }),
-        );
+        raster.override_image(&handle, Some(output.texture.clone()));
         Self {
             width: output.width,
             height: output.height,
@@ -776,15 +769,14 @@ impl FilterTextures {
     /// back to replaying raw; the next prepare re-bakes every entry.
     #[expect(
         clippy::too_many_arguments,
-        reason = "one bake pre-step's full inputs: the renderer's three device handles, the \
-                  residency it shares, and the frame with its three compose inputs"
+        reason = "one bake pre-step's full inputs: the rasterizer and its two device handles, and \
+                  the frame with its three compose inputs"
     )]
     pub(crate) fn prepare(
         &mut self,
-        renderer: &mut vello::Renderer,
+        raster: &mut Raster,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        atlas: &mut AtlasResidency,
         frame: &CommittedFrame,
         images: &[Option<ImageData>],
         vectors: &[Option<ImageData>],
@@ -813,7 +805,7 @@ impl FilterTextures {
         } else {
             while self.banks.len() > groups.len() {
                 if let Some(bank) = self.banks.pop().flatten() {
-                    renderer.override_image(&bank.handle, None);
+                    raster.override_image(&bank.handle, None);
                 }
             }
             self.banks.resize_with(groups.len(), || None);
@@ -835,10 +827,9 @@ impl FilterTextures {
             self.pipelines = Some(Pipelines::new(device));
         }
         self.bake_all(
-            renderer,
+            raster,
             device,
             queue,
-            atlas,
             frame,
             images,
             vectors,
@@ -943,10 +934,9 @@ impl FilterTextures {
     )]
     fn bake_all(
         &mut self,
-        renderer: &mut vello::Renderer,
+        raster: &mut Raster,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        atlas: &mut AtlasResidency,
         frame: &CommittedFrame,
         images: &[Option<ImageData>],
         vectors: &[Option<ImageData>],
@@ -976,7 +966,7 @@ impl FilterTextures {
             }
             let group = &groups[index];
             let (width, height) = group.size();
-            let bank = ensure_bank(&mut banks[index], renderer, device, width, height);
+            let bank = ensure_bank(&mut banks[index], raster, device, width, height);
 
             bake.reset();
             frame.bake_filter(
@@ -988,10 +978,6 @@ impl FilterTextures {
                 offset_of,
                 animation_now,
             );
-            // Every render through this renderer owes the residency a pass,
-            // including a bake: a patch-free bake frees the whole image
-            // atlas, which is exactly the loss `AtlasResidency` repairs.
-            atlas.prepare_all(renderer, bake, images, filtered, vectors);
             // The canvas is under the document root's Backdrop Root Image
             // and is no op of the frame, so it enters here, as the base the
             // range composes over; every other entry starts from nothing.
@@ -1000,15 +986,24 @@ impl FilterTextures {
             } else {
                 Color::TRANSPARENT
             };
-            renderer
-                .render_to_texture(
-                    device,
-                    queue,
-                    bake,
-                    &bank.target.view,
-                    &render_params(base, width, height),
-                )
-                .map_err(|error| GpuError::Render(error.to_string()))?;
+            // Every render through the rasterizer names what it may draw,
+            // a bake included: for the default one, a patch-free bake frees
+            // the whole image atlas, which is exactly the loss its residency
+            // repairs.
+            raster.render_to_texture(
+                device,
+                queue,
+                bake,
+                &bank.target.view,
+                width,
+                height,
+                base,
+                Drawn {
+                    images,
+                    filtered,
+                    vectors,
+                },
+            )?;
 
             let plan = decimate(f64::from(group.sigma), width, height);
             bank.ensure_levels(device, plan.levels);
@@ -1036,7 +1031,7 @@ impl FilterTextures {
 
             // The texture's contents just changed, so the copy vello holds in
             // its atlas is stale whatever the residency believes about it.
-            renderer.mark_override_image_dirty(&bank.handle);
+            raster.mark_override_image_dirty(&bank.handle);
             filtered[index] = Some(bank.handle.clone());
         }
         Ok(())
@@ -1167,7 +1162,7 @@ fn run_chain(passes: &mut Passes<'_>, bank: &Bank, plan: &Decimation) {
 /// image's, so the old handle is unregistered rather than repointed.
 fn ensure_bank<'bank>(
     slot: &'bank mut Option<Bank>,
-    renderer: &mut vello::Renderer,
+    raster: &mut Raster,
     device: &wgpu::Device,
     width: u32,
     height: u32,
@@ -1177,9 +1172,9 @@ fn ensure_bank<'bank>(
         .is_some_and(|bank| bank.width == width && bank.height == height)
     {
         if let Some(stale) = slot.take() {
-            renderer.override_image(&stale.handle, None);
+            raster.override_image(&stale.handle, None);
         }
-        *slot = Some(Bank::new(renderer, device, width, height));
+        *slot = Some(Bank::new(raster, device, width, height));
     }
     slot.as_mut().expect("the bank was just ensured")
 }

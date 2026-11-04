@@ -29,7 +29,7 @@ use super::{CANVAS, FrameSize, PainterError};
 use crate::render::blur::FilterTextures;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::render::gpu::read_texture;
-use crate::render::gpu::{AtlasResidency, render_params, renderer_options};
+use crate::render::raster::{Drawn, Raster};
 use crate::render::vector_textures::VectorTextures;
 use crate::visual::{CommittedFrame, ScrollSlot};
 
@@ -62,10 +62,9 @@ pub(super) enum FrameAcquisition {
 pub(super) struct WindowGraphics {
     context: RenderContext,
     surface: RenderSurface<'static>,
-    renderer: vello::Renderer,
-    /// What that renderer's image atlas still holds; see
-    /// [`crate::render::gpu::AtlasResidency`].
-    atlas: AtlasResidency,
+    /// The rasterizer this window's frames and bakes render through; see
+    /// [`crate::render::raster::Raster`].
+    raster: Raster,
     /// The `filter: blur()` bakes of the frame this renderer last composed;
     /// see [`crate::render::blur::FilterTextures`].
     filters: FilterTextures,
@@ -114,13 +113,12 @@ impl WindowGraphics {
             .await
             .map_err(|error| PainterError::Render(error.to_string()))?;
         let handle = &context.devices[surface.dev_id];
-        let renderer = vello::Renderer::new(&handle.device, renderer_options())
-            .map_err(|error| PainterError::Render(error.to_string()))?;
+        let raster =
+            Raster::new(&handle.device).map_err(|error| PainterError::Render(error.to_string()))?;
         Ok(Self {
             context,
             surface,
-            renderer,
-            atlas: AtlasResidency::default(),
+            raster,
             filters: FilterTextures::default(),
             vectors: VectorTextures::default(),
             #[cfg(not(target_arch = "wasm32"))]
@@ -197,21 +195,21 @@ impl WindowGraphics {
         // The filter and vector bakes are override images this scene may
         // draw, so the residency has to see them too or a post-loss repair
         // is missed.
-        self.atlas.prepare_all(
-            &mut self.renderer,
-            scene,
-            images,
-            self.filters.images(),
-            self.vectors.images(),
-        );
         let handle = &self.context.devices[self.surface.dev_id];
-        self.renderer
+        self.raster
             .render_to_texture(
                 &handle.device,
                 &handle.queue,
                 scene,
                 &self.surface.target_view,
-                &render_params(CANVAS, size.width, size.height),
+                size.width,
+                size.height,
+                CANVAS,
+                Drawn {
+                    images,
+                    filtered: self.filters.images(),
+                    vectors: self.vectors.images(),
+                },
             )
             .map_err(|error| PainterError::Render(error.to_string()))
     }
@@ -228,14 +226,13 @@ impl WindowGraphics {
         let Self {
             context,
             surface,
-            renderer,
-            atlas,
+            raster,
             vectors,
             ..
         } = self;
         let handle = &context.devices[surface.dev_id];
         vectors
-            .prepare(frame, renderer, &handle.device, &handle.queue, atlas)
+            .prepare(frame, raster, &handle.device, &handle.queue)
             .map_err(|error| PainterError::Gpu(error.to_string()))
     }
 
@@ -257,18 +254,16 @@ impl WindowGraphics {
         let Self {
             context,
             surface,
-            renderer,
-            atlas,
+            raster,
             filters,
             ..
         } = self;
         let handle = &context.devices[surface.dev_id];
         filters
             .prepare(
-                renderer,
+                raster,
                 &handle.device,
                 &handle.queue,
-                atlas,
                 frame,
                 images,
                 vectors,
