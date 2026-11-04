@@ -492,8 +492,11 @@ fn automatic_minimum_applies(
 }
 
 /// §6.6's content-based minimum size as a margin-box value, before the
-/// fixed-maximum clamp of the tracks it spans: the min-content size, capped
-/// by a preferred size.
+/// fixed-maximum clamp of the tracks it spans: the specified size suggestion
+/// — a definite preferred size, whatever the content measures — and
+/// otherwise the content size suggestion, the min-content size. Unlike
+/// flexbox's (css-flexbox-1 §4.5), grid's specified suggestion is not capped
+/// by the content one.
 fn automatic_minimum_suggestion<T>(
     tree: &T,
     state: &mut T::State,
@@ -504,18 +507,20 @@ fn automatic_minimum_suggestion<T>(
 where
     T: LayoutTree,
 {
-    let preferred = axis
-        .size(item.preferred_size)
-        .map(|value| value + margin_sum(item, axis));
-    let raw_outer = raw_content_size(
+    let margin = margin_sum(item, axis);
+    if !axis.size(item.preferred_behaves_auto_or_depends)
+        && let Some(preferred) = axis.size(item.preferred_size)
+    {
+        return preferred + margin;
+    }
+    raw_content_size(
         tree,
         state,
         item,
         axis,
         ContributionKind::MinContent,
         cross_tracks,
-    ) + margin_sum(item, axis);
-    preferred.map_or(raw_outer, |size| raw_outer.min(size))
+    ) + margin
 }
 
 /// The minimum contribution of an item with no definite minimum size where

@@ -30,7 +30,7 @@ tree/style storage, DOM/runtime types, device-unit policy, or paint order.
   `LinearStyle` and `RelativeStyle` each carry only what their own algorithm
   reads and are demanded at that algorithm's entry point;
   `GridLanesStyle: GridStyle` extends Grid's rather than the core with
-  `flow_tolerance` and the computed `font_size` its `normal` keyword resolves
+  `fit_tolerance` and the computed `font_size` its `normal` keyword resolves
   against; `TextContainerStyle` supplies `text_maxline`/`text_maxlength` from
   non-inherited integer custom properties. `LayoutInput` stays one struct.
 - `LayoutTree::flattened_children` is the box-tree view; it flattens
@@ -48,7 +48,7 @@ Landed and not to be regressed:
   id-constrained Starlight Relative Level 1, and Lynx `display: linear` are all
   live. css-contain-2 is landed layout-side; single-axis containment and
   container queries are deliberately out of scope.
-- CSS Grid Level 3 `display: grid-lanes` + `flow-tolerance` landed 2026-09-18
+- CSS Grid Level 3 `display: grid-lanes` + `fit-tolerance` landed 2026-09-18
   (`compute/grid/lanes.rs`, on Grid's own template/line/track-sizing code;
   `DisplayMode::GridLanes` in `terminus`). It is **W3C, not Lynx** — a
   user-directed extension beyond parity, so the standards policy's bucket-2

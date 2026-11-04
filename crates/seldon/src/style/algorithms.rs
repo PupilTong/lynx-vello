@@ -11,7 +11,7 @@ use stylo::computed_values::{
 };
 use stylo::values::computed::lynx_layout::{RelativeAlign, RelativeReference};
 use stylo::values::computed::{
-    FlexBasis, FlowTolerance, GridAutoFlow, GridLine, GridTemplateComponent, ImplicitGridTracks,
+    FitTolerance, FlexBasis, GridAutoFlow, GridLine, GridTemplateComponent, ImplicitGridTracks,
     JustifyItems, NonNegativeNumber,
 };
 
@@ -63,9 +63,9 @@ style_protocol! {
 style_protocol! {
     pub trait GridLanesStyle: GridStyle {
         defaults(style) {
-            flow_tolerance -> &FlowTolerance =
-                &style.computed_values().get_position().flow_tolerance,
-            // css-grid-3 §4.2: `flow-tolerance: normal` is `1em`, so the
+            fit_tolerance -> &FitTolerance =
+                &style.computed_values().get_position().fit_tolerance,
+            // css-grid-3 §4.2: `fit-tolerance: normal` is `1em`, so the
             // algorithm needs the element's own computed font size to resolve
             // it. No other length in layout is font-relative.
             font_size -> f32 =
@@ -189,7 +189,7 @@ mod tests {
         );
         assert!(style.grid_row_start().is_auto());
 
-        assert_eq!(style.flow_tolerance(), &FlowTolerance::normal());
+        assert_eq!(style.fit_tolerance(), &FitTolerance::normal());
         assert_eq!(GridLanesStyle::font_size(&style), 16.0);
 
         assert_eq!(style.linear_direction(), linear_direction::T::Column);

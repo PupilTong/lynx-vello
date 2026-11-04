@@ -2327,6 +2327,9 @@ where
         outer: mut outer_size,
         inner: mut inner_size,
         available_inner: mut inner_available_space,
+        // The grid container's own content cap (`grid::ratio_content_cap`);
+        // a flex container's ratio is applied below.
+        ratio_content_cap: _,
     } = resolve_container_box(&style, input);
     let mut outer_definite = Size::new(
         input.definite_dimensions.width || style_definite.width,
