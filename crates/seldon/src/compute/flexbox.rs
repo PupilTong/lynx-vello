@@ -22,13 +22,15 @@ use super::single_axis::{
 };
 use super::util::{
     Axis, BaselineSet, ItemGeometry, OrderedItem, PendingLayoutItem, ResolvedContainerBox,
-    accumulate_scrollable_overflow, axis_has_intrinsic_style, axis_sizing_is_stable, clamp_axis,
-    container_content_independence, debug_assert_tree_order, edges_depend_on_inline_basis,
-    is_scroll_container, normalize_content_alignment, normalize_item_alignment_with_last_baseline,
-    own_scrollable_overflow, padding_box_end, relative_offset, resolve_container_box, resolve_gap,
-    resolve_gap_axis, resolve_insets, resolve_item_geometry, resolve_length_percentage,
-    resolve_style_size, sort_and_assign_layout_order, store_committed_child,
-    style_size_behaves_auto, style_size_depends_on_basis,
+    accumulate_scrollable_overflow, apply_border_box_ratio, axis_has_intrinsic_style,
+    axis_sizing_is_stable, clamp_axis, container_content_independence, debug_assert_tree_order,
+    edges_depend_on_inline_basis, is_scroll_container, mirror_ratio_definiteness,
+    normalize_content_alignment, normalize_item_alignment_with_last_baseline,
+    own_scrollable_overflow, padding_box_end, ratio_project, relative_offset,
+    resolve_container_box, resolve_gap, resolve_gap_axis, resolve_insets, resolve_item_geometry,
+    resolve_length_percentage, resolve_max_sizes, resolve_size, resolve_style_size,
+    sort_and_assign_layout_order, store_committed_child, style_size_behaves_auto,
+    style_size_depends_on_basis,
 };
 use super::{AbsoluteContainingBlock, compute_absolute_layout_in};
 use crate::geometry::{Edges, Point, Size};
@@ -323,7 +325,27 @@ where
         flex_shrink.is_finite() && flex_shrink >= 0.0,
         "flex-shrink must be finite and non-negative"
     );
-    let geometry = resolve_item_geometry(style, container_inner_size);
+    let mut geometry = resolve_item_geometry(style, container_inner_size);
+    if geometry.aspect_ratio.is_some() {
+        // A flex item's main size is not clamped by a minimum or maximum its
+        // ratio transfers from the cross axis, only by its own main-axis
+        // ones: Blink, Gecko and WebKit agree, and css-flexbox-1 leaves the
+        // case open (w3c/csswg-drafts#10997).
+        if axes
+            .main
+            .size(resolve_size(style.min_size(), container_inner_size))
+            .is_none()
+        {
+            axes.main.set_size(&mut geometry.min_size, None);
+        }
+        if axes
+            .main
+            .size(resolve_max_sizes(style.max_size(), container_inner_size))
+            .is_none()
+        {
+            axes.main.set_size(&mut geometry.max_size, None);
+        }
+    }
     let direction = style.direction();
     let relative_offset = if style.position() == PositionProperty::Relative {
         relative_offset(
@@ -400,10 +422,11 @@ where
         state: &'state mut T::State,
         item: &FlexItem<T::NodeId>,
         axes: Axes,
-        container_inner_size: Size<Option<f32>>,
+        container: ContainerInner,
         available_space: Size<AvailableSpace>,
         single_line: bool,
     ) -> Self {
+        let container_inner_size = container.size;
         let inset_size = item.box_floor();
         // css-flexbox-1 §9.8: in a single-line container with a definite cross
         // size, the cross size of an item the container is going to stretch is
@@ -416,6 +439,7 @@ where
         // measured at the wrong cross size. The container's own intrinsic
         // passes leave the cross size indefinite, which turns this back off
         // exactly where it should be.
+        let mut cross_is_stretched = false;
         let cross_preferred = axes.cross.size(item.preferred_size).or_else(|| {
             let stretches = single_line
                 && item.align_self == AlignFlags::STRETCH
@@ -426,6 +450,7 @@ where
                 .then(|| axes.cross.size(container_inner_size))
                 .flatten()
                 .map(|cross| {
+                    cross_is_stretched = true;
                     clamp_axis(
                         cross - axes.cross.sum(item.margin),
                         axes.cross.size(item.min_size),
@@ -436,13 +461,15 @@ where
         });
         let mut known = Size::NONE;
         axes.cross.set_size(&mut known, cross_preferred);
+        let child_basis = container.child_basis();
         let mut known_is_definite = Size::new(false, false);
         axes.cross.set_size(
             &mut known_is_definite,
-            axes.cross.size(item.preferred_definite),
+            (cross_is_stretched && axes.cross.size(child_basis).is_some())
+                || axes.cross.size(item.preferred_definite),
         );
 
-        let contribution_parent_size = axes.main.pack(None, axes.cross.size(container_inner_size));
+        let contribution_parent_size = axes.main.pack(None, axes.cross.size(child_basis));
         Self {
             tree,
             state,
@@ -507,6 +534,16 @@ where
         value
     }
 
+    /// The cross size every probe is taken at, when the item has a definite
+    /// one before its main size is known: its preferred cross size, or the
+    /// cross size the container stretches it to ([`Self::for_item`]).
+    fn definite_cross(&self) -> Option<f32> {
+        self.axes
+            .cross
+            .size(self.known_dimensions)
+            .filter(|_| self.axes.cross.size(self.definite_dimensions))
+    }
+
     fn min_content(&mut self) -> f32 {
         self.probe(0, AvailableSpace::MinContent)
     }
@@ -557,6 +594,32 @@ where
     }
 }
 
+/// The container's inner size as its items are measured in it, with whether
+/// its height is a percentage basis for them: a height the container's
+/// content decided is not (§9.8), even once a commit hands it in as known.
+#[derive(Debug, Clone, Copy)]
+struct ContainerInner {
+    size: Size<Option<f32>>,
+    height_is_definite: bool,
+}
+
+impl ContainerInner {
+    const fn new(size: Size<Option<f32>>, height_is_definite: bool) -> Self {
+        Self {
+            size,
+            height_is_definite,
+        }
+    }
+
+    /// The percentage basis the container's children are measured against.
+    fn child_basis(self) -> Size<Option<f32>> {
+        Size::new(
+            self.size.width,
+            self.size.height.filter(|_| self.height_is_definite),
+        )
+    }
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 #[expect(
     clippy::too_many_lines,
@@ -567,7 +630,7 @@ fn determine_flex_base_sizes<'tree, T>(
     state: &mut T::State,
     items: &mut [FlexItem<T::NodeId>],
     axes: Axes,
-    container_inner_size: Size<Option<f32>>,
+    container: ContainerInner,
     available_space: Size<AvailableSpace>,
     flex_basis_percentage_basis: Option<f32>,
     container_main_is_definite: bool,
@@ -584,7 +647,7 @@ fn determine_flex_base_sizes<'tree, T>(
     T: LayoutTree + 'tree,
     T::Style<'tree>: FlexboxStyle,
 {
-    let container_main = axes.main.size(container_inner_size);
+    let container_main = axes.main.size(container.size);
     let available_main = axes.main.size(available_space);
     // A definite available main size needs both: the container's
     // fit-content main size clamps between its min- and max-content main
@@ -613,7 +676,7 @@ fn determine_flex_base_sizes<'tree, T>(
             &mut *state,
             item,
             axes,
-            container_inner_size,
+            container,
             available_space,
             single_line,
         );
@@ -634,6 +697,27 @@ fn determine_flex_base_sizes<'tree, T>(
         {
             axes.main.set_size(&mut item.max_size, Some(value));
         }
+
+        // The item's content size in the main axis when it has a preferred
+        // aspect ratio and a cross size before its main size is known: the
+        // cross size transferred through the ratio (css-sizing-4 §5.1), for
+        // its flex base size and its contributions alike. A cross size from
+        // the item's own size property is already transferred into its
+        // preferred main size; this adds the one the container stretches it
+        // to, which §9.8 makes definite.
+        let ratio_content = item
+            .aspect_ratio
+            .zip(probes.definite_cross())
+            .map(|(ratio, cross)| {
+                ratio_project(
+                    cross,
+                    ratio,
+                    axes.cross == Axis::Horizontal,
+                    item.box_sizing,
+                    axes.cross.size(inset_size),
+                    main_floor,
+                )
+            });
 
         let flex_basis_is_auto = flex_basis_behaves_auto(raw_flex_basis);
         let resolved_basis =
@@ -677,6 +761,11 @@ fn determine_flex_base_sizes<'tree, T>(
                 content_basis
             };
             match content_basis {
+                // §9.2.3 step B: an item with a preferred aspect ratio, a
+                // used flex basis of `content` and a definite cross size
+                // takes its flex base size from that cross size through the
+                // ratio.
+                StyleSize::Auto if let Some(transferred) = ratio_content => transferred,
                 StyleSize::MinContent => probes.min_content(),
                 StyleSize::MaxContent => probes.max_content(),
                 StyleSize::FitContentFunction(limit) => {
@@ -712,7 +801,13 @@ fn determine_flex_base_sizes<'tree, T>(
 
         item.inner_flex_basis = item.flex_basis - main_floor;
 
-        let explicit_min = axes.main.size(item.min_size);
+        // Only `min-*: auto` asks for the automatic minimum (§4.5). A
+        // percentage against an indefinite basis computes to that
+        // percentage, not `auto`, and a minimum size it cannot resolve is
+        // zero (CSS 2.2 §10.7, css-sizing-3 §5.2.1).
+        let explicit_min = axes.main.size(item.min_size).or_else(|| {
+            matches!(axes.main.size(raw_min_size), StyleSize::LengthPercentage(_)).then_some(0.0)
+        });
         item.resolved_min_main = if let Some(minimum) = explicit_min {
             minimum.max(main_floor)
         } else if item.overflow.x.is_scrollable() || item.overflow.y.is_scrollable() {
@@ -785,6 +880,11 @@ fn determine_flex_base_sizes<'tree, T>(
         let content_free = (needs_min_content_contribution || needs_max_content_contribution)
             .then(|| content_free_main_contribution(item, axes))
             .flatten();
+        let content_free = content_free.or_else(|| {
+            ratio_content
+                .filter(|_| needs_min_content_contribution || needs_max_content_contribution)
+                .map(|transferred| main_contribution(item, axes, transferred))
+        });
         item.max_content_contribution = if needs_max_content_contribution {
             content_free.unwrap_or_else(|| main_contribution(item, axes, probes.max_content()))
         } else {
@@ -941,7 +1041,7 @@ fn resolve_deferred_min_content_contributions<'tree, T>(
     state: &mut T::State,
     items: &mut [FlexItem<T::NodeId>],
     axes: Axes,
-    container_inner_size: Size<Option<f32>>,
+    container: ContainerInner,
     available_space: Size<AvailableSpace>,
     single_line: bool,
 ) where
@@ -954,7 +1054,7 @@ fn resolve_deferred_min_content_contributions<'tree, T>(
             &mut *state,
             item,
             axes,
-            container_inner_size,
+            container,
             available_space,
             single_line,
         )
@@ -1019,19 +1119,23 @@ fn intrinsic_main_size<N>(
 /// the break leaves space at the end of every line.
 ///
 /// A `block_axis` main size — a column container's height, seldon laying out
-/// horizontal-tb only — is its content's height on one line under any
+/// horizontal-tb only — is its content's height after layout under any
 /// constraint: css-sizing-3 §2.1 makes a box's min-content block size its
 /// max-content block size, the height of its content after layout, so the
-/// fit-content block size is that too, and a column `wrap` container with an
-/// automatic height runs its items down one line however little height is
-/// available (as Chrome does). Under a min-content constraint the items'
-/// min-content contributions stand in for their max-content ones, being
-/// block sizes too and so the same (§9.2.3 step C sizes the items under the
-/// container's constraint); they are summed as one line, a multi-line
-/// container included.
+/// fit-content block size is that too. The items are laid out at their
+/// hypothetical main sizes, as Chrome, Firefox and Safari do (so a definite
+/// `flex-basis` wins over the item's `height`); the row algorithm's §9.9.3
+/// contributions are not read. A column `wrap` container with an automatic
+/// height runs its items down one line however little height is available,
+/// unless it has a definite maximum height, at which its lines break
+/// (`block_lines`) and whose longest line it then takes.
 #[allow(clippy::too_many_arguments)]
 fn determine_auto_main_size<N>(
     items: &[FlexItem<N>],
+    // The lines a column `wrap` container broke at its maximum height, the
+    // longest of which decides its height; `None` sums every item as one.
+    block_lines: Option<&[FlexLine]>,
+    axes: Axes,
     gap: f32,
     single_line: bool,
     block_axis: bool,
@@ -1041,13 +1145,25 @@ fn determine_auto_main_size<N>(
     max_outer: Option<f32>,
 ) -> f32 {
     let content = match available_main {
+        _ if block_axis => {
+            let line_main = |line: &[FlexItem<N>]| {
+                line.iter()
+                    .map(|item| item_outer_hypothetical_main(item, axes))
+                    .sum::<f32>()
+                    + gap * line.len().saturating_sub(1) as f32
+            };
+            block_lines.map_or_else(
+                || line_main(items),
+                |lines| {
+                    lines
+                        .iter()
+                        .map(|line| line_main(&items[line.start..line.end]))
+                        .fold(0.0, f32::max)
+                },
+            )
+        }
         AvailableSpace::MaxContent => intrinsic_main_size(items, gap, single_line, true),
-        AvailableSpace::MinContent => {
-            intrinsic_main_size(items, gap, single_line || block_axis, false)
-        }
-        AvailableSpace::Definite(_) if block_axis => {
-            intrinsic_main_size(items, gap, single_line, true)
-        }
+        AvailableSpace::MinContent => intrinsic_main_size(items, gap, single_line, false),
         AvailableSpace::Definite(available) => {
             let max_content = intrinsic_main_size(items, gap, single_line, true);
             if max_content <= available {
@@ -1123,19 +1239,29 @@ fn resolve_flexible_lengths<N>(
                 })
                 .sum::<f32>();
         let mut remaining = inner_main_size - used;
+        // The factors are summed, and each item's share of the free space
+        // is taken as its ratio of that sum (§9.7 step 4.4), in `f64`: a
+        // factor may be as large as `f32::MAX` (`flex-grow:
+        // calc(infinity)`, which css-values-4 §10.9 clamps to the largest
+        // representable number), where the `f32` sum of two of them, or a
+        // scaled flex shrink factor, would be infinite.
         let factor_sum = line_items
             .iter()
             .filter(|item| !item.frozen)
             .map(|item| {
-                if growing {
+                f64::from(if growing {
                     item.flex_grow
                 } else {
                     item.flex_shrink
-                }
+                })
             })
-            .sum::<f32>();
+            .sum::<f64>();
         if factor_sum < 1.0 {
-            let scaled = initial_free_space * factor_sum;
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "a factor sum below one scales a finite free space down"
+            )]
+            let scaled = initial_free_space * factor_sum as f32;
             if scaled.abs() < remaining.abs() {
                 remaining = scaled;
             }
@@ -1144,19 +1270,20 @@ fn resolve_flexible_lengths<N>(
         if growing {
             if factor_sum > 0.0 {
                 for item in line_items.iter_mut().filter(|item| !item.frozen) {
-                    item.target_main = item.flex_basis + remaining * item.flex_grow / factor_sum;
+                    let ratio = f64::from(item.flex_grow) / factor_sum;
+                    item.target_main = item.flex_basis + share(remaining, ratio);
                 }
             }
         } else {
             let scaled_sum = line_items
                 .iter()
                 .filter(|item| !item.frozen)
-                .map(|item| item.flex_shrink * item.inner_flex_basis)
-                .sum::<f32>();
+                .map(|item| f64::from(item.flex_shrink) * f64::from(item.inner_flex_basis))
+                .sum::<f64>();
             if scaled_sum > 0.0 {
                 for item in line_items.iter_mut().filter(|item| !item.frozen) {
-                    let scaled = item.flex_shrink * item.inner_flex_basis;
-                    item.target_main = item.flex_basis + remaining * scaled / scaled_sum;
+                    let scaled = f64::from(item.flex_shrink) * f64::from(item.inner_flex_basis);
+                    item.target_main = item.flex_basis + share(remaining, scaled / scaled_sum);
                 }
             }
         }
@@ -1198,6 +1325,17 @@ fn resolve_flexible_lengths<N>(
     }
 
     debug_assert!(false, "flex freeze loop exceeded the item-count bound");
+}
+
+/// An item's share of the line's remaining free space: `ratio` is at most
+/// one, so the product is no larger than `remaining`.
+#[inline]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "a ratio in [0, 1] of a finite f32 is a finite f32"
+)]
+fn share(remaining: f32, ratio: f64) -> f32 {
+    (f64::from(remaining) * ratio) as f32
 }
 
 /// The baseline-sharing group an item joins in its flex line (css-flexbox-1
@@ -1311,7 +1449,7 @@ fn determine_hypothetical_cross_sizes<T>(
     lines: &[FlexLine],
     axes: Axes,
     wrap: flex_wrap::T,
-    container_inner_size: Size<Option<f32>>,
+    container: ContainerInner,
     available_space: Size<AvailableSpace>,
     // `Some` only on a commit-goal pass, whose in-flow commit is the sole
     // consumer of the per-item flags this writes.
@@ -1348,7 +1486,7 @@ fn determine_hypothetical_cross_sizes<T>(
         None
     };
     let nowrap_cross = (wrap == flex_wrap::T::NOWRAP)
-        .then(|| axes.cross.size(container_inner_size))
+        .then(|| axes.cross.size(container.size))
         .flatten();
 
     for line in lines {
@@ -1447,7 +1585,7 @@ fn determine_hypothetical_cross_sizes<T>(
             );
             let mut input = LayoutInput::measure(
                 known,
-                container_inner_size,
+                container.child_basis(),
                 child_available,
                 RequestedAxis::Both,
             )
@@ -1604,6 +1742,17 @@ fn stretch_lines(
     }
 }
 
+/// Whether `align-self: stretch` stretches the item to its line's cross size
+/// (§9.4 step 11): its cross size property is `auto` and neither cross-axis
+/// margin is.
+#[inline]
+fn item_stretches<N>(item: &FlexItem<N>, axes: Axes) -> bool {
+    item.align_self == AlignFlags::STRETCH
+        && axes.cross.size(item.size_is_auto)
+        && !item.margin_auto.flow_start(axes.cross, axes.cross_reverse)
+        && !item.margin_auto.flow_end(axes.cross, axes.cross_reverse)
+}
+
 fn determine_used_cross_sizes<N>(
     items: &mut [FlexItem<N>],
     lines: &[FlexLine],
@@ -1616,11 +1765,7 @@ fn determine_used_cross_sizes<N>(
         for item in &mut items[line.start..line.end] {
             let inset_size = item.box_floor();
             let cross_floor = axes.cross.size(inset_size);
-            let should_stretch = item.align_self == AlignFlags::STRETCH
-                && axes.cross.size(item.size_is_auto)
-                && !item.margin_auto.flow_start(axes.cross, axes.cross_reverse)
-                && !item.margin_auto.flow_end(axes.cross, axes.cross_reverse);
-            item.target_cross = if should_stretch {
+            item.target_cross = if item_stretches(item, axes) {
                 if let Some(line_cross_imposed) = line_cross_imposed {
                     let imposed = line_cross_imposed
                         && item.edges_stable
@@ -1923,6 +2068,16 @@ where
             );
             axes.main
                 .set_size(&mut input.definite_dimensions, item.main_size_is_definite);
+            // A row item's used height is definite for its children when its
+            // own height property is, or when it is stretched (§9.8 items 1
+            // and 3); a height the item's content decided is not, so a
+            // percentage against it behaves as `auto`. A column item's
+            // cross size is its width, which its children always resolve
+            // percentages against.
+            if axes.cross == Axis::Vertical {
+                input.definite_dimensions.height =
+                    item.preferred_definite.height || item_stretches(item, axes);
+            }
             input.sizing_mode = SizingMode::IgnoreSizeStyles;
             let output = tree.compute_layout(state, item.key.node, input);
             // The committed run's baselines replace the measured ones: the
@@ -2162,6 +2317,8 @@ where
             .unwrap_or(AlignFlags::FLEX_START);
     let ResolvedContainerBox {
         preferred_definite: style_definite,
+        aspect_ratio,
+        box_sizing,
         padding,
         border,
         box_inset: container_inset_size,
@@ -2169,13 +2326,42 @@ where
         max: max_size,
         outer: mut outer_size,
         inner: mut inner_size,
-        available_inner: inner_available_space,
-        ..
+        available_inner: mut inner_available_space,
     } = resolve_container_box(&style, input);
-    let outer_definite = Size::new(
+    let mut outer_definite = Size::new(
         input.definite_dimensions.width || style_definite.width,
         input.definite_dimensions.height || style_definite.height,
     );
+    // css-sizing-4 §5.1: a container with a preferred aspect ratio and one
+    // settled axis takes the other from it, also when that axis is settled by
+    // its parent rather than its own size property (a stretched width, a
+    // flexed main size). The box's own sizes have already been transferred.
+    // A size transferred from a definite one is definite, also once the
+    // parent commits the box at both (`mirror_ratio_definiteness`).
+    mirror_ratio_definiteness(&mut outer_definite, aspect_ratio);
+    if aspect_ratio.is_some()
+        && input.sizing_mode != SizingMode::IgnoreSizeStyles
+        && outer_size.width.is_some() != outer_size.height.is_some()
+    {
+        let ratio_outer =
+            apply_border_box_ratio(outer_size, aspect_ratio, box_sizing, container_inset_size);
+        for axis in [Axis::Horizontal, Axis::Vertical] {
+            if axis.size(outer_size).is_none()
+                && let Some(transferred) = axis.size(ratio_outer)
+            {
+                let outer = clamp_axis(
+                    transferred,
+                    axis.size(min_size),
+                    axis.size(max_size),
+                    axis.size(container_inset_size),
+                );
+                let inner = (outer - axis.size(container_inset_size)).max(0.0);
+                axis.set_size(&mut outer_size, Some(outer));
+                axis.set_size(&mut inner_size, Some(inner));
+                axis.set_size(&mut inner_available_space, AvailableSpace::Definite(inner));
+            }
+        }
+    }
     let container_independent = container_content_independence(input, style_definite);
     // Only a measurement can be asked for an exact last baseline: a commit
     // reads the committed children and is exact anyway.
@@ -2249,13 +2435,17 @@ where
         state,
         &mut items,
         axes,
-        inner_size,
+        ContainerInner::new(inner_size, outer_definite.height),
         inner_available_space,
         (!main_percentage_basis_was_indefinite)
             .then(|| axes.main.size(inner_size))
             .flatten(),
         !main_percentage_basis_was_indefinite,
-        axes.main.size(outer_size).is_none() && axes.main.size(contained.extents()).is_none(),
+        // A vertical main axis sums hypothetical main sizes instead
+        // (`determine_auto_main_size`).
+        main_horizontal
+            && axes.main.size(outer_size).is_none()
+            && axes.main.size(contained.extents()).is_none(),
         flex_wrap == flex_wrap::T::NOWRAP,
         container_independent,
     );
@@ -2265,12 +2455,27 @@ where
         || axes.main.size(inner_available_space),
         AvailableSpace::Definite,
     );
+    // A column `wrap` container with an automatic height breaks its lines at
+    // its definite maximum height, as Blink, Gecko and WebKit do, and is as
+    // tall as its longest line (`determine_auto_main_size`).
+    let column_wrap_limit = (!main_horizontal
+        && flex_wrap != flex_wrap::T::NOWRAP
+        && axes.main.size(outer_size).is_none()
+        && axes.main.size(contained.extents()).is_none())
+    .then(|| axes.main.size(max_size))
+    .flatten()
+    .map(|max_outer| {
+        let inset = axes.main.size(container_inset_size);
+        (max_outer.max(axes.main.size(min_size).unwrap_or(0.0)) - inset).max(0.0)
+    });
     // A vertical main axis under a min-content constraint keeps its items on
     // one line, as under a max-content one (`determine_auto_main_size`).
     let mut lines = collect_flex_lines(
         &items,
         flex_wrap,
-        if !main_horizontal && line_available_main == AvailableSpace::MinContent {
+        if let Some(limit) = column_wrap_limit {
+            AvailableSpace::Definite(limit)
+        } else if !main_horizontal && line_available_main == AvailableSpace::MinContent {
             AvailableSpace::MaxContent
         } else {
             line_available_main
@@ -2307,13 +2512,15 @@ where
                     state,
                     &mut items,
                     axes,
-                    inner_size,
+                    ContainerInner::new(inner_size, outer_definite.height),
                     inner_available_space,
                     single_line,
                 );
             }
             determine_auto_main_size(
                 &items,
+                column_wrap_limit.map(|_| lines.as_slice()),
+                axes,
                 main_gap,
                 single_line,
                 !main_horizontal,
@@ -2368,7 +2575,7 @@ where
         &lines,
         axes,
         flex_wrap,
-        inner_size,
+        ContainerInner::new(inner_size, outer_definite.height),
         inner_available_space,
         container_independent,
         first_baseline_requested,
@@ -2422,12 +2629,17 @@ where
     if item_inline_basis_was_indefinite {
         gap = resolve_gap(gap_value, inner_size);
         main_gap = axes.main.size(gap);
+        // The decided width is the inline percentage basis now. A height the
+        // content decided stays indefinite: an item's percentage height
+        // against it still behaves as `auto` (css-flexbox-1 §9.8,
+        // css-sizing-3 §5.2.1).
+        let item_basis = Size::new(inner_size.width, percentage_basis.height);
         for item in &mut items {
             let key = item.key;
             *item = resolve_item(
                 &tree.style(key.node),
                 key,
-                inner_size,
+                item_basis,
                 axes,
                 rtl,
                 align_items,
@@ -2442,7 +2654,7 @@ where
             state,
             &mut items,
             axes,
-            inner_size,
+            ContainerInner::new(inner_size, outer_definite.height),
             final_available_space,
             if main_percentage_basis_was_indefinite {
                 None
@@ -2471,7 +2683,7 @@ where
             &lines,
             axes,
             flex_wrap,
-            inner_size,
+            ContainerInner::new(inner_size, outer_definite.height),
             final_available_space,
             container_independent,
             first_baseline_requested,
@@ -2843,7 +3055,7 @@ mod tests {
             &[test_line(items.len(), 0.0)],
             row_axes(wrap),
             wrap,
-            Size::new(Some(100.0), Some(cross)),
+            ContainerInner::new(Size::new(Some(100.0), Some(cross)), true),
             Size::new(
                 AvailableSpace::Definite(100.0),
                 AvailableSpace::Definite(cross),
@@ -2930,7 +3142,7 @@ mod tests {
             &mut state,
             &mut items,
             axes,
-            Size::new(Some(100.0), Some(20.0)),
+            ContainerInner::new(Size::new(Some(100.0), Some(20.0)), true),
             Size::new(
                 AvailableSpace::Definite(37.0),
                 AvailableSpace::Definite(20.0),
@@ -2960,7 +3172,7 @@ mod tests {
                 state,
                 items,
                 axes,
-                Size::new(None, Some(20.0)),
+                ContainerInner::new(Size::new(None, Some(20.0)), true),
                 Size::new(
                     AvailableSpace::Definite(37.0),
                     AvailableSpace::Definite(20.0),
@@ -2983,6 +3195,8 @@ mod tests {
         let auto_main = |items: &[FlexItem<TestRef>], available: f32| {
             determine_auto_main_size(
                 items,
+                None,
+                row_axes(flex_wrap::T::NOWRAP),
                 0.0,
                 true,
                 false,
@@ -2999,7 +3213,7 @@ mod tests {
             &mut state,
             &mut items,
             axes,
-            Size::new(None, Some(20.0)),
+            ContainerInner::new(Size::new(None, Some(20.0)), true),
             Size::new(
                 AvailableSpace::Definite(20.0),
                 AvailableSpace::Definite(20.0),
@@ -3068,25 +3282,33 @@ mod tests {
     #[test]
     fn block_axis_auto_main_size_is_one_line_under_any_constraint() {
         // A vertical main axis is a block axis, whose min-content size is its
-        // max-content size (css-sizing-3 §2.1): one line whatever the
-        // constraint, wrapping or not, summing the min-content contributions
-        // under a min-content one (8 + 2 + 15, plus the inset 1) and the
-        // max-content ones otherwise (12 + 2 + 24 + 1).
+        // max-content size (css-sizing-3 §2.1): its content's height after
+        // layout, one line of the items at their hypothetical main sizes,
+        // whatever the constraint, wrapping or not (10 + 3 + 2 + 20, plus
+        // the inset 1). The row algorithm's contributions are not read.
         let mut items = vec![item(10.0, 5.0), item(20.0, 7.0)];
+        items[0].margin.bottom = 3.0;
         items[0].min_content_contribution = 8.0;
         items[1].min_content_contribution = 15.0;
         items[0].max_content_contribution = 12.0;
         items[1].max_content_contribution = 24.0;
+        let axes = flex_axes(
+            flex_direction::T::Column,
+            flex_wrap::T::WRAP,
+            direction::T::Ltr,
+        );
         for single_line in [false, true] {
-            for (available_main, expected) in [
-                (AvailableSpace::MinContent, 26.0),
-                (AvailableSpace::MaxContent, 39.0),
-                (AvailableSpace::Definite(10.0), 39.0),
-                (AvailableSpace::Definite(100.0), 39.0),
+            for available_main in [
+                AvailableSpace::MinContent,
+                AvailableSpace::MaxContent,
+                AvailableSpace::Definite(10.0),
+                AvailableSpace::Definite(100.0),
             ] {
                 assert_eq!(
                     determine_auto_main_size(
                         &items,
+                        None,
+                        axes,
                         2.0,
                         single_line,
                         true,
@@ -3095,7 +3317,7 @@ mod tests {
                         None,
                         None
                     ),
-                    expected,
+                    36.0,
                     "{available_main:?}, single line {single_line}"
                 );
             }
@@ -3116,7 +3338,7 @@ mod tests {
                 &mut state,
                 &mut items,
                 axes,
-                Size::new(Some(available), Some(20.0)),
+                ContainerInner::new(Size::new(Some(available), Some(20.0)), true),
                 Size::new(
                     AvailableSpace::Definite(available),
                     AvailableSpace::Definite(20.0),
@@ -3382,6 +3604,8 @@ mod tests {
             assert_eq!(
                 determine_auto_main_size(
                     &items,
+                    None,
+                    row_axes(flex_wrap::T::NOWRAP),
                     2.0,
                     single_line,
                     false,
@@ -3397,6 +3621,8 @@ mod tests {
         assert_eq!(
             determine_auto_main_size::<TestRef>(
                 &[],
+                None,
+                row_axes(flex_wrap::T::NOWRAP),
                 2.0,
                 false,
                 false,

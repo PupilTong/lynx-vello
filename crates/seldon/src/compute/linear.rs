@@ -3,7 +3,7 @@
 #![allow(clippy::cast_precision_loss)]
 
 use smallvec::SmallVec;
-use stylo::computed_values::{box_sizing, direction, linear_direction};
+use stylo::computed_values::{direction, linear_direction};
 use stylo::values::computed::{
     ContentDistribution, Inset, ItemPlacement, PositionProperty, SelfAlignment,
 };
@@ -15,12 +15,13 @@ use super::single_axis::{
 };
 use super::util::{
     Axis, EdgeMask, ItemGeometry, ItemKey as LayoutItemKey, OrderedItem, PendingLayoutItem,
-    ResolvedContainerBox, accumulate_scrollable_overflow, apply_aspect_ratio, auto_edges_to_zero,
-    axis_has_intrinsic_style, clamp_axis, container_content_independence,
-    edges_depend_on_inline_basis, is_scroll_container, item_value_stability,
-    mirror_ratio_definiteness, own_scrollable_overflow, padding_box_end, relative_offset,
-    resolve_container_box, resolve_insets, resolve_intrinsic, resolve_item_geometry,
-    resolve_margins, resolve_padding, sort_and_assign_layout_order, store_committed_child,
+    ResolvedContainerBox, accumulate_scrollable_overflow, apply_aspect_ratio,
+    apply_border_box_ratio, auto_edges_to_zero, axis_has_intrinsic_style, clamp_axis,
+    container_content_independence, edges_depend_on_inline_basis, is_scroll_container,
+    item_value_stability, mirror_ratio_definiteness, own_scrollable_overflow, padding_box_end,
+    ratio_project, relative_offset, resolve_container_box, resolve_insets, resolve_intrinsic,
+    resolve_item_geometry, resolve_margins, resolve_padding, sort_and_assign_layout_order,
+    store_committed_child,
 };
 use super::{AbsoluteContainingBlock, compute_absolute_layout_in, measure_absolute_layout};
 use crate::geometry::{Edges, Point, Size};
@@ -489,37 +490,6 @@ fn resolve_intrinsic_sizes<T>(
 }
 
 #[inline]
-fn ratio_project(
-    known: f32,
-    ratio: f32,
-    divide: bool,
-    box_sizing: box_sizing::T,
-    known_inset: f32,
-    projected_inset: f32,
-) -> f32 {
-    debug_assert!(
-        ratio.is_finite() && ratio > 0.0,
-        "aspect-ratio must be positive and finite"
-    );
-    let content_box = box_sizing == box_sizing::T::ContentBox;
-    let sizing = if content_box {
-        (known - known_inset).max(0.0)
-    } else {
-        known
-    };
-    let projected = if divide {
-        sizing / ratio
-    } else {
-        sizing * ratio
-    };
-    if content_box {
-        projected + projected_inset
-    } else {
-        projected
-    }
-}
-
-#[inline]
 fn ratio_cross_size<N>(item: &LinearItem<N>, axes: LinearAxes, forced_main: f32) -> Option<f32> {
     let ratio = item.aspect_ratio?;
     if !axes.cross.size(item.size_is_auto) {
@@ -534,42 +504,6 @@ fn ratio_cross_size<N>(item: &LinearItem<N>, axes: LinearAxes, forced_main: f32)
         axes.main.size(inset),
         axes.cross.size(inset),
     ))
-}
-
-#[inline]
-fn apply_border_box_ratio(
-    mut size: Size<Option<f32>>,
-    aspect_ratio: Option<f32>,
-    box_sizing: box_sizing::T,
-    inset: Size<f32>,
-) -> Size<Option<f32>> {
-    let Some(ratio) = aspect_ratio else {
-        return size;
-    };
-    match (size.width, size.height) {
-        (Some(width), None) => {
-            size.height = Some(ratio_project(
-                width,
-                ratio,
-                true,
-                box_sizing,
-                inset.width,
-                inset.height,
-            ));
-        }
-        (None, Some(height)) => {
-            size.width = Some(ratio_project(
-                height,
-                ratio,
-                false,
-                box_sizing,
-                inset.height,
-                inset.width,
-            ));
-        }
-        _ => {}
-    }
-    size
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
