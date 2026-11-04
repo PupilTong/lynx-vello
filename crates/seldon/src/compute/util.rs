@@ -580,6 +580,12 @@ pub(super) struct ResolvedContainerBox {
     pub(super) outer: Size<Option<f32>>,
     pub(super) inner: Size<Option<f32>>,
     pub(super) available_inner: Size<AvailableSpace>,
+    /// Per axis where `outer` is the size the preferred aspect ratio transfers
+    /// and the box's automatic minimum size is its content (css-sizing-4
+    /// §5.1), the outer size that content may grow the box to: its own
+    /// maximum size, untransferred, or infinity. `resolve_container_box`
+    /// leaves both `None`; an algorithm that honours the rule sets them.
+    pub(super) ratio_content_cap: Size<Option<f32>>,
 }
 
 #[inline]
@@ -1345,6 +1351,7 @@ pub(super) fn resolve_container_box(
         outer,
         inner,
         available_inner,
+        ratio_content_cap: Size::NONE,
     }
 }
 

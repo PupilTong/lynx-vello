@@ -34,7 +34,7 @@ fn lanes_style(columns: &[TestTrack], rows: &[TestTrack]) -> TestStyle {
         justify_items: justify_items(AlignFlags::NORMAL),
         // Every trace below is written against an exact shortest-lane rule;
         // the `normal` (1em) tie threshold gets its own test.
-        flow_tolerance: tolerance_px(0.0),
+        fit_tolerance: tolerance_px(0.0),
         ..TestStyle::default()
     }
 }
@@ -145,7 +145,7 @@ fn items_land_in_the_shortest_lane_and_stack_from_its_end() {
 }
 
 #[test]
-fn flow_tolerance_decides_which_lanes_count_as_equally_short() {
+fn fit_tolerance_decides_which_lanes_count_as_equally_short() {
     // The same six items, laid out under four tie thresholds.
     let cases = [
         (
@@ -177,7 +177,7 @@ fn flow_tolerance_decides_which_lanes_count_as_equally_short() {
             .collect::<Vec<_>>();
         let root = tree.push_grid_lanes(
             TestStyle {
-                flow_tolerance: tolerance,
+                fit_tolerance: tolerance,
                 font_size,
                 ..lanes_style(&[px(50.0), px(50.0), px(50.0)], &[])
             },
@@ -211,7 +211,7 @@ fn a_percentage_tolerance_resolves_against_the_used_grid_axis_size() {
             .collect::<Vec<_>>();
         let root = tree.push_grid_lanes(
             TestStyle {
-                flow_tolerance: tolerance,
+                fit_tolerance: tolerance,
                 ..lanes_style(&[px(50.0), px(50.0)], &[])
             },
             children.clone(),
@@ -236,7 +236,7 @@ fn an_infinite_tolerance_distributes_items_strictly_in_order() {
             .collect::<Vec<_>>();
         let root = tree.push_grid_lanes(
             TestStyle {
-                flow_tolerance: tolerance,
+                fit_tolerance: tolerance,
                 ..lanes_style(&[px(50.0), px(50.0), px(50.0)], &[])
             },
             children.clone(),
@@ -374,7 +374,7 @@ fn gutters_separate_tracks_and_items_without_a_trailing_one() {
     let root = tree.push_grid_lanes(
         TestStyle {
             gap: Size::new(gap_px(10.0), gap_px(6.0)),
-            flow_tolerance: tolerance_normal(),
+            fit_tolerance: tolerance_normal(),
             ..lanes_style(&[px(50.0), px(50.0)], &[])
         },
         children.clone(),
@@ -1750,7 +1750,7 @@ fn a_ratio_item_stacks_with_fixed_and_content_sized_neighbours() {
 /// cursor walks them in order instead of chasing the shortest — the four items
 /// change places, and not one of them changes size.
 #[test]
-fn flow_tolerance_moves_ratio_items_without_resizing_them() {
+fn fit_tolerance_moves_ratio_items_without_resizing_them() {
     let wide_lane = Size::new(100.0, 50.0);
     let narrow_lane = Size::new(50.0, 25.0);
     let cases = [
@@ -1783,7 +1783,7 @@ fn flow_tolerance_moves_ratio_items_without_resizing_them() {
             .collect::<Vec<_>>();
         let root = tree.push_grid_lanes(
             TestStyle {
-                flow_tolerance: tolerance,
+                fit_tolerance: tolerance,
                 ..lanes_style(&[px(100.0), px(50.0)], &[])
             },
             items.clone(),
@@ -2273,4 +2273,207 @@ fn aggregated_span_one_sizing_matches_per_position_sizing() {
         };
         assert!(output.size.width > 0.0 && output.size.height > 0.0);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Regressions found by the web-platform-tests grid-lanes suite.
+// ---------------------------------------------------------------------------
+
+/// WPT `intrinsic-sizing/row-defined-height.html`: a definite preferred size
+/// is an item's content-based minimum (css-grid-2 §6.6's specified size
+/// suggestion), even where its content measures less, so `auto` tracks in a
+/// definite container are not squeezed below it and overflow instead.
+#[test]
+fn a_definite_preferred_size_is_the_automatic_minimum_of_an_auto_track() {
+    let mut tree = TestTree::default();
+    let mut children = Vec::new();
+    for row in [Some(1), Some(2), Some(3), None] {
+        let mut style = leaf_style(100.0, 100.0);
+        if let Some(row) = row {
+            style.grid_row = Line::new(line(row), support::grid_auto_placement());
+        }
+        // No content: only the preferred size makes the item 100px tall.
+        children.push(tree.push_leaf(style, Size::ZERO, None));
+    }
+    let auto = support::track_auto;
+    let root = tree.push_grid_lanes(
+        TestStyle {
+            size: Size::new(size_px(300.0), size_px(100.0)),
+            ..lanes_style(&[], &[auto(), auto(), auto()])
+        },
+        children.clone(),
+    );
+
+    assert_size(auto_layout(&tree, root).size, Size::new(300.0, 100.0));
+    assert_eq!(
+        locations(&tree, &children),
+        vec![
+            Point::new(0.0, 0.0),
+            Point::new(0.0, 100.0),
+            Point::new(0.0, 200.0),
+            Point::new(100.0, 0.0),
+        ]
+    );
+}
+
+/// WPT `alignment/grid-lanes-content-distribution-001.html`, laid out where
+/// no parent imposes the block size: the height the aspect ratio transfers
+/// from the clamped width is only a floor, since the automatic minimum in
+/// that axis is the content (css-sizing-4 §5.1), so the track fits the item
+/// and `align-content: center` has no negative free space to centre.
+#[test]
+fn a_ratio_sized_block_axis_grows_to_its_content() {
+    let mut tree = TestTree::default();
+    let item = tree.push_leaf(leaf_style(100.0, 100.0), Size::ZERO, None);
+    let root = tree.push_grid_lanes(
+        TestStyle {
+            size: Size::new(size_px(100.0), size_auto()),
+            max_size: Size::new(max_px(50.0), support::max_none()),
+            aspect_ratio: support::ratio(2.0),
+            align_content: content(AlignFlags::CENTER),
+            ..lanes_style(&[], &[support::track_auto()])
+        },
+        vec![item],
+    );
+
+    assert_size(auto_layout(&tree, root).size, Size::new(50.0, 100.0));
+    assert_point(tree.layout(item).location, Point::new(0.0, 0.0));
+}
+
+/// WPT `track-sizing/auto-repeat/row-auto-repeat-010.html`: a parent that
+/// commits the container at the size it measured, telling it to ignore its
+/// own size properties, still leaves the `auto-fill` count to its percentage
+/// `max-height`, so `grid-row: -2` names the same last row in both passes.
+#[test]
+fn auto_fill_counts_against_the_max_size_when_the_parent_imposes_the_size() {
+    let mut tree = TestTree::default();
+    let item = tree.push_leaf(
+        TestStyle {
+            size: Size::new(size_px(300.0), support::size_pct(1.0)),
+            grid_row: Line::new(line(-2), support::grid_auto_placement()),
+            ..TestStyle::default()
+        },
+        Size::ZERO,
+        None,
+    );
+    let root = tree.push_grid_lanes(
+        TestStyle {
+            max_size: Size::new(support::max_pct(0.5), support::max_pct(0.8)),
+            template_rows: template_values(
+                vec![track_repeat(TestRepeatCount::AutoFill, vec![px(50.0)])],
+                0,
+            ),
+            ..lanes_style(&[], &[])
+        },
+        vec![item],
+    );
+    let wrapper = tree.push_linear(
+        TestStyle {
+            display: Display::Linear,
+            size: Size::new(size_px(600.0), size_px(250.0)),
+            ..TestStyle::default()
+        },
+        vec![root],
+    );
+    support::perform_layout(
+        &tree,
+        wrapper,
+        Size::NONE,
+        Size::new(
+            AvailableSpace::Definite(800.0),
+            AvailableSpace::Definite(600.0),
+        ),
+    );
+
+    assert_size(tree.layout(root).size, Size::new(300.0, 200.0));
+    assert_point(tree.layout(item).location, Point::new(0.0, 150.0));
+    assert_size(tree.layout(item).size, Size::new(300.0, 50.0));
+}
+
+/// Two 54px words on 15px lines: one line from 108px up, two below.
+fn two_word_paragraph(input: LeafMeasureInput) -> LeafMetrics {
+    let width = input
+        .known_dimensions
+        .width
+        .unwrap_or(match input.available_space.width {
+            AvailableSpace::MinContent => 54.0,
+            AvailableSpace::MaxContent => 108.0,
+            AvailableSpace::Definite(width) => width.clamp(54.0, 108.0),
+        });
+    let lines = if width < 108.0 { 2.0 } else { 1.0 };
+    LeafMetrics::new(Size::new(
+        width,
+        input.known_dimensions.height.unwrap_or(15.0 * lines),
+    ))
+}
+
+/// WPT `row-min-max-content-container.html`: with lanes running across the
+/// rows, an item's `width: min-content` is the same in every lane, so the
+/// rows are sized by the height it has at that width — two lines here, not
+/// the one line it would take unconstrained.
+#[test]
+fn a_stacking_axis_keyword_is_resolved_before_the_grid_axis_is_sized() {
+    let mut tree = TestTree::default();
+    let children = (1..=3)
+        .map(|row| {
+            tree.push_measured_leaf(
+                TestStyle {
+                    size: Size::new(support::size_min_content(), size_auto()),
+                    grid_row: Line::new(line(row), support::grid_auto_placement()),
+                    ..TestStyle::default()
+                },
+                two_word_paragraph,
+            )
+        })
+        .collect::<Vec<_>>();
+    let auto = support::track_auto;
+    let root = tree.push_grid_lanes(
+        lanes_style(&[], &[auto(), auto(), auto()]),
+        children.clone(),
+    );
+
+    assert_size(auto_layout(&tree, root).size, Size::new(54.0, 90.0));
+    for (&child, top) in children.iter().zip([0.0, 30.0, 60.0]) {
+        assert_point(tree.layout(child).location, Point::new(0.0, top));
+        assert_size(tree.layout(child).size, Size::new(54.0, 30.0));
+    }
+}
+
+/// WPT `alignment/grid-lanes-align-content-refinalize-row-geometry-001.html`:
+/// an item's containing block is its lanes in the grid axis and the
+/// container's content box in the stacking axis (§4.4.1), so a percentage
+/// there resolves against the container — and the item is still not
+/// stretched along it.
+#[test]
+fn stacking_axis_percentages_resolve_against_the_content_box() {
+    let mut tree = TestTree::default();
+    let percent = tree.push_leaf(
+        TestStyle {
+            size: Size::new(support::size_pct(1.0), size_auto()),
+            ..TestStyle::default()
+        },
+        Size::ZERO,
+        None,
+    );
+    let half = tree.push_leaf(
+        TestStyle {
+            size: Size::new(support::size_pct(0.5), size_auto()),
+            ..TestStyle::default()
+        },
+        Size::ZERO,
+        None,
+    );
+    let content_sized = tree.push_leaf(TestStyle::default(), Size::new(10.0, 10.0), None);
+    let root = tree.push_grid_lanes(
+        TestStyle {
+            size: Size::new(size_px(100.0), size_auto()),
+            ..lanes_style(&[], &[px(20.0), px(20.0), px(20.0)])
+        },
+        vec![percent, half, content_sized],
+    );
+
+    assert_size(auto_layout(&tree, root).size, Size::new(100.0, 60.0));
+    assert_size(tree.layout(percent).size, Size::new(100.0, 20.0));
+    assert_size(tree.layout(half).size, Size::new(50.0, 20.0));
+    assert_size(tree.layout(content_sized).size, Size::new(10.0, 20.0));
 }

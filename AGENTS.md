@@ -4070,8 +4070,8 @@ retired), with host-side display dispatch. They are split by algorithm:
 `order`, while `FlexboxStyle`, `GridStyle`, `LinearStyle` and `RelativeStyle`
 each carry what only their own algorithm reads and are demanded at that
 algorithm's entry point; `GridLanesStyle: GridStyle` is the one that extends
-another algorithm's trait rather than `CoreStyle`, adding `flow_tolerance` and
-the computed `font_size` that `flow-tolerance: normal`'s `1em` resolves
+another algorithm's trait rather than `CoreStyle`, adding `fit_tolerance` and
+the computed `font_size` that `fit-tolerance: normal`'s `1em` resolves
 against. `TextContainerStyle` supplies a paragraph container's CSS
 (`text-align`, `text-wrap-mode`, `word-break`, `text-indent`,
 `text-overflow`); `LynxTextStyle: TextContainerStyle` adds the Lynx `<text>`
@@ -4096,7 +4096,7 @@ baseline only and Relative none, and the fork's `lynx` grammar parses
 `baseline`, `first baseline` and `last baseline` for the item and self
 alignment properties (`docs/tracking/deviations.md`). Grid lanes is a **user-directed W3C extension
 beyond Lynx parity** (2026-09-18) rather than a compat obligation — native
-Lynx has no such `display` value and no `flow-tolerance` property — and it
+Lynx has no such `display` value and no `fit-tolerance` property — and it
 excludes `inline-grid-lanes`, the orientation property and
 `grid-auto-flow: normal`,
 `dense` backfilling, intrinsic `repeat(auto-fill, auto)`, virtual-item

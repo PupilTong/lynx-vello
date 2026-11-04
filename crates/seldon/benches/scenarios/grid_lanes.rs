@@ -29,7 +29,7 @@ fn fixed_lanes_fixture(item_count: usize) -> LayoutFixture {
     let mut fixture = lanes_fixture(
         1024.0,
         4096.0,
-        "grid-template-columns:repeat(8, 120px); gap:8px; flow-tolerance:0",
+        "grid-template-columns:repeat(8, 120px); gap:8px; fit-tolerance:0",
     );
     let root = fixture.root();
     for index in 0..count {
@@ -52,7 +52,7 @@ fn waterfall_fixture(item_count: usize) -> LayoutFixture {
     let mut fixture = lanes_fixture(
         1024.0,
         4096.0,
-        "grid-template-columns:repeat(8, minmax(0, 1fr)); gap:8px; flow-tolerance:0",
+        "grid-template-columns:repeat(8, minmax(0, 1fr)); gap:8px; fit-tolerance:0",
     );
     let root = fixture.root();
     for index in 0..count {
@@ -103,7 +103,7 @@ fn mixed_span_fixture(item_count: usize) -> LayoutFixture {
     let mut fixture = lanes_fixture(
         1024.0,
         4096.0,
-        "grid-template-columns:repeat(8, minmax(0, 1fr)); gap:6px; flow-tolerance:0",
+        "grid-template-columns:repeat(8, minmax(0, 1fr)); gap:6px; fit-tolerance:0",
     );
     let root = fixture.root();
     for index in 0..count {
@@ -137,7 +137,7 @@ impl DirtyItemFixture {
         let mut fixture = lanes_fixture(
             1024.0,
             4096.0,
-            "grid-template-columns:repeat(8, minmax(0, 1fr)); gap:8px; flow-tolerance:0",
+            "grid-template-columns:repeat(8, minmax(0, 1fr)); gap:8px; fit-tolerance:0",
         );
         let root = fixture.root();
         let mut dirty = root;

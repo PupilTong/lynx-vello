@@ -3927,3 +3927,27 @@ fn a_min_content_constraint_keeps_the_definite_rerun() {
     assert_close(tree.layout(first).size.width, 40.0);
     assert_point(tree.layout(second).location, Point::new(40.0, 0.0));
 }
+
+/// css-grid-2 §6.6: the content-based minimum is the specified size
+/// suggestion — a definite preferred size — whatever the content measures, so
+/// an empty 40px-tall item keeps its `auto` row at 40px in a 30px container
+/// instead of sharing the container out. Found through the grid-lanes WPT
+/// `intrinsic-sizing/row-defined-height.html`, which shares this sizing.
+#[test]
+fn a_definite_preferred_size_is_the_content_based_minimum() {
+    let mut tree = TestTree::default();
+    let children = [1, 2].map(|row| {
+        let mut style = fixed_leaf_style(10.0, 40.0);
+        style.grid_row = placement(line(row), line(row + 1));
+        tree.push_leaf(style, Size::ZERO, Size::ZERO)
+    });
+    let root = tree.push_grid(
+        grid_style(&[px(10.0)], &[auto_track(), auto_track()]),
+        children.to_vec(),
+    );
+
+    definite_layout(&tree, root, 10.0, 30.0);
+
+    assert_point(tree.layout(children[0]).location, Point::new(0.0, 0.0));
+    assert_point(tree.layout(children[1]).location, Point::new(0.0, 40.0));
+}

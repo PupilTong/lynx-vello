@@ -56,7 +56,7 @@ pub use stylo::values::computed::length::NonNegativeLengthPercentageOrNormal;
 pub use stylo::values::computed::lynx_layout::{RelativeAlign, RelativeReference};
 pub use stylo::values::computed::{
     AspectRatio, Au, BorderSideWidth, Contain, ContainIntrinsicSize, ContainerType,
-    ContentDistribution, ContentVisibility, Display, FlexBasis, FlowTolerance, FontFamily,
+    ContentDistribution, ContentVisibility, Display, FitTolerance, FlexBasis, FontFamily,
     FontFeatureSettings, FontStyle, FontVariationSettings, FontWeight, GridAutoFlow, GridLine,
     GridTemplateComponent, ImplicitGridTracks, Inset, ItemPlacement, JustifyItems,
     LengthPercentage, LetterSpacing, LineHeight, Margin, MaxSize, NonNegativeLengthPercentage,

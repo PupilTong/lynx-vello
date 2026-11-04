@@ -163,7 +163,7 @@ the independent state:
 `container_type`, `contain_intrinsic_{width,height}`), `skips_contents`, the alignment accessors (`gap`, `align_content`, `align_items`, `justify_content`, `align_self`) and `order`; sequence and geometry values remain borrowed | every algorithm, the leaf, the absolute pass, the root, rounding and invalidation |
 | `FlexboxStyle: CoreStyle` | `flex_direction`, `flex_wrap`, `flex_basis`, `flex_grow`, `flex_shrink` | demanded by `compute_flexbox_layout` |
 | `GridStyle: CoreStyle` | `grid_template_rows`/`_columns`, `grid_auto_rows`/`_columns`, `grid_auto_flow`, `justify_items`, `grid_row_start`/`_end`, `grid_column_start`/`_end`, `justify_self` | demanded by `compute_grid_layout` |
-| `GridLanesStyle: GridStyle` | `flow_tolerance` plus the element's computed `font_size`, which is what `flow-tolerance: normal`'s `1em` resolves against | demanded by `compute_grid_lanes_layout` |
+| `GridLanesStyle: GridStyle` | `fit_tolerance` plus the element's computed `font_size`, which is what `fit-tolerance: normal`'s `1em` resolves against | demanded by `compute_grid_lanes_layout` |
 | `LinearStyle: CoreStyle` | `linear_direction`, `linear_weight_sum`, `linear_weight` | demanded by `compute_linear_layout` |
 | `RelativeStyle: CoreStyle` | `relative_layout_once`, `relative_id`, `relative_align`, `relative_adjacent`, `relative_center` | demanded by `compute_relative_layout` |
 | `TextContainerStyle: CoreStyle` | paragraph-level alignment, wrap-mode, word-break, indent, overflow | the Parley text block |
@@ -1287,7 +1287,7 @@ the painting — layout's job is to never be the frame's bottleneck.
   sparse/dense auto-placement, fixed/`fr` tracks, unique intrinsic span
   buckets, flex freeze thresholds, cold/warm nested grids, a root cache hit,
   and dirty-leaf ancestor invalidation. The grid-lanes suite (`grid_lanes`)
-  covers fixed-length lanes, the `minmax(0, 1fr)` lanes at `flow-tolerance: 0`
+  covers fixed-length lanes, the `minmax(0, 1fr)` lanes at `fit-tolerance: 0`
   that a `<list list-type="waterfall">` would lower onto,
   `minmax(min-content, 1fr)` lanes whose items overflow their own boxes, mixed
   spans with a full-span item every eighth, and one dirty item in the middle
@@ -1601,7 +1601,7 @@ span can occupy. The module is `src/compute/grid/lanes.rs`, under
 Grid's template expansion, line resolution, §12 track sizing, item resolution
 and alignment helpers verbatim — only placement, stacking and the container's
 stacking-axis size are Level 3's own. Its style bound is
-`GridLanesStyle: GridStyle`, which adds `flow_tolerance` and the element's
+`GridLanesStyle: GridStyle`, which adds `fit_tolerance` and the element's
 computed `font_size`.
 
 1. **Orientation** (§2.3) — with the orientation property still unspecified,
@@ -1654,11 +1654,13 @@ computed `font_size`.
    axis stays content-driven.
 4. **Placement and stacking** (§4.4 steps 1–3, §6.1) — in order-modified
    document order: choose the lane whose spanned tracks have the smallest
-   maximum running position, counting everything within the `flow-tolerance`
+   maximum running position, counting everything within the `fit-tolerance`
    threshold of that minimum as equally short and resolving that tie in favour
    of the first such lane at or after the auto-placement cursor (§4.2); lay
    the item out against a containing block that is its spanned tracks in the
-   grid axis and indefinite in the stacking axis; then advance every lane it
+   grid axis and the container's content box in the stacking axis (§4.4.1:
+   percentages resolve against it where it is definite, but nothing stretches
+   an item along it); then advance every lane it
    covers to its margin-box end plus the stacking gutter. A definite position
    is used as-is and leaves the cursor alone. `dense` backfilling (step 4) is
    not implemented, so the pass is strictly sparse. A percentage stacking
@@ -1730,7 +1732,7 @@ fragmentation are out of scope; the grammar side of that list is recorded in
   absolute/hoisted behavior.
   Private unit tests pin placement bit ranges, clamping, repeat expansion, and
   track cycling. `tests/grid_lanes.rs` covers orientation, lane choice and the
-  auto-placement cursor under every `flow-tolerance` form, auto-placed and
+  auto-placement cursor under every `fit-tolerance` form, auto-placed and
   definite spans, implicit tracks in both directions, gutters including the
   cyclic percentage stacking gutter, order-modified document order, hidden and
   out-of-flow children, grid-line-relative absolutes, intrinsic/flexible/
@@ -1782,7 +1784,7 @@ fragmentation are out of scope; the grammar side of that list is recorded in
   grid-area-relative absolute positioning.
 - **L2M — grid lanes** *(complete, 2026-09-18)*: `compute_grid_lanes_layout`
   on Grid's own template/line/track-sizing machinery, the `GridLanesStyle`
-  bound, `flow-tolerance` and the auto-placement cursor, the stacking pass and
+  bound, `fit-tolerance` and the auto-placement cursor, the stacking pass and
   its content distribution, grid-line-relative absolutes against a two-line
   stacking axis, and the `terminus` dispatch arm. A W3C extension beyond Lynx
   parity ([`style-assumptions.md`](style-assumptions.md) §24), not a Lynx

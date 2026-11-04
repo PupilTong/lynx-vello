@@ -287,7 +287,7 @@ fn static_flex_item_with_z_index_forms_a_context() {
 fn static_grid_lanes_item_with_z_index_forms_a_context() {
     let mut h = Harness::new(
         "page { display: flex; position: relative; width: 800px; height: 600px; }
-         .lanes { display: grid-lanes; width: 100px; gap: 0px; flow-tolerance: 0;
+         .lanes { display: grid-lanes; width: 100px; gap: 0px; fit-tolerance: 0;
                   grid-template-columns: minmax(0, 1fr); }
          .first { height: 100px; z-index: 5; }
          .second { height: 100px; margin-top: -100px; }",
@@ -308,7 +308,7 @@ fn static_grid_lanes_item_with_z_index_forms_a_context() {
 fn grid_lanes_items_without_z_index_paint_in_tree_order() {
     let mut h = Harness::new(
         "page { display: flex; position: relative; width: 800px; height: 600px; }
-         .lanes { display: grid-lanes; width: 100px; gap: 0px; flow-tolerance: 0;
+         .lanes { display: grid-lanes; width: 100px; gap: 0px; fit-tolerance: 0;
                   grid-template-columns: minmax(0, 1fr); }
          .first { height: 100px; }
          .second { height: 100px; margin-top: -100px; }",
@@ -328,7 +328,7 @@ fn hit_testing_finds_items_at_their_lane_positions() {
     let mut h = Harness::new(
         "page { display: flex; align-items: flex-start; position: relative;
                 width: 800px; height: 600px; }
-         .lanes { display: grid-lanes; width: 200px; gap: 10px; flow-tolerance: 0;
+         .lanes { display: grid-lanes; width: 200px; gap: 10px; fit-tolerance: 0;
                   grid-template-columns: repeat(2, minmax(0, 1fr)); }",
     );
     let root = h.root();
