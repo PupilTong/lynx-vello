@@ -300,6 +300,39 @@ fn compose(value: u32) -> Compose {
     }
 }
 
+/// Whether some layer of `encoding` that the root holds blends by anything
+/// but source-over.
+///
+/// vello starts every pixel of the root at the base colour, so such a layer
+/// blends against it. `vello_gpu` renders a root that is a blend target into
+/// a transparent intermediate and blits that over the cleared target, so the
+/// clear colour is under the blend rather than in it; [`SparseBackend::render`]
+/// then draws the base colour as the scene's first fill instead.
+fn blends_over_root(encoding: &Encoding) -> bool {
+    let mut depth = 0_u32;
+    let mut offset = 0_usize;
+    for tag in &encoding.draw_tags {
+        let at = offset;
+        offset += ((tag.0 >> 2) & 0x7) as usize;
+        match *tag {
+            DrawTag::BEGIN_CLIP => {
+                let blend = encoding.draw_data[at];
+                if depth == 0
+                    && blend != DrawBeginClip::CLIP_BLEND_MODE
+                    && BlendMode::new(mix((blend >> 8) & 0xff), compose(blend & 0xff))
+                        != BlendMode::default()
+                {
+                    return true;
+                }
+                depth += 1;
+            }
+            DrawTag::END_CLIP => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    false
+}
+
 /// `image`'s pixels as the premultiplied RGBA8 a pixmap holds.
 fn pixmap(image: &ImageData) -> Option<Pixmap> {
     let bytes = image.data.data();
@@ -465,6 +498,22 @@ impl SparseBackend {
         let mut stats = Stats::default();
         scene.reset_and_resize(w, h);
         let encoding = vello_scene.encoding();
+        // See `blends_over_root`: the base colour as a fill is what a root
+        // blend has to read, and over a transparent clear it composes to the
+        // same pixels the clear would have.
+        let underlay = base_color.components[3] > 0.0 && blends_over_root(encoding);
+        if underlay {
+            scene.set_transform(Affine::IDENTITY);
+            scene.set_fill_rule(Fill::NonZero);
+            scene.set_paint(base_color);
+            scene.reset_paint_transform();
+            scene.fill_rect(&Rect::new(0.0, 0.0, f64::from(w), f64::from(h)));
+        }
+        let clear = if underlay {
+            Color::TRANSPARENT
+        } else {
+            base_color
+        };
         let paths = decode_paths(encoding);
         stats.decode = started.elapsed();
         let mut paths = paths.into_iter();
@@ -695,7 +744,7 @@ impl SparseBackend {
             None,
             &bindings,
             TargetInit::Clear(ClearSettings::Viewport {
-                color: base_color.convert(),
+                color: clear.convert(),
             }),
         );
         queue.submit([encoder.finish()]);
