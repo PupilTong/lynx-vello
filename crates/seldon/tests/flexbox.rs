@@ -48,6 +48,53 @@ fn flex_grow_sum_below_one_leaves_part_of_the_free_space() {
     assert_close(tree.layout(second).location.x, 90.0);
 }
 
+/// WPT `css/css-flexbox/flex-grow-009.html`: `flex-grow: calc(infinity)`
+/// is clamped to `f32::MAX` (css-values-4 §10.9). The item's share is its
+/// ratio of the factor sum (§9.7 step 4.4), which stays finite: the item
+/// takes all of the free space, a factor of 1 beside it none, and two such
+/// items split it evenly where the `f32` sum of their factors would be
+/// infinite. The same holds for scaled shrink factors.
+#[test]
+fn a_largest_finite_flex_factor_takes_its_share_without_overflowing() {
+    let grow = |factors: &[f32]| {
+        let mut tree = TestTree::default();
+        let items: Vec<_> = factors
+            .iter()
+            .map(|&factor| {
+                let mut style = fixed_leaf_style(0.0, 20.0);
+                style.flex_grow = nn(factor);
+                tree.push_leaf(style, Size::new(0.0, 20.0), None)
+            })
+            .collect();
+        let root = flex_container(&mut tree, TestStyle::default(), &items);
+        definite_layout(&tree, root, 100.0, 20.0);
+        items
+            .iter()
+            .map(|&item| tree.layout(item).size.width)
+            .collect::<Vec<_>>()
+    };
+    let widths = grow(&[f32::MAX, 1.0]);
+    assert_close(widths[0], 100.0);
+    assert_close(widths[1], 0.0);
+    let widths = grow(&[f32::MAX, f32::MAX]);
+    assert_close(widths[0], 50.0);
+    assert_close(widths[1], 50.0);
+
+    let mut tree = TestTree::default();
+    let items: Vec<_> = (0..2)
+        .map(|_| {
+            let mut style = fixed_leaf_style(100.0, 20.0);
+            style.min_size.width = size_px(0.0);
+            style.flex_shrink = nn(f32::MAX);
+            tree.push_leaf(style, Size::new(100.0, 20.0), None)
+        })
+        .collect();
+    let root = flex_container(&mut tree, TestStyle::default(), &items);
+    definite_layout(&tree, root, 100.0, 20.0);
+    assert_close(tree.layout(items[0]).size.width, 50.0);
+    assert_close(tree.layout(items[1]).size.width, 50.0);
+}
+
 #[test]
 fn flex_shrink_uses_scaled_flex_shrink_factors() {
     let mut tree = TestTree::default();
@@ -3331,22 +3378,24 @@ mod last_baseline {
     #[test]
     fn a_column_container_does_not_share_baselines_and_takes_end_instead() {
         let mut tree = TestTree::default();
-        let last = baseline_leaf(
-            &mut tree,
-            TestStyle {
-                align_self: self_align(AlignFlags::LAST_BASELINE),
+        // The main axis is vertical: the flex basis is the height.
+        let mut column_leaf = |align: AlignFlags, size: Size<f32>, first, last| {
+            let style = TestStyle {
+                align_self: self_align(align),
+                size: Size::new(size_px(size.width), size_px(size.height)),
+                flex_basis: basis_px(size.height),
                 ..TestStyle::default()
-            },
+            };
+            tree.push_baseline_leaf(style, size, first, last)
+        };
+        let last = column_leaf(
+            AlignFlags::LAST_BASELINE,
             Size::new(20.0, 10.0),
             Some(7.0),
             Some(8.0),
         );
-        let first = baseline_leaf(
-            &mut tree,
-            TestStyle {
-                align_self: self_align(AlignFlags::BASELINE),
-                ..TestStyle::default()
-            },
+        let first = column_leaf(
+            AlignFlags::BASELINE,
             Size::new(30.0, 20.0),
             Some(5.0),
             Some(17.0),

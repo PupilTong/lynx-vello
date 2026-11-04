@@ -831,6 +831,78 @@ pub(super) fn apply_aspect_ratio(
     value
 }
 
+/// The size `known` projects onto the other axis through `ratio` (width over
+/// height), dividing for a known width and multiplying for a known height,
+/// with the ratio applied to the box `box_sizing` names (css-sizing-4 §5.1).
+#[inline]
+pub(super) fn ratio_project(
+    known: f32,
+    ratio: f32,
+    divide: bool,
+    box_sizing: box_sizing::T,
+    known_inset: f32,
+    projected_inset: f32,
+) -> f32 {
+    debug_assert!(
+        ratio.is_finite() && ratio > 0.0,
+        "aspect-ratio must be positive and finite"
+    );
+    let content_box = box_sizing == box_sizing::T::ContentBox;
+    let sizing = if content_box {
+        (known - known_inset).max(0.0)
+    } else {
+        known
+    };
+    let projected = if divide {
+        sizing / ratio
+    } else {
+        sizing * ratio
+    };
+    if content_box {
+        projected + projected_inset
+    } else {
+        projected
+    }
+}
+
+/// Settles the one unsettled axis of a border-box `size` from the other
+/// through a preferred aspect ratio (css-sizing-4 §5.1).
+#[inline]
+pub(super) fn apply_border_box_ratio(
+    mut size: Size<Option<f32>>,
+    aspect_ratio: Option<f32>,
+    box_sizing: box_sizing::T,
+    inset: Size<f32>,
+) -> Size<Option<f32>> {
+    let Some(ratio) = aspect_ratio else {
+        return size;
+    };
+    match (size.width, size.height) {
+        (Some(width), None) => {
+            size.height = Some(ratio_project(
+                width,
+                ratio,
+                true,
+                box_sizing,
+                inset.width,
+                inset.height,
+            ));
+        }
+        (None, Some(height)) => {
+            size.width = Some(ratio_project(
+                height,
+                ratio,
+                false,
+                box_sizing,
+                inset.height,
+                inset.width,
+            ));
+        }
+        _ => {}
+    }
+    size
+}
+
 #[inline]
 pub(super) fn used_aspect_ratio(value: AspectRatio) -> Option<f32> {
     match value.ratio {

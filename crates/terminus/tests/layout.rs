@@ -3266,3 +3266,209 @@ fn a_top_layer_element_adds_nothing_to_its_parents_scrollable_overflow() {
     h.layout();
     assert_eq!(h.layout_of(scroller).content_size.height, 550.0);
 }
+
+// Flexbox sizing regressions, each reduced from the web-platform-tests file
+// it names (`css/css-flexbox/`).
+
+/// `flex-aspect-ratio-cross-size-002.html`: a flex container whose width its
+/// parent stretches takes its height from its own `aspect-ratio`
+/// (css-sizing-4 §5.1), and its stretched item, whose cross size is definite
+/// (css-flexbox-1 §9.8), takes its flex base size through its ratio (§9.2.3
+/// step B).
+#[test]
+fn a_stretched_flex_container_and_item_transfer_their_aspect_ratios() {
+    let mut h = Harness::new(
+        "page { display: linear; width: 800px; }
+         .container { display: linear; width: 200px; }
+         .outer { display: flex; aspect-ratio: 4; }
+         .inner { display: flex; aspect-ratio: 1; }",
+    );
+    let root = h.doc.root;
+    let container = h.doc.el(root, "view.container");
+    let outer = h.doc.el(container, "view.outer");
+    let inner = h.doc.el(outer, "view.inner");
+    h.layout();
+
+    assert_eq!(h.rect(outer), (0.0, 0.0, 200.0, 50.0));
+    assert_eq!(h.rect(inner), (0.0, 0.0, 50.0, 50.0));
+}
+
+/// `aspect-ratio-intrinsic-size-005.html` and `-012`/`-013`: in a column
+/// container the stretched width transfers into the item's height, and the
+/// container's automatic height follows.
+#[test]
+fn a_column_item_takes_its_height_from_its_stretched_width_through_its_ratio() {
+    let mut h = Harness::new(
+        "page { display: linear; width: 800px; }
+         .column { display: flex; flex-direction: column; width: 200px; }
+         .item { aspect-ratio: 4; }",
+    );
+    let root = h.doc.root;
+    let column = h.doc.el(root, "view.column");
+    let item = h.doc.el(column, "view.item");
+    h.layout();
+
+    assert_eq!(h.rect(item), (0.0, 0.0, 200.0, 50.0));
+    assert_eq!(h.rect(column).3, 50.0);
+}
+
+/// `flex-basis-014.html`: the stretched cross size an item's max-content
+/// flex base size is measured at is definite, so a child's percentage
+/// height resolves against it and transfers through the child's ratio.
+#[test]
+fn a_stretched_items_definite_cross_size_reaches_its_content_measurement() {
+    let mut h = Harness::new(
+        "page { display: linear; width: 800px; }
+         .row { display: flex; height: 50px; }
+         .item { display: flex; min-width: 0; }
+         .ar { height: 100%; aspect-ratio: 2; }",
+    );
+    let root = h.doc.root;
+    let row = h.doc.el(root, "view.row");
+    let item = h.doc.el(row, "view.item");
+    let ar = h.doc.el(item, "view.ar");
+    h.layout();
+
+    assert_eq!(h.rect(item), (0.0, 0.0, 100.0, 50.0));
+    assert_eq!(h.rect(ar), (0.0, 0.0, 100.0, 50.0));
+}
+
+/// `flex-minimum-size-002.html`: a percentage `min-height` against an
+/// indefinite height is zero (CSS 2.2 §10.7), not `auto`, so the item has no
+/// automatic minimum and shrinks into a `max-height: 0` container.
+#[test]
+fn an_unresolvable_percentage_minimum_is_zero_not_the_automatic_minimum() {
+    let mut h = Harness::new(
+        "page { display: linear; width: 800px; }
+         .column { display: flex; flex-direction: column; max-height: 0;
+                   overflow: hidden; }
+         .shrinks { min-height: 100%; }
+         .fixed { flex: none; }
+         .content { height: 13px; }",
+    );
+    let root = h.doc.root;
+    let column = h.doc.el(root, "view.column");
+    let shrinks = h.doc.el(column, "view.shrinks");
+    h.doc.el(shrinks, "view.content");
+    let fixed = h.doc.el(column, "view.fixed");
+    h.doc.el(fixed, "view.content");
+    h.layout();
+
+    assert_eq!(h.rect(column).3, 0.0);
+    assert_eq!(h.rect(shrinks).3, 0.0);
+    assert_eq!(h.rect(fixed).3, 13.0);
+}
+
+/// `aspect-ratio-transferred-max-size.html`: a flex item's main size is not
+/// clamped by the maximum its ratio transfers from `max-height`
+/// (w3c/csswg-drafts#10997; Chrome, Firefox and Safari agree).
+#[test]
+fn a_flex_items_main_size_ignores_a_maximum_transferred_through_its_ratio() {
+    let mut h = Harness::new(
+        "page { display: linear; width: 800px; }
+         .row { display: flex; width: 100px; }
+         .item { aspect-ratio: 1 / 2; max-height: 100px; flex: 1; }",
+    );
+    let root = h.doc.root;
+    let row = h.doc.el(root, "view.row");
+    let item = h.doc.el(row, "view.item");
+    h.layout();
+
+    assert_eq!(h.rect(item), (0.0, 0.0, 100.0, 100.0));
+}
+
+/// `stretch-requires-computed-auto-size.html`: an item's percentage height
+/// against a container height its content decided behaves as `auto`, also
+/// once the container's parent commits it at that height; it is neither
+/// resolved nor stretched.
+#[test]
+fn a_percentage_height_against_a_content_decided_height_behaves_as_auto() {
+    let mut h = Harness::new(
+        "page { display: linear; width: 800px; }
+         .row { display: flex; }
+         .tall { width: 100px; height: 100px; }
+         .half { width: 100px; height: 50%; }",
+    );
+    let root = h.doc.root;
+    let row = h.doc.el(root, "view.row");
+    h.doc.el(row, "view.tall");
+    let half = h.doc.el(row, "view.half");
+    h.layout();
+
+    assert_eq!(h.rect(row).3, 100.0);
+    assert_eq!(h.rect(half), (100.0, 0.0, 100.0, 0.0));
+}
+
+/// `flexbox_align-items-stretch-4.html`: an item kept from stretching by its
+/// auto margins has a content-decided height, against which its child's
+/// percentage height behaves as `auto` (css-flexbox-1 §9.8).
+#[test]
+fn an_unstretched_items_height_is_no_percentage_basis_for_its_children() {
+    let mut h = Harness::new(
+        "page { display: linear; width: 800px; }
+         .row { display: flex; width: 100px; }
+         .item { display: linear; margin: auto; }
+         .pct { height: 100%; width: 100px; }
+         .second { height: 100px; }",
+    );
+    let root = h.doc.root;
+    let row = h.doc.el(root, "view.row");
+    let item = h.doc.el(row, "view.item");
+    let pct = h.doc.el(item, "view.pct");
+    let second = h.doc.el(item, "view.second");
+    h.layout();
+
+    assert_eq!(h.rect(item), (0.0, 0.0, 100.0, 100.0));
+    assert_eq!(h.rect(pct).3, 0.0);
+    assert_eq!(h.rect(second), (0.0, 0.0, 100.0, 100.0));
+}
+
+/// `flex-basis-010.html`: a column container's automatic height is its
+/// items laid out at their hypothetical main sizes, not the row algorithm's
+/// contributions: a `0%` basis against that indefinite height is `content`
+/// (css-flexbox-1 §7.2.3), so `height: 500px` is not read.
+#[test]
+fn a_column_containers_automatic_height_sums_hypothetical_main_sizes() {
+    let mut h = Harness::new(
+        "page { display: linear; width: 800px; }
+         .column { display: flex; flex-direction: column; width: 100px; }
+         .item { flex: 0 0 0%; height: 500px; }
+         .child { height: 100px; }
+         .based { flex: 0 1 30px; height: 10px; }",
+    );
+    let root = h.doc.root;
+    let column = h.doc.el(root, "view.column");
+    let item = h.doc.el(column, "view.item");
+    h.doc.el(item, "view.child");
+    let based = h.doc.el(column, "view.based");
+    h.layout();
+
+    assert_eq!(h.rect(item), (0.0, 0.0, 100.0, 100.0));
+    // A definite flex basis wins over the item's height, as in browsers.
+    assert_eq!(h.rect(based), (0.0, 100.0, 100.0, 30.0));
+    assert_eq!(h.rect(column).3, 130.0);
+}
+
+/// `flex-column-reverse-multiline-item-position.html`: a column `wrap`
+/// container with an automatic height breaks its lines at its maximum
+/// height and is as tall as its longest line.
+#[test]
+fn a_column_wrap_container_breaks_its_lines_at_its_maximum_height() {
+    let mut h = Harness::new(
+        "page { display: linear; width: 800px; }
+         .column { display: flex; flex-flow: column-reverse wrap;
+                   align-content: flex-start; align-items: flex-start;
+                   width: 200px; max-height: 100px; }
+         .short { width: 50px; height: 40px; }
+         .tall { width: 50px; height: 80px; }",
+    );
+    let root = h.doc.root;
+    let column = h.doc.el(root, "view.column");
+    let short = h.doc.el(column, "view.short");
+    let tall = h.doc.el(column, "view.tall");
+    h.layout();
+
+    assert_eq!(h.rect(column).3, 80.0);
+    assert_eq!(h.rect(short), (0.0, 40.0, 50.0, 40.0));
+    assert_eq!(h.rect(tall), (50.0, 0.0, 50.0, 80.0));
+}
