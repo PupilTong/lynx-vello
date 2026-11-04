@@ -1451,3 +1451,301 @@ impl SparseBackend {
         result.map_err(|error| error.to_string())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use vello::kurbo::{Cap, Join, Line, Stroke};
+    use vello::peniko::color::palette::css::{BLACK, BLUE, RED};
+
+    use super::*;
+    use crate::render::gpu::Headless;
+
+    fn render(scene: &vello::Scene, width: u32, height: u32) -> Vec<u8> {
+        let mut gpu = Headless::new().expect("a usable GPU adapter is mandatory");
+        gpu.render(scene, &[], width, height, Color::WHITE)
+            .expect("the scene renders")
+    }
+
+    fn pixel(pixels: &[u8], width: u32, x: u32, y: u32) -> [u8; 4] {
+        let at = ((y * width + x) * 4) as usize;
+        [pixels[at], pixels[at + 1], pixels[at + 2], pixels[at + 3]]
+    }
+
+    const WHITE: [u8; 4] = [255, 255, 255, 255];
+
+    fn hard_stop(at: f32) -> [peniko::ColorStop; 4] {
+        [
+            (0.0, RED).into(),
+            (at, RED).into(),
+            (at, BLUE).into(),
+            (1.0, BLUE).into(),
+        ]
+    }
+
+    fn vertices(path: &BezPath) -> Vec<(f64, f64)> {
+        path.elements()
+            .iter()
+            .filter_map(|el| match el {
+                vello::kurbo::PathEl::MoveTo(p) | vello::kurbo::PathEl::LineTo(p) => {
+                    Some((p.x, p.y))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_filled_rect_flattens_to_its_four_device_corners() {
+        let mut scene = vello::Scene::new();
+        let transform = Affine::translate((3.0, 4.0)) * Affine::scale(2.0);
+        scene.fill(
+            Fill::NonZero,
+            transform,
+            RED,
+            None,
+            &Rect::new(0.0, 0.0, 5.0, 5.0),
+        );
+        let paths = decode_paths(scene.encoding());
+        assert_eq!(paths.len(), 1);
+        assert_eq!(
+            vertices(&paths[0].path),
+            [
+                (3.0, 4.0),
+                (13.0, 4.0),
+                (13.0, 14.0),
+                (3.0, 14.0),
+                (3.0, 4.0)
+            ],
+            "each degree-raised line flattens to itself, in device space"
+        );
+        assert_eq!(paths[0].fill(), Fill::NonZero);
+    }
+
+    #[test]
+    fn an_open_strokes_cap_marker_draws_its_caps_and_no_closing_side() {
+        for (cap, area, x0) in [(Cap::Butt, 20.0, 0.0), (Cap::Square, 24.0, -1.0)] {
+            let mut scene = vello::Scene::new();
+            let stroke = Stroke::new(2.0).with_caps(cap);
+            let line = Line::new((0.0, 5.0), (10.0, 5.0));
+            scene.stroke(&stroke, Affine::IDENTITY, BLACK, None, &line);
+            let paths = decode_paths(scene.encoding());
+            assert_eq!(paths.len(), 1);
+            let path = &paths[0].path;
+            assert!(
+                (path.area().abs() - area).abs() < 1e-3,
+                "{cap:?}: {}",
+                path.area()
+            );
+            let bounds = path.bounding_box();
+            assert!((bounds.x0 - x0).abs() < 1e-4 && (bounds.y0 - 4.0).abs() < 1e-4);
+            assert!((bounds.x1 - (10.0 - x0)).abs() < 1e-4 && (bounds.y1 - 6.0).abs() < 1e-4);
+            assert_eq!(
+                paths[0].fill(),
+                Fill::NonZero,
+                "a stroke's lines fill non-zero"
+            );
+        }
+    }
+
+    #[test]
+    fn a_closed_strokes_cap_marker_joins_back_to_its_start() {
+        let mut scene = vello::Scene::new();
+        let rect = Rect::new(0.0, 0.0, 10.0, 10.0);
+        let stroke = Stroke::new(2.0).with_join(Join::Miter);
+        scene.stroke(&stroke, Affine::translate((1.0, 1.0)), BLACK, None, &rect);
+        let path = &decode_paths(scene.encoding())[0].path;
+        assert_eq!(path.bounding_box(), Rect::new(0.0, 0.0, 12.0, 12.0));
+        // Mitred corners, and the 8 px hole left unpainted.
+        let pixels = render(&scene, 12, 12);
+        let black = [0, 0, 0, 255];
+        for (x, y) in [(0, 0), (11, 0), (0, 11), (11, 11), (5, 1)] {
+            assert_eq!(pixel(&pixels, 12, x, y), black, "({x}, {y})");
+        }
+        for (x, y) in [(2, 2), (5, 5), (9, 9)] {
+            assert_eq!(pixel(&pixels, 12, x, y), WHITE, "({x}, {y})");
+        }
+    }
+
+    #[test]
+    fn a_brush_transform_is_the_one_current_at_the_path_marker() {
+        let mut scene = vello::Scene::new();
+        let transform = Affine::translate((5.0, 0.0));
+        let brush = Affine::scale(2.0);
+        let gradient = Gradient::new_linear((0.0, 0.0), (4.0, 0.0)).with_stops(hard_stop(0.5));
+        scene.fill(
+            Fill::EvenOdd,
+            transform,
+            &gradient,
+            Some(brush),
+            &Rect::new(0.0, 0.0, 4.0, 4.0),
+        );
+        let paths = decode_paths(scene.encoding());
+        assert_eq!(paths[0].brush_transform, transform * brush);
+        assert_eq!(paths[0].path.bounding_box(), Rect::new(5.0, 0.0, 9.0, 4.0));
+        assert_eq!(paths[0].fill(), Fill::EvenOdd);
+    }
+
+    #[test]
+    fn the_ramp_is_vellos_make_ramp() {
+        let ramp = vello_ramp(
+            &hard_stop(0.5),
+            peniko::InterpolationAlphaSpace::Premultiplied,
+        );
+        let red = RED.premultiply().to_rgba8();
+        let blue = BLUE.premultiply().to_rgba8();
+        assert_eq!(ramp.len(), RAMP_SAMPLES);
+        // Sample 255 sits at 0.499, sample 256 at 0.501.
+        assert_eq!((ramp[0], ramp[255]), (red, red));
+        assert_eq!((ramp[256], ramp[511]), (blue, blue));
+    }
+
+    #[test]
+    fn a_stair_colour_premultiplies_back_to_its_table_entry() {
+        for (r, g, b, a) in [
+            (0, 0, 0, 0),
+            (12, 200, 7, 200),
+            (1, 1, 1, 1),
+            (255, 255, 255, 255),
+        ] {
+            let rgba = PremulRgba8 { r, g, b, a };
+            let [cr, cg, cb, ca] = stair_color(rgba).premultiply().components;
+            let byte = |c: f32| (c * 255.0 + 0.5) as u8;
+            assert_eq!([byte(cr), byte(cg), byte(cb), byte(ca)], [r, g, b, a]);
+        }
+    }
+
+    /// vello's sample at `t`, a tie at a sample boundary sent up.
+    fn vello_index(t: f64, extend: Extend) -> usize {
+        let x = match extend {
+            Extend::Pad => t.clamp(0.0, 1.0),
+            _ => t - t.floor(),
+        };
+        ((x * 511.0 + 0.5).floor() as usize).min(511)
+    }
+
+    #[test]
+    fn under_pad_each_table_entry_reads_the_sample_vello_rounds_to() {
+        let map = RampMap::new(Extend::Pad);
+        for i in 0..200_000 {
+            let t = f64::from(i) / 200_000.0 * 1.2 - 0.1;
+            let u = (map.scale * t + map.bias).clamp(0.0, 1.0);
+            let k = ((u * 4095.0).floor() as usize).min(LUT_WIDTH - 1);
+            let (lo, hi) = map.samples(k);
+            // Within the tie bias below a boundary the entry reads upwards.
+            let near_tie = (t * 511.0 + 0.5).fract() > 1.0 - TIE_BIAS / 8.0;
+            if !near_tie {
+                assert_eq!(hi, vello_index(t, Extend::Pad), "t = {t}");
+            }
+            assert!(lo <= hi);
+        }
+    }
+
+    #[test]
+    fn under_repeat_each_table_entry_reads_the_sample_vello_rounds_to() {
+        let map = RampMap::new(Extend::Repeat);
+        for i in 0..200_000 {
+            let t = f64::from(i) / 200_000.0 * 3.0 - 1.0;
+            let u = map.scale * t + map.bias;
+            let k = (((u - u.floor()) * 4095.0).floor() as usize).min(LUT_WIDTH - 1);
+            let (lo, hi) = map.samples(k);
+            let expected = vello_index(t, Extend::Repeat);
+            // An entry a sample boundary crosses reads one side of it.
+            assert!(
+                hi == expected || lo == expected,
+                "t = {t}: {lo} {hi} {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_tie_follows_vellos_fused_parameter() {
+        // A 54 px mask's 50 % stop on a pixel edge, at two device offsets
+        // (css_atlas `mask-position-005` and `-002`): vello reads the upper
+        // sample at one and the lower at the other.
+        for (x0, upper) in [(64.0_f32, true), (320.0, false)] {
+            let transform = Transform {
+                matrix: [1.0, 0.0, 0.0, 1.0],
+                translation: [x0, 0.0],
+            };
+            let line = VelloLine::new(&transform, [0.0, 21.0], [54.0, 21.0]);
+            let sample = vello_sample(line.at(x0 as i32 + 27, 0), Extend::Pad);
+            assert_eq!(sample, if upper { 256 } else { 255 }, "at {x0}");
+        }
+    }
+
+    #[test]
+    fn a_hard_stop_lands_on_the_column_vello_samples_at_its_corner() {
+        let mut scene = vello::Scene::new();
+        let gradient = Gradient::new_linear((0.0, 0.0), (20.0, 0.0)).with_stops(hard_stop(0.475));
+        scene.fill(
+            Fill::NonZero,
+            Affine::IDENTITY,
+            &gradient,
+            None,
+            &Rect::new(0.0, 0.0, 20.0, 2.0),
+        );
+        let pixels = render(&scene, 20, 2);
+        // The stop is at x = 9.5: column 9's corner is before it, its centre
+        // after it.
+        assert_eq!(pixel(&pixels, 20, 9, 0), [255, 0, 0, 255]);
+        assert_eq!(pixel(&pixels, 20, 10, 0), [0, 0, 255, 255]);
+    }
+
+    #[test]
+    fn a_conic_centre_on_a_pixel_corner_is_left_unpainted() {
+        let mut scene = vello::Scene::new();
+        let gradient = Gradient::new_sweep((8.0, 8.0), 0.0, std::f32::consts::TAU)
+            .with_stops([RED, BLUE, RED].as_slice())
+            .with_extend(Extend::Repeat);
+        scene.fill(
+            Fill::NonZero,
+            Affine::IDENTITY,
+            &gradient,
+            None,
+            &Rect::new(0.0, 0.0, 16.0, 16.0),
+        );
+        let pixels = render(&scene, 16, 16);
+        assert_eq!(pixel(&pixels, 16, 8, 8), WHITE);
+        for (x, y) in [(7, 7), (8, 7), (7, 8), (9, 9)] {
+            assert_ne!(pixel(&pixels, 16, x, y), WHITE, "({x}, {y})");
+        }
+    }
+
+    #[test]
+    fn a_clip_layer_bounds_the_fill_inside_it() {
+        let mut scene = vello::Scene::new();
+        scene.push_clip_layer(
+            Fill::NonZero,
+            Affine::IDENTITY,
+            &Rect::new(2.0, 2.0, 6.0, 6.0),
+        );
+        scene.fill(
+            Fill::NonZero,
+            Affine::IDENTITY,
+            RED,
+            None,
+            &Rect::new(0.0, 0.0, 8.0, 8.0),
+        );
+        scene.pop_layer();
+        let pixels = render(&scene, 8, 8);
+        assert_eq!(pixel(&pixels, 8, 1, 1), WHITE);
+        assert_eq!(pixel(&pixels, 8, 3, 3), [255, 0, 0, 255]);
+        assert_eq!(pixel(&pixels, 8, 6, 6), WHITE);
+    }
+
+    #[test]
+    fn a_stroke_covers_its_offsets_and_its_caps() {
+        for (cap, capped) in [(Cap::Butt, false), (Cap::Square, true)] {
+            let mut scene = vello::Scene::new();
+            let line = Line::new((2.0, 4.0), (14.0, 4.0));
+            let stroke = Stroke::new(2.0).with_caps(cap);
+            scene.stroke(&stroke, Affine::IDENTITY, BLACK, None, &line);
+            let pixels = render(&scene, 16, 8);
+            let black = [0, 0, 0, 255];
+            assert_eq!(pixel(&pixels, 16, 5, 3), black);
+            assert_eq!(pixel(&pixels, 16, 5, 4), black);
+            assert_eq!(pixel(&pixels, 16, 5, 2), WHITE);
+            assert_eq!(pixel(&pixels, 16, 1, 3) == black, capped, "{cap:?}");
+        }
+    }
+}
