@@ -113,6 +113,10 @@ vello = { version = "0.11", default-features = false }
 # `terminus`'s `vello_gpu` feature: sparse-strip rasterization on wgpu only.
 vello_gpu = { version = "0.3", default-features = false, features = ["wgpu", "text"] }
 glifo = { version = "0.4", default-features = false }
+# `terminus`'s window-path test: a `CAMetalLayer` in no window is a surface
+# the painter's window stack can present to on macOS without an `NSWindow`.
+# Already in the tree through wgpu's Metal backend.
+objc2-quartz-core = { version = "0.3", default-features = false, features = ["std", "CALayer", "CAMetalLayer"] }
 # SVG documents as vector images: terminus's `render/svg` parses the XML with
 # `roxmltree` and its attribute values with `svgtypes` into a vello scene;
 # CSS inside an SVG is not read (docs/svg-lynx-component-design.md).
