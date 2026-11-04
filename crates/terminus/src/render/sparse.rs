@@ -22,8 +22,11 @@
 
 use std::time::{Duration, Instant};
 
+mod flatten;
+mod glyphs;
+
 use rustc_hash::FxHashMap;
-use vello::kurbo::{Affine, BezPath, Cap, Join, Point, Rect, Shape as _, Stroke};
+use vello::kurbo::{Affine, BezPath, Point, Rect, Shape as _};
 use vello::low_level::vello_encoding::{
     DrawBeginClip, DrawTag, Encoding, Patch, PathTag, Style, Transform,
 };
@@ -66,6 +69,11 @@ pub(crate) struct SparseBackend {
     bound: FxHashMap<u64, Bound>,
     next_texture: u64,
     staircases: Staircases,
+    /// Units per em of each font a glyph run named, by blob id and index.
+    units_per_em: FxHashMap<(u64, u32), f64>,
+    /// glifo's outline and hinting caches for the runs drawn through
+    /// [`glyphs::Glyphs`].
+    glyph_prep: glifo::GlyphPrepCache,
     pub(crate) last: Stats,
 }
 
@@ -85,13 +93,24 @@ impl std::fmt::Debug for SparseBackend {
     }
 }
 
-/// One decoded path: segments in the coordinates of `transform`.
+/// One decoded path, flattened to device space as vello flattens it.
 struct DecodedPath {
+    /// The lines vello rasterizes for the path, filled under [`Self::fill`].
     path: BezPath,
-    transform: Affine,
     /// The transform current at the path's end marker: the brush's.
     brush_transform: Affine,
     style: Style,
+}
+
+impl DecodedPath {
+    /// The rule `path` fills under: a stroke's lines are filled non-zero.
+    fn fill(&self) -> Fill {
+        if is_stroke(&self.style) {
+            Fill::NonZero
+        } else {
+            fill_rule(&self.style)
+        }
+    }
 }
 
 fn affine(transform: &Transform) -> Affine {
@@ -105,6 +124,76 @@ fn affine(transform: &Transform) -> Affine {
         f64::from(e),
         f64::from(f),
     ])
+}
+
+/// `run`'s synthetic bold as glifo has to be asked for it to widen each
+/// outline as vello does, `full` being the run's transform with its glyph
+/// transform.
+///
+/// vello widens the outline at the run's font size, before any transform.
+/// glifo widens it at the size it caches the outline at: units per em for an
+/// unhinted fill, the font size the run's uniform scale folds into
+/// otherwise (`glifo::glyph::GlyphScaleProperties`). The amount and its
+/// tolerance are rescaled by the ratio of the two sizes.
+fn embolden(
+    run: &vello::low_level::vello_encoding::GlyphRun,
+    full: Affine,
+    units_per_em: &mut FxHashMap<(u64, u32), f64>,
+) -> glifo::FontEmbolden {
+    let mut embolden = glifo::FontEmbolden {
+        amount: run.font_embolden.amount,
+        join: run.font_embolden.join,
+        miter_limit: run.font_embolden.miter_limit,
+        tolerance: run.font_embolden.tolerance,
+    };
+    if embolden.amount.xx == 0.0 && embolden.amount.yy == 0.0 {
+        return embolden;
+    }
+    let [a, b, c, d, ..] = full.as_coeffs();
+    let uniform = (a - d).abs() <= 1.0 / 4096.0 && a > 0.0 && b == 0.0 && c == 0.0;
+    let fill = matches!(run.style, peniko::Style::Fill(_));
+    let scale = if fill && !run.hint {
+        let upem = *units_per_em
+            .entry((run.font.data.id(), run.font.index))
+            .or_insert_with(|| head_units_per_em(run.font.data.data(), run.font.index));
+        upem / f64::from(run.font_size)
+    } else if uniform {
+        a
+    } else {
+        1.0
+    };
+    embolden.amount =
+        vello::kurbo::Diagonal2::new(embolden.amount.xx * scale, embolden.amount.yy * scale);
+    embolden.tolerance *= scale;
+    embolden
+}
+
+/// The `unitsPerEm` of face `index` in `font`'s `head` table, or 1000 for
+/// a font that has none.
+fn head_units_per_em(font: &[u8], index: u32) -> f64 {
+    let u16_at = |at: usize| {
+        font.get(at..at + 2)
+            .map(|b| u16::from_be_bytes([b[0], b[1]]))
+    };
+    let u32_at = |at: usize| {
+        font.get(at..at + 4)
+            .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+    };
+    let face = if font.get(..4) == Some(b"ttcf") {
+        u32_at(12 + 4 * index as usize).map(|offset| offset as usize)
+    } else {
+        Some(0)
+    };
+    face.and_then(|face| {
+        let tables = usize::from(u16_at(face + 4)?);
+        (0..tables).find_map(|table| {
+            let record = face + 12 + 16 * table;
+            (font.get(record..record + 4)? == b"head")
+                .then(|| u16_at(u32_at(record + 8)? as usize + 18))
+                .flatten()
+        })
+    })
+    .map_or(1000.0, f64::from)
 }
 
 /// `transform` back in the `f32` it was encoded in.
@@ -128,69 +217,32 @@ fn fill_rule(style: &Style) -> Fill {
     }
 }
 
-fn f16_to_f32(bits: u16) -> f32 {
-    let sign = if bits & 0x8000 != 0 { -1.0 } else { 1.0 };
-    let exponent = i32::from((bits >> 10) & 0x1f);
-    let mantissa = f32::from(bits & 0x3ff);
-    match exponent {
-        0 => sign * mantissa * 2f32.powi(-24),
-        0x1f => sign * f32::INFINITY,
-        _ => sign * (1.0 + mantissa / 1024.0) * 2f32.powi(exponent - 15),
-    }
-}
-
-fn stroke(style: &Style) -> Stroke {
-    let flags = style.flags_and_miter_limit;
-    let join = match flags & Style::FLAGS_JOIN_MASK {
-        Style::FLAGS_JOIN_BITS_MITER => Join::Miter,
-        Style::FLAGS_JOIN_BITS_ROUND => Join::Round,
-        _ => Join::Bevel,
-    };
-    let cap = |bits: u32| match bits {
-        Style::FLAGS_CAP_BITS_SQUARE => Cap::Square,
-        Style::FLAGS_CAP_BITS_ROUND => Cap::Round,
-        _ => Cap::Butt,
-    };
-    Stroke::new(f64::from(style.line_width))
-        .with_join(join)
-        .with_start_cap(cap((flags & Style::FLAGS_START_CAP_MASK) >> 2))
-        .with_end_cap(cap(flags & Style::FLAGS_END_CAP_MASK))
-        .with_miter_limit(f64::from(f16_to_f32(
-            (flags & Style::MITER_LIMIT_MASK) as u16,
-        )))
-}
-
 /// Every path of `encoding`, in path order, as `PathMonoid` counts them.
 fn decode_paths(encoding: &Encoding) -> Vec<DecodedPath> {
     let mut out = Vec::with_capacity(encoding.n_paths as usize);
-    let mut transform = Affine::IDENTITY;
+    let mut transform = Transform::IDENTITY;
     let mut style = Style::from_fill(Fill::NonZero);
     let mut transforms = encoding.transforms.iter();
     let mut styles = encoding.styles.iter();
-    // Point offset of the next segment's first point, in points.
-    let mut point = 0_usize;
     let mut word = 0_usize;
-    let mut path = BezPath::new();
-    let mut path_transform: Option<Affine> = None;
-    // The open subpath of a stroke, so its cap marker can be dropped.
-    let mut subpath: Vec<vello::kurbo::PathEl> = Vec::new();
-    let mut subpath_open = false;
-    let read = |word: usize, is_f32: bool| -> Point {
+    let mut segments: Vec<flatten::Segment> = Vec::new();
+    let mut path_transform: Option<Transform> = None;
+    let read = |word: usize, is_f32: bool| -> [f32; 2] {
         if is_f32 {
-            Point::new(
-                f64::from(f32::from_bits(encoding.path_data[word])),
-                f64::from(f32::from_bits(encoding.path_data[word + 1])),
-            )
+            [
+                f32::from_bits(encoding.path_data[word]),
+                f32::from_bits(encoding.path_data[word + 1]),
+            ]
         } else {
             let w = encoding.path_data[word];
-            Point::new(f64::from((w & 0xffff) as i16), f64::from((w >> 16) as i16))
+            [f32::from((w & 0xffff) as i16), f32::from((w >> 16) as i16)]
         }
     };
     for tag in &encoding.path_tags {
         let t = tag.0;
         if t & PathTag::TRANSFORM.0 != 0 {
             if let Some(next) = transforms.next() {
-                transform = affine(next);
+                transform = *next;
             }
         }
         if t & PathTag::STYLE.0 != 0 {
@@ -202,53 +254,25 @@ fn decode_paths(encoding: &Encoding) -> Vec<DecodedPath> {
         if segment != 0 {
             let is_f32 = t & 0x8 != 0;
             let size = if is_f32 { 2 } else { 1 };
-            let _ = point;
             if path_transform.is_none() {
                 path_transform = Some(transform);
             }
-            let p: Vec<Point> = (0..=segment as usize)
-                .map(|k| read(word + k * size, is_f32))
-                .collect();
-            if !subpath_open {
-                subpath.push(vello::kurbo::PathEl::MoveTo(p[0]));
-                subpath_open = true;
+            let mut points = [[0.0; 2]; 4];
+            for (k, point) in points.iter_mut().enumerate().take(segment as usize + 1) {
+                *point = read(word + k * size, is_f32);
             }
-            subpath.push(match segment {
-                1 => vello::kurbo::PathEl::LineTo(p[1]),
-                2 => vello::kurbo::PathEl::QuadTo(p[1], p[2]),
-                _ => vello::kurbo::PathEl::CurveTo(p[1], p[2], p[3]),
-            });
+            segments.push(flatten::Segment { tag: t, points });
             let end = (t >> 2) & 1;
-            let advance = segment as usize + end as usize;
-            point += advance;
-            word += advance * size;
-            if end != 0 {
-                if is_stroke(&style) {
-                    // The subpath's last segment is vello's cap marker: a
-                    // line for a closed subpath, a quad for an open one.
-                    let closed = matches!(subpath.pop(), Some(vello::kurbo::PathEl::LineTo(_)));
-                    for el in subpath.drain(..) {
-                        path.push(el);
-                    }
-                    if closed {
-                        path.close_path();
-                    }
-                } else {
-                    for el in subpath.drain(..) {
-                        path.push(el);
-                    }
-                    path.close_path();
-                }
-                subpath_open = false;
-            }
+            word += (segment as usize + end as usize) * size;
         }
         if t & PathTag::PATH.0 != 0 {
+            let local = path_transform.take().unwrap_or(transform);
             out.push(DecodedPath {
-                path: std::mem::take(&mut path),
-                transform: path_transform.take().unwrap_or(transform),
-                brush_transform: transform,
+                path: flatten::flatten(&segments, &style, &local),
+                brush_transform: affine(&transform),
                 style,
             });
+            segments.clear();
         }
     }
     out
@@ -1055,6 +1079,8 @@ impl SparseBackend {
             bound: FxHashMap::default(),
             next_texture: 0,
             staircases: Staircases::default(),
+            units_per_em: FxHashMap::default(),
+            glyph_prep: glifo::GlyphPrepCache::default(),
             last: Stats::default(),
         }
     }
@@ -1107,6 +1133,8 @@ impl SparseBackend {
             images,
             bound,
             staircases,
+            units_per_em,
+            glyph_prep,
             last,
             ..
         } = self;
@@ -1200,10 +1228,7 @@ impl SparseBackend {
                         }
                         (None, Some(decoded)) => (
                             f32_transform(decoded.brush_transform),
-                            decoded
-                                .transform
-                                .transform_rect_bbox(decoded.path.bounding_box())
-                                .intersect(viewport),
+                            decoded.path.bounding_box().intersect(viewport),
                         ),
                         (None, None) => continue,
                     };
@@ -1265,23 +1290,21 @@ impl SparseBackend {
                 scene.set_transform(run_transform);
                 let brush =
                     run_transform * run.brush_transform.map_or(Affine::IDENTITY, |t| affine(&t));
-                match &paint {
-                    vello_gpu::PaintType::Gradient(_) => {
-                        scene.set_paint_transform(corner_sampled(run_transform, brush));
-                    }
-                    _ => scene.set_paint_transform(run_transform.inverse() * brush),
-                }
-                let coords = &encoding.resources.normalized_coords[run.normalized_coords.clone()];
-                let embolden = glifo::FontEmbolden {
-                    amount: run.font_embolden.amount,
-                    join: run.font_embolden.join,
-                    miter_limit: run.font_embolden.miter_limit,
-                    tolerance: run.font_embolden.tolerance,
+                let paint_transform = match &paint {
+                    vello_gpu::PaintType::Gradient(_) => corner_sampled(run_transform, brush),
+                    _ => run_transform.inverse() * brush,
                 };
+                scene.set_paint_transform(paint_transform);
+                let coords = &encoding.resources.normalized_coords[run.normalized_coords.clone()];
                 // vello applies the per-glyph transform in the outline's
                 // y-up space; glifo in the scene's y-down one.
                 let flip = Affine::new([1.0, 0.0, 0.0, -1.0, 0.0, 0.0]);
                 let glyph_transform = run.glyph_transform.map(|t| flip * affine(&t) * flip);
+                let embolden = embolden(
+                    run,
+                    run_transform * glyph_transform.unwrap_or(Affine::IDENTITY),
+                    units_per_em,
+                );
                 if let peniko::Style::Stroke(stroke) = &run.style {
                     scene.set_stroke(stroke.clone());
                 }
@@ -1296,7 +1319,7 @@ impl SparseBackend {
                     (w, h),
                     |scene, paint| {
                         scene.set_paint(paint);
-                        let glyphs =
+                        let run_glyphs =
                             encoding.resources.glyphs[run.glyphs.clone()]
                                 .iter()
                                 .map(|g| glifo::Glyph {
@@ -1304,19 +1327,27 @@ impl SparseBackend {
                                     x: g.x,
                                     y: g.y,
                                 });
-                        let mut builder = scene
-                            .glyph_run(resources, &run.font)
-                            .font_size(run.font_size)
-                            .hint(run.hint)
-                            .normalized_coords(coords)
-                            .font_embolden(embolden);
+                        let backend = glyphs::Backend {
+                            glyphs: glyphs::Glyphs::new(scene),
+                            prep: glyph_prep,
+                        };
+                        let mut builder = glifo::GlyphRunBuilder::new(
+                            run.font.clone(),
+                            run_transform,
+                            paint_transform,
+                            backend,
+                        )
+                        .font_size(run.font_size)
+                        .hint(run.hint)
+                        .normalized_coords(coords)
+                        .font_embolden(embolden);
                         if let Some(t) = glyph_transform {
                             builder = builder.glyph_transform(t);
                         }
                         // A glyph the font cannot outline draws nothing, as in vello.
                         let _ = match &run.style {
-                            peniko::Style::Fill(_) => builder.fill_glyphs(glyphs),
-                            peniko::Style::Stroke(_) => builder.stroke_glyphs(glyphs),
+                            peniko::Style::Fill(_) => builder.fill_glyphs(run_glyphs),
+                            peniko::Style::Stroke(_) => builder.stroke_glyphs(run_glyphs),
                         };
                     },
                 );
@@ -1324,8 +1355,9 @@ impl SparseBackend {
             }
 
             let Some(decoded) = decoded else { continue };
-            scene.set_transform(decoded.transform);
-            scene.set_fill_rule(fill_rule(&decoded.style));
+            // The path is already in device space.
+            scene.set_transform(Affine::IDENTITY);
+            scene.set_fill_rule(decoded.fill());
             match *tag {
                 DrawTag::BEGIN_CLIP => {
                     stats.layers += 1;
@@ -1366,36 +1398,29 @@ impl SparseBackend {
                     match &paint {
                         vello_gpu::PaintType::Solid(_) => scene.reset_paint_transform(),
                         vello_gpu::PaintType::Gradient(_) => scene.set_paint_transform(
-                            corner_sampled(decoded.transform, decoded.brush_transform),
+                            corner_sampled(Affine::IDENTITY, decoded.brush_transform),
                         ),
-                        vello_gpu::PaintType::Image(_) => scene.set_paint_transform(
-                            decoded.transform.inverse() * decoded.brush_transform,
-                        ),
+                        vello_gpu::PaintType::Image(_) => {
+                            scene.set_paint_transform(decoded.brush_transform);
+                        }
                     }
-                    if is_stroke(&decoded.style) {
-                        scene.set_stroke(stroke(&decoded.style));
-                    }
-                    let fill = fill_rule(&decoded.style);
                     draw_split(
                         scene,
                         split,
                         paint,
-                        decoded.transform,
-                        fill,
+                        Affine::IDENTITY,
+                        decoded.fill(),
                         (w, h),
                         |scene, paint| {
                             scene.set_paint(paint);
-                            if is_stroke(&decoded.style) {
-                                scene.stroke_path(&decoded.path);
-                            } else {
-                                scene.fill_path(&decoded.path);
-                            }
+                            scene.fill_path(&decoded.path);
                         },
                     );
                 }
             }
         }
         stats.encode = started.elapsed();
+        glyph_prep.maintain();
 
         let started = Instant::now();
         let render_size = RenderSize {
