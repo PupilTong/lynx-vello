@@ -13,9 +13,9 @@
 //! px, the device rect to bake, and the program ops that make up what is
 //! baked. Nothing in that record is a GPU resource, so the commit stays
 //! device-free and the frame stays `Send + Sync`. [`FilterTextures`] is
-//! where the device side lives: one per [`vello::Renderer`], owned beside
-//! that renderer's [`AtlasResidency`], and asked once per rendered frame for
-//! the table of baked textures the compose program indexes by entry.
+//! where the device side lives: one per [`Raster`], owned beside it, and
+//! asked once per rendered frame for the table of baked textures the compose
+//! program indexes by entry.
 //!
 //! The two differ in four places and nowhere else. A `filter: blur()`
 //! group's rect carries a 3σ transparent margin and its sampler is
@@ -84,13 +84,17 @@
 //! Per entry, in this order:
 //!
 //! 1. **Bake.** The entry's ops replay into a scratch [`vello::Scene`] with the entry's own space
-//!    factored out (see [`crate::visual::CommittedFrame::bake_filter`]) and render into a
-//!    `STORAGE_BINDING` target over `Color::TRANSPARENT`, or over the canvas colour for an entry
-//!    that [reads the canvas](crate::paint::compose::FilterGroup::reads_canvas).
+//!    factored out (see [`crate::visual::CommittedFrame::bake_filter`]) and render through the
+//!    [`Raster`] into a target of its [`Raster::TARGET_USAGE`] over `Color::TRANSPARENT`, or over
+//!    the canvas colour for an entry that [reads the
+//!    canvas](crate::paint::compose::FilterGroup::reads_canvas).
 //! 2. **Premultiply.** vello writes its target *unpremultiplied*, and filtering unpremultiplied
 //!    color pulls the color of fully transparent pixels into their neighbours — a white square on
 //!    white gets a dark halo. So the first pass is `vec4(rgb * a, a)`, and the whole rest of the
-//!    chain is premultiplied.
+//!    chain is premultiplied. `vello_gpu` writes its target premultiplied
+//!    ([`Raster::OUTPUT_ALPHA`]), so under that rasterizer the pass copies the texel unchanged:
+//!    premultiplying a second time would darken every translucent pixel of the bake by its own
+//!    alpha.
 //! 3. **Decimate.** While the remaining variance exceeds 4 (σ > 2), take a 2× box downsample and
 //!    account for it: `V = (V − 0.917) / 4`. The 0.917 is the variance the resample pair itself
 //!    contributes in source px² — 0.25 for the box downsample plus 0.667 for the bilinear tent that
@@ -108,9 +112,11 @@
 //! and its element's own group effects compose against.
 //!
 //! The output is bound to a stable `peniko::ImageData` handle through
-//! `Renderer::override_image`, declared `AlphaPremultiplied` so vello's
+//! [`Raster::override_image`], declared `AlphaPremultiplied` so vello's
 //! `fine.wgsl` samples it without premultiplying a second time, and marked
 //! dirty once per bake so the atlas re-copies exactly the frames it has to.
+//! `vello_gpu` samples the bound texture in place as an external texture,
+//! which it reads as premultiplied.
 //!
 //! # Budget
 //!
@@ -408,7 +414,7 @@ impl Plane {
 struct Bank {
     width: u32,
     height: u32,
-    /// vello's own render target. Also the horizontal half-pass's
+    /// The rasterizer's own render target. Also the horizontal half-pass's
     /// destination when the bake takes no decimation level, which is sound
     /// because the premultiply pass has already consumed it by then — and is
     /// why an undecimated bake allocates no `pong`.
@@ -425,14 +431,19 @@ struct Bank {
 }
 
 /// Usage flags, named once so a texture's role is readable at its allocation.
-const BAKE_USAGE: wgpu::TextureUsages = wgpu::TextureUsages::STORAGE_BINDING
+///
+/// The bake target is what the rasterizer renders into, and also a pass's
+/// source and, undecimated, the horizontal half-pass's destination. The
+/// output is a pass's destination and what the rasterizer binds for the
+/// frame to draw.
+const BAKE_USAGE: wgpu::TextureUsages = Raster::TARGET_USAGE
     .union(wgpu::TextureUsages::TEXTURE_BINDING)
     .union(wgpu::TextureUsages::RENDER_ATTACHMENT);
 const LEVEL_USAGE: wgpu::TextureUsages =
     wgpu::TextureUsages::RENDER_ATTACHMENT.union(wgpu::TextureUsages::TEXTURE_BINDING);
 const OUTPUT_USAGE: wgpu::TextureUsages = wgpu::TextureUsages::RENDER_ATTACHMENT
     .union(wgpu::TextureUsages::TEXTURE_BINDING)
-    .union(wgpu::TextureUsages::COPY_SRC);
+    .union(Raster::BOUND_USAGE);
 
 impl Bank {
     fn new(raster: &mut Raster, device: &wgpu::Device, width: u32, height: u32) -> Self {
@@ -579,7 +590,14 @@ impl Pipelines {
                 cache: None,
             })
         };
-        let premultiply = build("dom filter premultiply", "fs_premultiply");
+        // The first pass brings the bake target to premultiplied alpha: a
+        // multiply over vello's straight output, a copy of `vello_gpu`'s
+        // already premultiplied one.
+        let premultiply = if matches!(Raster::OUTPUT_ALPHA, ImageAlphaType::AlphaPremultiplied) {
+            build("dom filter copy", "fs_copy")
+        } else {
+            build("dom filter premultiply", "fs_premultiply")
+        };
         let resample = build("dom filter resample", "fs_resample");
         let gaussian = build("dom filter gaussian", "fs_gaussian");
         let sampler = |label: &str, mode: wgpu::AddressMode| {
@@ -756,7 +774,7 @@ impl FilterTextures {
     /// side tables: an entry's range may draw either.
     ///
     /// `canvas` is the colour the composite render of this frame clears its
-    /// target to — the `base_color` it hands [`render_params`]. An entry that
+    /// target to — the `base` it hands [`Raster::render_to_texture`]. An entry that
     /// [reads the canvas](crate::paint::compose::FilterGroup::reads_canvas) bakes over it,
     /// so the two must be the same colour or the filtered backdrop is the
     /// backdrop of another canvas.

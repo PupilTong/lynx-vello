@@ -1,13 +1,13 @@
 //! The painter's raster cache for vector images: one texture per
-//! `(image, device width, device height)`, baked with vello's own renderer
-//! and drawn as a bitmap.
+//! `(image, device width, device height)`, baked with the frame's own
+//! rasterizer and drawn as a bitmap.
 //!
 //! A commit records a vector image (an SVG document) as a
 //! [`VectorDraw`]: the document's scene, its identity, and the device
 //! geometry of one draw. Nothing in it is a GPU resource, so the frame stays
 //! device-free and `Send + Sync`. [`VectorTextures`] is where the device
-//! side lives: one per [`vello::Renderer`], owned beside that renderer's
-//! [`AtlasResidency`] and [`super::blur::FilterTextures`], persisting across
+//! side lives: one per [`Raster`], owned beside it and
+//! [`super::blur::FilterTextures`], persisting across
 //! frames and documents, and asked once per rendered frame for the table of
 //! textures the compose program indexes by draw
 //! ([`crate::visual::CommittedFrame::compose_into`]'s `vectors`).
@@ -29,7 +29,7 @@
 //!
 //! # The bake
 //!
-//! A miss renders the scene with [`vello::Renderer::render_to_texture`]
+//! A miss renders the scene with [`Raster::render_to_texture`]
 //! into a fresh `Rgba8Unorm` texture of the key's size, over transparent,
 //! under the map that places the image's viewport in the draw's unclamped
 //! device extent by its `preserveAspectRatio`
@@ -37,18 +37,30 @@
 //! `meet` and `slice` scale uniformly and align) and then scales that
 //! extent per axis onto the texture ([`VectorDraw::placement`]), so a
 //! clamped texture holds the same picture squeezed and the draw's stretch
-//! restores it. vello writes its target with **straight**
-//! alpha — `fine.wgsl` divides the colour by the coverage before the store —
-//! so the texture is registered as an [`ImageAlphaType::Alpha`] override
-//! image through [`vello::Renderer::override_image`], behind the deliberate
-//! empty blob a registered override never reads. The compose program then
+//! restores it. The texture is registered as an override image through
+//! [`Raster::override_image`], behind the deliberate empty blob a registered
+//! override never reads, with the alpha the rasterizer writes
+//! ([`Raster::OUTPUT_ALPHA`]): vello's is **straight** — `fine.wgsl`
+//! divides the colour by the coverage before the store — and `vello_gpu`'s
+//! premultiplied, since it blends into the target. The compose program then
 //! draws the handle as it draws any bitmap, with the brush scale
 //! `extent / size`.
 //!
-//! A bake is a render through the frame's own renderer, so it owes the
-//! [`AtlasResidency`] a pass like any other render: a scene with no patch at
-//! all — a flat icon — frees the image atlas, which is exactly the loss the
-//! residency repairs at each bitmap's next use.
+//! With `vello_gpu` the texture is one texel longer than the key's size on
+//! each axis the device allows, its last column and row repeated there
+//! ([`repeat_edge`]): `vello_gpu` pads an image by clamping the sample
+//! position to the last texel's centre before it filters, which blends the
+//! last two columns of a bilinear draw half and half where vello reads the
+//! last one, and the repeated texels move that clamp to the picture's own
+//! edge (`render::sparse::Bitmaps` has the whole account). The handle keeps
+//! the key's size, so the brush scale is unchanged; the drawing paint finds
+//! the longer texture behind it.
+//!
+//! A bake is a render through the frame's own rasterizer, so with vello it
+//! owes the [`AtlasResidency`](super::gpu::AtlasResidency) a pass like any
+//! other render: a scene with no patch at all — a flat icon — frees the
+//! image atlas, which is exactly the loss the residency repairs at each
+//! bitmap's next use.
 //!
 //! # Budget, pinning and eviction
 //!
@@ -179,7 +191,8 @@ impl VectorTextures {
         self.images.reserve(draws.len());
         for draw in draws {
             let (width, height) = draw.device_size();
-            let bytes = u64::from(width) * u64::from(height) * BYTES_PER_TEXEL;
+            let (texture_width, texture_height) = texture_size(device, width, height);
+            let bytes = u64::from(texture_width) * u64::from(texture_height) * BYTES_PER_TEXEL;
             if width == 0 || height == 0 || bytes > self.budget {
                 self.images.push(None);
                 continue;
@@ -250,8 +263,31 @@ impl VectorTextures {
     }
 }
 
-/// Renders `draw`'s scene into a new `width` × `height` texture and
-/// registers it as an override image, answering the handle it is drawn
+/// The size of the texture a `width` × `height` bake renders into: the
+/// key's size, and with `vello_gpu` one texel more on each axis the device
+/// allows, for the repeated edge (module documentation).
+fn texture_size(device: &wgpu::Device, width: u32, height: u32) -> (u32, u32) {
+    if cfg!(feature = "vello_gpu") {
+        let longest = device.limits().max_texture_dimension_2d;
+        (
+            width + u32::from(width < longest),
+            height + u32::from(height < longest),
+        )
+    } else {
+        (width, height)
+    }
+}
+
+/// The usage a bake's texture needs beyond the rasterizer's: with
+/// `vello_gpu`, the copies [`repeat_edge`] makes.
+const EDGE_USAGE: wgpu::TextureUsages = if cfg!(feature = "vello_gpu") {
+    wgpu::TextureUsages::COPY_SRC.union(wgpu::TextureUsages::COPY_DST)
+} else {
+    wgpu::TextureUsages::empty()
+};
+
+/// Renders `draw`'s scene into a new texture for a `width` × `height` key
+/// and registers it as an override image, answering the handle it is drawn
 /// through.
 fn bake(
     scene: &mut vello::Scene,
@@ -262,11 +298,12 @@ fn bake(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
 ) -> Result<ImageData, GpuError> {
+    let (texture_width, texture_height) = texture_size(device, width, height);
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("dom vector texture"),
         size: wgpu::Extent3d {
-            width,
-            height,
+            width: texture_width,
+            height: texture_height,
             depth_or_array_layers: 1,
         },
         mip_level_count: 1,
@@ -274,7 +311,9 @@ fn bake(
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Rgba8Unorm,
         // Rendered into by the rasterizer, then bound as an override image.
-        usage: Raster::TARGET_USAGE.union(Raster::BOUND_USAGE),
+        usage: Raster::TARGET_USAGE
+            .union(Raster::BOUND_USAGE)
+            .union(EDGE_USAGE),
         view_formats: &[],
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -295,11 +334,14 @@ fn bake(
         queue,
         scene,
         &view,
-        width,
-        height,
+        texture_width,
+        texture_height,
         Color::TRANSPARENT,
         Drawn::default(),
     )?;
+    if (texture_width, texture_height) != (width, height) {
+        repeat_edge(device, queue, &texture, width, height);
+    }
 
     // `Renderer::register_texture` builds a handle like this one; it is
     // built here so the alpha type is named where the render that fills the
@@ -314,6 +356,87 @@ fn bake(
     };
     raster.override_image(&handle, Some(texture));
     Ok(handle)
+}
+
+/// Copies the last column and the last row of the `width` × `height`
+/// picture in `texture` once more beyond it, on the axes where `texture` is
+/// longer; the row after the column, so the corner repeats too.
+///
+/// wgpu copies between regions of one texture only through another, so each
+/// goes through a one-texel-thick scratch texture.
+fn repeat_edge(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    width: u32,
+    height: u32,
+) {
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("dom vector texture edge"),
+    });
+    let mut repeat = |from: wgpu::Origin3d, to: wgpu::Origin3d, size: wgpu::Extent3d| {
+        let scratch = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("dom vector texture edge scratch"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::COPY_SRC.union(wgpu::TextureUsages::COPY_DST),
+            view_formats: &[],
+        });
+        let at = |texture, origin| wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin,
+            aspect: wgpu::TextureAspect::All,
+        };
+        encoder.copy_texture_to_texture(
+            at(texture, from),
+            at(&scratch, wgpu::Origin3d::ZERO),
+            size,
+        );
+        encoder.copy_texture_to_texture(at(&scratch, wgpu::Origin3d::ZERO), at(texture, to), size);
+    };
+    if texture.width() > width {
+        repeat(
+            wgpu::Origin3d {
+                x: width - 1,
+                y: 0,
+                z: 0,
+            },
+            wgpu::Origin3d {
+                x: width,
+                y: 0,
+                z: 0,
+            },
+            wgpu::Extent3d {
+                width: 1,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+    if texture.height() > height {
+        repeat(
+            wgpu::Origin3d {
+                x: 0,
+                y: height - 1,
+                z: 0,
+            },
+            wgpu::Origin3d {
+                x: 0,
+                y: height,
+                z: 0,
+            },
+            wgpu::Extent3d {
+                width: texture.width(),
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+    queue.submit([encoder.finish()]);
 }
 
 #[cfg(test)]
@@ -335,8 +458,13 @@ mod tests {
         )
     }
 
-    /// The bytes of one 64×64 texture.
-    const SQUARE_BYTES: u64 = 64 * 64 * 4;
+    /// The bytes of one 64×64 picture's texture, with `vello_gpu` its
+    /// repeated edge included.
+    const SQUARE_BYTES: u64 = if cfg!(feature = "vello_gpu") {
+        65 * 65 * 4
+    } else {
+        64 * 64 * 4
+    };
 
     /// A page showing each `(source, document)` as a 64×64 `<image>`, the
     /// `n`th at `x = 100n`, with every document parsed into the registry,
@@ -492,6 +620,49 @@ mod tests {
             scene.encoding().resources.patches.len(),
             0,
             "no texture is drawn"
+        );
+    }
+
+    /// A picture drawn off the pixel grid, so it is filtered: the half-covered
+    /// pixel past its right edge reads the picture's last column, as vello
+    /// reads it — `vello_gpu` reads it through the texture's repeated edge,
+    /// without which it would blend the last two columns half and half.
+    #[test]
+    fn a_filtered_draw_reads_the_last_column_at_the_pictures_edge() {
+        let mut gpu = Headless::new().expect("a usable GPU adapter is mandatory");
+        let striped = r##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64">
+              <rect width="64" height="64" fill="#0000ff"/>
+              <rect x="63" width="1" height="64" fill="#ff0000"/></svg>"##;
+        let (mut doc, nodes) = page(&[("app:///striped.svg", striped)]);
+        doc.dom
+            .set_inline_style(nodes[0], "transform: translateX(0.5px)");
+        let frame = doc.dom.commit();
+        let vectors = gpu.prepare_vectors(&frame).expect("bake").to_vec();
+        let mut scene = vello::Scene::new();
+        frame.compose_into(&mut scene, &[], &[], &vectors, &|_| None, None);
+        let pixels = gpu
+            .render(&scene, &[], 800, 600, Color::WHITE)
+            .expect("render");
+        let at = |x: usize| -> [u8; 4] {
+            let at = (32 * 800 + x) * 4;
+            pixels[at..at + 4].try_into().expect("four channels")
+        };
+        let near = |actual: [u8; 4], expected: [u8; 3]| {
+            actual[..3]
+                .iter()
+                .zip(expected)
+                .all(|(&a, e)| a.abs_diff(e) <= 3)
+        };
+        assert!(near(at(32), [0, 0, 255]), "{:?}", at(32));
+        assert!(
+            near(at(63), [128, 0, 128]),
+            "between the last two centres: {:?}",
+            at(63)
+        );
+        assert!(
+            near(at(64), [255, 128, 128]),
+            "half the last column over white: {:?}",
+            at(64)
         );
     }
 }

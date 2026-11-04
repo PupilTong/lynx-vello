@@ -60,6 +60,8 @@
 //!
 //! - default: [`Image`], [`compare`], [`Screenshots`] — pixels in, verdict out, no render stack.
 //! - `render`: adds `capture_document` and `headless`, which pull in `terminus`.
+//! - `vello_gpu`: with `render`, captures rasterize through `terminus`'s `vello_gpu` feature
+//!   (`vello_gpu`'s sparse strips) instead of vello's compute pipeline.
 //!
 //! # Captures need a GPU
 //!

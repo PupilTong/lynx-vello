@@ -5050,6 +5050,7 @@ dependencies = [
  "glifo",
  "html5ever",
  "markup5ever_rcdom",
+ "objc2-quartz-core 0.3.2",
  "parley",
  "png",
  "pollster",

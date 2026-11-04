@@ -4,8 +4,7 @@
 //! a window handle is a main-thread-only call on macOS — and that is the same
 //! thread that draws, so it is never handed anywhere: every acquire, render
 //! and present happens on the thread that built the painter. Rendering into the
-//! retained
-//! target texture and presenting it are separate steps: the target is
+//! retained target texture and presenting it are separate steps: the target is
 //! re-rendered only when a new scene was produced, while surface
 //! invalidation and re-exposure re-present the retained target with a blit
 //! alone.
@@ -20,10 +19,17 @@
 //! reading included — on the near side of that pipeline, so what is sampled
 //! is the frame being produced for the next refresh, not one produced a
 //! pipeline-depth earlier.
+//!
+//! `vello::util::RenderContext` supplies the instance and the device; the
+//! swap chain and the retained target are this module's own, because the
+//! target's usage is the rasterizer's ([`Raster::TARGET_USAGE`]) and
+//! `vello::util::RenderSurface` builds one only vello's compute pipeline can
+//! render into.
 
 use euclid::default::Vector2D;
 use vello::peniko::ImageData;
-use vello::util::{RenderContext, RenderSurface};
+use vello::util::RenderContext;
+use vello::wgpu;
 
 use super::{CANVAS, FrameSize, PainterError};
 use crate::render::blur::FilterTextures;
@@ -39,13 +45,13 @@ use crate::visual::{CommittedFrame, ScrollSlot};
 /// rest of its life, which outlives any borrow the host could lend. A
 /// windowing embedder passes a shared handle — an `Arc<winit::Window>` —
 /// rather than a reference.
-pub type WindowTarget = vello::wgpu::SurfaceTarget<'static>;
+pub type WindowTarget = wgpu::SurfaceTarget<'static>;
 
 /// The swap-chain image a frame will be presented in, taken before the frame
 /// is produced. Dropping it without [`WindowGraphics::present`] discards it,
 /// which is what an abandoned frame does.
 pub(super) struct AcquiredFrame {
-    texture: vello::wgpu::SurfaceTexture,
+    texture: wgpu::SurfaceTexture,
     /// The surface handed over a suboptimal image and wants reconfiguring
     /// once this frame is on screen.
     reconfigure_after: bool,
@@ -61,7 +67,10 @@ pub(super) enum FrameAcquisition {
 
 pub(super) struct WindowGraphics {
     context: RenderContext,
-    surface: RenderSurface<'static>,
+    surface: WindowSurface,
+    /// The texture frames are rendered into and presented from; see
+    /// [`RetainedTarget`].
+    target: RetainedTarget,
     /// The rasterizer this window's frames and bakes render through; see
     /// [`crate::render::raster::Raster`].
     raster: Raster,
@@ -72,27 +81,79 @@ pub(super) struct WindowGraphics {
     /// baked into, kept across frames under a byte budget; see
     /// [`crate::render::vector_textures::VectorTextures`].
     vectors: VectorTextures,
-    #[cfg(not(target_arch = "wasm32"))]
-    capture: Option<CaptureTarget>,
 }
 
-/// A `COPY_SRC` twin of the surface's render target, on the same device, so
-/// screenshots read back exactly what the window pipeline rendered instead
-/// of re-rendering on a second GPU stack.
-#[cfg(not(target_arch = "wasm32"))]
-struct CaptureTarget {
+/// The swap chain: the surface built from the embedder's target, its
+/// configuration, the device it was configured on, and the blit that copies
+/// the retained target into its images.
+struct WindowSurface {
+    surface: wgpu::Surface<'static>,
+    config: wgpu::SurfaceConfiguration,
+    /// The index of the surface's device in the context's devices.
+    dev_id: usize,
+    blitter: wgpu::util::TextureBlitter,
+}
+
+/// The RGBA8 texture a window's frames are rendered into, retained across
+/// presents so a re-exposure re-presents it with a blit alone.
+///
+/// Its usage is [`Raster::TARGET_USAGE`] — a storage binding for vello, a
+/// render attachment for `vello_gpu` — plus the texture binding the present
+/// blit samples and, outside Wasm, the copy source a capture reads back: a
+/// screenshot is the pixels the window pipeline rendered, read the way
+/// [`crate::render::gpu::Headless`] reads its own target.
+struct RetainedTarget {
     width: u32,
     height: u32,
-    texture: vello::wgpu::Texture,
-    view: vello::wgpu::TextureView,
-    blitter: vello::wgpu::util::TextureBlitter,
+    #[cfg_attr(
+        target_arch = "wasm32",
+        expect(dead_code, reason = "read only by a capture, which Wasm has none of")
+    )]
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+}
+
+impl RetainedTarget {
+    const USAGE: wgpu::TextureUsages = {
+        let usage = Raster::TARGET_USAGE.union(wgpu::TextureUsages::TEXTURE_BINDING);
+        if cfg!(target_arch = "wasm32") {
+            usage
+        } else {
+            usage.union(wgpu::TextureUsages::COPY_SRC)
+        }
+    };
+
+    fn new(device: &wgpu::Device, width: u32, height: u32) -> Self {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("painter window target"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: Self::USAGE,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        Self {
+            width,
+            height,
+            texture,
+            view,
+        }
+    }
 }
 
 impl std::fmt::Debug for WindowGraphics {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("WindowGraphics")
-            .field("surface", &self.surface)
+            .field("surface", &self.surface.surface)
+            .field("config", &self.surface.config)
             .finish_non_exhaustive()
     }
 }
@@ -102,33 +163,77 @@ impl WindowGraphics {
         target: impl Into<WindowTarget>,
         size: FrameSize,
     ) -> Result<Self, PainterError> {
-        let mut context = RenderContext::new();
+        let context = RenderContext::new();
         let surface = context
-            .create_surface(
-                target,
-                size.width.max(1),
-                size.height.max(1),
-                vello::wgpu::PresentMode::AutoVsync,
-            )
-            .await
+            .instance
+            .create_surface(target.into())
             .map_err(|error| PainterError::Render(error.to_string()))?;
-        let handle = &context.devices[surface.dev_id];
+        Self::from_surface(context, surface, size).await
+    }
+
+    /// Builds the stack over `surface`, which `context`'s instance created.
+    async fn from_surface(
+        mut context: RenderContext,
+        surface: wgpu::Surface<'static>,
+        size: FrameSize,
+    ) -> Result<Self, PainterError> {
+        let dev_id = context.device(Some(&surface)).await.ok_or_else(|| {
+            PainterError::Render("no GPU device can present to this window".to_owned())
+        })?;
+        let handle = &context.devices[dev_id];
+        // The swap chain's own format; the retained target is RGBA8 either
+        // way, and the present blit converts.
+        let format = surface
+            .get_capabilities(handle.adapter())
+            .formats
+            .into_iter()
+            .find(|format| {
+                matches!(
+                    format,
+                    wgpu::TextureFormat::Rgba8Unorm | wgpu::TextureFormat::Bgra8Unorm
+                )
+            })
+            .ok_or_else(|| {
+                PainterError::Render(
+                    "the window surface offers neither an RGBA8 nor a BGRA8 format".to_owned(),
+                )
+            })?;
+        let (width, height) = (size.width.max(1), size.height.max(1));
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format,
+            width,
+            height,
+            present_mode: wgpu::PresentMode::AutoVsync,
+            color_space: wgpu::SurfaceColorSpace::Auto,
+            desired_maximum_frame_latency: 2,
+            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            view_formats: vec![],
+        };
+        surface.configure(&handle.device, &config);
+        let blitter = wgpu::util::TextureBlitter::new(&handle.device, format);
+        let target = RetainedTarget::new(&handle.device, width, height);
         let raster =
             Raster::new(&handle.device).map_err(|error| PainterError::Render(error.to_string()))?;
         Ok(Self {
             context,
-            surface,
+            surface: WindowSurface {
+                surface,
+                config,
+                dev_id,
+                blitter,
+            },
+            target,
             raster,
             filters: FilterTextures::default(),
             vectors: VectorTextures::default(),
-            #[cfg(not(target_arch = "wasm32"))]
-            capture: None,
         })
     }
 
-    /// Reconfigures the surface when the target size moved.
+    /// Reconfigures the surface, and rebuilds the retained target, when the
+    /// target size moved.
     ///
-    /// What was rendered into the retained target is not discarded here: the
+    /// What was rendered into the retained target is not carried over: the
     /// painter's own record of it carries the size it was rendered for, so a
     /// resize already fails to match and the next frame is painted.
     fn configure_for(&mut self, size: FrameSize) {
@@ -137,9 +242,19 @@ impl WindowGraphics {
             && (self.surface.config.width != size.width
                 || self.surface.config.height != size.height)
         {
-            self.context
-                .resize_surface(&mut self.surface, size.width, size.height);
+            let device = &self.context.devices[self.surface.dev_id].device;
+            self.target = RetainedTarget::new(device, size.width, size.height);
+            self.surface.config.width = size.width;
+            self.surface.config.height = size.height;
+            self.surface.surface.configure(device, &self.surface.config);
         }
+    }
+
+    /// Configures the surface again with the configuration it holds, which
+    /// is what an outdated or suboptimal swap chain asks for.
+    fn reconfigure(&self) {
+        let device = &self.context.devices[self.surface.dev_id].device;
+        self.surface.surface.configure(device, &self.surface.config);
     }
 
     /// Takes the swap-chain image this frame will be presented in, before any
@@ -151,24 +266,22 @@ impl WindowGraphics {
     /// frame and must ask for another.
     pub(super) fn acquire(&mut self, size: FrameSize) -> Result<FrameAcquisition, PainterError> {
         self.configure_for(size);
-        let Self {
-            context, surface, ..
-        } = self;
-        let (texture, reconfigure_after) = match surface.surface.get_current_texture() {
-            vello::wgpu::CurrentSurfaceTexture::Success(texture) => (texture, false),
-            vello::wgpu::CurrentSurfaceTexture::Suboptimal(texture) => (texture, true),
-            vello::wgpu::CurrentSurfaceTexture::Timeout
-            | vello::wgpu::CurrentSurfaceTexture::Occluded => return Ok(FrameAcquisition::Retry),
-            vello::wgpu::CurrentSurfaceTexture::Outdated => {
-                context.configure_surface(surface);
+        let (texture, reconfigure_after) = match self.surface.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(texture) => (texture, false),
+            wgpu::CurrentSurfaceTexture::Suboptimal(texture) => (texture, true),
+            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
                 return Ok(FrameAcquisition::Retry);
             }
-            vello::wgpu::CurrentSurfaceTexture::Lost => {
+            wgpu::CurrentSurfaceTexture::Outdated => {
+                self.reconfigure();
+                return Ok(FrameAcquisition::Retry);
+            }
+            wgpu::CurrentSurfaceTexture::Lost => {
                 return Err(PainterError::Render(
                     "the window surface was lost".to_owned(),
                 ));
             }
-            vello::wgpu::CurrentSurfaceTexture::Validation => {
+            wgpu::CurrentSurfaceTexture::Validation => {
                 return Err(PainterError::Render(
                     "surface acquisition raised a wgpu validation error".to_owned(),
                 ));
@@ -201,9 +314,9 @@ impl WindowGraphics {
                 &handle.device,
                 &handle.queue,
                 scene,
-                &self.surface.target_view,
-                size.width,
-                size.height,
+                &self.target.view,
+                self.target.width,
+                self.target.height,
                 CANVAS,
                 Drawn {
                     images,
@@ -290,96 +403,198 @@ impl WindowGraphics {
             texture: surface_texture,
             reconfigure_after,
         } = acquired;
-        let Self {
-            context, surface, ..
-        } = self;
-        let handle = &context.devices[surface.dev_id];
+        let handle = &self.context.devices[self.surface.dev_id];
         let output_view = surface_texture
             .texture
-            .create_view(&vello::wgpu::TextureViewDescriptor::default());
-        let mut encoder =
-            handle
-                .device
-                .create_command_encoder(&vello::wgpu::CommandEncoderDescriptor {
-                    label: Some("painter window blit"),
-                });
-        surface.blitter.copy(
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = handle
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("painter window blit"),
+            });
+        self.surface.blitter.copy(
             &handle.device,
             &mut encoder,
-            &surface.target_view,
+            &self.target.view,
             &output_view,
         );
         handle.queue.submit([encoder.finish()]);
         handle.queue.present(surface_texture);
         if reconfigure_after {
-            context.configure_surface(surface);
+            self.reconfigure();
         }
     }
 
-    /// Reads back the frame most recently rendered into the surface's target
-    /// texture, on the window's own device, as tightly-packed RGBA8 pixels.
+    /// Reads back the frame most recently rendered into the retained target,
+    /// on the window's own device, as tightly-packed RGBA8 pixels.
+    ///
+    /// # Errors
+    ///
+    /// [`PainterError::Render`] if the target is not at `size` — what it
+    /// holds was not rendered for this capture — and [`PainterError::Gpu`]
+    /// if the read fails.
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn capture_frame(&mut self, size: FrameSize) -> Result<Vec<u8>, PainterError> {
-        let handle = &self.context.devices[self.surface.dev_id];
-        if !self
-            .capture
-            .as_ref()
-            .is_some_and(|capture| capture.width == size.width && capture.height == size.height)
-        {
-            let texture = handle
-                .device
-                .create_texture(&vello::wgpu::TextureDescriptor {
-                    label: Some("painter capture target"),
-                    size: vello::wgpu::Extent3d {
-                        width: size.width,
-                        height: size.height,
-                        depth_or_array_layers: 1,
-                    },
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: vello::wgpu::TextureDimension::D2,
-                    format: vello::wgpu::TextureFormat::Rgba8Unorm,
-                    usage: vello::wgpu::TextureUsages::RENDER_ATTACHMENT
-                        | vello::wgpu::TextureUsages::COPY_SRC,
-                    view_formats: &[],
-                });
-            let view = texture.create_view(&vello::wgpu::TextureViewDescriptor::default());
-            let blitter = vello::wgpu::util::TextureBlitter::new(
-                &handle.device,
-                vello::wgpu::TextureFormat::Rgba8Unorm,
-            );
-            self.capture = Some(CaptureTarget {
-                width: size.width,
-                height: size.height,
-                texture,
-                view,
-                blitter,
-            });
+        if self.target.width != size.width || self.target.height != size.height {
+            return Err(PainterError::Render(format!(
+                "the window target is {}\u{d7}{}, not the {}\u{d7}{} being captured",
+                self.target.width, self.target.height, size.width, size.height
+            )));
         }
-        let capture = self
-            .capture
-            .as_ref()
-            .expect("the capture target was just ensured");
-        let mut encoder =
-            handle
-                .device
-                .create_command_encoder(&vello::wgpu::CommandEncoderDescriptor {
-                    label: Some("painter capture blit"),
-                });
-        capture.blitter.copy(
-            &handle.device,
-            &mut encoder,
-            &self.surface.target_view,
-            &capture.view,
-        );
-        handle.queue.submit([encoder.finish()]);
+        let handle = &self.context.devices[self.surface.dev_id];
         read_texture(
             &handle.device,
             &handle.queue,
-            &capture.texture,
+            &self.target.texture,
             size.width,
             size.height,
         )
         .map_err(|error| PainterError::Gpu(error.to_string()))
+    }
+}
+
+/// The window stack against [`crate::render::gpu::Headless`], over a
+/// `CAMetalLayer` in no window: a real swap chain, acquired from, presented
+/// to and resized, without an `NSWindow` or the main thread.
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use objc2_quartz_core::CAMetalLayer;
+    use vello::kurbo::{Affine, Circle, Point, Rect, RoundedRect, Stroke};
+    use vello::peniko::{Color, Fill, Gradient, Mix};
+    use vello::util::RenderContext;
+    use vello::wgpu;
+
+    use super::{FrameAcquisition, WindowGraphics};
+    use crate::painter::{CANVAS, FrameSize};
+    use crate::render::gpu::Headless;
+
+    /// Fills, a stroke, a gradient (a ramp patch) and a clipped translucent
+    /// layer: every kind of draw a composed frame is made of short of images
+    /// and glyphs.
+    fn scene(size: FrameSize) -> vello::Scene {
+        let (width, height) = (f64::from(size.width), f64::from(size.height));
+        let mut scene = vello::Scene::new();
+        scene.fill(
+            Fill::NonZero,
+            Affine::IDENTITY,
+            Color::from_rgb8(20, 120, 220),
+            None,
+            &Rect::new(8.0, 8.0, width / 2.0, height / 2.0),
+        );
+        let gradient = Gradient::new_linear(Point::new(0.0, 0.0), Point::new(width, height))
+            .with_stops([Color::from_rgb8(250, 60, 30), Color::from_rgb8(30, 200, 90)]);
+        scene.fill(
+            Fill::NonZero,
+            Affine::IDENTITY,
+            &gradient,
+            None,
+            &RoundedRect::new(width / 4.0, height / 4.0, width - 6.0, height - 6.0, 12.0),
+        );
+        scene.push_layer(
+            Fill::NonZero,
+            Mix::Normal,
+            0.6,
+            Affine::IDENTITY,
+            &Circle::new((width / 2.0, height / 2.0), width.min(height) / 3.0),
+        );
+        scene.fill(
+            Fill::NonZero,
+            Affine::rotate(0.3),
+            Color::from_rgb8(240, 200, 20),
+            None,
+            &Rect::new(width / 3.0, 0.0, width, height / 2.0),
+        );
+        scene.pop_layer();
+        scene.stroke(
+            &Stroke::new(3.0),
+            Affine::IDENTITY,
+            Color::BLACK,
+            None,
+            &Circle::new((width / 3.0, height * 0.7), 14.5),
+        );
+        scene
+    }
+
+    /// Acquires, renders, presents and captures one frame of [`scene`] at
+    /// `size` through `window`.
+    fn present_and_capture(window: &mut WindowGraphics, size: FrameSize) -> Vec<u8> {
+        let acquired = loop {
+            match window
+                .acquire(size)
+                .expect("the layer's swap chain hands out images")
+            {
+                FrameAcquisition::Ready(acquired) => break acquired,
+                FrameAcquisition::Retry => {}
+            }
+        };
+        window
+            .render_to_target(&scene(size), &[], size)
+            .expect("the window target renders");
+        window.present(acquired);
+        window
+            .capture_frame(size)
+            .expect("the window target reads back")
+    }
+
+    #[test]
+    fn a_window_frame_reads_back_as_the_headless_render_of_its_scene() {
+        let layer = CAMetalLayer::new();
+        let context = RenderContext::new();
+        #[expect(
+            unsafe_code,
+            reason = "wgpu takes a bare CAMetalLayer as a raw pointer"
+        )]
+        // SAFETY: the pointer is to a live `CAMetalLayer`, the one kind of
+        // object this target variant names, and `layer` is held until the end
+        // of this test, past the surface, which `window` owns and drops first
+        // (wgpu's Metal backend also retains the layer for itself).
+        let surface = unsafe {
+            context
+                .instance
+                .create_surface_unsafe(wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(
+                    std::ptr::from_ref::<CAMetalLayer>(&layer).cast_mut().cast(),
+                ))
+        }
+        .expect("wgpu builds a surface over a CAMetalLayer");
+        let first = FrameSize {
+            width: 96,
+            height: 72,
+        };
+        let mut window = pollster::block_on(WindowGraphics::from_surface(context, surface, first))
+            .expect("the window stack builds over the layer");
+        let mut headless = Headless::new().expect("a usable GPU adapter is mandatory");
+
+        // The first size, then a resize, which rebuilds the retained target.
+        let second = FrameSize {
+            width: 130,
+            height: 50,
+        };
+        for size in [first, second] {
+            let captured = present_and_capture(&mut window, size);
+            let expected = headless
+                .render(&scene(size), &[], size.width, size.height, CANVAS)
+                .expect("the headless render succeeds");
+            assert_eq!(
+                captured.len(),
+                expected.len(),
+                "{}x{}: both read back the whole target",
+                size.width,
+                size.height
+            );
+            assert!(
+                captured.chunks_exact(4).any(|pixel| pixel != [255; 4]),
+                "{}x{}: the scene drew something to compare",
+                size.width,
+                size.height
+            );
+            assert!(
+                captured == expected,
+                "{}x{}: the window capture differs from the headless render",
+                size.width,
+                size.height
+            );
+        }
+        drop(window);
+        drop(layer);
     }
 }

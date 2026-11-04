@@ -6,8 +6,10 @@
 #![deny(unreachable_pub)]
 // The crate's whole `unsafe` surface is two blocks — the arena-set backpointer
 // deref and Stylo's `TElement::ensure_data` contract call — and each states the
-// invariant it rests on. The workspace-wide `unsafe_code = "warn"` says a block
-// may exist; this says it must explain itself.
+// invariant it rests on; a third, test-only one hands wgpu a bare
+// `CAMetalLayer` for the window stack's test (`painter/graphics.rs`). The
+// workspace-wide `unsafe_code = "warn"` says a block may exist; this says it
+// must explain itself.
 #![warn(clippy::undocumented_unsafe_blocks)]
 
 //! `terminus` — a generic, stylo-integrated W3C-DOM-subset document tree.

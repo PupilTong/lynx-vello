@@ -252,6 +252,10 @@ impl std::fmt::Debug for VectorImage {
 /// this bound may still fail to allocate transiently when the atlas is full of
 /// other images — vello resolves that itself by evicting or growing — but an
 /// image past it can never be placed at all.
+///
+/// The `vello_gpu` rasterizer keeps the same bound, which is wgpu's default
+/// texture limit too: its atlas layers are 4096 px, so a bitmap past
+/// `render::sparse`'s atlas side is drawn from a texture of its own.
 pub const MAX_RENDERABLE_DIMENSION: u32 = 8192;
 
 /// Whether vello can place this bitmap in its image atlas.
