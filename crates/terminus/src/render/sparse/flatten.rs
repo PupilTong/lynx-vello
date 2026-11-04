@@ -14,7 +14,10 @@
     clippy::many_single_char_names,
     clippy::similar_names,
     clippy::suboptimal_flops,
-    reason = "a transliteration of vello's shader: its names and its operation order"
+    clippy::float_cmp,
+    clippy::excessive_precision,
+    reason = "a transliteration of vello's shader: its names, its operation order, its exact \
+              comparisons and its constants as written"
 )]
 
 use rustc_hash::FxHashMap;
@@ -567,7 +570,7 @@ fn draw_cap(
     transform: &Transform,
 ) {
     if cap_style == Style::FLAGS_CAP_BITS_ROUND {
-        flatten_arc(out, cap0, cap1, point, 3.141_592_7, transform);
+        flatten_arc(out, cap0, cap1, point, std::f32::consts::PI, transform);
         return;
     }
     let (start, end) = (cap0, cap1);
@@ -655,7 +658,7 @@ fn f16_to_f32(bits: u16) -> f32 {
 /// The lines vello's `flatten` writes for one path's `segments` under
 /// `style` and `transform`, as a device-space path a fill rasterizes the same
 /// way: each closed chain of lines one subpath.
-pub(super) fn flatten(segments: &[Segment], style: &Style, transform: &Transform) -> BezPath {
+pub(super) fn flatten(segments: &[Segment], style: Style, transform: &Transform) -> BezPath {
     let flags = style.flags_and_miter_limit;
     let is_stroke = flags & Style::FLAGS_STYLE_BIT != 0;
     let mut out = Lines { lines: Vec::new() };

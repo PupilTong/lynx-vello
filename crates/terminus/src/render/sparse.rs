@@ -17,7 +17,9 @@
     clippy::cast_precision_loss,
     clippy::cast_sign_loss,
     clippy::too_many_lines,
-    reason = "a decoder over vello's packed streams: counts and offsets are small exact integers"
+    clippy::many_single_char_names,
+    reason = "a decoder over vello's packed streams: counts and offsets are small exact integers, \
+              and an affine's six coefficients go by their usual letters"
 )]
 
 use std::time::{Duration, Instant};
@@ -90,7 +92,7 @@ impl std::fmt::Debug for SparseBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SparseBackend")
             .field("last", &self.last)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -106,10 +108,10 @@ struct DecodedPath {
 impl DecodedPath {
     /// The rule `path` fills under: a stroke's lines are filled non-zero.
     fn fill(&self) -> Fill {
-        if is_stroke(&self.style) {
+        if is_stroke(self.style) {
             Fill::NonZero
         } else {
-            fill_rule(&self.style)
+            fill_rule(self.style)
         }
     }
 }
@@ -152,8 +154,8 @@ fn embolden(
     }
     let [a, b, c, d, ..] = full.as_coeffs();
     let uniform = (a - d).abs() <= 1.0 / 4096.0 && a > 0.0 && b == 0.0 && c == 0.0;
-    let fill = matches!(run.style, peniko::Style::Fill(_));
-    let scale = if fill && !run.hint {
+    let filled = matches!(run.style, peniko::Style::Fill(_));
+    let scale = if filled && !run.hint {
         let upem = *units_per_em
             .entry((run.font.data.id(), run.font.index))
             .or_insert_with(|| head_units_per_em(run.font.data.data(), run.font.index));
@@ -206,11 +208,11 @@ fn f32_transform(transform: Affine) -> Transform {
     }
 }
 
-fn is_stroke(style: &Style) -> bool {
+fn is_stroke(style: Style) -> bool {
     style.flags_and_miter_limit & Style::FLAGS_STYLE_BIT != 0
 }
 
-fn fill_rule(style: &Style) -> Fill {
+fn fill_rule(style: Style) -> Fill {
     if style.flags_and_miter_limit & Style::FLAGS_FILL_BIT == 0 {
         Fill::NonZero
     } else {
@@ -241,15 +243,15 @@ fn decode_paths(encoding: &Encoding) -> Vec<DecodedPath> {
     };
     for tag in &encoding.path_tags {
         let t = tag.0;
-        if t & PathTag::TRANSFORM.0 != 0 {
-            if let Some(next) = transforms.next() {
-                transform = *next;
-            }
+        if t & PathTag::TRANSFORM.0 != 0
+            && let Some(next) = transforms.next()
+        {
+            transform = *next;
         }
-        if t & PathTag::STYLE.0 != 0 {
-            if let Some(next) = styles.next() {
-                style = *next;
-            }
+        if t & PathTag::STYLE.0 != 0
+            && let Some(next) = styles.next()
+        {
+            style = *next;
         }
         let segment = t & 0x3;
         if segment != 0 {
@@ -269,7 +271,7 @@ fn decode_paths(encoding: &Encoding) -> Vec<DecodedPath> {
         if t & PathTag::PATH.0 != 0 {
             let local = path_transform.take().unwrap_or(transform);
             out.push(DecodedPath {
-                path: flatten::flatten(&segments, &style, &local),
+                path: flatten::flatten(&segments, style, &local),
                 brush_transform: affine(&transform),
                 style,
             });
@@ -1586,7 +1588,7 @@ impl SparseBackend {
             // The paint of this draw, and the pixels it paints otherwise.
             let mut split = None;
             let paint: Option<vello_gpu::PaintType> = match *tag {
-                DrawTag::COLOR => Some(premul_color(data[at]).into()),
+                DrawTag::COLOR | DrawTag::BLUR_RECT => Some(premul_color(data[at]).into()),
                 DrawTag::LINEAR_GRADIENT | DrawTag::RADIAL_GRADIENT | DrawTag::SWEEP_GRADIENT => {
                     let Some(Patch::Ramp {
                         stops,
@@ -1679,7 +1681,6 @@ impl SparseBackend {
                         paint.into()
                     })
                 }
-                DrawTag::BLUR_RECT => Some(premul_color(data[at]).into()),
                 _ => None,
             };
 
