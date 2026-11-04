@@ -1605,6 +1605,32 @@ fn draw_backdrop(
             alpha: 1.0,
         },
     });
+    // Under `vello_gpu`, a backdrop with post-blur passes is clipped to its
+    // rounded box first and the passes run over the whole rectangle inside
+    // the clip, so they see an opaque backdrop at the box's anti-aliased rim.
+    // Run over the rim's partial alpha instead, a non-separable pass
+    // (`grayscale`, `saturate`: `Mix::Saturation`) unpremultiplies a white
+    // pixel to a colour an ulp above 1 with equal channels, and the blend
+    // shader's `clip_color` divides 0 by 0: a dark dot on the rim. vello's
+    // shader shares that division; its output is left as it was.
+    if cfg!(feature = "vello_gpu") && !backdrop.after.is_empty() {
+        let bounds = backdrop.shape.bounding_box();
+        with_shape!(&backdrop.shape, |s| scene.push_clip_layer(
+            Fill::NonZero,
+            transform,
+            s
+        ));
+        scene.fill(
+            Fill::NonZero,
+            transform,
+            brush,
+            Some(brush_transform),
+            &bounds,
+        );
+        crate::paint::filters::draw_passes_rect(scene, &backdrop.after, bounds, transform);
+        scene.pop_layer();
+        return;
+    }
     with_shape!(&backdrop.shape, |s| scene.fill(
         Fill::NonZero,
         transform,
@@ -2276,10 +2302,18 @@ mod tests {
             let entries = [entry];
             replay_program(&program, &entries, &[Some(baked)])
         };
+        // Under `vello_gpu` the texture and its passes are drawn inside a clip
+        // to the rounded box (`draw_backdrop`): a clip layer and its pop more.
+        let clip = if cfg!(feature = "vello_gpu") { 2 } else { 0 };
         assert_eq!(
             with_passes.encoding().draw_tags.len(),
-            plain.encoding().draw_tags.len() + 3,
+            plain.encoding().draw_tags.len() + 3 + clip,
             "one post-blur pass is a blend layer, its flat fill, and the pop",
+        );
+        assert_eq!(
+            with_passes.encoding().n_open_clips,
+            0,
+            "and the passes leave the layer stack balanced",
         );
     }
 

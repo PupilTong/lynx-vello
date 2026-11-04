@@ -38,6 +38,20 @@ pub(crate) struct Drawn<'a> {
     pub(crate) vectors: &'a [Option<ImageData>],
 }
 
+/// The rasterizer this build renders through, named for a golden file: `None`
+/// for vello's compute pipeline (the default), `Some("vello_gpu")` under the
+/// `vello_gpu` feature.
+///
+/// A screenshot store keys its backend override goldens on it
+/// (`<name>.vello_gpu.png` beside the shared `<name>.png`), so a test reads
+/// the rasterizer it was compiled against from here rather than from a flag
+/// of its own.
+pub const RASTER_VARIANT: Option<&str> = if cfg!(feature = "vello_gpu") {
+    Some("vello_gpu")
+} else {
+    None
+};
+
 /// See the [module documentation](self).
 pub(crate) struct Raster {
     #[cfg(not(feature = "vello_gpu"))]

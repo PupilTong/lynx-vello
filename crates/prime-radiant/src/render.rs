@@ -15,10 +15,12 @@
 use std::fmt;
 
 use terminus::link::Document;
+use terminus::link::render::RASTER_VARIANT;
 use terminus::link::render::gpu::{GpuError, Headless};
 use terminus::link::vello::Scene;
 use terminus::link::vello::peniko::{Color, ImageData};
 
+use crate::golden::{Screenshots, screenshots_in};
 use crate::image::{Image, ImageError};
 
 #[derive(Debug)]
@@ -38,6 +40,16 @@ impl fmt::Display for CaptureError {
 }
 
 impl std::error::Error for CaptureError {}
+
+/// [`screenshots_in`] for images `terminus` rendered: the store's variant is
+/// the rasterizer `terminus` was compiled with
+/// (`terminus::link::render::RASTER_VARIANT`), so a `vello_gpu` build
+/// compares against `<name>.vello_gpu.png` where one exists and writes one
+/// only where its rendering differs from the shared golden.
+#[must_use]
+pub fn raster_screenshots_in(manifest_dir: &str) -> Screenshots {
+    screenshots_in(manifest_dir).with_variant(RASTER_VARIANT)
+}
 
 /// Creates the required headless renderer for a GPU-backed test.
 #[must_use]

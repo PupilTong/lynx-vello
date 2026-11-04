@@ -279,8 +279,10 @@ fn settle_drawing(
     );
 }
 
+/// The crate's golden store, keyed on the rasterizer `terminus` was built
+/// with, so a `vello_gpu` build reads `<name>.vello_gpu.png` where one exists.
 fn screenshots() -> Screenshots {
-    prime_radiant::screenshots_in(env!("CARGO_MANIFEST_DIR"))
+    prime_radiant::raster_screenshots_in(env!("CARGO_MANIFEST_DIR"))
 }
 
 /// The painter's newest frame, ready to compare with a golden.

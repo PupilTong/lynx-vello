@@ -220,6 +220,19 @@ also asserts the four disposition totals (84, 61, 170, and 19), so the
 all 145 W3C-correct rows (84 raster/sample plus 61 UA-choice) to
 `NativeSnapshot`; every other registry row maps to `Skip`.
 
+A native snapshot takes a per-rasterizer override beside it
+(`css-paint-native/<case>.vello_gpu.png`) wherever the `vello_gpu` build
+renders it otherwise. A *browser match* has no native snapshot to override, so
+a `vello_gpu`-only difference from its Chromium reference is recorded instead
+in `crates/terminus/tests/css-paint-differences.vello_gpu.tsv` (same columns;
+the issue must be a raster/sample or UA-choice one). Under `--features
+vello_gpu` such a case compares against `css-paint-native/<case>.vello_gpu.png`,
+written by `CSS_PAINT_UPDATE_NATIVE=1`; every other build keeps the Chromium
+reference. `--validate-assets` requires exactly one such PNG per row, and no
+override PNG without either a shared native snapshot or a row. Today the list
+holds `mask-linear-009`, whose 45° stop passes exactly through pixel centres
+(an exact tie that Chromium and `vello_gpu` break opposite ways).
+
 ## Regeneration and audit
 
 Generate Rust cases and the browser HTML shards:

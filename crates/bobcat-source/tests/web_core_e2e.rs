@@ -298,8 +298,10 @@ fn screenshots() -> Screenshots {
     // a golden at all; with one this size, a real change still fails, since
     // the smallest of them moves whole glyphs or boxes. The nondeterminism
     // itself is worth fixing in the engine; until it is, this is what lets the
-    // suite mean something.
-    prime_radiant::screenshots_in(env!("CARGO_MANIFEST_DIR"))
+    // suite mean something. The store is keyed on the rasterizer `terminus`
+    // was built with, so a `vello_gpu` build reads `<name>.vello_gpu.png`
+    // where one exists.
+    prime_radiant::raster_screenshots_in(env!("CARGO_MANIFEST_DIR"))
         .with_options(prime_radiant::CompareOptions::default().with_max_diff_pixels(64))
 }
 
@@ -958,7 +960,9 @@ include!("web_core_e2e/driven.rs");
 /// A pending case must have no golden — neither of its first screen nor of
 /// any frame its script reaches: a picture of a rendering nobody has judged
 /// would be read as a decision by whoever comes next. The same goes for a
-/// picture no card owns any more.
+/// picture no card owns any more. A backend override, `<frame>.<variant>.png`,
+/// belongs to the frame whose shared golden `<frame>.png` it overrides, and
+/// only that golden's existence makes it owned.
 #[test]
 fn no_pending_case_has_a_golden() {
     let judged: BTreeSet<String> = VERIFIED
@@ -983,7 +987,13 @@ fn no_pending_case_has_a_golden() {
                 .and_then(|name| name.strip_suffix(".png"))
                 .map(str::to_owned)
         })
-        .filter(|name| !judged.contains(name))
+        .filter(|name| {
+            let owned = |name: &str| judged.contains(name);
+            let overrides_owned = name.rsplit_once('.').is_some_and(|(shared, _)| {
+                owned(shared) && directory.join(format!("{shared}.png")).exists()
+            });
+            !owned(name) && !overrides_owned
+        })
         .collect();
     strays.sort_unstable();
     assert!(

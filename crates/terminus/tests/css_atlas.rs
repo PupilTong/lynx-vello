@@ -20,7 +20,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use prime_radiant::{CompareOptions, Image, compare, screenshots_in};
+use prime_radiant::{CompareOptions, Image, compare, raster_screenshots_in, screenshots_in};
 use terminus::link::render::gpu::Headless;
 use terminus::link::vello::Scene;
 use terminus::link::vello::kurbo::{Affine, Rect};
@@ -155,11 +155,26 @@ fn run_browser_match_case(index: usize) {
         case.name
     );
     assert!(
-        !native_update_enabled(),
+        !native_update_enabled() || variant_difference(case).is_some(),
         "{UPDATE_NATIVE_ENV}=1 only accepts tests filtered by `css_native_`; \
          browser references are never writable from Rust"
     );
     compare_case(index);
+}
+
+/// The documented difference this build's rasterizer has from `case`'s
+/// Chromium reference (`css-paint-differences.vello_gpu.tsv`), if `case` is a
+/// browser match listed there and this build has that rasterizer.
+fn variant_difference(case: &CssPaintCase) -> Option<(DifferenceKind, &'static str)> {
+    if !matches!(case.expectation, Expectation::BrowserMatch)
+        || terminus::link::render::RASTER_VARIANT != Some("vello_gpu")
+    {
+        return None;
+    }
+    generated::VARIANT_DIFFERENCES
+        .iter()
+        .find(|(name, ..)| *name == case.name)
+        .map(|&(_, kind, issue)| (kind, issue))
 }
 
 fn run_native_snapshot_case(index: usize) {
@@ -214,6 +229,10 @@ fn compare_case(index: usize) {
     };
     let actual = crop_cell(actual_atlas, slot);
 
+    if audit.is_none() && update_native && variant_difference(case).is_some() {
+        update_variant_reference(case.name, &actual);
+        return;
+    }
     if audit.is_none()
         && update_native
         && matches!(case.expectation, Expectation::NativeSnapshot { .. })
@@ -262,8 +281,12 @@ fn compare_case(index: usize) {
     );
 }
 
+/// The reference `case` compares against and who owns it. A native snapshot
+/// resolves through the rasterizer's variant: a `vello_gpu` build reads
+/// `<name>.vello_gpu.png` where one exists. A Chromium reference has no
+/// variant, since every rasterizer is held to the browser's picture.
 fn reference_path(case: &CssPaintCase) -> (PathBuf, &'static str) {
-    let screenshots = screenshots_in(env!("CARGO_MANIFEST_DIR"));
+    let screenshots = raster_screenshots_in(env!("CARGO_MANIFEST_DIR"));
     assert!(
         !screenshots.is_updating(),
         "CSS atlas references reject PRIME_RADIANT_UPDATE_SNAPSHOTS; browser \
@@ -288,38 +311,73 @@ fn reference_path(case: &CssPaintCase) -> (PathBuf, &'static str) {
         std::env::var_os(REFERENCE_DIR_ENV).is_none(),
         "{REFERENCE_DIR_ENV} is only valid together with {AUDIT_ENV}"
     );
+    if variant_difference(case).is_some() {
+        return (
+            variant_reference_path(case.name),
+            "native rasterizer snapshot (css-paint-differences.vello_gpu.tsv)",
+        );
+    }
     match case.expectation {
         Expectation::BrowserMatch => (screenshots.path(&["css-paint", case.name]), "Chromium"),
-        Expectation::NativeSnapshot { .. } => (
-            screenshots.path(&["css-paint-native", case.name]),
-            "native Pulsar/Parley",
-        ),
+        Expectation::NativeSnapshot { .. } => {
+            let name = ["css-paint-native", case.name];
+            let path = screenshots.golden_path(&name);
+            let owner = if screenshots.variant_path(&name).as_ref() == Some(&path) {
+                "native Pulsar/Parley rasterizer override"
+            } else {
+                "native Pulsar/Parley"
+            };
+            (path, owner)
+        }
         Expectation::Skip { .. } => {
             panic!("{}: skipped cases need CSS-paint audit mode", case.name)
         }
     }
 }
 
+/// Accepts a native snapshot under the store's update rule: a build with a
+/// rasterizer variant writes `<name>.<variant>.png` only where its rendering
+/// differs from the shared snapshot, and never rewrites the shared one.
 fn update_native_reference(name: &str, actual: &Image) {
     assert!(
         std::env::var_os(AUDIT_ENV).is_none() && std::env::var_os(REFERENCE_DIR_ENV).is_none(),
         "{UPDATE_NATIVE_ENV}=1 cannot update references during an audit"
     );
-    let screenshots = screenshots_in(env!("CARGO_MANIFEST_DIR"));
+    let screenshots = raster_screenshots_in(env!("CARGO_MANIFEST_DIR"));
     assert!(
         !screenshots.is_updating(),
         "{UPDATE_NATIVE_ENV}=1 must not be combined with PRIME_RADIANT_UPDATE_SNAPSHOTS"
     );
-    let path = screenshots.path(&["css-paint-native", name]);
-    let parent = path
-        .parent()
-        .expect("a native CSS-paint snapshot has a parent directory");
-    std::fs::create_dir_all(parent)
-        .unwrap_or_else(|error| panic!("cannot create {}: {error}", parent.display()));
+    let outcome = screenshots
+        .accept(&["css-paint-native", name], actual)
+        .unwrap_or_else(|error| panic!("cannot update native CSS-paint snapshot {name}: {error}"));
+    eprintln!("native CSS-paint snapshot {name}: {outcome}");
+}
+
+/// Where a browser match this build's rasterizer documents a difference for
+/// keeps its own snapshot: `css-paint-native/<case>.<variant>.png`, with no
+/// shared native snapshot beside it — the shared reference is Chromium's.
+fn variant_reference_path(name: &str) -> PathBuf {
+    raster_screenshots_in(env!("CARGO_MANIFEST_DIR"))
+        .variant_path(&["css-paint-native", name])
+        .expect("a documented rasterizer difference implies a rasterizer variant")
+}
+
+/// Writes a documented rasterizer difference's own snapshot. There is no
+/// shared native snapshot to keep or compare against, so it is written as is.
+fn update_variant_reference(name: &str, actual: &Image) {
+    assert!(
+        std::env::var_os(AUDIT_ENV).is_none() && std::env::var_os(REFERENCE_DIR_ENV).is_none(),
+        "{UPDATE_NATIVE_ENV}=1 cannot update references during an audit"
+    );
+    let path = variant_reference_path(name);
     actual
         .write_png(&path)
-        .unwrap_or_else(|error| panic!("cannot update {}: {error}", path.display()));
-    eprintln!("updated native CSS-paint snapshot {}", path.display());
+        .unwrap_or_else(|error| panic!("cannot write {}: {error}", path.display()));
+    eprintln!(
+        "rasterizer CSS-paint snapshot {name}: wrote {}",
+        path.display()
+    );
 }
 
 fn native_update_enabled() -> bool {
@@ -517,6 +575,7 @@ fn css_paint_asset_inventory() {
     let native_golden_directory = manifest.join("tests/screenshots/css-paint-native");
     let fixture_directory = manifest.join("tests/fixtures/css-paint-differences");
     let difference_registry = manifest.join("tests/css-paint-differences.tsv");
+    let variant_registry = manifest.join("tests/css-paint-differences.vello_gpu.tsv");
 
     let mut browser_matches = BTreeSet::new();
     let mut native_snapshots = BTreeSet::new();
@@ -601,6 +660,8 @@ fn css_paint_asset_inventory() {
         "checked difference registry must match generated case metadata"
     );
 
+    let variant_differences = validate_variant_differences(&browser_matches, &variant_registry);
+
     validate_asset_basenames(
         &browser_golden_directory,
         &native_golden_directory,
@@ -608,8 +669,44 @@ fn css_paint_asset_inventory() {
         &browser_matches,
         &native_snapshots,
         &skipped,
+        &variant_differences.keys().cloned().collect(),
     );
     validate_difference_fixtures(&fixture_directory);
+}
+
+/// Browser matches the `vello_gpu` rasterizer documents a difference for:
+/// each stays a browser match everywhere else and owns only a
+/// `<case>.vello_gpu.png` native snapshot. Answers them with their issues.
+fn validate_variant_differences(
+    browser_matches: &BTreeSet<String>,
+    variant_registry: &Path,
+) -> BTreeMap<String, &'static str> {
+    let mut variant_differences = BTreeMap::new();
+    for &(name, kind, issue) in &generated::VARIANT_DIFFERENCES {
+        assert!(
+            browser_matches.contains(name),
+            "{name}: a vello_gpu difference must be a browser match"
+        );
+        assert!(
+            kind.uses_native_snapshot(),
+            "{name}: a vello_gpu difference must be a W3C-correct raster/sample or UA choice"
+        );
+        assert!(
+            !issue.is_empty(),
+            "{name}: vello_gpu difference issue is empty"
+        );
+        assert_eq!(
+            variant_differences.insert(name.to_owned(), issue),
+            None,
+            "duplicate vello_gpu difference {name}"
+        );
+    }
+    assert_eq!(
+        read_variant_registry(variant_registry),
+        variant_differences,
+        "checked vello_gpu difference registry must match generated case metadata"
+    );
+    variant_differences
 }
 
 fn assert_inventory_mode() {
@@ -628,17 +725,40 @@ fn validate_asset_basenames(
     browser_matches: &BTreeSet<String>,
     native_snapshots: &BTreeSet<String>,
     skipped: &BTreeSet<String>,
+    variant_differences: &BTreeSet<String>,
 ) {
     let browser_golden_names = asset_basenames(browser_golden_directory, "png");
     assert_eq!(
         &browser_golden_names, browser_matches,
         "committed browser PNG basenames must equal the BrowserMatch set"
     );
-    let native_golden_names = asset_basenames(native_golden_directory, "png");
+    // `<case>.png` is a shared native snapshot; `<case>.vello_gpu.png` the
+    // `vello_gpu` rasterizer's override of one, or the own snapshot of a
+    // browser match it documents a difference for.
+    let (overrides, shared): (BTreeSet<String>, BTreeSet<String>) =
+        asset_basenames(native_golden_directory, "png")
+            .into_iter()
+            .partition(|name| name.contains('.'));
     assert_eq!(
-        &native_golden_names, native_snapshots,
+        &shared, native_snapshots,
         "committed native PNG basenames must equal the NativeSnapshot set"
     );
+    for name in &overrides {
+        let case = name
+            .strip_suffix(".vello_gpu")
+            .unwrap_or_else(|| panic!("native PNG {name}.png names no known rasterizer variant"));
+        assert!(
+            native_snapshots.contains(case) || variant_differences.contains(case),
+            "native PNG {name}.png overrides neither a native snapshot nor a documented \
+             vello_gpu difference"
+        );
+    }
+    for case in variant_differences {
+        assert!(
+            overrides.contains(&format!("{case}.vello_gpu")),
+            "{case}: documented vello_gpu difference has no {case}.vello_gpu.png"
+        );
+    }
     let fixture_names = asset_basenames(fixture_directory, "html");
     let difference_names = native_snapshots
         .union(skipped)
@@ -736,6 +856,42 @@ fn read_difference_registry(path: &Path) -> BTreeMap<String, &'static str> {
             "{}:{}: duplicate case {name}",
             path.display(),
             line_index + 1
+        );
+    }
+    result
+}
+
+/// `css-paint-differences.vello_gpu.tsv`: case TAB issue per row.
+fn read_variant_registry(path: &Path) -> BTreeMap<String, &'static str> {
+    let source = std::fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+    let mut result = BTreeMap::new();
+    for (line_index, raw) in source.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let at = || format!("{}:{}", path.display(), line_index + 1);
+        let (name, issue) = line
+            .split_once('\t')
+            .unwrap_or_else(|| panic!("{}: expected <case> TAB <issue>", at()));
+        let generated_issue = generated::VARIANT_DIFFERENCES
+            .iter()
+            .find(|(case, ..)| *case == name)
+            .map_or_else(
+                || panic!("{}: {name} is not a generated vello_gpu difference", at()),
+                |&(_, _, issue)| issue,
+            );
+        assert_eq!(
+            issue,
+            generated_issue,
+            "{}: issue does not match generated metadata",
+            at()
+        );
+        assert!(
+            result.insert(name.to_owned(), generated_issue).is_none(),
+            "{}: duplicate case {name}",
+            at()
         );
     }
     result

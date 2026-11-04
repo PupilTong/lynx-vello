@@ -7002,6 +7002,11 @@ pub(super) static CASES: [CssPaintCase; 1000] = [
     },
 ];
 
+/// Browser matches the `vello_gpu` rasterizer compares against a native snapshot (`css-paint-differences.vello_gpu.tsv`).
+pub(super) static VARIANT_DIFFERENCES: [(&str, DifferenceKind, &str); 1] = [
+    (r"mask-linear-009", DifferenceKind::RasterOrSampling, r"css-gradient-hard-stop-boundary-sampling"),
+];
+
 css_paint_case_tests! {
     browser_matches {
         0 => css_background_solid_000;

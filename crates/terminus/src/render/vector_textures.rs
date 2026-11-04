@@ -49,10 +49,11 @@
 //! With `vello_gpu` the texture is one texel longer than the key's size on
 //! each axis the device allows, its last column and row repeated there
 //! ([`repeat_edge`]): `vello_gpu` pads an image by clamping the sample
-//! position to the last texel's centre before it filters, which blends the
-//! last two columns of a bilinear draw half and half where vello reads the
-//! last one, and the repeated texels move that clamp to the picture's own
-//! edge (`render::sparse::Bitmaps` has the whole account). The handle keeps
+//! position half a texel short of the last texel's centre before it filters,
+//! which blends the last two columns of a bilinear draw half and half where
+//! clamp-to-edge reads the last one, and the repeated texels move that clamp
+//! to the picture's own edge (`render::sparse::Bitmaps` has the whole
+//! account). The handle keeps
 //! the key's size, so the brush scale is unchanged; the drawing paint finds
 //! the longer texture behind it.
 //!
@@ -624,8 +625,8 @@ mod tests {
     }
 
     /// A picture drawn off the pixel grid, so it is filtered: the half-covered
-    /// pixel past its right edge reads the picture's last column, as vello
-    /// reads it — `vello_gpu` reads it through the texture's repeated edge,
+    /// pixel past its right edge reads the picture's last column, clamped to
+    /// its edge — `vello_gpu` reads it through the texture's repeated edge,
     /// without which it would blend the last two columns half and half.
     #[test]
     fn a_filtered_draw_reads_the_last_column_at_the_pictures_edge() {

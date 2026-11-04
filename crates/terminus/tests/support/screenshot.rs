@@ -5,7 +5,9 @@
 //! text, and [`AHEM`] where a binary wants em squares instead. A fixture that
 //! resolved a *host* font could not have a committed golden at all:
 //! `prime-radiant` goldens carry no platform suffix, and its tolerance absorbs
-//! rasterizer noise, not a different typeface.
+//! rasterizer noise, not a different typeface. [`assert_golden`] does key on
+//! the rasterizer this build of `terminus` renders through: a `vello_gpu`
+//! build reads `<name>.vello_gpu.png` where one exists.
 
 #![allow(dead_code)]
 
@@ -52,5 +54,5 @@ pub(super) fn capture_prebuilt_document<T: Sync>(
 }
 
 pub(super) fn assert_golden(name: &[&str], actual: &Image) {
-    prime_radiant::screenshots_in(env!("CARGO_MANIFEST_DIR")).assert_matches(name, actual);
+    prime_radiant::raster_screenshots_in(env!("CARGO_MANIFEST_DIR")).assert_matches(name, actual);
 }
