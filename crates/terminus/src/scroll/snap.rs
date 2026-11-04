@@ -543,6 +543,21 @@ fn snap_range(
     (offset, offset)
 }
 
+/// The axes `style`'s `scroll-snap-type` snaps on, `(x, y)`; neither when
+/// its strictness is `none`. The physical axes, as this engine lays out
+/// horizontal-tb only.
+pub(super) fn snapping_axes(style: &ComputedValues) -> (bool, bool) {
+    let snap_type = style.get_scroll_snap_type();
+    if snap_type.strictness() == ScrollSnapStrictness::None {
+        return (false, false);
+    }
+    match snap_type.axis() {
+        ScrollSnapAxis::X | ScrollSnapAxis::Inline => (true, false),
+        ScrollSnapAxis::Y | ScrollSnapAxis::Block => (false, true),
+        ScrollSnapAxis::Both => (true, true),
+    }
+}
+
 pub(crate) fn scroll_padding(value: &NonNegativeLengthPercentageOrAuto, basis: f32) -> f32 {
     match value {
         NonNegativeLengthPercentageOrAuto::Auto => 0.0,
@@ -583,11 +598,7 @@ impl<T> Document<T> {
             ScrollSnapStrictness::Mandatory => SnapStrictness::Mandatory,
             ScrollSnapStrictness::Proximity => SnapStrictness::Proximity,
         };
-        let (snaps_x, snaps_y) = match snap_type.axis() {
-            ScrollSnapAxis::X | ScrollSnapAxis::Inline => (true, false),
-            ScrollSnapAxis::Y | ScrollSnapAxis::Block => (false, true),
-            ScrollSnapAxis::Both => (true, true),
-        };
+        let (snaps_x, snaps_y) = snapping_axes(style);
         let node = self.get(id)?;
         let port = scroll_box.scrollport;
         let max = scroll_box.max_offset();

@@ -68,7 +68,10 @@
 //! its own offset by whatever part of the sum it has not applied yet, and
 //! names the sum it had applied in every offset it posts back, so the
 //! document can add what a post made before the painter saw an adjustment is
-//! missing ([`Document::scroll_anchor_shift`]).
+//! missing ([`Document::scroll_anchor_shift`]). The clamp a layout makes when
+//! the scrolling area shrinks past the offset is one more adjustment in the
+//! same sum ([`Document::clamp_scroll_offsets_after_layout`]): the painter
+//! follows it the same way, on whichever frame it adopts next.
 
 use euclid::default::{Rect, Vector2D};
 use seldon::style::PositionProperty;
@@ -89,15 +92,17 @@ use crate::tree::document::{Document, NodeId};
 pub(crate) struct ScrollAnchor {
     /// The anchor node, while one is selected.
     node: Option<NodeId>,
-    /// The sum of every block-axis adjustment anchoring has made to the
-    /// container, in CSS px.
-    shift: f32,
+    /// The sum of every adjustment made to the container's offset, in CSS
+    /// px: anchoring's, on the block axis, and the clamps of layouts that
+    /// shrank the scrolling area past the offset, on either axis
+    /// ([`Document::clamp_scroll_offsets_after_layout`]).
+    pub(super) shift: Vector2D<f32>,
 }
 
 impl ScrollAnchor {
     /// The sum of the container's adjustments, as a scroll slot carries it.
     pub(crate) fn shift(&self) -> Vector2D<f32> {
-        Vector2D::new(0.0, self.shift)
+        self.shift
     }
 }
 
@@ -249,7 +254,7 @@ impl<T: Sync> Document<T> {
             let slot = self.slot(scroller).expect("a scroll container is live");
             let state = self.layout_state_mut();
             state.scroll_offsets.insert(slot, target);
-            state.scroll_anchors.entry(scroller).or_default().shift += moved;
+            state.scroll_anchors.entry(scroller).or_default().shift.y += moved;
             // The frame carries the offset and the shift; the observers
             // read the offset.
             self.note_visual_mutation();
