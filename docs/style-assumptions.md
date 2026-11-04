@@ -1720,10 +1720,11 @@ and §D.16 with what the wire format actually permits.)*
     - **Approximated or not done (engine side).** The containing block's
       direction for a box whose containing block is the initial one, and
       for a `<text>` block's own out-of-flow children, is the box's own
-      `direction`; a box hoisted to a grid container is placed against its
-      padding box rather than the grid area its placement names, and
-      hoisted boxes add nothing to their containing block's scrollable
-      overflow (both as before this module); §4.4.1.2's extension of the overflow limit rect to a
+      `direction`; a box hoisted to a grid-lanes container is placed
+      against its padding box rather than the grid area its placement
+      names (a grid container's hoisted boxes take the area, css-grid-2
+      §10.1), and hoisted boxes add nothing to their containing block's
+      scrollable overflow (both as before this module); §4.4.1.2's extension of the overflow limit rect to a
       scroll container's scrollable area (and to infinity for scrollers) is
       not modelled — the limit is the bounding box of the inset-modified and
       original containing blocks; `normal` still stretches a replaced box

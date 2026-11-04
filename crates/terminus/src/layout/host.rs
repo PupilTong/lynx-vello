@@ -675,7 +675,7 @@ pub(super) fn run_layout<T: Sync>(
                     // which reuses the caches just filled. The containing
                     // blocks above the node then run their absolute passes,
                     // so the tail places nothing late under it.
-                    if output != previous || hoisted::escapes_to_scrollable_block(tree, state, slot)
+                    if output != previous || hoisted::escapes_past_late_placement(tree, state, slot)
                     {
                         escalated.push(pending.node_id);
                         let mut current = tree.at(slot).flat_parent_slot();
