@@ -225,7 +225,8 @@ impl WorkerOwner {
                     .get(1)
                     .map_or(HostValue::Undefined, |data| data.to_value());
                 if let Some(sender) = sender.upgrade() {
-                    sender.post(key, WorkerMessage::Post(data));
+                    let enqueued = sender.view.outbox.registry().js_blocking_stamp();
+                    sender.post(key, WorkerMessage::Post { data, enqueued });
                 }
                 Ok(HostValue::Undefined)
             },

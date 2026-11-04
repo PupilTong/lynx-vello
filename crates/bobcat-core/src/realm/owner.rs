@@ -73,6 +73,7 @@ use super::child::{ChildKey, ChildRealms};
 use super::policy::{self, Row, Scene};
 use crate::clock::ClockInstant;
 use crate::future::HostFuture;
+use crate::jobs::{JobKind, JsThreadName};
 use crate::lifetime::{EndOnUnwind, Lifetime, Settles, run_job};
 use crate::link::{HostOutbox, SourceAnswer};
 use crate::main::quickjs::{ScriptRuntime, SharedRuntime};
@@ -94,6 +95,10 @@ pub(crate) trait RealmOwner: Sized + 'static {
     /// What this owner reports: an `EngineEvent` to the view's host, or a
     /// `WorkerPayload` to the realm that created the worker.
     type Event;
+
+    /// The engine thread this owner's jobs run on: `bobcat-main` for a
+    /// page, `bobcat-workers` for a worker.
+    const THREAD: JsThreadName;
 
     /// Every task of this owner, the token that ends them, and the latches
     /// its end and its reports go through.
@@ -263,8 +268,9 @@ pub(crate) fn trapped<O: RealmOwner>(owner: &Rc<O>, payload: &(dyn Any + Send)) 
     end(owner);
 }
 
-/// Queues one synchronous operation against `owner`'s live realm, which then
-/// settles what it owes, and answers with what the operation returned.
+/// Queues one synchronous operation against `owner`'s live realm, as a job of
+/// `kind`, which then settles what it owes, and answers with what the
+/// operation returned.
 ///
 /// This is the one way into JavaScript. `None` is a realm that is not live,
 /// an owner that has ended, an operation that trapped, or a thread that is
@@ -278,6 +284,7 @@ pub(crate) fn trapped<O: RealmOwner>(owner: &Rc<O>, payload: &(dyn Any + Send)) 
 /// checkpoint resumes the panic when the operation that called it ends.
 pub(crate) fn enter<O, T, F>(
     owner: &Rc<O>,
+    kind: JobKind,
     operation: F,
 ) -> impl Future<Output = Option<T>> + use<O, T, F>
 where
@@ -285,7 +292,17 @@ where
     T: 'static,
     F: FnOnce(&mut O::Realm, &mut ScriptRuntime) -> T + 'static,
 {
-    run_job(owner, move |owner| enter_now(owner, operation))
+    run_job(owner, kind, move |owner| enter_now(owner, operation))
+}
+
+/// [`enter`] for a caller that does not wait: the job is queued by the
+/// call, and only its answer is dropped.
+pub(crate) fn queue<O, F>(owner: &Rc<O>, kind: JobKind, operation: F)
+where
+    O: RealmOwner,
+    F: FnOnce(&mut O::Realm, &mut ScriptRuntime) + 'static,
+{
+    drop(enter(owner, kind, operation));
 }
 
 /// The body of one entry, as the job runs it:
@@ -502,7 +519,7 @@ async fn load_module<O: RealmOwner>(owner: Rc<O>, url: String, answer: SourceAns
         .and_then(|answer| module_answer(&url, answer))
         .map_err(|reason| format!("module '{url}': {reason}"));
     let completing = Rc::clone(&owner);
-    enter(&owner, move |realm, js| {
+    enter(&owner, JobKind::Module, move |realm, js| {
         let loaded = loaded
             .as_ref()
             .map(|(response, source)| (response.as_str(), source.as_str()))
@@ -533,7 +550,7 @@ async fn load_child_module<O: RealmOwner>(
         .and_then(|answer| module_answer(&url, answer))
         .map_err(|reason| format!("module '{url}': {reason}"));
     let completing = Rc::clone(&owner);
-    enter(&owner, move |realm, js| {
+    enter(&owner, JobKind::Module, move |realm, js| {
         let loaded = loaded
             .as_ref()
             .map(|(response, source)| (response.as_str(), source.as_str()))
@@ -558,7 +575,7 @@ async fn settle_child_future<O: RealmOwner>(
 ) {
     let outcome = future.await;
     let settling = Rc::clone(&owner);
-    enter(&owner, move |realm, js| {
+    enter(&owner, JobKind::Future, move |realm, js| {
         let children = Rc::clone(&O::core(realm).children);
         if let Some(Err(error)) = children.deliver_future(js, child, id, outcome) {
             policy::report(&settling, Scene::Future, error);
@@ -575,7 +592,7 @@ async fn settle_child_future<O: RealmOwner>(
 async fn settle_future<O: RealmOwner>(owner: Rc<O>, id: u32, future: HostFuture) {
     let outcome = future.await;
     let settling = Rc::clone(&owner);
-    enter(&owner, move |realm, js| {
+    enter(&owner, JobKind::Future, move |realm, js| {
         let delivered = crate::future::deliver(&O::core(realm).engine, js, id, outcome);
         if let Err(error) = delivered {
             policy::report(&settling, Scene::Future, error);
@@ -634,7 +651,7 @@ where
     T: 'static,
     F: FnOnce(&mut Option<Box<O::Realm>>, &mut ScriptRuntime) -> T + 'static,
 {
-    run_job(owner, move |owner| {
+    run_job(owner, JobKind::Release, move |owner| {
         let mut js = owner.runtime().borrow_mut();
         let Ok(js) = js.as_mut() else {
             return None;
@@ -679,10 +696,16 @@ impl<O: RealmOwner> Settles for O {
         RealmOwner::lifetime(self)
     }
 
+    const THREAD: JsThreadName = <Self as RealmOwner>::THREAD;
+
+    fn outbox(&self) -> &HostOutbox {
+        RealmOwner::host(self)
+    }
+
     /// The epilogue alone, for a wake that carries no operation of its own —
     /// a timer deadline, or a sibling's checkpoint.
-    fn settle(owner: &Rc<Self>) -> impl Future<Output = Option<()>> {
-        enter(owner, |_, _| ())
+    fn settle(owner: &Rc<Self>, kind: JobKind) -> impl Future<Output = Option<()>> {
+        enter(owner, kind, |_, _| ())
     }
 
     fn end(owner: &Rc<Self>) {

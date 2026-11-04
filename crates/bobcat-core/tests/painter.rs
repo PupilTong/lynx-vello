@@ -371,10 +371,18 @@ async fn a_painter_whose_view_is_gone_attaches_to_the_next_one() {
     painter
         .attach(&second)
         .expect("a painter whose view has gone is not an attached one");
-    assert!(
-        painter.capture().is_err(),
-        "nothing of the new page has been rendered yet"
-    );
+    // The first page's frame went with its view: a capture now either finds
+    // nothing to draw, or — when the second page's boot on its own thread has
+    // already committed, which attaching's metrics release — the second
+    // page. Never the first: that is what `attach`'s reset is for.
+    match painter.capture() {
+        Err(_) => {}
+        Ok(shot) => assert_eq!(
+            <[u8; 4]>::try_from(&shot.pixels[..4]).expect("an RGBA frame"),
+            BLUE,
+            "the painter kept the first page's frame"
+        ),
+    }
     wait_for_script(&mut second).expect("the second entry boots");
     tick(&mut painter, true).expect("the second page's frame");
     assert_eq!(

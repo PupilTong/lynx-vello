@@ -190,7 +190,7 @@ fn a_worker_observer_is_owed_the_entries_of_its_realm() {
     let registry = PipelineRegistry::detached();
     let worker = WorkerKey::new(7);
     registry.bind_worker(worker, OpenerId::PAGE);
-    registry.observe_worker(worker, true, false);
+    registry.observe_worker(worker, Some(EntryTypes::NONE));
     registry.bind_commit(flush(OpenerId::PAGE, 0, &["mine"], 1));
     assert_eq!(registry.note_presented(frame(1)), vec![worker]);
     assert!(registry.take_completed_for_rust().is_empty());
@@ -275,8 +275,8 @@ fn paint_marks_complete_once_for_whoever_asked_for_paint() {
     let worker = WorkerKey::new(3);
     let other = WorkerKey::new(4);
     registry.observe_rust(EntryTypes::PAINT);
-    registry.observe_worker(worker, true, true);
-    registry.observe_worker(other, true, false);
+    registry.observe_worker(worker, Some(EntryTypes::PAINT));
+    registry.observe_worker(other, Some(EntryTypes::NONE));
     assert!(registry.wants_content_detection());
     let first = frame(1);
     assert_eq!(registry.note_paint(Some(first), None), vec![worker]);
@@ -331,10 +331,10 @@ fn paint_marks_nobody_asked_for_make_no_record_and_no_detection() {
     assert_eq!(registry.generation(), 0);
     assert!(registry.records_for_test().is_empty());
     // A worker that observes pipelines only asks for no detection either.
-    registry.observe_worker(WorkerKey::new(1), true, false);
+    registry.observe_worker(WorkerKey::new(1), Some(EntryTypes::NONE));
     assert!(!registry.wants_content_detection());
     // Asking for paint turns detection on until the contentful paint.
-    registry.observe_worker(WorkerKey::new(1), true, true);
+    registry.observe_worker(WorkerKey::new(1), Some(EntryTypes::PAINT));
     assert!(registry.wants_content_detection());
     assert!(registry.wants_presentation_timing());
     registry.forget_worker(WorkerKey::new(1));
@@ -355,4 +355,318 @@ fn a_waiting_record_wants_presentation_timing_and_an_untimed_present_completes_i
     assert_eq!(registry.generation(), 1);
     assert!(!registry.wants_presentation_timing());
     assert_eq!(registry.take_completed_for_rust().len(), 1);
+}
+
+#[test]
+fn a_delivered_entry_reaches_the_audiences_that_asked_for_its_type_in_order() {
+    let registry = PipelineRegistry::detached();
+    let (painting, plain) = (WorkerKey::new(1), WorkerKey::new(2));
+    registry.observe_worker(painting, Some(EntryTypes::PAINT));
+    registry.observe_worker(plain, Some(EntryTypes::NONE));
+    let start = ClockInstant::now();
+    let paint = |millis| {
+        PerformanceEntry::Paint(PaintEntry {
+            name: PaintName::FirstPaint,
+            start: Timestamp(start + Duration::from_millis(millis)),
+        })
+    };
+    // Nobody asked: nothing kept, nothing to wake.
+    assert!(!registry.deliver_entry(paint(0), EntryTypes::PAINT, WorkerAudience::None));
+    assert!(!registry.deliver_entry(paint(0), EntryTypes::PAINT, WorkerAudience::One(plain)));
+    assert_eq!(registry.generation(), 0);
+    assert!(registry.deliver_entry(paint(1), EntryTypes::PAINT, WorkerAudience::Every));
+    assert!(registry.deliver_entry(paint(2), EntryTypes::PAINT, WorkerAudience::One(painting)));
+    assert_eq!(registry.take_wakes(), vec![painting]);
+    assert_eq!(
+        registry.take_completed_for_worker(painting),
+        vec![paint(1), paint(2)],
+        "in production order"
+    );
+    assert!(registry.take_completed_for_worker(plain).is_empty());
+    assert!(registry.take_completed_for_rust().is_empty());
+    // A worker that stops observing drops what it had not taken.
+    assert!(registry.deliver_entry(paint(3), EntryTypes::PAINT, WorkerAudience::Every));
+    registry.observe_worker(painting, None);
+    assert!(registry.take_completed_for_worker(painting).is_empty());
+}
+
+#[test]
+fn the_long_task_monitor_is_off_by_default_and_reports_to_rust_alone_bounded() {
+    let registry = PipelineRegistry::detached();
+    assert_eq!(registry.long_task_threshold(), None);
+    let config = LongTaskConfig::default();
+    assert_eq!(config.threshold, Duration::from_millis(50));
+    registry.set_long_task_threshold(Some(Duration::ZERO));
+    assert_eq!(registry.long_task_threshold(), Some(Duration::ZERO));
+    registry.set_long_task_threshold(None);
+    assert_eq!(registry.long_task_threshold(), None);
+    assert!(EntryTypes::ALL.contains(EntryTypes::LONG_TASK | EntryTypes::JS_BLOCKING));
+    let start = ClockInstant::now();
+    let deliver = |millis, kind| {
+        registry.deliver_entry(
+            PerformanceEntry::LongTask(LongTaskEntry {
+                start: Timestamp(start),
+                end: Timestamp(start + Duration::from_millis(millis)),
+                thread: JsThreadName::Workers,
+                kind,
+            }),
+            EntryTypes::LONG_TASK,
+            WorkerAudience::None,
+        )
+    };
+    // Nobody observes long tasks, a worker included: dropped as it is made.
+    registry.observe_rust(EntryTypes::PIPELINE);
+    registry.observe_worker(WorkerKey::new(1), Some(EntryTypes::ALL));
+    assert!(!deliver(60, JobKind::Post));
+    assert_eq!(registry.generation(), 0);
+    registry.observe_rust(EntryTypes::LONG_TASK);
+    for millis in 0..1005 {
+        assert!(deliver(millis, JobKind::Timer));
+    }
+    let entries = registry.take_completed_for_rust();
+    assert_eq!(entries.len(), 1000);
+    let PerformanceEntry::LongTask(first) = &entries[0] else {
+        panic!("a long task: {:?}", entries[0]);
+    };
+    assert_eq!(
+        first.duration(),
+        Duration::from_millis(5),
+        "the five oldest went"
+    );
+    assert!(registry.take_completed_for_rust().is_empty(), "taken once");
+    assert_eq!(registry.take_completed_for_worker(WorkerKey::new(1)), []);
+}
+
+#[test]
+fn a_long_task_entry_writes_long_tasks_and_lynx_s_keys() {
+    let origin = TimeOrigin::now();
+    let entry = PerformanceEntry::LongTask(LongTaskEntry {
+        start: at(&origin, 10),
+        end: at(&origin, 72),
+        thread: JsThreadName::Main,
+        kind: JobKind::Command,
+    });
+    assert_eq!((entry.entry_type(), entry.name()), ("longtask", "command"));
+    let keys: Vec<_> = entry
+        .lynx_fields(&origin)
+        .map(|(key, _)| key.into_owned())
+        .collect();
+    let expected = "entryType name startTime duration thread_name task_type task_name duration_ms";
+    assert_eq!(keys.join(" "), expected);
+    let mut json = String::new();
+    entry.write_lynx_json(&origin, &mut json);
+    let value: serde_json::Value = serde_json::from_str(&json).expect("the entry is JSON");
+    assert_eq!(value["thread_name"], "Lynx_TASM");
+    assert_eq!(value["task_type"], "native_func_task");
+    assert_eq!(value["task_name"], "command");
+    assert!((value["duration"].as_f64().unwrap() - 62.0).abs() < 1e-6);
+    assert!((value["duration_ms"].as_f64().unwrap() - 62.0).abs() < 1e-6);
+    let start = value["startTime"].as_f64().expect("a number");
+    assert!((start - origin.unix_millis() - 10.0).abs() < 1e-6);
+    // A kind Lynx files under no category leaves `task_type` out.
+    let settle = PerformanceEntry::LongTask(LongTaskEntry {
+        start: at(&origin, 0),
+        end: at(&origin, 1),
+        thread: JsThreadName::Workers,
+        kind: JobKind::Settle,
+    });
+    let mut json = String::new();
+    settle.write_lynx_json(&origin, &mut json);
+    let value: serde_json::Value = serde_json::from_str(&json).expect("the entry is JSON");
+    assert_eq!(value["thread_name"], "Lynx_JS");
+    assert!(value.get("task_type").is_none());
+}
+
+fn blocking(threshold_millis: u64) -> JsBlockingConfig {
+    JsBlockingConfig {
+        threshold: Duration::from_millis(threshold_millis),
+        report_interval: Duration::from_secs(5),
+    }
+}
+
+fn blocking_entries(registry: &PipelineRegistry) -> Vec<JsBlockingEntry> {
+    registry
+        .take_completed_for_rust()
+        .into_iter()
+        .map(|entry| match entry {
+            PerformanceEntry::JsBlocking(report) => report,
+            entry => panic!("a js_blocking entry: {entry:?}"),
+        })
+        .collect()
+}
+
+#[test]
+fn the_js_blocking_monitor_is_off_by_default_and_reports_to_rust_alone_bounded() {
+    let registry = PipelineRegistry::detached();
+    assert_eq!(registry.js_blocking_stamp(), None, "off by default");
+    let config = JsBlockingConfig::default();
+    assert_eq!(config.threshold, Duration::from_millis(20));
+    assert_eq!(config.report_interval, Duration::from_secs(5));
+    let start = ClockInstant::now();
+    // Off: a wait counts nothing, and nothing reports.
+    registry.note_js_blocking(Duration::from_secs(1));
+    assert!(!registry.report_js_blocking_at(JsBlockingStage::LoadBundle, start));
+    let epoch = registry
+        .set_js_blocking_monitor(Some(blocking(0)), start)
+        .expect("on");
+    assert!(registry.js_blocking_stamp().is_some());
+    assert!(registry.js_blocking_is_current(epoch));
+    assert_eq!(registry.js_blocking_anchor(epoch), None, "no load yet");
+    // A report nobody observes is made, its totals spent, and dropped; a
+    // worker that asked for everything is not its audience.
+    registry.observe_worker(WorkerKey::new(1), Some(EntryTypes::ALL));
+    registry.note_js_blocking(Duration::from_millis(5));
+    assert!(!registry.report_js_blocking_at(JsBlockingStage::LoadBundle, start));
+    registry.observe_rust(EntryTypes::JS_BLOCKING);
+    assert!(!registry.report_js_blocking_at(JsBlockingStage::Timer, start));
+    assert_eq!(registry.generation(), 0);
+    for _ in 0..1005 {
+        registry.note_js_blocking(Duration::from_millis(1));
+        assert!(registry.report_js_blocking_at(JsBlockingStage::Timer, start));
+    }
+    assert_eq!(blocking_entries(&registry).len(), 1000);
+    assert_eq!(registry.take_completed_for_worker(WorkerKey::new(1)), []);
+    assert_eq!(registry.set_js_blocking_monitor(None, start), None);
+    assert_eq!(registry.js_blocking_stamp(), None);
+    assert!(!registry.js_blocking_is_current(epoch));
+}
+
+#[test]
+fn js_blocking_reports_follow_lynx_s_formulas() {
+    let registry = PipelineRegistry::detached();
+    registry.observe_rust(EntryTypes::JS_BLOCKING);
+    let start = ClockInstant::now();
+    registry.set_js_blocking_monitor(Some(blocking(20)), start);
+    // Under the threshold: not counted.
+    registry.note_js_blocking(Duration::from_millis(19));
+    // Nothing counted: no report, and the span is not restarted.
+    assert!(!registry.report_js_blocking_at(JsBlockingStage::LoadBundle, start));
+    registry.note_js_blocking(Duration::from_millis(20));
+    registry.note_js_blocking(Duration::from_millis(40));
+    let load = start + Duration::from_millis(200);
+    assert!(registry.report_js_blocking_at(JsBlockingStage::LoadBundle, load));
+    let [report] = blocking_entries(&registry)[..] else {
+        panic!("one report");
+    };
+    assert_eq!(report.stage, JsBlockingStage::LoadBundle);
+    assert_eq!(report.total_blocking_time, Duration::from_millis(60));
+    assert_eq!(report.total_blocking_count, 2);
+    assert_eq!(report.total_duration, Duration::from_millis(200));
+    assert!((report.blocking_ratio - 0.3).abs() < 1e-9);
+    assert_eq!(report.avg_blocking_time, Duration::from_millis(30));
+    assert_eq!(report.time_after_load_bundle, None);
+    // Lynx resets the totals after a report: a timer report with nothing
+    // counted since is not made.
+    let first_timer = load + Duration::from_secs(5);
+    assert!(!registry.report_js_blocking_at(JsBlockingStage::Timer, first_timer));
+    registry.note_js_blocking(Duration::from_millis(100));
+    let second_timer = load + Duration::from_secs(15);
+    assert!(registry.report_js_blocking_at(JsBlockingStage::Timer, second_timer));
+    let [report] = blocking_entries(&registry)[..] else {
+        panic!("one report");
+    };
+    assert_eq!(report.stage, JsBlockingStage::Timer);
+    assert_eq!(report.total_blocking_count, 1);
+    // From the last report made, which the skipped one was not.
+    assert_eq!(report.total_duration, Duration::from_secs(15));
+    assert!((report.blocking_ratio - 0.1 / 15.0).abs() < 1e-9);
+    assert_eq!(report.avg_blocking_time, Duration::from_millis(100));
+    assert_eq!(report.time_after_load_bundle, Some(Duration::from_secs(15)));
+}
+
+#[test]
+fn the_page_load_makes_the_load_bundle_report_and_anchors_the_timer() {
+    let registry = PipelineRegistry::detached();
+    registry.observe_rust(EntryTypes::JS_BLOCKING);
+    let epoch = registry
+        .set_js_blocking_monitor(Some(blocking(0)), ClockInstant::now())
+        .expect("on");
+    let mut epochs = registry.monitor_epochs();
+    epochs.borrow_and_update();
+    registry.note_js_blocking(Duration::from_millis(1));
+    registry.open_load(OpenerId::PAGE, "app:///main.js", None);
+    assert!(registry.mark_load(OpenerId::PAGE, LoadMark::MtsRenderStart));
+    let mut binding = flush(OpenerId::PAGE, 0, &[], 1);
+    binding.load = true;
+    registry.bind_commit(binding);
+    registry.note_presented(frame(1));
+    assert!(epochs.has_changed().unwrap(), "the report task is woken");
+    assert!(
+        registry.js_blocking_anchor(epoch).is_some(),
+        "the timer starts at the load"
+    );
+    let [report] = blocking_entries(&registry)[..] else {
+        panic!("the loadBundle report");
+    };
+    assert_eq!(report.stage, JsBlockingStage::LoadBundle);
+    assert_eq!(report.total_blocking_count, 1);
+    // A report task of an earlier configuration reports nothing.
+    registry.note_js_blocking(Duration::from_millis(1));
+    assert!(!registry.report_js_blocking(epoch + 1));
+    assert!(registry.report_js_blocking(epoch));
+    let [report] = blocking_entries(&registry)[..] else {
+        panic!("the timer report");
+    };
+    assert_eq!(report.stage, JsBlockingStage::Timer);
+    assert!(report.time_after_load_bundle.is_some());
+    // Another monitor's setter keeps this configuration current; turned on
+    // again after the load, the timer is anchored at once.
+    registry.set_long_task_threshold(None);
+    assert!(registry.js_blocking_is_current(epoch));
+    registry.set_js_blocking_monitor(None, ClockInstant::now());
+    let again = registry
+        .set_js_blocking_monitor(Some(blocking(0)), ClockInstant::now())
+        .expect("on");
+    assert!(again > epoch);
+    assert!(!registry.js_blocking_is_current(epoch));
+    assert!(registry.js_blocking_anchor(again).is_some());
+}
+
+#[test]
+fn a_js_blocking_entry_writes_lynx_s_keys_and_types() {
+    let origin = TimeOrigin::now();
+    let report = JsBlockingEntry::from_totals(
+        JsBlockingStage::Timer,
+        Duration::from_millis(45),
+        2,
+        Duration::from_secs(5),
+        Some(Duration::from_millis(5_001)),
+    );
+    let entry = PerformanceEntry::JsBlocking(report);
+    assert_eq!(
+        (entry.entry_type(), entry.name()),
+        ("js_blocking", "js_blocking")
+    );
+    let keys: Vec<_> = entry
+        .lynx_fields(&origin)
+        .map(|(key, _)| key.into_owned())
+        .collect();
+    let expected = "entryType name stage total_blocking_time total_blocking_count \
+                    total_duration blocking_ratio avg_blocking_time time_after_load_bundle";
+    assert_eq!(keys.join(" "), expected);
+    let mut json = String::new();
+    entry.write_lynx_json(&origin, &mut json);
+    let value: serde_json::Value = serde_json::from_str(&json).expect("the entry is JSON");
+    assert_eq!(value["stage"], "timer");
+    assert_eq!(value["total_blocking_time"].as_i64(), Some(45));
+    assert_eq!(value["total_blocking_count"].as_i64(), Some(2));
+    assert_eq!(value["total_duration"].as_i64(), Some(5_000));
+    assert_eq!(value["time_after_load_bundle"].as_i64(), Some(5_001));
+    assert!((value["blocking_ratio"].as_f64().unwrap() - 0.009).abs() < 1e-12);
+    assert!((value["avg_blocking_time"].as_f64().unwrap() - 22.5).abs() < 1e-9);
+    // A `loadBundle` report has no `time_after_load_bundle`, and a ratio
+    // over a zero span is `null` rather than invalid JSON.
+    let load = PerformanceEntry::JsBlocking(JsBlockingEntry::from_totals(
+        JsBlockingStage::LoadBundle,
+        Duration::from_millis(45),
+        2,
+        Duration::ZERO,
+        None,
+    ));
+    let mut json = String::new();
+    load.write_lynx_json(&origin, &mut json);
+    let value: serde_json::Value = serde_json::from_str(&json).expect("the entry is JSON");
+    assert_eq!(value["stage"], "loadBundle");
+    assert!(value["blocking_ratio"].is_null());
+    assert!(value.get("time_after_load_bundle").is_none());
 }
