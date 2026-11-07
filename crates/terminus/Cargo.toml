@@ -1,6 +1,6 @@
 [package]
 name = "terminus"
-description = "Generic W3C DOM, Stylo/layout core, and document-owned Vello paint pipeline"
+description = "Generic W3C DOM, Stylo/layout core, and document-owned paint pipeline over vello_gpu"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -28,7 +28,6 @@ slab = { workspace = true }
 smallvec = { workspace = true }
 pollster = { workspace = true }
 rayon = { workspace = true }
-vello = { workspace = true }
 vello_gpu = { workspace = true }
 vello_common = { workspace = true }
 glifo = { workspace = true }

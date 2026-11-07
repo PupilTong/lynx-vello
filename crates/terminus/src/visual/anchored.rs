@@ -76,11 +76,11 @@ use rustc_hash::FxHashMap;
 use seldon::tree::AnchorOutcome;
 use smallvec::SmallVec;
 use stylo::values::specified::position::PositionVisibility;
-use vello::kurbo;
-use vello::kurbo::Affine;
 
 use super::space::{self, SpaceKind, SpaceSamples};
 use super::{PaintItemKind, PaintOrder};
+use crate::kurbo;
+use crate::kurbo::Affine;
 use crate::layout::anchors::{ScrollAdjust, fits_shifted, mask, scroll_adjustment_ancestors};
 use crate::paint::compose::snap_offset;
 use crate::tree::document::{Document, NodeId};

@@ -5,7 +5,7 @@
 //!
 //! - [`ImageRegistry`] lives on the document. It is a name table keyed by the raw source string the
 //!   page wrote, holding each image's load state and its own intrinsic dimensions. No
-//!   [`ImageData`], no [`Blob`](vello::peniko::Blob), no store — and no identity to mint, because
+//!   [`ImageData`], no [`Blob`](crate::peniko::Blob), no store — and no identity to mint, because
 //!   nothing per-image is stored behind a name.
 //! - [`FrameImages`] is the read seam. A committed frame's image draws name a source, and whoever
 //!   composes that frame supplies the pixels for it.
@@ -107,9 +107,9 @@ use bytes::Bytes;
 use rustc_hash::FxHashMap;
 use seldon::text::TextContext;
 use smallvec::SmallVec;
-use vello::peniko::ImageData;
 
 use crate::paint::display_list::DisplayList;
+use crate::peniko::ImageData;
 use crate::render::gpu::GpuDevice;
 use crate::render::svg::{self, VectorDocument};
 use crate::tree::document::NodeId;
@@ -1215,8 +1215,8 @@ mod tests {
         }
     }
 
-    fn image(width: u32, height: u32) -> vello::peniko::ImageData {
-        use vello::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
+    fn image(width: u32, height: u32) -> crate::peniko::ImageData {
+        use crate::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
         // Declares the size without allocating it: every check under test
         // reads the declared dimensions, not the buffer.
         ImageData {

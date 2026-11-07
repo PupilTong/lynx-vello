@@ -71,13 +71,13 @@
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
-use vello::kurbo::Size;
-use vello::peniko::{Blob, Color, ImageData, ImageFormat};
 
 use super::gpu::GpuError;
 use super::raster::Raster;
+use crate::kurbo::Size;
 use crate::paint::compose::VectorDraw;
 use crate::paint::display_list::DisplayList;
+use crate::peniko::{Blob, Color, ImageData, ImageFormat};
 use crate::visual::CommittedFrame;
 
 /// The bytes of baked vector textures kept across frames.
@@ -417,9 +417,8 @@ fn repeat_edge(
 mod tests {
     use std::sync::Arc;
 
-    use vello::peniko::{Color, ImageData};
-
     use crate::paint::display_list::DisplayList;
+    use crate::peniko::{Color, ImageData};
     use crate::render::gpu::Headless;
     use crate::render::image::{DocumentKind, ImageEvent, ImageRole};
     use crate::test_common::Doc;

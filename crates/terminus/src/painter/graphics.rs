@@ -25,10 +25,10 @@
 //! limits a headless target does.
 
 use euclid::default::Vector2D;
-use vello::peniko::ImageData;
 
 use super::{CANVAS, FrameSize, PainterError};
 use crate::paint::display_list::DisplayList;
+use crate::peniko::ImageData;
 use crate::render::blur::FilterTextures;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::render::gpu::read_texture;
@@ -432,12 +432,12 @@ impl WindowGraphics {
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use objc2_quartz_core::CAMetalLayer;
-    use vello::kurbo::{Affine, Circle, Point, Rect, RoundedRect, Stroke};
-    use vello::peniko::{Color, Fill, Gradient, Mix};
 
     use super::{FrameAcquisition, WindowGraphics};
+    use crate::kurbo::{Affine, Circle, Point, Rect, RoundedRect, Stroke};
     use crate::paint::display_list::DisplayList;
     use crate::painter::{CANVAS, FrameSize};
+    use crate::peniko::{Color, Fill, Gradient, Mix};
     use crate::render::gpu::{Headless, instance};
 
     /// Fills, a stroke, a gradient (a ramp patch) and a clipped translucent

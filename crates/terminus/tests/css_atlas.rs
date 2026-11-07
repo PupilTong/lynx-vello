@@ -22,9 +22,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use prime_radiant::{CompareOptions, Image, compare, screenshots_in};
 use terminus::link::DisplayList;
+use terminus::link::kurbo::{Affine, Rect};
+use terminus::link::peniko::{BlendMode, Color, Compose, Fill, Mix};
 use terminus::link::render::gpu::Headless;
-use terminus::link::vello::kurbo::{Affine, Rect};
-use terminus::link::vello::peniko::{BlendMode, Color, Compose, Fill, Mix};
 
 const CASE_COUNT: usize = 1_000;
 const CELL_SIZE: u32 = 128;

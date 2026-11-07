@@ -78,13 +78,13 @@ use std::sync::Arc;
 
 use euclid::default::Vector2D;
 use smallvec::SmallVec;
-use vello::kurbo::{Affine, Point, Rect, Size};
-use vello::peniko::{
-    BlendMode, BrushRef, Extend, Fill, ImageBrush, ImageData, ImageQuality, ImageSampler,
-};
 
+use crate::kurbo::{Affine, Point, Rect, Size};
 use crate::paint::display_list::DisplayList;
 use crate::paint::shape::{BoxShape, with_shape};
+use crate::peniko::{
+    BlendMode, BrushRef, Extend, Fill, ImageBrush, ImageData, ImageQuality, ImageSampler,
+};
 use crate::render::image::{
     AspectAlign, AspectRatio, ImageSizeHint, MAX_RENDERABLE_DIMENSION, is_renderable,
 };
@@ -1653,9 +1653,8 @@ fn is_integer_translation(affine: Affine) -> bool {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use vello::peniko::{Compose, Mix};
-
     use super::*;
+    use crate::peniko::{Compose, Mix};
 
     fn assembly() -> ComposeAssembly {
         ComposeAssembly::with_storage(
@@ -1797,7 +1796,7 @@ mod tests {
         scene.fill(
             Fill::NonZero,
             Affine::IDENTITY,
-            vello::peniko::Color::from_rgb8(0, 128, 128),
+            crate::peniko::Color::from_rgb8(0, 128, 128),
             None,
             &Rect::new(0.0, 0.0, 8.0, 8.0),
         );
@@ -2042,9 +2041,9 @@ mod tests {
         group.ops = 2..3;
         let groups = [group];
         let baked = ImageData {
-            data: vello::peniko::Blob::new(Arc::new([0_u8, 0, 0, 0])),
-            format: vello::peniko::ImageFormat::Rgba8,
-            alpha_type: vello::peniko::ImageAlphaType::AlphaPremultiplied,
+            data: crate::peniko::Blob::new(Arc::new([0_u8, 0, 0, 0])),
+            format: crate::peniko::ImageFormat::Rgba8,
+            alpha_type: crate::peniko::ImageAlphaType::AlphaPremultiplied,
             width: 8,
             height: 8,
         };
@@ -2255,9 +2254,9 @@ mod tests {
             ComposeOp::PushBackdrop { index: 0 },
         ];
         let baked = ImageData {
-            data: vello::peniko::Blob::new(Arc::new([0_u8, 0, 0, 0])),
-            format: vello::peniko::ImageFormat::Rgba8,
-            alpha_type: vello::peniko::ImageAlphaType::AlphaPremultiplied,
+            data: crate::peniko::Blob::new(Arc::new([0_u8, 0, 0, 0])),
+            format: crate::peniko::ImageFormat::Rgba8,
+            alpha_type: crate::peniko::ImageAlphaType::AlphaPremultiplied,
             width: 8,
             height: 8,
         };
@@ -2411,9 +2410,9 @@ mod tests {
     /// identity of its own, as the raster cache registers one.
     fn texture(width: u32, height: u32) -> ImageData {
         ImageData {
-            data: vello::peniko::Blob::new(Arc::new([])),
-            format: vello::peniko::ImageFormat::Rgba8,
-            alpha_type: vello::peniko::ImageAlphaType::Alpha,
+            data: crate::peniko::Blob::new(Arc::new([])),
+            format: crate::peniko::ImageFormat::Rgba8,
+            alpha_type: crate::peniko::ImageAlphaType::Alpha,
             width,
             height,
         }

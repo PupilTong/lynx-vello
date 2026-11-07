@@ -23,8 +23,7 @@ pub(crate) mod shape;
 mod text;
 pub(crate) mod walker;
 
-use vello::kurbo::{Affine, BezPath, Rect, Vec2};
-
+use crate::kurbo::{Affine, BezPath, Rect, Vec2};
 use crate::layout::{Edges, Layout, TextBrush};
 use crate::paint::shape::ReferenceBoxes;
 use crate::visual::CornerRadii;

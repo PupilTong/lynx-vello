@@ -42,11 +42,11 @@ use stylo::properties::longhands::animation_direction::computed_value::single_va
 use stylo::properties::{LonghandId, OwnedPropertyDeclarationId, PropertyDeclarationId};
 use stylo::servo::animation::{Animation, Transition};
 use stylo::values::computed::transform::Transform as ComputedTransform;
-use vello::kurbo::Affine;
 
 use super::ScrollOffsets;
 use super::reach::{Interval, Reach, Segment, eased_range};
 use super::transform::{ContextMatrix, planar};
+use crate::kurbo::Affine;
 use crate::style::timeline::{Axis, ProgressKind, ProgressTiming, iteration_progress};
 use crate::tree::document::NodeId;
 

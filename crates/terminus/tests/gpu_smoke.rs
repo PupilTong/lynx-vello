@@ -3,9 +3,9 @@
 //! adapter is mandatory, including in CI.
 
 use terminus::link::DisplayList;
+use terminus::link::kurbo::{Affine, Rect};
+use terminus::link::peniko::{Color, Fill};
 use terminus::link::render::gpu::Headless;
-use terminus::link::vello::kurbo::{Affine, Rect};
-use terminus::link::vello::peniko::{Color, Fill};
 
 fn pixel(pixels: &[u8], width: usize, x: usize, y: usize) -> [u8; 4] {
     let offset = (y * width + x) * 4;

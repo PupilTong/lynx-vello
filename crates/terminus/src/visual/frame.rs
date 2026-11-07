@@ -18,12 +18,12 @@
 use euclid::default::{Point2D, Size2D, Vector2D};
 use smallvec::SmallVec;
 use stylo::properties::animated_properties::AnimationValueMap;
-use vello::kurbo::Affine;
-use vello::peniko::ImageData;
 
 use super::{AnimationSample, PaintOrder, SpaceSamples};
+use crate::kurbo::Affine;
 use crate::paint::compose::{self, ComposeOp, FilterGroup};
 use crate::paint::display_list::DisplayList;
+use crate::peniko::ImageData;
 use crate::scroll::{
     AutoScrollRequest, CaptureAxes, ChainLink, ScrollAxes, ScrollRequest, SnapAxis, SnapPoint,
     SnapStrictness, unwrap_axis, wrap_axis, wrap_period_axis,
@@ -725,7 +725,7 @@ impl CommittedFrame {
         crate::paint::filters::draw_passes_rect(
             scene,
             &backdrop.before,
-            vello::kurbo::Rect::new(0.0, 0.0, f64::from(width), f64::from(height)),
+            crate::kurbo::Rect::new(0.0, 0.0, f64::from(width), f64::from(height)),
             Affine::IDENTITY,
         );
     }

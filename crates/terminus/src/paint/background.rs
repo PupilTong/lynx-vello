@@ -49,10 +49,8 @@ use stylo::values::generics::image::{
 use stylo::values::generics::length::LengthPercentageOrAuto;
 use stylo::values::specified::background::BackgroundRepeatKeyword;
 use stylo::values::specified::position::{HorizontalPositionKeyword, VerticalPositionKeyword};
-use vello::kurbo::{Affine, Point, Rect, Size, Vec2};
-use vello::peniko;
-use vello::peniko::{BrushRef, Color, Extend, Fill, ImageQuality, ImageSampler};
 
+use crate::kurbo::{Affine, Point, Rect, Size, Vec2};
 use crate::layout::NaturalSize;
 use crate::paint::compose::{ImageArea, ImageDraw, VectorDraw};
 use crate::paint::convert::resolve_color;
@@ -60,6 +58,8 @@ use crate::paint::display_list::DisplayList;
 use crate::paint::shape::{BoxShape, inner_radii, with_shape};
 use crate::paint::walker::WalkSink;
 use crate::paint::{BoxFragment, TextClip};
+use crate::peniko;
+use crate::peniko::{BrushRef, Color, Extend, Fill, ImageQuality, ImageSampler};
 use crate::render::image::{ImageRegistry, VectorImage};
 
 const EPS: f64 = 1e-6;
@@ -1901,9 +1901,9 @@ mod tests {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod object_fit_tests {
     use stylo::computed_values::object_fit::T as ObjectFit;
-    use vello::kurbo::Rect;
 
     use super::{concrete_object_size, fitted_size};
+    use crate::kurbo::Rect;
     use crate::layout::{NaturalSize, Size as LayoutSize};
 
     fn content() -> Rect {

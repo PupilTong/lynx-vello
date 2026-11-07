@@ -58,7 +58,7 @@ impl Harness {
         let moved = frame
             .space_samples(&animations, &stickies, &anchored, ratio, &offsets)
             .css(item.space)
-            * vello::kurbo::Point::new(f64::from(baked.x), f64::from(baked.y));
+            * crate::kurbo::Point::new(f64::from(baked.x), f64::from(baked.y));
         #[allow(clippy::cast_possible_truncation, reason = "CSS px fit f32")]
         Point2D::new(moved.x as f32, moved.y as f32)
     }

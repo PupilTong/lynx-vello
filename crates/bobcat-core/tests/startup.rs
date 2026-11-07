@@ -49,7 +49,7 @@ impl bobcat_core::FrameImages for ThreadedFetcher {
         &self,
         source: &str,
         hint: bobcat_core::ImageSizeHint,
-    ) -> Option<bobcat_core::vello::peniko::ImageData> {
+    ) -> Option<bobcat_core::peniko::ImageData> {
         self.base.read(source, hint)
     }
 
@@ -159,7 +159,7 @@ impl bobcat_core::FrameImages for PendingFetcher {
         &self,
         source: &str,
         hint: bobcat_core::ImageSizeHint,
-    ) -> Option<bobcat_core::vello::peniko::ImageData> {
+    ) -> Option<bobcat_core::peniko::ImageData> {
         self.base.read(source, hint)
     }
 
@@ -648,7 +648,7 @@ impl bobcat_core::FrameImages for TwoScriptFetcher {
         &self,
         source: &str,
         hint: bobcat_core::ImageSizeHint,
-    ) -> Option<bobcat_core::vello::peniko::ImageData> {
+    ) -> Option<bobcat_core::peniko::ImageData> {
         self.base.read(source, hint)
     }
 

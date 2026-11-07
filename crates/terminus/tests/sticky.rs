@@ -7,7 +7,7 @@ mod common;
 
 use common::Doc;
 use euclid::default::Vector2D;
-use terminus::link::vello::peniko::Color;
+use terminus::link::peniko::Color;
 use terminus::link::{CommittedFrame, DisplayList, NodeId, Point2D};
 
 const CSS: &str = "page { display: flex; width: 800px; height: 600px; }

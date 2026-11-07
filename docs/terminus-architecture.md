@@ -91,9 +91,9 @@ coarse touch pointers, CSS-values-4 fallback font metrics. Quirks stays
 hard-wired in matching, the `Stylist` and the doc-hidden `standards_device`
 test seam, so neither the quirks knob nor any stylo device vocabulary exists
 above this crate; view metrics read back through `Document::{viewport_size,
-device_pixel_ratio}`. The crate root re-exports the one workspace `vello`
-version — embedders configure wgpu/peniko/kurbo exclusively through it — and
-re-exports `stylo` as the CSS vocabulary door for the layers above (strict
+device_pixel_ratio}`. The link re-exports `wgpu` and the `kurbo` and
+`peniko` the one workspace `vello_gpu` is built against — embedders configure
+wgpu/peniko/kurbo exclusively through them — and re-exports `stylo` as the CSS vocabulary door for the layers above (strict
 linear chain: cli → resources → core → element → terminus).
 
 It must not contain Lynx runtime-element vocabulary or Lynx device/unit policy

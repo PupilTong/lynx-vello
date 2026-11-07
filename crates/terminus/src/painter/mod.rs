@@ -38,7 +38,6 @@ use std::sync::Arc;
 use euclid::default::Vector2D;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
-use vello::peniko::{Color, ImageData};
 
 pub use self::gesture::{
     EmitEvent, GesturePolicy, GestureRouter, InputDecision, InputDecisions, RouterHost,
@@ -50,6 +49,7 @@ use self::motion::{ElasticStep, Motion, resolve_elastic_step, stretch_of, unwind
 use crate::clock::ClockInstant;
 use crate::input::{InputEvent, InputKind, PointerId};
 use crate::paint::display_list::DisplayList;
+use crate::peniko::{Color, ImageData};
 use crate::render::gpu::Headless;
 use crate::render::image::FrameImages;
 use crate::scroll::{

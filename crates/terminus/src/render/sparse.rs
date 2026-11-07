@@ -31,8 +31,6 @@ use std::time::Duration;
 
 use glifo::{AtlasCacher, GlyphPrepCache, GlyphRenderError, GlyphRunBackend};
 use rustc_hash::FxHashMap;
-use vello::kurbo::{Affine, BezPath, Diagonal2, Point, Rect, Shape as _};
-use vello::peniko::{Color, Extend, Fill, ImageAlphaType, ImageData, ImageFormat, ImageSampler};
 use vello_common::image_cache::ImageCache;
 use vello_gpu::{
     AllocationStrategy, AtlasConfig, AtlasWriter, ClearSettings, Image, ImageId, ImageSource,
@@ -42,10 +40,12 @@ use vello_gpu::{
 };
 
 use crate::clock::ClockInstant;
+use crate::kurbo::{Affine, BezPath, Diagonal2, Point, Rect, Shape as _};
 use crate::paint::display_list::{
     DisplayList, FILL_TOLERANCE, GlyphRun, GlyphStyle, ImagePaint, Item, Paint, STROKE_TOLERANCE,
     Shape,
 };
+use crate::peniko::{Color, Extend, Fill, ImageAlphaType, ImageData, ImageFormat, ImageSampler};
 
 /// What one frame cost, and what it could not draw.
 #[derive(Debug, Default, Clone, Copy)]
@@ -1040,15 +1040,15 @@ impl SparseBackend {
 mod tests {
     use std::sync::Arc;
 
-    use vello::kurbo::{Affine, Rect};
-    use vello::peniko::{
-        BlendMode, Blob, Color, Extend, Fill, ImageAlphaType, ImageBrush, ImageData, ImageFormat,
-        ImageQuality, ImageSampler,
-    };
     use vello_gpu::{AllocationStrategy, AtlasConfig};
 
     use super::{PINNED_RENDERS, SparseBackend, Store};
+    use crate::kurbo::{Affine, Rect};
     use crate::paint::display_list::DisplayList;
+    use crate::peniko::{
+        BlendMode, Blob, Color, Extend, Fill, ImageAlphaType, ImageBrush, ImageData, ImageFormat,
+        ImageQuality, ImageSampler,
+    };
     use crate::render::gpu::{GpuDevice, instance};
 
     const RED: [u8; 4] = [255, 0, 0, 255];
@@ -1535,11 +1535,10 @@ mod tests {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod replay_tests {
-    use vello::kurbo::{Cap, Join, Line, Stroke};
-    use vello::peniko::color::palette::css::{BLACK, BLUE, RED};
-    use vello::peniko::{self, BlendMode, Compose, Gradient, Mix};
-
     use super::*;
+    use crate::kurbo::{Cap, Join, Line, Stroke};
+    use crate::peniko::color::palette::css::{BLACK, BLUE, RED};
+    use crate::peniko::{self, BlendMode, Compose, Gradient, Mix};
     use crate::render::gpu::Headless;
 
     fn render(scene: &DisplayList, width: u32, height: u32) -> Vec<u8> {
@@ -1733,7 +1732,7 @@ mod replay_tests {
     /// `backdrop-filter: grayscale()` pass `draw_backdrop` draws).
     #[test]
     fn a_saturation_blend_in_a_rounded_clip_leaves_the_rim_clean() {
-        let shape = vello::kurbo::RoundedRect::new(2.0, 2.0, 62.0, 30.0, 13.5);
+        let shape = crate::kurbo::RoundedRect::new(2.0, 2.0, 62.0, 30.0, 13.5);
         let bounds = Rect::new(2.0, 2.0, 62.0, 30.0);
         let mut scene = DisplayList::new();
         scene.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &shape);
@@ -1773,7 +1772,7 @@ mod replay_tests {
     /// between the clip and the blend: the list isolates the clip.
     #[test]
     fn a_multiply_blend_in_a_rounded_clip_is_cut_after_it_blends() {
-        let shape = vello::kurbo::RoundedRect::new(0.0, 0.0, 32.0, 32.0, 12.0);
+        let shape = crate::kurbo::RoundedRect::new(0.0, 0.0, 32.0, 32.0, 12.0);
         let bounds = Rect::new(0.0, 0.0, 32.0, 32.0);
         let mut scene = DisplayList::new();
         scene.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &shape);

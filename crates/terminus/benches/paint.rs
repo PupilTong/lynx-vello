@@ -82,7 +82,7 @@ use stylo::values::computed::{CSSPixelLength, Length};
 use stylo::values::specified::font::{FONT_MEDIUM_PX, QueryFontMetricsFlags};
 use stylo_traits::{CSSPixel, DevicePixel};
 use terminus::link::layout::{NaturalSize, Size};
-use terminus::link::vello::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
+use terminus::link::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
 use terminus::link::{Document, ImageRole, NodeId, StylesheetOrigin, Vector2D};
 
 fn main() {

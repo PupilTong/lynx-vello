@@ -7,8 +7,8 @@ mod paint_common;
 use paint_common::Doc;
 use prime_radiant::headless;
 use terminus::link::DisplayList;
-use terminus::link::vello::kurbo::{Affine, Rect};
-use terminus::link::vello::peniko::{BlendMode, Color, Compose, Fill, Mix};
+use terminus::link::kurbo::{Affine, Rect};
+use terminus::link::peniko::{BlendMode, Color, Compose, Fill, Mix};
 
 const AHEM: &[u8] = include_bytes!("../../seldon/tests/fixtures/Ahem.ttf");
 const ISOLATION_ATLAS_WIDTH: u32 = 384;
@@ -472,7 +472,7 @@ fn render_filtered(
         .dom
         .committed_frame()
         .expect("render leaves a committed frame retained");
-    let filtered: Vec<Option<terminus::link::vello::peniko::ImageData>> = gpu
+    let filtered: Vec<Option<terminus::link::peniko::ImageData>> = gpu
         .prepare_filters(&frame, &[], &[], &|_| None, 0, None, Color::WHITE)
         .expect("the filter bakes render")
         .to_vec();
@@ -737,7 +737,7 @@ fn a_blurred_box_in_a_scroller_moves_with_the_offset() {
 
     gpu.forget_filters();
     for offset in [0.0_f32, 40.0] {
-        let filtered: Vec<Option<terminus::link::vello::peniko::ImageData>> = gpu
+        let filtered: Vec<Option<terminus::link::peniko::ImageData>> = gpu
             .prepare_filters(
                 &frame,
                 &[],
@@ -830,7 +830,7 @@ fn a_sliding_blurred_card_stays_inside_its_ancestors_clip() {
     // Committed at x = 30; at 0.6 s the card spans x = 80..140, and the
     // frame's clip ends at x = 100.
     let now = Some(0.6);
-    let filtered: Vec<Option<terminus::link::vello::peniko::ImageData>> = gpu
+    let filtered: Vec<Option<terminus::link::peniko::ImageData>> = gpu
         .prepare_filters(&frame, &[], &[], &|_| None, 0, now, Color::WHITE)
         .expect("the filter bakes render")
         .to_vec();
@@ -859,7 +859,7 @@ fn compose_at(
     now: Option<f64>,
     (width, height): (u32, u32),
 ) -> Vec<u8> {
-    let filtered: Vec<Option<terminus::link::vello::peniko::ImageData>> = gpu
+    let filtered: Vec<Option<terminus::link::peniko::ImageData>> = gpu
         .prepare_filters(frame, &[], &[], &|_| None, 0, now, Color::WHITE)
         .expect("the filter bakes render")
         .to_vec();
@@ -1141,7 +1141,7 @@ fn a_blurred_backdrop_over_a_scroller_re_bakes_with_it() {
 
     let draw = |gpu: &mut terminus::link::render::gpu::Headless, generation: u64, offset: f32| {
         let offset_of = |_: &terminus::link::ScrollSlot| Some(Vector2D::new(0.0, offset));
-        let filtered: Vec<Option<terminus::link::vello::peniko::ImageData>> = gpu
+        let filtered: Vec<Option<terminus::link::peniko::ImageData>> = gpu
             .prepare_filters(&frame, &[], &[], &offset_of, generation, None, Color::WHITE)
             .expect("the entries bake")
             .to_vec();
@@ -1560,7 +1560,7 @@ fn a_group_over_the_budget_renders_unblurred() {
         u64::from(width) * u64::from(height) > terminus::link::render::blur::MAX_FILTER_AREA,
         "and it is past the budget ({width}x{height})",
     );
-    let filtered: Vec<Option<terminus::link::vello::peniko::ImageData>> = gpu
+    let filtered: Vec<Option<terminus::link::peniko::ImageData>> = gpu
         .prepare_filters(&frame, &[], &[], &|_| None, 0, None, Color::WHITE)
         .expect("a refused group is not an error")
         .to_vec();
@@ -1679,7 +1679,7 @@ fn render_baked_over(
         entries,
         "the frame's filter entries",
     );
-    let filtered: Vec<Option<terminus::link::vello::peniko::ImageData>> = gpu
+    let filtered: Vec<Option<terminus::link::peniko::ImageData>> = gpu
         .prepare_filters(&frame, &[], &[], &|_| None, 0, None, canvas)
         .expect("the bakes render")
         .to_vec();
@@ -1883,7 +1883,7 @@ fn a_fixed_backdrop_over_a_scroller_rebakes_per_offset() {
     gpu.forget_filters();
     let mut reads = Vec::new();
     for (generation, offset) in [(0_u64, 0.0_f32), (1, 12.0)] {
-        let filtered: Vec<Option<terminus::link::vello::peniko::ImageData>> = gpu
+        let filtered: Vec<Option<terminus::link::peniko::ImageData>> = gpu
             .prepare_filters(
                 &frame,
                 &[],
@@ -2048,7 +2048,7 @@ fn a_backdrop_over_the_budget_stays_unfiltered() {
         u64::from(width) * u64::from(height) > terminus::link::render::blur::MAX_FILTER_AREA,
         "and it is past the budget ({width}x{height})",
     );
-    let filtered: Vec<Option<terminus::link::vello::peniko::ImageData>> = gpu
+    let filtered: Vec<Option<terminus::link::peniko::ImageData>> = gpu
         .prepare_filters(&frame, &[], &[], &|_| None, 0, None, Color::WHITE)
         .expect("a refused entry is not an error")
         .to_vec();
@@ -2092,7 +2092,7 @@ fn a_colour_only_backdrop_darkens_only_inside_the_box() {
         (frame.filter_groups()[0].sigma - 0.0).abs() < f32::EPSILON,
         "a colour-only list has no blur",
     );
-    let filtered: Vec<Option<terminus::link::vello::peniko::ImageData>> = gpu
+    let filtered: Vec<Option<terminus::link::peniko::ImageData>> = gpu
         .prepare_filters(&frame, &[], &[], &|_| None, 0, None, Color::WHITE)
         .expect("the backdrop bakes")
         .to_vec();
@@ -2214,7 +2214,7 @@ fn a_canvas_change_re_bakes_a_backdrop_over_it() {
         (Color::WHITE, [255_u8, 255, 255]),
         (Color::from_rgb8(40, 120, 200), [40, 120, 200]),
     ] {
-        let filtered: Vec<Option<terminus::link::vello::peniko::ImageData>> = gpu
+        let filtered: Vec<Option<terminus::link::peniko::ImageData>> = gpu
             .prepare_filters(&frame, &[], &[], &|_| None, 0, None, canvas)
             .expect("the backdrop bakes")
             .to_vec();
@@ -2469,7 +2469,7 @@ fn an_anchored_box_follows_its_scrolled_anchor_and_hides_with_it() {
         .enumerate()
     {
         let offset_of = move |_: &terminus::link::ScrollSlot| Some(Vector2D::new(0.0, offset));
-        let filtered: Vec<Option<terminus::link::vello::peniko::ImageData>> = gpu
+        let filtered: Vec<Option<terminus::link::peniko::ImageData>> = gpu
             .prepare_filters(
                 &frame,
                 &[],

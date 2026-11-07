@@ -8,8 +8,8 @@
 //! It reports every load inline through the [`terminus::link::ImageReports`] a view
 //! handed it, so a test needs no async runtime at all. What it does honour is
 //! the identity contract: every [`FrameImages::read`] of one
-//! source returns a clone sharing the same `Blob`, which is what vello keys
-//! its atlas on.
+//! source returns a clone sharing the same `Blob`, which is what the
+//! rasterizer keys its bitmap uploads on.
 //!
 //! An SVG document is parsed here, the way a production host parses one:
 //! with the engine's own parser ([`ImageEvent::parse_document`]), and
@@ -25,7 +25,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use terminus::link::vello::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
+use terminus::link::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
 use terminus::link::{
     Document, DocumentKind, FrameImages, ImageEvent, ImageReports, ImageSizeHint, VectorDocument,
 };
@@ -260,8 +260,8 @@ impl TestImages {
 
 impl FrameImages for TestImages {
     /// Returns a clone that shares the published `Blob`, so every read of one
-    /// source carries the same `Blob::id()` — the identity vello keys its
-    /// atlas on. The hint is recorded and otherwise ignored: this store
+    /// source carries the same `Blob::id()` — the identity the rasterizer
+    /// keys its bitmap uploads on. The hint is recorded and otherwise ignored: this store
     /// decodes nothing, so there is nothing to size.
     fn read(&self, source: &str, hint: ImageSizeHint) -> Option<ImageData> {
         self.reads

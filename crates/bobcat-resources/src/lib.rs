@@ -60,8 +60,8 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use bobcat_core::peniko::ImageData;
 use bobcat_core::resource::ResourceFetcher;
-use bobcat_core::vello::peniko::ImageData;
 use bobcat_core::{FrameImages, ImageReports, ImageSizeHint, PreparsedStyleSheet};
 use bytes::Bytes;
 use rustc_hash::FxHashSet;
@@ -150,7 +150,7 @@ pub struct ResourcesConfig {
     /// The disk tier; `None` keeps everything in memory.
     pub disk_cache: Option<DiskCacheConfig>,
     /// The largest per-axis size of an image's first decode, before any
-    /// frame has said how large it draws it. Also bounded by what vello can
+    /// frame has said how large it draws it. Also bounded by what the rasterizer can
     /// draw at all.
     pub initial_decode_bound: u32,
     /// A resident bitmap at least this many times larger than its draw on

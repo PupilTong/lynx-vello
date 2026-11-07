@@ -34,13 +34,13 @@
 use euclid::default::Size2D;
 use stylo::properties::ComputedValues;
 use stylo::values::computed::effects::BoxShadow;
-use vello::kurbo::Rect;
-use vello::peniko::{BlendMode, Color, Compose, Fill, Mix};
 
+use crate::kurbo::Rect;
 use crate::paint::compose::FilterGroup;
 use crate::paint::shape::{BoxShape, inner_radii, normalize_radii, ring_path_into, with_shape};
 use crate::paint::walker::WalkSink;
 use crate::paint::{BoxFragment, PathScratch, convert};
+use crate::peniko::{BlendMode, Color, Compose, Fill, Mix};
 use crate::visual::{CornerRadii, PaintOrder};
 
 pub(crate) fn paint_outset(

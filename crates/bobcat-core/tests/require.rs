@@ -92,7 +92,7 @@ impl bobcat_core::FrameImages for Files {
         &self,
         _source: &str,
         _hint: bobcat_core::ImageSizeHint,
-    ) -> Option<bobcat_core::vello::peniko::ImageData> {
+    ) -> Option<bobcat_core::peniko::ImageData> {
         None
     }
 

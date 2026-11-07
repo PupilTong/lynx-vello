@@ -17,7 +17,7 @@ pub use euclid::default::{Point2D, Rect, Size2D, Vector2D};
 pub use seldon::text::{FontBlob, TextContext};
 pub use stylo;
 pub use stylo_dom::ElementState;
-pub use vello;
+pub use vello_gpu::{kurbo, peniko};
 pub use wgpu;
 
 pub use crate::layout::TextLineReport;

@@ -28,8 +28,8 @@ use seldon::text::FontBlob;
 use stylo::properties::animated_properties::{AnimationValue, AnimationValueMap};
 use stylo::properties::{LonghandId, OwnedPropertyDeclarationId, PropertyDeclarationId};
 use stylo::rule_tree::CascadeOrigin;
-use vello::kurbo::{Affine, Point, Rect};
 
+use crate::kurbo::{Affine, Point, Rect};
 use crate::paint::convert::item_affine;
 use crate::test_common::Doc;
 use crate::tree::document::NodeId;

@@ -25,7 +25,7 @@ mod common;
 
 use common::{Doc, device};
 use prime_radiant::headless;
-use terminus::link::vello::peniko::Color;
+use terminus::link::peniko::Color;
 use terminus::link::{FontBlob, FontFaceRequest, FontFaceSource, NodeId, Vector2D};
 
 const AHEM: &[u8] = include_bytes!("../../seldon/tests/fixtures/Ahem.ttf");

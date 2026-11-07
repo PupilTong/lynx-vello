@@ -12,8 +12,6 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
-use vello::kurbo::{Affine, BezPath, Rect, Shape, Stroke};
-use vello::peniko::{Brush, Fill};
 
 use super::paint_server::{self, GradientSpec};
 use super::style::{
@@ -21,6 +19,8 @@ use super::style::{
 };
 use super::text::{Space, TextChunk, TextItem, TextPaint, TextSpan, normalize_whitespace};
 use super::{FillPaint, Item, LayerClip, StrokePaint, SvgError, VectorDocument, nesting, shapes};
+use crate::kurbo::{Affine, BezPath, Rect, Shape, Stroke};
+use crate::peniko::{Brush, Fill};
 use crate::render::image::{AspectAlign, AspectRatio};
 
 /// The default object size of CSS Images 3, in CSS px.
@@ -1060,9 +1060,9 @@ fn items_bounds(items: &[Item], into: Affine, include_stroke: bool) -> Option<Re
             // Half the width on each side, plus the reach of a miter join.
             let reach = stroke.style.width / 2.0
                 * match stroke.style.join {
-                    vello::kurbo::Join::Miter => stroke.style.miter_limit.max(1.0),
-                    vello::kurbo::Join::Round => 1.0,
-                    vello::kurbo::Join::Bevel => std::f64::consts::SQRT_2,
+                    crate::kurbo::Join::Miter => stroke.style.miter_limit.max(1.0),
+                    crate::kurbo::Join::Round => 1.0,
+                    crate::kurbo::Join::Bevel => std::f64::consts::SQRT_2,
                 };
             local = local.inflate(reach, reach);
         }

@@ -111,15 +111,15 @@
 //! viewport still answers with the element drawn there.
 
 use euclid::default::{Size2D, Vector2D};
-use vello::kurbo::{Affine, Point, Rect};
-use vello::peniko::{BlendMode, Compose, Fill, Mix};
 
+use crate::kurbo::{Affine, Point, Rect};
 use crate::paint::compose::{BackdropRoot, CapturedShape, ComposeAssembly, ComposeOp, FilterGroup};
 use crate::paint::display_list::DisplayList;
 use crate::paint::shape::{BoxShape, with_shape};
 use crate::paint::{
     BoxFragment, PathScratch, background, border, convert, filters, mask, shadow, text,
 };
+use crate::peniko::{BlendMode, Compose, Fill, Mix};
 use crate::render::image::ImageRegistry;
 use crate::tree::document::Document;
 use crate::visual::space::{self, SpaceKind, nearest_scroll, nearest_sticky};
@@ -1988,7 +1988,7 @@ fn color_gradient_box<T>(
     // content box, so that origin — border plus padding — is the offset
     // between the two, and the paint item is the establishing element itself
     // rather than a run inside it.
-    let content_origin = vello::kurbo::Vec2::new(
+    let content_origin = crate::kurbo::Vec2::new(
         f64::from(element_layout.border.left + element_layout.padding.left),
         f64::from(element_layout.border.top + element_layout.padding.top),
     );
@@ -2000,17 +2000,17 @@ fn collect_text_clip<T>(
     element: crate::tree::document::NodeId,
 ) -> crate::paint::TextClip<'_> {
     let mut clip = crate::paint::TextClip::default();
-    collect_text_clip_under(document, element, vello::kurbo::Vec2::ZERO, &mut clip);
+    collect_text_clip_under(document, element, crate::kurbo::Vec2::ZERO, &mut clip);
     clip
 }
 
 fn collect_text_clip_under<'doc, T>(
     document: &'doc Document<T>,
     node: crate::tree::document::NodeId,
-    offset: vello::kurbo::Vec2,
+    offset: crate::kurbo::Vec2,
     clip: &mut crate::paint::TextClip<'doc>,
 ) {
-    use vello::kurbo::Vec2;
+    use crate::kurbo::Vec2;
     let Some(node_ref) = document.get(node) else {
         return;
     };
@@ -3032,13 +3032,13 @@ fn blend_mode(style: &stylo::properties::ComputedValues) -> BlendMode {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use euclid::default::{Size2D, Transform3D};
-    use vello::kurbo::Affine;
 
     use super::{
         BoxShape, CapturedShape, ComposeAssembly, ComposeOp, CullPlan, DisplayList, PaintItem,
         PaintItemKind, Rect, Scratch, can_reach, cull_rect, item_bounds, walk, walk_compose,
         walk_uncultured,
     };
+    use crate::kurbo::Affine;
     use crate::paint::equivalence::assert_scenes_identical;
     use crate::test_common::Doc;
     use crate::visual::CornerRadii;

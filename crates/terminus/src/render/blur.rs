@@ -131,11 +131,11 @@
 //! 256 MiB — a number only a pathological page approaches.
 
 use euclid::default::Vector2D;
-use vello::peniko::{Blob, Color, ImageAlphaType, ImageData, ImageFormat};
 
 use super::gpu::{GpuDevice, GpuError};
 use super::raster::Raster;
 use crate::paint::display_list::DisplayList;
+use crate::peniko::{Blob, Color, ImageAlphaType, ImageData, ImageFormat};
 use crate::visual::{CommittedFrame, ScrollSlot};
 
 /// Largest per-axis device-pixel count one filter bake may have: the
@@ -1299,7 +1299,7 @@ mod tests {
     /// once, and another colour forgets it.
     #[test]
     fn a_canvas_change_forgets_the_bakes_and_the_same_canvas_keeps_them() {
-        use vello::peniko::Color;
+        use crate::peniko::Color;
 
         let mut textures = FilterTextures::default();
         textures.adopt_canvas(Color::WHITE);
@@ -1337,8 +1337,7 @@ mod tests {
     /// nothing is moving behind, from re-baking it.
     #[test]
     fn an_entry_reads_only_what_its_pixels_depend_on() {
-        use vello::kurbo::{Affine, Rect};
-
+        use crate::kurbo::{Affine, Rect};
         use crate::paint::compose::{Backdrop, FilterGroup};
 
         let rect = Rect::new(0.0, 0.0, 8.0, 8.0);
@@ -1407,8 +1406,7 @@ mod tests {
     /// one beside it alone; a new commit re-bakes both.
     #[test]
     fn a_sampling_entry_does_not_re_bake_a_still_one() {
-        use vello::kurbo::Rect;
-
+        use crate::kurbo::Rect;
         use crate::paint::compose::FilterGroup;
 
         let rect = Rect::new(0.0, 0.0, 8.0, 8.0);

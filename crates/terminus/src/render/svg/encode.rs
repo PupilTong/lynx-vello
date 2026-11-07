@@ -1,12 +1,12 @@
 //! Items into a display list, text shaped on the way.
 
 use seldon::text::{ShapedLine, TextContext, shape_line};
-use vello::kurbo::{Affine, Point, Rect, Stroke};
-use vello::peniko::{Brush, Fill, Mix, StyleRef};
 
 use super::text::{TextAnchor, TextItem, TextPaint};
 use super::{Item, LayerClip, VectorDocument, paint_server};
+use crate::kurbo::{Affine, Point, Rect, Stroke};
 use crate::paint::display_list::{DisplayList, Glyph};
+use crate::peniko::{Brush, Fill, Mix, StyleRef};
 
 /// Encodes `document` into a scene in viewport units, shaping its text
 /// through the document's `context`, created here on the first document

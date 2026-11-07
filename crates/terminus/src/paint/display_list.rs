@@ -27,8 +27,9 @@ use std::sync::Arc;
 
 /// One positioned glyph of a run.
 pub use glifo::Glyph;
-use vello::kurbo::{Affine, PathEl, Rect, RoundedRect, Stroke};
-use vello::peniko::{
+
+use crate::kurbo::{Affine, PathEl, Rect, RoundedRect, Stroke};
+use crate::peniko::{
     BlendMode, Brush, BrushRef, Color, Fill, FontData, Gradient, ImageBrushRef, ImageData,
     ImageSampler, StyleRef,
 };
@@ -202,7 +203,7 @@ pub struct Embolden {
     /// Per-axis widening.
     pub x: f64,
     pub y: f64,
-    pub join: vello::kurbo::Join,
+    pub join: crate::kurbo::Join,
     pub miter_limit: f64,
     pub tolerance: f64,
 }
@@ -212,7 +213,7 @@ impl Default for Embolden {
         Self {
             x: 0.0,
             y: 0.0,
-            join: vello::kurbo::Join::Miter,
+            join: crate::kurbo::Join::Miter,
             miter_limit: 4.0,
             tolerance: 0.1,
         }
@@ -445,7 +446,7 @@ impl DisplayList {
 
     /// Records `shape` as an item shape at `tolerance`; `None` for a shape
     /// with no segments.
-    fn shape(&mut self, shape: &impl vello::kurbo::Shape, tolerance: f64) -> Option<Shape> {
+    fn shape(&mut self, shape: &impl crate::kurbo::Shape, tolerance: f64) -> Option<Shape> {
         if let Some(rect) = shape.as_rect() {
             return Some(Shape::Rect(rect));
         }
@@ -472,7 +473,7 @@ impl DisplayList {
         transform: Affine,
         brush: impl Into<BrushRef<'b>>,
         brush_transform: Option<Affine>,
-        shape: &impl vello::kurbo::Shape,
+        shape: &impl crate::kurbo::Shape,
     ) {
         let Some(shape) = self.shape(shape, FILL_TOLERANCE) else {
             return;
@@ -494,7 +495,7 @@ impl DisplayList {
         transform: Affine,
         brush: impl Into<BrushRef<'b>>,
         brush_transform: Option<Affine>,
-        shape: &impl vello::kurbo::Shape,
+        shape: &impl crate::kurbo::Shape,
     ) {
         if style.width == 0.0 {
             return;
@@ -516,7 +517,7 @@ impl DisplayList {
 
     /// The region of a clip or layer over `clip`; an empty shape clips
     /// everything.
-    fn region(&mut self, rule: Fill, transform: Affine, clip: &impl vello::kurbo::Shape) -> Region {
+    fn region(&mut self, rule: Fill, transform: Affine, clip: &impl crate::kurbo::Shape) -> Region {
         let shape = self
             .shape(clip, FILL_TOLERANCE)
             .unwrap_or(Shape::Rect(Rect::ZERO));
@@ -536,7 +537,7 @@ impl DisplayList {
         blend: impl Into<BlendMode>,
         alpha: f32,
         transform: Affine,
-        clip: &impl vello::kurbo::Shape,
+        clip: &impl crate::kurbo::Shape,
     ) {
         let region = self.region(clip_style, transform, clip);
         self.open_layer(Item::PushLayer {
@@ -552,7 +553,7 @@ impl DisplayList {
         &mut self,
         clip_style: Fill,
         transform: Affine,
-        clip: &impl vello::kurbo::Shape,
+        clip: &impl crate::kurbo::Shape,
     ) {
         let region = self.region(clip_style, transform, clip);
         self.open_layer(Item::PushClip {
@@ -961,10 +962,9 @@ pub(crate) fn units_per_em(font: &[u8], index: u32) -> f64 {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use vello::kurbo::{Line, RoundedRect};
-    use vello::peniko::{Compose, Mix};
-
     use super::*;
+    use crate::kurbo::{Line, RoundedRect};
+    use crate::peniko::{Compose, Mix};
 
     fn rect() -> Rect {
         Rect::new(0.0, 0.0, 8.0, 8.0)
@@ -1075,7 +1075,7 @@ mod tests {
     /// place.
     #[test]
     fn an_append_is_the_same_drawing_recorded_in_place() {
-        let font = FontData::new(vello::peniko::Blob::new(Arc::new([0_u8; 4])), 0);
+        let font = FontData::new(crate::peniko::Blob::new(Arc::new([0_u8; 4])), 0);
         let record = |list: &mut DisplayList, outer: Affine| {
             list.stroke(
                 &Stroke::new(1.0),
@@ -1163,7 +1163,7 @@ mod tests {
     #[expect(clippy::float_cmp, reason = "exact products of small powers of two")]
     fn synthetic_bold_is_stored_in_the_units_glifo_outlines_in() {
         // No `head` table: 1000 units per em.
-        let font = FontData::new(vello::peniko::Blob::new(Arc::new([0_u8; 4])), 0);
+        let font = FontData::new(crate::peniko::Blob::new(Arc::new([0_u8; 4])), 0);
         let glyph = [Glyph {
             id: 1,
             x: 0.0,

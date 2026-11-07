@@ -19,12 +19,12 @@
 use std::fmt;
 
 use euclid::default::Vector2D;
-use vello::peniko::ImageData;
 
 use super::blur::FilterTextures;
 use super::raster::Raster;
 use super::vector_textures::VectorTextures;
 use crate::paint::display_list::DisplayList;
+use crate::peniko::ImageData;
 use crate::visual::{CommittedFrame, ScrollSlot};
 
 /// Headless GPU renderer for tests, benchmarks, and windowless embedders.
@@ -239,7 +239,7 @@ impl Headless {
         offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
         scroll_generation: u64,
         animation_now: Option<f64>,
-        base_color: vello::peniko::Color,
+        base_color: crate::peniko::Color,
     ) -> Result<&[Option<ImageData>], GpuError> {
         let Self {
             gpu,
@@ -280,7 +280,7 @@ impl Headless {
         scene: &DisplayList,
         width: u32,
         height: u32,
-        base_color: vello::peniko::Color,
+        base_color: crate::peniko::Color,
     ) -> Result<(), GpuError> {
         if width == 0 || height == 0 {
             return Err(GpuError::Render(format!(
@@ -413,7 +413,7 @@ impl Headless {
         scene: &DisplayList,
         width: u32,
         height: u32,
-        base_color: vello::peniko::Color,
+        base_color: crate::peniko::Color,
     ) -> Result<Vec<u8>, GpuError> {
         self.render_frame(scene, width, height, base_color)?;
         self.read_pixels()

@@ -8,17 +8,17 @@
 use std::sync::Arc;
 
 use seldon::text::{FontBlob, TextContext};
-use vello::kurbo::{
-    Affine, BezPath, Cap, Circle, Ellipse, Join, PathEl, Point, Rect, Shape, Stroke,
-};
-use vello::peniko::color::DynamicColor;
-use vello::peniko::{BlendMode, Brush, Color, ColorStop, Compose, Extend, Fill, Gradient, Mix};
 
 use super::shapes::{self, ARC_TOLERANCE};
 use super::text::{TextAnchor, TextPaint};
 use super::{Item, LayerClip, SvgError, VectorDocument, encode, parse};
+use crate::kurbo::{
+    Affine, BezPath, Cap, Circle, Ellipse, Join, PathEl, Point, Rect, Shape, Stroke,
+};
 use crate::paint::display_list::DisplayList;
 use crate::paint::equivalence::assert_scenes_identical;
+use crate::peniko::color::DynamicColor;
+use crate::peniko::{BlendMode, Brush, Color, ColorStop, Compose, Extend, Fill, Gradient, Mix};
 use crate::render::image::{AspectAlign, AspectRatio};
 
 const RED: Color = Color::from_rgba8(255, 0, 0, 255);

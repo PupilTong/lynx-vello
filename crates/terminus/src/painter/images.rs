@@ -16,8 +16,7 @@
 
 use std::sync::Arc;
 
-use vello::peniko::ImageData;
-
+use crate::peniko::ImageData;
 use crate::render::image::FrameImages;
 
 /// The pixels the current commit draws, in draw order.

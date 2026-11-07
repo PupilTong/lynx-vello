@@ -14,8 +14,8 @@
 
 use std::fmt;
 
+use terminus::link::peniko::{Color, ImageData};
 use terminus::link::render::gpu::{GpuError, Headless};
-use terminus::link::vello::peniko::{Color, ImageData};
 use terminus::link::{DisplayList, Document};
 
 use crate::image::{Image, ImageError};

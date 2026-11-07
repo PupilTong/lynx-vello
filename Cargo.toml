@@ -109,12 +109,9 @@ wasm_thread = { git = "https://github.com/utooland/wasm_thread", rev = "94438ff7
 web-sys = "0.3"
 winit = { version = "0.30.13", default-features = false, features = ["rwh_06"] }
 
-# terminus's paint walk records into a `vello::Scene`; only that scene and
-# its `Encoding` are used, so vello's own GPU renderer (its `wgpu` feature,
-# with its shaders and compute pipelines) stays out of the build.
-vello = { version = "0.11", default-features = false }
 # terminus's rasterizer: sparse strips on vello_gpu's wgpu backend
-# (`crates/terminus/src/render/raster.rs`).
+# (`crates/terminus/src/render/raster.rs`). Its `kurbo` and `peniko`
+# re-exports are the geometry and paint types the whole crate draws in.
 vello_gpu = { version = "0.3", default-features = false, features = ["wgpu", "text"] }
 glifo = { version = "0.4", default-features = false }
 # vello_gpu's own image-cache allocator, which terminus replays to know

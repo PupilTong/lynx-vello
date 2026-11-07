@@ -12,10 +12,9 @@
 //! ([`super::gpu::Headless`], the painter's window) and the bakes
 //! ([`super::blur`], [`super::vector_textures`]) are written once.
 
-use vello::peniko::{Color, ImageAlphaType, ImageData};
-
 use super::gpu::GpuError;
 use crate::paint::display_list::DisplayList;
+use crate::peniko::{Color, ImageAlphaType, ImageData};
 
 /// See the [module documentation](self).
 pub(crate) struct Raster {

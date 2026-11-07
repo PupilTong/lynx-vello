@@ -94,7 +94,7 @@
 //! `currentColor` is the stop's own `color`, inherited through the
 //! gradient's ancestors, whichever element the gradient paints. Gradients
 //! inherit attributes and stops along their `href` chain, map `spreadMethod` to
-//! [`Extend`](vello::peniko::Extend), take `gradientTransform` as the
+//! [`Extend`](crate::peniko::Extend), take `gradientTransform` as the
 //! brush transform, and resolve `objectBoundingBox` units against the shape's
 //! `kurbo` bounding box (a text chunk's advance box after shaping);
 //! `userSpaceOnUse` percentages resolve against the viewport. A radial
@@ -133,9 +133,9 @@ mod text;
 pub(crate) use encode::encode;
 pub(crate) use parse::parse;
 pub(crate) use text::TextItem;
-use vello::kurbo::{Affine, BezPath, Rect, Stroke};
-use vello::peniko::{Brush, Fill};
 
+use crate::kurbo::{Affine, BezPath, Rect, Stroke};
+use crate::peniko::{Brush, Fill};
 use crate::render::image::AspectRatio;
 
 /// A parsed SVG document, ready to encode: its sizes and a flat command

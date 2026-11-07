@@ -57,7 +57,7 @@
 
 use std::sync::Arc;
 
-use bobcat_core::vello::peniko::ImageData;
+use bobcat_core::peniko::ImageData;
 use bobcat_core::{
     DocumentKind, ImageEvent, ImageReports, ImageSizeHint, MAX_RENDERABLE_DIMENSION, VectorDocument,
 };
@@ -520,7 +520,7 @@ pub(crate) fn read(resources: &Resources, source: &str, hint: ImageSizeHint) -> 
     }
 }
 
-/// Never ask a decoder for more than vello can draw.
+/// Never ask a decoder for more than the rasterizer can draw.
 fn bounded(target: (u32, u32)) -> (u32, u32) {
     ImageSizeHint::new(MAX_RENDERABLE_DIMENSION, MAX_RENDERABLE_DIMENSION).fit(target.0, target.1)
 }

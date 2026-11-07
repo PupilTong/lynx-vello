@@ -41,14 +41,14 @@ use smallvec::SmallVec;
 use stylo::computed_values::text_decoration_style::T as TextDecorationStyle;
 use stylo::properties::ComputedValues;
 use stylo::values::computed::{ColorPropertyValue, Image, TextDecorationLine};
-use vello::kurbo::{Affine, BezPath, Line, Rect, Stroke};
-use vello::peniko;
-use vello::peniko::{BrushRef, Color, Fill, StyleRef};
 
+use crate::kurbo::{Affine, BezPath, Line, Rect, Stroke};
 use crate::layout::paragraph::PaintedParagraph;
 use crate::paint::background::{GradientBrush, gradient_brush};
 use crate::paint::convert;
 use crate::paint::display_list::{DisplayList, Embolden, Glyph};
+use crate::peniko;
+use crate::peniko::{BrushRef, Color, Fill, StyleRef};
 
 enum TextFill {
     Solid(Color),
@@ -1155,9 +1155,8 @@ pub(crate) fn paint_caret_and_composition(
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use vello::kurbo::{CubicBez, ParamCurve, PathEl, Point};
-
     use super::*;
+    use crate::kurbo::{CubicBez, ParamCurve, PathEl, Point};
 
     const AHEM: &[u8] = include_bytes!("../../../seldon/tests/fixtures/Ahem.ttf");
 

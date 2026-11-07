@@ -9,8 +9,9 @@
 use euclid::default::{Size2D, Transform3D};
 use stylo::color::{AbsoluteColor, ColorSpace};
 use stylo::properties::ComputedValues;
-use vello::kurbo::Affine;
-use vello::peniko::Color;
+
+use crate::kurbo::Affine;
+use crate::peniko::Color;
 
 pub(crate) fn item_affine(transform: &Transform3D<f32>, size: Size2D<f32>) -> Option<Affine> {
     if !transform.is_invertible() {
@@ -65,9 +66,8 @@ pub(crate) fn current_color(style: &ComputedValues) -> Color {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use vello::kurbo::Point;
-
     use super::*;
+    use crate::kurbo::Point;
 
     #[test]
     fn affine_matrices_convert_exactly() {

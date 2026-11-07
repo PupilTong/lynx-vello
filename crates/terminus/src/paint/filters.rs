@@ -85,11 +85,10 @@
 
 use std::ops::Range;
 
-use vello::kurbo::{Affine, Rect};
-use vello::peniko::{BlendMode, Color, Compose, Fill, Mix};
-
+use crate::kurbo::{Affine, Rect};
 use crate::paint::display_list::DisplayList;
 use crate::paint::shape::{BoxShape, with_shape};
+use crate::peniko::{BlendMode, Color, Compose, Fill, Mix};
 
 pub(crate) type Filter = stylo::values::computed::effects::Filter;
 

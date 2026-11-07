@@ -290,7 +290,7 @@ impl ComposedSlots {
 /// committed one on the element's effect layer.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct AnimationSample {
-    pub(crate) delta: vello::kurbo::Affine,
+    pub(crate) delta: crate::kurbo::Affine,
     pub(crate) alpha: Option<f32>,
 }
 
@@ -573,7 +573,7 @@ impl PaintOrder {
                 (
                     index,
                     AnimationSample {
-                        delta: vello::kurbo::Affine::IDENTITY,
+                        delta: crate::kurbo::Affine::IDENTITY,
                         alpha: None,
                     },
                 )
