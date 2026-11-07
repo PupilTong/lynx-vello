@@ -23,7 +23,7 @@ use euclid::default::Vector2D;
 use super::blur::FilterTextures;
 use super::raster::Raster;
 use super::vector_textures::VectorTextures;
-use crate::paint::display_list::DisplayList;
+use crate::paint::display_list::{DisplayList, Texture};
 use crate::peniko::ImageData;
 use crate::visual::{CommittedFrame, ScrollSlot};
 
@@ -201,7 +201,7 @@ impl Headless {
     pub fn prepare_vectors(
         &mut self,
         frame: &CommittedFrame,
-    ) -> Result<&[Option<ImageData>], GpuError> {
+    ) -> Result<&[Option<Texture>], GpuError> {
         let Self {
             gpu,
             raster,
@@ -235,12 +235,12 @@ impl Headless {
         &mut self,
         frame: &CommittedFrame,
         images: &[Option<ImageData>],
-        vectors: &[Option<ImageData>],
+        vectors: &[Option<Texture>],
         offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
         scroll_generation: u64,
         animation_now: Option<f64>,
         base_color: crate::peniko::Color,
-    ) -> Result<&[Option<ImageData>], GpuError> {
+    ) -> Result<&[Option<Texture>], GpuError> {
         let Self {
             gpu,
             raster,

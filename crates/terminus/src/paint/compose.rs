@@ -80,11 +80,9 @@ use euclid::default::Vector2D;
 use smallvec::SmallVec;
 
 use crate::kurbo::{Affine, Point, Rect, Size};
-use crate::paint::display_list::DisplayList;
+use crate::paint::display_list::{DisplayList, ImagePaint, Paint, Texture};
 use crate::paint::shape::{BoxShape, with_shape};
-use crate::peniko::{
-    BlendMode, BrushRef, Extend, Fill, ImageBrush, ImageData, ImageQuality, ImageSampler,
-};
+use crate::peniko::{BlendMode, Extend, Fill, ImageData, ImageQuality, ImageSampler};
 use crate::render::image::{
     AspectAlign, AspectRatio, ImageSizeHint, MAX_RENDERABLE_DIMENSION, is_renderable,
 };
@@ -303,12 +301,12 @@ pub(crate) fn aspect_transform(viewport: (f32, f32), aspect: AspectRatio, size: 
 fn encode_vector(
     scene: &mut DisplayList,
     draws: &[VectorDraw],
-    textures: &[Option<ImageData>],
+    textures: &[Option<Texture>],
     index: u32,
     outer: Affine,
 ) {
     let index = index as usize;
-    if let Some(Some(data)) = textures.get(index) {
+    if let Some(Some(texture)) = textures.get(index) {
         let draw = &draws[index];
         encode_textured(
             scene,
@@ -317,8 +315,37 @@ fn encode_vector(
             draw.extent,
             draw.sampler,
             &draw.area,
-            data,
+            Picture::Texture(*texture),
         );
+    }
+}
+
+/// What a textured draw fills with: a bitmap's pixels, or a texture the
+/// rasterizer holds.
+#[derive(Clone, Copy)]
+enum Picture<'a> {
+    Bitmap(&'a ImageData),
+    Texture(Texture),
+}
+
+impl Picture<'_> {
+    /// The picture's size, which a draw's brush scale divides by.
+    fn size(self) -> (u32, u32) {
+        match self {
+            Self::Bitmap(data) => (data.width, data.height),
+            Self::Texture(texture) => texture.size(),
+        }
+    }
+
+    /// The paint drawing the picture through `sampler`.
+    fn paint(self, sampler: ImageSampler) -> Paint {
+        match self {
+            Self::Bitmap(image) => Paint::Image(Arc::new(ImagePaint {
+                image: image.clone(),
+                sampler,
+            })),
+            Self::Texture(texture) => Paint::Texture { texture, sampler },
+        }
     }
 }
 
@@ -390,6 +417,13 @@ pub(crate) fn encode_image(
     outer: Affine,
     data: &ImageData,
 ) {
+    // A bitmap the rasterizer cannot place draws as nothing — the same
+    // one-frame gap a not-yet-loaded image already produces. This is the
+    // only place the bound is enforced, because it is the only place the
+    // bitmap is known, and the only place the extent is divided by it.
+    if !is_renderable(data) {
+        return;
+    }
     encode_textured(
         scene,
         outer * draw.transform,
@@ -397,13 +431,13 @@ pub(crate) fn encode_image(
         draw.extent,
         draw.sampler,
         &draw.area,
-        data,
+        Picture::Bitmap(data),
     );
 }
 
-/// Encodes one fill of `area` with `data`, under `transform`, placed so one
-/// copy of the bitmap covers the `extent` at `anchor`. The shared encoder of
-/// an image draw and a vector draw's texture.
+/// Encodes one fill of `area` with `picture`, under `transform`, placed so
+/// one copy of it covers the `extent` at `anchor`. The shared encoder of an
+/// image draw and a vector draw's texture.
 fn encode_textured(
     scene: &mut DisplayList,
     transform: Affine,
@@ -411,40 +445,31 @@ fn encode_textured(
     extent: Size,
     sampler: ImageSampler,
     area: &ImageArea,
-    data: &ImageData,
+    picture: Picture<'_>,
 ) {
-    // A bitmap the rasterizer cannot place draws as nothing — the same one-frame gap a
-    // not-yet-loaded image already produces. This is the only place the bound
-    // is enforced, because it is the only place the bitmap is known, and the
-    // only place the extent is divided by it.
-    if !is_renderable(data) {
-        return;
-    }
+    let (width, height) = picture.size();
     let brush_transform = Affine::translate(anchor.to_vec2())
         * Affine::scale_non_uniform(
-            extent.width / f64::from(data.width),
-            extent.height / f64::from(data.height),
+            extent.width / f64::from(width),
+            extent.height / f64::from(height),
         );
-    let brush = BrushRef::Image(ImageBrush {
-        image: data,
-        sampler,
-    });
+    let paint = picture.paint(sampler);
     match area {
         ImageArea::Fill(CapturedShape::Rect(rect)) => {
-            scene.fill(Fill::NonZero, transform, brush, Some(brush_transform), rect);
+            scene.fill_paint(Fill::NonZero, transform, paint, Some(brush_transform), rect);
         }
         ImageArea::Fill(CapturedShape::Box(shape)) => {
-            with_shape!(shape, |s| scene.fill(
+            with_shape!(shape, |s| scene.fill_paint(
                 Fill::NonZero,
                 transform,
-                brush,
+                paint,
                 Some(brush_transform),
                 s
             ));
         }
         ImageArea::Clipped { clip, draw: rect } => {
             with_shape!(clip, |s| scene.push_clip_layer(Fill::NonZero, transform, s));
-            scene.fill(Fill::NonZero, transform, brush, Some(brush_transform), rect);
+            scene.fill_paint(Fill::NonZero, transform, paint, Some(brush_transform), rect);
             scene.pop_layer();
         }
     }
@@ -1088,9 +1113,9 @@ pub(crate) fn replay(
     image_draws: &[ImageDraw],
     images: &[Option<ImageData>],
     vector_draws: &[VectorDraw],
-    vectors: &[Option<ImageData>],
+    vectors: &[Option<Texture>],
     filter_groups: &[FilterGroup],
-    filtered: &[Option<ImageData>],
+    filtered: &[Option<Texture>],
     samples: &SpaceSamples<'_>,
     seams: &[SeamPass],
 ) {
@@ -1383,11 +1408,11 @@ pub(crate) struct Tables<'a> {
     pub(crate) vector_draws: &'a [VectorDraw],
     /// One entry per [`Tables::vector_draws`] entry: the texture the raster
     /// cache baked for that draw, or `None` for a draw that encodes nothing.
-    pub(crate) vectors: &'a [Option<ImageData>],
+    pub(crate) vectors: &'a [Option<Texture>],
     pub(crate) filter_groups: &'a [FilterGroup],
     /// One entry per [`Tables::filter_groups`] entry: the baked texture for
     /// that entry, or `None` for the unfiltered fallback.
-    pub(crate) filtered: &'a [Option<ImageData>],
+    pub(crate) filtered: &'a [Option<Texture>],
     /// The frame's space tree, which the ops' spaces index.
     pub(crate) spaces: &'a [Space],
     pub(crate) samples: &'a AnimationSamples,
@@ -1491,12 +1516,12 @@ pub(crate) fn replay_ops(
             ComposeOp::PushFilter { index: group } => {
                 let group_index = *group as usize;
                 let group = &filter_groups[group_index];
-                if let Some(Some(image)) = filtered.get(group_index) {
+                if let Some(&Some(texture)) = filtered.get(group_index) {
                     // A seam copy that the group does not ride skips the
                     // texture too: it holds the group's content, none of
                     // which the copy draws.
                     if draws(group.space) {
-                        draw_filtered(scene, group, image, spaces, device_transform);
+                        draw_filtered(scene, group, texture, spaces, device_transform);
                     }
                     // Straight to the matching `PopFilter`, which is a no-op.
                     index = group.ops.end as usize;
@@ -1507,11 +1532,12 @@ pub(crate) fn replay_ops(
             ComposeOp::PushBackdrop { index: slot } => {
                 let slot = *slot as usize;
                 let entry = &filter_groups[slot];
-                if let (Some(Some(image)), Some(backdrop)) = (filtered.get(slot), &entry.backdrop)
+                if let (Some(&Some(texture)), Some(backdrop)) =
+                    (filtered.get(slot), &entry.backdrop)
                     && draws(entry.space)
                 {
                     let animated = space::nearest_animation(spaces, entry.space).is_some();
-                    draw_backdrop(scene, entry, backdrop, image, animated, device_transform);
+                    draw_backdrop(scene, entry, backdrop, texture, animated, device_transform);
                 }
             }
         }
@@ -1530,7 +1556,7 @@ pub(crate) fn replay_ops(
 fn draw_filtered(
     scene: &mut DisplayList,
     group: &FilterGroup,
-    image: &ImageData,
+    texture: Texture,
     spaces: &[Space],
     device_transform: &dyn Fn(Option<u32>) -> Affine,
 ) {
@@ -1539,9 +1565,12 @@ fn draw_filtered(
     } else {
         ImageQuality::Medium
     };
-    scene.draw_image(
-        ImageBrush {
-            image,
+    let (width, height) = texture.size();
+    scene.fill_paint(
+        Fill::NonZero,
+        device_transform(group.space) * Affine::translate((group.rect.x0, group.rect.y0)),
+        Paint::Texture {
+            texture,
             sampler: ImageSampler {
                 x_extend: Extend::Pad,
                 y_extend: Extend::Pad,
@@ -1549,7 +1578,8 @@ fn draw_filtered(
                 alpha: 1.0,
             },
         },
-        device_transform(group.space) * Affine::translate((group.rect.x0, group.rect.y0)),
+        None,
+        &Rect::new(0.0, 0.0, f64::from(width), f64::from(height)),
     );
 }
 
@@ -1578,7 +1608,7 @@ fn draw_backdrop(
     scene: &mut DisplayList,
     entry: &FilterGroup,
     backdrop: &Backdrop,
-    image: &ImageData,
+    texture: Texture,
     animated: bool,
     device_transform: &dyn Fn(Option<u32>) -> Affine,
 ) {
@@ -1594,15 +1624,15 @@ fn draw_backdrop(
     } else {
         ImageQuality::Medium
     };
-    let brush = BrushRef::Image(ImageBrush {
-        image,
+    let paint = Paint::Texture {
+        texture,
         sampler: ImageSampler {
             x_extend: Extend::Pad,
             y_extend: Extend::Pad,
             quality,
             alpha: 1.0,
         },
-    });
+    };
     // A backdrop with post-blur passes is clipped to its rounded box first
     // and the passes run over the whole rectangle inside the clip, so they
     // see an opaque backdrop at the box's anti-aliased rim. Run over the
@@ -1617,10 +1647,10 @@ fn draw_backdrop(
             transform,
             s
         ));
-        scene.fill(
+        scene.fill_paint(
             Fill::NonZero,
             transform,
-            brush,
+            paint,
             Some(brush_transform),
             &bounds,
         );
@@ -1628,10 +1658,10 @@ fn draw_backdrop(
         scene.pop_layer();
         return;
     }
-    with_shape!(&backdrop.shape, |s| scene.fill(
+    with_shape!(&backdrop.shape, |s| scene.fill_paint(
         Fill::NonZero,
         transform,
-        brush,
+        paint,
         Some(brush_transform),
         s
     ));
@@ -1806,7 +1836,7 @@ mod tests {
     fn replay_program(
         program: &[ComposeOp],
         groups: &[FilterGroup],
-        filtered: &[Option<ImageData>],
+        filtered: &[Option<Texture>],
     ) -> DisplayList {
         let fragments = [fragment()];
         let mut scene = DisplayList::default();
@@ -2040,13 +2070,7 @@ mod tests {
         let mut group = group(None);
         group.ops = 2..3;
         let groups = [group];
-        let baked = ImageData {
-            data: crate::peniko::Blob::new(Arc::new([0_u8, 0, 0, 0])),
-            format: crate::peniko::ImageFormat::Rgba8,
-            alpha_type: crate::peniko::ImageAlphaType::AlphaPremultiplied,
-            width: 8,
-            height: 8,
-        };
+        let baked = texture(8, 8);
 
         let raw = replay_program(&program, &groups, &[None]);
         let composed = replay_program(&program, &groups, &[Some(baked)]);
@@ -2253,19 +2277,13 @@ mod tests {
             },
             ComposeOp::PushBackdrop { index: 0 },
         ];
-        let baked = ImageData {
-            data: crate::peniko::Blob::new(Arc::new([0_u8, 0, 0, 0])),
-            format: crate::peniko::ImageFormat::Rgba8,
-            alpha_type: crate::peniko::ImageAlphaType::AlphaPremultiplied,
-            width: 8,
-            height: 8,
-        };
+        let baked = texture(8, 8);
 
         let plain = {
             let mut entry = backdrop_entry(None);
             entry.ops = 0..1;
             let entries = [entry];
-            replay_program(&program, &entries, &[Some(baked.clone())])
+            replay_program(&program, &entries, &[Some(baked)])
         };
         assert_eq!(plain.image_draws(), 1, "the entry's texture, once");
         assert_eq!(
@@ -2406,22 +2424,16 @@ mod tests {
         ImageArea::Fill(CapturedShape::Rect(Rect::new(0.0, 0.0, 8.0, 8.0)))
     }
 
-    /// The handle a baked texture is drawn through: an empty blob with an
-    /// identity of its own, as the raster cache registers one.
-    fn texture(width: u32, height: u32) -> ImageData {
-        ImageData {
-            data: crate::peniko::Blob::new(Arc::new([])),
-            format: crate::peniko::ImageFormat::Rgba8,
-            alpha_type: crate::peniko::ImageAlphaType::Alpha,
-            width,
-            height,
-        }
+    /// A baked texture's handle, with an id of its own, as the raster
+    /// cache and the filter bakes mint one.
+    fn texture(width: u32, height: u32) -> Texture {
+        Texture::new(width, height, width, height)
     }
 
     fn replay_vectors(
         program: &[ComposeOp],
         draws: &[VectorDraw],
-        vectors: &[Option<ImageData>],
+        vectors: &[Option<Texture>],
     ) -> DisplayList {
         let fragments = [fragment()];
         let mut scene = DisplayList::default();
@@ -2476,9 +2488,10 @@ mod tests {
         }
     }
 
-    /// With a texture the op is the one image fill an [`ImageDraw`] of the
-    /// same bitmap over the same area makes — through a clip pair, closed
-    /// inside the op, where a rounded clip is only partly covered.
+    /// With a texture the op is the one fill an [`ImageDraw`] makes over
+    /// the same area, painted with the texture by its id — through a clip
+    /// pair, closed inside the op, where a rounded clip is only partly
+    /// covered.
     #[test]
     fn a_vector_op_with_a_texture_draws_it_as_one_image_fill() {
         let program = [ComposeOp::Vector {
@@ -2489,21 +2502,17 @@ mod tests {
         let plain = replay_vectors(
             &program,
             &[vector_draw(Affine::IDENTITY, whole())],
-            &[Some(baked.clone())],
+            &[Some(baked)],
         );
         let mut expected = DisplayList::default();
-        encode_image(
+        encode_textured(
             &mut expected,
-            &ImageDraw {
-                image: Arc::from("app:///x.png"),
-                transform: Affine::IDENTITY,
-                anchor: Point::ZERO,
-                extent: Size::new(8.0, 8.0),
-                sampler: ImageSampler::default(),
-                area: whole(),
-            },
             Affine::IDENTITY,
-            &baked,
+            Point::ZERO,
+            Size::new(8.0, 8.0),
+            ImageSampler::default(),
+            &whole(),
+            Picture::Texture(baked),
         );
         crate::paint::equivalence::assert_scenes_identical(&plain, &expected);
         assert_eq!(plain.image_draws(), 1, "the texture");

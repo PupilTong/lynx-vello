@@ -22,7 +22,9 @@ pub use wgpu;
 
 pub use crate::layout::TextLineReport;
 pub use crate::paint::compose::FilterGroup;
-pub use crate::paint::display_list::{DisplayList, DrawGlyphs, Embolden, Glyph, NormalizedCoord};
+pub use crate::paint::display_list::{
+    DisplayList, DrawGlyphs, Embolden, Glyph, NormalizedCoord, Texture,
+};
 pub use crate::render::image::{
     DocumentKind, DocumentRequest, FrameImages, ImageEvent, ImageInbox, ImageOutcome, ImageReports,
     ImageRole, ImageSizeHint, MAX_RENDERABLE_DIMENSION, NoImages, is_renderable,

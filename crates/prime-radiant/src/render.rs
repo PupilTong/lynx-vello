@@ -14,9 +14,9 @@
 
 use std::fmt;
 
-use terminus::link::peniko::{Color, ImageData};
+use terminus::link::peniko::Color;
 use terminus::link::render::gpu::{GpuError, Headless};
-use terminus::link::{DisplayList, Document};
+use terminus::link::{DisplayList, Document, Texture};
 
 use crate::image::{Image, ImageError};
 
@@ -99,11 +99,11 @@ pub fn capture_document_sized<T: Sync>(
     // bakes: a capture composes the frame exactly as it was committed. They
     // take the capture's background, which is the canvas a backdrop at the
     // document's root filters.
-    let vectors: Vec<Option<ImageData>> = gpu
+    let vectors: Vec<Option<Texture>> = gpu
         .prepare_vectors(&frame)
         .map_err(CaptureError::Gpu)?
         .to_vec();
-    let filtered: Vec<Option<ImageData>> = gpu
+    let filtered: Vec<Option<Texture>> = gpu
         .prepare_filters(&frame, &images, &vectors, &|_| None, 0, None, background)
         .map_err(CaptureError::Gpu)?
         .to_vec();

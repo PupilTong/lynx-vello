@@ -109,8 +109,8 @@
 //! entry still gets the isolated copy of its backdrop that its blend passes
 //! and its element's own group effects compose against.
 //!
-//! The output is bound to a stable `peniko::ImageData` handle through
-//! [`Raster::bind_texture`], declared `AlphaPremultiplied`. The rasterizer
+//! The output is bound under a stable [`Texture`] id through
+//! [`Raster::bind_texture`], holding premultiplied colour. The rasterizer
 //! samples the bound texture in place as an external texture, so a re-bake
 //! into it is what the next render draws, with nothing to bind again.
 //!
@@ -134,8 +134,8 @@ use euclid::default::Vector2D;
 
 use super::gpu::{GpuDevice, GpuError};
 use super::raster::Raster;
-use crate::paint::display_list::DisplayList;
-use crate::peniko::{Blob, Color, ImageAlphaType, ImageData, ImageFormat};
+use crate::paint::display_list::{DisplayList, Texture};
+use crate::peniko::{Color, ImageData};
 use crate::visual::{CommittedFrame, ScrollSlot};
 
 /// Largest per-axis device-pixel count one filter bake may have: the
@@ -421,7 +421,7 @@ struct Bank {
     /// level moves.
     pong: Option<Plane>,
     output: Plane,
-    handle: ImageData,
+    handle: Texture,
 }
 
 /// Usage flags, named once so a texture's role is readable at its allocation.
@@ -443,15 +443,7 @@ impl Bank {
     fn new(raster: &mut Raster, device: &wgpu::Device, width: u32, height: u32) -> Self {
         let target = Plane::new(device, "dom filter bake", width, height, BAKE_USAGE);
         let output = Plane::new(device, "dom filter output", width, height, OUTPUT_USAGE);
-        // The blob is a deliberate fake: only its id is read, to find the
-        // texture bound to it. The alpha type is the blur chain's.
-        let handle = ImageData {
-            data: Blob::new(std::sync::Arc::new([])),
-            format: ImageFormat::Rgba8,
-            alpha_type: ImageAlphaType::AlphaPremultiplied,
-            width: output.width,
-            height: output.height,
-        };
+        let handle = Texture::new(output.width, output.height, output.width, output.height);
         raster.bind_texture(&handle, Some(output.texture.clone()));
         Self {
             width: output.width,
@@ -714,9 +706,10 @@ pub(crate) struct FilterTextures {
     /// The scene one group's ops replay into. Reset per group, so its
     /// encoding capacity is reused across groups and frames.
     bake: DisplayList,
-    /// Index-parallel with the frame's filter groups: the handle the compose
-    /// program draws each one through, or `None` for the raw fallback.
-    images: Vec<Option<ImageData>>,
+    /// Index-parallel with the frame's filter groups: the texture the
+    /// compose program draws each one through, or `None` for the raw
+    /// fallback.
+    images: Vec<Option<Texture>>,
     /// Whether each group fits the budget, in program order. A field so the
     /// admission pass allocates nothing.
     admitted: Vec<bool>,
@@ -781,12 +774,12 @@ impl FilterTextures {
         queue: &wgpu::Queue,
         frame: &CommittedFrame,
         images: &[Option<ImageData>],
-        vectors: &[Option<ImageData>],
+        vectors: &[Option<Texture>],
         offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
         scroll_generation: u64,
         animation_now: Option<f64>,
         canvas: Color,
-    ) -> Result<&[Option<ImageData>], GpuError> {
+    ) -> Result<&[Option<Texture>], GpuError> {
         let groups = frame.filter_groups();
         let commit = frame.commit_id();
         self.adopt_canvas(canvas);
@@ -934,7 +927,7 @@ impl FilterTextures {
         queue: &wgpu::Queue,
         frame: &CommittedFrame,
         images: &[Option<ImageData>],
-        vectors: &[Option<ImageData>],
+        vectors: &[Option<Texture>],
         offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
         animation_now: Option<f64>,
         canvas: Color,
@@ -1015,7 +1008,7 @@ impl FilterTextures {
             run_chain(&mut passes, bank, &plan);
             passes.submit();
 
-            filtered[index] = Some(bank.handle.clone());
+            filtered[index] = Some(bank.handle);
         }
         Ok(())
     }
@@ -1140,9 +1133,9 @@ fn run_chain(passes: &mut Passes<'_>, bank: &Bank, plan: &Decimation) {
 /// The bank for one group at `width` × `height`, reusing the one already
 /// there when it is the right size.
 ///
-/// A resize is a new texture and therefore a new handle: the rasterizer
-/// keys a bound texture by blob id and reads the handle's dimensions as the
-/// texture's, so the old handle is unregistered rather than repointed.
+/// A resize is a new texture and therefore a new [`Texture`]: a draw reads
+/// the texture's size from the handle it names, so the old one is unbound
+/// rather than repointed.
 fn ensure_bank<'bank>(
     slot: &'bank mut Option<Bank>,
     raster: &mut Raster,

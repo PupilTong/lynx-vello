@@ -22,7 +22,7 @@ use stylo::properties::animated_properties::AnimationValueMap;
 use super::{AnimationSample, PaintOrder, SpaceSamples};
 use crate::kurbo::Affine;
 use crate::paint::compose::{self, ComposeOp, FilterGroup};
-use crate::paint::display_list::DisplayList;
+use crate::paint::display_list::{DisplayList, Texture};
 use crate::peniko::ImageData;
 use crate::scroll::{
     AutoScrollRequest, CaptureAxes, ChainLink, ScrollAxes, ScrollRequest, SnapAxis, SnapPoint,
@@ -547,8 +547,8 @@ impl CommittedFrame {
         &self,
         scene: &mut DisplayList,
         images: &[Option<ImageData>],
-        filtered: &[Option<ImageData>],
-        vectors: &[Option<ImageData>],
+        filtered: &[Option<Texture>],
+        vectors: &[Option<Texture>],
         offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
         animation_now: Option<f64>,
     ) {
@@ -654,8 +654,8 @@ impl CommittedFrame {
         index: usize,
         scene: &mut DisplayList,
         images: &[Option<ImageData>],
-        filtered: &[Option<ImageData>],
-        vectors: &[Option<ImageData>],
+        filtered: &[Option<Texture>],
+        vectors: &[Option<Texture>],
         offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
         animation_now: Option<f64>,
     ) {

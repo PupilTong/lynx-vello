@@ -8,13 +8,13 @@
 //! and sampled in place as external textures.
 //!
 //! It answers two calls — render a list into a texture view, and bind or
-//! unbind the texture an [`ImageData`] handle names — so the targets
+//! unbind the texture a [`Texture`] names — so the targets
 //! ([`super::gpu::Headless`], the painter's window) and the bakes
 //! ([`super::blur`], [`super::vector_textures`]) are written once.
 
 use super::gpu::GpuError;
-use crate::paint::display_list::DisplayList;
-use crate::peniko::{Color, ImageAlphaType, ImageData};
+use crate::paint::display_list::{DisplayList, Texture};
+use crate::peniko::Color;
 
 /// See the [module documentation](self).
 pub(crate) struct Raster {
@@ -35,10 +35,6 @@ impl Raster {
     /// The usage a texture bound through [`Self::bind_texture`] needs: it
     /// is sampled in place.
     pub(crate) const BOUND_USAGE: wgpu::TextureUsages = wgpu::TextureUsages::TEXTURE_BINDING;
-
-    /// The alpha a texture [`Self::render_to_texture`] filled holds: the
-    /// rasterizer blends into its target premultiplied.
-    pub(crate) const OUTPUT_ALPHA: ImageAlphaType = ImageAlphaType::AlphaPremultiplied;
 
     /// Builds the rasterizer on `device`.
     pub(crate) fn new(device: &wgpu::Device) -> Self {
@@ -73,14 +69,14 @@ impl Raster {
             .map_err(GpuError::Render)
     }
 
-    /// Binds `texture` to every draw of `handle`, or with `None` unbinds it.
+    /// Binds `bound` to every draw of `texture`, or with `None` unbinds it.
     ///
-    /// `texture` matches `handle`'s dimensions or exceeds them by the
-    /// repeated edge [`super::vector_textures`] describes, was created with
-    /// [`Self::BOUND_USAGE`], and holds premultiplied colour. A draw samples
-    /// the texture as it is at that render, so redrawing into a bound
-    /// texture needs no further call.
-    pub(crate) fn bind_texture(&mut self, handle: &ImageData, texture: Option<wgpu::Texture>) {
-        self.sparse.bind(handle, texture);
+    /// `bound` is the size [`Texture`] names as its texture size, was
+    /// created with [`Self::BOUND_USAGE`], and holds premultiplied colour —
+    /// what the rasterizer writes into every target, since it blends into
+    /// it premultiplied. A draw samples the texture as it is at that render,
+    /// so redrawing into a bound texture needs no further call.
+    pub(crate) fn bind_texture(&mut self, texture: &Texture, bound: Option<wgpu::Texture>) {
+        self.sparse.bind(texture, bound);
     }
 }

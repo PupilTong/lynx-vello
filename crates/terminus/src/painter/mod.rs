@@ -48,7 +48,7 @@ use self::inertia::{AutoScroll, Axis, BounceBack, ChainOutcome, DragTrack, Fling
 use self::motion::{ElasticStep, Motion, resolve_elastic_step, stretch_of, unwind_stretch};
 use crate::clock::ClockInstant;
 use crate::input::{InputEvent, InputKind, PointerId};
-use crate::paint::display_list::DisplayList;
+use crate::paint::display_list::{DisplayList, Texture};
 use crate::peniko::{Color, ImageData};
 use crate::render::gpu::Headless;
 use crate::render::image::FrameImages;
@@ -453,7 +453,7 @@ impl Output {
     fn prepare_vectors(
         &mut self,
         frame: &CommittedFrame,
-        out: &mut Vec<Option<ImageData>>,
+        out: &mut Vec<Option<Texture>>,
     ) -> Result<(), PainterError> {
         out.clear();
         let baked = match self {
@@ -467,7 +467,7 @@ impl Output {
                 .map_err(|error| PainterError::Gpu(error.to_string()))?,
             Self::Window(graphics) => graphics.prepare_vectors(frame)?,
         };
-        out.extend(baked.iter().cloned());
+        out.extend(baked.iter().copied());
         Ok(())
     }
 
@@ -493,11 +493,11 @@ impl Output {
         &mut self,
         frame: &CommittedFrame,
         images: &[Option<ImageData>],
-        vectors: &[Option<ImageData>],
+        vectors: &[Option<Texture>],
         offset_of: &dyn Fn(&crate::visual::ScrollSlot) -> Option<Vector2D<f32>>,
         scroll_generation: u64,
         animation_now: Option<f64>,
-        out: &mut Vec<Option<ImageData>>,
+        out: &mut Vec<Option<Texture>>,
     ) -> Result<(), PainterError> {
         out.clear();
         let baked = match self {
@@ -526,7 +526,7 @@ impl Output {
                 animation_now,
             )?,
         };
-        out.extend(baked.iter().cloned());
+        out.extend(baked.iter().copied());
         Ok(())
     }
 
@@ -703,10 +703,10 @@ pub struct Painter {
     /// The `filter: blur()` textures of the frame being composed, copied out
     /// of the target's bake cache. Kept here so its capacity outlives a
     /// frame.
-    composed_filters: Vec<Option<ImageData>>,
+    composed_filters: Vec<Option<Texture>>,
     /// The vector image textures of the frame being composed, copied out of
     /// the target's raster cache, for the same reason.
-    composed_vectors: Vec<Option<ImageData>>,
+    composed_vectors: Vec<Option<Texture>>,
     /// The pixels the adopted commit draws, read out of the host's store.
     images: images::PainterImages,
     /// The shown view's presentation records ([`Self::last_presented`],
@@ -1594,8 +1594,8 @@ fn settle_stretch_aware(
 fn compose_and_render(
     output: &mut Output,
     buffer: &mut DisplayList,
-    filtered: &mut Vec<Option<ImageData>>,
-    vectors: &mut Vec<Option<ImageData>>,
+    filtered: &mut Vec<Option<Texture>>,
+    vectors: &mut Vec<Option<Texture>>,
     intents: &ScrollIntents,
     frame: &CommittedFrame,
     images: &[Option<ImageData>],

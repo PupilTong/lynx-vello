@@ -37,12 +37,10 @@
 //! `meet` and `slice` scale uniformly and align) and then scales that
 //! extent per axis onto the texture ([`VectorDraw::placement`]), so a
 //! clamped texture holds the same picture squeezed and the draw's stretch
-//! restores it. The texture is bound to a handle through
-//! [`Raster::bind_texture`], behind a deliberate empty blob whose id alone
-//! is read, with the alpha the rasterizer writes ([`Raster::OUTPUT_ALPHA`]:
-//! premultiplied, since it blends into the target). The compose program then
-//! draws the handle as it draws any bitmap, with the brush scale
-//! `extent / size`.
+//! restores it. The texture is bound under a fresh [`Texture`] id through
+//! [`Raster::bind_texture`], holding the premultiplied colour the rasterizer
+//! writes. The compose program then draws it as it draws a bitmap, with the
+//! brush scale `extent / size`.
 //!
 //! The texture is one texel longer than the key's size on each axis the
 //! device allows, its last column and row repeated there ([`repeat_edge`]):
@@ -51,9 +49,9 @@
 //! which blends the last two columns of a bilinear draw half and half where
 //! clamp-to-edge reads the last one, and the repeated texels move that clamp
 //! to the picture's own edge (`render::sparse::Bitmaps` has the whole
-//! account). The handle keeps
-//! the key's size, so the brush scale is unchanged; the drawing paint finds
-//! the longer texture behind it.
+//! account). The [`Texture`] keeps
+//! the key's size as its picture size, so the brush scale is unchanged, and
+//! names the longer texture behind it.
 //!
 //! # Budget, pinning and eviction
 //!
@@ -68,16 +66,14 @@
 //! all for that frame: the bound is on what is retained *across* frames,
 //! and what one frame draws is what its own culling admitted.
 
-use std::sync::Arc;
-
 use rustc_hash::FxHashMap;
 
 use super::gpu::GpuError;
 use super::raster::Raster;
 use crate::kurbo::Size;
 use crate::paint::compose::VectorDraw;
-use crate::paint::display_list::DisplayList;
-use crate::peniko::{Blob, Color, ImageData, ImageFormat};
+use crate::paint::display_list::{DisplayList, Texture};
+use crate::peniko::Color;
 use crate::visual::CommittedFrame;
 
 /// The bytes of baked vector textures kept across frames.
@@ -96,7 +92,7 @@ const BYTES_PER_TEXEL: u64 = 4;
 /// — a `wgpu::Texture` is a shared handle — and goes when it is unbound, so
 /// nothing here has to own it twice.
 struct Entry {
-    handle: ImageData,
+    handle: Texture,
     bytes: u64,
     /// The prepare that last drew it; see [`VectorTextures::tick`].
     last_used: u64,
@@ -105,9 +101,9 @@ struct Entry {
 /// The device side of vector images: the texture bank. See the module doc.
 pub(crate) struct VectorTextures {
     entries: FxHashMap<(u64, u32, u32), Entry>,
-    /// Index-parallel with the prepared frame's vector draws: the handle
+    /// Index-parallel with the prepared frame's vector draws: the texture
     /// each draw is drawn through, or `None` for a draw with no texture.
-    images: Vec<Option<ImageData>>,
+    images: Vec<Option<Texture>>,
     /// Bytes of every resident texture.
     bytes: u64,
     /// How many prepares this bank has run. An entry's `last_used` is the
@@ -173,7 +169,7 @@ impl VectorTextures {
         raster: &mut Raster,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-    ) -> Result<&[Option<ImageData>], GpuError> {
+    ) -> Result<&[Option<Texture>], GpuError> {
         let draws = frame.vector_draws();
         self.images.clear();
         if draws.is_empty() {
@@ -193,14 +189,14 @@ impl VectorTextures {
             let key = (draw.key, width, height);
             if let Some(entry) = self.entries.get_mut(&key) {
                 entry.last_used = tick;
-                self.images.push(Some(entry.handle.clone()));
+                self.images.push(Some(entry.handle));
                 continue;
             }
             let handle = bake(&mut self.bake, draw, width, height, raster, device, queue)?;
             self.entries.insert(
                 key,
                 Entry {
-                    handle: handle.clone(),
+                    handle,
                     bytes,
                     last_used: tick,
                 },
@@ -275,7 +271,7 @@ fn bake(
     raster: &mut Raster,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-) -> Result<ImageData, GpuError> {
+) -> Result<Texture, GpuError> {
     let (texture_width, texture_height) = texture_size(device, width, height);
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("dom vector texture"),
@@ -317,16 +313,7 @@ fn bake(
         repeat_edge(device, queue, &texture, width, height);
     }
 
-    // The blob is a deliberate fake: only its id is read, to find the
-    // texture bound to it. The alpha type is named here, where the render
-    // that fills the texture is.
-    let handle = ImageData {
-        data: Blob::new(Arc::new([])),
-        format: ImageFormat::Rgba8,
-        alpha_type: Raster::OUTPUT_ALPHA,
-        width,
-        height,
-    };
+    let handle = Texture::new(width, height, texture_width, texture_height);
     raster.bind_texture(&handle, Some(texture));
     Ok(handle)
 }
@@ -417,8 +404,8 @@ fn repeat_edge(
 mod tests {
     use std::sync::Arc;
 
-    use crate::paint::display_list::DisplayList;
-    use crate::peniko::{Color, ImageData};
+    use crate::paint::display_list::{DisplayList, Texture};
+    use crate::peniko::Color;
     use crate::render::gpu::Headless;
     use crate::render::image::{DocumentKind, ImageEvent, ImageRole};
     use crate::test_common::Doc;
@@ -490,12 +477,8 @@ mod tests {
         frame
     }
 
-    fn handle_id(table: &[Option<ImageData>], index: usize) -> u64 {
-        table[index]
-            .as_ref()
-            .expect("the draw has a texture")
-            .data
-            .id()
+    fn handle_id(table: &[Option<Texture>], index: usize) -> u64 {
+        table[index].expect("the draw has a texture").id()
     }
 
     /// Two pictures under a budget that holds one texture: a frame drawing

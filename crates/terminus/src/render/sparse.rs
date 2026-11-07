@@ -14,9 +14,9 @@
 //! run is outlined by glifo through [`Glyphs`], with the outline cache the
 //! backend keeps across renders.
 //!
-//! An image whose handle has a texture bound ([`SparseBackend::bind`]: the
-//! `filter: blur()`, `backdrop-filter` and vector-image bakes) is drawn as an
-//! external texture, sampled in place; any other bitmap is uploaded once and
+//! A texture paint (the `filter: blur()`, `backdrop-filter` and vector-image
+//! bakes, bound by [`SparseBackend::bind`]) is drawn as an external texture
+//! under its own id, sampled in place; a bitmap is uploaded once and
 //! released once renders stop drawing it ([`Bitmaps`]).
 
 #![allow(
@@ -43,7 +43,7 @@ use crate::clock::ClockInstant;
 use crate::kurbo::{Affine, BezPath, Diagonal2, Point, Rect, Shape as _};
 use crate::paint::display_list::{
     DisplayList, FILL_TOLERANCE, GlyphRun, GlyphStyle, ImagePaint, Item, Paint, STROKE_TOLERANCE,
-    Shape,
+    Shape, Texture, next_texture_id,
 };
 use crate::peniko::{Color, Extend, Fill, ImageAlphaType, ImageData, ImageFormat, ImageSampler};
 
@@ -58,7 +58,8 @@ pub(crate) struct Stats {
     pub(crate) draws: u32,
     pub(crate) glyph_runs: u32,
     pub(crate) layers: u32,
-    /// Image draws with neither a bound texture nor readable pixels.
+    /// Image draws with no readable pixels, and texture draws with no
+    /// texture bound.
     pub(crate) images_skipped: u32,
 }
 
@@ -71,18 +72,9 @@ pub(crate) struct SparseBackend {
     replay: Replay,
     /// Uploaded bitmaps, with their lifecycle.
     images: Bitmaps,
-    /// Textures bound to image handles, by blob id.
-    bound: FxHashMap<u64, Bound>,
-    next_texture: u64,
+    /// The bound textures, by id.
+    bound: FxHashMap<u64, wgpu::TextureView>,
     pub(crate) last: Stats,
-}
-
-/// A texture bound to an image handle.
-struct Bound {
-    id: TextureId,
-    view: wgpu::TextureView,
-    width: u16,
-    height: u16,
 }
 
 impl std::fmt::Debug for SparseBackend {
@@ -135,7 +127,7 @@ fn set_paint(
     scene: &mut Scene,
     paint: &Paint,
     transform: Option<Affine>,
-    images: &mut dyn FnMut(&ImagePaint) -> Option<Image>,
+    pictures: &mut Pictures<'_>,
     stats: &mut Stats,
 ) -> bool {
     let paint: PaintType = match paint {
@@ -146,11 +138,20 @@ fn set_paint(
         }
         Paint::Gradient(gradient) => (**gradient).clone().into(),
         Paint::Image(image) => {
-            let Some(image) = images(image) else {
+            let Some(image) = (pictures.bitmap)(image) else {
                 stats.images_skipped += 1;
                 return false;
             };
             image.into()
+        }
+        Paint::Texture { texture, sampler } => {
+            // A texture a render cannot bind fails the whole render, so one
+            // the bake that made it has since released draws nothing.
+            if !(pictures.bound)(texture.id()) {
+                stats.images_skipped += 1;
+                return false;
+            }
+            texture_image(*texture, *sampler).into()
         }
     };
     scene.set_paint(paint);
@@ -158,14 +159,50 @@ fn set_paint(
     true
 }
 
+/// How a replay resolves the pictures a list paints with.
+pub(crate) struct Pictures<'a> {
+    /// A bitmap paint to the image the scene draws; `None` draws nothing.
+    pub(crate) bitmap: &'a mut dyn FnMut(&ImagePaint) -> Option<Image>,
+    /// Whether a texture id is bound for the render.
+    pub(crate) bound: &'a dyn Fn(u64) -> bool,
+}
+
+/// The image a texture paint draws: the texture under its own id, the
+/// repeated edge a bake added included on a padded axis only.
+fn texture_image(texture: Texture, sampler: ImageSampler) -> Image {
+    let (width, height) = texture.size();
+    let (texture_width, texture_height) = texture.texture_size();
+    let region = |extend: Extend, size: u32, texture: u32| {
+        let texture = u16::try_from(texture).unwrap_or(u16::MAX);
+        let size = u16::try_from(size).map_or(texture, |size| size.min(texture));
+        if extend == Extend::Pad && texture > size {
+            size + 1
+        } else {
+            size
+        }
+    };
+    Image {
+        image: ImageSource::ExternalTexture {
+            id: TextureId(texture.id()),
+            source_region: RectU16::new(
+                0,
+                0,
+                region(sampler.x_extend, width, texture_width),
+                region(sampler.y_extend, height, texture_height),
+            ),
+            may_have_transparency: true,
+        },
+        sampler,
+    }
+}
+
 /// Replays `list` into `scene`, which the caller has reset to its target
-/// size. `images` resolves a bitmap paint to the image the scene draws;
-/// `None` draws nothing.
+/// size, resolving its pictures through `pictures`.
 pub(crate) fn replay(
     scene: &mut Scene,
     list: &DisplayList,
     kept: &mut Replay,
-    images: &mut dyn FnMut(&ImagePaint) -> Option<Image>,
+    pictures: &mut Pictures<'_>,
 ) -> Stats {
     let mut stats = Stats::default();
     let Replay { glyphs, path, open } = kept;
@@ -173,7 +210,13 @@ pub(crate) fn replay(
     for item in list.items() {
         match item {
             Item::Fill(draw) => {
-                if !set_paint(scene, &draw.paint, draw.paint_transform, images, &mut stats) {
+                if !set_paint(
+                    scene,
+                    &draw.paint,
+                    draw.paint_transform,
+                    pictures,
+                    &mut stats,
+                ) {
                     continue;
                 }
                 stats.draws += 1;
@@ -187,7 +230,13 @@ pub(crate) fn replay(
                 }
             }
             Item::Stroke(draw, stroke) => {
-                if !set_paint(scene, &draw.paint, draw.paint_transform, images, &mut stats) {
+                if !set_paint(
+                    scene,
+                    &draw.paint,
+                    draw.paint_transform,
+                    pictures,
+                    &mut stats,
+                ) {
                     continue;
                 }
                 stats.draws += 1;
@@ -240,7 +289,7 @@ pub(crate) fn replay(
             },
             Item::Glyphs(index) => {
                 let run = &list.runs()[*index as usize];
-                if set_paint(scene, &run.paint, run.paint_transform, images, &mut stats) {
+                if set_paint(scene, &run.paint, run.paint_transform, pictures, &mut stats) {
                     stats.glyph_runs += 1;
                     replay_glyphs(scene, list, run, glyphs);
                 }
@@ -341,12 +390,20 @@ impl StripScene {
     pub fn fill(&mut self, list: &DisplayList) -> u32 {
         let (width, height) = (self.scene.width(), self.scene.height());
         self.scene.reset_and_resize(width, height);
-        let stats = replay(&mut self.scene, list, &mut self.replay, &mut |paint| {
-            Some(Image {
-                image: ImageSource::opaque_id(ImageId::new(0)),
-                sampler: paint.sampler,
-            })
-        });
+        let stats = replay(
+            &mut self.scene,
+            list,
+            &mut self.replay,
+            &mut Pictures {
+                bitmap: &mut |paint| {
+                    Some(Image {
+                        image: ImageSource::opaque_id(ImageId::new(0)),
+                        sampler: paint.sampler,
+                    })
+                },
+                bound: &|_| true,
+            },
+        );
         self.replay.maintain();
         stats.draws + stats.glyph_runs
     }
@@ -635,7 +692,7 @@ impl Bitmaps {
     /// when the image's pixels are unreadable.
     #[expect(
         clippy::too_many_arguments,
-        reason = "an upload's device handles beside the texture ids it draws from"
+        reason = "an upload's device handles beside the image and its sampler"
     )]
     fn paint(
         &mut self,
@@ -644,7 +701,6 @@ impl Bitmaps {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
-        next_texture: &mut u64,
         image: &ImageData,
         sampler: ImageSampler,
     ) -> Option<Image> {
@@ -699,8 +755,7 @@ impl Bitmaps {
                 view_formats: &[],
             });
             pixmap.write_to_atlas(device, queue, encoder, &texture, [0, 0], width, height);
-            let id = TextureId(*next_texture);
-            *next_texture += 1;
+            let id = TextureId(next_texture_id());
             Store::Texture {
                 id,
                 view: texture.create_view(&wgpu::TextureViewDescriptor::default()),
@@ -819,62 +874,6 @@ fn pixmap(image: &ImageData, edge: (bool, bool)) -> Option<(Pixmap, bool)> {
     ))
 }
 
-/// The paint drawing `image`: its bound texture when it has one, else its
-/// pixels ([`Bitmaps`]).
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the upload's device handles beside the two caches it consults"
-)]
-fn image_paint(
-    images: &mut Bitmaps,
-    bound: &FxHashMap<u64, Bound>,
-    renderer: &mut Renderer,
-    resources: &mut Resources,
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    encoder: &mut wgpu::CommandEncoder,
-    next_texture: &mut u64,
-    paint: &ImagePaint,
-) -> Option<Image> {
-    let ImagePaint { image, sampler } = paint;
-    let sampler = *sampler;
-    if let Some(texture) = bound.get(&image.data.id()) {
-        // A texture longer than its handle carries the repeated edge a vector
-        // bake adds (`vector_textures`), sampled on a padded axis only.
-        let region = |extend: Extend, size: u32, texture: u16| {
-            let size = u16::try_from(size).map_or(texture, |size| size.min(texture));
-            if extend == Extend::Pad && texture > size {
-                size + 1
-            } else {
-                size
-            }
-        };
-        return Some(Image {
-            image: ImageSource::ExternalTexture {
-                id: texture.id,
-                source_region: RectU16::new(
-                    0,
-                    0,
-                    region(sampler.x_extend, image.width, texture.width),
-                    region(sampler.y_extend, image.height, texture.height),
-                ),
-                may_have_transparency: true,
-            },
-            sampler,
-        });
-    }
-    images.paint(
-        renderer,
-        resources,
-        device,
-        queue,
-        encoder,
-        next_texture,
-        image,
-        sampler,
-    )
-}
-
 impl SparseBackend {
     pub(crate) fn new(device: &wgpu::Device) -> Self {
         Self::with_atlas(device, atlas_config())
@@ -904,30 +903,21 @@ impl SparseBackend {
                 settings.memory_settings.image_atlas_config,
             ),
             bound: FxHashMap::default(),
-            next_texture: 0,
             last: Stats::default(),
         }
     }
 
-    /// Binds `texture` to every draw of `handle`, or with `None` unbinds it.
-    pub(crate) fn bind(&mut self, handle: &ImageData, texture: Option<wgpu::Texture>) {
-        let key = handle.data.id();
-        match texture {
-            Some(texture) => {
-                let id = TextureId(self.next_texture);
-                self.next_texture += 1;
+    /// Binds `bound` to every draw of `texture`, or with `None` unbinds it.
+    pub(crate) fn bind(&mut self, texture: &Texture, bound: Option<wgpu::Texture>) {
+        match bound {
+            Some(bound) => {
                 self.bound.insert(
-                    key,
-                    Bound {
-                        id,
-                        view: texture.create_view(&wgpu::TextureViewDescriptor::default()),
-                        width: texture.width() as u16,
-                        height: texture.height() as u16,
-                    },
+                    texture.id(),
+                    bound.create_view(&wgpu::TextureViewDescriptor::default()),
                 );
             }
             None => {
-                self.bound.remove(&key);
+                self.bound.remove(&texture.id());
             }
         }
     }
@@ -957,7 +947,6 @@ impl SparseBackend {
             replay: kept,
             images,
             bound,
-            next_texture,
             last,
         } = self;
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -987,19 +976,25 @@ impl SparseBackend {
         } else {
             base_color
         };
-        let mut stats = replay(scene, list, kept, &mut |paint| {
-            image_paint(
-                images,
-                bound,
-                renderer,
-                resources,
-                device,
-                queue,
-                &mut encoder,
-                next_texture,
-                paint,
-            )
-        });
+        let mut stats = replay(
+            scene,
+            list,
+            kept,
+            &mut Pictures {
+                bitmap: &mut |paint| {
+                    images.paint(
+                        renderer,
+                        resources,
+                        device,
+                        queue,
+                        &mut encoder,
+                        &paint.image,
+                        paint.sampler,
+                    )
+                },
+                bound: &|id| bound.contains_key(&id),
+            },
+        );
         stats.encode = started.elapsed();
 
         let started = ClockInstant::now();
@@ -1008,8 +1003,8 @@ impl SparseBackend {
             height: h,
         };
         let mut bindings = TextureBindings::new();
-        for texture in bound.values() {
-            bindings.insert(texture.id, texture.view.clone());
+        for (&id, view) in bound.iter() {
+            bindings.insert(TextureId(id), view.clone());
         }
         images.bind_into(&mut bindings);
         let result = renderer.render(

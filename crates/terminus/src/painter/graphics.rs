@@ -27,7 +27,7 @@
 use euclid::default::Vector2D;
 
 use super::{CANVAS, FrameSize, PainterError};
-use crate::paint::display_list::DisplayList;
+use crate::paint::display_list::{DisplayList, Texture};
 use crate::peniko::ImageData;
 use crate::render::blur::FilterTextures;
 #[cfg(not(target_arch = "wasm32"))]
@@ -318,7 +318,7 @@ impl WindowGraphics {
     pub(super) fn prepare_vectors(
         &mut self,
         frame: &CommittedFrame,
-    ) -> Result<&[Option<ImageData>], PainterError> {
+    ) -> Result<&[Option<Texture>], PainterError> {
         let Self {
             gpu,
             raster,
@@ -340,11 +340,11 @@ impl WindowGraphics {
         &mut self,
         frame: &CommittedFrame,
         images: &[Option<ImageData>],
-        vectors: &[Option<ImageData>],
+        vectors: &[Option<Texture>],
         offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
         scroll_generation: u64,
         animation_now: Option<f64>,
-    ) -> Result<&[Option<ImageData>], PainterError> {
+    ) -> Result<&[Option<Texture>], PainterError> {
         let Self {
             gpu,
             raster,

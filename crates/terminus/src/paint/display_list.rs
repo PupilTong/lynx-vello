@@ -9,8 +9,9 @@
 //! keeps its blend mode and alpha; a glyph run keeps its font, size,
 //! transforms and the synthetic bold amount in the units the glyph renderer
 //! applies it in ([`GlyphRun::embolden`]); an image keeps its pixels' handle
-//! and sampler; a gradient is shared by reference, so a list that copies it
-//! ([`DisplayList::append`]) copies no stops.
+//! and sampler, a baked texture its id ([`Texture`]); a gradient is shared by
+//! reference, so a list that copies it ([`DisplayList::append`]) copies no
+//! stops.
 //!
 //! Paths, glyphs and variation coordinates live in arenas the items index,
 //! so appending one list to another — the compose program's per-frame
@@ -40,8 +41,10 @@ pub type NormalizedCoord = i16;
 /// The tolerance a curved fill or clip shape is flattened to a path at.
 pub(crate) const FILL_TOLERANCE: f64 = 0.1;
 
-/// The tolerance a curved stroked shape is flattened to a path at: finer
-/// than a fill's, since a stroke's error is seen from both sides.
+/// The tolerance a curved stroked shape is flattened to a path at. The
+/// stroke is expanded from the flattened path, so the flattening error moves
+/// both of its edges; a tenth of a fill's tolerance keeps that far below a
+/// device pixel.
 pub(crate) const STROKE_TOLERANCE: f64 = 0.01;
 
 /// The geometry one item draws or clips with, in the item's own space.
@@ -64,6 +67,68 @@ pub(crate) enum Paint {
     Gradient(Arc<Gradient>),
     /// A bitmap and how it is sampled.
     Image(Arc<ImagePaint>),
+    /// A texture the rasterizer holds, and how it is sampled.
+    Texture {
+        texture: Texture,
+        sampler: ImageSampler,
+    },
+}
+
+/// A texture the rasterizer holds — a `filter: blur()` or `backdrop-filter`
+/// bake, a vector image's bake — named by the process-unique id it is bound
+/// under (`render::raster::Raster::bind_texture`). A draw refers to it by
+/// that id alone: there are no pixels here and nothing to look up.
+///
+/// The picture's size is what a draw's brush scale divides by. The texture
+/// may be longer by one texel on an axis whose last column or row a bake
+/// repeated (`render::vector_textures`), which a padded draw samples and a
+/// repeating one does not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Texture {
+    id: u64,
+    width: u32,
+    height: u32,
+    stored_width: u32,
+    stored_height: u32,
+}
+
+impl Texture {
+    /// A fresh id for a `width` × `height` picture held in a texture of
+    /// `texture_width` × `texture_height`.
+    pub(crate) fn new(width: u32, height: u32, texture_width: u32, texture_height: u32) -> Self {
+        Self {
+            id: next_texture_id(),
+            width,
+            height,
+            stored_width: texture_width,
+            stored_height: texture_height,
+        }
+    }
+
+    /// The id the texture is bound under, unique in the process.
+    #[must_use]
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// The picture's size.
+    #[must_use]
+    pub fn size(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
+    /// The texture's own size.
+    pub(crate) fn texture_size(&self) -> (u32, u32) {
+        (self.stored_width, self.stored_height)
+    }
+}
+
+/// A texture id no other texture in the process has had: the rasterizer
+/// draws a texture by this id directly, its bakes' and its own bitmaps'
+/// alike, so they share one counter.
+pub(crate) fn next_texture_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// A bitmap paint: the pixels' handle and how they are sampled.
@@ -92,6 +157,10 @@ impl Paint {
                 image: image.image.clone(),
                 sampler: image.sampler.multiply_alpha(alpha),
             })),
+            Self::Texture { texture, sampler } => Self::Texture {
+                texture,
+                sampler: sampler.multiply_alpha(alpha),
+            },
         }
     }
 }
@@ -392,25 +461,16 @@ impl DisplayList {
         self.runs.len()
     }
 
-    /// How many fills and strokes paint an image.
+    /// How many fills and strokes paint a bitmap or a texture.
     #[cfg(test)]
     pub(crate) fn image_draws(&self) -> usize {
         self.items
             .iter()
-            .filter(|item| {
-                matches!(
-                    item,
-                    Item::Fill(Draw {
-                        paint: Paint::Image(_),
-                        ..
-                    }) | Item::Stroke(
-                        Draw {
-                            paint: Paint::Image(_),
-                            ..
-                        },
-                        _
-                    )
-                )
+            .filter(|item| match item {
+                Item::Fill(draw) | Item::Stroke(draw, _) => {
+                    matches!(draw.paint, Paint::Image(_) | Paint::Texture { .. })
+                }
+                _ => false,
             })
             .count()
     }
@@ -451,6 +511,10 @@ impl DisplayList {
             return Some(Shape::Rect(rect));
         }
         if let Some(rounded) = shape.as_rounded_rect() {
+            // Square corners are a rectangle, and keep its fast paths.
+            if rounded.radii().as_single_radius() == Some(0.0) {
+                return Some(Shape::Rect(rounded.rect()));
+            }
             return Some(Shape::RoundedRect(rounded));
         }
         let start = self.paths.len();
@@ -475,6 +539,24 @@ impl DisplayList {
         brush_transform: Option<Affine>,
         shape: &impl crate::kurbo::Shape,
     ) {
+        self.fill_paint(
+            style,
+            transform,
+            brush.into().into(),
+            brush_transform,
+            shape,
+        );
+    }
+
+    /// [`Self::fill`] with a paint: what draws a texture.
+    pub(crate) fn fill_paint(
+        &mut self,
+        style: Fill,
+        transform: Affine,
+        paint: Paint,
+        brush_transform: Option<Affine>,
+        shape: &impl crate::kurbo::Shape,
+    ) {
         let Some(shape) = self.shape(shape, FILL_TOLERANCE) else {
             return;
         };
@@ -482,7 +564,7 @@ impl DisplayList {
             rule: style,
             transform,
             shape,
-            paint: brush.into().into(),
+            paint,
             paint_transform: brush_transform,
         }));
     }
