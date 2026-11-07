@@ -24,7 +24,7 @@ thousand-style-run fragmentation case.
 `grid_lanes.rs` covers the two sizing paths `display: grid-lanes` can take and
 the stacking pass over them: fixed-length lanes, where no track consults its
 items and the pass materialises no per-candidate-position sizing item;
-`minmax(0, 1fr)` lanes at `flow-tolerance: 0` — the shape the Lynx
+`minmax(0, 1fr)` lanes at `fit-tolerance: 0` — the shape the Lynx
 `<list list-type="waterfall">` component lowers onto — and
 `minmax(min-content, 1fr)` lanes with overflowing items, both of which do
 materialise them; mixed spans with a full-span item every eighth, which levels

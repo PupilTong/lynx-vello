@@ -37,11 +37,13 @@ use types::{Axis, GridItem, MaxKind, MinKind, TrackSet};
 
 use super::util::{
     BaselineSet, IntrinsicTag, ItemKey, OrderedItem, PendingLayoutItem, ResolvedContainerBox,
-    accumulate_scrollable_overflow, apply_aspect_ratio, axis_has_intrinsic_style, box_inset_size,
-    clamp, clamp_axis, container_content_independence, is_scroll_container, item_end_margin,
-    item_value_stability, normalize_content_alignment, normalize_item_alignment_with_last_baseline,
-    own_scrollable_overflow, resolve_container_box, resolve_gap, resolve_insets,
-    resolve_item_geometry, sort_and_assign_layout_order,
+    accumulate_scrollable_overflow, apply_aspect_ratio, apply_box_sizing, axis_has_intrinsic_style,
+    box_inset_size, clamp, clamp_axis, container_content_independence, is_scroll_container,
+    item_end_margin, item_value_stability, normalize_content_alignment,
+    normalize_item_alignment_with_last_baseline, own_scrollable_overflow, resolve_container_box,
+    resolve_gap, resolve_insets, resolve_item_geometry, resolve_max_sizes,
+    resolve_quantitative_max_sizes, resolve_quantitative_sizes, sort_and_assign_layout_order,
+    style_size_behaves_auto,
 };
 use super::{AbsoluteContainingBlock, compute_absolute_layout_in, hide_subtree};
 use crate::geometry::{Edges, Line, Point, Size};
@@ -635,16 +637,24 @@ impl DefiniteRerun<'_> {
 
 /// The container's used outer size on one axis: the parent's or the style's
 /// own size when there is one, otherwise the content it holds plus padding and
-/// border, clamped by min/max and floored at the box inset.
+/// border, clamped by min/max and floored at the box inset. A size the aspect
+/// ratio transfers is only a floor where the automatic minimum is the content
+/// (css-sizing-4 §5.1): the content, capped by the maximum size, can exceed it.
 fn final_outer_axis(metrics: &ResolvedContainerBox, axis: Axis, content: f32) -> f32 {
-    axis.size(metrics.outer).unwrap_or_else(|| {
+    let content_outer = || {
         clamp_axis(
             content + axis.size(metrics.box_inset),
             axis.size(metrics.min),
             axis.size(metrics.max),
             axis.size(metrics.box_inset),
         )
-    })
+    };
+    match axis.size(metrics.outer) {
+        Some(outer) => axis.size(metrics.ratio_content_cap).map_or(outer, |cap| {
+            outer.max((content + axis.size(metrics.box_inset)).min(cap))
+        }),
+        None => content_outer(),
+    }
 }
 
 fn final_outer_size(metrics: &ResolvedContainerBox, tracks: Size<f32>) -> Size<f32> {
@@ -711,10 +721,95 @@ struct ContainerPrologue {
     repeat_count_gap: Size<f32>,
 }
 
+/// css-sizing-4 §5.1: in the axis a preferred aspect ratio sizes, a box
+/// that is not a scroll container has its min-content size, capped by its
+/// own maximum size, as its automatic minimum, so the transferred size holds
+/// only while the content fits it ([`ResolvedContainerBox::ratio_content_cap`]).
+/// That makes the size content-dependent there.
+fn ratio_content_cap<S: CoreStyle>(
+    style: &S,
+    input: LayoutInput,
+    metrics: &ResolvedContainerBox,
+) -> Size<Option<f32>> {
+    if metrics.aspect_ratio.is_none()
+        || input.sizing_mode == SizingMode::IgnoreSizeStyles
+        || is_scroll_container(style.overflow())
+    {
+        return Size::NONE;
+    }
+    let preferred = style.size();
+    let min_size = style.min_size();
+    let own_max = apply_box_sizing(
+        resolve_max_sizes(style.max_size(), input.parent_size),
+        metrics.box_sizing,
+        metrics.box_inset,
+    );
+    let cap = |known: Option<f32>,
+               outer: Option<f32>,
+               size: &StyleSize,
+               minimum: &StyleSize,
+               max: Option<f32>| {
+        (known.is_none()
+            && outer.is_some()
+            && style_size_behaves_auto(size)
+            && matches!(minimum, StyleSize::Auto))
+        .then(|| max.unwrap_or(f32::INFINITY))
+    };
+    Size::new(
+        cap(
+            input.known_dimensions.width,
+            metrics.outer.width,
+            preferred.width,
+            min_size.width,
+            own_max.width,
+        ),
+        cap(
+            input.known_dimensions.height,
+            metrics.outer.height,
+            preferred.height,
+            min_size.height,
+            own_max.height,
+        ),
+    )
+}
+
+/// The min and max sizes css-grid-2 §7.2.3.2 counts `auto-fill`/`auto-fit`
+/// repetitions against: the container's own. A parent that has already
+/// applied them and asks for them to be ignored
+/// (`SizingMode::IgnoreSizeStyles`) does not change the count, so they are
+/// read from the style again, and a commit repeats as many tracks as the
+/// measurement it follows.
+fn repeat_count_limits<S: CoreStyle>(
+    style: &S,
+    input: LayoutInput,
+    metrics: &ResolvedContainerBox,
+) -> (Size<Option<f32>>, Size<Option<f32>>) {
+    if input.sizing_mode != SizingMode::IgnoreSizeStyles {
+        return (metrics.min, metrics.max);
+    }
+    (
+        resolve_quantitative_sizes(
+            style.min_size(),
+            input.parent_size,
+            metrics.aspect_ratio,
+            metrics.box_sizing,
+            metrics.box_inset,
+        ),
+        resolve_quantitative_max_sizes(
+            style.max_size(),
+            input.parent_size,
+            metrics.aspect_ratio,
+            metrics.box_sizing,
+            metrics.box_inset,
+        ),
+    )
+}
+
 fn container_prologue<S: CoreStyle>(style: &S, input: LayoutInput) -> ContainerPrologue {
     let preferred = style.size();
     let gap_value = style.gap();
     let mut metrics = resolve_container_box(style, input);
+    metrics.ratio_content_cap = ratio_content_cap(style, input, &metrics);
     let style_definite = metrics.preferred_definite;
     let outer_definite = Size::new(
         input.definite_dimensions.width || style_definite.width,
@@ -765,22 +860,20 @@ fn container_prologue<S: CoreStyle>(style: &S, input: LayoutInput) -> ContainerP
             .flatten(),
     );
     let gap = resolve_gap(gap_value, percentage_basis);
+    let (repeat_min, repeat_max) = repeat_count_limits(style, input, &metrics);
     let repeat_max_basis = Size::new(
-        definite_outer.width.or(metrics.max.width).map(|value| {
-            (clamp(value, metrics.min.width, metrics.max.width) - metrics.box_inset.width).max(0.0)
+        definite_outer.width.or(repeat_max.width).map(|value| {
+            (clamp(value, repeat_min.width, repeat_max.width) - metrics.box_inset.width).max(0.0)
         }),
-        definite_outer.height.or(metrics.max.height).map(|value| {
-            (clamp(value, metrics.min.height, metrics.max.height) - metrics.box_inset.height)
-                .max(0.0)
+        definite_outer.height.or(repeat_max.height).map(|value| {
+            (clamp(value, repeat_min.height, repeat_max.height) - metrics.box_inset.height).max(0.0)
         }),
     );
     let repeat_min_basis = Size::new(
-        metrics
-            .min
+        repeat_min
             .width
             .map(|value| (value - metrics.box_inset.width).max(0.0)),
-        metrics
-            .min
+        repeat_min
             .height
             .map(|value| (value - metrics.box_inset.height).max(0.0)),
     );
@@ -792,7 +885,10 @@ fn container_prologue<S: CoreStyle>(style: &S, input: LayoutInput) -> ContainerP
     ContainerPrologue {
         metrics,
         fit_content_width,
-        style_definite,
+        style_definite: Size::new(
+            style_definite.width && metrics.ratio_content_cap.width.is_none(),
+            style_definite.height && metrics.ratio_content_cap.height.is_none(),
+        ),
         percentage_basis,
         gap,
         repeat_max_basis,
@@ -2074,6 +2170,7 @@ mod tests {
             outer: Size::new(None, None),
             inner: Size::NONE,
             available_inner: Size::new(AvailableSpace::MaxContent, AvailableSpace::MaxContent),
+            ratio_content_cap: Size::NONE,
         };
         assert_eq!(
             final_outer_size(&metrics, Size::new(10.0, 20.0)),

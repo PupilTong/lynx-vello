@@ -41,8 +41,8 @@ reads, and `FlexboxStyle`/`GridStyle`/`GridLanesStyle`/`LinearStyle`/
 `RelativeStyle` hold the
 properties exactly one algorithm reads, demanded by that algorithm's entry
 point (`T::Style<'tree>: GridStyle`) rather than by the `Style` GAT bound.
-`GridLanesStyle` extends `GridStyle` with `flow-tolerance` and the element's
-computed font size, which is what `flow-tolerance: normal` resolves against.
+`GridLanesStyle` extends `GridStyle` with `fit-tolerance` and the element's
+computed font size, which is what `fit-tolerance: normal` resolves against.
 `TextContainerStyle` supplies a paragraph container's CSS, and
 `LynxTextStyle: TextContainerStyle` the Lynx `<text>` inputs on top: the
 `text_maxline` and `text_maxlength` limits, defaulting to unlimited,

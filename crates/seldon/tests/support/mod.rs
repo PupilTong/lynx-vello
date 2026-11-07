@@ -27,7 +27,7 @@ use stylo::values::computed::length_percentage::{CalcNode, CalcPercentageLeaf, C
 use stylo::values::computed::lynx_layout::{RelativeAlign, RelativeReference};
 use stylo::values::computed::{
     AspectRatio, Au, BorderSideWidth, Contain, ContainIntrinsicSize, ContainerType,
-    ContentDistribution, ContentVisibility, Display, FlexBasis, FlowTolerance, GridAutoFlow,
+    ContentDistribution, ContentVisibility, Display, FitTolerance, FlexBasis, GridAutoFlow,
     GridLine, GridTemplateComponent, ImplicitGridTracks, Inset, ItemPlacement, JustifyItems,
     Length, LengthPercentage, Margin, MaxSize, NonNegativeLengthPercentage, NonNegativeNumber,
     Overflow, Percentage, PositionArea, PositionProperty, PositionTryOrder, Ratio, SelfAlignment,
@@ -373,20 +373,20 @@ pub(super) fn grid_auto_placement() -> GridLine {
     GridLine::auto()
 }
 
-pub(super) fn tolerance_normal() -> FlowTolerance {
-    FlowTolerance::Normal
+pub(super) fn tolerance_normal() -> FitTolerance {
+    FitTolerance::Normal
 }
 
-pub(super) fn tolerance_px(value: f32) -> FlowTolerance {
-    FlowTolerance::LengthPercentage(npx(value))
+pub(super) fn tolerance_px(value: f32) -> FitTolerance {
+    FitTolerance::LengthPercentage(npx(value))
 }
 
-pub(super) fn tolerance_pct(fraction: f32) -> FlowTolerance {
-    FlowTolerance::LengthPercentage(npct(fraction))
+pub(super) fn tolerance_pct(fraction: f32) -> FitTolerance {
+    FitTolerance::LengthPercentage(npct(fraction))
 }
 
-pub(super) fn tolerance_infinite() -> FlowTolerance {
-    FlowTolerance::Infinite
+pub(super) fn tolerance_infinite() -> FitTolerance {
+    FitTolerance::Infinite
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -442,7 +442,7 @@ pub(super) struct TestStyle {
     pub(super) justify_self: SelfAlignment,
     pub(super) position_area: PositionArea,
     pub(super) position_try_order: PositionTryOrder,
-    pub(super) flow_tolerance: FlowTolerance,
+    pub(super) fit_tolerance: FitTolerance,
     pub(super) font_size: f32,
     pub(super) relative_layout_once: relative_layout_once::T,
     pub(super) relative_id: RelativeReference,
@@ -498,7 +498,7 @@ impl Default for TestStyle {
             justify_self: SelfAlignment::auto(),
             position_area: PositionArea::none(),
             position_try_order: PositionTryOrder::normal(),
-            flow_tolerance: tolerance_normal(),
+            fit_tolerance: tolerance_normal(),
             font_size: 16.0,
             relative_layout_once: relative_layout_once::T::True,
             relative_id: RELATIVE_NONE,
@@ -710,8 +710,8 @@ impl GridStyle for TestStyle {
 }
 
 impl GridLanesStyle for TestStyle {
-    fn flow_tolerance(&self) -> &FlowTolerance {
-        &self.flow_tolerance
+    fn fit_tolerance(&self) -> &FitTolerance {
+        &self.fit_tolerance
     }
 
     fn font_size(&self) -> f32 {

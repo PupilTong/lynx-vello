@@ -893,10 +893,10 @@ and §D.16 with what the wire format actually permits.)*
     by the exact value `"true"` through a UA attribute selector.
 
 24. **CSS Grid Level 3 grid lanes (`display: grid-lanes` +
-    `flow-tolerance`): enabled as a user-directed extension beyond Lynx
+    `fit-tolerance`): enabled as a user-directed extension beyond Lynx
     parity.** *(Recorded 2026-09-18.)* Native Lynx's `display` has no such
     value — `lynx/tools/css_generator/css_defines/24-display.json` lists only
-    `none/flex/grid/linear/relative/block/auto` — and no `flow-tolerance`
+    `none/flex/grid/linear/relative/block/auto` — and no `fit-tolerance`
     property exists in the generated property set, so the `.web.bundle` wire
     format can carry neither and no real bundle emits them. Like §19 this
     falls outside the wire-format subset framing of §A: it is a deliberate,
@@ -906,7 +906,7 @@ and §D.16 with what the wire format actually permits.)*
     `DisplayInside::GridLanes` — block-level, and an item container, so a
     grid-lanes box blockifies its children and flags its `display: contents`
     children exactly as `grid` does (`Display::is_item_container`) — and the
-    `flow-tolerance` longhand
+    `fit-tolerance` longhand
     (`normal | <length-percentage [0,∞]> | infinite`, initial `normal`, not
     inherited, percentages against the container's grid-axis content-box
     size), which also had to be seeded in `lynx_properties.txt` because
@@ -931,7 +931,13 @@ and §D.16 with what the wire format actually permits.)*
       initial-value rule exists: the block axis carries the tracks exactly
       when `grid-template-columns` is `none` and `grid-template-rows` is not,
       and `grid-auto-flow`'s `row`/`column` are ignored.
-    - **`flow-tolerance: normal` resolves to `1em` in layout, `infinite` to
+    - **The property is spelled `fit-tolerance`, with no alias** *(renamed
+      2026-11-04)*. The draft renamed `flow-tolerance` to `fit-tolerance`
+      (csswg-drafts commit of 2026-09-02, w3c/csswg-drafts#10884), so the
+      fork follows the current name and the old one no longer parses. No
+      bundle could carry the old name, and the `<list>` UA sheet is the only
+      in-tree writer.
+    - **`fit-tolerance: normal` resolves to `1em` in layout, `infinite` to
       an unbounded threshold.** The draft's computed-value line names only a
       computed `<length-percentage>`, so resolving the two keywords against
       the element's own computed font size is this implementation's choice,

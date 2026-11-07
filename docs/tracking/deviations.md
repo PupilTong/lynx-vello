@@ -2193,15 +2193,15 @@ consequential choice about whether to follow the spec or the quirk.
   `lynx/core/renderer/starlight/layout/staggered_grid_layout_algorithm.cc` is
   *not* that algorithm — see [css-layout.md](css-layout.md).
   **Where css-grid-3 §4.4 placement differs from it:**
-  - (a) `flow-tolerance` defaults to `normal` = `1em`, so lanes within `1em`
-    of the shortest count as equally short. `flow-tolerance: 0` removes this
+  - (a) `fit-tolerance` defaults to `normal` = `1em`, so lanes within `1em`
+    of the shortest count as equally short. `fit-tolerance: 0` removes this
     difference entirely.
   - (b) The auto-placement cursor. Among tied lanes grid-lanes takes the first
     one at or after the previous auto-placed item's end line; Lynx always takes
     the lowest index. No CSS value disables the cursor. Minimal case: two
     lanes, item heights `[100, 200, 100, X]`, gap 0 — Lynx puts `X` in lane 0,
     grid-lanes in lane 1. The seldon test
-    `flow_tolerance_decides_which_lanes_count_as_equally_short` pins the W3C
+    `fit_tolerance_decides_which_lanes_count_as_equally_short` pins the W3C
     outcome for a three-lane example.
   - (c) Main-axis margins: all three differ, and native vs web-core is a
     conflict by itself. Native advances the lane by the margin box plus the
