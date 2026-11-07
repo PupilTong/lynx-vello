@@ -327,6 +327,7 @@ impl<T> Document<T> {
         let root_slot = self.live_slot(root);
         self.live_node_mut(root).parent = Some(host_slot);
         self.live_node_mut(host).links_mut().shadow_root = Some(root_slot);
+        self.note_container_timing_inserted(host, root);
         self.note_shadow_root_added();
         self.assign_slots(root);
         self.mark_subtree_dirty(host);
