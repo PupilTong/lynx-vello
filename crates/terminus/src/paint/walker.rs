@@ -8,61 +8,48 @@
 //!
 //! Three stack disciplines interleave on the display list's single layer stack:
 //!
-//! 1. **Item clip chains** ([`crate::visual::ClipNode`]) — pushed lazily
-//!    per item by diffing the item's chain against what is on the stack,
-//!    so runs of items sharing clips pay nothing. Chains restart inside
-//!    every group scope: an item's chain is (re-)pushed inside its
-//!    innermost group, which keeps escape semantics (a fixed descendant of
-//!    an opacity group is grouped but not clipped by the group's ancestors)
-//!    and keeps group blend layers from opening inside a clip layer
-//!    (vello [#1198](https://github.com/linebender/vello/issues/1198) —
-//!    re-pushing intersecting clips is idempotent). Below a group whose
-//!    element has `filter` or `backdrop-filter` the chain is cut at a
-//!    *floor*, the element's own chain: both properties contain their
-//!    positioned descendants, so every chain inside extends it, and an item
-//!    pushes only the links below it. The links between the enclosing floor
-//!    and this one are the scope's *output clips*, pushed outside its own
-//!    layers, the innermost as a full `SrcOver` layer so the effect layer
-//!    never opens directly inside a clip layer. CSS clips a filter's output
-//!    by the ancestors' `overflow` clips, not its input: content just past
-//!    an ancestor's edge still blurs ink back inside, a blur's 3σ margin and
-//!    a filtered backdrop stop at the edge, and a nested backdrop reads its
-//!    root's content uncut by the root's ancestors. The precise #1198 invariant
-//!    maintained crate-wide: a blend layer's *immediate* enclosing layer is
-//!    always a real (isolating) layer, never a clip layer — clip layers
-//!    share their parent's buffer, so a blend directly inside one reads
-//!    pixels outside the clip. Fragment painters that need a blend under an
-//!    item clip (inset shadows) interpose their own full `SrcOver` layer
-//!    first. **A pushed link is cut to what it holds.** The chain restarts
-//!    around every group scope, so a page of small faded boxes inside one
-//!    page-sized `overflow` clip pushes that clip once per box. The rasterizer
-//!    applies a plain clip by intersecting its coverage into the strips of
-//!    everything drawn inside it (`render::sparse`): a link with rounded
-//!    corners builds the strips of its whole outline at every push, every draw
-//!    inside it is intersected with them, and a rectangle drawn inside it
-//!    loses the strip-free rectangle path; an axis-aligned rectangle link
-//!    costs none of that. A link the rasterizer keeps as an isolated layer,
-//!    around a blend, allocates a texture over its whole extent.
-//!    [`plan_clip_pushes`] replays the stack discipline once per frame and
-//!    records, per push, the region the items painted inside it can put ink
-//!    in — each item's layer bound, carried into the link's space through
-//!    every scroll window, sticky range and curve reach between them — and
-//!    [`push_clip`] pushes the link's rect cut to that region grown by
-//!    [`HOLD_SLACK_CSS_PX`]: a plain rect when the cut stays clear of the
-//!    link's rounded corners, the link's whole shape otherwise. Nothing inside
-//!    the link reaches outside the region, so the picture is the same, and the
-//!    cost is the content's.
+//! 1. **Item clip chains** ([`crate::visual::ClipNode`]) — pushed lazily per item by diffing the
+//!    item's chain against what is on the stack, so runs of items sharing clips pay nothing. Chains
+//!    restart inside every group scope: an item's chain is (re-)pushed inside its innermost group,
+//!    which keeps escape semantics (a fixed descendant of an opacity group is grouped but not
+//!    clipped by the group's ancestors) and opens a group's blend layer directly inside its parent
+//!    group, where it blends with the group's whole backdrop (re-pushing intersecting clips is
+//!    idempotent). Below a group whose element has `filter` or `backdrop-filter` the chain is cut
+//!    at a *floor*, the element's own chain: both properties contain their positioned descendants,
+//!    so every chain inside extends it, and an item pushes only the links below it. The links
+//!    between the enclosing floor and this one are the scope's *output clips*, pushed outside its
+//!    own layers. CSS clips a filter's output by the ancestors' `overflow` clips, not its input:
+//!    content just past an ancestor's edge still blurs ink back inside, a blur's 3σ margin and a
+//!    filtered backdrop stop at the edge, and a nested backdrop reads its root's content uncut by
+//!    the root's ancestors. A clip that holds a blend layer is composited as an isolated layer of
+//!    its own (the display list marks it, `Item::PushClip`), so the blend reads only what was
+//!    painted inside the clip: the isolated group a mask's `SrcIn` under a `clip-path` and an inset
+//!    shadow's `DestOut` need. The innermost output clip of a `filter` or `backdrop-filter` element
+//!    with a `mix-blend-mode` is such a clip too, so that element's blend reads nothing painted
+//!    before it. **A pushed link is cut to what it holds.** The chain restarts around every group
+//!    scope, so a page of small faded boxes inside one page-sized `overflow` clip pushes that clip
+//!    once per box. The rasterizer applies a plain clip by intersecting its coverage into the
+//!    strips of everything drawn inside it (`render::sparse`): a link with rounded corners builds
+//!    the strips of its whole outline at every push, every draw inside it is intersected with them,
+//!    and a rectangle drawn inside it loses the strip-free rectangle path; an axis-aligned
+//!    rectangle link costs none of that. A link the rasterizer keeps as an isolated layer, around a
+//!    blend, allocates a texture over its whole extent. [`plan_clip_pushes`] replays the stack
+//!    discipline once per frame and records, per push, the region the items painted inside it can
+//!    put ink in — each item's layer bound, carried into the link's space through every scroll
+//!    window, sticky range and curve reach between them — and [`push_clip`] pushes the link's rect
+//!    cut to that region grown by [`HOLD_SLACK_CSS_PX`]: a plain rect when the cut stays clear of
+//!    the link's rounded corners, the link's whole shape otherwise. Nothing inside the link reaches
+//!    outside the region, so the picture is the same, and the cost is the content's.
 //! 2. **Group scopes** ([`crate::visual::RenderLayer`]) — a stacking context with group effects
 //!    pushes, outermost to innermost: the effect layer (blend mode + `opacity` alpha, clipped to
-//!    the group's prepass-computed content bounds), a `clip-path` layer (a full `push_layer`, not a
-//!    clip layer, per the #1198 rule above), and for `mask-image` the alpha-mask sandwich — mask
-//!    pattern drawn first, then a `Compose::SrcIn` layer holding the content, and innermost of all
-//!    a `filter: blur()` group's bracket. Filter adjustments draw at scope close, inside the
-//!    innermost layer, after in-scope clips pop: the ones before the list's first `blur()` inside
-//!    the blur bracket, the ones after it outside it. Composite order on pop is therefore pre-blur
-//!    adjustments → blur → post-blur adjustments → mask → clip-path → opacity/blend — clip and mask
-//!    are both intersective alpha ops, so the swap versus the spec's filter → clip → mask is
-//!    unobservable.
+//!    the group's prepass-computed content bounds), a `clip-path` clip, and for `mask-image` the
+//!    alpha-mask sandwich — mask pattern drawn first, then a `Compose::SrcIn` layer holding the
+//!    content, and innermost of all a `filter: blur()` group's bracket. Filter adjustments draw at
+//!    scope close, inside the innermost layer, after in-scope clips pop: the ones before the list's
+//!    first `blur()` inside the blur bracket, the ones after it outside it. Composite order on pop
+//!    is therefore pre-blur adjustments → blur → post-blur adjustments → mask → clip-path →
+//!    opacity/blend — clip and mask are both intersective alpha ops, so the swap versus the spec's
+//!    filter → clip → mask is unobservable.
 //! 3. **Fragments** — per element box: outset shadows, background, inset shadows, replaced content
 //!    (above the inset shadows — css-backgrounds-3 §7.4.1 paints inner shadows immediately above
 //!    the background, below content, which is why an inset shadow on an `<img>` is invisible in
@@ -1357,11 +1344,12 @@ fn open_scope<T>(
     }
 }
 
-/// Pushes this scope's `clip-path` layer, answering whether it pushed one.
+/// Pushes this scope's `clip-path` clip, answering whether it pushed one.
 ///
-/// A full `push_layer` rather than a clip layer, per the module doc's #1198
-/// rule. A singular map has no shape to clip with, so it pushes an empty rect
-/// instead — which encodes the same "nothing gets through".
+/// A plain clip: where the group holds a blend (a mask's `SrcIn`, a filter's
+/// colour passes, a blended child) the display list isolates it. A singular
+/// map has no shape to clip with, so it pushes an empty clip instead — which
+/// records the same "nothing gets through".
 fn push_clip_path(
     sink: &mut WalkSink<'_>,
     space: Option<u32>,
@@ -1379,23 +1367,8 @@ fn push_clip_path(
         return false;
     };
     match local {
-        Some(local) => sink.push_layer_box(
-            space,
-            fill,
-            BlendMode::new(Mix::Normal, Compose::SrcOver),
-            1.0,
-            scale * local,
-            clip_shape,
-        ),
-        None => sink.push_layer_rect(
-            space,
-            None,
-            Fill::NonZero,
-            BlendMode::new(Mix::Normal, Compose::SrcOver),
-            1.0,
-            Affine::IDENTITY,
-            Rect::ZERO,
-        ),
+        Some(local) => sink.push_clip_box(space, fill, scale * local, clip_shape),
+        None => sink.push_clip_empty(space),
     }
     true
 }
@@ -1525,10 +1498,8 @@ fn backdrop_entry(
 /// Pushes the links of `clip`'s chain below `floor`, root first — a floored
 /// scope's output clips — and answers how many layers that pushed.
 ///
-/// Every link but the innermost is a clip layer. The innermost is a full
-/// `SrcOver` layer at alpha 1 over the same shape, which clips the same
-/// pixels and is the real layer the #1198 rule wants directly around the
-/// scope's effect layer, whose blend may be anything.
+/// Every link but the innermost is cut to what it holds ([`push_clip`]); the
+/// innermost, directly around the scope's effect layer, is pushed whole.
 ///
 /// The chain is the group element's own, and `floor` the innermost clip of
 /// the enclosing floored element's, which an element inside it extends. A
@@ -1562,20 +1533,11 @@ fn push_output_clips(
         push_clip(sink, scratch, frame, index, scale);
     }
     let link = &clips[innermost];
-    let isolating = BlendMode::new(Mix::Normal, Compose::SrcOver);
     match clip_geometry(frame, link, scale) {
         Some((transform, shape)) => {
-            sink.push_layer_box(link.space, Fill::NonZero, isolating, 1.0, transform, shape);
+            sink.push_clip_box(link.space, Fill::NonZero, transform, shape);
         }
-        None => sink.push_layer_rect(
-            link.space,
-            None,
-            Fill::NonZero,
-            isolating,
-            1.0,
-            Affine::IDENTITY,
-            Rect::ZERO,
-        ),
+        None => sink.push_clip_empty(link.space),
     }
     u32::try_from(scratch.chain.len()).expect("a clip chain is shorter than 2^32 links")
 }

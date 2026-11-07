@@ -44,8 +44,9 @@
 //! `push_layer(BlendMode::new(mix, Compose::SrcAtop), alpha, bounds)` +
 //! flat gray fill of `bounds` + `pop_layer` (`SrcAtop`: modify color where
 //! content exists, leave alpha untouched; with layer alpha `a` the covered
-//! result is `mix(c, gray)·a + c·(1−a)`). The walker guarantees no clip
-//! layer is open here, so these blend layers are safe (vello #1198).
+//! result is `mix(c, gray)·a + c·(1−a)`). A clip open around them (a
+//! `clip-path`) holds these blend layers, so the display list composites it
+//! as an isolated layer and the passes read only the group's pixels.
 //!
 //! Mapping (recorded approximations — behavioral, not colorimetric):
 //! - `grayscale(f)`: gray fill with `Mix::Saturation`, alpha `f` (`grayscale(1)` ≡ `saturate(0)`;

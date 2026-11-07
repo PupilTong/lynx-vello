@@ -617,9 +617,8 @@ isotropic number under a non-uniform scale or a skew (recorded limit).
 
 An ancestor's `overflow` clip cuts a filter's output, not its input. A scope
 whose element has `filter` or `backdrop-filter` opens inside the links of its
-own clip chain — the output clips, pushed outside its layers, the innermost
-as a full `SrcOver` layer for the #1198 rule — and its content pushes only the
-links below them; every other scope re-pushes whole chains so a fixed
+own clip chain — the output clips, pushed outside its layers — and its
+content pushes only the links below them; every other scope re-pushes whole chains so a fixed
 descendant of an `opacity` group escapes the group's ancestors' clips. Culling
 follows the same split, coarsely: inside a blurred group only the links below
 the innermost blurred group's own chain take part in the cull test and hold

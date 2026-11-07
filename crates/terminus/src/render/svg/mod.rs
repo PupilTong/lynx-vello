@@ -82,8 +82,7 @@
 //! - An element with a `mask` is skipped with its whole subtree: drawing it unmasked would show
 //!   what the author hid.
 //! - Every compositing layer is `Normal`: `mix-blend-mode` and `isolation` have no presentation
-//!   attribute and CSS is not read, so nothing blends, and no clip layer ever has to stand in for
-//!   an isolating layer (vello [#1198](https://github.com/linebender/vello/issues/1198)).
+//!   attribute and CSS is not read, so nothing blends.
 //! - A nested `svg` and a `symbol` clip to their viewport (`overflow: hidden`) and map their
 //!   `viewBox` by their `preserveAspectRatio`. The root's `preserveAspectRatio` is not applied
 //!   here: it is carried as [`VectorDocument::aspect`] for the painter, which maps the viewport

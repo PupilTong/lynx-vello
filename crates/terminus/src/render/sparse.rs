@@ -1766,24 +1766,17 @@ mod replay_tests {
         }
     }
 
-    /// A blend inside a rounded clip, in the group a fragment painter
-    /// interposes for it (inset shadows), blends at full coverage and is cut
-    /// once, by the clip: multiplying red into blue gives black, and the rim
-    /// is that black faded over the white page, with no red or blue of the
-    /// operands showing through.
+    /// A blend directly inside a rounded clip blends at full coverage with
+    /// what the clip holds and is cut once, by the clip: multiplying red into
+    /// blue gives black, and the rim is that black faded over the white page,
+    /// with no red or blue of the operands showing through. No layer stands
+    /// between the clip and the blend: the list isolates the clip.
     #[test]
     fn a_multiply_blend_in_a_rounded_clip_is_cut_after_it_blends() {
         let shape = vello::kurbo::RoundedRect::new(0.0, 0.0, 32.0, 32.0, 12.0);
         let bounds = Rect::new(0.0, 0.0, 32.0, 32.0);
         let mut scene = DisplayList::new();
         scene.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &shape);
-        scene.push_layer(
-            Fill::NonZero,
-            BlendMode::default(),
-            1.0,
-            Affine::IDENTITY,
-            &bounds,
-        );
         scene.fill(Fill::NonZero, Affine::IDENTITY, BLUE, None, &bounds);
         scene.push_layer(
             Fill::NonZero,
@@ -1793,7 +1786,6 @@ mod replay_tests {
             &bounds,
         );
         scene.fill(Fill::NonZero, Affine::IDENTITY, RED, None, &bounds);
-        scene.pop_layer();
         scene.pop_layer();
         scene.pop_layer();
         let pixels = render(&scene, 32, 32);
@@ -1812,5 +1804,46 @@ mod replay_tests {
             }
         }
         assert!(partial > 0, "the rounded rim is anti-aliased");
+    }
+
+    /// An inset shadow's shape: a clip holding a fill and a `DestOut` layer
+    /// that erases a hole from it. The erase reaches only what the clip
+    /// holds — the page painted before the clip shows through the hole —
+    /// because the list composites the clip as an isolated layer.
+    #[test]
+    fn a_destination_out_in_a_clip_erases_only_what_the_clip_holds() {
+        const GREEN: [u8; 4] = [0, 255, 0, 255];
+        let page = Rect::new(0.0, 0.0, 16.0, 16.0);
+        let clip = Rect::new(2.0, 2.0, 14.0, 14.0);
+        let mut scene = DisplayList::new();
+        scene.fill(
+            Fill::NonZero,
+            Affine::IDENTITY,
+            Color::from_rgb8(0, 255, 0),
+            None,
+            &page,
+        );
+        scene.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &clip);
+        scene.fill(Fill::NonZero, Affine::IDENTITY, RED, None, &clip);
+        scene.push_layer(
+            Fill::NonZero,
+            BlendMode::new(Mix::Normal, Compose::DestOut),
+            1.0,
+            Affine::IDENTITY,
+            &clip,
+        );
+        scene.fill(
+            Fill::NonZero,
+            Affine::IDENTITY,
+            Color::WHITE,
+            None,
+            &Rect::new(6.0, 6.0, 10.0, 10.0),
+        );
+        scene.pop_layer();
+        scene.pop_layer();
+        let pixels = render(&scene, 16, 16);
+        assert_eq!(pixel(&pixels, 16, 0, 0), GREEN, "the page outside the clip");
+        assert_eq!(pixel(&pixels, 16, 3, 3), OPAQUE_RED, "the clip's fill");
+        assert_eq!(pixel(&pixels, 16, 8, 8), GREEN, "the hole shows the page");
     }
 }

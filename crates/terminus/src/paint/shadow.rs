@@ -14,15 +14,12 @@
 //!   offset and inflated by the spread, inside an even-odd clip that carves the border-box shape
 //!   out (§7.4.1: the shadow paints only outside the border box). Zero-blur shadows fill the offset
 //!   shape exactly, with per-corner radii.
-//! - Inset: inside a full `SrcOver` layer clipped to the padding-box shape (a
-//!   full layer, not a clip layer, because a blend layer sits inside —
-//!   vello [#1198](https://github.com/linebender/vello/issues/1198)), fill
-//!   the padding box with the shadow color, then erase the "hole" (padding
-//!   box offset by the shadow offset, deflated by the spread) with a
-//!   `Compose::DestOut` blurred full-alpha white draw: what survives is
-//!   color × (1 − blurred hole alpha) — exactly the inset shadow band.
-//!   Zero-blur insets fill the (padding − hole) ring even-odd under a plain
-//!   clip layer instead.
+//! - Inset: inside a clip to the padding-box shape, which the display list isolates because a blend
+//!   layer sits inside, fill the padding box with the shadow color, then erase the "hole" (padding
+//!   box offset by the shadow offset, deflated by the spread) with a `Compose::DestOut` blurred
+//!   full-alpha white draw: what survives is color × (1 − blurred hole alpha) — exactly the inset
+//!   shadow band. Zero-blur insets fill the (padding − hole) ring even-odd under a plain clip layer
+//!   instead.
 //!
 //! Recorded approximations:
 //! - Uniform circular radii use the rasterizer's analytic blur. Other radii fill their actual shape
@@ -204,11 +201,9 @@ fn paint_one_inset(
     let hole_radii = adjust_radii(padding_radii, -geometry.spread as f32);
 
     if geometry.sigma > 0.0 {
-        sink.push_layer_box(
+        sink.push_clip_box(
             space,
             Fill::NonZero,
-            BlendMode::new(Mix::Normal, Compose::SrcOver),
-            1.0,
             fragment.transform,
             padding_shape.clone(),
         );

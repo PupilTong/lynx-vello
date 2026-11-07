@@ -26,8 +26,7 @@
 //!   explicit tile loop. `space` is approximated as `repeat` (recorded v1 limit) and `round`
 //!   rescales the tile so a whole number fits.
 //! - Every draw is clipped to the `background-clip` shape — directly (the shape is the fill), by
-//!   rect intersection, or via `scene.push_clip_layer` + fill. Only plain fills ever go inside a
-//!   clip layer (vello #1198 forbids blend layers there, not fills).
+//!   rect intersection, or via `scene.push_clip_layer` + fill.
 //! - `background-attachment` does not exist in the fork's grammar (Lynx has no viewport-fixed
 //!   backgrounds); layers are always origin-box anchored.
 
