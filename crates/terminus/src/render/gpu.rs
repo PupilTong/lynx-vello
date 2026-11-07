@@ -11,7 +11,9 @@
 //! frame will not match a headless screenshot of the same scene.
 //!
 //! [`AtlasResidency`] is the second thing every target owes each frame, and
-//! every [`vello::Renderer`] rendered through this crate is paired with one.
+//! every [`vello::Renderer`] rendered through this crate is paired with one,
+//! behind the same lock in [`SharedGpu`]: a render by any target can free the
+//! atlas every other target's images live in.
 //! [`super::vector_textures::VectorTextures`] and
 //! [`super::blur::FilterTextures`] are the third and fourth, and unlike the
 //! other two they are optional per frame: a frame drawing no SVG document
@@ -21,11 +23,11 @@
 //! draw them.
 
 use std::fmt;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 
 use euclid::default::Vector2D;
 use rustc_hash::FxHashSet;
 use vello::peniko::ImageData;
-use vello::util::RenderContext;
 use vello::wgpu;
 
 use super::blur::FilterTextures;
@@ -33,11 +35,11 @@ use super::vector_textures::VectorTextures;
 use crate::visual::{CommittedFrame, ScrollSlot};
 
 /// Headless GPU renderer for tests, benchmarks, and windowless embedders.
+///
+/// Its device and renderer are the process's [`SharedGpu`]; the render
+/// target, the readback buffer and the bake caches are its own.
 pub struct Headless {
-    context: RenderContext,
-    device_index: usize,
-    renderer: vello::Renderer,
-    atlas: AtlasResidency,
+    gpu: Arc<SharedGpu>,
     filters: FilterTextures,
     vectors: VectorTextures,
     target: Option<RenderTarget>,
@@ -157,14 +159,195 @@ impl fmt::Display for GpuError {
 impl std::error::Error for GpuError {}
 
 /// Renderer construction options for this crate's one render policy:
-/// area-only antialiasing. Windowed embedders building their own
-/// [`vello::Renderer`] must construct it with these options to match the
-/// headless path.
+/// area-only antialiasing. [`SharedGpu`] builds the one renderer every
+/// target draws through with them, so a window and a headless screenshot of
+/// the same scene match.
 #[must_use]
 pub(crate) fn renderer_options() -> vello::RendererOptions {
     vello::RendererOptions {
         antialiasing_support: vello::AaSupport::area_only(),
         ..vello::RendererOptions::default()
+    }
+}
+
+/// The wgpu device and the [`vello::Renderer`] every target in this process
+/// draws through. See the module doc.
+///
+/// The renderer is behind a lock because targets render from the threads that
+/// own them, and its image atlas, override table and buffer pool are one
+/// state. Each step that renders takes the lock for the whole of its
+/// residency pass and render, so no other target's render can free the atlas
+/// between the two.
+pub(crate) struct SharedGpu {
+    /// Kept so a window surface can be created on the same instance as the
+    /// adapter it must be checked against.
+    instance: wgpu::Instance,
+    adapter: wgpu::Adapter,
+    pub(crate) device: wgpu::Device,
+    pub(crate) queue: wgpu::Queue,
+    renderer: Mutex<SharedRenderer>,
+}
+
+/// The renderer and the residency that mirrors its image atlas, locked
+/// together.
+pub(crate) struct SharedRenderer {
+    pub(crate) renderer: vello::Renderer,
+    pub(crate) atlas: AtlasResidency,
+}
+
+impl fmt::Debug for SharedGpu {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SharedGpu")
+            .field("adapter", &self.adapter.get_info().name)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The process's live [`SharedGpu`], held weakly so it goes with the last
+/// target that uses it.
+///
+/// Native targets on any thread share it. A browser build keeps one per
+/// thread instead: a WebGPU device belongs to the Worker that requested it,
+/// and wgpu's handles are not `Send` there.
+#[cfg(not(target_arch = "wasm32"))]
+static SHARED_GPU: Mutex<Weak<SharedGpu>> = Mutex::new(Weak::new());
+
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    static SHARED_GPU: std::cell::RefCell<Weak<SharedGpu>> =
+        const { std::cell::RefCell::new(Weak::new()) };
+}
+
+fn with_shared_slot<R>(f: impl FnOnce(&mut Weak<SharedGpu>) -> R) -> R {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        f(&mut SHARED_GPU.lock().unwrap_or_else(PoisonError::into_inner))
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        SHARED_GPU.with(|slot| f(&mut slot.borrow_mut()))
+    }
+}
+
+/// The instance [`vello::util::RenderContext::new`] would create.
+fn new_instance() -> wgpu::Instance {
+    wgpu::Instance::new(wgpu::InstanceDescriptor {
+        display: None,
+        backends: wgpu::Backends::from_env().unwrap_or_default(),
+        flags: wgpu::InstanceFlags::from_build_config().with_env(),
+        memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
+        backend_options: wgpu::BackendOptions::from_env_or_default(),
+    })
+}
+
+impl SharedGpu {
+    /// The live shared stack, or a new one on the default adapter if none
+    /// is live. Blocks on the adapter and device requests.
+    pub(crate) fn offscreen() -> Result<Arc<Self>, GpuError> {
+        // The slot stays locked through the build, so two targets built at
+        // once get one stack rather than racing to two.
+        with_shared_slot(|slot| {
+            if let Some(live) = slot.upgrade() {
+                return Ok(live);
+            }
+            let built = Arc::new(pollster::block_on(Self::build(new_instance(), None))?);
+            *slot = Arc::downgrade(&built);
+            Ok(built)
+        })
+    }
+
+    /// A surface for `target` and the stack it is drawn with: the live
+    /// shared stack when its adapter can present to the surface, otherwise a
+    /// stack on an adapter that can.
+    ///
+    /// The second case is a machine with several adapters where the shared
+    /// one cannot present to this window; that window then has a device and
+    /// renderer of its own, as every window did before they were shared. The
+    /// stack built when none is live becomes the shared one.
+    pub(crate) async fn for_surface(
+        target: wgpu::SurfaceTarget<'static>,
+    ) -> Result<(Arc<Self>, wgpu::Surface<'static>), GpuError> {
+        // Not locked across the awaits below: a browser build has no other
+        // thread to contend with, and a native race at worst leaves one
+        // window on a stack of its own.
+        let live = with_shared_slot(|slot| slot.upgrade());
+        let instance = live
+            .as_ref()
+            .map_or_else(new_instance, |gpu| gpu.instance.clone());
+        let surface = instance
+            .create_surface(target)
+            .map_err(|error| GpuError::Render(error.to_string()))?;
+        if let Some(live) = live {
+            if live.adapter.is_surface_supported(&surface) {
+                return Ok((live, surface));
+            }
+            let own = Arc::new(Self::build(instance, Some(&surface)).await?);
+            return Ok((own, surface));
+        }
+        let built = Arc::new(Self::build(instance, Some(&surface)).await?);
+        with_shared_slot(|slot| {
+            if slot.strong_count() == 0 {
+                *slot = Arc::downgrade(&built);
+            }
+        });
+        Ok((built, surface))
+    }
+
+    /// The adapter, device and renderer vello's own
+    /// `RenderContext::device` and this crate's [`renderer_options`] would
+    /// build.
+    async fn build(
+        instance: wgpu::Instance,
+        compatible_surface: Option<&wgpu::Surface<'_>>,
+    ) -> Result<Self, GpuError> {
+        let adapter =
+            wgpu::util::initialize_adapter_from_env_or_default(&instance, compatible_surface)
+                .await
+                .map_err(|_| GpuError::NoAdapter)?;
+        let wanted = wgpu::Features::CLEAR_TEXTURE | wgpu::Features::PIPELINE_CACHE;
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: None,
+                required_features: adapter.features() & wanted,
+                required_limits: wgpu::Limits::default(),
+                ..Default::default()
+            })
+            .await
+            .map_err(|_| GpuError::NoAdapter)?;
+        let renderer = vello::Renderer::new(&device, renderer_options())
+            .map_err(|error| GpuError::Render(error.to_string()))?;
+        Ok(Self {
+            instance,
+            adapter,
+            device,
+            queue,
+            renderer: Mutex::new(SharedRenderer {
+                renderer,
+                atlas: AtlasResidency::default(),
+            }),
+        })
+    }
+
+    pub(crate) fn adapter(&self) -> &wgpu::Adapter {
+        &self.adapter
+    }
+
+    /// Locks the renderer for one residency pass and the render it precedes.
+    ///
+    /// A poisoned lock is taken anyway: the panic it records was another
+    /// target's, and every step re-establishes the residency it needs.
+    pub(crate) fn renderer(&self) -> MutexGuard<'_, SharedRenderer> {
+        self.renderer.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Unregisters every override texture `filters` and `vectors` hold from
+    /// the shared renderer, for a target that is going away. The renderer
+    /// outlives the target, and its override table would otherwise keep
+    /// those textures alive.
+    pub(crate) fn release(&self, filters: &mut FilterTextures, vectors: &mut VectorTextures) {
+        let mut shared = self.renderer();
+        filters.release(&mut shared.renderer);
+        vectors.release(&mut shared.renderer);
     }
 }
 
@@ -184,22 +367,15 @@ pub(crate) fn render_params(
 }
 
 impl Headless {
-    /// Creates a headless renderer on the platform's default adapter.
+    /// Creates a headless renderer on the process's [`SharedGpu`], building
+    /// it on the platform's default adapter if no target holds one.
     ///
     /// Returns [`GpuError::NoAdapter`] when the platform has no usable adapter
     /// rather than panicking: an embedder can surface that and fall back, while
     /// tests treat it as a hard environment failure.
     pub fn new() -> Result<Self, GpuError> {
-        let mut context = RenderContext::new();
-        let device_index = pollster::block_on(context.device(None)).ok_or(GpuError::NoAdapter)?;
-        let handle = &context.devices[device_index];
-        let renderer = vello::Renderer::new(&handle.device, renderer_options())
-            .map_err(|error| GpuError::Render(error.to_string()))?;
         Ok(Self {
-            context,
-            device_index,
-            renderer,
-            atlas: AtlasResidency::default(),
+            gpu: SharedGpu::offscreen()?,
             filters: FilterTextures::default(),
             vectors: VectorTextures::default(),
             target: None,
@@ -216,10 +392,10 @@ impl Headless {
     /// pixels as this one's. [`Self::render_frame`] builds a new one, and
     /// [`Self::read_pixels`] has nothing to read until it does.
     ///
-    /// The atlas residency is untouched: it mirrors this renderer's image
-    /// cache, which a change of document does not disturb. The filter bakes
-    /// keep their textures but forget which frame they were baked for, since
-    /// commit ids restart at one per document. The vector textures are
+    /// The atlas residency is untouched: it mirrors the shared renderer's
+    /// image cache, which a change of document does not disturb. The filter
+    /// bakes keep their textures but forget which frame they were baked for,
+    /// since commit ids restart at one per document. The vector textures are
     /// untouched too: their key is a process-unique image identity, which no
     /// document change can alias.
     pub fn forget(&mut self) {
@@ -253,16 +429,10 @@ impl Headless {
         &mut self,
         frame: &CommittedFrame,
     ) -> Result<&[Option<ImageData>], GpuError> {
-        let Self {
-            context,
-            device_index,
-            renderer,
-            atlas,
-            vectors,
-            ..
-        } = self;
-        let handle = &context.devices[*device_index];
-        vectors.prepare(frame, renderer, &handle.device, &handle.queue, atlas)
+        let Self { gpu, vectors, .. } = self;
+        let mut shared = gpu.renderer();
+        let SharedRenderer { renderer, atlas } = &mut *shared;
+        vectors.prepare(frame, renderer, &gpu.device, &gpu.queue, atlas)
     }
 
     /// Bakes `frame`'s `filter: blur()` groups and `backdrop-filter`
@@ -295,19 +465,13 @@ impl Headless {
         animation_now: Option<f64>,
         base_color: vello::peniko::Color,
     ) -> Result<&[Option<ImageData>], GpuError> {
-        let Self {
-            context,
-            device_index,
-            renderer,
-            atlas,
-            filters,
-            ..
-        } = self;
-        let handle = &context.devices[*device_index];
+        let Self { gpu, filters, .. } = self;
+        let mut shared = gpu.renderer();
+        let SharedRenderer { renderer, atlas } = &mut *shared;
         filters.prepare(
             renderer,
-            &handle.device,
-            &handle.queue,
+            &gpu.device,
+            &gpu.queue,
             atlas,
             frame,
             images,
@@ -323,6 +487,7 @@ impl Headless {
     /// test can watch eviction without drawing 64 MiB of pictures.
     #[cfg(test)]
     pub(crate) fn set_vector_budget(&mut self, bytes: u64) {
+        self.vectors.release(&mut self.gpu.renderer().renderer);
         self.vectors = VectorTextures::with_budget(bytes);
     }
 
@@ -349,27 +514,25 @@ impl Headless {
 
         self.ensure_target(width, height);
         let Self {
-            context,
-            device_index,
-            renderer,
-            atlas,
+            gpu,
             filters,
             vectors,
             target,
             ..
         } = self;
-        // The bakes this renderer holds are override images the composite
+        let mut shared = gpu.renderer();
+        let SharedRenderer { renderer, atlas } = &mut *shared;
+        // The bakes this target holds are override images the composite
         // render may draw, so they are named here too — the residency has to
         // see every image a render touches or a post-loss repair is missed.
         atlas.prepare_all(renderer, scene, images, filters.images(), vectors.images());
-        let handle = &context.devices[*device_index];
         let view = &target
             .as_ref()
             .expect("ensure_target installs a render target")
             .view;
         if let Err(error) = renderer.render_to_texture(
-            &handle.device,
-            &handle.queue,
+            &gpu.device,
+            &gpu.queue,
             scene,
             view,
             &render_params(base_color, width, height),
@@ -380,10 +543,10 @@ impl Headless {
         Ok(())
     }
 
-    /// Waits for all submitted GPU work.
+    /// Waits for all submitted GPU work, every target's on the shared
+    /// device included.
     pub fn wait_idle(&self) -> Result<(), GpuError> {
-        let handle = &self.context.devices[self.device_index];
-        handle
+        self.gpu
             .device
             .poll(wgpu::PollType::wait_indefinitely())
             .map_err(|error| GpuError::Render(error.to_string()))?;
@@ -400,15 +563,13 @@ impl Headless {
         self.ensure_readback(width, height);
 
         let Self {
-            context,
-            device_index,
+            gpu,
             target,
             readback,
             ..
         } = self;
-        let handle = &context.devices[*device_index];
-        let device = &handle.device;
-        let queue = &handle.queue;
+        let device = &gpu.device;
+        let queue = &gpu.queue;
         let target = target
             .as_ref()
             .expect("a target was checked before allocating readback");
@@ -498,7 +659,7 @@ impl Headless {
             return;
         }
 
-        let device = &self.context.devices[self.device_index].device;
+        let device = &self.gpu.device;
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("dom headless target"),
             size: wgpu::Extent3d {
@@ -530,7 +691,7 @@ impl Headless {
             return;
         }
 
-        let device = &self.context.devices[self.device_index].device;
+        let device = &self.gpu.device;
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("dom headless readback"),
             size: u64::from(padded_bytes_per_row) * u64::from(height),
@@ -542,6 +703,12 @@ impl Headless {
             height,
             buffer,
         });
+    }
+}
+
+impl Drop for Headless {
+    fn drop(&mut self) {
+        self.gpu.release(&mut self.filters, &mut self.vectors);
     }
 }
 
@@ -632,6 +799,16 @@ mod tests {
             width: 1,
             height: 1,
         }
+    }
+
+    /// A target built while another is live draws through that one's device
+    /// and renderer rather than building its own, which is the whole point
+    /// of the shared stack: vello's working buffers are paid once.
+    #[test]
+    fn a_target_built_while_another_is_live_shares_its_stack() {
+        let first = super::Headless::new().expect("a usable GPU adapter is mandatory");
+        let second = super::Headless::new().expect("a usable GPU adapter is mandatory");
+        assert!(Arc::ptr_eq(&first.gpu, &second.gpu));
     }
 
     /// How many marks a render of `images` emits, given whether that render

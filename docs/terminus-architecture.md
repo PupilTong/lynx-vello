@@ -677,7 +677,17 @@ nothing else in `render` names a frame at all. A render names the bitmaps its sc
 draws: vello frees its persistent image atlas whenever a scene with no patch at
 all renders while its image cache still counts every resident image clean, so
 `AtlasResidency` — one per `vello::Renderer` — re-marks each image once after
-such a loss and nothing in the steady state. `Headless::new` reports `NoAdapter`; every GPU-backed test
+such a loss and nothing in the steady state. Every target in a process — each
+`Headless` and each painter window — draws through one `render::gpu::SharedGpu`:
+one wgpu device and queue and one `vello::Renderer`, with that renderer's
+`AtlasResidency` behind the same lock, since any target's patch-free render
+frees the atlas every target's images live in. vello's fixed working buffers
+(about 165 MiB of GPU memory, whatever the target size) are therefore paid once
+per process rather than once per view. The stack is held weakly and goes with
+the last target; a native one is process-wide, a wasm32 one per thread. A
+window whose surface the shared adapter cannot present to gets a stack of its
+own. The render target, readback buffer, filter bakes and vector raster cache
+stay per target. `Headless::new` reports `NoAdapter`; every GPU-backed test
 treats that as a hard failure, including in CI.
 
 ## Top layer and `::backdrop`

@@ -481,6 +481,37 @@ fn a_frame_after_the_atlas_is_lost_repairs_only_the_images_it_draws() {
     );
 }
 
+/// Every target in a process renders through one shared renderer, so the
+/// patch-free render that frees the atlas may be another target's. The
+/// residency is the renderer's, not the target's, and the image this target
+/// drew before the other target's render must be repaired all the same.
+#[test]
+fn an_image_survives_another_targets_image_free_render() {
+    let mut drawing = headless("an_image_survives_another_targets_image_free_render");
+    let mut other = headless("an_image_survives_another_targets_image_free_render");
+
+    let red = prime_radiant::rgba8(1, 1, vec![255, 0, 0, 255]);
+    let drawn = [Some(red.clone())];
+    let draw = || image_scene(&red, Affine::scale(64.0));
+
+    let first = drawing
+        .render(&draw(), &drawn, 64, 64, Color::WHITE)
+        .expect("first image render");
+    assert_eq!(pixel(&first, 64, 32, 32), RED, "the first render");
+
+    let _ = other
+        .render(&solid_scene(), &[], 32, 32, Color::WHITE)
+        .expect("the other target's image-free render");
+    let again = drawing
+        .render(&draw(), &drawn, 64, 64, Color::WHITE)
+        .expect("image render after the other target's");
+    assert_eq!(
+        pixel(&again, 64, 32, 32),
+        RED,
+        "another target's image-free render must not change what this one draws"
+    );
+}
+
 /// A scroll is a translation applied while the committed frame is put
 /// together, and the scrollport clip does not ride it: the content under the
 /// port moves, and nothing leaks out beside or below it at any offset inside
