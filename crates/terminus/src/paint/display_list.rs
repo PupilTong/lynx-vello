@@ -777,12 +777,13 @@ impl DisplayList {
                 Item::Stroke(stroke, style) => self
                     .items
                     .push(Item::Stroke(draw(stroke), Arc::clone(style))),
-                Item::PushClip {
-                    region: clip,
-                    isolated,
-                } => self.open_layer(Item::PushClip {
+                // Isolation is derived again as the items land: every blend
+                // inside the clip is among them, and a clip copied already
+                // marked would stop the marking short of this list's own
+                // clips open around it.
+                Item::PushClip { region: clip, .. } => self.open_layer(Item::PushClip {
                     region: region(*clip),
-                    isolated: *isolated,
+                    isolated: false,
                 }),
                 Item::PushLayer {
                     region: layer,
@@ -1131,6 +1132,9 @@ mod tests {
     #[test]
     fn an_appended_blend_isolates_the_hosts_open_clip() {
         let mut fragment = DisplayList::new();
+        // The fragment's own clip around the blend is isolated in the
+        // fragment already; the host's clip around both must be too.
+        fragment.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &rect());
         fragment.push_layer(
             Fill::NonZero,
             BlendMode::new(Mix::Multiply, Compose::SrcOver),
@@ -1139,15 +1143,25 @@ mod tests {
             &rect(),
         );
         fragment.pop_layer();
-        assert!(fragment.blends_at_root());
+        fragment.pop_layer();
+        assert!(matches!(
+            fragment.items()[0],
+            Item::PushClip { isolated: true, .. }
+        ));
+        assert!(!fragment.blends_at_root());
         let mut host = DisplayList::new();
         host.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &rect());
         host.append(&fragment, Some(Affine::translate((2.0, 0.0))));
         host.pop_layer();
-        assert!(matches!(
-            host.items()[0],
-            Item::PushClip { isolated: true, .. }
-        ));
+        let isolated: Vec<bool> = host
+            .items()
+            .iter()
+            .filter_map(|item| match item {
+                Item::PushClip { isolated, .. } => Some(*isolated),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(isolated, [true, true], "the host's clip and the fragment's");
         assert!(!host.blends_at_root());
         assert_eq!(host.open_layers(), 0);
     }
