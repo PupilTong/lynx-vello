@@ -5,6 +5,10 @@
 //! The paint and compose layers build a `vello::Scene`. This module decodes its encoding stream by
 //! stream — paths, styles, transforms, draw objects and the late-bound patches (ramps, images,
 //! glyph runs) — and replays it into a `vello_gpu::Scene` of the target's size.
+//! A plain clip replays as a non-isolated clip, intersected into the strips
+//! of what it holds with no layer texture, except around a blend
+//! ([`isolated_clips`]); a fill or clip that is an axis-aligned rectangle
+//! takes `vello_gpu`'s rectangle fast paths ([`axis_rect`]).
 //! An image whose handle has a texture bound ([`SparseBackend::bind`]: the
 //! `filter: blur()`, `backdrop-filter` and vector-image bakes) is drawn as an
 //! external texture, sampled in place; any other bitmap is uploaded once and
@@ -85,6 +89,102 @@ impl std::fmt::Debug for SparseBackend {
             .field("last", &self.last)
             .finish_non_exhaustive()
     }
+}
+
+/// The rectangle `path` outlines when it is exactly one axis-aligned
+/// rectangle — a move, three or four horizontal or vertical lines visiting
+/// the four distinct corners in order (either winding), and a close — so
+/// that a fill or clip of it can take `vello_gpu`'s rectangle fast paths.
+///
+/// Every fill and clip path [`decode_paths`] yields ends closed, so an open
+/// path is not one of these. A degenerate outline (zero width or height, a
+/// corner visited twice) is not a rectangle and keeps the path route, which
+/// gives it the coverage its own edges define.
+fn axis_rect(path: &BezPath) -> Option<Rect> {
+    use vello::kurbo::PathEl;
+    let elements = path.elements();
+    let (PathEl::MoveTo(start), [lines @ .., PathEl::ClosePath]) = elements.split_first()? else {
+        return None;
+    };
+    let mut points = [*start; 5];
+    let mut count = 1;
+    for element in lines {
+        let PathEl::LineTo(point) = *element else {
+            return None;
+        };
+        if count == points.len() {
+            return None;
+        }
+        points[count] = point;
+        count += 1;
+    }
+    // The encoder closes a fill with an explicit line back to the start.
+    if count == 5 && points[4] == *start {
+        count = 4;
+    }
+    if count != 4 {
+        return None;
+    }
+    let [a, b, c, d, _] = points;
+    // Opposite corners differ on both axes, and the other two are the
+    // remaining corners of the box they span, in either order.
+    #[expect(
+        clippy::float_cmp,
+        reason = "the corners of one rectangle repeat its coordinates exactly"
+    )]
+    let spans = a.x != c.x && a.y != c.y;
+    let corners = (b == Point::new(a.x, c.y) && d == Point::new(c.x, a.y))
+        || (b == Point::new(c.x, a.y) && d == Point::new(a.x, c.y));
+    (spans && corners).then(|| Rect::from_points(a, c))
+}
+
+/// Per draw object of `encoding`, whether it is a plain clip that has to
+/// stay an isolated clip layer: one whose span holds a layer with a blend
+/// mode other than the default `Normal`/`SrcOver`.
+///
+/// [`SparseBackend::render`] replays every other plain clip as a
+/// non-isolated `vello_gpu` clip: its coverage is intersected into the
+/// strips of every draw and layer inside it on the CPU, and no intermediate
+/// texture is allocated. Under such a clip the content inside reaches its
+/// blend at the clip's partial coverage along an anti-aliased edge. A
+/// separable blend tolerates that, but the non-separable ones do not: a
+/// `backdrop-filter` pass under `Mix::Saturation` (`grayscale`, `saturate`)
+/// unpremultiplies a rim pixel to channels just above 1 and the blend
+/// shader's `clip_color` divides 0 by 0, which leaves dark dots along a
+/// rounded rim (`draw_backdrop` in `paint::compose`). As an isolated layer
+/// the clip lets its content and every blend inside it run at full
+/// coverage and applies the clip once, when the layer composites.
+///
+/// Every clip open around such a layer is marked, not only the innermost:
+/// each of them would cut the content at partial coverage before the
+/// blend reads it.
+fn isolated_clips(encoding: &Encoding) -> Vec<bool> {
+    let mut isolated = vec![false; encoding.draw_tags.len()];
+    let mut open: Vec<usize> = Vec::new();
+    let mut offset = 0_usize;
+    for (index, tag) in encoding.draw_tags.iter().enumerate() {
+        let at = offset;
+        offset += ((tag.0 >> 2) & 0x7) as usize;
+        match *tag {
+            DrawTag::BEGIN_CLIP => {
+                let blend = encoding.draw_data[at];
+                if blend != DrawBeginClip::CLIP_BLEND_MODE
+                    && BlendMode::new(mix((blend >> 8) & 0xff), compose(blend & 0xff))
+                        != BlendMode::default()
+                {
+                    for &outer in &open {
+                        isolated[outer] = true;
+                    }
+                }
+                open.push(index);
+            }
+            DrawTag::END_CLIP => {
+                open.pop();
+            }
+            _ => {}
+        }
+    }
+    isolated
 }
 
 /// One decoded path: its segments in the coordinates of `transform`.
@@ -932,6 +1032,10 @@ impl SparseBackend {
             .enumerate()
             .map(|(index, run)| (run.stream_offsets.draw_tags, index))
             .collect();
+        let isolated = isolated_clips(encoding);
+        // Per open `BEGIN_CLIP`, whether it was replayed as a non-isolated
+        // clip, which its `END_CLIP` pops with `pop_clip`.
+        let mut clips: Vec<bool> = Vec::new();
         let data = &encoding.draw_data;
         let mut offset = 0_usize;
         let f = |at: usize| f32::from_bits(data[at]);
@@ -1059,7 +1163,18 @@ impl SparseBackend {
                     stats.layers += 1;
                     let blend = data[at];
                     let alpha = f(at + 1);
-                    if blend == DrawBeginClip::CLIP_BLEND_MODE {
+                    let plain = blend == DrawBeginClip::CLIP_BLEND_MODE;
+                    if plain && !isolated[index] {
+                        // A non-isolated clip: no layer texture, its
+                        // coverage intersected into the strips of what it
+                        // holds (see `isolated_clips`). A layer pushed
+                        // inside it composites cut to its own path within
+                        // this clip.
+                        match axis_rect(&decoded.path) {
+                            Some(rect) => scene.push_clip_rect(&rect),
+                            None => scene.push_clip_path(&decoded.path),
+                        }
+                    } else if plain {
                         scene.push_clip_layer(&decoded.path);
                     } else {
                         if blend == DrawBeginClip::LUMINANCE_MASK_BLEND_MODE {
@@ -1068,8 +1183,15 @@ impl SparseBackend {
                         let mode = BlendMode::new(mix((blend >> 8) & 0xff), compose(blend & 0xff));
                         scene.push_layer(Some(&decoded.path), Some(mode), Some(alpha), None, None);
                     }
+                    clips.push(plain && !isolated[index]);
                 }
-                DrawTag::END_CLIP => scene.pop_layer(),
+                DrawTag::END_CLIP => {
+                    if clips.pop() == Some(true) {
+                        scene.pop_clip();
+                    } else {
+                        scene.pop_layer();
+                    }
+                }
                 DrawTag::BLUR_RECT => {
                     stats.draws += 1;
                     if let Some(paint) = paint {
@@ -1103,6 +1225,10 @@ impl SparseBackend {
                     if is_stroke(decoded.style) {
                         scene.set_stroke(stroke(decoded.style));
                         scene.stroke_path(&decoded.path);
+                    } else if let Some(rect) = axis_rect(&decoded.path) {
+                        // Under an axis-aligned transform and clip, a
+                        // rectangle draws without strips.
+                        scene.fill_rect(&rect);
                     } else {
                         scene.fill_path(&decoded.path);
                     }
@@ -1823,6 +1949,218 @@ mod decode_tests {
         assert!(blends_over_root(scene.encoding()));
         // |white − red| is cyan.
         assert_eq!(pixel(&render(&scene, 4, 4), 4, 1, 1), [0, 255, 255, 255]);
+    }
+
+    fn polygon(points: &[(f64, f64)], close: bool) -> BezPath {
+        let mut path = BezPath::new();
+        path.move_to(points[0]);
+        for &point in &points[1..] {
+            path.line_to(point);
+        }
+        if close {
+            path.close_path();
+        }
+        path
+    }
+
+    /// An axis-aligned rectangle is recognised in either winding, with or
+    /// without the encoder's explicit closing line, and as the paths a
+    /// `vello::Scene` fill of a `Rect` decodes to.
+    #[test]
+    fn axis_rect_recognises_a_closed_axis_aligned_rectangle() {
+        let rect = Rect::new(1.0, 2.0, 5.0, 7.5);
+        let clockwise = [(1.0, 2.0), (5.0, 2.0), (5.0, 7.5), (1.0, 7.5)];
+        let counter = [(1.0, 2.0), (1.0, 7.5), (5.0, 7.5), (5.0, 2.0)];
+        assert_eq!(axis_rect(&polygon(&clockwise, true)), Some(rect));
+        assert_eq!(axis_rect(&polygon(&counter, true)), Some(rect));
+        let mut explicit = clockwise.to_vec();
+        explicit.push(clockwise[0]);
+        assert_eq!(axis_rect(&polygon(&explicit, true)), Some(rect));
+        // Starting at another corner names the same box.
+        let rotated = [(5.0, 7.5), (1.0, 7.5), (1.0, 2.0), (5.0, 2.0)];
+        assert_eq!(axis_rect(&polygon(&rotated, true)), Some(rect));
+
+        let mut scene = vello::Scene::new();
+        scene.fill(Fill::NonZero, Affine::IDENTITY, RED, None, &rect);
+        let paths = decode_paths(scene.encoding());
+        assert_eq!(axis_rect(&paths[0].path), Some(rect));
+    }
+
+    /// A rotated quad, an open outline, a degenerate box and a curve are not
+    /// rectangles.
+    #[test]
+    fn axis_rect_refuses_everything_else() {
+        let diamond = [(4.0, 0.0), (8.0, 4.0), (4.0, 8.0), (0.0, 4.0)];
+        assert_eq!(axis_rect(&polygon(&diamond, true)), None, "rotated");
+        let square = [(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0)];
+        assert_eq!(axis_rect(&polygon(&square, false)), None, "not closed");
+        assert_eq!(axis_rect(&polygon(&square[..3], true)), None, "a triangle");
+        let flat = [(0.0, 0.0), (4.0, 0.0), (4.0, 0.0), (0.0, 0.0)];
+        assert_eq!(axis_rect(&polygon(&flat, true)), None, "zero height");
+        // Every point on a corner, one corner visited twice: zero area.
+        let folded = [(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (4.0, 0.0)];
+        assert_eq!(axis_rect(&polygon(&folded, true)), None, "folded");
+        let mut five = square.to_vec();
+        five.push((2.0, 0.0));
+        assert_eq!(axis_rect(&polygon(&five, true)), None, "five corners");
+        let mut two = polygon(&square, true);
+        two.extend(polygon(&square, true));
+        assert_eq!(axis_rect(&two), None, "two subpaths");
+        let rounded = vello::kurbo::RoundedRect::new(0.0, 0.0, 8.0, 8.0, 2.0);
+        assert_eq!(axis_rect(&rounded.to_path(0.1)), None, "rounded");
+    }
+
+    /// A clip whose span holds a blend layer stays isolated, and so does
+    /// every clip around it; a clip holding only opacity layers, or only
+    /// draws, does not.
+    #[test]
+    fn a_clip_holding_a_blend_stays_isolated() {
+        let clip = |scene: &mut vello::Scene| {
+            scene.push_clip_layer(
+                Fill::NonZero,
+                Affine::IDENTITY,
+                &Rect::new(0.0, 0.0, 8.0, 8.0),
+            );
+        };
+        let fill = |scene: &mut vello::Scene| {
+            scene.fill(
+                Fill::NonZero,
+                Affine::IDENTITY,
+                RED,
+                None,
+                &Rect::new(0.0, 0.0, 8.0, 8.0),
+            );
+        };
+        let layer = |scene: &mut vello::Scene, blend: BlendMode, alpha: f32| {
+            scene.push_layer(
+                Fill::NonZero,
+                blend,
+                alpha,
+                Affine::IDENTITY,
+                &Rect::new(0.0, 0.0, 8.0, 8.0),
+            );
+        };
+        // Draw objects: clip 0 { clip 1 { layer 2 { fill 3 } 4 } 5 } 6,
+        // then clip 7 { fill 8 } 9.
+        let mut scene = vello::Scene::new();
+        clip(&mut scene);
+        clip(&mut scene);
+        layer(
+            &mut scene,
+            BlendMode::new(Mix::Saturation, Compose::SrcAtop),
+            1.0,
+        );
+        fill(&mut scene);
+        scene.pop_layer();
+        scene.pop_layer();
+        scene.pop_layer();
+        clip(&mut scene);
+        fill(&mut scene);
+        scene.pop_layer();
+        let isolated = isolated_clips(scene.encoding());
+        assert_eq!(
+            isolated,
+            [
+                true, true, false, false, false, false, false, false, false, false
+            ]
+        );
+
+        // Opacity alone is a source-over layer: the clip around it is not
+        // isolated, and neither is a layer itself.
+        let mut scene = vello::Scene::new();
+        clip(&mut scene);
+        layer(&mut scene, BlendMode::default(), 0.5);
+        fill(&mut scene);
+        scene.pop_layer();
+        scene.pop_layer();
+        assert!(isolated_clips(scene.encoding()).iter().all(|&i| !i));
+    }
+
+    /// A non-separable blend inside a rounded clip reads full coverage along
+    /// the clip's anti-aliased rim: desaturating white over white leaves
+    /// white everywhere, rim included, with no dark pixel (the
+    /// `backdrop-filter: grayscale()` pass `draw_backdrop` draws).
+    #[test]
+    fn a_saturation_blend_in_a_rounded_clip_leaves_the_rim_clean() {
+        let shape = vello::kurbo::RoundedRect::new(2.0, 2.0, 62.0, 30.0, 13.5);
+        let bounds = Rect::new(2.0, 2.0, 62.0, 30.0);
+        let mut scene = vello::Scene::new();
+        scene.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &shape);
+        scene.fill(Fill::NonZero, Affine::IDENTITY, Color::WHITE, None, &bounds);
+        scene.push_layer(
+            Fill::NonZero,
+            BlendMode::new(Mix::Saturation, Compose::SrcAtop),
+            1.0,
+            Affine::IDENTITY,
+            &bounds,
+        );
+        scene.fill(
+            Fill::NonZero,
+            Affine::IDENTITY,
+            Color::from_rgb8(128, 128, 128),
+            None,
+            &bounds,
+        );
+        scene.pop_layer();
+        scene.pop_layer();
+        let pixels = render(&scene, 64, 32);
+        for y in 0..32 {
+            for x in 0..64 {
+                let px = pixel(&pixels, 64, x, y);
+                assert!(
+                    px.iter().all(|&c| c >= 254),
+                    "({x}, {y}) is {px:?}, not white"
+                );
+            }
+        }
+    }
+
+    /// A blend inside a rounded clip, in the group a fragment painter
+    /// interposes for it (inset shadows), blends at full coverage and is cut
+    /// once, by the clip: multiplying red into blue gives black, and the rim
+    /// is that black faded over the white page, with no red or blue of the
+    /// operands showing through.
+    #[test]
+    fn a_multiply_blend_in_a_rounded_clip_is_cut_after_it_blends() {
+        let shape = vello::kurbo::RoundedRect::new(0.0, 0.0, 32.0, 32.0, 12.0);
+        let bounds = Rect::new(0.0, 0.0, 32.0, 32.0);
+        let mut scene = vello::Scene::new();
+        scene.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &shape);
+        scene.push_layer(
+            Fill::NonZero,
+            BlendMode::default(),
+            1.0,
+            Affine::IDENTITY,
+            &bounds,
+        );
+        scene.fill(Fill::NonZero, Affine::IDENTITY, BLUE, None, &bounds);
+        scene.push_layer(
+            Fill::NonZero,
+            BlendMode::new(Mix::Multiply, Compose::SrcOver),
+            1.0,
+            Affine::IDENTITY,
+            &bounds,
+        );
+        scene.fill(Fill::NonZero, Affine::IDENTITY, RED, None, &bounds);
+        scene.pop_layer();
+        scene.pop_layer();
+        scene.pop_layer();
+        let pixels = render(&scene, 32, 32);
+        assert_eq!(pixel(&pixels, 32, 16, 16), OPAQUE_BLACK);
+        assert_eq!(pixel(&pixels, 32, 0, 0), WHITE);
+        let mut partial = 0;
+        for y in 0..32 {
+            for x in 0..32 {
+                let [r, g, b, a] = pixel(&pixels, 32, x, y);
+                assert!(
+                    r.abs_diff(g) <= 1 && b.abs_diff(g) <= 1 && a == 255,
+                    "({x}, {y}) is {:?}, not a grey",
+                    [r, g, b, a]
+                );
+                partial += usize::from(g != 0 && g != 255);
+            }
+        }
+        assert!(partial > 0, "the rounded rim is anti-aliased");
     }
 
     /// `unitsPerEm` read from a font's `head` table, plain or in a
