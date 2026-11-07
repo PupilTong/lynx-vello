@@ -344,7 +344,7 @@ impl Picture<'_> {
                 image: image.clone(),
                 sampler,
             })),
-            Self::Texture(texture) => Paint::Texture { texture, sampler },
+            Self::Texture(texture) => Paint::texture(texture, sampler),
         }
     }
 }
@@ -1569,15 +1569,15 @@ fn draw_filtered(
     scene.fill_paint(
         Fill::NonZero,
         device_transform(group.space) * Affine::translate((group.rect.x0, group.rect.y0)),
-        Paint::Texture {
+        Paint::texture(
             texture,
-            sampler: ImageSampler {
+            ImageSampler {
                 x_extend: Extend::Pad,
                 y_extend: Extend::Pad,
                 quality,
                 alpha: 1.0,
             },
-        },
+        ),
         None,
         &Rect::new(0.0, 0.0, f64::from(width), f64::from(height)),
     );
@@ -1624,15 +1624,15 @@ fn draw_backdrop(
     } else {
         ImageQuality::Medium
     };
-    let paint = Paint::Texture {
+    let paint = Paint::texture(
         texture,
-        sampler: ImageSampler {
+        ImageSampler {
             x_extend: Extend::Pad,
             y_extend: Extend::Pad,
             quality,
             alpha: 1.0,
         },
-    };
+    );
     // A backdrop with post-blur passes is clipped to its rounded box first
     // and the passes run over the whole rectangle inside the clip, so they
     // see an opaque backdrop at the box's anti-aliased rim. Run over the
@@ -2554,7 +2554,10 @@ mod tests {
         let Some(crate::paint::display_list::Item::Fill(fill)) = scene.items().last() else {
             panic!("the texture is the list's last fill");
         };
-        let brush = fill.transform * fill.paint_transform.unwrap_or_default();
+        let brush = scene.transform(fill.transform)
+            * scene
+                .paint_transform(fill.paint_transform)
+                .unwrap_or_default();
         assert_eq!(brush.as_coeffs(), [2.0, 0.0, 0.0, 2.0, 0.0, 0.0]);
     }
 

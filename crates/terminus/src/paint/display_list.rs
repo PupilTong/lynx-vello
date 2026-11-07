@@ -13,10 +13,12 @@
 //! reference, so a list that copies it ([`DisplayList::append`]) copies no
 //! stops.
 //!
-//! Paths, glyphs and variation coordinates live in arenas the items index,
-//! so appending one list to another — the compose program's per-frame
-//! assembly of a committed frame's fragments — copies items and arena
-//! slices and allocates nothing per item.
+//! Transforms, rounded-rectangle radii, paths, glyphs and variation
+//! coordinates live in arenas the items index, a run of items under one
+//! transform sharing its entry. That keeps an item small, and appending one
+//! list to another — the compose program's per-frame assembly of a committed
+//! frame's fragments — copies items and arena slices, maps each distinct
+//! transform once, and allocates nothing per item.
 //!
 //! The recording calls mirror the drawing model the paint modules were
 //! written against: shapes under a transform, a layer stack of clips and
@@ -29,7 +31,7 @@ use std::sync::Arc;
 /// One positioned glyph of a run.
 pub use glifo::Glyph;
 
-use crate::kurbo::{Affine, PathEl, Rect, RoundedRect, Stroke};
+use crate::kurbo::{Affine, PathEl, Rect, RoundedRect, RoundedRectRadii, Stroke};
 use crate::peniko::{
     BlendMode, Brush, BrushRef, Color, Fill, FontData, Gradient, ImageBrushRef, ImageData,
     ImageSampler, StyleRef,
@@ -51,13 +53,21 @@ pub(crate) const STROKE_TOLERANCE: f64 = 0.01;
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Shape {
     Rect(Rect),
-    RoundedRect(RoundedRect),
+    /// A rounded rectangle: its rectangle, and its radii in the list's radii
+    /// arena.
+    RoundedRect {
+        rect: Rect,
+        radii: u32,
+    },
     /// A path: a range of the list's path arena.
     Path {
         start: u32,
         end: u32,
     },
 }
+
+/// The index an item stores for "no paint transform".
+const NO_TRANSFORM: u32 = u32::MAX;
 
 /// The paint a fill, stroke or glyph run applies.
 #[derive(Clone, Debug, PartialEq)]
@@ -68,10 +78,21 @@ pub(crate) enum Paint {
     /// A bitmap and how it is sampled.
     Image(Arc<ImagePaint>),
     /// A texture the rasterizer holds, and how it is sampled.
-    Texture {
-        texture: Texture,
-        sampler: ImageSampler,
-    },
+    Texture(Arc<TexturePaint>),
+}
+
+/// A texture paint: the texture, and how it is sampled.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct TexturePaint {
+    pub(crate) texture: Texture,
+    pub(crate) sampler: ImageSampler,
+}
+
+impl Paint {
+    /// The paint drawing `texture` through `sampler`.
+    pub(crate) fn texture(texture: Texture, sampler: ImageSampler) -> Self {
+        Self::Texture(Arc::new(TexturePaint { texture, sampler }))
+    }
 }
 
 /// A texture the rasterizer holds — a `filter: blur()` or `backdrop-filter`
@@ -157,10 +178,9 @@ impl Paint {
                 image: image.image.clone(),
                 sampler: image.sampler.multiply_alpha(alpha),
             })),
-            Self::Texture { texture, sampler } => Self::Texture {
-                texture,
-                sampler: sampler.multiply_alpha(alpha),
-            },
+            Self::Texture(paint) => {
+                Self::texture(paint.texture, paint.sampler.multiply_alpha(alpha))
+            }
         }
     }
 }
@@ -196,31 +216,35 @@ fn gradient_paint(gradient: &Gradient) -> Paint {
     }
 }
 
-/// A fill or a stroke.
+/// A fill or a stroke. Its transforms are indices into the list's arenas
+/// ([`DisplayList::transform`], [`DisplayList::paint_transform`]), which
+/// keeps an item small and lets an append map each distinct transform once.
 #[derive(Clone, Debug)]
 pub(crate) struct Draw {
     pub(crate) rule: Fill,
     /// The shape's space to the list's.
-    pub(crate) transform: Affine,
+    pub(crate) transform: u32,
+    /// The paint's space to the shape's.
+    pub(crate) paint_transform: u32,
     pub(crate) shape: Shape,
     pub(crate) paint: Paint,
-    /// The paint's space to the shape's; `None` is the identity.
-    pub(crate) paint_transform: Option<Affine>,
 }
 
 /// A clip or a group layer: its shape and fill rule.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Region {
     pub(crate) rule: Fill,
-    pub(crate) transform: Affine,
+    /// The shape's space to the list's.
+    pub(crate) transform: u32,
     pub(crate) shape: Shape,
 }
 
 /// A Gaussian-blurred rounded rectangle (`box-shadow`): the area
 /// `std_dev × 2.5` around `rect` is painted.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct BlurredRoundedRect {
-    pub(crate) transform: Affine,
+    /// The rectangle's space to the list's.
+    pub(crate) transform: u32,
     pub(crate) rect: Rect,
     pub(crate) color: Color,
     pub(crate) radius: f32,
@@ -375,6 +399,11 @@ impl GlyphRun {
 #[derive(Default)]
 pub struct DisplayList {
     items: Vec<Item>,
+    /// Item transforms, a run of items under one transform sharing an entry.
+    transforms: Vec<Affine>,
+    /// Paint transforms, relative to their item's transform.
+    paint_transforms: Vec<Affine>,
+    radii: Vec<RoundedRectRadii>,
     paths: Vec<PathEl>,
     runs: Vec<GlyphRun>,
     glyphs: Vec<Glyph>,
@@ -419,6 +448,9 @@ impl DisplayList {
     /// Empties the list, keeping its capacity.
     pub fn reset(&mut self) {
         self.items.clear();
+        self.transforms.clear();
+        self.paint_transforms.clear();
+        self.radii.clear();
         self.paths.clear();
         self.runs.clear();
         self.glyphs.clear();
@@ -468,7 +500,7 @@ impl DisplayList {
             .iter()
             .filter(|item| match item {
                 Item::Fill(draw) | Item::Stroke(draw, _) => {
-                    matches!(draw.paint, Paint::Image(_) | Paint::Texture { .. })
+                    matches!(draw.paint, Paint::Image(_) | Paint::Texture(_))
                 }
                 _ => false,
             })
@@ -493,6 +525,42 @@ impl DisplayList {
         &self.coords[run.coords.start as usize..run.coords.end as usize]
     }
 
+    /// Item transform `index`.
+    pub(crate) fn transform(&self, index: u32) -> Affine {
+        self.transforms[index as usize]
+    }
+
+    /// Paint transform `index`, `None` for the identity.
+    pub(crate) fn paint_transform(&self, index: u32) -> Option<Affine> {
+        (index != NO_TRANSFORM).then(|| self.paint_transforms[index as usize])
+    }
+
+    /// The rounded rectangle of a [`Shape::RoundedRect`].
+    pub(crate) fn rounded(&self, rect: Rect, radii: u32) -> RoundedRect {
+        RoundedRect::from_rect(rect, self.radii[radii as usize])
+    }
+
+    /// The index of `transform` in the item transform arena, reusing the
+    /// last entry when it is the same.
+    fn transform_index(&mut self, transform: Affine) -> u32 {
+        if self.transforms.last() != Some(&transform) {
+            self.transforms.push(transform);
+        }
+        index(self.transforms.len() - 1)
+    }
+
+    /// The index of `transform` in the paint transform arena, reusing the
+    /// last entry when it is the same.
+    fn paint_transform_index(&mut self, transform: Option<Affine>) -> u32 {
+        let Some(transform) = transform else {
+            return NO_TRANSFORM;
+        };
+        if self.paint_transforms.last() != Some(&transform) {
+            self.paint_transforms.push(transform);
+        }
+        index(self.paint_transforms.len() - 1)
+    }
+
     /// The path elements of a [`Shape::Path`].
     pub(crate) fn path(&self, start: u32, end: u32) -> &[PathEl] {
         &self.paths[start as usize..end as usize]
@@ -515,7 +583,11 @@ impl DisplayList {
             if rounded.radii().as_single_radius() == Some(0.0) {
                 return Some(Shape::Rect(rounded.rect()));
             }
-            return Some(Shape::RoundedRect(rounded));
+            self.radii.push(rounded.radii());
+            return Some(Shape::RoundedRect {
+                rect: rounded.rect(),
+                radii: index(self.radii.len() - 1),
+            });
         }
         let start = self.paths.len();
         self.paths.extend(shape.path_elements(tolerance));
@@ -560,13 +632,14 @@ impl DisplayList {
         let Some(shape) = self.shape(shape, FILL_TOLERANCE) else {
             return;
         };
-        self.items.push(Item::Fill(Draw {
+        let draw = Draw {
             rule: style,
-            transform,
+            transform: self.transform_index(transform),
+            paint_transform: self.paint_transform_index(brush_transform),
             shape,
             paint,
-            paint_transform: brush_transform,
-        }));
+        };
+        self.items.push(Item::Fill(draw));
     }
 
     /// Strokes `shape` under `transform` with `brush`. A dash pattern on
@@ -585,16 +658,14 @@ impl DisplayList {
         let Some(shape) = self.shape(shape, STROKE_TOLERANCE) else {
             return;
         };
-        self.items.push(Item::Stroke(
-            Draw {
-                rule: Fill::NonZero,
-                transform,
-                shape,
-                paint: brush.into().into(),
-                paint_transform: brush_transform,
-            },
-            Arc::new(style.clone()),
-        ));
+        let draw = Draw {
+            rule: Fill::NonZero,
+            transform: self.transform_index(transform),
+            paint_transform: self.paint_transform_index(brush_transform),
+            shape,
+            paint: brush.into().into(),
+        };
+        self.items.push(Item::Stroke(draw, Arc::new(style.clone())));
     }
 
     /// The region of a clip or layer over `clip`; an empty shape clips
@@ -605,7 +676,7 @@ impl DisplayList {
             .unwrap_or(Shape::Rect(Rect::ZERO));
         Region {
             rule,
-            transform,
+            transform: self.transform_index(transform),
             shape,
         }
     }
@@ -688,6 +759,7 @@ impl DisplayList {
         radius: f64,
         std_dev: f64,
     ) {
+        let transform = self.transform_index(transform);
         #[expect(
             clippy::cast_possible_truncation,
             reason = "the rasterizer takes the radius and deviation as f32"
@@ -740,10 +812,20 @@ impl DisplayList {
     /// `transform`.
     pub fn append(&mut self, other: &Self, transform: Option<Affine>) {
         let outer = |inner: Affine| transform.map_or(inner, |outer| outer * inner);
+        let transforms = index(self.transforms.len());
+        let paint_transforms = index(self.paint_transforms.len());
+        let radii = index(self.radii.len());
         let paths = index(self.paths.len());
         let runs = index(self.runs.len());
         let glyphs = index(self.glyphs.len());
         let coords = index(self.coords.len());
+        // Each distinct item transform is mapped once; paint transforms are
+        // relative to their item's and copy as they are.
+        self.transforms
+            .extend(other.transforms.iter().map(|&inner| outer(inner)));
+        self.paint_transforms
+            .extend_from_slice(&other.paint_transforms);
+        self.radii.extend_from_slice(&other.radii);
         self.paths.extend_from_slice(&other.paths);
         self.glyphs.extend_from_slice(&other.glyphs);
         self.coords.extend_from_slice(&other.coords);
@@ -752,15 +834,24 @@ impl DisplayList {
                 start: start + paths,
                 end: end + paths,
             },
-            other => other,
+            Shape::RoundedRect { rect, radii: at } => Shape::RoundedRect {
+                rect,
+                radii: at + radii,
+            },
+            other @ Shape::Rect(_) => other,
         };
         let region = |region: Region| Region {
-            transform: outer(region.transform),
+            transform: region.transform + transforms,
             shape: shape(region.shape),
             ..region
         };
         let draw = |draw: &Draw| Draw {
-            transform: outer(draw.transform),
+            transform: draw.transform + transforms,
+            paint_transform: if draw.paint_transform == NO_TRANSFORM {
+                NO_TRANSFORM
+            } else {
+                draw.paint_transform + paint_transforms
+            },
             shape: shape(draw.shape),
             ..draw.clone()
         };
@@ -799,7 +890,7 @@ impl DisplayList {
                 Item::BlurredRoundedRect(blur) => {
                     self.items
                         .push(Item::BlurredRoundedRect(BlurredRoundedRect {
-                            transform: outer(blur.transform),
+                            transform: blur.transform + transforms,
                             ..*blur
                         }));
                 }
@@ -832,7 +923,13 @@ impl DisplayList {
     fn same_shape(&self, left: Shape, other: &Self, right: Shape) -> bool {
         match (left, right) {
             (Shape::Rect(left), Shape::Rect(right)) => left == right,
-            (Shape::RoundedRect(left), Shape::RoundedRect(right)) => left == right,
+            (
+                Shape::RoundedRect { rect, radii },
+                Shape::RoundedRect {
+                    rect: other_rect,
+                    radii: other_radii,
+                },
+            ) => self.rounded(rect, radii) == other.rounded(other_rect, other_radii),
             (Shape::Path { start, end }, Shape::Path { start: s, end: e }) => {
                 self.path(start, end) == other.path(s, e)
             }
@@ -843,16 +940,17 @@ impl DisplayList {
     #[cfg(test)]
     fn same_draw(&self, left: &Draw, other: &Self, right: &Draw) -> bool {
         left.rule == right.rule
-            && left.transform == right.transform
+            && self.transform(left.transform) == other.transform(right.transform)
             && left.paint == right.paint
-            && left.paint_transform == right.paint_transform
+            && self.paint_transform(left.paint_transform)
+                == other.paint_transform(right.paint_transform)
             && self.same_shape(left.shape, other, right.shape)
     }
 
     #[cfg(test)]
     fn same_region(&self, left: &Region, other: &Self, right: &Region) -> bool {
         left.rule == right.rule
-            && left.transform == right.transform
+            && self.transform(left.transform) == other.transform(right.transform)
             && self.same_shape(left.shape, other, right.shape)
     }
 
@@ -905,7 +1003,13 @@ impl DisplayList {
                     && self.glyphs_of(left) == other.glyphs_of(right)
                     && self.coords_of(left) == other.coords_of(right)
             }
-            (Item::BlurredRoundedRect(left), Item::BlurredRoundedRect(right)) => left == right,
+            (Item::BlurredRoundedRect(left), Item::BlurredRoundedRect(right)) => {
+                self.transform(left.transform) == other.transform(right.transform)
+                    && left.rect == right.rect
+                    && left.color == right.color
+                    && left.radius == right.radius
+                    && left.std_dev == right.std_dev
+            }
             _ => false,
         }
     }
@@ -1053,6 +1157,18 @@ mod tests {
         Rect::new(0.0, 0.0, 8.0, 8.0)
     }
 
+    /// An item stays small: its transforms, radii and texture are indices
+    /// or shared, so a list of thousands of draws stays close to the size
+    /// of the drawing it records.
+    #[test]
+    fn an_item_is_at_most_96_bytes() {
+        assert!(
+            std::mem::size_of::<Item>() <= 96,
+            "{} bytes",
+            std::mem::size_of::<Item>()
+        );
+    }
+
     /// Shapes are kept as what they were recorded as: a rectangle and a
     /// rounded rectangle symbolically, anything else as a path.
     #[test]
@@ -1083,7 +1199,9 @@ mod tests {
             })
             .collect();
         assert!(matches!(shapes[0], Shape::Rect(r) if r == rect()));
-        assert!(matches!(shapes[1], Shape::RoundedRect(r) if r == rounded));
+        assert!(
+            matches!(shapes[1], Shape::RoundedRect { rect, radii } if list.rounded(rect, radii) == rounded)
+        );
         assert!(matches!(shapes[2], Shape::Path { start: 0, end: 2 }));
     }
 

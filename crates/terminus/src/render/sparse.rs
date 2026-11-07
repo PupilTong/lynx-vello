@@ -115,7 +115,9 @@ fn shape_path<'p>(
     path.truncate(0);
     match shape {
         Shape::Rect(rect) => path.extend(rect.path_elements(tolerance)),
-        Shape::RoundedRect(rounded) => path.extend(rounded.path_elements(tolerance)),
+        Shape::RoundedRect { rect, radii } => {
+            path.extend(list.rounded(rect, radii).path_elements(tolerance));
+        }
         Shape::Path { start, end } => path.extend(list.path(start, end).iter().copied()),
     }
     path
@@ -144,14 +146,14 @@ fn set_paint(
             };
             image.into()
         }
-        Paint::Texture { texture, sampler } => {
+        Paint::Texture(paint) => {
             // A texture a render cannot bind fails the whole render, so one
             // the bake that made it has since released draws nothing.
-            if !(pictures.bound)(texture.id()) {
+            if !(pictures.bound)(paint.texture.id()) {
                 stats.images_skipped += 1;
                 return false;
             }
-            texture_image(*texture, *sampler).into()
+            texture_image(paint.texture, paint.sampler).into()
         }
     };
     scene.set_paint(paint);
@@ -213,14 +215,14 @@ pub(crate) fn replay(
                 if !set_paint(
                     scene,
                     &draw.paint,
-                    draw.paint_transform,
+                    list.paint_transform(draw.paint_transform),
                     pictures,
                     &mut stats,
                 ) {
                     continue;
                 }
                 stats.draws += 1;
-                scene.set_transform(draw.transform);
+                scene.set_transform(list.transform(draw.transform));
                 scene.set_fill_rule(draw.rule);
                 match draw.shape {
                     // Under an axis-aligned transform and clip, a
@@ -233,14 +235,14 @@ pub(crate) fn replay(
                 if !set_paint(
                     scene,
                     &draw.paint,
-                    draw.paint_transform,
+                    list.paint_transform(draw.paint_transform),
                     pictures,
                     &mut stats,
                 ) {
                     continue;
                 }
                 stats.draws += 1;
-                scene.set_transform(draw.transform);
+                scene.set_transform(list.transform(draw.transform));
                 // `vello_gpu` strokes through kurbo, which applies the dash
                 // pattern the stroke carries.
                 scene.set_stroke((**stroke).clone());
@@ -248,7 +250,7 @@ pub(crate) fn replay(
             }
             Item::PushClip { region, isolated } => {
                 stats.layers += 1;
-                scene.set_transform(region.transform);
+                scene.set_transform(list.transform(region.transform));
                 scene.set_fill_rule(region.rule);
                 match (isolated, region.shape) {
                     // A non-isolated clip: no layer texture, its coverage
@@ -271,7 +273,7 @@ pub(crate) fn replay(
                 alpha,
             } => {
                 stats.layers += 1;
-                scene.set_transform(region.transform);
+                scene.set_transform(list.transform(region.transform));
                 scene.set_fill_rule(region.rule);
                 scene.push_layer(
                     Some(shape_path(path, list, region.shape, FILL_TOLERANCE)),
@@ -300,7 +302,10 @@ pub(crate) fn replay(
                 scene.reset_paint_transform();
                 // Centred on its rect, the blur covers the 2.5σ-inflated
                 // area around it.
-                scene.set_transform(blur.transform.pre_translate(blur.rect.center().to_vec2()));
+                scene.set_transform(
+                    list.transform(blur.transform)
+                        .pre_translate(blur.rect.center().to_vec2()),
+                );
                 scene.fill_blurred_rounded_rect(
                     &Rect::from_center_size(Point::ORIGIN, blur.rect.size()),
                     blur.radius,
