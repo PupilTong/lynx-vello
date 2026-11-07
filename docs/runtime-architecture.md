@@ -2528,8 +2528,8 @@ per box and exceeds vello's fixed tile budget (`1 << 21` tiles), after which
 every stage past `tile_alloc` is skipped and the frame is transparent.
 
 The device side is `terminus::link::render::blur::FilterTextures`, one per
-`vello::Renderer`, owned beside that renderer's `AtlasResidency` by `Headless`
-and by the painter's `WindowGraphics`. Its cache holds one commit's bakes,
+rasterizer (`render::raster::Raster`), owned beside it by `Headless` and by
+the painter's `WindowGraphics`. Its cache holds one commit's bakes,
 taken over one canvas colour, and each entry re-bakes on its own two
 conditional readings. The painter's scroll
 generation counts when some op in the entry's range and the entry's own space

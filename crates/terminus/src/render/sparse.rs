@@ -1,12 +1,10 @@
-//! The `vello_gpu` rasterizer: a composed [`vello::Scene`] replayed into a
+//! The rasterizer: a composed [`vello::Scene`] replayed into a
 //! `vello_gpu::Scene` and rendered by sparse strips on `vello_gpu`'s wgpu
-//! backend. Compiled with the `vello_gpu` feature; [`super::raster::Raster`]
-//! is its only caller.
+//! backend. [`super::raster::Raster`] is its only caller.
 //!
-//! The paint and compose layers build a `vello::Scene` either way. This
-//! module decodes its encoding stream by stream — paths, styles,
-//! transforms, draw objects and the late-bound patches (ramps, images, glyph
-//! runs) — and replays it into a `vello_gpu::Scene` of the target's size.
+//! The paint and compose layers build a `vello::Scene`. This module decodes its encoding stream by
+//! stream — paths, styles, transforms, draw objects and the late-bound patches (ramps, images,
+//! glyph runs) — and replays it into a `vello_gpu::Scene` of the target's size.
 //! An image whose handle has a texture bound ([`SparseBackend::bind`]: the
 //! `filter: blur()`, `backdrop-filter` and vector-image bakes) is drawn as an
 //! external texture, sampled in place; any other bitmap is uploaded once and
@@ -22,7 +20,7 @@
               and an affine's six coefficients go by their usual letters"
 )]
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use rustc_hash::FxHashMap;
 use vello::kurbo::{Affine, BezPath, Cap, Join, Point, Rect, Stroke};
@@ -33,12 +31,13 @@ use vello::peniko::{
     self, BlendMode, Color, Compose, Extend, Fill, Gradient, ImageAlphaType, ImageData,
     ImageFormat, ImageQuality, ImageSampler, Mix,
 };
-use vello::wgpu;
 use vello_gpu::{
     AtlasWriter, ClearSettings, Image, ImageId, ImageSource, PixelMetadata, Pixmap, RectU16,
     RenderSize, RenderTargetConfig, Renderer, Resources, Scene, TargetInit, TextureBindings,
     TextureId,
 };
+
+use crate::clock::ClockInstant;
 
 /// What one frame cost, and what it could not draw.
 #[derive(Debug, Default, Clone, Copy)]
@@ -889,7 +888,7 @@ impl SparseBackend {
         });
         images.begin();
 
-        let started = Instant::now();
+        let started = ClockInstant::now();
         let mut stats = Stats::default();
         scene.reset_and_resize(w, h);
         let encoding = vello_scene.encoding();
@@ -1112,7 +1111,7 @@ impl SparseBackend {
         }
         stats.encode = started.elapsed();
 
-        let started = Instant::now();
+        let started = ClockInstant::now();
         let render_size = RenderSize {
             width: w,
             height: h,
@@ -1154,10 +1153,9 @@ mod tests {
         Blob, Color, Extend, Fill, ImageAlphaType, ImageBrush, ImageData, ImageFormat,
         ImageQuality, ImageSampler,
     };
-    use vello::util::RenderContext;
-    use vello::wgpu;
 
     use super::{PINNED_RENDERS, SparseBackend, Store};
+    use crate::render::gpu::{GpuDevice, instance};
 
     const RED: [u8; 4] = [255, 0, 0, 255];
     const BLUE: [u8; 4] = [0, 0, 255, 255];
@@ -1165,8 +1163,7 @@ mod tests {
     /// A device, a backend on it, and one `width` × `height` target read back
     /// after each render.
     struct Rig {
-        context: RenderContext,
-        device: usize,
+        gpu: GpuDevice,
         backend: SparseBackend,
         target: wgpu::Texture,
         width: u32,
@@ -1175,12 +1172,10 @@ mod tests {
 
     impl Rig {
         fn new(width: u32, height: u32) -> Self {
-            let mut context = RenderContext::new();
-            let device = pollster::block_on(context.device(None))
+            let gpu = pollster::block_on(GpuDevice::request(&instance(), None))
                 .expect("a usable GPU adapter is mandatory");
-            let handle = &context.devices[device];
-            let backend = SparseBackend::new(&handle.device);
-            let target = handle.device.create_texture(&wgpu::TextureDescriptor {
+            let backend = SparseBackend::new(&gpu.device);
+            let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("sparse test target"),
                 size: wgpu::Extent3d {
                     width,
@@ -1195,8 +1190,7 @@ mod tests {
                 view_formats: &[],
             });
             Self {
-                context,
-                device,
+                gpu,
                 backend,
                 target,
                 width,
@@ -1207,8 +1201,7 @@ mod tests {
         /// Renders `scene` over white and answers the target's pixel at
         /// each of `at`.
         fn render(&mut self, scene: &vello::Scene) -> Pixels {
-            let handle = &self.context.devices[self.device];
-            let (device, queue) = (&handle.device, &handle.queue);
+            let (device, queue) = (&self.gpu.device, &self.gpu.queue);
             let view = self
                 .target
                 .create_view(&wgpu::TextureViewDescriptor::default());
@@ -1551,7 +1544,7 @@ mod decode_tests {
 
     fn render(scene: &vello::Scene, width: u32, height: u32) -> Vec<u8> {
         let mut gpu = Headless::new().expect("a usable GPU adapter is mandatory");
-        gpu.render(scene, &[], width, height, Color::WHITE)
+        gpu.render(scene, width, height, Color::WHITE)
             .expect("the scene renders")
     }
 

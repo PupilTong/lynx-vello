@@ -88,13 +88,11 @@
 //!    [`Raster`] into a target of its [`Raster::TARGET_USAGE`] over `Color::TRANSPARENT`, or over
 //!    the canvas colour for an entry that [reads the
 //!    canvas](crate::paint::compose::FilterGroup::reads_canvas).
-//! 2. **Premultiply.** vello writes its target *unpremultiplied*, and filtering unpremultiplied
-//!    color pulls the color of fully transparent pixels into their neighbours — a white square on
-//!    white gets a dark halo. So the first pass is `vec4(rgb * a, a)`, and the whole rest of the
-//!    chain is premultiplied. `vello_gpu` writes its target premultiplied
-//!    ([`Raster::OUTPUT_ALPHA`]), so under that rasterizer the pass copies the texel unchanged:
-//!    premultiplying a second time would darken every translucent pixel of the bake by its own
-//!    alpha.
+//! 2. **Copy.** The bake target to full-res level 0, texel for texel. The rasterizer writes
+//!    premultiplied colour ([`Raster::OUTPUT_ALPHA`]), so the whole chain works premultiplied,
+//!    which is what keeps the colour of fully transparent pixels out of their neighbours (filtered
+//!    unpremultiplied, a white square on white gets a dark halo). The copy frees the bake target
+//!    for the undecimated horizontal half-pass to write into.
 //! 3. **Decimate.** While the remaining variance exceeds 4 (σ > 2), take a 2× box downsample and
 //!    account for it: `V = (V − 0.917) / 4`. The 0.917 is the variance the resample pair itself
 //!    contributes in source px² — 0.25 for the box downsample plus 0.667 for the bilinear tent that
@@ -107,16 +105,14 @@
 //!    texture.
 //!
 //! At σ = 0 — only reachable for a colour-only `backdrop-filter` — steps 3
-//! to 5 are skipped and the premultiply writes the output directly, so the
+//! to 5 are skipped and the copy writes the output directly, so the
 //! entry still gets the isolated copy of its backdrop that its blend passes
 //! and its element's own group effects compose against.
 //!
 //! The output is bound to a stable `peniko::ImageData` handle through
-//! [`Raster::override_image`], declared `AlphaPremultiplied` so vello's
-//! `fine.wgsl` samples it without premultiplying a second time, and marked
-//! dirty once per bake so the atlas re-copies exactly the frames it has to.
-//! `vello_gpu` samples the bound texture in place as an external texture,
-//! which it reads as premultiplied.
+//! [`Raster::bind_texture`], declared `AlphaPremultiplied`. The rasterizer
+//! samples the bound texture in place as an external texture, so a re-bake
+//! into it is what the next render draws, with nothing to bind again.
 //!
 //! # Budget
 //!
@@ -127,34 +123,31 @@
 //! over: a `filter: blur()` group's ops replay raw and that group renders
 //! **unblurred** rather than not at all, and a `backdrop-filter` element
 //! draws no backdrop of its own, leaving the **unfiltered** backdrop it
-//! already sits on showing. One admitted group costs three RGBA8 textures of its own area — vello's
-//! bake target, the premultiplied level 0, and the output — plus, when it
+//! already sits on showing. One admitted group costs three RGBA8 textures of its own area — the
+//! bake target, the full-res level 0, and the output — plus, when it
 //! decimates, the under-⅓-area pyramid and one plane at the deepest level; see
 //! `Bank`. At four bytes a pixel and at most four full-res planes' worth per
 //! group, the cap therefore bounds a frame's whole filter memory at about
-//! 256 MiB — a number only a pathological page approaches, and in practice
-//! vello's 8192² atlas binds first.
+//! 256 MiB — a number only a pathological page approaches.
 
 use euclid::default::Vector2D;
 use vello::peniko::{Blob, Color, ImageAlphaType, ImageData, ImageFormat};
-use vello::wgpu;
 
-use super::gpu::GpuError;
-use super::raster::{Drawn, Raster};
+use super::gpu::{GpuDevice, GpuError};
+use super::raster::Raster;
 use crate::visual::{CommittedFrame, ScrollSlot};
 
-/// Largest per-axis device-pixel count one filter bake may have.
-///
-/// vello's image atlas stops doubling at 8192 px, so a texture longer than
-/// this on either axis can never be placed in it at any atlas size — the
-/// same bound [`crate::render::image::MAX_RENDERABLE_DIMENSION`] enforces for bitmaps.
-pub(crate) const MAX_FILTER_DIMENSION: u32 = 8192;
+/// Largest per-axis device-pixel count one filter bake may have: the
+/// longest texture side the device is created with
+/// ([`GpuDevice::LIMITS`]), the same bound
+/// [`crate::render::image::MAX_RENDERABLE_DIMENSION`] enforces for bitmaps.
+pub(crate) const MAX_FILTER_DIMENSION: u32 = GpuDevice::LIMITS.max_texture_dimension_2d;
 
 /// Largest total device-pixel area one frame's filter bakes may cover.
 ///
-/// A quarter of the atlas at its largest, so blurred groups cannot crowd out
-/// the page's own bitmaps. See the module doc for what a group over the cap
-/// does instead.
+/// A quarter of one texture of the longest side on each axis, so blurred
+/// groups cannot take more GPU memory than the cap the module doc works out.
+/// See the module doc for what a group over the cap does instead.
 pub const MAX_FILTER_AREA: u64 = (MAX_FILTER_DIMENSION as u64 * MAX_FILTER_DIMENSION as u64) / 4;
 
 /// Variance, in source px², that one 2× box downsample and the bilinear tent
@@ -351,7 +344,7 @@ fn level_size(width: u32, height: u32, level: u32) -> (u32, u32) {
 /// pipeline set that holds it.
 #[derive(Debug, Clone, Copy)]
 enum Stage {
-    Premultiply,
+    Copy,
     Resample,
     Gaussian,
 }
@@ -403,7 +396,7 @@ impl Plane {
 /// and the rest depends on how far the bake decimates:
 ///
 /// - **No decimation** (`sigma_device` <= 2): those three and nothing else. `pong` stays `None`,
-///   because the horizontal half-pass writes into `target`, which the premultiply pass has already
+///   because the horizontal half-pass writes into `target`, which the copy pass has already
 ///   consumed.
 /// - **`n` levels**: plus `levels[1..=n]`, whose areas are a geometric quarter-series summing to
 ///   under a third of full-res, plus one `pong` at level `n`'s size.
@@ -416,11 +409,11 @@ struct Bank {
     height: u32,
     /// The rasterizer's own render target. Also the horizontal half-pass's
     /// destination when the bake takes no decimation level, which is sound
-    /// because the premultiply pass has already consumed it by then — and is
+    /// because the copy pass has already consumed it by then — and is
     /// why an undecimated bake allocates no `pong`.
     target: Plane,
-    /// The decimation pyramid, index 0 being the premultiplied full-res
-    /// level. Grown to whatever depth a bake asks for and kept.
+    /// The decimation pyramid, index 0 being the full-res copy of the bake. Grown to whatever
+    /// depth a bake asks for and kept.
     levels: Vec<Plane>,
     /// The second half of the separable pair, at the deepest level's size.
     /// `None` until a decimated bake needs one, and reallocated when that
@@ -449,11 +442,8 @@ impl Bank {
     fn new(raster: &mut Raster, device: &wgpu::Device, width: u32, height: u32) -> Self {
         let target = Plane::new(device, "dom filter bake", width, height, BAKE_USAGE);
         let output = Plane::new(device, "dom filter output", width, height, OUTPUT_USAGE);
-        // `Renderer::register_texture` builds this handle too, but hardcodes
-        // unpremultiplied alpha; the blur chain works premultiplied, so the
-        // handle is built here with the alpha type that matches. The blob is
-        // the same deliberate fake: vello never reads it, because the image
-        // is registered as an override.
+        // The blob is a deliberate fake: only its id is read, to find the
+        // texture bound to it. The alpha type is the blur chain's.
         let handle = ImageData {
             data: Blob::new(std::sync::Arc::new([])),
             format: ImageFormat::Rgba8,
@@ -461,7 +451,7 @@ impl Bank {
             width: output.width,
             height: output.height,
         };
-        raster.override_image(&handle, Some(output.texture.clone()));
+        raster.bind_texture(&handle, Some(output.texture.clone()));
         Self {
             width: output.width,
             height: output.height,
@@ -507,7 +497,7 @@ impl Bank {
 /// per [`FilterTextures`] on the first frame that blurs.
 struct Pipelines {
     layout: wgpu::BindGroupLayout,
-    premultiply: wgpu::RenderPipeline,
+    copy: wgpu::RenderPipeline,
     resample: wgpu::RenderPipeline,
     gaussian: wgpu::RenderPipeline,
     /// Clamp-to-edge, for a `filter: blur()` group: its rect carries a 3σ
@@ -590,14 +580,7 @@ impl Pipelines {
                 cache: None,
             })
         };
-        // The first pass brings the bake target to premultiplied alpha: a
-        // multiply over vello's straight output, a copy of `vello_gpu`'s
-        // already premultiplied one.
-        let premultiply = if matches!(Raster::OUTPUT_ALPHA, ImageAlphaType::AlphaPremultiplied) {
-            build("dom filter copy", "fs_copy")
-        } else {
-            build("dom filter premultiply", "fs_premultiply")
-        };
+        let copy = build("dom filter copy", "fs_copy");
         let resample = build("dom filter resample", "fs_resample");
         let gaussian = build("dom filter gaussian", "fs_gaussian");
         let sampler = |label: &str, mode: wgpu::AddressMode| {
@@ -614,7 +597,7 @@ impl Pipelines {
         };
         Self {
             layout,
-            premultiply,
+            copy,
             resample,
             gaussian,
             clamp: sampler("dom filter clamp", wgpu::AddressMode::ClampToEdge),
@@ -624,7 +607,7 @@ impl Pipelines {
 
     fn pipeline(&self, stage: Stage) -> &wgpu::RenderPipeline {
         match stage {
-            Stage::Premultiply => &self.premultiply,
+            Stage::Copy => &self.copy,
             Stage::Resample => &self.resample,
             Stage::Gaussian => &self.gaussian,
         }
@@ -823,7 +806,7 @@ impl FilterTextures {
         } else {
             while self.banks.len() > groups.len() {
                 if let Some(bank) = self.banks.pop().flatten() {
-                    raster.override_image(&bank.handle, None);
+                    raster.bind_texture(&bank.handle, None);
                 }
             }
             self.banks.resize_with(groups.len(), || None);
@@ -857,13 +840,6 @@ impl FilterTextures {
         )?;
         self.commit = Some(commit);
         Ok(&self.images)
-    }
-
-    /// The table [`Self::prepare`] last produced — what a composite render
-    /// has to name so the atlas residency stays truthful about it.
-    #[must_use]
-    pub(crate) fn images(&self) -> &[Option<ImageData>] {
-        &self.images
     }
 
     /// Forgets which frame the bakes belong to, so the next
@@ -1004,10 +980,6 @@ impl FilterTextures {
             } else {
                 Color::TRANSPARENT
             };
-            // Every render through the rasterizer names what it may draw,
-            // a bake included: for the default one, a patch-free bake frees
-            // the whole image atlas, which is exactly the loss its residency
-            // repairs.
             raster.render_to_texture(
                 device,
                 queue,
@@ -1016,11 +988,6 @@ impl FilterTextures {
                 width,
                 height,
                 base,
-                Drawn {
-                    images,
-                    filtered,
-                    vectors,
-                },
             )?;
 
             let plan = decimate(f64::from(group.sigma), width, height);
@@ -1047,9 +1014,6 @@ impl FilterTextures {
             run_chain(&mut passes, bank, &plan);
             passes.submit();
 
-            // The texture's contents just changed, so the copy vello holds in
-            // its atlas is stale whatever the residency believes about it.
-            raster.mark_override_image_dirty(&bank.handle);
             filtered[index] = Some(bank.handle.clone());
         }
         Ok(())
@@ -1096,11 +1060,11 @@ fn reading(group: &crate::paint::compose::FilterGroup, readings: Readings) -> (u
 fn run_chain(passes: &mut Passes<'_>, bank: &Bank, plan: &Decimation) {
     // A colour-only `backdrop-filter` bakes at σ = 0: there is nothing to
     // decimate and nothing to convolve, but the entry still owes its element
-    // the isolated, premultiplied copy of the backdrop that its blend passes
+    // the isolated copy of the backdrop that its blend passes
     // and its own group effects compose against.
     if plan.levels == 0 && plan.sigma <= 0.0 {
         passes.run(
-            Stage::Premultiply,
+            Stage::Copy,
             &bank.target.view,
             &bank.output.view,
             &Params::plain(bank.width, bank.height),
@@ -1110,7 +1074,7 @@ fn run_chain(passes: &mut Passes<'_>, bank: &Bank, plan: &Decimation) {
     let levels = &bank.levels;
     let full = &levels[0];
     passes.run(
-        Stage::Premultiply,
+        Stage::Copy,
         &bank.target.view,
         &full.view,
         &Params::plain(bank.width, bank.height),
@@ -1129,7 +1093,7 @@ fn run_chain(passes: &mut Passes<'_>, bank: &Bank, plan: &Decimation) {
     // The horizontal half-pass needs somewhere to put its result that is not
     // its own source. A decimated bake uses `pong`, allocated at the deepest
     // level's size; an undecimated one uses the *bake target*, which the
-    // premultiply pass has already read and which is full-res by
+    // copy pass has already read and which is full-res by
     // construction — so no full-res plane is allocated for it.
     let (pong, vertical_target) = if plan.levels == 0 {
         (&bank.target, &bank.output)
@@ -1175,9 +1139,9 @@ fn run_chain(passes: &mut Passes<'_>, bank: &Bank, plan: &Decimation) {
 /// The bank for one group at `width` × `height`, reusing the one already
 /// there when it is the right size.
 ///
-/// A resize is a new texture and therefore a new handle: vello keys an
-/// override by blob id and assumes the override's dimensions match the
-/// image's, so the old handle is unregistered rather than repointed.
+/// A resize is a new texture and therefore a new handle: the rasterizer
+/// keys a bound texture by blob id and reads the handle's dimensions as the
+/// texture's, so the old handle is unregistered rather than repointed.
 fn ensure_bank<'bank>(
     slot: &'bank mut Option<Bank>,
     raster: &mut Raster,
@@ -1190,7 +1154,7 @@ fn ensure_bank<'bank>(
         .is_some_and(|bank| bank.width == width && bank.height == height)
     {
         if let Some(stale) = slot.take() {
-            raster.override_image(&stale.handle, None);
+            raster.bind_texture(&stale.handle, None);
         }
         *slot = Some(Bank::new(raster, device, width, height));
     }
@@ -1348,7 +1312,7 @@ mod tests {
 
     /// A colour-only `backdrop-filter` plans no work at all: no decimation
     /// level and no kernel. `run_chain` reads exactly that pair to decide it
-    /// owes only the premultiply.
+    /// owes only the copy.
     #[test]
     fn a_zero_sigma_plan_decimates_and_convolves_nothing() {
         let plan = decimate(0.0, 256, 256);

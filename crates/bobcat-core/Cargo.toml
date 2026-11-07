@@ -14,11 +14,6 @@ publish = false
 # only the `benches/` targets").
 bench = false
 
-[features]
-# Rasterize every painter's frames with `vello_gpu`'s sparse strips instead of
-# vello's compute pipeline (`terminus`'s `vello_gpu` feature).
-vello_gpu = ["terminus/vello_gpu"]
-
 [dependencies]
 # The type a document request's bytes travel in, from the document to the
 # host (`ResourceFetcher::request_document`).

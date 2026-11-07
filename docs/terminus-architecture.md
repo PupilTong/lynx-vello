@@ -662,8 +662,9 @@ The crate also owns the DOM-free render floor absorbed from the former `pulsar`
 crate (2026-08-04): the `render` module holds the `FrameImages` trait
 (re-exported at the crate root) and the `render::gpu` wgpu
 render-to-texture/readback backend (`gpu::Headless`, plus the
-`read_texture`/`renderer_options`/`render_params`/`AtlasResidency` seams
-windowed embedders build against). `render::blur` is the third seam, and the
+`instance`/`GpuDevice`/`read_texture` seams the painter's window builds
+against), over the one rasterizer `render::raster::Raster` (`vello_gpu`'s
+sparse strips, `render::sparse`). `render::blur` is the third seam, and the
 one narrow exception to the floor's DOM-freedom: `FilterTextures::prepare`
 reads a `CommittedFrame`'s filter side table and calls the frame's own
 `bake_filter`, because a bake *is* a partial replay of that frame's compose
@@ -673,11 +674,7 @@ marginless crop — renders an entry that `reads_canvas` over the canvas colour
 `prepare` is given and every other over transparent black, and skips the
 whole gaussian at σ = 0, which only a colour-only `backdrop-filter` reaches. It still knows nothing about nodes, computed styles, layout or paint
 order — the frame hands it device-pixel geometry and an opaque op range — and
-nothing else in `render` names a frame at all. A render names the bitmaps its scene
-draws: vello frees its persistent image atlas whenever a scene with no patch at
-all renders while its image cache still counts every resident image clean, so
-`AtlasResidency` — one per `vello::Renderer` — re-marks each image once after
-such a loss and nothing in the steady state. `Headless::new` reports `NoAdapter`; every GPU-backed test
+nothing else in `render` names a frame at all. `Headless::new` reports `NoAdapter`; every GPU-backed test
 treats that as a hard failure, including in CI.
 
 ## Top layer and `::backdrop`

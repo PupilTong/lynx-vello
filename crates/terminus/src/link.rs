@@ -18,6 +18,7 @@ pub use seldon::text::{FontBlob, TextContext};
 pub use stylo;
 pub use stylo_dom::ElementState;
 pub use vello;
+pub use wgpu;
 
 pub use crate::layout::TextLineReport;
 pub use crate::paint::compose::FilterGroup;
@@ -142,9 +143,8 @@ pub mod layout {
 /// area limit of a `filter: blur()` bake.
 ///
 /// The render floor knows no nodes, styles or layout: the document builds a
-/// [`vello::Scene`] per commit and this floor
-/// turns scenes into pixels, on the one workspace `vello` version this link
-/// re-exports.
+/// [`vello::Scene`] per commit and this floor turns scenes into pixels with
+/// `vello_gpu`'s sparse strips, on the [`wgpu`] this link re-exports.
 pub mod render {
     pub use crate::render::raster::RASTER_VARIANT;
 

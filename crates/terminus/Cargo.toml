@@ -19,10 +19,6 @@ layout-test-utils = ["seldon/layout-test-utils"]
 # pinnable frame clock, and read access to its gesture router and scroll
 # intents, for an owner's own tests (`docs/terminus-link-api.md`).
 painter-test-utils = []
-# Rasterize with `vello_gpu`'s sparse strips on its wgpu backend instead of
-# vello's compute pipeline: no fixed-size GPU buffer pool, at a CPU strip
-# generation cost per frame (`crates/terminus/src/render/raster.rs`).
-vello_gpu = ["dep:vello_gpu", "dep:glifo"]
 
 [dependencies]
 bytes = { workspace = true }
@@ -32,9 +28,10 @@ slab = { workspace = true }
 smallvec = { workspace = true }
 pollster = { workspace = true }
 rayon = { workspace = true }
-vello = { workspace = true, features = ["wgpu", "wgpu_default"] }
-vello_gpu = { workspace = true, optional = true }
-glifo = { workspace = true, optional = true }
+vello = { workspace = true }
+vello_gpu = { workspace = true }
+glifo = { workspace = true }
+wgpu = { workspace = true }
 roxmltree = { workspace = true }
 siphasher = { workspace = true }
 svgtypes = { workspace = true }

@@ -399,7 +399,7 @@ fn sticky_survives_an_initial_target_refill_and_a_retained_snap_step() {
         let mut scene = Scene::new();
         frame.compose_into(&mut scene, &[], &[], &[], &offsets, None);
         let pixels = gpu
-            .render(&scene, &[], 100, 100, Color::WHITE)
+            .render(&scene, 100, 100, Color::WHITE)
             .expect("render sticky after initial targeting and snapping");
         let at = (15 * 100 + 20) * 4;
         assert_eq!(&pixels[at..at + 4], &[255, 0, 0, 255]);
@@ -425,7 +425,7 @@ fn sticky_pixels_survive_scroll_refills_and_match_retained_frame_hits() {
             None,
         );
         let pixels = gpu
-            .render(&scene, &[], 100, 100, Color::WHITE)
+            .render(&scene, 100, 100, Color::WHITE)
             .expect("render sticky");
         let at = (usize::from(y) * 100 + 20) * 4;
         assert_eq!(&pixels[at..at + 4], &[255, 0, 0, 255], "scrollTop={offset}");
@@ -447,7 +447,7 @@ fn sticky_pixels_survive_scroll_refills_and_match_retained_frame_hits() {
         None,
     );
     let pixels = gpu
-        .render(&scene, &[], 100, 100, Color::WHITE)
+        .render(&scene, 100, 100, Color::WHITE)
         .expect("compose sticky");
     let at = (15 * 100 + 20) * 4;
     assert_eq!(&pixels[at..at + 4], &[255, 0, 0, 255]);
@@ -474,7 +474,7 @@ fn sticky_pixels_survive_enclosing_effects_and_far_refills() {
             let mut scene = Scene::new();
             frame.compose_into(&mut scene, &[], &filtered, &[], &offsets, None);
             let pixels = gpu
-                .render(&scene, &[], 100, 100, Color::WHITE)
+                .render(&scene, 100, 100, Color::WHITE)
                 .expect("render sticky effects");
             let y = if offset == 0.0 { 45 } else { 15 };
             let at = (y * 100 + 20) * 4;
@@ -517,7 +517,7 @@ fn nested_sticky_motion_refreshes_a_filter_with_the_same_scroll_chain() {
         let mut scene = Scene::new();
         frame.compose_into(&mut scene, &[], &filtered, &[], &offsets, None);
         let pixels = gpu
-            .render(&scene, &[], 100, 100, Color::WHITE)
+            .render(&scene, 100, 100, Color::WHITE)
             .expect("render nested sticky filter");
         let at = (usize::from(y) * 100 + 20) * 4;
         assert_eq!(&pixels[at..at + 4], &[255, 0, 0, 255]);

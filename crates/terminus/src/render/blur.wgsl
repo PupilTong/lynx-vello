@@ -2,13 +2,11 @@
 //
 // Every pass is one fragment shader over a fullscreen triangle, every target
 // is `Rgba8Unorm`, and none of them blends: each writes what it computes.
-// The whole chain works in *premultiplied* alpha, which is why the first pass
-// exists at all — vello writes its render target unpremultiplied (`fine.wgsl`
-// divides by alpha before `textureStore`), and filtering unpremultiplied
-// color mixes the color of fully transparent pixels into its neighbours,
-// which shows up as a dark halo around a white square on white. `vello_gpu`
-// blends its target premultiplied already, so under that rasterizer the
-// first pass is `fs_copy` instead.
+// The whole chain works in *premultiplied* alpha, which is what the
+// rasterizer writes into the bake target: filtering unpremultiplied color
+// would mix the color of fully transparent pixels into its neighbours, which
+// shows up as a dark halo around a white square on white. The first pass,
+// `fs_copy`, moves the bake into the pyramid's full-res level unchanged.
 //
 // The sampler is supplied per entry and is one of two, both linear. A
 // `filter: blur()` group binds the clamp-to-edge one: its bake rect carries a
@@ -49,16 +47,9 @@ fn vs_full(@builtin(vertex_index) index: u32) -> @builtin(position) vec4f {
     return vec4f(x, y, 0.0, 1.0);
 }
 
-// Source and destination are the same size here, so the texel under this
-// fragment is exact and `textureLoad` needs no sampler and no rounding.
-@fragment
-fn fs_premultiply(@builtin(position) position: vec4f) -> @location(0) vec4f {
-    let c = textureLoad(source, vec2i(position.xy), 0);
-    return vec4f(c.rgb * c.a, c.a);
-}
-
-// The first pass over a bake target that already holds premultiplied colour:
-// the same texel, unchanged.
+// The first pass: the same texel, unchanged. Source and destination are the
+// same size, so the texel under this fragment is exact and `textureLoad`
+// needs no sampler and no rounding.
 @fragment
 fn fs_copy(@builtin(position) position: vec4f) -> @location(0) vec4f {
     return textureLoad(source, vec2i(position.xy), 0);

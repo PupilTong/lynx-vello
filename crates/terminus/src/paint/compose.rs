@@ -235,8 +235,8 @@ impl VectorDraw {
 
     /// The device size the texture is baked at: [`Self::device_extent`]
     /// rounded up — [`ImageDraw::size_hint`]'s rule — and clamped to
-    /// [`MAX_RENDERABLE_DIMENSION`] per axis, which is as large as vello's
-    /// atlas can place. A clamped texture is drawn stretched over the
+    /// [`MAX_RENDERABLE_DIMENSION`] per axis, the longest texture side the
+    /// device is created with. A clamped texture is drawn stretched over the
     /// extent, since the brush scale divides by its own size. Zero on an
     /// axis with no device length, which bakes nothing.
     pub(crate) fn device_size(&self) -> (u32, u32) {
@@ -1605,15 +1605,14 @@ fn draw_backdrop(
             alpha: 1.0,
         },
     });
-    // Under `vello_gpu`, a backdrop with post-blur passes is clipped to its
-    // rounded box first and the passes run over the whole rectangle inside
-    // the clip, so they see an opaque backdrop at the box's anti-aliased rim.
-    // Run over the rim's partial alpha instead, a non-separable pass
-    // (`grayscale`, `saturate`: `Mix::Saturation`) unpremultiplies a white
-    // pixel to a colour an ulp above 1 with equal channels, and the blend
-    // shader's `clip_color` divides 0 by 0: a dark dot on the rim. vello's
-    // shader shares that division; its output is left as it was.
-    if cfg!(feature = "vello_gpu") && !backdrop.after.is_empty() {
+    // A backdrop with post-blur passes is clipped to its rounded box first
+    // and the passes run over the whole rectangle inside the clip, so they
+    // see an opaque backdrop at the box's anti-aliased rim. Run over the
+    // rim's partial alpha instead, a non-separable pass (`grayscale`,
+    // `saturate`: `Mix::Saturation`) unpremultiplies a white pixel to a
+    // colour an ulp above 1 with equal channels, and the blend shader's
+    // `clip_color` divides 0 by 0: a dark dot on the rim.
+    if !backdrop.after.is_empty() {
         let bounds = backdrop.shape.bounding_box();
         with_shape!(&backdrop.shape, |s| scene.push_clip_layer(
             Fill::NonZero,
@@ -2302,13 +2301,13 @@ mod tests {
             let entries = [entry];
             replay_program(&program, &entries, &[Some(baked)])
         };
-        // Under `vello_gpu` the texture and its passes are drawn inside a clip
-        // to the rounded box (`draw_backdrop`): a clip layer and its pop more.
-        let clip = if cfg!(feature = "vello_gpu") { 2 } else { 0 };
+        // The texture and its passes are drawn inside a clip to the rounded
+        // box (`draw_backdrop`): a clip layer and its pop more.
         assert_eq!(
             with_passes.encoding().draw_tags.len(),
-            plain.encoding().draw_tags.len() + 3 + clip,
-            "one post-blur pass is a blend layer, its flat fill, and the pop",
+            plain.encoding().draw_tags.len() + 3 + 2,
+            "one post-blur pass is a blend layer, its flat fill, and the pop, \
+             inside the clip and its pop",
         );
         assert_eq!(
             with_passes.encoding().n_open_clips,

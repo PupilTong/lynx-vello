@@ -109,10 +109,17 @@ wasm_thread = { git = "https://github.com/utooland/wasm_thread", rev = "94438ff7
 web-sys = "0.3"
 winit = { version = "0.30.13", default-features = false, features = ["rwh_06"] }
 
+# terminus's paint walk records into a `vello::Scene`; only that scene and
+# its `Encoding` are used, so vello's own GPU renderer (its `wgpu` feature,
+# with its shaders and compute pipelines) stays out of the build.
 vello = { version = "0.11", default-features = false }
-# `terminus`'s `vello_gpu` feature: sparse-strip rasterization on wgpu only.
+# terminus's rasterizer: sparse strips on vello_gpu's wgpu backend
+# (`crates/terminus/src/render/raster.rs`).
 vello_gpu = { version = "0.3", default-features = false, features = ["wgpu", "text"] }
 glifo = { version = "0.4", default-features = false }
+# The one wgpu in the tree: the major vello_gpu is built against. Default
+# features, so every native backend and WebGPU are compiled in.
+wgpu = "30.0.1"
 # `terminus`'s window-path test: a `CAMetalLayer` in no window is a surface
 # the painter's window stack can present to on macOS without an `NSWindow`.
 # Already in the tree through wgpu's Metal backend.

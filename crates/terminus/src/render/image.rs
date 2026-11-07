@@ -33,14 +33,14 @@
 //!
 //! # What the engine will not draw
 //!
-//! Vello packs every scene image into one shared square atlas that grows by
-//! doubling to [`MAX_RENDERABLE_DIMENSION`]. An image longer than that on
-//! either axis never fits at any atlas size: the resolve pass leaves it
-//! unallocated and zeroes the draw's dimensions, so it renders as nothing
-//! with no error anywhere — after growing the shared atlas to its maximum, a
-//! texture that never shrinks, and re-uploading every image already in it.
+//! The rasterizer uploads a bitmap into its image atlas or, past the atlas's
+//! side, into a texture of its own, and no texture can be longer than the
+//! device's `max_texture_dimension_2d`, which is [`MAX_RENDERABLE_DIMENSION`]
+//! on every device this crate creates. Creating a longer one is a wgpu
+//! validation error, not a draw that degrades.
 //!
-//! So [`is_renderable`] refuses such a bitmap before it reaches vello. It is
+//! So [`is_renderable`] refuses such a bitmap before it reaches the
+//! rasterizer. It is
 //! tested against the pixels [`FrameImages::read`] actually returns, and
 //! never against an image's intrinsic size: **the intrinsic size is a CSS
 //! input and is not bounded at all**. A host may report a 12000x6000 image
@@ -110,6 +110,7 @@ use smallvec::SmallVec;
 use vello::Scene;
 use vello::peniko::ImageData;
 
+use crate::render::gpu::GpuDevice;
 use crate::render::svg::{self, VectorDocument};
 use crate::tree::document::NodeId;
 
@@ -245,25 +246,21 @@ impl std::fmt::Debug for VectorImage {
     }
 }
 
-/// Largest per-axis pixel count vello can render.
+/// Largest per-axis pixel count of a bitmap the rasterizer can draw.
 ///
-/// Vello's image atlas starts at 1024 px and doubles until an image fits,
-/// stopping at `vello_encoding`'s `MAX_ATLAS_SIZE` of 8192. An image within
-/// this bound may still fail to allocate transiently when the atlas is full of
-/// other images — vello resolves that itself by evicting or growing — but an
-/// image past it can never be placed at all.
-///
-/// The `vello_gpu` rasterizer keeps the same bound, which is wgpu's default
-/// texture limit too: its atlas layers are 4096 px, so a bitmap past
-/// `render::sparse`'s atlas side is drawn from a texture of its own.
-pub const MAX_RENDERABLE_DIMENSION: u32 = 8192;
+/// The `max_texture_dimension_2d` of the limits every device of this crate
+/// is created with (`render::gpu::GpuDevice::LIMITS`, wgpu's defaults): a
+/// bitmap past `render::sparse`'s atlas side is drawn from a texture of its
+/// own, and no texture may be longer. A constant rather than a reading of a
+/// device, because a host sizes its decodes by it before any device exists.
+pub const MAX_RENDERABLE_DIMENSION: u32 = GpuDevice::LIMITS.max_texture_dimension_2d;
 
-/// Whether vello can place this bitmap in its image atlas.
+/// Whether the rasterizer can draw this bitmap.
 ///
 /// Tested against the bitmap a frame actually reads, never against an image's
 /// intrinsic size. A zero axis is refused for a second reason: the brush
 /// transform divides the draw's extent by these dimensions, and dividing by
-/// zero encodes a non-finite transform that vello accepts without complaint.
+/// zero encodes a non-finite transform that the scene accepts without complaint.
 #[must_use]
 pub fn is_renderable(data: &ImageData) -> bool {
     data.width > 0
@@ -994,7 +991,7 @@ impl ImageRegistry {
             return None;
         }
         let state = match event {
-            // Well-formedness, not the atlas bound: an image with a zero axis
+            // Well-formedness, not the texture bound: an image with a zero axis
             // has neither an intrinsic size nor an aspect ratio, so it would
             // stretch an unknown bitmap over the whole content box, and it is
             // refused as a failure. `MAX_RENDERABLE_DIMENSION` is deliberately

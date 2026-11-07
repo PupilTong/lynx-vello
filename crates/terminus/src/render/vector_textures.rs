@@ -20,8 +20,8 @@
 //! it — which is why this cache, unlike the filter bakes keyed by commit id,
 //! has no `forget`. The size is [`VectorDraw::device_size`]: the draw's
 //! extent under the per-axis scale of its committed transform, rounded up,
-//! clamped to [`crate::render::image::MAX_RENDERABLE_DIMENSION`] per axis (vello's atlas
-//! can place nothing longer). Every draw of one image at one device size — every tile
+//! clamped to [`crate::render::image::MAX_RENDERABLE_DIMENSION`] per axis (the longest texture
+//! side the device is created with). Every draw of one image at one device size — every tile
 //! of a repeated background, every element showing the same icon at the same
 //! size — shares one texture; a draw at another size is another texture. A
 //! compose-time scale (an exported `transform` curve) samples the committed
@@ -37,18 +37,16 @@
 //! `meet` and `slice` scale uniformly and align) and then scales that
 //! extent per axis onto the texture ([`VectorDraw::placement`]), so a
 //! clamped texture holds the same picture squeezed and the draw's stretch
-//! restores it. The texture is registered as an override image through
-//! [`Raster::override_image`], behind the deliberate empty blob a registered
-//! override never reads, with the alpha the rasterizer writes
-//! ([`Raster::OUTPUT_ALPHA`]): vello's is **straight** — `fine.wgsl`
-//! divides the colour by the coverage before the store — and `vello_gpu`'s
-//! premultiplied, since it blends into the target. The compose program then
+//! restores it. The texture is bound to a handle through
+//! [`Raster::bind_texture`], behind a deliberate empty blob whose id alone
+//! is read, with the alpha the rasterizer writes ([`Raster::OUTPUT_ALPHA`]:
+//! premultiplied, since it blends into the target). The compose program then
 //! draws the handle as it draws any bitmap, with the brush scale
 //! `extent / size`.
 //!
-//! With `vello_gpu` the texture is one texel longer than the key's size on
-//! each axis the device allows, its last column and row repeated there
-//! ([`repeat_edge`]): `vello_gpu` pads an image by clamping the sample
+//! The texture is one texel longer than the key's size on each axis the
+//! device allows, its last column and row repeated there ([`repeat_edge`]):
+//! `vello_gpu` pads an image by clamping the sample
 //! position half a texel short of the last texel's centre before it filters,
 //! which blends the last two columns of a bilinear draw half and half where
 //! clamp-to-edge reads the last one, and the repeated texels move that clamp
@@ -57,12 +55,6 @@
 //! the key's size, so the brush scale is unchanged; the drawing paint finds
 //! the longer texture behind it.
 //!
-//! A bake is a render through the frame's own rasterizer, so with vello it
-//! owes the [`AtlasResidency`](super::gpu::AtlasResidency) a pass like any
-//! other render: a scene with no patch at all — a flat icon — frees the
-//! image atlas, which is exactly the loss the residency repairs at each
-//! bitmap's next use.
-//!
 //! # Budget, pinning and eviction
 //!
 //! The resident textures are bounded by [`MAX_VECTOR_TEXTURE_BYTES`] —
@@ -70,7 +62,7 @@
 //! the frame being prepared draws are **pinned** for that prepare. Once its
 //! misses are baked, the unpinned entries are evicted least-recently-used
 //! first until the total is back under the budget, each eviction
-//! unregistering the override and so dropping the texture. A single draw
+//! unbinding the texture and so dropping it. A single draw
 //! whose texture alone would exceed the budget gets none and encodes
 //! nothing. A frame whose own draws together exceed the budget keeps them
 //! all for that frame: the bound is on what is retained *across* frames,
@@ -81,10 +73,9 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 use vello::kurbo::Size;
 use vello::peniko::{Blob, Color, ImageData, ImageFormat};
-use vello::wgpu;
 
 use super::gpu::GpuError;
-use super::raster::{Drawn, Raster};
+use super::raster::Raster;
 use crate::paint::compose::VectorDraw;
 use crate::visual::CommittedFrame;
 
@@ -100,9 +91,9 @@ const BYTES_PER_TEXEL: u64 = 4;
 
 /// One baked texture, by the handle the compose program draws it through.
 ///
-/// The texture itself is held by the renderer's override table — a
-/// `wgpu::Texture` is a shared handle — and goes when the override is
-/// unregistered, so nothing here has to own it twice.
+/// The texture itself is held by the rasterizer's table of bound textures
+/// — a `wgpu::Texture` is a shared handle — and goes when it is unbound, so
+/// nothing here has to own it twice.
 struct Entry {
     handle: ImageData,
     bytes: u64,
@@ -220,13 +211,6 @@ impl VectorTextures {
         Ok(&self.images)
     }
 
-    /// The table [`Self::prepare`] last produced — what a composite render
-    /// has to name so the atlas residency stays truthful about it.
-    #[must_use]
-    pub(crate) fn images(&self) -> &[Option<ImageData>] {
-        &self.images
-    }
-
     /// Bytes of texture resident right now.
     #[cfg(test)]
     #[must_use]
@@ -258,38 +242,30 @@ impl VectorTextures {
                 .entries
                 .remove(&key)
                 .expect("the victim was just found in the table");
-            raster.override_image(&entry.handle, None);
+            raster.bind_texture(&entry.handle, None);
             self.bytes -= entry.bytes;
         }
     }
 }
 
 /// The size of the texture a `width` × `height` bake renders into: the
-/// key's size, and with `vello_gpu` one texel more on each axis the device
-/// allows, for the repeated edge (module documentation).
+/// key's size plus one texel on each axis the device allows, for the
+/// repeated edge (module documentation).
 fn texture_size(device: &wgpu::Device, width: u32, height: u32) -> (u32, u32) {
-    if cfg!(feature = "vello_gpu") {
-        let longest = device.limits().max_texture_dimension_2d;
-        (
-            width + u32::from(width < longest),
-            height + u32::from(height < longest),
-        )
-    } else {
-        (width, height)
-    }
+    let longest = device.limits().max_texture_dimension_2d;
+    (
+        width + u32::from(width < longest),
+        height + u32::from(height < longest),
+    )
 }
 
-/// The usage a bake's texture needs beyond the rasterizer's: with
-/// `vello_gpu`, the copies [`repeat_edge`] makes.
-const EDGE_USAGE: wgpu::TextureUsages = if cfg!(feature = "vello_gpu") {
-    wgpu::TextureUsages::COPY_SRC.union(wgpu::TextureUsages::COPY_DST)
-} else {
-    wgpu::TextureUsages::empty()
-};
+/// The usage a bake's texture needs beyond the rasterizer's: the copies
+/// [`repeat_edge`] makes.
+const EDGE_USAGE: wgpu::TextureUsages =
+    wgpu::TextureUsages::COPY_SRC.union(wgpu::TextureUsages::COPY_DST);
 
 /// Renders `draw`'s scene into a new texture for a `width` × `height` key
-/// and registers it as an override image, answering the handle it is drawn
-/// through.
+/// and binds it to a new handle, answering the handle it is drawn through.
 fn bake(
     scene: &mut vello::Scene,
     draw: &VectorDraw,
@@ -311,7 +287,7 @@ fn bake(
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Rgba8Unorm,
-        // Rendered into by the rasterizer, then bound as an override image.
+        // Rendered into by the rasterizer, then bound to the handle.
         usage: Raster::TARGET_USAGE
             .union(Raster::BOUND_USAGE)
             .union(EDGE_USAGE),
@@ -327,9 +303,6 @@ fn bake(
             Size::new(f64::from(width), f64::from(height)),
         )),
     );
-    // Every render through the rasterizer names what it may draw, a bake
-    // included: for the default one, a patch-free bake frees the whole image
-    // atlas, which is exactly the loss its residency repairs.
     raster.render_to_texture(
         device,
         queue,
@@ -338,16 +311,14 @@ fn bake(
         texture_width,
         texture_height,
         Color::TRANSPARENT,
-        Drawn::default(),
     )?;
     if (texture_width, texture_height) != (width, height) {
         repeat_edge(device, queue, &texture, width, height);
     }
 
-    // `Renderer::register_texture` builds a handle like this one; it is
-    // built here so the alpha type is named where the render that fills the
-    // texture is. The blob is the deliberate fake: vello never reads it,
-    // because the image is registered as an override.
+    // The blob is a deliberate fake: only its id is read, to find the
+    // texture bound to it. The alpha type is named here, where the render
+    // that fills the texture is.
     let handle = ImageData {
         data: Blob::new(Arc::new([])),
         format: ImageFormat::Rgba8,
@@ -355,7 +326,7 @@ fn bake(
         width,
         height,
     };
-    raster.override_image(&handle, Some(texture));
+    raster.bind_texture(&handle, Some(texture));
     Ok(handle)
 }
 
@@ -459,13 +430,9 @@ mod tests {
         )
     }
 
-    /// The bytes of one 64×64 picture's texture, with `vello_gpu` its
-    /// repeated edge included.
-    const SQUARE_BYTES: u64 = if cfg!(feature = "vello_gpu") {
-        65 * 65 * 4
-    } else {
-        64 * 64 * 4
-    };
+    /// The bytes of one 64×64 picture's texture, its repeated edge
+    /// included.
+    const SQUARE_BYTES: u64 = 65 * 65 * 4;
 
     /// A page showing each `(source, document)` as a 64×64 `<image>`, the
     /// `n`th at `x = 100n`, with every document parsed into the registry,
@@ -560,9 +527,7 @@ mod tests {
         let vectors = gpu.prepare_vectors(&red_frame).expect("hit").to_vec();
         let mut scene = vello::Scene::new();
         red_frame.compose_into(&mut scene, &[], &[], &vectors, &|_| None, None);
-        let pixels = gpu
-            .render(&scene, &[], 800, 600, Color::WHITE)
-            .expect("render");
+        let pixels = gpu.render(&scene, 800, 600, Color::WHITE).expect("render");
         let at = (32 * 800 + 32) * 4;
         assert_eq!(&pixels[at..at + 4], &[255, 0, 0, 255], "the red icon");
         let outside = (32 * 800 + 200) * 4;
@@ -626,7 +591,7 @@ mod tests {
 
     /// A picture drawn off the pixel grid, so it is filtered: the half-covered
     /// pixel past its right edge reads the picture's last column, clamped to
-    /// its edge — `vello_gpu` reads it through the texture's repeated edge,
+    /// its edge — the rasterizer reads it through the texture's repeated edge,
     /// without which it would blend the last two columns half and half.
     #[test]
     fn a_filtered_draw_reads_the_last_column_at_the_pictures_edge() {
@@ -641,9 +606,7 @@ mod tests {
         let vectors = gpu.prepare_vectors(&frame).expect("bake").to_vec();
         let mut scene = vello::Scene::new();
         frame.compose_into(&mut scene, &[], &[], &vectors, &|_| None, None);
-        let pixels = gpu
-            .render(&scene, &[], 800, 600, Color::WHITE)
-            .expect("render");
+        let pixels = gpu.render(&scene, 800, 600, Color::WHITE).expect("render");
         let at = |x: usize| -> [u8; 4] {
             let at = (32 * 800 + x) * 4;
             pixels[at..at + 4].try_into().expect("four channels")

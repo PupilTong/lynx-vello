@@ -128,7 +128,7 @@ pub fn capture_document_sized<T: Sync>(
         &composed
     };
     let pixels = gpu
-        .render(scene, &images, width, height, background)
+        .render(scene, width, height, background)
         .map_err(CaptureError::Gpu)?;
     Image::from_rgba8(width, height, pixels).map_err(CaptureError::Image)
 }
@@ -153,7 +153,7 @@ pub fn capture_scene_sized(
     height: u32,
 ) -> Result<Image, CaptureError> {
     let pixels = gpu
-        .render(scene, &[], width, height, background)
+        .render(scene, width, height, background)
         .map_err(CaptureError::Gpu)?;
     Image::from_rgba8(width, height, pixels).map_err(CaptureError::Image)
 }

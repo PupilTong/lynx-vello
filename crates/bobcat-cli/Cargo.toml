@@ -32,9 +32,6 @@ server = [
     "dep:uuid",
     "dep:ve-tos-rust-sdk",
 ]
-# Rasterize with `vello_gpu` instead of vello, in either product
-# (`bobcat-core`'s `vello_gpu` feature).
-vello_gpu = ["bobcat-core/vello_gpu"]
 
 [[bin]]
 name = "bobcat"

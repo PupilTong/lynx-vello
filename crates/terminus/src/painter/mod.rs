@@ -530,8 +530,7 @@ impl Output {
         Ok(())
     }
 
-    /// Renders one composed scene, drawing `images`, into this target at
-    /// `size`.
+    /// Renders one composed scene into this target at `size`.
     ///
     /// A window renders into the texture it re-presents rather than into the
     /// swap-chain image, which is what lets re-exposure present the same frame
@@ -539,23 +538,14 @@ impl Output {
     /// a window presents, and an offscreen target's readback polls the device
     /// itself — only [`Painter::draw_offscreen`], which renders offscreen and
     /// reads nothing back, waits.
-    ///
-    /// The scene's bitmaps are named because a target tracks what its
-    /// renderer's image atlas still holds; see
-    /// [`crate::render::gpu::AtlasResidency`].
-    fn render(
-        &mut self,
-        scene: &Scene,
-        images: &[Option<ImageData>],
-        size: FrameSize,
-    ) -> Result<(), PainterError> {
+    fn render(&mut self, scene: &Scene, size: FrameSize) -> Result<(), PainterError> {
         match self {
             #[cfg(feature = "painter-test-utils")]
             Self::None => Ok(()),
             Self::Offscreen(gpu) => gpu
-                .render_frame(scene, images, size.width, size.height, CANVAS)
+                .render_frame(scene, size.width, size.height, CANVAS)
                 .map_err(|error| PainterError::Gpu(error.to_string())),
-            Self::Window(graphics) => graphics.render_to_target(scene, images, size),
+            Self::Window(graphics) => graphics.render_to_target(scene, size),
         }
     }
 
@@ -1655,7 +1645,7 @@ fn compose_and_render(
         );
         &*buffer
     };
-    output.render(scene, images, size)
+    output.render(scene, size)
 }
 
 fn route_published(

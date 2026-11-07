@@ -17,9 +17,6 @@ bench = false
 [features]
 default = []
 render = ["dep:terminus"]
-# Captures rasterize with `vello_gpu` instead of vello (`terminus`'s
-# `vello_gpu` feature); only meaningful beside `render`.
-vello_gpu = ["terminus?/vello_gpu"]
 
 [dependencies]
 png = { workspace = true }

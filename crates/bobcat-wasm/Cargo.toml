@@ -15,11 +15,6 @@ publish = false
 bench = false
 crate-type = ["cdylib", "rlib"]
 
-[features]
-# Rasterize with `vello_gpu` instead of vello (`bobcat-core`'s `vello_gpu`
-# feature), on its wgpu backend over WebGPU; its WebGL backend stays off.
-vello_gpu = ["bobcat-core/vello_gpu"]
-
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 bobcat-core = { workspace = true }
 bobcat-resources = { workspace = true }

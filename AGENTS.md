@@ -47,7 +47,8 @@ DOM + CSS engine). We replace that browser-hosted implementation with a native,
 cross-platform engine built on:
 
 - **[stylo](https://github.com/servo/stylo)** — CSS parsing/cascade/computed-style engine (Servo's)
-- **[vello](https://github.com/linebender/vello)** — GPU vector rendering
+- **[vello](https://github.com/linebender/vello)** — the scene format the paint walk records
+  (`vello::Scene`); rasterized by **vello_gpu** (0.3, sparse strips on wgpu 30)
 - **[parley](https://github.com/linebender/parley)** (0.12) — text layout & shaping, including
   the CSS 2.2 §10.8.1 line boxes both paragraph kinds report
 
@@ -3186,8 +3187,8 @@ instantiates Wasm or owns engine state. That Worker initializes the module,
 constructs one opaque `LynxGroup` and one `LynxView` per page through
 `BobcatRenderer::load`, keeps **one `Painter` for its canvas across page
 loads** (rebuilt only when it is missing or its target has failed), permanently
-owns every thread-affine GPU object — crates.io Vello 0.11/wgpu 30 Device,
-Queue, Surface, Renderer, and OffscreenCanvas — and uses `wasm_thread` to
+owns every thread-affine GPU object — crates.io wgpu 30 Device,
+Queue, Surface, the `vello_gpu` Renderer, and OffscreenCanvas — and uses `wasm_thread` to
 create the two Workers each group is made of: its nested Lynx main/VM Worker
 and the worker-realm Worker beside it. A `load` is `painter.detach()` → drop
 the old view → drop its group (ending the Lynx-main Worker and then the

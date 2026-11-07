@@ -1,42 +1,34 @@
-//! The wgpu side: adapter/device management and rendering built scenes,
-//! including a headless render-to-texture path with pixel readback (the
-//! test and screenshot surface — embedders with a window drive
-//! `vello::util::RenderContext`/`RenderSurface` themselves through the
-//! [`vello`] re-export).
+//! The wgpu side: instance, adapter and device creation, and rendering built
+//! scenes, including a headless render-to-texture path with pixel readback
+//! (the test and screenshot surface; the painter's window stack is
+//! `crate::painter::graphics`).
 //!
-//! There is one render policy in this crate: area-only antialiasing.
-//! [`renderer_options`] and [`render_params`] are its single definition, and
-//! every target rendered through this crate — the headless one here and an
-//! embedder's windowed one — must be constructed from them, or a windowed
-//! frame will not match a headless screenshot of the same scene.
+//! [`instance`] and [`GpuDevice::request`] are the one place this crate
+//! creates wgpu objects: the headless target here and the painter's window
+//! both build their device through them, so both run the rasterizer on the
+//! same features and limits.
 //!
-//! [`AtlasResidency`] is the second thing every target owes each frame, and
-//! every [`vello::Renderer`] rendered through this crate is paired with one.
-//! [`super::vector_textures::VectorTextures`] and
-//! [`super::blur::FilterTextures`] are the third and fourth, and unlike the
-//! other two they are optional per frame: a frame drawing no SVG document
-//! asks nothing of the first, and one with no `filter: blur()` group and no
-//! `backdrop-filter` element nothing of the second. Where a frame owes
-//! both, the vector textures come first: a filter bake replays ops that may
-//! draw them.
+//! Every target owns one [`Raster`], and beside it a
+//! [`super::vector_textures::VectorTextures`] and a
+//! [`super::blur::FilterTextures`]. Those two are optional per frame: a frame
+//! drawing no SVG document asks nothing of the first, and one with no
+//! `filter: blur()` group and no `backdrop-filter` element nothing of the
+//! second. Where a frame owes both, the vector textures come first: a filter
+//! bake replays ops that may draw them.
 
 use std::fmt;
 
 use euclid::default::Vector2D;
-use rustc_hash::FxHashSet;
 use vello::peniko::ImageData;
-use vello::util::RenderContext;
-use vello::wgpu;
 
 use super::blur::FilterTextures;
-use super::raster::{Drawn, Raster};
+use super::raster::Raster;
 use super::vector_textures::VectorTextures;
 use crate::visual::{CommittedFrame, ScrollSlot};
 
 /// Headless GPU renderer for tests, benchmarks, and windowless embedders.
 pub struct Headless {
-    context: RenderContext,
-    device_index: usize,
+    gpu: GpuDevice,
     raster: Raster,
     filters: FilterTextures,
     vectors: VectorTextures,
@@ -44,85 +36,66 @@ pub struct Headless {
     readback: Option<ReadbackBuffer>,
 }
 
-/// Which bitmaps one [`vello::Renderer`] has re-uploaded since its image
-/// atlas was last freed.
-///
-/// vello frees the atlas whenever a scene with no patch at all renders — no
-/// image, no gradient ramp, no glyph run: `Resolver::resolve` returns
-/// `Images::default()`, which resizes the persistent proxy to 1x1 and drops
-/// the texture — while `ImageCache` still counts every resident image clean,
-/// so nothing re-uploads afterwards and later draws sample the freed slot.
-/// The repair is a dirty mark, which re-uploads the whole bitmap on its next
-/// use; doing that unconditionally would put an image-bytes-linear upload on
-/// every frame, so this records what has already been repaired and marks each
-/// image at most once per loss.
-///
-/// Nothing is owed for an image vello has evicted and will reinsert, or has
-/// never seen: both enter the cache dirty by construction, so a skipped mark
-/// cannot cost pixels.
-#[cfg_attr(
-    feature = "vello_gpu",
-    allow(dead_code, reason = "the default rasterizer's")
-)]
-#[derive(Debug, Default)]
-pub(crate) struct AtlasResidency {
-    /// Blob ids ([`vello::peniko::Blob::id`]) marked since the last loss.
-    reuploaded: FxHashSet<u64>,
+/// A wgpu instance over the backends and flags the environment selects
+/// (`WGPU_BACKEND` and wgpu's other variables), every compiled-in backend
+/// otherwise.
+pub(crate) fn instance() -> wgpu::Instance {
+    wgpu::Instance::new(wgpu::InstanceDescriptor {
+        display: None,
+        backends: wgpu::Backends::from_env().unwrap_or_default(),
+        flags: wgpu::InstanceFlags::from_build_config().with_env(),
+        memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
+        backend_options: wgpu::BackendOptions::from_env_or_default(),
+    })
 }
 
-#[cfg_attr(
-    feature = "vello_gpu",
-    allow(dead_code, reason = "the default rasterizer's")
-)]
-impl AtlasResidency {
-    /// Brings `renderer` up to a render of `scene` drawing three tables: the
-    /// bitmaps a frame's image draws resolved, the textures its
-    /// `filter: blur()` groups baked, and the textures its vector images were
-    /// baked into. Call immediately before that render.
+/// One adapter's device and queue, which a target renders through.
+pub(crate) struct GpuDevice {
+    adapter: wgpu::Adapter,
+    pub(crate) device: wgpu::Device,
+    pub(crate) queue: wgpu::Queue,
+}
+
+impl GpuDevice {
+    /// The limits every device is created with: wgpu's defaults, which wgpu
+    /// guarantees on every modern backend and in WebGPU.
+    /// [`crate::render::image::MAX_RENDERABLE_DIMENSION`] is their
+    /// `max_texture_dimension_2d`.
+    pub(crate) const LIMITS: wgpu::Limits = wgpu::Limits::defaults();
+
+    /// Requests a device on the adapter the environment selects
+    /// (`WGPU_ADAPTER_NAME`, else the default one), able to present to
+    /// `compatible_surface` if one is given. No optional feature is
+    /// requested: the rasterizer and the bakes need none.
     ///
-    /// The baked textures are override images like any other as far as the
-    /// atlas is concerned, so they are owed the same repair after a loss —
-    /// and a bake of a solid-color group, or of a flat icon, is precisely
-    /// the patch-free render that causes one.
-    pub(crate) fn prepare_all(
-        &mut self,
-        renderer: &mut vello::Renderer,
-        scene: &vello::Scene,
-        images: &[Option<ImageData>],
-        filtered: &[Option<ImageData>],
-        vectors: &[Option<ImageData>],
-    ) {
-        self.prepare_with(
-            scene.encoding().resources.patches.is_empty(),
-            images,
-            filtered,
-            vectors,
-            |image| renderer.mark_override_image_dirty(image),
-        );
+    /// `None` when no adapter qualifies or it refuses the device.
+    pub(crate) async fn request(
+        instance: &wgpu::Instance,
+        compatible_surface: Option<&wgpu::Surface<'_>>,
+    ) -> Option<Self> {
+        let adapter =
+            wgpu::util::initialize_adapter_from_env_or_default(instance, compatible_surface)
+                .await
+                .ok()?;
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("terminus"),
+                required_features: wgpu::Features::empty(),
+                required_limits: Self::LIMITS,
+                ..wgpu::DeviceDescriptor::default()
+            })
+            .await
+            .ok()?;
+        Some(Self {
+            adapter,
+            device,
+            queue,
+        })
     }
 
-    /// The decision itself, with the marking supplied, so it is checkable
-    /// without a GPU.
-    ///
-    /// The marks are emitted before the loss is recorded: a patch-free scene
-    /// that still names images must leave nothing behind, since the render
-    /// that draws them is the one that frees the atlas.
-    fn prepare_with(
-        &mut self,
-        loses_atlas: bool,
-        images: &[Option<ImageData>],
-        filtered: &[Option<ImageData>],
-        vectors: &[Option<ImageData>],
-        mut mark: impl FnMut(&ImageData),
-    ) {
-        for image in images.iter().chain(filtered).chain(vectors).flatten() {
-            if self.reuploaded.insert(image.data.id()) {
-                mark(image);
-            }
-        }
-        if loses_atlas {
-            self.reuploaded.clear();
-        }
+    /// The adapter the device was created on.
+    pub(crate) fn adapter(&self) -> &wgpu::Adapter {
+        &self.adapter
     }
 }
 
@@ -164,41 +137,6 @@ impl fmt::Display for GpuError {
 
 impl std::error::Error for GpuError {}
 
-/// Renderer construction options for this crate's one render policy:
-/// area-only antialiasing. Windowed embedders building their own
-/// [`vello::Renderer`] must construct it with these options to match the
-/// headless path.
-#[cfg_attr(
-    feature = "vello_gpu",
-    allow(dead_code, reason = "the default rasterizer's")
-)]
-#[must_use]
-pub(crate) fn renderer_options() -> vello::RendererOptions {
-    vello::RendererOptions {
-        antialiasing_support: vello::AaSupport::area_only(),
-        ..vello::RendererOptions::default()
-    }
-}
-
-/// Per-frame render parameters for that same policy over `base_color`.
-#[cfg_attr(
-    feature = "vello_gpu",
-    allow(dead_code, reason = "the default rasterizer's")
-)]
-#[must_use]
-pub(crate) fn render_params(
-    base_color: vello::peniko::Color,
-    width: u32,
-    height: u32,
-) -> vello::RenderParams {
-    vello::RenderParams {
-        base_color,
-        width,
-        height,
-        antialiasing_method: vello::AaConfig::Area,
-    }
-}
-
 impl Headless {
     /// Creates a headless renderer on the platform's default adapter.
     ///
@@ -206,13 +144,11 @@ impl Headless {
     /// rather than panicking: an embedder can surface that and fall back, while
     /// tests treat it as a hard environment failure.
     pub fn new() -> Result<Self, GpuError> {
-        let mut context = RenderContext::new();
-        let device_index = pollster::block_on(context.device(None)).ok_or(GpuError::NoAdapter)?;
-        let handle = &context.devices[device_index];
-        let raster = Raster::new(&handle.device)?;
+        let gpu =
+            pollster::block_on(GpuDevice::request(&instance(), None)).ok_or(GpuError::NoAdapter)?;
+        let raster = Raster::new(&gpu.device);
         Ok(Self {
-            context,
-            device_index,
+            gpu,
             raster,
             filters: FilterTextures::default(),
             vectors: VectorTextures::default(),
@@ -230,12 +166,10 @@ impl Headless {
     /// pixels as this one's. [`Self::render_frame`] builds a new one, and
     /// [`Self::read_pixels`] has nothing to read until it does.
     ///
-    /// The atlas residency is untouched: it mirrors this renderer's image
-    /// cache, which a change of document does not disturb. The filter bakes
-    /// keep their textures but forget which frame they were baked for, since
-    /// commit ids restart at one per document. The vector textures are
-    /// untouched too: their key is a process-unique image identity, which no
-    /// document change can alias.
+    /// The filter bakes keep their textures but forget which frame they were
+    /// baked for, since commit ids restart at one per document. The vector
+    /// textures are untouched: their key is a process-unique image identity,
+    /// which no document change can alias.
     pub fn forget(&mut self) {
         self.target = None;
         self.readback = None;
@@ -268,14 +202,12 @@ impl Headless {
         frame: &CommittedFrame,
     ) -> Result<&[Option<ImageData>], GpuError> {
         let Self {
-            context,
-            device_index,
+            gpu,
             raster,
             vectors,
             ..
         } = self;
-        let handle = &context.devices[*device_index];
-        vectors.prepare(frame, raster, &handle.device, &handle.queue)
+        vectors.prepare(frame, raster, &gpu.device, &gpu.queue)
     }
 
     /// Bakes `frame`'s `filter: blur()` groups and `backdrop-filter`
@@ -309,17 +241,15 @@ impl Headless {
         base_color: vello::peniko::Color,
     ) -> Result<&[Option<ImageData>], GpuError> {
         let Self {
-            context,
-            device_index,
+            gpu,
             raster,
             filters,
             ..
         } = self;
-        let handle = &context.devices[*device_index];
         filters.prepare(
             raster,
-            &handle.device,
-            &handle.queue,
+            &gpu.device,
+            &gpu.queue,
             frame,
             images,
             vectors,
@@ -343,11 +273,10 @@ impl Headless {
         &self.vectors
     }
 
-    /// Renders a scene drawing `images` into the retained headless texture.
+    /// Renders a scene into the retained headless texture.
     pub fn render_frame(
         &mut self,
         scene: &vello::Scene,
-        images: &[Option<ImageData>],
         width: u32,
         height: u32,
         base_color: vello::peniko::Color,
@@ -360,37 +289,23 @@ impl Headless {
 
         self.ensure_target(width, height);
         let Self {
-            context,
-            device_index,
+            gpu,
             raster,
-            filters,
-            vectors,
             target,
             ..
         } = self;
-        let handle = &context.devices[*device_index];
         let view = &target
             .as_ref()
             .expect("ensure_target installs a render target")
             .view;
-        // The bakes this renderer holds are override images the composite
-        // render may draw, so they are named here too — the default
-        // rasterizer's residency has to see every image a render touches or
-        // a post-loss repair is missed.
-        let drawn = Drawn {
-            images,
-            filtered: filters.images(),
-            vectors: vectors.images(),
-        };
         if let Err(error) = raster.render_to_texture(
-            &handle.device,
-            &handle.queue,
+            &gpu.device,
+            &gpu.queue,
             scene,
             view,
             width,
             height,
             base_color,
-            drawn,
         ) {
             *target = None;
             return Err(error);
@@ -400,8 +315,7 @@ impl Headless {
 
     /// Waits for all submitted GPU work.
     pub fn wait_idle(&self) -> Result<(), GpuError> {
-        let handle = &self.context.devices[self.device_index];
-        handle
+        self.gpu
             .device
             .poll(wgpu::PollType::wait_indefinitely())
             .map_err(|error| GpuError::Render(error.to_string()))?;
@@ -418,15 +332,13 @@ impl Headless {
         self.ensure_readback(width, height);
 
         let Self {
-            context,
-            device_index,
+            gpu,
             target,
             readback,
             ..
         } = self;
-        let handle = &context.devices[*device_index];
-        let device = &handle.device;
-        let queue = &handle.queue;
+        let device = &gpu.device;
+        let queue = &gpu.queue;
         let target = target
             .as_ref()
             .expect("a target was checked before allocating readback");
@@ -498,12 +410,11 @@ impl Headless {
     pub fn render(
         &mut self,
         scene: &vello::Scene,
-        images: &[Option<ImageData>],
         width: u32,
         height: u32,
         base_color: vello::peniko::Color,
     ) -> Result<Vec<u8>, GpuError> {
-        self.render_frame(scene, images, width, height, base_color)?;
+        self.render_frame(scene, width, height, base_color)?;
         self.read_pixels()
     }
 
@@ -516,7 +427,7 @@ impl Headless {
             return;
         }
 
-        let device = &self.context.devices[self.device_index].device;
+        let device = &self.gpu.device;
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("dom headless target"),
             size: wgpu::Extent3d {
@@ -548,7 +459,7 @@ impl Headless {
             return;
         }
 
-        let device = &self.context.devices[self.device_index].device;
+        let device = &self.gpu.device;
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("dom headless readback"),
             size: u64::from(padded_bytes_per_row) * u64::from(height),
@@ -629,95 +540,4 @@ pub(crate) fn read_texture(
         pixels.extend_from_slice(&row[..tight_bytes_per_row as usize]);
     }
     Ok(pixels)
-}
-
-#[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
-mod tests {
-    use std::sync::Arc;
-
-    use vello::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
-
-    use super::AtlasResidency;
-
-    /// A 1x1 bitmap with an identity of its own — `Blob::new` takes a fresh
-    /// id per call, which is what the residency keys on.
-    fn image() -> ImageData {
-        ImageData {
-            data: Blob::new(Arc::new([255_u8, 0, 0, 255])),
-            format: ImageFormat::Rgba8,
-            alpha_type: ImageAlphaType::Alpha,
-            width: 1,
-            height: 1,
-        }
-    }
-
-    /// How many marks a render of `images` emits, given whether that render
-    /// frees the atlas.
-    fn marks(
-        residency: &mut AtlasResidency,
-        loses_atlas: bool,
-        images: &[Option<ImageData>],
-    ) -> usize {
-        let mut marked = 0;
-        residency.prepare_with(loses_atlas, images, &[], &[], |_| marked += 1);
-        marked
-    }
-
-    /// The steady state: no patch-free render, so a bitmap is marked once
-    /// however many frames draw it, and re-uploads nothing afterwards.
-    #[test]
-    fn a_resident_bitmap_is_marked_once_until_the_atlas_is_lost() {
-        let mut residency = AtlasResidency::default();
-        let drawn = [Some(image())];
-        assert_eq!(marks(&mut residency, false, &drawn), 1, "the first sight");
-        for frame in 0..8 {
-            assert_eq!(
-                marks(&mut residency, false, &drawn),
-                0,
-                "frame {frame} re-uploaded a bitmap vello still holds"
-            );
-        }
-        assert_eq!(
-            marks(&mut residency, true, &[]),
-            0,
-            "a solid-paths frame draws no bitmap to mark"
-        );
-        assert_eq!(
-            marks(&mut residency, false, &drawn),
-            1,
-            "the loss must be repaired at the bitmap's next use"
-        );
-    }
-
-    /// The repair is owed per bitmap, not per frame: a frame after the loss
-    /// that draws only one of two bitmaps must not settle the other's debt.
-    #[test]
-    fn a_frame_after_the_loss_repairs_only_the_bitmaps_it_draws() {
-        let mut residency = AtlasResidency::default();
-        let (first, second) = (image(), image());
-        let both = [Some(first.clone()), Some(second)];
-        assert_eq!(marks(&mut residency, false, &both), 2);
-        assert_eq!(marks(&mut residency, true, &[]), 0);
-        assert_eq!(marks(&mut residency, false, &[Some(first)]), 1);
-        assert_eq!(
-            marks(&mut residency, false, &both),
-            1,
-            "the bitmap the intervening frame did not draw is still owed"
-        );
-    }
-
-    /// A patch-free render that still names bitmaps is the render that frees
-    /// the atlas, so it must leave nothing recorded.
-    #[test]
-    fn a_patch_free_render_naming_bitmaps_records_none_of_them() {
-        let mut residency = AtlasResidency::default();
-        let drawn = [Some(image())];
-        assert_eq!(marks(&mut residency, true, &drawn), 1);
-        assert_eq!(
-            marks(&mut residency, false, &drawn),
-            1,
-            "the atlas went with that render, so the mark is owed again"
-        );
-    }
 }
