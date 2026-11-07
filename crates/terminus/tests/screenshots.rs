@@ -301,8 +301,6 @@ fn rounded_box_showcase_matches_browser() {
         &mut doc.dom,
         &terminus::link::NoImages,
     );
-    // A Chrome reference, so no backend variant: every rasterizer is held to
-    // the browser's picture, and none may record an override of it.
     let references = prime_radiant::Screenshots::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/screenshots/rounded-box-browser"

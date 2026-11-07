@@ -4,7 +4,7 @@
 # Columns: case-name<TAB>issue.
 # W3C-correct raster/sample and UA-choice rows use committed native
 # snapshots; all other rows are ignored. Browser-match rows are absent.
-# Dispositions: 84 raster/sample, 61 UA choice, 170 W3C gap,
+# Dispositions: 85 raster/sample, 61 UA choice, 170 W3C gap,
 # 19 non-W3C compatibility.
 background-linear-000	css-gradient-multi-position-stops
 background-linear-001	css-gradient-hard-stop-boundary-sampling
@@ -205,6 +205,7 @@ mask-linear-000	vello-chromium-edge-coverage
 mask-linear-001	vello-chromium-edge-coverage
 mask-linear-006	vello-chromium-edge-coverage
 mask-linear-007	vello-chromium-edge-coverage
+mask-linear-009	css-gradient-hard-stop-boundary-sampling
 mask-linear-022	vello-chromium-edge-coverage
 mask-linear-023	vello-chromium-edge-coverage
 mask-linear-030	vello-chromium-edge-coverage

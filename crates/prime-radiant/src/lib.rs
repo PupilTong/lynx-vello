@@ -16,15 +16,15 @@
 //! # #[cfg(feature = "render")]
 //! # fn example(document: &mut terminus::link::Document<()>) {
 //! use prime_radiant::vello::peniko::Color;
-//! use prime_radiant::{capture_document, headless, raster_screenshots_in};
+//! use prime_radiant::{Screenshots, capture_document, headless};
 //!
 //! let mut gpu = headless("my_test");
 //! // The pixel source a frame's image draws resolve against. A page with no
 //! // images passes `terminus::link::NoImages`; one with images passes the store.
 //! let image = capture_document(&mut gpu, document, Color::WHITE, &terminus::link::NoImages)
 //!     .expect("capture");
-//! // `<crate>/tests/screenshots`, keyed on the rasterizer `terminus` was built with.
-//! raster_screenshots_in(env!("CARGO_MANIFEST_DIR")).assert_matches(&["my-case", "index"], &image);
+//! Screenshots::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/screenshots"))
+//!     .assert_matches(&["my-case", "index"], &image);
 //! # }
 //! ```
 //!
@@ -47,18 +47,10 @@
 //!
 //! # What it deliberately does not borrow
 //!
-//! - **No platform suffix on golden filenames, and a backend suffix only as an override.**
-//!   Playwright commits only `-linux` goldens and regenerates elsewhere. lynx-vello has one shared
-//!   golden per case, `<name>.png`, and cross-platform rasterizer differences are absorbed by
-//!   tolerance instead of by per-platform baselines. A second rasterizer (`terminus`'s `vello_gpu`)
-//!   is held to CSS, web and Lynx behaviour, not to vello's pixels, so where its correct output
-//!   differs from the shared golden beyond the tolerance it gets an override `<name>.<variant>.png`
-//!   beside it (see [`Screenshots::with_variant`] and, with `render`, `raster_screenshots_in`,
-//!   which takes the variant from the rasterizer `terminus` was compiled with). A variant store
-//!   compares against the override when it exists and the shared golden otherwise; its update mode
-//!   writes the override only where the rendering does not match the shared golden, deletes an
-//!   override that has become a repeat of it, and never modifies an existing shared golden. Without
-//!   a variant, nothing changes: the fix for a platform difference is still not a tighter
+//! - **No platform or backend suffix on golden filenames.** Playwright commits only `-linux`
+//!   goldens and regenerates elsewhere. lynx-vello has one committed golden per case, so
+//!   cross-platform rasterizer differences are absorbed by tolerance instead of by per-platform
+//!   baselines. If that stops holding, the fix is a suffix in [`Screenshots::path`], not a tighter
 //!   threshold.
 //! - **No stability loop.** Playwright re-captures until two screenshots agree because a live
 //!   browser animates; a `terminus` document's internal paint pipeline is a pure function of its
@@ -67,10 +59,7 @@
 //! # Features
 //!
 //! - default: [`Image`], [`compare`], [`Screenshots`] — pixels in, verdict out, no render stack.
-//! - `render`: adds `capture_document`, `headless` and `raster_screenshots_in`, which pull in
-//!   `terminus`.
-//! - `vello_gpu`: with `render`, captures rasterize through `terminus`'s `vello_gpu` feature
-//!   (`vello_gpu`'s sparse strips) instead of vello's compute pipeline.
+//! - `render`: adds `capture_document` and `headless`, which pull in `terminus`.
 //!
 //! # Captures need a GPU
 //!
@@ -97,7 +86,7 @@ pub use crate::image::{Image, ImageError};
 #[cfg(feature = "render")]
 pub use crate::render::{
     CaptureError, capture_document, capture_document_sized, capture_scene, capture_scene_sized,
-    frame_size, headless, raster_screenshots_in,
+    frame_size, headless,
 };
 #[cfg(feature = "render")]
 pub use crate::store::{TestImages, pump_images, render_with_images, rgba8};

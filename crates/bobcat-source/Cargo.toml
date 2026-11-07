@@ -32,12 +32,6 @@ tokio = { workspace = true, features = ["rt", "macros", "time"] }
 divan = { workspace = true }
 prime-radiant = { workspace = true }
 
-# `web_core_e2e` checks pixels `terminus` rendered, so its golden store keys on
-# the rasterizer through `render` (`prime_radiant::raster_screenshots_in`).
-# Native only: the wasm32 tests decode bundles and never capture.
-[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
-prime-radiant = { workspace = true, features = ["render"] }
-
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen-test = { workspace = true }
 

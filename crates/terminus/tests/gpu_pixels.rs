@@ -563,10 +563,10 @@ fn a_white_blurred_square_over_white_grows_no_halo() {
 /// A half-transparent red square under `blur(4px)` keeps its colour at the
 /// centre: red over the white page, half covered.
 ///
-/// The other half of the premultiply pass's contract: it must premultiply
-/// exactly once. A rasterizer that already writes premultiplied colour and
-/// gets multiplied by alpha again draws the bake at a quarter of its red
-/// over half of its alpha, and the page's white shows through as pink.
+/// The other half of the chain's alpha contract: the bake is premultiplied
+/// exactly once, by the rasterizer. Multiplied by alpha a second time, it
+/// draws at a quarter of its red over half of its alpha, and the page's
+/// white shows through as pink.
 #[test]
 fn a_translucent_blurred_square_keeps_its_colour() {
     let mut gpu = headless("a_translucent_blurred_square_keeps_its_colour");

@@ -139,15 +139,12 @@ pub mod layout {
     pub use crate::layout::{Layout, NaturalSize, ParagraphKind, Size};
 }
 
-/// Headless GPU rendering, the rasterizer this build renders through, and the
-/// area limit of a `filter: blur()` bake.
+/// Headless GPU rendering and the area limit of a `filter: blur()` bake.
 ///
 /// The render floor knows no nodes, styles or layout: the document builds a
 /// [`vello::Scene`] per commit and this floor turns scenes into pixels with
 /// `vello_gpu`'s sparse strips, on the [`wgpu`] this link re-exports.
 pub mod render {
-    pub use crate::render::raster::RASTER_VARIANT;
-
     /// Headless rendering and readback.
     pub mod gpu {
         pub use crate::render::gpu::{GpuError, Headless};

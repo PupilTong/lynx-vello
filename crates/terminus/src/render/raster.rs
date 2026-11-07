@@ -16,11 +16,6 @@ use vello::peniko::{Color, ImageAlphaType, ImageData};
 
 use super::gpu::GpuError;
 
-/// The name screenshot goldens rendered by this rasterizer are stored
-/// under: a screenshot store reads `<name>.vello_gpu.png` where one exists,
-/// beside the shared `<name>.png`.
-pub const RASTER_VARIANT: Option<&str> = Some("vello_gpu");
-
 /// See the [module documentation](self).
 pub(crate) struct Raster {
     sparse: super::sparse::SparseBackend,

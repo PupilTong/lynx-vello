@@ -1,7 +1,0 @@
-# Browser-match CSS-paint cases the `vello_gpu` rasterizer renders otherwise
-# than their Chromium reference, for a W3C-correct raster/sample reason.
-# Read by support/generate_css_paint_cases.py: under `--features vello_gpu`
-# each compares against css-paint-native/<case>.vello_gpu.png; every other
-# build keeps its Chromium reference.
-# Columns: case-name<TAB>issue (a raster/sample or UA-choice issue).
-mask-linear-009	css-gradient-hard-stop-boundary-sampling

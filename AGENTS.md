@@ -4707,8 +4707,8 @@ exact differing-pixel count. Never accept a golden you have not looked at: a
 blank or all-white image compares happily against itself forever. Browser-owned
 suites can reject `PRIME_RADIANT_UPDATE_SNAPSHOTS`; follow their checked capture
 and audit workflow instead. The CSS paint atlas has two explicit reference
-owners: 666 Chromium matches remain browser-owned, while 145 W3C-correct
-differences (84 rasterization/sampling cases plus 61 standards-permitted UA
+owners: 665 Chromium matches remain browser-owned, while 146 W3C-correct
+differences (85 rasterization/sampling cases plus 61 standards-permitted UA
 choices) use native DOM/Parley snapshots in a separate directory. Native atlas
 references may be updated only with the filtered
 `CSS_PAINT_UPDATE_NATIVE=1 ... css_native_` workflow, which cannot overwrite
