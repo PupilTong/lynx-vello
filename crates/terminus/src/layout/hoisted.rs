@@ -24,11 +24,12 @@
 //!   lays every listed box inside a moved subtree out again, which re-registers it.
 //! - **In-place relayout** of a subtree whose hoisted box escapes it reaches no containing block
 //!   above it. The rounding tail places those boxes ([`places_late`]), with the same function the
-//!   containing block's pass would have used, so a box comes out the same either way. The one box
+//!   containing block's pass would have used, so a box comes out the same either way. The boxes
 //!   that function cannot reproduce — one with a default anchor whose containing block is a scroll
-//!   container, laid out against css-position-4's scrollable containing block, which only the
-//!   container's own pass computes — makes the relayout fall back to the whole-tree pass instead
-//!   ([`escapes_to_scrollable_block`]).
+//!   container, laid out against css-position-4's scrollable containing block, and one naming a
+//!   grid line whose containing block is a grid container, laid out in the grid area, both of which
+//!   only the container's own pass computes — make the relayout fall back to the whole-tree pass
+//!   instead ([`escapes_past_late_placement`]).
 
 use rustc_hash::FxHashSet;
 use seldon::geometry::Point;
@@ -37,7 +38,7 @@ use seldon::tree::{HoistedChild, Layout, LayoutTree};
 use smallvec::SmallVec;
 
 use super::anchors::{connected_chain, containing_block_generator, precedes};
-use super::style::{DisplayMode, StyleView, box_parent, resolve_position};
+use super::style::{DisplayMode, StyleView, box_parent, display_mode, resolve_position};
 use crate::tree::document::{Document, DocumentLayoutState, NodeId, NodeSlot, TreeArenas};
 use crate::tree::node::Node;
 
@@ -232,22 +233,26 @@ pub(super) fn places_late<T>(
 }
 
 /// Whether a box hoisted out of the subtree at `root`, which was just relaid
-/// in place, is listed under a scroll container above `root` and can have a
-/// default anchor. Its containing block's own absolute pass lays such a box
-/// out against css-position-4's scrollable containing block — the
-/// container's in-flow overflow, which that pass alone computes — so the
-/// rounding tail's late placement ([`places_late`]) cannot stand in for that
-/// pass, and the caller runs it instead.
+/// in place, escapes to a containing block above `root` whose own absolute
+/// pass places it against something the rounding tail's late placement
+/// ([`places_late`], the padding box) does not know, so the caller runs that
+/// pass instead:
+///
+/// - a scroll container, for a box that can have a default anchor: css-position-4's scrollable
+///   containing block is the container's in-flow overflow, which that pass alone computes;
+/// - a grid container, for a box whose grid-placement properties name a line: css-grid-2 §10.1's
+///   grid area comes from the tracks, which only the grid's pass has.
 ///
 /// Answered from [`DocumentLayoutState::hoisted_to`], which is keyed by
 /// containing block: a page with no hoisted box pays one `is_empty` test;
 /// otherwise each listed block costs one computed-style read, each box
 /// listed under a scroll container one `position-anchor` test over its style
-/// and position options, and each box that passes both a walk up its flat
-/// ancestors to the first of `block` and `root`. A stale listing (a box that
-/// no longer escapes to its block) can only make the answer `true` where
-/// `false` was enough, which costs a whole-tree pass, never a misplaced box.
-pub(super) fn escapes_to_scrollable_block<T>(
+/// and position options, each box listed under a grid four placement tests,
+/// and each box that passes a walk up its flat ancestors to the first of
+/// `block` and `root`. A stale listing (a box that no longer escapes to its
+/// block) can only make the answer `true` where `false` was enough, which
+/// costs a whole-tree pass, never a misplaced box.
+pub(super) fn escapes_past_late_placement<T>(
     tree: &TreeArenas<T>,
     state: &DocumentLayoutState,
     root: NodeSlot,
@@ -256,17 +261,36 @@ pub(super) fn escapes_to_scrollable_block<T>(
         return false;
     }
     state.hoisted_to.iter().any(|(&block, listed)| {
-        block != root
-            && tree
-                .get(block)
-                .and_then(Node::layout_computed_style)
-                .is_some_and(crate::scroll::is_scroll_container)
+        if block == root {
+            return false;
+        }
+        let Some(block_node) = tree.get(block) else {
+            return false;
+        };
+        let Some(block_style) = block_node.layout_computed_style() else {
+            return false;
+        };
+        let scroll = crate::scroll::is_scroll_container(block_style);
+        let grid = display_mode(block_node, *block_style.get_display()) == DisplayMode::Grid;
+        (scroll || grid)
             && listed.iter().any(|&node| {
                 tree.get(node).is_some_and(|hoisted| {
-                    super::anchors::may_have_default_anchor(tree, hoisted)
+                    ((scroll && super::anchors::may_have_default_anchor(tree, hoisted))
+                        || (grid && names_a_grid_line(hoisted)))
                         && below_root_under_block(hoisted, block, root)
                 })
             })
+    })
+}
+
+/// Whether any of `node`'s grid-placement properties is other than `auto`.
+fn names_a_grid_line<T>(node: &Node<T>) -> bool {
+    node.layout_computed_style().is_some_and(|style| {
+        let position = style.get_position();
+        !(position.grid_row_start.is_auto()
+            && position.grid_row_end.is_auto()
+            && position.grid_column_start.is_auto()
+            && position.grid_column_end.is_auto())
     })
 }
 
