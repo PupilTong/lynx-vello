@@ -44,20 +44,42 @@
 //! sections, background thread and workers all hang under the card's URL —
 //! resolves it once, so what it fetches and what it builds name one
 //! absolute URL. It requests nothing.
+//!
+//! # The `resource.lazyBundle` entry
+//!
+//! A fetch the realm names a lazy bundle load — `fetchResource(url, true)`,
+//! which `lynx.fetchBundle` makes and a `<frame>`'s fetch of its card does
+//! not, since native's frame load (`LazyBundleLoader::LoadFrameBundle`,
+//! `kFrame`) reports no such entry — is timed while someone observes
+//! `resource` — the Rust embedder through
+//! [`EntryTypes::RESOURCE`](crate::performance::EntryTypes::RESOURCE), or a
+//! BTS observer of `resource` — when it makes a request: the
+//! call's instant is its `requireStart`, the request asks the fetcher for its
+//! own readings ([`SourceRequest::Fetch::timed`]), and the outcome's delivery
+//! to the realm completes one Lynx `LazyBundleEntry`, opened by the realm
+//! that called ([`LazyBundleEntry::from_fetch`]). A URL already fetched,
+//! answered `true` at once, is native's cached load, which reports nothing.
+//! While nobody observes, a fetch reads one relaxed atomic for it and takes
+//! no instant.
 
 use std::rc::Rc;
+use std::sync::Arc;
 
 use quickjs_rust_bridge::{HostArgument, HostValue};
 
+use crate::clock::ClockInstant;
 use crate::esm::HOST_MODULE_SPECIFIER;
 use crate::future::FutureTable;
 use crate::link::HostOutbox;
 use crate::main::quickjs::ScriptEngine;
+use crate::performance::{LazyBundleEntry, Opener};
 use crate::resource::{LoadedSource, SourceRequest, unanswered_source};
 use crate::script::ScriptError;
 
 /// Starts one fetch and answers the id of the future its outcome settles —
-/// or `true`, for a URL this view has fetched already.
+/// or `true`, for a URL this view has fetched already. A second argument,
+/// `true`, names the fetch a lazy bundle load, which a `resource.lazyBundle`
+/// entry reports.
 const FETCH_EXPORT: &str = "fetchResource";
 
 /// Resolves a URL against the view's base, as a fetch of it resolves it.
@@ -72,10 +94,15 @@ const RESOLVE_EXPORT: &str = "resolveUrl";
 /// already holds that URL, in which case it answers `true` and starts
 /// nothing. `resolveUrl` answers a string, and throws for a URL that does not
 /// resolve.
+///
+/// `opener` is the realm the fetches are timed as — the main-thread realm or
+/// `<frame>` card realm, or the worker — which decides which BTS observer
+/// hears its `resource.lazyBundle` entries.
 pub(crate) fn install(
     engine: &mut ScriptEngine,
     sources: &HostOutbox,
     futures: &Rc<FutureTable>,
+    opener: Opener,
 ) -> Result<(), ScriptError> {
     let resolving = sources.clone();
     install_member(engine, RESOLVE_EXPORT, 1, move |arguments| {
@@ -86,21 +113,44 @@ pub(crate) fn install(
     })?;
     let requests = sources.clone();
     let futures = Rc::clone(futures);
-    install_member(engine, FETCH_EXPORT, 1, move |arguments| {
+    install_member(engine, FETCH_EXPORT, 2, move |arguments| {
         const NAME: &str = "bobcat-internal:host.fetchResource";
         let url = string_argument(NAME, arguments, 0)?.to_owned();
+        let lazy_bundle = matches!(arguments.get(1), Some(HostArgument::Boolean(true)));
         // Already fetched, as the fetcher itself answers: nothing is
         // requested and the realm has its outcome before this call returns.
         if requests.fetch_probe().is_some_and(|probe| probe(&url)) {
             return Ok(HostValue::Boolean(true));
         }
-        let answer = requests.request(SourceRequest::Fetch { url });
+        // The one read a lazy bundle's fetch makes while nobody observes
+        // `resource`.
+        let registry = requests.registry();
+        let timing = (lazy_bundle && registry.times_resources())
+            .then(|| (ClockInstant::now(), Arc::<str>::from(url.as_str())));
+        let answer = requests.request(SourceRequest::Fetch {
+            url,
+            timed: timing.is_some(),
+        });
+        let timed = timing.map(|timing| (timing, Arc::clone(registry), requests.clone()));
         // Registered rather than awaited: which of the two ways out the realm
         // takes — the synchronous `Future.wait` or the `.then` the owner's
         // epilogue settles — is the caller's business, not this member's.
         let id = futures.register(async move {
-            match answer.await {
-                Ok(Ok(LoadedSource::Fetched)) => Ok(HostValue::Undefined),
+            let answer = answer.await;
+            if let Some(((started, url), registry, host)) = timed {
+                let outcome = match &answer {
+                    Ok(Ok(LoadedSource::Fetched(outcome))) => Some(outcome),
+                    _ => None,
+                };
+                let entry = LazyBundleEntry::from_fetch(url, started, ClockInstant::now(), outcome);
+                if registry.note_lazy_bundle(opener, entry) {
+                    // The embedder's next `pump` reports it, and tells the
+                    // BTS observer owed it.
+                    host.wake();
+                }
+            }
+            match answer {
+                Ok(Ok(LoadedSource::Fetched(_))) => Ok(HostValue::Undefined),
                 Ok(Ok(LoadedSource::Module { .. })) => {
                     Err("the fetcher returned a script".to_owned())
                 }
