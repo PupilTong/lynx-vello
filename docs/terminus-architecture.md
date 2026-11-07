@@ -1040,6 +1040,15 @@ paint-order build when an offset moved), and the painter the offset it holds.
   offset, drag origins and glide targets by the part it has not applied when it
   rebases. Every post names the sum it had applied, and the runtime adds what a
   post lacks.
+- **Shrinking.** A layout that leaves the scrolling area shorter than the
+  offset writes the clamp back into the stored offset, as Blink's
+  `ClampScrollOffsetAfterOverflowChange` does, and adds it to the same sum
+  (`Document::clamp_scroll_offsets_after_layout`). The area growing back later
+  does not carry the container out again, and the painter lands on the same
+  offset whichever frames it adopted on the way: left to its own re-clamp onto
+  each frame, a `<list>` whose cells built ahead stood at 0 for one frame ended
+  at that frame's end on a painter that caught it and at the list's end on one
+  that did not.
 
 Only
 `overflow: scroll` is user-scrollable; `hidden` is a scroll container that
