@@ -4474,9 +4474,8 @@ mod tests {
     /// A scope whose element has `filter` (or `backdrop-filter`) opens inside
     /// the links of its own clip chain — a scroller's clip in the space
     /// outside the scroller's node, then the card's in the scroller's node,
-    /// the innermost as a full layer around the effect layer — and its
-    /// content pushes none of them. So the blur group's range is the box's
-    /// own content alone, which a scroll of the scroller or the card does
+    /// right around the effect layer — and its content pushes none of them. So the blur group's
+    /// range is the box's own content alone, which a scroll of the scroller or the card does
     /// not change, and the bake reads neither. A box no ancestor clips opens
     /// with no output clip at all.
     #[test]
@@ -4530,8 +4529,8 @@ mod tests {
         );
         assert_eq!(
             push(&program[at - 2]),
-            Some((false, spaces[card_node as usize].parent)),
-            "the card's clip, a full layer, in the scroller's node",
+            Some((true, spaces[card_node as usize].parent)),
+            "the card's clip, in the scroller's node",
         );
         assert_eq!(
             push(&program[at - 3]),
