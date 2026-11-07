@@ -62,8 +62,9 @@ use tokio_util::sync::CancellationToken;
 
 use super::scope::install_worker_members;
 use super::{WorkerCommand, WorkerEvent, WorkerKey, WorkerMessage, WorkerPayload, WorkerStart};
+use crate::clock::ClockInstant;
 use crate::esm::{Export, build_runtime};
-use crate::jobs::{JsThread, JsThreadHandle};
+use crate::jobs::{JobKind, JsThread, JsThreadHandle, JsThreadName};
 use crate::lifetime::{Lifetime, run_job, serve_clock};
 use crate::link::HostOutbox;
 use crate::main::quickjs::{ScriptRuntime, SharedRuntime, mark_checkpoint_later};
@@ -352,6 +353,16 @@ impl Worker {
         })
     }
 
+    /// The JS blocking monitor's reading for one message this worker was
+    /// sent: how long the job delivering it waited for this thread, from
+    /// the send to the job's start. `None` is a message sent while the
+    /// monitor was off, which costs nothing here.
+    fn note_wait(&self, enqueued: Option<ClockInstant>) {
+        if let Some(enqueued) = enqueued {
+            self.host.registry().note_js_blocking(enqueued.elapsed());
+        }
+    }
+
     fn ended(&self) -> bool {
         self.lifetime.ended()
     }
@@ -539,6 +550,7 @@ impl Worker {
 impl RealmOwner for Worker {
     type Realm = WorkerRealm;
     type Event = WorkerPayload;
+    const THREAD: JsThreadName = JsThreadName::Workers;
 
     /// A rejected root module is not reported by the epilogue, which reads
     /// the root module's load only to learn that it has settled. Only the
@@ -681,7 +693,7 @@ async fn boot_worker(
     name: String,
     messages: mpsc::UnboundedReceiver<WorkerMessage>,
 ) {
-    let booted = run_job(&worker, move |worker| worker.boot(name));
+    let booted = run_job(&worker, JobKind::Start, move |worker| worker.boot(name));
     owner::spawn(&worker, consume_messages(Rc::clone(&worker), messages));
     // The boot job runs the first epilogue itself, so the first deadline has
     // already been published by the time this returns — and that epilogue
@@ -705,9 +717,10 @@ async fn boot_worker(
 /// Queued rather than awaited, for the reason [`consume_messages`] queues
 /// everything: the consumer has to go on reading, so that a `Terminate` behind
 /// this reaches [`owner::end`] even while the job this queued is parked.
-fn deliver_vsync(worker: &Rc<Worker>, milliseconds: f64) {
+fn deliver_vsync(worker: &Rc<Worker>, milliseconds: f64, enqueued: Option<ClockInstant>) {
     let reporting = Rc::clone(worker);
-    drop(owner::enter(worker, move |realm, js| {
+    owner::queue(worker, JobKind::AnimationFrame, move |realm, js| {
+        reporting.note_wait(enqueued);
         if let Err(error) = realm.core.engine.call_module_export(
             js,
             Export::BeginFrame,
@@ -715,14 +728,21 @@ fn deliver_vsync(worker: &Rc<Worker>, milliseconds: f64) {
         ) {
             policy::report(&reporting, Scene::Frame, error);
         }
-    }));
+    });
 }
 
 /// One native module's answer to one function argument of one call this
 /// worker's realm made, handed to it by [`crate::native_module::deliver`].
-fn deliver_module_callback(worker: &Rc<Worker>, call: u64, index: u32, arguments: Option<String>) {
+fn deliver_module_callback(
+    worker: &Rc<Worker>,
+    call: u64,
+    index: u32,
+    arguments: Option<String>,
+    enqueued: Option<ClockInstant>,
+) {
     let reporting = Rc::clone(worker);
-    drop(owner::enter(worker, move |realm, js| {
+    owner::queue(worker, JobKind::ModuleCallback, move |realm, js| {
+        reporting.note_wait(enqueued);
         let delivered = crate::native_module::deliver(
             &realm.core.engine,
             js,
@@ -733,7 +753,7 @@ fn deliver_module_callback(worker: &Rc<Worker>, call: u64, index: u32, arguments
         if let Err(error) = delivered {
             policy::report(&reporting, Scene::HostCall, error);
         }
-    }));
+    });
 }
 
 /// The one ordered consumer of what is posted to this worker.
@@ -774,20 +794,23 @@ async fn consume_messages(
     worker: Rc<Worker>,
     mut messages: mpsc::UnboundedReceiver<WorkerMessage>,
 ) {
-    // What is posted before the root module has finished; `None` once it has
-    // and what was held has been delivered.
-    let mut held: Option<Vec<HostValue>> = Some(Vec::new());
+    // What is posted before the root module has finished, each with its
+    // enqueue instant; `None` once it has and what was held has been
+    // delivered. A held message's wait for the worker thread counts from
+    // its send, as Lynx counts a task queued behind the loading bundle.
+    let mut held: Option<Vec<(HostValue, Option<ClockInstant>)>> = Some(Vec::new());
     // A `PerformanceReady` read before the root module finished, delivered
-    // once with what was held: one take drains every entry owed.
-    let mut performance_held = false;
+    // once with what was held: one take drains every entry owed. The
+    // earliest one's enqueue instant is kept.
+    let mut performance_held: Option<Option<ClockInstant>> = None;
     let mut ready = worker.boot_finished.subscribe();
     loop {
         if let Some(queued) = held.take_if(|_| *ready.borrow_and_update()) {
-            for data in queued {
-                deliver_post(&worker, data);
+            for (data, enqueued) in queued {
+                deliver_post(&worker, data, enqueued);
             }
-            if std::mem::take(&mut performance_held) {
-                deliver_performance(&worker);
+            if let Some(enqueued) = performance_held.take() {
+                deliver_performance(&worker, enqueued);
             }
         }
         tokio::select! {
@@ -796,21 +819,23 @@ async fn consume_messages(
                 // Explicit termination or collection of the MTS handle, or
                 // the release of its realm.
                 None | Some(WorkerMessage::Terminate) => break,
-                Some(WorkerMessage::Post(data)) => match held.as_mut() {
-                    Some(held) => held.push(data),
-                    None => deliver_post(&worker, data),
+                Some(WorkerMessage::Post { data, enqueued }) => match held.as_mut() {
+                    Some(held) => held.push((data, enqueued)),
+                    None => deliver_post(&worker, data, enqueued),
                 },
-                Some(WorkerMessage::Vsync(milliseconds)) => deliver_vsync(&worker, milliseconds),
-                Some(WorkerMessage::PerformanceReady) => if held.is_some() {
-                    performance_held = true;
+                Some(WorkerMessage::Vsync { milliseconds, enqueued }) => {
+                    deliver_vsync(&worker, milliseconds, enqueued);
+                }
+                Some(WorkerMessage::PerformanceReady { enqueued }) => if held.is_some() {
+                    performance_held.get_or_insert(enqueued);
                 } else {
-                    deliver_performance(&worker);
+                    deliver_performance(&worker, enqueued);
                 },
                 // Immediately, like a frame and unlike a post: the entry that
                 // has not finished importing may itself be awaiting this
                 // answer, so queuing it behind boot would deadlock the call.
-                Some(WorkerMessage::ModuleCallback { call, index, arguments }) => {
-                    deliver_module_callback(&worker, call, index, arguments);
+                Some(WorkerMessage::ModuleCallback { call, index, arguments, enqueued }) => {
+                    deliver_module_callback(&worker, call, index, arguments, enqueued);
                 }
             },
             changed = ready.changed(), if held.is_some() => if changed.is_err() { return; },
@@ -823,9 +848,10 @@ async fn consume_messages(
 /// of `bobcat:bts-runtime`'s `__BobcatPerformanceReady`, which takes them
 /// and emits each to the realm's observers. A realm with no observer, which
 /// may not have that module at all, is called nothing.
-fn deliver_performance(worker: &Rc<Worker>) {
+fn deliver_performance(worker: &Rc<Worker>, enqueued: Option<ClockInstant>) {
     let reporting = Rc::clone(worker);
-    drop(owner::enter(worker, move |realm, js| {
+    owner::queue(worker, JobKind::Performance, move |realm, js| {
+        reporting.note_wait(enqueued);
         if realm.closing.get() || !realm.performance_observed.get() {
             return;
         }
@@ -836,15 +862,16 @@ fn deliver_performance(worker: &Rc<Worker>) {
         {
             policy::report(&reporting, Scene::Listener, error);
         }
-    }));
+    });
 }
 
 /// Queues one posted value for this worker's realm.
-fn deliver_post(worker: &Rc<Worker>, data: HostValue) {
+fn deliver_post(worker: &Rc<Worker>, data: HostValue, enqueued: Option<ClockInstant>) {
     let delivering = Rc::clone(worker);
-    drop(owner::enter(worker, move |realm, js| {
+    owner::queue(worker, JobKind::Post, move |realm, js| {
+        delivering.note_wait(enqueued);
         deliver(&delivering, realm, js, &data);
-    }));
+    });
 }
 
 /// Hands one message value to a realm that is up.
@@ -1048,7 +1075,7 @@ mod tests {
             // queue both realms share.
             second
                 .messages
-                .send(WorkerMessage::Post(HostValue::String("ping".to_owned())))
+                .send(WorkerMessage::post(HostValue::String("ping".to_owned())))
                 .expect("the second worker is still serving");
             for _ in 0..TURNS {
                 if first.worker.epilogue_count() > settled {
@@ -1388,7 +1415,7 @@ mod tests {
 
             started
                 .messages
-                .send(WorkerMessage::Post(HostValue::String("first".to_owned())))
+                .send(WorkerMessage::post(HostValue::String("first".to_owned())))
                 .expect("the worker is serving");
             // This test's own body is a task, so it goes on running inside the
             // job's wait — which is the property the whole model rests on, and
@@ -1414,7 +1441,7 @@ mod tests {
             // anyway, which is what this pins.
             started
                 .messages
-                .send(WorkerMessage::Post(HostValue::String(
+                .send(WorkerMessage::post(HostValue::String(
                     "behind the wait".to_owned(),
                 )))
                 .expect("the worker is serving");

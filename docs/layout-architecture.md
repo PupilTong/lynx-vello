@@ -1402,7 +1402,13 @@ the engine we're succeeding.
    main size per item; child measurement via `compute_layout` probes
    with `SizingMode::IgnoreSizeStyles`. `flex-basis: content` is the
    content's size (§9.2.3 step E, `max-content`), whatever the main size
-   property says.
+   property says, except for an item with an `aspect-ratio` and a definite
+   cross size — its own, or the one a single-line container with a
+   definite cross size stretches it to (§9.8), which the probes are told is
+   definite — whose basis and contributions are that cross size through the
+   ratio (§9.2.3 step B). The probes and the cross-size measurements give
+   the children the container's height as a percentage basis only when it
+   is definite.
 3. **Container main size and line breaking** (§9.2 step 4, §9.3) — single
    line for `NoWrap`, else greedy line-fill against main available size
    including `gap`. A container whose main size is not known takes its
@@ -1414,9 +1420,13 @@ the engine we're succeeding.
    size. That clamp is the horizontal main axis's. A vertical main axis is
    the block axis, whose min-content size is its max-content size
    (css-sizing-3 §2.1), so a column container with an automatic height
-   takes its content's height on one line under any constraint, and its
-   §4.5 automatic minimum as a column item is that height too. The
-   intrinsic main sizes sum the items' §9.9.3 contributions: each starts
+   takes its content's height on one line under any constraint — its items
+   laid out at their hypothetical main sizes, as Blink, Gecko and WebKit
+   do, never the contributions below — and its §4.5 automatic minimum as a
+   column item is that height too. A column `wrap` container with a
+   definite `max-height` breaks its lines there instead and takes its
+   longest line. The row container's intrinsic main sizes sum the items'
+   §9.9.3 contributions: each starts
    from the item's own css-sizing-3 §5.2 contribution — its definite
    preferred main size, else its content size, as Chrome's row algorithm
    does where §9.9.3 takes the larger of the two — is capped by a definite
