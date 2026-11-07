@@ -1,4 +1,4 @@
-//! End-to-end pixel tests: `Document` → `PaintOrder` → `Scene` → GPU →
+//! End-to-end pixel tests: `Document` → `PaintOrder` → `DisplayList` → GPU →
 //! readback. Ahem glyphs are solid em squares, so glyph coverage is
 //! pixel-assertable. A usable GPU adapter is mandatory.
 
@@ -6,7 +6,7 @@ mod paint_common;
 
 use paint_common::Doc;
 use prime_radiant::headless;
-use terminus::link::vello::Scene;
+use terminus::link::DisplayList;
 use terminus::link::vello::kurbo::{Affine, Rect};
 use terminus::link::vello::peniko::{BlendMode, Color, Compose, Fill, Mix};
 
@@ -271,7 +271,7 @@ fn isolated_atlas_cell_matches_standalone_group_effects() {
     let left_neighbor = Rect::new(0.0, cell_y, cell_x, cell_y + 128.0);
     let cell = Rect::new(cell_x, cell_y, cell_x + 128.0, cell_y + 128.0);
     let right_neighbor = Rect::new(cell_x + 128.0, cell_y, 384.0, cell_y + 128.0);
-    let mut atlas = Scene::new();
+    let mut atlas = DisplayList::new();
     atlas.fill(
         Fill::NonZero,
         Affine::IDENTITY,
@@ -360,7 +360,7 @@ fn a_composition_at_a_scroll_offset_stays_inside_the_scrollport() {
     // Screen y plus the offset is content y, so each probe names the row the
     // port shows there.
     for (offset, near, far) in [(0.0_f32, RED, RED), (30.0, RED, BLUE), (100.0, BLUE, BLUE)] {
-        let mut scene = Scene::new();
+        let mut scene = DisplayList::new();
         frame.compose_into(
             &mut scene,
             &[],
@@ -476,7 +476,7 @@ fn render_filtered(
         .prepare_filters(&frame, &[], &[], &|_| None, 0, None, Color::WHITE)
         .expect("the filter bakes render")
         .to_vec();
-    let mut scene = Scene::new();
+    let mut scene = DisplayList::new();
     frame.compose_into(&mut scene, &[], &filtered, &[], &|_| None, None);
     gpu.render(&scene, size, size, Color::WHITE)
         .expect("headless render")
@@ -749,7 +749,7 @@ fn a_blurred_box_in_a_scroller_moves_with_the_offset() {
             )
             .expect("the filter bakes render")
             .to_vec();
-        let mut scene = Scene::new();
+        let mut scene = DisplayList::new();
         frame.compose_into(
             &mut scene,
             &[],
@@ -834,7 +834,7 @@ fn a_sliding_blurred_card_stays_inside_its_ancestors_clip() {
         .prepare_filters(&frame, &[], &[], &|_| None, 0, now, Color::WHITE)
         .expect("the filter bakes render")
         .to_vec();
-    let mut scene = Scene::new();
+    let mut scene = DisplayList::new();
     frame.compose_into(&mut scene, &[], &filtered, &[], &|_| None, now);
     let pixels = gpu
         .render(&scene, 200, 100, Color::WHITE)
@@ -863,7 +863,7 @@ fn compose_at(
         .prepare_filters(frame, &[], &[], &|_| None, 0, now, Color::WHITE)
         .expect("the filter bakes render")
         .to_vec();
-    let mut scene = Scene::new();
+    let mut scene = DisplayList::new();
     frame.compose_into(&mut scene, &[], &filtered, &[], &|_| None, now);
     gpu.render(&scene, width, height, Color::WHITE)
         .expect("headless render")
@@ -1146,7 +1146,7 @@ fn a_blurred_backdrop_over_a_scroller_re_bakes_with_it() {
             .expect("the entries bake")
             .to_vec();
         assert!(filtered.iter().all(Option::is_some), "both entries baked");
-        let mut scene = Scene::new();
+        let mut scene = DisplayList::new();
         frame.compose_into(&mut scene, &[], &filtered, &[], &offset_of, None);
         gpu.render(&scene, 128, 128, Color::WHITE)
             .expect("headless render")
@@ -1569,7 +1569,7 @@ fn a_group_over_the_budget_renders_unblurred() {
         filtered[0].is_none(),
         "a group over the budget gets no texture"
     );
-    let mut scene = Scene::new();
+    let mut scene = DisplayList::new();
     frame.compose_into(&mut scene, &[], &filtered, &[], &|_| None, None);
     // Rendered at a viewport-sized target, which is all the retained scene is
     // valid for; the point is that the unblurred fallback draws.
@@ -1687,7 +1687,7 @@ fn render_baked_over(
         filtered.iter().all(Option::is_some),
         "every recorded entry baked a texture",
     );
-    let mut scene = Scene::new();
+    let mut scene = DisplayList::new();
     frame.compose_into(&mut scene, &[], &filtered, &[], &|_| None, None);
     gpu.render(&scene, size, size, canvas)
         .expect("headless render")
@@ -1896,7 +1896,7 @@ fn a_fixed_backdrop_over_a_scroller_rebakes_per_offset() {
             .expect("the backdrop bakes")
             .to_vec();
         assert!(filtered[0].is_some(), "offset {offset} baked a texture");
-        let mut scene = Scene::new();
+        let mut scene = DisplayList::new();
         frame.compose_into(
             &mut scene,
             &[],
@@ -2057,7 +2057,7 @@ fn a_backdrop_over_the_budget_stays_unfiltered() {
         filtered[0].is_none(),
         "an entry over the budget gets no texture",
     );
-    let mut scene = Scene::new();
+    let mut scene = DisplayList::new();
     frame.compose_into(&mut scene, &[], &filtered, &[], &|_| None, None);
     let pixels = gpu
         .render(&scene, 256, 256, Color::WHITE)
@@ -2100,7 +2100,7 @@ fn a_colour_only_backdrop_darkens_only_inside_the_box() {
         filtered[0].is_some(),
         "a zero-sigma backdrop still produces its texture",
     );
-    let mut scene = Scene::new();
+    let mut scene = DisplayList::new();
     frame.compose_into(&mut scene, &[], &filtered, &[], &|_| None, None);
     let pixels = gpu
         .render(&scene, 128, 128, Color::WHITE)
@@ -2218,7 +2218,7 @@ fn a_canvas_change_re_bakes_a_backdrop_over_it() {
             .prepare_filters(&frame, &[], &[], &|_| None, 0, None, canvas)
             .expect("the backdrop bakes")
             .to_vec();
-        let mut scene = Scene::new();
+        let mut scene = DisplayList::new();
         frame.compose_into(&mut scene, &[], &filtered, &[], &|_| None, None);
         let pixels = gpu.render(&scene, 64, 64, canvas).expect("headless render");
         let inside = pixel(&pixels, 64, 32, 32);
@@ -2481,7 +2481,7 @@ fn an_anchored_box_follows_its_scrolled_anchor_and_hides_with_it() {
             )
             .expect("the filter bakes render")
             .to_vec();
-        let mut scene = Scene::new();
+        let mut scene = DisplayList::new();
         frame.compose_into(&mut scene, &[], &filtered, &[], &offset_of, None);
         let pixels = gpu
             .render(&scene, 200, 150, Color::WHITE)

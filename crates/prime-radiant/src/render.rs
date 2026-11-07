@@ -14,10 +14,9 @@
 
 use std::fmt;
 
-use terminus::link::Document;
 use terminus::link::render::gpu::{GpuError, Headless};
-use terminus::link::vello::Scene;
 use terminus::link::vello::peniko::{Color, ImageData};
+use terminus::link::{DisplayList, Document};
 
 use crate::image::{Image, ImageError};
 
@@ -108,7 +107,7 @@ pub fn capture_document_sized<T: Sync>(
         .prepare_filters(&frame, &images, &vectors, &|_| None, 0, None, background)
         .map_err(CaptureError::Gpu)?
         .to_vec();
-    let mut composed = Scene::new();
+    let mut composed = DisplayList::new();
     let scene = if let Some(scene) = frame.scene() {
         scene
     } else {
@@ -125,7 +124,7 @@ pub fn capture_document_sized<T: Sync>(
 pub fn capture_scene<T>(
     gpu: &mut Headless,
     document: &Document<T>,
-    scene: &Scene,
+    scene: &DisplayList,
     background: Color,
 ) -> Result<Image, CaptureError> {
     let (width, height) = frame_size(document);
@@ -135,7 +134,7 @@ pub fn capture_scene<T>(
 /// [`capture_scene`] at an explicit pixel size.
 pub fn capture_scene_sized(
     gpu: &mut Headless,
-    scene: &Scene,
+    scene: &DisplayList,
     background: Color,
     width: u32,
     height: u32,

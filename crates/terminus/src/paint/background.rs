@@ -51,12 +51,13 @@ use stylo::values::generics::length::LengthPercentageOrAuto;
 use stylo::values::specified::background::BackgroundRepeatKeyword;
 use stylo::values::specified::position::{HorizontalPositionKeyword, VerticalPositionKeyword};
 use vello::kurbo::{Affine, Point, Rect, Size, Vec2};
+use vello::peniko;
 use vello::peniko::{BrushRef, Color, Extend, Fill, ImageQuality, ImageSampler};
-use vello::{Scene, peniko};
 
 use crate::layout::NaturalSize;
 use crate::paint::compose::{ImageArea, ImageDraw, VectorDraw};
 use crate::paint::convert::resolve_color;
+use crate::paint::display_list::DisplayList;
 use crate::paint::shape::{BoxShape, inner_radii, with_shape};
 use crate::paint::walker::WalkSink;
 use crate::paint::{BoxFragment, TextClip};
@@ -549,7 +550,7 @@ pub(super) fn paint_pattern_layer(
         return;
     }
 
-    let inline = |scene: &mut Scene| match &source {
+    let inline = |scene: &mut DisplayList| match &source {
         Source::Raster(..) | Source::Vector(..) => {
             unreachable!("the raster and vector cases returned above")
         }
@@ -802,7 +803,7 @@ fn image_area(clip: &BoxShape, draw: Rect) -> Option<ImageArea> {
 }
 
 fn fill_area(
-    scene: &mut Scene,
+    scene: &mut DisplayList,
     transform: Affine,
     clip: &BoxShape,
     draw: Rect,
@@ -832,7 +833,7 @@ fn fill_area(
 }
 
 fn fill_gradient_tiles(
-    scene: &mut Scene,
+    scene: &mut DisplayList,
     transform: Affine,
     clip: &BoxShape,
     grid: &TileGrid,
@@ -890,22 +891,15 @@ fn fill_gradient_tiles(
 
 /// Whether a vector image has anything to draw.
 ///
-/// An empty scene produces no draw at all: there is nothing to bake, and
-/// the monolithic walk, which appends the scene, must not append an empty
-/// one — `Encoding::append` copies the appended scene's `flags`, so that
-/// would clear the `FORCE_NEXT_TRANSFORM | FORCE_NEXT_STYLE` bits a
-/// preceding glyph run set, and the next path's transform could be wrongly
-/// deduplicated. Glyph runs are deferred resources, so a text-only scene has
-/// an empty path stream and still draws. A degenerate viewport has no scale
-/// to draw at.
+/// An empty list produces no draw at all: there is nothing to bake. A
+/// degenerate viewport has no scale to draw at.
 fn is_drawable(vector: &VectorImage) -> bool {
     let (width, height) = vector.viewport();
-    let encoding = vector.scene().encoding();
     width > 0.0
         && height > 0.0
         && width.is_finite()
         && height.is_finite()
-        && !(encoding.is_empty() && encoding.resources.glyph_runs.is_empty())
+        && !vector.scene().is_empty()
 }
 
 /// Emits one [`VectorDraw`] of `vector` per visible tile of `grid` inside

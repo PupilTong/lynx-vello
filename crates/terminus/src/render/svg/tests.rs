@@ -1,6 +1,6 @@
 //! Each test parses a hand-written document and compares the converter's
-//! scene with one built from the vello calls the rule names, through
-//! `assert_scenes_identical`, which compares every encoding stream, or
+//! list with one built from the display-list calls the rule names, through
+//! `assert_scenes_identical`, which compares every item, or
 //! reads the parsed items directly.
 
 #![allow(clippy::float_cmp)]
@@ -8,7 +8,6 @@
 use std::sync::Arc;
 
 use seldon::text::{FontBlob, TextContext};
-use vello::Scene;
 use vello::kurbo::{
     Affine, BezPath, Cap, Circle, Ellipse, Join, PathEl, Point, Rect, Shape, Stroke,
 };
@@ -18,6 +17,7 @@ use vello::peniko::{BlendMode, Brush, Color, ColorStop, Compose, Extend, Fill, G
 use super::shapes::{self, ARC_TOLERANCE};
 use super::text::{TextAnchor, TextPaint};
 use super::{Item, LayerClip, SvgError, VectorDocument, encode, parse};
+use crate::paint::display_list::DisplayList;
 use crate::paint::equivalence::assert_scenes_identical;
 use crate::render::image::{AspectAlign, AspectRatio};
 
@@ -41,7 +41,7 @@ fn ahem() -> TextContext {
     context
 }
 
-fn encoded(parsed: &VectorDocument) -> Scene {
+fn encoded(parsed: &VectorDocument) -> DisplayList {
     encode(parsed, &mut Some(Box::new(no_fonts())))
 }
 
@@ -63,7 +63,13 @@ fn rect_path(x0: f64, y0: f64, x1: f64, y1: f64) -> BezPath {
     Rect::new(x0, y0, x1, y1).to_path(ARC_TOLERANCE)
 }
 
-fn solid_fill(scene: &mut Scene, rule: Fill, transform: Affine, color: Color, shape: &BezPath) {
+fn solid_fill(
+    scene: &mut DisplayList,
+    rule: Fill,
+    transform: Affine,
+    color: Color,
+    shape: &BezPath,
+) {
     scene.fill(rule, transform, &Brush::Solid(color), None, shape);
 }
 
@@ -106,7 +112,7 @@ fn a_path_fills_with_its_own_fill_rule() {
                 PathEl::ClosePath,
             ]
         );
-        let mut expected = Scene::new();
+        let mut expected = DisplayList::new();
         solid_fill(&mut expected, fill, Affine::IDENTITY, RED, shape);
         assert_scenes_identical(&encoded(&parsed), &expected);
     }
@@ -115,7 +121,7 @@ fn a_path_fills_with_its_own_fill_rule() {
 #[test]
 fn solid_paint_folds_the_paint_opacity_into_rgba8() {
     let parsed = document(r##"<rect width="10" height="10" fill="#ff0000" fill-opacity="0.5"/>"##);
-    let mut expected = Scene::new();
+    let mut expected = DisplayList::new();
     solid_fill(
         &mut expected,
         Fill::NonZero,
@@ -134,7 +140,7 @@ fn a_stroke_carries_width_caps_join_miter_and_dashes() {
             stroke-dasharray="5 3" stroke-dashoffset="2"/>"##,
     );
     let (shape, _) = paths(&parsed)[0];
-    let mut expected = Scene::new();
+    let mut expected = DisplayList::new();
     expected.stroke(
         &Stroke::new(4.0)
             .with_caps(Cap::Round)
@@ -183,7 +189,7 @@ fn paint_order_stroke_draws_the_stroke_first() {
             paint-order="stroke"/>"##,
     );
     let shape = rect_path(0.0, 0.0, 10.0, 10.0);
-    let mut expected = Scene::new();
+    let mut expected = DisplayList::new();
     expected.stroke(
         // SVG's initial cap, join and miter limit, none of which is
         // kurbo's default.
@@ -210,7 +216,7 @@ fn an_invisible_path_and_a_pattern_draw_nothing() {
             <rect width="10" height="10" fill="url(#p)"/>"##,
     );
     assert!(patterned.items.is_empty());
-    assert!(encoded(&patterned).encoding().is_empty());
+    assert!(encoded(&patterned).is_empty());
 }
 
 /// `visibility` inherits but a child may turn it back on; `display: none`
@@ -224,7 +230,7 @@ fn visibility_and_display_follow_their_inheritance() {
             </g>
             <g display="none"><rect width="10" height="10" fill="#ff0000"/></g>"##,
     );
-    let mut expected = Scene::new();
+    let mut expected = DisplayList::new();
     solid_fill(
         &mut expected,
         Fill::NonZero,
@@ -396,7 +402,7 @@ fn a_linear_gradient_maps_each_spread_method_and_folds_stop_opacity() {
                 ])
                 .as_slice(),
             );
-        let mut expected = Scene::new();
+        let mut expected = DisplayList::new();
         expected.fill(
             Fill::NonZero,
             Affine::IDENTITY,
@@ -424,7 +430,7 @@ fn a_radial_gradient_starts_at_the_focal_circle() {
     let gradient = Gradient::new_two_point_radial((40.0, 45.0), 5.0, (50.0, 50.0), 40.0)
         .with_extend(Extend::Repeat)
         .with_stops(stops(&[(0.0, RED), (1.0, BLUE)]).as_slice());
-    let mut expected = Scene::new();
+    let mut expected = DisplayList::new();
     expected.fill(
         Fill::NonZero,
         Affine::IDENTITY,
@@ -448,7 +454,7 @@ fn an_object_bounding_box_gradient_maps_the_unit_square_onto_the_shape() {
     );
     let gradient = Gradient::new_linear((0.0, 0.0), (1.0, 1.0))
         .with_stops(stops(&[(0.0, RED), (1.0, BLUE)]).as_slice());
-    let mut expected = Scene::new();
+    let mut expected = DisplayList::new();
     expected.fill(
         Fill::NonZero,
         Affine::IDENTITY,
@@ -484,7 +490,7 @@ fn a_gradient_href_chain_supplies_stops_and_attributes() {
     let gradient = Gradient::new_linear((0.0, 0.0), (30.0, 10.0))
         .with_extend(Extend::Reflect)
         .with_stops(stops(&[(0.0, RED), (1.0, BLUE)]).as_slice());
-    let mut expected = Scene::new();
+    let mut expected = DisplayList::new();
     expected.fill(
         Fill::NonZero,
         Affine::IDENTITY,
@@ -510,7 +516,7 @@ fn a_one_stop_gradient_and_a_fallback_are_solid() {
             <rect width="10" height="10" fill="url(#missing)"/>"##,
     );
     let shape = rect_path(0.0, 0.0, 10.0, 10.0);
-    let mut expected = Scene::new();
+    let mut expected = DisplayList::new();
     solid_fill(
         &mut expected,
         Fill::NonZero,
@@ -561,7 +567,7 @@ fn group_opacity_is_one_layer_over_the_layer_bounds() {
               <rect x="10" y="10" width="20" height="20" fill="#ff0000"/>
             </g>"##,
     );
-    let mut expected = Scene::new();
+    let mut expected = DisplayList::new();
     expected.push_layer(
         Fill::NonZero,
         normal(),
@@ -608,7 +614,7 @@ fn blend_and_isolation_attributes_change_nothing() {
               <rect width="20" height="20" fill="#ff0000"/>
             </g>"##,
     );
-    let mut expected = Scene::new();
+    let mut expected = DisplayList::new();
     solid_fill(
         &mut expected,
         Fill::NonZero,
@@ -624,7 +630,7 @@ fn blend_and_isolation_attributes_change_nothing() {
 #[test]
 fn opacity_on_a_shape_is_a_layer_around_it() {
     let parsed = document(r##"<rect width="20" height="20" fill="#ff0000" opacity="0.5"/>"##);
-    let mut expected = Scene::new();
+    let mut expected = DisplayList::new();
     expected.push_layer(
         Fill::NonZero,
         normal(),
@@ -649,7 +655,7 @@ fn a_filter_pushes_nothing() {
         r##"<defs><filter id="f"><feGaussianBlur stdDeviation="2"/></filter></defs>
             <g filter="url(#f)"><rect width="20" height="20" fill="#ff0000"/></g>"##,
     );
-    let mut expected = Scene::new();
+    let mut expected = DisplayList::new();
     solid_fill(
         &mut expected,
         Fill::NonZero,
@@ -667,7 +673,7 @@ fn a_masked_group_is_skipped_and_its_siblings_still_draw() {
             <g mask="url(#m)"><rect width="20" height="20" fill="#ff0000"/></g>
             <rect y="30" width="20" height="20" fill="#0000ff"/>"##,
     );
-    let mut expected = Scene::new();
+    let mut expected = DisplayList::new();
     solid_fill(
         &mut expected,
         Fill::NonZero,
@@ -690,7 +696,7 @@ fn a_single_path_clip_is_a_clip_layer_under_the_full_transform_product() {
               <rect width="40" height="40" fill="#ff0000"/>
             </g>"##,
     );
-    let mut expected = Scene::new();
+    let mut expected = DisplayList::new();
     expected.push_clip_layer(
         Fill::EvenOdd,
         Affine::scale(2.0) * Affine::translate((5.0, 5.0)),
@@ -716,7 +722,7 @@ fn a_single_path_clip_with_opacity_is_the_layer_shape() {
               <rect width="40" height="40" fill="#ff0000"/>
             </g>"##,
     );
-    let mut expected = Scene::new();
+    let mut expected = DisplayList::new();
     expected.push_layer(
         Fill::NonZero,
         normal(),
@@ -754,7 +760,7 @@ fn a_multi_child_clip_concatenates_its_children() {
         let mut rotated = rect_path(20.0, 20.0, 30.0, 30.0);
         rotated.apply_affine(Affine::rotate(10_f64.to_radians()));
         concatenated.extend(rotated);
-        let mut expected = Scene::new();
+        let mut expected = DisplayList::new();
         if opacity == "0.5" {
             expected.push_layer(
                 Fill::NonZero,
@@ -791,7 +797,7 @@ fn a_clipped_clip_path_pushes_its_own_clip_first() {
             </defs>
             <g clip-path="url(#inner)"><rect width="40" height="40" fill="#ff0000"/></g>"##,
     );
-    let mut expected = Scene::new();
+    let mut expected = DisplayList::new();
     expected.push_clip_layer(
         Fill::NonZero,
         Affine::IDENTITY,
@@ -822,7 +828,7 @@ fn an_object_bounding_box_clip_scales_to_the_element() {
         r##"<defs><clipPath id="c" clipPathUnits="objectBoundingBox"><rect width="0.5" height="1"/></clipPath></defs>
             <g clip-path="url(#c)"><rect x="10" y="10" width="40" height="20" fill="#ff0000"/></g>"##,
     );
-    let mut expected = Scene::new();
+    let mut expected = DisplayList::new();
     expected.push_clip_layer(
         Fill::NonZero,
         Affine::translate((10.0, 10.0)) * Affine::scale_non_uniform(40.0, 20.0),
@@ -853,7 +859,7 @@ fn use_draws_its_target_and_a_symbol_is_a_sized_viewport() {
             <use href="#r" x="5" y="6" fill="#0000ff"/>
             <use href="#s" x="20" y="20" width="20" height="40"/>"##,
     );
-    let mut expected = Scene::new();
+    let mut expected = DisplayList::new();
     solid_fill(
         &mut expected,
         Fill::NonZero,
@@ -1034,7 +1040,7 @@ fn a_nested_svg_clips_and_maps_its_view_box() {
               <rect width="10" height="10" fill="#ff0000"/>
             </svg>"##,
     );
-    let mut expected = Scene::new();
+    let mut expected = DisplayList::new();
     expected.push_clip_layer(
         Fill::NonZero,
         Affine::IDENTITY,
@@ -1072,7 +1078,7 @@ fn a_switch_draws_its_first_unconditional_child() {
               <rect width="10" height="10" fill="#ff0000"/>
             </switch>"##,
     );
-    let mut expected = Scene::new();
+    let mut expected = DisplayList::new();
     solid_fill(
         &mut expected,
         Fill::NonZero,
@@ -1101,7 +1107,7 @@ fn a_style_element_changes_nothing() {
             <g><rect class="a" width="10" height="10" fill="none"/></g>"##,
     );
     let shape = rect_path(0.0, 0.0, 10.0, 10.0);
-    let mut expected = Scene::new();
+    let mut expected = DisplayList::new();
     solid_fill(
         &mut expected,
         Fill::NonZero,
@@ -1127,7 +1133,7 @@ fn a_style_attribute_changes_nothing() {
             </g>"##,
     );
     let shape = rect_path(0.0, 0.0, 10.0, 10.0);
-    let mut expected = Scene::new();
+    let mut expected = DisplayList::new();
     solid_fill(
         &mut expected,
         Fill::NonZero,
@@ -1153,7 +1159,7 @@ fn inherit_and_current_color_resolve_per_element() {
             </g>"##,
     );
     let shape = rect_path(0.0, 0.0, 10.0, 10.0);
-    let mut expected = Scene::new();
+    let mut expected = DisplayList::new();
     solid_fill(&mut expected, Fill::NonZero, Affine::IDENTITY, RED, &shape);
     solid_fill(&mut expected, Fill::NonZero, Affine::IDENTITY, BLUE, &shape);
     solid_fill(&mut expected, Fill::NonZero, Affine::IDENTITY, RED, &shape);
@@ -1187,7 +1193,7 @@ fn an_image_element_draws_nothing() {
 fn an_empty_document_encodes_nothing() {
     let parsed = document("");
     assert!(parsed.items.is_empty());
-    assert!(encoded(&parsed).encoding().is_empty());
+    assert!(encoded(&parsed).is_empty());
 }
 
 // --- Sizes and errors ------------------------------------------------------
@@ -1441,11 +1447,14 @@ fn text_is_drawn_as_glyph_runs_at_the_pen_and_anchored() {
         r##"<text x="10" y="20" font-size="10" font-family="Ahem" fill="#ff0000">ab<tspan dx="2" dy="3">c</tspan><tspan x="50" y="60" text-anchor="middle">de</tspan><tspan x="80" y="90" text-anchor="end">fgh</tspan></text>"##,
     );
     let scene = encode(&parsed, &mut Some(Box::new(ahem())));
-    let runs = &scene.encoding().resources.glyph_runs;
+    let runs = scene.runs();
     assert_eq!(runs.len(), 4, "one run per span");
-    let placed: Vec<([f32; 2], usize, f32)> = runs
+    let placed: Vec<([f64; 2], usize, f32)> = runs
         .iter()
-        .map(|run| (run.transform.translation, run.glyphs.len(), run.font_size))
+        .map(|run| {
+            let [.., x, y] = run.transform.as_coeffs();
+            ([x, y], run.glyphs.len(), run.font_size)
+        })
         .collect();
     assert_eq!(
         placed,
@@ -1457,8 +1466,11 @@ fn text_is_drawn_as_glyph_runs_at_the_pen_and_anchored() {
         ]
     );
     assert!(runs.iter().all(|run| !run.hint));
-    assert!(runs.iter().all(|run| run.brush_transform.is_none()));
-    let glyphs = &scene.encoding().resources.glyphs;
+    assert!(runs.iter().all(|run| run.paint_transform.is_none()));
+    let glyphs: Vec<_> = runs
+        .iter()
+        .flat_map(|run| scene.glyphs_of(run).iter().copied())
+        .collect();
     assert_eq!(glyphs.len(), 8);
     assert_eq!(glyphs[1].x, 10.0, "the second glyph one em along");
     assert!(glyphs.iter().all(|glyph| glyph.y == 0.0));
@@ -1474,16 +1486,24 @@ fn text_gradients_resolve_against_the_shaped_chunk_box() {
             <text x="10" y="20" font-size="10" font-family="Ahem" fill="url(#g)" stroke="#0000ff" stroke-width="1">ab</text>"##,
     );
     let scene = encode(&parsed, &mut Some(Box::new(ahem())));
-    let runs = &scene.encoding().resources.glyph_runs;
+    let runs = scene.runs();
     assert_eq!(runs.len(), 2, "a fill run and a stroke run");
-    let brush = runs[0].brush_transform.expect("the gradient's transform");
+    let brush = runs[0].paint_transform.expect("the gradient's transform");
     // The chunk box is 20 wide (two ems) from the pen, 8 above and 2 below
     // the baseline: the unit square maps onto it, relative to the pen.
-    assert_eq!(brush.translation, [0.0, -8.0]);
-    assert_eq!(brush.matrix, [20.0, 0.0, 0.0, 10.0]);
-    assert!(matches!(runs[0].style, vello::peniko::Style::Fill(_)));
-    assert!(matches!(runs[1].style, vello::peniko::Style::Stroke(_)));
-    assert!(!scene.encoding().resources.color_stops.is_empty());
+    assert_eq!(brush.as_coeffs(), [20.0, 0.0, 0.0, 10.0, 0.0, -8.0]);
+    assert!(matches!(
+        runs[0].style,
+        crate::paint::display_list::GlyphStyle::Fill
+    ));
+    assert!(matches!(
+        runs[1].style,
+        crate::paint::display_list::GlyphStyle::Stroke(_)
+    ));
+    assert!(matches!(
+        runs[0].paint,
+        crate::paint::display_list::Paint::Gradient(_)
+    ));
 }
 
 /// Text inside an opacity group extends the layer's bounds once shaped,
@@ -1496,7 +1516,7 @@ fn text_extends_the_bounds_of_the_layer_around_it() {
     // One context for both, so the font blob is the same registration.
     let mut context = Some(Box::new(ahem()));
     let scene = encode(&parsed, &mut context);
-    let mut expected = Scene::new();
+    let mut expected = DisplayList::new();
     expected.push_layer(
         Fill::NonZero,
         normal(),
@@ -1527,11 +1547,13 @@ fn text_extends_the_bounds_of_the_layer_around_it() {
             .brush_transform(None)
             .draw(
                 Fill::NonZero,
-                run.glyphs.iter().map(|glyph| vello::Glyph {
-                    id: glyph.id,
-                    x: glyph.x,
-                    y: glyph.y,
-                }),
+                run.glyphs
+                    .iter()
+                    .map(|glyph| crate::paint::display_list::Glyph {
+                        id: glyph.id,
+                        x: glyph.x,
+                        y: glyph.y,
+                    }),
             );
     }
     expected.pop_layer();
@@ -1544,7 +1566,7 @@ fn text_extends_the_bounds_of_the_layer_around_it() {
 fn text_without_any_font_encodes_without_glyphs() {
     let parsed = document(r#"<text x="0" y="10">dropped</text>"#);
     let scene = encode(&parsed, &mut Some(Box::new(no_fonts())));
-    assert!(scene.encoding().resources.glyphs.is_empty());
+    assert_eq!(scene.glyph_runs(), 0);
 }
 
 /// Every item type crosses threads, and a document clones.

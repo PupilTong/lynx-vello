@@ -40,7 +40,7 @@
 //!
 //! The walker calls [`apply`] at a group's scope close, inside the innermost
 //! effect layer, so each adjustment composites against exactly the group's
-//! own pixels. vello blends are per-layer, so one adjustment =
+//! own pixels. Blends are per-layer, so one adjustment =
 //! `push_layer(BlendMode::new(mix, Compose::SrcAtop), alpha, bounds)` +
 //! flat gray fill of `bounds` + `pop_layer` (`SrcAtop`: modify color where
 //! content exists, leave alpha untouched; with layer alpha `a` the covered
@@ -84,10 +84,10 @@
 
 use std::ops::Range;
 
-use vello::Scene;
 use vello::kurbo::{Affine, Rect};
 use vello::peniko::{BlendMode, Color, Compose, Fill, Mix};
 
+use crate::paint::display_list::DisplayList;
 use crate::paint::shape::{BoxShape, with_shape};
 
 pub(crate) type Filter = stylo::values::computed::effects::Filter;
@@ -143,7 +143,7 @@ pub(crate) fn plan(filters: &[Filter]) -> FilterPlan {
 
 /// Draws the adjustment passes of `range`, in list order.
 pub(crate) fn apply(
-    scene: &mut Scene,
+    scene: &mut DisplayList,
     filters: &[Filter],
     range: Range<usize>,
     bounds: Rect,
@@ -170,7 +170,7 @@ pub(crate) fn passes(filters: &[Filter], range: Range<usize>) -> Vec<Pass> {
 
 /// Draws already-collected passes bounded by `bounds`.
 pub(crate) fn draw_passes_rect(
-    scene: &mut Scene,
+    scene: &mut DisplayList,
     passes: &[Pass],
     bounds: Rect,
     transform: Affine,
@@ -183,7 +183,7 @@ pub(crate) fn draw_passes_rect(
 /// Draws already-collected passes bounded by a rounded box — a backdrop's
 /// `after` half, whose bound is the element's own border box.
 pub(crate) fn draw_passes_shape(
-    scene: &mut Scene,
+    scene: &mut DisplayList,
     passes: &[Pass],
     shape: &BoxShape,
     transform: Affine,
@@ -207,7 +207,7 @@ pub(crate) fn draw_passes_shape(
     }
 }
 
-fn draw_rect(scene: &mut Scene, pass: &Pass, bounds: Rect, transform: Affine) {
+fn draw_rect(scene: &mut DisplayList, pass: &Pass, bounds: Rect, transform: Affine) {
     scene.push_layer(
         Fill::NonZero,
         BlendMode::new(pass.mix, Compose::SrcAtop),

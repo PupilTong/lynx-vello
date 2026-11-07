@@ -1,14 +1,15 @@
-//! Text runs: retained Parley layouts as vello glyph runs, plus
+//! Text runs: retained Parley layouts as display-list glyph runs, plus
 //! decorations, `text-shadow` (offset + color, no blur — recorded v1
 //! limit), and `text-stroke`.
 //!
 //! Spec sketch:
 //! - Walk `layout.lines()` → `line.items()` → `PositionedLayoutItem::GlyphRun`; for each run:
 //!   `scene.draw_glyphs(run.font())` with `font_size`, the run's `normalized_coords` (parley coord
-//!   i16s convert to `vello::NormalizedCoord`), `hint(false)` (transforms are arbitrary), `brush` =
-//!   the element's used `color`, glyphs mapped from `glyph_run.positioned_glyphs()`.
-//! - Synthesis (fake bold/oblique) from `run.synthesis()`: embolden via
-//!   `DrawGlyphs::font_embolden`, oblique via `glyph_transform` skew.
+//!   i16s convert to `F2Dot14` bits), `hint(false)` (transforms are arbitrary), `brush` = the
+//!   element's used `color`, glyphs mapped from `glyph_run.positioned_glyphs()`.
+//! - Synthesis (fake bold/oblique) from `run.synthesis()`: embolden via `DrawGlyphs::font_embolden`
+//!   (font-size units; the list stores it in the units the glyph renderer widens outlines in),
+//!   oblique via a `glyph_transform` skew in the run's y-down space.
 //! - `text-shadow`: repeat the glyph pass per shadow (last-specified first, under the main pass),
 //!   offset by the shadow offset, shadow color.
 //! - `text-stroke` (`-webkit-text-stroke` semantics): a second glyph pass drawn with
@@ -40,13 +41,14 @@ use smallvec::SmallVec;
 use stylo::computed_values::text_decoration_style::T as TextDecorationStyle;
 use stylo::properties::ComputedValues;
 use stylo::values::computed::{ColorPropertyValue, Image, TextDecorationLine};
-use vello::kurbo::{Affine, BezPath, Diagonal2, Line, Rect, Stroke};
+use vello::kurbo::{Affine, BezPath, Line, Rect, Stroke};
+use vello::peniko;
 use vello::peniko::{BrushRef, Color, Fill, StyleRef};
-use vello::{FontEmbolden, Scene, peniko};
 
 use crate::layout::paragraph::PaintedParagraph;
 use crate::paint::background::{GradientBrush, gradient_brush};
 use crate::paint::convert;
+use crate::paint::display_list::{DisplayList, Embolden, Glyph};
 
 enum TextFill {
     Solid(Color),
@@ -556,7 +558,7 @@ pub(crate) fn has_visible_glyph(paragraph: &PaintedParagraph<'_>) -> bool {
 }
 
 pub(crate) fn paint(
-    scene: &mut Scene,
+    scene: &mut DisplayList,
     paragraph: &PaintedParagraph<'_>,
     transform: Affine,
     runs: &RunPaints<'_>,
@@ -569,7 +571,7 @@ pub(crate) fn paint(
 }
 
 fn paint_shadows(
-    scene: &mut Scene,
+    scene: &mut DisplayList,
     paragraph: &PaintedParagraph<'_>,
     transform: Affine,
     runs: &RunPaints<'_>,
@@ -681,7 +683,7 @@ fn text_stroke(style: &ComputedValues) -> Option<(f64, Color)> {
 /// no per-run styles and no decorations: every run contributes the same solid
 /// coverage whatever colour it would otherwise paint in.
 pub(crate) fn paint_silhouette(
-    scene: &mut Scene,
+    scene: &mut DisplayList,
     layout: &Layout<crate::layout::TextBrush>,
     transform: Affine,
 ) {
@@ -696,7 +698,7 @@ pub(crate) fn paint_silhouette(
 }
 
 fn paint_pass(
-    scene: &mut Scene,
+    scene: &mut DisplayList,
     paragraph: &PaintedParagraph<'_>,
     transform: Affine,
     runs: &RunPaints<'_>,
@@ -806,14 +808,14 @@ fn paint_pass(
 }
 
 fn draw_glyph_run(
-    scene: &mut Scene,
+    scene: &mut DisplayList,
     glyph_run: &GlyphRun<'_, ()>,
     transform: Affine,
     style: StyleRef<'_>,
     fill: &TextFill,
 ) {
     let run = glyph_run.run();
-    // vello takes the coordinates as raw F2Dot14 bits; parley hands them out
+    // The list takes the coordinates as raw F2Dot14 bits; parley hands them out
     // typed. Empty for every font that is not variable.
     let normalized_coords: SmallVec<[i16; 4]> = run
         .normalized_coords()
@@ -822,14 +824,15 @@ fn draw_glyph_run(
         .collect();
     let synthesis = run.synthesis();
     let embolden = if synthesis.embolden() {
-        let amount = f64::from(run.font_size()) / 48.0;
-        FontEmbolden::new(Diagonal2::new(amount, amount))
+        Embolden::uniform(f64::from(run.font_size()) / 48.0)
     } else {
-        FontEmbolden::default()
+        Embolden::default()
     };
+    // The oblique leans the glyph's top to the right: in the run's y-down
+    // space, a point above the baseline (negative y) moves to positive x.
     let glyph_transform = synthesis
         .skew()
-        .map(|degrees| Affine::skew(f64::from(degrees).to_radians().tan(), 0.0));
+        .map(|degrees| Affine::skew(-f64::from(degrees).to_radians().tan(), 0.0));
     scene
         .draw_glyphs(run.font())
         .font_size(run.font_size())
@@ -842,7 +845,7 @@ fn draw_glyph_run(
         .brush_transform(fill.brush_transform())
         .draw(
             style,
-            glyph_run.positioned_glyphs().map(|glyph| vello::Glyph {
+            glyph_run.positioned_glyphs().map(|glyph| Glyph {
                 id: glyph.id,
                 x: glyph.x,
                 y: glyph.y,
@@ -892,7 +895,7 @@ fn double_tops(kind: DecorationKind, top: f64, thickness: f64) -> [f64; 2] {
 }
 
 fn paint_band(
-    scene: &mut Scene,
+    scene: &mut DisplayList,
     transform: Affine,
     color: Color,
     line_style: TextDecorationStyle,
@@ -1069,7 +1072,7 @@ fn caret_color(style: &ComputedValues) -> Color {
 /// The selection highlight, one box per line the selection covers, under
 /// everything the paragraph paints.
 pub(crate) fn paint_selection(
-    scene: &mut Scene,
+    scene: &mut DisplayList,
     layout: &Layout<crate::layout::TextBrush>,
     transform: Affine,
     editing: &EditingPaint,
@@ -1088,7 +1091,7 @@ pub(crate) fn paint_selection(
 /// The caret and the composition underline, over the glyphs. The caret does
 /// not blink (deferred in `docs/editable-text-design.md`).
 pub(crate) fn paint_caret_and_composition(
-    scene: &mut Scene,
+    scene: &mut DisplayList,
     layout: &Layout<crate::layout::TextBrush>,
     transform: Affine,
     editing: &EditingPaint,
@@ -1159,18 +1162,16 @@ mod tests {
     const AHEM: &[u8] = include_bytes!("../../../seldon/tests/fixtures/Ahem.ttf");
 
     /// Every glyph `scene` encodes, as `(x, y)` in the scene's space.
-    fn glyph_origins(scene: &Scene) -> Vec<(f32, f32)> {
-        let resources = &scene.encoding().resources;
-        resources
-            .glyph_runs
+    fn glyph_origins(scene: &DisplayList) -> Vec<(f32, f32)> {
+        scene
+            .runs()
             .iter()
             .flat_map(|run| {
-                resources.glyphs[run.glyphs.clone()].iter().map(|glyph| {
-                    (
-                        run.transform.translation[0] + glyph.x,
-                        run.transform.translation[1] + glyph.y,
-                    )
-                })
+                let [.., x, y] = run.transform.as_coeffs();
+                scene
+                    .glyphs_of(run)
+                    .iter()
+                    .map(move |glyph| (x as f32 + glyph.x, y as f32 + glyph.y))
             })
             .collect()
     }
@@ -1203,7 +1204,7 @@ mod tests {
 
         let paragraph = doc.painted_paragraph(block).expect("a committed flow");
         let runs = RunPaints::resolve(&doc, block, &paragraph, None);
-        let mut scene = Scene::new();
+        let mut scene = DisplayList::new();
         paint(&mut scene, &paragraph, Affine::IDENTITY, &runs);
         assert_eq!(glyph_origins(&scene), [(0.0, 16.0), (10.0, 16.0)]);
     }

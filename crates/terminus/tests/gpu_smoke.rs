@@ -2,8 +2,8 @@
 //! hand, render it headless, and check pixels from the readback. A usable GPU
 //! adapter is mandatory, including in CI.
 
+use terminus::link::DisplayList;
 use terminus::link::render::gpu::Headless;
-use terminus::link::vello;
 use terminus::link::vello::kurbo::{Affine, Rect};
 use terminus::link::vello::peniko::{Color, Fill};
 
@@ -21,7 +21,7 @@ fn headless(test: &str) -> Headless {
 fn red_square_over_white_base() {
     let mut headless = headless("red_square_over_white_base");
 
-    let mut scene = vello::Scene::new();
+    let mut scene = DisplayList::new();
     scene.fill(
         Fill::NonZero,
         Affine::IDENTITY,
@@ -53,7 +53,7 @@ fn red_square_over_white_base() {
 fn empty_scene_paints_exact_base_color_with_row_padding() {
     let mut headless = headless("empty_scene_paints_exact_base_color_with_row_padding");
 
-    let scene = vello::Scene::new();
+    let scene = DisplayList::new();
     let blue = Color::from_rgb8(0, 0, 255);
     let pixels = headless
         .render(&scene, 33, 17, blue)

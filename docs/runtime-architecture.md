@@ -1888,7 +1888,7 @@ task of the view consumes the watch, `consume_metrics`, and settles the page
 once per change: that is what commits a resize with no JavaScript behind it.
 
 `terminus::link::Document<T>` privately owns its style/layout state, retained commit
-builder and Vello scene; that DOM-side painter is distinct from the
+builder and display list; that DOM-side painter is distinct from the
 embedder-thread `bobcat_core::Painter` that composes a published frame.
 In Bobcat the payload is `()` and the core adds
 the permanent `page` root plus Lynx UA defaults from `PageConfig`.
@@ -2420,7 +2420,7 @@ without the marker.
 ### One render path: a scroll frame recomposes the committed fragments
 
 There is one path from a committed frame to pixels. Every presented frame is
-one flat vello scene: `compose_into` replays the commit's compose program —
+one flat display list: `compose_into` replays the commit's compose program —
 pre-encoded per-space fragments plus the push/pop ops over them — with each
 scroll slot translated by the offset the painter holds for it. Nothing is
 retained per scroller, and a scroll frame's cost is bounded by the commit's

@@ -139,6 +139,7 @@ pub(crate) use self::space::{Space, SpaceKind, SpaceSamples};
 #[cfg(test)]
 pub(crate) use self::sticky_frame::StickySample;
 pub(crate) use self::sticky_frame::{StickySamples, StickySlot};
+use crate::paint::display_list::DisplayList;
 use crate::render::image::{DocumentRequest, FrameImages, ImageEvent, ImageOutcome, ImageRole};
 use crate::scroll::initial_target::InitialTarget;
 use crate::scroll::{AutoScrollRequest, SnapAxis, SnapPoint};
@@ -1070,12 +1071,12 @@ impl<T: Sync> Document<T> {
 }
 
 /// A borrow-shaped handle on the committed frame's scene: it keeps the frame
-/// alive and dereferences to the [`vello::Scene`] inside it. A
+/// alive and dereferences to the [`DisplayList`] inside it. A
 /// layered frame retains no whole-frame composition, so the handle carries
 /// one composed for it on demand.
 pub struct SceneRef {
     frame: Arc<CommittedFrame>,
-    composed: Option<Box<vello::Scene>>,
+    composed: Option<Box<DisplayList>>,
 }
 
 impl std::fmt::Debug for SceneRef {
@@ -1088,9 +1089,9 @@ impl std::fmt::Debug for SceneRef {
 }
 
 impl std::ops::Deref for SceneRef {
-    type Target = vello::Scene;
+    type Target = DisplayList;
 
-    fn deref(&self) -> &vello::Scene {
+    fn deref(&self) -> &DisplayList {
         self.composed.as_deref().map_or_else(
             || {
                 self.frame
@@ -1109,7 +1110,7 @@ impl<T> Document<T> {
         self.painter.borrow().frame().cloned()
     }
 
-    /// The Vello scene committed by the last successful [`Self::render`].
+    /// The display list committed by the last successful [`Self::render`].
     ///
     /// Valid only within this document's own viewport — [`Self::viewport_size`]
     /// scaled by [`Self::device_pixel_ratio`], which is the region an embedder
@@ -1133,7 +1134,7 @@ impl<T> Document<T> {
         let composed = frame.scene().is_none().then(|| {
             let (mut images, mut sources) = (Vec::new(), Vec::new());
             frame.resolve_images(pixels, &mut images, &mut sources);
-            let mut scene = vello::Scene::new();
+            let mut scene = DisplayList::new();
             // No GPU here, so no bake: a `filter: blur()` group replays raw
             // and this scene is the unblurred one, and a vector image, whose
             // texture only a renderer can bake, draws nothing (both

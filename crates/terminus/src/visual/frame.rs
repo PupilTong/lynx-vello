@@ -18,12 +18,12 @@
 use euclid::default::{Point2D, Size2D, Vector2D};
 use smallvec::SmallVec;
 use stylo::properties::animated_properties::AnimationValueMap;
-use vello::Scene;
 use vello::kurbo::Affine;
 use vello::peniko::ImageData;
 
 use super::{AnimationSample, PaintOrder, SpaceSamples};
 use crate::paint::compose::{self, ComposeOp, FilterGroup};
+use crate::paint::display_list::DisplayList;
 use crate::scroll::{
     AutoScrollRequest, CaptureAxes, ChainLink, ScrollAxes, ScrollRequest, SnapAxis, SnapPoint,
     SnapStrictness, unwrap_axis, wrap_axis, wrap_period_axis,
@@ -483,7 +483,7 @@ pub struct CommittedFrame {
 
 /// The split scene: fragments plus the program that assembles them.
 pub(crate) struct Presentation {
-    pub(crate) fragments: Vec<Scene>,
+    pub(crate) fragments: Vec<DisplayList>,
     pub(crate) program: Vec<ComposeOp>,
     /// One entry per [`ComposeOp::Image`], in program order. Carries names
     /// and geometry; never pixels.
@@ -516,7 +516,7 @@ impl CommittedFrame {
     /// memory); compose one with [`Self::compose_into`] where a flat scene
     /// is genuinely needed.
     #[must_use]
-    pub fn scene(&self) -> Option<&Scene> {
+    pub fn scene(&self) -> Option<&DisplayList> {
         matches!(
             self.presentation.program.as_slice(),
             [ComposeOp::Fragment {
@@ -545,7 +545,7 @@ impl CommittedFrame {
     /// its side table; an absent entry draws nothing.
     pub fn compose_into(
         &self,
-        scene: &mut Scene,
+        scene: &mut DisplayList,
         images: &[Option<ImageData>],
         filtered: &[Option<ImageData>],
         vectors: &[Option<ImageData>],
@@ -652,7 +652,7 @@ impl CommittedFrame {
     pub fn bake_filter(
         &self,
         index: usize,
-        scene: &mut Scene,
+        scene: &mut DisplayList,
         images: &[Option<ImageData>],
         filtered: &[Option<ImageData>],
         vectors: &[Option<ImageData>],

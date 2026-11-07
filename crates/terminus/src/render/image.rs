@@ -16,7 +16,7 @@
 //!
 //! # Why the read is synchronous and may block
 //!
-//! Composition holds `&mut Scene` and an open clip stack; it can neither
+//! Composition holds `&mut DisplayList` and an open clip stack; it can neither
 //! suspend nor leave a layer unbalanced. So the pixel read is one
 //! non-suspending call: [`FrameImages::read`].
 //!
@@ -107,9 +107,9 @@ use bytes::Bytes;
 use rustc_hash::FxHashMap;
 use seldon::text::TextContext;
 use smallvec::SmallVec;
-use vello::Scene;
 use vello::peniko::ImageData;
 
+use crate::paint::display_list::DisplayList;
 use crate::render::gpu::GpuDevice;
 use crate::render::svg::{self, VectorDocument};
 use crate::tree::document::NodeId;
@@ -131,7 +131,7 @@ use crate::tree::document::NodeId;
 /// Cloning shares the scene.
 #[derive(Clone)]
 pub(crate) struct VectorImage {
-    scene: Arc<Scene>,
+    scene: Arc<DisplayList>,
     viewport: (f32, f32),
     aspect: AspectRatio,
     key: u64,
@@ -178,7 +178,7 @@ static NEXT_VECTOR_KEY: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomic
 const _: () = {
     const fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<VectorDocument>();
-    assert_send_sync::<Scene>();
+    assert_send_sync::<DisplayList>();
     assert_send_sync::<VectorImage>();
 };
 
@@ -228,9 +228,9 @@ impl VectorImage {
         self.viewport
     }
 
-    /// The document encoded as a vello scene in viewport units.
+    /// The document recorded as a display list in viewport units.
     #[must_use]
-    pub(crate) fn scene(&self) -> &Arc<Scene> {
+    pub(crate) fn scene(&self) -> &Arc<DisplayList> {
         &self.scene
     }
 }
@@ -1641,7 +1641,7 @@ mod vector_tests {
         assert_eq!(applied.and_then(|applied| applied.loaded), Some((10, 10)));
         let (_, _, vector) = registry.resolve("app:///icon.svg").expect("loaded");
         let vector = vector.expect("a vector image");
-        assert!(!vector.scene().encoding().is_empty());
+        assert!(!vector.scene().is_empty());
         assert_eq!(vector.viewport(), (10.0, 10.0));
     }
 

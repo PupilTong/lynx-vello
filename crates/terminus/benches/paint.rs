@@ -1,5 +1,5 @@
 //! Document render benchmarks: style/layout/visual-order/private paint →
-//! retained `vello::Scene`, CPU-side only (no GPU dispatch),
+//! retained `DisplayList`, CPU-side only (no GPU dispatch),
 //! `CodSpeed`-compatible.
 //!
 //! Two kinds of measurement live here, and they answer different questions.
@@ -601,12 +601,7 @@ fn bench_frames(
         phase = !phase;
         step(&mut page, phase);
         divan::black_box(page.render());
-        divan::black_box(
-            page.scene(&terminus::link::NoImages)
-                .encoding()
-                .draw_tags
-                .len(),
-        );
+        divan::black_box(page.scene(&terminus::link::NoImages).len());
     });
 }
 
@@ -644,12 +639,7 @@ fn render_document(bencher: divan::Bencher<'_, '_>, cards: usize) {
         .with_inputs(|| card_page(cards).0)
         .bench_local_values(|mut dom| {
             divan::black_box(dom.render());
-            divan::black_box(
-                dom.scene(&terminus::link::NoImages)
-                    .encoding()
-                    .draw_tags
-                    .len(),
-            );
+            divan::black_box(dom.scene(&terminus::link::NoImages).len());
             dom
         });
 }
@@ -670,12 +660,7 @@ fn render_list_document(bencher: divan::Bencher<'_, '_>, rows: usize) {
         .with_inputs(|| cold_list_page(rows, false).0)
         .bench_local_values(|mut dom| {
             divan::black_box(dom.render());
-            divan::black_box(
-                dom.scene(&terminus::link::NoImages)
-                    .encoding()
-                    .draw_tags
-                    .len(),
-            );
+            divan::black_box(dom.scene(&terminus::link::NoImages).len());
             dom
         });
 }
@@ -687,12 +672,7 @@ fn render_auto_list_document(bencher: divan::Bencher<'_, '_>, rows: usize) {
         .with_inputs(|| cold_list_page(rows, true).0)
         .bench_local_values(|mut dom| {
             divan::black_box(dom.render());
-            divan::black_box(
-                dom.scene(&terminus::link::NoImages)
-                    .encoding()
-                    .draw_tags
-                    .len(),
-            );
+            divan::black_box(dom.scene(&terminus::link::NoImages).len());
             dom
         });
 }
@@ -792,7 +772,7 @@ fn frame_scroll_tick(bencher: divan::Bencher<'_, '_>, rows: usize) {
         frame.slot_of(list).is_some(),
         "the committed frame must carry the list's scroll slot"
     );
-    let mut scene = terminus::link::vello::Scene::new();
+    let mut scene = terminus::link::DisplayList::new();
     let mut phase = false;
     bencher.bench_local(move || {
         phase = !phase;
@@ -806,7 +786,7 @@ fn frame_scroll_tick(bencher: divan::Bencher<'_, '_>, rows: usize) {
             &|slot| Some(dom.scroll_offset(slot.node)),
             None,
         );
-        divan::black_box(scene.encoding().draw_tags.len());
+        divan::black_box(scene.len());
     });
 }
 

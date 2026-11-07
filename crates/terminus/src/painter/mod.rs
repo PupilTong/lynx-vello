@@ -38,7 +38,6 @@ use std::sync::Arc;
 use euclid::default::Vector2D;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
-use vello::Scene;
 use vello::peniko::{Color, ImageData};
 
 pub use self::gesture::{
@@ -50,6 +49,7 @@ use self::inertia::{AutoScroll, Axis, BounceBack, ChainOutcome, DragTrack, Fling
 use self::motion::{ElasticStep, Motion, resolve_elastic_step, stretch_of, unwind_stretch};
 use crate::clock::ClockInstant;
 use crate::input::{InputEvent, InputKind, PointerId};
+use crate::paint::display_list::DisplayList;
 use crate::render::gpu::Headless;
 use crate::render::image::FrameImages;
 use crate::scroll::{
@@ -538,7 +538,7 @@ impl Output {
     /// a window presents, and an offscreen target's readback polls the device
     /// itself — only [`Painter::draw_offscreen`], which renders offscreen and
     /// reads nothing back, waits.
-    fn render(&mut self, scene: &Scene, size: FrameSize) -> Result<(), PainterError> {
+    fn render(&mut self, scene: &DisplayList, size: FrameSize) -> Result<(), PainterError> {
         match self {
             #[cfg(feature = "painter-test-utils")]
             Self::None => Ok(()),
@@ -699,7 +699,7 @@ pub struct Painter {
     /// The target's, not the document's: what was drawn stays drawn until
     /// [`Self::forget_target`] clears it.
     composed: Option<(ComposeKey, FrameSize)>,
-    composed_scene: Scene,
+    composed_scene: DisplayList,
     /// The `filter: blur()` textures of the frame being composed, copied out
     /// of the target's bake cache. Kept here so its capacity outlives a
     /// frame.
@@ -1593,7 +1593,7 @@ fn settle_stretch_aware(
 )]
 fn compose_and_render(
     output: &mut Output,
-    buffer: &mut Scene,
+    buffer: &mut DisplayList,
     filtered: &mut Vec<Option<ImageData>>,
     vectors: &mut Vec<Option<ImageData>>,
     intents: &ScrollIntents,
@@ -1720,7 +1720,7 @@ impl Painter {
             clock: FrameClock::new(),
             scroll_intents: ScrollIntents::new(),
             composed: None,
-            composed_scene: Scene::new(),
+            composed_scene: DisplayList::new(),
             composed_filters: Vec::new(),
             composed_vectors: Vec::new(),
             images: images::PainterImages::default(),

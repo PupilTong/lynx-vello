@@ -1215,13 +1215,7 @@ pub(crate) mod tests {
         assert!(document.render());
         assert!(!document.needs_render());
         assert!(!document.render());
-        assert!(
-            !document
-                .scene(&crate::render::image::NoImages)
-                .encoding()
-                .draw_tags
-                .is_empty()
-        );
+        assert!(!document.scene(&crate::render::image::NoImages).is_empty());
 
         document.apply_image_events(&[crate::render::image::ImageEvent::Failed {
             source: std::sync::Arc::from("app:///a.png"),

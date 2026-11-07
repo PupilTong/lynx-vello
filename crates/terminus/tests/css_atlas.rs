@@ -21,8 +21,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use prime_radiant::{CompareOptions, Image, compare, screenshots_in};
+use terminus::link::DisplayList;
 use terminus::link::render::gpu::Headless;
-use terminus::link::vello::Scene;
 use terminus::link::vello::kurbo::{Affine, Rect};
 use terminus::link::vello::peniko::{BlendMode, Color, Compose, Fill, Mix};
 
@@ -367,7 +367,7 @@ fn render_shard(shard: usize) -> ShardOutcome {
 }
 
 fn build_and_render(shard: usize, gpu: &mut Headless) -> Result<Image, String> {
-    let mut atlas = Scene::new();
+    let mut atlas = DisplayList::new();
     let first = shard * CASES_PER_SHARD;
     let include_skipped = std::env::var_os(AUDIT_ENV).is_some();
 

@@ -85,8 +85,10 @@ impl Harness {
     fn stats(&mut self) -> (usize, u32) {
         prime_radiant::render_with_images(&mut self.doc.dom, &self.images);
         let scene = self.doc.dom.scene(self.images.as_ref());
-        let encoding = scene.encoding();
-        (encoding.draw_tags.len(), encoding.n_open_clips)
+        (
+            scene.len(),
+            u32::try_from(scene.open_layers()).expect("a test page pushes few layers"),
+        )
     }
 }
 

@@ -10,7 +10,7 @@
 //! space changes. Replaying the program with one instant's space maps
 //! reproduces exactly the operation sequence the monolithic walk would have
 //! encoded at those offsets: push ops re-encode their shapes under the mapped
-//! transform, fragments append under the same map (`Scene::append`
+//! transform, fragments append under the same map (`DisplayList::append`
 //! left-multiplies the child's transform stream), and pops are pops.
 //! Painter-internal pushes (background layers, text `SrcIn` sandwiches,
 //! inset-shadow isolation) are balanced within one item and stay inside
@@ -78,12 +78,12 @@ use std::sync::Arc;
 
 use euclid::default::Vector2D;
 use smallvec::SmallVec;
-use vello::Scene;
 use vello::kurbo::{Affine, Point, Rect, Size};
 use vello::peniko::{
     BlendMode, BrushRef, Extend, Fill, ImageBrush, ImageData, ImageQuality, ImageSampler,
 };
 
+use crate::paint::display_list::DisplayList;
 use crate::paint::shape::{BoxShape, with_shape};
 use crate::render::image::{
     AspectAlign, AspectRatio, ImageSizeHint, MAX_RENDERABLE_DIMENSION, is_renderable,
@@ -103,7 +103,7 @@ pub(crate) enum CapturedShape {
 ///
 /// The clip-layer pair of the rounded-partial case lives *inside* this
 /// variant rather than as surrounding program ops. That is not tidiness:
-/// `Encoding::encode_end_clip` is a silent no-op at `n_open_clips == 0`, so a
+/// `DisplayList::pop_layer` is a silent no-op with no layer open, so a
 /// fragment cut landing between a `push_clip_layer` and its `pop_layer` would
 /// produce a wrong picture with no error anywhere. Keeping the pair inside one
 /// op makes that cut unrepresentable.
@@ -190,7 +190,7 @@ fn device_length(length: f64) -> u32 {
 /// scene is encoded in, and how that viewport maps onto a box of another
 /// ratio.
 pub(crate) struct VectorDraw {
-    pub(crate) scene: Arc<Scene>,
+    pub(crate) scene: Arc<DisplayList>,
     /// The image's process-unique identity (`VectorImage::key`), half of
     /// the raster cache's key; the device size is the other half.
     pub(crate) key: u64,
@@ -301,7 +301,7 @@ pub(crate) fn aspect_transform(viewport: (f32, f32), aspect: AspectRatio, size: 
 /// larger than the raster cache's whole budget — encodes nothing: nothing
 /// stands in for the picture, and nothing stands in its place either.
 fn encode_vector(
-    scene: &mut Scene,
+    scene: &mut DisplayList,
     draws: &[VectorDraw],
     textures: &[Option<ImageData>],
     index: u32,
@@ -331,7 +331,7 @@ fn encode_vector(
 /// can never land between them. The append is never of an empty scene — the
 /// producers refuse one — so the `FORCE_NEXT_*` flags a preceding glyph run
 /// set are never cleared.
-pub(crate) fn encode_vector_inline(scene: &mut Scene, draw: &VectorDraw, outer: Affine) {
+pub(crate) fn encode_vector_inline(scene: &mut DisplayList, draw: &VectorDraw, outer: Affine) {
     let transform = outer * draw.transform;
     let layers = match &draw.area {
         ImageArea::Fill(CapturedShape::Rect(rect)) => {
@@ -367,7 +367,7 @@ pub(crate) fn encode_vector_inline(scene: &mut Scene, draw: &VectorDraw, outer: 
 /// answer, and draws nothing — the same one-frame gap a not-yet-loaded image
 /// already produces.
 fn encode_draw(
-    scene: &mut Scene,
+    scene: &mut DisplayList,
     draws: &[ImageDraw],
     images: &[Option<ImageData>],
     index: u32,
@@ -384,7 +384,12 @@ fn encode_draw(
 /// A read that misses draws nothing, which is the same one-frame gap a
 /// not-yet-loaded image already produces. `outer` is the device-px map of
 /// the space the draw composes in.
-pub(crate) fn encode_image(scene: &mut Scene, draw: &ImageDraw, outer: Affine, data: &ImageData) {
+pub(crate) fn encode_image(
+    scene: &mut DisplayList,
+    draw: &ImageDraw,
+    outer: Affine,
+    data: &ImageData,
+) {
     encode_textured(
         scene,
         outer * draw.transform,
@@ -400,7 +405,7 @@ pub(crate) fn encode_image(scene: &mut Scene, draw: &ImageDraw, outer: Affine, d
 /// copy of the bitmap covers the `extent` at `anchor`. The shared encoder of
 /// an image draw and a vector draw's texture.
 fn encode_textured(
-    scene: &mut Scene,
+    scene: &mut DisplayList,
     transform: Affine,
     anchor: Point,
     extent: Size,
@@ -408,7 +413,7 @@ fn encode_textured(
     area: &ImageArea,
     data: &ImageData,
 ) {
-    // A bitmap vello cannot place draws as nothing — the same one-frame gap a
+    // A bitmap the rasterizer cannot place draws as nothing — the same one-frame gap a
     // not-yet-loaded image already produces. This is the only place the bound
     // is enforced, because it is the only place the bitmap is known, and the
     // only place the extent is divided by it.
@@ -452,7 +457,7 @@ pub(crate) enum ComposeOp {
         index: u32,
         space: Option<u32>,
     },
-    /// `Scene::push_layer` (or `push_clip_layer` when `clip_only`) with the
+    /// `DisplayList::push_layer` (or `push_clip_layer` when `clip_only`) with the
     /// recorded parameters, the transform mapped by `space`.
     Push {
         clip_only: bool,
@@ -726,7 +731,7 @@ impl FilterGroup {
 /// The compose sink the walker fills: fragments plus the program over them.
 #[derive(Default)]
 pub(crate) struct ComposeAssembly {
-    pub(crate) fragments: Vec<Scene>,
+    pub(crate) fragments: Vec<DisplayList>,
     pub(crate) program: Vec<ComposeOp>,
     pub(crate) image_draws: Vec<ImageDraw>,
     pub(crate) vector_draws: Vec<VectorDraw>,
@@ -742,7 +747,7 @@ pub(crate) struct ComposeAssembly {
     /// stack, so nesting costs no allocation.
     open_filter: Option<u32>,
     /// Emptied scenes to encode the next fragments into.
-    pool: Vec<Scene>,
+    pool: Vec<DisplayList>,
 }
 
 impl std::fmt::Debug for ComposeAssembly {
@@ -760,12 +765,12 @@ impl ComposeAssembly {
     /// containers of a retired frame, and the pool of emptied scenes its
     /// fragments encode into.
     pub(crate) fn with_storage(
-        fragments: Vec<Scene>,
+        fragments: Vec<DisplayList>,
         program: Vec<ComposeOp>,
         image_draws: Vec<ImageDraw>,
         vector_draws: Vec<VectorDraw>,
         filter_groups: Vec<FilterGroup>,
-        pool: Vec<Scene>,
+        pool: Vec<DisplayList>,
     ) -> Self {
         debug_assert!(
             fragments.is_empty()
@@ -789,7 +794,7 @@ impl ComposeAssembly {
 
     /// The scene content in `space` encodes into, cutting a fragment when
     /// the space changed.
-    pub(crate) fn fragment_for(&mut self, space: Option<u32>) -> &mut Scene {
+    pub(crate) fn fragment_for(&mut self, space: Option<u32>) -> &mut DisplayList {
         if self.current != Some(space) {
             self.seal_fragment();
             let mut scene = self.pool.pop().unwrap_or_default();
@@ -837,23 +842,18 @@ impl ComposeAssembly {
         let Some(space) = self.current.take() else {
             return;
         };
-        let encoding = self
-            .fragments
-            .last()
-            .expect("an open fragment has a scene")
-            .encoding();
+        let fragment = self.fragments.last().expect("an open fragment has a list");
         // A cut between a `push_clip_layer` and its `pop_layer` is silently
-        // wrong rather than loud: `Encoding::encode_end_clip` does nothing at
-        // zero open clips, so the pop is dropped and every later draw stays
+        // wrong rather than loud: `DisplayList::pop_layer` does nothing at
+        // zero open layers, so the pop is dropped and every later draw stays
         // clipped. Painter-internal layers must therefore close inside the
         // fragment that opened them.
         debug_assert_eq!(
-            encoding.n_open_clips, 0,
+            fragment.open_layers(),
+            0,
             "a fragment must never be cut inside a painter-internal layer",
         );
-        // Glyphs are deferred resources: a text-only fragment has an empty
-        // path stream, so `Encoding::is_empty` alone would discard it.
-        if encoding.is_empty() && encoding.resources.glyph_runs.is_empty() {
+        if fragment.is_empty() {
             let scene = self.fragments.pop().expect("the open fragment exists");
             self.pool.push(scene);
             return;
@@ -1047,12 +1047,12 @@ impl ComposeAssembly {
 
 /// What one sealed assembly hands back.
 pub(crate) struct Finished {
-    pub(crate) fragments: Vec<Scene>,
+    pub(crate) fragments: Vec<DisplayList>,
     pub(crate) program: Vec<ComposeOp>,
     pub(crate) image_draws: Vec<ImageDraw>,
     pub(crate) vector_draws: Vec<VectorDraw>,
     pub(crate) filter_groups: Vec<FilterGroup>,
-    pub(crate) pool: Vec<Scene>,
+    pub(crate) pool: Vec<DisplayList>,
 }
 
 /// A scroll offset snapped to the device pixel grid.
@@ -1074,18 +1074,16 @@ pub(crate) fn snap_offset(offset: Vector2D<f32>, ratio: f32) -> Vector2D<f32> {
 /// encoded content carries the device scale as its outermost factor — the
 /// map applies inside one scale and outside the other.
 ///
-/// Besides pushes, appends and pops this also encodes raw geometry between
-/// appends, for image draws. That is sound because `Encoding::append`
-/// left-multiplies the child's transform stream before `encode_transform`'s
-/// dedup compares against the last one, so an elided tag after an append is
-/// genuinely redundant rather than wrong.
+/// Besides pushes, appends and pops this also records image draws between
+/// appends; every item carries its own transform, so their order is all
+/// that matters.
 #[expect(
     clippy::too_many_arguments,
     reason = "one replay's full inputs: the program, its side tables, and the samples"
 )]
 pub(crate) fn replay(
-    scene: &mut Scene,
-    fragments: &[Scene],
+    scene: &mut DisplayList,
+    fragments: &[DisplayList],
     program: &[ComposeOp],
     image_draws: &[ImageDraw],
     images: &[Option<ImageData>],
@@ -1287,7 +1285,7 @@ struct SeamRun {
 /// Nested circular containers straddling at once each draw their own copy;
 /// the outer copy shows the inner container at its original offset.
 pub(crate) fn replay_seams(
-    scene: &mut Scene,
+    scene: &mut DisplayList,
     tables: Tables<'_>,
     ops: Range<usize>,
     samples: &SpaceSamples<'_>,
@@ -1378,7 +1376,7 @@ fn draws_riding(tables: Tables<'_>, op: &ComposeOp, slot: u32) -> bool {
 /// program and every side table it indexes.
 #[derive(Clone, Copy)]
 pub(crate) struct Tables<'a> {
-    pub(crate) fragments: &'a [Scene],
+    pub(crate) fragments: &'a [DisplayList],
     pub(crate) program: &'a [ComposeOp],
     pub(crate) image_draws: &'a [ImageDraw],
     pub(crate) images: &'a [Option<ImageData>],
@@ -1415,7 +1413,7 @@ pub(crate) struct Tables<'a> {
 /// layer stack stays balanced and the clips of the slot's ancestors still
 /// apply. With `None` every op draws.
 pub(crate) fn replay_ops(
-    scene: &mut Scene,
+    scene: &mut DisplayList,
     tables: Tables<'_>,
     ops: Range<usize>,
     device_transform: &dyn Fn(Option<u32>) -> Affine,
@@ -1530,7 +1528,7 @@ pub(crate) fn replay_ops(
 /// offsets scroll and sticky nodes snap to. An animation node can land it
 /// anywhere, so that case samples bilinearly.
 fn draw_filtered(
-    scene: &mut Scene,
+    scene: &mut DisplayList,
     group: &FilterGroup,
     image: &ImageData,
     spaces: &[Space],
@@ -1577,7 +1575,7 @@ fn draw_filtered(
 /// nothing or the blur spread what it painted toward such a place, and the
 /// group's unfiltered pixels show through it there.
 fn draw_backdrop(
-    scene: &mut Scene,
+    scene: &mut DisplayList,
     entry: &FilterGroup,
     backdrop: &Backdrop,
     image: &ImageData,
@@ -1794,8 +1792,8 @@ mod tests {
 
     /// One fragment drawing a teal square, so a replay has real content to
     /// append.
-    fn fragment() -> Scene {
-        let mut scene = Scene::default();
+    fn fragment() -> DisplayList {
+        let mut scene = DisplayList::default();
         scene.fill(
             Fill::NonZero,
             Affine::IDENTITY,
@@ -1810,9 +1808,9 @@ mod tests {
         program: &[ComposeOp],
         groups: &[FilterGroup],
         filtered: &[Option<ImageData>],
-    ) -> Scene {
+    ) -> DisplayList {
         let fragments = [fragment()];
-        let mut scene = Scene::default();
+        let mut scene = DisplayList::default();
         replay(
             &mut scene,
             &fragments,
@@ -1861,11 +1859,11 @@ mod tests {
     }
 
     /// Replays `program` over [`circular_slot`] standing at `offset`.
-    fn replay_circular(program: &[ComposeOp], offset: Vector2D<f32>) -> Scene {
+    fn replay_circular(program: &[ComposeOp], offset: Vector2D<f32>) -> DisplayList {
         let fragments = [fragment()];
         let slots = [circular_slot()];
         let offset_of = move |_: &crate::visual::ScrollSlot| Some(offset);
-        let mut scene = Scene::default();
+        let mut scene = DisplayList::default();
         let samples = SpaceSamples {
             spaces: &SPACES,
             slots: &slots,
@@ -1905,7 +1903,7 @@ mod tests {
             ComposeOp::Pop,
         ];
         let expected = |copies: &[f64]| {
-            let mut scene = Scene::default();
+            let mut scene = DisplayList::default();
             scene.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &Rect::ZERO);
             for &y in copies {
                 scene.append(&fragment(), Some(Affine::translate((0.0, y))));
@@ -1941,7 +1939,7 @@ mod tests {
                 space: None,
             },
         ];
-        let mut expected = Scene::default();
+        let mut expected = DisplayList::default();
         expected.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &Rect::ZERO);
         expected.append(&fragment(), Some(Affine::translate((0.0, -150.0))));
         expected.append(&fragment(), Some(Affine::translate((0.0, 50.0))));
@@ -1973,7 +1971,7 @@ mod tests {
             },
             ComposeOp::Pop,
         ];
-        let mut expected = Scene::default();
+        let mut expected = DisplayList::default();
         expected.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &Rect::ZERO);
         for y in [-150.0, 50.0] {
             expected.push_clip_layer(Fill::NonZero, Affine::translate((0.0, y)), &Rect::ZERO);
@@ -2053,24 +2051,16 @@ mod tests {
 
         let raw = replay_program(&program, &groups, &[None]);
         let composed = replay_program(&program, &groups, &[Some(baked)]);
+        assert_eq!(composed.image_draws(), 1, "the group's texture, once");
+        assert_eq!(raw.image_draws(), 0, "and none in the fallback");
         assert_eq!(
-            composed.encoding().resources.patches.len(),
-            1,
-            "the group's texture, once",
-        );
-        assert_eq!(
-            raw.encoding().resources.patches.len(),
-            0,
-            "and none in the fallback",
-        );
-        assert_eq!(
-            composed.encoding().n_open_clips,
+            composed.open_layers(),
             0,
             "skipping the range leaves the layer stack balanced",
         );
         assert_eq!(
-            composed.encoding().draw_tags.len(),
-            raw.encoding().draw_tags.len(),
+            composed.len(),
+            raw.len(),
             "one image fill replaces one content fill",
         );
     }
@@ -2278,13 +2268,9 @@ mod tests {
             let entries = [entry];
             replay_program(&program, &entries, &[Some(baked.clone())])
         };
+        assert_eq!(plain.image_draws(), 1, "the entry's texture, once");
         assert_eq!(
-            plain.encoding().resources.patches.len(),
-            1,
-            "the entry's texture, once",
-        );
-        assert_eq!(
-            plain.encoding().n_open_clips,
+            plain.open_layers(),
             0,
             "and the op leaves the layer stack balanced",
         );
@@ -2304,13 +2290,13 @@ mod tests {
         // The texture and its passes are drawn inside a clip to the rounded
         // box (`draw_backdrop`): a clip layer and its pop more.
         assert_eq!(
-            with_passes.encoding().draw_tags.len(),
-            plain.encoding().draw_tags.len() + 3 + 2,
+            with_passes.len(),
+            plain.len() + 3 + 2,
             "one post-blur pass is a blend layer, its flat fill, and the pop, \
              inside the clip and its pop",
         );
         assert_eq!(
-            with_passes.encoding().n_open_clips,
+            with_passes.open_layers(),
             0,
             "and the passes leave the layer stack balanced",
         );
@@ -2437,9 +2423,9 @@ mod tests {
         program: &[ComposeOp],
         draws: &[VectorDraw],
         vectors: &[Option<ImageData>],
-    ) -> Scene {
+    ) -> DisplayList {
         let fragments = [fragment()];
-        let mut scene = Scene::default();
+        let mut scene = DisplayList::default();
         replay(
             &mut scene,
             &fragments,
@@ -2500,12 +2486,13 @@ mod tests {
             index: 0,
             space: None,
         }];
+        let baked = texture(8, 8);
         let plain = replay_vectors(
             &program,
             &[vector_draw(Affine::IDENTITY, whole())],
-            &[Some(texture(8, 8))],
+            &[Some(baked.clone())],
         );
-        let mut expected = Scene::default();
+        let mut expected = DisplayList::default();
         encode_image(
             &mut expected,
             &ImageDraw {
@@ -2517,10 +2504,10 @@ mod tests {
                 area: whole(),
             },
             Affine::IDENTITY,
-            &texture(8, 8),
+            &baked,
         );
         crate::paint::equivalence::assert_scenes_identical(&plain, &expected);
-        assert_eq!(plain.encoding().resources.patches.len(), 1, "the texture");
+        assert_eq!(plain.image_draws(), 1, "the texture");
 
         let clipped = replay_vectors(
             &program,
@@ -2534,11 +2521,11 @@ mod tests {
             &[Some(texture(8, 8))],
         );
         assert_eq!(
-            clipped.encoding().draw_tags.len(),
+            clipped.len(),
             3,
             "the clip's begin, the fill, and the clip's end",
         );
-        assert_eq!(clipped.encoding().n_open_clips, 0);
+        assert_eq!(clipped.open_layers(), 0);
     }
 
     /// A texture smaller than the draw — one the renderable bound clamped —
@@ -2556,13 +2543,11 @@ mod tests {
             &[vector_draw(Affine::IDENTITY, whole())],
             &[Some(texture(4, 4))],
         );
-        let brush = scene
-            .encoding()
-            .transforms
-            .last()
-            .expect("the brush transform is encoded after the fill's");
-        assert_eq!(brush.matrix, [2.0, 0.0, 0.0, 2.0]);
-        assert_eq!(brush.translation, [0.0, 0.0]);
+        let Some(crate::paint::display_list::Item::Fill(fill)) = scene.items().last() else {
+            panic!("the texture is the list's last fill");
+        };
+        let brush = fill.transform * fill.paint_transform.unwrap_or_default();
+        assert_eq!(brush.as_coeffs(), [2.0, 0.0, 0.0, 2.0, 0.0, 0.0]);
     }
 
     /// `preserveAspectRatio`: `none` stretches per axis; `meet` fits the
@@ -2640,7 +2625,7 @@ mod tests {
     }
 
     /// The device size is the extent under the transform's per-axis scale,
-    /// rounded up, and no larger on either axis than vello can place.
+    /// rounded up, and no larger on either axis than the rasterizer can place.
     #[test]
     fn a_draws_device_size_is_its_scaled_extent_rounded_up_and_bounded() {
         let at = |transform| VectorDraw {
@@ -2665,9 +2650,9 @@ mod tests {
             extent: Size::new(16.0, 8.0),
             ..vector_draw(Affine::IDENTITY, whole())
         };
-        let mut actual = Scene::default();
+        let mut actual = DisplayList::default();
         encode_vector_inline(&mut actual, &draw, Affine::IDENTITY);
-        let mut expected = Scene::default();
+        let mut expected = DisplayList::default();
         expected.push_clip_layer(
             Fill::NonZero,
             Affine::IDENTITY,
@@ -2677,6 +2662,6 @@ mod tests {
         expected.append(&fragment(), Some(Affine::translate((6.0, 2.0))));
         expected.pop_layer();
         crate::paint::equivalence::assert_scenes_identical(&actual, &expected);
-        assert_eq!(actual.encoding().n_open_clips, 0);
+        assert_eq!(actual.open_layers(), 0);
     }
 }

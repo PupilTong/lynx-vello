@@ -39,8 +39,7 @@ use stylo::values::computed::font::GenericFontFamily;
 use stylo::values::computed::{CSSPixelLength, Length};
 use stylo::values::specified::font::{FONT_MEDIUM_PX, QueryFontMetricsFlags};
 use stylo_traits::{CSSPixel, DevicePixel};
-use terminus::link::vello::Scene;
-use terminus::link::{CommittedFrame, Document, FontBlob, StylesheetOrigin};
+use terminus::link::{CommittedFrame, DisplayList, Document, FontBlob, StylesheetOrigin};
 
 fn main() {
     divan::main();
@@ -327,7 +326,7 @@ fn frame_scroll_driven_composite(bencher: divan::Bencher<'_, '_>) {
         "every scroll-driven animation must export"
     );
     assert!(!frame.has_live_curves() && !frame.needs_main_ticks());
-    let mut scene = Scene::new();
+    let mut scene = DisplayList::new();
     let mut index = 0_u32;
     bencher.bench_local(move || {
         index += 1;
@@ -341,7 +340,7 @@ fn frame_scroll_driven_composite(bencher: divan::Bencher<'_, '_>) {
             &|slot| (slot.node == list).then_some(offset),
             None,
         );
-        divan::black_box(scene.encoding().draw_tags.len());
+        divan::black_box(scene.len());
     });
 }
 
@@ -455,7 +454,7 @@ fn bench_production_frame(
         !frame.needs_main_ticks(),
         "nothing may be left to main-thread ticks"
     );
-    let mut scene = Scene::new();
+    let mut scene = DisplayList::new();
     let mut now = FRAME_STEP;
     bencher.bench_local(move || {
         now += FRAME_STEP;
@@ -475,7 +474,7 @@ fn bench_production_frame(
             &|_| None,
             frame.has_live_curves().then_some(now),
         );
-        divan::black_box(scene.encoding().draw_tags.len());
+        divan::black_box(scene.len());
     });
 }
 

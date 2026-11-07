@@ -1,13 +1,13 @@
 //! The one rasterizer a target renders every scene through: its frames and
 //! every bake.
 //!
-//! The paint and compose layers build a [`vello::Scene`]; [`Raster`] turns
+//! The paint and compose layers build a [`DisplayList`]; [`Raster`] turns
 //! it into pixels with `vello_gpu`'s sparse strips over its wgpu backend
-//! ([`super::sparse`]): the scene's encoding is replayed into a
+//! ([`super::sparse`]): the list's items are replayed into a
 //! `vello_gpu::Scene` per render, and the bake textures are bound by handle
 //! and sampled in place as external textures.
 //!
-//! It answers two calls — render a scene into a texture view, and bind or
+//! It answers two calls — render a list into a texture view, and bind or
 //! unbind the texture an [`ImageData`] handle names — so the targets
 //! ([`super::gpu::Headless`], the painter's window) and the bakes
 //! ([`super::blur`], [`super::vector_textures`]) are written once.
@@ -15,6 +15,7 @@
 use vello::peniko::{Color, ImageAlphaType, ImageData};
 
 use super::gpu::GpuError;
+use crate::paint::display_list::DisplayList;
 
 /// See the [module documentation](self).
 pub(crate) struct Raster {
@@ -62,7 +63,7 @@ impl Raster {
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        scene: &vello::Scene,
+        scene: &DisplayList,
         view: &wgpu::TextureView,
         width: u32,
         height: u32,

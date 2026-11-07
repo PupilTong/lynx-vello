@@ -4,9 +4,9 @@
     reason = "CSS/style geometry is f32 while Vello/Kurbo geometry is f64"
 )]
 
-//! The scene walker: flat paint-order items → vello layer stack.
+//! The scene walker: flat paint-order items → the display list's layer stack.
 //!
-//! Three stack disciplines interleave on vello's single layer stack:
+//! Three stack disciplines interleave on the display list's single layer stack:
 //!
 //! 1. **Item clip chains** ([`crate::visual::ClipNode`]) — pushed lazily
 //!    per item by diffing the item's chain against what is on the stack,
@@ -124,11 +124,11 @@
 //! viewport still answers with the element drawn there.
 
 use euclid::default::{Size2D, Vector2D};
-use vello::Scene;
 use vello::kurbo::{Affine, Point, Rect};
 use vello::peniko::{BlendMode, Compose, Fill, Mix};
 
 use crate::paint::compose::{BackdropRoot, CapturedShape, ComposeAssembly, ComposeOp, FilterGroup};
+use crate::paint::display_list::DisplayList;
 use crate::paint::shape::{BoxShape, with_shape};
 use crate::paint::{
     BoxFragment, PathScratch, background, border, convert, filters, mask, shadow, text,
@@ -152,13 +152,16 @@ pub(crate) enum WalkSink<'s> {
             reason = "constructed only by the equivalence tests' monolithic walk"
         )
     )]
-    Monolithic(&'s mut Scene, &'s dyn crate::render::image::FrameImages),
+    Monolithic(
+        &'s mut DisplayList,
+        &'s dyn crate::render::image::FrameImages,
+    ),
     Compose(&'s mut ComposeAssembly),
 }
 
 impl WalkSink<'_> {
     /// The scene content in `space` encodes into.
-    pub(super) fn scene_for(&mut self, space: Option<u32>) -> &mut Scene {
+    pub(super) fn scene_for(&mut self, space: Option<u32>) -> &mut DisplayList {
         match self {
             Self::Monolithic(scene, _) => scene,
             Self::Compose(assembly) => assembly.fragment_for(space),
@@ -210,7 +213,7 @@ impl WalkSink<'_> {
 
     #[expect(
         clippy::too_many_arguments,
-        reason = "mirrors vello's push_layer plus the compose tags"
+        reason = "mirrors the display list's push_layer plus the compose tags"
     )]
     pub(super) fn push_layer_rect(
         &mut self,
@@ -768,7 +771,7 @@ impl Admitted {
 ///
 /// Three things add up to well under this. An embedder sizes its target
 /// `round(css * device_pixel_ratio)` device px, up to half a device pixel past
-/// the CSS viewport. Vello's area antialiasing samples across a whole pixel.
+/// the CSS viewport. The rasterizer's area antialiasing samples across a whole pixel.
 /// And the frame carries f32 geometry that is converted to f64 here.
 const VIEWPORT_SLACK_DEVICE_PX: f64 = 2.0;
 
@@ -872,7 +875,7 @@ struct Scope {
 /// [`walk_compose`] for the equivalence tests.
 #[cfg(test)]
 pub(crate) fn walk<T>(
-    scene: &mut Scene,
+    scene: &mut DisplayList,
     scratch: &mut Scratch,
     document: &Document<T>,
     frame: &PaintOrder,
@@ -924,7 +927,7 @@ pub(crate) fn walk_compose<T>(
 /// that culling changes nothing an observer of the viewport can see.
 #[cfg(test)]
 pub(crate) fn walk_uncultured<T>(
-    scene: &mut Scene,
+    scene: &mut DisplayList,
     scratch: &mut Scratch,
     document: &Document<T>,
     frame: &PaintOrder,
@@ -3070,8 +3073,8 @@ mod tests {
     use vello::kurbo::Affine;
 
     use super::{
-        BoxShape, CapturedShape, ComposeAssembly, ComposeOp, CullPlan, PaintItem, PaintItemKind,
-        Rect, Scene, Scratch, can_reach, cull_rect, item_bounds, walk, walk_compose,
+        BoxShape, CapturedShape, ComposeAssembly, ComposeOp, CullPlan, DisplayList, PaintItem,
+        PaintItemKind, Rect, Scratch, can_reach, cull_rect, item_bounds, walk, walk_compose,
         walk_uncultured,
     };
     use crate::paint::equivalence::assert_scenes_identical;
@@ -3089,8 +3092,8 @@ mod tests {
     /// Both encodings of one frame: the one the painter produces, and the one
     /// it would produce if nothing were culled.
     struct Frames {
-        cultured: Scene,
-        uncultured: Scene,
+        cultured: DisplayList,
+        uncultured: DisplayList,
         cultured_bounds: Vec<Rect>,
         uncultured_bounds: Vec<Rect>,
         painted: usize,
@@ -3131,7 +3134,7 @@ mod tests {
     fn walk_twice(doc: &mut Doc) -> Frames {
         let frame = doc.dom.build_paint_order();
         let images = crate::render::image::ImageRegistry::default();
-        let mut cultured = Scene::default();
+        let mut cultured = DisplayList::default();
         let mut cultured_scratch = Scratch::default();
         walk(
             &mut cultured,
@@ -3141,7 +3144,7 @@ mod tests {
             &images,
             &crate::render::image::NoImages,
         );
-        let mut uncultured = Scene::default();
+        let mut uncultured = DisplayList::default();
         let mut uncultured_scratch = Scratch::default();
         walk_uncultured(
             &mut uncultured,
@@ -3164,8 +3167,8 @@ mod tests {
         }
     }
 
-    fn draws(scene: &Scene) -> usize {
-        scene.encoding().draw_tags.len()
+    fn draws(scene: &DisplayList) -> usize {
+        scene.len()
     }
 
     fn item(x: f32, y: f32, size: f32) -> PaintItem {
@@ -3886,20 +3889,16 @@ mod tests {
         assert!(box_encodes(&doc, &frame, dot), "the dot's ink can show");
     }
 
-    /// The alpha of every layer `scene` begins, in encode order.
-    fn layer_alphas(scene: &Scene) -> Vec<f32> {
-        let encoding = scene.encoding();
-        let mut offset = 0_usize;
-        let mut alphas = Vec::new();
-        for tag in &encoding.draw_tags {
-            // `DrawTag::BEGIN_CLIP`, whose data is `DrawBeginClip { blend_mode, alpha }`.
-            if tag.0 == 0x49 {
-                alphas.push(f32::from_bits(encoding.draw_data[offset + 1]));
-            }
-            // The tag's data size in words, as vello's `DrawMonoid` reads it.
-            offset += ((tag.0 >> 2) & 0x7) as usize;
-        }
-        alphas
+    /// The alpha of every layer `scene` begins, in record order.
+    fn layer_alphas(scene: &DisplayList) -> Vec<f32> {
+        scene
+            .items()
+            .iter()
+            .filter_map(|item| match item {
+                crate::paint::display_list::Item::PushLayer { alpha, .. } => Some(*alpha),
+                _ => None,
+            })
+            .collect()
     }
 
     /// A fading child inside a fading parent's group: each effect layer's
@@ -3942,7 +3941,7 @@ mod tests {
         );
 
         let alphas = |now: Option<f64>| {
-            let mut scene = Scene::default();
+            let mut scene = DisplayList::default();
             frame.compose_into(&mut scene, &[], &[], &[], &|_| None, now);
             layer_alphas(&scene)
                 .into_iter()
@@ -4278,7 +4277,7 @@ mod tests {
             "the uncultured walk must encode them, or the fixture proves nothing",
         );
         assert_eq!(
-            frames.cultured.encoding().n_open_clips,
+            frames.cultured.open_layers(),
             0,
             "every pushed layer must still be popped",
         );

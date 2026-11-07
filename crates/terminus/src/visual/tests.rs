@@ -8,6 +8,7 @@ use seldon::text::FontBlob;
 use stylo::properties::animated_properties::{AnimationValue, AnimationValueMap};
 use stylo::properties::{LonghandId, OwnedPropertyDeclarationId};
 
+use crate::paint::display_list::DisplayList;
 use crate::test_common::{self as common, Doc};
 use crate::tree::document::NodeId;
 use crate::visual::{PaintItemKind, PaintOrder};
@@ -2619,7 +2620,7 @@ fn a_compose_samples_only_the_curves_its_program_encodes() {
         (1..10).contains(&composed),
         "only the dots in the list's window compose, got {composed}",
     );
-    let mut scene = vello::Scene::new();
+    let mut scene = DisplayList::new();
     frame.compose_into(&mut scene, &[], &[], &[], &|_| None, Some(0.5));
 }
 

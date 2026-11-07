@@ -24,6 +24,7 @@ use vello::peniko::ImageData;
 use super::blur::FilterTextures;
 use super::raster::Raster;
 use super::vector_textures::VectorTextures;
+use crate::paint::display_list::DisplayList;
 use crate::visual::{CommittedFrame, ScrollSlot};
 
 /// Headless GPU renderer for tests, benchmarks, and windowless embedders.
@@ -276,7 +277,7 @@ impl Headless {
     /// Renders a scene into the retained headless texture.
     pub fn render_frame(
         &mut self,
-        scene: &vello::Scene,
+        scene: &DisplayList,
         width: u32,
         height: u32,
         base_color: vello::peniko::Color,
@@ -409,7 +410,7 @@ impl Headless {
     /// Renders a frame and reads it back as tightly-packed RGBA8 pixels.
     pub fn render(
         &mut self,
-        scene: &vello::Scene,
+        scene: &DisplayList,
         width: u32,
         height: u32,
         base_color: vello::peniko::Color,

@@ -21,12 +21,12 @@ use euclid::default::Size2D;
 use smallvec::SmallVec;
 use stylo::properties::ComputedValues;
 use stylo::values::computed::{BorderStyle, OutlineStyle};
-use vello::Scene;
 use vello::kurbo::{BezPath, Cap, Point, Rect, Stroke};
 use vello::peniko::{Color, Fill};
 
 use crate::layout::Edges;
 use crate::paint::convert::resolve_color;
+use crate::paint::display_list::DisplayList;
 use crate::paint::shape::{BoxShape, inner_radii, ring_path_into, with_shape};
 use crate::paint::{BoxFragment, PathScratch};
 use crate::visual::CornerRadii;
@@ -50,7 +50,7 @@ struct SidePaint {
 }
 
 pub(crate) fn paint(
-    scene: &mut Scene,
+    scene: &mut DisplayList,
     paths: &mut PathScratch,
     style: &ComputedValues,
     fragment: &BoxFragment,
@@ -140,7 +140,7 @@ fn uniform_solid_color(sides: &[SidePaint]) -> Option<Color> {
 }
 
 fn paint_side(
-    scene: &mut Scene,
+    scene: &mut DisplayList,
     paths: &mut PathScratch,
     fragment: &BoxFragment,
     outer: &BoxShape,
@@ -344,7 +344,7 @@ fn same_color(a: Color, b: Color) -> bool {
 }
 
 pub(crate) fn paint_outline(
-    scene: &mut Scene,
+    scene: &mut DisplayList,
     paths: &mut PathScratch,
     style: &ComputedValues,
     fragment: &BoxFragment,
@@ -491,7 +491,7 @@ mod tests {
         let rect = Rect::new(0.0, 0.0, 100.0, 40.0);
         for line in [BorderStyle::Dotted, BorderStyle::Dashed] {
             let stroke = dash_stroke(line, 3.0);
-            let mut scene = Scene::new();
+            let mut scene = DisplayList::new();
             scene.stroke(
                 &stroke,
                 vello::kurbo::Affine::IDENTITY,
@@ -500,8 +500,11 @@ mod tests {
                 &rect,
             );
             assert!(
-                scene.encoding().n_path_segments > 0,
-                "{line:?} stroke encoded no path segments"
+                matches!(
+                    scene.items(),
+                    [crate::paint::display_list::Item::Stroke(_, recorded)] if **recorded == stroke
+                ),
+                "{line:?} stroke recorded no stroke"
             );
         }
     }

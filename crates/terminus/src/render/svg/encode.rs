@@ -1,19 +1,22 @@
-//! Items into a vello scene, text shaped on the way.
+//! Items into a display list, text shaped on the way.
 
 use seldon::text::{ShapedLine, TextContext, shape_line};
 use vello::kurbo::{Affine, Point, Rect, Stroke};
 use vello::peniko::{Brush, Fill, Mix, StyleRef};
-use vello::{Glyph, Scene};
 
 use super::text::{TextAnchor, TextItem, TextPaint};
 use super::{Item, LayerClip, VectorDocument, paint_server};
+use crate::paint::display_list::{DisplayList, Glyph};
 
 /// Encodes `document` into a scene in viewport units, shaping its text
 /// through the document's `context`, created here on the first document
 /// with text so one without pays for no font context. A document with
 /// nothing drawable encodes nothing.
-pub(crate) fn encode(document: &VectorDocument, context: &mut Option<Box<TextContext>>) -> Scene {
-    let mut scene = Scene::new();
+pub(crate) fn encode(
+    document: &VectorDocument,
+    context: &mut Option<Box<TextContext>>,
+) -> DisplayList {
+    let mut scene = DisplayList::new();
     let shaped_texts = if document.has_text {
         shape_all(
             document,
@@ -34,7 +37,7 @@ pub(crate) fn encode(document: &VectorDocument, context: &mut Option<Box<TextCon
                 stroke,
                 fill_first,
             } => {
-                let fill = |scene: &mut Scene| {
+                let fill = |scene: &mut DisplayList| {
                     if let Some(fill) = fill {
                         scene.fill(
                             fill.rule,
@@ -45,7 +48,7 @@ pub(crate) fn encode(document: &VectorDocument, context: &mut Option<Box<TextCon
                         );
                     }
                 };
-                let stroke = |scene: &mut Scene| {
+                let stroke = |scene: &mut DisplayList| {
                     if let Some(stroke) = stroke {
                         scene.stroke(
                             &stroke.style,
@@ -229,7 +232,7 @@ fn extend(bounds: Rect, extension: Option<Rect>) -> Rect {
 /// Draws one text item's shaped chunks as `paint/text.rs` draws a glyph
 /// run: `draw_glyphs` with the run's font, size and normalised coordinates,
 /// no hinting, the brush and its transform.
-fn draw_text(scene: &mut Scene, text: &TextItem, shaped: &ShapedText) {
+fn draw_text(scene: &mut DisplayList, text: &TextItem, shaped: &ShapedText) {
     for (chunk, placed) in text.chunks.iter().zip(&shaped.chunks) {
         for (span, (pen, line)) in chunk.spans.iter().zip(&placed.spans) {
             let run_transform = text.transform * Affine::translate(pen.to_vec2());
@@ -257,32 +260,33 @@ fn draw_text(scene: &mut Scene, text: &TextItem, shaped: &ShapedText) {
                 .stroke
                 .as_ref()
                 .and_then(|(style, paint)| resolve(paint).map(|brush| (style, brush)));
-            let draw = |scene: &mut Scene, style: StyleRef<'_>, brush: &(Brush, Option<Affine>)| {
-                for run in &line.runs {
-                    scene
-                        .draw_glyphs(&run.font)
-                        .font_size(run.size)
-                        .transform(run_transform)
-                        .normalized_coords(&run.normalized_coords)
-                        .hint(false)
-                        .brush(&brush.0)
-                        .brush_transform(brush.1)
-                        .draw(
-                            style,
-                            run.glyphs.iter().map(|glyph| Glyph {
-                                id: glyph.id,
-                                x: glyph.x,
-                                y: glyph.y,
-                            }),
-                        );
-                }
-            };
-            let draw_fill = |scene: &mut Scene| {
+            let draw =
+                |scene: &mut DisplayList, style: StyleRef<'_>, brush: &(Brush, Option<Affine>)| {
+                    for run in &line.runs {
+                        scene
+                            .draw_glyphs(&run.font)
+                            .font_size(run.size)
+                            .transform(run_transform)
+                            .normalized_coords(&run.normalized_coords)
+                            .hint(false)
+                            .brush(&brush.0)
+                            .brush_transform(brush.1)
+                            .draw(
+                                style,
+                                run.glyphs.iter().map(|glyph| Glyph {
+                                    id: glyph.id,
+                                    x: glyph.x,
+                                    y: glyph.y,
+                                }),
+                            );
+                    }
+                };
+            let draw_fill = |scene: &mut DisplayList| {
                 if let Some(brush) = &fill {
                     draw(scene, Fill::NonZero.into(), brush);
                 }
             };
-            let draw_stroke = |scene: &mut Scene| {
+            let draw_stroke = |scene: &mut DisplayList| {
                 if let Some((style, brush)) = &stroke {
                     let style: &Stroke = style;
                     draw(scene, style.into(), brush);

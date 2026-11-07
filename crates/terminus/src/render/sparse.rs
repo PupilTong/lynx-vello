@@ -1,14 +1,19 @@
-//! The rasterizer: a composed [`vello::Scene`] replayed into a
-//! `vello_gpu::Scene` and rendered by sparse strips on `vello_gpu`'s wgpu
-//! backend. [`super::raster::Raster`] is its only caller.
+//! The rasterizer: a [`DisplayList`] replayed into a `vello_gpu::Scene` and
+//! rendered by sparse strips on `vello_gpu`'s wgpu backend.
+//! [`super::raster::Raster`] is its only caller.
 //!
-//! The paint and compose layers build a `vello::Scene`. This module decodes its encoding stream by
-//! stream — paths, styles, transforms, draw objects and the late-bound patches (ramps, images,
-//! glyph runs) — and replays it into a `vello_gpu::Scene` of the target's size.
-//! A plain clip replays as a non-isolated clip, intersected into the strips
-//! of what it holds with no layer texture, except around a blend
-//! ([`isolated_clips`]); a fill or clip that is an axis-aligned rectangle
-//! takes `vello_gpu`'s rectangle fast paths ([`axis_rect`]).
+//! [`replay`] walks the list's items once per render and calls the scene's
+//! drawing API for each, with the transform, fill rule, paint and paint
+//! transform the item carries. This is the CPU half of a render: every path
+//! is flattened and turned into strips here, so its cost is the content's.
+//! A fill of a rectangle takes `vello_gpu`'s rectangle fast path, which
+//! under an axis-aligned transform and clip records no strips at all. A
+//! plain clip is intersected into the strips of what it holds with no layer
+//! texture, a rectangle one by the same fast path, unless the list marked
+//! it isolated because a blend opens inside it ([`Item::PushClip`]). A glyph
+//! run is outlined by glifo through [`Glyphs`], with the outline cache the
+//! backend keeps across renders.
+//!
 //! An image whose handle has a texture bound ([`SparseBackend::bind`]: the
 //! `filter: blur()`, `backdrop-filter` and vector-image bakes) is drawn as an
 //! external texture, sampled in place; any other bitmap is uploaded once and
@@ -18,41 +23,36 @@
     clippy::cast_possible_truncation,
     clippy::cast_precision_loss,
     clippy::cast_sign_loss,
-    clippy::too_many_lines,
-    clippy::many_single_char_names,
-    reason = "a decoder over vello's packed streams: counts and offsets are small exact integers, \
-              and an affine's six coefficients go by their usual letters"
+    reason = "target sizes and texture sides are small exact integers in u16 and u32 alike"
 )]
 
+use std::ops::RangeInclusive;
 use std::time::Duration;
 
+use glifo::{AtlasCacher, GlyphPrepCache, GlyphRenderError, GlyphRunBackend};
 use rustc_hash::FxHashMap;
-use vello::kurbo::{Affine, BezPath, Cap, Join, Point, Rect, Stroke};
-use vello::low_level::vello_encoding::{
-    DrawBeginClip, DrawTag, Encoding, Patch, PathTag, Style, Transform,
-};
-use vello::peniko::{
-    self, BlendMode, Color, Compose, Extend, Fill, Gradient, ImageAlphaType, ImageData,
-    ImageFormat, ImageQuality, ImageSampler, Mix,
-};
+use vello::kurbo::{Affine, BezPath, Diagonal2, Point, Rect, Shape as _};
+use vello::peniko::{Color, Extend, Fill, ImageAlphaType, ImageData, ImageFormat, ImageSampler};
 use vello_common::image_cache::ImageCache;
 use vello_gpu::{
     AllocationStrategy, AtlasConfig, AtlasWriter, ClearSettings, Image, ImageId, ImageSource,
-    LayersConfig, MemorySettings, PixelMetadata, Pixmap, RectU16, RenderSettings, RenderSize,
-    RenderTargetConfig, Renderer, Resources, Scene, SizeU16, TargetInit, TextureBindings,
-    TextureId,
+    LayersConfig, MemorySettings, PaintType, PixelMetadata, Pixmap, RectU16, RenderSettings,
+    RenderSize, RenderTargetConfig, Renderer, Resources, Scene, SizeU16, TargetInit,
+    TextureBindings, TextureId,
 };
 
 use crate::clock::ClockInstant;
+use crate::paint::display_list::{
+    DisplayList, FILL_TOLERANCE, GlyphRun, GlyphStyle, ImagePaint, Item, Paint, STROKE_TOLERANCE,
+    Shape,
+};
 
 /// What one frame cost, and what it could not draw.
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct Stats {
-    /// Decoding the vello encoding and building the sparse-strip scene
-    /// (path flattening and strip generation run here, on the CPU).
+    /// Replaying the list into the sparse-strip scene (path flattening and
+    /// strip generation run here, on the CPU).
     pub(crate) encode: Duration,
-    /// Of `encode`, decoding vello's streams alone (the trial's own cost).
-    pub(crate) decode: Duration,
     /// `Renderer::render` and the submit.
     pub(crate) render: Duration,
     pub(crate) draws: u32,
@@ -60,20 +60,20 @@ pub(crate) struct Stats {
     pub(crate) layers: u32,
     /// Image draws with neither a bound texture nor readable pixels.
     pub(crate) images_skipped: u32,
-    pub(crate) masks_skipped: u32,
 }
 
 pub(crate) struct SparseBackend {
     renderer: Renderer,
     resources: Resources,
     scene: Scene,
+    /// What [`replay`] keeps across renders: glifo's outline cache and the
+    /// scratch path.
+    replay: Replay,
     /// Uploaded bitmaps, with their lifecycle.
     images: Bitmaps,
     /// Textures bound to image handles, by blob id.
     bound: FxHashMap<u64, Bound>,
     next_texture: u64,
-    /// Units per em of each font a glyph run named, by blob id and index.
-    units_per_em: FxHashMap<(u64, u32), f64>,
     pub(crate) last: Stats,
 }
 
@@ -93,416 +93,326 @@ impl std::fmt::Debug for SparseBackend {
     }
 }
 
-/// The rectangle `path` outlines when it is exactly one axis-aligned
-/// rectangle — a move, three or four horizontal or vertical lines visiting
-/// the four distinct corners in order (either winding), and a close — so
-/// that a fill or clip of it can take `vello_gpu`'s rectangle fast paths.
-///
-/// Every fill and clip path [`decode_paths`] yields ends closed, so an open
-/// path is not one of these. A degenerate outline (zero width or height, a
-/// corner visited twice) is not a rectangle and keeps the path route, which
-/// gives it the coverage its own edges define.
-fn axis_rect(path: &BezPath) -> Option<Rect> {
-    use vello::kurbo::PathEl;
-    let elements = path.elements();
-    let (PathEl::MoveTo(start), [lines @ .., PathEl::ClosePath]) = elements.split_first()? else {
-        return None;
-    };
-    let mut points = [*start; 5];
-    let mut count = 1;
-    for element in lines {
-        let PathEl::LineTo(point) = *element else {
-            return None;
-        };
-        if count == points.len() {
-            return None;
-        }
-        points[count] = point;
-        count += 1;
-    }
-    // The encoder closes a fill with an explicit line back to the start.
-    if count == 5 && points[4] == *start {
-        count = 4;
-    }
-    if count != 4 {
-        return None;
-    }
-    let [a, b, c, d, _] = points;
-    // Opposite corners differ on both axes, and the other two are the
-    // remaining corners of the box they span, in either order.
-    #[expect(
-        clippy::float_cmp,
-        reason = "the corners of one rectangle repeat its coordinates exactly"
-    )]
-    let spans = a.x != c.x && a.y != c.y;
-    let corners = (b == Point::new(a.x, c.y) && d == Point::new(c.x, a.y))
-        || (b == Point::new(c.x, a.y) && d == Point::new(a.x, c.y));
-    (spans && corners).then(|| Rect::from_points(a, c))
+/// The state [`replay`] keeps from one render to the next.
+#[derive(Default)]
+pub(crate) struct Replay {
+    /// glifo's outline and hinting caches, maintained after every render.
+    glyphs: GlyphPrepCache,
+    /// The path a non-rectangular shape is rebuilt into for the scene.
+    path: BezPath,
+    /// Per open clip or layer, whether it was replayed as a non-isolated
+    /// clip, which its pop closes with `pop_clip`.
+    open: Vec<bool>,
 }
 
-/// Per draw object of `encoding`, whether it is a plain clip that has to
-/// stay an isolated clip layer: one whose span holds a layer with a blend
-/// mode other than the default `Normal`/`SrcOver`.
-///
-/// [`SparseBackend::render`] replays every other plain clip as a
-/// non-isolated `vello_gpu` clip: its coverage is intersected into the
-/// strips of every draw and layer inside it on the CPU, and no intermediate
-/// texture is allocated. Under such a clip the content inside reaches its
-/// blend at the clip's partial coverage along an anti-aliased edge. A
-/// separable blend tolerates that, but the non-separable ones do not: a
-/// `backdrop-filter` pass under `Mix::Saturation` (`grayscale`, `saturate`)
-/// unpremultiplies a rim pixel to channels just above 1 and the blend
-/// shader's `clip_color` divides 0 by 0, which leaves dark dots along a
-/// rounded rim (`draw_backdrop` in `paint::compose`). As an isolated layer
-/// the clip lets its content and every blend inside it run at full
-/// coverage and applies the clip once, when the layer composites.
-///
-/// Every clip open around such a layer is marked, not only the innermost:
-/// each of them would cut the content at partial coverage before the
-/// blend reads it.
-fn isolated_clips(encoding: &Encoding) -> Vec<bool> {
-    let mut isolated = vec![false; encoding.draw_tags.len()];
-    let mut open: Vec<usize> = Vec::new();
-    let mut offset = 0_usize;
-    for (index, tag) in encoding.draw_tags.iter().enumerate() {
-        let at = offset;
-        offset += ((tag.0 >> 2) & 0x7) as usize;
-        match *tag {
-            DrawTag::BEGIN_CLIP => {
-                let blend = encoding.draw_data[at];
-                if blend != DrawBeginClip::CLIP_BLEND_MODE
-                    && BlendMode::new(mix((blend >> 8) & 0xff), compose(blend & 0xff))
-                        != BlendMode::default()
-                {
-                    for &outer in &open {
-                        isolated[outer] = true;
+impl Replay {
+    /// Ends a render: lets glifo's outline cache age out what it no longer
+    /// draws.
+    pub(crate) fn maintain(&mut self) {
+        self.glyphs.maintain();
+    }
+}
+
+/// `shape` as a path in `list`'s arena, rebuilt into `path`.
+fn shape_path<'p>(
+    path: &'p mut BezPath,
+    list: &DisplayList,
+    shape: Shape,
+    tolerance: f64,
+) -> &'p BezPath {
+    path.truncate(0);
+    match shape {
+        Shape::Rect(rect) => path.extend(rect.path_elements(tolerance)),
+        Shape::RoundedRect(rounded) => path.extend(rounded.path_elements(tolerance)),
+        Shape::Path { start, end } => path.extend(list.path(start, end).iter().copied()),
+    }
+    path
+}
+
+/// Sets `paint` on `scene` with `transform` as its paint transform; `false`
+/// when the paint draws nothing (an image with no pixels to draw).
+fn set_paint(
+    scene: &mut Scene,
+    paint: &Paint,
+    transform: Option<Affine>,
+    images: &mut dyn FnMut(&ImagePaint) -> Option<Image>,
+    stats: &mut Stats,
+) -> bool {
+    let paint: PaintType = match paint {
+        Paint::Solid(color) => {
+            scene.set_paint(*color);
+            scene.reset_paint_transform();
+            return true;
+        }
+        Paint::Gradient(gradient) => (**gradient).clone().into(),
+        Paint::Image(image) => {
+            let Some(image) = images(image) else {
+                stats.images_skipped += 1;
+                return false;
+            };
+            image.into()
+        }
+    };
+    scene.set_paint(paint);
+    scene.set_paint_transform(transform.unwrap_or(Affine::IDENTITY));
+    true
+}
+
+/// Replays `list` into `scene`, which the caller has reset to its target
+/// size. `images` resolves a bitmap paint to the image the scene draws;
+/// `None` draws nothing.
+pub(crate) fn replay(
+    scene: &mut Scene,
+    list: &DisplayList,
+    kept: &mut Replay,
+    images: &mut dyn FnMut(&ImagePaint) -> Option<Image>,
+) -> Stats {
+    let mut stats = Stats::default();
+    let Replay { glyphs, path, open } = kept;
+    open.clear();
+    for item in list.items() {
+        match item {
+            Item::Fill(draw) => {
+                if !set_paint(scene, &draw.paint, draw.paint_transform, images, &mut stats) {
+                    continue;
+                }
+                stats.draws += 1;
+                scene.set_transform(draw.transform);
+                scene.set_fill_rule(draw.rule);
+                match draw.shape {
+                    // Under an axis-aligned transform and clip, a
+                    // rectangle draws without strips.
+                    Shape::Rect(rect) => scene.fill_rect(&rect),
+                    shape => scene.fill_path(shape_path(path, list, shape, FILL_TOLERANCE)),
+                }
+            }
+            Item::Stroke(draw, stroke) => {
+                if !set_paint(scene, &draw.paint, draw.paint_transform, images, &mut stats) {
+                    continue;
+                }
+                stats.draws += 1;
+                scene.set_transform(draw.transform);
+                // `vello_gpu` strokes through kurbo, which applies the dash
+                // pattern the stroke carries.
+                scene.set_stroke((**stroke).clone());
+                scene.stroke_path(shape_path(path, list, draw.shape, STROKE_TOLERANCE));
+            }
+            Item::PushClip { region, isolated } => {
+                stats.layers += 1;
+                scene.set_transform(region.transform);
+                scene.set_fill_rule(region.rule);
+                match (isolated, region.shape) {
+                    // A non-isolated clip: no layer texture, its coverage
+                    // intersected into the strips of what it holds. A layer
+                    // pushed inside it composites cut to its own path within
+                    // this clip.
+                    (false, Shape::Rect(rect)) => scene.push_clip_rect(&rect),
+                    (false, shape) => {
+                        scene.push_clip_path(shape_path(path, list, shape, FILL_TOLERANCE));
+                    }
+                    (true, shape) => {
+                        scene.push_clip_layer(shape_path(path, list, shape, FILL_TOLERANCE));
                     }
                 }
-                open.push(index);
+                open.push(!isolated);
             }
-            DrawTag::END_CLIP => {
-                open.pop();
+            Item::PushLayer {
+                region,
+                blend,
+                alpha,
+            } => {
+                stats.layers += 1;
+                scene.set_transform(region.transform);
+                scene.set_fill_rule(region.rule);
+                scene.push_layer(
+                    Some(shape_path(path, list, region.shape, FILL_TOLERANCE)),
+                    Some(*blend),
+                    Some(*alpha),
+                    None,
+                    None,
+                );
+                open.push(false);
             }
-            _ => {}
+            Item::Pop => match open.pop() {
+                Some(true) => scene.pop_clip(),
+                Some(false) => scene.pop_layer(),
+                None => {}
+            },
+            Item::Glyphs(index) => {
+                let run = &list.runs()[*index as usize];
+                if set_paint(scene, &run.paint, run.paint_transform, images, &mut stats) {
+                    stats.glyph_runs += 1;
+                    replay_glyphs(scene, list, run, glyphs);
+                }
+            }
+            Item::BlurredRoundedRect(blur) => {
+                stats.draws += 1;
+                scene.set_paint(blur.color);
+                scene.reset_paint_transform();
+                // Centred on its rect, the blur covers the 2.5σ-inflated
+                // area around it.
+                scene.set_transform(blur.transform.pre_translate(blur.rect.center().to_vec2()));
+                scene.fill_blurred_rounded_rect(
+                    &Rect::from_center_size(Point::ORIGIN, blur.rect.size()),
+                    blur.radius,
+                    blur.std_dev,
+                    false,
+                );
+            }
         }
     }
-    isolated
+    stats
 }
 
-/// One decoded path: its segments in the coordinates of `transform`.
-struct DecodedPath {
-    path: BezPath,
-    /// The transform current at the path's first segment: the shape's.
-    transform: Affine,
-    /// The transform current at the path's end marker: the brush's.
-    brush_transform: Affine,
-    style: Style,
+/// Draws `run` of `list` with the paint already set on `scene`, outlining
+/// its glyphs through glifo with `cache`.
+fn replay_glyphs(
+    scene: &mut Scene,
+    list: &DisplayList,
+    run: &GlyphRun,
+    cache: &mut GlyphPrepCache,
+) {
+    scene.set_transform(run.transform);
+    scene.set_fill_rule(Fill::NonZero);
+    if let GlyphStyle::Stroke(stroke) = &run.style {
+        scene.set_stroke((**stroke).clone());
+    }
+    let full = run.transform * run.glyph_transform.unwrap_or(Affine::IDENTITY);
+    let embolden = run.embolden.scaled(run.outline_scale(full));
+    let mut builder = glifo::GlyphRunBuilder::new(
+        run.font.clone(),
+        run.transform,
+        run.paint_transform.unwrap_or(Affine::IDENTITY),
+        Glyphs { scene, cache },
+    )
+    .font_size(run.font_size)
+    .hint(run.hint)
+    .normalized_coords(list.coords_of(run))
+    .font_embolden(glifo::FontEmbolden {
+        amount: Diagonal2::new(embolden.x, embolden.y),
+        join: embolden.join,
+        miter_limit: embolden.miter_limit,
+        tolerance: embolden.tolerance,
+    });
+    if let Some(transform) = run.glyph_transform {
+        builder = builder.glyph_transform(transform);
+    }
+    let glyphs = list.glyphs_of(run).iter().copied();
+    // A glyph the font cannot outline draws nothing.
+    let _ = match run.style {
+        GlyphStyle::Fill => builder.fill_glyphs(glyphs),
+        GlyphStyle::Stroke(_) => builder.stroke_glyphs(glyphs),
+    };
 }
 
-fn affine(transform: &Transform) -> Affine {
-    let [a, b, c, d] = transform.matrix;
-    let [e, f] = transform.translation;
-    Affine::new([
-        f64::from(a),
-        f64::from(b),
-        f64::from(c),
-        f64::from(d),
-        f64::from(e),
-        f64::from(f),
-    ])
-}
-
-/// `run`'s synthetic bold in the units glifo applies it in, `full` being the
-/// run's transform with its glyph transform: the text keeps the weight the
-/// paint layer asked for.
+/// The CPU half of a render on its own, for benchmarks: a list replayed
+/// into a sparse-strip scene, every path flattened and turned into strips,
+/// with nothing submitted to a device.
 ///
-/// vello's `DrawGlyphs::font_embolden` amount is in the run's font-size
-/// units, before any transform. glifo widens the outline at the size it
-/// caches it at — units per em for an unhinted fill, the font size the run's
-/// uniform scale folds into otherwise (`glifo::glyph::GlyphScaleProperties`)
-/// — so handed through unchanged, a 2048-unit font's bold would come out
-/// about a hundredth as wide. The amount and its tolerance are rescaled by
-/// the ratio of the two sizes.
-fn embolden(
-    run: &vello::low_level::vello_encoding::GlyphRun,
-    full: Affine,
-    units_per_em: &mut FxHashMap<(u64, u32), f64>,
-) -> glifo::FontEmbolden {
-    let mut embolden = glifo::FontEmbolden {
-        amount: run.font_embolden.amount,
-        join: run.font_embolden.join,
-        miter_limit: run.font_embolden.miter_limit,
-        tolerance: run.font_embolden.tolerance,
-    };
-    if embolden.amount.xx == 0.0 && embolden.amount.yy == 0.0 {
-        return embolden;
-    }
-    let [a, b, c, d, ..] = full.as_coeffs();
-    let uniform = (a - d).abs() <= 1.0 / 4096.0 && a > 0.0 && b == 0.0 && c == 0.0;
-    let filled = matches!(run.style, peniko::Style::Fill(_));
-    let scale = if filled && !run.hint {
-        let upem = *units_per_em
-            .entry((run.font.data.id(), run.font.index))
-            .or_insert_with(|| head_units_per_em(run.font.data.data(), run.font.index));
-        upem / f64::from(run.font_size)
-    } else if uniform {
-        a
-    } else {
-        1.0
-    };
-    embolden.amount =
-        vello::kurbo::Diagonal2::new(embolden.amount.xx * scale, embolden.amount.yy * scale);
-    embolden.tolerance *= scale;
-    embolden
+/// A bitmap paint draws as a placeholder atlas image, whose fill is
+/// stripped as any image fill is; what a real render adds is the upload,
+/// once per bitmap.
+pub struct StripScene {
+    scene: Scene,
+    replay: Replay,
 }
 
-/// The `unitsPerEm` of face `index` in `font`'s `head` table, or 1000 for
-/// a font that has none.
-fn head_units_per_em(font: &[u8], index: u32) -> f64 {
-    let u16_at = |at: usize| {
-        font.get(at..at + 2)
-            .map(|b| u16::from_be_bytes([b[0], b[1]]))
-    };
-    let u32_at = |at: usize| {
-        font.get(at..at + 4)
-            .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
-    };
-    let face = if font.get(..4) == Some(b"ttcf") {
-        u32_at(12 + 4 * index as usize).map(|offset| offset as usize)
-    } else {
-        Some(0)
-    };
-    face.and_then(|face| {
-        let tables = usize::from(u16_at(face + 4)?);
-        (0..tables).find_map(|table| {
-            let record = face + 12 + 16 * table;
-            (font.get(record..record + 4)? == b"head")
-                .then(|| u16_at(u32_at(record + 8)? as usize + 18))
-                .flatten()
-        })
-    })
-    .map_or(1000.0, f64::from)
-}
-
-fn is_stroke(style: Style) -> bool {
-    style.flags_and_miter_limit & Style::FLAGS_STYLE_BIT != 0
-}
-
-fn fill_rule(style: Style) -> Fill {
-    if style.flags_and_miter_limit & Style::FLAGS_FILL_BIT == 0 {
-        Fill::NonZero
-    } else {
-        Fill::EvenOdd
+impl std::fmt::Debug for StripScene {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StripScene")
+            .field("width", &self.scene.width())
+            .field("height", &self.scene.height())
+            .finish_non_exhaustive()
     }
 }
 
-/// WGSL's `unpack2x16float(x)[0]`: the miter limit's half float.
-fn f16_to_f32(bits: u16) -> f32 {
-    let sign = if bits & 0x8000 != 0 { -1.0 } else { 1.0 };
-    let exponent = i32::from((bits >> 10) & 0x1f);
-    let mantissa = f32::from(bits & 0x3ff);
-    match exponent {
-        0 => sign * mantissa * 2f32.powi(-24),
-        0x1f => sign * f32::INFINITY,
-        _ => sign * (1.0 + mantissa / 1024.0) * 2f32.powi(exponent - 15),
-    }
-}
-
-/// The stroke a stroke `style` encodes. Dashes are not in it: vello dashes a
-/// stroke on the CPU before it encodes the segments.
-fn stroke(style: Style) -> Stroke {
-    let flags = style.flags_and_miter_limit;
-    let join = match flags & Style::FLAGS_JOIN_MASK {
-        Style::FLAGS_JOIN_BITS_MITER => Join::Miter,
-        Style::FLAGS_JOIN_BITS_ROUND => Join::Round,
-        _ => Join::Bevel,
-    };
-    let cap = |bits: u32| match bits {
-        Style::FLAGS_CAP_BITS_SQUARE => Cap::Square,
-        Style::FLAGS_CAP_BITS_ROUND => Cap::Round,
-        _ => Cap::Butt,
-    };
-    Stroke::new(f64::from(style.line_width))
-        .with_join(join)
-        .with_start_cap(cap((flags & Style::FLAGS_START_CAP_MASK) >> 2))
-        .with_end_cap(cap(flags & Style::FLAGS_END_CAP_MASK))
-        .with_miter_limit(f64::from(f16_to_f32(
-            (flags & Style::MITER_LIMIT_MASK) as u16,
-        )))
-}
-
-/// Every path of `encoding`, in path order, as `PathMonoid` counts them.
-///
-/// A segment reads its first point where the previous one ended, and a
-/// subpath's last segment carries the end bit, past which the next
-/// subpath's start point is stored. A fill's subpath ends closed. A stroke's
-/// ends with vello's cap marker (`PathEncoder`), which is no geometry: a line
-/// for a closed subpath, whose closing side the encoder already added, and a
-/// quad for an open one.
-fn decode_paths(encoding: &Encoding) -> Vec<DecodedPath> {
-    let mut out = Vec::with_capacity(encoding.n_paths as usize);
-    let mut transform = Affine::IDENTITY;
-    let mut style = Style::from_fill(Fill::NonZero);
-    let mut transforms = encoding.transforms.iter();
-    let mut styles = encoding.styles.iter();
-    let mut word = 0_usize;
-    let mut path = BezPath::new();
-    let mut path_transform: Option<Affine> = None;
-    let mut subpath_open = false;
-    let read = |word: usize, is_f32: bool| -> Point {
-        if is_f32 {
-            Point::new(
-                f64::from(f32::from_bits(encoding.path_data[word])),
-                f64::from(f32::from_bits(encoding.path_data[word + 1])),
-            )
-        } else {
-            let w = encoding.path_data[word];
-            Point::new(f64::from((w & 0xffff) as i16), f64::from((w >> 16) as i16))
-        }
-    };
-    for tag in &encoding.path_tags {
-        let t = tag.0;
-        if t & PathTag::TRANSFORM.0 != 0
-            && let Some(next) = transforms.next()
-        {
-            transform = affine(next);
-        }
-        if t & PathTag::STYLE.0 != 0
-            && let Some(next) = styles.next()
-        {
-            style = *next;
-        }
-        let segment = t & 0x3;
-        if segment != 0 {
-            let is_f32 = t & 0x8 != 0;
-            let size = if is_f32 { 2 } else { 1 };
-            path_transform.get_or_insert(transform);
-            let end = t & PathTag::SUBPATH_END_BIT != 0;
-            let p = |k: usize| read(word + k * size, is_f32);
-            if end && is_stroke(style) {
-                if segment == 1 {
-                    path.close_path();
-                }
-            } else {
-                if !subpath_open {
-                    path.move_to(p(0));
-                    subpath_open = true;
-                }
-                match segment {
-                    1 => path.line_to(p(1)),
-                    2 => path.quad_to(p(1), p(2)),
-                    _ => path.curve_to(p(1), p(2), p(3)),
-                }
-                if end {
-                    path.close_path();
-                }
-            }
-            if end {
-                subpath_open = false;
-            }
-            word += (segment as usize + usize::from(end)) * size;
-        }
-        if t & PathTag::PATH.0 != 0 {
-            out.push(DecodedPath {
-                path: std::mem::take(&mut path),
-                transform: path_transform.take().unwrap_or(transform),
-                brush_transform: transform,
-                style,
-            });
-            subpath_open = false;
+impl StripScene {
+    /// A scene for a `width` × `height` target.
+    #[must_use]
+    pub fn new(width: u16, height: u16) -> Self {
+        Self {
+            scene: Scene::new(width, height),
+            replay: Replay::default(),
         }
     }
-    out
-}
 
-fn premul_color(rgba: u32) -> Color {
-    let [r, g, b, a] = rgba.to_ne_bytes();
-    if a == 0 {
-        return Color::TRANSPARENT;
-    }
-    let un = |c: u8| ((f32::from(c) * 255.0 / f32::from(a)).round().min(255.0)) as u8;
-    Color::from_rgba8(un(r), un(g), un(b), a)
-}
-
-fn extend(bits: u32) -> Extend {
-    match bits & 0x3 {
-        1 => Extend::Repeat,
-        2 => Extend::Reflect,
-        _ => Extend::Pad,
+    /// Replays `list` into the scene, emptied first, and answers how many
+    /// draws and glyph runs it recorded.
+    pub fn fill(&mut self, list: &DisplayList) -> u32 {
+        let (width, height) = (self.scene.width(), self.scene.height());
+        self.scene.reset_and_resize(width, height);
+        let stats = replay(&mut self.scene, list, &mut self.replay, &mut |paint| {
+            Some(Image {
+                image: ImageSource::opaque_id(ImageId::new(0)),
+                sampler: paint.sampler,
+            })
+        });
+        self.replay.maintain();
+        stats.draws + stats.glyph_runs
     }
 }
 
-fn mix(value: u32) -> Mix {
-    match value {
-        1 => Mix::Multiply,
-        2 => Mix::Screen,
-        3 => Mix::Overlay,
-        4 => Mix::Darken,
-        5 => Mix::Lighten,
-        6 => Mix::ColorDodge,
-        7 => Mix::ColorBurn,
-        8 => Mix::HardLight,
-        9 => Mix::SoftLight,
-        10 => Mix::Difference,
-        11 => Mix::Exclusion,
-        12 => Mix::Hue,
-        13 => Mix::Saturation,
-        14 => Mix::Color,
-        15 => Mix::Luminosity,
-        _ => Mix::Normal,
-    }
+/// glifo's glyph-run backend over a `vello_gpu` scene, with the outline
+/// cache [`Replay`] keeps and the glyph atlas off: every glyph is drawn as
+/// its outline.
+struct Glyphs<'a> {
+    scene: &'a mut Scene,
+    cache: &'a mut GlyphPrepCache,
 }
 
-fn compose(value: u32) -> Compose {
-    match value {
-        0 => Compose::Clear,
-        1 => Compose::Copy,
-        2 => Compose::Dest,
-        4 => Compose::DestOver,
-        5 => Compose::SrcIn,
-        6 => Compose::DestIn,
-        7 => Compose::SrcOut,
-        8 => Compose::DestOut,
-        9 => Compose::SrcAtop,
-        10 => Compose::DestAtop,
-        11 => Compose::Xor,
-        12 => Compose::Plus,
-        13 => Compose::PlusLighter,
-        _ => Compose::SrcOver,
+impl<'a> GlyphRunBackend<'a> for Glyphs<'a> {
+    fn atlas_cache(self, _enabled: bool) -> Self {
+        self
     }
-}
 
-/// Whether some layer of `encoding` that the root holds blends by anything
-/// but source-over.
-///
-/// vello starts every pixel of the root at the base colour, so such a layer
-/// blends against it. `vello_gpu` renders a root that is a blend target into
-/// a transparent intermediate and blits that over the cleared target, so the
-/// clear colour is under the blend rather than in it; [`SparseBackend::render`]
-/// then draws the base colour as the scene's first fill instead.
-fn blends_over_root(encoding: &Encoding) -> bool {
-    let mut depth = 0_u32;
-    let mut offset = 0_usize;
-    for tag in &encoding.draw_tags {
-        let at = offset;
-        offset += ((tag.0 >> 2) & 0x7) as usize;
-        match *tag {
-            DrawTag::BEGIN_CLIP => {
-                let blend = encoding.draw_data[at];
-                if depth == 0
-                    && blend != DrawBeginClip::CLIP_BLEND_MODE
-                    && BlendMode::new(mix((blend >> 8) & 0xff), compose(blend & 0xff))
-                        != BlendMode::default()
-                {
-                    return true;
-                }
-                depth += 1;
-            }
-            DrawTag::END_CLIP => depth = depth.saturating_sub(1),
-            _ => {}
-        }
+    fn fill_glyphs<Iter>(
+        self,
+        run: glifo::GlyphRun<'a>,
+        glyphs: Iter,
+    ) -> Result<(), GlyphRenderError>
+    where
+        Iter: Iterator<Item = glifo::Glyph> + Clone,
+    {
+        run.build(glyphs, self.cache.as_mut(), AtlasCacher::Disabled)
+            .fill_glyphs(self.scene)
     }
-    false
+
+    fn stroke_glyphs<Iter>(
+        self,
+        run: glifo::GlyphRun<'a>,
+        glyphs: Iter,
+    ) -> Result<(), GlyphRenderError>
+    where
+        Iter: Iterator<Item = glifo::Glyph> + Clone,
+    {
+        let mut glyph_run = run.build(glyphs, self.cache.as_mut(), AtlasCacher::Disabled);
+        // glifo folds a uniform scale of the run's transform into the font
+        // size and draws the larger outline without it, so the stroke is
+        // widened by that scale: the width the transform would have given.
+        let stroke = self.scene.stroke().clone();
+        let mut adjusted = stroke.clone();
+        adjusted.width *= glyph_run.stroke_adjustment();
+        self.scene.set_stroke(adjusted);
+        let result = glyph_run.stroke_glyphs(self.scene);
+        self.scene.set_stroke(stroke);
+        result
+    }
+
+    fn render_decoration<Iter>(
+        self,
+        run: glifo::GlyphRun<'a>,
+        glyphs: Iter,
+        x_range: RangeInclusive<f32>,
+        baseline_y: f32,
+        offset: f32,
+        size: f32,
+        buffer: f32,
+    ) where
+        Iter: Iterator<Item = glifo::Glyph> + Clone,
+    {
+        run.build(glyphs, self.cache.as_mut(), AtlasCacher::Disabled)
+            .render_decoration(x_range, baseline_y, offset, size, buffer, self.scene);
+    }
 }
 
 /// The bitmap bytes kept resident across renders, in the image atlas and in
@@ -909,21 +819,6 @@ fn pixmap(image: &ImageData, edge: (bool, bool)) -> Option<(Pixmap, bool)> {
     ))
 }
 
-/// The sampler a `DrawImage`'s packed sample word names.
-fn sampler(sample: u32) -> ImageSampler {
-    let quality = match (sample >> 12) & 0x3 {
-        0 => ImageQuality::Low,
-        1 => ImageQuality::Medium,
-        _ => ImageQuality::High,
-    };
-    ImageSampler {
-        x_extend: extend(sample >> 10),
-        y_extend: extend(sample >> 8),
-        quality,
-        alpha: (sample & 0xff) as f32 / 255.0,
-    }
-}
-
 /// The paint drawing `image`: its bound texture when it has one, else its
 /// pixels ([`Bitmaps`]).
 #[expect(
@@ -939,10 +834,10 @@ fn image_paint(
     queue: &wgpu::Queue,
     encoder: &mut wgpu::CommandEncoder,
     next_texture: &mut u64,
-    image: &ImageData,
-    sample: u32,
+    paint: &ImagePaint,
 ) -> Option<Image> {
-    let sampler = sampler(sample);
+    let ImagePaint { image, sampler } = paint;
+    let sampler = *sampler;
     if let Some(texture) = bound.get(&image.data.id()) {
         // A texture longer than its handle carries the repeated edge a vector
         // bake adds (`vector_textures`), sampled on a padded axis only.
@@ -1003,13 +898,13 @@ impl SparseBackend {
             renderer,
             resources,
             scene: Scene::new(1, 1),
+            replay: Replay::default(),
             images: Bitmaps::new(
                 MAX_BITMAP_BYTES,
                 settings.memory_settings.image_atlas_config,
             ),
             bound: FxHashMap::default(),
             next_texture: 0,
-            units_per_em: FxHashMap::default(),
             last: Stats::default(),
         }
     }
@@ -1037,18 +932,18 @@ impl SparseBackend {
         }
     }
 
-    /// Renders `vello_scene` into `view`, a `width`×`height` RGBA8 target
-    /// cleared to `base_color` first.
+    /// Renders `list` into `view`, a `width`×`height` RGBA8 target cleared
+    /// to `base_color` first.
     #[expect(
         clippy::too_many_arguments,
-        reason = "one render's full inputs: the device pair, the scene, and the target with its \
+        reason = "one render's full inputs: the device pair, the list, and the target with its \
                   size and base colour"
     )]
     pub(crate) fn render(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        vello_scene: &vello::Scene,
+        list: &DisplayList,
         view: &wgpu::TextureView,
         width: u32,
         height: u32,
@@ -1059,10 +954,10 @@ impl SparseBackend {
             renderer,
             resources,
             scene,
+            replay: kept,
             images,
             bound,
             next_texture,
-            units_per_em,
             last,
         } = self;
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1071,13 +966,15 @@ impl SparseBackend {
         images.begin();
 
         let started = ClockInstant::now();
-        let mut stats = Stats::default();
         scene.reset_and_resize(w, h);
-        let encoding = vello_scene.encoding();
-        // See `blends_over_root`: the base colour as a fill is what a root
-        // blend has to read, and over a transparent clear it composes to the
-        // same pixels the clear would have.
-        let underlay = base_color.components[3] > 0.0 && blends_over_root(encoding);
+        // A layer blending over the root blends against what is under the
+        // whole list, which on the target is the base colour. `vello_gpu`
+        // renders a root that is a blend target into a transparent
+        // intermediate and blits that over the cleared target, so the clear
+        // colour is under the blend rather than in it: the base colour is
+        // drawn as the scene's first fill instead, which over a transparent
+        // clear composes to the same pixels the clear would have.
+        let underlay = base_color.components[3] > 0.0 && list.blends_at_root();
         if underlay {
             scene.set_transform(Affine::IDENTITY);
             scene.set_fill_rule(Fill::NonZero);
@@ -1090,233 +987,19 @@ impl SparseBackend {
         } else {
             base_color
         };
-        let paths = decode_paths(encoding);
-        stats.decode = started.elapsed();
-        let mut paths = paths.into_iter();
-        let ramps: FxHashMap<usize, &Patch> = encoding
-            .resources
-            .patches
-            .iter()
-            .filter_map(|patch| match patch {
-                Patch::Ramp {
-                    draw_data_offset, ..
-                }
-                | Patch::Image {
-                    draw_data_offset, ..
-                } => Some((*draw_data_offset, patch)),
-                Patch::GlyphRun { .. } => None,
-            })
-            .collect();
-        let runs: FxHashMap<usize, usize> = encoding
-            .resources
-            .glyph_runs
-            .iter()
-            .enumerate()
-            .map(|(index, run)| (run.stream_offsets.draw_tags, index))
-            .collect();
-        let isolated = isolated_clips(encoding);
-        // Per open `BEGIN_CLIP`, whether it was replayed as a non-isolated
-        // clip, which its `END_CLIP` pops with `pop_clip`.
-        let mut clips: Vec<bool> = Vec::new();
-        let data = &encoding.draw_data;
-        let mut offset = 0_usize;
-        let f = |at: usize| f32::from_bits(data[at]);
-        for (index, tag) in encoding.draw_tags.iter().enumerate() {
-            let size = ((tag.0 >> 2) & 0x7) as usize;
-            let at = offset;
-            offset += size;
-            if *tag == DrawTag::NOP {
-                continue;
-            }
-            let glyph_run = runs.get(&index).copied();
-            let decoded = if glyph_run.is_some() {
-                None
-            } else {
-                paths.next()
-            };
-            let paint: Option<vello_gpu::PaintType> = match *tag {
-                DrawTag::COLOR | DrawTag::BLUR_RECT => Some(premul_color(data[at]).into()),
-                DrawTag::LINEAR_GRADIENT | DrawTag::RADIAL_GRADIENT | DrawTag::SWEEP_GRADIENT => {
-                    let Some(Patch::Ramp {
-                        stops,
-                        extend,
-                        interpolation_alpha_space,
-                        ..
-                    }) = ramps.get(&at)
-                    else {
-                        continue;
-                    };
-                    let p = |i: usize| Point::new(f64::from(f(at + i)), f64::from(f(at + i + 1)));
-                    let mut gradient = match *tag {
-                        DrawTag::LINEAR_GRADIENT => Gradient::new_linear(p(1), p(3)),
-                        DrawTag::RADIAL_GRADIENT => {
-                            Gradient::new_two_point_radial(p(1), f(at + 5), p(3), f(at + 6))
-                        }
-                        // vello stores the angles in turns.
-                        _ => Gradient::new_sweep(
-                            p(1),
-                            f(at + 3) * std::f32::consts::TAU,
-                            f(at + 4) * std::f32::consts::TAU,
-                        ),
-                    };
-                    gradient.extend = *extend;
-                    gradient.interpolation_alpha_space = *interpolation_alpha_space;
-                    gradient.stops = encoding.resources.color_stops[stops.clone()].into();
-                    Some(gradient.into())
-                }
-                DrawTag::IMAGE => {
-                    let Some(Patch::Image { image, .. }) = ramps.get(&at) else {
-                        continue;
-                    };
-                    let paint = image_paint(
-                        images,
-                        bound,
-                        renderer,
-                        resources,
-                        device,
-                        queue,
-                        &mut encoder,
-                        next_texture,
-                        image,
-                        data[at + 2],
-                    );
-                    if paint.is_none() {
-                        stats.images_skipped += 1;
-                    }
-                    paint.map(Into::into)
-                }
-                _ => None,
-            };
-
-            if let Some(run_index) = glyph_run {
-                let run = &encoding.resources.glyph_runs[run_index];
-                let Some(paint) = paint else { continue };
-                stats.glyph_runs += 1;
-                let run_transform = affine(&run.transform);
-                scene.set_paint(paint);
-                scene.set_transform(run_transform);
-                match run.brush_transform {
-                    Some(t) => scene.set_paint_transform(affine(&t)),
-                    None => scene.reset_paint_transform(),
-                }
-                scene.set_fill_rule(Fill::NonZero);
-                if let peniko::Style::Stroke(stroke) = &run.style {
-                    scene.set_stroke(stroke.clone());
-                }
-                // vello applies the per-glyph transform in the outline's
-                // y-up space; glifo in the scene's y-down one.
-                let flip = Affine::new([1.0, 0.0, 0.0, -1.0, 0.0, 0.0]);
-                let glyph_transform = run.glyph_transform.map(|t| flip * affine(&t) * flip);
-                let embolden = embolden(
-                    run,
-                    run_transform * glyph_transform.unwrap_or(Affine::IDENTITY),
-                    units_per_em,
-                );
-                let coords = &encoding.resources.normalized_coords[run.normalized_coords.clone()];
-                let glyphs = encoding.resources.glyphs[run.glyphs.clone()]
-                    .iter()
-                    .map(|g| glifo::Glyph {
-                        id: g.id,
-                        x: g.x,
-                        y: g.y,
-                    });
-                let mut builder = scene
-                    .glyph_run(resources, &run.font)
-                    .font_size(run.font_size)
-                    .hint(run.hint)
-                    .normalized_coords(coords)
-                    .font_embolden(embolden);
-                if let Some(t) = glyph_transform {
-                    builder = builder.glyph_transform(t);
-                }
-                // A glyph the font cannot outline draws nothing, as in vello.
-                let _ = match &run.style {
-                    peniko::Style::Fill(_) => builder.fill_glyphs(glyphs),
-                    peniko::Style::Stroke(_) => builder.stroke_glyphs(glyphs),
-                };
-                continue;
-            }
-
-            let Some(decoded) = decoded else { continue };
-            scene.set_transform(decoded.transform);
-            scene.set_fill_rule(fill_rule(decoded.style));
-            match *tag {
-                DrawTag::BEGIN_CLIP => {
-                    stats.layers += 1;
-                    let blend = data[at];
-                    let alpha = f(at + 1);
-                    let plain = blend == DrawBeginClip::CLIP_BLEND_MODE;
-                    if plain && !isolated[index] {
-                        // A non-isolated clip: no layer texture, its
-                        // coverage intersected into the strips of what it
-                        // holds (see `isolated_clips`). A layer pushed
-                        // inside it composites cut to its own path within
-                        // this clip.
-                        match axis_rect(&decoded.path) {
-                            Some(rect) => scene.push_clip_rect(&rect),
-                            None => scene.push_clip_path(&decoded.path),
-                        }
-                    } else if plain {
-                        scene.push_clip_layer(&decoded.path);
-                    } else {
-                        if blend == DrawBeginClip::LUMINANCE_MASK_BLEND_MODE {
-                            stats.masks_skipped += 1;
-                        }
-                        let mode = BlendMode::new(mix((blend >> 8) & 0xff), compose(blend & 0xff));
-                        scene.push_layer(Some(&decoded.path), Some(mode), Some(alpha), None, None);
-                    }
-                    clips.push(plain && !isolated[index]);
-                }
-                DrawTag::END_CLIP => {
-                    if clips.pop() == Some(true) {
-                        scene.pop_clip();
-                    } else {
-                        scene.pop_layer();
-                    }
-                }
-                DrawTag::BLUR_RECT => {
-                    stats.draws += 1;
-                    if let Some(paint) = paint {
-                        scene.set_paint(paint);
-                    }
-                    // The brush transform places the rect's centre at the
-                    // origin; `vello_gpu` fills the same 2.5σ-inflated area
-                    // vello's `draw_blurred_rounded_rect` encodes.
-                    scene.set_transform(decoded.brush_transform);
-                    scene.reset_paint_transform();
-                    let (width, height) = (f64::from(f(at + 1)), f64::from(f(at + 2)));
-                    scene.fill_blurred_rounded_rect(
-                        &Rect::from_center_size(Point::ORIGIN, (width, height)),
-                        f(at + 3),
-                        f(at + 4),
-                        false,
-                    );
-                }
-                _ => {
-                    let Some(paint) = paint else { continue };
-                    stats.draws += 1;
-                    let solid = matches!(paint, vello_gpu::PaintType::Solid(_));
-                    scene.set_paint(paint);
-                    if solid {
-                        scene.reset_paint_transform();
-                    } else {
-                        scene.set_paint_transform(
-                            decoded.transform.inverse() * decoded.brush_transform,
-                        );
-                    }
-                    if is_stroke(decoded.style) {
-                        scene.set_stroke(stroke(decoded.style));
-                        scene.stroke_path(&decoded.path);
-                    } else if let Some(rect) = axis_rect(&decoded.path) {
-                        // Under an axis-aligned transform and clip, a
-                        // rectangle draws without strips.
-                        scene.fill_rect(&rect);
-                    } else {
-                        scene.fill_path(&decoded.path);
-                    }
-                }
-            }
-        }
+        let mut stats = replay(scene, list, kept, &mut |paint| {
+            image_paint(
+                images,
+                bound,
+                renderer,
+                resources,
+                device,
+                queue,
+                &mut encoder,
+                next_texture,
+                paint,
+            )
+        });
         stats.encode = started.elapsed();
 
         let started = ClockInstant::now();
@@ -1344,6 +1027,7 @@ impl SparseBackend {
             }),
         );
         images.finish(renderer, resources, &mut encoder);
+        kept.maintain();
         queue.submit([encoder.finish()]);
         stats.render = started.elapsed();
         *last = stats;
@@ -1364,6 +1048,7 @@ mod tests {
     use vello_gpu::{AllocationStrategy, AtlasConfig};
 
     use super::{PINNED_RENDERS, SparseBackend, Store};
+    use crate::paint::display_list::DisplayList;
     use crate::render::gpu::{GpuDevice, instance};
 
     const RED: [u8; 4] = [255, 0, 0, 255];
@@ -1413,7 +1098,7 @@ mod tests {
 
         /// Renders `scene` over white and answers the target's pixel at
         /// each of `at`.
-        fn render(&mut self, scene: &vello::Scene) -> Pixels {
+        fn render(&mut self, scene: &DisplayList) -> Pixels {
             let (device, queue) = (&self.gpu.device, &self.gpu.queue);
             let view = self
                 .target
@@ -1505,7 +1190,7 @@ mod tests {
 
     /// Fills `rect` with `image`, placed by `brush`.
     fn draw(
-        scene: &mut vello::Scene,
+        scene: &mut DisplayList,
         image: &ImageData,
         quality: ImageQuality,
         extend: Extend,
@@ -1537,7 +1222,7 @@ mod tests {
     fn a_padded_axis_filters_to_the_last_texel_and_a_repeating_one_keeps_its_period() {
         let mut rig = Rig::new(64, 16);
         let image = bitmap(2, &[RED, BLUE]);
-        let mut scene = vello::Scene::new();
+        let mut scene = DisplayList::new();
         // Two texels at 8 px each, padded out to 32 px.
         draw(
             &mut scene,
@@ -1586,7 +1271,7 @@ mod tests {
             height: 1,
             ..square.clone()
         };
-        let mut scene = vello::Scene::new();
+        let mut scene = DisplayList::new();
         draw(
             &mut scene,
             &square,
@@ -1636,7 +1321,7 @@ mod tests {
         // One padded 2×2 upload's bytes.
         rig.backend.images.budget = 16;
         let frame = |image: &ImageData| {
-            let mut scene = vello::Scene::new();
+            let mut scene = DisplayList::new();
             draw(
                 &mut scene,
                 image,
@@ -1654,7 +1339,7 @@ mod tests {
         // render drawing no bitmap is not one of them.
         for _ in 1..PINNED_RENDERS {
             assert_eq!(rig.render(&frame(&blue)).at(4, 4), BLUE);
-            let _ = rig.render(&vello::Scene::new());
+            let _ = rig.render(&DisplayList::new());
             assert_eq!(rig.backend.images.entries.len(), 2, "red is pinned");
         }
         assert_eq!(rig.render(&frame(&blue)).at(4, 4), BLUE);
@@ -1703,7 +1388,7 @@ mod tests {
         let mut texels = vec![RED; 1100];
         texels[1099] = BLUE;
         let image = bitmap(1100, &texels);
-        let mut scene = vello::Scene::new();
+        let mut scene = DisplayList::new();
         // The last eight texels at pixels 0..8, then the padded area.
         draw(
             &mut scene,
@@ -1729,7 +1414,7 @@ mod tests {
         rig.backend.images.budget = 0;
         let other = bitmap(1, &[RED]);
         for _ in 0..PINNED_RENDERS {
-            let mut scene = vello::Scene::new();
+            let mut scene = DisplayList::new();
             draw(
                 &mut scene,
                 &other,
@@ -1761,7 +1446,7 @@ mod tests {
         );
         let images = [RED, BLUE, [0, 255, 0, 255]].map(|texel| bitmap(40, &vec![texel; 1600]));
         let frame = |images: &[ImageData]| {
-            let mut scene = vello::Scene::new();
+            let mut scene = DisplayList::new();
             for (index, image) in images.iter().enumerate() {
                 let x = 40.0 * index as f64;
                 draw(
@@ -1824,7 +1509,7 @@ mod tests {
     #[test]
     fn a_layer_taller_than_4096_px_renders() {
         let mut rig = Rig::new(8, 5000);
-        let mut scene = vello::Scene::new();
+        let mut scene = DisplayList::new();
         let page = Rect::new(0.0, 0.0, 8.0, 5000.0);
         scene.push_layer(
             Fill::NonZero,
@@ -1849,14 +1534,15 @@ mod tests {
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
-mod decode_tests {
-    use vello::kurbo::{Line, PathEl, Shape as _};
+mod replay_tests {
+    use vello::kurbo::{Cap, Join, Line, Stroke};
     use vello::peniko::color::palette::css::{BLACK, BLUE, RED};
+    use vello::peniko::{self, BlendMode, Compose, Gradient, Mix};
 
     use super::*;
     use crate::render::gpu::Headless;
 
-    fn render(scene: &vello::Scene, width: u32, height: u32) -> Vec<u8> {
+    fn render(scene: &DisplayList, width: u32, height: u32) -> Vec<u8> {
         let mut gpu = Headless::new().expect("a usable GPU adapter is mandatory");
         gpu.render(scene, width, height, Color::WHITE)
             .expect("the scene renders")
@@ -1882,106 +1568,8 @@ mod decode_tests {
     }
 
     #[test]
-    fn a_filled_rect_decodes_to_its_local_corners_under_its_transform() {
-        let mut scene = vello::Scene::new();
-        let transform = Affine::translate((3.0, 4.0)) * Affine::scale(2.0);
-        scene.fill(
-            Fill::NonZero,
-            transform,
-            RED,
-            None,
-            &Rect::new(0.0, 0.0, 5.0, 5.0),
-        );
-        let paths = decode_paths(scene.encoding());
-        assert_eq!(paths.len(), 1);
-        assert_eq!(paths[0].transform, transform);
-        assert_eq!(paths[0].path.bounding_box(), Rect::new(0.0, 0.0, 5.0, 5.0));
-        assert!(matches!(
-            paths[0].path.elements().last(),
-            Some(PathEl::ClosePath)
-        ));
-        assert!(!is_stroke(paths[0].style));
-        assert_eq!(fill_rule(paths[0].style), Fill::NonZero);
-    }
-
-    #[test]
-    fn a_brush_transform_is_the_one_current_at_the_path_marker() {
-        let mut scene = vello::Scene::new();
-        let transform = Affine::translate((5.0, 0.0));
-        let brush = Affine::scale(2.0);
-        let gradient = Gradient::new_linear((0.0, 0.0), (4.0, 0.0)).with_stops(hard_stop(0.5));
-        scene.fill(
-            Fill::EvenOdd,
-            transform,
-            &gradient,
-            Some(brush),
-            &Rect::new(0.0, 0.0, 4.0, 4.0),
-        );
-        let paths = decode_paths(scene.encoding());
-        assert_eq!(paths[0].transform, transform);
-        assert_eq!(paths[0].brush_transform, transform * brush);
-        assert_eq!(fill_rule(paths[0].style), Fill::EvenOdd);
-    }
-
-    /// The cap marker vello ends a stroke's subpath with is dropped: an open
-    /// subpath stays open, a closed one closes, and the stroke's style
-    /// decodes back to its width, caps, join and miter limit.
-    #[test]
-    fn a_strokes_cap_marker_is_no_geometry() {
-        let mut scene = vello::Scene::new();
-        let style = Stroke::new(2.0)
-            .with_start_cap(Cap::Square)
-            .with_end_cap(Cap::Round)
-            .with_join(Join::Miter)
-            .with_miter_limit(4.0);
-        scene.stroke(
-            &style,
-            Affine::IDENTITY,
-            BLACK,
-            None,
-            &Line::new((0.0, 5.0), (10.0, 5.0)),
-        );
-        scene.stroke(
-            &style,
-            Affine::IDENTITY,
-            BLACK,
-            None,
-            &Rect::new(0.0, 0.0, 10.0, 10.0),
-        );
-        let paths = decode_paths(scene.encoding());
-        assert_eq!(paths.len(), 2);
-        assert_eq!(
-            paths[0].path.elements(),
-            [
-                PathEl::MoveTo((0.0, 5.0).into()),
-                PathEl::LineTo((10.0, 5.0).into())
-            ],
-        );
-        assert!(matches!(
-            paths[1].path.elements().last(),
-            Some(PathEl::ClosePath)
-        ));
-        assert_eq!(
-            paths[1].path.bounding_box(),
-            Rect::new(0.0, 0.0, 10.0, 10.0)
-        );
-        let decoded = stroke(paths[0].style);
-        assert!(is_stroke(paths[0].style));
-        assert_eq!(
-            (
-                decoded.width,
-                decoded.start_cap,
-                decoded.end_cap,
-                decoded.join,
-                decoded.miter_limit
-            ),
-            (2.0, Cap::Square, Cap::Round, Join::Miter, 4.0),
-        );
-    }
-
-    #[test]
     fn a_closed_stroke_joins_back_to_its_start() {
-        let mut scene = vello::Scene::new();
+        let mut scene = DisplayList::new();
         let rect = Rect::new(0.0, 0.0, 10.0, 10.0);
         let stroke = Stroke::new(2.0).with_join(Join::Miter);
         scene.stroke(&stroke, Affine::translate((1.0, 1.0)), BLACK, None, &rect);
@@ -1998,7 +1586,7 @@ mod decode_tests {
     #[test]
     fn a_stroke_covers_its_offsets_and_its_caps() {
         for (cap, capped) in [(Cap::Butt, false), (Cap::Square, true)] {
-            let mut scene = vello::Scene::new();
+            let mut scene = DisplayList::new();
             let line = Line::new((2.0, 4.0), (14.0, 4.0));
             let stroke = Stroke::new(2.0).with_caps(cap);
             scene.stroke(&stroke, Affine::IDENTITY, BLACK, None, &line);
@@ -2013,7 +1601,7 @@ mod decode_tests {
     /// A dashed stroke reaches the rasterizer already dashed.
     #[test]
     fn a_dashed_stroke_leaves_its_gaps_unpainted() {
-        let mut scene = vello::Scene::new();
+        let mut scene = DisplayList::new();
         let line = Line::new((0.0, 4.0), (16.0, 4.0));
         let stroke = Stroke::new(2.0).with_dashes(0.0, [4.0, 4.0]);
         scene.stroke(&stroke, Affine::IDENTITY, BLACK, None, &line);
@@ -2028,7 +1616,7 @@ mod decode_tests {
 
     #[test]
     fn a_clip_layer_bounds_the_fill_inside_it() {
-        let mut scene = vello::Scene::new();
+        let mut scene = DisplayList::new();
         scene.push_clip_layer(
             Fill::NonZero,
             Affine::IDENTITY,
@@ -2052,7 +1640,7 @@ mod decode_tests {
     /// takes the colour at its centre.
     #[test]
     fn a_hard_stop_on_a_pixel_edge_splits_the_columns_there() {
-        let mut scene = vello::Scene::new();
+        let mut scene = DisplayList::new();
         let gradient = Gradient::new_linear((0.0, 0.0), (20.0, 0.0)).with_stops(hard_stop(0.5));
         scene.fill(
             Fill::NonZero,
@@ -2077,7 +1665,7 @@ mod decode_tests {
             (Extend::Repeat, OPAQUE_RED, OPAQUE_BLUE),
             (Extend::Reflect, OPAQUE_BLUE, OPAQUE_RED),
         ] {
-            let mut scene = vello::Scene::new();
+            let mut scene = DisplayList::new();
             let gradient = Gradient::new_linear((0.0, 0.0), (10.0, 0.0))
                 .with_stops(hard_stop(0.5))
                 .with_extend(extend);
@@ -2098,7 +1686,7 @@ mod decode_tests {
     /// Every pixel of a conic gradient is painted, its centre's included.
     #[test]
     fn a_conic_gradient_paints_its_centre() {
-        let mut scene = vello::Scene::new();
+        let mut scene = DisplayList::new();
         let gradient = Gradient::new_sweep((8.0, 8.0), 0.0, std::f32::consts::TAU)
             .with_stops([RED, BLUE, RED].as_slice())
             .with_extend(Extend::Repeat);
@@ -2118,7 +1706,7 @@ mod decode_tests {
     /// A layer blending over the root blends against the base colour.
     #[test]
     fn a_root_blend_reads_the_base_colour() {
-        let mut scene = vello::Scene::new();
+        let mut scene = DisplayList::new();
         scene.push_layer(
             Fill::NonZero,
             BlendMode::new(Mix::Difference, Compose::SrcOver),
@@ -2134,134 +1722,9 @@ mod decode_tests {
             &Rect::new(0.0, 0.0, 4.0, 4.0),
         );
         scene.pop_layer();
-        assert!(blends_over_root(scene.encoding()));
+        assert!(scene.blends_at_root());
         // |white − red| is cyan.
         assert_eq!(pixel(&render(&scene, 4, 4), 4, 1, 1), [0, 255, 255, 255]);
-    }
-
-    fn polygon(points: &[(f64, f64)], close: bool) -> BezPath {
-        let mut path = BezPath::new();
-        path.move_to(points[0]);
-        for &point in &points[1..] {
-            path.line_to(point);
-        }
-        if close {
-            path.close_path();
-        }
-        path
-    }
-
-    /// An axis-aligned rectangle is recognised in either winding, with or
-    /// without the encoder's explicit closing line, and as the paths a
-    /// `vello::Scene` fill of a `Rect` decodes to.
-    #[test]
-    fn axis_rect_recognises_a_closed_axis_aligned_rectangle() {
-        let rect = Rect::new(1.0, 2.0, 5.0, 7.5);
-        let clockwise = [(1.0, 2.0), (5.0, 2.0), (5.0, 7.5), (1.0, 7.5)];
-        let counter = [(1.0, 2.0), (1.0, 7.5), (5.0, 7.5), (5.0, 2.0)];
-        assert_eq!(axis_rect(&polygon(&clockwise, true)), Some(rect));
-        assert_eq!(axis_rect(&polygon(&counter, true)), Some(rect));
-        let mut explicit = clockwise.to_vec();
-        explicit.push(clockwise[0]);
-        assert_eq!(axis_rect(&polygon(&explicit, true)), Some(rect));
-        // Starting at another corner names the same box.
-        let rotated = [(5.0, 7.5), (1.0, 7.5), (1.0, 2.0), (5.0, 2.0)];
-        assert_eq!(axis_rect(&polygon(&rotated, true)), Some(rect));
-
-        let mut scene = vello::Scene::new();
-        scene.fill(Fill::NonZero, Affine::IDENTITY, RED, None, &rect);
-        let paths = decode_paths(scene.encoding());
-        assert_eq!(axis_rect(&paths[0].path), Some(rect));
-    }
-
-    /// A rotated quad, an open outline, a degenerate box and a curve are not
-    /// rectangles.
-    #[test]
-    fn axis_rect_refuses_everything_else() {
-        let diamond = [(4.0, 0.0), (8.0, 4.0), (4.0, 8.0), (0.0, 4.0)];
-        assert_eq!(axis_rect(&polygon(&diamond, true)), None, "rotated");
-        let square = [(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0)];
-        assert_eq!(axis_rect(&polygon(&square, false)), None, "not closed");
-        assert_eq!(axis_rect(&polygon(&square[..3], true)), None, "a triangle");
-        let flat = [(0.0, 0.0), (4.0, 0.0), (4.0, 0.0), (0.0, 0.0)];
-        assert_eq!(axis_rect(&polygon(&flat, true)), None, "zero height");
-        // Every point on a corner, one corner visited twice: zero area.
-        let folded = [(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (4.0, 0.0)];
-        assert_eq!(axis_rect(&polygon(&folded, true)), None, "folded");
-        let mut five = square.to_vec();
-        five.push((2.0, 0.0));
-        assert_eq!(axis_rect(&polygon(&five, true)), None, "five corners");
-        let mut two = polygon(&square, true);
-        two.extend(polygon(&square, true));
-        assert_eq!(axis_rect(&two), None, "two subpaths");
-        let rounded = vello::kurbo::RoundedRect::new(0.0, 0.0, 8.0, 8.0, 2.0);
-        assert_eq!(axis_rect(&rounded.to_path(0.1)), None, "rounded");
-    }
-
-    /// A clip whose span holds a blend layer stays isolated, and so does
-    /// every clip around it; a clip holding only opacity layers, or only
-    /// draws, does not.
-    #[test]
-    fn a_clip_holding_a_blend_stays_isolated() {
-        let clip = |scene: &mut vello::Scene| {
-            scene.push_clip_layer(
-                Fill::NonZero,
-                Affine::IDENTITY,
-                &Rect::new(0.0, 0.0, 8.0, 8.0),
-            );
-        };
-        let fill = |scene: &mut vello::Scene| {
-            scene.fill(
-                Fill::NonZero,
-                Affine::IDENTITY,
-                RED,
-                None,
-                &Rect::new(0.0, 0.0, 8.0, 8.0),
-            );
-        };
-        let layer = |scene: &mut vello::Scene, blend: BlendMode, alpha: f32| {
-            scene.push_layer(
-                Fill::NonZero,
-                blend,
-                alpha,
-                Affine::IDENTITY,
-                &Rect::new(0.0, 0.0, 8.0, 8.0),
-            );
-        };
-        // Draw objects: clip 0 { clip 1 { layer 2 { fill 3 } 4 } 5 } 6,
-        // then clip 7 { fill 8 } 9.
-        let mut scene = vello::Scene::new();
-        clip(&mut scene);
-        clip(&mut scene);
-        layer(
-            &mut scene,
-            BlendMode::new(Mix::Saturation, Compose::SrcAtop),
-            1.0,
-        );
-        fill(&mut scene);
-        scene.pop_layer();
-        scene.pop_layer();
-        scene.pop_layer();
-        clip(&mut scene);
-        fill(&mut scene);
-        scene.pop_layer();
-        let isolated = isolated_clips(scene.encoding());
-        assert_eq!(
-            isolated,
-            [
-                true, true, false, false, false, false, false, false, false, false
-            ]
-        );
-
-        // Opacity alone is a source-over layer: the clip around it is not
-        // isolated, and neither is a layer itself.
-        let mut scene = vello::Scene::new();
-        clip(&mut scene);
-        layer(&mut scene, BlendMode::default(), 0.5);
-        fill(&mut scene);
-        scene.pop_layer();
-        scene.pop_layer();
-        assert!(isolated_clips(scene.encoding()).iter().all(|&i| !i));
     }
 
     /// A non-separable blend inside a rounded clip reads full coverage along
@@ -2272,7 +1735,7 @@ mod decode_tests {
     fn a_saturation_blend_in_a_rounded_clip_leaves_the_rim_clean() {
         let shape = vello::kurbo::RoundedRect::new(2.0, 2.0, 62.0, 30.0, 13.5);
         let bounds = Rect::new(2.0, 2.0, 62.0, 30.0);
-        let mut scene = vello::Scene::new();
+        let mut scene = DisplayList::new();
         scene.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &shape);
         scene.fill(Fill::NonZero, Affine::IDENTITY, Color::WHITE, None, &bounds);
         scene.push_layer(
@@ -2312,7 +1775,7 @@ mod decode_tests {
     fn a_multiply_blend_in_a_rounded_clip_is_cut_after_it_blends() {
         let shape = vello::kurbo::RoundedRect::new(0.0, 0.0, 32.0, 32.0, 12.0);
         let bounds = Rect::new(0.0, 0.0, 32.0, 32.0);
-        let mut scene = vello::Scene::new();
+        let mut scene = DisplayList::new();
         scene.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &shape);
         scene.push_layer(
             Fill::NonZero,
@@ -2349,28 +1812,5 @@ mod decode_tests {
             }
         }
         assert!(partial > 0, "the rounded rim is anti-aliased");
-    }
-
-    /// `unitsPerEm` read from a font's `head` table, plain or in a
-    /// collection, and 1000 for a font without one.
-    #[test]
-    #[expect(clippy::float_cmp, reason = "a unitsPerEm is an exact small integer")]
-    fn units_per_em_come_from_the_head_table() {
-        // An offset table of one record, `head` at 28, unitsPerEm at +18.
-        let mut font = vec![0_u8; 28 + 54];
-        font[4..6].copy_from_slice(&1_u16.to_be_bytes());
-        font[12..16].copy_from_slice(b"head");
-        font[20..24].copy_from_slice(&28_u32.to_be_bytes());
-        font[28 + 18..28 + 20].copy_from_slice(&2048_u16.to_be_bytes());
-        assert_eq!(head_units_per_em(&font, 0), 2048.0);
-        // The same face as the second of a collection.
-        let mut collection = vec![0_u8; 20];
-        collection[..4].copy_from_slice(b"ttcf");
-        collection[16..20].copy_from_slice(&20_u32.to_be_bytes());
-        let mut face = font.clone();
-        face[20..24].copy_from_slice(&(20_u32 + 28).to_be_bytes());
-        collection.extend_from_slice(&face);
-        assert_eq!(head_units_per_em(&collection, 1), 2048.0);
-        assert_eq!(head_units_per_em(&[0; 12], 0), 1000.0);
     }
 }

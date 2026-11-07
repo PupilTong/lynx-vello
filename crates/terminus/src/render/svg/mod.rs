@@ -10,10 +10,10 @@
 //!   paint a final peniko brush. Geometry is resolved here; text is collected but not shaped, so
 //!   the parse needs no fonts and runs in the host, on the pool it decodes bitmaps on, reached
 //!   through `ImageEvent::parse_document`. `Send + Sync`.
-//! - [`encode`] turns a document into a [`Scene`](vello::Scene) on the document thread, shaping its
-//!   text through the document's own [`TextContext`](seldon::text::TextContext), created on the
-//!   first text shaped, so SVG glyphs come from the same fonts and `@font-face` registrations as
-//!   `<text>`.
+//! - [`encode`] turns a document into a [`DisplayList`](crate::paint::display_list::DisplayList) on
+//!   the document thread, shaping its text through the document's own
+//!   [`TextContext`](seldon::text::TextContext), created on the first text shaped, so SVG glyphs
+//!   come from the same fonts and `@font-face` registrations as `<text>`.
 //!
 //! # The supported subset
 //!

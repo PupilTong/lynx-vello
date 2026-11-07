@@ -83,7 +83,7 @@
 //!
 //! Per entry, in this order:
 //!
-//! 1. **Bake.** The entry's ops replay into a scratch [`vello::Scene`] with the entry's own space
+//! 1. **Bake.** The entry's ops replay into a scratch [`DisplayList`] with the entry's own space
 //!    factored out (see [`crate::visual::CommittedFrame::bake_filter`]) and render through the
 //!    [`Raster`] into a target of its [`Raster::TARGET_USAGE`] over `Color::TRANSPARENT`, or over
 //!    the canvas colour for an entry that [reads the
@@ -135,6 +135,7 @@ use vello::peniko::{Blob, Color, ImageAlphaType, ImageData, ImageFormat};
 
 use super::gpu::{GpuDevice, GpuError};
 use super::raster::Raster;
+use crate::paint::display_list::DisplayList;
 use crate::visual::{CommittedFrame, ScrollSlot};
 
 /// Largest per-axis device-pixel count one filter bake may have: the
@@ -712,7 +713,7 @@ pub(crate) struct FilterTextures {
     uniforms: Vec<wgpu::Buffer>,
     /// The scene one group's ops replay into. Reset per group, so its
     /// encoding capacity is reused across groups and frames.
-    bake: vello::Scene,
+    bake: DisplayList,
     /// Index-parallel with the frame's filter groups: the handle the compose
     /// program draws each one through, or `None` for the raw fallback.
     images: Vec<Option<ImageData>>,

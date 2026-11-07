@@ -499,7 +499,7 @@ rendered at instead of collapsing to its estimate.
 
 `Document<T>` owns one private concrete `Painter`
 (`crates/terminus/src/paint/painter.rs`), including its reusable walk scratch, its
-retained `vello::Scene`, and the `Arc<CommittedFrame>` it retains. `render`
+retained `DisplayList`, and the `Arc<CommittedFrame>` it retains. `render`
 privately builds `PaintOrder` and invokes that painter only for a dirty scene;
 it records which private visual epoch its scene represents, so
 `render`/`needs_render` own retained-scene scheduling without publishing that
@@ -648,7 +648,10 @@ through `apply_image_events`, and retains no pixel: the store is the
 consumer's, handed to `scene` and to the bake path per call.
 
 The private `painter`/`walker`/`paint`/`shape` modules turn the paint order
-into the retained Vello scene. Item clip chains diff against Vello layers;
+into the retained display list (`paint::display_list`: shapes, paints,
+clips, layers and glyph runs as drawing semantics, replayed by
+`render::sparse` into `vello_gpu` per render). Item clip chains diff against
+its layer stack;
 `RenderLayer` scopes composite opacity, filters, clip paths, and masks; box
 fragments paint shadows, backgrounds, replaced content, borders, outlines, and
 retained Parley glyphs. Internal style access is `Document::paint_style`

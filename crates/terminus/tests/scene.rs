@@ -27,11 +27,10 @@ impl Harness {
     fn stats(&mut self) -> (usize, u32, u32) {
         self.doc.dom.render();
         let scene = self.doc.dom.scene(&terminus::link::NoImages);
-        let encoding = scene.encoding();
         (
-            encoding.draw_tags.len(),
-            encoding.n_clips,
-            encoding.n_open_clips,
+            scene.len(),
+            u32::try_from(scene.layers()).expect("a test page pushes few layers"),
+            u32::try_from(scene.open_layers()).expect("a test page pushes few layers"),
         )
     }
 }

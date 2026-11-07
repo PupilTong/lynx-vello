@@ -28,6 +28,7 @@ use euclid::default::Vector2D;
 use vello::peniko::ImageData;
 
 use super::{CANVAS, FrameSize, PainterError};
+use crate::paint::display_list::DisplayList;
 use crate::render::blur::FilterTextures;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::render::gpu::read_texture;
@@ -292,7 +293,7 @@ impl WindowGraphics {
     /// [`Self::present`] then blits into a swap-chain image.
     pub(super) fn render_to_target(
         &mut self,
-        scene: &vello::Scene,
+        scene: &DisplayList,
         size: FrameSize,
     ) -> Result<(), PainterError> {
         self.configure_for(size);
@@ -435,15 +436,16 @@ mod tests {
     use vello::peniko::{Color, Fill, Gradient, Mix};
 
     use super::{FrameAcquisition, WindowGraphics};
+    use crate::paint::display_list::DisplayList;
     use crate::painter::{CANVAS, FrameSize};
     use crate::render::gpu::{Headless, instance};
 
     /// Fills, a stroke, a gradient (a ramp patch) and a clipped translucent
     /// layer: every kind of draw a composed frame is made of short of images
     /// and glyphs.
-    fn scene(size: FrameSize) -> vello::Scene {
+    fn scene(size: FrameSize) -> DisplayList {
         let (width, height) = (f64::from(size.width), f64::from(size.height));
-        let mut scene = vello::Scene::new();
+        let mut scene = DisplayList::new();
         scene.fill(
             Fill::NonZero,
             Affine::IDENTITY,

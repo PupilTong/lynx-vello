@@ -12,6 +12,7 @@ mod background;
 mod border;
 pub(crate) mod compose;
 pub(crate) mod convert;
+pub(crate) mod display_list;
 #[cfg(test)]
 pub(crate) mod equivalence;
 pub(crate) mod filters;

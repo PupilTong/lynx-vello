@@ -2,8 +2,9 @@
 //! ([`raster`] over [`sparse`]) and wgpu submission/readback.
 //!
 //! Nothing here knows about nodes, computed styles, layout, or paint order —
-//! the document-aware painter builds a [`vello::Scene`] and this floor turns
-//! scenes into pixels. Embedders reach peniko/kurbo through the link's
+//! the document-aware painter builds a
+//! [`DisplayList`](crate::paint::display_list::DisplayList) and this floor
+//! turns lists into pixels. Embedders reach peniko/kurbo through the link's
 //! `vello` re-export and wgpu through its `wgpu` one.
 //!
 //! [`blur`] and [`vector_textures`] are the two exceptions, and narrow ones:

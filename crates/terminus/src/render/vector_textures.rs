@@ -77,6 +77,7 @@ use vello::peniko::{Blob, Color, ImageData, ImageFormat};
 use super::gpu::GpuError;
 use super::raster::Raster;
 use crate::paint::compose::VectorDraw;
+use crate::paint::display_list::DisplayList;
 use crate::visual::CommittedFrame;
 
 /// The bytes of baked vector textures kept across frames.
@@ -116,7 +117,7 @@ pub(crate) struct VectorTextures {
     budget: u64,
     /// The scene one bake encodes. Reset per bake, so its capacity is
     /// reused across bakes and frames.
-    bake: vello::Scene,
+    bake: DisplayList,
 }
 
 impl Default for VectorTextures {
@@ -147,7 +148,7 @@ impl VectorTextures {
             bytes: 0,
             tick: 0,
             budget,
-            bake: vello::Scene::new(),
+            bake: DisplayList::new(),
         }
     }
 
@@ -267,7 +268,7 @@ const EDGE_USAGE: wgpu::TextureUsages =
 /// Renders `draw`'s scene into a new texture for a `width` × `height` key
 /// and binds it to a new handle, answering the handle it is drawn through.
 fn bake(
-    scene: &mut vello::Scene,
+    scene: &mut DisplayList,
     draw: &VectorDraw,
     width: u32,
     height: u32,
@@ -418,6 +419,7 @@ mod tests {
 
     use vello::peniko::{Color, ImageData};
 
+    use crate::paint::display_list::DisplayList;
     use crate::render::gpu::Headless;
     use crate::render::image::{DocumentKind, ImageEvent, ImageRole};
     use crate::test_common::Doc;
@@ -525,7 +527,7 @@ mod tests {
 
         // The texture shows the picture where the element is.
         let vectors = gpu.prepare_vectors(&red_frame).expect("hit").to_vec();
-        let mut scene = vello::Scene::new();
+        let mut scene = DisplayList::new();
         red_frame.compose_into(&mut scene, &[], &[], &vectors, &|_| None, None);
         let pixels = gpu.render(&scene, 800, 600, Color::WHITE).expect("render");
         let at = (32 * 800 + 32) * 4;
@@ -580,13 +582,9 @@ mod tests {
         let vectors = gpu.prepare_vectors(&frame).expect("prepare").to_vec();
         assert_eq!(vectors, [None]);
         assert_eq!(gpu.vector_textures().resident(), 0);
-        let mut scene = vello::Scene::new();
+        let mut scene = DisplayList::new();
         frame.compose_into(&mut scene, &[], &[], &vectors, &|_| None, None);
-        assert_eq!(
-            scene.encoding().resources.patches.len(),
-            0,
-            "no texture is drawn"
-        );
+        assert_eq!(scene.image_draws(), 0, "no texture is drawn");
     }
 
     /// A picture drawn off the pixel grid, so it is filtered: the half-covered
@@ -604,7 +602,7 @@ mod tests {
             .set_inline_style(nodes[0], "transform: translateX(0.5px)");
         let frame = doc.dom.commit();
         let vectors = gpu.prepare_vectors(&frame).expect("bake").to_vec();
-        let mut scene = vello::Scene::new();
+        let mut scene = DisplayList::new();
         frame.compose_into(&mut scene, &[], &[], &vectors, &|_| None, None);
         let pixels = gpu.render(&scene, 800, 600, Color::WHITE).expect("render");
         let at = |x: usize| -> [u8; 4] {
