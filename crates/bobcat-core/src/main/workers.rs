@@ -317,7 +317,8 @@ impl WorkerOwner {
         });
     }
 
-    fn post(&self, key: WorkerKey, message: WorkerMessage) {
+    /// Sends `message` to the worker under `key`, if this realm holds it.
+    pub(super) fn post(&self, key: WorkerKey, message: WorkerMessage) {
         if let Some(messages) = self.live.borrow().get(&key) {
             let _ = messages.send(message);
         }

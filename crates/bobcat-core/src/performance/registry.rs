@@ -41,6 +41,11 @@
 //! per worker, each bounded by [`MAX_RECORDS`], which the takes append to
 //! the records' entries in the order they were made. And the two monitors'
 //! switches, each one relaxed atomic, and the JS blocking monitor's state.
+//!
+//! The memory monitor's readings land here too
+//! ([`PipelineRegistry::note_memory`]): each category's latest one, and the
+//! `memory` entries reported from them through the same delivery path, for
+//! the Rust embedder alone.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -53,6 +58,7 @@ use terminus::link::CommitTiming;
 use terminus::link::painter::PresentedFrame;
 use tokio::sync::watch;
 
+use super::memory::{MemoryCategory, MemoryConfig, MemoryEntry, MemoryItem};
 use super::monitors::{decode_threshold, encode_threshold};
 use super::{
     ACTUAL_FMP_FLAG, ActualFmp, EntryTypes, ExtraTiming, FrameworkTiming, JsBlockingConfig,
@@ -246,11 +252,29 @@ struct Inner {
     page_loaded: Option<ClockInstant>,
     /// The JS blocking monitor's running state; `None` while it is off.
     js_blocking: Option<JsBlockingState>,
+    /// The memory monitor's readings; `None` while it is off.
+    memory: Option<MemoryState>,
     /// The delivered entries the Rust embedder has not taken, oldest first,
     /// at most [`MAX_RECORDS`].
     owed_rust: VecDeque<PerformanceEntry>,
     /// The delivered entries each worker has not taken, likewise.
     owed_workers: FxHashMap<WorkerKey, VecDeque<PerformanceEntry>>,
+}
+
+/// The memory monitor's state: Lynx's `MemoryMonitor` members.
+struct MemoryState {
+    /// The configuration this state belongs to: its monitor epoch.
+    epoch: u64,
+    /// `memory_records_`: each category's latest reading, by
+    /// [`MemoryCategory::index`].
+    records: [Option<MemoryItem>; MemoryCategory::ALL.len()],
+    /// `last_reported_size_bytes_`: the total the last report carried.
+    last_reported_total: u64,
+    /// The smallest change of the total that is reported, in bytes.
+    threshold: u64,
+    /// Whether the next reading is reported whatever it changed: the first
+    /// one after the monitor was turned on.
+    force_next: bool,
 }
 
 /// The JS blocking monitor's state between two reports: Lynx's
@@ -1331,6 +1355,90 @@ impl PipelineRegistry {
             inner,
             PerformanceEntry::JsBlocking(entry),
             EntryTypes::JS_BLOCKING,
+            WorkerAudience::None,
+        )
+    }
+
+    /// Turns the memory monitor on with `config`, or off, and answers the
+    /// epoch a sampling task for the new configuration serves — `None` when
+    /// it is off. Each call starts the readings afresh: the categories read
+    /// so far are dropped and the next reading is reported whatever it
+    /// changed.
+    pub(crate) fn set_memory_monitor(&self, config: Option<MemoryConfig>) -> Option<u64> {
+        let mut inner = self.lock();
+        // Under the lock, so a task that wakes for the bump reads the new
+        // state.
+        let epoch = self.next_monitor_epoch();
+        inner.memory = config.map(|config| MemoryState {
+            epoch,
+            records: Default::default(),
+            last_reported_total: 0,
+            threshold: config.change_threshold,
+            force_next: true,
+        });
+        config.map(|_| epoch)
+    }
+
+    /// Whether `epoch` is the memory monitor's current configuration: what
+    /// its task and each sample check before they read anything.
+    pub(crate) fn memory_is_current(&self, epoch: u64) -> bool {
+        self.lock()
+            .memory
+            .as_ref()
+            .is_some_and(|state| state.epoch == epoch)
+    }
+
+    /// The BTS worker of the view's page realm, which a memory sample asks
+    /// for the background thread's reading.
+    pub(crate) fn page_background(&self) -> Option<WorkerKey> {
+        Self::background_of(&self.lock(), OpenerId::PAGE)
+    }
+
+    /// One category's reading: Lynx's `UpdateMemoryUsage` and then
+    /// `ReportMemory`. A reading whose size is the one its category last
+    /// had is dropped, as Lynx drops it, unless it is the first since the
+    /// monitor was turned on; any other replaces the category's reading,
+    /// and a report of every category's latest one is delivered, to the
+    /// Rust embedder alone, when the total moved by at least the threshold
+    /// since the last report (0 reports every change), or the total is 0,
+    /// or the reading is the first. Answers [`Self::deliver`]'s answer;
+    /// nothing at all while the monitor is off.
+    pub(crate) fn note_memory(&self, item: MemoryItem) -> bool {
+        let mut guard = self.lock();
+        let inner = &mut *guard;
+        let Some(state) = inner.memory.as_mut() else {
+            return false;
+        };
+        let force = std::mem::take(&mut state.force_next);
+        let slot = &mut state.records[item.category.index()];
+        if !force
+            && slot
+                .as_ref()
+                .is_some_and(|last| last.size_bytes == item.size_bytes)
+        {
+            return false;
+        }
+        *slot = Some(item);
+        let total = state
+            .records
+            .iter()
+            .flatten()
+            .fold(0_u64, |total, item| total.saturating_add(item.size_bytes));
+        if !force && total > 0 && total.abs_diff(state.last_reported_total) < state.threshold {
+            return false;
+        }
+        state.last_reported_total = total;
+        if !inner.rust_types.contains(EntryTypes::MEMORY) {
+            return false;
+        }
+        let entry = MemoryEntry {
+            size_bytes: total,
+            items: state.records.iter().flatten().cloned().collect(),
+        };
+        self.deliver(
+            inner,
+            PerformanceEntry::Memory(entry),
+            EntryTypes::MEMORY,
             WorkerAudience::None,
         )
     }

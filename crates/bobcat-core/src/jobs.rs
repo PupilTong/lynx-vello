@@ -123,6 +123,10 @@ pub enum JobKind {
     ModuleCallback,
     /// Performance entries delivered to a worker's observers.
     Performance,
+    /// A memory monitor sample: the main thread's reading of its script
+    /// runtime and its document, or a BTS worker's of its script runtime.
+    /// No JavaScript runs in it.
+    Memory,
     /// The disposal and release of a realm whose owner ended.
     Release,
 }
@@ -149,6 +153,7 @@ impl JobKind {
             Self::AnimationFrame => "animationFrame",
             Self::ModuleCallback => "moduleCallback",
             Self::Performance => "performance",
+            Self::Memory => "memory",
             Self::Release => "release",
         }
     }

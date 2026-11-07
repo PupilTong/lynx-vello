@@ -68,7 +68,7 @@ use crate::jobs::{JobKind, JsThread, JsThreadHandle, JsThreadName};
 use crate::lifetime::{Lifetime, run_job, serve_clock};
 use crate::link::HostOutbox;
 use crate::main::quickjs::{ScriptRuntime, SharedRuntime, mark_checkpoint_later};
-use crate::performance::WorkerLoadMark;
+use crate::performance::{MemoryCategory, MemoryItem, WorkerLoadMark};
 use crate::realm::owner::{self, RealmOwner};
 use crate::realm::policy::{self, Row, Scene};
 use crate::realm::{self, RealmCore};
@@ -826,6 +826,12 @@ async fn consume_messages(
                 Some(WorkerMessage::Vsync { milliseconds, enqueued }) => {
                     deliver_vsync(&worker, milliseconds, enqueued);
                 }
+                // Immediately, like a frame: it reads the thread's runtime
+                // and enters no realm, so a root module still loading
+                // changes nothing about it.
+                Some(WorkerMessage::MemorySample { enqueued }) => {
+                    deliver_memory_sample(&worker, enqueued);
+                }
                 Some(WorkerMessage::PerformanceReady { enqueued }) => if held.is_some() {
                     performance_held.get_or_insert(enqueued);
                 } else {
@@ -863,6 +869,28 @@ fn deliver_performance(worker: &Rc<Worker>, enqueued: Option<ClockInstant>) {
             policy::report(&reporting, Scene::Listener, error);
         }
     });
+}
+
+/// The memory monitor's reading of this thread's script runtime, as one
+/// job of this worker's: `JS_ComputeMemoryUsage` over the runtime every
+/// worker realm of the group shares, written to the view's registry as the
+/// `backgroundThreadScriptingEngine` category. Runs no JavaScript and needs
+/// no realm, so it is queued without entering one; a worker that has ended,
+/// or a runtime that was never built, reads nothing.
+fn deliver_memory_sample(worker: &Rc<Worker>, enqueued: Option<ClockInstant>) {
+    drop(run_job(worker, JobKind::Memory, move |worker| {
+        worker.note_wait(enqueued);
+        if worker.ended() {
+            return None;
+        }
+        let usage = worker.js.borrow().as_ref().ok()?.memory_usage();
+        let item =
+            MemoryItem::scripting_engine(MemoryCategory::BackgroundThreadScriptingEngine, &usage);
+        if worker.host.registry().note_memory(item) {
+            worker.host.wake();
+        }
+        Some(())
+    }));
 }
 
 /// Queues one posted value for this worker's realm.
