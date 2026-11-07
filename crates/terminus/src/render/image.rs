@@ -34,7 +34,7 @@
 //! # What the engine will not draw
 //!
 //! The rasterizer uploads a bitmap into its image atlas or, past the atlas's
-//! side, into a texture of its own, and no texture can be longer than the
+//! side or its room, into a texture of its own, and no texture can be longer than the
 //! device's `max_texture_dimension_2d`, which is [`MAX_RENDERABLE_DIMENSION`]
 //! on every device this crate creates. Creating a longer one is a wgpu
 //! validation error, not a draw that degrades.

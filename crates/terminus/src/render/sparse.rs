@@ -35,9 +35,11 @@ use vello::peniko::{
     self, BlendMode, Color, Compose, Extend, Fill, Gradient, ImageAlphaType, ImageData,
     ImageFormat, ImageQuality, ImageSampler, Mix,
 };
+use vello_common::image_cache::ImageCache;
 use vello_gpu::{
-    AtlasWriter, ClearSettings, Image, ImageId, ImageSource, PixelMetadata, Pixmap, RectU16,
-    RenderSize, RenderTargetConfig, Renderer, Resources, Scene, TargetInit, TextureBindings,
+    AllocationStrategy, AtlasConfig, AtlasWriter, ClearSettings, Image, ImageId, ImageSource,
+    LayersConfig, MemorySettings, PixelMetadata, Pixmap, RectU16, RenderSettings, RenderSize,
+    RenderTargetConfig, Renderer, Resources, Scene, SizeU16, TargetInit, TextureBindings,
     TextureId,
 };
 
@@ -512,18 +514,75 @@ const MAX_BITMAP_BYTES: u64 = 128 * 1024 * 1024;
 #[cfg(target_arch = "wasm32")]
 const MAX_BITMAP_BYTES: u64 = 64 * 1024 * 1024;
 
-/// Of those, the bytes that may live in `vello_gpu`'s image atlas at once.
-/// The atlas shares its 4096 × 4096 layers with the glyph cache, creates them
-/// as it fills and frees none, and `Renderer::upload_image` panics when no
-/// layer has room; so bitmaps take at most one layer's worth of it and the
-/// rest take their own textures.
-const MAX_ATLAS_BITMAP_BYTES: u64 = 64 * 1024 * 1024;
+/// The side of one page of `vello_gpu`'s image atlas. The atlas creates a
+/// page the first time a bitmap needs one and frees none, so the first
+/// bitmap a view draws costs a whole page; at 2048 that page is 16 MiB of
+/// RGBA8, where `vello_gpu`'s default 4096 makes it 64 MiB.
+const ATLAS_PAGE_SIDE: u16 = 2048;
+
+/// The most pages the atlas grows to: 64 MiB of bitmaps at
+/// [`ATLAS_PAGE_SIDE`]. A bitmap that finds no room in them takes a texture
+/// of its own ([`Bitmaps`]).
+const ATLAS_PAGES: usize = 4;
 
 /// The longest side, edge included, a bitmap is uploaded to the atlas with.
 /// A longer one is a draw of its own however it is stored, and in the atlas
-/// it would hold a large share of a layer that is never freed; its own
+/// it would hold a large share of a page that is never freed; its own
 /// texture goes when it does.
 const MAX_ATLAS_BITMAP_SIDE: u16 = 1024;
+
+/// The smallest side of an intermediate layer texture: `vello_gpu`'s
+/// default, which its `LayersConfig` documentation gives as the choice for
+/// mobile GPUs, where smaller intermediates cost less than the extra render
+/// passes they need. Textures grow to the largest layer a render needs and
+/// do not shrink.
+const MIN_LAYER_SIDE: u16 = 512;
+
+/// The image atlas the backend renders with: [`ATLAS_PAGES`] pages of
+/// [`ATLAS_PAGE_SIDE`], created as bitmaps need them.
+fn atlas_config() -> AtlasConfig {
+    AtlasConfig {
+        initial_atlas_count: 0,
+        max_atlases: ATLAS_PAGES,
+        atlas_size: (ATLAS_PAGE_SIDE, ATLAS_PAGE_SIDE),
+        auto_grow: true,
+        allocation_strategy: AllocationStrategy::FirstFit,
+    }
+}
+
+/// The settings a renderer on `device` is built with, `atlas` its image
+/// atlas.
+///
+/// A layer's intermediate texture is as large as the layer's clip, and a
+/// render rejects a layer longer than [`LayersConfig::max_texture_size`]
+/// outright (`vello_gpu`'s default is 4096): a page-sized clip kept as a
+/// layer on a target 4097 px tall would fail the whole frame. A layer lies
+/// within its target, and no target is longer than the device's longest
+/// texture side, so that side is the bound: every layer any target can hold
+/// renders. `vello_gpu` clamps the atlas and the layer sizes to the same
+/// limit; [`Bitmaps`] reads the atlas back from here with that clamp
+/// applied.
+fn render_settings(device: &wgpu::Device, atlas: AtlasConfig) -> RenderSettings {
+    let longest = u16::try_from(device.limits().max_texture_dimension_2d).unwrap_or(u16::MAX);
+    RenderSettings {
+        memory_settings: MemorySettings {
+            image_atlas_config: AtlasConfig {
+                atlas_size: (
+                    atlas.atlas_size.0.min(longest),
+                    atlas.atlas_size.1.min(longest),
+                ),
+                initial_atlas_count: atlas.initial_atlas_count.min(atlas.max_atlases),
+                ..atlas
+            },
+            layers_config: LayersConfig {
+                max_textures: None,
+                min_texture_size: SizeU16::new(MIN_LAYER_SIDE.min(longest)),
+                max_texture_size: SizeU16::new(longest),
+            },
+        },
+        ..RenderSettings::default()
+    }
+}
 
 /// One bitmap upload's identity: the pixels, and which axes carry the
 /// repeated edge [`Bitmaps`] describes.
@@ -588,11 +647,18 @@ const PINNED_RENDERS: u64 = 4;
 /// # Upload
 ///
 /// A bitmap is converted to the premultiplied RGBA8 `vello_gpu` samples
-/// ([`pixmap`]) and uploaded to the shared image atlas, or, when it is longer
-/// than [`MAX_ATLAS_BITMAP_SIDE`] or the atlas already holds
-/// [`MAX_ATLAS_BITMAP_BYTES`] of bitmaps, to a texture of its own drawn as an
-/// external texture. The key names the blob, its size and its layout, so a
-/// blob drawn at another size or under another layout is another upload, and
+/// ([`pixmap`]) and uploaded to the image atlas, or, when it is longer than
+/// [`MAX_ATLAS_BITMAP_SIDE`] or no atlas page has room for it, to a texture
+/// of its own drawn as an external texture.
+///
+/// `Renderer::upload_image` panics when the atlas has no room, and
+/// `vello_gpu` keeps its atlas allocator private. So [`Bitmaps::atlas`] is a
+/// second allocator of the same configuration that every atlas upload and
+/// release goes through first: the allocator is deterministic, and with the
+/// glyph atlas cache off nothing else allocates in `vello_gpu`'s, so both
+/// make the same decisions and an upload is only attempted where it fits.
+/// The two hand out the same image ids, which debug builds check. The key names the blob, its size
+/// and its layout, so a blob drawn at another size or under another layout is another upload, and
 /// pixels that change take a new blob and so a new key; the old upload ages
 /// out below.
 ///
@@ -619,9 +685,10 @@ const PINNED_RENDERS: u64 = 4;
 /// exceed the larger of the budget and what the pinned renders drew.
 pub(crate) struct Bitmaps {
     entries: FxHashMap<BitmapKey, Bitmap>,
-    /// Bytes of every upload, and of those in the atlas.
+    /// Bytes of every upload.
     bytes: u64,
-    atlas_bytes: u64,
+    /// The allocations of `vello_gpu`'s image atlas, replayed (see above).
+    atlas: ImageCache,
     /// How many renders have drawn a bitmap. An upload's `last_used` is the
     /// tick of the render that last drew it, so those within
     /// [`PINNED_RENDERS`] of the current tick are the pinned ones and the
@@ -635,11 +702,13 @@ pub(crate) struct Bitmaps {
 }
 
 impl Bitmaps {
-    fn with_budget(budget: u64) -> Self {
+    /// No bitmaps yet, `budget` bytes to keep, and `atlas` the configuration
+    /// `vello_gpu`'s image atlas was built with.
+    fn new(budget: u64, atlas: AtlasConfig) -> Self {
         Self {
             entries: FxHashMap::default(),
             bytes: 0,
-            atlas_bytes: 0,
+            atlas: ImageCache::new_with_config(atlas),
             tick: 0,
             drawing: false,
             budget,
@@ -696,11 +765,14 @@ impl Bitmaps {
         let (pixmap, opaque) = pixmap(image, key.edge)?;
         let (width, height) = (pixmap.width(), pixmap.height());
         let bytes = u64::from(width) * u64::from(height) * 4;
-        let store = if width.max(height) <= MAX_ATLAS_BITMAP_SIDE
-            && self.atlas_bytes + bytes <= MAX_ATLAS_BITMAP_BYTES
-        {
-            self.atlas_bytes += bytes;
-            Store::Atlas(renderer.upload_image(resources, device, queue, encoder, &pixmap))
+        // `upload_image` allocates with no padding.
+        let slot = (width.max(height) <= MAX_ATLAS_BITMAP_SIDE)
+            .then(|| self.atlas.allocate(width, height, 0).ok())
+            .flatten();
+        let store = if let Some(slot) = slot {
+            let id = renderer.upload_image(resources, device, queue, encoder, &pixmap);
+            debug_assert_eq!(id, slot, "the replayed atlas allocates as vello_gpu's does");
+            Store::Atlas(id)
         } else {
             let texture = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("terminus vello_gpu bitmap"),
@@ -781,7 +853,7 @@ impl Bitmaps {
                 .expect("the victim was just found in the table");
             self.bytes -= bitmap.bytes;
             if let Store::Atlas(id) = bitmap.store {
-                self.atlas_bytes -= bitmap.bytes;
+                self.atlas.deallocate(id);
                 renderer.destroy_image(resources, encoder, id);
             }
         }
@@ -910,21 +982,31 @@ fn image_paint(
 
 impl SparseBackend {
     pub(crate) fn new(device: &wgpu::Device) -> Self {
+        Self::with_atlas(device, atlas_config())
+    }
+
+    /// A backend whose image atlas is `atlas`.
+    fn with_atlas(device: &wgpu::Device, atlas: AtlasConfig) -> Self {
+        let settings = render_settings(device, atlas);
         // The target size here only seeds a config buffer; every render
         // names its own.
-        let (renderer, resources) = Renderer::new(
+        let (renderer, resources) = Renderer::new_with(
             device,
             &RenderTargetConfig {
                 format: wgpu::TextureFormat::Rgba8Unorm,
                 width: 1,
                 height: 1,
             },
+            settings,
         );
         Self {
             renderer,
             resources,
             scene: Scene::new(1, 1),
-            images: Bitmaps::with_budget(MAX_BITMAP_BYTES),
+            images: Bitmaps::new(
+                MAX_BITMAP_BYTES,
+                settings.memory_settings.image_atlas_config,
+            ),
             bound: FxHashMap::default(),
             next_texture: 0,
             units_per_em: FxHashMap::default(),
@@ -1276,9 +1358,10 @@ mod tests {
 
     use vello::kurbo::{Affine, Rect};
     use vello::peniko::{
-        Blob, Color, Extend, Fill, ImageAlphaType, ImageBrush, ImageData, ImageFormat,
+        BlendMode, Blob, Color, Extend, Fill, ImageAlphaType, ImageBrush, ImageData, ImageFormat,
         ImageQuality, ImageSampler,
     };
+    use vello_gpu::{AllocationStrategy, AtlasConfig};
 
     use super::{PINNED_RENDERS, SparseBackend, Store};
     use crate::render::gpu::{GpuDevice, instance};
@@ -1298,9 +1381,13 @@ mod tests {
 
     impl Rig {
         fn new(width: u32, height: u32) -> Self {
+            Self::with_atlas(width, height, super::atlas_config())
+        }
+
+        fn with_atlas(width: u32, height: u32, atlas: AtlasConfig) -> Self {
             let gpu = pollster::block_on(GpuDevice::request(&instance(), None))
                 .expect("a usable GPU adapter is mandatory");
-            let backend = SparseBackend::new(&gpu.device);
+            let backend = SparseBackend::with_atlas(&gpu.device, atlas);
             let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("sparse test target"),
                 size: wgpu::Extent3d {
@@ -1573,7 +1660,6 @@ mod tests {
         assert_eq!(rig.render(&frame(&blue)).at(4, 4), BLUE);
         assert_eq!(rig.backend.images.entries.len(), 1, "red was released");
         assert_eq!(rig.backend.images.bytes, 16);
-        assert_eq!(rig.backend.images.atlas_bytes, 16);
 
         for _ in 0..2 {
             for _ in 0..PINNED_RENDERS {
@@ -1640,7 +1726,6 @@ mod tests {
                 .map(|bitmap| &bitmap.store),
             Some(Store::Texture { .. })
         ));
-        assert_eq!(rig.backend.images.atlas_bytes, 0);
         rig.backend.images.budget = 0;
         let other = bitmap(1, &[RED]);
         for _ in 0..PINNED_RENDERS {
@@ -1656,6 +1741,109 @@ mod tests {
             let _ = rig.render(&scene);
         }
         assert_eq!(rig.backend.images.entries.len(), 1, "the long one went");
+    }
+
+    /// Bitmaps past what the atlas has room for draw from textures of their
+    /// own, and one released from the atlas frees its room for the next.
+    #[test]
+    fn a_bitmap_the_atlas_has_no_room_for_draws_from_its_own_texture() {
+        // One 64 px page: room for one padded 40 × 40 upload.
+        let mut rig = Rig::with_atlas(
+            128,
+            48,
+            AtlasConfig {
+                initial_atlas_count: 0,
+                max_atlases: 1,
+                atlas_size: (64, 64),
+                auto_grow: true,
+                allocation_strategy: AllocationStrategy::FirstFit,
+            },
+        );
+        let images = [RED, BLUE, [0, 255, 0, 255]].map(|texel| bitmap(40, &vec![texel; 1600]));
+        let frame = |images: &[ImageData]| {
+            let mut scene = vello::Scene::new();
+            for (index, image) in images.iter().enumerate() {
+                let x = 40.0 * index as f64;
+                draw(
+                    &mut scene,
+                    image,
+                    ImageQuality::Low,
+                    Extend::Pad,
+                    Affine::translate((x, 0.0)),
+                    Rect::new(x, 0.0, x + 40.0, 40.0),
+                );
+            }
+            scene
+        };
+        let pixels = rig.render(&frame(&images));
+        assert_eq!(
+            [pixels.at(20, 20), pixels.at(60, 20), pixels.at(100, 20)],
+            [RED, BLUE, [0, 255, 0, 255]]
+        );
+        let stores = |rig: &Rig| {
+            let mut stores: Vec<_> = rig
+                .backend
+                .images
+                .entries
+                .iter()
+                .map(|(key, bitmap)| (key.blob, matches!(bitmap.store, Store::Atlas(_))))
+                .collect();
+            stores.sort_unstable();
+            stores
+                .into_iter()
+                .map(|(_, atlas)| atlas)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(stores(&rig), [true, false, false], "only the first fits");
+
+        // Once red is released, the next upload takes its room.
+        rig.backend.images.budget = 0;
+        for _ in 0..PINNED_RENDERS {
+            let _ = rig.render(&frame(&images[1..2]));
+        }
+        assert_eq!(
+            stores(&rig),
+            [false],
+            "red went, blue stayed in its texture"
+        );
+        let fresh = bitmap(40, &vec![RED; 1600]);
+        let pixels = rig.render(&frame(&[fresh]));
+        assert_eq!(pixels.at(20, 20), RED);
+        assert!(
+            rig.backend
+                .images
+                .entries
+                .values()
+                .any(|bitmap| matches!(bitmap.store, Store::Atlas(_))),
+            "the freed room is reused",
+        );
+    }
+
+    /// A layer longer than `vello_gpu`'s default intermediate texture side
+    /// (4096) renders: the layer limit is the device's longest side.
+    #[test]
+    fn a_layer_taller_than_4096_px_renders() {
+        let mut rig = Rig::new(8, 5000);
+        let mut scene = vello::Scene::new();
+        let page = Rect::new(0.0, 0.0, 8.0, 5000.0);
+        scene.push_layer(
+            Fill::NonZero,
+            BlendMode::default(),
+            0.5,
+            Affine::IDENTITY,
+            &page,
+        );
+        scene.fill(Fill::NonZero, Affine::IDENTITY, Color::BLACK, None, &page);
+        scene.pop_layer();
+        let pixels = rig.render(&scene);
+        for y in [0, 2500, 4999] {
+            let [r, g, b, a] = pixels.at(4, y);
+            assert!(
+                r.abs_diff(128) <= 1 && r == g && g == b && a == 255,
+                "half black over white at {y}: {:?}",
+                [r, g, b, a]
+            );
+        }
     }
 }
 
