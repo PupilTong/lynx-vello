@@ -2521,11 +2521,15 @@ space through the scroll windows, sticky ranges and curve reaches between
 them, grown by 2 CSS px — pushed as a plain rect where the cut stays clear of
 the link's rounded corners and as the link's whole shape otherwise
 (`paint::walker::plan_clip_pushes`, a second prepass over the walk's stack
-discipline). Vello allocates a clip layer's tiles over its whole shape, and
-the chain restarts around every group, so without the cut a page of small
-faded boxes inside one page-sized `overflow` clip costs a viewport of tiles
-per box and exceeds vello's fixed tile budget (`1 << 21` tiles), after which
-every stage past `tile_alloc` is skipped and the frame is transparent.
+discipline). The chain restarts around every group, so a page of small faded
+boxes inside one page-sized `overflow` clip pushes that clip once per box.
+The rasterizer intersects a plain clip's coverage into the strips of
+everything drawn inside it (`render::sparse`): uncut, a rounded link builds
+its whole outline's strips at every push and every draw inside it is
+intersected with them, while a cut that stays clear of the corners is an
+axis-aligned rectangle, which costs no strips and keeps the rectangle fast
+path for the draws inside it. A link kept as an isolated layer around a
+blend allocates its texture over the cut rather than the whole link.
 
 The device side is `terminus::link::render::blur::FilterTextures`, one per
 rasterizer (`render::raster::Raster`), owned beside it by `Headless` and by

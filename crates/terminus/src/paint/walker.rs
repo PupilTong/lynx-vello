@@ -33,17 +33,21 @@
 //!    share their parent's buffer, so a blend directly inside one reads
 //!    pixels outside the clip. Fragment painters that need a blend under an
 //!    item clip (inset shadows) interpose their own full `SrcOver` layer
-//!    first. **A pushed link is cut to what it holds.** Vello allocates a clip
-//!    layer's tiles over the whole bounding box of its shape, whatever lies
-//!    inside it, and the chain restarts around every group scope, so a page
-//!    of small faded boxes inside one page-sized `overflow` clip re-pushed
-//!    that clip once per box and exceeded vello's fixed tile budget
-//!    (`1 << 21` tiles): every stage after `tile_alloc` is skipped and the frame is
-//!    transparent. [`plan_clip_pushes`] replays the stack discipline once per
-//!    frame and records, per push, the region the items painted inside it can
-//!    put ink in — each item's layer bound, carried into the link's space
-//!    through every scroll window, sticky range and curve reach between them
-//!    — and [`push_clip`] pushes the link's rect cut to that region grown by
+//!    first. **A pushed link is cut to what it holds.** The chain restarts
+//!    around every group scope, so a page of small faded boxes inside one
+//!    page-sized `overflow` clip pushes that clip once per box. The rasterizer
+//!    applies a plain clip by intersecting its coverage into the strips of
+//!    everything drawn inside it (`render::sparse`): a link with rounded
+//!    corners builds the strips of its whole outline at every push, every draw
+//!    inside it is intersected with them, and a rectangle drawn inside it
+//!    loses the strip-free rectangle path; an axis-aligned rectangle link
+//!    costs none of that. A link the rasterizer keeps as an isolated layer,
+//!    around a blend, allocates a texture over its whole extent.
+//!    [`plan_clip_pushes`] replays the stack discipline once per frame and
+//!    records, per push, the region the items painted inside it can put ink
+//!    in — each item's layer bound, carried into the link's space through
+//!    every scroll window, sticky range and curve reach between them — and
+//!    [`push_clip`] pushes the link's rect cut to that region grown by
 //!    [`HOLD_SLACK_CSS_PX`]: a plain rect when the cut stays clear of the
 //!    link's rounded corners, the link's whole shape otherwise. Nothing inside
 //!    the link reaches outside the region, so the picture is the same, and the

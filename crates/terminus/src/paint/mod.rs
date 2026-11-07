@@ -108,5 +108,3 @@ impl BoxFragment {
         }
     }
 }
-#[cfg(test)]
-mod tiles;
