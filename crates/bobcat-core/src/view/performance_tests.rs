@@ -677,3 +677,59 @@ fn the_js_blocking_monitor_reports_at_the_load_and_then_on_its_timer() {
         .expect("a live view");
     assert_eq!(engine.view.seat().registry.js_blocking_stamp(), None);
 }
+
+#[test]
+fn the_memory_monitor_reports_every_category_read_by_its_own_thread() {
+    use crate::performance::{MemoryCategory, MemoryConfig, MemoryEntry};
+
+    fn complete(events: &[EngineEvent]) -> Option<&MemoryEntry> {
+        performance(events).find_map(|entry| match entry {
+            PerformanceEntry::Memory(memory)
+                if MemoryCategory::ALL.iter().all(|category| {
+                    memory
+                        .item(*category)
+                        .is_some_and(|item| item.size_bytes > 0)
+                }) =>
+            {
+                Some(memory)
+            }
+            _ => None,
+        })
+    }
+
+    let mut engine = engine(Some("globalThis.kept = [1, 2, 3];"));
+    engine.view.observe_performance(EntryTypes::MEMORY);
+    engine
+        .view
+        .set_memory_monitor(Some(MemoryConfig {
+            report_interval: Duration::from_millis(50),
+            acquisition_delay: Duration::from_millis(10),
+            change_threshold: 0,
+        }))
+        .expect("a live view");
+    let mut events = Vec::new();
+    drive_until(&mut engine, &mut events, |events| {
+        complete(events).is_some()
+    });
+    let entry = complete(&events).expect("every category");
+    assert_eq!(
+        entry.size_bytes,
+        entry.items.iter().map(|item| item.size_bytes).sum::<u64>()
+    );
+    let elements = entry
+        .item(MemoryCategory::LynxTasmElement)
+        .expect("the document's reading");
+    assert!(elements.instance_count >= 1, "{elements:?}");
+    let shared = |category| {
+        entry.item(category).is_some_and(|item| {
+            item.detail
+                .iter()
+                .any(|(key, value)| &**key == "sharedRuntime" && &**value == "thread")
+        })
+    };
+    assert!(shared(MemoryCategory::MainThreadScriptingEngine));
+    assert!(shared(MemoryCategory::BackgroundThreadScriptingEngine));
+    // Off: the task ends, and a reading still on its way reports nothing.
+    engine.view.set_memory_monitor(None).expect("a live view");
+    assert!(!engine.view.seat().registry.note_memory(elements.clone()));
+}

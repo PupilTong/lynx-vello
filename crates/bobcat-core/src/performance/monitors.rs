@@ -2,9 +2,9 @@
 //! `LongTaskMonitor` and `JSBlockingMonitor` have them: their
 //! configurations, their entries (made whole where they are produced and
 //! handed to [`PipelineRegistry::deliver_entry`]), and the tasks a monitor
-//! runs on the view's `bobcat-main`. Both are off unless the embedder turns
-//! them on; off, each costs one relaxed atomic load where it would measure
-//! and reads no clock.
+//! runs on the view's `bobcat-main`, the memory monitor's among them. Both
+//! are off unless the embedder turns them on; off, each costs one relaxed
+//! atomic load where it would measure and reads no clock.
 
 use std::future::Future;
 use std::pin::pin;
@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use tokio::sync::watch;
 
+use super::memory::{MemoryConfig, serve_memory_samples};
 use super::{PipelineRegistry, Timestamp};
 use crate::jobs::{JobKind, JsThreadName};
 use crate::link::HostOutbox;
@@ -167,13 +168,21 @@ pub(crate) const fn decode_threshold(raw: u64) -> Option<Duration> {
 pub(crate) enum MonitorTask {
     /// The JS blocking monitor's `timer` reports.
     JsBlockingReports { epoch: u64, interval: Duration },
+    /// The memory monitor's samples.
+    MemorySamples { epoch: u64, config: MemoryConfig },
 }
 
 impl MonitorTask {
-    pub(crate) async fn serve(self, host: HostOutbox) {
+    /// Serves the task. `sample_memory` queues the view's job that takes
+    /// one memory sample for the configuration of the epoch it is given;
+    /// only [`Self::MemorySamples`] calls it.
+    pub(crate) async fn serve(self, host: HostOutbox, mut sample_memory: impl FnMut(u64)) {
         match self {
             Self::JsBlockingReports { epoch, interval } => {
                 serve_js_blocking_reports(host, epoch, interval).await;
+            }
+            Self::MemorySamples { epoch, config } => {
+                serve_memory_samples(host, epoch, config, || sample_memory(epoch)).await;
             }
         }
     }

@@ -5,6 +5,7 @@ pub(crate) mod anonymous;
 pub(crate) mod arena;
 pub(crate) mod custom;
 pub(crate) mod document;
+pub(crate) mod footprint;
 pub(crate) mod node;
 pub(crate) mod popover;
 pub(crate) mod shadow;
