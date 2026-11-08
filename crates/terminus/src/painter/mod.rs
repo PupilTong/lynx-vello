@@ -1635,8 +1635,9 @@ fn compose_and_render(
         scene
     } else {
         buffer.reset();
-        frame.compose_into(
+        frame.compose_target_into(
             buffer,
+            (size.width, size.height),
             images,
             filtered,
             vectors,

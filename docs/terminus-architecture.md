@@ -527,7 +527,11 @@ toward an edge is `ScrollSlot::recenter_due`, and the consumer answers it with
 painter reaches its edge. `CommittedFrame::slot_of` is one lookup in the
 node index the commit built. Composition is the one render path: `compose_into` replays
 the whole program into one flat scene at those offsets, and nothing is retained
-per scroller. A scroll container is no stacking context by itself, as on the
+per scroller. The replay leaves out what cannot reach the target — the frame's
+device viewport, or the size `compose_target_into` names — from the bounds the
+commit gave each fragment's chunks (`DisplayList::seal_bounds`) and the boxes
+of the pushes and image draws, so the encode window's headroom costs the
+rasterizer nothing until it scrolls into view. A scroll container is no stacking context by itself, as on the
 web (see `runtime-architecture.md`). Composite animations ride the same split:
 an element whose `opacity`/`transform` animation set exports publishes an
 `AnimationSlot` curve — a clone of that stylo state — which the consumer

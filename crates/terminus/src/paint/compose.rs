@@ -80,7 +80,7 @@ use euclid::default::Vector2D;
 use smallvec::SmallVec;
 
 use crate::kurbo::{Affine, Point, Rect, Size};
-use crate::paint::display_list::{DisplayList, ImagePaint, Paint, Texture};
+use crate::paint::display_list::{DisplayList, ImagePaint, Paint, Texture, may_reach};
 use crate::paint::shape::{BoxShape, with_shape};
 use crate::peniko::{BlendMode, Extend, Fill, ImageData, ImageQuality, ImageSampler};
 use crate::render::image::{
@@ -95,6 +95,16 @@ use crate::visual::{AnimationSamples, AnimationSlot};
 pub(crate) enum CapturedShape {
     Rect(Rect),
     Box(BoxShape),
+}
+
+impl CapturedShape {
+    /// The shape's bounding box in its own space.
+    fn bounding_box(&self) -> Rect {
+        match self {
+            Self::Rect(rect) => rect.abs(),
+            Self::Box(shape) => shape.bounding_box().abs(),
+        }
+    }
 }
 
 /// The shape a raster fill resolves to, decided from geometry alone.
@@ -112,6 +122,30 @@ pub(crate) enum ImageArea {
     Fill(CapturedShape),
     /// A rounded clip the draw only partly covers: clip layer, fill, pop.
     Clipped { clip: BoxShape, draw: Rect },
+}
+
+impl ImageArea {
+    /// Whether the fill, in a space `transform` maps to the target's, can
+    /// put ink in `within`: its shape's box, or the drawn rectangle of a
+    /// clipped one, is all it fills.
+    fn reaches(&self, transform: Affine, within: Rect) -> bool {
+        let bounds = match self {
+            Self::Fill(shape) => shape.bounding_box(),
+            Self::Clipped { draw, .. } => draw.abs(),
+        };
+        may_reach(bounds, transform, within)
+    }
+}
+
+/// Runs `$body` with `$s` bound to the kurbo shape a [`CapturedShape`]
+/// holds.
+macro_rules! with_captured {
+    ($shape:expr, |$s:ident| $body:expr) => {
+        match $shape {
+            CapturedShape::Rect($s) => $body,
+            CapturedShape::Box(shape) => with_shape!(shape, |$s| $body),
+        }
+    };
 }
 
 /// One raster image fill whose only late input is the pixels.
@@ -883,6 +917,10 @@ impl ComposeAssembly {
             self.pool.push(scene);
             return;
         }
+        self.fragments
+            .last_mut()
+            .expect("the open fragment exists")
+            .seal_bounds();
         let index =
             u32::try_from(self.fragments.len() - 1).expect("a frame cannot hold 2^32 fragments");
         self.program.push(ComposeOp::Fragment { index, space });
@@ -1102,12 +1140,16 @@ pub(crate) fn snap_offset(offset: Vector2D<f32>, ratio: f32) -> Vector2D<f32> {
 /// Besides pushes, appends and pops this also records image draws between
 /// appends; every item carries its own transform, so their order is all
 /// that matters.
+///
+/// What cannot reach `visible`, the device-px rectangle the target shows,
+/// is left out ([`replay_ops`]).
 #[expect(
     clippy::too_many_arguments,
     reason = "one replay's full inputs: the program, its side tables, and the samples"
 )]
 pub(crate) fn replay(
     scene: &mut DisplayList,
+    visible: Rect,
     fragments: &[DisplayList],
     program: &[ComposeOp],
     image_draws: &[ImageDraw],
@@ -1136,7 +1178,7 @@ pub(crate) fn replay(
         0..program.len(),
         samples,
         seams,
-        ReplayTarget::Frame,
+        ReplayTarget::Frame { visible },
     );
 }
 
@@ -1144,12 +1186,15 @@ pub(crate) fn replay(
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ReplayTarget {
     /// The composed frame, in device px: [`SpaceSamples::device_cached`].
-    Frame,
+    /// `visible` is the part of it the target shows.
+    Frame { visible: Rect },
     /// A filter entry's bake target: [`SpaceSamples::bake_map`] for the
-    /// entry's space and its rect's origin.
+    /// entry's space and its rect's origin. The target is `size` device px
+    /// from that origin.
     Bake {
         entry: Option<u32>,
         origin: (f64, f64),
+        size: (u32, u32),
     },
 }
 
@@ -1162,8 +1207,17 @@ impl ReplayTarget {
         body: impl FnOnce(&dyn Fn(Option<u32>) -> Affine) -> R,
     ) -> R {
         match self {
-            Self::Frame => body(&samples.device_cached()),
-            Self::Bake { entry, origin } => body(&samples.bake_map(entry, origin)),
+            Self::Frame { .. } => body(&samples.device_cached()),
+            Self::Bake { entry, origin, .. } => body(&samples.bake_map(entry, origin)),
+        }
+    }
+
+    /// The rectangle of this target's own space that its pixels cover:
+    /// what a replay for it may leave out everything outside of.
+    fn visible(self) -> Rect {
+        match self {
+            Self::Frame { visible } => visible,
+            Self::Bake { size, .. } => Rect::new(0.0, 0.0, f64::from(size.0), f64::from(size.1)),
         }
     }
 
@@ -1173,7 +1227,7 @@ impl ReplayTarget {
     /// composed frame draws that entry's texture twice instead.
     fn within(self) -> Option<u32> {
         match self {
-            Self::Frame => None,
+            Self::Frame { .. } => None,
             Self::Bake { entry, .. } => entry,
         }
     }
@@ -1318,12 +1372,15 @@ pub(crate) fn replay_seams(
     target: ReplayTarget,
 ) {
     let within = target.within();
+    let visible = target.visible();
     let passes: SmallVec<[&SeamPass; 2]> = seams
         .iter()
         .filter(|pass| !space::rides(tables.spaces, within, pass.slot))
         .collect();
     if passes.is_empty() {
-        target.with_map(samples, |map| replay_ops(scene, tables, ops, map, None));
+        target.with_map(samples, |map| {
+            replay_ops(scene, tables, ops, map, visible, None);
+        });
         return;
     }
 
@@ -1344,7 +1401,7 @@ pub(crate) fn replay_seams(
         let mut cursor = ops.start.min(end);
         for (run, pass) in &runs {
             let after = next(run.last);
-            replay_ops(scene, tables, cursor..after, map, None);
+            replay_ops(scene, tables, cursor..after, map, visible, None);
             cursor = cursor.max(after);
             let offsets = samples.shifted_offsets(run.slot, run.shift);
             let shifted = SpaceSamples {
@@ -1362,6 +1419,7 @@ pub(crate) fn replay_seams(
                     tables,
                     walk[run.first].0..after,
                     shifted_map,
+                    visible,
                     Some(run.slot),
                 );
             });
@@ -1369,7 +1427,7 @@ pub(crate) fn replay_seams(
                 scene.pop_layer();
             }
         }
-        replay_ops(scene, tables, cursor..end, map, None);
+        replay_ops(scene, tables, cursor..end, map, visible, None);
     });
 }
 
@@ -1437,11 +1495,24 @@ pub(crate) struct Tables<'a> {
 /// push and pop is still encoded, each under its own space's map, so the
 /// layer stack stays balanced and the clips of the slot's ancestors still
 /// apply. With `None` every op draws.
+///
+/// What cannot reach `visible`, the rectangle of the target's own space its
+/// pixels cover, cut to the clips and layers open around it, is left out:
+/// a fragment's chunks whose bounds miss it ([`DisplayList::append_visible`]),
+/// an image, vector or baked filter draw whose box misses it, and a push
+/// whose own shape misses it together with everything up to its matching
+/// pop. The rasterizer turns every path it is given into strips wherever it
+/// lands, so this is what keeps content composed off the target — the
+/// encode window's headroom, a moved sticky or animated box — from costing
+/// a frame anything. A push whose matching pop lies past the range is
+/// encoded, and only what it holds is tested, so the layers the range
+/// leaves open are the ones a replay without culling leaves.
 pub(crate) fn replay_ops(
     scene: &mut DisplayList,
     tables: Tables<'_>,
     ops: Range<usize>,
     device_transform: &dyn Fn(Option<u32>) -> Affine,
+    visible: Rect,
     riding: Option<u32>,
 ) {
     let Tables {
@@ -1459,7 +1530,16 @@ pub(crate) fn replay_ops(
     let draws = |space: Option<u32>| riding.is_none_or(|slot| space::rides(spaces, space, slot));
     let end = ops.end.min(program.len());
     let mut index = ops.start.min(end);
+    // The part of the target the ops at the current depth can reach,
+    // innermost last: `visible` cut to every push open in this replay. A
+    // push this replay did not open (a seam copy's, a bake's enclosing
+    // ones) is not on it, which only means less is left out.
+    let mut reach: SmallVec<[Rect; 16]> = SmallVec::new();
+    reach.push(visible);
     while index < end {
+        let within = *reach
+            .last()
+            .expect("the target's own rectangle is never popped");
         match &program[index] {
             ComposeOp::Fragment {
                 index: fragment,
@@ -1467,52 +1547,46 @@ pub(crate) fn replay_ops(
             } => {
                 if draws(*space) {
                     let transform = device_transform(*space);
-                    scene.append(&fragments[*fragment as usize], Some(transform));
+                    scene.append_visible(&fragments[*fragment as usize], transform, within);
                 }
             }
-            ComposeOp::Push {
-                clip_only,
-                fill,
-                blend,
-                alpha,
+            op @ ComposeOp::Push {
                 transform,
                 shape,
                 space,
-                alpha_animation,
+                ..
             } => {
-                let alpha = alpha_animation
-                    .and_then(|slot| samples.get(slot).alpha)
-                    .unwrap_or(*alpha);
                 let transform = device_transform(*space) * *transform;
-                match (clip_only, shape) {
-                    (true, CapturedShape::Rect(rect)) => {
-                        scene.push_clip_layer(*fill, transform, rect);
-                    }
-                    (true, CapturedShape::Box(shape)) => {
-                        with_shape!(shape, |s| scene.push_clip_layer(*fill, transform, s));
-                    }
-                    (false, CapturedShape::Rect(rect)) => {
-                        scene.push_layer(*fill, *blend, alpha, transform, rect);
-                    }
-                    (false, CapturedShape::Box(shape)) => {
-                        with_shape!(shape, |s| scene
-                            .push_layer(*fill, *blend, alpha, transform, s));
-                    }
+                let bounds = shape.bounding_box();
+                if !may_reach(bounds, transform, within)
+                    && let Some(pop) = matching_pop(program, index, end)
+                {
+                    index = pop + 1;
+                    continue;
                 }
+                reach.push(cut_reach(within, bounds, transform));
+                encode_push(scene, op, transform, samples);
             }
             ComposeOp::Image { index: draw, space } => {
-                if draws(*space) {
-                    let transform = device_transform(*space);
+                let transform = device_transform(*space);
+                let image = &image_draws[*draw as usize];
+                if draws(*space) && image.area.reaches(transform * image.transform, within) {
                     encode_draw(scene, image_draws, images, *draw, transform);
                 }
             }
             ComposeOp::Vector { index: draw, space } => {
-                if draws(*space) {
-                    let transform = device_transform(*space);
+                let transform = device_transform(*space);
+                let vector = &vector_draws[*draw as usize];
+                if draws(*space) && vector.area.reaches(transform * vector.transform, within) {
                     encode_vector(scene, vector_draws, vectors, *draw, transform);
                 }
             }
-            ComposeOp::Pop => scene.pop_layer(),
+            ComposeOp::Pop => {
+                if reach.len() > 1 {
+                    reach.pop();
+                }
+                scene.pop_layer();
+            }
             ComposeOp::PushFilter { index: group } => {
                 let group_index = *group as usize;
                 let group = &filter_groups[group_index];
@@ -1520,7 +1594,9 @@ pub(crate) fn replay_ops(
                     // A seam copy that the group does not ride skips the
                     // texture too: it holds the group's content, none of
                     // which the copy draws.
-                    if draws(group.space) {
+                    if draws(group.space)
+                        && reaches_filtered(group, texture, device_transform, within)
+                    {
                         draw_filtered(scene, group, texture, spaces, device_transform);
                     }
                     // Straight to the matching `PopFilter`, which is a no-op.
@@ -1543,6 +1619,89 @@ pub(crate) fn replay_ops(
         }
         index += 1;
     }
+}
+
+/// Encodes push `op` under `transform`, its alpha the sampled opacity of
+/// the animation slot it names, if any.
+fn encode_push(
+    scene: &mut DisplayList,
+    op: &ComposeOp,
+    transform: Affine,
+    samples: &AnimationSamples,
+) {
+    let ComposeOp::Push {
+        clip_only,
+        fill,
+        blend,
+        alpha,
+        shape,
+        alpha_animation,
+        ..
+    } = op
+    else {
+        return;
+    };
+    let alpha = alpha_animation
+        .and_then(|slot| samples.get(slot).alpha)
+        .unwrap_or(*alpha);
+    if *clip_only {
+        with_captured!(shape, |s| scene.push_clip_layer(*fill, transform, s));
+    } else {
+        with_captured!(shape, |s| scene
+            .push_layer(*fill, *blend, alpha, transform, s));
+    }
+}
+
+/// The index of the `Pop` that closes the `Push` at `push`, if it lies
+/// before `end`. Filter brackets and backdrops open no layer, so only
+/// pushes and pops count.
+fn matching_pop(program: &[ComposeOp], push: usize, end: usize) -> Option<usize> {
+    let mut depth = 0_usize;
+    for (at, op) in program.iter().enumerate().take(end).skip(push + 1) {
+        match op {
+            ComposeOp::Push { .. } => depth += 1,
+            ComposeOp::Pop if depth == 0 => return Some(at),
+            ComposeOp::Pop => depth -= 1,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// `within` cut to the box of a push's shape `bounds` under `transform`:
+/// what the ops inside the push can reach. A box that is not finite cuts
+/// nothing.
+fn cut_reach(within: Rect, bounds: Rect, transform: Affine) -> Rect {
+    if !bounds.is_finite() || !transform.is_finite() {
+        return within;
+    }
+    let mapped = transform.transform_rect_bbox(bounds);
+    if mapped.is_finite() {
+        mapped.intersect(within)
+    } else {
+        within
+    }
+}
+
+/// Whether a baked group's texture, drawn where [`draw_filtered`] draws
+/// it, can reach `within`.
+fn reaches_filtered(
+    group: &FilterGroup,
+    texture: Texture,
+    device_transform: &dyn Fn(Option<u32>) -> Affine,
+    within: Rect,
+) -> bool {
+    let (width, height) = texture.size();
+    may_reach(
+        Rect::new(
+            group.rect.x0,
+            group.rect.y0,
+            group.rect.x0 + f64::from(width),
+            group.rect.y0 + f64::from(height),
+        ),
+        device_transform(group.space),
+        within,
+    )
 }
 
 /// Draws one baked `filter: blur()` group's texture in place of its ops.
@@ -1819,6 +1978,15 @@ mod tests {
         assert!(!animated.finish().filter_groups[0].inner_chains);
     }
 
+    /// A target no op misses: what replays that test what is drawn, not
+    /// what is culled, compose for.
+    const EVERYWHERE: Rect = Rect::new(
+        f64::NEG_INFINITY,
+        f64::NEG_INFINITY,
+        f64::INFINITY,
+        f64::INFINITY,
+    );
+
     /// One fragment drawing a teal square, so a replay has real content to
     /// append.
     fn fragment() -> DisplayList {
@@ -1842,6 +2010,7 @@ mod tests {
         let mut scene = DisplayList::default();
         replay(
             &mut scene,
+            EVERYWHERE,
             &fragments,
             program,
             &[],
@@ -1904,6 +2073,7 @@ mod tests {
         };
         replay(
             &mut scene,
+            EVERYWHERE,
             &fragments,
             program,
             &[],
@@ -1986,6 +2156,9 @@ mod tests {
     /// container (its scrollport clip) is inherited.
     #[test]
     fn a_seam_copy_pushes_its_own_riding_layers_again() {
+        // Clips the content reaches through, wherever the copies land.
+        let area = Rect::new(0.0, -400.0, 100.0, 400.0);
+        let push = |space| clip_in(space, area);
         let program = [
             push(None),
             push(SCROLLED),
@@ -2001,9 +2174,9 @@ mod tests {
             ComposeOp::Pop,
         ];
         let mut expected = DisplayList::default();
-        expected.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &Rect::ZERO);
+        expected.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &area);
         for y in [-150.0, 50.0] {
-            expected.push_clip_layer(Fill::NonZero, Affine::translate((0.0, y)), &Rect::ZERO);
+            expected.push_clip_layer(Fill::NonZero, Affine::translate((0.0, y)), &area);
             expected.append(&fragment(), Some(Affine::translate((0.0, y))));
             expected.pop_layer();
         }
@@ -2439,6 +2612,7 @@ mod tests {
         let mut scene = DisplayList::default();
         replay(
             &mut scene,
+            EVERYWHERE,
             &fragments,
             program,
             &[],
@@ -2674,5 +2848,294 @@ mod tests {
         expected.pop_layer();
         crate::paint::equivalence::assert_scenes_identical(&actual, &expected);
         assert_eq!(actual.open_layers(), 0);
+    }
+
+    /// A sealed fragment drawing one 8 px square at `(x, y)`.
+    fn square_at(x: f64, y: f64) -> DisplayList {
+        let mut scene = DisplayList::default();
+        scene.fill(
+            Fill::NonZero,
+            Affine::IDENTITY,
+            crate::peniko::Color::from_rgb8(0, 128, 128),
+            None,
+            &Rect::new(x, y, x + 8.0, y + 8.0),
+        );
+        scene.seal_bounds();
+        scene
+    }
+
+    /// A clip push of `rect` at the root.
+    fn clip(rect: Rect) -> ComposeOp {
+        clip_in(None, rect)
+    }
+
+    /// A clip push of `rect` in `space`.
+    fn clip_in(space: Option<u32>, rect: Rect) -> ComposeOp {
+        ComposeOp::Push {
+            clip_only: true,
+            fill: Fill::NonZero,
+            blend: BlendMode::new(Mix::Normal, Compose::SrcOver),
+            alpha: 1.0,
+            transform: Affine::IDENTITY,
+            shape: CapturedShape::Rect(rect),
+            space,
+            alpha_animation: None,
+        }
+    }
+
+    /// The 100 px target the culling replays compose for.
+    const TARGET: Rect = Rect::new(0.0, 0.0, 100.0, 100.0);
+
+    /// Replays `program` over `fragments` for [`TARGET`], with [`SPACES`]'
+    /// scroll slot (not circular) at `offset`.
+    fn replay_culled(
+        fragments: &[DisplayList],
+        program: &[ComposeOp],
+        groups: &[FilterGroup],
+        filtered: &[Option<Texture>],
+        offset: Vector2D<f32>,
+    ) -> DisplayList {
+        use crate::scroll::ScrollAxes;
+        let slots = [crate::visual::ScrollSlot {
+            circular: ScrollAxes::NONE,
+            ..circular_slot()
+        }];
+        let offset_of = move |_: &crate::visual::ScrollSlot| Some(offset);
+        let samples = SpaceSamples {
+            spaces: &SPACES,
+            slots: &slots,
+            animations: &crate::visual::AnimationSamples::default(),
+            stickies: &crate::visual::StickySamples::default(),
+            anchored: &crate::visual::anchored::AnchoredSamples::new(),
+            ratio: 1.0,
+            offset_of: &offset_of,
+        };
+        let mut scene = DisplayList::default();
+        replay(
+            &mut scene,
+            TARGET,
+            fragments,
+            program,
+            &[],
+            &[],
+            &[],
+            &[],
+            groups,
+            filtered,
+            &samples,
+            &samples.seam_passes_with(&[], None),
+        );
+        scene
+    }
+
+    /// A fragment whose ink lies off the target draws nothing; one partly
+    /// on it is drawn whole.
+    #[test]
+    fn a_fragment_off_the_target_draws_nothing_and_one_partly_on_it_draws() {
+        let program = [ComposeOp::Fragment {
+            index: 0,
+            space: None,
+        }];
+        let off = replay_culled(
+            &[square_at(200.0, 0.0)],
+            &program,
+            &[],
+            &[],
+            Vector2D::zero(),
+        );
+        assert!(off.is_empty(), "{off:?}");
+        let partly = replay_culled(
+            &[square_at(96.0, 96.0)],
+            &program,
+            &[],
+            &[],
+            Vector2D::zero(),
+        );
+        let mut expected = DisplayList::default();
+        expected.append(&square_at(96.0, 96.0), Some(Affine::IDENTITY));
+        assert_eq!(partly.compare(&expected), Ok(()));
+    }
+
+    /// The test reads the fragment's bound under its compose transform at
+    /// this instant: content below the scrollport draws once the container
+    /// scrolls it into view, and not before.
+    #[test]
+    fn a_fragment_is_culled_where_the_scroll_offset_puts_it() {
+        let program = [ComposeOp::Fragment {
+            index: 0,
+            space: SCROLLED,
+        }];
+        let fragments = [square_at(0.0, 150.0)];
+        let still = replay_culled(&fragments, &program, &[], &[], Vector2D::zero());
+        assert!(still.is_empty(), "{still:?}");
+        let scrolled = replay_culled(&fragments, &program, &[], &[], Vector2D::new(0.0, 100.0));
+        assert_eq!(scrolled.len(), 1);
+    }
+
+    /// A fragment the clip around it excludes is skipped; the clip itself
+    /// is still pushed and popped.
+    #[test]
+    fn a_fragment_its_clip_excludes_is_skipped() {
+        let program = [
+            clip(Rect::new(0.0, 0.0, 50.0, 50.0)),
+            ComposeOp::Fragment {
+                index: 0,
+                space: None,
+            },
+            ComposeOp::Pop,
+        ];
+        let scene = replay_culled(
+            &[square_at(60.0, 60.0)],
+            &program,
+            &[],
+            &[],
+            Vector2D::zero(),
+        );
+        assert_eq!(scene.len(), 2, "the clip's push and pop alone");
+        assert_eq!(scene.layers(), 1);
+        assert_eq!(scene.open_layers(), 0);
+    }
+
+    /// A push whose own shape misses the target is skipped with everything
+    /// up to its matching pop, nested pushes included, and what follows the
+    /// pop draws.
+    #[test]
+    fn a_push_off_the_target_is_skipped_up_to_its_matching_pop() {
+        let program = [
+            clip(Rect::new(200.0, 0.0, 300.0, 100.0)),
+            clip(Rect::new(0.0, 0.0, 300.0, 100.0)),
+            ComposeOp::Fragment {
+                index: 0,
+                space: None,
+            },
+            ComposeOp::Pop,
+            ComposeOp::Pop,
+            ComposeOp::Fragment {
+                index: 1,
+                space: None,
+            },
+        ];
+        let fragments = [square_at(210.0, 0.0), square_at(0.0, 0.0)];
+        let scene = replay_culled(&fragments, &program, &[], &[], Vector2D::zero());
+        assert_eq!(scene.len(), 1, "the second fragment alone");
+        assert_eq!(scene.layers(), 0);
+    }
+
+    /// A fragment's chunk holding a layer is left out whole, so the layer
+    /// stack balances, and the fragment's other chunks still draw.
+    #[test]
+    fn a_skipped_chunk_holding_a_layer_keeps_the_stack_balanced() {
+        let mut fragment = DisplayList::default();
+        fragment.push_layer(
+            Fill::NonZero,
+            BlendMode::default(),
+            0.5,
+            Affine::IDENTITY,
+            &Rect::new(0.0, 200.0, 50.0, 250.0),
+        );
+        for _ in 0..4 {
+            fragment.fill(
+                Fill::NonZero,
+                Affine::IDENTITY,
+                crate::peniko::Color::BLACK,
+                None,
+                &Rect::new(0.0, 200.0, 50.0, 250.0),
+            );
+        }
+        fragment.pop_layer();
+        fragment.fill(
+            Fill::NonZero,
+            Affine::IDENTITY,
+            crate::peniko::Color::BLACK,
+            None,
+            &Rect::new(0.0, 0.0, 8.0, 8.0),
+        );
+        fragment.seal_bounds();
+        let program = [
+            clip(Rect::new(0.0, 0.0, 100.0, 300.0)),
+            ComposeOp::Fragment {
+                index: 0,
+                space: None,
+            },
+            ComposeOp::Pop,
+        ];
+        let scene = replay_culled(&[fragment], &program, &[], &[], Vector2D::zero());
+        assert_eq!(scene.open_layers(), 0);
+        assert_eq!(
+            scene.layers(),
+            1,
+            "the clip alone; the fragment's layer was left out"
+        );
+        assert_eq!(scene.len(), 3, "push, the fill on the target, pop");
+    }
+
+    /// A push whose matching pop lies past the replayed range is encoded
+    /// even off the target, so the range leaves open what a replay without
+    /// culling leaves open; what it holds is still culled.
+    #[test]
+    fn a_push_whose_pop_lies_past_the_range_is_encoded() {
+        let program = [
+            clip(Rect::new(200.0, 0.0, 300.0, 100.0)),
+            ComposeOp::Fragment {
+                index: 0,
+                space: None,
+            },
+            ComposeOp::Pop,
+        ];
+        let fragments = [square_at(210.0, 0.0)];
+        let mut scene = DisplayList::default();
+        replay_ops(
+            &mut scene,
+            Tables {
+                fragments: &fragments,
+                program: &program,
+                image_draws: &[],
+                images: &[],
+                vector_draws: &[],
+                vectors: &[],
+                filter_groups: &[],
+                filtered: &[],
+                spaces: &SPACES,
+                samples: &crate::visual::AnimationSamples::default(),
+            },
+            0..2,
+            &|_| Affine::IDENTITY,
+            TARGET,
+            None,
+        );
+        assert_eq!(scene.open_layers(), 1);
+        assert_eq!(scene.len(), 1, "the push alone");
+    }
+
+    /// A baked group's texture covers the group's content grown by its blur
+    /// outset; it draws while that outset reaches the target, though the
+    /// content itself does not, and draws nothing once none of it does.
+    #[test]
+    fn a_baked_groups_outset_reaching_the_target_draws_it() {
+        let program = [
+            ComposeOp::PushFilter { index: 0 },
+            ComposeOp::Fragment {
+                index: 0,
+                space: None,
+            },
+            ComposeOp::PopFilter,
+        ];
+        // The content at 106, its 6 px outset from 100.
+        let fragments = [square_at(106.0, 0.0)];
+        let baked = |x: f64| {
+            let mut group = FilterGroup::new(2.0, Rect::new(x, 0.0, x + 20.0, 20.0), None);
+            // The ops between the bracket's pair, as `push_filter` and
+            // `pop_filter` record them.
+            group.ops = 1..2;
+            replay_culled(
+                &fragments,
+                &program,
+                &[group],
+                &[Some(texture(20, 20))],
+                Vector2D::zero(),
+            )
+        };
+        assert_eq!(baked(100.0).image_draws(), 1);
+        assert!(baked(140.0).is_empty());
     }
 }

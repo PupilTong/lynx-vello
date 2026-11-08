@@ -5,7 +5,10 @@
 //! [`replay`] walks the list's items once per render and calls the scene's
 //! drawing API for each, with the transform, fill rule, paint and paint
 //! transform the item carries. This is the CPU half of a render: every path
-//! is flattened and turned into strips here, so its cost is the content's.
+//! is flattened and turned into strips here, on the target or not, so its
+//! cost is the content's — which is why composition leaves out what cannot
+//! reach the target before the list gets here
+//! ([`crate::paint::compose::replay_ops`]).
 //! A fill of a rectangle takes `vello_gpu`'s rectangle fast path, which
 //! under an axis-aligned transform and clip records no strips at all. A
 //! plain clip is intersected into the strips of what it holds with no layer

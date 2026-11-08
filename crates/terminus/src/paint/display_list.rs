@@ -24,16 +24,28 @@
 //! written against: shapes under a transform, a layer stack of clips and
 //! group layers, and glyph runs built by a [`DrawGlyphs`] builder. Every
 //! clip and layer pushed is popped by the matching [`DisplayList::pop_layer`].
+//!
+//! A list the compose program retains as a fragment is sealed
+//! ([`DisplayList::seal_bounds`]): its items are cut into chunks of a few
+//! items each, every cut where no clip or layer is open, and each chunk
+//! keeps a bound on where its items can put ink in the list's space. The
+//! rasterizer turns every path it is given into strips, whether or not it
+//! lands on the target, so the per-frame assembly appends only the chunks
+//! whose bound, under the fragment's compose transform, reaches what the
+//! target shows ([`DisplayList::append_visible`]). A chunk opens and closes
+//! its own clips and layers, so leaving one out leaves the layer stack
+//! balanced.
 
 use std::ops::Range;
 use std::sync::Arc;
 
 /// One positioned glyph of a run.
 pub use glifo::Glyph;
+use smallvec::SmallVec;
 
-use crate::kurbo::{Affine, PathEl, Rect, RoundedRect, RoundedRectRadii, Stroke};
+use crate::kurbo::{Affine, Join, PathEl, Rect, RoundedRect, RoundedRectRadii, Stroke};
 use crate::peniko::{
-    BlendMode, Brush, BrushRef, Color, Fill, FontData, Gradient, ImageBrushRef, ImageData,
+    BlendMode, Brush, BrushRef, Color, Compose, Fill, FontData, Gradient, ImageBrushRef, ImageData,
     ImageSampler, StyleRef,
 };
 
@@ -414,7 +426,145 @@ pub struct DisplayList {
     /// no clip or layer around it, so that it blends with what is under the
     /// whole list.
     blends_at_root: bool,
+    /// The chunks [`Self::seal_bounds`] cut the items into, in order; empty
+    /// for a list not sealed since it last changed.
+    chunks: Vec<Chunk>,
+    /// The union of the chunks' bounds: [`NO_INK`] when they put none.
+    ink: Rect,
 }
+
+/// A run of items that opens and closes its own clips and layers, and a
+/// bound on where its items can put ink, in the list's space.
+#[derive(Clone, Copy, Debug)]
+struct Chunk {
+    /// The index one past the chunk's last item.
+    end: u32,
+    /// [`NO_INK`] when the chunk puts none; not finite when no finite bound
+    /// was established, which never culls.
+    bounds: Rect,
+}
+
+/// How many items a chunk gathers before it is cut at the next point where
+/// no clip or layer is open. Each chunk costs one rectangle test per frame;
+/// a few items each keeps that small beside what one item costs to
+/// rasterize, while a chunk straddling the target's edge drags in little
+/// that is off the target.
+const CHUNK_ITEMS: usize = 4;
+
+/// The bound of a run of items that puts no ink: empty under every union,
+/// and outside every rectangle.
+const NO_INK: Rect = Rect::new(
+    f64::INFINITY,
+    f64::INFINITY,
+    f64::NEG_INFINITY,
+    f64::NEG_INFINITY,
+);
+
+/// No finite bound: whatever holds it is never culled.
+const ANYWHERE: Rect = Rect::new(
+    f64::NEG_INFINITY,
+    f64::NEG_INFINITY,
+    f64::INFINITY,
+    f64::INFINITY,
+);
+
+/// `acc` grown to cover `ink`. Ink with a coordinate that is not a number
+/// has no bound, so it makes `acc` [`ANYWHERE`]; ink of no area adds
+/// nothing, since it covers no pixel.
+fn grow(acc: &mut Rect, ink: Rect) {
+    if ink.x0.is_nan() || ink.y0.is_nan() || ink.x1.is_nan() || ink.y1.is_nan() {
+        *acc = ANYWHERE;
+    } else if ink.x1 > ink.x0 && ink.y1 > ink.y0 {
+        *acc = acc.union(ink);
+    }
+}
+
+/// `ink` cut to `clip`, the bound of the clips open around it; `None` is
+/// no clip. Either side not being a number leaves the other: a clip of no
+/// bound cuts nothing, and ink of no bound fills the clip.
+fn cut(ink: Rect, clip: Option<Rect>) -> Rect {
+    match clip {
+        Some(clip) if ink.x0.is_nan() || ink.y0.is_nan() || ink.x1.is_nan() || ink.y1.is_nan() => {
+            clip
+        }
+        Some(clip) => ink.intersect(clip),
+        None => ink,
+    }
+}
+
+/// Whether ink bounded by `bounds` in some space, mapped by `transform`,
+/// can reach `visible`. Only a proof of the opposite answers `false`: a
+/// bound or map that is not finite, or a comparison with something that is
+/// not a number, answers `true`. Edges that touch count as reaching.
+pub(crate) fn may_reach(bounds: Rect, transform: Affine, visible: Rect) -> bool {
+    if bounds.x0 > bounds.x1 || bounds.y0 > bounds.y1 {
+        // [`NO_INK`]: nothing to reach with.
+        return false;
+    }
+    if !bounds.is_finite() || !transform.is_finite() {
+        return true;
+    }
+    let mapped = transform.transform_rect_bbox(bounds);
+    !(mapped.x1 < visible.x0
+        || mapped.x0 > visible.x1
+        || mapped.y1 < visible.y0
+        || mapped.y0 > visible.y1)
+}
+
+/// Records a chunk ending before item `end` with `bounds`, and grows the
+/// list's `ink` by it.
+fn close_chunk(chunks: &mut Vec<Chunk>, ink: &mut Rect, end: usize, bounds: Rect) {
+    chunks.push(Chunk {
+        end: index(end),
+        bounds,
+    });
+    if bounds.x0 <= bounds.x1 && bounds.y0 <= bounds.y1 {
+        *ink = if bounds.is_finite() {
+            ink.union(bounds)
+        } else {
+            ANYWHERE
+        };
+    }
+}
+
+/// How far a stroke of `stroke` can put ink past its path's bounding box,
+/// in the path's space: half the width, as far again as the miter limit
+/// lets a miter join reach, and a square cap's half diagonal.
+fn stroke_reach(stroke: &Stroke) -> f64 {
+    let half = stroke.width.abs() / 2.0;
+    let join = if stroke.join == Join::Miter {
+        stroke.miter_limit.max(1.0)
+    } else {
+        1.0
+    };
+    half * join.max(std::f64::consts::SQRT_2)
+}
+
+/// Whether a layer composited by `blend` changes what is under it where
+/// its content put no ink: a compose whose destination factor is not one
+/// for a transparent source. Such a layer puts ink over its whole region.
+fn clears_under_empty_source(blend: BlendMode) -> bool {
+    matches!(
+        blend.compose,
+        Compose::Clear
+            | Compose::Copy
+            | Compose::SrcIn
+            | Compose::DestIn
+            | Compose::SrcOut
+            | Compose::DestAtop
+    )
+}
+
+/// How far, in ems, the outline of a glyph can reach from its origin
+/// beyond the face's own bounding box (`head`): a variable instance's
+/// outlines may leave the default instance's box, and a face's box may be
+/// wrong. Glyph runs are a small share of what a chunk straddling the
+/// target's edge drags in, so the margin is generous.
+const GLYPH_MARGIN_EM: f64 = 1.0;
+
+/// The box, in ems with y down, every glyph's ink is assumed to reach at
+/// least, whatever the face's own box says.
+const GLYPH_FLOOR_EM: Rect = Rect::new(-1.0, -2.0, 2.0, 1.0);
 
 impl std::fmt::Debug for DisplayList {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -457,6 +607,8 @@ impl DisplayList {
         self.coords.clear();
         self.open.clear();
         self.blends_at_root = false;
+        self.chunks.clear();
+        self.ink = NO_INK;
     }
 
     /// Whether the list records nothing.
@@ -811,12 +963,43 @@ impl DisplayList {
     /// Appends `other`, every item's transform left-multiplied by
     /// `transform`.
     pub fn append(&mut self, other: &Self, transform: Option<Affine>) {
+        self.append_chunks(other, transform, None);
+    }
+
+    /// Appends the chunks of `other` whose ink, mapped by `transform`, can
+    /// reach `visible` in this list's space, every item's transform
+    /// left-multiplied by `transform`. A list not sealed since it last
+    /// changed is appended whole.
+    ///
+    /// What is left out is whole chunks, each of which closes every clip
+    /// and layer it opens, so the layer stack balances as a whole append's
+    /// does; and a chunk's bound covers everything its items can change on
+    /// the target, a layer that clears what is under it included, so what
+    /// is left out leaves no pixel of `visible` different.
+    pub(crate) fn append_visible(&mut self, other: &Self, transform: Affine, visible: Rect) {
+        if other.chunks.is_empty() {
+            self.append(other, Some(transform));
+            return;
+        }
+        debug_assert_eq!(
+            other.chunks.last().map(|chunk| chunk.end as usize),
+            Some(other.items.len()),
+            "a sealed list records nothing after its seal",
+        );
+        if !may_reach(other.ink, transform, visible) {
+            return;
+        }
+        self.append_chunks(other, Some(transform), Some(visible));
+    }
+
+    /// [`Self::append`], leaving out the chunks of `other` that cannot reach
+    /// `visible` when it is set and `other` is sealed.
+    fn append_chunks(&mut self, other: &Self, transform: Option<Affine>, visible: Option<Rect>) {
         let outer = |inner: Affine| transform.map_or(inner, |outer| outer * inner);
         let transforms = index(self.transforms.len());
         let paint_transforms = index(self.paint_transforms.len());
         let radii = index(self.radii.len());
         let paths = index(self.paths.len());
-        let runs = index(self.runs.len());
         let glyphs = index(self.glyphs.len());
         let coords = index(self.coords.len());
         // Each distinct item transform is mapped once; paint transforms are
@@ -855,47 +1038,263 @@ impl DisplayList {
             shape: shape(draw.shape),
             ..draw.clone()
         };
-        self.runs.extend(other.runs.iter().map(|run| GlyphRun {
-            transform: outer(run.transform),
-            glyphs: run.glyphs.start + glyphs..run.glyphs.end + glyphs,
-            coords: run.coords.start + coords..run.coords.end + coords,
-            ..run.clone()
-        }));
+        // One pseudo-chunk of every item when nothing is culled.
+        let whole = [Chunk {
+            end: index(other.items.len()),
+            bounds: ANYWHERE,
+        }];
+        let (chunks, cull) = match (visible, transform) {
+            (Some(visible), Some(transform)) if !other.chunks.is_empty() => {
+                (other.chunks.as_slice(), Some((transform, visible)))
+            }
+            _ => (whole.as_slice(), None),
+        };
         self.items.reserve(other.items.len());
-        for item in &other.items {
-            match item {
-                Item::Fill(fill) => self.items.push(Item::Fill(draw(fill))),
-                Item::Stroke(stroke, style) => self
-                    .items
-                    .push(Item::Stroke(draw(stroke), Arc::clone(style))),
-                // Isolation is derived again as the items land: every blend
-                // inside the clip is among them, and a clip copied already
-                // marked would stop the marking short of this list's own
-                // clips open around it.
-                Item::PushClip { region: clip, .. } => self.open_layer(Item::PushClip {
-                    region: region(*clip),
-                    isolated: false,
-                }),
-                Item::PushLayer {
-                    region: layer,
-                    blend,
-                    alpha,
-                } => self.open_layer(Item::PushLayer {
-                    region: region(*layer),
-                    blend: *blend,
-                    alpha: *alpha,
-                }),
-                Item::Pop => self.pop_layer(),
-                Item::Glyphs(run) => self.items.push(Item::Glyphs(run + runs)),
-                Item::BlurredRoundedRect(blur) => {
-                    self.items
-                        .push(Item::BlurredRoundedRect(BlurredRoundedRect {
-                            transform: blur.transform + transforms,
-                            ..*blur
-                        }));
+        let mut start = 0;
+        for chunk in chunks {
+            let items = &other.items[start..chunk.end as usize];
+            start = chunk.end as usize;
+            if cull.is_some_and(|(transform, visible)| !may_reach(chunk.bounds, transform, visible))
+            {
+                continue;
+            }
+            for item in items {
+                match item {
+                    Item::Fill(fill) => self.items.push(Item::Fill(draw(fill))),
+                    Item::Stroke(stroke, style) => self
+                        .items
+                        .push(Item::Stroke(draw(stroke), Arc::clone(style))),
+                    // Isolation is derived again as the items land: every
+                    // blend inside the clip is among them, and a clip copied
+                    // already marked would stop the marking short of this
+                    // list's own clips open around it.
+                    Item::PushClip { region: clip, .. } => self.open_layer(Item::PushClip {
+                        region: region(*clip),
+                        isolated: false,
+                    }),
+                    Item::PushLayer {
+                        region: layer,
+                        blend,
+                        alpha,
+                    } => self.open_layer(Item::PushLayer {
+                        region: region(*layer),
+                        blend: *blend,
+                        alpha: *alpha,
+                    }),
+                    Item::Pop => self.pop_layer(),
+                    // A run is copied as its item lands: runs are recorded
+                    // in the order of the items naming them, one item each,
+                    // so the copies keep that order.
+                    Item::Glyphs(run) => {
+                        let run = &other.runs[*run as usize];
+                        self.items.push(Item::Glyphs(index(self.runs.len())));
+                        self.runs.push(GlyphRun {
+                            transform: outer(run.transform),
+                            glyphs: run.glyphs.start + glyphs..run.glyphs.end + glyphs,
+                            coords: run.coords.start + coords..run.coords.end + coords,
+                            ..run.clone()
+                        });
+                    }
+                    Item::BlurredRoundedRect(blur) => {
+                        self.items
+                            .push(Item::BlurredRoundedRect(BlurredRoundedRect {
+                                transform: blur.transform + transforms,
+                                ..*blur
+                            }));
+                    }
                 }
             }
         }
+    }
+
+    /// Cuts the items into chunks and bounds each one's ink (see the
+    /// [module documentation](self)). What is recorded afterwards is not
+    /// bounded: a sealed list is a finished one.
+    pub(crate) fn seal_bounds(&mut self) {
+        let mut chunks = std::mem::take(&mut self.chunks);
+        chunks.clear();
+        let mut ink = NO_INK;
+        // The bound of the clips and layers open at each item, innermost
+        // last, each already cut to the ones around it.
+        let mut clips: SmallVec<[Rect; 8]> = SmallVec::new();
+        let mut chunk = NO_INK;
+        let mut gathered = 0;
+        // The last face a run was bounded with: runs of one face follow
+        // each other, and its `head` table is read once for them.
+        let mut face: Option<(u64, u32, Rect, f64)> = None;
+        for (at, item) in self.items.iter().enumerate() {
+            let clip = clips.last().copied();
+            match item {
+                Item::Fill(draw) => {
+                    let bounds = self.shape_bounds(draw.shape);
+                    let ink = self.transform(draw.transform).transform_rect_bbox(bounds);
+                    grow(&mut chunk, cut(ink, clip));
+                }
+                Item::Stroke(draw, stroke) => {
+                    let reach = stroke_reach(stroke);
+                    let bounds = self.shape_bounds(draw.shape).inflate(reach, reach);
+                    let ink = self.transform(draw.transform).transform_rect_bbox(bounds);
+                    grow(&mut chunk, cut(ink, clip));
+                }
+                Item::PushClip { region, .. } => {
+                    let bounds = self
+                        .transform(region.transform)
+                        .transform_rect_bbox(self.shape_bounds(region.shape));
+                    clips.push(cut(bounds, clip));
+                }
+                Item::PushLayer { region, blend, .. } => {
+                    let bounds = cut(
+                        self.transform(region.transform)
+                            .transform_rect_bbox(self.shape_bounds(region.shape)),
+                        clip,
+                    );
+                    if clears_under_empty_source(*blend) {
+                        grow(&mut chunk, bounds);
+                    }
+                    clips.push(bounds);
+                }
+                Item::Pop => {
+                    clips.pop();
+                }
+                Item::Glyphs(run) => {
+                    let run = &self.runs[*run as usize];
+                    let id = run.font.data.id();
+                    let (em, upem) = match face {
+                        Some((face_id, face_index, em, upem))
+                            if face_id == id && face_index == run.font.index =>
+                        {
+                            (em, upem)
+                        }
+                        _ => {
+                            let (em, upem) = glyph_ink_em(run.font.data.data(), run.font.index);
+                            face = Some((id, run.font.index, em, upem));
+                            (em, upem)
+                        }
+                    };
+                    grow(&mut chunk, cut(self.run_bounds(run, em, upem), clip));
+                }
+                Item::BlurredRoundedRect(blur) => {
+                    // The rasterizer paints 2.5σ around the rectangle.
+                    let reach = 3.0 * f64::from(blur.std_dev.abs()) + 1.0;
+                    let ink = self
+                        .transform(blur.transform)
+                        .transform_rect_bbox(blur.rect.abs().inflate(reach, reach));
+                    grow(&mut chunk, cut(ink, clip));
+                }
+            }
+            gathered += 1;
+            if clips.is_empty() && gathered >= CHUNK_ITEMS {
+                close_chunk(&mut chunks, &mut ink, at + 1, chunk);
+                chunk = NO_INK;
+                gathered = 0;
+            }
+        }
+        if gathered > 0 {
+            close_chunk(&mut chunks, &mut ink, self.items.len(), chunk);
+        }
+        self.chunks = chunks;
+        self.ink = ink;
+    }
+
+    /// The bound of a sealed list's ink in its own space, `None` when the
+    /// list is not sealed: what [`Self::append_visible`] tests first.
+    #[cfg(test)]
+    pub(crate) fn ink_bounds(&self) -> Option<Rect> {
+        (!self.chunks.is_empty()).then_some(self.ink)
+    }
+
+    /// How many chunks [`Self::seal_bounds`] cut the list into.
+    #[cfg(test)]
+    pub(crate) fn chunks(&self) -> usize {
+        self.chunks.len()
+    }
+
+    /// The bounding box of `shape` in its own space.
+    fn shape_bounds(&self, shape: Shape) -> Rect {
+        match shape {
+            Shape::Rect(rect) | Shape::RoundedRect { rect, .. } => rect.abs(),
+            // A curve stays inside the hull of its control points, so their
+            // box bounds the path.
+            Shape::Path { start, end } => {
+                let mut bounds = NO_INK;
+                let mut add = |point: crate::kurbo::Point| {
+                    bounds = Rect::new(
+                        bounds.x0.min(point.x),
+                        bounds.y0.min(point.y),
+                        bounds.x1.max(point.x),
+                        bounds.y1.max(point.y),
+                    );
+                };
+                for element in self.path(start, end) {
+                    match *element {
+                        PathEl::MoveTo(p) | PathEl::LineTo(p) => add(p),
+                        PathEl::QuadTo(a, b) => {
+                            add(a);
+                            add(b);
+                        }
+                        PathEl::CurveTo(a, b, c) => {
+                            add(a);
+                            add(b);
+                            add(c);
+                        }
+                        PathEl::ClosePath => {}
+                    }
+                }
+                bounds
+            }
+        }
+    }
+
+    /// A bound on the ink of `run` in the list's space, given its face's
+    /// glyph box `em` ([`glyph_ink_em`]) and units per em.
+    fn run_bounds(&self, run: &GlyphRun, em: Rect, upem: f64) -> Rect {
+        let glyphs = self.glyphs_of(run);
+        let Some(first) = glyphs.first() else {
+            return NO_INK;
+        };
+        let origins = glyphs.iter().fold(
+            Rect::new(
+                f64::from(first.x),
+                f64::from(first.y),
+                f64::from(first.x),
+                f64::from(first.y),
+            ),
+            |origins, glyph| {
+                let (x, y) = (f64::from(glyph.x), f64::from(glyph.y));
+                Rect::new(
+                    origins.x0.min(x),
+                    origins.y0.min(y),
+                    origins.x1.max(x),
+                    origins.y1.max(y),
+                )
+            },
+        );
+        let size = f64::from(run.font_size.abs());
+        // Synthetic bold widens each side by its amount, which an unhinted
+        // fill stores in font units and every other run in font-size ones.
+        let bold = run.embolden.x.abs().max(run.embolden.y.abs());
+        let bold = if run.style == GlyphStyle::Fill && !run.hint {
+            bold * size / upem
+        } else {
+            bold
+        };
+        let stroke = match &run.style {
+            GlyphStyle::Fill => 0.0,
+            GlyphStyle::Stroke(stroke) => stroke_reach(stroke),
+        };
+        // A pixel more for hinting, which moves outlines by less than one.
+        let widen = bold + stroke + 1.0;
+        let ink =
+            Rect::new(em.x0 * size, em.y0 * size, em.x1 * size, em.y1 * size).inflate(widen, widen);
+        let ink = run
+            .glyph_transform
+            .map_or(ink, |glyph| glyph.transform_rect_bbox(ink));
+        run.transform.transform_rect_bbox(Rect::new(
+            origins.x0 + ink.x0,
+            origins.y0 + ink.y0,
+            origins.x1 + ink.x1,
+            origins.y1 + ink.y1,
+        ))
     }
 
     #[cfg(test)]
@@ -1118,32 +1517,64 @@ impl DrawGlyphs<'_> {
     }
 }
 
-/// The `unitsPerEm` of face `index` in `font`'s `head` table, or 1000 for a
-/// font that has none.
-pub(crate) fn units_per_em(font: &[u8], index: u32) -> f64 {
-    let u16_at = |at: usize| {
-        font.get(at..at + 2)
-            .map(|b| u16::from_be_bytes([b[0], b[1]]))
-    };
+/// The big-endian `u16` at `at` in `font`.
+fn u16_at(font: &[u8], at: usize) -> Option<u16> {
+    font.get(at..at + 2)
+        .map(|b| u16::from_be_bytes([b[0], b[1]]))
+}
+
+/// The offset of face `index`'s `head` table in `font`, a font file or a
+/// collection.
+fn head_table(font: &[u8], index: u32) -> Option<usize> {
     let u32_at = |at: usize| {
         font.get(at..at + 4)
             .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
     };
     let face = if font.get(..4) == Some(b"ttcf") {
-        u32_at(12 + 4 * index as usize).map(|offset| offset as usize)
+        u32_at(12 + 4 * index as usize)? as usize
     } else {
-        Some(0)
+        0
     };
-    face.and_then(|face| {
-        let tables = usize::from(u16_at(face + 4)?);
-        (0..tables).find_map(|table| {
-            let record = face + 12 + 16 * table;
-            (font.get(record..record + 4)? == b"head")
-                .then(|| u16_at(u32_at(record + 8)? as usize + 18))
-                .flatten()
-        })
+    let tables = usize::from(u16_at(font, face + 4)?);
+    (0..tables).find_map(|table| {
+        let record = face + 12 + 16 * table;
+        (font.get(record..record + 4)? == b"head")
+            .then(|| u32_at(record + 8).map(|offset| offset as usize))
+            .flatten()
     })
-    .map_or(1000.0, f64::from)
+}
+
+/// The `unitsPerEm` of face `index` in `font`'s `head` table, or 1000 for a
+/// font that has none.
+pub(crate) fn units_per_em(font: &[u8], index: u32) -> f64 {
+    head_table(font, index)
+        .and_then(|head| u16_at(font, head + 18))
+        .map_or(1000.0, f64::from)
+}
+
+/// The box in ems, y down, that the outline of every glyph of face `index`
+/// in `font` is assumed to stay inside, measured from the glyph's origin:
+/// the face's `head` bounding box, which OpenType defines as the union of
+/// every glyph's, grown to at least [`GLYPH_FLOOR_EM`] and then by
+/// [`GLYPH_MARGIN_EM`] on every side. Its second value is the face's units
+/// per em.
+fn glyph_ink_em(font: &[u8], index: u32) -> (Rect, f64) {
+    let head = head_table(font, index);
+    let upem = head
+        .and_then(|head| u16_at(font, head + 18))
+        .filter(|&upem| upem > 0)
+        .map_or(1000.0, f64::from);
+    let signed = |at: usize| u16_at(font, at).map(|bits| f64::from(bits.cast_signed()));
+    let face = head.and_then(|head| {
+        Some(Rect::new(
+            signed(head + 36)? / upem,
+            -signed(head + 42)? / upem,
+            signed(head + 40)? / upem,
+            -signed(head + 38)? / upem,
+        ))
+    });
+    let floor = face.map_or(GLYPH_FLOOR_EM, |face| face.abs().union(GLYPH_FLOOR_EM));
+    (floor.inflate(GLYPH_MARGIN_EM, GLYPH_MARGIN_EM), upem)
 }
 
 #[cfg(test)]
@@ -1345,6 +1776,297 @@ mod tests {
             paints,
             [Paint::Solid(Color::WHITE), Paint::Solid(Color::TRANSPARENT)]
         );
+    }
+
+    /// The sealed bound of `list`'s ink.
+    fn sealed(mut list: DisplayList) -> Rect {
+        list.seal_bounds();
+        list.ink_bounds()
+            .expect("a sealed list with items has a bound")
+    }
+
+    /// Whether `outer` holds all of `inner`.
+    fn holds(outer: Rect, inner: Rect) -> bool {
+        outer.x0 <= inner.x0 && outer.y0 <= inner.y0 && outer.x1 >= inner.x1 && outer.y1 >= inner.y1
+    }
+
+    /// A stroke's bound covers half its width past the path on every side,
+    /// and its miter joins as far as the miter limit lets them reach.
+    #[test]
+    fn a_strokes_bound_covers_its_width_and_its_joins() {
+        let mut list = DisplayList::new();
+        let stroke = Stroke::new(4.0)
+            .with_join(Join::Miter)
+            .with_miter_limit(4.0);
+        list.stroke(
+            &stroke,
+            Affine::IDENTITY,
+            Color::BLACK,
+            None,
+            &Line::new((0.0, 0.0), (10.0, 0.0)),
+        );
+        let bounds = sealed(list);
+        // Half the width, as far again as a miter of limit 4 reaches.
+        assert!(
+            holds(bounds, Rect::new(-8.0, -8.0, 18.0, 8.0)),
+            "{bounds:?}"
+        );
+    }
+
+    /// A box shadow's bound covers the 2.5σ around its rectangle the
+    /// rasterizer paints, under the shadow's transform.
+    #[test]
+    fn a_shadows_bound_covers_its_blur() {
+        let mut list = DisplayList::new();
+        list.draw_blurred_rounded_rect(
+            Affine::translate((100.0, 0.0)),
+            Rect::new(0.0, 0.0, 10.0, 10.0),
+            Color::BLACK,
+            2.0,
+            4.0,
+        );
+        let bounds = sealed(list);
+        assert!(
+            holds(bounds, Rect::new(90.0, -10.0, 120.0, 20.0)),
+            "{bounds:?}"
+        );
+    }
+
+    /// A transformed draw is bounded by its mapped box, and a clip around
+    /// it cuts the bound.
+    #[test]
+    fn a_transformed_draw_is_bounded_by_its_mapped_box_cut_to_its_clip() {
+        let mut list = DisplayList::new();
+        let rotated = Affine::translate((50.0, 50.0)) * Affine::rotate(std::f64::consts::FRAC_PI_4);
+        list.fill(
+            Fill::NonZero,
+            rotated,
+            Color::BLACK,
+            None,
+            &Rect::new(-10.0, -10.0, 10.0, 10.0),
+        );
+        let bounds = sealed(list);
+        let half = 10.0 * std::f64::consts::SQRT_2;
+        let mapped = Rect::new(50.0 - half, 50.0 - half, 50.0 + half, 50.0 + half);
+        assert!(holds(bounds, mapped), "{bounds:?}");
+        assert!(holds(mapped.inflate(1e-9, 1e-9), bounds), "{bounds:?}");
+
+        let mut clipped = DisplayList::new();
+        clipped.push_clip_layer(
+            Fill::NonZero,
+            Affine::IDENTITY,
+            &Rect::new(0.0, 0.0, 50.0, 50.0),
+        );
+        clipped.fill(
+            Fill::NonZero,
+            rotated,
+            Color::BLACK,
+            None,
+            &Rect::new(-10.0, -10.0, 10.0, 10.0),
+        );
+        clipped.pop_layer();
+        let bounds = sealed(clipped);
+        let expected = Rect::new(50.0 - half, 50.0 - half, 50.0, 50.0);
+        assert!(
+            holds(bounds, expected.inflate(-1e-9, -1e-9))
+                && holds(expected.inflate(1e-9, 1e-9), bounds),
+            "{bounds:?}"
+        );
+    }
+
+    /// A layer that clears what is under it where its content is empty
+    /// (here `copy`) puts ink over its whole region; one composited
+    /// source-over puts only its content's.
+    #[test]
+    fn a_layer_that_clears_under_it_is_bounded_by_its_region() {
+        let region = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let content = Rect::new(10.0, 10.0, 20.0, 20.0);
+        let layer = |blend: BlendMode| {
+            let mut list = DisplayList::new();
+            list.push_layer(Fill::NonZero, blend, 1.0, Affine::IDENTITY, &region);
+            list.fill(
+                Fill::NonZero,
+                Affine::IDENTITY,
+                Color::BLACK,
+                None,
+                &content,
+            );
+            list.pop_layer();
+            sealed(list)
+        };
+        assert_eq!(layer(BlendMode::new(Mix::Normal, Compose::Copy)), region);
+        assert_eq!(
+            layer(BlendMode::new(Mix::Multiply, Compose::SrcOver)),
+            content
+        );
+    }
+
+    /// A glyph run is bounded by its glyphs' origins grown by an em box
+    /// under the run's transform, so its ink inside an em of its origins
+    /// is never outside the bound.
+    #[test]
+    fn a_glyph_runs_bound_covers_an_em_around_its_glyphs() {
+        // No `head` table: the floor box alone.
+        let font = FontData::new(crate::peniko::Blob::new(Arc::new([0_u8; 4])), 0);
+        let mut list = DisplayList::new();
+        list.draw_glyphs(&font)
+            .font_size(10.0)
+            .transform(Affine::translate((0.0, 200.0)))
+            .draw(
+                Fill::NonZero,
+                [
+                    Glyph {
+                        id: 1,
+                        x: 0.0,
+                        y: 0.0,
+                    },
+                    Glyph {
+                        id: 2,
+                        x: 100.0,
+                        y: 0.0,
+                    },
+                ]
+                .into_iter(),
+            );
+        let bounds = sealed(list);
+        assert!(
+            holds(bounds, Rect::new(-10.0, 190.0, 110.0, 210.0)),
+            "{bounds:?}"
+        );
+    }
+
+    /// The face's own `head` box grows a run's bound past the floor box.
+    #[test]
+    fn a_faces_box_grows_its_runs_bound() {
+        // `head` at 28: unitsPerEm 1000, a box 5 ems wide and 4 tall above
+        // the baseline.
+        let mut font = vec![0_u8; 28 + 54];
+        font[4..6].copy_from_slice(&1_u16.to_be_bytes());
+        font[12..16].copy_from_slice(b"head");
+        font[20..24].copy_from_slice(&28_u32.to_be_bytes());
+        font[28 + 18..28 + 20].copy_from_slice(&1000_u16.to_be_bytes());
+        font[28 + 40..28 + 42].copy_from_slice(&5000_i16.to_be_bytes());
+        font[28 + 42..28 + 44].copy_from_slice(&4000_i16.to_be_bytes());
+        let (em, upem) = glyph_ink_em(&font, 0);
+        assert!((upem - 1000.0).abs() < f64::EPSILON);
+        assert!(holds(em, Rect::new(0.0, -4.0, 5.0, 0.0)), "{em:?}");
+    }
+
+    /// Chunks are cut every few items, never inside an open clip or layer.
+    #[test]
+    fn chunks_are_cut_only_where_no_layer_is_open() {
+        let mut list = DisplayList::new();
+        for _ in 0..5 {
+            list.fill(Fill::NonZero, Affine::IDENTITY, Color::BLACK, None, &rect());
+        }
+        list.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &rect());
+        for _ in 0..6 {
+            list.fill(Fill::NonZero, Affine::IDENTITY, Color::BLACK, None, &rect());
+        }
+        list.pop_layer();
+        list.fill(Fill::NonZero, Affine::IDENTITY, Color::BLACK, None, &rect());
+        list.seal_bounds();
+        // Four fills; one fill and the whole clip; the last fill.
+        assert_eq!(list.chunks(), 3);
+        let ends: Vec<u32> = list.chunks.iter().map(|chunk| chunk.end).collect();
+        assert_eq!(ends, [4, 13, 14]);
+    }
+
+    /// A culled append leaves out the chunks that cannot reach the visible
+    /// rectangle and keeps every other, with their glyph runs, and the
+    /// layer stack it leaves is balanced.
+    #[test]
+    fn a_culled_append_keeps_the_chunks_that_reach_and_balances() {
+        let font = FontData::new(crate::peniko::Blob::new(Arc::new([0_u8; 4])), 0);
+        let glyph = |list: &mut DisplayList, x: f32| {
+            list.draw_glyphs(&font)
+                .draw(Fill::NonZero, [Glyph { id: 1, x, y: 0.0 }].into_iter());
+        };
+        let mut fragment = DisplayList::new();
+        // Off the target, a layer and a run among them.
+        fragment.push_layer(
+            Fill::NonZero,
+            BlendMode::default(),
+            0.5,
+            Affine::IDENTITY,
+            &Rect::new(500.0, 0.0, 600.0, 10.0),
+        );
+        fragment.fill(
+            Fill::NonZero,
+            Affine::IDENTITY,
+            Color::BLACK,
+            None,
+            &Rect::new(500.0, 0.0, 510.0, 10.0),
+        );
+        fragment.pop_layer();
+        glyph(&mut fragment, 520.0);
+        // On it.
+        for _ in 0..3 {
+            fragment.fill(Fill::NonZero, Affine::IDENTITY, Color::WHITE, None, &rect());
+        }
+        glyph(&mut fragment, 4.0);
+        fragment.seal_bounds();
+        assert_eq!(fragment.chunks(), 2);
+
+        let mut culled = DisplayList::new();
+        culled.append_visible(
+            &fragment,
+            Affine::IDENTITY,
+            Rect::new(0.0, 0.0, 100.0, 100.0),
+        );
+        assert_eq!(culled.len(), 4, "the second chunk alone");
+        assert_eq!(culled.layers(), 0);
+        assert_eq!(culled.open_layers(), 0);
+        assert_eq!(culled.glyph_runs(), 1);
+        assert!(matches!(culled.items()[3], Item::Glyphs(0)));
+        assert!(
+            (culled.runs()[0].glyphs.start..culled.runs()[0].glyphs.end).contains(&1),
+            "the run keeps its own glyph"
+        );
+
+        // Moved onto the target, both chunks land: a whole append.
+        let mut moved = DisplayList::new();
+        moved.append_visible(
+            &fragment,
+            Affine::translate((-480.0, 0.0)),
+            Rect::new(-500.0, 0.0, 100.0, 100.0),
+        );
+        let mut whole = DisplayList::new();
+        whole.append(&fragment, Some(Affine::translate((-480.0, 0.0))));
+        assert_eq!(moved.compare(&whole), Ok(()));
+
+        // Nowhere near: nothing.
+        let mut away = DisplayList::new();
+        away.append_visible(
+            &fragment,
+            Affine::translate((0.0, 1000.0)),
+            Rect::new(0.0, 0.0, 100.0, 100.0),
+        );
+        assert!(away.is_empty());
+    }
+
+    /// Only a proof culls: a bound or map that is not finite reaches.
+    #[test]
+    fn a_bound_that_is_not_finite_always_reaches() {
+        let visible = Rect::new(0.0, 0.0, 10.0, 10.0);
+        assert!(may_reach(ANYWHERE, Affine::IDENTITY, visible));
+        assert!(!may_reach(NO_INK, Affine::IDENTITY, visible));
+        assert!(may_reach(
+            Rect::new(100.0, 100.0, 110.0, 110.0),
+            Affine::translate((f64::NAN, 0.0)),
+            visible
+        ));
+        assert!(!may_reach(
+            Rect::new(100.0, 100.0, 110.0, 110.0),
+            Affine::IDENTITY,
+            visible
+        ));
+        // Touching edges reach.
+        assert!(may_reach(
+            Rect::new(10.0, 10.0, 20.0, 20.0),
+            Affine::IDENTITY,
+            visible
+        ));
     }
 
     /// `unitsPerEm` read from a font's `head` table, plain or in a

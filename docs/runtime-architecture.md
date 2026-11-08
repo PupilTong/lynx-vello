@@ -2423,8 +2423,15 @@ There is one path from a committed frame to pixels. Every presented frame is
 one flat display list: `compose_into` replays the commit's compose program —
 pre-encoded per-space fragments plus the push/pop ops over them — with each
 scroll slot translated by the offset the painter holds for it. Nothing is
-retained per scroller, and a scroll frame's cost is bounded by the commit's
-encode windows, which already discarded everything no clip chain admits.
+retained per scroller. The encode windows hold more than the target shows —
+a scrollport's worth of headroom on each side — and the rasterizer turns
+every path it is given into strips whether or not it lands on the target, so
+the replay leaves out what cannot reach the target at that instant: each
+fragment is cut, when its commit seals it, into chunks of a few items that
+close their own layers, each with a bound on its ink, and a chunk, an image
+draw or a push whose bound under its compose transform misses the target
+(cut to the pushes open around it) is not appended, the push with everything
+up to its pop. A scroll frame's cost is therefore that of what it shows.
 Retained per-scroller textures were tried and removed: measured per scroll
 frame they were slower than flat recomposition — each frame copied a plane
 larger than the viewport into vello's image atlas — and every commit re-baked

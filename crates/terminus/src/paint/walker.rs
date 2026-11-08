@@ -109,6 +109,11 @@
 //! Hit testing is unaffected: it reads [`PaintOrder`], and the cull decision
 //! lives in [`Scratch`], which never leaves the painter. A point outside the
 //! viewport still answers with the element drawn there.
+//!
+//! What this keeps for every instant — an encode window's headroom, a sticky
+//! box's whole range, a curve's whole reach — is culled once more at each
+//! composition, against where that instant puts it
+//! ([`crate::paint::compose::replay_ops`]).
 
 use euclid::default::{Size2D, Vector2D};
 

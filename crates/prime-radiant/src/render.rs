@@ -111,7 +111,15 @@ pub fn capture_document_sized<T: Sync>(
     let scene = if let Some(scene) = frame.scene() {
         scene
     } else {
-        frame.compose_into(&mut composed, &images, &filtered, &vectors, &|_| None, None);
+        frame.compose_target_into(
+            &mut composed,
+            (width, height),
+            &images,
+            &filtered,
+            &vectors,
+            &|_| None,
+            None,
+        );
         &composed
     };
     let pixels = gpu
