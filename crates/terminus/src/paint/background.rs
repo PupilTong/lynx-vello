@@ -1156,33 +1156,42 @@ fn radial_gradient(
     Some(GradientBrush::Gradient { gradient, local })
 }
 
-/// The largest `f32` below 1: where stops resolved to the ramp's end are kept.
+/// The largest `f32` below 1: where a run of stops at the ramp's end is kept.
 const RAMP_END: f32 = 1.0 - f32::EPSILON / 2.0;
 
-/// Maps fixed-up stops onto the `[0, 1]` ramp vello samples so both ends hold
-/// their stop's colour.
+/// Maps fixed-up stops onto the `[0, 1]` ramp the rasterizer samples, so
+/// that the colour past the last stop is the last stop's.
 ///
-/// css-images-3 §3.4.2: "Before the first color stop, the gradient line is
-/// the color of the first color stop, and after the last color stop, the
-/// gradient line is the color of the last color stop." `vello_encoding`'s
-/// `make_ramp` (0.10, unchanged in 0.11) breaks both halves. It never reads
-/// the first stop's offset — its first segment always runs from 0 to the
-/// second stop — so
-/// `red 50%, blue 50%` would fade over [0, 0.5]; a copy of the first stop at
-/// 0 holds its colour instead. And it advances past a stop only once a sample
-/// lies strictly beyond it, so the sample at 1, which `Extend::Pad` stretches
-/// past the end, takes the *first* of several stops at 1: the disc in
-/// `red 100%, transparent 100%` would pad red. Pulling those stops to the
-/// largest offset below 1 lets the last sample reach the last stop; the move
-/// is far below one of the ramp's 512 samples.
+/// css-images-3 §3.4.2: "after the last color stop, the gradient line is the
+/// color of the last color stop." When two or more stops sit at the ramp's
+/// end (`red 100%, transparent 100%`, or a hard edge at the last stop of a
+/// re-mapped ramp), `Extend::Pad` reads the ramp's last sample for
+/// everything past it, and `vello_common` (`GradientLut::new`) gives each
+/// stop-to-stop range the samples below its end offset times the table
+/// length: the range ending at the first stop at 1 takes every sample up to
+/// the last, the ones after it take none, and the disc in `red 100%,
+/// transparent 100%` would pad red. Pulling that run to the largest offset
+/// below 1 leaves the last sample to the range `vello_common` appends from
+/// the last stop to 1, which holds the last stop's colour. A single stop at
+/// the end is left at 1, where its own range reaches the last sample; moving
+/// it would only make `vello_common` size its table for a range 2^-24 wide.
+///
+/// Offsets are clamped into `[0, 1]`, since a re-mapped offset can round
+/// just past an end and `vello_common` paints a gradient with an offset
+/// outside that range as its first stop's solid colour. A first stop above 0 needs nothing:
+/// `vello_common` holds its colour from 0 itself.
 fn ramp_stops(stops: &[(f64, Color)], offset: impl Fn(f64) -> f32) -> Vec<(f32, Color)> {
-    let mut out = Vec::with_capacity(stops.len() + 1);
-    if let Some(&(first, color)) = stops.first()
-        && offset(first) > 0.0
-    {
-        out.push((0.0, color));
+    let mut out: Vec<(f32, Color)> = stops
+        .iter()
+        .map(|&(p, c)| (offset(p).clamp(0.0, 1.0), c))
+        .collect();
+    let at_end = out.iter().rev().take_while(|&&(o, _)| o >= 1.0).count();
+    if at_end > 1 {
+        let len = out.len();
+        for stop in &mut out[len - at_end..] {
+            stop.0 = RAMP_END;
+        }
     }
-    out.extend(stops.iter().map(|&(p, c)| (offset(p).min(RAMP_END), c)));
     out
 }
 
@@ -1790,6 +1799,30 @@ mod tests {
         assert_eq!(stops.len(), 1);
         assert_close(stops[0].0, 0.0);
         assert_eq!(stops[0].1, blue);
+    }
+
+    #[test]
+    fn a_run_of_stops_at_the_ramps_end_is_kept_below_it() {
+        let red = Color::new([1.0, 0.0, 0.0, 1.0]);
+        let clear = Color::new([0.0, 0.0, 0.0, 0.0]);
+        let stops = ramp_stops(&[(0.0, red), (1.0, red), (1.0, clear)], |p| p as f32);
+        assert_eq!(stops, vec![(0.0, red), (RAMP_END, red), (RAMP_END, clear)]);
+    }
+
+    #[test]
+    fn a_lone_stop_at_the_ramps_end_stays_there() {
+        let red = Color::new([1.0, 0.0, 0.0, 1.0]);
+        let blue = Color::new([0.0, 0.0, 1.0, 1.0]);
+        let stops = ramp_stops(&[(0.5, red), (1.0, blue)], |p| p as f32);
+        assert_eq!(stops, vec![(0.5, red), (1.0, blue)]);
+    }
+
+    #[test]
+    fn ramp_offsets_that_round_past_an_end_are_clamped() {
+        let red = Color::new([1.0, 0.0, 0.0, 1.0]);
+        let blue = Color::new([0.0, 0.0, 1.0, 1.0]);
+        let stops = ramp_stops(&[(-1e-7, red), (1.0 + 1e-7, blue)], |p| p as f32);
+        assert_eq!(stops, vec![(0.0, red), (1.0, blue)]);
     }
 
     #[test]
