@@ -8,7 +8,7 @@ use paint_common::Doc;
 use prime_radiant::headless;
 use terminus::link::DisplayList;
 use terminus::link::kurbo::{Affine, Rect};
-use terminus::link::peniko::{BlendMode, Color, Compose, Fill, Mix};
+use terminus::link::peniko::{BlendMode, Color, Compose, Fill, ImageBrush, ImageSampler, Mix};
 
 const AHEM: &[u8] = include_bytes!("../../seldon/tests/fixtures/Ahem.ttf");
 const ISOLATION_ATLAS_WIDTH: u32 = 384;
@@ -2503,4 +2503,61 @@ fn an_anchored_box_follows_its_scrolled_anchor_and_hides_with_it() {
             );
         }
     }
+}
+
+/// A 16 × 16 bitmap of `texel` on a blob of its own, drawn at `x`.
+fn swatch(scene: &mut DisplayList, texel: [u8; 4], x: f64) {
+    let image = prime_radiant::rgba8(16, 16, texel.repeat(256));
+    scene.fill(
+        Fill::NonZero,
+        Affine::IDENTITY,
+        ImageBrush {
+            image: &image,
+            sampler: ImageSampler::default(),
+        },
+        Some(Affine::translate((x, 0.0))),
+        &Rect::new(x, 0.0, x + 16.0, 16.0),
+    );
+}
+
+/// Every target in a process draws through one device and renderer, from
+/// the thread that owns it. Two targets on two threads, each drawing
+/// bitmaps of its own — a fresh one every frame — and one a third, idle
+/// target drew first, each read back their own pixels every frame, and one
+/// of them going away and coming back mid-run changes nothing the other
+/// draws.
+#[test]
+fn targets_on_two_threads_draw_their_own_bitmaps() {
+    const NAME: &str = "targets_on_two_threads_draw_their_own_bitmaps";
+    let shared = [0, 160, 0, 255];
+    let mut scene = DisplayList::new();
+    swatch(&mut scene, shared, 16.0);
+    let mut first = headless(NAME);
+    let pixels = first.render(&scene, 32, 16, Color::WHITE).expect("render");
+    assert_eq!(pixel(&pixels, 32, 20, 8), shared);
+    let scene = &scene;
+    std::thread::scope(|scope| {
+        for side in 0..2_u8 {
+            scope.spawn(move || {
+                let mut gpu = headless(NAME);
+                for frame in 0..40_u8 {
+                    if side == 1 && frame == 20 {
+                        drop(gpu);
+                        gpu = headless(NAME);
+                    }
+                    let own = [255 - side * 200, frame * 6, side * 200, 255];
+                    let mut list = scene.clone();
+                    swatch(&mut list, own, 0.0);
+                    let pixels = gpu.render(&list, 32, 16, Color::WHITE).expect("render");
+                    assert_eq!(
+                        pixel(&pixels, 32, 8, 8),
+                        own,
+                        "target {side}, frame {frame}"
+                    );
+                    assert_eq!(pixel(&pixels, 32, 24, 8), shared, "target {side}");
+                }
+            });
+        }
+    });
+    drop(first);
 }

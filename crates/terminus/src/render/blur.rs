@@ -132,7 +132,7 @@
 
 use euclid::default::Vector2D;
 
-use super::gpu::{GpuDevice, GpuError};
+use super::gpu::{GpuError, SharedGpu};
 use super::raster::Raster;
 use crate::paint::display_list::{DisplayList, Texture};
 use crate::peniko::{Color, ImageData};
@@ -140,9 +140,9 @@ use crate::visual::{CommittedFrame, ScrollSlot};
 
 /// Largest per-axis device-pixel count one filter bake may have: the
 /// longest texture side the device is created with
-/// ([`GpuDevice::LIMITS`]), the same bound
+/// ([`SharedGpu::LIMITS`]), the same bound
 /// [`crate::render::image::MAX_RENDERABLE_DIMENSION`] enforces for bitmaps.
-pub(crate) const MAX_FILTER_DIMENSION: u32 = GpuDevice::LIMITS.max_texture_dimension_2d;
+pub(crate) const MAX_FILTER_DIMENSION: u32 = SharedGpu::LIMITS.max_texture_dimension_2d;
 
 /// Largest total device-pixel area one frame's filter bakes may cover.
 ///
@@ -618,8 +618,7 @@ impl Pipelines {
 /// between passes would give every pass the last pass's parameters. The
 /// buffers are pooled on [`FilterTextures`], so a settled page allocates none.
 struct Passes<'a> {
-    device: &'a wgpu::Device,
-    queue: &'a wgpu::Queue,
+    gpu: &'a SharedGpu,
     pipelines: &'a Pipelines,
     uniforms: &'a mut Vec<wgpu::Buffer>,
     next: usize,
@@ -640,7 +639,7 @@ impl Passes<'_> {
     ) {
         if self.next == self.uniforms.len() {
             self.uniforms
-                .push(self.device.create_buffer(&wgpu::BufferDescriptor {
+                .push(self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("dom filter params"),
                     size: PARAMS_SIZE,
                     usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
@@ -649,25 +648,30 @@ impl Passes<'_> {
         }
         let uniform = &self.uniforms[self.next];
         self.next += 1;
-        self.queue.write_buffer(uniform, 0, &params.bytes());
-        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("dom filter pass"),
-            layout: &self.pipelines.layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(source),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(self.pipelines.sampler(self.mirror)),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: uniform.as_entire_binding(),
-                },
-            ],
-        });
+        self.gpu.queue.write_buffer(uniform, 0, &params.bytes());
+        let bind_group = self
+            .gpu
+            .device
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("dom filter pass"),
+                layout: &self.pipelines.layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(source),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(
+                            self.pipelines.sampler(self.mirror),
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: uniform.as_entire_binding(),
+                    },
+                ],
+            });
         let mut pass = self.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("dom filter pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -690,7 +694,7 @@ impl Passes<'_> {
     }
 
     fn submit(self) {
-        self.queue.submit([self.encoder.finish()]);
+        self.gpu.submit([self.encoder.finish()]);
     }
 }
 
@@ -764,14 +768,13 @@ impl FilterTextures {
     /// back to replaying raw; the next prepare re-bakes every entry.
     #[expect(
         clippy::too_many_arguments,
-        reason = "one bake pre-step's full inputs: the rasterizer and its two device handles, and \
-                  the frame with its three compose inputs"
+        reason = "one bake pre-step's full inputs: the rasterizer and its stack, and the frame \
+                  with its three compose inputs"
     )]
     pub(crate) fn prepare(
         &mut self,
         raster: &mut Raster,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
+        gpu: &SharedGpu,
         frame: &CommittedFrame,
         images: &[Option<ImageData>],
         vectors: &[Option<Texture>],
@@ -819,12 +822,11 @@ impl FilterTextures {
             return Ok(&self.images);
         }
         if self.pipelines.is_none() {
-            self.pipelines = Some(Pipelines::new(device));
+            self.pipelines = Some(Pipelines::new(&gpu.device));
         }
         self.bake_all(
             raster,
-            device,
-            queue,
+            gpu,
             frame,
             images,
             vectors,
@@ -923,8 +925,7 @@ impl FilterTextures {
     fn bake_all(
         &mut self,
         raster: &mut Raster,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
+        gpu: &SharedGpu,
         frame: &CommittedFrame,
         images: &[Option<ImageData>],
         vectors: &[Option<Texture>],
@@ -932,6 +933,7 @@ impl FilterTextures {
         animation_now: Option<f64>,
         canvas: Color,
     ) -> Result<(), GpuError> {
+        let device = &gpu.device;
         let Self {
             pipelines,
             banks,
@@ -974,15 +976,7 @@ impl FilterTextures {
             } else {
                 Color::TRANSPARENT
             };
-            raster.render_to_texture(
-                device,
-                queue,
-                bake,
-                &bank.target.view,
-                width,
-                height,
-                base,
-            )?;
+            raster.render_to_texture(bake, &bank.target.view, width, height, base)?;
 
             let plan = decimate(f64::from(group.sigma), width, height);
             bank.ensure_levels(device, plan.levels);
@@ -995,8 +989,7 @@ impl FilterTextures {
             }
 
             let mut passes = Passes {
-                device,
-                queue,
+                gpu,
                 pipelines,
                 uniforms,
                 next: 0,

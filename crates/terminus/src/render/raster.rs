@@ -11,8 +11,14 @@
 //! unbind the texture a [`Texture`] names — so the targets
 //! ([`super::gpu::Headless`], the painter's window) and the bakes
 //! ([`super::blur`], [`super::vector_textures`]) are written once.
+//!
+//! Each target has one; every one on a device draws through the
+//! renderer, the image atlas and the bitmaps of that device's
+//! [`SharedGpu`], and keeps its own scene and bound textures.
 
-use super::gpu::GpuError;
+use std::sync::Arc;
+
+use super::gpu::{GpuError, SharedGpu};
 use crate::paint::display_list::{DisplayList, Texture};
 use crate::peniko::Color;
 
@@ -36,28 +42,22 @@ impl Raster {
     /// is sampled in place.
     pub(crate) const BOUND_USAGE: wgpu::TextureUsages = wgpu::TextureUsages::TEXTURE_BINDING;
 
-    /// Builds the rasterizer on `device`.
-    pub(crate) fn new(device: &wgpu::Device) -> Self {
+    /// Builds a target's rasterizer on `gpu`, sharing its renderer.
+    pub(crate) fn new(gpu: &Arc<SharedGpu>) -> Self {
         Self {
-            sparse: super::sparse::SparseBackend::new(device),
+            sparse: super::sparse::SparseBackend::new(gpu),
         }
     }
 
-    /// Renders `scene` into `view`, a `width` × `height` RGBA8 texture
-    /// created with [`Self::TARGET_USAGE`], over `base`.
+    /// Renders `scene` into `view`, a `width` × `height` RGBA8 texture on
+    /// this rasterizer's device, created with [`Self::TARGET_USAGE`], over
+    /// `base`.
     ///
     /// # Errors
     ///
     /// [`GpuError::Render`] if the render fails.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "one render's full inputs: the device pair, the scene, the target and its size, \
-                  and the base colour"
-    )]
     pub(crate) fn render_to_texture(
         &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
         scene: &DisplayList,
         view: &wgpu::TextureView,
         width: u32,
@@ -65,7 +65,7 @@ impl Raster {
         base: Color,
     ) -> Result<(), GpuError> {
         self.sparse
-            .render(device, queue, scene, view, width, height, base)
+            .render(scene, view, width, height, base)
             .map_err(GpuError::Render)
     }
 

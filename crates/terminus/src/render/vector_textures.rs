@@ -68,7 +68,7 @@
 
 use rustc_hash::FxHashMap;
 
-use super::gpu::GpuError;
+use super::gpu::{GpuError, SharedGpu};
 use super::raster::Raster;
 use crate::kurbo::Size;
 use crate::paint::compose::VectorDraw;
@@ -167,9 +167,9 @@ impl VectorTextures {
         &mut self,
         frame: &CommittedFrame,
         raster: &mut Raster,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
+        gpu: &SharedGpu,
     ) -> Result<&[Option<Texture>], GpuError> {
+        let device = &gpu.device;
         let draws = frame.vector_draws();
         self.images.clear();
         if draws.is_empty() {
@@ -192,7 +192,7 @@ impl VectorTextures {
                 self.images.push(Some(entry.handle));
                 continue;
             }
-            let handle = bake(&mut self.bake, draw, width, height, raster, device, queue)?;
+            let handle = bake(&mut self.bake, draw, width, height, raster, gpu)?;
             self.entries.insert(
                 key,
                 Entry {
@@ -269,9 +269,9 @@ fn bake(
     width: u32,
     height: u32,
     raster: &mut Raster,
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
+    gpu: &SharedGpu,
 ) -> Result<Texture, GpuError> {
+    let device = &gpu.device;
     let (texture_width, texture_height) = texture_size(device, width, height);
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("dom vector texture"),
@@ -301,8 +301,6 @@ fn bake(
         )),
     );
     raster.render_to_texture(
-        device,
-        queue,
         scene,
         &view,
         texture_width,
@@ -310,7 +308,7 @@ fn bake(
         Color::TRANSPARENT,
     )?;
     if (texture_width, texture_height) != (width, height) {
-        repeat_edge(device, queue, &texture, width, height);
+        repeat_edge(gpu, &texture, width, height);
     }
 
     let handle = Texture::new(width, height, texture_width, texture_height);
@@ -324,13 +322,8 @@ fn bake(
 ///
 /// wgpu copies between regions of one texture only through another, so each
 /// goes through a one-texel-thick scratch texture.
-fn repeat_edge(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    texture: &wgpu::Texture,
-    width: u32,
-    height: u32,
-) {
+fn repeat_edge(gpu: &SharedGpu, texture: &wgpu::Texture, width: u32, height: u32) {
+    let device = &gpu.device;
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("dom vector texture edge"),
     });
@@ -396,7 +389,7 @@ fn repeat_edge(
             },
         );
     }
-    queue.submit([encoder.finish()]);
+    gpu.submit([encoder.finish()]);
 }
 
 #[cfg(test)]

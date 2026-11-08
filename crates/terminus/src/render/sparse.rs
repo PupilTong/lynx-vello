@@ -18,6 +18,11 @@
 //! bakes, bound by [`SparseBackend::bind`]) is drawn as an external texture
 //! under its own id, sampled in place; a bitmap is uploaded once and
 //! released once renders stop drawing it ([`Bitmaps`]).
+//!
+//! Every target on a device renders through the one `vello_gpu` renderer
+//! and image atlas of its [`SharedGpu`] ([`SharedRaster`]); each target's
+//! [`SparseBackend`] keeps its own scene, replay state and bound textures,
+//! so the replay runs on the target's thread without the renderer's lock.
 
 #![allow(
     clippy::cast_possible_truncation,
@@ -27,25 +32,31 @@
 )]
 
 use std::ops::RangeInclusive;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use glifo::{AtlasCacher, GlyphPrepCache, GlyphRenderError, GlyphRunBackend};
 use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
 use vello_common::image_cache::ImageCache;
 use vello_gpu::{
-    AllocationStrategy, AtlasConfig, AtlasWriter, ClearSettings, Image, ImageId, ImageSource,
-    LayersConfig, MemorySettings, PaintType, PixelMetadata, Pixmap, RectU16, RenderSettings,
-    RenderSize, RenderTargetConfig, Renderer, Resources, Scene, SizeU16, TargetInit,
-    TextureBindings, TextureId,
+    AllocationStrategy, AtlasConfig, ClearSettings, Image, ImageId, ImageSource, LayersConfig,
+    MemorySettings, PaintType, PixelMetadata, Pixmap, RectU16, RenderSettings, RenderSize,
+    RenderTargetConfig, Renderer, Resources, Scene, SizeU16, TargetInit, TextureBindings,
+    TextureId,
 };
 
+use super::gpu::SharedGpu;
 use crate::clock::ClockInstant;
 use crate::kurbo::{Affine, BezPath, Diagonal2, Point, Rect, Shape as _};
 use crate::paint::display_list::{
     DisplayList, FILL_TOLERANCE, GlyphRun, GlyphStyle, ImagePaint, Item, Paint, STROKE_TOLERANCE,
     Shape, Texture, next_texture_id,
 };
-use crate::peniko::{Color, Extend, Fill, ImageAlphaType, ImageData, ImageFormat, ImageSampler};
+use crate::peniko::{
+    Color, Extend, Fill, ImageAlphaType, ImageData, ImageFormat, ImageQuality, ImageSampler,
+};
 
 /// What one frame cost, and what it could not draw.
 #[derive(Debug, Default, Clone, Copy)]
@@ -53,7 +64,10 @@ pub(crate) struct Stats {
     /// Replaying the list into the sparse-strip scene (path flattening and
     /// strip generation run here, on the CPU).
     pub(crate) encode: Duration,
-    /// `Renderer::render` and the submit.
+    /// Waiting for another target's render to let the shared renderer go.
+    pub(crate) wait: Duration,
+    /// The queued bitmap uploads, `Renderer::render`, the releases and the
+    /// submit: the span the shared renderer is held.
     pub(crate) render: Duration,
     pub(crate) draws: u32,
     pub(crate) glyph_runs: u32,
@@ -63,23 +77,31 @@ pub(crate) struct Stats {
     pub(crate) images_skipped: u32,
 }
 
+/// One target's rasterizer: the scene its renders fill, the textures it
+/// binds, and its pins on the bitmaps it draws, over the [`SharedRaster`]
+/// of the [`SharedGpu`] it was built on.
 pub(crate) struct SparseBackend {
-    renderer: Renderer,
-    resources: Resources,
+    gpu: Arc<SharedGpu>,
+    /// This target's name in the bitmaps' pins.
+    target: u64,
+    /// How many of this target's renders have drawn a bitmap.
+    generation: u64,
     scene: Scene,
     /// What [`replay`] keeps across renders: glifo's outline cache and the
     /// scratch path.
     replay: Replay,
-    /// Uploaded bitmaps, with their lifecycle.
-    images: Bitmaps,
     /// The bound textures, by id.
     bound: FxHashMap<u64, wgpu::TextureView>,
+    /// The bitmaps the current render draws from textures of their own,
+    /// bound for it beside [`Self::bound`].
+    textures: Vec<(TextureId, wgpu::TextureView)>,
     pub(crate) last: Stats,
 }
 
 impl std::fmt::Debug for SparseBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SparseBackend")
+            .field("target", &self.target)
             .field("last", &self.last)
             .finish_non_exhaustive()
     }
@@ -478,17 +500,17 @@ impl<'a> GlyphRunBackend<'a> for Glyphs<'a> {
 }
 
 /// The bitmap bytes kept resident across renders, in the image atlas and in
-/// bitmaps' own textures together.
+/// bitmaps' own textures together, for every target on a [`SharedGpu`].
 #[cfg(not(target_arch = "wasm32"))]
 const MAX_BITMAP_BYTES: u64 = 128 * 1024 * 1024;
 /// The bitmap bytes kept resident across renders, in the image atlas and in
-/// bitmaps' own textures together.
+/// bitmaps' own textures together, for every target on a [`SharedGpu`].
 #[cfg(target_arch = "wasm32")]
 const MAX_BITMAP_BYTES: u64 = 64 * 1024 * 1024;
 
 /// The side of one page of `vello_gpu`'s image atlas. The atlas creates a
 /// page the first time a bitmap needs one and frees none, so the first
-/// bitmap a view draws costs a whole page; at 2048 that page is 16 MiB of
+/// bitmap drawn on a [`SharedGpu`] costs a whole page; at 2048 that page is 16 MiB of
 /// RGBA8, where `vello_gpu`'s default 4096 makes it 64 MiB.
 const ATLAS_PAGE_SIDE: u16 = 2048;
 
@@ -567,6 +589,9 @@ struct BitmapKey {
     /// read under another layout is other pixels.
     layout: (u8, u8),
     edge: (bool, bool),
+    /// Drawn nearest-neighbour, and so from a texture of its own; see
+    /// [`Bitmaps`].
+    nearest: bool,
 }
 
 /// Where an uploaded bitmap lives.
@@ -579,6 +604,14 @@ enum Store {
     },
 }
 
+/// One target's hold on a bitmap: the target's render generation that last
+/// drew it.
+#[derive(Clone, Copy)]
+struct Pin {
+    target: u64,
+    generation: u64,
+}
+
 /// One uploaded bitmap.
 struct Bitmap {
     store: Store,
@@ -587,8 +620,11 @@ struct Bitmap {
     height: u16,
     opaque: bool,
     bytes: u64,
-    /// The render that last drew it; see [`Bitmaps::tick`].
-    last_used: u64,
+    /// The [`Bitmaps::stamp`] of the render that last drew it, by any
+    /// target: the release order.
+    last_drawn: u64,
+    /// Per target that has drawn it, the last generation that did.
+    pins: SmallVec<[Pin; 2]>,
 }
 
 impl Bitmap {
@@ -603,36 +639,111 @@ impl Bitmap {
         };
         Image { image, sampler }
     }
+
+    /// Records that `drawing`'s current render draws this bitmap, dropping
+    /// the pins of targets no longer live.
+    fn mark(&mut self, drawing: &mut Drawing<'_>, targets: &FxHashMap<u64, u64>) {
+        let (generation, stamp) = drawing.tick.expect("a drawing render has ticked");
+        self.last_drawn = stamp;
+        self.pins
+            .retain(|pin| pin.target != drawing.target && targets.contains_key(&pin.target));
+        self.pins.push(Pin {
+            target: drawing.target,
+            generation,
+        });
+        if let Store::Texture { id, view } = &self.store {
+            drawing.textures.push((*id, view.clone()));
+        }
+    }
+
+    /// Whether a live target drew it in one of its last [`PINNED_RENDERS`]
+    /// bitmap-drawing renders.
+    fn pinned(&self, targets: &FxHashMap<u64, u64>) -> bool {
+        self.pins.iter().any(|pin| {
+            targets
+                .get(&pin.target)
+                .is_some_and(|&now| pin.generation + PINNED_RENDERS > now)
+        })
+    }
 }
 
-/// How many of the latest bitmap-drawing renders pin what they drew. A frame
-/// is several renders through one backend — its `filter: blur()` and vector
-/// bakes, then the composite — so what the composite drew stays pinned
-/// through the next frame's bakes; vello's own image cache spares what the
-/// last two of its renders drew the same way. A render that draws no bitmap
-/// (most bakes) is not a tick at all.
+/// How many of a target's latest bitmap-drawing renders pin what they drew.
+/// A frame is several renders of one target — its `filter: blur()` and
+/// vector bakes, then the composite — so what the composite drew stays
+/// pinned through the next frame's bakes. A render that draws no bitmap
+/// (most bakes) is not one of them.
 const PINNED_RENDERS: u64 = 4;
 
-/// The bitmaps a render draws, uploaded once per [`BitmapKey`] and released
-/// once no render draws them.
+/// The rasterizer state every target on one device shares: `vello_gpu`'s
+/// renderer with the resources paired to it, and the bitmaps uploaded to
+/// them.
+///
+/// # Locking
+///
+/// Targets render from the threads that own them, and each fills a scene
+/// of its own. The CPU half of a render — the list replayed into that
+/// scene, every path flattened and turned into strips — holds no lock but a
+/// short [`Self::bitmaps`] hold per bitmap draw, which converts no pixels
+/// and uploads nothing. The GPU half holds [`Self::renderer`] throughout:
+/// the uploads the replays have queued, `Renderer::render` (its layer
+/// schedule and the command encoding), the releases, and the submit. Two
+/// targets therefore strip their scenes in parallel and take turns only
+/// for the GPU half. The renderer lock is always taken before the bitmaps
+/// one.
+pub(crate) struct SharedRaster {
+    renderer: Mutex<Paired>,
+    bitmaps: Mutex<Bitmaps>,
+}
+
+impl std::fmt::Debug for SharedRaster {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SharedRaster").finish_non_exhaustive()
+    }
+}
+
+/// A renderer and the resources it was created with, which `vello_gpu`
+/// requires to be used together only.
+struct Paired {
+    renderer: Renderer,
+    resources: Resources,
+}
+
+/// The bitmaps renders draw, uploaded once per [`BitmapKey`] and released
+/// once no live target draws them.
 ///
 /// # Upload
 ///
 /// A bitmap is converted to the premultiplied RGBA8 `vello_gpu` samples
 /// ([`pixmap`]) and uploaded to the image atlas, or, when it is longer than
-/// [`MAX_ATLAS_BITMAP_SIDE`] or no atlas page has room for it, to a texture
-/// of its own drawn as an external texture.
+/// [`MAX_ATLAS_BITMAP_SIDE`], drawn nearest-neighbour, or no atlas page has
+/// room for it, to a texture of its own drawn as an external texture. The
+/// key names the blob, its size, its layout and whether it is drawn
+/// nearest-neighbour, so a blob drawn at another size, under another layout
+/// or with the other filter is another upload, and pixels that change take a
+/// new blob and so a new key; the old upload ages out below. A blob two
+/// targets draw is one upload.
+///
+/// A nearest-neighbour draw (`image-rendering: pixelated`) reads the texel
+/// a sample position falls in. `vello_gpu` adds an atlas upload's offset to
+/// the position in f32 before it rounds, so a position within that
+/// addition's rounding error of a texel edge — every exact tie, which CSS
+/// gives no rule for and layout produces readily — would read the texel on
+/// one side or the other depending on where in the atlas the bitmap was
+/// placed, and so on what every other target uploaded before it. From a
+/// texture of its own the offset is zero and the position is read as
+/// computed.
 ///
 /// `Renderer::upload_image` panics when the atlas has no room, and
 /// `vello_gpu` keeps its atlas allocator private. So [`Bitmaps::atlas`] is a
 /// second allocator of the same configuration that every atlas upload and
 /// release goes through first: the allocator is deterministic, and with the
 /// glyph atlas cache off nothing else allocates in `vello_gpu`'s, so both
-/// make the same decisions and an upload is only attempted where it fits.
-/// The two hand out the same image ids, which debug builds check. The key names the blob, its size
-/// and its layout, so a blob drawn at another size or under another layout is another upload, and
-/// pixels that change take a new blob and so a new key; the old upload ages
-/// out below.
+/// make the same decisions as long as both see the same allocations and
+/// releases in the same order. A replay allocates here, with no renderer
+/// lock, and queues the upload in [`Bitmaps::pending`]; the next render by
+/// any target makes the queued uploads, in order, before it renders or
+/// releases anything ([`Bitmaps::flush`]). The two hand out the same image
+/// ids, which debug builds check.
 ///
 /// `vello_gpu` pads an image axis by clamping the sample position to
 /// `size − 1` (`extend.wesl`) before its bilinear and bicubic taps take
@@ -647,172 +758,158 @@ const PINNED_RENDERS: u64 = 4;
 ///
 /// # Lifecycle
 ///
-/// Every render that draws a bitmap is one tick, and what the last
-/// [`PINNED_RENDERS`] of them drew is pinned. Once a render's draws are
+/// Each target counts its renders that draw a bitmap — its generations —
+/// and a bitmap is pinned while some live target drew it in one of its
+/// last [`PINNED_RENDERS`] generations; a target that goes away
+/// ([`SparseBackend`]'s `Drop`) pins nothing more. Once a render's draws are
 /// encoded, the unpinned uploads are released least recently drawn first
-/// until the resident bytes are back within [`MAX_BITMAP_BYTES`] — an atlas
-/// upload with `Renderer::destroy_image`, a texture by dropping it. Renders
-/// whose own bitmaps exceed the budget keep them all while they are pinned:
-/// the bound is on what is kept across renders, and resident bytes never
-/// exceed the larger of the budget and what the pinned renders drew.
+/// (by any target) until the resident bytes are back within the budget —
+/// an atlas upload with `Renderer::destroy_image`, a texture by dropping
+/// it. Renders whose own bitmaps exceed the budget keep them all while they
+/// are pinned: the bound is on what is kept across renders.
+///
+/// `destroy_image` clears the freed atlas region with a pass in the
+/// releasing render's encoder, and an atlas upload is a queued write, which
+/// applies at the start of the next submit. So a release runs after every
+/// draw of its render that sampled the region, and is submitted before the
+/// renderer lock is let go; an upload that lands in the region is
+/// allocated after the release and so made by a later render, whose submit
+/// follows the clear.
 pub(crate) struct Bitmaps {
     entries: FxHashMap<BitmapKey, Bitmap>,
     /// Bytes of every upload.
     bytes: u64,
     /// The allocations of `vello_gpu`'s image atlas, replayed (see above).
     atlas: ImageCache,
-    /// How many renders have drawn a bitmap. An upload's `last_used` is the
-    /// tick of the render that last drew it, so those within
-    /// [`PINNED_RENDERS`] of the current tick are the pinned ones and the
-    /// smallest tick is the next to go.
-    tick: u64,
-    /// Whether the current render has drawn a bitmap, and so is a tick.
-    drawing: bool,
+    /// The atlas uploads allocated in [`Self::atlas`] and not yet made in
+    /// `vello_gpu`'s, in allocation order.
+    pending: Vec<(ImageId, Pixmap)>,
+    /// Each live target's latest generation.
+    targets: FxHashMap<u64, u64>,
+    /// How many renders, by any target, have drawn a bitmap.
+    stamp: u64,
     budget: u64,
-    /// The device's longest texture side, read at the first upload.
-    longest: Option<u32>,
+    /// The device's longest texture side.
+    longest: u32,
+}
+
+/// What one render of one target records on the bitmaps it draws.
+struct Drawing<'a> {
+    target: u64,
+    /// The target's generation count.
+    generation: &'a mut u64,
+    /// The render's generation and [`Bitmaps::stamp`], once it has drawn a
+    /// bitmap.
+    tick: Option<(u64, u64)>,
+    /// Where the render's bitmaps drawn from textures of their own go, to be
+    /// bound for it.
+    textures: &'a mut Vec<(TextureId, wgpu::TextureView)>,
 }
 
 impl Bitmaps {
-    /// No bitmaps yet, `budget` bytes to keep, and `atlas` the configuration
-    /// `vello_gpu`'s image atlas was built with.
-    fn new(budget: u64, atlas: AtlasConfig) -> Self {
+    /// No bitmaps yet, `budget` bytes to keep, `atlas` the configuration
+    /// `vello_gpu`'s image atlas was built with and `longest` the device's
+    /// longest texture side.
+    fn new(budget: u64, atlas: AtlasConfig, longest: u32) -> Self {
         Self {
             entries: FxHashMap::default(),
             bytes: 0,
             atlas: ImageCache::new_with_config(atlas),
-            tick: 0,
-            drawing: false,
+            pending: Vec::new(),
+            targets: FxHashMap::default(),
+            stamp: 0,
             budget,
-            longest: None,
+            longest,
         }
     }
 
-    /// Starts a render; its first bitmap draw makes it a tick.
-    fn begin(&mut self) {
-        self.drawing = false;
-    }
-
-    /// The paint drawing `image` under `sampler`, uploaded on a miss; `None`
-    /// when the image's pixels are unreadable.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "an upload's device handles beside the image and its sampler"
-    )]
-    fn paint(
-        &mut self,
-        renderer: &mut Renderer,
-        resources: &mut Resources,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
-        image: &ImageData,
-        sampler: ImageSampler,
-    ) -> Option<Image> {
+    /// The key `image` drawn under `sampler` is uploaded under.
+    fn key(&self, image: &ImageData, sampler: ImageSampler) -> BitmapKey {
         // The repeated edge needs one texel more than the image: a texture
         // already as long as the device allows keeps the shader's clamp.
-        let longest = *self
-            .longest
-            .get_or_insert_with(|| device.limits().max_texture_dimension_2d);
-        let key = BitmapKey {
+        BitmapKey {
             blob: image.data.id(),
             width: image.width,
             height: image.height,
             layout: (image.format as u8, image.alpha_type as u8),
             edge: (
-                sampler.x_extend == Extend::Pad && image.width < longest,
-                sampler.y_extend == Extend::Pad && image.height < longest,
+                sampler.x_extend == Extend::Pad && image.width < self.longest,
+                sampler.y_extend == Extend::Pad && image.height < self.longest,
             ),
-        };
-        if !self.drawing {
-            self.drawing = true;
-            self.tick += 1;
+            nearest: sampler.quality == ImageQuality::Low,
         }
-        let tick = self.tick;
-        if let Some(bitmap) = self.entries.get_mut(&key) {
-            bitmap.last_used = tick;
-            return Some(bitmap.image(sampler));
+    }
+
+    /// The upload under `key`, marked drawn by `drawing`'s render — whose
+    /// first bitmap draw this makes it one of its target's generations.
+    fn hit(
+        &mut self,
+        key: &BitmapKey,
+        sampler: ImageSampler,
+        drawing: &mut Drawing<'_>,
+    ) -> Option<Image> {
+        if drawing.tick.is_none() {
+            *drawing.generation += 1;
+            self.stamp += 1;
+            self.targets.insert(drawing.target, *drawing.generation);
+            drawing.tick = Some((*drawing.generation, self.stamp));
         }
-        let (pixmap, opaque) = pixmap(image, key.edge)?;
-        let (width, height) = (pixmap.width(), pixmap.height());
-        let bytes = u64::from(width) * u64::from(height) * 4;
-        // `upload_image` allocates with no padding.
-        let slot = (width.max(height) <= MAX_ATLAS_BITMAP_SIDE)
-            .then(|| self.atlas.allocate(width, height, 0).ok())
-            .flatten();
-        let store = if let Some(slot) = slot {
-            let id = renderer.upload_image(resources, device, queue, encoder, &pixmap);
-            debug_assert_eq!(id, slot, "the replayed atlas allocates as vello_gpu's does");
-            Store::Atlas(id)
-        } else {
-            let texture = device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("terminus vello_gpu bitmap"),
-                size: wgpu::Extent3d {
-                    width: u32::from(width),
-                    height: u32::from(height),
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8Unorm,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                view_formats: &[],
-            });
-            pixmap.write_to_atlas(device, queue, encoder, &texture, [0, 0], width, height);
-            let id = TextureId(next_texture_id());
-            Store::Texture {
-                id,
-                view: texture.create_view(&wgpu::TextureViewDescriptor::default()),
-            }
-        };
-        self.bytes += bytes;
-        let bitmap = self.entries.entry(key).or_insert(Bitmap {
-            store,
-            width,
-            height,
-            opaque,
-            bytes,
-            last_used: tick,
-        });
+        let bitmap = self.entries.get_mut(key)?;
+        bitmap.mark(drawing, &self.targets);
         Some(bitmap.image(sampler))
     }
 
-    /// Binds the textures of the bitmaps the current render draws from their
-    /// own texture.
-    fn bind_into(&self, bindings: &mut TextureBindings) {
-        for bitmap in self.entries.values() {
-            if let Store::Texture { id, view } = &bitmap.store
-                && self.drawing
-                && bitmap.last_used == self.tick
-            {
-                bindings.insert(*id, view.clone());
-            }
+    /// Adds the upload `bitmap` under `key`, drawn by `drawing`'s render,
+    /// which [`Self::hit`] has ticked.
+    fn insert(
+        &mut self,
+        key: BitmapKey,
+        mut bitmap: Bitmap,
+        sampler: ImageSampler,
+        drawing: &mut Drawing<'_>,
+    ) -> Image {
+        bitmap.mark(drawing, &self.targets);
+        self.bytes += bitmap.bytes;
+        self.entries
+            .entry(key)
+            .insert_entry(bitmap)
+            .get()
+            .image(sampler)
+    }
+
+    /// Makes the queued atlas uploads in `vello_gpu`'s atlas, in the order
+    /// [`Self::atlas`] allocated them.
+    fn flush(
+        &mut self,
+        paired: &mut Paired,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+    ) {
+        let Paired {
+            renderer,
+            resources,
+        } = paired;
+        for (slot, pixmap) in self.pending.drain(..) {
+            let id = renderer.upload_image(resources, device, queue, encoder, &pixmap);
+            debug_assert_eq!(id, slot, "the replayed atlas allocates as vello_gpu's does");
         }
     }
 
-    /// Ends a render: releases the unpinned uploads, least recently drawn
-    /// first, until the resident bytes are within the budget.
+    /// Releases the unpinned uploads, least recently drawn first, until the
+    /// resident bytes are within the budget; the atlas ones by clearing
+    /// their region in `encoder`.
     ///
-    /// Called once the render's draws are encoded into `encoder` and before
-    /// it is submitted. `destroy_image` clears the freed atlas region with a
-    /// pass in `encoder`, so the clear runs after every draw that sampled the
-    /// region, and an upload that lands there later — a queued write, which
-    /// applies at the start of the submit after this one — after the clear.
-    /// Releasing inside the render instead would let this render's own
-    /// uploads, applied before its encoder runs, be cleared by it.
-    fn finish(
-        &mut self,
-        renderer: &mut Renderer,
-        resources: &mut Resources,
-        encoder: &mut wgpu::CommandEncoder,
-    ) {
+    /// Called with no upload queued, so `vello_gpu`'s atlas has seen every
+    /// allocation [`Self::atlas`] has when both release.
+    fn release(&mut self, paired: &mut Paired, encoder: &mut wgpu::CommandEncoder) {
+        debug_assert!(self.pending.is_empty(), "every upload is made first");
         while self.bytes > self.budget {
             let victim = self
                 .entries
                 .iter()
-                .filter(|(_, bitmap)| bitmap.last_used + PINNED_RENDERS <= self.tick)
-                .min_by_key(|(_, bitmap)| bitmap.last_used)
+                .filter(|(_, bitmap)| !bitmap.pinned(&self.targets))
+                .min_by_key(|(_, bitmap)| bitmap.last_drawn)
                 .map(|(key, _)| *key);
             let Some(key) = victim else {
                 break;
@@ -824,9 +921,212 @@ impl Bitmaps {
             self.bytes -= bitmap.bytes;
             if let Store::Atlas(id) = bitmap.store {
                 self.atlas.deallocate(id);
-                renderer.destroy_image(resources, encoder, id);
+                paired
+                    .renderer
+                    .destroy_image(&mut paired.resources, encoder, id);
             }
         }
+    }
+}
+
+/// A texture of its own holding `pixmap`, drawn as an external texture.
+fn own_texture(device: &wgpu::Device, queue: &wgpu::Queue, pixmap: &Pixmap) -> Store {
+    let (width, height) = (u32::from(pixmap.width()), u32::from(pixmap.height()));
+    let size = wgpu::Extent3d {
+        width,
+        height,
+        depth_or_array_layers: 1,
+    };
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("terminus bitmap"),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        texture.as_image_copy(),
+        pixmap.data_as_u8_slice(),
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(4 * width),
+            rows_per_image: Some(height),
+        },
+        size,
+    );
+    Store::Texture {
+        id: TextureId(next_texture_id()),
+        view: texture.create_view(&wgpu::TextureViewDescriptor::default()),
+    }
+}
+
+impl SharedRaster {
+    /// The renderer, its resources and the bitmap table on `device`.
+    pub(crate) fn new(device: &wgpu::Device) -> Self {
+        Self::with_atlas(device, atlas_config())
+    }
+
+    /// The same, with `atlas` the renderer's image atlas.
+    pub(crate) fn with_atlas(device: &wgpu::Device, atlas: AtlasConfig) -> Self {
+        let settings = render_settings(device, atlas);
+        // The target size here only seeds a config buffer; every render
+        // names its own.
+        let (renderer, resources) = Renderer::new_with(
+            device,
+            &RenderTargetConfig {
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                width: 1,
+                height: 1,
+            },
+            settings,
+        );
+        Self {
+            renderer: Mutex::new(Paired {
+                renderer,
+                resources,
+            }),
+            bitmaps: Mutex::new(Bitmaps::new(
+                MAX_BITMAP_BYTES,
+                settings.memory_settings.image_atlas_config,
+                device.limits().max_texture_dimension_2d,
+            )),
+        }
+    }
+
+    /// Locks the renderer and its resources for one render's GPU half.
+    ///
+    /// A poisoned lock is taken anyway, here and in [`Self::bitmaps`]: the
+    /// panic it records was another target's, and the state it guards is
+    /// consistent between the steps a holder takes.
+    fn renderer(&self) -> MutexGuard<'_, Paired> {
+        self.renderer.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Locks the bitmap table.
+    fn bitmaps(&self) -> MutexGuard<'_, Bitmaps> {
+        self.bitmaps.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The image drawing `image` under `sampler` in `drawing`'s render,
+    /// converted and queued for upload on a miss; `None` when the image's
+    /// pixels are unreadable.
+    ///
+    /// The conversion, and a texture of its own, are made with no lock
+    /// held; another target may upload the same key meanwhile, and then its
+    /// upload is drawn and this one dropped.
+    fn bitmap(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        image: &ImageData,
+        sampler: ImageSampler,
+        drawing: &mut Drawing<'_>,
+    ) -> Option<Image> {
+        let key = {
+            let mut bitmaps = self.bitmaps();
+            let key = bitmaps.key(image, sampler);
+            if let Some(image) = bitmaps.hit(&key, sampler, drawing) {
+                return Some(image);
+            }
+            key
+        };
+        let (pixmap, opaque) = pixmap(image, key.edge)?;
+        let (width, height) = (pixmap.width(), pixmap.height());
+        let bytes = u64::from(width) * u64::from(height) * 4;
+        let mut bitmaps = self.bitmaps();
+        if let Some(image) = bitmaps.hit(&key, sampler, drawing) {
+            return Some(image);
+        }
+        // `upload_image` allocates with no padding.
+        let slot = (!key.nearest && width.max(height) <= MAX_ATLAS_BITMAP_SIDE)
+            .then(|| bitmaps.atlas.allocate(width, height, 0).ok())
+            .flatten();
+        let store = if let Some(slot) = slot {
+            bitmaps.pending.push((slot, pixmap));
+            Store::Atlas(slot)
+        } else {
+            drop(bitmaps);
+            let store = own_texture(device, queue, &pixmap);
+            bitmaps = self.bitmaps();
+            if let Some(image) = bitmaps.hit(&key, sampler, drawing) {
+                return Some(image);
+            }
+            store
+        };
+        let bitmap = Bitmap {
+            store,
+            width,
+            height,
+            opaque,
+            bytes,
+            last_drawn: 0,
+            pins: SmallVec::new(),
+        };
+        Some(bitmaps.insert(key, bitmap, sampler, drawing))
+    }
+
+    /// The GPU half of a render on `gpu`, whose rasterizer this is: `scene`,
+    /// which a target has filled, drawn into `view` over `clear` with
+    /// `bindings` bound, under the renderer lock — the queued uploads, the
+    /// render, the releases and the submit.
+    /// Notes the wait for the lock and the time it was held in `stats`.
+    fn render(
+        &self,
+        gpu: &SharedGpu,
+        scene: &Scene,
+        view: &wgpu::TextureView,
+        bindings: &TextureBindings,
+        clear: Color,
+        stats: &mut Stats,
+    ) -> Result<(), String> {
+        let SharedGpu { device, queue, .. } = gpu;
+        let render_size = RenderSize {
+            width: scene.width(),
+            height: scene.height(),
+        };
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("terminus vello_gpu frame"),
+        });
+        let waited = ClockInstant::now();
+        let mut paired = self.renderer();
+        let started = ClockInstant::now();
+        stats.wait = started.duration_since(waited);
+        self.bitmaps()
+            .flush(&mut paired, device, queue, &mut encoder);
+        let Paired {
+            renderer,
+            resources,
+        } = &mut *paired;
+        let result = renderer.render(
+            scene,
+            resources,
+            device,
+            queue,
+            &mut encoder,
+            &render_size,
+            view,
+            None,
+            bindings,
+            TargetInit::Clear(ClearSettings::Viewport {
+                color: clear.convert(),
+            }),
+        );
+        {
+            // Uploads queued while this target rendered were allocated
+            // before anything below is released, so they are made first.
+            let mut bitmaps = self.bitmaps();
+            bitmaps.flush(&mut paired, device, queue, &mut encoder);
+            bitmaps.release(&mut paired, &mut encoder);
+        }
+        // Submitted under the lock: the releases' clears must reach the queue
+        // before any upload a later render makes into the freed regions.
+        gpu.submit([encoder.finish()]);
+        drop(paired);
+        stats.render = started.elapsed();
+        result.map_err(|error| error.to_string())
     }
 }
 
@@ -879,35 +1179,23 @@ fn pixmap(image: &ImageData, edge: (bool, bool)) -> Option<(Pixmap, bool)> {
     ))
 }
 
-impl SparseBackend {
-    pub(crate) fn new(device: &wgpu::Device) -> Self {
-        Self::with_atlas(device, atlas_config())
-    }
+/// The next target's name in the bitmaps' pins.
+fn next_target() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
 
-    /// A backend whose image atlas is `atlas`.
-    fn with_atlas(device: &wgpu::Device, atlas: AtlasConfig) -> Self {
-        let settings = render_settings(device, atlas);
-        // The target size here only seeds a config buffer; every render
-        // names its own.
-        let (renderer, resources) = Renderer::new_with(
-            device,
-            &RenderTargetConfig {
-                format: wgpu::TextureFormat::Rgba8Unorm,
-                width: 1,
-                height: 1,
-            },
-            settings,
-        );
+impl SparseBackend {
+    /// A target's rasterizer on `gpu`.
+    pub(crate) fn new(gpu: &Arc<SharedGpu>) -> Self {
         Self {
-            renderer,
-            resources,
+            gpu: Arc::clone(gpu),
+            target: next_target(),
+            generation: 0,
             scene: Scene::new(1, 1),
             replay: Replay::default(),
-            images: Bitmaps::new(
-                MAX_BITMAP_BYTES,
-                settings.memory_settings.image_atlas_config,
-            ),
             bound: FxHashMap::default(),
+            textures: Vec::new(),
             last: Stats::default(),
         }
     }
@@ -929,15 +1217,13 @@ impl SparseBackend {
 
     /// Renders `list` into `view`, a `width`×`height` RGBA8 target cleared
     /// to `base_color` first.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "one render's full inputs: the device pair, the list, and the target with its \
-                  size and base colour"
-    )]
+    ///
+    /// The list is replayed into this target's scene with no lock held but
+    /// the bitmap table's, briefly, per bitmap draw; the shared renderer is
+    /// locked for the upload, render, release and submit that follow (see
+    /// [`SharedRaster`]).
     pub(crate) fn render(
         &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
         list: &DisplayList,
         view: &wgpu::TextureView,
         width: u32,
@@ -946,18 +1232,21 @@ impl SparseBackend {
     ) -> Result<(), String> {
         let (w, h) = (width as u16, height as u16);
         let Self {
-            renderer,
-            resources,
+            gpu,
+            target,
+            generation,
             scene,
             replay: kept,
-            images,
             bound,
+            textures,
             last,
         } = self;
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("terminus vello_gpu frame"),
-        });
-        images.begin();
+        let SharedGpu {
+            device,
+            queue,
+            raster: shared,
+            ..
+        } = &**gpu;
 
         let started = ClockInstant::now();
         scene.reset_and_resize(w, h);
@@ -981,57 +1270,45 @@ impl SparseBackend {
         } else {
             base_color
         };
+        textures.clear();
+        let mut drawing = Drawing {
+            target: *target,
+            generation,
+            tick: None,
+            textures,
+        };
         let mut stats = replay(
             scene,
             list,
             kept,
             &mut Pictures {
                 bitmap: &mut |paint| {
-                    images.paint(
-                        renderer,
-                        resources,
-                        device,
-                        queue,
-                        &mut encoder,
-                        &paint.image,
-                        paint.sampler,
-                    )
+                    shared.bitmap(device, queue, &paint.image, paint.sampler, &mut drawing)
                 },
                 bound: &|id| bound.contains_key(&id),
             },
         );
-        stats.encode = started.elapsed();
-
-        let started = ClockInstant::now();
-        let render_size = RenderSize {
-            width: w,
-            height: h,
-        };
+        kept.maintain();
         let mut bindings = TextureBindings::new();
         for (&id, view) in bound.iter() {
             bindings.insert(TextureId(id), view.clone());
         }
-        images.bind_into(&mut bindings);
-        let result = renderer.render(
-            scene,
-            resources,
-            device,
-            queue,
-            &mut encoder,
-            &render_size,
-            view,
-            None,
-            &bindings,
-            TargetInit::Clear(ClearSettings::Viewport {
-                color: clear.convert(),
-            }),
-        );
-        images.finish(renderer, resources, &mut encoder);
-        kept.maintain();
-        queue.submit([encoder.finish()]);
-        stats.render = started.elapsed();
+        for (id, view) in drawing.textures.drain(..) {
+            bindings.insert(id, view);
+        }
+        stats.encode = started.elapsed();
+
+        let result = shared.render(gpu, scene, view, &bindings, clear, &mut stats);
         *last = stats;
-        result.map_err(|error| error.to_string())
+        result
+    }
+}
+
+impl Drop for SparseBackend {
+    /// Gives up this target's pins: what only it drew becomes releasable at
+    /// the next render that runs over the budget.
+    fn drop(&mut self) {
+        self.gpu.raster.bitmaps().targets.remove(&self.target);
     }
 }
 
@@ -1042,22 +1319,22 @@ mod tests {
 
     use vello_gpu::{AllocationStrategy, AtlasConfig};
 
-    use super::{PINNED_RENDERS, SparseBackend, Store};
+    use super::{Bitmaps, PINNED_RENDERS, SharedRaster, SparseBackend, Store};
     use crate::kurbo::{Affine, Rect};
     use crate::paint::display_list::DisplayList;
     use crate::peniko::{
         BlendMode, Blob, Color, Extend, Fill, ImageAlphaType, ImageBrush, ImageData, ImageFormat,
         ImageQuality, ImageSampler,
     };
-    use crate::render::gpu::{GpuDevice, instance};
+    use crate::render::gpu::SharedGpu;
 
     const RED: [u8; 4] = [255, 0, 0, 255];
     const BLUE: [u8; 4] = [0, 0, 255, 255];
 
-    /// A device, a backend on it, and one `width` × `height` target read back
-    /// after each render.
+    /// A stack of its own, a target's backend on it, and one `width` ×
+    /// `height` texture read back after each render.
     struct Rig {
-        gpu: GpuDevice,
+        gpu: Arc<SharedGpu>,
         backend: SparseBackend,
         target: wgpu::Texture,
         width: u32,
@@ -1070,9 +1347,17 @@ mod tests {
         }
 
         fn with_atlas(width: u32, height: u32, atlas: AtlasConfig) -> Self {
-            let gpu = pollster::block_on(GpuDevice::request(&instance(), None))
-                .expect("a usable GPU adapter is mandatory");
-            let backend = SparseBackend::with_atlas(&gpu.device, atlas);
+            Self::on(
+                &SharedGpu::private(|device| SharedRaster::with_atlas(device, atlas)),
+                width,
+                height,
+            )
+        }
+
+        /// A target's backend on `gpu`, with its own texture.
+        fn on(gpu: &Arc<SharedGpu>, width: u32, height: u32) -> Self {
+            let gpu = Arc::clone(gpu);
+            let backend = SparseBackend::new(&gpu);
             let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("sparse test target"),
                 size: wgpu::Extent3d {
@@ -1099,20 +1384,12 @@ mod tests {
         /// Renders `scene` over white and answers the target's pixel at
         /// each of `at`.
         fn render(&mut self, scene: &DisplayList) -> Pixels {
-            let (device, queue) = (&self.gpu.device, &self.gpu.queue);
+            let device = &self.gpu.device;
             let view = self
                 .target
                 .create_view(&wgpu::TextureViewDescriptor::default());
             self.backend
-                .render(
-                    device,
-                    queue,
-                    scene,
-                    &view,
-                    self.width,
-                    self.height,
-                    Color::WHITE,
-                )
+                .render(scene, &view, self.width, self.height, Color::WHITE)
                 .expect("render");
             let row = self.width * 4;
             let padded = row.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
@@ -1142,7 +1419,7 @@ mod tests {
                     depth_or_array_layers: 1,
                 },
             );
-            queue.submit([encoder.finish()]);
+            self.gpu.submit([encoder.finish()]);
             let slice = buffer.slice(..);
             let (sender, receiver) = flume::bounded(1);
             slice.map_async(wgpu::MapMode::Read, move |result| {
@@ -1160,6 +1437,13 @@ mod tests {
                     .flat_map(|line| line[..row as usize].iter().copied())
                     .collect(),
             }
+        }
+    }
+
+    impl Rig {
+        /// The stack's bitmap table.
+        fn bitmaps(&self) -> std::sync::MutexGuard<'_, Bitmaps> {
+            self.gpu.raster.bitmaps()
         }
     }
 
@@ -1255,7 +1539,7 @@ mod tests {
         assert_eq!(pixels.at(17, 12), RED, "a repeat starts over");
         assert_eq!(pixels.at(30, 12), BLUE);
         assert_eq!(
-            rig.backend.images.entries.len(),
+            rig.bitmaps().entries.len(),
             2,
             "the padded and the repeating draw are two uploads of one blob",
         );
@@ -1307,7 +1591,47 @@ mod tests {
             ],
             [RED, BLUE, BLUE, RED]
         );
-        assert_eq!(rig.backend.images.entries.len(), 2);
+        assert_eq!(rig.bitmaps().entries.len(), 2);
+    }
+
+    /// A nearest-neighbour draw samples a texture of its own, where no atlas
+    /// offset is added to its sample positions, and the same blob drawn
+    /// smoothly is an atlas upload of its own.
+    #[test]
+    fn a_nearest_neighbour_bitmap_draws_from_its_own_texture() {
+        let mut rig = Rig::new(12, 6);
+        let stripes = bitmap(4, &[RED, RED, BLUE, BLUE]);
+        let mut scene = DisplayList::new();
+        for (row, quality) in [ImageQuality::Low, ImageQuality::Medium]
+            .into_iter()
+            .enumerate()
+        {
+            let y = 3.0 * row as f64;
+            draw(
+                &mut scene,
+                &stripes,
+                quality,
+                Extend::Pad,
+                Affine::translate((0.0, y)) * Affine::scale(3.0),
+                Rect::new(0.0, y, 12.0, y + 3.0),
+            );
+        }
+        let pixels = rig.render(&scene);
+        for y in [1, 4] {
+            assert_eq!([pixels.at(1, y), pixels.at(10, y)], [RED, BLUE], "row {y}");
+        }
+        let mut stores: Vec<_> = rig
+            .bitmaps()
+            .entries
+            .iter()
+            .map(|(key, bitmap)| (key.nearest, matches!(bitmap.store, Store::Texture { .. })))
+            .collect();
+        stores.sort_unstable();
+        assert_eq!(
+            stores,
+            [(false, false), (true, true)],
+            "one upload per filter, the nearest-neighbour one in a texture of its own"
+        );
     }
 
     /// Past the budget, the bitmaps a render did not draw are released least
@@ -1319,7 +1643,7 @@ mod tests {
         let red = bitmap(1, &[RED]);
         let blue = bitmap(1, &[BLUE]);
         // One padded 2×2 upload's bytes.
-        rig.backend.images.budget = 16;
+        rig.bitmaps().budget = 16;
         let frame = |image: &ImageData| {
             let mut scene = DisplayList::new();
             draw(
@@ -1333,18 +1657,18 @@ mod tests {
             scene
         };
         assert_eq!(rig.render(&frame(&red)).at(4, 4), RED);
-        assert_eq!(rig.backend.images.bytes, 16);
+        assert_eq!(rig.bitmaps().bytes, 16);
 
         // Red stays pinned through the renders after it, then goes; a
         // render drawing no bitmap is not one of them.
         for _ in 1..PINNED_RENDERS {
             assert_eq!(rig.render(&frame(&blue)).at(4, 4), BLUE);
             let _ = rig.render(&DisplayList::new());
-            assert_eq!(rig.backend.images.entries.len(), 2, "red is pinned");
+            assert_eq!(rig.bitmaps().entries.len(), 2, "red is pinned");
         }
         assert_eq!(rig.render(&frame(&blue)).at(4, 4), BLUE);
-        assert_eq!(rig.backend.images.entries.len(), 1, "red was released");
-        assert_eq!(rig.backend.images.bytes, 16);
+        assert_eq!(rig.bitmaps().entries.len(), 1, "red was released");
+        assert_eq!(rig.bitmaps().bytes, 16);
 
         for _ in 0..2 {
             for _ in 0..PINNED_RENDERS {
@@ -1354,7 +1678,7 @@ mod tests {
                 assert_eq!(rig.render(&frame(&blue)).at(4, 4), BLUE);
             }
         }
-        assert_eq!(rig.backend.images.entries.len(), 1);
+        assert_eq!(rig.bitmaps().entries.len(), 1);
 
         // A render drawing both keeps both, past the budget, for itself.
         let mut both = frame(&red);
@@ -1369,12 +1693,12 @@ mod tests {
         let pixels = rig.render(&both);
         assert_eq!(pixels.at(1, 4), RED);
         assert_eq!(pixels.at(6, 4), BLUE);
-        assert_eq!(rig.backend.images.entries.len(), 2);
+        assert_eq!(rig.bitmaps().entries.len(), 2);
         for _ in 0..PINNED_RENDERS {
             let _ = rig.render(&frame(&blue));
         }
         assert_eq!(
-            rig.backend.images.entries.len(),
+            rig.bitmaps().entries.len(),
             1,
             "and once it is unpinned, red goes",
         );
@@ -1393,7 +1717,7 @@ mod tests {
         draw(
             &mut scene,
             &image,
-            ImageQuality::Low,
+            ImageQuality::Medium,
             Extend::Pad,
             Affine::translate((-1092.0, 0.0)),
             Rect::new(0.0, 0.0, 16.0, 4.0),
@@ -1403,29 +1727,28 @@ mod tests {
         assert_eq!(pixels.at(7, 0), BLUE);
         assert_eq!(pixels.at(12, 0), BLUE, "padded past the end");
         assert!(matches!(
-            rig.backend
-                .images
+            rig.bitmaps()
                 .entries
                 .values()
                 .next()
                 .map(|bitmap| &bitmap.store),
             Some(Store::Texture { .. })
         ));
-        rig.backend.images.budget = 0;
+        rig.bitmaps().budget = 0;
         let other = bitmap(1, &[RED]);
         for _ in 0..PINNED_RENDERS {
             let mut scene = DisplayList::new();
             draw(
                 &mut scene,
                 &other,
-                ImageQuality::Low,
+                ImageQuality::Medium,
                 Extend::Pad,
                 Affine::IDENTITY,
                 Rect::new(0.0, 0.0, 1.0, 1.0),
             );
             let _ = rig.render(&scene);
         }
-        assert_eq!(rig.backend.images.entries.len(), 1, "the long one went");
+        assert_eq!(rig.bitmaps().entries.len(), 1, "the long one went");
     }
 
     /// Bitmaps past what the atlas has room for draw from textures of their
@@ -1452,7 +1775,7 @@ mod tests {
                 draw(
                     &mut scene,
                     image,
-                    ImageQuality::Low,
+                    ImageQuality::Medium,
                     Extend::Pad,
                     Affine::translate((x, 0.0)),
                     Rect::new(x, 0.0, x + 40.0, 40.0),
@@ -1467,8 +1790,7 @@ mod tests {
         );
         let stores = |rig: &Rig| {
             let mut stores: Vec<_> = rig
-                .backend
-                .images
+                .bitmaps()
                 .entries
                 .iter()
                 .map(|(key, bitmap)| (key.blob, matches!(bitmap.store, Store::Atlas(_))))
@@ -1482,7 +1804,7 @@ mod tests {
         assert_eq!(stores(&rig), [true, false, false], "only the first fits");
 
         // Once red is released, the next upload takes its room.
-        rig.backend.images.budget = 0;
+        rig.bitmaps().budget = 0;
         for _ in 0..PINNED_RENDERS {
             let _ = rig.render(&frame(&images[1..2]));
         }
@@ -1495,12 +1817,129 @@ mod tests {
         let pixels = rig.render(&frame(&[fresh]));
         assert_eq!(pixels.at(20, 20), RED);
         assert!(
-            rig.backend
-                .images
+            rig.bitmaps()
                 .entries
                 .values()
                 .any(|bitmap| matches!(bitmap.store, Store::Atlas(_))),
             "the freed room is reused",
+        );
+    }
+
+    /// A 1 × 1 bitmap of `texel` on a blob of its own, filling `rect`, drawn
+    /// from the atlas.
+    fn swatch(scene: &mut DisplayList, texel: [u8; 4], rect: Rect) -> ImageData {
+        let image = bitmap(1, &[texel]);
+        draw(
+            scene,
+            &image,
+            ImageQuality::Medium,
+            Extend::Pad,
+            Affine::translate((rect.x0, rect.y0)),
+            rect,
+        );
+        image
+    }
+
+    /// Two targets on one stack, each on a thread of its own, draw bitmaps
+    /// of their own — a fresh one every frame, past a budget that releases
+    /// the old ones as they go — and one they both draw. Every frame of
+    /// each shows its own pixels: the uploads one target's replay queues
+    /// and the releases the other's render makes leave both atlases in
+    /// step, and neither releases what the other is drawing.
+    #[test]
+    fn two_targets_on_two_threads_draw_their_own_bitmaps() {
+        let gpu = SharedGpu::private(SharedRaster::new);
+        // Room for three padded 2 × 2 uploads.
+        gpu.raster.bitmaps().budget = 48;
+        let common = bitmap(1, &[[0, 255, 0, 255]]);
+        std::thread::scope(|scope| {
+            for side in 0..2_u8 {
+                let gpu = &gpu;
+                let common = &common;
+                scope.spawn(move || {
+                    let mut rig = Rig::on(gpu, 8, 4);
+                    for frame in 0..48_u8 {
+                        let own = [side * 120, frame * 5, 255 - side * 120, 255];
+                        let mut scene = DisplayList::new();
+                        swatch(&mut scene, own, Rect::new(0.0, 0.0, 4.0, 4.0));
+                        draw(
+                            &mut scene,
+                            common,
+                            ImageQuality::Low,
+                            Extend::Pad,
+                            Affine::translate((4.0, 0.0)),
+                            Rect::new(4.0, 0.0, 8.0, 4.0),
+                        );
+                        let pixels = rig.render(&scene);
+                        assert_eq!(pixels.at(1, 1), own, "target {side}, frame {frame}");
+                        assert_eq!(pixels.at(6, 1), [0, 255, 0, 255], "target {side}");
+                    }
+                });
+            }
+        });
+        let bitmaps = gpu.raster.bitmaps();
+        assert!(bitmaps.pending.is_empty(), "every queued upload was made");
+        assert!(
+            bitmaps.entries.len() <= 2 * PINNED_RENDERS as usize + 1,
+            "the old swatches were released: {} resident",
+            bitmaps.entries.len()
+        );
+    }
+
+    /// A bitmap stays pinned by every live target that drew it, counted in
+    /// that target's own renders, and a target that goes away pins nothing:
+    /// another target's renders release what only it drew, and draw on
+    /// from what they share.
+    #[test]
+    fn a_target_that_goes_away_releases_its_pins_and_nothing_else() {
+        let gpu = SharedGpu::private(SharedRaster::new);
+        gpu.raster.bitmaps().budget = 0;
+        let mut first = Rig::on(&gpu, 8, 4);
+        let mut second = Rig::on(&gpu, 8, 4);
+
+        let mut scene = DisplayList::new();
+        let only_first = swatch(&mut scene, RED, Rect::new(0.0, 0.0, 4.0, 4.0));
+        let both = swatch(&mut scene, BLUE, Rect::new(4.0, 0.0, 8.0, 4.0));
+        let pixels = first.render(&scene);
+        assert_eq!([pixels.at(1, 1), pixels.at(6, 1)], [RED, BLUE]);
+
+        let mut theirs = DisplayList::new();
+        draw(
+            &mut theirs,
+            &both,
+            ImageQuality::Medium,
+            Extend::Pad,
+            Affine::IDENTITY,
+            Rect::new(0.0, 0.0, 8.0, 4.0),
+        );
+        // The second target's renders, however many, release nothing the
+        // first drew in its last render.
+        for _ in 0..2 * PINNED_RENDERS {
+            assert_eq!(second.render(&theirs).at(1, 1), BLUE);
+        }
+        assert_eq!(
+            gpu.raster.bitmaps().entries.len(),
+            2,
+            "both pinned by the first"
+        );
+
+        drop(first);
+        assert_eq!(second.render(&theirs).at(1, 1), BLUE, "drawn on");
+        let bitmaps = gpu.raster.bitmaps();
+        assert_eq!(
+            bitmaps
+                .entries
+                .keys()
+                .map(|key| key.blob)
+                .collect::<Vec<_>>(),
+            [both.data.id()],
+            "what only the first drew was released, what the second draws kept"
+        );
+        assert!(
+            !bitmaps
+                .entries
+                .keys()
+                .any(|key| key.blob == only_first.data.id())
         );
     }
 

@@ -110,7 +110,7 @@ use smallvec::SmallVec;
 
 use crate::paint::display_list::DisplayList;
 use crate::peniko::ImageData;
-use crate::render::gpu::GpuDevice;
+use crate::render::gpu::SharedGpu;
 use crate::render::svg::{self, VectorDocument};
 use crate::tree::document::NodeId;
 
@@ -249,11 +249,11 @@ impl std::fmt::Debug for VectorImage {
 /// Largest per-axis pixel count of a bitmap the rasterizer can draw.
 ///
 /// The `max_texture_dimension_2d` of the limits every device of this crate
-/// is created with (`render::gpu::GpuDevice::LIMITS`, wgpu's defaults): a
+/// is created with (`render::gpu::SharedGpu::LIMITS`, wgpu's defaults): a
 /// bitmap past `render::sparse`'s atlas side is drawn from a texture of its
 /// own, and no texture may be longer. A constant rather than a reading of a
 /// device, because a host sizes its decodes by it before any device exists.
-pub const MAX_RENDERABLE_DIMENSION: u32 = GpuDevice::LIMITS.max_texture_dimension_2d;
+pub const MAX_RENDERABLE_DIMENSION: u32 = SharedGpu::LIMITS.max_texture_dimension_2d;
 
 /// Whether the rasterizer can draw this bitmap.
 ///

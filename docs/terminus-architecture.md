@@ -664,9 +664,30 @@ The crate also owns the DOM-free render floor absorbed from the former `pulsar`
 crate (2026-08-04): the `render` module holds the `FrameImages` trait
 (re-exported at the crate root) and the `render::gpu` wgpu
 render-to-texture/readback backend (`gpu::Headless`, plus the
-`instance`/`GpuDevice`/`read_texture` seams the painter's window builds
+`SharedGpu`/`read_texture` seams the painter's window builds
 against), over the one rasterizer `render::raster::Raster` (`vello_gpu`'s
-sparse strips, `render::sparse`). `render::blur` is the third seam, and the
+sparse strips, `render::sparse`). Every target in a process — each `Headless`
+and each painter window — draws through one `render::gpu::SharedGpu`: one wgpu
+device and queue, one `vello_gpu::Renderer` with the `Resources` paired to it,
+and one table of uploaded bitmaps (`render::sparse::SharedRaster`), so the
+shaders are compiled once and a bitmap two views draw is uploaded once. The
+stack is held weakly and goes with the last target; a native one is
+process-wide, a wasm32 one per thread. A window whose surface the shared
+adapter cannot present to gets a stack of its own. Each target's `Raster`
+keeps its own scene, replay caches and bound textures, and replays its list —
+the CPU strip generation — on its own thread without the renderer's lock; the
+lock covers the bitmap uploads, the render and the submit. Every submit on a
+stack goes through `SharedGpu::submit`, and a window's surface configuration
+holds the same lock, because wgpu fails a configuration when another thread
+submits while it waits for the device to go idle. A bitmap is pinned
+while a live target drew it in one of that target's last four bitmap-drawing
+renders, and a target going away drops its pins. A bitmap drawn
+nearest-neighbour (`image-rendering: pixelated`) takes a texture of its own
+rather than an atlas slot: `vello_gpu` adds an atlas slot's offset to the
+sample position in f32, so a pixel centre on a texel edge would otherwise read
+one texel or the other depending on where in the shared atlas the bitmap
+landed. The render target, readback
+buffer, filter bakes and vector raster cache stay per target. `render::blur` is the third seam, and the
 one narrow exception to the floor's DOM-freedom: `FilterTextures::prepare`
 reads a `CommittedFrame`'s filter side table and calls the frame's own
 `bake_filter`, because a bake *is* a partial replay of that frame's compose
