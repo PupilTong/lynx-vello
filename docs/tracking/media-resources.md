@@ -311,7 +311,7 @@ revision 4.1 of the design, ruled 2026-10-10):
    `<svg>` lays out at it; `<image>` keeps its `contain: size` rule.
 5. **Encode, on the document thread.** Applying a parsed document shapes
    its text through the document's own `TextContext` (fonts from the SVG's
-   own attributes, `@font-face` faces included) and encodes one vello scene,
+   own attributes, `@font-face` faces included) and records one display list,
    held by `terminus`'s image registry as a ready vector image. The painter's
    `FrameImages`, the bitmap atlas and `ImageSizeHint` never see it.
 6. **Paint.** Where `paint/background.rs` would emit an image draw
@@ -322,11 +322,11 @@ revision 4.1 of the design, ruled 2026-10-10):
    `object-fit`/`object-position`, `background-size`, position and repeat
    come from the same code as for a raster. The painter's raster cache
    (`crates/terminus/src/render/vector_textures.rs`) renders each draw's scene
-   with `render_to_texture` at its device size, the viewport mapped onto it
+   with `Raster::render_to_texture` at its device size, the viewport mapped onto it
    by `preserveAspectRatio`, keys the texture by `(image, width, height)`,
    keeps the textures under a byte budget (64 MiB native, 32 MiB wasm32;
    least recently used first, the frame's own draws pinned), and draws it as
-   an image quad.
+   a texture.
 7. **Events.** `<image>` with an SVG `src` fires `load` with the natural size,
    as for a raster, and `error` when the document does not parse. `<svg>`
    fires `load` with the element's border-box layout size read at delivery

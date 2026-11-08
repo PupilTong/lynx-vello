@@ -153,9 +153,9 @@ fn blur_shapes_matrix_matches_reference() {
             0,
             &subject("border: 6px solid #b45309; box-sizing: border-box; filter: blur(3px)"),
         ),
-        // White on white. The premultiply pass is the whole reason this cell
-        // is blank rather than ringed: filtering vello's unpremultiplied
-        // target averages the colour of the fully transparent margin into the
+        // White on white. The cell is blank rather than ringed because the
+        // blur chain filters premultiplied colour: filtering unpremultiplied
+        // colour averages the colour of the fully transparent margin into the
         // square's edge, and a dark halo appears.
         cell(4, 1, &subject("background-color: #ffffff; filter: blur(6px)")),
         cell(

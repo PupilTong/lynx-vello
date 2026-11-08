@@ -2,7 +2,7 @@
 
 `crates/bobcat-wasm` is the `wasm-bindgen` browser embedder and npm facade for
 `wasm32-unknown-unknown`. It builds with shared memory and uses crates.io
-Vello 0.11/wgpu 30. It runs the same core-owned QuickJS engine as native
+vello_gpu 0.3/wgpu 30. It runs the same core-owned QuickJS engine as native
 Bobcat.
 
 ## Execution and ownership
@@ -18,7 +18,7 @@ Render Worker
   initializes shared Wasm
   owns one Painter over the transferred canvas, for its whole life
   owns the opaque LynxView of the current page + the resource registry
-  owns Vello/wgpu/OffscreenCanvas
+  owns vello_gpu/wgpu/OffscreenCanvas
   └── core wasm_thread spawn, two Workers per LynxGroup
       ├── Lynx main/VM Worker (bobcat-main)
       │   ├── owner-thread-bound QuickJS realm per view

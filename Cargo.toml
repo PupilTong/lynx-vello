@@ -125,7 +125,8 @@ wgpu = "30.0.1"
 # Already in the tree through wgpu's Metal backend.
 objc2-quartz-core = { version = "0.3", default-features = false, features = ["std", "CALayer", "CAMetalLayer"] }
 # SVG documents as vector images: terminus's `render/svg` parses the XML with
-# `roxmltree` and its attribute values with `svgtypes` into a vello scene;
+# `roxmltree` and its attribute values with `svgtypes` into a `VectorDocument`,
+# which the document records into a display list;
 # CSS inside an SVG is not read (docs/svg-lynx-component-design.md).
 roxmltree = "0.21.1"
 svgtypes = "0.16.1"

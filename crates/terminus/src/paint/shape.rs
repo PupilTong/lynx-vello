@@ -1,7 +1,7 @@
 #![allow(
     clippy::cast_lossless,
     clippy::cast_possible_truncation,
-    reason = "CSS/style geometry is f32 while Vello/Kurbo geometry is f64"
+    reason = "CSS/style geometry is f32 while Kurbo geometry is f64"
 )]
 
 //! Box geometry: rounded-rect shapes with per-corner elliptical radii, ring

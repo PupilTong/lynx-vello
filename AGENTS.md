@@ -47,8 +47,10 @@ DOM + CSS engine). We replace that browser-hosted implementation with a native,
 cross-platform engine built on:
 
 - **[stylo](https://github.com/servo/stylo)** — CSS parsing/cascade/computed-style engine (Servo's)
-- **[vello](https://github.com/linebender/vello)** — the scene format the paint walk records
-  (`vello::Scene`); rasterized by **vello_gpu** (0.3, sparse strips on wgpu 30)
+- **[vello_gpu](https://github.com/linebender/vello)** (0.3) — the rasterizer, from the
+  linebender Vello project: sparse strips generated on the CPU and composited on wgpu 30.
+  The paint walk records terminus's own display list, which each render replays into a
+  `vello_gpu::Scene`.
 - **[parley](https://github.com/linebender/parley)** (0.12) — text layout & shaping, including
   the CSS 2.2 §10.8.1 line boxes both paragraph kinds report
 
@@ -3052,7 +3054,7 @@ commit does.
 Headed mode uses a native winit window with display-backed vsync and tracks
 both logical viewport size and device-pixel ratio; headless mode uses a
 configurable synthetic vsync rate, skips catch-up bursts after slow frames, and
-retains its Vello renderer, render texture and staging buffer across frames.
+retains its rasterizer, render texture and staging buffer across frames.
 Both expose a GDB-like stdin command prompt (`continue`, `pause`, `frame`,
 `screenshot`, `help`, `quit`; headless also `set/show vsync`), with editing
 commands that drive a page without a keyboard: `tap X Y`, `key KEY [TEXT]`,
@@ -3728,7 +3730,9 @@ Subsystems:
   `content-visibility: auto` relevance determination (`relevance.rs`), which
   runs inside `render` between the paint-order build and the walk.
 - `paint/` — the document-owned private `FramePainter`, walker, fragment painters
-  and the retained `vello::Scene` a `commit` publishes as `CommittedFrame`.
+  and the display list they record into (`paint/display_list.rs`: fills,
+  strokes, clips, layers and glyph runs with their bounds), whose fragments a
+  `commit` publishes in its `CommittedFrame`.
 - `scroll/` — CSSOM-View geometry, per-node offsets, `scroll_to`/`scroll_by`/
   `scroll_chain`, and the one chain walk (`drive_chain`) both the document
   and the presenting painter (`painter/`) run: `overscroll-behavior` fences the reach,
@@ -3800,7 +3804,11 @@ Subsystems:
   engine hears. `event::EventDetail` is the one description of an event's
   payload; `CustomElement::observed_events` gates the walk.
 - `render/` — the DOM-free floor absorbed from the former `pulsar` crate
-  (2026-08-04): `FrameImages` and the `render::gpu` wgpu backend. `render::blur`
+  (2026-08-04): `FrameImages`, the `render::gpu` wgpu backend
+  (`SharedGpu`: one device, one `vello_gpu` renderer and one bitmap table
+  shared by every target in a process), and the rasterizer `render::raster::Raster`,
+  which replays a display list into `vello_gpu` (`render::sparse`), drawing
+  glyphs as outlines (glifo's glyph atlas cache is off). `render::blur`
   is the one exception: a `filter: blur()` bake is a partial replay of a
   committed frame's compose program, so it reads `CommittedFrame`'s filter side
   table, while still naming no node, style, layout or paint-order type. A
@@ -3839,12 +3847,11 @@ so every report of one parse (one per view waiting on a load) holds one copy.
 `Document::apply_image_events` never parses. Applying a parsed document shapes its `<text>` through the document's own
 `TextContext` (`seldon::text::shape_line`; font family, weight, style,
 stretch and size come from the SVG's own attributes, not the host element's
-style) and encodes it once into a crate-private `VectorImage` (an
-`Arc<Scene>`, its viewport, its `preserveAspectRatio`, a process-unique key),
+style) and records it once into a crate-private `VectorImage` (an
+`Arc<DisplayList>`, its viewport, its `preserveAspectRatio`, a process-unique key),
 kept in `ImageState::Ready { width, height, kind: ImageKind::Vector(..) }`
 with the document's natural size in whole CSS px (at least one per axis). Every
-layer the converter opens is `Normal`: no blend can be set without CSS, so
-there is no vello #1198 isolation to carry. A later
+layer the converter opens is `Normal`: no blend can be set without CSS. A later
 `@font-face` does not re-shape already-encoded text.
 
 The frame carries the scene, never pixels: each visible tile of a vector
@@ -3853,12 +3860,12 @@ image becomes a `VectorDraw` in `Presentation.vector_draws`, referenced by
 `FrameImages` never sees one and the monolithic `Document::scene()` draws
 none. The painter's raster cache (`render/vector_textures.rs`,
 `VectorTextures`, owned beside `FilterTextures`) bakes each draw with
-`render_to_texture` at its device size, keyed by `(image key, width,
-height)`, registers the texture as a straight-alpha override image and
-replays the op as an image quad; resident textures are bounded by
-`MAX_VECTOR_TEXTURE_BYTES` (64 MiB native, 32 MiB wasm32) with the frame's
-draws pinned and the rest evicted least-recently-used. `Headless` bakes the
-same way, so goldens exercise it. Masks, filters, patterns, markers and
+`Raster::render_to_texture` at its device size, keyed by `(image key, width,
+height)`, binds the premultiplied texture under a texture id
+(`Raster::bind_texture`) and replays the op as a draw of that texture;
+resident textures are bounded by `MAX_VECTOR_TEXTURE_BYTES` (64 MiB native,
+32 MiB wasm32) with the frame's draws pinned and the rest evicted
+least-recently-used. `Headless` bakes the same way, so goldens exercise it. Masks, filters, patterns, markers and
 nested `image` elements draw nothing.
 
 **Documents handed over as markup.** `Document::set_image_document(node,
@@ -4399,11 +4406,12 @@ section is the only place the absolute paths are spelled out.
   work (adding a CSS property, porting a built-in component, auditing a JS API
   for parity), usable from either Claude Code or Codex.
 - `docs/text-rendering-research.md` — **read before proposing any text-painting
-  performance work.** Why vello has no glyph atlas and cannot get one, what a
-  text-heavy frame actually costs here (measured), where the ecosystem's answer
-  lives (`glifo` via `vello_hybrid`), and why `glyphon` and a hand-rolled atlas
-  are both ruled out. Conclusion is *don't switch renderers yet*, so the useful
-  contribution is evidence, not a port.
+  performance work.** Why vello classic had no glyph atlas, what a text-heavy
+  frame cost under it (measured), where the ecosystem's answer lives (`glifo`,
+  now in `vello_gpu`, formerly `vello_hybrid`), and why `glyphon` and a
+  hand-rolled atlas are both ruled out. Its 2026-11 update records the switch
+  to `vello_gpu` with glifo's glyph atlas cache left off: glyphs still draw as
+  outlines every frame, so the useful contribution is evidence, not a cache.
 
 ## Toolchain
 
@@ -4482,7 +4490,7 @@ it is:
 # Full debug info for workspace crates
 CARGO_PROFILE_DEV_DEBUG=true cargo test -p <crate> <filter>
 
-# ...and for dependencies too (stylo, vello, parley, ...)
+# ...and for dependencies too (stylo, vello_gpu, parley, ...)
 cargo test -p <crate> <filter> \
   --config 'profile.dev.debug=true' \
   --config 'profile.dev.package."*".debug=true'

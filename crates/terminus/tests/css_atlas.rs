@@ -5,7 +5,7 @@
 //! cases exercise rasterization/sampling differences or CSS-permitted UA
 //! choices against native Pulsar/Parley snapshots.  The other 189 audited
 //! differences remain ignored fixtures.  Up to twenty-five active documents
-//! share one isolated 640×640 Vello atlas readback; a full audit compares all
+//! share one isolated 640×640 atlas readback; a full audit compares all
 //! 1,000 against temporary Chromium references.
 
 #[path = "support/html.rs"]

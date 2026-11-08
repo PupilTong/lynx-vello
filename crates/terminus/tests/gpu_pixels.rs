@@ -540,10 +540,10 @@ fn a_blurred_square_spreads_monotonically_and_symmetrically() {
 
 /// A WHITE square blurred over a WHITE page stays white everywhere.
 ///
-/// This is the premultiply pass's test and nothing else's: vello writes its
-/// render target unpremultiplied, so filtering it directly averages the
-/// colour of the transparent margin — which is whatever the divide by a tiny
-/// alpha left there — into the square's own edge, and a dark halo appears.
+/// This is the test of the blur chain's premultiplied input: filtering
+/// unpremultiplied colour averages the colour of the transparent margin —
+/// whatever a divide by a tiny alpha left there — into the square's own edge,
+/// and a dark halo appears.
 #[test]
 fn a_white_blurred_square_over_white_grows_no_halo() {
     let mut gpu = headless("a_white_blurred_square_over_white_grows_no_halo");
@@ -588,7 +588,7 @@ fn a_translucent_blurred_square_keeps_its_colour() {
 ///
 /// That is its own code path, and the one place a texture is both read and
 /// written inside one bake: with no pyramid the horizontal half-pass writes
-/// back into the bake target, which the premultiply pass consumed. A missing
+/// back into the bake target, which the copy pass consumed. A missing
 /// barrier or an aliasing mistake there shows up as a smeared or doubled
 /// profile, so the same monotone-and-symmetric assertions apply.
 #[test]
