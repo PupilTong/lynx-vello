@@ -860,3 +860,185 @@ fn a_memory_entry_writes_lynx_s_nested_maps_and_a_mark_stays_one_member() {
         "{record}"
     );
 }
+
+fn lazy_bundle(origin: &TimeOrigin, url: &str) -> LazyBundleEntry {
+    LazyBundleEntry {
+        component_url: Arc::from(url),
+        size_bytes: None,
+        load_success: true,
+        require: at(origin, 1)..at(origin, 5),
+        decode: None,
+    }
+}
+
+fn bundle_urls(entries: Vec<PerformanceEntry>) -> Vec<String> {
+    entries
+        .into_iter()
+        .map(|entry| match entry {
+            PerformanceEntry::LazyBundle(bundle) => bundle.component_url.to_string(),
+            other => panic!("a lazy bundle: {other:?}"),
+        })
+        .collect()
+}
+
+#[test]
+fn a_lazy_bundle_is_timed_while_observed_and_reaches_rust_and_the_fetching_realm_s_bts() {
+    let registry = PipelineRegistry::detached();
+    let origin = registry.time_origin();
+    assert!(EntryTypes::ALL.contains(EntryTypes::RESOURCE));
+    assert!(!registry.times_resources(), "nobody observes at first");
+    registry.observe_rust(EntryTypes::PIPELINE | EntryTypes::MEMORY);
+    assert!(!registry.times_resources(), "other types time no fetch");
+    // Nobody asks: dropped, and the embedder is not woken.
+    assert!(!registry.note_lazy_bundle(
+        Opener::Realm(OpenerId::PAGE),
+        lazy_bundle(&origin, "app:///dropped.bundle")
+    ));
+    assert_eq!(registry.generation(), 0);
+
+    let page_bts = WorkerKey::new(1);
+    let card_bts = WorkerKey::new(2);
+    let card = registry.allocate_opener();
+    registry.bind_worker(page_bts, OpenerId::PAGE);
+    registry.bind_worker(card_bts, card);
+    registry.observe_worker(card_bts, Some(EntryTypes::NONE));
+    registry.observe_worker(page_bts, Some(EntryTypes::RESOURCE));
+    assert!(registry.times_resources(), "a BTS observer of resource");
+    registry.observe_rust(EntryTypes::RESOURCE);
+    // The page realm's fetch and its BTS's own reach that BTS; the card's
+    // BTS does not ask for `resource`, so the card's reaches Rust alone.
+    for (opener, url) in [
+        (Opener::Realm(OpenerId::PAGE), "app:///page.bundle"),
+        (Opener::Worker(page_bts), "app:///bts.bundle"),
+        (Opener::Realm(card), "app:///card.bundle"),
+    ] {
+        assert!(registry.note_lazy_bundle(opener, lazy_bundle(&origin, url)));
+    }
+    assert_eq!(registry.take_wakes(), vec![page_bts]);
+    assert_eq!(
+        bundle_urls(registry.take_completed_for_rust()),
+        [
+            "app:///page.bundle",
+            "app:///bts.bundle",
+            "app:///card.bundle"
+        ]
+    );
+    assert_eq!(
+        bundle_urls(registry.take_completed_for_worker(page_bts)),
+        ["app:///page.bundle", "app:///bts.bundle"]
+    );
+    assert!(registry.take_completed_for_worker(card_bts).is_empty());
+
+    registry.observe_rust(EntryTypes::NONE);
+    registry.forget_worker(page_bts);
+    assert!(!registry.times_resources(), "the observers are gone");
+}
+
+#[test]
+fn a_fetch_s_lazy_bundle_entry_takes_the_fetcher_s_readings_and_writes_lynx_s_keys() {
+    let origin = TimeOrigin::now();
+    let instant = |millis| origin.instant + Duration::from_millis(millis);
+    let outcome = crate::resource::FetchOutcome {
+        size_bytes: Some(2048),
+        received: Some(instant(4)),
+        installed: Some(instant(5)..instant(7)),
+    };
+    let url = || Arc::from("app:///lazy.bundle");
+    let fetched = LazyBundleEntry::from_fetch(url(), instant(1), instant(9), Some(&outcome));
+    assert!(fetched.load_success);
+    assert_eq!(fetched.size_bytes, Some(2048));
+    assert_eq!(fetched.require, at(&origin, 1)..at(&origin, 4));
+    assert_eq!(fetched.decode, Some(at(&origin, 5)..at(&origin, 7)));
+    // A fetcher that read nothing: the delivery ends the require span.
+    let silent = crate::resource::FetchOutcome::default();
+    let quiet = LazyBundleEntry::from_fetch(url(), instant(1), instant(9), Some(&silent));
+    assert!(quiet.load_success);
+    assert_eq!(quiet.require, at(&origin, 1)..at(&origin, 9));
+    assert_eq!((quiet.size_bytes, quiet.decode), (None, None));
+    // A failed fetch carries no outcome.
+    let failed = LazyBundleEntry::from_fetch(url(), instant(1), instant(9), None);
+    assert!(!failed.load_success);
+    assert_eq!(failed.require, at(&origin, 1)..at(&origin, 9));
+
+    let entry = PerformanceEntry::LazyBundle(fetched);
+    assert_eq!(
+        (entry.entry_type(), entry.name()),
+        ("resource", "lazyBundle")
+    );
+    let keys = |entry: &PerformanceEntry| -> Vec<String> {
+        let fields = entry.lynx_fields(&origin);
+        fields.map(|(key, _)| key.into_owned()).collect()
+    };
+    assert_eq!(
+        keys(&entry).join(" "),
+        "entryType name componentUrl size loadSuccess mode decodeStart decodeEnd requireStart \
+         requireEnd"
+    );
+    let mut json = String::new();
+    entry.write_lynx_json(&origin, &mut json);
+    let value: serde_json::Value = serde_json::from_str(&json).expect("the entry is JSON");
+    assert_eq!(value["size"], 2048);
+    assert_eq!(value["loadSuccess"], true);
+    assert_eq!(value["mode"], "normal");
+    assert!(value.get("sync").is_none(), "native's writer leaves it out");
+    let span = value["requireEnd"]
+        .as_f64()
+        .zip(value["requireStart"].as_f64());
+    assert!(span.is_some_and(|(end, start)| (end - start - 3.0).abs() < 1e-6));
+    // A failed fetch: no size, no decode, and the boolean in the BTS record.
+    let failed = PerformanceEntry::LazyBundle(failed);
+    assert_eq!(
+        keys(&failed).join(" "),
+        "entryType name componentUrl loadSuccess mode requireStart requireEnd"
+    );
+    let record = encode_entries(&[failed], &origin);
+    assert!(record.contains("11:loadSuccess2:b0"), "{record}");
+    assert!(record.contains("9:entryType9:sresource"), "{record}");
+}
+
+/// Opens, renders and presents the load of `realm`, whose bundle is `url`,
+/// at commit `commit_id`.
+fn complete_load(registry: &PipelineRegistry, realm: OpenerId, url: &str, commit_id: u64) {
+    registry.open_load(realm, url, None);
+    registry.mark_load(realm, LoadMark::VmExecuteEnd);
+    assert!(registry.mark_load(realm, LoadMark::MtsRenderStart));
+    let mut binding = flush(realm, 0, &[], commit_id);
+    binding.load = true;
+    registry.bind_commit(binding);
+    registry.note_presented(frame(commit_id));
+}
+
+#[test]
+fn a_card_s_load_is_owed_as_loadmetrics_once_whoever_observes_and_the_page_s_never() {
+    let registry = PipelineRegistry::detached();
+    complete_load(&registry, OpenerId::PAGE, "app:///main.js", 1);
+    assert!(
+        registry.take_frame_loads().is_empty(),
+        "the page's own load"
+    );
+    assert_eq!(registry.generation(), 0, "nobody observes the page's load");
+
+    let card = registry.allocate_opener();
+    complete_load(&registry, card, "app:///child.web.bundle", 2);
+    assert!(registry.generation() > 0, "the embedder's pump looks");
+    let owed = registry.take_frame_loads();
+    let [(owner, load)] = owed.as_slice() else {
+        panic!("one card load: {owed:?}");
+    };
+    assert_eq!(*owner, card);
+    assert_eq!(&*load.url, "app:///child.web.bundle");
+    assert_eq!(load.pipeline.origin, PipelineOrigin::LoadBundle);
+    assert!(registry.take_frame_loads().is_empty(), "owed once");
+    assert!(
+        registry.take_completed_for_rust().is_empty(),
+        "to nobody else"
+    );
+
+    // Sent again after `set_extra_timing`, a load is not owed again.
+    registry.observe_rust(EntryTypes::LOAD_BUNDLE);
+    assert!(registry.set_extra_timing(&ExtraTiming {
+        open_time: Some(SystemTime::now()),
+        ..ExtraTiming::default()
+    }));
+    assert!(registry.take_frame_loads().is_empty());
+}

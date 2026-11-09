@@ -46,6 +46,16 @@
 //! ([`PipelineRegistry::note_memory`]): each category's latest one, and the
 //! `memory` entries reported from them through the same delivery path, for
 //! the Rust embedder alone.
+//!
+//! So do the `resource.lazyBundle` entries a realm's `fetchResource`
+//! completes ([`PipelineRegistry::note_lazy_bundle`]), made only while the
+//! Rust embedder observes [`EntryTypes::RESOURCE`] or a BTS observer asked
+//! for `resource` ([`PipelineRegistry::times_resources`], one relaxed load
+//! per fetch).
+//!
+//! And the `<frame>` cards' loads: each nested card's completed load record
+//! is owed to that card's realm as Lynx's `loadmetrics` component event
+//! ([`PipelineRegistry::take_frame_loads`]), whoever observes.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -62,8 +72,8 @@ use super::memory::{MemoryCategory, MemoryConfig, MemoryEntry, MemoryItem};
 use super::monitors::{decode_threshold, encode_threshold};
 use super::{
     ACTUAL_FMP_FLAG, ActualFmp, EntryTypes, ExtraTiming, FrameworkTiming, JsBlockingConfig,
-    JsBlockingEntry, JsBlockingStage, LoadBundleTiming, Metric, PaintEntry, PaintName,
-    PainterTiming, PerformanceEntry, PipelineOrigin, PipelineTiming, ReloadBundleTiming,
+    JsBlockingEntry, JsBlockingStage, LazyBundleEntry, LoadBundleTiming, Metric, PaintEntry,
+    PaintName, PainterTiming, PerformanceEntry, PipelineOrigin, PipelineTiming, ReloadBundleTiming,
     TimeOrigin, Timestamp,
 };
 use crate::background::WorkerKey;
@@ -153,19 +163,16 @@ pub(crate) struct Completion {
 /// reach besides the Rust embedder, each only when its observers asked for
 /// the entry's type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "`One` and `Every` carry the later phase 2 entries"
-    )
-)]
 pub(crate) enum WorkerAudience {
     /// The Rust embedder alone.
     None,
     /// The BTS of the realm that produced the entry.
     One(WorkerKey),
     /// Every worker of the view: an entry about the view as a whole.
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "the `container` entries of phase 2 carry it")
+    )]
     Every,
 }
 
@@ -216,6 +223,9 @@ pub(crate) struct PipelineRegistry {
     /// configuration's epoch, and notified without a bump when a monitor's
     /// state changes in a way its task waits for.
     monitor_epochs: watch::Sender<u64>,
+    /// [`Self::times_resources`]: the Rust embedder observes
+    /// [`EntryTypes::RESOURCE`] or a BTS observer asked for `resource`.
+    resource_observed: AtomicBool,
     inner: Mutex<Inner>,
 }
 
@@ -259,6 +269,9 @@ struct Inner {
     owed_rust: VecDeque<PerformanceEntry>,
     /// The delivered entries each worker has not taken, likewise.
     owed_workers: FxHashMap<WorkerKey, VecDeque<PerformanceEntry>>,
+    /// The `<frame>` card realms whose load completed and whose `loadmetrics`
+    /// the embedder's next `pump` has not sent yet, in completion order.
+    frame_loads_owed: Vec<OpenerId>,
 }
 
 /// The memory monitor's state: Lynx's `MemoryMonitor` members.
@@ -429,6 +442,7 @@ impl PipelineRegistry {
             long_task_threshold: AtomicU64::new(0),
             js_blocking_threshold: AtomicU64::new(0),
             monitor_epochs: watch::channel(0).0,
+            resource_observed: AtomicBool::new(false),
             inner: Mutex::new(Inner::default()),
         }
     }
@@ -457,19 +471,23 @@ impl PipelineRegistry {
             !inner.rust_types.is_empty() || !inner.worker_types.is_empty(),
             Ordering::Relaxed,
         );
-        let detect = Self::paint_wanted(inner) && inner.first_contentful_paint.is_none();
+        self.resource_observed
+            .store(Self::wanted(inner, EntryTypes::RESOURCE), Ordering::Relaxed);
+        let detect =
+            Self::wanted(inner, EntryTypes::PAINT) && inner.first_contentful_paint.is_none();
         self.content_detection.store(detect, Ordering::Relaxed);
         self.marks_wanted
             .store(detect || inner.first_paint.is_none(), Ordering::Relaxed);
     }
 
-    /// Whether anyone asked for `paint` entries.
-    fn paint_wanted(inner: &Inner) -> bool {
-        inner.rust_types.contains(EntryTypes::PAINT)
+    /// Whether anyone asked for `kind`'s entries: the Rust embedder, or a
+    /// worker's observers.
+    fn wanted(inner: &Inner, kind: EntryTypes) -> bool {
+        inner.rust_types.contains(kind)
             || inner
                 .worker_types
                 .values()
-                .any(|types| types.contains(EntryTypes::PAINT))
+                .any(|types| types.contains(kind))
     }
 
     /// Whether the view's document should decide Paint Timing's contentful
@@ -1086,13 +1104,29 @@ impl PipelineRegistry {
         record.audience = audience;
         record.worker = worker;
         let mut page_loaded = None;
+        let mut frame_load = None;
         if record.kind == Kind::Load && !record.load_only {
             let snapshot = record.clone();
-            if realm == Some(OpenerId::PAGE) {
-                page_loaded = record.presented.map(|frame| frame.presented);
+            match realm {
+                Some(OpenerId::PAGE) => {
+                    page_loaded = record.presented.map(|frame| frame.presented);
+                }
+                // A `<frame>` card's own load: Lynx's `FramePerformanceClient`
+                // forwards exactly this entry to the frame as `loadmetrics`
+                // (`LynxFrameView.java:456-477`), whatever the host observes,
+                // so it is owed whoever observes — one per card load.
+                Some(card) => frame_load = Some(card),
+                None => {}
             }
             if let Some(load) = realm.and_then(|realm| inner.loads.get_mut(&realm)) {
                 load.completed = Some(snapshot);
+            }
+        }
+        if let Some(card) = frame_load {
+            inner.frame_loads_owed.push(card);
+            if audience == 0 {
+                // What the embedder's next `pump` reads to look at all.
+                self.generation.fetch_add(1, Ordering::Release);
             }
         }
         if audience == 0 {
@@ -1499,8 +1533,8 @@ impl PipelineRegistry {
 
     /// Whether the worker `key` has a `lynx.performance` observer — `None`
     /// for none — and, when it has, the types its observers opt into
-    /// beyond its realm's pipeline entries ([`EntryTypes::PAINT`] is the
-    /// one there is). A worker that stops observing drops the delivered
+    /// beyond its realm's pipeline entries ([`EntryTypes::PAINT`] and
+    /// [`EntryTypes::RESOURCE`]). A worker that stops observing drops the delivered
     /// entries it had not taken.
     pub(crate) fn observe_worker(&self, key: WorkerKey, asked: Option<EntryTypes>) {
         let mut inner = self.lock();
@@ -1511,6 +1545,83 @@ impl PipelineRegistry {
             inner.owed_workers.remove(&key);
         }
         self.update_observed(&inner);
+    }
+
+    /// Whether a `fetchResource` is timed: the Rust embedder observes
+    /// [`EntryTypes::RESOURCE`] or a BTS observer asked for `resource`. One
+    /// relaxed load, which is all a fetch reads while nobody does.
+    pub(crate) fn times_resources(&self) -> bool {
+        self.resource_observed.load(Ordering::Relaxed)
+    }
+
+    /// One timed fetch completed, made by `opener`'s realm: its
+    /// `resource.lazyBundle` entry, delivered to the Rust embedder and to
+    /// the BTS of the realm that fetched — the worker itself, or the BTS
+    /// its main-thread realm connected ([`Self::background_of`]) — as
+    /// native sends it to every audience (`kEventTypeAll`,
+    /// `lynx/core/resource/lazy_bundle/lazy_bundle_loader.cc:169`).
+    /// Answers [`Self::deliver`]'s answer.
+    pub(crate) fn note_lazy_bundle(&self, opener: Opener, entry: LazyBundleEntry) -> bool {
+        let mut guard = self.lock();
+        let inner = &mut *guard;
+        let background = match opener {
+            Opener::Worker(key) => Some(key),
+            Opener::Realm(realm) => Self::background_of(inner, realm),
+        };
+        self.deliver(
+            inner,
+            PerformanceEntry::LazyBundle(entry),
+            EntryTypes::RESOURCE,
+            background.map_or(WorkerAudience::None, WorkerAudience::One),
+        )
+    }
+
+    /// Every `<frame>` card's load entry owed to its realm as `loadmetrics`
+    /// since the last call, in completion order, assembled on the caller's
+    /// thread — the embedder's, in `pump` — from the record its completion
+    /// kept.
+    pub(crate) fn take_frame_loads(&self) -> Vec<(OpenerId, LoadBundleTiming)> {
+        let taken: Vec<(OpenerId, Taken)> = {
+            let mut guard = self.lock();
+            let inner = &mut *guard;
+            if inner.frame_loads_owed.is_empty() {
+                return Vec::new();
+            }
+            let owed = std::mem::take(&mut inner.frame_loads_owed);
+            owed.into_iter()
+                .filter_map(|card| {
+                    let load = inner.loads.get(&card)?;
+                    let record = load.completed.clone()?;
+                    let snapshot = LoadSnapshot {
+                        url: Arc::clone(&load.url),
+                        create_lynx: load.create_lynx,
+                        vm_execute: load.vm_execute,
+                        page: false,
+                    };
+                    Some((
+                        card,
+                        Taken {
+                            record,
+                            load: Some(snapshot),
+                            extra: inner.extra,
+                            first_paint: inner.first_paint,
+                        },
+                    ))
+                })
+                .collect()
+        };
+        taken
+            .into_iter()
+            .filter_map(|(card, taken)| {
+                taken
+                    .assemble(EntryTypes::LOAD_BUNDLE, &self.origin)
+                    .into_iter()
+                    .find_map(|entry| match entry {
+                        PerformanceEntry::LoadBundle(load) => Some((card, *load)),
+                        _ => None,
+                    })
+            })
+            .collect()
     }
 
     /// What the Rust embedder subscribes to.

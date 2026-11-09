@@ -17,8 +17,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use bobcat_core::resource::{
-    LoadedSource, ResourceError, ResourceErrorKind, ResourceErrorPhase, ResourceFetcher,
-    RetryAdvice, SourceCompletion, SourceRequest, StyleSheetSource,
+    FetchOutcome, LoadedSource, ResourceError, ResourceErrorKind, ResourceErrorPhase,
+    ResourceFetcher, RetryAdvice, SourceCompletion, SourceRequest, StyleSheetSource,
 };
 use bobcat_core::{
     DrawTarget, EngineEvent, LynxGroup, NoWakeup, Painter, StyleThreads, ViewSources,
@@ -155,11 +155,11 @@ impl ResourceFetcher for Files {
             // A plain fetch, which this host happens to make a container of:
             // the fetch, the decode and the registration all happened here,
             // and what comes back says only that the fetch is over.
-            SourceRequest::Fetch { url } => match url.as_str() {
+            SourceRequest::Fetch { url, .. } => match url.as_str() {
                 LAZY => {
                     self.lazy_requests.fetch_add(1, Ordering::SeqCst);
                     self.remember(url);
-                    Ok(LoadedSource::Fetched)
+                    Ok(LoadedSource::Fetched(FetchOutcome::default()))
                 }
                 SLOW => {
                     self.held
@@ -202,7 +202,7 @@ impl ResourceFetcher for Files {
         };
         if let Some((_, completion)) = released {
             self.remember(SLOW);
-            completion.complete(Ok(LoadedSource::Fetched));
+            completion.complete(Ok(LoadedSource::Fetched(FetchOutcome::default())));
         }
     }
 
