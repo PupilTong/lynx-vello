@@ -6,7 +6,7 @@ runtime core, and one Lynx policy layer above them:
 ```text
 bobcat-cli ───▶ bobcat-core ───▶ terminus ─┬─▶ vendor/stylo
                      ▲                ├─▶ seldon
-   packages/bobcat-element            └─▶ vello/wgpu
+   packages/bobcat-element            └─▶ vello_gpu/wgpu
    (embedded Element PAPI runtime,
     drives bobcat-core's tree module
     through `bobcat-internal:host` ESM imports)
@@ -128,9 +128,9 @@ CSS supplied as text.
 
 | Layer | Owns | Must not own |
 | --- | --- | --- |
-| `terminus` | `Document<T>` and its aligned arenas; DOM topology and attributes; private style context and damage harvest; invalidation-carrying mutation; inline parsing; matching, cascade, media evaluation, computed values; the concrete `seldon` host; private visual order, `Painter`, and retained Vello scene; the `ImageStore` contract the embedder implements | Pluggable renderer policy, Lynx tags or Element-PAPI opcodes, JS handle lifetime, payload semantics, `<page>` policy, bundle decoding/`StyleInfo` lowering, Lynx UA defaults, view metrics, GPU surface/window policy |
+| `terminus` | `Document<T>` and its aligned arenas; DOM topology and attributes; private style context and damage harvest; invalidation-carrying mutation; inline parsing; matching, cascade, media evaluation, computed values; the concrete `seldon` host; private visual order, `Painter`, and retained display list; the `ImageStore` contract the embedder implements | Pluggable renderer policy, Lynx tags or Element-PAPI opcodes, JS handle lifetime, payload semantics, `<page>` policy, bundle decoding/`StyleInfo` lowering, Lynx UA defaults, view metrics, GPU surface/window policy |
 | `bobcat-core` | Opaque `LynxView` and `Painter`; injected resource, image-store, draw-target, and OS-input contracts; private Lynx page policy (`page` root, device construction, UA stylesheet); private engine/tree/runtime; the crate-owned QuickJS realm; the native `bobcat-internal:host` ESM and embedded Element PAPI runtime | Re-exporting `terminus`, exposing engine/tree/document/realm handles, bundle decoding or config parsing, an element-host trait, matcher/cascade/layout/paint algorithms, public `PaintOrder`, or the PAPI member surface itself (that is `packages/bobcat-element`'s) |
-| `terminus::render` (the DOM-free floor) | The `ImageStore` trait an embedder implements; Vello version/re-export boundary; headed/headless GPU submission and readback helpers | `Document`, `NodeId`, computed styles, layout, paint order, Lynx runtime vocabulary, or DOM mutation policy |
+| `terminus::render` (the DOM-free floor) | The `ImageStore` trait an embedder implements; the rasterizer (`vello_gpu`) and its `kurbo`/`peniko`/`wgpu` re-export boundary; headed/headless GPU submission and readback helpers | `Document`, `NodeId`, computed styles, layout, paint order, Lynx runtime vocabulary, or DOM mutation policy |
 | `vendor/stylo` | CSS grammar, selector/rule-tree/cascade primitives, and the maintained Lynx CSS extension grammar behind the `lynx` feature | Runtime protocol, document ownership, bundle ingestion, or host policy |
 | `packages/bobcat-element` (the script half) | The `__*` Element-PAPI members and their arities; Lynx tag vocabulary; handle identity (one plain object per element, carrying its DOM `NodeId` under a realm-local symbol — web-core's `uniqueIdSymbol` shape); Snapshot property/query policy; realm-local event registration; direct named imports from `bobcat-internal:host`; the element ownership graph (a strong per-handle child set, so a connected element's handle is reachable from the permanent page handle) and the `FinalizationRegistry` drop path (cleanup calls the imported `dropElement` at host job checkpoints, which frees that node alone) | Native-ID validation, style/layout/paint behavior, direct DOM access, event-path construction, or any state the native side must gate presentation on |
 | `bobcat-source` | Bundle and XML decoding; `StyleInfo` lowering into `PreparsedStyleSheet`, including fragment order and css-id guard synthesis (`lower_style`) | Matching, cascade, runtime state, or reading `enableRemoveCSSScope` |
@@ -168,7 +168,7 @@ CSS supplied as text.
 7. Bobcat's private `Engine` asks the document-owned Painter (through
    the shared document) whether its retained scene is
    current. A dirty document runs `Document::render`, builds the private
-   paint order, and retains the resulting Vello scene. Embedders never drive
+   paint order, and retains the resulting display list. Embedders never drive
    this lifecycle — they relay OS facts to the engine, which schedules it.
 
 ## Runtime integration status

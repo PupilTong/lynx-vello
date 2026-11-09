@@ -1,10 +1,11 @@
-//! The DOM-free render floor: the embedder's image contract and wgpu
-//! submission/readback over the one workspace [`vello`] version.
+//! The DOM-free render floor: the embedder's image contract, the rasterizer
+//! ([`raster`] over [`sparse`]) and wgpu submission/readback.
 //!
 //! Nothing here knows about nodes, computed styles, layout, or paint order —
-//! the document-aware painter builds a [`vello::Scene`] and this floor turns
-//! scenes into pixels. Embedders configure wgpu/peniko/kurbo exclusively
-//! through the crate-root [`vello`] re-export.
+//! the document-aware painter builds a
+//! [`DisplayList`](crate::paint::display_list::DisplayList) and this floor
+//! turns lists into pixels. Embedders reach peniko/kurbo through the link's
+//! `kurbo` and `peniko` re-exports and wgpu through its `wgpu` one.
 //!
 //! [`blur`] and [`vector_textures`] are the two exceptions, and narrow ones:
 //! a `filter: blur()` bake has to replay part of a committed frame's compose
@@ -17,5 +18,7 @@
 pub(crate) mod blur;
 pub(crate) mod gpu;
 pub(crate) mod image;
+pub(crate) mod raster;
+pub(crate) mod sparse;
 pub(crate) mod svg;
 pub(crate) mod vector_textures;

@@ -189,7 +189,7 @@ bobcat-cli    ─┬──▶ bobcat-source
                └──▶ bobcat-resources ─┐
 bobcat-server ─┬──▶ bobcat-source     ├──▶ bobcat-core ──▶ terminus ─┬─▶ seldon
                └──▶ bobcat-resources ─┤          │              ├─▶ vendor/stylo
-bobcat-wasm ──┬───▶ bobcat-resources ─┘          │              └─▶ vello/wgpu
+bobcat-wasm ──┬───▶ bobcat-resources ─┘          │              └─▶ vello_gpu/wgpu
               └───▶ bobcat-source
 bobcat-source ────────────────────────────────────┘
                                                   └──▶ quickjs-rust-bridge
@@ -1888,7 +1888,7 @@ task of the view consumes the watch, `consume_metrics`, and settles the page
 once per change: that is what commits a resize with no JavaScript behind it.
 
 `terminus::link::Document<T>` privately owns its style/layout state, retained commit
-builder and Vello scene; that DOM-side painter is distinct from the
+builder and display list; that DOM-side painter is distinct from the
 embedder-thread `bobcat_core::Painter` that composes a published frame.
 In Bobcat the payload is `()` and the core adds
 the permanent `page` root plus Lynx UA defaults from `PageConfig`.
@@ -2420,15 +2420,23 @@ without the marker.
 ### One render path: a scroll frame recomposes the committed fragments
 
 There is one path from a committed frame to pixels. Every presented frame is
-one flat vello scene: `compose_into` replays the commit's compose program —
+one flat display list: `compose_into` replays the commit's compose program —
 pre-encoded per-space fragments plus the push/pop ops over them — with each
 scroll slot translated by the offset the painter holds for it. Nothing is
-retained per scroller, and a scroll frame's cost is bounded by the commit's
-encode windows, which already discarded everything no clip chain admits.
+retained per scroller. The encode windows hold more than the target shows —
+a scrollport's worth of headroom on each side — and the rasterizer turns
+every path it is given into strips whether or not it lands on the target, so
+the replay leaves out what cannot reach the target at that instant: each
+fragment is cut, when its commit seals it, into chunks of a few items that
+close their own layers, each with a bound on its ink, and a chunk, an image
+draw or a push whose bound under its compose transform misses the target
+(cut to the pushes open around it) is not appended, the push with everything
+up to its pop. A scroll frame's cost is therefore that of what it shows.
 Retained per-scroller textures were tried and removed: measured per scroll
-frame they were slower than flat recomposition — each frame copied a plane
-larger than the viewport into vello's image atlas — and every commit re-baked
-all of them.
+frame they were slower than flat recomposition, and every commit re-baked all
+of them. Retained textures of static subtrees were measured under the
+sparse-strip rasterizer as well and not adopted: sampling their texels every
+frame cost more than the strip generation they saved.
 
 A scroll container is no stacking context by itself, as on the web and in
 web-core (whose `scroll-view` is `position: relative` with no `z-index`;
@@ -2508,9 +2516,8 @@ it; for a scope whose element has `filter` or `backdrop-filter` — both
 contain their positioned descendants, so every chain inside extends the
 element's own — the chain is cut at that element's chain. The links between
 the enclosing such scope's chain and this one are the scope's output clips,
-ordinary `Push` ops outside its own layers, the innermost a full `SrcOver`
-layer so the effect layer never opens directly inside a clip layer, and its
-items push only the links below. So an ancestor's clip cuts the texture, the
+ordinary `Push` ops outside its own layers, and its items push only the links
+below. So an ancestor's clip cuts the texture, the
 raw fallback and the backdrop once, after the filter; content just past the
 edge still blurs ink back inside it; and a nested backdrop reads its root's
 content uncut by the root's ancestors. Every other group re-pushes whole
@@ -2521,15 +2528,19 @@ space through the scroll windows, sticky ranges and curve reaches between
 them, grown by 2 CSS px — pushed as a plain rect where the cut stays clear of
 the link's rounded corners and as the link's whole shape otherwise
 (`paint::walker::plan_clip_pushes`, a second prepass over the walk's stack
-discipline). Vello allocates a clip layer's tiles over its whole shape, and
-the chain restarts around every group, so without the cut a page of small
-faded boxes inside one page-sized `overflow` clip costs a viewport of tiles
-per box and exceeds vello's fixed tile budget (`1 << 21` tiles), after which
-every stage past `tile_alloc` is skipped and the frame is transparent.
+discipline). The chain restarts around every group, so a page of small faded
+boxes inside one page-sized `overflow` clip pushes that clip once per box.
+The rasterizer intersects a plain clip's coverage into the strips of
+everything drawn inside it (`render::sparse`): uncut, a rounded link builds
+its whole outline's strips at every push and every draw inside it is
+intersected with them, while a cut that stays clear of the corners is an
+axis-aligned rectangle, which costs no strips and keeps the rectangle fast
+path for the draws inside it. A link kept as an isolated layer around a
+blend allocates its texture over the cut rather than the whole link.
 
 The device side is `terminus::link::render::blur::FilterTextures`, one per
-`vello::Renderer`, owned beside that renderer's `AtlasResidency` by `Headless`
-and by the painter's `WindowGraphics`. Its cache holds one commit's bakes,
+rasterizer (`render::raster::Raster`), owned beside it by `Headless` and by
+the painter's `WindowGraphics`. Its cache holds one commit's bakes,
 taken over one canvas colour, and each entry re-bakes on its own two
 conditional readings. The painter's scroll
 generation counts when some op in the entry's range and the entry's own space
@@ -2551,14 +2562,13 @@ the entries that read it. Commit ids
 restart per document, so a target pointed at a second document must `forget`
 the cache, the same obligation it already has for its own compose key. Bakes
 happen in increasing order of range end, so every texture an entry's own range
-draws already exists when it bakes; each bake is a `render_to_texture` and therefore
-owes the residency a pass of its own, because a bake of a solid-colour group
-is precisely the patch-free render that frees vello's image atlas. The baked
-textures are override images, so the *composite* render names them to the
-residency too.
+draws already exists when it bakes; each bake is a `Raster::render_to_texture`
+into a texture of its own, bound under a texture id (`Raster::bind_texture`)
+that the composite render draws it by.
 
 Filter memory is page-complexity-linear, so it is capped: 8192 device px per
-texture side and a quarter of the atlas in total area, shared by both kinds of
+texture side and, in total area, a quarter of one texture that long on both
+sides (`MAX_FILTER_AREA`), shared by both kinds of
 entry and consumed in program order. An entry past the cap gets no texture and
 takes the unfiltered fallback — the fallback is the budget's enforcement
 mechanism, not an error path.
@@ -2764,7 +2774,7 @@ the same way.
 
 The browser UI thread is a JavaScript coordinator only. It creates an
 embedder/Render Worker and transfers an `OffscreenCanvas`. That Worker owns
-the Wasm `LynxView`, its `Painter`, the Vello/wgpu objects, and the resource
+the Wasm `LynxView`, its `Painter`, the vello_gpu/wgpu objects, and the resource
 provider; core creates
 its owner-thread-bound realm inside the nested Lynx main Worker, and the
 realm's own boot module creates the document there. No direct

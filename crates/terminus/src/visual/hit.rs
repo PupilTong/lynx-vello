@@ -14,9 +14,9 @@
 //! in the tree no longer has to blank every query in it.
 
 use euclid::default::{Point2D, Rect, Vector2D};
-use vello::kurbo::{Affine, Point};
 
 use super::{PaintItem, PaintItemKind, PaintOrder, ScrollSlot, SpaceSamples, geometry};
+use crate::kurbo::{Affine, Point};
 use crate::tree::document::{Document, NodeId};
 
 /// Where a hit query's scroll offsets come from: `None` falls back to the

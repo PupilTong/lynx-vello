@@ -6,8 +6,8 @@
 //! state. [`shape_line`] builds a one-style [`parley::RangedBuilder`] over
 //! the shared [`TextContext`], breaks it as one line, and reads the
 //! positioned glyphs back per font run. The output names each run's font
-//! handle, size and variation coordinates, which is exactly what a vello
-//! `draw_glyphs` call takes, and the glyph positions are relative to the
+//! handle, size and variation coordinates, which is exactly what a glyph run
+//! draw takes, and the glyph positions are relative to the
 //! line's start on its alphabetic baseline, so a caller places the line by
 //! one translation.
 //!

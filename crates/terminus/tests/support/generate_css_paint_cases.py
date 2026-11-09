@@ -1268,7 +1268,7 @@ def load_differences(cases: Iterable[Case]) -> dict[str, Difference]:
 
     counts = Counter(difference.kind for difference in result.values())
     expected = {
-        DifferenceKind.RASTER_OR_SAMPLING: 84,
+        DifferenceKind.RASTER_OR_SAMPLING: 85,
         DifferenceKind.UA_CHOICE: 61,
         DifferenceKind.W3C_GAP: 170,
         DifferenceKind.NON_W3C_COMPATIBILITY: 19,
@@ -1533,13 +1533,13 @@ def validate_assets(cases: list[Case], differences: dict[str, Difference]) -> No
     skipped_names = difference_names - native_snapshots
     if (
         len(all_names) != 1_000
-        or len(browser_matches) != 666
-        or len(native_snapshots) != 145
+        or len(browser_matches) != 665
+        or len(native_snapshots) != 146
         or len(skipped_names) != 189
     ):
         raise SystemExit(
-            "CSS-paint inventory must contain 1000 total / 666 browser matches / "
-            "145 native snapshots / 189 skipped"
+            "CSS-paint inventory must contain 1000 total / 665 browser matches / "
+            "146 native snapshots / 189 skipped"
         )
     if browser_matches & difference_names or native_snapshots & skipped_names:
         raise SystemExit("CSS-paint expectation sets overlap")

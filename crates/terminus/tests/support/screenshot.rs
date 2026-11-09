@@ -9,7 +9,7 @@
 
 #![allow(dead_code)]
 
-use prime_radiant::vello::peniko::Color;
+use prime_radiant::peniko::Color;
 use prime_radiant::{Image, capture_document, headless};
 
 use crate::html;

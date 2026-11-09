@@ -7,8 +7,8 @@ Status: design ruled 2026-10-14; series E1–E5 implemented (sections below).
 Editable text is laid out, painted and edited **inside the engine** (route B,
 the Chromium/WebKit/Clay/Flutter model). The host platform contributes only
 what an engine cannot: the input method (composition, candidates,
-autocorrect) and the clipboard. The alternative, an OS-native text field composited above the vello
-surface, was surveyed and rejected: the committed frame cannot produce the
+autocorrect) and the clipboard. The alternative, an OS-native text field composited above the engine's
+rendered surface, was surveyed and rejected: the committed frame cannot produce the
 "everything painted above this element" region such a view would need to mask
 itself with, and every project that tried it (Flutter, Lynx native, Compose
 Multiplatform) carries a fallback path for exactly that case.
@@ -64,7 +64,7 @@ every synchronous OS query from it with no wait.
  │  • composition range                     │    │                                           │
  │  • commands (insert, delete, move, …)    │◀───│ LynxView::edit(Command)    (counted FIFO) │
  │  • TextInputState snapshot per change    │───▶│ ViewNotice::TextInputState(TextInputState)│
- │ paint::text paints caret/selection/      │    │ Painter unchanged: text is vello content  │
+ │ paint::text paints caret/selection/      │    │ Painter unchanged: text is painted content│
  │   composition underline from that state  │    └──────────────────────────────────────────┘
  └─────────────────────────────────────────┘
 ```

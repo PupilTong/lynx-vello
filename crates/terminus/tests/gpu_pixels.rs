@@ -1,4 +1,4 @@
-//! End-to-end pixel tests: `Document` → `PaintOrder` → `Scene` → GPU →
+//! End-to-end pixel tests: `Document` → `PaintOrder` → `DisplayList` → GPU →
 //! readback. Ahem glyphs are solid em squares, so glyph coverage is
 //! pixel-assertable. A usable GPU adapter is mandatory.
 
@@ -6,9 +6,9 @@ mod paint_common;
 
 use paint_common::Doc;
 use prime_radiant::headless;
-use terminus::link::vello::Scene;
-use terminus::link::vello::kurbo::{Affine, Rect};
-use terminus::link::vello::peniko::{BlendMode, Color, Compose, Fill, Mix};
+use terminus::link::DisplayList;
+use terminus::link::kurbo::{Affine, Rect};
+use terminus::link::peniko::{BlendMode, Color, Compose, Fill, ImageBrush, ImageSampler, Mix};
 
 const AHEM: &[u8] = include_bytes!("../../seldon/tests/fixtures/Ahem.ttf");
 const ISOLATION_ATLAS_WIDTH: u32 = 384;
@@ -43,7 +43,7 @@ fn background_clip_text_clips_to_glyph_ink() {
     doc.dom.render();
     let scene = doc.dom.scene(&terminus::link::NoImages);
     let pixels = gpu
-        .render(&scene, &[], 200, 100, Color::WHITE)
+        .render(&scene, 200, 100, Color::WHITE)
         .expect("headless render");
 
     let ink = pixel(&pixels, 200, 30, 20);
@@ -80,7 +80,7 @@ fn plain_background_covers_the_box() {
     doc.dom.render();
     let scene = doc.dom.scene(&terminus::link::NoImages);
     let pixels = gpu
-        .render(&scene, &[], 200, 100, Color::WHITE)
+        .render(&scene, 200, 100, Color::WHITE)
         .expect("headless render");
 
     let gap = pixel(&pixels, 200, 60, 40);
@@ -110,7 +110,7 @@ fn gradient_color_fills_glyph_ink_from_the_padding_box() {
     doc.dom.render();
     let scene = doc.dom.scene(&terminus::link::NoImages);
     let pixels = gpu
-        .render(&scene, &[], 200, 100, Color::WHITE)
+        .render(&scene, 200, 100, Color::WHITE)
         .expect("headless render");
 
     let first = pixel(&pixels, 200, 30, 20);
@@ -144,7 +144,7 @@ fn gradient_square(name: &str, image: &str) -> Vec<u8> {
 
     doc.dom.render();
     let scene = doc.dom.scene(&terminus::link::NoImages);
-    gpu.render(&scene, &[], 200, 100, Color::WHITE)
+    gpu.render(&scene, 200, 100, Color::WHITE)
         .expect("headless render")
 }
 
@@ -227,7 +227,7 @@ fn outline_rings_the_border_box() {
     doc.dom.render();
     let scene = doc.dom.scene(&terminus::link::NoImages);
     let pixels = gpu
-        .render(&scene, &[], 200, 100, Color::WHITE)
+        .render(&scene, 200, 100, Color::WHITE)
         .expect("headless render");
 
     let ring = pixel(&pixels, 200, 17, 45);
@@ -263,7 +263,7 @@ fn isolated_atlas_cell_matches_standalone_group_effects() {
     doc.dom.render();
     let scene = doc.dom.scene(&terminus::link::NoImages);
     let standalone = gpu
-        .render(&scene, &[], 128, 128, Color::WHITE)
+        .render(&scene, 128, 128, Color::WHITE)
         .expect("standalone headless render");
 
     let cell_x = f64::from(ISOLATION_CELL_X);
@@ -271,7 +271,7 @@ fn isolated_atlas_cell_matches_standalone_group_effects() {
     let left_neighbor = Rect::new(0.0, cell_y, cell_x, cell_y + 128.0);
     let cell = Rect::new(cell_x, cell_y, cell_x + 128.0, cell_y + 128.0);
     let right_neighbor = Rect::new(cell_x + 128.0, cell_y, 384.0, cell_y + 128.0);
-    let mut atlas = Scene::new();
+    let mut atlas = DisplayList::new();
     atlas.fill(
         Fill::NonZero,
         Affine::IDENTITY,
@@ -299,7 +299,6 @@ fn isolated_atlas_cell_matches_standalone_group_effects() {
     let appended = gpu
         .render(
             &atlas,
-            &[],
             ISOLATION_ATLAS_WIDTH,
             ISOLATION_ATLAS_HEIGHT,
             Color::WHITE,
@@ -324,160 +323,6 @@ fn isolated_atlas_cell_matches_standalone_group_effects() {
         pixel(&appended, ISOLATION_ATLAS_WIDTH, 264, 96),
         [219, 39, 119, 255],
         "outset effects leaked into the right neighbor"
-    );
-}
-
-/// One 64x64 scene drawing `image` over the whole target, with nearest
-/// sampling so a texel reads back exactly and a filtered edge cannot be
-/// mistaken for a wrong atlas.
-fn image_scene(image: &terminus::link::vello::peniko::ImageData, at: Affine) -> Scene {
-    use terminus::link::vello::peniko::{ImageBrush, ImageQuality, ImageSampler};
-
-    let mut scene = Scene::new();
-    scene.draw_image(
-        ImageBrush {
-            image,
-            sampler: ImageSampler::default().with_quality(ImageQuality::Low),
-        },
-        at,
-    );
-    scene
-}
-
-/// A scene of solid paths only, which is the shape that frees the atlas.
-fn solid_scene() -> Scene {
-    let mut scene = Scene::new();
-    scene.fill(
-        Fill::NonZero,
-        Affine::IDENTITY,
-        Color::from_rgb8(0x11, 0x22, 0x33),
-        None,
-        &Rect::new(0.0, 0.0, 64.0, 64.0),
-    );
-    scene
-}
-
-/// An intervening image-free render costs the atlas its contents;
-/// `Headless::render_frame`'s residency bookkeeping is what a target survives
-/// it by, and the render entry point does it, so no caller can forget.
-///
-/// Mechanism, confirmed in vello 0.10.0's own source and unchanged in 0.11.0
-/// (the cited files are byte-identical across the two): an encoding with no
-/// patches at all — solid paths only, so no image, no gradient ramp and no
-/// glyph run — takes `Resolver::resolve`'s early return and reports
-/// `Images::default()` (`vello_encoding/src/resolve.rs:187-191`). That
-/// zero-sized report clamps the atlas to 1x1
-/// (`vello/src/render.rs:160-161`), which no longer matches the persistent
-/// proxy, so the renderer frees the real atlas texture and installs a 1x1
-/// one (`render.rs:166-171`). `ImageCache` is not told: its entries stay
-/// resident and clean (`image_cache.rs:148-160`), so the next render would
-/// re-use the freed slot and sample nothing. The control render below pins
-/// that renderer reuse alone is fine — only the intervening patch-free
-/// render breaks it.
-#[test]
-fn an_image_survives_an_intervening_image_free_render() {
-    let mut gpu = headless("an_image_survives_an_intervening_image_free_render");
-
-    // A 2x2 image whose four texels are distinct, so a blank-atlas read is
-    // not mistakable for a correct one; 2x2 texels scaled to fill the target.
-    let image = prime_radiant::rgba8(
-        2,
-        2,
-        vec![
-            255, 0, 0, 255, // red
-            0, 255, 0, 255, // green
-            0, 0, 255, 255, // blue
-            255, 255, 0, 255, // yellow
-        ],
-    );
-    let drawn = [Some(image.clone())];
-    let draw_image = || image_scene(&image, Affine::scale(32.0));
-
-    let first = gpu
-        .render(&draw_image(), &drawn, 64, 64, Color::WHITE)
-        .expect("first image render");
-    assert_eq!(
-        pixel(&first, 64, 16, 16),
-        [255, 0, 0, 255],
-        "the first render must show the image's own texels"
-    );
-
-    // Control: back-to-back image renders, nothing in between. This isolates
-    // the intervening render as the cause rather than renderer reuse itself.
-    let control = gpu
-        .render(&draw_image(), &drawn, 64, 64, Color::WHITE)
-        .expect("control image render");
-    assert_eq!(
-        control, first,
-        "two image renders in a row must agree — renderer reuse alone is fine"
-    );
-
-    let _ = gpu
-        .render(&solid_scene(), &[], 64, 64, Color::WHITE)
-        .expect("intervening image-free render");
-    let third = gpu
-        .render(&draw_image(), &drawn, 64, 64, Color::WHITE)
-        .expect("image render after the image-free one");
-
-    assert_eq!(
-        pixel(&third, 64, 16, 16),
-        [255, 0, 0, 255],
-        "an image-free render between two identical image renders must not \
-         change what the second one draws"
-    );
-}
-
-/// The repair is owed per image, not per frame: a loss is repaired at each
-/// resident image's first later use, however many frames that takes.
-///
-/// A frame drawing both images, then a patch-free one, then a frame drawing
-/// only the first — which repairs only the first — and then both again. The
-/// second image's pixels in that last render are the whole test: a scheme
-/// that only re-marked the images of the first frame after a loss would leave
-/// it sampling the freed slot forever.
-#[test]
-fn a_frame_after_the_atlas_is_lost_repairs_only_the_images_it_draws() {
-    let mut gpu = headless("a_frame_after_the_atlas_is_lost_repairs_only_the_images_it_draws");
-
-    let red = prime_radiant::rgba8(1, 1, vec![255, 0, 0, 255]);
-    let blue = prime_radiant::rgba8(1, 1, vec![0, 0, 255, 255]);
-    // Side by side, each filling half of the 64x64 target.
-    let both = || {
-        let mut scene = image_scene(&red, Affine::scale_non_uniform(32.0, 64.0));
-        scene.append(
-            &image_scene(&blue, Affine::scale_non_uniform(32.0, 64.0)),
-            Some(Affine::translate((32.0, 0.0))),
-        );
-        scene
-    };
-    let both_drawn = [Some(red.clone()), Some(blue.clone())];
-    let red_drawn = [Some(red.clone())];
-
-    let _ = gpu
-        .render(&both(), &both_drawn, 64, 64, Color::WHITE)
-        .expect("both images render");
-    let _ = gpu
-        .render(&solid_scene(), &[], 64, 64, Color::WHITE)
-        .expect("the render that frees the atlas");
-    let only_red = gpu
-        .render(
-            &image_scene(&red, Affine::scale_non_uniform(32.0, 64.0)),
-            &red_drawn,
-            64,
-            64,
-            Color::WHITE,
-        )
-        .expect("one image render");
-    assert_eq!(pixel(&only_red, 64, 16, 32), RED, "the repaired image");
-
-    let again = gpu
-        .render(&both(), &both_drawn, 64, 64, Color::WHITE)
-        .expect("both images render again");
-    assert_eq!(pixel(&again, 64, 16, 32), RED);
-    assert_eq!(
-        pixel(&again, 64, 48, 32),
-        BLUE,
-        "the image no frame drew since the loss must still be repaired"
     );
 }
 
@@ -515,7 +360,7 @@ fn a_composition_at_a_scroll_offset_stays_inside_the_scrollport() {
     // Screen y plus the offset is content y, so each probe names the row the
     // port shows there.
     for (offset, near, far) in [(0.0_f32, RED, RED), (30.0, RED, BLUE), (100.0, BLUE, BLUE)] {
-        let mut scene = Scene::new();
+        let mut scene = DisplayList::new();
         frame.compose_into(
             &mut scene,
             &[],
@@ -525,7 +370,7 @@ fn a_composition_at_a_scroll_offset_stays_inside_the_scrollport() {
             None,
         );
         let pixels = gpu
-            .render(&scene, &[], 200, 150, Color::WHITE)
+            .render(&scene, 200, 150, Color::WHITE)
             .expect("headless render");
         assert_eq!(pixel(&pixels, 200, 50, 20), near, "offset {offset}: y 20");
         assert_eq!(pixel(&pixels, 200, 50, 95), far, "offset {offset}: y 95");
@@ -570,7 +415,7 @@ fn a_nested_scope_paints_in_its_own_colour() {
     doc.dom.render();
     let scene = doc.dom.scene(&terminus::link::NoImages);
     let pixels = gpu
-        .render(&scene, &[], 200, 100, Color::WHITE)
+        .render(&scene, 200, 100, Color::WHITE)
         .expect("headless render");
 
     // First em square is the root run, third is the nested scope's.
@@ -627,13 +472,13 @@ fn render_filtered(
         .dom
         .committed_frame()
         .expect("render leaves a committed frame retained");
-    let filtered: Vec<Option<terminus::link::vello::peniko::ImageData>> = gpu
+    let filtered: Vec<Option<terminus::link::Texture>> = gpu
         .prepare_filters(&frame, &[], &[], &|_| None, 0, None, Color::WHITE)
         .expect("the filter bakes render")
         .to_vec();
-    let mut scene = Scene::new();
+    let mut scene = DisplayList::new();
     frame.compose_into(&mut scene, &[], &filtered, &[], &|_| None, None);
-    gpu.render(&scene, &[], size, size, Color::WHITE)
+    gpu.render(&scene, size, size, Color::WHITE)
         .expect("headless render")
 }
 
@@ -695,10 +540,10 @@ fn a_blurred_square_spreads_monotonically_and_symmetrically() {
 
 /// A WHITE square blurred over a WHITE page stays white everywhere.
 ///
-/// This is the premultiply pass's test and nothing else's: vello writes its
-/// render target unpremultiplied, so filtering it directly averages the
-/// colour of the transparent margin — which is whatever the divide by a tiny
-/// alpha left there — into the square's own edge, and a dark halo appears.
+/// This is the test of the blur chain's premultiplied input: filtering
+/// unpremultiplied colour averages the colour of the transparent margin —
+/// whatever a divide by a tiny alpha left there — into the square's own edge,
+/// and a dark halo appears.
 #[test]
 fn a_white_blurred_square_over_white_grows_no_halo() {
     let mut gpu = headless("a_white_blurred_square_over_white_grows_no_halo");
@@ -715,11 +560,35 @@ fn a_white_blurred_square_over_white_grows_no_halo() {
     }
 }
 
+/// A half-transparent red square under `blur(4px)` keeps its colour at the
+/// centre: red over the white page, half covered.
+///
+/// The other half of the chain's alpha contract: the bake is premultiplied
+/// exactly once, by the rasterizer. Multiplied by alpha a second time, it
+/// draws at a quarter of its red over half of its alpha, and the page's
+/// white shows through as pink.
+#[test]
+fn a_translucent_blurred_square_keeps_its_colour() {
+    let mut gpu = headless("a_translucent_blurred_square_keeps_its_colour");
+    let mut doc = blur_page(
+        128.0,
+        48.0,
+        "background-color: rgb(255 0 0 / 50%); filter: blur(4px);",
+    );
+    let pixels = render_filtered(&mut gpu, &mut doc, 128);
+    let [red, green, blue, _] = pixel(&pixels, 128, 64, 64);
+    assert!(
+        red >= 253 && (124..=132).contains(&green) && green.abs_diff(blue) <= 1,
+        "the centre is half red over white ({:?})",
+        [red, green, blue],
+    );
+}
+
 /// A sigma small enough to need no decimation blurs correctly.
 ///
 /// That is its own code path, and the one place a texture is both read and
 /// written inside one bake: with no pyramid the horizontal half-pass writes
-/// back into the bake target, which the premultiply pass consumed. A missing
+/// back into the bake target, which the copy pass consumed. A missing
 /// barrier or an aliasing mistake there shows up as a smeared or doubled
 /// profile, so the same monotone-and-symmetric assertions apply.
 #[test]
@@ -868,7 +737,7 @@ fn a_blurred_box_in_a_scroller_moves_with_the_offset() {
 
     gpu.forget_filters();
     for offset in [0.0_f32, 40.0] {
-        let filtered: Vec<Option<terminus::link::vello::peniko::ImageData>> = gpu
+        let filtered: Vec<Option<terminus::link::Texture>> = gpu
             .prepare_filters(
                 &frame,
                 &[],
@@ -880,7 +749,7 @@ fn a_blurred_box_in_a_scroller_moves_with_the_offset() {
             )
             .expect("the filter bakes render")
             .to_vec();
-        let mut scene = Scene::new();
+        let mut scene = DisplayList::new();
         frame.compose_into(
             &mut scene,
             &[],
@@ -890,7 +759,7 @@ fn a_blurred_box_in_a_scroller_moves_with_the_offset() {
             None,
         );
         let pixels = gpu
-            .render(&scene, &[], 200, 200, Color::WHITE)
+            .render(&scene, 200, 200, Color::WHITE)
             .expect("headless render");
         // The box's content-space centre is y = 80, so it shows at 80 - offset.
         #[expect(
@@ -961,14 +830,14 @@ fn a_sliding_blurred_card_stays_inside_its_ancestors_clip() {
     // Committed at x = 30; at 0.6 s the card spans x = 80..140, and the
     // frame's clip ends at x = 100.
     let now = Some(0.6);
-    let filtered: Vec<Option<terminus::link::vello::peniko::ImageData>> = gpu
+    let filtered: Vec<Option<terminus::link::Texture>> = gpu
         .prepare_filters(&frame, &[], &[], &|_| None, 0, now, Color::WHITE)
         .expect("the filter bakes render")
         .to_vec();
-    let mut scene = Scene::new();
+    let mut scene = DisplayList::new();
     frame.compose_into(&mut scene, &[], &filtered, &[], &|_| None, now);
     let pixels = gpu
-        .render(&scene, &[], 200, 100, Color::WHITE)
+        .render(&scene, 200, 100, Color::WHITE)
         .expect("headless render");
     assert!(
         luma(&pixels, 200, 90, 50) < 40,
@@ -990,13 +859,13 @@ fn compose_at(
     now: Option<f64>,
     (width, height): (u32, u32),
 ) -> Vec<u8> {
-    let filtered: Vec<Option<terminus::link::vello::peniko::ImageData>> = gpu
+    let filtered: Vec<Option<terminus::link::Texture>> = gpu
         .prepare_filters(frame, &[], &[], &|_| None, 0, now, Color::WHITE)
         .expect("the filter bakes render")
         .to_vec();
-    let mut scene = Scene::new();
+    let mut scene = DisplayList::new();
     frame.compose_into(&mut scene, &[], &filtered, &[], &|_| None, now);
-    gpu.render(&scene, &[], width, height, Color::WHITE)
+    gpu.render(&scene, width, height, Color::WHITE)
         .expect("headless render")
 }
 
@@ -1272,14 +1141,14 @@ fn a_blurred_backdrop_over_a_scroller_re_bakes_with_it() {
 
     let draw = |gpu: &mut terminus::link::render::gpu::Headless, generation: u64, offset: f32| {
         let offset_of = |_: &terminus::link::ScrollSlot| Some(Vector2D::new(0.0, offset));
-        let filtered: Vec<Option<terminus::link::vello::peniko::ImageData>> = gpu
+        let filtered: Vec<Option<terminus::link::Texture>> = gpu
             .prepare_filters(&frame, &[], &[], &offset_of, generation, None, Color::WHITE)
             .expect("the entries bake")
             .to_vec();
         assert!(filtered.iter().all(Option::is_some), "both entries baked");
-        let mut scene = Scene::new();
+        let mut scene = DisplayList::new();
         frame.compose_into(&mut scene, &[], &filtered, &[], &offset_of, None);
-        gpu.render(&scene, &[], 128, 128, Color::WHITE)
+        gpu.render(&scene, 128, 128, Color::WHITE)
             .expect("headless render")
     };
     gpu.forget_filters();
@@ -1691,7 +1560,7 @@ fn a_group_over_the_budget_renders_unblurred() {
         u64::from(width) * u64::from(height) > terminus::link::render::blur::MAX_FILTER_AREA,
         "and it is past the budget ({width}x{height})",
     );
-    let filtered: Vec<Option<terminus::link::vello::peniko::ImageData>> = gpu
+    let filtered: Vec<Option<terminus::link::Texture>> = gpu
         .prepare_filters(&frame, &[], &[], &|_| None, 0, None, Color::WHITE)
         .expect("a refused group is not an error")
         .to_vec();
@@ -1700,12 +1569,12 @@ fn a_group_over_the_budget_renders_unblurred() {
         filtered[0].is_none(),
         "a group over the budget gets no texture"
     );
-    let mut scene = Scene::new();
+    let mut scene = DisplayList::new();
     frame.compose_into(&mut scene, &[], &filtered, &[], &|_| None, None);
     // Rendered at a viewport-sized target, which is all the retained scene is
     // valid for; the point is that the unblurred fallback draws.
     let pixels = gpu
-        .render(&scene, &[], 256, 256, Color::WHITE)
+        .render(&scene, 256, 256, Color::WHITE)
         .expect("the unblurred fallback renders");
     assert!(
         luma(&pixels, 256, 128, 128) < 8,
@@ -1810,7 +1679,7 @@ fn render_baked_over(
         entries,
         "the frame's filter entries",
     );
-    let filtered: Vec<Option<terminus::link::vello::peniko::ImageData>> = gpu
+    let filtered: Vec<Option<terminus::link::Texture>> = gpu
         .prepare_filters(&frame, &[], &[], &|_| None, 0, None, canvas)
         .expect("the bakes render")
         .to_vec();
@@ -1818,9 +1687,9 @@ fn render_baked_over(
         filtered.iter().all(Option::is_some),
         "every recorded entry baked a texture",
     );
-    let mut scene = Scene::new();
+    let mut scene = DisplayList::new();
     frame.compose_into(&mut scene, &[], &filtered, &[], &|_| None, None);
-    gpu.render(&scene, &[], size, size, canvas)
+    gpu.render(&scene, size, size, canvas)
         .expect("headless render")
 }
 
@@ -2014,7 +1883,7 @@ fn a_fixed_backdrop_over_a_scroller_rebakes_per_offset() {
     gpu.forget_filters();
     let mut reads = Vec::new();
     for (generation, offset) in [(0_u64, 0.0_f32), (1, 12.0)] {
-        let filtered: Vec<Option<terminus::link::vello::peniko::ImageData>> = gpu
+        let filtered: Vec<Option<terminus::link::Texture>> = gpu
             .prepare_filters(
                 &frame,
                 &[],
@@ -2027,7 +1896,7 @@ fn a_fixed_backdrop_over_a_scroller_rebakes_per_offset() {
             .expect("the backdrop bakes")
             .to_vec();
         assert!(filtered[0].is_some(), "offset {offset} baked a texture");
-        let mut scene = Scene::new();
+        let mut scene = DisplayList::new();
         frame.compose_into(
             &mut scene,
             &[],
@@ -2037,7 +1906,7 @@ fn a_fixed_backdrop_over_a_scroller_rebakes_per_offset() {
             None,
         );
         reads.push(
-            gpu.render(&scene, &[], 128, 128, Color::WHITE)
+            gpu.render(&scene, 128, 128, Color::WHITE)
                 .expect("headless render"),
         );
     }
@@ -2179,7 +2048,7 @@ fn a_backdrop_over_the_budget_stays_unfiltered() {
         u64::from(width) * u64::from(height) > terminus::link::render::blur::MAX_FILTER_AREA,
         "and it is past the budget ({width}x{height})",
     );
-    let filtered: Vec<Option<terminus::link::vello::peniko::ImageData>> = gpu
+    let filtered: Vec<Option<terminus::link::Texture>> = gpu
         .prepare_filters(&frame, &[], &[], &|_| None, 0, None, Color::WHITE)
         .expect("a refused entry is not an error")
         .to_vec();
@@ -2188,10 +2057,10 @@ fn a_backdrop_over_the_budget_stays_unfiltered() {
         filtered[0].is_none(),
         "an entry over the budget gets no texture",
     );
-    let mut scene = Scene::new();
+    let mut scene = DisplayList::new();
     frame.compose_into(&mut scene, &[], &filtered, &[], &|_| None, None);
     let pixels = gpu
-        .render(&scene, &[], 256, 256, Color::WHITE)
+        .render(&scene, 256, 256, Color::WHITE)
         .expect("the unfiltered fallback renders");
     // The seam is at device x = 4000, far outside this target; everything
     // drawn here is the black half, hard-edged and unfiltered.
@@ -2223,7 +2092,7 @@ fn a_colour_only_backdrop_darkens_only_inside_the_box() {
         (frame.filter_groups()[0].sigma - 0.0).abs() < f32::EPSILON,
         "a colour-only list has no blur",
     );
-    let filtered: Vec<Option<terminus::link::vello::peniko::ImageData>> = gpu
+    let filtered: Vec<Option<terminus::link::Texture>> = gpu
         .prepare_filters(&frame, &[], &[], &|_| None, 0, None, Color::WHITE)
         .expect("the backdrop bakes")
         .to_vec();
@@ -2231,10 +2100,10 @@ fn a_colour_only_backdrop_darkens_only_inside_the_box() {
         filtered[0].is_some(),
         "a zero-sigma backdrop still produces its texture",
     );
-    let mut scene = Scene::new();
+    let mut scene = DisplayList::new();
     frame.compose_into(&mut scene, &[], &filtered, &[], &|_| None, None);
     let pixels = gpu
-        .render(&scene, &[], 128, 128, Color::WHITE)
+        .render(&scene, 128, 128, Color::WHITE)
         .expect("headless render");
 
     let inside = luma(&pixels, 128, 80, 64);
@@ -2345,15 +2214,13 @@ fn a_canvas_change_re_bakes_a_backdrop_over_it() {
         (Color::WHITE, [255_u8, 255, 255]),
         (Color::from_rgb8(40, 120, 200), [40, 120, 200]),
     ] {
-        let filtered: Vec<Option<terminus::link::vello::peniko::ImageData>> = gpu
+        let filtered: Vec<Option<terminus::link::Texture>> = gpu
             .prepare_filters(&frame, &[], &[], &|_| None, 0, None, canvas)
             .expect("the backdrop bakes")
             .to_vec();
-        let mut scene = Scene::new();
+        let mut scene = DisplayList::new();
         frame.compose_into(&mut scene, &[], &filtered, &[], &|_| None, None);
-        let pixels = gpu
-            .render(&scene, &[], 64, 64, canvas)
-            .expect("headless render");
+        let pixels = gpu.render(&scene, 64, 64, canvas).expect("headless render");
         let inside = pixel(&pixels, 64, 32, 32);
         for channel in 0..3 {
             assert!(
@@ -2602,7 +2469,7 @@ fn an_anchored_box_follows_its_scrolled_anchor_and_hides_with_it() {
         .enumerate()
     {
         let offset_of = move |_: &terminus::link::ScrollSlot| Some(Vector2D::new(0.0, offset));
-        let filtered: Vec<Option<terminus::link::vello::peniko::ImageData>> = gpu
+        let filtered: Vec<Option<terminus::link::Texture>> = gpu
             .prepare_filters(
                 &frame,
                 &[],
@@ -2614,10 +2481,10 @@ fn an_anchored_box_follows_its_scrolled_anchor_and_hides_with_it() {
             )
             .expect("the filter bakes render")
             .to_vec();
-        let mut scene = Scene::new();
+        let mut scene = DisplayList::new();
         frame.compose_into(&mut scene, &[], &filtered, &[], &offset_of, None);
         let pixels = gpu
-            .render(&scene, &[], 200, 150, Color::WHITE)
+            .render(&scene, 200, 150, Color::WHITE)
             .expect("headless render");
         let column: Vec<u32> = (0..150)
             .filter(|&y| green(pixel(&pixels, 200, 140, y)))
@@ -2636,4 +2503,61 @@ fn an_anchored_box_follows_its_scrolled_anchor_and_hides_with_it() {
             );
         }
     }
+}
+
+/// A 16 × 16 bitmap of `texel` on a blob of its own, drawn at `x`.
+fn swatch(scene: &mut DisplayList, texel: [u8; 4], x: f64) {
+    let image = prime_radiant::rgba8(16, 16, texel.repeat(256));
+    scene.fill(
+        Fill::NonZero,
+        Affine::IDENTITY,
+        ImageBrush {
+            image: &image,
+            sampler: ImageSampler::default(),
+        },
+        Some(Affine::translate((x, 0.0))),
+        &Rect::new(x, 0.0, x + 16.0, 16.0),
+    );
+}
+
+/// Every target in a process draws through one device and renderer, from
+/// the thread that owns it. Two targets on two threads, each drawing
+/// bitmaps of its own — a fresh one every frame — and one a third, idle
+/// target drew first, each read back their own pixels every frame, and one
+/// of them going away and coming back mid-run changes nothing the other
+/// draws.
+#[test]
+fn targets_on_two_threads_draw_their_own_bitmaps() {
+    const NAME: &str = "targets_on_two_threads_draw_their_own_bitmaps";
+    let shared = [0, 160, 0, 255];
+    let mut scene = DisplayList::new();
+    swatch(&mut scene, shared, 16.0);
+    let mut first = headless(NAME);
+    let pixels = first.render(&scene, 32, 16, Color::WHITE).expect("render");
+    assert_eq!(pixel(&pixels, 32, 20, 8), shared);
+    let scene = &scene;
+    std::thread::scope(|scope| {
+        for side in 0..2_u8 {
+            scope.spawn(move || {
+                let mut gpu = headless(NAME);
+                for frame in 0..40_u8 {
+                    if side == 1 && frame == 20 {
+                        drop(gpu);
+                        gpu = headless(NAME);
+                    }
+                    let own = [255 - side * 200, frame * 6, side * 200, 255];
+                    let mut list = scene.clone();
+                    swatch(&mut list, own, 0.0);
+                    let pixels = gpu.render(&list, 32, 16, Color::WHITE).expect("render");
+                    assert_eq!(
+                        pixel(&pixels, 32, 8, 8),
+                        own,
+                        "target {side}, frame {frame}"
+                    );
+                    assert_eq!(pixel(&pixels, 32, 24, 8), shared, "target {side}");
+                }
+            });
+        }
+    });
+    drop(first);
 }

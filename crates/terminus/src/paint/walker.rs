@@ -1,64 +1,55 @@
 #![allow(
     clippy::cast_lossless,
     clippy::cast_possible_truncation,
-    reason = "CSS/style geometry is f32 while Vello/Kurbo geometry is f64"
+    reason = "CSS/style geometry is f32 while Kurbo geometry is f64"
 )]
 
-//! The scene walker: flat paint-order items → vello layer stack.
+//! The scene walker: flat paint-order items → the display list's layer stack.
 //!
-//! Three stack disciplines interleave on vello's single layer stack:
+//! Three stack disciplines interleave on the display list's single layer stack:
 //!
-//! 1. **Item clip chains** ([`crate::visual::ClipNode`]) — pushed lazily
-//!    per item by diffing the item's chain against what is on the stack,
-//!    so runs of items sharing clips pay nothing. Chains restart inside
-//!    every group scope: an item's chain is (re-)pushed inside its
-//!    innermost group, which keeps escape semantics (a fixed descendant of
-//!    an opacity group is grouped but not clipped by the group's ancestors)
-//!    and keeps group blend layers from opening inside a clip layer
-//!    (vello [#1198](https://github.com/linebender/vello/issues/1198) —
-//!    re-pushing intersecting clips is idempotent). Below a group whose
-//!    element has `filter` or `backdrop-filter` the chain is cut at a
-//!    *floor*, the element's own chain: both properties contain their
-//!    positioned descendants, so every chain inside extends it, and an item
-//!    pushes only the links below it. The links between the enclosing floor
-//!    and this one are the scope's *output clips*, pushed outside its own
-//!    layers, the innermost as a full `SrcOver` layer so the effect layer
-//!    never opens directly inside a clip layer. CSS clips a filter's output
-//!    by the ancestors' `overflow` clips, not its input: content just past
-//!    an ancestor's edge still blurs ink back inside, a blur's 3σ margin and
-//!    a filtered backdrop stop at the edge, and a nested backdrop reads its
-//!    root's content uncut by the root's ancestors. The precise #1198 invariant
-//!    maintained crate-wide: a blend layer's *immediate* enclosing layer is
-//!    always a real (isolating) layer, never a clip layer — clip layers
-//!    share their parent's buffer, so a blend directly inside one reads
-//!    pixels outside the clip. Fragment painters that need a blend under an
-//!    item clip (inset shadows) interpose their own full `SrcOver` layer
-//!    first. **A pushed link is cut to what it holds.** Vello allocates a clip
-//!    layer's tiles over the whole bounding box of its shape, whatever lies
-//!    inside it, and the chain restarts around every group scope, so a page
-//!    of small faded boxes inside one page-sized `overflow` clip re-pushed
-//!    that clip once per box and exceeded vello's fixed tile budget
-//!    (`1 << 21` tiles): every stage after `tile_alloc` is skipped and the frame is
-//!    transparent. [`plan_clip_pushes`] replays the stack discipline once per
-//!    frame and records, per push, the region the items painted inside it can
-//!    put ink in — each item's layer bound, carried into the link's space
-//!    through every scroll window, sticky range and curve reach between them
-//!    — and [`push_clip`] pushes the link's rect cut to that region grown by
-//!    [`HOLD_SLACK_CSS_PX`]: a plain rect when the cut stays clear of the
-//!    link's rounded corners, the link's whole shape otherwise. Nothing inside
-//!    the link reaches outside the region, so the picture is the same, and the
-//!    cost is the content's.
+//! 1. **Item clip chains** ([`crate::visual::ClipNode`]) — pushed lazily per item by diffing the
+//!    item's chain against what is on the stack, so runs of items sharing clips pay nothing. Chains
+//!    restart inside every group scope: an item's chain is (re-)pushed inside its innermost group,
+//!    which keeps escape semantics (a fixed descendant of an opacity group is grouped but not
+//!    clipped by the group's ancestors) and opens a group's blend layer directly inside its parent
+//!    group, where it blends with the group's whole backdrop (re-pushing intersecting clips is
+//!    idempotent). Below a group whose element has `filter` or `backdrop-filter` the chain is cut
+//!    at a *floor*, the element's own chain: both properties contain their positioned descendants,
+//!    so every chain inside extends it, and an item pushes only the links below it. The links
+//!    between the enclosing floor and this one are the scope's *output clips*, pushed outside its
+//!    own layers. CSS clips a filter's output by the ancestors' `overflow` clips, not its input:
+//!    content just past an ancestor's edge still blurs ink back inside, a blur's 3σ margin and a
+//!    filtered backdrop stop at the edge, and a nested backdrop reads its root's content uncut by
+//!    the root's ancestors. A clip that holds a blend layer is composited as an isolated layer of
+//!    its own (the display list marks it, `Item::PushClip`), so the blend reads only what was
+//!    painted inside the clip: the isolated group a mask's `SrcIn` under a `clip-path` and an inset
+//!    shadow's `DestOut` need. The innermost output clip of a `filter` or `backdrop-filter` element
+//!    with a `mix-blend-mode` is such a clip too, so that element's blend reads nothing painted
+//!    before it. **A pushed link is cut to what it holds.** The chain restarts around every group
+//!    scope, so a page of small faded boxes inside one page-sized `overflow` clip pushes that clip
+//!    once per box. The rasterizer applies a plain clip by intersecting its coverage into the
+//!    strips of everything drawn inside it (`render::sparse`): a link with rounded corners builds
+//!    the strips of its whole outline at every push, every draw inside it is intersected with them,
+//!    and a rectangle drawn inside it loses the strip-free rectangle path; an axis-aligned
+//!    rectangle link costs none of that. A link the rasterizer keeps as an isolated layer, around a
+//!    blend, allocates a texture over its whole extent. [`plan_clip_pushes`] replays the stack
+//!    discipline once per frame and records, per push, the region the items painted inside it can
+//!    put ink in — each item's layer bound, carried into the link's space through every scroll
+//!    window, sticky range and curve reach between them — and [`push_clip`] pushes the link's rect
+//!    cut to that region grown by [`HOLD_SLACK_CSS_PX`]: a plain rect when the cut stays clear of
+//!    the link's rounded corners, the link's whole shape otherwise. Nothing inside the link reaches
+//!    outside the region, so the picture is the same, and the cost is the content's.
 //! 2. **Group scopes** ([`crate::visual::RenderLayer`]) — a stacking context with group effects
 //!    pushes, outermost to innermost: the effect layer (blend mode + `opacity` alpha, clipped to
-//!    the group's prepass-computed content bounds), a `clip-path` layer (a full `push_layer`, not a
-//!    clip layer, per the #1198 rule above), and for `mask-image` the alpha-mask sandwich — mask
-//!    pattern drawn first, then a `Compose::SrcIn` layer holding the content, and innermost of all
-//!    a `filter: blur()` group's bracket. Filter adjustments draw at scope close, inside the
-//!    innermost layer, after in-scope clips pop: the ones before the list's first `blur()` inside
-//!    the blur bracket, the ones after it outside it. Composite order on pop is therefore pre-blur
-//!    adjustments → blur → post-blur adjustments → mask → clip-path → opacity/blend — clip and mask
-//!    are both intersective alpha ops, so the swap versus the spec's filter → clip → mask is
-//!    unobservable.
+//!    the group's prepass-computed content bounds), a `clip-path` clip, and for `mask-image` the
+//!    alpha-mask sandwich — mask pattern drawn first, then a `Compose::SrcIn` layer holding the
+//!    content, and innermost of all a `filter: blur()` group's bracket. Filter adjustments draw at
+//!    scope close, inside the innermost layer, after in-scope clips pop: the ones before the list's
+//!    first `blur()` inside the blur bracket, the ones after it outside it. Composite order on pop
+//!    is therefore pre-blur adjustments → blur → post-blur adjustments → mask → clip-path →
+//!    opacity/blend — clip and mask are both intersective alpha ops, so the swap versus the spec's
+//!    filter → clip → mask is unobservable.
 //! 3. **Fragments** — per element box: outset shadows, background, inset shadows, replaced content
 //!    (above the inset shadows — css-backgrounds-3 §7.4.1 paints inner shadows immediately above
 //!    the background, below content, which is why an inset shadow on an `<img>` is invisible in
@@ -118,17 +109,22 @@
 //! Hit testing is unaffected: it reads [`PaintOrder`], and the cull decision
 //! lives in [`Scratch`], which never leaves the painter. A point outside the
 //! viewport still answers with the element drawn there.
+//!
+//! What this keeps for every instant — an encode window's headroom, a sticky
+//! box's whole range, a curve's whole reach — is culled once more at each
+//! composition, against where that instant puts it
+//! ([`crate::paint::compose::replay_ops`]).
 
 use euclid::default::{Size2D, Vector2D};
-use vello::Scene;
-use vello::kurbo::{Affine, Point, Rect};
-use vello::peniko::{BlendMode, Compose, Fill, Mix};
 
+use crate::kurbo::{Affine, Point, Rect};
 use crate::paint::compose::{BackdropRoot, CapturedShape, ComposeAssembly, ComposeOp, FilterGroup};
+use crate::paint::display_list::DisplayList;
 use crate::paint::shape::{BoxShape, with_shape};
 use crate::paint::{
     BoxFragment, PathScratch, background, border, convert, filters, mask, shadow, text,
 };
+use crate::peniko::{BlendMode, Compose, Fill, Mix};
 use crate::render::image::ImageRegistry;
 use crate::tree::document::Document;
 use crate::visual::space::{self, SpaceKind, nearest_scroll, nearest_sticky};
@@ -148,13 +144,16 @@ pub(crate) enum WalkSink<'s> {
             reason = "constructed only by the equivalence tests' monolithic walk"
         )
     )]
-    Monolithic(&'s mut Scene, &'s dyn crate::render::image::FrameImages),
+    Monolithic(
+        &'s mut DisplayList,
+        &'s dyn crate::render::image::FrameImages,
+    ),
     Compose(&'s mut ComposeAssembly),
 }
 
 impl WalkSink<'_> {
     /// The scene content in `space` encodes into.
-    pub(super) fn scene_for(&mut self, space: Option<u32>) -> &mut Scene {
+    pub(super) fn scene_for(&mut self, space: Option<u32>) -> &mut DisplayList {
         match self {
             Self::Monolithic(scene, _) => scene,
             Self::Compose(assembly) => assembly.fragment_for(space),
@@ -206,7 +205,7 @@ impl WalkSink<'_> {
 
     #[expect(
         clippy::too_many_arguments,
-        reason = "mirrors vello's push_layer plus the compose tags"
+        reason = "mirrors the display list's push_layer plus the compose tags"
     )]
     pub(super) fn push_layer_rect(
         &mut self,
@@ -764,7 +763,7 @@ impl Admitted {
 ///
 /// Three things add up to well under this. An embedder sizes its target
 /// `round(css * device_pixel_ratio)` device px, up to half a device pixel past
-/// the CSS viewport. Vello's area antialiasing samples across a whole pixel.
+/// the CSS viewport. The rasterizer's area antialiasing samples across a whole pixel.
 /// And the frame carries f32 geometry that is converted to f64 here.
 const VIEWPORT_SLACK_DEVICE_PX: f64 = 2.0;
 
@@ -868,7 +867,7 @@ struct Scope {
 /// [`walk_compose`] for the equivalence tests.
 #[cfg(test)]
 pub(crate) fn walk<T>(
-    scene: &mut Scene,
+    scene: &mut DisplayList,
     scratch: &mut Scratch,
     document: &Document<T>,
     frame: &PaintOrder,
@@ -920,7 +919,7 @@ pub(crate) fn walk_compose<T>(
 /// that culling changes nothing an observer of the viewport can see.
 #[cfg(test)]
 pub(crate) fn walk_uncultured<T>(
-    scene: &mut Scene,
+    scene: &mut DisplayList,
     scratch: &mut Scratch,
     document: &Document<T>,
     frame: &PaintOrder,
@@ -1350,11 +1349,12 @@ fn open_scope<T>(
     }
 }
 
-/// Pushes this scope's `clip-path` layer, answering whether it pushed one.
+/// Pushes this scope's `clip-path` clip, answering whether it pushed one.
 ///
-/// A full `push_layer` rather than a clip layer, per the module doc's #1198
-/// rule. A singular map has no shape to clip with, so it pushes an empty rect
-/// instead — which encodes the same "nothing gets through".
+/// A plain clip: where the group holds a blend (a mask's `SrcIn`, a filter's
+/// colour passes, a blended child) the display list isolates it. A singular
+/// map has no shape to clip with, so it pushes an empty clip instead — which
+/// records the same "nothing gets through".
 fn push_clip_path(
     sink: &mut WalkSink<'_>,
     space: Option<u32>,
@@ -1372,23 +1372,8 @@ fn push_clip_path(
         return false;
     };
     match local {
-        Some(local) => sink.push_layer_box(
-            space,
-            fill,
-            BlendMode::new(Mix::Normal, Compose::SrcOver),
-            1.0,
-            scale * local,
-            clip_shape,
-        ),
-        None => sink.push_layer_rect(
-            space,
-            None,
-            Fill::NonZero,
-            BlendMode::new(Mix::Normal, Compose::SrcOver),
-            1.0,
-            Affine::IDENTITY,
-            Rect::ZERO,
-        ),
+        Some(local) => sink.push_clip_box(space, fill, scale * local, clip_shape),
+        None => sink.push_clip_empty(space),
     }
     true
 }
@@ -1518,10 +1503,8 @@ fn backdrop_entry(
 /// Pushes the links of `clip`'s chain below `floor`, root first — a floored
 /// scope's output clips — and answers how many layers that pushed.
 ///
-/// Every link but the innermost is a clip layer. The innermost is a full
-/// `SrcOver` layer at alpha 1 over the same shape, which clips the same
-/// pixels and is the real layer the #1198 rule wants directly around the
-/// scope's effect layer, whose blend may be anything.
+/// Every link but the innermost is cut to what it holds ([`push_clip`]); the
+/// innermost, directly around the scope's effect layer, is pushed whole.
 ///
 /// The chain is the group element's own, and `floor` the innermost clip of
 /// the enclosing floored element's, which an element inside it extends. A
@@ -1555,20 +1538,11 @@ fn push_output_clips(
         push_clip(sink, scratch, frame, index, scale);
     }
     let link = &clips[innermost];
-    let isolating = BlendMode::new(Mix::Normal, Compose::SrcOver);
     match clip_geometry(frame, link, scale) {
         Some((transform, shape)) => {
-            sink.push_layer_box(link.space, Fill::NonZero, isolating, 1.0, transform, shape);
+            sink.push_clip_box(link.space, Fill::NonZero, transform, shape);
         }
-        None => sink.push_layer_rect(
-            link.space,
-            None,
-            Fill::NonZero,
-            isolating,
-            1.0,
-            Affine::IDENTITY,
-            Rect::ZERO,
-        ),
+        None => sink.push_clip_empty(link.space),
     }
     u32::try_from(scratch.chain.len()).expect("a clip chain is shorter than 2^32 links")
 }
@@ -2019,7 +1993,7 @@ fn color_gradient_box<T>(
     // content box, so that origin — border plus padding — is the offset
     // between the two, and the paint item is the establishing element itself
     // rather than a run inside it.
-    let content_origin = vello::kurbo::Vec2::new(
+    let content_origin = crate::kurbo::Vec2::new(
         f64::from(element_layout.border.left + element_layout.padding.left),
         f64::from(element_layout.border.top + element_layout.padding.top),
     );
@@ -2031,17 +2005,17 @@ fn collect_text_clip<T>(
     element: crate::tree::document::NodeId,
 ) -> crate::paint::TextClip<'_> {
     let mut clip = crate::paint::TextClip::default();
-    collect_text_clip_under(document, element, vello::kurbo::Vec2::ZERO, &mut clip);
+    collect_text_clip_under(document, element, crate::kurbo::Vec2::ZERO, &mut clip);
     clip
 }
 
 fn collect_text_clip_under<'doc, T>(
     document: &'doc Document<T>,
     node: crate::tree::document::NodeId,
-    offset: vello::kurbo::Vec2,
+    offset: crate::kurbo::Vec2,
     clip: &mut crate::paint::TextClip<'doc>,
 ) {
-    use vello::kurbo::Vec2;
+    use crate::kurbo::Vec2;
     let Some(node_ref) = document.get(node) else {
         return;
     };
@@ -3063,13 +3037,13 @@ fn blend_mode(style: &stylo::properties::ComputedValues) -> BlendMode {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use euclid::default::{Size2D, Transform3D};
-    use vello::kurbo::Affine;
 
     use super::{
-        BoxShape, CapturedShape, ComposeAssembly, ComposeOp, CullPlan, PaintItem, PaintItemKind,
-        Rect, Scene, Scratch, can_reach, cull_rect, item_bounds, walk, walk_compose,
+        BoxShape, CapturedShape, ComposeAssembly, ComposeOp, CullPlan, DisplayList, PaintItem,
+        PaintItemKind, Rect, Scratch, can_reach, cull_rect, item_bounds, walk, walk_compose,
         walk_uncultured,
     };
+    use crate::kurbo::Affine;
     use crate::paint::equivalence::assert_scenes_identical;
     use crate::test_common::Doc;
     use crate::visual::CornerRadii;
@@ -3085,8 +3059,8 @@ mod tests {
     /// Both encodings of one frame: the one the painter produces, and the one
     /// it would produce if nothing were culled.
     struct Frames {
-        cultured: Scene,
-        uncultured: Scene,
+        cultured: DisplayList,
+        uncultured: DisplayList,
         cultured_bounds: Vec<Rect>,
         uncultured_bounds: Vec<Rect>,
         painted: usize,
@@ -3127,7 +3101,7 @@ mod tests {
     fn walk_twice(doc: &mut Doc) -> Frames {
         let frame = doc.dom.build_paint_order();
         let images = crate::render::image::ImageRegistry::default();
-        let mut cultured = Scene::default();
+        let mut cultured = DisplayList::default();
         let mut cultured_scratch = Scratch::default();
         walk(
             &mut cultured,
@@ -3137,7 +3111,7 @@ mod tests {
             &images,
             &crate::render::image::NoImages,
         );
-        let mut uncultured = Scene::default();
+        let mut uncultured = DisplayList::default();
         let mut uncultured_scratch = Scratch::default();
         walk_uncultured(
             &mut uncultured,
@@ -3160,8 +3134,8 @@ mod tests {
         }
     }
 
-    fn draws(scene: &Scene) -> usize {
-        scene.encoding().draw_tags.len()
+    fn draws(scene: &DisplayList) -> usize {
+        scene.len()
     }
 
     fn item(x: f32, y: f32, size: f32) -> PaintItem {
@@ -3882,20 +3856,16 @@ mod tests {
         assert!(box_encodes(&doc, &frame, dot), "the dot's ink can show");
     }
 
-    /// The alpha of every layer `scene` begins, in encode order.
-    fn layer_alphas(scene: &Scene) -> Vec<f32> {
-        let encoding = scene.encoding();
-        let mut offset = 0_usize;
-        let mut alphas = Vec::new();
-        for tag in &encoding.draw_tags {
-            // `DrawTag::BEGIN_CLIP`, whose data is `DrawBeginClip { blend_mode, alpha }`.
-            if tag.0 == 0x49 {
-                alphas.push(f32::from_bits(encoding.draw_data[offset + 1]));
-            }
-            // The tag's data size in words, as vello's `DrawMonoid` reads it.
-            offset += ((tag.0 >> 2) & 0x7) as usize;
-        }
-        alphas
+    /// The alpha of every layer `scene` begins, in record order.
+    fn layer_alphas(scene: &DisplayList) -> Vec<f32> {
+        scene
+            .items()
+            .iter()
+            .filter_map(|item| match item {
+                crate::paint::display_list::Item::PushLayer { alpha, .. } => Some(*alpha),
+                _ => None,
+            })
+            .collect()
     }
 
     /// A fading child inside a fading parent's group: each effect layer's
@@ -3938,7 +3908,7 @@ mod tests {
         );
 
         let alphas = |now: Option<f64>| {
-            let mut scene = Scene::default();
+            let mut scene = DisplayList::default();
             frame.compose_into(&mut scene, &[], &[], &[], &|_| None, now);
             layer_alphas(&scene)
                 .into_iter()
@@ -4274,7 +4244,7 @@ mod tests {
             "the uncultured walk must encode them, or the fixture proves nothing",
         );
         assert_eq!(
-            frames.cultured.encoding().n_open_clips,
+            frames.cultured.open_layers(),
             0,
             "every pushed layer must still be popped",
         );
@@ -4509,9 +4479,8 @@ mod tests {
     /// A scope whose element has `filter` (or `backdrop-filter`) opens inside
     /// the links of its own clip chain — a scroller's clip in the space
     /// outside the scroller's node, then the card's in the scroller's node,
-    /// the innermost as a full layer around the effect layer — and its
-    /// content pushes none of them. So the blur group's range is the box's
-    /// own content alone, which a scroll of the scroller or the card does
+    /// right around the effect layer — and its content pushes none of them. So the blur group's
+    /// range is the box's own content alone, which a scroll of the scroller or the card does
     /// not change, and the bake reads neither. A box no ancestor clips opens
     /// with no output clip at all.
     #[test]
@@ -4565,8 +4534,8 @@ mod tests {
         );
         assert_eq!(
             push(&program[at - 2]),
-            Some((false, spaces[card_node as usize].parent)),
-            "the card's clip, a full layer, in the scroller's node",
+            Some((true, spaces[card_node as usize].parent)),
+            "the card's clip, in the scroller's node",
         );
         assert_eq!(
             push(&program[at - 3]),

@@ -1,7 +1,7 @@
 #![allow(
     clippy::cast_lossless,
     clippy::cast_possible_truncation,
-    reason = "CSS/style geometry is f32 while Vello/Kurbo geometry is f64"
+    reason = "CSS/style geometry is f32 while Kurbo geometry is f64"
 )]
 
 //! Per-fragment CSS painters. The walker owns traversal, clipping, and
@@ -12,6 +12,7 @@ mod background;
 mod border;
 pub(crate) mod compose;
 pub(crate) mod convert;
+pub(crate) mod display_list;
 #[cfg(test)]
 pub(crate) mod equivalence;
 pub(crate) mod filters;
@@ -22,8 +23,7 @@ pub(crate) mod shape;
 mod text;
 pub(crate) mod walker;
 
-use vello::kurbo::{Affine, BezPath, Rect, Vec2};
-
+use crate::kurbo::{Affine, BezPath, Rect, Vec2};
 use crate::layout::{Edges, Layout, TextBrush};
 use crate::paint::shape::ReferenceBoxes;
 use crate::visual::CornerRadii;
@@ -108,5 +108,3 @@ impl BoxFragment {
         }
     }
 }
-#[cfg(test)]
-mod tiles;

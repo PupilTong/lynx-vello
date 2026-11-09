@@ -10,7 +10,7 @@
 //! one sizing rule they share.
 
 use bobcat_core::ImageSizeHint;
-use bobcat_core::vello::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat as PixelFormat};
+use bobcat_core::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat as PixelFormat};
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::image_header::ImageHeader;
@@ -33,7 +33,7 @@ pub struct Bitmap {
     pub source_width: u32,
     pub source_height: u32,
     /// Whether the colour channels are premultiplied by alpha. `ImageIO`
-    /// produces premultiplied pixels and gdk-pixbuf straight ones; vello
+    /// produces premultiplied pixels and gdk-pixbuf straight ones; the rasterizer
     /// composes either correctly as long as it is told which.
     pub premultiplied: bool,
     pub rgba: Vec<u8>,

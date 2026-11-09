@@ -2,7 +2,7 @@
 //!
 //! The painter walks DOM's private back-to-front visual order, applies the
 //! document Device's pixel ratio once at the root, threads clip chains and
-//! group-effect layers through Vello, and paints box fragments plus retained
+//! group-effect layers into the display list, and paints box fragments plus retained
 //! Parley glyph runs. It reads computed styles and rounded layouts directly
 //! from the same document, so viewport, scale, geometry, resources, and scene
 //! construction cannot be assembled from divergent owners. What it produces
@@ -32,8 +32,8 @@
 //!   composite curve; and an element past the shared area budget draws no backdrop at all, leaving
 //!   the *unfiltered* backdrop showing. `docs/tracking/deviations.md` records the set.
 //! - Perspective-projected items use the affine map agreeing with the true projection at three
-//!   border-box corners because Vello transforms are affine; hit testing remains projectively
-//!   exact.
+//!   border-box corners because display-list transforms are affine; hit testing remains
+//!   projectively exact.
 //! - Lynx's `background-clip: border-area` skips its layer. `background-clip: text` uses
 //!   glyph-silhouette `SrcIn` sandwiches over descendant text; decorations and descendant
 //!   transforms are excluded.
@@ -63,8 +63,8 @@
 use std::sync::Arc;
 
 use euclid::default::Size2D;
-use vello::Scene;
 
+use crate::paint::display_list::DisplayList;
 use crate::tree::document::Document;
 use crate::visual::{CommittedFrame, PaintOrder};
 
@@ -101,9 +101,9 @@ pub(crate) struct FramePainter {
     /// Retired frames' scenes — fragments and committed compositions —
     /// emptied but with their encoding capacity intact, pooled for the next
     /// paint's fragments and composition.
-    spare_scenes: Vec<Scene>,
+    spare_scenes: Vec<DisplayList>,
     /// A retired frame's emptied fragment container, capacity intact.
-    spare_fragments: Vec<Scene>,
+    spare_fragments: Vec<DisplayList>,
     /// A retired frame's emptied compose program, capacity intact.
     spare_program: Vec<crate::paint::compose::ComposeOp>,
     /// A retired frame's emptied image-draw table, capacity intact.

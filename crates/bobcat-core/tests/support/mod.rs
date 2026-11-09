@@ -363,7 +363,7 @@ impl bobcat_core::FrameImages for FetcherDouble {
         &self,
         source: &str,
         hint: bobcat_core::ImageSizeHint,
-    ) -> Option<bobcat_core::vello::peniko::ImageData> {
+    ) -> Option<bobcat_core::peniko::ImageData> {
         self.images
             .as_ref()
             .and_then(|images| images.read(source, hint))

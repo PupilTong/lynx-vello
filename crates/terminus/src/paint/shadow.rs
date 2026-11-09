@@ -8,26 +8,23 @@
 //!
 //! The computed list paints **last shadow first**, so the first-specified
 //! shadow ends up on top (css-backgrounds-3 §7.4.1). CSS blur-radius is 2σ;
-//! vello's analytic blur cuts off at 2.5σ; the per-corner offscreen path uses 3σ.
+//! the rasterizer's analytic blur cuts off at 2.5σ; the per-corner offscreen path uses 3σ.
 //!
-//! - Outset: [`vello::Scene::draw_blurred_rounded_rect`] of the border-box rect offset by the
-//!   shadow offset and inflated by the spread, inside an even-odd clip that carves the border-box
-//!   shape out (§7.4.1: the shadow paints only outside the border box). Zero-blur shadows fill the
-//!   offset shape exactly, with per-corner radii.
-//! - Inset: inside a full `SrcOver` layer clipped to the padding-box shape (a
-//!   full layer, not a clip layer, because a blend layer sits inside —
-//!   vello [#1198](https://github.com/linebender/vello/issues/1198)), fill
-//!   the padding box with the shadow color, then erase the "hole" (padding
-//!   box offset by the shadow offset, deflated by the spread) with a
-//!   `Compose::DestOut` blurred full-alpha white draw: what survives is
-//!   color × (1 − blurred hole alpha) — exactly the inset shadow band.
-//!   Zero-blur insets fill the (padding − hole) ring even-odd under a plain
-//!   clip layer instead.
+//! - Outset: [`DisplayList::draw_blurred_rounded_rect`] of the border-box rect offset by the shadow
+//!   offset and inflated by the spread, inside an even-odd clip that carves the border-box shape
+//!   out (§7.4.1: the shadow paints only outside the border box). Zero-blur shadows fill the offset
+//!   shape exactly, with per-corner radii.
+//! - Inset: inside a clip to the padding-box shape, which the display list isolates because a blend
+//!   layer sits inside, fill the padding box with the shadow color, then erase the "hole" (padding
+//!   box offset by the shadow offset, deflated by the spread) with a `Compose::DestOut` blurred
+//!   full-alpha white draw: what survives is color × (1 − blurred hole alpha) — exactly the inset
+//!   shadow band. Zero-blur insets fill the (padding − hole) ring even-odd under a plain clip layer
+//!   instead.
 //!
 //! Recorded approximations:
-//! - Uniform circular radii use Vello's analytic blur. Other radii fill their actual shape into the
-//!   existing offscreen blur pipeline. Like CSS filters, that pipeline uses the mean scale of the
-//!   transform for device-space σ (non-uniform scale/skew remain an approximation).
+//! - Uniform circular radii use the rasterizer's analytic blur. Other radii fill their actual shape
+//!   into the existing offscreen blur pipeline. Like CSS filters, that pipeline uses the mean scale
+//!   of the transform for device-space σ (non-uniform scale/skew remain an approximation).
 //! - Spread adjusts corner radii linearly, clamped at zero, with zero components staying zero
 //!   (sharp corners stay sharp — the endpoint of the spec's easing); the nonlinear easing for radii
 //!   smaller than the spread is skipped (behavioral fidelity — see AGENTS.md).
@@ -37,13 +34,13 @@
 use euclid::default::Size2D;
 use stylo::properties::ComputedValues;
 use stylo::values::computed::effects::BoxShadow;
-use vello::kurbo::Rect;
-use vello::peniko::{BlendMode, Color, Compose, Fill, Mix};
 
+use crate::kurbo::Rect;
 use crate::paint::compose::FilterGroup;
 use crate::paint::shape::{BoxShape, inner_radii, normalize_radii, ring_path_into, with_shape};
 use crate::paint::walker::WalkSink;
 use crate::paint::{BoxFragment, PathScratch, convert};
+use crate::peniko::{BlendMode, Color, Compose, Fill, Mix};
 use crate::visual::{CornerRadii, PaintOrder};
 
 pub(crate) fn paint_outset(
@@ -204,11 +201,9 @@ fn paint_one_inset(
     let hole_radii = adjust_radii(padding_radii, -geometry.spread as f32);
 
     if geometry.sigma > 0.0 {
-        sink.push_layer_box(
+        sink.push_clip_box(
             space,
             Fill::NonZero,
-            BlendMode::new(Mix::Normal, Compose::SrcOver),
-            1.0,
             fragment.transform,
             padding_shape.clone(),
         );
@@ -481,12 +476,7 @@ mod tests {
                     "radius={radius}, shadow={shadow}"
                 );
                 assert!(frame.filter_groups.is_empty());
-                assert!(
-                    frame
-                        .fragments
-                        .iter()
-                        .all(|scene| scene.encoding().n_open_clips == 0)
-                );
+                assert!(frame.fragments.iter().all(|scene| scene.open_layers() == 0));
             }
         }
     }

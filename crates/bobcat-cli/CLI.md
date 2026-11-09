@@ -66,8 +66,8 @@ with one editing host that logs its editing events to standard error.
 
 Headed mode is macOS-only today; it derives the device-pixel ratio from the
 window, while headless mode takes it from `--dpr` (default 1). Only
-screenshots read pixels back to the CPU; normal frames reuse the scene, Vello
-renderer, GPU target, and scratch allocations, skip the GPU entirely while
+screenshots read pixels back to the CPU; normal frames reuse the display
+list, the rasterizer, GPU target, and scratch allocations, skip the GPU entirely while
 the document is unchanged, and wait for each submitted frame so a clock that
 outpaces the GPU cannot pile up work.
 

@@ -2,10 +2,10 @@
 //! hand, render it headless, and check pixels from the readback. A usable GPU
 //! adapter is mandatory, including in CI.
 
+use terminus::link::DisplayList;
+use terminus::link::kurbo::{Affine, Rect};
+use terminus::link::peniko::{Color, Fill};
 use terminus::link::render::gpu::Headless;
-use terminus::link::vello;
-use terminus::link::vello::kurbo::{Affine, Rect};
-use terminus::link::vello::peniko::{Color, Fill};
 
 fn pixel(pixels: &[u8], width: usize, x: usize, y: usize) -> [u8; 4] {
     let offset = (y * width + x) * 4;
@@ -21,7 +21,7 @@ fn headless(test: &str) -> Headless {
 fn red_square_over_white_base() {
     let mut headless = headless("red_square_over_white_base");
 
-    let mut scene = vello::Scene::new();
+    let mut scene = DisplayList::new();
     scene.fill(
         Fill::NonZero,
         Affine::IDENTITY,
@@ -30,7 +30,7 @@ fn red_square_over_white_base() {
         &Rect::new(12.0, 12.0, 52.0, 52.0),
     );
     let pixels = headless
-        .render(&scene, &[], 64, 64, Color::WHITE)
+        .render(&scene, 64, 64, Color::WHITE)
         .expect("headless render should succeed");
     assert_eq!(pixels.len(), 64 * 64 * 4);
 
@@ -53,10 +53,10 @@ fn red_square_over_white_base() {
 fn empty_scene_paints_exact_base_color_with_row_padding() {
     let mut headless = headless("empty_scene_paints_exact_base_color_with_row_padding");
 
-    let scene = vello::Scene::new();
+    let scene = DisplayList::new();
     let blue = Color::from_rgb8(0, 0, 255);
     let pixels = headless
-        .render(&scene, &[], 33, 17, blue)
+        .render(&scene, 33, 17, blue)
         .expect("headless render should succeed");
     assert_eq!(pixels.len(), 33 * 17 * 4);
 

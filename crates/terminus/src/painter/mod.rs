@@ -38,8 +38,6 @@ use std::sync::Arc;
 use euclid::default::Vector2D;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
-use vello::Scene;
-use vello::peniko::{Color, ImageData};
 
 pub use self::gesture::{
     EmitEvent, GesturePolicy, GestureRouter, InputDecision, InputDecisions, RouterHost,
@@ -50,6 +48,8 @@ use self::inertia::{AutoScroll, Axis, BounceBack, ChainOutcome, DragTrack, Fling
 use self::motion::{ElasticStep, Motion, resolve_elastic_step, stretch_of, unwind_stretch};
 use crate::clock::ClockInstant;
 use crate::input::{InputEvent, InputKind, PointerId};
+use crate::paint::display_list::{DisplayList, Texture};
+use crate::peniko::{Color, ImageData};
 use crate::render::gpu::Headless;
 use crate::render::image::FrameImages;
 use crate::scroll::{
@@ -453,7 +453,7 @@ impl Output {
     fn prepare_vectors(
         &mut self,
         frame: &CommittedFrame,
-        out: &mut Vec<Option<ImageData>>,
+        out: &mut Vec<Option<Texture>>,
     ) -> Result<(), PainterError> {
         out.clear();
         let baked = match self {
@@ -467,7 +467,7 @@ impl Output {
                 .map_err(|error| PainterError::Gpu(error.to_string()))?,
             Self::Window(graphics) => graphics.prepare_vectors(frame)?,
         };
-        out.extend(baked.iter().cloned());
+        out.extend(baked.iter().copied());
         Ok(())
     }
 
@@ -493,11 +493,11 @@ impl Output {
         &mut self,
         frame: &CommittedFrame,
         images: &[Option<ImageData>],
-        vectors: &[Option<ImageData>],
+        vectors: &[Option<Texture>],
         offset_of: &dyn Fn(&crate::visual::ScrollSlot) -> Option<Vector2D<f32>>,
         scroll_generation: u64,
         animation_now: Option<f64>,
-        out: &mut Vec<Option<ImageData>>,
+        out: &mut Vec<Option<Texture>>,
     ) -> Result<(), PainterError> {
         out.clear();
         let baked = match self {
@@ -526,12 +526,11 @@ impl Output {
                 animation_now,
             )?,
         };
-        out.extend(baked.iter().cloned());
+        out.extend(baked.iter().copied());
         Ok(())
     }
 
-    /// Renders one composed scene, drawing `images`, into this target at
-    /// `size`.
+    /// Renders one composed scene into this target at `size`.
     ///
     /// A window renders into the texture it re-presents rather than into the
     /// swap-chain image, which is what lets re-exposure present the same frame
@@ -539,23 +538,14 @@ impl Output {
     /// a window presents, and an offscreen target's readback polls the device
     /// itself — only [`Painter::draw_offscreen`], which renders offscreen and
     /// reads nothing back, waits.
-    ///
-    /// The scene's bitmaps are named because a target tracks what its
-    /// renderer's image atlas still holds; see
-    /// [`crate::render::gpu::AtlasResidency`].
-    fn render(
-        &mut self,
-        scene: &Scene,
-        images: &[Option<ImageData>],
-        size: FrameSize,
-    ) -> Result<(), PainterError> {
+    fn render(&mut self, scene: &DisplayList, size: FrameSize) -> Result<(), PainterError> {
         match self {
             #[cfg(feature = "painter-test-utils")]
             Self::None => Ok(()),
             Self::Offscreen(gpu) => gpu
-                .render_frame(scene, images, size.width, size.height, CANVAS)
+                .render_frame(scene, size.width, size.height, CANVAS)
                 .map_err(|error| PainterError::Gpu(error.to_string())),
-            Self::Window(graphics) => graphics.render_to_target(scene, images, size),
+            Self::Window(graphics) => graphics.render_to_target(scene, size),
         }
     }
 
@@ -709,14 +699,14 @@ pub struct Painter {
     /// The target's, not the document's: what was drawn stays drawn until
     /// [`Self::forget_target`] clears it.
     composed: Option<(ComposeKey, FrameSize)>,
-    composed_scene: Scene,
+    composed_scene: DisplayList,
     /// The `filter: blur()` textures of the frame being composed, copied out
     /// of the target's bake cache. Kept here so its capacity outlives a
     /// frame.
-    composed_filters: Vec<Option<ImageData>>,
+    composed_filters: Vec<Option<Texture>>,
     /// The vector image textures of the frame being composed, copied out of
     /// the target's raster cache, for the same reason.
-    composed_vectors: Vec<Option<ImageData>>,
+    composed_vectors: Vec<Option<Texture>>,
     /// The pixels the adopted commit draws, read out of the host's store.
     images: images::PainterImages,
     /// The shown view's presentation records ([`Self::last_presented`],
@@ -1603,9 +1593,9 @@ fn settle_stretch_aware(
 )]
 fn compose_and_render(
     output: &mut Output,
-    buffer: &mut Scene,
-    filtered: &mut Vec<Option<ImageData>>,
-    vectors: &mut Vec<Option<ImageData>>,
+    buffer: &mut DisplayList,
+    filtered: &mut Vec<Option<Texture>>,
+    vectors: &mut Vec<Option<Texture>>,
     intents: &ScrollIntents,
     frame: &CommittedFrame,
     images: &[Option<ImageData>],
@@ -1645,8 +1635,9 @@ fn compose_and_render(
         scene
     } else {
         buffer.reset();
-        frame.compose_into(
+        frame.compose_target_into(
             buffer,
+            (size.width, size.height),
             images,
             filtered,
             vectors,
@@ -1655,7 +1646,7 @@ fn compose_and_render(
         );
         &*buffer
     };
-    output.render(scene, images, size)
+    output.render(scene, size)
 }
 
 fn route_published(
@@ -1730,7 +1721,7 @@ impl Painter {
             clock: FrameClock::new(),
             scroll_intents: ScrollIntents::new(),
             composed: None,
-            composed_scene: Scene::new(),
+            composed_scene: DisplayList::new(),
             composed_filters: Vec::new(),
             composed_vectors: Vec::new(),
             images: images::PainterImages::default(),

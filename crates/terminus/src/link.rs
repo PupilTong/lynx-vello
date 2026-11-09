@@ -17,10 +17,14 @@ pub use euclid::default::{Point2D, Rect, Size2D, Vector2D};
 pub use seldon::text::{FontBlob, TextContext};
 pub use stylo;
 pub use stylo_dom::ElementState;
-pub use vello;
+pub use vello_gpu::{kurbo, peniko};
+pub use wgpu;
 
 pub use crate::layout::TextLineReport;
 pub use crate::paint::compose::FilterGroup;
+pub use crate::paint::display_list::{
+    DisplayList, DrawGlyphs, Embolden, Glyph, NormalizedCoord, Texture,
+};
 pub use crate::render::image::{
     DocumentKind, DocumentRequest, FrameImages, ImageEvent, ImageInbox, ImageOutcome, ImageReports,
     ImageRole, ImageSizeHint, MAX_RENDERABLE_DIMENSION, NoImages, is_renderable,
@@ -139,12 +143,11 @@ pub mod layout {
     pub use crate::layout::{Layout, NaturalSize, ParagraphKind, Size};
 }
 
-/// Headless GPU rendering, and the area limit of a `filter: blur()` bake.
+/// Headless GPU rendering and the area limit of a `filter: blur()` bake.
 ///
 /// The render floor knows no nodes, styles or layout: the document builds a
-/// [`vello::Scene`] per commit and this floor
-/// turns scenes into pixels, on the one workspace `vello` version this link
-/// re-exports.
+/// [`DisplayList`] per commit and this floor turns scenes into pixels with
+/// `vello_gpu`'s sparse strips, on the [`wgpu`] this link re-exports.
 pub mod render {
     /// Headless rendering and readback.
     pub mod gpu {
@@ -154,6 +157,13 @@ pub mod render {
     /// The `filter: blur()` bake.
     pub mod blur {
         pub use crate::render::blur::MAX_FILTER_AREA;
+    }
+
+    /// The CPU half of a render — a display list replayed into sparse
+    /// strips — for this crate's benchmarks.
+    #[doc(hidden)]
+    pub mod strips {
+        pub use crate::render::sparse::StripScene;
     }
 }
 

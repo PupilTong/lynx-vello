@@ -28,24 +28,24 @@ The ordinary suite has three explicit expectation states:
 
 | State | Cases | Checked reference |
 | --- | ---: | --- |
-| `BrowserMatch` | 666 | Chromium PNG under `tests/screenshots/css-paint/` |
-| `NativeSnapshot` | 145 | DOM/Parley PNG under `tests/screenshots/css-paint-native/` |
+| `BrowserMatch` | 665 | Chromium PNG under `tests/screenshots/css-paint/` |
+| `NativeSnapshot` | 146 | DOM/Parley PNG under `tests/screenshots/css-paint-native/` |
 | `Skip` | 189 | No PNG and `#[ignore]`; retained for full browser audit |
 
-The 145 native snapshots are all audited W3C-correct Chromium differences:
-84 rasterization or boundary/subpixel-sampling cases plus 61 cases where CSS
+The 146 native snapshots are all audited W3C-correct Chromium differences:
+85 rasterization or boundary/subpixel-sampling cases plus 61 cases where CSS
 permits different UA geometry, pattern, color, or `auto` metrics. They are
 active regressions: their current standards-conforming DOM/Parley result
 must remain stable even though it is not required to match Chromium. The full
 browser audit still compares every one of these cases to Chromium so a parity
 change cannot silently alter its standards disposition.
 
-Every one of the 334 Chromium differences has a standalone HTML fixture under
+Every one of the 335 Chromium differences has a standalone HTML fixture under
 `crates/terminus/tests/fixtures/css-paint-differences/` and a row in
 `crates/terminus/tests/css-paint-differences.tsv`. Thus “difference” is not
-synonymous with “ignored”: the registry is the union of 145 active native
+synonymous with “ignored”: the registry is the union of 146 active native
 snapshots and 189 skips. The asset inventory requires exact basename equality
-for the 666 browser PNGs, 145 native PNGs, and 334 difference fixtures.
+for the 665 browser PNGs, 146 native PNGs, and 335 difference fixtures.
 
 The atlas contains **no `backdrop-filter` case**, and cannot: its generator
 predates the property, Lynx has no `backdrop-filter` anywhere (so there is no
@@ -150,23 +150,23 @@ These WPT subsets overlap and must not be summed.
 | Transforms | 100 | 100 | 0 |
 | Filters and opacity | 80 | 70 | 10 |
 | Clip paths | 80 | 47 | 33 |
-| Masks | 100 | 46 | 54 |
+| Masks | 100 | 45 | 55 |
 | Text | 160 | 75 | 85 |
-| **Total** | **1,000** | **666** | **334** |
+| **Total** | **1,000** | **665** | **335** |
 
 “Pixelmatch-exact” means zero non-antialiased pixels beyond the Playwright
-threshold. The 334 mismatches are not one undifferentiated bug count:
+threshold. The 335 mismatches are not one undifferentiated bug count:
 
 | Classification | Cases | Meaning |
 | --- | ---: | --- |
-| W3C-correct — rasterization or boundary sampling | 84 | The standard behavior is present; Vello/Parley and Chromium cover a boundary or subpixel differently. |
+| W3C-correct — rasterization or boundary sampling | 85 | The standard behavior is present; the rasterizer/Parley and Chromium cover a boundary or subpixel differently. |
 | W3C-correct — permitted UA choice | 61 | CSS deliberately leaves the observed geometry, pattern, color, or `auto` metric to the UA. |
-| **W3C-correct subtotal** | **145** | These are Chromium-parity differences, not standards defects. |
+| **W3C-correct subtotal** | **146** | These are Chromium-parity differences, not standards defects. |
 | Definite W3C gap | 170 | A standard grammar or required behavior is missing or implemented incorrectly. |
 | Non-W3C compatibility | 19 | `text-stroke` is a WebKit/Lynx compatibility surface, not a W3C CSS property. |
-| **Audited mismatch total** | **334** | Exactly the difference registry: 145 native snapshots plus 189 skips. |
+| **Audited mismatch total** | **335** | Exactly the difference registry: 146 native snapshots plus 189 skips. |
 
-The 84 raster/sample cases are 8 hard-stop boundary samples, 48 general
+The 85 raster/sample cases are 9 hard-stop boundary samples, 48 general
 edge-coverage cases, and 28 ordinary text subpixel cases. The 61 UA-choice
 cases are 16 dash/dot patterns, 24 3D border colors, 16 rounded double borders,
 and the five `line-through` cases using
@@ -188,7 +188,7 @@ and nested-overflow cases, 20/20 opacity groups, 20/20 clip ellipses, 10/10
 | Issue | Class | Cases | Finding and implementation evidence |
 | --- | --- | ---: | --- |
 | `css-gradient-multi-position-stops` | W3C gap | 76 | The Lynx Stylo build compiles out second positions and interpolation hints in `vendor/stylo/style/values/specified/image.rs`; the whole declaration is rejected before the painter sees it. |
-| `css-gradient-hard-stop-boundary-sampling` | W3C-correct: raster/sample | 8 | Coincident stops reach the painter, while the boundary scanline selects a different device sample in `crates/terminus/src/paint/background.rs`. |
+| `css-gradient-hard-stop-boundary-sampling` | W3C-correct: raster/sample | 9 | Coincident stops reach the painter, while the boundary scanline selects a different device sample in `crates/terminus/src/paint/background.rs`. `mask-linear-009` joined the first audit's eight when `vello_gpu` became the rasterizer: its 45° stop passes exactly through pixel centres, an exact tie that Chromium and `vello_gpu` break opposite ways. |
 | `css-border-dash-dot-pattern` | W3C-correct: UA choice | 16 | DOM's painter uses fixed 2w/1w dashed and 2w dotted periods in `crates/terminus/src/paint/border.rs`; CSS does not prescribe dash length, spacing, or perimeter phasing. |
 | `css-border-3d-light-face-color` | W3C-correct: UA choice | 24 | `groove`, `ridge`, `inset`, and `outset` use the painter's fixed lighten/darken colors. CSS specifies the visual relationship, not a color formula. |
 | `css-double-border-rounded-corners` | W3C-correct: UA choice | 16 | DOM's one-third line allocation and rounded-corner interpolation differ from Chrome, but CSS does not fully determine the line split or rounded style transition. |
@@ -208,16 +208,16 @@ and nested-overflow cases, 20/20 opacity groups, 20/20 clip ellipses, 10/10
 | `pulsar-text-shadow-blur` | W3C gap | 10 | Text-shadow offset and color paint, but the parsed blur radius is ignored. |
 | `css-text-decoration-auto-thickness-ua-choice` | W3C-correct: UA choice | 5 | `text-decoration-{002,006,010,014,018}` use `line-through` with `text-decoration-thickness: auto`; CSS leaves the resulting font/UA metric and exact line geometry to the UA. |
 | `pulsar-text-decoration-thickness` | W3C gap | 5 | `text-decoration-{003,007,011,015,019}` explicitly request `3px`; Stylo parses and computes the authorable longhand, but `crates/terminus/src/paint/text.rs` does not read it and always derives decoration thickness from font metrics. |
-| `pulsar-text-stroke-join-geometry` | Non-W3C compatibility | 19 | Every `text-stroke-000..019` case except matching control `006`: `text-stroke`/`-webkit-text-stroke` is a WebKit/Lynx extension, not a W3C CSS property. Kurbo's default join differs from Chromium's glyph-stroke join and unhinted Vello coverage contributes remaining pixels. |
-| `css-text-subpixel-rasterization` | W3C-correct: raster/sample | 28 | Ordinary Ahem glyph/baseline coverage differs at subpixel edges with Vello glyph hinting disabled. The text is present and standards behavior is not missing. |
+| `pulsar-text-stroke-join-geometry` | Non-W3C compatibility | 19 | Every `text-stroke-000..019` case except matching control `006`: `text-stroke`/`-webkit-text-stroke` is a WebKit/Lynx extension, not a W3C CSS property. Kurbo's default join differs from Chromium's glyph-stroke join and unhinted glyph coverage contributes remaining pixels. |
+| `css-text-subpixel-rasterization` | W3C-correct: raster/sample | 28 | Ordinary Ahem glyph/baseline coverage differs at subpixel edges with glyph hinting disabled. The text is present and standards behavior is not missing. |
 
 The authoritative difference mapping is the two-column
 `crates/terminus/tests/css-paint-differences.tsv` (`case-name`, `issue`). The
 name-based classifier refuses an unclassified mismatch, a duplicate row or
 name, index/name drift, a missing case, or a mapped case that now matches. It
-also asserts the four disposition totals (84, 61, 170, and 19), so the
-145-case W3C-correct subtotal cannot change accidentally. The generator maps
-all 145 W3C-correct rows (84 raster/sample plus 61 UA-choice) to
+also asserts the four disposition totals (85, 61, 170, and 19), so the
+146-case W3C-correct subtotal cannot change accidentally. The generator maps
+all 146 W3C-correct rows (85 raster/sample plus 61 UA-choice) to
 `NativeSnapshot`; every other registry row maps to `Skip`.
 
 ## Regeneration and audit
@@ -240,7 +240,7 @@ node crates/terminus/tests/support/capture_css_paint_references.mjs \
 ```
 
 Inspect the atlases, then split them into the committed browser-reference
-directory. The default split writes only the 666 `BrowserMatch` tiles; it never
+directory. The default split writes only the 665 `BrowserMatch` tiles; it never
 writes either the native-reference directory or any other difference:
 
 ```sh
@@ -248,7 +248,7 @@ python3 crates/terminus/tests/support/generate_css_paint_cases.py \
   --split-atlases output/playwright/css-paint/atlases
 ```
 
-To intentionally accept the current DOM/Parley behavior for all 145
+To intentionally accept the current DOM/Parley behavior for all 146
 W3C-correct Chromium differences, run only the generated `css_native_` tests
 on a real GPU:
 
@@ -267,9 +267,9 @@ python3 crates/terminus/tests/support/generate_css_paint_cases.py \
   --prune-reference-assets --validate-assets
 ```
 
-The checked regression suite compares 811 screenshot cases: 666 to Chromium
-and 145 to native snapshots. With the inventory test, Cargo reports 812 passed
-and 189 ignored; the native atlas
+The checked regression suite compares 811 screenshot cases: 665 to Chromium
+and 146 to native snapshots. With the asset inventory test and the fixture
+paragraph test, Cargo reports 813 passed and 189 ignored; the native atlas
 builder does not render those skipped cases in a normal run:
 
 ```sh
@@ -304,7 +304,7 @@ explicitly, then rerun it.
 
 After classification, first regenerate Rust and HTML metadata, then update the
 native W3C-correct set and split the browser matches. Finally validate the
-666/145/189 asset partition:
+665/146/189 asset partition:
 
 ```sh
 python3 crates/terminus/tests/support/generate_css_paint_cases.py

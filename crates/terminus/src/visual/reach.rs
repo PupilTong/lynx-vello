@@ -22,7 +22,8 @@ use stylo::values::computed::transform::{
 };
 use stylo::values::computed::{CSSPixelLength, TimingFunction};
 use stylo::values::generics::transform::GenericTransformOperation;
-use vello::kurbo::{Affine, Point, Rect};
+
+use crate::kurbo::{Affine, Point, Rect};
 
 /// A closed interval `[low, high]`.
 #[derive(Debug, Clone, Copy, PartialEq)]

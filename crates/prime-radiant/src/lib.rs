@@ -15,7 +15,7 @@
 //! ```no_run
 //! # #[cfg(feature = "render")]
 //! # fn example(document: &mut terminus::link::Document<()>) {
-//! use prime_radiant::vello::peniko::Color;
+//! use prime_radiant::peniko::Color;
 //! use prime_radiant::{Screenshots, capture_document, headless};
 //!
 //! let mut gpu = headless("my_test");
@@ -76,7 +76,7 @@ mod render;
 mod store;
 
 #[cfg(feature = "render")]
-pub use terminus::link::vello;
+pub use terminus::link::{kurbo, peniko};
 
 pub use crate::compare::{CompareOptions, Comparison, compare};
 pub use crate::golden::{

@@ -1,8 +1,8 @@
 //! Document render benchmarks: style/layout/visual-order/private paint →
-//! retained `vello::Scene`, CPU-side only (no GPU dispatch),
+//! retained `DisplayList`, CPU-side only (no GPU dispatch),
 //! `CodSpeed`-compatible.
 //!
-//! Two kinds of measurement live here, and they answer different questions.
+//! Three kinds of measurement live here, and they answer different questions.
 //!
 //! - `render_document` is the **cold** number: a document built by `with_inputs` and never
 //!   rendered, so one iteration pays the first style flush, the first full layout, the first
@@ -13,6 +13,11 @@
 //!   plus one repaint of an already-warm document. These are the frames a running app actually
 //!   produces — a scroll tick, a color change, a transform write — and none of them were observable
 //!   before, because a fresh document's first render swamped them.
+//! - Every `strips_*` benchmark is the rasterizer's **CPU half** of one frame: a committed display
+//!   list replayed into a `vello_gpu` scene, where every path is flattened and turned into sparse
+//!   strips. That is the per-frame cost of drawing a list at all — every render pays it, a scroll
+//!   or animation frame that recommits nothing included — and the `frame_*` numbers, which stop at
+//!   the list, do not contain it.
 //!
 //! What the `frame_*` set is arranged to expose:
 //!
@@ -82,7 +87,7 @@ use stylo::values::computed::{CSSPixelLength, Length};
 use stylo::values::specified::font::{FONT_MEDIUM_PX, QueryFontMetricsFlags};
 use stylo_traits::{CSSPixel, DevicePixel};
 use terminus::link::layout::{NaturalSize, Size};
-use terminus::link::vello::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
+use terminus::link::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
 use terminus::link::{Document, ImageRole, NodeId, StylesheetOrigin, Vector2D};
 
 fn main() {
@@ -601,12 +606,7 @@ fn bench_frames(
         phase = !phase;
         step(&mut page, phase);
         divan::black_box(page.render());
-        divan::black_box(
-            page.scene(&terminus::link::NoImages)
-                .encoding()
-                .draw_tags
-                .len(),
-        );
+        divan::black_box(page.scene(&terminus::link::NoImages).len());
     });
 }
 
@@ -644,12 +644,7 @@ fn render_document(bencher: divan::Bencher<'_, '_>, cards: usize) {
         .with_inputs(|| card_page(cards).0)
         .bench_local_values(|mut dom| {
             divan::black_box(dom.render());
-            divan::black_box(
-                dom.scene(&terminus::link::NoImages)
-                    .encoding()
-                    .draw_tags
-                    .len(),
-            );
+            divan::black_box(dom.scene(&terminus::link::NoImages).len());
             dom
         });
 }
@@ -670,12 +665,7 @@ fn render_list_document(bencher: divan::Bencher<'_, '_>, rows: usize) {
         .with_inputs(|| cold_list_page(rows, false).0)
         .bench_local_values(|mut dom| {
             divan::black_box(dom.render());
-            divan::black_box(
-                dom.scene(&terminus::link::NoImages)
-                    .encoding()
-                    .draw_tags
-                    .len(),
-            );
+            divan::black_box(dom.scene(&terminus::link::NoImages).len());
             dom
         });
 }
@@ -687,12 +677,7 @@ fn render_auto_list_document(bencher: divan::Bencher<'_, '_>, rows: usize) {
         .with_inputs(|| cold_list_page(rows, true).0)
         .bench_local_values(|mut dom| {
             divan::black_box(dom.render());
-            divan::black_box(
-                dom.scene(&terminus::link::NoImages)
-                    .encoding()
-                    .draw_tags
-                    .len(),
-            );
+            divan::black_box(dom.scene(&terminus::link::NoImages).len());
             dom
         });
 }
@@ -792,7 +777,7 @@ fn frame_scroll_tick(bencher: divan::Bencher<'_, '_>, rows: usize) {
         frame.slot_of(list).is_some(),
         "the committed frame must carry the list's scroll slot"
     );
-    let mut scene = terminus::link::vello::Scene::new();
+    let mut scene = terminus::link::DisplayList::new();
     let mut phase = false;
     bencher.bench_local(move || {
         phase = !phase;
@@ -806,7 +791,7 @@ fn frame_scroll_tick(bencher: divan::Bencher<'_, '_>, rows: usize) {
             &|slot| Some(dom.scroll_offset(slot.node)),
             None,
         );
-        divan::black_box(scene.encoding().draw_tags.len());
+        divan::black_box(scene.len());
     });
 }
 
@@ -981,4 +966,49 @@ fn frame_image_repaint(bencher: divan::Bencher<'_, '_>) {
     bench_frames(bencher, page, Staleness::Repaints, move |dom, phase| {
         dom.set_inline_style_property(root, "background-color", flip_color(phase));
     });
+}
+
+// ---------------------------------------------------------------------------
+// Strip generation — the rasterizer's CPU half
+// ---------------------------------------------------------------------------
+
+/// Replays `dom`'s committed display list into a sparse-strip scene of its
+/// device size, once per iteration: the work every render does on the CPU
+/// before it submits anything — every path flattened, every glyph outlined,
+/// every draw turned into strips. No device is created; a bitmap draws as a
+/// placeholder image.
+fn bench_strips(bencher: divan::Bencher<'_, '_>, mut dom: Document<()>) {
+    dom.render();
+    let list = dom.scene(&terminus::link::NoImages).clone();
+    let viewport = dom.viewport_size();
+    let ratio = dom.device_pixel_ratio();
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a benchmark page's device size is a small pixel count"
+    )]
+    let (width, height) = (
+        (viewport.width * ratio).round() as u16,
+        (viewport.height * ratio).round() as u16,
+    );
+    let mut strips = terminus::link::render::strips::StripScene::new(width, height);
+    assert!(strips.fill(&list) > 0, "the page draws something");
+    bencher.bench_local(move || divan::black_box(strips.fill(&list)));
+}
+
+/// The card page's frame: rounded borders and backgrounds, blurred
+/// shadows, opacity layers and `overflow` clips, no text.
+#[divan::bench]
+fn strips_cards(bencher: divan::Bencher<'_, '_>) {
+    bench_strips(bencher, card_page(24).0);
+}
+
+/// [`frame_with_text_runs`]'s page: `PARAGRAPHS * PARAGRAPH_CHARS` glyphs,
+/// each outlined and stripped.
+#[divan::bench]
+fn strips_paragraphs(bencher: divan::Bencher<'_, '_>) {
+    bench_strips(
+        bencher.counter(ItemsCount::new(PARAGRAPHS * PARAGRAPH_CHARS)),
+        paragraph_page(true).0,
+    );
 }

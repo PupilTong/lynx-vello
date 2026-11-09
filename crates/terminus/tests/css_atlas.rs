@@ -1,11 +1,11 @@
 //! Browser-referenced, pure-`<div>` CSS paint screenshot tests.
 //!
-//! The matrix retains all 1,000 independent 128×128 probes.  The 666 probes
-//! that pixelmatch Chromium own browser references.  Another 145 W3C-correct
+//! The matrix retains all 1,000 independent 128×128 probes.  The 665 probes
+//! that pixelmatch Chromium own browser references.  Another 146 W3C-correct
 //! cases exercise rasterization/sampling differences or CSS-permitted UA
 //! choices against native Pulsar/Parley snapshots.  The other 189 audited
 //! differences remain ignored fixtures.  Up to twenty-five active documents
-//! share one isolated 640×640 Vello atlas readback; a full audit compares all
+//! share one isolated 640×640 atlas readback; a full audit compares all
 //! 1,000 against temporary Chromium references.
 
 #[path = "support/html.rs"]
@@ -21,10 +21,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use prime_radiant::{CompareOptions, Image, compare, screenshots_in};
+use terminus::link::DisplayList;
+use terminus::link::kurbo::{Affine, Rect};
+use terminus::link::peniko::{BlendMode, Color, Compose, Fill, Mix};
 use terminus::link::render::gpu::Headless;
-use terminus::link::vello::Scene;
-use terminus::link::vello::kurbo::{Affine, Rect};
-use terminus::link::vello::peniko::{BlendMode, Color, Compose, Fill, Mix};
 
 const CASE_COUNT: usize = 1_000;
 const CELL_SIZE: u32 = 128;
@@ -367,7 +367,7 @@ fn render_shard(shard: usize) -> ShardOutcome {
 }
 
 fn build_and_render(shard: usize, gpu: &mut Headless) -> Result<Image, String> {
-    let mut atlas = Scene::new();
+    let mut atlas = DisplayList::new();
     let first = shard * CASES_PER_SHARD;
     let include_skipped = std::env::var_os(AUDIT_ENV).is_some();
 
@@ -409,7 +409,7 @@ fn build_and_render(shard: usize, gpu: &mut Headless) -> Result<Image, String> {
     }
 
     let pixels = gpu
-        .render(&atlas, &[], ATLAS_SIZE, ATLAS_SIZE, Color::WHITE)
+        .render(&atlas, ATLAS_SIZE, ATLAS_SIZE, Color::WHITE)
         .map_err(|error| error.to_string())?;
     Image::from_rgba8(ATLAS_SIZE, ATLAS_SIZE, pixels).map_err(|error| error.to_string())
 }
@@ -585,15 +585,15 @@ fn css_paint_asset_inventory() {
     }
 
     assert_eq!(generated::CASES.len(), CASE_COUNT);
-    assert_eq!(browser_matches.len(), 666);
-    assert_eq!(native_snapshots.len(), 145);
+    assert_eq!(browser_matches.len(), 665);
+    assert_eq!(native_snapshots.len(), 146);
     assert_eq!(skipped.len(), 189);
     assert!(browser_matches.is_disjoint(&native_snapshots));
     assert!(browser_matches.is_disjoint(&skipped));
     assert!(native_snapshots.is_disjoint(&skipped));
     assert_eq!(
         (raster_or_sampling, ua_choices, gaps, non_w3c),
-        (84, 61, 170, 19)
+        (85, 61, 170, 19)
     );
     assert_eq!(
         read_difference_registry(&difference_registry),

@@ -21,7 +21,7 @@ impl bobcat_core::FrameImages for DelayedBackground {
         &self,
         source: &str,
         hint: bobcat_core::ImageSizeHint,
-    ) -> Option<bobcat_core::vello::peniko::ImageData> {
+    ) -> Option<bobcat_core::peniko::ImageData> {
         self.resources.read(source, hint)
     }
 

@@ -103,7 +103,7 @@ impl terminus::link::FrameImages for InlineFetcher {
         &self,
         _source: &str,
         _hint: terminus::link::ImageSizeHint,
-    ) -> Option<terminus::link::vello::peniko::ImageData> {
+    ) -> Option<terminus::link::peniko::ImageData> {
         None
     }
 

@@ -31,7 +31,7 @@ Lynx's paint/visual CSS surface is implemented in `lynx/core/renderer/css/parser
 | `linear-gradient()` angle syntax | `<angle>` in deg/grad/rad/turn, or `to <side-or-corner>`; 0deg="to top" | Core | Yes | Matches CSS spec exactly — no angle-convention quirk (verify before assuming otherwise) | lynx/core/renderer/css/parser/css_string_parser.cc:1387-1514 |
 | `radial-gradient()` | `circle`/`ellipse` shape, `closest-side/corner`, `farthest-side/corner`, explicit length(s), `at <position>` | Core | Yes | | lynx/core/renderer/css/parser/css_string_parser.cc:1515-1628 |
 | `conic-gradient()` | `from <angle>`, `at <position>` | Core | Yes | | lynx/core/renderer/css/parser/css_string_parser.cc:1629-1687 |
-| `repeating-linear-gradient()` / `repeating-radial-gradient()` / `repeating-conic-gradient()` | Not found — only `TokenType::LINEAR_GRADIENT/RADIAL_GRADIENT/CONIC_GRADIENT` recognized, no REPEATING_* variants | — | No (absent) | Not supported. Implement via vello's gradient extend modes if bundles ever need it; otherwise document as unsupported author-facing feature | grep across lynx/core/renderer/css/parser/css_string_parser.cc (no REPEATING hits) |
+| `repeating-linear-gradient()` / `repeating-radial-gradient()` / `repeating-conic-gradient()` | Not found — only `TokenType::LINEAR_GRADIENT/RADIAL_GRADIENT/CONIC_GRADIENT` recognized, no REPEATING_* variants | — | No (absent) | Not supported. Implement via the rasterizer's gradient extend modes if bundles ever need it; otherwise document as unsupported author-facing feature | grep across lynx/core/renderer/css/parser/css_string_parser.cc (no REPEATING hits) |
 | Gradient color-stop list w/ positions | `<color> [<percentage>|<number>]?`, comma-separated | Core | Yes | | lynx/core/renderer/css/parser/css_string_parser.cc:1719-1770 (ColorStopList) |
 | `background-position` | Full 1-4 value keyword+length/percentage grammar incl. `<edge> <length>` offsets | Core | Yes | | lynx/core/renderer/css/parser/css_string_parser.h:304-316, lynx/core/renderer/css/parser/background_position_handler.cc |
 | `background-size` | `<length-percentage>{1,2}` \| `cover` \| `contain` \| `auto` | Core | Yes | | lynx/core/renderer/css/parser/css_string_parser.h:317-318, lynx/core/renderer/css/parser/background_size_handler.cc |
@@ -100,7 +100,7 @@ Lynx's paint/visual CSS surface is implemented in `lynx/core/renderer/css/parser
 
 ## Implementation status (2026-07-28)
 
-The Vello-backed renderer for this surface is live inside `crates/terminus`: its private Painter paints
+The `vello_gpu`-backed renderer for this surface is live inside `crates/terminus`: its private Painter paints
 backgrounds (color, multi-layer linear/radial/conic gradients), borders (all
 styles, per-corner elliptical radii), box-shadows, text (glyph runs,
 decorations, text-stroke, unblurred text-shadow), and the group effects
@@ -125,6 +125,6 @@ that correct rows above: `text-decoration-color` IS compiled;
 
 ## Also see
 
-Scope note: this is the spec for what the `stylo`-backed style engine must resolve and what the `vello`-backed renderer must paint — see `.claude/agents/lynx-css-engine.md` and `.claude/agents/lynx-render-engine.md`.
+Scope note: this is the spec for what the `stylo`-backed style engine must resolve and what the `vello_gpu`-backed renderer must paint — see `.claude/agents/lynx-css-engine.md` and `.claude/agents/lynx-render-engine.md`.
 
 Implementation-pattern reference (not a behavior spec): `Paws/engine/src/style.rs` and `Paws/engine/src/style/css_style_sheet.rs` show a working `stylo` cascade integration over a custom Rust DOM.

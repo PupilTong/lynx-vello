@@ -18,12 +18,12 @@
 use euclid::default::{Point2D, Size2D, Vector2D};
 use smallvec::SmallVec;
 use stylo::properties::animated_properties::AnimationValueMap;
-use vello::Scene;
-use vello::kurbo::Affine;
-use vello::peniko::ImageData;
 
 use super::{AnimationSample, PaintOrder, SpaceSamples};
+use crate::kurbo::Affine;
 use crate::paint::compose::{self, ComposeOp, FilterGroup};
+use crate::paint::display_list::{DisplayList, Texture};
+use crate::peniko::ImageData;
 use crate::scroll::{
     AutoScrollRequest, CaptureAxes, ChainLink, ScrollAxes, ScrollRequest, SnapAxis, SnapPoint,
     SnapStrictness, unwrap_axis, wrap_axis, wrap_period_axis,
@@ -483,7 +483,7 @@ pub struct CommittedFrame {
 
 /// The split scene: fragments plus the program that assembles them.
 pub(crate) struct Presentation {
-    pub(crate) fragments: Vec<Scene>,
+    pub(crate) fragments: Vec<DisplayList>,
     pub(crate) program: Vec<ComposeOp>,
     /// One entry per [`ComposeOp::Image`], in program order. Carries names
     /// and geometry; never pixels.
@@ -516,7 +516,7 @@ impl CommittedFrame {
     /// memory); compose one with [`Self::compose_into`] where a flat scene
     /// is genuinely needed.
     #[must_use]
-    pub fn scene(&self) -> Option<&Scene> {
+    pub fn scene(&self) -> Option<&DisplayList> {
         matches!(
             self.presentation.program.as_slice(),
             [ComposeOp::Fragment {
@@ -543,12 +543,67 @@ impl CommittedFrame {
     /// one the filter bakes produce, and `vectors` the one the vector raster
     /// cache produces (`VectorTextures::prepare`), each index-parallel with
     /// its side table; an absent entry draws nothing.
+    ///
+    /// The scene holds what can reach the frame's own viewport in device
+    /// px, [`Self::device_viewport`]: content composed off it — the encode
+    /// window's headroom past the scrollport, a box a sticky shift or an
+    /// animation moved away — is left out, since the rasterizer would turn
+    /// it into strips only to drop them. [`Self::compose_target_into`]
+    /// composes for a target of another size.
     pub fn compose_into(
         &self,
-        scene: &mut Scene,
+        scene: &mut DisplayList,
         images: &[Option<ImageData>],
-        filtered: &[Option<ImageData>],
-        vectors: &[Option<ImageData>],
+        filtered: &[Option<Texture>],
+        vectors: &[Option<Texture>],
+        offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
+        animation_now: Option<f64>,
+    ) {
+        self.compose_target_into(
+            scene,
+            self.device_viewport(),
+            images,
+            filtered,
+            vectors,
+            offset_of,
+            animation_now,
+        );
+    }
+
+    /// The frame's viewport in device px, from the origin: the target a
+    /// frame is composed for when no other is named.
+    #[must_use]
+    pub fn device_viewport(&self) -> (u32, u32) {
+        let length = |css: f32| {
+            let device = f64::from(css) * f64::from(self.device_pixel_ratio);
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "clamped to the u32 range immediately before the cast"
+            )]
+            if device.is_finite() {
+                device.ceil().clamp(0.0, f64::from(u32::MAX)) as u32
+            } else {
+                u32::MAX
+            }
+        };
+        (length(self.viewport.width), length(self.viewport.height))
+    }
+
+    /// [`Self::compose_into`] for a target of `target` device px: what can
+    /// reach no pixel of it is left out of `scene`.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one composition's full inputs: the target, its size, the three pixel tables, \
+                  and the two compose readings"
+    )]
+    pub fn compose_target_into(
+        &self,
+        scene: &mut DisplayList,
+        target: (u32, u32),
+        images: &[Option<ImageData>],
+        filtered: &[Option<Texture>],
+        vectors: &[Option<Texture>],
         offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
         animation_now: Option<f64>,
     ) {
@@ -575,6 +630,7 @@ impl CommittedFrame {
         );
         compose::replay(
             scene,
+            crate::kurbo::Rect::new(0.0, 0.0, f64::from(target.0), f64::from(target.1)),
             &self.presentation.fragments,
             &self.presentation.program,
             &self.presentation.image_draws,
@@ -652,10 +708,10 @@ impl CommittedFrame {
     pub fn bake_filter(
         &self,
         index: usize,
-        scene: &mut Scene,
+        scene: &mut DisplayList,
         images: &[Option<ImageData>],
-        filtered: &[Option<ImageData>],
-        vectors: &[Option<ImageData>],
+        filtered: &[Option<Texture>],
+        vectors: &[Option<Texture>],
         offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
         animation_now: Option<f64>,
     ) {
@@ -713,6 +769,7 @@ impl CommittedFrame {
             compose::ReplayTarget::Bake {
                 entry: group.space,
                 origin: (group.rect.x0, group.rect.y0),
+                size: group.size(),
             },
         );
         let Some(backdrop) = group.backdrop.as_ref() else {
@@ -725,7 +782,7 @@ impl CommittedFrame {
         crate::paint::filters::draw_passes_rect(
             scene,
             &backdrop.before,
-            vello::kurbo::Rect::new(0.0, 0.0, f64::from(width), f64::from(height)),
+            crate::kurbo::Rect::new(0.0, 0.0, f64::from(width), f64::from(height)),
             Affine::IDENTITY,
         );
     }

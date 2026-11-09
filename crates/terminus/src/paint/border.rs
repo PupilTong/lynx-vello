@@ -21,14 +21,14 @@ use euclid::default::Size2D;
 use smallvec::SmallVec;
 use stylo::properties::ComputedValues;
 use stylo::values::computed::{BorderStyle, OutlineStyle};
-use vello::Scene;
-use vello::kurbo::{BezPath, Cap, Point, Rect, Stroke};
-use vello::peniko::{Color, Fill};
 
+use crate::kurbo::{BezPath, Cap, Point, Rect, Stroke};
 use crate::layout::Edges;
 use crate::paint::convert::resolve_color;
+use crate::paint::display_list::DisplayList;
 use crate::paint::shape::{BoxShape, inner_radii, ring_path_into, with_shape};
 use crate::paint::{BoxFragment, PathScratch};
+use crate::peniko::{Color, Fill};
 use crate::visual::CornerRadii;
 
 #[derive(Debug, Clone, Copy)]
@@ -50,7 +50,7 @@ struct SidePaint {
 }
 
 pub(crate) fn paint(
-    scene: &mut Scene,
+    scene: &mut DisplayList,
     paths: &mut PathScratch,
     style: &ComputedValues,
     fragment: &BoxFragment,
@@ -140,7 +140,7 @@ fn uniform_solid_color(sides: &[SidePaint]) -> Option<Color> {
 }
 
 fn paint_side(
-    scene: &mut Scene,
+    scene: &mut DisplayList,
     paths: &mut PathScratch,
     fragment: &BoxFragment,
     outer: &BoxShape,
@@ -344,7 +344,7 @@ fn same_color(a: Color, b: Color) -> bool {
 }
 
 pub(crate) fn paint_outline(
-    scene: &mut Scene,
+    scene: &mut DisplayList,
     paths: &mut PathScratch,
     style: &ComputedValues,
     fragment: &BoxFragment,
@@ -419,9 +419,8 @@ fn grow_radii(radii: &CornerRadii, by: f32) -> CornerRadii {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use vello::kurbo::{Point, Shape};
-
     use super::*;
+    use crate::kurbo::{Point, Shape};
 
     fn assert_close(actual: f32, expected: f32) {
         assert!((actual - expected).abs() < 1e-5, "{actual} != {expected}");
@@ -491,17 +490,20 @@ mod tests {
         let rect = Rect::new(0.0, 0.0, 100.0, 40.0);
         for line in [BorderStyle::Dotted, BorderStyle::Dashed] {
             let stroke = dash_stroke(line, 3.0);
-            let mut scene = Scene::new();
+            let mut scene = DisplayList::new();
             scene.stroke(
                 &stroke,
-                vello::kurbo::Affine::IDENTITY,
+                crate::kurbo::Affine::IDENTITY,
                 Color::new([0.0, 0.0, 0.0, 1.0]),
                 None,
                 &rect,
             );
             assert!(
-                scene.encoding().n_path_segments > 0,
-                "{line:?} stroke encoded no path segments"
+                matches!(
+                    scene.items(),
+                    [crate::paint::display_list::Item::Stroke(_, recorded)] if **recorded == stroke
+                ),
+                "{line:?} stroke recorded no stroke"
             );
         }
     }
@@ -652,7 +654,7 @@ mod tests {
         };
         let padding_box = Rect::new(9.0, 6.0, 54.0, 37.0);
         let fragment = BoxFragment {
-            transform: vello::kurbo::Affine::IDENTITY,
+            transform: crate::kurbo::Affine::IDENTITY,
             border_box: Rect::new(0.0, 0.0, 60.0, 40.0),
             padding_box,
             content_box: padding_box,

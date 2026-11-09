@@ -8,6 +8,7 @@ use seldon::text::FontBlob;
 use stylo::properties::animated_properties::{AnimationValue, AnimationValueMap};
 use stylo::properties::{LonghandId, OwnedPropertyDeclarationId};
 
+use crate::paint::display_list::DisplayList;
 use crate::test_common::{self as common, Doc};
 use crate::tree::document::NodeId;
 use crate::visual::{PaintItemKind, PaintOrder};
@@ -2619,7 +2620,7 @@ fn a_compose_samples_only_the_curves_its_program_encodes() {
         (1..10).contains(&composed),
         "only the dots in the list's window compose, got {composed}",
     );
-    let mut scene = vello::Scene::new();
+    let mut scene = DisplayList::new();
     frame.compose_into(&mut scene, &[], &[], &[], &|_| None, Some(0.5));
 }
 
@@ -3074,8 +3075,8 @@ fn an_animation_on_an_inactive_timeline_animates_nothing_in_the_export() {
 #[test]
 fn a_scroll_driven_reach_eases_in_the_bindings_direction() {
     use stylo::properties::longhands::animation_direction::computed_value::single_value::T as AnimationDirection;
-    use vello::kurbo::{Point, Rect};
 
+    use crate::kurbo::{Point, Rect};
     use crate::visual::curves::Timeline;
     use crate::visual::{ScrollOffsets, ScrollSlot};
 
@@ -3260,7 +3261,7 @@ fn a_scroll_driven_mover_is_culled_like_a_time_mover() {
         timed.presentation.composed.animations,
         driven.presentation.composed.animations,
     );
-    let region = vello::kurbo::Rect::new(-40.0, 10.0, 260.0, 90.0);
+    let region = crate::kurbo::Rect::new(-40.0, 10.0, 260.0, 90.0);
     for (a, b) in timed.animation_slots().iter().zip(driven.animation_slots()) {
         let reach = |slot: &crate::visual::AnimationSlot| {
             slot.curve

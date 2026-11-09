@@ -14,10 +14,9 @@
 
 use std::fmt;
 
-use terminus::link::Document;
+use terminus::link::peniko::Color;
 use terminus::link::render::gpu::{GpuError, Headless};
-use terminus::link::vello::Scene;
-use terminus::link::vello::peniko::{Color, ImageData};
+use terminus::link::{DisplayList, Document, Texture};
 
 use crate::image::{Image, ImageError};
 
@@ -100,23 +99,31 @@ pub fn capture_document_sized<T: Sync>(
     // bakes: a capture composes the frame exactly as it was committed. They
     // take the capture's background, which is the canvas a backdrop at the
     // document's root filters.
-    let vectors: Vec<Option<ImageData>> = gpu
+    let vectors: Vec<Option<Texture>> = gpu
         .prepare_vectors(&frame)
         .map_err(CaptureError::Gpu)?
         .to_vec();
-    let filtered: Vec<Option<ImageData>> = gpu
+    let filtered: Vec<Option<Texture>> = gpu
         .prepare_filters(&frame, &images, &vectors, &|_| None, 0, None, background)
         .map_err(CaptureError::Gpu)?
         .to_vec();
-    let mut composed = Scene::new();
+    let mut composed = DisplayList::new();
     let scene = if let Some(scene) = frame.scene() {
         scene
     } else {
-        frame.compose_into(&mut composed, &images, &filtered, &vectors, &|_| None, None);
+        frame.compose_target_into(
+            &mut composed,
+            (width, height),
+            &images,
+            &filtered,
+            &vectors,
+            &|_| None,
+            None,
+        );
         &composed
     };
     let pixels = gpu
-        .render(scene, &images, width, height, background)
+        .render(scene, width, height, background)
         .map_err(CaptureError::Gpu)?;
     Image::from_rgba8(width, height, pixels).map_err(CaptureError::Image)
 }
@@ -125,7 +132,7 @@ pub fn capture_document_sized<T: Sync>(
 pub fn capture_scene<T>(
     gpu: &mut Headless,
     document: &Document<T>,
-    scene: &Scene,
+    scene: &DisplayList,
     background: Color,
 ) -> Result<Image, CaptureError> {
     let (width, height) = frame_size(document);
@@ -135,13 +142,13 @@ pub fn capture_scene<T>(
 /// [`capture_scene`] at an explicit pixel size.
 pub fn capture_scene_sized(
     gpu: &mut Headless,
-    scene: &Scene,
+    scene: &DisplayList,
     background: Color,
     width: u32,
     height: u32,
 ) -> Result<Image, CaptureError> {
     let pixels = gpu
-        .render(scene, &[], width, height, background)
+        .render(scene, width, height, background)
         .map_err(CaptureError::Gpu)?;
     Image::from_rgba8(width, height, pixels).map_err(CaptureError::Image)
 }

@@ -10,10 +10,10 @@
 //!   paint a final peniko brush. Geometry is resolved here; text is collected but not shaped, so
 //!   the parse needs no fonts and runs in the host, on the pool it decodes bitmaps on, reached
 //!   through `ImageEvent::parse_document`. `Send + Sync`.
-//! - [`encode`] turns a document into a [`Scene`](vello::Scene) on the document thread, shaping its
-//!   text through the document's own [`TextContext`](seldon::text::TextContext), created on the
-//!   first text shaped, so SVG glyphs come from the same fonts and `@font-face` registrations as
-//!   `<text>`.
+//! - [`encode`] turns a document into a [`DisplayList`](crate::paint::display_list::DisplayList) on
+//!   the document thread, shaping its text through the document's own
+//!   [`TextContext`](seldon::text::TextContext), created on the first text shaped, so SVG glyphs
+//!   come from the same fonts and `@font-face` registrations as `<text>`.
 //!
 //! # The supported subset
 //!
@@ -82,8 +82,7 @@
 //! - An element with a `mask` is skipped with its whole subtree: drawing it unmasked would show
 //!   what the author hid.
 //! - Every compositing layer is `Normal`: `mix-blend-mode` and `isolation` have no presentation
-//!   attribute and CSS is not read, so nothing blends, and no clip layer ever has to stand in for
-//!   an isolating layer (vello [#1198](https://github.com/linebender/vello/issues/1198)).
+//!   attribute and CSS is not read, so nothing blends.
 //! - A nested `svg` and a `symbol` clip to their viewport (`overflow: hidden`) and map their
 //!   `viewBox` by their `preserveAspectRatio`. The root's `preserveAspectRatio` is not applied
 //!   here: it is carried as [`VectorDocument::aspect`] for the painter, which maps the viewport
@@ -95,7 +94,7 @@
 //! `currentColor` is the stop's own `color`, inherited through the
 //! gradient's ancestors, whichever element the gradient paints. Gradients
 //! inherit attributes and stops along their `href` chain, map `spreadMethod` to
-//! [`Extend`](vello::peniko::Extend), take `gradientTransform` as the
+//! [`Extend`](crate::peniko::Extend), take `gradientTransform` as the
 //! brush transform, and resolve `objectBoundingBox` units against the shape's
 //! `kurbo` bounding box (a text chunk's advance box after shaping);
 //! `userSpaceOnUse` percentages resolve against the viewport. A radial
@@ -134,9 +133,9 @@ mod text;
 pub(crate) use encode::encode;
 pub(crate) use parse::parse;
 pub(crate) use text::TextItem;
-use vello::kurbo::{Affine, BezPath, Rect, Stroke};
-use vello::peniko::{Brush, Fill};
 
+use crate::kurbo::{Affine, BezPath, Rect, Stroke};
+use crate::peniko::{Brush, Fill};
 use crate::render::image::AspectRatio;
 
 /// A parsed SVG document, ready to encode: its sizes and a flat command

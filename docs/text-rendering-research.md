@@ -29,6 +29,22 @@ WGPU 30 (§5.3) now does. The one rendering change 0.11 carries is
 bitmap-glyph (`sbix`/`CBDT`) placement in `vello/src/scene.rs`; outline and
 COLR glyphs are untouched.
 
+Renderer update, 2026-11: terminus no longer depends on `vello`. The paint
+walk records terminus's own display list (`crates/terminus/src/paint/display_list.rs`)
+and every render replays it into `vello_gpu` 0.3 (the crate previously
+published as `vello_hybrid`; sparse strips, wgpu 30) in
+`crates/terminus/src/render/sparse.rs`. Glyph runs go through `glifo` 0.4
+with an outline cache kept across renders, and glifo's glyph atlas cache is
+deliberately left off: every glyph instance is drawn as its outline, flattened
+and turned into strips on the CPU at every render. So §5.2 has happened
+without its atlas, and the per-frame cost this note describes (each glyph
+re-rasterized as a filled path every frame) still holds for the new
+rasterizer, now as CPU strip generation rather than GPU binning and tiling.
+`strips_paragraphs` in `crates/terminus/benches` measures that half. The
+measurements and the vello-specific sections below were taken on vello 0.9
+and are kept as the record they are; read them as history, not as a
+description of the current code.
+
 ## Short answer
 
 Painting glyphs *correctly* is done: `terminus::paint::text` already drives

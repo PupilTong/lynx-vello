@@ -25,7 +25,7 @@ mod common;
 
 use common::{Doc, device};
 use prime_radiant::headless;
-use terminus::link::vello::peniko::Color;
+use terminus::link::peniko::Color;
 use terminus::link::{FontBlob, FontFaceRequest, FontFaceSource, NodeId, Vector2D};
 
 const AHEM: &[u8] = include_bytes!("../../seldon/tests/fixtures/Ahem.ttf");
@@ -75,7 +75,7 @@ fn readback(test: &str, doc: &mut Doc, width: u32, height: u32) -> Vec<u8> {
     doc.dom.layout();
     doc.dom.render();
     let scene = doc.dom.scene(&terminus::link::NoImages);
-    gpu.render(&scene, &[], width, height, Color::WHITE)
+    gpu.render(&scene, width, height, Color::WHITE)
         .expect("headless render")
 }
 

@@ -1,7 +1,7 @@
 #![allow(
     clippy::cast_lossless,
     clippy::cast_possible_truncation,
-    reason = "CSS/style geometry is f32 while Vello/Kurbo geometry is f64"
+    reason = "CSS/style geometry is f32 while Kurbo geometry is f64"
 )]
 
 //! Box geometry: rounded-rect shapes with per-corner elliptical radii, ring
@@ -16,10 +16,10 @@ use stylo::values::generics::basic_shape::{
 };
 use stylo::values::generics::position::PositionOrAuto;
 use stylo::values::specified::svg_path::{PathCommand, SVGPathData, SVGPathPosition};
-use vello::kurbo::{BezPath, Point, Rect, RoundedRect, RoundedRectRadii, Shape};
-use vello::peniko::Fill;
 
+use crate::kurbo::{BezPath, Point, Rect, RoundedRect, RoundedRectRadii, Shape};
 use crate::layout::Edges;
+use crate::peniko::Fill;
 use crate::visual::CornerRadii;
 
 const KAPPA: f64 = 0.552_284_749_830_793_4;
@@ -233,7 +233,7 @@ fn basic_shape(shape: &BasicShape, reference: Rect) -> (BoxShape, Fill) {
         BasicShape::PathOrShape(GenericPathOrShapeFunction::Path(path)) => {
             let fill = fill_rule(path.fill);
             let mut bez = svg_path(&path.path);
-            bez.apply_affine(vello::kurbo::Affine::translate((
+            bez.apply_affine(crate::kurbo::Affine::translate((
                 reference.x0,
                 reference.y0,
             )));
@@ -433,7 +433,7 @@ fn corner_distances(center: Point, reference: Rect) -> [f64; 4] {
 }
 
 fn ellipse_shape(center: Point, rx: f64, ry: f64) -> BoxShape {
-    BoxShape::Path(vello::kurbo::Ellipse::new(center, (rx.max(0.0), ry.max(0.0)), 0.0).to_path(0.1))
+    BoxShape::Path(crate::kurbo::Ellipse::new(center, (rx.max(0.0), ry.max(0.0)), 0.0).to_path(0.1))
 }
 
 fn resolve(length: &LengthPercentage, basis: f64) -> f64 {
@@ -484,10 +484,10 @@ fn svg_path(data: &SVGPathData) -> BezPath {
             } => {
                 let to = end_point(point, &to_point);
                 let ry = radii.ry.as_ref().copied().unwrap_or(radii.rx);
-                let arc = vello::kurbo::SvgArc {
+                let arc = crate::kurbo::SvgArc {
                     from: current,
                     to,
-                    radii: vello::kurbo::Vec2::new(radii.rx as f64, ry as f64),
+                    radii: crate::kurbo::Vec2::new(radii.rx as f64, ry as f64),
                     x_rotation: (*rotate as f64).to_radians(),
                     large_arc: matches!(
                         arc_size,
@@ -498,7 +498,7 @@ fn svg_path(data: &SVGPathData) -> BezPath {
                         stylo::values::generics::basic_shape::ArcSweep::Cw
                     ),
                 };
-                match vello::kurbo::Arc::from_svg_arc(&arc) {
+                match crate::kurbo::Arc::from_svg_arc(&arc) {
                     Some(arc) => path.extend(arc.append_iter(0.1)),
                     None => path.line_to(to),
                 }

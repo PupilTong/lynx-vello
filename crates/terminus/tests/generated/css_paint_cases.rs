@@ -5248,7 +5248,7 @@ pub(super) static CASES: [CssPaintCase; 1000] = [
         category: r"mask",
         source: r"wpt/css/css-masking/mask-image/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#fef2f2;"><div style="display:flex;position:absolute;left:12px;top:12px;width:104px;height:104px;background:linear-gradient(135deg,#ef4444,#22c55e,#2563eb);mask-image:linear-gradient(45deg,transparent 0%,transparent 25%,black 25%,black 100%);mask-repeat:repeat;mask-size:36px 28px"></div></div>"#,
-        expectation: Expectation::BrowserMatch,
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"css-gradient-hard-stop-boundary-sampling" },
     },
     CssPaintCase {
         name: r"mask-linear-010",
@@ -7554,7 +7554,6 @@ css_paint_case_tests! {
         744 => css_mask_linear_004;
         745 => css_mask_linear_005;
         748 => css_mask_linear_008;
-        749 => css_mask_linear_009;
         750 => css_mask_linear_010;
         751 => css_mask_linear_011;
         752 => css_mask_linear_012;
@@ -7752,6 +7751,7 @@ css_paint_case_tests! {
         741 => css_native_mask_linear_001;
         746 => css_native_mask_linear_006;
         747 => css_native_mask_linear_007;
+        749 => css_native_mask_linear_009;
         762 => css_native_mask_linear_022;
         763 => css_native_mask_linear_023;
         770 => css_native_mask_linear_030;

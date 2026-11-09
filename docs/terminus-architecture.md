@@ -91,9 +91,9 @@ coarse touch pointers, CSS-values-4 fallback font metrics. Quirks stays
 hard-wired in matching, the `Stylist` and the doc-hidden `standards_device`
 test seam, so neither the quirks knob nor any stylo device vocabulary exists
 above this crate; view metrics read back through `Document::{viewport_size,
-device_pixel_ratio}`. The crate root re-exports the one workspace `vello`
-version — embedders configure wgpu/peniko/kurbo exclusively through it — and
-re-exports `stylo` as the CSS vocabulary door for the layers above (strict
+device_pixel_ratio}`. The link re-exports `wgpu` and the `kurbo` and
+`peniko` the one workspace `vello_gpu` is built against — embedders configure
+wgpu/peniko/kurbo exclusively through them — and re-exports `stylo` as the CSS vocabulary door for the layers above (strict
 linear chain: cli → resources → core → element → terminus).
 
 It must not contain Lynx runtime-element vocabulary or Lynx device/unit policy
@@ -499,7 +499,7 @@ rendered at instead of collapsing to its estimate.
 
 `Document<T>` owns one private concrete `Painter`
 (`crates/terminus/src/paint/painter.rs`), including its reusable walk scratch, its
-retained `vello::Scene`, and the `Arc<CommittedFrame>` it retains. `render`
+retained `DisplayList`, and the `Arc<CommittedFrame>` it retains. `render`
 privately builds `PaintOrder` and invokes that painter only for a dirty scene;
 it records which private visual epoch its scene represents, so
 `render`/`needs_render` own retained-scene scheduling without publishing that
@@ -527,7 +527,11 @@ toward an edge is `ScrollSlot::recenter_due`, and the consumer answers it with
 painter reaches its edge. `CommittedFrame::slot_of` is one lookup in the
 node index the commit built. Composition is the one render path: `compose_into` replays
 the whole program into one flat scene at those offsets, and nothing is retained
-per scroller. A scroll container is no stacking context by itself, as on the
+per scroller. The replay leaves out what cannot reach the target — the frame's
+device viewport, or the size `compose_target_into` names — from the bounds the
+commit gave each fragment's chunks (`DisplayList::seal_bounds`) and the boxes
+of the pushes and image draws, so the encode window's headroom costs the
+rasterizer nothing until it scrolls into view. A scroll container is no stacking context by itself, as on the
 web (see `runtime-architecture.md`). Composite animations ride the same split:
 an element whose `opacity`/`transform` animation set exports publishes an
 `AnimationSlot` curve — a clone of that stylo state — which the consumer
@@ -617,9 +621,8 @@ isotropic number under a non-uniform scale or a skew (recorded limit).
 
 An ancestor's `overflow` clip cuts a filter's output, not its input. A scope
 whose element has `filter` or `backdrop-filter` opens inside the links of its
-own clip chain — the output clips, pushed outside its layers, the innermost
-as a full `SrcOver` layer for the #1198 rule — and its content pushes only the
-links below them; every other scope re-pushes whole chains so a fixed
+own clip chain — the output clips, pushed outside its layers — and its
+content pushes only the links below them; every other scope re-pushes whole chains so a fixed
 descendant of an `opacity` group escapes the group's ancestors' clips. Culling
 follows the same split, coarsely: inside a blurred group only the links below
 the innermost blurred group's own chain take part in the cull test and hold
@@ -648,7 +651,10 @@ through `apply_image_events`, and retains no pixel: the store is the
 consumer's, handed to `scene` and to the bake path per call.
 
 The private `painter`/`walker`/`paint`/`shape` modules turn the paint order
-into the retained Vello scene. Item clip chains diff against Vello layers;
+into the retained display list (`paint::display_list`: shapes, paints,
+clips, layers and glyph runs as drawing semantics, replayed by
+`render::sparse` into `vello_gpu` per render). Item clip chains diff against
+its layer stack;
 `RenderLayer` scopes composite opacity, filters, clip paths, and masks; box
 fragments paint shadows, backgrounds, replaced content, borders, outlines, and
 retained Parley glyphs. Internal style access is `Document::paint_style`
@@ -662,8 +668,30 @@ The crate also owns the DOM-free render floor absorbed from the former `pulsar`
 crate (2026-08-04): the `render` module holds the `FrameImages` trait
 (re-exported at the crate root) and the `render::gpu` wgpu
 render-to-texture/readback backend (`gpu::Headless`, plus the
-`read_texture`/`renderer_options`/`render_params`/`AtlasResidency` seams
-windowed embedders build against). `render::blur` is the third seam, and the
+`SharedGpu`/`read_texture` seams the painter's window builds
+against), over the one rasterizer `render::raster::Raster` (`vello_gpu`'s
+sparse strips, `render::sparse`). Every target in a process — each `Headless`
+and each painter window — draws through one `render::gpu::SharedGpu`: one wgpu
+device and queue, one `vello_gpu::Renderer` with the `Resources` paired to it,
+and one table of uploaded bitmaps (`render::sparse::SharedRaster`), so the
+shaders are compiled once and a bitmap two views draw is uploaded once. The
+stack is held weakly and goes with the last target; a native one is
+process-wide, a wasm32 one per thread. A window whose surface the shared
+adapter cannot present to gets a stack of its own. Each target's `Raster`
+keeps its own scene, replay caches and bound textures, and replays its list —
+the CPU strip generation — on its own thread without the renderer's lock; the
+lock covers the bitmap uploads, the render and the submit. Every submit on a
+stack goes through `SharedGpu::submit`, and a window's surface configuration
+holds the same lock, because wgpu fails a configuration when another thread
+submits while it waits for the device to go idle. A bitmap is pinned
+while a live target drew it in one of that target's last four bitmap-drawing
+renders, and a target going away drops its pins. A bitmap drawn
+nearest-neighbour (`image-rendering: pixelated`) takes a texture of its own
+rather than an atlas slot: `vello_gpu` adds an atlas slot's offset to the
+sample position in f32, so a pixel centre on a texel edge would otherwise read
+one texel or the other depending on where in the shared atlas the bitmap
+landed. The render target, readback
+buffer, filter bakes and vector raster cache stay per target. `render::blur` is the third seam, and the
 one narrow exception to the floor's DOM-freedom: `FilterTextures::prepare`
 reads a `CommittedFrame`'s filter side table and calls the frame's own
 `bake_filter`, because a bake *is* a partial replay of that frame's compose
@@ -673,11 +701,7 @@ marginless crop — renders an entry that `reads_canvas` over the canvas colour
 `prepare` is given and every other over transparent black, and skips the
 whole gaussian at σ = 0, which only a colour-only `backdrop-filter` reaches. It still knows nothing about nodes, computed styles, layout or paint
 order — the frame hands it device-pixel geometry and an opaque op range — and
-nothing else in `render` names a frame at all. A render names the bitmaps its scene
-draws: vello frees its persistent image atlas whenever a scene with no patch at
-all renders while its image cache still counts every resident image clean, so
-`AtlasResidency` — one per `vello::Renderer` — re-marks each image once after
-such a loss and nothing in the steady state. `Headless::new` reports `NoAdapter`; every GPU-backed test
+nothing else in `render` names a frame at all. `Headless::new` reports `NoAdapter`; every GPU-backed test
 treats that as a hard failure, including in CI.
 
 ## Top layer and `::backdrop`

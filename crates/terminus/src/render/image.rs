@@ -5,7 +5,7 @@
 //!
 //! - [`ImageRegistry`] lives on the document. It is a name table keyed by the raw source string the
 //!   page wrote, holding each image's load state and its own intrinsic dimensions. No
-//!   [`ImageData`], no [`Blob`](vello::peniko::Blob), no store — and no identity to mint, because
+//!   [`ImageData`], no [`Blob`](crate::peniko::Blob), no store — and no identity to mint, because
 //!   nothing per-image is stored behind a name.
 //! - [`FrameImages`] is the read seam. A committed frame's image draws name a source, and whoever
 //!   composes that frame supplies the pixels for it.
@@ -16,7 +16,7 @@
 //!
 //! # Why the read is synchronous and may block
 //!
-//! Composition holds `&mut Scene` and an open clip stack; it can neither
+//! Composition holds `&mut DisplayList` and an open clip stack; it can neither
 //! suspend nor leave a layer unbalanced. So the pixel read is one
 //! non-suspending call: [`FrameImages::read`].
 //!
@@ -33,14 +33,14 @@
 //!
 //! # What the engine will not draw
 //!
-//! Vello packs every scene image into one shared square atlas that grows by
-//! doubling to [`MAX_RENDERABLE_DIMENSION`]. An image longer than that on
-//! either axis never fits at any atlas size: the resolve pass leaves it
-//! unallocated and zeroes the draw's dimensions, so it renders as nothing
-//! with no error anywhere — after growing the shared atlas to its maximum, a
-//! texture that never shrinks, and re-uploading every image already in it.
+//! The rasterizer uploads a bitmap into its image atlas or, past the atlas's
+//! side or its room, into a texture of its own, and no texture can be longer than the
+//! device's `max_texture_dimension_2d`, which is [`MAX_RENDERABLE_DIMENSION`]
+//! on every device this crate creates. Creating a longer one is a wgpu
+//! validation error, not a draw that degrades.
 //!
-//! So [`is_renderable`] refuses such a bitmap before it reaches vello. It is
+//! So [`is_renderable`] refuses such a bitmap before it reaches the
+//! rasterizer. It is
 //! tested against the pixels [`FrameImages::read`] actually returns, and
 //! never against an image's intrinsic size: **the intrinsic size is a CSS
 //! input and is not bounded at all**. A host may report a 12000x6000 image
@@ -107,9 +107,10 @@ use bytes::Bytes;
 use rustc_hash::FxHashMap;
 use seldon::text::TextContext;
 use smallvec::SmallVec;
-use vello::Scene;
-use vello::peniko::ImageData;
 
+use crate::paint::display_list::DisplayList;
+use crate::peniko::ImageData;
+use crate::render::gpu::SharedGpu;
 use crate::render::svg::{self, VectorDocument};
 use crate::tree::document::NodeId;
 
@@ -130,7 +131,7 @@ use crate::tree::document::NodeId;
 /// Cloning shares the scene.
 #[derive(Clone)]
 pub(crate) struct VectorImage {
-    scene: Arc<Scene>,
+    scene: Arc<DisplayList>,
     viewport: (f32, f32),
     aspect: AspectRatio,
     key: u64,
@@ -177,7 +178,7 @@ static NEXT_VECTOR_KEY: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomic
 const _: () = {
     const fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<VectorDocument>();
-    assert_send_sync::<Scene>();
+    assert_send_sync::<DisplayList>();
     assert_send_sync::<VectorImage>();
 };
 
@@ -227,9 +228,9 @@ impl VectorImage {
         self.viewport
     }
 
-    /// The document encoded as a vello scene in viewport units.
+    /// The document recorded as a display list in viewport units.
     #[must_use]
-    pub(crate) fn scene(&self) -> &Arc<Scene> {
+    pub(crate) fn scene(&self) -> &Arc<DisplayList> {
         &self.scene
     }
 }
@@ -245,21 +246,21 @@ impl std::fmt::Debug for VectorImage {
     }
 }
 
-/// Largest per-axis pixel count vello can render.
+/// Largest per-axis pixel count of a bitmap the rasterizer can draw.
 ///
-/// Vello's image atlas starts at 1024 px and doubles until an image fits,
-/// stopping at `vello_encoding`'s `MAX_ATLAS_SIZE` of 8192. An image within
-/// this bound may still fail to allocate transiently when the atlas is full of
-/// other images — vello resolves that itself by evicting or growing — but an
-/// image past it can never be placed at all.
-pub const MAX_RENDERABLE_DIMENSION: u32 = 8192;
+/// The `max_texture_dimension_2d` of the limits every device of this crate
+/// is created with (`render::gpu::SharedGpu::LIMITS`, wgpu's defaults): a
+/// bitmap past `render::sparse`'s atlas side is drawn from a texture of its
+/// own, and no texture may be longer. A constant rather than a reading of a
+/// device, because a host sizes its decodes by it before any device exists.
+pub const MAX_RENDERABLE_DIMENSION: u32 = SharedGpu::LIMITS.max_texture_dimension_2d;
 
-/// Whether vello can place this bitmap in its image atlas.
+/// Whether the rasterizer can draw this bitmap.
 ///
 /// Tested against the bitmap a frame actually reads, never against an image's
 /// intrinsic size. A zero axis is refused for a second reason: the brush
 /// transform divides the draw's extent by these dimensions, and dividing by
-/// zero encodes a non-finite transform that vello accepts without complaint.
+/// zero encodes a non-finite transform that the scene accepts without complaint.
 #[must_use]
 pub fn is_renderable(data: &ImageData) -> bool {
     data.width > 0
@@ -990,7 +991,7 @@ impl ImageRegistry {
             return None;
         }
         let state = match event {
-            // Well-formedness, not the atlas bound: an image with a zero axis
+            // Well-formedness, not the texture bound: an image with a zero axis
             // has neither an intrinsic size nor an aspect ratio, so it would
             // stretch an unknown bitmap over the whole content box, and it is
             // refused as a failure. `MAX_RENDERABLE_DIMENSION` is deliberately
@@ -1214,8 +1215,8 @@ mod tests {
         }
     }
 
-    fn image(width: u32, height: u32) -> vello::peniko::ImageData {
-        use vello::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
+    fn image(width: u32, height: u32) -> crate::peniko::ImageData {
+        use crate::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
         // Declares the size without allocating it: every check under test
         // reads the declared dimensions, not the buffer.
         ImageData {
@@ -1640,7 +1641,7 @@ mod vector_tests {
         assert_eq!(applied.and_then(|applied| applied.loaded), Some((10, 10)));
         let (_, _, vector) = registry.resolve("app:///icon.svg").expect("loaded");
         let vector = vector.expect("a vector image");
-        assert!(!vector.scene().encoding().is_empty());
+        assert!(!vector.scene().is_empty());
         assert_eq!(vector.viewport(), (10.0, 10.0));
     }
 

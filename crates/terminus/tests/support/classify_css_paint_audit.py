@@ -21,7 +21,7 @@ W3C_GAP = "w3c-gap"
 NON_W3C_COMPATIBILITY = "non-w3c-compatibility"
 
 EXPECTED_DISPOSITION_COUNTS = {
-    W3C_CORRECT_RASTER_OR_SAMPLING: 84,
+    W3C_CORRECT_RASTER_OR_SAMPLING: 85,
     W3C_CORRECT_UA_CHOICE: 61,
     W3C_GAP: 170,
     NON_W3C_COMPATIBILITY: 19,
@@ -41,9 +41,12 @@ ISSUES: dict[str, set[str]] = {
         | cases("background-radial", range(30))
         | cases("background-conic", range(30))
     ),
+    # mask-linear-009's 45-degree stop passes exactly through pixel centres:
+    # an exact tie that Chromium and vello_gpu break opposite ways.
     "css-gradient-hard-stop-boundary-sampling": cases(
         "background-linear", range(1, 40, 5)
-    ),
+    )
+    | {"mask-linear-009"},
     "css-border-dash-dot-pattern": cases("border-style", range(18, 30))
     | cases("outline", range(2, 6)),
     "css-border-3d-light-face-color": cases("border-style", range(36, 60)),
@@ -234,7 +237,7 @@ def classify(audit: Path, output: Path) -> None:
         "# Columns: case-name<TAB>issue.",
         "# W3C-correct raster/sample and UA-choice rows use committed native",
         "# snapshots; all other rows are ignored. Browser-match rows are absent.",
-        "# Dispositions: 84 raster/sample, 61 UA choice, 170 W3C gap,",
+        "# Dispositions: 85 raster/sample, 61 UA choice, 170 W3C gap,",
         "# 19 non-W3C compatibility.",
     ]
     counts: Counter[str] = Counter()

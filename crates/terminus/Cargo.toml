@@ -1,6 +1,6 @@
 [package]
 name = "terminus"
-description = "Generic W3C DOM, Stylo/layout core, and document-owned Vello paint pipeline"
+description = "Generic W3C DOM, Stylo/layout core, and document-owned paint pipeline over vello_gpu"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -28,7 +28,10 @@ slab = { workspace = true }
 smallvec = { workspace = true }
 pollster = { workspace = true }
 rayon = { workspace = true }
-vello = { workspace = true, features = ["wgpu", "wgpu_default"] }
+vello_gpu = { workspace = true }
+vello_common = { workspace = true }
+glifo = { workspace = true }
+wgpu = { workspace = true }
 roxmltree = { workspace = true }
 siphasher = { workspace = true }
 svgtypes = { workspace = true }
@@ -60,6 +63,11 @@ prime-radiant = { workspace = true, features = ["render"] }
 html5ever = { workspace = true }
 markup5ever_rcdom = { workspace = true }
 png = { workspace = true }
+
+# The painter's window stack is tested over a bare `CAMetalLayer` surface
+# (`painter/graphics.rs`), which needs no window and no main thread.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+objc2-quartz-core = { workspace = true }
 
 [[bench]]
 name = "animation"

@@ -146,7 +146,7 @@ its pointers:
 
 ```
 Context: lynx-vello, a Rust reimplementation of LynxJS's web-bundle runtime on
-stylo/vello/parley (see AGENTS.md for the mission and the standards policy).
+stylo/vello_gpu/parley (see AGENTS.md for the mission and the standards policy).
 Task: {TASK}. Relevant spec: docs/tracking/{FILE}.md and docs/{DOC}.md.
 Relevant code: {CRATE_PATH}. Relevant reference source: lynx/{PATH} or
 lynx-stack/{PATH} (see AGENTS.md "Reference repos" for their absolute paths;

@@ -7,9 +7,8 @@ mod common;
 
 use common::Doc;
 use euclid::default::Vector2D;
-use terminus::link::vello::Scene;
-use terminus::link::vello::peniko::Color;
-use terminus::link::{CommittedFrame, NodeId, Point2D};
+use terminus::link::peniko::Color;
+use terminus::link::{CommittedFrame, DisplayList, NodeId, Point2D};
 
 const CSS: &str = "page { display: flex; width: 800px; height: 600px; }
     .scroller { display: flex; flex-direction: column; align-items: flex-start;
@@ -396,10 +395,10 @@ fn sticky_survives_an_initial_target_refill_and_a_retained_snap_step() {
                 .map(|target| target.node),
             Some(sticky)
         );
-        let mut scene = Scene::new();
+        let mut scene = DisplayList::new();
         frame.compose_into(&mut scene, &[], &[], &[], &offsets, None);
         let pixels = gpu
-            .render(&scene, &[], 100, 100, Color::WHITE)
+            .render(&scene, 100, 100, Color::WHITE)
             .expect("render sticky after initial targeting and snapping");
         let at = (15 * 100 + 20) * 4;
         assert_eq!(&pixels[at..at + 4], &[255, 0, 0, 255]);
@@ -415,7 +414,7 @@ fn sticky_pixels_survive_scroll_refills_and_match_retained_frame_hits() {
         doc.dom.scroll_to(scroller, Vector2D::new(0.0, offset));
         let frame = doc.dom.commit();
         let y: u16 = if offset == 0.0 { 45 } else { 15 };
-        let mut scene = Scene::new();
+        let mut scene = DisplayList::new();
         frame.compose_into(
             &mut scene,
             &[],
@@ -425,7 +424,7 @@ fn sticky_pixels_survive_scroll_refills_and_match_retained_frame_hits() {
             None,
         );
         let pixels = gpu
-            .render(&scene, &[], 100, 100, Color::WHITE)
+            .render(&scene, 100, 100, Color::WHITE)
             .expect("render sticky");
         let at = (usize::from(y) * 100 + 20) * 4;
         assert_eq!(&pixels[at..at + 4], &[255, 0, 0, 255], "scrollTop={offset}");
@@ -437,7 +436,7 @@ fn sticky_pixels_survive_scroll_refills_and_match_retained_frame_hits() {
     // The compositor can move the retained frame without changing document state.
     let (mut doc, scroller, sticky) = page("");
     let frame = doc.dom.commit();
-    let mut scene = Scene::new();
+    let mut scene = DisplayList::new();
     frame.compose_into(
         &mut scene,
         &[],
@@ -447,7 +446,7 @@ fn sticky_pixels_survive_scroll_refills_and_match_retained_frame_hits() {
         None,
     );
     let pixels = gpu
-        .render(&scene, &[], 100, 100, Color::WHITE)
+        .render(&scene, 100, 100, Color::WHITE)
         .expect("compose sticky");
     let at = (15 * 100 + 20) * 4;
     assert_eq!(&pixels[at..at + 4], &[255, 0, 0, 255]);
@@ -471,10 +470,10 @@ fn sticky_pixels_survive_enclosing_effects_and_far_refills() {
                 .prepare_filters(&frame, &[], &[], &offsets, generation, None, Color::WHITE)
                 .expect("prepare sticky effects")
                 .to_vec();
-            let mut scene = Scene::new();
+            let mut scene = DisplayList::new();
             frame.compose_into(&mut scene, &[], &filtered, &[], &offsets, None);
             let pixels = gpu
-                .render(&scene, &[], 100, 100, Color::WHITE)
+                .render(&scene, 100, 100, Color::WHITE)
                 .expect("render sticky effects");
             let y = if offset == 0.0 { 45 } else { 15 };
             let at = (y * 100 + 20) * 4;
@@ -514,10 +513,10 @@ fn nested_sticky_motion_refreshes_a_filter_with_the_same_scroll_chain() {
             .prepare_filters(&frame, &[], &[], &offsets, generation, None, Color::WHITE)
             .expect("prepare nested sticky filter")
             .to_vec();
-        let mut scene = Scene::new();
+        let mut scene = DisplayList::new();
         frame.compose_into(&mut scene, &[], &filtered, &[], &offsets, None);
         let pixels = gpu
-            .render(&scene, &[], 100, 100, Color::WHITE)
+            .render(&scene, 100, 100, Color::WHITE)
             .expect("render nested sticky filter");
         let at = (usize::from(y) * 100 + 20) * 4;
         assert_eq!(&pixels[at..at + 4], &[255, 0, 0, 255]);
