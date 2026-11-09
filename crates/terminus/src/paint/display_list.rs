@@ -272,11 +272,13 @@ pub(crate) enum Item {
     /// the region.
     ///
     /// `isolated` is set when a [`Item::PushLayer`] that blends by anything
-    /// but source-over opens inside it, at any depth: such a clip is
-    /// composited as a layer of its own, so its content and every blend in
-    /// it run at full coverage and the clip applies once, when it
-    /// composites. Every other clip is intersected into what it holds and
-    /// needs no layer of its own (`render::sparse`).
+    /// but source-over opens inside it with no other clip or group layer
+    /// between: such a clip is composited as a layer of its own, so the
+    /// blend reads only what was painted inside the clip and the clip
+    /// applies once, when it composites. A clip further out composites
+    /// plain source-over, and a group layer between isolates the blend by
+    /// itself, so neither needs a layer of its own: every other clip is
+    /// intersected into what it holds (`render::sparse`).
     PushClip {
         region: Region,
         isolated: bool,
@@ -577,9 +579,14 @@ impl std::fmt::Debug for DisplayList {
 }
 
 impl Clone for DisplayList {
+    /// The same drawing, sealed the same: a clone of a sealed list keeps
+    /// its chunks and its bound, since the copy has the same items at the
+    /// same indices.
     fn clone(&self) -> Self {
         let mut list = Self::new();
         list.append(self, None);
+        list.chunks.clone_from(&self.chunks);
+        list.ink = self.ink;
         list
     }
 }
@@ -753,6 +760,18 @@ impl DisplayList {
         })
     }
 
+    /// Appends `item`. Every item lands here, and any item recorded after
+    /// [`Self::seal_bounds`] unseals the list: its chunks no longer cover
+    /// every item, so they are dropped and the list is appended whole until
+    /// it is sealed again, rather than appended short of its tail.
+    fn record(&mut self, item: Item) {
+        if !self.chunks.is_empty() {
+            self.chunks.clear();
+            self.ink = NO_INK;
+        }
+        self.items.push(item);
+    }
+
     /// Fills `shape` under `transform` with `brush`, placed by
     /// `brush_transform` relative to the shape's space.
     pub fn fill<'b>(
@@ -791,7 +810,7 @@ impl DisplayList {
             shape,
             paint,
         };
-        self.items.push(Item::Fill(draw));
+        self.record(Item::Fill(draw));
     }
 
     /// Strokes `shape` under `transform` with `brush`. A dash pattern on
@@ -817,7 +836,7 @@ impl DisplayList {
             shape,
             paint: brush.into().into(),
         };
-        self.items.push(Item::Stroke(draw, Arc::new(style.clone())));
+        self.record(Item::Stroke(draw, Arc::new(style.clone())));
     }
 
     /// The region of a clip or layer over `clip`; an empty shape clips
@@ -872,25 +891,29 @@ impl DisplayList {
         if let Item::PushLayer { blend, .. } = &item
             && is_blend(*blend)
         {
-            self.isolate_open_clips();
+            self.isolate_enclosing_clip();
         }
         self.open.push(index(self.items.len()));
-        self.items.push(item);
+        self.record(item);
     }
 
-    /// Marks every open clip isolated: a blend layer is opening inside
-    /// them. A clip already marked was marked with every clip under it, so
-    /// the walk down the stack stops there.
-    fn isolate_open_clips(&mut self) {
+    /// Marks the clip a blend layer is opening directly inside isolated:
+    /// the innermost open clip, unless a group layer lies between it and
+    /// the blend, which isolates the blend by itself. Clips further out
+    /// composite plain source-over whatever happens inside, so they are
+    /// left as they are ([`Item::PushClip`]).
+    fn isolate_enclosing_clip(&mut self) {
         if self.open.is_empty() {
             self.blends_at_root = true;
         }
         for &open in self.open.iter().rev() {
-            if let Item::PushClip { isolated, .. } = &mut self.items[open as usize] {
-                if *isolated {
+            match &mut self.items[open as usize] {
+                Item::PushClip { isolated, .. } => {
+                    *isolated = true;
                     break;
                 }
-                *isolated = true;
+                Item::PushLayer { .. } => break,
+                _ => {}
             }
         }
     }
@@ -898,7 +921,7 @@ impl DisplayList {
     /// Closes the innermost open clip or layer.
     pub fn pop_layer(&mut self) {
         if self.open.pop().is_some() {
-            self.items.push(Item::Pop);
+            self.record(Item::Pop);
         }
     }
 
@@ -916,14 +939,13 @@ impl DisplayList {
             clippy::cast_possible_truncation,
             reason = "the rasterizer takes the radius and deviation as f32"
         )]
-        self.items
-            .push(Item::BlurredRoundedRect(BlurredRoundedRect {
-                transform,
-                rect,
-                color: brush,
-                radius: radius as f32,
-                std_dev: std_dev as f32,
-            }));
+        self.record(Item::BlurredRoundedRect(BlurredRoundedRect {
+            transform,
+            rect,
+            color: brush,
+            radius: radius as f32,
+            std_dev: std_dev as f32,
+        }));
     }
 
     /// Draws `image` at its natural size under `transform`.
@@ -1060,14 +1082,13 @@ impl DisplayList {
             }
             for item in items {
                 match item {
-                    Item::Fill(fill) => self.items.push(Item::Fill(draw(fill))),
-                    Item::Stroke(stroke, style) => self
-                        .items
-                        .push(Item::Stroke(draw(stroke), Arc::clone(style))),
-                    // Isolation is derived again as the items land: every
-                    // blend inside the clip is among them, and a clip copied
-                    // already marked would stop the marking short of this
-                    // list's own clips open around it.
+                    Item::Fill(fill) => self.record(Item::Fill(draw(fill))),
+                    Item::Stroke(stroke, style) => {
+                        self.record(Item::Stroke(draw(stroke), Arc::clone(style)));
+                    }
+                    // Isolation is derived again as the items land, so a
+                    // blend `other` opens at its root isolates the clip this
+                    // list has open directly around the append.
                     Item::PushClip { region: clip, .. } => self.open_layer(Item::PushClip {
                         region: region(*clip),
                         isolated: false,
@@ -1087,7 +1108,7 @@ impl DisplayList {
                     // so the copies keep that order.
                     Item::Glyphs(run) => {
                         let run = &other.runs[*run as usize];
-                        self.items.push(Item::Glyphs(index(self.runs.len())));
+                        self.record(Item::Glyphs(index(self.runs.len())));
                         self.runs.push(GlyphRun {
                             transform: outer(run.transform),
                             glyphs: run.glyphs.start + glyphs..run.glyphs.end + glyphs,
@@ -1096,11 +1117,10 @@ impl DisplayList {
                         });
                     }
                     Item::BlurredRoundedRect(blur) => {
-                        self.items
-                            .push(Item::BlurredRoundedRect(BlurredRoundedRect {
-                                transform: blur.transform + transforms,
-                                ..*blur
-                            }));
+                        self.record(Item::BlurredRoundedRect(BlurredRoundedRect {
+                            transform: blur.transform + transforms,
+                            ..*blur
+                        }));
                     }
                 }
             }
@@ -1108,8 +1128,9 @@ impl DisplayList {
     }
 
     /// Cuts the items into chunks and bounds each one's ink (see the
-    /// [module documentation](self)). What is recorded afterwards is not
-    /// bounded: a sealed list is a finished one.
+    /// [module documentation](self)). A sealed list is a finished one:
+    /// recording anything more unseals it ([`Self::record`]), and it is
+    /// appended whole until it is sealed again.
     pub(crate) fn seal_bounds(&mut self) {
         let mut chunks = std::mem::take(&mut self.chunks);
         chunks.clear();
@@ -1512,7 +1533,7 @@ impl DrawGlyphs<'_> {
         }
         run.glyphs = index(glyphs_start)..index(list.glyphs.len());
         run.coords = index(coords_start)..index(list.coords.len());
-        list.items.push(Item::Glyphs(index(list.runs.len())));
+        list.record(Item::Glyphs(index(list.runs.len())));
         list.runs.push(run);
     }
 }
@@ -1636,13 +1657,19 @@ mod tests {
         assert!(matches!(shapes[2], Shape::Path { start: 0, end: 2 }));
     }
 
-    /// A clip around a blend layer is isolated, and so is every clip around
-    /// it; a clip around an opacity layer or a fill is not.
-    #[test]
-    fn a_clip_holding_a_blend_is_isolated() {
-        let mut list = DisplayList::new();
-        list.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &rect());
-        list.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &rect());
+    /// The `isolated` flag of every clip `list` pushes, in record order.
+    fn isolated_clips(list: &DisplayList) -> Vec<bool> {
+        list.items()
+            .iter()
+            .filter_map(|item| match item {
+                Item::PushClip { isolated, .. } => Some(*isolated),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Opens a saturation blend layer holding one fill and closes it.
+    fn blend(list: &mut DisplayList) {
         list.push_layer(
             Fill::NonZero,
             BlendMode::new(Mix::Saturation, Compose::SrcAtop),
@@ -1652,8 +1679,34 @@ mod tests {
         );
         list.fill(Fill::NonZero, Affine::IDENTITY, Color::BLACK, None, &rect());
         list.pop_layer();
+    }
+
+    /// The clip directly around a blend layer is isolated. A clip around
+    /// that clip is not, nor a clip around an opacity layer that holds the
+    /// blend, nor one around an opacity layer or a fill alone.
+    #[test]
+    fn the_clip_directly_around_a_blend_is_isolated() {
+        let mut list = DisplayList::new();
+        // Two clips, the blend in the inner one.
+        list.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &rect());
+        list.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &rect());
+        blend(&mut list);
         list.pop_layer();
         list.pop_layer();
+        // A clip around an opacity layer around the blend: the layer
+        // isolates the blend by itself.
+        list.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &rect());
+        list.push_layer(
+            Fill::NonZero,
+            BlendMode::default(),
+            0.5,
+            Affine::IDENTITY,
+            &rect(),
+        );
+        blend(&mut list);
+        list.pop_layer();
+        list.pop_layer();
+        // A clip around an opacity layer alone.
         list.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &rect());
         list.push_layer(
             Fill::NonZero,
@@ -1664,55 +1717,109 @@ mod tests {
         );
         list.pop_layer();
         list.pop_layer();
-        let isolated: Vec<bool> = list
-            .items()
-            .iter()
-            .filter_map(|item| match item {
-                Item::PushClip { isolated, .. } => Some(*isolated),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(isolated, [true, true, false]);
+        assert_eq!(isolated_clips(&list), [false, true, false, false]);
         assert!(!list.blends_at_root());
+        assert_eq!(list.open_layers(), 0);
     }
 
-    /// Appending re-derives isolation across the seam: a fragment's blend
-    /// isolates the clip its host has open around it.
+    /// Appending re-derives isolation across the seam: a blend a fragment
+    /// opens at its root isolates the clip its host has open around the
+    /// append, and a fragment whose own clip holds the blend leaves the
+    /// host's clip alone.
     #[test]
-    fn an_appended_blend_isolates_the_hosts_open_clip() {
-        let mut fragment = DisplayList::new();
-        // The fragment's own clip around the blend is isolated in the
-        // fragment already; the host's clip around both must be too.
-        fragment.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &rect());
-        fragment.push_layer(
-            Fill::NonZero,
-            BlendMode::new(Mix::Multiply, Compose::SrcOver),
-            1.0,
-            Affine::IDENTITY,
-            &rect(),
-        );
-        fragment.pop_layer();
-        fragment.pop_layer();
-        assert!(matches!(
-            fragment.items()[0],
-            Item::PushClip { isolated: true, .. }
-        ));
-        assert!(!fragment.blends_at_root());
+    fn an_appended_blend_isolates_the_hosts_clip_directly_around_it() {
+        let mut bare = DisplayList::new();
+        blend(&mut bare);
+        assert!(bare.blends_at_root());
+        let mut clipped = DisplayList::new();
+        clipped.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &rect());
+        blend(&mut clipped);
+        clipped.pop_layer();
+        assert_eq!(isolated_clips(&clipped), [true]);
+        assert!(!clipped.blends_at_root());
+
         let mut host = DisplayList::new();
         host.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &rect());
-        host.append(&fragment, Some(Affine::translate((2.0, 0.0))));
+        host.append(&bare, Some(Affine::translate((2.0, 0.0))));
         host.pop_layer();
-        let isolated: Vec<bool> = host
-            .items()
-            .iter()
-            .filter_map(|item| match item {
-                Item::PushClip { isolated, .. } => Some(*isolated),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(isolated, [true, true], "the host's clip and the fragment's");
+        host.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &rect());
+        host.append(&clipped, Some(Affine::translate((2.0, 0.0))));
+        host.pop_layer();
+        assert_eq!(
+            isolated_clips(&host),
+            [true, false, true],
+            "the host's clip around the bare blend; the fragment's own clip, not the host's, \
+             around the clipped one",
+        );
         assert!(!host.blends_at_root());
         assert_eq!(host.open_layers(), 0);
+    }
+
+    /// `CHUNK_ITEMS` fills on the target, then one far off it.
+    fn near_then_far() -> DisplayList {
+        let mut list = DisplayList::new();
+        for _ in 0..CHUNK_ITEMS {
+            list.fill(Fill::NonZero, Affine::IDENTITY, Color::BLACK, None, &rect());
+        }
+        list.fill(
+            Fill::NonZero,
+            Affine::IDENTITY,
+            Color::BLACK,
+            None,
+            &Rect::new(500.0, 0.0, 508.0, 8.0),
+        );
+        list
+    }
+
+    /// The 100 px target the seal tests append for.
+    const TARGET: Rect = Rect::new(0.0, 0.0, 100.0, 100.0);
+
+    /// Recording after a seal unseals the list, which is then appended
+    /// whole — never short of the items recorded late — until it is sealed
+    /// again.
+    #[test]
+    fn recording_after_a_seal_unseals_the_list() {
+        let mut list = DisplayList::new();
+        for _ in 0..CHUNK_ITEMS {
+            list.fill(Fill::NonZero, Affine::IDENTITY, Color::BLACK, None, &rect());
+        }
+        list.seal_bounds();
+        assert_eq!(list.chunks(), 1);
+        list.fill(
+            Fill::NonZero,
+            Affine::IDENTITY,
+            Color::BLACK,
+            None,
+            &Rect::new(500.0, 0.0, 508.0, 8.0),
+        );
+        assert_eq!(list.ink_bounds(), None, "unsealed");
+        let mut whole = DisplayList::new();
+        whole.append_visible(&list, Affine::IDENTITY, TARGET);
+        assert_eq!(whole.len(), CHUNK_ITEMS + 1, "appended whole");
+
+        list.seal_bounds();
+        assert_eq!(list.chunks(), 2);
+        let mut culled = DisplayList::new();
+        culled.append_visible(&list, Affine::IDENTITY, TARGET);
+        assert_eq!(culled.len(), CHUNK_ITEMS, "the far fill is left out again");
+    }
+
+    /// A clone of a sealed list is sealed the same, and culls the same.
+    #[test]
+    fn a_clone_of_a_sealed_list_keeps_its_seal() {
+        let mut list = near_then_far();
+        list.seal_bounds();
+        let clone = list.clone();
+        assert_eq!(clone.chunks(), list.chunks());
+        assert_eq!(clone.ink_bounds(), list.ink_bounds());
+        let mut culled = DisplayList::new();
+        culled.append_visible(&clone, Affine::IDENTITY, TARGET);
+        assert_eq!(culled.len(), CHUNK_ITEMS, "the far fill is left out");
+        assert_eq!(
+            near_then_far().clone().ink_bounds(),
+            None,
+            "unsealed stays unsealed"
+        );
     }
 
     /// An append maps every transform and lands the arenas at their new
