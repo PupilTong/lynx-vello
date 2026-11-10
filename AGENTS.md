@@ -71,8 +71,11 @@ and behave the same as they do under `web-core` today. "Behave the same" means
 matching rendering output and user-interaction behavior — **not** pixel-perfect
 fidelity, and **not** reimplementing Android/iOS native platform code paths.
 Source-based native external `.lynx.bundle` parsing and conversion are
-supported by `bobcat-source`; native bytecode execution and platform bridges
-remain outside the runtime target.
+supported by `bobcat-source`. Running a bytecode `.lynx.bundle`, by converting
+its PrimJS bytecode into this engine's QuickJS bytecode, is a target by a
+2026-11-10 ruling and is **not built**: such a bundle is still rejected
+(`docs/primjs-bytecode-conversion-design.md`). Native platform bridges remain
+outside the runtime target.
 
 ## Standards policy
 
@@ -4722,6 +4725,11 @@ section is the only place the absolute paths are spelled out.
 - `docs/lynx-binary-template.md` — the *native* `.lynx.bundle` format ("lynx"
   target), implemented for source-based external bundles by
   `bobcat-source::native`.
+- `docs/primjs-bytecode-conversion-design.md` — **read before touching native
+  bytecode sections.** The PrimJS serialized-bytecode format a `.lynx.bundle`
+  carries, how it differs from the pinned fork's, the design for rewriting one
+  into the other, what the fork's interpreter assumes of bytecode it reads,
+  and the 2026-11-10 rulings. Design only; nothing in it is built.
 - `docs/terminus-architecture.md` — `crates/terminus`'s internals: arenas and identity,
   shadow DOM and custom elements, the style engine and invalidation, the
   layout host, visual order and the committed frame, scroll/input/event
