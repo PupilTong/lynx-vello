@@ -2983,6 +2983,22 @@ type and depends only on `bytes`, `http`, `url`, `serde_json`, `thiserror`,
   processes writing one key write the same bytes and there is no shared index
   file; they expire 15 days after their last use, under a byte budget, and
   all at once when the `EngineId` changes.
+- **A Store inside one file** (`pack`): `PackStore<F: SyncFile>`, for a host
+  whose only synchronous storage is one file it opened ahead of time — a
+  browser's OPFS sync access handle, whose open is asynchronous and
+  exclusive. `SyncFile` is positioned synchronous IO (`len`, `read_at`,
+  `write_at`, `truncate`, `flush`), implemented here for `std::fs::File` and
+  for `MemFile`, so the whole Store is tested natively. The file is a 64-byte
+  header and an append-only log of records (`crc64 | kind | key_len |
+  meta_len | body_len | last_used | key | meta | body`; put, meta, delete,
+  touch); the index is the replay of the log, and a record that does not
+  verify ends the replay and is truncated away, which is what a crash
+  mid-append leaves. A `get` verifies the record it reads. Compaction runs
+  when dead bytes pass both 1 MiB and half the file, needs no second file,
+  and survives a crash at any write: fresh puts of every live entry are
+  appended, a move journal in the header records where they are, they are
+  copied to the front, and the file is truncated; `open` finishes a
+  journalled move before it replays.
 - **The vocabulary**: `CachePolicy`, `mime`, `preprocess`, `image_header`,
   `data_url`, `image` (`ImageSizeHint`, `Bitmap`, `DecodeError`,
   `target_size`, `wants_refinement`, `bounded`), and `error`

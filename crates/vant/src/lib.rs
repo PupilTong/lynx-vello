@@ -9,7 +9,9 @@
 //! What it asks of the embedder is three capabilities — a transport
 //! ([`Fetch`]), persistent bytes ([`Store`]) and platform pixels
 //! ([`ImageDecoder`]) — bundled as one [`Platform`]; their implementations
-//! live with the embedder (`docs/resource-cache-design.md`).
+//! live with the embedder (`docs/resource-cache-design.md`). One [`Store`]
+//! lives here too: [`pack::PackStore`], every entry in one synchronous file
+//! (a browser's OPFS sync access handle), over the [`pack::SyncFile`] trait.
 
 #![warn(clippy::undocumented_unsafe_blocks)]
 
@@ -22,6 +24,7 @@ pub mod image;
 pub mod image_header;
 pub mod memory;
 pub mod mime;
+pub mod pack;
 pub mod platform;
 pub mod preprocess;
 #[cfg(test)]

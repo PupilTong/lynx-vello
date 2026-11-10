@@ -457,7 +457,7 @@ const fn crc64_table() -> [u64; 256] {
 
 /// CRC-64/ECMA-182 of `bytes`. A checksum, not a hash: it catches a
 /// corrupt payload, while the key fields catch a misfiled one.
-fn crc64(bytes: &[u8]) -> u64 {
+pub(crate) fn crc64(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0, |crc, &byte| {
         CRC64_TABLE[usize::from((crc >> 56) as u8 ^ byte)] ^ (crc << 8)
     })
