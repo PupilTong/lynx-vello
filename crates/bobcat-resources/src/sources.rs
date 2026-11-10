@@ -12,8 +12,9 @@ use http::HeaderMap;
 use rustc_hash::FxHashMap;
 use tokio::sync::watch;
 use url::Url;
+use vant::Platform;
 
-use crate::{CachePolicy, Registered, Resources, SharedHandle, error, preprocess_fetched};
+use crate::{CachePolicy, Registered, Resources, SharedHandle, preprocess_fetched};
 
 type SourceResult = Result<LoadedSource, LynxViewError>;
 type CachedStyle = watch::Receiver<Option<SourceResult>>;
@@ -81,7 +82,7 @@ impl Destination {
 
 /// Preloading is a best-effort hint. Only stylesheet caching is needed here;
 /// other source kinds are loaded when they are requested.
-pub(crate) fn preload(resources: &Resources, request: SourceRequest) {
+pub(crate) fn preload<P: Platform>(resources: &Resources<P>, request: SourceRequest) {
     if let SourceRequest::StyleSheet(specifier) = request
         && let Ok(url) = resources
             .shared
@@ -96,7 +97,7 @@ pub(crate) fn preload(resources: &Resources, request: SourceRequest) {
     }
 }
 
-fn cached_style(resources: &Resources, url: Url) -> CachedStyle {
+fn cached_style<P: Platform>(resources: &Resources<P>, url: Url) -> CachedStyle {
     let mut cache = resources.style_cache.borrow_mut();
     if let Some(response) = cache.get(&url) {
         return response.clone();
@@ -126,7 +127,11 @@ async fn answer_cached_style(mut response: CachedStyle, completion: SourceComple
     }
 }
 
-pub(crate) fn request(resources: &Resources, request: SourceRequest, completion: SourceCompletion) {
+pub(crate) fn request<P: Platform>(
+    resources: &Resources<P>,
+    request: SourceRequest,
+    completion: SourceCompletion,
+) {
     if completion.is_cancelled() {
         return;
     }
@@ -167,7 +172,12 @@ pub(crate) fn request(resources: &Resources, request: SourceRequest, completion:
     }
 }
 
-fn start(resources: &Resources, url: Url, kind: SourceKind, completion: Destination) {
+fn start<P: Platform>(
+    resources: &Resources<P>,
+    url: Url,
+    kind: SourceKind,
+    completion: Destination,
+) {
     #[cfg(not(target_arch = "wasm32"))]
     spawn(resources, url, kind, completion);
     #[cfg(target_arch = "wasm32")]
@@ -188,7 +198,12 @@ fn start(resources: &Resources, url: Url, kind: SourceKind, completion: Destinat
 /// A cache load stops when no scope or reader holds its response; an ordinary
 /// request stops when its completion reports cancellation.
 #[cfg(not(target_arch = "wasm32"))]
-fn spawn(resources: &Resources, url: Url, kind: SourceKind, completion: Destination) {
+fn spawn<P: Platform>(
+    resources: &Resources<P>,
+    url: Url,
+    kind: SourceKind,
+    completion: Destination,
+) {
     let shared = SharedHandle::clone(&resources.shared);
     let handle = resources.executor.handle();
     resources.executor.spawn(async move {
@@ -234,7 +249,7 @@ fn spawn(resources: &Resources, url: Url, kind: SourceKind, completion: Destinat
 /// A source load answered with what a blocking closure's panic left.
 #[cfg(not(target_arch = "wasm32"))]
 fn panicked(message: &str, url: &Url) -> LynxViewError {
-    error::Failure::new(
+    vant::error::Failure::new(
         ResourceErrorKind::Unavailable,
         ResourceErrorPhase::ReadBody,
         message,
@@ -244,7 +259,12 @@ fn panicked(message: &str, url: &Url) -> LynxViewError {
 }
 
 #[cfg(target_arch = "wasm32")]
-async fn run(shared: SharedHandle, url: Url, kind: SourceKind, completion: Destination) {
+async fn run<P: Platform>(
+    shared: SharedHandle<P>,
+    url: Url,
+    kind: SourceKind,
+    completion: Destination,
+) {
     if completion.is_cancelled() {
         return;
     }
@@ -274,14 +294,18 @@ fn arrival(kind: SourceKind) -> Option<Instant> {
 /// this load's answer, and so is a stylesheet it registered pre-parsed,
 /// which has no bytes to fetch; otherwise the load goes on, and finds what
 /// the install registered.
-async fn after_install(shared: &SharedHandle, url: &Url, kind: SourceKind) -> Option<SourceResult> {
+async fn after_install<P: Platform>(
+    shared: &SharedHandle<P>,
+    url: &Url,
+    kind: SourceKind,
+) -> Option<SourceResult> {
     let mut done = shared.transports.registry.install_covering(url)?;
     let ended = done
         .wait_for(Option::is_some)
         .await
         .map(|result| result.clone().expect("wait_for required a result"));
     let failure = |message: &str| {
-        Some(Err(error::Failure::new(
+        Some(Err(vant::error::Failure::new(
             ResourceErrorKind::ResponseBody,
             ResourceErrorPhase::ReadBody,
             message,
@@ -312,12 +336,12 @@ async fn after_install(shared: &SharedHandle, url: &Url, kind: SourceKind) -> Op
 /// what a [`FontBlob`] retains. Read from a file, they are that file's shared
 /// mapping, so every view loading the font is handed the same memory and
 /// [`FontBlob::new`] answers each with the one blob.
-fn prepare(
-    fetched: Result<crate::Fetched, error::Failure>,
+fn prepare<P: Platform>(
+    fetched: Result<crate::Fetched, vant::error::Failure>,
     url: &Url,
     kind: SourceKind,
     received: Option<Instant>,
-    shared: &SharedHandle,
+    shared: &SharedHandle<P>,
 ) -> Result<LoadedSource, LynxViewError> {
     // A plain fetch takes neither preprocessing nor a UTF-8 check: the bytes
     // are whatever they are. The only thing done with them is the offer to
@@ -361,7 +385,7 @@ fn prepare(
                 })
             })
             .map_err(|message| {
-                error::Failure::new(
+                vant::error::Failure::new(
                     ResourceErrorKind::ResponseBody,
                     ResourceErrorPhase::ReadBody,
                     message,

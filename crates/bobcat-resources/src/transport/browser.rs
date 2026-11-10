@@ -1,29 +1,45 @@
-//! `http(s)` in the browser: the Render Worker's own `fetch`, which applies
-//! the page's origin, CORS, credentials and HTTP-cache policy for free.
+//! [`BrowserFetch`]: `http(s)` in the browser through the Render Worker's
+//! own `fetch`, which applies the page's origin, CORS, credentials and
+//! HTTP-cache policy for free.
 //!
-//! The browser's HTTP cache stands in for the disk tier here, driven by the
-//! same [`CachePolicy`] through the request's cache mode; what it did is
-//! opaque, and nothing here asks.
+//! The browser's HTTP cache stands in for the byte tier here
+//! ([`Fetch::owns_http_cache`]), driven by the same [`CachePolicy`] through
+//! the request's cache mode; what it did is opaque, and nothing here asks.
 
 use bobcat_core::resource::{ResourceErrorKind, ResourceErrorPhase};
 use bytes::Bytes;
-use http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
+use http::{HeaderMap, HeaderName, HeaderValue};
 use url::Url;
+use vant::error::Failure;
+use vant::{Fetch, Request, Response};
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
-use web_sys::{Headers, Request, RequestCache, RequestInit, Response, WorkerGlobalScope};
+use web_sys::{Headers, RequestCache, RequestInit, WorkerGlobalScope};
 
-use super::{Fetched, HttpSettings, status_failure};
 use crate::CachePolicy;
-use crate::error::Failure;
-use crate::mime::MediaType;
 
-pub(crate) async fn fetch(
-    url: &Url,
-    policy: CachePolicy,
-    headers: &HeaderMap,
-    settings: &HttpSettings,
-) -> Result<Fetched, Failure> {
+/// The browser transport. It cannot block, so a synchronous request —
+/// a restore inside a read — has nothing to ask it.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BrowserFetch;
+
+impl Fetch for BrowserFetch {
+    fn fetch_blocking(&self, _request: &Request) -> Option<Result<Response, Failure>> {
+        None
+    }
+
+    async fn fetch(&self, request: Request) -> Result<Response, Failure> {
+        fetch(&request).await
+    }
+
+    fn owns_http_cache(&self) -> bool {
+        true
+    }
+}
+
+/// One request through `fetch`. A response whose status is not a success
+/// is answered without its body, which nothing reads.
+async fn fetch(request: &Request) -> Result<Response, Failure> {
     let scope = js_sys::global()
         .dyn_into::<WorkerGlobalScope>()
         .map_err(|_| {
@@ -35,7 +51,7 @@ pub(crate) async fn fetch(
         })?;
     let request_headers =
         Headers::new().map_err(|error| js_failure(ResourceErrorPhase::Open, &error))?;
-    for (name, value) in headers {
+    for (name, value) in &request.headers {
         if let Ok(value) = value.to_str() {
             let _ = request_headers.append(name.as_str(), value);
         }
@@ -43,7 +59,7 @@ pub(crate) async fn fetch(
     let init = RequestInit::new();
     init.set_method("GET");
     init.set_headers(&request_headers);
-    init.set_cache(match policy {
+    init.set_cache(match request.policy {
         CachePolicy::NoStore => RequestCache::NoStore,
         CachePolicy::Reload => RequestCache::Reload,
         CachePolicy::NoCache => RequestCache::NoCache,
@@ -51,12 +67,12 @@ pub(crate) async fn fetch(
         CachePolicy::OnlyIfCached => RequestCache::OnlyIfCached,
         _ => RequestCache::Default,
     });
-    let request = Request::new_with_str_and_init(url.as_str(), &init)
+    let js_request = web_sys::Request::new_with_str_and_init(request.url.as_str(), &init)
         .map_err(|error| js_failure(ResourceErrorPhase::Open, &error))?;
-    let response = JsFuture::from(scope.fetch_with_request(&request))
+    let response = JsFuture::from(scope.fetch_with_request(&js_request))
         .await
         .map_err(|error| js_failure(ResourceErrorPhase::Connect, &error))?
-        .dyn_into::<Response>()
+        .dyn_into::<web_sys::Response>()
         .map_err(|_| {
             Failure::new(
                 ResourceErrorKind::Protocol,
@@ -64,16 +80,16 @@ pub(crate) async fn fetch(
                 "fetch resolved with something other than a Response",
             )
         })?;
-    let status = StatusCode::from_u16(response.status()).map_err(|_| {
-        Failure::new(
-            ResourceErrorKind::Protocol,
-            ResourceErrorPhase::ReceiveHeaders,
-            format!("impossible status {}", response.status()),
-        )
-    })?;
-    let response_headers = collect_headers(&response.headers());
-    if let Some(failure) = status_failure(status) {
-        return Err(failure);
+    let status = response.status();
+    let headers = collect_headers(&response.headers());
+    let url = Url::parse(&response.url()).unwrap_or_else(|_| request.url.clone());
+    if !(200..300).contains(&status) {
+        return Ok(Response {
+            url,
+            status,
+            headers,
+            body: Bytes::new(),
+        });
     }
     let buffer = JsFuture::from(
         response
@@ -83,24 +99,18 @@ pub(crate) async fn fetch(
     .await
     .map_err(|error| js_failure(ResourceErrorPhase::ReadBody, &error))?;
     let bytes = js_sys::Uint8Array::new(&buffer).to_vec();
-    if bytes.len() > settings.max_body {
+    if bytes.len() > request.max_body {
         return Err(Failure::new(
             ResourceErrorKind::ResponseTooLarge,
             ResourceErrorPhase::ReadBody,
-            format!("the response exceeded {} bytes", settings.max_body),
+            format!("the response exceeded {} bytes", request.max_body),
         ));
     }
-    let media_type = response_headers
-        .get(http::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .and_then(MediaType::parse)
-        .or_else(|| crate::mime::from_extension(url.path()));
-    Ok(Fetched {
-        bytes: Bytes::from(bytes),
-        media_type,
-        url: Url::parse(&response.url()).unwrap_or_else(|_| url.clone()),
-        // The browser's HTTP cache cannot be read synchronously.
-        restorable: false,
+    Ok(Response {
+        url,
+        status,
+        headers,
+        body: Bytes::from(bytes),
     })
 }
 

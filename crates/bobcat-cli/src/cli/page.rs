@@ -11,7 +11,7 @@
 //! while the group, the view and the painter are built.
 
 use bobcat_core::{ScreenMetrics, ViewSources};
-use bobcat_resources::{DiskCacheConfig, Resources, ResourcesConfig};
+use bobcat_resources::{DiskCacheConfig, NativePlatform, Resources, ResourcesConfig};
 use bobcat_source::{DeferredPage, PageSource};
 use url::Url;
 
@@ -58,25 +58,27 @@ impl Program {
     /// `bobcat-resources`.
     pub(crate) fn resources(&self, wakeup: impl Fn() + Send + Sync + 'static) -> Resources {
         self.resources_with(
-            DiskCacheConfig::at_default_location(DISK_CACHE_BUDGET),
+            DiskCacheConfig::at_default_location(DISK_CACHE_BUDGET).as_ref(),
             wakeup,
         )
     }
 
     fn resources_with(
         &self,
-        disk_cache: Option<DiskCacheConfig>,
+        disk_cache: Option<&DiskCacheConfig>,
         wakeup: impl Fn() + Send + Sync + 'static,
     ) -> Resources {
-        let resources = Resources::new(
+        let (platform, notes) = NativePlatform::new(disk_cache);
+        let resources = Resources::with_platform(
             ResourcesConfig {
                 base_url: Some(self.source.input_url().clone()),
-                disk_cache,
                 // Lazy bundles: a `lynx.fetchBundle` installs its sections
                 // through this, and without one every fetch fails.
                 container_installer: Some(std::sync::Arc::new(bobcat_source::BundleInstaller)),
                 ..ResourcesConfig::default()
             },
+            platform,
+            notes,
             wakeup,
         );
         self.source.register_in_background(&resources);

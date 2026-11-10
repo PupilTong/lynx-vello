@@ -16,11 +16,15 @@
 //!   classified, and treated by class: text is transcoded to UTF-8 with its BOM removed, JSON is
 //!   validated, images are container-sniffed and header-probed for the size layout needs, and the
 //!   rest passes through ([`preprocess`]).
-//! - **Tiered caching.** Decoded bitmaps live in a memory tier under a byte budget with the frame's
-//!   working set pinned ([`cache::memory`]); fetched bytes live on disk under their own budget with
-//!   HTTP freshness and revalidation semantics ([`cache::disk`], [`cache::http`]), natively; the
-//!   browser's HTTP cache plays that role there. Stylesheet responses and pending loads are shared
-//!   by URL within each resource scope, including preload hints.
+//! - **Tiered caching, applied from `vant`.** The cache policy is `vant`'s and this crate applies
+//!   it: decoded bitmaps live in a memory tier under a byte budget with the frame's working set
+//!   pinned ([`cache::memory`]); fetched bytes live in `vant`'s byte tier
+//!   ([`vant::byte_cache::ByteCache`]) under their own budget with HTTP freshness and revalidation
+//!   semantics ([`cache::http`]), over the platform's [`Store`](vant::Store) — natively a cache
+//!   directory ([`FsStore`]) when the embedder configures one. A transport that applies HTTP cache
+//!   semantics itself, the browser's `fetch`, gets no byte tier: its HTTP cache plays that role.
+//!   Stylesheet responses and pending loads are shared by URL within each resource scope, including
+//!   preload hints.
 //! - **Platform image decoding.** No codec is compiled in: `ImageIO` on macOS, gdk-pixbuf on Linux,
 //!   the main thread's `Image` element in the browser, each asked to downsample during decode
 //!   ([`decode`]).
@@ -36,6 +40,17 @@
 //!   size in the background, so a photo shown as a thumbnail costs a thumbnail.
 //!
 //! # Shape
+//!
+//! This crate is the orchestration — [`Resources`], its job executor, the
+//! image and source pipelines, the registry — and the reference adapters for
+//! the three capabilities `vant` asks of an embedder, bundled as a
+//! [`vant::Platform`]: [`NativePlatform`] ([`NativeFetch`], [`FsStore`],
+//! [`NativeDecoder`]) on macOS and Linux, and `BrowserPlatform`
+//! (`BrowserFetch`, [`vant::NoStore`], `BrowserDecoder`) on wasm32. Each is
+//! the target's [`DefaultPlatform`], which [`Resources::new`] builds with no
+//! persistent store; an embedder with a disk cache, its own HTTP stack or
+//! its own storage builds a platform and hands it to
+//! [`Resources::with_platform`].
 //!
 //! [`Resources`] is the shared system: registry, caches, job executor,
 //! decoder. An embedder builds one, registers what it already holds, and
@@ -68,50 +83,51 @@ use rustc_hash::FxHashSet;
 use url::Url;
 
 pub mod cache;
-pub mod data_url;
 pub mod decode;
-mod error;
 mod executor;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod file_body;
-pub mod image_header;
 mod images;
-pub mod mime;
-pub mod preprocess;
+pub mod platform;
 mod registry;
 mod sources;
+pub mod store;
 pub mod transport;
+
+#[cfg(target_arch = "wasm32")]
+pub use decode::BrowserDecoder;
+#[cfg(not(target_arch = "wasm32"))]
+pub use decode::NativeDecoder;
+#[cfg(target_arch = "wasm32")]
+pub use platform::BrowserPlatform;
+#[cfg(not(target_arch = "wasm32"))]
+pub use platform::NativePlatform;
+#[cfg(not(target_arch = "wasm32"))]
+pub use store::FsStore;
+#[cfg(target_arch = "wasm32")]
+pub use transport::BrowserFetch;
+#[cfg(not(target_arch = "wasm32"))]
+pub use transport::NativeFetch;
+use vant::Platform;
+use vant::byte_cache::ByteCache;
+pub use vant::{CachePolicy, data_url, image_header, mime, preprocess};
 
 use crate::executor::Wakeup;
 use crate::images::{Completion, ImageState};
-use crate::registry::Registered;
+use crate::registry::{Registered, Registry};
 use crate::transport::{Fetched, HttpSettings, Transports};
 
-/// What a load may do with the caches on its way.
-///
-/// The fetcher's own vocabulary: every load this crate starts names one, the
-/// disk tier turns it into an RFC 9111 plan (`cache::http::plan`), and the
-/// browser transport maps it onto a `fetch` request's cache mode.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum CachePolicy {
-    /// Ordinary freshness rules: a fresh stored response answers, a stale one
-    /// is revalidated.
-    #[default]
-    Default,
-    /// Fetch, and store nothing.
-    NoStore,
-    /// Fetch unconditionally, ignoring what is stored.
-    Reload,
-    /// Revalidate whatever is stored before using it.
-    NoCache,
-    /// Use a stored response however stale, and fetch only without one.
-    ForceCache,
-    /// Use a stored response however stale, and fail without one.
-    OnlyIfCached,
-}
+/// The platform [`Resources::new`] builds, and the one [`Resources`] and
+/// [`ViewResources`] name when no other is: [`NativePlatform`] natively.
+#[cfg(not(target_arch = "wasm32"))]
+pub type DefaultPlatform = platform::NativePlatform;
+/// The platform [`Resources::new`] builds, and the one [`Resources`] and
+/// [`ViewResources`] name when no other is: `BrowserPlatform` on wasm32.
+#[cfg(target_arch = "wasm32")]
+pub type DefaultPlatform = platform::BrowserPlatform;
 
-/// The disk tier's location and size.
+/// The byte tier's directory and budget, natively: what
+/// [`NativePlatform::new`] opens an [`FsStore`] over.
 #[derive(Clone, Debug)]
 pub struct DiskCacheConfig {
     pub dir: std::path::PathBuf,
@@ -124,12 +140,12 @@ impl DiskCacheConfig {
     #[cfg(not(target_arch = "wasm32"))]
     #[must_use]
     pub fn at_default_location(budget_bytes: u64) -> Option<Self> {
-        cache::disk::default_cache_dir().map(|dir| Self { dir, budget_bytes })
+        store::default_cache_dir().map(|dir| Self { dir, budget_bytes })
     }
 }
 
-/// Everything a [`Resources`] is built with. `Default` is a working
-/// configuration for a desktop host with no disk cache.
+/// Everything a [`Resources`] is built with, beside its [`Platform`].
+/// `Default` is a working configuration for any host.
 #[derive(Clone, Debug)]
 pub struct ResourcesConfig {
     /// What relative stylesheet, fetch and image URLs resolve against, by
@@ -147,8 +163,6 @@ pub struct ResourcesConfig {
     /// being drawn is never evicted, and a single bitmap larger than the
     /// budget still has to exist while it is on screen.
     pub memory_budget_bytes: usize,
-    /// The disk tier; `None` keeps everything in memory.
-    pub disk_cache: Option<DiskCacheConfig>,
     /// The largest per-axis size of an image's first decode, before any
     /// frame has said how large it draws it. Also bounded by what the rasterizer can
     /// draw at all.
@@ -189,11 +203,6 @@ pub struct ResourcesConfig {
     /// `bobcat_source::BundleInstaller`, which registers a fetched container
     /// by the same `ContainerSources` path a page's own takes.
     pub container_installer: Option<Arc<dyn ContainerInstaller>>,
-    /// This Worker's end of the channel whose other end the host's
-    /// main-thread image decoder listens on (`js/image-decoder.ts` in the
-    /// `bobcat-wasm` package), in the browser. Without it no image decodes.
-    #[cfg(target_arch = "wasm32")]
-    pub image_port: Option<web_sys::MessagePort>,
 }
 
 impl Default for ResourcesConfig {
@@ -201,7 +210,6 @@ impl Default for ResourcesConfig {
         Self {
             base_url: None,
             memory_budget_bytes: 64 * 1024 * 1024,
-            disk_cache: None,
             initial_decode_bound: 2048,
             downsample_ratio: 2.0,
             request_timeout: Duration::from_secs(30),
@@ -213,8 +221,6 @@ impl Default for ResourcesConfig {
             decode_parallelism: None,
             log_to_stderr: cfg!(not(target_arch = "wasm32")),
             container_installer: None,
-            #[cfg(target_arch = "wasm32")]
-            image_port: None,
         }
     }
 }
@@ -257,7 +263,7 @@ pub trait ContainerInstaller: fmt::Debug + Send + Sync + 'static {
 /// asked for before the container existed, so no cached response for one can
 /// be standing.
 pub struct Registrar {
-    shared: SharedHandle,
+    registry: Arc<Registry>,
 }
 
 impl fmt::Debug for Registrar {
@@ -280,7 +286,7 @@ impl Registrar {
         media_type: Option<&str>,
     ) -> Result<Url, RegisterError> {
         let url = parse_registration_url(url)?;
-        self.shared.transports.registry.insert(
+        self.registry.insert(
             &url,
             Registered::Bytes {
                 bytes: bytes.into(),
@@ -302,10 +308,7 @@ impl Registrar {
         sheet: Arc<PreparsedStyleSheet>,
     ) -> Result<Url, RegisterError> {
         let url = parse_registration_url(url)?;
-        self.shared
-            .transports
-            .registry
-            .insert(&url, Registered::StyleSheet(sheet));
+        self.registry.insert(&url, Registered::StyleSheet(sheet));
         Ok(url)
     }
 }
@@ -387,19 +390,22 @@ impl FetchIndex {
     }
 }
 
-/// The handle jobs hold on [`Shared`]: atomic natively, where a job's task
-/// and its blocking closures share it across threads, and plain in the
-/// browser, where nothing does and the decoder it holds is thread-bound
-/// anyway.
+/// The handle jobs hold on [`Shared`] and the platform parts in it: atomic
+/// natively, where a job's task and its blocking closures share it across
+/// threads, and plain in the browser, where nothing does and the decoder it
+/// holds is thread-bound anyway.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) type SharedHandle = Arc<Shared>;
+pub(crate) type Handle<T> = Arc<T>;
 #[cfg(target_arch = "wasm32")]
-pub(crate) type SharedHandle = Rc<Shared>;
+pub(crate) type Handle<T> = Rc<T>;
+
+/// The handle jobs hold on [`Shared`].
+pub(crate) type SharedHandle<P> = Handle<Shared<P>>;
 
 /// The part of the system every job may touch. It holds no piece of the
 /// [`executor::Executor`], so no job can keep the fetcher's runtime alive.
-pub(crate) struct Shared {
-    transports: Transports,
+pub(crate) struct Shared<P: Platform> {
+    transports: Transports<P>,
     /// The base every specifier resolves against, and the URLs a plain fetch
     /// has completed for. Behind an `Arc` of its own because
     /// [`ResourceFetcher::fetch_probe`] hands a reader of it to the engine
@@ -407,8 +413,7 @@ pub(crate) struct Shared {
     fetches: Arc<FetchIndex>,
     initial_decode_bound: u32,
     downsample_ratio: f32,
-    #[cfg(target_arch = "wasm32")]
-    decoder: Option<Rc<decode::browser::ImageDecoder>>,
+    decoder: Handle<P::Decoder>,
     completions: tokio::sync::mpsc::UnboundedSender<Completion>,
     wakeup: Wakeup,
     log_to_stderr: bool,
@@ -443,7 +448,7 @@ pub(crate) type DecodeHook = Arc<
         + Sync,
 >;
 
-impl Shared {
+impl<P: Platform> Shared<P> {
     /// Offers one fetch's bytes to the container installer, if this host has
     /// one, and says whether anything was registered.
     ///
@@ -451,8 +456,8 @@ impl Shared {
     /// its bytes is still a fetch that completed.
     ///
     /// The registrar is built here rather than handed in, because what it
-    /// writes through is this very [`Shared`].
-    fn install_container(self: &SharedHandle, url: &Url, bytes: &[u8]) -> Result<bool, String> {
+    /// writes through is this very [`Shared`]'s registry.
+    fn install_container(&self, url: &Url, bytes: &[u8]) -> Result<bool, String> {
         let Some(installer) = self.container_installer.as_ref() else {
             return Ok(false);
         };
@@ -460,7 +465,7 @@ impl Shared {
             url,
             bytes,
             &Registrar {
-                shared: SharedHandle::clone(self),
+                registry: Arc::clone(&self.transports.registry),
             },
         )
     }
@@ -490,7 +495,7 @@ impl Shared {
         policy: CachePolicy,
         headers: &http::HeaderMap,
         body: file_body::Body,
-    ) -> Result<Fetched, error::Failure> {
+    ) -> Result<Fetched, vant::error::Failure> {
         #[cfg(test)]
         {
             let hook = self
@@ -547,53 +552,28 @@ impl Shared {
     }
 
     /// Decodes `bytes`, which preprocessing found to be a `format` image
-    /// with `header`, at most `max` large. The native decoders take the
-    /// header; the browser's takes the media type instead.
-    #[cfg(not(target_arch = "wasm32"))]
-    #[expect(
-        clippy::unused_self,
-        reason = "the browser variant decodes through a port this holds; one call shape serves both"
-    )]
+    /// with `header`, at most `max` large, with the platform's decoder,
+    /// blocking the calling thread.
     fn decode_bytes(
         &self,
         bytes: &[u8],
-        _format: mime::ImageFormat,
+        format: mime::ImageFormat,
         header: Option<image_header::ImageHeader>,
         max: (u32, u32),
     ) -> Result<decode::Bitmap, decode::DecodeError> {
-        decode::decode(bytes, header, max)
+        vant::ImageDecoder::decode_blocking(&*self.decoder, bytes, format, header, max)
     }
 
-    #[cfg(target_arch = "wasm32")]
-    fn decode_bytes(
-        &self,
-        bytes: &[u8],
-        format: mime::ImageFormat,
-        _header: Option<image_header::ImageHeader>,
-        max: (u32, u32),
-    ) -> Result<decode::Bitmap, decode::DecodeError> {
-        self.image_decoder()?
-            .decode_blocking(bytes, format.media_type(), max)
-    }
-
+    /// [`Self::decode_bytes`] without blocking, for the browser's loads.
     #[cfg(target_arch = "wasm32")]
     async fn decode_bytes_async(
         &self,
-        bytes: &[u8],
+        bytes: Bytes,
         format: mime::ImageFormat,
-        _header: Option<image_header::ImageHeader>,
+        header: Option<image_header::ImageHeader>,
         max: (u32, u32),
     ) -> Result<decode::Bitmap, decode::DecodeError> {
-        self.image_decoder()?
-            .decode(bytes, format.media_type(), max)
-            .await
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    fn image_decoder(&self) -> Result<&decode::browser::ImageDecoder, decode::DecodeError> {
-        self.decoder.as_deref().ok_or_else(|| {
-            decode::DecodeError::Unavailable("no image decoder was configured".to_owned())
-        })
+        vant::ImageDecoder::decode(&*self.decoder, bytes, format, header, max).await
     }
 }
 
@@ -604,9 +584,8 @@ impl Shared {
 /// serves (the painter's). It is also the only holder of the native
 /// executor: when the last clone of the last scope goes, the fetcher's
 /// runtime is shut down, on this thread.
-#[derive(Clone)]
-pub struct Resources {
-    shared: SharedHandle,
+pub struct Resources<P: Platform = DefaultPlatform> {
+    shared: SharedHandle<P>,
     /// Shared by every scope, held by nothing a job can reach.
     #[cfg(not(target_arch = "wasm32"))]
     executor: Arc<executor::Executor>,
@@ -614,7 +593,19 @@ pub struct Resources {
     style_cache: Rc<RefCell<sources::StyleCache>>,
 }
 
-impl fmt::Debug for Resources {
+impl<P: Platform> Clone for Resources<P> {
+    fn clone(&self) -> Self {
+        Self {
+            shared: SharedHandle::clone(&self.shared),
+            #[cfg(not(target_arch = "wasm32"))]
+            executor: Arc::clone(&self.executor),
+            local: Rc::clone(&self.local),
+            style_cache: Rc::clone(&self.style_cache),
+        }
+    }
+}
+
+impl<P: Platform> fmt::Debug for Resources<P> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Resources")
@@ -630,20 +621,38 @@ pub enum RegisterError {
     InvalidUrl { url: String, message: String },
 }
 
-impl Resources {
-    /// Builds the system. `wakeup` is called whenever a load completes between
-    /// painter turns — natively from the executor's driver thread, in the
-    /// browser from the Render Worker's own task, there being no driver there.
-    /// Pass the same wakeup the view was given, so the completion is answered
-    /// by a turn.
+impl Resources<DefaultPlatform> {
+    /// Builds the system over this target's [`DefaultPlatform`] with no
+    /// persistent store — and, in the browser, no image decoder, which
+    /// [`Resources::take_notes`] then reports. What tests and
+    /// `bobcat-server` build; [`Resources::with_platform`] says the rest.
+    ///
+    /// # Panics
+    ///
+    /// As [`Resources::with_platform`].
+    #[must_use]
+    pub fn new(config: ResourcesConfig, wakeup: impl Fn() + Send + Sync + 'static) -> Self {
+        let (platform, notes) = DefaultPlatform::new(None);
+        Self::with_platform(config, platform, notes, wakeup)
+    }
+}
+
+impl<P: Platform> Resources<P> {
+    /// Builds the system over `platform`. `notes` are what building the
+    /// platform left out (the second half of [`NativePlatform::new`]'s
+    /// answer); they open [`Resources::take_notes`]. The byte tier is opened
+    /// over the platform's store, under its
+    /// [`byte_budget`](Platform::byte_budget), unless its transport applies
+    /// HTTP cache semantics itself.
+    ///
+    /// `wakeup` is called whenever a load completes between painter turns —
+    /// natively from the executor's driver thread, in the browser from the
+    /// Render Worker's own task, there being no driver there. Pass the same
+    /// wakeup the view was given, so the completion is answered by a turn.
     ///
     /// Natively that wakeup must not block, and must not take a lock the
     /// thread dropping the last [`Resources`] can be holding: the drop joins
     /// the driver, so it waits for a wakeup already running.
-    ///
-    /// Never fails on anything the embedder chose: a disk cache that cannot
-    /// be opened, or a decoder that cannot be reached, is recorded in
-    /// [`Resources::take_notes`] and the system runs without it.
     ///
     /// # Panics
     ///
@@ -656,52 +665,33 @@ impl Resources {
         clippy::needless_pass_by_value,
         reason = "a configuration is handed over to the system it configures"
     )]
-    pub fn new(config: ResourcesConfig, wakeup: impl Fn() + Send + Sync + 'static) -> Self {
-        let mut notes = Vec::new();
-        #[cfg(not(target_arch = "wasm32"))]
-        let disk = config.disk_cache.as_ref().and_then(|disk| {
-            match cache::disk::DiskCache::open(&disk.dir, disk.budget_bytes) {
-                Ok(cache) => Some(Arc::new(cache)),
-                Err(error) => {
-                    notes.push(format!(
-                        "the disk cache at `{}` could not be opened: {error}",
-                        disk.dir.display()
-                    ));
-                    None
-                }
-            }
-        });
-        #[cfg(not(target_arch = "wasm32"))]
-        if let Err(error) = decode::available() {
-            notes.push(format!("images will not decode: {error}"));
-        }
-        #[cfg(target_arch = "wasm32")]
-        let decoder = if let Some(port) = config.image_port.clone() {
-            decode::browser::ImageDecoder::new(port)
-                .inspect_err(|error| notes.push(format!("images will not decode: {error}")))
-                .ok()
-        } else {
-            notes.push("images will not decode: no image decode port was configured".to_owned());
-            None
-        };
+    pub fn with_platform(
+        config: ResourcesConfig,
+        platform: P,
+        notes: Vec<String>,
+        wakeup: impl Fn() + Send + Sync + 'static,
+    ) -> Self {
+        let budget = platform.byte_budget();
+        let (fetch, store, decoder) = platform.into_parts();
+        let bytes = store
+            .filter(|_| !vant::Fetch::owns_http_cache(&fetch))
+            .map(|store| Handle::new(ByteCache::open(store, budget)));
         let (completions, receiver) = tokio::sync::mpsc::unbounded_channel();
         let shared = SharedHandle::new(Shared {
-            transports: Transports {
-                registry: Arc::default(),
-                http: HttpSettings {
+            transports: Transports::new(
+                HttpSettings {
                     timeout: config.request_timeout,
                     max_body: config.max_response_bytes,
                     user_agent: config.user_agent.clone(),
                     max_redirects: config.max_redirects,
                 },
-                #[cfg(not(target_arch = "wasm32"))]
-                disk,
-            },
+                Handle::new(fetch),
+                bytes,
+            ),
             fetches: Arc::new(FetchIndex::with_base(config.base_url.clone())),
             initial_decode_bound: config.initial_decode_bound.max(1),
             downsample_ratio: config.downsample_ratio.max(1.0),
-            #[cfg(target_arch = "wasm32")]
-            decoder,
+            decoder: Handle::new(decoder),
             completions,
             wakeup: Arc::new(wakeup),
             log_to_stderr: config.log_to_stderr,
@@ -728,7 +718,7 @@ impl Resources {
     }
 
     /// An independent page resource scope sharing only the executor, the
-    /// platform decoder and the disk cache. Registrations, relative URL base,
+    /// platform decoder, the transport and the byte tier. Registrations, relative URL base,
     /// decoded images, stylesheet responses and completion queues start empty. Late image results
     /// from a retired page cannot populate the replacement page's cache.
     ///
@@ -740,19 +730,13 @@ impl Resources {
         let (completions, receiver) = tokio::sync::mpsc::unbounded_channel();
         Self {
             shared: SharedHandle::new(Shared {
-                transports: Transports {
-                    registry: Arc::default(),
-                    http: self.shared.transports.http.clone(),
-                    #[cfg(not(target_arch = "wasm32"))]
-                    disk: self.shared.transports.disk.clone(),
-                },
+                transports: self.shared.transports.for_new_scope(),
                 // A fresh index, like the fresh registry beside it: a new
                 // scope has fetched nothing and has no base yet.
                 fetches: Arc::new(FetchIndex::default()),
                 initial_decode_bound: self.shared.initial_decode_bound,
                 downsample_ratio: self.shared.downsample_ratio,
-                #[cfg(target_arch = "wasm32")]
-                decoder: self.shared.decoder.clone(),
+                decoder: Handle::clone(&self.shared.decoder),
                 completions,
                 wakeup: self.shared.wakeup.clone(),
                 log_to_stderr: self.shared.log_to_stderr,
@@ -837,7 +821,7 @@ impl Resources {
         self.shared.transports.registry.hold(id, container, done);
         let shared = SharedHandle::clone(&self.shared);
         let registrar = Registrar {
-            shared: SharedHandle::clone(&shared),
+            registry: Arc::clone(&shared.transports.registry),
         };
         let finish = move |result: Result<(), String>| {
             if let Err(message) = &result {
@@ -958,7 +942,7 @@ impl Resources {
     /// The per-view value for one [`bobcat_core::LynxView`], carrying its
     /// [`ImageReports`].
     #[must_use]
-    pub fn for_view(&self, reports: ImageReports) -> ViewResources {
+    pub fn for_view(&self, reports: ImageReports) -> ViewResources<P> {
         ViewResources {
             resources: self.clone(),
             reports,
@@ -966,7 +950,7 @@ impl Resources {
     }
 
     /// The builder [`bobcat_core::LynxGroup::create_lynx_view`] takes.
-    pub fn builder(&self) -> impl FnOnce(ImageReports) -> ViewResources + 'static {
+    pub fn builder(&self) -> impl FnOnce(ImageReports) -> ViewResources<P> + 'static {
         let resources = self.clone();
         move |reports| resources.for_view(reports)
     }
@@ -979,14 +963,14 @@ impl Resources {
 fn preprocess_fetched(
     fetched: Fetched,
     url: &Url,
-) -> Result<(Fetched, preprocess::Preprocessed), error::Failure> {
+) -> Result<(Fetched, preprocess::Preprocessed), vant::error::Failure> {
     let preprocessed = preprocess::preprocess(
         fetched.bytes.clone(),
         fetched.media_type.as_ref(),
         Some(url),
     )
     .map_err(|error| {
-        error::Failure::new(
+        vant::error::Failure::new(
             bobcat_core::resource::ResourceErrorKind::ResponseBody,
             bobcat_core::resource::ResourceErrorPhase::ReadBody,
             error.to_string(),
@@ -1003,12 +987,12 @@ fn parse_registration_url(url: &str) -> Result<Url, RegisterError> {
 }
 
 /// One view's end of the system: the [`ResourceFetcher`] it is built with.
-pub struct ViewResources {
-    resources: Resources,
+pub struct ViewResources<P: Platform = DefaultPlatform> {
+    resources: Resources<P>,
     reports: ImageReports,
 }
 
-impl fmt::Debug for ViewResources {
+impl<P: Platform> fmt::Debug for ViewResources<P> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ViewResources")
@@ -1017,15 +1001,15 @@ impl fmt::Debug for ViewResources {
     }
 }
 
-impl ViewResources {
+impl<P: Platform> ViewResources<P> {
     /// The shared system behind this view.
     #[must_use]
-    pub fn resources(&self) -> &Resources {
+    pub fn resources(&self) -> &Resources<P> {
         &self.resources
     }
 }
 
-impl ResourceFetcher for ViewResources {
+impl<P: Platform> ResourceFetcher for ViewResources<P> {
     fn request_source(
         &self,
         request: bobcat_core::resource::SourceRequest,
@@ -1077,7 +1061,7 @@ impl ResourceFetcher for ViewResources {
     }
 }
 
-impl FrameImages for ViewResources {
+impl<P: Platform> FrameImages for ViewResources<P> {
     fn read(&self, source: &str, hint: ImageSizeHint) -> Option<ImageData> {
         images::read(&self.resources, source, hint)
     }

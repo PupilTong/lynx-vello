@@ -4,15 +4,18 @@
 //! private cache with one user.
 //!
 //! Nothing here touches storage or the network. That is what makes it
-//! testable against literal header blocks, and what lets the disk tier and
-//! the transport share one answer to "fetch, revalidate, or serve".
+//! testable against literal header blocks, and what lets the byte tier and
+//! the transport share one answer to "fetch, revalidate, or serve". The
+//! record a stored response is kept as ([`StoredResponse::to_record`]) is
+//! JSON, so a [`Store`](crate::Store) holds it without knowing its shape.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use http::header::{
-    CACHE_CONTROL, DATE, ETAG, EXPIRES, HeaderMap, HeaderName, IF_MODIFIED_SINCE, IF_NONE_MATCH,
-    LAST_MODIFIED, VARY,
+    CACHE_CONTROL, DATE, ETAG, EXPIRES, HeaderMap, HeaderName, HeaderValue, IF_MODIFIED_SINCE,
+    IF_NONE_MATCH, LAST_MODIFIED, VARY,
 };
+use serde_json::{Value, json};
 
 use crate::CachePolicy;
 
@@ -179,6 +182,68 @@ impl StoredResponse {
             stored_at: now,
         }
     }
+}
+
+impl StoredResponse {
+    /// The record this response is stored as, beside the media type the
+    /// body was labelled with: `media_type`, `status`, `headers` as an
+    /// array of `[name, value]` pairs, and `stored_at` in Unix seconds.
+    ///
+    /// The key, length and last use are the [`Meta`](crate::Meta)'s and are
+    /// not repeated here. A header value that is not visible ASCII cannot be
+    /// written as a JSON string faithfully and is left out.
+    #[must_use]
+    pub fn to_record(&self, media_type: Option<&str>) -> Value {
+        json!({
+            "media_type": media_type,
+            "status": self.status,
+            "headers": self
+                .headers
+                .iter()
+                .filter_map(|(name, value)| {
+                    value.to_str().ok().map(|value| json!([name.as_str(), value]))
+                })
+                .collect::<Vec<Value>>(),
+            "stored_at": unix_seconds(self.stored_at),
+        })
+    }
+
+    /// The response and media type a [`to_record`](Self::to_record) record
+    /// holds, or `None` when the record is not one. A header pair that does
+    /// not parse is skipped rather than failing the record.
+    #[must_use]
+    pub fn from_record(value: &Value) -> Option<(Self, Option<String>)> {
+        let media_type = value
+            .get("media_type")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let status = u16::try_from(value.get("status")?.as_u64()?).ok()?;
+        let mut headers = HeaderMap::new();
+        for pair in value.get("headers")?.as_array()? {
+            let name = pair.get(0)?.as_str()?;
+            let header_value = pair.get(1)?.as_str()?;
+            if let (Ok(name), Ok(header_value)) = (
+                HeaderName::from_bytes(name.as_bytes()),
+                HeaderValue::from_str(header_value),
+            ) {
+                headers.append(name, header_value);
+            }
+        }
+        let stored_at = UNIX_EPOCH + Duration::from_secs(value.get("stored_at")?.as_u64()?);
+        Some((
+            Self {
+                status,
+                headers,
+                stored_at,
+            },
+            media_type,
+        ))
+    }
+}
+
+fn unix_seconds(time: SystemTime) -> u64 {
+    time.duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
 }
 
 /// Decides how a request with `policy` is served given the entry the cache
@@ -367,8 +432,6 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
 
 #[cfg(test)]
 mod tests {
-    use http::header::HeaderValue;
-
     use super::*;
 
     fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
@@ -598,6 +661,45 @@ mod tests {
         assert_eq!(
             plan(CachePolicy::OnlyIfCached, None, now),
             Plan::Unavailable
+        );
+    }
+
+    #[test]
+    fn a_stored_response_round_trips_through_its_record() {
+        let response = stored(
+            200,
+            &[
+                ("etag", "\"v1\""),
+                ("cache-control", "max-age=60"),
+                ("vary", "Accept"),
+                ("vary", "Accept-Encoding"),
+            ],
+            1_000_000,
+        );
+        let record = response.to_record(Some("image/png"));
+        assert_eq!(
+            StoredResponse::from_record(&record),
+            Some((response.clone(), Some("image/png".to_owned())))
+        );
+        assert_eq!(
+            StoredResponse::from_record(&response.to_record(None)),
+            Some((response, None))
+        );
+
+        let with_a_broken_header = json!({
+            "media_type": null, "status": 404, "stored_at": 7,
+            "headers": [["etag", "\"x\""], ["bad name", "v"]],
+        });
+        let (parsed, media_type) =
+            StoredResponse::from_record(&with_a_broken_header).expect("a record");
+        assert_eq!(parsed, stored(404, &[("etag", "\"x\"")], 7));
+        assert_eq!(media_type, None);
+
+        assert_eq!(StoredResponse::from_record(&json!("not a record")), None);
+        assert_eq!(
+            StoredResponse::from_record(&json!({ "status": 200, "headers": [] })),
+            None,
+            "`stored_at` is required"
         );
     }
 

@@ -19,6 +19,7 @@ bench = false
 # host (`ResourceFetcher::request_document`).
 bytes = { workspace = true }
 terminus = { workspace = true }
+vant = { workspace = true }
 # `<markdown>` (`tree::markdown`): its source parser and bare-URL autolinking.
 linkify = { workspace = true }
 pulldown-cmark = { workspace = true }

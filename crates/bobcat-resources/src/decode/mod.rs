@@ -5,15 +5,15 @@
 //! runtime, and the browser through the main thread's `Image` element —
 //! each the same decoder the platform's own image views use, with the same
 //! format coverage, and each able to downsample *during* decode so a 4000px
-//! photo shown at 200px never materialises at full size. What this module
-//! owns is the shape every platform decoder answers in, [`Bitmap`], and the
-//! one sizing rule they share.
+//! photo shown at 200px never materialises at full size. They are this
+//! crate's [`vant::ImageDecoder`]s: [`NativeDecoder`] natively and
+//! [`BrowserDecoder`] on wasm32. The shape every one answers in, [`Bitmap`],
+//! and the one sizing rule they share live in `vant::image`.
 
-use bobcat_core::ImageSizeHint;
-use bobcat_core::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat as PixelFormat};
+pub use vant::image::{Bitmap, DecodeError, target_size};
 
-#[cfg(not(target_arch = "wasm32"))]
 use crate::image_header::ImageHeader;
+use crate::mime::ImageFormat;
 
 #[cfg(target_arch = "wasm32")]
 pub(crate) mod browser;
@@ -22,65 +22,98 @@ mod gdk_pixbuf;
 #[cfg(target_os = "macos")]
 mod imageio;
 
-/// Decoded pixels: tightly packed RGBA8, at most the size that was asked
-/// for, with the image's own size beside them.
-#[derive(Clone, Debug)]
-pub struct Bitmap {
-    pub width: u32,
-    pub height: u32,
-    /// The image's intrinsic size — what layout is told — which the bitmap
-    /// is a downsampled rendition of when the two differ.
-    pub source_width: u32,
-    pub source_height: u32,
-    /// Whether the colour channels are premultiplied by alpha. `ImageIO`
-    /// produces premultiplied pixels and gdk-pixbuf straight ones; the rasterizer
-    /// composes either correctly as long as it is told which.
-    pub premultiplied: bool,
-    pub rgba: Vec<u8>,
-}
+/// The native platform decoder as a [`vant::ImageDecoder`]: [`decode`] and
+/// [`available`].
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NativeDecoder;
 
-impl Bitmap {
-    /// The bytes the pixels occupy.
-    #[must_use]
-    pub fn byte_len(&self) -> usize {
-        self.rgba.len()
+#[cfg(not(target_arch = "wasm32"))]
+impl vant::ImageDecoder for NativeDecoder {
+    /// The native decoders take the header the format sniff found; the
+    /// format itself they read from the bytes.
+    fn decode_blocking(
+        &self,
+        bytes: &[u8],
+        _format: ImageFormat,
+        header: Option<ImageHeader>,
+        max: (u32, u32),
+    ) -> Result<Bitmap, DecodeError> {
+        decode(bytes, header, max)
     }
 
-    /// The pixels as the image the compose path draws.
-    #[must_use]
-    pub fn into_image_data(self) -> ImageData {
-        ImageData {
-            data: Blob::from(self.rgba),
-            format: PixelFormat::Rgba8,
-            alpha_type: if self.premultiplied {
-                ImageAlphaType::AlphaPremultiplied
-            } else {
-                ImageAlphaType::Alpha
-            },
-            width: self.width,
-            height: self.height,
-        }
+    fn available(&self) -> Result<(), DecodeError> {
+        available()
     }
 }
 
-#[derive(Clone, Debug, thiserror::Error)]
-pub enum DecodeError {
-    /// This platform has no decoder this crate knows how to reach.
-    #[error("no platform image decoder is available: {0}")]
-    Unavailable(String),
-    /// The platform decoder does not decode this container.
-    #[error("the platform decoder does not support this image: {0}")]
-    Unsupported(String),
-    /// The bytes are not a decodable image.
-    #[error("the image could not be decoded: {0}")]
-    Malformed(String),
+/// The main thread's `Image` element as a [`vant::ImageDecoder`], reached
+/// over the port the host handed the Render Worker. Without a port every
+/// decode answers [`DecodeError::Unavailable`].
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone, Debug, Default)]
+pub struct BrowserDecoder {
+    decoder: Option<std::rc::Rc<browser::ImageDecoder>>,
 }
 
-/// The size a `source_width`x`source_height` image is decoded to under
-/// `max`: inside the bound, the image's own ratio kept, never upsampled.
-#[must_use]
-pub fn target_size(source_width: u32, source_height: u32, max: (u32, u32)) -> (u32, u32) {
-    ImageSizeHint::new(max.0, max.1).fit(source_width, source_height)
+#[cfg(target_arch = "wasm32")]
+impl BrowserDecoder {
+    /// The decoder over `port`, this Worker's end of the channel whose other
+    /// end the host's main-thread image decoder listens on
+    /// (`js/image-decoder.ts` in the `bobcat-wasm` package).
+    ///
+    /// # Errors
+    ///
+    /// When the port refuses the decoder's first message.
+    pub fn new(port: web_sys::MessagePort) -> Result<Self, String> {
+        browser::ImageDecoder::new(port).map(|decoder| Self {
+            decoder: Some(decoder),
+        })
+    }
+
+    /// The decoder with no port: every decode is unavailable.
+    #[must_use]
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    fn decoder(&self) -> Result<&browser::ImageDecoder, DecodeError> {
+        self.decoder
+            .as_deref()
+            .ok_or_else(|| DecodeError::Unavailable("no image decoder was configured".to_owned()))
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl vant::ImageDecoder for BrowserDecoder {
+    /// Blocks this Worker on the job's mailbox, for a restore. The main
+    /// thread's decoder takes the media type rather than a header.
+    fn decode_blocking(
+        &self,
+        bytes: &[u8],
+        format: ImageFormat,
+        _header: Option<ImageHeader>,
+        max: (u32, u32),
+    ) -> Result<Bitmap, DecodeError> {
+        self.decoder()?
+            .decode_blocking(bytes, format.media_type(), max)
+    }
+
+    async fn decode(
+        &self,
+        bytes: bytes::Bytes,
+        format: ImageFormat,
+        _header: Option<ImageHeader>,
+        max: (u32, u32),
+    ) -> Result<Bitmap, DecodeError> {
+        self.decoder()?
+            .decode(&bytes, format.media_type(), max)
+            .await
+    }
+
+    fn available(&self) -> Result<(), DecodeError> {
+        self.decoder().map(|_| ())
+    }
 }
 
 /// Decodes `bytes` with the platform decoder, downsampling to fit inside
@@ -176,35 +209,11 @@ fn pack_rgba(
     Some(rgba)
 }
 
-#[cfg(test)]
+/// The gdk-pixbuf helpers, which only Linux builds.
+#[cfg(all(test, unix, not(target_os = "macos")))]
 mod tests {
     use super::*;
 
-    #[test]
-    fn a_bitmap_becomes_image_data_with_its_alpha_type() {
-        let bitmap = Bitmap {
-            width: 1,
-            height: 1,
-            source_width: 8,
-            source_height: 8,
-            premultiplied: true,
-            rgba: vec![1, 2, 3, 4],
-        };
-        assert_eq!(bitmap.byte_len(), 4);
-        let image = bitmap.into_image_data();
-        assert_eq!(image.alpha_type, ImageAlphaType::AlphaPremultiplied);
-        assert_eq!((image.width, image.height), (1, 1));
-        assert_eq!(image.data.as_ref(), &[1, 2, 3, 4]);
-    }
-
-    #[test]
-    fn the_target_size_fits_inside_the_bound_without_upsampling() {
-        assert_eq!(target_size(4000, 3000, (200, 200)), (200, 150));
-        assert_eq!(target_size(100, 50, (200, 200)), (100, 50));
-        assert_eq!(target_size(0, 0, (200, 200)), (1, 1));
-    }
-
-    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn rows_pack_from_rgb_and_rgba_with_stride() {
         let rgb = [1, 2, 3, 4, 5, 6, 0, 0, 7, 8, 9, 10, 11, 12, 0, 0];
@@ -228,7 +237,6 @@ mod tests {
         );
     }
 
-    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn a_transposing_orientation_is_reconciled_from_the_decoded_shape() {
         assert_eq!(oriented_source_size((4000, 3000), (200, 150)), (4000, 3000));

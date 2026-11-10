@@ -31,7 +31,7 @@ pub enum Body {
     /// The bytes are the file's for as long as they are held, under the
     /// contract the platform's own font files are mapped with: a file
     /// rewritten in place changes under its readers, and one truncated
-    /// faults them. A file replaced by a rename — every write the disk tier
+    /// faults them. A file replaced by a rename — every write `FsStore`
     /// makes — leaves the mapping on the old contents.
     Mapped,
 }
@@ -122,7 +122,7 @@ fn map(path: &Path) -> io::Result<Bytes> {
         return Ok(Bytes::from_owner(Mapping(mapping)));
     }
     // SAFETY: the mapping is read-only, and nothing in this process writes
-    // a mapped file in place: the disk tier, the one writer here, replaces
+    // a mapped file in place: `FsStore`, the one writer here, replaces
     // its bodies by a rename. Another process changing the file in
     // place is the hazard every mapped font carries, the platform's own
     // included; `Body::Mapped` states it for its callers.

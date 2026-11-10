@@ -167,9 +167,9 @@ Rules every tier built on a `Store` follows:
 
 ```rust
 pub trait ImageDecoder: Threaded {
-    /// Decodes at most `max` large, blocking. `None` from a decoder that
-    /// cannot block (the browser's main-thread `Image`, outside the mailbox
-    /// path).
+    /// Decodes at most `max` large, blocking. A decoder that cannot block
+    /// (the browser's main-thread `Image`, outside the mailbox path)
+    /// answers `DecodeError::Unavailable`.
     fn decode_blocking(&self, bytes: &[u8], format: ImageFormat,
                        header: Option<ImageHeader>, max: (u32, u32))
         -> Result<Bitmap, DecodeError>;
@@ -191,11 +191,18 @@ pub trait Platform: 'static {
     type Fetch: Fetch;
     type Store: Store;      // `NoStore` for a host with no persistent tier
     type Decoder: ImageDecoder;
-    fn fetch(&self) -> &Self::Fetch;
-    fn store(&self) -> Option<&Self::Store>;
-    fn decoder(&self) -> &Self::Decoder;
+    /// Taken apart once, when the resource system is built: the byte tier
+    /// owns its Store.
+    fn into_parts(self) -> (Self::Fetch, Option<Self::Store>, Self::Decoder);
+    /// The budget for the byte tier over `Store`; the tier clamps it to the
+    /// Store's quota. `u64::MAX` means "the quota, or unbounded".
+    fn byte_budget(&self) -> u64 { u64::MAX }
 }
 ```
+
+The resource system (`Resources::with_platform`) reads `byte_budget`, takes
+the parts, and opens a `ByteCache` over the Store unless the `Fetch` owns its
+HTTP cache.
 
 `bobcat-resources` ships `NativePlatform` (`NativeFetch`, `FsStore`,
 `NativeDecoder`) and, on wasm32, `BrowserPlatform` (`BrowserFetch`, `NoStore`,
@@ -210,12 +217,17 @@ the traits and passes its own `Platform`.
   `Plan`, `plan`), plus the JSON (de)serialisation of a `StoredResponse` for a
   `Meta::record`.
 - `vant::byte_cache::ByteCache<S: Store>` — the HTTP byte tier: what
-  `cache/disk.rs` and the cache half of `Transports::http_blocking` do today,
-  generic over the Store. API: `open(store, budget)`, `lookup(key, policy, now)
-  -> Lookup` (`UseStored(Meta, Bytes)` / `Fetch { conditional: Option<HeaderMap>,
-  revalidating: bool, store: bool }` / `Unavailable`), `store(key, media_type,
-  &Response, now) -> bool`, `refreshed(key, &not_modified_headers, now) ->
-  Option<(Meta, Bytes)>`, `map_body(key)`, `used_bytes`, `len`, `clear`.
+  `cache/disk.rs` and the cache half of `Transports::http_blocking` did,
+  generic over the Store. API: `open(store, budget)`, `lookup(key, policy, now,
+  read) -> Lookup` (`UseStored(Entry, Bytes)` / `Fetch { conditional:
+  Option<HeaderMap>, revalidating: bool, store: bool }` / `Unavailable`), where
+  `Read::{Owned, Mapped}` says how the body is handed over (`Mapped` asks
+  `Store::map_body` first and verifies the mapping against `get_meta`) and
+  `Entry` is the index's view (`Meta`, media type, `StoredResponse`);
+  `store(key, media_type, &Response, now) -> bool`, `refreshed(key,
+  &not_modified_headers, now, read) -> Option<(Entry, Bytes)>`,
+  `map_body(key)`, `entry(key)`, `remove`, `clear`, `used_bytes`, `len`,
+  `budget`, `store_ref`.
 - `vant::image` — `ImageSizeHint`, `Bitmap`, `DecodeError`, `target_size`,
   `wants_refinement`, `bounded` (against a `max_renderable` the caller passes;
   `vant` does not know the GPU limit).
@@ -244,15 +256,19 @@ the traits and passes its own `Platform`.
    `NativeDecoder` over `decode/{imageio,gdk_pixbuf}.rs`, `BrowserFetch` over
    `transport/browser.rs`, `BrowserDecoder` over `decode/browser.rs`;
    `Resources<P: Platform>`, `ViewResources<P>`, `Shared<P>`;
-   `Resources::new(config, platform, wakeup)`; `ResourcesConfig` loses
-   `disk_cache` and `image_port` (they are the platform's). `Transports`
-   becomes the dispatch over registry → `data:` → `ByteCache`/`Fetch`.
+   `Resources::with_platform(config, platform, notes, wakeup)`, and
+   `Resources::new(config, wakeup)` over the target's `DefaultPlatform`
+   (`NativePlatform` / `BrowserPlatform`, no persistent store) so that every
+   `LynxView<ViewResources>` signature keeps compiling through the default
+   type parameter; `ResourcesConfig` loses `disk_cache` and `image_port`
+   (they are the platform's). `Transports` becomes the dispatch over registry
+   → `data:` → `ByteCache`/`Fetch`.
    Behaviour is unchanged: the same tiers, the same policies, the same
    notes.
-4. Embedders: `bobcat-cli` builds `NativePlatform::new(DiskCacheConfig::…)`,
-   `bobcat-server` `NativePlatform::new(None)`, `bobcat-wasm`
-   `BrowserPlatform::new(image_port)`; `LynxView<ViewResources>` becomes
-   `LynxView<ViewResources<NativePlatform>>` etc.
+4. Embedders: `bobcat-cli` builds `NativePlatform::new(Some(&disk))`,
+   `bobcat-server` keeps `Resources::new` (no disk cache, as before),
+   `bobcat-wasm` builds `BrowserPlatform::new(Some(image_port))`.
+   `LynxView<ViewResources>` is `LynxView<ViewResources<DefaultPlatform>>`.
 5. CI: `-p vant` joins the wasm32 clippy list; AGENTS.md's workspace map and
    the `bobcat-resources` section describe the split; this document is the
    design reference.
