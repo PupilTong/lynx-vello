@@ -25,6 +25,12 @@
 //!   semantics itself, the browser's `fetch`, gets no byte tier: its HTTP cache plays that role.
 //!   Stylesheet responses and pending loads are shared by URL within each resource scope, including
 //!   preload hints.
+//! - **The code cache's Store side.** The engine looks compiled script bytecode up in, and files
+//!   what it compiled into, `vant`'s process-wide artifact tier
+//!   ([`vant::artifact::Artifacts::global`]). When the platform hands over an artifact Store —
+//!   natively the `code` directory inside the cache directory — this crate preloads the stored
+//!   bytecode of a script's text before it delivers that text, and writes what the engine compiled
+//!   back once per embedder turn ([`vant::artifact::ArtifactCache`]).
 //! - **Platform image decoding.** No codec is compiled in: `ImageIO` on macOS, gdk-pixbuf on Linux,
 //!   the main thread's `Image` element in the browser, each asked to downsample during decode
 //!   ([`decode`]).
@@ -108,9 +114,10 @@ pub use store::FsStore;
 pub use transport::BrowserFetch;
 #[cfg(not(target_arch = "wasm32"))]
 pub use transport::NativeFetch;
-use vant::Platform;
+use vant::artifact::{ArtifactCache, ArtifactConfig, Artifacts, SourceDigest};
 use vant::byte_cache::ByteCache;
 pub use vant::{CachePolicy, data_url, image_header, mime, preprocess};
+use vant::{Parts, Platform, Store};
 
 use crate::executor::Wakeup;
 use crate::images::{Completion, ImageState};
@@ -126,21 +133,35 @@ pub type DefaultPlatform = platform::NativePlatform;
 #[cfg(target_arch = "wasm32")]
 pub type DefaultPlatform = platform::BrowserPlatform;
 
-/// The byte tier's directory and budget, natively: what
-/// [`NativePlatform::new`] opens an [`FsStore`] over.
+/// The directory inside [`DiskCacheConfig::dir`] the code cache keeps its
+/// entries in: a Store of its own, which the byte tier's scan leaves alone.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) const CODE_CACHE_DIR: &str = "code";
+
+/// The disk cache's directory and budgets, natively: what
+/// [`NativePlatform::new`] opens an [`FsStore`] over for the byte tier, and
+/// another over `dir/code` for the code cache.
 #[derive(Clone, Debug)]
 pub struct DiskCacheConfig {
     pub dir: std::path::PathBuf,
+    /// The byte tier's budget.
     pub budget_bytes: u64,
+    /// The code cache's budget, in stored entry bytes.
+    pub code_budget_bytes: u64,
 }
 
 impl DiskCacheConfig {
     /// The platform's per-user cache directory for Bobcat, or `None` when
-    /// the environment does not name one.
+    /// the environment does not name one. The code cache gets its default
+    /// budget, [`ArtifactConfig::DEFAULT_BUDGET_BYTES`] (64 MiB).
     #[cfg(not(target_arch = "wasm32"))]
     #[must_use]
     pub fn at_default_location(budget_bytes: u64) -> Option<Self> {
-        store::default_cache_dir().map(|dir| Self { dir, budget_bytes })
+        store::default_cache_dir().map(|dir| Self {
+            dir,
+            budget_bytes,
+            code_budget_bytes: ArtifactConfig::DEFAULT_BUDGET_BYTES,
+        })
     }
 }
 
@@ -402,10 +423,71 @@ pub(crate) type Handle<T> = Rc<T>;
 /// The handle jobs hold on [`Shared`].
 pub(crate) type SharedHandle<P> = Handle<Shared<P>>;
 
+/// The code cache's persistent half: the [`ArtifactCache`] over the
+/// platform's artifact Store, shared by every scope of one system.
+///
+/// The engine fills the process-wide memory tier ([`Artifacts::global`]);
+/// this preloads a script's stored bytecode into it before the script is
+/// delivered ([`Self::preload`]) and writes what the engine compiled back
+/// ([`flush_code_cache`]). When the last scope lets go, whatever is still
+/// queued is written once more, synchronously.
+pub(crate) struct CodeCache<S: Store> {
+    cache: ArtifactCache<S>,
+    /// Whether a flush is queued or running, so a turn starts at most one.
+    flushing: std::sync::atomic::AtomicBool,
+}
+
+impl<S: Store> CodeCache<S> {
+    fn open(store: S, budget: u64) -> Self {
+        Self {
+            cache: ArtifactCache::open(
+                Arc::clone(Artifacts::global()),
+                store,
+                bobcat_core::script_engine_id(),
+                ArtifactConfig {
+                    budget_bytes: budget,
+                    ..ArtifactConfig::default()
+                },
+                transport::now(),
+            ),
+            flushing: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// Admits every stored artifact of `text` to the memory tier, for a
+    /// script about to be delivered as exactly `text`. A text the engine
+    /// would not look up ([`bobcat_core::MIN_CACHED_SOURCE_BYTES`]) is not
+    /// hashed.
+    pub(crate) fn preload(&self, text: &str) {
+        if text.len() >= bobcat_core::MIN_CACHED_SOURCE_BYTES {
+            self.cache
+                .preload(SourceDigest::of(text.as_bytes()), transport::now());
+        }
+    }
+}
+
+impl<S: Store> Drop for CodeCache<S> {
+    fn drop(&mut self) {
+        self.cache.flush(transport::now());
+    }
+}
+
+impl<S: Store> fmt::Debug for CodeCache<S> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CodeCache")
+            .field("cache", &self.cache)
+            .finish_non_exhaustive()
+    }
+}
+
 /// The part of the system every job may touch. It holds no piece of the
 /// [`executor::Executor`], so no job can keep the fetcher's runtime alive.
 pub(crate) struct Shared<P: Platform> {
     transports: Transports<P>,
+    /// The code cache's Store side, when the platform handed over an
+    /// artifact Store; shared by every scope, like the byte tier.
+    code: Option<Handle<CodeCache<P::Store>>>,
     /// The base every specifier resolves against, and the URLs a plain fetch
     /// has completed for. Behind an `Arc` of its own because
     /// [`ResourceFetcher::fetch_probe`] hands a reader of it to the engine
@@ -641,9 +723,9 @@ impl<P: Platform> Resources<P> {
     /// Builds the system over `platform`. `notes` are what building the
     /// platform left out (the second half of [`NativePlatform::new`]'s
     /// answer); they open [`Resources::take_notes`]. The byte tier is opened
-    /// over the platform's store, under its
-    /// [`byte_budget`](Platform::byte_budget), unless its transport applies
-    /// HTTP cache semantics itself.
+    /// over the platform's byte Store, under that Store's budget, unless its
+    /// transport applies HTTP cache semantics itself; the code cache over
+    /// its artifact Store, whatever the transport.
     ///
     /// `wakeup` is called whenever a load completes between painter turns —
     /// natively from the executor's driver thread, in the browser from the
@@ -671,11 +753,16 @@ impl<P: Platform> Resources<P> {
         notes: Vec<String>,
         wakeup: impl Fn() + Send + Sync + 'static,
     ) -> Self {
-        let budget = platform.byte_budget();
-        let (fetch, store, decoder) = platform.into_parts();
-        let bytes = store
+        let Parts {
+            fetch,
+            decoder,
+            bytes,
+            artifacts,
+        } = platform.into_parts();
+        let bytes = bytes
             .filter(|_| !vant::Fetch::owns_http_cache(&fetch))
-            .map(|store| Handle::new(ByteCache::open(store, budget)));
+            .map(|tier| Handle::new(ByteCache::open(tier.store, tier.budget)));
+        let code = artifacts.map(|tier| Handle::new(CodeCache::open(tier.store, tier.budget)));
         let (completions, receiver) = tokio::sync::mpsc::unbounded_channel();
         let shared = SharedHandle::new(Shared {
             transports: Transports::new(
@@ -688,6 +775,7 @@ impl<P: Platform> Resources<P> {
                 Handle::new(fetch),
                 bytes,
             ),
+            code,
             fetches: Arc::new(FetchIndex::with_base(config.base_url.clone())),
             initial_decode_bound: config.initial_decode_bound.max(1),
             downsample_ratio: config.downsample_ratio.max(1.0),
@@ -731,6 +819,7 @@ impl<P: Platform> Resources<P> {
         Self {
             shared: SharedHandle::new(Shared {
                 transports: self.shared.transports.for_new_scope(),
+                code: self.shared.code.clone(),
                 // A fresh index, like the fresh registry beside it: a new
                 // scope has fetched nothing and has no base yet.
                 fetches: Arc::new(FetchIndex::default()),
@@ -960,6 +1049,49 @@ impl<P: Platform> Resources<P> {
     }
 }
 
+/// Writes what the engine compiled since the last flush to the code cache's
+/// Store, when there is a Store, something is queued and no flush is already
+/// queued or running. Asked once per embedder turn, from
+/// [`ResourceFetcher::service_images`]: when nothing is queued it costs one
+/// atomic load.
+///
+/// Natively the write runs on the blocking pool, and a panic in it is a
+/// note; in the browser it runs here, the Store being synchronous there too.
+fn flush_code_cache<P: Platform>(resources: &Resources<P>) {
+    use std::sync::atomic::Ordering;
+
+    let Some(code) = resources.shared.code.as_ref() else {
+        return;
+    };
+    if !code.cache.memory().has_pending() || code.flushing.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let shared = SharedHandle::clone(&resources.shared);
+        let handle = resources.executor.handle();
+        resources.executor.spawn(async move {
+            let Some(code) = shared.code.clone() else {
+                return;
+            };
+            let written = executor::blocking(&handle, "code cache flush", {
+                let code = Handle::clone(&code);
+                move || code.cache.flush(transport::now())
+            })
+            .await;
+            code.flushing.store(false, Ordering::Release);
+            if let Err(message) = written {
+                shared.note(message);
+            }
+        });
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        code.cache.flush(transport::now());
+        code.flushing.store(false, Ordering::Release);
+    }
+}
+
 fn preprocess_fetched(
     fetched: Fetched,
     url: &Url,
@@ -1032,6 +1164,7 @@ impl<P: Platform> ResourceFetcher for ViewResources<P> {
 
     fn service_images(&self) {
         images::service(&self.resources);
+        flush_code_cache(&self.resources);
     }
 
     /// This view's answer to "already fetched?", read from either engine

@@ -354,6 +354,14 @@ impl Artifacts {
             .collect()
     }
 
+    /// Forgets the artifact `engine` derived for `key`, and drops it from
+    /// the queue if it was waiting there. What a Store holds is untouched.
+    pub fn remove(&self, engine: EngineId, key: ArtifactKey) {
+        let mut state = self.state();
+        state.remove((engine, key));
+        self.sync_pending(&state);
+    }
+
     /// Forgets every artifact and the queue.
     pub fn clear(&self) {
         let mut state = self.state();
@@ -899,6 +907,25 @@ mod tests {
             "parts are length-prefixed"
         );
         assert_ne!(Variant::of(&[b"abc"]), Variant::of(&[b"ab", b"c"]));
+    }
+
+    #[test]
+    fn remove_forgets_one_artifact_and_its_place_in_the_queue() {
+        let memory = Artifacts::new(1 << 20);
+        let (kept, removed) = (key_of("a", "module"), key_of("b", "module"));
+        memory.insert(ENGINE, kept, bytes(b"kept"));
+        memory.insert(ENGINE, removed, bytes(b"removed"));
+        memory.remove(ENGINE, removed);
+        memory.remove(ENGINE, key_of("never", "module"));
+        assert!(memory.contains(ENGINE, kept));
+        assert!(!memory.contains(ENGINE, removed));
+        assert_eq!(memory.used_bytes(), 4);
+        let pending = memory.take_pending();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].1, kept);
+        memory.remove(ENGINE, kept);
+        assert!(memory.is_empty());
+        assert!(!memory.has_pending());
     }
 
     #[test]

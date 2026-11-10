@@ -118,6 +118,14 @@ impl Store for FsStore {
         let mut records: Vec<PathBuf> = Vec::new();
         for item in fs::read_dir(&self.dir)? {
             let item = item?;
+            // A directory is never an entry, and never removed: another Store
+            // may live in one (the code cache's `code` directory is inside the
+            // byte tier's). Its name alone would not protect it — `code` has
+            // no extension and so happens to be skipped below, but a
+            // directory whose name has a dot would reach the removal.
+            if item.file_type()?.is_dir() {
+                continue;
+            }
             let path = item.path();
             let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
                 continue;
@@ -392,6 +400,32 @@ mod tests {
         assert!(!dir.file("k", "bin").exists());
         assert!(!dir.file("k", "json").exists());
         store.delete("k").expect("deleting nothing is not an error");
+    }
+
+    #[test]
+    fn a_scan_leaves_subdirectories_alone() {
+        let dir = TempDir::new();
+        let store = FsStore::open(&dir.0).expect("open");
+        store.put(&meta("k", 6), b"pixels").expect("put");
+        // The code cache's Store, inside this one's directory, and a
+        // directory whose name looks like one of this Store's files.
+        let code = FsStore::open(dir.0.join("code")).expect("open the inner store");
+        code.put(&meta("inner", 5), b"bytes").expect("put inside");
+        let dotted = dir.0.join(format!("{}.json", hash_key("dotted")));
+        fs::create_dir_all(dotted.join("nested")).expect("a dotted directory");
+
+        let scanned = store.scan().expect("scan");
+        assert_eq!(
+            scanned
+                .iter()
+                .map(|meta| meta.key.as_str())
+                .collect::<Vec<_>>(),
+            ["k"]
+        );
+        assert!(dotted.join("nested").is_dir());
+        let (_, body) = code.get("inner").expect("read").expect("still present");
+        assert_eq!(&body[..], b"bytes");
+        assert_eq!(code.scan().expect("scan inside").len(), 1);
     }
 
     #[test]

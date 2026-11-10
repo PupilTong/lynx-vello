@@ -721,3 +721,233 @@ fn an_install_holds_its_container_path_and_nothing_beside_it() {
     assert!(!held("other:///page/card.web.bundle/root.js"));
     drop(release);
 }
+
+/// The code cache's Store side. The memory tier is the process's own
+/// (`Artifacts::global`), which every test in this binary shares, so every
+/// test here uses script text no other test delivers and asserts only about
+/// its own keys.
+mod code_cache {
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::AtomicU64;
+
+    use bytes::Bytes;
+    use vant::artifact::{
+        ArtifactCache, ArtifactConfig, ArtifactKey, Artifacts, SourceDigest, Variant,
+    };
+
+    use super::*;
+    use crate::{DiskCacheConfig, NativePlatform, flush_code_cache};
+
+    /// Serializes the tests whose system has a code store, each of which
+    /// flushes at least when it drops: a flush takes the whole process's
+    /// queue, so one test's flush could write another's artifact to its own
+    /// directory.
+    static FLUSHES: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new() -> Self {
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "bobcat-resources-code-cache-{}-{}",
+                std::process::id(),
+                COUNTER.fetch_add(1, Ordering::Relaxed)
+            ));
+            let _ = std::fs::remove_dir_all(&path);
+            Self(path)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn disk(dir: &Path) -> DiskCacheConfig {
+        DiskCacheConfig {
+            dir: dir.to_owned(),
+            budget_bytes: 1 << 20,
+            code_budget_bytes: 1 << 20,
+        }
+    }
+
+    fn disk_resources(dir: &Path) -> (Resources, Vec<String>) {
+        let (platform, notes) = NativePlatform::new(Some(&disk(dir)));
+        let resources = Resources::with_platform(
+            ResourcesConfig {
+                base_url: Some(Url::parse("app:///page/main.js").unwrap()),
+                log_to_stderr: false,
+                ..ResourcesConfig::default()
+            },
+            platform,
+            notes.clone(),
+            || {},
+        );
+        (resources, notes)
+    }
+
+    /// Script text over the cache's threshold that only `test` delivers.
+    fn script_text(test: &str) -> String {
+        format!(
+            "globalThis.{} = true;\n{}",
+            test.replace('-', "_"),
+            "// padding\n".repeat(128)
+        )
+    }
+
+    fn key_of(text: &str, variant: &str) -> ArtifactKey {
+        ArtifactKey {
+            source: SourceDigest::of(text.as_bytes()),
+            variant: Variant::of(&[b"test", variant.as_bytes()]),
+        }
+    }
+
+    async fn deliver(resources: &Resources, url: &str, text: &str) {
+        resources
+            .register(url, text.to_owned(), Some("text/javascript"))
+            .unwrap();
+        match result(load(resources, url, SourceKind::Script))
+            .await
+            .unwrap()
+        {
+            LoadedSource::Module { source, .. } => assert_eq!(source, text),
+            source => panic!("expected a script, got {source:?}"),
+        }
+    }
+
+    /// Writes `key`'s artifact into the code cache under `dir` the way a
+    /// flush would, without the process's tier.
+    fn plant(dir: &Path, key: ArtifactKey, artifact: &'static [u8]) {
+        let memory = Arc::new(Artifacts::new(1 << 20));
+        memory.insert(
+            bobcat_core::script_engine_id(),
+            key,
+            Bytes::from_static(artifact),
+        );
+        let cache = ArtifactCache::open(
+            memory,
+            crate::FsStore::open(dir.join("code")).unwrap(),
+            bobcat_core::script_engine_id(),
+            ArtifactConfig::default(),
+            std::time::SystemTime::now(),
+        );
+        assert_eq!(cache.flush(std::time::SystemTime::now()), 1);
+    }
+
+    /// Whether the code cache under `dir` holds `key`, read through a tier
+    /// of its own.
+    fn stored(dir: &Path, key: ArtifactKey) -> bool {
+        let memory = Arc::new(Artifacts::new(1 << 20));
+        let cache = ArtifactCache::open(
+            Arc::clone(&memory),
+            crate::FsStore::open(dir.join("code")).unwrap(),
+            bobcat_core::script_engine_id(),
+            ArtifactConfig::default(),
+            std::time::SystemTime::now(),
+        );
+        cache.preload(key.source, std::time::SystemTime::now());
+        memory.contains(bobcat_core::script_engine_id(), key)
+    }
+
+    #[tokio::test]
+    async fn a_scripts_bytecode_survives_into_a_second_resource_system_over_the_same_cache_directory()
+     {
+        let _flushes = FLUSHES.lock().await;
+        let dir = TempDir::new();
+        let text = script_text("survives-into-a-second-system");
+        let key = key_of(&text, "survives");
+        let engine = bobcat_core::script_engine_id();
+        let global = Artifacts::global();
+        {
+            let (resources, _) = disk_resources(&dir.0);
+            deliver(&resources, "app:///page/big.js", &text).await;
+            // What the engine does after compiling the delivered text.
+            global.insert(engine, key, Bytes::from_static(b"compiled"));
+            flush_code_cache(&resources);
+            let code = resources.shared.code.as_ref().expect("a code cache");
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while code.flushing.load(Ordering::Acquire) {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("the flush ends");
+            assert!(stored(&dir.0, key), "the flush wrote the artifact");
+        }
+        global.remove(engine, key);
+
+        let (resources, _) = disk_resources(&dir.0);
+        assert!(!global.contains(engine, key));
+        deliver(&resources, "app:///page/big.js", &text).await;
+        assert_eq!(
+            global.get(engine, key).as_deref(),
+            Some(&b"compiled"[..]),
+            "delivering the text preloaded its artifact"
+        );
+        global.remove(engine, key);
+    }
+
+    #[tokio::test]
+    async fn only_the_delivered_texts_artifacts_are_preloaded() {
+        let _flushes = FLUSHES.lock().await;
+        let dir = TempDir::new();
+        let delivered = script_text("only-the-delivered-text-delivered");
+        let other = script_text("only-the-delivered-text-other");
+        let (delivered_key, other_key) = (key_of(&delivered, "a"), key_of(&other, "a"));
+        plant(&dir.0, delivered_key, b"delivered");
+        plant(&dir.0, other_key, b"other");
+        let engine = bobcat_core::script_engine_id();
+
+        let (resources, _) = disk_resources(&dir.0);
+        deliver(&resources, "app:///page/delivered.js", &delivered).await;
+        assert!(Artifacts::global().contains(engine, delivered_key));
+        assert!(!Artifacts::global().contains(engine, other_key));
+        Artifacts::global().remove(engine, delivered_key);
+    }
+
+    #[tokio::test]
+    async fn a_script_under_the_threshold_is_not_preloaded() {
+        let _flushes = FLUSHES.lock().await;
+        let dir = TempDir::new();
+        let text = "globalThis.a_script_under_the_threshold = true;";
+        assert!(text.len() < bobcat_core::MIN_CACHED_SOURCE_BYTES);
+        let key = key_of(text, "small");
+        plant(&dir.0, key, b"small");
+
+        let (resources, _) = disk_resources(&dir.0);
+        deliver(&resources, "app:///page/small.js", text).await;
+        assert!(!Artifacts::global().contains(bobcat_core::script_engine_id(), key));
+    }
+
+    #[tokio::test]
+    async fn without_a_disk_cache_there_is_no_code_store_and_delivery_is_unchanged() {
+        let resources = resources();
+        assert!(resources.shared.code.is_none());
+        let text = script_text("without-a-disk-cache");
+        deliver(&resources, "app:///page/plain.js", &text).await;
+        flush_code_cache(&resources);
+    }
+
+    #[tokio::test]
+    async fn a_code_directory_that_cannot_be_opened_is_a_note_and_the_system_runs() {
+        let dir = TempDir::new();
+        std::fs::create_dir_all(&dir.0).unwrap();
+        // A file where the directory would be.
+        std::fs::write(dir.0.join("code"), b"not a directory").unwrap();
+
+        let (resources, notes) = disk_resources(&dir.0);
+        assert!(
+            notes.iter().any(|note| note.contains("the code cache at")),
+            "{notes:?}"
+        );
+        assert!(
+            !notes.iter().any(|note| note.contains("the disk cache at")),
+            "the byte tier opened: {notes:?}"
+        );
+        assert!(resources.shared.code.is_none());
+        let text = script_text("a-code-directory-that-cannot-be-opened");
+        deliver(&resources, "app:///page/runs.js", &text).await;
+    }
+}

@@ -1067,6 +1067,43 @@ and a page whose import finished inside a sibling's checkpoint settles what its
 own realm owes. Comparing that generation against the one recorded at the end
 of the page's own last entry keeps a page's own bumps from waking it.
 
+**The code cache** (`code_cache.rs`; `docs/resource-cache-design.md`, "PR2").
+Every text a host answers a realm with — a module completion
+(`ScriptEngine::complete_module`, which MTS, BTS, Workers, a worker's root and
+a `ShadowRealm` child all go through) and a synchronous load
+(`register_synchronous_loader`) — is compiled through `RealmCodeCache`, which
+looks the bytecode up in `vant::artifact::Artifacts::global()` at that moment,
+in memory and synchronously, and otherwise asks the bridge to keep the
+compile's. The lookup is the engine's and not the fetcher's because only the
+engine knows what the compile bakes in. The rules:
+
+- The key is the `SourceDigest` of exactly the text handed over, and a
+  `Variant` of what else the bytes depend on: for a module its name and
+  whether the runtime strips source text; for a CommonJS wrapper its response
+  URL, its parameter list and the strip flag. A module's response URL
+  (`import.meta.url`) is set after the read and is no part of the key. The
+  `EngineId` is `bobcat_core::script_engine_id()`, the bridge's
+  `bytecode_engine_id()`.
+- A text under `MIN_CACHED_SOURCE_BYTES` (1 KiB) is compiled as without a
+  cache and never hashed, as is every text while the tier's budget is 0. JSON
+  compiles nothing. Built-in modules registered on the runtime are not host
+  answers and take no part.
+- What the bridge kept is filed at the end of the operation that compiled it:
+  `ScriptEngine::checkpoint` and the job drain call `file_compiled`, which
+  empties `Context::take_compiled` into the tier, where the resource system's
+  flush finds it.
+- The bridge names a compile by what it was compiled under, and a module is
+  compiled when first linked, possibly operations after its text arrived. The
+  realm therefore keeps, per name, the digest of the text it handed over, and
+  files a compile only while every text handed over under that name was the
+  same one; two different texts under one name file nothing in that realm
+  (`Expected::Ambiguous`). Bytecode is never filed under a text it might not be
+  the compile of.
+- A hit changes nothing observable: exports, `import.meta.url`, stack frames
+  and `Function.prototype.toString` are the text's. Bytecode that cannot be
+  read falls back to the text inside the bridge and the working compile
+  replaces it.
+
 A `.web.bundle`'s `lepusCode.root` or raw XML main body becomes a real ESM at
 its resolved entry URL — a container's at `<U>/root.js` — and it is
 `bobcat-source` that gives it named imports
@@ -2916,8 +2953,11 @@ type and depends only on `bytes`, `http`, `url`, `serde_json`, `thiserror`,
   host cannot block, async `fetch`, `owns_http_cache`, `map_file`), `Store`
   (synchronous persistent bytes with `Meta`, `estimate`, `touch`, `volatility`
   — `Durable`, `PurgedWhenIdle`, `EvictableAnytime` — and `map_body`),
-  `ImageDecoder`, and `Platform`, the bundle of the three an embedder hands
-  over (`into_parts`, `byte_budget`). Capabilities are traits with associated
+  `ImageDecoder`, and `Platform`, the bundle an embedder hands over:
+  `into_parts` answers `Parts { fetch, decoder, bytes, artifacts }`, the last
+  two each an optional `Tier { store, budget }` — the HTTP byte tier's Store
+  and the derived-artifact tier's, separate namespaces of one Store type.
+  Capabilities are traits with associated
   types, never `dyn`; `Threaded` is the cfg'd marker that requires `Send + Sync`
   natively and nothing on wasm32. `NoStore` is the `Store` of a host with no
   persistent tier.
@@ -2961,8 +3001,8 @@ example of what the protocol expects, not part of the protocol. The policy it
 applies is `vant`'s; what is here is the orchestration — `Resources<P:
 vant::Platform>`, `ViewResources<P>`, the job executor, the image and source
 pipelines, the registry — and the reference adapters: `NativePlatform`
-(`NativeFetch` over libcurl and `file:`, `FsStore` over a cache directory,
-`NativeDecoder` over ImageIO/gdk-pixbuf) and, on wasm32, `BrowserPlatform`
+(`NativeFetch` over libcurl and `file:`, `FsStore` over a cache directory and
+another over its `code` subdirectory, `NativeDecoder` over ImageIO/gdk-pixbuf) and, on wasm32, `BrowserPlatform`
 (`BrowserFetch` over the Render Worker's `fetch`, `NoStore`, `BrowserDecoder`
 over the main thread's `Image`). `Resources::new` builds the target's
 `DefaultPlatform` with no persistent store; an embedder with a disk cache, its
@@ -3026,6 +3066,30 @@ the encoded bytes of what it cannot restore. Stylesheet responses, including
 pending loads and failures, are shared by resolved URL within a resource
 scope. Preload hints populate that same cache; registration changes
 invalidate the affected URLs.
+
+**The code cache's Store side.** The engine reads and fills the process-wide
+`vant::artifact::Artifacts` (`crates/bobcat-core`, "The code cache"); this
+crate puts persistence behind it when the platform's `Parts::artifacts` is
+present, in a `vant::artifact::ArtifactCache` shared by every scope of one
+system. Two things happen. `sources::prepare` **preloads** before it delivers
+a script: on the pool thread that prepared the text, it admits every stored
+variant of exactly that text to the memory tier, so the realm's synchronous
+lookup hits; a text under `bobcat_core::MIN_CACHED_SOURCE_BYTES` is not
+hashed. `ResourceFetcher::service_images` **flushes** once per embedder turn:
+when the tier has artifacts queued and no flush is in flight (one atomic load
+otherwise), one blocking-pool job natively — inline in the browser — writes
+them, and the last scope's drop writes what is still queued. Natively the
+Store is an `FsStore` at `<DiskCacheConfig::dir>/code` under
+`DiskCacheConfig::code_budget_bytes` (64 MiB at the default location); it
+opens and fails separately from the byte tier, each failure a note, and
+`FsStore::scan` leaves directories alone so the outer Store never sweeps the
+inner one. A system with no disk cache — `Resources::new` — has no Store, and
+its realms still share bytecode through the memory tier for the life of the
+process. Several systems or processes over one directory are safe: entries
+are content-addressed and each file is written by temp-and-rename. A body
+lands before its record, so another Store's scan that runs between the two
+sweeps the entry as a broken half; that costs one later recompile and nothing
+else, because the index is a hint and every hit is verified.
 
 **Platform image decoding** (raster images; SVG is parsed, below): no codec
 is compiled in — `ImageIO` on macOS

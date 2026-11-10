@@ -28,8 +28,8 @@ pub mod preprocess;
 pub(crate) mod test_store;
 
 pub use platform::{
-    Estimate, Fetch, ImageDecoder, Meta, NoStore, Platform, Request, Response, Store, StoreError,
-    Threaded, Volatility,
+    Estimate, Fetch, ImageDecoder, Meta, NoStore, Parts, Platform, Request, Response, Store,
+    StoreError, Threaded, Tier, Volatility,
 };
 
 /// What a load may do with the caches on its way.
