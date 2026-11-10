@@ -176,7 +176,7 @@ Why these are all the forms tasm 0.0.53 writes, in the lynx sources:
 
 Programs the PrimJS compiler in tasm 0.0.53 rejects are not in the corpus: `#x in obj`
 (unexpected token), class `static` blocks (invalid property name), `&&=`,
-`||=` and `??=` (unexpected token), the RegExp `d` flag (invalid flags) and
+`||=` and `??=` (unexpected token), the RegExp `d` and `v` flags (invalid flags) and
 `\p{...}` property escapes (invalid escape). A call in a class field
 initialiser (`a = f();`, instance or static) crashes the encoder process with
 SIGSEGV, so `class-fields.js` and `class-static-fields.js` avoid one.
