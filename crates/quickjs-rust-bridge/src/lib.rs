@@ -38,12 +38,26 @@
 //! themselves — a clone is a copy the realm made, not a handle on anything in
 //! it — and a value the serializer refuses (a function, a `Symbol`, a `Map`)
 //! throws in the realm at the call rather than reaching the host at all.
+//!
+//! [`bytecode_abi`] describes the fork's bytecode format as data generated
+//! from its sources, for writers of that format outside the engine. Module
+//! bytecode from such a writer enters a realm through
+//! [`Context::complete_module_bytecode`], which reads it with the fork's
+//! verifying read; [`Context::compile_regexp_bytecode`] is the regular
+//! expression compiler such a writer needs.
 
 #[allow(
     unsafe_code,
     reason = "this private module implements the allocator ABI used by the C translation units"
 )]
 mod allocator;
+pub mod bytecode_abi;
+#[cfg(test)]
+#[allow(
+    unsafe_code,
+    reason = "the table tests call the generated C check through the FFI"
+)]
+mod bytecode_tests;
 mod ffi;
 #[allow(
     unsafe_code,
@@ -211,6 +225,13 @@ mod implementation {
         Interrupted,
         ExecutionTimeout,
         Engine,
+        /// Bytecode a verifying read refused: it is not well-formed, a
+        /// function's stack depth cannot be computed from it (an invalid
+        /// opcode, a truncated instruction, a jump outside the function, a
+        /// stack underflow, different depths where paths meet), or it is
+        /// not the kind of value the call needs. See
+        /// [`Context::complete_module_bytecode`].
+        BytecodeRejected,
     }
 
     /// Sanitized source coordinates from a JavaScript error.
@@ -2285,6 +2306,224 @@ mod implementation {
             let bytecode = unsafe { std::slice::from_raw_parts(bytes.as_ptr(), length) }.to_vec();
             unsafe { ffi::qjs_bytecode_free(self.raw().as_ptr(), bytes.as_ptr()) };
             Ok(bytecode)
+        }
+
+        /// Copies `length` bytes the shim `js_malloc`'d out of `bytes` and
+        /// frees them; `None` when the shim returned NULL.
+        fn take_engine_bytes(&self, bytes: *mut u8, length: usize) -> Option<Vec<u8>> {
+            let bytes = NonNull::new(bytes)?;
+            // SAFETY: the shim wrote `length` bytes at `bytes`, which nothing
+            // else holds.
+            let copied = unsafe { std::slice::from_raw_parts(bytes.as_ptr(), length) }.to_vec();
+            // SAFETY: `bytes` came from this context's `js_malloc` and is
+            // freed once, here.
+            unsafe { ffi::qjs_bytecode_free(self.raw().as_ptr(), bytes.as_ptr()) };
+            Some(copied)
+        }
+
+        /// The pending exception of a verifying read, as
+        /// [`ErrorKind::BytecodeRejected`] unless it is running out of
+        /// memory.
+        fn bytecode_rejection(&self, phase: ErrorPhase) -> Error {
+            let mut error = capture_exception(self.raw(), phase);
+            if error.kind != ErrorKind::OutOfMemory {
+                error.kind = ErrorKind::BytecodeRejected;
+            }
+            error
+        }
+
+        /// Compiles script source text — a global script, not a module — to
+        /// bytecode, the way [`Self::compile_module_bytecode`] compiles a
+        /// module. Nothing is evaluated, and nothing stays in the realm.
+        ///
+        /// For tooling and tests: no entry of this crate runs script
+        /// bytecode. A syntax error is [`ErrorKind::Syntax`].
+        pub fn compile_script_bytecode(&self, name: &str, source: &str) -> Result<Vec<u8>, Error> {
+            self.reclaim();
+            let name = CString::new(name).map_err(|_| {
+                Error::bridge(
+                    ErrorKind::InvalidInput,
+                    ErrorPhase::RegisterModule,
+                    "script name contains a NUL byte",
+                )
+            })?;
+            // `JS_Eval` reads one byte past the length it is given, which
+            // must be a NUL: the parser's lookahead ends on it.
+            let mut terminated = Vec::with_capacity(source.len() + 1);
+            terminated.extend_from_slice(source.as_bytes());
+            terminated.push(0);
+            let mut length = 0usize;
+            // SAFETY: the source and the name live through the call, which
+            // copies what it keeps; the bytes are taken below.
+            let bytes = unsafe {
+                ffi::qjs_context_compile_script_bytecode(
+                    self.raw().as_ptr(),
+                    terminated.as_ptr(),
+                    source.len(),
+                    name.as_ptr(),
+                    &raw mut length,
+                )
+            };
+            self.take_engine_bytes(bytes, length).ok_or_else(|| {
+                capture_exception_with_syntax(self.raw(), ErrorPhase::RegisterModule, true)
+            })
+        }
+
+        /// Reads `bytecode` the way [`Self::complete_module_bytecode`] does
+        /// — `JS_ReadObject` with the fork's `JS_READ_OBJ_VERIFY` — and
+        /// answers what was read written out again (`JS_WriteObject`). In
+        /// the answer every function's stack size is the one the read
+        /// computed from its instructions; for bytes the fork itself wrote
+        /// it equals the one they carried.
+        ///
+        /// For tooling and tests: it says whether the engine accepts bytes,
+        /// and with what stack sizes, without running anything. A module
+        /// read here stays loaded in this realm under the name its bytes
+        /// carry, so a caller checking several modules uses a realm for
+        /// nothing else. A refusal is [`ErrorKind::BytecodeRejected`].
+        pub fn verify_bytecode(&self, bytecode: &[u8]) -> Result<Vec<u8>, Error> {
+            self.reclaim();
+            let mut length = 0usize;
+            // SAFETY: the input lives through the call, which reads it and
+            // keeps nothing of it; the bytes are taken below.
+            let bytes = unsafe {
+                ffi::qjs_context_verify_bytecode(
+                    self.raw().as_ptr(),
+                    bytecode.as_ptr(),
+                    bytecode.len(),
+                    &raw mut length,
+                )
+            };
+            self.take_engine_bytes(bytes, length)
+                .ok_or_else(|| self.bytecode_rejection(ErrorPhase::RegisterModule))
+        }
+
+        /// Reads script bytecode with verification and evaluates it, for this
+        /// crate's tests of the verifying read.
+        #[cfg(test)]
+        pub(crate) fn evaluate_script_bytecode(&self, bytecode: &[u8]) -> Result<Value, Error> {
+            self.reclaim();
+            let guard = self.begin();
+            // SAFETY: the input lives through the call, which keeps nothing
+            // of it; the script runs under the guard.
+            let raw = unsafe {
+                ffi::qjs_context_evaluate_script_bytecode(
+                    self.raw().as_ptr(),
+                    bytecode.as_ptr(),
+                    bytecode.len(),
+                )
+            };
+            let result = self.value_or_exception(raw, ErrorPhase::Evaluate);
+            guard.finish(result, ErrorPhase::Evaluate)
+        }
+
+        /// Compiles a regular expression to the fork's regular expression
+        /// bytecode: the bytes a `RegExp` with this pattern and these flags
+        /// carries, and the string a regular expression literal puts in its
+        /// function's constant pool after its pattern (`JS_CompileRegExp`).
+        ///
+        /// `pattern` is UTF-16 code units, as a JavaScript string holds
+        /// them, because that is what the compiler reads: a pattern may
+        /// contain unpaired surrogates, which a `&str` cannot carry and
+        /// which compile differently from U+FFFD. `flags` is the flag
+        /// letters (`dgimsuvy`), each at most once. The answer is the
+        /// compiler's bytes exactly, including bytes at or above 0x80. An
+        /// invalid pattern or invalid flags is [`ErrorKind::Syntax`].
+        pub fn compile_regexp_bytecode(
+            &self,
+            pattern: &[u16],
+            flags: &str,
+        ) -> Result<Vec<u8>, Error> {
+            self.reclaim();
+            let mut length = 0usize;
+            // SAFETY: both inputs live through the call, which copies them
+            // into engine strings; the bytes are taken below.
+            let bytes = unsafe {
+                ffi::qjs_context_compile_regexp(
+                    self.raw().as_ptr(),
+                    pattern.as_ptr(),
+                    pattern.len(),
+                    flags.as_ptr().cast(),
+                    flags.len(),
+                    &raw mut length,
+                )
+            };
+            self.take_engine_bytes(bytes, length).ok_or_else(|| {
+                capture_exception_with_syntax(self.raw(), ErrorPhase::ConstructValue, true)
+            })
+        }
+
+        /// Supplies a realm-local module as module bytecode, the way
+        /// [`Self::complete_module`] supplies one as text: `url` is its
+        /// `import.meta.url` and the base its imports resolve against, and
+        /// an import of `name` in this realm gets this module.
+        ///
+        /// The bytes may come from a writer this process does not trust.
+        /// They are read here, once, with the fork's verifying read
+        /// (`JS_READ_OBJ_VERIFY`): every count, length and index the reader
+        /// uses is checked against the input, only the value kinds compiled
+        /// code contains are accepted, and every function's stack size is
+        /// computed from its instructions — the size the bytes carry is
+        /// ignored, so a writer need not compute one. Bytes the read refuses
+        /// are [`ErrorKind::BytecodeRejected`], as are bytes that read as
+        /// something other than a module, and leave nothing in the realm.
+        /// The read does not check instruction operands (local, argument,
+        /// closure and constant indices) or how values flow between
+        /// instructions, so bytes from an untrusted writer must also have
+        /// passed the writer's own checks of those before they run.
+        ///
+        /// The module's name is the one in its bytes; it is what the
+        /// realm's module list holds and the base its relative imports are
+        /// normalized from (through `url`, as for any realm-local source),
+        /// so it should be `name`. The module is read when this is called,
+        /// not when it is imported, and it then counts as a module the
+        /// realm may already have linked: a synchronous `require` of it
+        /// from inside a running module body is refused until it has been
+        /// evaluated, where a text source would compile inside the
+        /// `require`. The bytes are not kept.
+        ///
+        /// A name this realm has already been answered for is left as it
+        /// was, and nothing is read, as with [`Self::complete_module`]; a
+        /// name the runtime has is [`ErrorKind::InvalidInput`].
+        pub fn complete_module_bytecode(
+            &self,
+            name: &str,
+            url: &str,
+            bytecode: &[u8],
+        ) -> Result<(), Error> {
+            self.reclaim();
+            let c_string = |text: &str| {
+                CString::new(text).map_err(|_| {
+                    Error::bridge(
+                        ErrorKind::InvalidInput,
+                        ErrorPhase::RegisterModule,
+                        "module name or URL contains a NUL byte",
+                    )
+                })
+            };
+            let name = c_string(name)?;
+            let url = c_string(url)?;
+            // SAFETY: all buffers live through the call, which copies the
+            // name and the URL and reads the bytecode without keeping it.
+            let status = unsafe {
+                ffi::qjs_context_complete_module_bytecode(
+                    self.raw().as_ptr(),
+                    name.as_ptr(),
+                    url.as_ptr(),
+                    bytecode.as_ptr(),
+                    bytecode.len(),
+                )
+            };
+            match status {
+                0 | -5 => Ok(()),
+                -2 => Err(Error::bridge(
+                    ErrorKind::InvalidInput,
+                    ErrorPhase::RegisterModule,
+                    "module name is already registered",
+                )),
+                -6 | -7 => Err(self.bytecode_rejection(ErrorPhase::RegisterModule)),
+                _ => Err(capture_exception(self.raw(), ErrorPhase::RegisterModule)),
+            }
         }
 
         /// Retries suspended imports after completing their sources. This

@@ -256,6 +256,46 @@ unsafe extern "C" {
         out_length: *mut usize,
     ) -> *mut u8;
     pub(crate) fn qjs_bytecode_free(context: *mut QjsContext, bytes: *mut u8);
+    pub(crate) fn qjs_context_compile_script_bytecode(
+        context: *mut QjsContext,
+        source: *const u8,
+        source_length: usize,
+        name: *const c_char,
+        out_length: *mut usize,
+    ) -> *mut u8;
+    pub(crate) fn qjs_context_verify_bytecode(
+        context: *mut QjsContext,
+        bytecode: *const u8,
+        length: usize,
+        out_length: *mut usize,
+    ) -> *mut u8;
+    #[cfg(test)]
+    pub(crate) fn qjs_context_evaluate_script_bytecode(
+        context: *mut QjsContext,
+        bytecode: *const u8,
+        length: usize,
+    ) -> *mut QjsValue;
+    pub(crate) fn qjs_context_compile_regexp(
+        context: *mut QjsContext,
+        pattern: *const u16,
+        pattern_length: usize,
+        flags: *const c_char,
+        flags_length: usize,
+        out_length: *mut usize,
+    ) -> *mut u8;
+    pub(crate) fn qjs_context_complete_module_bytecode(
+        context: *mut QjsContext,
+        name: *const c_char,
+        url: *const c_char,
+        bytecode: *const u8,
+        length: usize,
+    ) -> c_int;
+    /// Defined in the generated unit that compiles `quickjs.c`
+    /// (`build/bytecode_abi.rs`): -1 when a new runtime's built-in atoms
+    /// have the texts and kinds of [`crate::bytecode_abi::ATOMS`], else the
+    /// first atom number that differs (-2: no runtime).
+    #[cfg(test)]
+    pub(crate) fn qjs_bytecode_abi_atom_mismatch() -> c_int;
     pub(crate) fn qjs_runtime_reserve_module_prefix(
         runtime: *mut QjsRuntime,
         prefix: *const c_char,
