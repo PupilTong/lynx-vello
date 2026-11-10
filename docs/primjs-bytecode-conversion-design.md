@@ -210,14 +210,14 @@ flowchart TD
     D --> E[Expand each instruction<br/>table or template]
     E --> F[Synthesize function and module records<br/>var_ref_idx, closure_type, vardefs]
     F --> G[Lay out: old pc to new pc,<br/>rewrite jump offsets]
-    G --> V[Slot-kind and instruction rules<br/>gosub addresses, catch offsets]
-    V --> I[Re-encode pc2line,<br/>recompile RegExp literals]
+    G --> I[Re-encode pc2line,<br/>recompile RegExp literals]
     I --> J[Write fork bytes]
-    J --> H[Fork reads with verification<br/>stack depth, sets stack_size]
+    J --> V[Bridge: read, verify every rule, write<br/>bytecode::check]
+    V --> H[Fork reads with verification<br/>stack depth, sets stack_size]
     H --> K[Module registered in the realm]
     B -. reject .-> X[ConvertError]
     E -. reject .-> X
-    V -. reject .-> X
+    V -. reject .-> Y
     H -. reject .-> Y[Load error]
     style H stroke-width:3px
     style V stroke-width:3px
@@ -226,7 +226,8 @@ flowchart TD
 
 The marked steps are the ones that are not a per-instruction rewrite: C needs
 the whole function tree, and V and H together are what makes the output safe
-to run (§4.7). Everything above J is the converter, in Rust; H is in the fork.
+to run (§4.7). Everything down to J is the converter, in `bobcat-source`; V is
+in the bridge crate, in Rust; H is in the fork.
 
 ### 4.1 Decode
 
@@ -340,8 +341,10 @@ iteration, so the name maps directly.
   array of `arg_count + var_count` entries with `JS_ATOM_NULL` names.
   `scope_next` and `has_scope` are only read by a direct `eval`, which §4.10
   rejects.
-- `js_mode`: strict carries over; async moves from bit 4 to bit 2; strip,
-  bigint and math are dropped.
+- `js_mode`: strict carries over; every other bit is dropped, the async bit
+  included. The fork sets `JS_MODE_ASYNC` on a running frame, not in a record:
+  in a record it makes a normal frame's variable-reference lookup treat the C
+  stack as an async frame, and the verifier refuses it.
 - `is_direct_or_indirect_eval`: 0.
 
 ### 4.6 Layout
@@ -383,37 +386,67 @@ against their tables. Without the flag the reader behaves as before.
 
 **The function alone is not enough for hostile input.** It was written to
 size a frame for code the compiler just produced, and it relies on that
-compiler's habits. Reading the interpreter for this document found the
-following assumptions that it does not check. Each is a memory-safety issue or
-a process abort if violated:
+compiler's habits. The interpreter assumes far more of its input than stack
+depth: that the value `ret` pops is an address a `gosub` pushed (the source
+comments "should have a different tag to avoid security flaw"), that a
+catch offset stays in the slot where it was pushed, that `fclosure`'s pool
+entry is function bytecode, that `regexp` receives bytecode the engine
+compiled, that generator instructions run only in generator frames, that
+enumerated operands are in range, and so on.
 
-| Assumption | Where the interpreter relies on it | Needed rule |
-| --- | --- | --- |
-| The value `ret` pops is an address a `gosub` pushed | `OP_ret` jumps to any in-buffer integer on the stack (`:19213`; the source comments "should have a different tag to avoid security flaw") | track the slot a `gosub` pushes; it may be discarded but not copied, moved or consumed by another instruction, and `ret` requires it on top |
-| A catch-offset value stays in the slot where `catch`/`for_of_start` put it | the unwinder scans the stack for the tagged value and resumes at its label with whatever depth that leaves (`:20946`) | same slot tracking: only `drop`, `nip`, `nip1`, `nip_catch`, `iterator_close` and the iteration instructions may touch it; never stored to a variable |
-| A `catch` label is not position 0 | offset 0 marks an iterator triple to close, not a handler | reject |
-| `for_of_next`'s operand addresses the iterator triple | reads `sp[-3 - operand]` unchecked (`:19249`) | depth at least `3 + operand`, and the slots are a `for_of_start` triple |
-| `fclosure`'s pool entry is function bytecode | `js_closure` takes the pointer without a tag test (`:17634`) | check the entry's tag |
-| `regexp` receives a pattern and bytecode the engine compiled | executed by the regexp interpreter as is | the instruction must directly follow two `push_const` of entries the converter itself recompiled (§4.9), with no jump target between; this one is the converter's to keep, since only it knows which strings it compiled |
-| Generator instructions run only in generator frames | `await`, `yield`, `yield_star`, `async_yield_star`, `initial_yield`, `return_async` leave through a path that does not close variable references of a stack frame (`:20967`) | allow each only in a function of the matching `func_kind` |
-| Enumerated operands are in range | `special_object` reaches `abort()` on an unknown value | check the range of every enumerated operand |
-| Local, argument, closure and pool operands are inside their counts | indexed without a test | checked on decode (§2.4, §4.1); kept by construction |
-| A jump target is an instruction start | the stack walk and the interpreter decode from any offset; landing inside an atom operand executes bytes that were never turned into atoms | every target is checked against the instruction starts |
-| Record fields are consistent | a captured variable's `var_ref_idx` is only `assert`ed below `var_ref_count`; vardefs are dereferenced whenever `var_ref_count > 0`; `closure_type` values 6 and 7 outside a module, or any value above 7, reach `abort()` or a null variable reference in `js_closure2`; a module's import and export `var_idx` must name closure variables of the matching module types | checked on the output record |
-| The instruction stream decodes linearly | the reader's atom fixup walks it instruction by instruction | kept by construction |
+**The rules live in Rust, in the bridge (ruling 8).**
+`quickjs_rust_bridge::bytecode` holds a model of the fork's format, a reader, a
+writer and `verify`. Its module documentation carries the rules table (32
+rules, each with what the interpreter would do without it) and is the
+reference; this section only summarizes. The verifier walks each function's
+control flow along the same edges as `compute_stack_size`, plus the edge from
+`ret` back to each `gosub`, and keeps per reached instruction the depth, the
+kinds of the slots that are not plain values, the locals that can hold the
+uninitialized marker, and a copy of the fork walk's own depth and catch
+position. The rule classes:
 
-This list comes from reading part of the interpreter, not all of it. Before
-the converter may accept bytes from a source that is not trusted, every opcode
-case needs the same reading. That audit is the same size as the semantic one
-in §5 and is tracked with it (§7).
+- **Stack and slots**: depth, merges, return addresses, catch offsets,
+  iterator markers and raw function bytecode on the stack.
+- **Frames**: which instructions may run in normal, generator, async and
+  module-linking frames.
+- **Liveness**: `catch`, `gosub` and `with_*` jump forward only, because the
+  interpreter polls its interrupt handler only on `goto`, `if_*` and calls, and
+  a loop closed any other way cannot be stopped by an execution limit.
+- **Leaks**: three iteration instructions overwrite or drop a slot without
+  freeing it, so the slot must hold the marker or a known `undefined`; a leak
+  is an abort when the runtime is freed.
+- **The uninitialized marker**: a value read without a check from a variable
+  that can hold the marker is tracked, and only instructions that test its
+  tag may take it.
+- **Operands, records and module records**: ranges, enumerations, closure
+  types by position, captured-variable indices, global bindings, the module
+  function's shape.
+- **Regular expressions**: the bytecode string of a `regexp` must equal what
+  the engine compiles for the pattern and the flags in its header.
 
-The added rules live in the converter (ruling 8): a pass in Rust over each
-output function, before the bytes are written. It walks control flow the way
-`compute_stack_size` does and carries, per stack slot, one of three kinds:
-ordinary value, `gosub` address, catch offset. Two walks therefore exist, the
-fork's for depth and the converter's for kinds, and they must agree on every
-branch kind; §7's third item tests that agreement on the fork's own output.
-The fork patch stays the small refactor described above.
+`Context::complete_module_bytecode` runs the reader, the verifier and the
+writer on its input and hands the *written* bytes to the fork's verifying
+read, so the C reader sees exactly the program that passed, and no caller can
+load module bytecode that skipped the rules. The converter produces its output
+through the same model and may call `verify` itself for an earlier error.
+
+How the rules were arrived at: a first list from reading the interpreter;
+then every opcode case and every consumer of a record field was read and
+tabulated; then mutated bytecode that passed the checks was executed, and each
+crash, abort or hang became a rule with a regression test. Six holes were
+found that way (a value dropped without being freed by `for_await_of_next`, a
+module's linking frame left with references open, a backward `catch` that no
+execution limit could stop, `define_class` without a parent over a live
+object, a global declaration named by the null atom, an initializing store
+into an undeclared global's parked reference). With the final rules, 7.3
+million mutants, 2.6 million of them executed, and 150 thousand under
+AddressSanitizer ran without a fault; every program the fork compiles from the
+corpus, the bridge's tests and 12,700 files of `node_modules` is accepted.
+
+What the rules do not cover is listed at the end of that module's
+documentation: a direct `eval`'s record flags, regexp bytecode beyond equality
+with the engine's own output, and an out-of-memory failure inside a module's
+linking prologue (which the fork's own compiler output has too).
 
 ### 4.8 Debug information
 
@@ -472,7 +505,7 @@ Let `N` be the input size in bytes and `C` the closure entries of §4.3.
 | pc2line | O(N) | O(table) |
 | RegExp | one compile per literal | |
 | Write | O(N + C) | output buffer |
-| Slot-kind pass (converter) | O(N + S), `S` the special slots live at each reached instruction, summed; kinds are kept as a sparse list of the non-ordinary slots, which try/finally and iteration nesting bound | that list per reached instruction |
+| Rules pass (bridge) | O(N + S), `S` the non-plain slots live at each reached instruction, summed; kinds are kept as a sparse list, which try/finally and iteration nesting bound | that list per reached instruction |
 | Verification on read (fork) | O(N); each reached instruction is visited once | a depth and a catch position per output byte, freed after the read |
 
 Total: O(N + C) time, O(N + C) memory, in a fixed number of passes. `C` is
@@ -511,35 +544,48 @@ to `quickjs-rust-bridge`, which owns the C build. `bobcat-source` depends on
 a global script whose runtime names are globals of its context. In this
 engine every card body is an ES module whose first line imports those names
 (`MTS_CHUNK_PREAMBLE`, `BTS_CHUNK_PREAMBLE`), and a global-props update
-replaces a live module binding. The converter keeps that contract by writing
-a module record around the converted top-level function. It already builds
-that function's closure table (§4.3), so the mapping is a choice of entry
-type per free name:
+replaces a live module binding. The converter keeps that contract.
 
-| Free name in the PrimJS script | Closure entry in the module function |
-| --- | --- |
-| imported by the realm's preamble | `JS_CLOSURE_MODULE_IMPORT`, with an import entry and a module request (`bobcat:runtime`, `bobcat:element`, `bobcat:bts-runtime`) |
-| one the background preamble declares `undefined` (`window`, `document`, …) | a module-local constant initialized to `undefined` |
-| declared by the script itself (`define_var`, `define_func`) | `JS_CLOSURE_GLOBAL_DECL`, as in a script: a script's top-level declarations are properties of the global object, and other sections may read them |
-| anything else | `JS_CLOSURE_GLOBAL` |
+The fork runs a module function twice, once in a normal frame to link
+(`this === true`) and once as an async function to evaluate, and requires it
+to be strict; the verifier holds it to the compiler's shape for both. A
+script's top-level function is a normal, possibly sloppy function that returns
+a completion value, so it is not turned into the module function. The module
+function is a fixed sequence written by the converter, and the converted
+script function is its one child:
 
-The preamble lists are `bobcat-core`'s constants; the converter takes the
-names from them and holds no copy.
+```
+push_this; if_false L; return_undef        ; linking: nothing to initialize
+L: get_var globalThis                      ; a script's top-level `this`
+   fclosure <converted script function>
+   call_method 0                           ; the completion value
+   <store to the default export, or drop>
+   undefined; return_async
+```
 
-Three things a script has and a module function does not:
+This keeps the script's own strictness, its `this`, and its `return`s as they
+are. The module function owns the top-level closure table, and the script
+function reaches it through closure references (§4.3 with one more level):
 
-- **Completion value.** A PrimJS global script returns its completion value
-  (the `<ret>` local, visible in §2.1's fingerprint). The source path turns
-  that value into a default export for a `main-thread` section and for a
-  Lynx-target background body (`export default <body>`,
-  `crates/bobcat-source/src/page.rs`, `bts_module_source`), and discards it
-  for a root entry. The converter does the same at each top-level `return`:
-  store to the default-export binding, or `drop`.
-- **`this`.** A script's top-level `this` is the global object, a module's is
-  `undefined`. A top-level `push_this` becomes a read of `globalThis`.
-- **Prologue.** The fork calls a module function once with `this === true` to
-  initialize hoisted bindings and return (`:34511`); the converter emits that
-  test at the start.
+| Free name in the PrimJS script | Module function's entry | Reached from the script by |
+| --- | --- | --- |
+| imported by the realm's preamble | `JS_CLOSURE_MODULE_IMPORT`, with an import entry and a module request (`bobcat:runtime`, `bobcat:element`, `bobcat:bts-runtime`) | `JS_CLOSURE_REF`; reads are `get_var_ref_check`, a write is the read-only error |
+| one the background preamble declares `undefined` (`window`, `document`, …) | a module-local constant initialized to `undefined` | `JS_CLOSURE_REF`, as above |
+| declared by the script itself (`define_var`, `define_func`) | `JS_CLOSURE_GLOBAL_DECL`: a script's top-level declarations are properties of the global object, and other sections may read them | `JS_CLOSURE_GLOBAL_REF` and the `get_var`/`put_var` family |
+| anything else | `JS_CLOSURE_GLOBAL` | `JS_CLOSURE_GLOBAL_REF` and the `get_var`/`put_var` family |
+
+A name the script declares wins over the preamble's list. The preamble lists
+are `bobcat-core`'s constants; the converter takes the names from them and
+holds no copy.
+
+One difference from a script follows: global declarations are instantiated
+when the module's closure is created, at link time, not when the script
+starts to run, and a redeclaration error is a link failure.
+
+The completion value becomes the default export for a `main-thread` section
+and for a Lynx-target background body, as the source path does
+(`export default <body>`, `crates/bobcat-source/src/page.rs`,
+`bts_module_source`), and is dropped for a root entry.
 
 A named Lepus chunk is registered today as a plain script that the realm
 compiles as a function body over the preamble's names. Its bytecode form is
@@ -559,9 +605,9 @@ integration step.
    takes the pattern as UTF-16 code units because a lone surrogate compiles
    differently from U+FFFD.
 3. Fork: `JS_READ_OBJ_VERIFY` (§4.7); bridge: `Context::complete_module_bytecode`,
-   which supplies a realm-local module as owned bytes, reads them at once with
-   the flag and answers `ErrorKind::BytecodeRejected` for bytes the read
-   refuses. `Runtime::register_module_bytecode` is unchanged and still for
+   which supplies a realm-local module as owned bytes, checks them with
+   `bytecode::check`, reads the result with the flag and answers
+   `ErrorKind::BytecodeRejected` for bytes either refuses. `Runtime::register_module_bytecode` is unchanged and still for
    build-time bytes only.
 4. For tooling and tests: `Context::compile_script_bytecode` and
    `Context::verify_bytecode`.
@@ -575,11 +621,9 @@ name the module will be registered under.
 **Caching.** Conversion output depends on the input bytes, the name it is
 registered under, and the fork build. It can be kept under a key of those
 (content hash, name, engine build identity), so a bundle is converted once
-per engine build. The verifying read covers stack depth and the reader's own
-safety, not the rules of §4.7 that live in the converter. Cached bytes are
-therefore either trusted as this process's own output, or read back into the
-fork-format model and passed through the converter's checks again before the
-fork reads them; which of the two is decided with the cache (§11 step 5).
+per engine build. `complete_module_bytecode` checks every rule on whatever
+bytes it is given, so cached bytes are verified again on each load and the
+cache does not have to be trusted.
 
 ## 7. Verification plan
 
@@ -660,10 +704,12 @@ Given by the user on 2026-11-10.
 7. **A PrimJS build may be used as a test-time tool** (§7). It is not linked
    into the engine.
 
-8. **The rules beyond stack depth live in the converter**, in Rust, as a pass
-   over its own output; the fork exports only the stack computation. This was
-   asked after ruling 6, because §4.7 found that hostile input needs more
-   than `compute_stack_size` checks.
+8. **The rules beyond stack depth live in Rust, not in the fork patch.** This
+   was asked after ruling 6, because §4.7 found that hostile input needs more
+   than `compute_stack_size` checks. As built they are in the bridge crate
+   (`quickjs_rust_bridge::bytecode`), which the converter writes through and
+   which `complete_module_bytecode` enforces on every load; the fork patch
+   computes stack sizes and makes its own reader safe on arbitrary bytes.
 
 ## 11. Order of work
 
@@ -673,11 +719,11 @@ Each step stands alone and is useful without the next.
    tests, including the packed header of §2.5. Makes real bundles inspectable;
    converts nothing.
 2. Fork patches: the verifying read (stack depth) and the regexp compile
-   export; bridge entries for both and the generated tables. Tested on
+   export; bridge entries for both and the generated tables; the fork-format
+   model, reader, writer and the rules of §4.7 in the bridge. Tested on
    bytecode the fork itself wrote (§7, third item).
 3. The converter for scripts without generators, classes or RegExp, as a
    module; the differential harness with the PrimJS test-time build.
-4. Templates for generators and async iteration; RegExp recompile; pc2line;
-   the slot-kind pass and the instruction rules of §4.7.
+4. Templates for generators and async iteration; RegExp recompile; pc2line.
 5. Engine integration for both threads: registration of converted modules in
    place of `ConvertError::CodeCacheBundle`, the chunk path, and the cache.
