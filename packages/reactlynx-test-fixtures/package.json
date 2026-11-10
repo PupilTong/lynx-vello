@@ -5,9 +5,10 @@
   "type": "module",
   "description": "ReactLynx source fixtures and bundle generators for Bobcat integration tests.",
   "scripts": {
-    "build": "pnpm build:production && pnpm build:development",
+    "build": "pnpm build:production && pnpm build:development && pnpm build:bytecode",
     "build:production": "NODE_ENV=production DEBUG=lynx rsbuild build --no-env --mode production",
     "build:development": "NODE_ENV=development DEBUG=lynx rsbuild build --no-env --mode development",
+    "build:bytecode": "node scripts/bytecode-bundles.ts",
     "test:type": "tsc -p tsconfig.json"
   },
   "dependencies": {

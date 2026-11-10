@@ -25,7 +25,9 @@ defaults. The package scripts invoke the public `rsbuild build` CLI once in
 production mode and once in development mode. No script creates a compiler or
 imports an internal build-tool entry point.
 Both commands set `NODE_ENV` explicitly so the fixture matrix and compiler
-use the same mode.
+use the same mode. A third step, `build:bytecode`, runs
+`scripts/bytecode-bundles.ts` with Node after both; see
+[PrimJS bytecode bundles](#primjs-bytecode-bundles).
 
 The default build produces eight native production pages, three native development
 variants and twenty-eight web pages. Each native environment has its own
@@ -120,3 +122,91 @@ stay out of version control.
 
 Lazy fixtures remain available as source inputs for later work. Their external
 bundle loading is not part of the current runtime integration suite.
+
+## PrimJS bytecode bundles
+
+`scripts/bytecode-bundles.ts` (`pnpm build:bytecode`, the last step of
+`build`) writes native bundles whose JavaScript is PrimJS bytecode, for tests
+of the converter in `docs/primjs-bytecode-conversion-design.md`. It calls
+`@lynx-js/tasm`'s native encoder directly and stops with an error on any
+platform where that encoder is not shipped (it is shipped for macOS and x64
+Linux). Everything goes to `dist/bytecode/`, which the step deletes and
+rewrites; the outputs of the Rsbuild steps are not changed.
+
+### Language corpus
+
+`bytecode-corpus/` holds one plain script per language topic. Every program
+follows one protocol: it assigns a string to `globalThis.__result`, either
+synchronously or from a promise job, so a harness runs the script, drains
+pending jobs and reads that global. Programs use no host API (no `console`,
+timers, `lynx`, modules or `eval`) and report caught errors by `name`, never
+by message.
+
+Each program is encoded four times, as `dist/bytecode/corpus/<program>/<variant>.lynx.bundle`.
+Every bundle is a fiber-architecture LepusNG page (`enableFiberArch`,
+`useLepusNG`, `dsl: 'react_nodiff'`) with
+`experimental_encodeQuickjsBytecode: true`, and carries the program twice: as
+the main-thread script (`ROOT_LEPUS`) and as the background script
+`/app-service.js` (`JS_BYTECODE`, inside the 24-byte packed header). The
+build checks the header of both on every run.
+
+| Variant | `targetSdkVersion` | `debugInfoOutside` | `ROOT_LEPUS` | `JS_BYTECODE` |
+| --- | --- | --- | --- | --- |
+| `sdk-2.13` | `2.13` | `true` | version 1; debug blocks name the atom `__lepusNG_function_id__` and a function id, no pc2line | version 1, no debug blocks (`LEPUS_EVAL_FLAG_STRIP`) |
+| `sdk-2.14` | `2.14` | `true` | version 9, `NEW_DEBUGINFO_FLAG` | version 9, `NEW_DEBUGINFO_FLAG` |
+| `sdk-4.1` | `4.1` | `true` | version 9, `NEW_DEBUGINFO_FLAG` and `STRIP_VARINFO_FLAG` | as `sdk-2.14` |
+| `inline-debug` | `4.1` | `false` | version 1, inline debug info (filename, line, pc2line) | as `sdk-2.14` |
+
+Why these are all the forms tasm 0.0.53 writes, in the lynx sources:
+
+- The main-thread compile sets the PrimJS context's target SDK only when
+  `debugInfoOutside` is on (`core/runtime/lepus/bytecode_generator.cc`,
+  `GenerateBytecodeForQuickContext`), and PrimJS writes version 9 only when a
+  target SDK of 2.14 or later is set (`JS_IsNewVersion`). So version 9 always
+  comes with external debug info, and without `debugInfoOutside` the main
+  thread is version 1 with inline debug info at any target SDK.
+- The background compile decides by target SDK alone
+  (`template_binary_writer.cc`, `EncodeJsBytecode`): below 2.14 stripped,
+  otherwise external debug info. `STRIP_VARINFO_FLAG` does not appear there
+  at 4.1: PrimJS sets it only for a LepusNG context (`JS_ShouldStripVarInfo`),
+  and the bytes show the background compile does not use one.
+- `enableOptLepusNGBytecode` (`LEPUS_SetOptLepusNGPackageSize`) produced the
+  same bytes as without it for every corpus program in every variant, so it is
+  not a variant.
+
+Programs the PrimJS compiler in tasm 0.0.53 rejects are not in the corpus: `#x in obj`
+(unexpected token), class `static` blocks (invalid property name), `&&=`,
+`||=` and `??=` (unexpected token), the RegExp `d` flag (invalid flags) and
+`\p{...}` property escapes (invalid escape). A call in a class field
+initialiser (`a = f();`, instance or static) crashes the encoder process with
+SIGSEGV, so `class-fields.js` and `class-static-fields.js` avoid one.
+
+### ReactLynx fixtures
+
+For every native environment (`target: 'lynx'` in its provenance), the step
+re-encodes the retained `.lynx/<entry>/tasm.json` and checks that the bytes
+equal the page Rsbuild emitted (`nativePageSha256`) before
+`scripts/source-bundles.ts` replaced it. That page, with main-thread bytecode
+and background source, is written as
+`dist/bytecode/fixtures/<fixture>/<entry>.lynx.bundle`; the same input with
+`experimental_encodeQuickjsBytecode: true` is written as
+`<entry>.js-bytecode.lynx.bundle`, with a `JS_BYTECODE` section in place of
+`JS`. Lazy chunks are not re-encoded; they are the ones `dist/index.rs` lists.
+
+### Rust registry
+
+The step writes `dist/bytecode/index.rs`, which `bytecode.rs` includes as
+`PROGRAMS` (name, source text, one bundle per `Variant`) and `FIXTURES` (name,
+both pages). A test includes it the way it includes `fixtures.rs`:
+
+```rust
+#[path = "../../../packages/reactlynx-test-fixtures/bytecode.rs"]
+mod bytecode;
+
+for program in bytecode::PROGRAMS {
+    for variant in bytecode::Variant::ALL {
+        let bundle: &[u8] = program.bundle(variant);
+        // run program.source, run the converted bundle, compare __result
+    }
+}
+```
