@@ -29,11 +29,11 @@ const VALUE_RECURSION_LIMIT: usize = 128;
 // program. Source-based external bundles still carry this inert root section;
 // accepting only the exact empty program avoids silently discarding real MTS
 // code that cannot be decompiled.
-const EMPTY_ROOT_LEPUS_INLINE_DEBUG: &[u8] = &[
+pub(crate) const EMPTY_ROOT_LEPUS_INLINE_DEBUG: &[u8] = &[
     1, 0, 13, 0, 6, 0, 158, 1, 0, 1, 0, 1, 0, 0, 2, 1, 160, 1, 0, 0, 0, 194, 40, 94, 1, 12, 0, 0,
     128, 128, 128, 144, 128, 128, 128, 128, 128, 1,
 ];
-const EMPTY_ROOT_LEPUS_EXTERNAL_DEBUG: &[u8] = &[
+pub(crate) const EMPTY_ROOT_LEPUS_EXTERNAL_DEBUG: &[u8] = &[
     9, 204, 1, 176, 202, 1, 0, 0, 0, 0, 13, 0, 6, 0, 158, 1, 0, 1, 0, 1, 0, 0, 2, 1, 160, 1, 0, 0,
     0, 194, 40, 94, 1, 0,
 ];
@@ -41,7 +41,7 @@ const EMPTY_ROOT_LEPUS_EXTERNAL_DEBUG: &[u8] = &[
 // Verified by encoding an external source-only
 // bundle with no lepusCode at engineVersion 4.1.0; this is still an exact
 // inert-program fingerprint, not permission to skip executable bytecode.
-const EMPTY_ROOT_LEPUS_EXTERNAL_DEBUG_TASM_0_0_53: &[u8] = &[
+pub(crate) const EMPTY_ROOT_LEPUS_EXTERNAL_DEBUG_TASM_0_0_53: &[u8] = &[
     9, 204, 1, 176, 202, 3, 0, 0, 0, 0, 13, 0, 6, 0, 158, 1, 0, 1, 0, 1, 0, 0, 2, 0, 194, 40, 94,
     1, 0,
 ];
@@ -196,7 +196,8 @@ impl LepusValue {
     }
 }
 
-pub(crate) fn decode(bytes: &[u8]) -> Result<crate::web::WebTemplate, ConvertError> {
+/// Reads the declared size and the magic word.
+fn open(bytes: &[u8]) -> Result<Reader<'_>, ConvertError> {
     let mut reader = Reader::new(bytes);
     let declared_size = reader.u32()?;
     if usize::try_from(declared_size).ok() != Some(bytes.len()) {
@@ -215,6 +216,11 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<crate::web::WebTemplate, ConvertErr
     if magic != QUICKJS_MAGIC {
         return Err(ConvertError::BadNativeMagic(magic));
     }
+    Ok(reader)
+}
+
+pub(crate) fn decode(bytes: &[u8]) -> Result<crate::web::WebTemplate, ConvertError> {
+    let mut reader = open(bytes)?;
 
     let NativeHeader {
         fields,
@@ -603,12 +609,20 @@ fn is_empty_counted_section(
     Ok(true)
 }
 
-fn is_empty_root_lepus(bytes: &[u8], range: SectionRange) -> Result<bool, ConvertError> {
+/// The bytecode of a `ROOT_LEPUS` section: a `u64` length and that many
+/// bytes, filling the section.
+fn root_lepus_payload(bytes: &[u8], range: SectionRange) -> Result<(usize, &[u8]), ConvertError> {
     let mut reader = section_reader(bytes, range, SECTION_ROOT_LEPUS)?;
     let length = usize::try_from(reader.u64()?)
         .map_err(|_| ConvertError::invalid(reader.position(), "ROOT_LEPUS length overflow"))?;
+    let offset = reader.position();
     let bytecode = reader.take(length)?;
     ensure_empty(&reader, "ROOT_LEPUS")?;
+    Ok((offset, bytecode))
+}
+
+fn is_empty_root_lepus(bytes: &[u8], range: SectionRange) -> Result<bool, ConvertError> {
+    let (_, bytecode) = root_lepus_payload(bytes, range)?;
     Ok(bytecode == EMPTY_ROOT_LEPUS_INLINE_DEBUG
         || bytecode == EMPTY_ROOT_LEPUS_EXTERNAL_DEBUG
         || bytecode == EMPTY_ROOT_LEPUS_EXTERNAL_DEBUG_TASM_0_0_53)
@@ -666,6 +680,19 @@ fn decode_js_sources(
 }
 
 fn decode_custom_headers(reader: &mut Reader<'_>) -> Result<Vec<CustomHeader>, ConvertError> {
+    let headers = parse_custom_headers(reader)?;
+    if let Some(header) = headers
+        .iter()
+        .find(|header| header.encoding == CUSTOM_JS_BYTECODE)
+    {
+        return Err(ConvertError::CodeCacheBundle {
+            section: header.name.clone(),
+        });
+    }
+    Ok(headers)
+}
+
+fn parse_custom_headers(reader: &mut Reader<'_>) -> Result<Vec<CustomHeader>, ConvertError> {
     let count = usize::try_from(reader.u32()?)
         .map_err(|_| ConvertError::invalid(reader.position(), "custom-section count overflow"))?;
     if count > reader.remaining() / 13 {
@@ -706,15 +733,191 @@ fn decode_custom_headers(reader: &mut Reader<'_>) -> Result<Vec<CustomHeader>, C
         headers.iter().map(|header| (header.start, header.end)),
         reader.position(),
     )?;
-    if let Some(header) = headers
-        .iter()
-        .find(|header| header.encoding == CUSTOM_JS_BYTECODE)
-    {
-        return Err(ConvertError::CodeCacheBundle {
-            section: header.name.clone(),
+    Ok(headers)
+}
+
+/// The absolute range of a custom section's content, checked against the
+/// end of `CUSTOM_SECTIONS`.
+fn custom_content_range(
+    section_end: usize,
+    content_start: usize,
+    header: &CustomHeader,
+) -> Result<(usize, usize), ConvertError> {
+    let start = content_start
+        .checked_add(header.start)
+        .ok_or_else(|| ConvertError::invalid(content_start, "custom-section start overflow"))?;
+    let end = content_start
+        .checked_add(header.end)
+        .ok_or_else(|| ConvertError::invalid(content_start, "custom-section end overflow"))?;
+    if end > section_end {
+        return Err(ConvertError::invalid(
+            content_start,
+            format!(
+                "custom section {:?} ends outside CUSTOM_SECTIONS",
+                header.name
+            ),
+        ));
+    }
+    Ok((start, end))
+}
+
+/// Reads a `u64` length and that many bytes, which must fill `reader`.
+fn length_prefixed<'a>(
+    reader: &mut Reader<'a>,
+    section: &'static str,
+) -> Result<(usize, &'a [u8]), ConvertError> {
+    let length = usize::try_from(reader.u64()?)
+        .map_err(|_| ConvertError::invalid(reader.position(), "bytecode length overflow"))?;
+    let offset = reader.position();
+    let payload = reader.take(length)?;
+    ensure_empty(reader, section)?;
+    Ok((offset, payload))
+}
+
+/// Every bytecode payload a flexible native bundle carries, without
+/// interpreting it: `ROOT_LEPUS`, each `LEPUS_CHUNK` entry, each
+/// `JS_BYTECODE` file and each custom section whose encoding is
+/// `JsBytecode`, in that order.
+///
+/// The bundle prologue, header and section routes are read by the same code
+/// as [`decode`], so a bundle that fails there fails here with the same
+/// error. Unlike [`decode`], bytecode sections are returned rather than
+/// rejected, and no other section is decoded.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one block per bytecode-carrying section, in bundle order"
+)]
+pub(crate) fn bytecode_sections(
+    bytes: &[u8],
+) -> Result<Vec<super::primjs::BytecodeSection<'_>>, ConvertError> {
+    use super::primjs::{BytecodeSection, SectionKind};
+
+    let mut reader = open(bytes)?;
+    let _header = decode_header(&mut reader)?;
+    let routes = decode_section_routes(&mut reader, bytes.len())?;
+    let mut sections = Vec::new();
+
+    if let Some(range) = routes.get(&SECTION_ROOT_LEPUS) {
+        let (offset, payload) = root_lepus_payload(bytes, *range)?;
+        sections.push(BytecodeSection {
+            kind: SectionKind::RootLepus,
+            name: "ROOT_LEPUS".to_owned(),
+            offset,
+            bytes: payload,
         });
     }
-    Ok(headers)
+
+    if let Some(range) = routes.get(&SECTION_LEPUS_CHUNK) {
+        let mut reader = section_reader(bytes, *range, SECTION_LEPUS_CHUNK)?;
+        let count = usize::try_from(reader.u32()?)
+            .map_err(|_| ConvertError::invalid(reader.position(), "Lepus chunk count overflow"))?;
+        if count > reader.remaining() / 12 {
+            return Err(ConvertError::invalid(
+                reader.position(),
+                "Lepus chunk count exceeds the section payload",
+            ));
+        }
+        let mut entries = Vec::with_capacity(count);
+        for _ in 0..count {
+            let name = reader.string("Lepus chunk name")?;
+            let start = reader.u32()? as usize;
+            let end = reader.u32()? as usize;
+            if start > end {
+                return Err(ConvertError::invalid(
+                    reader.position(),
+                    format!("Lepus chunk {name:?} has a reversed range"),
+                ));
+            }
+            entries.push((name, start, end));
+        }
+        let descriptor_end = reader.position();
+        validate_ranges(
+            entries.iter().map(|(_, start, end)| (*start, *end)),
+            descriptor_end,
+        )?;
+        for (name, start, end) in entries {
+            let (Some(start), Some(end)) = (
+                descriptor_end.checked_add(start),
+                descriptor_end.checked_add(end),
+            ) else {
+                return Err(ConvertError::invalid(
+                    descriptor_end,
+                    "Lepus chunk range overflow",
+                ));
+            };
+            if end > range.end {
+                return Err(ConvertError::invalid(
+                    descriptor_end,
+                    format!("Lepus chunk {name:?} ends outside LEPUS_CHUNK"),
+                ));
+            }
+            let mut chunk = Reader::section(bytes, start, end)?;
+            let (offset, payload) = length_prefixed(&mut chunk, "Lepus chunk")?;
+            sections.push(BytecodeSection {
+                kind: SectionKind::LepusChunk,
+                name,
+                offset,
+                bytes: payload,
+            });
+        }
+    }
+
+    if let Some(range) = routes.get(&SECTION_JS_BYTECODE) {
+        let mut reader = section_reader(bytes, *range, SECTION_JS_BYTECODE)?;
+        let engine = reader.u32()?;
+        // `JSRuntimeType` in Lynx's `core/runtime/js/jsi/jsi.h`:
+        // v8 = 0, jsc = 1, quickjs = 2.
+        if engine != 2 {
+            return Err(ConvertError::UnsupportedBundle(format!(
+                "JS_BYTECODE engine type {engine} is not QuickJS (2)"
+            )));
+        }
+        let count = usize::try_from(reader.u32()?)
+            .map_err(|_| ConvertError::invalid(reader.position(), "JS file count overflow"))?;
+        if count > reader.remaining() / 12 {
+            return Err(ConvertError::invalid(
+                reader.position(),
+                "JS_BYTECODE file count exceeds the section payload",
+            ));
+        }
+        for _ in 0..count {
+            let name = reader.string("JS_BYTECODE path")?;
+            let length = usize::try_from(reader.u64()?).map_err(|_| {
+                ConvertError::invalid(reader.position(), "bytecode length overflow")
+            })?;
+            let offset = reader.position();
+            let payload = reader.take(length)?;
+            sections.push(BytecodeSection {
+                kind: SectionKind::JsBytecode,
+                name,
+                offset,
+                bytes: payload,
+            });
+        }
+        ensure_empty(&reader, "JS_BYTECODE")?;
+    }
+
+    if let Some(range) = routes.get(&SECTION_CUSTOM) {
+        let mut reader = section_reader(bytes, *range, SECTION_CUSTOM)?;
+        let headers = parse_custom_headers(&mut reader)?;
+        let content_start = reader.position();
+        for header in headers {
+            if header.encoding != CUSTOM_JS_BYTECODE {
+                continue;
+            }
+            let (start, end) = custom_content_range(range.end, content_start, &header)?;
+            let mut content = Reader::section(bytes, start, end)?;
+            let (offset, payload) = length_prefixed(&mut content, "custom bytecode")?;
+            sections.push(BytecodeSection {
+                kind: SectionKind::CustomSection,
+                name: header.name,
+                offset,
+                bytes: payload,
+            });
+        }
+    }
+
+    Ok(sections)
 }
 
 #[expect(
@@ -733,21 +936,7 @@ fn decode_custom_content(
     custom_sections: &mut Map<String, JsonValue>,
     named_css: &mut BTreeMap<String, i32>,
 ) -> Result<(), ConvertError> {
-    let start = content_start
-        .checked_add(header.start)
-        .ok_or_else(|| ConvertError::invalid(content_start, "custom-section start overflow"))?;
-    let end = content_start
-        .checked_add(header.end)
-        .ok_or_else(|| ConvertError::invalid(content_start, "custom-section end overflow"))?;
-    if end > section_end {
-        return Err(ConvertError::invalid(
-            content_start,
-            format!(
-                "custom section {:?} ends outside CUSTOM_SECTIONS",
-                header.name
-            ),
-        ));
-    }
+    let (start, end) = custom_content_range(section_end, content_start, header)?;
     let mut content = Reader::section(bytes, start, end)?;
     match header.encoding {
         CUSTOM_SOURCE => {

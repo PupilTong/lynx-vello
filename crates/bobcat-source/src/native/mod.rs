@@ -18,6 +18,7 @@
 mod decode;
 mod encode;
 mod error;
+pub mod primjs;
 mod reader;
 pub(crate) mod style;
 mod tokenize;
