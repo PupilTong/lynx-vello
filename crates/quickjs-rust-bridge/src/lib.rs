@@ -40,17 +40,21 @@
 //! throws in the realm at the call rather than reaching the host at all.
 //!
 //! [`bytecode_abi`] describes the fork's bytecode format as data generated
-//! from its sources, for writers of that format outside the engine. Module
-//! bytecode from such a writer enters a realm through
-//! [`Context::complete_module_bytecode`], which reads it with the fork's
-//! verifying read; [`Context::compile_regexp_bytecode`] is the regular
-//! expression compiler such a writer needs.
+//! from its sources, and [`bytecode`] models it in Rust (reader, writer,
+//! disassembler, verifier), for writers of that format outside the engine.
+//! Module bytecode from such a writer enters a realm through
+//! [`Context::complete_module_bytecode`], which checks it with
+//! [`bytecode::verify`] and then reads it with the fork's verifying read;
+//! [`Context::compile_regexp_bytecode`] is the regular expression compiler
+//! such a writer needs.
 
 #[allow(
     unsafe_code,
     reason = "this private module implements the allocator ABI used by the C translation units"
 )]
 mod allocator;
+#[forbid(unsafe_code)]
+pub mod bytecode;
 pub mod bytecode_abi;
 #[cfg(test)]
 #[allow(
@@ -2369,23 +2373,47 @@ mod implementation {
             })
         }
 
-        /// Reads `bytecode` the way [`Self::complete_module_bytecode`] does
-        /// — `JS_ReadObject` with the fork's `JS_READ_OBJ_VERIFY` — and
-        /// answers what was read written out again (`JS_WriteObject`). In
-        /// the answer every function's stack size is the one the read
-        /// computed from its instructions; for bytes the fork itself wrote
-        /// it equals the one they carried.
+        /// Checks `bytecode` the way [`Self::complete_module_bytecode`] does
+        /// — the rules of [`crate::bytecode::verify`] in Rust, then
+        /// `JS_ReadObject` with the fork's `JS_READ_OBJ_VERIFY` — and
+        /// answers what the engine read, written out again
+        /// (`JS_WriteObject`). In the answer every function's stack size is
+        /// the one the read computed from its instructions; for bytes the
+        /// fork itself wrote it equals the one they carried. The top-level
+        /// value may be a script, a module or a data value.
         ///
         /// For tooling and tests: it says whether the engine accepts bytes,
         /// and with what stack sizes, without running anything. A module
         /// read here stays loaded in this realm under the name its bytes
         /// carry, so a caller checking several modules uses a realm for
-        /// nothing else. A refusal is [`ErrorKind::BytecodeRejected`].
+        /// nothing else. A refusal, by either check, is
+        /// [`ErrorKind::BytecodeRejected`]; a regular expression literal is
+        /// compiled in this realm to compare with its bytecode.
         pub fn verify_bytecode(&self, bytecode: &[u8]) -> Result<Vec<u8>, Error> {
             self.reclaim();
+            let checked = self.check_untrusted_bytecode(bytecode, crate::bytecode::Root::Any)?;
             let mut length = 0usize;
             // SAFETY: the input lives through the call, which reads it and
             // keeps nothing of it; the bytes are taken below.
+            let bytes = unsafe {
+                ffi::qjs_context_verify_bytecode(
+                    self.raw().as_ptr(),
+                    checked.as_ptr(),
+                    checked.len(),
+                    &raw mut length,
+                )
+            };
+            self.take_engine_bytes(bytes, length)
+                .ok_or_else(|| self.bytecode_rejection(ErrorPhase::RegisterModule))
+        }
+
+        /// [`Self::verify_bytecode`] without the Rust checks: the fork's
+        /// verifying read alone, for this crate's tests of that read.
+        #[cfg(test)]
+        pub(crate) fn verify_bytecode_read_only(&self, bytecode: &[u8]) -> Result<Vec<u8>, Error> {
+            self.reclaim();
+            let mut length = 0usize;
+            // SAFETY: as in `verify_bytecode`.
             let bytes = unsafe {
                 ffi::qjs_context_verify_bytecode(
                     self.raw().as_ptr(),
@@ -2398,8 +2426,26 @@ mod implementation {
                 .ok_or_else(|| self.bytecode_rejection(ErrorPhase::RegisterModule))
         }
 
-        /// Reads script bytecode with verification and evaluates it, for this
-        /// crate's tests of the verifying read.
+        /// Runs the Rust checks of [`crate::bytecode`] on untrusted bytes and
+        /// answers the bytes to hand the engine: the checked program written
+        /// back. A refusal is [`ErrorKind::BytecodeRejected`].
+        fn check_untrusted_bytecode(
+            &self,
+            bytecode: &[u8],
+            root: crate::bytecode::Root,
+        ) -> Result<Vec<u8>, Error> {
+            crate::bytecode::check(bytecode, self, root).map_err(|error| {
+                Error::bridge(
+                    ErrorKind::BytecodeRejected,
+                    ErrorPhase::RegisterModule,
+                    error.to_string(),
+                )
+            })
+        }
+
+        /// Reads script bytecode with the fork's verifying read alone — not
+        /// the Rust checks — and evaluates it, for this crate's tests of the
+        /// verifying read and of the Rust checks.
         #[cfg(test)]
         pub(crate) fn evaluate_script_bytecode(&self, bytecode: &[u8]) -> Result<Value, Error> {
             self.reclaim();
@@ -2459,18 +2505,26 @@ mod implementation {
         /// an import of `name` in this realm gets this module.
         ///
         /// The bytes may come from a writer this process does not trust.
-        /// They are read here, once, with the fork's verifying read
-        /// (`JS_READ_OBJ_VERIFY`): every count, length and index the reader
-        /// uses is checked against the input, only the value kinds compiled
-        /// code contains are accepted, and every function's stack size is
-        /// computed from its instructions — the size the bytes carry is
-        /// ignored, so a writer need not compute one. Bytes the read refuses
-        /// are [`ErrorKind::BytecodeRejected`], as are bytes that read as
+        /// Before the engine sees them they are read into
+        /// [`crate::bytecode::Program`] and checked against every rule of
+        /// [`crate::bytecode::verify`]: operands inside their counts, jump
+        /// targets at instruction starts, the stack walked along every path
+        /// with return addresses, catch offsets and iterator markers kept in
+        /// their slots, generator and async instructions only in frames that
+        /// resume them, closure and module records consistent with the
+        /// functions they describe, and each regular expression literal's
+        /// bytecode equal to what this realm compiles for its pattern and
+        /// flags. The program is then written back and the engine reads
+        /// those bytes, once, with the fork's verifying read
+        /// (`JS_READ_OBJ_VERIFY`), which checks every count, length and
+        /// index against the input and computes every function's stack size
+        /// from its instructions — the size the bytes carry is ignored, so a
+        /// writer need not compute one. Bytes either check refuses are
+        /// [`ErrorKind::BytecodeRejected`], as are bytes that read as
         /// something other than a module, and leave nothing in the realm.
-        /// The read does not check instruction operands (local, argument,
-        /// closure and constant indices) or how values flow between
-        /// instructions, so bytes from an untrusted writer must also have
-        /// passed the writer's own checks of those before they run.
+        /// The checks are about what the interpreter assumes of its input,
+        /// not about what the program computes: bytecode that passes may
+        /// still loop, allocate or throw like any other JavaScript.
         ///
         /// The module's name is the one in its bytes; it is what the
         /// realm's module list holds and the base its relative imports are
@@ -2503,6 +2557,7 @@ mod implementation {
             };
             let name = c_string(name)?;
             let url = c_string(url)?;
+            let checked = self.check_untrusted_bytecode(bytecode, crate::bytecode::Root::Module)?;
             // SAFETY: all buffers live through the call, which copies the
             // name and the URL and reads the bytecode without keeping it.
             let status = unsafe {
@@ -2510,8 +2565,8 @@ mod implementation {
                     self.raw().as_ptr(),
                     name.as_ptr(),
                     url.as_ptr(),
-                    bytecode.as_ptr(),
-                    bytecode.len(),
+                    checked.as_ptr(),
+                    checked.len(),
                 )
             };
             match status {

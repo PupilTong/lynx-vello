@@ -200,7 +200,7 @@ fn find_opcode(bytes: &[u8], layout: &FunctionLayout, opcode: u8) -> usize {
 // The verifying read accepts what the fork writes
 
 /// Scripts whose completion value is a string.
-const SCRIPTS: &[&str] = &[
+pub(crate) const SCRIPTS: &[&str] = &[
     "String(1 + 2)",
     "function outer(a) { let b = a * 2; return () => a + b; } String(outer(5)())",
     "class A { #x = 1; static s = 'S'; get x() { return this.#x; } \
@@ -265,7 +265,7 @@ fn verifying_read_accepts_and_runs_what_the_fork_writes_for_scripts() {
 }
 
 /// Modules whose export `result` is a string once evaluated.
-const MODULES: &[&str] = &[
+pub(crate) const MODULES: &[&str] = &[
     "export const result = [1, 2, 3].map((x) => x * 2).join();",
     "let count = 0;\n\
      export function bump() { return ++count; }\n\
@@ -375,10 +375,12 @@ fn compiled_script(source: &str) -> Vec<u8> {
         .unwrap()
 }
 
+/// The fork's verifying read's own refusal, without the Rust checks in
+/// front of it (`crate::bytecode`, whose own tests cover them).
 fn refusal(bytes: &[u8]) -> String {
     let (_runtime, checker) = realm();
     let error = checker
-        .verify_bytecode(bytes)
+        .verify_bytecode_read_only(bytes)
         .expect_err("the patched bytecode is refused");
     assert_eq!(error.kind, ErrorKind::BytecodeRejected, "{error:?}");
     error.message
