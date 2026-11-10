@@ -44,7 +44,7 @@ Scope of this document:
 
 | Field | Encoding | Meaning |
 | --- | --- | --- |
-| version | u8 | `1` (`BC_VERSION`) for target SDK < 2.14, else `9` (`BC_VERSION + BC_NEW_PREFIX`) |
+| version | u8 | `9` (`BC_VERSION + BC_NEW_PREFIX`) when the compile context has a target SDK of 2.14 or later, else `1` (`BC_VERSION`); §2.5 says when the context has one |
 | primjs version | u64 LE, only when version is `9` | low 32 bits `(OP_SHIPPABLE_COUNT + 16 + JS_ATOM_END - 1) \| 0xCAB00000`; bit 32 `NEW_DEBUGINFO_FLAG`; bit 33 `STRIP_VARINFO_FLAG` |
 | atom count | leb128 | number of atoms that follow |
 | atoms | per atom: leb128 `len << 1 \| is_wide`, then bytes or u16 units | every atom that is not built in |
@@ -109,6 +109,15 @@ with atom operands rewritten to file indices; when `has_debug`, either
 atom, `line_num`, pc2line length and bytes; then the constant pool, each entry
 a tagged value.
 
+On the wire the debug block is the same four fields in every form (atom,
+leb128, leb128 length, bytes). Three meanings occur: inline (filename, line,
+pc2line); external with a version-`9` header (filename, function id, length
+0); and external with a version-`1` header, where the filename atom is the
+fixed string `__lepusNG_function_id__`, the second field is the function id
+and the length is 0 (the reader's `debuginfo_outside == 2` branch,
+`source/quickjs.cc:33509`). A vardef's `scope_next` can be -2, written through
+an unsigned field as `0xFFFFFFFF`; it occurs in real bundles.
+
 Vardefs are stripped when the bundle is LepusNG with external debug info and a
 target SDK of 4.1 or later, except in a function with a direct `eval`
 (`JS_ShouldStripVarInfo`, `:32394`).
@@ -126,26 +135,37 @@ against the parent's counts. It does not check stack depth or jump targets.
 Ruling 1 asked whether the background thread's bytecode is the same format as
 the main thread's. It is. In `lynx/` (at `66b002855`):
 
-| | Main thread (`ROOT_LEPUS`, `LEPUS_CHUNK`) | Background thread (`JS_BYTECODE`, `JsBytecode` custom section) |
+| | `ROOT_LEPUS`, `LEPUS_CHUNK`, `JsBytecode` custom section | `JS_BYTECODE` |
 | --- | --- | --- |
-| Written by | `LEPUS_WriteObject(…, LEPUS_WRITE_OBJ_BYTECODE)` on the LepusNG context's top-level function (`core/runtime/lepus/context_binary_writer.cc:67`) | `LEPUS_Eval(COMPILE_ONLY \| TYPE_GLOBAL)` then the same `LEPUS_WriteObject` (`core/runtime/js/bytecode/quickjs/quickjs_cache_generator.cc`, `CompileJS`) |
+| Thread | main | background |
+| Written by | `LEPUS_WriteObject(…, LEPUS_WRITE_OBJ_BYTECODE)` on the LepusNG context's top-level function (`core/runtime/lepus/context_binary_writer.cc:67`; a custom section goes through the same writer, `template_binary_writer.cc:245`) | `LEPUS_Eval(COMPILE_ONLY \| TYPE_GLOBAL)` then the same `LEPUS_WriteObject` (`core/runtime/js/bytecode/quickjs/quickjs_cache_generator.cc`, `CompileJS`) |
 | Read by | `LEPUS_EvalBinary` (`core/runtime/lepusng/quick_context.cc:1117`) | `LEPUS_EvalBinary` (`core/runtime/js/jsi/quickjs/quickjs_helper.cc:259`) |
 | Program kind | global script | global script |
-| Wrapper | none | 24-byte packed header |
+| Wrapper | a `u64` length | 24-byte packed header |
 
 The packed header (`core/runtime/js/bytecode/quickjs/bytecode/quickjs_bytecode.h`)
 is six little-endian `u32`: magic `0xD8C54E17`, header version `1`, bytecode
 offset, bytecode size, target SDK major, target SDK minor. Lynx checks that
 offset plus size equals the buffer length and that the target SDK is not newer
 than the runtime (`quickjs_runtime.cc`, `PrepareJavaScriptBytecode`); the
-converter does the first and ignores the second.
+reader does the first and ignores the second. The `JS_BYTECODE` section's
+engine type field is `2` (`JSRuntimeType::quickjs`, `core/runtime/js/jsi/jsi.h`).
 
-What differs is which of §2's options a section uses, not the format. For a
-target SDK of 2.14 or later the encoder sets the target SDK and external debug
-info on the compile context (`template_binary_writer.cc:791`), so the bytes
-open with version `9` and `NEW_DEBUGINFO_FLAG`; below it they open with
-version `1` and are compiled with `LEPUS_EVAL_FLAG_STRIP`, so functions carry
-no debug block. The converter reads every combination already.
+What differs between sections is which of §2's options the encoder picks, not
+the format. Encoding the corpus of §7 with `@lynx-js/tasm` 0.0.53 gave:
+
+| Encoder options | `ROOT_LEPUS` | `JS_BYTECODE` |
+| --- | --- | --- |
+| target SDK 2.13, `debugInfoOutside: true` | version `1`; debug blocks in the `__lepusNG_function_id__` form | version `1`; no debug blocks |
+| target SDK 2.14, `debugInfoOutside: true` | version `9`, `NEW_DEBUGINFO_FLAG` | version `9`, `NEW_DEBUGINFO_FLAG` |
+| target SDK 4.1, `debugInfoOutside: true` | version `9`, `NEW_DEBUGINFO_FLAG`, `STRIP_VARINFO_FLAG` | as for 2.14 |
+| target SDK 4.1, `debugInfoOutside: false` | version `1`; inline debug blocks with pc2line | as for 2.14 |
+
+The main-thread compile gives its context a target SDK only when
+`debugInfoOutside` is on, which is why its version byte follows that option as
+well as the SDK. Version `9` with inline debug info could not be produced, and
+`STRIP_VARINFO_FLAG` never appeared in `JS_BYTECODE`. The reader accepts every
+combination the format allows, including those.
 
 ## 3. The fork's format, and where it differs
 
@@ -347,12 +367,19 @@ follows every branch kind (`if_*`, `goto*`, `gosub`, `catch`, the `with_*`
 family), rejects an inconsistent depth, an underflow, a depth above
 `JS_STACK_SIZE_MAX` and a jump outside the buffer, and yields the maximum
 depth. It is `static`, but of its `JSFunctionDef` argument it reads only the
-bytecode buffer and length, so the fork patch is small: split the body into a
-function over `(buffer, length)` and reach it from a read flag (working name
-`JS_READ_OBJ_VERIFY`) that runs it on each function read and stores the result
-as that function's `stack_size`. The converter then writes no stack size of
-its own, and bytes read with the flag cannot run unchecked, whether they come
-from the converter or from a cache.
+bytecode buffer and length. The fork patch splits the body into a function
+over `(buffer, length)` and reaches it from a read flag, `JS_READ_OBJ_VERIFY`,
+that runs it on each function read and stores the result as that function's
+`stack_size`. The converter therefore writes no stack size of its own.
+
+The same flag makes the reader itself safe to call on arbitrary bytes, which
+it was not: its instruction walk indexed the opcode table with any byte and
+read operands past the buffer, counts were used before being compared with the
+input, a vardef count other than `arg_count + var_count` led to out-of-bounds
+access later, and a module that failed to read stayed on the context's module
+list. Under the flag each of these is a failed read, only the value kinds
+compiled code contains are accepted, and a module record's indices are checked
+against their tables. Without the flag the reader behaves as before.
 
 **The function alone is not enough for hostile input.** It was written to
 size a frame for code the compiler just produced, and it relies on that
@@ -371,6 +398,8 @@ a process abort if violated:
 | Generator instructions run only in generator frames | `await`, `yield`, `yield_star`, `async_yield_star`, `initial_yield`, `return_async` leave through a path that does not close variable references of a stack frame (`:20967`) | allow each only in a function of the matching `func_kind` |
 | Enumerated operands are in range | `special_object` reaches `abort()` on an unknown value | check the range of every enumerated operand |
 | Local, argument, closure and pool operands are inside their counts | indexed without a test | checked on decode (§2.4, §4.1); kept by construction |
+| A jump target is an instruction start | the stack walk and the interpreter decode from any offset; landing inside an atom operand executes bytes that were never turned into atoms | every target is checked against the instruction starts |
+| Record fields are consistent | a captured variable's `var_ref_idx` is only `assert`ed below `var_ref_count`; vardefs are dereferenced whenever `var_ref_count > 0`; `closure_type` values 6 and 7 outside a module, or any value above 7, reach `abort()` or a null variable reference in `js_closure2`; a module's import and export `var_idx` must name closure variables of the matching module types | checked on the output record |
 | The instruction stream decodes linearly | the reader's atom fixup walks it instruction by instruction | kept by construction |
 
 This list comes from reading part of the interpreter, not all of it. Before
@@ -518,22 +547,39 @@ the same module with a default export of the completion value; how
 `__LoadLepusChunk` reaches a module instead of a function body is part of the
 integration step.
 
-**Bridge and fork additions.**
+**Bridge and fork additions (built, §11 step 2).**
 
-1. Opcode and atom tables generated from the fork's headers, exposed to the
-   converter.
-2. Fork export: compile a regexp pattern to bytecode (§4.9).
-3. Fork export: the verifying read (§4.7).
-4. Registering module bytecode whose lifetime is not `'static`; the present
-   entry borrows build-time bytes for the runtime's life.
+1. `quickjs_rust_bridge::bytecode_abi`: the opcode table, the built-in atom
+   table and the format's enumerations, generated by the bridge's build script
+   from the fork's headers and `quickjs.c`. Each generated value has a
+   `_Static_assert` compiled in the same unit as `quickjs.c`, and a test
+   compares the atom table with a new runtime's, so a fork rebase that
+   renumbers anything fails the build or that test.
+2. Fork: `JS_CompileRegExp`; bridge: `Context::compile_regexp_bytecode`, which
+   takes the pattern as UTF-16 code units because a lone surrogate compiles
+   differently from U+FFFD.
+3. Fork: `JS_READ_OBJ_VERIFY` (§4.7); bridge: `Context::complete_module_bytecode`,
+   which supplies a realm-local module as owned bytes, reads them at once with
+   the flag and answers `ErrorKind::BytecodeRejected` for bytes the read
+   refuses. `Runtime::register_module_bytecode` is unchanged and still for
+   build-time bytes only.
+4. For tooling and tests: `Context::compile_script_bytecode` and
+   `Context::verify_bytecode`.
 
-Items 2 and 3 are two more commits on the fork's `lynx` series.
+The fork changes are two commits on top of the `lynx` series.
 
-**Caching.** Conversion output depends on the input bytes and on the fork
-build. It can be kept under the same key a compiled-source code cache would
-use (content hash plus engine build identity), so a bundle is converted once
-per engine build. Cached bytes are read with the verifying flag like any
-other, so the cache is not a way around §4.7.
+A module's name is part of its bytes: it is what the realm's module list
+holds and what its relative imports resolve from. The converter writes the
+name the module will be registered under.
+
+**Caching.** Conversion output depends on the input bytes, the name it is
+registered under, and the fork build. It can be kept under a key of those
+(content hash, name, engine build identity), so a bundle is converted once
+per engine build. The verifying read covers stack depth and the reader's own
+safety, not the rules of §4.7 that live in the converter. Cached bytes are
+therefore either trusted as this process's own output, or read back into the
+fork-format model and passed through the converter's checks again before the
+fork reads them; which of the two is decided with the cache (§11 step 5).
 
 ## 7. Verification plan
 
@@ -578,6 +624,12 @@ resume sites; the regexp header layouts; string and BigInt serialization; that
 both threads' sections come from one serializer (§2.5); the interpreter
 assumptions listed in §4.7; that `compute_stack_size` reads only the bytecode
 buffer of its `JSFunctionDef`.
+
+Verified by running code (§11 steps 1 and 2): the reader decodes every program
+of the corpus in every encoder variant and both sections, and both pages of
+the ReactLynx fixtures; the verifying read accepts bytecode the fork compiled
+and reproduces the compiler's stack sizes; the generated tables equal the
+compiled engine's.
 
 Not verified: the 222 name-mapped opcodes beyond those; `await`,
 `initial_yield`, `return_async` and `async_yield_star` beyond the resume
