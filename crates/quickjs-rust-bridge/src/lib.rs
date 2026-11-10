@@ -998,6 +998,8 @@ mod implementation {
         raw: NonNull<ffi::QjsRuntime>,
         interrupt: Rc<InterruptState>,
         hosts: Box<HostTable>,
+        /// [`RuntimeOptions::strip_source`], as the runtime was built.
+        strip_source: bool,
     }
 
     impl RuntimeInner {
@@ -1099,6 +1101,7 @@ mod implementation {
                         raw,
                         interrupt,
                         hosts,
+                        strip_source: options.strip_source,
                     }),
                 })
             }
@@ -1466,6 +1469,159 @@ mod implementation {
     /// Synchronous name resolution; source retrieval remains asynchronous.
     pub type ModuleNormalizer = fn(base: &str, specifier: &str) -> Result<String, String>;
 
+    /// Identifies everything that decides whether bytecode this build writes
+    /// can be read by it, as one stable 64-bit number: equal ids, readable
+    /// bytecode.
+    ///
+    /// It is a 64-bit FNV-1a hash, computed once per process, of
+    ///
+    /// - a digest of the engine's sources, taken by the build script: every `QuickJS` C source and
+    ///   header it compiles or includes, `QuickJS`'s `VERSION`, this crate's `shim.c`, and the
+    ///   build script itself, whose defines change what the engine compiles (its atom table, which
+    ///   bytecode indexes into, among them);
+    /// - this crate's version;
+    /// - the bytecode format version `QuickJS` writes as the first byte of every output and refuses
+    ///   any other value of (`BC_VERSION`, private to `quickjs.c`, read off a write on a scratch
+    ///   runtime);
+    /// - the target's pointer width and byte order, which the format does not record and the reader
+    ///   does not check.
+    ///
+    /// What [`RuntimeOptions::strip_source`] was is not part of it: that is a
+    /// choice per runtime, not per build, and bytecode written either way
+    /// reads on any runtime of this build. It changes what the code answers
+    /// `Function.prototype.toString` with, so a caller that keeps bytecode
+    /// keys it by [`Context::strips_source`] as well.
+    ///
+    /// Every capture this bridge hands out ([`Context::take_compiled`])
+    /// carries the id it was written under, and a cache that carries any
+    /// other is compiled from its text instead.
+    #[must_use]
+    pub fn bytecode_engine_id() -> u64 {
+        static ID: OnceLock<u64> = OnceLock::new();
+        *ID.get_or_init(|| {
+            // SAFETY: the scratch runtime is the shim's own, made and freed
+            // inside the call.
+            let format = unsafe { ffi::qjs_bytecode_format_version() };
+            let pointer_width: u8 = if cfg!(target_pointer_width = "64") {
+                64
+            } else if cfg!(target_pointer_width = "32") {
+                32
+            } else {
+                16
+            };
+            let endian: u8 = if cfg!(target_endian = "little") {
+                b'l'
+            } else {
+                b'b'
+            };
+            let mut hash = Fnv1a::new();
+            hash.write(env!("QJS_ENGINE_SOURCES_DIGEST").as_bytes());
+            hash.write(&[0]);
+            hash.write(env!("CARGO_PKG_VERSION").as_bytes());
+            hash.write(&[0]);
+            hash.write(&format.to_le_bytes());
+            hash.write(&[pointer_width, endian]);
+            // Zero is kept for "no id", which no build answers.
+            hash.finish().max(1)
+        })
+    }
+
+    /// 64-bit FNV-1a: stable across Rust releases and platforms, which
+    /// `std::hash` does not promise.
+    struct Fnv1a(u64);
+
+    impl Fnv1a {
+        const fn new() -> Self {
+            Self(0xcbf2_9ce4_8422_2325)
+        }
+
+        fn write(&mut self, bytes: &[u8]) {
+            for &byte in bytes {
+                self.0 ^= u64::from(byte);
+                self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+
+        const fn finish(&self) -> u64 {
+            self.0
+        }
+    }
+
+    /// The bytes before the `QuickJS` bytecode in every capture: the
+    /// [`bytecode_engine_id`] it was written under and the length of what
+    /// follows, both little-endian `u64`s.
+    const BYTECODE_FRAME_HEADER: usize = 16;
+
+    /// Frames bytecode this build wrote, as [`Compiled::bytecode`] carries it.
+    fn frame_bytecode(payload: &[u8]) -> Vec<u8> {
+        let mut framed = Vec::with_capacity(BYTECODE_FRAME_HEADER + payload.len());
+        framed.extend_from_slice(&bytecode_engine_id().to_le_bytes());
+        framed.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+        framed.extend_from_slice(payload);
+        framed
+    }
+
+    /// The bytecode a frame carries, when it is this build's and whole.
+    ///
+    /// `JS_ReadObject` trusts its input, and a read that fails part-way
+    /// through a module leaves that half-read module registered in the realm
+    /// under its name (`JS_ReadModule`'s failure path releases one of its two
+    /// references); nothing outside `quickjs.c` can unregister it. So bytes
+    /// of another build and truncated bytes — the two ways a store hands back
+    /// what this build did not write — are turned away here, before any read.
+    /// Bytes damaged in place are the caller's checksum's to catch.
+    fn unframe_bytecode(framed: &[u8]) -> Option<&[u8]> {
+        let (id, rest) = framed.split_first_chunk::<8>()?;
+        let (length, payload) = rest.split_first_chunk::<8>()?;
+        (u64::from_le_bytes(*id) == bytecode_engine_id()
+            && u64::from_le_bytes(*length) == payload.len() as u64
+            && !payload.is_empty())
+        .then_some(payload)
+    }
+
+    /// What the realm does about a module's compiled form.
+    #[derive(Clone, Copy, Debug)]
+    pub enum ModuleCode<'a> {
+        /// Compile the text when the module is first linked. What
+        /// [`Context::complete_module`] does.
+        Compile,
+        /// Compile the text, and keep the bytecode of that compile for
+        /// [`Context::take_compiled`].
+        Capture,
+        /// Read this bytecode — a [`Compiled::bytecode`] a compile of this
+        /// same text under this same name left — instead of compiling. If it
+        /// cannot be read as this module, compile the text instead and keep
+        /// that compile's bytecode for [`Context::take_compiled`], exactly as
+        /// [`Capture`](Self::Capture).
+        Cached(&'a [u8]),
+    }
+
+    /// One compile whose bytecode a realm kept ([`Context::take_compiled`]).
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct Compiled {
+        /// What was compiled.
+        pub kind: CompiledKind,
+        /// The name the compile baked in: a module's name (the name it was
+        /// completed or required under), a `CommonJS` file's response URL.
+        pub name: String,
+        /// What to hand back as [`ModuleCode::Cached`] or
+        /// [`RequiredCode::cached`]: the bytes `JS_WriteObject` wrote,
+        /// behind a frame naming the [`bytecode_engine_id`] they were
+        /// written under and their length. Opaque; read only by a realm of
+        /// a build with the same id.
+        pub bytecode: Vec<u8>,
+    }
+
+    /// What a [`Compiled`] is the bytecode of.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub enum CompiledKind {
+        /// An ES module, unlinked: what a realm reads it back as resolves its
+        /// imports against that realm's modules.
+        Module,
+        /// A `CommonJS` wrapper, with the parameter list it was wrapped in.
+        CommonJs { parameters: String },
+    }
+
     /// How a synchronously loaded source is read.
     ///
     /// The host decides: this bridge knows nothing about URLs, file
@@ -1507,17 +1663,54 @@ mod implementation {
         pub kind: RequiredKind,
     }
 
-    type RequireLoader = dyn FnMut(&str) -> Result<RequiredSource, String>;
+    /// As [`RequiredSource`], with a choice of code.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct RequiredCode {
+        pub source: RequiredSource,
+        /// Bytecode a previous load of exactly this text, URL and parameter
+        /// list left ([`Compiled::bytecode`]), to read instead of compiling:
+        /// the `CommonJS` wrapper's when the kind is
+        /// [`CommonJs`](RequiredKind::CommonJs), the module's when it is
+        /// [`Module`](RequiredKind::Module).
+        ///
+        /// A wrapper's makes the load `CommonJS` whenever the source's own
+        /// kind is `CommonJs` or `Detect`, without detection; a module's
+        /// makes it a module whenever that kind is `Module` or `Detect`.
+        /// Bytecode that cannot be read, or that the source's kind rules out,
+        /// is dropped and the text compiled as it would have been, with its
+        /// bytecode kept as [`capture`](Self::capture) keeps it. A `Json`
+        /// source is never read from bytecode.
+        pub cached: Option<(RequiredKind, Vec<u8>)>,
+        /// Keep the bytecode of whatever this load compiles for
+        /// [`Context::take_compiled`]: a `CommonJS` wrapper's under its
+        /// response URL, a module's under the URL it was asked for. A `Json`
+        /// source compiles nothing and keeps nothing.
+        pub capture: bool,
+    }
+
+    impl From<RequiredSource> for RequiredCode {
+        fn from(source: RequiredSource) -> Self {
+            Self {
+                source,
+                cached: None,
+                capture: false,
+            }
+        }
+    }
+
+    type RequireLoader = dyn FnMut(&str, &str) -> Result<RequiredCode, String>;
 
     /// What the last load produced, kept alive for the shim to read out of.
     ///
-    /// One load at a time: the shim copies the URL and compiles or parses the
-    /// text before it evaluates the compiled script, which is the first thing
-    /// that can start another load.
+    /// One load at a time: the shim copies the URL and compiles, reads or
+    /// parses the text and bytecode before it evaluates the compiled script,
+    /// which is the first thing that can start another load.
     #[derive(Default)]
     struct ParkedRequire {
         url: CString,
         text: String,
+        /// Framed, as the host handed it in: the shim reads past the frame.
+        cached: Vec<u8>,
         error: CString,
     }
 
@@ -1643,34 +1836,59 @@ mod implementation {
     unsafe extern "C" fn require_load(
         opaque: *mut c_void,
         url: *const c_char,
+        parameters: *const c_char,
         source: *mut ffi::QjsRequiredSource,
     ) -> c_int {
-        // SAFETY: the shim calls on this context's owner thread, with a valid
-        // C string and out-parameter, and only while its stable Rc allocation
-        // is alive.
-        let (context, url) = unsafe {
+        // SAFETY: the shim calls on this context's owner thread, with valid
+        // C strings (`parameters` possibly null) and out-parameter, and only
+        // while its stable Rc allocation is alive.
+        let (context, url, parameters) = unsafe {
             (
                 &*opaque.cast::<ContextInner>(),
                 CStr::from_ptr(url).to_string_lossy(),
+                if parameters.is_null() {
+                    "".into()
+                } else {
+                    CStr::from_ptr(parameters).to_string_lossy()
+                },
             )
         };
         let loaded = catch_unwind(AssertUnwindSafe(|| {
             let Ok(mut loader) = context.require_loader.try_borrow_mut() else {
                 return Err("this require loader is already running".to_owned());
             };
-            loader.as_mut().expect("registered loader")(&url)
+            loader.as_mut().expect("registered loader")(&url, &parameters)
         }))
         .unwrap_or_else(|_| Err("the require loader panicked".to_owned()));
         let loaded = loaded.and_then(|loaded| {
-            CString::new(loaded.url)
-                .map(|url| (url, loaded.text, loaded.kind))
+            CString::new(loaded.source.url)
+                .map(|url| {
+                    (
+                        url,
+                        loaded.source.text,
+                        loaded.source.kind,
+                        loaded.cached,
+                        loaded.capture,
+                    )
+                })
                 .map_err(|_| "the response URL contains a NUL byte".to_owned())
         });
         let mut parked = context.required.borrow_mut();
         match loaded {
-            Ok((url, text, kind)) => {
+            Ok((url, text, kind, cached, capture)) => {
                 parked.url = url;
                 parked.text = text;
+                // Bytecode that is not this build's, or not whole, is no
+                // cache at all: the text compiles, and keeps what it compiled
+                // to, as unreadable bytecode does in the shim.
+                let had_cache = cached.is_some();
+                let (cached_kind, bytes) = cached.unwrap_or((RequiredKind::CommonJs, Vec::new()));
+                parked.cached = bytes;
+                let (cached, capture) = match unframe_bytecode(&parked.cached) {
+                    Some(payload) => ((payload.as_ptr(), payload.len()), capture),
+                    None => ((ptr::null(), 0), capture || had_cache),
+                };
+                let cached_kind = cached_kind.as_raw();
                 // SAFETY: the out-parameter is the shim's, valid for this
                 // call; the buffers it borrows are parked here until the next
                 // load, which the shim starts only after it has read them.
@@ -1679,6 +1897,10 @@ mod implementation {
                     (*source).text = parked.text.as_ptr();
                     (*source).text_length = parked.text.len();
                     (*source).kind = kind.as_raw();
+                    (*source).cached = cached.0;
+                    (*source).cached_length = cached.1;
+                    (*source).cached_kind = cached_kind;
+                    (*source).capture = c_int::from(capture);
                 }
                 0
             }
@@ -1885,6 +2107,10 @@ mod implementation {
                     error.as_ref().map_or(ptr::null(), |e| e.as_ptr()),
                 )
             };
+            self.completion_status(status)
+        }
+
+        fn completion_status(&self, status: c_int) -> Result<(), Error> {
             match status {
                 // -5 is this name having been answered already, which a
                 // synchronous `require` linking an import of it inline does
@@ -1899,6 +2125,111 @@ mod implementation {
                 )),
                 _ => Err(capture_exception(self.raw(), ErrorPhase::RegisterModule)),
             }
+        }
+
+        /// [`Self::complete_module`] with a successful answer and a choice of
+        /// [`ModuleCode`]: the module's text and response URL, and what the
+        /// realm does about its compiled form.
+        ///
+        /// The code is a choice about how the text becomes a module and
+        /// nothing else: the module is the text's either way, named `name`,
+        /// with `url` as its `import.meta.url` and its imports' base, which
+        /// is why one bytecode serves realms that answered the same text
+        /// from different URLs. Bytecode is copied here and read the first
+        /// time the module is linked; bytecode that cannot be read as this
+        /// module then falls back to the text, as [`ModuleCode::Cached`]
+        /// says. A name already answered stands as it was answered, code and
+        /// all (`Ok`, as with `complete_module`).
+        pub fn complete_module_with(
+            &self,
+            name: &str,
+            url: &str,
+            text: &str,
+            code: ModuleCode<'_>,
+        ) -> Result<(), Error> {
+            let c_string = |text: &str| {
+                CString::new(text).map_err(|_| {
+                    Error::bridge(
+                        ErrorKind::InvalidInput,
+                        ErrorPhase::RegisterModule,
+                        "module name or URL contains a NUL byte",
+                    )
+                })
+            };
+            let name = c_string(name)?;
+            let url = c_string(url)?;
+            let (bytecode, capture) = match code {
+                ModuleCode::Compile => (None, false),
+                ModuleCode::Capture => (None, true),
+                ModuleCode::Cached(framed) => match unframe_bytecode(framed) {
+                    Some(payload) => (Some(payload), false),
+                    None => (None, true),
+                },
+            };
+            // SAFETY: all buffers live through the call, which copies them.
+            let status = unsafe {
+                ffi::qjs_context_complete_module_code(
+                    self.raw().as_ptr(),
+                    name.as_ptr(),
+                    url.as_ptr(),
+                    text.as_ptr(),
+                    text.len(),
+                    bytecode.map_or(ptr::null(), <[u8]>::as_ptr),
+                    bytecode.map_or(0, <[u8]>::len),
+                    c_int::from(capture),
+                )
+            };
+            self.completion_status(status)
+        }
+
+        /// One compile whose bytecode this realm kept, oldest first; `None`
+        /// when there is none.
+        ///
+        /// A compile is kept when it was asked for — [`ModuleCode::Capture`],
+        /// [`RequiredCode::capture`] — or when bytecode handed in could not
+        /// be read and the text compiled instead. It is kept once the text
+        /// has compiled and before anything of it has run, so a module or
+        /// file whose evaluation then throws is kept too; a text that does
+        /// not compile keeps nothing. Bytecode that was read keeps nothing,
+        /// and neither does JSON. What is kept stays until it is taken or the
+        /// realm is dropped.
+        #[must_use]
+        pub fn take_compiled(&self) -> Option<Compiled> {
+            // SAFETY: the shim hands over one entry it no longer links to;
+            // it is read here and freed below, in this same call.
+            let entry =
+                NonNull::new(unsafe { ffi::qjs_context_take_compiled(self.raw().as_ptr()) })?;
+            let compiled = unsafe {
+                let entry = entry.as_ref();
+                let text =
+                    |pointer: *const c_char| CStr::from_ptr(pointer).to_string_lossy().into_owned();
+                let kind = if entry.kind == ffi::COMPILED_COMMONJS && !entry.parameters.is_null() {
+                    CompiledKind::CommonJs {
+                        parameters: text(entry.parameters),
+                    }
+                } else {
+                    debug_assert_eq!(entry.kind, ffi::COMPILED_MODULE);
+                    CompiledKind::Module
+                };
+                Compiled {
+                    kind,
+                    name: text(entry.name),
+                    bytecode: frame_bytecode(std::slice::from_raw_parts(entry.bytes, entry.length)),
+                }
+            };
+            // SAFETY: the entry is the one taken above, freed once.
+            unsafe { ffi::qjs_compiled_free(self.raw().as_ptr(), entry.as_ptr()) };
+            Some(compiled)
+        }
+
+        /// Whether this realm's runtime was built with
+        /// [`RuntimeOptions::strip_source`]. Bytecode a stripping runtime
+        /// wrote answers `Function.prototype.toString` without the source
+        /// text, so a cache of bytecode keys by this as well as by
+        /// [`bytecode_engine_id`].
+        #[must_use]
+        pub fn strips_source(&self) -> bool {
+            self.inner.runtime.strip_source
         }
 
         /// Compiles module source text to bytecode, for
@@ -2171,10 +2502,39 @@ mod implementation {
             &mut self,
             module_name: &str,
             export_name: &str,
-            load: F,
+            mut load: F,
         ) -> Result<(), Error>
         where
             F: FnMut(&str) -> Result<RequiredSource, String> + 'static,
+        {
+            self.register_synchronous_loader_with_code(
+                module_name,
+                export_name,
+                move |url, _parameters| load(url).map(RequiredCode::from),
+            )
+        }
+
+        /// As [`Self::register_synchronous_loader`], except that `load` is
+        /// also told the parameter list the load was asked with, and may
+        /// answer with code: bytecode to read instead of compiling, and
+        /// whether to keep the bytecode of what it compiles
+        /// ([`RequiredCode`]).
+        ///
+        /// The parameter list is the second argument of `loadModuleSync`,
+        /// verbatim. An import being linked inline was asked with none, and
+        /// is told `""`; it is linked as a module whatever `load` answers, so
+        /// only a module's bytecode is of use to it. Bytecode is lent on the
+        /// same terms as the text, and read or copied before anything of the
+        /// file runs. What a load keeps is taken with
+        /// [`Self::take_compiled`].
+        pub fn register_synchronous_loader_with_code<F>(
+            &mut self,
+            module_name: &str,
+            export_name: &str,
+            load: F,
+        ) -> Result<(), Error>
+        where
+            F: FnMut(&str, &str) -> Result<RequiredCode, String> + 'static,
         {
             self.reclaim();
             let (module_name, export_name) = host_module_names(module_name, export_name)?;
@@ -5821,6 +6181,807 @@ mod implementation {
         }
 
         #[test]
+        fn the_bytecode_engine_id_is_stable_and_never_zero() {
+            let id = bytecode_engine_id();
+            assert_ne!(id, 0);
+            assert_eq!(bytecode_engine_id(), id);
+            assert_eq!(
+                thread::spawn(bytecode_engine_id).join().unwrap(),
+                id,
+                "one build, one id, whichever thread asks"
+            );
+        }
+
+        #[test]
+        fn a_realm_reports_whether_its_runtime_strips_source() {
+            let (_runtime, plain) = runtime_and_realm();
+            assert!(!plain.strips_source());
+            let stripping = Runtime::with_options(RuntimeOptions {
+                strip_source: true,
+                ..RuntimeOptions::default()
+            })
+            .unwrap();
+            assert!(stripping.create_context().unwrap().strips_source());
+        }
+
+        /// Settles a root load of `name`, answering its namespace or what
+        /// the load failed with.
+        fn settle_load(runtime: &mut Runtime, realm: &Context, name: &str) -> Result<Value, Error> {
+            let load = realm.load_module(name)?;
+            match runtime.drain_pending_jobs(realm) {
+                Err(error) => {
+                    runtime.discard_unhandled_rejections(realm);
+                    Err(error)
+                }
+                Ok(_) => realm
+                    .settled_promise_result(&load)
+                    .map(|namespace| namespace.expect("the load settled")),
+            }
+        }
+
+        fn take_all_compiled(realm: &Context) -> Vec<Compiled> {
+            std::iter::from_fn(|| realm.take_compiled()).collect()
+        }
+
+        fn global_text(realm: &Context, expression: &str) -> String {
+            string_of(
+                &realm
+                    .evaluate(EvalSource::new(expression), EvalOptions::default())
+                    .unwrap(),
+            )
+        }
+
+        /// A two-module cycle with a live binding, a function whose text is
+        /// read back, a throw whose stack is kept, and `import.meta.url`.
+        const CODE_LIB: &str = "import { tick } from 'app:///main.mjs';\n\
+             globalThis.libRuns = (globalThis.libRuns ?? 0) + 1;\n\
+             export let count = 0;\n\
+             export function bump() { count += 1; return tick(); }\n\
+             export function fail() {\n\
+               throw new Error('from lib');\n\
+             }\n";
+        const CODE_MAIN: &str = "import { count, bump, fail } from 'app:///lib.mjs';\n\
+             globalThis.mainRuns = (globalThis.mainRuns ?? 0) + 1;\n\
+             export function tick() { return 'tick'; }\n\
+             export const before = count;\n\
+             export const ticked = bump();\n\
+             export const after = count;\n\
+             export const source = String(bump);\n\
+             let stack = '';\n\
+             try { fail(); } catch (error) { stack = error.stack; }\n\
+             export { stack };\n\
+             export const url = import.meta.url;\n";
+
+        /// What one realm made of `CODE_MAIN`, as text, in export order.
+        fn code_main_exports(realm: &mut Context, namespace: &Value) -> Vec<String> {
+            let mut exports: Vec<String> = ["before", "ticked", "after", "source", "stack", "url"]
+                .into_iter()
+                .map(|name| {
+                    let value = realm.property(namespace, name).unwrap();
+                    match value.as_number() {
+                        Some(number) => number.to_string(),
+                        None => string_of(&value),
+                    }
+                })
+                .collect();
+            exports.push(global_text(
+                realm,
+                "`${globalThis.libRuns}/${globalThis.mainRuns}`",
+            ));
+            exports
+        }
+
+        /// Completes `CODE_LIB` and `CODE_MAIN` in a fresh realm, the main
+        /// module answered from `main_url`, and loads the main module.
+        fn run_code_modules(
+            lib: ModuleCode<'_>,
+            main: ModuleCode<'_>,
+            main_url: &str,
+        ) -> (Runtime, Context, Vec<String>) {
+            let (mut runtime, mut realm) = runtime_and_realm();
+            realm
+                .complete_module_with("app:///lib.mjs", "app:///lib.mjs", CODE_LIB, lib)
+                .unwrap();
+            realm
+                .complete_module_with("app:///main.mjs", main_url, CODE_MAIN, main)
+                .unwrap();
+            let namespace = settle_load(&mut runtime, &realm, "app:///main.mjs").unwrap();
+            let exports = code_main_exports(&mut realm, &namespace);
+            // A second load is answered from the one instance.
+            let again = settle_load(&mut runtime, &realm, "app:///main.mjs").unwrap();
+            assert_eq!(code_main_exports(&mut realm, &again), exports);
+            (runtime, realm, exports)
+        }
+
+        #[test]
+        fn a_captured_module_graph_reads_back_as_the_graph_its_text_compiled_to() {
+            let (_runtime, text_realm, from_text) =
+                run_code_modules(ModuleCode::Capture, ModuleCode::Capture, "app:///main.mjs");
+            assert_eq!(from_text[..3], ["0", "tick", "1"], "{from_text:?}");
+            assert!(from_text[3].contains("count += 1"), "{from_text:?}");
+            assert!(
+                from_text[4].contains("at fail (app:///lib.mjs:6:16)"),
+                "{from_text:?}"
+            );
+            assert_eq!(from_text[5], "app:///main.mjs");
+            assert_eq!(from_text[6], "1/1", "each module evaluates once");
+
+            // The root compiles first, and its import as the root resolves.
+            let compiled = take_all_compiled(&text_realm);
+            let names: Vec<_> = compiled.iter().map(|c| c.name.as_str()).collect();
+            assert_eq!(names, ["app:///main.mjs", "app:///lib.mjs"]);
+            assert!(compiled.iter().all(|c| c.kind == CompiledKind::Module));
+
+            let (_runtime, read_realm, from_bytecode) = run_code_modules(
+                ModuleCode::Cached(&compiled[1].bytecode),
+                ModuleCode::Cached(&compiled[0].bytecode),
+                "app:///main.mjs",
+            );
+            assert_eq!(from_bytecode, from_text, "bytecode is the text's module");
+            assert!(
+                read_realm.take_compiled().is_none(),
+                "a module read from bytecode keeps nothing"
+            );
+        }
+
+        #[test]
+        fn import_meta_url_is_the_response_url_of_each_realm_not_of_the_bytecode() {
+            let (_runtime, realm, _) =
+                run_code_modules(ModuleCode::Capture, ModuleCode::Capture, "app:///main.mjs");
+            let compiled = take_all_compiled(&realm);
+            for url in [
+                "https://one.example/main.mjs",
+                "https://two.example/main.mjs",
+            ] {
+                let (_runtime, _realm, exports) = run_code_modules(
+                    ModuleCode::Cached(&compiled[1].bytecode),
+                    ModuleCode::Cached(&compiled[0].bytecode),
+                    url,
+                );
+                assert_eq!(exports[5], url);
+            }
+        }
+
+        #[test]
+        fn compile_keeps_no_bytecode() {
+            let (_runtime, realm, _) =
+                run_code_modules(ModuleCode::Compile, ModuleCode::Compile, "app:///main.mjs");
+            assert!(realm.take_compiled().is_none());
+        }
+
+        #[test]
+        fn a_syntax_error_under_capture_fails_as_it_does_under_compile_and_keeps_nothing() {
+            let mut failures = Vec::new();
+            for code in [ModuleCode::Compile, ModuleCode::Capture] {
+                let (mut runtime, realm) = runtime_and_realm();
+                realm
+                    .complete_module_with(
+                        "app:///bad.mjs",
+                        "app:///bad.mjs",
+                        "export const a = 1;\nexport let let = 2;",
+                        code,
+                    )
+                    .unwrap();
+                let error = settle_load(&mut runtime, &realm, "app:///bad.mjs").unwrap_err();
+                assert_eq!(error.name.as_deref(), Some("SyntaxError"), "{error:?}");
+                assert!(realm.take_compiled().is_none());
+                failures.push((error.name, error.message, error.location));
+            }
+            assert_eq!(failures[0], failures[1]);
+        }
+
+        /// The bytecode `JS_WriteObject` writes of a module does not depend
+        /// on whether its compile resolved its imports: a capture made by an
+        /// inline link (a `require`) is byte for byte the one an unlinked
+        /// compile (an `import`) makes of the same text under the same name.
+        #[test]
+        fn a_linked_capture_is_the_bytes_of_an_unlinked_one() {
+            let dep = "export const answer = 42;";
+            let text =
+                "import { answer } from 'app:///dep.mjs';\nexport const doubled = answer * 2;";
+
+            let (mut runtime, realm) = runtime_and_realm();
+            realm
+                .complete_module_with("app:///dep.mjs", "app:///dep.mjs", dep, ModuleCode::Compile)
+                .unwrap();
+            realm
+                .complete_module_with("app:///m.mjs", "app:///m.mjs", text, ModuleCode::Capture)
+                .unwrap();
+            settle_load(&mut runtime, &realm, "app:///m.mjs").unwrap();
+            let unlinked = take_all_compiled(&realm);
+
+            let (mut runtime, mut realm, _host) = code_loader_realm(
+                CodeHost::capturing()
+                    .module("app:///dep.mjs", dep)
+                    .module("app:///m.mjs", text),
+            );
+            run_code_script(
+                &mut runtime,
+                &mut realm,
+                "if (loadModuleSync('app:///m.mjs', '').value.doubled !== 84) throw Error('doubled');",
+            )
+            .unwrap();
+            let linked = take_all_compiled(&realm);
+            let linked_m: Vec<_> = linked.iter().filter(|c| c.name == "app:///m.mjs").collect();
+            assert_eq!(linked_m.len(), 1);
+            assert_eq!(unlinked.len(), 1);
+            assert_eq!(linked_m[0], &unlinked[0]);
+        }
+
+        /// Bytecode that cannot be read as the module it was handed in for
+        /// is dropped: the text compiles instead, its bytecode is kept, and
+        /// the module is the text's — once, under its own name, for every
+        /// import of it.
+        #[test]
+        fn unusable_module_bytecode_falls_back_to_the_text_and_captures_it() {
+            let (_runtime, realm, _) =
+                run_code_modules(ModuleCode::Capture, ModuleCode::Capture, "app:///main.mjs");
+            let good = take_all_compiled(&realm).remove(1).bytecode;
+            let other_name = {
+                let (mut runtime, realm) = runtime_and_realm();
+                realm
+                    .complete_module_with(
+                        "app:///other.mjs",
+                        "app:///other.mjs",
+                        "export const count = 99;",
+                        ModuleCode::Capture,
+                    )
+                    .unwrap();
+                settle_load(&mut runtime, &realm, "app:///other.mjs").unwrap();
+                realm.take_compiled().unwrap().bytecode
+            };
+            let commonjs = capture_commonjs("app:///lib.mjs", "exports", "exports.count = 7;");
+            let cases: [(&str, Vec<u8>); 6] = [
+                ("unframed garbage", b"not bytecode at all".to_vec()),
+                ("framed garbage", frame_bytecode(b"definitely not quickjs")),
+                ("truncated", good[..good.len() - 7].to_vec()),
+                ("another build", {
+                    let mut foreign = good.clone();
+                    foreign[0] ^= 1;
+                    foreign
+                }),
+                ("a CommonJS wrapper", commonjs),
+                ("another module's", other_name),
+            ];
+            for (case, bytes) in cases {
+                let (mut runtime, realm) = runtime_and_realm();
+                realm
+                    .complete_module_with(
+                        "app:///lib.mjs",
+                        "app:///lib.mjs",
+                        "globalThis.libRuns = (globalThis.libRuns ?? 0) + 1;\nexport let count = 3;",
+                        ModuleCode::Cached(&bytes),
+                    )
+                    .unwrap();
+                for (name, text) in [
+                    (
+                        "app:///a.mjs",
+                        "export { count as a } from 'app:///lib.mjs';",
+                    ),
+                    (
+                        "app:///b.mjs",
+                        "export { count as b } from 'app:///lib.mjs';",
+                    ),
+                    (
+                        "app:///root.mjs",
+                        "import { a } from 'app:///a.mjs';\n\
+                         import { b } from 'app:///b.mjs';\n\
+                         export const sum = a + b;",
+                    ),
+                ] {
+                    realm
+                        .complete_module_with(name, name, text, ModuleCode::Compile)
+                        .unwrap();
+                }
+                let mut realm = realm;
+                let namespace = settle_load(&mut runtime, &realm, "app:///root.mjs")
+                    .unwrap_or_else(|error| panic!("{case}: {error:?}"));
+                assert_eq!(
+                    realm.property(&namespace, "sum").unwrap().as_number(),
+                    Some(6.0),
+                    "{case}"
+                );
+                assert_eq!(
+                    global_text(&realm, "String(globalThis.libRuns)"),
+                    "1",
+                    "{case}"
+                );
+                let kept = take_all_compiled(&realm);
+                assert_eq!(kept.len(), 1, "{case}: {kept:?}");
+                assert_eq!(kept[0].name, "app:///lib.mjs", "{case}");
+                assert_eq!(kept[0].kind, CompiledKind::Module, "{case}");
+            }
+        }
+
+        /// An import that cannot be loaded fails a module read from bytecode
+        /// exactly as it fails the module compiled from its text, through an
+        /// asynchronous import and through a `require` alike, and leaves the
+        /// realm as usable.
+        #[test]
+        fn an_unloadable_import_fails_the_same_from_bytecode_as_from_text() {
+            let text = "import { gone } from 'app:///gone.mjs';\nexport const value = gone;";
+            let bytecode = {
+                let (_runtime, scratch) = runtime_and_realm();
+                frame_bytecode(
+                    &scratch
+                        .compile_module_bytecode("app:///wants.mjs", text)
+                        .unwrap(),
+                )
+            };
+
+            let mut asynchronous = Vec::new();
+            for code in [ModuleCode::Compile, ModuleCode::Cached(&bytecode)] {
+                let (mut runtime, realm) = runtime_and_realm();
+                realm
+                    .complete_module_with("app:///wants.mjs", "app:///wants.mjs", text, code)
+                    .unwrap();
+                realm
+                    .complete_module("app:///gone.mjs", Err("the page has no such file"))
+                    .unwrap();
+                let error = settle_load(&mut runtime, &realm, "app:///wants.mjs").unwrap_err();
+                assert!(realm.take_compiled().is_none());
+                assert_eq!(global_text(&realm, "String(1 + 1)"), "2");
+                asynchronous.push((error.name, error.message));
+            }
+            assert_eq!(asynchronous[0], asynchronous[1]);
+
+            let mut synchronous = Vec::new();
+            for cached in [None, Some(bytecode.clone())] {
+                let mut host = CodeHost::default().module("app:///wants.mjs", text);
+                if let Some(bytes) = cached {
+                    host.cached
+                        .insert("app:///wants.mjs".to_owned(), (RequiredKind::Module, bytes));
+                }
+                let (mut runtime, mut realm, _host) = code_loader_realm(host);
+                let error = run_code_script(
+                    &mut runtime,
+                    &mut realm,
+                    "loadModuleSync('app:///wants.mjs', '');",
+                )
+                .unwrap_err();
+                assert!(realm.take_compiled().is_none());
+                synchronous.push((error.name, error.message));
+                // A second try fails the same way again.
+                let again =
+                    run_code_script_again(&mut realm, "loadModuleSync('app:///wants.mjs', '');")
+                        .unwrap_err();
+                assert_eq!(
+                    (again.name, again.message),
+                    synchronous.last().cloned().unwrap()
+                );
+            }
+            assert_eq!(synchronous[0], synchronous[1]);
+            assert!(synchronous[0].1.contains("gone.mjs"), "{synchronous:?}");
+        }
+
+        #[test]
+        fn a_top_level_await_module_reads_back_and_still_cannot_be_required() {
+            let text = "globalThis.awaited = await Promise.resolve(5);\nexport const value = 1;";
+            let (mut runtime, realm) = runtime_and_realm();
+            realm
+                .complete_module_with(
+                    "app:///tla.mjs",
+                    "app:///tla.mjs",
+                    text,
+                    ModuleCode::Capture,
+                )
+                .unwrap();
+            settle_load(&mut runtime, &realm, "app:///tla.mjs").unwrap();
+            assert_eq!(global_text(&realm, "String(globalThis.awaited)"), "5");
+            let bytecode = realm.take_compiled().unwrap().bytecode;
+
+            let (mut runtime, realm) = runtime_and_realm();
+            realm
+                .complete_module_with(
+                    "app:///tla.mjs",
+                    "app:///tla.mjs",
+                    text,
+                    ModuleCode::Cached(&bytecode),
+                )
+                .unwrap();
+            settle_load(&mut runtime, &realm, "app:///tla.mjs").unwrap();
+            assert_eq!(global_text(&realm, "String(globalThis.awaited)"), "5");
+            assert!(realm.take_compiled().is_none());
+
+            let mut refusals = Vec::new();
+            for cached in [None, Some(bytecode)] {
+                let mut host = CodeHost::capturing().module("app:///tla.mjs", text);
+                let hit = cached.is_some();
+                if let Some(bytes) = cached {
+                    host.cached
+                        .insert("app:///tla.mjs".to_owned(), (RequiredKind::Module, bytes));
+                }
+                let (mut runtime, mut realm, _host) = code_loader_realm(host);
+                let error = run_code_script(
+                    &mut runtime,
+                    &mut realm,
+                    "loadModuleSync('app:///tla.mjs', '');",
+                )
+                .unwrap_err();
+                assert_eq!(realm.take_compiled().is_some(), !hit);
+                refusals.push(error.message);
+            }
+            assert_eq!(refusals[0], refusals[1]);
+            assert!(refusals[0].contains("top-level await"), "{refusals:?}");
+        }
+
+        /// A module an asynchronous import already instantiated from its
+        /// bytecode is what a later `require` of it answers from: nothing is
+        /// loaded again or compiled.
+        #[test]
+        fn a_require_after_an_import_answers_from_the_module_read_from_bytecode() {
+            let text = "globalThis.runs = (globalThis.runs ?? 0) + 1;\nexport const answer = 42;";
+            let bytecode = {
+                let (_runtime, scratch) = runtime_and_realm();
+                frame_bytecode(
+                    &scratch
+                        .compile_module_bytecode("app:///shared.mjs", text)
+                        .unwrap(),
+                )
+            };
+            let host = CodeHost::capturing().module("app:///shared.mjs", text);
+            let (mut runtime, mut realm, host) = code_loader_realm(host);
+            realm
+                .complete_module_with(
+                    "app:///shared.mjs",
+                    "app:///shared.mjs",
+                    text,
+                    ModuleCode::Cached(&bytecode),
+                )
+                .unwrap();
+            settle_load(&mut runtime, &realm, "app:///shared.mjs").unwrap();
+            run_code_script(
+                &mut runtime,
+                &mut realm,
+                "const loaded = loadModuleSync('app:///shared.mjs', '');\n\
+                 if (loaded.value.answer !== 42 || globalThis.runs !== 1) throw Error('runs');",
+            )
+            .unwrap();
+            assert!(host.borrow().loads.is_empty());
+            assert!(realm.take_compiled().is_none());
+        }
+
+        /// A source the host's own fetch completed with bytecode, which no
+        /// import has instantiated yet, is the source a `require` of its URL
+        /// links: the load's answer finds it standing (`-5`), and the
+        /// bytecode it was completed with is what is read, exactly as the
+        /// text it was completed with would have been compiled.
+        #[test]
+        fn a_require_of_a_source_completed_with_bytecode_reads_that_bytecode() {
+            let text = "globalThis.runs = (globalThis.runs ?? 0) + 1;\n\
+                        export const answer = 42;\n\
+                        export const hasText = String(() => 'body').includes('body');";
+            // Written by a runtime that strips source, so what the realm
+            // ran tells the read from a compile of the text.
+            let bytecode = frame_bytecode(compiled_module("app:///shared.mjs", text));
+            let mut reports = Vec::new();
+            for code in [ModuleCode::Compile, ModuleCode::Cached(&bytecode)] {
+                // The load's own answer asks for nothing: the source that
+                // stands decides.
+                let host = CodeHost::default().module("app:///shared.mjs", text);
+                let (mut runtime, mut realm, host) = code_loader_realm(host);
+                realm
+                    .complete_module_with("app:///shared.mjs", "app:///shared.mjs", text, code)
+                    .unwrap();
+                run_code_script(
+                    &mut runtime,
+                    &mut realm,
+                    "const loaded = loadModuleSync('app:///shared.mjs', '');\n\
+                     globalThis.report = [loaded.kind, loaded.value.answer, globalThis.runs,\n\
+                       loaded.value.hasText].join('|');",
+                )
+                .unwrap();
+                assert_eq!(host.borrow().loads.len(), 1);
+                assert!(realm.take_compiled().is_none());
+                reports.push(global_text(&realm, "globalThis.report"));
+            }
+            assert_eq!(reports, ["module|42|1|true", "module|42|1|false"]);
+        }
+
+        /// The host half of a load with code: files, the bytecode it holds
+        /// per URL, whether it asks for captures, and every `(url,
+        /// parameters)` it was asked for.
+        #[derive(Default)]
+        struct CodeHost {
+            files: HashMap<String, RequiredSource>,
+            cached: HashMap<String, (RequiredKind, Vec<u8>)>,
+            capture: bool,
+            loads: Vec<(String, String)>,
+        }
+
+        impl CodeHost {
+            fn capturing() -> Self {
+                Self {
+                    capture: true,
+                    ..Self::default()
+                }
+            }
+
+            fn file(mut self, url: &str, text: &str, kind: RequiredKind) -> Self {
+                self.files.insert(
+                    url.to_owned(),
+                    RequiredSource {
+                        url: url.to_owned(),
+                        text: text.to_owned(),
+                        kind,
+                    },
+                );
+                self
+            }
+
+            fn module(self, url: &str, text: &str) -> Self {
+                self.file(url, text, RequiredKind::Module)
+            }
+
+            fn load(&mut self, url: &str, parameters: &str) -> Result<RequiredCode, String> {
+                self.loads.push((url.to_owned(), parameters.to_owned()));
+                let source = self
+                    .files
+                    .get(url)
+                    .cloned()
+                    .ok_or_else(|| format!("no such file: {url}"))?;
+                Ok(RequiredCode {
+                    source,
+                    cached: self.cached.get(url).cloned(),
+                    capture: self.capture,
+                })
+            }
+        }
+
+        fn code_loader_realm(host: CodeHost) -> (Runtime, Context, Rc<RefCell<CodeHost>>) {
+            let runtime = Runtime::new().unwrap();
+            let mut realm = runtime.create_context().unwrap();
+            let host = Rc::new(RefCell::new(host));
+            let loader = Rc::clone(&host);
+            realm
+                .register_synchronous_loader_with_code(
+                    REQUIRE_MODULE,
+                    "loadModuleSync",
+                    move |url, parameters| loader.borrow_mut().load(url, parameters),
+                )
+                .unwrap();
+            (runtime, realm, host)
+        }
+
+        /// `run_script`, for a realm that has not had the export installed
+        /// as a global yet.
+        fn run_code_script(
+            runtime: &mut Runtime,
+            realm: &mut Context,
+            body: &str,
+        ) -> Result<(), Error> {
+            run_script(runtime, realm, body)
+        }
+
+        /// A further script in a realm `run_code_script` already set up.
+        fn run_code_script_again(realm: &mut Context, body: &str) -> Result<(), Error> {
+            realm
+                .evaluate(EvalSource::new(body), EvalOptions::default())
+                .map(|_| ())
+        }
+
+        /// The wrapper a `CommonJS` load of `text` under `parameters`
+        /// compiles to, captured.
+        fn capture_commonjs(url: &str, parameters: &str, text: &str) -> Vec<u8> {
+            let (mut runtime, mut realm, _host) =
+                code_loader_realm(CodeHost::capturing().file(url, text, RequiredKind::CommonJs));
+            run_code_script(
+                &mut runtime,
+                &mut realm,
+                &format!("loadModuleSync('{url}', '{parameters}');"),
+            )
+            .unwrap();
+            let compiled = realm.take_compiled().unwrap();
+            assert_eq!(
+                compiled.kind,
+                CompiledKind::CommonJs {
+                    parameters: parameters.to_owned()
+                }
+            );
+            compiled.bytecode
+        }
+
+        const CODE_COMMONJS: &str = "const helper = require('helper');\n\
+             module.exports.answer = function answer() { return helper * 2; };\n\
+             module.exports.fail = function fail() {\n\
+               throw new Error('from commonjs');\n\
+             };\n\
+             globalThis.cjsRuns = (globalThis.cjsRuns ?? 0) + 1;\n";
+
+        /// Loads and runs `CODE_COMMONJS` through the wrapper the load
+        /// answers, reporting what it made of it, as text.
+        const RUN_COMMONJS: &str = "const loaded = loadModuleSync('app:///lib.cjs', 'exports, require, module');\n\
+             const module = { exports: {} };\n\
+             loaded.value.call(module.exports, module.exports, () => 21, module);\n\
+             let stack = '';\n\
+             try { module.exports.fail(); } catch (error) { stack = error.stack; }\n\
+             globalThis.report = [loaded.kind, loaded.url, module.exports.answer(),\n\
+               String(module.exports.answer), stack, globalThis.cjsRuns].join('|');";
+
+        fn run_commonjs(host: CodeHost) -> (String, Vec<Compiled>, Vec<(String, String)>) {
+            let (mut runtime, mut realm, host) = code_loader_realm(host);
+            run_code_script(&mut runtime, &mut realm, RUN_COMMONJS).unwrap();
+            let report = global_text(&realm, "globalThis.report");
+            let loads = host.borrow().loads.clone();
+            (report, take_all_compiled(&realm), loads)
+        }
+
+        #[test]
+        fn a_captured_commonjs_wrapper_reads_back_as_the_function_its_text_compiled_to() {
+            let (from_text, compiled, loads) = run_commonjs(CodeHost::capturing().file(
+                "app:///lib.cjs",
+                CODE_COMMONJS,
+                RequiredKind::CommonJs,
+            ));
+            assert_eq!(
+                loads,
+                [(
+                    "app:///lib.cjs".to_owned(),
+                    "exports, require, module".to_owned()
+                )],
+                "the loader is told the parameter list"
+            );
+            let parts: Vec<_> = from_text.split('|').collect();
+            assert_eq!(
+                parts[..3],
+                ["commonjs", "app:///lib.cjs", "42"],
+                "{from_text}"
+            );
+            assert!(parts[3].contains("helper * 2"), "{from_text}");
+            assert!(
+                parts[4].contains("at fail (app:///lib.cjs:4:16)"),
+                "{from_text}"
+            );
+            assert_eq!(parts[5], "1");
+            assert_eq!(compiled.len(), 1);
+            assert_eq!(compiled[0].name, "app:///lib.cjs");
+            assert_eq!(
+                compiled[0].kind,
+                CompiledKind::CommonJs {
+                    parameters: "exports, require, module".to_owned()
+                }
+            );
+
+            // Read back whether the host names the file CommonJS or leaves
+            // it to detection, which the bytecode makes unnecessary.
+            for kind in [RequiredKind::CommonJs, RequiredKind::Detect] {
+                let mut host = CodeHost::capturing().file("app:///lib.cjs", CODE_COMMONJS, kind);
+                host.cached.insert(
+                    "app:///lib.cjs".to_owned(),
+                    (RequiredKind::CommonJs, compiled[0].bytecode.clone()),
+                );
+                let (from_bytecode, kept, _) = run_commonjs(host);
+                assert_eq!(from_bytecode, from_text, "{kind:?}");
+                assert!(kept.is_empty(), "a read wrapper keeps nothing");
+            }
+        }
+
+        #[test]
+        fn unusable_commonjs_bytecode_falls_back_to_the_text_and_captures_it() {
+            let module_bytecode = {
+                let (_runtime, scratch) = runtime_and_realm();
+                frame_bytecode(
+                    &scratch
+                        .compile_module_bytecode("app:///lib.cjs", "export const a = 1;")
+                        .unwrap(),
+                )
+            };
+            let good =
+                capture_commonjs("app:///lib.cjs", "exports, require, module", CODE_COMMONJS);
+            let (from_text, _, _) = run_commonjs(CodeHost::default().file(
+                "app:///lib.cjs",
+                CODE_COMMONJS,
+                RequiredKind::CommonJs,
+            ));
+            let cases: [(&str, RequiredKind, Vec<u8>); 5] = [
+                (
+                    "unframed garbage",
+                    RequiredKind::CommonJs,
+                    b"garbage".to_vec(),
+                ),
+                (
+                    "framed garbage",
+                    RequiredKind::CommonJs,
+                    frame_bytecode(b"garbage"),
+                ),
+                (
+                    "truncated",
+                    RequiredKind::CommonJs,
+                    good[..good.len() - 3].to_vec(),
+                ),
+                ("a module's", RequiredKind::CommonJs, module_bytecode),
+                ("named a module", RequiredKind::Module, good.clone()),
+            ];
+            for (case, cached_kind, bytes) in cases {
+                let mut host = CodeHost::default().file(
+                    "app:///lib.cjs",
+                    CODE_COMMONJS,
+                    RequiredKind::CommonJs,
+                );
+                host.cached
+                    .insert("app:///lib.cjs".to_owned(), (cached_kind, bytes));
+                let (report, kept, _) = run_commonjs(host);
+                assert_eq!(report, from_text, "{case}");
+                assert_eq!(kept.len(), 1, "{case}: {kept:?}");
+                assert_eq!(kept[0].name, "app:///lib.cjs", "{case}");
+            }
+        }
+
+        #[test]
+        fn json_is_never_read_from_bytecode_nor_captured() {
+            let good = capture_commonjs("app:///data.json", "exports", "exports.a = 1;");
+            let mut host = CodeHost::capturing().file(
+                "app:///data.json",
+                "{\"answer\": 42}",
+                RequiredKind::Json,
+            );
+            host.cached.insert(
+                "app:///data.json".to_owned(),
+                (RequiredKind::CommonJs, good),
+            );
+            let (mut runtime, mut realm, _host) = code_loader_realm(host);
+            run_code_script(
+                &mut runtime,
+                &mut realm,
+                "const loaded = loadModuleSync('app:///data.json', 'exports');\n\
+                 if (loaded.kind !== 'json' || loaded.value.answer !== 42) throw Error('json');",
+            )
+            .unwrap();
+            assert!(realm.take_compiled().is_none());
+        }
+
+        /// A `require` of an ES module captures every module its inline link
+        /// compiles, imports included, each under the URL it is stored
+        /// under; a fresh realm handed those back reads the whole graph and
+        /// compiles nothing.
+        #[test]
+        fn a_required_module_graph_captures_and_reads_back_through_the_loader() {
+            const SCRIPT: &str = "const loaded = loadModuleSync('app:///main.mjs', 'exports');\n\
+                 globalThis.report = [loaded.kind, loaded.url, loaded.value.seen,\n\
+                   loaded.value.text, globalThis.depRuns].join('|');";
+            let dep = "globalThis.depRuns = (globalThis.depRuns ?? 0) + 1;\n\
+                       export let n = 1;\nexport function inc() { n += 1; }";
+            let main = "import { n, inc } from 'app:///dep.mjs';\n\
+                        inc();\nexport const seen = n;\nexport const text = String(inc);";
+            let host = || {
+                CodeHost::capturing()
+                    .module("app:///dep.mjs", dep)
+                    .module("app:///main.mjs", main)
+            };
+
+            let (mut runtime, mut realm, text_host) = code_loader_realm(host());
+            run_code_script(&mut runtime, &mut realm, SCRIPT).unwrap();
+            let from_text = global_text(&realm, "globalThis.report");
+            assert_eq!(
+                from_text,
+                "module|app:///main.mjs|2|function inc() { n += 1; }|1"
+            );
+            assert_eq!(
+                text_host.borrow().loads,
+                [
+                    ("app:///main.mjs".to_owned(), "exports".to_owned()),
+                    ("app:///dep.mjs".to_owned(), String::new()),
+                ],
+                "an inline import is asked with no parameter list"
+            );
+            let compiled = take_all_compiled(&realm);
+            let names: Vec<_> = compiled.iter().map(|c| c.name.as_str()).collect();
+            assert_eq!(names, ["app:///dep.mjs", "app:///main.mjs"]);
+
+            let mut cached_host = host();
+            for capture in &compiled {
+                cached_host.cached.insert(
+                    capture.name.clone(),
+                    (RequiredKind::Module, capture.bytecode.clone()),
+                );
+            }
+            let (mut runtime, mut realm, _host) = code_loader_realm(cached_host);
+            run_code_script(&mut runtime, &mut realm, SCRIPT).unwrap();
+            assert_eq!(global_text(&realm, "globalThis.report"), from_text);
+            assert!(realm.take_compiled().is_none());
+        }
+
+        #[test]
         fn interned_member_names_serve_every_realm_on_a_runtime() {
             let (runtime, first) = runtime_and_realm();
             let second = runtime.create_context().unwrap();
@@ -7336,8 +8497,9 @@ mod implementation {
 
 pub use ffi::MemoryUsage;
 pub use implementation::{
-    CallOutcome, Context, Error, ErrorKind, ErrorPhase, EvalOptions, EvalSource, HostArgument,
-    HostFunctionError, HostValue, InterruptHandle, Member, ModuleNormalizer, RequiredKind,
-    RequiredSource, Runtime, RuntimeOptions, SourceLocation, SourceType, StructuredBytes,
-    StructuredClone, Value, ValueKind,
+    CallOutcome, Compiled, CompiledKind, Context, Error, ErrorKind, ErrorPhase, EvalOptions,
+    EvalSource, HostArgument, HostFunctionError, HostValue, InterruptHandle, Member, ModuleCode,
+    ModuleNormalizer, RequiredCode, RequiredKind, RequiredSource, Runtime, RuntimeOptions,
+    SourceLocation, SourceType, StructuredBytes, StructuredClone, Value, ValueKind,
+    bytecode_engine_id,
 };

@@ -2754,6 +2754,47 @@ module's on the path and the evaluation promise, and the shim forgets every
 rejection the evaluation recorded with the thrown value
 (`qjs_rejections_forget_since`), so a caller that catches it has handled it.
 
+**Bytecode of host-loaded scripts goes out and comes back in**
+(`docs/resource-cache-design.md`, "PR2"). The bridge compiles in two places
+for text a host fetched — a realm-local module when it is first linked, and a
+synchronous load — and each can keep the bytecode of its compile or read
+bytecode instead of compiling. `Context::complete_module_with(name, url,
+text, ModuleCode)` is `complete_module` with the choice: `Compile` (what
+`complete_module` does), `Capture` (compile, and queue the bytecode for
+`Context::take_compiled`), `Cached(bytes)` (read the bytes; if they are not
+this module, compile the text and capture). The synchronous loader's
+counterpart is `register_synchronous_loader_with_code`, whose host callback is
+also told the wrapper's parameter list and answers a `RequiredCode { source,
+cached, capture }`; JSON is never read from bytecode nor captured. A
+`Compiled { kind, name, bytecode }` names what the compile baked in: a
+module's name, or a CommonJS wrapper's response URL with its parameter list
+(`CompiledKind::CommonJs`). The bytes are the bridge's own framing — its
+`bytecode_engine_id()` and the payload length ahead of `JS_WriteObject`'s
+output — and a caller stores and returns them whole. What the rules are:
+
+- **A read never fails a load.** Bytes with another engine id or length, bytes
+  `JS_ReadObject` rejects, a value of the wrong kind, and a module read under
+  another name all fall back to the text with capture on, leaving no pending
+  exception. An import that cannot be loaded is not such a failure: the read
+  module's import list is the text's own, so it fails exactly as the text
+  does.
+- **The frame is a guard, not a checksum.** `JS_ReadObject` trusts its input,
+  and the fork's `JS_ReadModule` leaves a half-read module on the realm's
+  loaded-module list when a read fails part-way, which no public API can
+  remove. The frame turns away truncated bytes and another build's before any
+  read; bytes damaged in place are the caller's to detect (`vant`'s stored
+  entries carry a CRC-64), and a module that was read and then refused is
+  released with both of its references (`qjs_drop_read_module`).
+- **A capture is the bytes of an unlinked module** whether the compile was
+  linked or not (`JS_WriteObject` writes names, never resolutions), so one
+  capture serves an `import` and a `require` alike. `import.meta.url` is set
+  after the compile or the read and is no part of the bytes.
+- `bytecode_engine_id()` hashes a build-time digest of the QuickJS and shim
+  sources (`build.rs`, `QJS_ENGINE_SOURCES_DIGEST`), the crate version,
+  `BC_VERSION` as a scratch `JS_WriteObject` reports it, pointer width and
+  byte order. Whether a runtime strips source text is not in it:
+  `Context::strips_source` reports that, and a caller that caches keys on it.
+
 A runtime can also reserve module-name prefixes
 (`Runtime::reserve_module_prefix`), which checks a name at two places. The
 loader looks a name up in the realm's own sources, the runtime's registered

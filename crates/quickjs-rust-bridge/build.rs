@@ -34,6 +34,18 @@ fn main() {
         "libunicode.c",
         "cutils.c",
     ];
+    let headers = [
+        "quickjs.h",
+        "quickjs-atom.h",
+        "quickjs-opcode.h",
+        "cutils.h",
+        "dtoa.h",
+        "libregexp.h",
+        "libregexp-opcode.h",
+        "libunicode.h",
+        "libunicode-table.h",
+        "list.h",
+    ];
 
     let configure_quickjs_build = || {
         let mut build = cc::Build::new();
@@ -98,19 +110,73 @@ fn main() {
     for source in sources {
         rerun_if_changed(&quickjs_dir.join(source));
     }
-    for header in [
-        "quickjs.h",
-        "quickjs-atom.h",
-        "quickjs-opcode.h",
-        "cutils.h",
-        "dtoa.h",
-        "libregexp.h",
-        "libregexp-opcode.h",
-        "libunicode.h",
-        "libunicode-table.h",
-        "list.h",
-    ] {
+    for header in headers {
         rerun_if_changed(&quickjs_dir.join(header));
+    }
+
+    export_engine_sources_digest(&manifest_dir, &quickjs_dir, &sources, &headers);
+}
+
+/// Exports `QJS_ENGINE_SOURCES_DIGEST`, the build half of the bridge's
+/// `bytecode_engine_id`.
+fn export_engine_sources_digest(
+    manifest_dir: &Path,
+    quickjs_dir: &Path,
+    sources: &[&str],
+    headers: &[&str],
+) {
+    // Everything that decides whether bytecode one build writes can be read
+    // by another: the engine's C sources and headers, the version file they
+    // are built under, the shim, and this script, whose defines change what
+    // the engine compiles (its atom table among them). Each file is hashed
+    // under a path relative to the crate, in sorted order, so the digest is
+    // the same wherever the checkout lives. Every file named here already
+    // has its `rerun-if-changed` in `main`, and Cargo reruns a changed build
+    // script on its own.
+    let mut engine_files: Vec<(String, PathBuf)> = sources
+        .iter()
+        .chain(headers.iter())
+        .chain(std::iter::once(&"VERSION"))
+        .map(|name| (format!("vendor/quickjs/{name}"), quickjs_dir.join(name)))
+        .chain([
+            ("src/shim.c".to_owned(), manifest_dir.join("src/shim.c")),
+            ("build.rs".to_owned(), manifest_dir.join("build.rs")),
+        ])
+        .collect();
+    engine_files.sort();
+    let mut digest = Fnv1a::new();
+    for (label, path) in &engine_files {
+        let contents = fs::read(path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+        digest.write(label.as_bytes());
+        digest.write(&[0]);
+        digest.write(&(contents.len() as u64).to_le_bytes());
+        digest.write(&contents);
+    }
+    println!(
+        "cargo:rustc-env=QJS_ENGINE_SOURCES_DIGEST={:016x}",
+        digest.finish()
+    );
+}
+
+/// 64-bit FNV-1a: stable across Rust releases and platforms, which
+/// `std::hash` does not promise.
+struct Fnv1a(u64);
+
+impl Fnv1a {
+    const fn new() -> Self {
+        Self(0xcbf2_9ce4_8422_2325)
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.0 ^= u64::from(byte);
+            self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+
+    const fn finish(&self) -> u64 {
+        self.0
     }
 }
 
