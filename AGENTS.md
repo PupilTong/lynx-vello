@@ -2887,6 +2887,21 @@ type and depends only on `bytes`, `http`, `url`, `serde_json`, `thiserror`,
   `touch` rate-limited to once per 24 h per entry, an entry larger than the
   budget refused), and `http` (`StoredResponse`, freshness, revalidation
   headers, the JSON record a `Store` keeps beside a body).
+- **The derived-artifact tier** (`artifact`, the code cache's storage; the
+  crate never names QuickJS): `Artifacts`, the process-wide memory tier
+  (`Artifacts::global()`, `Send + Sync` on every target, LRU under a byte
+  budget) that an engine reads synchronously at the moment it would compile
+  and inserts what it compiled into; and `ArtifactCache<S: Store>`, the
+  persistence a resource system puts behind it — `preload(SourceDigest)`
+  admits every stored variant of a source before its text is delivered,
+  `flush` writes what was inserted since. A key is a `SourceDigest` (128-bit
+  SipHash-1-3 of the text) and a `Variant` (what the derivation bakes in
+  beyond the text) under an `EngineId`; a stored entry is `magic | format |
+  engine | source | variant | length | crc64 | payload`, and `decode` is the
+  only way a payload leaves a Store. Entries are content-addressed, so two
+  processes writing one key write the same bytes and there is no shared index
+  file; they expire 15 days after their last use, under a byte budget, and
+  all at once when the `EngineId` changes.
 - **The vocabulary**: `CachePolicy`, `mime`, `preprocess`, `image_header`,
   `data_url`, `image` (`ImageSizeHint`, `Bitmap`, `DecodeError`,
   `target_size`, `wants_refinement`, `bounded`), and `error`

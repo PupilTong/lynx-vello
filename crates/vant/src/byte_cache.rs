@@ -31,8 +31,17 @@ use crate::CachePolicy;
 use crate::http::{Plan, StoredResponse, plan};
 use crate::platform::{Meta, Response, Store};
 
-/// How often a hit's recency reaches the Store.
+/// How often a hit's recency reaches the Store. The artifact tier
+/// ([`crate::artifact`]) follows the same rule through [`touch_due`].
 const TOUCH_INTERVAL: Duration = Duration::from_hours(24);
+
+/// Whether a hit at `now` on an entry whose recency the Store last recorded
+/// at `persisted` is due a [`Store::touch`]: at most once per
+/// [`TOUCH_INTERVAL`], so a hot entry costs no write per hit.
+pub(crate) fn touch_due(persisted: SystemTime, now: SystemTime) -> bool {
+    now.duration_since(persisted)
+        .is_ok_and(|elapsed| elapsed >= TOUCH_INTERVAL)
+}
 
 /// The index's view of one stored response.
 #[derive(Clone, Debug)]
@@ -351,10 +360,7 @@ impl<S: Store> ByteCache<S> {
         };
         let slot = index.slots.get_mut(key).expect("the entry was just found");
         slot.entry.meta.last_used = now;
-        let due = now
-            .duration_since(slot.persisted)
-            .is_ok_and(|elapsed| elapsed >= TOUCH_INTERVAL);
-        if due && self.store.touch(key, now).is_ok() {
+        if touch_due(slot.persisted, now) && self.store.touch(key, now).is_ok() {
             slot.persisted = now;
         }
         Some((slot.entry.clone(), bytes))
@@ -412,121 +418,14 @@ impl<S: Store> ByteCache<S> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::Ordering;
     use std::time::UNIX_EPOCH;
 
     use http::header::{HeaderName, HeaderValue, IF_NONE_MATCH};
     use url::Url;
 
     use super::*;
-    use crate::platform::{Estimate, StoreError, Volatility};
-
-    /// An in-memory [`Store`] with knobs for the failures a real one has.
-    /// Clones share their contents, so a test can reopen a tier over the
-    /// same entries.
-    #[derive(Clone, Default)]
-    struct MemStore {
-        entries: Arc<Mutex<HashMap<String, (Meta, Bytes)>>>,
-        quota: Option<u64>,
-        maps: bool,
-        fail_put: Arc<AtomicBool>,
-        touches: Arc<AtomicUsize>,
-    }
-
-    impl MemStore {
-        fn entries(&self) -> MutexGuard<'_, HashMap<String, (Meta, Bytes)>> {
-            self.entries.lock().unwrap()
-        }
-
-        /// Files `meta` and `body` under `slot`, whatever key `meta` names:
-        /// a corrupt record, a hash collision, a truncated body.
-        fn forge(&self, slot: &str, meta: Meta, body: &[u8]) {
-            self.entries()
-                .insert(slot.to_owned(), (meta, Bytes::copy_from_slice(body)));
-        }
-
-        fn holds(&self, key: &str) -> bool {
-            self.entries().contains_key(key)
-        }
-
-        fn persisted_last_used(&self, key: &str) -> SystemTime {
-            self.entries()[key].0.last_used
-        }
-    }
-
-    impl Store for MemStore {
-        fn scan(&self) -> Result<Vec<Meta>, StoreError> {
-            Ok(self
-                .entries()
-                .values()
-                .map(|(meta, _)| meta.clone())
-                .collect())
-        }
-
-        fn get(&self, key: &str) -> Result<Option<(Meta, Bytes)>, StoreError> {
-            Ok(self.entries().get(key).cloned())
-        }
-
-        fn get_meta(&self, key: &str) -> Result<Option<Meta>, StoreError> {
-            Ok(self.entries().get(key).map(|(meta, _)| meta.clone()))
-        }
-
-        fn put(&self, meta: &Meta, body: &[u8]) -> Result<(), StoreError> {
-            if self.fail_put.load(Ordering::Relaxed) {
-                return Err(StoreError::Other("the disk is full".to_owned()));
-            }
-            self.forge(&meta.key, meta.clone(), body);
-            Ok(())
-        }
-
-        fn put_meta(&self, meta: &Meta) -> Result<(), StoreError> {
-            match self.entries().get_mut(&meta.key) {
-                Some(entry) => {
-                    entry.0 = meta.clone();
-                    Ok(())
-                }
-                None => Err(StoreError::Corrupt("no body".to_owned())),
-            }
-        }
-
-        fn delete(&self, key: &str) -> Result<(), StoreError> {
-            self.entries().remove(key);
-            Ok(())
-        }
-
-        fn touch(&self, key: &str, now: SystemTime) -> Result<(), StoreError> {
-            self.touches.fetch_add(1, Ordering::Relaxed);
-            if let Some(entry) = self.entries().get_mut(key) {
-                entry.0.last_used = now;
-            }
-            Ok(())
-        }
-
-        fn map_body(&self, key: &str) -> Option<Bytes> {
-            if self.maps {
-                self.entries().get(key).map(|(_, body)| body.clone())
-            } else {
-                None
-            }
-        }
-
-        fn estimate(&self) -> Estimate {
-            Estimate {
-                used: self
-                    .entries()
-                    .values()
-                    .map(|(_, body)| body.len() as u64)
-                    .sum(),
-                quota: self.quota,
-            }
-        }
-
-        fn volatility(&self) -> Volatility {
-            Volatility::Durable
-        }
-    }
+    use crate::test_store::MemStore;
 
     fn at(seconds: u64) -> SystemTime {
         UNIX_EPOCH + Duration::from_secs(seconds)

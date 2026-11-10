@@ -2,15 +2,18 @@
 //! policy vocabulary, the in-memory bitmap tier, RFC 9111 freshness, MIME
 //! sniffing and preprocessing, image header probing, `data:` URLs, image
 //! sizing decisions, the HTTP byte tier ([`ByteCache`](byte_cache::ByteCache))
-//! over a [`Store`], and the resource error vocabulary. It sits below
-//! `terminus` and names no DOM, style, runtime or platform type. What it
-//! asks of the embedder is three capabilities — a transport ([`Fetch`]),
-//! persistent bytes ([`Store`]) and platform pixels ([`ImageDecoder`]) —
-//! bundled as one [`Platform`]; their implementations live with the embedder
-//! (`docs/resource-cache-design.md`).
+//! over a [`Store`], the derived-artifact tier ([`artifact`]: what an engine
+//! derives from a source text, such as a compiled script, shared in-process
+//! and persisted over a [`Store`]), and the resource error vocabulary. It
+//! sits below `terminus` and names no DOM, style, runtime or platform type.
+//! What it asks of the embedder is three capabilities — a transport
+//! ([`Fetch`]), persistent bytes ([`Store`]) and platform pixels
+//! ([`ImageDecoder`]) — bundled as one [`Platform`]; their implementations
+//! live with the embedder (`docs/resource-cache-design.md`).
 
 #![warn(clippy::undocumented_unsafe_blocks)]
 
+pub mod artifact;
 pub mod byte_cache;
 pub mod data_url;
 pub mod error;
@@ -21,6 +24,8 @@ pub mod memory;
 pub mod mime;
 pub mod platform;
 pub mod preprocess;
+#[cfg(test)]
+pub(crate) mod test_store;
 
 pub use platform::{
     Estimate, Fetch, ImageDecoder, Meta, NoStore, Platform, Request, Response, Store, StoreError,

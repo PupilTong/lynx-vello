@@ -19,6 +19,7 @@ bytes = { workspace = true }
 http = { workspace = true }
 rustc-hash = { workspace = true }
 serde_json = { workspace = true }
+siphasher = { workspace = true }
 thiserror = { workspace = true }
 url = { workspace = true }
 # Only for `peniko::ImageData`, the shape a decoded bitmap is drawn in.
