@@ -85,7 +85,7 @@ use std::time::Duration;
 
 use bobcat_core::peniko::ImageData;
 use bobcat_core::resource::ResourceFetcher;
-use bobcat_core::{FrameImages, ImageReports, ImageSizeHint, PreparsedStyleSheet};
+use bobcat_core::{FrameImages, ImageReports, ImageResidency, ImageSizeHint, PreparsedStyleSheet};
 use bytes::Bytes;
 use rustc_hash::FxHashSet;
 use url::Url;
@@ -113,6 +113,7 @@ pub use store::FsStore;
 pub use transport::NativeFetch;
 use vant::artifact::{ArtifactCache, ArtifactConfig, Artifacts, AsyncArtifactCache, SourceDigest};
 use vant::byte_cache::ByteCache;
+use vant::image::residency::ViewKey;
 pub use vant::registry::{ContainerInstaller, RegisterError, Registered};
 use vant::registry::{Register, RegisterInBackground, parse_registration_url};
 use vant::{ArtifactStore, AsyncStore, Parts, Platform, Store};
@@ -781,6 +782,8 @@ impl<P: Platform> Resources<P> {
             .map(|tier| Handle::new(ByteCache::open(tier.store, tier.budget)));
         let code = artifacts.map(|tier| Handle::new(CodeCache::open(tier.store, tier.budget)));
         let (completions, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let initial_decode_bound = config.initial_decode_bound.max(1);
+        let downsample_ratio = config.downsample_ratio.max(1.0);
         let shared = SharedHandle::new(Shared {
             transports: Transports::new(
                 HttpSettings {
@@ -794,8 +797,8 @@ impl<P: Platform> Resources<P> {
             ),
             code,
             fetches: Arc::new(FetchIndex::with_base(config.base_url.clone())),
-            initial_decode_bound: config.initial_decode_bound.max(1),
-            downsample_ratio: config.downsample_ratio.max(1.0),
+            initial_decode_bound,
+            downsample_ratio,
             decoder: Handle::new(decoder),
             completions,
             wakeup: Arc::new(wakeup),
@@ -816,7 +819,11 @@ impl<P: Platform> Resources<P> {
             )),
             style_cache: Rc::default(),
             local: Rc::new(RefCell::new(ImageState::new(
-                config.memory_budget_bytes,
+                ImageResidency::new(
+                    config.memory_budget_bytes,
+                    initial_decode_bound,
+                    downsample_ratio,
+                ),
                 receiver,
             ))),
         };
@@ -886,7 +893,11 @@ impl<P: Platform> Resources<P> {
             executor: Arc::clone(&self.executor),
             style_cache: Rc::default(),
             local: Rc::new(RefCell::new(ImageState::new(
-                self.local.borrow().budget(),
+                ImageResidency::new(
+                    self.local.borrow().residency.budget(),
+                    self.shared.initial_decode_bound,
+                    self.shared.downsample_ratio,
+                ),
                 receiver,
             ))),
         }
@@ -1030,24 +1041,24 @@ impl<P: Platform> Resources<P> {
     #[must_use]
     pub fn memory_used_bytes(&self) -> usize {
         let state = self.local.borrow();
-        state.bitmap_bytes() + state.encoded_bytes()
+        state.residency.bitmap_bytes() + state.residency.encoded_bytes()
     }
 
     /// Changes the bitmap budget, evicting what no longer fits.
     pub fn set_memory_budget_bytes(&self, budget: usize) {
-        self.local.borrow_mut().set_budget(budget);
+        self.local.borrow_mut().residency.set_budget(budget);
     }
 
     /// Whether `source` currently has decoded pixels in memory.
     #[must_use]
     pub fn is_resident(&self, source: &str) -> bool {
-        self.local.borrow().is_resident(source)
+        self.local.borrow().residency.is_resident(source)
     }
 
     /// The resident bitmap's size for `source`, if it has one.
     #[must_use]
     pub fn resident_size(&self, source: &str) -> Option<(u32, u32)> {
-        self.local.borrow().resident_size(source)
+        self.local.borrow().residency.resident_size(source)
     }
 
     /// Whether `source` has been asked for, through
@@ -1056,7 +1067,7 @@ impl<P: Platform> Resources<P> {
     /// makes a source known.
     #[must_use]
     pub fn knows_image(&self, source: &str) -> bool {
-        self.local.borrow().knows(source)
+        self.local.borrow().residency.knows(source)
     }
 
     /// Diagnostics recorded since the last call: an image that failed, a
@@ -1073,12 +1084,15 @@ impl<P: Platform> Resources<P> {
     }
 
     /// The per-view value for one [`bobcat_core::LynxView`], carrying its
-    /// [`ImageReports`].
+    /// [`ImageReports`] and its own working set, which this scope pins
+    /// beside every other view's until the value is dropped.
     #[must_use]
     pub fn for_view(&self, reports: ImageReports) -> ViewResources<P> {
+        let view = self.local.borrow_mut().residency.new_view();
         ViewResources {
             resources: self.clone(),
             reports,
+            view,
         }
     }
 
@@ -1211,6 +1225,20 @@ pub struct ViewResources<
 > {
     resources: Resources<P>,
     reports: ImageReports,
+    /// This view's working set in the scope's image residency.
+    view: ViewKey,
+}
+
+impl<P: Platform> Drop for ViewResources<P> {
+    /// The view's working set stops counting: what only it pinned may be
+    /// evicted.
+    fn drop(&mut self) {
+        // `try_borrow_mut`: a panic that unwinds through a borrow of the
+        // image state must not turn into an abort here.
+        if let Ok(mut state) = self.resources.local.try_borrow_mut() {
+            state.residency.release_view(self.view);
+        }
+    }
 }
 
 impl<P: Platform> fmt::Debug for ViewResources<P> {
@@ -1289,7 +1317,7 @@ impl<P: Platform> FrameImages for ViewResources<P> {
     }
 
     fn retain(&self, frame: &[Arc<str>]) {
-        images::retain(&self.resources, frame);
+        images::retain(&self.resources, self.view, frame);
     }
 }
 

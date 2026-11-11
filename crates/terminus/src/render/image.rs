@@ -107,6 +107,8 @@ use bytes::Bytes;
 use rustc_hash::FxHashMap;
 use seldon::text::TextContext;
 use smallvec::SmallVec;
+use vant::image::Bitmap;
+use vant::image::residency::{Decoded, Read, Requested, Residency, ResidencyConfig, ViewKey};
 
 use crate::paint::display_list::DisplayList;
 use crate::peniko::ImageData;
@@ -459,6 +461,189 @@ impl ImageInbox {
     /// to.
     pub fn detach(&self) {
         self.queue.detached.set(true);
+    }
+}
+
+/// The engine's image store type: [`vant::image::residency::Residency`]
+/// over [`ImageReports`], with what the engine fixes about it.
+///
+/// It supplies [`MAX_RENDERABLE_DIMENSION`], so no host passes it, and it
+/// dispatches the reports: every transition that hands waiters back reports
+/// to them here, once, so a host cannot forget or reorder a report. It runs
+/// no IO; the host starts the loads it is told to start and feeds their
+/// completions in. The host's own notes ("image `…` failed to load") stay
+/// with the host, which these methods answer enough to write.
+#[derive(Debug)]
+pub struct ImageResidency {
+    residency: Residency<ImageReports>,
+}
+
+impl ImageResidency {
+    /// A residency with a bitmap budget of `budget_bytes`, first decodes
+    /// bounded by `initial_bound`, and refinements past `downsample_ratio`
+    /// (see [`ResidencyConfig`]).
+    #[must_use]
+    pub fn new(budget_bytes: usize, initial_bound: u32, downsample_ratio: f32) -> Self {
+        Self {
+            residency: Residency::new(ResidencyConfig {
+                budget_bytes,
+                initial_bound,
+                max_renderable: MAX_RENDERABLE_DIMENSION,
+                downsample_ratio,
+            }),
+        }
+    }
+
+    /// A key for one more view's working set.
+    pub fn new_view(&mut self) -> ViewKey {
+        self.residency.new_view()
+    }
+
+    /// Names `source` for `reports`, reporting at once what is already
+    /// known. Answers the bound to decode at when the caller must start the
+    /// load.
+    pub fn request(&mut self, source: &str, reports: &ImageReports) -> Option<(u32, u32)> {
+        match self.residency.request(source, reports.clone()) {
+            Requested::Loaded { intrinsic } => {
+                reports.loaded(source, intrinsic.0, intrinsic.1);
+                None
+            }
+            Requested::Failed => {
+                reports.failed(source);
+                None
+            }
+            Requested::Joined => None,
+            Requested::Start { bound } => Some(bound),
+        }
+    }
+
+    /// Files a document request for `source`, whose parse the caller starts
+    /// and whose outcome is reported to `reports`.
+    pub fn request_document(&mut self, source: Arc<str>, reports: &ImageReports) {
+        self.residency.request_document(source, reports.clone());
+    }
+
+    /// `source`'s load decoded: reported loaded to every view that asked.
+    pub fn complete_loaded(&mut self, source: &Arc<str>, decoded: Decoded) {
+        if let Some((waiters, intrinsic)) = self.residency.loaded(source, decoded) {
+            for reports in waiters {
+                reports.loaded(source, intrinsic.0, intrinsic.1);
+            }
+        }
+    }
+
+    /// `source`'s load was a document and it parsed: reported to every view
+    /// that asked.
+    pub fn complete_parsed(&mut self, source: &str, document: &Arc<VectorDocument>) {
+        if let Some(waiters) = self.residency.parsed(source) {
+            for reports in waiters {
+                reports.parsed_document(source, Arc::clone(document));
+            }
+        }
+    }
+
+    /// A document request's parse for `source` completed: reported to one
+    /// view that asked. Answers the parse's failure when it was reported,
+    /// for the host's note.
+    pub fn complete_requested_document(
+        &mut self,
+        source: &str,
+        parsed: Result<Arc<VectorDocument>, String>,
+    ) -> Option<String> {
+        let reports = self.residency.requested_document_done(source)?;
+        match parsed {
+            Ok(document) => {
+                reports.parsed_document(source, document);
+                None
+            }
+            Err(message) => {
+                reports.failed(source);
+                Some(message)
+            }
+        }
+    }
+
+    /// `source`'s load failed, or it could not be started: reported failed
+    /// to every view that asked. Answers whether a load was in flight, which
+    /// is when the host notes the failure.
+    pub fn complete_failed(&mut self, source: &str) -> bool {
+        let Some(waiters) = self.residency.failed(source) else {
+            return false;
+        };
+        for reports in waiters {
+            reports.failed(source);
+        }
+        true
+    }
+
+    /// See [`Residency::refined`].
+    pub fn refined(&mut self, source: &Arc<str>, target: (u32, u32), bitmap: Bitmap) {
+        self.residency.refined(source, target, bitmap);
+    }
+
+    /// See [`Residency::refine_failed`].
+    pub fn refine_failed(&mut self, source: &str) {
+        self.residency.refine_failed(source);
+    }
+
+    /// See [`Residency::read`].
+    pub fn read(&mut self, source: &str, hint: ImageSizeHint) -> Read {
+        self.residency.read(source, hint)
+    }
+
+    /// See [`Residency::restored`].
+    pub fn restored(&mut self, source: &str, bitmap: Bitmap) -> ImageData {
+        self.residency.restored(source, bitmap)
+    }
+
+    /// See [`Residency::retain`].
+    pub fn retain(&mut self, view: ViewKey, frame: &[Arc<str>]) {
+        self.residency.retain(view, frame);
+    }
+
+    /// See [`Residency::release_view`].
+    pub fn release_view(&mut self, view: ViewKey) {
+        self.residency.release_view(view);
+    }
+
+    #[must_use]
+    pub fn budget(&self) -> usize {
+        self.residency.budget()
+    }
+
+    /// See [`Residency::set_budget`].
+    pub fn set_budget(&mut self, budget: usize) {
+        self.residency.set_budget(budget);
+    }
+
+    /// See [`Residency::bitmap_bytes`].
+    #[must_use]
+    pub fn bitmap_bytes(&self) -> usize {
+        self.residency.bitmap_bytes()
+    }
+
+    /// See [`Residency::encoded_bytes`].
+    #[must_use]
+    pub fn encoded_bytes(&self) -> usize {
+        self.residency.encoded_bytes()
+    }
+
+    /// See [`Residency::knows`].
+    #[must_use]
+    pub fn knows(&self, source: &str) -> bool {
+        self.residency.knows(source)
+    }
+
+    /// See [`Residency::is_resident`].
+    #[must_use]
+    pub fn is_resident(&self, source: &str) -> bool {
+        self.residency.is_resident(source)
+    }
+
+    /// See [`Residency::resident_size`].
+    #[must_use]
+    pub fn resident_size(&self, source: &str) -> Option<(u32, u32)> {
+        self.residency.resident_size(source)
     }
 }
 
@@ -1767,5 +1952,191 @@ mod synthetic_tests {
             registry.apply(&event, &mut context).is_none(),
             "a second report for the settled source moves nothing"
         );
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod residency_tests {
+    //! What [`ImageResidency`] reports for each transition, to whom, and how
+    //! often. The policy itself is tested in `vant::image::residency`.
+
+    use std::sync::Arc;
+
+    use vant::image::Bitmap;
+    use vant::image::residency::Decoded;
+    use vant::mime::ImageFormat;
+
+    use super::{
+        DocumentKind, ImageEvent, ImageInbox, ImageResidency, MAX_RENDERABLE_DIMENSION,
+        VectorDocument,
+    };
+
+    const SVG: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="4"/>"#;
+
+    fn residency() -> ImageResidency {
+        ImageResidency::new(1 << 20, 2048, 2.0)
+    }
+
+    fn decoded(intrinsic: (u32, u32)) -> Decoded {
+        Decoded {
+            url: url::Url::parse("app:///a.png").expect("url"),
+            bitmap: Bitmap {
+                width: 1,
+                height: 1,
+                source_width: intrinsic.0,
+                source_height: intrinsic.1,
+                premultiplied: false,
+                rgba: vec![0; 4],
+            },
+            format: ImageFormat::Png,
+            header: None,
+            encoded: None,
+        }
+    }
+
+    fn document() -> Arc<VectorDocument> {
+        match ImageEvent::parse_document(Arc::from("icon.svg"), SVG, DocumentKind::Svg) {
+            ImageEvent::ParsedDocument { document, .. } => document,
+            other => panic!("not a document: {other:?}"),
+        }
+    }
+
+    fn loaded(events: &[ImageEvent]) -> Vec<(&str, u32, u32)> {
+        events
+            .iter()
+            .map(|event| match event {
+                ImageEvent::Loaded {
+                    source,
+                    width,
+                    height,
+                } => (&**source, *width, *height),
+                other => panic!("not a load: {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_load_reports_once_to_every_view_that_asked() {
+        let mut residency = residency();
+        let (first, first_inbox) = ImageInbox::new();
+        let (second, second_inbox) = ImageInbox::new();
+        assert_eq!(residency.request("a.png", &first), Some((2048, 2048)));
+        assert_eq!(residency.request("a.png", &second), None, "joined");
+        assert!(first_inbox.drain().is_empty(), "nothing to report yet");
+
+        let source = Arc::from("a.png");
+        residency.complete_loaded(&source, decoded((40, 20)));
+        assert_eq!(loaded(&first_inbox.drain()), [("a.png", 40, 20)]);
+        assert_eq!(loaded(&second_inbox.drain()), [("a.png", 40, 20)]);
+
+        residency.complete_loaded(&source, decoded((1, 1)));
+        assert!(
+            first_inbox.drain().is_empty(),
+            "a stray completion reports nothing"
+        );
+
+        let (third, third_inbox) = ImageInbox::new();
+        assert_eq!(residency.request("a.png", &third), None);
+        assert_eq!(
+            loaded(&third_inbox.drain()),
+            [("a.png", 40, 20)],
+            "a loaded source reports at once"
+        );
+        assert!(first_inbox.drain().is_empty());
+    }
+
+    #[test]
+    fn the_first_decode_is_bounded_by_the_engine() {
+        let mut residency = ImageResidency::new(0, u32::MAX, 2.0);
+        let (reports, _inbox) = ImageInbox::new();
+        assert_eq!(
+            residency.request("a.png", &reports),
+            Some((MAX_RENDERABLE_DIMENSION, MAX_RENDERABLE_DIMENSION))
+        );
+    }
+
+    #[test]
+    fn a_failure_reports_to_every_view_and_then_at_once() {
+        let mut residency = residency();
+        let (first, first_inbox) = ImageInbox::new();
+        let (second, second_inbox) = ImageInbox::new();
+        residency.request("a.png", &first);
+        residency.request("a.png", &second);
+        assert!(residency.complete_failed("a.png"));
+        for inbox in [&first_inbox, &second_inbox] {
+            assert!(matches!(
+                inbox.drain().as_slice(),
+                [ImageEvent::Failed { source }] if &**source == "a.png"
+            ));
+        }
+        assert!(
+            !residency.complete_failed("a.png"),
+            "no load in flight: nothing reported, nothing to note"
+        );
+        assert!(first_inbox.drain().is_empty());
+        assert_eq!(residency.request("a.png", &first), None);
+        assert!(matches!(
+            first_inbox.drain().as_slice(),
+            [ImageEvent::Failed { .. }]
+        ));
+    }
+
+    #[test]
+    fn a_fetched_document_reports_its_parse_to_every_view_that_asked() {
+        let mut residency = residency();
+        let (first, first_inbox) = ImageInbox::new();
+        let (second, second_inbox) = ImageInbox::new();
+        residency.request("icon.svg", &first);
+        residency.request("icon.svg", &second);
+        residency.complete_parsed("icon.svg", &document());
+        for inbox in [&first_inbox, &second_inbox] {
+            assert!(matches!(
+                inbox.drain().as_slice(),
+                [ImageEvent::ParsedDocument { source, .. }] if &**source == "icon.svg"
+            ));
+        }
+        residency.complete_parsed("icon.svg", &document());
+        assert!(first_inbox.drain().is_empty());
+        assert_eq!(
+            residency.request("icon.svg", &first),
+            Some((2048, 2048)),
+            "a parsed document is fetched again"
+        );
+    }
+
+    #[test]
+    fn a_document_request_reports_to_the_view_that_asked_once() {
+        let mut residency = residency();
+        let (first, first_inbox) = ImageInbox::new();
+        let (second, second_inbox) = ImageInbox::new();
+        residency.request_document(Arc::from("svg-content:a"), &first);
+        residency.request_document(Arc::from("svg-content:b"), &second);
+
+        assert_eq!(
+            residency.complete_requested_document("svg-content:a", Ok(document())),
+            None
+        );
+        assert!(matches!(
+            first_inbox.drain().as_slice(),
+            [ImageEvent::ParsedDocument { source, .. }] if &**source == "svg-content:a"
+        ));
+        assert!(second_inbox.drain().is_empty());
+
+        assert_eq!(
+            residency.complete_requested_document("svg-content:b", Err("broken".to_owned())),
+            Some("broken".to_owned()),
+            "the failure comes back for the host's note"
+        );
+        assert!(matches!(
+            second_inbox.drain().as_slice(),
+            [ImageEvent::Failed { source }] if &**source == "svg-content:b"
+        ));
+        assert_eq!(
+            residency.complete_requested_document("svg-content:b", Err("again".to_owned())),
+            None,
+            "no request left: nothing reported, nothing to note"
+        );
+        assert!(second_inbox.drain().is_empty());
     }
 }
