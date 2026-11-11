@@ -1,9 +1,6 @@
-//! The cache tiers: an in-memory LRU with a byte budget, and on native
-//! targets a disk cache with HTTP freshness semantics.
+//! The cache tiers, all `vant`'s: an in-memory LRU with a byte budget, and
+//! the HTTP freshness rules the byte tier
+//! ([`vant::byte_cache::ByteCache`]) applies over the platform's
+//! [`Store`](vant::Store).
 
-pub mod memory;
-
-#[cfg(not(target_arch = "wasm32"))]
-pub mod disk;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod http;
+pub use vant::{http, memory};

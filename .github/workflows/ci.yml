@@ -173,6 +173,7 @@ jobs:
         # does not target wasm32.
         run: >-
           cargo clippy --target wasm32-unknown-unknown --lib
+          -p vant
           -p bobcat-wasm
           -p bobcat-resources
           -p bobcat-core

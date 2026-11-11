@@ -15,7 +15,7 @@
 //!   returned while a refinement job at the drawn size runs off the painter's thread and replaces
 //!   it — the downsampling the size hint exists for;
 //! - the bitmap was evicted, and is restored on the painter's thread, inside the read, from the
-//!   encoded bytes — kept in memory when nothing else holds them, read back from the disk tier or
+//!   encoded bytes — kept in memory when nothing else holds them, read back from the byte tier or
 //!   the file when something does — because a read after a reported load must not miss. That
 //!   restore fetches and decodes synchronously and takes no decode permit: it must never wait for a
 //!   background decode.
@@ -64,8 +64,10 @@ use bobcat_core::{
 use bytes::Bytes;
 use rustc_hash::FxHashMap;
 use url::Url;
+use vant::Platform;
+use vant::image::{bounded, wants_refinement};
+use vant::memory::MemoryCache;
 
-use crate::cache::memory::MemoryCache;
 use crate::decode::{Bitmap, DecodeError};
 use crate::image_header::ImageHeader;
 use crate::mime::ImageFormat;
@@ -155,8 +157,8 @@ struct Loaded {
     format: ImageFormat,
     header: Option<ImageHeader>,
     /// The encoded bytes, kept when no other tier can hand them back: a
-    /// registration that may be cleared, a `data:` URL, a response the disk
-    /// did not store, and everything in the browser.
+    /// registration that may be cleared, a `data:` URL, a response the byte
+    /// tier did not store, and everything in the browser.
     encoded: Option<Bytes>,
     /// A refinement decode in flight, and the size it targets.
     refining: Option<(u32, u32)>,
@@ -257,7 +259,7 @@ impl ImageState {
 /// knows it as a bitmap or a failure, joins a load in flight, and otherwise
 /// starts the load and remembers who asked. A document parsed before is
 /// fetched and parsed again.
-pub(crate) fn request(resources: &Resources, source: &str, reports: &ImageReports) {
+pub(crate) fn request<P: Platform>(resources: &Resources<P>, source: &str, reports: &ImageReports) {
     let mut state = resources.local.borrow_mut();
     match state.entries.get_mut(source) {
         Some(Entry::Loaded(loaded)) => {
@@ -305,8 +307,8 @@ pub(crate) fn request(resources: &Resources, source: &str, reports: &ImageReport
 /// outcome is reported to `reports`. Nothing is resolved or fetched, no
 /// entry is filed and none is consulted: every request is one parse and one
 /// report.
-pub(crate) fn request_document(
-    resources: &Resources,
+pub(crate) fn request_document<P: Platform>(
+    resources: &Resources<P>,
     source: &str,
     bytes: Bytes,
     kind: DocumentKind,
@@ -322,7 +324,7 @@ pub(crate) fn request_document(
 }
 
 /// Applies every completion queued since the last turn.
-pub(crate) fn service(resources: &Resources) {
+pub(crate) fn service<P: Platform>(resources: &Resources<P>) {
     let completions: Vec<Completion> = {
         let mut state = resources.local.borrow_mut();
         let mut drained = Vec::new();
@@ -338,7 +340,7 @@ pub(crate) fn service(resources: &Resources) {
     }
 }
 
-fn apply(resources: &Resources, completion: Completion) {
+fn apply<P: Platform>(resources: &Resources<P>, completion: Completion) {
     let mut state = resources.local.borrow_mut();
     match completion {
         Completion::Loaded {
@@ -443,13 +445,17 @@ fn apply(resources: &Resources, completion: Completion) {
 }
 
 /// Records the frame's working set: those bitmaps are never evicted.
-pub(crate) fn retain(resources: &Resources, frame: &[Arc<str>]) {
+pub(crate) fn retain<P: Platform>(resources: &Resources<P>, frame: &[Arc<str>]) {
     let mut state = resources.local.borrow_mut();
     let _ = state.bitmaps.pin(frame);
 }
 
 /// The pixels for `source`, for a draw of `hint`.
-pub(crate) fn read(resources: &Resources, source: &str, hint: ImageSizeHint) -> Option<ImageData> {
+pub(crate) fn read<P: Platform>(
+    resources: &Resources<P>,
+    source: &str,
+    hint: ImageSizeHint,
+) -> Option<ImageData> {
     let mut state = resources.local.borrow_mut();
     let state = &mut *state;
     let loaded = match state.entries.get_mut(source)? {
@@ -459,7 +465,10 @@ pub(crate) fn read(resources: &Resources, source: &str, hint: ImageSizeHint) -> 
         // unreachable for an SVG document.
         Entry::Parsed | Entry::Loading { .. } | Entry::Failed => return None,
     };
-    let target = bounded(hint.fit(loaded.intrinsic.0, loaded.intrinsic.1));
+    let target = bounded(
+        hint.fit(loaded.intrinsic.0, loaded.intrinsic.1),
+        MAX_RENDERABLE_DIMENSION,
+    );
     if let Some(image) = state.bitmaps.get(source) {
         let image = image.clone();
         if loaded.refining.is_none()
@@ -520,31 +529,6 @@ pub(crate) fn read(resources: &Resources, source: &str, hint: ImageSizeHint) -> 
     }
 }
 
-/// Never ask a decoder for more than the rasterizer can draw.
-fn bounded(target: (u32, u32)) -> (u32, u32) {
-    ImageSizeHint::new(MAX_RENDERABLE_DIMENSION, MAX_RENDERABLE_DIMENSION).fit(target.0, target.1)
-}
-
-/// Whether a resident bitmap of `resident` should be replaced by one decoded
-/// for `target`: it is at least `ratio` times too large on both axes, or it
-/// is smaller than the draw while the image itself has more pixels to give.
-pub(crate) fn wants_refinement(
-    resident: (u32, u32),
-    target: (u32, u32),
-    intrinsic: (u32, u32),
-    ratio: f32,
-) -> bool {
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "pixel counts are compared approximately, by ratio"
-    )]
-    let too_large = resident.0 as f32 >= target.0 as f32 * ratio
-        && resident.1 as f32 >= target.1 as f32 * ratio;
-    let too_small = (resident.0 < target.0 || resident.1 < target.1)
-        && (resident.0 < intrinsic.0 || resident.1 < intrinsic.1);
-    too_large || too_small
-}
-
 /// What a load's transport-and-preprocess step hands on.
 #[cfg(not(target_arch = "wasm32"))]
 enum Prepared {
@@ -564,7 +548,7 @@ enum Prepared {
 /// The blocking half of a load: fetch the bytes and run them through the
 /// preprocessing pipeline. Runs on a blocking-pool thread.
 #[cfg(not(target_arch = "wasm32"))]
-fn prepare(shared: &Shared, source: &str, url: &Url) -> Result<Prepared, String> {
+fn prepare<P: Platform>(shared: &Shared<P>, source: &str, url: &Url) -> Result<Prepared, String> {
     let fetched = shared
         .fetch_job(
             url,
@@ -602,8 +586,8 @@ fn prepare(shared: &Shared, source: &str, url: &Url) -> Result<Prepared, String>
 /// submitted until it returns, so a decode that has to wait holds no thread.
 /// A document is parsed in the decode's place, under the same permit.
 #[cfg(not(target_arch = "wasm32"))]
-async fn load(
-    shared: &SharedHandle,
+async fn load<P: Platform>(
+    shared: &SharedHandle<P>,
     handle: &tokio::runtime::Handle,
     permits: &Arc<tokio::sync::Semaphore>,
     source: &Arc<str>,
@@ -677,7 +661,12 @@ async fn acquire_decode(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn spawn_load(resources: &Resources, source: Arc<str>, url: Url, bound: (u32, u32)) {
+fn spawn_load<P: Platform>(
+    resources: &Resources<P>,
+    source: Arc<str>,
+    url: Url,
+    bound: (u32, u32),
+) {
     let shared = SharedHandle::clone(&resources.shared);
     let handle = resources.executor.handle();
     let permits = resources.executor.decode_permits();
@@ -696,7 +685,12 @@ fn spawn_load(resources: &Resources, source: Arc<str>, url: Url, bound: (u32, u3
 /// Starts the parse of a document the page handed over: [`parse_job`] as a
 /// task of its own, with no transport and no preprocessing in front of it.
 #[cfg(not(target_arch = "wasm32"))]
-fn spawn_parse(resources: &Resources, source: Arc<str>, bytes: Bytes, kind: DocumentKind) {
+fn spawn_parse<P: Platform>(
+    resources: &Resources<P>,
+    source: Arc<str>,
+    bytes: Bytes,
+    kind: DocumentKind,
+) {
     let shared = SharedHandle::clone(&resources.shared);
     let handle = resources.executor.handle();
     let permits = resources.executor.decode_permits();
@@ -709,7 +703,12 @@ fn spawn_parse(resources: &Resources, source: Arc<str>, bytes: Bytes, kind: Docu
 /// Starts the parse of a document the page handed over, in a local task on
 /// the Render Worker, as a fetched document's parse runs in its load's.
 #[cfg(target_arch = "wasm32")]
-fn spawn_parse(resources: &Resources, source: Arc<str>, bytes: Bytes, kind: DocumentKind) {
+fn spawn_parse<P: Platform>(
+    resources: &Resources<P>,
+    source: Arc<str>,
+    bytes: Bytes,
+    kind: DocumentKind,
+) {
     let shared = SharedHandle::clone(&resources.shared);
     wasm_bindgen_futures::spawn_local(async move {
         let parsed = parse(&source, &bytes, kind);
@@ -718,7 +717,12 @@ fn spawn_parse(resources: &Resources, source: Arc<str>, bytes: Bytes, kind: Docu
 }
 
 #[cfg(target_arch = "wasm32")]
-fn spawn_load(resources: &Resources, source: Arc<str>, url: Url, bound: (u32, u32)) {
+fn spawn_load<P: Platform>(
+    resources: &Resources<P>,
+    source: Arc<str>,
+    url: Url,
+    bound: (u32, u32),
+) {
     let shared = SharedHandle::clone(&resources.shared);
     wasm_bindgen_futures::spawn_local(async move {
         let fetched = shared
@@ -734,11 +738,11 @@ fn spawn_load(resources: &Resources, source: Arc<str>, url: Url, bound: (u32, u3
 }
 
 #[cfg(target_arch = "wasm32")]
-async fn load_async(
-    shared: &Shared,
+async fn load_async<P: Platform>(
+    shared: &Shared<P>,
     source: &Arc<str>,
     url: &Url,
-    fetched: Result<crate::transport::Fetched, crate::error::Failure>,
+    fetched: Result<crate::transport::Fetched, vant::error::Failure>,
     bound: (u32, u32),
 ) -> Result<LoadOutcome, String> {
     let fetched = fetched.map_err(|failure| failure.to_string())?;
@@ -758,7 +762,7 @@ async fn load_async(
         return parse(source, &preprocessed.bytes, DocumentKind::Svg).map(LoadOutcome::Vector);
     }
     let bitmap = shared
-        .decode_bytes_async(&preprocessed.bytes, format, header, bound)
+        .decode_bytes_async(preprocessed.bytes.clone(), format, header, bound)
         .await
         .map_err(|error| error.to_string())?;
     let encoded = (!restorable).then_some(preprocessed.bytes);
@@ -779,8 +783,8 @@ pub(crate) struct Refinement {
 /// The refinement job: recover the bytes if the entry did not keep them,
 /// take a decode permit, decode at the drawn size.
 #[cfg(not(target_arch = "wasm32"))]
-async fn refine(
-    shared: &SharedHandle,
+async fn refine<P: Platform>(
+    shared: &SharedHandle<P>,
     handle: &tokio::runtime::Handle,
     permits: &Arc<tokio::sync::Semaphore>,
     refinement: Refinement,
@@ -810,7 +814,7 @@ async fn refine(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn spawn_refine(resources: &Resources, source: Arc<str>, refinement: Refinement) {
+fn spawn_refine<P: Platform>(resources: &Resources<P>, source: Arc<str>, refinement: Refinement) {
     let shared = SharedHandle::clone(&resources.shared);
     let handle = resources.executor.handle();
     let permits = resources.executor.decode_permits();
@@ -833,7 +837,7 @@ fn spawn_refine(resources: &Resources, source: Arc<str>, refinement: Refinement)
 }
 
 #[cfg(target_arch = "wasm32")]
-fn spawn_refine(resources: &Resources, source: Arc<str>, refinement: Refinement) {
+fn spawn_refine<P: Platform>(resources: &Resources<P>, source: Arc<str>, refinement: Refinement) {
     let shared = SharedHandle::clone(&resources.shared);
     let Refinement {
         url,
@@ -849,7 +853,7 @@ fn spawn_refine(resources: &Resources, source: Arc<str>, refinement: Refinement)
         };
         let completion = match bytes {
             Ok(bytes) => match shared
-                .decode_bytes_async(&bytes, format, header, target)
+                .decode_bytes_async(bytes, format, header, target)
                 .await
             {
                 Ok(bitmap) => Completion::Refined {
@@ -872,7 +876,7 @@ fn spawn_refine(resources: &Resources, source: Arc<str>, refinement: Refinement)
 /// as [`restore_bytes`], reached through the background job's transport seam
 /// on a blocking-pool thread.
 #[cfg(not(target_arch = "wasm32"))]
-fn restore_for_job(shared: &Shared, url: &Url) -> Result<Bytes, String> {
+fn restore_for_job<P: Platform>(shared: &Shared<P>, url: &Url) -> Result<Bytes, String> {
     shared
         .fetch_job(
             url,
@@ -884,12 +888,12 @@ fn restore_for_job(shared: &Shared, url: &Url) -> Result<Bytes, String> {
         .map_err(|failure| failure.to_string())
 }
 
-/// Encoded bytes for an image whose bytes were not kept: the disk tier or
+/// Encoded bytes for an image whose bytes were not kept: the byte tier or
 /// the file natively, only what is already in hand in the browser.
 ///
 /// Natively this is the painter's own restore, called inside
 /// [`FrameImages::read`](bobcat_core::FrameImages::read).
-fn restore_bytes(shared: &Shared, url: &Url) -> Result<Bytes, String> {
+fn restore_bytes<P: Platform>(shared: &Shared<P>, url: &Url) -> Result<Bytes, String> {
     #[cfg(not(target_arch = "wasm32"))]
     {
         shared
@@ -909,7 +913,7 @@ fn restore_bytes(shared: &Shared, url: &Url) -> Result<Bytes, String> {
             .transports
             .local(url)
             .unwrap_or_else(|| {
-                Err(crate::error::Failure::new(
+                Err(vant::error::Failure::new(
                     bobcat_core::resource::ResourceErrorKind::Unavailable,
                     bobcat_core::resource::ResourceErrorPhase::Open,
                     "the bytes were not retained and cannot be re-fetched synchronously",
@@ -922,8 +926,8 @@ fn restore_bytes(shared: &Shared, url: &Url) -> Result<Bytes, String> {
 
 /// The painter's own decode, for a restore inside a read: the platform
 /// decoder directly, with no permit and no test seam.
-fn decode_blocking(
-    shared: &Shared,
+fn decode_blocking<P: Platform>(
+    shared: &Shared<P>,
     bytes: &[u8],
     format: ImageFormat,
     header: Option<ImageHeader>,
@@ -1372,34 +1376,5 @@ mod job_tests {
             1,
             "the drop returned while the driver was still inside the wakeup"
         );
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::wants_refinement;
-
-    #[test]
-    fn refinement_triggers_on_a_bitmap_far_too_large_or_too_small() {
-        // A 2048-wide initial decode drawn at 200px: twice too large.
-        assert!(wants_refinement(
-            (2048, 1536),
-            (200, 150),
-            (4000, 3000),
-            2.0
-        ));
-        // Drawn at 1100px: under the ratio, kept as is.
-        assert!(!wants_refinement(
-            (2048, 1536),
-            (1100, 825),
-            (4000, 3000),
-            2.0
-        ));
-        // Drawn larger than the resident bitmap while the image has more.
-        assert!(wants_refinement((200, 150), (400, 300), (4000, 3000), 2.0));
-        // Drawn larger than the resident bitmap, which is already everything.
-        assert!(!wants_refinement((200, 150), (400, 300), (200, 150), 2.0));
-        // Exactly the drawn size.
-        assert!(!wants_refinement((200, 150), (200, 150), (4000, 3000), 2.0));
     }
 }

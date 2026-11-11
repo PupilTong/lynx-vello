@@ -25,6 +25,7 @@ seldon = { path = "crates/seldon" }
 prime-radiant = { path = "crates/prime-radiant" }
 quickjs-rust-bridge = { path = "crates/quickjs-rust-bridge" }
 terminus = { path = "crates/terminus" }
+vant = { path = "crates/vant" }
 
 stylo = { path = "vendor/stylo/style", package = "stylo", features = ["lynx"] }
 stylo_atoms = { path = "vendor/stylo/stylo_atoms" }

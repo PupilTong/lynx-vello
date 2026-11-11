@@ -2,9 +2,8 @@
 
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
 
-use thiserror::Error;
+pub use vant::error::{ResourceError, ResourceErrorKind, ResourceErrorPhase, RetryAdvice};
 
 use crate::style::PreparsedStyleSheet;
 
@@ -439,62 +438,6 @@ pub(crate) fn unanswered_source() -> ResourceError {
         message: "the fetcher dropped a source request without completing it".into(),
         retry: RetryAdvice::Never,
     }
-}
-
-/// Stable resource failure details shared by every operation.
-#[derive(Clone, Debug, Error)]
-#[error("{kind:?} during {phase:?}: {message}")]
-pub struct ResourceError {
-    pub kind: ResourceErrorKind,
-    pub phase: ResourceErrorPhase,
-    pub locator: Option<Arc<str>>,
-    pub message: Arc<str>,
-    pub retry: RetryAdvice,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum ResourceErrorKind {
-    InvalidRequest,
-    InvalidUrl,
-    UnsupportedScheme,
-    UnsupportedOperation,
-    NotFound,
-    PermissionDenied,
-    PolicyDenied,
-    Dns,
-    Connect,
-    Tls,
-    Protocol,
-    RedirectLoop,
-    TooManyRedirects,
-    RequestBody,
-    ResponseBody,
-    Io,
-    IntegrityMismatch,
-    ResponseTooLarge,
-    Unavailable,
-    Other,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum ResourceErrorPhase {
-    Resolve,
-    Open,
-    Connect,
-    SendRequest,
-    ReceiveHeaders,
-    ReadBody,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum RetryAdvice {
-    #[default]
-    Never,
-    Immediate,
-    After(Duration),
 }
 
 #[cfg(test)]

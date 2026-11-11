@@ -153,7 +153,8 @@ Rust parses structured input only when Rust behavior actually needs its fields
 | `crates/bobcat-source` | Owner of Lynx source parsing: ZIP, restricted XML, `.web.bundle`, `.lynx.bundle`. | [→](#cratesbobcat-source) |
 | `crates/bobcat-core` | The native runtime core: group, view, painter, QuickJS realms, page policy. | [→](#cratesbobcat-core) |
 | `crates/quickjs-rust-bridge` | Owner-thread-bound safe Rust wrapper around the pinned `vendor/quickjs` submodule. | [→](#cratesquickjs-rust-bridge) |
-| `crates/bobcat-resources` | Reference resource system: transports, MIME pipeline, caches, platform image decoding. | [→](#cratesbobcat-resources) |
+| `crates/vant` | Resource policy below `terminus`: cache tiers, RFC 9111 freshness, MIME pipeline, image sizing, the embedder capability traits (`Fetch`, `Store`, `ImageDecoder`, `Platform`). | [→](#cratesvant) |
+| `crates/bobcat-resources` | Reference resource system over `vant`: the load orchestration plus the native and browser adapters (`NativePlatform`, `BrowserPlatform`). | [→](#cratesbobcat-resources) |
 | `crates/bobcat-cli` | The `bobcat` product (`cli`) and the `bobcat-server` screenshot service (`server`), both embedders. | [cli](#cratesbobcat-cli-cli-feature), [server](#cratesbobcat-cli-server-feature) |
 | `crates/bobcat-wasm` | The pure-Rust `wasm-bindgen` browser embedder and npm facade. | [→](#cratesbobcat-wasm) |
 | `crates/terminus` | Generic W3C-DOM-subset document tree and standards-oriented CSS computation core. | [→](#cratesterminus) |
@@ -663,8 +664,10 @@ made and the realm's `fetchResource` settles in that same call, which is the
 only synchronous answer this protocol has; the default is no probe, and a
 probe must neither block nor start a load. It carries no response-size limit either; each
 fetcher owns the memory bound for the response it materializes. The resource
-module must not decode images, fonts or templates, upload render resources, or
-own cache/retry policy.
+module must not decode images, fonts or templates, or upload render resources,
+and owns no cache or retry policy of its own: that policy is `vant`'s
+(`crates/vant`), the crate below `terminus` every fetcher applies, and core only
+re-exports its error vocabulary (`ResourceError` and friends).
 
 **`NativeModules` is the other host-injected, thread-bound capability.**
 `LynxGroup::create_lynx_view` takes a `Vec<Box<dyn NativeModule>>` beside the
@@ -1311,8 +1314,10 @@ carries a `terminus::link::ImageSizeHint` — the largest device-pixel extent th
 draws that source at, computed per draw under its transform and unioned per
 source — so a host decodes to the draw rather than to the file. No container
 sniffing, codec contract, cache policy or byte budget lives in `bobcat-core` or
-`terminus`; `crates/bobcat-resources` is the reference implementation every shipped
-embedder uses. `FrameImages::retain` — the sources one resolve pass met, in
+`terminus`: the sizing vocabulary (`ImageSizeHint`, `Bitmap`, `target_size`) and
+every cache policy are `vant`'s, which both re-export, and
+`crates/bobcat-resources` is the reference orchestration over `vant` that every
+shipped embedder uses. `FrameImages::retain` — the sources one resolve pass met, in
 paint order — carries **no default body**, so every store writes its working
 set where someone can see it rather than inheriting a silent no-op.
 `LynxView::prefetch_images` warms sources ahead of the walk that would discover
@@ -2858,12 +2863,56 @@ functions, or its own hook) is a cycle that leaks it. The token counts that
 independent of Bobcat, the DOM, resources, and runtime policy — it knows
 nothing about Lynx.
 
+### crates/vant
+
+The resource policy every embedder shares, below `terminus` (design:
+`docs/resource-cache-design.md`). It names no DOM, style, runtime or platform
+type and depends only on `bytes`, `http`, `url`, `serde_json`, `thiserror`,
+`rustc-hash` and `vello_common` (for `peniko::ImageData`). What lives here:
+
+- **The embedder capability traits**, modelled on the web platform's Fetch and
+  Cache APIs: `Fetch` (a transport: `fetch_blocking` answering `None` where the
+  host cannot block, async `fetch`, `owns_http_cache`, `map_file`), `Store`
+  (synchronous persistent bytes with `Meta`, `estimate`, `touch`, `volatility`
+  — `Durable`, `PurgedWhenIdle`, `EvictableAnytime` — and `map_body`),
+  `ImageDecoder`, and `Platform`, the bundle of the three an embedder hands
+  over (`into_parts`, `byte_budget`). Capabilities are traits with associated
+  types, never `dyn`; `Threaded` is the cfg'd marker that requires `Send + Sync`
+  natively and nothing on wasm32. `NoStore` is the `Store` of a host with no
+  persistent tier.
+- **The tiers**: `memory::MemoryCache` (LRU by stamp under a byte budget with a
+  pinned working set), `byte_cache::ByteCache<S: Store>` (the HTTP byte tier:
+  RFC 9111 `plan` over a stored response, index rebuilt from `Store::scan` and
+  treated as a hint, LRU by `last_used`, budget `min(configured, quota)`,
+  `touch` rate-limited to once per 24 h per entry, an entry larger than the
+  budget refused), and `http` (`StoredResponse`, freshness, revalidation
+  headers, the JSON record a `Store` keeps beside a body).
+- **The vocabulary**: `CachePolicy`, `mime`, `preprocess`, `image_header`,
+  `data_url`, `image` (`ImageSizeHint`, `Bitmap`, `DecodeError`,
+  `target_size`, `wants_refinement`, `bounded`), and `error`
+  (`ResourceError`, `ResourceErrorKind`, `ResourceErrorPhase`, `RetryAdvice`,
+  `Failure`), which `bobcat-core` and `terminus` re-export at their old paths.
+
+Not here yet: the load orchestration (`images.rs`, `sources.rs`, the registry)
+and the browser `Store`, which stay in `bobcat-resources` until the later PRs
+the design document lists.
+
 ### crates/bobcat-resources
 
 The cross-platform reference resource system: one `ResourceFetcher` for macOS,
 Linux and the browser, which every shipped embedder uses. It is the worked
-example of what the protocol expects, not part of the protocol, and core stays
-free of resources. Five things live here and nowhere else in the workspace.
+example of what the protocol expects, not part of the protocol. The policy it
+applies is `vant`'s; what is here is the orchestration — `Resources<P:
+vant::Platform>`, `ViewResources<P>`, the job executor, the image and source
+pipelines, the registry — and the reference adapters: `NativePlatform`
+(`NativeFetch` over libcurl and `file:`, `FsStore` over a cache directory,
+`NativeDecoder` over ImageIO/gdk-pixbuf) and, on wasm32, `BrowserPlatform`
+(`BrowserFetch` over the Render Worker's `fetch`, `NoStore`, `BrowserDecoder`
+over the main thread's `Image`). `Resources::new` builds the target's
+`DefaultPlatform` with no persistent store; an embedder with a disk cache, its
+own HTTP stack or its own storage builds a `Platform` and passes it to
+`Resources::with_platform`. Five things live here and nowhere else in the
+workspace.
 
 **Transports**: contents the embedder registers under any URL
 (`Resources::register` and `register_style_sheet`, or a `ContainerInstaller`'s
@@ -2907,13 +2956,19 @@ engine's strict validation sees what a browser's decoder would have produced,
 JSON validated, images container-sniffed and header-probed for their intrinsic
 size without decoding a pixel, the rest passed through.
 
-**Tiered caching**: decoded bitmaps in a memory tier under a byte budget with
-the frame's working set pinned against eviction, and fetched bytes in a disk
-tier under its own budget with RFC 9111 freshness, `ETag`/`Last-Modified`
-revalidation, and the fetch cache modes mapped from `CachePolicy` (natively;
-the browser's HTTP cache plays that role there). Stylesheet responses,
-including pending loads and failures, are shared by resolved URL within a
-resource scope. Preload hints populate that same cache; registration changes
+**Tiered caching, applied from `vant`**: decoded bitmaps in
+`vant::memory::MemoryCache` under a byte budget with the frame's working set
+pinned against eviction, and fetched bytes in `vant::byte_cache::ByteCache`
+over the platform's `Store` (`FsStore`: `<fnv64>.bin` beside `<fnv64>.json`
+holding the key, length, last use and the HTTP record, temp-and-rename
+writes, strays and broken halves swept at open) with RFC 9111 freshness,
+`ETag`/`Last-Modified` revalidation, and the fetch cache modes mapped from
+`CachePolicy`. A `Fetch` whose `owns_http_cache` is true — the browser's —
+gets no byte tier in front of it; its HTTP cache plays that role, and
+nothing it holds can be read back synchronously, so the image pipeline keeps
+the encoded bytes of what it cannot restore. Stylesheet responses, including
+pending loads and failures, are shared by resolved URL within a resource
+scope. Preload hints populate that same cache; registration changes
 invalidate the affected URLs.
 
 **Platform image decoding** (raster images; SVG is parsed, below): no codec
@@ -4664,8 +4719,8 @@ Treat that as a hypothesis to test, not the default explanation for a failure.
 
   ```sh
   cargo clippy --target wasm32-unknown-unknown --lib \
-    -p bobcat-wasm -p bobcat-resources -p bobcat-core -p terminus -p seldon \
-    -p bobcat-source -p quickjs-rust-bridge -- -D warnings
+    -p vant -p bobcat-wasm -p bobcat-resources -p bobcat-core -p terminus \
+    -p seldon -p bobcat-source -p quickjs-rust-bridge -- -D warnings
   ```
 
   `--lib`, not `--all-targets`. `bobcat-core`'s own tokio dependency builds for

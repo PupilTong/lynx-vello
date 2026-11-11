@@ -434,6 +434,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "url",
+ "vant",
  "wasm_thread",
  "web-time",
 ]
@@ -458,6 +459,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "url",
+ "vant",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
@@ -5051,6 +5053,7 @@ dependencies = [
  "stylo_traits",
  "svgtypes",
  "url",
+ "vant",
  "vello_common",
  "vello_gpu",
  "web-time",
@@ -5533,6 +5536,19 @@ name = "valuable"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
+
+[[package]]
+name = "vant"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "http 1.4.2",
+ "rustc-hash 2.1.3",
+ "serde_json",
+ "thiserror 2.0.18",
+ "url",
+ "vello_common",
+]
 
 [[package]]
 name = "ve-tos-generic"

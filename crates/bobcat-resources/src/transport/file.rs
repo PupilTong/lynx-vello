@@ -1,18 +1,17 @@
-//! `file:` URLs on native targets: the local filesystem, labelled by
-//! extension.
+//! `file:` URLs on native targets: the local filesystem, read for
+//! [`NativeFetch`](super::NativeFetch).
 
 use std::io;
 
 use bobcat_core::resource::{ResourceErrorKind, ResourceErrorPhase};
 use bytes::Bytes;
 use url::Url;
+use vant::error::Failure;
 
-use crate::error::Failure;
 use crate::file_body::{self, Body};
-use crate::mime;
 
 /// Reads the file `url` names, handed over as `body` says.
-pub(crate) fn read(url: &Url, body: Body) -> Result<(Bytes, Option<mime::MediaType>), Failure> {
+pub(crate) fn read(url: &Url, body: Body) -> Result<Bytes, Failure> {
     let path = url.to_file_path().map_err(|()| {
         Failure::new(
             ResourceErrorKind::InvalidUrl,
@@ -20,7 +19,7 @@ pub(crate) fn read(url: &Url, body: Body) -> Result<(Bytes, Option<mime::MediaTy
             "the file URL has no local path",
         )
     })?;
-    let bytes = file_body::read(&path, body).map_err(|error| {
+    file_body::read(&path, body).map_err(|error| {
         let kind = match error.kind() {
             io::ErrorKind::NotFound => ResourceErrorKind::NotFound,
             io::ErrorKind::PermissionDenied => ResourceErrorKind::PermissionDenied,
@@ -31,9 +30,7 @@ pub(crate) fn read(url: &Url, body: Body) -> Result<(Bytes, Option<mime::MediaTy
             ResourceErrorPhase::Open,
             format!("could not read `{}`: {error}", path.display()),
         )
-    })?;
-    let media_type = mime::from_extension(url.path());
-    Ok((bytes, media_type))
+    })
 }
 
 #[cfg(test)]
@@ -41,21 +38,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_file_reads_with_its_extension_type_and_a_missing_one_is_not_found() {
+    fn a_file_reads_its_contents_and_a_missing_one_is_not_found() {
         let dir =
             std::env::temp_dir().join(format!("bobcat-resources-file-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("dir");
         let path = dir.join("style.css");
         std::fs::write(&path, b"a{}").expect("write");
         let url = Url::from_file_path(&path).expect("a file URL");
-        let (bytes, media_type) = read(&url, Body::Read).expect("read");
-        assert_eq!(&bytes[..], b"a{}");
-        assert_eq!(
-            media_type
-                .map(|media_type| media_type.essence().to_owned())
-                .as_deref(),
-            Some("text/css")
-        );
+        assert_eq!(&read(&url, Body::Read).expect("read")[..], b"a{}");
+        assert_eq!(&read(&url, Body::Mapped).expect("mapped")[..], b"a{}");
 
         let missing = Url::from_file_path(dir.join("missing.png")).expect("a file URL");
         let failure = read(&missing, Body::Mapped).expect_err("missing");

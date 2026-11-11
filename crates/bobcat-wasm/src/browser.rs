@@ -33,7 +33,7 @@ use bobcat_core::{
     ModuleCallback, NativeModule, PageConfig, Painter, ScreenMetrics, StyleThreads, ViewSources,
     WindowTarget, configure_wasm_workers,
 };
-use bobcat_resources::{Resources, ResourcesConfig, ViewResources};
+use bobcat_resources::{BrowserPlatform, Resources, ResourcesConfig, ViewResources};
 use bobcat_source::{PageSource, ZipSource, register_lynx_xml_response};
 use js_sys::{Array, Object, Promise, Reflect};
 use url::Url;
@@ -441,15 +441,17 @@ impl BobcatRenderer {
             )
             .await
             .map_err(js_error)?;
-            let resources = Resources::new(
+            let (platform, notes) = BrowserPlatform::new(Some(image_port));
+            let resources = Resources::with_platform(
                 ResourcesConfig {
-                    image_port: Some(image_port),
                     // Lazy bundles: a `lynx.fetchBundle` installs its
                     // sections through this, and without one every fetch
                     // fails.
                     container_installer: Some(Arc::new(bobcat_source::BundleInstaller)),
                     ..ResourcesConfig::default()
                 },
+                platform,
+                notes,
                 {
                     let events = Arc::clone(&events);
                     move || events.request_event()

@@ -1,0 +1,28 @@
+[package]
+name = "vant"
+description = "Resource policy shared by every Bobcat embedder: cache tiers, HTTP freshness, MIME preprocessing, image sizing, and the resource error vocabulary"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+# Only `benches/` holds benchmarks: keep `cargo build --benches` from compiling
+# this target a second time as a bench harness (AGENTS.md, "Benchmarks are
+# only the `benches/` targets").
+bench = false
+
+[dependencies]
+bytes = { workspace = true }
+http = { workspace = true }
+rustc-hash = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+url = { workspace = true }
+# Only for `peniko::ImageData`, the shape a decoded bitmap is drawn in.
+vello_common = { workspace = true, features = ["std"] }
+
+[lints]
+workspace = true

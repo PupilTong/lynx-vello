@@ -16,6 +16,7 @@ bench = false
 
 [dependencies]
 bobcat-core = { workspace = true }
+vant = { workspace = true }
 bytes = { workspace = true }
 http = { workspace = true }
 rustc-hash = { workspace = true }
