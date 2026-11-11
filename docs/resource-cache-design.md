@@ -278,39 +278,70 @@ Not in PR1: moving `images.rs`/`sources.rs`/`registry.rs` orchestration into
 
 ## PR2: QuickJS code cache
 
-Lookup happens **at source delivery, in the fetcher**, not at compile time in
-the bridge: a `require`/`loadModuleSync` must answer synchronously and the
-browser's storage cannot, so the fetcher hashes the script text it is about to
-deliver, consults the artifact cache and delivers `(text, Option<bytecode>)`
-together. `LoadedSource::Module` gains `bytecode: Option<Bytes>`. The bridge's
-three compile points (`qjs_compile_module_source`, `qjs_eval`, the `require`
-wrapper) take optional bytecode and read it with `JS_ReadObject` instead of
-compiling; on a miss they compile, `JS_WriteObject` the result and hand the
-bytes back through a compile hook so the fetcher can store them. Serialising
-the just-compiled object is cheap; nothing recompiles in the background.
+Three parties, each doing the one thing only it can:
 
-Entry layout, verified **before** `JS_ReadObject` (which trusts its input):
+- **The engine (`bobcat-core`) looks bytecode up at the moment it would
+  compile**, synchronously, in `vant::artifact::Artifacts` — a process-wide
+  memory tier (`Arc`, `Send + Sync` on every target, bounded by bytes, LRU).
+  A `require`/`loadModuleSync` must answer within the call and the browser's
+  storage cannot be read from a realm's thread, so the lookup the engine makes
+  is always a memory lookup. On a miss it compiles as before and asks the
+  bridge to keep the bytecode of that compile, which it then inserts.
+- **The resource system (`bobcat-resources`) owns the embedder's `Store`.**
+  Before it delivers a script's text it hashes the text and `preload`s every
+  stored variant of that source into the memory tier
+  (`ArtifactCache::preload`); after the engine compiled something new it
+  writes it back (`ArtifactCache::flush`, from the pump, on the blocking pool
+  natively). `LoadedSource::Module` is unchanged: nothing about bytecode
+  crosses the fetcher protocol, so a fetcher that knows nothing of this still
+  gets in-process reuse.
+- **The bridge (`quickjs-rust-bridge`) reads and writes.** `ModuleCode::{Compile,
+  Capture, Cached}` on `Context::complete_module_with`, `RequiredCode` on the
+  synchronous loader, `Context::take_compiled` for what a capture left. Bytecode
+  that fails to read falls back to the text and re-captures; `JS_ReadObject`
+  trusts its input, so nothing reaches it that `vant::artifact::decode` (for a
+  stored entry) or this process's own compile (for a resident one) did not
+  vouch for.
+
+Key: `ArtifactKey { source: SourceDigest, variant: Variant }` under an
+`EngineId`.
+
+- `SourceDigest` — 128-bit SipHash-1-3 of the text. `.web.bundle` headers
+  carry no content hash, so the text itself is hashed.
+- `Variant` — what the compile bakes in beyond the text: for a module its
+  name (stack frames and the module record carry it; `import.meta.url` is set
+  after the read and is not part of it), for a CommonJS file the response URL
+  it is compiled under and the wrapper's parameter list; plus whether the
+  runtime strips source text.
+- `EngineId` — the bridge's `bytecode_engine_id()`: a build-time digest of the
+  QuickJS and shim sources, the bridge version, `BC_VERSION`, pointer width
+  and endianness.
+
+Stored entry, verified by `decode` before the payload is handed on:
 
 ```
-magic | format version | BC_VERSION | engine build id (quickjs commit, bridge
-version, strip flags, cfg) | 128-bit source hash (SipHash-1-3, as the
-synthetic-source hash) | hash of module name/URL and require parameter list |
-bytecode length | crc64 | bytecode
+magic "VANTART\0" | format u32 | engine u64 | source u128 | variant u64 |
+payload length u64 | crc64 | bytecode
 ```
 
-The module name is part of the key because the compile bakes it into stack
-frames and `import.meta.url`. `.web.bundle` headers carry no content hash, so
-the text itself is hashed.
+Storage: `vant::artifact::ArtifactCache<S: Store>` over a Store of its own
+(natively `<cache dir>/code`, beside the byte tier's files). Entries are
+content-addressed, so two processes writing one key write identical bytes and
+either rename may win; there is no shared index file (Lynx's single
+`meta.json` under a process-local mutex is the pattern to avoid). Expiry: 15
+days since last use, a byte budget (64 MiB by default, clamped to the Store's
+quota), and a wipe of every entry another `EngineId` wrote. Without a Store
+the memory tier alone serves, with identical keys, so adding storage later
+changes no caller; this is also what gives `bobcat-server` reuse across
+captures and several views of one card a single compile.
 
-Storage: `vant::artifact::ArtifactCache<S: Store>` — a process-wide memory
-tier (`Arc`, shared by every group and view, bounded) in front of an optional
-`Store` in its own namespace. Entries are content-addressed, so two processes
-writing one key write identical bytes and either rename may win; there is no
-shared index file (Lynx's single `meta.json` under a process-local mutex is
-the pattern to avoid). Expiry: last-access TTL plus a byte budget plus a
-namespace wipe when the engine build id changes. Without a Store the memory
-tier alone serves, with identical keys, so adding storage later changes no
-caller; this is also what gives `bobcat-server` cross-capture reuse.
+`Platform::into_parts` hands over `Parts { fetch, decoder, bytes:
+Option<Tier<Store>>, artifacts: Option<Tier<Store>> }`, each `Tier` a Store
+with its budget.
+
+Sources below 1 KiB are not cached. Not covered: `Context::evaluate` (the
+engine runs no fetched text through it) and runtime-registered text modules
+(tests and fixtures only).
 
 ## PR3: `terminus` owns image residency
 

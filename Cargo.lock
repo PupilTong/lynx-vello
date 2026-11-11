@@ -5545,6 +5545,7 @@ dependencies = [
  "http 1.4.2",
  "rustc-hash 2.1.3",
  "serde_json",
+ "siphasher",
  "thiserror 2.0.18",
  "url",
  "vello_common",
