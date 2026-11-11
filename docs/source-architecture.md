@@ -217,7 +217,8 @@ converter, the examples and the tests.
 `Configurations` and the `LepusCode` keys (`web::scan`), which is all its
 `view_sources` needs. `DeferredPage::register_in_background(resources)` then
 hands the whole decode, lowering and registration to
-`Resources::register_in_background`, which runs it on the resource system's
+`vant::registry::RegisterInBackground::register_in_background` —
+`bobcat_resources::Resources` implements it — which runs it on the resource system's
 blocking pool natively (a task of the Render Worker in the browser) and holds
 every source request for a URL under the container until it has run. The
 embedder creates its group, view and painter meanwhile; the view's first loads

@@ -246,7 +246,7 @@ struct ScriptInstaller {
     installed: Mutex<Vec<Url>>,
 }
 
-impl crate::ContainerInstaller for ScriptInstaller {
+impl crate::ContainerInstaller<bobcat_core::PreparsedStyleSheet> for ScriptInstaller {
     fn install(
         &self,
         url: &Url,
@@ -655,7 +655,7 @@ async fn a_load_under_a_container_being_registered_waits_for_it() {
         resources
             .shared
             .transports
-            .registry
+            .installs
             .install_covering(&Url::parse("app:///page/card.web.bundle/root.js").unwrap())
             .is_none()
     );
@@ -706,7 +706,7 @@ fn an_install_holds_its_container_path_and_nothing_beside_it() {
         resources
             .shared
             .transports
-            .registry
+            .installs
             .install_covering(&Url::parse(url).unwrap())
             .is_some()
     };

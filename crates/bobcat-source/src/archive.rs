@@ -3,11 +3,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Cursor, Read};
 
-use bobcat_resources::Resources;
 use percent_encoding::percent_decode_str;
 use thiserror::Error;
 use url::Url;
-use vant::Platform;
+use vant::registry::Register;
 
 use crate::{PageSource, SourceError};
 
@@ -118,9 +117,9 @@ impl ZipSource {
     /// origin, preserving ZIP-root paths. Call only after `page` succeeds.
     /// Keep these registrations for the view's lifetime: images may load
     /// after boot. Replacing a page should retire its resource scope.
-    pub fn register_with<P: Platform>(
+    pub fn register_with(
         self,
-        resources: &Resources<P>,
+        resources: &impl Register<bobcat_core::PreparsedStyleSheet>,
         entry: &Url,
     ) -> Result<(), ZipSourceError> {
         entry_path(entry)?;
@@ -137,7 +136,7 @@ impl ZipSource {
                 .clear()
                 .extend(path.split('/'));
             resources
-                .register(url.as_str(), bytes, None)
+                .register(url.as_str(), bytes.into(), None)
                 .expect("archive registration URLs were built from a parsed URL");
         }
         Ok(())

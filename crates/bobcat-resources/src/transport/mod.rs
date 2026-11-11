@@ -36,8 +36,8 @@ use vant::{Fetch, Platform, Request, Response};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::file_body::Body;
 use crate::mime::MediaType;
-use crate::registry::{Registered, Registry};
-use crate::{CachePolicy, Handle, data_url};
+use crate::registry::Installs;
+use crate::{CachePolicy, Handle, Registered, Registry, data_url};
 
 /// What every request this system makes is sent with.
 #[derive(Clone, Debug)]
@@ -89,6 +89,8 @@ pub(crate) struct Transports<P: Platform> {
     /// [`ResourceFetcher::style_sheet_probe`](bobcat_core::resource::ResourceFetcher::style_sheet_probe)
     /// can hand a reader of it to `bobcat-main`, as the fetch index is.
     pub registry: std::sync::Arc<Registry>,
+    /// The containers still being registered into it in the background.
+    pub installs: Installs,
     pub http: HttpSettings,
     pub fetch: Handle<P::Fetch>,
     /// The HTTP byte tier: `None` when the platform has no store, or when
@@ -130,6 +132,7 @@ impl<P: Platform> Transports<P> {
     ) -> Self {
         Self {
             registry: std::sync::Arc::default(),
+            installs: Installs::default(),
             http,
             fetch,
             bytes,
@@ -157,7 +160,7 @@ impl<P: Platform> Transports<P> {
             )
         })?;
         if self.registry.contains(&url)
-            || self.registry.install_covering(&url).is_some()
+            || self.installs.install_covering(&url).is_some()
             || Self::serves_scheme(url.scheme())
         {
             Ok(url)
