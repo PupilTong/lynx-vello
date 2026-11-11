@@ -918,12 +918,11 @@ static void qjs_drop_read_module(JSContext *raw, JSValue module) {
    it resolves to: a module read under the wrong name would answer imports of
    that name and leave this one's unanswered.
 
-   A refusal part-way through a module is the one this cannot clean up after:
-   `JS_ReadModule`'s failure path releases one of the module's two references
-   and leaves the other on the loaded-module list, under the name it had read,
-   where nothing outside quickjs.c can reach it. The host's own checks (its
-   checksum, and the engine id the bridge frames every capture with) are what
-   keep such bytes from arriving here. */
+   A refusal part-way through a module leaves nothing behind either:
+   `JS_ReadModule`'s failure path releases both of the module's references,
+   which frees it and takes it off the loaded-module list. The host's own
+   checks (its checksum, and the engine id the bridge frames every capture
+   with) still keep most such bytes from arriving here. */
 static JSValue qjs_read_cached_module(QjsContext *context,
                                       const QjsModuleSource *source) {
     JSContext *raw = context->raw;

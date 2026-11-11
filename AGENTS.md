@@ -2825,13 +2825,15 @@ output — and a caller stores and returns them whole. What the rules are:
   exception. An import that cannot be loaded is not such a failure: the read
   module's import list is the text's own, so it fails exactly as the text
   does.
-- **The frame is a guard, not a checksum.** `JS_ReadObject` trusts its input,
-  and the fork's `JS_ReadModule` leaves a half-read module on the realm's
-  loaded-module list when a read fails part-way, which no public API can
-  remove. The frame turns away truncated bytes and another build's before any
-  read; bytes damaged in place are the caller's to detect (`vant`'s stored
-  entries carry a CRC-64), and a module that was read and then refused is
-  released with both of its references (`qjs_drop_read_module`).
+- **The frame is a guard, not a checksum.** `JS_ReadObject` trusts its input:
+  it reads what another build wrote as if this one had. The frame turns away
+  truncated bytes and another build's before any read; bytes damaged in place
+  are the caller's to detect (`vant`'s stored entries carry a CRC-64). A read
+  that does fail part-way through a module leaves nothing behind: the fork's
+  `JS_ReadModule` releases both of the module's references on failure, which
+  frees it and takes it off the realm's loaded-module list, and a module that
+  was read whole and then refused is released the same way
+  (`qjs_drop_read_module`).
 - **A capture is the bytes of an unlinked module** whether the compile was
   linked or not (`JS_WriteObject` writes names, never resolutions), so one
   capture serves an `import` and a `require` alike. `import.meta.url` is set

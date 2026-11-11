@@ -393,12 +393,13 @@ one name file nothing in that realm. Bytecode is therefore never filed under
 a text it might not be the compile of, whatever order hand-overs, cache hits
 and compiles come in.
 
-Known limit, in the fork: `JS_ReadModule`'s failure path frees one of the two
-references a half-read module holds, so the module stays on the context's
-loaded-module list. The bridge's frame (engine id and length) and `vant`'s
-CRC-64 keep damaged bytes from reaching the reader, and a module read whole
-and then refused is released with both references; freeing the object in
-the reader's `fail:` path would close it in the fork.
+A read that fails part-way through a module leaves nothing registered: the
+fork's `JS_ReadModule` failure path frees both of the references a half-read
+module holds (PupilTong/quickjs#6), so the module leaves the context's
+loaded-module list and the text compiled in its place is the one imports
+resolve to. The bridge's frame (engine id and length) and `vant`'s CRC-64
+still keep most damaged bytes from reaching the reader, and a module read
+whole and then refused is released with both references.
 
 ## PR3: browser code cache store
 
