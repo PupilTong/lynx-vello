@@ -63,6 +63,10 @@ pub(crate) const REQUIRED_DETECT: i32 = 3;
 /// owning both buffers: the shim borrows them only until it enters the
 /// callback again, which a load started from a loaded file's own text does,
 /// and which an import linked inline during that file's compile does too.
+///
+/// `cached` (with `cached_length` and `cached_kind`, one of the
+/// `REQUIRED_*` kinds) is bytecode the host lends on the same terms, or null;
+/// `capture` asks the shim to keep the bytecode of what it compiles.
 #[repr(C)]
 pub(crate) struct QjsRequiredSource {
     pub(crate) url: *const c_char,
@@ -70,13 +74,36 @@ pub(crate) struct QjsRequiredSource {
     pub(crate) text_length: usize,
     pub(crate) kind: i32,
     pub(crate) error: *const c_char,
+    pub(crate) cached: *const u8,
+    pub(crate) cached_length: usize,
+    pub(crate) cached_kind: i32,
+    pub(crate) capture: i32,
 }
 
+/// `parameters` is the list the load was asked with, or null for an import
+/// being linked inline.
 pub(crate) type RequireLoad = unsafe extern "C" fn(
     opaque: *mut c_void,
     url: *const c_char,
+    parameters: *const c_char,
     source: *mut QjsRequiredSource,
 ) -> c_int;
+
+pub(crate) const COMPILED_MODULE: i32 = 0;
+pub(crate) const COMPILED_COMMONJS: i32 = 1;
+
+/// One compile whose bytecode a realm kept, as `qjs_context_take_compiled`
+/// hands it over: owned by the caller until `qjs_compiled_free`. `parameters`
+/// is null for a module.
+#[repr(C)]
+pub(crate) struct QjsCompiled {
+    pub(crate) kind: i32,
+    pub(crate) name: *const c_char,
+    pub(crate) parameters: *const c_char,
+    pub(crate) bytes: *const u8,
+    pub(crate) length: usize,
+    _next: *mut QjsCompiled,
+}
 
 /// `HostInitializeShadowRealm`, called inside `new ShadowRealm()` with the
 /// fresh child realm. The child is the host's from the call on, whatever it
@@ -175,6 +202,20 @@ unsafe extern "C" {
         length: usize,
         error: *const c_char,
     ) -> c_int;
+    pub(crate) fn qjs_context_complete_module_code(
+        context: *mut QjsContext,
+        name: *const c_char,
+        url: *const c_char,
+        text: *const u8,
+        length: usize,
+        bytecode: *const u8,
+        bytecode_length: usize,
+        capture: c_int,
+    ) -> c_int;
+    pub(crate) fn qjs_context_take_compiled(context: *mut QjsContext) -> *mut QjsCompiled;
+    pub(crate) fn qjs_compiled_free(context: *mut QjsContext, compiled: *mut QjsCompiled);
+    /// `BC_VERSION`, read off a write on a scratch runtime; -1 if that failed.
+    pub(crate) fn qjs_bytecode_format_version() -> c_int;
     pub(crate) fn qjs_context_resume_module_loads(context: *mut QjsContext);
     pub(crate) fn qjs_context_load_module(
         context: *mut QjsContext,
