@@ -239,10 +239,11 @@ fn spawn<P: Platform>(
             move || prepare(fetched, &url, kind, received, &shared)
         })
         .await;
-        completion.complete(match prepared {
+        let prepared = match prepared {
             Ok(result) => result,
             Err(message) => Err(panicked(&message, &url)),
-        });
+        };
+        completion.complete(preloaded(&shared, prepared).await);
     });
 }
 
@@ -280,7 +281,23 @@ async fn run<P: Platform>(
     if completion.is_cancelled() {
         return;
     }
-    completion.complete(prepare(fetched, &url, kind, received, &shared));
+    let prepared = prepare(fetched, &url, kind, received, &shared);
+    completion.complete(preloaded(&shared, prepared).await);
+}
+
+/// A prepared module's text, once the code cache's asynchronous store has
+/// preloaded the bytecode stored for it ([`crate::CodeCache::preload_async`]),
+/// so that bytecode is resident before the realm is handed the text. Over a
+/// synchronous store, or without one, [`prepare`] already did all there is.
+async fn preloaded<P: Platform>(shared: &SharedHandle<P>, prepared: SourceResult) -> SourceResult {
+    let text = match &prepared {
+        Ok(LoadedSource::Module { source, .. }) => Some(source.as_str()),
+        _ => None,
+    };
+    if let (Some(code), Some(text)) = (&shared.code, text) {
+        code.preload_async(text).await;
+    }
+    prepared
 }
 
 /// When a load's bytes arrived, read only for a timed fetch: every other
@@ -329,8 +346,9 @@ async fn after_install<P: Platform>(
 }
 
 /// The CPU half of a source load: preprocessing, the UTF-8 check the
-/// engine's strict validation depends on and, for a script, the code
-/// cache's preload of the bytecode stored for its text.
+/// engine's strict validation depends on and, for a script over a
+/// synchronous code store, the code cache's preload of the bytecode stored
+/// for its text (an asynchronous store's preload is [`preloaded`]).
 ///
 /// A font takes neither: its bytes go to the font backend as they arrived,
 /// without a copy — `Bytes` is already a shared, thread-safe buffer, which is

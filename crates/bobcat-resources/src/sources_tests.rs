@@ -950,4 +950,253 @@ mod code_cache {
         let text = script_text("a-code-directory-that-cannot-be-opened");
         deliver(&resources, "app:///page/runs.js", &text).await;
     }
+
+    /// A platform whose code cache is an in-memory [`vant::AsyncStore`]:
+    /// what the browser's Cache API store is to the resource system.
+    mod async_store {
+        use std::collections::HashMap;
+        use std::time::SystemTime;
+
+        use vant::{
+            ArtifactStore, AsyncStore, Estimate, Meta, NoStore, Parts, Platform, StoreError, Tier,
+            Volatility,
+        };
+
+        use super::*;
+        use crate::{NativeDecoder, NativeFetch};
+
+        /// Clones share their entries. A put waits until `puts_open` is
+        /// `true`, so a test can keep a flush in flight.
+        #[derive(Clone)]
+        struct MemAsyncStore {
+            entries: Arc<Mutex<HashMap<String, (Meta, Bytes)>>>,
+            puts_open: watch::Sender<bool>,
+            puts: Arc<AtomicUsize>,
+        }
+
+        impl MemAsyncStore {
+            fn new() -> Self {
+                Self {
+                    entries: Arc::default(),
+                    puts_open: watch::Sender::new(true),
+                    puts: Arc::default(),
+                }
+            }
+
+            fn holds(&self, name: &str) -> bool {
+                self.entries.lock().unwrap().contains_key(name)
+            }
+        }
+
+        impl AsyncStore for MemAsyncStore {
+            fn scan(&self) -> impl Future<Output = Result<Vec<Meta>, StoreError>> + Send {
+                let metas = self
+                    .entries
+                    .lock()
+                    .unwrap()
+                    .values()
+                    .map(|(meta, _)| meta.clone())
+                    .collect();
+                std::future::ready(Ok(metas))
+            }
+
+            fn get(
+                &self,
+                key: &str,
+            ) -> impl Future<Output = Result<Option<(Meta, Bytes)>, StoreError>> + Send
+            {
+                std::future::ready(Ok(self.entries.lock().unwrap().get(key).cloned()))
+            }
+
+            fn put(
+                &self,
+                meta: &Meta,
+                body: Bytes,
+            ) -> impl Future<Output = Result<(), StoreError>> + Send {
+                let (store, meta) = (self.clone(), meta.clone());
+                let mut open = self.puts_open.subscribe();
+                async move {
+                    let _ = open.wait_for(|open| *open).await;
+                    store.puts.fetch_add(1, Ordering::Relaxed);
+                    store
+                        .entries
+                        .lock()
+                        .unwrap()
+                        .insert(meta.key.clone(), (meta, body));
+                    Ok(())
+                }
+            }
+
+            fn delete(&self, key: &str) -> impl Future<Output = Result<(), StoreError>> + Send {
+                self.entries.lock().unwrap().remove(key);
+                std::future::ready(Ok(()))
+            }
+
+            fn touch(
+                &self,
+                key: &str,
+                now: SystemTime,
+            ) -> impl Future<Output = Result<(), StoreError>> + Send {
+                if let Some(entry) = self.entries.lock().unwrap().get_mut(key) {
+                    entry.0.last_used = now;
+                }
+                std::future::ready(Ok(()))
+            }
+
+            fn estimate(&self) -> impl Future<Output = Estimate> + Send {
+                std::future::ready(Estimate::default())
+            }
+
+            fn volatility(&self) -> Volatility {
+                Volatility::EvictableAnytime
+            }
+        }
+
+        struct AsyncPlatform(MemAsyncStore);
+
+        impl Platform for AsyncPlatform {
+            type Fetch = NativeFetch;
+            type Store = NoStore;
+            type AsyncStore = MemAsyncStore;
+            type Decoder = NativeDecoder;
+
+            fn into_parts(self) -> Parts<NativeFetch, NoStore, MemAsyncStore, NativeDecoder> {
+                Parts {
+                    fetch: NativeFetch,
+                    decoder: NativeDecoder,
+                    bytes: None,
+                    artifacts: Some(Tier {
+                        store: ArtifactStore::Async(self.0),
+                        budget: 1 << 20,
+                    }),
+                }
+            }
+        }
+
+        fn async_resources(store: &MemAsyncStore) -> Resources<AsyncPlatform> {
+            Resources::with_platform(
+                ResourcesConfig {
+                    base_url: Some(Url::parse("app:///page/main.js").unwrap()),
+                    log_to_stderr: false,
+                    ..ResourcesConfig::default()
+                },
+                AsyncPlatform(store.clone()),
+                Vec::new(),
+                || {},
+            )
+        }
+
+        /// Delivers `text` as the script at `url`, and answers once its
+        /// completion has arrived.
+        async fn deliver(resources: &Resources<AsyncPlatform>, url: &str, text: &str) {
+            resources
+                .register(url, text.to_owned(), Some("text/javascript"))
+                .unwrap();
+            let (sender, response) = watch::channel(None);
+            start(
+                resources,
+                Url::parse(url).unwrap(),
+                SourceKind::Script,
+                Destination::Cache(sender),
+            );
+            match result(response).await.unwrap() {
+                LoadedSource::Module { source, .. } => assert_eq!(source, text),
+                source => panic!("expected a script, got {source:?}"),
+            }
+        }
+
+        async fn flush_ended(resources: &Resources<AsyncPlatform>) {
+            let code = resources.shared.code.as_ref().expect("a code cache");
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while code.flushing.load(Ordering::Acquire) {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("the flush ends");
+        }
+
+        fn name(key: ArtifactKey) -> String {
+            format!(
+                "{:016x}/{:032x}/{:016x}",
+                bobcat_core::script_engine_id().0,
+                key.source.0,
+                key.variant.0
+            )
+        }
+
+        #[tokio::test]
+        async fn bytecode_a_flush_wrote_is_admitted_before_the_script_is_delivered() {
+            let _flushes = FLUSHES.lock().await;
+            let store = MemAsyncStore::new();
+            let text = script_text("async-store-admitted-before-delivery");
+            let key = key_of(&text, "async");
+            let engine = bobcat_core::script_engine_id();
+            let global = Artifacts::global();
+            {
+                let resources = async_resources(&store);
+                deliver(&resources, "app:///page/async.js", &text).await;
+                global.insert(engine, key, Bytes::from_static(b"compiled"));
+                flush_code_cache(&resources);
+                flush_ended(&resources).await;
+                assert!(store.holds(&name(key)), "the flush wrote the artifact");
+            }
+            global.remove(engine, key);
+
+            let resources = async_resources(&store);
+            deliver(&resources, "app:///page/async.js", &text).await;
+            assert_eq!(
+                global.get(engine, key).as_deref(),
+                Some(&b"compiled"[..]),
+                "the preload ran before the completion was delivered"
+            );
+            global.remove(engine, key);
+        }
+
+        #[tokio::test]
+        async fn a_turn_starts_no_flush_while_one_is_in_flight() {
+            let _flushes = FLUSHES.lock().await;
+            let store = MemAsyncStore::new();
+            let engine = bobcat_core::script_engine_id();
+            let global = Artifacts::global();
+            let resources = async_resources(&store);
+            let (first, second) = (
+                key_of(&script_text("async-store-one-flush-first"), "async"),
+                key_of(&script_text("async-store-one-flush-second"), "async"),
+            );
+
+            store.puts_open.send_replace(false);
+            global.insert(engine, first, Bytes::from_static(b"first"));
+            flush_code_cache(&resources);
+            let code = resources.shared.code.as_ref().unwrap();
+            assert!(code.flushing.load(Ordering::Acquire));
+            // The flush task has taken the queue once nothing is pending; its
+            // put then waits.
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while global.has_pending() {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("the flush takes the queue");
+            global.insert(engine, second, Bytes::from_static(b"second"));
+            // The next turns, while the first flush waits on its put.
+            for _ in 0..3 {
+                flush_code_cache(&resources);
+            }
+            assert!(global.has_pending(), "the second artifact is still queued");
+            store.puts_open.send_replace(true);
+            flush_ended(&resources).await;
+            assert_eq!(store.puts.load(Ordering::Relaxed), 1);
+            assert!(store.holds(&name(first)) && !store.holds(&name(second)));
+
+            // The turn after it ends starts the next flush.
+            flush_code_cache(&resources);
+            flush_ended(&resources).await;
+            assert_eq!(store.puts.load(Ordering::Relaxed), 2);
+            assert!(store.holds(&name(second)));
+            global.remove(engine, first);
+            global.remove(engine, second);
+        }
+    }
 }

@@ -25,14 +25,14 @@ cssparser = { workspace = true }
 thiserror = { workspace = true }
 url = { workspace = true }
 percent-encoding = { workspace = true }
+# `vant::Platform`: registration takes a `Resources` over any platform.
+vant = { workspace = true }
 zip = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros", "time"] }
 divan = { workspace = true }
 prime-radiant = { workspace = true }
-# `tests/code_cache.rs` reads the process's code-cache tier.
-vant = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen-test = { workspace = true }

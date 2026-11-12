@@ -154,7 +154,7 @@ Rust parses structured input only when Rust behavior actually needs its fields
 | `crates/bobcat-core` | The native runtime core: group, view, painter, QuickJS realms, page policy. | [→](#cratesbobcat-core) |
 | `crates/quickjs-rust-bridge` | Owner-thread-bound safe Rust wrapper around the pinned `vendor/quickjs` submodule. | [→](#cratesquickjs-rust-bridge) |
 | `crates/vant` | Resource policy below `terminus`: cache tiers, RFC 9111 freshness, MIME pipeline, image sizing, the embedder capability traits (`Fetch`, `Store`, `ImageDecoder`, `Platform`). | [→](#cratesvant) |
-| `crates/bobcat-resources` | Reference resource system over `vant`: the load orchestration plus the native and browser adapters (`NativePlatform`, `BrowserPlatform`). | [→](#cratesbobcat-resources) |
+| `crates/bobcat-resources` | Reference resource system over `vant`: the load orchestration plus the native adapters (`NativePlatform`). The browser's adapters are `bobcat-wasm`'s. | [→](#cratesbobcat-resources) |
 | `crates/bobcat-cli` | The `bobcat` product (`cli`) and the `bobcat-server` screenshot service (`server`), both embedders. | [cli](#cratesbobcat-cli-cli-feature), [server](#cratesbobcat-cli-server-feature) |
 | `crates/bobcat-wasm` | The pure-Rust `wasm-bindgen` browser embedder and npm facade. | [→](#cratesbobcat-wasm) |
 | `crates/terminus` | Generic W3C-DOM-subset document tree and standards-oriented CSS computation core. | [→](#cratesterminus) |
@@ -2953,14 +2953,17 @@ type and depends only on `bytes`, `http`, `url`, `serde_json`, `thiserror`,
   host cannot block, async `fetch`, `owns_http_cache`, `map_file`), `Store`
   (synchronous persistent bytes with `Meta`, `estimate`, `touch`, `volatility`
   — `Durable`, `PurgedWhenIdle`, `EvictableAnytime` — and `map_body`),
+  `AsyncStore` (the subset of `Store` the artifact tier uses, modelled on the
+  web Cache API, every call but `volatility` a future that is `MaybeSend`),
   `ImageDecoder`, and `Platform`, the bundle an embedder hands over:
   `into_parts` answers `Parts { fetch, decoder, bytes, artifacts }`, the last
-  two each an optional `Tier { store, budget }` — the HTTP byte tier's Store
-  and the derived-artifact tier's, separate namespaces of one Store type.
-  Capabilities are traits with associated
-  types, never `dyn`; `Threaded` is the cfg'd marker that requires `Send + Sync`
-  natively and nothing on wasm32. `NoStore` is the `Store` of a host with no
-  persistent tier.
+  two each an optional `Tier { store, budget }` — the HTTP byte tier's
+  `Store`, and the derived-artifact tier's `ArtifactStore::Blocking(Store)` or
+  `ArtifactStore::Async(AsyncStore)`, separate namespaces. Capabilities are
+  traits with associated types, never `dyn`; `Threaded` is the cfg'd marker
+  that requires `Send + Sync` natively and nothing on wasm32, and `MaybeSend`
+  the one that requires `Send` natively and nothing on wasm32. `NoStore` is
+  the `Store` and the `AsyncStore` of a host without one.
 - **The tiers**: `memory::MemoryCache` (LRU by stamp under a byte budget with a
   pinned working set), `byte_cache::ByteCache<S: Store>` (the HTTP byte tier:
   RFC 9111 `plan` over a stored response, index rebuilt from `Store::scan` and
@@ -2972,10 +2975,16 @@ type and depends only on `bytes`, `http`, `url`, `serde_json`, `thiserror`,
   crate never names QuickJS): `Artifacts`, the process-wide memory tier
   (`Artifacts::global()`, `Send + Sync` on every target, LRU under a byte
   budget) that an engine reads synchronously at the moment it would compile
-  and inserts what it compiled into; and `ArtifactCache<S: Store>`, the
-  persistence a resource system puts behind it — `preload(SourceDigest)`
-  admits every stored variant of a source before its text is delivered,
-  `flush` writes what was inserted since. A key is a `SourceDigest` (128-bit
+  and inserts what it compiled into; and the persistence a resource system
+  puts behind it — `preload(SourceDigest)` admits every stored variant of a
+  source before its text is delivered, `flush` writes what was inserted
+  since. Two drivers share the tier's IO-free decisions (one index type
+  whose methods answer the IO to do and take its result):
+  `ArtifactCache<S: Store>` runs the IO under the index lock, and
+  `AsyncArtifactCache<A: AsyncStore>` awaits it with the lock released, its
+  docs stating the rule each overlap of calls follows (two preloads of one
+  source both read; a key whose put or delete is in flight is not written
+  again; a read that fails deletes only the indexing it was issued for). A key is a `SourceDigest` (128-bit
   SipHash-1-3 of the text) and a `Variant` (what the derivation bakes in
   beyond the text) under an `EngineId`; a stored entry is `magic | format |
   engine | source | variant | length | crc64 | payload`, and `decode` is the
@@ -2989,9 +2998,9 @@ type and depends only on `bytes`, `http`, `url`, `serde_json`, `thiserror`,
   (`ResourceError`, `ResourceErrorKind`, `ResourceErrorPhase`, `RetryAdvice`,
   `Failure`), which `bobcat-core` and `terminus` re-export at their old paths.
 
-Not here yet: the load orchestration (`images.rs`, `sources.rs`, the registry)
-and the browser `Store`, which stay in `bobcat-resources` until the later PRs
-the design document lists.
+Not here yet: the load orchestration (`images.rs`, `sources.rs`, the registry),
+which stays in `bobcat-resources` until the later PRs the design document
+lists.
 
 ### crates/bobcat-resources
 
@@ -3000,15 +3009,19 @@ Linux and the browser, which every shipped embedder uses. It is the worked
 example of what the protocol expects, not part of the protocol. The policy it
 applies is `vant`'s; what is here is the orchestration — `Resources<P:
 vant::Platform>`, `ViewResources<P>`, the job executor, the image and source
-pipelines, the registry — and the reference adapters: `NativePlatform`
+pipelines, the registry — and the native reference adapters: `NativePlatform`
 (`NativeFetch` over libcurl and `file:`, `FsStore` over a cache directory and
-another over its `code` subdirectory, `NativeDecoder` over ImageIO/gdk-pixbuf) and, on wasm32, `BrowserPlatform`
-(`BrowserFetch` over the Render Worker's `fetch`, `NoStore`, `BrowserDecoder`
-over the main thread's `Image`). `Resources::new` builds the target's
-`DefaultPlatform` with no persistent store; an embedder with a disk cache, its
-own HTTP stack or its own storage builds a `Platform` and passes it to
-`Resources::with_platform`. Five things live here and nowhere else in the
-workspace.
+another over its `code` subdirectory, `NativeDecoder` over ImageIO/gdk-pixbuf).
+The crate has no browser platform: it compiles for wasm32 as orchestration
+alone (local tasks through `wasm-bindgen-futures`, the `Date` clock through
+`js-sys`), and the browser's `Platform` is `bobcat-wasm`'s
+(`crates/bobcat-wasm`, "The browser platform"). Natively `Resources::new`
+builds `DefaultPlatform` (`NativePlatform`) with no persistent store, and
+`Resources<P>` defaults `P` to it; on wasm32 there is no default and no
+`Resources::new`, so an embedder names its platform. An embedder with a disk
+cache, its own HTTP stack or its own storage builds a `Platform` and passes
+it to `Resources::with_platform`. Five things live here and nowhere else in
+the workspace.
 
 **Transports**: contents the embedder registers under any URL
 (`Resources::register` and `register_style_sheet`, or a `ContainerInstaller`'s
@@ -3070,15 +3083,24 @@ invalidate the affected URLs.
 **The code cache's Store side.** The engine reads and fills the process-wide
 `vant::artifact::Artifacts` (`crates/bobcat-core`, "The code cache"); this
 crate puts persistence behind it when the platform's `Parts::artifacts` is
-present, in a `vant::artifact::ArtifactCache` shared by every scope of one
-system. Two things happen. `sources::prepare` **preloads** before it delivers
-a script: on the pool thread that prepared the text, it admits every stored
-variant of exactly that text to the memory tier, so the realm's synchronous
+present, in a `CodeCache` shared by every scope of one system that drives a
+`vant::artifact::ArtifactCache` over a `Store` or a
+`vant::artifact::AsyncArtifactCache` over an `AsyncStore`. Two things happen.
+A script is **preloaded** before it is delivered: every stored variant of
+exactly that text is admitted to the memory tier, so the realm's synchronous
 lookup hits; a text under `bobcat_core::MIN_CACHED_SOURCE_BYTES` is not
-hashed. `ResourceFetcher::service_images` **flushes** once per embedder turn:
-when the tier has artifacts queued and no flush is in flight (one atomic load
-otherwise), one blocking-pool job natively — inline in the browser — writes
-them, and the last scope's drop writes what is still queued. Natively the
+hashed. Over a `Store`, `sources::prepare` does it on the pool thread that
+prepared the text; over an `AsyncStore`, the load's task awaits it after
+`prepare` answered and before the completion is delivered, natively and in
+the browser. `ResourceFetcher::service_images` **flushes** once per embedder
+turn: when the tier has artifacts queued and no flush is in flight (one
+atomic load otherwise), over a `Store` one blocking-pool job natively —
+inline in the browser — writes them, and the last scope's drop writes what is
+still queued; over an `AsyncStore` the flush is a task (the executor
+natively, `spawn_local` in the browser) and nothing is written on drop, so
+what was compiled after the last serviced turn is compiled again next time.
+An `AsyncStore` is opened by a task started with the system; the first
+preload or flush awaits that open. Natively the
 Store is an `FsStore` at `<DiskCacheConfig::dir>/code` under
 `DiskCacheConfig::code_budget_bytes` (64 MiB at the default location); it
 opens and fails separately from the byte tier, each failure a note, and
@@ -3368,6 +3390,42 @@ image caches and completion queues while sharing the platform decoder. The
 browser has no executor: each load is a local task on the Render Worker. The
 service worker only provides cross-origin isolation headers; `loadLynxXml`
 retains its XML-only, host-configured contract.
+
+**The browser platform** (`src/platform/`, `bobcat_wasm::platform`): the
+`vant::Platform` the Render Worker's resource system is built over.
+`BrowserFetch` is the Worker's own `fetch`, which applies HTTP cache semantics
+itself (`owns_http_cache`), so there is no byte tier. `BrowserDecoder` is the
+main thread's `Image` element over a `MessagePort` and a mailbox in shared
+Wasm memory (`mailbox.rs`; `js/image-decoder.ts` is the other half). The code
+cache's store is `CacheStore` (`cache.rs`), a `vant::AsyncStore` over one
+cache of the web Cache API (`caches.open("bobcat-code-cache")`, 32 MiB,
+`Volatility::EvictableAnytime`), handed over as `ArtifactStore::Async`, so
+compiled scripts survive a page load and are shared by every tab of the
+origin. What holds:
+
+- `BrowserPlatform::new(image_port, code_cache)` is `async` because
+  `caches.open` is, and never fails: a missing port, a scope without `caches`
+  (a context that is not secure) or an `open` that rejects (private browsing
+  in some browsers) each become a note (`the code cache will not persist:
+  …`) and the view runs with the in-memory tier. `caches` and
+  `navigator.storage` are read from the global scope, so the store works in a
+  Window or a Worker.
+- A key is the request URL `https://bobcat.invalid/<key>` (each path segment
+  percent-encoded; `Cache.put` accepts only `http(s)`, and nothing is fetched
+  from it). An entry is a `Response` whose body is the entry bytes and whose
+  headers carry the `Meta`: `x-bobcat-key`, `x-bobcat-length`,
+  `x-bobcat-last-used` (Unix seconds) and `x-bobcat-record` (percent-encoded
+  JSON). `scan` is `matchAll()` reading headers only; an entry whose headers
+  do not parse is found through `keys()` and deleted. `touch` re-puts the
+  stored body's stream under a new `last_used` header. Recency is that header
+  alone, never the order `keys()` or `matchAll()` answer in. `estimate` is
+  `navigator.storage.estimate()` when present.
+- Every body is copied through a fresh non-shared `Uint8Array`: the Wasm
+  memory is a `SharedArrayBuffer`, which a `Response` body cannot be built
+  over, and a view over it is detached by a memory growth.
+- All Cache API calls are stable `web-sys` bindings. The store's policy, and
+  every overlap of its asynchronous calls, is `vant`'s and is tested natively;
+  `CacheStore` itself has no automated test (the Wasm tests run in Node).
 
 The browser UI thread is a JavaScript-only host coordinator: it creates one
 explicit embedder Worker and transfers an `OffscreenCanvas`, but never

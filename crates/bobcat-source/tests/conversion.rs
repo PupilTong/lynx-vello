@@ -1,3 +1,7 @@
+// These tests build the native resource system, which wasm32 has no default
+// platform for; the wasm32 run covers `decode_web_bundle` and `zip_source`.
+#![cfg(not(target_arch = "wasm32"))]
+
 use bobcat_source::native::{ConvertError, convert};
 use bobcat_source::web::css_property::{CssPropertyId, token_types};
 
@@ -790,8 +794,6 @@ async fn named_lepus_chunks_load_and_run_on_every_call() {
     }
 }
 
-// Pixel readback through Painter::capture is a native-only integration.
-#[cfg(not(target_arch = "wasm32"))]
 #[tokio::test]
 async fn named_css_is_loaded_by_url_after_native_web_conversion() {
     use std::sync::Arc;

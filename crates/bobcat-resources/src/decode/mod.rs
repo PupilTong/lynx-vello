@@ -1,22 +1,21 @@
 //! Image decoding, done entirely by the platform.
 //!
 //! This crate contains no codec and links no decoding library. macOS decodes
-//! through `ImageIO`, Linux through the desktop's gdk-pixbuf loaded at
-//! runtime, and the browser through the main thread's `Image` element —
-//! each the same decoder the platform's own image views use, with the same
-//! format coverage, and each able to downsample *during* decode so a 4000px
-//! photo shown at 200px never materialises at full size. They are this
-//! crate's [`vant::ImageDecoder`]s: [`NativeDecoder`] natively and
-//! [`BrowserDecoder`] on wasm32. The shape every one answers in, [`Bitmap`],
+//! through `ImageIO` and Linux through the desktop's gdk-pixbuf loaded at
+//! runtime — each the same decoder the platform's own image views use, with
+//! the same format coverage, and each able to downsample *during* decode so a
+//! 4000px photo shown at 200px never materialises at full size. Together they
+//! are this crate's [`vant::ImageDecoder`], [`NativeDecoder`]; the browser's
+//! decoder is `bobcat-wasm`'s. The shape every one answers in, [`Bitmap`],
 //! and the one sizing rule they share live in `vant::image`.
 
 pub use vant::image::{Bitmap, DecodeError, target_size};
 
+#[cfg(not(target_arch = "wasm32"))]
 use crate::image_header::ImageHeader;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::mime::ImageFormat;
 
-#[cfg(target_arch = "wasm32")]
-pub(crate) mod browser;
 #[cfg(all(unix, not(target_os = "macos")))]
 mod gdk_pixbuf;
 #[cfg(target_os = "macos")]
@@ -44,75 +43,6 @@ impl vant::ImageDecoder for NativeDecoder {
 
     fn available(&self) -> Result<(), DecodeError> {
         available()
-    }
-}
-
-/// The main thread's `Image` element as a [`vant::ImageDecoder`], reached
-/// over the port the host handed the Render Worker. Without a port every
-/// decode answers [`DecodeError::Unavailable`].
-#[cfg(target_arch = "wasm32")]
-#[derive(Clone, Debug, Default)]
-pub struct BrowserDecoder {
-    decoder: Option<std::rc::Rc<browser::ImageDecoder>>,
-}
-
-#[cfg(target_arch = "wasm32")]
-impl BrowserDecoder {
-    /// The decoder over `port`, this Worker's end of the channel whose other
-    /// end the host's main-thread image decoder listens on
-    /// (`js/image-decoder.ts` in the `bobcat-wasm` package).
-    ///
-    /// # Errors
-    ///
-    /// When the port refuses the decoder's first message.
-    pub fn new(port: web_sys::MessagePort) -> Result<Self, String> {
-        browser::ImageDecoder::new(port).map(|decoder| Self {
-            decoder: Some(decoder),
-        })
-    }
-
-    /// The decoder with no port: every decode is unavailable.
-    #[must_use]
-    pub fn none() -> Self {
-        Self::default()
-    }
-
-    fn decoder(&self) -> Result<&browser::ImageDecoder, DecodeError> {
-        self.decoder
-            .as_deref()
-            .ok_or_else(|| DecodeError::Unavailable("no image decoder was configured".to_owned()))
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-impl vant::ImageDecoder for BrowserDecoder {
-    /// Blocks this Worker on the job's mailbox, for a restore. The main
-    /// thread's decoder takes the media type rather than a header.
-    fn decode_blocking(
-        &self,
-        bytes: &[u8],
-        format: ImageFormat,
-        _header: Option<ImageHeader>,
-        max: (u32, u32),
-    ) -> Result<Bitmap, DecodeError> {
-        self.decoder()?
-            .decode_blocking(bytes, format.media_type(), max)
-    }
-
-    async fn decode(
-        &self,
-        bytes: bytes::Bytes,
-        format: ImageFormat,
-        _header: Option<ImageHeader>,
-        max: (u32, u32),
-    ) -> Result<Bitmap, DecodeError> {
-        self.decoder()?
-            .decode(&bytes, format.media_type(), max)
-            .await
-    }
-
-    fn available(&self) -> Result<(), DecodeError> {
-        self.decoder().map(|_| ())
     }
 }
 

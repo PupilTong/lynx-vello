@@ -24,8 +24,8 @@ resources: the engine owns the policy, the embedder owns the bytes.
 
 | crate | owns | depends on |
 |---|---|---|
-| `vant` | every resource **policy**: `CachePolicy`, the memory tier, RFC 9111 freshness, the byte-cache tier over a `Store`, image residency and refinement decisions, MIME sniffing and preprocessing, image header probing, `data:` URLs, the resource error vocabulary, the three embedder traits (`Fetch`, `Store`, `ImageDecoder`) and `Platform`, and (PR2) the derived-artifact cache that backs the QuickJS code cache | `bytes`, `http`, `url`, `rustc-hash`, `serde_json`, `thiserror`, `vello_common` (for `peniko::ImageData`), `siphasher`. **Never** `terminus`, `bobcat-core`, tokio, libc bindings or `web-sys`. |
-| `bobcat-resources` | the reference **orchestrator** (`Resources<P>`, `ViewResources<P>`, the image job pipeline, source loading, the registry and background installs, the native executor) and the shipped **native adapters**: `NativeFetch` (libcurl + `file:`), `FsStore` (a cache directory), `NativeDecoder` (ImageIO / gdk-pixbuf); on wasm32 `BrowserFetch` and `BrowserDecoder` until PR3 moves them into `bobcat-wasm` | `vant`, `bobcat-core`, tokio, the platform libraries |
+| `vant` | every resource **policy**: `CachePolicy`, the memory tier, RFC 9111 freshness, the byte-cache tier over a `Store`, image residency and refinement decisions, MIME sniffing and preprocessing, image header probing, `data:` URLs, the resource error vocabulary, the embedder traits (`Fetch`, `Store`, `AsyncStore`, `ImageDecoder`) and `Platform`, and (PR2) the derived-artifact cache that backs the QuickJS code cache, with a synchronous and an asynchronous driver | `bytes`, `http`, `url`, `rustc-hash`, `serde_json`, `thiserror`, `vello_common` (for `peniko::ImageData`), `siphasher`. **Never** `terminus`, `bobcat-core`, tokio, libc bindings or `web-sys`. |
+| `bobcat-resources` | the reference **orchestrator** (`Resources<P>`, `ViewResources<P>`, the image job pipeline, source loading, the registry and background installs, the native executor) and the shipped **native adapters**: `NativeFetch` (libcurl + `file:`), `FsStore` (a cache directory), `NativeDecoder` (ImageIO / gdk-pixbuf); the browser's adapters (`BrowserFetch`, `BrowserDecoder`, `CacheStore`) are `bobcat-wasm`'s since PR3 | `vant`, `bobcat-core`, tokio, the platform libraries |
 | `terminus` | re-exports `vant::ImageSizeHint` at `terminus::link::ImageSizeHint`; (PR5) owns the image store type `terminus::link::ImageResidency` over `vant::image::Residency`, with the engine's constants and report dispatch | `vant` |
 
 Dependency direction: `terminus → vant`, `bobcat-core → terminus, vant`,
@@ -94,13 +94,11 @@ A `Fetch` serves `http`, `https` and natively `file:`. Registered contents and
 
 ### `Store` — persistent bytes
 
-Synchronous on every target: natively a directory; in the browser (PR3) one
-OPFS file opened once through `createSyncAccessHandle` — which only a Worker
-has, which is why the Store lives on the Render Worker, and whose open is
-asynchronous and exclusive, which is why the Store is a log inside one file
-(`vant::pack::PackStore`) rather than a file per entry. The Cache API itself is
-asynchronous and is not a `Store`; a browser host that prefers it fills a
-memory-only `vant` tier from it.
+Synchronous: natively a directory. The HTTP byte tier needs synchronous
+reads (a restore inside `FrameImages::read`, a mapped body), so it is always
+built on a `Store`. A browser has no synchronous storage every scope can use,
+so its only persistent tier, the derived-artifact tier, is built on an
+`AsyncStore` instead (below).
 
 ```rust
 /// What a `Store` keeps beside a body. `record` is the tier's own
@@ -165,6 +163,33 @@ Rules every tier built on a `Store` follows:
 - Trimming (LRU by `last_used`) runs at open and whenever a `put` crosses the
   budget; an entry larger than the whole budget is refused.
 
+### `AsyncStore` — persistent bytes, answered asynchronously
+
+Modelled on the web Cache API (`caches.open(name)`), with only what the
+derived-artifact tier uses. The contracts are `Store`'s: `put` is atomic per
+entry, the tier checks `Meta.key` on every read, and entries may vanish at
+any time.
+
+```rust
+/// `Send` on native targets, nothing on wasm32.
+pub trait MaybeSend {}
+
+pub trait AsyncStore: Threaded {
+    fn scan(&self) -> impl Future<Output = Result<Vec<Meta>, StoreError>> + MaybeSend;
+    fn get(&self, key: &str)
+        -> impl Future<Output = Result<Option<(Meta, Bytes)>, StoreError>> + MaybeSend;
+    fn put(&self, meta: &Meta, body: Bytes)
+        -> impl Future<Output = Result<(), StoreError>> + MaybeSend;
+    fn delete(&self, key: &str) -> impl Future<Output = Result<(), StoreError>> + MaybeSend;
+    fn touch(&self, key: &str, now: SystemTime)
+        -> impl Future<Output = Result<(), StoreError>> + MaybeSend;
+    fn estimate(&self) -> impl Future<Output = Estimate> + MaybeSend;
+    fn volatility(&self) -> Volatility;
+}
+```
+
+`NoStore` implements both `Store` and `AsyncStore`.
+
 ### `ImageDecoder` — platform pixels
 
 ```rust
@@ -191,17 +216,19 @@ live in `vant`.
 ```rust
 pub trait Platform: 'static {
     type Fetch: Fetch;
-    type Store: Store;      // `NoStore` for a host with no persistent tier
+    type Store: Store;            // `NoStore` for a host with no synchronous tier
+    type AsyncStore: AsyncStore;  // `NoStore` for a host without one
     type Decoder: ImageDecoder;
     /// Taken apart once, when the resource system is built: each tier owns
-    /// its Store.
-    fn into_parts(self) -> Parts<Self::Fetch, Self::Store, Self::Decoder>;
+    /// its store.
+    fn into_parts(self) -> Parts<Self::Fetch, Self::Store, Self::AsyncStore, Self::Decoder>;
 }
-pub struct Parts<F, S, D> {
+pub enum ArtifactStore<S, A> { Blocking(S), Async(A) }
+pub struct Parts<F, S, A, D> {
     pub fetch: F,
     pub decoder: D,
-    pub bytes: Option<Tier<S>>,      // the HTTP byte tier
-    pub artifacts: Option<Tier<S>>,  // the derived-artifact tier (PR2)
+    pub bytes: Option<Tier<S>>,                          // the HTTP byte tier
+    pub artifacts: Option<Tier<ArtifactStore<S, A>>>,    // the derived-artifact tier (PR2)
 }
 /// A Store with the budget of the tier over it; the tier clamps it to the
 /// Store's quota. `u64::MAX` means "the quota, or unbounded".
@@ -210,13 +237,15 @@ pub struct Tier<S> { pub store: S, pub budget: u64 }
 
 The resource system (`Resources::with_platform`) takes the parts, opens a
 `ByteCache` over `bytes` unless the `Fetch` owns its HTTP cache, and an
-`ArtifactCache` over `artifacts` whatever the transport. (PR1 shipped
+`ArtifactCache` (over a `Store`) or an `AsyncArtifactCache` (over an
+`AsyncStore`) over `artifacts` whatever the transport. (PR1 shipped
 `into_parts` as a tuple with a `byte_budget` method; PR2 gave it this shape
 when the second tier arrived.)
 
 `bobcat-resources` ships `NativePlatform` (`NativeFetch`, `FsStore`,
-`NativeDecoder`) and, on wasm32, `BrowserPlatform` (`BrowserFetch`, `NoStore`,
-`BrowserDecoder`). An embedder with its own HTTP stack or storage implements
+`NativeDecoder`, `ArtifactStore::Blocking(FsStore)` for the artifact tier);
+`bobcat-wasm` ships `BrowserPlatform` (`BrowserFetch`,
+`ArtifactStore::Async(CacheStore)` for the artifact tier, `BrowserDecoder`). An embedder with its own HTTP stack or storage implements
 the traits and passes its own `Platform`.
 
 ## Tiers in `vant`
@@ -241,7 +270,8 @@ the traits and passes its own `Platform`.
 - `vant::image` — `ImageSizeHint`, `Bitmap`, `DecodeError`, `target_size`,
   `wants_refinement`, `bounded` (against a `max_renderable` the caller passes;
   `vant` does not know the GPU limit).
-- (PR2) `vant::artifact::ArtifactCache<S>` — see "Code cache".
+- (PR2) `vant::artifact::ArtifactCache<S>` and `AsyncArtifactCache<A>` — see
+  "PR2: QuickJS code cache" and "PR3: browser code cache store".
 
 ## PR1: `vant` exists, embedders provide the platform
 
@@ -346,8 +376,8 @@ changes no caller; this is also what gives `bobcat-server` reuse across
 captures and several views of one card a single compile.
 
 `Platform::into_parts` hands over `Parts { fetch, decoder, bytes:
-Option<Tier<Store>>, artifacts: Option<Tier<Store>> }`, each `Tier` a Store
-with its budget.
+Option<Tier<Store>>, artifacts: Option<Tier<ArtifactStore<Store,
+AsyncStore>>> }`, each `Tier` a store with its budget.
 
 Sources below 1 KiB are not cached. Not covered: `Context::evaluate` (the
 engine runs no fetched text through it) and runtime-registered text modules
@@ -370,25 +400,45 @@ CRC-64 keep damaged bytes from reaching the reader, and a module read whole
 and then refused is released with both references; freeing the object in
 the reader's `fail:` path would close it in the fork.
 
-## PR3: browser `Store`
+## PR3: browser code cache store
 
-`vant::pack::PackStore<F: SyncFile>`: a `Store` inside one file with
-positioned synchronous IO — an append-only record log (`crc64 | kind | key |
-meta | body`), an index rebuilt by replay, a torn tail truncated at open, and
-in-place compaction made crash-safe by a move journal in the header. Written
-against `SyncFile` so all of it is tested natively over a `Vec<u8>` and a
-`std::fs::File`, including a crash at every write of a compaction.
+`vant::AsyncStore` and `vant::artifact::AsyncArtifactCache<A: AsyncStore>`:
+the artifact tier's policy driven by awaiting the store. The tier's decisions
+(what a preload reads, what `open` keeps and deletes, what a flush writes,
+what a trim deletes, how the index changes after each IO answer) are IO-free
+steps on one index type; `ArtifactCache<S: Store>` runs the IO under the
+index lock, `AsyncArtifactCache` releases the lock while it awaits. Calls may
+overlap on one thread, and each overlap has one rule (the type's docs state
+them): two preloads of one source both read and both admit; a preload does
+not read an entry whose put is in flight; a flush skips a key whose put or
+delete another call has in flight; a read that verifies is admitted even if
+its entry was trimmed meanwhile, and a read that fails deletes the entry only
+if the index still lists the indexing it was issued for.
 
-`bobcat-wasm` implements `SyncFile` over a `FileSystemSyncAccessHandle`
-(`OpfsFile`, opened once, asynchronously, when the first view is built) and
-`BrowserPlatform` hands `PackStore<OpfsFile>` over as the artifact tier, so
-compiled bytecode survives a page load. The byte tier stays absent in the
-browser: its HTTP cache already does that job and cannot be read
-synchronously. The file's handle is exclusive, so a Worker opens it once and
-shares it between its views, and a second tab runs with the memory tier alone
-(a note, never an error). `BrowserFetch`, `BrowserDecoder` and
-`BrowserPlatform` move from `bobcat-resources` to `bobcat-wasm`:
-`bobcat-resources` keeps the orchestration and the native adapters.
+`bobcat-wasm` implements `AsyncStore` over the web Cache API (`CacheStore`,
+over `caches.open("bobcat-code-cache")`, opened when the renderer is built).
+A key is the request URL `https://bobcat.invalid/<key>`, each path segment
+percent-encoded; nothing is fetched from it, and `https` is the scheme
+`Cache.put` accepts. An entry is a `Response` whose body is the entry bytes
+and whose headers carry the `Meta`: the key, the length, `last_used` in Unix
+seconds and the record as percent-encoded JSON. `scan` is `matchAll()` and
+reads headers only; `touch` puts the stored body's stream again under a new
+`last_used` header. Recency is that header alone, never the order `keys()` or
+`matchAll()` answer in. The Cache API is available in a Window and in every
+Worker and is shared by every tab of the origin. Without it (a context that
+is not secure, a browser that refuses it in private browsing) the code cache
+keeps artifacts in memory only, and that is a note, never an error.
+
+`bobcat-resources`' `CodeCache` holds either driver. Over an `AsyncStore` the
+store is opened by a task started with the system, and the first call that
+needs it awaits that open; a module's preload is awaited after its text is
+prepared and before its completion is delivered, and a flush is a task of its
+own, at most one at a time. There is no flush when the last scope lets go:
+what the engine compiled after the last serviced turn is compiled again next
+time. The byte tier stays absent in the browser: its HTTP cache already does
+that job and cannot be read synchronously. `BrowserFetch`, `BrowserDecoder`
+and `BrowserPlatform` are `bobcat-wasm`'s: `bobcat-resources` keeps the
+orchestration and the native adapters.
 
 ## PR4: the registry moves into `vant`
 
@@ -429,5 +479,5 @@ a dropped view's last frame keeps the pixels it read, and adds host policy.
 | iOS | `Library/Caches` | purged when disk is low (Apple's disk-usage guidance); app extensions share the directory | `PurgedWhenIdle`; index is rebuilt by `scan`; entries are self-describing |
 | Android | `getCacheDir`, `getCacheQuotaBytes` | oldest `lastModified` first, any time | `EvictableAnytime`; `touch` moves mtime; budget bounded by the quota |
 | macOS / Linux CLI | `~/Library/Caches/bobcat`, `$XDG_CACHE_HOME/bobcat` | user tools; concurrent CLI processes | atomic writes, no shared index |
-| browser | OPFS / Cache API, per-origin quota | whole-origin eviction under pressure; Safari clears script-writable storage after 7 days without interaction | `EvictableAnytime`; persistence is best-effort, the browser HTTP cache carries HTTP freshness |
+| browser | Cache API (the code cache's `AsyncStore`), per-origin quota | whole-origin eviction under pressure; Safari clears script-writable storage after 7 days without interaction | `EvictableAnytime`; persistence is best-effort, the browser HTTP cache carries HTTP freshness |
 | bobcat-server | none | fresh per capture | `NoStore`; the process-wide artifact memory tier still shares bytecode across captures |

@@ -27,10 +27,12 @@
 //!   preload hints.
 //! - **The code cache's Store side.** The engine looks compiled script bytecode up in, and files
 //!   what it compiled into, `vant`'s process-wide artifact tier
-//!   ([`vant::artifact::Artifacts::global`]). When the platform hands over an artifact Store —
-//!   natively the `code` directory inside the cache directory — this crate preloads the stored
-//!   bytecode of a script's text before it delivers that text, and writes what the engine compiled
-//!   back once per embedder turn ([`vant::artifact::ArtifactCache`]).
+//!   ([`vant::artifact::Artifacts::global`]). When the platform hands over an artifact store —
+//!   natively the `code` directory inside the cache directory, in the browser a cache of the web
+//!   Cache API — this crate preloads the stored bytecode of a script's text before it delivers that
+//!   text, and writes what the engine compiled back once per embedder turn
+//!   ([`vant::artifact::ArtifactCache`] over a synchronous store,
+//!   [`vant::artifact::AsyncArtifactCache`] over an asynchronous one).
 //! - **Platform image decoding.** No codec is compiled in: `ImageIO` on macOS, gdk-pixbuf on Linux,
 //!   the main thread's `Image` element in the browser, each asked to downsample during decode
 //!   ([`decode`]).
@@ -51,12 +53,12 @@
 //! image and source pipelines, the registry — and the reference adapters for
 //! the three capabilities `vant` asks of an embedder, bundled as a
 //! [`vant::Platform`]: [`NativePlatform`] ([`NativeFetch`], [`FsStore`],
-//! [`NativeDecoder`]) on macOS and Linux, and `BrowserPlatform`
-//! (`BrowserFetch`, [`vant::NoStore`], `BrowserDecoder`) on wasm32. Each is
-//! the target's [`DefaultPlatform`], which [`Resources::new`] builds with no
-//! persistent store; an embedder with a disk cache, its own HTTP stack or
-//! its own storage builds a platform and hands it to
-//! [`Resources::with_platform`].
+//! [`NativeDecoder`]) on macOS and Linux. It is the native
+//! [`DefaultPlatform`], which [`Resources::new`] builds with no persistent
+//! store; an embedder with a disk cache, its own HTTP stack or its own
+//! storage builds a platform and hands it to [`Resources::with_platform`].
+//! The browser's platform is `bobcat-wasm`'s, so on wasm32 there is no
+//! default and every [`Resources`] names its platform.
 //!
 //! [`Resources`] is the shared system: registry, caches, job executor,
 //! decoder. An embedder builds one, registers what it already holds, and
@@ -94,30 +96,25 @@ mod executor;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod file_body;
 mod images;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod platform;
 mod registry;
 mod sources;
 pub mod store;
 pub mod transport;
 
-#[cfg(target_arch = "wasm32")]
-pub use decode::BrowserDecoder;
 #[cfg(not(target_arch = "wasm32"))]
 pub use decode::NativeDecoder;
-#[cfg(target_arch = "wasm32")]
-pub use platform::BrowserPlatform;
 #[cfg(not(target_arch = "wasm32"))]
 pub use platform::NativePlatform;
 #[cfg(not(target_arch = "wasm32"))]
 pub use store::FsStore;
-#[cfg(target_arch = "wasm32")]
-pub use transport::BrowserFetch;
 #[cfg(not(target_arch = "wasm32"))]
 pub use transport::NativeFetch;
-use vant::artifact::{ArtifactCache, ArtifactConfig, Artifacts, SourceDigest};
+use vant::artifact::{ArtifactCache, ArtifactConfig, Artifacts, AsyncArtifactCache, SourceDigest};
 use vant::byte_cache::ByteCache;
+use vant::{ArtifactStore, AsyncStore, Parts, Platform, Store};
 pub use vant::{CachePolicy, data_url, image_header, mime, preprocess};
-use vant::{Parts, Platform, Store};
 
 use crate::executor::Wakeup;
 use crate::images::{Completion, ImageState};
@@ -125,13 +122,10 @@ use crate::registry::{Registered, Registry};
 use crate::transport::{Fetched, HttpSettings, Transports};
 
 /// The platform [`Resources::new`] builds, and the one [`Resources`] and
-/// [`ViewResources`] name when no other is: [`NativePlatform`] natively.
+/// [`ViewResources`] name when no other is: [`NativePlatform`]. Native
+/// only: the browser's platform is the embedder's (`bobcat-wasm`).
 #[cfg(not(target_arch = "wasm32"))]
 pub type DefaultPlatform = platform::NativePlatform;
-/// The platform [`Resources::new`] builds, and the one [`Resources`] and
-/// [`ViewResources`] name when no other is: `BrowserPlatform` on wasm32.
-#[cfg(target_arch = "wasm32")]
-pub type DefaultPlatform = platform::BrowserPlatform;
 
 /// The directory inside [`DiskCacheConfig::dir`] the code cache keeps its
 /// entries in: a Store of its own, which the byte tier's scan leaves alone.
@@ -423,61 +417,166 @@ pub(crate) type Handle<T> = Rc<T>;
 /// The handle jobs hold on [`Shared`].
 pub(crate) type SharedHandle<P> = Handle<Shared<P>>;
 
-/// The code cache's persistent half: the [`ArtifactCache`] over the
-/// platform's artifact Store, shared by every scope of one system.
+/// The code cache's persistent half: the driver over the platform's
+/// artifact store, shared by every scope of one system.
 ///
 /// The engine fills the process-wide memory tier ([`Artifacts::global`]);
 /// this preloads a script's stored bytecode into it before the script is
-/// delivered ([`Self::preload`]) and writes what the engine compiled back
-/// ([`flush_code_cache`]). When the last scope lets go, whatever is still
-/// queued is written once more, synchronously.
-pub(crate) struct CodeCache<S: Store> {
-    cache: ArtifactCache<S>,
+/// delivered and writes what the engine compiled back
+/// ([`flush_code_cache`]).
+///
+/// - Over a synchronous [`Store`] ([`ArtifactCache`]): the preload runs in the source load's CPU
+///   half ([`Self::preload`]), a flush runs on the blocking pool natively and inline in the
+///   browser, and when the last scope lets go, whatever is still queued is written once more,
+///   synchronously.
+/// - Over an [`AsyncStore`] ([`AsyncArtifactCache`]): the store is opened by a task started with
+///   the system, and the first call that needs it awaits that open. The preload is awaited after a
+///   module's text is prepared and before its completion is delivered ([`Self::preload_async`]),
+///   and a flush is a task of its own. There is no flush when the last scope lets go: what the
+///   engine compiled after the last serviced turn is compiled again next time.
+pub(crate) struct CodeCache<S: Store, A: AsyncStore> {
+    memory: Arc<Artifacts>,
+    driver: CodeDriver<S, A>,
     /// Whether a flush is queued or running, so a turn starts at most one.
     flushing: std::sync::atomic::AtomicBool,
 }
 
-impl<S: Store> CodeCache<S> {
-    fn open(store: S, budget: u64) -> Self {
-        Self {
-            cache: ArtifactCache::open(
-                Arc::clone(Artifacts::global()),
+enum CodeDriver<S: Store, A: AsyncStore> {
+    Blocking(ArtifactCache<S>),
+    Async {
+        /// The store, until the open takes it.
+        store: Mutex<Option<A>>,
+        budget: u64,
+        cache: tokio::sync::OnceCell<AsyncArtifactCache<A>>,
+    },
+}
+
+fn code_config(budget: u64) -> ArtifactConfig {
+    ArtifactConfig {
+        budget_bytes: budget,
+        ..ArtifactConfig::default()
+    }
+}
+
+impl<S: Store, A: AsyncStore> CodeCache<S, A> {
+    fn open(store: ArtifactStore<S, A>, budget: u64) -> Self {
+        let memory = Arc::clone(Artifacts::global());
+        let driver = match store {
+            ArtifactStore::Blocking(store) => CodeDriver::Blocking(ArtifactCache::open(
+                Arc::clone(&memory),
                 store,
                 bobcat_core::script_engine_id(),
-                ArtifactConfig {
-                    budget_bytes: budget,
-                    ..ArtifactConfig::default()
-                },
+                code_config(budget),
                 transport::now(),
-            ),
+            )),
+            ArtifactStore::Async(store) => CodeDriver::Async {
+                store: Mutex::new(Some(store)),
+                budget,
+                cache: tokio::sync::OnceCell::new(),
+            },
+        };
+        Self {
+            memory,
+            driver,
             flushing: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
-    /// Admits every stored artifact of `text` to the memory tier, for a
-    /// script about to be delivered as exactly `text`. A text the engine
-    /// would not look up ([`bobcat_core::MIN_CACHED_SOURCE_BYTES`]) is not
-    /// hashed.
+    fn is_async(&self) -> bool {
+        matches!(self.driver, CodeDriver::Async { .. })
+    }
+
+    /// The asynchronous driver, opened by the first call that asks. `None`
+    /// over a synchronous store, or when an open was dropped before it
+    /// finished (the system shutting down), which leaves no store to open.
+    async fn opened(&self) -> Option<&AsyncArtifactCache<A>> {
+        let CodeDriver::Async {
+            store,
+            budget,
+            cache,
+        } = &self.driver
+        else {
+            return None;
+        };
+        cache
+            .get_or_try_init(|| async {
+                let store = store
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take()
+                    .ok_or(())?;
+                Ok::<_, ()>(
+                    AsyncArtifactCache::open(
+                        Arc::clone(&self.memory),
+                        store,
+                        bobcat_core::script_engine_id(),
+                        code_config(*budget),
+                        transport::now(),
+                    )
+                    .await,
+                )
+            })
+            .await
+            .ok()
+    }
+
+    /// Over a synchronous store, admits every stored artifact of `text` to
+    /// the memory tier, for a script about to be delivered as exactly
+    /// `text`. A text the engine would not look up
+    /// ([`bobcat_core::MIN_CACHED_SOURCE_BYTES`]) is not hashed. Over an
+    /// asynchronous store this does nothing: [`Self::preload_async`] does it.
     pub(crate) fn preload(&self, text: &str) {
-        if text.len() >= bobcat_core::MIN_CACHED_SOURCE_BYTES {
-            self.cache
-                .preload(SourceDigest::of(text.as_bytes()), transport::now());
+        if let CodeDriver::Blocking(cache) = &self.driver
+            && text.len() >= bobcat_core::MIN_CACHED_SOURCE_BYTES
+        {
+            cache.preload(SourceDigest::of(text.as_bytes()), transport::now());
+        }
+    }
+
+    /// [`Self::preload`] over an asynchronous store, awaited before the
+    /// script's completion is delivered. Over a synchronous store this does
+    /// nothing: the preload already ran.
+    pub(crate) async fn preload_async(&self, text: &str) {
+        if !self.is_async() || text.len() < bobcat_core::MIN_CACHED_SOURCE_BYTES {
+            return;
+        }
+        if let Some(cache) = self.opened().await {
+            cache
+                .preload(SourceDigest::of(text.as_bytes()), transport::now())
+                .await;
         }
     }
 }
 
-impl<S: Store> Drop for CodeCache<S> {
+/// Clears [`CodeCache::flushing`] when an asynchronous flush ends, or when
+/// its task is dropped first.
+struct Flushing<'a>(&'a std::sync::atomic::AtomicBool);
+
+impl Drop for Flushing<'_> {
     fn drop(&mut self) {
-        self.cache.flush(transport::now());
+        self.0.store(false, std::sync::atomic::Ordering::Release);
     }
 }
 
-impl<S: Store> fmt::Debug for CodeCache<S> {
+impl<S: Store, A: AsyncStore> Drop for CodeCache<S, A> {
+    /// Over a synchronous store, writes what is still queued. Over an
+    /// asynchronous one nothing is written: there is no task left to await
+    /// the store.
+    fn drop(&mut self) {
+        if let CodeDriver::Blocking(cache) = &self.driver {
+            cache.flush(transport::now());
+        }
+    }
+}
+
+impl<S: Store, A: AsyncStore> fmt::Debug for CodeCache<S, A> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("CodeCache")
-            .field("cache", &self.cache)
-            .finish_non_exhaustive()
+        let mut debug = formatter.debug_struct("CodeCache");
+        match &self.driver {
+            CodeDriver::Blocking(cache) => debug.field("cache", cache),
+            CodeDriver::Async { cache, .. } => debug.field("cache", &cache.get()),
+        };
+        debug.finish_non_exhaustive()
     }
 }
 
@@ -487,7 +586,7 @@ pub(crate) struct Shared<P: Platform> {
     transports: Transports<P>,
     /// The code cache's Store side, when the platform handed over an
     /// artifact Store; shared by every scope, like the byte tier.
-    code: Option<Handle<CodeCache<P::Store>>>,
+    code: Option<Handle<CodeCache<P::Store, P::AsyncStore>>>,
     /// The base every specifier resolves against, and the URLs a plain fetch
     /// has completed for. Behind an `Arc` of its own because
     /// [`ResourceFetcher::fetch_probe`] hands a reader of it to the engine
@@ -666,7 +765,13 @@ impl<P: Platform> Shared<P> {
 /// serves (the painter's). It is also the only holder of the native
 /// executor: when the last clone of the last scope goes, the fetcher's
 /// runtime is shut down, on this thread.
-pub struct Resources<P: Platform = DefaultPlatform> {
+///
+/// The platform parameter defaults to [`DefaultPlatform`] natively; on
+/// wasm32 there is none, and the embedder names its own.
+pub struct Resources<
+    #[cfg(not(target_arch = "wasm32"))] P: Platform = DefaultPlatform,
+    #[cfg(target_arch = "wasm32")] P: Platform,
+> {
     shared: SharedHandle<P>,
     /// Shared by every scope, held by nothing a job can reach.
     #[cfg(not(target_arch = "wasm32"))]
@@ -703,11 +808,11 @@ pub enum RegisterError {
     InvalidUrl { url: String, message: String },
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Resources<DefaultPlatform> {
-    /// Builds the system over this target's [`DefaultPlatform`] with no
-    /// persistent store — and, in the browser, no image decoder, which
-    /// [`Resources::take_notes`] then reports. What tests and
-    /// `bobcat-server` build; [`Resources::with_platform`] says the rest.
+    /// Builds the system over [`DefaultPlatform`] with no persistent store.
+    /// What tests and `bobcat-server` build; [`Resources::with_platform`]
+    /// says the rest.
     ///
     /// # Panics
     ///
@@ -790,7 +895,7 @@ impl<P: Platform> Resources<P> {
             #[cfg(all(test, not(target_arch = "wasm32")))]
             decode_hook: Mutex::new(None),
         });
-        Self {
+        let resources = Self {
             shared,
             #[cfg(not(target_arch = "wasm32"))]
             executor: Arc::new(executor::Executor::new(
@@ -802,7 +907,36 @@ impl<P: Platform> Resources<P> {
                 config.memory_budget_bytes,
                 receiver,
             ))),
+        };
+        // An asynchronous code store is opened by a task of its own, so its
+        // scan runs while the first page's sources are fetched.
+        if let Some(code) = resources
+            .shared
+            .code
+            .as_ref()
+            .filter(|code| code.is_async())
+        {
+            let code = Handle::clone(code);
+            resources.spawn(async move {
+                code.opened().await;
+            });
         }
+        resources
+    }
+
+    /// Runs `task` beside the system's loads: natively on the executor, in
+    /// the browser as a local task of the Render Worker.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn spawn(&self, task: impl Future<Output = ()> + Send + 'static) {
+        self.executor.spawn(task);
+    }
+
+    /// Runs `task` beside the system's loads: natively on the executor, in
+    /// the browser as a local task of the Render Worker.
+    #[cfg(target_arch = "wasm32")]
+    #[expect(clippy::unused_self, reason = "the native twin spawns on the executor")]
+    fn spawn(&self, task: impl Future<Output = ()> + 'static) {
+        wasm_bindgen_futures::spawn_local(task);
     }
 
     /// An independent page resource scope sharing only the executor, the
@@ -1050,20 +1184,31 @@ impl<P: Platform> Resources<P> {
 }
 
 /// Writes what the engine compiled since the last flush to the code cache's
-/// Store, when there is a Store, something is queued and no flush is already
+/// store, when there is a store, something is queued and no flush is already
 /// queued or running. Asked once per embedder turn, from
 /// [`ResourceFetcher::service_images`]: when nothing is queued it costs one
 /// atomic load.
 ///
-/// Natively the write runs on the blocking pool, and a panic in it is a
-/// note; in the browser it runs here, the Store being synchronous there too.
+/// Over a synchronous store the write runs on the blocking pool natively,
+/// where a panic in it is a note, and here in the browser. Over an
+/// asynchronous store it is a task that awaits the store.
 fn flush_code_cache<P: Platform>(resources: &Resources<P>) {
     use std::sync::atomic::Ordering;
 
     let Some(code) = resources.shared.code.as_ref() else {
         return;
     };
-    if !code.cache.memory().has_pending() || code.flushing.swap(true, Ordering::AcqRel) {
+    if !code.memory.has_pending() || code.flushing.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    if code.is_async() {
+        let code = Handle::clone(code);
+        resources.spawn(async move {
+            let _flushing = Flushing(&code.flushing);
+            if let Some(cache) = code.opened().await {
+                cache.flush(transport::now()).await;
+            }
+        });
         return;
     }
     #[cfg(not(target_arch = "wasm32"))]
@@ -1076,7 +1221,7 @@ fn flush_code_cache<P: Platform>(resources: &Resources<P>) {
             };
             let written = executor::blocking(&handle, "code cache flush", {
                 let code = Handle::clone(&code);
-                move || code.cache.flush(transport::now())
+                move || code.flush_blocking()
             })
             .await;
             code.flushing.store(false, Ordering::Release);
@@ -1087,8 +1232,17 @@ fn flush_code_cache<P: Platform>(resources: &Resources<P>) {
     }
     #[cfg(target_arch = "wasm32")]
     {
-        code.cache.flush(transport::now());
+        code.flush_blocking();
         code.flushing.store(false, Ordering::Release);
+    }
+}
+
+impl<S: Store, A: AsyncStore> CodeCache<S, A> {
+    /// A flush over a synchronous store; nothing over an asynchronous one.
+    fn flush_blocking(&self) {
+        if let CodeDriver::Blocking(cache) = &self.driver {
+            cache.flush(transport::now());
+        }
     }
 }
 
@@ -1119,7 +1273,10 @@ fn parse_registration_url(url: &str) -> Result<Url, RegisterError> {
 }
 
 /// One view's end of the system: the [`ResourceFetcher`] it is built with.
-pub struct ViewResources<P: Platform = DefaultPlatform> {
+pub struct ViewResources<
+    #[cfg(not(target_arch = "wasm32"))] P: Platform = DefaultPlatform,
+    #[cfg(target_arch = "wasm32")] P: Platform,
+> {
     resources: Resources<P>,
     reports: ImageReports,
 }

@@ -33,7 +33,7 @@ use bobcat_core::{
     ModuleCallback, NativeModule, PageConfig, Painter, ScreenMetrics, StyleThreads, ViewSources,
     WindowTarget, configure_wasm_workers,
 };
-use bobcat_resources::{BrowserPlatform, Resources, ResourcesConfig, ViewResources};
+use bobcat_resources::{Resources, ResourcesConfig, ViewResources};
 use bobcat_source::{PageSource, ZipSource, register_lynx_xml_response};
 use js_sys::{Array, Object, Promise, Reflect};
 use url::Url;
@@ -42,6 +42,7 @@ use wasm_bindgen_futures::future_to_promise;
 use web_sys::OffscreenCanvas;
 use web_time::SystemTime;
 
+use crate::platform::{BrowserPlatform, CodeCacheConfig};
 use crate::text_input::{edit_command, enter_key_hint_name, input_mode_name, input_type_name};
 
 #[wasm_bindgen]
@@ -258,11 +259,11 @@ pub struct BobcatRenderer {
     /// tear the surface down and put it back for no reason. Declared before
     /// the view so its surface is released before anything else here is.
     painter: Option<Painter>,
-    view: Option<LynxView<ViewResources>>,
+    view: Option<LynxView<ViewResources<BrowserPlatform>>>,
     /// Empty/staged sources for the next load, sharing the platform decoder.
-    resources: Resources,
+    resources: Resources<BrowserPlatform>,
     /// Current page registrations stay available after boot, including ZIP assets.
-    page_resources: Option<Resources>,
+    page_resources: Option<Resources<BrowserPlatform>>,
     /// Scripts/styles remain registered until the loading view reports boot's outcome.
     boot_urls: Vec<String>,
     canvas: OffscreenCanvas,
@@ -441,7 +442,10 @@ impl BobcatRenderer {
             )
             .await
             .map_err(js_error)?;
-            let (platform, notes) = BrowserPlatform::new(Some(image_port));
+            // The code cache's store is opened here, once per Worker: every
+            // later page is a `new_scope` of this system and shares it.
+            let (platform, notes) =
+                BrowserPlatform::new(Some(image_port), Some(CodeCacheConfig::default())).await;
             let resources = Resources::with_platform(
                 ResourcesConfig {
                     // Lazy bundles: a `lynx.fetchBundle` installs its
@@ -1354,7 +1358,7 @@ fn wall_clock(unix_millis: f64) -> Option<SystemTime> {
 
 /// Surfaces what the resource system recorded — an image that failed, a
 /// decoder that is missing — on the console, where a browser host looks.
-fn warn_notes(resources: &Resources) {
+fn warn_notes(resources: &Resources<BrowserPlatform>) {
     for note in resources.take_notes() {
         console_warn(&JsValue::from(format!("bobcat-resources: {note}")));
     }
