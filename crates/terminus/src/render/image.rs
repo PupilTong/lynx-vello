@@ -31,6 +31,17 @@
 //! to report that an image stopped being resident, so a document's image
 //! state can never regress from loaded back to pending.
 //!
+//! # One copy of a bitmap
+//!
+//! The painter asks first what a source draws as ([`FrameImages::describe`]),
+//! which never blocks: the bitmap's [`ImageDescriptor`], with its pixels when
+//! the store holds them. The rasterizer keys its upload of a bitmap on that
+//! descriptor alone, one upload for every draw of a source whatever its
+//! sampler, so once it holds that upload the painter tells the store
+//! ([`FrameImages::release`]) and the store may drop its copy. The painter calls
+//! [`FrameImages::read`] only when the store dropped a bitmap the rasterizer does not hold either.
+//! A store that keeps everything implements neither and is correct.
+//!
 //! # What the engine will not draw
 //!
 //! The rasterizer uploads a bitmap into a texture of its own, and no texture
@@ -107,7 +118,9 @@ use rustc_hash::FxHashMap;
 use seldon::text::TextContext;
 use smallvec::SmallVec;
 use vant::image::Bitmap;
-use vant::image::residency::{Decoded, Read, Requested, Residency, ResidencyConfig, ViewKey};
+use vant::image::residency::{
+    Decoded, Described, Read, Requested, Residency, ResidencyConfig, ViewKey,
+};
 
 use crate::paint::display_list::DisplayList;
 use crate::peniko::ImageData;
@@ -263,13 +276,41 @@ pub const MAX_RENDERABLE_DIMENSION: u32 = SharedGpu::LIMITS.max_texture_dimensio
 /// zero encodes a non-finite transform that the scene accepts without complaint.
 #[must_use]
 pub fn is_renderable(data: &ImageData) -> bool {
-    data.width > 0
-        && data.height > 0
-        && data.width <= MAX_RENDERABLE_DIMENSION
-        && data.height <= MAX_RENDERABLE_DIMENSION
+    renders_at(data.width, data.height)
 }
 
-pub use vant::image::ImageSizeHint;
+/// [`is_renderable`] of a bitmap known by its size alone.
+pub(crate) const fn renders_at(width: u32, height: u32) -> bool {
+    width > 0
+        && height > 0
+        && width <= MAX_RENDERABLE_DIMENSION
+        && height <= MAX_RENDERABLE_DIMENSION
+}
+
+pub use vant::image::{ImageDescriptor, ImageSizeHint};
+
+/// What a frame draws for one source ([`FrameImages::describe`]): the
+/// bitmap's descriptor, and its pixels when the store holds them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FrameImage {
+    /// The bitmap the frame draws. With `pixels`, it is theirs.
+    pub descriptor: ImageDescriptor,
+    /// `None` when the store does not hold the bitmap: a rasterizer that
+    /// still holds an upload of it draws it from there, and one that does not
+    /// [`FrameImages::read`]s it.
+    pub pixels: Option<ImageData>,
+}
+
+impl FrameImage {
+    /// A bitmap the store holds.
+    #[must_use]
+    pub fn resident(image: ImageData) -> Self {
+        Self {
+            descriptor: ImageDescriptor::of(&image),
+            pixels: Some(image),
+        }
+    }
+}
 
 /// The synchronous pixel source a frame's image draws resolve against.
 ///
@@ -301,6 +342,36 @@ pub trait FrameImages {
     /// trait is the one answer that cannot be reviewed — writing `{}` says
     /// the same thing where someone can see it.
     fn retain(&self, frame: &[Arc<str>]);
+
+    /// What the frame draws for `source`: the descriptor of the bitmap, and
+    /// its pixels when the store holds them, or `None` when there is nothing
+    /// to draw.
+    ///
+    /// **Must not block on a decode.** A store that dropped the pixels
+    /// answers their descriptor with `pixels: None`, and is asked to
+    /// [`Self::read`] them only when the rasterizer holds no upload of that
+    /// bitmap either. `source` and `hint` are as [`Self::read`] has them.
+    ///
+    /// The default answers [`Self::read`] with its pixels: the answer of a
+    /// store that keeps every bitmap it answers, which is a correct store.
+    /// Unlike [`Self::retain`], this has a default because the default is a
+    /// complete policy — keep everything — rather than a decision left
+    /// unmade.
+    fn describe(&self, source: &str, hint: ImageSizeHint) -> Option<FrameImage> {
+        self.read(source, hint).map(FrameImage::resident)
+    }
+
+    /// The rasterizer holds the upload of each of `sources` the frame last
+    /// described draws, and will keep it while that frame is drawn:
+    /// the store may drop their pixels. [`Self::read`] is asked for one of
+    /// them again only if the rasterizer loses an upload.
+    ///
+    /// Advisory, as [`Self::retain`] is. The default drops nothing — a store
+    /// that keeps every bitmap it answers, which is a correct store — and is
+    /// a default for the reason [`Self::describe`]'s is.
+    fn release(&self, sources: &[Arc<str>]) {
+        let _ = sources;
+    }
 }
 
 /// Composes every image draw as nothing: the pixel source for a scene built
@@ -321,6 +392,14 @@ impl<T: FrameImages + ?Sized> FrameImages for Rc<T> {
 
     fn retain(&self, frame: &[Arc<str>]) {
         (**self).retain(frame);
+    }
+
+    fn describe(&self, source: &str, hint: ImageSizeHint) -> Option<FrameImage> {
+        (**self).describe(source, hint)
+    }
+
+    fn release(&self, sources: &[Arc<str>]) {
+        (**self).release(sources);
     }
 }
 
@@ -587,6 +666,16 @@ impl ImageResidency {
     /// See [`Residency::read`].
     pub fn read(&mut self, source: &str, hint: ImageSizeHint) -> Read {
         self.residency.read(source, hint)
+    }
+
+    /// See [`Residency::describe`].
+    pub fn describe(&mut self, source: &str, hint: ImageSizeHint) -> Described {
+        self.residency.describe(source, hint)
+    }
+
+    /// See [`Residency::release`].
+    pub fn release(&mut self, sources: &[Arc<str>]) {
+        self.residency.release(sources);
     }
 
     /// See [`Residency::restored`].

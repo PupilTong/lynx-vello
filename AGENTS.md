@@ -1233,10 +1233,10 @@ target and leaves the watch alone, so the last frame stays up and capturable
 while the next page loads and no later flush parks.
 
 Every entry point first polls the link, adopting the newest `Published` with
-the pixels it draws before noticing a view that has gone, so a commit published
-in the release turn is still adopted. A commit whose pixels could not be read
-in the same step is not adopted, because a frame indexes its store's bitmaps by
-draw order. The painter retains the newest frame and runs input routing,
+the bitmaps it draws before noticing a view that has gone, so a commit published
+in the release turn is still adopted. A commit whose bitmaps could not be
+described in the same step — there was no store to ask — is not adopted, because
+a frame indexes its store's bitmaps by draw order. The painter retains the newest frame and runs input routing,
 gestures, compositor scrolling, composition and presentation inside the
 embedder's own calls; vsync touches the OS only there. Commands needing the
 live tree go to `bobcat-main`, which answers by publishing a later frame, so a
@@ -1350,11 +1350,29 @@ is asked for one image at a time by source string (the `url(…)` value CSS
 produced, or a replaced element's source): named through `request_image`,
 answered through `ImageReports` with the intrinsic size layout needs, given its
 moment in every `LynxView::pump` through `service_images` (where a host whose
-loads complete off-thread forwards them into the reports), and read back
-synchronously when a painter adopts a commit through `FrameImages::read`, which
-carries a `terminus::link::ImageSizeHint` — the largest device-pixel extent the frame
+loads complete off-thread forwards them into the reports), and asked
+synchronously when a painter adopts a commit, with a
+`terminus::link::ImageSizeHint` — the largest device-pixel extent the frame
 draws that source at, computed per draw under its transform and unioned per
-source — so a host decodes to the draw rather than to the file. No container
+source — so a host decodes to the draw rather than to the file. **A drawn
+bitmap has one copy.** The painter first asks what each source draws as
+(`FrameImages::describe`, which must not block on a decode): the bitmap's
+`ImageDescriptor` — blob id, size, layout, what the rasterizer keys an upload
+on — with its pixels when the store holds them. It keeps those pixels only
+until the rasterizer holds its upload — one per bitmap, whatever the samplers
+the frame draws it with; then it takes a lease on that upload, drops its
+reference and tells the store it may drop its own (`FrameImages::release`). A leased upload
+is not released under the GPU byte budget, so the frame — a dropped view's
+last one included — stays drawable with no pixel on the CPU; the lease ends
+when the painter adopts a commit that no longer draws the source, forgets the
+view or drops. `FrameImages::read`, the call that may block on a restore, is
+made only for a source whose pixels the store dropped and whose upload the
+rasterizer does not hold: a source drawn again after its lease ended and its
+upload was released, or a render that found neither an upload nor the pixels it was lent, after which
+the next adoption describes the commit again. `describe` and `release` have
+default bodies — `describe` is a `read`, `release` drops nothing — because
+keeping every bitmap is a complete policy; a store with only `read` and
+`retain` behaves as before. No container
 sniffing, codec contract, cache policy or byte budget lives in `bobcat-core` or
 `terminus`: the sizing vocabulary (`ImageSizeHint`, `Bitmap`, `target_size`) and
 every cache policy are `vant`'s, which both re-export, and
@@ -3026,7 +3044,12 @@ type and depends only on `bytes`, `http`, `url`, `serde_json`, `thiserror`,
   completion back (`loaded`, `parsed`, `failed`, `refined`, …) and is handed
   the waiters to tell; a frame's `read` answers `Read::Hit` with the
   `Refinement` to start when the bitmap is far from the drawn size,
-  `Read::Restore` when it was evicted, or `Read::Unavailable`. Each view has
+  `Read::Restore` when it was evicted or released, or `Read::Unavailable`.
+  `describe` answers without ever asking for a restore — `Described::Resident`,
+  or `Described::Absent` with the `ImageDescriptor` (`vant::image`) of the
+  bitmap last inserted for the source — and `release(sources)` drops bitmaps
+  from the tier, pinned or not, for a caller whose rasterizer holds them; the
+  entries stay loaded. Each view has
   a `ViewKey` and its own working set, and the tier pins **the union of
   every view's set** (`retain(view, frame)`, `release_view`), so one view's
   frame never unpins another's. It stores waiters and never calls them.
@@ -3114,7 +3137,11 @@ size without decoding a pixel, the rest passed through.
 `ImageResidency` (`terminus::link::ImageResidency`, the engine's store type
 over `vant::image::residency::Residency`) under a byte budget with every
 view's working set pinned against eviction — a `ViewResources` carries its
-`ViewKey` and releases its set when it drops — and fetched bytes in `vant::byte_cache::ByteCache`
+`ViewKey` and releases its set when it drops; a bitmap whose upload a
+painter's rasterizer holds leaves the tier when the painter says so
+(`FrameImages::release`), is described by its descriptor from then on, and is
+decoded again inside a `read` only when the rasterizer does not hold it either
+— and fetched bytes in `vant::byte_cache::ByteCache`
 over the platform's `Store` (`FsStore`: `<fnv64>.bin` beside `<fnv64>.json`
 holding the key, length, last use and the HTTP record, temp-and-rename
 writes, strays and broken halves swept at open) with RFC 9111 freshness,
@@ -4104,7 +4131,14 @@ Subsystems:
   (`SharedGpu`: one device, one `vello_gpu` renderer and one bitmap table
   shared by every target in a process), and the rasterizer `render::raster::Raster`,
   which replays a display list into `vello_gpu` (`render::sparse`), drawing
-  glyphs as outlines (glifo's glyph atlas cache is off). `render::blur`
+  glyphs as outlines (glifo's glyph atlas cache is off). A bitmap paint is an
+  `ImageRef`: the `ImageDescriptor` an upload is keyed on, and pixels that are
+  held, lent (a weak blob — what a painter's per-commit table hands a composed
+  list and a filter bake, so neither keeps a bitmap alive) or only uploaded;
+  the pixels are read on an upload miss alone. `render::sparse::BitmapLeases`
+  is one owner's hold on uploads that does not depend on having drawn them
+  recently, and the budget trim skips a leased upload as it skips a pinned
+  one. `render::blur`
   is the one exception: a `filter: blur()` bake is a partial replay of a
   committed frame's compose program, so it reads `CommittedFrame`'s filter side
   table, while still naming no node, style, layout or paint-order type. A

@@ -170,7 +170,12 @@ impl WalkSink<'_> {
         match self {
             Self::Monolithic(scene, pixels) => {
                 if let Some(data) = pixels.read(&draw.image, draw.size_hint()) {
-                    crate::paint::compose::encode_image(scene, &draw, Affine::IDENTITY, &data);
+                    crate::paint::compose::encode_image(
+                        scene,
+                        &draw,
+                        Affine::IDENTITY,
+                        &crate::paint::display_list::ImageRef::held(&data),
+                    );
                 }
             }
             Self::Compose(assembly) => assembly.push_image(space, draw),

@@ -134,8 +134,8 @@ use euclid::default::Vector2D;
 
 use super::gpu::{GpuError, SharedGpu};
 use super::raster::Raster;
-use crate::paint::display_list::{DisplayList, Texture};
-use crate::peniko::{Color, ImageData};
+use crate::paint::display_list::{DisplayList, ImageRef, Texture};
+use crate::peniko::Color;
 use crate::visual::{CommittedFrame, ScrollSlot};
 
 /// Largest per-axis device-pixel count one filter bake may have: the
@@ -776,7 +776,7 @@ impl FilterTextures {
         raster: &mut Raster,
         gpu: &SharedGpu,
         frame: &CommittedFrame,
-        images: &[Option<ImageData>],
+        images: &[Option<ImageRef>],
         vectors: &[Option<Texture>],
         offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
         scroll_generation: u64,
@@ -927,7 +927,7 @@ impl FilterTextures {
         raster: &mut Raster,
         gpu: &SharedGpu,
         frame: &CommittedFrame,
-        images: &[Option<ImageData>],
+        images: &[Option<ImageRef>],
         vectors: &[Option<Texture>],
         offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
         animation_now: Option<f64>,

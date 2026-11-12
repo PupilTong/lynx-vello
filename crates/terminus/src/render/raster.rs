@@ -79,4 +79,12 @@ impl Raster {
     pub(crate) fn bind_texture(&mut self, texture: &Texture, bound: Option<wgpu::Texture>) {
         self.sparse.bind(texture, bound);
     }
+
+    /// How many bitmap draws of this target's renders, its bakes' included,
+    /// drew nothing because no upload was resident and the pixels they
+    /// were lent were gone: a count that moves only when an owner of lent
+    /// pixels must read them again.
+    pub(crate) fn lost_pixels(&self) -> u64 {
+        self.sparse.lost()
+    }
 }

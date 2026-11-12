@@ -120,6 +120,65 @@ impl Bitmap {
     }
 }
 
+/// What a decoded bitmap is, without its pixels: everything a rasterizer
+/// keys an upload of it on — the blob's identity, its size and its layout.
+///
+/// A descriptor names one bitmap for as long as its blob id is unique,
+/// which is the process's life: a bitmap decoded again is a new blob and so
+/// a new descriptor, even at the same size.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ImageDescriptor {
+    /// The pixels' [`Blob::id`].
+    pub blob: u64,
+    pub width: u32,
+    pub height: u32,
+    pub format: PixelFormat,
+    pub alpha_type: ImageAlphaType,
+}
+
+impl std::hash::Hash for ImageDescriptor {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        // `peniko`'s two layout enums are fieldless and derive no `Hash`.
+        (
+            self.blob,
+            self.width,
+            self.height,
+            self.format as u8,
+            self.alpha_type as u8,
+        )
+            .hash(state);
+    }
+}
+
+impl ImageDescriptor {
+    /// What `image` is.
+    #[must_use]
+    pub fn of(image: &ImageData) -> Self {
+        Self {
+            blob: image.data.id(),
+            width: image.width,
+            height: image.height,
+            format: image.format,
+            alpha_type: image.alpha_type,
+        }
+    }
+
+    /// The image this descriptor names, with `data` its pixels: the blob
+    /// the descriptor was taken of, or one upgraded from a weak handle to
+    /// it.
+    #[must_use]
+    pub fn with_pixels(self, data: Blob<u8>) -> ImageData {
+        debug_assert_eq!(data.id(), self.blob, "the pixels this descriptor names");
+        ImageData {
+            data,
+            format: self.format,
+            alpha_type: self.alpha_type,
+            width: self.width,
+            height: self.height,
+        }
+    }
+}
+
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum DecodeError {
     /// This platform has no decoder the host knows how to reach.
@@ -224,6 +283,26 @@ mod tests {
         assert_eq!(image.alpha_type, ImageAlphaType::AlphaPremultiplied);
         assert_eq!((image.width, image.height), (1, 1));
         assert_eq!(image.data.as_ref(), &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn a_descriptor_names_an_image_and_rebuilds_it_from_its_pixels() {
+        let image = Bitmap {
+            width: 2,
+            height: 1,
+            source_width: 2,
+            source_height: 1,
+            premultiplied: false,
+            rgba: vec![9; 8],
+        }
+        .into_image_data();
+        let descriptor = ImageDescriptor::of(&image);
+        assert_eq!(descriptor.blob, image.data.id());
+        assert_eq!((descriptor.width, descriptor.height), (2, 1));
+        let weak = image.data.downgrade();
+        let rebuilt = descriptor.with_pixels(weak.upgrade().expect("still held"));
+        assert_eq!(rebuilt, image);
+        assert_eq!(ImageDescriptor::of(&rebuilt), descriptor);
     }
 
     #[test]

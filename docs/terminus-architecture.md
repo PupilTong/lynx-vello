@@ -685,12 +685,15 @@ stack goes through `SharedGpu::submit`, and a window's surface configuration
 holds the same lock, because wgpu fails a configuration when another thread
 submits while it waits for the device to go idle. A bitmap is pinned
 while a live target drew it in one of that target's last four bitmap-drawing
-renders, and a target going away drops its pins. A bitmap drawn
-nearest-neighbour (`image-rendering: pixelated`) takes a texture of its own
-rather than an atlas slot: `vello_gpu` adds an atlas slot's offset to the
-sample position in f32, so a pixel centre on a texel edge would otherwise read
-one texel or the other depending on where in the shared atlas the bitmap
-landed. The render target, readback
+renders, and a target going away drops its pins. A painter also leases the
+uploads of the bitmaps its adopted commit draws (`render::sparse::BitmapLeases`):
+a leased upload is kept whether or not it was drawn recently, which is what lets
+the painter and its host drop the CPU pixels of a bitmap once its upload exists.
+An upload is keyed on the bitmap's descriptor alone — one upload serves every
+sampler a frame draws it with — and its pixels are read on a miss alone. Every
+bitmap is a texture of its own, bound and sampled whole as an external texture,
+so a nearest-neighbour draw (`image-rendering: pixelated`) samples at the
+position computed. The render target, readback
 buffer, filter bakes and vector raster cache stay per target. `render::blur` is the third seam, and the
 one narrow exception to the floor's DOM-freedom: `FilterTextures::prepare`
 reads a `CommittedFrame`'s filter side table and calls the frame's own

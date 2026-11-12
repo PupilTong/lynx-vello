@@ -22,8 +22,7 @@ use stylo::properties::animated_properties::AnimationValueMap;
 use super::{AnimationSample, PaintOrder, SpaceSamples};
 use crate::kurbo::Affine;
 use crate::paint::compose::{self, ComposeOp, FilterGroup};
-use crate::paint::display_list::{DisplayList, Texture};
-use crate::peniko::ImageData;
+use crate::paint::display_list::{DisplayList, ImageRef, Texture};
 use crate::scroll::{
     AutoScrollRequest, CaptureAxes, ChainLink, ScrollAxes, ScrollRequest, SnapAxis, SnapPoint,
     SnapStrictness, unwrap_axis, wrap_axis, wrap_period_axis,
@@ -553,7 +552,7 @@ impl CommittedFrame {
     pub fn compose_into(
         &self,
         scene: &mut DisplayList,
-        images: &[Option<ImageData>],
+        images: &[Option<ImageRef>],
         filtered: &[Option<Texture>],
         vectors: &[Option<Texture>],
         offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
@@ -601,7 +600,7 @@ impl CommittedFrame {
         &self,
         scene: &mut DisplayList,
         target: (u32, u32),
-        images: &[Option<ImageData>],
+        images: &[Option<ImageRef>],
         filtered: &[Option<Texture>],
         vectors: &[Option<Texture>],
         offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
@@ -709,7 +708,7 @@ impl CommittedFrame {
         &self,
         index: usize,
         scene: &mut DisplayList,
-        images: &[Option<ImageData>],
+        images: &[Option<ImageRef>],
         filtered: &[Option<Texture>],
         vectors: &[Option<Texture>],
         offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
@@ -796,9 +795,13 @@ impl CommittedFrame {
     /// only changes when the commit does. This runs once per commit instead,
     /// and encoding a draw becomes a slice index.
     ///
-    /// `images` ends up with one entry per image draw, in draw order.
-    /// `sources` receives each distinct image once, in first-draw order —
-    /// the frame's working set, and the residency hint a host is given.
+    /// `images` ends up with one entry per image draw, in draw order, each
+    /// holding its pixels ([`ImageRef::held`]): the table of a caller with
+    /// no rasterizer to lease uploads from, whose composed scene may outlive
+    /// the store's answer. The painter lends them instead
+    /// (`painter::images`). `sources` receives each distinct image once, in
+    /// first-draw order — the frame's working set, and the residency hint a
+    /// host is given.
     ///
     /// Each source is read once, with the size hint covering every draw of
     /// it in this frame — which is why the draws are walked before the first
@@ -807,16 +810,42 @@ impl CommittedFrame {
     pub fn resolve_images<P: crate::render::image::FrameImages + ?Sized>(
         &self,
         pixels: &P,
-        images: &mut Vec<Option<ImageData>>,
+        images: &mut Vec<Option<ImageRef>>,
         sources: &mut Vec<std::sync::Arc<str>>,
     ) {
         images.clear();
+        let mut hints = Vec::new();
+        let mut indices = Vec::new();
+        self.image_sources(sources, &mut hints, &mut indices);
+        let distinct: Vec<Option<ImageRef>> = sources
+            .iter()
+            .zip(&hints)
+            .map(|(source, hint)| {
+                pixels
+                    .read(source, *hint)
+                    .map(|image| ImageRef::held(&image))
+            })
+            .collect();
+        images.extend(indices.into_iter().map(|index| distinct[index].clone()));
+    }
+
+    /// The distinct sources this frame's image draws name, in first-draw
+    /// order, into `sources`; the size hint covering every draw of each,
+    /// parallel to it, into `hints`; and per draw, in draw order, the index
+    /// of its source into `indices`. Each is cleared first.
+    pub(crate) fn image_sources(
+        &self,
+        sources: &mut Vec<std::sync::Arc<str>>,
+        hints: &mut Vec<crate::render::image::ImageSizeHint>,
+        indices: &mut Vec<usize>,
+    ) {
         sources.clear();
-        // One entry per distinct source, parallel to `sources`. A frame draws
-        // few distinct images however many draws it has, so this scan is over
-        // a handful of pointers.
-        let mut hints: Vec<crate::render::image::ImageSizeHint> = Vec::new();
-        let mut indices: Vec<usize> = Vec::with_capacity(self.presentation.image_draws.len());
+        hints.clear();
+        indices.clear();
+        indices.reserve(self.presentation.image_draws.len());
+        // One entry per distinct source. A frame draws few distinct images
+        // however many draws it has, so this scan is over a handful of
+        // pointers.
         for draw in &self.presentation.image_draws {
             // Every draw of one source shares one allocation — the registry
             // hands back its own key — so pointer identity is the whole
@@ -833,12 +862,6 @@ impl CommittedFrame {
             hints[index] = hints[index].union(hint);
             indices.push(index);
         }
-        let distinct: Vec<Option<ImageData>> = sources
-            .iter()
-            .zip(&hints)
-            .map(|(source, hint)| pixels.read(source, *hint))
-            .collect();
-        images.extend(indices.into_iter().map(|index| distinct[index].clone()));
     }
 
     /// This frame's commit id. Monotonic across a document's life, so it

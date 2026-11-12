@@ -21,7 +21,7 @@
 //! bakes, bound by [`SparseBackend::bind`]) is drawn as an external texture
 //! under its own id, sampled in place; a bitmap is uploaded once to a
 //! texture of its own, drawn the same way, and released once renders stop
-//! drawing it ([`Bitmaps`]).
+//! drawing it and no painter leases it ([`Bitmaps`], [`BitmapLeases`]).
 //!
 //! Every target on a device renders through the one `vello_gpu` renderer
 //! of its [`SharedGpu`] ([`SharedRaster`]); each target's
@@ -53,10 +53,11 @@ use super::gpu::SharedGpu;
 use crate::clock::ClockInstant;
 use crate::kurbo::{Affine, BezPath, Diagonal2, Point, Rect, Shape as _};
 use crate::paint::display_list::{
-    DisplayList, FILL_TOLERANCE, GlyphRun, GlyphStyle, ImagePaint, Item, Paint, STROKE_TOLERANCE,
-    Shape, Texture, next_texture_id,
+    DisplayList, FILL_TOLERANCE, GlyphRun, GlyphStyle, ImagePaint, ImageRef, Item, Paint,
+    STROKE_TOLERANCE, Shape, Texture, next_texture_id,
 };
 use crate::peniko::{Color, Extend, Fill, ImageAlphaType, ImageData, ImageFormat, ImageSampler};
+use crate::render::image::ImageDescriptor;
 
 /// What one frame cost, and what it could not draw.
 #[derive(Debug, Default, Clone, Copy)]
@@ -75,6 +76,10 @@ pub(crate) struct Stats {
     /// Image draws with no readable pixels, and texture draws with no
     /// texture bound.
     pub(crate) images_skipped: u32,
+    /// Bitmap draws with no upload whose lent pixels were gone: drawn as
+    /// nothing like an unreadable image, but recoverable, since the owner
+    /// can read the pixels again ([`SparseBackend::lost`]).
+    pub(crate) images_lost: u32,
 }
 
 /// One target's rasterizer: the scene its renders fill, the textures it
@@ -96,6 +101,8 @@ pub(crate) struct SparseBackend {
     /// bound for it beside [`Self::bound`].
     textures: Vec<(TextureId, wgpu::TextureView)>,
     pub(crate) last: Stats,
+    /// Every [`Stats::images_lost`] of this target's renders, summed.
+    lost: u64,
 }
 
 impl std::fmt::Debug for SparseBackend {
@@ -161,13 +168,17 @@ fn set_paint(
             return true;
         }
         Paint::Gradient(gradient) => (**gradient).clone().into(),
-        Paint::Image(image) => {
-            let Some(image) = (pictures.bitmap)(image) else {
+        Paint::Image(image) => match (pictures.bitmap)(image) {
+            Ok(image) => image.into(),
+            Err(Missing::Unreadable) => {
                 stats.images_skipped += 1;
                 return false;
-            };
-            image.into()
-        }
+            }
+            Err(Missing::Lost) => {
+                stats.images_lost += 1;
+                return false;
+            }
+        },
         Paint::Texture(paint) => {
             // A texture a render cannot bind fails the whole render, so one
             // the bake that made it has since released draws nothing.
@@ -183,10 +194,20 @@ fn set_paint(
     true
 }
 
+/// Why a bitmap paint draws nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Missing {
+    /// Its pixels cannot be drawn: too long a side, too few bytes.
+    Unreadable,
+    /// No upload of it is resident and the pixels it was lent are gone.
+    Lost,
+}
+
 /// How a replay resolves the pictures a list paints with.
 pub(crate) struct Pictures<'a> {
-    /// A bitmap paint to the image the scene draws; `None` draws nothing.
-    pub(crate) bitmap: &'a mut dyn FnMut(&ImagePaint) -> Option<Image>,
+    /// A bitmap paint to the image the scene draws, or why it draws
+    /// nothing.
+    pub(crate) bitmap: &'a mut dyn FnMut(&ImagePaint) -> Result<Image, Missing>,
     /// Whether a texture id is bound for the render.
     pub(crate) bound: &'a dyn Fn(u64) -> bool,
 }
@@ -425,7 +446,7 @@ impl StripScene {
             &mut self.replay,
             &mut Pictures {
                 bitmap: &mut |paint| {
-                    Some(Image {
+                    Ok(Image {
                         image: ImageSource::external_texture(
                             TextureId(0),
                             TextureRegion::Full,
@@ -558,10 +579,10 @@ struct BitmapKey {
 }
 
 impl BitmapKey {
-    /// The key `image` is uploaded under.
-    fn of(image: &ImageData) -> Self {
+    /// The key the bitmap `image` names is uploaded under.
+    fn of(image: &ImageDescriptor) -> Self {
         Self {
-            blob: image.data.id(),
+            blob: image.blob,
             width: image.width,
             height: image.height,
             layout: (image.format as u8, image.alpha_type as u8),
@@ -588,6 +609,9 @@ struct Bitmap {
     last_drawn: u64,
     /// Per target that has drawn it, the last generation that did.
     pins: SmallVec<[Pin; 2]>,
+    /// How many leases hold it ([`BitmapLeases`]): while any does, it is
+    /// not released, drawn recently or not.
+    leases: u32,
 }
 
 impl Bitmap {
@@ -656,6 +680,9 @@ const PINNED_RENDERS: u64 = 4;
 pub(crate) struct SharedRaster {
     renderer: Mutex<Paired>,
     bitmaps: Mutex<Bitmaps>,
+    /// How many bitmaps have been uploaded, by any target: read without a
+    /// lock by a lease holder that only rechecks once something was.
+    uploads: AtomicU64,
 }
 
 impl std::fmt::Debug for SharedRaster {
@@ -692,8 +719,10 @@ struct Paired {
 /// Each target counts its renders that draw a bitmap — its generations —
 /// and a bitmap is pinned while some live target drew it in one of its
 /// last [`PINNED_RENDERS`] generations; a target that goes away
-/// ([`SparseBackend`]'s `Drop`) pins nothing more. Once a render is
-/// submitted, the unpinned uploads are released least recently drawn first
+/// ([`SparseBackend`]'s `Drop`) pins nothing more. A bitmap a painter
+/// leases ([`BitmapLeases`]) is held whether drawn recently or not. Once a
+/// render is submitted, the unpinned, unleased uploads are released least
+/// recently drawn first
 /// (by any target) until the resident bytes are back within the budget, by
 /// dropping their textures; wgpu keeps a texture alive until the work
 /// submitted on it is done. Renders whose own bitmaps exceed the budget keep
@@ -705,6 +734,9 @@ pub(crate) struct Bitmaps {
     bytes: u64,
     /// Each live target's latest generation.
     targets: FxHashMap<u64, u64>,
+    /// Each lease owner's leased uploads ([`BitmapLeases`]); every key
+    /// listed counts once in its upload's [`Bitmap::leases`].
+    leases: FxHashMap<u64, Vec<BitmapKey>>,
     /// How many renders, by any target, have drawn a bitmap.
     stamp: u64,
     budget: u64,
@@ -730,6 +762,7 @@ impl Bitmaps {
             entries: FxHashMap::default(),
             bytes: 0,
             targets: FxHashMap::default(),
+            leases: FxHashMap::default(),
             stamp: 0,
             budget,
         }
@@ -772,14 +805,14 @@ impl Bitmaps {
             .image(sampler)
     }
 
-    /// Releases the unpinned uploads, least recently drawn first, until the
-    /// resident bytes are within the budget.
+    /// Releases the unpinned, unleased uploads, least recently drawn first,
+    /// until the resident bytes are within the budget.
     fn release(&mut self) {
         while self.bytes > self.budget {
             let victim = self
                 .entries
                 .iter()
-                .filter(|(_, bitmap)| !bitmap.pinned(&self.targets))
+                .filter(|(_, bitmap)| bitmap.leases == 0 && !bitmap.pinned(&self.targets))
                 .min_by_key(|(_, bitmap)| bitmap.last_drawn)
                 .map(|(key, _)| *key);
             let Some(key) = victim else {
@@ -791,6 +824,112 @@ impl Bitmaps {
                 .expect("the victim was just found in the table");
             self.bytes -= bitmap.bytes;
         }
+    }
+}
+
+impl Bitmaps {
+    /// Leases `image`'s upload to `owner`, when it exists; otherwise
+    /// changes nothing. Answers whether it leased.
+    fn lease(&mut self, owner: u64, image: &ImageDescriptor) -> bool {
+        let key = BitmapKey::of(image);
+        let Some(bitmap) = self.entries.get_mut(&key) else {
+            return false;
+        };
+        bitmap.leases += 1;
+        self.leases.entry(owner).or_default().push(key);
+        true
+    }
+
+    /// Makes `owner`'s leases exactly the uploads of `held` that exist:
+    /// the new set is leased before the old one is let go, under the one
+    /// lock hold, so an upload in both is never unleased between.
+    fn replace_leases<'a>(
+        &mut self,
+        owner: u64,
+        held: impl IntoIterator<Item = &'a ImageDescriptor>,
+    ) {
+        let mut keys = Vec::new();
+        for image in held {
+            let key = BitmapKey::of(image);
+            if let Some(bitmap) = self.entries.get_mut(&key) {
+                bitmap.leases += 1;
+                keys.push(key);
+            }
+        }
+        let old = self.leases.insert(owner, keys).unwrap_or_default();
+        self.unlease(&old);
+    }
+
+    /// Ends every lease `owner` holds.
+    fn end_leases(&mut self, owner: u64) {
+        if let Some(old) = self.leases.remove(&owner) {
+            self.unlease(&old);
+        }
+    }
+
+    fn unlease(&mut self, keys: &[BitmapKey]) {
+        for key in keys {
+            if let Some(bitmap) = self.entries.get_mut(key) {
+                bitmap.leases -= 1;
+            }
+        }
+    }
+}
+
+/// One owner's leases on a [`SharedGpu`]'s uploads: a hold on a bitmap's
+/// upload that, unlike a render's pins, does not depend on having drawn it
+/// recently, so a painter whose host let go of a bitmap's pixels can still
+/// draw it from its upload. Released uploads skip a leased one as they skip
+/// a pinned one; every lease ends when this is dropped.
+pub(crate) struct BitmapLeases {
+    gpu: Arc<SharedGpu>,
+    owner: u64,
+}
+
+impl std::fmt::Debug for BitmapLeases {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BitmapLeases")
+            .field("owner", &self.owner)
+            .finish_non_exhaustive()
+    }
+}
+
+impl BitmapLeases {
+    /// A lease owner holding nothing yet on `gpu`'s uploads.
+    pub(crate) fn new(gpu: &Arc<SharedGpu>) -> Self {
+        Self {
+            gpu: Arc::clone(gpu),
+            owner: next_target(),
+        }
+    }
+
+    /// Whether these leases are on `gpu`'s uploads.
+    pub(crate) fn on(&self, gpu: &Arc<SharedGpu>) -> bool {
+        Arc::ptr_eq(&self.gpu, gpu)
+    }
+
+    /// Leases `image`'s upload, when one exists; otherwise holds nothing
+    /// more. Answers whether it leased.
+    pub(crate) fn lease(&self, image: &ImageDescriptor) -> bool {
+        self.gpu.raster.bitmaps().lease(self.owner, image)
+    }
+
+    /// Replaces every lease held with the uploads of `held` that exist,
+    /// with no moment in which an upload in both sets is unleased.
+    pub(crate) fn replace<'a>(&self, held: impl IntoIterator<Item = &'a ImageDescriptor>) {
+        self.gpu.raster.bitmaps().replace_leases(self.owner, held);
+    }
+
+    /// How many bitmaps have been uploaded on this device, by any target:
+    /// nothing a lease could newly hold exists unless this moved.
+    pub(crate) fn uploads(&self) -> u64 {
+        self.gpu.raster.uploads.load(Ordering::Acquire)
+    }
+}
+
+impl Drop for BitmapLeases {
+    fn drop(&mut self) {
+        self.gpu.raster.bitmaps().end_leases(self.owner);
     }
 }
 
@@ -856,6 +995,7 @@ impl SharedRaster {
                 resources,
             }),
             bitmaps: Mutex::new(Bitmaps::new(MAX_BITMAP_BYTES)),
+            uploads: AtomicU64::new(0),
         }
     }
 
@@ -874,33 +1014,38 @@ impl SharedRaster {
     }
 
     /// The image drawing `image` under `sampler` in `drawing`'s render,
-    /// converted and uploaded on a miss; `None` when the image's pixels are
-    /// unreadable or it is longer than the device's longest texture side.
+    /// converted and uploaded on a miss; [`Missing`] when there is no upload
+    /// and its pixels are unreadable, longer than the device's longest
+    /// texture side or, lent, gone.
     ///
-    /// The conversion and the upload are made with no lock held; another
-    /// target may upload the same key meanwhile, and then its upload is
-    /// drawn and this one dropped.
+    /// The pixels are read on a miss alone: a hit is decided by the
+    /// descriptor. The conversion and the upload are made with no lock
+    /// held; another target may upload the same key meanwhile, and then its
+    /// upload is drawn and this one dropped.
     fn bitmap(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        image: &ImageData,
+        image: &ImageRef,
         sampler: ImageSampler,
         drawing: &mut Drawing<'_>,
-    ) -> Option<Image> {
-        let key = BitmapKey::of(image);
+    ) -> Result<Image, Missing> {
+        let key = BitmapKey::of(&image.descriptor);
         if let Some(image) = self.bitmaps().hit(&key, sampler, drawing) {
-            return Some(image);
+            return Ok(image);
         }
         let longest = device.limits().max_texture_dimension_2d;
-        if image.width > longest || image.height > longest {
-            return None;
+        let descriptor = &image.descriptor;
+        if descriptor.width > longest || descriptor.height > longest {
+            return Err(Missing::Unreadable);
         }
-        let (texels, opaque) = premultiplied(image)?;
-        let (id, view) = own_texture(device, queue, &texels, image.width, image.height);
+        let pixels = image.pixels().ok_or(Missing::Lost)?;
+        let (texels, opaque) = premultiplied(&pixels).ok_or(Missing::Unreadable)?;
+        drop(pixels);
+        let (id, view) = own_texture(device, queue, &texels, descriptor.width, descriptor.height);
         let mut bitmaps = self.bitmaps();
         if let Some(image) = bitmaps.hit(&key, sampler, drawing) {
-            return Some(image);
+            return Ok(image);
         }
         let bitmap = Bitmap {
             id,
@@ -909,8 +1054,11 @@ impl SharedRaster {
             bytes: texels.len() as u64,
             last_drawn: 0,
             pins: SmallVec::new(),
+            leases: 0,
         };
-        Some(bitmaps.insert(key, bitmap, sampler, drawing))
+        let image = bitmaps.insert(key, bitmap, sampler, drawing);
+        self.uploads.fetch_add(1, Ordering::Release);
+        Ok(image)
     }
 
     /// The GPU half of a render on `gpu`, whose rasterizer this is: `scene`,
@@ -1010,7 +1158,15 @@ impl SparseBackend {
             bound: FxHashMap::default(),
             textures: Vec::new(),
             last: Stats::default(),
+            lost: 0,
         }
+    }
+
+    /// How many bitmap draws of this target's renders found neither an
+    /// upload nor the pixels they were lent ([`Stats::images_lost`]),
+    /// summed over its life.
+    pub(crate) fn lost(&self) -> u64 {
+        self.lost
     }
 
     /// Binds `bound` to every draw of `texture`, or with `None` unbinds it.
@@ -1058,6 +1214,7 @@ impl SparseBackend {
             bound,
             textures,
             last,
+            lost,
         } = self;
         let SharedGpu {
             device,
@@ -1117,6 +1274,7 @@ impl SparseBackend {
         stats.encode = started.elapsed();
 
         let result = shared.render(gpu, scene, view, &bindings, clear, &mut stats);
+        *lost += u64::from(stats.images_lost);
         *last = stats;
         result
     }
@@ -1135,7 +1293,7 @@ impl Drop for SparseBackend {
 mod tests {
     use std::sync::Arc;
 
-    use super::{Bitmaps, PINNED_RENDERS, SharedRaster, SparseBackend};
+    use super::{BitmapLeases, Bitmaps, PINNED_RENDERS, SharedRaster, SparseBackend};
     use crate::kurbo::{Affine, Rect};
     use crate::paint::display_list::DisplayList;
     use crate::peniko::{
@@ -1143,6 +1301,7 @@ mod tests {
         ImageQuality, ImageSampler,
     };
     use crate::render::gpu::SharedGpu;
+    use crate::render::image::ImageDescriptor;
 
     const RED: [u8; 4] = [255, 0, 0, 255];
     const BLUE: [u8; 4] = [0, 0, 255, 255];
@@ -1678,6 +1837,172 @@ mod tests {
                 .keys()
                 .any(|key| key.blob == only_first.data.id())
         );
+    }
+
+    /// The sampler [`filling`] draws with: bilinear, padded.
+    fn padded() -> ImageSampler {
+        ImageSampler {
+            x_extend: Extend::Pad,
+            y_extend: Extend::Pad,
+            quality: ImageQuality::Medium,
+            alpha: 1.0,
+        }
+    }
+
+    /// One padded bilinear draw of `image` filling an 8×8 target.
+    fn filling(image: &ImageData) -> DisplayList {
+        let mut scene = DisplayList::new();
+        draw(
+            &mut scene,
+            image,
+            ImageQuality::Medium,
+            Extend::Pad,
+            Affine::scale(8.0),
+            Rect::new(0.0, 0.0, 8.0, 8.0),
+        );
+        scene
+    }
+
+    /// A padded bilinear draw of `image` filling an 8×8 target.
+    fn filling_ref(image: crate::paint::display_list::ImageRef) -> DisplayList {
+        let mut scene = DisplayList::new();
+        scene.fill_paint(
+            Fill::NonZero,
+            Affine::IDENTITY,
+            super::Paint::Image(Arc::new(super::ImagePaint {
+                image,
+                sampler: padded(),
+            })),
+            Some(Affine::scale(8.0)),
+            &Rect::new(0.0, 0.0, 8.0, 8.0),
+        );
+        scene
+    }
+
+    /// Whether `image` has an upload.
+    fn uploaded(rig: &Rig, image: &ImageData) -> bool {
+        rig.bitmaps()
+            .entries
+            .keys()
+            .any(|key| key.blob == image.data.id())
+    }
+
+    /// A lease holds an upload the release past the budget would otherwise
+    /// take, drawn recently or not; an unleased one goes as before.
+    #[test]
+    fn a_leased_upload_survives_a_release_past_the_budget_and_an_unleased_one_does_not() {
+        let mut rig = Rig::new(8, 8);
+        rig.bitmaps().budget = 0;
+        let (red, green, blue) = (
+            bitmap(1, &[RED]),
+            bitmap(1, &[[0, 255, 0, 255]]),
+            bitmap(1, &[BLUE]),
+        );
+        let _ = rig.render(&filling(&red));
+        let _ = rig.render(&filling(&green));
+        let leases = BitmapLeases::new(&rig.gpu);
+        assert!(leases.lease(&ImageDescriptor::of(&red)));
+        for _ in 0..2 * PINNED_RENDERS {
+            assert_eq!(rig.render(&filling(&blue)).at(4, 4), BLUE);
+        }
+        assert!(uploaded(&rig, &red), "leased, so kept past every pin");
+        assert!(!uploaded(&rig, &green), "unleased, so released");
+        // Drawn from the lease alone: the pixels it was lent are gone.
+        let descriptor = ImageDescriptor::of(&red);
+        drop(red);
+        let scene = filling_ref(crate::paint::display_list::ImageRef::uploaded(descriptor));
+        assert_eq!(rig.render(&scene).at(4, 4), RED, "drawn from the upload");
+        assert_eq!(rig.backend.lost(), 0);
+    }
+
+    /// A lease of a bitmap with no upload holds nothing, a replacement that
+    /// names one keeps nothing for it, and a draw with no upload whose lent
+    /// pixels are gone is counted lost.
+    #[test]
+    fn a_lease_of_a_bitmap_with_no_upload_holds_nothing() {
+        let mut rig = Rig::new(8, 8);
+        rig.bitmaps().budget = 0;
+        let (red, never) = (bitmap(1, &[RED]), bitmap(1, &[[0, 255, 0, 255]]));
+        let _ = rig.render(&filling(&red));
+        let leases = BitmapLeases::new(&rig.gpu);
+        assert!(!leases.lease(&ImageDescriptor::of(&never)));
+        leases.replace([&ImageDescriptor::of(&never)]);
+        assert!(
+            rig.bitmaps()
+                .entries
+                .values()
+                .all(|bitmap| bitmap.leases == 0),
+            "nothing is held"
+        );
+        assert!(
+            rig.bitmaps()
+                .leases
+                .get(&leases.owner)
+                .is_none_or(Vec::is_empty)
+        );
+        assert!(!uploaded(&rig, &never), "and nothing was uploaded for it");
+
+        let lent = crate::paint::display_list::ImageRef::lent(&bitmap(1, &[BLUE]));
+        assert_eq!(
+            rig.render(&filling_ref(lent)).at(4, 4),
+            [255; 4],
+            "drawn as nothing"
+        );
+        assert_eq!(rig.backend.last.images_lost, 1);
+        assert_eq!(rig.backend.last.images_skipped, 0, "lost, not unreadable");
+        assert_eq!(rig.backend.lost(), 1);
+    }
+
+    /// Dropping the lease owner frees its uploads to be released.
+    #[test]
+    fn dropping_the_lease_owner_frees_its_uploads() {
+        let mut rig = Rig::new(8, 8);
+        rig.bitmaps().budget = 0;
+        let (red, blue) = (bitmap(1, &[RED]), bitmap(1, &[BLUE]));
+        let _ = rig.render(&filling(&red));
+        let leases = BitmapLeases::new(&rig.gpu);
+        assert!(leases.lease(&ImageDescriptor::of(&red)));
+        let uploads = leases.uploads();
+        drop(leases);
+        assert!(rig.bitmaps().leases.is_empty());
+        for _ in 0..PINNED_RENDERS {
+            let _ = rig.render(&filling(&blue));
+        }
+        assert!(!uploaded(&rig, &red), "released once nothing holds it");
+        assert!(uploaded(&rig, &blue));
+        let leases = BitmapLeases::new(&rig.gpu);
+        assert_eq!(leases.uploads(), uploads + 1, "blue was one more upload");
+    }
+
+    /// Replacing an owner's leases keeps what stays in the new set and lets
+    /// go of the rest.
+    #[test]
+    fn replacing_the_leases_keeps_what_stays() {
+        let mut rig = Rig::new(8, 8);
+        rig.bitmaps().budget = 0;
+        let (red, green, blue) = (
+            bitmap(1, &[RED]),
+            bitmap(1, &[[0, 255, 0, 255]]),
+            bitmap(1, &[BLUE]),
+        );
+        let _ = rig.render(&filling(&red));
+        let _ = rig.render(&filling(&green));
+        let leases = BitmapLeases::new(&rig.gpu);
+        let (red_at, green_at) = (ImageDescriptor::of(&red), ImageDescriptor::of(&green));
+        assert!(leases.lease(&red_at));
+        assert!(leases.lease(&green_at));
+        leases.replace([&green_at]);
+        for bitmap in rig.bitmaps().entries.values() {
+            assert!(bitmap.leases <= 1, "each held once");
+        }
+        for _ in 0..PINNED_RENDERS {
+            let _ = rig.render(&filling(&blue));
+        }
+        assert!(!uploaded(&rig, &red), "out of the new set, so released");
+        assert!(uploaded(&rig, &green), "in both, so never let go");
+        leases.replace([]);
+        let _ = rig.render(&filling(&blue));
+        assert!(!uploaded(&rig, &green));
     }
 
     /// A layer longer than `vello_gpu`'s default intermediate texture side

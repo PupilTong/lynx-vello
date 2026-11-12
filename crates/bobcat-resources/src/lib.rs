@@ -1319,6 +1319,14 @@ impl<P: Platform> FrameImages for ViewResources<P> {
     fn retain(&self, frame: &[Arc<str>]) {
         images::retain(&self.resources, self.view, frame);
     }
+
+    fn describe(&self, source: &str, hint: ImageSizeHint) -> Option<bobcat_core::FrameImage> {
+        images::describe(&self.resources, source, hint)
+    }
+
+    fn release(&self, sources: &[Arc<str>]) {
+        images::release(&self.resources, sources);
+    }
 }
 
 #[cfg(test)]

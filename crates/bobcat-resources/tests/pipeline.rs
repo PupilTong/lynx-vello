@@ -264,6 +264,52 @@ fn an_evicted_bitmap_is_restored_inside_the_read() {
     assert!(harness.resources.is_resident("app:///a.png"));
 }
 
+/// A bitmap the painter's rasterizer holds is released from the tier, pinned
+/// or not: its bytes leave the accounting, a describe answers its descriptor
+/// without pixels, and a read restores it.
+#[test]
+fn a_released_bitmap_leaves_the_tier_and_a_read_restores_it() {
+    let harness = Harness::new(Harness::quiet());
+    harness
+        .resources
+        .register("app:///a.png", quadrant_png(32, 32), None)
+        .expect("register");
+    harness.load("app:///a.png");
+    harness.view.retain(&[Arc::from("app:///a.png")]);
+    let described = harness
+        .view
+        .describe("app:///a.png", ImageSizeHint::new(32, 32))
+        .expect("a loaded bitmap is described");
+    let pixels = described.pixels.expect("resident, so with its pixels");
+    assert_eq!(
+        described.descriptor,
+        bobcat_core::ImageDescriptor::of(&pixels)
+    );
+    drop(pixels);
+    let used = harness.resources.memory_used_bytes();
+    assert!(used >= 32 * 32 * 4, "the bitmap is resident: {used}");
+
+    harness.view.release(&[Arc::from("app:///a.png")]);
+    assert!(
+        harness.resources.memory_used_bytes() <= used - 32 * 32 * 4,
+        "its bytes left the tier"
+    );
+    assert!(!harness.resources.is_resident("app:///a.png"));
+    let absent = harness
+        .view
+        .describe("app:///a.png", ImageSizeHint::new(32, 32))
+        .expect("still loaded");
+    assert!(absent.pixels.is_none(), "a describe restores nothing");
+    assert_eq!(absent.descriptor, described.descriptor);
+
+    let restored = harness
+        .view
+        .read("app:///a.png", ImageSizeHint::new(32, 32))
+        .expect("a read restores a released bitmap");
+    assert_eq!((restored.width, restored.height), (32, 32));
+    assert!(harness.resources.is_resident("app:///a.png"));
+}
+
 #[test]
 fn data_urls_and_non_images_and_unknown_schemes_report_precisely() {
     let harness = Harness::new(Harness::quiet());

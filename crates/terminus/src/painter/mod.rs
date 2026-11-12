@@ -48,8 +48,8 @@ use self::inertia::{AutoScroll, Axis, BounceBack, ChainOutcome, DragTrack, Fling
 use self::motion::{ElasticStep, Motion, resolve_elastic_step, stretch_of, unwind_stretch};
 use crate::clock::ClockInstant;
 use crate::input::{InputEvent, InputKind, PointerId};
-use crate::paint::display_list::{DisplayList, Texture};
-use crate::peniko::{Color, ImageData};
+use crate::paint::display_list::{DisplayList, ImageRef, Texture};
+use crate::peniko::Color;
 use crate::render::gpu::Headless;
 use crate::render::image::FrameImages;
 use crate::scroll::{
@@ -441,6 +441,36 @@ impl Output {
         }
     }
 
+    /// The stack this target draws through, whose uploads a painter leases;
+    /// `None` for a painter with nowhere to draw.
+    #[cfg_attr(
+        not(feature = "painter-test-utils"),
+        expect(
+            clippy::unnecessary_wraps,
+            reason = "only the test-only target has no stack"
+        )
+    )]
+    fn gpu(&self) -> Option<&Arc<crate::render::gpu::SharedGpu>> {
+        match self {
+            #[cfg(feature = "painter-test-utils")]
+            Self::None => None,
+            Self::Offscreen(gpu) => Some(gpu.gpu()),
+            Self::Window(graphics) => Some(graphics.gpu()),
+        }
+    }
+
+    /// How many bitmap draws this target's renders found neither an upload
+    /// nor the pixels they were lent for, over its life
+    /// ([`crate::render::raster::Raster::lost_pixels`]).
+    fn lost_pixels(&self) -> u64 {
+        match self {
+            #[cfg(feature = "painter-test-utils")]
+            Self::None => 0,
+            Self::Offscreen(gpu) => gpu.lost_pixels(),
+            Self::Window(graphics) => graphics.lost_pixels(),
+        }
+    }
+
     /// Bakes the textures of `frame`'s vector image draws not already
     /// resident in this target's raster cache into `out`, index-parallel
     /// with the frame's vector draws.
@@ -492,7 +522,7 @@ impl Output {
     fn prepare_filters(
         &mut self,
         frame: &CommittedFrame,
-        images: &[Option<ImageData>],
+        images: &[Option<ImageRef>],
         vectors: &[Option<Texture>],
         offset_of: &dyn Fn(&crate::visual::ScrollSlot) -> Option<Vector2D<f32>>,
         scroll_generation: u64,
@@ -707,8 +737,10 @@ pub struct Painter {
     /// The vector image textures of the frame being composed, copied out of
     /// the target's raster cache, for the same reason.
     composed_vectors: Vec<Option<Texture>>,
-    /// The pixels the adopted commit draws, read out of the host's store.
+    /// The bitmaps the adopted commit draws, described by the host's store.
     images: images::PainterImages,
+    /// The output's [`Output::lost_pixels`] when this painter last looked.
+    lost_pixels: u64,
     /// The shown view's presentation records ([`Self::last_presented`],
     /// [`Self::first_paint`], [`Self::first_contentful_paint`]). The view's,
     /// not the target's: [`Self::forget_view`] clears them.
@@ -1598,7 +1630,7 @@ fn compose_and_render(
     vectors: &mut Vec<Option<Texture>>,
     intents: &ScrollIntents,
     frame: &CommittedFrame,
-    images: &[Option<ImageData>],
+    images: &[Option<ImageRef>],
     size: FrameSize,
     animation_now: Option<f64>,
 ) -> Result<(), PainterError> {
@@ -1725,6 +1757,7 @@ impl Painter {
             composed_filters: Vec::new(),
             composed_vectors: Vec::new(),
             images: images::PainterImages::default(),
+            lost_pixels: 0,
             paint_timing: PaintTiming::default(),
             thread_bound: PhantomData,
         }
@@ -1801,21 +1834,34 @@ impl Painter {
     /// still at hand, for the rebase onto the new one (css-scroll-snap-1
     /// §4.1.3).
     ///
+    /// The store is told what each source draws as rather than asked for its
+    /// pixels ([`FrameImages::describe`]); a bitmap whose pixels it dropped
+    /// draws from the rasterizer's upload of it, which this painter leases.
+    /// Every adoption, whether or not the commit moved, then leases the
+    /// upload of each bitmap it still holds the pixels of once it exists,
+    /// lets those pixels go and tells the store so
+    /// ([`FrameImages::release`]). A render that lost pixels it was lent
+    /// marks the table stale, and the next adoption describes the commit
+    /// again.
+    ///
     /// **May block.** A store is allowed — required, in fact — to restore a
-    /// bitmap it evicted, and adopting a commit is the read that asks it to.
-    /// Call it before the drawing path acquires a swap-chain image, so a
-    /// restore cannot stall the chain under vsync.
+    /// bitmap it evicted, and a source the rasterizer holds no upload of
+    /// either is read, which asks it to. Call it before the drawing path
+    /// acquires a swap-chain image, so a restore cannot stall the chain
+    /// under vsync.
     pub fn adopt(
         &mut self,
         frame: Option<Arc<CommittedFrame>>,
         store: Option<&dyn FrameImages>,
     ) -> bool {
+        self.images.bind(self.output.gpu());
         let commit = frame.as_ref().map(|frame| frame.commit_id());
         if commit != self.frame.as_ref().map(|frame| frame.commit_id()) {
             if let Some(incoming) = frame.as_deref()
                 && !self.images.holds(incoming.commit_id())
             {
                 let Some(store) = store else {
+                    self.images.release_held(None);
                     return false;
                 };
                 self.images.resolve(incoming, store);
@@ -1825,8 +1871,18 @@ impl Painter {
                 self.scroll_intents.leave(outgoing);
             }
             self.redraw_pending.set(true);
+        } else if self.images.is_stale()
+            && let Some(store) = store
+            && let Some(current) = frame.as_deref()
+        {
+            // A render lost pixels it was lent: the same commit, described
+            // again, restores them, and what the target holds lacks them.
+            self.images.resolve(current, store);
+            self.composed = None;
+            self.redraw_pending.set(true);
         }
         self.frame = frame;
+        self.images.release_held(store);
         true
     }
 
@@ -2204,6 +2260,20 @@ impl Painter {
             size,
             animation_now,
         );
+        let lost = self.output.lost_pixels();
+        if lost != self.lost_pixels {
+            // A draw found neither an upload nor the pixels it was lent: the
+            // next adoption reads them back, and the frame is drawn again.
+            // Asked for once per resolve: a table already stale is one no
+            // adoption could restore yet — there was no store — and drawing
+            // it again would lose the same pixels and ask again, every
+            // frame.
+            self.lost_pixels = lost;
+            if !self.images.is_stale() {
+                self.images.mark_stale();
+                self.redraw_pending.set(true);
+            }
+        }
         match rendered {
             Ok(()) => {
                 let span = start.map(|start| ComposeSpan {

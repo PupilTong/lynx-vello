@@ -23,11 +23,12 @@ pub use wgpu;
 pub use crate::layout::TextLineReport;
 pub use crate::paint::compose::FilterGroup;
 pub use crate::paint::display_list::{
-    DisplayList, DrawGlyphs, Embolden, Glyph, NormalizedCoord, Texture,
+    DisplayList, DrawGlyphs, Embolden, Glyph, ImagePixels, ImageRef, NormalizedCoord, Texture,
 };
 pub use crate::render::image::{
-    DocumentKind, DocumentRequest, FrameImages, ImageEvent, ImageInbox, ImageOutcome, ImageReports,
-    ImageResidency, ImageRole, ImageSizeHint, MAX_RENDERABLE_DIMENSION, NoImages, is_renderable,
+    DocumentKind, DocumentRequest, FrameImage, FrameImages, ImageDescriptor, ImageEvent,
+    ImageInbox, ImageOutcome, ImageReports, ImageResidency, ImageRole, ImageSizeHint,
+    MAX_RENDERABLE_DIMENSION, NoImages, is_renderable,
 };
 pub use crate::render::svg::VectorDocument;
 pub use crate::style::animation::AnimationTick;
