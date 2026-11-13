@@ -191,13 +191,60 @@ and background source, is written as
 `dist/bytecode/fixtures/<fixture>/<entry>.lynx.bundle`; the same input with
 `experimental_encodeQuickjsBytecode: true` is written as
 `<entry>.js-bytecode.lynx.bundle`, with a `JS_BYTECODE` section in place of
-`JS`. Lazy chunks are not re-encoded; they are the ones `dist/index.rs` lists.
+`JS`.
+
+Each lazy bundle of a fixture is re-encoded from its retained
+`.lynx/lazy-bundle/<name>/tasm.json`, which must reproduce one lazy bundle of
+the fixture's provenance byte for byte; that gives the path the bytecode forms
+keep. Two forms are written:
+
+- `fixtures/<fixture>/main-thread-bytecode/<path>`: the `main-thread` custom
+  section with `encoding: 'JsBytecode'`, which is what the template plugin
+  writes outside development and `DEBUG` builds (`enableSectionBytecode` in
+  `LynxTemplatePlugin`). The encoder compiles a `JsBytecode` section with the
+  main-thread (LepusNG) context, as it compiles `ROOT_LEPUS`
+  (`EncodeCustomSection` in lynx's `template_binary_writer.cc`).
+- `fixtures/<fixture>/js-bytecode/<path>`: the same with
+  `experimental_encodeQuickjsBytecode: true`. The encoder compiles only
+  manifest files to `JS_BYTECODE`, and a lazy bundle's manifest is empty, so
+  this form has an empty `JS_BYTECODE` section (no files) in place of an empty
+  `JS` section and is otherwise the first form.
+
+In both forms the background code stays the string custom section
+`background`, and `CSS` stays a CSS custom section. A lazy bundle with no
+`main-thread` section (`react-lazy-nested`'s `src_react-lazy-nested-value.js`)
+is unchanged by the first form.
+
+### Hand-written cards
+
+`bytecode-cards/<card>/` holds the scripts of four small cards. The step
+assembles their encoder input itself (no Rsbuild, no ReactLynx), with
+`targetSdkVersion: '4.1.0'`, fiber architecture and LepusNG, and writes under
+`dist/bytecode/cards/<card>/`: `<card>.lynx.bundle` (main-thread code as
+bytecode, the manifest as `JS`), `<card>.js-bytecode.lynx.bundle` (the manifest
+as `JS_BYTECODE` as well), the lazy bundles the card fetches, the source twin
+of each under `source/`, and every encoder input under `tasm/`. The source
+twin carries every script as a string custom section, as
+`scripts/source-bundles.ts` repacks a page: the root as `<card>__main-thread`,
+a Lepus chunk `n` as `n__main-thread`, a manifest path without its leading
+`/`. Every card writes what it observed into a text node and logs the same
+line with `console.log`.
+
+| Card | What it is for |
+| --- | --- |
+| `chunk-twice` | The root calls `__LoadLepusChunk('counter', {})` twice; `counter` is a `LEPUS_CHUNK` entry that counts its runs on `globalThis`. Shows `chunk-twice true,true run1,run2`. In the source twin the chunk is the section `counter__main-thread`, which a test renames to the Lepus chunk `counter` after converting the page to a `.web.bundle` |
+| `custom-section-bytecode` | The root calls `lynx.loadScript('answer__main-thread', {})` on a `JsBytecode` custom section whose completion value is a function, and calls it. Shows `custom-section-bytecode answer:42` |
+| `refused-lazy` | The root calls `lynx.fetchBundle` for `lazy-bundle/refused.lynx.bundle` beside the page, whose only script is a `JsBytecode` `main-thread` section with a direct `eval('1')`. Shows `refused-lazy code:<code>` when the fetch fails (and logs `refused-lazy error_msg <reason>` first), or `refused-lazy loaded 1` when it succeeds and the section runs, as the source twin does |
+| `background-bytecode-min` | `/app-service.js` evaluates to `{init}`; `init` logs `background-bytecode-min background 2,4,6`. The root shows `background-bytecode-min main` |
 
 ### Rust registry
 
 The step writes `dist/bytecode/index.rs`, which `bytecode.rs` includes as
-`PROGRAMS` (name, source text, one bundle per `Variant`) and `FIXTURES` (name,
-both pages). A test includes it the way it includes `fixtures.rs`:
+`PROGRAMS` (name, source text, one bundle per `Variant`), `FIXTURES` (name,
+both pages, both forms of the lazy chunks; `bytecode::fixture(name)` finds
+one) and `CARDS` (both bytecode pages, lazy chunks, expected console lines
+and the `SourceCard` twin; `bytecode::card(name)` finds one). A test includes
+it the way it includes `fixtures.rs`:
 
 ```rust
 #[path = "../../../packages/reactlynx-test-fixtures/bytecode.rs"]
