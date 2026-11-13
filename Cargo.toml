@@ -173,3 +173,12 @@ debug = false
 # it takes about 1.1 KB.
 [profile.dev.package.roxmltree]
 opt-level = 1
+
+# Sanitizer runs (`-Zsanitizer=address`, both CI sanitizer jobs). `opt-level = 1`
+# is what AddressSanitizer is meant to run at: unoptimised, QuickJS's C frames
+# grow several times over under the sanitizer's checks, so tests that measure
+# stack depth no longer describe the shipped engine. Debug assertions and
+# overflow checks stay on.
+[profile.sanitize]
+inherits = "dev"
+opt-level = 1

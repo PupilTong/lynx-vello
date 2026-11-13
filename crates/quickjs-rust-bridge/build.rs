@@ -180,6 +180,78 @@ impl Fnv1a {
     }
 }
 
+/// The instrumentation this build gives Rust code, which the C objects linked
+/// into the same binary must carry as well.
+///
+/// Both come from `RUSTFLAGS`, so a sanitized or fuzzing build passes no C
+/// flags of its own. `-Zsanitizer=<name>` sets `cfg(sanitize = "<name>")` and
+/// links that sanitizer's runtime, which C objects instrumented for the same
+/// sanitizer report through. `cargo fuzz` builds with `--cfg fuzzing` and
+/// `SanitizerCoverage` for Rust; libFuzzer can steer by the engine's branches
+/// only when its C carries the same counters. The C compiler must be LLVM's
+/// Clang (`CC`): Apple's names a runtime of its own in every instrumented
+/// object (`__asan_version_mismatch_check_apple_clang_*`), which rustc's does
+/// not define, so nothing it instruments links.
+struct Instrumentation {
+    sanitizers: Vec<String>,
+    fuzzing: bool,
+}
+
+impl Instrumentation {
+    fn from_cargo() -> Self {
+        let sanitizers: Vec<String> = env::var("CARGO_CFG_SANITIZE")
+            .unwrap_or_default()
+            .split(',')
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .collect();
+        for name in &sanitizers {
+            assert!(
+                matches!(
+                    name.as_str(),
+                    "address" | "hwaddress" | "leak" | "memory" | "thread"
+                ),
+                "-Zsanitizer={name} has no Clang counterpart for the QuickJS C sources"
+            );
+        }
+        Self {
+            sanitizers,
+            fuzzing: env::var_os("CARGO_CFG_FUZZING").is_some(),
+        }
+    }
+
+    fn apply(&self, build: &mut cc::Build) {
+        for name in &self.sanitizers {
+            build.flag(format!("-fsanitize={name}"));
+        }
+        if self.sanitizers.iter().any(|name| name == "address") {
+            // Clang defines `__SANITIZE_ADDRESS__` here, and QuickJS then
+            // gives every allocation to the host allocator instead of
+            // carving small ones out of its 4 KiB arenas, so the sanitizer
+            // sees each object's bounds and lifetime.
+            //
+            // Rust has no UndefinedBehaviorSanitizer, but rustc's
+            // AddressSanitizer runtime carries its handlers, so the C is
+            // checked for undefined behaviour too, and the first report
+            // aborts. `function` is left out: QuickJS calls functions
+            // through pointer types whose parameters differ from theirs by
+            // design (`js_realloc_rt`, taking a `JSRuntime *`, is called as
+            // a `DynBufReallocFunc`, taking a `void *`).
+            build
+                .flag("-fsanitize=undefined")
+                .flag("-fno-sanitize=function")
+                .flag("-fno-sanitize-recover=undefined");
+        }
+        if !self.sanitizers.is_empty() {
+            // Reports unwind through C frames by frame pointer.
+            build.flag("-fno-omit-frame-pointer");
+        }
+        if self.fuzzing {
+            build.flag("-fsanitize=fuzzer-no-link");
+        }
+    }
+}
+
 fn assert_supported_target(target_os: &str, target_env: &str) {
     assert!(
         target_os != "windows" || target_env == "gnu",
@@ -187,7 +259,10 @@ fn assert_supported_target(target_os: &str, target_env: &str) {
     );
 }
 
+/// What every C object of this build takes from the Rust build it links
+/// into: the target's features and Rust's instrumentation.
 fn configure_target(build: &mut cc::Build, target: &str, clang_target_feature_flags: &[String]) {
+    Instrumentation::from_cargo().apply(build);
     build.flag_if_supported("-fwrapv");
     if target == "wasm32-unknown-unknown" {
         // These describe C object code only; the QuickJS build still omits

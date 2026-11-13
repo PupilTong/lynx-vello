@@ -341,6 +341,153 @@ jobs:
       - name: Build the Lynx Explorer pages
         run: pnpm build:explorer
 
+  sanitizers:
+    name: AddressSanitizer + UBSan tests — QuickJS bridge, core, resources (macOS)
+    runs-on: macos-latest
+    env:
+      # `--target` below keeps this off build scripts and proc macros, which
+      # run on the host uninstrumented. The bridge's build script reads it
+      # and instruments the QuickJS C to match (`Instrumentation` in
+      # `crates/quickjs-rust-bridge/build.rs`).
+      RUSTFLAGS: -Zsanitizer=address
+      UBSAN_OPTIONS: print_stacktrace=1
+      HOMEBREW_NO_AUTO_UPDATE: 1
+    steps:
+      # The crates that hold C and `unsafe`: the bridge with the QuickJS fork
+      # and its shim, the core that drives every realm, worker and module
+      # load through them, and the resources' platform FFI (ImageIO, curl).
+      # macOS because their suites include GPU screenshot cases, which only
+      # this platform's runners can run; the Ubuntu job below adds
+      # LeakSanitizer for the bridge alone.
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up workspace JavaScript
+        uses: ./.github/actions/setup-javascript
+        with:
+          fixtures: true
+
+      - name: Install pinned toolchain
+        run: rustup toolchain install
+
+      - name: Install LLVM 22 from Homebrew
+        # Apple's Clang instruments C for a sanitizer runtime of its own,
+        # which rustc's does not link.
+        run: |
+          brew install llvm@22
+          echo "CC=$(brew --prefix llvm@22)/bin/clang" >> "$GITHUB_ENV"
+          echo "CXX=$(brew --prefix llvm@22)/bin/clang++" >> "$GITHUB_ENV"
+          echo "ASAN_SYMBOLIZER_PATH=$(brew --prefix llvm@22)/bin/llvm-symbolizer" >> "$GITHUB_ENV"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          shared-key: sanitizers
+
+      - name: Tests under AddressSanitizer and UBSan
+        # The `sanitize` profile is opt-level 1, the level AddressSanitizer
+        # is meant for. `--tests` leaves out doctests, which rustdoc builds
+        # without these RUSTFLAGS.
+        run: >-
+          cargo test --locked --profile sanitize --target aarch64-apple-darwin --tests
+          -p quickjs-rust-bridge
+          -p bobcat-core
+          -p bobcat-resources
+
+  quickjs-unsafe:
+    name: QuickJS bridge — LeakSanitizer tests, Miri, fuzzing (Ubuntu)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    env:
+      CC: clang-22
+      CXX: clang++-22
+      ASAN_SYMBOLIZER_PATH: /usr/bin/llvm-symbolizer-22
+      UBSAN_OPTIONS: print_stacktrace=1
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install pinned toolchain and Miri
+        run: |
+          rustup toolchain install
+          rustup component add miri
+
+      - name: Install LLVM 22 from Ubuntu
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes clang-22 llvm-22
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          shared-key: quickjs-unsafe
+          # The fuzz targets are a Cargo workspace of their own.
+          workspaces: |
+            . -> target
+            crates/quickjs-rust-bridge/fuzz -> target
+
+      - name: Bridge tests under AddressSanitizer, LeakSanitizer and UBSan
+        env:
+          RUSTFLAGS: -Zsanitizer=address
+        run: >-
+          cargo test --locked --profile sanitize --target x86_64-unknown-linux-gnu --tests
+          -p quickjs-rust-bridge
+
+      - name: Miri over the C hooks implemented in Rust
+        # The allocator and string functions QuickJS calls are Rust, and
+        # their unit tests call them directly, so Miri can check them; the
+        # rest of the bridge is calls into C, which Miri cannot run. Miri
+        # perturbs float results by design; `atanh`'s test compares bits.
+        env:
+          MIRIFLAGS: -Zmiri-deterministic-floats
+        run: >-
+          cargo miri test --locked -p quickjs-rust-bridge --lib --
+          allocator:: platform_stdlib::
+
+      - name: Install cargo-fuzz
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+
+      - name: Fuzz targets are locked and lint-clean
+        run: |
+          cargo fetch --locked --manifest-path crates/quickjs-rust-bridge/fuzz/Cargo.toml
+          cargo clippy --locked --manifest-path crates/quickjs-rust-bridge/fuzz/Cargo.toml --all-targets -- -D warnings
+
+      - name: Restore the fuzz corpus
+        uses: actions/cache/restore@v4
+        with:
+          path: crates/quickjs-rust-bridge/fuzz/corpus
+          key: quickjs-fuzz-corpus-${{ github.run_id }}
+          restore-keys: quickjs-fuzz-corpus-
+
+      - name: Replay the fuzz corpus
+        # Every input main's fuzzing has kept, run once with no mutation: a
+        # pull request fails here only on an input that passed before it.
+        if: github.event_name == 'pull_request'
+        run: ./.github/scripts/fuzz-quickjs.sh replay
+
+      - name: Fuzz for five minutes per target
+        if: github.event_name == 'push'
+        run: ./.github/scripts/fuzz-quickjs.sh fuzz 300
+
+      - name: Save the fuzz corpus
+        if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@v4
+        with:
+          path: crates/quickjs-rust-bridge/fuzz/corpus
+          key: quickjs-fuzz-corpus-${{ github.run_id }}
+
+      - name: Upload crashing inputs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quickjs-fuzz-artifacts
+          path: crates/quickjs-rust-bridge/fuzz/artifacts/
+          if-no-files-found: ignore
+
   walltime-benchmarks:
     name: bench (CodSpeed walltime, macOS)
     if: >-
