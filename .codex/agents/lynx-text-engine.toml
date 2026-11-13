@@ -16,7 +16,8 @@ rather than child boxes.
 
 ## Read first
 
-- `AGENTS.md`: Standards policy, and the `crates/seldon` entry in Crates.
+- `AGENTS.md`: Standards policy.
+- `crates/seldon/AGENTS.md`.
 - `docs/tracking/css-text.md` — the property survey.
 - `docs/tracking/web-text-test-replication.md` — the **status tracker** for the
   ported `lynx-stack` web-platform text tests: which replicas pass, which gaps

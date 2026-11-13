@@ -16,8 +16,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  ci:
-    name: fmt + clippy + test + coverage (macOS)
+  checks:
+    name: fmt + clippy + doctests (macOS)
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,10 +27,10 @@ jobs:
       - name: Set up workspace JavaScript
         uses: ./.github/actions/setup-javascript
         with:
+          # No corpus: only the `runtime` test shard reads it, and the
+          # `linux-embedders` job already shows that `cargo clippy
+          # --all-targets` compiles without it.
           fixtures: true
-          # This job is the one that runs tests, so it is the one that needs
-          # the corpus `crates/bobcat-source/tests/web_core_e2e.rs` boots.
-          corpus: true
 
       - name: Install pinned toolchain
         run: rustup toolchain install
@@ -56,6 +56,11 @@ jobs:
         # instead, so a new crate is covered the moment it joins the workspace.
         run: ./.github/scripts/fmt-check.sh
 
+      - name: Agent guide
+        # The root `AGENTS.md` stays within the size Codex loads, every crate
+        # has its guide file, and the guide's links resolve.
+        run: python3 .github/scripts/check-agent-docs.py
+
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
@@ -75,29 +80,16 @@ jobs:
         # on a third appearing, or on a recorded one going away unnoticed.
         run: python3 .github/scripts/check-bench-feature-parity.py
 
-      - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-llvm-cov
-
-      - name: Tests + coverage
-        # One instrumented build and one run of every test. Per-crate coverage
-        # is Codecov's job (`codecov.yml` names the components); there is no
-        # coverage threshold in this workflow.
-        run: |
-          cargo llvm-cov --workspace --lcov --output-path lcov.info \
-            --ignore-filename-regex '(^|/)vendor(/|$)'
-
-      # A golden that differs leaves `-expected`/`-actual`/`-diff` PNGs beside
-      # its golden directory (`crates/*/tests/artifacts`); keep them, so a
-      # rendering that differs only on this runner can be read.
-      - name: Upload golden diffs
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: golden-diffs
-          path: crates/*/tests/artifacts/
-          if-no-files-found: ignore
+      - name: CI shards build what the unsharded jobs built
+        # The `test` and `memory-benchmarks` jobs each select part of the
+        # workspace. This compares Cargo's unit graph of every shard with the
+        # graph of the unsharded `cargo test --workspace` and `cargo build
+        # --benches` builds: a unit the unsharded build does not have, or one
+        # compiled with other features, would mean a shard tests or measures a
+        # different build. It also fails unless every test unit and every bench
+        # target belongs to exactly one shard. Only unit graphs are computed;
+        # nothing is compiled.
+        run: python3 .github/scripts/ci-shards.py check
 
       - name: Stylo fork Lynx tests
         run: |
@@ -113,11 +105,91 @@ jobs:
       - name: Doctests
         run: cargo test --doc
 
+  # One runner used to do the lint builds, the instrumented build and every
+  # test in sequence. The test run is dominated by two binaries, one in each
+  # shard: bobcat-source's `web_core_e2e` in `runtime` and terminus's lib
+  # tests in `engine`. `.github/scripts/ci-shards.py` holds the split.
+  #
+  # Each shard selects part of the workspace. With the two variables below
+  # Cargo resolves features over the whole workspace anyway, so `terminus`
+  # keeps `painter-test-utils`, which bobcat-core's dev-dependency turns on in
+  # a whole-workspace build. `ci-shards.py check` in the `checks` job verifies
+  # this from Cargo's unit graph.
+  test:
+    name: test + coverage (macOS, ${{ matrix.shard }})
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [engine, runtime]
+    env:
+      CARGO_UNSTABLE_FEATURE_UNIFICATION: "true"
+      CARGO_RESOLVER_FEATURE_UNIFICATION: workspace
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up workspace JavaScript
+        uses: ./.github/actions/setup-javascript
+        with:
+          fixtures: true
+          # The `runtime` shard runs bobcat-source's tests, so it is the one
+          # that needs the corpus `crates/bobcat-source/tests/web_core_e2e.rs`
+          # boots.
+          corpus: ${{ matrix.shard == 'runtime' }}
+
+      - name: Install pinned toolchain
+        run: rustup toolchain install
+
+      # No Homebrew LLVM, as in `checks`.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Both shards restore one cache, since matrix jobs share the
+          # job-based key. Only `runtime` saves it, because it compiles every
+          # dependency `engine` does, with the same features. Main only, as in
+          # `checks`.
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && matrix.shard == 'runtime' }}
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Tests + coverage
+        # One instrumented build and one run of this shard's tests. Per-crate
+        # coverage is Codecov's job (`codecov.yml` names the components); there
+        # is no coverage threshold in this workflow.
+        #
+        # The selection is assigned first: inside the cargo command a failed
+        # `$(...)` would leave no selection, and cargo-llvm-cov would then run
+        # the whole workspace in both shards.
+        run: |
+          select="$(python3 .github/scripts/ci-shards.py tests ${{ matrix.shard }})"
+          cargo llvm-cov $select \
+            --lcov --output-path lcov.info \
+            --ignore-filename-regex '(^|/)vendor(/|$)'
+
+      # A golden that differs leaves `-expected`/`-actual`/`-diff` PNGs beside
+      # its golden directory (`crates/*/tests/artifacts`); keep them, so a
+      # rendering that differs only on this runner can be read. One artifact
+      # per shard: two jobs cannot upload one artifact name.
+      - name: Upload golden diffs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: golden-diffs-${{ matrix.shard }}
+          path: crates/*/tests/artifacts/
+          if-no-files-found: ignore
+
       - name: Upload coverage to Codecov
+        # Codecov merges the uploads of one commit; `codecov.yml` waits for
+        # both shards before it reports.
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: lcov.info
+          name: ${{ matrix.shard }}
           fail_ci_if_error: true
 
   browser:
@@ -155,7 +227,7 @@ jobs:
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Clippy (wasm32)
-        # The macOS job's `cargo clippy` runs for the host, where every
+        # The `checks` job's `cargo clippy` runs for the host, where every
         # wasm32-gated item is `cfg`-ed out — `crates/bobcat-wasm/src/browser.rs`
         # is the whole browser embedder and had never been linted, or even
         # type-checked, by CI. This job already carries the LLVM 22 toolchain
@@ -260,10 +332,10 @@ jobs:
       CXX: clang++-22
     steps:
       # The CLI, HTTP server, and their source adapter are the native workspace
-      # products no other job compiles on Linux. The macOS job builds them
-      # there; the Ubuntu benchmark job builds
+      # products no other job compiles on Linux. The macOS `checks` and `test`
+      # jobs build them there; the Ubuntu benchmark jobs build
       # terminus/seldon/quickjs-rust-bridge through their bench targets but never
-      # reaches these embedders, which nothing depends on. Without this job the
+      # reach these embedders, which nothing depends on. Without this job the
       # headless runners — the modes Linux hosts actually run — have no gate
       # compiling them at all.
       #
@@ -301,7 +373,7 @@ jobs:
           --all-targets --no-deps -- -D warnings
 
       - name: Independent embedder features
-        # Each feature set on its own, headless. The macOS job checks `cli`
+        # Each feature set on its own, headless. The `checks` job checks `cli`
         # alone as well, for the winit half that only exists there.
         run: |
           cargo clippy --locked -p bobcat-cli --no-default-features --all-targets --no-deps -- -D warnings
@@ -392,9 +464,22 @@ jobs:
           run: cargo codspeed run -m walltime
           token: ${{ secrets.CODSPEED_TOKEN }}
 
+  # The build was 22 of this job's 26 minutes when it ran unsharded: 23 bench
+  # binaries, each a thin-LTO link, on a 4-vCPU runner. Each shard builds and
+  # runs the bench targets `.github/scripts/ci-shards.py` assigns it. The
+  # package selection stays the whole workspace, so every unit keeps the
+  # features it has in an unsharded `cargo codspeed build` and the measured
+  # binaries are the same. CodSpeed merges the jobs of one workflow run into one
+  # report, and each benchmark must run in exactly one shard. Adding a shard is
+  # one more entry in the matrix list, since the script takes the count from
+  # `strategy.job-total`.
   memory-benchmarks:
-    name: bench (CodSpeed memory, Ubuntu)
+    name: bench (CodSpeed memory, Ubuntu, ${{ matrix.shard }}/${{ strategy.job-total }})
     runs-on: ubuntu-26.04
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     env:
       CC: clang-22
       CXX: clang++-22
@@ -411,6 +496,15 @@ jobs:
       - name: Install pinned toolchain
         run: rustup toolchain install
 
+      - name: Select this shard's bench targets
+        id: shard
+        # Assigned to a variable first: the exit status of a `$(...)` inside
+        # `echo` is lost, and a failed assignment must fail the job.
+        run: |
+          set -euo pipefail
+          benches="$(python3 .github/scripts/ci-shards.py benches ${{ strategy.job-index }} ${{ strategy.job-total }})"
+          echo "benches=$benches" >> "$GITHUB_OUTPUT"
+
       - name: Install benchmark system dependencies
         run: |
           sudo apt-get update
@@ -418,7 +512,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          # The shards share the job-based cache key; one of them saves it.
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && strategy.job-index == 0 }}
 
       - name: Install cargo-codspeed 5
         uses: taiki-e/install-action@v2
@@ -437,7 +532,7 @@ jobs:
         # `cargo build --benches` underneath, in the bench profile: thin LTO
         # and one codegen unit per crate, so every library sets `bench = false`
         # to keep this to the `benches/` targets and their dependencies.
-        run: cargo codspeed build -m memory
+        run: cargo codspeed build -m memory ${{ steps.shard.outputs.benches }}
         env:
           RUSTC_WRAPPER: sccache
           SCCACHE_GHA_ENABLED: "true"
@@ -449,5 +544,5 @@ jobs:
         uses: CodSpeedHQ/action@v4
         with:
           mode: memory
-          run: cargo codspeed run -m memory
+          run: cargo codspeed run -m memory ${{ steps.shard.outputs.benches }}
           token: ${{ secrets.CODSPEED_TOKEN }}

@@ -16,8 +16,9 @@ tree/style storage, DOM/runtime types, device-unit policy, or paint order.
 
 ## Read first
 
-- `AGENTS.md`: Standards policy, the `crates/seldon` and `crates/terminus` entries in
-  Crates, Testing, and "Benchmarks measure a debug-instrumented terminus".
+- `AGENTS.md`: Standards policy and Testing; `crates/seldon/AGENTS.md` and
+  `crates/terminus/AGENTS.md`; "Benchmarks measure a debug-instrumented
+  terminus" in `docs/testing.md`.
 - `docs/layout-architecture.md` — **required** before touching seldon.
 - `docs/tracking/css-layout.md` (primary spec), `docs/tracking/deviations.md`.
 - `docs/starlight-linear-layout.md`, `docs/starlight-relative-layout.md`,
@@ -79,7 +80,7 @@ Landed and not to be regressed:
   render layer. Do not move stacking order into seldon.
 - `display: linear` and `relative-*` are Lynx-only extensions: match Lynx
   exactly and **do not extend them** — no extra capability, no widened grammar.
-- The `layout-test-utils` feature exists for benches only; AGENTS.md explains
+- The `layout-test-utils` feature exists for benches only; `docs/testing.md` explains
   why it leaks into `terminus` in bench builds and why that is accepted.
 
 ## Reference repos

@@ -1,10 +1,19 @@
 # Codecov reads this from the default branch and from a pull request's head.
 #
-# CI uploads one lcov report per run (`cargo llvm-cov --workspace`, vendor
-# excluded at the source). Everything about *reading* that report lives here:
+# CI uploads one lcov report per `test` shard, two per commit (`cargo llvm-cov`
+# with the selection `.github/scripts/ci-shards.py` prints, vendor excluded at
+# the source), and Codecov merges them. Everything about *reading* the merged
+# report lives here:
 # what counts as production source, one component per crate so a crate's
 # coverage is a number in the PR comment rather than a `--fail-under` in the
 # workflow, and statuses that inform without gating.
+
+# A report built from one shard alone would show the other shard's crates as
+# uncovered, so Codecov waits for both uploads before it sends a status or a
+# comment.
+codecov:
+  notify:
+    after_n_builds: 2
 
 # cargo-llvm-cov already leaves `tests/`, `benches/`, `*_tests.rs` and the
 # vendored stylo out of the report it uploads; this keeps that true should the
@@ -72,6 +81,7 @@ component_management:
         - crates/prime-radiant/**
 
 comment:
+  after_n_builds: 2
   layout: "condensed_header, diff, components"
   behavior: default
   require_changes: false
