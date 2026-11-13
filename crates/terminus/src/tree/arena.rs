@@ -10,7 +10,10 @@
 
 use core::fmt;
 use std::hint::likely;
+use std::marker::PhantomData;
 use std::num::{NonZeroU32, NonZeroU64};
+use std::ops::{Deref, DerefMut};
+use std::ptr::NonNull;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use seldon::geometry::Edges;
@@ -101,8 +104,109 @@ pub(crate) struct TreeArenas<T> {
     live_elements: usize,
 }
 
-impl<T> TreeArenas<T> {
+pub(crate) struct ArenaPtr<T>(NonNull<TreeArenas<T>>);
+
+impl<T> Clone for ArenaPtr<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> Copy for ArenaPtr<T> {}
+
+impl<T> ArenaPtr<T> {
+    #[inline]
+    pub(crate) const fn as_ptr(self) -> *const TreeArenas<T> {
+        self.0.as_ptr().cast_const()
+    }
+}
+
+pub(crate) struct ArenaBox<T> {
+    ptr: NonNull<TreeArenas<T>>,
+    _owns: PhantomData<TreeArenas<T>>,
+}
+
+impl<T> ArenaBox<T> {
     pub(crate) fn new() -> Self {
+        let mut arenas = Self {
+            ptr: NonNull::from(Box::leak(Box::new(TreeArenas::new()))),
+            _owns: PhantomData,
+        };
+        let owner = arenas.owner();
+        arenas.reserve_zero(owner);
+        arenas
+    }
+
+    #[inline]
+    const fn owner(&self) -> ArenaPtr<T> {
+        ArenaPtr(self.ptr)
+    }
+
+    #[expect(
+        clippy::inline_always,
+        reason = "keep the slab insert in the node-allocation hot path"
+    )]
+    #[inline(always)]
+    pub(crate) fn insert_node(
+        &mut self,
+        make: impl FnOnce(ArenaPtr<T>, NodeId) -> Node<T>,
+    ) -> NodeId {
+        let owner = self.owner();
+        self.file_node(owner, make)
+    }
+}
+
+impl<T> Deref for ArenaBox<T> {
+    type Target = TreeArenas<T>;
+
+    #[inline]
+    fn deref(&self) -> &TreeArenas<T> {
+        #[expect(unsafe_code, reason = "lend the arena set from its owning pointer")]
+        // SAFETY: `ptr` is the allocation `new` leaked, initialised there and
+        // freed only by `drop`, so it is valid for as long as `self` is. The
+        // shared borrow is tied to `&self`, and the only `&mut TreeArenas<T>`
+        // there is comes from `deref_mut`, which needs `&mut self`, so none is
+        // live beside it. The borrow is derived from `ptr` itself, so using it
+        // leaves every node's copy of `ptr` usable (`Node::arenas`).
+        unsafe {
+            self.ptr.as_ref()
+        }
+    }
+}
+
+impl<T> DerefMut for ArenaBox<T> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut TreeArenas<T> {
+        #[expect(unsafe_code, reason = "lend the arena set from its owning pointer")]
+        // SAFETY: `ptr` is valid for as long as `self` is, as in `deref`. The
+        // exclusive borrow is tied to `&mut self`, so no borrow lent by
+        // `deref` or `deref_mut`, and no `&Node` or `&TreeArenas<T>` reached
+        // through one ([`Node::arenas`] included, whose result borrows the
+        // node it was called on), is live beside it. The borrow is derived
+        // from `ptr`, so writing through it leaves every node's copy of `ptr`
+        // usable.
+        unsafe {
+            self.ptr.as_mut()
+        }
+    }
+}
+
+impl<T> Drop for ArenaBox<T> {
+    fn drop(&mut self) {
+        #[expect(unsafe_code, reason = "free the arena set's allocation")]
+        // SAFETY: `ptr` came from `Box::leak` of a `Box<TreeArenas<T>>` in
+        // `new`, and this is the one place it is turned back into one, once.
+        // `&mut self` means no borrow lent by `deref`/`deref_mut` is live.
+        // Every node carrying a copy of `ptr` is either inside the arena set,
+        // and dropped with it here, or was handed back by `remove_node` and
+        // dropped by the document before that call returned; dropping a node
+        // reads nothing through its copy.
+        drop(unsafe { Box::from_raw(self.ptr.as_ptr()) });
+    }
+}
+
+impl<T> TreeArenas<T> {
+    fn new() -> Self {
         Self {
             nodes: Slab::with_capacity(INITIAL_NODE_CAPACITY),
             generations: Vec::with_capacity(INITIAL_NODE_CAPACITY),
@@ -220,12 +324,11 @@ impl<T> TreeArenas<T> {
         self.committed_boxes.units_flag()
     }
 
-    pub(crate) fn reserve_zero(&mut self) {
+    fn reserve_zero(&mut self, owner: ArenaPtr<T>) {
         debug_assert!(
             self.generations.is_empty(),
             "zero is reserved before any node"
         );
-        let owner = std::ptr::from_mut::<Self>(self);
         let placeholder = NodeId::at_key(NonZeroU32::new(1).expect("one is non-zero"), 0);
         assert_eq!(
             self.nodes
@@ -376,11 +479,11 @@ impl<T> TreeArenas<T> {
         reason = "keep the slab insert in the node-allocation hot path"
     )]
     #[inline(always)]
-    pub(crate) fn insert_node(
+    fn file_node(
         &mut self,
-        make: impl FnOnce(*mut Self, NodeId) -> Node<T>,
+        owner: ArenaPtr<T>,
+        make: impl FnOnce(ArenaPtr<T>, NodeId) -> Node<T>,
     ) -> NodeId {
-        let owner = std::ptr::from_mut::<Self>(self);
         let arena_key = self.nodes.vacant_key();
         let key = u32::try_from(arena_key).expect("a document holds fewer than u32::MAX nodes");
         let key = NonZeroU32::new(key).expect("arena key zero is reserved and never allocated");
@@ -765,14 +868,13 @@ impl DocumentLayoutState {
 mod tests {
     use super::*;
 
-    fn text(payload: u32) -> impl FnOnce(*mut TreeArenas<u32>, NodeId) -> Node<u32> {
+    fn text(payload: u32) -> impl FnOnce(ArenaPtr<u32>, NodeId) -> Node<u32> {
         move |owner, id| Node::new_text(owner, id, Box::default()).with_payload(payload)
     }
 
     #[test]
     fn a_freed_key_comes_back_clean() {
-        let mut arenas: TreeArenas<u32> = TreeArenas::new();
-        arenas.reserve_zero();
+        let mut arenas: ArenaBox<u32> = ArenaBox::new();
         let mut layout = DocumentLayoutState::new();
         let mut issued = Vec::new();
         for payload in 0..4 {
@@ -819,8 +921,7 @@ mod tests {
 
     #[test]
     fn layout_state_is_filed_only_for_the_nodes_that_lay_out() {
-        let mut arenas: TreeArenas<u32> = TreeArenas::new();
-        arenas.reserve_zero();
+        let mut arenas: ArenaBox<u32> = ArenaBox::new();
         let mut layout = DocumentLayoutState::new();
         let element = arenas.insert_node(|owner, id| {
             Node::new_element(owner, id, stylo::LocalName::from("view")).with_payload(0)
@@ -870,9 +971,42 @@ mod tests {
     }
 
     #[test]
+    fn a_nodes_arena_address_survives_later_writes_and_moves() {
+        #[inline(never)]
+        fn moved<A>(arenas: A) -> A {
+            arenas
+        }
+
+        let mut arenas: ArenaBox<u32> = ArenaBox::new();
+        let first = arenas.insert_node(text(0));
+        let freed = arenas.insert_node(text(1));
+        let first_arenas = std::ptr::from_ref(arenas.at(first).arenas());
+        arenas.remove_node(freed);
+        let mut arenas = moved(arenas);
+        let last = arenas.insert_node(text(2));
+        arenas
+            .get_mut(last)
+            .expect("just filed")
+            .set_has_line_if_empty(true);
+
+        let address = std::ptr::from_ref::<TreeArenas<u32>>(&arenas);
+        for id in [first, last] {
+            let node = arenas.at(id);
+            assert!(std::ptr::eq(node.arenas(), address));
+            assert_eq!(
+                node.arenas().get(id).map(Node::payload),
+                Some(node.payload())
+            );
+        }
+        assert!(
+            std::ptr::eq(first_arenas, address),
+            "one address throughout"
+        );
+    }
+
+    #[test]
     fn a_handle_that_was_never_issued_resolves_to_nothing() {
-        let mut arenas: TreeArenas<u32> = TreeArenas::new();
-        arenas.reserve_zero();
+        let mut arenas: ArenaBox<u32> = ArenaBox::new();
         let id = arenas.insert_node(text(0));
         assert_eq!(id.arena_key(), 1, "key zero is reserved");
 
@@ -915,8 +1049,7 @@ mod tests {
 
     #[test]
     fn a_handle_held_across_its_nodes_free_is_refused_even_once_reused() {
-        let mut arenas: TreeArenas<u32> = TreeArenas::new();
-        arenas.reserve_zero();
+        let mut arenas: ArenaBox<u32> = ArenaBox::new();
         let held = arenas.insert_node(text(1));
         assert!(arenas.slot_is_current(held));
         assert!(arenas.try_at(held).is_some());

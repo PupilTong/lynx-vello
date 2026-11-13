@@ -39,8 +39,9 @@ one of these three has to be a deliberate edit to that line.
 Where `unsafe` is unavoidable, the bar is a `SAFETY` comment per block,
 enforced by a crate-local `#![warn(clippy::undocumented_unsafe_blocks)]` in
 `bobcat-cli` (which now holds no `unsafe` at all, the lint standing as a bar
-for any that arrives) and in `terminus` (its two, and one test-only block that
-hands wgpu a bare `CAMetalLayer`). The lint is still crate-local
+for any that arrives) and in `terminus` (its five — `ArenaBox`'s shared and
+exclusive lending and its free, the node backpointer deref, `ensure_data` —
+and one test-only block that hands wgpu a bare `CAMetalLayer`). The lint is still crate-local
 rather than workspace-wide because `quickjs-rust-bridge` (133 blocks) is the
 last holdout and is being restructured separately; raising it there is what
 would let this move into `[workspace.lints.clippy]`.

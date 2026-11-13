@@ -161,6 +161,9 @@ pub struct TextContext {
 impl TextContext {
     #[must_use]
     pub fn new() -> Self {
+        if cfg!(miri) {
+            return Self::without_system_fonts();
+        }
         Self {
             font: system_font_template().clone(),
             layout: LayoutContext::new(),

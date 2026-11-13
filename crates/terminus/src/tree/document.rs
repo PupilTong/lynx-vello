@@ -16,6 +16,7 @@ use stylo::stylesheets::UrlExtraData;
 use crate::style::damage::StyleDamage;
 use crate::style::engine::StyleEngine;
 pub use crate::tree::arena::NodeId;
+use crate::tree::arena::{ArenaBox, ArenaPtr};
 pub(crate) use crate::tree::arena::{
     DOCUMENT_ELEMENT_NODE_ID, DOCUMENT_NODE_ID, DeferredContainer, DocumentLayoutState,
     NodeLayoutState, NodeSlot, StickyContainingBlock, TreeArenas,
@@ -47,7 +48,7 @@ pub(crate) struct PendingRelayout {
 pub struct Document<T> {
     style_engine: StyleEngine,
     style_pool: Option<std::rc::Rc<crate::style::pool::StylePool>>,
-    tree: Box<TreeArenas<T>>,
+    tree: ArenaBox<T>,
     layout: DocumentLayoutState,
     pub(crate) painter: RefCell<crate::paint::painter::FramePainter>,
     pub(crate) images: crate::render::image::ImageRegistry,
@@ -94,8 +95,7 @@ impl<T> Document<T> {
         let style_engine = StyleEngine::new(device.into_stylo(), about_blank_url_data());
         let lock = style_engine.lock();
         let url_data = style_engine.url_data();
-        let mut tree = Box::new(TreeArenas::new());
-        tree.reserve_zero();
+        let mut tree = ArenaBox::new();
         let root = tree.insert_node(|owner, id| Node::new_document(owner, id, lock, url_data));
         assert_eq!(
             root, DOCUMENT_NODE_ID,
@@ -175,7 +175,7 @@ impl<T> Document<T> {
         &mut self.style_engine
     }
 
-    pub(crate) const fn style_and_tree_parts(&mut self) -> (&mut StyleEngine, &mut TreeArenas<T>) {
+    pub(crate) fn style_and_tree_parts(&mut self) -> (&mut StyleEngine, &mut TreeArenas<T>) {
         (&mut self.style_engine, &mut self.tree)
     }
 
@@ -384,7 +384,7 @@ impl<T> Document<T> {
 
     pub(crate) fn allocate_node(
         &mut self,
-        make: impl FnOnce(*mut TreeArenas<T>, NodeId) -> Node<T>,
+        make: impl FnOnce(ArenaPtr<T>, NodeId) -> Node<T>,
     ) -> NodeId {
         self.tree.insert_node(make)
     }

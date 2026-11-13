@@ -28,7 +28,10 @@ item hands it out) or it is `pub(crate)`. A new consumer need is a new name on t
 
 Subsystems:
 
-- `tree/` — the boxed `TreeArenas<T>`, `Node`, `Document`, shadow roots, the
+- `tree/` — the `TreeArenas<T>` in their own allocation (`ArenaBox`, which
+  holds them through a `NonNull` that each `Node` carries a copy of and every
+  `&`/`&mut TreeArenas` is derived from, so that copy stays usable under the
+  aliasing model), `Node`, `Document`, shadow roots, the
   flat tree, custom-element definitions and reactions, the document's
   top layer with its `::backdrop` nodes (`tree/top_layer.rs`), and the
   anonymous block boxes around loose text (`tree/anonymous.rs`): each
@@ -524,8 +527,10 @@ test-only registry probe.
 
 Rulings and limits to know before touching it:
 
-- The whole `unsafe` surface is two blocks, each with a `SAFETY` comment kept
-  honest by `#![warn(clippy::undocumented_unsafe_blocks)]`.
+- The whole `unsafe` surface is five blocks (`ArenaBox`'s shared lend,
+  exclusive lend and free, the node backpointer deref, `ensure_data`), each
+  with a `SAFETY` comment kept honest by
+  `#![warn(clippy::undocumented_unsafe_blocks)]`.
 - A `NodeId` is never reissued (no generation counters, no epoch gate on the
   retained frame) and the document element is permanent and pre-created.
 - `overflow: auto` stays out (user decision, 2026-07-29) and a `visible` axis
