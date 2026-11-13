@@ -1,12 +1,15 @@
 //! The capabilities an embedder provides: a transport ([`Fetch`]),
-//! persistent bytes ([`Store`]) and platform pixels ([`ImageDecoder`]),
-//! bundled as one [`Platform`].
+//! persistent bytes ([`Store`], or [`AsyncStore`] for the artifact tier of a
+//! host whose storage answers asynchronously) and platform pixels
+//! ([`ImageDecoder`]), bundled as one [`Platform`].
 //!
-//! They are shaped after the web platform's Fetch and Cache APIs, with the
-//! additions this engine needs and the Cache API lacks: synchronous storage,
-//! a body mapped read-only, and an LRU signal. Every policy decision — what
-//! to cache, for how long, what a request sends — stays in this crate; an
-//! implementation only moves bytes (`docs/resource-cache-design.md`).
+//! They are shaped after the web platform's Fetch and Cache APIs. [`Store`]
+//! adds what this engine needs and the Cache API lacks: synchronous storage,
+//! a body mapped read-only, and an LRU signal. [`AsyncStore`] is the subset
+//! of [`Store`] the artifact tier uses, answered asynchronously, as the
+//! Cache API answers. Every policy decision — what to cache, for how long,
+//! what a request sends — stays in this crate; an implementation only moves
+//! bytes (`docs/resource-cache-design.md`).
 //!
 //! Capabilities are traits with associated types, never `dyn`, so a host
 //! that names its platform pays no dispatch for it.
@@ -45,6 +48,24 @@ pub trait Threaded: 'static {}
 
 #[cfg(target_arch = "wasm32")]
 impl<T: 'static> Threaded for T {}
+
+/// The bound on the futures an [`AsyncStore`] answers with: `Send` on native
+/// targets, where the tier that awaits them runs as a task of a multi-thread
+/// pool, and nothing on wasm32, where a browser's Promises are bound to the
+/// thread that made them.
+#[cfg(not(target_arch = "wasm32"))]
+pub trait MaybeSend: Send {}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<T: Send + ?Sized> MaybeSend for T {}
+
+/// The bound on the futures an [`AsyncStore`] answers with: nothing on
+/// wasm32, where a browser's Promises are bound to the thread that made them.
+#[cfg(target_arch = "wasm32")]
+pub trait MaybeSend {}
+
+#[cfg(target_arch = "wasm32")]
+impl<T: ?Sized> MaybeSend for T {}
 
 /// One request a [`Fetch`] moves the bytes for.
 #[derive(Clone, Debug)]
@@ -163,10 +184,9 @@ pub enum StoreError {
     Other(String),
 }
 
-/// Persistent bytes: one body and one [`Meta`] per key.
+/// Persistent bytes: one body and one [`Meta`] per key, answered
+/// synchronously (natively, a directory).
 ///
-/// Synchronous on every target: natively a directory; in the browser an
-/// OPFS directory through `createSyncAccessHandle`, which only a Worker has.
 /// The tiers built on a Store treat what it answers as the truth and their
 /// own index as a hint, so a Store may lose entries at any time.
 pub trait Store: Threaded {
@@ -194,8 +214,9 @@ pub trait Store: Threaded {
     fn volatility(&self) -> Volatility;
 }
 
-/// The [`Platform::Store`] of a host with no persistent tier. It has no
-/// values, so [`Platform::into_parts`] can only hand over `None` for it.
+/// The [`Platform::Store`] or [`Platform::AsyncStore`] of a host without
+/// one. It has no values, so [`Platform::into_parts`] can never hand one
+/// over.
 #[derive(Clone, Copy, Debug)]
 pub enum NoStore {}
 
@@ -234,6 +255,93 @@ impl Store for NoStore {
 
     fn estimate(&self) -> Estimate {
         match *self {}
+    }
+
+    fn volatility(&self) -> Volatility {
+        match *self {}
+    }
+}
+
+/// Persistent bytes answered asynchronously, for the artifact tier
+/// ([`AsyncArtifactCache`](crate::artifact::AsyncArtifactCache)) of a host
+/// whose storage is asynchronous.
+///
+/// Modelled on the web Cache API (`caches.open(name)`): an entry is one
+/// request key and one response, `scan` is `matchAll`, `get` is `match`,
+/// `put` is `put` and `delete` is `delete`. Only what the artifact tier uses
+/// is here; the HTTP byte tier reads synchronously and stays on [`Store`].
+///
+/// The contracts are [`Store`]'s: a `put` is atomic per entry, the tier
+/// checks [`Meta::key`] on every read and treats a mismatch as a miss, and
+/// entries may vanish at any time, so the tier treats what the store answers
+/// as the truth and its own index as a hint.
+pub trait AsyncStore: Threaded {
+    /// Every entry present, for rebuilding the index. An entry whose
+    /// metadata cannot be read back is deleted on the way.
+    fn scan(&self) -> impl Future<Output = Result<Vec<Meta>, StoreError>> + MaybeSend;
+    fn get(
+        &self,
+        key: &str,
+    ) -> impl Future<Output = Result<Option<(Meta, Bytes)>, StoreError>> + MaybeSend;
+    /// Atomic per entry: a failure leaves the old entry or none, never a
+    /// truncated one.
+    fn put(
+        &self,
+        meta: &Meta,
+        body: Bytes,
+    ) -> impl Future<Output = Result<(), StoreError>> + MaybeSend;
+    fn delete(&self, key: &str) -> impl Future<Output = Result<(), StoreError>> + MaybeSend;
+    /// The LRU signal: records `now` as the entry's `last_used`. A key with
+    /// no entry is left absent.
+    fn touch(
+        &self,
+        key: &str,
+        now: SystemTime,
+    ) -> impl Future<Output = Result<(), StoreError>> + MaybeSend;
+    fn estimate(&self) -> impl Future<Output = Estimate> + MaybeSend;
+    fn volatility(&self) -> Volatility;
+}
+
+impl AsyncStore for NoStore {
+    fn scan(&self) -> impl Future<Output = Result<Vec<Meta>, StoreError>> + MaybeSend {
+        let never = *self;
+        async move { match never {} }
+    }
+
+    fn get(
+        &self,
+        _key: &str,
+    ) -> impl Future<Output = Result<Option<(Meta, Bytes)>, StoreError>> + MaybeSend {
+        let never = *self;
+        async move { match never {} }
+    }
+
+    fn put(
+        &self,
+        _meta: &Meta,
+        _body: Bytes,
+    ) -> impl Future<Output = Result<(), StoreError>> + MaybeSend {
+        let never = *self;
+        async move { match never {} }
+    }
+
+    fn delete(&self, _key: &str) -> impl Future<Output = Result<(), StoreError>> + MaybeSend {
+        let never = *self;
+        async move { match never {} }
+    }
+
+    fn touch(
+        &self,
+        _key: &str,
+        _now: SystemTime,
+    ) -> impl Future<Output = Result<(), StoreError>> + MaybeSend {
+        let never = *self;
+        async move { match never {} }
+    }
+
+    fn estimate(&self) -> impl Future<Output = Estimate> + MaybeSend {
+        let never = *self;
+        async move { match never {} }
     }
 
     fn volatility(&self) -> Volatility {
@@ -280,33 +388,46 @@ pub struct Tier<S> {
     pub budget: u64,
 }
 
+/// The derived-artifact tier's store, of either kind: a synchronous
+/// [`Store`], driven by an [`ArtifactCache`](crate::artifact::ArtifactCache),
+/// or an [`AsyncStore`], driven by an
+/// [`AsyncArtifactCache`](crate::artifact::AsyncArtifactCache).
+#[derive(Clone, Copy, Debug)]
+pub enum ArtifactStore<S, A> {
+    Blocking(S),
+    Async(A),
+}
+
 /// What a [`Platform`] is taken apart into, once, when the resource system
 /// is built.
 #[derive(Debug)]
-pub struct Parts<F, S, D> {
+pub struct Parts<F, S, A, D> {
     pub fetch: F,
     pub decoder: D,
     /// The HTTP byte tier's Store; `None` for a host with no persistent
-    /// tier.
+    /// tier. Always a synchronous [`Store`]: the byte tier restores a body
+    /// inside a synchronous call and maps retained bodies.
     pub bytes: Option<Tier<S>>,
-    /// The derived-artifact tier's Store (the code cache,
-    /// [`ArtifactCache`](crate::artifact::ArtifactCache)): a namespace of its
+    /// The derived-artifact tier's store (the code cache): a namespace of its
     /// own, never the byte tier's. `None` keeps artifacts in memory only.
-    pub artifacts: Option<Tier<S>>,
+    pub artifacts: Option<Tier<ArtifactStore<S, A>>>,
 }
 
 /// The bundle an embedder hands over: one transport, one decoder, and up to
-/// two Stores, each with its budget.
+/// two stores, each with its budget.
 ///
 /// The parts are handed over by value, because the tiers built on them own
 /// them: a [`ByteCache`](crate::byte_cache::ByteCache) takes its Store, an
-/// [`ArtifactCache`](crate::artifact::ArtifactCache) its own.
+/// [`ArtifactCache`](crate::artifact::ArtifactCache) or an
+/// [`AsyncArtifactCache`](crate::artifact::AsyncArtifactCache) its own.
 pub trait Platform: 'static {
     type Fetch: Fetch;
-    /// [`NoStore`] for a host with no persistent tier.
+    /// [`NoStore`] for a host with no synchronous persistent tier.
     type Store: Store;
+    /// [`NoStore`] for a host with no asynchronous store.
+    type AsyncStore: AsyncStore;
     type Decoder: ImageDecoder;
 
     /// Takes the platform apart once, when the resource system is built.
-    fn into_parts(self) -> Parts<Self::Fetch, Self::Store, Self::Decoder>;
+    fn into_parts(self) -> Parts<Self::Fetch, Self::Store, Self::AsyncStore, Self::Decoder>;
 }

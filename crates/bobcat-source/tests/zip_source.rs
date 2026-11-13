@@ -30,15 +30,86 @@ fn archive(entries: &[(&str, &[u8])], method: zip::CompressionMethod) -> Vec<u8>
     writer.finish().unwrap().into_inner()
 }
 
+fn config() -> ResourcesConfig {
+    ResourcesConfig {
+        worker_threads: 1,
+        log_to_stderr: false,
+        ..ResourcesConfig::default()
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn resources() -> Resources {
-    Resources::new(
-        ResourcesConfig {
-            worker_threads: 1,
-            log_to_stderr: false,
-            ..ResourcesConfig::default()
-        },
-        || {},
-    )
+    Resources::new(config(), || {})
+}
+
+/// In Wasm `bobcat-resources` has no platform of its own (the browser's is
+/// `bobcat-wasm`'s), so these tests name one that neither fetches nor
+/// decodes: they only register and unregister.
+#[cfg(target_arch = "wasm32")]
+fn resources() -> Resources<offline::Offline> {
+    Resources::with_platform(config(), offline::Offline, Vec::new(), || {})
+}
+
+#[cfg(target_arch = "wasm32")]
+mod offline {
+    use vant::error::Failure;
+    use vant::image::{Bitmap, DecodeError};
+    use vant::image_header::ImageHeader;
+    use vant::mime::ImageFormat;
+    use vant::{Fetch, ImageDecoder, NoStore, Parts, Platform, Request, Response};
+
+    pub struct Offline;
+
+    pub struct NoFetch;
+
+    impl Fetch for NoFetch {
+        fn fetch_blocking(&self, _request: &Request) -> Option<Result<Response, Failure>> {
+            None
+        }
+
+        fn owns_http_cache(&self) -> bool {
+            true
+        }
+    }
+
+    pub struct NoDecoder;
+
+    impl ImageDecoder for NoDecoder {
+        fn decode_blocking(
+            &self,
+            _bytes: &[u8],
+            _format: ImageFormat,
+            _header: Option<ImageHeader>,
+            _max: (u32, u32),
+        ) -> Result<Bitmap, DecodeError> {
+            Err(DecodeError::Unavailable(
+                "these tests decode nothing".to_owned(),
+            ))
+        }
+
+        fn available(&self) -> Result<(), DecodeError> {
+            Err(DecodeError::Unavailable(
+                "these tests decode nothing".to_owned(),
+            ))
+        }
+    }
+
+    impl Platform for Offline {
+        type Fetch = NoFetch;
+        type Store = NoStore;
+        type AsyncStore = NoStore;
+        type Decoder = NoDecoder;
+
+        fn into_parts(self) -> Parts<NoFetch, NoStore, NoStore, NoDecoder> {
+            Parts {
+                fetch: NoFetch,
+                decoder: NoDecoder,
+                bytes: None,
+                artifacts: None,
+            }
+        }
+    }
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

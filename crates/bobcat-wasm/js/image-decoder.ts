@@ -1,6 +1,5 @@
-// The main thread's half of the image decode protocol `bobcat-resources`
-// drives from the Render Worker; `decode/browser.rs` in that crate is the
-// other half.
+// The main thread's half of the image decode protocol the Render Worker
+// drives; `src/platform/mailbox.rs` in this crate is the other half.
 //
 // Decoding is the platform's: an `Image` element fed a Blob URL, which is
 // the browser's codecs and its EXIF orientation handling, and a 2D canvas to
@@ -19,7 +18,7 @@
 // stores, notifies, and echoes a message over the port, and a Render Worker
 // blocked in Atomics.wait and one parked on its event loop are both woken.
 
-// The messages on the port, as `decode/browser.rs` posts and reads them.
+// The messages on the port, as `src/platform/mailbox.rs` posts and reads them.
 
 /** The Render Worker's Wasm memory, sent once before any job. */
 interface InitMessage {

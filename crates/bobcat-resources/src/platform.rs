@@ -1,37 +1,25 @@
-//! The [`Platform`]s this crate ships: [`NativePlatform`] on macOS and
-//! Linux, [`BrowserPlatform`] in the browser's Render Worker. Either is the
-//! target's [`DefaultPlatform`](crate::DefaultPlatform), which
+//! The [`Platform`] this crate ships: [`NativePlatform`], on macOS and
+//! Linux. It is the [`DefaultPlatform`](crate::DefaultPlatform), which
 //! [`Resources::new`](crate::Resources::new) builds with no persistent
 //! store; an embedder with a disk cache builds one itself and hands it to
-//! [`Resources::with_platform`](crate::Resources::with_platform).
+//! [`Resources::with_platform`](crate::Resources::with_platform). The
+//! browser's platform is `bobcat-wasm`'s.
 //!
 //! Building a platform never fails on anything the embedder chose: a store
 //! that cannot be opened, or a decoder that cannot be reached, is left out
 //! and described in the notes `new` returns, which the resource system
 //! reports through [`Resources::take_notes`](crate::Resources::take_notes).
 
-#[cfg(not(target_arch = "wasm32"))]
-use vant::ImageDecoder as _;
-#[cfg(not(target_arch = "wasm32"))]
-use vant::Tier;
-use vant::{Parts, Platform};
+use vant::{ArtifactStore, ImageDecoder as _, NoStore, Parts, Platform, Tier};
 
-#[cfg(target_arch = "wasm32")]
-use crate::decode::BrowserDecoder;
-#[cfg(not(target_arch = "wasm32"))]
 use crate::decode::NativeDecoder;
-#[cfg(not(target_arch = "wasm32"))]
 use crate::store::FsStore;
-#[cfg(target_arch = "wasm32")]
-use crate::transport::BrowserFetch;
-#[cfg(not(target_arch = "wasm32"))]
 use crate::transport::NativeFetch;
 
 /// macOS and Linux: libcurl and the local filesystem ([`NativeFetch`]), a
 /// cache directory when one is configured ([`FsStore`]) with the code
 /// cache's own directory inside it, and `ImageIO` or gdk-pixbuf
 /// ([`NativeDecoder`]).
-#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug)]
 pub struct NativePlatform {
     fetch: NativeFetch,
@@ -40,7 +28,6 @@ pub struct NativePlatform {
     decoder: NativeDecoder,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl NativePlatform {
     /// The native platform, with the byte tier in `disk` when it is given
     /// and its directory opens, and the code cache in the `code` directory
@@ -82,77 +69,26 @@ impl NativePlatform {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl Platform for NativePlatform {
     type Fetch = NativeFetch;
     type Store = FsStore;
+    type AsyncStore = NoStore;
     type Decoder = NativeDecoder;
 
-    fn into_parts(self) -> Parts<NativeFetch, FsStore, NativeDecoder> {
+    fn into_parts(self) -> Parts<NativeFetch, FsStore, NoStore, NativeDecoder> {
         Parts {
             fetch: self.fetch,
             decoder: self.decoder,
             bytes: self.bytes,
-            artifacts: self.artifacts,
+            artifacts: self.artifacts.map(|tier| Tier {
+                store: ArtifactStore::Blocking(tier.store),
+                budget: tier.budget,
+            }),
         }
     }
 }
 
-/// The browser's Render Worker: its own `fetch` ([`BrowserFetch`]), whose
-/// HTTP cache is the only byte tier, no [`Store`](vant::Store), and the main
-/// thread's `Image` element ([`BrowserDecoder`]).
-#[cfg(target_arch = "wasm32")]
-#[derive(Debug)]
-pub struct BrowserPlatform {
-    fetch: BrowserFetch,
-    decoder: BrowserDecoder,
-}
-
-#[cfg(target_arch = "wasm32")]
-impl BrowserPlatform {
-    /// The browser platform, decoding through `image_port` — this Worker's
-    /// end of the channel whose other end the host's main-thread image
-    /// decoder listens on (`js/image-decoder.ts` in the `bobcat-wasm`
-    /// package). Without it no image decodes, which the notes say.
-    #[must_use]
-    pub fn new(image_port: Option<web_sys::MessagePort>) -> (Self, Vec<String>) {
-        let mut notes = Vec::new();
-        let decoder = if let Some(port) = image_port {
-            BrowserDecoder::new(port).unwrap_or_else(|error| {
-                notes.push(format!("images will not decode: {error}"));
-                BrowserDecoder::none()
-            })
-        } else {
-            notes.push("images will not decode: no image decode port was configured".to_owned());
-            BrowserDecoder::none()
-        };
-        let platform = Self {
-            fetch: BrowserFetch,
-            decoder,
-        };
-        (platform, notes)
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-impl Platform for BrowserPlatform {
-    type Fetch = BrowserFetch;
-    type Store = vant::NoStore;
-    type Decoder = BrowserDecoder;
-
-    /// No Store for either tier: the browser's HTTP cache is the byte
-    /// tier, and the code cache keeps its artifacts in memory only.
-    fn into_parts(self) -> Parts<BrowserFetch, vant::NoStore, BrowserDecoder> {
-        Parts {
-            fetch: self.fetch,
-            decoder: self.decoder,
-            bytes: None,
-            artifacts: None,
-        }
-    }
-}
-
-#[cfg(all(test, not(target_arch = "wasm32")))]
+#[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
@@ -205,7 +141,10 @@ mod tests {
         let artifacts = parts.artifacts.expect("the code cache");
         assert_eq!(bytes.store.dir(), dir.0);
         assert_eq!(bytes.budget, 1 << 20);
-        assert_eq!(artifacts.store.dir(), dir.0.join("code"));
+        let ArtifactStore::Blocking(store) = &artifacts.store else {
+            panic!("the native code cache is a synchronous store");
+        };
+        assert_eq!(store.dir(), dir.0.join("code"));
         assert_eq!(artifacts.budget, 2 << 20);
     }
 

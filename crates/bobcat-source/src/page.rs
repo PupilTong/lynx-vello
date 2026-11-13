@@ -64,6 +64,7 @@ use bobcat_resources::{Registrar, Resources};
 use bytes::Bytes;
 use thiserror::Error;
 use url::Url;
+use vant::Platform;
 
 use crate::ContainerSources;
 
@@ -276,7 +277,7 @@ impl PageSource {
 
     /// A page from an already-decoded template, as either compiler's
     /// container: the tests' way to give one body every shape.
-    #[cfg(test)]
+    #[cfg(all(test, not(target_arch = "wasm32")))]
     #[expect(
         clippy::needless_pass_by_value,
         reason = "the tests hand over the template they built"
@@ -324,7 +325,7 @@ impl PageSource {
 
     /// The container a container page registers, for the tests that hold it
     /// up against what a fetch of the same bytes registers.
-    #[cfg(test)]
+    #[cfg(all(test, not(target_arch = "wasm32")))]
     pub(crate) const fn container(&self) -> Option<&ContainerSources> {
         match &self.page {
             Page::Container(container) => Some(container),
@@ -342,7 +343,7 @@ impl PageSource {
     /// replaces an earlier registration of the same URL, so two pages
     /// registering one input URL leave the later one's bodies — and whatever
     /// URL only the earlier one had.
-    pub fn register_with(&self, resources: &Resources) {
+    pub fn register_with<P: Platform>(&self, resources: &Resources<P>) {
         match &self.page {
             Page::Container(container) => container.register_with(resources),
             Page::Xml(xml) => {
@@ -550,7 +551,7 @@ impl DeferredPage {
     /// every load of its URLs held until they are; any other page's at once,
     /// as [`PageSource::register_with`] does. A container that fails to
     /// decode fails those loads with its decode error.
-    pub fn register_in_background(&self, resources: &Resources) {
+    pub fn register_in_background<P: Platform>(&self, resources: &Resources<P>) {
         match &self.page {
             Deferred::Decoded(page) => page.register_with(resources),
             Deferred::Web {
@@ -738,10 +739,10 @@ pub(crate) fn background_boot_source(input: &Url, has_app_service: bool) -> Stri
 /// [`mts_entry_source`], the background-thread script as a
 /// [`BundleTarget::Web`] body — and the CSS as it is, exactly as
 /// [`PageSource::register_with`] registers an XML page's.
-pub fn register_lynx_xml_response(
+pub fn register_lynx_xml_response<P: Platform>(
     input: &Url,
     source: &str,
-    resources: &Resources,
+    resources: &Resources<P>,
 ) -> Result<LynxXmlResponseRegistration, SourceError> {
     let mapped = map_lynx_xml(input, source, LynxXmlUrlPolicy::ResponseFragments)?;
     let background_thread_url = mapped.background_thread.map(|(url, source)| {
@@ -809,7 +810,7 @@ const fn raw_lynx_xml_config() -> PageConfig {
     }
 }
 
-fn register_text(resources: &Resources, url: &Url, source: &str, media_type: &str) {
+fn register_text<P: Platform>(resources: &Resources<P>, url: &Url, source: &str, media_type: &str) {
     resources
         .register(url.as_str(), source.as_bytes().to_vec(), Some(media_type))
         .expect("PageSource's registration URLs are valid");
@@ -891,7 +892,9 @@ pub(crate) fn looks_like_lynx_xml(mut bytes: &[u8]) -> bool {
     bytes.first() == Some(&b'<')
 }
 
-#[cfg(test)]
+// Native only: these register into the native resource system, which wasm32
+// has no default platform for.
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use std::collections::BTreeMap;
 
@@ -1365,14 +1368,12 @@ mod tests {
     ///
     /// Nothing draws through it: boot's first `__FlushElementTree` waits for a
     /// painter to bind the view, and binding it is all this is for.
-    #[cfg(not(target_arch = "wasm32"))]
     async fn binding_painter() -> bobcat_core::Painter {
         bobcat_core::Painter::new(bobcat_core::DrawTarget::Offscreen, 32.0, 24.0, 1.0)
             .await
             .unwrap()
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
     async fn registered_compiler_sources_boot_bts_for_web_and_native_wrappers() {
         use std::time::{Duration, Instant};
@@ -1578,7 +1579,6 @@ mod tests {
     /// A container page boots with the container as its card: `__Card__` is
     /// the input URL rather than the entry's, and a named chunk and a named
     /// stylesheet are found under it by the URLs MTS builds from it.
-    #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
     async fn a_container_page_boots_with_the_container_as_its_card() {
         use std::time::{Duration, Instant};
@@ -1901,7 +1901,6 @@ mod tests {
     /// for every bundle the fixtures compile — except a `StyleInfo` section
     /// with no rule, which only the decode can tell is empty.
     #[test]
-    #[cfg(not(target_arch = "wasm32"))]
     fn a_deferred_page_names_the_sources_its_decode_names() {
         let screen = ScreenMetrics::for_viewport(32.0, 24.0, 1.0);
         let input = Url::parse("https://cdn.test/app/card.web.bundle?rev=1").unwrap();
@@ -1976,7 +1975,6 @@ mod tests {
 
     /// Waits for what a background install leaves: `done` is polled until it
     /// holds.
-    #[cfg(not(target_arch = "wasm32"))]
     fn eventually(mut done: impl FnMut() -> bool) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while !done() {
@@ -1988,7 +1986,6 @@ mod tests {
         }
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     fn quiet_resources() -> Resources {
         Resources::new(
             bobcat_resources::ResourcesConfig {
@@ -2002,7 +1999,6 @@ mod tests {
     /// The background install registers what the decoded page registers,
     /// and an empty sheet at a listed `StyleInfo` that held no rule.
     #[test]
-    #[cfg(not(target_arch = "wasm32"))]
     fn a_deferred_page_registers_its_container_in_the_background() {
         let input = Url::parse("https://cdn.test/app/basic-bindtap.web.bundle").unwrap();
         let bytes = crate::fixtures::fixture("basic-bindtap").page;
@@ -2029,7 +2025,6 @@ mod tests {
     /// A bundle whose sections fail to decode is deferred all the same; its
     /// install fails, registers nothing, and says why.
     #[test]
-    #[cfg(not(target_arch = "wasm32"))]
     fn a_deferred_page_that_fails_to_decode_registers_nothing() {
         let input = input_url();
         let mut bytes = web_bundle(Some("export {};"));

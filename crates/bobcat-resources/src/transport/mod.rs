@@ -9,12 +9,10 @@
 //! has one and the transport does not apply HTTP cache semantics itself.
 //! Anything else is refused at resolution, before a request exists.
 //!
-//! The adapters this crate ships are here too: [`NativeFetch`] (libcurl
-//! loaded at runtime, and the local filesystem) natively, and
-//! [`BrowserFetch`] (the Render Worker's `fetch`) on wasm32.
+//! The native adapter this crate ships is here too: [`NativeFetch`]
+//! (libcurl loaded at runtime, and the local filesystem). The browser's
+//! transport is `bobcat-wasm`'s.
 
-#[cfg(target_arch = "wasm32")]
-mod browser;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod curl;
 #[cfg(not(target_arch = "wasm32"))]
@@ -25,8 +23,6 @@ mod native;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bobcat_core::resource::{ResourceErrorKind, ResourceErrorPhase, RetryAdvice};
-#[cfg(target_arch = "wasm32")]
-pub use browser::BrowserFetch;
 use bytes::Bytes;
 use http::{HeaderMap, StatusCode};
 #[cfg(not(target_arch = "wasm32"))]
@@ -715,9 +711,10 @@ mod dispatch_tests {
     impl Platform for Test {
         type Fetch = Scripted;
         type Store = FsStore;
+        type AsyncStore = vant::NoStore;
         type Decoder = NativeDecoder;
 
-        fn into_parts(self) -> vant::Parts<Scripted, FsStore, NativeDecoder> {
+        fn into_parts(self) -> vant::Parts<Scripted, FsStore, vant::NoStore, NativeDecoder> {
             unreachable!("the tests build their transports from parts")
         }
     }

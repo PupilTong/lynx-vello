@@ -1,4 +1,7 @@
 //! Public host updates require MTS boot and reach a loading BTS in order.
+// These tests build the native resource system, which wasm32 has no default
+// platform for; the wasm32 run covers `decode_web_bundle` and `zip_source`.
+#![cfg(not(target_arch = "wasm32"))]
 
 use std::cell::Cell;
 use std::rc::Rc;

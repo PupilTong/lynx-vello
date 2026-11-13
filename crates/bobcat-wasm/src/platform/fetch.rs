@@ -6,17 +6,14 @@
 //! ([`Fetch::owns_http_cache`]), driven by the same [`CachePolicy`] through
 //! the request's cache mode; what it did is opaque, and nothing here asks.
 
-use bobcat_core::resource::{ResourceErrorKind, ResourceErrorPhase};
 use bytes::Bytes;
 use http::{HeaderMap, HeaderName, HeaderValue};
 use url::Url;
-use vant::error::Failure;
-use vant::{Fetch, Request, Response};
+use vant::error::{Failure, ResourceErrorKind, ResourceErrorPhase};
+use vant::{CachePolicy, Fetch, Request, Response};
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{Headers, RequestCache, RequestInit, WorkerGlobalScope};
-
-use crate::CachePolicy;
 
 /// The browser transport. It cannot block, so a synchronous request —
 /// a restore inside a read — has nothing to ask it.

@@ -7,6 +7,7 @@ use bobcat_resources::Resources;
 use percent_encoding::percent_decode_str;
 use thiserror::Error;
 use url::Url;
+use vant::Platform;
 
 use crate::{PageSource, SourceError};
 
@@ -117,7 +118,11 @@ impl ZipSource {
     /// origin, preserving ZIP-root paths. Call only after `page` succeeds.
     /// Keep these registrations for the view's lifetime: images may load
     /// after boot. Replacing a page should retire its resource scope.
-    pub fn register_with(self, resources: &Resources, entry: &Url) -> Result<(), ZipSourceError> {
+    pub fn register_with<P: Platform>(
+        self,
+        resources: &Resources<P>,
+        entry: &Url,
+    ) -> Result<(), ZipSourceError> {
         entry_path(entry)?;
         let mut root = entry.clone();
         root.set_query(None);

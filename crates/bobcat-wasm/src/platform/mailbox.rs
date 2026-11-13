@@ -14,8 +14,7 @@
 //! signals through `postMessage` echoes on the event loop; a restore waits
 //! on them with `Atomics.wait`, which a dedicated Worker may do and a main
 //! thread may not — which is why the main thread is the side that never
-//! waits. Its half of the protocol is `js/image-decoder.ts`, shipped by
-//! `bobcat-wasm`.
+//! waits. Its half of the protocol is `js/image-decoder.ts`.
 
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
@@ -24,11 +23,10 @@ use std::time::Duration;
 
 use js_sys::{Array, Int32Array, Object, Reflect, Uint8Array};
 use rustc_hash::FxHashMap;
+use vant::image::{Bitmap, DecodeError};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use web_sys::{MessageEvent, MessagePort};
-
-use super::{Bitmap, DecodeError};
 
 const STATE_DECODING: i32 = 0;
 const STATE_DIMENSIONS: i32 = 1;

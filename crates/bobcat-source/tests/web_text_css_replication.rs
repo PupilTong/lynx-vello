@@ -113,6 +113,9 @@
 //! advance a browser gives web-core and is `#[ignore]`d on the gap. Read the
 //! green count below as "the wire and the lowering", never as "`@font-face`
 //! works".
+// These tests build the native resource system, which wasm32 has no default
+// platform for; the wasm32 run covers `decode_web_bundle` and `zip_source`.
+#![cfg(not(target_arch = "wasm32"))]
 
 use bobcat_resources::{Resources, ResourcesConfig};
 use bobcat_source::PageSource;

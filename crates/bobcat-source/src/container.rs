@@ -80,6 +80,7 @@ use bobcat_core::{MTS_CHUNK_PREAMBLE, PageConfig, PreparsedStyleSheet};
 use bobcat_resources::{ContainerInstaller, RegisterError, Registrar, Resources};
 use bytes::Bytes;
 use url::Url;
+use vant::Platform;
 
 use crate::page::{
     BundleTarget, SourceError, background_boot_source, bounded_diagnostic, bts_module_source,
@@ -407,7 +408,7 @@ impl ContainerSources {
     ///
     /// Every URL was derived from an already-parsed [`Url`], so registration
     /// cannot fail URL validation.
-    pub fn register_with(&self, resources: &Resources) {
+    pub fn register_with<P: Platform>(&self, resources: &Resources<P>) {
         self.register(resources)
             .expect("a container's registration URLs are derived from a parsed URL");
     }
@@ -461,7 +462,7 @@ trait Sink {
     -> Result<(), RegisterError>;
 }
 
-impl Sink for Resources {
+impl<P: Platform> Sink for Resources<P> {
     fn script(&self, url: &Url, source: Bytes) -> Result<(), RegisterError> {
         self.register(url.as_str(), source, Some(SCRIPT_MEDIA_TYPE))
             .map(drop)
