@@ -206,7 +206,7 @@ fn a_text_attribute_on_a_text_element_carries_the_paragraph_s_run() {
 /// the `x-view`, and that surrounding whitespace is dropped here so the atom's
 /// advance is the atom's own and not the module-level leading-space divergence.
 /// And the line's own height is not asserted: this case's claim is the atom's
-/// advance, and the CSS 2.2 §10.8.1 line box parley 0.12 builds around a
+/// advance, and the CSS 2.2 §10.8.1 line box parley 0.13 builds around a
 /// baseline-aligned box is pinned by `crates/seldon/tests/text_block.rs`.
 /// Held only from `d19cbea2` (#227) on: before it the paragraph ran every
 /// atom with `LayoutInput::measure`, which writes no box, and copied that
@@ -1969,7 +1969,7 @@ fn a_compiled_card_s_inline_image_takes_its_used_size_and_its_margin() {
 ///
 /// The atom's vertical placement in the line is left out, as in the other
 /// atomic-inline replicas: this case's claim is the advance and the shared
-/// line, and the CSS 2.2 §10.8.1 placement parley 0.12 gives a baseline-aligned
+/// line, and the CSS 2.2 §10.8.1 placement parley 0.13 gives a baseline-aligned
 /// box is pinned by `crates/seldon/tests/text_block.rs`.
 ///
 /// Held only from `d19cbea2` (#227) on: before it an atom's subtree was only

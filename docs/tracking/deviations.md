@@ -621,7 +621,7 @@ consequential choice about whether to follow the spec or the quirk.
   which is a change to the vendored submodule and its own review, so it is
   filed here rather than smuggled into an engine-side change.
 - **Paragraph base direction: the inline formatting context follows
-  `direction`; a `<text>` stays first-strong** — parley 0.12 takes a base
+  `direction`; a `<text>` stays first-strong** — parley 0.13 takes a base
   direction (`StyleRunBuilder::set_base_direction`, `parley::BaseDirection`).
   The CSS block container's inline formatting context (`seldon::text::inline`)
   hands it the block's `direction`, as css-writing-modes-3 takes the bidi

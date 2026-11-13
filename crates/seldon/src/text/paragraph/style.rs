@@ -332,21 +332,38 @@ pub(in crate::text) fn parley_style(
             LineHeight::Px(px) => ParleyLineHeight::Absolute(px),
         },
         letter_spacing: run.letter_spacing,
-        word_break: match breaking.word_break {
-            WordBreak::Normal => ParleyWordBreak::Normal,
-            WordBreak::BreakAll => ParleyWordBreak::BreakAll,
-            WordBreak::KeepAll => ParleyWordBreak::KeepAll,
-        },
-        overflow_wrap: match breaking.overflow_wrap {
-            OverflowWrap::Normal => ParleyOverflowWrap::Normal,
-            OverflowWrap::Anywhere => ParleyOverflowWrap::Anywhere,
-            OverflowWrap::BreakWord => ParleyOverflowWrap::BreakWord,
-        },
-        text_wrap_mode: match breaking.text_wrap {
-            TextWrap::Wrap => ParleyTextWrapMode::Wrap,
-            TextWrap::NoWrap => ParleyTextWrapMode::NoWrap,
-        },
         ..ParleyTextStyle::default()
+    }
+    .with_breaking(breaking)
+}
+
+/// Writing a [`BreakStyle`]'s line-breaking values into a parley style.
+pub(in crate::text) trait WithBreaking: Sized {
+    /// `self` with `breaking`'s `word-break`, `overflow-wrap` and
+    /// `text-wrap-mode` written in, and nothing else changed.
+    #[must_use]
+    fn with_breaking(self, breaking: BreakStyle) -> Self;
+}
+
+impl WithBreaking for ParleyTextStyle<'_, '_, TextBrush> {
+    fn with_breaking(self, breaking: BreakStyle) -> Self {
+        Self {
+            word_break: match breaking.word_break {
+                WordBreak::Normal => ParleyWordBreak::Normal,
+                WordBreak::BreakAll => ParleyWordBreak::BreakAll,
+                WordBreak::KeepAll => ParleyWordBreak::KeepAll,
+            },
+            overflow_wrap: match breaking.overflow_wrap {
+                OverflowWrap::Normal => ParleyOverflowWrap::Normal,
+                OverflowWrap::Anywhere => ParleyOverflowWrap::Anywhere,
+                OverflowWrap::BreakWord => ParleyOverflowWrap::BreakWord,
+            },
+            text_wrap_mode: match breaking.text_wrap {
+                TextWrap::Wrap => ParleyTextWrapMode::Wrap,
+                TextWrap::NoWrap => ParleyTextWrapMode::NoWrap,
+            },
+            ..self
+        }
     }
 }
 

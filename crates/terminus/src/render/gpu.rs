@@ -247,7 +247,7 @@ impl SharedGpu {
     async fn build_with(
         instance: wgpu::Instance,
         compatible_surface: Option<&wgpu::Surface<'_>>,
-        raster: impl FnOnce(&wgpu::Device) -> SharedRaster,
+        raster: impl FnOnce(&wgpu::Device, &wgpu::Queue) -> SharedRaster,
     ) -> Option<Self> {
         let adapter =
             wgpu::util::initialize_adapter_from_env_or_default(&instance, compatible_surface)
@@ -262,7 +262,7 @@ impl SharedGpu {
             })
             .await
             .ok()?;
-        let raster = raster(&device);
+        let raster = raster(&device, &queue);
         Some(Self {
             instance,
             adapter,
@@ -303,7 +303,9 @@ impl SharedGpu {
     /// A stack no other target shares, its rasterizer built by `raster`:
     /// for a test that watches the shared state.
     #[cfg(test)]
-    pub(crate) fn private(raster: impl FnOnce(&wgpu::Device) -> SharedRaster) -> Arc<Self> {
+    pub(crate) fn private(
+        raster: impl FnOnce(&wgpu::Device, &wgpu::Queue) -> SharedRaster,
+    ) -> Arc<Self> {
         Arc::new(
             pollster::block_on(Self::build_with(instance(), None, raster))
                 .expect("a usable GPU adapter is mandatory"),

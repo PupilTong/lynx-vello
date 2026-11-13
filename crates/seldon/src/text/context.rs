@@ -598,6 +598,25 @@ impl TextContext {
         self.locale
     }
 
+    /// A family of this context's own fonts for a shaping that needs a font
+    /// and names none — atomic boxes with no text and no strut, whose
+    /// objects parley 0.13 shapes in some font all the same — or `None` when
+    /// `sans-serif`, parley's default family, already names one. Parley
+    /// gives up a shaping whose first cluster no font can be found for, and
+    /// its own last resort is the generic families, which a context without
+    /// system fonts and without a default family has none of.
+    pub(super) fn last_resort_family(&mut self) -> Option<String> {
+        let collection = &mut self.font.collection;
+        if collection
+            .generic_families(GenericFamily::SansSerif)
+            .next()
+            .is_some()
+        {
+            return None;
+        }
+        collection.family_names().next().map(str::to_owned)
+    }
+
     /// The parley contexts and the scratch layout a shaping builds into.
     pub(super) fn shaping_parts(
         &mut self,

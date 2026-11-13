@@ -11,8 +11,9 @@
 
 use seldon::geometry::Size;
 use seldon::text::block::{
-    BlockConstraint, BlockStyle, InlineBoxSpec, InlineItem, PlacedBox, RunStyle, TextBlock,
-    TextOverflow, TextRunItem, TextSecurity, TextWrap, VerticalAlign, WhiteSpaceCollapse,
+    BlockConstraint, BlockStyle, InlineBoxSpec, InlineItem, PlacedBox, RunStyle, TextAlign,
+    TextBlock, TextOverflow, TextRunItem, TextSecurity, TextWrap, VerticalAlign,
+    WhiteSpaceCollapse,
 };
 use seldon::text::{FontBlob, TextContext};
 use stylo::Atom;
@@ -168,6 +169,33 @@ fn a_tab_advances_to_the_next_twenty_pixel_stop() {
             .width,
         30.0,
     );
+}
+
+/// A tab stop is decided before the line is justified, which then widens
+/// the tab as the space it is shaped as: justification moves the text after
+/// the tab, never the stop it reached.
+#[test]
+fn justification_widens_a_tab_after_its_stop_is_decided() {
+    let style = ahem();
+    // "a" 10, the tab to the stop at 20, "bb" to 40 and its space hanging:
+    // the first of two lines at 55, whose 15 of free space justification
+    // gives the tab, its one opportunity.
+    let items = [run(&style, "a\tbb cc")];
+    let left = laid_out(verbatim(), &items, Some(55.0));
+    let justified = laid_out(
+        BlockStyle {
+            text_align: TextAlign::Justify,
+            ..verbatim()
+        },
+        &items,
+        Some(55.0),
+    );
+    for block in [&left, &justified] {
+        assert_eq!(block.lines().len(), 2);
+        assert_close(block.lines()[0].advance, 50.0);
+    }
+    assert_close(unit_x(&left, 2), 20.0);
+    assert_close(unit_x(&justified, 2), 35.0);
 }
 
 /// `width` with a resolved `text-indent` of `indent`.

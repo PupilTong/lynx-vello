@@ -32,7 +32,7 @@
 //! - The whole painter works in the text item's local space (origin at the text box's top-left,
 //!   which is also the Parley layout origin); `transform` already includes the device scale.
 //! - Everything parley positioned on a line — glyphs, decoration bands, background fragments,
-//!   gradient tiles — is already on that line's box: parley 0.12 builds CSS 2.2 §10.8.1 line boxes
+//!   gradient tiles — is already on that line's box: parley 0.13 builds CSS 2.2 §10.8.1 line boxes
 //!   for both paragraph kinds.
 
 use parley::{GlyphRun, Layout, PositionedLayoutItem};
@@ -1106,7 +1106,7 @@ pub(crate) fn paint_caret_and_composition(
                 return;
             };
             let metrics = line.metrics();
-            // The line's deepest font descent: parley 0.12's line metrics
+            // The line's deepest font descent: parley 0.13's line metrics
             // are the CSS line box, so the descent is the glyph runs'.
             let descent = line
                 .items()

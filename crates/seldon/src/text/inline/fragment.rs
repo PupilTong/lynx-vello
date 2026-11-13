@@ -21,6 +21,7 @@ use parley::PositionedLayoutItem;
 use super::edge::{EdgeRun, EdgeSide, SpanAt};
 use super::{FlowSource, InlineFlow, InlineFragment};
 use crate::geometry::{Point, Rect, Size};
+use crate::text::paragraph::shape::Objects;
 use crate::text::paragraph::{Additions, Direction, LineGeometry};
 
 /// Each box's inline extent on one line, if it has any.
@@ -58,6 +59,7 @@ impl InlineFlow {
         // Per box, its fragments in line order.
         let mut by_span: Vec<Vec<InlineFragment>> = vec![Vec::new(); boxes.spans.len()];
 
+        let objects = Objects::of(&self.paragraph.natural);
         for (index, line) in self
             .paragraph
             .natural
@@ -67,7 +69,7 @@ impl InlineFlow {
         {
             let geometry = LineGeometry::of(&line);
             extents.extents.fill(None);
-            self.line_extents(&line, &mut extents);
+            self.line_extents(&line, &objects, &mut extents);
             let line_index = u32::try_from(index).expect("line count fits u32");
             for (span, extent) in extents.extents.iter().enumerate() {
                 let Some((left, right)) = *extent else {
@@ -105,6 +107,7 @@ impl InlineFlow {
     fn line_extents(
         &self,
         line: &parley::Line<'_, crate::style::TextBrush>,
+        objects: &Objects,
         extents: &mut Extents<'_>,
     ) {
         let block = &self.paragraph.content.block;
@@ -144,8 +147,7 @@ impl InlineFlow {
                             right.min(visible_high),
                         ),
                         FlowSource::Edge(_) => {
-                            let start = u32::try_from(glyph_run.run().text_range().start)
-                                .expect("text fits u32");
+                            let start = objects.text_byte(glyph_run.run().text_range().start);
                             if let Ok(edge) = boxes
                                 .edges
                                 .binary_search_by_key(&start, |edge| edge.bytes.start)

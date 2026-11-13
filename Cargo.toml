@@ -65,7 +65,7 @@ markup5ever_rcdom = "0.39"
 pulldown-cmark = { version = "0.13", default-features = false }
 # Bare URL and email autolinking for `<markdown>`, markdown-it's `linkify`.
 linkify = "0.11"
-parley = { version = "0.12", default-features = false, features = [
+parley = { version = "0.13", default-features = false, features = [
     "std",
     "system",
 ] }
@@ -113,11 +113,23 @@ winit = { version = "0.30.13", default-features = false, features = ["rwh_06"] }
 # terminus's rasterizer: sparse strips on vello_gpu's wgpu backend
 # (`crates/terminus/src/render/raster.rs`). Its `kurbo` and `peniko`
 # re-exports are the geometry and paint types the whole crate draws in.
-vello_gpu = { version = "0.3", default-features = false, features = ["wgpu", "text"] }
-glifo = { version = "0.4", default-features = false }
-# vello_gpu's own image-cache allocator, which terminus replays to know
-# whether an atlas upload fits (`crates/terminus/src/render/sparse.rs`).
-vello_common = { version = "0.3", default-features = false }
+# Without its defaults vello_gpu compiles every optional paint out of its
+# shaders and panics when a scene draws one, so the paints terminus records
+# are named: `box-shadow` blurs (`blurred_rounded_rect`), bitmaps and bakes
+# sampled with any extend and filter (`full_image_support`) and
+# `conic-gradient` (`gradient_sweep`). `wgpu_external_texture`, for binding
+# a multi-planar `wgpu::ExternalTexture`, is not used.
+vello_gpu = { version = "0.4", default-features = false, features = [
+    "wgpu",
+    "text",
+    "blurred_rounded_rect",
+    "full_image_support",
+    "gradient_sweep",
+] }
+glifo = { version = "0.5", default-features = false }
+# The `peniko` image data `vant` decodes bitmaps into, without a vello_gpu
+# dependency.
+vello_common = { version = "0.4", default-features = false }
 # The one wgpu in the tree: the major vello_gpu is built against. Default
 # features, so every native backend and WebGPU are compiled in.
 wgpu = "30.0.1"

@@ -45,6 +45,7 @@
 
 use parley::{BreakReason, Layout, PositionedLayoutItem};
 
+use super::shape::Objects;
 use super::style::IndentKeywords;
 use crate::style::TextBrush;
 
@@ -131,6 +132,9 @@ pub(in crate::text) fn resolve(
     debug_assert_eq!(tabs.len(), spacing.len());
     debug_assert_eq!(tabs.len(), min.len());
     let mut wanted = spacing.to_vec();
+    // `tabs` are bytes of the normalized text; the layout's count each box's
+    // object.
+    let objects = Objects::of(layout);
     for (index, line) in layout.lines().enumerate() {
         // An indented line starts at the `text-indent` parley applied to it.
         // css-text-3 measures stops from the content edge, so the indent
@@ -152,8 +156,7 @@ pub(in crate::text) fn resolve(
                     }
                     walked_run = Some(run.index());
                     for cluster in run.visual_clusters() {
-                        let byte =
-                            u32::try_from(cluster.text_range().start).expect("text fits u32");
+                        let byte = objects.text_byte(cluster.text_range().start);
                         let Ok(tab) = tabs.binary_search(&byte) else {
                             x += cluster.advance();
                             continue;

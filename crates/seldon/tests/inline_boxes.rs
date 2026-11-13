@@ -914,9 +914,11 @@ const ATOM: InlineFlowItem<'static> = InlineFlowItem::Atom(InlineAtom {
 
 #[test]
 fn a_hanging_indent_keeps_the_intrinsic_widths_of_two_breaks() {
-    // The break at zero width ends the atom's line with a soft wrap, and the
-    // empty line after it takes the hanging indent; the one pass has no
-    // line there.
+    // One line, which a hanging indent leaves unindented. Parley 0.12's
+    // break at zero width ended the line right after the atom that
+    // overflowed it, and the empty line after it took the indent (10 against
+    // the one pass's 5); parley 0.13 breaks an atom as it breaks text, and
+    // the two agree.
     let style = InlineFlowStyle {
         indent: IndentKeywords {
             each_line: false,
@@ -925,7 +927,7 @@ fn a_hanging_indent_keeps_the_intrinsic_widths_of_two_breaks() {
         ..container(Direction::Ltr)
     };
     let (intrinsic, breaks, one_pass) = intrinsic_widths(style, &[ATOM], &[(0, 5.0)], 10.0);
-    assert_eq!(intrinsic, (10.0, 10.0));
+    assert_eq!(intrinsic, (5.0, 5.0));
     assert_eq!(one_pass, (5.0, 5.0), "parley's one pass");
     assert_eq!(breaks, 2);
 }
@@ -933,9 +935,11 @@ fn a_hanging_indent_keeps_the_intrinsic_widths_of_two_breaks() {
 #[test]
 fn overflow_wrap_anywhere_keeps_the_intrinsic_widths_of_two_breaks() {
     // A space that is `nowrap` and `anywhere` before an atom: the one pass
-    // breaks before the space, as `anywhere` allows; the break at zero width
-    // keeps one line, since the space fits by hanging and the atom after it
-    // follows a `nowrap` run.
+    // breaks before the space, as `anywhere` allows. Parley 0.12's break at
+    // zero width kept one line (45), since the space fits by hanging and it
+    // appended an atom after a `nowrap` run whatever its width; parley 0.13
+    // breaks an atom as it breaks text, so the overflowing atom takes the
+    // `anywhere` opportunity before the space, and the two agree.
     let style = ahem();
     let items = [
         run(&style, "bbb"),
@@ -954,7 +958,7 @@ fn overflow_wrap_anywhere_keeps_the_intrinsic_widths_of_two_breaks() {
     ];
     let (intrinsic, breaks, one_pass) =
         intrinsic_widths(container(Direction::Ltr), &items, &[(2, 5.0)], 0.0);
-    assert_eq!(intrinsic, (45.0, 45.0));
+    assert_eq!(intrinsic, (30.0, 45.0));
     assert_eq!(one_pass, (30.0, 45.0), "parley's one pass");
     assert_eq!(breaks, 2);
 }

@@ -13,7 +13,7 @@ use core::ops::Range;
 
 use parley::Layout;
 
-use super::shape::NaturalLine;
+use super::shape::{NaturalLine, Objects};
 use super::{Additions, LineGeometry, Paragraph};
 use crate::geometry::{Point, Rect, Size};
 use crate::style::TextBrush;
@@ -83,6 +83,7 @@ impl<S, A: Additions> Paragraph<S, A> {
             )]);
         }
 
+        let objects = Objects::of(displayed.layout);
         let mut boxes = Vec::new();
         for (index, (line, reported)) in displayed.layout.lines().zip(lines).enumerate() {
             // Clipping to the line's own range is what drops its trailing
@@ -96,6 +97,7 @@ impl<S, A: Additions> Paragraph<S, A> {
             let mut extent: Option<(f32, f32)> = None;
             self.for_each_extent(
                 &line,
+                &objects,
                 displayed.cut_byte,
                 displayed.content_slots,
                 |units, left, right| {
@@ -141,6 +143,7 @@ impl<S, A: Additions> Paragraph<S, A> {
         let mut hit = None;
         self.for_each_extent(
             &line,
+            &Objects::of(displayed.layout),
             displayed.cut_byte,
             displayed.content_slots,
             |units, left, right| {

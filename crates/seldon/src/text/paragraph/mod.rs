@@ -71,7 +71,8 @@ use content::{InsertedSegment, MarkerPlaces, NormalizedBlock, WhiteSpaceProcessi
 pub use memo::{BlockConstraint, BlockMetrics};
 pub use offsets::OffsetMap;
 use parley::{
-    ContentWidths, InlineBox, InlineBoxKind, Layout, WhiteSpaceCollapse as ParleyWhiteSpace,
+    Alignment, AlignmentOptions, ContentWidths, InlineBox, InlineBoxKind, Layout,
+    WhiteSpaceCollapse as ParleyWhiteSpace,
 };
 pub use position::used_line_height;
 use shape::{BreakOverride, NaturalLine, ShapeSpan};
@@ -486,6 +487,11 @@ impl<S: Copy, A: Additions> Paragraph<S, A> {
     /// paragraph with preserved tabs re-shapes when a break moved a tab to a
     /// different stop (`tab`), at most `tab::MAX_ROUNDS` times; `breaking` is
     /// what such a re-shape uses.
+    ///
+    /// The committed lines are aligned by `alignment`: parley 0.13 aligns
+    /// every break as it ends. The tab rounds read the advances a break
+    /// leaves, which `Justify` widens, so a paragraph with preserved tabs
+    /// settles them unjustified and is broken once more to justify them.
     pub(in crate::text) fn break_lines(
         &mut self,
         context: &mut TextContext,
@@ -493,6 +499,7 @@ impl<S: Copy, A: Additions> Paragraph<S, A> {
         constraint: BlockConstraint,
         max_lines: Option<u32>,
         keywords: IndentKeywords,
+        alignment: Alignment,
     ) -> Vec<NaturalLine> {
         let width = constraint.max_advance();
 
@@ -501,9 +508,18 @@ impl<S: Copy, A: Additions> Paragraph<S, A> {
         self.write_boxes();
 
         let indent = constraint.indent;
+        let deferred = alignment == Alignment::Justify && !self.content.block.tabs.is_empty();
+        let rounds_alignment = if deferred {
+            Alignment::Start
+        } else {
+            alignment
+        };
         let mut tab_rounds = 0;
         loop {
+            // A re-shape is a new layout, which parley builds with neither.
             self.natural.set_text_indent(indent, keywords.options());
+            self.natural
+                .set_alignment(rounds_alignment, AlignmentOptions::default());
             shape::break_clamped(&mut self.natural, width, max_lines);
             if tab_rounds == tab::MAX_ROUNDS {
                 break;
@@ -525,34 +541,22 @@ impl<S: Copy, A: Additions> Paragraph<S, A> {
             self.reshape(context, breaking);
             tab_rounds += 1;
         }
+        if deferred {
+            self.natural
+                .set_alignment(alignment, AlignmentOptions::default());
+            shape::break_clamped(&mut self.natural, width, max_lines);
+        }
         if self.is_empty_strut_line() {
             debug_assert_eq!(
                 self.natural.len(),
                 1,
                 "parley breaks empty text into one line"
             );
-            // Parley aligns a line within the width it was broken at, less
-            // the line's advance, and this line's advance is the substitute
-            // space's. Breaking it once more at that width plus the space's
-            // advance leaves the free space at the width itself, so every
-            // `text-align` places the line where it places a zero-wide one:
-            // the start, the exact centre, the end; `justify` as the start.
-            // Only this path adds the advance: parley ignores the width when
-            // it breaks empty text, so the second break moves nothing but
-            // the line's alignment width. Unconstrained, the line's width is
-            // its own advance and there is nothing to align within.
-            if let Some(width) = width {
-                let advance = self
-                    .natural
-                    .get(0)
-                    .map_or(0.0, |line| line.metrics().advance);
-                shape::break_clamped(&mut self.natural, Some(width + advance), max_lines);
-            }
-            // The one line empty content was shaped into, which holds only
-            // the substitute space parley shapes in the strut: no source
-            // text, so it is read as an empty line at the start of the
-            // source that consumes none of it, rather than through the
-            // source map, which has no byte for that space.
+            // The one line empty content was shaped into: parley 0.13 lays
+            // out one line of the strut for empty text, with no item, which
+            // every `text-align` places where it places a zero-wide line. No
+            // source text, so it is read as an empty line at the start of
+            // the source that consumes none of it.
             return vec![NaturalLine {
                 start_unit: 0,
                 end_unit: 0,
@@ -573,28 +577,54 @@ impl<S: Copy, A: Additions> Paragraph<S, A> {
     /// white space is processed — and the root lays out one empty line of
     /// the strut for it ([`ParagraphRoot::strut_line_when_empty`]).
     ///
-    /// That line holds the substitute space parley shapes for empty text,
-    /// which parley neither lets hang nor leaves out of its widths, so the
-    /// natural layout's width and its content widths count the space's
-    /// advance. The paragraph's own width is zero: [`Self::content_widths`]
-    /// answers so, and each consumer reports a zero-wide line.
+    /// Parley lays that line out with no item, and counts the indent toward
+    /// the natural layout's width and its content widths. The paragraph's
+    /// own width is zero: [`Self::content_widths`] answers so, and each
+    /// consumer reports a zero-wide line.
     pub(in crate::text) fn is_empty_strut_line(&self) -> bool {
         self.root.line_root().shapes_empty_content()
             && self.content.block.text.is_empty()
             && self.content.block.boxes.is_empty()
     }
 
+    /// Breaks the natural layout once more at the `width` and `max_lines` the
+    /// last [`Self::break_lines`] was given, aligned by `alignment`: the same
+    /// lines, aligned anew, since parley 0.13 aligns only as a break ends.
+    /// Nothing is written in first, so this is sound only straight after
+    /// that break. A no-op when the lines already have that alignment.
+    pub(in crate::text) fn realign(
+        &mut self,
+        alignment: Alignment,
+        width: Option<f32>,
+        max_lines: Option<u32>,
+    ) {
+        if self.natural.alignment() == Some(alignment) {
+            return;
+        }
+        self.natural
+            .set_alignment(alignment, AlignmentOptions::default());
+        shape::break_clamped(&mut self.natural, width, max_lines);
+    }
+
     /// Writes the atomic boxes' current sizes, baselines and alignments into
     /// the natural layout, each widened by the advance laid beside it.
+    ///
+    /// Parley 0.13 edits one box at a time and places its object there — its
+    /// advance and its baseline — which is constant work per box: no break,
+    /// no reshaping.
     fn write_boxes(&mut self) {
-        for (slot, entry) in self.natural.inline_boxes_mut().enumerate() {
+        let count = self.natural.inline_boxes().len();
+        for slot in 0..count {
             let spec = self.content.box_spec(self.content.block.boxes[slot].item);
-            let sized = sized_box(spec, slot, entry.index, self.percent_basis);
             let (before, after) = self.content.additions.box_advance(slot);
-            entry.width = sized.width + before + after;
-            entry.height = sized.height;
-            entry.baseline = sized.baseline;
-            entry.vertical_align = sized.vertical_align;
+            let percent_basis = self.percent_basis;
+            self.natural.edit_inline_box(slot, |entry| {
+                let sized = sized_box(spec, slot, entry.index, percent_basis);
+                entry.width = sized.width + before + after;
+                entry.height = sized.height;
+                entry.baseline = sized.baseline;
+                entry.vertical_align = sized.vertical_align;
+            });
         }
     }
 
@@ -754,7 +784,10 @@ pub(in crate::text) fn parley_boxes<A: Additions>(
 
 /// One atomic box as parley lays it out: its margin box, its baseline from
 /// the box's top edge (`None` puts the bottom edge on the baseline), and its
-/// `vertical-align`, which parley 0.12 resolves against the root inline box.
+/// `vertical-align`, which parley resolves against the root inline box: the
+/// style its object is shaped in is a copy of the root's
+/// (`shape::build_into_scratch`). `index` is the box's byte in the
+/// normalized text; the shaper moves it to its object's.
 pub(in crate::text) fn sized_box(
     spec: &InlineBoxSpec,
     slot: usize,

@@ -2,20 +2,79 @@
 //!
 //! One shaping per content revision; breaking re-runs per layout call. The
 //! breaker is always dropped before anything reads committed lines — the
-//! committed line storage lives inside the breaker until its `Drop` runs.
+//! committed line storage lives inside the breaker until its `Drop` runs,
+//! and so does the alignment: parley 0.13 aligns every break as the breaker
+//! drops, with the alignment set on the layout beforehand
+//! (`Layout::set_alignment`), which building the layout resets to `Start`.
+//!
+//! Parley 0.13 represents an atomic inline box — an *inline object* — by a
+//! U+FFFC OBJECT REPLACEMENT CHARACTER in the text it shapes ([`OBJECT`]),
+//! and indexes every layout it builds by the bytes of that text. The
+//! normalized text the paragraph core keeps has no such character: a box is
+//! a place between two bytes there (`super::content`). Building a layout
+//! inserts one before each box's byte, in a style run of its own
+//! ([`build_into_scratch`]); [`Objects`] maps a layout's bytes back.
 
 use core::ops::Range;
+use std::borrow::Cow;
 
 use parley::fontique::Attributes;
 use parley::{
-    BaseDirection, CHROMIUM_LINE_BREAK_OVERRIDE, InlineBox, Layout, LineBreakOverrideFn,
-    LineHeight as ParleyLineHeight, PositionedLayoutItem, TextStyle as ParleyTextStyle,
+    BaseDirection, CHROMIUM_LINE_BREAK_OVERRIDE, FontFamily as ParleyFontFamily, FontFamilyName,
+    InlineBox, Layout, LineBreakOverrideFn, LineHeight as ParleyLineHeight, PositionedLayoutItem,
+    StyleRunBuilder, TextStyle as ParleyTextStyle,
 };
 
 use super::content::{BoxAt, SourceMap};
-use super::style::{BreakStyle, RunStyle, WordBreak};
+use super::style::{BreakStyle, RunStyle, WithBreaking, WordBreak};
 use crate::style::TextBrush;
 use crate::text::TextContext;
+
+/// What stands for an inline object in the text parley shapes.
+pub(in crate::text) const OBJECT: char = '\u{FFFC}';
+
+/// [`OBJECT`]'s UTF-8 length.
+const OBJECT_LEN: u32 = 3;
+
+/// Where one layout's inline objects sit in the text it was built from: the
+/// layout byte of each object's [`OBJECT`], ascending, which is box slot
+/// order. Read off the layout's own boxes, so it serves any layout this
+/// module built — the natural one, a truncated display, a probe.
+///
+/// Each object is the box's place in the normalized text with three bytes
+/// added, so a layout byte less three per object before it is the byte of
+/// the text the layout was built over; an object's own byte answers its
+/// box's.
+#[derive(Debug, Default)]
+pub(in crate::text) struct Objects {
+    at: Vec<u32>,
+}
+
+impl Objects {
+    /// The objects of `layout`.
+    pub(in crate::text) fn of(layout: &Layout<TextBrush>) -> Self {
+        Self {
+            at: layout
+                .inline_boxes()
+                .map(|inline_box| u32::try_from(inline_box.index).expect("text fits u32"))
+                .collect(),
+        }
+    }
+
+    /// The byte of the text the layout was built over that layout byte
+    /// `byte` stands at.
+    pub(in crate::text) fn text_byte(&self, byte: usize) -> u32 {
+        let byte = u32::try_from(byte).expect("text fits u32");
+        let before = self.at.partition_point(|&at| at < byte);
+        byte - OBJECT_LEN * u32::try_from(before).expect("box count fits u32")
+    }
+
+    /// The box slot whose object is at layout byte `byte`, if any.
+    pub(in crate::text) fn slot_at(&self, byte: usize) -> Option<usize> {
+        let byte = u32::try_from(byte).ok()?;
+        self.at.binary_search(&byte).ok()
+    }
+}
 
 /// One contiguous styled span handed to the shaper.
 ///
@@ -100,7 +159,9 @@ impl core::fmt::Debug for BreakOverride {
 /// the parley style-index → source identity table: push order is the style
 /// index, which is the run-identity channel that leaves `TextBrush = ()`
 /// untouched crate-wide. With a strut, index 0 is the strut's and no glyph
-/// run carries it.
+/// run carries it. With boxes, the last indices are the styles their
+/// objects are shaped in ([`object_style`]), each recording style 0's
+/// identity, which no glyph run carries either.
 ///
 /// The shaping happens in the context's scratch layout and the caller gets a
 /// copy of it. Parley reserves a layout's shaping buffers for the text's
@@ -109,16 +170,11 @@ impl core::fmt::Debug for BreakOverride {
 /// cloned `Vec` holds exactly its elements, so the retained layout costs what
 /// was shaped, and the scratch's buffers serve the next shaping.
 ///
-/// Fully empty content short-circuits to an empty layout: parley shapes a
-/// substitute space for an empty build, whose glyph run would carry a style
-/// index this module never pushed. A root that keeps a line for empty
-/// content ([`LineRoot::shapes_empty_content`]) is the exception: its strut
-/// is style 0, which parley shapes the substitute space in, so the layout
-/// has one line whose box is the strut's, and that space is the one glyph
-/// run the strut's index carries. It is no content: paint draws no glyph run
-/// of the strut, and since parley neither hangs the space nor leaves it out
-/// of its widths, each consumer reports that line zero wide
-/// (`Paragraph::is_empty_strut_line`).
+/// Fully empty content short-circuits to an empty layout. A root that keeps
+/// a line for empty content ([`LineRoot::shapes_empty_content`]) is the
+/// exception: its strut is style 0, and parley 0.13 breaks empty text into
+/// one line with no item whose box is the strut's. It is no content: each
+/// consumer reports that line zero wide (`Paragraph::is_empty_strut_line`).
 pub(in crate::text) fn shape<S: Copy>(
     context: &mut TextContext,
     text: &str,
@@ -224,20 +280,35 @@ fn build_into_scratch<S: Copy>(
         .iter()
         .map(|span| super::style::parley_style(span.style, span.breaking))
         .collect();
+    // A span at font size 0 draws nothing, so no fallback font is asked for
+    // it: an inline box's edge cluster (`crate::text::inline`), whose marks
+    // no font is expected to map.
     context.cover(
         text,
-        spans.iter().zip(&styles).map(|(span, style)| {
-            (
-                span.bytes.clone(),
-                &style.font_family,
-                Attributes {
-                    width: style.font_width,
-                    weight: style.font_weight,
-                    style: style.font_style,
-                },
-            )
-        }),
+        spans
+            .iter()
+            .zip(&styles)
+            .filter(|(_, style)| style.font_size != 0.0)
+            .map(|(span, style)| {
+                (
+                    span.bytes.clone(),
+                    &style.font_family,
+                    Attributes {
+                        width: style.font_width,
+                        weight: style.font_weight,
+                        style: style.font_style,
+                    },
+                )
+            }),
     );
+    // Boxes with no text and no strut name no family their objects can be
+    // shaped in but parley's default.
+    let object_family = (root.strut.is_none() && spans.is_empty() && !boxes.is_empty())
+        .then(|| context.last_resort_family())
+        .flatten();
+    // Each box is an inline object, which parley 0.13 shapes as an `OBJECT`
+    // in the text, before the character at the box's byte.
+    let object_text = ObjectText::new(text, &boxes);
     let (font_context, layout_context, scratch) = context.shaping_parts();
     // `text` is already whitespace-normalized by `super::content::normalize`,
     // and `style_run_builder` takes it verbatim — parley's own
@@ -252,7 +323,8 @@ fn build_into_scratch<S: Copy>(
     // the identity on the text, which is what this builder already is, so
     // `white-space-collapse: preserve` needs nothing from parley beyond it:
     // the normalizer keeps every space, and the tab stops are `super::tab`'s.
-    let mut builder = layout_context.style_run_builder(font_context, text, 1.0, false);
+    let mut builder =
+        layout_context.style_run_builder(font_context, object_text.text(), 1.0, false);
     // Parley 0.12 takes a mandatory break before it looks for a wrap
     // opportunity, so the override's opportunity after the space of `"a \nb"`
     // no longer swallows the newline's break.
@@ -269,7 +341,7 @@ fn build_into_scratch<S: Copy>(
         builder.set_line_break_override(Some(overrides));
     }
     builder.set_base_direction(root.direction);
-    builder.reserve(spans.len() + 1, spans.len());
+    builder.reserve(spans.len() + 3, spans.len() + 2 * boxes.len());
     if let Some((strut, source)) = root.strut {
         let mut style = super::style::parley_style(strut, BreakStyle::default());
         style.locale = locale;
@@ -281,12 +353,9 @@ fn build_into_scratch<S: Copy>(
         // default style the strut. A style with no extent above or below the
         // baseline is no strut at all; no glyph run carries it, so it records
         // no paint identity.
-        builder.push_style(ParleyTextStyle {
-            font_size: 0.0,
-            line_height: ParleyLineHeight::Absolute(0.0),
-            ..ParleyTextStyle::default()
-        });
+        builder.push_style(empty_root_style());
     }
+    let mut runs = Vec::with_capacity(if boxes.is_empty() { 0 } else { spans.len() });
     for (span, mut style) in spans.iter().zip(styles) {
         style.locale = locale;
         style.letter_spacing += span.extra_spacing;
@@ -294,14 +363,259 @@ fn build_into_scratch<S: Copy>(
         let index = builder.push_style(style);
         debug_assert_eq!(usize::from(index), sources.len());
         sources.push(span.source);
-        builder.push_style_run(index, span.bytes.clone());
+        if boxes.is_empty() {
+            builder.push_style_run(index, span.bytes.clone());
+        } else {
+            object_text.span_runs(span.bytes.clone(), index, span.breaking, &mut runs);
+        }
     }
-    for inline_box in boxes {
+    if !boxes.is_empty() {
+        let object_root = ObjectRoot {
+            strut: root.strut,
+            first: spans
+                .first()
+                .map(|span| (span.style, span.breaking, span.source)),
+            locale,
+            family: object_family,
+        };
+        push_object_runs(&mut builder, &object_text, runs, &object_root, sources);
+    }
+    for (slot, mut inline_box) in boxes.into_iter().enumerate() {
         debug_assert!(text.is_char_boundary(inline_box.index));
+        inline_box.index = object_text.object_byte(slot);
         builder.push_inline_box(inline_box);
     }
-    builder.build_into(scratch, text);
+    builder.build_into(scratch, object_text.text());
     true
+}
+
+/// What the styles a layout's objects are shaped in are copies of: parley's
+/// style 0 — the strut, the empty style of boxes with neither text nor a
+/// strut, or else the first span's — and the paint identity it records.
+struct ObjectRoot<'a, S> {
+    strut: Option<(&'a RunStyle, S)>,
+    /// The first span's style, line-breaking values and paint identity.
+    first: Option<(&'a RunStyle, BreakStyle, S)>,
+    locale: Option<parley::Language>,
+    /// The family of the empty style ([`TextContext::last_resort_family`]).
+    family: Option<String>,
+}
+
+impl<S: Copy> ObjectRoot<'_, S> {
+    /// Style 0's paint identity; none for the empty style, which records
+    /// none.
+    fn source(&self) -> Option<S> {
+        self.strut
+            .map(|(_, source)| source)
+            .or_else(|| self.first.map(|(_, _, source)| source))
+    }
+
+    /// Pushes the object style ([`object_style`]) for the line-breaking
+    /// values `breaking`, answering its index.
+    fn push(&self, builder: &mut StyleRunBuilder<'_, TextBrush>, breaking: BreakStyle) -> u16 {
+        match (self.strut, self.first) {
+            (Some((strut, _)), _) => builder.push_style(object_style(
+                super::style::parley_style(strut, BreakStyle::default()),
+                self.locale,
+                breaking,
+            )),
+            (None, Some((style, span_breaking, _))) => builder.push_style(object_style(
+                super::style::parley_style(style, span_breaking),
+                self.locale,
+                breaking,
+            )),
+            (None, None) => {
+                let mut style = empty_root_style();
+                if let Some(family) = &self.family {
+                    style.font_family =
+                        ParleyFontFamily::Single(FontFamilyName::Named(Cow::Owned(family.clone())));
+                }
+                builder.push_style(object_style(style, self.locale, breaking))
+            }
+        }
+    }
+}
+
+/// Pushes the style runs of a layout with boxes: `runs`, the spans', and
+/// one run per box for its object, in text order, which together cover the
+/// text. Each object takes the object style of the line-breaking values of
+/// the text before it, pushed after every span's style the first time those
+/// values are met; each records [`ObjectRoot::source`] in `sources`.
+fn push_object_runs<S: Copy>(
+    builder: &mut StyleRunBuilder<'_, TextBrush>,
+    object_text: &ObjectText<'_>,
+    runs: Vec<StyleRun>,
+    root: &ObjectRoot<'_, S>,
+    sources: &mut Vec<S>,
+) {
+    let mut object_styles: Vec<(BreakStyle, u16)> = Vec::new();
+    let mut objects = Vec::with_capacity(object_text.boxes.len());
+    for slot in 0..object_text.boxes.len() {
+        let at = object_text.object_byte(slot);
+        // The values of the text before the object, or parley's initial
+        // ones at the paragraph start: see `object_style`.
+        let breaking = runs[..runs.partition_point(|run| run.bytes.end <= at)]
+            .last()
+            .map_or_else(BreakStyle::default, |run| run.breaking);
+        let index =
+            if let Some(&(_, index)) = object_styles.iter().find(|(seen, _)| *seen == breaking) {
+                index
+            } else {
+                let index = root.push(builder, breaking);
+                if let Some(source) = root.source() {
+                    debug_assert_eq!(usize::from(index), sources.len());
+                    sources.push(source);
+                }
+                object_styles.push((breaking, index));
+                index
+            };
+        objects.push(StyleRun {
+            bytes: at..at + OBJECT_LEN as usize,
+            index,
+            breaking,
+        });
+    }
+    let mut spans = runs.into_iter().peekable();
+    let mut objects = objects.into_iter().peekable();
+    loop {
+        let run = match (spans.peek(), objects.peek()) {
+            (Some(span), Some(object)) if span.bytes.start < object.bytes.start => spans.next(),
+            (_, Some(_)) => objects.next(),
+            (Some(_), None) => spans.next(),
+            (None, None) => break,
+        };
+        let run = run.expect("peeked");
+        builder.push_style_run(run.index, run.bytes);
+    }
+}
+
+/// The style an inline object is shaped in: parley's style 0 — the root
+/// inline box, whose box parley 0.12 aligned every atomic box against — with
+/// nothing of its own that parley 0.12 did not give an atomic box.
+///
+/// Parley 0.13 takes an object's parent from the style of its `OBJECT` and
+/// treats the object as an atom of that style. So the copy keeps style 0's
+/// font, size and `vertical-align: baseline` (a child of the root with the
+/// root's metrics, which places a box as the root itself does), and drops
+/// what would reach the box: letter-spacing, which parley adds after every
+/// atom, and a line height, which with `normal` would add the object's run
+/// box in the font of the text before it. Its line-breaking values are
+/// `breaking`, the text's before the object: parley 0.12 decided the
+/// opportunities on both sides of a box from the `text-wrap-mode` of the
+/// last text before it, its breaker's lagged value, which is `Wrap` before
+/// any text.
+fn object_style<'family, 'settings>(
+    root: ParleyTextStyle<'family, 'settings, TextBrush>,
+    locale: Option<parley::Language>,
+    breaking: BreakStyle,
+) -> ParleyTextStyle<'family, 'settings, TextBrush> {
+    ParleyTextStyle {
+        locale,
+        letter_spacing: 0.0,
+        word_spacing: 0.0,
+        line_height: ParleyLineHeight::Absolute(0.0),
+        vertical_align: parley::VerticalAlign::default(),
+        ..root
+    }
+    .with_breaking(breaking)
+}
+
+/// Parley's style 0 for boxes with no run and no strut: no extent above or
+/// below the baseline.
+fn empty_root_style() -> ParleyTextStyle<'static, 'static, TextBrush> {
+    ParleyTextStyle {
+        font_size: 0.0,
+        line_height: ParleyLineHeight::Absolute(0.0),
+        ..ParleyTextStyle::default()
+    }
+}
+
+/// One style run of a layout with boxes, in the bytes of its object text.
+struct StyleRun {
+    bytes: Range<usize>,
+    index: u16,
+    breaking: BreakStyle,
+}
+
+/// The text one layout is built over: the normalized text with an
+/// [`OBJECT`] before the byte of each box, in slot order — the normalized
+/// text itself when there is no box.
+struct ObjectText<'a> {
+    text: Cow<'a, str>,
+    /// Each box's byte in the normalized text, ascending.
+    boxes: Vec<usize>,
+}
+
+impl<'a> ObjectText<'a> {
+    fn new(text: &'a str, inline_boxes: &[InlineBox]) -> Self {
+        if inline_boxes.is_empty() {
+            return Self {
+                text: Cow::Borrowed(text),
+                boxes: Vec::new(),
+            };
+        }
+        let at: Vec<usize> = inline_boxes
+            .iter()
+            .map(|inline_box| inline_box.index)
+            .collect();
+        debug_assert!(at.is_sorted(), "boxes come in text order");
+        let mut with_objects = String::with_capacity(text.len() + OBJECT_LEN as usize * at.len());
+        let mut copied = 0;
+        for &byte in &at {
+            with_objects.push_str(&text[copied..byte]);
+            with_objects.push(OBJECT);
+            copied = byte;
+        }
+        with_objects.push_str(&text[copied..]);
+        Self {
+            text: Cow::Owned(with_objects),
+            boxes: at,
+        }
+    }
+
+    fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// The byte of box slot `slot`'s object.
+    fn object_byte(&self, slot: usize) -> usize {
+        self.boxes[slot] + OBJECT_LEN as usize * slot
+    }
+
+    /// The runs of the normalized bytes `bytes` in style `index`, appended to
+    /// `runs`: one, unless a box's object falls inside them. A box shares
+    /// its byte with the character after it, so its object precedes that
+    /// character and follows a run ending there.
+    fn span_runs(
+        &self,
+        bytes: Range<usize>,
+        index: u16,
+        breaking: BreakStyle,
+        runs: &mut Vec<StyleRun>,
+    ) {
+        let first = self.boxes.partition_point(|&at| at <= bytes.start);
+        let last = self.boxes.partition_point(|&at| at < bytes.end);
+        let mut start = bytes.start + OBJECT_LEN as usize * first;
+        for slot in first..last {
+            let at = self.object_byte(slot);
+            if start < at {
+                runs.push(StyleRun {
+                    bytes: start..at,
+                    index,
+                    breaking,
+                });
+            }
+            start = at + OBJECT_LEN as usize;
+        }
+        let end = bytes.end + OBJECT_LEN as usize * last;
+        if start < end {
+            runs.push(StyleRun {
+                bytes: start..end,
+                index,
+                breaking,
+            });
+        }
+    }
 }
 
 /// Breaks lines at `width`, committing at most `max_lines` of them.
@@ -309,13 +623,13 @@ fn build_into_scratch<S: Copy>(
 /// Whether content remains past the committed lines is decided by the caller
 /// from the captured lines' consumed units — never from the breaker: parley
 /// leaves `is_done` false while only an empty final line remains pending
-/// (after a trailing explicit break, or after a box overflowed onto the last
-/// line), which would misreport fully consumed content as overflowing.
+/// (after a trailing explicit break), which would misreport fully consumed
+/// content as overflowing.
 ///
-/// The unlimited path routes through `break_all_lines`, which also covers the
-/// empty-layout width workaround parley applies inside `break_next`. The
-/// clamp path must initialize both breaker advances — `BreakerState` defaults
-/// them to zero, under which every cluster overflows.
+/// The unlimited path routes through `break_all_lines`. The clamp path must
+/// initialize both breaker advances — `BreakerState` defaults them to zero,
+/// under which every cluster overflows. Either way the lines are aligned as
+/// the breaker drops, by the alignment set on the layout.
 pub(in crate::text) fn break_clamped(
     layout: &mut Layout<TextBrush>,
     width: Option<f32>,
@@ -335,98 +649,63 @@ pub(in crate::text) fn break_clamped(
     }
 }
 
-/// Whether a committed line renders nothing: no boxes and an empty text
-/// range. Parley commits one after a box overflows onto its own line at the
-/// end of content, and after a trailing preserved newline — cases where CSS
-/// produces no line box. A verbatim paragraph keeps the second as its empty
-/// last line ([`capture_lines`]).
+/// Whether a committed line renders nothing: an empty text range, which
+/// holds no box either, a box being an [`OBJECT`] of the text. Parley
+/// commits one after a trailing preserved newline — where CSS produces no
+/// line box. A verbatim paragraph keeps it as its empty last line
+/// ([`capture_lines`]).
 pub(in crate::text) fn is_blank_line(line: &parley::Line<'_, TextBrush>) -> bool {
-    let range = line.text_range();
-    range.start >= range.end && box_count(line) == 0
-}
-
-/// How many inline boxes `line` holds: its items are its runs and its boxes.
-///
-/// Counting the runs reads each item's kind only. `Line::items` would also
-/// position every glyph run of the line, which is most of a re-break's cost
-/// on a long paragraph.
-fn box_count(line: &parley::Line<'_, TextBrush>) -> usize {
-    line.len() - line.runs().count()
+    line.text_range().is_empty()
 }
 
 /// The inline boxes of a layout's committed lines, line by line, in logical
 /// order, without positioning anything.
 ///
-/// Parley commits a layout's items to its lines in text order and each
-/// inline box to exactly one line, so the boxes of each line are the next
-/// [`box_count`] boxes of [`Layout::inline_boxes`], which is in text order
-/// too. Every line is read in order, from the first; a layout without boxes
-/// answers each line without reading it.
-pub(in crate::text) struct LineBoxes<I> {
-    boxes: I,
-    /// How many boxes of the line read last are still to be yielded.
-    unread: usize,
+/// Each box is an [`OBJECT`] of the layout's text, which parley commits to
+/// exactly one line, so the boxes of a line are the ones whose object lies
+/// in its text range; [`Layout::inline_boxes`] is in text order. Every line
+/// is read in order, from the first; a layout without boxes answers each
+/// line without reading it.
+pub(in crate::text) struct LineBoxes<'a> {
+    boxes: Vec<&'a InlineBox>,
+    /// The first box not on a line read yet.
+    next: usize,
 }
 
 /// The inline boxes of `layout`'s committed lines ([`LineBoxes`]).
-pub(in crate::text) fn line_boxes(
-    layout: &Layout<TextBrush>,
-) -> LineBoxes<impl ExactSizeIterator<Item = &InlineBox> + '_> {
+pub(in crate::text) fn line_boxes(layout: &Layout<TextBrush>) -> LineBoxes<'_> {
     LineBoxes {
-        boxes: layout.inline_boxes(),
-        unread: 0,
+        boxes: layout.inline_boxes().collect(),
+        next: 0,
     }
 }
 
-impl<'a, I: ExactSizeIterator<Item = &'a InlineBox>> LineBoxes<I> {
+impl<'a> LineBoxes<'a> {
     /// The boxes on `line`, the line after the one the last call read, in
-    /// logical order. Boxes left unread are skipped by the next call.
+    /// logical order.
     pub(in crate::text) fn on(
         &mut self,
         line: &parley::Line<'_, TextBrush>,
     ) -> impl ExactSizeIterator<Item = &'a InlineBox> + '_ {
-        for _ in 0..core::mem::take(&mut self.unread) {
-            self.boxes.next();
+        let mut on = self.next..self.next;
+        if self.next < self.boxes.len() {
+            let range = line.text_range();
+            let rest = &self.boxes[self.next..];
+            let start = rest.partition_point(|inline_box| inline_box.index < range.start);
+            let end = rest.partition_point(|inline_box| inline_box.index < range.end);
+            on = self.next + start..self.next + end;
+            self.next += end;
         }
-        let count = if self.boxes.len() == 0 {
-            0
-        } else {
-            box_count(line)
-        };
         debug_assert_eq!(
-            count,
+            on.len(),
             line.items()
                 .filter(|item| matches!(item, PositionedLayoutItem::InlineBox(_)))
                 .count(),
-            "a line's items are its runs and its boxes",
+            "a line's boxes are the objects in its text",
         );
-        self.unread = count;
-        Unread { lines: self }
+        self.boxes[on].iter().copied()
     }
 }
-
-/// The boxes [`LineBoxes::on`] has not yielded yet.
-struct Unread<'b, I> {
-    lines: &'b mut LineBoxes<I>,
-}
-
-impl<'a, I: Iterator<Item = &'a InlineBox>> Iterator for Unread<'_, I> {
-    type Item = &'a InlineBox;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.lines.unread == 0 {
-            return None;
-        }
-        self.lines.unread -= 1;
-        self.lines.boxes.next()
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        (self.lines.unread, Some(self.lines.unread))
-    }
-}
-
-impl<'a, I: Iterator<Item = &'a InlineBox>> ExactSizeIterator for Unread<'_, I> {}
 
 /// One committed line's place in both offset spaces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -466,9 +745,9 @@ impl NaturalLine {
 /// selects nothing in a range query, and reports `start == end` in the line
 /// list, as Android's `getLineStart`/`getLineEnd` do for it.
 ///
-/// `Line::text_range()` reports an inverted `usize::MAX..0` range for a line
-/// whose items are all inline boxes, so byte bounds fall back to the line's
-/// first box.
+/// `Line::text_range()` is in the layout's bytes, which count the boxes'
+/// objects ([`Objects`]); a line whose items are all boxes has no byte of
+/// the normalized text, so its byte bounds fall back to its first box.
 pub(in crate::text) fn capture_lines(
     layout: &Layout<TextBrush>,
     text: &str,
@@ -480,12 +759,13 @@ pub(in crate::text) fn capture_lines(
     // Whether the last line with content ends with the newline that ends
     // the text.
     let mut ends_with_break = false;
+    let objects = Objects::of(layout);
     let mut line_boxes = line_boxes(layout);
     for line in layout.lines() {
         let boxes = line_boxes.on(&line);
-        let range = line.text_range();
-        // `is_blank_line`, with the boxes already counted.
-        if range.start >= range.end && boxes.len() == 0 {
+        let layout_range = line.text_range();
+        // `is_blank_line`.
+        if layout_range.is_empty() {
             // Blank lines only ever trail (every interior line carries its
             // break byte or a box) and are about to be popped; a zeroed
             // record keeps the indexes aligned without consulting the map at
@@ -501,7 +781,9 @@ pub(in crate::text) fn capture_lines(
             continue;
         }
         blank_tail = 0;
-        let has_text = range.start <= range.end;
+        let range = objects.text_byte(layout_range.start) as usize
+            ..objects.text_byte(layout_range.end) as usize;
+        let has_text = range.start < range.end;
         ends_with_break = has_text
             && range.end == text.len()
             && text.as_bytes()[..range.end].last() == Some(&b'\n');

@@ -1855,6 +1855,74 @@ fn a_truncated_offset_map_reports_its_cut() {
     );
 }
 
+/// The cut that lays inline-truncation content in at a clamp frees width
+/// measured on the line unjustified: `text-align: justify` widens the space
+/// on the clamped line where it shows, not in the arithmetic.
+#[test]
+fn a_justified_clamp_frees_unjustified_width_for_the_truncation_content() {
+    let mut context = text_context();
+    let style = ahem_style();
+    // "aa bb " fills the first of the 55px lines, its space hanging; the
+    // 32px box needs "a bb" freed unjustified (40), where the space
+    // justified by the line's 5px of free space would stop at " bb" (35).
+    let block = laid_out(
+        &mut context,
+        BlockStyle {
+            max_lines: core::num::NonZeroU32::new(1),
+            text_align: TextAlign::Justify,
+            ..BlockStyle::default()
+        },
+        &[run(&style, "aa bb cc")],
+        Some(&[atom(9, 32.0, 10.0, VerticalAlign::Baseline)]),
+        Some(55.0),
+    );
+    assert!(block.truncation_visible());
+    let lines = block.lines();
+    assert_eq!(lines.len(), 1);
+    assert_eq!((lines[0].source_start, lines[0].source_end), (0, 5));
+    assert_eq!(lines[0].ellipsis_count, 4, "cut after the first `a`");
+}
+
+/// An atomic box is one source unit and, in the display layout, the U+FFFC
+/// parley holds an inline object as: every display byte the map answers is
+/// the layout's own, the object's three bytes reading as the box's unit.
+#[test]
+fn an_atomic_box_is_its_object_in_the_offset_map() {
+    let mut context = text_context();
+    let style = ahem_style();
+    let block = laid_out(
+        &mut context,
+        BlockStyle::default(),
+        &[
+            run(&style, "ab"),
+            atom(1, 10.0, 10.0, VerticalAlign::Baseline),
+            run(&style, "cd"),
+        ],
+        None,
+        Some(400.0),
+    );
+    let map = block.offset_map();
+    assert_eq!(map.display_text(), "abcd");
+    assert_eq!(map.source_len(), 5);
+    assert!(!map.truncated());
+    assert_eq!(map.cut_byte(), 7, "the text and the box's object");
+    let layout = block.display();
+    for (unit, byte) in [(0, 0), (1, 1), (2, 2), (3, 5), (4, 6)] {
+        assert_eq!(map.unit_to_byte(unit), Some(byte), "unit {unit}");
+        assert_eq!(map.byte_to_unit(byte), unit, "byte {byte}");
+        let cluster = parley::Cluster::from_byte_index(layout, byte).expect("a cluster");
+        assert_eq!(cluster.text_range().start, byte, "unit {unit}");
+    }
+    assert_eq!(map.unit_to_byte_or_end(5), Some(7));
+    // Inside the object: the box.
+    assert_eq!(map.byte_to_unit(3), 2);
+    assert_eq!(map.byte_to_unit(7), 5);
+    // An end before the object leaves the box out; one after it takes it.
+    for (byte, unit) in [(2, 2), (3, 2), (5, 3), (6, 4), (7, 5)] {
+        assert_eq!(map.unit_before(byte), unit, "byte {byte}");
+    }
+}
+
 /// `white-space: nowrap` shows a `<text>`'s first line only: the units after
 /// its first newline are in no byte, and the end of what it shows is the
 /// text's end.

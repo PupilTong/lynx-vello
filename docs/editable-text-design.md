@@ -336,12 +336,12 @@ Public surface:
   layout alone, and focus, commands and the UA rule still read
   `contenteditable`. Either input is a shaping input, so a change to the
   attribute or the bit invalidates the element's layout and rebuilds its
-  paragraph. Parley shapes a substitute space for empty text in style 0,
-  the strut, which gives the line its box; that space is no content — the
-  line is zero wide, so `text-align` puts it and the caret at the start, the
-  exact centre or the end (the line is aligned within its width plus the
-  space's advance), it selects and hits nothing, and paint skips the
-  strut's glyph run. Every other empty paragraph still lays out no line.
+  paragraph. Parley 0.13 breaks empty text into one line with no item,
+  whose box is style 0's, the strut (parley 0.12 shaped a substitute space
+  there, which the core aligned and reported as no content); the line is
+  zero wide, so `text-align` puts it and the caret at the start, the exact
+  centre or the end, and it selects and hits nothing. Every other empty
+  paragraph still lays out no line.
   (The editors' shadow sheet once asked for this with `min-height: 1lh`,
   which the fork's `lynx` grammar does not parse.)
 - **A host with no paragraph.** A host that establishes no paragraph of its

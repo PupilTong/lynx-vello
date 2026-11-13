@@ -5,6 +5,7 @@ use core::ops::Range;
 
 use parley::{Line, PositionedLayoutItem};
 
+use super::shape::Objects;
 use super::{Additions, Paragraph};
 use crate::style::TextBrush;
 
@@ -25,9 +26,13 @@ impl<S, A: Additions> Paragraph<S, A> {
     /// either is no source text and is skipped here, once, for every reader.
     /// Clipping to the line's own source range, which is what drops the
     /// whitespace hanging at its end, is the caller's.
+    ///
+    /// `objects` are that layout's ([`Objects::of`]): its cluster bytes
+    /// count each box's object, which `cut_byte` and the text do not.
     pub(in crate::text) fn for_each_extent(
         &self,
         line: &Line<'_, TextBrush>,
+        objects: &Objects,
         cut_byte: usize,
         content_slots: usize,
         mut visit: impl FnMut(Range<u32>, f32, f32),
@@ -36,7 +41,8 @@ impl<S, A: Additions> Paragraph<S, A> {
         let text = &block.text;
         // A run is split into one glyph run per style; its clusters are
         // walked once, from the first glyph run's offset, which is where the
-        // run starts.
+        // run starts. A box's object is a run of its own, which parley
+        // yields as the box rather than as a glyph run.
         let mut walked_run = None;
         for item in line.items() {
             match item {
@@ -49,7 +55,9 @@ impl<S, A: Additions> Paragraph<S, A> {
                     let mut x = glyph_run.offset();
                     for cluster in run.visual_clusters() {
                         let advance = cluster.advance();
-                        let bytes = cluster.text_range();
+                        let layout_bytes = cluster.text_range();
+                        let bytes = objects.text_byte(layout_bytes.start) as usize
+                            ..objects.text_byte(layout_bytes.end) as usize;
                         if bytes.start < cut_byte {
                             let first = block.map.byte_to_unit(
                                 text,
