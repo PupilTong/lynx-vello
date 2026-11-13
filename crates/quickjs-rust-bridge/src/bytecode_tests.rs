@@ -602,6 +602,72 @@ fn mutated_bytecode_is_read_or_refused_and_never_run() {
 }
 
 // ---------------------------------------------------------------------------
+// Template objects
+
+/// What a tagged template's strings array looks like: frozen state of it
+/// and of `raw`, the flags of `raw` and `length`, and whether one site
+/// answers the same array on every call.
+const TEMPLATE_STATE: &str = "function tag(strings) { return strings; }\n\
+     function site() { return tag`a${1}b\\x41${2}`; }\n\
+     const s = site();\n\
+     const raw = Object.getOwnPropertyDescriptor(s, 'raw');\n\
+     const length = Object.getOwnPropertyDescriptor(s, 'length');\n\
+     JSON.stringify([Object.isFrozen(s), Object.isFrozen(s.raw), Object.isExtensible(s), \
+     Object.isExtensible(s.raw), s === site(), s.raw === site().raw, raw.writable, \
+     raw.enumerable, raw.configurable, length.writable, length.configurable, \
+     Object.getOwnPropertyDescriptor(s.raw, 'length').writable, [...s], [...s.raw]])";
+
+const TEMPLATE_EXPECTED: &str = "[true,true,false,false,true,true,false,false,false,false,\
+     false,false,[\"a\",\"bA\",\"\"],[\"a\",\"b\\\\x41\",\"\"]]";
+
+#[test]
+fn template_objects_read_from_bytecode_are_frozen_like_compiled_ones() {
+    // The source run, which the compiler's own objects answer.
+    let (_runtime, direct) = realm();
+    let expected = direct
+        .evaluate(EvalSource::new(TEMPLATE_STATE), EvalOptions::default())
+        .unwrap();
+    assert_eq!(text(&expected), TEMPLATE_EXPECTED);
+
+    // A script read back from bytecode, by the fork's verifying read alone
+    // and through the checked entry.
+    let bytes = compiled_script(TEMPLATE_STATE);
+    let (_runtime, runner) = realm();
+    assert_eq!(
+        text(&runner.evaluate_script_bytecode(&bytes).unwrap()),
+        TEMPLATE_EXPECTED
+    );
+    let (_runtime, runner) = realm();
+    let checked = runner.verify_bytecode(&bytes).unwrap();
+    assert_eq!(
+        text(&runner.evaluate_script_bytecode(&checked).unwrap()),
+        TEMPLATE_EXPECTED
+    );
+
+    // A module, completed as bytecode and registered as bytecode.
+    let source = format!("export const result = (() => {{ {TEMPLATE_STATE} }})();")
+        .replace("JSON.stringify(", "return JSON.stringify(");
+    let name = "app:///template.js";
+    let (_compiler, compiler) = realm();
+    let module = compiler.compile_module_bytecode(name, &source).unwrap();
+    let (mut runtime, mut realm) = realm();
+    realm.complete_module_bytecode(name, name, &module).unwrap();
+    assert_eq!(
+        evaluated_result(&mut runtime, &mut realm, name),
+        TEMPLATE_EXPECTED
+    );
+    let mut runtime = Runtime::new().unwrap();
+    runtime
+        .register_module_bytecode(name, Box::leak(module.into_boxed_slice()))
+        .unwrap();
+    let mut realm = runtime.create_context().unwrap();
+    assert_eq!(
+        evaluated_result(&mut runtime, &mut realm, name),
+        TEMPLATE_EXPECTED
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Regular expressions
 
 /// Whether `haystack` holds `needle` as a string value: its tag, its

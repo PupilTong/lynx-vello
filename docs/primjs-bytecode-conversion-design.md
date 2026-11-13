@@ -724,10 +724,11 @@ Verified by running code (§11 steps 1 to 4): the reader decodes every program
 of the corpus in every encoder variant and both sections, and both pages of
 the ReactLynx fixtures; the verifying read accepts bytecode the fork compiled
 and reproduces the compiler's stack sizes; the generated tables equal the
-compiled engine's; of the corpus's 2000 conversions (250 programs, four
-encoder variants, both sections), 1944 leave the result the fork's own run of
-the source leaves and the other 56 are the seven programs listed in the
-differential test, each asserted with its outcome; 38 of the 44 bytecode
+compiled engine's; a template object read from bytecode is frozen, which the
+fork's reader did not do before its third commit here; of the corpus's 2000 conversions (250 programs, four
+encoder variants, both sections), 1960 leave the result the fork's own run of
+the source leaves and the other 40 are the five programs of §4.4 where
+PrimJS's compiler departs from the source, each asserted with its outcome; 38 of the 44 bytecode
 sections of the ReactLynx fixtures convert and pass every rule, and the other
 6 are development main-thread scripts refused for direct `eval`. The converted
 fixtures have not been run: that needs step 5.

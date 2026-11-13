@@ -113,8 +113,7 @@ struct KnownDifference {
 }
 
 /// Programs that `PrimJS` compiled to different semantics than the fork
-/// gives their source, or that the fork's own bytecode reader runs
-/// differently from its source. The converter keeps `PrimJS`'s
+/// gives their source. The converter keeps `PrimJS`'s
 /// instructions, so the converted run does what `PrimJS`'s bytecode says.
 /// The evidence for each is the `PrimJS` disassembly
 /// (`tests/primjs_convert_dump.rs` prints it).
@@ -169,25 +168,6 @@ const KNOWN_DIFFERENCES: &[KnownDifference] = &[
         outcome: "ReferenceError: S is not initialized",
         also: Some("ReferenceError: lexical variable is not initialized"),
         threw: true,
-    },
-    // The template object is a `BC_TAG_TEMPLATE_OBJECT` constant. The
-    // fork's reader (`JS_ReadArray` in `vendor/quickjs/quickjs.c`) only
-    // prevents extensions of it, where the fork's compiler and
-    // `PrimJS`'s reader also make `length` read-only (`seal_template_obj`),
-    // so `Object.isFrozen(strings)` is false. The fork's own bytecode of
-    // the source gives the same result as the converted run, which
-    // `template_objects_from_bytecode_are_not_frozen` checks.
-    KnownDifference {
-        program: "tagged-template",
-        outcome: r#"[{"cooked":["a","b","\n",""],"raw":["a","b","\\n",""],"subs":[5,10,"s"],"frozen":false},true,"\\unicode",true,"a\\n1"]"#,
-        also: None,
-        threw: false,
-    },
-    KnownDifference {
-        program: "tagged-template-nested",
-        outcome: r#"[["a=| b=| c=| i=|\\t <1,2,10,0>","a=| b=| c=| i=|\\t <1,2,10,1>","arrow | <13>","outer | <nested | <10>>"],["a=| b=| c=| i=|\\t <2,3,20,0>","a=| b=| c=| i=|\\t <2,3,20,1>","arrow | <25>","outer | <nested | <20>>"],[true,true,false],10,"m:1"]"#,
-        also: None,
-        threw: false,
     },
 ];
 
@@ -314,24 +294,27 @@ fn fork_bytecode_run(source: &str) -> Outcome {
     read_result(&mut realm)
 }
 
-/// The evidence for the two tagged-template entries of
-/// [`KNOWN_DIFFERENCES`]: the fork's own bytecode of the source (compiled
-/// as a module, which these programs allow) gives what the converted runs
-/// give, so the difference is the fork's reader, not the conversion.
+/// Template objects read from bytecode are frozen as the compiler makes
+/// them (`JS_ReadArray` seals them with `seal_template_obj`): the fork's
+/// own bytecode of these programs, compiled as a module, gives what their
+/// source gives, and so do their converted runs (`corpus_runs`).
 #[test]
-fn template_objects_from_bytecode_are_not_frozen() {
+fn template_objects_from_bytecode_are_frozen() {
     with_large_stack(|| {
         for name in ["tagged-template", "tagged-template-nested"] {
             let program = bytecode::PROGRAMS
                 .iter()
                 .find(|program| program.name == name)
                 .expect("corpus program");
-            let known = KNOWN_DIFFERENCES
-                .iter()
-                .find(|known| known.program == name)
-                .expect("listed");
-            assert_eq!(fork_bytecode_run(program.source), known.outcome(), "{name}");
-            assert_ne!(reference(program.source), known.outcome(), "{name}");
+            assert!(
+                KNOWN_DIFFERENCES.iter().all(|known| known.program != name),
+                "{name} is not a known difference"
+            );
+            assert_eq!(
+                fork_bytecode_run(program.source),
+                reference(program.source),
+                "{name}"
+            );
         }
     });
 }
