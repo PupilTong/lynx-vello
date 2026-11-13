@@ -539,3 +539,69 @@ fn a_worker_root_module_is_cached_as_a_module() {
     assert_eq!(first_view, second_view);
     assert!(artifacts.take_pending().is_empty(), "the root was read");
 }
+
+/// Module bytecode is never compiled, so a realm that loads it, by an import
+/// or by a synchronous load, looks nothing up, keeps nothing and hands no
+/// name over, though a text of the same length would be cached.
+#[test]
+fn module_bytecode_is_never_looked_up_or_kept() {
+    let artifacts = Arc::new(Artifacts::new(Artifacts::DEFAULT_BUDGET_BYTES));
+    let verified = |name: &str| {
+        let runtime = quickjs::Runtime::new().expect("a QuickJS runtime");
+        let compiler = runtime.create_context().expect("a QuickJS realm");
+        let bytes = compiler
+            .compile_module_bytecode(name, &module_text())
+            .expect("the module compiles");
+        quickjs::bytecode::Verifier::new()
+            .module_from_bytes(&bytes)
+            .expect("the verifier accepts the engine's own output")
+    };
+    let imported = verified("app:///lib.js");
+    let mut realm = Realm::new(&artifacts);
+    realm.required.borrow_mut().insert(
+        "app:///required.js".to_owned(),
+        quickjs::RequiredSource {
+            url: "https://a.test/required.js".to_owned(),
+            body: quickjs::RequiredBody::ModuleBytecode(verified("app:///required.js")),
+            kind: quickjs::RequiredKind::Module,
+        },
+    );
+
+    realm
+        .engine
+        .execute_script(
+            &mut realm.runtime,
+            "import('app:///lib.js').then(() => {}, error => { globalThis.failed = String(error); });",
+            "app:///main.js",
+        )
+        .expect("the import is asked for");
+    let name = realm
+        .engine
+        .take_module_request()
+        .expect("the import asks for its module");
+    realm
+        .engine
+        .complete_module(
+            &mut realm.runtime,
+            &name,
+            Ok(("https://a.test/lib.js", ModuleBody::Bytecode(&imported))),
+        )
+        .expect("the module completes");
+    assert!(realm.engine.take_module_request().is_none());
+    let view = realm.module_view("app:///lib.js");
+    assert!(view.starts_with("[42,\"https://a.test/lib.js\""), "{view}");
+    let required = realm.probe(
+        "const loaded = load('app:///required.js', 'exports, module');\n\
+         if (loaded.kind !== 'module') throw new Error('kind ' + loaded.kind);\n\
+         report(JSON.stringify([loaded.value.answer, loaded.value.url]));",
+    );
+    assert_eq!(required, "[42,\"https://a.test/required.js\"]");
+
+    assert!(artifacts.is_empty());
+    assert!(!artifacts.has_pending());
+    assert_eq!(realm.code().handed_over_len(), 0, "no name was handed over");
+    assert!(
+        realm.engine.realm.take_compiled().is_none(),
+        "nothing was kept"
+    );
+}

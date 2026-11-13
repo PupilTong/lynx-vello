@@ -211,11 +211,11 @@ flowchart TD
     D --> E[Expand each instruction<br/>table or template]
     E --> F[Synthesize function and module records<br/>var_ref_idx, closure_type, vardefs]
     F --> G[Lay out: old pc to new pc,<br/>rewrite jump offsets]
-    G --> I[Re-encode pc2line,<br/>recompile RegExp literals]
-    I --> J[Write fork bytes]
-    J --> V[Bridge: read, verify every rule, write<br/>bytecode::check]
-    V --> H[Fork reads with verification<br/>stack depth, sets stack_size]
-    H --> K[Module registered in the realm]
+    G --> I[Re-encode pc2line,<br/>recompile RegExp literals<br/>Verifier::compile_regexp]
+    I --> V[Bridge: verify every rule, write<br/>Verifier::module, once per module<br/>when the container is registered]
+    V --> J[VerifiedModule registered]
+    J --> H[Fork reads with verification<br/>stack depth, sets stack_size<br/>on every load]
+    H --> K[Module in the realm]
     B -. reject .-> X[ConvertError]
     E -. reject .-> X
     V -. reject .-> Y
@@ -227,8 +227,10 @@ flowchart TD
 
 The marked steps are the ones that are not a per-instruction rewrite: C needs
 the whole function tree, and V and H together are what makes the output safe
-to run (§4.7). Everything down to J is the converter, in `bobcat-source`; V is
-in the bridge crate, in Rust; H is in the fork.
+to run (§4.7). Everything down to I is the converter, in `bobcat-source`; V is
+in the bridge crate, in Rust, and runs once per converted module, when its
+container is registered; H is in the fork, and runs each time a realm compiles
+the module.
 
 ### 4.1 Decode
 
@@ -454,7 +456,8 @@ enumerated operands are in range, and so on.
 
 **The rules live in Rust, in the bridge (ruling 8).**
 `quickjs_rust_bridge::bytecode` holds a model of the fork's format, a reader, a
-writer and `verify`. Its module documentation carries the rules table (32
+writer and the verifier, whose one public entry is `Verifier`. Its module
+documentation carries the rules table (32
 rules, each with what the interpreter would do without it) and is the
 reference; this section only summarizes. The verifier walks each function's
 control flow along the same edges as `compute_stack_size`, plus the edge from
@@ -480,13 +483,26 @@ position. The rule classes:
   types by position, captured-variable indices, global bindings, the module
   function's shape.
 - **Regular expressions**: the bytecode string of a `regexp` must equal what
-  the engine compiles for the pattern and the flags in its header.
+  the engine compiles for the pattern and the flags in its header. The
+  compiler is the `Verifier`'s own: a runtime and a realm with only the
+  engine's basic objects (`JS_NewContextRaw`), made on the first literal it
+  compiles, with every compilation kept by pattern and flags for the
+  verifier's lifetime. The trait the rules take a compiler through is private
+  to the bridge, so no caller can supply a compiler that answers arbitrary
+  bytes for a pattern.
 
-`Context::complete_module_bytecode` runs the reader, the verifier and the
-writer on its input and hands the *written* bytes to the fork's verifying
-read, so the C reader sees exactly the program that passed, and no caller can
-load module bytecode that skipped the rules. The converter produces its output
-through the same model and may call `verify` itself for an earlier error.
+`Verifier::module` checks a program against the rules and writes it;
+`Verifier::module_from_bytes` reads bytes first. Either answers a
+`VerifiedModule`: the bytes the bridge's writer wrote for a program the
+verifier accepted, a value with no other constructor.
+`Context::complete_module_bytecode` and the synchronous loader's
+`RequiredBody::ModuleBytecode` take only a `VerifiedModule` and hand its bytes
+to the fork's verifying read as they are, so the C reader sees exactly the
+program that passed, and no caller can load module bytecode that skipped the
+rules. `Context::verify_bytecode`, for tooling and tests, runs the same rules
+with the realm's own compiler on bytes of any root. The converter builds its
+output through the same model and hands it to `Verifier::module`, so its
+output is checked once, before it is written.
 
 How the rules were arrived at: a first list from reading the interpreter;
 then every opcode case and every consumer of a record field was read and
@@ -526,9 +542,12 @@ adjacently (`source/quickjs.cc:22568`). The converter requires exactly that
 shape (§4.7), reads the flags from the PrimJS regexp header, and replaces the
 bytecode string with what the fork compiles for that pattern and flags. This
 is the one place the rewrite looks at a neighboring instruction, and the one
-place it calls the engine: it needs a fork export of the pattern compiler,
-which today is the `static js_compile_regexp` behind `ctx->compile_regexp`. A
-pattern the fork rejects fails the conversion.
+place it calls the engine, through the fork's export of the pattern compiler,
+`JS_CompileRegExp`. It asks the container's `Verifier`
+(`Verifier::compile_regexp`), which keeps each compilation by pattern and
+flags, so the `regexp` rule's comparison of the same literal, and every later
+literal with the same pattern and flags in any section of the container, costs
+no second compilation. A pattern the fork rejects fails the conversion.
 
 ### 4.10 What is rejected
 
@@ -659,27 +678,29 @@ the script: it stores the script function itself as the default export
 **Where conversion runs (built, §11 step 5).** In `bobcat-source`, when a
 container is built from a native bundle (`ContainerSources`), before
 anything is registered: the crates below it (`bobcat-core`,
-`bobcat-resources`) cannot call the converter, and they learn only "module
-bytecode for the fork, to be verified", never "PrimJS". Each bytecode section
-is converted with the URL it is registered under as its module name and
-registered as module bytecode; `docs/source-architecture.md` has the section
-table. The regexp compiler conversion needs is a scratch runtime and realm
-made for the container; the realm that loads the module checks every literal
-again, so the scratch one is not trusted. A refused section fails the
+`bobcat-resources`) cannot call the converter, and they learn only "a verified
+module for the fork", never "PrimJS". Each bytecode section is converted with
+the URL it is registered under as its module name, checked and written by the
+container's one `Verifier`, and registered as the `VerifiedModule` that
+answers; `docs/source-architecture.md` has the section table. The verifier
+also compiles the regular expression literals the converter needs (§4.9); its
+engine is made on the first literal, so a container whose sections carry none
+makes none. A section that fails to read, convert or verify fails the
 container, which fails the page's load or the lazy bundle's fetch with the
 reason. `native::decode` and `native::convert`, the path of the tool that
 writes a `.web.bundle`, keep refusing bytecode: that format has no place for
 it.
 
-The path of the bytes after that: `Registrar::register_module_bytecode` →
-`LoadedSource::ModuleBytecode` → `Context::complete_module_bytecode` for an
-entry or an `import()`, or the synchronous loader's
-`RequiredBody::ModuleBytecode` for a `require` and for an import linked
-inline. The bridge runs `bytecode::check` when the bytes arrive, keeps the
-checked bytes, and the fork reads them with `JS_READ_OBJ_VERIFY` when the
-module is compiled; reading at that point, not on arrival, is what lets a
-running module body `require` a bytecode module. A refusal at either check is
-a `SyntaxError`, `bytecode rejected for '<url>': <reason>`.
+The path of the module after that, as the one `VerifiedModule` value (its
+bytes are shared, not copied, until a realm keeps them):
+`Registrar::register_module_bytecode` → `LoadedSource::ModuleBytecode` →
+`Context::complete_module_bytecode` for an entry or an `import()`, or the
+synchronous loader's `RequiredBody::ModuleBytecode` for a `require` and for an
+import linked inline. No Rust check runs on this path: the realm keeps a copy
+of the bytes, and the fork reads them with `JS_READ_OBJ_VERIFY` when the module
+is compiled; reading at that point, not on arrival, is what lets a running
+module body `require` a bytecode module. A refusal by that read is a
+`SyntaxError`, `bytecode rejected for '<url>': <reason>`.
 
 **Bridge and fork additions (built, §11 step 2).**
 
@@ -692,15 +713,18 @@ a `SyntaxError`, `bytecode rejected for '<url>': <reason>`.
 2. Fork: `JS_CompileRegExp`; bridge: `Context::compile_regexp_bytecode`, which
    takes the pattern as UTF-16 code units because a lone surrogate compiles
    differently from U+FFFD.
-3. Fork: `JS_READ_OBJ_VERIFY` (§4.7); bridge: `Context::complete_module_bytecode`
+3. Bridge: `bytecode::Verifier` (`new`, `compile_regexp`, `module`,
+   `module_from_bytes`), which owns the regexp compiler the rules use, in a
+   realm the shim makes with `JS_NewContextRaw`; and `bytecode::VerifiedModule`,
+   which only the verifier constructs, and which is `Send + Sync` and shares
+   its bytes when cloned.
+4. Fork: `JS_READ_OBJ_VERIFY` (§4.7); bridge: `Context::complete_module_bytecode`
    and the synchronous loader's `RequiredBody::ModuleBytecode`, which supply a
-   realm-local module as bytes. The bytes are checked with `bytecode::check`
-   on arrival (a refusal from `complete_module_bytecode` is its `Err`, of kind
-   `ErrorKind::BytecodeRejected`), the checked bytes are kept, and the fork
-   reads them with the flag when the module is compiled.
+   realm-local module from a `VerifiedModule`. The bytes are kept as they are,
+   and the fork reads them with the flag when the module is compiled.
    `Runtime::register_module_bytecode` is unchanged and still for build-time
    bytes only.
-4. For tooling and tests: `Context::compile_script_bytecode` and
+5. For tooling and tests: `Context::compile_script_bytecode` and
    `Context::verify_bytecode`.
 
 The fork changes are two commits on top of the `lynx` series.
@@ -712,9 +736,9 @@ name the module will be registered under.
 **Caching.** Conversion output depends on the input bytes, the name it is
 registered under, and the fork build. It can be kept under a key of those
 (content hash, name, engine build identity), so a bundle is converted once
-per engine build. `complete_module_bytecode` checks every rule on whatever
-bytes it is given, so cached bytes are verified again on each load and the
-cache does not have to be trusted.
+per engine build. Bytes read back from such a cache become a `VerifiedModule`
+only through `Verifier::module_from_bytes`, which checks every rule again, so
+the cache does not have to be trusted.
 
 ## 7. Verification plan
 
@@ -742,7 +766,7 @@ cache does not have to be trusted.
 | Risk | Consequence | Mitigation |
 | --- | --- | --- |
 | A same-name opcode differs in a way no test reaches | wrong result at run time, silently | the audit and test262 in §7 |
-| The verification misses an assumption the interpreter makes | memory unsafety from a hostile bundle | the per-opcode audit and the execution of mutated bytecode that passed the checks (§4.7); every load is checked, whatever its source |
+| The verification misses an assumption the interpreter makes | memory unsafety from a hostile bundle | the per-opcode audit and the execution of mutated bytecode that passed the checks (§4.7); no module reaches a realm without passing `Verifier` (a `VerifiedModule` has no other constructor), and the fork's verifying read checks each load again |
 | The added rules reject code PrimJS's compiler really emits | valid bundles fail to load | corpus of real bundles in §7; each rejection names the instruction and rule |
 | A fork rebase changes an instruction a template uses, changes control flow the converter's walk mirrors, or conflicts with the fork patch | conversion output breaks | the differential suite runs in CI against the pinned fork |
 | PrimJS ships a new format flag | new bundles rejected | unknown header bits are an explicit error, not a misread |
@@ -775,6 +799,12 @@ Verified by running code:
   wrong, each asserted with its outcome;
 - a template object read from bytecode is frozen, which the fork's reader did
   not do before its third commit here;
+- one `Verifier` compiles each regexp pattern and flags once, for the
+  converter and the rule together and across a container's sections; a
+  verifier that sees no literal makes no engine; its realm with only the basic
+  objects compiles and refuses the same patterns as a full realm; one
+  `VerifiedModule` completes and runs in realms of two runtimes on two
+  threads;
 - **real bundles run**: the production ReactLynx fixtures (`react-native`,
   `react-list`, `react-data-processor`, `react-global-props`, `react-reload`,
   `react-lazy`, `react-lazy-sync`, `react-lazy-nested`) boot and pass the
@@ -816,9 +846,11 @@ Given by the user on 2026-11-10.
 8. **The rules beyond stack depth live in Rust, not in the fork patch.** This
    was asked after ruling 6, because §4.7 found that hostile input needs more
    than `compute_stack_size` checks. As built they are in the bridge crate
-   (`quickjs_rust_bridge::bytecode`), which the converter writes through and
-   which `complete_module_bytecode` enforces on every load; the fork patch
-   computes stack sizes and makes its own reader safe on arbitrary bytes.
+   (`quickjs_rust_bridge::bytecode`), which the converter writes through: its
+   `Verifier` checks every module once, and `complete_module_bytecode` and the
+   synchronous loader take only the `VerifiedModule` it answers; the fork
+   patch computes stack sizes and makes its own reader safe on arbitrary
+   bytes.
 9. **PrimJS's non-conformant behaviour is not a target.** Where the converter
    can choose, it follows the specification (and so the fork), not PrimJS.
    What PrimJS's compiler already got wrong inside the bytecode stays wrong

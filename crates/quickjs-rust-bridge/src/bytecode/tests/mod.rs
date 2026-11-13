@@ -4,6 +4,7 @@ mod corpus;
 mod fuzz;
 mod robustness;
 mod rules;
+mod verifier;
 mod wide;
 
 use super::{Program, RegExpCompiler, read_program, verify, write_program};

@@ -5,6 +5,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use crate::bytecode::{CheckError, Rule, VerifiedModule, Verifier};
 use crate::bytecode_abi::{
     ATOMS, AtomKind, BC_VERSION, JS_ATOM_END, OP_COUNT, OPCODES, OperandFormat,
     builtin_string_atom, export_type, op, tag,
@@ -27,6 +28,20 @@ fn text(value: &Value) -> String {
 
 fn utf16(text: &str) -> Vec<u16> {
     text.encode_utf16().collect()
+}
+
+/// `bytes` through a verifier of its own, which must accept them as they
+/// are: what the fork writes is what the bridge's writer writes again.
+fn verified(bytes: &[u8]) -> VerifiedModule {
+    let module = Verifier::new()
+        .module_from_bytes(bytes)
+        .unwrap_or_else(|error| panic!("the verifier refuses the fork's module: {error}"));
+    assert_eq!(
+        module.bytes(),
+        bytes,
+        "verified bytes differ from the fork's"
+    );
+    module
 }
 
 // ---------------------------------------------------------------------------
@@ -330,7 +345,7 @@ fn verifying_read_accepts_and_runs_what_the_fork_writes_for_modules() {
 
         let (mut runtime, mut realm) = realm();
         realm
-            .complete_module_bytecode(&name, &name, &bytes)
+            .complete_module_bytecode(&name, &name, &verified(&bytes))
             .unwrap_or_else(|error| panic!("module {index} refused: {error}"));
         assert_eq!(
             evaluated_result(&mut runtime, &mut realm, &name),
@@ -359,10 +374,18 @@ fn modules_completed_as_bytecode_import_each_other() {
 
     let (mut runtime, mut realm) = realm();
     realm
-        .complete_module_bytecode("app:///lib/dep.js", "https://cdn.test/dep.js", &dependency)
+        .complete_module_bytecode(
+            "app:///lib/dep.js",
+            "https://cdn.test/dep.js",
+            &verified(&dependency),
+        )
         .unwrap();
     realm
-        .complete_module_bytecode("app:///lib/entry.js", "https://cdn.test/entry.js", &entry)
+        .complete_module_bytecode(
+            "app:///lib/entry.js",
+            "https://cdn.test/entry.js",
+            &verified(&entry),
+        )
         .unwrap();
     assert_eq!(
         evaluated_result(&mut runtime, &mut realm, "app:///lib/entry.js"),
@@ -491,35 +514,47 @@ fn a_stack_size_too_small_is_accepted_and_corrected() {
 }
 
 #[test]
-fn completed_module_bytecode_is_verified_and_a_refusal_leaves_nothing() {
+fn module_bytecode_the_verifier_refuses_never_becomes_a_module() {
     let name = "app:///checked.js";
     let source = "const x = globalThis.c ? 1 : 2; export const result = String(x);";
     let (_compiler, compiler) = realm();
     let original = compiler.compile_module_bytecode(name, source).unwrap();
     let layout = first_function(&original);
+    let verifier = Verifier::new();
 
-    let (mut runtime, mut realm) = realm();
+    // Paths that meet with different depths: a rule of the verifier.
     let mut broken = original.clone();
     let arm = find_opcode(&broken, &layout, op::PUSH_2);
     broken[arm] = op::NOP;
-    let error = realm
-        .complete_module_bytecode(name, name, &broken)
-        .expect_err("refused");
-    assert_eq!(error.kind, ErrorKind::BytecodeRejected, "{error:?}");
+    match verifier.module_from_bytes(&broken) {
+        Err(CheckError::Verify(error)) => assert_eq!(error.rule, Rule::Merge, "{error}"),
+        other => panic!("refused by a rule: {other:?}"),
+    }
 
+    // A script is not a module.
     let script = compiled_script("1");
-    let error = realm
-        .complete_module_bytecode(name, name, &script)
-        .expect_err("a script is not a module");
-    assert_eq!(error.kind, ErrorKind::BytecodeRejected, "{error:?}");
+    assert!(
+        matches!(
+            verifier.module_from_bytes(&script),
+            Err(CheckError::Root("a module"))
+        ),
+        "a script is not a module"
+    );
 
-    // Nothing of either stayed: the name is still open, and the stored
-    // stack size of the bytes that answer it is not used.
+    // Bytes that do not read.
+    assert!(matches!(
+        verifier.module_from_bytes(&original[..original.len() / 2]),
+        Err(CheckError::Read(_))
+    ));
+
+    // The stored stack size of the bytes is not used: the verifier keeps
+    // it, and the realm's read computes its own.
+    let (mut runtime, mut realm) = realm();
     let mut understated = original.clone();
     understated[layout.stack_size.0] = 0;
-    realm
-        .complete_module_bytecode(name, name, &understated)
-        .unwrap();
+    let module = verifier.module_from_bytes(&understated).unwrap();
+    assert_eq!(module.bytes(), understated.as_slice());
+    realm.complete_module_bytecode(name, name, &module).unwrap();
     assert_eq!(evaluated_result(&mut runtime, &mut realm, name), "2");
 }
 
@@ -609,8 +644,8 @@ fn mutated_bytecode_is_read_or_refused_and_never_run() {
 }
 
 // ---------------------------------------------------------------------------
-// Module bytecode as a realm-local source: checked when supplied, read with
-// the fork's verifying read when compiled
+// Module bytecode as a realm-local source: verified before it is supplied,
+// read with the fork's verifying read when compiled
 
 /// Module bytecode the fork compiles for `source` under `name`.
 fn module_bytecode(name: &str, source: &str) -> Vec<u8> {
@@ -620,7 +655,7 @@ fn module_bytecode(name: &str, source: &str) -> Vec<u8> {
 
 /// The fork's module bytecode for `source` with the instruction the fork's
 /// stack walk refuses (an arm of a conditional made to push nothing), which
-/// the Rust checks refuse too: only the unchecked completion stores it.
+/// the verifier refuses too: only the unchecked entries store it.
 fn refused_module_bytecode(name: &str) -> Vec<u8> {
     let source = "const x = globalThis.c ? 1 : 2; export const result = String(x);";
     let mut bytes = module_bytecode(name, source);
@@ -653,10 +688,10 @@ fn sync_realm(files: Vec<(&str, RequiredSource)>) -> (Runtime, Context) {
     (runtime, realm)
 }
 
-fn bytecode_answer(url: &str, bytes: Vec<u8>) -> RequiredSource {
+fn bytecode_answer(url: &str, module: VerifiedModule) -> RequiredSource {
     RequiredSource {
         url: url.to_owned(),
-        body: RequiredBody::ModuleBytecode(bytes),
+        body: RequiredBody::ModuleBytecode(module),
         kind: RequiredKind::Module,
     }
 }
@@ -707,7 +742,7 @@ fn a_running_module_body_requires_module_bytecode() {
     let bytes = module_bytecode("app:///dep.js", DEPENDENCY);
     let (mut runtime, mut realm) = sync_realm(vec![(
         "app:///dep.js",
-        bytecode_answer("app:///dep.js", bytes),
+        bytecode_answer("app:///dep.js", verified(&bytes)),
     )]);
     let out = run_entry(
         &mut runtime,
@@ -726,7 +761,10 @@ fn a_running_module_body_requires_module_bytecode() {
 fn an_import_linked_inline_reads_module_bytecode() {
     let bytes = module_bytecode("app:///dep.js", DEPENDENCY);
     let (mut runtime, mut realm) = sync_realm(vec![
-        ("app:///dep.js", bytecode_answer("app:///dep.js", bytes)),
+        (
+            "app:///dep.js",
+            bytecode_answer("app:///dep.js", verified(&bytes)),
+        ),
         (
             "app:///main.js",
             text_module(
@@ -765,7 +803,7 @@ fn module_bytecode_completed_before_is_required_from_a_running_body() {
     ]);
     let bytes = module_bytecode("app:///pre.js", DEPENDENCY);
     realm
-        .complete_module_bytecode("app:///pre.js", "app:///pre.js", &bytes)
+        .complete_module_bytecode("app:///pre.js", "app:///pre.js", &verified(&bytes))
         .unwrap();
     assert!(realm.owned_bytecode() > 0);
     let out = run_entry(
@@ -781,11 +819,13 @@ fn module_bytecode_completed_before_is_required_from_a_running_body() {
 
 #[test]
 fn refused_bytecode_from_the_synchronous_loader_is_a_syntax_error() {
-    // Script bytecode is not a module; the Rust checks refuse it when the
-    // loader answers, for a require and for an import linked inline.
-    let script = compiled_script("1");
+    // Bytes the fork's verifying read refuses, answered by the loader as a
+    // module no verifier wrote: the read refuses them inside the load, for
+    // a require and for an import linked inline.
+    let bad = VerifiedModule::unverified(&refused_module_bytecode("app:///bad.js"));
+    let kept = bad.bytes().len();
     let (mut runtime, mut realm) = sync_realm(vec![
-        ("app:///bad.js", bytecode_answer("app:///bad.js", script)),
+        ("app:///bad.js", bytecode_answer("app:///bad.js", bad)),
         (
             "app:///main.js",
             text_module(
@@ -807,7 +847,12 @@ fn refused_bytecode_from_the_synchronous_loader_is_a_syntax_error() {
          globalThis.out = seen.join();",
     );
     assert_eq!(out.unwrap(), "true,true,true,true");
-    assert_eq!(realm.owned_bytecode(), 0);
+    // The refused copy stays with the source, answered once, which the
+    // realm frees.
+    assert_eq!(realm.owned_bytecode(), kept);
+    drop(realm);
+    let keeper = runtime.create_context().unwrap();
+    assert_eq!(keeper.owned_bytecode(), 0);
 }
 
 #[test]
@@ -864,7 +909,7 @@ fn bytecode_the_verifying_read_refuses_fails_at_compile() {
 #[test]
 fn kept_module_bytecode_is_freed_on_every_path() {
     let name = "app:///kept.js";
-    let bytes = module_bytecode(name, "export const result = 'kept';");
+    let bytes = verified(&module_bytecode(name, "export const result = 'kept';"));
     let runtime = Runtime::new().unwrap();
     let keeper = runtime.create_context().unwrap();
 
@@ -887,14 +932,6 @@ fn kept_module_bytecode_is_freed_on_every_path() {
     realm.complete_module_bytecode(name, name, &bytes).unwrap();
     assert!(keeper.owned_bytecode() > 0);
     drop(realm);
-    assert_eq!(keeper.owned_bytecode(), 0);
-
-    // Refused by the Rust checks: nothing is kept.
-    let realm = runtime.create_context().unwrap();
-    let error = realm
-        .complete_module_bytecode(name, name, &compiled_script("1"))
-        .expect_err("a script is not a module");
-    assert_eq!(error.kind, ErrorKind::BytecodeRejected);
     assert_eq!(keeper.owned_bytecode(), 0);
 }
 
@@ -948,7 +985,9 @@ fn template_objects_read_from_bytecode_are_frozen_like_compiled_ones() {
     let (_compiler, compiler) = realm();
     let module = compiler.compile_module_bytecode(name, &source).unwrap();
     let (mut runtime, mut realm) = realm();
-    realm.complete_module_bytecode(name, name, &module).unwrap();
+    realm
+        .complete_module_bytecode(name, name, &verified(&module))
+        .unwrap();
     assert_eq!(
         evaluated_result(&mut runtime, &mut realm, name),
         TEMPLATE_EXPECTED

@@ -14,7 +14,6 @@ use bobcat_source::native::primjs::{
     self, ALL_OPCODES, ConvertOptions, Format, Function, OpcodeClass, REJECTED, SAME, TRANSLATED,
     Value, opcode_class,
 };
-use quickjs_rust_bridge::Runtime;
 use quickjs_rust_bridge::bytecode_abi::{OPCODES, OperandFormat};
 
 /// The fork's operand format that matches a `PrimJS` one by meaning.
@@ -109,15 +108,14 @@ fn walk(function: &Function, seen: &mut BTreeSet<u8>) {
 /// converts (and so runs in `primjs_convert`); prints the list.
 #[test]
 fn every_accepted_opcode_is_exercised_by_the_corpus() {
-    let runtime = Runtime::new().unwrap();
-    let realm = runtime.create_context().unwrap();
+    let verifier = quickjs_rust_bridge::bytecode::Verifier::new();
     let mut seen = BTreeSet::new();
     for program in bytecode::PROGRAMS {
         for variant in bytecode::Variant::ALL {
             for section in primjs::bundle_bytecode_sections(program.bundle(variant)).unwrap() {
                 let (_, parsed) = primjs::read_payload(section.bytes).unwrap();
                 let options = ConvertOptions::script("app:///coverage.js");
-                if primjs::convert_script(&parsed, &options, &realm).is_ok() {
+                if primjs::convert_script(&parsed, &options, &verifier).is_ok() {
                     walk(&parsed.root, &mut seen);
                 }
             }

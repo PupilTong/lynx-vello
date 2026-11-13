@@ -271,10 +271,6 @@ typedef struct QjsRequiredSource {
     int32_t cached_kind;
     /* Nonzero: keep the bytecode of whatever this load compiles from text. */
     int32_t capture;
-    /* With `error`: nonzero when the load failed because the host refused
-       the bytecode it was answered with, which is thrown as a
-       `SyntaxError` rather than an `Error`. */
-    int32_t error_is_syntax;
 } QjsRequiredSource;
 
 /* `parameters` is the parameter list the load was asked with, or NULL for an
@@ -1294,15 +1290,8 @@ static int qjs_require_module_source(QjsContext *context, const char *name) {
     if (context->require_load(context->require_opaque, name, NULL, &loaded) !=
         0) {
         /* An import whose source cannot be had is unresolvable, which is
-           what a `ReferenceError` says here and in QuickJS's own loader.
-           Bytecode the host refused is a `SyntaxError`, as a body that does
-           not parse is. */
-        if (loaded.error_is_syntax) {
-            qjs_throw_with_message(context->raw, 1,
-                                   JS_NewString(context->raw, loaded.error));
-        } else {
-            JS_ThrowReferenceError(context->raw, "%s", loaded.error);
-        }
+           what a `ReferenceError` says here and in QuickJS's own loader. */
+        JS_ThrowReferenceError(context->raw, "%s", loaded.error);
         return -1;
     }
     /* -5 is this name having been answered already, which is the host's own
@@ -1866,7 +1855,8 @@ uint8_t *qjs_context_compile_regexp(QjsContext *context,
     return bytes;
 }
 
-QjsContext *qjs_context_new(QjsRuntime *runtime) {
+static QjsContext *qjs_context_new_with(QjsRuntime *runtime,
+                                        JSContext *(*make)(JSRuntime *)) {
     QjsContext *context = calloc(1, sizeof(*context));
 
     if (context == NULL) {
@@ -1874,13 +1864,25 @@ QjsContext *qjs_context_new(QjsRuntime *runtime) {
     }
     context->runtime = runtime;
     context->shadow_eval = JS_UNDEFINED;
-    context->raw = JS_NewContext(runtime->raw);
+    context->raw = make(runtime->raw);
     if (context->raw == NULL) {
         free(context);
         return NULL;
     }
     JS_SetContextOpaque(context->raw, context);
     return context;
+}
+
+QjsContext *qjs_context_new(QjsRuntime *runtime) {
+    return qjs_context_new_with(runtime, JS_NewContext);
+}
+
+/* A realm with only the basic objects (`JS_NewContextRaw`: the object and
+   function prototypes, the global object and the error constructors), for
+   compiling regular expressions: `JS_CompileRegExp` needs nothing else, and
+   its refusal is a `SyntaxError` from the error prototypes it has. */
+QjsContext *qjs_context_new_bare(QjsRuntime *runtime) {
+    return qjs_context_new_with(runtime, JS_NewContextRaw);
 }
 
 void qjs_context_free(QjsContext *context) {
@@ -2584,9 +2586,6 @@ static JSValue qjs_load_module_sync(JSContext *raw, JSValueConst this_value,
     if (failed) {
         JS_FreeCString(raw, url);
         JS_FreeCString(raw, parameters);
-        if (loaded.error_is_syntax) {
-            return qjs_throw_with_message(raw, 1, JS_NewString(raw, loaded.error));
-        }
         return qjs_require_throw_load(raw, loaded.error);
     }
     kind = loaded.kind;

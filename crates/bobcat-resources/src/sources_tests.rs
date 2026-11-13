@@ -2,8 +2,25 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, mpsc};
 use std::time::Duration;
 
+use bobcat_core::resource::VerifiedModule;
+
 use super::*;
 use crate::ResourcesConfig;
+
+/// A verified module the engine compiles for `source`, named `name`.
+fn verified_module(name: &str, source: &str) -> VerifiedModule {
+    let runtime = quickjs_rust_bridge::Runtime::new().unwrap();
+    let compiler = runtime.create_context().unwrap();
+    let bytes = compiler.compile_module_bytecode(name, source).unwrap();
+    quickjs_rust_bridge::bytecode::Verifier::new()
+        .module_from_bytes(&bytes)
+        .unwrap()
+}
+
+/// The module the held install registers at `<container>/chunk.js`.
+fn chunk_module() -> VerifiedModule {
+    verified_module("app:///chunk.js", "export default 3;")
+}
 
 fn resources() -> Resources {
     Resources::new(
@@ -246,7 +263,9 @@ struct ScriptInstaller {
     installed: Mutex<Vec<Url>>,
 }
 
-impl crate::ContainerInstaller<bobcat_core::PreparsedStyleSheet> for ScriptInstaller {
+impl crate::ContainerInstaller<bobcat_core::PreparsedStyleSheet, VerifiedModule>
+    for ScriptInstaller
+{
     fn install(
         &self,
         url: &Url,
@@ -604,7 +623,7 @@ fn install_held(
             )
             .unwrap();
         registrar
-            .register_module_bytecode(&bytecode, b"module bytecode".to_vec())
+            .register_module_bytecode(&bytecode, chunk_module())
             .unwrap();
         outcome
     });
@@ -655,10 +674,10 @@ async fn a_load_under_a_container_being_registered_waits_for_it() {
         panic!("the held load answers what the install registered");
     };
     assert_eq!(source, "export default 2;");
-    let Ok(LoadedSource::ModuleBytecode { bytes, url }) = result(bytecode).await else {
+    let Ok(LoadedSource::ModuleBytecode { module, url }) = result(bytecode).await else {
         panic!("the held load answers the module bytecode the install registered");
     };
-    assert_eq!(bytes.as_ref(), b"module bytecode");
+    assert_eq!(module, chunk_module());
     assert_eq!(url, "app:///page/card.web.bundle/chunk.js");
     assert!(matches!(
         result(sheet).await,
@@ -1259,19 +1278,20 @@ mod code_cache {
 async fn registered_module_bytecode_answers_only_a_module_request() {
     let resources = resources();
     let url = "app:///page/compiled.js";
+    let compiled = verified_module(url, "export default 1;");
     let registered = resources
-        .register_module_bytecode(url, b"module bytecode".to_vec())
+        .register_module_bytecode(url, compiled.clone())
         .unwrap();
     assert_eq!(registered.as_str(), url);
 
     let Ok(LoadedSource::ModuleBytecode {
-        bytes,
+        module,
         url: answered,
     }) = result(load(&resources, url, SourceKind::Script)).await
     else {
         panic!("a module request reads module bytecode");
     };
-    assert_eq!(bytes.as_ref(), b"module bytecode");
+    assert_eq!(module, compiled);
     assert_eq!(answered, url);
 
     for (kind, name) in [

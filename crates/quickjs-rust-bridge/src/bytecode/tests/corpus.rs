@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use super::{assert_round_trip, check, realm};
-use crate::bytecode::{Root, read_program};
+use crate::bytecode::read_program;
 use crate::bytecode_tests::{MODULES, SCRIPTS};
 use crate::{Context, EvalOptions, EvalSource, Runtime};
 
@@ -103,7 +103,7 @@ fn checked_scripts_run_as_compiled() {
         let (_compiler_runtime, compiler) = realm();
         let bytes = compiler.compile_script_bytecode(&name, &source).unwrap();
         let (_runtime, realm_for_checks) = realm();
-        let checked = crate::bytecode::check(&bytes, &realm_for_checks, Root::Any)
+        let checked = crate::bytecode::check(&bytes, &realm_for_checks)
             .unwrap_or_else(|error| panic!("{name}: {error}"));
         assert_eq!(
             checked, bytes,

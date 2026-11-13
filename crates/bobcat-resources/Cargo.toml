@@ -45,6 +45,9 @@ bobcat-source = { workspace = true }
 prime-radiant = { workspace = true, features = ["render"] }
 flume = { workspace = true }
 png = { workspace = true }
+# The tests of module bytecode registration make a `VerifiedModule`, which
+# only the bridge's `Verifier` constructs.
+quickjs-rust-bridge = { workspace = true }
 # `rt` and `sync` come from `[dependencies]`; every test is a default-flavour
 # `#[tokio::test]`, so only the attribute macro is missing.
 tokio = { workspace = true, features = ["macros"] }

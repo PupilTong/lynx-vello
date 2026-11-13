@@ -57,7 +57,8 @@ fn load(
     options: &ConvertOptions<'_>,
 ) -> Result<(), quickjs_rust_bridge::Error> {
     let (_, program) = primjs::read_payload(bytes).unwrap();
-    let converted = primjs::convert_script(&program, options, realm).unwrap();
+    let verifier = quickjs_rust_bridge::bytecode::Verifier::new();
+    let converted = primjs::convert_script(&program, options, &verifier).unwrap();
     realm.complete_module_bytecode(CONVERTED, CONVERTED, &converted)?;
     let promise = realm.load_module(CONVERTED)?;
     runtime.drain_pending_jobs(realm)?;
@@ -372,4 +373,26 @@ fn export_script_runs_on_every_call() {
             .unwrap();
         assert_eq!(string(&realm, &helper), "helper:3", "{variant}");
     }
+}
+
+/// One verifier converts several scripts, as a container's does: each
+/// regular expression literal's pattern and flags compile once, for the
+/// converter and for the rule that checks the literal alike, however many
+/// scripts carry it; a script without literals makes no compilation.
+#[test]
+fn a_shared_verifier_compiles_each_literal_once() {
+    let verifier = quickjs_rust_bridge::bytecode::Verifier::new();
+    let convert = |name: &str| {
+        let (_, program) = primjs::read_payload(&fixture(name)).unwrap();
+        primjs::convert_script(&program, &ConvertOptions::script(CONVERTED), &verifier)
+            .unwrap_or_else(|error| panic!("{name}: {error}"))
+    };
+    convert("values.mts.v9.bin");
+    assert_eq!(verifier.compiled_regexps(), 0);
+    // `regexp.js` has `/a(b+)c/gi` and `/-/g`.
+    convert("regexp.mts.v9.bin");
+    assert_eq!(verifier.compiled_regexps(), 2);
+    convert("regexp.mts.v1.bin");
+    convert("regexp.bts.v9.bin");
+    assert_eq!(verifier.compiled_regexps(), 2);
 }

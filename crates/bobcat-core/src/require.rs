@@ -98,12 +98,13 @@ pub(crate) fn install(
                 url,
                 body: RequiredBody::Text(source),
             }),
-            // Checked and verified by the bridge as it is stored and read; a
-            // refusal is the load's `SyntaxError`.
-            LoadedSource::ModuleBytecode { bytes, url } => Ok(RequiredSource {
+            // Verified when it was made; the engine's verifying read reads
+            // it inside the load, and its refusal is the load's
+            // `SyntaxError`.
+            LoadedSource::ModuleBytecode { module, url } => Ok(RequiredSource {
                 kind: RequiredKind::Module,
                 url,
-                body: RequiredBody::ModuleBytecode(bytes.to_vec()),
+                body: RequiredBody::ModuleBytecode(module),
             }),
             LoadedSource::StyleSheet(_) => Err("the fetcher returned a stylesheet".to_owned()),
             LoadedSource::Font(_) => Err("the fetcher returned a font".to_owned()),

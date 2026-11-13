@@ -625,8 +625,8 @@ pub(crate) fn module_answer(
 ) -> Result<(String, LoadedModule), String> {
     let kind = match answer {
         LoadedSource::Module { source, url } => return Ok((url, LoadedModule::Text(source))),
-        LoadedSource::ModuleBytecode { bytes, url } => {
-            return Ok((url, LoadedModule::Bytecode(bytes)));
+        LoadedSource::ModuleBytecode { module, url } => {
+            return Ok((url, LoadedModule::Bytecode(module)));
         }
         LoadedSource::StyleSheet(_) => "stylesheet",
         LoadedSource::Font(_) => "font",
@@ -744,10 +744,19 @@ mod tests {
         };
         assert_eq!(url, "app:///redirected.js");
         assert_eq!(source, LoadedModule::Text("export {};".to_owned()));
+        let runtime = quickjs_rust_bridge::Runtime::new().unwrap();
+        let compiler = runtime.create_context().unwrap();
+        let module = quickjs_rust_bridge::bytecode::Verifier::new()
+            .module_from_bytes(
+                &compiler
+                    .compile_module_bytecode("app:///compiled.js", "export {};")
+                    .unwrap(),
+            )
+            .unwrap();
         let answered = module_answer(
             REQUESTED,
             LoadedSource::ModuleBytecode {
-                bytes: bytes::Bytes::from_static(b"bytes"),
+                module: module.clone(),
                 url: "app:///compiled.js".to_owned(),
             },
         );
@@ -755,7 +764,7 @@ mod tests {
             answered,
             Ok((
                 "app:///compiled.js".to_owned(),
-                LoadedModule::Bytecode(bytes::Bytes::from_static(b"bytes"))
+                LoadedModule::Bytecode(module)
             ))
         );
     }

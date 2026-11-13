@@ -4,7 +4,7 @@
 
 use std::collections::BTreeSet;
 
-use super::error::{Rule, VerifyError};
+use super::error::{RegExpError, Rule, VerifyError};
 use super::model::{
     Atom, ClosureType, Export, Function, FunctionKind, Instruction, JsString, Module, Operand,
     Program, ResolvedAtom, Value,
@@ -16,24 +16,31 @@ use crate::bytecode_abi::{
 
 /// The engine's regular expression compiler, which the `regexp` rule
 /// needs: a regular expression literal's bytecode must be exactly what the
-/// engine compiles for its pattern and flags. [`crate::Context`]
-/// implements it.
-pub trait RegExpCompiler {
+/// engine compiles for its pattern and flags.
+///
+/// Crate-private, so that no caller can hand the rules a compiler of its
+/// own (one that answers any bytes for any pattern would make them accept
+/// arbitrary bytes as regular expression bytecode): the public way in is
+/// [`super::Verifier`], whose compiler is this process's engine.
+/// [`crate::Context`] implements it for [`crate::Context::verify_bytecode`]
+/// and this crate's tests.
+pub(crate) trait RegExpCompiler {
     /// The bytecode the engine compiles for `pattern` (UTF-16 code units)
-    /// and `flags` (flag letters), or `None` when it refuses them.
-    fn compile_regexp(&self, pattern: &[u16], flags: &str) -> Option<Vec<u8>>;
+    /// and `flags` (flag letters), or why there is none.
+    fn compile_regexp(&self, pattern: &[u16], flags: &str) -> Result<Vec<u8>, RegExpError>;
 }
 
 impl RegExpCompiler for crate::Context {
-    fn compile_regexp(&self, pattern: &[u16], flags: &str) -> Option<Vec<u8>> {
-        self.compile_regexp_bytecode(pattern, flags).ok()
+    fn compile_regexp(&self, pattern: &[u16], flags: &str) -> Result<Vec<u8>, RegExpError> {
+        self.compile_regexp_bytecode(pattern, flags)
+            .map_err(|_| RegExpError::Refused)
     }
 }
 
 /// Checks every rule of the module documentation on `program`. `regexps`
 /// compiles the regular expression literals the program carries, to
 /// compare with their bytecode.
-pub fn verify(program: &Program, regexps: &dyn RegExpCompiler) -> Result<(), VerifyError> {
+pub(crate) fn verify(program: &Program, regexps: &dyn RegExpCompiler) -> Result<(), VerifyError> {
     let mut verifier = Verifier {
         program,
         regexps,
@@ -1074,8 +1081,11 @@ impl Code<'_> {
         let compiled = self
             .regexps
             .compile_regexp(&pattern.to_utf16(), &flags)
-            .ok_or_else(|| {
-                self.fail(at, Rule::RegExp, "the engine refuses the regexp's pattern")
+            .map_err(|error| match error {
+                RegExpError::Refused => {
+                    self.fail(at, Rule::RegExp, "the engine refuses the regexp's pattern")
+                }
+                RegExpError::NoEngine(_) => self.fail(at, Rule::RegExp, error.to_string()),
             })?;
         if compiled != *bytes {
             return Err(self.fail(

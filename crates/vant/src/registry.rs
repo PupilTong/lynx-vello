@@ -10,9 +10,11 @@
 //! may be cached by the source loader; registration changes invalidate it.
 //!
 //! `S` throughout is the host's parsed-stylesheet type: this crate names no
-//! style type, so a registered stylesheet is whatever the host parsed.
-//! Module bytecode is registered as the host hands it over
-//! ([`Registered::ModuleBytecode`]): this crate never reads it.
+//! style type, so a registered stylesheet is whatever the host parsed. `M`
+//! is the host's verified module bytecode type: this crate names no script
+//! engine either, and never reads a registered module
+//! ([`Registered::ModuleBytecode`]); it is held and handed back as the host
+//! registered it, so whatever the host checked about it still holds.
 //! [`Register`] is what a registration is written through, and
 //! [`RegisterInBackground`] a host that can also run one off the calling
 //! thread; a source parser writes through these and names no fetcher.
@@ -28,7 +30,7 @@ use crate::mime::MediaType;
 
 /// One registered resource.
 #[derive(Debug)]
-pub enum Registered<S> {
+pub enum Registered<S, M> {
     /// Bytes with the media type they were registered under, if any; an
     /// absent type is sniffed like a response without a `Content-Type`.
     Bytes {
@@ -38,14 +40,14 @@ pub enum Registered<S> {
     /// A stylesheet the host already parsed; it answers only a stylesheet
     /// source request, since it has no bytes to give any other one.
     StyleSheet(Arc<S>),
-    /// Module bytecode of the host's script engine. It answers only a module
-    /// source request; every other request for its URL fails, as for
-    /// [`Self::StyleSheet`]. Only a registration makes one: no response is
-    /// ever read as bytecode.
-    ModuleBytecode(Bytes),
+    /// Verified module bytecode of the host's script engine. It answers only
+    /// a module source request; every other request for its URL fails, as
+    /// for [`Self::StyleSheet`]. Only a registration makes one: no response
+    /// is ever read as bytecode.
+    ModuleBytecode(M),
 }
 
-impl<S> Clone for Registered<S> {
+impl<S, M: Clone> Clone for Registered<S, M> {
     fn clone(&self) -> Self {
         match self {
             Self::Bytes { bytes, media_type } => Self::Bytes {
@@ -53,7 +55,7 @@ impl<S> Clone for Registered<S> {
                 media_type: media_type.clone(),
             },
             Self::StyleSheet(sheet) => Self::StyleSheet(Arc::clone(sheet)),
-            Self::ModuleBytecode(bytes) => Self::ModuleBytecode(bytes.clone()),
+            Self::ModuleBytecode(module) => Self::ModuleBytecode(module.clone()),
         }
     }
 }
@@ -62,11 +64,11 @@ impl<S> Clone for Registered<S> {
 /// blocking-pool threads, which serve image and source loads from it, so it
 /// locks rather than borrows.
 #[derive(Debug)]
-pub struct Registry<S> {
-    entries: Mutex<FxHashMap<String, Registered<S>>>,
+pub struct Registry<S, M> {
+    entries: Mutex<FxHashMap<String, Registered<S, M>>>,
 }
 
-impl<S> Default for Registry<S> {
+impl<S, M> Default for Registry<S, M> {
     fn default() -> Self {
         Self {
             entries: Mutex::default(),
@@ -74,17 +76,21 @@ impl<S> Default for Registry<S> {
     }
 }
 
-impl<S> Registry<S> {
+impl<S, M> Registry<S, M> {
     /// Registers `registered` under `url`, replacing any earlier
     /// registration.
-    pub fn insert(&self, url: &Url, registered: Registered<S>) {
+    pub fn insert(&self, url: &Url, registered: Registered<S, M>) {
         self.lock().insert(url.to_string(), registered);
     }
 
     /// What is registered under `url`. A clone: the bytes and the sheet are
-    /// both reference-counted.
+    /// both reference-counted, and the module is the host's to make cheap to
+    /// clone.
     #[must_use]
-    pub fn get(&self, url: &Url) -> Option<Registered<S>> {
+    pub fn get(&self, url: &Url) -> Option<Registered<S, M>>
+    where
+        M: Clone,
+    {
         self.lock().get(url.as_str()).cloned()
     }
 
@@ -95,7 +101,7 @@ impl<S> Registry<S> {
     }
 
     /// Forgets the registration of `url` and returns it.
-    pub fn remove(&self, url: &Url) -> Option<Registered<S>> {
+    pub fn remove(&self, url: &Url) -> Option<Registered<S, M>> {
         self.lock().remove(url.as_str())
     }
 
@@ -116,7 +122,7 @@ impl<S> Registry<S> {
         self.lock().is_empty()
     }
 
-    fn lock(&self) -> MutexGuard<'_, FxHashMap<String, Registered<S>>> {
+    fn lock(&self) -> MutexGuard<'_, FxHashMap<String, Registered<S, M>>> {
         self.entries.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
@@ -144,7 +150,7 @@ pub fn parse_registration_url(url: &str) -> Result<Url, RegisterError> {
 
 /// Something contents can be registered into: the reference fetcher's
 /// resource system, or a [`Registrar`] onto its registry.
-pub trait Register<S> {
+pub trait Register<S, M> {
     /// Registers `bytes` under `url`, replacing any earlier registration.
     /// `media_type` labels them the way a `Content-Type` would; without it
     /// they are sniffed. Returns the normalized URL they answer to.
@@ -174,7 +180,7 @@ pub trait Register<S> {
     /// # Errors
     ///
     /// [`RegisterError::InvalidUrl`] for a URL that does not parse.
-    fn register_module_bytecode(&self, url: &str, bytes: Bytes) -> Result<Url, RegisterError>;
+    fn register_module_bytecode(&self, url: &str, module: M) -> Result<Url, RegisterError>;
 }
 
 /// What a [`ContainerInstaller`] registers through: the registry alone,
@@ -184,20 +190,20 @@ pub trait Register<S> {
 /// stylesheet-cache invalidation, which is thread-bound and has nothing to
 /// invalidate here: a container's section URLs were never asked for before
 /// the container existed, so no cached response for one can be standing.
-pub struct Registrar<S> {
-    registry: Arc<Registry<S>>,
+pub struct Registrar<S, M> {
+    registry: Arc<Registry<S, M>>,
 }
 
-impl<S> fmt::Debug for Registrar<S> {
+impl<S, M> fmt::Debug for Registrar<S, M> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.debug_struct("Registrar").finish_non_exhaustive()
     }
 }
 
-impl<S> Registrar<S> {
+impl<S, M> Registrar<S, M> {
     /// A registrar onto `registry`.
     #[must_use]
-    pub fn new(registry: Arc<Registry<S>>) -> Self {
+    pub fn new(registry: Arc<Registry<S, M>>) -> Self {
         Self { registry }
     }
 
@@ -236,26 +242,22 @@ impl<S> Registrar<S> {
         Ok(url)
     }
 
-    /// Registers module bytecode of the host's script engine under `url`,
-    /// replacing any earlier registration. It answers a module source
+    /// Registers verified module bytecode of the host's script engine under
+    /// `url`, replacing any earlier registration. It answers a module source
     /// request, and no other request at all.
     ///
     /// # Errors
     ///
     /// [`RegisterError::InvalidUrl`] for a URL that does not parse.
-    pub fn register_module_bytecode(
-        &self,
-        url: &str,
-        bytes: impl Into<Bytes>,
-    ) -> Result<Url, RegisterError> {
+    pub fn register_module_bytecode(&self, url: &str, module: M) -> Result<Url, RegisterError> {
         let url = parse_registration_url(url)?;
         self.registry
-            .insert(&url, Registered::ModuleBytecode(bytes.into()));
+            .insert(&url, Registered::ModuleBytecode(module));
         Ok(url)
     }
 }
 
-impl<S> Register<S> for Registrar<S> {
+impl<S, M> Register<S, M> for Registrar<S, M> {
     fn register(
         &self,
         url: &str,
@@ -269,8 +271,8 @@ impl<S> Register<S> for Registrar<S> {
         Self::register_style_sheet(self, url, sheet)
     }
 
-    fn register_module_bytecode(&self, url: &str, bytes: Bytes) -> Result<Url, RegisterError> {
-        Self::register_module_bytecode(self, url, bytes)
+    fn register_module_bytecode(&self, url: &str, module: M) -> Result<Url, RegisterError> {
+        Self::register_module_bytecode(self, url, module)
     }
 }
 
@@ -289,7 +291,7 @@ impl<S> Register<S> for Registrar<S> {
 /// It runs on whichever thread the load finished on — a blocking-pool thread
 /// natively — which is why it is `Send + Sync`, and why what it writes
 /// through is a [`Registrar`] rather than the resource system itself.
-pub trait ContainerInstaller<S>: fmt::Debug + Send + Sync + 'static {
+pub trait ContainerInstaller<S, M>: fmt::Debug + Send + Sync + 'static {
     /// Offers the bytes fetched from `url`. `url` is the **resolved request
     /// URL**, which is what a realm derives its section URLs from; a redirect
     /// is the transport's business and no part of it.
@@ -303,12 +305,13 @@ pub trait ContainerInstaller<S>: fmt::Debug + Send + Sync + 'static {
     /// # Errors
     ///
     /// A container that would not decode or register.
-    fn install(&self, url: &Url, bytes: &[u8], registrar: &Registrar<S>) -> Result<bool, String>;
+    fn install(&self, url: &Url, bytes: &[u8], registrar: &Registrar<S, M>)
+    -> Result<bool, String>;
 }
 
 /// A host that can run an install off the calling thread, and hold every
 /// source request for a URL under the container until it has run.
-pub trait RegisterInBackground<S>: Register<S> {
+pub trait RegisterInBackground<S, M>: Register<S, M> {
     /// Runs `install` off this thread with a [`Registrar`] onto this host's
     /// registry, and holds every source request for a URL under `container`
     /// until it has run: such a request is then answered from what it
@@ -318,7 +321,7 @@ pub trait RegisterInBackground<S>: Register<S> {
     fn register_in_background(
         &self,
         container: &Url,
-        install: impl FnOnce(&Registrar<S>) -> Result<(), String> + Send + 'static,
+        install: impl FnOnce(&Registrar<S, M>) -> Result<(), String> + Send + 'static,
     );
 }
 
@@ -330,13 +333,17 @@ mod tests {
     #[derive(Debug, PartialEq)]
     struct Sheet;
 
+    /// A stand-in for the host's verified module bytecode type.
+    #[derive(Clone, Debug, PartialEq)]
+    struct Module(&'static str);
+
     fn url(text: &str) -> Url {
         Url::parse(text).expect("a URL")
     }
 
     #[test]
     fn a_registration_is_found_under_its_normalized_url_and_replaced_by_a_later_one() {
-        let registrar = Registrar::new(Arc::new(Registry::<Sheet>::default()));
+        let registrar = Registrar::new(Arc::new(Registry::<Sheet, Module>::default()));
         let registered = registrar
             .register("APP://host/a.js", b"1".as_slice(), Some("text/javascript"))
             .expect("a valid URL");
@@ -357,7 +364,7 @@ mod tests {
 
     #[test]
     fn a_style_sheet_is_registered_as_the_host_parsed_it() {
-        let registry = Arc::new(Registry::<Sheet>::default());
+        let registry = Arc::new(Registry::<Sheet, Module>::default());
         let sheet = Arc::new(Sheet);
         Register::register_style_sheet(
             &Registrar::new(Arc::clone(&registry)),
@@ -373,28 +380,28 @@ mod tests {
 
     #[test]
     fn module_bytecode_is_registered_as_the_host_handed_it_over() {
-        let registry = Arc::new(Registry::<Sheet>::default());
+        let registry = Arc::new(Registry::<Sheet, Module>::default());
         let registered = Register::register_module_bytecode(
             &Registrar::new(Arc::clone(&registry)),
             "APP://host/a.js",
-            Bytes::from_static(b"module bytecode"),
+            Module("verified"),
         )
         .expect("a valid URL");
         assert_eq!(registered.as_str(), "app://host/a.js");
         let Some(Registered::ModuleBytecode(found)) = registry.get(&url("app://host/a.js")) else {
             panic!("the module bytecode is registered");
         };
-        assert_eq!(&found[..], b"module bytecode");
+        assert_eq!(found, Module("verified"));
     }
 
     #[test]
     fn module_bytecode_replaces_and_is_replaced_by_other_registrations() {
-        let registrar = Registrar::new(Arc::new(Registry::<Sheet>::default()));
+        let registrar = Registrar::new(Arc::new(Registry::<Sheet, Module>::default()));
         registrar
             .register("app://host/a.js", b"text".as_slice(), None)
             .expect("a valid URL");
         registrar
-            .register_module_bytecode("app://host/a.js", b"bytecode".as_slice())
+            .register_module_bytecode("app://host/a.js", Module("verified"))
             .expect("a valid URL");
         assert!(matches!(
             registrar.registry.get(&url("app://host/a.js")),
@@ -409,14 +416,14 @@ mod tests {
         ));
         assert_eq!(registrar.registry.len(), 1);
         assert!(matches!(
-            registrar.register_module_bytecode("not a url", Bytes::new()),
+            registrar.register_module_bytecode("not a url", Module("verified")),
             Err(RegisterError::InvalidUrl { .. })
         ));
     }
 
     #[test]
     fn removing_and_clearing_forget_registrations() {
-        let registry = Registry::<Sheet>::default();
+        let registry = Registry::<Sheet, Module>::default();
         for name in ["a", "b"] {
             registry.insert(
                 &url(&format!("app://host/{name}")),
@@ -435,7 +442,7 @@ mod tests {
 
     #[test]
     fn a_url_that_does_not_parse_is_not_registered() {
-        let registrar = Registrar::new(Arc::new(Registry::<Sheet>::default()));
+        let registrar = Registrar::new(Arc::new(Registry::<Sheet, Module>::default()));
         assert!(matches!(
             registrar.register("not a url", Bytes::new(), None),
             Err(RegisterError::InvalidUrl { .. })

@@ -7,11 +7,20 @@
 //! verifying read (`JS_READ_OBJ_VERIFY`) makes the C reader safe on any
 //! bytes and computes each function's stack size; it does not make the
 //! bytecode safe to run, because the interpreter assumes many properties
-//! of compiler output that the read does not check. [`verify`] checks them.
+//! of compiler output that the read does not check. The rules below check
+//! them. [`Verifier`] is the one public way to run them: it checks a
+//! program, or bytes it reads, and writes what it accepts as a
+//! [`VerifiedModule`], a value nothing else constructs.
 //! [`crate::Context::complete_module_bytecode`] and
-//! [`crate::Context::verify_bytecode`] run [`check`] (read, verify, write)
-//! on every input and hand the engine the bytes [`write_program`] wrote, so
-//! no bytes reach the C reader without passing these rules.
+//! [`crate::RequiredBody::ModuleBytecode`] take only a [`VerifiedModule`],
+//! so no bytes reach the fork's module read without passing these rules;
+//! [`crate::Context::verify_bytecode`] runs the same rules, with the realm's
+//! own regular expression compiler, on bytes of any root.
+//!
+//! The rules compare each regular expression literal with what the engine
+//! compiles for it, so the compiler is part of the check. It is never the
+//! caller's: [`Verifier`] owns its engine, and the compiler trait the
+//! rules take is private to this crate.
 //!
 //! The module contains no unsafe code; it works over the generated tables
 //! of [`crate::bytecode_abi`].
@@ -38,8 +47,11 @@
 //! A converter builds a [`Program`] directly: intern its strings with
 //! [`Program::intern`], build each [`Function`] from [`Function::new`],
 //! push instructions made with [`Instruction::new`] (using the 32-bit jump
-//! forms, since it changes instruction sizes), then call [`verify`] and
-//! [`write_program`]. [`check`] is the same sequence for bytes.
+//! forms, since it changes instruction sizes), then hand the program to
+//! [`Verifier::module`], which checks it and writes it; a regular
+//! expression literal's bytecode comes from [`Verifier::compile_regexp`] of
+//! the same verifier, which compiles each pattern and flags once.
+//! [`Verifier::module_from_bytes`] is the same for bytes.
 //!
 //! # Reader and writer
 //!
@@ -53,7 +65,7 @@
 //!
 //! # The rules
 //!
-//! [`verify`] walks every function's control flow the way the fork's
+//! The verifier walks every function's control flow the way the fork's
 //! `compute_stack_size_buf` does, following the same edges (`if_*`,
 //! `goto*`, `gosub` to its target and past it, `catch` to its handler at
 //! one more slot, the `with_*` targets at their own depths; `ret`,
@@ -129,6 +141,7 @@ mod disasm;
 mod error;
 mod model;
 mod read;
+mod verified;
 mod verify;
 mod write;
 
@@ -136,37 +149,25 @@ mod write;
 mod tests;
 
 pub use disasm::disassemble;
-pub use error::{CheckError, ModelError, ReadError, Rule, VerifyError, WriteError};
+pub use error::{CheckError, ModelError, ReadError, RegExpError, Rule, VerifyError, WriteError};
 pub use model::{
     Atom, ClosureType, ClosureVar, DebugInfo, Export, Function, FunctionFlags, FunctionKind,
     Import, Instruction, JsString, Module, ModuleRequest, Operand, OperandKind, Program,
     ResolvedAtom, Value, VarDef,
 };
 pub use read::{NESTING_LIMIT, read_program};
-pub use verify::{RegExpCompiler, verify};
+pub use verified::{VerifiedModule, Verifier};
+pub(crate) use verify::{RegExpCompiler, verify};
 pub use write::write_program;
 
-/// What the top-level value of checked bytes must be.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Root {
-    /// A module record.
-    Module,
-    /// Anything the format carries.
-    Any,
-}
-
-/// Reads untrusted `bytes`, checks every rule of [`verify`] and writes the
-/// program back: the answer is the bytes to hand the engine, which mean
-/// exactly the program that was checked.
-pub fn check(
-    bytes: &[u8],
-    regexps: &dyn RegExpCompiler,
-    root: Root,
-) -> Result<Vec<u8>, CheckError> {
+/// Reads untrusted `bytes`, checks every rule of the module documentation
+/// with `regexps` and writes the program back: the answer is the bytes to
+/// hand the engine, which mean exactly the program that was checked. The
+/// top-level value may be anything the format carries. For
+/// [`crate::Context::verify_bytecode`] and this crate's tests; the public
+/// way to check a module is [`Verifier`].
+pub(crate) fn check(bytes: &[u8], regexps: &dyn RegExpCompiler) -> Result<Vec<u8>, CheckError> {
     let program = read_program(bytes).map_err(CheckError::Read)?;
-    if root == Root::Module && !matches!(program.root, Value::Module(_)) {
-        return Err(CheckError::Root("a module"));
-    }
     verify(&program, regexps).map_err(CheckError::Verify)?;
     write_program(&program).map_err(CheckError::Write)
 }

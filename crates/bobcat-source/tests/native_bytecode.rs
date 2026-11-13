@@ -36,8 +36,8 @@ fn sample(name: &str) -> Vec<u8> {
 }
 
 /// The module name written into converted bytes.
-fn module_name(bytes: &[u8]) -> String {
-    let program = fork::read_program(bytes).expect("converted bytes read");
+fn module_name(module: &fork::VerifiedModule) -> String {
+    let program = fork::read_program(module.bytes()).expect("converted bytes read");
     let fork::Value::Module(module) = &program.root else {
         panic!("a converted section is a module");
     };
@@ -66,7 +66,7 @@ fn every_bytecode_section_is_registered_at_its_url() {
     let registered: Vec<(&str, String)> = container
         .module_bytecode()
         .iter()
-        .map(|(at, bytes)| (at.as_str(), module_name(bytes)))
+        .map(|(at, module)| (at.as_str(), module_name(module)))
         .collect();
     let mut expected = BTreeSet::new();
     for (kind, name) in &sections {

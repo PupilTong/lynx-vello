@@ -17,14 +17,14 @@ mod bytecode;
 
 use bobcat_core::{BTS_CHUNK_IMPORTS, BTS_CHUNK_UNDEFINED, MTS_CHUNK_IMPORTS};
 use bobcat_source::native::primjs::{self, Completion, ConvertOptions, SectionKind};
-use quickjs_rust_bridge::Runtime;
-use quickjs_rust_bridge::bytecode::{self as fork, RegExpCompiler, Root};
+use quickjs_rust_bridge::bytecode::Verifier;
 
 #[test]
 fn fixture_sections_convert_and_pass_the_checks() {
-    let runtime = Runtime::new().unwrap();
-    let realm = runtime.create_context().unwrap();
-    let regexps: &dyn RegExpCompiler = &realm;
+    // One verifier converts, as a container's does; another reads each
+    // module back and checks it again, as bytes from any writer.
+    let verifier = Verifier::new();
+    let rechecker = Verifier::new();
     let mut converted = 0usize;
     let mut failures = Vec::new();
     let mut refused_eval = Vec::new();
@@ -56,14 +56,14 @@ fn fixture_sections_convert_and_pass_the_checks() {
                     undefined_names,
                     completion,
                 };
-                match primjs::convert_script(&program, &options, regexps) {
-                    Ok(bytes) => {
-                        if let Err(error) = fork::check(&bytes, regexps, Root::Module) {
-                            failures.push(format!("{label}: check: {error}"));
-                        } else {
-                            converted += 1;
+                match primjs::convert_script(&program, &options, &verifier) {
+                    Ok(module) => match rechecker.module_from_bytes(module.bytes()) {
+                        Err(error) => failures.push(format!("{label}: check: {error}")),
+                        Ok(again) if again != module => {
+                            failures.push(format!("{label}: checked again, the bytes differ"));
                         }
-                    }
+                        Ok(_) => converted += 1,
+                    },
                     Err(primjs::ConvertError::Unsupported { opcode, .. })
                         if section.kind == SectionKind::RootLepus
                             && fixture.name.ends_with("-development")

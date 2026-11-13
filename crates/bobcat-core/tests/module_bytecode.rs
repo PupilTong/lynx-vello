@@ -1,10 +1,12 @@
 //! Module bytecode end to end: a fetcher answering
 //! [`LoadedSource::ModuleBytecode`] with bytecode the engine's own compiler
-//! wrote (`Context::compile_module_bytecode`), on a real view's main-thread
-//! realm and its background Worker realm. Each realm boots from a bytecode
-//! entry, `import()`s a bytecode module, `require`s one from its running
-//! entry body, is refused bytes that are not a module on both paths, and the
-//! main thread runs a chunk answered as bytecode through `__LoadLepusChunk`.
+//! wrote (`Context::compile_module_bytecode`) and a `Verifier` accepted, on a
+//! real view's main-thread realm and its background Worker realm. Each realm
+//! boots from a bytecode entry, `import()`s a bytecode module and `require`s
+//! one from its running entry body, and the main thread runs a chunk answered
+//! as bytecode through `__LoadLepusChunk`. Bytes the verifier refuses never
+//! become a [`VerifiedModule`], so no answer carries them; the bridge's
+//! tests cover those refusals at the verifier.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -12,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use bobcat_core::resource::{
     LoadedSource, ResourceError, ResourceErrorKind, ResourceErrorPhase, ResourceFetcher,
-    RetryAdvice, SourceCompletion, SourceRequest,
+    RetryAdvice, SourceCompletion, SourceRequest, VerifiedModule,
 };
 use bobcat_core::{
     DrawTarget, EngineEvent, LynxGroup, MTS_CHUNK_IMPORTS, MTS_CHUNK_PREAMBLE, NoWakeup, Painter,
@@ -31,22 +33,10 @@ const MAIN_BODY: &str = r"
 import { createRequire } from 'bobcat:module';
 const require = createRequire(import.meta.url);
 const dep = require('./dep.js');
-let refused;
-try {
-  require('./refused.js');
-  refused = 'loaded';
-} catch (error) {
-  refused = error instanceof SyntaxError
-    && error.message.includes(`bytecode rejected for 'app:///refused.js'`);
-}
-console.log(['main', dep.value, refused].join(' '));
+console.log(['main', dep.value].join(' '));
 import('./lazy.js').then(
   (module) => console.log('main import ' + module.value),
   (error) => console.log('main import failed ' + error.message));
-import('./refused-async.js').then(
-  () => console.log('main refused-async loaded'),
-  (error) => console.log('main refused-async '
-    + error.message.includes(`bytecode rejected for 'app:///refused-async.js'`)));
 __LoadLepusChunk('chunk', {});
 __LoadLepusChunk('chunk', {});
 globalThis.renderPage = function () {
@@ -66,29 +56,17 @@ import { console } from 'bobcat:bts-runtime';
 import { createRequire } from 'bobcat:module';
 const require = createRequire(import.meta.url);
 const dep = require('./bts/dep.js');
-let refused;
-try {
-  require('./bts/refused.js');
-  refused = 'loaded';
-} catch (error) {
-  refused = error instanceof SyntaxError
-    && error.message.includes(`bytecode rejected for 'app:///bts/refused.js'`);
-}
-console.log(['background', dep.value, refused].join(' '));
+console.log(['background', dep.value].join(' '));
 import('./bts/lazy.js').then(
   (module) => console.log('background import ' + module.value),
   (error) => console.log('background import failed ' + error.message));
-import('./bts/refused-async.js').then(
-  () => console.log('background refused-async loaded'),
-  (error) => console.log('background refused-async '
-    + error.message.includes(`bytecode rejected for 'app:///bts/refused-async.js'`)));
 ";
 
 /// What a URL answers with.
 #[derive(Clone)]
 enum Answer {
     Text(String),
-    Bytecode(Vec<u8>),
+    Bytecode(VerifiedModule),
 }
 
 struct Served {
@@ -116,9 +94,9 @@ impl ResourceFetcher for Served {
             | SourceRequest::Fetch { url, .. } => url.clone(),
         };
         let answer = match (&request, self.answers.get(&url)) {
-            (SourceRequest::Module(_), Some(Answer::Bytecode(bytes))) => {
+            (SourceRequest::Module(_), Some(Answer::Bytecode(module))) => {
                 Ok(LoadedSource::ModuleBytecode {
-                    bytes: bytes::Bytes::from(bytes.clone()),
+                    module: module.clone(),
                     url: url.clone(),
                 })
             }
@@ -139,18 +117,16 @@ impl ResourceFetcher for Served {
     }
 }
 
-/// The engine's own module bytecode for `source`, named `url`.
+/// The engine's own module bytecode for `source`, named `url`, verified.
 fn compiled(url: &str, source: &str) -> Answer {
     let runtime = quickjs_rust_bridge::Runtime::new().unwrap();
     let compiler = runtime.create_context().unwrap();
-    Answer::Bytecode(compiler.compile_module_bytecode(url, source).unwrap())
-}
-
-/// Script bytecode: well-formed, but not a module, so every load refuses it.
-fn script_bytecode() -> Answer {
-    let runtime = quickjs_rust_bridge::Runtime::new().unwrap();
-    let compiler = runtime.create_context().unwrap();
-    Answer::Bytecode(compiler.compile_script_bytecode("script.js", "1").unwrap())
+    let bytes = compiler.compile_module_bytecode(url, source).unwrap();
+    Answer::Bytecode(
+        quickjs_rust_bridge::bytecode::Verifier::new()
+            .module_from_bytes(&bytes)
+            .unwrap(),
+    )
 }
 
 /// Boots one view over `answers` and collects what its realms logged, until
@@ -225,8 +201,6 @@ async fn both_realms_load_module_bytecode_on_every_path() {
         "app:///lazy.js".to_owned(),
         compiled("app:///lazy.js", "export const value = 7;"),
     );
-    answers.insert("app:///refused.js".to_owned(), script_bytecode());
-    answers.insert("app:///refused-async.js".to_owned(), script_bytecode());
     // `__LoadLepusChunk` loads a chunk at its section URL under the card's.
     answers.insert(
         "app:///main.js/chunk.js".to_owned(),
@@ -247,67 +221,17 @@ async fn both_realms_load_module_bytecode_on_every_path() {
         "app:///bts/lazy.js".to_owned(),
         compiled("app:///bts/lazy.js", "export const value = 8;"),
     );
-    answers.insert("app:///bts/refused.js".to_owned(), script_bytecode());
-    answers.insert("app:///bts/refused-async.js".to_owned(), script_bytecode());
 
     assert_eq!(
-        logs_of(MAIN_URL, Some(BACKGROUND_URL), answers, 8).await,
+        logs_of(MAIN_URL, Some(BACKGROUND_URL), answers, 6).await,
         [
-            "background 43 true",
+            "background 43",
             "background import 8",
-            "background refused-async true",
             "chunk true",
             "chunk true",
-            "main 42 true",
+            "main 42",
             "main import 7",
-            "main refused-async true",
         ]
-    );
-}
-
-/// An entry answered with bytes that are not a module boots no further than
-/// a text entry that does not parse: boot's import of it rejects with the
-/// reason, which is the app's failure, and the view goes on.
-#[tokio::test]
-async fn a_refused_bytecode_entry_rejects_boots_import_with_the_reason() {
-    let group = LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Sequential)
-        .await
-        .expect("the group starts");
-    let mut answers = HashMap::new();
-    answers.insert(MAIN_URL.to_owned(), script_bytecode());
-    let answers = Arc::new(answers);
-    let mut view = group
-        .create_lynx_view(
-            32.0,
-            24.0,
-            1.0,
-            move |_reports| Served { answers },
-            Vec::new(),
-            ViewSources::new("app:///", MAIN_URL, SCREEN, "en-US"),
-        )
-        .expect("the view is built");
-    let mut painter = Painter::new(DrawTarget::Offscreen, 32.0, 24.0, 1.0)
-        .await
-        .expect("the painter is built");
-    painter.attach(&view).expect("a fresh view takes a painter");
-    let deadline = Instant::now() + Duration::from_secs(30);
-    let mut reason = None;
-    while reason.is_none() {
-        for event in view.pump() {
-            match event {
-                EngineEvent::ScriptRunError(error) => reason = Some(error.message.to_string()),
-                EngineEvent::StartupFailed(error) => panic!("boot failed: {error}"),
-                EngineEvent::Panicked(error) => panic!("panicked: {}", error.message),
-                _ => {}
-            }
-        }
-        assert!(Instant::now() < deadline, "the entry's import was refused");
-        std::thread::sleep(Duration::from_millis(1));
-    }
-    let reason = reason.unwrap();
-    assert!(
-        reason.contains("bytecode rejected for 'app:///main.js'"),
-        "{reason}"
     );
 }
 

@@ -26,7 +26,7 @@ use crate::bytecode_abi::{BC_VERSION, atom_int, export_type, tag};
 /// JS_READ_OBJ_VERIFY)` reads back as the same program. A file atom whose
 /// text the runtime interns as a built-in or integer atom is written as
 /// that atom, which is what the engine reads it as either way. The program
-/// is not verified here; see [`super::verify`].
+/// is not verified here; see [`super::Verifier`].
 pub fn write_program(program: &Program) -> Result<Vec<u8>, WriteError> {
     let mut writer = Writer {
         program,

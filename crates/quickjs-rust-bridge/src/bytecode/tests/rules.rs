@@ -178,9 +178,9 @@ fn programs_built_through_the_model_load_and_run() {
     });
     assert_eq!(verdict(&program, &realm), Ok(()));
     let name = "app:///built.js";
-    realm
-        .complete_module_bytecode(name, name, &write_program(&program).unwrap())
-        .unwrap();
+    let module = crate::bytecode::Verifier::new().module(&program).unwrap();
+    assert_eq!(module.bytes(), write_program(&program).unwrap().as_slice());
+    realm.complete_module_bytecode(name, name, &module).unwrap();
     let promise = realm.load_module(name).unwrap();
     runtime.drain_pending_jobs(&realm).unwrap();
     realm.settled_promise_result(&promise).unwrap().unwrap();

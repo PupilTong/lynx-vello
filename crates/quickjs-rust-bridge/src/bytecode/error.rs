@@ -67,7 +67,7 @@ impl fmt::Display for WriteError {
 impl std::error::Error for WriteError {}
 
 /// The rule a program broke. Each variant is one rule of
-/// [`super::verify`]; the module documentation lists what each protects.
+/// [`super::Verifier`]; the module documentation lists what each protects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Rule {
@@ -183,7 +183,7 @@ pub enum Rule {
     FallsOffEnd,
 }
 
-/// A program [`super::verify`] refused: which function, which instruction
+/// A program [`super::Verifier`] refused: which function, which instruction
 /// and which rule.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifyError {
@@ -236,3 +236,28 @@ impl fmt::Display for CheckError {
 }
 
 impl std::error::Error for CheckError {}
+
+/// Why a regular expression has no bytecode: what
+/// [`super::Verifier::compile_regexp`] answers instead of bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegExpError {
+    /// The engine refuses the pattern or the flags.
+    Refused,
+    /// There is no engine to compile with: creating its runtime or realm
+    /// failed, for the reason given.
+    NoEngine(String),
+}
+
+impl fmt::Display for RegExpError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Refused => formatter.write_str("the engine refuses the pattern and flags"),
+            Self::NoEngine(reason) => write!(
+                formatter,
+                "no engine to compile regular expressions with: {reason}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for RegExpError {}

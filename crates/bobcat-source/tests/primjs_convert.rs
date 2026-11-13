@@ -14,6 +14,7 @@ mod bytecode;
 use std::time::Duration;
 
 use bobcat_source::native::primjs::{self, ConvertOptions, SectionKind};
+use quickjs_rust_bridge::bytecode::Verifier;
 use quickjs_rust_bridge::{Context, EvalOptions, EvalSource, Runtime, RuntimeOptions, ValueKind};
 
 /// What a run left behind: `globalThis.__result`, or why there is none.
@@ -77,11 +78,12 @@ fn subject(section: &[u8]) -> Outcome {
     let (mut runtime, mut realm) = realm();
     let (_, program) = primjs::read_payload(section).expect("the reader accepts every section");
     let name = "app:///converted.js";
-    let bytes = match primjs::convert_script(&program, &ConvertOptions::script(name), &realm) {
-        Ok(bytes) => bytes,
+    let verifier = Verifier::new();
+    let module = match primjs::convert_script(&program, &ConvertOptions::script(name), &verifier) {
+        Ok(module) => module,
         Err(error) => return Outcome::Unconverted(error.to_string()),
     };
-    if let Err(error) = realm.complete_module_bytecode(name, name, &bytes) {
+    if let Err(error) = realm.complete_module_bytecode(name, name, &module) {
         return Outcome::Refused(describe(&error));
     }
     let promise = match realm.load_module(name) {
@@ -272,8 +274,9 @@ fn corpus_runs() {
     }
 }
 
-/// The fork compiles `source` as a module, writes it as bytecode and runs
-/// the bytecode through `complete_module_bytecode`.
+/// The fork compiles `source` as a module, writes it as bytecode, a
+/// [`Verifier`] checks it, and the realm runs it through
+/// `complete_module_bytecode`.
 fn fork_bytecode_run(source: &str) -> Outcome {
     let name = "app:///source.js";
     // Compiled in a realm of its own, so the realm that runs the bytes
@@ -283,9 +286,12 @@ fn fork_bytecode_run(source: &str) -> Outcome {
         .compile_module_bytecode(name, source)
         .expect("the fork compiles the program");
     let (mut runtime, mut realm) = realm();
-    realm
-        .complete_module_bytecode(name, name, &bytes)
+    let module = Verifier::new()
+        .module_from_bytes(&bytes)
         .expect("the fork's bytecode passes");
+    realm
+        .complete_module_bytecode(name, name, &module)
+        .expect("the module completes");
     let promise = realm.load_module(name).expect("module loads");
     runtime.drain_pending_jobs(&realm).expect("jobs");
     if let Err(error) = realm.settled_promise_result(&promise) {

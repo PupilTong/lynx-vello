@@ -66,12 +66,12 @@ impl Default for QuickJsConfig {
     }
 }
 
-/// The body of one module answer: source text, or module bytecode of the
-/// engine's format to be checked and verified as it is read.
+/// The body of one module answer: source text, or verified module bytecode
+/// of the engine's format, which the engine's verifying read reads.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum ModuleBody<'a> {
     Text(&'a str),
-    Bytecode(&'a [u8]),
+    Bytecode(&'a quickjs::bytecode::VerifiedModule),
 }
 
 /// A module answer's body, owned, as [`crate::realm::owner::module_answer`]
@@ -79,14 +79,14 @@ pub(crate) enum ModuleBody<'a> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum LoadedModule {
     Text(String),
-    Bytecode(bytes::Bytes),
+    Bytecode(quickjs::bytecode::VerifiedModule),
 }
 
 impl LoadedModule {
     pub(crate) fn body(&self) -> ModuleBody<'_> {
         match self {
             Self::Text(text) => ModuleBody::Text(text),
-            Self::Bytecode(bytes) => ModuleBody::Bytecode(bytes),
+            Self::Bytecode(module) => ModuleBody::Bytecode(module),
         }
     }
 }
@@ -543,9 +543,10 @@ impl ScriptEngine {
     /// a response URL containing one fails the module instead, because the
     /// replaced URL would name an address the fetcher never answered for.
     ///
-    /// Module bytecode is handed to the bridge's checked completion; bytes
-    /// it refuses complete the module with that refusal as its error, so the
-    /// import fails with the reason, as an answer that failed to load does.
+    /// Module bytecode is verified already ([`LoadedModule::Bytecode`]) and
+    /// is handed to the bridge as it is; the engine's verifying read, when
+    /// the module is compiled, is what can still refuse it, and its refusal
+    /// fails the import with the reason.
     pub(crate) fn complete_module(
         &self,
         runtime: &mut ScriptRuntime,
@@ -572,15 +573,8 @@ impl ScriptEngine {
                     .realm
                     .complete_module_with(name, url, text, code.as_bridge()),
             },
-            Ok((url, ModuleBody::Bytecode(bytes))) => {
-                match self.realm.complete_module_bytecode(name, url, bytes) {
-                    Err(error) if error.kind == quickjs::ErrorKind::BytecodeRejected => {
-                        let reason = format!("bytecode rejected for '{url}': {}", error.message)
-                            .replace('\0', "\u{fffd}");
-                        self.realm.complete_module(name, Err(&reason))
-                    }
-                    other => other,
-                }
+            Ok((url, ModuleBody::Bytecode(module))) => {
+                self.realm.complete_module_bytecode(name, url, module)
             }
             Err(error) => self.realm.complete_module(name, Err(error.as_str())),
         };

@@ -11,8 +11,7 @@
 mod bytecode;
 
 use bobcat_source::native::primjs::{self, ConvertOptions};
-use quickjs_rust_bridge::Runtime;
-use quickjs_rust_bridge::bytecode::{self as fork, RegExpCompiler, Root};
+use quickjs_rust_bridge::bytecode::Verifier;
 
 fn seeds() -> Vec<Vec<u8>> {
     let mut seeds = Vec::new();
@@ -99,9 +98,8 @@ const ITERATIONS: usize = 100_000;
 
 #[test]
 fn mutated_bytecode_converts_or_is_refused() {
-    let runtime = Runtime::new().unwrap();
-    let realm = runtime.create_context().unwrap();
-    let regexps: &dyn RegExpCompiler = &realm;
+    let verifier = Verifier::new();
+    let rechecker = Verifier::new();
     let options = ConvertOptions::script("app:///mutated.js");
     let mut rng = Rng(0x5eed_c0de_cafe_0007);
     let seeds = seeds();
@@ -119,9 +117,9 @@ fn mutated_bytecode_converts_or_is_refused() {
             continue;
         };
         read += 1;
-        if let Ok(bytes) = primjs::convert_script(&program, &options, regexps) {
+        if let Ok(module) = primjs::convert_script(&program, &options, &verifier) {
             converted += 1;
-            if let Err(error) = fork::check(&bytes, regexps, Root::Module) {
+            if let Err(error) = rechecker.module_from_bytes(module.bytes()) {
                 panic!("iteration {iteration}: converted bytes fail the checks: {error}");
             }
         }

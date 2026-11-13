@@ -59,6 +59,7 @@
 
 use std::sync::Arc;
 
+use bobcat_core::resource::VerifiedModule;
 use bobcat_core::{PageConfig, PreparsedStyleSheet, ScreenMetrics, ViewSources};
 use bytes::Bytes;
 use thiserror::Error;
@@ -343,7 +344,7 @@ impl PageSource {
     /// replaces an earlier registration of the same URL, so two pages
     /// registering one input URL leave the later one's bodies — and whatever
     /// URL only the earlier one had.
-    pub fn register_with(&self, resources: &impl Register<PreparsedStyleSheet>) {
+    pub fn register_with(&self, resources: &impl Register<PreparsedStyleSheet, VerifiedModule>) {
         match &self.page {
             Page::Container(container) => container.register_with(resources),
             Page::Xml(xml) => {
@@ -553,7 +554,7 @@ impl DeferredPage {
     /// decode fails those loads with its decode error.
     pub fn register_in_background(
         &self,
-        resources: &impl RegisterInBackground<PreparsedStyleSheet>,
+        resources: &impl RegisterInBackground<PreparsedStyleSheet, VerifiedModule>,
     ) {
         match &self.page {
             Deferred::Decoded(page) => page.register_with(resources),
@@ -745,7 +746,7 @@ pub(crate) fn background_boot_source(input: &Url, has_app_service: bool) -> Stri
 pub fn register_lynx_xml_response(
     input: &Url,
     source: &str,
-    resources: &impl Register<PreparsedStyleSheet>,
+    resources: &impl Register<PreparsedStyleSheet, VerifiedModule>,
 ) -> Result<LynxXmlResponseRegistration, SourceError> {
     let mapped = map_lynx_xml(input, source, LynxXmlUrlPolicy::ResponseFragments)?;
     let background_thread_url = mapped.background_thread.map(|(url, source)| {
@@ -814,7 +815,7 @@ const fn raw_lynx_xml_config() -> PageConfig {
 }
 
 fn register_text(
-    resources: &impl Register<PreparsedStyleSheet>,
+    resources: &impl Register<PreparsedStyleSheet, VerifiedModule>,
     url: &Url,
     source: &str,
     media_type: &str,

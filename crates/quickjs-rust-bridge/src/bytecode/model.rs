@@ -1,5 +1,5 @@
 //! The program model: what [`super::read_program`] returns, what
-//! [`super::write_program`] writes and what [`super::verify`] checks.
+//! [`super::write_program`] writes and what [`super::Verifier`] checks.
 
 use std::borrow::Cow;
 

@@ -79,9 +79,6 @@ pub(crate) struct QjsRequiredSource {
     pub(crate) cached_length: usize,
     pub(crate) cached_kind: i32,
     pub(crate) capture: i32,
-    /// With `error`: nonzero for refused bytecode, thrown as a
-    /// `SyntaxError`.
-    pub(crate) error_is_syntax: i32,
 }
 
 /// `parameters` is the list the load was asked with, or null for an import
@@ -185,6 +182,7 @@ unsafe extern "C" {
     ) -> *mut QjsRuntime;
     pub(crate) fn qjs_runtime_free(runtime: *mut QjsRuntime);
     pub(crate) fn qjs_context_new(runtime: *mut QjsRuntime) -> *mut QjsContext;
+    pub(crate) fn qjs_context_new_bare(runtime: *mut QjsRuntime) -> *mut QjsContext;
     pub(crate) fn qjs_context_free(context: *mut QjsContext);
     pub(crate) fn qjs_context_enable_module_loading(
         context: *mut QjsContext,

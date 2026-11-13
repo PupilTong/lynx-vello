@@ -351,9 +351,9 @@ fn registered_answer<P: Platform>(
         (SourceKind::StyleSheet, Registered::StyleSheet(sheet)) => Some(Ok(
             LoadedSource::StyleSheet(StyleSheetSource::Preparsed(sheet)),
         )),
-        (SourceKind::Script, Registered::ModuleBytecode(bytes)) => {
+        (SourceKind::Script, Registered::ModuleBytecode(module)) => {
             Some(Ok(LoadedSource::ModuleBytecode {
-                bytes,
+                module,
                 url: url.to_string(),
             }))
         }

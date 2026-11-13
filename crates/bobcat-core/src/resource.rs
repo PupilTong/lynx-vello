@@ -3,6 +3,7 @@
 use std::rc::Rc;
 use std::sync::Arc;
 
+pub use quickjs_rust_bridge::bytecode::VerifiedModule;
 pub use vant::error::{ResourceError, ResourceErrorKind, ResourceErrorPhase, RetryAdvice};
 
 use crate::style::PreparsedStyleSheet;
@@ -306,14 +307,16 @@ pub enum LoadedSource {
     },
     /// Module bytecode of the engine's own format, answering a
     /// [`SourceRequest::Module`] the way [`Self::Module`]'s text does: an
-    /// entry, an import, a worker script or a synchronous load. The bytes may
-    /// come from a writer the engine does not trust; the realm checks them
-    /// when they arrive and verifies them again as it reads them, and bytes
-    /// it refuses fail the load with the reason (the import rejects, the
-    /// synchronous load throws a `SyntaxError`). Only a registrant supplies
-    /// these, never a network response.
+    /// entry, an import, a worker script or a synchronous load. It is a
+    /// [`VerifiedModule`]: the bridge's verifier checked it against every
+    /// rule when it was made (for a `.lynx.bundle`, when the container was
+    /// registered), so the realm runs no check of its own and only reads it,
+    /// with the engine's verifying read. Bytes that read refuses fail the
+    /// load with the reason (the import rejects, the synchronous load throws
+    /// a `SyntaxError`). Only a registrant supplies these, never a network
+    /// response.
     ModuleBytecode {
-        bytes: bytes::Bytes,
+        module: VerifiedModule,
         /// The response URL, as for [`Self::Module`]. The module name the
         /// bytes carry should be the URL the module is requested by.
         url: String,

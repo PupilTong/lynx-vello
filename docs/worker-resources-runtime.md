@@ -256,17 +256,21 @@ native re-evaluates per call — see `docs/tracking/deviations.md`.
 
 A registrant can supply a module as bytecode of the engine's QuickJS fork
 instead of text: `Registrar::register_module_bytecode` and
-`Resources::register_module_bytecode`. Such a registration answers only a
+`Resources::register_module_bytecode`, which take a `VerifiedModule`
+(`quickjs_rust_bridge::bytecode`, re-exported as
+`bobcat_core::resource::VerifiedModule`): the bytes of a program the bridge's
+`Verifier` checked against every rule of `quickjs_rust_bridge::bytecode` and
+wrote, a value nothing else constructs. Such a registration answers only a
 module request, as `LoadedSource::ModuleBytecode`; a stylesheet, font or fetch
 request for that URL is refused the way a request for a registered stylesheet
 is, and no network response becomes bytecode. Either realm loads it wherever
 it loads module text: the entry and `import()` through
 `Context::complete_module_bytecode`, a `require`/`loadModuleSync` and an
 import linked inline through the synchronous loader's
-`RequiredBody::ModuleBytecode`. The bridge checks the bytes against every rule
-of `quickjs_rust_bridge::bytecode` when they are supplied, keeps the checked
-bytes, and lets the fork read them with `JS_READ_OBJ_VERIFY` when the module
-is compiled. A refusal is a `SyntaxError` whose message is
+`RequiredBody::ModuleBytecode`. No Rust check runs at load: the realm keeps a
+copy of the bytes and lets the fork read them with `JS_READ_OBJ_VERIFY` when
+the module is compiled. A refusal by that read is a `SyntaxError` whose
+message is
 `bytecode rejected for '<url>': <reason>`: thrown by a `require`, the
 rejection of an `import()`, a failed boot for an entry. Core does not know
 where the bytes came from; today the one registrant is `bobcat-source`,

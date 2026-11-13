@@ -1,8 +1,10 @@
 //! `PrimJS` global scripts to modules of the pinned `QuickJS` fork.
 //!
-//! [`convert_script`] turns a [`Program`] the reader returned into the bytes
-//! of a fork module that [`quickjs_rust_bridge::Context::complete_module_bytecode`]
-//! accepts and that runs as the script would. The design is
+//! [`convert_script`] turns a [`Program`] the reader returned into a fork
+//! module, checked and written by a [`Verifier`] as the
+//! [`VerifiedModule`] that
+//! [`quickjs_rust_bridge::Context::complete_module_bytecode`] takes, which
+//! runs as the script would. The design is
 //! `docs/primjs-bytecode-conversion-design.md` (§4, §6); this module
 //! documentation states what the code does.
 //!
@@ -60,9 +62,12 @@
 //! # Checks
 //!
 //! The output is built through [`quickjs_rust_bridge::bytecode`]'s model and
-//! passed through its [`verify`](quickjs_rust_bridge::bytecode::verify)
-//! before it is written, so a program the fork's interpreter must not run
-//! is a [`ConvertError::Verify`] naming the function and the instruction.
+//! handed to [`Verifier::module`], which checks every rule before it writes
+//! it, so a program the fork's interpreter must not run is a
+//! [`ConvertError::Verify`] naming the function and the instruction. A
+//! regular expression literal's bytecode comes from the same verifier's
+//! [`Verifier::compile_regexp`], which compiles each pattern and flags
+//! once for the rule's comparison and for every later literal like it.
 //! Conversion is linear in the input apart from the closure variables the
 //! names add (bounded by nesting depth times distinct names), recursion is
 //! bounded by the reader's nesting limit, and no input makes it panic.
@@ -79,8 +84,8 @@ use atoms::Atoms;
 pub use classify::{OpcodeClass, REJECTED, SAME, TRANSLATED, opcode_class};
 use function::{NameSlots, ParentNames, Role};
 use quickjs_rust_bridge::bytecode::{
-    self as fork, ClosureType, Export, Import, Instruction, Module, ModuleRequest, Operand as Fo,
-    RegExpCompiler,
+    self as fork, CheckError, ClosureType, Export, Import, Instruction, Module, ModuleRequest,
+    Operand as Fo, VerifiedModule, Verifier,
 };
 use quickjs_rust_bridge::bytecode_abi::{js_mode, limits, op, var_kind};
 
@@ -278,7 +283,7 @@ struct Name {
 /// State of one conversion.
 struct Converter<'a, 'p> {
     atoms: Atoms<'p>,
-    regexps: &'a dyn RegExpCompiler,
+    regexps: &'a Verifier,
     names: Vec<Name>,
     name_ids: HashMap<fork::Atom, u32>,
     /// The names each function reaches (its own and its descendants'),
@@ -295,9 +300,10 @@ struct Converter<'a, 'p> {
     unnamed: fork::Atom,
 }
 
-/// Converts a `PrimJS` global script into the bytes of a fork module (see
-/// the module documentation). `regexps` compiles the regular expression
-/// literals; pass the realm the module will run in.
+/// Converts a `PrimJS` global script into a fork module (see the module
+/// documentation), checked and written by `verifier`, which also compiles
+/// the regular expression literals. One verifier serves every script of a
+/// container, so a literal they share compiles once.
 #[allow(
     clippy::too_many_lines,
     reason = "the module record and function, in the order the format lists them"
@@ -305,8 +311,8 @@ struct Converter<'a, 'p> {
 pub fn convert_script(
     program: &Program,
     options: &ConvertOptions<'_>,
-    regexps: &dyn RegExpCompiler,
-) -> Result<Vec<u8>, ConvertError> {
+    verifier: &Verifier,
+) -> Result<VerifiedModule, ConvertError> {
     let mut atoms = Atoms::new(program);
     let module_name = atoms.intern_str(options.module_name);
     if module_name == fork::Atom::NULL || options.module_name.is_empty() {
@@ -318,7 +324,7 @@ pub fn convert_script(
     let unnamed = atoms.intern_str("lexical variable");
     let mut converter = Converter {
         atoms,
-        regexps,
+        regexps: verifier,
         names: Vec::new(),
         name_ids: HashMap::new(),
         needs: Vec::new(),
@@ -505,8 +511,14 @@ pub fn convert_script(
         atoms: std::mem::take(&mut converter.atoms.table),
         root: fork::Value::Module(Box::new(module)),
     };
-    fork::verify(&program, regexps).map_err(ConvertError::Verify)?;
-    fork::write_program(&program).map_err(|error| ConvertError::Write(error.message))
+    verifier.module(&program).map_err(|error| match error {
+        CheckError::Verify(error) => ConvertError::Verify(error),
+        CheckError::Write(error) => ConvertError::Write(error.message),
+        // The root is the module built above, and nothing was read.
+        other @ (CheckError::Read(_) | CheckError::Root(_)) => {
+            ConvertError::Write(other.to_string())
+        }
+    })
 }
 
 impl Converter<'_, '_> {

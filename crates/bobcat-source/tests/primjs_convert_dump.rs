@@ -20,6 +20,7 @@ use quickjs_rust_bridge::{Runtime, bytecode as fork};
 fn dump() {
     let runtime = Runtime::new().unwrap();
     let realm = runtime.create_context().unwrap();
+    let verifier = fork::Verifier::new();
     let target = std::env::var("PRIMJS_DUMP").unwrap_or_else(|_| "arith-basic".to_owned());
     let variant = std::env::var("PRIMJS_DUMP_VARIANT").unwrap_or_else(|_| "sdk-2.14".to_owned());
     let (bundle, source): (Vec<u8>, Option<String>) = match bytecode::PROGRAMS
@@ -52,10 +53,10 @@ fn dump() {
                 }
             }
             let options = primjs::ConvertOptions::script("app:///dump.js");
-            if let Ok(bytes) = primjs::convert_script(&program, &options, &realm) {
+            if let Ok(module) = primjs::convert_script(&program, &options, &verifier) {
                 println!(
                     "{}",
-                    fork::disassemble(&fork::read_program(&bytes).unwrap())
+                    fork::disassemble(&fork::read_program(module.bytes()).unwrap())
                 );
             }
             return;
@@ -76,9 +77,9 @@ fn dump() {
         println!("==== PrimJS {:?} {}", section.kind, section.name);
         println!("{}", primjs::disassemble(&program));
         let options = primjs::ConvertOptions::script("app:///dump.js");
-        match primjs::convert_script(&program, &options, &realm) {
-            Ok(bytes) => {
-                let converted = fork::read_program(&bytes).unwrap();
+        match primjs::convert_script(&program, &options, &verifier) {
+            Ok(module) => {
+                let converted = fork::read_program(module.bytes()).unwrap();
                 println!("==== converted");
                 println!("{}", fork::disassemble(&converted));
             }

@@ -139,8 +139,9 @@ Accepted consequences, each a change from the two paths this replaced:
 
 A native `.lynx.bundle` usually carries its scripts as PrimJS bytecode, not
 text. `ContainerSources` converts each such section to a module of the fork's
-bytecode when it builds the container and registers the result as module
-bytecode (`Registrar::register_module_bytecode`); the design, the rules a
+bytecode when it builds the container, has the bridge's verifier check and
+write it, and registers the resulting `VerifiedModule`
+(`Registrar::register_module_bytecode`); the design, the rules a
 converted program is held to and the rulings are in
 `docs/primjs-bytecode-conversion-design.md`.
 
@@ -149,10 +150,15 @@ sections; `native::decode` and `native::convert`, the web-bundle tool path,
 still answer `CodeCacheBundle`, since a `.web.bundle` cannot hold bytecode.
 Each section is read (`primjs::read_payload`) and converted
 (`primjs::convert_script`) with the URL it is registered under as its module
-name. Conversion needs an engine only to compile regular expression literals;
-the container makes one scratch runtime and realm for that, and the realm
-that later loads the module compiles each literal again and compares, so
-nothing from the scratch realm is trusted.
+name, through one `quickjs_rust_bridge::bytecode::Verifier` for the whole
+container. The verifier checks each converted program against every rule and
+writes it, once, here; a realm that loads the module runs no Rust check of its
+own, and the fork's verifying read still reads it. Conversion needs an engine
+only to compile regular expression literals, and that engine is the
+verifier's: a runtime and a realm with only the basic objects, made on the
+first literal, with each pattern and flags compiled once for the converter and
+the rule that checks the literal alike. A section that fails to read, convert
+or verify refuses the whole container.
 
 | Section | URL | Names bound as imports | The module's default export |
 | --- | --- | --- | --- |

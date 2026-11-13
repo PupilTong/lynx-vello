@@ -12,7 +12,7 @@ use std::time::Duration;
 use super::corpus::corpus;
 use crate::bytecode::model::layout;
 use crate::bytecode::{
-    ClosureType, Function, FunctionKind, Instruction, Operand, Program, Root, Value, read_program,
+    ClosureType, Function, FunctionKind, Instruction, Operand, Program, Value, read_program,
     write_program,
 };
 use crate::bytecode_abi::OP_COUNT;
@@ -383,11 +383,8 @@ fn limited_runtime() -> Runtime {
 fn run_mutant(bytes: &[u8], module: Option<&str>, counts: &mut Counts, dump: Option<&str>) {
     let mut runtime = limited_runtime();
     let realm = runtime.create_context().unwrap();
-    let Ok(checked) = crate::bytecode::check(
-        bytes,
-        &realm as &dyn crate::bytecode::RegExpCompiler,
-        Root::Any,
-    ) else {
+    let Ok(checked) = crate::bytecode::check(bytes, &realm as &dyn crate::bytecode::RegExpCompiler)
+    else {
         counts.refused_by_rust += 1;
         return;
     };
@@ -420,7 +417,17 @@ fn run_mutant(bytes: &[u8], module: Option<&str>, counts: &mut Counts, dump: Opt
                     _ => None,
                 });
             let name = carried.as_deref().unwrap_or(seed_name);
-            if realm.complete_module_bytecode(name, name, bytes).is_ok() {
+            let Ok(verified) = crate::bytecode::Verifier::new().module_from_bytes(bytes) else {
+                // The checks above took any root; a module takes a module.
+                counts.refused_by_rust += 1;
+                drop(realm);
+                runtime.run_gc();
+                return;
+            };
+            if realm
+                .complete_module_bytecode(name, name, &verified)
+                .is_ok()
+            {
                 counts.executed += 1;
                 if realm.load_module(name).is_ok() {
                     let _ = runtime.drain_pending_jobs(&realm);

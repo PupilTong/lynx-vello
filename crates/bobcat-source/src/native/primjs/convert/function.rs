@@ -852,7 +852,7 @@ impl Converter<'_, '_> {
         let compiled = self
             .regexps
             .compile_regexp(&units, &flags)
-            .ok_or_else(|| error("the engine refuses the pattern and flags"))?;
+            .map_err(|refusal| error(&refusal.to_string()))?;
         let index = u32::try_from(function.cpool.len() + appended.len())
             .map_err(|_| error("constant pool too large"))?;
         appended.push(fork::Value::String(fork::JsString::Latin1(compiled)));

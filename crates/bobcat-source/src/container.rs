@@ -33,8 +33,9 @@
 //! | the BTS boot script (every container with an entry) | `U` with its fragment replaced by `#background-thread` | `background_boot_source` |
 //!
 //! A `.lynx.bundle`'s `PrimJS` bytecode sections are converted
-//! (`crate::native::primjs::convert_script`) and registered as module
-//! bytecode, each named by its URL, by the same rule:
+//! (`crate::native::primjs::convert_script`), checked and written once by the
+//! container's one [`Verifier`], and registered as the [`VerifiedModule`] it
+//! answers, each named by its URL, by the same rule:
 //!
 //! | Section | URL | Imports, completion |
 //! |---|---|---|
@@ -49,8 +50,8 @@
 //! each with the main-thread context. A container is a page's when it has
 //! a `root` as source or bytecode, and its BTS boot loads `/app-service.js`
 //! when the manifest has it as source or as a `JS_BYTECODE` file. A section
-//! the reader or the converter refuses refuses the whole container, with
-//! [`crate::native::ConvertError::Bytecode`].
+//! the reader, the converter or the verifier refuses refuses the whole
+//! container, with [`crate::native::ConvertError::Bytecode`].
 //!
 //! Who asks for each: a page's boot imports `root.js`; MTS's
 //! `__LoadLepusChunk` a Lepus chunk and its `lynx.loadScript` (a lazy
@@ -102,6 +103,7 @@ use bobcat_core::{
     PreparsedStyleSheet,
 };
 use bytes::Bytes;
+use quickjs_rust_bridge::bytecode::{VerifiedModule, Verifier};
 use url::Url;
 use vant::registry::{ContainerInstaller, Register, RegisterError};
 
@@ -115,8 +117,8 @@ use crate::web::style_info::{self, AlignedSection};
 use crate::web::{DecodeError, Sections};
 
 /// What a [`ContainerInstaller`] registers through, over this crate's
-/// stylesheet type.
-pub(crate) type Registrar = vant::registry::Registrar<PreparsedStyleSheet>;
+/// stylesheet type and the bridge's verified module type.
+pub(crate) type Registrar = vant::registry::Registrar<PreparsedStyleSheet, VerifiedModule>;
 
 /// The Lepus chunk a container's entry is.
 pub(crate) const ROOT: &str = "root";
@@ -136,9 +138,9 @@ pub struct ContainerSources {
     target: BundleTarget,
     /// Every script body, ordered by URL, as the text registered for it.
     scripts: Vec<(Url, Arc<str>)>,
-    /// Every converted bytecode section, ordered by URL, as the module
-    /// bytecode registered for it.
-    module_bytecode: Vec<(Url, Bytes)>,
+    /// Every converted bytecode section, ordered by URL, as the verified
+    /// module registered for it.
+    module_bytecode: Vec<(Url, VerifiedModule)>,
     /// One named stylesheet per CSS custom section, ordered by URL: an entry
     /// of the `CustomSectionsStyleInfo` section, a legacy `encoding: "CSS"`
     /// JSON section, or a `.lynx.bundle`'s CSS custom section.
@@ -432,10 +434,10 @@ impl ContainerSources {
     }
 
     /// Every converted `PrimJS` bytecode section, ordered by URL, as the
-    /// module bytecode registered for it (a module of the engine's own
-    /// bytecode, named by that URL).
+    /// module registered for it (a module of the engine's own bytecode,
+    /// named by that URL, which the bridge's verifier accepted).
     #[must_use]
-    pub fn module_bytecode(&self) -> &[(Url, Bytes)] {
+    pub fn module_bytecode(&self) -> &[(Url, VerifiedModule)] {
         &self.module_bytecode
     }
 
@@ -452,7 +454,7 @@ impl ContainerSources {
     ///
     /// Every URL was derived from an already-parsed [`Url`], so registration
     /// cannot fail URL validation.
-    pub fn register_with(&self, resources: &impl Register<PreparsedStyleSheet>) {
+    pub fn register_with(&self, resources: &impl Register<PreparsedStyleSheet, VerifiedModule>) {
         self.register(resources)
             .expect("a container's registration URLs are derived from a parsed URL");
     }
@@ -468,14 +470,17 @@ impl ContainerSources {
         self.register(registrar)
     }
 
-    fn register(&self, sink: &impl Register<PreparsedStyleSheet>) -> Result<(), RegisterError> {
+    fn register(
+        &self,
+        sink: &impl Register<PreparsedStyleSheet, VerifiedModule>,
+    ) -> Result<(), RegisterError> {
         for registration in self.registrations() {
             match registration {
                 Registration::Script(url, source) => {
                     sink.register(url.as_str(), script_bytes(source), Some(SCRIPT_MEDIA_TYPE))?;
                 }
-                Registration::ModuleBytecode(url, bytes) => {
-                    sink.register_module_bytecode(url.as_str(), bytes.clone())?;
+                Registration::ModuleBytecode(url, module) => {
+                    sink.register_module_bytecode(url.as_str(), module.clone())?;
                 }
                 Registration::StyleSheet(url, sheet) => {
                     sink.register_style_sheet(url.as_str(), Arc::clone(sheet))?;
@@ -495,7 +500,7 @@ impl ContainerSources {
             .chain(
                 self.module_bytecode
                     .iter()
-                    .map(|(url, bytes)| Registration::ModuleBytecode(url, bytes)),
+                    .map(|(url, module)| Registration::ModuleBytecode(url, module)),
             )
             .chain(
                 self.style_sheets
@@ -508,7 +513,7 @@ impl ContainerSources {
 
 enum Registration<'a> {
     Script(&'a Url, &'a Arc<str>),
-    ModuleBytecode(&'a Url, &'a Bytes),
+    ModuleBytecode(&'a Url, &'a VerifiedModule),
     StyleSheet(&'a Url, &'a Arc<PreparsedStyleSheet>),
 }
 
@@ -576,13 +581,13 @@ fn script_bytes(source: &Arc<str>) -> Bytes {
 }
 
 /// A container's texts and its module bytecode, each ordered by URL.
-type Bodies = (Vec<(Url, Arc<str>)>, Vec<(Url, Bytes)>);
+type Bodies = (Vec<(Url, Arc<str>)>, Vec<(Url, VerifiedModule)>);
 
-/// One script body: text, or a converted section's module bytecode.
+/// One script body: text, or a converted section's verified module.
 #[derive(Clone, PartialEq)]
 enum Body {
     Text(Arc<str>),
-    ModuleBytecode(Bytes),
+    ModuleBytecode(VerifiedModule),
 }
 
 /// The script set being collected: one body per URL, an equal body for an
@@ -613,12 +618,12 @@ impl<'a> Scripts<'a> {
         }
     }
 
-    fn insert_bytecode(&mut self, url: Url, bytes: Bytes) -> Result<(), SourceError> {
+    fn insert_bytecode(&mut self, url: Url, module: VerifiedModule) -> Result<(), SourceError> {
         match self.scripts.get(&url) {
-            Some(Body::ModuleBytecode(existing)) if *existing == bytes => Ok(()),
+            Some(Body::ModuleBytecode(existing)) if *existing == module => Ok(()),
             Some(_) => Err(conflict(self.container, &url)),
             None => {
-                self.scripts.insert(url, Body::ModuleBytecode(bytes));
+                self.scripts.insert(url, Body::ModuleBytecode(module));
                 Ok(())
             }
         }
@@ -631,7 +636,7 @@ impl<'a> Scripts<'a> {
         for (url, body) in self.scripts {
             match body {
                 Body::Text(text) => texts.push((url, text)),
-                Body::ModuleBytecode(bytes) => bytecode.push((url, bytes)),
+                Body::ModuleBytecode(module) => bytecode.push((url, module)),
             }
         }
         (texts, bytecode)
@@ -778,8 +783,8 @@ fn has_app_service(parts: &Parts<'_>) -> bool {
 }
 
 /// Converts every bytecode section into the script set, at each URL
-/// [`bytecode_targets`] gives it. The scratch engine is made only when
-/// there is a section to convert.
+/// [`bytecode_targets`] gives it, through one [`Verifier`] for the whole
+/// container.
 fn insert_bytecode(
     scripts: &mut Scripts<'_>,
     container: &Url,
@@ -789,11 +794,11 @@ fn insert_bytecode(
     if sections.is_empty() {
         return Ok(());
     }
-    let converter = BytecodeConverter::new(container)?;
+    let converter = BytecodeConverter::new(container);
     for section in sections {
         for (body_url, role) in bytecode_targets(container, section, entry) {
-            let bytes = converter.convert(section, &body_url, role)?;
-            scripts.insert_bytecode(body_url, bytes)?;
+            let module = converter.convert(section, &body_url, role)?;
+            scripts.insert_bytecode(body_url, module)?;
         }
     }
     Ok(())
@@ -864,42 +869,34 @@ fn bytecode_targets(
     }
 }
 
-/// Converts one container's `PrimJS` sections. The realm is a scratch one,
-/// used only to compile regular expression literals; nothing from it is
-/// trusted, since the realm that loads a converted module checks every rule
-/// again, recompiling each literal itself.
+/// Converts one container's `PrimJS` sections, and verifies each converted
+/// module once, here, when the container is registered: a realm that loads
+/// one runs no Rust check of its own (the engine's verifying read still
+/// reads it). The [`Verifier`] is shared by every section, so its engine is
+/// made at most once per container, on the first regular expression
+/// literal, and a literal compiles once however many sections carry it.
 struct BytecodeConverter {
     container: Url,
-    // Dropped after the realm: fields drop in declaration order.
-    realm: quickjs_rust_bridge::Context,
-    _runtime: quickjs_rust_bridge::Runtime,
+    verifier: Verifier,
 }
 
 impl BytecodeConverter {
-    fn new(container: &Url) -> Result<Self, SourceError> {
-        let failed = |error: quickjs_rust_bridge::Error| SourceError::DecodeNativeBundle {
-            input: diagnostic_url(container),
-            source: crate::native::ConvertError::UnsupportedBundle(format!(
-                "no engine to compile the bytecode's regular expressions with: {error}"
-            )),
-        };
-        let runtime = quickjs_rust_bridge::Runtime::new().map_err(failed)?;
-        let realm = runtime.create_context().map_err(failed)?;
-        Ok(Self {
+    fn new(container: &Url) -> Self {
+        Self {
             container: container.clone(),
-            realm,
-            _runtime: runtime,
-        })
+            verifier: Verifier::new(),
+        }
     }
 
-    /// The section as a module of the engine's bytecode named `url`, or the
-    /// reader's or converter's refusal, which refuses the container.
+    /// The section as a verified module of the engine's bytecode named
+    /// `url`, or the reader's, converter's or verifier's refusal, which
+    /// refuses the container.
     fn convert(
         &self,
         section: &BytecodeSection<'_>,
         url: &Url,
         role: BytecodeRole,
-    ) -> Result<Bytes, SourceError> {
+    ) -> Result<VerifiedModule, SourceError> {
         let refused = |reason: String| SourceError::DecodeNativeBundle {
             input: diagnostic_url(&self.container),
             source: crate::native::ConvertError::Bytecode {
@@ -926,8 +923,7 @@ impl BytecodeConverter {
             undefined_names,
             completion,
         };
-        crate::native::primjs::convert_script(&program, &options, &self.realm)
-            .map(Bytes::from)
+        crate::native::primjs::convert_script(&program, &options, &self.verifier)
             .map_err(|error| refused(error.to_string()))
     }
 }
@@ -943,7 +939,7 @@ impl BytecodeConverter {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct BundleInstaller;
 
-impl ContainerInstaller<PreparsedStyleSheet> for BundleInstaller {
+impl ContainerInstaller<PreparsedStyleSheet, VerifiedModule> for BundleInstaller {
     fn install(&self, url: &Url, bytes: &[u8], registrar: &Registrar) -> Result<bool, String> {
         if !looks_like_native_bundle(bytes) && !looks_like_web_bundle(bytes) {
             return Ok(false);
@@ -1370,6 +1366,16 @@ mod tests {
         }
     }
 
+    /// A verified module the engine compiles for `source`.
+    fn verified_module(source: &str) -> VerifiedModule {
+        let runtime = quickjs_rust_bridge::Runtime::new().unwrap();
+        let compiler = runtime.create_context().unwrap();
+        let bytes = compiler
+            .compile_module_bytecode("app:///m.js", source)
+            .unwrap();
+        Verifier::new().module_from_bytes(&bytes).unwrap()
+    }
+
     /// One URL, one text: an equal text deduplicates, a different one refuses
     /// the whole container, and so does a stylesheet URL a script reaches.
     /// A text and a module's bytecode at one URL conflict, as two different
@@ -1378,15 +1384,13 @@ mod tests {
     fn text_and_bytecode_at_one_url_conflict() {
         let container = url(BUNDLE);
         let at = named_chunk_url(&container, "main-thread");
+        let a = verified_module("export const a = 1;");
+        let b = verified_module("export const b = 2;");
         let mut scripts = Scripts::new(&container);
-        scripts
-            .insert_bytecode(at.clone(), Bytes::from_static(b"a"))
-            .unwrap();
-        scripts
-            .insert_bytecode(at.clone(), Bytes::from_static(b"a"))
-            .unwrap();
+        scripts.insert_bytecode(at.clone(), a.clone()).unwrap();
+        scripts.insert_bytecode(at.clone(), a.clone()).unwrap();
         assert!(matches!(
-            scripts.insert_bytecode(at.clone(), Bytes::from_static(b"b")),
+            scripts.insert_bytecode(at.clone(), b),
             Err(SourceError::ConflictingSection { .. })
         ));
         assert!(matches!(
@@ -1396,7 +1400,7 @@ mod tests {
         let mut scripts = Scripts::new(&container);
         scripts.insert(at.clone(), "text").unwrap();
         assert!(matches!(
-            scripts.insert_bytecode(at, Bytes::from_static(b"a")),
+            scripts.insert_bytecode(at, a),
             Err(SourceError::ConflictingSection { .. })
         ));
     }
