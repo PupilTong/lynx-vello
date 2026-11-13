@@ -153,7 +153,8 @@ Each section is read (`primjs::read_payload`) and converted
 name, through one `quickjs_rust_bridge::bytecode::Verifier` for the whole
 container. The verifier checks each converted program against every rule and
 writes it, once, here; a realm that loads the module runs no Rust check of its
-own, and the fork's verifying read still reads it. Conversion needs an engine
+own, and the fork reads it computing every function's stack size, trusting the
+structure the bridge's writer gave it. Conversion needs an engine
 only to compile regular expression literals, and that engine is the
 verifier's: a runtime and a realm with only the basic objects, made on the
 first literal, with each pattern and flags compiled once for the converter and

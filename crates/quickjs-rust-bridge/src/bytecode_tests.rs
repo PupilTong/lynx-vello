@@ -1,5 +1,15 @@
-//! Tests of the bytecode tables, the verifying read and the regular
-//! expression compiler, on bytecode the fork itself wrote.
+//! Tests of the bytecode tables, the fork's read with
+//! `JS_READ_OBJ_COMPUTE_STACK_SIZE` and the regular expression compiler, on
+//! bytecode the fork itself wrote.
+//!
+//! The fork's reader trusts the structure of its input. Every byte string
+//! these tests hand it straight (through `verify_bytecode_read_only`,
+//! `evaluate_script_bytecode`, `complete_module_bytecode_unchecked` or
+//! `VerifiedModule::unverified`) is the fork's own output, or that output
+//! with an instruction replaced by others of the same total size, so that
+//! only the stack computation has something to refuse. Malformed structure
+//! is the Rust reader's to refuse, and `bytecode::tests::robustness` tests
+//! it there.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -117,16 +127,16 @@ fn leb128(bytes: &[u8], position: &mut usize) -> u32 {
 }
 
 /// Where the parts of the first function record of a bytecode file are.
-struct FunctionLayout {
+pub(crate) struct FunctionLayout {
     /// The offset of the stack size field and its encoded length.
-    stack_size: (usize, usize),
+    pub(crate) stack_size: (usize, usize),
     /// The offset and length of the instructions.
-    code: (usize, usize),
+    pub(crate) code: (usize, usize),
 }
 
 /// Finds the first `FUNCTION_BYTECODE` record of a script (the top level
 /// value) or of a module (its function, after the module record).
-fn first_function(bytes: &[u8]) -> FunctionLayout {
+pub(crate) fn first_function(bytes: &[u8]) -> FunctionLayout {
     assert_eq!(bytes[0], BC_VERSION);
     let mut position = 1;
     let atom_count = leb128(bytes, &mut position);
@@ -199,7 +209,7 @@ fn first_function(bytes: &[u8]) -> FunctionLayout {
 }
 
 /// The instruction offsets of a function's code, by the opcode table.
-fn instructions(bytes: &[u8], layout: &FunctionLayout) -> Vec<usize> {
+pub(crate) fn instructions(bytes: &[u8], layout: &FunctionLayout) -> Vec<usize> {
     let (start, length) = layout.code;
     let mut offsets = Vec::new();
     let mut position = start;
@@ -219,7 +229,7 @@ fn find_opcode(bytes: &[u8], layout: &FunctionLayout, opcode: u8) -> usize {
 }
 
 // ---------------------------------------------------------------------------
-// The verifying read accepts what the fork writes
+// The fork's read accepts what the fork writes
 
 /// Scripts whose completion value is a string.
 pub(crate) const SCRIPTS: &[&str] = &[
@@ -260,7 +270,7 @@ pub(crate) const SCRIPTS: &[&str] = &[
 ];
 
 #[test]
-fn verifying_read_accepts_and_runs_what_the_fork_writes_for_scripts() {
+fn the_fork_read_accepts_and_runs_what_the_fork_writes_for_scripts() {
     for (index, source) in SCRIPTS.iter().enumerate() {
         let (_runtime, direct_realm) = realm();
         let direct = direct_realm
@@ -323,7 +333,7 @@ fn evaluated_result(runtime: &mut Runtime, realm: &mut Context, name: &str) -> S
 }
 
 #[test]
-fn verifying_read_accepts_and_runs_what_the_fork_writes_for_modules() {
+fn the_fork_read_accepts_and_runs_what_the_fork_writes_for_modules() {
     for (index, source) in MODULES.iter().enumerate() {
         let name = format!("app:///module{index}.js");
 
@@ -394,19 +404,20 @@ fn modules_completed_as_bytecode_import_each_other() {
 }
 
 // ---------------------------------------------------------------------------
-// The verifying read refuses
+// The stack computation refuses
 
-const BRANCHY: &str = "var r = globalThis.c ? 1 : 2; String(r)";
+pub(crate) const BRANCHY: &str = "var r = globalThis.c ? 1 : 2; String(r)";
 
-fn compiled_script(source: &str) -> Vec<u8> {
+pub(crate) fn compiled_script(source: &str) -> Vec<u8> {
     let (_runtime, compiler) = realm();
     compiler
         .compile_script_bytecode("patched.js", source)
         .unwrap()
 }
 
-/// The fork's verifying read's own refusal, without the Rust checks in
-/// front of it (`crate::bytecode`, whose own tests cover them).
+/// The fork's read's own refusal, without the Rust checks in front of it
+/// (`crate::bytecode`, whose own tests cover them). `bytes` keep the
+/// structure of the fork's output.
 fn refusal(bytes: &[u8]) -> String {
     let (_runtime, checker) = realm();
     let error = checker
@@ -417,27 +428,19 @@ fn refusal(bytes: &[u8]) -> String {
 }
 
 #[test]
-fn an_invalid_opcode_is_refused() {
-    let original = compiled_script(BRANCHY);
-    let layout = first_function(&original);
-    for opcode in [op::INVALID, u8::try_from(OP_COUNT).unwrap(), u8::MAX] {
-        let mut bytes = original.clone();
-        bytes[layout.code.0] = opcode;
-        let message = refusal(&bytes);
-        assert!(message.contains("invalid opcode"), "{message}");
-    }
-}
-
-#[test]
-fn an_instruction_running_past_the_end_is_refused() {
+fn the_invalid_opcode_is_refused() {
     let mut bytes = compiled_script(BRANCHY);
     let layout = first_function(&bytes);
-    let last = *instructions(&bytes, &layout).last().unwrap();
-    assert_eq!(bytes[last], op::RETURN);
-    // A one-byte instruction becomes a five-byte one.
-    bytes[last] = op::PUSH_I32;
+    // `invalid` is in the opcode table (one byte, no operand), so the
+    // reader steps over it; the stack computation refuses it. The rest of
+    // the first instruction's bytes become `nop`s so the stream still
+    // decodes.
+    let first = layout.code.0;
+    let size = usize::from(OPCODES[usize::from(bytes[first])].size);
+    bytes[first] = op::INVALID;
+    bytes[first + 1..first + size].fill(op::NOP);
     let message = refusal(&bytes);
-    assert!(message.contains("truncated instruction"), "{message}");
+    assert!(message.contains("invalid opcode"), "{message}");
 }
 
 #[test]
@@ -645,7 +648,7 @@ fn mutated_bytecode_is_read_or_refused_and_never_run() {
 
 // ---------------------------------------------------------------------------
 // Module bytecode as a realm-local source: verified before it is supplied,
-// read with the fork's verifying read when compiled
+// read computing stack sizes when compiled
 
 /// Module bytecode the fork compiles for `source` under `name`.
 fn module_bytecode(name: &str, source: &str) -> Vec<u8> {
@@ -819,7 +822,7 @@ fn module_bytecode_completed_before_is_required_from_a_running_body() {
 
 #[test]
 fn refused_bytecode_from_the_synchronous_loader_is_a_syntax_error() {
-    // Bytes the fork's verifying read refuses, answered by the loader as a
+    // Bytes the fork's stack computation refuses, answered by the loader as a
     // module no verifier wrote: the read refuses them inside the load, for
     // a require and for an import linked inline.
     let bad = VerifiedModule::unverified(&refused_module_bytecode("app:///bad.js"));
@@ -856,7 +859,7 @@ fn refused_bytecode_from_the_synchronous_loader_is_a_syntax_error() {
 }
 
 #[test]
-fn bytecode_the_verifying_read_refuses_fails_at_compile() {
+fn bytecode_the_stack_computation_refuses_fails_at_compile() {
     let name = "app:///broken.js";
     let broken = refused_module_bytecode(name);
 
@@ -963,7 +966,7 @@ fn template_objects_read_from_bytecode_are_frozen_like_compiled_ones() {
         .unwrap();
     assert_eq!(text(&expected), TEMPLATE_EXPECTED);
 
-    // A script read back from bytecode, by the fork's verifying read alone
+    // A script read back from bytecode, by the fork's read alone
     // and through the checked entry.
     let bytes = compiled_script(TEMPLATE_STATE);
     let (_runtime, runner) = realm();

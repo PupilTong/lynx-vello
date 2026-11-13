@@ -1,6 +1,14 @@
 //! Soundness by execution: mutants of the fork's own bytecode that pass the
-//! Rust checks and the fork's verifying read are run, under an execution
-//! limit, and the process must survive and the realm must be destroyable.
+//! Rust checks are written by the Rust writer, read by the fork (computing
+//! stack sizes) and run, under an execution limit, and the process must
+//! survive and the realm must be destroyable.
+//!
+//! The fork is only ever handed the writer's output for a program the
+//! rules accepted, as in production: its reader trusts the structure of
+//! its input. Every such output must read back with the Rust reader. The
+//! fork's read can still refuse it when a function's stack size cannot be
+//! computed; the rules walk every function the way the fork's computation
+//! does (`ForkWalk`), so that count must be zero.
 //!
 //! `BYTECODE_FUZZ_ITERATIONS` sets the iterations of the ignored long run,
 //! `BYTECODE_FUZZ_SEED` its seed, and `BYTECODE_FUZZ_DUMP` a file each
@@ -359,13 +367,27 @@ fn mutate_bytes(rng: &mut Rng, bytes: &mut Vec<u8>) {
     }
 }
 
-/// What happened to one mutant.
+/// What happened to the mutants, one counter per outcome.
 #[derive(Default, Debug)]
 pub(in crate::bytecode) struct Counts {
+    /// Mutants made.
     pub(in crate::bytecode) mutants: usize,
+    /// Model mutants the writer refused to write.
     pub(in crate::bytecode) unwritable: usize,
+    /// Mutants the Rust reader or rules refused (for a module seed, also
+    /// one whose root is no longer a module).
     pub(in crate::bytecode) refused_by_rust: usize,
-    pub(in crate::bytecode) refused_by_fork: usize,
+    /// Module mutants the rules accepted whose name or URL
+    /// `complete_module_bytecode` refused (a NUL byte in the name the bytes
+    /// carry): nothing reached the fork.
+    pub(in crate::bytecode) name_refused: usize,
+    /// Mutants the rules accepted and the fork's read then refused: a
+    /// function whose stack size the fork's computation refuses.
+    pub(in crate::bytecode) refused_by_fork_read: usize,
+    /// Script mutants whose read ran out of the runtime's memory limit.
+    pub(in crate::bytecode) read_out_of_memory: usize,
+    /// Mutants the fork read and ran (or tried to: an import that throws
+    /// or runs out of time counts here).
     pub(in crate::bytecode) executed: usize,
 }
 
@@ -379,7 +401,23 @@ fn limited_runtime() -> Runtime {
     .unwrap()
 }
 
-/// Checks and, when both checks pass, runs `bytes`.
+/// Whether `message` is the fork's read refusing a module's bytes
+/// (`qjs_throw_bytecode_rejected`).
+fn rejected_by_read(message: &str) -> bool {
+    message.contains("bytecode rejected for '")
+}
+
+/// Records a mutant the fork's read refused.
+fn fork_refused(counts: &mut Counts, checked: &[u8], reason: &str, dump: Option<&str>) {
+    counts.refused_by_fork_read += 1;
+    if let Some(path) = dump {
+        let _ = std::fs::write(format!("{path}.fork-refused"), checked);
+        let _ = std::fs::write(format!("{path}.fork-refused.txt"), reason);
+    }
+}
+
+/// Checks `bytes` and, when the rules accept them, hands the fork what the
+/// Rust writer wrote for them, and runs it.
 fn run_mutant(bytes: &[u8], module: Option<&str>, counts: &mut Counts, dump: Option<&str>) {
     let mut runtime = limited_runtime();
     let realm = runtime.create_context().unwrap();
@@ -388,23 +426,38 @@ fn run_mutant(bytes: &[u8], module: Option<&str>, counts: &mut Counts, dump: Opt
         counts.refused_by_rust += 1;
         return;
     };
+    // The bytes the fork gets have the structure its reader trusts: the
+    // reader for untrusted bytes reads them, and they are a fixed point of
+    // reading and writing.
+    let reread = read_program(&checked)
+        .unwrap_or_else(|error| panic!("the writer's output does not read back: {error}"));
+    assert!(
+        write_program(&reread).as_deref() == Ok(checked.as_slice()),
+        "the writer's output is not a fixed point of reading and writing"
+    );
     if let Some(path) = dump {
         let _ = std::fs::write(path, &checked);
     }
     match module {
-        None => match realm.evaluate_script_bytecode(&checked) {
-            Err(error) if error.kind == crate::ErrorKind::BytecodeRejected => {
-                counts.refused_by_fork += 1;
-                if let Some(path) = dump {
-                    let _ = std::fs::write(format!("{path}.fork-refused"), &checked);
-                    let _ = std::fs::write(format!("{path}.fork-refused.txt"), &error.message);
+        None => {
+            // The read alone first (a script read leaves nothing in the
+            // realm), so that its refusal is told apart from the script's
+            // own exceptions; then the read and the run.
+            if let Err(error) = realm.verify_bytecode_read_only(&checked) {
+                if error.kind == crate::ErrorKind::BytecodeRejected {
+                    fork_refused(counts, &checked, &error.message, dump);
+                } else {
+                    counts.read_out_of_memory += 1;
                 }
+                drop(realm);
+                runtime.run_gc();
+                return;
             }
-            _ => {
-                counts.executed += 1;
+            counts.executed += 1;
+            if realm.evaluate_script_bytecode(&checked).is_ok() {
                 let _ = runtime.drain_pending_jobs(&realm);
             }
-        },
+        }
         Some(seed_name) => {
             // A mutant may have changed the name its bytes carry, which is
             // the name the realm's module list holds.
@@ -424,19 +477,33 @@ fn run_mutant(bytes: &[u8], module: Option<&str>, counts: &mut Counts, dump: Opt
                 runtime.run_gc();
                 return;
             };
+            assert_eq!(verified.bytes(), checked.as_slice());
             if realm
                 .complete_module_bytecode(name, name, &verified)
-                .is_ok()
+                .is_err()
             {
-                counts.executed += 1;
-                if realm.load_module(name).is_ok() {
+                // Refused before anything reached the fork.
+                counts.name_refused += 1;
+                drop(realm);
+                runtime.run_gc();
+                return;
+            }
+            // The fork reads the module inside the load, and a refusal is
+            // the load's `SyntaxError`: thrown by the call, or the
+            // rejection of the promise it answers.
+            let refusal = match realm.load_module(name) {
+                Err(error) => rejected_by_read(&error.message).then_some(error.message),
+                Ok(promise) => {
                     let _ = runtime.drain_pending_jobs(&realm);
+                    match realm.settled_promise_result(&promise) {
+                        Err(error) if rejected_by_read(&error.message) => Some(error.message),
+                        _ => None,
+                    }
                 }
-            } else {
-                counts.refused_by_fork += 1;
-                if let Some(path) = dump {
-                    let _ = std::fs::write(format!("{path}.fork-refused"), &checked);
-                }
+            };
+            match refusal {
+                Some(reason) => fork_refused(counts, &checked, &reason, dump),
+                None => counts.executed += 1,
             }
         }
     }
@@ -489,12 +556,22 @@ fn in_big_thread<T: Send + 'static>(run: impl FnOnce() -> T + Send + 'static) ->
         .unwrap()
 }
 
+/// What a non-zero `refused_by_fork_read` means.
+const STACK_WALK_DIVERGED: &str = "the fork's read refused bytecode the Rust rules accepted: the \
+     Rust copy of the fork's stack walk in verify.rs (the ForkWalk rule) has diverged from the \
+     fork's compute_stack_size_buf, so production would accept modules the engine then refuses \
+     to load";
+
 #[test]
 fn checked_mutants_run_without_crashing() {
     let counts = in_big_thread(|| fuzz(0x9e37_79b9_7f4a_7c15, 5000));
     println!("{counts:?}");
     assert!(counts.executed > 50, "{counts:?}");
     assert!(counts.refused_by_rust > 50, "{counts:?}");
+    assert_eq!(
+        counts.refused_by_fork_read, 0,
+        "{STACK_WALK_DIVERGED}: {counts:?}"
+    );
 }
 
 #[test]
@@ -510,10 +587,15 @@ fn checked_mutants_run_without_crashing_long() {
         .unwrap_or(0x1234_5678_9abc_def1);
     let counts = in_big_thread(move || fuzz(seed, iterations));
     println!("{counts:?}");
+    assert_eq!(
+        counts.refused_by_fork_read, 0,
+        "{STACK_WALK_DIVERGED}: {counts:?}"
+    );
 }
 
 /// Re-runs one dumped mutant (`BYTECODE_FUZZ_DUMP`), for finding the rule a
-/// crash needs.
+/// crash needs. The dump is the Rust writer's output for a checked
+/// program, which is what the fork's read may be handed.
 #[test]
 #[ignore = "reproduces a dumped mutant"]
 fn run_dumped_mutant() {

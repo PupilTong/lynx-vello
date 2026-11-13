@@ -48,7 +48,10 @@
 //! a value only the verifier makes. That value is what enters a realm,
 //! through [`Context::complete_module_bytecode`] or a synchronous load's
 //! [`RequiredBody::ModuleBytecode`], with no further Rust check; the engine
-//! reads it with the fork's verifying read when the module is compiled.
+//! reads it when the module is compiled with the fork's
+//! `JS_READ_OBJ_COMPUTE_STACK_SIZE`, which computes every function's stack
+//! size and trusts the structure of the bytes. [`bytecode::read_program`]
+//! is the only reader that takes bytes from an untrusted writer.
 //! [`Context::compile_regexp_bytecode`] compiles a regular expression in a
 //! realm, for tooling.
 
@@ -233,11 +236,12 @@ mod implementation {
         Interrupted,
         ExecutionTimeout,
         Engine,
-        /// Bytecode a verifying read refused: it is not well-formed, a
-        /// function's stack depth cannot be computed from it (an invalid
-        /// opcode, a truncated instruction, a jump outside the function, a
-        /// stack underflow, different depths where paths meet), or it is
-        /// not the kind of value the call needs. See
+        /// Bytecode refused: by the Rust reader or the rules of
+        /// [`crate::bytecode`], by the engine's read because a function's
+        /// stack size cannot be computed from it (an invalid opcode reached,
+        /// a jump outside the function, a stack underflow or overflow,
+        /// different depths where paths meet), or because it is not the
+        /// kind of value the call needs. See
         /// [`Context::complete_module_bytecode`] and
         /// [`Context::verify_bytecode`].
         BytecodeRejected,
@@ -1755,11 +1759,12 @@ mod implementation {
         /// Source text, read as [`RequiredSource::kind`] says.
         Text(String),
         /// Module bytecode of the fork's format that passed
-        /// [`crate::bytecode::Verifier`]. It is read with the fork's
-        /// verifying read when the module is compiled, inside the load: a
-        /// refusal is the load's `SyntaxError`, naming the URL and saying
-        /// "bytecode rejected". It answers the load as an ES module, as
-        /// [`RequiredKind::Module`] text does.
+        /// [`crate::bytecode::Verifier`]. It is read when the module is
+        /// compiled, inside the load, computing every function's stack size
+        /// (`JS_READ_OBJ_COMPUTE_STACK_SIZE`): a refusal is the load's
+        /// `SyntaxError`, naming the URL and saying "bytecode rejected". It
+        /// answers the load as an ES module, as [`RequiredKind::Module`]
+        /// text does.
         ModuleBytecode(crate::bytecode::VerifiedModule),
     }
 
@@ -2374,7 +2379,7 @@ mod implementation {
             Some(copied)
         }
 
-        /// The pending exception of a verifying read, as
+        /// The pending exception of a bytecode read, as
         /// [`ErrorKind::BytecodeRejected`] unless it is running out of
         /// memory.
         fn bytecode_rejection(&self, phase: ErrorPhase) -> Error {
@@ -2424,8 +2429,10 @@ mod implementation {
 
         /// Checks `bytecode` the way a module reaches a realm — the rules of
         /// [`crate::bytecode`] in Rust (what [`crate::bytecode::Verifier`]
-        /// runs), then `JS_ReadObject` with the fork's `JS_READ_OBJ_VERIFY`
-        /// (what [`Self::complete_module_bytecode`]'s module is read with) —
+        /// runs), then `JS_ReadObject` of the bytes the Rust writer wrote for
+        /// the checked program, with the fork's
+        /// `JS_READ_OBJ_COMPUTE_STACK_SIZE` (what
+        /// [`Self::complete_module_bytecode`]'s module is read with) —
         /// and answers what the engine read, written out again
         /// (`JS_WriteObject`). In the answer every function's stack size is
         /// the one the read computed from its instructions; for bytes the
@@ -2464,7 +2471,11 @@ mod implementation {
         }
 
         /// [`Self::verify_bytecode`] without the Rust checks: the fork's
-        /// verifying read alone, for this crate's tests of that read.
+        /// read alone, for this crate's tests of its stack computation. That
+        /// read trusts the structure of its input, so `bytecode` must be
+        /// bytes the fork wrote, or such bytes with a change that keeps
+        /// their structure (an instruction replaced by one of the same
+        /// size); anything else is undefined behaviour in the engine.
         #[cfg(test)]
         pub(crate) fn verify_bytecode_read_only(&self, bytecode: &[u8]) -> Result<Vec<u8>, Error> {
             self.reclaim();
@@ -2482,9 +2493,12 @@ mod implementation {
                 .ok_or_else(|| self.bytecode_rejection(ErrorPhase::RegisterModule))
         }
 
-        /// Reads script bytecode with the fork's verifying read alone — not
-        /// the Rust checks — and evaluates it, for this crate's tests of the
-        /// verifying read and of the Rust checks.
+        /// Reads script bytecode with the fork's read alone — not the Rust
+        /// checks — computing stack sizes, and evaluates it, for this
+        /// crate's tests of that read and of the Rust checks. The same
+        /// restriction on `bytecode` as for
+        /// [`Self::verify_bytecode_read_only`]: bytes the fork or the Rust
+        /// writer wrote, or such bytes with their structure kept.
         #[cfg(test)]
         pub(crate) fn evaluate_script_bytecode(&self, bytecode: &[u8]) -> Result<Value, Error> {
             self.reclaim();
@@ -2558,13 +2572,14 @@ mod implementation {
         /// `name`. The engine reads it when the module is first
         /// compiled — by an import of `name`, or by a synchronous
         /// `require` of it, which may come from inside a running module
-        /// body as for a text source — with the fork's verifying read
-        /// (`JS_READ_OBJ_VERIFY`), which checks every count, length and
-        /// index against the input and computes every function's stack size
-        /// from its instructions (the size the bytes carry is ignored, so a
-        /// writer need not compute one). The kept copy is freed once that
-        /// read has made the module, or with the realm. A refusal by the
-        /// verifying read is a `SyntaxError` saying "bytecode rejected for
+        /// body as for a text source — with the fork's
+        /// `JS_READ_OBJ_COMPUTE_STACK_SIZE`, which computes every function's
+        /// stack size from its instructions (the size the bytes carry is
+        /// ignored, so a writer need not compute one) and trusts the rest of
+        /// the bytes' structure, which the module's writer guarantees. The
+        /// kept copy is freed once that read has made the module, or with
+        /// the realm. A refusal by that read (a function whose stack size
+        /// cannot be computed) is a `SyntaxError` saying "bytecode rejected for
         /// '<url>'": the rejection of the import that compiled it, or the
         /// `require`'s throw. A later import of `name` is refused the same
         /// way. The checks are about what the interpreter assumes of its
@@ -2622,8 +2637,9 @@ mod implementation {
         }
 
         /// [`Self::complete_module_bytecode`] with bytes no verifier wrote,
-        /// for this crate's tests of what the fork's verifying read refuses
-        /// when the module is compiled.
+        /// for this crate's tests of what the fork's read refuses when the
+        /// module is compiled. The same restriction on `bytecode` as for
+        /// [`Self::verify_bytecode_read_only`].
         #[cfg(test)]
         pub(crate) fn complete_module_bytecode_unchecked(
             &self,
@@ -2839,8 +2855,9 @@ mod implementation {
         /// A body of [`RequiredBody::ModuleBytecode`] is answered as a
         /// [`Module`](RequiredKind::Module) is, whatever `kind` says: the
         /// [`VerifiedModule`](crate::bytecode::VerifiedModule)'s bytes are
-        /// kept by the realm as the module's body and read with the fork's
-        /// verifying read inside this load. Bytes that read refuses throw
+        /// kept by the realm as the module's body and read inside this load,
+        /// computing every function's stack size. Bytes that read refuses
+        /// throw
         /// `SyntaxError("bytecode rejected for '<url>': …")`, from a
         /// `require` and from an import linked inline alike.
         ///

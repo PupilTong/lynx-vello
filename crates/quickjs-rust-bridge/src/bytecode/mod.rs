@@ -2,13 +2,18 @@
 //! writer, a disassembler and the verifier that decides whether bytes from
 //! an untrusted writer may run.
 //!
-//! This is the Rust half of the bytecode safety boundary of
-//! `docs/primjs-bytecode-conversion-design.md` (§4.7, ruling 8). The fork's
-//! verifying read (`JS_READ_OBJ_VERIFY`) makes the C reader safe on any
-//! bytes and computes each function's stack size; it does not make the
-//! bytecode safe to run, because the interpreter assumes many properties
-//! of compiler output that the read does not check. The rules below check
-//! them. [`Verifier`] is the one public way to run them: it checks a
+//! This is the bytecode safety boundary of
+//! `docs/primjs-bytecode-conversion-design.md` (§4.7, ruling 8). The fork
+//! reads module bytecode with `JS_READ_OBJ_COMPUTE_STACK_SIZE`, which
+//! computes each function's stack size from its instructions and fails the
+//! read when it cannot, and checks nothing else: the C reader trusts the
+//! structure of its input (counts, lengths, indices, value kinds, the
+//! instruction stream) and the interpreter trusts much more. So the
+//! [`read_program`] of this module is the only reader that takes bytes from
+//! an untrusted writer, the rules below check what the interpreter assumes,
+//! and [`write_program`] writes, for a program the rules accepted, bytes
+//! whose structure the C reader may trust (see `write.rs` for what it
+//! guarantees). [`Verifier`] is the one public way to run them: it checks a
 //! program, or bytes it reads, and writes what it accepts as a
 //! [`VerifiedModule`], a value nothing else constructs.
 //! [`crate::Context::complete_module_bytecode`] and
@@ -37,7 +42,7 @@
 //!   interns it to, so a builder never puts a built-in or integer text in the table.
 //! - **Functions** carry every field `JS_WriteFunctionTag` writes, in order. `has_debug` is
 //!   [`Function::debug`] being present. [`Function::stack_size`] is kept so that read and write
-//!   round-trip; the verifying read ignores it and computes its own, so a builder leaves it `0`.
+//!   round-trip; the fork's read computes its own and ignores it, so a builder leaves it `0`.
 //! - **Instructions** ([`Instruction`]) are an opcode byte (an [`crate::bytecode_abi::op`]
 //!   constant) and typed [`Operand`]s in encoding order, implicit operands of the short forms
 //!   included. A jump target is [`Operand::Target`]: an index into the same function's
@@ -55,13 +60,18 @@
 //!
 //! # Reader and writer
 //!
-//! [`read_program`] accepts what the verifying read accepts, minus
-//! non-canonical encodings (see its documentation), without panicking on
-//! any input and with recursion bounded by [`NESTING_LIMIT`].
+//! [`read_program`] takes bytes from any writer: it checks every count,
+//! length, index, tag and instruction against the input, without panicking
+//! on any input and with recursion bounded by [`NESTING_LIMIT`], and refuses
+//! non-canonical encodings (see its documentation).
 //! [`write_program`] writes what `JS_WriteObject` writes for the same
 //! program; for bytes the fork wrote, `write_program(read_program(b))` is
 //! `b`. Its jump policy: the opcode the model gives is kept, a short jump
-//! out of range is an error.
+//! out of range is an error. What it writes has the structure the fork's
+//! reader assumes by construction, except where a value is placed and the
+//! indices of a module record, which the rules `ValuePlacement` and
+//! `ModuleRecord` check: only the bytes of a program the rules accepted
+//! may reach the fork's read.
 //!
 //! # The rules
 //!
@@ -80,25 +90,33 @@
 //! the set of `gosub`s that can have pushed it), a catch offset (with its
 //! `catch`), the iterator marker (catch offset 0) of `for_of_start`,
 //! `for_await_of_start` and `iterator_get_value_done`, and function
-//! bytecode pushed by `push_const`. Three more kinds are plain values
+//! bytecode pushed by `push_const`. Four more kinds are plain values
 //! with a known property: `undefined` (holds no reference), the module
-//! function's `this` (`true` when linked, `undefined` when evaluated), and
-//! a value an unchecked read took from a variable that can hold the
-//! uninitialized marker. Where paths meet, return-address sets are joined,
-//! the two known-value kinds fall back to a plain value, a maybe-marker
+//! function's `this` (`true` when linked, `undefined` when evaluated), an
+//! array `array_from` made that nothing else holds, and a value an
+//! unchecked read took from a variable that can hold the uninitialized
+//! marker. Where paths meet, return-address sets are joined, the three
+//! known-value kinds fall back to a plain value, a maybe-marker
 //! value stays one, and the sets of maybe-uninitialized locals are joined;
 //! everything else must be equal. A `catch` handler starts with every local
 //! any `set_loc_uninitialized` of the function touches counted as
 //! maybe-uninitialized, since it is entered from anywhere in its region.
 //!
+//! That walk does not take a branch it knows is never taken (a test of the
+//! module function's `this`), and the fork's walk takes every branch. So
+//! the fork's walk is also run on its own, along every edge it follows,
+//! and a function it refuses is refused: the engine's read runs it on
+//! every function it reads and fails the read when it refuses.
+//!
 //! | Rule ([`Rule`]) | Requirement | What the interpreter would do otherwise |
 //! | --- | --- | --- |
 //! | `StackDepth` | every pop and addressed slot is on the stack; depth ≤ `JS_STACK_SIZE_MAX` | read or write outside the frame |
 //! | `Merge` | where paths meet, depth and special slots are equal (return-address sets are joined) | run an instruction with a different stack than the one checked |
-//! | `ForkWalk` | the fork walk's depth is never below the real one and never inconsistent | size the frame too small (`nip_catch` is computed from the fork walk's catch position, which can disagree with the stack) |
+//! | `ForkWalk` | the fork walk's depth is never below the real one and never inconsistent; the fork's walk on its own, along every edge it follows, accepts the function | size the frame too small (`nip_catch` is computed from the fork walk's catch position, which can disagree with the stack); the engine's read refuses the module, so a converted bundle fails to load |
 //! | `SpecialSlot` | only `drop`, `nip`, `nip1` discard a special slot (one, as the slot they drop); `nip_catch` discards everything above the nearest catch offset or marker; permutations may move a marker and nothing else special; `define_class` consumes function bytecode, and without its heritage flag finds `undefined` under it; nothing else pops, copies, moves or reads one | a return address or catch offset used as a value, copied, or moved so that the unwinder resumes at a wrong depth; raw function bytecode reaching JavaScript |
 //! | `IteratorSlots` | `for_of_next n`: `sp[-3-n]`, `sp[-2-n]` plain, `sp[-1-n]` the marker; `iterator_next`/`iterator_call`: `sp[-4]`, `sp[-3]`, `sp[-1]` plain, `sp[-2]` marker or plain; `iterator_close`: two plain values under a top that is the marker or a known `undefined`; `for_await_of_next`: the marker or a known `undefined` on top; `iterator_get_value_done`: four slots, the marker or a known `undefined` in `sp[-2]`; every marker has two plain slots below it | `sp[offset]` read outside the frame; the unwinder closes or frees slots below the stack; the three instructions that overwrite or drop a slot without freeing it leak an object, and the runtime aborts when it is freed (`JS_FreeRuntime`'s leak assertion) |
 //! | `NipCatch` | a catch offset or marker exists below the top | the scan runs to the bottom and throws an internal error, after freeing the stack |
+//! | `AppendTarget` | `append` adds to an array `array_from` made that no other slot, variable or object holds: since then only moved, or extended by `define_field`, `define_array_el` and `append` | `js_append_enumerate` reads a fast-array source through a pointer into its values while it defines elements on the destination; when they are the same array, a definition reallocates the values and the next read is a use after free |
 //! | `Ret` | `ret` pops a return address; the stack after it equals the stack at each `gosub` it returns to | jump to any in-buffer integer, or resume with a depth the fork walk did not size |
 //! | `BackwardTarget` | `catch`, `gosub` and `with_*` jump forward | the interpreter polls for interrupts only on `goto`, `if_*` and calls: a loop closed by these jumps, or by an exception delivered to an earlier handler, never reaches the execution limit (with forward targets every cycle passes a polling jump: a `ret` can only return past a `gosub` that ran again); and a handler at instruction 0 would have catch offset 0, which the unwinder reads as the iterator marker and closes an "iterator" instead of jumping |
 //! | `FrameKind` | `await`, `yield`, `yield_star`, `async_yield_star`, `initial_yield`, `return_async` only in frames that resume them; `return`, `return_undef`, `tail_call*` only in normal frames; in a generator, `initial_yield` exactly once, with no special slot, before any suspension or `return_async`; a module function is checked twice: as linked (a normal frame, `this === true`), where only the compiler's linking prologue may run — `push_this`, `if_*`, `fclosure` of functions that capture no local or argument, `put_var_ref`, `set_name`, `undefined`, `return_undef`, and `put_loc` of `this` or `undefined` — and as evaluated (an async frame, `this === undefined`) | leave a normal frame without closing its variable references (use after free), resume a generator with a stack one value short, close variable references twice, `abort()` in `js_async_generator_resume_next`; a module that throws while it links leaves its normal frame through the generator exit, which frees nothing and closes nothing |
@@ -115,9 +133,9 @@
 //! | `ModuleThisFunc` | no `special_object` `THIS_FUNC` or `MAPPED_ARGUMENTS` in a module function | JavaScript calls the module function, a normal-class function whose body is an async body |
 //! | `VardefCount`, `VarRefIndex`, `VarKind`, `DefinedArgCount`, `JsMode` | vardefs `arg_count + var_count` or none; captured indices below `var_ref_count`, distinct, counted exactly; kinds in range; `defined_arg_count ≤ arg_count`; `js_mode` only strict and backtrace barrier | the `JS_MODE_ASYNC` bit in a normal frame makes `get_var_ref` treat the C stack as an async frame |
 //! | `ClosureType`, `ClosureParent` | a script's top-level function holds `GLOBAL`/`GLOBAL_DECL`; a module's adds `MODULE_DECL`/`MODULE_IMPORT`; a nested function holds `LOCAL`/`ARG`/`REF`/`GLOBAL_REF` naming an existing, captured (and for `GLOBAL_REF`, global) parent entry | `js_closure2` with no parent frame or parent references, `abort()` |
-//! | `ModuleRecord`, `ModuleFunction` | imports fill `MODULE_IMPORT` (star: `MODULE_DECL`) variables, every `MODULE_IMPORT` variable is filled, local exports name `MODULE_DECL` variables, request indices in range, attributes `undefined` or an object; the module function is async and strict | the linker dereferences a null variable reference; evaluation of a normal-kind module body frees its frame twice |
+//! | `ModuleRecord`, `ModuleFunction` | imports fill `MODULE_IMPORT` (star: `MODULE_DECL`) variables, every `MODULE_IMPORT` variable is filled, local exports name `MODULE_DECL` variables, request indices in range, attributes `undefined` or an object; the module function is async and strict | the linker dereferences a null variable reference, and indexes the closure variables and the requests with the record's indices without a bound; evaluation of a normal-kind module body frees its frame twice |
 //! | `ClassConstructor` | `define_class` constructs from a normal function | `js_op_define_class` asserts |
-//! | `ValuePlacement` | functions only as the top level, a module's function or pool entries; a module only at the top level | (the verifying read refuses these too) |
+//! | `ValuePlacement` | functions only as the top level, a module's function or pool entries; a module only at the top level | the fork's reader reads a function or a module wherever its tag appears: raw function bytecode or a module record reaches JavaScript as an array element, a property value or a constant `push_const` pushes |
 //!
 //! Not covered: `JS_FreeRuntime` aborts on a leak, and a module whose
 //! linking prologue runs out of memory between `fclosure` and

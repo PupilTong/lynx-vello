@@ -268,9 +268,11 @@ it loads module text: the entry and `import()` through
 `Context::complete_module_bytecode`, a `require`/`loadModuleSync` and an
 import linked inline through the synchronous loader's
 `RequiredBody::ModuleBytecode`. No Rust check runs at load: the realm keeps a
-copy of the bytes and lets the fork read them with `JS_READ_OBJ_VERIFY` when
-the module is compiled. A refusal by that read is a `SyntaxError` whose
-message is
+copy of the bytes and lets the fork read them with
+`JS_READ_OBJ_COMPUTE_STACK_SIZE` when the module is compiled. That read
+computes every function's stack size and trusts the rest of the bytes'
+structure, which the bridge's writer guarantees for the verified program. A
+refusal by that read is a `SyntaxError` whose message is
 `bytecode rejected for '<url>': <reason>`: thrown by a `require`, the
 rejection of an `import()`, a failed boot for an entry. Core does not know
 where the bytes came from; today the one registrant is `bobcat-source`,

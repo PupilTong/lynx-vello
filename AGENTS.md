@@ -2904,9 +2904,12 @@ nothing else constructs and which is `Send + Sync`. `Context::complete_module_by
 supplies a realm-local module from a `VerifiedModule`, and the synchronous
 loader may answer a `require` with `RequiredBody::ModuleBytecode(VerifiedModule)`:
 either way no Rust check runs at load, the realm keeps a copy of the bytes,
-and the fork reads them with `JS_READ_OBJ_VERIFY`, which computes each
-function's stack size, when the module is compiled; a refusal by that read is
-a `SyntaxError` naming the URL. `Context::verify_bytecode` (tooling, tests)
+and the fork reads them with `JS_READ_OBJ_COMPUTE_STACK_SIZE`, which computes
+each function's stack size and checks nothing else, when the module is
+compiled; a refusal by that read is a `SyntaxError` naming the URL. The C
+reader trusts the structure of its input: `bytecode::read_program` is the only
+reader for untrusted bytes, and the bridge's writer guarantees the structure
+of what it writes for a program the rules accepted. `Context::verify_bytecode` (tooling, tests)
 runs the rules with the realm's own compiler on bytes of any root, and
 `Context::compile_regexp_bytecode` compiles a UTF-16 pattern to the fork's
 regexp bytecode. `bobcat-core` carries such a module as

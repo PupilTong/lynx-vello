@@ -164,6 +164,9 @@ pub enum Rule {
     IteratorSlots,
     /// `nip_catch` with no catch offset or iterator marker below the top.
     NipCatch,
+    /// `append` to anything but an array `array_from` made that no other
+    /// slot, variable or object holds.
+    AppendTarget,
     /// `ret` without a return address on top, or returning with a stack
     /// that differs from the one at the `gosub`.
     Ret,

@@ -934,10 +934,10 @@ impl<P: Platform> Resources<P> {
     /// load) with [`bobcat_core::resource::LoadedSource::ModuleBytecode`],
     /// and no other request at all. The module passed every rule of the
     /// bridge's verifier when it was made, so a realm loading it runs no
-    /// check of its own; the engine's verifying read still reads it. The
-    /// module name the bytes carry should be the URL the realm requests,
-    /// which is the normalized URL this answers. Invalidates any cached
-    /// stylesheet response for that URL.
+    /// check of its own; the engine reads it computing every function's
+    /// stack size. The module name the bytes carry should be the URL the
+    /// realm requests, which is the normalized URL this answers. Invalidates
+    /// any cached stylesheet response for that URL.
     ///
     /// # Errors
     ///

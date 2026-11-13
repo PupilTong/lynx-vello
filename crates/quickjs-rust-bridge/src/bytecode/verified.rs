@@ -25,8 +25,10 @@ use super::write::write_program;
 ///
 /// [`crate::Context::complete_module_bytecode`] and
 /// [`crate::RequiredBody::ModuleBytecode`] take one and run no Rust check
-/// of their own; the fork's verifying read (`JS_READ_OBJ_VERIFY`) still
-/// reads the bytes when the module is compiled.
+/// of their own. The engine reads the bytes when the module is compiled
+/// with `JS_READ_OBJ_COMPUTE_STACK_SIZE`, which computes every function's
+/// stack size and trusts the structure of the bytes: the invariant above
+/// is what makes that trust hold.
 ///
 /// It is immutable, `Send + Sync`, and a clone shares the bytes, so one
 /// value completes the module in any number of realms on any threads.
@@ -43,7 +45,10 @@ impl VerifiedModule {
     }
 
     /// Bytes as a module without any check, for this crate's tests of what
-    /// the fork's verifying read refuses when a realm reads them.
+    /// the fork's read refuses when a realm reads them. The fork's reader
+    /// trusts the structure of its input, so the bytes must be the fork's
+    /// own, or such bytes with a change that keeps their structure (an
+    /// instruction replaced by one of the same size, say).
     #[cfg(test)]
     pub(crate) fn unverified(bytes: &[u8]) -> Self {
         Self {

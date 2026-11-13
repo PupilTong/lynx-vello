@@ -214,7 +214,7 @@ flowchart TD
     G --> I[Re-encode pc2line,<br/>recompile RegExp literals<br/>Verifier::compile_regexp]
     I --> V[Bridge: verify every rule, write<br/>Verifier::module, once per module<br/>when the container is registered]
     V --> J[VerifiedModule registered]
-    J --> H[Fork reads with verification<br/>stack depth, sets stack_size<br/>on every load]
+    J --> H[Fork reads, trusting the structure<br/>computes every stack_size<br/>on every load]
     H --> K[Module in the realm]
     B -. reject .-> X[ConvertError]
     E -. reject .-> X
@@ -226,8 +226,9 @@ flowchart TD
 ```
 
 The marked steps are the ones that are not a per-instruction rewrite: C needs
-the whole function tree, and V and H together are what makes the output safe
-to run (§4.7). Everything down to I is the converter, in `bobcat-source`; V is
+the whole function tree; V is what makes the output safe to run and writes it
+with the structure H trusts, and H computes the stack sizes the frames are
+allocated with (§4.7). Everything down to I is the converter, in `bobcat-source`; V is
 in the bridge crate, in Rust, and runs once per converted module, when its
 container is registered; H is in the fork, and runs each time a realm compiles
 the module.
@@ -431,18 +432,32 @@ family), rejects an inconsistent depth, an underflow, a depth above
 `JS_STACK_SIZE_MAX` and a jump outside the buffer, and yields the maximum
 depth. It is `static`, but of its `JSFunctionDef` argument it reads only the
 bytecode buffer and length. The fork patch splits the body into a function
-over `(buffer, length)` and reaches it from a read flag, `JS_READ_OBJ_VERIFY`,
-that runs it on each function read and stores the result as that function's
-`stack_size`. The converter therefore writes no stack size of its own.
+over `(buffer, length)` and reaches it from a read flag,
+`JS_READ_OBJ_COMPUTE_STACK_SIZE`, that runs it on each function read, stores
+the result as that function's `stack_size` (the stored one is ignored), and
+fails the read when the computation refuses. The converter therefore writes no
+stack size of its own, and the computation follows upstream on a rebase.
 
-The same flag makes the reader itself safe to call on arbitrary bytes, which
-it was not: its instruction walk indexed the opcode table with any byte and
-read operands past the buffer, counts were used before being compared with the
-input, a vardef count other than `arg_count + var_count` led to out-of-bounds
-access later, and a module that failed to read stayed on the context's module
-list. Under the flag each of these is a failed read, only the value kinds
-compiled code contains are accepted, and a module record's indices are checked
-against their tables. Without the flag the reader behaves as before.
+The flag checks nothing else. The fork's reader trusts the structure of its
+input, with the flag or without it: its instruction walk indexes the opcode
+table with each byte and reads atom operands without a bound, counts are used
+before they are compared with the input, a vardef count other than
+`arg_count + var_count` leads to out-of-bounds access when the function is
+freed, a function or a module is read wherever its tag appears, and a module
+record's indices are stored as they are and used by the linker. So the C
+reader is handed only bytes the bridge's writer wrote for a program the rules
+accepted. The bridge's own reader (`bytecode::read_program`) is the only reader
+that takes bytes from an untrusted writer; the writer guarantees by
+construction every count and length it writes, 16-bit and `int` field widths,
+a non-empty function with a consistent vardef count, valid opcodes each written
+in its opcode's size, atom indices inside the table it writes, and only the
+value kinds and export types compiled code contains; the rules check where a
+function or module is placed (`ValuePlacement`) and the module record's
+indices (`ModuleRecord`). The fork patch keeps one fix to the read's
+failure path, for any read: a function name is freed when a function read
+fails before the function is allocated. A module that fails to read is
+freed and taken off the context's module list by the `lynx` series' own
+failure path (PupilTong/quickjs#6).
 
 **The function alone is not enough for hostile input.** It was written to
 size a frame for code the compiler just produced, and it relies on that
@@ -457,14 +472,17 @@ enumerated operands are in range, and so on.
 **The rules live in Rust, in the bridge (ruling 8).**
 `quickjs_rust_bridge::bytecode` holds a model of the fork's format, a reader, a
 writer and the verifier, whose one public entry is `Verifier`. Its module
-documentation carries the rules table (32
-rules, each with what the interpreter would do without it) and is the
+documentation carries the rules table (one row per rule, each with what the
+interpreter would do without it) and is the
 reference; this section only summarizes. The verifier walks each function's
 control flow along the same edges as `compute_stack_size`, plus the edge from
 `ret` back to each `gosub`, and keeps per reached instruction the depth, the
 kinds of the slots that are not plain values, the locals that can hold the
 uninitialized marker, and a copy of the fork walk's own depth and catch
-position. The rule classes:
+position. It does not take a branch it knows is never taken (a test of the
+module function's `this`); the fork's walk takes every branch, so it is also
+run on its own, and a function it refuses is refused, since the engine's read
+would refuse it. The rule classes:
 
 - **Stack and slots**: depth, merges, return addresses, catch offsets,
   iterator markers and raw function bytecode on the stack.
@@ -497,8 +515,8 @@ position. The rule classes:
 verifier accepted, a value with no other constructor.
 `Context::complete_module_bytecode` and the synchronous loader's
 `RequiredBody::ModuleBytecode` take only a `VerifiedModule` and hand its bytes
-to the fork's verifying read as they are, so the C reader sees exactly the
-program that passed, and no caller can load module bytecode that skipped the
+to the fork's read as they are, so the C reader sees exactly the program that
+passed, written with the structure it trusts, and no caller can load module bytecode that skipped the
 rules. `Context::verify_bytecode`, for tooling and tests, runs the same rules
 with the realm's own compiler on bytes of any root. The converter builds its
 output through the same model and hands it to `Verifier::module`, so its
@@ -507,15 +525,22 @@ output is checked once, before it is written.
 How the rules were arrived at: a first list from reading the interpreter;
 then every opcode case and every consumer of a record field was read and
 tabulated; then mutated bytecode that passed the checks was executed, and each
-crash, abort or hang became a rule with a regression test. Six holes were
+crash, abort or hang became a rule with a regression test. Seven holes were
 found that way (a value dropped without being freed by `for_await_of_next`, a
 module's linking frame left with references open, a backward `catch` that no
 execution limit could stop, `define_class` without a parent over a live
 object, a global declaration named by the null atom, an initializing store
-into an undeclared global's parked reference). With the final rules, 7.3
-million mutants, 2.6 million of them executed, and 150 thousand under
-AddressSanitizer ran without a fault; every program the fork compiles from the
-corpus, the bridge's tests and 12,700 files of `node_modules` is accepted.
+into an undeclared global's parked reference, an `append` whose destination is
+its own fast-array source, a use after free AddressSanitizer reported). One
+more was a load failure, not a fault: a branch the flow walk skips because it
+knows the module function's `this` reached a join at another depth on the
+fork's walk, which refused the read; so the fork's walk is also run on its
+own. With the final rules, 2 million mutants (713 thousand of them executed)
+and a further 600 thousand under AddressSanitizer (215 thousand executed) ran
+without a fault, and the fork's read refused none the rules accepted; every
+program the
+fork compiles from the corpus, the bridge's tests and 12,980 files of
+`node_modules` is accepted.
 
 What the rules do not cover is listed at the end of that module's
 documentation: a direct `eval`'s record flags, regexp bytecode beyond equality
@@ -588,7 +613,7 @@ Let `N` be the input size in bytes and `C` the closure entries of §4.3.
 | RegExp | one compile per literal | |
 | Write | O(N + C) | output buffer |
 | Rules pass (bridge) | O(N + S), `S` the non-plain slots live at each reached instruction, summed; kinds are kept as a sparse list, which try/finally and iteration nesting bound | that list per reached instruction |
-| Verification on read (fork) | O(N); each reached instruction is visited once | a depth and a catch position per output byte, freed after the read |
+| Stack sizes on read (fork) | O(N); each reached instruction is visited once | a depth and a catch position per output byte, freed after the read |
 
 Total: O(N + C) time, O(N + C) memory, in a fixed number of passes. `C` is
 bounded by (nesting depth) × (distinct globals) and equals what the fork's own
@@ -611,14 +636,14 @@ The algorithm is not where the cost is. It is in four other places:
 4. **The fork moves.** The source side is frozen; the target side has no
    compatibility promise. Tables regenerate, but each template names fork
    instructions whose meaning a rebase can change, as the iterator family did,
-   and the verification patch has to be carried across each rebase.
+   and the stack-size patch has to be carried across each rebase.
 
 ## 6. Where it sits in this engine
 
 **Code.** The converter is bytes to bytes with no unsafe code, which fits
 `bobcat-source`: it is the owner of Lynx source adaptation, it forbids unsafe,
 and its `native` module is where the bytecode is found and rejected today.
-The fork-side tables, the regexp compile entry and the verifying read belong
+The fork-side tables, the regexp compile entry and the stack-size read belong
 to `quickjs-rust-bridge`, which owns the C build. `bobcat-source` depends on
 `bobcat-core`, which depends on the bridge, so no new crate edge is needed.
 
@@ -697,10 +722,12 @@ bytes are shared, not copied, until a realm keeps them):
 `Context::complete_module_bytecode` for an entry or an `import()`, or the
 synchronous loader's `RequiredBody::ModuleBytecode` for a `require` and for an
 import linked inline. No Rust check runs on this path: the realm keeps a copy
-of the bytes, and the fork reads them with `JS_READ_OBJ_VERIFY` when the module
-is compiled; reading at that point, not on arrival, is what lets a running
-module body `require` a bytecode module. A refusal by that read is a
-`SyntaxError`, `bytecode rejected for '<url>': <reason>`.
+of the bytes, and the fork reads them with `JS_READ_OBJ_COMPUTE_STACK_SIZE`
+when the module is compiled; reading at that point, not on arrival, is what
+lets a running module body `require` a bytecode module. A refusal by that read
+(a function whose stack size cannot be computed, which the rules' copy of the
+fork's walk refuses first) is a `SyntaxError`,
+`bytecode rejected for '<url>': <reason>`.
 
 **Bridge and fork additions (built, §11 step 2).**
 
@@ -718,16 +745,23 @@ module body `require` a bytecode module. A refusal by that read is a
    realm the shim makes with `JS_NewContextRaw`; and `bytecode::VerifiedModule`,
    which only the verifier constructs, and which is `Send + Sync` and shares
    its bytes when cloned.
-4. Fork: `JS_READ_OBJ_VERIFY` (§4.7); bridge: `Context::complete_module_bytecode`
-   and the synchronous loader's `RequiredBody::ModuleBytecode`, which supply a
-   realm-local module from a `VerifiedModule`. The bytes are kept as they are,
-   and the fork reads them with the flag when the module is compiled.
+4. Fork: `JS_READ_OBJ_COMPUTE_STACK_SIZE` (§4.7), which computes every
+   function's stack size with the compiler's `compute_stack_size` (split into
+   a core over `(buffer, length)`) and fails the read when it refuses; and,
+   for every read, a function name is freed when a function read fails
+   early. The reader is otherwise the `lynx` series' own and trusts the
+   structure of its input.
+   Bridge: `Context::complete_module_bytecode` and the synchronous loader's
+   `RequiredBody::ModuleBytecode`, which supply a realm-local module from a
+   `VerifiedModule`. The bytes are kept as they are, and the fork reads them
+   with the flag when the module is compiled.
    `Runtime::register_module_bytecode` is unchanged and still for build-time
    bytes only.
 5. For tooling and tests: `Context::compile_script_bytecode` and
    `Context::verify_bytecode`.
 
-The fork changes are two commits on top of the `lynx` series.
+The fork changes are three commits on top of the `lynx` series: the stack-size
+read, `JS_CompileRegExp`, and template objects read back frozen.
 
 A module's name is part of its bytes: it is what the realm's module list
 holds and what its relative imports resolve from. The converter writes the
@@ -752,12 +786,13 @@ the cache does not have to be trusted.
   it. Outputs must match. test262 is the corpus for language semantics; the
   ReactLynx fixtures are the corpus for what real bundles contain.
 - **The verifier accepts the fork's own output.** Everything the fork compiles
-  from test262 is written, read back with the verifying flag, and must pass.
+  from test262 is written, read back computing stack sizes, and must pass.
   This is what shows the added rules of §4.7 describe the compiler's habits
   and not something stricter.
 - **Robustness**, as for the other external-byte parsers: a fixed-seed mutator
-  over valid inputs, where every output either fails conversion, fails the
-  verifying read, or loads and runs in the fork without a fault.
+  over valid inputs, where every output either fails conversion or the rules,
+  or is written by the bridge's writer, read by the fork and run without a
+  fault; the fork's read never refuses what the rules accepted.
 - **Opcode audit.** One checklist of the fork's opcodes with two columns:
   semantics compared with PrimJS's case, and assumptions read for §4.7.
 
@@ -766,7 +801,9 @@ the cache does not have to be trusted.
 | Risk | Consequence | Mitigation |
 | --- | --- | --- |
 | A same-name opcode differs in a way no test reaches | wrong result at run time, silently | the audit and test262 in §7 |
-| The verification misses an assumption the interpreter makes | memory unsafety from a hostile bundle | the per-opcode audit and the execution of mutated bytecode that passed the checks (§4.7); no module reaches a realm without passing `Verifier` (a `VerifiedModule` has no other constructor), and the fork's verifying read checks each load again |
+| The verification misses an assumption the interpreter makes | memory unsafety from a hostile bundle | the per-opcode audit and the execution of mutated bytecode that passed the checks (§4.7), also under AddressSanitizer; no module reaches a realm without passing `Verifier` (a `VerifiedModule` has no other constructor) |
+| The bridge's writer emits bytes whose structure the fork's reader misreads | memory unsafety in the read: the C reader trusts structure | the writer's guarantees and checks (`write.rs`, §4.7), and the Rust reader reads back every mutant the rules accept, byte for byte |
+| The rules' copy of the fork's stack walk diverges from the fork's | modules the converter writes fail to load | the mutation run asserts the fork's read refuses nothing the rules accepted |
 | The added rules reject code PrimJS's compiler really emits | valid bundles fail to load | corpus of real bundles in §7; each rejection names the instruction and rule |
 | A fork rebase changes an instruction a template uses, changes control flow the converter's walk mirrors, or conflicts with the fork patch | conversion output breaks | the differential suite runs in CI against the pinned fork |
 | PrimJS ships a new format flag | new bundles rejected | unknown header bits are an explicit error, not a misread |
@@ -788,8 +825,14 @@ Verified by running code:
 
 - the reader decodes every program of the corpus in every encoder variant and
   both sections, and both pages of the ReactLynx fixtures;
-- the verifying read accepts bytecode the fork compiled and reproduces the
-  compiler's stack sizes; the generated tables equal the compiled engine's;
+- the fork's read with `JS_READ_OBJ_COMPUTE_STACK_SIZE` accepts bytecode the
+  fork compiled and reproduces the compiler's stack sizes, and refuses a
+  function whose stack size cannot be computed; the generated tables equal the
+  compiled engine's;
+- what the bridge's writer writes for a program the rules accept reads back
+  with the bridge's reader to the same bytes, for the corpus and for every
+  accepted mutant; every opcode is written in its size; the fork's read
+  refused none of the mutants the rules accepted;
 - the rules accept everything the fork compiles from the corpus and from
   12,700 files of `node_modules`, and mutated bytecode that passes them runs
   without a fault (§4.7);
@@ -838,7 +881,9 @@ Given by the user on 2026-11-10.
 4. **PrimJS module input is rejected.**
 5. **The external-debug-info function id is dropped.**
 6. **The stack check is exported from the fork**, not reimplemented in Rust
-   (§4.7).
+   (§4.7): `JS_READ_OBJ_COMPUTE_STACK_SIZE` runs the compiler's own
+   computation on every function read, so Rust writes no stack size and the
+   computation follows upstream on a rebase. The flag checks nothing else.
 7. **A PrimJS build may be used as a test-time tool** (§7). It is not linked
    into the engine.
 
@@ -849,8 +894,8 @@ Given by the user on 2026-11-10.
    (`quickjs_rust_bridge::bytecode`), which the converter writes through: its
    `Verifier` checks every module once, and `complete_module_bytecode` and the
    synchronous loader take only the `VerifiedModule` it answers; the fork
-   patch computes stack sizes and makes its own reader safe on arbitrary
-   bytes.
+   patch only computes stack sizes. The C reader trusts the structure of its
+   input, and the bridge's writer guarantees it (§4.7).
 9. **PrimJS's non-conformant behaviour is not a target.** Where the converter
    can choose, it follows the specification (and so the fork), not PrimJS.
    What PrimJS's compiler already got wrong inside the bytecode stays wrong
@@ -866,7 +911,7 @@ All five steps are built. Each stood alone and was useful without the next.
 
 1. PrimJS reader and validator in `bobcat-source`, with a disassembler,
    including the packed header of §2.5 (`native::primjs`).
-2. Fork patches: the verifying read (stack depth), the regexp compile export
+2. Fork patches: the stack-size read, the regexp compile export
    and frozen template objects; bridge entries and the generated tables; the
    fork-format model, reader, writer and the rules of §4.7 in the bridge
    (`quickjs_rust_bridge::{bytecode_abi, bytecode}`).

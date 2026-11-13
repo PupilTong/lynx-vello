@@ -200,6 +200,63 @@ fn value_placement() {
         returns_undefined(),
     )))])];
     refused(&script(root), Rule::ValuePlacement);
+
+    // The writer writes a function or a module wherever the model holds
+    // one, and the fork's reader reads one wherever its tag is: the rule
+    // is what keeps them where compiled code puts them.
+    let nested_module = module_program(|program| {
+        module(
+            program,
+            vec![s(op::UNDEFINED), s(op::RETURN_ASYNC)],
+            Vec::new(),
+        )
+    });
+    let Value::Module(mut inner) = nested_module.root.clone() else {
+        unreachable!()
+    };
+    // Its name is the only atom it has: a built-in one, so that it is valid
+    // in any program.
+    inner.name = named();
+    // A module as a constant.
+    let mut root = function(FunctionKind::Normal, returns_undefined());
+    root.cpool = vec![Value::Module(inner.clone())];
+    refused(&script(root), Rule::ValuePlacement);
+    // A module or a function inside a data value at the top level.
+    refused(
+        &Program::new(Value::Object(vec![(named(), Value::Module(inner))])),
+        Rule::ValuePlacement,
+    );
+    refused(
+        &Program::new(Value::TemplateObject {
+            elements: Vec::new(),
+            raw: Box::new(Value::Function(Box::new(function(
+                FunctionKind::Normal,
+                returns_undefined(),
+            )))),
+        }),
+        Rule::ValuePlacement,
+    );
+    // A function inside a module request's attributes.
+    let program = module_program(|program| {
+        let spec = program.intern_str("./dep.js");
+        let mut module = module(
+            program,
+            vec![s(op::UNDEFINED), s(op::RETURN_ASYNC)],
+            Vec::new(),
+        );
+        module.requests = vec![crate::bytecode::ModuleRequest {
+            specifier: spec,
+            attributes: Value::Object(vec![(
+                named(),
+                Value::Function(Box::new(function(
+                    FunctionKind::Normal,
+                    returns_undefined(),
+                ))),
+            )]),
+        }];
+        module
+    });
+    refused(&program, Rule::ValuePlacement);
 }
 
 #[test]
@@ -606,6 +663,40 @@ fn fork_walk() {
 }
 
 #[test]
+fn fork_walk_on_a_branch_the_flow_does_not_take_regression() {
+    // A module whose evaluated body tests its `this`, known `undefined`
+    // there: the flow walk takes only the jump, the fork's walk takes both
+    // edges, and the arm it alone takes reaches the join one value deeper.
+    // The engine's read refuses such a function, so the rules must too.
+    let program = module_program(|program| {
+        module(
+            program,
+            vec![
+                s(op::PUSH_THIS),
+                i(op::IF_FALSE8, &[Target(4)]),
+                s(op::PUSH_1),
+                i(op::GOTO8, &[Target(4)]),
+                s(op::UNDEFINED),
+                s(op::RETURN_ASYNC),
+            ],
+            Vec::new(),
+        )
+    });
+    refused(&program, Rule::ForkWalk);
+    // The engine's read, handed the writer's bytes (whose structure is
+    // valid), refuses them for the same reason.
+    let bytes = write_program(&program).unwrap();
+    let (_runtime, realm) = realm();
+    let error = realm
+        .verify_bytecode_read_only(&bytes)
+        .expect_err("the fork's walk refuses it");
+    assert!(
+        error.message.contains("inconsistent stack size"),
+        "{error:?}"
+    );
+}
+
+#[test]
 fn special_slot() {
     // A catch offset copied.
     refused(
@@ -928,6 +1019,65 @@ fn module_linking_stores_a_reference_regression() {
 }
 
 #[test]
+fn append_target_regression() {
+    // `[1, 2]` appended to itself at its end: the fast path reads the
+    // source through a pointer into its values while the definitions grow
+    // the same array, which reallocates them.
+    refused(
+        &script(function(
+            FunctionKind::Normal,
+            vec![
+                s(op::PUSH_1),
+                s(op::PUSH_2),
+                i(op::ARRAY_FROM, &[Immediate(2)]),
+                s(op::DUP),
+                s(op::PUSH_2),
+                s(op::SWAP),
+                s(op::APPEND),
+                s(op::DROP),
+                s(op::RETURN),
+            ],
+        )),
+        Rule::AppendTarget,
+    );
+    // An array from anywhere else (a variable here).
+    let mut root = function(
+        FunctionKind::Normal,
+        vec![
+            s(op::GET_LOC0),
+            s(op::PUSH_0),
+            s(op::GET_LOC0),
+            s(op::APPEND),
+            s(op::DROP),
+            s(op::RETURN),
+        ],
+    );
+    root.var_count = 1;
+    refused(&script(root), Rule::AppendTarget);
+    // The array of a spread being built, moved and extended, is one.
+    let (_runtime, realm) = realm();
+    let program = script(function(
+        FunctionKind::Normal,
+        vec![
+            i(op::ARRAY_FROM, &[Immediate(0)]),
+            s(op::PUSH_7),
+            i(op::DEFINE_FIELD, &[A(Atom::Int(0))]),
+            s(op::PUSH_1),
+            s(op::PUSH_7),
+            s(op::DEFINE_ARRAY_EL),
+            s(op::INC),
+            i(op::PUSH_I8, &[Immediate(9)]),
+            i(op::ARRAY_FROM, &[Immediate(1)]),
+            s(op::APPEND),
+            s(op::SWAP),
+            s(op::DROP),
+            s(op::RETURN),
+        ],
+    ));
+    assert_eq!(verdict(&program, &realm), Ok(()));
+}
+
+#[test]
 fn falls_off_end() {
     refused(
         &script(function(FunctionKind::Normal, vec![s(op::PUSH_1)])),
@@ -959,4 +1109,91 @@ fn module_imports_name_matching_variables() {
         module
     });
     refused(&program, Rule::ModuleRecord);
+}
+
+/// One change to a module record, and what it changes.
+type Change<'a> = (&'a str, &'a dyn Fn(&mut Module));
+
+/// Every index a module record holds is inside the table it indexes: the
+/// fork's reader stores them as they are, and the linker indexes the
+/// closure variables and the requests with them.
+#[test]
+fn module_record_indices_inside_their_tables() {
+    // `export { x }` of a module binding, `import { y } from './dep.js'`,
+    // `export * from './dep.js'` and `export { z } from './dep.js'`: one
+    // request, two closure variables.
+    let base = |change: &dyn Fn(&mut Module)| {
+        module_program(|program| {
+            let x = program.intern_str("x");
+            let y = program.intern_str("y");
+            let z = program.intern_str("z");
+            let spec = program.intern_str("./dep.js");
+            let mut module = module(
+                program,
+                vec![s(op::UNDEFINED), s(op::RETURN_ASYNC)],
+                vec![
+                    Cv::new(x, ClosureType::ModuleDecl, 0),
+                    Cv::new(y, ClosureType::ModuleImport, 0),
+                ],
+            );
+            module.requests = vec![crate::bytecode::ModuleRequest {
+                specifier: spec,
+                attributes: Value::Undefined,
+            }];
+            module.exports = vec![
+                Export::Local {
+                    var_idx: 0,
+                    name: x,
+                },
+                Export::Indirect {
+                    request: 0,
+                    local_name: z,
+                    name: z,
+                },
+            ];
+            module.star_exports = vec![0];
+            module.imports = vec![Import {
+                var_idx: 1,
+                is_star: false,
+                name: y,
+                request: 0,
+            }];
+            change(&mut module);
+            module
+        })
+    };
+    let (_runtime, realm) = realm();
+    assert_eq!(verdict(&base(&|_| {}), &realm), Ok(()));
+    let changes: [Change<'_>; 5] = [
+        ("a local export's variable", &|module| {
+            module.exports[0] = Export::Local {
+                var_idx: 2,
+                name: Atom::Int(1),
+            };
+        }),
+        ("an indirect export's request", &|module| {
+            module.exports[1] = Export::Indirect {
+                request: 1,
+                local_name: Atom::Int(1),
+                name: Atom::Int(1),
+            };
+        }),
+        ("a star export's request", &|module| {
+            module.star_exports[0] = 1;
+        }),
+        ("an import's variable", &|module| {
+            module.imports[0].var_idx = 2;
+        }),
+        ("an import's request", &|module| {
+            module.imports[0].request = 1;
+        }),
+    ];
+    for (what, change) in changes {
+        assert_eq!(
+            verdict(&base(change), &realm),
+            Err(Rule::ModuleRecord),
+            "{what}"
+        );
+        refused(&base(change), Rule::ModuleRecord);
+    }
 }

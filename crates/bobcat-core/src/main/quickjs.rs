@@ -67,7 +67,7 @@ impl Default for QuickJsConfig {
 }
 
 /// The body of one module answer: source text, or verified module bytecode
-/// of the engine's format, which the engine's verifying read reads.
+/// of the engine's format, which the engine reads computing stack sizes.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum ModuleBody<'a> {
     Text(&'a str),
@@ -544,9 +544,9 @@ impl ScriptEngine {
     /// replaced URL would name an address the fetcher never answered for.
     ///
     /// Module bytecode is verified already ([`LoadedModule::Bytecode`]) and
-    /// is handed to the bridge as it is; the engine's verifying read, when
-    /// the module is compiled, is what can still refuse it, and its refusal
-    /// fails the import with the reason.
+    /// is handed to the bridge as it is; the engine's read when the module
+    /// is compiled, which computes every function's stack size, is what can
+    /// still refuse it, and its refusal fails the import with the reason.
     pub(crate) fn complete_module(
         &self,
         runtime: &mut ScriptRuntime,

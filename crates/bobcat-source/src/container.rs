@@ -871,8 +871,8 @@ fn bytecode_targets(
 
 /// Converts one container's `PrimJS` sections, and verifies each converted
 /// module once, here, when the container is registered: a realm that loads
-/// one runs no Rust check of its own (the engine's verifying read still
-/// reads it). The [`Verifier`] is shared by every section, so its engine is
+/// one runs no Rust check of its own (the engine reads it computing every
+/// function's stack size). The [`Verifier`] is shared by every section, so its engine is
 /// made at most once per container, on the first regular expression
 /// literal, and a literal compiles once however many sections carry it.
 struct BytecodeConverter {

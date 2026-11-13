@@ -4,6 +4,7 @@ mod corpus;
 mod fuzz;
 mod robustness;
 mod rules;
+mod structure;
 mod verifier;
 mod wide;
 

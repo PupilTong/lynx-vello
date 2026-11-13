@@ -311,7 +311,7 @@ pub enum LoadedSource {
     /// [`VerifiedModule`]: the bridge's verifier checked it against every
     /// rule when it was made (for a `.lynx.bundle`, when the container was
     /// registered), so the realm runs no check of its own and only reads it,
-    /// with the engine's verifying read. Bytes that read refuses fail the
+    /// computing every function's stack size. Bytes that read refuses fail the
     /// load with the reason (the import rejects, the synchronous load throws
     /// a `SyntaxError`). Only a registrant supplies these, never a network
     /// response.

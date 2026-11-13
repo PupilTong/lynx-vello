@@ -5,6 +5,31 @@
 //! first meets them, LEB128 numbers are in their shortest form, and every
 //! instruction keeps the opcode the model gives it.
 //!
+//! **What the fork's reader takes on trust.** The engine reads these bytes
+//! with `JS_READ_OBJ_COMPUTE_STACK_SIZE`, which computes stack sizes and
+//! checks nothing of the structure, so the writer guarantees it:
+//!
+//! - every count it writes is the number of entries it then writes, and every length the number of
+//!   bytes or code units (the atom table, strings, `BigInt`s, properties, elements, vardefs,
+//!   closure variables, constants, bytecode, `pc2line`, source, and the module record's requests,
+//!   exports, star exports and imports);
+//! - every count and index the reader stores in an `int` is at most `i32::MAX` (`count`), every
+//!   field it stores in 16 bits comes from a `u16` of the model, and every string is at most
+//!   `JS_STRING_LEN_MAX`;
+//! - a function has at least one instruction, and its vardefs number `arg_count + var_count` or
+//!   none (the engine frees that many);
+//! - every opcode is one of the final bytecode, since [`Instruction`] has no other constructor, and
+//!   every instruction is written in its opcode's size, checked per instruction;
+//! - every atom is a built-in index below `JS_ATOM_END`, an integer atom at most `JS_ATOM_MAX_INT`,
+//!   or an index into the atom table it writes;
+//! - every value tag is one of [`Value`]'s, the kinds compiled code contains, and every export type
+//!   local or indirect.
+//!
+//! It writes a function or a module wherever the model holds one, and a
+//! module record's indices as they are: the rules `ValuePlacement` and
+//! `ModuleRecord` check those, so only a program the rules accepted is
+//! written for the engine.
+//!
 //! **Jumps.** The writer never changes an opcode. A jump's offset is
 //! computed from the instruction positions; a short form (`goto8`,
 //! `goto16`, `if_false8`, `if_true8`) whose target is out of its range is
@@ -23,10 +48,11 @@ use super::read::NESTING_LIMIT;
 use crate::bytecode_abi::{BC_VERSION, atom_int, export_type, tag};
 
 /// Writes `program` as bytes `JS_ReadObject(JS_READ_OBJ_BYTECODE |
-/// JS_READ_OBJ_VERIFY)` reads back as the same program. A file atom whose
-/// text the runtime interns as a built-in or integer atom is written as
-/// that atom, which is what the engine reads it as either way. The program
-/// is not verified here; see [`super::Verifier`].
+/// JS_READ_OBJ_COMPUTE_STACK_SIZE)` reads back as the same program, with
+/// the structure that read trusts (see the module documentation). A file
+/// atom whose text the runtime interns as a built-in or integer atom is
+/// written as that atom, which is what the engine reads it as either way.
+/// The program is not verified here; see [`super::Verifier`].
 pub fn write_program(program: &Program) -> Result<Vec<u8>, WriteError> {
     let mut writer = Writer {
         program,
@@ -428,6 +454,7 @@ fn encode_code(function: &Function) -> Result<Code, WriteError> {
                 instruction.info().name
             )));
         }
+        let start = bytes.len();
         bytes.push(instruction.opcode());
         for (&(kind, encoding), &operand) in shape.iter().zip(instruction.operands()) {
             if operand.kind() != kind {
@@ -496,6 +523,17 @@ fn encode_code(function: &Function) -> Result<Code, WriteError> {
                     }
                 }
             }
+        }
+        // The fork's reader steps through the code by the opcode table's
+        // sizes and reads operands without a bounds check, and the jump
+        // offsets above were computed from those sizes.
+        let written = bytes.len() - start;
+        if written != usize::from(instruction.size()) {
+            return Err(WriteError::new(format!(
+                "instruction {index}: {} written in {written} bytes, not its size {}",
+                instruction.info().name,
+                instruction.size()
+            )));
         }
     }
     Ok(Code { bytes, atoms })

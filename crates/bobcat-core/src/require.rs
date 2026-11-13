@@ -98,8 +98,8 @@ pub(crate) fn install(
                 url,
                 body: RequiredBody::Text(source),
             }),
-            // Verified when it was made; the engine's verifying read reads
-            // it inside the load, and its refusal is the load's
+            // Verified when it was made; the engine reads it inside the
+            // load, computing stack sizes, and its refusal is the load's
             // `SyntaxError`.
             LoadedSource::ModuleBytecode { module, url } => Ok(RequiredSource {
                 kind: RequiredKind::Module,

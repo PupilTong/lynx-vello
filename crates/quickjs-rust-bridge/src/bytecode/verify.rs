@@ -1,6 +1,6 @@
-//! The rules the interpreter assumes of bytecode and the fork's verifying
-//! read does not check. The module documentation lists them with what each
-//! protects; this file implements them.
+//! The rules the interpreter assumes of bytecode and the fork's read does
+//! not check (it computes stack sizes and nothing else). The module documentation lists them with
+//! what each protects; this file implements them.
 
 use std::collections::BTreeSet;
 
@@ -608,6 +608,10 @@ impl Verifier<'_> {
         for frame in frames {
             Flow::run(&code, frame)?;
         }
+        // After the flow walk, whose rules name a refusal more precisely
+        // where both refuse: this one finds what the flow walk did not
+        // reach.
+        code.fork_walk()?;
 
         // The constant pool.
         let child_parent = Parent {
@@ -680,6 +684,160 @@ impl Code<'_> {
                 ClosureType::Local | ClosureType::Arg
             )
         })
+    }
+
+    /// The fork's own stack walk (`compute_stack_size_buf`), which the
+    /// engine's read runs on every function: one depth and one catch
+    /// position per instruction, along every edge that walk follows,
+    /// including the branches [`Flow`] does not take because it knows the
+    /// value tested (the module function's `this`). A function this walk
+    /// refuses is one the engine's read refuses, so the rules refuse it
+    /// first. [`Flow`] keeps the same walk along the paths it takes, to
+    /// compare it with the real stack there.
+    fn fork_walk(&self) -> Result<(), VerifyError> {
+        let instructions = &self.function.instructions;
+        let mut seen: Vec<Option<(u32, Option<u32>)>> = vec![None; instructions.len()];
+        let mut work = Vec::new();
+        self.fork_visit(&mut seen, &mut work, 0, 0, 0, None)?;
+        while let Some(at) = work.pop() {
+            let Some((entry, mut catch)) = seen[at] else {
+                continue;
+            };
+            let instruction = &instructions[at];
+            let opcode = instruction.opcode();
+            let pops = instruction.pops();
+            if entry < pops {
+                return Err(self.fail(at, Rule::ForkWalk, "the fork's walk underflows here"));
+            }
+            let mut depth = entry - pops + instruction.pushes();
+            if depth > limits::JS_STACK_SIZE_MAX {
+                return Err(self.fail(
+                    at,
+                    Rule::ForkWalk,
+                    "the fork's walk goes deeper than JS_STACK_SIZE_MAX",
+                ));
+            }
+            let target = instruction.target().map_or(0, |target| target as usize);
+            // The depth the fork's walk gives a catch position's own
+            // entry: one more for the iterator marker of `for_of_start`
+            // and `for_await_of_start`.
+            let level = |seen: &[Option<(u32, Option<u32>)>], position: u32| {
+                let opcode = instructions[position as usize].opcode();
+                seen[position as usize]
+                    .map(|(depth, outer)| (depth + u32::from(opcode != op::CATCH), outer))
+            };
+            let catch_level = match opcode {
+                op::TAIL_CALL
+                | op::TAIL_CALL_METHOD
+                | op::RETURN
+                | op::RETURN_UNDEF
+                | op::RETURN_ASYNC
+                | op::THROW
+                | op::THROW_ERROR
+                | op::RET => continue,
+                op::GOTO | op::GOTO8 | op::GOTO16 => {
+                    self.fork_visit(&mut seen, &mut work, at, target, depth, catch)?;
+                    continue;
+                }
+                op::IF_TRUE | op::IF_FALSE | op::IF_TRUE8 | op::IF_FALSE8 => {
+                    self.fork_visit(&mut seen, &mut work, at, target, depth, catch)?;
+                    None
+                }
+                op::GOSUB | op::WITH_GET_VAR | op::WITH_DELETE_VAR => {
+                    self.fork_visit(&mut seen, &mut work, at, target, depth + 1, catch)?;
+                    None
+                }
+                op::WITH_MAKE_REF | op::WITH_GET_REF => {
+                    self.fork_visit(&mut seen, &mut work, at, target, depth + 2, catch)?;
+                    None
+                }
+                op::WITH_PUT_VAR => {
+                    // It pushes one value, so the depth after it is at
+                    // least one.
+                    self.fork_visit(&mut seen, &mut work, at, target, depth - 1, catch)?;
+                    None
+                }
+                op::CATCH => {
+                    self.fork_visit(&mut seen, &mut work, at, target, depth, catch)?;
+                    catch = Some(at as u32);
+                    None
+                }
+                op::FOR_OF_START | op::FOR_AWAIT_OF_START => {
+                    catch = Some(at as u32);
+                    None
+                }
+                op::DROP => Some(depth),
+                op::NIP | op::NIP1 => Some(depth - 1),
+                op::ITERATOR_CLOSE => Some(depth + 2),
+                op::NIP_CATCH => {
+                    let (level, outer) = catch
+                        .and_then(|position| level(&seen, position))
+                        .ok_or_else(|| {
+                            self.fail(
+                                at,
+                                Rule::ForkWalk,
+                                "nip_catch where the fork's walk has no catch position",
+                            )
+                        })?;
+                    depth = level + 1;
+                    catch = outer;
+                    None
+                }
+                _ => None,
+            };
+            if let Some(catch_level) = catch_level
+                && let Some(position) = catch
+                && let Some((level, outer)) = level(&seen, position)
+                && level == catch_level
+            {
+                catch = outer;
+            }
+            self.fork_visit(&mut seen, &mut work, at, at + 1, depth, catch)?;
+        }
+        Ok(())
+    }
+
+    /// One edge of [`Self::fork_walk`] (`ss_check`).
+    fn fork_visit(
+        &self,
+        seen: &mut [Option<(u32, Option<u32>)>],
+        work: &mut Vec<usize>,
+        at: usize,
+        target: usize,
+        depth: u32,
+        catch: Option<u32>,
+    ) -> Result<(), VerifyError> {
+        let Some(slot) = seen.get_mut(target) else {
+            return Err(self.fail(
+                at,
+                Rule::ForkWalk,
+                "the fork's walk runs past the end of the function",
+            ));
+        };
+        if depth > limits::JS_STACK_SIZE_MAX {
+            return Err(self.fail(
+                at,
+                Rule::ForkWalk,
+                "the fork's walk goes deeper than JS_STACK_SIZE_MAX",
+            ));
+        }
+        match *slot {
+            Some(existing) if existing != (depth, catch) => Err(self.fail(
+                at,
+                Rule::ForkWalk,
+                format!(
+                    "the fork's walk reaches instruction {target} with depth {} and catch \
+                     position {:?}, and with depth {depth} and catch position {catch:?}",
+                    existing.0, existing.1
+                ),
+            )),
+            Some(_) => Ok(()),
+            None => {
+                *slot = Some((depth, catch));
+                work.push(target);
+                Ok(())
+            }
+        }
     }
 
     #[allow(clippy::too_many_lines, reason = "one rule per instruction kind")]
@@ -1129,11 +1287,16 @@ enum Kind {
     /// reference: what the instructions that overwrite or drop a slot
     /// without freeing it need there.
     Undef,
+    /// An ordinary value known to be an array `array_from` made that no
+    /// other slot, variable or object holds: moved, or extended by
+    /// `define_field`, `define_array_el` and `append`, since. What
+    /// `append` adds to.
+    Fresh,
 }
 
 impl Kind {
     fn ordinary(kind: Option<&Self>) -> bool {
-        matches!(kind, None | Some(Self::This(_) | Self::Undef))
+        matches!(kind, None | Some(Self::This(_) | Self::Undef | Self::Fresh))
     }
 
     /// A slot whose value holds no reference, so overwriting it leaks
@@ -1157,6 +1320,7 @@ impl Kind {
             Some(Self::Marker) => Some(Self::Marker),
             Some(Self::Taint) => Some(Self::Taint),
             Some(Self::Undef) => Some(Self::Undef),
+            Some(Self::Fresh) => Some(Self::Fresh),
             _ => None,
         }
     }
@@ -1364,13 +1528,16 @@ impl<'a, 'b> Flow<'a, 'b> {
                         changed = true;
                     }
                 }
-                (Some(Kind::This(_) | Kind::Undef), None | Some(Kind::This(_) | Kind::Undef)) => {
+                (
+                    Some(Kind::This(_) | Kind::Undef | Kind::Fresh),
+                    None | Some(Kind::This(_) | Kind::Undef | Kind::Fresh),
+                ) => {
                     existing.set(index, None);
                     changed = true;
                 }
-                (None, Some(Kind::This(_) | Kind::Undef))
-                | (Some(Kind::Taint), None | Some(Kind::This(_) | Kind::Undef)) => {}
-                (None | Some(Kind::This(_) | Kind::Undef), Some(Kind::Taint)) => {
+                (None, Some(Kind::This(_) | Kind::Undef | Kind::Fresh))
+                | (Some(Kind::Taint), None | Some(Kind::This(_) | Kind::Undef | Kind::Fresh)) => {}
+                (None | Some(Kind::This(_) | Kind::Undef | Kind::Fresh), Some(Kind::Taint)) => {
                     existing.set(index, Some(Kind::Taint));
                     changed = true;
                 }
@@ -2133,8 +2300,37 @@ impl<'a, 'b> Flow<'a, 'b> {
                         ));
                     }
                 }
+                // `append` reads a fast-array source through a pointer
+                // while it adds to its destination, so the destination
+                // must be an array nothing else holds; compiled code
+                // appends only to the array of a spread it is building.
+                let array = out.depth.checked_sub(3).and_then(|index| out.kind(index));
+                let fresh = match opcode {
+                    op::ARRAY_FROM => true,
+                    // An array literal's elements past the 32nd.
+                    op::DEFINE_FIELD => {
+                        out.depth.checked_sub(2).and_then(|index| out.kind(index))
+                            == Some(&Kind::Fresh)
+                    }
+                    op::DEFINE_ARRAY_EL => array == Some(&Kind::Fresh),
+                    op::APPEND if array == Some(&Kind::Fresh) => true,
+                    op::APPEND => {
+                        return Err(self.fail(
+                            at,
+                            Rule::AppendTarget,
+                            format!(
+                                "append to {array:?}, not an array array_from made that \
+                                 nothing else holds"
+                            ),
+                        ));
+                    }
+                    _ => false,
+                };
                 self.pop(at, &mut out, pops)?;
                 out.depth += pushes;
+                if fresh {
+                    out.set(out.depth - pushes, Some(Kind::Fresh));
+                }
                 edges.push((next, out, EdgeKind::Normal));
             }
         }

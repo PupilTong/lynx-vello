@@ -73,7 +73,7 @@ impl Program {
         }
     }
 
-    /// What the runtime holds for `atom` once a verifying read has interned
+    /// What the runtime holds for `atom` once the engine's read has interned
     /// it: a file atom whose text is a built-in string or a canonical
     /// integer becomes that atom (`JS_NewAtomStr`). `None` for a file index
     /// outside the table or a built-in index past `JS_ATOM_END`.
@@ -261,8 +261,8 @@ impl Atom {
     pub const NULL: Self = Self::Builtin(0);
 }
 
-/// A serialized value (`JS_WriteObjectRec`), restricted to the kinds a
-/// verifying read accepts.
+/// A serialized value (`JS_WriteObjectRec`), restricted to the kinds
+/// compiled code contains.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     /// `null`
@@ -549,9 +549,10 @@ pub struct Function {
     pub var_count: u16,
     /// `length` of the function.
     pub defined_arg_count: u16,
-    /// The stack size the bytes carry. A verifying read ignores it and
-    /// computes its own, so a writer leaves it `0`; the reader keeps what
-    /// it read so that read and write round-trip.
+    /// The stack size the bytes carry. The engine's read
+    /// (`JS_READ_OBJ_COMPUTE_STACK_SIZE`) ignores it and computes its own,
+    /// so a writer leaves it `0`; the reader keeps what it read so that
+    /// read and write round-trip.
     pub stack_size: u16,
     /// Number of captured arguments and locals.
     pub var_ref_count: u16,

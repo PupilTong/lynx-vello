@@ -68,11 +68,13 @@ typedef struct QjsModuleSource {
     /* Whether a compile of this source's text keeps its bytecode in the
        realm's compiled queue (`qjs_context_take_compiled`). */
     int capture;
-    /* A realm-local source answered with module bytecode from a writer this
-       process does not trust (`qjs_context_complete_module_bytecode`, or a
-       synchronous load that answered bytecode): the bytes the host's own
-       checks passed, owned here (malloc'd), and read with
-       `JS_READ_OBJ_VERIFY` when the module is compiled. Freed as soon as
+    /* A realm-local source answered with module bytecode the host's own
+       writer wrote for a program its checks passed
+       (`qjs_context_complete_module_bytecode`, or a synchronous load that
+       answered bytecode), owned here (malloc'd), and read with
+       `JS_READ_OBJ_COMPUTE_STACK_SIZE` when the module is compiled. That
+       read trusts the structure of the bytes, which the host's writer
+       guarantees; it computes each function's stack size. Freed as soon as
        that read has made this realm's instance, or with the source. */
     uint8_t *verified_bytecode;
     size_t verified_bytecode_length;
@@ -245,9 +247,10 @@ enum QjsRequiredKind {
     QJS_REQUIRED_JSON = 1,
     QJS_REQUIRED_MODULE = 2,
     QJS_REQUIRED_DETECT = 3,
-    /* Module bytecode, already checked by the host: stored as the realm's
-       verified bytecode and read with `JS_READ_OBJ_VERIFY` when compiled.
-       `text` and `text_length` are the bytes. */
+    /* Module bytecode, already checked and written by the host: stored as
+       the realm's verified bytecode and read with
+       `JS_READ_OBJ_COMPUTE_STACK_SIZE` when compiled. `text` and
+       `text_length` are the bytes. */
     QJS_REQUIRED_MODULE_BYTECODE = 4,
 };
 
@@ -997,8 +1000,9 @@ static void qjs_source_drop_verified_bytecode(QjsRuntime *runtime,
     }
 }
 
-/* Replaces the pending exception — the fork's verifying read refusing bytes
-   — by `SyntaxError("bytecode rejected for '<url>': <reason>")`, so the
+/* Replaces the pending exception — the fork's read refusing bytes, which
+   with `JS_READ_OBJ_COMPUTE_STACK_SIZE` is a function whose stack size
+   cannot be computed — by `SyntaxError("bytecode rejected for '<url>': <reason>")`, so the
    import that failed or the `require` that threw names the module. A read
    runs no JavaScript, so it is never interrupted. */
 static void qjs_throw_bytecode_rejected(JSContext *raw, const char *url) {
@@ -1097,14 +1101,16 @@ static JSModuleDef *qjs_compile_module_source(QjsContext *context,
         int verify = source->verified_bytecode != NULL;
         /* Read bytecode is a module nothing has resolved, as a compile
            under JS_EVAL_FLAG_COMPILE_UNLINKED leaves one; an inline link
-           resolves it here, as that compile would have. Bytes of a writer
-           this process does not trust are read with the fork's verifying
-           read; a runtime's own (`qjs_runtime_add_module_bytecode`) are
-           this build's and are read as they are. */
+           resolves it here, as that compile would have. Bytes the host's
+           writer wrote from a checked program are read computing each
+           function's stack size; a runtime's own
+           (`qjs_runtime_add_module_bytecode`) are this build's and are read
+           as they are. */
         if (verify) {
             compiled = JS_ReadObject(raw_context, source->verified_bytecode,
                                      source->verified_bytecode_length,
-                                     JS_READ_OBJ_BYTECODE | JS_READ_OBJ_VERIFY);
+                                     JS_READ_OBJ_BYTECODE |
+                                     JS_READ_OBJ_COMPUTE_STACK_SIZE);
             if (JS_IsException(compiled)) {
                 qjs_throw_bytecode_rejected(raw_context, url);
             }
@@ -1783,8 +1789,10 @@ uint8_t *qjs_context_compile_script_bytecode(QjsContext *context,
     return bytes;
 }
 
-/* Reads bytecode with `JS_READ_OBJ_VERIFY` and writes what it read again,
-   so the bytes that come back carry the stack sizes the read computed.
+/* Reads bytecode with `JS_READ_OBJ_COMPUTE_STACK_SIZE` and writes what it
+   read again, so the bytes that come back carry the stack sizes the read
+   computed. The read trusts the structure of the bytes: only bytes this
+   engine or the host's checked writer wrote may be given.
    A module read here stays loaded in this realm under the name its bytes
    carry. The bytes are `js_malloc`'d; NULL leaves the read's failure as
    this realm's pending exception. */
@@ -1795,7 +1803,7 @@ uint8_t *qjs_context_verify_bytecode(QjsContext *context,
     uint8_t *bytes;
 
     read = JS_ReadObject(context->raw, bytecode, length,
-                         JS_READ_OBJ_BYTECODE | JS_READ_OBJ_VERIFY);
+                         JS_READ_OBJ_BYTECODE | JS_READ_OBJ_COMPUTE_STACK_SIZE);
     if (JS_IsException(read)) {
         return NULL;
     }
@@ -1805,15 +1813,16 @@ uint8_t *qjs_context_verify_bytecode(QjsContext *context,
     return bytes;
 }
 
-/* Reads script bytecode with `JS_READ_OBJ_VERIFY` and evaluates it in this
-   realm. NULL leaves the failure as this realm's pending exception. */
+/* Reads script bytecode with `JS_READ_OBJ_COMPUTE_STACK_SIZE` and evaluates
+   it in this realm. The read trusts the structure of the bytes, as above.
+   NULL leaves the failure as this realm's pending exception. */
 QjsValue *qjs_context_evaluate_script_bytecode(QjsContext *context,
                                                const uint8_t *bytecode,
                                                size_t length) {
     JSValue read;
 
     read = JS_ReadObject(context->raw, bytecode, length,
-                         JS_READ_OBJ_BYTECODE | JS_READ_OBJ_VERIFY);
+                         JS_READ_OBJ_BYTECODE | JS_READ_OBJ_COMPUTE_STACK_SIZE);
     if (JS_IsException(read)) {
         return NULL;
     }
@@ -2814,10 +2823,10 @@ int qjs_context_complete_module_code(QjsContext *context, const char *name,
 }
 
 /* Supplies a realm-local module as module bytecode the host has already
-   checked: an owned copy is kept as the source's verified bytecode, and
-   read with `JS_READ_OBJ_VERIFY` when the module is compiled — by the
-   loader for an import, inside the compile region for a `require` — which
-   then frees it. Same name rules and statuses as
+   checked and written: an owned copy is kept as the source's verified
+   bytecode, and read with `JS_READ_OBJ_COMPUTE_STACK_SIZE` when the module
+   is compiled — by the loader for an import, inside the compile region for
+   a `require` — which then frees it. Same name rules and statuses as
    `qjs_context_complete_module`: -2 for a name the runtime has, -5 for one
    already answered, in which case nothing is copied; -1 is running out of
    memory. */

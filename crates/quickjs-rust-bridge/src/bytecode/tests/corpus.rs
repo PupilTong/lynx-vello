@@ -84,7 +84,7 @@ fn what_the_fork_writes_round_trips_and_verifies() {
 }
 
 /// The checked bytes are what the engine reads, and they run as the
-/// compiler's own bytes do (read with the verifying read alone).
+/// compiler's own bytes do (read by the fork alone).
 #[test]
 fn checked_scripts_run_as_compiled() {
     let run = |bytes: &[u8]| {

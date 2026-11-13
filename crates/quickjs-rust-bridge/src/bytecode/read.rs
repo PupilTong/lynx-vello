@@ -12,18 +12,29 @@ use crate::bytecode_abi::{BC_VERSION, OP_COUNT, OPCODES, atom_int, export_type, 
 /// refuses the input. The verifier and the writer recurse no deeper.
 pub const NESTING_LIMIT: usize = 256;
 
-/// Reads a serialized program as `JS_ReadObject(JS_READ_OBJ_BYTECODE |
-/// JS_READ_OBJ_VERIFY)` would, for any input: it does not panic,
-/// recursion is bounded by [`NESTING_LIMIT`], and every count is checked
-/// against the bytes that remain before anything is allocated for it.
+/// Reads a serialized program in the format `JS_ReadObject(JS_READ_OBJ_BYTECODE)`
+/// reads, from any writer. This is the reader for untrusted bytes: the
+/// fork's own reader trusts the structure of its input and is handed only
+/// what [`super::write_program`] wrote for a checked program. This one does
+/// not panic on any input, recursion is bounded by [`NESTING_LIMIT`], and
+/// every count is checked against the bytes that remain before anything is
+/// allocated for it.
 ///
-/// It refuses everything the verifying read refuses that does not depend
-/// on stack depth, and more: a LEB128 number in more bytes than it needs,
-/// a boolean byte other than 0 or 1, flag bits the format does not define,
-/// a closure variable index above 16 bits (the engine stores it in 16 bits
-/// and would truncate it), a jump to a byte that does not start an
-/// instruction, and bytes after the top-level value. What it returns
-/// therefore writes back to bytes the engine reads as the same program.
+/// It refuses a count or length the input cannot hold, a count the engine
+/// stores in an `int` above `i32::MAX`, a field it stores in 16 bits above
+/// 16 bits, a
+/// function with no bytecode or with vardefs other than none or
+/// `arg_count + var_count`, an opcode outside the final bytecode, an
+/// instruction that runs past its function's bytecode, an atom index
+/// outside the atom table, a value tag compiled code does not contain, a
+/// function or a module where the fork's writer never puts one, and an
+/// export type other than local and indirect; and, beyond what the format
+/// needs, a LEB128 number in more bytes than it needs, a boolean byte other
+/// than 0 or 1, flag bits the format does not define, a closure variable
+/// index above 16 bits (the engine stores it in 16 bits and would truncate
+/// it), a jump to a byte that does not start an instruction, and bytes after
+/// the top-level value. What it returns therefore writes back to bytes the
+/// engine reads as the same program.
 pub fn read_program(bytes: &[u8]) -> Result<Program, ReadError> {
     let mut reader = Reader {
         bytes,

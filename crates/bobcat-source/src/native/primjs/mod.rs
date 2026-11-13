@@ -84,8 +84,8 @@
 //! bits (`PrimJS` truncates them); the vardef count is `0` or
 //! `arg_count + var_count`; no bytes follow the top-level function.
 //! `BC_TAG_BIG_FLOAT` and `BC_TAG_MODULE` values are rejected by ruling with
-//! their own errors. Stack depth is not checked; the design leaves that to
-//! the fork's verifying read.
+//! their own errors. Stack depth is not checked here: the bridge's rules
+//! check it on the converted program, and the fork's read computes it.
 
 mod code;
 mod convert;
