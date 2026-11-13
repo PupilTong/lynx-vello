@@ -1563,13 +1563,12 @@ mod implementation {
 
     /// The bytecode a frame carries, when it is this build's and whole.
     ///
-    /// `JS_ReadObject` trusts its input, and a read that fails part-way
-    /// through a module leaves that half-read module registered in the realm
-    /// under its name (`JS_ReadModule`'s failure path releases one of its two
-    /// references); nothing outside `quickjs.c` can unregister it. So bytes
-    /// of another build and truncated bytes — the two ways a store hands back
-    /// what this build did not write — are turned away here, before any read.
-    /// Bytes damaged in place are the caller's checksum's to catch.
+    /// `JS_ReadObject` trusts its input: it reads what another build wrote
+    /// as if this one had. So bytes of another build and truncated bytes —
+    /// the two ways a store hands back what this build did not write — are
+    /// turned away here, before any read. Bytes damaged in place are the
+    /// caller's checksum's to catch; a read that does fail part-way through
+    /// a module frees it and leaves nothing registered under its name.
     fn unframe_bytecode(framed: &[u8]) -> Option<&[u8]> {
         let (id, rest) = framed.split_first_chunk::<8>()?;
         let (length, payload) = rest.split_first_chunk::<8>()?;
@@ -6431,10 +6430,15 @@ mod implementation {
                 realm.take_compiled().unwrap().bytecode
             };
             let commonjs = capture_commonjs("app:///lib.mjs", "exports", "exports.count = 7;");
-            let cases: [(&str, Vec<u8>); 6] = [
+            // Whole by its frame, so it reaches the read, which fails
+            // inside the module: after its name, before its function.
+            let payload = &good[BYTECODE_FRAME_HEADER..];
+            let cut_inside = frame_bytecode(&payload[..payload.len() / 2]);
+            let cases: [(&str, Vec<u8>); 7] = [
                 ("unframed garbage", b"not bytecode at all".to_vec()),
                 ("framed garbage", frame_bytecode(b"definitely not quickjs")),
                 ("truncated", good[..good.len() - 7].to_vec()),
+                ("cut inside the module", cut_inside),
                 ("another build", {
                     let mut foreign = good.clone();
                     foreign[0] ^= 1;
