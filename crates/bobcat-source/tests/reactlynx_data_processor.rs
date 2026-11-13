@@ -1,5 +1,11 @@
 //! Compiler-generated processors feed both realms through the String-input facade.
 #![cfg(not(target_arch = "wasm32"))]
+#[path = "../../../packages/reactlynx-test-fixtures/bytecode.rs"]
+#[allow(
+    clippy::doc_markdown,
+    reason = "the registry is the fixture package's file"
+)]
+mod bytecode;
 #[path = "../../../packages/reactlynx-test-fixtures/fixtures.rs"]
 mod fixtures;
 use std::sync::Arc;
@@ -23,16 +29,38 @@ struct Observed {
     messages: Vec<String>,
 }
 
-#[tokio::test]
-async fn compiled_processors_feed_initial_data_updates_reset_and_reload() {
-    for (processor, increment, suffix) in [("", 1, "processed"), ("named", 10, "named")] {
-        let input = Url::parse("app:///react-data-processor.lynx.bundle").unwrap();
-        let page = PageSource::from_native_bundle(
+/// The page as source (every script a string section), or as the encoder
+/// writes it for production: main-thread bytecode with the background as
+/// source, or both as bytecode.
+fn page(form: &str) -> PageSource {
+    let input = Url::parse("app:///react-data-processor.lynx.bundle").unwrap();
+    let fixture = bytecode::fixture("react-data-processor");
+    match form {
+        "source" => PageSource::from_native_bundle(
             &input,
             fixtures::fixture("react-data-processor").page,
             "react-data-processor__main-thread",
-        )
-        .unwrap();
+        ),
+        "bytecode" => PageSource::from_bytes(&input, fixture.page),
+        _ => PageSource::from_bytes(&input, fixture.js_bytecode_page),
+    }
+    .unwrap()
+}
+
+#[tokio::test]
+async fn compiled_processors_feed_initial_data_updates_reset_and_reload() {
+    run_processors("source").await;
+}
+
+#[tokio::test]
+async fn bytecode_processors_feed_initial_data_updates_reset_and_reload() {
+    run_processors("bytecode").await;
+    run_processors("js-bytecode").await;
+}
+
+async fn run_processors(form: &str) {
+    for (processor, increment, suffix) in [("", 1, "processed"), ("named", 10, "named")] {
+        let page = page(form);
         let resources = Resources::new(ResourcesConfig::default(), || {});
         page.register_with(&resources);
         let mut sources = page.view_sources(SCREEN, "en-US");

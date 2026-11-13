@@ -307,3 +307,69 @@ fn stack_traces_keep_function_names_and_inline_lines() {
         .unwrap();
     assert!(thrower.contains(CONVERTED), "{external}");
 }
+
+/// `Completion::ExportScript`: the module's default export is the script
+/// function. Each call runs the script again with the caller's `this`,
+/// its top-level declarations are global properties (`calls` keeps
+/// counting across calls), an import is read live, and the call returns
+/// the completion value.
+#[test]
+fn export_script_runs_on_every_call() {
+    let provider = "export let counter = 0; export function bump() { counter++; }";
+    for variant in ["mts.v1", "mts.v9"] {
+        let (mut runtime, mut realm) = new_realm();
+        realm
+            .complete_module(PROVIDER, Ok((PROVIDER, provider)))
+            .unwrap();
+        let imports: &[(&str, &[&str])] = &[(PROVIDER, &["counter", "bump"])];
+        let options = ConvertOptions {
+            module_name: CONVERTED,
+            imports,
+            undefined_names: &[],
+            completion: Completion::ExportScript,
+        };
+        load(
+            &mut runtime,
+            &realm,
+            &fixture(&format!("convert_export_script.{variant}.bin")),
+            &options,
+        )
+        .unwrap_or_else(|error| panic!("{variant}: {error}"));
+        // Loading runs nothing of the script.
+        assert_eq!(global(&mut realm, "calls").kind(), ValueKind::Undefined);
+        let namespace = realm.module_namespace(CONVERTED).unwrap();
+        let script = realm.property(&namespace, "default").unwrap();
+        assert_eq!(script.kind(), ValueKind::Function);
+        let global_object = realm.global_object().unwrap();
+        realm
+            .set_property(&global_object, "__chunk", &script)
+            .unwrap();
+        let mut results = Vec::new();
+        for _ in 0..2 {
+            let value = realm
+                .evaluate(
+                    EvalSource::new("__chunk.call(globalThis)"),
+                    EvalOptions::default(),
+                )
+                .unwrap();
+            results.push(string(&realm, &value));
+            realm
+                .evaluate(
+                    EvalSource::new("import('app:///provider.js').then(m => m.bump())"),
+                    EvalOptions::default(),
+                )
+                .unwrap();
+            runtime.drain_pending_jobs(&realm).unwrap();
+        }
+        // A call with another `this` sees it.
+        let other = realm
+            .evaluate(EvalSource::new("__chunk.call({})"), EvalOptions::default())
+            .unwrap();
+        results.push(string(&realm, &other));
+        assert_eq!(results, ["1:0:true", "2:1:true", "3:2:false"], "{variant}");
+        let helper = realm
+            .evaluate(EvalSource::new("chunkHelper()"), EvalOptions::default())
+            .unwrap();
+        assert_eq!(string(&realm, &helper), "helper:3", "{variant}");
+    }
+}

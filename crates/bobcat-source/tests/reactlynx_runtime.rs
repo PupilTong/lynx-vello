@@ -3,6 +3,12 @@
 // These integration tests use native threads and GPU capture.
 #![cfg(not(target_arch = "wasm32"))]
 
+#[path = "../../../packages/reactlynx-test-fixtures/bytecode.rs"]
+#[allow(
+    clippy::doc_markdown,
+    reason = "the registry is the fixture package's file"
+)]
+mod bytecode;
 #[path = "../../../packages/reactlynx-test-fixtures/fixtures.rs"]
 mod fixtures;
 
@@ -94,6 +100,40 @@ async fn real_native_card_boots_without_lynx_core() {
         "react-native.lynx.bundle",
     )
     .await;
+}
+
+/// The same card as the encoder writes it for production: its main-thread
+/// script as `PrimJS` bytecode (`ROOT_LEPUS`), and its background script as
+/// source (`page`) or as bytecode too (`js_bytecode_page`), each section
+/// converted to a module of the engine's bytecode. It boots as the source
+/// form does.
+#[tokio::test]
+async fn real_native_card_boots_from_bytecode() {
+    let fixture = bytecode::fixture("react-native");
+    for (bytes, name) in [
+        (fixture.page, "react-native-bytecode.lynx.bundle"),
+        (
+            fixture.js_bytecode_page,
+            "react-native-js-bytecode.lynx.bundle",
+        ),
+    ] {
+        boot(bytes, name).await;
+    }
+}
+
+/// `react-list`'s forty-cell `<list>` boots from both bytecode forms.
+#[tokio::test]
+async fn real_native_list_boots_from_bytecode() {
+    let fixture = bytecode::fixture("react-list");
+    for (bytes, name) in [
+        (fixture.page, "react-list-bytecode.lynx.bundle"),
+        (
+            fixture.js_bytecode_page,
+            "react-list-js-bytecode.lynx.bundle",
+        ),
+    ] {
+        boot(bytes, name).await;
+    }
 }
 
 #[tokio::test]

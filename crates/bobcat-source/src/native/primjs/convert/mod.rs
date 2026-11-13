@@ -22,6 +22,10 @@
 //!    undefined; return_async
 //! ```
 //!
+//! With [`Completion::ExportScript`] the evaluated part is
+//! `fclosure <script function>; put_var_ref *default*; undefined;
+//! return_async`: the script runs when the default export is called.
+//!
 //! The module function owns the top-level closure variables; the script
 //! function and everything below reach them through closure references:
 //!
@@ -90,6 +94,12 @@ pub enum Completion {
     DefaultExport,
     /// It is dropped.
     Discard,
+    /// The script is not run when the module evaluates: the module's
+    /// default export is the converted script function itself, which a
+    /// caller runs as often as it likes, with the `this` it chooses (a
+    /// named Lepus chunk, which `__LoadLepusChunk` runs on every call with
+    /// `this` = `globalThis`). Each call returns the completion value.
+    ExportScript,
 }
 
 /// How a script becomes a module.
@@ -398,7 +408,9 @@ pub fn convert_script(
         }
     };
     let mut exports = Vec::new();
-    let default_index = if options.completion == Completion::DefaultExport {
+    let default_index = if options.completion == Completion::Discard {
+        None
+    } else {
         let default_atom = converter.atoms.intern_str("*default*");
         let mut closure_var = fork::ClosureVar::new(default_atom, ClosureType::ModuleDecl, 0);
         closure_var.is_lexical = true;
@@ -409,8 +421,6 @@ pub fn convert_script(
             name: converter.atoms.intern_str("default"),
         });
         Some(index)
-    } else {
-        None
     };
     if closure_vars.len() > limits::JS_MAX_LOCAL_VARS as usize {
         return Err(ConvertError::TooManyClosureVariables {
@@ -444,20 +454,31 @@ pub fn convert_script(
         pc2line: Vec::new(),
         source: Vec::new(),
     });
-    let code = [
+    let head = [
         Instruction::simple(op::PUSH_THIS),
         Instruction::new(op::IF_FALSE, &[Fo::Target(3)]),
         Instruction::simple(op::RETURN_UNDEF),
-        Instruction::new(op::GET_VAR, &[Fo::ClosureVar(this_index)]),
-        Instruction::new(op::FCLOSURE, &[Fo::Const(0)]),
-        Instruction::new(op::CALL_METHOD, &[Fo::Immediate(0)]),
-        match default_index {
-            Some(index) => Instruction::new(op::PUT_VAR_REF, &[Fo::ClosureVar(index)]),
-            None => Instruction::simple(op::DROP),
-        },
+    ];
+    let body: Vec<_> = match (options.completion, default_index) {
+        (Completion::ExportScript, Some(index)) => vec![
+            Instruction::new(op::FCLOSURE, &[Fo::Const(0)]),
+            Instruction::new(op::PUT_VAR_REF, &[Fo::ClosureVar(index)]),
+        ],
+        (_, default_index) => vec![
+            Instruction::new(op::GET_VAR, &[Fo::ClosureVar(this_index)]),
+            Instruction::new(op::FCLOSURE, &[Fo::Const(0)]),
+            Instruction::new(op::CALL_METHOD, &[Fo::Immediate(0)]),
+            match default_index {
+                Some(index) => Instruction::new(op::PUT_VAR_REF, &[Fo::ClosureVar(index)]),
+                None => Instruction::simple(op::DROP),
+            },
+        ],
+    };
+    let tail = [
         Instruction::simple(op::UNDEFINED),
         Instruction::simple(op::RETURN_ASYNC),
     ];
+    let code: Vec<_> = head.into_iter().chain(body).chain(tail).collect();
     function.instructions = code
         .into_iter()
         .collect::<Result<_, _>>()

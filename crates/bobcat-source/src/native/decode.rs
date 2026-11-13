@@ -220,6 +220,41 @@ fn open(bytes: &[u8]) -> Result<Reader<'_>, ConvertError> {
 }
 
 pub(crate) fn decode(bytes: &[u8]) -> Result<crate::web::WebTemplate, ConvertError> {
+    decode_template(bytes, false).map(|(template, _)| template)
+}
+
+/// A native bundle as a container reads it: the template model of
+/// [`decode`] (every source section, styles, config) and, instead of a
+/// [`ConvertError::CodeCacheBundle`] refusal, the bundle's `PrimJS`
+/// bytecode sections, in [`bytecode_sections`] order. The empty
+/// `ROOT_LEPUS` an external (`DynamicComponent`) layout carries, which
+/// [`decode`] accepts, is not among them. A legacy-Lepus bundle is still
+/// [`ConvertError::CodeCacheBundle`].
+pub(crate) fn decode_container(
+    bytes: &[u8],
+) -> Result<
+    (
+        crate::web::WebTemplate,
+        Vec<super::primjs::BytecodeSection<'_>>,
+    ),
+    ConvertError,
+> {
+    let (template, root_is_placeholder) = decode_template(bytes, true)?;
+    let mut sections = bytecode_sections(bytes)?;
+    if root_is_placeholder {
+        sections.retain(|section| section.kind != super::primjs::SectionKind::RootLepus);
+    }
+    Ok((template, sections))
+}
+
+/// [`decode`], or with `allow_bytecode` the template part of
+/// [`decode_container`]: bytecode sections are skipped rather than
+/// refused. Also answers whether `ROOT_LEPUS` is the empty program of an
+/// external layout.
+fn decode_template(
+    bytes: &[u8],
+    allow_bytecode: bool,
+) -> Result<(crate::web::WebTemplate, bool), ConvertError> {
     let mut reader = open(bytes)?;
 
     let NativeHeader {
@@ -230,12 +265,20 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<crate::web::WebTemplate, ConvertErr
     } = decode_header(&mut reader)?;
 
     let routes = decode_section_routes(&mut reader, bytes.len())?;
-    reject_top_level_bytecode(bytes, &routes, &app_type)?;
+    let root_is_placeholder = is_placeholder_root(bytes, &routes, &app_type)?;
+    if !allow_bytecode {
+        reject_top_level_bytecode(&routes, root_is_placeholder)?;
+    }
     let custom = routes
         .get(&SECTION_CUSTOM)
         .map(|range| {
             let mut reader = section_reader(bytes, *range, SECTION_CUSTOM)?;
-            let headers = decode_custom_headers(&mut reader)?;
+            let mut headers = if allow_bytecode {
+                parse_custom_headers(&mut reader)?
+            } else {
+                decode_custom_headers(&mut reader)?
+            };
+            headers.retain(|header| header.encoding != CUSTOM_JS_BYTECODE);
             Ok((headers, reader.position(), range.end))
         })
         .transpose()?;
@@ -299,7 +342,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<crate::web::WebTemplate, ConvertErr
     let custom_sections_style_info = named_style_infos(&style_info, named_css);
     let config = build_web_config(page_config, &fields, &target_version_source, &app_type);
 
-    Ok(crate::web::WebTemplate {
+    let template = crate::web::WebTemplate {
         version: 1,
         config,
         lepus_code,
@@ -308,7 +351,8 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<crate::web::WebTemplate, ConvertErr
         custom_sections: Some(JsonValue::Object(custom_sections)),
         custom_sections_style_info,
         ..crate::web::WebTemplate::default()
-    })
+    };
+    Ok((template, root_is_placeholder))
 }
 
 /// Each named CSS section as a sheet of its own, the shape the web encoder's
@@ -556,9 +600,8 @@ fn validate_ranges(
 }
 
 fn reject_top_level_bytecode(
-    bytes: &[u8],
     routes: &HashMap<u8, SectionRange>,
-    app_type: &str,
+    root_is_placeholder: bool,
 ) -> Result<(), ConvertError> {
     for (section, name) in [
         (SECTION_JS_BYTECODE, "JS_BYTECODE"),
@@ -570,28 +613,40 @@ fn reject_top_level_bytecode(
             });
         }
     }
-    if let Some(range) = routes.get(&SECTION_ROOT_LEPUS) {
-        let js_is_empty = routes
-            .get(&SECTION_JS)
-            .map(|range| is_empty_counted_section(bytes, *range, SECTION_JS, "JS"))
-            .transpose()?
-            .unwrap_or(true);
-        let css_is_empty = routes
-            .get(&SECTION_CSS)
-            .map(|range| is_empty_counted_section(bytes, *range, SECTION_CSS, "CSS"))
-            .transpose()?
-            .unwrap_or(true);
-        let is_external_layout = app_type == "DynamicComponent"
-            && routes.contains_key(&SECTION_CUSTOM)
-            && js_is_empty
-            && css_is_empty;
-        if !is_external_layout || !is_empty_root_lepus(bytes, *range)? {
-            return Err(ConvertError::CodeCacheBundle {
-                section: "ROOT_LEPUS".to_owned(),
-            });
-        }
+    if routes.contains_key(&SECTION_ROOT_LEPUS) && !root_is_placeholder {
+        return Err(ConvertError::CodeCacheBundle {
+            section: "ROOT_LEPUS".to_owned(),
+        });
     }
     Ok(())
+}
+
+/// Whether `ROOT_LEPUS` is the empty program an external
+/// (`DynamicComponent`) layout carries beside its custom sections, with
+/// empty `JS` and `CSS` sections.
+fn is_placeholder_root(
+    bytes: &[u8],
+    routes: &HashMap<u8, SectionRange>,
+    app_type: &str,
+) -> Result<bool, ConvertError> {
+    let Some(range) = routes.get(&SECTION_ROOT_LEPUS) else {
+        return Ok(false);
+    };
+    let js_is_empty = routes
+        .get(&SECTION_JS)
+        .map(|range| is_empty_counted_section(bytes, *range, SECTION_JS, "JS"))
+        .transpose()?
+        .unwrap_or(true);
+    let css_is_empty = routes
+        .get(&SECTION_CSS)
+        .map(|range| is_empty_counted_section(bytes, *range, SECTION_CSS, "CSS"))
+        .transpose()?
+        .unwrap_or(true);
+    let is_external_layout = app_type == "DynamicComponent"
+        && routes.contains_key(&SECTION_CUSTOM)
+        && js_is_empty
+        && css_is_empty;
+    Ok(is_external_layout && is_empty_root_lepus(bytes, *range)?)
 }
 
 fn is_empty_counted_section(

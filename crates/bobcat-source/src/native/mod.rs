@@ -7,6 +7,10 @@
 //! Lepus-chunk, `JS_BYTECODE`, or `JsBytecode` custom section returns
 //! [`ConvertError::CodeCacheBundle`] before an output bundle is produced.
 //!
+//! The engine itself runs such bundles: `crate::ContainerSources` reads
+//! them through `decode_container` and converts each bytecode section with
+//! [`primjs::convert_script`]. Only this web-bundle conversion refuses them.
+//!
 //! # Example
 //!
 //! ```no_run
@@ -42,4 +46,12 @@ pub fn convert(native_bundle: &[u8]) -> Result<Vec<u8>, ConvertError> {
 /// Named external modules retain their names; no page root is invented.
 pub fn decode(bytes: &[u8]) -> Result<crate::web::WebTemplate, ConvertError> {
     decode::decode(bytes)
+}
+
+/// A native bundle as a container reads it: the template of [`decode`] and
+/// its `PrimJS` bytecode sections, which [`decode`] refuses.
+pub(crate) fn decode_container(
+    bytes: &[u8],
+) -> Result<(crate::web::WebTemplate, Vec<primjs::BytecodeSection<'_>>), ConvertError> {
+    decode::decode_container(bytes)
 }

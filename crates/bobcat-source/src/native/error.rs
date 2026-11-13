@@ -84,6 +84,20 @@ pub enum ConvertError {
         section: String,
     },
 
+    /// A `PrimJS` bytecode section that cannot run on this engine: the
+    /// reader or the converter refused it (`crate::native::primjs`). A
+    /// container with one such section is refused as a whole.
+    #[error("bytecode section {section:?} ({kind:?}) cannot run: {reason}")]
+    Bytecode {
+        /// The section's name: `ROOT_LEPUS`, a Lepus chunk's or custom
+        /// section's name, or a `JS_BYTECODE` path.
+        section: String,
+        /// Which kind of section it is.
+        kind: super::primjs::SectionKind,
+        /// The reader's or the converter's error.
+        reason: String,
+    },
+
     /// The bundle uses a native feature outside the source-external format.
     #[error("unsupported native bundle: {0}")]
     UnsupportedBundle(String),
