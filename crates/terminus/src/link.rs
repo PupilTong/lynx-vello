@@ -27,7 +27,7 @@ pub use crate::paint::display_list::{
 };
 pub use crate::render::image::{
     DocumentKind, DocumentRequest, FrameImages, ImageEvent, ImageInbox, ImageOutcome, ImageReports,
-    ImageRole, ImageSizeHint, MAX_RENDERABLE_DIMENSION, NoImages, is_renderable,
+    ImageResidency, ImageRole, ImageSizeHint, MAX_RENDERABLE_DIMENSION, NoImages, is_renderable,
 };
 pub use crate::render::svg::VectorDocument;
 pub use crate::style::animation::AnimationTick;

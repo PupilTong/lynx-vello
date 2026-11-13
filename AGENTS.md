@@ -1359,7 +1359,12 @@ sniffing, codec contract, cache policy or byte budget lives in `bobcat-core` or
 `terminus`: the sizing vocabulary (`ImageSizeHint`, `Bitmap`, `target_size`) and
 every cache policy are `vant`'s, which both re-export, and
 `crates/bobcat-resources` is the reference orchestration over `vant` that every
-shipped embedder uses. `FrameImages::retain` — the sources one resolve pass met, in
+shipped embedder uses. What the engine fixes about a host's image store is
+`terminus::link::ImageResidency` (re-exported at the `bobcat-core` root):
+`vant::image::residency::Residency` over `ImageReports`, which supplies
+`MAX_RENDERABLE_DIMENSION` and sends every report itself, once per
+transition, so a host runs the IO and cannot forget or reorder a report.
+`FrameImages::retain` — the sources one resolve pass met, in
 paint order — carries **no default body**, so every store writes its working
 set where someone can see it rather than inheriting a silent no-op.
 `LynxView::prefetch_images` warms sources ahead of the walk that would discover
@@ -3011,14 +3016,27 @@ type and depends only on `bytes`, `http`, `url`, `serde_json`, `thiserror`,
   writes through on whichever thread the load finished. The holds a
   background install places are not here: they wait on a tokio channel, so
   they are the orchestrator's.
+- **Image residency** (`image::residency`): `Residency<W>`, the synchronous,
+  IO-free state of every image source a host was asked for — loading with its
+  waiters `W`, loaded, the parsed-document marker, failed — over the
+  decoded-bitmap `MemoryCache`. A host asks what a request means
+  (`Requested`: report now, join, or start a load at a bound), feeds every
+  completion back (`loaded`, `parsed`, `failed`, `refined`, …) and is handed
+  the waiters to tell; a frame's `read` answers `Read::Hit` with the
+  `Refinement` to start when the bitmap is far from the drawn size,
+  `Read::Restore` when it was evicted, or `Read::Unavailable`. Each view has
+  a `ViewKey` and its own working set, and the tier pins **the union of
+  every view's set** (`retain(view, frame)`, `release_view`), so one view's
+  frame never unpins another's. It stores waiters and never calls them.
 - **The vocabulary**: `CachePolicy`, `mime`, `preprocess`, `image_header`,
   `data_url`, `image` (`ImageSizeHint`, `Bitmap`, `DecodeError`,
   `target_size`, `wants_refinement`, `bounded`), and `error`
   (`ResourceError`, `ResourceErrorKind`, `ResourceErrorPhase`, `RetryAdvice`,
   `Failure`), which `bobcat-core` and `terminus` re-export at their old paths.
 
-Not here: the load orchestration (`images.rs`, `sources.rs`, the background
-install holds), which is `bobcat-resources`'s, and every adapter — the native
+Not here: the load orchestration (the IO of `images.rs`, `sources.rs`, the
+background install holds), which is `bobcat-resources`'s, the dispatch of
+image reports, which is `terminus`'s `ImageResidency`, and every adapter — the native
 ones are `bobcat-resources`'s and the browser's are `bobcat-wasm`'s.
 
 ### crates/bobcat-resources
@@ -3090,9 +3108,11 @@ engine's strict validation sees what a browser's decoder would have produced,
 JSON validated, images container-sniffed and header-probed for their intrinsic
 size without decoding a pixel, the rest passed through.
 
-**Tiered caching, applied from `vant`**: decoded bitmaps in
-`vant::memory::MemoryCache` under a byte budget with the frame's working set
-pinned against eviction, and fetched bytes in `vant::byte_cache::ByteCache`
+**Tiered caching, applied from `vant`**: decoded bitmaps in the scope's
+`ImageResidency` (`terminus::link::ImageResidency`, the engine's store type
+over `vant::image::residency::Residency`) under a byte budget with every
+view's working set pinned against eviction — a `ViewResources` carries its
+`ViewKey` and releases its set when it drops — and fetched bytes in `vant::byte_cache::ByteCache`
 over the platform's `Store` (`FsStore`: `<fnv64>.bin` beside `<fnv64>.json`
 holding the key, length, last use and the HTTP record, temp-and-rename
 writes, strays and broken halves swept at open) with RFC 9111 freshness,
@@ -3170,17 +3190,22 @@ an ordinary `Completion::Failed` with a note. `ViewResources::request_document`
 synthetic `svg-content:` source the engine named and runs the same parse with
 no resolution, transport or preprocessing; its completion
 (`Completion::RequestedDocument`) is routed to the view that asked through
-the in-flight list `ImageState::requested`. **Documents are parsed and
+the residency's in-flight list of document requests. **Documents are parsed and
 reported, never retained** (owner ruling 2026-10-11): the engine owns the
 scene it encodes. A document request files no entry before, during or after
 its parse, so two requests for one source are two parses and two reports
-and `knows_image` stays false; a fetched document leaves only the unit
-marker `Entry::Parsed`, so the URL stays known while a later request fetches
+and `knows_image` stays false; a fetched document leaves only the
+residency's parsed marker, so the URL stays known while a later request fetches
 and parses it again. `is_resident` is false, `read` answers `None` (so the
 memory tier, refinement and restore never see a document), and
 `memory_used_bytes` counts no document. A document labelled with a specific
 non-SVG type such as `text/plain` is trusted as that type and is not an
 image (`mime::sniff`).
+
+`images.rs` is the pipeline's IO alone: what a request or a read means is the
+residency's answer, every report is sent by `ImageResidency`, and this module
+starts the load, the refinement or the restore it is told to and feeds the
+completion back.
 
 The frame reads each image at the size it draws it: a resident bitmap far
 larger than its draw is re-decoded at the drawn size in the background and

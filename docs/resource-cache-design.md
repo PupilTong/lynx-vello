@@ -26,7 +26,7 @@ resources: the engine owns the policy, the embedder owns the bytes.
 |---|---|---|
 | `vant` | every resource **policy**: `CachePolicy`, the memory tier, RFC 9111 freshness, the byte-cache tier over a `Store`, image residency and refinement decisions, MIME sniffing and preprocessing, image header probing, `data:` URLs, the resource error vocabulary, the embedder traits (`Fetch`, `Store`, `AsyncStore`, `ImageDecoder`) and `Platform`, and (PR2) the derived-artifact cache that backs the QuickJS code cache, with a synchronous and an asynchronous driver | `bytes`, `http`, `url`, `rustc-hash`, `serde_json`, `thiserror`, `vello_common` (for `peniko::ImageData`), `siphasher`. **Never** `terminus`, `bobcat-core`, tokio, libc bindings or `web-sys`. |
 | `bobcat-resources` | the reference **orchestrator** (`Resources<P>`, `ViewResources<P>`, the image job pipeline, source loading, background installs over `vant::registry` (PR4), the native executor) and the shipped **native adapters**: `NativeFetch` (libcurl + `file:`), `FsStore` (a cache directory), `NativeDecoder` (ImageIO / gdk-pixbuf); the browser's adapters (`BrowserFetch`, `BrowserDecoder`, `CacheStore`) are `bobcat-wasm`'s since PR3 | `vant`, `bobcat-core`, tokio, the platform libraries |
-| `terminus` | re-exports `vant::ImageSizeHint` at `terminus::link::ImageSizeHint`; (PR5) owns the image store type `terminus::link::ImageResidency` over `vant::image::Residency`, with the engine's constants and report dispatch | `vant` |
+| `terminus` | re-exports `vant::ImageSizeHint` at `terminus::link::ImageSizeHint`; (PR5) owns the image store type `terminus::link::ImageResidency` over `vant::image::residency::Residency`, with the engine's constants and report dispatch | `vant` |
 
 Dependency direction: `terminus → vant`, `bobcat-core → terminus, vant`,
 `bobcat-source → bobcat-core, vant` (registrations are written through
@@ -461,13 +461,26 @@ invalidation) and the trait implementations call them.
 The image pipeline's decisions — the state of every source, who waits for
 it, the decoded-bitmap tier and its pins, when a read hits, refines or must
 restore — move out of `bobcat-resources`' `images.rs` into
-`vant::image::Residency<W>`, a synchronous state machine with no IO.
+`vant::image::residency::Residency<W>`, a synchronous state machine with no IO.
 `terminus::link::ImageResidency` is the engine's store type over it, owning
 `MAX_RENDERABLE_DIMENSION` and the dispatch of `ImageReports`, so a host
 cannot forget or reorder a report. `bobcat-resources` keeps the IO: fetch,
 decode, parse, and feeding completions in. One behaviour fix is part of it:
-the pinned working set becomes the union of every view's, where today one
-view's `retain` replaces the set and unpins another view's bitmaps.
+the pinned working set becomes the union of every view's, where before one
+view's `retain` replaced the set and unpinned another view's bitmaps. Each
+`ViewResources` holds a `ViewKey`, `retain(view, frame)` replaces only that
+view's set, and dropping the `ViewResources` releases it, so what only that
+view pinned becomes evictable at once rather than at another view's next
+frame.
+
+As landed: a request answers `Requested` (`Loaded`, `Failed`, `Joined`, or
+`Start { bound }`, the bound being `initial_bound.min(max_renderable)` so the
+host names neither); completions are `loaded(Decoded)`, `parsed`, `failed`,
+`refined`, `refine_failed` and `requested_document_done`, each handing back
+the waiters to tell; a read answers `Read::Hit { image, refine }`,
+`Read::Restore(Refinement)` or `Read::Unavailable`, and a restore is answered
+with `restored`. A source that cannot be resolved is a `failed` right after
+its `Start`. A completion for an entry that is not loading is ignored.
 
 Not in the series — it needs a ruling: making the CPU tier release a bitmap
 the GPU `Bitmaps` cache holds, and restore only when both dropped it. Strong

@@ -123,9 +123,9 @@ pub use native_module::{ModuleCall, ModuleCallback, NativeModule};
 pub use paint::{Painter, PostedFrame};
 pub use style::{PreparsedDeclaration, PreparsedKeyframe, PreparsedRule, PreparsedStyleSheet};
 pub use terminus::link::{
-    DocumentKind, FontBlob, FrameImages, ImageEvent, ImageInbox, ImageReports, ImageSizeHint,
-    MAX_RENDERABLE_DIMENSION, MAX_STYLE_THREADS, NoImages, VectorDocument, is_renderable, kurbo,
-    peniko,
+    DocumentKind, FontBlob, FrameImages, ImageEvent, ImageInbox, ImageReports, ImageResidency,
+    ImageSizeHint, MAX_RENDERABLE_DIMENSION, MAX_STYLE_THREADS, NoImages, VectorDocument,
+    is_renderable, kurbo, peniko,
 };
 #[cfg(target_arch = "wasm32")]
 pub use view::configure_wasm_workers;

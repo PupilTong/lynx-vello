@@ -1,9 +1,12 @@
 //! Image sizing and decoded pixels: the size hint a frame reports for each
 //! image, the one downsampling rule every host shares, the shape every
-//! platform decoder answers in ([`Bitmap`]), and when a resident bitmap is
-//! worth decoding again at another size.
+//! platform decoder answers in ([`Bitmap`]), when a resident bitmap is
+//! worth decoding again at another size, and the residency policy built on
+//! them ([`residency::Residency`]).
 
 use vello_common::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat as PixelFormat};
+
+pub mod residency;
 
 /// How large a frame draws an image, in device pixels.
 ///

@@ -1,5 +1,12 @@
-//! The image pipeline: what happens between the painter naming a source and
-//! the frame reading its pixels.
+//! The image pipeline's IO: the jobs that fetch, preprocess, decode and
+//! parse, and the completions they feed back.
+//!
+//! What is known about every source, who waits for it, the decoded-bitmap
+//! tier and its pins, and when a read hits, refines or must restore are not
+//! decided here: they are [`vant::image::residency::Residency`]'s, held as
+//! the engine's [`ImageResidency`], which also sends every report. This
+//! module asks it what a request or a read means and does the IO it is told
+//! to do.
 //!
 //! A request resolves the source, then a job — one task on the fetcher's own
 //! runtime natively, a local task in the browser — fetches the bytes and runs
@@ -38,35 +45,23 @@
 //!
 //! Either is reported through [`ImageReports::parsed_document`], or through
 //! [`ImageReports::failed`] when it does not parse. **Documents are parsed
-//! and reported, never retained**: the engine owns the scene it encodes from
-//! the report, and this pipeline keeps nothing of the document. Nothing
-//! enters the memory tier or [`Resources::memory_used_bytes`],
+//! and reported, never retained** (the residency's module docs say what that
+//! means for its entries): nothing enters the memory tier or
+//! [`Resources::memory_used_bytes`],
 //! [`FrameImages::read`](bobcat_core::FrameImages::read) answers `None` (the
 //! engine draws the document itself and never asks), and no refinement and
-//! no restore can start for it. A document request files no entry at all,
-//! before, during or after its parse: two requests for one source are two
-//! parses and two reports, and the engine applies the first that finds the
-//! source pending. A fetched document leaves [`Entry::Parsed`], a marker
-//! that holds nothing and keeps the source known; a later request for it
-//! fetches and parses it again.
-//!
-//! The document's state never regresses, and a bitmap's does not here: an
-//! entry that failed stays failed, and one that loaded as a bitmap stays
-//! loaded whatever the memory tier holds for it. The parsed marker is the
-//! one entry a later request starts over.
+//! no restore can start for it.
 
 use std::sync::Arc;
 
 use bobcat_core::peniko::ImageData;
 use bobcat_core::{
-    DocumentKind, ImageEvent, ImageReports, ImageSizeHint, MAX_RENDERABLE_DIMENSION, VectorDocument,
+    DocumentKind, ImageEvent, ImageReports, ImageResidency, ImageSizeHint, VectorDocument,
 };
 use bytes::Bytes;
-use rustc_hash::FxHashMap;
 use url::Url;
 use vant::Platform;
-use vant::image::{bounded, wants_refinement};
-use vant::memory::MemoryCache;
+use vant::image::residency::{Decoded, Read, Refinement, ViewKey};
 
 use crate::decode::{Bitmap, DecodeError};
 use crate::image_header::ImageHeader;
@@ -117,51 +112,12 @@ fn parse(
     }
 }
 
-/// The painter-thread half: what is known about every source asked for.
+/// The painter-thread half: the engine's residency over every source asked
+/// for, and the queue its completions arrive on.
 pub(crate) struct ImageState {
-    entries: FxHashMap<Arc<str>, Entry>,
-    bitmaps: MemoryCache<ImageData>,
-    /// Document requests whose parse is in flight, each with the view that
-    /// asked: where a parse's report goes, since a view's [`ImageReports`]
-    /// cannot travel with the job. Not an entry: two requests for one source
-    /// are two of these, two parses and two reports, and each leaves the
-    /// list when a parse of its source completes.
-    requested: Vec<(Arc<str>, ImageReports)>,
+    pub(crate) residency: ImageResidency,
     /// The painter is the only consumer, and drains without blocking.
     completions: tokio::sync::mpsc::UnboundedReceiver<Completion>,
-}
-
-enum Entry {
-    /// Asked for; the job has not completed. Every view that asked is told
-    /// when it does.
-    Loading {
-        waiters: Vec<ImageReports>,
-    },
-    /// A decoded raster image.
-    Loaded(Loaded),
-    /// A fetched document that parsed and was reported to every view that
-    /// asked. Nothing of it is kept, since the engine owns the scene it
-    /// encodes; the marker keeps the source known, and a later request
-    /// fetches and parses it again. It has no bitmap, so the memory tier,
-    /// refinement and restore never see it.
-    Parsed,
-    Failed,
-}
-
-struct Loaded {
-    url: Url,
-    intrinsic: (u32, u32),
-    /// The container, for a decoder that wants to be told what it is given.
-    /// Never [`ImageFormat::Svg`]: an SVG document completes as
-    /// [`Entry::Parsed`], so no restore or refinement ever decodes one.
-    format: ImageFormat,
-    header: Option<ImageHeader>,
-    /// The encoded bytes, kept when no other tier can hand them back: a
-    /// registration that may be cleared, a `data:` URL, a response the byte
-    /// tier did not store, and everything in the browser.
-    encoded: Option<Bytes>,
-    /// A refinement decode in flight, and the size it targets.
-    refining: Option<(u32, u32)>,
 }
 
 /// What a job sends back.
@@ -201,105 +157,37 @@ pub(crate) enum Completion {
 
 impl ImageState {
     pub(crate) fn new(
-        budget: usize,
+        residency: ImageResidency,
         completions: tokio::sync::mpsc::UnboundedReceiver<Completion>,
     ) -> Self {
         Self {
-            entries: FxHashMap::default(),
-            bitmaps: MemoryCache::new(budget),
-            requested: Vec::new(),
+            residency,
             completions,
         }
     }
-
-    pub(crate) fn budget(&self) -> usize {
-        self.bitmaps.budget()
-    }
-
-    /// Bytes held by decoded bitmaps.
-    pub(crate) fn bitmap_bytes(&self) -> usize {
-        self.bitmaps.used_bytes()
-    }
-
-    /// Bytes held by encoded images nothing else can restore.
-    pub(crate) fn encoded_bytes(&self) -> usize {
-        self.entries
-            .values()
-            .filter_map(|entry| match entry {
-                Entry::Loaded(loaded) => loaded.encoded.as_ref().map(Bytes::len),
-                Entry::Loading { .. } | Entry::Parsed | Entry::Failed => None,
-            })
-            .sum()
-    }
-
-    pub(crate) fn set_budget(&mut self, budget: usize) {
-        self.bitmaps.set_budget(budget);
-    }
-
-    /// Whether `source` has been asked for at all. A document request does
-    /// not count: it files no entry.
-    pub(crate) fn knows(&self, source: &str) -> bool {
-        self.entries.contains_key(source)
-    }
-
-    /// Whether `source` has a resident bitmap.
-    pub(crate) fn is_resident(&self, source: &str) -> bool {
-        self.bitmaps.contains(source)
-    }
-
-    /// The resident bitmap's size, if any.
-    pub(crate) fn resident_size(&self, source: &str) -> Option<(u32, u32)> {
-        self.bitmaps
-            .peek(source)
-            .map(|image| (image.width, image.height))
-    }
 }
 
-/// Names `source` for `reports`: answers at once if the pipeline already
-/// knows it as a bitmap or a failure, joins a load in flight, and otherwise
-/// starts the load and remembers who asked. A document parsed before is
-/// fetched and parsed again.
+/// Names `source` for `reports`: the residency answers at once if it
+/// already knows it as a bitmap or a failure, or joins a load in flight;
+/// otherwise the load starts here. A document parsed before is fetched and
+/// parsed again.
 pub(crate) fn request<P: Platform>(resources: &Resources<P>, source: &str, reports: &ImageReports) {
     let mut state = resources.local.borrow_mut();
-    match state.entries.get_mut(source) {
-        Some(Entry::Loaded(loaded)) => {
-            reports.loaded(source, loaded.intrinsic.0, loaded.intrinsic.1);
-            return;
-        }
-        Some(Entry::Failed) => {
-            reports.failed(source);
-            return;
-        }
-        Some(Entry::Loading { waiters }) => {
-            waiters.push(reports.clone());
-            return;
-        }
-        Some(Entry::Parsed) | None => {}
-    }
+    let Some(bound) = state.residency.request(source, reports) else {
+        return;
+    };
     let base = resources.base_url();
     let url = match resources.shared.transports.resolve(source, base.as_ref()) {
         Ok(url) => url,
         Err(failure) => {
-            state.entries.insert(Arc::from(source), Entry::Failed);
+            state.residency.complete_failed(source);
             drop(state);
             resources.note(format!("image `{source}` cannot be resolved: {failure}"));
-            reports.failed(source);
             return;
         }
     };
-    let source: Arc<str> = Arc::from(source);
-    state.entries.insert(
-        Arc::clone(&source),
-        Entry::Loading {
-            waiters: vec![reports.clone()],
-        },
-    );
     drop(state);
-    let bound = resources
-        .shared
-        .initial_decode_bound
-        .min(MAX_RENDERABLE_DIMENSION);
-    spawn_load(resources, source, url, (bound, bound));
+    spawn_load(resources, Arc::from(source), url, bound);
 }
 
 /// Hands `bytes`, a document of `kind` a page wrote itself, to a parse of
@@ -318,8 +206,8 @@ pub(crate) fn request_document<P: Platform>(
     resources
         .local
         .borrow_mut()
-        .requested
-        .push((Arc::clone(&source), reports.clone()));
+        .residency
+        .request_document(Arc::clone(&source), reports);
     spawn_parse(resources, source, bytes, kind);
 }
 
@@ -350,92 +238,38 @@ fn apply<P: Platform>(resources: &Resources<P>, completion: Completion) {
             format,
             header,
             encoded,
-        } => {
-            let Some(Entry::Loading { waiters }) = state.entries.remove(&source) else {
-                return;
-            };
-            let intrinsic = (bitmap.source_width, bitmap.source_height);
-            let bytes = bitmap.byte_len();
-            let image = bitmap.into_image_data();
-            state.bitmaps.insert(Arc::clone(&source), image, bytes);
-            state.entries.insert(
-                Arc::clone(&source),
-                Entry::Loaded(Loaded {
-                    url,
-                    intrinsic,
-                    format,
-                    header,
-                    encoded,
-                    refining: None,
-                }),
-            );
-            drop(state);
-            for reports in waiters {
-                reports.loaded(&source, intrinsic.0, intrinsic.1);
-            }
-        }
+        } => state.residency.complete_loaded(
+            &source,
+            Decoded {
+                url,
+                bitmap,
+                format,
+                header,
+                encoded,
+            },
+        ),
         Completion::ParsedDocument { source, document } => {
-            let Some(Entry::Loading { waiters }) = state.entries.remove(&source) else {
-                return;
-            };
-            state.entries.insert(Arc::clone(&source), Entry::Parsed);
-            drop(state);
-            for reports in waiters {
-                reports.parsed_document(&source, Arc::clone(&document));
-            }
+            state.residency.complete_parsed(&source, &document);
         }
         Completion::RequestedDocument { source, parsed } => {
-            // Any request for this source will do: the source names its
-            // markup, so every parse of it is the same document.
-            let Some(index) = state
-                .requested
-                .iter()
-                .position(|(requested, _)| *requested == source)
-            else {
-                return;
-            };
-            let (_, reports) = state.requested.swap_remove(index);
-            drop(state);
-            match parsed {
-                Ok(document) => reports.parsed_document(&source, document),
-                Err(message) => {
-                    resources.note(format!("image `{source}` failed to load: {message}"));
-                    reports.failed(&source);
-                }
+            if let Some(message) = state.residency.complete_requested_document(&source, parsed) {
+                drop(state);
+                resources.note(format!("image `{source}` failed to load: {message}"));
             }
         }
         Completion::Refined {
             source,
             target,
             bitmap,
-        } => {
-            let Some(Entry::Loaded(loaded)) = state.entries.get_mut(&source) else {
-                return;
-            };
-            if loaded.refining != Some(target) {
-                return;
-            }
-            loaded.refining = None;
-            let bytes = bitmap.byte_len();
-            state
-                .bitmaps
-                .insert(Arc::clone(&source), bitmap.into_image_data(), bytes);
-        }
+        } => state.residency.refined(&source, target, bitmap),
         Completion::Failed { source, message } => {
-            let Some(Entry::Loading { waiters }) = state.entries.remove(&source) else {
-                return;
-            };
-            state.entries.insert(Arc::clone(&source), Entry::Failed);
-            drop(state);
-            resources.note(format!("image `{source}` failed to load: {message}"));
-            for reports in waiters {
-                reports.failed(&source);
+            if state.residency.complete_failed(&source) {
+                drop(state);
+                resources.note(format!("image `{source}` failed to load: {message}"));
             }
         }
         Completion::RefineFailed { source, message } => {
-            if let Some(Entry::Loaded(loaded)) = state.entries.get_mut(&source) {
-                loaded.refining = None;
-            }
+            state.residency.refine_failed(&source);
             drop(state);
             resources.note(format!(
                 "image `{source}` could not be re-decoded: {message}"
@@ -444,10 +278,10 @@ fn apply<P: Platform>(resources: &Resources<P>, completion: Completion) {
     }
 }
 
-/// Records the frame's working set: those bitmaps are never evicted.
-pub(crate) fn retain<P: Platform>(resources: &Resources<P>, frame: &[Arc<str>]) {
-    let mut state = resources.local.borrow_mut();
-    let _ = state.bitmaps.pin(frame);
+/// Records `view`'s working set: the bitmaps of every view's set are never
+/// evicted.
+pub(crate) fn retain<P: Platform>(resources: &Resources<P>, view: ViewKey, frame: &[Arc<str>]) {
+    resources.local.borrow_mut().residency.retain(view, frame);
 }
 
 /// The pixels for `source`, for a draw of `hint`.
@@ -457,49 +291,22 @@ pub(crate) fn read<P: Platform>(
     hint: ImageSizeHint,
 ) -> Option<ImageData> {
     let mut state = resources.local.borrow_mut();
-    let state = &mut *state;
-    let loaded = match state.entries.get_mut(source)? {
-        Entry::Loaded(loaded) => loaded,
-        // The engine draws a document itself and never reads it here;
-        // answering `None` is what keeps every restore and refinement below
-        // unreachable for an SVG document.
-        Entry::Parsed | Entry::Loading { .. } | Entry::Failed => return None,
-    };
-    let target = bounded(
-        hint.fit(loaded.intrinsic.0, loaded.intrinsic.1),
-        MAX_RENDERABLE_DIMENSION,
-    );
-    if let Some(image) = state.bitmaps.get(source) {
-        let image = image.clone();
-        if loaded.refining.is_none()
-            && wants_refinement(
-                (image.width, image.height),
-                target,
-                loaded.intrinsic,
-                resources.shared.downsample_ratio,
-            )
-        {
-            loaded.refining = Some(target);
-            spawn_refine(
-                resources,
-                Arc::from(source),
-                Refinement {
-                    url: loaded.url.clone(),
-                    encoded: loaded.encoded.clone(),
-                    format: loaded.format,
-                    header: loaded.header,
-                    target,
-                },
-            );
+    let restore = match state.residency.read(source, hint) {
+        Read::Unavailable => return None,
+        Read::Hit { image, refine } => {
+            if let Some(refinement) = refine {
+                spawn_refine(resources, Arc::from(source), refinement);
+            }
+            return Some(image);
         }
-        return Some(image);
-    }
+        Read::Restore(restore) => restore,
+    };
     // Evicted: restore now, on this thread, with no decode permit. The
     // contract is that a reported load never misses, and blocking the
     // painter here is the accepted price.
-    let bytes = match loaded.encoded.clone() {
+    let bytes = match restore.encoded {
         Some(bytes) => bytes,
-        None => match restore_bytes(&resources.shared, &loaded.url) {
+        None => match restore_bytes(&resources.shared, &restore.url) {
             Ok(bytes) => bytes,
             Err(message) => {
                 resources.note(format!("image `{source}` could not be restored: {message}"));
@@ -510,18 +317,11 @@ pub(crate) fn read<P: Platform>(
     match decode_blocking(
         &resources.shared,
         &bytes,
-        loaded.format,
-        loaded.header,
-        target,
+        restore.format,
+        restore.header,
+        restore.target,
     ) {
-        Ok(bitmap) => {
-            let bytes = bitmap.byte_len();
-            let image = bitmap.into_image_data();
-            state
-                .bitmaps
-                .insert(Arc::from(source), image.clone(), bytes);
-            Some(image)
-        }
+        Ok(bitmap) => Some(state.residency.restored(source, bitmap)),
         Err(error) => {
             resources.note(format!("image `{source}` could not be re-decoded: {error}"));
             None
@@ -769,17 +569,6 @@ async fn load_async<P: Platform>(
     Ok(LoadOutcome::Raster((bitmap, format, header, encoded)))
 }
 
-/// What a refinement re-decodes, and at what size.
-pub(crate) struct Refinement {
-    url: Url,
-    /// The entry's own bytes, when it kept them; otherwise another tier is
-    /// asked for them again.
-    encoded: Option<Bytes>,
-    format: ImageFormat,
-    header: Option<ImageHeader>,
-    target: (u32, u32),
-}
-
 /// The refinement job: recover the bytes if the entry did not keep them,
 /// take a decode permit, decode at the drawn size.
 #[cfg(not(target_arch = "wasm32"))]
@@ -945,7 +734,8 @@ mod job_tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
 
-    use bobcat_core::{DocumentKind, ImageEvent, ImageInbox, ImageSizeHint};
+    use bobcat_core::resource::ResourceFetcher;
+    use bobcat_core::{DocumentKind, FrameImages, ImageEvent, ImageInbox, ImageSizeHint};
 
     use crate::decode::Bitmap;
     use crate::{Resources, ResourcesConfig};
@@ -1231,6 +1021,56 @@ mod job_tests {
             resources.knows_image("app:///big.png"),
             "the entry stays loaded"
         );
+    }
+
+    /// Regression: one view's frame used to replace the scope's pinned set,
+    /// so a second view's `retain` unpinned the first view's bitmaps while
+    /// its painter still drew them.
+    #[test]
+    fn two_views_of_one_scope_keep_both_working_sets_pinned() {
+        let resources = Resources::new(
+            quiet(ResourcesConfig {
+                worker_threads: 2,
+                ..ResourcesConfig::default()
+            }),
+            || {},
+        );
+        resources
+            .shared
+            .set_decode_hook(Arc::new(|_bytes, _format, _header, _max| {
+                Ok(pixel(1, 1, (1, 1)))
+            }));
+        let (first_reports, first_inbox) = ImageInbox::new();
+        let (second_reports, second_inbox) = ImageInbox::new();
+        let first = resources.for_view(first_reports);
+        let second = resources.for_view(second_reports);
+        for (source, view) in [("app:///a.png", &first), ("app:///b.png", &second)] {
+            resources
+                .register(source, tiny_png(), None)
+                .expect("register");
+            view.request_image(source);
+        }
+        let mut seen = 0;
+        settle(&resources, "the two images never reported", || {
+            seen += first_inbox.drain().len() + second_inbox.drain().len();
+            seen >= 2
+        });
+
+        first.retain(&[Arc::from("app:///a.png")]);
+        second.retain(&[Arc::from("app:///b.png")]);
+        resources.set_memory_budget_bytes(0);
+        assert!(
+            resources.is_resident("app:///a.png"),
+            "the second view's frame does not unpin the first view's"
+        );
+        assert!(resources.is_resident("app:///b.png"));
+
+        drop(first);
+        assert!(
+            !resources.is_resident("app:///a.png"),
+            "a dropped view's working set stops counting"
+        );
+        assert!(resources.is_resident("app:///b.png"));
     }
 
     /// The gate a test holds a blocking closure at.
