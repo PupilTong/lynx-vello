@@ -767,9 +767,9 @@ fork's walk refuses first) is a `SyntaxError`,
 5. For tooling and tests: `Context::compile_script_bytecode` and
    `Context::verify_bytecode`.
 
-The fork changes are four commits on top of the `lynx` series: the stack-size
-read (one commit that added a larger flag and one that reduced it),
-`JS_CompileRegExp`, and template objects read back frozen.
+The fork changes are one commit of the `lynx` series (`ebb7d24`,
+PupilTong/quickjs#5): the stack-size read, `JS_CompileRegExp`, and template
+objects read back frozen.
 
 A module's name is part of its bytes: it is what the realm's module list
 holds and what its relative imports resolve from. The converter writes the
