@@ -1676,14 +1676,16 @@ mod implementation {
     }
 
     /// One source a synchronous load produced: the URL it answered from, its
-    /// text, and how to read it.
+    /// body, and how to read it.
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub struct RequiredSource {
         /// The response URL. It names the compiled source and is what the
         /// answer reports back, so a caller that resolves against it resolves
         /// against where the source came from rather than where it asked.
         pub url: String,
-        pub text: String,
+        pub body: RequiredBody,
+        /// How [`RequiredBody::Text`] is read; ignored for
+        /// [`RequiredBody::ModuleBytecode`], which is always a module.
         pub kind: RequiredKind,
     }
 
@@ -1722,6 +1724,22 @@ mod implementation {
         }
     }
 
+    /// The body of a synchronously loaded source.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub enum RequiredBody {
+        /// Source text, read as [`RequiredSource::kind`] says.
+        Text(String),
+        /// Module bytecode of the fork's format, from a writer this process
+        /// need not trust. It is checked when the load answers
+        /// ([`crate::bytecode::check`], against this realm's regular
+        /// expression compiler) and read with the fork's verifying read when
+        /// the module is compiled, inside the load: a refusal by either is
+        /// the load's `SyntaxError`, naming the URL and saying "bytecode
+        /// rejected". It answers the load as an ES module, as
+        /// [`RequiredKind::Module`] text does.
+        ModuleBytecode(Vec<u8>),
+    }
+
     type RequireLoader = dyn FnMut(&str, &str) -> Result<RequiredCode, String>;
 
     /// What the last load produced, kept alive for the shim to read out of.
@@ -1732,7 +1750,7 @@ mod implementation {
     #[derive(Default)]
     struct ParkedRequire {
         url: CString,
-        text: String,
+        body: Vec<u8>,
         /// Framed, as the host handed it in: the shim reads past the frame.
         cached: Vec<u8>,
         error: CString,
@@ -1884,24 +1902,43 @@ mod implementation {
             loader.as_mut().expect("registered loader")(&url, &parameters)
         }))
         .unwrap_or_else(|_| Err("the require loader panicked".to_owned()));
-        let loaded = loaded.and_then(|loaded| {
-            CString::new(loaded.source.url)
-                .map(|url| {
-                    (
-                        url,
-                        loaded.source.text,
-                        loaded.source.kind,
-                        loaded.cached,
-                        loaded.capture,
-                    )
+        // Bytecode is checked here, where the answer is in hand and before
+        // C stores anything of it: what C keeps is the checked program,
+        // written back. It is never read from the code cache nor captured.
+        let loaded = loaded.map_err(RequireFailure::Load).and_then(|loaded| {
+            let RequiredCode {
+                source,
+                cached,
+                capture,
+            } = loaded;
+            let url_text = source.url;
+            let (body, kind, cached, capture) = match source.body {
+                RequiredBody::Text(text) => {
+                    (text.into_bytes(), source.kind.as_raw(), cached, capture)
+                }
+                RequiredBody::ModuleBytecode(bytes) => {
+                    let regexps = RealmRegExps(context.raw);
+                    match crate::bytecode::check(&bytes, &regexps, crate::bytecode::Root::Module) {
+                        Ok(checked) => (checked, ffi::REQUIRED_MODULE_BYTECODE, None, false),
+                        Err(error) => {
+                            return Err(RequireFailure::Syntax(format!(
+                                "bytecode rejected for '{url_text}': {error}"
+                            )));
+                        }
+                    }
+                }
+            };
+            CString::new(url_text)
+                .map(|url| (url, body, kind, cached, capture))
+                .map_err(|_| {
+                    RequireFailure::Load("the response URL contains a NUL byte".to_owned())
                 })
-                .map_err(|_| "the response URL contains a NUL byte".to_owned())
         });
         let mut parked = context.required.borrow_mut();
         match loaded {
-            Ok((url, text, kind, cached, capture)) => {
+            Ok((url, body, kind, cached, capture)) => {
                 parked.url = url;
-                parked.text = text;
+                parked.body = body;
                 // Bytecode that is not this build's, or not whole, is no
                 // cache at all: the text compiles, and keeps what it compiled
                 // to, as unreadable bytecode does in the shim.
@@ -1918,9 +1955,9 @@ mod implementation {
                 // load, which the shim starts only after it has read them.
                 unsafe {
                     (*source).url = parked.url.as_ptr();
-                    (*source).text = parked.text.as_ptr();
-                    (*source).text_length = parked.text.len();
-                    (*source).kind = kind.as_raw();
+                    (*source).text = parked.body.as_ptr();
+                    (*source).text_length = parked.body.len();
+                    (*source).kind = kind;
                     (*source).cached = cached.0;
                     (*source).cached_length = cached.1;
                     (*source).cached_kind = cached_kind;
@@ -1928,17 +1965,66 @@ mod implementation {
                 }
                 0
             }
-            // The message the `require` throws, worded here because this is
-            // where the URL asked for and the host's reason are both in hand.
-            Err(message) => {
-                parked.error = CString::new(format!("cannot load '{url}': {message}"))
+            Err(failure) => {
+                let (message, syntax) = match failure {
+                    // The message the `require` throws, worded here because
+                    // this is where the URL asked for and the host's reason
+                    // are both in hand.
+                    RequireFailure::Load(message) => (format!("cannot load '{url}': {message}"), 0),
+                    RequireFailure::Syntax(message) => (message, 1),
+                };
+                parked.error = CString::new(message)
                     .unwrap_or_else(|_| c"the require loader failed".to_owned());
                 // SAFETY: as above.
                 unsafe {
                     (*source).error = parked.error.as_ptr();
+                    (*source).error_is_syntax = syntax;
                 }
                 -1
             }
+        }
+    }
+
+    /// Why a synchronous load produced nothing.
+    enum RequireFailure {
+        /// The host's loader failed: thrown as an `Error`.
+        Load(String),
+        /// The host answered bytecode the checks refuse: thrown as a
+        /// `SyntaxError`, with this message as it is.
+        Syntax(String),
+    }
+
+    /// This realm's regular expression compiler, for checking bytecode
+    /// while a synchronous load is running inside it: it leaves no
+    /// exception pending, whatever the compiler answers.
+    struct RealmRegExps(NonNull<ffi::QjsContext>);
+
+    impl crate::bytecode::RegExpCompiler for RealmRegExps {
+        fn compile_regexp(&self, pattern: &[u16], flags: &str) -> Option<Vec<u8>> {
+            let mut length = 0usize;
+            // SAFETY: called on the realm's owner thread while the realm is
+            // alive (inside one of its own loads); both inputs live through
+            // the call, which copies them into engine strings.
+            let bytes = unsafe {
+                ffi::qjs_context_compile_regexp(
+                    self.0.as_ptr(),
+                    pattern.as_ptr(),
+                    pattern.len(),
+                    flags.as_ptr().cast(),
+                    flags.len(),
+                    &raw mut length,
+                )
+            };
+            let Some(bytes) = NonNull::new(bytes) else {
+                // SAFETY: as above; a refused pattern left its error pending.
+                unsafe { ffi::qjs_discard_exception(self.0.as_ptr()) };
+                return None;
+            };
+            // SAFETY: the shim wrote `length` bytes at `bytes`, which nothing
+            // else holds, and they came from this realm's `js_malloc`.
+            let copied = unsafe { std::slice::from_raw_parts(bytes.as_ptr(), length) }.to_vec();
+            unsafe { ffi::qjs_bytecode_free(self.0.as_ptr(), bytes.as_ptr()) };
+            Some(copied)
         }
     }
 
@@ -2505,40 +2591,44 @@ mod implementation {
         /// an import of `name` in this realm gets this module.
         ///
         /// The bytes may come from a writer this process does not trust.
-        /// Before the engine sees them they are read into
-        /// [`crate::bytecode::Program`] and checked against every rule of
-        /// [`crate::bytecode::verify`]: operands inside their counts, jump
-        /// targets at instruction starts, the stack walked along every path
-        /// with return addresses, catch offsets and iterator markers kept in
-        /// their slots, generator and async instructions only in frames that
-        /// resume them, closure and module records consistent with the
-        /// functions they describe, and each regular expression literal's
-        /// bytecode equal to what this realm compiles for its pattern and
-        /// flags. The program is then written back and the engine reads
-        /// those bytes, once, with the fork's verifying read
+        /// Here, at once, they are read into [`crate::bytecode::Program`]
+        /// and checked against every rule of [`crate::bytecode::verify`]:
+        /// operands inside their counts, jump targets at instruction
+        /// starts, the stack walked along every path with return addresses,
+        /// catch offsets and iterator markers kept in their slots, generator
+        /// and async instructions only in frames that resume them, closure
+        /// and module records consistent with the functions they describe,
+        /// and each regular expression literal's bytecode equal to what this
+        /// realm compiles for its pattern and flags. Bytes those checks
+        /// refuse, or whose top-level value is not a module, are
+        /// [`ErrorKind::BytecodeRejected`] and leave nothing in the realm.
+        ///
+        /// What passes is written back and kept, owned by the realm, as the
+        /// body of `name`. The engine reads it when the module is first
+        /// compiled — by an import of `name`, or by a synchronous
+        /// `require` of it, which may come from inside a running module
+        /// body as for a text source — with the fork's verifying read
         /// (`JS_READ_OBJ_VERIFY`), which checks every count, length and
         /// index against the input and computes every function's stack size
-        /// from its instructions — the size the bytes carry is ignored, so a
-        /// writer need not compute one. Bytes either check refuses are
-        /// [`ErrorKind::BytecodeRejected`], as are bytes that read as
-        /// something other than a module, and leave nothing in the realm.
-        /// The checks are about what the interpreter assumes of its input,
-        /// not about what the program computes: bytecode that passes may
-        /// still loop, allocate or throw like any other JavaScript.
+        /// from its instructions (the size the bytes carry is ignored, so a
+        /// writer need not compute one). The kept copy is freed once that
+        /// read has made the module, or with the realm. A refusal by the
+        /// verifying read is a `SyntaxError` saying "bytecode rejected for
+        /// '<url>'": the rejection of the import that compiled it, or the
+        /// `require`'s throw. A later import of `name` is refused the same
+        /// way. The checks are about what the interpreter assumes of its
+        /// input, not about what the program computes: bytecode that passes
+        /// may still loop, allocate or throw like any other JavaScript.
         ///
         /// The module's name is the one in its bytes; it is what the
         /// realm's module list holds and the base its relative imports are
         /// normalized from (through `url`, as for any realm-local source),
-        /// so it should be `name`. The module is read when this is called,
-        /// not when it is imported, and it then counts as a module the
-        /// realm may already have linked: a synchronous `require` of it
-        /// from inside a running module body is refused until it has been
-        /// evaluated, where a text source would compile inside the
-        /// `require`. The bytes are not kept.
+        /// so it should be `name`.
         ///
         /// A name this realm has already been answered for is left as it
-        /// was, and nothing is read, as with [`Self::complete_module`]; a
-        /// name the runtime has is [`ErrorKind::InvalidInput`].
+        /// was, and nothing is kept, as with [`Self::complete_module`] (the
+        /// checks still run first); a name the runtime has is
+        /// [`ErrorKind::InvalidInput`].
         pub fn complete_module_bytecode(
             &self,
             name: &str,
@@ -2559,7 +2649,7 @@ mod implementation {
             let url = c_string(url)?;
             let checked = self.check_untrusted_bytecode(bytecode, crate::bytecode::Root::Module)?;
             // SAFETY: all buffers live through the call, which copies the
-            // name and the URL and reads the bytecode without keeping it.
+            // name, the URL and the checked bytes into the realm's source.
             let status = unsafe {
                 ffi::qjs_context_complete_module_bytecode(
                     self.raw().as_ptr(),
@@ -2576,9 +2666,44 @@ mod implementation {
                     ErrorPhase::RegisterModule,
                     "module name is already registered",
                 )),
-                -6 | -7 => Err(self.bytecode_rejection(ErrorPhase::RegisterModule)),
                 _ => Err(capture_exception(self.raw(), ErrorPhase::RegisterModule)),
             }
+        }
+
+        /// [`Self::complete_module_bytecode`] without the Rust checks, for
+        /// this crate's tests of what the fork's verifying read refuses when
+        /// the module is compiled.
+        #[cfg(test)]
+        pub(crate) fn complete_module_bytecode_unchecked(
+            &self,
+            name: &str,
+            url: &str,
+            bytecode: &[u8],
+        ) -> Result<(), Error> {
+            let name = CString::new(name).unwrap();
+            let url = CString::new(url).unwrap();
+            // SAFETY: as in `complete_module_bytecode`.
+            let status = unsafe {
+                ffi::qjs_context_complete_module_bytecode(
+                    self.raw().as_ptr(),
+                    name.as_ptr(),
+                    url.as_ptr(),
+                    bytecode.as_ptr(),
+                    bytecode.len(),
+                )
+            };
+            match status {
+                0 | -5 => Ok(()),
+                _ => Err(capture_exception(self.raw(), ErrorPhase::RegisterModule)),
+            }
+        }
+
+        /// Bytes of checked module bytecode this runtime's realms keep and
+        /// have not yet read, for the tests of when they are freed.
+        #[cfg(test)]
+        pub(crate) fn owned_bytecode(&self) -> usize {
+            // SAFETY: the runtime is alive as long as this realm is.
+            unsafe { ffi::qjs_runtime_owned_bytecode(self.inner.runtime.raw.as_ptr()) }
         }
 
         /// Retries suspended imports after completing their sources. This
@@ -2759,6 +2884,14 @@ mod implementation {
         ///   evaluated. `parameters` is unread, and `kind` is `"module"`.
         /// - [`Detect`](RequiredKind::Detect): whichever of the first and the third `QuickJS`'s
         ///   syntax heuristic reads the text as, answered as that one.
+        ///
+        /// A body of [`RequiredBody::ModuleBytecode`] is answered as a
+        /// [`Module`](RequiredKind::Module) is, whatever `kind` says: the
+        /// bytes are checked by [`crate::bytecode::check`] when `load`
+        /// returns them, kept by the realm as the module's body, and read
+        /// with the fork's verifying read inside this load. Bytes either
+        /// refuses throw `SyntaxError("bytecode rejected for '<url>': …")`,
+        /// from a `require` and from an import linked inline alike.
         ///
         /// Either way the source text never becomes a JavaScript value, and
         /// the compile or parse names [`RequiredSource::url`] — the URL the
@@ -4453,7 +4586,7 @@ mod implementation {
                     url.to_owned(),
                     RequiredSource {
                         url: url.to_owned(),
-                        text: text.to_owned(),
+                        body: RequiredBody::Text(text.to_owned()),
                         kind: RequiredKind::CommonJs,
                     },
                 );
@@ -4467,7 +4600,7 @@ mod implementation {
                     url.to_owned(),
                     RequiredSource {
                         url: response.to_owned(),
-                        text: text.to_owned(),
+                        body: RequiredBody::Text(text.to_owned()),
                         kind: RequiredKind::CommonJs,
                     },
                 );
@@ -4479,7 +4612,7 @@ mod implementation {
                     url.to_owned(),
                     RequiredSource {
                         url: url.to_owned(),
-                        text: text.to_owned(),
+                        body: RequiredBody::Text(text.to_owned()),
                         kind: RequiredKind::Json,
                     },
                 );
@@ -4492,7 +4625,7 @@ mod implementation {
                     url.to_owned(),
                     RequiredSource {
                         url: url.to_owned(),
-                        text: text.to_owned(),
+                        body: RequiredBody::Text(text.to_owned()),
                         kind: RequiredKind::Module,
                     },
                 );
@@ -4505,7 +4638,7 @@ mod implementation {
                     url.to_owned(),
                     RequiredSource {
                         url: response.to_owned(),
-                        text: text.to_owned(),
+                        body: RequiredBody::Text(text.to_owned()),
                         kind: RequiredKind::Module,
                     },
                 );
@@ -4518,7 +4651,7 @@ mod implementation {
                     url.to_owned(),
                     RequiredSource {
                         url: url.to_owned(),
-                        text: text.to_owned(),
+                        body: RequiredBody::Text(text.to_owned()),
                         kind: RequiredKind::Detect,
                     },
                 );
@@ -4944,7 +5077,9 @@ mod implementation {
                     };
                     Ok(RequiredSource {
                         url: url.to_owned(),
-                        text: format!("{text}\nexport const entered = {entered};"),
+                        body: RequiredBody::Text(format!(
+                            "{text}\nexport const entered = {entered};"
+                        )),
                         kind: RequiredKind::Module,
                     })
                 })
@@ -7000,7 +7135,7 @@ mod implementation {
                     url.to_owned(),
                     RequiredSource {
                         url: url.to_owned(),
-                        text: text.to_owned(),
+                        body: RequiredBody::Text(text.to_owned()),
                         kind,
                     },
                 );
@@ -8797,7 +8932,7 @@ pub use ffi::MemoryUsage;
 pub use implementation::{
     CallOutcome, Compiled, CompiledKind, Context, Error, ErrorKind, ErrorPhase, EvalOptions,
     EvalSource, HostArgument, HostFunctionError, HostValue, InterruptHandle, Member, ModuleCode,
-    ModuleNormalizer, RequiredCode, RequiredKind, RequiredSource, Runtime, RuntimeOptions,
-    SourceLocation, SourceType, StructuredBytes, StructuredClone, Value, ValueKind,
+    ModuleNormalizer, RequiredBody, RequiredCode, RequiredKind, RequiredSource, Runtime,
+    RuntimeOptions, SourceLocation, SourceType, StructuredBytes, StructuredClone, Value, ValueKind,
     bytecode_engine_id,
 };

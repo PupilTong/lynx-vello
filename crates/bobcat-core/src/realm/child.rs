@@ -241,7 +241,7 @@ impl ChildRealms {
         js: &mut ScriptRuntime,
         key: ChildKey,
         url: &str,
-        loaded: Result<(&str, &str), &str>,
+        loaded: Result<(&str, crate::main::quickjs::ModuleBody<'_>), &str>,
     ) -> Option<Result<(), ScriptError>> {
         self.with_child(key, |child| {
             child.landed();

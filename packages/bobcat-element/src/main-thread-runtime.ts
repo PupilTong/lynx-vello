@@ -691,6 +691,11 @@ type ChunkBody = (...bindings: unknown[]) => unknown;
  * `MTS_CHUNK_PREAMBLE` imports — as the parameters of the function body it
  * was compiled as. A `var` at its top level is therefore local to that call.
  *
+ * A chunk the host answers as an ES module — module bytecode, which carries
+ * its script as the module's default export — is evaluated once, by the
+ * first load, and its default export is called with `this` = `globalThis`
+ * on every call. Its bindings are its module's own imports, not parameters.
+ *
  * The answer is native's: `false` for a chunk this page does not carry and for
  * a different component entry, and `true` for a chunk that was found — even
  * when running it threw, which is reported and nothing more. A chunk that
@@ -711,8 +716,13 @@ export function __LoadLepusChunk(path: string, options: {dynamicComponentEntry?:
     _ReportError(error);
     return true;
   }
-  try { (loaded.value as ChunkBody).apply(undefined, chunkArguments()); }
-  catch (error) { _ReportError(error); }
+  try {
+    if (loaded.kind === "module") {
+      (loaded.value as {default: () => unknown}).default.call(globalThis);
+    } else {
+      (loaded.value as ChunkBody).apply(undefined, chunkArguments());
+    }
+  } catch (error) { _ReportError(error); }
   return true;
 }
 

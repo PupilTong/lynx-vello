@@ -304,6 +304,20 @@ pub enum LoadedSource {
         /// answered from one that is not absolute fails the view's startup.
         url: String,
     },
+    /// Module bytecode of the engine's own format, answering a
+    /// [`SourceRequest::Module`] the way [`Self::Module`]'s text does: an
+    /// entry, an import, a worker script or a synchronous load. The bytes may
+    /// come from a writer the engine does not trust; the realm checks them
+    /// when they arrive and verifies them again as it reads them, and bytes
+    /// it refuses fail the load with the reason (the import rejects, the
+    /// synchronous load throws a `SyntaxError`). Only a registrant supplies
+    /// these, never a network response.
+    ModuleBytecode {
+        bytes: bytes::Bytes,
+        /// The response URL, as for [`Self::Module`]. The module name the
+        /// bytes carry should be the URL the module is requested by.
+        url: String,
+    },
     /// One `@font-face` source's bytes, unvalidated: a font file is binary,
     /// so nothing here decodes or transcodes it. The font backend is what
     /// rejects bytes that are not a face.

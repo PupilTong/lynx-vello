@@ -1,12 +1,19 @@
 //! Tests of the bytecode tables, the verifying read and the regular
 //! expression compiler, on bytecode the fork itself wrote.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
+
 use crate::bytecode_abi::{
     ATOMS, AtomKind, BC_VERSION, JS_ATOM_END, OP_COUNT, OPCODES, OperandFormat,
     builtin_string_atom, export_type, op, tag,
 };
 use crate::ffi;
-use crate::implementation::{Context, ErrorKind, EvalOptions, EvalSource, Runtime, Value};
+use crate::implementation::{
+    Context, ErrorKind, EvalOptions, EvalSource, RequiredBody, RequiredKind, RequiredSource,
+    Runtime, SourceType, Value,
+};
 
 fn realm() -> (Runtime, Context) {
     let runtime = Runtime::new().expect("runtime should initialize");
@@ -599,6 +606,296 @@ fn mutated_bytecode_is_read_or_refused_and_never_run() {
         accepted > 0 && refused > 0,
         "{accepted} read, {refused} refused"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Module bytecode as a realm-local source: checked when supplied, read with
+// the fork's verifying read when compiled
+
+/// Module bytecode the fork compiles for `source` under `name`.
+fn module_bytecode(name: &str, source: &str) -> Vec<u8> {
+    let (_runtime, compiler) = realm();
+    compiler.compile_module_bytecode(name, source).unwrap()
+}
+
+/// The fork's module bytecode for `source` with the instruction the fork's
+/// stack walk refuses (an arm of a conditional made to push nothing), which
+/// the Rust checks refuse too: only the unchecked completion stores it.
+fn refused_module_bytecode(name: &str) -> Vec<u8> {
+    let source = "const x = globalThis.c ? 1 : 2; export const result = String(x);";
+    let mut bytes = module_bytecode(name, source);
+    let layout = first_function(&bytes);
+    let arm = find_opcode(&bytes, &layout, op::PUSH_2);
+    bytes[arm] = op::NOP;
+    bytes
+}
+
+/// A realm whose synchronous loader (`bobcat:module`'s `loadModuleSync`)
+/// answers from `files`.
+fn sync_realm(files: Vec<(&str, RequiredSource)>) -> (Runtime, Context) {
+    let runtime = Runtime::new().unwrap();
+    let mut realm = runtime.create_context().unwrap();
+    let files: Rc<RefCell<HashMap<String, RequiredSource>>> = Rc::new(RefCell::new(
+        files
+            .into_iter()
+            .map(|(url, source)| (url.to_owned(), source))
+            .collect(),
+    ));
+    realm
+        .register_synchronous_loader("bobcat:module", "loadModuleSync", move |url| {
+            files
+                .borrow()
+                .get(url)
+                .cloned()
+                .ok_or_else(|| format!("no such file: {url}"))
+        })
+        .unwrap();
+    (runtime, realm)
+}
+
+fn bytecode_answer(url: &str, bytes: Vec<u8>) -> RequiredSource {
+    RequiredSource {
+        url: url.to_owned(),
+        body: RequiredBody::ModuleBytecode(bytes),
+        kind: RequiredKind::Module,
+    }
+}
+
+fn text_module(url: &str, text: &str) -> RequiredSource {
+    RequiredSource {
+        url: url.to_owned(),
+        body: RequiredBody::Text(text.to_owned()),
+        kind: RequiredKind::Module,
+    }
+}
+
+/// Runs `body` as the module `app:///entry.js` to settlement and answers
+/// `globalThis.out`, or the error the evaluation rejected with.
+fn run_entry(runtime: &mut Runtime, realm: &mut Context, body: &str) -> Result<String, String> {
+    let promise = realm
+        .evaluate(
+            EvalSource {
+                text: body,
+                name: Some("app:///entry.js"),
+                line_offset: 0,
+            },
+            EvalOptions {
+                source_type: SourceType::Module,
+                ..EvalOptions::default()
+            },
+        )
+        .map_err(|error| error.message)?;
+    runtime.drain_pending_jobs(realm).unwrap();
+    realm
+        .settled_promise_result(&promise)
+        .map_err(|error| format!("{}: {}", error.name.unwrap_or_default(), error.message))?
+        .expect("settled");
+    let out = realm
+        .evaluate(
+            EvalSource::new("String(globalThis.out)"),
+            EvalOptions::default(),
+        )
+        .unwrap();
+    Ok(text(&out))
+}
+
+const DEPENDENCY: &str = "export const value = 41 + 1;\n\
+     export default function () { return this === globalThis; }";
+
+#[test]
+fn a_running_module_body_requires_module_bytecode() {
+    let bytes = module_bytecode("app:///dep.js", DEPENDENCY);
+    let (mut runtime, mut realm) = sync_realm(vec![(
+        "app:///dep.js",
+        bytecode_answer("app:///dep.js", bytes),
+    )]);
+    let out = run_entry(
+        &mut runtime,
+        &mut realm,
+        "import { loadModuleSync } from 'bobcat:module';\n\
+         const loaded = loadModuleSync('app:///dep.js', 'module, exports');\n\
+         globalThis.out = [loaded.kind, loaded.url, loaded.value.value, \
+         loaded.value.default.call(globalThis)].join();",
+    );
+    assert_eq!(out.unwrap(), "module,app:///dep.js,42,true");
+    // The kept copy was read and freed inside the require.
+    assert_eq!(realm.owned_bytecode(), 0);
+}
+
+#[test]
+fn an_import_linked_inline_reads_module_bytecode() {
+    let bytes = module_bytecode("app:///dep.js", DEPENDENCY);
+    let (mut runtime, mut realm) = sync_realm(vec![
+        ("app:///dep.js", bytecode_answer("app:///dep.js", bytes)),
+        (
+            "app:///main.js",
+            text_module(
+                "app:///main.js",
+                "import { value } from 'app:///dep.js'; export const doubled = value * 2;",
+            ),
+        ),
+    ]);
+    let out = run_entry(
+        &mut runtime,
+        &mut realm,
+        "import { loadModuleSync } from 'bobcat:module';\n\
+         globalThis.out = loadModuleSync('app:///main.js', '').value.doubled;",
+    );
+    assert_eq!(out.unwrap(), "84");
+    assert_eq!(realm.owned_bytecode(), 0);
+}
+
+#[test]
+fn module_bytecode_completed_before_is_required_from_a_running_body() {
+    // The host's loader would answer other text: the completed bytecode is
+    // the module, read inside the require, and the loader's answer finds
+    // the name already answered.
+    let (mut runtime, mut realm) = sync_realm(vec![
+        (
+            "app:///pre.js",
+            text_module("app:///pre.js", "export const value = 'host text';"),
+        ),
+        (
+            "app:///main.js",
+            text_module(
+                "app:///main.js",
+                "import { value } from 'app:///pre.js'; export const seen = value;",
+            ),
+        ),
+    ]);
+    let bytes = module_bytecode("app:///pre.js", DEPENDENCY);
+    realm
+        .complete_module_bytecode("app:///pre.js", "app:///pre.js", &bytes)
+        .unwrap();
+    assert!(realm.owned_bytecode() > 0);
+    let out = run_entry(
+        &mut runtime,
+        &mut realm,
+        "import { loadModuleSync } from 'bobcat:module';\n\
+         globalThis.out = [loadModuleSync('app:///main.js', '').value.seen, \
+         loadModuleSync('app:///pre.js', '').value.value].join();",
+    );
+    assert_eq!(out.unwrap(), "42,42");
+    assert_eq!(realm.owned_bytecode(), 0);
+}
+
+#[test]
+fn refused_bytecode_from_the_synchronous_loader_is_a_syntax_error() {
+    // Script bytecode is not a module; the Rust checks refuse it when the
+    // loader answers, for a require and for an import linked inline.
+    let script = compiled_script("1");
+    let (mut runtime, mut realm) = sync_realm(vec![
+        ("app:///bad.js", bytecode_answer("app:///bad.js", script)),
+        (
+            "app:///main.js",
+            text_module(
+                "app:///main.js",
+                "import 'app:///bad.js'; export const x = 1;",
+            ),
+        ),
+    ]);
+    let out = run_entry(
+        &mut runtime,
+        &mut realm,
+        "import { loadModuleSync } from 'bobcat:module';\n\
+         const seen = [];\n\
+         for (const url of ['app:///bad.js', 'app:///main.js']) {\n\
+           try { loadModuleSync(url, ''); seen.push('loaded'); }\n\
+           catch (error) { seen.push(error instanceof SyntaxError, \
+             error.message.includes(\"bytecode rejected for 'app:///bad.js'\")); }\n\
+         }\n\
+         globalThis.out = seen.join();",
+    );
+    assert_eq!(out.unwrap(), "true,true,true,true");
+    assert_eq!(realm.owned_bytecode(), 0);
+}
+
+#[test]
+fn bytecode_the_verifying_read_refuses_fails_at_compile() {
+    let name = "app:///broken.js";
+    let broken = refused_module_bytecode(name);
+
+    // An import: the evaluation rejects with the read's refusal.
+    let (mut runtime, realm) = realm();
+    realm
+        .complete_module_bytecode_unchecked(name, name, &broken)
+        .unwrap();
+    assert_eq!(realm.owned_bytecode(), broken.len());
+    for _ in 0..2 {
+        let promise = realm.load_module(name).unwrap();
+        // The job that settles it reports the rejection; the promise holds it.
+        let _ = runtime.drain_pending_jobs(&realm);
+        let error = realm
+            .settled_promise_result(&promise)
+            .expect_err("the import rejects");
+        assert_eq!(error.name.as_deref(), Some("SyntaxError"), "{error:?}");
+        assert!(
+            error
+                .message
+                .contains("bytecode rejected for 'app:///broken.js'"),
+            "{error:?}"
+        );
+        // The refused copy stays with the source, which frees it.
+        assert_eq!(realm.owned_bytecode(), broken.len());
+    }
+    drop(realm);
+    let keeper = runtime.create_context().unwrap();
+    assert_eq!(keeper.owned_bytecode(), 0);
+
+    // A require: the same refusal, thrown.
+    let (mut runtime, mut realm) = sync_realm(vec![(
+        name,
+        text_module(name, "export const result = 'host text';"),
+    )]);
+    realm
+        .complete_module_bytecode_unchecked(name, name, &broken)
+        .unwrap();
+    let out = run_entry(
+        &mut runtime,
+        &mut realm,
+        "import { loadModuleSync } from 'bobcat:module';\n\
+         try { loadModuleSync('app:///broken.js', ''); globalThis.out = 'loaded'; }\n\
+         catch (error) { globalThis.out = [error instanceof SyntaxError, \
+         error.message.includes(\"bytecode rejected for 'app:///broken.js'\")].join(); }",
+    );
+    assert_eq!(out.unwrap(), "true,true");
+}
+
+#[test]
+fn kept_module_bytecode_is_freed_on_every_path() {
+    let name = "app:///kept.js";
+    let bytes = module_bytecode(name, "export const result = 'kept';");
+    let runtime = Runtime::new().unwrap();
+    let keeper = runtime.create_context().unwrap();
+
+    // Read: freed once the import has made the module.
+    {
+        let mut runtime_ref = Runtime::new().unwrap();
+        let mut realm = runtime_ref.create_context().unwrap();
+        realm.complete_module_bytecode(name, name, &bytes).unwrap();
+        let kept = realm.owned_bytecode();
+        assert!(kept > 0);
+        // Answered twice: the second answer keeps nothing.
+        realm.complete_module_bytecode(name, name, &bytes).unwrap();
+        assert_eq!(realm.owned_bytecode(), kept);
+        assert_eq!(evaluated_result(&mut runtime_ref, &mut realm, name), "kept");
+        assert_eq!(realm.owned_bytecode(), 0);
+    }
+
+    // Never imported: freed with the realm.
+    let realm = runtime.create_context().unwrap();
+    realm.complete_module_bytecode(name, name, &bytes).unwrap();
+    assert!(keeper.owned_bytecode() > 0);
+    drop(realm);
+    assert_eq!(keeper.owned_bytecode(), 0);
+
+    // Refused by the Rust checks: nothing is kept.
+    let realm = runtime.create_context().unwrap();
+    let error = realm
+        .complete_module_bytecode(name, name, &compiled_script("1"))
+        .expect_err("a script is not a module");
+    assert_eq!(error.kind, ErrorKind::BytecodeRejected);
+    assert_eq!(keeper.owned_bytecode(), 0);
 }
 
 // ---------------------------------------------------------------------------

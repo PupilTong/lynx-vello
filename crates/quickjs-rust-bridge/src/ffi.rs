@@ -56,6 +56,7 @@ pub(crate) const REQUIRED_COMMONJS: i32 = 0;
 pub(crate) const REQUIRED_JSON: i32 = 1;
 pub(crate) const REQUIRED_MODULE: i32 = 2;
 pub(crate) const REQUIRED_DETECT: i32 = 3;
+pub(crate) const REQUIRED_MODULE_BYTECODE: i32 = 4;
 
 /// One synchronous source load, as the shim reads it back.
 ///
@@ -78,6 +79,9 @@ pub(crate) struct QjsRequiredSource {
     pub(crate) cached_length: usize,
     pub(crate) cached_kind: i32,
     pub(crate) capture: i32,
+    /// With `error`: nonzero for refused bytecode, thrown as a
+    /// `SyntaxError`.
+    pub(crate) error_is_syntax: i32,
 }
 
 /// `parameters` is the list the load was asked with, or null for an import
@@ -290,6 +294,8 @@ unsafe extern "C" {
         bytecode: *const u8,
         length: usize,
     ) -> c_int;
+    #[cfg(test)]
+    pub(crate) fn qjs_runtime_owned_bytecode(runtime: *mut QjsRuntime) -> usize;
     /// Defined in the generated unit that compiles `quickjs.c`
     /// (`build/bytecode_abi.rs`): -1 when a new runtime's built-in atoms
     /// have the texts and kinds of [`crate::bytecode_abi::ATOMS`], else the

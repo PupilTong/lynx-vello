@@ -11,6 +11,8 @@
 //!
 //! `S` throughout is the host's parsed-stylesheet type: this crate names no
 //! style type, so a registered stylesheet is whatever the host parsed.
+//! Module bytecode is registered as the host hands it over
+//! ([`Registered::ModuleBytecode`]): this crate never reads it.
 //! [`Register`] is what a registration is written through, and
 //! [`RegisterInBackground`] a host that can also run one off the calling
 //! thread; a source parser writes through these and names no fetcher.
@@ -36,6 +38,11 @@ pub enum Registered<S> {
     /// A stylesheet the host already parsed; it answers only a stylesheet
     /// source request, since it has no bytes to give any other one.
     StyleSheet(Arc<S>),
+    /// Module bytecode of the host's script engine. It answers only a module
+    /// source request; every other request for its URL fails, as for
+    /// [`Self::StyleSheet`]. Only a registration makes one: no response is
+    /// ever read as bytecode.
+    ModuleBytecode(Bytes),
 }
 
 impl<S> Clone for Registered<S> {
@@ -46,6 +53,7 @@ impl<S> Clone for Registered<S> {
                 media_type: media_type.clone(),
             },
             Self::StyleSheet(sheet) => Self::StyleSheet(Arc::clone(sheet)),
+            Self::ModuleBytecode(bytes) => Self::ModuleBytecode(bytes.clone()),
         }
     }
 }
@@ -158,6 +166,15 @@ pub trait Register<S> {
     ///
     /// [`RegisterError::InvalidUrl`] for a URL that does not parse.
     fn register_style_sheet(&self, url: &str, sheet: Arc<S>) -> Result<Url, RegisterError>;
+
+    /// Registers module bytecode of the host's script engine under `url`,
+    /// replacing any earlier registration. It answers a module source
+    /// request, and no other request at all.
+    ///
+    /// # Errors
+    ///
+    /// [`RegisterError::InvalidUrl`] for a URL that does not parse.
+    fn register_module_bytecode(&self, url: &str, bytes: Bytes) -> Result<Url, RegisterError>;
 }
 
 /// What a [`ContainerInstaller`] registers through: the registry alone,
@@ -218,6 +235,24 @@ impl<S> Registrar<S> {
         self.registry.insert(&url, Registered::StyleSheet(sheet));
         Ok(url)
     }
+
+    /// Registers module bytecode of the host's script engine under `url`,
+    /// replacing any earlier registration. It answers a module source
+    /// request, and no other request at all.
+    ///
+    /// # Errors
+    ///
+    /// [`RegisterError::InvalidUrl`] for a URL that does not parse.
+    pub fn register_module_bytecode(
+        &self,
+        url: &str,
+        bytes: impl Into<Bytes>,
+    ) -> Result<Url, RegisterError> {
+        let url = parse_registration_url(url)?;
+        self.registry
+            .insert(&url, Registered::ModuleBytecode(bytes.into()));
+        Ok(url)
+    }
 }
 
 impl<S> Register<S> for Registrar<S> {
@@ -232,6 +267,10 @@ impl<S> Register<S> for Registrar<S> {
 
     fn register_style_sheet(&self, url: &str, sheet: Arc<S>) -> Result<Url, RegisterError> {
         Self::register_style_sheet(self, url, sheet)
+    }
+
+    fn register_module_bytecode(&self, url: &str, bytes: Bytes) -> Result<Url, RegisterError> {
+        Self::register_module_bytecode(self, url, bytes)
     }
 }
 
@@ -330,6 +369,49 @@ mod tests {
             panic!("the sheet is registered");
         };
         assert!(Arc::ptr_eq(&found, &sheet));
+    }
+
+    #[test]
+    fn module_bytecode_is_registered_as_the_host_handed_it_over() {
+        let registry = Arc::new(Registry::<Sheet>::default());
+        let registered = Register::register_module_bytecode(
+            &Registrar::new(Arc::clone(&registry)),
+            "APP://host/a.js",
+            Bytes::from_static(b"module bytecode"),
+        )
+        .expect("a valid URL");
+        assert_eq!(registered.as_str(), "app://host/a.js");
+        let Some(Registered::ModuleBytecode(found)) = registry.get(&url("app://host/a.js")) else {
+            panic!("the module bytecode is registered");
+        };
+        assert_eq!(&found[..], b"module bytecode");
+    }
+
+    #[test]
+    fn module_bytecode_replaces_and_is_replaced_by_other_registrations() {
+        let registrar = Registrar::new(Arc::new(Registry::<Sheet>::default()));
+        registrar
+            .register("app://host/a.js", b"text".as_slice(), None)
+            .expect("a valid URL");
+        registrar
+            .register_module_bytecode("app://host/a.js", b"bytecode".as_slice())
+            .expect("a valid URL");
+        assert!(matches!(
+            registrar.registry.get(&url("app://host/a.js")),
+            Some(Registered::ModuleBytecode(_))
+        ));
+        registrar
+            .register_style_sheet("app://host/a.js", Arc::new(Sheet))
+            .expect("a valid URL");
+        assert!(matches!(
+            registrar.registry.get(&url("app://host/a.js")),
+            Some(Registered::StyleSheet(_))
+        ));
+        assert_eq!(registrar.registry.len(), 1);
+        assert!(matches!(
+            registrar.register_module_bytecode("not a url", Bytes::new()),
+            Err(RegisterError::InvalidUrl { .. })
+        ));
     }
 
     #[test]

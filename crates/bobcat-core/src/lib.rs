@@ -117,7 +117,10 @@ pub mod editing {
 }
 
 pub use code_cache::{MIN_CACHED_SOURCE_BYTES, script_engine_id};
-pub use esm::{BTS_CHUNK_PREAMBLE, MTS_CHUNK_PREAMBLE};
+pub use esm::{
+    BTS_CHUNK_IMPORTS, BTS_CHUNK_PREAMBLE, BTS_CHUNK_UNDEFINED, MTS_CHUNK_IMPORTS,
+    MTS_CHUNK_PREAMBLE,
+};
 pub use main::tree::PageConfig;
 pub use native_module::{ModuleCall, ModuleCallback, NativeModule};
 pub use paint::{Painter, PostedFrame};

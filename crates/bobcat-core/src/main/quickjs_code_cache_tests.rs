@@ -123,7 +123,7 @@ impl Realm {
             asked.to_owned(),
             quickjs::RequiredSource {
                 url: url.to_owned(),
-                text: text.to_owned(),
+                body: quickjs::RequiredBody::Text(text.to_owned()),
                 kind,
             },
         );
@@ -139,7 +139,11 @@ impl Realm {
                 .cloned()
                 .unwrap_or_else(|| panic!("no module is served as {name}"));
             self.engine
-                .complete_module(&mut self.runtime, &name, Ok((&url, &text)))
+                .complete_module(
+                    &mut self.runtime,
+                    &name,
+                    Ok((&url, ModuleBody::Text(&text))),
+                )
                 .expect("the module completes");
         }
     }

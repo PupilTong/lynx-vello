@@ -925,6 +925,27 @@ impl<P: Platform> Resources<P> {
         Ok(url)
     }
 
+    /// Registers module bytecode under `url`, as
+    /// [`Registrar::register_module_bytecode`] does. Invalidates any cached
+    /// stylesheet response for that URL.
+    ///
+    /// # Errors
+    ///
+    /// [`RegisterError::InvalidUrl`] for a URL that does not parse.
+    pub fn register_module_bytecode(
+        &self,
+        url: &str,
+        bytes: impl Into<Bytes>,
+    ) -> Result<Url, RegisterError> {
+        let url = parse_registration_url(url)?;
+        self.style_cache.borrow_mut().remove(&url);
+        self.shared
+            .transports
+            .registry
+            .insert(&url, Registered::ModuleBytecode(bytes.into()));
+        Ok(url)
+    }
+
     /// Registers a stylesheet the host already parsed. It answers a stylesheet
     /// source request pre-parsed, and no other request at all — it has no
     /// bytes to give one. Replaces any cached stylesheet response for that URL.
@@ -1123,6 +1144,10 @@ impl<P: Platform> Register<PreparsedStyleSheet> for Resources<P> {
         sheet: Arc<PreparsedStyleSheet>,
     ) -> Result<Url, RegisterError> {
         Self::register_style_sheet(self, url, sheet)
+    }
+
+    fn register_module_bytecode(&self, url: &str, bytes: Bytes) -> Result<Url, RegisterError> {
+        Self::register_module_bytecode(self, url, bytes)
     }
 }
 

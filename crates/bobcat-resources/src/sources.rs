@@ -152,12 +152,8 @@ pub(crate) fn request<P: Platform>(
             return;
         }
     };
-    if kind == SourceKind::StyleSheet
-        && let Some(Registered::StyleSheet(sheet)) = resources.shared.transports.registry.get(&url)
-    {
-        completion.complete(Ok(LoadedSource::StyleSheet(StyleSheetSource::Preparsed(
-            sheet,
-        ))));
+    if let Some(answer) = registered_answer(&resources.shared, &url, kind) {
+        completion.complete(answer);
         return;
     }
     if kind == SourceKind::StyleSheet {
@@ -308,11 +304,12 @@ fn arrival(kind: SourceKind) -> Option<Instant> {
 
 /// Waits out the background install that will register `url`, if one is
 /// running ([`crate::Resources::register_in_background`]); its failure is
-/// this load's answer. A stylesheet registered pre-parsed, which has no bytes
-/// to fetch, is this load's answer too, whether the install was still running
-/// or had already ended when the load looked: an install releases its hold
-/// only after everything is registered. Otherwise the load goes on, and finds
-/// what the install registered.
+/// this load's answer. What a registration answers without a fetch — a
+/// stylesheet registered pre-parsed, module bytecode — is this load's answer
+/// too, whether the install was still running or had already ended when the
+/// load looked: an install releases its hold only after everything is
+/// registered. Otherwise the load goes on, and finds what the install
+/// registered.
 async fn after_install<P: Platform>(
     shared: &SharedHandle<P>,
     url: &Url,
@@ -338,14 +335,30 @@ async fn after_install<P: Platform>(
             Err(_) => return failure("the container install ended without an answer"),
         }
     }
-    if kind == SourceKind::StyleSheet
-        && let Some(Registered::StyleSheet(sheet)) = shared.transports.registry.get(url)
-    {
-        return Some(Ok(LoadedSource::StyleSheet(StyleSheetSource::Preparsed(
-            sheet,
-        ))));
+    registered_answer(shared, url, kind)
+}
+
+/// The answer a registration gives without a fetch: a pre-parsed stylesheet
+/// to a stylesheet request, module bytecode to a module request. `None` for
+/// everything else, which is fetched — and a request of another kind for a
+/// URL registered as either then fails in the transport.
+fn registered_answer<P: Platform>(
+    shared: &SharedHandle<P>,
+    url: &Url,
+    kind: SourceKind,
+) -> Option<SourceResult> {
+    match (kind, shared.transports.registry.get(url)?) {
+        (SourceKind::StyleSheet, Registered::StyleSheet(sheet)) => Some(Ok(
+            LoadedSource::StyleSheet(StyleSheetSource::Preparsed(sheet)),
+        )),
+        (SourceKind::Script, Registered::ModuleBytecode(bytes)) => {
+            Some(Ok(LoadedSource::ModuleBytecode {
+                bytes,
+                url: url.to_string(),
+            }))
+        }
+        _ => None,
     }
-    None
 }
 
 /// The CPU half of a source load: preprocessing, the UTF-8 check the

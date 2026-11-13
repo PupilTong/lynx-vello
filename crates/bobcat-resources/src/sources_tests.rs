@@ -587,6 +587,7 @@ fn install_held(
     let container = Url::parse(container).unwrap();
     let section = format!("{container}/root.js");
     let sheet = format!("{container}/style-info.css");
+    let bytecode = format!("{container}/chunk.js");
     resources.register_in_background(&container, move |registrar| {
         released.recv().expect("the test lets the install go");
         registrar
@@ -601,6 +602,9 @@ fn install_held(
                 &sheet,
                 Arc::new(bobcat_core::PreparsedStyleSheet::default()),
             )
+            .unwrap();
+        registrar
+            .register_module_bytecode(&bytecode, b"module bytecode".to_vec())
             .unwrap();
         outcome
     });
@@ -641,11 +645,21 @@ async fn a_load_under_a_container_being_registered_waits_for_it() {
         "the load waits while the install runs"
     );
 
+    let bytecode = load(
+        &resources,
+        "app:///page/card.web.bundle/chunk.js",
+        SourceKind::Script,
+    );
     release.send(()).unwrap();
     let Ok(LoadedSource::Module { source, .. }) = result(module).await else {
         panic!("the held load answers what the install registered");
     };
     assert_eq!(source, "export default 2;");
+    let Ok(LoadedSource::ModuleBytecode { bytes, url }) = result(bytecode).await else {
+        panic!("the held load answers the module bytecode the install registered");
+    };
+    assert_eq!(bytes.as_ref(), b"module bytecode");
+    assert_eq!(url, "app:///page/card.web.bundle/chunk.js");
     assert!(matches!(
         result(sheet).await,
         Ok(LoadedSource::StyleSheet(StyleSheetSource::Preparsed(_)))
@@ -1234,5 +1248,49 @@ mod code_cache {
             global.remove(engine, first);
             global.remove(engine, second);
         }
+    }
+}
+
+/// Registered module bytecode answers a module request with its bytes and
+/// URL, and every
+/// other kind of request for its URL fails, as for a pre-parsed stylesheet:
+/// nothing but a module request reads it.
+#[tokio::test]
+async fn registered_module_bytecode_answers_only_a_module_request() {
+    let resources = resources();
+    let url = "app:///page/compiled.js";
+    let registered = resources
+        .register_module_bytecode(url, b"module bytecode".to_vec())
+        .unwrap();
+    assert_eq!(registered.as_str(), url);
+
+    let Ok(LoadedSource::ModuleBytecode {
+        bytes,
+        url: answered,
+    }) = result(load(&resources, url, SourceKind::Script)).await
+    else {
+        panic!("a module request reads module bytecode");
+    };
+    assert_eq!(bytes.as_ref(), b"module bytecode");
+    assert_eq!(answered, url);
+
+    for (kind, name) in [
+        (SourceKind::StyleSheet, "stylesheet"),
+        (SourceKind::Font, "font"),
+        (SourceKind::Fetch { timed: false }, "fetch"),
+    ] {
+        let Err(LynxViewError::Resource(error)) = result(load(&resources, url, kind)).await else {
+            panic!("a {name} request does not read module bytecode");
+        };
+        assert_eq!(
+            error.kind,
+            ResourceErrorKind::UnsupportedOperation,
+            "{name}"
+        );
+        assert!(
+            error.message.contains("module bytecode"),
+            "{}",
+            error.message
+        );
     }
 }

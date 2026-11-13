@@ -290,6 +290,83 @@ pub const MTS_CHUNK_PREAMBLE: &str = concat!(
     "__QuerySelectorAll, __InvokeUIMethod, __GetComputedStyleByKey, __FlushElementTree ",
     "} from \"bobcat:element\"; ",
 );
+/// [`MTS_CHUNK_PREAMBLE`] as data: each specifier with the names it
+/// imports, in the text's order. For a writer of module bytecode that must
+/// bind a card body's names as the text binds them; a test renders it back
+/// to the text.
+pub const MTS_CHUNK_IMPORTS: &[(&str, &[&str])] = &[
+    (
+        "bobcat:runtime",
+        &[
+            "__Card__",
+            "lynx",
+            "console",
+            "SystemInfo",
+            "__globalProps",
+            "NativeModules",
+            "_AddEventListener",
+            "_ReportError",
+            "_SetSourceMapRelease",
+            "__OnLifecycleEvent",
+            "__LoadLepusChunk",
+            "__LoadStyleSheet",
+            "__AdoptStyleSheet",
+        ],
+    ),
+    (
+        "bobcat:element",
+        &[
+            "__CreatePage",
+            "__CreateElement",
+            "__CreateWrapperElement",
+            "__CreateText",
+            "__CreateImage",
+            "__CreateView",
+            "__CreateScrollView",
+            "__CreateRawText",
+            "__CreateList",
+            "__CreateFrame",
+            "__AppendElement",
+            "__InsertElementBefore",
+            "__RemoveElement",
+            "__ReplaceElement",
+            "__ReplaceElements",
+            "__SwapElement",
+            "__SetClasses",
+            "__SetID",
+            "__GetID",
+            "__GetTag",
+            "__GetChildren",
+            "__GetAttributeByName",
+            "__GetAttributeNames",
+            "__GetElementUniqueID",
+            "__SetDataset",
+            "__GetDataset",
+            "__AddDataset",
+            "__SetInlineStyles",
+            "__AddInlineStyle",
+            "__SetCSSId",
+            "__SetAttribute",
+            "__UpdateListCallbacks",
+            "__AddEvent",
+            "__GetEvent",
+            "__GetEvents",
+            "__SetEvents",
+            "__AddEventListener",
+            "__RemoveEventListener",
+            "__StopPropagation",
+            "__StopImmediatePropagation",
+            "__CreateEvent",
+            "__DispatchEvent",
+            "__GetPageElement",
+            "__QuerySelector",
+            "__QuerySelectorAll",
+            "__InvokeUIMethod",
+            "__GetComputedStyleByKey",
+            "__FlushElementTree",
+        ],
+    ),
+];
 
 /// BTS bindings live separately from the bootstrap that awaits the app entry.
 pub(crate) const BTS_RUNTIME_MODULE_SPECIFIER: &str = "bobcat:bts-runtime";
@@ -322,6 +399,52 @@ pub const BTS_CHUNK_PREAMBLE: &str = concat!(
     "alert = undefined, confirm = undefined, prompt = undefined, webkit = undefined, ",
     "Reporter = undefined, print = undefined, global = undefined; ",
 );
+/// [`BTS_CHUNK_PREAMBLE`]'s imports as data, as [`MTS_CHUNK_IMPORTS`] is
+/// for the main thread.
+pub const BTS_CHUNK_IMPORTS: &[(&str, &[&str])] = &[(
+    "bobcat:bts-runtime",
+    &[
+        "lynx",
+        "lynxCoreInject",
+        "NativeModules",
+        "console",
+        "SystemInfo",
+        "Card",
+        "Component",
+        "nativeAppId",
+        "Behavior",
+        "LynxJSBI",
+        "setTimeout",
+        "setInterval",
+        "clearTimeout",
+        "clearInterval",
+        "requestAnimationFrame",
+        "cancelAnimationFrame",
+    ],
+)];
+
+/// The names [`BTS_CHUNK_PREAMBLE`] declares as `undefined` (`const <name> =
+/// undefined`), in the text's order.
+pub const BTS_CHUNK_UNDEFINED: &[&str] = &[
+    "postMessage",
+    "ReactLynx",
+    "window",
+    "document",
+    "frames",
+    "location",
+    "navigator",
+    "localStorage",
+    "history",
+    "Caches",
+    "screen",
+    "alert",
+    "confirm",
+    "prompt",
+    "webkit",
+    "Reporter",
+    "print",
+    "global",
+];
 
 /// The URL rule both realms write a container's section and stylesheet URLs
 /// with — one module so the two cannot drift, and so `bobcat-source` has one
@@ -423,6 +546,34 @@ pub(crate) fn build_runtime() -> Result<ScriptRuntime, ScriptError> {
 #[cfg(test)]
 mod tests {
     use super::BUILTIN_MODULES;
+
+    /// The structured preamble constants render to exactly the text ones.
+    #[test]
+    fn preamble_data_renders_to_the_preamble_text() {
+        fn imports(lists: &[(&str, &[&str])]) -> String {
+            use std::fmt::Write as _;
+            lists
+                .iter()
+                .fold(String::new(), |mut text, (specifier, names)| {
+                    let _ = write!(
+                        text,
+                        "import {{ {} }} from \"{specifier}\"; ",
+                        names.join(", ")
+                    );
+                    text
+                })
+        }
+        assert_eq!(imports(super::MTS_CHUNK_IMPORTS), super::MTS_CHUNK_PREAMBLE);
+        let undefined = super::BTS_CHUNK_UNDEFINED
+            .iter()
+            .map(|name| format!("{name} = undefined"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        assert_eq!(
+            format!("{}const {undefined}; ", imports(super::BTS_CHUNK_IMPORTS)),
+            super::BTS_CHUNK_PREAMBLE
+        );
+    }
 
     /// What type-checks the built-ins: its `paths` resolve each specifier to
     /// the file the realm registers under it, one entry per line.

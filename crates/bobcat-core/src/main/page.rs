@@ -1396,8 +1396,9 @@ async fn load_entry(page: Rc<Page>, entry: StartupSource) {
     });
     let completing = Rc::clone(&page);
     owner::enter(&page, JobKind::Entry, move |runtime, js| {
-        let completed = answered
-            .and_then(|(response_url, source)| runtime.complete_entry(js, &response_url, &source));
+        let completed = answered.and_then(|(response_url, module)| {
+            runtime.complete_entry(js, &response_url, module.body())
+        });
         match completed {
             Ok(Ok(())) => {}
             _ if completing.outbox.is_cancelled() => owner::end(&completing),

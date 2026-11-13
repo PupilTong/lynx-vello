@@ -4171,8 +4171,12 @@ await Promise.resolve().then(() => __FlushElementTree());
         // never sends to a fetcher; it is answered below.
         let requested = self.take_module_request();
         debug_assert_eq!(requested, self.entry_module_name().ok());
-        self.complete_entry(js_runtime, source_name, &card_entry(source))
-            .expect("naming an entry by an absolute URL does not fail")?;
+        self.complete_entry(
+            js_runtime,
+            source_name,
+            crate::main::quickjs::ModuleBody::Text(&card_entry(source)),
+        )
+        .expect("naming an entry by an absolute URL does not fail")?;
         let finished = self.main_module_finished().map(|_| ());
         let collected = self.finish_batch(js_runtime, finished.is_ok());
         finished.and(collected)
@@ -4217,8 +4221,12 @@ await Promise.resolve().then(() => __FlushElementTree());
         // The one request boot left is its entry, which the view's owner
         // never sends to a fetcher.
         assert_eq!(self.take_module_request(), self.entry_module_name().ok());
-        self.complete_entry(js_runtime, source_name, &card_entry(source))
-            .expect("naming an entry by an absolute URL does not fail")
+        self.complete_entry(
+            js_runtime,
+            source_name,
+            crate::main::quickjs::ModuleBody::Text(&card_entry(source)),
+        )
+        .expect("naming an entry by an absolute URL does not fail")
     }
 
     /// The next module an import in this realm is waiting for, if any.
@@ -4287,7 +4295,7 @@ await Promise.resolve().then(() => __FlushElementTree());
         &mut self,
         js_runtime: &mut ScriptRuntime,
         url: &str,
-        source: &str,
+        body: crate::main::quickjs::ModuleBody<'_>,
     ) -> Result<Result<(), MainThreadError>, LynxViewError> {
         let booting = |error| MainThreadError::from_engine("booting the MTS entry", error);
         let starting = |error| LynxViewError::Script(booting(error).into_script_error());
@@ -4313,7 +4321,7 @@ await Promise.resolve().then(() => __FlushElementTree());
         Ok(self
             .core
             .engine
-            .complete_module(js_runtime, &name, Ok((url, source)))
+            .complete_module(js_runtime, &name, Ok((url, body)))
             .map_err(booting))
     }
 
