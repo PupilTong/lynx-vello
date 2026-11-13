@@ -124,6 +124,7 @@ impl<T: Sync> Document<T> {
         if !anchors.is_empty() {
             self.adjust_scroll_anchors(anchors);
         }
+        self.clamp_scroll_offsets_after_layout();
         // The focused host's selection follows the layout it was placed in
         // (`editing`): re-snapped, or rebuilt from the offsets an edit left.
         self.refresh_editing_after_layout();

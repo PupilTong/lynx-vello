@@ -24,9 +24,13 @@
 //! a `circular` axis normalized into its period), so a relayout that shrinks
 //! the scrolling area, or a restyle that stops the box being a scroll
 //! container, corrects the observable offset without an invalidation hook of
-//! its own. Like every other post-layout query here, the read uses the **last
-//! committed** layout: call [`Document::layout`] first if the tree has been
-//! mutated since.
+//! its own. A layout that shrinks the area past the offset also writes the
+//! clamp back ([`Document::clamp_scroll_offsets_after_layout`]), so the area
+//! growing again does not carry the container out to where it stood, and the
+//! painter, which holds an offset of its own, is told the distance. Like
+//! every other post-layout query here, the read uses the **last committed**
+//! layout: call [`Document::layout`] first if the tree has been mutated
+//! since.
 //!
 //! # Chaining
 //!
@@ -708,6 +712,75 @@ impl<T> Document<T> {
         admitted
     }
 
+    /// CSSOM-View after a layout: an offset the scrolling area has shrunk
+    /// past is written back clamped, as Blink's
+    /// `ClampScrollOffsetAfterOverflowChange` writes it, so the area growing
+    /// again later does not carry the container back out to where it stood.
+    /// No read needs the write ([`ScrollBox::admit`] clamps every read); the
+    /// painter does, since it owns the live offset: the clamp is recorded as
+    /// one more adjustment in the container's anchoring sum
+    /// ([`Self::scroll_anchor_shift`]), so the painter moves its offset by
+    /// it on whichever frame it adopts next, and a post it made before that
+    /// is brought the same distance when it is adopted
+    /// ([`anchoring`]). Left to the painter's own re-clamp onto
+    /// each frame, the offset depended on which frames the painter happened
+    /// to adopt: a `<list>` whose cells built ahead stood at 0 for one frame
+    /// ended at that frame's end on a painter that caught it, and at the
+    /// list's end on one that did not.
+    ///
+    /// A `circular` axis is never clamped, nor is an axis the container
+    /// snaps on: css-scroll-snap-1 §4.1.3 re-snapping ([`Self::resnap`])
+    /// moves a container that stood on a snap position onto that area's new
+    /// position, reading the offset as it was written, and the painter
+    /// settles its own the same way. A container with a pending programmatic
+    /// scroll is left to its request, as anchoring leaves it. Reads nothing
+    /// when no container is scrolled.
+    pub(crate) fn clamp_scroll_offsets_after_layout(&mut self) {
+        if self.layout_state().scroll_offsets.is_empty() {
+            return;
+        }
+        let stored: SmallVec<[(NodeId, Vector2D<f32>); 4]> = self
+            .layout_state()
+            .scroll_offsets
+            .iter()
+            .filter(|(_, offset)| **offset != Vector2D::zero())
+            .map(|(&scroller, &offset)| (scroller, offset))
+            .collect();
+        for (scroller, offset) in stored {
+            if self.pending_scroll_request(scroller).is_some() {
+                continue;
+            }
+            let (Some(style), Some(scroll_box)) =
+                (self.paint_style(scroller), self.scroll_box(scroller))
+            else {
+                continue;
+            };
+            let (snaps_x, snaps_y) = snap::snapping_axes(style);
+            let (period_x, period_y) = scroll_box.wrap_period();
+            let clamped = Vector2D::new(
+                if snaps_x || period_x.is_some() {
+                    offset.x
+                } else {
+                    scroll_box.offset.x
+                },
+                if snaps_y || period_y.is_some() {
+                    offset.y
+                } else {
+                    scroll_box.offset.y
+                },
+            );
+            let moved = clamped - offset;
+            if moved == Vector2D::zero() {
+                continue;
+            }
+            let state = self.layout_state_mut();
+            state.scroll_offsets.insert(scroller, clamped);
+            state.scroll_anchors.entry(scroller).or_default().shift += moved;
+            // The frame carries the sum.
+            self.note_visual_mutation();
+        }
+    }
+
     /// Records how much farther the painter's own motion will carry `id`
     /// past its offset ([`ScrollEntry::reach`]), as the painter's newest post
     /// says: every adopted post overwrites it, so a drag or a wheel step after
@@ -1051,15 +1124,40 @@ mod tests {
         assert_eq!(document.scroll_offset(inner), Vector2D::new(50.0, 300.0));
     }
 
+    /// The shrink clamps the stored offset, not only its reads: the content
+    /// growing back finds the container at the clamp, and the painter is
+    /// told the distance through the anchoring sum.
     #[test]
-    fn a_shrinking_relayout_reclamps_the_offset_without_an_invalidation_hook() {
+    fn a_shrinking_relayout_reclamps_the_offset_and_the_area_growing_back_leaves_it() {
         let (mut document, _outer, inner) = nested_scrollers();
-        document.scroll_to(inner, Vector2D::new(0.0, 300.0));
+        document.scroll_to(inner, Vector2D::new(200.0, 300.0));
+        assert_eq!(document.scroll_anchor_shift(inner), Vector2D::zero());
 
-        document.add_stylesheet(".content { height: 120px; }", StylesheetOrigin::Author);
+        document.add_stylesheet(
+            ".content { width: 120px; height: 120px; }",
+            StylesheetOrigin::Author,
+        );
         document.layout();
+        assert_eq!(document.scroll_offset(inner), Vector2D::new(20.0, 20.0));
+        assert_eq!(
+            document.scroll_anchor_shift(inner),
+            Vector2D::new(-180.0, -280.0)
+        );
 
-        assert_eq!(document.scroll_offset(inner), Vector2D::new(0.0, 20.0));
+        document.add_stylesheet(
+            ".content { width: 300px; height: 400px; }",
+            StylesheetOrigin::Author,
+        );
+        document.layout();
+        assert_eq!(
+            document.scroll_offset(inner),
+            Vector2D::new(20.0, 20.0),
+            "the clamp was written back, so the area growing again moves nothing"
+        );
+        assert_eq!(
+            document.scroll_anchor_shift(inner),
+            Vector2D::new(-180.0, -280.0)
+        );
     }
 
     #[test]
