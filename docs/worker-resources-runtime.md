@@ -252,6 +252,26 @@ native re-evaluates per call — see `docs/tracking/deviations.md`.
 `lynx.requireModuleAsync`, `nativeApp.loadScriptAsync` and
 `nativeApp.readScript` are still absent.
 
+## Module bytecode
+
+A registrant can supply a module as bytecode of the engine's QuickJS fork
+instead of text: `Registrar::register_module_bytecode` and
+`Resources::register_module_bytecode`. Such a registration answers only a
+module request, as `LoadedSource::ModuleBytecode`; a stylesheet, font or fetch
+request for that URL is refused the way a request for a registered stylesheet
+is, and no network response becomes bytecode. Either realm loads it wherever
+it loads module text: the entry and `import()` through
+`Context::complete_module_bytecode`, a `require`/`loadModuleSync` and an
+import linked inline through the synchronous loader's
+`RequiredBody::ModuleBytecode`. The bridge checks the bytes against every rule
+of `quickjs_rust_bridge::bytecode` when they are supplied, keeps the checked
+bytes, and lets the fork read them with `JS_READ_OBJ_VERIFY` when the module
+is compiled. A refusal is a `SyntaxError` whose message is
+`bytecode rejected for '<url>': <reason>`: thrown by a `require`, the
+rejection of an `import()`, a failed boot for an entry. Core does not know
+where the bytes came from; today the one registrant is `bobcat-source`,
+converting a native bundle's PrimJS bytecode.
+
 ## Lazy containers
 
 `lynx.fetchBundle(url, options?)` is **a plain fetch** — apart from being

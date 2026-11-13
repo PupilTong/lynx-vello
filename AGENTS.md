@@ -71,12 +71,11 @@ and behave the same as they do under `web-core` today. "Behave the same" means
 matching rendering output and user-interaction behavior — **not** pixel-perfect
 fidelity, and **not** reimplementing Android/iOS native platform code paths.
 Source-based native external `.lynx.bundle` parsing and conversion are
-supported by `bobcat-source`. Running a bytecode `.lynx.bundle`, by converting
-its PrimJS bytecode into this engine's QuickJS bytecode, is a target by a
-2026-11-10 ruling and is **not finished**: the converter exists, but such a
-bundle is still rejected
-(`docs/primjs-bytecode-conversion-design.md`). Native platform bridges remain
-outside the runtime target.
+supported by `bobcat-source`, and so is running a bytecode `.lynx.bundle`:
+its PrimJS bytecode is converted into this engine's QuickJS bytecode when the
+bundle is registered (`docs/primjs-bytecode-conversion-design.md`). The engine
+does not embed PrimJS. Native platform bridges remain outside the runtime
+target.
 
 ## Standards policy
 
@@ -192,15 +191,24 @@ dev-dependency its tests boot cards with.
 (`engine-version`, `thread="main"` / `thread="background"`), retaining UTF-16
 and UTF-8 error offsets. `web` decodes `SDRA WROF` on the unchanged rkyv 0.7
 wire model. `native` decodes source-based flexible external `.lynx.bundle`
-files into that same model and can explicitly encode a web bundle; it rejects
-real QuickJS/Lepus bytecode rather than executing or decompiling it.
-`native::primjs` reads, validates and disassembles that bytecode
-(`read_payload`, `bundle_bytecode_sections`, `disassemble`) and converts a
-script of it to a module of the fork's bytecode (`convert_script`, through
-`quickjs_rust_bridge::bytecode`); `tests/primjs_convert.rs` compares every
+files into that same model and can explicitly encode a web bundle; that tool
+path (`native::decode`, `native::convert`) rejects real QuickJS/Lepus bytecode,
+which a `.web.bundle` cannot hold. Loading is different: `ContainerSources`
+converts every PrimJS bytecode section of a native bundle (`ROOT_LEPUS`,
+`LEPUS_CHUNK`, `JS_BYTECODE`, `JsBytecode` custom sections) to a module of the
+fork's bytecode and registers it under the section's URL
+(`Registrar::register_module_bytecode`); a section it cannot convert fails the
+whole container with the reason (`native::ConvertError::Bytecode`).
+`native::primjs` holds the reader, validator and disassembler
+(`read_payload`, `bundle_bytecode_sections`, `disassemble`) and the converter
+(`convert_script`, which builds its output through
+`quickjs_rust_bridge::bytecode`). `tests/primjs_convert.rs` compares every
 program of the bytecode corpus, converted and run, with the fork's run of its
-source. `decode` does not call any of it yet, and still rejects bytecode
-bundles (`docs/primjs-bytecode-conversion-design.md`, §11 step 5).
+source, and the `reactlynx_*`, `lazy_bundle` and `native_bytecode` targets run
+the production fixtures and four hand-written cards from bytecode under the
+assertions of their source forms. The section-to-URL table is in
+`docs/source-architecture.md`, the design and rulings in
+`docs/primjs-bytecode-conversion-design.md`.
 Named external modules are preserved and acquire no invented page root.
 `PageSource::from_native_bundle` requires an explicit entry name, `from_bytes`
 a `root` for binary page inputs. A `.web.bundle` is read in place: bodies are
@@ -2883,12 +2891,17 @@ by `_Static_assert`s compiled in one unit with `quickjs.c`
 reader, a writer and `verify`, pure Rust under `#[forbid(unsafe_code)]`,
 whose module documentation lists every rule the fork's interpreter needs of
 bytecode it did not compile; `Context::complete_module_bytecode` supplies a
-realm-local module as owned bytes, runs `bytecode::check` on them (read,
-verify, write) and hands the written bytes to the fork's
-`JS_READ_OBJ_VERIFY` read, which computes each function's stack size, so no
-caller can load bytecode that skipped the rules, and a refusal is
-`ErrorKind::BytecodeRejected`; and `Context::compile_regexp_bytecode`
-compiles a UTF-16 pattern to the fork's regexp bytecode. `Runtime::register_module_bytecode` stays the trusted,
+realm-local module as bytes, and the synchronous loader may answer a
+`require` with `RequiredBody::ModuleBytecode`: either way the bridge runs
+`bytecode::check` (read, verify, write) when the bytes arrive, keeps the
+written bytes, and has the fork read them with `JS_READ_OBJ_VERIFY`, which
+computes each function's stack size, when the module is compiled, so no
+caller can load bytecode that skipped the rules, and a refusal is a
+`SyntaxError` naming the URL; and `Context::compile_regexp_bytecode` compiles
+a UTF-16 pattern to the fork's regexp bytecode. `bobcat-core` carries such a
+module as `LoadedSource::ModuleBytecode` on every load path of both realms,
+and `bobcat-resources` registers it with `register_module_bytecode`, which
+answers module requests only. `Runtime::register_module_bytecode` stays the trusted,
 build-time path.
 
 A runtime can also reserve module-name prefixes
@@ -4760,8 +4773,8 @@ section is the only place the absolute paths are spelled out.
   bytecode sections.** The PrimJS serialized-bytecode format a `.lynx.bundle`
   carries, how it differs from the pinned fork's, the design for rewriting one
   into the other, what the fork's interpreter assumes of bytecode it reads,
-  and the 2026-11-10 rulings. The reader, the rules and the converter are
-  built; loading such a bundle in the engine is not.
+  and the 2026-11-10 rulings. All of it is built; its §9 says what has been
+  shown to work and what has not.
 - `docs/terminus-architecture.md` — `crates/terminus`'s internals: arenas and identity,
   shadow DOM and custom elements, the style engine and invalidation, the
   layout host, visual order and the committed frame, scroll/input/event

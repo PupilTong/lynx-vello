@@ -1,7 +1,7 @@
 # Converting PrimJS bytecode to this engine's QuickJS bytecode
 
-Investigation and design evaluation, 2026-11-10; §11 steps 1 to 4 were built
-the same day and §9 says what has been shown to work. The rulings are in §10;
+Investigation and design evaluation, 2026-11-10; all of §11 was built the
+same day, and §9 says what has been shown to work. The rulings are in §10;
 the rest is what the two formats are, how one is rewritten into the other,
 what that costs, and where it would sit in this engine.
 
@@ -650,11 +650,36 @@ and for a Lynx-target background body, as the source path does
 (`export default <body>`, `crates/bobcat-source/src/page.rs`,
 `bts_module_source`), and is dropped for a root entry.
 
-A named Lepus chunk is registered today as a plain script that the realm
-compiles as a function body over the preamble's names. Its bytecode form is
-the same module with a default export of the completion value; how
-`__LoadLepusChunk` reaches a module instead of a function body is part of the
-integration step.
+A named Lepus chunk has to run again on every `__LoadLepusChunk` call, and a
+module evaluates once. For such a section the module function does not call
+the script: it stores the script function itself as the default export
+(`Completion::ExportScript`), and `__LoadLepusChunk` calls that export with
+`this` set to the global object each time.
+
+**Where conversion runs (built, §11 step 5).** In `bobcat-source`, when a
+container is built from a native bundle (`ContainerSources`), before
+anything is registered: the crates below it (`bobcat-core`,
+`bobcat-resources`) cannot call the converter, and they learn only "module
+bytecode for the fork, to be verified", never "PrimJS". Each bytecode section
+is converted with the URL it is registered under as its module name and
+registered as module bytecode; `docs/source-architecture.md` has the section
+table. The regexp compiler conversion needs is a scratch runtime and realm
+made for the container; the realm that loads the module checks every literal
+again, so the scratch one is not trusted. A refused section fails the
+container, which fails the page's load or the lazy bundle's fetch with the
+reason. `native::decode` and `native::convert`, the path of the tool that
+writes a `.web.bundle`, keep refusing bytecode: that format has no place for
+it.
+
+The path of the bytes after that: `Registrar::register_module_bytecode` →
+`LoadedSource::ModuleBytecode` → `Context::complete_module_bytecode` for an
+entry or an `import()`, or the synchronous loader's
+`RequiredBody::ModuleBytecode` for a `require` and for an import linked
+inline. The bridge runs `bytecode::check` when the bytes arrive, keeps the
+checked bytes, and the fork reads them with `JS_READ_OBJ_VERIFY` when the
+module is compiled; reading at that point, not on arrival, is what lets a
+running module body `require` a bytecode module. A refusal at either check is
+a `SyntaxError`, `bytecode rejected for '<url>': <reason>`.
 
 **Bridge and fork additions (built, §11 step 2).**
 
@@ -667,11 +692,14 @@ integration step.
 2. Fork: `JS_CompileRegExp`; bridge: `Context::compile_regexp_bytecode`, which
    takes the pattern as UTF-16 code units because a lone surrogate compiles
    differently from U+FFFD.
-3. Fork: `JS_READ_OBJ_VERIFY` (§4.7); bridge: `Context::complete_module_bytecode`,
-   which supplies a realm-local module as owned bytes, checks them with
-   `bytecode::check`, reads the result with the flag and answers
-   `ErrorKind::BytecodeRejected` for bytes either refuses. `Runtime::register_module_bytecode` is unchanged and still for
-   build-time bytes only.
+3. Fork: `JS_READ_OBJ_VERIFY` (§4.7); bridge: `Context::complete_module_bytecode`
+   and the synchronous loader's `RequiredBody::ModuleBytecode`, which supply a
+   realm-local module as bytes. The bytes are checked with `bytecode::check`
+   on arrival (a refusal from `complete_module_bytecode` is its `Err`, of kind
+   `ErrorKind::BytecodeRejected`), the checked bytes are kept, and the fork
+   reads them with the flag when the module is compiled.
+   `Runtime::register_module_bytecode` is unchanged and still for build-time
+   bytes only.
 4. For tooling and tests: `Context::compile_script_bytecode` and
    `Context::verify_bytecode`.
 
@@ -714,7 +742,7 @@ cache does not have to be trusted.
 | Risk | Consequence | Mitigation |
 | --- | --- | --- |
 | A same-name opcode differs in a way no test reaches | wrong result at run time, silently | the audit and test262 in §7 |
-| The verification misses an assumption the interpreter makes | memory unsafety from a hostile bundle | the per-opcode audit; the mutator test; until the audit is complete, converted bytecode is accepted only from sources as trusted as the engine's own build |
+| The verification misses an assumption the interpreter makes | memory unsafety from a hostile bundle | the per-opcode audit and the execution of mutated bytecode that passed the checks (§4.7); every load is checked, whatever its source |
 | The added rules reject code PrimJS's compiler really emits | valid bundles fail to load | corpus of real bundles in §7; each rejection names the instruction and rule |
 | A fork rebase changes an instruction a template uses, changes control flow the converter's walk mirrors, or conflicts with the fork patch | conversion output breaks | the differential suite runs in CI against the pinned fork |
 | PrimJS ships a new format flag | new bundles rejected | unknown header bits are an explicit error, not a misread |
@@ -732,24 +760,38 @@ both threads' sections come from one serializer (§2.5); the interpreter
 assumptions listed in §4.7; that `compute_stack_size` reads only the bytecode
 buffer of its `JSFunctionDef`.
 
-Verified by running code (§11 steps 1 to 4): the reader decodes every program
-of the corpus in every encoder variant and both sections, and both pages of
-the ReactLynx fixtures; the verifying read accepts bytecode the fork compiled
-and reproduces the compiler's stack sizes; the generated tables equal the
-compiled engine's; a template object read from bytecode is frozen, which the
-fork's reader did not do before its third commit here; of the corpus's 2000 conversions (250 programs, four
-encoder variants, both sections), 1960 leave the result the fork's own run of
-the source leaves and the other 40 are the five programs of §4.4 where
-PrimJS's compiler departs from the source, each asserted with its outcome; 38 of the 44 bytecode
-sections of the ReactLynx fixtures convert and pass every rule, and the other
-6 are development main-thread scripts refused for direct `eval`. The converted
-fixtures have not been run: that needs step 5.
+Verified by running code:
 
-Not verified: converted ReactLynx bundles running in the engine (step 5);
-the three accepted differences of §4.4 by a test (no corpus program shows
-them); dynamic `import()`; whether shipped bundles ever use PrimJS's optional
-bytecode optimizer (the encoder used here produced identical bytes with its
-option on and off); the fork commits on test262; any timing or size figure.
+- the reader decodes every program of the corpus in every encoder variant and
+  both sections, and both pages of the ReactLynx fixtures;
+- the verifying read accepts bytecode the fork compiled and reproduces the
+  compiler's stack sizes; the generated tables equal the compiled engine's;
+- the rules accept everything the fork compiles from the corpus and from
+  12,700 files of `node_modules`, and mutated bytecode that passes them runs
+  without a fault (§4.7);
+- of the corpus's 2000 conversions (250 programs, four encoder variants, both
+  sections), 1960 leave the result the fork's own run of the source leaves,
+  and the other 40 are the five programs of §4.4 that PrimJS's compiler got
+  wrong, each asserted with its outcome;
+- a template object read from bytecode is frozen, which the fork's reader did
+  not do before its third commit here;
+- **real bundles run**: the production ReactLynx fixtures (`react-native`,
+  `react-list`, `react-data-processor`, `react-global-props`, `react-reload`,
+  `react-lazy`, `react-lazy-sync`, `react-lazy-nested`) boot and pass the
+  assertions of their source forms with the main thread as bytecode, and with
+  both threads as bytecode, including lazy bundles in bytecode form; the
+  development fixtures are refused for direct `eval`, with the reason; four
+  hand-written cards (a chunk run twice, a `JsBytecode` custom section, a
+  refused lazy bundle, background bytecode) behave as their source forms do.
+
+Not verified: a `<frame>` whose inner card is a bytecode bundle (no fixture;
+it goes through the same installer and entry URL); the three accepted
+differences of §4.4 by a test (no corpus program shows them); dynamic
+`import()`; whether shipped bundles ever use PrimJS's optional bytecode
+optimizer (the encoder used here produced identical bytes with its option on
+and off); bundles from encoders other than `@lynx-js/tasm` 0.0.53; the fork
+commits on test262; any timing or size figure, including the cost of
+converting a page on the thread that loads it.
 
 ## 10. Rulings
 
@@ -788,17 +830,22 @@ Given by the user on 2026-11-10.
 
 ## 11. Order of work
 
-Each step stands alone and is useful without the next.
+All five steps are built. Each stood alone and was useful without the next.
 
-1. PrimJS reader and validator in `bobcat-source`, with a disassembler for
-   tests, including the packed header of §2.5. Makes real bundles inspectable;
-   converts nothing.
-2. Fork patches: the verifying read (stack depth) and the regexp compile
-   export; bridge entries for both and the generated tables; the fork-format
-   model, reader, writer and the rules of §4.7 in the bridge. Tested on
-   bytecode the fork itself wrote (§7, third item).
-3. The converter for scripts without generators, classes or RegExp, as a
-   module; the differential harness with the PrimJS test-time build.
+1. PrimJS reader and validator in `bobcat-source`, with a disassembler,
+   including the packed header of §2.5 (`native::primjs`).
+2. Fork patches: the verifying read (stack depth), the regexp compile export
+   and frozen template objects; bridge entries and the generated tables; the
+   fork-format model, reader, writer and the rules of §4.7 in the bridge
+   (`quickjs_rust_bridge::{bytecode_abi, bytecode}`).
+3. The converter, as a module, and the differential test over the corpus
+   (`native::primjs::convert`, `tests/primjs_convert.rs`).
 4. Templates for generators and async iteration; RegExp recompile; pc2line.
-5. Engine integration for both threads: registration of converted modules in
-   place of `ConvertError::CodeCacheBundle`, the chunk path, and the cache.
+5. Engine integration for both threads: module bytecode as a body kind in the
+   resource registry, the core protocol and the bridge's two load paths;
+   conversion and registration in `ContainerSources`; the fixture tests run
+   over bytecode bundles.
+
+Left for later: a conversion cache (§6); converting a page off the loading
+thread; direct `eval`, if development builds are ever to run as bytecode
+(ruling 10 says they are not).
