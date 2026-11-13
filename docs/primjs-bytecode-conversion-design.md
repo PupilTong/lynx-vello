@@ -444,10 +444,14 @@ table with each byte and reads atom operands without a bound, counts are used
 before they are compared with the input, a vardef count other than
 `arg_count + var_count` leads to out-of-bounds access when the function is
 freed, a function or a module is read wherever its tag appears, and a module
-record's indices are stored as they are and used by the linker. So the C
-reader is handed only bytes the bridge's writer wrote for a program the rules
-accepted. The bridge's own reader (`bytecode::read_program`) is the only reader
-that takes bytes from an untrusted writer; the writer guarantees by
+record's indices are stored as they are and used by the linker. So with the
+flag the C reader is handed only bytes the bridge's writer wrote for a program
+the rules accepted. Its one other caller is the code cache
+(`docs/resource-cache-design.md`), which reads, without the flag, bytes this
+engine wrote when it compiled source text; a converted module is never
+compiled, so the code cache neither looks it up nor keeps it. The bridge's own
+reader (`bytecode::read_program`) is the only reader that takes bytes from an
+untrusted writer; the writer guarantees by
 construction every count and length it writes, 16-bit and `int` field widths,
 a non-empty function with a consistent vardef count, valid opcodes each written
 in its opcode's size, atom indices inside the table it writes, and only the
@@ -644,8 +648,11 @@ The algorithm is not where the cost is. It is in four other places:
 `bobcat-source`: it is the owner of Lynx source adaptation, it forbids unsafe,
 and its `native` module is where the bytecode is found and rejected today.
 The fork-side tables, the regexp compile entry and the stack-size read belong
-to `quickjs-rust-bridge`, which owns the C build. `bobcat-source` depends on
-`bobcat-core`, which depends on the bridge, so no new crate edge is needed.
+to `quickjs-rust-bridge`, which owns the C build. `bobcat-source` already
+reached the bridge through `bobcat-core`; it now also depends on it directly,
+for `bytecode::Verifier`. The registry a `VerifiedModule` is registered in is
+`vant::registry`, which names no engine type: the module is its second type
+parameter, so `vant` depends on neither the bridge nor `bobcat-core`.
 
 **A converted section is a module (ruling 2).** In native Lynx each section is
 a global script whose runtime names are globals of its context. In this
@@ -760,8 +767,9 @@ fork's walk refuses first) is a `SyntaxError`,
 5. For tooling and tests: `Context::compile_script_bytecode` and
    `Context::verify_bytecode`.
 
-The fork changes are three commits on top of the `lynx` series: the stack-size
-read, `JS_CompileRegExp`, and template objects read back frozen.
+The fork changes are four commits on top of the `lynx` series: the stack-size
+read (one commit that added a larger flag and one that reduced it),
+`JS_CompileRegExp`, and template objects read back frozen.
 
 A module's name is part of its bytes: it is what the realm's module list
 holds and what its relative imports resolve from. The converter writes the
@@ -772,7 +780,9 @@ registered under, and the fork build. It can be kept under a key of those
 (content hash, name, engine build identity), so a bundle is converted once
 per engine build. Bytes read back from such a cache become a `VerifiedModule`
 only through `Verifier::module_from_bytes`, which checks every rule again, so
-the cache does not have to be trusted.
+the cache does not have to be trusted. No such cache exists yet. It would be
+separate from the engine's code cache, whose entries are keyed by source text
+and hold what this engine compiled from it.
 
 ## 7. Verification plan
 
