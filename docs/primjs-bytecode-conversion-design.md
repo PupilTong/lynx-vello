@@ -360,13 +360,25 @@ and are accepted:
   the inner `return` first; the converted loop calls `next`, as the
   specification says.
 
-**PrimJS compiler behaviour that conversion preserves.** The bytecode is what
-PrimJS compiled, so where its compiler departs from the source's meaning the
-converted program does too, exactly as on native Lynx. The corpus shows five:
-`a ?? b` tests the left side for `undefined` only; `(o?.m)()` loses `this`;
-`delete o?.a` deletes nothing; a default parameter expression sees the body's
-`var`; a static field initializer that reads its own class throws. The
-differential test asserts each with its outcome.
+**PrimJS compiler errors the converter cannot repair.** Matching PrimJS where
+PrimJS is wrong is not a goal (ruling 9): wherever the converter has a choice,
+as in the three cases above and the `for await` head, it takes the
+specification's behaviour. But the bytecode is what PrimJS's compiler
+produced, and where that compiler departed from the source's meaning the
+departure is in the instructions, usually in a form that cannot be told from
+correct code for other source. The corpus shows five:
+
+| Source | What PrimJS compiled | Why it cannot be put right from bytecode |
+| --- | --- | --- |
+| `a ?? b` | a test of the left side for `undefined` only | the same instructions as a default value (`{a = b} = o`, `function f(a = b)`), where testing for `undefined` only is correct |
+| `(o?.m)()` | a property read, then a call without `this` | the same as calling a function taken out of an object on purpose |
+| `delete o?.a` | a property read, a drop, `true` | the same as `(o?.a, true)` |
+| a default parameter expression naming a variable the body also declares with `var` | a read of the body's variable | the scope was resolved at compile time; the outer binding is not named anywhere |
+| a static field initializer that reads its own class | the read before the class binding is initialized | the order of two instruction groups, with nothing marking them as one class definition |
+
+A bundle that needs these to behave as written has to be shipped in source
+form. The differential test asserts each of the five with its outcome, so a
+change in either direction is noticed.
 
 ### 4.5 Function records
 
@@ -758,12 +770,21 @@ Given by the user on 2026-11-10.
 7. **A PrimJS build may be used as a test-time tool** (§7). It is not linked
    into the engine.
 
+
 8. **The rules beyond stack depth live in Rust, not in the fork patch.** This
    was asked after ruling 6, because §4.7 found that hostile input needs more
    than `compute_stack_size` checks. As built they are in the bridge crate
    (`quickjs_rust_bridge::bytecode`), which the converter writes through and
    which `complete_module_bytecode` enforces on every load; the fork patch
    computes stack sizes and makes its own reader safe on arbitrary bytes.
+9. **PrimJS's non-conformant behaviour is not a target.** Where the converter
+   can choose, it follows the specification (and so the fork), not PrimJS.
+   What PrimJS's compiler already got wrong inside the bytecode stays wrong
+   (§4.4), because it cannot be recognized there.
+10. **Development builds stay refused.** ReactLynx's development main-thread
+    runtime uses a direct `eval`; such a bundle fails to load as bytecode, and
+    development uses the source form of the bundle, which the engine loads
+    today.
 
 ## 11. Order of work
 
