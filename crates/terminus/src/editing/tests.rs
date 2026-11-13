@@ -1151,7 +1151,8 @@ fn commands_over_an_empty_host_s_one_line_stay_at_its_start() {
         eprintln!("kind {kind:?}");
         let (mut doc, host) = host_in(kind, &[], 200.0);
         assert!(doc.editable_paragraph(host).is_some());
-        // Left of, on and right of where parley's substitute space sits.
+        // Left of, on and right of where parley 0.12's substitute space for
+        // empty text sat; parley 0.13 shapes none.
         for x in [1.0, 6.0, 13.0, 40.0] {
             for command in [
                 Command::SelectFromPoint {

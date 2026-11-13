@@ -19,7 +19,7 @@ use parley::Layout;
 use super::style::{BlockStyle, TextOverflow};
 use crate::style::TextBrush;
 use crate::text::paragraph::content::{BoxAt, SourceMap, StyledRange};
-use crate::text::paragraph::shape::{self, NaturalLine};
+use crate::text::paragraph::shape::{self, NaturalLine, Objects};
 
 /// How many units the dots-form ellipsis backs the maxline cut off, and how
 /// many dots it appends.
@@ -230,11 +230,16 @@ fn line_atoms(
     slots: &[BoxAt],
 ) -> Vec<(u32, f32)> {
     let parley_line = natural.get(line_index).expect("the cut line is committed");
+    let objects = Objects::of(natural);
     let mut atoms = Vec::new();
     for run in parley_line.runs() {
         for cluster in run.clusters() {
-            let start = u32::try_from(cluster.text_range().start).expect("text fits u32");
-            let unit = map.byte_to_unit(text, start);
+            let start = cluster.text_range().start;
+            // A box's object is a cluster too; its box is read below.
+            if objects.slot_at(start).is_some() {
+                continue;
+            }
+            let unit = map.byte_to_unit(text, objects.text_byte(start));
             if unit < line.end_unit {
                 atoms.push((unit, cluster.advance()));
             }

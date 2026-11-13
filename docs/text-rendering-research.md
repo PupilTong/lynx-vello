@@ -31,9 +31,9 @@ COLR glyphs are untouched.
 
 Renderer update, 2026-11: terminus no longer depends on `vello`. The paint
 walk records terminus's own display list (`crates/terminus/src/paint/display_list.rs`)
-and every render replays it into `vello_gpu` 0.3 (the crate previously
+and every render replays it into `vello_gpu` 0.4 (the crate previously
 published as `vello_hybrid`; sparse strips, wgpu 30) in
-`crates/terminus/src/render/sparse.rs`. Glyph runs go through `glifo` 0.4
+`crates/terminus/src/render/sparse.rs`. Glyph runs go through `glifo` 0.5
 with an outline cache kept across renders, and glifo's glyph atlas cache is
 deliberately left off: every glyph instance is drawn as its outline, flattened
 and turned into strips on the CPU at every render. So §5.2 has happened

@@ -13,8 +13,8 @@
 //! ([`super::blur`], [`super::vector_textures`]) are written once.
 //!
 //! Each target has one; every one on a device draws through the
-//! renderer, the image atlas and the bitmaps of that device's
-//! [`SharedGpu`], and keeps its own scene and bound textures.
+//! renderer and the bitmaps of that device's [`SharedGpu`], and keeps its
+//! own scene and bound textures.
 
 use std::sync::Arc;
 

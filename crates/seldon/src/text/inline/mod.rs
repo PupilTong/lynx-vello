@@ -18,7 +18,7 @@
 //!   run is analysed without it (`docs/tracking/deviations.md`).
 //! - **`text-indent`** honours its `each-line` and `hanging` keywords and counts toward the
 //!   min-content and max-content widths.
-//! - **Line boxes** follow CSS 2.2 §10.8.1, as parley 0.12 builds them: every line starts with the
+//! - **Line boxes** follow CSS 2.2 §10.8.1, as parley 0.13 builds them: every line starts with the
 //!   root inline box's strut — the container's first available font at its `line-height`, parley's
 //!   style 0 — and every run on it adds its own half-leading box around the shared baseline; with
 //!   `line-height: normal` a run shaped in a fallback font adds that font's box too.
@@ -68,7 +68,7 @@ use std::sync::OnceLock;
 pub use boxes::InlineEdges;
 use boxes::{BoxSpec, InlineBoxes};
 use edge::EdgeAdditions;
-use parley::{Alignment, AlignmentOptions, BaseDirection, Layout, PositionedLayoutItem};
+use parley::{Alignment, BaseDirection, Layout, PositionedLayoutItem};
 
 use crate::geometry::{Point, Rect, Size};
 use crate::style::{TextBrush, TextContainerStyle, TextRunStyle};
@@ -77,7 +77,7 @@ use crate::text::block::PlacedBox;
 use crate::text::paragraph::content::WhiteSpaceProcessing;
 use crate::text::paragraph::memo::{BreakMemo, Retained};
 use crate::text::paragraph::query::Displayed;
-use crate::text::paragraph::shape::{self, NaturalLine};
+use crate::text::paragraph::shape::{self, NaturalLine, Objects};
 use crate::text::paragraph::style::resolve_alignment;
 use crate::text::paragraph::{
     Additions, BlockConstraint, BlockMetrics, BreakStyle, Direction, Flow, IndentKeywords,
@@ -194,10 +194,8 @@ pub struct InlineBoxOpen<'src> {
 /// What a parley style index of [`InlineFlow::display`] was shaped from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FlowSource {
-    /// The strut, which no text is shaped in. The one glyph run that
-    /// carries it is the substitute space parley shapes for a block with no
-    /// content that keeps one line
-    /// ([`InlineFlowStyle::strut_line_when_empty`]), which draws nothing.
+    /// The strut, which no text is shaped in, so no glyph run carries it —
+    /// and the styles the atoms' objects are shaped in, copies of it.
     Strut,
     /// A text run: its index in the items the flow was built from.
     Run(u32),
@@ -525,7 +523,13 @@ impl InlineFlow {
     pub fn offset_map(&self) -> OffsetMap<'_> {
         self.expect_result();
         let block = &self.paragraph.content.block;
-        OffsetMap::new(&block.text, &block.map, block.text.len())
+        OffsetMap::new(
+            &block.text,
+            &block.map,
+            block.text.len(),
+            &block.boxes,
+            block.boxes.len(),
+        )
     }
 
     /// How many CSS line boxes the flow laid out.
@@ -674,6 +678,7 @@ impl InlineFlow {
                 before = Some((key, edge));
             }
         };
+        let objects = Objects::of(&self.paragraph.natural);
         let mut walked_run = None;
         for entry in line.items() {
             match entry {
@@ -687,8 +692,8 @@ impl InlineFlow {
                     for cluster in run.visual_clusters() {
                         let advance = cluster.advance();
                         let bytes = cluster.text_range();
-                        let start = u32::try_from(bytes.start).expect("text fits u32");
-                        let end = u32::try_from(bytes.end).expect("text fits u32");
+                        let start = objects.text_byte(bytes.start);
+                        let end = objects.text_byte(bytes.end);
                         let (leading, trailing) = if cluster.is_rtl() {
                             (x + advance, x)
                         } else {
@@ -873,19 +878,22 @@ impl InlineFlow {
             .expect("an InlineFlow is read after a layout")
     }
 
-    /// Breaks the natural layout at `constraint`, counting the break.
+    /// Breaks the natural layout at `constraint`, counting the break, and
+    /// aligns its lines.
     fn break_at(
         &mut self,
         context: &mut TextContext,
         constraint: BlockConstraint,
     ) -> Vec<NaturalLine> {
         self.memo.begin_break();
+        let alignment = resolve_alignment(self.style.text_align, self.style.direction);
         self.paragraph.break_lines(
             context,
             RunBreaking::PerItem(&self.breaking),
             constraint,
             None,
             self.style.indent,
+            alignment,
         )
     }
 
@@ -905,7 +913,7 @@ impl InlineFlow {
         if self.paragraph.is_empty_strut_line() {
             // The one empty line a block with no content keeps shows
             // nothing, at any indent: zero wide whatever parley measured
-            // its substitute space at.
+            // it at.
             let intrinsic = Intrinsic {
                 indent,
                 min: 0.0,
@@ -963,12 +971,15 @@ impl InlineFlow {
             if counted {
                 self.memo.begin_break();
             }
+            // Only widths are read: no alignment moves one, and the start
+            // alignment justifies nothing that would want a second break.
             paragraph.break_lines(
                 context,
                 breaking,
                 BlockConstraint::new(width, indent),
                 None,
                 keywords,
+                Alignment::Start,
             );
         };
         break_at(&mut self.paragraph, None);
@@ -1122,10 +1133,7 @@ impl Retained for InlineFlow {
         if core::mem::take(&mut self.excess_lines) {
             self.paragraph.release_line_capacity();
         }
-        let alignment = resolve_alignment(self.style.text_align, self.style.direction);
-        self.paragraph
-            .natural
-            .align(alignment, AlignmentOptions::default());
+        // `break_at` aligned the lines.
         let atoms = self.place_atoms(natural.len());
         // css-sizing-3's fit-content size: the available width clamped between
         // the intrinsic widths. Max-content is the unconstrained answer.

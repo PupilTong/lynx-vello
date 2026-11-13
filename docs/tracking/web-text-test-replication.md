@@ -462,6 +462,28 @@ Every workaround the paragraph core carried for parley 0.11, read against the
 | A wrap opportunity before `\n` swallows the forced break (`"a \nb"` on one line) | Fixed: a mandatory break is taken before any wrap opportunity | The custom line-break override is deleted; the paragraph takes `CHROMIUM_LINE_BREAK_OVERRIDE` as parley ships it |
 | No `vertical-align` for inline boxes; no CSS line boxes | Fixed: CSS 2.2 §10.8.1 line boxes with a strut (style 0) and inline-box alignment | The contribution and placement tables (`position.rs`) and the inline formatting context's own line boxes (`inline/line_boxes.rs`) and line `shift` are deleted |
 
+### Parley 0.13
+
+What parley 0.13 changed under the paragraph core, and what the core does so
+that it reports what it reported on 0.12:
+
+| Change | What the core does |
+| --- | --- |
+| `Layout::align` is gone: the breaker aligns as it drops, by `Layout::set_alignment`, which building resets to `Start` | Every break sets the consumer's alignment first (`Paragraph::break_lines`). A justified paragraph with preserved tabs settles its tab stops unjustified and is broken once more, justified; a justified `<text>` with inline-truncation content and a `text-maxline` breaks its natural lines at `Start`, since the cut frees width measured off them, and justifies them only where no cut is taken (`TextBlock::natural_alignment`, `Paragraph::realign`); a truncated display layout is broken aligned |
+| An in-flow `InlineBox` is an inline object: a U+FFFC in the text, at its index, shaped in the style that holds it, which is also its `vertical-align` parent | The core's normalized text keeps no U+FFFC; building a layout inserts one before each box's byte, in a copy of style 0 with no letter-spacing and no line height (`shape::object_style`), and `shape::Objects` maps the layout's bytes back for every reader (`capture_lines`, the cluster walks, the tab pass, `OffsetMap`). The copy's line-breaking values are the text's before the box, the `text-wrap-mode` 0.12's breaker lagged onto a box |
+| `Layout::inline_boxes_mut` is gone | `edit_inline_box` per box, which also places its object: constant work per box per break |
+| Empty text shapes no substitute space: one line with no item, the strut's | The second break that aligned the substitute space as a zero-wide line is deleted |
+| `Layout::height` no longer leaves out a last line with no item | Nothing: the line after a final newline still carries an empty run, so it counted on 0.12 too, and the itemless line 0.12 committed after a box overflowed a line's start is gone (`capture_lines` dropped it, and the size was read off the reported lines) |
+| No letter-spacing after a cluster whose first character is default-ignorable (Blink's rule) | Inline box edge clusters, whose advance is their letter-spacing, are made of non-default-ignorable enclosing marks of the variation selectors' classes (`crates/seldon/src/text/inline/edge.rs`); other text takes parley's rule — see below |
+
+Not reproduced, as parley's own change:
+
+- Text with letter-spacing loses it after a default-ignorable character — a ZWSP, a ZWJ, a soft hyphen, a variation selector (`a_negative_letter_spacing_keeps_the_intrinsic_widths_of_two_breaks`).
+- The bidi resolver ends a paragraph at every paragraph separator, a `\n` among them (UAX #9 P1), which can let trailing preserved spaces hang in right-to-left text (`right_to_left_content_keeps_the_intrinsic_widths_of_two_breaks`); a box's object is a bidi neutral rather than taking the level of the run before it.
+- A box is an atom of the text: one too wide for its line at the line's start no longer ends the line at once (a `\n` after it ends the same line; a space after it hangs), and one that overflows can take an earlier emergency opportunity of `overflow-wrap` (`overflow_wrap_anywhere_keeps_the_intrinsic_widths_of_two_breaks`); a line holding nothing but a zero-size box takes the strut.
+- Parley's one-pass content widths now count an empty layout's indent and measure a box as an atom (`a_positive_indent_…`, `a_hanging_indent_…`): the cases where they differ from the two breaks moved, never the two breaks' answer.
+- Shaping moved to HarfRust 0.15; a font whose descender is positive is read as its magnitude; the shaping context across a box is its U+FFFC, so cursive joining no longer runs across an atomic box.
+
 ### D. Paint — closed
 
 A gradient-valued `color` on a **nested** run used to be ignored: the tile the

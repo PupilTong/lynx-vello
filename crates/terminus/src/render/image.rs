@@ -33,11 +33,10 @@
 //!
 //! # What the engine will not draw
 //!
-//! The rasterizer uploads a bitmap into its image atlas or, past the atlas's
-//! side or its room, into a texture of its own, and no texture can be longer than the
-//! device's `max_texture_dimension_2d`, which is [`MAX_RENDERABLE_DIMENSION`]
-//! on every device this crate creates. Creating a longer one is a wgpu
-//! validation error, not a draw that degrades.
+//! The rasterizer uploads a bitmap into a texture of its own, and no texture
+//! can be longer than the device's `max_texture_dimension_2d`, which is
+//! [`MAX_RENDERABLE_DIMENSION`] on every device this crate creates. Creating
+//! a longer one is a wgpu validation error, not a draw that degrades.
 //!
 //! So [`is_renderable`] refuses such a bitmap before it reaches the
 //! rasterizer. It is
@@ -252,9 +251,8 @@ impl std::fmt::Debug for VectorImage {
 ///
 /// The `max_texture_dimension_2d` of the limits every device of this crate
 /// is created with (`render::gpu::SharedGpu::LIMITS`, wgpu's defaults): a
-/// bitmap past `render::sparse`'s atlas side is drawn from a texture of its
-/// own, and no texture may be longer. A constant rather than a reading of a
-/// device, because a host sizes its decodes by it before any device exists.
+/// bitmap is drawn from a texture of its own, and no texture may be longer. A constant rather than
+/// a reading of a device, because a host sizes its decodes by it before any device exists.
 pub const MAX_RENDERABLE_DIMENSION: u32 = SharedGpu::LIMITS.max_texture_dimension_2d;
 
 /// Whether the rasterizer can draw this bitmap.
@@ -1403,7 +1401,7 @@ mod tests {
     /// The whole of issue 3: an intrinsic size is a CSS input and is not
     /// bounded. A host may report a huge image and decode it small.
     #[test]
-    fn an_intrinsic_size_past_the_atlas_bound_still_lays_out_and_draws() {
+    fn an_intrinsic_size_past_the_texture_bound_still_lays_out_and_draws() {
         let mut registry = ImageRegistry::default();
         let _ = registry.resolve("app:///huge.png");
         registry.take_wanted();
@@ -1414,14 +1412,14 @@ mod tests {
             .expect("a huge image is drawable — it is the bitmap that is bounded, not this");
         assert!((dimensions.0 - 12_000.0).abs() < f64::EPSILON);
 
-        // And the bitmap the host actually decoded is what the atlas bound
+        // And the bitmap the host actually decoded is what the texture bound
         // is tested against.
         assert!(is_renderable(&image(6_000, 3_000)));
         assert!(!is_renderable(&image(12_000, 6_000)));
     }
 
     #[test]
-    fn the_atlas_bound_is_inclusive_and_a_zero_axis_is_refused() {
+    fn the_texture_bound_is_inclusive_and_a_zero_axis_is_refused() {
         assert!(is_renderable(&image(1, 1)));
         assert!(is_renderable(&image(
             MAX_RENDERABLE_DIMENSION,
@@ -1433,7 +1431,7 @@ mod tests {
         assert!(!is_renderable(&image(4, 0)));
     }
 
-    /// A zero axis is not an atlas question: such an image has neither an
+    /// A zero axis is not a texture question: such an image has neither an
     /// intrinsic size nor a ratio, so it is refused as malformed.
     #[test]
     fn a_zero_intrinsic_axis_is_a_load_failure() {

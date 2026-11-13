@@ -23,34 +23,38 @@
 //! in as the segment's extra letter-spacing (parley applies spacing after
 //! each cluster):
 //!
-//! - **An end edge** is [`END_MARK`], a default-ignorable combining mark (UAX #14 class CM,
-//!   grapheme `Extend`, bidi NSM). UAX #14 LB9 attaches it to the character before it, so the
-//!   opportunity after it is the one between the content on either side, and bidi rule W1 gives it
-//!   the direction of that character, so it sits on that character's logical-after side.
+//! - **An end edge** is [`END_MARK`], a combining mark (UAX #14 class CM, grapheme `Extend`, bidi
+//!   NSM). UAX #14 LB9 attaches it to the character before it, so the opportunity after it is the
+//!   one between the content on either side, and bidi rule W1 gives it the direction of that
+//!   character, so it sits on that character's logical-after side.
 //! - **A start edge** is a copy of the content character that follows it, then [`START_MARK`],
 //!   another such mark, which joins the copy into one grapheme. The opportunity before the copy is
 //!   UAX #14's between the character before the box and the box's first character, because the copy
 //!   *is* that character; it has that character's bidi class too, so it sits on its logical-before
 //!   side. Where the copy would join or change what is around it (`start_cluster`) the cluster is
-//!   [`FALLBACK_START`] alone (WORD JOINER, class WJ: no opportunity before or after it): before
-//!   white space, a break, a format character, a mark or another character that extends the
-//!   grapheme before it, an atomic box, or the end of the text, which is UAX #14's answer before
-//!   nearly all of them anyway (classes SP, BK, CM, ZWJ, ZW, WJ, GL, BA); before a character that
-//!   continues the grapheme before the box, where UAX #14 has no opportunity either (`LB8a`, LB9,
-//!   LB26, LB28); and before a character of a cursively joining script, whose shaping would read
-//!   the copy as a neighbour (parley passes each run the text around it as shaping context,
-//!   `parley_engine-0.12.0/src/shape/shaper.rs:346-347`), or of a script whose words UAX #14
+//!   [`FALLBACK_START`] alone, a third such mark that the override gives WORD JOINER's
+//!   opportunities (none before or after it, but Chromium's after a space): before white space, a
+//!   break, a format character, a mark or another character that extends the grapheme before it, an
+//!   atomic box, or the end of the text, which is UAX #14's answer before nearly all of them anyway
+//!   (classes SP, BK, CM, ZWJ, ZW, WJ, GL, BA); before a character that continues the grapheme
+//!   before the box, where UAX #14 has no opportunity either (`LB8a`, LB9, LB26, LB28); and before
+//!   a character of a cursively joining script, whose shaping would read the copy as a neighbour
+//!   (parley passes each run the text around it as shaping context,
+//!   `parley_engine-0.13.0/src/shape/shaper.rs:370-371`), or of a script whose words UAX #14
 //!   segments by dictionary (class SA), whose segmentation the copy would change. In the last two
 //!   the only opportunity kept at the box's start is the one after a space, Chromium's — where a
 //!   joining script breaks anyway, and where a dictionary script's break at a box boundary inside
 //!   unspaced text is lost (`docs/tracking/deviations.md`). A regional indicator is copied twice,
 //!   or not at all, so that the pairs UAX #14 and UAX #29 count are unchanged.
 //!
-//! Both marks are variation selectors (VS17, VS18): default-ignorable, class CM, grapheme
-//! `Extend`, bidi NSM, which is what the breaker, the grapheme segmenter and the bidi resolver
-//! read. A font may map a variation sequence of the copied character and VS17 — the ideographic
-//! variation sequences use VS17 onward — but the cluster is shaped at font size 0, so whatever
-//! glyph it gets is never drawn and has no extent.
+//! The marks are combining enclosing marks (U+20E0, U+20DD, U+20DE): class CM, grapheme `Extend`,
+//! bidi NSM, script `Inherited`, combining class 0 and joining type T — the classes of the
+//! variation selectors VS17 and VS18 the edges were first made of, which is what the breaker, the
+//! grapheme segmenter, the bidi resolver and the shaper read — and none is default-ignorable:
+//! parley 0.13, as Blink does, adds no letter-spacing after a cluster whose first character is,
+//! and the spacing is the edge (`parley-0.13.0/src/layout/spacing.rs:99-136`). Each cluster is
+//! shaped at font size 0, so whatever glyph a font maps for it is never drawn and has no extent,
+//! and the core asks no fallback font for it (`crate::text::paragraph::shape`).
 //!
 //! A box's boundaries reach the core as markers
 //! (`crate::text::paragraph::InlineItem::Marker`), whose places after white
@@ -61,7 +65,9 @@
 //! ([`BREAK_OVERRIDE`], handed to the core as its consumer's own) settles
 //! the pairs the marks take part in: nothing breaks before a mark or after a
 //! start mark, and the opportunity after an end mark is Chromium's between
-//! the characters around it. A paragraph without inline box edges inserts
+//! the characters around it. The fallback start mark has WORD JOINER's: an
+//! opportunity before it only where Chromium's override puts one after a
+//! space, and none after it. A paragraph without inline box edges inserts
 //! nothing and is shaped with the core's override alone.
 //!
 //! An edge next to an atomic box is no cluster: it is added to the atom's
@@ -114,17 +120,19 @@ use crate::text::paragraph::content::{
 use crate::text::paragraph::shape::BreakOverride;
 
 /// The mark that ends a start edge cluster, after the copied character:
-/// VARIATION SELECTOR-17. What makes it fit is its classes — UAX #14 CM,
-/// grapheme `Extend`, bidi NSM — and that the cluster is shaped at font
-/// size 0, so a glyph a font maps for the sequence is never drawn.
-pub(super) const START_MARK: char = '\u{E0100}';
+/// COMBINING ENCLOSING CIRCLE BACKSLASH. What makes it fit is its classes —
+/// UAX #14 CM, grapheme `Extend`, bidi NSM, not default-ignorable — and that
+/// the cluster is shaped at font size 0, so a glyph a font maps for the
+/// sequence is never drawn.
+pub(super) const START_MARK: char = '\u{20E0}';
 
-/// An end edge cluster: VARIATION SELECTOR-18, of the same classes.
-pub(super) const END_MARK: char = '\u{E0101}';
+/// An end edge cluster: COMBINING ENCLOSING CIRCLE, of the same classes.
+pub(super) const END_MARK: char = '\u{20DD}';
 
-/// A start edge cluster where the next character cannot be copied: WORD
-/// JOINER.
-pub(super) const FALLBACK_START: char = '\u{2060}';
+/// A start edge cluster where the next character cannot be copied:
+/// COMBINING ENCLOSING SQUARE, of the same classes, with WORD JOINER's
+/// opportunities ([`edge_breaks`]).
+pub(super) const FALLBACK_START: char = '\u{20DE}';
 
 /// Which edge of an inline box.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -811,7 +819,7 @@ fn conjunct_break(character: char) -> IndicConjunctBreak {
 /// - `c`'s `Line_Break` is `SA` (UAX #14): its script's words are found by dictionary, and the
 ///   segmenter would read the copy as part of a word.
 /// - `c`'s `Joining_Type` is `D`, `R`, `L` or `C` (Unicode §9.2): parley shapes each run with the
-///   text around it as context (`parley_engine-0.12.0/src/shape/shaper.rs:346-347`), and a
+///   text around it as context (`parley_engine-0.13.0/src/shape/shaper.rs:370-371`), and a
 ///   cursively joining script reads that context, so a copy before the box would give the box's
 ///   first letter a joined form.
 /// - The character before the box and `c` are one grapheme by UAX #29: the one before is a `ZWJ`
@@ -934,6 +942,10 @@ fn edge_breaks(
     if context.after == START_MARK || context.after == END_MARK || context.before == START_MARK {
         return Some(false);
     }
+    if context.before == FALLBACK_START {
+        // WORD JOINER's: no opportunity after it.
+        return Some(false);
+    }
     if context.before == END_MARK {
         // The pair across the end edge: the character before it and the one
         // after. LB9 already makes ICU's answer that pair's, so only the
@@ -946,6 +958,12 @@ fn edge_breaks(
         across.before = previous;
         across.before_before = None;
         return rest(across);
+    }
+    if context.after == FALLBACK_START {
+        // WORD JOINER's: none before it (UAX #14 LB11, ahead of every rule
+        // but the mandatory breaks), except the one Chromium's override puts
+        // after a space.
+        return Some(rest(context) == Some(true));
     }
     rest(context)
 }
@@ -1474,6 +1492,30 @@ mod tests {
         assert_eq!(ask(Some(' '), END_MARK, 'b'), Some(true));
         assert_eq!(ask(Some('a'), END_MARK, 'b'), Some(false));
         assert_eq!(ask(Some('\n'), END_MARK, 'b'), Some(false));
+        // The fallback start mark has WORD JOINER's opportunities, under
+        // Chromium's override: one before it after a space, none before it
+        // otherwise, none after it.
+        assert_eq!(ask(Some('a'), ' ', FALLBACK_START), Some(true));
+        assert_eq!(ask(Some(' '), 'a', FALLBACK_START), Some(false));
+        assert_eq!(ask(Some('a'), FALLBACK_START, ' '), Some(false));
+        assert_eq!(ask(Some('a'), FALLBACK_START, 'b'), Some(false));
+        // and under UAX #14 alone none on either side.
+        let icu = |before_before: Option<char>, before: char, after: char| {
+            probe_context(before_before, before, after, BREAK_OVERRIDE.over_icu)
+        };
+        assert_eq!(icu(Some('a'), ' ', FALLBACK_START), Some(false));
+        assert_eq!(icu(Some('a'), FALLBACK_START, 'b'), Some(false));
+        // Every mark takes letter-spacing after it: none is default-ignorable,
+        // which parley 0.13 leaves unspaced, and the spacing is the edge.
+        for mark in [START_MARK, END_MARK, FALLBACK_START] {
+            assert!(
+                !icu_properties::CodePointSetData::new::<
+                    icu_properties::props::DefaultIgnorableCodePoint,
+                >()
+                .contains(mark),
+                "{mark:?}",
+            );
+        }
         // Between two plain characters it is Chromium's override unchanged.
         assert_eq!(
             ask(None, ' ', 'b'),

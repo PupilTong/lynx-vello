@@ -51,7 +51,7 @@ cross-platform engine built on:
   linebender Vello project: sparse strips generated on the CPU and composited on wgpu 30.
   The paint walk records terminus's own display list, which each render replays into a
   `vello_gpu::Scene`.
-- **[parley](https://github.com/linebender/parley)** (0.12) — text layout & shaping, including
+- **[parley](https://github.com/linebender/parley)** (0.13) — text layout & shaping, including
   the CSS 2.2 §10.8.1 line boxes both paragraph kinds report
 
 The from-scratch layout engine (successor to the C++ engine's `starlight`) is
@@ -4427,7 +4427,7 @@ both kinds answer through (`query.rs`), the read-only bridge between a
 committed paragraph's layout bytes and its source units that an editor
 addresses either kind through (`offsets.rs`, `OffsetMap`, from
 `TextBlock::offset_map` and `InlineFlow::offset_map`), `LineGeometry` — where each laid-out
-line sits, parley 0.12's own CSS 2.2 §10.8.1 line box — and `Paragraph`, which
+line sits, parley 0.13's own CSS 2.2 §10.8.1 line box — and `Paragraph`, which
 owns one shaped natural layout and re-breaks it in place, starting every line
 with its root inline box (`ParagraphRoot`: the strut, which is parley's style
 0, the base direction, and whether content with no text and no box still

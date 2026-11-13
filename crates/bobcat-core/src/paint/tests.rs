@@ -2541,7 +2541,7 @@ mod frame_images {
     /// Decision: one bitmap, reused. Every read of one source must hand back
     /// a clone sharing the *same* `Blob`, because `Blob::id()` is what the
     /// rasterizer keys its bitmap uploads on — two ids for one image would be
-    /// two GPU uploads and two atlas slots.
+    /// two GPU uploads and two textures.
     #[test]
     fn every_read_of_one_image_keeps_the_same_buffer_identity() {
         use terminus::link::FrameImages as _;

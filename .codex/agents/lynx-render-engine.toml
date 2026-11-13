@@ -13,8 +13,11 @@ terminus's own display list (`paint/display_list.rs`); `render/sparse.rs`
 replays it into a `vello_gpu::Scene` (sparse strips: paths and strips on the
 CPU, composited on wgpu). `terminus` draws in `vello_gpu`'s `kurbo` and
 `peniko` re-exports and re-exports them with the one workspace `wgpu`;
-vello_gpu pins wgpu's major (vello_gpu 0.3 / wgpu 30), so a wgpu bump is a
+vello_gpu pins wgpu's major (vello_gpu 0.4 / wgpu 30), so a wgpu bump is a
 vello_gpu bump. Glyphs draw as outlines: glifo's glyph atlas cache stays off.
+vello_gpu keeps no image store for callers: each bitmap is a texture of its
+own, drawn as an external texture (`render/sparse.rs`, `Bitmaps`), and the
+optional shader paints terminus draws are named as Cargo features.
 
 ## Read first
 

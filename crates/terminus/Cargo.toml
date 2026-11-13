@@ -29,7 +29,6 @@ smallvec = { workspace = true }
 pollster = { workspace = true }
 rayon = { workspace = true }
 vello_gpu = { workspace = true }
-vello_common = { workspace = true }
 glifo = { workspace = true }
 wgpu = { workspace = true }
 roxmltree = { workspace = true }

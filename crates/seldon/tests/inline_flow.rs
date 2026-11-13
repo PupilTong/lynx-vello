@@ -1094,12 +1094,12 @@ fn a_negative_indent_keeps_the_intrinsic_widths_of_two_breaks() {
 fn a_positive_indent_keeps_the_intrinsic_widths_of_two_breaks() {
     let style = ahem(10.0, LineHeight::Normal);
     // White space processing removes the lone space: the empty flow still
-    // breaks into one line, which takes the indent, and the one pass
-    // measures no line.
+    // breaks into one line, which takes the indent. Parley 0.13's one pass
+    // counts that line too (0.12's measured none).
     let (intrinsic, breaks, one_pass) =
         intrinsic_widths(container(style.clone()), &[run(&style, " ")], 10.0);
     assert_eq!(intrinsic, (10.0, 10.0));
-    assert_eq!(one_pass, (0.0, 0.0), "parley's one pass");
+    assert_eq!(one_pass, (10.0, 10.0), "parley's one pass");
     assert_eq!(breaks, 2);
     // A break takes no wrap opportunity after content of no advance, so the
     // zero width space and "aa" share the indented first line; the one pass
@@ -1134,8 +1134,12 @@ fn a_preserved_tab_keeps_the_intrinsic_widths_of_two_breaks() {
 
 #[test]
 fn a_negative_letter_spacing_keeps_the_intrinsic_widths_of_two_breaks() {
-    // The zero width space advances −3px: the one pass skips the wrap
-    // opportunity after it while its running width is negative.
+    // On parley 0.12 the zero width space advanced −3px, and the one pass
+    // skipped the wrap opportunity after it while its running width was
+    // negative (11 against the breaks' 14). Parley 0.13 adds no
+    // letter-spacing after a default-ignorable character, as Blink does, so
+    // the space advances nothing, every other character 7px, and the one
+    // pass agrees with the two breaks here.
     let style = RunStyle {
         letter_spacing: -3.0,
         ..ahem(10.0, LineHeight::Normal)
@@ -1145,8 +1149,8 @@ fn a_negative_letter_spacing_keeps_the_intrinsic_widths_of_two_breaks() {
         &[run(&style, "\u{200B}x-y")],
         0.0,
     );
-    assert_eq!(intrinsic, (14.0, 18.0));
-    assert_eq!(one_pass, (11.0, 18.0), "parley's one pass");
+    assert_eq!(intrinsic, (14.0, 21.0));
+    assert_eq!(one_pass, (14.0, 21.0), "parley's one pass");
     assert_eq!(breaks, 2);
 }
 
@@ -1156,6 +1160,10 @@ fn right_to_left_content_keeps_the_intrinsic_widths_of_two_breaks() {
     // level hang, and documents its widths as possibly wrong for mixed
     // directions. A left-to-right paragraph holding right-to-left text
     // takes the two breaks as well; no input found makes them differ there.
+    // On parley 0.12 this input's break at zero width kept the two preserved
+    // spaces before `dd` from hanging (37.5 against the one pass's 27);
+    // parley 0.13 ends a bidi paragraph at the `\n` (UAX #9 P1), after
+    // which they hang, and the two agree.
     let spaced = RunStyle {
         letter_spacing: 0.5,
         ..ahem(13.0, LineHeight::Normal)
@@ -1186,7 +1194,7 @@ fn right_to_left_content_keeps_the_intrinsic_widths_of_two_breaks() {
         &items,
         0.0,
     );
-    assert_eq!(intrinsic, (37.5, 75.0));
+    assert_eq!(intrinsic, (27.0, 75.0));
     assert_eq!(one_pass, (27.0, 75.0), "parley's one pass");
     assert_eq!(breaks, 2);
 }

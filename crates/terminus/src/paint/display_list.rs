@@ -7,8 +7,8 @@
 //! its transform, its paint and the paint's own transform. A clip keeps
 //! whether it has to stay an isolated layer ([`Item::PushClip`]); a layer
 //! keeps its blend mode and alpha; a glyph run keeps its font, size,
-//! transforms and the synthetic bold amount in the units the glyph renderer
-//! applies it in ([`GlyphRun::embolden`]); an image keeps its pixels' handle
+//! transforms and synthetic bold amount ([`GlyphRun::embolden`]); an image
+//! keeps its pixels' handle
 //! and sampler, a baked texture its id ([`Texture`]); a gradient is shared by
 //! reference, so a list that copies it ([`DisplayList::append`]) copies no
 //! stops.
@@ -338,21 +338,6 @@ impl Embolden {
             ..Self::default()
         }
     }
-
-    fn is_none(&self) -> bool {
-        self.x == 0.0 && self.y == 0.0
-    }
-
-    /// The same widening `scale` times as large, its tolerance with it.
-    #[must_use]
-    pub(crate) fn scaled(self, scale: f64) -> Self {
-        Self {
-            x: self.x * scale,
-            y: self.y * scale,
-            tolerance: self.tolerance * scale,
-            ..self
-        }
-    }
 }
 
 /// One glyph run.
@@ -370,43 +355,12 @@ pub(crate) struct GlyphRun {
     pub(crate) paint_transform: Option<Affine>,
     pub(crate) style: GlyphStyle,
     pub(crate) hint: bool,
-    /// Synthetic bold, in the units the glyph renderer (glifo) widens the
-    /// outline in.
-    ///
-    /// An unhinted fill is outlined at the font's units per em whatever the
-    /// run's transform, so its amount is converted from font-size units
-    /// when it is recorded. A stroked or hinted run is outlined at the font
-    /// size times the uniform scale glifo folds into it from the composed
-    /// transform — which a compose-time transform can change — so its
-    /// amount stays in font-size units and the replay applies that scale
-    /// ([`GlyphRun::outline_scale`]).
+    /// Synthetic bold, in font-size units: glifo widens each glyph by it at
+    /// the run's font size and scales the widening with the run's
+    /// transform, whatever size it outlines the glyph at.
     pub(crate) embolden: Embolden,
     pub(crate) glyphs: Range<u32>,
     pub(crate) coords: Range<u32>,
-}
-
-impl GlyphRun {
-    /// The factor between this run's stored synthetic bold and the units
-    /// glifo outlines it in under `full`, the run's composed transform with
-    /// its glyph transform: 1 for an unhinted fill, whose amount is already
-    /// in those units, and otherwise the uniform scale glifo absorbs into
-    /// the font size (`glifo`'s `prepare_glyph_run`), or 1 where it absorbs
-    /// none.
-    pub(crate) fn outline_scale(&self, full: Affine) -> f64 {
-        const NEARLY_ZERO: f64 = 1.0 / 4096.0;
-        let [a, b, c, d, ..] = full.as_coeffs();
-        let uniform = (a - d).abs() <= NEARLY_ZERO && a > 0.0 && d > 0.0;
-        let absorbs = if self.hint {
-            uniform && b.abs() <= NEARLY_ZERO
-        } else {
-            uniform && b.abs() <= NEARLY_ZERO && c.abs() <= NEARLY_ZERO
-        };
-        match self.style {
-            GlyphStyle::Fill if !self.hint => 1.0,
-            _ if absorbs => d,
-            _ => 1.0,
-        }
-    }
 }
 
 /// See the [module documentation](self).
@@ -1142,7 +1096,7 @@ impl DisplayList {
         let mut gathered = 0;
         // The last face a run was bounded with: runs of one face follow
         // each other, and its `head` table is read once for them.
-        let mut face: Option<(u64, u32, Rect, f64)> = None;
+        let mut face: Option<(u64, u32, Rect)> = None;
         for (at, item) in self.items.iter().enumerate() {
             let clip = clips.last().copied();
             match item {
@@ -1180,19 +1134,19 @@ impl DisplayList {
                 Item::Glyphs(run) => {
                     let run = &self.runs[*run as usize];
                     let id = run.font.data.id();
-                    let (em, upem) = match face {
-                        Some((face_id, face_index, em, upem))
+                    let em = match face {
+                        Some((face_id, face_index, em))
                             if face_id == id && face_index == run.font.index =>
                         {
-                            (em, upem)
+                            em
                         }
                         _ => {
-                            let (em, upem) = glyph_ink_em(run.font.data.data(), run.font.index);
-                            face = Some((id, run.font.index, em, upem));
-                            (em, upem)
+                            let em = glyph_ink_em(run.font.data.data(), run.font.index);
+                            face = Some((id, run.font.index, em));
+                            em
                         }
                     };
-                    grow(&mut chunk, cut(self.run_bounds(run, em, upem), clip));
+                    grow(&mut chunk, cut(self.run_bounds(run, em), clip));
                 }
                 Item::BlurredRoundedRect(blur) => {
                     // The rasterizer paints 2.5σ around the rectangle.
@@ -1267,8 +1221,8 @@ impl DisplayList {
     }
 
     /// A bound on the ink of `run` in the list's space, given its face's
-    /// glyph box `em` ([`glyph_ink_em`]) and units per em.
-    fn run_bounds(&self, run: &GlyphRun, em: Rect, upem: f64) -> Rect {
+    /// glyph box `em` ([`glyph_ink_em`]).
+    fn run_bounds(&self, run: &GlyphRun, em: Rect) -> Rect {
         let glyphs = self.glyphs_of(run);
         let Some(first) = glyphs.first() else {
             return NO_INK;
@@ -1291,14 +1245,8 @@ impl DisplayList {
             },
         );
         let size = f64::from(run.font_size.abs());
-        // Synthetic bold widens each side by its amount, which an unhinted
-        // fill stores in font units and every other run in font-size ones.
+        // Synthetic bold widens each side by its amount, in font-size units.
         let bold = run.embolden.x.abs().max(run.embolden.y.abs());
-        let bold = if run.style == GlyphStyle::Fill && !run.hint {
-            bold * size / upem
-        } else {
-            bold
-        };
         let stroke = match &run.style {
             GlyphStyle::Fill => 0.0,
             GlyphStyle::Stroke(stroke) => stroke_reach(stroke),
@@ -1525,12 +1473,6 @@ impl DrawGlyphs<'_> {
             StyleRef::Stroke(stroke) => GlyphStyle::Stroke(Arc::new(stroke.clone())),
         };
         run.paint = run.paint.multiply_alpha(brush_alpha);
-        // glifo outlines an unhinted fill at the font's units per em, so a
-        // widening in font-size units is that many times the size there.
-        if run.style == GlyphStyle::Fill && !run.hint && !run.embolden.is_none() {
-            let upem = units_per_em(run.font.data.data(), run.font.index);
-            run.embolden = run.embolden.scaled(upem / f64::from(run.font_size));
-        }
         run.glyphs = index(glyphs_start)..index(list.glyphs.len());
         run.coords = index(coords_start)..index(list.coords.len());
         list.record(Item::Glyphs(index(list.runs.len())));
@@ -1565,21 +1507,12 @@ fn head_table(font: &[u8], index: u32) -> Option<usize> {
     })
 }
 
-/// The `unitsPerEm` of face `index` in `font`'s `head` table, or 1000 for a
-/// font that has none.
-pub(crate) fn units_per_em(font: &[u8], index: u32) -> f64 {
-    head_table(font, index)
-        .and_then(|head| u16_at(font, head + 18))
-        .map_or(1000.0, f64::from)
-}
-
 /// The box in ems, y down, that the outline of every glyph of face `index`
 /// in `font` is assumed to stay inside, measured from the glyph's origin:
 /// the face's `head` bounding box, which OpenType defines as the union of
 /// every glyph's, grown to at least [`GLYPH_FLOOR_EM`] and then by
-/// [`GLYPH_MARGIN_EM`] on every side. Its second value is the face's units
-/// per em.
-fn glyph_ink_em(font: &[u8], index: u32) -> (Rect, f64) {
+/// [`GLYPH_MARGIN_EM`] on every side.
+fn glyph_ink_em(font: &[u8], index: u32) -> Rect {
     let head = head_table(font, index);
     let upem = head
         .and_then(|head| u16_at(font, head + 18))
@@ -1595,7 +1528,7 @@ fn glyph_ink_em(font: &[u8], index: u32) -> (Rect, f64) {
         ))
     });
     let floor = face.map_or(GLYPH_FLOOR_EM, |face| face.abs().union(GLYPH_FLOOR_EM));
-    (floor.inflate(GLYPH_MARGIN_EM, GLYPH_MARGIN_EM), upem)
+    floor.inflate(GLYPH_MARGIN_EM, GLYPH_MARGIN_EM)
 }
 
 #[cfg(test)]
@@ -2054,8 +1987,7 @@ mod tests {
         font[28 + 18..28 + 20].copy_from_slice(&1000_u16.to_be_bytes());
         font[28 + 40..28 + 42].copy_from_slice(&5000_i16.to_be_bytes());
         font[28 + 42..28 + 44].copy_from_slice(&4000_i16.to_be_bytes());
-        let (em, upem) = glyph_ink_em(&font, 0);
-        assert!((upem - 1000.0).abs() < f64::EPSILON);
+        let em = glyph_ink_em(&font, 0);
         assert!(holds(em, Rect::new(0.0, -4.0, 5.0, 0.0)), "{em:?}");
     }
 
@@ -2176,18 +2108,23 @@ mod tests {
         ));
     }
 
-    /// `unitsPerEm` read from a font's `head` table, plain or in a
-    /// collection, and 1000 for a font without one.
+    /// A face's `head` table is found in a plain font and in a collection,
+    /// and a font without one falls back to the floor box.
     #[test]
-    #[expect(clippy::float_cmp, reason = "a unitsPerEm is an exact small integer")]
-    fn units_per_em_come_from_the_head_table() {
-        // An offset table of one record, `head` at 28, unitsPerEm at +18.
+    fn a_collection_face_reads_its_own_head_table() {
+        // An offset table of one record, `head` at 28: unitsPerEm 2048 and
+        // a box 5000 units wide.
         let mut font = vec![0_u8; 28 + 54];
         font[4..6].copy_from_slice(&1_u16.to_be_bytes());
         font[12..16].copy_from_slice(b"head");
         font[20..24].copy_from_slice(&28_u32.to_be_bytes());
         font[28 + 18..28 + 20].copy_from_slice(&2048_u16.to_be_bytes());
-        assert_eq!(units_per_em(&font, 0), 2048.0);
+        font[28 + 40..28 + 42].copy_from_slice(&5000_i16.to_be_bytes());
+        let plain = glyph_ink_em(&font, 0);
+        assert!(
+            holds(plain, Rect::new(0.0, 0.0, 5000.0 / 2048.0, 0.0)),
+            "{plain:?}"
+        );
         // The same face as the second of a collection.
         let mut collection = vec![0_u8; 20];
         collection[..4].copy_from_slice(b"ttcf");
@@ -2195,17 +2132,18 @@ mod tests {
         let mut face = font.clone();
         face[20..24].copy_from_slice(&(20_u32 + 28).to_be_bytes());
         collection.extend_from_slice(&face);
-        assert_eq!(units_per_em(&collection, 1), 2048.0);
-        assert_eq!(units_per_em(&[0; 12], 0), 1000.0);
+        assert_eq!(glyph_ink_em(&collection, 1), plain);
+        assert_ne!(
+            glyph_ink_em(&[0; 12], 0),
+            plain,
+            "no head table: the floor box"
+        );
     }
 
-    /// An unhinted fill's synthetic bold is stored at the font's units per
-    /// em; a stroke's stays in font-size units and scales with a uniform
-    /// composed transform.
+    /// Synthetic bold is stored as recorded, in font-size units, for a fill
+    /// and a stroke alike: glifo converts it to the size it outlines at.
     #[test]
-    #[expect(clippy::float_cmp, reason = "exact products of small powers of two")]
-    fn synthetic_bold_is_stored_in_the_units_glifo_outlines_in() {
-        // No `head` table: 1000 units per em.
+    fn synthetic_bold_is_stored_in_font_size_units() {
         let font = FontData::new(crate::peniko::Blob::new(Arc::new([0_u8; 4])), 0);
         let glyph = [Glyph {
             id: 1,
@@ -2225,13 +2163,7 @@ mod tests {
         let [fill, stroke] = list.runs() else {
             unreachable!("two runs were recorded")
         };
-        assert_eq!(fill.embolden.x, 0.5 * 1000.0 / 20.0);
-        assert_eq!(fill.outline_scale(Affine::scale(2.0)), 1.0);
-        assert_eq!(stroke.embolden.x, 0.5);
-        assert_eq!(stroke.outline_scale(Affine::scale(2.0)), 2.0);
-        assert_eq!(
-            stroke.outline_scale(Affine::scale_non_uniform(2.0, 1.0)),
-            1.0
-        );
+        assert_eq!(fill.embolden, Embolden::uniform(0.5));
+        assert_eq!(stroke.embolden, Embolden::uniform(0.5));
     }
 }

@@ -285,7 +285,7 @@ pub(crate) fn natural_size(width: u32, height: u32) -> NaturalSize {
         clippy::cast_precision_loss,
         reason = "an intrinsic size large enough to lose precision here is far past anything \
                   layout can present, and rounds harmlessly. It is deliberately not bounded: \
-                  the atlas limit applies to the decoded bitmap, not to this."
+                  the texture limit applies to the decoded bitmap, not to this."
     )]
     NaturalSize::from_size(seldon::geometry::Size::new(width as f32, height as f32))
 }

@@ -90,8 +90,7 @@ pub struct ShapedGlyph {
 /// Shapes `text` as one line under `font` with `letter_spacing` px between
 /// characters, through the fonts `context` knows.
 ///
-/// Empty text shapes to an empty line without touching parley (which would
-/// shape a substitute space for an empty build).
+/// Empty text shapes to an empty line without touching parley.
 #[must_use]
 pub fn shape_line(
     context: &mut TextContext,

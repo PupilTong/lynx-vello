@@ -25,7 +25,7 @@
 //! - **Re-position** — reading a finished layout costs nothing; positions are assembled once per
 //!   [`TextBlock::probe`] or [`TextBlock::commit`] call.
 //! - **Re-break** — a new width, or [`TextBlock::set_box_size`], re-breaks the retained shaped
-//!   layout in place through `inline_boxes_mut`; shaping is not re-run. A repeated `layout` at
+//!   layout in place through `edit_inline_box`; shaping is not re-run. A repeated `layout` at
 //!   unchanged inputs is a no-op. The one exception is a paragraph with preserved tabs
 //!   (`white-space-collapse: preserve`): a break that moves a tab to a different place on its line
 //!   moves its tab stop, which re-shapes (`tab`).
@@ -65,9 +65,9 @@ use crate::text::TextContext;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceItem {
     /// The root inline box's strut ([`BlockStyle::strut`]): parley's style 0,
-    /// which no text is shaped in. The one glyph run that carries it is the
-    /// substitute space parley shapes for a block with no content that keeps
-    /// one line ([`BlockStyle::strut_line_when_empty`]), which draws nothing.
+    /// which no text is shaped in, so no glyph run carries it — and the
+    /// styles the atomic boxes' objects are shaped in, copies of it
+    /// (`crate::text::paragraph::shape`).
     Strut,
     /// Index into the `items` slice the block was built from.
     Content(u32),
@@ -496,15 +496,41 @@ impl TextBlock {
         }
     }
 
+    /// The alignment the natural layout is broken with: the block's own,
+    /// unless that is `justify` and a cut may read the natural lines'
+    /// advances. Parley 0.13 justifies as a break ends, which widens a
+    /// line's spaces, and the cut that lays the inline-truncation content in
+    /// at a `text-maxline` clamp frees width measured off the natural line
+    /// (`truncate::retreat_for_width`), which the block always measured
+    /// unjustified. Such a block breaks at the start alignment, which moves
+    /// no advance, and justifies the natural lines only where they are the
+    /// display ([`Self::finish_untruncated`]).
+    fn natural_alignment(&self) -> Alignment {
+        let alignment = resolve_alignment(self.style.text_align, self.style.direction);
+        if alignment == Alignment::Justify
+            && self.truncation.is_some()
+            && self.style.max_lines.is_some()
+        {
+            Alignment::Start
+        } else {
+            alignment
+        }
+    }
+
     fn finish_untruncated(
         &mut self,
         natural_lines: &[NaturalLine],
         constraint: BlockConstraint,
     ) -> LayoutResult {
+        // The natural layout is the display: its lines take the block's
+        // alignment, which the break gave them unless it was deferred
+        // (`Self::natural_alignment`).
         let alignment = resolve_alignment(self.style.text_align, self.style.direction);
-        self.paragraph
-            .natural
-            .align(alignment, AlignmentOptions::default());
+        self.paragraph.realign(
+            alignment,
+            constraint.max_advance(),
+            self.style.max_lines.map(NonZeroU32::get),
+        );
         let slot_specs: Vec<InlineBoxSpec> = self
             .paragraph
             .content
@@ -565,9 +591,8 @@ impl TextBlock {
         let width = constraint.max_advance();
         let alignment = resolve_alignment(self.style.text_align, self.style.direction);
         let visible = plan.cut_line as usize + 1;
-        let (mut display, sources, slots) =
-            self.rebuild(context, plan, constraint.indent, width, visible);
-        display.align(alignment, AlignmentOptions::default());
+        let (display, sources, slots) =
+            self.rebuild(context, plan, constraint.indent, width, visible, alignment);
         let slot_specs: Vec<InlineBoxSpec> = slots
             .iter()
             .map(|slot| match *slot {
@@ -772,7 +797,7 @@ impl TextBlock {
 
     /// Builds the truncated display layout: the visible prefix plus the tail,
     /// broken to at most the visible line count so a wrapped tail is clamped
-    /// away rather than adding a line.
+    /// away rather than adding a line, and aligned by `alignment`.
     fn rebuild(
         &self,
         context: &mut TextContext,
@@ -780,6 +805,7 @@ impl TextBlock {
         indent: f32,
         width: Option<f32>,
         visible: usize,
+        alignment: Alignment,
     ) -> (Layout<TextBrush>, Vec<SourceItem>, Vec<SlotSource>) {
         let cut = plan.cut_byte as usize;
         let mut text = String::with_capacity(cut + 16);
@@ -875,6 +901,7 @@ impl TextBlock {
         // The natural layout's indent rule, so every visible line keeps the
         // indent it was broken with.
         display.set_text_indent(indent, BlockStyle::INDENT_KEYWORDS.options());
+        display.set_alignment(alignment, AlignmentOptions::default());
         let limit = u32::try_from(visible).expect("line count fits u32");
         shape::break_clamped(&mut display, width, Some(limit));
         (display, sources, slots)
@@ -939,12 +966,14 @@ impl TextBlock {
     #[must_use]
     pub fn offset_map(&self) -> OffsetMap<'_> {
         let block = &self.paragraph.content.block;
-        let cut_byte = self
+        let (cut_byte, shown_boxes) = self
             .expect_result()
             .display
             .as_ref()
-            .map_or(block.text.len(), |part| part.cut_byte as usize);
-        OffsetMap::new(&block.text, &block.map, cut_byte)
+            .map_or((block.text.len(), block.boxes.len()), |part| {
+                (part.cut_byte as usize, part.content_slots)
+            });
+        OffsetMap::new(&block.text, &block.map, cut_byte, &block.boxes, shown_boxes)
     }
 
     /// How many parley style indices this block's display layout has.
@@ -1093,12 +1122,13 @@ impl Retained for TextBlock {
             constraint,
             self.style.max_lines.map(NonZeroU32::get),
             BlockStyle::INDENT_KEYWORDS,
+            self.natural_alignment(),
         );
 
         if self.paragraph.is_empty_strut_line() {
             // The one empty line a block with no content keeps: nothing to
             // cut, and nothing shown, so it is zero wide whatever parley
-            // measured its substitute space at.
+            // measured it at — its indent, if any.
             let mut result = self.finish_untruncated(&natural_lines, constraint);
             result.size.width = 0.0;
             for line in &mut result.lines {
