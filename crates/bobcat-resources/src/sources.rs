@@ -328,8 +328,9 @@ async fn after_install<P: Platform>(
     None
 }
 
-/// The CPU half of a source load: preprocessing and the UTF-8 check the
-/// engine's strict validation depends on.
+/// The CPU half of a source load: preprocessing, the UTF-8 check the
+/// engine's strict validation depends on and, for a script, the code
+/// cache's preload of the bytecode stored for its text.
 ///
 /// A font takes neither: its bytes go to the font backend as they arrived,
 /// without a copy — `Bytes` is already a shared, thread-safe buffer, which is
@@ -418,11 +419,16 @@ fn prepare<P: Platform>(
                     }
                 })?
                 .to_owned();
-            Ok(if style_sheet {
-                LoadedSource::StyleSheet(StyleSheetSource::Text(source))
-            } else {
-                LoadedSource::Module { source, url }
-            })
+            if style_sheet {
+                return Ok(LoadedSource::StyleSheet(StyleSheetSource::Text(source)));
+            }
+            // The text is final: what is hashed here is exactly what the
+            // realm is handed, so the bytecode a compile of it left is
+            // resident before the realm looks it up.
+            if let Some(code) = &shared.code {
+                code.preload(&source);
+            }
+            Ok(LoadedSource::Module { source, url })
         })
 }
 

@@ -20,6 +20,7 @@ use std::time::Duration;
 
 use quickjs_rust_bridge as quickjs;
 
+use crate::code_cache::RealmCodeCache;
 use crate::esm::Export;
 use crate::jobs::JsThreadHandle;
 use crate::realm::child::ChildRealms;
@@ -109,6 +110,9 @@ pub(crate) struct ScriptEngine {
     /// core's and drops after this engine; dangling for a child's own engine,
     /// whose grandchildren are in that same flat list.
     children: Weak<ChildRealms>,
+    /// What this realm looks bytecode up in and files what it compiled
+    /// under ([`crate::code_cache`]); shared with its synchronous loader.
+    code: Rc<RealmCodeCache>,
 }
 
 /// The `QuickJS` runtime a group's realms share.
@@ -131,6 +135,10 @@ pub(crate) struct ScriptRuntime {
     /// rather than by being told, which is what makes it impossible to enter
     /// JavaScript and forget to say so.
     checkpoint: tokio::sync::watch::Sender<u64>,
+    /// The memory tier of the code cache every realm opened here reads and
+    /// fills: [`Artifacts::global`](vant::artifact::Artifacts::global)
+    /// outside this crate's tests.
+    artifacts: Arc<vant::artifact::Artifacts>,
 }
 
 impl ScriptRuntime {
@@ -144,7 +152,20 @@ impl ScriptRuntime {
             runtime: quickjs::Runtime::with_options(config.runtime_options)?,
             config,
             checkpoint: tokio::sync::watch::channel(0).0,
+            artifacts: Arc::clone(vant::artifact::Artifacts::global()),
         })
+    }
+
+    /// A runtime whose realms use `artifacts` as their code cache instead of
+    /// the process-wide tier, so a test's assertions about it are exact.
+    #[cfg(test)]
+    pub(crate) fn with_artifacts(
+        artifacts: Arc<vant::artifact::Artifacts>,
+    ) -> Result<Self, ScriptError> {
+        let mut runtime = Self::with_config(QuickJsConfig::default())
+            .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::Initialize))?;
+        runtime.artifacts = artifacts;
+        Ok(runtime)
     }
 
     /// The checkpoint generation, for a task that must settle what its own
@@ -184,7 +205,12 @@ impl ScriptRuntime {
             .runtime
             .create_context()
             .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::Initialize))?;
-        Ok(ScriptEngine::adopt(realm, HostPanic::default()))
+        let code = RealmCodeCache::new(Arc::clone(&self.artifacts), realm.strips_source());
+        Ok(ScriptEngine::adopt(
+            realm,
+            HostPanic::default(),
+            Rc::new(code),
+        ))
     }
 
     /// Registers one module source on the runtime, for every realm on it.
@@ -275,13 +301,24 @@ pub(crate) fn mark_checkpoint_later(js: &SharedRuntime, thread: &JsThreadHandle)
 impl ScriptEngine {
     /// One bridge realm as an engine of its own, with nothing loaded in it
     /// yet.
-    fn adopt(realm: quickjs::Context, host_panic: HostPanic) -> Self {
+    fn adopt(realm: quickjs::Context, host_panic: HostPanic, code: Rc<RealmCodeCache>) -> Self {
         Self {
             realm,
             exports: [const { OnceCell::new() }; Export::COUNT],
             evaluation: RefCell::new(None),
             host_panic,
             children: Weak::new(),
+            code,
+        }
+    }
+
+    /// Files the bytecode of every compile this realm kept since the last
+    /// call ([`RealmCodeCache::insert`]). Run at the end of every operation
+    /// that can link a module or reach a `require`, so what a compile kept
+    /// is in the memory tier before the job that compiled it ends.
+    fn file_compiled(&self) {
+        while let Some(compiled) = self.realm.take_compiled() {
+            self.code.insert(compiled);
         }
     }
 
@@ -309,9 +346,11 @@ impl ScriptEngine {
         mut hook: impl FnMut(ScriptEngine) -> Result<(), String> + 'static,
     ) -> Result<(), ScriptError> {
         let host_panic = Rc::clone(&self.host_panic);
+        let code = Rc::clone(&self.code);
         self.realm
             .install_shadow_realm(move |child| {
-                let child = ScriptEngine::adopt(child, Rc::clone(&host_panic));
+                let child =
+                    ScriptEngine::adopt(child, Rc::clone(&host_panic), Rc::new(code.sibling()));
                 keep_host_panic(&host_panic, "the ShadowRealm host hook panicked", || {
                     hook(child)
                 })
@@ -346,6 +385,7 @@ impl ScriptEngine {
         runtime: &mut ScriptRuntime,
     ) -> Result<usize, ScriptError> {
         let drained = runtime.runtime.drain_pending_jobs(&self.realm);
+        self.file_compiled();
         if let Some(payload) = self.host_panic.take() {
             panic::resume_unwind(payload);
         }
@@ -436,6 +476,10 @@ impl ScriptEngine {
         // queue, and every sibling has to settle what its own realm owes
         // whether or not the drain got through it.
         runtime.mark_checkpoint();
+        // Every entry ends in a checkpoint, and a compile — a module linked,
+        // a `require` — happens inside one, so this is where what it kept is
+        // filed, before a resumed panic could skip it.
+        self.file_compiled();
         if let Some(payload) = self.host_panic.take() {
             panic::resume_unwind(payload);
         }
@@ -487,9 +531,21 @@ impl ScriptEngine {
             Ok(loaded) => Ok(loaded),
             Err(error) => Err(error.replace('\0', "\u{fffd}")),
         };
-        self.realm
-            .complete_module(name, result.as_ref().copied().map_err(String::as_str))
-            .map_err(|error| map_quickjs_error(error, PHASE))?;
+        let completed = match result {
+            // The code cache's choice is about how the text becomes a
+            // module, never what it is: the module behaves the same either
+            // way, so a text it does not cache keeps the plain completion.
+            Ok((url, text)) => match self.code.module_code(name, text) {
+                crate::code_cache::ModuleCode::Compile => {
+                    self.realm.complete_module(name, Ok((url, text)))
+                }
+                code => self
+                    .realm
+                    .complete_module_with(name, url, text, code.as_bridge()),
+            },
+            Err(error) => self.realm.complete_module(name, Err(error.as_str())),
+        };
+        completed.map_err(|error| map_quickjs_error(error, PHASE))?;
         let result = self
             .realm
             .resume_module_loads()
@@ -612,6 +668,11 @@ impl ScriptEngine {
     /// Registered when [`Self::register_host_module_function`] registers, and
     /// a loader that panics is treated the way a host function that panics
     /// is.
+    ///
+    /// What `load` answers goes through the realm's code cache
+    /// ([`RealmCodeCache::required`]): the compile reads bytecode a previous
+    /// load of the same text under the same names left, when the memory tier
+    /// holds it, and keeps its own otherwise.
     pub(crate) fn register_synchronous_loader<F>(
         &mut self,
         module_specifier: &str,
@@ -622,10 +683,17 @@ impl ScriptEngine {
         F: FnMut(&str) -> Result<quickjs::RequiredSource, String> + 'static,
     {
         let host_panic = Rc::clone(&self.host_panic);
+        let code = Rc::clone(&self.code);
         self.realm
-            .register_synchronous_loader(module_specifier, export_name, move |url| {
-                keep_host_panic(&host_panic, "the require loader panicked", || load(url))
-            })
+            .register_synchronous_loader_with_code(
+                module_specifier,
+                export_name,
+                move |url, parameters| {
+                    keep_host_panic(&host_panic, "the require loader panicked", || {
+                        load(url).map(|source| code.required(url, parameters, source))
+                    })
+                },
+            )
             .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::RegisterHostModuleFunction))
     }
 
@@ -1032,6 +1100,10 @@ fn script_error(
         location: None,
     }
 }
+
+#[cfg(test)]
+#[path = "quickjs_code_cache_tests.rs"]
+mod code_cache_tests;
 
 #[cfg(test)]
 mod tests {

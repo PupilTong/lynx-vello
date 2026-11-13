@@ -271,25 +271,42 @@ pub trait ImageDecoder: Threaded {
     fn available(&self) -> Result<(), DecodeError>;
 }
 
-/// The bundle an embedder hands over: one transport, an optional store, one
-/// decoder.
+/// A [`Store`] with the byte budget the tier built over it may use. The tier
+/// clamps the budget further to [`Store::estimate`]'s quota, so `u64::MAX`
+/// means the quota, or unbounded without one.
+#[derive(Clone, Copy, Debug)]
+pub struct Tier<S> {
+    pub store: S,
+    pub budget: u64,
+}
+
+/// What a [`Platform`] is taken apart into, once, when the resource system
+/// is built.
+#[derive(Debug)]
+pub struct Parts<F, S, D> {
+    pub fetch: F,
+    pub decoder: D,
+    /// The HTTP byte tier's Store; `None` for a host with no persistent
+    /// tier.
+    pub bytes: Option<Tier<S>>,
+    /// The derived-artifact tier's Store (the code cache,
+    /// [`ArtifactCache`](crate::artifact::ArtifactCache)): a namespace of its
+    /// own, never the byte tier's. `None` keeps artifacts in memory only.
+    pub artifacts: Option<Tier<S>>,
+}
+
+/// The bundle an embedder hands over: one transport, one decoder, and up to
+/// two Stores, each with its budget.
 ///
 /// The parts are handed over by value, because the tiers built on them own
-/// them: a [`ByteCache`](crate::byte_cache::ByteCache) takes its Store.
+/// them: a [`ByteCache`](crate::byte_cache::ByteCache) takes its Store, an
+/// [`ArtifactCache`](crate::artifact::ArtifactCache) its own.
 pub trait Platform: 'static {
     type Fetch: Fetch;
     /// [`NoStore`] for a host with no persistent tier.
     type Store: Store;
     type Decoder: ImageDecoder;
 
-    /// Takes the platform apart once, when the resource system is built. A
-    /// `None` store means no persistent tier.
-    fn into_parts(self) -> (Self::Fetch, Option<Self::Store>, Self::Decoder);
-
-    /// The byte budget for a tier over [`Self::Store`], in bytes; the tier
-    /// clamps it further to [`Store::estimate`]'s quota. The default,
-    /// `u64::MAX`, means the quota, or unbounded without one.
-    fn byte_budget(&self) -> u64 {
-        u64::MAX
-    }
+    /// Takes the platform apart once, when the resource system is built.
+    fn into_parts(self) -> Parts<Self::Fetch, Self::Store, Self::Decoder>;
 }

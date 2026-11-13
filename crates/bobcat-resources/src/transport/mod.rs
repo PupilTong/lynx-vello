@@ -505,15 +505,16 @@ fn not_cached() -> Failure {
     )
 }
 
-/// The wall clock the byte tier's freshness is measured on. `std`'s has no
-/// source on `wasm32-unknown-unknown`, so the browser's `Date` stands in.
+/// The wall clock the byte tier's freshness and the code cache's last-use
+/// stamps are measured on. `std`'s has no source on
+/// `wasm32-unknown-unknown`, so the browser's `Date` stands in.
 #[cfg(not(target_arch = "wasm32"))]
-fn now() -> SystemTime {
+pub(crate) fn now() -> SystemTime {
     SystemTime::now()
 }
 
 #[cfg(target_arch = "wasm32")]
-fn now() -> SystemTime {
+pub(crate) fn now() -> SystemTime {
     UNIX_EPOCH + Duration::from_secs_f64(js_sys::Date::now().max(0.0) / 1000.0)
 }
 
@@ -716,7 +717,7 @@ mod dispatch_tests {
         type Store = FsStore;
         type Decoder = NativeDecoder;
 
-        fn into_parts(self) -> (Scripted, Option<FsStore>, NativeDecoder) {
+        fn into_parts(self) -> vant::Parts<Scripted, FsStore, NativeDecoder> {
             unreachable!("the tests build their transports from parts")
         }
     }

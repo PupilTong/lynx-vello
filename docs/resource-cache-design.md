@@ -25,12 +25,12 @@ resources: the engine owns the policy, the embedder owns the bytes.
 | crate | owns | depends on |
 |---|---|---|
 | `vant` | every resource **policy**: `CachePolicy`, the memory tier, RFC 9111 freshness, the byte-cache tier over a `Store`, image residency and refinement decisions, MIME sniffing and preprocessing, image header probing, `data:` URLs, the resource error vocabulary, the three embedder traits (`Fetch`, `Store`, `ImageDecoder`) and `Platform`, and (PR2) the derived-artifact cache that backs the QuickJS code cache | `bytes`, `http`, `url`, `rustc-hash`, `serde_json`, `thiserror`, `vello_common` (for `peniko::ImageData`), `siphasher`. **Never** `terminus`, `bobcat-core`, tokio, libc bindings or `web-sys`. |
-| `bobcat-resources` | the reference **orchestrator** (`Resources<P>`, `ViewResources<P>`, the image job pipeline, source loading, the registry and background installs, the native executor) and the shipped **native adapters**: `NativeFetch` (libcurl + `file:`), `FsStore` (a cache directory), `NativeDecoder` (ImageIO / gdk-pixbuf); on wasm32 `BrowserFetch` and `BrowserDecoder` until PR4 moves them into `bobcat-wasm` | `vant`, `bobcat-core`, tokio, the platform libraries |
-| `terminus` | re-exports `vant::ImageSizeHint` at `terminus::link::ImageSizeHint`; (PR3) adopts `vant`'s image residency store in the painter so the CPU bitmap tier and the GPU `Bitmaps` budget are one decision | `vant` |
+| `bobcat-resources` | the reference **orchestrator** (`Resources<P>`, `ViewResources<P>`, the image job pipeline, source loading, the registry and background installs, the native executor) and the shipped **native adapters**: `NativeFetch` (libcurl + `file:`), `FsStore` (a cache directory), `NativeDecoder` (ImageIO / gdk-pixbuf); on wasm32 `BrowserFetch` and `BrowserDecoder` until PR3 moves them into `bobcat-wasm` | `vant`, `bobcat-core`, tokio, the platform libraries |
+| `terminus` | re-exports `vant::ImageSizeHint` at `terminus::link::ImageSizeHint`; (PR5) owns the image store type `terminus::link::ImageResidency` over `vant::image::Residency`, with the engine's constants and report dispatch | `vant` |
 
 Dependency direction: `terminus → vant`, `bobcat-core → terminus, vant`,
 `bobcat-source → vant` (for `Registrar`/`ContainerInstaller`, which stay in
-`bobcat-resources` until PR3 moves the registry down), `bobcat-resources →
+`bobcat-resources` until PR4 moves the registry down), `bobcat-resources →
 vant, bobcat-core`. `vant` sits below `terminus`, so nothing in it may name a
 DOM, style or runtime type; what the pipeline needs from above arrives as a
 generic parameter or a trait.
@@ -94,9 +94,11 @@ A `Fetch` serves `http`, `https` and natively `file:`. Registered contents and
 
 ### `Store` — persistent bytes
 
-Synchronous on every target: natively a directory; in the browser (PR4) an
-OPFS directory through `createSyncAccessHandle`, which only a Worker has and
-which is why the Store lives on the Render Worker. The Cache API itself is
+Synchronous on every target: natively a directory; in the browser (PR3) one
+OPFS file opened once through `createSyncAccessHandle` — which only a Worker
+has, which is why the Store lives on the Render Worker, and whose open is
+asynchronous and exclusive, which is why the Store is a log inside one file
+(`vant::pack::PackStore`) rather than a file per entry. The Cache API itself is
 asynchronous and is not a `Store`; a browser host that prefers it fills a
 memory-only `vant` tier from it.
 
@@ -191,18 +193,26 @@ pub trait Platform: 'static {
     type Fetch: Fetch;
     type Store: Store;      // `NoStore` for a host with no persistent tier
     type Decoder: ImageDecoder;
-    /// Taken apart once, when the resource system is built: the byte tier
-    /// owns its Store.
-    fn into_parts(self) -> (Self::Fetch, Option<Self::Store>, Self::Decoder);
-    /// The budget for the byte tier over `Store`; the tier clamps it to the
-    /// Store's quota. `u64::MAX` means "the quota, or unbounded".
-    fn byte_budget(&self) -> u64 { u64::MAX }
+    /// Taken apart once, when the resource system is built: each tier owns
+    /// its Store.
+    fn into_parts(self) -> Parts<Self::Fetch, Self::Store, Self::Decoder>;
 }
+pub struct Parts<F, S, D> {
+    pub fetch: F,
+    pub decoder: D,
+    pub bytes: Option<Tier<S>>,      // the HTTP byte tier
+    pub artifacts: Option<Tier<S>>,  // the derived-artifact tier (PR2)
+}
+/// A Store with the budget of the tier over it; the tier clamps it to the
+/// Store's quota. `u64::MAX` means "the quota, or unbounded".
+pub struct Tier<S> { pub store: S, pub budget: u64 }
 ```
 
-The resource system (`Resources::with_platform`) reads `byte_budget`, takes
-the parts, and opens a `ByteCache` over the Store unless the `Fetch` owns its
-HTTP cache.
+The resource system (`Resources::with_platform`) takes the parts, opens a
+`ByteCache` over `bytes` unless the `Fetch` owns its HTTP cache, and an
+`ArtifactCache` over `artifacts` whatever the transport. (PR1 shipped
+`into_parts` as a tuple with a `byte_budget` method; PR2 gave it this shape
+when the second tier arrived.)
 
 `bobcat-resources` ships `NativePlatform` (`NativeFetch`, `FsStore`,
 `NativeDecoder`) and, on wasm32, `BrowserPlatform` (`BrowserFetch`, `NoStore`,
@@ -233,7 +243,7 @@ the traits and passes its own `Platform`.
   `vant` does not know the GPU limit).
 - (PR2) `vant::artifact::ArtifactCache<S>` — see "Code cache".
 
-## PR1 (this PR): `vant` exists, embedders provide the platform
+## PR1: `vant` exists, embedders provide the platform
 
 1. New crate `crates/vant`. Moved verbatim (tests included), with doc paths
    updated: `cache/memory.rs → memory.rs`, `cache/http.rs → http.rs`,
@@ -273,8 +283,8 @@ the traits and passes its own `Platform`.
    the `bobcat-resources` section describe the split; this document is the
    design reference.
 
-Not in PR1: moving `images.rs`/`sources.rs`/`registry.rs` orchestration into
-`vant` (PR3), the code cache (PR2), the browser Store (PR4).
+Not in PR1: the code cache (PR2), the browser Store (PR3), the registry
+(PR4), image residency (PR5).
 
 ## PR2: QuickJS code cache
 
@@ -343,20 +353,74 @@ Sources below 1 KiB are not cached. Not covered: `Context::evaluate` (the
 engine runs no fetched text through it) and runtime-registered text modules
 (tests and fixtures only).
 
-## PR3: `terminus` owns image residency
+Pairing a compile with its text. The bridge names a kept compile by what it
+was compiled under (a module's name; a wrapper's response URL and parameter
+list), and compiles a module when it is first linked, which can be operations
+after its text was handed over. The realm keeps, per name, the digest of the
+text it handed over and files a compile under that digest only while every
+text handed over under the name was the same one; two different texts under
+one name file nothing in that realm. Bytecode is therefore never filed under
+a text it might not be the compile of, whatever order hand-overs, cache hits
+and compiles come in.
 
-The image pipeline's state (`ImageState`: entries, the bitmap tier, pin,
-restore, refinement) moves into `vant::image::Residency<P>` and the painter
-holds it, so the CPU tier releases a bitmap the GPU `Bitmaps` cache pinned
-and restores only when both have dropped it. `FrameImages` stays as the test
-seam. The registry and source cache move into `vant` generic over the sheet
-type, and `bobcat-source` depends on `vant` instead of `bobcat-resources`.
+Known limit, in the fork: `JS_ReadModule`'s failure path frees one of the two
+references a half-read module holds, so the module stays on the context's
+loaded-module list. The bridge's frame (engine id and length) and `vant`'s
+CRC-64 keep damaged bytes from reaching the reader, and a module read whole
+and then refused is released with both references; freeing the object in
+the reader's `fail:` path would close it in the fork.
 
-## PR4: browser `Store`
+## PR3: browser `Store`
 
-`OpfsStore` in `bobcat-wasm` over `createSyncAccessHandle`, used for the byte
-tier and the code cache; `BrowserFetch`/`BrowserDecoder` move there from
-`bobcat-resources`.
+`vant::pack::PackStore<F: SyncFile>`: a `Store` inside one file with
+positioned synchronous IO — an append-only record log (`crc64 | kind | key |
+meta | body`), an index rebuilt by replay, a torn tail truncated at open, and
+in-place compaction made crash-safe by a move journal in the header. Written
+against `SyncFile` so all of it is tested natively over a `Vec<u8>` and a
+`std::fs::File`, including a crash at every write of a compaction.
+
+`bobcat-wasm` implements `SyncFile` over a `FileSystemSyncAccessHandle`
+(`OpfsFile`, opened once, asynchronously, when the first view is built) and
+`BrowserPlatform` hands `PackStore<OpfsFile>` over as the artifact tier, so
+compiled bytecode survives a page load. The byte tier stays absent in the
+browser: its HTTP cache already does that job and cannot be read
+synchronously. The file's handle is exclusive, so a Worker opens it once and
+shares it between its views, and a second tab runs with the memory tier alone
+(a note, never an error). `BrowserFetch`, `BrowserDecoder` and
+`BrowserPlatform` move from `bobcat-resources` to `bobcat-wasm`:
+`bobcat-resources` keeps the orchestration and the native adapters.
+
+## PR4: the registry moves into `vant`
+
+`vant::registry`: `Registry<S>` and `Registered<S>` generic over the host's
+parsed-stylesheet type, `Registrar<S>`, `RegisterError`, the URL
+normalization every registration goes through, and the traits a source
+parser writes through — `Register<S>`, `RegisterInBackground<S>`,
+`ContainerInstaller<S>`. `bobcat-source` then names `vant` and `bobcat-core`
+only, and `bobcat-resources` becomes its dev-dependency. The install holds and
+the stylesheet in-flight cache stay in `bobcat-resources`: they are tokio
+`watch` channels, which `vant` does not have.
+
+## PR5: image residency is a policy
+
+The image pipeline's decisions — the state of every source, who waits for
+it, the decoded-bitmap tier and its pins, when a read hits, refines or must
+restore — move out of `bobcat-resources`' `images.rs` into
+`vant::image::Residency<W>`, a synchronous state machine with no IO.
+`terminus::link::ImageResidency` is the engine's store type over it, owning
+`MAX_RENDERABLE_DIMENSION` and the dispatch of `ImageReports`, so a host
+cannot forget or reorder a report. `bobcat-resources` keeps the IO: fetch,
+decode, parse, and feeding completions in. One behaviour fix is part of it:
+the pinned working set becomes the union of every view's, where today one
+view's `retain` replaces the set and unpins another view's bitmaps.
+
+Not in the series — it needs a ruling: making the CPU tier release a bitmap
+the GPU `Bitmaps` cache holds, and restore only when both dropped it. Strong
+references to a decoded image today are the host tier, the painter's resolved
+set, the composed display list and the filter bake list; releasing the CPU
+copy needs the frame to carry a descriptor and a weak blob, a pre-acquire
+restore each turn and a lease on the GPU entry. It breaks the tested law that
+a dropped view's last frame keeps the pixels it read, and adds host policy.
 
 ## Platform constraints the design answers
 

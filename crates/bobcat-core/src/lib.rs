@@ -39,6 +39,7 @@ mod background;
 #[doc(hidden)]
 pub mod bench_support;
 mod clock;
+mod code_cache;
 mod esm;
 mod fetch;
 mod future;
@@ -115,6 +116,7 @@ pub mod editing {
     }
 }
 
+pub use code_cache::{MIN_CACHED_SOURCE_BYTES, script_engine_id};
 pub use esm::{BTS_CHUNK_PREAMBLE, MTS_CHUNK_PREAMBLE};
 pub use main::tree::PageConfig;
 pub use native_module::{ModuleCall, ModuleCallback, NativeModule};
