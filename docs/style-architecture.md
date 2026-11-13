@@ -38,8 +38,8 @@ CSS supplied as text.
 
 ## The terminus core: one tree, Document-mediated mutation
 
-- **One tree, four aligned arenas.** `Document<T>` owns a fixed-address boxed
-  `TreeArenas<T>` whose primary `Slab<Node<T>>` selects every `NodeId`: slot
+- **One tree, four aligned arenas.** `Document<T>` owns a fixed-address
+  `TreeArenas<T>` (held through `ArenaBox`'s raw pointer) whose primary `Slab<Node<T>>` selects every `NodeId`: slot
   zero is the real `NodeData::Document`, and later slots are element/text
   nodes. Its payload and Stylo traversal/invalidation slabs share those IDs.
   A separate inline `DocumentLayoutState` owns the fourth, layout/text-state

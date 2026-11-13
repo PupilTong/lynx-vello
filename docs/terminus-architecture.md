@@ -9,7 +9,9 @@ touching the crate.
 
 ## Tree, arenas and identity
 
-It owns a fixed-address boxed `TreeArenas<T>` containing one `Slab<Node<T>>`
+It owns a fixed-address `TreeArenas<T>`, held through a raw pointer
+(`ArenaBox`) that every node carries a copy of and every borrow of the arena
+set is derived from, containing one `Slab<Node<T>>`
 (slot zero is the real DOM Document node and carries its node-visible style
 context; later slots are element/text nodes). The embedder's `T` payload rides
 in its node (`None` for the nodes nobody hands out), and so do the flags that

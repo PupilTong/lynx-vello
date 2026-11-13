@@ -4,10 +4,12 @@
 // check in `TreeArenas` — so the live path stays fall-through.
 #![feature(likely_unlikely)]
 #![deny(unreachable_pub)]
-// The crate's whole `unsafe` surface is two blocks — the arena-set backpointer
-// deref and Stylo's `TElement::ensure_data` contract call — and each states the
-// invariant it rests on; a third, test-only one hands wgpu a bare
-// `CAMetalLayer` for the window stack's test (`painter/graphics.rs`). The
+// The crate's whole `unsafe` surface is five blocks — the arena set's owning
+// pointer (`tree/arena.rs`'s `ArenaBox`: lending the arena set shared, lending
+// it exclusive, freeing it), the node backpointer deref that reads through a
+// copy of that pointer, and Stylo's `TElement::ensure_data` contract call —
+// and each states the invariant it rests on; a sixth, test-only one hands wgpu
+// a bare `CAMetalLayer` for the window stack's test (`painter/graphics.rs`). The
 // workspace-wide `unsafe_code = "warn"` says a block may exist; this says it
 // must explain itself.
 #![warn(clippy::undocumented_unsafe_blocks)]
