@@ -5388,7 +5388,15 @@ console.log('armed');
             ))
             .await;
         let mut events = owned.events();
-        assert_eq!(console_messages(&events), ["armed"], "{events:?}");
+        // `armed` is logged after the child armed its timer, in the same
+        // entry, so a timer that fired inside that entry would come first.
+        // Whether it has fired by the end of the boot is up to how long the
+        // boot took (longer than 30 ms under AddressSanitizer on CI).
+        assert_eq!(
+            console_messages(&events).first().map(String::as_str),
+            Some("armed"),
+            "{events:?}"
+        );
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while !console_messages(&events)

@@ -6003,8 +6003,10 @@ mod implementation {
         /// Compiles `source` as the module `name` on a scratch runtime that
         /// keeps no source text, the way a build compiles the engine's
         /// built-ins, and leaks the bytes so a runtime can borrow them for
-        /// its life.
+        /// its life. A static keeps them reachable once that runtime is
+        /// gone, so `LeakSanitizer` does not report the leak, which is meant.
         fn compiled_module(name: &str, source: &str) -> &'static [u8] {
+            static KEPT: std::sync::Mutex<Vec<&'static [u8]>> = std::sync::Mutex::new(Vec::new());
             let compiler = Runtime::with_options(RuntimeOptions {
                 strip_source: true,
                 ..RuntimeOptions::default()
@@ -6012,7 +6014,9 @@ mod implementation {
             .unwrap();
             let scratch = compiler.create_context().unwrap();
             let bytecode = scratch.compile_module_bytecode(name, source).unwrap();
-            Box::leak(bytecode.into_boxed_slice())
+            let bytecode: &'static [u8] = Box::leak(bytecode.into_boxed_slice());
+            KEPT.lock().unwrap().push(bytecode);
+            bytecode
         }
 
         #[test]
