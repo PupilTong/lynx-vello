@@ -73,7 +73,8 @@ fidelity, and **not** reimplementing Android/iOS native platform code paths.
 Source-based native external `.lynx.bundle` parsing and conversion are
 supported by `bobcat-source`. Running a bytecode `.lynx.bundle`, by converting
 its PrimJS bytecode into this engine's QuickJS bytecode, is a target by a
-2026-11-10 ruling and is **not built**: such a bundle is still rejected
+2026-11-10 ruling and is **not finished**: the converter exists, but such a
+bundle is still rejected
 (`docs/primjs-bytecode-conversion-design.md`). Native platform bridges remain
 outside the runtime target.
 
@@ -193,10 +194,13 @@ and UTF-8 error offsets. `web` decodes `SDRA WROF` on the unchanged rkyv 0.7
 wire model. `native` decodes source-based flexible external `.lynx.bundle`
 files into that same model and can explicitly encode a web bundle; it rejects
 real QuickJS/Lepus bytecode rather than executing or decompiling it.
-`native::primjs` reads, validates and disassembles that bytecode without
-converting or running it (`read_payload`, `bundle_bytecode_sections`,
-`disassemble`); it is the first step of
-`docs/primjs-bytecode-conversion-design.md`, and `decode` does not call it.
+`native::primjs` reads, validates and disassembles that bytecode
+(`read_payload`, `bundle_bytecode_sections`, `disassemble`) and converts a
+script of it to a module of the fork's bytecode (`convert_script`, through
+`quickjs_rust_bridge::bytecode`); `tests/primjs_convert.rs` compares every
+program of the bytecode corpus, converted and run, with the fork's run of its
+source. `decode` does not call any of it yet, and still rejects bytecode
+bundles (`docs/primjs-bytecode-conversion-design.md`, §11 step 5).
 Named external modules are preserved and acquire no invented page root.
 `PageSource::from_native_bundle` requires an explicit entry name, `from_bytes`
 a `root` for binary page inputs. A `.web.bundle` is read in place: bodies are
@@ -4756,7 +4760,8 @@ section is the only place the absolute paths are spelled out.
   bytecode sections.** The PrimJS serialized-bytecode format a `.lynx.bundle`
   carries, how it differs from the pinned fork's, the design for rewriting one
   into the other, what the fork's interpreter assumes of bytecode it reads,
-  and the 2026-11-10 rulings. Design only; nothing in it is built.
+  and the 2026-11-10 rulings. The reader, the rules and the converter are
+  built; loading such a bundle in the engine is not.
 - `docs/terminus-architecture.md` — `crates/terminus`'s internals: arenas and identity,
   shadow DOM and custom elements, the style engine and invalidation, the
   layout host, visual order and the committed frame, scroll/input/event

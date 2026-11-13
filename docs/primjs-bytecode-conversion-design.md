@@ -1,7 +1,8 @@
 # Converting PrimJS bytecode to this engine's QuickJS bytecode
 
-Investigation and design evaluation, 2026-11-10. Nothing here is built. The
-rulings given on it the same day are in §10; the rest is what the two formats are, how one is rewritten into the other,
+Investigation and design evaluation, 2026-11-10; §11 steps 1 to 4 were built
+the same day and §9 says what has been shown to work. The rulings are in §10;
+the rest is what the two formats are, how one is rewritten into the other,
 what that costs, and where it would sit in this engine.
 
 Revisions compared: `lynx-family/primjs` at `941a365` (2.11.1-rc.1) and
@@ -284,8 +285,11 @@ it compiled itself.
 
 ### 4.4 Instruction expansion
 
-About 222 of the 242 opcodes map by name with the operand layout unchanged.
-The rest, each as a fixed sequence that depends on the instruction alone:
+As built, 210 of the 242 opcodes copy by name, 25 are translated and 7 are
+refused (`convert/classify.rs`; a test checks every opcode is in exactly one
+class and that each copied one has the same pops, pushes and operand format in
+both tables). The translations, each a fixed sequence that depends on the
+instruction alone except where noted:
 
 | PrimJS | Fork sequence | Note |
 | --- | --- | --- |
@@ -298,13 +302,18 @@ The rest, each as a fixed sequence that depends on the instruction alone:
 | `get_super_ctor` | `get_super` | the fork tests for a constructor at the call, after the arguments, which is the specification's order |
 | `to_propkey2` | `swap; dup; is_undefined_or_null; if_false L; get_length; L: swap; to_propkey` | `get_length` on `null`/`undefined` raises the `TypeError` |
 | `is_function` | `typeof_is_function` | |
-| `import` | `undefined; import` | the fork's takes an options value |
+| `import` | refused | the mapping would be `undefined; import`, but no corpus program exercises it, and nothing is converted that no test executes |
 | `iterator_close_return` | `nip_catch; rot3r; undefined` | as the fork's `emit_return` (`:28704`) |
 | `async_iterator_next` | `iterator_next` | same stack contract |
 | `async_iterator_get 0`, `1` | `iterator_call 0`, `1` | |
 | `async_iterator_get 2` | `throw_error NULL, ITERATOR_THROW` | PrimJS's raises the same `TypeError` inline |
 | `async_iterator_close` | `drop; drop; get_field2 return; dup; is_undefined_or_null; if_true A; call_method 0; push_false; goto B; A: drop; drop; undefined; push_true; B:` | |
 | `yield_star` (sync) | the fork's delegation loop | below |
+| `iterator_get_value_done` | `iterator_check_object; get_field2 done; swap; get_field value; swap` | below; kept by name only in the `for await` head |
+| `dup3; drop; call_method 0; await; iterator_get_value_done` (the `for await` head) | `for_await_of_next; await; iterator_get_value_done` | the one translation that matches a sequence: `dup3` copies the iterator marker, which the rules refuse |
+| `apply` magic 0, 1 | same | any other magic is refused: the fork gives 2 another meaning |
+| `regexp` | same, with its bytecode operand recompiled | §4.9 |
+| `if_false8`, `if_true8`, `goto8`, `goto16` | the 32-bit forms | §4.6 |
 
 **`yield_star`.** PrimJS compiles a synchronous `yield*` as `for_of_start;
 drop; yield_star` and its runtime performs the delegation
@@ -323,19 +332,55 @@ return = 1, throw = 2 (`:21371`); a throw raises in both. Compiled code tests
 the value with `if_false`, which reads both the same way. Async generators
 push `Int32(completion_type)` on both sides.
 
-**`iterator_get_value_done`.** The fork's additionally stores a catch offset
-into the slot below the result object (`:17012`). In every PrimJS sequence
-that uses the instruction that slot is the catch-offset slot of the same
-iteration, so the name maps directly.
+**`iterator_get_value_done`.** The fork's helper additionally stores the
+iterator marker into the slot below the result object (`:17012`); PrimJS's
+does not. In PrimJS's async-generator `yield*` that slot has deliberately been
+replaced by `undefined`, so keeping the name would re-arm the marker and the
+unwinder would later call the inner iterator's `return()` where PrimJS and the
+specification do not. The instruction is therefore expanded to PrimJS's exact
+contract (a `TypeError` for a non-object, `done` read before `value`), except
+in the rewritten `for await` head, where the fork's instruction is the right
+one. That rewrite changes one behaviour toward the specification: a `next()`
+that throws or rejects no longer triggers `iterator.return()`.
+
+**What the semantic audit found.** Every opcode with the same name on both
+sides was compared case by case in the two interpreters: 199 have the same
+contract, 17 differ in ways that cannot change conformant code (mostly the
+fork following the specification where PrimJS did not), and 12 matter, all
+handled above or refused. Three differences cannot be absorbed by a converter
+and are accepted:
+
+- a spread call (`f(...a)`, `new F(...a)`, `super(...a)`) with more than 65534
+  elements throws `RangeError` on the fork; PrimJS has no limit;
+- for a strict assignment to an undeclared name, the `ReferenceError` is
+  raised at the assignment, after the right-hand side has run, where PrimJS
+  raised it before;
+- PrimJS's runtime starts a `yield*` delegation with the kind of the call that
+  resumed the generator, so a `yield*` inside `finally` during `return()` calls
+  the inner `return` first; the converted loop calls `next`, as the
+  specification says.
+
+**PrimJS compiler behaviour that conversion preserves.** The bytecode is what
+PrimJS compiled, so where its compiler departs from the source's meaning the
+converted program does too, exactly as on native Lynx. The corpus shows five:
+`a ?? b` tests the left side for `undefined` only; `(o?.m)()` loses `this`;
+`delete o?.a` deletes nothing; a default parameter expression sees the body's
+`var`; a static field initializer that reads its own class throws. The
+differential test asserts each with its outcome.
 
 ### 4.5 Function records
 
 - `closure_type`: `is_local && is_arg` → `JS_CLOSURE_ARG`; `is_local` →
   `JS_CLOSURE_LOCAL`; else `JS_CLOSURE_REF`; plus the entries of §4.3.
 - `var_ref_idx`, `var_ref_count`: number the captured arguments and locals of
-  a function from 0. Captured means some child's closure table names it as
-  `LOCAL` or `ARG`; PrimJS's `is_captured` says the same when vardefs are
-  present.
+  a function from 0. Captured is recomputed, not taken from PrimJS's flag: a
+  variable some child's closure table names as `LOCAL` or `ARG`, the operand
+  of `make_loc_ref`, `make_arg_ref` and `close_loc`, and every argument of a
+  function that builds a mapped `arguments` object (`special_object 1`), which
+  the fork fills through each argument's variable reference.
+- A closure variable whose name was stripped takes its name from the parent's
+  vardef or closure entry, or failing that the text the fork prints for an
+  unnamed variable; the null atom is not a legal name there.
 - Vardefs: the fork's `get_var_ref` reads `vardefs[i].var_ref_idx`
   (`:17262`), so a function whose vardefs were stripped gets a synthesized
   array of `arg_count + var_count` entries with `JS_ATOM_NULL` names.
@@ -349,8 +394,9 @@ iteration, so the name maps directly.
 
 ### 4.6 Layout
 
-Sizes change (`get_var` shrinks, templates grow), so every relative jump is
-rewritten through an old-pc-to-new-pc array. PrimJS's short jumps
+Sizes change (`get_var` shrinks, templates grow). Both models address a jump
+by instruction index, so the converter maps indices and the bridge's writer
+computes the byte offsets. PrimJS's short jumps
 (`if_false8`, `if_true8`, `goto8`, `goto16`) are widened to their 32-bit forms
 first; then one pass assigns addresses and a second writes offsets, with no
 relaxation loop. The cost is a few bytes per short jump.
@@ -453,10 +499,11 @@ linking prologue (which the fork's own compiler output has too).
 PrimJS's pc2line is a delta table whose values pack line and column into one
 word in two variants (`source/quickjs.cc:7749`); the fork's opens with
 leb128 line and column and continues with deltas (`:35019`). Decode, map each
-pc through the array of §4.6, encode. A bundle with external debug info has an
-empty table; the function id it carries instead has no place in the fork's
-record and is dropped (ruling 5), so a stack trace from such code has function
-names and no line numbers.
+pc, encode; PrimJS's columns count from 1 and are written as they are. A
+bundle with external debug info has an empty table; the function id it carries
+instead has no place in the fork's record and is dropped (ruling 5). Its
+functions get a debug block naming the module, with no line table, so a stack
+trace from such code has function names and no line numbers.
 
 ### 4.9 Constant pool
 
@@ -476,8 +523,10 @@ pattern the fork rejects fails the conversion.
 Every rejection is a conversion error for the whole section, and so a load
 failure of the bundle (ruling 3). There is no partial support.
 
-- **Direct `eval`.** PrimJS's `eval` takes one argument and no callee on the
-  stack (`:15662`); the fork's takes the callee and an argument count, and its
+- **Direct `eval`.** ReactLynx's *development* main-thread runtime contains
+  one (its snapshot-patch `evaluate` function), so development builds do not
+  convert; production builds do. PrimJS's `eval` takes one argument and no
+  callee on the stack (`:15662`); the fork's takes the callee and an argument count, and its
   runtime compiler reads the enclosing function's scope metadata in the fork's
   own encoding (`ARG_SCOPE_END`, `has_scope`). `with_get_ref_undef` exists
   only for the variable object such a function creates and goes with it.
@@ -485,7 +534,9 @@ failure of the bundle (ruling 3). There is no partial support.
 - **`BC_TAG_MODULE` input** (ruling 4). PrimJS's module record predates
   top-level await and import attributes, and both threads' sections are
   global scripts (§2.5).
-- **Opcodes at or above `OP_SHIPPABLE_COUNT`**, as PrimJS's own reader does.
+- **Opcodes at or above `OP_SHIPPABLE_COUNT`**, as PrimJS's own reader does,
+  and `nip1`, `for_await_of_next` and `nop`, which PrimJS's compiler cannot
+  emit; dynamic `import()`, which no test exercises.
 - **Byte-swapped input** (version bit `0x40`), and any header bit this
   document does not name.
 - **More than 65534 closure variables** in one function after §4.3.
@@ -669,21 +720,23 @@ both threads' sections come from one serializer (§2.5); the interpreter
 assumptions listed in §4.7; that `compute_stack_size` reads only the bytecode
 buffer of its `JSFunctionDef`.
 
-Verified by running code (§11 steps 1 and 2): the reader decodes every program
+Verified by running code (§11 steps 1 to 4): the reader decodes every program
 of the corpus in every encoder variant and both sections, and both pages of
 the ReactLynx fixtures; the verifying read accepts bytecode the fork compiled
 and reproduces the compiler's stack sizes; the generated tables equal the
-compiled engine's.
+compiled engine's; of the corpus's 2000 conversions (250 programs, four
+encoder variants, both sections), 1944 leave the result the fork's own run of
+the source leaves and the other 56 are the seven programs listed in the
+differential test, each asserted with its outcome; 38 of the 44 bytecode
+sections of the ReactLynx fixtures convert and pass every rule, and the other
+6 are development main-thread scripts refused for direct `eval`. The converted
+fixtures have not been run: that needs step 5.
 
-Not verified: the 222 name-mapped opcodes beyond those; `await`,
-`initial_yield`, `return_async` and `async_yield_star` beyond the resume
-sites; class-field and private-name instructions; the interpreter's
-assumptions for opcodes not in §4.7's table; whether PrimJS's compiler output
-always satisfies the slot rules proposed there; the module-function shape of
-§6 as running code (a module function carrying `JS_CLOSURE_GLOBAL_DECL`
-entries is a combination the fork's compiler does not itself produce); the
-`yield_star` template as running code; any timing or size figure. No converter
-code exists and no program has been converted.
+Not verified: converted ReactLynx bundles running in the engine (step 5);
+the three accepted differences of §4.4 by a test (no corpus program shows
+them); dynamic `import()`; whether shipped bundles ever use PrimJS's optional
+bytecode optimizer (the encoder used here produced identical bytes with its
+option on and off); the fork commits on test262; any timing or size figure.
 
 ## 10. Rulings
 
