@@ -15,7 +15,6 @@ bench = false
 
 [dependencies]
 bobcat-core = { workspace = true }
-bobcat-resources = { workspace = true }
 bytecheck = { workspace = true }
 bytes = { workspace = true }
 rkyv = { workspace = true }
@@ -25,11 +24,12 @@ cssparser = { workspace = true }
 thiserror = { workspace = true }
 url = { workspace = true }
 percent-encoding = { workspace = true }
-# `vant::Platform`: registration takes a `Resources` over any platform.
+# `vant::registry`: what registrations are written through.
 vant = { workspace = true }
 zip = { workspace = true }
 
 [dev-dependencies]
+bobcat-resources = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "time"] }
 divan = { workspace = true }
 prime-radiant = { workspace = true }

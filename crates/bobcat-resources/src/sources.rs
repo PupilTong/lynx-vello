@@ -316,7 +316,7 @@ async fn after_install<P: Platform>(
     url: &Url,
     kind: SourceKind,
 ) -> Option<SourceResult> {
-    let mut done = shared.transports.registry.install_covering(url)?;
+    let mut done = shared.transports.installs.install_covering(url)?;
     let ended = done
         .wait_for(Option::is_some)
         .await

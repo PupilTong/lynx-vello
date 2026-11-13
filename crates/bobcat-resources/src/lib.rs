@@ -113,13 +113,22 @@ pub use store::FsStore;
 pub use transport::NativeFetch;
 use vant::artifact::{ArtifactCache, ArtifactConfig, Artifacts, AsyncArtifactCache, SourceDigest};
 use vant::byte_cache::ByteCache;
+pub use vant::registry::{ContainerInstaller, RegisterError, Registered};
+use vant::registry::{Register, RegisterInBackground, parse_registration_url};
 use vant::{ArtifactStore, AsyncStore, Parts, Platform, Store};
 pub use vant::{CachePolicy, data_url, image_header, mime, preprocess};
 
 use crate::executor::Wakeup;
 use crate::images::{Completion, ImageState};
-use crate::registry::{Registered, Registry};
 use crate::transport::{Fetched, HttpSettings, Transports};
+
+/// What a [`ContainerInstaller`] registers through: the registry alone,
+/// reachable from the thread the load finished on
+/// ([`vant::registry::Registrar`], over this system's stylesheet type).
+pub type Registrar = vant::registry::Registrar<PreparsedStyleSheet>;
+
+/// The registered contents of one scope.
+pub(crate) type Registry = vant::registry::Registry<PreparsedStyleSheet>;
 
 /// The platform [`Resources::new`] builds, and the one [`Resources`] and
 /// [`ViewResources`] name when no other is: [`NativePlatform`]. Native
@@ -217,7 +226,7 @@ pub struct ResourcesConfig {
     /// `lynx.fetchBundle` to install lazy bundles passes
     /// `bobcat_source::BundleInstaller`, which registers a fetched container
     /// by the same `ContainerSources` path a page's own takes.
-    pub container_installer: Option<Arc<dyn ContainerInstaller>>,
+    pub container_installer: Option<Arc<dyn ContainerInstaller<PreparsedStyleSheet>>>,
 }
 
 impl Default for ResourcesConfig {
@@ -237,94 +246,6 @@ impl Default for ResourcesConfig {
             log_to_stderr: cfg!(not(target_arch = "wasm32")),
             container_installer: None,
         }
-    }
-}
-
-/// The hook that makes a fetched Lynx container's sections loadable.
-///
-/// A [`SourceRequest::Fetch`](bobcat_core::resource::SourceRequest::Fetch) is
-/// a plain fetch: core asks for a URL and learns only that the fetch is over.
-/// What the bytes *were* is this crate's and its host's business, and this is
-/// where that decision is made — if they are a Lynx container, its bodies and
-/// stylesheets are registered so that the source requests a realm makes for
-/// them by URL answer. Deciding *what* the bytes are is `bobcat-source`'s, so
-/// what is here is the fetch, the URL an install is based on, and the
-/// registry it writes.
-///
-/// A host without one still fetches; nothing about the completion changes.
-///
-/// It runs on whichever thread the load finished on — a blocking-pool thread
-/// natively — which is why it is `Send + Sync`, and why what it writes
-/// through is a [`Registrar`] rather than a [`Resources`].
-pub trait ContainerInstaller: fmt::Debug + Send + Sync + 'static {
-    /// Offers the bytes fetched from `url`. `url` is the **resolved request
-    /// URL**, which is what a realm derives its section URLs from; a redirect
-    /// is the transport's business and no part of it.
-    ///
-    /// `Ok(false)` is "these are not a container I recognize": the fetch
-    /// completes and nothing was registered, which is what an image or a
-    /// script fetched this way leaves. `Ok(true)` is installed. An error is a
-    /// container that would not decode, which **fails the fetch** with that
-    /// message.
-    fn install(&self, url: &Url, bytes: &[u8], registrar: &Registrar) -> Result<bool, String>;
-}
-
-/// What a [`ContainerInstaller`] registers through: the registry alone,
-/// reachable from the thread the load finished on.
-///
-/// It is [`Resources::register`] and [`Resources::register_style_sheet`]
-/// minus the per-scope stylesheet-cache invalidation, which is thread-bound
-/// and has nothing to invalidate here: a container's section URLs were never
-/// asked for before the container existed, so no cached response for one can
-/// be standing.
-pub struct Registrar {
-    registry: Arc<Registry>,
-}
-
-impl fmt::Debug for Registrar {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.debug_struct("Registrar").finish_non_exhaustive()
-    }
-}
-
-impl Registrar {
-    /// Registers `bytes` under `url`, replacing any earlier registration.
-    /// Returns the normalized URL they answer to.
-    ///
-    /// # Errors
-    ///
-    /// [`RegisterError::InvalidUrl`] for a URL that does not parse.
-    pub fn register(
-        &self,
-        url: &str,
-        bytes: impl Into<Bytes>,
-        media_type: Option<&str>,
-    ) -> Result<Url, RegisterError> {
-        let url = parse_registration_url(url)?;
-        self.registry.insert(
-            &url,
-            Registered::Bytes {
-                bytes: bytes.into(),
-                media_type: media_type.and_then(mime::MediaType::parse),
-            },
-        );
-        Ok(url)
-    }
-
-    /// Registers a stylesheet the installer already parsed. It answers a
-    /// stylesheet source request pre-parsed, and no other request at all.
-    ///
-    /// # Errors
-    ///
-    /// [`RegisterError::InvalidUrl`] for a URL that does not parse.
-    pub fn register_style_sheet(
-        &self,
-        url: &str,
-        sheet: Arc<PreparsedStyleSheet>,
-    ) -> Result<Url, RegisterError> {
-        let url = parse_registration_url(url)?;
-        self.registry.insert(&url, Registered::StyleSheet(sheet));
-        Ok(url)
     }
 }
 
@@ -598,7 +519,7 @@ pub(crate) struct Shared<P: Platform> {
     completions: tokio::sync::mpsc::UnboundedSender<Completion>,
     wakeup: Wakeup,
     log_to_stderr: bool,
-    container_installer: Option<Arc<dyn ContainerInstaller>>,
+    container_installer: Option<Arc<dyn ContainerInstaller<PreparsedStyleSheet>>>,
     notes: Mutex<Vec<String>>,
     /// A test's seam into a background job's transport read, called on the
     /// blocking thread that runs it, so a test can hold a job in flight or
@@ -645,9 +566,7 @@ impl<P: Platform> Shared<P> {
         installer.install(
             url,
             bytes,
-            &Registrar {
-                registry: Arc::clone(&self.transports.registry),
-            },
+            &Registrar::new(Arc::clone(&self.transports.registry)),
         )
     }
 
@@ -799,13 +718,6 @@ impl<P: Platform> fmt::Debug for Resources<P> {
             .field("transports", &self.shared.transports)
             .finish_non_exhaustive()
     }
-}
-
-/// A URL could not be registered.
-#[derive(Debug, thiserror::Error)]
-pub enum RegisterError {
-    #[error("`{url}` is not a valid URL: {message}")]
-    InvalidUrl { url: String, message: String },
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1041,11 +953,9 @@ impl<P: Platform> Resources<P> {
         static NEXT_INSTALL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let id = NEXT_INSTALL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (sender, done) = tokio::sync::watch::channel(None);
-        self.shared.transports.registry.hold(id, container, done);
+        self.shared.transports.installs.hold(id, container, done);
         let shared = SharedHandle::clone(&self.shared);
-        let registrar = Registrar {
-            registry: Arc::clone(&shared.transports.registry),
-        };
+        let registrar = Registrar::new(Arc::clone(&shared.transports.registry));
         let finish = move |result: Result<(), String>| {
             if let Err(message) = &result {
                 shared.note(format!("a container could not be registered: {message}"));
@@ -1053,7 +963,7 @@ impl<P: Platform> Resources<P> {
             // Released only once everything is registered: a request that no
             // longer finds the hold finds the registrations, and one that
             // found it waits for this answer.
-            shared.transports.registry.release(id);
+            shared.transports.installs.release(id);
             let _ = sender.send(Some(result.map_err(Arc::from)));
         };
         #[cfg(not(target_arch = "wasm32"))]
@@ -1183,6 +1093,35 @@ impl<P: Platform> Resources<P> {
     }
 }
 
+impl<P: Platform> Register<PreparsedStyleSheet> for Resources<P> {
+    fn register(
+        &self,
+        url: &str,
+        bytes: Bytes,
+        media_type: Option<&str>,
+    ) -> Result<Url, RegisterError> {
+        Self::register(self, url, bytes, media_type)
+    }
+
+    fn register_style_sheet(
+        &self,
+        url: &str,
+        sheet: Arc<PreparsedStyleSheet>,
+    ) -> Result<Url, RegisterError> {
+        Self::register_style_sheet(self, url, sheet)
+    }
+}
+
+impl<P: Platform> RegisterInBackground<PreparsedStyleSheet> for Resources<P> {
+    fn register_in_background(
+        &self,
+        container: &Url,
+        install: impl FnOnce(&Registrar) -> Result<(), String> + Send + 'static,
+    ) {
+        Self::register_in_background(self, container, install);
+    }
+}
+
 /// Writes what the engine compiled since the last flush to the code cache's
 /// store, when there is a store, something is queued and no flush is already
 /// queued or running. Asked once per embedder turn, from
@@ -1263,13 +1202,6 @@ fn preprocess_fetched(
         )
     })?;
     Ok((fetched, preprocessed))
-}
-
-fn parse_registration_url(url: &str) -> Result<Url, RegisterError> {
-    Url::parse(url).map_err(|error| RegisterError::InvalidUrl {
-        url: url.to_owned(),
-        message: error.to_string(),
-    })
 }
 
 /// One view's end of the system: the [`ResourceFetcher`] it is built with.

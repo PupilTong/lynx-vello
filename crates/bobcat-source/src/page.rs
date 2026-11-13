@@ -60,13 +60,13 @@
 use std::sync::Arc;
 
 use bobcat_core::{PageConfig, PreparsedStyleSheet, ScreenMetrics, ViewSources};
-use bobcat_resources::{Registrar, Resources};
 use bytes::Bytes;
 use thiserror::Error;
 use url::Url;
-use vant::Platform;
+use vant::registry::{Register, RegisterInBackground};
 
 use crate::ContainerSources;
+use crate::container::Registrar;
 
 /// A decoded page and the in-memory resources it contributes to a Bobcat
 /// view.
@@ -339,11 +339,11 @@ impl PageSource {
     /// CSS as they are.
     ///
     /// Every registration URL was derived from an already-parsed [`Url`], so
-    /// registration cannot fail URL validation. `Resources::register`
+    /// registration cannot fail URL validation. [`Register::register`]
     /// replaces an earlier registration of the same URL, so two pages
     /// registering one input URL leave the later one's bodies — and whatever
     /// URL only the earlier one had.
-    pub fn register_with<P: Platform>(&self, resources: &Resources<P>) {
+    pub fn register_with(&self, resources: &impl Register<PreparsedStyleSheet>) {
         match &self.page {
             Page::Container(container) => container.register_with(resources),
             Page::Xml(xml) => {
@@ -418,10 +418,10 @@ impl PageSource {
 /// `StyleInfo` it names — read by scanning the section table. The decode
 /// itself, the `StyleInfo` lowering and the registration run off the
 /// embedder's thread, through
-/// [`Resources::register_in_background`](bobcat_resources::Resources::register_in_background),
-/// while the view boots; its first loads of the container's URLs wait for
-/// them there. Every other input is decoded when it is deferred, and
-/// registered when asked.
+/// [`RegisterInBackground::register_in_background`] (the reference
+/// fetcher's `Resources` implements it), while the view boots; its first
+/// loads of the container's URLs wait for them there. Every other input is
+/// decoded when it is deferred, and registered when asked.
 ///
 /// The page is the one [`PageSource::from_bytes`] decodes, with one
 /// difference: a `StyleInfo` section is listed as the view's author sheet
@@ -551,7 +551,10 @@ impl DeferredPage {
     /// every load of its URLs held until they are; any other page's at once,
     /// as [`PageSource::register_with`] does. A container that fails to
     /// decode fails those loads with its decode error.
-    pub fn register_in_background<P: Platform>(&self, resources: &Resources<P>) {
+    pub fn register_in_background(
+        &self,
+        resources: &impl RegisterInBackground<PreparsedStyleSheet>,
+    ) {
         match &self.page {
             Deferred::Decoded(page) => page.register_with(resources),
             Deferred::Web {
@@ -739,10 +742,10 @@ pub(crate) fn background_boot_source(input: &Url, has_app_service: bool) -> Stri
 /// [`mts_entry_source`], the background-thread script as a
 /// [`BundleTarget::Web`] body — and the CSS as it is, exactly as
 /// [`PageSource::register_with`] registers an XML page's.
-pub fn register_lynx_xml_response<P: Platform>(
+pub fn register_lynx_xml_response(
     input: &Url,
     source: &str,
-    resources: &Resources<P>,
+    resources: &impl Register<PreparsedStyleSheet>,
 ) -> Result<LynxXmlResponseRegistration, SourceError> {
     let mapped = map_lynx_xml(input, source, LynxXmlUrlPolicy::ResponseFragments)?;
     let background_thread_url = mapped.background_thread.map(|(url, source)| {
@@ -810,9 +813,18 @@ const fn raw_lynx_xml_config() -> PageConfig {
     }
 }
 
-fn register_text<P: Platform>(resources: &Resources<P>, url: &Url, source: &str, media_type: &str) {
+fn register_text(
+    resources: &impl Register<PreparsedStyleSheet>,
+    url: &Url,
+    source: &str,
+    media_type: &str,
+) {
     resources
-        .register(url.as_str(), source.as_bytes().to_vec(), Some(media_type))
+        .register(
+            url.as_str(),
+            Bytes::copy_from_slice(source.as_bytes()),
+            Some(media_type),
+        )
         .expect("PageSource's registration URLs are valid");
 }
 
@@ -898,7 +910,7 @@ pub(crate) fn looks_like_lynx_xml(mut bytes: &[u8]) -> bool {
 mod tests {
     use std::collections::BTreeMap;
 
-    use bobcat_resources::ResourcesConfig;
+    use bobcat_resources::{Resources, ResourcesConfig};
 
     use super::*;
 

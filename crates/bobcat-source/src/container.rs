@@ -77,10 +77,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use bobcat_core::{MTS_CHUNK_PREAMBLE, PageConfig, PreparsedStyleSheet};
-use bobcat_resources::{ContainerInstaller, RegisterError, Registrar, Resources};
 use bytes::Bytes;
 use url::Url;
-use vant::Platform;
+use vant::registry::{ContainerInstaller, Register, RegisterError};
 
 use crate::page::{
     BundleTarget, SourceError, background_boot_source, bounded_diagnostic, bts_module_source,
@@ -89,6 +88,10 @@ use crate::page::{
 };
 use crate::web::style_info::{self, AlignedSection};
 use crate::web::{DecodeError, Sections};
+
+/// What a [`ContainerInstaller`] registers through, over this crate's
+/// stylesheet type.
+pub(crate) type Registrar = vant::registry::Registrar<PreparsedStyleSheet>;
 
 /// The Lepus chunk a container's entry is.
 pub(crate) const ROOT: &str = "root";
@@ -408,13 +411,13 @@ impl ContainerSources {
     ///
     /// Every URL was derived from an already-parsed [`Url`], so registration
     /// cannot fail URL validation.
-    pub fn register_with<P: Platform>(&self, resources: &Resources<P>) {
+    pub fn register_with(&self, resources: &impl Register<PreparsedStyleSheet>) {
         self.register(resources)
             .expect("a container's registration URLs are derived from a parsed URL");
     }
 
     /// Registers the same set through a [`ContainerInstaller`]'s
-    /// [`Registrar`].
+    /// [`Registrar`](vant::registry::Registrar).
     ///
     /// # Errors
     ///
@@ -424,11 +427,15 @@ impl ContainerSources {
         self.register(registrar)
     }
 
-    fn register(&self, sink: &impl Sink) -> Result<(), RegisterError> {
+    fn register(&self, sink: &impl Register<PreparsedStyleSheet>) -> Result<(), RegisterError> {
         for registration in self.registrations() {
             match registration {
-                Registration::Script(url, source) => sink.script(url, script_bytes(source))?,
-                Registration::StyleSheet(url, sheet) => sink.style_sheet(url, sheet)?,
+                Registration::Script(url, source) => {
+                    sink.register(url.as_str(), script_bytes(source), Some(SCRIPT_MEDIA_TYPE))?;
+                }
+                Registration::StyleSheet(url, sheet) => {
+                    sink.register_style_sheet(url.as_str(), Arc::clone(sheet))?;
+                }
             }
         }
         Ok(())
@@ -452,46 +459,6 @@ impl ContainerSources {
 enum Registration<'a> {
     Script(&'a Url, &'a Arc<str>),
     StyleSheet(&'a Url, &'a Arc<PreparsedStyleSheet>),
-}
-
-/// What a registration is written into: the embedder's [`Resources`], or a
-/// [`ContainerInstaller`]'s [`Registrar`].
-trait Sink {
-    fn script(&self, url: &Url, source: Bytes) -> Result<(), RegisterError>;
-    fn style_sheet(&self, url: &Url, sheet: &Arc<PreparsedStyleSheet>)
-    -> Result<(), RegisterError>;
-}
-
-impl<P: Platform> Sink for Resources<P> {
-    fn script(&self, url: &Url, source: Bytes) -> Result<(), RegisterError> {
-        self.register(url.as_str(), source, Some(SCRIPT_MEDIA_TYPE))
-            .map(drop)
-    }
-
-    fn style_sheet(
-        &self,
-        url: &Url,
-        sheet: &Arc<PreparsedStyleSheet>,
-    ) -> Result<(), RegisterError> {
-        self.register_style_sheet(url.as_str(), Arc::clone(sheet))
-            .map(drop)
-    }
-}
-
-impl Sink for Registrar {
-    fn script(&self, url: &Url, source: Bytes) -> Result<(), RegisterError> {
-        self.register(url.as_str(), source, Some(SCRIPT_MEDIA_TYPE))
-            .map(drop)
-    }
-
-    fn style_sheet(
-        &self,
-        url: &Url,
-        sheet: &Arc<PreparsedStyleSheet>,
-    ) -> Result<(), RegisterError> {
-        self.register_style_sheet(url.as_str(), Arc::clone(sheet))
-            .map(drop)
-    }
 }
 
 fn borrowed(map: &BTreeMap<String, String>) -> BTreeMap<&str, &str> {
@@ -706,7 +673,7 @@ pub(crate) fn background_boot_url(container: &Url) -> Url {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct BundleInstaller;
 
-impl ContainerInstaller for BundleInstaller {
+impl ContainerInstaller<PreparsedStyleSheet> for BundleInstaller {
     fn install(&self, url: &Url, bytes: &[u8], registrar: &Registrar) -> Result<bool, String> {
         if !looks_like_native_bundle(bytes) && !looks_like_web_bundle(bytes) {
             return Ok(false);

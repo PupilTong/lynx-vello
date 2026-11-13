@@ -4,11 +4,13 @@
 //! sizing decisions, the HTTP byte tier ([`ByteCache`](byte_cache::ByteCache))
 //! over a [`Store`], the derived-artifact tier ([`artifact`]: what an engine
 //! derives from a source text, such as a compiled script, shared in-process
-//! and persisted over a [`Store`] or an [`AsyncStore`]), and the resource
-//! error vocabulary. It sits below `terminus` and names no DOM, style,
-//! runtime or platform type. What it asks of the embedder is three
-//! capabilities — a transport ([`Fetch`]), persistent bytes ([`Store`], and
-//! for the artifact tier optionally [`AsyncStore`]) and platform pixels
+//! and persisted over a [`Store`] or an [`AsyncStore`]), the registry of
+//! contents the embedder already holds and the vocabulary registrations are
+//! written through ([`registry`]), and the resource error vocabulary. It
+//! sits below `terminus` and names no DOM, style, runtime or platform type.
+//! What it asks of the embedder is three capabilities — a transport
+//! ([`Fetch`]), persistent bytes ([`Store`], and for the artifact tier
+//! optionally [`AsyncStore`]) and platform pixels
 //! ([`ImageDecoder`]) — bundled as one [`Platform`]; their implementations
 //! live with the embedder (`docs/resource-cache-design.md`).
 
@@ -25,6 +27,7 @@ pub mod memory;
 pub mod mime;
 pub mod platform;
 pub mod preprocess;
+pub mod registry;
 #[cfg(test)]
 pub(crate) mod test_store;
 

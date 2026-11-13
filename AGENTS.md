@@ -153,7 +153,7 @@ Rust parses structured input only when Rust behavior actually needs its fields
 | `crates/bobcat-source` | Owner of Lynx source parsing: ZIP, restricted XML, `.web.bundle`, `.lynx.bundle`. | [→](#cratesbobcat-source) |
 | `crates/bobcat-core` | The native runtime core: group, view, painter, QuickJS realms, page policy. | [→](#cratesbobcat-core) |
 | `crates/quickjs-rust-bridge` | Owner-thread-bound safe Rust wrapper around the pinned `vendor/quickjs` submodule. | [→](#cratesquickjs-rust-bridge) |
-| `crates/vant` | Resource policy below `terminus`: cache tiers, RFC 9111 freshness, MIME pipeline, image sizing, the embedder capability traits (`Fetch`, `Store`, `ImageDecoder`, `Platform`). | [→](#cratesvant) |
+| `crates/vant` | Resource policy below `terminus`: cache tiers, RFC 9111 freshness, MIME pipeline, image sizing, the registry of embedder-held contents, the embedder capability traits (`Fetch`, `Store`, `ImageDecoder`, `Platform`). | [→](#cratesvant) |
 | `crates/bobcat-resources` | Reference resource system over `vant`: the load orchestration plus the native adapters (`NativePlatform`). The browser's adapters are `bobcat-wasm`'s. | [→](#cratesbobcat-resources) |
 | `crates/bobcat-cli` | The `bobcat` product (`cli`) and the `bobcat-server` screenshot service (`server`), both embedders. | [cli](#cratesbobcat-cli-cli-feature), [server](#cratesbobcat-cli-server-feature) |
 | `crates/bobcat-wasm` | The pure-Rust `wasm-bindgen` browser embedder and npm facade. | [→](#cratesbobcat-wasm) |
@@ -176,7 +176,12 @@ Rust parses structured input only when Rust behavior actually needs its fields
 The single owner of Lynx source parsing and adaptation: the always-available
 `ZipSource` API for bounded ZIP decoding, entry selection through `PageSource`,
 and resource registration. Native and Wasm embedders share that API; IO and
-resource-scope lifetime stay the host's.
+resource-scope lifetime stay the host's. The crate depends on `bobcat-core`
+and `vant` and on no fetcher: every registration is written through
+`vant::registry`'s traits (`&impl Register<PreparsedStyleSheet>`, or
+`&impl RegisterInBackground<PreparsedStyleSheet>` for the deferred path), which
+`bobcat_resources::Resources` implements, and `bobcat-resources` is a
+dev-dependency its tests boot cards with.
 
 `xml` is the zero-dependency, zero-copy restricted envelope parser
 (`engine-version`, `thread="main"` / `thread="background"`), retaining UTF-16
@@ -192,8 +197,8 @@ lowered from its validated archive through the `StyleInfoRead` traits, never
 deserialized into an owned tree on that path. `PageSource::defer` scans only
 the section table, so a view boots from its `DeferredPage::view_sources` while
 `register_in_background` decodes and registers the bundle through
-`Resources::register_in_background` (`docs/source-architecture.md`, "Booting
-while the bundle is decoded").
+`RegisterInBackground::register_in_background`
+(`docs/source-architecture.md`, "Booting while the bundle is decoded").
 
 **The import wrappers of a card's bodies are this crate's.** The engine adds
 nothing to a script, so every card body `bobcat-source` registers carries the
@@ -909,7 +914,7 @@ holds no bundle-specific code at all**: no installed set, no record JSON, and no
 knowledge of what the bytes were. Whether they were a Lynx container whose
 sections get registered at the URLs a later
 `lynx.loadScript(section, {bundleName})` or `__LoadStyleSheet('CSS', url)`
-names is the **fetcher's**, through `bobcat_resources::ContainerInstaller` and
+names is the **fetcher's**, through `vant::registry::ContainerInstaller` and
 `bobcat_source::BundleInstaller`, which sniffs the two container magics,
 leaves every other fetch alone, and registers a container exactly as a page's
 own is registered (`ContainerSources`; its `root`, if any, at `root.js` as the
@@ -2992,15 +2997,29 @@ type and depends only on `bytes`, `http`, `url`, `serde_json`, `thiserror`,
   processes writing one key write the same bytes and there is no shared index
   file; they expire 15 days after their last use, under a byte budget, and
   all at once when the `EngineId` changes.
+- **The registry** (`registry`): contents the embedder already holds, served
+  under a URL of its choosing. `Registry<S>` maps a normalized URL to a
+  `Registered<S>` — bytes with an optional media type, or a stylesheet the
+  host already parsed — and is generic over that stylesheet type `S`, since
+  this crate names no style type. `Register<S>` (`register`,
+  `register_style_sheet`) is what a registration is written through, and
+  `RegisterInBackground<S>` adds running an install off the calling thread
+  while every source request under the container URL is held; a source parser
+  takes these and names no fetcher. `Registrar<S>` is `Register` over a
+  registry alone, which is what a `ContainerInstaller<S>` — the hook that
+  registers the sections of a container found in a plain fetch's bytes —
+  writes through on whichever thread the load finished. The holds a
+  background install places are not here: they wait on a tokio channel, so
+  they are the orchestrator's.
 - **The vocabulary**: `CachePolicy`, `mime`, `preprocess`, `image_header`,
   `data_url`, `image` (`ImageSizeHint`, `Bitmap`, `DecodeError`,
   `target_size`, `wants_refinement`, `bounded`), and `error`
   (`ResourceError`, `ResourceErrorKind`, `ResourceErrorPhase`, `RetryAdvice`,
   `Failure`), which `bobcat-core` and `terminus` re-export at their old paths.
 
-Not here yet: the load orchestration (`images.rs`, `sources.rs`, the registry),
-which stays in `bobcat-resources` until the later PRs the design document
-lists.
+Not here: the load orchestration (`images.rs`, `sources.rs`, the background
+install holds), which is `bobcat-resources`'s, and every adapter — the native
+ones are `bobcat-resources`'s and the browser's are `bobcat-wasm`'s.
 
 ### crates/bobcat-resources
 
@@ -3009,7 +3028,7 @@ Linux and the browser, which every shipped embedder uses. It is the worked
 example of what the protocol expects, not part of the protocol. The policy it
 applies is `vant`'s; what is here is the orchestration — `Resources<P:
 vant::Platform>`, `ViewResources<P>`, the job executor, the image and source
-pipelines, the registry — and the native reference adapters: `NativePlatform`
+pipelines, the background install holds — and the native reference adapters: `NativePlatform`
 (`NativeFetch` over libcurl and `file:`, `FsStore` over a cache directory and
 another over its `code` subdirectory, `NativeDecoder` over ImageIO/gdk-pixbuf).
 The crate has no browser platform: it compiles for wasm32 as orchestration
@@ -3023,8 +3042,11 @@ cache, its own HTTP stack or its own storage builds a `Platform` and passes
 it to `Resources::with_platform`. Five things live here and nowhere else in
 the workspace.
 
-**Transports**: contents the embedder registers under any URL
-(`Resources::register` and `register_style_sheet`, or a `ContainerInstaller`'s
+**Transports**: contents the embedder registers under any URL, kept in a
+`vant::registry::Registry<PreparsedStyleSheet>` per scope
+(`Resources::register` and `register_style_sheet`, which are also its
+`vant::registry::Register` implementation and add the stylesheet-cache
+invalidation a registration change needs, or a `ContainerInstaller`'s
 own `Registrar` for the sections of a container it recognized in a plain
 `SourceRequest::Fetch`'s bytes — a decoded bundle's scripts, named sheets
 and `StyleInfo` sheet, a browser-fetched script's bytes, a test's PNG), `data:`
@@ -3038,9 +3060,12 @@ install)` runs `install` with a `Registrar` off the embedder's thread (the
 blocking pool natively, a local task in the browser) and holds every source
 request for a URL whose path is the container's or under it until it has run;
 a held load is then answered from the registry, a pre-parsed sheet directly,
-or fails with the install's message, which is also noted. The registry keeps
-the running installs beside its entries, and resolution accepts a held URL
-whatever its scheme.
+or fails with the install's message, which is also noted. The running
+installs are `Installs` (`registry.rs`), kept beside the registry in the
+scope's `Transports` because they wait on a tokio `watch` channel, and
+resolution accepts a held URL whatever its scheme. `Resources` implements
+`vant::registry::RegisterInBackground` with this method, which is how
+`bobcat-source`'s `DeferredPage` reaches it.
 
 **The `FetchIndex`**: the base URL relative stylesheet, fetch and image URLs
 resolve against by URL rules (a font URL arrives absolute, and so does every

@@ -25,13 +25,13 @@ resources: the engine owns the policy, the embedder owns the bytes.
 | crate | owns | depends on |
 |---|---|---|
 | `vant` | every resource **policy**: `CachePolicy`, the memory tier, RFC 9111 freshness, the byte-cache tier over a `Store`, image residency and refinement decisions, MIME sniffing and preprocessing, image header probing, `data:` URLs, the resource error vocabulary, the embedder traits (`Fetch`, `Store`, `AsyncStore`, `ImageDecoder`) and `Platform`, and (PR2) the derived-artifact cache that backs the QuickJS code cache, with a synchronous and an asynchronous driver | `bytes`, `http`, `url`, `rustc-hash`, `serde_json`, `thiserror`, `vello_common` (for `peniko::ImageData`), `siphasher`. **Never** `terminus`, `bobcat-core`, tokio, libc bindings or `web-sys`. |
-| `bobcat-resources` | the reference **orchestrator** (`Resources<P>`, `ViewResources<P>`, the image job pipeline, source loading, the registry and background installs, the native executor) and the shipped **native adapters**: `NativeFetch` (libcurl + `file:`), `FsStore` (a cache directory), `NativeDecoder` (ImageIO / gdk-pixbuf); the browser's adapters (`BrowserFetch`, `BrowserDecoder`, `CacheStore`) are `bobcat-wasm`'s since PR3 | `vant`, `bobcat-core`, tokio, the platform libraries |
+| `bobcat-resources` | the reference **orchestrator** (`Resources<P>`, `ViewResources<P>`, the image job pipeline, source loading, background installs over `vant::registry` (PR4), the native executor) and the shipped **native adapters**: `NativeFetch` (libcurl + `file:`), `FsStore` (a cache directory), `NativeDecoder` (ImageIO / gdk-pixbuf); the browser's adapters (`BrowserFetch`, `BrowserDecoder`, `CacheStore`) are `bobcat-wasm`'s since PR3 | `vant`, `bobcat-core`, tokio, the platform libraries |
 | `terminus` | re-exports `vant::ImageSizeHint` at `terminus::link::ImageSizeHint`; (PR5) owns the image store type `terminus::link::ImageResidency` over `vant::image::Residency`, with the engine's constants and report dispatch | `vant` |
 
 Dependency direction: `terminus → vant`, `bobcat-core → terminus, vant`,
-`bobcat-source → vant` (for `Registrar`/`ContainerInstaller`, which stay in
-`bobcat-resources` until PR4 moves the registry down), `bobcat-resources →
-vant, bobcat-core`. `vant` sits below `terminus`, so nothing in it may name a
+`bobcat-source → bobcat-core, vant` (registrations are written through
+`vant::registry` since PR4; `bobcat-resources` is only its dev-dependency),
+`bobcat-resources → vant, bobcat-core`. `vant` sits below `terminus`, so nothing in it may name a
 DOM, style or runtime type; what the pipeline needs from above arrives as a
 generic parameter or a trait.
 
@@ -447,9 +447,14 @@ parsed-stylesheet type, `Registrar<S>`, `RegisterError`, the URL
 normalization every registration goes through, and the traits a source
 parser writes through — `Register<S>`, `RegisterInBackground<S>`,
 `ContainerInstaller<S>`. `bobcat-source` then names `vant` and `bobcat-core`
-only, and `bobcat-resources` becomes its dev-dependency. The install holds and
-the stylesheet in-flight cache stay in `bobcat-resources`: they are tokio
-`watch` channels, which `vant` does not have.
+only, and `bobcat-resources` becomes its dev-dependency. The install holds
+(`Installs`, beside the registry in a scope's `Transports`) and the stylesheet
+in-flight cache stay in `bobcat-resources`: they are tokio `watch` channels,
+which `vant` does not have. `RegisterInBackground::register_in_background`
+takes a `Send + 'static` install on every target, because the reference
+system's own method always has; `Resources::register` and
+`register_style_sheet` stay inherent (they add the per-scope stylesheet-cache
+invalidation) and the trait implementations call them.
 
 ## PR5: image residency is a policy
 
