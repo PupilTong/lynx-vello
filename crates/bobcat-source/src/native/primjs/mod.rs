@@ -5,11 +5,12 @@
 //! `JS_BYTECODE` and custom sections whose encoding is `JsBytecode`.
 //! [`bundle_bytecode_sections`] finds them; [`read_payload`] (or
 //! [`read_program`] for bytes without a packed header) turns one into a
-//! [`Program`]. Nothing here converts or executes bytecode; the design this
-//! implements is `docs/primjs-bytecode-conversion-design.md` (§2, §4.1,
-//! §4.2). The format follows `JS_WriteObjectAtoms`, `JS_WriteFunction` and
-//! their readers in `src/interpreter/quickjs/source/quickjs.cc` of
-//! `lynx-family/primjs` at `941a365`.
+//! [`Program`], and [`convert_script`] turns a program into a module of the
+//! pinned `QuickJS` fork (see its documentation). Nothing here executes
+//! bytecode; the design this implements is
+//! `docs/primjs-bytecode-conversion-design.md` (§2, §4, §6). The format follows
+//! `JS_WriteObjectAtoms`, `JS_WriteFunction` and their readers in
+//! `src/interpreter/quickjs/source/quickjs.cc` of `lynx-family/primjs` at `941a365`.
 //!
 //! # Input robustness
 //!
@@ -87,6 +88,7 @@
 //! the fork's verifying read.
 
 mod code;
+mod convert;
 mod cursor;
 mod disasm;
 mod error;
@@ -96,6 +98,10 @@ mod read;
 mod sections;
 mod tables;
 
+pub use convert::{
+    Completion, ConvertError, ConvertOptions, OpcodeClass, REJECTED, SAME, TRANSLATED,
+    convert_script, opcode_class,
+};
 pub use disasm::disassemble;
 pub use error::PrimjsError;
 pub use model::{

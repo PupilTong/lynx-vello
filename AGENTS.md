@@ -179,8 +179,9 @@ Rust parses structured input only when Rust behavior actually needs its fields
 The single owner of Lynx source parsing and adaptation: the always-available
 `ZipSource` API for bounded ZIP decoding, entry selection through `PageSource`,
 and resource registration. Native and Wasm embedders share that API; IO and
-resource-scope lifetime stay the host's. The crate depends on `bobcat-core`
-and `vant` and on no fetcher: every registration is written through
+resource-scope lifetime stay the host's. The crate depends on `bobcat-core`,
+`vant` and `quickjs-rust-bridge` (the bytecode model the `PrimJS` converter
+writes through) and on no fetcher: every registration is written through
 `vant::registry`'s traits (`&impl Register<PreparsedStyleSheet>`, or
 `&impl RegisterInBackground<PreparsedStyleSheet>` for the deferred path), which
 `bobcat_resources::Resources` implements, and `bobcat-resources` is a

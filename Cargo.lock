@@ -475,6 +475,7 @@ dependencies = [
  "cssparser",
  "percent-encoding",
  "prime-radiant",
+ "quickjs-rust-bridge",
  "rkyv",
  "serde",
  "serde_json",
