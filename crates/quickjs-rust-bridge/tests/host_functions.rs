@@ -511,15 +511,19 @@ fn set_property_runs_a_proxy_trap_and_reports_refusal() {
 
 #[test]
 fn a_name_that_cannot_be_allocated_fails_construction_cleanly() {
+    const MEMORY_LIMIT: usize = 300_000;
     let mut realm = Runtime::with_options(RuntimeOptions {
-        memory_limit: Some(300_000),
+        memory_limit: Some(MEMORY_LIMIT),
         ..RuntimeOptions::default()
     })
     .unwrap()
     .create_context()
     .unwrap();
 
-    let huge = "n".repeat(200_000);
+    // Larger than the whole limit, so it cannot fit whatever the realm
+    // already holds: that is 150 KB with QuickJS's arenas and 96 KB under
+    // AddressSanitizer, which turns them off.
+    let huge = "n".repeat(MEMORY_LIMIT + 1);
     let outcome = realm.function(&huge, 0, |_| Ok(HostValue::Undefined));
     assert!(outcome.is_err(), "an unallocatable name must not succeed");
 

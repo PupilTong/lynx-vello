@@ -2969,7 +2969,9 @@ functions, or its own hook) is a cycle that leaks it. The token counts that
 `ShadowRealm` or wrapper that is only cyclic garbage still counts until
 `Runtime::run_gc` has collected it. The crate must remain
 independent of Bobcat, the DOM, resources, and runtime policy — it knows
-nothing about Lynx.
+nothing about Lynx. Its C build follows the instrumentation of the Rust build
+it links into, and `fuzz/` holds its libFuzzer targets (see
+[Sanitizers, Miri and fuzzing](#sanitizers-miri-and-fuzzing)).
 
 ### crates/vant
 
@@ -4901,6 +4903,54 @@ past an intervening attribute. Where an unsafe site carries
 `// SAFETY:` comment has to sit *between* that attribute and the block —
 placing it above the attribute still trips the lint, and `cargo fmt` will not
 move it either way.
+
+### Sanitizers, Miri and fuzzing
+
+The QuickJS fork, `shim.c` and the bridge's `unsafe` are checked by tools as
+well as by review. Two CI jobs run them: `sanitizers` (macOS) and
+`quickjs-unsafe` (Ubuntu).
+
+- **AddressSanitizer + UBSan.** Rust's `-Zsanitizer=address` is the only
+  switch: the bridge's build script reads `cfg(sanitize)` and instruments the
+  QuickJS C to match (`Instrumentation` in `build.rs`), adding UBSan for the C
+  (all of `undefined` but `function`), since rustc's ASan runtime carries its
+  handlers. QuickJS then gives every allocation to the host allocator instead
+  of its arenas. `CC` must be LLVM's Clang: Apple's instruments for a runtime
+  of its own and does not link. Build in the `sanitize` profile (opt-level 1,
+  AddressSanitizer's level) and pass `--target` so build scripts and proc
+  macros stay uninstrumented:
+  `CC=$(brew --prefix llvm@22)/bin/clang RUSTFLAGS=-Zsanitizer=address cargo
+  test --profile sanitize --target aarch64-apple-darwin --tests -p
+  quickjs-rust-bridge`. CI runs the bridge, `bobcat-core` and
+  `bobcat-resources` this way on macOS, and the bridge again on Ubuntu, where
+  LeakSanitizer is on as well.
+- **Miri** checks only the C hooks the bridge writes in Rust (`allocator`,
+  `platform_stdlib`), whose unit tests call them directly; the rest of the
+  bridge calls into C, which Miri cannot run:
+  `MIRIFLAGS=-Zmiri-deterministic-floats cargo miri test -p
+  quickjs-rust-bridge --lib -- allocator:: platform_stdlib::`. `terminus` is
+  not in the job: under Stacked Borrows stylo's `servo_arc` already fails
+  building the initial font family, and under Tree Borrows (`-Zmiri-tree-borrows`)
+  `Node::arenas` fails, its back-pointer to `TreeArenas` (taken with
+  `ptr::from_mut` in `TreeArenas::insert`) having been invalidated by the
+  next write through `&mut TreeArenas`.
+- **Fuzzing.** `crates/quickjs-rust-bridge/fuzz` is a `cargo fuzz` workspace
+  of its own, with its own `Cargo.lock` (CI checks it with `--locked`; update
+  it when the bridge's dependencies change). `script` runs the input as a
+  classic script; `modules` runs it as a graph of up to eight modules, first
+  compiled and captured through the host loader, then read back from that
+  bytecode on a fresh runtime. Every input runs on its own runtime, and
+  `JS_FreeRuntime`'s assertion turns a leaked reference into a crash.
+  `./.github/scripts/fuzz-quickjs.sh replay` runs every corpus and seed input
+  once; `fuzz <seconds>` mutates. Pull requests replay main's cached corpus,
+  which is deterministic; pushes to main fuzz five minutes per target, save
+  the corpus, and upload crashing inputs as `quickjs-fuzz-artifacts`.
+  Reproduce one from `crates/quickjs-rust-bridge` with
+  `cargo fuzz run <target> <file>`. The fuzz profile is opt-level 1 as well:
+  at 3, ASan reports a 64-byte read past `jump_slots` in `resolve_labels` on
+  QuickJS's own `examples/pi_bigint.js`, from vectorized code only — the
+  uninstrumented opt-level 3 build reads nothing past the block under
+  macOS's Guard Malloc.
 
 ### Benchmarks measure a debug-instrumented terminus
 
