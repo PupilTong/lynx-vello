@@ -120,6 +120,9 @@ pub struct Document<T> {
     /// ([`Self::set_content_detection`]). Off by default: the walk then
     /// tests one `bool` per item and nothing else.
     pub(crate) content_detection: crate::visual::timing::ContentDetection,
+    /// The Container Timing roots ([`crate::visual::container_timing`]):
+    /// what the paint walk and every insertion test before anything else.
+    pub(crate) container_roots: crate::visual::container_timing::ContainerRoots,
     /// Whether anything visually observable changed since the retained
     /// frame was built. This is the whole invalidation state: one bit, not
     /// a counter — a frame's identity is its commit id.
@@ -176,6 +179,7 @@ impl<T> Document<T> {
             commit_id: 0,
             commit_timer: crate::visual::timing::CommitTimer::default(),
             content_detection: crate::visual::timing::ContentDetection::Off,
+            container_roots: crate::visual::container_timing::ContainerRoots::default(),
             visual_dirty: true,
             layout_dirty: false,
             layout_root_dirty: false,
@@ -563,6 +567,7 @@ impl<T> Document<T> {
         let contains_custom_elements = self.note_custom_subtree_inserted(child);
 
         self.note_moved_subtree(child);
+        self.note_container_timing_inserted(parent, child);
         self.note_slot_assignment_inserted(parent, child, appended);
         self.note_child_list_change(parent, index);
         self.note_child_inserted(parent, child);
@@ -929,6 +934,9 @@ impl<T> Document<T> {
         );
         if node.is_shadow_root() {
             self.shadow_roots -= 1;
+        }
+        if node.is_container_timing_root() {
+            self.forget_container_timing_root(id);
         }
         self.note_freed_editing_node(&node);
         self.layout.remove(slot);

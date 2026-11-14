@@ -1042,3 +1042,96 @@ fn a_card_s_load_is_owed_as_loadmetrics_once_whoever_observes_and_the_page_s_nev
     }));
     assert!(registry.take_frame_loads().is_empty());
 }
+
+fn node(bits: u64) -> NodeId {
+    NodeId::from_bits(bits).expect("a non-zero handle")
+}
+
+#[test]
+#[expect(clippy::float_cmp, reason = "whole CSS px are exact")]
+fn a_container_entry_is_the_draft_s_json_for_the_rust_embedder_alone() {
+    use terminus::link::{Point2D, Size2D};
+    assert!(EntryTypes::ALL.contains(EntryTypes::CONTAINER));
+    let origin = TimeOrigin::now();
+    let registry = PipelineRegistry::detached();
+    registry.set_container_identifier(node(5), Some("hero"));
+    // A 40×20 CSS px box at (10, 20), 600 square CSS px of it painted.
+    let paint = |root| terminus::link::ContainerPaint {
+        root: node(root),
+        painted: Rect::new(Point2D::new(10.0, 20.0), Size2D::new(40.0, 20.0)),
+        size: 600.0,
+        first_render: at(&origin, 2).instant(),
+        latest: at(&origin, 5).instant(),
+        last_painted: node(root + 1),
+    };
+
+    // Nobody observes `container`, a worker that asks included: dropped
+    // before the lock.
+    let worker = WorkerKey::new(3);
+    registry.observe_worker(worker, Some(EntryTypes::ALL));
+    assert!(!registry.note_container_paints(&[paint(5)]));
+    assert_eq!(registry.generation(), 0);
+
+    registry.observe_rust(EntryTypes::CONTAINER);
+    assert!(registry.note_container_paints(&[paint(5), paint(9)]));
+    assert!(registry.take_wakes().is_empty());
+    assert!(registry.take_completed_for_worker(worker).is_empty());
+    let entries = registry.take_completed_for_rust();
+    let [first, unnamed] = &entries[..] else {
+        panic!("two entries: {entries:?}");
+    };
+    let PerformanceEntry::Container(container) = unnamed else {
+        panic!("a container entry: {unnamed:?}");
+    };
+    assert_eq!(
+        &*container.identifier, "",
+        "a root with no identifier recorded"
+    );
+    assert_eq!(first.entry_type(), "container");
+    assert_eq!(first.name(), "", "the draft's `name` is empty");
+    let mut json = String::new();
+    first.write_lynx_json(&origin, &mut json);
+    let value: serde_json::Value = serde_json::from_str(&json).expect("the entry is JSON");
+    let mut keys: Vec<_> = value
+        .as_object()
+        .expect("an object")
+        .keys()
+        .cloned()
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "duration",
+            "entryType",
+            "firstRenderTime",
+            "identifier",
+            "intersectionRect",
+            "name",
+            "size",
+            "startTime",
+        ]
+    );
+    assert_eq!(value["identifier"], "hero");
+    assert_eq!(value["duration"], 0);
+    let rect = &value["intersectionRect"];
+    let member = |name: &str| rect[name].as_f64().expect("a number");
+    assert_eq!(
+        [member("x"), member("y"), member("width"), member("height")],
+        [10.0, 20.0, 40.0, 20.0],
+        "{json}"
+    );
+    assert_eq!(value["size"].as_f64(), Some(600.0));
+    let start = value["startTime"].as_f64().expect("a number");
+    let first_render = value["firstRenderTime"].as_f64().expect("a number");
+    assert!((start - first_render - 3.0).abs() < 1e-6, "{json}");
+}
+
+#[test]
+fn the_container_stop_is_taken_once() {
+    let registry = PipelineRegistry::detached();
+    assert!(!registry.take_container_stop());
+    registry.request_container_stop();
+    assert!(registry.take_container_stop());
+    assert!(!registry.take_container_stop());
+}

@@ -690,7 +690,7 @@ impl<T> Document<T> {
                 if lynx_text {
                     root.mark_lynx_text();
                 }
-                root.custom_state = CustomElementState::Constructing;
+                root.set_custom_state(CustomElementState::Constructing);
                 root.mark_custom_subtree_may_contain();
             }
             self.custom_elements.instance_created(definition);
@@ -896,7 +896,7 @@ impl<T> Document<T> {
         element: NodeId,
     ) -> Option<Rc<dyn CustomElement<T>>> {
         let node = self.get(element)?;
-        if node.custom_state != CustomElementState::Custom {
+        if node.custom_state() != CustomElementState::Custom {
             return None;
         }
         self.dispatch_target(element)
@@ -912,7 +912,7 @@ impl<T> Document<T> {
         type_name: &str,
     ) -> Option<Rc<dyn CustomElement<T>>> {
         let node = self.get(element)?;
-        if node.custom_state != CustomElementState::Custom {
+        if node.custom_state() != CustomElementState::Custom {
             return None;
         }
         let definition = &self.custom_elements.definitions[node.custom_definition?.index()];
@@ -957,7 +957,7 @@ impl<T> Document<T> {
             return;
         };
         debug_assert_eq!(
-            self.live(element).custom_state,
+            self.live(element).custom_state(),
             CustomElementState::Constructing,
             "construct_element runs once, on the element the creation path marked"
         );
@@ -968,9 +968,10 @@ impl<T> Document<T> {
 
         let still_constructing = self
             .get(element)
-            .is_some_and(|node| node.custom_state == CustomElementState::Constructing);
+            .is_some_and(|node| node.custom_state() == CustomElementState::Constructing);
         if still_constructing {
-            self.live_node_mut(element).custom_state = CustomElementState::Custom;
+            self.live_node_mut(element)
+                .set_custom_state(CustomElementState::Custom);
         }
     }
 
@@ -985,7 +986,7 @@ impl<T> Document<T> {
             if lynx_text {
                 node.mark_lynx_text();
             }
-            node.custom_state = CustomElementState::Constructing;
+            node.set_custom_state(CustomElementState::Constructing);
             node.mark_custom_subtree_may_contain();
         }
         self.custom_elements.instance_created(definition);
@@ -1045,7 +1046,7 @@ impl<T> Document<T> {
         let Some(node) = self.get(element) else {
             return false;
         };
-        if node.custom_state != CustomElementState::Custom {
+        if node.custom_state() != CustomElementState::Custom {
             return false;
         }
         node.custom_definition.is_some_and(|definition| {
@@ -1134,7 +1135,7 @@ impl<T> Document<T> {
             if !node.custom_subtree_may_contain() {
                 continue;
             }
-            if node.custom_state == CustomElementState::Custom {
+            if node.custom_state() == CustomElementState::Custom {
                 out.push(node.id());
             }
             stack.extend(node.child_slots().iter().rev().copied());

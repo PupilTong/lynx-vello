@@ -14,6 +14,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use quickjs_rust_bridge::{HostArgument, HostValue};
+use terminus::link::NodeId;
 
 use super::{DocumentSlot, MainThreadError, borrow_slot, install};
 use crate::background::WorkerKey;
@@ -27,6 +28,13 @@ use crate::realm::string_argument;
 /// The attribute a Lynx timing flag rides on: one written to any element is
 /// bound to the next flush's commit.
 pub(super) const TIMING_FLAG_ATTRIBUTE: &str = "__lynx_timing_flag";
+/// W3C Container Timing's attributes (WICG draft): `containertiming`
+/// marks its element a root whose `container` entries carry the value as
+/// their `identifier`, and `containertimingignore` cuts its element's
+/// subtree out of the roots above it. Like the exposure attributes, they
+/// belong to every tag.
+pub(super) const CONTAINER_TIMING_ATTRIBUTE: &str = "containertiming";
+pub(super) const CONTAINER_TIMING_IGNORE_ATTRIBUTE: &str = "containertimingignore";
 
 /// One main-thread realm's own timing state, shared by that realm's members:
 /// which realm it is to the registry, whether its load has rendered and
@@ -136,6 +144,26 @@ impl DocumentSlot {
             self.document_mut().set_content_detection(wanted);
             self.content_detection = wanted;
         }
+    }
+
+    /// Ends Container Timing in the document when the painter facade saw the
+    /// view's first pointer down, wheel or key down since the last commit.
+    /// One relaxed atomic load per commit otherwise.
+    pub(super) fn sync_container_timing(&mut self) {
+        if self.outbox.registry().take_container_stop() {
+            self.document_mut().stop_container_timing();
+        }
+    }
+
+    /// `node`'s `containertiming` attribute was set to `identifier`, or
+    /// removed (`None`): the document marks or unmarks the root, and the
+    /// registry keeps the identifier its entries carry.
+    pub(super) fn container_timing_changed(&mut self, node: NodeId, identifier: Option<&str>) {
+        self.outbox
+            .registry()
+            .set_container_identifier(node, identifier);
+        self.document_mut()
+            .set_container_timing(node, identifier.is_some());
     }
 }
 
