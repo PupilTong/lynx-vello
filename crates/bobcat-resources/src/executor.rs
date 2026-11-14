@@ -44,10 +44,8 @@ pub type Wakeup = Arc<dyn Fn() + Send + Sync>;
 /// starts the driver thread itself on whichever thread builds the
 /// `Resources`.
 ///
-/// The one piece of the fetcher's work that does not come here is the
-/// painter's own synchronous restore in `images::read`, which fetches and
-/// decodes inline on the painter's thread because `FrameImages::read` has to
-/// answer inside the call.
+/// Every piece of the fetcher's image work comes here, a wanted source's
+/// restore included: nothing fetches or decodes on the painter's thread.
 ///
 /// # The decode permit
 ///

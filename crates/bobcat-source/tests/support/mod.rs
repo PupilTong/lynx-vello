@@ -17,12 +17,16 @@ pub struct DelayedBackground {
 }
 
 impl bobcat_core::FrameImages for DelayedBackground {
-    fn read(
+    fn describe(
         &self,
         source: &str,
         hint: bobcat_core::ImageSizeHint,
-    ) -> Option<bobcat_core::peniko::ImageData> {
-        self.resources.read(source, hint)
+    ) -> Option<bobcat_core::FrameImage> {
+        self.resources.describe(source, hint)
+    }
+
+    fn want(&self, source: &str, hint: bobcat_core::ImageSizeHint) {
+        self.resources.want(source, hint);
     }
 
     fn retain(&self, frame: &[Arc<str>]) {

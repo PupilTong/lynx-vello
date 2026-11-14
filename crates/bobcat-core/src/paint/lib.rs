@@ -552,12 +552,14 @@ impl Painter {
     /// painter with no window still has to see the frame it will capture, and
     /// an occluded one still has to see the commit it owes a redraw for.
     ///
-    /// A commit is adopted only if its pixels can be read in the same step.
+    /// A commit is adopted only if its pixels can be described in the same
+    /// step.
     /// The two are one fact — a frame indexes its store's bitmaps by draw
     /// order, so a frame from one commit over another commit's table draws the
     /// wrong images — and a released view takes its store with it. So the last
-    /// commit of a view that has gone is adopted if this painter read its
-    /// pixels while the view was still there, and left behind if it did not.
+    /// commit of a view that has gone is adopted if this painter described
+    /// its pixels while the view was still there, and left behind if it did
+    /// not.
     ///
     /// The snapshot is taken rather than only read when the watch reports a
     /// change: a completed `changed()` has already marked the value seen, so
@@ -566,10 +568,9 @@ impl Painter {
     /// sender is gone, and the last frame a view published before its task
     /// ended is still the frame this painter must draw.
     ///
-    /// **May block.** A store is allowed — required, in fact — to restore a
-    /// bitmap it evicted, and adopting a commit is the read that asks it to.
-    /// Every poll on the drawing path runs before that path acquires a
-    /// swap-chain image, so a restore cannot stall the chain under vsync.
+    /// Never waits: a picture the store has to restore is drawn as nothing
+    /// and wanted, the restore runs off this thread, and a later poll takes
+    /// its pixels and asks for a frame (`Painter::adopt` in `terminus`).
     fn poll_link(&mut self) {
         let Some(frames) = self.frames.as_mut() else {
             return;
@@ -577,14 +578,14 @@ impl Painter {
         let published = frames.borrow_and_update();
         let latest = published.clone();
         drop(published);
-        // One upgrade, for both halves of the seat: a commit's pixels are read
-        // out of the view's store through the same handle whose loss means the
+        // One upgrade, for both halves of the seat: a commit's pixels are asked
+        // of the view's store through the same handle whose loss means the
         // view is gone, so the two can never disagree.
         let seat = self.seat.upgrade();
         let store = seat.as_ref().map(|seat| seat.images.as_ref());
         if !self.core.adopt(latest.frame.clone(), store) {
             // The view is gone with its store, so this commit's pixels can no
-            // longer be read. It is not adopted; the painter keeps the last
+            // longer be described. It is not adopted; the painter keeps the last
             // commit it did read, whole.
             self.release_seat();
             return;
@@ -746,8 +747,8 @@ impl Painter {
 
     /// Runs the gesture clock over the frame this painter has already
     /// adopted, without polling for a newer one: the drawing path calls this
-    /// while it holds a swap-chain image, and [`Self::poll_link`] may block
-    /// on a store restoring an evicted bitmap.
+    /// while it holds a swap-chain image, and a frame adopted there would not
+    /// be the one that image presents.
     fn tick_gestures(&mut self, now: f64) {
         let mut emits = Vec::new();
         self.core.tick_gestures(now, &self.published, &mut emits);
@@ -917,11 +918,20 @@ impl Painter {
     /// view has already published, and the pixels come out of the store the
     /// view's own `pump` filled.
     ///
+    /// It never returns a frame that lacks a picture on its way: a source
+    /// the frame draws that neither the store nor the rasterizer holds is
+    /// restored in the host's turns, and a capture before it arrives is
+    /// refused. A host that captures therefore takes its turns — the view's
+    /// `pump` and its own wait for the wakeup — until
+    /// [`Self::awaits_pictures`] answers `false`, under a deadline of its
+    /// own, and captures then.
+    ///
     /// # Errors
     ///
-    /// [`EngineError::Render`] if nothing has been rendered to read back, and
-    /// [`EngineError::Gpu`] or [`EngineError::Render`] if bringing the target
-    /// up to the newest frame, or the read itself, fails.
+    /// [`EngineError::Render`] if nothing has been rendered to read back or a
+    /// picture the frame draws is on its way, and [`EngineError::Gpu`] or
+    /// [`EngineError::Render`] if bringing the target up to the newest frame,
+    /// or the read itself, fails.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn capture(&mut self) -> Result<Screenshot, EngineError> {
         // Refused before anything is polled, so a painter with no target says
@@ -937,6 +947,20 @@ impl Painter {
         // The newest frame is brought to the target first, so a capture is of
         // what this painter would draw rather than of whatever it last drew.
         Ok(self.core.capture(now)?)
+    }
+
+    /// Whether the newest frame lacks a picture that is on its way, adopting
+    /// everything the view has published first. Never blocks.
+    ///
+    /// A picture the frame draws that neither the view's store nor the
+    /// rasterizer holds is drawn as nothing while the store restores it off
+    /// this thread; its arrival wakes the host, and the turn after draws it.
+    /// What waits for that — a capture, a golden — takes the host's turns
+    /// until this answers `false` ([`Self::capture`]). `false` too once the
+    /// view is gone, since nothing will answer then.
+    pub fn awaits_pictures(&mut self) -> bool {
+        self.poll_link();
+        self.core.awaits_pictures()
     }
 
     /// Whether this painter has a frame to put on its window.

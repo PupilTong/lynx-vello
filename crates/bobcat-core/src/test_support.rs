@@ -103,13 +103,16 @@ fn resolved(url: &str) -> String {
 }
 
 impl terminus::link::FrameImages for InlineFetcher {
-    fn read(
+    fn describe(
         &self,
         _source: &str,
         _hint: terminus::link::ImageSizeHint,
-    ) -> Option<terminus::link::peniko::ImageData> {
+    ) -> Option<terminus::link::FrameImage> {
         None
     }
+
+    /// Nothing is ever answered, so nothing is ever wanted.
+    fn want(&self, _source: &str, _hint: terminus::link::ImageSizeHint) {}
 
     /// Nothing is held, so there is no working set to narrow.
     fn retain(&self, _frame: &[Arc<str>]) {}

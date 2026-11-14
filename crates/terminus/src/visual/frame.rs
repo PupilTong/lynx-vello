@@ -786,8 +786,8 @@ impl CommittedFrame {
         );
     }
 
-    /// Reads this frame's pixels once, into a table the compose path indexes
-    /// by draw rather than by name.
+    /// Asks for this frame's pixels once, into a table the compose path
+    /// indexes by draw rather than by name.
     ///
     /// Composition replays the program on every frame that scrolls or
     /// animates, so resolving by source string there would hash a URL and
@@ -803,30 +803,43 @@ impl CommittedFrame {
     /// first-draw order — the frame's working set, and the residency hint a
     /// host is given.
     ///
-    /// Each source is read once, with the size hint covering every draw of
-    /// it in this frame — which is why the draws are walked before the first
-    /// read: a source drawn small first and large later must be decoded for
-    /// the large draw.
+    /// Each source is described once, with the size hint covering every
+    /// draw of it in this frame — which is why the draws are walked before
+    /// the first describe: a source drawn small first and large later must
+    /// be decoded for the large draw. This caller has no rasterizer, so a
+    /// source the store answers without pixels draws nothing here, and the
+    /// store is told it is wanted ([`FrameImages::want`]), as the painter
+    /// tells it. Answers how many sources were wanted: a caller that captures
+    /// the table must not take one with any, since those pictures are on
+    /// their way.
+    ///
+    /// [`FrameImages::want`]: crate::render::image::FrameImages::want
     pub fn resolve_images<P: crate::render::image::FrameImages + ?Sized>(
         &self,
         pixels: &P,
         images: &mut Vec<Option<ImageRef>>,
         sources: &mut Vec<std::sync::Arc<str>>,
-    ) {
+    ) -> usize {
         images.clear();
         let mut hints = Vec::new();
         let mut indices = Vec::new();
         self.image_sources(sources, &mut hints, &mut indices);
+        let mut wanted = 0;
         let distinct: Vec<Option<ImageRef>> = sources
             .iter()
             .zip(&hints)
             .map(|(source, hint)| {
-                pixels
-                    .read(source, *hint)
-                    .map(|image| ImageRef::held(&image))
+                let described = pixels.describe(source, *hint)?;
+                let Some(image) = described.pixels else {
+                    pixels.want(source, *hint);
+                    wanted += 1;
+                    return None;
+                };
+                Some(ImageRef::held(&image))
             })
             .collect();
         images.extend(indices.into_iter().map(|index| distinct[index].clone()));
+        wanted
     }
 
     /// The distinct sources this frame's image draws name, in first-draw

@@ -99,8 +99,9 @@ pub struct Response {
 /// any transport is asked.
 pub trait Fetch: Threaded {
     /// Moves the bytes, blocking the calling thread. `None` from a transport
-    /// that cannot block (the browser), which makes a synchronous restore
-    /// impossible and tells the image pipeline to retain encoded bytes.
+    /// that cannot block (the browser), which tells the image pipeline to
+    /// retain encoded bytes: what it fetched cannot be read back without a
+    /// new request.
     fn fetch_blocking(&self, request: &Request) -> Option<Result<Response, Failure>>;
 
     /// Moves the bytes asynchronously. The default answers with
@@ -352,8 +353,9 @@ impl AsyncStore for NoStore {
 /// Platform pixels: decodes an encoded image to a [`Bitmap`].
 pub trait ImageDecoder: Threaded {
     /// Decodes at most `max` large, blocking the calling thread. A decoder
-    /// that cannot block (the browser's main-thread `Image`, outside the
-    /// mailbox path) answers [`DecodeError::Unavailable`].
+    /// that cannot block (the browser's main-thread `Image`) answers
+    /// [`DecodeError::Unavailable`], and is reached through
+    /// [`decode`](Self::decode) instead.
     fn decode_blocking(
         &self,
         bytes: &[u8],

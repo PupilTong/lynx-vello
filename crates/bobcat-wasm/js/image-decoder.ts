@@ -14,9 +14,9 @@
 //   [1] width, [2] height           of the decoded bitmap
 //   [3] sourceWidth, [4] sourceHeight   of the image itself
 //   [5] pointer, [6] length         of the pixel buffer the Render Worker allocated
-// This thread never waits on the mailbox — a main thread may not — so it
-// stores, notifies, and echoes a message over the port, and a Render Worker
-// blocked in Atomics.wait and one parked on its event loop are both woken.
+// Neither side waits on the mailbox: this thread stores into it and echoes a
+// message over the port, and the Render Worker reads it when the echo reaches
+// its event loop.
 
 // The messages on the port, as `src/platform/mailbox.rs` posts and reads them.
 
@@ -120,9 +120,7 @@ export class ImageDecoder {
   #fail(id: number, mailbox: number, error: unknown): void {
     this.#jobs.delete(id)
     try {
-      const mail = this.#words(mailbox)
-      Atomics.store(mail, 0, STATE_FAILED)
-      Atomics.notify(mail, 0)
+      Atomics.store(this.#words(mailbox), 0, STATE_FAILED)
     } catch {
       // The mailbox is unreachable only if the memory itself is gone.
     }
@@ -163,7 +161,6 @@ export class ImageDecoder {
       mail[3] = sourceWidth
       mail[4] = sourceHeight
       Atomics.store(mail, 0, STATE_SIZE_READY)
-      Atomics.notify(mail, 0)
       this.#port.postMessage({ type: 'dims', id } satisfies EchoMessage)
     } catch (error) {
       this.#fail(id, mailbox, error)
@@ -203,7 +200,6 @@ export class ImageDecoder {
     }
     new Uint8Array(this.#memory!.buffer, pointer, length).set(job.data)
     Atomics.store(mail, 0, STATE_DONE)
-    Atomics.notify(mail, 0)
     this.#port.postMessage({ type: 'done', id } satisfies EchoMessage)
   }
 

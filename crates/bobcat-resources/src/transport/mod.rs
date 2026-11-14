@@ -222,10 +222,8 @@ impl<P: Platform> Transports<P> {
         None
     }
 
-    /// Moves the bytes for `url`, blocking the calling thread: a
-    /// blocking-pool thread for a background job, and the painter's own for
-    /// the synchronous restore inside `FrameImages::read`, which has to
-    /// answer within the call and so cannot await anything.
+    /// Moves the bytes for `url`, blocking the calling thread: always a
+    /// blocking-pool thread, running a background job's transport read.
     ///
     /// `body` is how bytes read from a file — the `file:` URL's, or the byte
     /// tier's copy of a response — are handed over. Registered and `data:`

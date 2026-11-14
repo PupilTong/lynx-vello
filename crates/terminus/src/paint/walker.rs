@@ -169,7 +169,10 @@ impl WalkSink<'_> {
     pub(super) fn image(&mut self, space: Option<u32>, draw: crate::paint::compose::ImageDraw) {
         match self {
             Self::Monolithic(scene, pixels) => {
-                if let Some(data) = pixels.read(&draw.image, draw.size_hint()) {
+                if let Some(data) = pixels
+                    .describe(&draw.image, draw.size_hint())
+                    .and_then(|image| image.pixels)
+                {
                     crate::paint::compose::encode_image(
                         scene,
                         &draw,

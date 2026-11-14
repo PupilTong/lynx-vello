@@ -1,6 +1,7 @@
 //! The whole pipeline through the protocol's own seams, with no GPU and no
 //! view: a `ViewResources` driven the way the painter drives it — request,
-//! service, read — against an `ImageInbox` standing in for the document.
+//! service, describe, want — against an `ImageInbox` standing in for the
+//! document.
 //!
 //! Every raster image here goes through the real platform decoder, so these
 //! need `ImageIO` or gdk-pixbuf and fail rather than skip without one. SVG
@@ -129,6 +130,51 @@ impl Harness {
         self.resources.take_notes()
     }
 
+    /// The pixels a frame drawing `source` at `hint` is answered with, if
+    /// the tier holds them.
+    fn pixels(&self, source: &str, hint: ImageSizeHint) -> Option<bobcat_core::peniko::ImageData> {
+        self.view
+            .describe(source, hint)
+            .and_then(|image| image.pixels)
+    }
+
+    /// Wants `source` at `hint`, as a painter with nothing to draw it from
+    /// does, and drives turns until the restore lands; answers the restored
+    /// pixels. Nothing is restored before a turn applies the completion.
+    fn restore(&self, source: &str, hint: ImageSizeHint) -> bobcat_core::peniko::ImageData {
+        assert!(
+            self.pixels(source, hint).is_none(),
+            "`{source}` is not resident"
+        );
+        let wakeups = self.wakeups.load(Ordering::SeqCst);
+        self.view.want(source, hint);
+        assert!(
+            self.pixels(source, hint).is_none(),
+            "the want restores nothing inside the call"
+        );
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            self.view.service_images();
+            if let Some(pixels) = self.pixels(source, hint) {
+                assert!(
+                    self.wakeups.load(Ordering::SeqCst) > wakeups,
+                    "the restore woke the host"
+                );
+                assert!(
+                    self.inbox.drain().is_empty(),
+                    "the document is told nothing of a restore"
+                );
+                return pixels;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "`{source}` was never restored: {:?}",
+                self.resources.take_notes()
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
     /// Drives turns until the resident bitmap for `source` has `size`.
     fn settle_resident(&self, source: &str, size: (u32, u32)) {
         let deadline = Instant::now() + Duration::from_secs(30);
@@ -148,7 +194,7 @@ impl Harness {
 }
 
 #[test]
-fn a_registered_png_loads_reports_its_size_and_reads_back_at_the_drawn_size() {
+fn a_registered_png_loads_reports_its_size_and_is_described_at_the_drawn_size() {
     let harness = Harness::new(Harness::quiet());
     harness
         .resources
@@ -163,9 +209,8 @@ fn a_registered_png_loads_reports_its_size_and_reads_back_at_the_drawn_size() {
     assert!(harness.resources.is_resident("app:///checker.png"));
 
     let image = harness
-        .view
-        .read("app:///checker.png", ImageSizeHint::new(64, 32))
-        .expect("a loaded image reads");
+        .pixels("app:///checker.png", ImageSizeHint::new(64, 32))
+        .expect("a loaded image is described with its pixels");
     assert_eq!((image.width, image.height), (64, 32));
     assert_eq!(
         &image.data.as_ref()[..4],
@@ -204,18 +249,17 @@ fn a_draw_far_smaller_than_the_bitmap_refines_it_to_the_drawn_size() {
         Some((1024, 512))
     );
 
-    // The first read answers with what is resident and starts the refinement.
+    // The first describe answers with what is resident and starts the
+    // refinement.
     let first = harness
-        .view
-        .read("app:///big.png", ImageSizeHint::new(100, 100))
-        .expect("reads");
+        .pixels("app:///big.png", ImageSizeHint::new(100, 100))
+        .expect("resident");
     assert_eq!((first.width, first.height), (1024, 512));
     harness.settle_resident("app:///big.png", (100, 50));
 
     let refined = harness
-        .view
-        .read("app:///big.png", ImageSizeHint::new(100, 100))
-        .expect("reads");
+        .pixels("app:///big.png", ImageSizeHint::new(100, 100))
+        .expect("resident");
     assert_eq!(
         (refined.width, refined.height),
         (100, 50),
@@ -226,12 +270,12 @@ fn a_draw_far_smaller_than_the_bitmap_refines_it_to_the_drawn_size() {
     // Drawn larger again: the image has more to give, so it refines back up.
     let _ = harness
         .view
-        .read("app:///big.png", ImageSizeHint::new(400, 400));
+        .describe("app:///big.png", ImageSizeHint::new(400, 400));
     harness.settle_resident("app:///big.png", (400, 200));
 }
 
 #[test]
-fn an_evicted_bitmap_is_restored_inside_the_read() {
+fn an_evicted_bitmap_is_restored_once_wanted() {
     let harness = Harness::new(Harness::quiet());
     harness
         .resources
@@ -252,10 +296,7 @@ fn an_evicted_bitmap_is_restored_inside_the_read() {
     assert!(!harness.resources.is_resident("app:///a.png"));
     assert!(harness.resources.is_resident("app:///b.png"));
 
-    let restored = harness
-        .view
-        .read("app:///a.png", ImageSizeHint::new(16, 16))
-        .expect("a reported load never misses");
+    let restored = harness.restore("app:///a.png", ImageSizeHint::new(16, 16));
     assert_eq!(
         (restored.width, restored.height),
         (16, 16),
@@ -266,9 +307,9 @@ fn an_evicted_bitmap_is_restored_inside_the_read() {
 
 /// A bitmap the painter's rasterizer holds is released from the tier, pinned
 /// or not: its bytes leave the accounting, a describe answers its descriptor
-/// without pixels, and a read restores it.
+/// without pixels, and a want restores it.
 #[test]
-fn a_released_bitmap_leaves_the_tier_and_a_read_restores_it() {
+fn a_released_bitmap_leaves_the_tier_and_a_want_restores_it() {
     let harness = Harness::new(Harness::quiet());
     harness
         .resources
@@ -302,10 +343,7 @@ fn a_released_bitmap_leaves_the_tier_and_a_read_restores_it() {
     assert!(absent.pixels.is_none(), "a describe restores nothing");
     assert_eq!(absent.descriptor, described.descriptor);
 
-    let restored = harness
-        .view
-        .read("app:///a.png", ImageSizeHint::new(32, 32))
-        .expect("a read restores a released bitmap");
+    let restored = harness.restore("app:///a.png", ImageSizeHint::new(32, 32));
     assert_eq!((restored.width, restored.height), (32, 32));
     assert!(harness.resources.is_resident("app:///a.png"));
 }
@@ -342,7 +380,7 @@ fn data_urls_and_non_images_and_unknown_schemes_report_precisely() {
     assert!(
         harness
             .view
-            .read("gopher://nowhere/x.png", ImageSizeHint::UNBOUNDED)
+            .describe("gopher://nowhere/x.png", ImageSizeHint::UNBOUNDED)
             .is_none()
     );
 }
@@ -370,7 +408,7 @@ fn every_view_of_the_shared_system_sees_the_same_registrations_and_state() {
     assert!(harness.resources.knows_image("app:///shared.png"));
     assert!(
         Rc::new(harness.view)
-            .read("app:///shared.png", ImageSizeHint::UNBOUNDED)
+            .describe("app:///shared.png", ImageSizeHint::UNBOUNDED)
             .is_some()
     );
 }
@@ -398,11 +436,11 @@ impl Drop for TempFile {
 }
 
 /// A `file:`-backed image keeps no encoded bytes — the file is the tier that
-/// can hand them back — so an evicted one is re-fetched *and* re-decoded on
-/// the painter's thread, inside the read. This test's thread is inside
-/// another runtime's `block_on`, which the capture server's is too.
+/// can hand them back — so an evicted one that is wanted is re-fetched *and*
+/// re-decoded by a job, off the thread that wanted it. This test's thread is
+/// inside another runtime's `block_on`, which the capture server's is too.
 #[tokio::test(flavor = "current_thread")]
-async fn an_evicted_file_backed_image_is_re_fetched_and_decoded_inside_the_read() {
+async fn an_evicted_file_backed_image_is_re_fetched_and_decoded_once_wanted() {
     let file = TempFile::new("restore.png", &quadrant_png(64, 64));
     let harness = Harness::new(Harness::quiet());
     let source = file.url().to_string();
@@ -422,10 +460,7 @@ async fn an_evicted_file_backed_image_is_re_fetched_and_decoded_inside_the_read(
         "a restorable image keeps no encoded bytes either"
     );
 
-    let restored = harness
-        .view
-        .read(&source, ImageSizeHint::new(32, 32))
-        .expect("a reported load never misses");
+    let restored = harness.restore(&source, ImageSizeHint::new(32, 32));
     assert_eq!((restored.width, restored.height), (32, 32));
     assert_eq!(&restored.data.as_ref()[..4], &[255, 0, 0, 255]);
     assert!(harness.resources.take_notes().is_empty());
@@ -638,7 +673,7 @@ const MARKUP_SOURCE: &str = "svg-content:0123456789abcdef0123456789abcdef";
 /// Markup a page handed over arrives as a document request under the
 /// synthetic source the engine named: nothing is resolved or fetched, and
 /// the bytes are parsed as a fetched document's are and reported once. Nothing
-/// is kept: the source is not known, no read answers for it, and the memory
+/// is kept: the source is not known, no describe answers for it, and the memory
 /// used does not move.
 #[test]
 fn a_document_request_is_parsed_and_reported_once() {
@@ -663,7 +698,7 @@ fn a_document_request_is_parsed_and_reported_once() {
     assert!(
         harness
             .view
-            .read(MARKUP_SOURCE, ImageSizeHint::UNBOUNDED)
+            .describe(MARKUP_SOURCE, ImageSizeHint::UNBOUNDED)
             .is_none()
     );
     assert_eq!(
@@ -747,10 +782,10 @@ fn a_malformed_document_request_reports_failed() {
 }
 
 /// The engine draws a document itself, so the pixel seam has nothing for
-/// it: no read answers, nothing is resident, and no read starts a
+/// it: no describe answers, nothing is resident, and no describe starts a
 /// refinement. Nothing of the document is kept.
 #[test]
-fn an_svg_document_is_never_read_and_never_resident() {
+fn an_svg_document_is_never_described_and_never_resident() {
     let harness = Harness::new(Harness::quiet());
     let document = svg(r#"width="64" height="64""#);
     harness
@@ -769,7 +804,7 @@ fn an_svg_document_is_never_read_and_never_resident() {
         ImageSizeHint::new(4096, 4096),
     ] {
         assert!(
-            harness.view.read("app:///icon.svg", hint).is_none(),
+            harness.view.describe("app:///icon.svg", hint).is_none(),
             "{hint:?}"
         );
     }

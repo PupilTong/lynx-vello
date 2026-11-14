@@ -79,7 +79,8 @@ view's working set pinned against eviction — a `ViewResources` carries its
 `ViewKey` and releases its set when it drops; a bitmap whose upload a
 painter's rasterizer holds leaves the tier when the painter says so
 (`FrameImages::release`), is described by its descriptor from then on, and is
-decoded again inside a `read` only when the rasterizer does not hold it either
+decoded again, off the painter's thread, only when a frame wants it
+(`FrameImages::want`) because the rasterizer does not hold it either
 — and fetched bytes in `vant::byte_cache::ByteCache`
 over the platform's `Store` (`FsStore`: `<fnv64>.bin` beside `<fnv64>.json`
 holding the key, length, last use and the HTTP record, temp-and-rename
@@ -170,22 +171,24 @@ memory tier, refinement and restore never see a document), and
 non-SVG type such as `text/plain` is trusted as that type and is not an
 image (`mime::sniff`).
 
-`images.rs` is the pipeline's IO alone: what a request or a read means is the
-residency's answer, every report is sent by `ImageResidency`, and this module
-starts the load, the refinement or the restore it is told to and feeds the
-completion back.
+`images.rs` is the pipeline's IO alone: what a request, a describe or a want
+means is the residency's answer, every report is sent by `ImageResidency`, and
+this module starts the load, the refinement or the restore it is told to and
+feeds the completion back.
 
-The frame reads each image at the size it draws it: a resident bitmap far
-larger than its draw is re-decoded at the drawn size in the background and
-replaced; one that was evicted is restored inside the read from the retained
-bytes or the disk tier — on the embedder's own thread, synchronously and with
-no decode permit, which is why the transport keeps a blocking entry point and
-`tokio::fs` is not adopted; and one drawn larger than it was decoded is refined
-back up while the image has more to give. In the browser that restore is the
-one place the Render Worker blocks: the main thread never waits, so a job's
-mailbox in shared Wasm memory and `Atomics.wait` are what let a read that must
-not miss wait for it (`crates/bobcat-wasm/js/image-decoder.ts` is the main
-thread's half).
+The frame describes each image at the size it draws it, and nothing it asks
+blocks: a resident bitmap far larger than its draw is re-decoded at the drawn
+size in the background and replaced; one drawn larger than it was decoded is
+refined back up while the image has more to give; and one that was evicted and
+whose upload the rasterizer does not hold either draws nothing, is wanted
+(`FrameImages::want`), and is restored from the retained bytes or the disk
+tier as a refinement job — off the embedder's thread, under a decode permit —
+whose completion wakes the host, so the next adoption draws it with no commit.
+A restore that fails leaves the source with nothing to draw and is not
+retried. The browser's decode runs on the main thread's `Image` element over a
+mailbox whose two sides only signal through `postMessage`
+(`crates/bobcat-wasm/js/image-decoder.ts` is the main thread's half); nothing
+waits on it. See `docs/picture-source-design.md`.
 
 Shape: `Resources` is the shared system (registry, caches, executor, decoder;
 cheaply cloned, bound to the embedder's thread) and the only holder of the
