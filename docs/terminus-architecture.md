@@ -326,12 +326,14 @@ css-anchor-position-1 acceptable anchor placed before its reader. A moved
 subtree, which keeps its caches, has its listed boxes relaid so they
 re-register; a box under a subtree relaid in place, whose containing block
 above it does not run, and a box whose containing block is the initial one are
-placed by the rounding tail. The exception is a box hoisted out of such a
+placed by the rounding tail. The exceptions are a box hoisted out of such a
 subtree that can have a default anchor and whose containing block is a scroll
-container: it is laid out against css-position-4's scrollable containing
-block, which only that container's own absolute pass computes, so the
-in-place relayout escalates to the whole-tree pass instead
-(`hoisted::escapes_to_scrollable_block`, answered from the hoisted-box table,
+container, laid out against css-position-4's scrollable containing block,
+and one that names a grid line and whose containing block is a grid
+container, laid out in the grid area (css-grid-2 §10.1). Only that
+container's own absolute pass computes either, so the in-place relayout
+escalates to the whole-tree pass instead
+(`hoisted::escapes_past_late_placement`, answered from the hoisted-box table,
 which is keyed by containing block). `display: contents` elements generate no box: the
 engine's `flattened_children` splices them out of every item collection, and
 the host denies them containing-block, containment, skipped-contents, and

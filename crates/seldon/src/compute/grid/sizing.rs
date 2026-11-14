@@ -1306,6 +1306,11 @@ fn resolve_intrinsic_sizes<T, I>(
             } else {
                 spanning_minimum_kind
             };
+        // §12.5 step 4 repeats step 3 "distributing space only to flexible
+        // tracks", and step 3's first part feeds only "tracks with an
+        // intrinsic min track sizing function": a `minmax(0, 0.4fr)` row
+        // keeps its fixed 0 base (WPT
+        // `css/css-grid/layout-algorithm/flex-sizing-rows-indefinite-height-002.html`).
         run_spanning_base_phase(
             tree,
             state,
@@ -1317,7 +1322,7 @@ fn resolve_intrinsic_sizes<T, I>(
             flexible_base_kind,
             use_limited_min_content,
             true,
-            Track::is_flexible,
+            |track| track.is_flexible() && track.min.is_intrinsic(),
             distribution,
         );
         run_spanning_base_phase(
