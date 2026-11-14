@@ -1,4 +1,3 @@
-import { ImageDecoder } from './image-decoder.ts'
 import { parsePerformanceEntry, type LynxPerformanceEntry } from './performance.ts'
 import { TextInputProxy, keyFields } from './text-input.ts'
 import type {
@@ -971,7 +970,6 @@ export default function init(): Promise<void> {
  */
 export class BobcatCanvas {
   #client: RenderWorkerClient
-  #decoder: ImageDecoder
   #disposed = false
   #fatalError: Error | undefined
   /**
@@ -992,12 +990,10 @@ export class BobcatCanvas {
     canvas: HTMLCanvasElement,
     width: number,
     height: number,
-    decoder: ImageDecoder,
     containerInit: { start: number; end: number },
   ) {
     this.#client = client
     this.#containerInit = containerInit
-    this.#decoder = decoder
     const pointerInput = new CanvasPointerInput(
       canvas,
       width,
@@ -1035,7 +1031,6 @@ export class BobcatCanvas {
       this.#fatalError = error
       this.#pointerInput.dispose()
       this.#textInput.dispose()
-      this.#decoder.close()
       if (typeof this.onerror === 'function') {
         this.onerror(error)
       }
@@ -1086,10 +1081,6 @@ export class BobcatCanvas {
     const screen = screenPixels()
 
     const offscreen = canvas.transferControlToOffscreen()
-    // The Render Worker fetches a page's images and this thread decodes
-    // them, over a channel of their own.
-    const images = new MessageChannel()
-    const decoder = new ImageDecoder(images.port1)
     let client: RenderWorkerClient | undefined
     let worker: Worker | undefined
     try {
@@ -1105,7 +1096,6 @@ export class BobcatCanvas {
           config,
           devicePixelRatio,
           height,
-          imagePort: images.port2,
           hardwareConcurrency: hardwareConcurrency(),
           nativeModules,
           measureFrameRate: options.onFrameRate !== undefined,
@@ -1115,11 +1105,10 @@ export class BobcatCanvas {
           workerUrl: THREAD_WORKER_URL,
           width,
         } satisfies InitMessage,
-        [offscreen, images.port2],
+        [offscreen],
       )
       await client.ready
     } catch (error) {
-      decoder.close()
       client?.close()
       worker?.terminate()
       throw new Error(
@@ -1127,7 +1116,7 @@ export class BobcatCanvas {
         { cause: error },
       )
     }
-    return new BobcatCanvas(client, canvas, width, height, decoder, {
+    return new BobcatCanvas(client, canvas, width, height, {
       start: containerInitStart,
       end: Date.now(),
     })
@@ -1337,7 +1326,6 @@ export class BobcatCanvas {
     } finally {
       this.#unsubscribeFatal()
       this.#client.close()
-      this.#decoder.close()
     }
   }
 }

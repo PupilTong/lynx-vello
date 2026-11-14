@@ -34,6 +34,14 @@
 //! `W` is whoever waits for a source: the engine's per-view report handle.
 //! The residency stores waiters and hands them back; it never calls them.
 //!
+//! `F` is the decoder's platform frame type ([`crate::image::PictureFrame`]),
+//! [`Infallible`] for a decoder that answers CPU pixels only. A platform
+//! frame is held, released, evicted and restored exactly as CPU pixels are:
+//! the tier holds it until the caller's rasterizer holds its upload, then
+//! drops it — which is what lets the platform free it — keeps the
+//! descriptor minted for it, and decodes the source again when it is wanted.
+//! Its bytes are counted from its size, four a pixel.
+//!
 //! # Entries
 //!
 //! A document a page wrote itself arrives as a document request
@@ -60,14 +68,16 @@
 //! never unpins another's. A view that goes away says so
 //! ([`Residency::release_view`]), and its set stops counting.
 
+use std::convert::Infallible;
 use std::sync::Arc;
 
 use bytes::Bytes;
 use rustc_hash::FxHashMap;
 use url::Url;
-use vello_common::peniko::ImageData;
 
-use crate::image::{Bitmap, ImageDescriptor, ImageSizeHint, bounded, wants_refinement};
+use crate::image::{
+    DecodedImage, ImageDescriptor, ImageSizeHint, PictureFrame, bounded, wants_refinement,
+};
 use crate::image_header::ImageHeader;
 use crate::memory::MemoryCache;
 use crate::mime::ImageFormat;
@@ -117,9 +127,9 @@ pub enum Requested {
 /// A raster load's outcome: the bitmap, what the bytes were, and the bytes
 /// themselves when nothing else could restore them.
 #[derive(Debug)]
-pub struct Decoded {
+pub struct Decoded<F = Infallible> {
     pub url: Url,
-    pub bitmap: Bitmap,
+    pub bitmap: DecodedImage<F>,
     pub format: ImageFormat,
     pub header: Option<ImageHeader>,
     /// The encoded bytes, kept when no other tier can hand them back.
@@ -145,11 +155,13 @@ pub struct Refinement {
 
 /// What a frame finds for a source ([`Residency::describe`]).
 #[derive(Debug)]
-pub enum Described {
-    /// The resident bitmap, and the refinement the caller starts when it is
-    /// far from the drawn size and none is in flight.
+pub enum Described<F = Infallible> {
+    /// The resident bitmap, the descriptor that names it, and the refinement
+    /// the caller starts when it is far from the drawn size and none is in
+    /// flight.
     Resident {
-        image: ImageData,
+        image: PictureFrame<F>,
+        descriptor: ImageDescriptor,
         refine: Option<Refinement>,
     },
     /// Loaded, and the tier does not hold the bitmap — released or evicted.
@@ -168,9 +180,9 @@ pub enum Described {
 }
 
 /// What is known about every source asked for, and the decoded bitmaps.
-pub struct Residency<W> {
+pub struct Residency<W, F = Infallible> {
     entries: FxHashMap<Arc<str>, Entry<W>>,
-    bitmaps: MemoryCache<ImageData>,
+    bitmaps: MemoryCache<PictureFrame<F>>,
     /// Document requests whose parse is in flight, each with the waiter
     /// that asked: where a parse's answer goes, since a waiter cannot travel
     /// with the job. Not an entry: two requests for one source are two of
@@ -183,7 +195,7 @@ pub struct Residency<W> {
     config: ResidencyConfig,
 }
 
-impl<W> std::fmt::Debug for Residency<W> {
+impl<W, F> std::fmt::Debug for Residency<W, F> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("Residency")
@@ -195,6 +207,10 @@ impl<W> std::fmt::Debug for Residency<W> {
             .finish_non_exhaustive()
     }
 }
+
+/// What [`Residency::find`] answers: the loaded entry, the size a draw
+/// decodes at, and the resident bitmap.
+type Found<'a, F> = (&'a mut Loaded, (u32, u32), Option<PictureFrame<F>>);
 
 enum Entry<W> {
     /// Asked for; the job has not completed. Every waiter that asked is told
@@ -263,7 +279,7 @@ impl Loaded {
     }
 }
 
-impl<W> Residency<W> {
+impl<W, F: Clone> Residency<W, F> {
     #[must_use]
     pub fn new(config: ResidencyConfig) -> Self {
         Self {
@@ -323,7 +339,11 @@ impl<W> Residency<W> {
     /// `source`'s load decoded: the bitmap enters the tier and the entry is
     /// loaded. Answers the waiters to tell and the intrinsic size to tell
     /// them, or `None` when no load of `source` was in flight.
-    pub fn loaded(&mut self, source: &Arc<str>, decoded: Decoded) -> Option<(Vec<W>, (u32, u32))> {
+    pub fn loaded(
+        &mut self,
+        source: &Arc<str>,
+        decoded: Decoded<F>,
+    ) -> Option<(Vec<W>, (u32, u32))> {
         let Decoded {
             url,
             bitmap,
@@ -332,10 +352,9 @@ impl<W> Residency<W> {
             encoded,
             animated,
         } = decoded;
-        let intrinsic = (bitmap.source_width, bitmap.source_height);
+        let intrinsic = bitmap.source_size();
         let bytes = bitmap.byte_len();
-        let image = bitmap.into_image_data();
-        let descriptor = ImageDescriptor::of(&image);
+        let (image, descriptor) = bitmap.into_frame();
         let waiters = self.settle(
             source,
             Entry::Loaded(Loaded {
@@ -382,7 +401,12 @@ impl<W> Residency<W> {
 
     /// A refinement of `source` at `target` decoded: the bitmap replaces the
     /// resident one, unless the entry is no longer refining to `target`.
-    pub fn refined(&mut self, source: &Arc<str>, target: (u32, u32), bitmap: Bitmap) {
+    pub fn refined(
+        &mut self,
+        source: &Arc<str>,
+        target: (u32, u32),
+        bitmap: impl Into<DecodedImage<F>>,
+    ) {
         let Some(Entry::Loaded(loaded)) = self.entries.get_mut(source) else {
             return;
         };
@@ -391,9 +415,10 @@ impl<W> Residency<W> {
         }
         loaded.refining = None;
         loaded.unrestorable = false;
+        let bitmap = bitmap.into();
         let bytes = bitmap.byte_len();
-        let image = bitmap.into_image_data();
-        loaded.descriptor = ImageDescriptor::of(&image);
+        let (image, descriptor) = bitmap.into_frame();
+        loaded.descriptor = descriptor;
         self.bitmaps.insert(Arc::clone(source), image, bytes);
     }
 
@@ -414,15 +439,17 @@ impl<W> Residency<W> {
     /// the resident bitmap, or the descriptor of the one last inserted. A
     /// bitmap far from the drawn size plans a refinement; nothing is
     /// restored here.
-    pub fn describe(&mut self, source: &str, hint: ImageSizeHint) -> Described {
+    pub fn describe(&mut self, source: &str, hint: ImageSizeHint) -> Described<F> {
         let ratio = self.config.downsample_ratio;
         let Some((loaded, target, image)) = self.find(source, hint) else {
             return Described::Unavailable;
         };
         if let Some(image) = image {
+            let descriptor = loaded.descriptor;
             return Described::Resident {
-                refine: loaded.plan((image.width, image.height), target, ratio),
+                refine: loaded.plan((descriptor.width, descriptor.height), target, ratio),
                 image,
+                descriptor,
             };
         }
         if loaded.unrestorable {
@@ -466,12 +493,10 @@ impl<W> Residency<W> {
     }
 
     /// The loaded entry for `source`, the size a draw of `hint` decodes
-    /// at, and the resident bitmap, marked most recently used.
-    fn find(
-        &mut self,
-        source: &str,
-        hint: ImageSizeHint,
-    ) -> Option<(&mut Loaded, (u32, u32), Option<ImageData>)> {
+    /// at, and the resident bitmap, marked most recently used. A resident
+    /// bitmap is always the one last inserted, so the entry's descriptor
+    /// names it.
+    fn find(&mut self, source: &str, hint: ImageSizeHint) -> Option<Found<'_, F>> {
         let loaded = match self.entries.get_mut(source) {
             Some(Entry::Loaded(loaded)) => loaded,
             // The engine draws a document itself and never reads it here;
@@ -546,9 +571,15 @@ impl<W> Residency<W> {
     /// The resident bitmap's size, if any.
     #[must_use]
     pub fn resident_size(&self, source: &str) -> Option<(u32, u32)> {
-        self.bitmaps
-            .peek(source)
-            .map(|image| (image.width, image.height))
+        if !self.bitmaps.contains(source) {
+            return None;
+        }
+        match self.entries.get(source) {
+            Some(Entry::Loaded(loaded)) => {
+                Some((loaded.descriptor.width, loaded.descriptor.height))
+            }
+            Some(Entry::Loading { .. } | Entry::Parsed | Entry::Failed) | None => None,
+        }
     }
 
     /// Moves a loading entry to `next`, answering its waiters; leaves any
@@ -574,6 +605,7 @@ impl<W> Residency<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::image::Bitmap;
 
     const MAX: u32 = 8192;
 
@@ -604,7 +636,7 @@ mod tests {
     fn decoded(source: &str, bitmap: Bitmap, encoded: Option<&'static [u8]>) -> Decoded {
         Decoded {
             url: url(source),
-            bitmap,
+            bitmap: bitmap.into(),
             format: ImageFormat::Png,
             header: None,
             encoded: encoded.map(Bytes::from_static),
@@ -673,7 +705,7 @@ mod tests {
 
     #[test]
     fn the_first_decode_is_bounded_by_what_the_rasterizer_draws() {
-        let mut residency = Residency::new(ResidencyConfig {
+        let mut residency: Residency<()> = Residency::new(ResidencyConfig {
             budget_bytes: 0,
             initial_bound: 100_000,
             max_renderable: MAX,
@@ -787,10 +819,12 @@ mod tests {
         let Described::Resident {
             image,
             refine: Some(refinement),
+            ..
         } = residency.describe("big.png", hint)
         else {
             panic!("a hit with a refinement");
         };
+        let image = image.into_pixels();
         assert_eq!((image.width, image.height), (1000, 1000));
         assert_eq!(refinement.target, (125, 125));
         assert_eq!(refinement.url, url("big.png"));
@@ -914,6 +948,7 @@ mod tests {
         else {
             panic!("a restored bitmap is resident");
         };
+        let image = image.into_pixels();
         assert_eq!((image.width, image.height), (1, 1));
         assert!(
             residency
@@ -1016,10 +1051,12 @@ mod tests {
         let Described::Resident {
             image,
             refine: None,
+            ..
         } = residency.describe("a.png", ImageSizeHint::UNBOUNDED)
         else {
             panic!("a resident bitmap is described with its pixels");
         };
+        let image = image.into_pixels();
         let descriptor = ImageDescriptor::of(&image);
         drop(image);
 
@@ -1060,6 +1097,7 @@ mod tests {
         else {
             panic!("a restored bitmap is resident again");
         };
+        let image = image.into_pixels();
         assert_ne!(
             ImageDescriptor::of(&image),
             descriptor,
@@ -1080,10 +1118,12 @@ mod tests {
         let Described::Resident {
             image,
             refine: None,
+            ..
         } = residency.describe("big.png", ImageSizeHint::new(1000, 1000))
         else {
             panic!("resident at the drawn size");
         };
+        let image = image.into_pixels();
         let descriptor = ImageDescriptor::of(&image);
         residency.set_budget(0);
         assert!(!residency.is_resident("big.png"), "evicted, not released");
@@ -1108,6 +1148,92 @@ mod tests {
             residency.describe("missing.png", hint),
             Described::Unavailable
         ));
+    }
+
+    /// A platform frame whose last clone records that it was let go, as the
+    /// browser's closes its `ImageBitmap`.
+    #[derive(Clone, Debug)]
+    struct Frame(std::rc::Rc<std::cell::Cell<bool>>);
+
+    fn platform(width: u32, height: u32, intrinsic: (u32, u32)) -> (DecodedImage<Frame>, Frame) {
+        let frame = Frame(std::rc::Rc::default());
+        let decoded = DecodedImage::Platform(crate::image::PlatformBitmap {
+            frame: frame.clone(),
+            width,
+            height,
+            source_width: intrinsic.0,
+            source_height: intrinsic.1,
+        });
+        (decoded, frame)
+    }
+
+    /// A platform frame is held until the caller's rasterizer holds its
+    /// upload and then let go, its descriptor kept; a want decodes the
+    /// source again, and the bytes it counts are its size's.
+    #[test]
+    fn a_platform_frame_is_held_until_released_then_restored_by_a_decode() {
+        let mut residency: Residency<&'static str, Frame> = Residency::new(ResidencyConfig {
+            budget_bytes: 1 << 20,
+            initial_bound: 2048,
+            max_renderable: MAX,
+            downsample_ratio: 2.0,
+        });
+        assert!(matches!(
+            residency.request("a.png", "loader"),
+            Requested::Start { .. }
+        ));
+        let (bitmap, frame) = platform(4, 2, (4, 2));
+        let (waiters, intrinsic) = residency
+            .loaded(
+                &Arc::from("a.png"),
+                Decoded {
+                    url: url("a.png"),
+                    bitmap,
+                    format: ImageFormat::Png,
+                    header: None,
+                    encoded: Some(Bytes::from_static(b"kept")),
+                    animated: false,
+                },
+            )
+            .expect("in flight");
+        assert_eq!((waiters, intrinsic), (vec!["loader"], (4, 2)));
+        assert_eq!(residency.bitmap_bytes(), 4 * 2 * 4, "four bytes a pixel");
+        assert_eq!(residency.resident_size("a.png"), Some((4, 2)));
+
+        let Described::Resident {
+            image: PictureFrame::Platform(_),
+            descriptor,
+            refine: None,
+        } = residency.describe("a.png", ImageSizeHint::UNBOUNDED)
+        else {
+            panic!("the platform frame is described with its minted descriptor");
+        };
+        assert_eq!((descriptor.width, descriptor.height), (4, 2));
+
+        residency.release(&[Arc::from("a.png")]);
+        assert_eq!(
+            std::rc::Rc::strong_count(&frame.0),
+            1,
+            "the tier let go of its frame"
+        );
+        assert_eq!(residency.bitmap_bytes(), 0);
+        assert!(matches!(
+            residency.describe("a.png", ImageSizeHint::UNBOUNDED),
+            Described::Absent { descriptor: absent, .. } if absent == descriptor
+        ));
+        let plan = residency
+            .want("a.png", ImageSizeHint::UNBOUNDED)
+            .expect("a release is restored by a decode");
+        assert_eq!(plan.encoded.as_deref(), Some(&b"kept"[..]));
+        let (restored, _) = platform(4, 2, (4, 2));
+        residency.refined(&Arc::from("a.png"), plan.target, restored);
+        let Described::Resident {
+            descriptor: again, ..
+        } = residency.describe("a.png", ImageSizeHint::UNBOUNDED)
+        else {
+            panic!("restored");
+        };
+        assert_ne!(again, descriptor, "a decode is a new frame");
     }
 
     #[test]

@@ -85,19 +85,32 @@ scroll space of an image draw apply to every picture.
 
 A picture's content arrives as *frames*. A frame is one of:
 
-- **CPU pixels** — `ImageData`, as bitmaps are today;
+- **CPU pixels** — `ImageData`;
 - **a platform frame** — a value of the embedder's own type (an
-  `ImageBitmap` or `VideoFrame` in the browser, an `IOSurface`-backed buffer
-  on macOS), named by an associated type so no `dyn` crosses the boundary.
+  `ImageBitmap` in the browser today, later a `VideoFrame`, an
+  `IOSurface`-backed buffer on macOS), named by an associated type so no
+  `dyn` crosses the boundary.
 
-`PictureFrame<P>` is the two; `FrameImages::PlatformFrame` is `P`. Until a
-platform-frame writer exists the painter accepts only stores whose
-`PlatformFrame` is `std::convert::Infallible`.
+`PictureFrame<P>` is the two (`vant::image::PictureFrame`, re-exported by
+`terminus`); `FrameImages::PlatformFrame` is `P`, and it is bounded by
+`FrameWriter`, the writer below. A store with no platform frames names
+`std::convert::Infallible`, which implements the writer by having no value.
+The decoder is where `P` starts: `vant::ImageDecoder::Frame` is the type
+its asynchronous decodes may answer (`DecodedImage<F>`: a `Bitmap`, or a
+`PlatformBitmap<F>` with the sizes a `Bitmap` carries), and
+`bobcat-resources` names `FrameOf<P>` — that type for a `vant::Platform`
+`P` — as its store's `PlatformFrame`.
+
+A platform frame has no blob, so it is named by a descriptor minted for it
+(`ImageDescriptor::platform`): a blob id taken from the counter every
+`peniko::Blob` takes its id from, which no pixels share, its size, and the
+layout its writer produces, premultiplied RGBA8.
 
 ### Slot
 
 Each `Id` picture has one *slot* (`PictureSlot`) holding its newest frame. A
-producer on any thread replaces the slot's frame (`publish_pixels`) and wakes
+producer on any thread replaces the slot's frame (`publish_pixels`, or
+`publish` for a frame of either kind with its descriptor) and wakes
 the host's event loop when the slot says a wake is owed — when the frame it
 replaced had been taken, or there was none; a frame replaced before it was
 taken already owes one. Nothing is queued behind it. The store answers the
@@ -121,10 +134,26 @@ acquired.
   the new size, under the same id, by one that is not
   (`BitmapLeases::write_picture` in `render::sparse`).
 - The writer for CPU pixels is the engine's: it converts to premultiplied
-  RGBA8, which is what a bound texture must hold, and queues the write. The
-  writer for platform frames will be the embedder's, handed the device, the
-  queue and the destination texture and its size; with no `AtlasWriter` in
-  `vello_gpu` its exact shape is step 5's to decide.
+  RGBA8, which is what a bound texture must hold, and queues the write.
+- The writer for platform frames is the embedder's: the frame type
+  implements `terminus::link::FrameWriter`,
+  `fn write(&self, target: &FrameTarget<'_>) -> bool`, so the writer travels
+  with the frame and no object is passed beside it. `FrameTarget` is
+  `{ device, queue, texture, size }`: the engine creates the texture —
+  2D, `Rgba8Unorm`, one mip level, exactly the frame's size, with
+  `TEXTURE_BINDING | COPY_DST | RENDER_ATTACHMENT`, the last because the
+  browser's `copyExternalImageToTexture` requires it of its destination —
+  and the writer queues a copy of the whole frame into mip level 0 at the
+  origin, premultiplied, in sRGB, without blocking. It answers `false` for
+  a frame it cannot read (closed, or not the size it was described as), and
+  the picture then draws what it drew before, or nothing.
+- A URL picture's platform frame is written the moment the painter is lent
+  it (`BitmapLeases::upload_frame`), into an upload keyed on its descriptor
+  as a CPU bitmap's is, and released to the store in the same adoption: no
+  render can read it, so there is nothing to hold it for. An `Id` picture's
+  is written into the picture's texture as CPU pixels are; a texture a CPU
+  frame created lacks `RENDER_ATTACHMENT`, so a platform frame replaces it
+  under the same id. Without a rasterizer a platform frame draws nothing.
 - A frame is always copied. Sampling a producer's own texture is not built;
   the copy is where format conversion, orientation and premultiplication
   happen and what gives every picture one lifetime rule.
@@ -351,11 +380,14 @@ Associated types on `vant::Platform`, never `dyn`:
   `decode_frame`). One animation's frames are asked of one `Bytes`
   allocation in playing order, so a decoder may keep its source open between
   them until `forget_frames`; `ImageIO` does, since it composites a GIF frame
-  from the frames before it. Their defaults answer one frame, so a decoder that knows
-  nothing of animation draws an animated file as its first frame. Its output
-  is CPU pixels; a platform frame is step 5's.
-- **Frame writer** — the platform-frame writer above. A platform with no
-  platform frames names an uninhabited frame type and needs none.
+  from the frames before it, and so does the browser's `ImageDecoder`. Their defaults answer one frame, so a decoder that knows
+  nothing of animation draws an animated file as its first frame. The
+  blocking methods answer CPU pixels; the asynchronous ones answer a
+  `DecodedImage<Self::Frame>`, CPU pixels or a frame of the decoder's own
+  type (`ImageDecoder::Frame`, `Infallible` natively).
+- **Frame writer** — the platform-frame writer above, implemented by the
+  frame type. A platform with no platform frames names an uninhabited frame
+  type and needs none.
 - **Media** — opens a URL and returns a handle with `play`, `pause`,
   `set_loop`, `set_muted`, the events of ruling 8, and a slot the player
   fills.
@@ -365,7 +397,7 @@ Per platform:
 | | Image decode | Animation frames | Video |
 | --- | --- | --- | --- |
 | macOS | ImageIO | ImageIO by frame index (built) | AVFoundation, BGRA output as CPU frames at first |
-| Browser | `createImageBitmap` in the Render Worker | WebCodecs `ImageDecoder`; first frame only where it is missing. Until step 5 the main-thread `Image` decoder answers one frame | `HTMLVideoElement` → `VideoFrame`, transferred to the Render Worker |
+| Browser | `createImageBitmap` in the Render Worker (built) | WebCodecs `ImageDecoder` in the Render Worker; first frame only where it is missing (built) | `HTMLVideoElement` → `VideoFrame`, transferred to the Render Worker |
 | Linux | gdk-pixbuf | first frame only, for now: gdk-pixbuf has no decode by frame index (built) | none, for now |
 
 `ImageIO` (verified on macOS 26) reads the frame count and each frame's
@@ -375,8 +407,45 @@ forever, for GIF, APNG and WebP alike; for a GIF that is the NETSCAPE repeat
 count plus one, and one without the extension, which is how browsers read a
 GIF. A frame decoded by index is the whole canvas at that frame.
 
-The browser's main-thread `Image` decoder and its shared-memory mailbox are
-removed: with nothing blocking, nothing needs them.
+In the browser (`bobcat-wasm`'s `platform::decode`), verified in Chrome on
+macOS by `crates/bobcat-wasm/scripts/render-check.ts`:
+
+- A still image, an animation's first frame, a refinement and a restore
+  are `createImageBitmap` of the bytes as a `Blob`, with
+  `imageOrientation: "from-image"`, `premultiplyAlpha: "premultiply"` and
+  `colorSpaceConversion: "default"`. The size the browser decoded, after
+  its EXIF orientation, is the intrinsic size; one larger than the size
+  asked for is resized by a second `createImageBitmap` of the first, with
+  `resizeWidth`, `resizeHeight` and `resizeQuality: "high"`, and the first
+  is closed. The answer is a `BrowserFrame`, an `ImageBitmap` closed when
+  its last copy is dropped.
+- The writer is WebGPU's `copyExternalImageToTexture`
+  (`Queue::copy_external_image_to_texture` in wgpu's web backend) into the
+  engine's texture, with `colorSpace: "srgb"` and `premultipliedAlpha: true`.
+  The pixels never pass through Wasm memory.
+- An animation's frames are WebCodecs' `ImageDecoder`: the selected track's
+  `frameCount` and `repetitionCount` (repetitions after the first play,
+  `Infinity` for forever, so `n` is `n + 1` plays) and each frame's
+  `VideoFrame.duration` (microseconds, `null` read as zero) are its
+  `ImageFrames`. A duration is only known once its frame is decoded, so
+  `frames` decodes every frame once through a decoder of its own, closing
+  each `VideoFrame` at once. `decode_frame(i)` is `decode({ frameIndex: i })`
+  through one `ImageDecoder` per animation kept open until `forget_frames`,
+  turned into an `ImageBitmap` at frame 0's decoded size by
+  `createImageBitmap`, after which the `VideoFrame` is closed. Where
+  `ImageDecoder` is missing, or `ImageDecoder.isTypeSupported` refuses the
+  type, an image is one frame (`bobcat-wasm`'s `image_frames::frames(None)`,
+  tested natively).
+- Every buffer handed to the browser is a copy: the Wasm memory is a
+  `SharedArrayBuffer`, which a `Blob` and an `ImageDecoder` may not be built
+  over.
+- A frame produced on another thread would reach the Render Worker as a
+  transferred `ImageBitmap` or `VideoFrame` (`postMessage` with a transfer
+  list) and be published into its slot there. Nothing produces one today.
+
+The main thread holds no image: the main-thread `Image` decoder and its
+shared-memory mailbox are gone, with the port the facade handed the
+Render Worker.
 
 ## Not built
 
@@ -480,19 +549,69 @@ One change per step, in order; each leaves the tree green.
      (`an_animated_image_plays_its_own_picture_through_the_realm`), and the
      compiled `react-animated-image` card end to end on macOS
      (`crates/bobcat-source/tests/reactlynx_runtime.rs`).
-5. **Platform frames in the browser.** The frame-writer capability;
-   `createImageBitmap` and `ImageDecoder` in the Render Worker; the
-   main-thread decoder and mailbox removed.
+5. **Platform frames in the browser.** `FrameWriter` and `FrameTarget` in
+   `terminus` (`render::picture`), implemented by the frame type; the
+   decoder's frame type (`vant::ImageDecoder::Frame`) and its asynchronous
+   answers as `DecodedImage`; `vant`'s residency, the frame store in
+   `bobcat-resources` and `terminus`'s `FrameImage`, `ImageResidency` and
+   `PictureSlot` generic over the frame type, defaulting to `Infallible`;
+   `bobcat_core::Painter<P>` and the view's seat generic over it
+   (`Painter::with_platform_frames`). In `bobcat-wasm`: `BrowserFrame` and
+   its writer, `createImageBitmap` and `ImageDecoder` in the Render Worker
+   ([Platform capabilities](#platform-capabilities)), and the main-thread
+   decoder, its mailbox and its port removed. Tests: `vant`'s residency
+   holds a platform frame until it is released and restores it by a decode;
+   `terminus`'s painter uploads a lent platform frame through a test writer,
+   draws it and releases it in one adoption, and writes an `Id` picture's
+   platform frames into its one texture; `bobcat-wasm`'s `image_frames`
+   answers one frame without `ImageDecoder` and maps WebCodecs' counts and
+   durations. In a real browser,
+   `node crates/bobcat-wasm/scripts/render-check.ts` (local only, see
+   `docs/browser-wasm.md`) renders a card with a still PNG, a looping GIF in
+   an `<image>`, and a finite GIF as a CSS image and as an
+   `<image loop-count="1">`, and asserts on its pixels: the finite ones rest
+   on their last frame, the looping one shows both its frames. Native behaviour and every golden are unchanged.
 6. **Minimal video.** The media capability, the `video` component, macOS and
    browser implementations.
 
 ## Open verification
 
-- Current browser support for WebCodecs `ImageDecoder`.
-- Whether `createImageBitmap` and the present browser path produce the same
-  pixels (premultiplication, colour management). The wasm target has no
-  rendering test in CI today, so step 5 needs one.
-- What `vello_gpu` assumes about an external texture's colour space. Its
-  alpha is settled: a texture bound with `TextureBindings::insert` is read as
-  premultiplied RGBA, from mip level 0 of a non-array 2D view of a filterable
-  float format, and its sides must fit in `u16`.
+Settled by step 5:
+
+- **Browser support for WebCodecs `ImageDecoder`** (MDN browser-compat-data,
+  November 2026): Chrome and Edge 94, Firefox 133, Safari 27.3; exposed in
+  Window and dedicated Workers, secure contexts only (WebCodecs, "Image
+  Decoding": `[Exposed=(Window,DedicatedWorker), SecureContext]`). Not
+  Baseline. Every browser the Wasm build runs in (Chrome 135 and later)
+  has it; the one-frame branch covers the rest.
+- **`createImageBitmap` options** (MDN browser-compat-data): the function in
+  Chrome 50, Firefox 42, Safari 15; `imageOrientation` Chrome 52, Firefox
+  93, Safari 15; `premultiplyAlpha` Chrome 52, Firefox 93, Safari 17
+  (partial from 15); `colorSpaceConversion` Chrome 58, Firefox 98, Safari
+  15; `resizeWidth`/`resizeHeight` Chrome 54, Firefox 98, Safari 15;
+  `resizeQuality` Chrome 54, Firefox 149, Safari 15.
+- **Same pixels as the `Image` decoder path.** Both apply the browser's
+  colour management into sRGB and the EXIF orientation. The old path
+  drew into a 2D canvas, which holds premultiplied pixels, and read them
+  back unpremultiplied with `getImageData` before the engine premultiplied
+  them again, which loses precision where alpha is low; the new path keeps
+  them premultiplied from decode to texture. In Chrome 157 on macOS the
+  render check's still image (an opaque half and a half at 50 % alpha)
+  draws the same pixel values both ways at the sampled points.
+- What `vello_gpu` assumes about an external texture's colour space: none
+  beyond what it samples. It reads the texture's values as they are and
+  composes in the space the target is in, as it does a CPU bitmap's
+  upload; the writer therefore leaves sRGB values in it, which is what the
+  CPU path's `Rgba8Unorm` upload holds too. Its alpha is settled: a texture
+  bound with `TextureBindings::insert` is read as premultiplied RGBA, from
+  mip level 0 of a non-array 2D view of a filterable float format, and its
+  sides must fit in `u16`.
+
+Open:
+
+- `frames` decodes every frame of an animation once to learn its durations,
+  since WebCodecs states a duration only on a decoded frame; reading the
+  delays from the container would save that pass and is not built.
+- A large image is decoded at full size before it is resized; reading the
+  orientation from the header and decoding once at the target size would
+  save the first bitmap and is not built.

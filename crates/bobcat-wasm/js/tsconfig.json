@@ -1,7 +1,7 @@
 {
   "$schema": "https://www.schemastore.org/tsconfig",
-  // The main-thread program: the facade and the image decoder it owns,
-  // emitted to `dist/` with the declarations the package exports.
+  // The main-thread program: the facade and what it owns, emitted to
+  // `dist/` with the declarations the package exports.
   "extends": "../../../tsconfig.base.json",
   "compilerOptions": {
     "lib": ["es2023", "dom"],
@@ -12,5 +12,5 @@
     "rootDir": ".",
     "outDir": "../dist"
   },
-  "files": ["facade.ts", "image-decoder.ts", "performance.ts", "protocol.d.ts", "text-input.ts"]
+  "files": ["facade.ts", "performance.ts", "protocol.d.ts", "text-input.ts"]
 }

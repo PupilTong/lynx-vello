@@ -52,11 +52,11 @@ use std::sync::Arc;
 #[cfg(test)]
 use std::time::Duration;
 
-use terminus::link::CommittedFrame;
 use terminus::link::input::{InputEvent, InputKind};
 use terminus::link::painter::{EmitEvent, GesturePolicy};
 #[cfg(test)]
 use terminus::link::painter::{FrameClock, GestureRouter, InputDecisions, ScrollIntents};
+use terminus::link::{CommittedFrame, FrameWriter};
 #[cfg(test)]
 use tokio::sync::mpsc;
 use tokio::sync::watch;
@@ -178,7 +178,13 @@ pub(crate) struct FarEnd {
 /// arena, the resolved pixels — belongs to the attachment rather than to the
 /// painter. The draw target and what it holds do not: what was last drawn
 /// stays on screen, and stays capturable, across both.
-pub struct Painter {
+///
+/// `P` is the platform frame type of the stores of the views it attaches to
+/// ([`FrameImages::PlatformFrame`](crate::FrameImages::PlatformFrame)):
+/// [`std::convert::Infallible`], the default, for a host whose store answers
+/// CPU pixels only ([`Self::new`]), and the host's own type otherwise
+/// ([`Self::with_platform_frames`]) — the browser's `ImageBitmap`.
+pub struct Painter<P = std::convert::Infallible> {
     /// The presenting painter: the draw target and everything that turns
     /// adopted frames into pixels in it.
     core: terminus::link::painter::Painter,
@@ -186,7 +192,7 @@ pub struct Painter {
     /// Non-owning, and the only handle there is on a live view: an upgrade
     /// that fails is the view having been released, which is therefore a fact
     /// this painter reads rather than one anybody has to tell it.
-    seat: Weak<ViewSeat>,
+    seat: Weak<ViewSeat<P>>,
     /// A receiver on that view's publication watch, cloned when this painter
     /// attached.
     ///
@@ -221,7 +227,7 @@ struct PresentReport {
     container_timing_stopped: bool,
 }
 
-impl std::fmt::Debug for Painter {
+impl<P: FrameWriter + 'static> std::fmt::Debug for Painter<P> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("Painter")
@@ -234,7 +240,8 @@ impl std::fmt::Debug for Painter {
 
 impl Painter {
     /// Builds a painter over one draw target, on the thread that will draw
-    /// into it — the only thread macOS lets a surface be created from.
+    /// into it — the only thread macOS lets a surface be created from, for
+    /// views whose stores answer CPU pixels only.
     ///
     /// It observes nothing yet: [`Self::attach`] points it at a view.
     ///
@@ -250,26 +257,7 @@ impl Painter {
         height: f32,
         device_pixel_ratio: f32,
     ) -> Result<Self, EngineError> {
-        let core = terminus::link::painter::Painter::new(
-            target,
-            width,
-            height,
-            device_pixel_ratio,
-            LYNX_GESTURES,
-        )
-        .await?;
-        Ok(Self::with_core(core))
-    }
-
-    fn with_core(core: terminus::link::painter::Painter) -> Self {
-        Self {
-            core,
-            seat: Weak::new(),
-            frames: None,
-            published: Published::default(),
-            begin_frames_sent: 0,
-            reported: PresentReport::default(),
-        }
+        Self::with_platform_frames(target, width, height, device_pixel_ratio).await
     }
 
     /// A painter with nowhere to draw, for the in-crate tests about routing,
@@ -342,6 +330,43 @@ impl Painter {
             },
         )
     }
+}
+
+impl<P: FrameWriter + 'static> Painter<P> {
+    /// [`Self::new`], for views whose stores hand over frames of the host's
+    /// own type `P`, which write themselves into the textures this painter
+    /// creates for them ([`FrameWriter`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::new`].
+    pub async fn with_platform_frames(
+        target: DrawTarget,
+        width: f32,
+        height: f32,
+        device_pixel_ratio: f32,
+    ) -> Result<Self, EngineError> {
+        let core = terminus::link::painter::Painter::new(
+            target,
+            width,
+            height,
+            device_pixel_ratio,
+            LYNX_GESTURES,
+        )
+        .await?;
+        Ok(Self::with_core(core))
+    }
+
+    fn with_core(core: terminus::link::painter::Painter) -> Self {
+        Self {
+            core,
+            seat: Weak::new(),
+            frames: None,
+            published: Published::default(),
+            begin_frames_sent: 0,
+            reported: PresentReport::default(),
+        }
+    }
 
     /// Starts observing `view`: its frames, its listener names, and the
     /// pixels its host has loaded.
@@ -367,7 +392,7 @@ impl Painter {
     /// there is exactly one per view. [`EngineError::Render`] if this
     /// painter's draw target has already failed, so reuse is refused rather
     /// than silently drawing nothing.
-    pub fn attach<F: ResourceFetcher + 'static>(
+    pub fn attach<F: ResourceFetcher<PlatformFrame = P> + 'static>(
         &mut self,
         view: &LynxView<F>,
     ) -> Result<(), EngineError> {
@@ -546,7 +571,7 @@ impl Painter {
     }
 
     /// Sends each BTS worker in `owed` one `PerformanceReady`.
-    fn notify_owed(seat: &ViewSeat, owed: Vec<WorkerKey>) {
+    fn notify_owed(seat: &ViewSeat<P>, owed: Vec<WorkerKey>) {
         if !owed.is_empty() {
             let demand = seat.frame_demand.borrow();
             for key in owed {
@@ -563,7 +588,7 @@ impl Painter {
     /// the commit the draw will present when the switch is off, which
     /// [`Self::report_untimed_present`] tells the registry of. A detached
     /// painter leaves the switch as it is.
-    fn sync_presentation_timing(&mut self) -> Option<(Rc<ViewSeat>, u64)> {
+    fn sync_presentation_timing(&mut self) -> Option<(Rc<ViewSeat<P>>, u64)> {
         let seat = self.seat.upgrade()?;
         let timed = seat.registry.wants_presentation_timing();
         self.core.set_presentation_timing(timed);
@@ -579,7 +604,7 @@ impl Painter {
     /// was read — that record completes now rather than waiting for a
     /// present that nothing may ever ask for. Two atomic accesses when no
     /// record waits.
-    fn report_untimed_present(untimed: Option<(Rc<ViewSeat>, u64)>) {
+    fn report_untimed_present(untimed: Option<(Rc<ViewSeat<P>>, u64)>) {
         if let Some((seat, commit_id)) = untimed {
             let owed = seat.registry.note_untimed_present(commit_id);
             Self::notify_owed(&seat, owed);
@@ -1195,7 +1220,7 @@ impl Painter {
 /// The presenting painter's insides, for the tests that pin its clock, drive
 /// its intents by hand, or read its router.
 #[cfg(test)]
-impl Painter {
+impl<P: FrameWriter + 'static> Painter<P> {
     pub(crate) fn clock_mut(&mut self) -> &mut FrameClock {
         self.core.clock_mut()
     }

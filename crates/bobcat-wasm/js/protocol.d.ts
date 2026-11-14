@@ -49,8 +49,8 @@ export interface WheelFields {
 // Facade → Render Worker.
 
 /**
- * The first message. It transfers the canvas and the Worker's end of the
- * image decoder's channel.
+ * The first message. It transfers the canvas. Images are fetched and
+ * decoded in the Render Worker itself, so nothing else crosses for them.
  */
 export interface InitMessage {
   type: 'bobcat-init'
@@ -58,7 +58,6 @@ export interface InitMessage {
   config: PageConfigFields
   devicePixelRatio: number
   height: number
-  imagePort: MessagePort
   hardwareConcurrency: number
   /**
    * The host's `NativeModules` surface, by module name: the methods it

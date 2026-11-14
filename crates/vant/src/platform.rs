@@ -24,7 +24,7 @@ use url::Url;
 use crate::CachePolicy;
 use crate::error::{Failure, ResourceErrorKind, ResourceErrorPhase};
 use crate::image::animation::ImageFrames;
-use crate::image::{Bitmap, DecodeError};
+use crate::image::{Bitmap, DecodeError, DecodedImage};
 use crate::image_header::ImageHeader;
 use crate::mime::ImageFormat;
 
@@ -357,9 +357,25 @@ impl AsyncStore for NoStore {
 /// Every animation method has a default that answers one frame, so a
 /// decoder that knows nothing of animation draws an animated file as its
 /// first frame, correctly.
+///
+/// # Platform frames
+///
+/// The blocking methods answer CPU pixels. The asynchronous ones answer a
+/// [`DecodedImage`], which may instead be a frame of the decoder's own type
+/// ([`Self::Frame`]): the browser's `createImageBitmap` answers an
+/// `ImageBitmap` whose pixels never come back to the CPU. A decoder that
+/// answers CPU pixels only names [`std::convert::Infallible`] and inherits
+/// the asynchronous defaults, which wrap the blocking answers.
 pub trait ImageDecoder: Threaded {
+    /// The decoder's own frame type, which only the platform's writer can
+    /// copy into a texture; [`std::convert::Infallible`] for a decoder whose
+    /// every answer is CPU pixels. [`Threaded`] like the decoder: natively a
+    /// frame crosses from the decode pool to the painter's thread, and in the
+    /// browser it never leaves the Render Worker.
+    type Frame: Clone + std::fmt::Debug + Threaded;
+
     /// Decodes at most `max` large, blocking the calling thread. A decoder
-    /// that cannot block (the browser's main-thread `Image`) answers
+    /// that cannot block (the browser's, on its Worker's event loop) answers
     /// [`DecodeError::Unavailable`], and is reached through
     /// [`decode`](Self::decode) instead.
     fn decode_blocking(
@@ -370,16 +386,20 @@ pub trait ImageDecoder: Threaded {
         max: (u32, u32),
     ) -> Result<Bitmap, DecodeError>;
 
-    /// Decodes asynchronously. The default runs
-    /// [`decode_blocking`](Self::decode_blocking) when it is polled.
+    /// Decodes asynchronously, to CPU pixels or a frame of the decoder's
+    /// own. The default runs [`decode_blocking`](Self::decode_blocking) when
+    /// it is polled.
     fn decode(
         &self,
         bytes: Bytes,
         format: ImageFormat,
         header: Option<ImageHeader>,
         max: (u32, u32),
-    ) -> impl Future<Output = Result<Bitmap, DecodeError>> {
-        async move { self.decode_blocking(&bytes, format, header, max) }
+    ) -> impl Future<Output = Result<DecodedImage<Self::Frame>, DecodeError>> {
+        async move {
+            self.decode_blocking(&bytes, format, header, max)
+                .map(DecodedImage::from)
+        }
     }
 
     /// Whether the decoder can run at all, reported once at startup rather
@@ -458,8 +478,9 @@ pub trait ImageDecoder: Threaded {
     }
 
     /// [`decode_frame_blocking`](Self::decode_frame_blocking)
-    /// asynchronously. The default decodes frame 0 with
-    /// [`decode`](Self::decode) and refuses any other.
+    /// asynchronously, to CPU pixels or a frame of the decoder's own. The
+    /// default decodes frame 0 with [`decode`](Self::decode) and refuses any
+    /// other.
     fn decode_frame(
         &self,
         bytes: Bytes,
@@ -467,7 +488,7 @@ pub trait ImageDecoder: Threaded {
         header: Option<ImageHeader>,
         index: usize,
         max: (u32, u32),
-    ) -> impl Future<Output = Result<Bitmap, DecodeError>> {
+    ) -> impl Future<Output = Result<DecodedImage<Self::Frame>, DecodeError>> {
         async move {
             if index == 0 {
                 return self.decode(bytes, format, header, max).await;

@@ -53,6 +53,18 @@
 //! lent the pixels ([`ImageRef::lent`]) rather than given them, so they keep
 //! nothing alive.
 //!
+//! # Platform frames
+//!
+//! A store whose frames are of the embedder's own type
+//! ([`FrameImages::PlatformFrame`](crate::render::image::FrameImages::PlatformFrame))
+//! lends or hands over a frame no render can read: nothing but its writer
+//! ([`FrameWriter`](crate::render::picture::FrameWriter)) can copy it into a
+//! texture. So a URL picture's platform frame is uploaded the moment it is
+//! described ([`BitmapLeases::upload_frame`]), leased like any upload, and
+//! released to the store in the same adoption; an `Id` picture's is written
+//! into its texture as CPU pixels are. Without a rasterizer to lease from, a
+//! platform frame draws nothing.
+//!
 //! # What a change costs
 //!
 //! [`PainterImages::revision`] counts the changes of what the commit's draws
@@ -67,7 +79,6 @@
 //! A commit whose pictures are all static URL images is described once and
 //! never again: [`PainterImages::refresh`] answers at its first test.
 
-use std::convert::Infallible;
 use std::sync::Arc;
 
 use crate::clock::ClockInstant;
@@ -77,12 +88,6 @@ use crate::render::gpu::SharedGpu;
 use crate::render::image::{FrameImage, FrameImages, ImageDescriptor, ImageSizeHint};
 use crate::render::picture::{PictureFrame, PictureId, PictureKey};
 use crate::render::sparse::BitmapLeases;
-
-/// A store the painter can draw from: one whose frames are CPU pixels. A
-/// platform frame needs a writer of the embedder's, which is not built.
-pub(super) trait CpuFrames: FrameImages<PlatformFrame = Infallible> {}
-
-impl<S: FrameImages<PlatformFrame = Infallible> + ?Sized> CpuFrames for S {}
 
 /// One distinct picture the current commit draws.
 #[derive(Debug)]
@@ -96,6 +101,9 @@ struct Source {
     /// Whether this painter's leases hold its upload, or for an `Id`
     /// picture its texture.
     leased: bool,
+    /// A platform frame the store lent was uploaded, and the store has not
+    /// been told yet that it may drop it ([`FrameImages::release`]).
+    owed: bool,
     /// The store answered it without pixels and the rasterizer holds no
     /// upload of it either: the frame draws nothing for it, and the store
     /// was told it is wanted. Cleared by the describe that answers pixels,
@@ -209,7 +217,7 @@ impl PainterImages {
     /// picture, a picture's new frame — is taken by [`Self::refresh`].
     ///
     /// Never waits: every call it makes of `store` is non-blocking.
-    pub(super) fn resolve<S: CpuFrames + ?Sized>(
+    pub(super) fn resolve<S: FrameImages + ?Sized>(
         &mut self,
         frame: &crate::visual::CommittedFrame,
         store: &S,
@@ -230,6 +238,7 @@ impl PainterImages {
                     descriptor: None,
                     pixels: None,
                     leased: false,
+                    owed: false,
                     wanted: false,
                     generation: 0,
                     next_change: None,
@@ -265,7 +274,7 @@ impl PainterImages {
     /// picture, and one whose store named its next change, is described
     /// every turn, and its newest frame taken when its generation moved.
     /// A commit with neither asks nothing.
-    pub(super) fn refresh<S: CpuFrames + ?Sized>(&mut self, store: &S) -> bool {
+    pub(super) fn refresh<S: FrameImages + ?Sized>(&mut self, store: &S) -> bool {
         if !self.watching {
             return false;
         }
@@ -316,17 +325,22 @@ impl PainterImages {
     /// Cheap enough for every turn: nothing is attempted unless a bitmap
     /// was uploaded, or the table changed, since the last attempt. Without
     /// leases — an output with no rasterizer — nothing is let go.
-    pub(super) fn release_held<S: CpuFrames + ?Sized>(&mut self, store: Option<&S>) {
+    pub(super) fn release_held<S: FrameImages + ?Sized>(&mut self, store: Option<&S>) {
         let Some(leases) = &self.leases else {
             return;
         };
         let uploads = leases.uploads();
-        if self.checked == Some(uploads) {
+        if self.checked == Some(uploads) && !self.sources.iter().any(|source| source.owed) {
             return;
         }
         self.checked = Some(uploads);
         self.names.clear();
         for source in &mut self.sources {
+            if source.owed {
+                source.owed = false;
+                self.names.push(source.key.clone());
+                continue;
+            }
             if source.pixels.is_none() {
                 continue;
             }
@@ -435,7 +449,7 @@ impl Source {
 
     /// Asks `store` what this picture draws as. See [`Self::describe_url`]
     /// and [`Self::describe_picture`].
-    fn describe<S: CpuFrames + ?Sized>(&mut self, store: &S, leases: Option<&BitmapLeases>) {
+    fn describe<S: FrameImages + ?Sized>(&mut self, store: &S, leases: Option<&BitmapLeases>) {
         self.wanted = false;
         match self.key.id() {
             Some(id) => self.describe_picture(id, store, leases),
@@ -445,9 +459,10 @@ impl Source {
 
     /// A URL picture: its pixels when the store holds them, its upload when
     /// the store dropped the pixels and `leases` can hold it, and otherwise
-    /// nothing yet — the picture is wanted. A picture the store answers
-    /// nothing for draws nothing and is not wanted.
-    fn describe_url<S: CpuFrames + ?Sized>(&mut self, store: &S, leases: Option<&BitmapLeases>) {
+    /// nothing yet — the picture is wanted. A platform frame the store holds
+    /// is uploaded here and drawn from its upload. A picture the store
+    /// answers nothing for draws nothing and is not wanted.
+    fn describe_url<S: FrameImages + ?Sized>(&mut self, store: &S, leases: Option<&BitmapLeases>) {
         let Some(FrameImage {
             descriptor,
             pixels,
@@ -462,14 +477,37 @@ impl Source {
             return;
         };
         self.next_change = next_change;
-        if let Some(pixels) = pixels {
-            let descriptor = ImageDescriptor::of(&pixels);
-            // The lease held is of the bitmap drawn before, if any other.
-            self.leased &= self.descriptor == Some(descriptor);
-            self.descriptor = Some(descriptor);
-            self.pixels = Some(pixels);
-            self.generation = generation;
-            return;
+        match pixels {
+            Some(PictureFrame::Pixels(pixels)) => {
+                let descriptor = ImageDescriptor::of(&pixels);
+                // The lease held is of the bitmap drawn before, if any other.
+                self.leased &= self.descriptor == Some(descriptor);
+                self.descriptor = Some(descriptor);
+                self.pixels = Some(pixels);
+                self.generation = generation;
+                return;
+            }
+            Some(PictureFrame::Platform(frame)) => {
+                if self.descriptor == Some(descriptor) && self.leased {
+                    return;
+                }
+                if leases.is_some_and(|leases| leases.upload_frame(&descriptor, &frame)) {
+                    self.descriptor = Some(descriptor);
+                    self.pixels = None;
+                    self.leased = true;
+                    self.owed = true;
+                    self.generation = generation;
+                } else {
+                    // No rasterizer to write it into, or a frame its writer
+                    // could not copy: nothing draws it, and asking again
+                    // brings back the same frame.
+                    self.descriptor = None;
+                    self.pixels = None;
+                    self.leased = false;
+                }
+                return;
+            }
+            None => {}
         }
         if self.descriptor == Some(descriptor) && (self.leased || self.pixels.is_some()) {
             return;
@@ -490,7 +528,7 @@ impl Source {
     /// holds; otherwise nothing yet — the picture is wanted. Without a
     /// rasterizer the taken frame's pixels are held instead. A picture the
     /// store answers nothing for draws nothing and is not wanted.
-    fn describe_picture<S: CpuFrames + ?Sized>(
+    fn describe_picture<S: FrameImages + ?Sized>(
         &mut self,
         id: PictureId,
         store: &S,
@@ -518,17 +556,13 @@ impl Source {
             }
         }
         if let Some(taken) = store.take_frame(id) {
-            let pixels = match taken.frame {
-                PictureFrame::Pixels(pixels) => pixels,
-                PictureFrame::Platform(never) => match never {},
-            };
             if let Some(leases) = leases {
-                if leases.write_picture(id, taken.generation, &pixels) {
-                    self.descriptor = Some(ImageDescriptor::of(&pixels));
+                if leases.write_picture(id, taken.generation, taken.descriptor, &taken.frame) {
+                    self.descriptor = Some(taken.descriptor);
                     self.generation = taken.generation;
                     self.leased = true;
                 }
-            } else {
+            } else if let PictureFrame::Pixels(pixels) = taken.frame {
                 self.descriptor = Some(ImageDescriptor::of(&pixels));
                 self.pixels = Some(pixels);
                 self.generation = taken.generation;
@@ -556,7 +590,7 @@ mod tests {
     use crate::render::image::{
         FrameImage, FrameImages, ImageDescriptor, ImageEvent, ImageSizeHint,
     };
-    use crate::render::picture::{PictureId, PictureKey, PictureSlot, TakenFrame};
+    use crate::render::picture::{PictureFrame, PictureId, PictureKey, PictureSlot, TakenFrame};
     use crate::render::sparse::{BitmapLeases, SharedRaster};
     use crate::style::engine::StylesheetOrigin;
     use crate::tree::document::Document;
@@ -664,7 +698,7 @@ mod tests {
             }
             Some(FrameImage {
                 descriptor: entry.descriptor,
-                pixels: entry.pixels.clone(),
+                pixels: entry.pixels.clone().map(PictureFrame::Pixels),
                 generation: 0,
                 next_change: None,
             })
@@ -1013,7 +1047,7 @@ mod tests {
             let frame = self.frames.borrow()[self.shown.get()].clone();
             Some(FrameImage {
                 descriptor: ImageDescriptor::of(&frame),
-                pixels: self.held.get().then_some(frame),
+                pixels: self.held.get().then_some(PictureFrame::Pixels(frame)),
                 generation: self.shown.get() as u64,
                 next_change: Some(ClockInstant::now() + std::time::Duration::from_mins(5)),
             })
@@ -1402,5 +1436,238 @@ mod tests {
         assert_eq!(first.pixels, second.pixels);
         assert_eq!(first.pixels, third.pixels);
         assert_eq!(store.generations_taken(picture), [1]);
+    }
+
+    /// A platform frame of the tests' own: one premultiplied colour, which
+    /// its writer fills the target with through the queue, as the browser's
+    /// writer fills it with `copyExternalImageToTexture`. Every write is
+    /// counted.
+    #[derive(Clone, Debug)]
+    struct Solid {
+        texel: [u8; 4],
+        writes: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Solid {
+        fn new(texel: [u8; 4]) -> Self {
+            Self {
+                texel,
+                writes: Arc::default(),
+            }
+        }
+
+        fn writes(&self) -> usize {
+            self.writes.load(std::sync::atomic::Ordering::Relaxed)
+        }
+    }
+
+    impl crate::render::picture::FrameWriter for Solid {
+        fn write(&self, target: &crate::render::picture::FrameTarget<'_>) -> bool {
+            let (width, height) = target.size;
+            assert_eq!(
+                (target.texture.width(), target.texture.height()),
+                target.size
+            );
+            assert!(
+                target
+                    .texture
+                    .usage()
+                    .contains(wgpu::TextureUsages::RENDER_ATTACHMENT),
+                "the destination a browser copy requires"
+            );
+            let texels: Vec<u8> = self
+                .texel
+                .iter()
+                .copied()
+                .cycle()
+                .take((width * height * 4) as usize)
+                .collect();
+            target.queue.write_texture(
+                target.texture.as_image_copy(),
+                &texels,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4 * width),
+                    rows_per_image: Some(height),
+                },
+                wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+            );
+            self.writes
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            true
+        }
+    }
+
+    /// A store whose one URL picture, `SRC`, is a platform frame it holds
+    /// until it is told it may drop it, and whose `Id` pictures publish
+    /// platform frames or CPU pixels into slots.
+    struct Platform {
+        frame: RefCell<Option<Solid>>,
+        descriptor: ImageDescriptor,
+        slots: RefCell<HashMap<PictureId, PictureSlot<Solid>>>,
+        released: RefCell<Vec<Vec<PictureKey>>>,
+        wants: RefCell<Vec<PictureKey>>,
+    }
+
+    impl Platform {
+        fn new(frame: Solid) -> Self {
+            Self {
+                frame: RefCell::new(Some(frame)),
+                descriptor: ImageDescriptor::platform(1, 1),
+                slots: RefCell::default(),
+                released: RefCell::default(),
+                wants: RefCell::default(),
+            }
+        }
+
+        fn slot(&self, picture: PictureId) -> PictureSlot<Solid> {
+            self.slots.borrow_mut().entry(picture).or_default().clone()
+        }
+    }
+
+    impl FrameImages for Platform {
+        type PlatformFrame = Solid;
+
+        fn describe(&self, picture: &PictureKey, _: ImageSizeHint) -> Option<FrameImage<Solid>> {
+            match picture {
+                PictureKey::Url(url) => {
+                    (&**url == SRC).then_some(())?;
+                    Some(FrameImage {
+                        descriptor: self.descriptor,
+                        pixels: self.frame.borrow().clone().map(PictureFrame::Platform),
+                        generation: 0,
+                        next_change: None,
+                    })
+                }
+                PictureKey::Id(id) => self.slots.borrow().get(id)?.describe(),
+            }
+        }
+
+        fn take_frame(&self, picture: PictureId) -> Option<TakenFrame<Solid>> {
+            self.slots.borrow().get(&picture)?.take()
+        }
+
+        fn want(&self, picture: &PictureKey, _: ImageSizeHint) {
+            self.wants.borrow_mut().push(picture.clone());
+        }
+
+        fn retain(&self, _: &[PictureKey]) {}
+
+        fn release(&self, pictures: &[PictureKey]) {
+            if pictures.iter().any(|picture| picture.url() == Some(SRC)) {
+                self.frame.borrow_mut().take();
+            }
+            self.released.borrow_mut().push(pictures.to_vec());
+        }
+    }
+
+    /// A platform frame a store lends for a URL picture is written by its
+    /// own writer once, in the adoption that describes it, drawn from that
+    /// upload, and released to the store in the same adoption; once the
+    /// store has dropped it, the upload goes on drawing it and nothing is
+    /// wanted.
+    #[test]
+    fn a_platform_frame_a_store_lends_is_uploaded_drawn_and_released() {
+        let gpu = SharedGpu::private(SharedRaster::new);
+        let mut painter = painter_on(&gpu);
+        let frame = Solid::new(RED);
+        let store = Platform::new(frame.clone());
+        let (mut document, _) = page("");
+        assert!(painter.adopt(Some(document.commit()), Some(&store)));
+        assert_eq!(frame.writes(), 1, "written in the adoption");
+        assert_eq!(
+            *store.released.borrow(),
+            [vec![PictureKey::Url(Arc::from(SRC))]],
+            "released in the same adoption"
+        );
+        assert!(store.frame.borrow().is_none(), "the store let go of it");
+        assert!(uploaded(&gpu, &store.descriptor));
+        assert_eq!(at(&painter.capture(0.0).expect("capture"), 4, 4), RED);
+
+        let current = painter.frame().cloned();
+        assert!(painter.adopt(current, Some(&store)));
+        assert_eq!(at(&painter.capture(0.0).expect("capture"), 4, 4), RED);
+        assert_eq!(frame.writes(), 1, "drawn from its upload");
+        assert!(store.wants.borrow().is_empty());
+        assert!(!painter.awaits_pictures());
+    }
+
+    /// Without a rasterizer a platform frame cannot be written: it draws
+    /// nothing, is not held, and is not wanted.
+    #[cfg(feature = "painter-test-utils")]
+    #[test]
+    fn a_platform_frame_draws_nothing_without_a_rasterizer() {
+        let mut painter = Painter::without_output(
+            16.0,
+            16.0,
+            1.0,
+            GesturePolicy {
+                tap_slop: 50.0,
+                long_press_move_slop: 8.0,
+                drag_slop: 8.0,
+                long_press_seconds: 0.5,
+                tap_event: "press",
+                long_press_event: "hold",
+            },
+        );
+        let frame = Solid::new(RED);
+        let store = Platform::new(frame.clone());
+        let (mut document, _) = page("");
+        assert!(painter.adopt(Some(document.commit()), Some(&store)));
+        assert!(painter.images.resolved().iter().all(Option::is_none));
+        assert_eq!(frame.writes(), 0);
+        assert!(store.wants.borrow().is_empty());
+        assert!(!painter.awaits_pictures());
+    }
+
+    /// An `Id` picture's platform frames are written into its one texture:
+    /// in place while the size holds, under the same id when it does not,
+    /// and under the same id when a CPU frame wrote a texture the platform
+    /// writer's copy cannot target.
+    #[test]
+    fn a_platform_frame_published_into_a_slot_is_written_into_the_picture_texture() {
+        let gpu = SharedGpu::private(SharedRaster::new);
+        let mut painter = painter_on(&gpu);
+        let store = Platform::new(Solid::new(RED));
+        let picture = PictureId::new();
+        let slot = store.slot(picture);
+        assert!(slot.publish_pixels(bitmap(1, 1, &[RED]), None));
+        let (mut document, _) = picture_page("", &[(picture, "")]);
+        assert!(painter.adopt(Some(document.commit()), Some(&store)));
+        assert_eq!(at(&painter.capture(0.0).expect("capture"), 4, 4), RED);
+        let (id, ..) = gpu.raster.picture_texture(picture).expect("written");
+
+        let blue = Solid::new(BLUE);
+        assert!(slot.publish(
+            PictureFrame::Platform(blue.clone()),
+            ImageDescriptor::platform(1, 1),
+            None,
+        ));
+        let current = painter.frame().cloned();
+        assert!(painter.adopt(current, Some(&store)));
+        assert_eq!(blue.writes(), 1);
+        assert_eq!(at(&painter.capture(0.0).expect("capture"), 4, 4), BLUE);
+        assert_eq!(
+            gpu.raster.picture_texture(picture),
+            Some((id, 1, 1)),
+            "a CPU frame's texture is replaced under the same id"
+        );
+
+        let red = Solid::new(RED);
+        assert!(slot.publish(
+            PictureFrame::Platform(red.clone()),
+            ImageDescriptor::platform(2, 2),
+            None,
+        ));
+        let current = painter.frame().cloned();
+        assert!(painter.adopt(current, Some(&store)));
+        assert_eq!(red.writes(), 1);
+        assert_eq!(at(&painter.capture(0.0).expect("capture"), 4, 4), RED);
+        assert_eq!(gpu.raster.picture_texture(picture), Some((id, 2, 2)));
+        assert!(store.wants.borrow().is_empty());
     }
 }

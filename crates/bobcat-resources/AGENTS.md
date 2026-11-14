@@ -131,9 +131,19 @@ else, because the index is a hint and every hit is verified.
 is compiled in — `ImageIO` on macOS
 (`CGImageSourceCreateThumbnailAtIndex` with a maximum pixel size, so a photo
 shown small is decoded small), gdk-pixbuf on Linux (loaded at runtime;
-`gdk_pixbuf_loader_set_size` from the header probe), and the main thread's
-`Image` element in the browser (the Render Worker fetches the bytes and hands
-them over as a Blob), each asked to downsample during decode. Natively a load
+`gdk_pixbuf_loader_set_size` from the header probe), and the Render Worker's
+own `createImageBitmap` and WebCodecs `ImageDecoder` in the browser
+(`bobcat-wasm`'s `platform::decode`), each asked to downsample during decode.
+A decoder may answer frames of its own type instead of CPU pixels
+(`vant::ImageDecoder::Frame`; `FrameOf<P>` names it for a platform `P`): the
+browser's are `ImageBitmap`s. Everything in this crate that holds a decoded
+image — the residency (`ImageResidency<FrameOf<P>>`), the animation store,
+the completions, the `Id` pictures' slots — holds a `PictureFrame` of either
+kind, and `ViewResources<P>`'s `FrameImages::PlatformFrame` is `FrameOf<P>`,
+which the painter has write itself into a texture
+(`bobcat_core::FrameWriter`). A platform frame is held until the painter
+releases it, as CPU pixels are, and its bytes are counted from its size.
+Natively the frame type is `Infallible` and nothing changes. Natively a load
 is one task on the crate's own `current_thread` tokio runtime, built by
 `Resources::new` and moved to a `bobcat-resources-driver` thread that drives
 and shuts it down; its blocking pool (`max_blocking_threads = worker_threads`)
@@ -151,7 +161,7 @@ settles `ImageFormat::Svg`, the load runs the engine's parser
 (`ImageEvent::parse_document`) through `images::parse_job`: natively under a
 decode permit in a blocking closure of its own, in the browser inline in the
 load's local task on the Render Worker, whose executor has no permits; the
-platform decoder and the browser's `Image` element never see an
+platform decoder and the browser's `createImageBitmap` never see an
 SVG. It completes as `Completion::ParsedDocument` and servicing reports it
 through `ImageReports::parsed_document`; a document that does not parse is
 an ordinary `Completion::Failed` with a note. `ViewResources::request_document`
@@ -188,10 +198,9 @@ A restore that fails leaves the source with nothing to draw and is not
 retried. The store answers URL pictures only (`PictureKey::Url`): every
 generation it answers is zero, it has no `PictureKey::Id` picture and so no
 frame to take, and it hands the residency the URLs of the drawn set it is told
-(`FrameImages::retain`). The browser's decode runs on the main thread's `Image` element over a
-mailbox whose two sides only signal through `postMessage`
-(`crates/bobcat-wasm/js/image-decoder.ts` is the main thread's half); nothing
-waits on it. See `docs/picture-source-design.md`.
+(`FrameImages::retain`). The browser's decode is a local task on the Render
+Worker awaiting the browser's own promises; nothing waits on it. See
+`docs/picture-source-design.md`.
 
 Shape: `Resources` is the shared system (registry, caches, executor, decoder;
 cheaply cloned, bound to the embedder's thread) and the only holder of the
@@ -225,8 +234,11 @@ is noted. `ImageIO` answers every frame, from a source kept open per playing
 animation (`decode/imageio.rs`, `Opened`: at most sixteen, keyed on the
 `Bytes` allocation, closed by `ImageDecoder::forget_frames` when the store's
 playhead stops), because a GIF frame decoded from a fresh source costs time in
-proportion to its index; gdk-pixbuf and the browser's `Image` decoder answer
-one, explicitly. The fixtures in
+proportion to its index; the browser's `ImageDecoder` keeps one open per
+animation the same way (`bobcat-wasm`), and decodes every frame once when
+asked for the frames, since `WebCodecs` states a frame's duration only on the
+decoded frame. gdk-pixbuf answers one frame, explicitly, and so does a
+browser without `ImageDecoder`. The fixtures in
 `tests/fixtures/animated/` are written by `tests/animated_fixtures.rs`, which
 checks them byte for byte; the store's tests (`animation_tests.rs`) run over a
 test platform whose decoder reads APNG with the `png` crate and a test clock
@@ -251,11 +263,12 @@ reports a source with more than one frame through `loaded_animated`, so the
 document's `ImageStatus::Bitmap` says it animates.
 
 Recorded limits: an animated image animates only where the platform decoder
-decodes frames by index (macOS today); no `region-to-decode`, no `blur-radius` post-processing, and none of the
+decodes frames by index (macOS, and browsers with `ImageDecoder`); no `region-to-decode`, no `blur-radius` post-processing, and none of the
 `<image>` element surface past `src` — the pipeline serves whatever source
 string the paint walk names, today `url(…)` layers and the source an
 `<image>` presents through `Document::set_picture`. The macOS
 decoder is type-checked against the Apple target but exercised only where
 ImageIO exists; the Linux decoder and libcurl transport are tested for real
 against the system libraries, and the browser path is linted for wasm32 and
-exercised only in a browser.
+exercised only in a browser, by `bobcat-wasm`'s local render check
+(`crates/bobcat-wasm/scripts/render-check.ts`).

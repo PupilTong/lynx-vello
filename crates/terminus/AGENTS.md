@@ -199,13 +199,26 @@ Subsystems:
   `PictureSlot` a producer on any thread publishes an `Id` picture's newest
   frame into. `FrameImages` answers a generation per picture that changes
   exactly when its pixels do, takes an `Id` picture's frame out of its slot
-  (`take_frame`), and names the platform frame type it would hand over
-  (`PlatformFrame`; the painter accepts `Infallible` only, as no writer for a
-  platform frame exists). The painter writes a taken frame into the picture's
-  own texture in the bitmap table (`BitmapLeases::write_picture`): one texture
-  and one texture id per picture, written in place, reallocated under the same
-  id when the size changes, never an atlas (`vello_gpu` 0.4's atlas holds
-  glyphs only). `render::blur`
+  (`take_frame`), and names the platform frame type it hands over
+  (`PlatformFrame`). A frame is a `PictureFrame` (`vant`'s, re-exported): CPU
+  pixels, or a value of the embedder's own type that implements
+  `FrameWriter` — `write(&self, &FrameTarget { device, queue, texture, size })
+  -> bool`, which queues a copy of the frame, premultiplied, in sRGB, into mip
+  level 0 of a 2D `Rgba8Unorm` texture of exactly its size, created with
+  `TEXTURE_BINDING | COPY_DST | RENDER_ATTACHMENT` (the browser's
+  `copyExternalImageToTexture` requires the last). `Infallible` implements it
+  and is what every native store names. The painter writes a taken frame into
+  the picture's own texture in the bitmap table
+  (`BitmapLeases::write_picture`): one texture and one texture id per
+  picture, written in place, reallocated under the same id when the size
+  changes or a platform frame needs a usage the texture lacks, never an atlas
+  (`vello_gpu` 0.4's atlas holds glyphs only). A URL picture's platform frame
+  is uploaded through its writer the moment it is described, keyed on the
+  descriptor minted for it (`ImageDescriptor::platform`), leased, and released
+  to the store in the same adoption (`BitmapLeases::upload_frame`); without a
+  rasterizer it draws nothing. The scene-building paths that read pixels on
+  the CPU (`Document::scene`, `CommittedFrame::scene`, `prime-radiant`) still
+  take stores whose frame type is `Infallible`. `render::blur`
   is the one exception: a `filter: blur()` bake is a partial replay of a
   committed frame's compose program, so it reads `CommittedFrame`'s filter side
   table, while still naming no node, style, layout or paint-order type. A

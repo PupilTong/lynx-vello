@@ -40,8 +40,8 @@ memory cache, disk cache and eviction are the `ResourceFetcher`'s — the seam
 native reaches through `LynxMediaResourceFetcher`/`LynxImageFetcher`, placed
 one layer lower so the engine never owns a byte. `crates/bobcat-resources` is
 the reference implementation of that seam, and what both shipped embedders
-use: platform decoding only (ImageIO, gdk-pixbuf, the browser's `Image` element — no
-codec is compiled in), a memory tier for bitmaps under a byte budget with the
+use: platform decoding only (ImageIO, gdk-pixbuf, the browser's `createImageBitmap` and
+`ImageDecoder` in the Render Worker — no codec is compiled in), a memory tier for bitmaps under a byte budget with the
 frame's working set pinned, a disk tier for fetched bytes with HTTP freshness
 and revalidation, a MIME-keyed preprocessing pipeline, and native's default
 "decode to the view size" as the engine's `ImageSizeHint`: the frame reads
@@ -66,9 +66,9 @@ element's. The URL image service says a loaded URL animates
 (`ImageStatus::Bitmap`'s `animated`), and the document's thread asks the host
 for the playback with `terminus::link::PlaybackRequest`, whose loop reports
 come back as `ImageEvent::Playback`. Frames come from the platform's
-decoder: `ImageIO` on macOS decodes each by index; gdk-pixbuf on Linux and the
-browser's main-thread `Image` decoder answer one frame, so an animated file
-there shows its first frame. The policy is `vant::image::animation`; the frame
+decoder: `ImageIO` on macOS and WebCodecs' `ImageDecoder` in the browser decode
+each by index; gdk-pixbuf on Linux, and a browser without `ImageDecoder`,
+answer one frame, so an animated file there shows its first frame. The policy is `vant::image::animation`; the frame
 store, its window of decoded frames and the timer that wakes the host at the
 next frame are `bobcat-resources`'s. A CSS image playing the file's count
 rather than looping forever is a deliberate deviation from native Lynx
@@ -312,7 +312,7 @@ revision 4.1 of the design, ruled 2026-10-10):
    classifies a payload as `ImageFormat::Svg`, the host does not decode it:
    the load skips the platform decoder and parses the preprocessed bytes
    instead (step 3). The browser embedder does not decode SVG through
-   `HTMLImageElement`, so every target parses the same bytes.
+   `createImageBitmap`, so every target parses the same bytes.
 2. **Markup, in `terminus`.** `<svg content>` (`crates/bobcat-core/src/main/tree/svg.rs`)
    hands its markup to `Document::insert_image_document` as bytes. The registry
    files it under a synthetic source, `svg-content:` and the 32 hex digits of

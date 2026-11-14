@@ -12,7 +12,7 @@ tier, RFC 9111 freshness, image residency and draw-sized refinement, the
 stylesheet in-flight cache, MIME sniffing and preprocessing, the registry) and
 **platform adapters** that only one target needs (libcurl, `file:` mapping, a
 cache directory, ImageIO, gdk-pixbuf, a tokio runtime; or the Render Worker's
-`fetch` and the main thread's `Image` element). A new embedder — iOS, Android,
+`fetch` and the browser's own image decoders). A new embedder — iOS, Android,
 HarmonyOS, a test host — either links the whole crate or rewrites the policy.
 
 The 2026-08-07 embedder-boundary ruling says an embedder provides *IO atomic
@@ -195,15 +195,22 @@ pub trait AsyncStore: Threaded {
 
 ```rust
 pub trait ImageDecoder: Threaded {
-    /// Decodes at most `max` large, blocking. A decoder that cannot block
-    /// (the browser's main-thread `Image`) answers
-    /// `DecodeError::Unavailable` and is reached through `decode` instead.
+    /// The decoder's own frame type, which only the platform's writer can
+    /// copy into a texture: the browser's `ImageBitmap`; `Infallible` for a
+    /// decoder whose every answer is CPU pixels.
+    type Frame: Clone + Debug + Threaded;
+
+    /// Decodes at most `max` large, blocking, to CPU pixels. A decoder that
+    /// cannot block (the browser's) answers `DecodeError::Unavailable` and
+    /// is reached through `decode` instead.
     fn decode_blocking(&self, bytes: &[u8], format: ImageFormat,
                        header: Option<ImageHeader>, max: (u32, u32))
         -> Result<Bitmap, DecodeError>;
+    /// CPU pixels or a frame of the decoder's own. Default: the blocking
+    /// answer, as `DecodedImage::Pixels`.
     fn decode(&self, bytes: Bytes, format: ImageFormat,
               header: Option<ImageHeader>, max: (u32, u32))
-        -> impl Future<Output = Result<Bitmap, DecodeError>>;
+        -> impl Future<Output = Result<DecodedImage<Self::Frame>, DecodeError>>;
     /// Reported once at startup rather than once per image.
     fn available(&self) -> Result<(), DecodeError>;
 
@@ -229,17 +236,30 @@ pub trait ImageDecoder: Threaded {
     fn forget_frames(&self, bytes: &Bytes);
     fn decode_frame(&self, bytes: Bytes, format: ImageFormat,
                     header: Option<ImageHeader>, index: usize, max: (u32, u32))
-        -> impl Future<Output = Result<Bitmap, DecodeError>>;
+        -> impl Future<Output = Result<DecodedImage<Self::Frame>, DecodeError>>;
 }
 ```
 
-`Bitmap`, `DecodeError`, `ImageFormat`, `ImageHeader` and `ImageSizeHint` all
-live in `vant`, and so do `ImageFrames` and the playback policy built on it
+`Bitmap`, `DecodedImage` (a `Bitmap`, or a `PlatformBitmap` holding a frame
+of the decoder's type with the sizes a `Bitmap` carries), `PictureFrame`,
+`DecodeError`, `ImageFormat`, `ImageHeader` and `ImageSizeHint` all live in
+`vant`, and so do `ImageFrames` and the playback policy built on it
 (`vant::image::animation`, [Animated images](#animated-images)). The
 animation methods have defaults that answer one frame, so a decoder that
 knows nothing of animation draws an animated file as its first frame. The
-native decoder overrides them on macOS (`ImageIO`); gdk-pixbuf on Linux and
-the browser's main-thread `Image` answer one frame explicitly.
+native decoder overrides them on macOS (`ImageIO`) and the browser's on
+browsers with WebCodecs' `ImageDecoder`; gdk-pixbuf on Linux answers one
+frame explicitly, and so does the browser's where `ImageDecoder` is
+missing.
+
+A platform frame is held by the image residency as CPU pixels are
+(`Residency<W, F>`, `F` the decoder's frame type): until the painter's
+rasterizer holds its upload, when the tier drops it — which is what lets the
+browser close its `ImageBitmap` — keeping the descriptor minted for it
+(`ImageDescriptor::platform`), and decoding the source again when it is
+wanted. Its bytes are counted from its size, four a pixel. The writer that
+copies one into a texture is the frame type's own
+(`terminus::link::FrameWriter`, `docs/picture-source-design.md` "Writer").
 
 ### `Platform` — the bundle an embedder hands over
 
@@ -578,10 +598,11 @@ loaded image's pixels are not always available when a frame is composed.
   turns to take: `CommittedFrame::resolve_images` answers how many sources it
   wanted, and the capture describes them once more and is refused if any is
   still missing.
-- In the browser every decode was already a local task awaiting the main
-  thread's `Image`; the mailbox's blocking half — `Atomics.wait` on the
-  Render Worker, `Atomics.notify` on the main thread — is gone, and
-  `BrowserDecoder::decode_blocking` answers `DecodeError::Unavailable`.
+- In the browser every decode is a local task on the Render Worker awaiting
+  the browser's own `createImageBitmap` or `ImageDecoder`, and
+  `BrowserDecoder::decode_blocking` answers `DecodeError::Unavailable`. The
+  main-thread `Image` decoder and its mailbox in shared memory are gone
+  (`docs/picture-source-design.md`, step 5).
 
 ## Animated images
 
@@ -615,7 +636,10 @@ element's own, on a playhead of its own over the same frames, under the
   sixteen, closed by `forget_frames` when the animation stops being drawn):
   it composites a GIF frame from the frames before it, so frame 299 of a
   300-frame GIF costs about 180 ms from a fresh source and under 1 ms from
-  one that decoded frame 298 (measured on macOS 26).
+  one that decoded frame 298 (measured on macOS 26). The browser's
+  `BrowserDecoder` keeps one WebCodecs `ImageDecoder` open per animation the
+  same way; its frames are `ImageBitmap`s, held and dropped by the same
+  rules.
   `describe` advances the playhead to the present and answers the frame it
   is on, its generation and the instant its next frame is due; a describe
   is a draw, and `retain` stops a playhead no view's drawn set includes.

@@ -68,10 +68,16 @@ type and depends only on `bytes`, `http`, `url`, `serde_json`, `thiserror`,
   writes through on whichever thread the load finished. The holds a
   background install places are not here: they wait on a tokio channel, so
   they are the orchestrator's.
-- **Image residency** (`image::residency`): `Residency<W>`, the synchronous,
-  IO-free state of every image source a host was asked for — loading with its
-  waiters `W`, loaded, the parsed-document marker, failed — over the
-  decoded-bitmap `MemoryCache`. A host asks what a request means
+- **Image residency** (`image::residency`): `Residency<W, F = Infallible>`, the
+  synchronous, IO-free state of every image source a host was asked for —
+  loading with its waiters `W`, loaded, the parsed-document marker, failed —
+  over the decoded-bitmap `MemoryCache` of `PictureFrame<F>`s. `F` is the
+  decoder's platform frame type: a platform frame (an `ImageBitmap` in the
+  browser) is held, released, evicted and restored exactly as CPU pixels
+  are — held until the caller's rasterizer holds its upload, then dropped,
+  its descriptor kept, decoded again when wanted — and counted at four
+  bytes a pixel. `Described::Resident` carries the frame and its
+  descriptor. A host asks what a request means
   (`Requested`: report now, join, or start a load at a bound), feeds every
   completion back (`loaded`, `parsed`, `failed`, `refined`, …) and is handed
   the waiters to tell; a frame's `describe` answers `Described::Resident` with
@@ -109,11 +115,19 @@ type and depends only on `bytes`, `http`, `url`, `serde_json`, `thiserror`,
   completed loop, and whether it was the final one.
   `ImageDecoder` answers frames through `frames_blocking`/`frames` and
   `decode_frame_blocking`/`decode_frame`, whose defaults answer one frame;
+  its blocking decodes answer CPU pixels (`Bitmap`) and its asynchronous ones
+  a `DecodedImage<Self::Frame>` — a `Bitmap` or a `PlatformBitmap` of the
+  decoder's own frame type (`ImageDecoder::Frame`, `Threaded`; `Infallible`
+  for a decoder with none, whose asynchronous defaults wrap the blocking
+  answers);
   one animation's frames are asked of one `Bytes` allocation in playing order,
   so a decoder may keep state keyed on it until `forget_frames`;
   `ImageFormat::may_animate` (GIF, PNG, WebP) is which containers are asked.
 - **The vocabulary**: `CachePolicy`, `mime`, `preprocess`, `image_header`,
-  `data_url`, `image` (`ImageSizeHint`, `Bitmap`, `DecodeError`,
+  `data_url`, `image` (`ImageSizeHint`, `Bitmap`, `PlatformBitmap`,
+  `DecodedImage`, `PictureFrame` — CPU pixels or a platform frame, which
+  `terminus` re-exports — `ImageDescriptor` with `platform` minting a
+  descriptor for a frame that has no blob, `frame_bytes`, `DecodeError`,
   `target_size`, `wants_refinement`, `bounded`), and `error`
   (`ResourceError`, `ResourceErrorKind`, `ResourceErrorPhase`, `RetryAdvice`,
   `Failure`), which `bobcat-core` and `terminus` re-export at their old paths.

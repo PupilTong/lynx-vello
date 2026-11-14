@@ -1879,7 +1879,7 @@ impl Painter {
     /// Never waits: nothing it asks of `store` decodes or blocks on I/O.
     pub fn adopt<S>(&mut self, frame: Option<Arc<CommittedFrame>>, store: Option<&S>) -> bool
     where
-        S: FrameImages<PlatformFrame = std::convert::Infallible> + ?Sized,
+        S: FrameImages + ?Sized,
     {
         self.images.bind(self.output.gpu());
         let commit = frame.as_ref().map(|frame| frame.commit_id());

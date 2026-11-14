@@ -47,10 +47,13 @@ use crate::style::PreparsedStyleSheet;
 /// resource future and polls none, and nothing here names a host's transport, caches or
 /// codecs: whatever surface those have belongs to the host's own crate.
 ///
-/// Its frames are CPU pixels: the painter draws no platform frame yet.
-pub trait ResourceFetcher:
-    terminus::link::FrameImages<PlatformFrame = std::convert::Infallible>
-{
+/// Its frames are CPU pixels or frames of the host's own type
+/// ([`FrameImages::PlatformFrame`](terminus::link::FrameImages::PlatformFrame)),
+/// which write themselves into a texture the painter created
+/// ([`FrameWriter`](terminus::link::FrameWriter)); a host with none names
+/// [`std::convert::Infallible`]. A [`Painter`](crate::Painter) attaches only
+/// to views whose fetcher names its own frame type.
+pub trait ResourceFetcher: terminus::link::FrameImages {
     /// Begins one source load without blocking its caller.
     ///
     /// **A view's startup sources are requested before it runs at all**:

@@ -188,6 +188,15 @@ set where someone can see it rather than inheriting a silent no-op.
 `LynxView::prefetch_images` warms sources ahead of the walk that would discover
 them.
 
+**A store's frames may be of the host's own type.** `FrameImages::PlatformFrame`
+names it, bounded by `FrameWriter`: the frame writes itself into a texture the
+painter created (`docs/picture-source-design.md`, "Writer"). A view's seat holds
+its store as `FrameImages<PlatformFrame = F::PlatformFrame>`, so a `Painter<P>`
+attaches only to views whose fetcher names `P`. `Painter::new` builds the
+`Painter<Infallible>` every native host uses; `Painter::with_platform_frames`
+builds one for another type — the browser's `Painter<BrowserFrame>`, whose
+frames are `ImageBitmap`s (`crates/bobcat-wasm`).
+
 **An SVG document is parsed by the host, where it decodes bitmaps**
 (`docs/svg-lynx-component-design.md`, revision 4.1, ruled 2026-10-10). A
 fetched SVG is parsed by the fetcher with the engine's own parser,

@@ -10,6 +10,9 @@
 mod browser;
 #[cfg(target_arch = "wasm32")]
 pub mod platform;
+// The browser decoder's pure half, which the native test build checks too.
+#[cfg(any(target_arch = "wasm32", test))]
+mod image_frames;
 // The editing seam's pure half, which the native test build checks too.
 #[cfg(any(target_arch = "wasm32", test))]
 mod text_input;
