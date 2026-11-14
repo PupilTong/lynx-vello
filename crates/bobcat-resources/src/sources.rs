@@ -307,33 +307,36 @@ fn arrival(kind: SourceKind) -> Option<Instant> {
 }
 
 /// Waits out the background install that will register `url`, if one is
-/// running ([`crate::Resources::register_in_background`]). Its failure is
-/// this load's answer, and so is a stylesheet it registered pre-parsed,
-/// which has no bytes to fetch; otherwise the load goes on, and finds what
-/// the install registered.
+/// running ([`crate::Resources::register_in_background`]); its failure is
+/// this load's answer. A stylesheet registered pre-parsed, which has no bytes
+/// to fetch, is this load's answer too, whether the install was still running
+/// or had already ended when the load looked: an install releases its hold
+/// only after everything is registered. Otherwise the load goes on, and finds
+/// what the install registered.
 async fn after_install<P: Platform>(
     shared: &SharedHandle<P>,
     url: &Url,
     kind: SourceKind,
 ) -> Option<SourceResult> {
-    let mut done = shared.transports.installs.install_covering(url)?;
-    let ended = done
-        .wait_for(Option::is_some)
-        .await
-        .map(|result| result.clone().expect("wait_for required a result"));
-    let failure = |message: &str| {
-        Some(Err(vant::error::Failure::new(
-            ResourceErrorKind::ResponseBody,
-            ResourceErrorPhase::ReadBody,
-            message,
-        )
-        .into_error(Some(Arc::from(url.as_str())))
-        .into()))
-    };
-    match ended {
-        Ok(Ok(())) => {}
-        Ok(Err(message)) => return failure(&message),
-        Err(_) => return failure("the container install ended without an answer"),
+    if let Some(mut done) = shared.transports.installs.install_covering(url) {
+        let ended = done
+            .wait_for(Option::is_some)
+            .await
+            .map(|result| result.clone().expect("wait_for required a result"));
+        let failure = |message: &str| {
+            Some(Err(vant::error::Failure::new(
+                ResourceErrorKind::ResponseBody,
+                ResourceErrorPhase::ReadBody,
+                message,
+            )
+            .into_error(Some(Arc::from(url.as_str())))
+            .into()))
+        };
+        match ended {
+            Ok(Ok(())) => {}
+            Ok(Err(message)) => return failure(&message),
+            Err(_) => return failure("the container install ended without an answer"),
+        }
     }
     if kind == SourceKind::StyleSheet
         && let Some(Registered::StyleSheet(sheet)) = shared.transports.registry.get(url)

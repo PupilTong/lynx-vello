@@ -159,8 +159,11 @@ impl<P: Platform> Transports<P> {
                 format!("`{specifier}` is not a URL: {error}"),
             )
         })?;
-        if self.registry.contains(&url)
-            || self.installs.install_covering(&url).is_some()
+        // The hold before the registry: an install releases its hold only
+        // after everything is registered, so a URL it was going to register
+        // and no longer holds is registered by the time the registry is read.
+        if self.installs.install_covering(&url).is_some()
+            || self.registry.contains(&url)
             || Self::serves_scheme(url.scheme())
         {
             Ok(url)

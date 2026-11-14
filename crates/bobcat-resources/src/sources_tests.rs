@@ -661,6 +661,42 @@ async fn a_load_under_a_container_being_registered_waits_for_it() {
     );
 }
 
+/// A load that missed the registry while an install was registering its
+/// container, and looks for the install after it ended: no hold covers the
+/// URL, and a stylesheet the install registered pre-parsed is still this
+/// load's answer, never a fetch of bytes it does not have. A script with no
+/// hold goes on to its fetch.
+#[tokio::test]
+async fn a_load_past_an_ended_install_answers_its_pre_parsed_stylesheet() {
+    let resources = resources();
+    let sheet = Url::parse("app:///page/card.web.bundle/style-info.css").unwrap();
+    resources
+        .register_style_sheet(
+            sheet.as_str(),
+            Arc::new(bobcat_core::PreparsedStyleSheet::default()),
+        )
+        .unwrap();
+    assert!(
+        resources
+            .shared
+            .transports
+            .installs
+            .install_covering(&sheet)
+            .is_none()
+    );
+
+    assert!(matches!(
+        after_install(&resources.shared, &sheet, SourceKind::StyleSheet).await,
+        Some(Ok(LoadedSource::StyleSheet(StyleSheetSource::Preparsed(_))))
+    ));
+    let script = Url::parse("app:///page/card.web.bundle/root.js").unwrap();
+    assert!(
+        after_install(&resources.shared, &script, SourceKind::Script)
+            .await
+            .is_none()
+    );
+}
+
 /// An install that fails fails every load it held, with its own message,
 /// and leaves a note.
 #[tokio::test]
