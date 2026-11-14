@@ -162,11 +162,13 @@ scroll frame.
    (`Painter::take_redraw`); a producer's wake is what gets the host to adopt.
    A live picture does not count as animating, so it does not keep the
    display link running. A known next-change instant is reported as
-   `Painter::next_picture_change` for the host to arm a timer at; the painter
-   has no timer of its own (the engine's timers run on the main thread, for
-   realm timers and `x-swiper` autoplay), so arming one is the host's, and no
-   host does yet: no store in the workspace answers a next change before
-   step 4.
+   `Painter::next_picture_change`; the painter has no timer of its own (the
+   engine's timers run on the main thread, for realm timers and `x-swiper`
+   autoplay). A store that answers a next change wakes its host at it
+   itself: `bobcat-resources` arms a timer on its own executor for an
+   animated image's next frame and wakes the host the way a finished load
+   does ([Animated images](#animated-images)), so no host arms one on
+   `next_picture_change`.
 
 ### Consequences accepted
 
@@ -213,22 +215,50 @@ frame.
 ## Animated images
 
 One player serves every animated picture. It lives below the element layer,
-so a CSS image needs no element code to animate.
+so a CSS image needs no element code to animate. Its policy is `vant`'s
+(`vant::image::animation`): `ImageFrames` (what a decoder says of the
+frames), `Timeline`, `PlayPolicy` and `Playhead`, synchronous and reading no
+clock. The store around it for URL pictures is `bobcat-resources`'s
+(`animation.rs`).
 
-- The **frame sequence** is shared per URL: decoded once, by the platform's
-  decoder, a bounded window ahead of the playhead.
+- The **frame sequence** is shared per URL: decoded by the platform's
+  decoder, frame by frame, a bounded window ahead of the playhead. Frame 0 is
+  the URL's bitmap in the residency, as a still image's is; while the URL is
+  drawn its store holds the frame shown and the two after it, drops a frame
+  the playhead has passed, and drops the frame shown once the rasterizer
+  holds its upload. An animation of at most three frames keeps all of them
+  while drawn. A URL not drawn holds no frame beyond frame 0.
 - A **playhead** holds the position, the loops completed and whether it is
-  paused. A `Url` picture has one playhead for all its draws; an `Id`
-  picture has its own.
-- A playhead advances only while its picture is drawn. Time does not pass
-  while it is not: it continues from the frame it stopped on.
-- A frame that is not decoded when it is due is waited for. Frames are never
-  skipped, so N loops produce exactly N loop events.
+  paused, drawn or finished; its step count is the picture's generation. A
+  `Url` picture has one playhead for all its draws, in every view of a
+  resource scope; an `Id` picture will have its own (step 4b).
+- A playhead advances only while its picture is drawn: from the first
+  describe of it until no view's drawn set (`FrameImages::retain`) includes
+  it. Time does not pass while it is not: it continues from the frame it
+  stopped on, for the time that frame had left.
+- A frame that is not decoded when it is due is waited for. A playhead moves
+  at most one frame per describe and only onto a decoded frame, so frames
+  are never skipped and N loops complete exactly N times
+  (`Playhead::loops_completed`). A frame reached within its own delay of the
+  instant it was due keeps the file's pace; one reached later is shown for
+  its whole delay from then.
 - A frame delay of 10 ms or less is 100 ms.
-- Uploads are keyed by (animation, frame index), so playheads resting on the
-  same frame share one.
+- A URL picture's uploads are keyed by the descriptor of the bitmap each
+  frame is, so every draw of the URL, which shares the one playhead, draws
+  one upload of the frame shown. A frame decoded again is a new bitmap and
+  is uploaded again. A painter leases only the bitmap a URL picture draws
+  now: when a picture moves to another bitmap within a commit, the lease on
+  the one before ends, and the rasterizer releases it under its budget.
+- While a playhead runs, `bobcat-resources` arms a timer on its own executor
+  at the instant the next frame is due; it wakes the host the way a finished
+  load does, and the adoption that follows describes the picture again. A
+  frame due and not decoded arms no timer: its decode's completion wakes the
+  host.
 
-A playhead's *policy* is the only difference between the two semantics:
+A playhead's *policy* (`PlayPolicy`: the loop count, and whether it starts
+paused) is the only difference between the two semantics. Only the CSS
+policy is built (`PlayPolicy::stated`); the `<image>` one and its control
+surface are step 4b:
 
 | | `<image>` | CSS image, `<img>` |
 | --- | --- | --- |
@@ -267,9 +297,15 @@ picking a frame by wall clock at each draw and are not reproduced.
 
 Associated types on `vant::Platform`, never `dyn`:
 
-- **Decoder** — today's `ImageDecoder`, extended to answer an image's frame
-  count, per-frame delays and stated loop count, and to decode frame *i*. Its
-  output is CPU pixels or a platform frame.
+- **Decoder** — `ImageDecoder`, which answers an image's frames
+  (`frames_blocking` / `frames`: per-frame stated delays and the stated loop
+  count, as `ImageFrames`) and decodes frame *i* (`decode_frame_blocking` /
+  `decode_frame`). One animation's frames are asked of one `Bytes`
+  allocation in playing order, so a decoder may keep its source open between
+  them until `forget_frames`; `ImageIO` does, since it composites a GIF frame
+  from the frames before it. Their defaults answer one frame, so a decoder that knows
+  nothing of animation draws an animated file as its first frame. Its output
+  is CPU pixels; a platform frame is step 5's.
 - **Frame writer** — the platform-frame writer above. A platform with no
   platform frames names an uninhabited frame type and needs none.
 - **Media** — opens a URL and returns a handle with `play`, `pause`,
@@ -280,9 +316,16 @@ Per platform:
 
 | | Image decode | Animation frames | Video |
 | --- | --- | --- | --- |
-| macOS | ImageIO | ImageIO by frame index | AVFoundation, BGRA output as CPU frames at first |
-| Browser | `createImageBitmap` in the Render Worker | WebCodecs `ImageDecoder`; first frame only where it is missing | `HTMLVideoElement` → `VideoFrame`, transferred to the Render Worker |
-| Linux | gdk-pixbuf | first frame only, for now | none, for now |
+| macOS | ImageIO | ImageIO by frame index (built) | AVFoundation, BGRA output as CPU frames at first |
+| Browser | `createImageBitmap` in the Render Worker | WebCodecs `ImageDecoder`; first frame only where it is missing. Until step 5 the main-thread `Image` decoder answers one frame | `HTMLVideoElement` → `VideoFrame`, transferred to the Render Worker |
+| Linux | gdk-pixbuf | first frame only, for now: gdk-pixbuf has no decode by frame index (built) | none, for now |
+
+`ImageIO` (verified on macOS 26) reads the frame count and each frame's
+`UnclampedDelayTime` from the properties without decoding a pixel, and
+answers the container's `LoopCount` as the number of plays, zero for
+forever, for GIF, APNG and WebP alike; for a GIF that is the NETSCAPE repeat
+count plus one, and one without the extension, which is how browsers read a
+GIF. A frame decoded by index is the whole canvas at that frame.
 
 The browser's main-thread `Image` decoder and its shared-memory mailbox are
 removed: with nothing blocking, nothing needs them.
@@ -359,9 +402,25 @@ One change per step, in order; each leaves the tree green.
    element's record when the element is freed (`CustomElement::freed`). The
    role and presented-choice tests moved with it. No behaviour change: every
    golden is unchanged.
-4. **Animated images.** The player and its two policies in `vant`; the
-   decoder's frame interface and its ImageIO implementation; the `<image>`
-   attributes, methods and events; CSS images on shared playheads.
+4. **Animated images.** In two changes.
+   - **4a, animated URL pictures.** The player's policy in `vant`
+     (`vant::image::animation`: `ImageFrames`, `Timeline`, `PlayPolicy`,
+     `Playhead`) with the CSS policy; the decoder's frame interface with
+     one-frame defaults, its ImageIO implementation, and explicit one-frame
+     answers from gdk-pixbuf and the browser's `Image` decoder; the frame
+     store and shared playheads behind `describe`, `want`, `retain` and
+     `release` in `bobcat-resources`, with its timer on the store's own
+     executor; a painter ends the lease on a URL picture's previous bitmap
+     when the picture moves to another within a commit. Every URL picture
+     plays: a CSS image, and an `<image>` element, which presents a URL
+     picture and until 4b plays under the CSS policy, the file's own count
+     with no control surface. Fixtures (`crates/bobcat-resources/tests/fixtures/animated/`,
+     written by `tests/animated_fixtures.rs`) and a golden of two frames of
+     one file drawn with no commit between them
+     (`crates/bobcat-resources/tests/screenshots/animated/`).
+   - **4b, the `<image>` element's playback.** Not built yet: an `Id`
+     picture per `<image>` with its own playhead under the `<image>` policy,
+     `loop-count`, `autoplay`, the four methods and the three events.
 5. **Platform frames in the browser.** The frame-writer capability;
    `createImageBitmap` and `ImageDecoder` in the Render Worker; the
    main-thread decoder and mailbox removed.

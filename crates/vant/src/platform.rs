@@ -23,6 +23,7 @@ use url::Url;
 
 use crate::CachePolicy;
 use crate::error::{Failure, ResourceErrorKind, ResourceErrorPhase};
+use crate::image::animation::ImageFrames;
 use crate::image::{Bitmap, DecodeError};
 use crate::image_header::ImageHeader;
 use crate::mime::ImageFormat;
@@ -350,7 +351,12 @@ impl AsyncStore for NoStore {
     }
 }
 
-/// Platform pixels: decodes an encoded image to a [`Bitmap`].
+/// Platform pixels: decodes an encoded image to a [`Bitmap`], and an
+/// animated one frame by frame.
+///
+/// Every animation method has a default that answers one frame, so a
+/// decoder that knows nothing of animation draws an animated file as its
+/// first frame, correctly.
 pub trait ImageDecoder: Threaded {
     /// Decodes at most `max` large, blocking the calling thread. A decoder
     /// that cannot block (the browser's main-thread `Image`) answers
@@ -379,6 +385,98 @@ pub trait ImageDecoder: Threaded {
     /// Whether the decoder can run at all, reported once at startup rather
     /// than once per image.
     fn available(&self) -> Result<(), DecodeError>;
+
+    /// What the image's frames are, blocking the calling thread: how many,
+    /// how long each is shown as the file states it, and how many times the
+    /// file says they play. Asked only of a container that
+    /// [may animate](ImageFormat::may_animate).
+    ///
+    /// The default answers [`ImageFrames::still`], one frame, which is a
+    /// complete answer rather than a decision left unmade: an animated file
+    /// is then drawn as its first frame, which is what
+    /// [`decode_blocking`](Self::decode_blocking) produces. A decoder that
+    /// can answer more overrides this and
+    /// [`decode_frame_blocking`](Self::decode_frame_blocking) together.
+    fn frames_blocking(
+        &self,
+        bytes: &[u8],
+        format: ImageFormat,
+        header: Option<ImageHeader>,
+    ) -> Result<ImageFrames, DecodeError> {
+        let _ = (bytes, format, header);
+        Ok(ImageFrames::still())
+    }
+
+    /// [`frames_blocking`](Self::frames_blocking) asynchronously. The
+    /// default runs it when it is polled.
+    fn frames(
+        &self,
+        bytes: Bytes,
+        format: ImageFormat,
+        header: Option<ImageHeader>,
+    ) -> impl Future<Output = Result<ImageFrames, DecodeError>> {
+        async move { self.frames_blocking(&bytes, format, header) }
+    }
+
+    /// Decodes frame `index`, at most `max` large, blocking the calling
+    /// thread: the whole canvas as it is shown at that frame, every earlier
+    /// frame's disposal and blending applied.
+    ///
+    /// The frames of one animation are asked of one `bytes` allocation, in
+    /// playing order, one at a time. A decoder whose cost for frame `index`
+    /// grows with `index` when it starts from nothing (`ImageIO` composites
+    /// a GIF from its first frame) may keep what it opened for `bytes`
+    /// between calls, holding a clone so the allocation it is keyed on
+    /// cannot be reused, until [`forget_frames`](Self::forget_frames).
+    ///
+    /// The default decodes frame 0 with
+    /// [`decode_blocking`](Self::decode_blocking) and refuses any other, the
+    /// one answer consistent with the default
+    /// [`frames_blocking`](Self::frames_blocking).
+    fn decode_frame_blocking(
+        &self,
+        bytes: &Bytes,
+        format: ImageFormat,
+        header: Option<ImageHeader>,
+        index: usize,
+        max: (u32, u32),
+    ) -> Result<Bitmap, DecodeError> {
+        if index == 0 {
+            return self.decode_blocking(bytes, format, header, max);
+        }
+        Err(DecodeError::Unsupported(format!(
+            "this decoder decodes one frame, not frame {index}"
+        )))
+    }
+
+    /// No more frames of `bytes` will be asked for until the next
+    /// [`decode_frame_blocking`](Self::decode_frame_blocking) of them: a
+    /// decoder that kept anything open for them may let it go. The default
+    /// keeps nothing, so lets go of nothing.
+    fn forget_frames(&self, bytes: &Bytes) {
+        let _ = bytes;
+    }
+
+    /// [`decode_frame_blocking`](Self::decode_frame_blocking)
+    /// asynchronously. The default decodes frame 0 with
+    /// [`decode`](Self::decode) and refuses any other.
+    fn decode_frame(
+        &self,
+        bytes: Bytes,
+        format: ImageFormat,
+        header: Option<ImageHeader>,
+        index: usize,
+        max: (u32, u32),
+    ) -> impl Future<Output = Result<Bitmap, DecodeError>> {
+        async move {
+            if index == 0 {
+                return self.decode(bytes, format, header, max).await;
+            }
+            Err(DecodeError::Unsupported(format!(
+                "this decoder decodes one frame, not frame {index}"
+            )))
+        }
+    }
 }
 
 /// A [`Store`] with the byte budget the tier built over it may use. The tier

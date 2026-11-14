@@ -43,6 +43,12 @@
 //!   (`<svg content>`) arrives as a document request with its bytes and is parsed the same way. A
 //!   document holds no bitmap, so the memory tier and draw-sized decoding do not apply, and it is
 //!   never retained: every request is parsed and reported, and the engine owns what it encodes.
+//! - **Animated images.** An animated GIF, APNG or WebP plays wherever a URL picture is drawn, for
+//!   the loop count its file states, on one playhead per URL shared by every draw
+//!   (`vant::image::animation`); its frames are decoded by index a bounded window ahead of the
+//!   playhead where the platform decoder can (`ImageIO`), and a timer on this crate's own executor
+//!   wakes the host when the next one is due. gdk-pixbuf and the browser's `Image` answer one
+//!   frame.
 //! - **Draw-sized decoding.** The frame reads each image with the size it draws it at
 //!   ([`bobcat_core::ImageSizeHint`]); a bitmap far larger than its draw is re-decoded at the drawn
 //!   size in the background, so a photo shown as a thumbnail costs a thumbnail.
@@ -85,12 +91,14 @@ use std::time::Duration;
 
 use bobcat_core::resource::ResourceFetcher;
 use bobcat_core::{
-    FrameImages, ImageReports, ImageResidency, ImageSizeHint, PictureKey, PreparsedStyleSheet,
+    ClockInstant, FrameImages, ImageReports, ImageResidency, ImageSizeHint, PictureKey,
+    PreparsedStyleSheet,
 };
 use bytes::Bytes;
 use rustc_hash::FxHashSet;
 use url::Url;
 
+mod animation;
 pub mod cache;
 pub mod decode;
 mod executor;
@@ -533,7 +541,14 @@ pub(crate) struct Shared<P: Platform> {
     /// decode: a load, a refinement, and a wanted source's restore.
     #[cfg(all(test, not(target_arch = "wasm32")))]
     decode_hook: Mutex<Option<DecodeHook>>,
+    /// A test's stand-in for the clock the animated sources' playheads read.
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    clock_hook: Mutex<Option<ClockHook>>,
 }
+
+/// What a test reads the playheads' clock from instead of the engine's.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(crate) type ClockHook = Arc<dyn Fn() -> ClockInstant + Send + Sync>;
 
 /// What a test runs on the blocking thread of a background transport read.
 #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -633,6 +648,88 @@ impl<P: Platform> Shared<P> {
             }
         }
         self.decode_bytes(bytes, format, header, max)
+    }
+
+    /// The clock the animated sources' playheads read: the engine's, or a
+    /// test's.
+    #[cfg_attr(
+        any(not(test), target_arch = "wasm32"),
+        expect(clippy::unused_self, reason = "a test build reads its own clock here")
+    )]
+    fn now(&self) -> ClockInstant {
+        #[cfg(all(test, not(target_arch = "wasm32")))]
+        {
+            let hook = self
+                .clock_hook
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            if let Some(hook) = hook {
+                return hook();
+            }
+        }
+        ClockInstant::now()
+    }
+
+    /// Reads the playheads' clock from `hook`.
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) fn set_clock_hook(&self, hook: ClockHook) {
+        *self
+            .clock_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hook);
+    }
+
+    /// What a load's image's frames are, when its container may animate and
+    /// the decoder answers more than one; `None` for a still image, which
+    /// is also what a decoder that fails to answer leaves the image as.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn frames_job(
+        &self,
+        bytes: &[u8],
+        format: mime::ImageFormat,
+        header: Option<image_header::ImageHeader>,
+    ) -> Option<vant::image::animation::ImageFrames> {
+        if !format.may_animate() {
+            return None;
+        }
+        vant::ImageDecoder::frames_blocking(&*self.decoder, bytes, format, header)
+            .ok()
+            .filter(vant::image::animation::ImageFrames::is_animated)
+    }
+
+    /// [`Self::frames_job`] without blocking, for the browser's loads.
+    #[cfg(target_arch = "wasm32")]
+    async fn frames_async(
+        &self,
+        bytes: Bytes,
+        format: mime::ImageFormat,
+        header: Option<image_header::ImageHeader>,
+    ) -> Option<vant::image::animation::ImageFrames> {
+        if !format.may_animate() {
+            return None;
+        }
+        vant::ImageDecoder::frames(&*self.decoder, bytes, format, header)
+            .await
+            .ok()
+            .filter(vant::image::animation::ImageFrames::is_animated)
+    }
+
+    /// The decode of one frame of an animated source, while holding its
+    /// permit.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn decode_frame_job(
+        &self,
+        decode: &animation::FrameDecode,
+    ) -> Result<decode::Bitmap, decode::DecodeError> {
+        vant::ImageDecoder::decode_frame_blocking(
+            &*self.decoder,
+            &decode.bytes,
+            decode.format,
+            decode.header,
+            decode.index,
+            decode.max,
+        )
     }
 
     /// Puts `hook` in the place of the platform decoder for background jobs.
@@ -813,6 +910,8 @@ impl<P: Platform> Resources<P> {
             fetch_hook: Mutex::new(None),
             #[cfg(all(test, not(target_arch = "wasm32")))]
             decode_hook: Mutex::new(None),
+            #[cfg(all(test, not(target_arch = "wasm32")))]
+            clock_hook: Mutex::new(None),
         });
         let resources = Self {
             shared,
@@ -828,6 +927,7 @@ impl<P: Platform> Resources<P> {
                     initial_decode_bound,
                     downsample_ratio,
                 ),
+                ClockInstant::now(),
                 receiver,
             ))),
         };
@@ -892,6 +992,8 @@ impl<P: Platform> Resources<P> {
                 fetch_hook: Mutex::new(None),
                 #[cfg(all(test, not(target_arch = "wasm32")))]
                 decode_hook: Mutex::new(None),
+                #[cfg(all(test, not(target_arch = "wasm32")))]
+                clock_hook: Mutex::new(None),
             }),
             #[cfg(not(target_arch = "wasm32"))]
             executor: Arc::clone(&self.executor),
@@ -902,6 +1004,7 @@ impl<P: Platform> Resources<P> {
                     self.shared.initial_decode_bound,
                     self.shared.downsample_ratio,
                 ),
+                ClockInstant::now(),
                 receiver,
             ))),
         }
@@ -1045,7 +1148,9 @@ impl<P: Platform> Resources<P> {
     #[must_use]
     pub fn memory_used_bytes(&self) -> usize {
         let state = self.local.borrow();
-        state.residency.bitmap_bytes() + state.residency.encoded_bytes()
+        state.residency.bitmap_bytes()
+            + state.residency.encoded_bytes()
+            + state.animations.held_bytes()
     }
 
     /// Changes the bitmap budget, evicting what no longer fits.
@@ -1108,6 +1213,11 @@ impl<P: Platform> Resources<P> {
 
     pub(crate) fn note(&self, message: String) {
         self.shared.note(message);
+    }
+
+    /// The clock the animated sources' playheads read.
+    pub(crate) fn now(&self) -> ClockInstant {
+        self.shared.now()
     }
 }
 
@@ -1239,9 +1349,14 @@ impl<P: Platform> Drop for ViewResources<P> {
     fn drop(&mut self) {
         // `try_borrow_mut`: a panic that unwinds through a borrow of the
         // image state must not turn into an abort here.
-        if let Ok(mut state) = self.resources.local.try_borrow_mut() {
+        let now = self.resources.now();
+        let stopped = if let Ok(mut state) = self.resources.local.try_borrow_mut() {
             state.residency.release_view(self.view);
-        }
+            state.animations.release_view(self.view, now)
+        } else {
+            Vec::new()
+        };
+        images::forget_frames(&self.resources, stopped);
     }
 }
 

@@ -87,6 +87,25 @@ type and depends only on `bytes`, `http`, `url`, `serde_json`, `thiserror`,
   a `ViewKey` and its own working set, and the tier pins **the union of
   every view's set** (`retain(view, frame)`, `release_view`), so one view's
   frame never unpins another's. It stores waiters and never calls them.
+- **Animated-image playback policy** (`image::animation`,
+  `docs/picture-source-design.md` "Animated images"): `ImageFrames` (what a
+  decoder says of an image's frames: stated delays and `Loops::Infinite` or
+  `Loops::Plays(n)`, total plays; `ImageFrames::still()` is one frame),
+  `Timeline` (the played delays: a stated delay of 10 ms or less is 100 ms,
+  `played_delay`), `PlayPolicy` (loop count and whether it starts paused;
+  `PlayPolicy::stated` is the CSS image's, the file's own count) and
+  `Playhead`. Pure and synchronous, reading no clock: time is a `Duration`
+  since an origin the caller picks. A playhead runs only while drawn
+  (`set_drawn`), paused (`pause`, `resume`, `restart`) or not; `advance`
+  moves at most one frame, only onto a frame its caller says is ready, so no
+  frame is skipped and N loops complete exactly N times (`loops_completed`,
+  `Step::Advanced { looped }`, `Step::Finished`); after the last loop of a
+  finite count the last frame stays. `steps` is the picture's generation.
+  `ImageDecoder` answers frames through `frames_blocking`/`frames` and
+  `decode_frame_blocking`/`decode_frame`, whose defaults answer one frame;
+  one animation's frames are asked of one `Bytes` allocation in playing order,
+  so a decoder may keep state keyed on it until `forget_frames`;
+  `ImageFormat::may_animate` (GIF, PNG, WebP) is which containers are asked.
 - **The vocabulary**: `CachePolicy`, `mime`, `preprocess`, `image_header`,
   `data_url`, `image` (`ImageSizeHint`, `Bitmap`, `DecodeError`,
   `target_size`, `wants_refinement`, `bounded`), and `error`

@@ -33,6 +33,10 @@ libloading = { workspace = true }
 memmap2 = { workspace = true }
 # The executor's stop signal. Native only: the browser has no runtime here.
 tokio-util = { workspace = true }
+# The animated sources' timers run on the executor's own timer. Native only:
+# tokio's clock reads `std::time::Instant`, which panics on wasm32, where
+# the Render Worker's `setTimeout` is the timer instead.
+tokio = { workspace = true, features = ["time"] }
 
 # In the browser a load is a local task on the Render Worker, and the clock
 # is `Date`; the browser's adapters themselves are `bobcat-wasm`'s.
@@ -45,6 +49,10 @@ bobcat-source = { workspace = true }
 prime-radiant = { workspace = true, features = ["render"] }
 flume = { workspace = true }
 png = { workspace = true }
+# A presenting painter for the animated-image golden: it draws frames from a
+# `ViewResources` with no commit between them.
+pollster = { workspace = true }
+terminus = { workspace = true }
 # `rt` and `sync` come from `[dependencies]`; every test is a default-flavour
 # `#[tokio::test]`, so only the attribute macro is missing.
 tokio = { workspace = true, features = ["macros"] }

@@ -122,6 +122,10 @@ pub use main::tree::PageConfig;
 pub use native_module::{ModuleCall, ModuleCallback, NativeModule};
 pub use paint::{Painter, PostedFrame};
 pub use style::{PreparsedDeclaration, PreparsedKeyframe, PreparsedRule, PreparsedStyleSheet};
+/// The engine's monotonic clock, which a picture's next change
+/// ([`FrameImage::next_change`]) is read on: a host whose store knows when
+/// an animated picture next changes answers on it.
+pub use terminus::link::clock::ClockInstant;
 pub use terminus::link::{
     DocumentKind, FontBlob, FrameImage, FrameImages, ImageDescriptor, ImageEvent, ImageInbox,
     ImageReports, ImageResidency, ImageSizeHint, MAX_RENDERABLE_DIMENSION, MAX_STYLE_THREADS,
