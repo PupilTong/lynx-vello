@@ -380,11 +380,10 @@ consequential choice about whether to follow the spec or the quirk.
   `docs/picture-source-design.md` ruling 5): a CSS image, like a future HTML
   `<img>`, plays automatically for the count the file states — a GIF's
   NETSCAPE repeat count plus one, once without it; an APNG's `num_plays`; a
-  WebP's loop count; zero is forever — and then shows its last frame. Until
-  the `<image>` element's own playback lands (step 4b), an `<image>` presents
-  a URL picture and plays under this same policy too, so an `<image>` without
-  `loop-count` plays the file's count where native loops it forever; step 4b
-  gives it native's policy.
+  WebP's loop count; zero is forever — and then shows its last frame. An
+  `<image>`'s `placeholder` is such a picture too. An `<image>`'s own `src`
+  is not: it plays under native's policy (the `<image>` entries under
+  Components).
 
 - **`background` shorthand, multi-layer** — Lynx has an acknowledged code
   comment ("different from the web"): if a background layer has no image,
@@ -1842,6 +1841,36 @@ consequential choice about whether to follow the spec or the quirk.
   measures and fires `load` as this engine does. **Following web-core**, which
   is also the cheaper contract to state: whether an element asks for its
   source does not depend on layout.
+- **An animated `src` has native's playback surface, which web-core's
+  `x-image` has none of.** `loop-count` (absent, zero, negative or not a
+  number plays forever; N plays N times; the file's own count is never read),
+  `autoplay` (on unless `"false"`; off shows the first frame), the UI methods
+  `startAnimate`, `pauseAnimation`, `resumeAnimation` and `stopAnimation`, and
+  the events `startplay`, `currentloopcomplete` and `finalloopcomplete`
+  (`docs/picture-source-design.md`, "Animated images", ruling 4). web-core
+  hands the `src` to an inner `<img>`, which the browser plays for the count
+  the file states with no control, so there a `loop-count` changes nothing,
+  the methods answer code 3, `METHOD_NOT_FOUND`
+  (`web-core/ts/client/mainthread/elementAPIs/createInvokeUIMethod.ts`), and
+  the events never fire (`web-elements/src/elements/XImage/XImage.ts`,
+  `.../XImage/ImageEvents.ts`). **Following native**, the behaviour Android
+  and iOS share, and iOS's where they share none:
+  - `startAnimate` restarts at the first frame with the loops reset, and `stopAnimation` moves
+    the position to the first frame while the frame shown stays (iOS's SDWebImage with
+    `resetFrameIndexWhenStopped`, `platform/darwin/ios/lynx_service/image/LynxImageService.m:306-352`).
+    Android continues rather than restarts on `startAnimate`, treats `stopAnimation` as a pause,
+    advances by wall clock while not drawn and skips late frames; this engine's playhead advances
+    only while drawn and never skips a frame.
+  - Every method answers code 0 with native's message as its `data`, whether or not anything
+    plays, and on an element showing no animated `src` too. There iOS calls no callback at all
+    (`checkImageType`) and Android answers code 4 with "Not support … yet"
+    (`platform/android/.../ui/image/LynxImageManager.java:773-793`); the design's rule is one
+    answer for every element.
+  - `loop-count` and `autoplay` are read when the `src` loads, at the end of the entry that
+    loaded it, and a later change takes effect at the next load; a `src` change starts the
+    playback over.
+  - A method called before the `src` has loaded, or on an `<image>` whose `src` is still,
+    changes nothing: the next load plays under the attributes alone.
 - **A `load` that settles while the element is detached is still delivered.**
   web-core buffers it and replays it from `connectedCallback`
   (`XImage/ImageEvents.ts:44-63`), which is a workaround for its host and its

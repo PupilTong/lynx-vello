@@ -284,11 +284,24 @@ no per-element `load` or `error` (`bobcat-core`'s `tree::image_sources` holds
 those for `<image>` and `<svg>`). What it offers instead is the registry as a
 URL image service with no element in it: `Document::request_image(url) ->
 ImageStatus` asks for a URL once (`take_wanted_images`) and answers what is
-known (`Pending`, `Bitmap { width, height }`, `Vector { width, height }`,
-`Failed`); `image_status` reads it without asking; `apply_image_events`
-answers each `(source, ImageStatus)` a batch of reports settled, which is how
-an embedder learns an outcome. A settled status never moves, and a host URL
-is never forgotten.
+known (`Pending`, `Bitmap { width, height, animated }`, `Vector { width,
+height }`, `Failed`); `image_status` reads it without asking;
+`apply_image_events` answers each `(source, ImageStatus)` a batch of reports
+settled, which is how an embedder learns an outcome. A settled status never
+moves, and a host URL is never forgotten. `animated` is the host's word that
+the URL's decoder answered more than one frame
+(`ImageReports::loaded_animated`).
+
+**Picture playback.** An embedder that owns an `Id` picture can ask the host
+to play a URL's frames into it under a playhead of its own: a
+`PlaybackRequest` (`Play { picture, source, policy }` under `vant`'s
+`PlayPolicy`, `Control { picture, control }` with `vant`'s `Control` as
+`PlaybackControl`, `End { picture }`) travels from the embedder to its host,
+and the host reports each loop through `ImageReports::playback(picture,
+PlaybackReport)`, which reaches the embedder as `ImageEvent::Playback` among
+the image reports. `terminus` defines both and acts on neither:
+`Document::apply_image_events` skips a playback report, which settles no
+source. No element, attribute or event name is in either type.
 
 **Documents handed over as markup.** `Document::insert_image_document(bytes,
 kind) -> Arc<str>` files a document the page wrote itself (the Lynx

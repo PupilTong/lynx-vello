@@ -56,9 +56,9 @@ use crate::main::layout_change::{
 use crate::main::record::write_record_field;
 use crate::main::tree::{
     Autoplays, ComponentDetail, ComponentEvent, ComponentEvents, Field, ImageOutcome, ImageSources,
-    LynxDocument, MAX_FRAME_DEPTH, PageConfig, SELECTION_CHANGE, SelectionReports,
-    apply_image_events, frame_depth, invoke_base_method, is_svg, is_text, nested_page,
-    new_document, relevance_span, report_selection_changes, reset_frame,
+    LynxDocument, MAX_FRAME_DEPTH, PageConfig, SELECTION_CHANGE, START_PLAY_EVENT,
+    SelectionReports, apply_image_events, frame_depth, invoke_base_method, is_svg, is_text,
+    nested_page, new_document, relevance_span, report_selection_changes, reset_frame,
 };
 use crate::performance::{Opener, OpenerId};
 use crate::realm::child::{ChildHostModules, ChildHostState, ChildKey};
@@ -2061,6 +2061,21 @@ impl DocumentSlot {
         }
     }
 
+    /// Hands the host the playback requests the `image` component made
+    /// since the last drain ([`ImageSources::take_playback`]): an animated
+    /// `src` starting, under the policy its element's attributes give now,
+    /// a UI method's control, or a picture's end. Empty on every entry that
+    /// touched no animated `<image>`.
+    fn request_playback(&mut self) {
+        let Some(document) = self.document.as_ref() else {
+            return;
+        };
+        let requests = self.image_sources.take_playback(document);
+        if !requests.is_empty() {
+            self.outbox.notify(ViewNotice::Playback(requests));
+        }
+    }
+
     /// Whether the document holds anything the last commit did not apply.
     ///
     /// After the epilogue's [`Self::commit_if_dirty`] this is `true` only
@@ -2646,6 +2661,7 @@ impl MainThreadRuntime {
         let time = self.timeline_milliseconds();
         let mut slot = self.slot.borrow_mut();
         slot.request_documents();
+        slot.request_playback();
         slot.sync_editing_routes();
         slot.commit_if_dirty();
         slot.queue_instant_scroll_events();
@@ -3137,7 +3153,17 @@ impl MainThreadRuntime {
                     }
                     (node, ERROR_EVENT, false)
                 }
-                ComponentEvent::Plain { node, name } => (node, name, false),
+                // `startplay` only when the picture the `src` plays into was
+                // played from the start, which the policy read at the end of
+                // the entry that loaded it says.
+                ComponentEvent::Image(ImageOutcome::StartPlay { node, picture }) => {
+                    if !self.slot.borrow().image_sources.autoplays(picture) {
+                        continue;
+                    }
+                    (node, START_PLAY_EVENT, false)
+                }
+                ComponentEvent::Image(ImageOutcome::Played { node, name })
+                | ComponentEvent::Plain { node, name } => (node, name, false),
                 // The realm holding the frame's handle has filed the internal
                 // listener on it, so it alone is called, at any depth; a
                 // frame freed since — its page reset, its handle collected —

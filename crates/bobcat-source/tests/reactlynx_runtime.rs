@@ -417,6 +417,173 @@ async fn compiled_svg_component_draws_content_and_src() {
     .await;
 }
 
+/// The compiled `react-animated-image` card: two `<image>`s of one animated
+/// GIF whose file plays twice (the fixture's `index.jsx` has the layout),
+/// played by the platform decoder's frames on a playhead of each element's
+/// own, with the painter drawing them.
+///
+/// - `#playing`, `loop-count={3}`: `startplay` before `load`, three `currentloopcomplete`s and one
+///   `finalloopcomplete`, then nothing, and `#status` turns green.
+/// - `#paused`, `autoplay={false}`: a `load` and nothing more.
+/// - A tap: `startAnimate` on `#playing` answers code 0 and "Animation restarted.", and it plays
+///   its three loops again, with no second `startplay`; `stopAnimation` on `#paused`, which was not
+///   playing, answers code 0 and "Animation stopped."; `#status` turns blue.
+///
+/// Only macOS's decoder (`ImageIO`) reads a GIF's frames; gdk-pixbuf answers
+/// one frame, which plays nothing.
+#[tokio::test]
+#[cfg_attr(
+    not(target_os = "macos"),
+    ignore = "only ImageIO answers an animated GIF's frames"
+)]
+async fn compiled_animated_image_plays_its_own_loops_and_answers_its_methods() {
+    use bobcat_core::input::{InputEvent, Point2D, PointerKind, PointerPhase};
+    use bobcat_core::{DrawTarget, Painter};
+    const GREEN: [u8; 4] = [0, 128, 0, 255];
+    const BLUE: [u8; 4] = [0, 0, 255, 255];
+
+    let page = PageSource::from_bytes(
+        &Url::parse("app:///animated.web.bundle").unwrap(),
+        fixtures::fixture("react-animated-image").page,
+    )
+    .unwrap();
+    let resources = Resources::new(ResourcesConfig::default(), || {});
+    page.register_with(&resources);
+    let group = LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Auto)
+        .await
+        .unwrap();
+    let view = group
+        .create_lynx_view(
+            240.0,
+            240.0,
+            1.0,
+            resources.builder(),
+            Vec::new(),
+            page.view_sources(SCREEN, "en-US"),
+        )
+        .unwrap();
+    let mut painter = Painter::new(DrawTarget::Offscreen, 240.0, 240.0, 1.0)
+        .await
+        .unwrap();
+    painter.attach(&view).unwrap();
+    let mut card = AnimatedCard {
+        view,
+        painter,
+        booted: false,
+        logged: Vec::new(),
+    };
+
+    card.until_status(GREEN).await;
+    // A little longer: a fourth loop, or a late event, would show here.
+    card.idle(Duration::from_millis(800)).await;
+    assert_eq!(
+        card.of("playing"),
+        [
+            "startplay {}",
+            r#"load {"width":8,"height":8}"#,
+            "currentloopcomplete {}",
+            "currentloopcomplete {}",
+            "currentloopcomplete {}",
+            "finalloopcomplete {}",
+        ],
+        "three loops, not the file's two"
+    );
+    assert_eq!(card.of("paused"), [r#"load {"width":8,"height":8}"#]);
+
+    card.logged.clear();
+    for phase in [PointerPhase::Down, PointerPhase::Up] {
+        card.painter.dispatch_input(InputEvent::pointer(
+            Point2D::new(
+                f32::from(AnimatedCard::STATUS.0),
+                f32::from(AnimatedCard::STATUS.1),
+            ),
+            1,
+            PointerKind::Touch,
+            phase,
+        ));
+    }
+    card.until_status(BLUE).await;
+    assert_eq!(
+        card.of("playing"),
+        [
+            "startAnimate 0 Animation restarted.",
+            "currentloopcomplete {}",
+            "currentloopcomplete {}",
+            "currentloopcomplete {}",
+            "finalloopcomplete {}",
+        ]
+    );
+    assert_eq!(card.of("paused"), ["stopAnimation 0 Animation stopped."]);
+}
+
+/// The `react-animated-image` card in a 240px view, and the lines it logged.
+struct AnimatedCard {
+    view: bobcat_core::LynxView<bobcat_resources::ViewResources>,
+    painter: bobcat_core::Painter,
+    booted: bool,
+    logged: Vec<String>,
+}
+
+impl AnimatedCard {
+    /// A point of the card's `#status` band.
+    const STATUS: (u16, u16) = (120, 180);
+
+    /// One turn of the view and the painter, keeping the card's log lines.
+    fn turn(&mut self) {
+        for event in self.view.pump() {
+            match event {
+                EngineEvent::ScriptFinished => self.booted = true,
+                EngineEvent::ConsoleMessage { message, .. } => {
+                    if let Some(line) = message.strip_prefix("animated-image ") {
+                        self.logged.push(line.to_owned());
+                    }
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        self.painter.pump().unwrap();
+    }
+
+    /// Turns until `#status` shows `colour`.
+    async fn until_status(&mut self, colour: [u8; 4]) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            self.turn();
+            if self.booted {
+                let shot = self.painter.capture().unwrap();
+                let at = (usize::from(Self::STATUS.1) * 240 + usize::from(Self::STATUS.0)) * 4;
+                if shot.pixels[at..at + 4] == colour {
+                    return;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "#status never turned {colour:?}; logged {:?}",
+                self.logged
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    /// Turns for `duration`.
+    async fn idle(&mut self, duration: Duration) {
+        let until = Instant::now() + duration;
+        while Instant::now() < until {
+            self.turn();
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    /// What `#id` logged, without the id.
+    fn of(&self, id: &str) -> Vec<String> {
+        self.logged
+            .iter()
+            .filter_map(|line| line.strip_prefix(&format!("{id} ")))
+            .map(str::to_owned)
+            .collect()
+    }
+}
+
 /// A compiled `<scroll-coordinator>` (300 by 400: a translucent blue toolbar
 /// 60 tall, a red header 200 tall, a slot of eight 100px items in a
 /// `<scroll-view>`) boots with the header under the toolbar and the first

@@ -229,12 +229,12 @@ native numeric-length conversion remain unsupported.
 
 Legacy component-scoped roots, direct MTS selector PAPI, UI invoke methods
 other than the base set's four (`boundingClientRect`, `scrollIntoView`,
-`scrollTo`, `scrollBy`), `selectTab`, a swiper's `scrollTo`, a `scroll-view`'s four, a `list`'s five, an `x-refresh-view`'s three, a scroll coordinator's `setFoldExpanded`, a `text`'s `getTextBoundingRect` and a dialog's four (a `list`'s and a coordinator's `getScrollInfo` among them), animation methods
+`scrollTo`, `scrollBy`), `selectTab`, a swiper's `scrollTo`, a `scroll-view`'s four, a `list`'s five, an `x-refresh-view`'s three, a scroll coordinator's `setFoldExpanded`, a `text`'s `getTextBoundingRect`, an `image`'s four and a dialog's four (a `list`'s and a coordinator's `getScrollInfo` among them), animation methods
 and cross-realm host objects remain pending.
 An `image`'s `startAnimate`/`pauseAnimation`/`resumeAnimation`/`stopAnimation`
-and a `text`'s `getSelectedText`/`setTextSelection` are code 3 for want of a
-primitive: the engine plays no image frames, and has no text selection
-model.
+are built (`tree::image`): each answers code 0 with native's message as its
+`data` and sends its control to the picture the element plays an animated
+`src` into.
 `boundingClientRect` takes no `relativeTo`, `androidEnableTransformProps` or
 `iOSEnableAnimationProps`: it reads nothing from its `params`, since each of
 those names behavior this engine does not have. Query failures and invalid legacy ReactRef chaining

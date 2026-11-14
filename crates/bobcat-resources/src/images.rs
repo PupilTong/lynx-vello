@@ -71,7 +71,7 @@ use std::time::Duration;
 
 use bobcat_core::{
     ClockInstant, DocumentKind, FrameImage, ImageEvent, ImageReports, ImageResidency,
-    ImageSizeHint, VectorDocument,
+    ImageSizeHint, PictureId, PlaybackRequest, VectorDocument,
 };
 use bytes::Bytes;
 use url::Url;
@@ -131,7 +131,7 @@ fn parse(
 ) -> Result<Arc<VectorDocument>, String> {
     match ImageEvent::parse_document(Arc::clone(source), bytes, kind) {
         ImageEvent::ParsedDocument { document, .. } => Ok(document),
-        ImageEvent::Loaded { .. } | ImageEvent::Failed { .. } => {
+        ImageEvent::Loaded { .. } | ImageEvent::Failed { .. } | ImageEvent::Playback { .. } => {
             Err(format!("`{source}` is not a document the engine can draw"))
         }
     }
@@ -326,6 +326,7 @@ fn apply<P: Platform>(resources: &Resources<P>, completion: Completion) {
                     format,
                     header,
                     encoded,
+                    animated: animation.is_some(),
                 },
             );
             if let Some((frames, bytes, size)) = animation {
@@ -384,16 +385,136 @@ fn apply<P: Platform>(resources: &Resources<P>, completion: Completion) {
     }
 }
 
-/// Records `view`'s working set: the bitmaps of every view's set are never
-/// evicted, and the playhead of an animated source runs while some view's
-/// set includes it.
-pub(crate) fn retain<P: Platform>(resources: &Resources<P>, view: ViewKey, frame: &[Arc<str>]) {
+/// Records `view`'s working set: the bitmaps of every view's set, and the
+/// first frames of the sources its `Id` pictures play, are never evicted;
+/// the URL playhead of an animated source runs while some view's set
+/// includes its URL, and an `Id` picture's playhead while some view's set
+/// includes the picture.
+pub(crate) fn retain<P: Platform>(
+    resources: &Resources<P>,
+    view: ViewKey,
+    frame: &[Arc<str>],
+    pictures: &[PictureId],
+) {
     let mut state = resources.local.borrow_mut();
-    state.residency.retain(view, frame);
+    if pictures.is_empty() || state.animations.is_empty() {
+        state.residency.retain(view, frame);
+    } else {
+        let mut pinned = frame.to_vec();
+        pinned.extend(state.animations.sources_of(pictures));
+        state.residency.retain(view, &pinned);
+    }
     if !state.animations.is_empty() {
-        let stopped = state.animations.retain(view, frame, resources.now());
+        let stopped = state
+            .animations
+            .retain(view, frame, pictures, resources.now());
         drop(state);
         forget_frames(resources, stopped);
+    }
+}
+
+/// What a frame drawing the `Id` picture `picture` at `hint` draws: the
+/// newest frame its playhead published, after advancing it to the present.
+/// A picture this store plays nothing for is `None`.
+pub(crate) fn describe_picture<P: Platform>(
+    resources: &Resources<P>,
+    picture: PictureId,
+    hint: ImageSizeHint,
+) -> Option<FrameImage> {
+    let mut jobs = Vec::new();
+    let (image, wake) = {
+        let mut state = resources.local.borrow_mut();
+        let ImageState {
+            residency,
+            animations,
+            ..
+        } = &mut *state;
+        animations.describe_picture(residency, picture, hint, resources.now(), &mut jobs)
+    };
+    start(resources, jobs);
+    if wake {
+        resources.wake();
+    }
+    image
+}
+
+/// A frame draws the `Id` picture `picture` and has neither a frame to take
+/// nor a texture: the frame its playhead shows is published again once its
+/// pixels are at hand.
+pub(crate) fn want_picture<P: Platform>(
+    resources: &Resources<P>,
+    picture: PictureId,
+    hint: ImageSizeHint,
+) {
+    let mut jobs = Vec::new();
+    {
+        let mut state = resources.local.borrow_mut();
+        let ImageState {
+            residency,
+            animations,
+            ..
+        } = &mut *state;
+        animations.want_picture(residency, picture, hint, resources.now(), &mut jobs);
+    }
+    start(resources, jobs);
+}
+
+/// Takes the newest frame of the `Id` picture `picture`'s slot, if it has
+/// not been taken.
+pub(crate) fn take_frame<P: Platform>(
+    resources: &Resources<P>,
+    picture: PictureId,
+) -> Option<bobcat_core::TakenFrame> {
+    resources.local.borrow().animations.take_frame(picture)
+}
+
+/// Serves one playback request of `view`'s, whose loops are reported to
+/// `reports`. Every request wakes the host when it changed what a picture
+/// shows or will show, so the picture is described again: its frame is
+/// published there and its timer armed.
+pub(crate) fn playback<P: Platform>(
+    resources: &Resources<P>,
+    view: ViewKey,
+    reports: &ImageReports,
+    request: PlaybackRequest,
+) {
+    let mut jobs = Vec::new();
+    let mut stopped = None;
+    let wake = {
+        let mut state = resources.local.borrow_mut();
+        let ImageState {
+            residency,
+            animations,
+            ..
+        } = &mut *state;
+        match request {
+            PlaybackRequest::Play {
+                picture,
+                source,
+                policy,
+            } => animations.play(
+                residency,
+                picture,
+                &source,
+                policy,
+                reports.clone(),
+                view,
+                resources.now(),
+                &mut jobs,
+            ),
+            PlaybackRequest::Control { picture, control } => {
+                animations.control(picture, control, resources.now())
+            }
+            PlaybackRequest::End { picture } => {
+                stopped = animations.end(picture);
+                false
+            }
+        }
+    };
+    start(resources, jobs);
+    forget_frames(resources, stopped);
+    if wake {
+        resources.wake();
     }
 }
 

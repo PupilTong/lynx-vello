@@ -725,6 +725,7 @@ mod tests {
             source: Arc::from(source),
             width: 1,
             height: 1,
+            animated: false,
         }
     }
 

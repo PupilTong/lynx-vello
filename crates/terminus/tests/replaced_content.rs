@@ -260,6 +260,7 @@ fn freeing_a_node_mid_load_leaves_no_stale_binding() {
             source: std::sync::Arc::from("app:///pending.png"),
             width: 4,
             height: 4,
+            animated: false,
         }]);
     assert_eq!(settled.len(), 1, "the source still settles");
 }

@@ -205,6 +205,7 @@ mod tests {
             source: Arc::from(source),
             width: 30,
             height: 15,
+            animated: false,
         }
     }
 

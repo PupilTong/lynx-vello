@@ -20,7 +20,10 @@ px, and, for a `text-selection` text — `user-select` in its UA rules, so
 a pointer selects it without focus — `getSelectedText` and
 `setTextSelection` over the document's selection),
 `tree::image` (the `src`/`placeholder` reflection into the element's
-sources and its UA box), `tree::scroll_container` (`scroll-view` and
+sources, its UA box, and a component whose `CustomElement::invoke` answers
+`startAnimate`, `pauseAnimation`, `resumeAnimation` and `stopAnimation` with
+code 0 and native's message, sending each as a control to the picture the
+element plays an animated `src` into), `tree::scroll_container` (`scroll-view` and
 `list` as scroll containers — which axis scrolls, which one clips, and which
 way the subtree stacks, from `web-elements`' own `scroll-view.css` and
 `x-list.css`; `enable-scroll="false"` leaves the box a scroll container only
@@ -229,6 +232,23 @@ it (`tree::apply_image_events`, which the runtime's report path calls). A
 placeholder owes no event. The two components and the runtime share one
 handle per document, built with it (`new_document`'s `images`); a freed
 element's record goes in its component's `CustomElement::freed`.
+
+An `image` whose own `src` loads animated (`ImageStatus::Bitmap`'s
+`animated`) presents a `PictureKey::Id` of its own instead of the URL and
+queues a `terminus::link::PlaybackRequest::Play` for it; `ImageOutcome::StartPlay`
+is queued before its `load`. The runtime's epilogue takes the queue
+(`ImageSources::take_playback`, after the documents) and hands it to the host
+as one `ViewNotice::Playback`: that is when a `Play`'s policy is read from
+the element's `loop-count` and `autoplay` (`image_sources::play_policy`), so
+attributes written after a `src` that settled at its write still count, and
+`StartPlay` is dispatched as `startplay` only when that policy plays
+(`ImageSources::autoplays`). A `src` change, or a free, queues
+`PlaybackRequest::End`; a UI method queues a `Control`. The host's
+`ImageEvent::Playback` reports become `currentloopcomplete` and
+`finalloopcomplete` at the element whose picture played
+(`ImageOutcome::Played`), and one for a picture that has ended is dropped.
+All three are dispatched like `load`, non-bubbling with a `{}` detail. An
+animated `placeholder`, and every `svg`, presents the URL.
 
 `tree::svg` is the Lynx `<svg>` component
 (`docs/svg-lynx-component-design.md`): one picture, never a subtree, as

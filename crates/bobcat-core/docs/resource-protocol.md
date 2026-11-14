@@ -34,7 +34,10 @@ carries the absolute URL the document resolved; a stylesheet or fetch
 carries the URL as it was named, and the fetcher resolves it against its own
 base, which the embedder keeps equal to `ViewSources::base_url`. The fetcher supplies the transport policy. The protocol
 also offers the optional `preload_source` hint,
-`request_image`/`service_images` and the `FrameImages` supertrait: every method
+`request_image`/`service_images`, `request_playback` (an `Id` picture's
+`PlaybackRequest`: play a URL the host reported animated under a playhead of
+the picture's own, one of four controls, or its end; the host reports each
+loop through `ImageReports::playback`) and the `FrameImages` supertrait: every method
 is synchronous, so no resource future crosses it, and core names none of a
 fetcher's own transport API. **One optional member leaves the embedder's
 thread**: `fetch_probe()` hands back a `Send + Sync` `FetchProbe`

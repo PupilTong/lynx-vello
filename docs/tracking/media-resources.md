@@ -51,11 +51,21 @@ is re-decoded at that size. The prefetch API row below maps to
 intrinsic size, answered inline on a second request.
 
 Animated GIF, APNG and WebP play wherever a URL picture is drawn — a CSS
-image, and an `<image>`, which presents a URL picture
-(`docs/picture-source-design.md`, "Animated images", step 4a): automatically,
-for the loop count the file states, on one playhead per URL shared by every
-draw, advancing only while drawn and never skipping a frame, with a stated
-delay of 10 ms or less played as 100 ms. Frames come from the platform's
+image, and an `<image>`'s `placeholder` (`docs/picture-source-design.md`,
+"Animated images", step 4a): automatically, for the loop count the file
+states, on one playhead per URL shared by every draw, advancing only while
+drawn and never skipping a frame, with a stated delay of 10 ms or less played
+as 100 ms. An `<image>` whose own `src` loads animated presents a picture of
+its own and plays it on a playhead of its own under native's policy (step
+4b): `loop-count` (absent, zero, negative or not a number is forever; the
+file's own count is not read) and `autoplay` (on unless `"false"`), read when
+the `src` loads, the four UI methods, and `startplay` (before `load`),
+`currentloopcomplete` and `finalloopcomplete` with empty details. Its frames
+are the URL's, decoded once by the same store; only the playhead is the
+element's. The URL image service says a loaded URL animates
+(`ImageStatus::Bitmap`'s `animated`), and the document's thread asks the host
+for the playback with `terminus::link::PlaybackRequest`, whose loop reports
+come back as `ImageEvent::Playback`. Frames come from the platform's
 decoder: `ImageIO` on macOS decodes each by index; gdk-pixbuf on Linux and the
 browser's main-thread `Image` decoder answer one frame, so an animated file
 there shows its first frame. The policy is `vant::image::animation`; the frame
@@ -78,11 +88,10 @@ provide, since only the store knows what it has already decoded.
 
 The Lynx `<image>` element surface is implemented in `bobcat_core`'s
 `tree::image` as far as `src`, `placeholder`, `mode`, `auto-size`,
-`blur-radius` and the `load`/`error` events (2026-09-06 and 2026-09-17);
-`cap-insets` and the animated-image surface (`loop-count`, `autoplay`, the
-four animation methods and the three events) remain above this layer and
-unimplemented; until then an `<image>` plays an animated `src` under the CSS
-policy, the file's own count. It runs over the W3C `<img>` paint path: natural size into
+`blur-radius` and the `load`/`error` events (2026-09-06 and 2026-09-17),
+and the animated-image surface (`loop-count`, `autoplay`, the four animation
+methods and the three events, step 4b); `cap-insets` remains unimplemented.
+It runs over the W3C `<img>` paint path: natural size into
 layout,
 `object-fit`/`object-position`/`image-rendering` at paint. The natural size
 must not be encoded as `contain-intrinsic-size`, because natural replaced size
@@ -245,7 +254,7 @@ Prefetch (`lynx.prefetchImage`/priority+cache-target API) exists only on Android
 | `blur-radius` | Gaussian blur post-processor applied to decoded bitmap (native) vs. CSS `filter: blur()` custom-property (web-platform) | Extended | Yes (web-platform maps directly to CSS `filter: blur`) | — | `lynx/platform/android/.../image/LynxImageManager.java:1063-1072` (`ImageBlurPostProcessor`); `lynx/platform/darwin/ios/lynx/ui/image/LynxBlurImageProcessor.m`; `lynx-stack/.../XImage/ImageSrc.ts:40-46`, `x-image.css:20-29` |
 | `region-to-decode` | Decode only a sub-rect of the source image (perf optimization) | Rare | N/A (no W3C image-decode-region concept) | Implement as an optional decode-time crop parameter in lynx-vello's decoder if perf profiling shows need; otherwise skip for v1 | `lynx/platform/android/lynx_android/.../image/LynxImageManager.java:1073-1075, 1562-1567`; iOS `regionToDecode`/`LynxImageRegionToDecode`, `LynxUIImage.mm:268, 920-922` |
 | Down-sampling / resize-to-view-size | Default: image is decoded downsampled to view size (`ResizeOptions`) unless `disable-default-resize`/`auto-size`/`enable-resource-hint` is set | Core | N/A (perf optimization, no W3C parallel — browsers do their own internal downsampling opaquely) | Decode-time downsample to display size by default in lynx-vello too (perf-critical for memory), with an escape hatch matching `disable-default-resize` | `lynx/platform/android/lynx_android/.../image/LynxImageManager.java:1040, 948-952` |
-| Animated image loop-count & play events | `loop-count`, `pauseAnimation`/`resumeAnimation`/`stopAnimation`/`startAnimate` UI methods; `startplay`/`currentloopcomplete`/`finalloopcomplete` custom events | Extended | N/A (native-only extension; browsers auto-loop GIF/APNG with no scripting hooks) | Playback is built (step 4a): platform frames, `vant`'s `Playhead` under `PlayPolicy`, `bobcat-resources`' frame store and timer, URL pictures on the file's own count. The `<image>` policy, its methods and its events are step 4b, on the same playhead (`Playhead::pause`/`resume`/`restart`, `loops_completed`) | `lynx/platform/android/lynx_android/.../image/LynxImageManager.java:78-79, 439-461, 773-803`; `lynx/platform/darwin/ios/lynx/ui/image/LynxUIImage.mm` (`loopCount`, `handleAnimatedImage`) |
+| Animated image loop-count & play events | `loop-count`, `pauseAnimation`/`resumeAnimation`/`stopAnimation`/`startAnimate` UI methods; `startplay`/`currentloopcomplete`/`finalloopcomplete` custom events | Extended | N/A (native-only extension; browsers auto-loop GIF/APNG with no scripting hooks) | **Implemented** (steps 4a and 4b): platform frames, `vant`'s `Playhead` under `PlayPolicy` with the four `Control`s, `bobcat-resources`' frame store, per-picture playheads, slots, loop reports and timer; URL pictures on the file's own count, an `<image>`'s `src` on a picture and playhead of its own under `loop-count` and `autoplay` (`crates/bobcat-core/src/main/tree/image.rs`, `image_sources.rs`). The compiled `react-animated-image` card checks the events and two methods end to end on macOS (`crates/bobcat-source/tests/reactlynx_runtime.rs`); elsewhere the platform decoder answers one frame and nothing plays. Deviations from native and web-core: [deviations.md](deviations.md) | `lynx/platform/android/lynx_android/.../image/LynxImageManager.java:78-79, 439-461, 773-803`; `lynx/platform/darwin/ios/lynx/ui/image/LynxUIImage.mm` (`loopCount`, `handleAnimatedImage`) |
 | `load`/`error` event names & payload | Event names are literally `"load"`/`"error"` on all platforms; `load` detail = `{width, height}`; native `error` detail additionally has `error_code`/`lynx_categorized_code` (web-platform's is empty `{}`) | Core | Yes (mirrors DOM `<img>` `load`/`error` events) | **Implemented 2026-09-17** as web-core's shape: `load` detail `{width, height}` from the intrinsic size, `error` detail `{}`, both non-bubbling, both for `src` alone. Categorized native error codes stay unimplemented — nothing below this layer produces one, since a failure reaches the engine as `ImageReports::failed` with no reason at all | `lynx/platform/android/lynx_android/.../image/LynxImageManager.java:229-231, 1405-1428`; `lynx/platform/darwin/ios/lynx/ui/image/LynxImageManager.mm:12-13, 91-111`; `lynx-stack/.../XImage/ImageEvents.ts:21-62` |
 | Error categorization | Errors bucketed into `USER_OR_DESIGN`(1000s)/`NET`(1100s)/`PIC_SOURCE`(1200s) ranges for telemetry | Extended | N/A | Adopt similar buckets (network/decode/user-config) for lynx-vello's own error reporting/telemetry hooks | `lynx/platform/android/lynx_android/.../image/ImageErrorCodeUtils.java:20-116` |
 | Relative URL resolution | `./relative.png` resolved against the template's own bundle URL (not app/document URL) | Core | Yes (matches relative-URL-against-base-URL semantics, just using the template as "document") | — | `lynx/platform/android/lynx_android/.../image/ImageUrlRedirectUtils.java:89-131` |

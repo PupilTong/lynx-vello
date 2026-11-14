@@ -93,6 +93,7 @@ impl Harness {
                     source: reported, ..
                 }
                 | ImageEvent::Failed { source: reported } => &**reported == source,
+                ImageEvent::Playback { .. } => false,
             }) {
                 return event;
             }

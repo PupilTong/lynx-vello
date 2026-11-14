@@ -28,7 +28,16 @@
 //! image plays the count its file states and starts playing
 //! ([`PlayPolicy::stated`]); an element with a control surface of its own
 //! builds a policy from its own attributes and drives the same playhead
-//! ([`Playhead::pause`], [`Playhead::resume`], [`Playhead::restart`]).
+//! with the four [`Control`]s ([`Playhead::control`]).
+//!
+//! # Position and the frame shown
+//!
+//! A playhead's position is the frame it plays from; the frame shown is the
+//! one whose pixels are drawn. They are the same frame except after
+//! [`Control::Stop`], which moves the position to the first frame and leaves
+//! the frame shown where it was: the next [`Control::Resume`] or
+//! [`Control::Restart`] shows the first frame. [`Playhead::steps`] counts
+//! changes of the frame shown, so a stop changes no pixels.
 
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -212,6 +221,54 @@ impl PlayPolicy {
     }
 }
 
+/// One instruction of a control surface to a playhead ([`Playhead::control`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Control {
+    /// Back to the first frame with no loop completed, playing, from any
+    /// state.
+    Restart,
+    /// Stop advancing; the frame shown stays.
+    Pause,
+    /// Continue from the position: where a pause left it, or from the first
+    /// frame after a [`Self::Stop`] or after the final loop.
+    Resume,
+    /// Stop advancing and move the position to the first frame with no loop
+    /// completed; the frame shown stays until the playhead plays again.
+    Stop,
+}
+
+/// What one [`Step`] owes a control surface's loop events: how many loops
+/// the step completed (zero or one), and whether that was the final one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LoopsDone {
+    pub completed: u32,
+    pub finished: bool,
+}
+
+impl Step {
+    /// The loop events this step owes: a loop completed by a move from the
+    /// last frame to the first, or the final loop of a finite count. Every
+    /// loop completes once, the final one included, so N loops are N
+    /// completions with the last one also [`LoopsDone::finished`].
+    #[must_use]
+    pub const fn loops_done(self) -> LoopsDone {
+        match self {
+            Self::Advanced { looped: true } => LoopsDone {
+                completed: 1,
+                finished: false,
+            },
+            Self::Finished => LoopsDone {
+                completed: 1,
+                finished: true,
+            },
+            Self::Stay | Self::Waiting | Self::Advanced { looped: false } => LoopsDone {
+                completed: 0,
+                finished: false,
+            },
+        }
+    }
+}
+
 /// What one [`Playhead::advance`] did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Step {
@@ -228,20 +285,34 @@ pub enum Step {
     Finished,
 }
 
+/// Whether a playhead plays, apart from whether it is drawn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum State {
+    Playing,
+    /// Paused by its policy or by [`Control::Pause`].
+    Paused,
+    /// Stopped by [`Control::Stop`]: the position is the first frame while
+    /// the frame shown stays.
+    Stopped,
+    /// The final loop of a finite count completed.
+    Finished,
+}
+
 /// Where one picture's playback is: the frame it is on, the loops it has
-/// completed, and whether it is paused, drawn or finished.
+/// completed, and whether it is playing, paused, stopped or finished, and
+/// drawn.
 ///
-/// A playhead is *running* while it is drawn, not paused, not finished and
-/// its timeline has more than one frame. Only a running playhead's clock
-/// moves: [`Self::shown`] of the frame it is on grows while it runs and
-/// keeps its value while it does not.
+/// A playhead is *running* while it is drawn, playing, and its timeline has
+/// more than one frame. Only a running playhead's clock moves:
+/// [`Self::shown`] of the frame it is on grows while it runs and keeps its
+/// value while it does not.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Playhead {
+    /// The frame shown.
     frame: usize,
     loops: u32,
-    paused: bool,
+    state: State,
     drawn: bool,
-    finished: bool,
     /// How long the frame it is on had been shown before the playhead last
     /// stopped running, at most that frame's delay.
     shown: Duration,
@@ -260,9 +331,12 @@ impl Playhead {
         Self {
             frame: 0,
             loops: 0,
-            paused: policy.paused,
+            state: if policy.paused {
+                State::Paused
+            } else {
+                State::Playing
+            },
             drawn: false,
-            finished: false,
             shown: Duration::ZERO,
             since: None,
             steps: 0,
@@ -274,6 +348,19 @@ impl Playhead {
     #[must_use]
     pub const fn frame(&self) -> usize {
         self.frame
+    }
+
+    /// The frame the playhead plays from: the frame shown, except after
+    /// [`Control::Stop`], when it is the first frame.
+    #[must_use]
+    pub const fn position(&self) -> usize {
+        if self.is_stopped() { 0 } else { self.frame }
+    }
+
+    /// Whether [`Control::Stop`] stopped it and nothing has played it since.
+    #[must_use]
+    pub const fn is_stopped(&self) -> bool {
+        matches!(self.state, State::Stopped)
     }
 
     /// How many loops have completed.
@@ -289,9 +376,10 @@ impl Playhead {
         self.steps
     }
 
+    /// Whether it is paused or stopped: it would not play were it drawn.
     #[must_use]
     pub const fn is_paused(&self) -> bool {
-        self.paused
+        matches!(self.state, State::Paused | State::Stopped)
     }
 
     #[must_use]
@@ -302,7 +390,7 @@ impl Playhead {
     /// Whether the final loop of a finite count has completed.
     #[must_use]
     pub const fn is_finished(&self) -> bool {
-        self.finished
+        matches!(self.state, State::Finished)
     }
 
     #[must_use]
@@ -310,11 +398,11 @@ impl Playhead {
         self.policy
     }
 
-    /// Whether the playhead's clock moves: drawn, not paused, not finished,
-    /// with more than one frame to walk.
+    /// Whether the playhead's clock moves: drawn, playing, with more than
+    /// one frame to walk.
     #[must_use]
     pub fn is_running(&self, timeline: &Timeline) -> bool {
-        self.drawn && !self.paused && !self.finished && timeline.len() > 1
+        self.drawn && self.state == State::Playing && timeline.len() > 1
     }
 
     /// How long the frame it is on has been shown at `now`, at most its
@@ -348,32 +436,74 @@ impl Playhead {
         self.start(timeline, now);
     }
 
-    /// Stops advancing at `now`; the frame shown stays.
+    /// Stops advancing at `now`; the frame shown stays. A stopped or
+    /// finished playhead stays as it is.
     pub fn pause(&mut self, timeline: &Timeline, now: Duration) {
         self.stop(timeline, now);
-        self.paused = true;
+        if self.state == State::Playing {
+            self.state = State::Paused;
+        }
     }
 
-    /// Continues from the frame it is on, at `now`. A finished playhead
-    /// stays finished: [`Self::restart`] is what plays it again.
+    /// Continues from the frame it is on, at `now`, when paused. A finished
+    /// or stopped playhead stays as it is: [`Self::restart`] is what plays it
+    /// again.
     pub fn resume(&mut self, timeline: &Timeline, now: Duration) {
-        self.paused = false;
+        if self.state == State::Paused {
+            self.state = State::Playing;
+        }
         self.start(timeline, now);
     }
 
     /// Back to the first frame with no loop completed and not finished, at
-    /// `now`, paused or not as it was. The frame shown changes when it was
-    /// not the first.
+    /// `now`, paused when it was paused or stopped and playing otherwise.
+    /// The frame shown changes when it was not the first.
     pub fn restart(&mut self, timeline: &Timeline, now: Duration) {
         if self.frame != 0 {
             self.steps += 1;
         }
         self.frame = 0;
         self.loops = 0;
-        self.finished = false;
+        self.state = if self.is_paused() {
+            State::Paused
+        } else {
+            State::Playing
+        };
         self.shown = Duration::ZERO;
         self.since = None;
         self.start(timeline, now);
+    }
+
+    /// Applies one control at `now`:
+    ///
+    /// - [`Control::Restart`]: [`Self::restart`], playing, from any state.
+    /// - [`Control::Pause`]: [`Self::pause`]; the frame shown stays.
+    /// - [`Control::Resume`]: continues from the position. After [`Control::Stop`] or the final
+    ///   loop that is the first frame, with no loop completed, as a restart; otherwise
+    ///   [`Self::resume`].
+    /// - [`Control::Stop`]: stops advancing and moves the position to the first frame with no loop
+    ///   completed and not finished. The frame shown stays, so the steps do not move.
+    pub fn control(&mut self, control: Control, timeline: &Timeline, now: Duration) {
+        match control {
+            Control::Restart => self.play_from_start(timeline, now),
+            Control::Pause => self.pause(timeline, now),
+            Control::Resume if matches!(self.state, State::Stopped | State::Finished) => {
+                self.play_from_start(timeline, now);
+            }
+            Control::Resume => self.resume(timeline, now),
+            Control::Stop => {
+                self.stop(timeline, now);
+                self.state = State::Stopped;
+                self.loops = 0;
+                self.shown = Duration::ZERO;
+            }
+        }
+    }
+
+    /// [`Self::restart`], playing.
+    fn play_from_start(&mut self, timeline: &Timeline, now: Duration) {
+        self.state = State::Playing;
+        self.restart(timeline, now);
     }
 
     /// Moves to the next frame when it is due at `now` and `ready` says it
@@ -406,7 +536,7 @@ impl Playhead {
             && self.loops + 1 >= plays.get()
         {
             self.loops += 1;
-            self.finished = true;
+            self.state = State::Finished;
             self.shown = timeline.delay(self.frame);
             self.since = None;
             return Step::Finished;
@@ -738,5 +868,227 @@ mod tests {
             paused: true,
         });
         assert!(paused.is_paused());
+    }
+
+    // --- the control surface of an element with one ---------------------
+
+    /// A playhead of three frames (100, 200, 300 ms) under an element's own
+    /// policy, drawn from zero.
+    fn element(plays: u32, paused: bool) -> (Timeline, Playhead) {
+        let (_, timeline) = three(Loops::Infinite);
+        let mut playhead = Playhead::new(PlayPolicy {
+            loops: Loops::from_plays(plays),
+            paused,
+        });
+        playhead.set_drawn(true, &timeline, ms(0));
+        (timeline, playhead)
+    }
+
+    /// Advances `playhead` at each instant it names until `until`, and
+    /// answers the steps taken.
+    fn play(playhead: &mut Playhead, timeline: &Timeline, until: Duration) -> Vec<Step> {
+        let mut steps = Vec::new();
+        while let Some(due) = playhead.due(timeline) {
+            if due > until {
+                break;
+            }
+            steps.push(playhead.advance(timeline, due, READY));
+        }
+        steps
+    }
+
+    /// Loop events of every step, in order: `true` for a final loop.
+    fn loop_events(steps: &[Step]) -> Vec<bool> {
+        steps
+            .iter()
+            .map(|step| step.loops_done())
+            .filter(|done| done.completed > 0)
+            .map(|done| done.finished)
+            .collect()
+    }
+
+    /// N loops are exactly N loop completions, the last of them the final
+    /// one, and then nothing more.
+    #[test]
+    fn n_loops_complete_n_times_then_once_finally() {
+        for plays in 1..=4 {
+            let (timeline, mut playhead) = element(plays, false);
+            let steps = play(&mut playhead, &timeline, ms(60_000));
+            let mut expected = vec![false; plays as usize - 1];
+            expected.push(true);
+            assert_eq!(loop_events(&steps), expected, "{plays} plays");
+            assert_eq!(playhead.loops_completed(), plays);
+            assert_eq!(playhead.frame(), 2, "the last frame stays shown");
+        }
+    }
+
+    /// An infinite count completes every loop and never a final one.
+    #[test]
+    fn an_infinite_count_never_finishes() {
+        let (timeline, mut playhead) = element(0, false);
+        let steps = play(&mut playhead, &timeline, ms(6000));
+        assert_eq!(loop_events(&steps), vec![false; 10]);
+        assert!(!playhead.is_finished());
+    }
+
+    /// A playhead not drawn completes nothing, however long it waits, and
+    /// one that waits for a frame completes nothing while it waits.
+    #[test]
+    fn nothing_completes_while_not_drawn_or_waiting() {
+        let (timeline, mut playhead) = element(1, false);
+        playhead.set_drawn(false, &timeline, ms(0));
+        assert_eq!(playhead.advance(&timeline, ms(60_000), READY), Step::Stay);
+        assert_eq!(playhead.loops_completed(), 0);
+
+        let (timeline, mut playhead) = element(0, false);
+        playhead.advance(&timeline, ms(100), READY);
+        playhead.advance(&timeline, ms(300), READY);
+        for at in [600, 1000, 5000] {
+            let step = playhead.advance(&timeline, ms(at), |_| false);
+            assert_eq!(step, Step::Waiting);
+            assert_eq!(step.loops_done().completed, 0);
+        }
+        assert_eq!(playhead.loops_completed(), 0);
+    }
+
+    /// `autoplay` off: the playhead starts paused on the first frame and
+    /// does not move.
+    #[test]
+    fn a_playhead_that_starts_paused_shows_the_first_frame() {
+        let (timeline, mut playhead) = element(0, true);
+        assert_eq!(playhead.due(&timeline), None);
+        assert_eq!(playhead.advance(&timeline, ms(10_000), READY), Step::Stay);
+        assert_eq!((playhead.frame(), playhead.steps()), (0, 0));
+        playhead.control(Control::Resume, &timeline, ms(10_000));
+        assert_eq!(playhead.due(&timeline), Some(ms(10_100)));
+    }
+
+    /// `pauseAnimation` stops advancing and keeps the frame shown;
+    /// `resumeAnimation` continues from the paused position with the time
+    /// the frame had left.
+    #[test]
+    fn pause_keeps_the_frame_and_resume_continues_from_it() {
+        let (timeline, mut playhead) = element(0, false);
+        playhead.advance(&timeline, ms(100), READY);
+        playhead.control(Control::Pause, &timeline, ms(250));
+        let steps = playhead.steps();
+        assert_eq!(playhead.advance(&timeline, ms(9000), READY), Step::Stay);
+        assert_eq!((playhead.frame(), playhead.steps()), (1, steps));
+        playhead.control(Control::Resume, &timeline, ms(9000));
+        assert_eq!(
+            playhead.due(&timeline),
+            Some(ms(9050)),
+            "frame 1 had 50 ms left"
+        );
+        assert_eq!(playhead.frame(), 1);
+    }
+
+    /// `stopAnimation` stops advancing and moves the position to the first
+    /// frame, with the loops reset, and the frame shown stays; the next
+    /// `resumeAnimation` shows the first frame and plays from it.
+    #[test]
+    fn stop_moves_the_position_and_keeps_the_frame_shown() {
+        let (timeline, mut playhead) = element(2, false);
+        for at in [100, 300, 600, 700] {
+            playhead.advance(&timeline, ms(at), READY);
+        }
+        assert_eq!((playhead.frame(), playhead.loops_completed()), (1, 1));
+        let steps = playhead.steps();
+        playhead.control(Control::Stop, &timeline, ms(750));
+        assert!(playhead.is_stopped() && !playhead.is_running(&timeline));
+        assert_eq!(playhead.position(), 0);
+        assert_eq!(playhead.frame(), 1, "the frame shown stays");
+        assert_eq!(playhead.steps(), steps, "so no pixels change");
+        assert_eq!(playhead.loops_completed(), 0);
+        assert_eq!(playhead.advance(&timeline, ms(9000), READY), Step::Stay);
+
+        playhead.control(Control::Resume, &timeline, ms(9000));
+        assert_eq!((playhead.frame(), playhead.position()), (0, 0));
+        assert_eq!(playhead.steps(), steps + 1, "the first frame is shown");
+        assert_eq!(playhead.due(&timeline), Some(ms(9100)));
+        let steps = play(&mut playhead, &timeline, ms(60_000));
+        assert_eq!(
+            loop_events(&steps),
+            [false, true],
+            "both loops play again after the stop"
+        );
+    }
+
+    /// A stop never owes a final loop: the loops it cut short are not
+    /// completed.
+    #[test]
+    fn a_stop_owes_no_final_loop() {
+        let (timeline, mut playhead) = element(1, false);
+        playhead.advance(&timeline, ms(100), READY);
+        playhead.control(Control::Stop, &timeline, ms(150));
+        assert!(!playhead.is_finished());
+        assert_eq!(playhead.loops_completed(), 0);
+    }
+
+    /// `resumeAnimation` after the final loop starts again at the first
+    /// frame, with the loop count reset.
+    #[test]
+    fn resume_after_the_final_loop_restarts() {
+        let (timeline, mut playhead) = element(1, false);
+        let steps = play(&mut playhead, &timeline, ms(60_000));
+        assert_eq!(loop_events(&steps), [true]);
+        assert!(playhead.is_finished());
+        playhead.control(Control::Resume, &timeline, ms(10_000));
+        assert!(!playhead.is_finished());
+        assert_eq!((playhead.frame(), playhead.loops_completed()), (0, 0));
+        assert_eq!(playhead.due(&timeline), Some(ms(10_100)));
+        let steps = play(&mut playhead, &timeline, ms(60_000));
+        assert_eq!(loop_events(&steps), [true], "the count plays again");
+    }
+
+    /// `startAnimate` restarts at the first frame with the loops reset from
+    /// every state: playing, paused, stopped and finished; and plays.
+    #[test]
+    fn start_animate_restarts_from_any_state() {
+        /// Brings a playhead into the state a case names.
+        type Enter = fn(&Timeline, &mut Playhead);
+        let states: [(&str, Enter); 4] = [
+            ("playing", |_, _| {}),
+            ("paused", |timeline, playhead| {
+                playhead.control(Control::Pause, timeline, ms(800));
+            }),
+            ("stopped", |timeline, playhead| {
+                playhead.control(Control::Stop, timeline, ms(800));
+            }),
+            ("finished", |timeline, playhead| {
+                play(playhead, timeline, ms(60_000));
+            }),
+        ];
+        for (state, enter) in states {
+            let (timeline, mut playhead) = element(3, false);
+            for at in [100, 300, 600, 700] {
+                playhead.advance(&timeline, ms(at), READY);
+            }
+            enter(&timeline, &mut playhead);
+            playhead.control(Control::Restart, &timeline, ms(100_000));
+            assert_eq!(
+                (playhead.frame(), playhead.loops_completed()),
+                (0, 0),
+                "{state}"
+            );
+            assert!(!playhead.is_paused() && !playhead.is_finished(), "{state}");
+            assert_eq!(playhead.due(&timeline), Some(ms(100_100)), "{state}");
+        }
+    }
+
+    /// Every control answers alike whether or not the playhead was playing:
+    /// pausing a paused playhead and resuming a playing one change nothing.
+    #[test]
+    fn controls_that_change_nothing_are_harmless() {
+        let (timeline, mut playhead) = element(0, false);
+        playhead.control(Control::Resume, &timeline, ms(50));
+        assert_eq!(playhead.due(&timeline), Some(ms(100)));
+        playhead.control(Control::Pause, &timeline, ms(50));
+        playhead.control(Control::Pause, &timeline, ms(80));
+        playhead.control(Control::Resume, &timeline, ms(1000));
+        assert_eq!(playhead.due(&timeline), Some(ms(1050)));
+        playhead.control(Control::Stop, &timeline, ms(1000));
+        playhead.control(Control::Stop, &timeline, ms(1000));
+        assert_eq!(playhead.frame(), 0);
     }
 }

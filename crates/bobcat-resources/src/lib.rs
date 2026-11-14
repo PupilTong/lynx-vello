@@ -91,7 +91,7 @@ use std::time::Duration;
 
 use bobcat_core::resource::ResourceFetcher;
 use bobcat_core::{
-    ClockInstant, FrameImages, ImageReports, ImageResidency, ImageSizeHint, PictureKey,
+    ClockInstant, FrameImages, ImageReports, ImageResidency, ImageSizeHint, PictureId, PictureKey,
     PreparsedStyleSheet,
 };
 use bytes::Bytes;
@@ -1219,6 +1219,13 @@ impl<P: Platform> Resources<P> {
     pub(crate) fn now(&self) -> ClockInstant {
         self.shared.now()
     }
+
+    /// Wakes the host for a turn, as a finished load does: a picture's frame
+    /// was published or its playhead reported, outside the describe the
+    /// painter is in, or for a describe the next adoption makes.
+    pub(crate) fn wake(&self) {
+        (self.shared.wakeup)();
+    }
 }
 
 impl<P: Platform> Register<PreparsedStyleSheet> for Resources<P> {
@@ -1398,6 +1405,10 @@ impl<P: Platform> ResourceFetcher for ViewResources<P> {
         images::request_document(&self.resources, source, bytes, kind, &self.reports);
     }
 
+    fn request_playback(&self, request: bobcat_core::PlaybackRequest) {
+        images::playback(&self.resources, self.view, &self.reports, request);
+    }
+
     fn service_images(&self) {
         images::service(&self.resources);
         flush_code_cache(&self.resources);
@@ -1430,8 +1441,7 @@ impl<P: Platform> ResourceFetcher for ViewResources<P> {
     }
 }
 
-/// The URLs among `pictures`. This store answers URL pictures only, and
-/// has no picture an element owns: every generation it answers is zero.
+/// The URLs among `pictures`.
 fn urls(pictures: &[PictureKey]) -> Vec<Arc<str>> {
     pictures
         .iter()
@@ -1442,6 +1452,12 @@ fn urls(pictures: &[PictureKey]) -> Vec<Arc<str>> {
         .collect()
 }
 
+/// The `Id` pictures among `pictures`: those an element asked this store to
+/// play ([`bobcat_core::PlaybackRequest`]).
+fn ids(pictures: &[PictureKey]) -> Vec<PictureId> {
+    pictures.iter().filter_map(PictureKey::id).collect()
+}
+
 impl<P: Platform> FrameImages for ViewResources<P> {
     type PlatformFrame = std::convert::Infallible;
 
@@ -1450,17 +1466,25 @@ impl<P: Platform> FrameImages for ViewResources<P> {
         picture: &PictureKey,
         hint: ImageSizeHint,
     ) -> Option<bobcat_core::FrameImage> {
-        images::describe(&self.resources, picture.url()?, hint)
+        match picture {
+            PictureKey::Url(source) => images::describe(&self.resources, source, hint),
+            PictureKey::Id(picture) => images::describe_picture(&self.resources, *picture, hint),
+        }
+    }
+
+    fn take_frame(&self, picture: PictureId) -> Option<bobcat_core::TakenFrame> {
+        images::take_frame(&self.resources, picture)
     }
 
     fn want(&self, picture: &PictureKey, hint: ImageSizeHint) {
-        if let Some(source) = picture.url() {
-            images::want(&self.resources, source, hint);
+        match picture {
+            PictureKey::Url(source) => images::want(&self.resources, source, hint),
+            PictureKey::Id(picture) => images::want_picture(&self.resources, *picture, hint),
         }
     }
 
     fn retain(&self, drawn: &[PictureKey]) {
-        images::retain(&self.resources, self.view, &urls(drawn));
+        images::retain(&self.resources, self.view, &urls(drawn), &ids(drawn));
     }
 
     fn release(&self, pictures: &[PictureKey]) {

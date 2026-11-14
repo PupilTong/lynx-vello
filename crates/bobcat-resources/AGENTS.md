@@ -233,10 +233,25 @@ test platform whose decoder reads APNG with the `png` crate and a test clock
 (`Shared::set_clock_hook`), and include a golden through a presenting painter
 (`tests/screenshots/animated/`).
 
+**`Id` pictures playing a URL** (`animation.rs`, `images::playback`): a
+`ResourceFetcher::request_playback` of a view's (`PlaybackRequest::Play`, one
+of the four `Control`s, `End`) gives a picture a playhead of its own under the
+policy asked for, beside the URL's shared one, over the same frames, which are
+decoded once while any drawn playhead's window includes them. `describe` of
+the `Id` advances its playhead and publishes the frame it then shows into the
+picture's `PictureSlot` once per change (frame 0 from the residency, restored
+when absent), which `take_frame` hands the painter; `retain` runs it while a
+view's drawn set names the `Id`, and pins the URL's first frame in the
+residency meanwhile. Each loop it completes is reported to the asking view's
+`ImageReports::playback` (`LoopComplete`, then `FinalLoopComplete` after the
+last of a finite count), and a report, a publish or a control wakes the host.
+`End`, and the drop of the view that asked, release the picture's playhead
+and slot. A source this store does not animate plays nothing. The load
+reports a source with more than one frame through `loaded_animated`, so the
+document's `ImageStatus::Bitmap` says it animates.
+
 Recorded limits: an animated image animates only where the platform decoder
-decodes frames by index (macOS today); the `<image>` element's own playback
-surface (`loop-count`, `autoplay`, its methods and events) is not built, so
-an `<image>` plays under the CSS policy; no `region-to-decode`, no `blur-radius` post-processing, and none of the
+decodes frames by index (macOS today); no `region-to-decode`, no `blur-radius` post-processing, and none of the
 `<image>` element surface past `src` — the pipeline serves whatever source
 string the paint walk names, today `url(…)` layers and the source an
 `<image>` presents through `Document::set_picture`. The macOS

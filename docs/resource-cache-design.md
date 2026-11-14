@@ -586,18 +586,21 @@ loaded image's pixels are not always available when a frame is composed.
 ## Animated images
 
 Delivery step 4 of `docs/picture-source-design.md`. An animated GIF, APNG or
-WebP drawn as a URL picture (a CSS image, and an `<image>` element, which
-presents a URL picture) plays automatically, for the loop count the file
-states, on one playhead per URL shared by every draw of it in every view of
-a resource scope.
+WebP drawn as a URL picture (a CSS image, and an `<image>`'s
+`placeholder`) plays automatically, for the loop count the file states, on
+one playhead per URL shared by every draw of it in every view of a resource
+scope. An `<image>`'s own animated `src` plays into an `Id` picture of the
+element's own, on a playhead of its own over the same frames, under the
+`<image>` policy and its controls (`PlaybackRequest`, step 4b).
 
 - **Policy, in `vant::image::animation`, with no platform and no clock**:
   `ImageFrames` (stated delays, `Loops::Infinite` or `Loops::Plays(n)`, total
   plays), `Timeline` (a stated delay of 10 ms or less plays as 100 ms),
   `PlayPolicy` (the loop count and whether it starts paused;
-  `PlayPolicy::stated` is the CSS one) and `Playhead` (frame, loops
-  completed, paused, drawn, finished, and a step count that is the picture's
-  generation). Time is a `Duration` since an origin the caller picks. A
+  `PlayPolicy::stated` is the CSS one), `Control` (the four instructions of
+  a control surface) and `Playhead` (frame shown, position, loops completed,
+  playing, paused, stopped or finished, drawn, and a step count that is the
+  picture's generation). Time is a `Duration` since an origin the caller picks. A
   playhead advances only while drawn, at most one frame per call and only
   onto a frame its caller says is ready, so no frame is skipped and N loops
   complete exactly N times; after the last loop of a finite count the last

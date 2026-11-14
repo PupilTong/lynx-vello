@@ -42,7 +42,8 @@ export default defineConfig(({ env }) => {
           'react-overlay-pass-through', 'react-svg', 'react-markdown', 'css-custom-sections',
           'react-frame', 'react-frame-inner', 'react-frame-data', 'react-frame-auto-height',
           'react-frame-data-update', 'react-frame-global-props-update', 'react-frame-tap',
-          'react-frame-tap-inner', 'react-set-shared-data', 'react-get-shared-data']
+          'react-frame-tap-inner', 'react-set-shared-data', 'react-get-shared-data',
+          'react-animated-image']
           .map(fixture => [`web-${fixture}`, {
             source: { entry: { [fixture]: fixture === 'react-bts-query'
               ? `./src/${fixture}.jsx` : `./src/${fixture}/index.jsx` } },
@@ -51,6 +52,8 @@ export default defineConfig(({ env }) => {
               // `dist/index.rs` carries bundles alone, so a fixture's SVG
               // assets are inlined as `data:` URLs whatever their size.
               ...(fixture === 'react-svg' ? { dataUriLimit: { svg: Number.MAX_SAFE_INTEGER } } : {}),
+              ...(fixture === 'react-animated-image'
+                ? { dataUriLimit: { image: Number.MAX_SAFE_INTEGER } } : {}),
             },
           }])),
       } : {}),

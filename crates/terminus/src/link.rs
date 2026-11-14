@@ -30,7 +30,10 @@ pub use crate::render::image::{
     ImageInbox, ImageReports, ImageResidency, ImageSizeHint, ImageStatus, MAX_RENDERABLE_DIMENSION,
     NoImages, is_renderable,
 };
-pub use crate::render::picture::{PictureFrame, PictureId, PictureKey, PictureSlot, TakenFrame};
+pub use crate::render::picture::{
+    Loops, PictureFrame, PictureId, PictureKey, PictureSlot, PlayPolicy, PlaybackControl,
+    PlaybackReport, PlaybackRequest, TakenFrame,
+};
 pub use crate::render::svg::VectorDocument;
 pub use crate::style::animation::AnimationTick;
 pub use crate::style::device::Device;

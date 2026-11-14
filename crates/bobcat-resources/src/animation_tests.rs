@@ -8,7 +8,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use bobcat_core::{ClockInstant, FrameImage, FrameImages, ImageInbox, ImageSizeHint, PictureKey};
+use bobcat_core::resource::ResourceFetcher;
+use bobcat_core::{
+    ClockInstant, FrameImage, FrameImages, ImageEvent, ImageInbox, ImageSizeHint, PictureId,
+    PictureKey, PlayPolicy, PlaybackControl, PlaybackReport, PlaybackRequest,
+};
+use terminus::link::PictureFrame;
 use vant::image::animation::{ImageFrames, Loops};
 use vant::image::{Bitmap, DecodeError};
 use vant::{ImageDecoder, NoStore, Parts, Platform};
@@ -786,4 +791,338 @@ fn a_painter_draws_two_frames_of_one_file_with_no_commit_between() {
         "no commit"
     );
     goldens.assert_matches(&["animated", "second-frame"], &capture(&mut painter));
+}
+
+// --- `Id` pictures: a playhead of the picture's own ------------------------
+
+/// Three frames of 100, 200 and 300 ms whose file says forever.
+fn rgb_forever() -> Vec<u8> {
+    apng(0, &[(RED, 100), (GREEN, 200), (BLUE, 300)])
+}
+
+/// An element's policy: `plays` times (zero: forever), paused or not.
+fn policy(plays: u32, paused: bool) -> PlayPolicy {
+    PlayPolicy {
+        loops: Loops::from_plays(plays),
+        paused,
+    }
+}
+
+/// Asks `view`'s store to play `source` into a new picture under `policy`,
+/// and answers the picture.
+fn play(view: &ViewResources<PngPlatform>, source: &str, policy: PlayPolicy) -> PictureId {
+    let picture = PictureId::new();
+    view.request_playback(PlaybackRequest::Play {
+        picture,
+        source: Arc::from(source),
+        policy,
+    });
+    picture
+}
+
+impl Rig {
+    fn picture_position(&self, picture: PictureId) -> (usize, usize, u32, bool) {
+        self.resources
+            .local
+            .borrow()
+            .animations
+            .picture_position(picture)
+            .expect("a playing picture")
+    }
+}
+
+/// What the painter takes out of `picture`'s slot after describing it at
+/// the test's clock: the colour of the newest frame, if a new one was
+/// published, and the description.
+fn adopt(view: &ViewResources<PngPlatform>, picture: PictureId) -> (Option<[u8; 4]>, FrameImage) {
+    let image = view
+        .describe(&PictureKey::Id(picture), HINT)
+        .expect("a published frame");
+    let taken = view.take_frame(picture).map(|taken| {
+        assert_eq!(taken.generation, image.generation);
+        let PictureFrame::Pixels(pixels) = taken.frame;
+        pixels.data.data()[..4].try_into().expect("four")
+    });
+    (taken, image)
+}
+
+/// The playback reports `inbox` holds, in order.
+fn reports(inbox: &ImageInbox) -> Vec<(PictureId, PlaybackReport)> {
+    inbox
+        .drain()
+        .into_iter()
+        .filter_map(|event| match event {
+            ImageEvent::Playback { picture, report } => Some((picture, report)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// An `Id` picture plays its own count, not the file's: each frame is
+/// published once at its due instant, each loop is reported, the final one
+/// after it, and the last frame stays with no next change. The URL's own
+/// playhead is untouched.
+#[test]
+fn an_id_picture_plays_its_own_count_and_reports_every_loop() {
+    let rig = Rig::new();
+    let (view, inbox) = rig.view();
+    rig.load(&view, &inbox, "app:///a.png", rgb_forever());
+    let wakeups = rig.wakeups.load(Ordering::SeqCst);
+    let picture = play(&view, "app:///a.png", policy(2, false));
+    assert!(
+        rig.wakeups.load(Ordering::SeqCst) > wakeups,
+        "the first frame's publish wakes the host"
+    );
+    view.retain(&[PictureKey::Id(picture)]);
+    let (first, image) = adopt(&view, picture);
+    assert_eq!(first, Some(RED));
+    assert!(image.pixels.is_none(), "an `Id` picture's frames are taken");
+    assert_eq!(image.next_change, Some(rig.start + ms(100)));
+    rig.settle_held("app:///a.png", &[1, 2]);
+
+    let mut shown = Vec::new();
+    let mut events = Vec::new();
+    for at in [100, 300, 600, 700, 900, 1200, 5000] {
+        rig.set(ms(at));
+        crate::images::service(&rig.resources);
+        let (taken, image) = adopt(&view, picture);
+        shown.push((at, taken, image.next_change.map(|next| next - rig.start)));
+        events.extend(reports(&inbox).into_iter().map(|(_, report)| (at, report)));
+    }
+    assert_eq!(
+        shown,
+        [
+            (100, Some(GREEN), Some(ms(300))),
+            (300, Some(BLUE), Some(ms(600))),
+            (600, Some(RED), Some(ms(700))),
+            (700, Some(GREEN), Some(ms(900))),
+            (900, Some(BLUE), Some(ms(1200))),
+            (1200, None, None),
+            (5000, None, None),
+        ],
+        "the last frame stays shown, published once"
+    );
+    assert_eq!(
+        events,
+        [
+            (600, PlaybackReport::LoopComplete),
+            (1200, PlaybackReport::LoopComplete),
+            (1200, PlaybackReport::FinalLoopComplete),
+        ]
+    );
+    assert_eq!(rig.picture_position(picture), (2, 2, 2, true));
+    assert_eq!(
+        rig.position("app:///a.png"),
+        (0, 0, false),
+        "the URL's playhead was never drawn"
+    );
+}
+
+/// Two pictures of one URL each have a playhead of their own, while their
+/// frames are decoded once: one paused on the first frame, the other
+/// playing.
+#[test]
+fn two_pictures_of_one_url_play_apart_over_one_set_of_frames() {
+    let rig = Rig::new();
+    let (view, inbox) = rig.view();
+    rig.load(&view, &inbox, "app:///a.png", six());
+    let playing = play(&view, "app:///a.png", policy(0, false));
+    let paused = play(&view, "app:///a.png", policy(0, true));
+    view.retain(&[PictureKey::Id(playing), PictureKey::Id(paused)]);
+    assert_eq!(adopt(&view, playing).0, Some(RED));
+    let (first, image) = adopt(&view, paused);
+    assert_eq!(first, Some(RED), "autoplay off shows the first frame");
+    assert_eq!(image.next_change, None, "and does not play");
+    rig.settle_held("app:///a.png", &[1, 2]);
+    for (frame, colour) in [(1_usize, GREEN), (2, BLUE), (3, WHITE)] {
+        rig.settle("the next frame never arrived", || {
+            rig.held("app:///a.png").contains(&frame)
+        });
+        rig.set(ms(100 * frame as u64));
+        assert_eq!(adopt(&view, playing).0, Some(colour));
+        assert_eq!(adopt(&view, paused).0, None, "the paused picture stays");
+    }
+    assert_eq!(rig.picture_position(paused), (0, 0, 0, true));
+    let decoded = rig.decoder.decoded();
+    let mut unique = decoded.clone();
+    unique.sort_unstable();
+    unique.dedup();
+    assert_eq!(
+        decoded.len(),
+        unique.len(),
+        "no frame decoded twice: {decoded:?}"
+    );
+    assert!(reports(&inbox).is_empty());
+}
+
+/// The four controls: a pause keeps the frame shown and a resume
+/// continues from it; a stop keeps the frame shown and a resume shows the
+/// first frame; a restart shows the first frame from any state; a resume
+/// after the final loop plays the count again. None reports a loop.
+#[test]
+fn controls_drive_the_pictures_playhead() {
+    let rig = Rig::new();
+    let (view, inbox) = rig.view();
+    rig.load(&view, &inbox, "app:///a.png", rgb_forever());
+    let picture = play(&view, "app:///a.png", policy(1, false));
+    view.retain(&[PictureKey::Id(picture)]);
+    adopt(&view, picture);
+    rig.settle_held("app:///a.png", &[1, 2]);
+    let control = |control| {
+        view.request_playback(PlaybackRequest::Control { picture, control });
+    };
+
+    rig.set(ms(100));
+    assert_eq!(adopt(&view, picture).0, Some(GREEN));
+    rig.set(ms(150));
+    control(PlaybackControl::Pause);
+    rig.set(ms(10_000));
+    let (taken, image) = adopt(&view, picture);
+    assert_eq!((taken, image.next_change), (None, None), "paused on green");
+    control(PlaybackControl::Resume);
+    let (_, image) = adopt(&view, picture);
+    assert_eq!(
+        image.next_change,
+        Some(rig.start + ms(10_150)),
+        "green had 150 ms left"
+    );
+
+    rig.set(ms(10_050));
+    let wakeups = rig.wakeups.load(Ordering::SeqCst);
+    control(PlaybackControl::Stop);
+    assert!(
+        rig.wakeups.load(Ordering::SeqCst) > wakeups,
+        "a control wakes the host"
+    );
+    let (taken, image) = adopt(&view, picture);
+    assert_eq!(taken, None, "a stop keeps the frame shown");
+    assert_eq!(image.next_change, None);
+    assert_eq!(rig.picture_position(picture), (1, 0, 0, true));
+    rig.set(ms(20_000));
+    control(PlaybackControl::Resume);
+    let (taken, image) = adopt(&view, picture);
+    assert_eq!(
+        taken,
+        Some(RED),
+        "a resume after a stop shows the first frame"
+    );
+    assert_eq!(image.next_change, Some(rig.start + ms(20_100)));
+
+    for at in [20_100, 20_300, 20_600] {
+        rig.set(ms(at));
+        crate::images::service(&rig.resources);
+        rig.settle("the next frame never arrived", || {
+            let (_, image) = adopt(&view, picture);
+            image
+                .next_change
+                .is_none_or(|next| next > rig.start + ms(at))
+        });
+    }
+    assert_eq!(
+        reports(&inbox),
+        [
+            (picture, PlaybackReport::LoopComplete),
+            (picture, PlaybackReport::FinalLoopComplete),
+        ],
+        "one loop, then its end"
+    );
+    control(PlaybackControl::Resume);
+    assert_eq!(
+        adopt(&view, picture).0,
+        Some(RED),
+        "after the final loop, again"
+    );
+    control(PlaybackControl::Pause);
+    adopt(&view, picture);
+    rig.set(ms(30_000));
+    control(PlaybackControl::Restart);
+    let (taken, image) = adopt(&view, picture);
+    assert_eq!(taken, None, "already on the first frame");
+    assert_eq!(
+        image.next_change,
+        Some(rig.start + ms(30_100)),
+        "and playing"
+    );
+    assert!(reports(&inbox).is_empty(), "no control reports a loop");
+}
+
+/// A picture no view draws does not advance and reports nothing, however
+/// long it waits; and one that ends lets go of what it held.
+#[test]
+fn a_picture_not_drawn_waits_and_one_that_ends_lets_go() {
+    let rig = Rig::new();
+    let (view, inbox) = rig.view();
+    rig.load(&view, &inbox, "app:///a.png", six());
+    let picture = play(&view, "app:///a.png", policy(1, false));
+    view.retain(&[PictureKey::Id(picture)]);
+    adopt(&view, picture);
+    rig.settle_held("app:///a.png", &[1, 2]);
+    rig.set(ms(50));
+    view.retain(&[]);
+    assert_eq!(rig.picture_position(picture), (0, 0, 0, false));
+    assert!(
+        rig.held("app:///a.png").is_empty(),
+        "its frames are dropped"
+    );
+    rig.set(ms(60_000));
+    crate::images::service(&rig.resources);
+    assert_eq!(rig.picture_position(picture), (0, 0, 0, false));
+    assert!(reports(&inbox).is_empty());
+
+    view.retain(&[PictureKey::Id(picture)]);
+    let (_, image) = adopt(&view, picture);
+    assert_eq!(
+        image.next_change,
+        Some(rig.start + ms(60_050)),
+        "the 50 ms the first frame had left"
+    );
+    rig.settle_held("app:///a.png", &[1, 2]);
+    let forgotten = rig.decoder.forgotten.load(Ordering::SeqCst);
+    view.request_playback(PlaybackRequest::End { picture });
+    assert!(
+        rig.held("app:///a.png").is_empty(),
+        "nothing is held for it"
+    );
+    assert_eq!(
+        rig.decoder.forgotten.load(Ordering::SeqCst),
+        forgotten + 1,
+        "no playhead of the source is drawn any more"
+    );
+    assert!(view.describe(&PictureKey::Id(picture), HINT).is_none());
+    assert!(view.take_frame(picture).is_none());
+    // A drawn set still naming it changes nothing.
+    view.retain(&[PictureKey::Id(picture)]);
+    assert!(rig.held("app:///a.png").is_empty());
+}
+
+/// A view that goes ends the pictures it asked to play.
+#[test]
+fn a_view_that_goes_ends_its_pictures() {
+    let rig = Rig::new();
+    let (view, inbox) = rig.view();
+    rig.load(&view, &inbox, "app:///a.png", six());
+    let picture = play(&view, "app:///a.png", policy(0, false));
+    view.retain(&[PictureKey::Id(picture)]);
+    adopt(&view, picture);
+    drop(view);
+    assert!(
+        rig.resources
+            .local
+            .borrow()
+            .animations
+            .picture_position(picture)
+            .is_none()
+    );
+}
+
+/// A source the store does not animate plays nothing: a still image's
+/// picture has no frame, and asks for no decode.
+#[test]
+fn a_still_source_plays_nothing() {
+    let rig = Rig::new();
+    let (view, inbox) = rig.view();
+    rig.load(&view, &inbox, "app:///still.png", still_png());
+    let picture = play(&view, "app:///still.png", policy(0, false));
+    assert!(view.describe(&PictureKey::Id(picture), HINT).is_none());
+    assert_eq!(rig.decoder.decoded(), [0]);
 }

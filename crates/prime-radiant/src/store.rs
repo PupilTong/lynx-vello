@@ -72,7 +72,9 @@ impl Entry {
     fn parsed(source: &str, bytes: &[u8], kind: DocumentKind) -> Self {
         match ImageEvent::parse_document(Arc::from(source), bytes, kind) {
             ImageEvent::ParsedDocument { document, .. } => Entry::Svg(document),
-            ImageEvent::Loaded { .. } | ImageEvent::Failed { .. } => Entry::Failed,
+            ImageEvent::Loaded { .. } | ImageEvent::Failed { .. } | ImageEvent::Playback { .. } => {
+                Entry::Failed
+            }
         }
     }
 
@@ -85,11 +87,13 @@ impl Entry {
                 source,
                 width: image.width,
                 height: image.height,
+                animated: false,
             }),
             Entry::Released { descriptor, .. } => Some(ImageEvent::Loaded {
                 source,
                 width: descriptor.width,
                 height: descriptor.height,
+                animated: false,
             }),
             Entry::Svg(document) => Some(ImageEvent::ParsedDocument {
                 source,
@@ -313,11 +317,13 @@ impl TestImages {
                     source,
                     width,
                     height,
+                    ..
                 } => sink.loaded(source, *width, *height),
                 ImageEvent::ParsedDocument { source, document } => {
                     sink.parsed_document(source, Arc::clone(document));
                 }
                 ImageEvent::Failed { source } => sink.failed(source),
+                ImageEvent::Playback { picture, report } => sink.playback(*picture, *report),
             }
         }
         self.pending.lock().expect("test image reports").push(event);
