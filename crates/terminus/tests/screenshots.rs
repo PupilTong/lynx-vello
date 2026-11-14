@@ -142,14 +142,14 @@ fn decode_checker(width: u32, height: u32) -> Checker {
 }
 
 /// CSS Grid Level 3 `display: grid-lanes`: three `minmax(0, 1fr)` lanes, a
-/// 15px gutter in both axes, `flow-tolerance: 0` so every item lands in the
+/// 15px gutter in both axes, `fit-tolerance: 0` so every item lands in the
 /// strictly shortest lane, and one `grid-column: 1 / -1` item that spans them
 /// all and leaves them level behind it.
 ///
 /// Solid fills only: the subject is where the boxes land, and a colour per
 /// item is what makes a lane, a gutter and the full-span reset legible.
 const LANES_FRAGMENT: &str = r#"
-<div style="display: grid-lanes; width: 300px; height: 400px; gap: 15px; flow-tolerance: 0; grid-template-columns: repeat(3, minmax(0, 1fr)); background-color: #e5e7eb">
+<div style="display: grid-lanes; width: 300px; height: 400px; gap: 15px; fit-tolerance: 0; grid-template-columns: repeat(3, minmax(0, 1fr)); background-color: #e5e7eb">
   <div style="height: 60px; background-color: #2563eb"></div>
   <div style="height: 90px; background-color: #14b8a6"></div>
   <div style="height: 40px; background-color: #f59e0b"></div>

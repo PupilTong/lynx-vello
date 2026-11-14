@@ -282,14 +282,21 @@ fn grid_template_tracks() {
     );
 }
 
-/// css-grid-3 §4.2 `flow-tolerance: normal | <length-percentage [0,∞]> |
+/// css-grid-3 §4.2 `fit-tolerance: normal | <length-percentage [0,∞]> |
 /// infinite`. Both keywords survive to computed-value time: layout resolves
-/// `normal` to `1em` and `infinite` to an unbounded tie window.
+/// `normal` to `1em` and `infinite` to an unbounded tie window. The draft
+/// renamed the property from `flow-tolerance`, which is not kept as an alias
+/// (WPT `css/css-grid/grid-lanes/tentative/parsing/fit-tolerance-computed.html`
+/// and the reftests that set `fit-tolerance` read the current name).
 #[test]
-fn flow_tolerance_grammar() {
+fn fit_tolerance_grammar() {
     assert!(
-        property_is_supported("flow-tolerance"),
-        "flow-tolerance must be an author-facing longhand"
+        property_is_supported("fit-tolerance"),
+        "fit-tolerance must be an author-facing longhand"
+    );
+    assert!(
+        !property_is_supported("flow-tolerance"),
+        "the pre-rename name must not parse"
     );
     for (input, computed_value) in [
         ("normal", "normal"),
@@ -300,19 +307,19 @@ fn flow_tolerance_grammar() {
         ("calc(1em + 2px)", "18px"),
     ] {
         assert!(
-            parses("flow-tolerance", input),
-            "`flow-tolerance: {input}` must parse"
+            parses("fit-tolerance", input),
+            "`fit-tolerance: {input}` must parse"
         );
         assert_eq!(
-            computed(&format!("flow-tolerance: {input}"), "flow-tolerance"),
+            computed(&format!("fit-tolerance: {input}"), "fit-tolerance"),
             computed_value,
             "`{input}` computed value"
         );
     }
     for invalid in ["-1px", "-10%", "auto", "5", "none", "infinite 1px", ""] {
         assert!(
-            !parses("flow-tolerance", invalid),
-            "`flow-tolerance: {invalid}` must be rejected"
+            !parses("fit-tolerance", invalid),
+            "`fit-tolerance: {invalid}` must be rejected"
         );
     }
 }

@@ -2724,10 +2724,10 @@ fn bounding_client_rect_never_runs_a_pending_layout() {
 
 /// The waterfall shape the Lynx `<list list-type="waterfall">` component will
 /// be lowered onto: fixed `minmax(0, 1fr)` lanes, a gutter in both axes, and
-/// `flow-tolerance: 0` so every item lands in the strictly shortest lane.
+/// `fit-tolerance: 0` so every item lands in the strictly shortest lane.
 const LANES: &str = "page { display: flex; align-items: flex-start;
                             width: 400px; height: 400px; }
-     .lanes { display: grid-lanes; width: 200px; gap: 10px; flow-tolerance: 0;
+     .lanes { display: grid-lanes; width: 200px; gap: 10px; fit-tolerance: 0;
               grid-template-columns: repeat(2, minmax(0, 1fr)); }";
 
 #[test]
@@ -2767,7 +2767,7 @@ fn grid_lanes_stacks_items_into_the_shortest_lane() {
 fn grid_lanes_reads_a_var_substituted_track_list() {
     let mut h = Harness::new(
         "page { display: flex; align-items: flex-start; width: 400px; height: 400px; }
-         .lanes { display: grid-lanes; width: 200px; gap: 10px; flow-tolerance: 0;
+         .lanes { display: grid-lanes; width: 200px; gap: 10px; fit-tolerance: 0;
                   --n: 2;
                   grid-template-columns: repeat(var(--n), minmax(0, 1fr)); }",
     );
@@ -2827,7 +2827,7 @@ fn grid_lanes_scroll_extent_is_the_stacking_range_beyond_the_scrollport() {
     let mut h = Harness::new(
         "page { display: flex; align-items: flex-start; width: 400px; height: 400px; }
          .lanes { display: grid-lanes; width: 200px; height: 100px; overflow-y: scroll;
-                  gap: 10px; flow-tolerance: 0;
+                  gap: 10px; fit-tolerance: 0;
                   grid-template-columns: repeat(2, minmax(0, 1fr)); }",
     );
     let root = h.doc.root;
@@ -2855,7 +2855,7 @@ fn row_grid_lanes_stack_along_the_inline_axis_and_scroll_there() {
     let mut h = Harness::new(
         "page { display: flex; align-items: flex-start; width: 400px; height: 400px; }
          .lanes { display: grid-lanes; width: 100px; height: 200px; overflow-x: scroll;
-                  gap: 10px; flow-tolerance: 0;
+                  gap: 10px; fit-tolerance: 0;
                   grid-template-rows: repeat(2, minmax(0, 1fr)); }",
     );
     let root = h.doc.root;
@@ -2922,10 +2922,10 @@ fn grid_lanes_flattens_a_display_contents_wrapper() {
     assert_eq!(h.rect(lanes), (0.0, 0.0, 200.0, 120.0));
 }
 
-/// css-grid-3 §4.2: `flow-tolerance: normal` is `1em` of the container's own
+/// css-grid-3 §4.2: `fit-tolerance: normal` is `1em` of the container's own
 /// font, so the same three items land in different lanes under two font sizes.
 #[test]
-fn normal_flow_tolerance_resolves_against_the_containers_font_size() {
+fn normal_fit_tolerance_resolves_against_the_containers_font_size() {
     for (font_size, third) in [(16.0_f32, (100.0, 20.0)), (40.0_f32, (0.0, 50.0))] {
         let mut h = Harness::new(
             "page { display: flex; align-items: flex-start; width: 400px; height: 400px; }
@@ -2947,7 +2947,7 @@ fn normal_flow_tolerance_resolves_against_the_containers_font_size() {
         h.layout();
 
         assert_eq!(
-            h.doc.value(lanes, "flow-tolerance"),
+            h.doc.value(lanes, "fit-tolerance"),
             "normal",
             "the tolerance keyword survives to computed-value time",
         );
@@ -3083,7 +3083,7 @@ fn a_stretched_replaced_grid_item_transfers_into_an_auto_row() {
 #[test]
 fn replaced_lanes_items_take_their_lane_width_and_stack_by_the_transferred_height() {
     let mut h = Harness::new(
-        "page { display: grid-lanes; width: 200px; flow-tolerance: 0;
+        "page { display: grid-lanes; width: 200px; fit-tolerance: 0;
                 grid-template-columns: repeat(2, 100px); }
          image { justify-self: stretch; }",
     );
@@ -3105,7 +3105,7 @@ fn replaced_lanes_items_take_their_lane_width_and_stack_by_the_transferred_heigh
 #[test]
 fn normal_alignment_leaves_replaced_lanes_items_at_their_natural_size() {
     let mut h = Harness::new(
-        "page { display: grid-lanes; width: 200px; flow-tolerance: 0;
+        "page { display: grid-lanes; width: 200px; fit-tolerance: 0;
                 grid-template-columns: repeat(2, 100px); }",
     );
     let root = h.doc.root;
