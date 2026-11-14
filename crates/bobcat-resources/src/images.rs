@@ -305,13 +305,7 @@ pub(crate) fn describe<P: Platform>(
     let (image, refine) = match described {
         Described::Unavailable => return None,
         Described::Resident { image, refine } => (FrameImage::resident(image), refine),
-        Described::Absent { descriptor, refine } => (
-            FrameImage {
-                descriptor,
-                pixels: None,
-            },
-            refine,
-        ),
+        Described::Absent { descriptor, refine } => (FrameImage::released(descriptor), refine),
     };
     if let Some(refinement) = refine {
         spawn_refine(resources, Arc::from(source), refinement);
@@ -1058,7 +1052,7 @@ mod job_tests {
         let (reports, inbox) = ImageInbox::new();
         let view = resources.for_view(reports);
         load(&resources, "app:///a.png");
-        let source: Arc<str> = Arc::from("app:///a.png");
+        let source = bobcat_core::PictureKey::Url(Arc::from("app:///a.png"));
         view.release(std::slice::from_ref(&source));
         let hint = ImageSizeHint::new(1, 1);
         assert!(
@@ -1133,7 +1127,7 @@ mod job_tests {
         let (reports, inbox) = ImageInbox::new();
         let view = resources.for_view(reports);
         load(&resources, "app:///a.png");
-        let source: Arc<str> = Arc::from("app:///a.png");
+        let source = bobcat_core::PictureKey::Url(Arc::from("app:///a.png"));
         view.release(std::slice::from_ref(&source));
         let hint = ImageSizeHint::new(1, 1);
         view.want(&source, hint);
@@ -1183,8 +1177,8 @@ mod job_tests {
             seen >= 2
         });
 
-        first.retain(&[Arc::from("app:///a.png")]);
-        second.retain(&[Arc::from("app:///b.png")]);
+        first.retain(&[bobcat_core::PictureKey::Url(Arc::from("app:///a.png"))]);
+        second.retain(&[bobcat_core::PictureKey::Url(Arc::from("app:///b.png"))]);
         resources.set_memory_budget_bytes(0);
         assert!(
             resources.is_resident("app:///a.png"),

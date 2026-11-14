@@ -690,7 +690,7 @@ pub(crate) struct ViewSeat {
     /// The host's resource system, as the painter reads a commit's pixels out
     /// of it. A clone of the view's own handle, so the store is released when
     /// the view drops both — seat first, by declaration order there.
-    pub(crate) images: Rc<dyn FrameImages>,
+    pub(crate) images: Rc<dyn FrameImages<PlatformFrame = std::convert::Infallible>>,
     /// Where the painter posts its scroll offsets, its frame requests and its
     /// clock. Main holds a clone of its own: the seat never leaves this
     /// thread.

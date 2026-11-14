@@ -10,15 +10,16 @@ proposal and the contract is the requirement.
 
 ## Problem
 
-The paint pipeline assumes a picture's pixels change only with a commit:
+Before step 2 the paint pipeline assumed a picture's pixels change only with
+a commit:
 
-- an image draw names its source by the URL the page wrote, and the painter
-  resolves pixels through `terminus::link::FrameImages`, once per adopted
+- an image draw named its source by the URL the page wrote, and the painter
+  resolved pixels through `terminus::link::FrameImages`, once per adopted
   frame (`Painter::adopt`);
-- the compose key is the commit and the scroll generation, and a
-  `filter`/`backdrop-filter` bake is keyed by commit; the one change of
-  pixels within a commit, a wanted picture's restore arriving, clears what
-  the target holds and the bakes rather than entering either key.
+- the compose key was the commit and the scroll generation, and a
+  `filter`/`backdrop-filter` bake was keyed by commit; the one change of
+  pixels within a commit, a wanted picture's restore arriving, cleared what
+  the target held and the bakes rather than entering either key.
 
 Animated images, video, a canvas and an off-screen web view all change
 between commits, and none of them fits. Each could be added as its own
@@ -66,11 +67,15 @@ A *picture* is anything a draw can sample. It has:
 
 | Property | Meaning |
 | --- | --- |
-| key | `Url(Arc<str>)` — the URL the page wrote, shared by every draw of it — or `Id(PictureId)`, a process-unique id owned by one element |
+| key | `PictureKey::Url(Arc<str>)` — the URL the page wrote, shared by every draw of it — or `PictureKey::Id(PictureId)`, a process-unique id owned by one element (`Document::set_picture`, which also gives the element its natural size) |
 | generation | a counter that changes exactly when the picture's pixels do |
 | descriptor | `vant::image::ImageDescriptor`: identity of the current bitmap, its size and layout, without pixels |
 | opacity | whether any pixel may be non-opaque |
-| next change | the instant the generation will next change by itself, when the picture knows it (an animated image does; a video does not) |
+| next change | the instant the generation will next change by itself, when the picture knows it (an animated image does; a video does not), as a `ClockInstant` |
+
+`FrameImages::describe(picture, hint)` answers all of these together as a
+`FrameImage`; a store with no live pictures answers generation zero for
+every one.
 
 A static image is a picture whose generation never changes. Nothing about a
 draw distinguishes the kinds: `object-fit`, sampling, the clip shape and the
@@ -85,44 +90,83 @@ A picture's content arrives as *frames*. A frame is one of:
   `ImageBitmap` or `VideoFrame` in the browser, an `IOSurface`-backed buffer
   on macOS), named by an associated type so no `dyn` crosses the boundary.
 
+`PictureFrame<P>` is the two; `FrameImages::PlatformFrame` is `P`. Until a
+platform-frame writer exists the painter accepts only stores whose
+`PlatformFrame` is `std::convert::Infallible`.
+
 ### Slot
 
-Each picture has one *slot* holding its newest frame. A producer on any
-thread replaces the slot's frame and wakes the host's event loop; nothing is
-queued behind it. The painter takes the frame when it next composes.
+Each `Id` picture has one *slot* (`PictureSlot`) holding its newest frame. A
+producer on any thread replaces the slot's frame (`publish_pixels`) and wakes
+the host's event loop when the slot says a wake is owed — when the frame it
+replaced had been taken, or there was none; a frame replaced before it was
+taken already owes one. Nothing is queued behind it. The store answers the
+slot's description for `describe` and hands its frame over for
+`FrameImages::take_frame`; the painter takes it at its next adoption, when the
+generation differs from the one it drew. A `Url` picture has no slot: its
+pixels are the store's, lent as before.
 
 ### Writer
 
-A *writer* copies one frame into a rectangle of a texture the engine owns.
-It always runs on the painter's thread, before a swap-chain image is
+A *writer* copies one frame into a texture the engine owns. It always runs on
+the painter's thread, in `Painter::adopt`, before a swap-chain image is
 acquired.
 
-- The engine picks the destination: an atlas page for a small picture, a
-  texture of its own for a large one and for every picture whose generation
-  changes. A changing picture is rewritten in place, under one texture id.
-- The writer for CPU pixels is the engine's. The writer for platform frames
-  is the embedder's, and has the shape of `vello_gpu`'s `AtlasWriter`
-  (device, queue, encoder, destination texture, offset, size).
+- Every bitmap is a texture of its own, drawn as a `vello_gpu` external
+  texture: `vello_gpu` 0.4 removed its image atlas (`AtlasWriter` and
+  `Renderer::upload_image` with it) and keeps an atlas for glyphs only. A
+  `Url` picture's upload is keyed on its bitmap's descriptor; an `Id`
+  picture's is keyed on its `PictureId`, one texture under one texture id,
+  rewritten in place by a frame of the same size and replaced by a texture of
+  the new size, under the same id, by one that is not
+  (`BitmapLeases::write_picture` in `render::sparse`).
+- The writer for CPU pixels is the engine's: it converts to premultiplied
+  RGBA8, which is what a bound texture must hold, and queues the write. The
+  writer for platform frames will be the embedder's, handed the device, the
+  queue and the destination texture and its size; with no `AtlasWriter` in
+  `vello_gpu` its exact shape is step 5's to decide.
 - A frame is always copied. Sampling a producer's own texture is not built;
   the copy is where format conversion, orientation and premultiplication
   happen and what gives every picture one lifetime rule.
 
-### What the painter does per composed frame
+### What the painter does per adoption
 
-1. For every picture the frame draws and can see, ask the store for its
-   state (descriptor, generation, next change). This never blocks.
-2. For each whose generation differs from the uploaded one, take the slot's
-   frame and write it. If there is no frame and no upload, draw nothing for
-   it and tell the store it is wanted.
-3. Report the drawn set (today's `retain`) and the uploads held (today's
-   `release`), so the store can drop pixels and producers of pictures that
+A picture is *drawn* when the adopted commit draws it. The commit's walk has
+already culled its draws to the encode window around each scrollport, so a
+picture far off screen is not drawn; one inside the window but outside the
+target is, which is what lets it scroll in with its frame already there.
+Culling per composed frame instead would make the drawn set move with every
+scroll frame.
+
+1. For every picture the commit draws, ask the store for its state
+   (descriptor, generation, next change), once per commit. At every later
+   adoption ask again only for those that can change without a commit: a
+   wanted picture, every `Id` picture, and one whose store named its next
+   change. A commit whose pictures are all static URL images is asked
+   nothing more. This never blocks.
+2. For each `Id` picture whose generation differs from the one written into
+   its texture, take the slot's frame and write it. If there is no frame and
+   no texture, draw nothing for it and tell the store it is wanted.
+3. Report the drawn set (`retain`, once per commit) and the uploads held
+   (`release`), so the store can drop pixels and producers of pictures that
    are not drawn can stop producing.
-4. Compose. The compose key includes the generations of the pictures drawn;
-   a `filter` or `backdrop-filter` bake's key includes the generations of the
-   pictures inside it.
-5. Frame demand: a taken frame, or a wake from a producer, owes one frame.
-   A known next-change instant arms the engine's own timer, which then asks
-   for one frame; a live picture does not keep the display link running.
+4. Compose. The compose key is the commit, the scroll generation and a
+   revision the painter moves whenever what a draw resolves to changes — a
+   new frame taken, a wanted picture arriving — which is the generations of
+   the drawn pictures folded into one number. A `filter` or
+   `backdrop-filter` bake's key includes the bitmaps the image draws in its
+   own range resolve to (`FilterGroup::pictures`, the draws of its range and
+   of the backdrops it draws), so a new frame re-bakes only the bakes that
+   draw it.
+5. Frame demand: a taken frame, or a wanted picture arriving, owes one frame
+   (`Painter::take_redraw`); a producer's wake is what gets the host to adopt.
+   A live picture does not count as animating, so it does not keep the
+   display link running. A known next-change instant is reported as
+   `Painter::next_picture_change` for the host to arm a timer at; the painter
+   has no timer of its own (the engine's timers run on the main thread, for
+   realm timers and `x-swiper` autoplay), so arming one is the host's, and no
+   host does yet: no store in the workspace answers a next change before
+   step 4.
 
 ### Consequences accepted
 
@@ -266,11 +310,24 @@ One change per step, in order; each leaves the tree green.
    is still missing. The blocking half of the browser mailbox (`Atomics.wait` and
    `Atomics.notify`) is gone; the asynchronous decode over the mailbox stays
    until step 5.
-2. **Live pictures.** Picture keys (`Url` | `Id`), generations, slots for CPU
-   frames, in-place rewrite of a picture's own texture, generations in the
-   compose and bake keys, timer-driven frame demand, drawn-set feedback. A
-   test producer and goldens: a picture that changes with no commit is
-   recomposed; under `filter` it is re-baked; not drawn, it is not asked for.
+2. **Live pictures.** An image draw and a replaced box name a `PictureKey`
+   (`Url` | `Id`); `Document::set_picture` puts an `Id` picture on an element
+   with its natural size. A store's `FrameImage` carries a generation and a
+   next change; an `Id` picture's CPU frames come from a `PictureSlot` and
+   are taken with `FrameImages::take_frame`, which the painter writes into
+   the picture's own texture in place. The compose key carries the revision
+   of what the draws resolve to and each bake's key the bitmaps its range
+   draws, so step 1's clearing of the target and the bakes is gone; a render
+   that lost pixels it was lent still forgets the bakes, because a bake that
+   failed to draw a bitmap can name the very bitmap it failed to draw. A
+   change owes one frame; a known next change is reported
+   (`Painter::next_picture_change`) for a host's timer, which no host arms
+   yet. The drawn set is the commit's. `bobcat-resources` and
+   `prime-radiant`'s `TestImages` answer URL pictures only, at generation
+   zero. A test producer and goldens (`crates/terminus/tests/screenshots/live-picture/`):
+   a picture that changes with no commit is recomposed; under `filter` it is
+   re-baked; not drawn, it is not asked for; two draws share one texture; a
+   change of size keeps the texture id; one frame is owed per change.
 3. **`<image>` leaves `terminus`.** Roles, the presented choice and load
    outcomes move to the `bobcat-core` component over the one replaced-box
    primitive. No behaviour change.
@@ -289,5 +346,7 @@ One change per step, in order; each leaves the tree green.
 - Whether `createImageBitmap` and the present browser path produce the same
   pixels (premultiplication, colour management). The wasm target has no
   rendering test in CI today, so step 5 needs one.
-- What `vello_gpu` assumes about an external texture's alpha and colour
-  space.
+- What `vello_gpu` assumes about an external texture's colour space. Its
+  alpha is settled: a texture bound with `TextureBindings::insert` is read as
+  premultiplied RGBA, from mip level 0 of a non-array 2D view of a filterable
+  float format, and its sides must fit in `u16`.

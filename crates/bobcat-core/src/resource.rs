@@ -46,7 +46,11 @@ use crate::style::PreparsedStyleSheet;
 /// Every protocol method is synchronous: it starts work and returns. Core therefore holds no
 /// resource future and polls none, and nothing here names a host's transport, caches or
 /// codecs: whatever surface those have belongs to the host's own crate.
-pub trait ResourceFetcher: terminus::link::FrameImages {
+///
+/// Its frames are CPU pixels: the painter draws no platform frame yet.
+pub trait ResourceFetcher:
+    terminus::link::FrameImages<PlatformFrame = std::convert::Infallible>
+{
     /// Begins one source load without blocking its caller.
     ///
     /// **A view's startup sources are requested before it runs at all**:

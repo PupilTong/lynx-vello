@@ -84,7 +84,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bobcat_core::resource::ResourceFetcher;
-use bobcat_core::{FrameImages, ImageReports, ImageResidency, ImageSizeHint, PreparsedStyleSheet};
+use bobcat_core::{
+    FrameImages, ImageReports, ImageResidency, ImageSizeHint, PictureKey, PreparsedStyleSheet,
+};
 use bytes::Bytes;
 use rustc_hash::FxHashSet;
 use url::Url;
@@ -1313,21 +1315,41 @@ impl<P: Platform> ResourceFetcher for ViewResources<P> {
     }
 }
 
+/// The URLs among `pictures`. This store answers URL pictures only, and
+/// has no picture an element owns: every generation it answers is zero.
+fn urls(pictures: &[PictureKey]) -> Vec<Arc<str>> {
+    pictures
+        .iter()
+        .filter_map(|picture| match picture {
+            PictureKey::Url(url) => Some(Arc::clone(url)),
+            PictureKey::Id(_) => None,
+        })
+        .collect()
+}
+
 impl<P: Platform> FrameImages for ViewResources<P> {
-    fn describe(&self, source: &str, hint: ImageSizeHint) -> Option<bobcat_core::FrameImage> {
-        images::describe(&self.resources, source, hint)
+    type PlatformFrame = std::convert::Infallible;
+
+    fn describe(
+        &self,
+        picture: &PictureKey,
+        hint: ImageSizeHint,
+    ) -> Option<bobcat_core::FrameImage> {
+        images::describe(&self.resources, picture.url()?, hint)
     }
 
-    fn want(&self, source: &str, hint: ImageSizeHint) {
-        images::want(&self.resources, source, hint);
+    fn want(&self, picture: &PictureKey, hint: ImageSizeHint) {
+        if let Some(source) = picture.url() {
+            images::want(&self.resources, source, hint);
+        }
     }
 
-    fn retain(&self, frame: &[Arc<str>]) {
-        images::retain(&self.resources, self.view, frame);
+    fn retain(&self, drawn: &[PictureKey]) {
+        images::retain(&self.resources, self.view, &urls(drawn));
     }
 
-    fn release(&self, sources: &[Arc<str>]) {
-        images::release(&self.resources, sources);
+    fn release(&self, pictures: &[PictureKey]) {
+        images::release(&self.resources, &urls(pictures));
     }
 }
 
