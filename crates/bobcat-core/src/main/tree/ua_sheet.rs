@@ -74,7 +74,7 @@ use super::swiper::{SWIPER_ITEM_TAG, SWIPER_TAG};
 use super::viewpager::{VIEWPAGER_ITEM_TAG, VIEWPAGER_TAG, X_VIEWPAGER_ITEM_TAG, X_VIEWPAGER_TAG};
 use super::{
     frame, image, list, markdown, overlay, raw_text, refresh_view, scroll_container,
-    scroll_coordinator, svg, swiper, text, text_field, viewpager,
+    scroll_coordinator, svg, swiper, text, text_field, video, viewpager,
 };
 
 /// Page configuration for the Lynx runtime and UA cascade.
@@ -270,7 +270,7 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
     };
     format!(
         "page, view, scroll-view, list, list-item, {component_tags}, {BLUR_VIEW_TAG}, {X_BLUR_VIEW_TAG}, \
-         {MARKDOWN_TAG}, {X_MARKDOWN_TAG}, {text_fields}, text, image, svg, frame {{ box-sizing: border-box; border-width: 0; border-style: solid; \
+         {MARKDOWN_TAG}, {X_MARKDOWN_TAG}, {text_fields}, text, image, svg, video, frame {{ box-sizing: border-box; border-width: 0; border-style: solid; \
          position: relative; overflow: clip; min-width: 0; min-height: 0; }}\n\
          {display}\
          {overflow}\
@@ -295,7 +295,8 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
          {carriers}\
          {frames}\
          {images}\
-         {svgs}",
+         {svgs}\
+         {videos}",
         scrollers = scroll_container::UA_RULES,
         lists = list::UA_RULES,
         pagers = viewpager::UA_RULES,
@@ -318,6 +319,7 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
         frames = frame::UA_RULES,
         images = image::UA_RULES,
         svgs = svg::UA_RULES,
+        videos = video::UA_RULES,
     )
 }
 

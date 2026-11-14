@@ -593,6 +593,199 @@ impl AnimatedCard {
     }
 }
 
+/// The compiled `react-video` card: one muted `<video>` of the 1.2 s
+/// red-green-blue clip in a 240 by 180 box over a red `#status` band (the
+/// fixture's `index.jsx` has the layout), played by `AVFoundation` with the
+/// painter drawing its frames.
+///
+/// - It opens paused on its first frame: `firstframe` with the clip's duration, the box red, and
+///   nothing more while nobody plays it.
+/// - A tap: `play` answers code 0 and `{success: true}`; the clip plays through and `ended` fires
+///   once, `#status` turns green, and the box rests on the last frame, blue.
+///
+/// Only macOS has a player; Linux's fails every open.
+#[tokio::test]
+#[cfg_attr(
+    not(target_os = "macos"),
+    ignore = "only macOS has a video player (AVFoundation)"
+)]
+async fn compiled_video_opens_paused_and_plays_on_tap() {
+    use bobcat_core::input::{InputEvent, Point2D, PointerKind, PointerPhase};
+    use bobcat_core::{DrawTarget, Painter};
+    const GREEN: [u8; 4] = [0, 128, 0, 255];
+    /// A point of the video's box, and one of `#status`.
+    const CLIP: (usize, usize) = (120, 90);
+    const STATUS: (usize, usize) = (120, 210);
+
+    let page = PageSource::from_bytes(
+        &Url::parse("app:///video.web.bundle").unwrap(),
+        fixtures::fixture("react-video").page,
+    )
+    .unwrap();
+    let resources = Resources::new(ResourcesConfig::default(), || {});
+    page.register_with(&resources);
+    let group = LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Auto)
+        .await
+        .unwrap();
+    let view = group
+        .create_lynx_view(
+            240.0,
+            240.0,
+            1.0,
+            resources.builder(),
+            Vec::new(),
+            page.view_sources(SCREEN, "en-US"),
+        )
+        .unwrap();
+    let mut painter = Painter::new(DrawTarget::Offscreen, 240.0, 240.0, 1.0)
+        .await
+        .unwrap();
+    painter.attach(&view).unwrap();
+    let mut card = LoggedCard {
+        view,
+        painter,
+        prefix: "video ",
+        booted: false,
+        logged: Vec::new(),
+    };
+
+    // The first frame, paused.
+    card.until("the first frame drawn red", |card| {
+        card.of("clip")
+            .iter()
+            .any(|line| line.starts_with("firstframe"))
+            && card
+                .pixel(CLIP)
+                .is_some_and(|texel| near(texel, [255, 0, 0, 255]))
+    })
+    .await;
+    card.idle(Duration::from_millis(600)).await;
+    assert_eq!(card.of("clip"), [r#"firstframe {"duration":1.2}"#]);
+    assert!(
+        card.pixel(CLIP)
+            .is_some_and(|texel| near(texel, [255, 0, 0, 255])),
+        "a paused video stays on its first frame: {:?}",
+        card.pixel(CLIP)
+    );
+
+    // A tap plays it through.
+    card.logged.clear();
+    for phase in [PointerPhase::Down, PointerPhase::Up] {
+        card.painter.dispatch_input(InputEvent::pointer(
+            Point2D::new(120.0, 210.0),
+            1,
+            PointerKind::Touch,
+            phase,
+        ));
+    }
+    card.until("#status green", |card| card.pixel(STATUS) == Some(GREEN))
+        .await;
+    card.idle(Duration::from_millis(400)).await;
+    assert_eq!(
+        card.of("clip"),
+        [r#"play 0 {"success":true}"#, "ended {}"],
+        "one play, one end"
+    );
+    assert!(
+        card.pixel(CLIP)
+            .is_some_and(|texel| near(texel, [0, 0, 255, 255])),
+        "it rests on its last frame: {:?}",
+        card.pixel(CLIP)
+    );
+}
+
+/// Whether `texel` is `expected` within H.264's rounding of a flat colour.
+fn near(texel: [u8; 4], expected: [u8; 4]) -> bool {
+    texel
+        .iter()
+        .zip(expected)
+        .all(|(actual, expected)| actual.abs_diff(expected) <= 24)
+}
+
+/// A compiled card in a 240px view whose background thread logs lines that
+/// start with `prefix`, and the lines it logged.
+struct LoggedCard {
+    view: bobcat_core::LynxView<bobcat_resources::ViewResources>,
+    painter: bobcat_core::Painter,
+    prefix: &'static str,
+    booted: bool,
+    logged: Vec<String>,
+}
+
+impl LoggedCard {
+    /// One turn of the view and the painter, keeping the card's log lines.
+    fn turn(&mut self) {
+        for event in self.view.pump() {
+            match event {
+                EngineEvent::ScriptFinished => self.booted = true,
+                EngineEvent::ConsoleMessage { message, .. } => {
+                    if let Some(line) = message.strip_prefix(self.prefix) {
+                        self.logged.push(line.to_owned());
+                    }
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        self.painter.pump().unwrap();
+    }
+
+    /// The pixel at `at` of the painter's last frame; `None` before the
+    /// card booted or while no frame has been rendered to capture.
+    fn pixel(&mut self, at: (usize, usize)) -> Option<[u8; 4]> {
+        if !self.booted {
+            return None;
+        }
+        // A painter that has drawn nothing yet has nothing to capture: not
+        // painted so far, as the other suites here read it.
+        let shot = match self.painter.capture() {
+            Ok(shot) => shot,
+            Err(bobcat_core::EngineError::Render(message))
+                if message == "no frame has been rendered to capture" =>
+            {
+                return None;
+            }
+            Err(error) => panic!("capture failed: {error}"),
+        };
+        let index = (at.1 * 240 + at.0) * 4;
+        shot.pixels[index..index + 4].try_into().ok()
+    }
+
+    /// Turns until `done` holds, or fails after thirty seconds.
+    async fn until(&mut self, what: &str, done: impl Fn(&mut Self) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            self.turn();
+            if done(self) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{what} never happened; logged {:?}",
+                self.logged
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    /// Turns for `duration`.
+    async fn idle(&mut self, duration: Duration) {
+        let until = Instant::now() + duration;
+        while Instant::now() < until {
+            self.turn();
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    /// What `#id` logged, without the id.
+    fn of(&self, id: &str) -> Vec<String> {
+        self.logged
+            .iter()
+            .filter_map(|line| line.strip_prefix(&format!("{id} ")))
+            .map(str::to_owned)
+            .collect()
+    }
+}
+
 /// A compiled `<scroll-coordinator>` (300 by 400: a translucent blue toolbar
 /// 60 tall, a red header 200 tall, a slot of eight 100px items in a
 /// `<scroll-view>`) boots with the header under the toolbar and the first

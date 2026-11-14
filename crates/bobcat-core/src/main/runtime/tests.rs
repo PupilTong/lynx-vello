@@ -7161,6 +7161,149 @@ fn an_animated_image_plays_its_own_picture_through_the_realm() {
     );
 }
 
+/// A `<video>` through the realm: the entry that wrote its `src` asks the
+/// host to open a picture of the element's own under its `loop` and
+/// `muted`; the player's reports are `firstframe` with `{duration}`, `ended`
+/// with `{}` and `error` with `{errorCode, errorMsg}`, none of them bubbling;
+/// `play` and `pause` answer code 0 with `{success: true}` in the call and
+/// reach the host as commands when the entry ends; and `play` on a video
+/// with no `src` answers 8 and fires an `error`.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one scenario: the open, the reports and the two methods"
+)]
+fn a_video_opens_reports_and_answers_its_methods_through_the_realm() {
+    use terminus::link::{
+        MediaCommand, MediaError, MediaErrorKind, MediaEvent, MediaSettings, PlaybackReport,
+        PlaybackRequest,
+    };
+
+    let (mut js_runtime, mut runtime, _elements, mut far) =
+        runtime_over_watching_names(ingredients());
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.seen = [];
+                globalThis.runWorklet = (value, params) => value.body(params[0]);
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const video = __CreateElement('video', 0);
+                  const empty = __CreateElement('video', 0);
+                  __AppendElement(page, video);
+                  __AppendElement(page, empty);
+                  globalThis.held = [page, video, empty];
+                  for (const target of [video, empty]) {
+                    for (const name of ['firstframe', 'ended', 'error']) {
+                      __AddEvent(target, 'bindEvent', name, {
+                        type: 'worklet',
+                        value: {
+                          body: (event) =>
+                            seen.push(event.type + ':' + JSON.stringify(event.detail)),
+                        },
+                      });
+                    }
+                  }
+                  __AddEvent(page, 'bindEvent', 'ended', {
+                    type: 'worklet',
+                    value: { body: (event) => seen.push('page:' + event.type) },
+                  });
+                  __SetAttribute(video, 'src', 'app:///clip.mp4');
+                  __SetAttribute(video, 'muted', true);
+                };
+                ",
+            "app:///video.js",
+        )
+        .expect("main-thread script");
+    let _ = runtime.settle_entry();
+    let requests = playback_notices(&mut far.0.notices);
+    let [
+        PlaybackRequest::Open {
+            picture,
+            source,
+            settings,
+        },
+    ] = requests.as_slice()
+    else {
+        panic!("one open: {requests:?}");
+    };
+    let picture = *picture;
+    assert_eq!(&**source, "app:///clip.mp4");
+    assert_eq!(
+        *settings,
+        MediaSettings {
+            looping: false,
+            muted: true,
+        }
+    );
+
+    let report = |event| terminus::link::ImageEvent::Playback {
+        picture,
+        report: PlaybackReport::Media(event),
+    };
+    runtime.apply_image_events(&[
+        report(MediaEvent::FirstFrame {
+            width: 64,
+            height: 48,
+            duration: std::time::Duration::from_millis(2500),
+        }),
+        report(MediaEvent::Ended),
+        report(MediaEvent::Failed(MediaError::new(
+            MediaErrorKind::Playback,
+            "play() failed because the user didn't interact with the document first.",
+        ))),
+    ]);
+    assert!(
+        runtime
+            .dispatch_component_events(&mut js_runtime)
+            .is_empty()
+    );
+    expect_seen(
+        &mut js_runtime,
+        &mut runtime,
+        r#"firstframe:{"duration":2.5}|ended:{}|error:{"errorCode":-2,"errorMsg":"play() failed because the user didn't interact with the document first."}"#,
+    );
+
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+                import { __InvokeUIMethod } from 'bobcat:element';
+                for (const method of ['play', 'pause', 'stop']) {
+                  __InvokeUIMethod(held[1], method, {}, (result) =>
+                    seen.push(method + ':' + result.code + ':' + JSON.stringify(result.data)));
+                }
+                __InvokeUIMethod(held[2], 'play', {}, (result) =>
+                  seen.push('empty:' + result.code));
+                ",
+            "app:///play.mjs",
+            "calling the video methods",
+        )
+        .expect("calling the video methods");
+    expect_seen(
+        &mut js_runtime,
+        &mut runtime,
+        r#"play:0:{"success":true}|pause:0:{"success":true}|stop:3:undefined|empty:8"#,
+    );
+    let _ = runtime.settle_entry();
+    assert_eq!(
+        playback_notices(&mut far.0.notices),
+        [MediaCommand::Play, MediaCommand::Pause]
+            .map(|command| PlaybackRequest::Media { picture, command })
+    );
+    assert!(
+        runtime
+            .dispatch_component_events(&mut js_runtime)
+            .is_empty()
+    );
+    expect_seen(
+        &mut js_runtime,
+        &mut runtime,
+        r#"error:{"errorCode":-1,"errorMsg":"missing video source"}"#,
+    );
+}
+
 fn js_set_src(js_runtime: &mut ScriptRuntime, runtime: &mut MainThreadRuntime, source: &str) {
     runtime
         .evaluate_module(

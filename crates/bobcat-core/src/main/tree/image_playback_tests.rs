@@ -76,6 +76,9 @@ impl Host {
                 PlaybackRequest::End { picture } => {
                     self.pictures.remove(picture);
                 }
+                PlaybackRequest::Open { .. } | PlaybackRequest::Media { .. } => {
+                    panic!("an `image` opens no video: {request:?}")
+                }
             }
             self.requests.push(request);
         }

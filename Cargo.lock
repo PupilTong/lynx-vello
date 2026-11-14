@@ -451,6 +451,7 @@ dependencies = [
  "js-sys",
  "libloading",
  "memmap2",
+ "objc2 0.6.5",
  "png",
  "pollster",
  "prime-radiant",

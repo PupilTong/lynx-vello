@@ -1,10 +1,15 @@
-import initWasm, { BobcatRenderer } from '../pkg/bobcat_wasm.js'
+import initWasm, {
+  BobcatRenderer,
+  deliverMediaEvent,
+  deliverMediaFrame,
+} from '../pkg/bobcat_wasm.js'
 import { monitorFrameRate } from './frame-rate.ts'
 import type {
   EditCommand,
   FacadeMessage,
   InitMessage,
   LoadTimingFields,
+  MediaRequestMessage,
   RenderWorkerMessage,
   RequestMessage,
   TextInputFields,
@@ -149,6 +154,15 @@ function postPerformanceEntry(entry: string): void {
   } satisfies RenderWorkerMessage)
 }
 
+// One instruction for a video the engine opened, on its way to the
+// facade's `<video>` (`js/media.ts`). An open's bytes are a copy the engine
+// made for this message, so their buffer is transferred.
+function postMediaRequest(message: MediaRequestMessage): void {
+  const transfer =
+    message.op === 'open' && message.bytes !== null ? [message.bytes.buffer] : []
+  self.postMessage(message satisfies RenderWorkerMessage, transfer)
+}
+
 // One `bobcat-edit` as the engine's flat call: the command's name, its text,
 // and two numbers whose meaning the name decides (`src/text_input.rs`).
 function applyEdit(command: EditCommand): void {
@@ -205,6 +219,7 @@ async function initialize(message: InitMessage): Promise<void> {
     postNativeModuleCall,
     postTextInputState,
     message.observePerformance ? postPerformanceEntry : undefined,
+    postMediaRequest,
   )
   observePerformance = message.observePerformance
   running = true
@@ -623,6 +638,22 @@ self.addEventListener('message', (event) => {
     // The same queue as key input, so a `keydown` the facade posted first
     // reaches the engine first, and for the same reason as pointer input.
     requestQueue = requestQueue.then(dispatch)
+  } else if (message?.type === 'bobcat-media-frame') {
+    // Outside the request queue: a frame touches only its video's picture,
+    // never the renderer a load may be borrowing, and waiting would hold a
+    // decoder buffer for nothing. A frame of a video closed since is closed
+    // there.
+    deliverMediaFrame(message.player, message.frame)
+  } else if (message?.type === 'bobcat-media-event') {
+    // Outside the request queue for the same reason: a report is kept for
+    // the host's next turn, which it wakes.
+    if (message.event === 'firstframe') {
+      deliverMediaEvent(message.player, message.event, message.width, message.height, message.duration, '', '')
+    } else if (message.event === 'error') {
+      deliverMediaEvent(message.player, message.event, 0, 0, 0, message.kind, message.message)
+    } else {
+      deliverMediaEvent(message.player, message.event, 0, 0, 0, '', '')
+    }
   } else if (message?.type === 'bobcat-native-module-callback') {
     const answer = (): void => {
       if (!running || renderer === undefined) {

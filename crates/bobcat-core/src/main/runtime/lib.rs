@@ -57,8 +57,9 @@ use crate::main::record::write_record_field;
 use crate::main::tree::{
     Autoplays, ComponentDetail, ComponentEvent, ComponentEvents, Field, ImageOutcome, ImageSources,
     LynxDocument, MAX_FRAME_DEPTH, PageConfig, SELECTION_CHANGE, START_PLAY_EVENT,
-    SelectionReports, apply_image_events, frame_depth, invoke_base_method, is_svg, is_text,
-    nested_page, new_document, relevance_span, report_selection_changes, reset_frame,
+    SelectionReports, Videos, apply_image_events, apply_video_reports, frame_depth,
+    invoke_base_method, is_svg, is_text, nested_page, new_document, relevance_span,
+    report_selection_changes, reset_frame,
 };
 use crate::performance::{Opener, OpenerId};
 use crate::realm::child::{ChildHostModules, ChildHostState, ChildKey};
@@ -248,6 +249,10 @@ fn push_detail_extras<'a>(
         ComponentDetail::Selection { selection } => extras.extend([
             ("selectionStart", unit(selection.start)),
             ("selectionEnd", unit(selection.end)),
+        ]),
+        ComponentDetail::Error { code, message } => extras.extend([
+            ("errorCode", HostArgument::Number(f64::from(*code))),
+            ("errorMsg", HostArgument::String(message)),
         ]),
         ComponentDetail::Fields(fields) => {
             extras.extend(fields.iter().map(|&(key, field)| {
@@ -1148,6 +1153,10 @@ struct DocumentSlot {
     /// reports against. Held here for what `component_events` is: the
     /// components are its far end, and the report path is the runtime's.
     image_sources: ImageSources,
+    /// The document's `video` elements: the picture each shows, and the
+    /// requests for its player not handed to the host yet. Held here for
+    /// what `image_sources` is.
+    videos: Videos,
     /// The autoplay timers of the document's `x-swiper`s, which the
     /// component starts and stops from its reactions. Held here for what
     /// `component_events` is: the runtime waits for the earliest
@@ -1295,6 +1304,7 @@ impl DocumentSlot {
             held: None,
             component_events: ComponentEvents::default(),
             image_sources: ImageSources::default(),
+            videos: Videos::default(),
             autoplays: Autoplays::default(),
             exposure: Exposure::new(),
             layout_change: LayoutChangeObserver::default(),
@@ -1384,8 +1394,9 @@ impl DocumentSlot {
         let events = self.component_events.clone();
         let autoplays = self.autoplays.clone();
         let images = self.image_sources.clone();
+        let videos = self.videos.clone();
         let document = construction_phase("building the page", || {
-            let mut document = new_document(viewport, config, events, autoplays, images);
+            let mut document = new_document(viewport, config, events, autoplays, images, videos);
             if let Some(pool) = style_pool {
                 document.set_style_pool(pool);
             }
@@ -2061,16 +2072,19 @@ impl DocumentSlot {
         }
     }
 
-    /// Hands the host the playback requests the `image` component made
-    /// since the last drain ([`ImageSources::take_playback`]): an animated
-    /// `src` starting, under the policy its element's attributes give now,
-    /// a UI method's control, or a picture's end. Empty on every entry that
-    /// touched no animated `<image>`.
+    /// Hands the host the playback requests the `image` and `video`
+    /// components made since the last drain ([`ImageSources::take_playback`],
+    /// [`Videos::take_requests`]): an animated `src` starting, under the
+    /// policy its element's attributes give now, a video opening under the
+    /// settings its element's attributes give now, a UI method's control or
+    /// command, or a picture's end. Empty on every entry that touched no
+    /// animated `<image>` and no `<video>`.
     fn request_playback(&mut self) {
         let Some(document) = self.document.as_ref() else {
             return;
         };
-        let requests = self.image_sources.take_playback(document);
+        let mut requests = self.image_sources.take_playback(document);
+        requests.extend(self.videos.take_requests(document));
         if !requests.is_empty() {
             self.outbox.notify(ViewNotice::Playback(requests));
         }
@@ -2935,11 +2949,18 @@ impl MainThreadRuntime {
     /// producers answer the same way. The other one is the `image` component,
     /// which settles a `src` from inside the `__SetAttribute` that wrote it
     /// and may not re-enter the realm at all.
+    ///
+    /// A `video`'s player reports arrive in the same batch and owe its
+    /// `firstframe`, `ended` and `error` ([`apply_video_reports`]), queued
+    /// after the images' outcomes.
     pub(crate) fn apply_image_events(&mut self, events: &[terminus::link::ImageEvent]) {
         let mut slot = self.slot.borrow_mut();
         let sources = slot.image_sources.clone();
+        let videos = slot.videos.clone();
         let outcomes = apply_image_events(slot.document_mut(), &sources, events);
         slot.component_events.extend_images(outcomes);
+        let owed = apply_video_reports(slot.document_mut(), &videos, events);
+        slot.component_events.extend(owed);
     }
 
     /// Whether the document holds anything the last commit did not apply:

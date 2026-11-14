@@ -33,6 +33,12 @@
 //   `docs/picture-source-design.md` "Animated images"), so it never rests.
 // - `fast-forever.gif` (white, then red; forever) in an `<image>` is seen in
 //   both colours.
+// - `rgb.mp4` (`bobcat-resources/tests/fixtures/video`: red, green, then
+//   blue, 0.4 s each, H.264 in MP4) in a muted, looping `<video>` that the
+//   card plays as it renders: a muted play needs no user gesture. The
+//   browser's `<video>` on the page's thread plays it, and its frames reach
+//   the Render Worker as `VideoFrame`s. Once its first frame is drawn, every
+//   screenshot shows one of the clip's colours, and all three are seen.
 
 import { spawn } from 'node:child_process'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -49,8 +55,9 @@ const animatedFixtures = path.resolve(
   here,
   '../../bobcat-resources/tests/fixtures/animated',
 )
+const videoFixtures = path.resolve(here, '../../bobcat-resources/tests/fixtures/video')
 
-const WIDTH = 450
+const WIDTH = 560
 const HEIGHT = 120
 
 function argument(name: string): string | undefined {
@@ -118,6 +125,7 @@ const CARD = `<!doctype lynx>
 .at-1 { left: 120px; }
 .at-2 { left: 230px; }
 .at-3 { left: 340px; }
+.at-4 { left: 450px; }
 .css-twice {
   background-image: url(rgb-twice.gif);
   background-size: 100% 100%;
@@ -150,6 +158,13 @@ function renderPage() {
   __SetAttribute(once, "loop-count", "1");
   __SetAttribute(once, "src", "rgb-twice.gif");
   __AppendElement(page, once);
+  const video = __CreateElement("video", pageId);
+  __SetClasses(video, "cell at-4");
+  __SetAttribute(video, "muted", "true");
+  __SetAttribute(video, "loop", "true");
+  __SetAttribute(video, "src", "rgb.mp4");
+  __AppendElement(page, video);
+  __InvokeUIMethod(video, "play", {}, () => {});
 }
 
 engine.addEventListener("__RenderPage", renderPage);
@@ -189,6 +204,7 @@ const TYPES: Record<string, string> = {
   '.js': 'text/javascript; charset=utf-8',
   '.wasm': 'application/wasm',
   '.gif': 'image/gif',
+  '.mp4': 'video/mp4',
   '.png': 'image/png',
   '.xml': 'application/xml; charset=utf-8',
 }
@@ -209,6 +225,9 @@ function file(pathname: string): { body: Buffer; type: string } | undefined {
       body: readFileSync(path.join(animatedFixtures, pathname.slice(1))),
       type: TYPES['.gif']!,
     }
+  }
+  if (pathname === '/rgb.mp4') {
+    return { body: readFileSync(path.join(videoFixtures, 'rgb.mp4')), type: TYPES['.mp4']! }
   }
   const match = /^\/bobcat-wasm\/(pkg|dist)\/([\w.-]+)$/.exec(pathname)
   if (match !== null) {
@@ -561,6 +580,26 @@ async function main(): Promise<boolean> {
     const red = forever.some((colour) => near(colour, [255, 0, 0]))
     console.log(`${white && red ? 'ok  ' : 'FAIL'} fast-forever.gif shows white and red: white ${String(white)}, red ${String(red)}`)
     if (!(white && red)) failures.push('fast-forever.gif animates')
+    // The video cell's centre: white until the first frame is drawn (the
+    // page), then the clip's colours only, all three of them as it loops.
+    const clip: Record<string, [number, number, number]> = {
+      red: [255, 0, 0],
+      green: [0, 255, 0],
+      blue: [0, 0, 255],
+    }
+    const video = [...shots, ...finals].map((shot) => at(shot, 500, 60))
+    const drawn = video.slice(video.findIndex((colour) => !near(colour, [255, 255, 255])))
+    const named = drawn.map(
+      (colour) => Object.keys(clip).find((name) => near(colour, clip[name]!, 24)) ?? JSON.stringify(colour),
+    )
+    const seen = new Set(named)
+    const onlyClip = named.every((name) => name in clip)
+    const allThree = Object.keys(clip).every((name) => seen.has(name))
+    const videoOk = drawn.length > 0 && onlyClip && allThree
+    console.log(
+      `${videoOk ? 'ok  ' : 'FAIL'} rgb.mp4 in a muted, looping <video> plays the clip's colours: ${named.join(' ')}`,
+    )
+    if (!videoOk) failures.push('rgb.mp4 plays')
     if (failures.length > 0 || process.argv.includes('--console')) {
       console.log(`console of the page and its Workers (${String(consoleLines.length)} lines):`)
       for (const line of consoleLines) console.log(`  ${line}`)

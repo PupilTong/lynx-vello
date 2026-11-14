@@ -250,6 +250,27 @@ attributes written after a `src` that settled at its write still count, and
 All three are dispatched like `load`, non-bubbling with a `{}` detail. An
 animated `placeholder`, and every `svg`, presents the URL.
 
+`tree::video` is the Lynx `<video>` component, ruling 8's smallest useful
+element (`docs/picture-source-design.md`, "Video"). `Videos` is its handle,
+shared with the runtime like `ImageSources` (`new_document`'s `videos`, held
+in the `DocumentSlot`). A `src` presents a `PictureKey::Id` of the element's
+own at once, with no natural size, and queues an open; a new `src` or a free
+ends the picture before. The runtime's epilogue takes the queue
+(`Videos::take_requests`, after the image component's) into the same
+`ViewNotice::Playback`: an open becomes `PlaybackRequest::Open`, its
+`MediaSettings` read from `loop` and `muted` then, and a later change of
+either is a `PlaybackRequest::Media` command, as are the `play` and `pause`
+UI methods (code 0, `{success: true}`; a `play` with no `src` answers 8 and
+queues an `error`). The host's `PlaybackReport::Media` reports come back in
+`ImageEvent::Playback` (`tree::apply_video_reports`, which the runtime's
+report path calls after the images'): a first frame gives the box its
+natural size and queues `firstframe` (`ComponentDetail::Fields` with
+`duration`), an end `ended` (`Plain`), a failure `error`
+(`ComponentDetail::Error`, `{errorCode, errorMsg}`, iOS's `-1` and `-2`). A
+report for a picture that has ended is dropped. `object-fit` is the UA
+sheet's (`video { object-fit: contain }` and two attribute rules), and
+`video > *` has `image > *`'s ordering constraint.
+
 `tree::svg` is the Lynx `<svg>` component
 (`docs/svg-lynx-component-design.md`): one picture, never a subtree, as
 web-core's `x-svg` and native draw it. `src` is its one source (the host

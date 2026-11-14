@@ -8,11 +8,12 @@
 //! contents the embedder already holds and the vocabulary registrations are
 //! written through ([`registry`]), and the resource error vocabulary. It
 //! sits below `terminus` and names no DOM, style, runtime or platform type.
-//! What it asks of the embedder is three capabilities — a transport
+//! What it asks of the embedder is four capabilities — a transport
 //! ([`Fetch`]), persistent bytes ([`Store`], and for the artifact tier
-//! optionally [`AsyncStore`]) and platform pixels
-//! ([`ImageDecoder`]) — bundled as one [`Platform`]; their implementations
-//! live with the embedder (`docs/resource-cache-design.md`).
+//! optionally [`AsyncStore`]), platform pixels
+//! ([`ImageDecoder`]) and a video player ([`media::Media`]) — bundled as one
+//! [`Platform`]; their implementations live with the embedder
+//! (`docs/resource-cache-design.md`).
 
 #![warn(clippy::undocumented_unsafe_blocks)]
 
@@ -23,6 +24,7 @@ pub mod error;
 pub mod http;
 pub mod image;
 pub mod image_header;
+pub mod media;
 pub mod memory;
 pub mod mime;
 pub mod platform;
@@ -33,7 +35,7 @@ pub(crate) mod test_store;
 
 pub use platform::{
     ArtifactStore, AsyncStore, Estimate, Fetch, ImageDecoder, MaybeSend, Meta, NoStore, Parts,
-    Platform, Request, Response, Store, StoreError, Threaded, Tier, Volatility,
+    PartsOf, Platform, Request, Response, Store, StoreError, Threaded, Tier, Volatility,
 };
 
 /// What a load may do with the caches on its way.

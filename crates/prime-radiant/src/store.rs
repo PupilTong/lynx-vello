@@ -323,7 +323,7 @@ impl TestImages {
                     sink.parsed_document(source, Arc::clone(document));
                 }
                 ImageEvent::Failed { source } => sink.failed(source),
-                ImageEvent::Playback { picture, report } => sink.playback(*picture, *report),
+                ImageEvent::Playback { picture, report } => sink.playback(*picture, report.clone()),
             }
         }
         self.pending.lock().expect("test image reports").push(event);

@@ -423,6 +423,9 @@ impl ImageSources {
                     let name = match report {
                         PlaybackReport::LoopComplete => CURRENT_LOOP_COMPLETE_EVENT,
                         PlaybackReport::FinalLoopComplete => FINAL_LOOP_COMPLETE_EVENT,
+                        // A media player's, whose picture is a `video`'s
+                        // ([`super::video`]), never one of these.
+                        PlaybackReport::Media(_) => return None,
                     };
                     Some(ImageOutcome::Played { node, name })
                 }

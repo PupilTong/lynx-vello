@@ -10,7 +10,7 @@ use terminus::link::stylo::values::computed::{Display, Overflow};
 
 use super::{
     Autoplays, ComponentDetail, ComponentEvent, ComponentEvents, Field, ImageSources, LynxDocument,
-    PageConfig, Viewport, new_document,
+    PageConfig, Videos, Viewport, new_document,
 };
 
 /// A document on a phone-shaped viewport with the default page config.
@@ -46,9 +46,30 @@ pub(in crate::main) fn with_image_sources(
             events.clone(),
             Autoplays::default(),
             sources.clone(),
+            Videos::default(),
         ),
         events,
         sources,
+    )
+}
+
+/// The default document, plus the queue its components leave events in and
+/// the record of its `video` elements — both of which the runtime holds the
+/// other end of.
+pub(in crate::main) fn with_videos() -> (LynxDocument, ComponentEvents, Videos) {
+    let events = ComponentEvents::default();
+    let videos = Videos::default();
+    (
+        new_document(
+            Viewport::new(393.0, 727.0),
+            PageConfig::default(),
+            events.clone(),
+            Autoplays::default(),
+            ImageSources::default(),
+            videos.clone(),
+        ),
+        events,
+        videos,
     )
 }
 
@@ -63,6 +84,7 @@ pub(in crate::main) fn with_autoplays() -> (LynxDocument, Autoplays) {
             ComponentEvents::default(),
             autoplays.clone(),
             ImageSources::default(),
+            Videos::default(),
         ),
         autoplays,
     )

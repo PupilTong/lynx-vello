@@ -141,20 +141,23 @@ pub trait ResourceFetcher: terminus::link::FrameImages {
     /// Serves one request of the owner of an `Id` picture
     /// ([`PlaybackRequest`](terminus::link::PlaybackRequest)): play the
     /// frames of a URL this host reported loaded and animated under a
-    /// playhead of the picture's own, one of the four controls, or the end
-    /// of the picture. Non-blocking.
+    /// playhead of the picture's own, open a video with the platform's media
+    /// player, one of the four controls or a media command, or the end of
+    /// the picture. Non-blocking.
     ///
-    /// A host that serves it publishes the frame the playhead shows into the
-    /// picture's slot and answers it through
+    /// A host that serves it publishes the frame the playhead or the player
+    /// shows into the picture's slot and answers it through
     /// [`FrameImages`](terminus::link::FrameImages) like any `Id` picture,
-    /// advances the playhead only while the picture is drawn, and reports
-    /// each loop it completes through
+    /// advances a playhead only while the picture is drawn, publishes a
+    /// player's frames only while it is drawn, and reports each loop a
+    /// playhead completes and each event a player reports through
     /// [`ImageReports::playback`](terminus::link::ImageReports::playback) of
     /// this view. Waking the host for the turn that describes the picture
     /// again, after a request that changed what it shows, is the host's.
     ///
     /// The default serves nothing: a host that never reports a source
-    /// animated is never asked.
+    /// animated is never asked to play one, and a `video` on such a host
+    /// opens nothing and reports nothing.
     fn request_playback(&self, _request: terminus::link::PlaybackRequest) {}
 
     /// The host's own moment in every [`LynxView::pump`](crate::LynxView::pump),

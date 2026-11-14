@@ -42,7 +42,7 @@ use wasm_bindgen_futures::future_to_promise;
 use web_sys::OffscreenCanvas;
 use web_time::SystemTime;
 
-use crate::platform::{BrowserFrame, BrowserPlatform, CodeCacheConfig};
+use crate::platform::{BrowserFrame, BrowserMedia, BrowserPlatform, CodeCacheConfig};
 use crate::text_input::{edit_command, enter_key_hint_name, input_mode_name, input_type_name};
 
 #[wasm_bindgen]
@@ -381,6 +381,9 @@ impl BobcatRenderer {
         on_text_input: js_sys::Function,
         // Each performance entry as Lynx's JSON text; `None` observes none.
         on_performance: Option<js_sys::Function>,
+        // Called with each `bobcat-media` message of `js/protocol.d.ts`, for
+        // the facade's `<video>` elements (`platform::BrowserMedia`).
+        on_media: js_sys::Function,
     ) -> Result<BobcatRenderer, JsValue> {
         FrameSize::for_viewport(width, height, device_pixel_ratio).map_err(js_error)?;
         if worker_url.is_empty() {
@@ -445,7 +448,11 @@ impl BobcatRenderer {
             .map_err(js_error)?;
             // The code cache's store is opened here, once per Worker: every
             // later page is a `new_scope` of this system and shares it.
-            let (platform, notes) = BrowserPlatform::new(Some(CodeCacheConfig::default())).await;
+            let (platform, notes) = BrowserPlatform::new(
+                Some(CodeCacheConfig::default()),
+                BrowserMedia::new(on_media),
+            )
+            .await;
             let resources = Resources::with_platform(
                 ResourcesConfig {
                     // Lazy bundles: a `lynx.fetchBundle` installs its

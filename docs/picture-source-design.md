@@ -87,7 +87,7 @@ A picture's content arrives as *frames*. A frame is one of:
 
 - **CPU pixels** — `ImageData`;
 - **a platform frame** — a value of the embedder's own type (an
-  `ImageBitmap` in the browser today, later a `VideoFrame`, an
+  `ImageBitmap` or a `VideoFrame` in the browser; later perhaps an
   `IOSurface`-backed buffer on macOS), named by an associated type so no
   `dyn` crosses the boundary.
 
@@ -215,7 +215,7 @@ scroll frame.
 | `terminus` | the picture key on a replaced box and in an image draw; per-picture upload and generation; compose and bake keys; frame demand; the writer for CPU pixels. Knows nothing of URLs beyond carrying them, or of `<image>`; it carries an `Id` picture's playback requests and reports between the document's thread and the host without acting on them |
 | `vant` | policy with no platform in it: residency, the animation timeline and playhead, the decoder and platform capability traits |
 | `bobcat-resources`, `bobcat-wasm` | the platform's side: decoders, the platform-frame writer, the media player |
-| `bobcat-core` | the elements: `image`, later `video`; attribute mapping, UI methods, events |
+| `bobcat-core` | the elements: `image`, `video`; attribute mapping, UI methods, events |
 
 `terminus` keeps one primitive for a replaced element — the picture it
 presents and its natural size, `Document::set_picture(node,
@@ -388,17 +388,24 @@ Associated types on `vant::Platform`, never `dyn`:
 - **Frame writer** — the platform-frame writer above, implemented by the
   frame type. A platform with no platform frames names an uninhabited frame
   type and needs none.
-- **Media** — opens a URL and returns a handle with `play`, `pause`,
-  `set_loop`, `set_muted`, the events of ruling 8, and a slot the player
-  fills.
+- **Media** — `vant::media::Media<F>`, `F` the decoder's frame type: opens a
+  `MediaSource` (a URL the player reads itself, `Media::reads`, or bytes
+  the resource system fetched) under `MediaSettings` (`looping`, `muted`)
+  and answers a `MediaPlayer` with `play`, `pause`, `set_loop` and
+  `set_muted`; dropping it closes the video. What the player produces goes
+  to a `MediaSink` the store hands it: each new frame, and the three
+  `MediaEvent`s of ruling 8's events (`FirstFrame` with the natural size and
+  the duration, `Ended`, `Failed`). A platform with no player names
+  `NoMedia`, whose every open fails with `MediaErrorKind::Unsupported`
+  ([Video](#video)).
 
 Per platform:
 
 | | Image decode | Animation frames | Video |
 | --- | --- | --- | --- |
-| macOS | ImageIO | ImageIO by frame index (built) | AVFoundation, BGRA output as CPU frames at first |
-| Browser | `createImageBitmap` in the Render Worker (built) | WebCodecs `ImageDecoder` in the Render Worker; first frame only where it is missing (built) | `HTMLVideoElement` → `VideoFrame`, transferred to the Render Worker |
-| Linux | gdk-pixbuf | first frame only, for now: gdk-pixbuf has no decode by frame index (built) | none, for now |
+| macOS | ImageIO | ImageIO by frame index (built) | AVFoundation: `AVAssetReader` frames asked for as BGRA, handed over as CPU pixels, timed by an `AVSampleBufferRenderSynchronizer` the audio renderer drives (built) |
+| Browser | `createImageBitmap` in the Render Worker (built) | WebCodecs `ImageDecoder` in the Render Worker; first frame only where it is missing (built) | `HTMLVideoElement` on the page's thread → `VideoFrame`, transferred to the Render Worker (built) |
+| Linux | gdk-pixbuf | first frame only, for now: gdk-pixbuf has no decode by frame index (built) | none: every open fails (built) |
 
 `ImageIO` (verified on macOS 26) reads the frame count and each frame's
 `UnclampedDelayTime` from the properties without decoding a pixel, and
@@ -439,13 +446,68 @@ macOS by `crates/bobcat-wasm/scripts/render-check.ts`:
 - Every buffer handed to the browser is a copy: the Wasm memory is a
   `SharedArrayBuffer`, which a `Blob` and an `ImageDecoder` may not be built
   over.
-- A frame produced on another thread would reach the Render Worker as a
-  transferred `ImageBitmap` or `VideoFrame` (`postMessage` with a transfer
-  list) and be published into its slot there. Nothing produces one today.
+- A frame produced on another thread reaches the Render Worker transferred
+  (`postMessage` with a transfer list) and is published into its slot
+  there: a video's `VideoFrame`s, from the page's main thread
+  ([Video](#video)).
 
 The main thread holds no image: the main-thread `Image` decoder and its
 shared-memory mailbox are gone, with the port the facade handed the
 Render Worker.
+
+## Video
+
+Ruling 8's element, `video`, is a `bobcat-core` component
+(`main/tree/video.rs`): a replaced box presenting an `Id` picture of its
+own, sized like any replaced element from the video's natural size, which
+arrives with its first frame. The main thread holds the picture's id and the
+element's state only.
+
+| Surface | Behaviour |
+| --- | --- |
+| `src` | a new picture per value, the one before ended; empty or removed presents nothing |
+| `loop`, `muted` | booleans, on unless absent or `"false"`; read when the picture opens, a later change a command |
+| `object-fit` | `contain` (the default, native's), `cover`, `fill`, by UA attribute rules onto the CSS property |
+| `play`, `pause` | code 0 and `{success: true}`; `play` with no `src` answers 8 and fires `error` |
+| `firstframe` | `{duration}` in seconds, when the first frame is ready, before any `play` |
+| `ended` | `{}`, at the end of a video that does not loop |
+| `error` | `{errorCode, errorMsg}`: `-1` for a source that could not be opened, `-2` otherwise (iOS's codes) |
+
+Nothing plays until `play`: both platforms load a source paused on its first
+frame and report `firstframe` then. A `play` after the end plays from the
+start.
+
+The element's requests travel on the image protocol's playback channel:
+`PlaybackRequest::Open` (the source and its `MediaSettings`), `Media` (one
+`MediaCommand`: play, pause, loop, muted) and `End`; the player's events come
+back as `PlaybackReport::Media`, with the image reports. The component
+applies a first frame's natural size to its box and queues the three events
+for the page's component-events entry.
+
+`bobcat-resources` (`src/media/`) keeps each video's player, slot and
+reports. A source the player reads itself is handed over as a URL; anything
+else (a registered resource, a `data:` URL, and on macOS an `http` video) is
+fetched by the resource system and handed over as its bytes. The player
+hands each frame to the picture's sink on whatever thread produces it; the
+sink publishes it into the slot and wakes the host. A picture is drawn from
+its first describe until no view's drawn set includes it. While it is not
+drawn the player keeps playing, its audio included, but publishes nothing:
+the sink tells it frames are not wanted and does not publish one handed over
+anyway, keeping it as the newest, which is published when the picture is
+drawn again. A player that skips unwanted frames still hands over the one
+its video stops on (a pause, the end), so a picture drawn again after its
+video stopped shows where it stopped. Pausing an undrawn video was not
+chosen because it would stop its audio and move its end, which a card hears.
+
+The player owns the clock. On macOS the video is read by an
+`AVAssetReader` on a thread of its own and timed by an
+`AVSampleBufferRenderSynchronizer`; a video with an audio track plays it
+through an `AVSampleBufferAudioRenderer` the synchronizer follows, so audio
+is the master. `AVPlayer` is not used: its item loads and its time moves only
+while the process's main run loop runs, which an embedder's main thread need
+not do (verified on macOS 26). In the browser the page's `<video>` plays,
+its frames taken with `requestVideoFrameCallback`, and a `play()` the
+browser's autoplay rules reject is the element's `error`.
 
 ## Not built
 
@@ -571,8 +633,23 @@ One change per step, in order; each leaves the tree green.
    an `<image>`, and a finite GIF as a CSS image and as an
    `<image loop-count="1">`, and asserts on its pixels: the finite ones rest
    on their last frame, the looping one shows both its frames. Native behaviour and every golden are unchanged.
-6. **Minimal video.** The media capability, the `video` component, macOS and
-   browser implementations.
+6. **Minimal video.** `vant::media` (the `Media` capability, an associated
+   type of `Platform`, with `MediaPlayer`, `MediaSink`, `MediaSource`,
+   `MediaSettings`, `MediaCommand`, `MediaEvent` and `NoMedia`);
+   `PlaybackRequest::Open`, `PlaybackRequest::Media` and
+   `PlaybackReport::Media` on `terminus`'s image protocol; the `video`
+   component in `bobcat-core` ([Video](#video)); the video store in
+   `bobcat-resources` with its AVFoundation player on macOS and `NoMedia` on
+   Linux; and in `bobcat-wasm` the `<video>` half of the browser's player in
+   the facade (`js/media.ts`) and `BrowserFrame`'s `VideoFrame`. Tests:
+   `bobcat-core`'s component tests against a test media host
+   (`main/tree/video_tests.rs`) and one through the realm
+   (`a_video_opens_reports_and_answers_its_methods_through_the_realm`); the
+   store's against a test player (`src/media/tests.rs`); the macOS player
+   against `tests/fixtures/video/rgb.mp4` (`src/media/avfoundation_tests.rs`);
+   the compiled `react-video` card end to end on macOS; and a muted, looping
+   video cell in `crates/bobcat-wasm/scripts/render-check.ts`. Every golden is
+   unchanged.
 
 ## Open verification
 

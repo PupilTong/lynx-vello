@@ -36,8 +36,10 @@ base, which the embedder keeps equal to `ViewSources::base_url`. The fetcher sup
 also offers the optional `preload_source` hint,
 `request_image`/`service_images`, `request_playback` (an `Id` picture's
 `PlaybackRequest`: play a URL the host reported animated under a playhead of
-the picture's own, one of four controls, or its end; the host reports each
-loop through `ImageReports::playback`) and the `FrameImages` supertrait: every method
+the picture's own, open a video with the platform's media player, one of
+four controls or a media command, or its end; the host reports each loop,
+and each media event, through `ImageReports::playback`) and the
+`FrameImages` supertrait: every method
 is synchronous, so no resource future crosses it, and core names none of a
 fetcher's own transport API. **One optional member leaves the embedder's
 thread**: `fetch_probe()` hands back a `Send + Sync` `FetchProbe`

@@ -2591,6 +2591,8 @@ function invokeUIMethod(handle: Handle, method: string, params: unknown): Invoke
  *   `stopAnimation`, an `image`'s: native's message as a bare string
  *   (`"Animation restarted."`, `"Animation paused."`, `"Animation
  *   resumed."`, `"Animation stopped."`), whether or not anything plays.
+ * - `play` and `pause`, a `video`'s: `{success: true}`, what Android and iOS
+ *   both answer a call that succeeded with. The host writes one field, `1`.
  *
  * A method without an arm gets the fields themselves.
  */
@@ -2677,6 +2679,9 @@ function decodeMethodData(handle: Handle, method: string, fields: string[]): unk
     case "resumeAnimation":
     case "stopAnimation":
       return fields[0] ?? "";
+    case "play":
+    case "pause":
+      return { success: fields[0] === "1" };
     case "getValue": {
       const [value = "", start = "0", end = "0", composing = "0"] = fields;
       const selectionStart = Number(start);

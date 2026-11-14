@@ -1,7 +1,8 @@
 //! The capabilities an embedder provides: a transport ([`Fetch`]),
 //! persistent bytes ([`Store`], or [`AsyncStore`] for the artifact tier of a
-//! host whose storage answers asynchronously) and platform pixels
-//! ([`ImageDecoder`]), bundled as one [`Platform`].
+//! host whose storage answers asynchronously), platform pixels
+//! ([`ImageDecoder`]) and a video player ([`Media`](crate::media::Media)),
+//! bundled as one [`Platform`].
 //!
 //! They are shaped after the web platform's Fetch and Cache APIs. [`Store`]
 //! adds what this engine needs and the Cache API lacks: synchronous storage,
@@ -522,9 +523,12 @@ pub enum ArtifactStore<S, A> {
 /// What a [`Platform`] is taken apart into, once, when the resource system
 /// is built.
 #[derive(Debug)]
-pub struct Parts<F, S, A, D> {
+pub struct Parts<F, S, A, D, M = crate::media::NoMedia> {
     pub fetch: F,
     pub decoder: D,
+    /// The video player; [`NoMedia`](crate::media::NoMedia) for a host with
+    /// none.
+    pub media: M,
     /// The HTTP byte tier's Store; `None` for a host with no persistent
     /// tier. Always a synchronous [`Store`]: the byte tier restores a body
     /// inside a synchronous call and maps retained bodies.
@@ -534,8 +538,8 @@ pub struct Parts<F, S, A, D> {
     pub artifacts: Option<Tier<ArtifactStore<S, A>>>,
 }
 
-/// The bundle an embedder hands over: one transport, one decoder, and up to
-/// two stores, each with its budget.
+/// The bundle an embedder hands over: one transport, one decoder, one video
+/// player, and up to two stores, each with its budget.
 ///
 /// The parts are handed over by value, because the tiers built on them own
 /// them: a [`ByteCache`](crate::byte_cache::ByteCache) takes its Store, an
@@ -548,7 +552,20 @@ pub trait Platform: 'static {
     /// [`NoStore`] for a host with no asynchronous store.
     type AsyncStore: AsyncStore;
     type Decoder: ImageDecoder;
+    /// The video player, whose frames are the decoder's frame type: they are
+    /// drawn by the same writer. [`NoMedia`](crate::media::NoMedia) for a
+    /// host with none, whose every video fails to open.
+    type Media: crate::media::Media<<Self::Decoder as ImageDecoder>::Frame>;
 
     /// Takes the platform apart once, when the resource system is built.
-    fn into_parts(self) -> Parts<Self::Fetch, Self::Store, Self::AsyncStore, Self::Decoder>;
+    fn into_parts(self) -> PartsOf<Self>;
 }
+
+/// The [`Parts`] platform `P` is taken apart into.
+pub type PartsOf<P> = Parts<
+    <P as Platform>::Fetch,
+    <P as Platform>::Store,
+    <P as Platform>::AsyncStore,
+    <P as Platform>::Decoder,
+    <P as Platform>::Media,
+>;

@@ -11,10 +11,11 @@
 //!
 //! Each tag owns its UA rules and tests. Numeric text and list attributes
 //! flow through `attr()`; boolean flags use attribute selectors. Only `image`,
-//! `svg`, `blur_view`, `swiper`, `refresh_view`, `viewpager`,
+//! `svg`, `video`, `blur_view`, `swiper`, `refresh_view`, `viewpager`,
 //! `scroll_container`, `list`, `scroll_coordinator`, `overlay`,
 //! `markdown`, `frame` and `text_field` need components: for image resources (an `svg`'s `content`
-//! as a document handed to the host as its bytes), blur hints,
+//! as a document handed to the host as its bytes), the video element's picture, its `play` and
+//! `pause` UI methods and its `firstframe`, `ended` and `error` events ([`video`]), blur hints,
 //! the swiper's UA shadow tree, item count, `scrollTo` UI method and events, the
 //! refresh view's UA shadow tree, its header and footer slot assignment and
 //! its `finishRefresh`, `finishLoadMore` and `autoStartRefresh` UI methods
@@ -115,6 +116,7 @@ mod text;
 pub(crate) mod text_field;
 mod touch_count;
 mod ua_sheet;
+mod video;
 mod viewpager;
 #[cfg(test)]
 mod web_text_replication;
@@ -139,6 +141,7 @@ pub(crate) use self::swiper::Autoplays;
 pub(crate) use self::text::{SelectionReports, is_text, report_selection_changes};
 pub(crate) use self::text_field::focus_delegate;
 pub use self::ua_sheet::PageConfig;
+pub(crate) use self::video::{Videos, apply_reports as apply_video_reports};
 pub(crate) use crate::view::Viewport;
 
 /// The node whose border box a `layoutchange` registration on `element`
@@ -194,7 +197,11 @@ pub(crate) const SELECTION_CHANGE: &str = "selectionchange";
 /// component keeps its autoplay timers, for the runtime to wait out and run.
 /// `images` is where the `image` and `svg` components keep the sources their
 /// elements name, for the runtime to settle the image reports against
-/// ([`apply_image_events`]).
+/// ([`apply_image_events`]); `videos` where the `video` component keeps the
+/// picture each element shows, and the requests for its player, for the
+/// runtime to hand the host and to apply the player's reports against
+/// ([`apply_video_reports`]). The `video` component's `firstframe`, `ended`
+/// and `error` go into `events` too.
 #[must_use]
 pub(crate) fn new_document(
     viewport: Viewport,
@@ -202,12 +209,14 @@ pub(crate) fn new_document(
     events: ComponentEvents,
     autoplays: Autoplays,
     images: ImageSources,
+    videos: Videos,
 ) -> LynxDocument {
     let mut document = Document::new(viewport.device(), PAGE_TAG, ());
     document.set_queued_event_sink(Rc::new(events.clone()));
     blur_view::define(&mut document);
     image::define(&mut document, events.clone(), images.clone());
     svg::define(&mut document, events.clone(), images);
+    video::define(&mut document, events.clone(), videos);
     swiper::define(&mut document, autoplays, events.clone());
     refresh_view::define(&mut document, events.clone());
     viewpager::define(&mut document, events.clone());
@@ -346,7 +355,7 @@ pub(crate) enum ComponentEvent {
     /// through the document's queued-event sink), an
     /// `<overlay>`'s `showoverlay` and `dismissoverlay` ([`overlay`]), an
     /// `x-refresh-view`'s `headerreleased`, `footerreleased` and
-    /// `startloadmore` ([`refresh_view`]).
+    /// `startloadmore` ([`refresh_view`]), a `video`'s `ended` ([`video`]).
     Plain { node: NodeId, name: &'static str },
     /// A scroll container's `scroll` or `scrollend`, which the runtime
     /// queues, with the change in its offset the event reports (zero for a
@@ -361,9 +370,10 @@ pub(crate) enum ComponentEvent {
     },
     /// An event whose detail the component read when it queued the event,
     /// named by that component: `<x-markdown>`'s `parseEnd`, `link` and
-    /// `imageTap` ([`markdown`]), and an `x-input`'s or `x-textarea`'s
+    /// `imageTap` ([`markdown`]), an `x-input`'s or `x-textarea`'s
     /// `input`, `confirm`, `selection`, `focus` and `blur`
-    /// ([`text_field`]). [`ComponentDetail`] is the detail's shape.
+    /// ([`text_field`]), and a `video`'s `firstframe` and `error`
+    /// ([`video`]). [`ComponentDetail`] is the detail's shape.
     ///
     /// Dispatched not bubbling and composed (ruled 2026-10-14). Not bubbling
     /// is native's: Lynx fires `<markdown>`'s `link`, `imageTap` and
@@ -455,6 +465,9 @@ pub(crate) enum ComponentDetail {
     /// `{selectionStart, selectionEnd}`: a text field's selection in UTF-16
     /// units, such as an `x-input`'s or `x-textarea`'s `selection` reports.
     Selection { selection: Range<u32> },
+    /// `{errorCode, errorMsg}`: a failure's code and message, such as a
+    /// `video`'s `error` reports.
+    Error { code: i32, message: String },
     /// `{start, end, direction}`: a Lynx text element's selection as offsets
     /// of its text content in UTF-16 units and the direction from anchor to
     /// focus (`"forward"` or `"backward"`), such as a `text`'s or
@@ -510,6 +523,12 @@ impl ComponentEvents {
         self.0
             .borrow_mut()
             .extend(outcomes.into_iter().map(ComponentEvent::Image));
+    }
+
+    /// Queues `events` as they are, in order: what [`apply_video_reports`]
+    /// answered, or the `error` a `video`'s `play` owes.
+    pub(crate) fn extend(&self, events: impl IntoIterator<Item = ComponentEvent>) {
+        self.0.borrow_mut().extend(events);
     }
 
     /// Queues a whole image report batch's outcomes, in the order

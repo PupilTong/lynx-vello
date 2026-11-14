@@ -1,3 +1,4 @@
+import { MediaElements } from './media.ts'
 import { parsePerformanceEntry, type LynxPerformanceEntry } from './performance.ts'
 import { TextInputProxy, keyFields } from './text-input.ts'
 import type {
@@ -703,6 +704,8 @@ class RenderWorkerClient {
   #resolveReady!: () => void
   #readySettled = false
   #worker: Worker
+  /** The `<video>` elements of the videos the Render Worker opened. */
+  #media: MediaElements
   #onFrameRate: BobcatCanvasOptions['onFrameRate']
   #onPerformanceEntry: BobcatCanvasOptions['onPerformanceEntry']
   /** The canvas's text proxy, once the canvas exists. */
@@ -717,6 +720,11 @@ class RenderWorkerClient {
     this.#onPerformanceEntry = options.onPerformanceEntry
     this.#modules = modules
     this.#worker = worker
+    this.#media = new MediaElements((message, transfer = []) => {
+      if (this.#fatalError === undefined) {
+        this.#worker.postMessage(message, transfer)
+      }
+    })
     this.#ready = new Promise((resolve, reject) => {
       this.#resolveReady = resolve
       this.#rejectReady = reject
@@ -749,6 +757,7 @@ class RenderWorkerClient {
     }
     this.#pending.clear()
     this.#worker.terminate()
+    this.#media.dispose()
     for (const listener of this.#fatalListeners) {
       listener(this.#fatalError)
     }
@@ -787,6 +796,10 @@ class RenderWorkerClient {
     }
     if (message?.type === 'bobcat-text-input') {
       this.onTextInput?.(message)
+      return
+    }
+    if (message?.type === 'bobcat-media') {
+      this.#media.handle(message)
       return
     }
     if (message?.type === 'bobcat-ready') {
@@ -939,6 +952,7 @@ class RenderWorkerClient {
     this.#worker.removeEventListener('messageerror', this.#onMessageError)
     this.#worker.removeEventListener('error', this.#onError)
     this.#worker.terminate()
+    this.#media.dispose()
   }
 }
 

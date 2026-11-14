@@ -717,6 +717,7 @@ mod dispatch_tests {
         type Store = FsStore;
         type AsyncStore = vant::NoStore;
         type Decoder = NativeDecoder;
+        type Media = vant::media::NoMedia;
 
         fn into_parts(self) -> vant::Parts<Scripted, FsStore, vant::NoStore, NativeDecoder> {
             unreachable!("the tests build their transports from parts")

@@ -37,15 +37,18 @@
 //!
 //! # Playback
 //!
-//! An `Id` picture may play a URL's frames under a playhead of its own.
-//! Whoever owns the picture asks the store for that with a
-//! [`PlaybackRequest`] (play a URL under a [`PlayPolicy`], one of the four
-//! [`PlaybackControl`]s, or the end of the picture), and the store reports
-//! each loop the playhead completes as a [`PlaybackReport`]
+//! An `Id` picture may be filled by one of two players. The store plays an
+//! animated image's frames under a playhead of its own
+//! ([`vant::image::animation`]), or the platform's media player plays a
+//! video into it ([`vant::media`]). Whoever owns the picture asks the store
+//! for either with a [`PlaybackRequest`] — play a URL's frames under a
+//! [`PlayPolicy`], open a video under [`MediaSettings`], one of the four
+//! [`PlaybackControl`]s or a [`MediaCommand`], or the end of the picture —
+//! and the store reports what the player did as a [`PlaybackReport`]
 //! ([`ImageReports::playback`](crate::render::image::ImageReports::playback)),
-//! which travels back with the image reports. What the playhead does is
-//! `vant`'s ([`vant::image::animation`]); which element owns the picture,
-//! and what it makes of a report, is the embedder's.
+//! which travels back with the image reports: an animation's loops, or a
+//! video's [`MediaEvent`]s. Which element owns the picture, and what it
+//! makes of a report, is the embedder's.
 
 use std::convert::Infallible;
 use std::num::NonZeroU64;
@@ -54,6 +57,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 pub use vant::image::PictureFrame;
 pub use vant::image::animation::{Control as PlaybackControl, Loops, PlayPolicy};
+pub use vant::media::{MediaCommand, MediaError, MediaErrorKind, MediaEvent, MediaSettings};
 
 use crate::clock::ClockInstant;
 use crate::peniko::ImageData;
@@ -79,18 +83,34 @@ pub enum PlaybackRequest {
         picture: PictureId,
         control: PlaybackControl,
     },
-    /// `picture` is gone: the store lets go of everything it held for it.
+    /// `picture` shows the video at `source`, a URL as the page wrote it,
+    /// played by the platform's media player, which starts paused on its
+    /// first frame under `settings`. Asked once per picture.
+    Open {
+        picture: PictureId,
+        source: Arc<str>,
+        settings: MediaSettings,
+    },
+    /// One instruction to the media player `picture` was opened with.
+    Media {
+        picture: PictureId,
+        command: MediaCommand,
+    },
+    /// `picture` is gone: the store lets go of everything it held for it,
+    /// its player included.
     End { picture: PictureId },
 }
 
-/// What a playing picture's store reports of its playhead.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// What a playing picture's store reports of its player.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum PlaybackReport {
     /// A loop completed, the last of a finite count included.
     LoopComplete,
     /// The final loop of a finite count completed, after its
     /// [`Self::LoopComplete`]; the last frame stays shown.
     FinalLoopComplete,
+    /// What a media player reported ([`PlaybackRequest::Open`]).
+    Media(MediaEvent),
 }
 
 /// A picture one element owns, unique in the process: two ids are never

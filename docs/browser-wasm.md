@@ -138,6 +138,24 @@ thread holds no image and takes no part in decoding. The resource system's
 diagnostics — an image that failed, a Worker without `createImageBitmap` —
 reach `console.warn`.
 
+A `<video>` is played by the browser's own `HTMLVideoElement`, which exists
+only on the page's main thread (`docs/picture-source-design.md`, "Video").
+The Render Worker posts the facade each instruction (`bobcat-media`: open,
+`play`, `pause`, `loop`, `muted`, close), and the facade (`js/media.ts`) owns
+one detached `<video>` per video: an `http(s)` source it loads itself, with
+`crossOrigin = "anonymous"` so its frames may be read; anything else — a
+registered resource, a `data:` URL — the resource system fetches and posts
+as bytes, which the facade plays from a `blob:` URL. Each frame the element
+presents (`requestVideoFrameCallback`, and the first at `loadeddata`, so a
+paused video shows it) becomes a `VideoFrame`, transferred to the Render
+Worker (`bobcat-media-frame`), where it is a `BrowserFrame` written with
+`copyExternalImageToTexture` and closed when the painter has it. The
+element's `loadeddata` (its natural size and `duration`), `ended` and `error`
+come back as `bobcat-media-event`. The element plays its audio and paces the
+frames against it. The browser's autoplay rules apply as they are: a `play()`
+it rejects — an unmuted play outside a user gesture — is the video's
+`error`, and nothing works around it.
+
 SVG documents are the exception: the browser does not decode them through
 `createImageBitmap`. Once preprocessing says the bytes are `image/svg+xml`,
 the Render Worker parses them itself, inside the load's local task, with the
@@ -644,7 +662,11 @@ the still image's two halves are the expected colours over the white page,
 that both finite pictures rest on the last frame — blue over its left half,
 green on its right — in four screenshots spread over 750 ms, longer than
 that frame is shown within a loop, and that the looping one is seen in both
-of its colours. `--repeat <n>` runs it that many times, each in a fresh
+of its colours. A fifth cell is a muted, looping `<video>` of
+`crates/bobcat-resources/tests/fixtures/video/rgb.mp4` (red, green, blue,
+0.4 s each, H.264 tagged BT.709), which the card plays as it renders; a
+muted play needs no gesture. Once its first frame is drawn every screenshot
+of the cell is one of the clip's three colours, and all three are seen. `--repeat <n>` runs it that many times, each in a fresh
 browser, and fails if any run does; a failed run prints the console of the
 page and of every Worker it started (`--console` prints it always), which is
 where the resource system's notes go. `--package <dir>` serves another

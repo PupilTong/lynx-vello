@@ -195,11 +195,13 @@ impl Platform for PngPlatform {
     type Store = NoStore;
     type AsyncStore = NoStore;
     type Decoder = PngFrames;
+    type Media = vant::media::NoMedia;
 
     fn into_parts(self) -> Parts<NativeFetch, NoStore, NoStore, PngFrames> {
         Parts {
             fetch: NativeFetch,
             decoder: self.0,
+            media: vant::media::NoMedia,
             bytes: None,
             artifacts: None,
         }

@@ -5,6 +5,8 @@
 //! - [`BrowserDecoder`]: the Render Worker's own `createImageBitmap` and `WebCodecs`
 //!   `ImageDecoder`, whose frames are [`BrowserFrame`]s: `ImageBitmap`s the painter copies straight
 //!   into a texture.
+//! - [`BrowserMedia`]: the video player, an `HTMLVideoElement` on the page's main thread whose
+//!   `VideoFrame`s are transferred here and copied into a texture the same way.
 //! - The code cache's store: a [`CacheStore`] over one cache of the web Cache API, so compiled
 //!   scripts outlive the page and are shared by every tab of the origin.
 //!
@@ -17,11 +19,13 @@ mod cache;
 mod decode;
 mod fetch;
 mod frame;
+mod media;
 
 pub use cache::CacheStore;
 pub use decode::BrowserDecoder;
 pub use fetch::BrowserFetch;
 pub use frame::BrowserFrame;
+pub use media::{BrowserMedia, BrowserPlayer, deliver_media_event, deliver_media_frame};
 use vant::{ArtifactStore, NoStore, Parts, Platform, Tier};
 
 /// Which cache of the origin's Cache API the code cache keeps its entries
@@ -45,18 +49,21 @@ impl Default for CodeCacheConfig {
 }
 
 /// The browser's Render Worker: its own `fetch` ([`BrowserFetch`]), its own
-/// image decoders ([`BrowserDecoder`]), and, when the Cache API can be
-/// opened, the code cache's store ([`CacheStore`]).
+/// image decoders ([`BrowserDecoder`]), the facade's `<video>` elements
+/// ([`BrowserMedia`]), and, when the Cache API can be opened, the code
+/// cache's store ([`CacheStore`]).
 #[derive(Debug)]
 pub struct BrowserPlatform {
     fetch: BrowserFetch,
     decoder: BrowserDecoder,
+    media: BrowserMedia,
     artifacts: Option<Tier<CacheStore>>,
 }
 
 impl BrowserPlatform {
-    /// The browser platform, decoding images in this Worker and keeping
-    /// compiled scripts in `code_cache`'s cache of the Cache API.
+    /// The browser platform, decoding images in this Worker, playing videos
+    /// through `media`, and keeping compiled scripts in `code_cache`'s cache
+    /// of the Cache API.
     ///
     /// The cache is opened once, here; a second view in this Worker shares it
     /// through `Resources::new_scope`, and another tab's Worker opens the
@@ -64,7 +71,10 @@ impl BrowserPlatform {
     /// `createImageBitmap` no image decodes, and without the Cache API (a
     /// context that is not secure, a browser that refuses it in private
     /// browsing) the code cache keeps its artifacts in memory only.
-    pub async fn new(code_cache: Option<CodeCacheConfig>) -> (Self, Vec<String>) {
+    pub async fn new(
+        code_cache: Option<CodeCacheConfig>,
+        media: BrowserMedia,
+    ) -> (Self, Vec<String>) {
         let mut notes = Vec::new();
         let decoder = BrowserDecoder::new();
         if let Err(error) = vant::ImageDecoder::available(&decoder) {
@@ -86,6 +96,7 @@ impl BrowserPlatform {
         let platform = Self {
             fetch: BrowserFetch,
             decoder,
+            media,
             artifacts,
         };
         (platform, notes)
@@ -97,14 +108,16 @@ impl Platform for BrowserPlatform {
     type Store = NoStore;
     type AsyncStore = CacheStore;
     type Decoder = BrowserDecoder;
+    type Media = BrowserMedia;
 
     /// No byte tier: the browser's HTTP cache plays that role
     /// ([`BrowserFetch`] owns it). The code cache gets the Cache API store
     /// when it opened.
-    fn into_parts(self) -> Parts<BrowserFetch, NoStore, CacheStore, BrowserDecoder> {
+    fn into_parts(self) -> Parts<BrowserFetch, NoStore, CacheStore, BrowserDecoder, BrowserMedia> {
         Parts {
             fetch: self.fetch,
             decoder: self.decoder,
+            media: self.media,
             bytes: None,
             artifacts: self.artifacts.map(|tier| Tier {
                 store: ArtifactStore::Async(tier.store),
