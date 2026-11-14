@@ -18,7 +18,7 @@ coherent architectures that fit this repository's policies.
 | Components are `impl terminus::link::CustomElement<()>` with lifecycle callbacks and `handle_event`; the trait has no method surface. `Document::define` stores `Arc<dyn CustomElement<T>>`; the per-element handler lookup is `pub(crate)`. | `crates/terminus/src/tree/custom.rs:130, 362-390, 589-606` |
 | An element in script is a plain object `{ [nodeIdSymbol]: id }` on `Object.prototype`; no per-tag prototype. | `packages/bobcat-element/src/element-papi.ts:577-588, 698-700` |
 | The bridge installs flat host functions only. It has no object, array, class or prototype builder; `HostValue::Structured` is opaque bytes Rust cannot build or read. | `crates/quickjs-rust-bridge/src/lib.rs:630-670, 1735-1909` |
-| Policy: payloads JS consumes stay opaque in Rust; expose Rust facts as primitive binding arguments and build the object in JavaScript. | `AGENTS.md:135-143` |
+| Policy: payloads JS consumes stay opaque in Rust; expose Rust facts as primitive binding arguments and build the object in JavaScript. | `AGENTS.md`, "JavaScript data ownership" |
 | Policy: no `impl CustomElement` and no definition table may live in `terminus`; `bobcat-core::tree` owns the component handlers. | `docs/terminus-link-api.md:27` |
 | Pending method set: about 25 names over 9 kinds; at least four return data (`getValue`, `getVisibleCells`, `getScrollContainerInfo`, `getScrollInfo`). | `docs/tracking/components.md`, §6 below |
 | `docs/tracking/js-runtime.md:224-226` already records that a fixed enum under-serves this and asks for an open or explicitly registered per-widget dispatch. | |
@@ -126,7 +126,7 @@ flowchart LR
 - **Errors**: `enum MethodError { NotFound, InvalidParams, InvalidState,
   Operation }` mapped to codes 3/4/7/8 in one place.
 - **Costs**: stringly throughout; Rust parses JSON it does not need
-  (`AGENTS.md:135-143`); the table and the tracking catalog are the same
+  (`AGENTS.md`, "JavaScript data ownership"); the table and the tracking catalog are the same
   list in two places; nothing in script knows which tag has which method,
   so a future `customElements.define` in script cannot add methods without
   a second hook.
@@ -165,7 +165,7 @@ flowchart LR
   `CustomElement` trait are untouched; `serde_json` leaves `viewpager.rs`.
 - **Params and data**: TS decodes `params` per method and passes primitives;
   TS assembles data-returning results (`getVisibleCells` from a record), as
-  `getComputedStyleMap` does today. This is `AGENTS.md:135-143` as written.
+  `getComputedStyleMap` does today. This is `AGENTS.md`, "JavaScript data ownership" as written.
 - **Errors**: Rust returns typed `Result<_, DialogError>` per method; the
   host member maps to a thrown realm error carrying the DOMException name;
   one TS `catch` maps names to Lynx codes.
@@ -202,7 +202,7 @@ recorded so the comparison is complete.
 | Base methods shared like `HTMLElement` | no | base table fallback | `Document` fallback outside the trait | **prototype inheritance** |
 | Script-defined custom elements can add methods later | no | needs a second hook | needs a second hook | **free** |
 | `terminus` crate untouched (`terminus-link-api.md:27`) | yes | **yes** | no | **yes** |
-| `AGENTS.md:135-143` data ownership | JSON in Rust | JSON in Rust | JSON in Rust | **primitives, objects in TS** |
+| `AGENTS.md`, "JavaScript data ownership" | JSON in Rust | JSON in Rust | JSON in Rust | **primitives, objects in TS** |
 | Data-returning methods | impossible | new envelope | new envelope | **existing record path** |
 | Error typing | codes | one `MethodError` enum | one terminus outcome type | **typed `Result` per method, DOMException names** |
 | Wrong-kind call | code 3 | code 3 | code 3 | unreachable via `invoke`; `TypeError` on the member |

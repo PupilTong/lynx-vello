@@ -13,9 +13,9 @@ value *grammar* is not yours to widen in Rust — it is the vendored stylo fork'
 
 ## Read first
 
-- `AGENTS.md`: Standards policy, JavaScript data ownership, Dependency policy,
-  the `crates/terminus` and `crates/bobcat-source` entries in Crates, and the
-  vendored-stylo-fork paragraphs inside the `crates/terminus` entry.
+- `AGENTS.md`: Standards policy, JavaScript data ownership, Dependency policy.
+- `crates/terminus/AGENTS.md` and `crates/bobcat-source/AGENTS.md`, and the
+  vendored-stylo-fork paragraphs inside `crates/terminus/AGENTS.md`.
 - `docs/style-architecture.md` — ownership rules for this layer.
 - `docs/style-assumptions.md` — the user-confirmed scope exceptions. These
   override "match web-core"; follow them instead of re-deriving.

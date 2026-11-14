@@ -3,8 +3,8 @@
 `crates/terminus` is the generic W3C-DOM-subset document tree and
 standards-oriented CSS computation core the Lynx runtime layers sit on.
 `docs/terminus-link-api.md` is the authoritative normal-build versus test-feature
-API boundary; this file is the internals, moved out of `AGENTS.md`, whose
-`crates/terminus` section keeps the charter and the rulings an agent needs before
+API boundary; this file is the internals, moved out of `AGENTS.md`;
+`crates/terminus/AGENTS.md` keeps the charter and the rulings an agent needs before
 touching the crate.
 
 ## Tree, arenas and identity

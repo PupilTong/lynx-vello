@@ -16,8 +16,8 @@ compiled output, and the fixture/census machinery that does the proving.
 ## Read first
 
 - `AGENTS.md`: Mission (the compatibility target is a `.web.bundle` behaving as
-  it does under `web-core` today, behaviorally and not pixel-perfect), Testing,
-  and the `packages/bobcat-element` entry in Crates.
+  it does under `web-core` today, behaviorally and not pixel-perfect), Testing;
+  and `packages/bobcat-element/AGENTS.md`.
 - `docs/tracking/reactlynx.md` (primary spec), `docs/tracking/components.md`
   (built-in components, form/IME contract, lazy components, `<frame>`),
   `docs/tracking/accessibility.md`, `docs/tracking/deviations.md`.

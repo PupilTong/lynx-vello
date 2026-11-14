@@ -37,7 +37,7 @@ ACCEPTED: dict[str, dict[str, str]] = {
             "crates/terminus/src/layout/host.rs that a release build does not contain. "
             "Breaking the cycle means moving seldon's terminus-based benches into terminus, "
             "which renumbers every CodSpeed benchmark id and discards its history. "
-            "See AGENTS.md, 'Benchmarks measure a debug-instrumented terminus'."
+            "See docs/testing.md, 'Benchmarks measure a debug-instrumented terminus'."
         ),
         "painter-test-utils": (
             "bobcat-core dev-depends on terminus/painter-test-utils for its painter "
@@ -51,7 +51,7 @@ ACCEPTED: dict[str, dict[str, str]] = {
             "accessors (`Painter::without_output`, `clock_mut`, `scroll_intents_mut`, "
             "`ScrollIntentsTestUtils`, the two interval constants) are compiled in. "
             "Nothing else on the compose or draw path changes. Dropping it means "
-            "moving bobcat-core's painter tests off the feature. See AGENTS.md, "
+            "moving bobcat-core's painter tests off the feature. See docs/testing.md, "
             "'Benchmarks measure a debug-instrumented terminus'."
         ),
     },

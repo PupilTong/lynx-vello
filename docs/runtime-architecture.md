@@ -921,7 +921,7 @@ the child is kept while its worker runs) and calls `done`, which runs
 `resetFrame`, freeing the old card's nested page with everything under it
 and the shadow root's sheets — the old card's stopped elements with them —
 and building the next card's page. A load of the frame waits for that reset
-(see AGENTS.md, "The frame's lifecycle"). A worker realm's child has the
+(see `crates/bobcat-core/docs/frame.md`, "The frame's lifecycle"). A worker realm's child has the
 core alone.
 
 ### Realm construction and driving

@@ -25,8 +25,10 @@ optional shader paints terminus draws are named as Cargo features.
 
 ## Read first
 
-- `AGENTS.md`: Standards policy, the `crates/terminus`, `crates/bobcat-core` and
-  `crates/prime-radiant` entries in Crates.
+- `AGENTS.md`: Standards policy.
+- `crates/terminus/AGENTS.md`, `crates/prime-radiant/AGENTS.md`, and
+  `crates/bobcat-core/AGENTS.md` with `crates/bobcat-core/docs/painter.md` (the
+  painter facade in `crates/bobcat-core/src/paint/`).
 - `crates/terminus/src/paint/painter.rs`'s module header — it lists the **deliberate
   v1 limits** (isotropic `filter: blur()` σ under a non-uniform transform plus
   its area budget, the five `backdrop-filter` narrowings beside it, affine

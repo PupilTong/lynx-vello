@@ -21,8 +21,8 @@ context, event dispatch/hit-testing). It's cited in the files below where
 relevant; see `AGENTS.md` for its full scope.
 
 These files are research/spec rather than a status tracker. Implementation
-status lives in [`AGENTS.md`](../../AGENTS.md)'s Workspace map and Crates
-sections, one heading per crate and pnpm package, and in the
+status lives in [`AGENTS.md`](../../AGENTS.md)'s Workspace map and the
+`AGENTS.md` it links for each crate and pnpm package, and in the
 `docs/*-runtime.md` files for the runtime subsystems, with `crates/terminus`'s
 internals in [`docs/terminus-architecture.md`](../terminus-architecture.md). The
 authoritative enumeration of the Element PAPI is the header table of

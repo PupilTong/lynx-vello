@@ -311,7 +311,7 @@ the traits and passes its own `Platform`.
    `bobcat-wasm` builds `BrowserPlatform::new(Some(image_port))`.
    `LynxView<ViewResources>` is `LynxView<ViewResources<DefaultPlatform>>`.
 5. CI: `-p vant` joins the wasm32 clippy list; AGENTS.md's workspace map and
-   the `bobcat-resources` section describe the split; this document is the
+   `crates/bobcat-resources/AGENTS.md` describe the split; this document is the
    design reference.
 
 Not in PR1: the code cache (PR2), the browser Store (PR3), the registry

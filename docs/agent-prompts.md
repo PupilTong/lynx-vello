@@ -44,7 +44,7 @@ The order is fork grammar first, then the engine, then the UA sheet, then
 tests — a property that isn't in the fork's `lynx` allowlist doesn't parse.
 
 ```
-Read AGENTS.md (standards policy, the crates/terminus entry and its vendored-stylo
+Read AGENTS.md (standards policy), crates/terminus/AGENTS.md (with its vendored-stylo
 paragraphs), docs/style-architecture.md, docs/style-assumptions.md, and
 docs/tracking/{css-layout,css-visual,css-text,css-animation,
 css-selectors-cascade}.md for {PROPERTY_NAME}. If the tracking doc doesn't
@@ -88,7 +88,8 @@ verify against real source.
 ## Audit a JS/runtime API for parity
 
 ```
-Read AGENTS.md ("JavaScript data ownership" and the crates/bobcat-core entry),
+Read AGENTS.md ("JavaScript data ownership"), crates/bobcat-core/AGENTS.md
+and the topic file under crates/bobcat-core/docs/ that owns {API_NAME},
 then the runtime doc that owns {API_NAME}: docs/mts-execution-runtime.md,
 docs/data-lifecycle-runtime.md, docs/destruction-runtime.md,
 docs/events-diagnostics-runtime.md, docs/node-query-runtime.md,
