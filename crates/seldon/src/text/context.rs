@@ -238,6 +238,12 @@ pub struct TextContext {
 impl TextContext {
     #[must_use]
     pub fn new() -> Self {
+        // Discovering the system fonts calls the platform's font API
+        // (CoreText, fontconfig, DirectWrite), which Miri cannot execute; a
+        // context under Miri has only the fonts registered into it.
+        if cfg!(miri) {
+            return Self::without_system_fonts();
+        }
         Self {
             font: system_font_template().clone(),
             layout: LayoutContext::new(),

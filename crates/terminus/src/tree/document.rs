@@ -16,6 +16,7 @@ use stylo::stylesheets::UrlExtraData;
 use crate::style::damage::StyleDamage;
 use crate::style::engine::StyleEngine;
 pub use crate::tree::arena::NodeId;
+use crate::tree::arena::{ArenaBox, ArenaPtr};
 pub(crate) use crate::tree::arena::{
     DOCUMENT_ELEMENT_NODE_ID, DOCUMENT_NODE_ID, DeferredContainer, DocumentLayoutState,
     NodeLayoutState, NodeSlot, StickyContainingBlock, TreeArenas,
@@ -58,11 +59,12 @@ pub(crate) struct PendingRelayout {
 /// zero.
 ///
 /// A document belongs to the thread that created it and cannot leave: it is
-/// not `Send`, twice over. Its [`Node`](crate::tree::node::Node)s hold a raw backpointer
-/// into the arena set that owns them, and the [`Device`](crate::style::device::Device)
-/// it is built with owns a Stylo `Box<dyn FontMetricsProvider>` that is `Sync`
-/// but not `Send`. An embedder therefore builds a document *on* its owning
-/// thread rather than handing one over — which is what `bobcat-main` does.
+/// not `Send`, twice over. It holds its arena set through a raw pointer
+/// ([`ArenaBox`]) whose copy each of its [`Node`](crate::tree::node::Node)s
+/// carries, and the [`Device`](crate::style::device::Device) it is built with
+/// owns a Stylo `Box<dyn FontMetricsProvider>` that is `Sync` but not `Send`. An embedder therefore
+/// builds a document *on* its owning thread rather than handing one over — which is what
+/// `bobcat-main` does.
 pub struct Document<T> {
     style_engine: StyleEngine,
     /// The worker threads this document's style traversals run on. `None`
@@ -70,7 +72,7 @@ pub struct Document<T> {
     /// documents that flush on this same thread, which is what lets two
     /// documents on two threads restyle at once.
     style_pool: Option<std::rc::Rc<crate::style::pool::StylePool>>,
-    tree: Box<TreeArenas<T>>,
+    tree: ArenaBox<T>,
     layout: DocumentLayoutState,
     pub(crate) painter: RefCell<crate::paint::painter::FramePainter>,
     /// The document's image name table. Holds no pixels and no host handle:
@@ -146,8 +148,7 @@ impl<T> Document<T> {
         let style_engine = StyleEngine::new(device.into_stylo(), about_blank_url_data());
         let lock = style_engine.lock();
         let url_data = style_engine.url_data();
-        let mut tree = Box::new(TreeArenas::new());
-        tree.reserve_zero();
+        let mut tree = ArenaBox::new();
         let root = tree.insert_node(|owner, id| Node::new_document(owner, id, lock, url_data));
         assert_eq!(
             root, DOCUMENT_NODE_ID,
@@ -232,7 +233,7 @@ impl<T> Document<T> {
         &mut self.style_engine
     }
 
-    pub(crate) const fn style_and_tree_parts(&mut self) -> (&mut StyleEngine, &mut TreeArenas<T>) {
+    pub(crate) fn style_and_tree_parts(&mut self) -> (&mut StyleEngine, &mut TreeArenas<T>) {
         (&mut self.style_engine, &mut self.tree)
     }
 
@@ -457,7 +458,7 @@ impl<T> Document<T> {
     /// Files a node in the node arena under one freshly issued id.
     pub(crate) fn allocate_node(
         &mut self,
-        make: impl FnOnce(*mut TreeArenas<T>, NodeId) -> Node<T>,
+        make: impl FnOnce(ArenaPtr<T>, NodeId) -> Node<T>,
     ) -> NodeId {
         self.tree.insert_node(make)
     }

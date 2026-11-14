@@ -22,6 +22,7 @@ use stylo_atoms::Atom;
 use stylo_dom::ElementState;
 
 use crate::render::image::ImageRole;
+use crate::tree::arena::ArenaPtr;
 use crate::tree::custom::{CustomElementState, DefinitionId};
 use crate::tree::document::{DOCUMENT_NODE_ID, NodeId, NodeSlot, TreeArenas};
 use crate::tree::shadow::{ShadowLinks, ShadowRootData, ShadowRootMode};
@@ -152,7 +153,7 @@ impl NodeFlags {
 
 /// A single node in a [`Document`](crate::tree::document::Document) tree.
 pub struct Node<T> {
-    owner: *mut TreeArenas<T>,
+    owner: ArenaPtr<T>,
     /// This node's handle: both its identity and the arena position it
     /// occupies, because those are now one thing. A walk that follows
     /// `parent`/`children` indexes the arena directly — there is no id table
@@ -241,7 +242,7 @@ impl StyleRefresh {
 
 impl<T> Node<T> {
     pub(crate) fn new_document(
-        owner: *mut TreeArenas<T>,
+        owner: ArenaPtr<T>,
         id: NodeId,
         lock: StdArc<SharedRwLock>,
         url_data: UrlExtraData,
@@ -260,17 +261,13 @@ impl<T> Node<T> {
         )
     }
 
-    pub(crate) fn new_element(
-        owner: *mut TreeArenas<T>,
-        id: NodeId,
-        local_name: LocalName,
-    ) -> Self {
+    pub(crate) fn new_element(owner: ArenaPtr<T>, id: NodeId, local_name: LocalName) -> Self {
         let mut node = Self::new(owner, id, NodeData::Element(None), Some(local_name), None);
         node.element_state = ElementState::DEFINED;
         node
     }
 
-    pub(crate) fn new_text(owner: *mut TreeArenas<T>, id: NodeId, text: Box<str>) -> Self {
+    pub(crate) fn new_text(owner: ArenaPtr<T>, id: NodeId, text: Box<str>) -> Self {
         Self::new(owner, id, NodeData::Text, None, Some(text))
     }
 
@@ -279,7 +276,7 @@ impl<T> Node<T> {
     /// ([`NodeFlags::BACKDROP`] or [`NodeFlags::ANONYMOUS`]). It carries no
     /// payload.
     pub(crate) fn new_generated_element(
-        owner: *mut TreeArenas<T>,
+        owner: ArenaPtr<T>,
         id: NodeId,
         local_name: LocalName,
         marker: u8,
@@ -305,16 +302,12 @@ impl<T> Node<T> {
         self.payload
     }
 
-    pub(crate) fn new_shadow_root(
-        owner: *mut TreeArenas<T>,
-        id: NodeId,
-        data: ShadowRootData,
-    ) -> Self {
+    pub(crate) fn new_shadow_root(owner: ArenaPtr<T>, id: NodeId, data: ShadowRootData) -> Self {
         Self::new(owner, id, NodeData::ShadowRoot(Box::new(data)), None, None)
     }
 
     fn new(
-        owner: *mut TreeArenas<T>,
+        owner: ArenaPtr<T>,
         id: NodeId,
         data: NodeData,
         local_name: Option<LocalName>,
@@ -349,13 +342,30 @@ impl<T> Node<T> {
 
     pub(crate) fn arenas(&self) -> &TreeArenas<T> {
         #[expect(unsafe_code, reason = "deref the owning arena-set backpointer")]
-        // SAFETY: `owner` is the address of the `TreeArenas<T>` holding this
-        // node — taken by `ptr::from_mut` at construction, never stored again,
-        // and fixed for the document's life because `Document` boxes the arena
-        // set. The arenas therefore outlive every node inside them, including
-        // one `remove_node` has handed back. The reborrow is shared, and every
-        // caller reaches it from a `&Node` already lent out of these same
-        // arenas, so no `&mut TreeArenas<T>` is live across it.
+        // SAFETY: `owner` is an `ArenaPtr`, which only `ArenaBox` makes: the
+        // pointer it allocated this node's arena set through, handed to the
+        // node's constructor when `ArenaBox::insert_node` filed it.
+        //
+        // It is valid: the allocation is freed only when that `ArenaBox`
+        // drops, and no node outlives it. A node inside the arena set is
+        // dropped with it, and one `remove_node` handed back is dropped by
+        // the `Document` method that freed it, before that method returns.
+        //
+        // Its provenance is still usable here: every `&TreeArenas<T>` and
+        // `&mut TreeArenas<T>` the document has used was derived from this
+        // same pointer by `ArenaBox`'s `Deref`/`DerefMut`, so no write
+        // through them has invalidated it (`ArenaBox`'s comment says why a
+        // pointer taken from a `&mut` borrow does not stay usable).
+        //
+        // Reading through it ends any `&mut` derived from it for the bytes
+        // the read reaches, so no such `&mut` may be used again for those
+        // bytes. The borrow checker enforces most of that: the result borrows
+        // `&self`, a node lent out of these arenas, so the `&mut` that lent
+        // the node is unusable while the result is in use. The case it does
+        // not catch is a `&mut Node` that calls this through a reborrow,
+        // reaches its own node through the result, and writes through the
+        // `&mut` afterwards. No caller does; Miri under Tree Borrows reports
+        // one on any test path that does.
         //
         // The raw pointer is also what states this tree's thread affinity. It
         // costs `Node<T>` its `Send`, and with it `Document<T>`'s — which is
@@ -367,7 +377,7 @@ impl<T> Node<T> {
         // property it actually conferred was the `Send` a document must not
         // have.
         unsafe {
-            &*self.owner
+            &*self.owner.as_ptr()
         }
     }
 
@@ -721,7 +731,7 @@ impl<T> Node<T> {
     pub fn census_field_sizes() -> &'static [(&'static str, usize, bool)] {
         use std::mem::size_of;
         &[
-            ("owner", size_of::<*mut TreeArenas<()>>(), false),
+            ("owner", size_of::<ArenaPtr<()>>(), false),
             ("id", size_of::<NodeId>(), false),
             ("data", size_of::<NodeData>(), false),
             ("payload", size_of::<Option<()>>(), false),
