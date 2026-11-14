@@ -7,18 +7,20 @@
 //! attribute and renders no light-DOM child. Under the standards policy the
 //! tag is a Lynx-only component that shares its name with the HTML element
 //! (`docs/svg-lynx-component-design.md`). This module reflects both
-//! attributes into the element's [`terminus::link::ImageRole::Source`], so the element
-//! is replaced content and the image pipeline — the parse, the vector image,
-//! the natural size, the painter's raster cache — is shared with `<image>`.
+//! attributes into the element's one source in [`ImageSources`], which
+//! presents it on the element's replaced box from the moment it is named, so
+//! the image pipeline — the parse, the vector image, the natural size, the
+//! painter's raster cache — is shared with `<image>`.
 //!
 //! # `src` and `content`
 //!
-//! `src` is relayed as written to [`terminus::link::Document::set_image_source`]: the
-//! host fetches it, parses the document and reports it, as it does for an
+//! `src` is relayed as written to [`ImageSources::set`]: the host fetches it,
+//! parses the document and reports it, as it does for an
 //! `<image src="x.svg">`.
 //!
-//! `content` goes to [`terminus::link::Document::set_image_document`] as its bytes. No
-//! URL is made of it and the host is never asked to fetch it: `terminus` files
+//! `content` goes to [`ImageSources::set_document`] as its bytes, which
+//! [`terminus::link::Document::insert_image_document`] files. No URL is made
+//! of it and the host is never asked to fetch it: `terminus` files
 //! the markup under a synthetic source named by a 128-bit hash of it
 //! (`svg-content:<32 hex digits>`) and queues the bytes as a document
 //! request, which the page's epilogue hands the host
@@ -68,14 +70,15 @@
 //!
 //! `load` only: the Lynx `<svg>` typing and web-core's `x-svg` both expose
 //! `bindload` alone, so a source that fails dispatches nothing. A source that
-//! settled before the bind is queued on [`ComponentEvents`] exactly as
+//! settled before the write is queued on [`ComponentEvents`] exactly as
 //! [`super::image`] queues it. The detail differs from `<image>`'s and is the
 //! runtime's to build: native reports the element's layout size, not the
 //! document's intrinsic size (ruled 2026-10-08), so the runtime reads the
 //! border box at delivery ([`is_svg`] is how it tells the two apart).
 
-use terminus::link::{CustomElement, DocumentKind, ImageRole, NodeId};
+use terminus::link::{CustomElement, DocumentKind, NodeId};
 
+use super::image_sources::{ImageRole, ImageSources};
 use super::{ComponentEvents, LynxDocument};
 
 /// Lynx's vector picture tag, and the two attributes this module reflects.
@@ -94,10 +97,15 @@ pub(super) const UA_RULES: &str = r"svg { display: flex; }
 svg > * { display: none; }
 ";
 
-/// Installs the component, over the queue its bind-time outcomes go into.
-/// Must run before any element could carry the tag.
-pub(super) fn define(document: &mut LynxDocument, outcomes: ComponentEvents) {
-    document.define(SVG_TAG, Box::new(Svg { outcomes }));
+/// Installs the component, over the queue its write-time outcomes go into
+/// and the record of its elements' sources. Must run before any element
+/// could carry the tag.
+pub(super) fn define(
+    document: &mut LynxDocument,
+    outcomes: ComponentEvents,
+    sources: ImageSources,
+) {
+    document.define(SVG_TAG, Box::new(Svg { outcomes, sources }));
 }
 
 /// Whether `node` is a live `svg` element: the runtime builds an `svg`
@@ -111,14 +119,17 @@ pub(crate) fn is_svg(document: &LynxDocument, node: NodeId) -> bool {
 
 /// Points the element at whatever its last written attribute names.
 ///
-/// Only `attribute_changed_callback` is implemented, for the reasons
-/// [`super::image`]'s component gives: the reaction that carries a source
-/// always follows the element's creation, and a release unbinds the source
-/// in `terminus` itself.
+/// `attribute_changed_callback` is the whole of the reflection, for the
+/// reasons [`super::image`]'s component gives: the reaction that carries a
+/// source always follows the element's creation, and a free drops the
+/// element's record ([`CustomElement::freed`]) while `terminus`'s own free
+/// releases what the box presents.
 struct Svg {
-    /// Where a source that settles at the bind leaves its outcome. The
+    /// Where a source that settles at the write leaves its outcome. The
     /// reaction runs inside a JavaScript call, so it cannot dispatch.
     outcomes: ComponentEvents,
+    /// The sources every `image` and `svg` element names.
+    sources: ImageSources,
 }
 
 impl CustomElement<()> for Svg {
@@ -136,16 +147,12 @@ impl CustomElement<()> for Svg {
     ) {
         let new = new.filter(|value| !value.is_empty());
         let outcome = match name {
-            SRC_ATTRIBUTE => document.set_image_source(element, ImageRole::Source, new),
+            SRC_ATTRIBUTE => self.sources.set(document, element, ImageRole::Source, new),
             // No `content` keeps the current source (web-core's
             // `_handleContent`; see the module docs).
             CONTENT_ATTRIBUTE => new.and_then(|content| {
-                document.set_image_document(
-                    element,
-                    ImageRole::Source,
-                    content.as_bytes(),
-                    DocumentKind::Svg,
-                )
+                self.sources
+                    .set_document(document, element, content.as_bytes(), DocumentKind::Svg)
             }),
             other => {
                 debug_assert!(false, "`svg` does not observe `{other}`");
@@ -153,6 +160,10 @@ impl CustomElement<()> for Svg {
             }
         };
         self.outcomes.queue_image(outcome);
+    }
+
+    fn freed(&self, element: NodeId) {
+        self.sources.forget(element);
     }
 }
 
@@ -166,12 +177,15 @@ mod tests {
 
     use terminus::link::stylo::computed_values::box_sizing;
     use terminus::link::stylo::values::computed::{Contain, Display};
-    use terminus::link::{ImageEvent, ImageOutcome, ImageRole, NodeId};
+    use terminus::link::{ImageEvent, NodeId, PictureKey};
 
     use super::super::test_support::{
-        child, display, document, element_under, style_of, with_component_events, with_config,
+        child, display, document, element_under, style_of, with_config, with_image_sources,
     };
-    use super::super::{ComponentEvent, ComponentEvents, LynxDocument, PageConfig};
+    use super::super::{
+        ComponentEvent, ComponentEvents, ImageOutcome, ImageSources, LynxDocument, PageConfig,
+        apply_image_events,
+    };
     use super::{CONTENT_ATTRIBUTE, SRC_ATTRIBUTE, SVG_TAG, is_svg};
 
     const SOURCE: &str = "app:///a.svg";
@@ -202,10 +216,16 @@ mod tests {
         }
     }
 
+    /// The default document with the record of its elements' sources.
+    fn images() -> (LynxDocument, ComponentEvents, ImageSources) {
+        with_image_sources(PageConfig::default())
+    }
+
     /// The source `element` presents.
     fn source_of(document: &LynxDocument, element: NodeId) -> Option<String> {
         document
-            .image_source(element, ImageRole::Source)
+            .picture(element)
+            .and_then(PictureKey::url)
             .map(str::to_owned)
     }
 
@@ -217,13 +237,13 @@ mod tests {
     /// Answers every document request as a host does, with the engine's
     /// parser over its bytes reported for its source, and applies the
     /// reports.
-    fn answer_requests(document: &mut LynxDocument) -> Vec<ImageOutcome> {
+    fn answer_requests(document: &mut LynxDocument, sources: &ImageSources) -> Vec<ImageOutcome> {
         let reports: Vec<ImageEvent> = document
             .take_document_requests()
             .into_iter()
             .map(|(source, bytes, kind)| ImageEvent::parse_document(source, &bytes, kind))
             .collect();
-        document.apply_image_events(&reports)
+        apply_image_events(document, sources, &reports)
     }
 
     /// The outcomes queued at a bind, as the runtime would drain them.
@@ -275,7 +295,7 @@ mod tests {
     /// size, and a sized one keeps its CSS size, for both attributes.
     #[test]
     fn an_unsized_svg_lays_out_at_its_natural_size_and_a_sized_one_at_its_css_size() {
-        let mut document = document();
+        let (mut document, _, sources) = images();
         let holder = child(
             &mut document,
             "view",
@@ -288,8 +308,8 @@ mod tests {
             document.set_attribute(element, SRC_ATTRIBUTE, SOURCE);
         }
         document.set_attribute(inline, CONTENT_ATTRIBUTE, MARKUP);
-        let _ = document.apply_image_events(&[loaded(SOURCE)]);
-        let _ = answer_requests(&mut document);
+        let _ = apply_image_events(&mut document, &sources, &[loaded(SOURCE)]);
+        let _ = answer_requests(&mut document, &sources);
 
         assert_eq!(size_of(&mut document, natural), (30.0, 15.0));
         assert_eq!(size_of(&mut document, sized), (120.0, 80.0));
@@ -333,24 +353,24 @@ mod tests {
     /// is what the element draws and what its `load` answers for.
     #[test]
     fn the_last_attribute_written_wins() {
-        let mut document = document();
+        let (mut document, _, sources) = images();
         let element = svg(&mut document, "");
 
         document.set_attribute(element, SRC_ATTRIBUTE, SOURCE);
         document.set_attribute(element, CONTENT_ATTRIBUTE, MARKUP);
         assert_eq!(
-            document.apply_image_events(&[loaded(SOURCE)]),
+            apply_image_events(&mut document, &sources, &[loaded(SOURCE)]),
             Vec::new(),
             "`content` replaced `src`, so `src`'s load is nobody's"
         );
         assert_eq!(
-            answer_requests(&mut document),
+            answer_requests(&mut document, &sources),
             vec![outcome(element, 10, 5)]
         );
 
         document.set_attribute(element, SRC_ATTRIBUTE, OTHER_SOURCE);
         assert_eq!(
-            document.apply_image_events(&[loaded(OTHER_SOURCE)]),
+            apply_image_events(&mut document, &sources, &[loaded(OTHER_SOURCE)]),
             vec![outcome(element, 30, 15)],
             "and `src` written after `content` replaces it again"
         );
@@ -359,7 +379,7 @@ mod tests {
     /// An empty value or a removal of `src` names nothing, as in `<image>`.
     #[test]
     fn an_empty_or_removed_src_names_no_source() {
-        let mut document = document();
+        let (mut document, _, sources) = images();
         let element = svg(&mut document, "");
         document.set_attribute(element, SRC_ATTRIBUTE, "");
         assert!(document.take_wanted_images().is_empty());
@@ -377,7 +397,7 @@ mod tests {
                 "the element still has a box: {clear:?}"
             );
             assert_eq!(
-                document.apply_image_events(&[loaded(SOURCE)]),
+                apply_image_events(&mut document, &sources, &[loaded(SOURCE)]),
                 Vec::new(),
                 "a cleared `src` answers for nobody: {clear:?}"
             );
@@ -398,7 +418,7 @@ mod tests {
                 }
             };
 
-            let mut document = document();
+            let (mut document, _, sources) = images();
             let element = svg(&mut document, "");
             document.set_attribute(element, CONTENT_ATTRIBUTE, "");
             assert!(
@@ -413,19 +433,19 @@ mod tests {
             clear_content(&mut document, element);
             assert!(document.take_wanted_images().is_empty(), "{clear:?}");
             assert_eq!(
-                document.apply_image_events(&[loaded(SOURCE)]),
+                apply_image_events(&mut document, &sources, &[loaded(SOURCE)]),
                 vec![outcome(element, 30, 15)],
                 "`src` is still the source: {clear:?}"
             );
 
             // So does the `content`'s own document when it was the last
             // written.
-            let mut document = super::super::test_support::document();
+            let (mut document, _, sources) = images();
             let element = svg(&mut document, "");
             document.set_attribute(element, CONTENT_ATTRIBUTE, MARKUP);
             clear_content(&mut document, element);
             assert_eq!(
-                answer_requests(&mut document),
+                answer_requests(&mut document, &sources),
                 vec![outcome(element, 10, 5)],
                 "the markup is still the source: {clear:?}"
             );
@@ -436,12 +456,12 @@ mod tests {
     /// queued rather than dispatched, for both attributes.
     #[test]
     fn a_settled_source_is_queued_at_the_bind() {
-        let (mut document, events) = with_component_events(PageConfig::default());
-        let _ = document.apply_image_events(&[loaded(SOURCE)]);
+        let (mut document, events, sources) = images();
+        let _ = apply_image_events(&mut document, &sources, &[loaded(SOURCE)]);
         // Another element settles the markup first and keeps it bound.
         let first = svg(&mut document, "");
         document.set_attribute(first, CONTENT_ATTRIBUTE, MARKUP);
-        let _ = answer_requests(&mut document);
+        let _ = answer_requests(&mut document, &sources);
         assert!(queued(&events).is_empty(), "the first bind was pending");
 
         let element = svg(&mut document, "");
@@ -458,7 +478,7 @@ mod tests {
     /// and both settle when it applies.
     #[test]
     fn two_elements_with_the_same_content_share_one_source() {
-        let mut document = document();
+        let (mut document, _, sources) = images();
         let first = svg(&mut document, "");
         let second = svg(&mut document, "");
         for element in [first, second] {
@@ -466,7 +486,7 @@ mod tests {
         }
         assert_eq!(source_of(&document, first), source_of(&document, second));
         assert_eq!(
-            answer_requests(&mut document),
+            answer_requests(&mut document, &sources),
             vec![outcome(first, 10, 5), outcome(second, 10, 5)],
             "one parse settles both"
         );
@@ -478,16 +498,16 @@ mod tests {
     /// so writing it later parses it afresh.
     #[test]
     fn a_content_change_reparses_once_per_distinct_markup() {
-        let (mut document, events) = with_component_events(PageConfig::default());
+        let (mut document, events, sources) = images();
         let element = svg(&mut document, "");
 
         document.set_attribute(element, CONTENT_ATTRIBUTE, MARKUP);
-        assert_eq!(answer_requests(&mut document).len(), 1);
+        assert_eq!(answer_requests(&mut document, &sources).len(), 1);
         let first = source_of(&document, element).expect("a source");
 
         document.set_attribute(element, CONTENT_ATTRIBUTE, OTHER_MARKUP);
         assert_eq!(
-            answer_requests(&mut document),
+            answer_requests(&mut document, &sources),
             vec![outcome(element, 20, 20)],
             "new markup is one parse"
         );
@@ -507,7 +527,7 @@ mod tests {
 
         document.set_attribute(element, CONTENT_ATTRIBUTE, MARKUP);
         assert_eq!(
-            answer_requests(&mut document),
+            answer_requests(&mut document, &sources),
             vec![outcome(element, 10, 5)],
             "forgotten markup is parsed afresh"
         );

@@ -901,25 +901,12 @@ impl<T> Document<T> {
         // loose text was ever boxed.
         self.forget_anonymous_boxes(id);
         let node = self.tree.remove_node(id);
-        // The image registry names replaced nodes so a completed load knows
-        // whose natural size to set, and this is the one place a name stops
-        // meaning anything: an id retired here is never reissued, so an entry
-        // that outlived its node could only ever hold a stale one — and
-        // `Document::set_natural_size` panics on a stale id rather than
-        // ignoring it. Unbinding here makes that unrepresentable instead of
-        // guarded, and it is also what keeps `Entry::nodes` from growing with
-        // element churn: a recycled list binding one URL across its cells
-        // scans that vector on every rebind.
-        //
-        // Both sources: a placeholder outliving its element holds the same
-        // stale id its own load would reach.
-        for role in [
-            crate::render::image::ImageRole::Source,
-            crate::render::image::ImageRole::Placeholder,
-        ] {
-            if let Some(source) = node.image_source(role) {
-                self.images.unbind_node(source, id, role);
-            }
+        // A replaced box presenting a URL holds it in the image registry,
+        // which is what keeps a document handed over as bytes alive while
+        // something draws it; this is the one place a box stops presenting
+        // without saying so.
+        if let Some(crate::render::picture::PictureKey::Url(source)) = node.picture() {
+            self.images.unbind(source);
         }
         let slot = id;
         debug_assert_eq!(

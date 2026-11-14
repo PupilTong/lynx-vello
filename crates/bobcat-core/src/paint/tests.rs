@@ -7,7 +7,7 @@ use terminus::link::painter::ScrollIntentsTestUtils as _;
 use super::{FarEnd, Painter, ToMain};
 use crate::link::{FramePost, ScrollEntry, ScrollMailbox};
 use crate::main::tree::{
-    Autoplays, ComponentEvents, LynxDocument, PageConfig, Viewport, new_document,
+    Autoplays, ComponentEvents, ImageSources, LynxDocument, PageConfig, Viewport, new_document,
 };
 use crate::resource::SourceRequest;
 use crate::test_support::TestViewSpec;
@@ -20,6 +20,7 @@ fn document() -> LynxDocument {
         PageConfig::default(),
         ComponentEvents::default(),
         Autoplays::default(),
+        ImageSources::default(),
     )
 }
 

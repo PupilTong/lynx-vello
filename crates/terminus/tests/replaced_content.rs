@@ -14,7 +14,7 @@ use std::rc::Rc;
 
 use paint_common::Doc;
 use prime_radiant::TestImages;
-use terminus::link::ImageRole;
+use terminus::link::PictureKey;
 use terminus::link::layout::{NaturalSize, Size};
 
 const PAGE: &str = "page { display: flex; position: relative; width: 800px; height: 600px; }
@@ -46,6 +46,10 @@ fn checker_png(side: u32) -> Vec<u8> {
     bytes
 }
 
+fn url(source: &str) -> PictureKey {
+    PictureKey::Url(std::sync::Arc::from(source))
+}
+
 struct Harness {
     doc: Doc,
     images: Rc<TestImages>,
@@ -67,18 +71,12 @@ impl Harness {
 
         let root = self.doc.root;
         let node = self.doc.el_tag(root, "img", class);
-        #[allow(clippy::cast_precision_loss)]
-        let natural = NaturalSize::from_size(Size::new(info.width as f32, info.height as f32));
         let source = format!("app:///{}.png", node.to_bits());
         self.images
             .insert_rgba8(&source, info.width, info.height, rgba);
-        // The source first: for an element that has one, the document owns the
-        // natural size and recomputes it from whichever bitmap the element
-        // draws, so a hand-written size only survives after the source.
         self.doc
             .dom
-            .set_image_source(node, ImageRole::Source, Some(&source));
-        self.doc.dom.set_natural_size(node, natural);
+            .set_picture(node, Some((url(&source), Some((info.width, info.height)))));
         node
     }
 
@@ -151,30 +149,25 @@ fn a_node_with_no_registered_pixels_paints_nothing_but_still_lays_out() {
     assert_eq!((layout.size.width, layout.size.height), (40.0, 20.0));
 }
 
-/// Which of an element's two sources a frame draws: its own while that has
-/// pixels, its placeholder until then — and the drawn source is the one the
-/// frame reads, which is what the store sees.
+/// A frame draws the picture the element presents, and only that: a URL
+/// the embedder asked for without presenting it is requested and never
+/// read, and presenting it instead is what the next frame reads.
 #[test]
-fn a_frame_draws_the_placeholder_until_the_source_has_pixels() {
+fn a_frame_reads_the_picture_the_element_presents() {
     const SRC: &str = "app:///src.png";
     const PLACEHOLDER: &str = "app:///placeholder.png";
 
     let mut h = Harness::new("");
     let root = h.doc.root;
     let node = h.doc.el_tag(root, "img", "box");
+    let _ = h.doc.dom.request_image(SRC);
     h.doc
         .dom
-        .set_image_source(node, ImageRole::Source, Some(SRC));
-    h.doc
-        .dom
-        .set_image_source(node, ImageRole::Placeholder, Some(PLACEHOLDER));
+        .set_picture(node, Some((url(PLACEHOLDER), Some((1, 1)))));
     h.images.insert_rgba8(PLACEHOLDER, 1, 1, vec![0; 4]);
 
     let _ = h.stats();
-    assert!(
-        h.images.was_asked_for(SRC),
-        "both sources are requested, and the placeholder is no fallback"
-    );
+    assert!(h.images.was_asked_for(SRC), "a request asks the host");
     let sources = |h: &Harness| -> Vec<String> {
         h.images
             .reads()
@@ -184,8 +177,8 @@ fn a_frame_draws_the_placeholder_until_the_source_has_pixels() {
     };
     assert_eq!(sources(&h), vec![PLACEHOLDER.to_owned()]);
 
-    // The element's own source arriving takes the frame over for good.
     h.images.insert_rgba8(SRC, 2, 2, vec![0; 16]);
+    h.doc.dom.set_picture(node, Some((url(SRC), Some((2, 2)))));
     let _ = h.stats();
     assert_eq!(sources(&h).last().map(String::as_str), Some(SRC));
 }
@@ -241,12 +234,10 @@ fn a_read_carries_the_drawn_size_as_its_hint() {
 
 /// Regression: a load completing after its element was freed must not panic.
 ///
-/// The registry names replaced nodes so a completed load knows whose natural
-/// size to set, and `Document::set_natural_size` panics on a stale id rather
-/// than ignoring one. Freeing is the only place an id stops meaning anything,
-/// so the free is where the binding has to go — before this, an ordinary
-/// unmount during a load reached that panic, which is fatal on abort-only
-/// Wasm.
+/// Freeing is the only place an id stops meaning anything, so the free is
+/// where a box's hold on the URL it presents goes; before this, an ordinary
+/// unmount during a load reached a stale-id panic, which is fatal on
+/// abort-only Wasm.
 #[test]
 fn freeing_a_node_mid_load_leaves_no_stale_binding() {
     let mut h = Harness::new("");
@@ -254,7 +245,7 @@ fn freeing_a_node_mid_load_leaves_no_stale_binding() {
     let node = h.doc.el_tag(root, "img", "box");
     h.doc
         .dom
-        .set_image_source(node, ImageRole::Source, Some("app:///pending.png"));
+        .set_picture(node, Some((url("app:///pending.png"), None)));
     assert_eq!(
         h.doc.dom.take_wanted_images(),
         vec![std::sync::Arc::<str>::from("app:///pending.png")],
@@ -262,46 +253,13 @@ fn freeing_a_node_mid_load_leaves_no_stale_binding() {
     );
 
     h.doc.dom.drop_element(node);
-    h.doc
+    let settled = h
+        .doc
         .dom
         .apply_image_events(&[terminus::link::ImageEvent::Loaded {
             source: std::sync::Arc::from("app:///pending.png"),
             width: 4,
             height: 4,
         }]);
-}
-
-/// And the unbind is per node, not per source: one element going away leaves
-/// the others presenting the same URL bound, so the load still sizes them.
-#[test]
-fn freeing_one_node_leaves_a_sibling_on_the_same_source_bound() {
-    const SHARED: &str = "app:///shared.png";
-
-    let mut h = Harness::new("");
-    let root = h.doc.root;
-    let leaving = h.doc.el_tag(root, "img", "");
-    let staying = h.doc.el_tag(root, "img", "");
-    h.doc
-        .dom
-        .set_image_source(leaving, ImageRole::Source, Some(SHARED));
-    h.doc
-        .dom
-        .set_image_source(staying, ImageRole::Source, Some(SHARED));
-
-    h.doc.dom.drop_element(leaving);
-    h.doc
-        .dom
-        .apply_image_events(&[terminus::link::ImageEvent::Loaded {
-            source: std::sync::Arc::from(SHARED),
-            width: 40,
-            height: 20,
-        }]);
-    h.doc.dom.layout();
-
-    let layout = h.doc.dom.rounded_layout(staying).expect("laid out");
-    assert_eq!(
-        (layout.size.width, layout.size.height),
-        (40.0, 20.0),
-        "the surviving node still received the load's natural size"
-    );
+    assert_eq!(settled.len(), 1, "the source still settles");
 }

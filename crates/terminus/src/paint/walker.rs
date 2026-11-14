@@ -1649,10 +1649,10 @@ fn close_scope<T>(sink: &mut WalkSink<'_>, scratch: &mut Scratch, painting: Pain
     }
 }
 
-/// Draws what a replaced element presents into its content box: a picture
-/// it owns in place of its sources; otherwise, of its two sources, the one
-/// the registry picks — the one whose bitmap the node's natural size was
-/// recomputed from, so `object-fit` fits the bitmap drawn here.
+/// Draws the picture a replaced element presents into its content box,
+/// fitted against the natural size it was given with it: a picture it owns,
+/// or a URL resolved against the registry as a CSS image is, which draws
+/// nothing while pending or after failing.
 fn paint_presented<T>(
     sink: &mut WalkSink<'_>,
     document: &Document<T>,
@@ -1662,30 +1662,25 @@ fn paint_presented<T>(
     fragment: &BoxFragment,
     node: crate::tree::document::NodeId,
 ) {
-    if let Some(picture) = document.picture(node) {
-        background::paint_replaced_content(
-            sink,
-            space,
-            style,
-            fragment,
-            PictureKey::Id(picture),
-            None,
-            document.natural_size(node),
-        );
-        return;
-    }
-    let (source, placeholder) = document.image_sources(node);
-    if let Some((image, _, vector)) = images.resolve_presented(source, placeholder) {
-        background::paint_replaced_content(
-            sink,
-            space,
-            style,
-            fragment,
-            PictureKey::Url(image),
-            vector,
-            document.natural_size(node),
-        );
-    }
+    let (picture, vector) = match document.picture(node) {
+        Some(PictureKey::Id(picture)) => (PictureKey::Id(*picture), None),
+        Some(PictureKey::Url(url)) => {
+            let Some((image, _, vector)) = images.resolve(url) else {
+                return;
+            };
+            (PictureKey::Url(image), vector)
+        }
+        None => return,
+    };
+    background::paint_replaced_content(
+        sink,
+        space,
+        style,
+        fragment,
+        picture,
+        vector,
+        document.natural_size(node),
+    );
 }
 
 /// Paints one item with the matrix [`plan_frame`] resolved for it.

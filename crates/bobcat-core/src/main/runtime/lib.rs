@@ -52,10 +52,10 @@ use crate::main::layout_change::{
 };
 use crate::main::record::write_record_field;
 use crate::main::tree::{
-    Autoplays, ComponentDetail, ComponentEvent, ComponentEvents, Field, LynxDocument,
-    MAX_FRAME_DEPTH, PageConfig, SELECTION_CHANGE, SelectionReports, frame_depth,
-    invoke_base_method, is_svg, is_text, nested_page, new_document, relevance_span,
-    report_selection_changes, reset_frame,
+    Autoplays, ComponentDetail, ComponentEvent, ComponentEvents, Field, ImageOutcome, ImageSources,
+    LynxDocument, MAX_FRAME_DEPTH, PageConfig, SELECTION_CHANGE, SelectionReports,
+    apply_image_events, frame_depth, invoke_base_method, is_svg, is_text, nested_page,
+    new_document, relevance_span, report_selection_changes, reset_frame,
 };
 use crate::performance::{Opener, OpenerId};
 use crate::realm::child::{ChildHostModules, ChildHostState, ChildKey};
@@ -1139,6 +1139,12 @@ struct DocumentSlot {
     /// document because the `image` component is the far end of it and
     /// reaches nothing else; the runtime drains it once per entry.
     component_events: ComponentEvents,
+    /// The sources the document's `image` and `svg` elements name, which
+    /// those components record as their attributes are written and
+    /// [`MainThreadRuntime::apply_image_events`] settles the painting side's
+    /// reports against. Held here for what `component_events` is: the
+    /// components are its far end, and the report path is the runtime's.
+    image_sources: ImageSources,
     /// The autoplay timers of the document's `x-swiper`s, which the
     /// component starts and stops from its reactions. Held here for what
     /// `component_events` is: the runtime waits for the earliest
@@ -1285,6 +1291,7 @@ impl DocumentSlot {
             bound: false,
             held: None,
             component_events: ComponentEvents::default(),
+            image_sources: ImageSources::default(),
             autoplays: Autoplays::default(),
             exposure: Exposure::new(),
             layout_change: LayoutChangeObserver::default(),
@@ -1373,8 +1380,9 @@ impl DocumentSlot {
         };
         let events = self.component_events.clone();
         let autoplays = self.autoplays.clone();
+        let images = self.image_sources.clone();
         let document = construction_phase("building the page", || {
-            let mut document = new_document(viewport, config, events, autoplays);
+            let mut document = new_document(viewport, config, events, autoplays, images);
             if let Some(pool) = style_pool {
                 document.set_style_pool(pool);
             }
@@ -2908,7 +2916,8 @@ impl MainThreadRuntime {
     /// and may not re-enter the realm at all.
     pub(crate) fn apply_image_events(&mut self, events: &[terminus::link::ImageEvent]) {
         let mut slot = self.slot.borrow_mut();
-        let outcomes = slot.document_mut().apply_image_events(events);
+        let sources = slot.image_sources.clone();
+        let outcomes = apply_image_events(slot.document_mut(), &sources, events);
         slot.component_events.extend_images(outcomes);
     }
 
@@ -3095,7 +3104,7 @@ impl MainThreadRuntime {
             let lines_text: String;
             let mut extras: SmallVec<[(&'static str, HostArgument<'_>); 7]> = SmallVec::new();
             let (target, name, composed) = match *event {
-                ComponentEvent::Image(terminus::link::ImageOutcome::Loaded {
+                ComponentEvent::Image(ImageOutcome::Loaded {
                     node,
                     width,
                     height,
@@ -3117,7 +3126,7 @@ impl MainThreadRuntime {
                     extras.push(("height", HostArgument::Number(height)));
                     (node, LOAD_EVENT, false)
                 }
-                ComponentEvent::Image(terminus::link::ImageOutcome::Failed { node }) => {
+                ComponentEvent::Image(ImageOutcome::Failed { node }) => {
                     if is_svg(self.slot.borrow_mut().document_mut(), node) {
                         continue;
                     }

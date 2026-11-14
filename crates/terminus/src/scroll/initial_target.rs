@@ -341,10 +341,12 @@ mod tests {
         assert_eq!(document.scroll_offset(scroller), Vector2D::new(0.0, 300.0));
 
         let (mut document, scroller, pages) = paged("", 4);
-        document.set_image_source(
+        document.set_picture(
             pages[2],
-            crate::render::image::ImageRole::Source,
-            Some("app:///a.png"),
+            Some((
+                crate::render::picture::PictureKey::Url(std::sync::Arc::from("app:///a.png")),
+                None,
+            )),
         );
         document.set_inline_style(pages[2], "scroll-initial-target: nearest");
         document.commit();

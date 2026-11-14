@@ -67,7 +67,7 @@ A *picture* is anything a draw can sample. It has:
 
 | Property | Meaning |
 | --- | --- |
-| key | `PictureKey::Url(Arc<str>)` — the URL the page wrote, shared by every draw of it — or `PictureKey::Id(PictureId)`, a process-unique id owned by one element (`Document::set_picture`, which also gives the element its natural size) |
+| key | `PictureKey::Url(Arc<str>)` — the URL the page wrote, shared by every draw of it — or `PictureKey::Id(PictureId)`, a process-unique id owned by one element. A replaced box presents either (`Document::set_picture`, which also gives the element its natural size) |
 | generation | a counter that changes exactly when the picture's pixels do |
 | descriptor | `vant::image::ImageDescriptor`: identity of the current bitmap, its size and layout, without pixels |
 | opacity | whether any pixel may be non-opaque |
@@ -187,10 +187,25 @@ scroll frame.
 | `bobcat-core` | the elements: `image`, later `video`; attribute mapping, UI methods, events |
 
 `terminus` keeps one primitive for a replaced element — the picture it
-presents and its natural size — and resolves CSS image URLs as `Url`
-pictures. The `Source` / `Placeholder` roles, the choice between them at
-paint time and the per-element load outcome leave `terminus` for the `image`
-component.
+presents and its natural size, `Document::set_picture(node,
+Option<(PictureKey, Option<(u32, u32)>)>)` — and resolves `Url` pictures, a
+replaced box's and a CSS image's alike, against its image registry. It offers
+that registry to its embedder as a URL image service with no element in it:
+`Document::request_image(url) -> ImageStatus` asks for a URL once and answers
+what is known of it (`Pending`, `Bitmap` or `Vector` with the natural size,
+`Failed`), `Document::image_status` reads it without asking,
+`Document::insert_image_document` files a document handed over as bytes under
+its synthetic source, and `Document::apply_image_events` answers each source
+a report settled with the status it settled at. A host URL is asked for once
+and kept for the document's life; a document handed over as bytes is held by
+the replaced boxes presenting it and forgotten with the last.
+
+The `src` / `placeholder` roles, the choice between them and the
+per-element `load` and `error` are `bobcat-core`'s, in
+`main/tree/image_sources.rs` (`ImageSources`), which the `image` and `svg`
+components and the runtime's report path share: it records the sources each
+element names, presents the one the element shows at that picture's natural
+size, and turns a settled `src` into an `ImageOutcome`.
 
 The main thread holds picture keys and state only. It never holds pixels or a
 frame.
@@ -328,9 +343,22 @@ One change per step, in order; each leaves the tree green.
    a picture that changes with no commit is recomposed; under `filter` it is
    re-baked; not drawn, it is not asked for; two draws share one texture; a
    change of size keeps the texture id; one frame is owed per change.
-3. **`<image>` leaves `terminus`.** Roles, the presented choice and load
-   outcomes move to the `bobcat-core` component over the one replaced-box
-   primitive. No behaviour change.
+3. **`<image>` leaves `terminus`.** `Document::set_picture` takes a
+   `PictureKey` of either kind with an optional natural size, and is the one
+   replaced-box primitive: `set_image_source`, `set_image_document`,
+   `image_source`, `ImageRole` and `ImageOutcome` are gone from `terminus`,
+   and the paint walk draws the picture a box presents rather than choosing
+   between two. The URL image service (`request_image`, `image_status`,
+   `insert_image_document`, `apply_image_events` answering
+   `(source, ImageStatus)` pairs) is what an embedder learns a URL's outcome
+   and natural size from. `bobcat-core`'s `ImageSources` owns each `image`
+   and `svg` element's sources, presents `src` while it is loaded, else a
+   loaded `placeholder`, else whichever it names, at that picture's natural
+   size, and produces `load` and `error` for `src` alone, at the write when
+   the source had already settled and from the report otherwise; it drops an
+   element's record when the element is freed (`CustomElement::freed`). The
+   role and presented-choice tests moved with it. No behaviour change: every
+   golden is unchanged.
 4. **Animated images.** The player and its two policies in `vant`; the
    decoder's frame interface and its ImageIO implementation; the `<image>`
    attributes, methods and events; CSS images on shared playheads.

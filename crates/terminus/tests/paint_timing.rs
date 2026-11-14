@@ -12,7 +12,7 @@ mod paint_common;
 use paint_common::Doc;
 use prime_radiant::TestImages;
 use terminus::link::painter::{DrawTarget, GesturePolicy, Painter};
-use terminus::link::{CommitTiming, FontBlob, ImageRole, NoImages, NodeId};
+use terminus::link::{CommitTiming, FontBlob, NoImages, NodeId, PictureKey};
 
 const AHEM: &[u8] = include_bytes!("../../seldon/tests/fixtures/Ahem.ttf");
 
@@ -210,9 +210,7 @@ fn an_image_with_pixels_is_content() {
     bitmap(&images, "app:///photo.png");
     let root = doc.root;
     let image = doc.el_tag(root, "img", "box");
-    doc.dom
-        .set_image_source(image, ImageRole::Source, Some("app:///photo.png"));
-    prime_radiant::render_with_images(&mut doc.dom, &images);
+    prime_radiant::render_presenting(&mut doc.dom, &images, &[(image, "app:///photo.png")]);
     assert!(
         doc.dom
             .committed_frame()
@@ -226,8 +224,10 @@ fn an_image_without_pixels_is_not_content() {
     let mut doc = page("");
     let root = doc.root;
     let image = doc.el_tag(root, "img", "box");
-    doc.dom
-        .set_image_source(image, ImageRole::Source, Some("app:///missing.png"));
+    doc.dom.set_picture(
+        image,
+        Some((PictureKey::Url("app:///missing.png".into()), None)),
+    );
     assert!(!paints_content(&mut doc));
 }
 
@@ -253,9 +253,7 @@ fn an_svg_image_is_content() {
     images.insert_svg("app:///icon.svg", ICON);
     let root = doc.root;
     let image = doc.el_tag(root, "img", "box");
-    doc.dom
-        .set_image_source(image, ImageRole::Source, Some("app:///icon.svg"));
-    prime_radiant::render_with_images(&mut doc.dom, &images);
+    prime_radiant::render_presenting(&mut doc.dom, &images, &[(image, "app:///icon.svg")]);
     assert!(
         doc.dom
             .committed_frame()
@@ -286,9 +284,7 @@ fn an_image_outside_the_viewport_is_not_content() {
     bitmap(&images, "app:///photo.png");
     let root = doc.root;
     let image = doc.el_tag(root, "img", "box far");
-    doc.dom
-        .set_image_source(image, ImageRole::Source, Some("app:///photo.png"));
-    prime_radiant::render_with_images(&mut doc.dom, &images);
+    prime_radiant::render_presenting(&mut doc.dom, &images, &[(image, "app:///photo.png")]);
     assert!(
         !doc.dom
             .committed_frame()
