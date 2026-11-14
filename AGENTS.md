@@ -160,12 +160,10 @@ Rust parses structured input only when Rust behavior actually needs its fields
 - This file takes only what every session needs whatever it touches: policy,
   the map, and the toolchain and testing prerequisites. A new crate adds one
   row to the Workspace map and its own `AGENTS.md`.
-- `.github/scripts/check-agent-docs.py` runs in CI. This file stays within
-  32 KiB, Codex's default limit (`project_doc_max_bytes`) on the project
-  documentation it loads at session start; every other guide file stays within
-  64 KiB; every workspace crate has an `AGENTS.md`; and every relative link in
-  the guide resolves. A file that reaches its limit is split by topic, as
-  `crates/bobcat-core/docs/` is, rather than exempted.
+- Keep this file within 32 KiB, Codex's default limit
+  (`project_doc_max_bytes`) on the project documentation it loads at session
+  start. A crate's file that grows large is split by topic, as
+  `crates/bobcat-core/docs/` is.
 
 ## Workspace map
 

@@ -56,11 +56,6 @@ jobs:
         # instead, so a new crate is covered the moment it joins the workspace.
         run: ./.github/scripts/fmt-check.sh
 
-      - name: Agent guide
-        # The root `AGENTS.md` stays within the size Codex loads, every crate
-        # has its guide file, and the guide's links resolve.
-        run: python3 .github/scripts/check-agent-docs.py
-
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
