@@ -261,6 +261,261 @@ async fn a_dropped_views_last_frame_keeps_the_image_pixels_it_read() {
     );
 }
 
+/// The image page with a hook: `updatePage({ style })` restyles the box and
+/// flushes, which commits a frame that still draws the image.
+fn restyled_image_page() -> Vec<u8> {
+    format!(
+        r#"
+globalThis.renderPage = function renderPage() {{
+  const page = __CreatePage('card', 0);
+  const box = __CreateView(0);
+  __SetInlineStyles(box, 'width:32px;height:24px;background-image:url("{IMAGE_URL}")');
+  __AppendElement(page, box);
+  globalThis.box = box;
+}};
+globalThis.updatePage = function updatePage(data) {{
+  __SetInlineStyles(globalThis.box, data.style);
+  __FlushElementTree();
+}};
+"#
+    )
+    .into_bytes()
+}
+
+/// A view of `page` serving `images`, with an offscreen painter attached and
+/// its entry module booted.
+async fn image_view(
+    group: &LynxGroup,
+    page: Vec<u8>,
+    images: &Rc<prime_radiant::TestImages>,
+) -> (bobcat_core::LynxView<Rc<FetcherDouble>>, Painter) {
+    let mut view = group
+        .create_lynx_view(
+            32.0,
+            24.0,
+            1.0,
+            |sink| {
+                Rc::new(
+                    FetcherDouble::card(page)
+                        .resolving_to(SCRIPT_URL)
+                        .with_images(Rc::clone(images))
+                        .serving(sink),
+                )
+            },
+            Vec::new(),
+            ViewSources::new("app:///", SCRIPT_URL, SCREEN, "en-US"),
+        )
+        .expect("the view is built");
+    let mut painter = offscreen_painter().await;
+    painter.attach(&view).expect("a fresh view takes a painter");
+    wait_for_script(&mut view).expect("the entry module boots");
+    (view, painter)
+}
+
+/// Takes turns of both until `done` answers true.
+fn turn_until(
+    view: &mut bobcat_core::LynxView<Rc<FetcherDouble>>,
+    painter: &mut Painter,
+    what: &str,
+    mut done: impl FnMut() -> bool,
+) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !done() {
+        let _ = view.pump();
+        let _ = tick(painter, true);
+        assert!(Instant::now() < deadline, "{what}");
+    }
+}
+
+/// How many reads the store has answered for the image.
+fn image_reads(images: &prime_radiant::TestImages) -> usize {
+    images
+        .reads()
+        .iter()
+        .filter(|(source, _)| source == IMAGE_URL)
+        .count()
+}
+
+/// Restyles the page's box and turns until a frame of the new style is
+/// adopted: the store's working set is told once per adopted commit.
+fn restyle(
+    view: &mut bobcat_core::LynxView<Rc<FetcherDouble>>,
+    painter: &mut Painter,
+    images: &prime_radiant::TestImages,
+    style: &str,
+) {
+    let commits = images.retained().len();
+    view.update_data(format!(r#"{{"style":"{style}"}}"#), String::new())
+        .expect("a booted view accepts a data update");
+    turn_until(view, painter, "the restyle never committed", || {
+        images.retained().len() > commits
+    });
+}
+
+/// One copy of a bitmap: once the rasterizer holds the image's upload, the
+/// store is told it may drop its pixels, the painter keeps no reference of
+/// its own, and later commits that still draw the image describe it and draw
+/// it from the upload without reading it.
+#[tokio::test]
+async fn a_bitmap_the_rasterizer_holds_is_released_and_drawn_from_its_upload() {
+    let images = Rc::new(prime_radiant::TestImages::releasing());
+    let published = prime_radiant::rgba8(1, 1, vec![0, 0, 255, 255]);
+    let pixels = published.data.downgrade();
+    images.insert(IMAGE_URL, published);
+    let group = group().await;
+    let (mut view, mut painter) = image_view(&group, restyled_image_page(), &images).await;
+
+    turn_until(
+        &mut view,
+        &mut painter,
+        "the image was never released",
+        || !images.released().is_empty(),
+    );
+    assert_eq!(
+        images.released(),
+        [vec![Arc::<str>::from(IMAGE_URL)]],
+        "released once, after the frame that uploaded it"
+    );
+    assert!(!images.holds_pixels(IMAGE_URL));
+    assert!(
+        pixels.upgrade().is_none(),
+        "the store dropped the pixels, and nothing else held them"
+    );
+    assert_eq!(top_left(&mut painter), BLUE, "drawn from the upload");
+    let reads = image_reads(&images);
+
+    let described = images.described().len();
+    restyle(
+        &mut view,
+        &mut painter,
+        &images,
+        &format!("width:31px;height:24px;background-image:url('{IMAGE_URL}')"),
+    );
+    assert!(
+        images.described().len() > described,
+        "the new commit described the image"
+    );
+    assert_eq!(
+        image_reads(&images),
+        reads,
+        "and drew it from the leased upload without reading it"
+    );
+    assert_eq!(top_left(&mut painter), BLUE);
+    assert!(!images.holds_pixels(IMAGE_URL));
+}
+
+/// A commit that draws the released image with another sampler —
+/// `image-rendering: pixelated` — draws it from the one upload the
+/// rasterizer holds and reads nothing back.
+#[tokio::test]
+async fn a_draw_with_another_sampler_draws_the_released_image_from_its_upload() {
+    let images = Rc::new(prime_radiant::TestImages::releasing());
+    images.insert_rgba8(IMAGE_URL, 1, 1, vec![0, 0, 255, 255]);
+    let group = group().await;
+    let (mut view, mut painter) = image_view(&group, restyled_image_page(), &images).await;
+    turn_until(
+        &mut view,
+        &mut painter,
+        "the image was never released",
+        || !images.released().is_empty(),
+    );
+    let reads = image_reads(&images);
+
+    restyle(
+        &mut view,
+        &mut painter,
+        &images,
+        &format!(
+            "width:32px;height:24px;background-image:url('{IMAGE_URL}');image-rendering:pixelated"
+        ),
+    );
+    assert_eq!(top_left(&mut painter), BLUE, "the image draws");
+    assert_eq!(image_reads(&images), reads, "from the upload, with no read");
+    assert!(!images.holds_pixels(IMAGE_URL));
+    assert_eq!(images.released().len(), 1, "released once");
+}
+
+/// A scroller over two rows drawing one image, the second row with
+/// `image-rendering: pixelated`, so the image is drawn with two samplers. The
+/// second row is below the scrollport: committed, since the encode window
+/// reaches it, but not drawn. `updatePage({ rows })` resizes both rows.
+fn two_sampler_page() -> Vec<u8> {
+    format!(
+        r#"
+globalThis.renderPage = function renderPage() {{
+  const page = __CreatePage('card', 0);
+  const scroller = __CreateView(0);
+  const first = __CreateView(0);
+  const second = __CreateView(0);
+  __SetInlineStyles(scroller,
+    'display:flex;flex-direction:column;overflow:scroll;width:32px;height:24px');
+  __SetInlineStyles(first,
+    'flex-shrink:0;width:32px;height:30px;background-image:url("{IMAGE_URL}")');
+  __SetInlineStyles(second,
+    'flex-shrink:0;width:32px;height:30px;background-image:url("{IMAGE_URL}");image-rendering:pixelated');
+  __AppendElement(page, scroller);
+  __AppendElement(scroller, first);
+  __AppendElement(scroller, second);
+  globalThis.rows = [first, second];
+}};
+globalThis.updatePage = function updatePage(data) {{
+  __SetInlineStyles(globalThis.rows[0],
+    'flex-shrink:0;width:32px;height:' + data.rows + ';background-image:url("{IMAGE_URL}")');
+  __SetInlineStyles(globalThis.rows[1],
+    'flex-shrink:0;width:32px;height:' + data.rows + ';background-image:url("{IMAGE_URL}");image-rendering:pixelated');
+  __FlushElementTree();
+}};
+"#
+    )
+    .into_bytes()
+}
+
+/// A source drawn with two samplers is one upload: its pixels are released
+/// once that upload exists, while one of its draws is committed but never
+/// rendered, and that draw, once rendered, draws from the same upload with
+/// no read.
+#[tokio::test]
+async fn an_image_drawn_with_two_samplers_is_one_upload_released_once_it_exists() {
+    let images = Rc::new(prime_radiant::TestImages::releasing());
+    images.insert_rgba8(IMAGE_URL, 1, 1, vec![0, 0, 255, 255]);
+    let group = group().await;
+    let (mut view, mut painter) = image_view(&group, two_sampler_page(), &images).await;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while images.retained().is_empty() || top_left(&mut painter) != BLUE {
+        let _ = view.pump();
+        let _ = tick(&mut painter, true);
+        assert!(Instant::now() < deadline, "the image was never drawn");
+    }
+    turn_until(
+        &mut view,
+        &mut painter,
+        "the first row's upload never released the image",
+        || !images.released().is_empty(),
+    );
+    assert!(!images.holds_pixels(IMAGE_URL));
+    let reads = image_reads(&images);
+
+    let commits = images.retained().len();
+    view.update_data(r#"{"rows":"12px"}"#.to_owned(), String::new())
+        .expect("a booted view accepts a data update");
+    turn_until(
+        &mut view,
+        &mut painter,
+        "the resized rows never committed",
+        || images.retained().len() > commits,
+    );
+    assert!(!images.holds_pixels(IMAGE_URL));
+    let shot = painter.capture().expect("the committed frame");
+    let at = |y: usize| <[u8; 4]>::try_from(&shot.pixels[y * 32 * 4..y * 32 * 4 + 4]).unwrap();
+    assert_eq!(
+        [at(2), at(20)],
+        [BLUE, BLUE],
+        "both rows draw from the one upload"
+    );
+    assert_eq!(image_reads(&images), reads, "with no read");
+    assert_eq!(images.released().len(), 1, "released once");
+}
+
 /// The browser's shape: one painter over one canvas, pointed at a second view
 /// when the page changes.
 ///

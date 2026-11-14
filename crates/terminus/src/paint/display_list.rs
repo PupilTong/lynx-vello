@@ -45,9 +45,10 @@ use smallvec::SmallVec;
 
 use crate::kurbo::{Affine, Join, PathEl, Rect, RoundedRect, RoundedRectRadii, Stroke};
 use crate::peniko::{
-    BlendMode, Brush, BrushRef, Color, Compose, Fill, FontData, Gradient, ImageBrushRef, ImageData,
-    ImageSampler, StyleRef,
+    BlendMode, Blob, Brush, BrushRef, Color, Compose, Fill, FontData, Gradient, ImageBrushRef,
+    ImageData, ImageSampler, StyleRef, WeakBlob,
 };
+use crate::render::image::ImageDescriptor;
 
 /// A variation-space coordinate of a variable font, as `F2Dot14` bits.
 pub type NormalizedCoord = i16;
@@ -164,11 +165,87 @@ pub(crate) fn next_texture_id() -> u64 {
     NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
-/// A bitmap paint: the pixels' handle and how they are sampled.
-#[derive(Clone, Debug, PartialEq)]
+/// A bitmap paint: the bitmap, and how it is sampled.
+///
+/// Equal paints are the same bitmap through the same sampler, whoever
+/// holds its pixels.
+#[derive(Clone, Debug)]
 pub(crate) struct ImagePaint {
-    pub(crate) image: ImageData,
+    pub(crate) image: ImageRef,
     pub(crate) sampler: ImageSampler,
+}
+
+impl PartialEq for ImagePaint {
+    fn eq(&self, other: &Self) -> bool {
+        self.image.descriptor == other.image.descriptor && self.sampler == other.sampler
+    }
+}
+
+/// A bitmap a list draws: what it is, and where its pixels are.
+///
+/// The rasterizer keys its upload of a bitmap on the descriptor alone, so a
+/// draw whose upload is resident never reads the pixels; it needs them only
+/// to upload. A composed list lives until the next compose — on a static
+/// screen, indefinitely — so a bitmap the host's store owns is lent to it
+/// rather than held, and the store stays free to drop it once the
+/// rasterizer holds its upload.
+#[derive(Clone, Debug)]
+pub struct ImageRef {
+    pub descriptor: ImageDescriptor,
+    pub pixels: ImagePixels,
+}
+
+/// Where an [`ImageRef`]'s pixels are.
+#[derive(Clone, Debug)]
+pub enum ImagePixels {
+    /// Held by the draw: a picture nothing else owns — a bitmap a list
+    /// was handed directly, or one a caller with no rasterizer to lease from
+    /// resolved for a scene it keeps.
+    Held(Blob<u8>),
+    /// Lent by whoever owns them: drawable while they are alive.
+    Lent(WeakBlob<u8>),
+    /// Nowhere on the CPU: only an upload the rasterizer holds has them.
+    Uploaded,
+}
+
+impl ImageRef {
+    /// `image`, held.
+    #[must_use]
+    pub fn held(image: &ImageData) -> Self {
+        Self {
+            descriptor: ImageDescriptor::of(image),
+            pixels: ImagePixels::Held(image.data.clone()),
+        }
+    }
+
+    /// `image`, lent: its owner keeps the pixels alive.
+    #[must_use]
+    pub fn lent(image: &ImageData) -> Self {
+        Self {
+            descriptor: ImageDescriptor::of(image),
+            pixels: ImagePixels::Lent(image.data.downgrade()),
+        }
+    }
+
+    /// The bitmap `descriptor` names, whose pixels only an upload holds.
+    #[must_use]
+    pub fn uploaded(descriptor: ImageDescriptor) -> Self {
+        Self {
+            descriptor,
+            pixels: ImagePixels::Uploaded,
+        }
+    }
+
+    /// The pixels, when they are still alive somewhere.
+    #[must_use]
+    pub fn pixels(&self) -> Option<ImageData> {
+        let data = match &self.pixels {
+            ImagePixels::Held(data) => data.clone(),
+            ImagePixels::Lent(weak) => weak.upgrade()?,
+            ImagePixels::Uploaded => return None,
+        };
+        Some(self.descriptor.with_pixels(data))
+    }
 }
 
 impl Paint {
@@ -203,7 +280,7 @@ impl From<BrushRef<'_>> for Paint {
             BrushRef::Solid(color) => Self::Solid(color),
             BrushRef::Gradient(gradient) => gradient_paint(gradient),
             BrushRef::Image(image) => Self::Image(Arc::new(ImagePaint {
-                image: image.image.clone(),
+                image: ImageRef::held(image.image),
                 sampler: image.sampler,
             })),
         }

@@ -39,8 +39,7 @@ use super::blur::FilterTextures;
 use super::raster::Raster;
 use super::sparse::SharedRaster;
 use super::vector_textures::VectorTextures;
-use crate::paint::display_list::{DisplayList, Texture};
-use crate::peniko::ImageData;
+use crate::paint::display_list::{DisplayList, ImageRef, Texture};
 use crate::visual::{CommittedFrame, ScrollSlot};
 
 /// Headless GPU renderer for tests, benchmarks, and windowless embedders.
@@ -462,7 +461,7 @@ impl Headless {
     pub fn prepare_filters(
         &mut self,
         frame: &CommittedFrame,
-        images: &[Option<ImageData>],
+        images: &[Option<ImageRef>],
         vectors: &[Option<Texture>],
         offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
         scroll_generation: u64,
@@ -489,9 +488,13 @@ impl Headless {
     }
 
     /// The stack this target draws through.
-    #[cfg(test)]
     pub(crate) fn gpu(&self) -> &Arc<SharedGpu> {
         &self.gpu
+    }
+
+    /// See [`Raster::lost_pixels`].
+    pub(crate) fn lost_pixels(&self) -> u64 {
+        self.raster.lost_pixels()
     }
 
     /// A target on `gpu` rather than on the process's stack.

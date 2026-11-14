@@ -374,4 +374,20 @@ impl bobcat_core::FrameImages for FetcherDouble {
             images.retain(frame);
         }
     }
+
+    fn describe(
+        &self,
+        source: &str,
+        hint: bobcat_core::ImageSizeHint,
+    ) -> Option<bobcat_core::FrameImage> {
+        self.images
+            .as_ref()
+            .and_then(|images| images.describe(source, hint))
+    }
+
+    fn release(&self, sources: &[Arc<str>]) {
+        if let Some(images) = self.images.as_ref() {
+            images.release(sources);
+        }
+    }
 }

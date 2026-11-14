@@ -33,8 +33,7 @@ use std::sync::Arc;
 use euclid::default::Vector2D;
 
 use super::{CANVAS, FrameSize, PainterError};
-use crate::paint::display_list::{DisplayList, Texture};
-use crate::peniko::ImageData;
+use crate::paint::display_list::{DisplayList, ImageRef, Texture};
 use crate::render::blur::FilterTextures;
 use crate::render::gpu::SharedGpu;
 #[cfg(not(target_arch = "wasm32"))]
@@ -339,7 +338,7 @@ impl WindowGraphics {
     pub(super) fn prepare_filters(
         &mut self,
         frame: &CommittedFrame,
-        images: &[Option<ImageData>],
+        images: &[Option<ImageRef>],
         vectors: &[Option<Texture>],
         offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
         scroll_generation: u64,
@@ -364,6 +363,16 @@ impl WindowGraphics {
                 CANVAS,
             )
             .map_err(|error| PainterError::Gpu(error.to_string()))
+    }
+
+    /// The stack this window draws through.
+    pub(super) fn gpu(&self) -> &Arc<SharedGpu> {
+        &self.gpu
+    }
+
+    /// See [`Raster::lost_pixels`].
+    pub(super) fn lost_pixels(&self) -> u64 {
+        self.raster.lost_pixels()
     }
 
     /// Forgets which frame the filter bakes belong to. The window keeps its

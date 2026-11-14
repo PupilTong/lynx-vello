@@ -20,14 +20,24 @@
 //! document request keeps nothing, as a production host keeps nothing:
 //! every one is parsed and reported on its own. [`FrameImages::read`] never
 //! answers for either, because the engine never asks.
+//!
+//! By default the store keeps every bitmap it answers: a painter's
+//! [`FrameImages::release`] is logged and changes nothing, and
+//! [`FrameImages::describe`] is the trait's own default, a read. A store
+//! built with [`TestImages::releasing`] behaves as a production host does
+//! instead: a release drops the pixels — a copy of the bytes stays behind so a
+//! later read can restore them, as a host restores from its encoded bytes,
+//! into a new blob — and a describe answers the bitmap's descriptor alone
+//! until then.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use terminus::link::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
 use terminus::link::{
-    Document, DocumentKind, FrameImages, ImageEvent, ImageReports, ImageSizeHint, VectorDocument,
+    Document, DocumentKind, FrameImage, FrameImages, ImageDescriptor, ImageEvent, ImageReports,
+    ImageSizeHint, VectorDocument,
 };
 
 /// What this store answers for one source.
@@ -41,6 +51,12 @@ enum Entry {
     #[default]
     Pending,
     Ready(ImageData),
+    /// Ready, and released by a [`TestImages::releasing`] store: the blob is
+    /// gone, a copy of its bytes kept to restore from.
+    Released {
+        descriptor: ImageDescriptor,
+        bytes: Vec<u8>,
+    },
     /// An SVG document a test published, parsed at publication: what the
     /// store answers its source with, as [`Entry::Ready`] holds a test's
     /// pixels.
@@ -68,6 +84,11 @@ impl Entry {
                 source,
                 width: image.width,
                 height: image.height,
+            }),
+            Entry::Released { descriptor, .. } => Some(ImageEvent::Loaded {
+                source,
+                width: descriptor.width,
+                height: descriptor.height,
             }),
             Entry::Svg(document) => Some(ImageEvent::ParsedDocument {
                 source,
@@ -98,6 +119,12 @@ pub struct TestImages {
     /// Every read, with the size hint the frame passed for it, so a test can
     /// assert on what a store would have been told to decode.
     reads: Mutex<Vec<(String, ImageSizeHint)>>,
+    /// Whether a release drops the pixels ([`TestImages::releasing`]).
+    releasing: Cell<bool>,
+    /// Every describe a [`TestImages::releasing`] store answered itself.
+    described: Mutex<Vec<String>>,
+    /// Every release, in order.
+    released: Mutex<Vec<Vec<Arc<str>>>>,
 }
 
 impl std::fmt::Debug for TestImages {
@@ -113,6 +140,41 @@ impl TestImages {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A store whose [`FrameImages::release`] drops the pixels, and whose
+    /// [`FrameImages::describe`] then answers the descriptor alone until a
+    /// read restores them into a new blob.
+    #[must_use]
+    pub fn releasing() -> Self {
+        let store = Self::default();
+        store.releasing.set(true);
+        store
+    }
+
+    /// Every source a [`Self::releasing`] store was asked to describe, in
+    /// order. A default store logs a describe as the read it is.
+    #[must_use]
+    pub fn described(&self) -> Vec<String> {
+        self.described
+            .lock()
+            .expect("test image describe log")
+            .clone()
+    }
+
+    /// Every release a painter made, in order, whatever the mode.
+    #[must_use]
+    pub fn released(&self) -> Vec<Vec<Arc<str>>> {
+        self.released
+            .lock()
+            .expect("test image release log")
+            .clone()
+    }
+
+    /// Whether the store holds `source`'s pixels now.
+    #[must_use]
+    pub fn holds_pixels(&self, source: &str) -> bool {
+        matches!(self.entries().get(source), Some(Entry::Ready(_)))
     }
 
     /// Publishes `image` under `source`, replacing any previous entry.
@@ -209,7 +271,12 @@ impl TestImages {
     pub fn len(&self) -> usize {
         self.entries()
             .values()
-            .filter(|entry| matches!(entry, Entry::Ready(_) | Entry::Svg(_)))
+            .filter(|entry| {
+                matches!(
+                    entry,
+                    Entry::Ready(_) | Entry::Released { .. } | Entry::Svg(_)
+                )
+            })
             .count()
     }
 
@@ -263,14 +330,74 @@ impl FrameImages for TestImages {
     /// source carries the same `Blob::id()` — the identity the rasterizer
     /// keys its bitmap uploads on. The hint is recorded and otherwise ignored: this store
     /// decodes nothing, so there is nothing to size.
+    ///
+    /// A source a [`TestImages::releasing`] store released is restored: its
+    /// kept bytes become a new blob, as a host's restore decodes again.
     fn read(&self, source: &str, hint: ImageSizeHint) -> Option<ImageData> {
         self.reads
             .lock()
             .expect("test image read log")
             .push((source.to_owned(), hint));
-        match self.entries().get(source)? {
+        let mut entries = self.entries();
+        let entry = entries.get_mut(source)?;
+        match entry {
             Entry::Ready(image) => Some(image.clone()),
+            Entry::Released { descriptor, bytes } => {
+                let image = ImageData {
+                    data: Blob::from(std::mem::take(bytes)),
+                    format: descriptor.format,
+                    alpha_type: descriptor.alpha_type,
+                    width: descriptor.width,
+                    height: descriptor.height,
+                };
+                *entry = Entry::Ready(image.clone());
+                Some(image)
+            }
             Entry::Pending | Entry::Svg(_) | Entry::Failed => None,
+        }
+    }
+
+    /// A default store answers a read, as the trait's default does; a
+    /// [`TestImages::releasing`] one answers a released source's descriptor
+    /// without its pixels, and logs the describe.
+    fn describe(&self, source: &str, hint: ImageSizeHint) -> Option<FrameImage> {
+        if !self.releasing.get() {
+            return self.read(source, hint).map(FrameImage::resident);
+        }
+        self.described
+            .lock()
+            .expect("test image describe log")
+            .push(source.to_owned());
+        match self.entries().get(source)? {
+            Entry::Ready(image) => Some(FrameImage::resident(image.clone())),
+            Entry::Released { descriptor, .. } => Some(FrameImage {
+                descriptor: *descriptor,
+                pixels: None,
+            }),
+            Entry::Pending | Entry::Svg(_) | Entry::Failed => None,
+        }
+    }
+
+    /// Logs the release; a [`TestImages::releasing`] store drops the
+    /// pixels too.
+    fn release(&self, sources: &[Arc<str>]) {
+        self.released
+            .lock()
+            .expect("test image release log")
+            .push(sources.to_vec());
+        if !self.releasing.get() {
+            return;
+        }
+        let mut entries = self.entries();
+        for source in sources {
+            if let Some(entry) = entries.get_mut(&**source)
+                && let Entry::Ready(image) = entry
+            {
+                *entry = Entry::Released {
+                    descriptor: ImageDescriptor::of(image),
+                    bytes: image.data.data().to_vec(),
+                };
+            }
         }
     }
 

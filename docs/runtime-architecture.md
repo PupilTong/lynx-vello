@@ -61,8 +61,8 @@ crates/bobcat-core/src/
                        over terminus's presenting painter
                        (crates/terminus/src/painter/: the frame clock,
                        routing, composition and the adopted snapshot;
-                       images.rs one commit's resolved pixels, in draw
-                       order; gesture.rs input arbitration; graphics.rs
+                       images.rs one commit's bitmaps, in draw order,
+                       and their upload leases; gesture.rs input arbitration; graphics.rs
                        window GPU state)
   main/lib.rs          bobcat-main: the thread, the group task, and the style
                        pool and script runtime a group shares
@@ -1975,16 +1975,23 @@ elsewhere, before the sources that turn discovered are named. A painter asks
 the host for nothing at all; it only *reads*, through the seat it holds a
 `Weak` of, which carries the view's handle on the store the view owns.
 Adopting a commit is that read: the painter resolves the frame's images once
-per commit through `FrameImages::read`, synchronously and off the swap-chain
-window, each with the
+per commit, synchronously and off the swap-chain window, each with the
 `ImageSizeHint` of its largest draw in the frame — the size a host decodes to.
-A commit whose pixels cannot be read in the same step is not adopted, because
-a frame indexes its store's bitmaps by draw order and a frame over another
-commit's table would draw the wrong images; that is also why a released view's
-last frame stays drawable only if the painter read it while the view was still
-there.
+It asks `FrameImages::describe` what each source draws as — the bitmap's
+descriptor, with its pixels when the store holds them — and holds those pixels
+only until the rasterizer has its upload, one for every draw of the source
+whatever the sampler. Then it leases the upload, drops the pixels and tells
+the store it may drop its own (`FrameImages::release`); the composed list and
+the filter bakes are only ever lent the pixels. A source whose pixels the store
+dropped draws from its leased upload, and `FrameImages::read` is called only
+when that is not there.
+A commit whose bitmaps cannot be described in the same step is not adopted,
+because a frame indexes its store's bitmaps by draw order and a frame over
+another commit's table would draw the wrong images; that is also why a released
+view's last frame stays drawable only if the painter adopted it while the view
+was still there — from then on its leases keep the uploads.
 That read may block, because after a reported load it must not miss: a store
-that evicted a bitmap restores it inside the call. It happens in `poll_link`,
+that evicted or released a bitmap restores it inside the call. It happens in `poll_link`,
 which every painter entry point runs first and always before the drawing path
 acquires a swap-chain image, so a restore cannot stall the chain under vsync. `crates/bobcat-resources`
 is the reference implementation of all of this, and `LynxView::prefetch_images`

@@ -56,12 +56,13 @@ use std::sync::Arc;
 
 use bobcat_core::peniko::ImageData;
 use bobcat_core::{
-    DocumentKind, ImageEvent, ImageReports, ImageResidency, ImageSizeHint, VectorDocument,
+    DocumentKind, FrameImage, ImageEvent, ImageReports, ImageResidency, ImageSizeHint,
+    VectorDocument,
 };
 use bytes::Bytes;
 use url::Url;
 use vant::Platform;
-use vant::image::residency::{Decoded, Read, Refinement, ViewKey};
+use vant::image::residency::{Decoded, Described, Read, Refinement, ViewKey};
 
 use crate::decode::{Bitmap, DecodeError};
 use crate::image_header::ImageHeader;
@@ -282,6 +283,42 @@ fn apply<P: Platform>(resources: &Resources<P>, completion: Completion) {
 /// evicted.
 pub(crate) fn retain<P: Platform>(resources: &Resources<P>, view: ViewKey, frame: &[Arc<str>]) {
     resources.local.borrow_mut().residency.retain(view, frame);
+}
+
+/// What a frame drawing `source` at `hint` draws, without a restore: the
+/// resident bitmap, or the descriptor of the one the tier dropped. Starts
+/// the refinement the residency plans, as [`read`] does.
+pub(crate) fn describe<P: Platform>(
+    resources: &Resources<P>,
+    source: &str,
+    hint: ImageSizeHint,
+) -> Option<FrameImage> {
+    let described = resources
+        .local
+        .borrow_mut()
+        .residency
+        .describe(source, hint);
+    let (image, refine) = match described {
+        Described::Unavailable => return None,
+        Described::Resident { image, refine } => (FrameImage::resident(image), refine),
+        Described::Absent { descriptor, refine } => (
+            FrameImage {
+                descriptor,
+                pixels: None,
+            },
+            refine,
+        ),
+    };
+    if let Some(refinement) = refine {
+        spawn_refine(resources, Arc::from(source), refinement);
+    }
+    Some(image)
+}
+
+/// Drops `sources`' bitmaps from the tier: the painter's rasterizer holds
+/// the uploads its frame draws them from.
+pub(crate) fn release<P: Platform>(resources: &Resources<P>, sources: &[Arc<str>]) {
+    resources.local.borrow_mut().residency.release(sources);
 }
 
 /// The pixels for `source`, for a draw of `hint`.

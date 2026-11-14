@@ -80,11 +80,11 @@ use euclid::default::Vector2D;
 use smallvec::SmallVec;
 
 use crate::kurbo::{Affine, Point, Rect, Size};
-use crate::paint::display_list::{DisplayList, ImagePaint, Paint, Texture, may_reach};
+use crate::paint::display_list::{DisplayList, ImagePaint, ImageRef, Paint, Texture, may_reach};
 use crate::paint::shape::{BoxShape, with_shape};
-use crate::peniko::{BlendMode, Extend, Fill, ImageData, ImageQuality, ImageSampler};
+use crate::peniko::{BlendMode, Extend, Fill, ImageQuality, ImageSampler};
 use crate::render::image::{
-    AspectAlign, AspectRatio, ImageSizeHint, MAX_RENDERABLE_DIMENSION, is_renderable,
+    AspectAlign, AspectRatio, ImageSizeHint, MAX_RENDERABLE_DIMENSION, renders_at,
 };
 use crate::visual::anchored::AnchoredSlot;
 use crate::visual::space::{self, SeamPass, Space, SpaceSamples};
@@ -358,7 +358,7 @@ fn encode_vector(
 /// rasterizer holds.
 #[derive(Clone, Copy)]
 enum Picture<'a> {
-    Bitmap(&'a ImageData),
+    Bitmap(&'a ImageRef),
     Texture(Texture),
 }
 
@@ -366,7 +366,7 @@ impl Picture<'_> {
     /// The picture's size, which a draw's brush scale divides by.
     fn size(self) -> (u32, u32) {
         match self {
-            Self::Bitmap(data) => (data.width, data.height),
+            Self::Bitmap(image) => (image.descriptor.width, image.descriptor.height),
             Self::Texture(texture) => texture.size(),
         }
     }
@@ -430,13 +430,13 @@ pub(crate) fn encode_vector_inline(scene: &mut DisplayList, draw: &VectorDraw, o
 fn encode_draw(
     scene: &mut DisplayList,
     draws: &[ImageDraw],
-    images: &[Option<ImageData>],
+    images: &[Option<ImageRef>],
     index: u32,
     outer: Affine,
 ) {
     let index = index as usize;
-    if let Some(Some(data)) = images.get(index) {
-        encode_image(scene, &draws[index], outer, data);
+    if let Some(Some(image)) = images.get(index) {
+        encode_image(scene, &draws[index], outer, image);
     }
 }
 
@@ -449,13 +449,13 @@ pub(crate) fn encode_image(
     scene: &mut DisplayList,
     draw: &ImageDraw,
     outer: Affine,
-    data: &ImageData,
+    image: &ImageRef,
 ) {
     // A bitmap the rasterizer cannot place draws as nothing — the same
     // one-frame gap a not-yet-loaded image already produces. This is the
     // only place the bound is enforced, because it is the only place the
     // bitmap is known, and the only place the extent is divided by it.
-    if !is_renderable(data) {
+    if !renders_at(image.descriptor.width, image.descriptor.height) {
         return;
     }
     encode_textured(
@@ -465,7 +465,7 @@ pub(crate) fn encode_image(
         draw.extent,
         draw.sampler,
         &draw.area,
-        Picture::Bitmap(data),
+        Picture::Bitmap(image),
     );
 }
 
@@ -1153,7 +1153,7 @@ pub(crate) fn replay(
     fragments: &[DisplayList],
     program: &[ComposeOp],
     image_draws: &[ImageDraw],
-    images: &[Option<ImageData>],
+    images: &[Option<ImageRef>],
     vector_draws: &[VectorDraw],
     vectors: &[Option<Texture>],
     filter_groups: &[FilterGroup],
@@ -1462,7 +1462,7 @@ pub(crate) struct Tables<'a> {
     pub(crate) fragments: &'a [DisplayList],
     pub(crate) program: &'a [ComposeOp],
     pub(crate) image_draws: &'a [ImageDraw],
-    pub(crate) images: &'a [Option<ImageData>],
+    pub(crate) images: &'a [Option<ImageRef>],
     pub(crate) vector_draws: &'a [VectorDraw],
     /// One entry per [`Tables::vector_draws`] entry: the texture the raster
     /// cache baked for that draw, or `None` for a draw that encodes nothing.

@@ -483,13 +483,36 @@ the waiters to tell; a read answers `Read::Hit { image, refine }`,
 with `restored`. A source that cannot be resolved is a `failed` right after
 its `Start`. A completion for an entry that is not loading is ignored.
 
-Not in the series — it needs a ruling: making the CPU tier release a bitmap
-the GPU `Bitmaps` cache holds, and restore only when both dropped it. Strong
-references to a decoded image today are the host tier, the painter's resolved
-set, the composed display list and the filter bake list; releasing the CPU
-copy needs the frame to carry a descriptor and a weak blob, a pre-acquire
-restore each turn and a lease on the GPU entry. It breaks the tested law that
-a dropped view's last frame keeps the pixels it read, and adds host policy.
+## After the series: the CPU tier releases a bitmap the rasterizer holds
+
+Ruled 2026-11-12 and landed after PR5. A decoded bitmap had up to five
+holders: the host tier, the painter's resolved set, the composed display
+list, the filter bake list and the GPU upload. It now has one at a time.
+
+- `vant::image::ImageDescriptor` names a bitmap without its pixels (blob id,
+  size, layout). `Residency::describe` answers `Resident`, or `Absent` with
+  the descriptor of the bitmap last inserted, and never asks for a restore;
+  `Residency::release` drops bitmaps from the tier, pinned or not.
+- `FrameImages` gains `describe` and `release`, both with default bodies (a
+  `read`; nothing), so a store that keeps everything is unchanged.
+- The display list's bitmap paint is an `ImageRef`: the descriptor and pixels
+  held, lent as a weak blob, or only uploaded. The rasterizer decides a hit
+  from the descriptor and reads pixels on a miss alone.
+- `BitmapLeases` holds uploads for a painter regardless of how recently they
+  were drawn; the GPU budget trim skips leased uploads.
+- The painter, in `adopt` (before a swap-chain image is acquired): per commit
+  it describes each source, keeps pixels the store holds, leases the upload
+  of a source the store dropped, and reads — the blocking restore — only when
+  that upload is not there. Every turn it leases the upload of each source it
+  still holds pixels of once it exists, drops the pixels and tells the store.
+  A bitmap is one upload whatever the samplers it is drawn with. A render that found neither an upload nor lent pixels
+  marks the table stale, and the next adoption describes the commit again.
+
+The law that a dropped view's last frame stays drawable holds through the
+lease rather than through a strong reference. What it costs: leased uploads
+— the adopted commit's, off-screen ones in its encode window included — are
+exempt from the GPU byte budget, and a source drawn again after its lease
+ended and its upload was trimmed is decoded again inside `adopt`.
 
 ## Platform constraints the design answers
 

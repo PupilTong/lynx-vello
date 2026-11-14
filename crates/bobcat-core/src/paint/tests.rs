@@ -2569,6 +2569,52 @@ mod frame_images {
         );
     }
 
+    /// The release contract as the painter relies on it: a store that keeps
+    /// what it answers ignores a release and describes as it reads; one that
+    /// drops released pixels describes the bitmap by its descriptor alone
+    /// afterwards, and a read restores it into a new blob.
+    #[test]
+    fn a_released_source_is_described_without_pixels_until_a_read_restores_it() {
+        use terminus::link::{FrameImages as _, ImageSizeHint};
+
+        let source = "app:///pixel.png";
+        let keeping = prime_radiant::TestImages::new();
+        keeping.insert(source, prime_radiant::rgba8(1, 1, vec![1, 2, 3, 255]));
+        keeping.release(&[std::sync::Arc::from(source)]);
+        assert!(
+            keeping
+                .describe(source, ImageSizeHint::UNBOUNDED)
+                .is_some_and(|image| image.pixels.is_some()),
+            "a keeping store ignores the release"
+        );
+        assert_eq!(keeping.reads().len(), 1, "and describes by reading");
+
+        let images = prime_radiant::TestImages::releasing();
+        let published = prime_radiant::rgba8(1, 1, vec![1, 2, 3, 255]);
+        let weak = published.data.downgrade();
+        images.insert(source, published);
+        let described = images
+            .describe(source, ImageSizeHint::UNBOUNDED)
+            .expect("a published image is described");
+        assert!(described.pixels.is_some(), "with its pixels while held");
+        drop(described.pixels);
+        images.release(&[std::sync::Arc::from(source)]);
+        assert!(weak.upgrade().is_none(), "the release dropped the blob");
+        let absent = images
+            .describe(source, ImageSizeHint::UNBOUNDED)
+            .expect("still described");
+        assert!(absent.pixels.is_none());
+        assert_eq!(absent.descriptor, described.descriptor);
+        assert!(images.reads().is_empty(), "a describe is not a read");
+
+        let restored = images
+            .read(source, ImageSizeHint::UNBOUNDED)
+            .expect("a read restores it");
+        assert_ne!(restored.data.id(), described.descriptor.blob, "a new blob");
+        assert_eq!(restored.data.as_ref(), &[1, 2, 3, 255]);
+        assert!(images.holds_pixels(source));
+    }
+
     /// A source the host carries no pixels for reads as nothing rather than
     /// standing in for another image.
     #[test]
