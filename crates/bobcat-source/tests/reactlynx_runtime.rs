@@ -214,15 +214,24 @@ async fn compiled_cards_share_data_across_their_group() {
                 }
                 painter.pump().unwrap();
             }
-            let shot = cards[index].1.capture().unwrap();
+            // A painter that has drawn nothing yet has nothing to capture:
+            // not painted so far, as the other suites here read it.
             let offset = (50 * 240 + 50) * 4;
-            if shot.pixels[offset..offset + 4] == colour {
+            let pixel = match cards[index].1.capture() {
+                Ok(shot) => Some(<[u8; 4]>::try_from(&shot.pixels[offset..offset + 4]).unwrap()),
+                Err(bobcat_core::EngineError::Render(message))
+                    if message == "no frame has been rendered to capture" =>
+                {
+                    None
+                }
+                Err(error) => panic!("capture failed: {error}"),
+            };
+            if pixel == Some(colour) {
                 return;
             }
             assert!(
                 Instant::now() < deadline,
-                "card {index}: expected {colour:?}, got {:?}",
-                &shot.pixels[offset..offset + 4]
+                "card {index}: expected {colour:?}, got {pixel:?}"
             );
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
