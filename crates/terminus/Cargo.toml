@@ -69,6 +69,10 @@ png = { workspace = true }
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 objc2-quartz-core = { workspace = true }
 
+[[test]]
+name = "wpt"
+harness = false
+
 [[bench]]
 name = "animation"
 harness = false

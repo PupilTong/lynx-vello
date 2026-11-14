@@ -1,0 +1,87 @@
+path	status	subtests	note
+css/css-animations/AnimationEffect-getComputedTiming.tentative.html	NA	0/43	Web Animations API objects (getAnimations/Animation/CSSAnimation/KeyframeEffect)
+css/css-animations/AnimationEffect-updateTiming.tentative.html	NA	0/5	Web Animations API objects (getAnimations/Animation/CSSAnimation/KeyframeEffect)
+css/css-animations/CSSAnimation-animationName.tentative.html	NA	0/3	Web Animations API objects (getAnimations/Animation/CSSAnimation/KeyframeEffect)
+css/css-animations/CSSAnimation-canceling.tentative.html	NA	0/9	Web Animations API objects (getAnimations/Animation/CSSAnimation/KeyframeEffect)
+css/css-animations/CSSAnimation-compositeOrder.tentative.html	NA	0/2	Web Animations API objects (getAnimations/Animation/CSSAnimation/KeyframeEffect)
+css/css-animations/CSSAnimation-effect.tentative.html	NA	0/8	Web Animations API objects (getAnimations/Animation/CSSAnimation/KeyframeEffect)
+css/css-animations/CSSAnimation-finished.tentative.html	NA	0/3	Web Animations API objects (getAnimations/Animation/CSSAnimation/KeyframeEffect)
+css/css-animations/CSSAnimation-getCurrentTime.tentative.html	NA	0/2	Web Animations API objects (getAnimations/Animation/CSSAnimation/KeyframeEffect)
+css/css-animations/CSSAnimation-id.tentative.html	NA	0/1	Web Animations API objects (getAnimations/Animation/CSSAnimation/KeyframeEffect)
+css/css-animations/CSSAnimation-pausing.tentative.html	NA	0/9	Web Animations API objects (getAnimations/Animation/CSSAnimation/KeyframeEffect)
+css/css-animations/CSSAnimation-playState.tentative.html	NA	0/5	Web Animations API objects (getAnimations/Animation/CSSAnimation/KeyframeEffect)
+css/css-animations/CSSAnimation-ready.tentative.html	NA	0/5	Web Animations API objects (getAnimations/Animation/CSSAnimation/KeyframeEffect)
+css/css-animations/CSSAnimation-startTime.tentative.html	NA	0/3	Web Animations API objects (getAnimations/Animation/CSSAnimation/KeyframeEffect)
+css/css-animations/Document-getAnimations.tentative.html	NA	0/17	Web Animations API objects (getAnimations/Animation/CSSAnimation/KeyframeEffect)
+css/css-animations/Element-getAnimations-dynamic-changes.tentative.html	NA	0/5	Web Animations API objects (getAnimations/Animation/CSSAnimation/KeyframeEffect)
+css/css-animations/Element-getAnimations.tentative.html	NA	0/22	Web Animations API objects (getAnimations/Animation/CSSAnimation/KeyframeEffect)
+css/css-animations/KeyframeEffect-getKeyframes.tentative.html	NA	0/32	Web Animations API objects (getAnimations/Animation/CSSAnimation/KeyframeEffect)
+css/css-animations/KeyframeEffect-setKeyframes.tentative.html	NA	0/3	Web Animations API objects (getAnimations/Animation/CSSAnimation/KeyframeEffect)
+css/css-animations/KeyframeEffect-target.tentative.html	NA	0/3	Web Animations API objects (getAnimations/Animation/CSSAnimation/KeyframeEffect)
+css/css-animations/animate-with-background-color-oklch-002.html	NA	0/2	grammar: oklch()/color-mix()/relative colors rejected
+css/css-animations/animate-with-color-mix-2.html	NA	0/1	grammar: oklch()/color-mix()/relative colors rejected
+css/css-animations/animate-with-color-mix.html	NA	0/6	grammar: oklch()/color-mix()/relative colors rejected
+css/css-animations/animate-with-relative-color.html	NA	0/2	grammar: oklch()/color-mix()/relative colors rejected
+css/css-animations/animation-base-response-001.html	PASS	3/3	
+css/css-animations/animation-base-response-002.html	PASS	1/1	
+css/css-animations/animation-base-response-003.html	PASS	1/1	
+css/css-animations/animation-base-response-004.html	NA	0/1	Web Animations API (animate()/setKeyframes)
+css/css-animations/animation-before-initial-box-construction-001.html	NA	0/1	Web Animations API (animate()/finished) and stylesheet load timing
+css/css-animations/animation-change-underlying-value-changed-in-flight.html	FAIL	0/2	animated value keeps stale implicit keyframe after underlying style changes
+css/css-animations/animation-composition-keyframes.html	NA	0/6	grammar: animation-composition rejected
+css/css-animations/animation-composition.html	NA	0/6	grammar: animation-composition rejected
+css/css-animations/animation-css-variable-dependent-property.html	PASS	1/1	
+css/css-animations/animation-css-variable-in-keyframe-adjusted.html	FAIL	0/2	var() in keyframes not re-resolved after variable changes
+css/css-animations/animation-important-001.html	PARTIAL	3/7	::before, :visited, setKeyframes x2 and CSS.registerProperty subtests not portable
+css/css-animations/animation-important-with-transition.html	PASS	5/5	getAnimations()/instanceof assertions dropped; computed-value assertions kept
+css/css-animations/animation-iteration-count-009.html	PASS	4/4	
+css/css-animations/animation-iteration-count-010.html	PASS	6/6	
+css/css-animations/animation-iteration-count-calc.html	PASS	1/1	
+css/css-animations/animation-iteration-event-001.html	NA	0/1	animation events (no event dispatch)
+css/css-animations/animation-iteration-event-002.html	NA	0/1	animation events (no event dispatch)
+css/css-animations/animation-multiple-from-to-keyframes-with-only-timing-function.html	PASS	1/1	
+css/css-animations/animation-name-case-sensitive.html	PASS	1/1	inline declaration read back through computed animation-name
+css/css-animations/animation-name-inline-style.html	PASS	1/1	
+css/css-animations/animation-play-state-005.tentative.html	FAIL	0/1	finished animation restarts when animation-play-state is toggled
+css/css-animations/animation-restarted-after-changing-iteration-count-after-completion.html	PASS	1/1	
+css/css-animations/animation-style-element-replaced-with-keyframes-rule-of-same-name.html	FAIL	0/1	later @keyframes of same name does not update running animation (no stylesheet removal API; sheet added instead)
+css/css-animations/animationevent-interface.html	NA	0/42	AnimationEvent interface
+css/css-animations/animationevent-marker-pseudoelement.html	NA	0/1	pseudo-elements and animation events
+css/css-animations/animationevent-pseudoelement.html	NA	0/1	pseudo-elements and animation events
+css/css-animations/animationevent-types.html	NA	0/3	AnimationEvent interface and events
+css/css-animations/cancel-events-on-remove.html	NA	0/5	animation events (no event dispatch)
+css/css-animations/computed-style-animation-parsing.html	PASS	7/7	computedStyle.animation shorthand not exposed; compares eight computed longhands
+css/css-animations/dialog-animation.html	NA	0/1	<dialog>
+css/css-animations/dialog-backdrop-animation.html	NA	0/1	<dialog>/::backdrop
+css/css-animations/display-contents-animates.html	PASS	1/1	animationstart count dropped
+css/css-animations/display-interpolation.html	NA	0/5	grammar: display block/inline rejected; interpolation harness
+css/css-animations/display-none-dont-cancel-pseudo.tentative.html	NA	0/1	pseudo-elements
+css/css-animations/display-none-dont-cancel.tentative.html	FAIL	3/5	display animated none->none computes to base display (also via var()); animationstart count dropped; flex replaces inline
+css/css-animations/display-none-prevents-starting-in-subtree.html	FAIL	0/1	display:none ancestor does not cancel running animation
+css/css-animations/display-none-to-display-block-dont-cancel.tentative.html	PASS	1/1	flex replaces block
+css/css-animations/display-none-to-display-block-while-running.tentative.html	PASS	1/1	ResizeObserver replaced by laid-out width; flex replaces block
+css/css-animations/empty-pseudo-class-with-animation.html	PASS	1/1	
+css/css-animations/event-dispatch.tentative.html	NA	0/32	animation events (no event dispatch)
+css/css-animations/event-order.tentative.html	NA	0/5	animation events (no event dispatch)
+css/css-animations/historical.html	NA	0/1	legacy event handler IDL attributes
+css/css-animations/idlharness.html	NA	0/1	idlharness
+css/css-animations/inheritance.html	PASS	8/8	
+css/css-animations/keyframes-rule-caching.html	NA	0/1	CSSOM rule editing
+css/css-animations/keyframes-unrelated-custom-property.html	PASS	1/1	
+css/css-animations/missing-values-first-keyframe.html	PASS	1/1	paused currentTime scrub replaced by running clock
+css/css-animations/missing-values-last-keyframe.html	PASS	1/1	currentTime scrub replaced by clock
+css/css-animations/missing-values-middle-keyframe.html	PASS	1/1	
+css/css-animations/pending-style-changes-001.html	NA	0/2	getAnimations()
+css/css-animations/responsive/column-rule-color-001.html	NA	0/2	grammar: column-rule-color rejected
+css/css-animations/responsive/column-width-001.html	NA	0/3	grammar: column-width rejected
+css/css-animations/responsive/fill-forwards-viewport-units.html	NA	0/1	iframe resize and Web Animations API
+css/css-animations/responsive/line-height.html	FAIL	0/1	inherit in keyframes not re-resolved after parent value changes
+css/css-animations/revert-rule-keyframes-dynamic.html	FAIL	0/2	revert-rule keyframe value not re-resolved after reverted-to value changes
+css/css-animations/revert-rule-keyframes.html	PASS	2/2	CSS.supports assertion dropped
+css/css-animations/sample-on-last-keyframe.html	PASS	1/1	
+css/css-animations/stability/animation-event-destroy-renderer.html	NA	0/1	animation events (no event dispatch)
+css/css-animations/style-animation-parsing.html	PASS	5/5	empty input reads name as computed none; style.animation compared via specified() round trip
+css/css-animations/svg-color-visited-currentcolor.html	NA	0/3	SVG filter primitives and :visited
+css/css-animations/text-decoration-inset-auto.html	NA	0/10	grammar: text-decoration-inset rejected
+css/css-animations/transition-properties-not-animatable.html	PASS	3/3	
+css/css-animations/transition-ready-time-offscreen.html	NA	0/1	Web Animations API (startTime/ready)
