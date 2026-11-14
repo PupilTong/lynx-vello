@@ -7,40 +7,42 @@
 //!   page wrote, holding each image's load state and its own intrinsic dimensions. No
 //!   [`ImageData`], no [`Blob`](crate::peniko::Blob), no store — and no identity to mint, because
 //!   nothing per-image is stored behind a name.
-//! - [`FrameImages`] is the read seam. A committed frame's image draws name a source, and whoever
-//!   composes that frame supplies the pixels for it.
+//! - [`FrameImages`] is the pixel seam. A committed frame's image draws name a source, and whoever
+//!   composes that frame asks the store what each draws as.
 //!
 //! Producing those pixels is not this crate's business at all: the embedder's
 //! resource system owns bytes, decoding, residency and eviction, and this
-//! crate only ever names images and reads them back.
+//! crate only ever names images and asks for them.
 //!
-//! # Why the read is synchronous and may block
+//! # Nothing on the painter's thread waits for pixels
 //!
 //! Composition holds `&mut DisplayList` and an open clip stack; it can neither
-//! suspend nor leave a layer unbalanced. So the pixel read is one
-//! non-suspending call: [`FrameImages::read`].
+//! suspend nor leave a layer unbalanced. So every question the painter asks a
+//! store is one non-suspending call, and none of them may block: the painter
+//! never decodes and never waits for a decode or for I/O.
 //!
-//! Unlike the non-blocking residency probe this replaces, `read` is not
-//! allowed to answer "not resident". Once a store has reported an image
-//! loaded, `read` must produce its pixels — restoring them from the store's
-//! own backing store inside the call if its memory cache dropped them.
-//! Blocking there is accepted: the caller is the painter, and the engine
-//! calls it outside the window in which a swap-chain image is held.
+//! The painter asks what a source draws as ([`FrameImages::describe`]): the
+//! bitmap's [`ImageDescriptor`], with its pixels when the store holds them. A
+//! store that dropped the pixels answers the descriptor alone. When the
+//! rasterizer holds no upload of that bitmap either, the frame **draws
+//! nothing** for the source, and the painter tells the store the source is
+//! wanted ([`FrameImages::want`]). The store restores it off the painter's
+//! thread and wakes its host the way a finished load does; the painter asks
+//! again at its next adoption, and the next frame it composes draws it.
 //!
-//! That is what makes eviction invisible above this module. There is no way
-//! to report that an image stopped being resident, so a document's image
-//! state can never regress from loaded back to pending.
+//! The document never learns of any of this. There is no way to report that
+//! an image stopped being resident or came back, so a document's image state
+//! can never regress from loaded back to pending, and its natural size,
+//! layout and `load`/`error` events do not move.
 //!
 //! # One copy of a bitmap
 //!
-//! The painter asks first what a source draws as ([`FrameImages::describe`]),
-//! which never blocks: the bitmap's [`ImageDescriptor`], with its pixels when
-//! the store holds them. The rasterizer keys its upload of a bitmap on that
-//! descriptor alone, one upload for every draw of a source whatever its
-//! sampler, so once it holds that upload the painter tells the store
-//! ([`FrameImages::release`]) and the store may drop its copy. The painter calls
-//! [`FrameImages::read`] only when the store dropped a bitmap the rasterizer does not hold either.
-//! A store that keeps everything implements neither and is correct.
+//! The rasterizer keys its upload of a bitmap on its descriptor alone, one
+//! upload for every draw of a source whatever its sampler, so once it holds
+//! that upload the painter tells the store ([`FrameImages::release`]) and the
+//! store may drop its copy. A store that keeps every bitmap it answers is
+//! never asked for one it dropped, and is correct with an empty
+//! [`FrameImages::want`].
 //!
 //! # What the engine will not draw
 //!
@@ -51,7 +53,7 @@
 //!
 //! So [`is_renderable`] refuses such a bitmap before it reaches the
 //! rasterizer. It is
-//! tested against the pixels [`FrameImages::read`] actually returns, and
+//! tested against the pixels [`FrameImages::describe`] actually answers, and
 //! never against an image's intrinsic size: **the intrinsic size is a CSS
 //! input and is not bounded at all**. A host may report a 12000x6000 image
 //! and decode it to 6000x3000; that lays out at its true size and ratio and
@@ -119,7 +121,7 @@ use seldon::text::TextContext;
 use smallvec::SmallVec;
 use vant::image::Bitmap;
 use vant::image::residency::{
-    Decoded, Described, Read, Requested, Residency, ResidencyConfig, ViewKey,
+    Decoded, Described, Refinement, Requested, Residency, ResidencyConfig, ViewKey,
 };
 
 use crate::paint::display_list::DisplayList;
@@ -270,7 +272,7 @@ pub const MAX_RENDERABLE_DIMENSION: u32 = SharedGpu::LIMITS.max_texture_dimensio
 
 /// Whether the rasterizer can draw this bitmap.
 ///
-/// Tested against the bitmap a frame actually reads, never against an image's
+/// Tested against the bitmap a frame actually draws, never against an image's
 /// intrinsic size. A zero axis is refused for a second reason: the brush
 /// transform divides the draw's extent by these dimensions, and dividing by
 /// zero encodes a non-finite transform that the scene accepts without complaint.
@@ -297,7 +299,7 @@ pub struct FrameImage {
     pub descriptor: ImageDescriptor,
     /// `None` when the store does not hold the bitmap: a rasterizer that
     /// still holds an upload of it draws it from there, and one that does not
-    /// [`FrameImages::read`]s it.
+    /// draws nothing and says the source is wanted ([`FrameImages::want`]).
     pub pixels: Option<ImageData>,
 }
 
@@ -312,16 +314,24 @@ impl FrameImage {
     }
 }
 
-/// The synchronous pixel source a frame's image draws resolve against.
+/// The pixel source a frame's image draws resolve against.
 ///
 /// The embedder's resource system is one implementation; the painter's
 /// per-commit resolved set is another; a test double is a third. This is the
 /// only image-shaped type the compose path knows.
+///
+/// **No method may block.** Each is called on the painter's thread, and the
+/// painter never decodes and never waits for a decode or for I/O (see the
+/// module docs).
 pub trait FrameImages {
-    /// The pixels for `source`, or `None` when there are none to draw.
+    /// What the frame draws for `source`: the descriptor of the bitmap, and
+    /// its pixels when the store holds them, or `None` when there is nothing
+    /// to draw.
     ///
-    /// May block. See the module docs for the contract a real store owes
-    /// here: after a successful load, this must not miss.
+    /// A store that dropped the pixels answers their descriptor with
+    /// `pixels: None`: a rasterizer that still holds an upload of that bitmap
+    /// draws it from there, and one that does not draws nothing and says so
+    /// ([`Self::want`]).
     ///
     /// `source` is the raw string the page wrote, and it is only ever one the
     /// host has already reported loaded. `hint` is how large the frame draws
@@ -329,13 +339,31 @@ pub trait FrameImages {
     /// that already holds pixels may ignore it. The bitmap need not match
     /// the hint or the intrinsic size that was reported with the load: a
     /// reduced-scale decode composes correctly.
-    fn read(&self, source: &str, hint: ImageSizeHint) -> Option<ImageData>;
+    fn describe(&self, source: &str, hint: ImageSizeHint) -> Option<FrameImage>;
+
+    /// The frame draws `source` at `hint`, the store answered it without
+    /// pixels, and the rasterizer holds no upload of it either: the frame
+    /// draws nothing for it until the store holds its pixels again.
+    ///
+    /// The store restores it off the calling thread and, once it holds the
+    /// pixels, wakes its host the way a finished load does; [`Self::describe`]
+    /// then answers them. A store that cannot restore it any more answers
+    /// `None` from [`Self::describe`] instead. Asked once per source per
+    /// resolve pass, and a store asked again while a restore is in flight
+    /// starts nothing.
+    ///
+    /// There is no default, for the reason [`Self::retain`] has none: a
+    /// store that drops pixels has to decide how they come back, and a
+    /// silent no-op inherited from the trait would leave a picture blank for
+    /// good. A store that keeps every bitmap it answers is never asked, and
+    /// writes `{}`.
+    fn want(&self, source: &str, hint: ImageSizeHint);
 
     /// The sources the frame just resolved, deduplicated in paint order.
     ///
     /// Advisory: it informs residency and nothing else, and a store that
     /// ignores it is still correct. Called once per resolve pass, immediately
-    /// after the reads that pass made.
+    /// after the descriptions that pass made.
     ///
     /// There is no default, deliberately. A store that keeps bitmaps has to
     /// decide what its working set is, and a silent no-op inherited from the
@@ -343,32 +371,15 @@ pub trait FrameImages {
     /// the same thing where someone can see it.
     fn retain(&self, frame: &[Arc<str>]);
 
-    /// What the frame draws for `source`: the descriptor of the bitmap, and
-    /// its pixels when the store holds them, or `None` when there is nothing
-    /// to draw.
-    ///
-    /// **Must not block on a decode.** A store that dropped the pixels
-    /// answers their descriptor with `pixels: None`, and is asked to
-    /// [`Self::read`] them only when the rasterizer holds no upload of that
-    /// bitmap either. `source` and `hint` are as [`Self::read`] has them.
-    ///
-    /// The default answers [`Self::read`] with its pixels: the answer of a
-    /// store that keeps every bitmap it answers, which is a correct store.
-    /// Unlike [`Self::retain`], this has a default because the default is a
-    /// complete policy — keep everything — rather than a decision left
-    /// unmade.
-    fn describe(&self, source: &str, hint: ImageSizeHint) -> Option<FrameImage> {
-        self.read(source, hint).map(FrameImage::resident)
-    }
-
     /// The rasterizer holds the upload of each of `sources` the frame last
     /// described draws, and will keep it while that frame is drawn:
-    /// the store may drop their pixels. [`Self::read`] is asked for one of
-    /// them again only if the rasterizer loses an upload.
+    /// the store may drop their pixels. One of them is wanted again
+    /// ([`Self::want`]) only if the rasterizer loses an upload.
     ///
     /// Advisory, as [`Self::retain`] is. The default drops nothing — a store
     /// that keeps every bitmap it answers, which is a correct store — and is
-    /// a default for the reason [`Self::describe`]'s is.
+    /// a default because it is a complete policy rather than a decision
+    /// left unmade.
     fn release(&self, sources: &[Arc<str>]) {
         let _ = sources;
     }
@@ -386,16 +397,16 @@ pub struct NoImages;
 /// `Rc` rather than `Arc` because a resource system never leaves the painter's
 /// thread; an atomic count here would be paid on every clone and never used.
 impl<T: FrameImages + ?Sized> FrameImages for Rc<T> {
-    fn read(&self, source: &str, hint: ImageSizeHint) -> Option<ImageData> {
-        (**self).read(source, hint)
+    fn describe(&self, source: &str, hint: ImageSizeHint) -> Option<FrameImage> {
+        (**self).describe(source, hint)
+    }
+
+    fn want(&self, source: &str, hint: ImageSizeHint) {
+        (**self).want(source, hint);
     }
 
     fn retain(&self, frame: &[Arc<str>]) {
         (**self).retain(frame);
-    }
-
-    fn describe(&self, source: &str, hint: ImageSizeHint) -> Option<FrameImage> {
-        (**self).describe(source, hint)
     }
 
     fn release(&self, sources: &[Arc<str>]) {
@@ -404,9 +415,12 @@ impl<T: FrameImages + ?Sized> FrameImages for Rc<T> {
 }
 
 impl FrameImages for NoImages {
-    fn read(&self, _source: &str, _hint: ImageSizeHint) -> Option<ImageData> {
+    fn describe(&self, _source: &str, _hint: ImageSizeHint) -> Option<FrameImage> {
         None
     }
+
+    /// Nothing is ever answered, so nothing is ever wanted.
+    fn want(&self, _source: &str, _hint: ImageSizeHint) {}
 
     /// Nothing is held, so there is no working set to narrow.
     fn retain(&self, _frame: &[Arc<str>]) {}
@@ -455,7 +469,7 @@ impl ImageReports {
     ///
     /// Neither dimension is bounded. This is the image's intrinsic size,
     /// which layout uses; what a host may actually decode to is bounded, and
-    /// checked where the pixels are read.
+    /// checked where the pixels are drawn.
     ///
     /// Non-blocking, and it must not re-enter the store.
     pub fn loaded(&self, source: &str, width: u32, height: u32) {
@@ -663,11 +677,6 @@ impl ImageResidency {
         self.residency.refine_failed(source);
     }
 
-    /// See [`Residency::read`].
-    pub fn read(&mut self, source: &str, hint: ImageSizeHint) -> Read {
-        self.residency.read(source, hint)
-    }
-
     /// See [`Residency::describe`].
     pub fn describe(&mut self, source: &str, hint: ImageSizeHint) -> Described {
         self.residency.describe(source, hint)
@@ -678,9 +687,9 @@ impl ImageResidency {
         self.residency.release(sources);
     }
 
-    /// See [`Residency::restored`].
-    pub fn restored(&mut self, source: &str, bitmap: Bitmap) -> ImageData {
-        self.residency.restored(source, bitmap)
+    /// See [`Residency::want`].
+    pub fn want(&mut self, source: &str, hint: ImageSizeHint) -> Option<Refinement> {
+        self.residency.want(source, hint)
     }
 
     /// See [`Residency::retain`].
@@ -844,7 +853,8 @@ enum ImageState {
 /// What a loaded image draws from.
 #[derive(Debug)]
 enum ImageKind {
-    /// Pixels the host holds, read through [`FrameImages`] at compose time.
+    /// Pixels the host holds, described through [`FrameImages`] at compose
+    /// time.
     Raster,
     /// A parsed SVG document, encoded into the frame on the document thread.
     Vector(VectorImage),
@@ -1755,7 +1765,7 @@ mod tests {
     fn the_empty_pixel_source_draws_nothing() {
         assert!(
             NoImages
-                .read("app:///a.png", ImageSizeHint::UNBOUNDED)
+                .describe("app:///a.png", ImageSizeHint::UNBOUNDED)
                 .is_none()
         );
     }

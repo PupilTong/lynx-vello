@@ -1339,10 +1339,11 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
     ///
     /// **This is the only call that advances the resource protocol**, past
     /// the startup sources [`LynxGroup::create_lynx_view`] handed the fetcher
-    /// as it built this view. A painter observing this view asks the host for
-    /// nothing — it draws what has already been published and reads pixels
-    /// the fetcher already holds — so a host that wants an image to arrive
-    /// takes this turn.
+    /// as it built this view. A painter observing this view asks the host
+    /// for no load — it draws what has already been published from pixels
+    /// the fetcher already holds, and names the pictures it wants back —
+    /// so a host that wants an image to arrive, or to come back, takes this
+    /// turn.
     #[must_use]
     pub fn pump(&mut self) -> Vec<EngineEvent> {
         let mut events = Vec::new();

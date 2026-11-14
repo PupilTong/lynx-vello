@@ -441,6 +441,19 @@ impl Output {
         }
     }
 
+    /// Forgets which frame the `filter`/`backdrop-filter` bakes belong to,
+    /// so the next render bakes them again: what the images a commit draws
+    /// changing without a new commit needs, since the bakes are keyed by
+    /// commit and a bake may draw an image.
+    fn forget_filters(&mut self) {
+        match self {
+            #[cfg(feature = "painter-test-utils")]
+            Self::None => {}
+            Self::Offscreen(gpu) => gpu.forget_filters(),
+            Self::Window(graphics) => graphics.forget_filters(),
+        }
+    }
+
     /// The stack this target draws through, whose uploads a painter leases;
     /// `None` for a painter with nowhere to draw.
     #[cfg_attr(
@@ -1820,35 +1833,35 @@ impl Painter {
     }
 
     /// Adopts `frame`, the newest a document has published, together with
-    /// the pixels it draws, read out of `store`; answers whether it did.
+    /// the pixels it draws, described by `store`; answers whether it did.
     ///
     /// A frame of the commit already adopted replaces it as it stands. A new
-    /// commit's pixels are read unless this painter already holds them: the
-    /// two are one fact — a frame indexes its store's bitmaps by draw order,
-    /// so a frame from one commit over another commit's table draws the wrong
-    /// images. So a new commit whose pixels are not held is refused when
-    /// there is no `store` to read them from — the document has gone, and its
-    /// store with it — and the painter keeps the last commit it did read,
-    /// whole. An adopted new commit asks for a redraw, and the snap area each
+    /// commit's pixels are described unless this painter already holds them:
+    /// the two are one fact — a frame indexes its store's bitmaps by draw
+    /// order, so a frame from one commit over another commit's table draws
+    /// the wrong images. So a new commit whose pixels are not held is refused
+    /// when there is no `store` to describe them — the document has gone, and
+    /// its store with it — and the painter keeps the last commit it did
+    /// describe, whole. An adopted new commit asks for a redraw, and the snap area each
     /// container stood on in the outgoing frame is read while that frame is
     /// still at hand, for the rebase onto the new one (css-scroll-snap-1
     /// §4.1.3).
     ///
-    /// The store is told what each source draws as rather than asked for its
-    /// pixels ([`FrameImages::describe`]); a bitmap whose pixels it dropped
-    /// draws from the rasterizer's upload of it, which this painter leases.
-    /// Every adoption, whether or not the commit moved, then leases the
-    /// upload of each bitmap it still holds the pixels of once it exists,
-    /// lets those pixels go and tells the store so
-    /// ([`FrameImages::release`]). A render that lost pixels it was lent
+    /// The store is asked what each source draws as
+    /// ([`FrameImages::describe`]); a bitmap whose pixels it dropped draws
+    /// from the rasterizer's upload of it, which this painter leases. A
+    /// source with neither draws nothing, and the store is told it is wanted
+    /// ([`FrameImages::want`]). Every adoption, whether or not the commit
+    /// moved, describes each wanted source again, and one whose pixels have
+    /// arrived asks for a frame drawing it: no commit is involved, so the
+    /// frame the target holds, and the `filter` bakes, are composed again.
+    /// Every adoption then leases the upload of each bitmap it still holds
+    /// the pixels of once it exists, lets those pixels go and tells the store
+    /// so ([`FrameImages::release`]). A render that lost pixels it was lent
     /// marks the table stale, and the next adoption describes the commit
     /// again.
     ///
-    /// **May block.** A store is allowed — required, in fact — to restore a
-    /// bitmap it evicted, and a source the rasterizer holds no upload of
-    /// either is read, which asks it to. Call it before the drawing path
-    /// acquires a swap-chain image, so a restore cannot stall the chain
-    /// under vsync.
+    /// Never waits: nothing it asks of `store` decodes or blocks on I/O.
     pub fn adopt(
         &mut self,
         frame: Option<Arc<CommittedFrame>>,
@@ -1856,15 +1869,18 @@ impl Painter {
     ) -> bool {
         self.images.bind(self.output.gpu());
         let commit = frame.as_ref().map(|frame| frame.commit_id());
+        let mut described = false;
         if commit != self.frame.as_ref().map(|frame| frame.commit_id()) {
             if let Some(incoming) = frame.as_deref()
                 && !self.images.holds(incoming.commit_id())
             {
                 let Some(store) = store else {
+                    self.images.orphan();
                     self.images.release_held(None);
                     return false;
                 };
                 self.images.resolve(incoming, store);
+                described = true;
             }
             // While the outgoing frame's snap positions can still be read.
             if let Some(outgoing) = self.frame.as_deref() {
@@ -1876,14 +1892,44 @@ impl Painter {
             && let Some(current) = frame.as_deref()
         {
             // A render lost pixels it was lent: the same commit, described
-            // again, restores them, and what the target holds lacks them.
+            // again, draws them or wants them, and what the target holds
+            // lacks them.
             self.images.resolve(current, store);
-            self.composed = None;
-            self.redraw_pending.set(true);
+            described = true;
+            self.recompose();
         }
         self.frame = frame;
+        match store {
+            // Pixels a wanted source waited for, arrived since the last
+            // adoption: the same commit draws them now.
+            Some(store) if !described && self.images.refresh_wanted(store) => self.recompose(),
+            Some(_) => {}
+            None => self.images.orphan(),
+        }
         self.images.release_held(store);
         true
+    }
+
+    /// The images the adopted commit draws changed without a new commit:
+    /// what the target holds and the `filter` bakes, both keyed by commit,
+    /// lack them, so the next frame composes and bakes again.
+    fn recompose(&mut self) {
+        self.composed = None;
+        self.output.forget_filters();
+        self.redraw_pending.set(true);
+    }
+
+    /// Whether the adopted frame lacks a picture that is on its way: a
+    /// source it draws has neither pixels in the store nor an upload in the
+    /// rasterizer and the store has not answered it yet, or a render lost
+    /// pixels and the commit has not been described again. A capture is
+    /// refused while this holds ([`Self::capture`]); a host that captures
+    /// takes its turns until it does not.
+    ///
+    /// False once the view's store has gone, since nothing will answer then.
+    #[must_use]
+    pub fn awaits_pictures(&self) -> bool {
+        self.images.awaits()
     }
 
     /// Drops everything derived from the document this painter showed: the
@@ -2263,7 +2309,8 @@ impl Painter {
         let lost = self.output.lost_pixels();
         if lost != self.lost_pixels {
             // A draw found neither an upload nor the pixels it was lent: the
-            // next adoption reads them back, and the frame is drawn again.
+            // next adoption describes them again, and the frame is drawn
+            // again.
             // Asked for once per resolve: a table already stale is one no
             // adoption could restore yet — there was no store — and drawing
             // it again would lose the same pixels and ask again, every
@@ -2413,12 +2460,19 @@ impl Painter {
     /// the adopted frame at `now`, so a capture is of what this painter would
     /// draw rather than of whatever it last drew.
     ///
+    /// Never a frame that lacks a picture on its way
+    /// ([`Self::awaits_pictures`]): such a capture is refused, before the
+    /// render and again after it, since a render that loses pixels leaves
+    /// one. This call cannot wait for them — the store answers in the host's
+    /// turns — so a host that captures takes its turns until
+    /// [`Self::awaits_pictures`] is false, and bounds that wait itself.
+    ///
     /// # Errors
     ///
     /// [`PainterError::Render`] if nothing has been rendered at the current
-    /// size to read back, and [`PainterError::Gpu`] or
-    /// [`PainterError::Render`] if bringing the target up to the adopted
-    /// frame, or the read itself, fails.
+    /// size to read back or a picture the frame draws is on its way, and
+    /// [`PainterError::Gpu`] or [`PainterError::Render`] if bringing the
+    /// target up to the adopted frame, or the read itself, fails.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn capture(&mut self, now: f64) -> Result<Screenshot, PainterError> {
         // Refused before anything is composed, so a painter with no target
@@ -2431,10 +2485,23 @@ impl Painter {
             ));
         }
         let size = self.frame_size;
+        let awaited = || {
+            PainterError::Render(
+                "a picture this frame draws has not arrived yet; take the host's turns until \
+                 `awaits_pictures` is false"
+                    .to_owned(),
+            )
+        };
+        if self.images.awaits() {
+            return Err(awaited());
+        }
         if let Some(frame) = self.frame.clone() {
             let key: ComposeKey = (frame.commit_id(), self.scroll_intents.generation);
             let animation_now = frame.has_live_curves().then_some(now);
             self.render_frame(&frame, key, animation_now, false)?;
+        }
+        if self.images.awaits() {
+            return Err(awaited());
         }
         // Read back only what the record names at the size being read: a
         // record at another size is not this capture's pixels.

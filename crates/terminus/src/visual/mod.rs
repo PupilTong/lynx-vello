@@ -1133,7 +1133,9 @@ impl<T> Document<T> {
             .expect("Document::scene reads the committed frame: render first");
         let composed = frame.scene().is_none().then(|| {
             let (mut images, mut sources) = (Vec::new(), Vec::new());
-            frame.resolve_images(pixels, &mut images, &mut sources);
+            // A picture wanted here draws nothing in this scene; the store
+            // has been told, and a later scene draws it.
+            let _wanted = frame.resolve_images(pixels, &mut images, &mut sources);
             let mut scene = DisplayList::new();
             // No GPU here, so no bake: a `filter: blur()` group replays raw
             // and this scene is the unblurred one, and a vector image, whose

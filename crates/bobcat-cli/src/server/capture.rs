@@ -424,6 +424,7 @@ async fn capture_page(request: &CaptureRequest) -> Result<Screenshot, CaptureFai
     )
     .await?;
 
+    pictures(&mut view, &mut painter, &wakeup, &request.url).await?;
     let screenshot = painter.capture().map_err(|source| CaptureFailure::Render {
         url: request.url.clone(),
         source: Box::new(source),
@@ -504,6 +505,33 @@ async fn frame(
     }
     painter.draw_posted(posted, force).map_err(render)?;
     Ok(())
+}
+
+/// Takes the view's turns until no picture the frame draws is on its way
+/// ([`Painter::awaits_pictures`]): a source the store dropped and the
+/// rasterizer no longer holds is restored off this thread, and the restore
+/// wakes this host when it lands. Bounded by [`FRAME_DEADLINE`]; past it the
+/// capture that follows is refused rather than returning a frame without
+/// the picture.
+async fn pictures(
+    view: &mut LynxView<ViewResources>,
+    painter: &mut Painter,
+    wakeup: &CaptureWakeup,
+    url: &Url,
+) -> Result<(), CaptureFailure> {
+    let deadline = tokio::time::Instant::now() + FRAME_DEADLINE;
+    loop {
+        check_events(view, url)?;
+        if !painter.awaits_pictures() {
+            return Ok(());
+        }
+        if tokio::time::timeout_at(deadline, wakeup.0.notified())
+            .await
+            .is_err()
+        {
+            return Ok(());
+        }
+    }
 }
 
 fn check_events(view: &mut LynxView<ViewResources>, url: &Url) -> Result<bool, CaptureFailure> {

@@ -1350,13 +1350,15 @@ is asked for one image at a time by source string (the `url(…)` value CSS
 produced, or a replaced element's source): named through `request_image`,
 answered through `ImageReports` with the intrinsic size layout needs, given its
 moment in every `LynxView::pump` through `service_images` (where a host whose
-loads complete off-thread forwards them into the reports), and asked
-synchronously when a painter adopts a commit, with a
+loads complete off-thread forwards them into the reports), and asked when a
+painter adopts a commit, with a
 `terminus::link::ImageSizeHint` — the largest device-pixel extent the frame
 draws that source at, computed per draw under its transform and unioned per
-source — so a host decodes to the draw rather than to the file. **A drawn
-bitmap has one copy.** The painter first asks what each source draws as
-(`FrameImages::describe`, which must not block on a decode): the bitmap's
+source — so a host decodes to the draw rather than to the file. **Nothing on
+the painter's thread decodes or waits for a decode or for I/O** (ruled
+2026-11-14, `docs/picture-source-design.md`): every `FrameImages` method is
+non-blocking. **A drawn bitmap has one copy.** The painter asks what each
+source draws as (`FrameImages::describe`): the bitmap's
 `ImageDescriptor` — blob id, size, layout, what the rasterizer keys an upload
 on — with its pixels when the store holds them. It keeps those pixels only
 until the rasterizer holds its upload — one per bitmap, whatever the samplers
@@ -1365,14 +1367,22 @@ reference and tells the store it may drop its own (`FrameImages::release`). A le
 is not released under the GPU byte budget, so the frame — a dropped view's
 last one included — stays drawable with no pixel on the CPU; the lease ends
 when the painter adopts a commit that no longer draws the source, forgets the
-view or drops. `FrameImages::read`, the call that may block on a restore, is
-made only for a source whose pixels the store dropped and whose upload the
-rasterizer does not hold: a source drawn again after its lease ended and its
-upload was released, or a render that found neither an upload nor the pixels it was lent, after which
-the next adoption describes the commit again. `describe` and `release` have
-default bodies — `describe` is a `read`, `release` drops nothing — because
-keeping every bitmap is a complete policy; a store with only `read` and
-`retain` behaves as before. No container
+view or drops. **A source with neither pixels in the store nor an upload in
+the rasterizer draws nothing** — one drawn again after its lease ended and
+its upload was released, or found missing by a render, after which the next
+adoption describes the commit again — and the painter tells the store it is
+wanted (`FrameImages::want`), once per resolve. The store restores it off the
+painter's thread and wakes the host as a finished load does; every adoption
+describes the wanted sources again, and one whose pixels arrived recomposes
+the frame and re-bakes its `filter`s with no commit. The document never
+learns of an eviction or a restore: load state, natural size, layout and
+`load`/`error` are untouched. A capture is never of a frame lacking a picture
+on its way: `Painter::awaits_pictures` says one is, `Painter::capture`
+refuses while it does, and every capturing host (the `bobcat` CLI's headless
+`screenshot`, `bobcat-server`) takes its turns until it does not, under its
+own deadline. `release` alone has a default body — it drops nothing, because
+keeping every bitmap is a complete policy; `describe`, `want` and `retain` are
+required. No container
 sniffing, codec contract, cache policy or byte budget lives in `bobcat-core` or
 `terminus`: the sizing vocabulary (`ImageSizeHint`, `Bitmap`, `target_size`) and
 every cache policy are `vant`'s, which both re-export, and
@@ -3042,14 +3052,16 @@ type and depends only on `bytes`, `http`, `url`, `serde_json`, `thiserror`,
   decoded-bitmap `MemoryCache`. A host asks what a request means
   (`Requested`: report now, join, or start a load at a bound), feeds every
   completion back (`loaded`, `parsed`, `failed`, `refined`, …) and is handed
-  the waiters to tell; a frame's `read` answers `Read::Hit` with the
-  `Refinement` to start when the bitmap is far from the drawn size,
-  `Read::Restore` when it was evicted or released, or `Read::Unavailable`.
-  `describe` answers without ever asking for a restore — `Described::Resident`,
-  or `Described::Absent` with the `ImageDescriptor` (`vant::image`) of the
-  bitmap last inserted for the source — and `release(sources)` drops bitmaps
-  from the tier, pinned or not, for a caller whose rasterizer holds them; the
-  entries stay loaded. Each view has
+  the waiters to tell; a frame's `describe` never asks for a restore and
+  answers `Described::Resident` with the `Refinement` to start when the bitmap
+  is far from the drawn size, `Described::Absent` with the `ImageDescriptor`
+  (`vant::image`) of the bitmap last inserted when the tier dropped it, or
+  `Described::Unavailable`. `want(source, hint)` answers the `Refinement` that
+  restores an absent bitmap — once while it is in flight, nothing after a
+  restore failed, which leaves the source `Unavailable` — for the host to run
+  off the frame's thread and answer with `refined` or `refine_failed`; and
+  `release(sources)` drops bitmaps from the tier, pinned or not, for a caller
+  whose rasterizer holds them; the entries stay loaded. Each view has
   a `ViewKey` and its own working set, and the tier pins **the union of
   every view's set** (`retain(view, frame)`, `release_view`), so one view's
   frame never unpins another's. It stores waiters and never calls them.
@@ -3140,8 +3152,8 @@ view's working set pinned against eviction — a `ViewResources` carries its
 `ViewKey` and releases its set when it drops; a bitmap whose upload a
 painter's rasterizer holds leaves the tier when the painter says so
 (`FrameImages::release`), is described by its descriptor from then on, and is
-decoded again inside a `read` only when the rasterizer does not hold it either
-— and fetched bytes in `vant::byte_cache::ByteCache`
+decoded again by a background job only when the rasterizer does not hold it
+either and a frame wants it — and fetched bytes in `vant::byte_cache::ByteCache`
 over the platform's `Store` (`FsStore`: `<fnv64>.bin` beside `<fnv64>.json`
 holding the key, length, last use and the HTTP record, temp-and-rename
 writes, strays and broken halves swept at open) with RFC 9111 freshness,
@@ -3225,28 +3237,28 @@ scene it encodes. A document request files no entry before, during or after
 its parse, so two requests for one source are two parses and two reports
 and `knows_image` stays false; a fetched document leaves only the
 residency's parsed marker, so the URL stays known while a later request fetches
-and parses it again. `is_resident` is false, `read` answers `None` (so the
+and parses it again. `is_resident` is false, `describe` answers `None` (so the
 memory tier, refinement and restore never see a document), and
 `memory_used_bytes` counts no document. A document labelled with a specific
 non-SVG type such as `text/plain` is trusted as that type and is not an
 image (`mime::sniff`).
 
-`images.rs` is the pipeline's IO alone: what a request or a read means is the
-residency's answer, every report is sent by `ImageResidency`, and this module
+`images.rs` is the pipeline's IO alone: what a request, a describe or a want
+means is the residency's answer, every report is sent by `ImageResidency`, and this module
 starts the load, the refinement or the restore it is told to and feeds the
 completion back.
 
-The frame reads each image at the size it draws it: a resident bitmap far
+The frame describes each image at the size it draws it: a resident bitmap far
 larger than its draw is re-decoded at the drawn size in the background and
-replaced; one that was evicted is restored inside the read from the retained
-bytes or the disk tier — on the embedder's own thread, synchronously and with
-no decode permit, which is why the transport keeps a blocking entry point and
-`tokio::fs` is not adopted; and one drawn larger than it was decoded is refined
-back up while the image has more to give. In the browser that restore is the
-one place the Render Worker blocks: the main thread never waits, so a job's
-mailbox in shared Wasm memory and `Atomics.wait` are what let a read that must
-not miss wait for it (`crates/bobcat-wasm/js/image-decoder.ts` is the main
-thread's half).
+replaced; one drawn larger than it was decoded is refined back up while the
+image has more to give; and one that was evicted or released, and that the
+painter's rasterizer holds no upload of, is drawn as nothing and wanted, and
+restored by the same background job from the retained bytes or the disk tier,
+under a decode permit, whose completion wakes the host. Nothing fetches or
+decodes on the embedder's thread. In the browser every decode is a local task
+on the Render Worker awaiting the main thread's `Image` element; neither side
+ever waits on the job's mailbox in shared Wasm memory
+(`crates/bobcat-wasm/js/image-decoder.ts` is the main thread's half).
 
 Shape: `Resources` is the shared system (registry, caches, executor, decoder;
 cheaply cloned, bound to the embedder's thread) and the only holder of the
@@ -4580,7 +4592,11 @@ nothing. `pump_images` drives one round of the document-to-host image protocol
 `ImageEvent::parse_document`: `insert_svg(source, &str)` reports the parsed
 document through `parsed_document` (or `failed`), and `request_document`
 answers a document request the same way; prime-radiant has no SVG parser
-dependency of its own.
+dependency of its own. `capture_document` never draws a frame without a
+picture on its way: a source the store answers without pixels is wanted and
+described again once — `TestImages::releasing` restores inside `want` — and
+the capture is refused (`CaptureError::PicturesWanted`) if it is still
+missing.
 `headless` requires a usable GPU adapter and panics without one, so local and
 CI runs obey the same mandatory-GPU policy. DOM-aware screenshot suites live in
 `terminus`, which also keeps the direct GPU smoke tests. Goldens are not

@@ -205,6 +205,9 @@ fn execute_command(
             println!("Rendered one frame.");
         }
         Command::Screenshot(path) => {
+            if await_pictures(host, painter)? {
+                script.finish();
+            }
             let result = painter
                 .capture()
                 .map_err(CliError::Engine)
@@ -338,6 +341,29 @@ fn frame(host: &mut Host<'_>, painter: &mut Painter, force: bool) -> Result<bool
     }
     painter.draw_posted(posted, force)?;
     Ok(finished)
+}
+
+/// Takes this embedder's turns until no picture the frame draws is on its
+/// way ([`Painter::awaits_pictures`]): a source the store dropped and the
+/// rasterizer no longer holds is restored off this thread, and its arrival
+/// wakes this loop. Bounded by [`FRAME_DEADLINE`]; past it the capture that
+/// follows is refused rather than missing the picture. A command that
+/// arrives meanwhile keeps its place in `held`. Answers whether the view
+/// reported its script finished during the wait.
+fn await_pictures(host: &mut Host<'_>, painter: &mut Painter) -> Result<bool, CliError> {
+    let deadline = Instant::now() + FRAME_DEADLINE;
+    let mut finished = false;
+    loop {
+        finished |= check_script(host)?;
+        if !painter.awaits_pictures() {
+            return Ok(finished);
+        }
+        match host.receiver.recv_deadline(deadline) {
+            Ok(HostEvent::Pump) => {}
+            Ok(HostEvent::Command(command)) => host.held.push_back(command),
+            Err(_) => return Ok(finished),
+        }
+    }
 }
 
 fn check_script(host: &mut Host<'_>) -> Result<bool, CliError> {

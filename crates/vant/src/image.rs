@@ -20,7 +20,7 @@ pub mod residency;
 /// engine composes correctly against either, so the hint is advisory — a
 /// host may decode at it, below it, or ignore it.
 ///
-/// [`ImageSizeHint::UNBOUNDED`] names a read with no frame behind it, where
+/// [`ImageSizeHint::UNBOUNDED`] names a draw with no frame behind it, where
 /// the only right answer is the image's own size.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ImageSizeHint {

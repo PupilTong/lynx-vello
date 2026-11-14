@@ -2531,19 +2531,19 @@ fn a_wheel_rests_only_after_a_quiet_interval() {
     assert!(!painter.is_animating());
 }
 
-/// The store contract the painter's per-commit pixels rest on, read through
-/// `terminus::link::FrameImages` as the painter reads it. Here rather than beside
+/// The store contract the painter's per-commit pixels rest on, asked through
+/// `terminus::link::FrameImages` as the painter asks it. Here rather than beside
 /// the painter's image table in `terminus`, whose own unit-test build sees
 /// `prime-radiant`'s store implement a second copy of that trait.
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod frame_images {
 
-    /// Decision: one bitmap, reused. Every read of one source must hand back
-    /// a clone sharing the *same* `Blob`, because `Blob::id()` is what the
-    /// rasterizer keys its bitmap uploads on — two ids for one image would be
-    /// two GPU uploads and two textures.
+    /// Decision: one bitmap, reused. Every describe of one source must hand
+    /// back a clone sharing the *same* `Blob`, because `Blob::id()` is what
+    /// the rasterizer keys its bitmap uploads on — two ids for one image
+    /// would be two GPU uploads and two textures.
     #[test]
-    fn every_read_of_one_image_keeps_the_same_buffer_identity() {
+    fn every_describe_of_one_image_keeps_the_same_buffer_identity() {
         use terminus::link::FrameImages as _;
 
         let images = prime_radiant::TestImages::new();
@@ -2551,12 +2551,14 @@ mod frame_images {
         let published = pixels.data.id();
         images.insert("app:///pixel.png", pixels);
 
-        let first = images
-            .read("app:///pixel.png", terminus::link::ImageSizeHint::UNBOUNDED)
-            .expect("a published image reads back");
-        let second = images
-            .read("app:///pixel.png", terminus::link::ImageSizeHint::UNBOUNDED)
-            .expect("and reads back again");
+        let pixels_of = || {
+            images
+                .describe("app:///pixel.png", terminus::link::ImageSizeHint::UNBOUNDED)
+                .and_then(|image| image.pixels)
+                .expect("a published image is described with its pixels")
+        };
+        let first = pixels_of();
+        let second = pixels_of();
         assert_eq!(
             first.data.id(),
             published,
@@ -2565,16 +2567,16 @@ mod frame_images {
         assert_eq!(
             first.data.id(),
             second.data.id(),
-            "and every later read is the same GPU resource"
+            "and every later describe is the same GPU resource"
         );
     }
 
     /// The release contract as the painter relies on it: a store that keeps
-    /// what it answers ignores a release and describes as it reads; one that
-    /// drops released pixels describes the bitmap by its descriptor alone
-    /// afterwards, and a read restores it into a new blob.
+    /// what it answers ignores a release and describes with the pixels; one
+    /// that drops released pixels describes the bitmap by its descriptor
+    /// alone afterwards, and a want restores it into a new blob.
     #[test]
-    fn a_released_source_is_described_without_pixels_until_a_read_restores_it() {
+    fn a_released_source_is_described_without_pixels_until_a_want_restores_it() {
         use terminus::link::{FrameImages as _, ImageSizeHint};
 
         let source = "app:///pixel.png";
@@ -2587,7 +2589,7 @@ mod frame_images {
                 .is_some_and(|image| image.pixels.is_some()),
             "a keeping store ignores the release"
         );
-        assert_eq!(keeping.reads().len(), 1, "and describes by reading");
+        assert_eq!(keeping.reads().len(), 1, "and logs the describe");
 
         let images = prime_radiant::TestImages::releasing();
         let published = prime_radiant::rgba8(1, 1, vec![1, 2, 3, 255]);
@@ -2605,26 +2607,29 @@ mod frame_images {
             .expect("still described");
         assert!(absent.pixels.is_none());
         assert_eq!(absent.descriptor, described.descriptor);
-        assert!(images.reads().is_empty(), "a describe is not a read");
+        assert!(images.reads().is_empty(), "a describe restores nothing");
 
+        images.want(source, ImageSizeHint::UNBOUNDED);
+        assert_eq!(images.reads().len(), 1, "the want restored it");
         let restored = images
-            .read(source, ImageSizeHint::UNBOUNDED)
-            .expect("a read restores it");
+            .describe(source, ImageSizeHint::UNBOUNDED)
+            .and_then(|image| image.pixels)
+            .expect("described with its pixels again");
         assert_ne!(restored.data.id(), described.descriptor.blob, "a new blob");
         assert_eq!(restored.data.as_ref(), &[1, 2, 3, 255]);
         assert!(images.holds_pixels(source));
     }
 
-    /// A source the host carries no pixels for reads as nothing rather than
-    /// standing in for another image.
+    /// A source the host carries no pixels for is described as nothing
+    /// rather than standing in for another image.
     #[test]
-    fn an_unpublished_source_reads_as_nothing() {
+    fn an_unpublished_source_is_described_as_nothing() {
         use terminus::link::FrameImages as _;
 
         let images = prime_radiant::TestImages::new();
         assert!(
             images
-                .read(
+                .describe(
                     "app:///missing.png",
                     terminus::link::ImageSizeHint::UNBOUNDED
                 )

@@ -16,10 +16,9 @@ The paint pipeline assumes a picture's pixels change only with a commit:
   resolves pixels through `terminus::link::FrameImages`, once per adopted
   frame (`Painter::adopt`);
 - the compose key is the commit and the scroll generation, and a
-  `filter`/`backdrop-filter` bake is keyed by commit;
-- a restore after eviction decodes inside `FrameImages::read`, on the
-  painter's thread, and the browser embedder keeps a shared-memory mailbox so
-  a Worker can block for it.
+  `filter`/`backdrop-filter` bake is keyed by commit; the one change of
+  pixels within a commit, a wanted picture's restore arriving, clears what
+  the target holds and the bakes rather than entering either key.
 
 Animated images, video, a canvas and an off-screen web view all change
 between commits, and none of them fits. Each could be added as its own
@@ -249,10 +248,24 @@ removed: with nothing blocking, nothing needs them.
 
 One change per step, in order; each leaves the tree green.
 
-1. **All asynchronous.** `FrameImages::read` loses its blocking contract and
-   the painter stops decoding; a wanted picture is restored off the painter's
-   thread and wakes the host. Captures wait for wanted pictures. The blocking
-   half of the browser mailbox goes.
+1. **All asynchronous.** `FrameImages` has no blocking call: it is
+   `describe`, `want`, `retain` and `release`, and the painter never decodes.
+   A picture with neither pixels in the store nor an upload in the
+   rasterizer draws nothing and is wanted, once per resolve; the store
+   (`vant`'s `Residency::want`, run by `bobcat-resources` as a refinement
+   job) restores it off the painter's thread and wakes the host, and the
+   next adoption takes the pixels with no commit, clears what the target
+   holds and forgets the `filter` bakes. A restore that fails leaves the
+   picture with nothing to draw, and it is not retried. The document never
+   learns of either. `Painter::awaits_pictures` is true while a drawn picture
+   is wanted and unanswered; `Painter::capture` refuses such a frame, and
+   the capturing hosts (the `bobcat` CLI's headless `screenshot`,
+   `bobcat-server`) take their turns until it is false, under their frame
+   deadline; `prime-radiant`'s `capture_document`, which has no turns to
+   take, describes a wanted picture once more and refuses the capture if it
+   is still missing. The blocking half of the browser mailbox (`Atomics.wait` and
+   `Atomics.notify`) is gone; the asynchronous decode over the mailbox stays
+   until step 5.
 2. **Live pictures.** Picture keys (`Url` | `Id`), generations, slots for CPU
    frames, in-place rewrite of a picture's own texture, generations in the
    compose and bake keys, timer-driven frame demand, drawn-set feedback. A

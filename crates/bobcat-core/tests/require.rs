@@ -88,13 +88,16 @@ struct Files {
 }
 
 impl bobcat_core::FrameImages for Files {
-    fn read(
+    fn describe(
         &self,
         _source: &str,
         _hint: bobcat_core::ImageSizeHint,
-    ) -> Option<bobcat_core::peniko::ImageData> {
+    ) -> Option<bobcat_core::FrameImage> {
         None
     }
+
+    /// Nothing is ever answered, so nothing is ever wanted.
+    fn want(&self, _source: &str, _hint: bobcat_core::ImageSizeHint) {}
 
     fn retain(&self, _frame: &[Arc<str>]) {}
 }
