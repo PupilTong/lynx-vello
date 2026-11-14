@@ -63,7 +63,7 @@ use crate::compute::util::{
 use crate::geometry::{Edges, Point, Size};
 use crate::style::containment::contained_axes;
 use crate::style::{
-    Contain, CoreStyle, FlowTolerance, GridLanesStyle, GridStyle, Overflow, PositionProperty,
+    Contain, CoreStyle, FitTolerance, GridLanesStyle, GridStyle, Overflow, PositionProperty,
 };
 use crate::tree::{
     AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutOutput, LayoutTree, RequestedAxis,
@@ -73,11 +73,11 @@ use crate::tree::{
 /// equally filled. `normal` is `1em`; a percentage resolves against the used
 /// grid-axis content-box size, which placement always runs after and which the
 /// threshold never feeds back into.
-fn tie_threshold(tolerance: &FlowTolerance, font_size: f32, basis: f32) -> f32 {
+fn tie_threshold(tolerance: &FitTolerance, font_size: f32, basis: f32) -> f32 {
     match tolerance {
-        FlowTolerance::Normal => font_size.max(0.0),
-        FlowTolerance::Infinite => f32::INFINITY,
-        FlowTolerance::LengthPercentage(value) => resolve_length_percentage(&value.0, Some(basis))
+        FitTolerance::Normal => font_size.max(0.0),
+        FitTolerance::Infinite => f32::INFINITY,
+        FitTolerance::LengthPercentage(value) => resolve_length_percentage(&value.0, Some(basis))
             .unwrap_or(0.0)
             .max(0.0),
     }
@@ -362,12 +362,24 @@ fn size_grid_axis<T>(
         // An earlier run measured the span-1 items in place: undo what it
         // wrote. Only an intrinsic keyword had a size filled in, and the
         // spanning clones below are taken from the items too.
+        let item_basis = axis.pack(None, axis.other().size(basis));
         for item in items.iter_mut() {
             if item.intrinsic.has_intrinsic() {
-                refresh_item_basis(tree, item, Size::NONE);
+                refresh_item_basis(tree, item, item_basis);
             }
             item.clear_contribution_cache(Axis::Horizontal);
             item.clear_contribution_cache(Axis::Vertical);
+        }
+    }
+    if reads_items {
+        // An intrinsic keyword in the stacking axis (`width: min-content` on
+        // an item of lanes running across the rows) sizes the item the same
+        // in every lane, since that axis has no tracks: resolve it before the
+        // grid axis measures the item across it, or the grid-axis
+        // contribution is taken at the wrong cross size.
+        let stacking = axis.other();
+        for item in items.iter_mut() {
+            resolve_item_intrinsic_dimensions(tree, state, item, stacking, None, basis);
         }
     }
     let mut sizing = if reads_items {
@@ -475,6 +487,10 @@ struct LanesContext<'a> {
     inner_grid: f32,
     content_origin: Point<f32>,
     stacking_gap: f32,
+    /// The container's content-box size in the stacking axis where it is
+    /// definite: the stacking-axis half of every item's containing block
+    /// (§4.4.1).
+    stacking_basis: Option<f32>,
     tolerance: f32,
     rtl: bool,
     goal: LayoutGoal,
@@ -552,24 +568,27 @@ where
 
         item.area = grid_axis_area(axis, lines);
         let track_area = context.tracks.area_size(lines.start, lines.end);
-        // The containing block is the spanned tracks in the grid axis and
-        // indefinite in the stacking axis: an item is placed at a running
-        // position, not inside a sized area.
+        // §4.4.1: the containing block is the spanned tracks in the grid axis
+        // and the container's content box in the stacking axis, which is
+        // what percentages resolve against. The item is placed at a running
+        // position rather than inside a sized area, so nothing stretches it
+        // in the stacking axis and its geometry takes no size there.
+        let containing_block = axis.pack(Some(track_area), context.stacking_basis);
         let area = axis.pack(Some(track_area), None);
-        refresh_item_basis(tree, item, area);
+        refresh_item_basis(tree, item, containing_block);
         item.clear_contribution_cache(Axis::Horizontal);
         item.clear_contribution_cache(Axis::Vertical);
         // A grid-axis intrinsic keyword measures across an indefinite stacking
         // size, but a stacking-axis one measures across the lane it landed in,
         // whose grid-axis size is already resolved.
-        resolve_item_intrinsic_dimensions(tree, state, item, axis, None, area);
+        resolve_item_intrinsic_dimensions(tree, state, item, axis, None, containing_block);
         resolve_item_intrinsic_dimensions(
             tree,
             state,
             item,
             stacking,
             Some(CrossAxisTracks::resolved(context.tracks)),
-            area,
+            containing_block,
         );
         let (known, available) = item_area_geometry(item, area);
         let item_goal = match context.goal.independence() {
@@ -601,7 +620,7 @@ where
         let output = tree.compute_layout(
             state,
             item.key.node,
-            LayoutInput::new(item_goal, known, area, available)
+            LayoutInput::new(item_goal, known, containing_block, available)
                 .reading_last_baseline(context.reads_last_baseline && !item_goal.commits())
                 .reading_first_baseline(context.reads_first_baseline && !item_goal.commits()),
         );
@@ -661,7 +680,7 @@ where
             *lane = true;
         }
 
-        let relative = relative_item_offset(tree, item, area);
+        let relative = relative_item_offset(tree, item, containing_block);
         let mut layout = Layout::with_order(item.key.layout_order);
         layout.size = output.size;
         layout.content_size = output.content_size;
@@ -919,6 +938,10 @@ where
         &occupied,
     );
 
+    // Before placement an item's grid-axis area is unknown, so only its
+    // stacking-axis percentages resolve (§4.4.1).
+    let stacking_basis = stacking_axis.size(percentage_basis);
+    let item_basis = grid_axis.pack(None, stacking_basis);
     let mut items = in_flow
         .iter()
         .map(|pending| {
@@ -927,7 +950,7 @@ where
                 &tree.style(key.node),
                 key,
                 GridArea::default(),
-                Size::NONE,
+                item_basis,
                 item_defaults,
             );
             // §6.5 allows baseline self-alignment to fall back in the stacking
@@ -1060,7 +1083,8 @@ where
             metrics.border.top + metrics.padding.top,
         ),
         stacking_gap: stacking_axis.size(initial_gap),
-        tolerance: tie_threshold(style.flow_tolerance(), style.font_size(), grid_inner),
+        stacking_basis,
+        tolerance: tie_threshold(style.fit_tolerance(), style.font_size(), grid_inner),
         rtl,
         goal: container_goal,
         all_tracks_fixed,
@@ -1242,16 +1266,16 @@ mod tests {
 
     #[test]
     fn tie_threshold_reads_normal_as_one_em_and_percentages_off_the_grid_axis() {
-        assert_eq!(tie_threshold(&FlowTolerance::Normal, 18.0, 200.0), 18.0);
+        assert_eq!(tie_threshold(&FitTolerance::Normal, 18.0, 200.0), 18.0);
         assert_eq!(
-            tie_threshold(&FlowTolerance::Infinite, 18.0, 200.0),
+            tie_threshold(&FitTolerance::Infinite, 18.0, 200.0),
             f32::INFINITY
         );
-        let length = FlowTolerance::LengthPercentage(NonNegative(LengthPercentage::new_length(
+        let length = FitTolerance::LengthPercentage(NonNegative(LengthPercentage::new_length(
             Length::new(7.0),
         )));
         assert_eq!(tie_threshold(&length, 18.0, 200.0), 7.0);
-        let percentage = FlowTolerance::LengthPercentage(NonNegative(
+        let percentage = FitTolerance::LengthPercentage(NonNegative(
             LengthPercentage::new_percent(Percentage(0.25)),
         ));
         assert_eq!(tie_threshold(&percentage, 18.0, 200.0), 50.0);

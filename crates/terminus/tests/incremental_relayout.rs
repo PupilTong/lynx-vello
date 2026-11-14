@@ -609,7 +609,7 @@ fn rects(doc: &Document<()>, ids: &[terminus::link::NodeId]) -> Vec<(f32, f32, f
     ids.iter().map(|&id| rect(doc, id)).collect()
 }
 
-const WATERFALL: &str = "display: grid-lanes; width: 200px; gap: 10px; flow-tolerance: 0;
+const WATERFALL: &str = "display: grid-lanes; width: 200px; gap: 10px; fit-tolerance: 0;
                          grid-template-columns: repeat(2, minmax(0, 1fr))";
 
 /// One item growing re-runs the lane choice for every item after it: the
@@ -653,12 +653,12 @@ fn a_grid_lanes_item_height_change_re_places_the_items_after_it() {
     assert_eq!(rect(&mutated, list), rect(&fresh, fresh_list));
 }
 
-/// `flow-tolerance` only ever changes which lane an item chooses, so a change
+/// `fit-tolerance` only ever changes which lane an item chooses, so a change
 /// to it has to reach the container's own algorithm — nothing about any item
 /// changed.
 #[test]
-fn a_flow_tolerance_change_re_lays_the_container_out() {
-    const TIGHT: &str = "display: grid-lanes; width: 200px; gap: 0px; flow-tolerance: 0;
+fn a_fit_tolerance_change_re_lays_the_container_out() {
+    const TIGHT: &str = "display: grid-lanes; width: 200px; gap: 0px; fit-tolerance: 0;
                          grid-template-columns: repeat(2, minmax(0, 1fr))";
     let (mut mutated, list, items) = waterfall(TIGHT, &[50.0, 20.0, 20.0]);
     mutated.layout();
@@ -668,13 +668,13 @@ fn a_flow_tolerance_change_re_lays_the_container_out() {
     // 40px is wider than the 30px by which lane 0 overhangs lane 1, so both
     // lanes now count as equally short and the item falls back to the first
     // one — the lanes are tied, and no lane sits at or after the cursor.
-    mutated.set_inline_style_property(list, "flow-tolerance", "40px");
+    mutated.set_inline_style_property(list, "fit-tolerance", "40px");
     mutated.layout();
     assert_eq!(rect(&mutated, items[2]), (0.0, 50.0, 100.0, 20.0));
     assert_eq!(rect(&mutated, list), (0.0, 0.0, 200.0, 70.0));
 
     let (mut fresh, fresh_list, fresh_items) = waterfall(
-        &TIGHT.replace("flow-tolerance: 0", "flow-tolerance: 40px"),
+        &TIGHT.replace("fit-tolerance: 0", "fit-tolerance: 40px"),
         &[50.0, 20.0, 20.0],
     );
     fresh.layout();
@@ -699,7 +699,7 @@ fn a_content_change_inside_a_fixed_grid_lanes_item_relayouts_in_place() {
         let list = doc.create_element("view", ());
         doc.set_inline_style(
             list,
-            "display: grid-lanes; width: 200px; gap: 8px; flow-tolerance: 0;
+            "display: grid-lanes; width: 200px; gap: 8px; fit-tolerance: 0;
              grid-template-columns: 96px 96px",
         );
         doc.append_child(root, list);

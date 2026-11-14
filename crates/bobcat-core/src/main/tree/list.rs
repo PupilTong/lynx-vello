@@ -312,7 +312,7 @@ list[list-type="flow"][scroll-orientation="horizontal"] list-item[full-span]:not
 list[list-type="waterfall"] {
   display: grid-lanes;
   grid-template-columns: repeat(max(1, var(--list-item-span-count)), minmax(0, 1fr));
-  flow-tolerance: 0;
+  fit-tolerance: 0;
 }
 list[list-type="waterfall"][scroll-orientation="horizontal"] {
   grid-template-columns: none;
@@ -1280,7 +1280,7 @@ mod tests {
         assert_eq!(rect(&document, cells[1]), (0.0, 50.0, 200.0, 50.0));
     }
 
-    /// `waterfall` is `display: grid-lanes` with `flow-tolerance: 0`, so each
+    /// `waterfall` is `display: grid-lanes` with `fit-tolerance: 0`, so each
     /// cell lands at the running end of the strictly shortest lane.
     #[test]
     fn waterfall_stacks_each_cell_into_the_shortest_lane() {
