@@ -4222,6 +4222,31 @@ consequential choice about whether to follow the spec or the quirk.
   These are the systemic AT-model differences to design around, not
   individual prop quirks.
 
+- **Native bundles that carry bytecode** (`docs/primjs-bytecode-conversion-design.md`,
+  rulings of 2026-11-10): the engine does not run PrimJS; it converts each
+  bytecode section to its own QuickJS fork's bytecode and runs that.
+  - A section with a direct `eval`, a `BigFloat` value or a dynamic `import()`
+    is refused, and a refused section fails its whole bundle. ReactLynx's
+    development main-thread runtime has a direct `eval`, so a development
+    build loads only in source form.
+  - Where PrimJS's runtime departs from ECMAScript, converted code follows
+    the specification: a `yield*` inside `finally` during `return()`; a
+    `next()` that throws inside `for await` (no `return()` call); the moment a
+    strict assignment to an undeclared name throws. A spread call with more
+    than 65534 elements throws `RangeError`.
+  - What PrimJS's compiler got wrong is in the bytecode and stays: `a ?? b`
+    tests for `undefined` only, `(o?.m)()` loses `this`, `delete o?.a` deletes
+    nothing, a default parameter sees the body's `var`, a static field
+    initializer reading its own class throws.
+  - A bytecode script is a global script, as on native: its top-level
+    declarations are properties of the global object (created when its module
+    links) and its top-level `this` is the global object. The same script in
+    source form is a module, whose declarations are local and whose `this` is
+    `undefined`. Runtime and PAPI names are module imports in both forms, not
+    globals as on native.
+  - A stack trace from a bundle with external debug info has function names
+    and no line numbers.
+
 *(Full per-row detail, including ~250 more narrowly-scoped items — mostly
 Lynx-only extension properties/APIs with no W3C equivalent to conflict with —
 lives in the `W3C-compliant?` column of each linked file.)*

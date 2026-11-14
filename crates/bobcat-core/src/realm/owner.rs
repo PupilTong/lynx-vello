@@ -76,7 +76,7 @@ use crate::future::HostFuture;
 use crate::jobs::{JobKind, JsThreadName};
 use crate::lifetime::{EndOnUnwind, Lifetime, Settles, run_job};
 use crate::link::{HostOutbox, SourceAnswer};
-use crate::main::quickjs::{ScriptRuntime, SharedRuntime};
+use crate::main::quickjs::{LoadedModule, ScriptRuntime, SharedRuntime};
 use crate::resource::{LoadedSource, SourceRequest, unanswered_source};
 use crate::script::ScriptError;
 use crate::view::LynxViewError;
@@ -522,7 +522,7 @@ async fn load_module<O: RealmOwner>(owner: Rc<O>, url: String, answer: SourceAns
     enter(&owner, JobKind::Module, move |realm, js| {
         let loaded = loaded
             .as_ref()
-            .map(|(response, source)| (response.as_str(), source.as_str()))
+            .map(|(response, module)| (response.as_str(), module.body()))
             .map_err(String::as_str);
         if let Err(error) = O::core(realm).engine.complete_module(js, &url, loaded) {
             policy::report(&completing, Scene::Module, error);
@@ -553,7 +553,7 @@ async fn load_child_module<O: RealmOwner>(
     enter(&owner, JobKind::Module, move |realm, js| {
         let loaded = loaded
             .as_ref()
-            .map(|(response, source)| (response.as_str(), source.as_str()))
+            .map(|(response, module)| (response.as_str(), module.body()))
             .map_err(String::as_str);
         let children = Rc::clone(&O::core(realm).children);
         if let Some(Err(error)) = children.complete_module(js, child, &url, loaded) {
@@ -622,9 +622,12 @@ pub(crate) async fn await_source(answer: SourceAnswer) -> Result<LoadedSource, L
 pub(crate) fn module_answer(
     requested: &str,
     answer: LoadedSource,
-) -> Result<(String, String), String> {
+) -> Result<(String, LoadedModule), String> {
     let kind = match answer {
-        LoadedSource::Module { source, url } => return Ok((url, source)),
+        LoadedSource::Module { source, url } => return Ok((url, LoadedModule::Text(source))),
+        LoadedSource::ModuleBytecode { module, url } => {
+            return Ok((url, LoadedModule::Bytecode(module)));
+        }
         LoadedSource::StyleSheet(_) => "stylesheet",
         LoadedSource::Font(_) => "font",
         LoadedSource::Fetched(_) => "plain fetch",
@@ -740,7 +743,30 @@ mod tests {
             panic!("a script answer is read as one: {answered:?}");
         };
         assert_eq!(url, "app:///redirected.js");
-        assert_eq!(source, "export {};");
+        assert_eq!(source, LoadedModule::Text("export {};".to_owned()));
+        let runtime = quickjs_rust_bridge::Runtime::new().unwrap();
+        let compiler = runtime.create_context().unwrap();
+        let module = quickjs_rust_bridge::bytecode::Verifier::new()
+            .module_from_bytes(
+                &compiler
+                    .compile_module_bytecode("app:///compiled.js", "export {};")
+                    .unwrap(),
+            )
+            .unwrap();
+        let answered = module_answer(
+            REQUESTED,
+            LoadedSource::ModuleBytecode {
+                module: module.clone(),
+                url: "app:///compiled.js".to_owned(),
+            },
+        );
+        assert_eq!(
+            answered,
+            Ok((
+                "app:///compiled.js".to_owned(),
+                LoadedModule::Bytecode(module)
+            ))
+        );
     }
 
     /// Every answer that is not a script is refused the same way, naming the

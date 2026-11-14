@@ -2,8 +2,25 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, mpsc};
 use std::time::Duration;
 
+use bobcat_core::resource::VerifiedModule;
+
 use super::*;
 use crate::ResourcesConfig;
+
+/// A verified module the engine compiles for `source`, named `name`.
+fn verified_module(name: &str, source: &str) -> VerifiedModule {
+    let runtime = quickjs_rust_bridge::Runtime::new().unwrap();
+    let compiler = runtime.create_context().unwrap();
+    let bytes = compiler.compile_module_bytecode(name, source).unwrap();
+    quickjs_rust_bridge::bytecode::Verifier::new()
+        .module_from_bytes(&bytes)
+        .unwrap()
+}
+
+/// The module the held install registers at `<container>/chunk.js`.
+fn chunk_module() -> VerifiedModule {
+    verified_module("app:///chunk.js", "export default 3;")
+}
 
 fn resources() -> Resources {
     Resources::new(
@@ -246,7 +263,9 @@ struct ScriptInstaller {
     installed: Mutex<Vec<Url>>,
 }
 
-impl crate::ContainerInstaller<bobcat_core::PreparsedStyleSheet> for ScriptInstaller {
+impl crate::ContainerInstaller<bobcat_core::PreparsedStyleSheet, VerifiedModule>
+    for ScriptInstaller
+{
     fn install(
         &self,
         url: &Url,
@@ -587,6 +606,7 @@ fn install_held(
     let container = Url::parse(container).unwrap();
     let section = format!("{container}/root.js");
     let sheet = format!("{container}/style-info.css");
+    let bytecode = format!("{container}/chunk.js");
     resources.register_in_background(&container, move |registrar| {
         released.recv().expect("the test lets the install go");
         registrar
@@ -601,6 +621,9 @@ fn install_held(
                 &sheet,
                 Arc::new(bobcat_core::PreparsedStyleSheet::default()),
             )
+            .unwrap();
+        registrar
+            .register_module_bytecode(&bytecode, chunk_module())
             .unwrap();
         outcome
     });
@@ -641,11 +664,21 @@ async fn a_load_under_a_container_being_registered_waits_for_it() {
         "the load waits while the install runs"
     );
 
+    let bytecode = load(
+        &resources,
+        "app:///page/card.web.bundle/chunk.js",
+        SourceKind::Script,
+    );
     release.send(()).unwrap();
     let Ok(LoadedSource::Module { source, .. }) = result(module).await else {
         panic!("the held load answers what the install registered");
     };
     assert_eq!(source, "export default 2;");
+    let Ok(LoadedSource::ModuleBytecode { module, url }) = result(bytecode).await else {
+        panic!("the held load answers the module bytecode the install registered");
+    };
+    assert_eq!(module, chunk_module());
+    assert_eq!(url, "app:///page/card.web.bundle/chunk.js");
     assert!(matches!(
         result(sheet).await,
         Ok(LoadedSource::StyleSheet(StyleSheetSource::Preparsed(_)))
@@ -1234,5 +1267,50 @@ mod code_cache {
             global.remove(engine, first);
             global.remove(engine, second);
         }
+    }
+}
+
+/// Registered module bytecode answers a module request with its bytes and
+/// URL, and every
+/// other kind of request for its URL fails, as for a pre-parsed stylesheet:
+/// nothing but a module request reads it.
+#[tokio::test]
+async fn registered_module_bytecode_answers_only_a_module_request() {
+    let resources = resources();
+    let url = "app:///page/compiled.js";
+    let compiled = verified_module(url, "export default 1;");
+    let registered = resources
+        .register_module_bytecode(url, compiled.clone())
+        .unwrap();
+    assert_eq!(registered.as_str(), url);
+
+    let Ok(LoadedSource::ModuleBytecode {
+        module,
+        url: answered,
+    }) = result(load(&resources, url, SourceKind::Script)).await
+    else {
+        panic!("a module request reads module bytecode");
+    };
+    assert_eq!(module, compiled);
+    assert_eq!(answered, url);
+
+    for (kind, name) in [
+        (SourceKind::StyleSheet, "stylesheet"),
+        (SourceKind::Font, "font"),
+        (SourceKind::Fetch { timed: false }, "fetch"),
+    ] {
+        let Err(LynxViewError::Resource(error)) = result(load(&resources, url, kind)).await else {
+            panic!("a {name} request does not read module bytecode");
+        };
+        assert_eq!(
+            error.kind,
+            ResourceErrorKind::UnsupportedOperation,
+            "{name}"
+        );
+        assert!(
+            error.message.contains("module bytecode"),
+            "{}",
+            error.message
+        );
     }
 }

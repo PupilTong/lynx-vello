@@ -360,6 +360,32 @@ describe("MTS/BTS lifecycle runtime", () => {
     expect(moduleLoads).toEqual([]);
   });
 
+  it("calls a chunk answered as a module through its default export on every call", () => {
+    moduleLoads.length = 0;
+    reportedErrors.mockClear();
+    const url = "https://example.test/page/main.js/compiled.js?version=2#entry";
+    const receivers: unknown[] = [];
+    // The engine's answer for module bytecode: the namespace of the module,
+    // evaluated once, whose default export is the chunk's script.
+    hostModules.set(url, {
+      default: function (this: unknown, ...rest: unknown[]) {
+        receivers.push(this);
+        expect(rest).toEqual([]);
+      },
+    });
+    expect(mts.__LoadLepusChunk("compiled", {})).toBe(true);
+    expect(mts.__LoadLepusChunk("compiled", {})).toBe(true);
+    expect(receivers).toEqual([globalThis, globalThis]);
+    expect(moduleLoads.map(([loaded]) => loaded)).toEqual([url, url]);
+
+    // A default export that throws is reported, and the chunk was found.
+    hostModules.set(url, { default() { throw Error("module chunk failed"); } });
+    expect(mts.__LoadLepusChunk("compiled", {})).toBe(true);
+    expect(reportedErrors).toHaveBeenCalledTimes(1);
+    expect(reportedErrors.mock.calls[0]![1]).toContain("module chunk failed");
+    hostModules.delete(url);
+  });
+
   it("answers a chunk the host cannot load with false, and a chunk that fails with true", () => {
     moduleLoads.length = 0;
     reportedErrors.mockClear();

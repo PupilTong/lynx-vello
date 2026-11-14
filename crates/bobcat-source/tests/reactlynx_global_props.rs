@@ -2,6 +2,12 @@
 // These integration tests use native threads and GPU capture.
 #![cfg(not(target_arch = "wasm32"))]
 
+#[path = "../../../packages/reactlynx-test-fixtures/bytecode.rs"]
+#[allow(
+    clippy::doc_markdown,
+    reason = "the registry is the fixture package's file"
+)]
+mod bytecode;
 #[path = "../../../packages/reactlynx-test-fixtures/fixtures.rs"]
 mod fixtures;
 
@@ -27,24 +33,59 @@ use support::{DelayedBackground, PendingSource};
 const SCREEN: bobcat_core::ScreenMetrics =
     bobcat_core::ScreenMetrics::for_viewport(120.0, 120.0, 1.0);
 
+/// How the page is encoded: every script a string section, or as the
+/// encoder writes it for production, main-thread bytecode with the
+/// background as source or as bytecode too.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Form {
+    Source,
+    Bytecode,
+    JsBytecode,
+}
+
 #[tokio::test]
 async fn default_global_props_initialize_module_and_state_then_rerender() {
-    verify(false, false).await;
+    verify(false, false, Form::Source).await;
 }
 
 #[tokio::test]
 async fn global_props_wait_for_bts_readiness_before_updates() {
-    verify(true, false).await;
+    verify(true, false, Form::Source).await;
 }
 
 #[tokio::test]
 async fn development_global_props_follow_default_reactive_hooks() {
-    verify(false, true).await;
-    verify(true, true).await;
+    verify(false, true, Form::Source).await;
+    verify(true, true, Form::Source).await;
 }
 
-async fn verify(delayed: bool, development: bool) {
-    let mut page = PropsView::new(delayed, development).await;
+#[tokio::test]
+async fn bytecode_global_props_initialize_module_and_state_then_rerender() {
+    for form in [Form::Bytecode, Form::JsBytecode] {
+        verify(false, false, form).await;
+        verify(true, false, form).await;
+    }
+}
+
+/// A development build's main-thread runtime calls `eval` directly
+/// (`ReactLynx`'s snapshot-patch `evaluate`), which the converter refuses by
+/// ruling, so both bytecode forms of the development page fail to decode,
+/// naming `ROOT_LEPUS` and the refusal.
+#[test]
+fn development_bytecode_pages_are_refused() {
+    let fixture = bytecode::fixture("react-global-props-development");
+    let input = Url::parse("app:///react-global-props.lynx.bundle").unwrap();
+    for bytes in [fixture.page, fixture.js_bytecode_page] {
+        let error = PageSource::from_bytes(&input, bytes)
+            .expect_err("a development page is refused")
+            .to_string();
+        assert!(error.contains("ROOT_LEPUS"), "{error}");
+        assert!(error.contains("eval"), "{error}");
+    }
+}
+
+async fn verify(delayed: bool, development: bool, form: Form) {
+    let mut page = PropsView::new(delayed, development, form).await;
     assert!(matches!(
         page.view.update_global_props("{}".into()),
         Err(EngineError::NotReady)
@@ -91,17 +132,22 @@ struct PropsView {
 }
 
 impl PropsView {
-    async fn new(delayed: bool, development: bool) -> Self {
+    async fn new(delayed: bool, development: bool, form: Form) -> Self {
         let input = Url::parse("app:///react-global-props.lynx.bundle").unwrap();
-        let page = PageSource::from_native_bundle(
-            &input,
-            if development {
-                fixtures::fixture("react-global-props-development").page
-            } else {
-                fixtures::fixture("react-global-props").page
-            },
-            "react-global-props__main-thread",
-        )
+        let bytecode = bytecode::fixture("react-global-props");
+        let page = match form {
+            Form::Source => PageSource::from_native_bundle(
+                &input,
+                if development {
+                    fixtures::fixture("react-global-props-development").page
+                } else {
+                    fixtures::fixture("react-global-props").page
+                },
+                "react-global-props__main-thread",
+            ),
+            Form::Bytecode => PageSource::from_bytes(&input, bytecode.page),
+            Form::JsBytecode => PageSource::from_bytes(&input, bytecode.js_bytecode_page),
+        }
         .unwrap();
         let resources = Resources::new(ResourcesConfig::default(), || {});
         page.register_with(&resources);

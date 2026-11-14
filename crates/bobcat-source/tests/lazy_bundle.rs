@@ -5,6 +5,12 @@
 // These integration tests use native threads and GPU capture.
 #![cfg(not(target_arch = "wasm32"))]
 
+#[path = "../../../packages/reactlynx-test-fixtures/bytecode.rs"]
+#[allow(
+    clippy::doc_markdown,
+    reason = "the registry is the fixture package's file"
+)]
+mod bytecode;
 #[path = "../../../packages/reactlynx-test-fixtures/fixtures.rs"]
 mod fixtures;
 
@@ -26,15 +32,50 @@ const SCREEN: bobcat_core::ScreenMetrics =
 /// chunk is registered at this origin's root rather than beside the page.
 const ORIGIN: &str = "https://cdn.test";
 
+/// How a page or its lazy chunks are encoded: every script as source, or as
+/// the encoder writes them for production — main-thread code as bytecode,
+/// and with `JsBytecode` the manifest as bytecode too (a page's
+/// `JS_BYTECODE`; a lazy chunk's is empty).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Form {
+    Source,
+    Bytecode,
+    JsBytecode,
+}
+
+/// The page and chunk forms each lazy fixture also runs in.
+const BYTECODE_FORMS: [(Form, Form); 4] = [
+    (Form::Bytecode, Form::Source),
+    (Form::Bytecode, Form::Bytecode),
+    (Form::JsBytecode, Form::Source),
+    (Form::JsBytecode, Form::JsBytecode),
+];
+
 /// The page, its lazy chunks, and a resource system that installs containers.
-fn registered(name: &str) -> (bobcat_core::ViewSources, Resources) {
+fn registered(
+    name: &str,
+    page_form: Form,
+    chunk_form: Form,
+) -> (bobcat_core::ViewSources, Resources) {
     let fixture = fixtures::fixture(name);
+    let bytecode = bytecode::fixture(name);
     let input = Url::parse(&format!("{ORIGIN}/{name}.lynx.bundle")).expect("a page URL");
     // A source-based `.lynx.bundle` names its main-thread module after the
-    // entry it was compiled from, so it is selected explicitly.
-    let page =
-        PageSource::from_native_bundle(&input, fixture.page, &format!("{name}__main-thread"))
-            .expect("the card decodes");
+    // entry it was compiled from, so it is selected explicitly; a bytecode
+    // page's entry is its `ROOT_LEPUS`.
+    let page = match page_form {
+        Form::Source => {
+            PageSource::from_native_bundle(&input, fixture.page, &format!("{name}__main-thread"))
+        }
+        Form::Bytecode => PageSource::from_bytes(&input, bytecode.page),
+        Form::JsBytecode => PageSource::from_bytes(&input, bytecode.js_bytecode_page),
+    }
+    .expect("the card decodes");
+    let chunks = match chunk_form {
+        Form::Source => fixture.chunks,
+        Form::Bytecode => bytecode.chunks,
+        Form::JsBytecode => bytecode.js_bytecode_chunks,
+    };
     let resources = Resources::new(
         ResourcesConfig {
             base_url: Some(input.clone()),
@@ -46,7 +87,7 @@ fn registered(name: &str) -> (bobcat_core::ViewSources, Resources) {
         || {},
     );
     page.register_with(&resources);
-    for (chunk, bytes) in fixture.chunks {
+    for (chunk, bytes) in chunks {
         resources
             .register(&format!("{ORIGIN}/{chunk}"), *bytes, None)
             .expect("a chunk URL is a URL");
@@ -64,7 +105,25 @@ const LAZY_BOX: &[((usize, usize), [u8; 4])] = &[((40, 40), [0, 0, 255, 255])];
 /// components' own CSS reaches a frame. Any other runtime event fails the
 /// test.
 async fn boots(name: &str, expected: &str, probes: &[((usize, usize), [u8; 4])]) {
-    let (sources, resources) = registered(name);
+    boots_in(name, Form::Source, Form::Source, expected, probes).await;
+}
+
+/// [`boots`] for every bytecode form of the page and its chunks.
+async fn boots_from_bytecode(name: &str, expected: &str, probes: &[((usize, usize), [u8; 4])]) {
+    for (page_form, chunk_form) in BYTECODE_FORMS {
+        boots_in(name, page_form, chunk_form, expected, probes).await;
+    }
+}
+
+async fn boots_in(
+    name: &str,
+    page_form: Form,
+    chunk_form: Form,
+    expected: &str,
+    probes: &[((usize, usize), [u8; 4])],
+) {
+    let (sources, resources) = registered(name, page_form, chunk_form);
+    let name = &format!("{name} ({page_form:?} page, {chunk_form:?} chunks)");
     let group = LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Auto)
         .await
         .expect("the group starts");
@@ -123,12 +182,22 @@ async fn a_compiled_lazy_card_fetches_its_container_and_renders_it() {
     boots("react-lazy", "react-lazy-ready", LAZY_BOX).await;
 }
 
+#[tokio::test]
+async fn a_bytecode_lazy_card_fetches_its_container_and_renders_it() {
+    boots_from_bytecode("react-lazy", "react-lazy-ready", LAZY_BOX).await;
+}
+
 /// The synchronous shape: `lynx.fetchBundle(url, {}).wait(5)` parks the BTS
 /// job until the container is installed, and the section loads before the
 /// call returns.
 #[tokio::test]
 async fn a_sync_lazy_card_waits_out_its_container_on_the_background_thread() {
     boots("react-lazy-sync", "react-lazy-sync-listening", LAZY_BOX).await;
+}
+
+#[tokio::test]
+async fn a_bytecode_sync_lazy_card_waits_out_its_container() {
+    boots_from_bytecode("react-lazy-sync", "react-lazy-sync-listening", LAZY_BOX).await;
 }
 
 /// The nested shape: an async lazy `Outer` whose container carries the
@@ -145,18 +214,20 @@ async fn a_sync_lazy_card_waits_out_its_container_on_the_background_thread() {
 /// `null`, and nothing is adopted, requested or reported.
 #[tokio::test]
 async fn a_nested_lazy_card_adopts_the_outer_containers_css() {
-    boots(
-        "react-lazy-nested",
-        "react-lazy-nested-ready",
-        &[
-            // Inside `.nested-outer`, outside the 80px `Inner`.
-            ((90, 90), [255, 165, 0, 255]),
-            // Inside `Inner`, after the shared module recoloured it.
-            ((40, 40), [128, 0, 128, 255]),
-        ],
-    )
-    .await;
+    boots("react-lazy-nested", "react-lazy-nested-ready", NESTED).await;
 }
+
+#[tokio::test]
+async fn a_bytecode_nested_lazy_card_adopts_the_outer_containers_css() {
+    boots_from_bytecode("react-lazy-nested", "react-lazy-nested-ready", NESTED).await;
+}
+
+const NESTED: &[((usize, usize), [u8; 4])] = &[
+    // Inside `.nested-outer`, outside the 80px `Inner`.
+    ((90, 90), [255, 165, 0, 255]),
+    // Inside `Inner`, after the shared module recoloured it.
+    ((40, 40), [128, 0, 128, 255]),
+];
 
 /// What the real `react-lazy` chunk decodes to, URL by URL: the one rule both
 /// realms write, over a container the compiler actually produced.

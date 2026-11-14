@@ -151,7 +151,7 @@ pub(crate) fn install(
             }
             match answer {
                 Ok(Ok(LoadedSource::Fetched(_))) => Ok(HostValue::Undefined),
-                Ok(Ok(LoadedSource::Module { .. })) => {
+                Ok(Ok(LoadedSource::Module { .. } | LoadedSource::ModuleBytecode { .. })) => {
                     Err("the fetcher returned a script".to_owned())
                 }
                 Ok(Ok(LoadedSource::StyleSheet(_))) => {

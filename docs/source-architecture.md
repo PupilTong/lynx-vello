@@ -135,6 +135,59 @@ Accepted consequences, each a change from the two paths this replaced:
 - A source-based `.lynx.bundle` loaded as a `<frame>` without an explicit
   entry has no `root.js`, since nothing guesses one.
 
+## Native bundles that carry bytecode
+
+A native `.lynx.bundle` usually carries its scripts as PrimJS bytecode, not
+text. `ContainerSources` converts each such section to a module of the fork's
+bytecode when it builds the container, has the bridge's verifier check and
+write it, and registers the resulting `VerifiedModule`
+(`Registrar::register_module_bytecode`); the design, the rules a
+converted program is held to and the rulings are in
+`docs/primjs-bytecode-conversion-design.md`.
+
+`native::decode_container` returns the template model and the bytecode
+sections; `native::decode` and `native::convert`, the web-bundle tool path,
+still answer `CodeCacheBundle`, since a `.web.bundle` cannot hold bytecode.
+Each section is read (`primjs::read_payload`) and converted
+(`primjs::convert_script`) with the URL it is registered under as its module
+name, through one `quickjs_rust_bridge::bytecode::Verifier` for the whole
+container. The verifier checks each converted program against every rule and
+writes it, once, here; a realm that loads the module runs no Rust check of its
+own, and the fork reads it computing every function's stack size, trusting the
+structure the bridge's writer gave it. Conversion needs an engine
+only to compile regular expression literals, and that engine is the
+verifier's: a runtime and a realm with only the basic objects, made on the
+first literal, with each pattern and flags compiled once for the converter and
+the rule that checks the literal alike. A section that fails to read, convert
+or verify refuses the whole container.
+
+| Section | URL | Names bound as imports | The module's default export |
+| --- | --- | --- | --- |
+| `ROOT_LEPUS`, or a Lepus chunk `root` | `P/root.js S` (the entry) | main-thread preamble | none: the completion value is dropped |
+| Lepus chunk `main-thread` / `*__main-thread` | `P/<n>.js S` | main-thread preamble | the completion value |
+| any other Lepus chunk | `P/<n>.js S` | main-thread preamble | the script itself, as a function `__LoadLepusChunk` calls on every call |
+| the explicit native entry, when it is a bytecode chunk | its own URL by the rows above, and `P/root.js S` | main-thread preamble | none at `root.js` |
+| `JsBytecode` custom section, any name | `P/<n>.js S` | main-thread preamble | the completion value |
+| `JS_BYTECODE` file `p` | `P/<p> S` | background preamble, with its names bound to `undefined` | the completion value |
+
+A `JsBytecode` custom section is main-thread code whatever it is called: the
+native encoder compiles every one with its main-thread context. In a lazy
+bundle built for bytecode the main-thread code is the custom section
+`main-thread` and the background code stays a string custom section, which
+goes the text way.
+
+A section the reader or the converter refuses fails the whole container
+(`native::ConvertError::Bytecode`, naming the section and the reason, inside
+`SourceError::DecodeNativeBundle`): a page does not load, and a lazy bundle's
+fetch fails with that reason. A text body and a bytecode body at one URL are a
+conflict, as two different texts are.
+
+Tests: `crates/bobcat-source/tests/native_bytecode.rs` (the mapping, module
+names, a refused section, the four hand-written cards against their source
+forms), and the `reactlynx_*` and `lazy_bundle` targets, which run their
+production fixtures in source form and in both bytecode forms under the same
+assertions.
+
 ## API and dependencies
 
 | Module / adapter (always available) | API | Dependencies |

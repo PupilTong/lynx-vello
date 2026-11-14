@@ -66,6 +66,31 @@ impl Default for QuickJsConfig {
     }
 }
 
+/// The body of one module answer: source text, or verified module bytecode
+/// of the engine's format, which the engine reads computing stack sizes.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum ModuleBody<'a> {
+    Text(&'a str),
+    Bytecode(&'a quickjs::bytecode::VerifiedModule),
+}
+
+/// A module answer's body, owned, as [`crate::realm::owner::module_answer`]
+/// reads it out of a [`crate::resource::LoadedSource`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum LoadedModule {
+    Text(String),
+    Bytecode(quickjs::bytecode::VerifiedModule),
+}
+
+impl LoadedModule {
+    pub(crate) fn body(&self) -> ModuleBody<'_> {
+        match self {
+            Self::Text(text) => ModuleBody::Text(text),
+            Self::Bytecode(module) => ModuleBody::Bytecode(module),
+        }
+    }
+}
+
 /// One realm on a [`ScriptRuntime`] — one view's global object, modules and
 /// host functions — with Bobcat's job policy on it.
 ///
@@ -517,11 +542,16 @@ impl ScriptEngine {
     /// for every caller: a NUL in the error text is replaced with U+FFFD, and
     /// a response URL containing one fails the module instead, because the
     /// replaced URL would name an address the fetcher never answered for.
+    ///
+    /// Module bytecode is verified already ([`LoadedModule::Bytecode`]) and
+    /// is handed to the bridge as it is; the engine's read when the module
+    /// is compiled, which computes every function's stack size, is what can
+    /// still refuse it, and its refusal fails the import with the reason.
     pub(crate) fn complete_module(
         &self,
         runtime: &mut ScriptRuntime,
         name: &str,
-        result: Result<(&str, &str), &str>,
+        result: Result<(&str, ModuleBody<'_>), &str>,
     ) -> Result<(), ScriptError> {
         const PHASE: ScriptErrorPhase = ScriptErrorPhase::ExecuteModule;
         let result = match result {
@@ -535,7 +565,7 @@ impl ScriptEngine {
             // The code cache's choice is about how the text becomes a
             // module, never what it is: the module behaves the same either
             // way, so a text it does not cache keeps the plain completion.
-            Ok((url, text)) => match self.code.module_code(name, text) {
+            Ok((url, ModuleBody::Text(text))) => match self.code.module_code(name, text) {
                 crate::code_cache::ModuleCode::Compile => {
                     self.realm.complete_module(name, Ok((url, text)))
                 }
@@ -543,6 +573,9 @@ impl ScriptEngine {
                     .realm
                     .complete_module_with(name, url, text, code.as_bridge()),
             },
+            Ok((url, ModuleBody::Bytecode(module))) => {
+                self.realm.complete_module_bytecode(name, url, module)
+            }
             Err(error) => self.realm.complete_module(name, Err(error.as_str())),
         };
         completed.map_err(|error| map_quickjs_error(error, PHASE))?;
@@ -1249,7 +1282,10 @@ mod tests {
             .complete_module(
                 &mut runtime,
                 "app:///url.js",
-                Ok(("app:///redirected\0.js", "export default 1;")),
+                Ok((
+                    "app:///redirected\0.js",
+                    ModuleBody::Text("export default 1;"),
+                )),
             )
             .expect("a response URL with a NUL completes the module");
         engine

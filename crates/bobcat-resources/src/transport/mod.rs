@@ -199,6 +199,11 @@ impl<P: Platform> Transports<P> {
                     ResourceErrorPhase::Open,
                     "the URL is registered as a pre-parsed stylesheet, which has no bytes",
                 )),
+                Registered::ModuleBytecode(_) => Err(Failure::new(
+                    ResourceErrorKind::UnsupportedOperation,
+                    ResourceErrorPhase::Open,
+                    "the URL is registered as module bytecode, which only a module request reads",
+                )),
             });
         }
         if url.scheme() == "data" {

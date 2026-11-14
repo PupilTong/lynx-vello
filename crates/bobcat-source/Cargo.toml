@@ -15,6 +15,7 @@ bench = false
 
 [dependencies]
 bobcat-core = { workspace = true }
+quickjs-rust-bridge = { workspace = true }
 bytecheck = { workspace = true }
 bytes = { workspace = true }
 rkyv = { workspace = true }

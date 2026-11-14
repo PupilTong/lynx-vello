@@ -145,6 +145,22 @@ is evaluated **once per realm**, because a URL is one module per realm.
 `docs/worker-resources-runtime.md` "Lazy containers". Data/update/reload
 policy remains separate.
 
+### A chunk supplied as bytecode
+
+A named Lepus chunk of a bytecode bundle is registered as module bytecode
+whose default export is the chunk's script function
+(`docs/source-architecture.md`, "Native bundles that carry bytecode"). The
+synchronous loader then answers a module, and `__LoadLepusChunk` calls that
+default export with `this` set to `globalThis`, again on every call. Two
+things differ from a text chunk, which is compiled as a function body over
+the preamble's names: the chunk's top-level `var` and function declarations
+are properties of the global object, created once when the module links, and
+its names are live module imports instead of arguments read at each call.
+`CHUNK_BINDINGS` has nine names the main-thread preamble does not import
+(`CSSStyleValue`, `Document` and seven `__Bobcat*` names); a text chunk
+receives them as parameters and a bytecode chunk does not see them
+(`crates/bobcat-core/tests/module_bytecode.rs` pins the difference).
+
 ## Validation coverage
 
 A real QuickJS boot test verifies synchronous processor/render ordering,

@@ -32,6 +32,27 @@
 //! | the container's own non-empty `StyleInfo` | `P/style-info.css S` | a lowered [`PreparsedStyleSheet`] |
 //! | the BTS boot script (every container with an entry) | `U` with its fragment replaced by `#background-thread` | `background_boot_source` |
 //!
+//! A `.lynx.bundle`'s `PrimJS` bytecode sections are converted
+//! (`crate::native::primjs::convert_script`), checked and written once by the
+//! container's one [`Verifier`], and registered as the [`VerifiedModule`] it
+//! answers, each named by its URL, by the same rule:
+//!
+//! | Section | URL | Imports, completion |
+//! |---|---|---|
+//! | `ROOT_LEPUS` (not the empty program of an external layout) | `P/root.js S`, the entry | [`MTS_CHUNK_IMPORTS`], dropped |
+//! | a Lepus chunk `main-thread` / `*__main-thread` | `P/<name>.js S` | MTS, the default export |
+//! | any other Lepus chunk | `P/<name>.js S` | MTS, the script itself the default export (`__LoadLepusChunk` runs it on every call) |
+//! | the Lepus chunk named as the explicit native entry | as above, and `P/root.js S` | MTS, dropped at `root.js` |
+//! | every `JsBytecode` custom section, whatever its name | `P/<name>.js S` | MTS, the default export |
+//! | a `JS_BYTECODE` path `p` | `P/<p> S` | [`BTS_CHUNK_IMPORTS`] and [`BTS_CHUNK_UNDEFINED`], the default export |
+//!
+//! A `JsBytecode` custom section is main-thread code: the encoder compiles
+//! each with the main-thread context. A container is a page's when it has
+//! a `root` as source or bytecode, and its BTS boot loads `/app-service.js`
+//! when the manifest has it as source or as a `JS_BYTECODE` file. A section
+//! the reader, the converter or the verifier refuses refuses the whole
+//! container, with [`crate::native::ConvertError::Bytecode`].
+//!
 //! Who asks for each: a page's boot imports `root.js`; MTS's
 //! `__LoadLepusChunk` a Lepus chunk and its `lynx.loadScript` (a lazy
 //! container's prepare) a `main-thread` section; BTS's
@@ -59,10 +80,11 @@
 //!
 //! # Collisions
 //!
-//! Two names that reach one URL with one text are one registration. Two that
-//! reach it with different texts, or a stylesheet URL some script also
-//! reaches, are [`SourceError::ConflictingSection`]: no half of a container
-//! is registered. A container URL that cannot be a base has no path to hang
+//! Two names that reach one URL with one text (or equal module bytecode)
+//! are one registration. Two that reach it with different bodies of either
+//! kind, or a stylesheet URL some script also reaches, are
+//! [`SourceError::ConflictingSection`]: no half of a container is
+//! registered. A container URL that cannot be a base has no path to hang
 //! anything under, and is [`SourceError::OpaqueContainerUrl`].
 //!
 //! The URLs are equal only while the two bases are: the container URL is
@@ -76,11 +98,16 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use bobcat_core::{MTS_CHUNK_PREAMBLE, PageConfig, PreparsedStyleSheet};
+use bobcat_core::{
+    BTS_CHUNK_IMPORTS, BTS_CHUNK_UNDEFINED, MTS_CHUNK_IMPORTS, MTS_CHUNK_PREAMBLE, PageConfig,
+    PreparsedStyleSheet,
+};
 use bytes::Bytes;
+use quickjs_rust_bridge::bytecode::{VerifiedModule, Verifier};
 use url::Url;
 use vant::registry::{ContainerInstaller, Register, RegisterError};
 
+use crate::native::primjs::{BytecodeSection, Completion, ConvertOptions, SectionKind};
 use crate::page::{
     BundleTarget, SourceError, background_boot_source, bounded_diagnostic, bts_module_source,
     diagnostic_url, looks_like_lynx_xml, looks_like_native_bundle, looks_like_web_bundle,
@@ -90,8 +117,8 @@ use crate::web::style_info::{self, AlignedSection};
 use crate::web::{DecodeError, Sections};
 
 /// What a [`ContainerInstaller`] registers through, over this crate's
-/// stylesheet type.
-pub(crate) type Registrar = vant::registry::Registrar<PreparsedStyleSheet>;
+/// stylesheet type and the bridge's verified module type.
+pub(crate) type Registrar = vant::registry::Registrar<PreparsedStyleSheet, VerifiedModule>;
 
 /// The Lepus chunk a container's entry is.
 pub(crate) const ROOT: &str = "root";
@@ -100,6 +127,8 @@ pub(crate) const ROOT: &str = "root";
 const MAIN_THREAD_SECTION: &str = "main-thread";
 const MAIN_THREAD_SUFFIX: &str = "__main-thread";
 const SCRIPT_MEDIA_TYPE: &str = "text/javascript; charset=utf-8";
+/// The manifest path whose presence makes a container's BTS boot load it.
+const APP_SERVICE: &str = "/app-service.js";
 
 /// One decoded container: every body and stylesheet it carries, at the URL
 /// each answers under, and what a view booting it as a page is built from.
@@ -109,6 +138,9 @@ pub struct ContainerSources {
     target: BundleTarget,
     /// Every script body, ordered by URL, as the text registered for it.
     scripts: Vec<(Url, Arc<str>)>,
+    /// Every converted bytecode section, ordered by URL, as the verified
+    /// module registered for it.
+    module_bytecode: Vec<(Url, VerifiedModule)>,
     /// One named stylesheet per CSS custom section, ordered by URL: an entry
     /// of the `CustomSectionsStyleInfo` section, a legacy `encoding: "CSS"`
     /// JSON section, or a `.lynx.bundle`'s CSS custom section.
@@ -136,7 +168,7 @@ impl ContainerSources {
             return Err(SourceError::NotAContainer(diagnostic_url(url)));
         }
         if looks_like_native_bundle(bytes) {
-            return Self::from_template(url, &decode_native(url, bytes)?, BundleTarget::Lynx, None);
+            return Self::from_native(url, bytes, None);
         }
         Self::from_web_bundle(url, bytes)
     }
@@ -151,12 +183,22 @@ impl ContainerSources {
     /// [`SourceError::MissingNativeEntry`] when no Lepus chunk is named
     /// `entry`, and every error [`Self::from_bytes`] has.
     pub fn from_native_bundle(url: &Url, bytes: &[u8], entry: &str) -> Result<Self, SourceError> {
-        Self::from_template(
-            url,
-            &decode_native(url, bytes)?,
-            BundleTarget::Lynx,
-            Some(entry),
-        )
+        Self::from_native(url, bytes, Some(entry))
+    }
+
+    /// A `.lynx.bundle`: its source sections as [`Self::from_template`]
+    /// registers a template's, and each `PrimJS` bytecode section converted
+    /// to a module of the engine's bytecode (see [`bytecode_body`]).
+    fn from_native(url: &Url, bytes: &[u8], entry: Option<&str>) -> Result<Self, SourceError> {
+        let (template, bytecode) = crate::native::decode_container(bytes).map_err(|source| {
+            SourceError::DecodeNativeBundle {
+                input: diagnostic_url(url),
+                source,
+            }
+        })?;
+        let mut parts = Parts::of_template(&template);
+        parts.bytecode = bytecode;
+        Self::from_parts(url, parts, BundleTarget::Lynx, entry)
     }
 
     /// A `.web.bundle`, read where it lies: every body is copied once, into
@@ -202,41 +244,20 @@ impl ContainerSources {
             lepus_code: sections.lepus_code,
             manifest: sections.manifest,
             custom_sections: sections.custom_sections.as_ref(),
+            bytecode: Vec::new(),
         };
         Self::from_parts(url, parts, BundleTarget::Web, None)
     }
 
-    /// A container from a decoded template: a `.lynx.bundle`'s, or one a
-    /// test built.
+    /// A container from a decoded template a test built.
+    #[cfg(test)]
     pub(crate) fn from_template(
         url: &Url,
         template: &crate::web::WebTemplate,
         target: BundleTarget,
         entry: Option<&str>,
     ) -> Result<Self, SourceError> {
-        let parts = Parts {
-            lepus_code: borrowed(&template.lepus_code),
-            manifest: borrowed(&template.manifest),
-            custom_sections: template.custom_sections.as_ref(),
-            config: PageConfig {
-                default_display_linear: template.config_flag("defaultDisplayLinear"),
-                default_overflow_visible: template.config_flag("defaultOverflowVisible"),
-                enable_css_selector: template.config_flag("enableCSSSelector"),
-                enable_js_data_processor: template.config_flag("enableJSDataProcessor"),
-                enable_css_inheritance: template.config_flag("enableCSSInheritance"),
-            },
-            style_info: template
-                .style_info
-                .as_ref()
-                .map(crate::lower_style::to_preparsed_style_sheet),
-            style_sheets: crate::custom_style::named_style_sheets(
-                template.custom_sections.as_ref(),
-                template
-                    .custom_sections_style_info
-                    .iter()
-                    .map(|(name, style_info)| (name.as_str(), style_info)),
-            ),
-        };
+        let parts = Parts::of_template(template);
         Self::from_parts(url, parts, target, entry)
     }
 
@@ -249,15 +270,25 @@ impl ContainerSources {
         if url.cannot_be_a_base() {
             return Err(SourceError::OpaqueContainerUrl(diagnostic_url(url)));
         }
+        // A Lepus chunk by that name, as source or as bytecode (whose root
+        // is the `ROOT_LEPUS` section).
+        let has_chunk = |name: &str| {
+            parts.lepus_code.contains_key(name)
+                || parts.bytecode.iter().any(|section| match section.kind {
+                    SectionKind::RootLepus => name == ROOT,
+                    SectionKind::LepusChunk => section.name == name,
+                    _ => false,
+                })
+        };
         let entry_name = match entry {
-            Some(name) if parts.lepus_code.contains_key(name) => Some(name),
+            Some(name) if has_chunk(name) => Some(name),
             Some(name) => {
                 return Err(SourceError::MissingNativeEntry {
                     input: diagnostic_url(url),
                     entry: bounded_diagnostic(name.to_owned()),
                 });
             }
-            None => parts.lepus_code.contains_key(ROOT).then_some(ROOT),
+            None => has_chunk(ROOT).then_some(ROOT),
         };
 
         let mut scripts = Scripts::new(url);
@@ -266,12 +297,12 @@ impl ContainerSources {
         }
         // A native entry named explicitly is the entry at `root.js` as well
         // as the chunk under its own name.
-        if let Some(name) = entry_name.filter(|name| *name != ROOT) {
-            scripts.insert(
-                named_chunk_url(url, ROOT),
-                mts_entry_source(parts.lepus_code[name]),
-            )?;
+        if let Some(name) = entry_name.filter(|name| *name != ROOT)
+            && let Some(body) = parts.lepus_code.get(name)
+        {
+            scripts.insert(named_chunk_url(url, ROOT), mts_entry_source(body))?;
         }
+        insert_bytecode(&mut scripts, url, &parts.bytecode, entry_name)?;
         if let Some(serde_json::Value::Object(sections)) = parts.custom_sections {
             for (name, section) in sections {
                 // A section whose content is not a string carries no body — a
@@ -313,13 +344,13 @@ impl ContainerSources {
             let boot = background_boot_url(url);
             scripts.insert(
                 boot.clone(),
-                background_boot_source(url, parts.manifest.contains_key("/app-service.js")),
+                background_boot_source(url, has_app_service(&parts)),
             )?;
             Some(boot)
         } else {
             None
         };
-        let scripts = scripts.finish();
+        let (scripts, module_bytecode) = scripts.finish();
 
         let style_sheets: Vec<(Url, Arc<PreparsedStyleSheet>)> = parts
             .style_sheets
@@ -334,6 +365,9 @@ impl ContainerSources {
             if scripts
                 .binary_search_by(|(script_url, _)| script_url.cmp(sheet_url))
                 .is_ok()
+                || module_bytecode
+                    .binary_search_by(|(script_url, _)| script_url.cmp(sheet_url))
+                    .is_ok()
             {
                 return Err(conflict(url, sheet_url));
             }
@@ -343,6 +377,7 @@ impl ContainerSources {
             url: url.clone(),
             target,
             scripts,
+            module_bytecode,
             style_sheets,
             style_info,
             entry,
@@ -398,6 +433,14 @@ impl ContainerSources {
         &self.scripts
     }
 
+    /// Every converted `PrimJS` bytecode section, ordered by URL, as the
+    /// module registered for it (a module of the engine's own bytecode,
+    /// named by that URL, which the bridge's verifier accepted).
+    #[must_use]
+    pub fn module_bytecode(&self) -> &[(Url, VerifiedModule)] {
+        &self.module_bytecode
+    }
+
     /// Every named stylesheet, ordered by URL. The container's own
     /// `StyleInfo` is not among them: see [`Self::style_info`].
     #[must_use]
@@ -411,7 +454,7 @@ impl ContainerSources {
     ///
     /// Every URL was derived from an already-parsed [`Url`], so registration
     /// cannot fail URL validation.
-    pub fn register_with(&self, resources: &impl Register<PreparsedStyleSheet>) {
+    pub fn register_with(&self, resources: &impl Register<PreparsedStyleSheet, VerifiedModule>) {
         self.register(resources)
             .expect("a container's registration URLs are derived from a parsed URL");
     }
@@ -427,11 +470,17 @@ impl ContainerSources {
         self.register(registrar)
     }
 
-    fn register(&self, sink: &impl Register<PreparsedStyleSheet>) -> Result<(), RegisterError> {
+    fn register(
+        &self,
+        sink: &impl Register<PreparsedStyleSheet, VerifiedModule>,
+    ) -> Result<(), RegisterError> {
         for registration in self.registrations() {
             match registration {
                 Registration::Script(url, source) => {
                     sink.register(url.as_str(), script_bytes(source), Some(SCRIPT_MEDIA_TYPE))?;
+                }
+                Registration::ModuleBytecode(url, module) => {
+                    sink.register_module_bytecode(url.as_str(), module.clone())?;
                 }
                 Registration::StyleSheet(url, sheet) => {
                     sink.register_style_sheet(url.as_str(), Arc::clone(sheet))?;
@@ -441,12 +490,18 @@ impl ContainerSources {
         Ok(())
     }
 
-    /// The one list both `register_*` drain: the scripts, then the named
-    /// stylesheets, then the container's own `StyleInfo`.
+    /// The one list both `register_*` drain: the scripts, the module
+    /// bytecode, then the named stylesheets, then the container's own
+    /// `StyleInfo`.
     fn registrations(&self) -> impl Iterator<Item = Registration<'_>> {
         self.scripts
             .iter()
             .map(|(url, source)| Registration::Script(url, source))
+            .chain(
+                self.module_bytecode
+                    .iter()
+                    .map(|(url, module)| Registration::ModuleBytecode(url, module)),
+            )
             .chain(
                 self.style_sheets
                     .iter()
@@ -458,7 +513,38 @@ impl ContainerSources {
 
 enum Registration<'a> {
     Script(&'a Url, &'a Arc<str>),
+    ModuleBytecode(&'a Url, &'a VerifiedModule),
     StyleSheet(&'a Url, &'a Arc<PreparsedStyleSheet>),
+}
+
+impl<'t> Parts<'t> {
+    /// A decoded template's parts, with no bytecode section.
+    fn of_template(template: &'t crate::web::WebTemplate) -> Self {
+        Parts {
+            lepus_code: borrowed(&template.lepus_code),
+            manifest: borrowed(&template.manifest),
+            custom_sections: template.custom_sections.as_ref(),
+            config: PageConfig {
+                default_display_linear: template.config_flag("defaultDisplayLinear"),
+                default_overflow_visible: template.config_flag("defaultOverflowVisible"),
+                enable_css_selector: template.config_flag("enableCSSSelector"),
+                enable_js_data_processor: template.config_flag("enableJSDataProcessor"),
+                enable_css_inheritance: template.config_flag("enableCSSInheritance"),
+            },
+            style_info: template
+                .style_info
+                .as_ref()
+                .map(crate::lower_style::to_preparsed_style_sheet),
+            style_sheets: crate::custom_style::named_style_sheets(
+                template.custom_sections.as_ref(),
+                template
+                    .custom_sections_style_info
+                    .iter()
+                    .map(|(name, style_info)| (name.as_str(), style_info)),
+            ),
+            bytecode: Vec::new(),
+        }
+    }
 }
 
 fn borrowed(map: &BTreeMap<String, String>) -> BTreeMap<&str, &str> {
@@ -478,6 +564,8 @@ struct Parts<'t> {
     style_info: Option<PreparsedStyleSheet>,
     /// The named stylesheets, by section name.
     style_sheets: BTreeMap<String, Arc<PreparsedStyleSheet>>,
+    /// A `.lynx.bundle`'s `PrimJS` bytecode sections.
+    bytecode: Vec<BytecodeSection<'t>>,
 }
 
 /// A script's text as the bytes registered for it, shared rather than
@@ -492,11 +580,21 @@ fn script_bytes(source: &Arc<str>) -> Bytes {
     Bytes::from_owner(Text(Arc::clone(source)))
 }
 
-/// The script set being collected: one text per URL, an equal text for an
-/// equal URL deduplicated, a different one refused.
+/// A container's texts and its module bytecode, each ordered by URL.
+type Bodies = (Vec<(Url, Arc<str>)>, Vec<(Url, VerifiedModule)>);
+
+/// One script body: text, or a converted section's verified module.
+#[derive(Clone, PartialEq)]
+enum Body {
+    Text(Arc<str>),
+    ModuleBytecode(VerifiedModule),
+}
+
+/// The script set being collected: one body per URL, an equal body for an
+/// equal URL deduplicated, a different one (of either kind) refused.
 struct Scripts<'a> {
     container: &'a Url,
-    scripts: BTreeMap<Url, Arc<str>>,
+    scripts: BTreeMap<Url, Body>,
 }
 
 impl<'a> Scripts<'a> {
@@ -511,17 +609,37 @@ impl<'a> Scripts<'a> {
     fn insert<'s>(&mut self, url: Url, source: impl Into<Cow<'s, str>>) -> Result<(), SourceError> {
         let source = source.into();
         match self.scripts.get(&url) {
-            Some(existing) if **existing == *source => Ok(()),
+            Some(Body::Text(existing)) if **existing == *source => Ok(()),
             Some(_) => Err(conflict(self.container, &url)),
             None => {
-                self.scripts.insert(url, Arc::from(source));
+                self.scripts.insert(url, Body::Text(Arc::from(source)));
                 Ok(())
             }
         }
     }
 
-    fn finish(self) -> Vec<(Url, Arc<str>)> {
-        self.scripts.into_iter().collect()
+    fn insert_bytecode(&mut self, url: Url, module: VerifiedModule) -> Result<(), SourceError> {
+        match self.scripts.get(&url) {
+            Some(Body::ModuleBytecode(existing)) if *existing == module => Ok(()),
+            Some(_) => Err(conflict(self.container, &url)),
+            None => {
+                self.scripts.insert(url, Body::ModuleBytecode(module));
+                Ok(())
+            }
+        }
+    }
+
+    /// The texts and the module bytecode, each ordered by URL.
+    fn finish(self) -> Bodies {
+        let mut texts = Vec::new();
+        let mut bytecode = Vec::new();
+        for (url, body) in self.scripts {
+            match body {
+                Body::Text(text) => texts.push((url, text)),
+                Body::ModuleBytecode(module) => bytecode.push((url, module)),
+            }
+        }
+        (texts, bytecode)
     }
 }
 
@@ -530,13 +648,6 @@ fn conflict(container: &Url, url: &Url) -> SourceError {
         input: diagnostic_url(container),
         url: diagnostic_url(url),
     }
-}
-
-fn decode_native(url: &Url, bytes: &[u8]) -> Result<crate::web::WebTemplate, SourceError> {
-    crate::native::decode(bytes).map_err(|source| SourceError::DecodeNativeBundle {
-        input: diagnostic_url(url),
-        source,
-    })
 }
 
 /// A name with one leading `/` stripped, which is how either spelling of a
@@ -662,6 +773,161 @@ pub(crate) fn background_boot_url(container: &Url) -> Url {
     url
 }
 
+/// Whether the container's manifest has `/app-service.js`, as source or
+/// as a `JS_BYTECODE` file, which its BTS boot then loads.
+fn has_app_service(parts: &Parts<'_>) -> bool {
+    parts.manifest.contains_key(APP_SERVICE)
+        || parts.bytecode.iter().any(|section| {
+            section.kind == SectionKind::JsBytecode && bare(&section.name) == bare(APP_SERVICE)
+        })
+}
+
+/// Converts every bytecode section into the script set, at each URL
+/// [`bytecode_targets`] gives it, through one [`Verifier`] for the whole
+/// container.
+fn insert_bytecode(
+    scripts: &mut Scripts<'_>,
+    container: &Url,
+    sections: &[BytecodeSection<'_>],
+    entry: Option<&str>,
+) -> Result<(), SourceError> {
+    if sections.is_empty() {
+        return Ok(());
+    }
+    let converter = BytecodeConverter::new(container);
+    for section in sections {
+        for (body_url, role) in bytecode_targets(container, section, entry) {
+            let module = converter.convert(section, &body_url, role)?;
+            scripts.insert_bytecode(body_url, module)?;
+        }
+    }
+    Ok(())
+}
+
+/// What one converted bytecode section is to the realm that loads it,
+/// which decides its imports and its completion.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BytecodeRole {
+    /// The entry, `P/root.js`: the MTS imports, the completion dropped.
+    Entry,
+    /// A `main-thread` / `*__main-thread` body or a `JsBytecode` custom
+    /// section: the MTS imports, the completion the default export.
+    MainThread,
+    /// A named Lepus chunk `__LoadLepusChunk` runs on every call: the MTS
+    /// imports, the script itself the default export.
+    LepusChunk,
+    /// A `JS_BYTECODE` file: the BTS imports and names bound to
+    /// `undefined`, the completion the default export.
+    Background,
+}
+
+/// Where each bytecode section is registered, and as what: the URL rule of
+/// the module documentation, one body per URL.
+///
+/// | Section | URL | Role |
+/// |---|---|---|
+/// | `ROOT_LEPUS` | `P/root.js S` | entry |
+/// | Lepus chunk `main-thread` / `*__main-thread` | `P/<name>.js S` | main thread |
+/// | any other Lepus chunk | `P/<name>.js S` | Lepus chunk |
+/// | the Lepus chunk named as the explicit native entry | its own URL by the rows above, and `P/root.js S` | entry at `root.js` |
+/// | a `JsBytecode` custom section, whatever its name | `P/<name>.js S` | main thread |
+/// | a `JS_BYTECODE` path `p` | `P/<p> S` | background |
+///
+/// Every `JsBytecode` custom section is main-thread code: the encoder
+/// writes each with the main-thread context, and only main-thread assets
+/// are marked `JsBytecode`.
+fn bytecode_targets(
+    container: &Url,
+    section: &BytecodeSection<'_>,
+    entry: Option<&str>,
+) -> Vec<(Url, BytecodeRole)> {
+    match section.kind {
+        SectionKind::RootLepus => vec![(named_chunk_url(container, ROOT), BytecodeRole::Entry)],
+        SectionKind::LepusChunk => {
+            let name = bare(&section.name);
+            let role = if name == ROOT {
+                BytecodeRole::Entry
+            } else if is_main_thread(name) {
+                BytecodeRole::MainThread
+            } else {
+                BytecodeRole::LepusChunk
+            };
+            let mut targets = vec![(named_chunk_url(container, name), role)];
+            if entry.is_some_and(|entry| entry != ROOT && entry == section.name) {
+                targets.push((named_chunk_url(container, ROOT), BytecodeRole::Entry));
+            }
+            targets
+        }
+        SectionKind::CustomSection => vec![(
+            named_chunk_url(container, &section.name),
+            BytecodeRole::MainThread,
+        )],
+        SectionKind::JsBytecode => vec![(
+            bundle_path_url(container, &section.name),
+            BytecodeRole::Background,
+        )],
+    }
+}
+
+/// Converts one container's `PrimJS` sections, and verifies each converted
+/// module once, here, when the container is registered: a realm that loads
+/// one runs no Rust check of its own (the engine reads it computing every
+/// function's stack size). The [`Verifier`] is shared by every section, so its engine is
+/// made at most once per container, on the first regular expression
+/// literal, and a literal compiles once however many sections carry it.
+struct BytecodeConverter {
+    container: Url,
+    verifier: Verifier,
+}
+
+impl BytecodeConverter {
+    fn new(container: &Url) -> Self {
+        Self {
+            container: container.clone(),
+            verifier: Verifier::new(),
+        }
+    }
+
+    /// The section as a verified module of the engine's bytecode named
+    /// `url`, or the reader's, converter's or verifier's refusal, which
+    /// refuses the container.
+    fn convert(
+        &self,
+        section: &BytecodeSection<'_>,
+        url: &Url,
+        role: BytecodeRole,
+    ) -> Result<VerifiedModule, SourceError> {
+        let refused = |reason: String| SourceError::DecodeNativeBundle {
+            input: diagnostic_url(&self.container),
+            source: crate::native::ConvertError::Bytecode {
+                section: bounded_diagnostic(section.name.clone()),
+                kind: section.kind,
+                reason,
+            },
+        };
+        let (_, program) = crate::native::primjs::read_payload(section.bytes)
+            .map_err(|error| refused(error.to_string()))?;
+        let (imports, undefined_names, completion) = match role {
+            BytecodeRole::Entry => (MTS_CHUNK_IMPORTS, &[][..], Completion::Discard),
+            BytecodeRole::MainThread => (MTS_CHUNK_IMPORTS, &[][..], Completion::DefaultExport),
+            BytecodeRole::LepusChunk => (MTS_CHUNK_IMPORTS, &[][..], Completion::ExportScript),
+            BytecodeRole::Background => (
+                BTS_CHUNK_IMPORTS,
+                BTS_CHUNK_UNDEFINED,
+                Completion::DefaultExport,
+            ),
+        };
+        let options = ConvertOptions {
+            module_name: url.as_str(),
+            imports,
+            undefined_names,
+            completion,
+        };
+        crate::native::primjs::convert_script(&program, &options, &self.verifier)
+            .map_err(|error| refused(error.to_string()))
+    }
+}
+
 /// The one [`ContainerInstaller`] every embedder that decodes Lynx containers
 /// installs: [`ContainerSources::from_bytes`], registered.
 ///
@@ -673,7 +939,7 @@ pub(crate) fn background_boot_url(container: &Url) -> Url {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct BundleInstaller;
 
-impl ContainerInstaller<PreparsedStyleSheet> for BundleInstaller {
+impl ContainerInstaller<PreparsedStyleSheet, VerifiedModule> for BundleInstaller {
     fn install(&self, url: &Url, bytes: &[u8], registrar: &Registrar) -> Result<bool, String> {
         if !looks_like_native_bundle(bytes) && !looks_like_web_bundle(bytes) {
             return Ok(false);
@@ -1100,8 +1366,45 @@ mod tests {
         }
     }
 
+    /// A verified module the engine compiles for `source`.
+    fn verified_module(source: &str) -> VerifiedModule {
+        let runtime = quickjs_rust_bridge::Runtime::new().unwrap();
+        let compiler = runtime.create_context().unwrap();
+        let bytes = compiler
+            .compile_module_bytecode("app:///m.js", source)
+            .unwrap();
+        Verifier::new().module_from_bytes(&bytes).unwrap()
+    }
+
     /// One URL, one text: an equal text deduplicates, a different one refuses
     /// the whole container, and so does a stylesheet URL a script reaches.
+    /// A text and a module's bytecode at one URL conflict, as two different
+    /// texts do; equal bytecode at one URL is one registration.
+    #[test]
+    fn text_and_bytecode_at_one_url_conflict() {
+        let container = url(BUNDLE);
+        let at = named_chunk_url(&container, "main-thread");
+        let a = verified_module("export const a = 1;");
+        let b = verified_module("export const b = 2;");
+        let mut scripts = Scripts::new(&container);
+        scripts.insert_bytecode(at.clone(), a.clone()).unwrap();
+        scripts.insert_bytecode(at.clone(), a.clone()).unwrap();
+        assert!(matches!(
+            scripts.insert_bytecode(at.clone(), b),
+            Err(SourceError::ConflictingSection { .. })
+        ));
+        assert!(matches!(
+            scripts.insert(at.clone(), "text"),
+            Err(SourceError::ConflictingSection { .. })
+        ));
+        let mut scripts = Scripts::new(&container);
+        scripts.insert(at.clone(), "text").unwrap();
+        assert!(matches!(
+            scripts.insert_bytecode(at, a),
+            Err(SourceError::ConflictingSection { .. })
+        ));
+    }
+
     #[test]
     fn two_texts_at_one_url_conflict() {
         let same = ContainerSources::from_template(

@@ -84,7 +84,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bobcat_core::peniko::ImageData;
-use bobcat_core::resource::ResourceFetcher;
+use bobcat_core::resource::{ResourceFetcher, VerifiedModule};
 use bobcat_core::{FrameImages, ImageReports, ImageResidency, ImageSizeHint, PreparsedStyleSheet};
 use bytes::Bytes;
 use rustc_hash::FxHashSet;
@@ -125,11 +125,12 @@ use crate::transport::{Fetched, HttpSettings, Transports};
 
 /// What a [`ContainerInstaller`] registers through: the registry alone,
 /// reachable from the thread the load finished on
-/// ([`vant::registry::Registrar`], over this system's stylesheet type).
-pub type Registrar = vant::registry::Registrar<PreparsedStyleSheet>;
+/// ([`vant::registry::Registrar`], over this system's stylesheet and verified
+/// module types).
+pub type Registrar = vant::registry::Registrar<PreparsedStyleSheet, VerifiedModule>;
 
 /// The registered contents of one scope.
-pub(crate) type Registry = vant::registry::Registry<PreparsedStyleSheet>;
+pub(crate) type Registry = vant::registry::Registry<PreparsedStyleSheet, VerifiedModule>;
 
 /// The platform [`Resources::new`] builds, and the one [`Resources`] and
 /// [`ViewResources`] name when no other is: [`NativePlatform`]. Native
@@ -227,7 +228,8 @@ pub struct ResourcesConfig {
     /// `lynx.fetchBundle` to install lazy bundles passes
     /// `bobcat_source::BundleInstaller`, which registers a fetched container
     /// by the same `ContainerSources` path a page's own takes.
-    pub container_installer: Option<Arc<dyn ContainerInstaller<PreparsedStyleSheet>>>,
+    pub container_installer:
+        Option<Arc<dyn ContainerInstaller<PreparsedStyleSheet, VerifiedModule>>>,
 }
 
 impl Default for ResourcesConfig {
@@ -520,7 +522,7 @@ pub(crate) struct Shared<P: Platform> {
     completions: tokio::sync::mpsc::UnboundedSender<Completion>,
     wakeup: Wakeup,
     log_to_stderr: bool,
-    container_installer: Option<Arc<dyn ContainerInstaller<PreparsedStyleSheet>>>,
+    container_installer: Option<Arc<dyn ContainerInstaller<PreparsedStyleSheet, VerifiedModule>>>,
     notes: Mutex<Vec<String>>,
     /// A test's seam into a background job's transport read, called on the
     /// blocking thread that runs it, so a test can hold a job in flight or
@@ -925,6 +927,35 @@ impl<P: Platform> Resources<P> {
         Ok(url)
     }
 
+    /// Registers verified module bytecode of the engine's format under
+    /// `url`, replacing any earlier registration, as
+    /// [`Registrar::register_module_bytecode`] does. It answers a module
+    /// source request (an entry, an import, a worker script, a synchronous
+    /// load) with [`bobcat_core::resource::LoadedSource::ModuleBytecode`],
+    /// and no other request at all. The module passed every rule of the
+    /// bridge's verifier when it was made, so a realm loading it runs no
+    /// check of its own; the engine reads it computing every function's
+    /// stack size. The module name the bytes carry should be the URL the
+    /// realm requests, which is the normalized URL this answers. Invalidates
+    /// any cached stylesheet response for that URL.
+    ///
+    /// # Errors
+    ///
+    /// [`RegisterError::InvalidUrl`] for a URL that does not parse.
+    pub fn register_module_bytecode(
+        &self,
+        url: &str,
+        module: VerifiedModule,
+    ) -> Result<Url, RegisterError> {
+        let url = parse_registration_url(url)?;
+        self.style_cache.borrow_mut().remove(&url);
+        self.shared
+            .transports
+            .registry
+            .insert(&url, Registered::ModuleBytecode(module));
+        Ok(url)
+    }
+
     /// Registers a stylesheet the host already parsed. It answers a stylesheet
     /// source request pre-parsed, and no other request at all — it has no
     /// bytes to give one. Replaces any cached stylesheet response for that URL.
@@ -1107,7 +1138,7 @@ impl<P: Platform> Resources<P> {
     }
 }
 
-impl<P: Platform> Register<PreparsedStyleSheet> for Resources<P> {
+impl<P: Platform> Register<PreparsedStyleSheet, VerifiedModule> for Resources<P> {
     fn register(
         &self,
         url: &str,
@@ -1124,9 +1155,17 @@ impl<P: Platform> Register<PreparsedStyleSheet> for Resources<P> {
     ) -> Result<Url, RegisterError> {
         Self::register_style_sheet(self, url, sheet)
     }
+
+    fn register_module_bytecode(
+        &self,
+        url: &str,
+        module: VerifiedModule,
+    ) -> Result<Url, RegisterError> {
+        Self::register_module_bytecode(self, url, module)
+    }
 }
 
-impl<P: Platform> RegisterInBackground<PreparsedStyleSheet> for Resources<P> {
+impl<P: Platform> RegisterInBackground<PreparsedStyleSheet, VerifiedModule> for Resources<P> {
     fn register_in_background(
         &self,
         container: &Url,

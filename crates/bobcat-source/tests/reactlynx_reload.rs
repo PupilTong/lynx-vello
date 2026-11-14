@@ -3,6 +3,12 @@
 // These integration tests use native threads and GPU capture.
 #![cfg(not(target_arch = "wasm32"))]
 
+#[path = "../../../packages/reactlynx-test-fixtures/bytecode.rs"]
+#[allow(
+    clippy::doc_markdown,
+    reason = "the registry is the fixture package's file"
+)]
+mod bytecode;
 #[path = "../../../packages/reactlynx-test-fixtures/fixtures.rs"]
 mod fixtures;
 
@@ -28,29 +34,75 @@ use support::{DelayedBackground, PendingSource};
 const SCREEN: bobcat_core::ScreenMetrics =
     bobcat_core::ScreenMetrics::for_viewport(120.0, 120.0, 1.0);
 
+/// How the page is encoded: every script a string section, or as the
+/// encoder writes it for production, main-thread bytecode with the
+/// background as source or as bytecode too.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Form {
+    Source,
+    Bytecode,
+    JsBytecode,
+}
+
+const BYTECODE_FORMS: [Form; 2] = [Form::Bytecode, Form::JsBytecode];
+
 #[tokio::test]
 async fn native_reload_recreates_state_and_effects_without_reexecuting_the_entry() {
-    verify_reload(false, false).await;
+    verify_reload(false, false, Form::Source).await;
 }
 
 #[tokio::test]
 async fn native_reload_after_a_delayed_background_starts() {
-    verify_reload(true, false).await;
+    verify_reload(true, false, Form::Source).await;
 }
 
 #[tokio::test]
 async fn development_build_boots_updates_and_reloads_with_default_framework_branches() {
-    verify_reload(false, true).await;
-    verify_reload(true, true).await;
+    verify_reload(false, true, Form::Source).await;
+    verify_reload(true, true, Form::Source).await;
+}
+
+#[tokio::test]
+async fn bytecode_reload_recreates_state_and_effects_without_reexecuting_the_entry() {
+    for form in BYTECODE_FORMS {
+        verify_reload(false, false, form).await;
+        verify_reload(true, false, form).await;
+    }
+}
+
+/// Both bytecode forms of the development page are refused: `ReactLynx`'s
+/// development main-thread runtime calls `eval` directly.
+#[test]
+fn development_bytecode_pages_are_refused() {
+    let fixture = bytecode::fixture("react-reload-development");
+    let input = Url::parse("app:///react-reload.lynx.bundle").unwrap();
+    for bytes in [fixture.page, fixture.js_bytecode_page] {
+        let error = PageSource::from_bytes(&input, bytes)
+            .expect_err("a development page is refused")
+            .to_string();
+        assert!(error.contains("ROOT_LEPUS"), "{error}");
+        assert!(error.contains("eval"), "{error}");
+    }
 }
 
 #[tokio::test]
 async fn bts_reload_keeps_its_callback_alive_across_component_cleanup_and_remount() {
+    bts_reload_keeps_its_callback(Form::Source).await;
+}
+
+#[tokio::test]
+async fn bytecode_bts_reload_keeps_its_callback_alive() {
+    for form in BYTECODE_FORMS {
+        bts_reload_keeps_its_callback(form).await;
+    }
+}
+
+async fn bts_reload_keeps_its_callback(form: Form) {
     let ReloadView {
         mut view,
         mut painter,
         ..
-    } = prepare_view(false, false).await;
+    } = prepare_view(false, false, form).await;
     let mut observed = Observed::default();
     wait_pixel(
         &mut view,
@@ -159,17 +211,22 @@ struct ReloadView {
     released: Rc<Cell<bool>>,
 }
 
-async fn prepare_view(before_background: bool, development: bool) -> ReloadView {
+async fn prepare_view(before_background: bool, development: bool, form: Form) -> ReloadView {
     let input = Url::parse("app:///react-reload.lynx.bundle").unwrap();
-    let page = PageSource::from_native_bundle(
-        &input,
-        if development {
-            fixtures::fixture("react-reload-development").page
-        } else {
-            fixtures::fixture("react-reload").page
-        },
-        "react-reload__main-thread",
-    )
+    let bytecode = bytecode::fixture("react-reload");
+    let page = match form {
+        Form::Source => PageSource::from_native_bundle(
+            &input,
+            if development {
+                fixtures::fixture("react-reload-development").page
+            } else {
+                fixtures::fixture("react-reload").page
+            },
+            "react-reload__main-thread",
+        ),
+        Form::Bytecode => PageSource::from_bytes(&input, bytecode.page),
+        Form::JsBytecode => PageSource::from_bytes(&input, bytecode.js_bytecode_page),
+    }
     .unwrap();
     let resources = Resources::new(ResourcesConfig::default(), || {});
     page.register_with(&resources);
@@ -207,12 +264,12 @@ async fn prepare_view(before_background: bool, development: bool) -> ReloadView 
     }
 }
 
-async fn verify_reload(before_background: bool, development: bool) {
+async fn verify_reload(before_background: bool, development: bool, form: Form) {
     let ReloadView {
         mut view,
         mut painter,
         released,
-    } = prepare_view(before_background, development).await;
+    } = prepare_view(before_background, development, form).await;
     let mut observed = Observed {
         expect_missing_websocket: development,
         ..Observed::default()

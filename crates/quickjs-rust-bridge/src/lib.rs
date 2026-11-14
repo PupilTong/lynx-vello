@@ -38,12 +38,37 @@
 //! themselves — a clone is a copy the realm made, not a handle on anything in
 //! it — and a value the serializer refuses (a function, a `Symbol`, a `Map`)
 //! throws in the realm at the call rather than reaching the host at all.
+//!
+//! [`bytecode_abi`] describes the fork's bytecode format as data generated
+//! from its sources, and [`bytecode`] models it in Rust (reader, writer,
+//! disassembler, verifier), for writers of that format outside the engine.
+//! Module bytecode from such a writer is checked once by a
+//! [`bytecode::Verifier`], which owns the regular expression compiler the
+//! checks compare literals with and answers a [`bytecode::VerifiedModule`],
+//! a value only the verifier makes. That value is what enters a realm,
+//! through [`Context::complete_module_bytecode`] or a synchronous load's
+//! [`RequiredBody::ModuleBytecode`], with no further Rust check; the engine
+//! reads it when the module is compiled with the fork's
+//! `JS_READ_OBJ_COMPUTE_STACK_SIZE`, which computes every function's stack
+//! size and trusts the structure of the bytes. [`bytecode::read_program`]
+//! is the only reader that takes bytes from an untrusted writer.
+//! [`Context::compile_regexp_bytecode`] compiles a regular expression in a
+//! realm, for tooling.
 
 #[allow(
     unsafe_code,
     reason = "this private module implements the allocator ABI used by the C translation units"
 )]
 mod allocator;
+#[forbid(unsafe_code)]
+pub mod bytecode;
+pub mod bytecode_abi;
+#[cfg(test)]
+#[allow(
+    unsafe_code,
+    reason = "the table tests call the generated C check through the FFI"
+)]
+mod bytecode_tests;
 mod ffi;
 #[allow(
     unsafe_code,
@@ -211,6 +236,15 @@ mod implementation {
         Interrupted,
         ExecutionTimeout,
         Engine,
+        /// Bytecode refused: by the Rust reader or the rules of
+        /// [`crate::bytecode`], by the engine's read because a function's
+        /// stack size cannot be computed from it (an invalid opcode reached,
+        /// a jump outside the function, a stack underflow or overflow,
+        /// different depths where paths meet), or because it is not the
+        /// kind of value the call needs. See
+        /// [`Context::complete_module_bytecode`] and
+        /// [`Context::verify_bytecode`].
+        BytecodeRejected,
     }
 
     /// Sanitized source coordinates from a JavaScript error.
@@ -1131,6 +1165,26 @@ mod implementation {
             Ok(Context::adopt(raw, &self.inner))
         }
 
+        /// A realm with only the engine's basic objects (`JS_NewContextRaw`:
+        /// the object and function prototypes, the global object, the error
+        /// constructors), for [`crate::bytecode::Verifier`]'s regular
+        /// expression compiler. Only [`Context::compile_regexp_bytecode`] is
+        /// called on it: the other members assume a realm with every
+        /// built-in.
+        pub(crate) fn create_bare_context(&self) -> Result<Context, Error> {
+            self.inner.reclaim();
+            // SAFETY: as in `create_context`.
+            let raw = NonNull::new(unsafe { ffi::qjs_context_new_bare(self.inner.raw.as_ptr()) })
+                .ok_or_else(|| {
+                Error::bridge(
+                    ErrorKind::OutOfMemory,
+                    ErrorPhase::CreateContext,
+                    "QuickJS could not allocate a context",
+                )
+            })?;
+            Ok(Context::adopt(raw, &self.inner))
+        }
+
         #[must_use]
         pub fn interrupt_handle(&self) -> InterruptHandle {
             InterruptHandle {
@@ -1651,14 +1705,16 @@ mod implementation {
     }
 
     /// One source a synchronous load produced: the URL it answered from, its
-    /// text, and how to read it.
+    /// body, and how to read it.
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub struct RequiredSource {
         /// The response URL. It names the compiled source and is what the
         /// answer reports back, so a caller that resolves against it resolves
         /// against where the source came from rather than where it asked.
         pub url: String,
-        pub text: String,
+        pub body: RequiredBody,
+        /// How [`RequiredBody::Text`] is read; ignored for
+        /// [`RequiredBody::ModuleBytecode`], which is always a module.
         pub kind: RequiredKind,
     }
 
@@ -1697,6 +1753,21 @@ mod implementation {
         }
     }
 
+    /// The body of a synchronously loaded source.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub enum RequiredBody {
+        /// Source text, read as [`RequiredSource::kind`] says.
+        Text(String),
+        /// Module bytecode of the fork's format that passed
+        /// [`crate::bytecode::Verifier`]. It is read when the module is
+        /// compiled, inside the load, computing every function's stack size
+        /// (`JS_READ_OBJ_COMPUTE_STACK_SIZE`): a refusal is the load's
+        /// `SyntaxError`, naming the URL and saying "bytecode rejected". It
+        /// answers the load as an ES module, as [`RequiredKind::Module`]
+        /// text does.
+        ModuleBytecode(crate::bytecode::VerifiedModule),
+    }
+
     type RequireLoader = dyn FnMut(&str, &str) -> Result<RequiredCode, String>;
 
     /// What the last load produced, kept alive for the shim to read out of.
@@ -1707,7 +1778,7 @@ mod implementation {
     #[derive(Default)]
     struct ParkedRequire {
         url: CString,
-        text: String,
+        body: Vec<u8>,
         /// Framed, as the host handed it in: the shim reads past the frame.
         cached: Vec<u8>,
         error: CString,
@@ -1859,24 +1930,33 @@ mod implementation {
             loader.as_mut().expect("registered loader")(&url, &parameters)
         }))
         .unwrap_or_else(|_| Err("the require loader panicked".to_owned()));
+        // Module bytecode is never read from the code cache nor captured.
         let loaded = loaded.and_then(|loaded| {
-            CString::new(loaded.source.url)
-                .map(|url| {
-                    (
-                        url,
-                        loaded.source.text,
-                        loaded.source.kind,
-                        loaded.cached,
-                        loaded.capture,
-                    )
-                })
+            let RequiredCode {
+                source,
+                cached,
+                capture,
+            } = loaded;
+            let (body, kind, cached, capture) = match source.body {
+                RequiredBody::Text(text) => {
+                    (text.into_bytes(), source.kind.as_raw(), cached, capture)
+                }
+                RequiredBody::ModuleBytecode(module) => (
+                    module.bytes().to_vec(),
+                    ffi::REQUIRED_MODULE_BYTECODE,
+                    None,
+                    false,
+                ),
+            };
+            CString::new(source.url)
+                .map(|url| (url, body, kind, cached, capture))
                 .map_err(|_| "the response URL contains a NUL byte".to_owned())
         });
         let mut parked = context.required.borrow_mut();
         match loaded {
-            Ok((url, text, kind, cached, capture)) => {
+            Ok((url, body, kind, cached, capture)) => {
                 parked.url = url;
-                parked.text = text;
+                parked.body = body;
                 // Bytecode that is not this build's, or not whole, is no
                 // cache at all: the text compiles, and keeps what it compiled
                 // to, as unreadable bytecode does in the shim.
@@ -1893,9 +1973,9 @@ mod implementation {
                 // load, which the shim starts only after it has read them.
                 unsafe {
                     (*source).url = parked.url.as_ptr();
-                    (*source).text = parked.text.as_ptr();
-                    (*source).text_length = parked.text.len();
-                    (*source).kind = kind.as_raw();
+                    (*source).text = parked.body.as_ptr();
+                    (*source).text_length = parked.body.len();
+                    (*source).kind = kind;
                     (*source).cached = cached.0;
                     (*source).cached_length = cached.1;
                     (*source).cached_kind = cached_kind;
@@ -1903,15 +1983,14 @@ mod implementation {
                 }
                 0
             }
-            // The message the `require` throws, worded here because this is
-            // where the URL asked for and the host's reason are both in hand.
             Err(message) => {
+                // The message the `require` throws, worded here because this
+                // is where the URL asked for and the host's reason are both
+                // in hand.
                 parked.error = CString::new(format!("cannot load '{url}': {message}"))
                     .unwrap_or_else(|_| c"the require loader failed".to_owned());
                 // SAFETY: as above.
-                unsafe {
-                    (*source).error = parked.error.as_ptr();
-                }
+                unsafe { (*source).error = parked.error.as_ptr() };
                 -1
             }
         }
@@ -2287,6 +2366,313 @@ mod implementation {
             Ok(bytecode)
         }
 
+        /// Copies `length` bytes the shim `js_malloc`'d out of `bytes` and
+        /// frees them; `None` when the shim returned NULL.
+        fn take_engine_bytes(&self, bytes: *mut u8, length: usize) -> Option<Vec<u8>> {
+            let bytes = NonNull::new(bytes)?;
+            // SAFETY: the shim wrote `length` bytes at `bytes`, which nothing
+            // else holds.
+            let copied = unsafe { std::slice::from_raw_parts(bytes.as_ptr(), length) }.to_vec();
+            // SAFETY: `bytes` came from this context's `js_malloc` and is
+            // freed once, here.
+            unsafe { ffi::qjs_bytecode_free(self.raw().as_ptr(), bytes.as_ptr()) };
+            Some(copied)
+        }
+
+        /// The pending exception of a bytecode read, as
+        /// [`ErrorKind::BytecodeRejected`] unless it is running out of
+        /// memory.
+        fn bytecode_rejection(&self, phase: ErrorPhase) -> Error {
+            let mut error = capture_exception(self.raw(), phase);
+            if error.kind != ErrorKind::OutOfMemory {
+                error.kind = ErrorKind::BytecodeRejected;
+            }
+            error
+        }
+
+        /// Compiles script source text — a global script, not a module — to
+        /// bytecode, the way [`Self::compile_module_bytecode`] compiles a
+        /// module. Nothing is evaluated, and nothing stays in the realm.
+        ///
+        /// For tooling and tests: no entry of this crate runs script
+        /// bytecode. A syntax error is [`ErrorKind::Syntax`].
+        pub fn compile_script_bytecode(&self, name: &str, source: &str) -> Result<Vec<u8>, Error> {
+            self.reclaim();
+            let name = CString::new(name).map_err(|_| {
+                Error::bridge(
+                    ErrorKind::InvalidInput,
+                    ErrorPhase::RegisterModule,
+                    "script name contains a NUL byte",
+                )
+            })?;
+            // `JS_Eval` reads one byte past the length it is given, which
+            // must be a NUL: the parser's lookahead ends on it.
+            let mut terminated = Vec::with_capacity(source.len() + 1);
+            terminated.extend_from_slice(source.as_bytes());
+            terminated.push(0);
+            let mut length = 0usize;
+            // SAFETY: the source and the name live through the call, which
+            // copies what it keeps; the bytes are taken below.
+            let bytes = unsafe {
+                ffi::qjs_context_compile_script_bytecode(
+                    self.raw().as_ptr(),
+                    terminated.as_ptr(),
+                    source.len(),
+                    name.as_ptr(),
+                    &raw mut length,
+                )
+            };
+            self.take_engine_bytes(bytes, length).ok_or_else(|| {
+                capture_exception_with_syntax(self.raw(), ErrorPhase::RegisterModule, true)
+            })
+        }
+
+        /// Checks `bytecode` the way a module reaches a realm — the rules of
+        /// [`crate::bytecode`] in Rust (what [`crate::bytecode::Verifier`]
+        /// runs), then `JS_ReadObject` of the bytes the Rust writer wrote for
+        /// the checked program, with the fork's
+        /// `JS_READ_OBJ_COMPUTE_STACK_SIZE` (what
+        /// [`Self::complete_module_bytecode`]'s module is read with) —
+        /// and answers what the engine read, written out again
+        /// (`JS_WriteObject`). In the answer every function's stack size is
+        /// the one the read computed from its instructions; for bytes the
+        /// fork itself wrote it equals the one they carried. The top-level
+        /// value may be a script, a module or a data value.
+        ///
+        /// For tooling and tests: it says whether the engine accepts bytes,
+        /// and with what stack sizes, without running anything. A module
+        /// read here stays loaded in this realm under the name its bytes
+        /// carry, so a caller checking several modules uses a realm for
+        /// nothing else. A refusal, by either check, is
+        /// [`ErrorKind::BytecodeRejected`]; a regular expression literal is
+        /// compiled in this realm to compare with its bytecode.
+        pub fn verify_bytecode(&self, bytecode: &[u8]) -> Result<Vec<u8>, Error> {
+            self.reclaim();
+            let checked = crate::bytecode::check(bytecode, self).map_err(|error| {
+                Error::bridge(
+                    ErrorKind::BytecodeRejected,
+                    ErrorPhase::RegisterModule,
+                    error.to_string(),
+                )
+            })?;
+            let mut length = 0usize;
+            // SAFETY: the input lives through the call, which reads it and
+            // keeps nothing of it; the bytes are taken below.
+            let bytes = unsafe {
+                ffi::qjs_context_verify_bytecode(
+                    self.raw().as_ptr(),
+                    checked.as_ptr(),
+                    checked.len(),
+                    &raw mut length,
+                )
+            };
+            self.take_engine_bytes(bytes, length)
+                .ok_or_else(|| self.bytecode_rejection(ErrorPhase::RegisterModule))
+        }
+
+        /// [`Self::verify_bytecode`] without the Rust checks: the fork's
+        /// read alone, for this crate's tests of its stack computation. That
+        /// read trusts the structure of its input, so `bytecode` must be
+        /// bytes the fork wrote, or such bytes with a change that keeps
+        /// their structure (an instruction replaced by one of the same
+        /// size); anything else is undefined behaviour in the engine.
+        #[cfg(test)]
+        pub(crate) fn verify_bytecode_read_only(&self, bytecode: &[u8]) -> Result<Vec<u8>, Error> {
+            self.reclaim();
+            let mut length = 0usize;
+            // SAFETY: as in `verify_bytecode`.
+            let bytes = unsafe {
+                ffi::qjs_context_verify_bytecode(
+                    self.raw().as_ptr(),
+                    bytecode.as_ptr(),
+                    bytecode.len(),
+                    &raw mut length,
+                )
+            };
+            self.take_engine_bytes(bytes, length)
+                .ok_or_else(|| self.bytecode_rejection(ErrorPhase::RegisterModule))
+        }
+
+        /// Reads script bytecode with the fork's read alone — not the Rust
+        /// checks — computing stack sizes, and evaluates it, for this
+        /// crate's tests of that read and of the Rust checks. The same
+        /// restriction on `bytecode` as for
+        /// [`Self::verify_bytecode_read_only`]: bytes the fork or the Rust
+        /// writer wrote, or such bytes with their structure kept.
+        #[cfg(test)]
+        pub(crate) fn evaluate_script_bytecode(&self, bytecode: &[u8]) -> Result<Value, Error> {
+            self.reclaim();
+            let guard = self.begin();
+            // SAFETY: the input lives through the call, which keeps nothing
+            // of it; the script runs under the guard.
+            let raw = unsafe {
+                ffi::qjs_context_evaluate_script_bytecode(
+                    self.raw().as_ptr(),
+                    bytecode.as_ptr(),
+                    bytecode.len(),
+                )
+            };
+            let result = self.value_or_exception(raw, ErrorPhase::Evaluate);
+            guard.finish(result, ErrorPhase::Evaluate)
+        }
+
+        /// Compiles a regular expression to the fork's regular expression
+        /// bytecode: the bytes a `RegExp` with this pattern and these flags
+        /// carries, and the string a regular expression literal puts in its
+        /// function's constant pool after its pattern (`JS_CompileRegExp`).
+        ///
+        /// `pattern` is UTF-16 code units, as a JavaScript string holds
+        /// them, because that is what the compiler reads: a pattern may
+        /// contain unpaired surrogates, which a `&str` cannot carry and
+        /// which compile differently from U+FFFD. `flags` is the flag
+        /// letters (`dgimsuvy`), each at most once. The answer is the
+        /// compiler's bytes exactly, including bytes at or above 0x80. An
+        /// invalid pattern or invalid flags is [`ErrorKind::Syntax`].
+        pub fn compile_regexp_bytecode(
+            &self,
+            pattern: &[u16],
+            flags: &str,
+        ) -> Result<Vec<u8>, Error> {
+            self.reclaim();
+            let mut length = 0usize;
+            // SAFETY: both inputs live through the call, which copies them
+            // into engine strings; the bytes are taken below.
+            let bytes = unsafe {
+                ffi::qjs_context_compile_regexp(
+                    self.raw().as_ptr(),
+                    pattern.as_ptr(),
+                    pattern.len(),
+                    flags.as_ptr().cast(),
+                    flags.len(),
+                    &raw mut length,
+                )
+            };
+            self.take_engine_bytes(bytes, length).ok_or_else(|| {
+                capture_exception_with_syntax(self.raw(), ErrorPhase::ConstructValue, true)
+            })
+        }
+
+        /// Supplies a realm-local module as module bytecode, the way
+        /// [`Self::complete_module`] supplies one as text: `url` is its
+        /// `import.meta.url` and the base its imports resolve against, and
+        /// an import of `name` in this realm gets this module.
+        ///
+        /// The module is a [`VerifiedModule`](crate::bytecode::VerifiedModule):
+        /// a [`crate::bytecode::Verifier`] checked it against every rule of
+        /// [`crate::bytecode`] when it was made — operands inside their
+        /// counts, jump targets at instruction starts, the stack walked along
+        /// every path with return addresses, catch offsets and iterator
+        /// markers kept in their slots, generator and async instructions only
+        /// in frames that resume them, closure and module records consistent
+        /// with the functions they describe, and each regular expression
+        /// literal's bytecode equal to what this process's engine compiles
+        /// for its pattern and flags — so this call runs no Rust check.
+        ///
+        /// A copy of its bytes is kept, owned by the realm, as the body of
+        /// `name`. The engine reads it when the module is first
+        /// compiled — by an import of `name`, or by a synchronous
+        /// `require` of it, which may come from inside a running module
+        /// body as for a text source — with the fork's
+        /// `JS_READ_OBJ_COMPUTE_STACK_SIZE`, which computes every function's
+        /// stack size from its instructions (the size the bytes carry is
+        /// ignored, so a writer need not compute one) and trusts the rest of
+        /// the bytes' structure, which the module's writer guarantees. The
+        /// kept copy is freed once that read has made the module, or with
+        /// the realm. A refusal by that read (a function whose stack size
+        /// cannot be computed) is a `SyntaxError` saying "bytecode rejected for
+        /// '<url>'": the rejection of the import that compiled it, or the
+        /// `require`'s throw. A later import of `name` is refused the same
+        /// way. The checks are about what the interpreter assumes of its
+        /// input, not about what the program computes: bytecode that passes
+        /// may still loop, allocate or throw like any other JavaScript.
+        ///
+        /// The module's name is the one in its bytes; it is what the
+        /// realm's module list holds and the base its relative imports are
+        /// normalized from (through `url`, as for any realm-local source),
+        /// so it should be `name`.
+        ///
+        /// A name this realm has already been answered for is left as it
+        /// was, and nothing is kept, as with [`Self::complete_module`]; a
+        /// name the runtime has is
+        /// [`ErrorKind::InvalidInput`].
+        pub fn complete_module_bytecode(
+            &self,
+            name: &str,
+            url: &str,
+            module: &crate::bytecode::VerifiedModule,
+        ) -> Result<(), Error> {
+            self.reclaim();
+            let c_string = |text: &str| {
+                CString::new(text).map_err(|_| {
+                    Error::bridge(
+                        ErrorKind::InvalidInput,
+                        ErrorPhase::RegisterModule,
+                        "module name or URL contains a NUL byte",
+                    )
+                })
+            };
+            let name = c_string(name)?;
+            let url = c_string(url)?;
+            let checked = module.bytes();
+            // SAFETY: all buffers live through the call, which copies the
+            // name, the URL and the module's bytes into the realm's source.
+            let status = unsafe {
+                ffi::qjs_context_complete_module_bytecode(
+                    self.raw().as_ptr(),
+                    name.as_ptr(),
+                    url.as_ptr(),
+                    checked.as_ptr(),
+                    checked.len(),
+                )
+            };
+            match status {
+                0 | -5 => Ok(()),
+                -2 => Err(Error::bridge(
+                    ErrorKind::InvalidInput,
+                    ErrorPhase::RegisterModule,
+                    "module name is already registered",
+                )),
+                _ => Err(capture_exception(self.raw(), ErrorPhase::RegisterModule)),
+            }
+        }
+
+        /// [`Self::complete_module_bytecode`] with bytes no verifier wrote,
+        /// for this crate's tests of what the fork's read refuses when the
+        /// module is compiled. The same restriction on `bytecode` as for
+        /// [`Self::verify_bytecode_read_only`].
+        #[cfg(test)]
+        pub(crate) fn complete_module_bytecode_unchecked(
+            &self,
+            name: &str,
+            url: &str,
+            bytecode: &[u8],
+        ) -> Result<(), Error> {
+            let name = CString::new(name).unwrap();
+            let url = CString::new(url).unwrap();
+            // SAFETY: as in `complete_module_bytecode`.
+            let status = unsafe {
+                ffi::qjs_context_complete_module_bytecode(
+                    self.raw().as_ptr(),
+                    name.as_ptr(),
+                    url.as_ptr(),
+                    bytecode.as_ptr(),
+                    bytecode.len(),
+                )
+            };
+            match status {
+                0 | -5 => Ok(()),
+                _ => Err(capture_exception(self.raw(), ErrorPhase::RegisterModule)),
+            }
+        }
+
+        /// Bytes of checked module bytecode this runtime's realms keep and
+        /// have not yet read, for the tests of when they are freed.
+        #[cfg(test)]
+        pub(crate) fn owned_bytecode(&self) -> usize {
+            // SAFETY: the runtime is alive as long as this realm is.
+            unsafe { ffi::qjs_runtime_owned_bytecode(self.inner.runtime.raw.as_ptr()) }
+        }
+
         /// Retries suspended imports after completing their sources. This
         /// does not drain promise jobs. Further dependencies may be requested.
         pub fn resume_module_loads(&self) -> Result<(), Error> {
@@ -2465,6 +2851,15 @@ mod implementation {
         ///   evaluated. `parameters` is unread, and `kind` is `"module"`.
         /// - [`Detect`](RequiredKind::Detect): whichever of the first and the third `QuickJS`'s
         ///   syntax heuristic reads the text as, answered as that one.
+        ///
+        /// A body of [`RequiredBody::ModuleBytecode`] is answered as a
+        /// [`Module`](RequiredKind::Module) is, whatever `kind` says: the
+        /// [`VerifiedModule`](crate::bytecode::VerifiedModule)'s bytes are
+        /// kept by the realm as the module's body and read inside this load,
+        /// computing every function's stack size. Bytes that read refuses
+        /// throw
+        /// `SyntaxError("bytecode rejected for '<url>': …")`, from a
+        /// `require` and from an import linked inline alike.
         ///
         /// Either way the source text never becomes a JavaScript value, and
         /// the compile or parse names [`RequiredSource::url`] — the URL the
@@ -4159,7 +4554,7 @@ mod implementation {
                     url.to_owned(),
                     RequiredSource {
                         url: url.to_owned(),
-                        text: text.to_owned(),
+                        body: RequiredBody::Text(text.to_owned()),
                         kind: RequiredKind::CommonJs,
                     },
                 );
@@ -4173,7 +4568,7 @@ mod implementation {
                     url.to_owned(),
                     RequiredSource {
                         url: response.to_owned(),
-                        text: text.to_owned(),
+                        body: RequiredBody::Text(text.to_owned()),
                         kind: RequiredKind::CommonJs,
                     },
                 );
@@ -4185,7 +4580,7 @@ mod implementation {
                     url.to_owned(),
                     RequiredSource {
                         url: url.to_owned(),
-                        text: text.to_owned(),
+                        body: RequiredBody::Text(text.to_owned()),
                         kind: RequiredKind::Json,
                     },
                 );
@@ -4198,7 +4593,7 @@ mod implementation {
                     url.to_owned(),
                     RequiredSource {
                         url: url.to_owned(),
-                        text: text.to_owned(),
+                        body: RequiredBody::Text(text.to_owned()),
                         kind: RequiredKind::Module,
                     },
                 );
@@ -4211,7 +4606,7 @@ mod implementation {
                     url.to_owned(),
                     RequiredSource {
                         url: response.to_owned(),
-                        text: text.to_owned(),
+                        body: RequiredBody::Text(text.to_owned()),
                         kind: RequiredKind::Module,
                     },
                 );
@@ -4224,7 +4619,7 @@ mod implementation {
                     url.to_owned(),
                     RequiredSource {
                         url: url.to_owned(),
-                        text: text.to_owned(),
+                        body: RequiredBody::Text(text.to_owned()),
                         kind: RequiredKind::Detect,
                     },
                 );
@@ -4650,7 +5045,9 @@ mod implementation {
                     };
                     Ok(RequiredSource {
                         url: url.to_owned(),
-                        text: format!("{text}\nexport const entered = {entered};"),
+                        body: RequiredBody::Text(format!(
+                            "{text}\nexport const entered = {entered};"
+                        )),
                         kind: RequiredKind::Module,
                     })
                 })
@@ -6706,7 +7103,7 @@ mod implementation {
                     url.to_owned(),
                     RequiredSource {
                         url: url.to_owned(),
-                        text: text.to_owned(),
+                        body: RequiredBody::Text(text.to_owned()),
                         kind,
                     },
                 );
@@ -8503,7 +8900,7 @@ pub use ffi::MemoryUsage;
 pub use implementation::{
     CallOutcome, Compiled, CompiledKind, Context, Error, ErrorKind, ErrorPhase, EvalOptions,
     EvalSource, HostArgument, HostFunctionError, HostValue, InterruptHandle, Member, ModuleCode,
-    ModuleNormalizer, RequiredCode, RequiredKind, RequiredSource, Runtime, RuntimeOptions,
-    SourceLocation, SourceType, StructuredBytes, StructuredClone, Value, ValueKind,
+    ModuleNormalizer, RequiredBody, RequiredCode, RequiredKind, RequiredSource, Runtime,
+    RuntimeOptions, SourceLocation, SourceType, StructuredBytes, StructuredClone, Value, ValueKind,
     bytecode_engine_id,
 };

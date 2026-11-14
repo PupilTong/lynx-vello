@@ -109,7 +109,8 @@ Section payloads (per the C++ readers):
   (2=style, 4=media, 5=font-face, 8=keyframes, …).
 - **JS**: `u32 file_count`, then per file `str path` + `str source`
   (e.g. `/app-service.js`).
-- **JS_BYTECODE**: `u32 engine_type (1=quickjs)`, `u32 file_count`, per file
+- **JS_BYTECODE**: `u32 engine_type` (2 = quickjs, `JSRuntimeType` in
+  `core/runtime/js/jsi/jsi.h`), `u32 file_count`, per file
   `str path` + `compact_u64 len` + raw QuickJS bytecode.
 - **CONFIG**: one string containing JSON (page config).
 - **ROOT_LEPUS**: main-thread code — QuickJS bytecode when magic is LepusNG.

@@ -443,11 +443,11 @@ orchestration and the native adapters.
 
 ## PR4: the registry moves into `vant`
 
-`vant::registry`: `Registry<S>` and `Registered<S>` generic over the host's
-parsed-stylesheet type, `Registrar<S>`, `RegisterError`, the URL
-normalization every registration goes through, and the traits a source
-parser writes through — `Register<S>`, `RegisterInBackground<S>`,
-`ContainerInstaller<S>`. `bobcat-source` then names `vant` and `bobcat-core`
+`vant::registry`: `Registry<S, M>` and `Registered<S, M>` generic over the
+host's parsed-stylesheet type and its verified module bytecode type,
+`Registrar<S, M>`, `RegisterError`, the URL normalization every registration
+goes through, and the traits a source parser writes through —
+`Register<S, M>`, `RegisterInBackground<S, M>`, `ContainerInstaller<S, M>`. `bobcat-source` then names `vant` and `bobcat-core`
 only, and `bobcat-resources` becomes its dev-dependency. The install holds
 (`Installs`, beside the registry in a scope's `Transports`) and the stylesheet
 in-flight cache stay in `bobcat-resources`: they are tokio `watch` channels,

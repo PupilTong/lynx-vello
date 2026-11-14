@@ -1,0 +1,49 @@
+header: version 9, external debug info, vardefs stripped
+atoms: 6
+  0: "counter"
+  1: "label"
+  2: "limit"
+  3: "bump"
+  4: "x"
+  5: "main-thread.js"
+function @52 "<eval>"
+  kind normal, js_mode 0x00, flags [arguments_allowed has_debug]
+  args 0, vars 1, defined_args 0, stack 1, closure_vars 0, cpool 1, bytecode 80 bytes @66
+  code:
+        0  check_define_var "counter" 0
+        6  check_define_var "label" 128
+       12  check_define_var "limit" 128
+       18  check_define_var "bump" 64
+       24  define_var "counter" 0
+       30  define_var "label" 130
+       36  define_var "limit" 128
+       42  fclosure8 const:0
+       44  define_func "bump" 0
+       50  push_1 1
+       51  put_var "counter"
+       56  push_atom_value "x"
+       61  put_var_init "label"
+       66  push_3 3
+       67  put_var_init "limit"
+       72  get_var "bump"
+       77  call0 0
+       78  set_loc0 loc:0
+       79  return
+  debug: external, filename "main-thread.js", function_id 2
+  cpool:
+    0:
+      function @150 "bump"
+        kind normal, js_mode 0x00, flags [has_prototype has_simple_parameter_list new_target_allowed arguments_allowed has_debug]
+        args 0, vars 0, defined_args 0, stack 2, closure_vars 0, cpool 0, bytecode 30 bytes @164
+        code:
+              0  get_var "counter"
+              5  get_var "limit"
+             10  add
+             11  dup
+             12  put_var "counter"
+             17  drop
+             18  get_var "label"
+             23  get_var "counter"
+             28  add
+             29  return
+        debug: external, filename "main-thread.js", function_id 1

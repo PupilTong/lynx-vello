@@ -119,7 +119,10 @@ impl ZipSource {
     /// after boot. Replacing a page should retire its resource scope.
     pub fn register_with(
         self,
-        resources: &impl Register<bobcat_core::PreparsedStyleSheet>,
+        resources: &impl Register<
+            bobcat_core::PreparsedStyleSheet,
+            bobcat_core::resource::VerifiedModule,
+        >,
         entry: &Url,
     ) -> Result<(), ZipSourceError> {
         entry_path(entry)?;

@@ -68,6 +68,19 @@ typedef struct QjsModuleSource {
     /* Whether a compile of this source's text keeps its bytecode in the
        realm's compiled queue (`qjs_context_take_compiled`). */
     int capture;
+    /* A realm-local source answered with module bytecode the host's own
+       writer wrote for a program its checks passed
+       (`qjs_context_complete_module_bytecode`, or a synchronous load that
+       answered bytecode), owned here (malloc'd), and read with
+       `JS_READ_OBJ_COMPUTE_STACK_SIZE` when the module is compiled. That
+       read trusts the structure of the bytes, which the host's writer
+       guarantees; it computes each function's stack size. Freed as soon as
+       that read has made this realm's instance, or with the source. */
+    uint8_t *verified_bytecode;
+    size_t verified_bytecode_length;
+    /* The verified bytecode has been read into this realm's instance and
+       freed: the source stays answered, and the instance is the module. */
+    int bytecode_read;
     char *url;
     char *error;
     int requested;
@@ -76,7 +89,8 @@ typedef struct QjsModuleSource {
 
 /* Whether the host has supplied this source, as text or as bytecode. */
 static int qjs_source_is_answered(const QjsModuleSource *source) {
-    return source->source != NULL || source->bytecode != NULL;
+    return source->source != NULL || source->bytecode != NULL ||
+           source->verified_bytecode != NULL || source->bytecode_read;
 }
 
 /* `JSModuleDef` lives on `JSContext.loaded_modules`, so what a source
@@ -198,6 +212,10 @@ typedef struct QjsRuntime {
        At zero no body of any realm on this runtime is part-way through, and
        a module this runtime has is therefore safe to link or evaluate. */
     int evaluation_depth;
+    /* Bytes of verified module bytecode realm-local sources of this runtime
+       hold and have not yet read: what `qjs_runtime_owned_bytecode`
+       reports, for the tests of when those copies are freed. */
+    size_t owned_bytecode;
     /* The one object every realm given it shares by reference, and how many
        live realms have been given it; `JS_UNDEFINED` while none has. See
        `qjs_context_add_host_module_shared_object`. */
@@ -229,6 +247,11 @@ enum QjsRequiredKind {
     QJS_REQUIRED_JSON = 1,
     QJS_REQUIRED_MODULE = 2,
     QJS_REQUIRED_DETECT = 3,
+    /* Module bytecode, already checked and written by the host: stored as
+       the realm's verified bytecode and read with
+       `JS_READ_OBJ_COMPUTE_STACK_SIZE` when compiled. `text` and
+       `text_length` are the bytes. */
+    QJS_REQUIRED_MODULE_BYTECODE = 4,
 };
 
 /* One synchronous source load. The host fills either the three source fields
@@ -503,6 +526,8 @@ _Static_assert(QJS_REQUIRED_MODULE == 2,
                "Rust QJS_REQUIRED_MODULE must match shim.c");
 _Static_assert(QJS_REQUIRED_DETECT == 3,
                "Rust QJS_REQUIRED_DETECT must match shim.c");
+_Static_assert(QJS_REQUIRED_MODULE_BYTECODE == 4,
+               "Rust QJS_REQUIRED_MODULE_BYTECODE must match shim.c");
 
 enum QjsRejectionStatus {
     QJS_REJECTION_NONE = 0,
@@ -956,6 +981,62 @@ static JSValue qjs_read_cached_module(QjsContext *context,
     return compiled;
 }
 
+static JSModuleDef *qjs_add_module_instance(QjsContext *context,
+                                            const QjsModuleSource *source,
+                                            JSModuleDef *definition,
+                                            QjsModuleInstance *instance);
+
+static JSValue qjs_throw_with_message(JSContext *realm, int syntax,
+                                      JSValue message);
+
+/* Frees a source's verified bytecode, if it holds any. */
+static void qjs_source_drop_verified_bytecode(QjsRuntime *runtime,
+                                              QjsModuleSource *source) {
+    if (source->verified_bytecode != NULL) {
+        runtime->owned_bytecode -= source->verified_bytecode_length;
+        free(source->verified_bytecode);
+        source->verified_bytecode = NULL;
+        source->verified_bytecode_length = 0;
+    }
+}
+
+/* Replaces the pending exception — the fork's read refusing bytes, which
+   with `JS_READ_OBJ_COMPUTE_STACK_SIZE` is a function whose stack size
+   cannot be computed — by `SyntaxError("bytecode rejected for '<url>': <reason>")`, so the
+   import that failed or the `require` that threw names the module. A read
+   runs no JavaScript, so it is never interrupted. */
+static void qjs_throw_bytecode_rejected(JSContext *raw, const char *url) {
+    static const char PROLOGUE[] = "bytecode rejected for '";
+    static const char INFIX[] = "': ";
+    JSValue reason = JS_GetException(raw);
+    const char *text;
+    size_t url_length;
+    size_t text_length;
+    size_t fixed = sizeof(PROLOGUE) - 1 + sizeof(INFIX) - 1;
+    char *message;
+
+    text = JS_ToCString(raw, reason);
+    JS_FreeValue(raw, reason);
+    if (text == NULL) {
+        return;
+    }
+    url_length = strlen(url);
+    text_length = strlen(text);
+    if (url_length > SIZE_MAX - fixed - text_length - 1 ||
+        (message = malloc(fixed + url_length + text_length + 1)) == NULL) {
+        JS_FreeCString(raw, text);
+        JS_ThrowOutOfMemory(raw);
+        return;
+    }
+    memcpy(message, PROLOGUE, sizeof(PROLOGUE) - 1);
+    memcpy(message + sizeof(PROLOGUE) - 1, url, url_length);
+    memcpy(message + sizeof(PROLOGUE) - 1 + url_length, INFIX, sizeof(INFIX) - 1);
+    memcpy(message + fixed + url_length, text, text_length + 1);
+    JS_FreeCString(raw, text);
+    qjs_throw_with_message(raw, 1, JS_NewString(raw, message));
+    free(message);
+}
+
 /* Compiles one source this realm has into a module of it — or reads the
    module back from the bytecode the source carries instead of text — and
    remembers the instance.
@@ -998,25 +1079,51 @@ static JSModuleDef *qjs_compile_module_source(QjsContext *context,
                                               QjsModuleSource *source,
                                               int linked) {
     JSContext *raw_context = context->raw;
-    QjsModuleInstance *instance = calloc(1, sizeof(*instance));
+    QjsModuleInstance *instance;
     JSValue compiled;
     JSModuleDef *definition;
+    const char *url = source->url != NULL ? source->url : source->name;
 
+    if (source->source == NULL && source->bytecode == NULL &&
+        source->verified_bytecode == NULL) {
+        /* Verified bytecode is freed only once its instance is recorded,
+           and the loader answers from that instance first, so nothing
+           reaches here without a body to compile. */
+        JS_ThrowInternalError(raw_context, "module '%s' has no body", source->name);
+        return NULL;
+    }
+    instance = calloc(1, sizeof(*instance));
     if (instance == NULL) {
         JS_ThrowOutOfMemory(raw_context);
         return NULL;
     }
-    if (source->bytecode != NULL) {
+    if (source->verified_bytecode != NULL || source->bytecode != NULL) {
+        int verify = source->verified_bytecode != NULL;
         /* Read bytecode is a module nothing has resolved, as a compile
            under JS_EVAL_FLAG_COMPILE_UNLINKED leaves one; an inline link
-           resolves it here, as that compile would have. */
-        compiled = JS_ReadObject(raw_context, source->bytecode,
-                                 source->bytecode_length, JS_READ_OBJ_BYTECODE);
+           resolves it here, as that compile would have. Bytes the host's
+           writer wrote from a checked program are read computing each
+           function's stack size; a runtime's own
+           (`qjs_runtime_add_module_bytecode`) are this build's and are read
+           as they are. */
+        if (verify) {
+            compiled = JS_ReadObject(raw_context, source->verified_bytecode,
+                                     source->verified_bytecode_length,
+                                     JS_READ_OBJ_BYTECODE |
+                                     JS_READ_OBJ_COMPUTE_STACK_SIZE);
+            if (JS_IsException(compiled)) {
+                qjs_throw_bytecode_rejected(raw_context, url);
+            }
+        } else {
+            compiled = JS_ReadObject(raw_context, source->bytecode,
+                                     source->bytecode_length,
+                                     JS_READ_OBJ_BYTECODE);
+        }
         if (!JS_IsException(compiled) &&
             JS_VALUE_GET_TAG(compiled) != JS_TAG_MODULE) {
             JS_FreeValue(raw_context, compiled);
             compiled = JS_ThrowTypeError(
-                raw_context, "the bytecode registered as '%s' is not a module",
+                raw_context, "the bytecode for '%s' is not a module",
                 source->name);
         }
         if (!JS_IsException(compiled) && linked &&
@@ -1061,15 +1168,35 @@ static JSModuleDef *qjs_compile_module_source(QjsContext *context,
         }
     }
     if (JS_IsException(compiled)) {
+        /* Verified bytecode the read refused stays with the source: a later
+           import of it is refused the same way, and the source frees it. */
         free(instance);
         return NULL;
     }
     definition = JS_VALUE_GET_PTR(compiled);
     JS_FreeValue(raw_context, compiled);
+    if (qjs_add_module_instance(context, source, definition, instance) == NULL) {
+        return NULL;
+    }
+    if (source->verified_bytecode != NULL) {
+        /* The instance is the module from here on. */
+        qjs_source_drop_verified_bytecode(context->runtime, source);
+        source->bytecode_read = 1;
+    }
+    return definition;
+}
+
+/* Gives a module this realm compiled or read its `import.meta.url` and
+   records it, in `instance`, as this realm's instance of `source`. Frees
+   `instance` when it fails. */
+static JSModuleDef *qjs_add_module_instance(QjsContext *context,
+                                            const QjsModuleSource *source,
+                                            JSModuleDef *definition,
+                                            QjsModuleInstance *instance) {
     /* A realm-local module knows the URL it answered from; a source the
        runtime carries is known by the name it was registered under. */
     if (qjs_set_import_meta_url(
-            raw_context, definition,
+            context->raw, definition,
             source->url != NULL ? source->url : source->name) < 0) {
         free(instance);
         return NULL;
@@ -1127,6 +1254,27 @@ int qjs_context_complete_module_code(QjsContext *context, const char *name,
                                      const char *url, const uint8_t *text,
                                      size_t length, const uint8_t *bytecode,
                                      size_t bytecode_length, int capture);
+int qjs_context_complete_module_bytecode(QjsContext *context, const char *name,
+                                         const char *url,
+                                         const uint8_t *bytecode,
+                                         size_t length);
+
+/* Stores what a synchronous load answered as this realm's source of
+   `name`: text, with `bytecode` to read in its place and `capture` as for
+   `qjs_context_complete_module_code`, or verified module bytecode, which
+   takes neither. Same statuses as the two completions. */
+static int qjs_complete_required(QjsContext *context, const char *name,
+                                 const QjsRequiredSource *loaded,
+                                 const uint8_t *bytecode,
+                                 size_t bytecode_length, int capture) {
+    if (loaded->kind == QJS_REQUIRED_MODULE_BYTECODE) {
+        return qjs_context_complete_module_bytecode(
+            context, name, loaded->url, loaded->text, loaded->text_length);
+    }
+    return qjs_context_complete_module_code(context, name, loaded->url,
+                                            loaded->text, loaded->text_length,
+                                            bytecode, bytecode_length, capture);
+}
 
 /* Loads one import's source through the host's synchronous loader and copies
    it into this realm.
@@ -1155,8 +1303,8 @@ static int qjs_require_module_source(QjsContext *context, const char *name) {
     /* -5 is this name having been answered already, which is the host's own
        fetch of it having landed first: its source is this source. */
     usable = loaded.cached != NULL && loaded.cached_kind == QJS_REQUIRED_MODULE;
-    status = qjs_context_complete_module_code(
-        context, name, loaded.url, loaded.text, loaded.text_length,
+    status = qjs_complete_required(
+        context, name, &loaded,
         usable ? loaded.cached : NULL, usable ? loaded.cached_length : 0,
         loaded.capture || (loaded.cached != NULL && !usable));
     if (status != 0 && status != -5) {
@@ -1310,9 +1458,11 @@ static int qjs_check_module_attributes(JSContext *raw, void *opaque,
     return 0;
 }
 
-static void qjs_module_sources_free(QjsModuleSource *module) {
+static void qjs_module_sources_free(QjsRuntime *runtime,
+                                    QjsModuleSource *module) {
     while (module != NULL) {
         QjsModuleSource *next = module->next;
+        qjs_source_drop_verified_bytecode(runtime, module);
         free(module->name);
         free(module->source);
         free(module->owned_bytecode);
@@ -1440,7 +1590,7 @@ void qjs_runtime_free(QjsRuntime *runtime) {
     }
     JS_FreeValueRT(runtime->raw, runtime->shared_object);
     JS_FreeRuntime(runtime->raw);
-    qjs_module_sources_free(runtime->module_sources);
+    qjs_module_sources_free(runtime, runtime->module_sources);
     qjs_host_module_names_free(runtime->host_module_names);
     qjs_reserved_prefixes_free(runtime->reserved_prefixes);
     free(runtime);
@@ -1616,7 +1766,106 @@ int qjs_bytecode_format_version(void) {
     return version;
 }
 
-QjsContext *qjs_context_new(QjsRuntime *runtime) {
+/* Compiles script source text (a global script, not a module) to the
+   bytecode `JS_WriteObject` writes of it. Nothing is evaluated. As for
+   `qjs_context_compile_module_bytecode`, the bytes are `js_malloc`'d and
+   NULL leaves the failure as this realm's pending exception. */
+uint8_t *qjs_context_compile_script_bytecode(QjsContext *context,
+                                             const uint8_t *source,
+                                             size_t source_length,
+                                             const char *name,
+                                             size_t *out_length) {
+    JSValue compiled;
+    uint8_t *bytes;
+
+    compiled = JS_Eval(context->raw, (const char *)source, source_length, name,
+                       JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_COMPILE_ONLY);
+    if (JS_IsException(compiled)) {
+        return NULL;
+    }
+    bytes = JS_WriteObject(context->raw, out_length, compiled,
+                           JS_WRITE_OBJ_BYTECODE);
+    JS_FreeValue(context->raw, compiled);
+    return bytes;
+}
+
+/* Reads bytecode with `JS_READ_OBJ_COMPUTE_STACK_SIZE` and writes what it
+   read again, so the bytes that come back carry the stack sizes the read
+   computed. The read trusts the structure of the bytes: only bytes this
+   engine or the host's checked writer wrote may be given.
+   A module read here stays loaded in this realm under the name its bytes
+   carry. The bytes are `js_malloc`'d; NULL leaves the read's failure as
+   this realm's pending exception. */
+uint8_t *qjs_context_verify_bytecode(QjsContext *context,
+                                     const uint8_t *bytecode, size_t length,
+                                     size_t *out_length) {
+    JSValue read;
+    uint8_t *bytes;
+
+    read = JS_ReadObject(context->raw, bytecode, length,
+                         JS_READ_OBJ_BYTECODE | JS_READ_OBJ_COMPUTE_STACK_SIZE);
+    if (JS_IsException(read)) {
+        return NULL;
+    }
+    bytes = JS_WriteObject(context->raw, out_length, read,
+                           JS_WRITE_OBJ_BYTECODE);
+    JS_FreeValue(context->raw, read);
+    return bytes;
+}
+
+/* Reads script bytecode with `JS_READ_OBJ_COMPUTE_STACK_SIZE` and evaluates
+   it in this realm. The read trusts the structure of the bytes, as above.
+   NULL leaves the failure as this realm's pending exception. */
+QjsValue *qjs_context_evaluate_script_bytecode(QjsContext *context,
+                                               const uint8_t *bytecode,
+                                               size_t length) {
+    JSValue read;
+
+    read = JS_ReadObject(context->raw, bytecode, length,
+                         JS_READ_OBJ_BYTECODE | JS_READ_OBJ_COMPUTE_STACK_SIZE);
+    if (JS_IsException(read)) {
+        return NULL;
+    }
+    if (JS_VALUE_GET_TAG(read) != JS_TAG_FUNCTION_BYTECODE) {
+        JS_FreeValue(context->raw, read);
+        JS_ThrowTypeError(context->raw, "the bytecode is not a script");
+        return NULL;
+    }
+    return qjs_box(context->raw, JS_EvalFunction(context->raw, read));
+}
+
+static JSValue qjs_string_from_utf16(JSContext *raw_context,
+                                     const uint16_t *units, size_t length);
+
+/* Compiles a regular expression to the bytecode a RegExp with that pattern
+   and those flags carries (`JS_CompileRegExp`). The pattern is UTF-16 code
+   units, the flags the flag letters. The bytes are `js_malloc`'d; NULL
+   leaves the failure as this realm's pending exception. */
+uint8_t *qjs_context_compile_regexp(QjsContext *context,
+                                    const uint16_t *pattern,
+                                    size_t pattern_length, const char *flags,
+                                    size_t flags_length, size_t *out_length) {
+    JSValue pattern_value;
+    JSValue flags_value;
+    uint8_t *bytes = NULL;
+
+    *out_length = 0;
+    pattern_value = qjs_string_from_utf16(context->raw, pattern, pattern_length);
+    if (JS_IsException(pattern_value)) {
+        return NULL;
+    }
+    flags_value = JS_NewStringLen(context->raw, flags, flags_length);
+    if (!JS_IsException(flags_value)) {
+        bytes = JS_CompileRegExp(context->raw, out_length, pattern_value,
+                                 flags_value);
+        JS_FreeValue(context->raw, flags_value);
+    }
+    JS_FreeValue(context->raw, pattern_value);
+    return bytes;
+}
+
+static QjsContext *qjs_context_new_with(QjsRuntime *runtime,
+                                        JSContext *(*make)(JSRuntime *)) {
     QjsContext *context = calloc(1, sizeof(*context));
 
     if (context == NULL) {
@@ -1624,13 +1873,25 @@ QjsContext *qjs_context_new(QjsRuntime *runtime) {
     }
     context->runtime = runtime;
     context->shadow_eval = JS_UNDEFINED;
-    context->raw = JS_NewContext(runtime->raw);
+    context->raw = make(runtime->raw);
     if (context->raw == NULL) {
         free(context);
         return NULL;
     }
     JS_SetContextOpaque(context->raw, context);
     return context;
+}
+
+QjsContext *qjs_context_new(QjsRuntime *runtime) {
+    return qjs_context_new_with(runtime, JS_NewContext);
+}
+
+/* A realm with only the basic objects (`JS_NewContextRaw`: the object and
+   function prototypes, the global object and the error constructors), for
+   compiling regular expressions: `JS_CompileRegExp` needs nothing else, and
+   its refusal is a `SyntaxError` from the error prototypes it has. */
+QjsContext *qjs_context_new_bare(QjsRuntime *runtime) {
+    return qjs_context_new_with(runtime, JS_NewContextRaw);
 }
 
 void qjs_context_free(QjsContext *context) {
@@ -1653,7 +1914,7 @@ void qjs_context_free(QjsContext *context) {
         context->runtime->shared_object = JS_UNDEFINED;
     }
     qjs_module_instances_free(context->module_instances);
-    qjs_module_sources_free(context->module_sources);
+    qjs_module_sources_free(context->runtime, context->module_sources);
     while (context->compiled_head != NULL) {
         QjsCompiled *compiled = context->compiled_head;
         context->compiled_head = compiled->next;
@@ -2183,9 +2444,8 @@ static JSValue qjs_require_module(QjsContext *context, const char *requested,
 
     /* -5 is this URL having been answered already, by the host's own fetch
        of an import of it: that source is this source, and it stands. */
-    status = qjs_context_complete_module_code(
-        context, requested, loaded->url, loaded->text, loaded->text_length,
-        bytecode, bytecode_length, capture);
+    status = qjs_complete_required(context, requested, loaded, bytecode,
+                                   bytecode_length, capture);
     if (status != 0 && status != -5) {
         if (!JS_HasException(raw)) {
             JS_ThrowInternalError(raw, "module '%s' could not be completed",
@@ -2382,7 +2642,7 @@ static JSValue qjs_load_module_sync(JSContext *raw, JSValueConst this_value,
                    : QJS_REQUIRED_COMMONJS;
         loaded.text = (const uint8_t *)terminated;
     }
-    if (kind == QJS_REQUIRED_MODULE) {
+    if (kind == QJS_REQUIRED_MODULE || kind == QJS_REQUIRED_MODULE_BYTECODE) {
         /* `parameters` is a CommonJS wrapper's, and a module has none. The
            URL asked for is what the module is stored under, because that is
            the name an import of it resolves to. */
@@ -2560,6 +2820,65 @@ int qjs_context_complete_module_code(QjsContext *context, const char *name,
                                      size_t bytecode_length, int capture) {
     return qjs_complete_module(context, name, url, text, length, NULL,
                                bytecode, bytecode_length, capture);
+}
+
+/* Supplies a realm-local module as module bytecode the host has already
+   checked and written: an owned copy is kept as the source's verified
+   bytecode, and read with `JS_READ_OBJ_COMPUTE_STACK_SIZE` when the module
+   is compiled — by the loader for an import, inside the compile region for
+   a `require` — which then frees it. Same name rules and statuses as
+   `qjs_context_complete_module`: -2 for a name the runtime has, -5 for one
+   already answered, in which case nothing is copied; -1 is running out of
+   memory. */
+int qjs_context_complete_module_bytecode(QjsContext *context, const char *name,
+                                         const char *url,
+                                         const uint8_t *bytecode,
+                                         size_t length) {
+    QjsModuleSource *source = qjs_find_local_source(context, name);
+    uint8_t *copy;
+    char *url_copy;
+    int created = 0;
+
+    if (qjs_find_module_source(context->runtime, name) != NULL ||
+        qjs_find_host_module_name(context->runtime, name) != NULL)
+        return -2;
+    if (source != NULL && (qjs_source_is_answered(source) || source->error != NULL))
+        return -5;
+    copy = malloc(length != 0 ? length : 1);
+    url_copy = qjs_strdup(url);
+    if (copy == NULL || url_copy == NULL)
+        goto oom;
+    if (source == NULL) {
+        source = calloc(1, sizeof(*source));
+        if (source == NULL)
+            goto oom;
+        source->name = qjs_strdup(name);
+        if (source->name == NULL) {
+            free(source);
+            goto oom;
+        }
+        created = 1;
+    }
+    memcpy(copy, bytecode, length);
+    source->verified_bytecode = copy;
+    source->verified_bytecode_length = length;
+    source->url = url_copy;
+    context->runtime->owned_bytecode += length;
+    if (created) {
+        source->next = context->module_sources;
+        context->module_sources = source;
+    }
+    return 0;
+ oom:
+    free(copy);
+    free(url_copy);
+    JS_ThrowOutOfMemory(context->raw);
+    return -1;
+}
+
+/* Bytes of verified module bytecode this runtime's realms hold unread. */
+size_t qjs_runtime_owned_bytecode(QjsRuntime *runtime) {
+    return runtime->owned_bytecode;
 }
 
 void qjs_context_resume_module_loads(QjsContext *context) {

@@ -212,9 +212,11 @@ impl RealmCodeCache {
     ) -> quickjs::RequiredCode {
         use quickjs::RequiredKind;
 
-        let digest = match source.kind {
-            RequiredKind::Json => None,
-            _ => self.digest(&source.text),
+        // Module bytecode is never compiled: nothing is looked up for it,
+        // nothing is captured, and no name is handed over.
+        let digest = match (&source.body, source.kind) {
+            (quickjs::RequiredBody::ModuleBytecode(_), _) | (_, RequiredKind::Json) => None,
+            (quickjs::RequiredBody::Text(text), _) => self.digest(text),
         };
         let Some(digest) = digest else {
             return source.into();
@@ -330,7 +332,7 @@ mod tests {
     fn required(url: &str, text: &str) -> quickjs::RequiredSource {
         quickjs::RequiredSource {
             url: url.to_owned(),
-            text: text.to_owned(),
+            body: quickjs::RequiredBody::Text(text.to_owned()),
             kind: quickjs::RequiredKind::CommonJs,
         }
     }

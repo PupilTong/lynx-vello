@@ -44,7 +44,7 @@
 //! the message consumer reads during the wait, which ends the worker and
 //! cancels the token its own source requests carry.
 
-use quickjs_rust_bridge::{HostArgument, HostValue, RequiredKind, RequiredSource};
+use quickjs_rust_bridge::{HostArgument, HostValue, RequiredBody, RequiredKind, RequiredSource};
 
 use crate::esm::HOST_MODULE_SPECIFIER;
 use crate::jobs::JsThreadHandle;
@@ -96,7 +96,15 @@ pub(crate) fn install(
             LoadedSource::Module { source, url } => Ok(RequiredSource {
                 kind: kind_of(&url),
                 url,
-                text: source,
+                body: RequiredBody::Text(source),
+            }),
+            // Verified when it was made; the engine reads it inside the
+            // load, computing stack sizes, and its refusal is the load's
+            // `SyntaxError`.
+            LoadedSource::ModuleBytecode { module, url } => Ok(RequiredSource {
+                kind: RequiredKind::Module,
+                url,
+                body: RequiredBody::ModuleBytecode(module),
             }),
             LoadedSource::StyleSheet(_) => Err("the fetcher returned a stylesheet".to_owned()),
             LoadedSource::Font(_) => Err("the fetcher returned a font".to_owned()),
