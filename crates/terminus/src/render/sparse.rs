@@ -58,6 +58,7 @@ use crate::paint::display_list::{
 };
 use crate::peniko::{Color, Extend, Fill, ImageAlphaType, ImageData, ImageFormat, ImageSampler};
 use crate::render::image::ImageDescriptor;
+use crate::render::picture::PictureId;
 
 /// What one frame cost, and what it could not draw.
 #[derive(Debug, Default, Clone, Copy)]
@@ -567,26 +568,48 @@ fn render_settings(device: &wgpu::Device) -> RenderSettings {
     })
 }
 
-/// One bitmap upload's identity: the pixels, read under one layout.
+/// One bitmap upload's identity: the pixels, read under one layout, or the
+/// picture whose texture is rewritten in place.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-struct BitmapKey {
-    blob: u64,
-    width: u32,
-    height: u32,
-    /// [`ImageFormat`] and [`ImageAlphaType`] by their `repr(u8)`: one blob
-    /// read under another layout is other pixels.
-    layout: (u8, u8),
+enum BitmapKey {
+    Blob {
+        blob: u64,
+        width: u32,
+        height: u32,
+        /// [`ImageFormat`] and [`ImageAlphaType`] by their `repr(u8)`: one
+        /// blob read under another layout is other pixels.
+        layout: (u8, u8),
+    },
+    /// A picture one element owns: one texture under one id, whatever frame
+    /// it holds ([`SharedRaster::write_picture`]).
+    Picture(PictureId),
 }
 
 impl BitmapKey {
     /// The key the bitmap `image` names is uploaded under.
     fn of(image: &ImageDescriptor) -> Self {
-        Self {
+        Self::Blob {
             blob: image.blob,
             width: image.width,
             height: image.height,
             layout: (image.format as u8, image.alpha_type as u8),
         }
+    }
+
+    /// The blob a blob's upload holds.
+    #[cfg(test)]
+    fn blob(&self) -> Option<u64> {
+        match self {
+            Self::Blob { blob, .. } => Some(*blob),
+            Self::Picture(_) => None,
+        }
+    }
+
+    /// The key a draw of `image` is drawn from.
+    fn drawn(image: &ImageRef) -> Self {
+        image
+            .picture
+            .map_or_else(|| Self::of(&image.descriptor), Self::Picture)
     }
 }
 
@@ -604,6 +627,10 @@ struct Bitmap {
     view: wgpu::TextureView,
     opaque: bool,
     bytes: u64,
+    /// For a picture's texture, the generation of the frame last written
+    /// into it and what that frame is; `None` for a blob's upload, which
+    /// never changes.
+    written: Option<(u64, ImageDescriptor)>,
     /// The [`Bitmaps::stamp`] of the render that last drew it, by any
     /// target: the release order.
     last_drawn: u64,
@@ -840,17 +867,37 @@ impl Bitmaps {
         true
     }
 
-    /// Makes `owner`'s leases exactly the uploads of `held` that exist:
-    /// the new set is leased before the old one is let go, under the one
-    /// lock hold, so an upload in both is never unleased between.
+    /// Leases `picture`'s texture to `owner`, when it exists and `owner`
+    /// does not hold it already; answers the generation of the frame last
+    /// written into it and what that frame is, or `None` when there is no
+    /// texture.
+    fn lease_picture(&mut self, owner: u64, picture: PictureId) -> Option<(u64, ImageDescriptor)> {
+        let key = BitmapKey::Picture(picture);
+        let bitmap = self.entries.get_mut(&key)?;
+        let held = self.leases.entry(owner).or_default();
+        if !held.contains(&key) {
+            held.push(key);
+            bitmap.leases += 1;
+        }
+        bitmap.written
+    }
+
+    /// Makes `owner`'s leases exactly the uploads of `held` and the
+    /// textures of `pictures` that exist: the new set is leased before the
+    /// old one is let go, under the one lock hold, so an upload in both is
+    /// never unleased between.
     fn replace_leases<'a>(
         &mut self,
         owner: u64,
         held: impl IntoIterator<Item = &'a ImageDescriptor>,
+        pictures: impl IntoIterator<Item = PictureId>,
     ) {
         let mut keys = Vec::new();
-        for image in held {
-            let key = BitmapKey::of(image);
+        let held = held
+            .into_iter()
+            .map(BitmapKey::of)
+            .chain(pictures.into_iter().map(BitmapKey::Picture));
+        for key in held {
             if let Some(bitmap) = self.entries.get_mut(&key) {
                 bitmap.leases += 1;
                 keys.push(key);
@@ -914,10 +961,42 @@ impl BitmapLeases {
         self.gpu.raster.bitmaps().lease(self.owner, image)
     }
 
-    /// Replaces every lease held with the uploads of `held` that exist,
-    /// with no moment in which an upload in both sets is unleased.
-    pub(crate) fn replace<'a>(&self, held: impl IntoIterator<Item = &'a ImageDescriptor>) {
-        self.gpu.raster.bitmaps().replace_leases(self.owner, held);
+    /// Replaces every lease held with the uploads of `held` and the
+    /// textures of `pictures` that exist, with no moment in which an upload
+    /// in both sets is unleased.
+    pub(crate) fn replace<'a>(
+        &self,
+        held: impl IntoIterator<Item = &'a ImageDescriptor>,
+        pictures: impl IntoIterator<Item = PictureId>,
+    ) {
+        self.gpu
+            .raster
+            .bitmaps()
+            .replace_leases(self.owner, held, pictures);
+    }
+
+    /// Leases `picture`'s texture, when it has one, answering the
+    /// generation of the frame last written into it and what that frame is.
+    pub(crate) fn lease_picture(&self, picture: PictureId) -> Option<(u64, ImageDescriptor)> {
+        self.gpu.raster.bitmaps().lease_picture(self.owner, picture)
+    }
+
+    /// Writes `pixels`, frame `generation` of `picture`, into the picture's
+    /// own texture and leases it ([`SharedRaster::write_picture`]); answers
+    /// whether it was written.
+    pub(crate) fn write_picture(
+        &self,
+        picture: PictureId,
+        generation: u64,
+        pixels: &ImageData,
+    ) -> bool {
+        let SharedGpu {
+            device,
+            queue,
+            raster,
+            ..
+        } = &*self.gpu;
+        raster.write_picture(device, queue, self.owner, picture, generation, pixels)
     }
 
     /// How many bitmaps have been uploaded on this device, by any target:
@@ -934,13 +1013,14 @@ impl Drop for BitmapLeases {
 }
 
 /// A texture of its own holding `texels`, a `width` × `height` premultiplied
-/// RGBA8 bitmap, and the id it is drawn under.
+/// RGBA8 bitmap, and the id it is drawn under: `id`, or a fresh one.
 fn own_texture(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     texels: &[u8],
     width: u32,
     height: u32,
+    id: Option<TextureId>,
 ) -> (TextureId, wgpu::TextureView) {
     let size = wgpu::Extent3d {
         width,
@@ -957,6 +1037,23 @@ fn own_texture(
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
+    write_texels(queue, &texture, texels, width, height);
+    (
+        id.unwrap_or_else(|| TextureId(next_texture_id())),
+        texture.create_view(&wgpu::TextureViewDescriptor::default()),
+    )
+}
+
+/// Writes `texels`, a `width` × `height` premultiplied RGBA8 bitmap, over
+/// the whole of `texture`, which is that size. The write lands before the
+/// next submitted work, so a render submitted after it samples it.
+fn write_texels(
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    texels: &[u8],
+    width: u32,
+    height: u32,
+) {
     queue.write_texture(
         texture.as_image_copy(),
         texels,
@@ -965,12 +1062,12 @@ fn own_texture(
             bytes_per_row: Some(4 * width),
             rows_per_image: Some(height),
         },
-        size,
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
     );
-    (
-        TextureId(next_texture_id()),
-        texture.create_view(&wgpu::TextureViewDescriptor::default()),
-    )
 }
 
 impl SharedRaster {
@@ -1021,6 +1118,16 @@ impl SharedRaster {
         self.bitmaps().budget = bytes;
     }
 
+    /// The id `picture`'s texture is drawn under and the texture's size,
+    /// when it has one: what a test pins a rewrite in place by.
+    #[cfg(test)]
+    pub(crate) fn picture_texture(&self, picture: PictureId) -> Option<(u64, u32, u32)> {
+        let bitmaps = self.bitmaps();
+        let bitmap = bitmaps.entries.get(&BitmapKey::Picture(picture))?;
+        let texture = bitmap.view.texture();
+        Some((bitmap.id.0, texture.width(), texture.height()))
+    }
+
     /// The image drawing `image` under `sampler` in `drawing`'s render,
     /// converted and uploaded on a miss; [`Missing`] when there is no upload
     /// and its pixels are unreadable, longer than the device's longest
@@ -1038,7 +1145,7 @@ impl SharedRaster {
         sampler: ImageSampler,
         drawing: &mut Drawing<'_>,
     ) -> Result<Image, Missing> {
-        let key = BitmapKey::of(&image.descriptor);
+        let key = BitmapKey::drawn(image);
         if let Some(image) = self.bitmaps().hit(&key, sampler, drawing) {
             return Ok(image);
         }
@@ -1050,7 +1157,14 @@ impl SharedRaster {
         let pixels = image.pixels().ok_or(Missing::Lost)?;
         let (texels, opaque) = premultiplied(&pixels).ok_or(Missing::Unreadable)?;
         drop(pixels);
-        let (id, view) = own_texture(device, queue, &texels, descriptor.width, descriptor.height);
+        let (id, view) = own_texture(
+            device,
+            queue,
+            &texels,
+            descriptor.width,
+            descriptor.height,
+            None,
+        );
         let mut bitmaps = self.bitmaps();
         if let Some(image) = bitmaps.hit(&key, sampler, drawing) {
             return Ok(image);
@@ -1060,6 +1174,7 @@ impl SharedRaster {
             view,
             opaque,
             bytes: texels.len() as u64,
+            written: None,
             last_drawn: 0,
             pins: SmallVec::new(),
             leases: 0,
@@ -1067,6 +1182,114 @@ impl SharedRaster {
         let image = bitmaps.insert(key, bitmap, sampler, drawing);
         self.uploads.fetch_add(1, Ordering::Release);
         Ok(image)
+    }
+
+    /// Writes `pixels`, frame `generation` of `picture`, into the picture's
+    /// own texture and leases it to `owner`, answering whether it was
+    /// written: `false` for pixels that cannot be drawn (too few bytes, a
+    /// zero or too long side), which leaves the texture as it was.
+    ///
+    /// The texture is rewritten in place under its one id when the frame is
+    /// the size of the last, and replaced by one of the new size under the
+    /// same id when it is not, so every draw of the picture, in a list
+    /// composed before the write or after it, samples the newest frame. The
+    /// conversion runs with no lock held; the write itself is queued, and
+    /// lands before the next submitted render.
+    fn write_picture(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        owner: u64,
+        picture: PictureId,
+        generation: u64,
+        pixels: &ImageData,
+    ) -> bool {
+        let longest = device.limits().max_texture_dimension_2d;
+        let (width, height) = (pixels.width, pixels.height);
+        if width == 0 || height == 0 || width > longest || height > longest {
+            return false;
+        }
+        let Some((texels, opaque)) = premultiplied(pixels) else {
+            return false;
+        };
+        let key = BitmapKey::Picture(picture);
+        let held = self.bitmaps().entries.get(&key).map(|bitmap| {
+            let texture = bitmap.view.texture();
+            (
+                bitmap.id,
+                (texture.width(), texture.height()) == (width, height),
+                texture.clone(),
+            )
+        });
+        let replaced = match &held {
+            Some((_, true, texture)) => {
+                write_texels(queue, texture, &texels, width, height);
+                None
+            }
+            Some((id, false, _)) => Some(own_texture(
+                device,
+                queue,
+                &texels,
+                width,
+                height,
+                Some(*id),
+            )),
+            None => Some(own_texture(device, queue, &texels, width, height, None)),
+        };
+        let bytes = texels.len() as u64;
+        let mut bitmaps = self.bitmaps();
+        let Bitmaps {
+            entries,
+            bytes: total,
+            leases,
+            ..
+        } = &mut *bitmaps;
+        let written = Some((generation, ImageDescriptor::of(pixels)));
+        if let Some(bitmap) = entries.get_mut(&key) {
+            if let Some((_, view)) = replaced {
+                bitmap.view = view;
+            }
+            *total = *total - bitmap.bytes + bytes;
+            bitmap.bytes = bytes;
+            bitmap.opaque = opaque;
+            bitmap.written = written;
+        } else {
+            // Released between the two locks: the texture the write went
+            // into is gone with it, so the new one, or the one written in
+            // place, is the picture's now.
+            let (id, view) = replaced.unwrap_or_else(|| {
+                let (id, _, texture) = held.expect("a write in place had a texture");
+                (
+                    id,
+                    texture.create_view(&wgpu::TextureViewDescriptor::default()),
+                )
+            });
+            *total += bytes;
+            entries.insert(
+                key,
+                Bitmap {
+                    id,
+                    view,
+                    opaque,
+                    bytes,
+                    written,
+                    last_drawn: 0,
+                    pins: SmallVec::new(),
+                    leases: 0,
+                },
+            );
+        }
+        let held = leases.entry(owner).or_default();
+        if !held.contains(&key) {
+            held.push(key);
+            entries
+                .get_mut(&key)
+                .expect("the picture's texture was just written")
+                .leases += 1;
+        }
+        drop(bitmaps);
+        self.uploads.fetch_add(1, Ordering::Release);
+        true
     }
 
     /// The GPU half of a render on `gpu`, whose rasterizer this is: `scene`,
@@ -1834,7 +2057,7 @@ mod tests {
             bitmaps
                 .entries
                 .keys()
-                .map(|key| key.blob)
+                .filter_map(super::BitmapKey::blob)
                 .collect::<Vec<_>>(),
             [both.data.id()],
             "what only the first drew was released, what the second draws kept"
@@ -1843,7 +2066,7 @@ mod tests {
             !bitmaps
                 .entries
                 .keys()
-                .any(|key| key.blob == only_first.data.id())
+                .any(|key| key.blob() == Some(only_first.data.id()))
         );
     }
 
@@ -1892,7 +2115,7 @@ mod tests {
         rig.bitmaps()
             .entries
             .keys()
-            .any(|key| key.blob == image.data.id())
+            .any(|key| key.blob() == Some(image.data.id()))
     }
 
     /// A lease holds an upload the release past the budget would otherwise
@@ -1934,7 +2157,7 @@ mod tests {
         let _ = rig.render(&filling(&red));
         let leases = BitmapLeases::new(&rig.gpu);
         assert!(!leases.lease(&ImageDescriptor::of(&never)));
-        leases.replace([&ImageDescriptor::of(&never)]);
+        leases.replace([&ImageDescriptor::of(&never)], []);
         assert!(
             rig.bitmaps()
                 .entries
@@ -1999,7 +2222,7 @@ mod tests {
         let (red_at, green_at) = (ImageDescriptor::of(&red), ImageDescriptor::of(&green));
         assert!(leases.lease(&red_at));
         assert!(leases.lease(&green_at));
-        leases.replace([&green_at]);
+        leases.replace([&green_at], []);
         for bitmap in rig.bitmaps().entries.values() {
             assert!(bitmap.leases <= 1, "each held once");
         }
@@ -2008,7 +2231,7 @@ mod tests {
         }
         assert!(!uploaded(&rig, &red), "out of the new set, so released");
         assert!(uploaded(&rig, &green), "in both, so never let go");
-        leases.replace([]);
+        leases.replace([], []);
         let _ = rig.render(&filling(&blue));
         assert!(!uploaded(&rig, &green));
     }

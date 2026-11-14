@@ -19,6 +19,11 @@ use bobcat_core::{
 };
 use bobcat_resources::{Resources, ResourcesConfig, ViewResources};
 
+/// The picture a page names by `source`.
+fn url(source: &str) -> bobcat_core::PictureKey {
+    bobcat_core::PictureKey::Url(Arc::from(source))
+}
+
 /// A width x height PNG whose quadrants are red, green, blue and white.
 fn quadrant_png(width: u32, height: u32) -> Vec<u8> {
     let mut rgba = Vec::with_capacity((width * height * 4) as usize);
@@ -134,7 +139,7 @@ impl Harness {
     /// the tier holds them.
     fn pixels(&self, source: &str, hint: ImageSizeHint) -> Option<bobcat_core::peniko::ImageData> {
         self.view
-            .describe(source, hint)
+            .describe(&url(source), hint)
             .and_then(|image| image.pixels)
     }
 
@@ -147,7 +152,7 @@ impl Harness {
             "`{source}` is not resident"
         );
         let wakeups = self.wakeups.load(Ordering::SeqCst);
-        self.view.want(source, hint);
+        self.view.want(&url(source), hint);
         assert!(
             self.pixels(source, hint).is_none(),
             "the want restores nothing inside the call"
@@ -270,7 +275,7 @@ fn a_draw_far_smaller_than_the_bitmap_refines_it_to_the_drawn_size() {
     // Drawn larger again: the image has more to give, so it refines back up.
     let _ = harness
         .view
-        .describe("app:///big.png", ImageSizeHint::new(400, 400));
+        .describe(&url("app:///big.png"), ImageSizeHint::new(400, 400));
     harness.settle_resident("app:///big.png", (400, 200));
 }
 
@@ -291,7 +296,7 @@ fn an_evicted_bitmap_is_restored_once_wanted() {
     assert!(used >= 2 * 32 * 32 * 4, "both bitmaps are resident: {used}");
 
     // A budget for one bitmap, with `b` as the working set: `a` is evicted.
-    harness.view.retain(&[Arc::from("app:///b.png")]);
+    harness.view.retain(&[url("app:///b.png")]);
     harness.resources.set_memory_budget_bytes(32 * 32 * 4 + 16);
     assert!(!harness.resources.is_resident("app:///a.png"));
     assert!(harness.resources.is_resident("app:///b.png"));
@@ -316,10 +321,10 @@ fn a_released_bitmap_leaves_the_tier_and_a_want_restores_it() {
         .register("app:///a.png", quadrant_png(32, 32), None)
         .expect("register");
     harness.load("app:///a.png");
-    harness.view.retain(&[Arc::from("app:///a.png")]);
+    harness.view.retain(&[url("app:///a.png")]);
     let described = harness
         .view
-        .describe("app:///a.png", ImageSizeHint::new(32, 32))
+        .describe(&url("app:///a.png"), ImageSizeHint::new(32, 32))
         .expect("a loaded bitmap is described");
     let pixels = described.pixels.expect("resident, so with its pixels");
     assert_eq!(
@@ -330,7 +335,7 @@ fn a_released_bitmap_leaves_the_tier_and_a_want_restores_it() {
     let used = harness.resources.memory_used_bytes();
     assert!(used >= 32 * 32 * 4, "the bitmap is resident: {used}");
 
-    harness.view.release(&[Arc::from("app:///a.png")]);
+    harness.view.release(&[url("app:///a.png")]);
     assert!(
         harness.resources.memory_used_bytes() <= used - 32 * 32 * 4,
         "its bytes left the tier"
@@ -338,7 +343,7 @@ fn a_released_bitmap_leaves_the_tier_and_a_want_restores_it() {
     assert!(!harness.resources.is_resident("app:///a.png"));
     let absent = harness
         .view
-        .describe("app:///a.png", ImageSizeHint::new(32, 32))
+        .describe(&url("app:///a.png"), ImageSizeHint::new(32, 32))
         .expect("still loaded");
     assert!(absent.pixels.is_none(), "a describe restores nothing");
     assert_eq!(absent.descriptor, described.descriptor);
@@ -380,7 +385,7 @@ fn data_urls_and_non_images_and_unknown_schemes_report_precisely() {
     assert!(
         harness
             .view
-            .describe("gopher://nowhere/x.png", ImageSizeHint::UNBOUNDED)
+            .describe(&url("gopher://nowhere/x.png"), ImageSizeHint::UNBOUNDED)
             .is_none()
     );
 }
@@ -408,7 +413,7 @@ fn every_view_of_the_shared_system_sees_the_same_registrations_and_state() {
     assert!(harness.resources.knows_image("app:///shared.png"));
     assert!(
         Rc::new(harness.view)
-            .describe("app:///shared.png", ImageSizeHint::UNBOUNDED)
+            .describe(&url("app:///shared.png"), ImageSizeHint::UNBOUNDED)
             .is_some()
     );
 }
@@ -698,7 +703,7 @@ fn a_document_request_is_parsed_and_reported_once() {
     assert!(
         harness
             .view
-            .describe(MARKUP_SOURCE, ImageSizeHint::UNBOUNDED)
+            .describe(&url(MARKUP_SOURCE), ImageSizeHint::UNBOUNDED)
             .is_none()
     );
     assert_eq!(
@@ -797,14 +802,17 @@ fn an_svg_document_is_never_described_and_never_resident() {
     assert!(harness.resources.knows_image("app:///icon.svg"));
     assert!(!harness.resources.is_resident("app:///icon.svg"));
     assert_eq!(harness.resources.resident_size("app:///icon.svg"), None);
-    harness.view.retain(&[Arc::from("app:///icon.svg")]);
+    harness.view.retain(&[url("app:///icon.svg")]);
     for hint in [
         ImageSizeHint::UNBOUNDED,
         ImageSizeHint::new(8, 8),
         ImageSizeHint::new(4096, 4096),
     ] {
         assert!(
-            harness.view.describe("app:///icon.svg", hint).is_none(),
+            harness
+                .view
+                .describe(&url("app:///icon.svg"), hint)
+                .is_none(),
             "{hint:?}"
         );
     }

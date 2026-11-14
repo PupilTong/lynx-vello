@@ -2,7 +2,6 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::sync::Arc;
 
 use bobcat_core::resource::{ResourceFetcher, SourceCompletion, SourceRequest};
 use bobcat_resources::ViewResources;
@@ -17,19 +16,21 @@ pub struct DelayedBackground {
 }
 
 impl bobcat_core::FrameImages for DelayedBackground {
+    type PlatformFrame = std::convert::Infallible;
+
     fn describe(
         &self,
-        source: &str,
+        picture: &bobcat_core::PictureKey,
         hint: bobcat_core::ImageSizeHint,
     ) -> Option<bobcat_core::FrameImage> {
-        self.resources.describe(source, hint)
+        self.resources.describe(picture, hint)
     }
 
-    fn want(&self, source: &str, hint: bobcat_core::ImageSizeHint) {
-        self.resources.want(source, hint);
+    fn want(&self, picture: &bobcat_core::PictureKey, hint: bobcat_core::ImageSizeHint) {
+        self.resources.want(picture, hint);
     }
 
-    fn retain(&self, frame: &[Arc<str>]) {
+    fn retain(&self, frame: &[bobcat_core::PictureKey]) {
         self.resources.retain(frame);
     }
 }

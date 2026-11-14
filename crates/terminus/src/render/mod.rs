@@ -18,6 +18,7 @@
 pub(crate) mod blur;
 pub(crate) mod gpu;
 pub(crate) mod image;
+pub(crate) mod picture;
 pub(crate) mod raster;
 pub(crate) mod sparse;
 pub(crate) mod svg;

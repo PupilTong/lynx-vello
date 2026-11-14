@@ -219,12 +219,14 @@ impl fmt::Debug for Screenshot {
     }
 }
 
-/// What a rendered target is identified by: the commit it came from, and
-/// the scroll generation it was composed at.
+/// What a rendered target is identified by: the commit it came from, the
+/// scroll generation it was composed at, and the revision of what its image
+/// draws resolve to ([`images::PainterImages::revision`]).
 ///
-/// Images need no term of their own. A load that changes what a frame draws
-/// dirties the document, and every rebuild takes a new commit id.
-type ComposeKey = (u64, u64);
+/// A load that changes what a frame draws dirties the document, and every
+/// rebuild takes a new commit id. The third term is what changes without
+/// one: a wanted picture's pixels arriving, a picture's new frame.
+type ComposeKey = (u64, u64, u64);
 
 /// What building, resizing or drawing through a painter fails with.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -442,9 +444,9 @@ impl Output {
     }
 
     /// Forgets which frame the `filter`/`backdrop-filter` bakes belong to,
-    /// so the next render bakes them again: what the images a commit draws
-    /// changing without a new commit needs, since the bakes are keyed by
-    /// commit and a bake may draw an image.
+    /// so the next render bakes them again: what a render that lost pixels
+    /// needs, since a bake that drew nothing for a lost draw can name the
+    /// very bitmap it failed to draw, and its key would not move.
     fn forget_filters(&mut self) {
         match self {
             #[cfg(feature = "painter-test-utils")]
@@ -1847,14 +1849,21 @@ impl Painter {
     /// still at hand, for the rebase onto the new one (css-scroll-snap-1
     /// §4.1.3).
     ///
-    /// The store is asked what each source draws as
+    /// The store is asked what each picture draws as
     /// ([`FrameImages::describe`]); a bitmap whose pixels it dropped draws
     /// from the rasterizer's upload of it, which this painter leases. A
-    /// source with neither draws nothing, and the store is told it is wanted
+    /// picture with neither draws nothing, and the store is told it is wanted
     /// ([`FrameImages::want`]). Every adoption, whether or not the commit
-    /// moved, describes each wanted source again, and one whose pixels have
-    /// arrived asks for a frame drawing it: no commit is involved, so the
-    /// frame the target holds, and the `filter` bakes, are composed again.
+    /// moved, describes again each wanted picture, each picture an element
+    /// owns and each whose store named its next change; one whose pixels
+    /// have arrived, or whose generation moved, is taken — an owned
+    /// picture's newest frame written into its texture in place
+    /// ([`FrameImages::take_frame`]) — and owes one frame drawing it. No
+    /// commit is involved: the compose key carries the revision of what the
+    /// draws resolve to, and each `filter` bake's key the bitmaps its own
+    /// range draws, so the next frame composes again and re-bakes only the
+    /// entries that draw it. A commit whose pictures are all static URL
+    /// images is asked nothing more after it was described.
     /// Every adoption then leases the upload of each bitmap it still holds
     /// the pixels of once it exists, lets those pixels go and tells the store
     /// so ([`FrameImages::release`]). A render that lost pixels it was lent
@@ -1862,11 +1871,10 @@ impl Painter {
     /// again.
     ///
     /// Never waits: nothing it asks of `store` decodes or blocks on I/O.
-    pub fn adopt(
-        &mut self,
-        frame: Option<Arc<CommittedFrame>>,
-        store: Option<&dyn FrameImages>,
-    ) -> bool {
+    pub fn adopt<S>(&mut self, frame: Option<Arc<CommittedFrame>>, store: Option<&S>) -> bool
+    where
+        S: FrameImages<PlatformFrame = std::convert::Infallible> + ?Sized,
+    {
         self.images.bind(self.output.gpu());
         let commit = frame.as_ref().map(|frame| frame.commit_id());
         let mut described = false;
@@ -1876,7 +1884,7 @@ impl Painter {
             {
                 let Some(store) = store else {
                     self.images.orphan();
-                    self.images.release_held(None);
+                    self.images.release_held(None::<&S>);
                     return false;
                 };
                 self.images.resolve(incoming, store);
@@ -1896,13 +1904,19 @@ impl Painter {
             // lacks them.
             self.images.resolve(current, store);
             described = true;
-            self.recompose();
+            self.output.forget_filters();
+            self.redraw_pending.set(true);
         }
         self.frame = frame;
         match store {
-            // Pixels a wanted source waited for, arrived since the last
-            // adoption: the same commit draws them now.
-            Some(store) if !described && self.images.refresh_wanted(store) => self.recompose(),
+            // Pixels a wanted picture waited for, or a picture's new frame,
+            // arrived since the last adoption: the same commit draws them
+            // now. The compose key and each bake's key move with them, so
+            // the next frame composes and re-bakes what draws them; this
+            // owes that one frame.
+            Some(store) if !described && self.images.refresh(store) => {
+                self.redraw_pending.set(true);
+            }
             Some(_) => {}
             None => self.images.orphan(),
         }
@@ -1910,13 +1924,21 @@ impl Painter {
         true
     }
 
-    /// The images the adopted commit draws changed without a new commit:
-    /// what the target holds and the `filter` bakes, both keyed by commit,
-    /// lack them, so the next frame composes and bakes again.
-    fn recompose(&mut self) {
-        self.composed = None;
-        self.output.forget_filters();
-        self.redraw_pending.set(true);
+    /// The earliest instant a picture the adopted frame draws said it will
+    /// next change by itself ([`FrameImage::next_change`]), as of the last
+    /// adoption; `None` when none did.
+    ///
+    /// A live picture does not keep the display link running between its
+    /// changes: [`Self::is_animating`] and [`Self::owes_frame`] do not count
+    /// it. A host arms a timer of its own at this instant and takes a turn
+    /// then — an adoption, which describes the picture again and owes one
+    /// frame if its generation moved. A producer that publishes a frame
+    /// wakes the host itself, and needs no timer.
+    ///
+    /// [`FrameImage::next_change`]: crate::render::image::FrameImage::next_change
+    #[must_use]
+    pub fn next_picture_change(&self) -> Option<ClockInstant> {
+        self.images.next_change()
     }
 
     /// Whether the adopted frame lacks a picture that is on its way: a
@@ -2401,7 +2423,11 @@ impl Painter {
             frame,
             now,
         } = window_frame;
-        let key: ComposeKey = (frame.commit_id(), self.scroll_intents.generation);
+        let key: ComposeKey = (
+            frame.commit_id(),
+            self.scroll_intents.generation,
+            self.images.revision(),
+        );
         let animation_now = frame.has_live_curves().then_some(now);
         let rendered = match self.render_frame(&frame, key, animation_now, false) {
             Ok(rendered) => rendered,
@@ -2440,7 +2466,11 @@ impl Painter {
         let Some(frame) = self.frame.clone() else {
             return Ok(false);
         };
-        let key: ComposeKey = (frame.commit_id(), self.scroll_intents.generation);
+        let key: ComposeKey = (
+            frame.commit_id(),
+            self.scroll_intents.generation,
+            self.images.revision(),
+        );
         let animation_now = frame.has_live_curves().then_some(now);
         let Some(rendered) = self.render_frame(&frame, key, animation_now, force)? else {
             return Ok(false);
@@ -2496,7 +2526,11 @@ impl Painter {
             return Err(awaited());
         }
         if let Some(frame) = self.frame.clone() {
-            let key: ComposeKey = (frame.commit_id(), self.scroll_intents.generation);
+            let key: ComposeKey = (
+                frame.commit_id(),
+                self.scroll_intents.generation,
+                self.images.revision(),
+            );
             let animation_now = frame.has_live_curves().then_some(now);
             self.render_frame(&frame, key, animation_now, false)?;
         }

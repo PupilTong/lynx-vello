@@ -1127,7 +1127,10 @@ impl<T> Document<T> {
     /// system moved to the painter, the frame names images rather than
     /// carrying them, so the caller supplies whatever resolves those names.
     /// Pass [`NoImages`](crate::render::image::NoImages) for a page with no images.
-    pub fn scene<P: FrameImages + ?Sized>(&self, pixels: &P) -> SceneRef {
+    pub fn scene<P: FrameImages<PlatformFrame = std::convert::Infallible> + ?Sized>(
+        &self,
+        pixels: &P,
+    ) -> SceneRef {
         let frame = self
             .committed_frame()
             .expect("Document::scene reads the committed frame: render first");

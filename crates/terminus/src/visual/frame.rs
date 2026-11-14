@@ -23,6 +23,7 @@ use super::{AnimationSample, PaintOrder, SpaceSamples};
 use crate::kurbo::Affine;
 use crate::paint::compose::{self, ComposeOp, FilterGroup};
 use crate::paint::display_list::{DisplayList, ImageRef, Texture};
+use crate::render::picture::{PictureFrame, PictureKey};
 use crate::scroll::{
     AutoScrollRequest, CaptureAxes, ChainLink, ScrollAxes, ScrollRequest, SnapAxis, SnapPoint,
     SnapStrictness, unwrap_axis, wrap_axis, wrap_period_axis,
@@ -814,12 +815,15 @@ impl CommittedFrame {
     /// their way.
     ///
     /// [`FrameImages::want`]: crate::render::image::FrameImages::want
-    pub fn resolve_images<P: crate::render::image::FrameImages + ?Sized>(
+    pub fn resolve_images<P>(
         &self,
         pixels: &P,
         images: &mut Vec<Option<ImageRef>>,
-        sources: &mut Vec<std::sync::Arc<str>>,
-    ) -> usize {
+        sources: &mut Vec<PictureKey>,
+    ) -> usize
+    where
+        P: crate::render::image::FrameImages<PlatformFrame = std::convert::Infallible> + ?Sized,
+    {
         images.clear();
         let mut hints = Vec::new();
         let mut indices = Vec::new();
@@ -830,7 +834,16 @@ impl CommittedFrame {
             .zip(&hints)
             .map(|(source, hint)| {
                 let described = pixels.describe(source, *hint)?;
-                let Some(image) = described.pixels else {
+                // An `Id` picture's newest frame is taken; this caller keeps
+                // no upload, so it is held by the table it resolves into.
+                let image = match source {
+                    PictureKey::Url(_) => described.pixels,
+                    PictureKey::Id(id) => pixels.take_frame(*id).map(|taken| match taken.frame {
+                        PictureFrame::Pixels(image) => image,
+                        PictureFrame::Platform(never) => match never {},
+                    }),
+                };
+                let Some(image) = image else {
                     pixels.want(source, *hint);
                     wanted += 1;
                     return None;
@@ -842,13 +855,13 @@ impl CommittedFrame {
         wanted
     }
 
-    /// The distinct sources this frame's image draws name, in first-draw
+    /// The distinct pictures this frame's image draws name, in first-draw
     /// order, into `sources`; the size hint covering every draw of each,
     /// parallel to it, into `hints`; and per draw, in draw order, the index
-    /// of its source into `indices`. Each is cleared first.
+    /// of its picture into `indices`. Each is cleared first.
     pub(crate) fn image_sources(
         &self,
-        sources: &mut Vec<std::sync::Arc<str>>,
+        sources: &mut Vec<PictureKey>,
         hints: &mut Vec<crate::render::image::ImageSizeHint>,
         indices: &mut Vec<usize>,
     ) {
@@ -856,19 +869,16 @@ impl CommittedFrame {
         hints.clear();
         indices.clear();
         indices.reserve(self.presentation.image_draws.len());
-        // One entry per distinct source. A frame draws few distinct images
-        // however many draws it has, so this scan is over a handful of
-        // pointers.
+        // One entry per distinct picture. A frame draws few distinct images
+        // however many draws it has, so this scan is over a handful of keys.
         for draw in &self.presentation.image_draws {
-            // Every draw of one source shares one allocation — the registry
+            // Every draw of one URL shares one allocation — the registry
             // hands back its own key — so pointer identity is the whole
             // dedup, and no URL is ever compared.
-            let seen = sources
-                .iter()
-                .position(|source| std::sync::Arc::ptr_eq(source, &draw.image));
+            let seen = sources.iter().position(|source| source.same(&draw.image));
             let hint = draw.size_hint();
             let index = seen.unwrap_or_else(|| {
-                sources.push(std::sync::Arc::clone(&draw.image));
+                sources.push(draw.image.clone());
                 hints.push(hint);
                 sources.len() - 1
             });

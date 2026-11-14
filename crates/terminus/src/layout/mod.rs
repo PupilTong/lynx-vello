@@ -421,6 +421,53 @@ impl<T> Document<T> {
         self.set_image_source(id, role, Some(&source))
     }
 
+    /// Makes `id` present `picture`, a picture it owns, at the natural size
+    /// `width` × `height`, in place of its sources; `None` takes the picture
+    /// off it, so it presents its sources again, or is no longer replaced
+    /// when it has none.
+    ///
+    /// The document holds the picture's key and its natural size, never a
+    /// frame: the frames reach the painter through the host's store
+    /// ([`FrameImages`](crate::render::image::FrameImages)), and a new frame
+    /// is drawn with no commit. A change of the natural size is a layout
+    /// change, as it is for a source; handing the picture the element
+    /// already presents at the size it already has does nothing.
+    pub fn set_picture(
+        &mut self,
+        id: crate::tree::document::NodeId,
+        picture: Option<(crate::render::picture::PictureId, u32, u32)>,
+    ) {
+        let value = picture.map(|(picture, width, height)| (picture, natural_size(width, height)));
+        let was_replaced = {
+            let node = self
+                .get(id)
+                .expect("stale NodeId passed to Document::set_picture");
+            assert!(
+                node.is_element(),
+                "non-element NodeId passed to Document::set_picture"
+            );
+            node.is_replaced()
+        };
+        let changed = self
+            .arenas_mut()
+            .get_mut(id)
+            .expect("the node was live a moment ago")
+            .set_picture(value);
+        if changed {
+            self.note_replaced_change(id, was_replaced);
+        }
+    }
+
+    /// The picture `id` owns and presents, if it presents one
+    /// ([`Self::set_picture`]).
+    #[must_use]
+    pub fn picture(
+        &self,
+        id: crate::tree::document::NodeId,
+    ) -> Option<crate::render::picture::PictureId> {
+        self.get(id)?.picture().map(|(picture, _)| picture)
+    }
+
     /// Settles a source change: the natural size the element's new sources
     /// give it, and the invalidation that change is worth.
     fn note_replaced_change(&mut self, id: crate::tree::document::NodeId, was_replaced: bool) {
@@ -454,14 +501,18 @@ impl<T> Document<T> {
             if !node.is_replaced() {
                 return;
             }
-            self.images
-                .presented_dimensions(
-                    node.image_source(ImageRole::Source),
-                    node.image_source(ImageRole::Placeholder),
-                )
-                .map_or(NaturalSize::NONE, |(width, height)| {
-                    natural_size(width, height)
-                })
+            if let Some((_, natural)) = node.picture() {
+                natural
+            } else {
+                self.images
+                    .presented_dimensions(
+                        node.image_source(ImageRole::Source),
+                        node.image_source(ImageRole::Placeholder),
+                    )
+                    .map_or(NaturalSize::NONE, |(width, height)| {
+                        natural_size(width, height)
+                    })
+            }
         };
         self.set_natural_size(id, natural);
     }

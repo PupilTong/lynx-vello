@@ -2553,7 +2553,10 @@ mod frame_images {
 
         let pixels_of = || {
             images
-                .describe("app:///pixel.png", terminus::link::ImageSizeHint::UNBOUNDED)
+                .describe(
+                    &terminus::link::PictureKey::Url(std::sync::Arc::from("app:///pixel.png")),
+                    terminus::link::ImageSizeHint::UNBOUNDED,
+                )
                 .and_then(|image| image.pixels)
                 .expect("a published image is described with its pixels")
         };
@@ -2580,12 +2583,13 @@ mod frame_images {
         use terminus::link::{FrameImages as _, ImageSizeHint};
 
         let source = "app:///pixel.png";
+        let key = terminus::link::PictureKey::Url(std::sync::Arc::from(source));
         let keeping = prime_radiant::TestImages::new();
         keeping.insert(source, prime_radiant::rgba8(1, 1, vec![1, 2, 3, 255]));
-        keeping.release(&[std::sync::Arc::from(source)]);
+        keeping.release(std::slice::from_ref(&key));
         assert!(
             keeping
-                .describe(source, ImageSizeHint::UNBOUNDED)
+                .describe(&key, ImageSizeHint::UNBOUNDED)
                 .is_some_and(|image| image.pixels.is_some()),
             "a keeping store ignores the release"
         );
@@ -2596,23 +2600,23 @@ mod frame_images {
         let weak = published.data.downgrade();
         images.insert(source, published);
         let described = images
-            .describe(source, ImageSizeHint::UNBOUNDED)
+            .describe(&key, ImageSizeHint::UNBOUNDED)
             .expect("a published image is described");
         assert!(described.pixels.is_some(), "with its pixels while held");
         drop(described.pixels);
-        images.release(&[std::sync::Arc::from(source)]);
+        images.release(std::slice::from_ref(&key));
         assert!(weak.upgrade().is_none(), "the release dropped the blob");
         let absent = images
-            .describe(source, ImageSizeHint::UNBOUNDED)
+            .describe(&key, ImageSizeHint::UNBOUNDED)
             .expect("still described");
         assert!(absent.pixels.is_none());
         assert_eq!(absent.descriptor, described.descriptor);
         assert!(images.reads().is_empty(), "a describe restores nothing");
 
-        images.want(source, ImageSizeHint::UNBOUNDED);
+        images.want(&key, ImageSizeHint::UNBOUNDED);
         assert_eq!(images.reads().len(), 1, "the want restored it");
         let restored = images
-            .describe(source, ImageSizeHint::UNBOUNDED)
+            .describe(&key, ImageSizeHint::UNBOUNDED)
             .and_then(|image| image.pixels)
             .expect("described with its pixels again");
         assert_ne!(restored.data.id(), described.descriptor.blob, "a new blob");
@@ -2630,7 +2634,7 @@ mod frame_images {
         assert!(
             images
                 .describe(
-                    "app:///missing.png",
+                    &terminus::link::PictureKey::Url(std::sync::Arc::from("app:///missing.png")),
                     terminus::link::ImageSizeHint::UNBOUNDED
                 )
                 .is_none()

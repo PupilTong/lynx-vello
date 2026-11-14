@@ -22,6 +22,7 @@ use stylo_atoms::Atom;
 use stylo_dom::ElementState;
 
 use crate::render::image::ImageRole;
+use crate::render::picture::PictureId;
 use crate::tree::custom::{CustomElementState, DefinitionId};
 use crate::tree::document::{DOCUMENT_NODE_ID, NodeId, NodeSlot, TreeArenas};
 use crate::tree::shadow::{ShadowLinks, ShadowRootData, ShadowRootMode};
@@ -114,6 +115,9 @@ struct Replaced {
     /// concurrently with it and never falling back from it: a source that
     /// loads suppresses this one for good. Held as `source` is.
     placeholder: Option<StdArc<str>>,
+    /// A picture this element owns, presented in place of both sources,
+    /// with the natural size its owner gave it.
+    picture: Option<(PictureId, NaturalSize)>,
 }
 
 /// Per-node bits that each cost a padded byte of the node stride as a `bool`.
@@ -1062,6 +1066,7 @@ impl<T> Node<T> {
             natural_size,
             source: None,
             placeholder: None,
+            picture: None,
         }))));
         true
     }
@@ -1099,7 +1104,10 @@ impl<T> Node<T> {
                 ImageRole::Placeholder => &mut replaced.placeholder,
             };
             let previous = std::mem::replace(held, value);
-            if replaced.source.is_none() && replaced.placeholder.is_none() {
+            if replaced.source.is_none()
+                && replaced.placeholder.is_none()
+                && replaced.picture.is_none()
+            {
                 self.content = None;
             }
             return previous;
@@ -1112,8 +1120,49 @@ impl<T> Node<T> {
             natural_size: NaturalSize::NONE,
             source,
             placeholder,
+            picture: None,
         }))));
         None
+    }
+
+    /// The picture this element owns and presents, with the natural size
+    /// its owner gave it.
+    #[must_use]
+    pub(crate) fn picture(&self) -> Option<(PictureId, NaturalSize)> {
+        match self.content.as_deref() {
+            Some(NodeContent::Replaced(replaced)) => replaced.picture,
+            _ => None,
+        }
+    }
+
+    /// Sets the picture this element presents in place of its sources,
+    /// making it replaced content, and, when it was the element's last
+    /// picture and it holds no source, ordinary content again. Answers
+    /// whether anything changed.
+    pub(crate) fn set_picture(&mut self, value: Option<(PictureId, NaturalSize)>) -> bool {
+        if let Some(NodeContent::Replaced(replaced)) = self.content.as_deref_mut() {
+            if replaced.picture == value {
+                return false;
+            }
+            replaced.picture = value;
+            if replaced.source.is_none()
+                && replaced.placeholder.is_none()
+                && replaced.picture.is_none()
+            {
+                self.content = None;
+            }
+            return true;
+        }
+        let Some(picture) = value else {
+            return false;
+        };
+        self.content = Some(Box::new(NodeContent::Replaced(Box::new(Replaced {
+            natural_size: NaturalSize::NONE,
+            source: None,
+            placeholder: None,
+            picture: Some(picture),
+        }))));
+        true
     }
 
     #[cfg(feature = "layout-test-utils")]

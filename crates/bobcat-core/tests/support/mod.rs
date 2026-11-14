@@ -359,13 +359,15 @@ impl ResourceFetcher for FetcherDouble {
 /// A double serves images only when a test gave it a store; otherwise every
 /// image draw resolves to nothing, which is what an unloaded image looks like.
 impl bobcat_core::FrameImages for FetcherDouble {
-    fn want(&self, source: &str, hint: bobcat_core::ImageSizeHint) {
+    type PlatformFrame = std::convert::Infallible;
+
+    fn want(&self, picture: &bobcat_core::PictureKey, hint: bobcat_core::ImageSizeHint) {
         if let Some(images) = self.images.as_ref() {
-            images.want(source, hint);
+            images.want(picture, hint);
         }
     }
 
-    fn retain(&self, frame: &[Arc<str>]) {
+    fn retain(&self, frame: &[bobcat_core::PictureKey]) {
         if let Some(images) = self.images.as_ref() {
             images.retain(frame);
         }
@@ -373,15 +375,15 @@ impl bobcat_core::FrameImages for FetcherDouble {
 
     fn describe(
         &self,
-        source: &str,
+        picture: &bobcat_core::PictureKey,
         hint: bobcat_core::ImageSizeHint,
     ) -> Option<bobcat_core::FrameImage> {
         self.images
             .as_ref()
-            .and_then(|images| images.describe(source, hint))
+            .and_then(|images| images.describe(picture, hint))
     }
 
-    fn release(&self, sources: &[Arc<str>]) {
+    fn release(&self, sources: &[bobcat_core::PictureKey]) {
         if let Some(images) = self.images.as_ref() {
             images.release(sources);
         }

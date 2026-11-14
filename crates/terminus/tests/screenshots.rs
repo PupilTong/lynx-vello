@@ -378,3 +378,142 @@ fn rounded_box_matrix_matches_reference() {
     );
     screenshot::assert_golden(&["rounded-box-matrix"], &actual);
 }
+
+/// The cells of the live-picture golden: each draws the one picture through
+/// another of the geometries every image draw has — `object-fit`, a rounded
+/// clip, a blur — so the golden shows a picture an element owns is drawn
+/// through the same image draw a URL is.
+const LIVE_PICTURE_CSS: &str = "
+    img { position: absolute; width: 96px; height: 72px; background-color: #e5e7eb; }
+    .c0 { left: 12px; } .c1 { left: 120px; } .c2 { left: 228px; }
+    .r0 { top: 12px; } .r1 { top: 96px; }
+    .fill { object-fit: fill; }
+    .contain { object-fit: contain; }
+    .cover { object-fit: cover; }
+    .none { object-fit: none; }
+    .rounded { border-radius: 16px; }
+    .blurred { filter: blur(3px); }
+";
+
+/// A store holding one picture an element owns, through the slot a
+/// producer publishes into.
+struct OneSlot {
+    picture: terminus::link::PictureId,
+    slot: terminus::link::PictureSlot,
+}
+
+impl terminus::link::FrameImages for OneSlot {
+    type PlatformFrame = std::convert::Infallible;
+
+    fn describe(
+        &self,
+        picture: &terminus::link::PictureKey,
+        _hint: terminus::link::ImageSizeHint,
+    ) -> Option<terminus::link::FrameImage> {
+        (picture.id() == Some(self.picture))
+            .then(|| self.slot.describe())
+            .flatten()
+    }
+
+    fn take_frame(&self, picture: terminus::link::PictureId) -> Option<terminus::link::TakenFrame> {
+        (picture == self.picture)
+            .then(|| self.slot.take())
+            .flatten()
+    }
+
+    /// The test publishes before every adoption, so nothing is wanted.
+    fn want(&self, _picture: &terminus::link::PictureKey, _hint: terminus::link::ImageSizeHint) {}
+
+    fn retain(&self, _drawn: &[terminus::link::PictureKey]) {}
+}
+
+/// The checker [`decode_checker`] draws, as a frame.
+fn checker_frame(width: u32, height: u32) -> terminus::link::peniko::ImageData {
+    let (width, height, rgba) = decode_checker(width, height);
+    terminus::link::peniko::ImageData {
+        data: terminus::link::peniko::Blob::from(rgba),
+        format: terminus::link::peniko::ImageFormat::Rgba8,
+        alpha_type: terminus::link::peniko::ImageAlphaType::Alpha,
+        width,
+        height,
+    }
+}
+
+/// A picture an element owns, drawn by the presenting painter from a test
+/// producer's frames. The first frame is drawn with the commit; the second,
+/// of twice the size and its quadrants mirrored, is published with no
+/// commit, and the next adoption draws it in every cell, the blurred ones
+/// baked again.
+#[test]
+fn live_picture_frames_match_reference() {
+    use terminus::link::painter::{DrawTarget, GesturePolicy, Painter};
+
+    const WIDTH: f32 = 336.0;
+    const HEIGHT: f32 = 180.0;
+    let mut doc = paint_common::Doc::with_css_sized(LIVE_PICTURE_CSS, WIDTH, HEIGHT);
+    let store = OneSlot {
+        picture: terminus::link::PictureId::new(),
+        slot: terminus::link::PictureSlot::new(),
+    };
+    let root = doc.root;
+    for class in [
+        "r0 c0 fill",
+        "r0 c1 contain",
+        "r0 c2 cover rounded",
+        "r1 c0 none",
+        "r1 c1 contain blurred",
+        "r1 c2 fill rounded blurred",
+    ] {
+        let node = doc.el_tag(root, "img", class);
+        doc.dom.set_picture(node, Some((store.picture, 32, 24)));
+    }
+    let mut painter = pollster::block_on(Painter::new(
+        DrawTarget::Offscreen,
+        WIDTH,
+        HEIGHT,
+        1.0,
+        GesturePolicy {
+            tap_slop: 50.0,
+            long_press_move_slop: 8.0,
+            drag_slop: 8.0,
+            long_press_seconds: 0.5,
+            tap_event: "tap",
+            long_press_event: "longpress",
+        },
+    ))
+    .expect("a GPU adapter is mandatory for the render tests");
+    let capture = |painter: &mut Painter| {
+        let screenshot = painter.capture(0.0).expect("capture");
+        prime_radiant::Image::from_rgba8(
+            screenshot.size.width,
+            screenshot.size.height,
+            screenshot.pixels,
+        )
+        .expect("an RGBA8 capture")
+    };
+
+    let _ = store.slot.publish_pixels(checker_frame(32, 24), None);
+    assert!(painter.adopt(Some(doc.dom.commit()), Some(&store)));
+    screenshot::assert_golden(&["live-picture", "first-frame"], &capture(&mut painter));
+
+    let mut second = checker_frame(64, 48);
+    let mirrored: Vec<u8> = second
+        .data
+        .data()
+        .chunks_exact(4 * 64)
+        .flat_map(|row| {
+            row.chunks_exact(4)
+                .rev()
+                .flatten()
+                .copied()
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    second.data = terminus::link::peniko::Blob::from(mirrored);
+    let _ = store.slot.publish_pixels(second, None);
+    let commit = painter.frame().map(|frame| frame.commit_id());
+    let frame = painter.frame().cloned();
+    assert!(painter.adopt(frame, Some(&store)));
+    assert_eq!(painter.frame().map(|frame| frame.commit_id()), commit);
+    screenshot::assert_golden(&["live-picture", "second-frame"], &capture(&mut painter));
+}

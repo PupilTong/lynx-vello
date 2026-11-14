@@ -126,6 +126,7 @@ use crate::paint::{
 };
 use crate::peniko::{BlendMode, Compose, Fill, Mix};
 use crate::render::image::ImageRegistry;
+use crate::render::picture::PictureKey;
 use crate::tree::document::Document;
 use crate::visual::space::{self, SpaceKind, nearest_scroll, nearest_sticky};
 use crate::visual::{AutoBox, ClipNode, PaintItem, PaintItemKind, PaintOrder, RenderLayer};
@@ -146,7 +147,7 @@ pub(crate) enum WalkSink<'s> {
     )]
     Monolithic(
         &'s mut DisplayList,
-        &'s dyn crate::render::image::FrameImages,
+        &'s dyn crate::render::image::FrameImages<PlatformFrame = std::convert::Infallible>,
     ),
     Compose(&'s mut ComposeAssembly),
 }
@@ -880,7 +881,7 @@ pub(crate) fn walk<T>(
     document: &Document<T>,
     frame: &PaintOrder,
     images: &ImageRegistry,
-    pixels: &dyn crate::render::image::FrameImages,
+    pixels: &dyn crate::render::image::FrameImages<PlatformFrame = std::convert::Infallible>,
 ) {
     let device = document.device();
     let ratio = f64::from(device.device_pixel_ratio().get());
@@ -932,7 +933,7 @@ pub(crate) fn walk_uncultured<T>(
     document: &Document<T>,
     frame: &PaintOrder,
     images: &ImageRegistry,
-    pixels: &dyn crate::render::image::FrameImages,
+    pixels: &dyn crate::render::image::FrameImages<PlatformFrame = std::convert::Infallible>,
 ) {
     let ratio = f64::from(document.device().device_pixel_ratio().get());
     let mut sink = WalkSink::Monolithic(scene, pixels);
@@ -1648,6 +1649,45 @@ fn close_scope<T>(sink: &mut WalkSink<'_>, scratch: &mut Scratch, painting: Pain
     }
 }
 
+/// Draws what a replaced element presents into its content box: a picture
+/// it owns in place of its sources; otherwise, of its two sources, the one
+/// the registry picks — the one whose bitmap the node's natural size was
+/// recomputed from, so `object-fit` fits the bitmap drawn here.
+fn paint_presented<T>(
+    sink: &mut WalkSink<'_>,
+    document: &Document<T>,
+    images: &ImageRegistry,
+    space: Option<u32>,
+    style: &stylo::properties::ComputedValues,
+    fragment: &BoxFragment,
+    node: crate::tree::document::NodeId,
+) {
+    if let Some(picture) = document.picture(node) {
+        background::paint_replaced_content(
+            sink,
+            space,
+            style,
+            fragment,
+            PictureKey::Id(picture),
+            None,
+            document.natural_size(node),
+        );
+        return;
+    }
+    let (source, placeholder) = document.image_sources(node);
+    if let Some((image, _, vector)) = images.resolve_presented(source, placeholder) {
+        background::paint_replaced_content(
+            sink,
+            space,
+            style,
+            fragment,
+            PictureKey::Url(image),
+            vector,
+            document.natural_size(node),
+        );
+    }
+}
+
 /// Paints one item with the matrix [`plan_frame`] resolved for it.
 fn paint_item<T>(
     sink: &mut WalkSink<'_>,
@@ -1700,21 +1740,7 @@ fn paint_item<T>(
             shadow::paint_outset(sink, frame, space, &mut scratch.paths, style, &fragment);
             background::paint(sink, space, style, &fragment, images, text_clip.as_ref());
             shadow::paint_inset(sink, frame, space, &mut scratch.paths, style, &fragment);
-            // Of a replaced element's two sources, the registry picks the one
-            // whose bitmap the node's natural size was recomputed from, so
-            // `object-fit` fits the bitmap drawn here.
-            let (source, placeholder) = document.image_sources(item.node);
-            if let Some((image, _, vector)) = images.resolve_presented(source, placeholder) {
-                background::paint_replaced_content(
-                    sink,
-                    space,
-                    style,
-                    &fragment,
-                    image,
-                    vector,
-                    document.natural_size(item.node),
-                );
-            }
+            paint_presented(sink, document, images, space, style, &fragment, item.node);
             border::paint(sink.scene_for(space), &mut scratch.paths, style, &fragment);
             border::paint_outline(sink.scene_for(space), &mut scratch.paths, style, &fragment);
             // The focused editing host with no paragraph to paint its caret

@@ -103,19 +103,21 @@ fn resolved(url: &str) -> String {
 }
 
 impl terminus::link::FrameImages for InlineFetcher {
+    type PlatformFrame = std::convert::Infallible;
+
     fn describe(
         &self,
-        _source: &str,
+        _picture: &terminus::link::PictureKey,
         _hint: terminus::link::ImageSizeHint,
     ) -> Option<terminus::link::FrameImage> {
         None
     }
 
     /// Nothing is ever answered, so nothing is ever wanted.
-    fn want(&self, _source: &str, _hint: terminus::link::ImageSizeHint) {}
+    fn want(&self, _picture: &terminus::link::PictureKey, _hint: terminus::link::ImageSizeHint) {}
 
     /// Nothing is held, so there is no working set to narrow.
-    fn retain(&self, _frame: &[Arc<str>]) {}
+    fn retain(&self, _frame: &[terminus::link::PictureKey]) {}
 }
 
 impl ResourceFetcher for InlineFetcher {

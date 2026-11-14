@@ -49,6 +49,7 @@ use crate::peniko::{
     ImageData, ImageSampler, StyleRef, WeakBlob,
 };
 use crate::render::image::ImageDescriptor;
+use crate::render::picture::PictureId;
 
 /// A variation-space coordinate of a variable font, as `F2Dot14` bits.
 pub type NormalizedCoord = i16;
@@ -177,7 +178,9 @@ pub(crate) struct ImagePaint {
 
 impl PartialEq for ImagePaint {
     fn eq(&self, other: &Self) -> bool {
-        self.image.descriptor == other.image.descriptor && self.sampler == other.sampler
+        self.image.descriptor == other.image.descriptor
+            && self.image.picture == other.image.picture
+            && self.sampler == other.sampler
     }
 }
 
@@ -189,10 +192,19 @@ impl PartialEq for ImagePaint {
 /// screen, indefinitely — so a bitmap the host's store owns is lent to it
 /// rather than held, and the store stays free to drop it once the
 /// rasterizer holds its upload.
+///
+/// A picture one element owns ([`PictureId`]) is different: its frames are
+/// written into one texture the rasterizer keeps under the picture's id,
+/// rewritten in place as its generation changes, so the draw names the id
+/// and the descriptor of the frame last written there, and carries no
+/// pixels.
 #[derive(Clone, Debug)]
 pub struct ImageRef {
     pub descriptor: ImageDescriptor,
     pub pixels: ImagePixels,
+    /// The picture whose texture this draws, for a picture one element
+    /// owns; `None` for a bitmap uploaded by its descriptor.
+    pub picture: Option<PictureId>,
 }
 
 /// Where an [`ImageRef`]'s pixels are.
@@ -215,6 +227,7 @@ impl ImageRef {
         Self {
             descriptor: ImageDescriptor::of(image),
             pixels: ImagePixels::Held(image.data.clone()),
+            picture: None,
         }
     }
 
@@ -224,6 +237,7 @@ impl ImageRef {
         Self {
             descriptor: ImageDescriptor::of(image),
             pixels: ImagePixels::Lent(image.data.downgrade()),
+            picture: None,
         }
     }
 
@@ -233,6 +247,18 @@ impl ImageRef {
         Self {
             descriptor,
             pixels: ImagePixels::Uploaded,
+            picture: None,
+        }
+    }
+
+    /// The texture `picture` was last written into, holding the frame
+    /// `descriptor` describes.
+    #[must_use]
+    pub fn written(picture: PictureId, descriptor: ImageDescriptor) -> Self {
+        Self {
+            descriptor,
+            pixels: ImagePixels::Uploaded,
+            picture: Some(picture),
         }
     }
 
