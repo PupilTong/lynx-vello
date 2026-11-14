@@ -400,7 +400,8 @@ mod tests {
     use crate::paint::display_list::{DisplayList, Texture};
     use crate::peniko::Color;
     use crate::render::gpu::Headless;
-    use crate::render::image::{DocumentKind, ImageEvent, ImageRole};
+    use crate::render::image::{DocumentKind, ImageEvent};
+    use crate::render::picture::PictureKey;
     use crate::test_common::Doc;
 
     /// A 64×64 document filled with `fill`.
@@ -432,7 +433,7 @@ mod tests {
             doc.dom
                 .set_inline_style(node, &format!("left: {}px", index * 100));
             doc.dom
-                .set_image_source(node, ImageRole::Source, Some(source));
+                .set_picture(node, Some((PictureKey::Url(Arc::from(*source)), None)));
             nodes.push(node);
         }
         doc.dom.render();
@@ -444,6 +445,13 @@ mod tests {
             })
             .collect();
         doc.dom.apply_image_events(&events);
+        // Each box takes its document's natural size, as an embedder's
+        // element does when its source settles.
+        for (&node, (source, _)) in nodes.iter().zip(images) {
+            let natural = doc.dom.image_status(source).natural_size();
+            doc.dom
+                .set_picture(node, Some((PictureKey::Url(Arc::from(*source)), natural)));
+        }
         doc.dom.render();
         (doc, nodes)
     }

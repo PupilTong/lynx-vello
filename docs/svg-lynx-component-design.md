@@ -56,8 +56,8 @@ Superseded:
 flowchart LR
     subgraph main["document thread (bobcat-main)"]
         comp["tree/svg.rs<br/>#lt;svg src | content#gt;"]
-        bindsrc["Document::set_image_source<br/>(src: a URL)"]
-        binddoc["Document::set_image_document<br/>svg-content:#lt;SipHash-1-3 128#gt;<br/>entry Pending, binders"]
+        bindsrc["ImageSources::set → Document::request_image,<br/>Document::set_picture (src: a URL)"]
+        binddoc["Document::insert_image_document<br/>svg-content:#lt;SipHash-1-3 128#gt;<br/>entry Pending, presenters"]
         drain["Page::after_timers<br/>take_document_requests, then commit<br/>(take_wanted_images)"]
         apply["Document::apply_image_events<br/>ImageRegistry::apply: shape text through<br/>the document's TextContext, encode Scene"]
         image["VectorImage (crate-private)<br/>scene, viewport, aspect, key;<br/>natural size in the entry"]
@@ -106,13 +106,16 @@ apply junction where a parsed document becomes a scene
 
 `crates/bobcat-core/src/main/tree/svg.rs` is a `CustomElement` registered by
 `new_document` right after `image::define` (`main/tree/lib.rs`). It observes
-`src` and `content`, implements `attribute_changed_callback` only, and
-writes both into the element's `ImageRole::Source`, so the element is
-replaced content and shares `<image>`'s pipeline.
+`src` and `content`, implements `attribute_changed_callback` (and `freed`,
+which drops the element's record), and writes both into the element's one
+source in `tree::image_sources` (`ImageSources`, shared with `<image>`), which
+presents it on the element's replaced box (`Document::set_picture`) from the
+moment it is named, so the element is replaced content and shares
+`<image>`'s pipeline.
 
-- `src` goes as written to `Document::set_image_source`; an empty value or a removal means no source, as on `<image>`.
-- `content` goes to `Document::set_image_document(node, ImageRole::Source, content.as_bytes(), DocumentKind::Svg)` (section 5). An empty value or a removal keeps the current source, whichever attribute set it. The last attribute written wins.
-- An outcome the bind returns (a source that settled before this element bound it) is queued on `ComponentEvents`, as `<image>` queues it. No `placeholder`, `mode` or `blur-radius`: neither reference has them on `<svg>`.
+- `src` goes as written to `ImageSources::set`; an empty value or a removal means no source, as on `<image>`.
+- `content` goes to `ImageSources::set_document(document, node, content.as_bytes(), DocumentKind::Svg)`, which files it with `Document::insert_image_document` (section 5) and names the synthetic source it answers. An empty value or a removal keeps the current source, whichever attribute set it. The last attribute written wins.
+- An outcome the write returns (a source that settled before this element named it) is queued on `ComponentEvents`, as `<image>` queues it. No `placeholder`, `mode` or `blur-radius`: neither reference has them on `<svg>`.
 - UA rules (`UA_RULES`, assembled by `ua_sheet.rs`): `svg { display: flex; }` and `svg > * { display: none; }`, with `svg` in the shared border-box block beside `image`. No `contain: size`: an unsized `<svg>` lays out at the document's natural size, a sized one draws the picture into its box by the root's `preserveAspectRatio`. web-core's `contain: content` is not adopted (the element is a replaced leaf). The child suppression ties on specificity with the container tags' `display` rules and wins on source order; `nothing_inside_an_svg_generates_a_box` checks it.
 - Events: `load` only. `MainThreadRuntime::dispatch_component_events` builds the detail (`main/runtime/lib.rs`): for a node `is_svg` answers for, the element's border-box size from `bounding_client_rect` at delivery, 0×0 without a box (an `<image>`'s `load` carries the intrinsic size). A `Failed` outcome on an `<svg>` dispatches nothing.
 - The `needs_render` hold: because the detail is read at delivery, `Page::after_timers` (`main/page.rs`) posts component events only when `MainThreadRuntime::needs_render` is `false`, that is, when the epilogue's commit ran and applied the natural size the report set. The commit is skipped only while a listed author sheet is outstanding, which ends at the first `__FlushElementTree`. The hold covers the whole batch (`<image>`, `<dialog>`, `<overlay>` events too) and neither drains nor latches, so events are delayed, never dropped.
@@ -120,17 +123,18 @@ replaced content and shares `<image>`'s pipeline.
 
 ## 5. Documents and the registry
 
-`Document::set_image_document(id, role, bytes, kind) -> Option<ImageOutcome>`
+`Document::insert_image_document(bytes, kind) -> Arc<str>`
 (`crates/terminus/src/layout/mod.rs`) files the bytes with
-`ImageRegistry::insert_document` and then binds exactly as
-`set_image_source` does, with the synthetic source as the value.
+`ImageRegistry::insert_document` and answers the synthetic source, which the
+caller presents with `Document::set_picture` and asks the status of as of
+any URL (`Document::request_image`).
 
 - **Naming.** `synthetic_source(bytes, kind)` (`render/image.rs`) is `svg-content:` followed by the 32 hex digits of SipHash-1-3's 128-bit output keyed with zeros (`siphasher` 1.0, already in the tree through `phf`, a direct dependency of `terminus`). One 128-bit pass rather than two seeded 64-bit ones, because the 128-bit variant exists; SipHash folds the length into its last block, so a prefix of a document is not its collision; the fixed key gives one markup one name in every document and every run. With a known key the hash is not collision-resistant against a page that sets out to collide two of its own pictures; such a page only confuses its own drawing.
 - **One entry per markup while bound.** A known source binds at once, settled or still parsing, for the cost of a hash. An unknown one is created `Pending` and `(source, Bytes, kind)` is pushed onto `document_requests`. Identical markup on any number of elements is one entry, one parse, one scene and one texture per device size.
-- **Binder count.** The entry's `nodes` list, deduplicated per `(node, role)`, is the count; there is no second counter. A binding goes when `set_image_source` moves the node to another source and when the node is freed (`tree/document.rs`). The last unbind of a synthetic source removes the entry with its picture and withdraws its document request if that has not been drained. A host source is never removed.
-- **The drain.** `Document::take_document_requests` (`visual/mod.rs`) drains once; every request names an entry that is pending and still bound. `MainThreadRuntime::request_documents` calls it from `Page::after_timers` before `commit_if_dirty` and sends a non-empty batch as one `ViewNotice::RequestDocuments`.
+- **Presenter count.** The entry's `presenters` counts the replaced boxes presenting it (`ImageRegistry::bind`, from `Document::set_picture`). A box lets go when it is given another picture and when it is freed (`tree/document.rs`). The last unbind of a synthetic source removes the entry with its picture and withdraws its document request if that has not been drained. A host source is never removed.
+- **The drain.** `Document::take_document_requests` (`visual/mod.rs`) drains once; every request names an entry that is pending and not forgotten. `MainThreadRuntime::request_documents` calls it from `Page::after_timers` before `commit_if_dirty` and sends a non-empty batch as one `ViewNotice::RequestDocuments`.
 - **Apply.** `ImageRegistry::apply` moves only a `Pending` entry; a second report for a settled source moves nothing. A report for a synthetic source forgotten since its request (every element let go while the host parsed) moves nothing either: filing it would keep an entry no element can bind to without `insert_document` queueing a parse of its own. A `ParsedDocument` settles as `Ready { width, height, kind: Vector(..) }` with the document's natural size, which the converter makes at least one px per axis, so a parsed document is never refused for a zero axis.
-- **Never asked of the host.** Neither the paint walk (`ImageRegistry::sight`) nor `bind_node` queues a synthetic source as wanted. A page that writes an `svg-content:` name itself (`<image src>`, `url()`) files nothing and asks for nothing while no entry exists, because an entry without bytes would make that markup's later `insert_document` read it as known and never queue its parse; while some `<svg content>` holds that markup, the name resolves to its entry.
+- **Never asked of the host.** Neither the paint walk (`ImageRegistry::sight`) nor a request or a bind (`ImageRegistry::request`, `bind`) queues a synthetic source as wanted. A page that writes an `svg-content:` name itself (`<image src>`, `url()`) files nothing and asks for nothing while no entry exists, because an entry without bytes would make that markup's later `insert_document` read it as known and never queue its parse; while some `<svg content>` holds that markup, the name resolves to its entry.
 
 ## 6. The host side (revision 4.1)
 

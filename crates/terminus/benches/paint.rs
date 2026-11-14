@@ -86,9 +86,8 @@ use stylo::values::computed::font::GenericFontFamily;
 use stylo::values::computed::{CSSPixelLength, Length};
 use stylo::values::specified::font::{FONT_MEDIUM_PX, QueryFontMetricsFlags};
 use stylo_traits::{CSSPixel, DevicePixel};
-use terminus::link::layout::{NaturalSize, Size};
 use terminus::link::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
-use terminus::link::{Document, ImageRole, NodeId, StylesheetOrigin, Vector2D};
+use terminus::link::{Document, NodeId, PictureKey, StylesheetOrigin, Vector2D};
 
 fn main() {
     divan::main();
@@ -518,7 +517,7 @@ fn tile_page() -> (Document<()>, Rc<TestImages>) {
     let images = Rc::new(TestImages::new());
     images.insert(TILE_SOURCE, tile_pixels(0x30));
     let root = dom.document_element().id();
-    let natural = NaturalSize::from_size(Size::new(TILE_PIXELS as f32, TILE_PIXELS as f32));
+    let source: std::sync::Arc<str> = std::sync::Arc::from(TILE_SOURCE);
     for index in 0..TILES {
         let tile = dom.create_element("view", ());
         dom.add_class(tile, "tile");
@@ -531,10 +530,15 @@ fn tile_page() -> (Document<()>, Rc<TestImages>) {
             ),
         );
         dom.append_child(root, tile);
-        // The source first: for an element that has one, the document owns the
-        // natural size and recomputes it from the bitmap the element draws.
-        dom.set_image_source(tile, ImageRole::Source, Some(TILE_SOURCE));
-        dom.set_natural_size(tile, natural);
+        // Presented at the size the store reports for it, as an embedder's
+        // element presents a URL once it has loaded.
+        dom.set_picture(
+            tile,
+            Some((
+                PictureKey::Url(std::sync::Arc::clone(&source)),
+                Some((TILE_PIXELS, TILE_PIXELS)),
+            )),
+        );
     }
     (dom, images)
 }

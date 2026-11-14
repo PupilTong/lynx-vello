@@ -197,7 +197,7 @@ when it does not parse; the report applies through
 `MainThreadRuntime::apply_image_events` like every other, where `terminus` shapes
 the document's text and encodes its scene, so the registry, the natural-size
 relayout and the `load`/`error` follow the path every other report takes.
-The markup an `<svg content>` hands the document (`Document::set_image_document`)
+The markup an `<svg content>` hands the document (`Document::insert_image_document`)
 reaches the host the same way: the page's epilogue calls
 `MainThreadRuntime::settle_entry`, whose first step, before its commit, drains
 `Document::take_document_requests` into one `ViewNotice::RequestDocuments`

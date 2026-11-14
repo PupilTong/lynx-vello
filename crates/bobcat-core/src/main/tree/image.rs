@@ -7,20 +7,23 @@
 //! reaches the host's resource system, the completed load reports an intrinsic
 //! size back, and the paint walk draws the bitmap into the content box. So
 //! this module owns both halves of the join: a [`terminus::link::CustomElement`]
-//! reflecting the attributes into [`terminus`], and the UA rules that decide what
-//! shape the box it draws into has ([`UA_RULES`]).
+//! reflecting the attributes into the element's sources ([`ImageSources`]),
+//! which put the picture the element shows on its replaced box in
+//! [`terminus`], and the UA rules that decide what shape the box it draws into
+//! has ([`UA_RULES`]).
 //!
 //! # Which attribute becomes what
 //!
 //! Four of the tag's attributes are implemented, and they reach the engine
 //! three different ways.
 //!
-//! `src` and `placeholder` are the two *sources*, reflected into the one
-//! [`terminus::link::Document::set_image_source`] under [`terminus::link::ImageRole::Source`] and
-//! [`terminus::link::ImageRole::Placeholder`] respectively. They are concurrent, not a
-//! fallback chain — `terminus` owns that model and `docs/tracking/media-resources.md`
-//! carries the 2026-09-17 ruling behind it; this module only relays the strings,
-//! identically for both, with an empty value meaning no source at all.
+//! `src` and `placeholder` are the two *sources*, named on the element's
+//! record in [`ImageSources`] under [`ImageRole::Source`] and
+//! [`ImageRole::Placeholder`] respectively. They are concurrent, not a
+//! fallback chain — [`super::image_sources`] owns that model and
+//! `docs/tracking/media-resources.md` carries the 2026-09-17 ruling behind
+//! it; the reflection relays the strings, identically for both, with an empty
+//! value meaning no source at all.
 //!
 //! `mode`, `auto-size` and the rest of what a picture's *shape* depends on are
 //! attribute selectors in [`UA_RULES`], not node state. That is web-core's own
@@ -32,9 +35,9 @@
 //! sheet cannot spell as a finite set of literals. It reflects into
 //! `filter: blur(…)`.
 //!
-//! Writing `src` can also *settle* it in the same call: binding is what asks
-//! the host for a URL, so a URL this document has already seen settle answers
-//! at the bind rather than through a later report. That answer is a `load` or
+//! Writing `src` can also *settle* it in the same call: naming a URL is what
+//! asks the document for it, so a URL this document has already seen settle
+//! answers at once rather than through a later report. That answer is a `load` or
 //! an `error` this element owes, and it arrives in the middle of a JavaScript
 //! call — inside the `__SetAttribute` that wrote the attribute — where nothing
 //! may dispatch. So it is queued in [`ComponentEvents`], which the runtime drains
@@ -148,10 +151,10 @@
 //! # Recorded traps
 //!
 //! - `Document::set_natural_size` makes *any* element replaced, including one that never carried a
-//!   source. Nothing here calls it; the document sets it from the load reports. For an element that
-//!   *has* a source it is the document's to maintain — it recomputes it from whichever of the two
-//!   sources the element draws — so a size written by hand there survives only until the next
-//!   report or source change.
+//!   source. Nothing here calls it; [`ImageSources`] presents the natural size of the picture the
+//!   element shows with that picture (`Document::set_picture`), recomputed from whichever of the
+//!   two sources the element draws, so a size written by hand survives only until the next report
+//!   or source change that moves it.
 //! - Under `auto-size` that recomputation is a *layout* input, and the bitmap it names is whichever
 //!   one the element draws: the placeholder's size until `src` has pixels, `src`'s afterwards. So a
 //!   placeholder can size the box, which is iOS's and web-core's behaviour; Android sizes from
@@ -165,11 +168,11 @@
 //!   Ruled 2026-09-20 to stay so in this change; bitmap-only blur is a separate piece of paint
 //!   work, and needs a declaration other than `filter` for this module to write.
 //! - A `load` or an `error` is the *element's own source* settling. The placeholder produces
-//!   neither, which is `terminus`'s rule rather than this module's:
-//!   [`terminus::link::ImageOutcome`] has no variant naming a placeholder.
+//!   neither: [`super::ImageOutcome`] has no variant naming a placeholder.
 
-use terminus::link::{CustomElement, ImageRole, NodeId};
+use terminus::link::{CustomElement, NodeId};
 
+use super::image_sources::{ImageRole, ImageSources};
 use super::{ComponentEvents, LynxDocument};
 
 /// Lynx's picture tag, and the attributes this module reflects off it.
@@ -251,26 +254,33 @@ image[auto-size]:not([auto-size="false"]) { contain: none; max-width: 100%; max-
 image > * { display: none; }
 "#;
 
-/// Installs the component, over the queue its bind-time outcomes go into. Must
-/// run before any element could carry the tag, which is
+/// Installs the component, over the queue its write-time outcomes go into
+/// and the record of its elements' sources. Must run before any element
+/// could carry the tag, which is
 /// [`Document::define`](terminus::link::Document::define)'s own precondition.
-pub(super) fn define(document: &mut LynxDocument, outcomes: ComponentEvents) {
-    document.define(IMAGE_TAG, Box::new(Image { outcomes }));
+pub(super) fn define(
+    document: &mut LynxDocument,
+    outcomes: ComponentEvents,
+    sources: ImageSources,
+) {
+    document.define(IMAGE_TAG, Box::new(Image { outcomes, sources }));
 }
 
 /// Points the element at whatever its attributes currently name.
 ///
-/// Only `attribute_changed_callback` is implemented, and that is the whole
-/// component. `constructed` could observe nothing: `__CreateImage` mints the
-/// element before `__SetAttribute` writes on it, so the reaction that carries
-/// the source always comes later. Nothing runs on disconnect either — a
-/// removal frees nothing, so a detached image keeps its source and its request,
-/// and the path that does free it raises no reaction at all. The registry
-/// unbind that a free owes belongs where the free is, in `terminus`.
+/// `attribute_changed_callback` is the whole of the reflection.
+/// `constructed` could observe nothing: `__CreateImage` mints the element
+/// before `__SetAttribute` writes on it, so the reaction that carries the
+/// source always comes later. Nothing runs on disconnect either — a removal
+/// frees nothing, so a detached image keeps its sources and its requests.
+/// The free drops the element's record ([`CustomElement::freed`]), and the
+/// box's own hold on the picture it presents goes in `terminus`'s free.
 struct Image {
-    /// Where a `src` that settles at the bind leaves its outcome. The
+    /// Where a `src` that settles at the write leaves its outcome. The
     /// reaction runs inside a JavaScript call, so it cannot dispatch.
     outcomes: ComponentEvents,
+    /// The sources every `image` and `svg` element names.
+    sources: ImageSources,
 }
 
 impl CustomElement<()> for Image {
@@ -303,18 +313,19 @@ impl CustomElement<()> for Image {
             // resource system's job, not this engine's.
             //
             // No `old == new` guard: the setter already returns before it
-            // binds, asks, or invalidates anything when handed the value that
+            // asks for or invalidates anything when handed the value that
             // role already holds.
             //
-            // A source the registry has already settled answers here, at the
-            // bind, because no report will ever arrive for it again — the
+            // A source the document has already settled answers here, at the
+            // write, because no report will ever arrive for it again — the
             // second mount of a URL this document has seen. It is queued
             // rather than dispatched: this runs inside `__SetAttribute`, and
             // an event delivered from there would re-enter the realm in the
             // middle of the call that wrote the attribute. web-core's
             // equivalent is asynchronous for the same reason — an `<img>`
             // load event is a task, even for a cached URL.
-            SRC_ATTRIBUTE => self.outcomes.queue_image(document.set_image_source(
+            SRC_ATTRIBUTE => self.outcomes.queue_image(self.sources.set(
+                document,
                 element,
                 ImageRole::Source,
                 source(new),
@@ -327,7 +338,9 @@ impl CustomElement<()> for Image {
             // `ImageRole::Placeholder` never produces, so there is nothing to
             // queue here.
             PLACEHOLDER_ATTRIBUTE => {
-                document.set_image_source(element, ImageRole::Placeholder, source(new));
+                let _ = self
+                    .sources
+                    .set(document, element, ImageRole::Placeholder, source(new));
             }
             // Removing first is load-bearing: a hint keeps its old declaration
             // when handed a value that does not parse, so offering
@@ -350,6 +363,10 @@ impl CustomElement<()> for Image {
             other => debug_assert!(false, "`image` does not observe `{other}`"),
         }
     }
+
+    fn freed(&self, element: NodeId) {
+        self.sources.forget(element);
+    }
 }
 
 /// An attribute value that names something, with the empty string and a
@@ -370,7 +387,7 @@ mod tests {
     use terminus::link::stylo::values::computed::{Contain, Display};
 
     use super::super::test_support::{
-        child, display, document, element_under, style_of, with_config,
+        child, display, document, element_under, style_of, with_config, with_image_sources,
     };
     use super::super::{LynxDocument, PageConfig};
     use super::{BLUR_RADIUS_ATTRIBUTE, IMAGE_TAG, PLACEHOLDER_ATTRIBUTE, SRC_ATTRIBUTE};
@@ -700,16 +717,20 @@ mod tests {
     /// (`AutoSizeImage.justSize`), so there a placeholder never sizes anything.
     #[test]
     fn an_empty_or_removed_placeholder_leaves_the_element_nothing_to_draw() {
-        let mut document = document();
+        let (mut document, _, sources) = with_image_sources(PageConfig::default());
         let parent = child(&mut document, "view", "display: flex; flex-direction: row");
         let element = element_under(&mut document, parent, IMAGE_TAG, "");
         document.set_attribute(element, AUTO_SIZE_ATTRIBUTE, "");
         document.set_attribute(element, PLACEHOLDER_ATTRIBUTE, PLACEHOLDER);
-        let _ = document.apply_image_events(&[terminus::link::ImageEvent::Loaded {
-            source: std::sync::Arc::from(PLACEHOLDER),
-            width: NATURAL_PIXELS.0,
-            height: NATURAL_PIXELS.1,
-        }]);
+        let _ = super::super::apply_image_events(
+            &mut document,
+            &sources,
+            &[terminus::link::ImageEvent::Loaded {
+                source: std::sync::Arc::from(PLACEHOLDER),
+                width: NATURAL_PIXELS.0,
+                height: NATURAL_PIXELS.1,
+            }],
+        );
         assert_eq!(size_of(&mut document, element), NATURAL);
 
         for cleared in [Some(""), None] {
