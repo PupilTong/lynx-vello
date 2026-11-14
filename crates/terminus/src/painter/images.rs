@@ -284,3 +284,247 @@ impl Source {
         }
     }
 }
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use std::cell::{Cell, RefCell};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use super::super::{FrameSize, GesturePolicy, Output, Painter, Screenshot, Viewport};
+    use crate::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
+    use crate::render::gpu::{Headless, SharedGpu};
+    use crate::render::image::{
+        FrameImage, FrameImages, ImageDescriptor, ImageEvent, ImageRole, ImageSizeHint,
+    };
+    use crate::render::sparse::{BitmapLeases, SharedRaster};
+    use crate::style::engine::StylesheetOrigin;
+    use crate::tree::document::Document;
+    use crate::tree::document::tests::device;
+
+    const SRC: &str = "app:///a.png";
+    const OTHER: &str = "app:///b.png";
+    const RED: [u8; 4] = [255, 0, 0, 255];
+    const BLUE: [u8; 4] = [0, 0, 255, 255];
+
+    /// A store that drops a source's pixels when it is told it may, and
+    /// restores them into a new blob when they are read: a production host's
+    /// policy, with every read counted and every release logged.
+    struct Releasing {
+        entries: RefCell<HashMap<&'static str, Entry>>,
+        reads: Cell<u32>,
+        released: RefCell<Vec<Vec<Arc<str>>>>,
+    }
+
+    /// One source of a [`Releasing`] store.
+    struct Entry {
+        /// The colour of its one texel, which a restore decodes again.
+        texel: [u8; 4],
+        /// The pixels, while the store holds them.
+        pixels: Option<ImageData>,
+        /// The bitmap it was last answered as.
+        descriptor: ImageDescriptor,
+    }
+
+    impl Releasing {
+        fn new(sources: [(&'static str, [u8; 4]); 2]) -> Self {
+            let entries = sources
+                .into_iter()
+                .map(|(source, texel)| {
+                    let pixels = texel_image(texel);
+                    let descriptor = ImageDescriptor::of(&pixels);
+                    let entry = Entry {
+                        texel,
+                        pixels: Some(pixels),
+                        descriptor,
+                    };
+                    (source, entry)
+                })
+                .collect();
+            Self {
+                entries: RefCell::new(entries),
+                reads: Cell::new(0),
+                released: RefCell::default(),
+            }
+        }
+
+        fn holds(&self, source: &str) -> bool {
+            self.entries.borrow()[source].pixels.is_some()
+        }
+
+        fn descriptor(&self, source: &str) -> ImageDescriptor {
+            self.entries.borrow()[source].descriptor
+        }
+    }
+
+    impl FrameImages for Releasing {
+        fn read(&self, source: &str, _: ImageSizeHint) -> Option<ImageData> {
+            self.reads.set(self.reads.get() + 1);
+            let mut entries = self.entries.borrow_mut();
+            let entry = entries.get_mut(source)?;
+            let texel = entry.texel;
+            let image = entry
+                .pixels
+                .get_or_insert_with(|| texel_image(texel))
+                .clone();
+            entry.descriptor = ImageDescriptor::of(&image);
+            Some(image)
+        }
+
+        fn retain(&self, _: &[Arc<str>]) {}
+
+        fn describe(&self, source: &str, _: ImageSizeHint) -> Option<FrameImage> {
+            let entries = self.entries.borrow();
+            let entry = entries.get(source)?;
+            Some(FrameImage {
+                descriptor: entry.descriptor,
+                pixels: entry.pixels.clone(),
+            })
+        }
+
+        fn release(&self, sources: &[Arc<str>]) {
+            self.released.borrow_mut().push(sources.to_vec());
+            let mut entries = self.entries.borrow_mut();
+            for source in sources {
+                if let Some(entry) = entries.get_mut(&**source) {
+                    entry.pixels = None;
+                }
+            }
+        }
+    }
+
+    /// A one-texel straight-alpha RGBA8 bitmap of `texel`, in a blob of its
+    /// own.
+    fn texel_image(texel: [u8; 4]) -> ImageData {
+        ImageData {
+            data: Blob::new(Arc::new(texel.to_vec())),
+            format: ImageFormat::Rgba8,
+            alpha_type: ImageAlphaType::Alpha,
+            width: 1,
+            height: 1,
+        }
+    }
+
+    fn loaded(source: &str) -> ImageEvent {
+        ImageEvent::Loaded {
+            source: Arc::from(source),
+            width: 1,
+            height: 1,
+        }
+    }
+
+    /// Whether `gpu` holds an upload of `image`: a lease of it succeeds
+    /// only then, and ends as the leases are dropped here.
+    fn uploaded(gpu: &Arc<SharedGpu>, image: &ImageDescriptor) -> bool {
+        BitmapLeases::new(gpu).lease(image)
+    }
+
+    fn at(screenshot: &Screenshot, x: u32, y: u32) -> [u8; 4] {
+        let at = ((y * screenshot.size.width + x) * 4) as usize;
+        screenshot.pixels[at..at + 4]
+            .try_into()
+            .expect("four channels")
+    }
+
+    /// A painter drawing offscreen on `gpu`, 16 × 16 px.
+    fn painter_on(gpu: &Arc<SharedGpu>) -> Painter {
+        let frame_size = FrameSize::for_viewport(16.0, 16.0, 1.0).expect("a valid size");
+        Painter::with_output(
+            Viewport::new(16.0, 16.0),
+            frame_size,
+            Output::Offscreen(Box::new(Headless::on(Arc::clone(gpu)))),
+            GesturePolicy {
+                tap_slop: 50.0,
+                long_press_move_slop: 8.0,
+                drag_slop: 8.0,
+                long_press_seconds: 0.5,
+                tap_event: "press",
+                long_press_event: "hold",
+            },
+        )
+    }
+
+    /// A source whose pixels the store dropped and whose upload the
+    /// rasterizer released is read back once, inside the adoption of the
+    /// commit that draws it again; it draws from those pixels, and once the
+    /// new upload exists the pixels are let go and the store told so again.
+    #[test]
+    fn a_source_with_neither_pixels_nor_an_upload_is_read_back_once_and_released_again() {
+        let gpu = SharedGpu::private(SharedRaster::new);
+        // Every upload no lease and no recent render holds is released after
+        // each render. The stack is this test's alone.
+        gpu.raster.set_bitmap_budget(0);
+        let mut painter = painter_on(&gpu);
+        let store = Releasing::new([(SRC, RED), (OTHER, BLUE)]);
+        let mut document = Document::new(device(), "page", ());
+        document.add_stylesheet(
+            "image { width: 8px; height: 8px; }",
+            StylesheetOrigin::Author,
+        );
+        let root = document.document_element().id();
+        let image = document.create_element("image", ());
+        document.append_child(root, image);
+        document.set_image_source(image, ImageRole::Source, Some(SRC));
+        document.apply_image_events(&[loaded(SRC)]);
+
+        // 1. Drawn from the store's pixels, uploaded, then leased: the painter and the store both
+        //    let the pixels go.
+        assert!(painter.adopt(Some(document.commit()), Some(&store)));
+        let screenshot = painter.capture(0.0).expect("capture");
+        assert_eq!(at(&screenshot, 4, 4), RED);
+        let drawn = store.descriptor(SRC);
+        assert!(uploaded(&gpu, &drawn), "the render uploaded it");
+        let current = painter.frame().cloned();
+        assert!(painter.adopt(current, Some(&store)));
+        assert_eq!(*store.released.borrow(), [vec![Arc::<str>::from(SRC)]]);
+        assert!(!store.holds(SRC), "the store dropped its pixels");
+        let source = &painter.images.sources[0];
+        assert!(source.pixels.is_none() && source.leased, "{source:?}");
+        assert_eq!(store.reads.get(), 0, "describing was enough");
+
+        // 2. A commit that no longer draws it ends the lease, and renders of another bitmap, past
+        //    the ones the target pins what it drew in, release the upload.
+        document.set_image_source(image, ImageRole::Source, Some(OTHER));
+        document.apply_image_events(&[loaded(OTHER)]);
+        assert!(painter.adopt(Some(document.commit()), Some(&store)));
+        for _ in 0..8 {
+            assert!(painter.draw_offscreen(0.0, true).expect("render"));
+        }
+        assert!(!uploaded(&gpu, &drawn), "the upload was released");
+        assert!(!store.holds(SRC));
+        assert_eq!(store.reads.get(), 0);
+
+        // 3. The commit that draws it again reads it back, once, in the adoption, and draws those
+        //    pixels with nothing lost.
+        document.set_image_source(image, ImageRole::Source, Some(SRC));
+        assert!(painter.adopt(Some(document.commit()), Some(&store)));
+        assert_eq!(
+            store.reads.get(),
+            1,
+            "a source with neither pixels nor an upload is read in the adoption"
+        );
+        let restored = store.descriptor(SRC);
+        assert_ne!(restored, drawn, "a restore is a new blob");
+        let screenshot = painter.capture(0.0).expect("capture");
+        assert_eq!(at(&screenshot, 4, 4), RED, "drawn from the pixels read");
+        assert_eq!(painter.output.lost_pixels(), 0, "no draw lost its pixels");
+        assert!(!painter.images.is_stale());
+        assert!(uploaded(&gpu, &restored), "the render uploaded them");
+
+        // 4. The next turn leases the new upload and lets the pixels go again, with no further
+        //    read.
+        let current = painter.frame().cloned();
+        assert!(painter.adopt(current, Some(&store)));
+        assert_eq!(store.released.borrow().len(), 2, "{:?}", store.released);
+        assert_eq!(
+            store.released.borrow()[1],
+            [Arc::<str>::from(SRC)],
+            "the second release names the source"
+        );
+        assert!(!store.holds(SRC));
+        let source = &painter.images.sources[0];
+        assert!(source.pixels.is_none() && source.leased, "{source:?}");
+        assert_eq!(store.reads.get(), 1, "no further read");
+    }
+}

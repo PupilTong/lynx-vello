@@ -1013,6 +1013,14 @@ impl SharedRaster {
         self.bitmaps.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// Sets how many bytes of unleased, unpinned uploads are kept, so a test
+    /// outside this module can watch an upload be released. Only on a stack
+    /// of the test's own ([`SharedGpu::private`]).
+    #[cfg(test)]
+    pub(crate) fn set_bitmap_budget(&self, bytes: u64) {
+        self.bitmaps().budget = bytes;
+    }
+
     /// The image drawing `image` under `sampler` in `drawing`'s render,
     /// converted and uploaded on a miss; [`Missing`] when there is no upload
     /// and its pixels are unreadable, longer than the device's longest
