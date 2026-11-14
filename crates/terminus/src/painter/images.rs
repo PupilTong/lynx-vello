@@ -57,7 +57,11 @@
 //!
 //! [`PainterImages::revision`] counts the changes of what the commit's draws
 //! resolve to, and is the third term of the painter's compose key, so a new
-//! frame of a picture recomposes the target with no commit. A `filter` or
+//! frame of a picture recomposes the target with no commit. A URL picture
+//! that moves to another bitmap within a commit (an animated image's next
+//! frame) ends the lease on the bitmap it drew before, so the uploads a
+//! long-adopted commit keeps leased are one per picture, and the earlier
+//! frames are released under the rasterizer's budget. A `filter` or
 //! `backdrop-filter` bake keys on the bitmaps its own range draws
 //! (`render::blur`), so the change re-bakes only the entries that draw it.
 //! A commit whose pictures are all static URL images is described once and
@@ -250,16 +254,7 @@ impl PainterImages {
             })
             .collect();
         if let Some(leases) = &self.leases {
-            leases.replace(
-                sources
-                    .iter()
-                    .filter(|source| source.leased && source.key.id().is_none())
-                    .filter_map(|source| source.descriptor.as_ref()),
-                sources
-                    .iter()
-                    .filter(|source| source.leased)
-                    .filter_map(|source| source.key.id()),
-            );
+            lease_exactly(leases, &sources);
         }
         self.sources = sources;
         self.watching = self.sources.iter().any(Source::watched);
@@ -303,6 +298,13 @@ impl PainterImages {
         }
         self.watching = self.sources.iter().any(Source::watched);
         if changed {
+            // A URL picture that moved to another bitmap, an animated
+            // image's next frame, lets go of the one it drew before, so a
+            // commit that stays adopted while its pictures change leases one
+            // bitmap per picture rather than every bitmap it ever drew.
+            if let Some(leases) = &self.leases {
+                lease_exactly(leases, &self.sources);
+            }
             self.fill_resolved();
             self.checked = None;
             self.revision += 1;
@@ -404,6 +406,21 @@ impl PainterImages {
     }
 }
 
+/// Makes `leases` exactly the uploads `sources` are drawn from: each URL
+/// picture's bitmap and each `Id` picture's texture its entry holds.
+fn lease_exactly(leases: &BitmapLeases, sources: &[Source]) {
+    leases.replace(
+        sources
+            .iter()
+            .filter(|source| source.leased && source.key.id().is_none())
+            .filter_map(|source| source.descriptor.as_ref()),
+        sources
+            .iter()
+            .filter(|source| source.leased)
+            .filter_map(|source| source.key.id()),
+    );
+}
+
 impl Source {
     /// Whether the picture is described again every turn: it is wanted, it
     /// is one an element owns, or its store named when it next changes.
@@ -458,7 +475,10 @@ impl Source {
         };
         self.next_change = next_change;
         if let Some(pixels) = pixels {
-            self.descriptor = Some(ImageDescriptor::of(&pixels));
+            let descriptor = ImageDescriptor::of(&pixels);
+            // The lease held is of the bitmap drawn before, if any other.
+            self.leased &= self.descriptor == Some(descriptor);
+            self.descriptor = Some(descriptor);
             self.pixels = Some(pixels);
             self.generation = generation;
             return;
@@ -985,6 +1005,84 @@ mod tests {
         assert_eq!(frame.resolve_images(&store, &mut images, &mut sources), 0);
         assert!(images.iter().all(Option::is_some), "drawn once it is there");
         assert_eq!(store.wants(), 1);
+    }
+
+    /// A URL store whose one source moves to a new bitmap each time the test
+    /// says so, as an animated image's next frame does, and drops the
+    /// pixels of the one shown once told the rasterizer holds its upload.
+    struct Animated {
+        frames: RefCell<Vec<ImageData>>,
+        shown: std::cell::Cell<usize>,
+        held: std::cell::Cell<bool>,
+    }
+
+    impl FrameImages for Animated {
+        type PlatformFrame = Infallible;
+
+        fn describe(&self, picture: &PictureKey, _: ImageSizeHint) -> Option<FrameImage> {
+            (picture.url()? == SRC).then_some(())?;
+            let frame = self.frames.borrow()[self.shown.get()].clone();
+            Some(FrameImage {
+                descriptor: ImageDescriptor::of(&frame),
+                pixels: self.held.get().then_some(frame),
+                generation: self.shown.get() as u64,
+                next_change: Some(ClockInstant::now() + std::time::Duration::from_mins(5)),
+            })
+        }
+
+        fn want(&self, _: &PictureKey, _: ImageSizeHint) {
+            self.held.set(true);
+        }
+
+        fn retain(&self, _: &[PictureKey]) {}
+
+        fn release(&self, _: &[PictureKey]) {
+            self.held.set(false);
+        }
+    }
+
+    /// A URL picture that moves from bitmap to bitmap within one commit
+    /// keeps a lease on the one it draws only: the uploads of the bitmaps it
+    /// drew before are released under the rasterizer's budget, however long
+    /// the commit stays adopted.
+    #[test]
+    fn a_url_picture_that_changes_bitmap_leases_only_the_one_it_draws() {
+        let gpu = SharedGpu::private(SharedRaster::new);
+        gpu.raster.set_bitmap_budget(0);
+        let mut painter = painter_on(&gpu);
+        let colours = [RED, BLUE, RED, BLUE, RED, BLUE];
+        let store = Animated {
+            frames: RefCell::new(colours.iter().map(|&texel| texel_image(texel)).collect()),
+            shown: std::cell::Cell::new(0),
+            held: std::cell::Cell::new(true),
+        };
+        let (mut document, _image) = page("");
+        assert!(painter.adopt(Some(document.commit()), Some(&store)));
+        let mut drawn = Vec::new();
+        for (index, &colour) in colours.iter().enumerate() {
+            store.shown.set(index);
+            store.held.set(true);
+            let current = painter.frame().cloned();
+            assert!(painter.adopt(current, Some(&store)));
+            assert_eq!(at(&painter.capture(0.0).expect("capture"), 4, 4), colour);
+            // The next turn leases the upload, and the store drops its pixels.
+            let current = painter.frame().cloned();
+            assert!(painter.adopt(current, Some(&store)));
+            assert!(!store.held.get(), "released");
+            drawn.push(ImageDescriptor::of(&store.frames.borrow()[index]));
+        }
+        // Renders past the ones that pin what they drew.
+        for _ in 0..8 {
+            assert!(painter.draw_offscreen(0.0, true).expect("render"));
+        }
+        let (last, earlier) = drawn.split_last().expect("frames");
+        assert!(uploaded(&gpu, last), "the bitmap drawn stays leased");
+        for descriptor in earlier {
+            assert!(
+                !uploaded(&gpu, descriptor),
+                "an earlier bitmap was released: {descriptor:?}"
+            );
+        }
     }
 
     /// A store of pictures elements own: one slot per picture, which a test
