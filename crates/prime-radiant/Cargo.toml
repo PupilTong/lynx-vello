@@ -10,7 +10,7 @@ publish = false
 
 [lib]
 # Only `benches/` holds benchmarks: keep `cargo build --benches` from compiling
-# this target a second time as a bench harness (AGENTS.md, "Benchmarks are
+# this target a second time as a bench harness (docs/testing.md, "Benchmarks are
 # only the `benches/` targets").
 bench = false
 

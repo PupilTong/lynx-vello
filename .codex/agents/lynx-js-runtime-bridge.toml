@@ -12,9 +12,11 @@ and `bobcat-workers` (every Worker realm, including the BTS).
 
 ## Read first
 
-- `AGENTS.md`: the `crates/bobcat-core`, `crates/quickjs-rust-bridge` and
-  `packages/bobcat-element` entries in Crates, plus "JavaScript data ownership"
-  and Standards policy.
+- `AGENTS.md`: "JavaScript data ownership" and Standards policy.
+- `crates/bobcat-core/AGENTS.md` (the index) and the topic files under
+  `crates/bobcat-core/docs/` that the task touches,
+  `crates/quickjs-rust-bridge/AGENTS.md` and
+  `packages/bobcat-element/AGENTS.md`.
 - `docs/runtime-architecture.md` (dependency graph, transport and lifetime
   boundaries), then the per-area runtime docs: `mts-execution`,
   `data-lifecycle`, `destruction`, `events-diagnostics`, `node-query`,
@@ -254,7 +256,8 @@ Landed and not to be regressed:
 - Not implemented on purpose: the `l-e-name` entry-name CSS guard (`__SetCSSId`
   ignores `entryName`), UI methods other
   than the base set's `boundingClientRect`, `scrollIntoView` and
-  `scrollTo`/`scrollBy` and the kinds' methods `AGENTS.md` lists (`focus`/`blur`
+  `scrollTo`/`scrollBy` and the kinds' methods
+  `crates/bobcat-core/docs/page-policy.md` lists (`focus`/`blur`
   have no focus model), import maps, import attributes, JSON *ESM*
   modules (`require` does parse a `.json` response), transfer lists.
 
@@ -290,7 +293,7 @@ Shorthand `lynx/`, `lynx-stack/`, `Paws/`; absolute paths live once in AGENTS.md
   compiles the realm runtime into `OUT_DIR`, so a stale install breaks cargo.
 - `cargo clippy --all-targets -- -D warnings`.
 - The wasm32 clippy of CI's `browser` job (the command and the Homebrew
-  `llvm@22` `CC`/`CXX` are in AGENTS.md) whenever a change touches
+  `llvm@22` `CC`/`CXX` are in `docs/testing.md`) whenever a change touches
   `cfg(target_arch = "wasm32")` or `cfg(panic = "abort")` code, or an API
   `crates/bobcat-wasm/src/browser.rs` uses: no native build type-checks either.
 - `cargo test -p bobcat-core` — `tests/main_thread.rs` runs the emitted JS

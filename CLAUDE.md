@@ -1,9 +1,10 @@
 # lynx-vello
 
 Canonical project context — mission, standards policy, dependency policy,
-crates, reference repos, toolchain, testing — lives in
-[AGENTS.md](AGENTS.md). **Read that first.** This file only adds
-Claude-Code-specific notes on top of it.
+the workspace map, reference repos, toolchain, testing — lives in
+[AGENTS.md](AGENTS.md). **Read that first.** Before working in a crate or
+package, also read that crate's own `AGENTS.md`, linked from the Workspace
+map. This file only adds Claude-Code-specific notes on top of it.
 
 ## Subagents ([`.claude/agents/`](.claude/agents/))
 
