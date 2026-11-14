@@ -140,7 +140,7 @@ pub(crate) use self::space::{Space, SpaceKind, SpaceSamples};
 pub(crate) use self::sticky_frame::StickySample;
 pub(crate) use self::sticky_frame::{StickySamples, StickySlot};
 use crate::paint::display_list::DisplayList;
-use crate::render::image::{DocumentRequest, FrameImages, ImageEvent, ImageOutcome, ImageRole};
+use crate::render::image::{DocumentRequest, FrameImages, ImageEvent, ImageStatus};
 use crate::scroll::initial_target::InitialTarget;
 use crate::scroll::{AutoScrollRequest, SnapAxis, SnapPoint};
 use crate::tree::document::{Document, NodeId};
@@ -1241,10 +1241,10 @@ impl<T> Document<T> {
         self.images.take_wanted()
     }
 
-    /// The documents [`Document::set_image_document`] filed since the last
+    /// The documents [`Document::insert_image_document`] filed since the last
     /// drain, as requests for the host to parse: each one's synthetic
     /// source, its bytes, and what to parse them as. Drained once; every one
-    /// names a source that is pending and still presented by some element.
+    /// names a source that is pending and not forgotten.
     ///
     /// The embedder hands each to its host beside the image sources
     /// [`Self::take_wanted_images`] names. The host parses the bytes with
@@ -1266,16 +1266,15 @@ impl<T> Document<T> {
     /// settles as a loaded vector image. A document that did not parse
     /// arrives as a failure.
     ///
-    /// A report that lands on replaced nodes recomputes their natural size in
-    /// the same call, so an element resizes in the commit that first draws
-    /// what it reports on.
-    ///
-    /// The [`ImageOutcome`]s are the elements whose *own* source settled, for
-    /// the embedder to turn into `load` and `error` events. A placeholder is
-    /// nobody's event, and a source reported twice is nobody's either: one URL
-    /// has one content, so only the report that moves it is carried.
-    pub fn apply_image_events(&mut self, events: &[ImageEvent]) -> Vec<ImageOutcome> {
-        let mut outcomes = Vec::new();
+    /// Answers each source a report settled, with the status it settled at,
+    /// in report order: what an embedder presenting a source on a replaced
+    /// box ([`Document::set_picture`]) learns its outcome and natural size
+    /// from, in the same call, so an element resizes in the commit that
+    /// first draws what it reports on. A source reported twice is not
+    /// answered again: one URL has one content, so only the report that moves
+    /// it is carried.
+    pub fn apply_image_events(&mut self, events: &[ImageEvent]) -> Vec<(Arc<str>, ImageStatus)> {
+        let mut settled = Vec::new();
         for event in events {
             // `None` is a source reported twice, which one URL with one
             // content makes a no-op: nothing moved, so nothing is dirtied.
@@ -1283,27 +1282,13 @@ impl<T> Document<T> {
                 let (images, text_context) = self.image_apply_parts();
                 images.apply(event, text_context)
             };
-            let Some(applied) = applied else {
+            let Some(status) = applied else {
                 continue;
             };
-            for (node, role) in applied.nodes {
-                if role == ImageRole::Source {
-                    outcomes.push(match applied.loaded {
-                        Some((width, height)) => ImageOutcome::Loaded {
-                            node,
-                            width,
-                            height,
-                        },
-                        None => ImageOutcome::Failed { node },
-                    });
-                }
-                // Which bitmap the node draws may have changed, and with it
-                // the natural size that bitmap is fitted against.
-                self.refresh_natural_size(node);
-            }
+            settled.push((Arc::clone(event.source()), status));
             self.note_visual_mutation();
         }
-        outcomes
+        settled
     }
 
     /// Continues a `content-visibility: auto` determination the last render

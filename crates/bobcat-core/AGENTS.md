@@ -79,5 +79,6 @@ the main-thread flush binding — and
   IntersectionObserver primitive, Lynx exposure (`main/exposure.rs`) and layout
   events (`main/layout_change.rs`).
 - [Page policy: tags, text and the UA sheet](docs/page-policy.md) — Lynx page
-  policy in the `tree` module (`tree/lib.rs`, `ua_sheet.rs`): tags, text and the
-  UA sheet.
+  policy in the `tree` module (`tree/lib.rs`, `ua_sheet.rs`): tags, text, the
+  UA sheet, and the sources of the `image` and `svg` elements
+  (`tree/image_sources.rs`), which `bobcat-core` owns and `terminus` does not.

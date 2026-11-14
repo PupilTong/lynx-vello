@@ -195,8 +195,7 @@ Subsystems:
   is one owner's hold on uploads that does not depend on having drawn them
   recently, and the budget trim skips a leased upload as it skips a pinned
   one. `render::picture` is what an image draw names: a `PictureKey`, the
-  URL the page wrote or a process-unique `PictureId` one element owns
-  (`Document::set_picture`, with the element's natural size), and the
+  URL the page wrote or a process-unique `PictureId` one element owns, and the
   `PictureSlot` a producer on any thread publishes an `Id` picture's newest
   frame into. `FrameImages` answers a generation per picture that changes
   exactly when its pixels do, takes an `Id` picture's frame out of its slot
@@ -272,22 +271,42 @@ resident textures are bounded by `MAX_VECTOR_TEXTURE_BYTES` (64 MiB native,
 least-recently-used. `Headless` bakes the same way, so goldens exercise it. Masks, filters, patterns, markers and
 nested `image` elements draw nothing.
 
-**Documents handed over as markup.** `Document::set_image_document(node,
-role, bytes, kind)` is `set_image_source` for a document the page wrote
-itself (the Lynx `<svg content>`): the bytes are filed under a synthetic
-source, `svg-content:` and the 32 hex digits of a 128-bit SipHash-1-3 of the
-bytes (`siphasher`), so identical markup is one entry, one parse, one scene
-and one texture however many elements set it. An unknown source is created
-`Pending` and its bytes queued as a document request,
-`Document::take_document_requests` (`terminus::link::DocumentRequest` tuples, drained
-once, which the embedder hands the host to parse and report like a fetched
-document); a known one binds and settles at once. No bind and no walk ever
-asks the host to fetch a synthetic source, and its entry is forgotten when
-the last `(node, role)` binding goes (another source, or `free_node`), taking
-any unrequested bytes with it — the one removal the registry makes. The host
-keeps nothing of a parsed document, so markup that comes back afterwards is
-requested and parsed again, and a report that finds its source settled or
-forgotten moves nothing. `Document::image_source` reads the bound source; `knows_image_source` is a
+**Replaced boxes and the URL image service.** A replaced box presents one
+picture at one natural size: `Document::set_picture(node,
+Option<(PictureKey, Option<(u32, u32)>)>)`, read back with
+`Document::picture`. It is the one replaced-content primitive besides
+`set_natural_size`; the paint walk draws the picture into the content box,
+fitted against that natural size, resolving a `Url` against the registry as
+it resolves a CSS image, so a pending or failed URL draws nothing. Which
+picture an element presents, and when that changes, is the embedder's:
+`terminus` has no `src`, no `placeholder`, no choice between two sources and
+no per-element `load` or `error` (`bobcat-core`'s `tree::image_sources` holds
+those for `<image>` and `<svg>`). What it offers instead is the registry as a
+URL image service with no element in it: `Document::request_image(url) ->
+ImageStatus` asks for a URL once (`take_wanted_images`) and answers what is
+known (`Pending`, `Bitmap { width, height }`, `Vector { width, height }`,
+`Failed`); `image_status` reads it without asking; `apply_image_events`
+answers each `(source, ImageStatus)` a batch of reports settled, which is how
+an embedder learns an outcome. A settled status never moves, and a host URL
+is never forgotten.
+
+**Documents handed over as markup.** `Document::insert_image_document(bytes,
+kind) -> Arc<str>` files a document the page wrote itself (the Lynx
+`<svg content>`) under a synthetic source, `svg-content:` and the 32 hex
+digits of a 128-bit SipHash-1-3 of the bytes (`siphasher`), and answers that
+source for the caller to present; identical markup is one entry, one parse,
+one scene and one texture however many elements present it. An unknown
+source is created `Pending` and its bytes queued as a document request,
+`Document::take_document_requests` (`terminus::link::DocumentRequest` tuples,
+drained once, which the embedder hands the host to parse and report like a
+fetched document); a known one is answered as any URL is. Nothing ever asks
+the host to fetch a synthetic source. A replaced box presenting a URL holds
+it (`ImageRegistry::bind`, a count per entry), and a synthetic source is
+forgotten when the last box presenting it lets go (another picture, or
+`free_node`), taking any unrequested bytes with it — the one removal the
+registry makes. The host keeps nothing of a parsed document, so markup that
+comes back afterwards is requested and parsed again, and a report that finds
+its source settled or forgotten moves nothing. `knows_image_source` is a
 test-only registry probe.
 
 Rulings and limits to know before touching it:

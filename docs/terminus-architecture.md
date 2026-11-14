@@ -341,15 +341,22 @@ Replaced leaf content reads a closed `NaturalSize` value stored in lazily
 allocated node content; its internal update path automatically invalidates the
 affected cache path. Mutually exclusive literal text, natural size, and
 test-only leaf metadata reuse the node's single nullable content pointer.
-`Document::set_natural_size`, `Document::set_image_source` and
-`Document::set_picture` are the public replaced-content update seams (public because both halves arrive from above
-`terminus`, out of the embedder's image system, independently and in either order).
-The natural size always invalidates layout; a source invalidates only the scene
-*unless* it is the call that makes the element replaced, because being replaced
-forces `DisplayMode::Leaf` and hides every child — a layout input, not a paint
-one. Both getters stay paint/layout-internal, setting an equal value is a
-structural no-op, clearing a source an element never had is a no-op rather than
-a conversion to a replaced leaf, and the DOM core still knows no tag names.
+`Document::set_natural_size` and `Document::set_picture` are the public
+replaced-content update seams (public because what a box presents is decided
+above `terminus`, by the element that owns it). `set_picture` puts one
+picture on the box — a URL, resolved against the image registry as a CSS
+image is, or a picture one element owns — with its natural size or none;
+`terminus` has no notion of an element's sources, of a placeholder, or of a
+`load`. The embedder learns a URL's outcome from the URL image service
+(`Document::request_image`, `Document::image_status`, and the
+`(source, ImageStatus)` pairs `Document::apply_image_events` answers). A
+change of the natural size invalidates layout; another picture at the same
+size invalidates only the scene *unless* it is the call that makes the
+element replaced or takes its picture off, because being replaced forces
+`DisplayMode::Leaf` and hides every child — a layout input, not a paint one.
+The natural size getter stays paint/layout-internal, setting an equal value
+is a structural no-op, taking a picture off an element that has none is a
+no-op rather than a conversion, and the DOM core still knows no tag names.
 Each `DocumentLayoutState` entry owns one `LayoutSlot` containing the
 measurement cache, static position, and durable rounded/unrounded results;
 `Document::rounded_layout` is the public geometry query, while unrounded

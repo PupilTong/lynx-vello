@@ -38,7 +38,7 @@ use std::sync::{Arc, Mutex};
 use terminus::link::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
 use terminus::link::{
     Document, DocumentKind, FrameImage, FrameImages, ImageDescriptor, ImageEvent, ImageReports,
-    ImageSizeHint, PictureKey, VectorDocument,
+    ImageSizeHint, NodeId, PictureKey, VectorDocument,
 };
 
 /// What this store answers for one source.
@@ -479,7 +479,7 @@ pub fn rgba8(width: u32, height: u32, pixels: Vec<u8>) -> ImageData {
 /// Drives one round of the document-to-host image protocol, the same loop a
 /// painter runs: request every source the last walk discovered, hand the
 /// store every document the page handed over as markup
-/// ([`Document::set_image_document`], drained through
+/// ([`Document::insert_image_document`], drained through
 /// [`Document::take_document_requests`] as the runtime drains it), then
 /// apply whatever the store reported. The store parses each such document as
 /// a host does ([`TestImages::request_document`]); nothing parses inside the
@@ -494,10 +494,44 @@ pub fn pump_images<T>(document: &mut Document<T>, store: &TestImages) -> bool {
         store.request_document(&source, &bytes, kind);
     }
     let events = store.drain_events();
-    // The outcomes go nowhere: they are what an embedder turns into `load`
-    // and `error` events, and a screenshot has no realm to dispatch one in.
-    let _outcomes = document.apply_image_events(&events);
+    // The settled sources go nowhere here: they are what an embedder's
+    // element learns its outcome from, and a test presenting URLs reads
+    // their natural size back from the document ([`present_urls`]).
+    let _settled = document.apply_image_events(&events);
     !events.is_empty()
+}
+
+/// Presents each `(node, url)` on its replaced box
+/// ([`Document::set_picture`]), at the natural size the document knows of
+/// the URL, asking for it ([`Document::request_image`]): what an embedder's
+/// element presenting one URL does when it names it, and again when it
+/// settles. A box already presenting its URL at that size is left alone.
+pub fn present_urls<T>(document: &mut Document<T>, presented: &[(NodeId, &str)]) {
+    for &(node, url) in presented {
+        let natural = document.request_image(url).natural_size();
+        document.set_picture(node, Some((PictureKey::Url(Arc::from(url)), natural)));
+    }
+}
+
+/// [`render_with_images`] for a page whose replaced boxes present URLs:
+/// `presented` is presented before the first round and again after every
+/// round, so each box takes its URL's natural size in the round the URL
+/// settles, as an embedder's element does.
+pub fn render_presenting<T: Sync>(
+    document: &mut Document<T>,
+    store: &TestImages,
+    presented: &[(NodeId, &str)],
+) {
+    present_urls(document, presented);
+    for _ in 0..8 {
+        document.render();
+        let moved = pump_images(document, store);
+        present_urls(document, presented);
+        if !moved {
+            return;
+        }
+    }
+    document.render();
 }
 
 /// Renders until every image the page needs has been requested, reported and
@@ -518,7 +552,7 @@ mod tests {
     use std::sync::Arc;
 
     use terminus::link::{
-        Device, Document, DocumentKind, ImageEvent, ImageOutcome, ImageRole, NodeId,
+        Device, Document, DocumentKind, ImageEvent, ImageStatus, NodeId, PictureKey,
     };
 
     use super::{TestImages, pump_images};
@@ -574,20 +608,13 @@ mod tests {
     fn pump_images_answers_a_document_request_by_parsing_it() {
         let store = TestImages::new();
         let (mut document, image) = page();
+        let source = document.insert_image_document(ICON.as_bytes(), DocumentKind::Svg);
+        document.set_picture(image, Some((PictureKey::Url(source.clone()), None)));
         assert_eq!(
-            document.set_image_document(
-                image,
-                ImageRole::Source,
-                ICON.as_bytes(),
-                DocumentKind::Svg
-            ),
-            None,
+            document.image_status(&source),
+            ImageStatus::Pending,
             "pending until the store reports"
         );
-        let source = document
-            .image_source(image, ImageRole::Source)
-            .expect("a synthetic source")
-            .to_owned();
 
         assert!(
             pump_images(&mut document, &store),
@@ -599,21 +626,14 @@ mod tests {
         );
         assert!(!pump_images(&mut document, &store), "nothing more moves");
 
-        let root = document.document_element().id();
-        let second = document.create_element("image", ());
-        document.append_child(root, second);
+        let again = document.insert_image_document(ICON.as_bytes(), DocumentKind::Svg);
+        assert_eq!(again, source, "the same markup is the same source");
         assert_eq!(
-            document.set_image_document(
-                second,
-                ImageRole::Source,
-                ICON.as_bytes(),
-                DocumentKind::Svg
-            ),
-            Some(ImageOutcome::Loaded {
-                node: second,
+            document.request_image(&again),
+            ImageStatus::Vector {
                 width: 12,
                 height: 6,
-            }),
+            },
             "the store's report settled the shared source"
         );
     }

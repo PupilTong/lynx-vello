@@ -89,4 +89,6 @@ pub use crate::render::{
     frame_size, headless,
 };
 #[cfg(feature = "render")]
-pub use crate::store::{TestImages, pump_images, render_with_images, rgba8};
+pub use crate::store::{
+    TestImages, present_urls, pump_images, render_presenting, render_with_images, rgba8,
+};
