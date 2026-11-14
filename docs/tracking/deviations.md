@@ -367,6 +367,25 @@ consequential choice about whether to follow the spec or the quirk.
 
 ## CSS visual/paint & animation (see [css-visual.md](css-visual.md), [css-animation.md](css-animation.md))
 
+- **An animated CSS image plays the loop count its file states** — native
+  Lynx loops an animated `background-image` forever on both platforms. iOS
+  draws a background's frames from a display link and wraps the frame index
+  with no loop count at all
+  (`platform/darwin/ios/lynx/base/background/LynxBackgroundSubBackgroundLayer.m:265-274`);
+  Android's image requests carry a loop count of zero, Fresco's "infinite",
+  unless an `<image>` sets `loop-count`
+  (`platform/android/service_api/src/main/java/com/lynx/tasm/image/model/ImageRequestInfoBuilder.java:18`,
+  applied in `platform/android/lynx_service/lynx_service_image/src/main/java/com/lynx/service/image/LynxImageService.java:222-223`).
+  **Decision: follow W3C, as browsers do** (user ruling 2026-11-14,
+  `docs/picture-source-design.md` ruling 5): a CSS image, like a future HTML
+  `<img>`, plays automatically for the count the file states — a GIF's
+  NETSCAPE repeat count plus one, once without it; an APNG's `num_plays`; a
+  WebP's loop count; zero is forever — and then shows its last frame. Until
+  the `<image>` element's own playback lands (step 4b), an `<image>` presents
+  a URL picture and plays under this same policy too, so an `<image>` without
+  `loop-count` plays the file's count where native loops it forever; step 4b
+  gives it native's policy.
+
 - **`background` shorthand, multi-layer** — Lynx has an acknowledged code
   comment ("different from the web"): if a background layer has no image,
   Lynx silently skips updating that layer's other sub-properties instead of

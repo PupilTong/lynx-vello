@@ -200,8 +200,43 @@ up — when the last clone of the last scope drops on that thread.
 `Resources::builder` yields the per-view `ViewResources` that
 `LynxGroup::create_lynx_view` takes, carrying that view's `ImageReports`.
 
-Recorded limits: only an image's first frame is decoded (no animated playback),
-no `region-to-decode`, no `blur-radius` post-processing, and none of the
+**Animated images** (`animation.rs`, `docs/picture-source-design.md`
+"Animated images"): a load of a container that may animate asks the decoder
+for its frames (`ImageDecoder::frames_blocking`) inside the decode's closure,
+under its permit; one with more than one frame keeps its encoded bytes and
+gets a playhead under `vant`'s `PlayPolicy::stated`, one per URL per scope,
+shared by every draw in every view. `describe` advances it and answers the
+frame it is on (frame 0 is the residency's bitmap; frame *i* is decoded by
+index at frame 0's decoded size, one decode in flight per source, under a
+decode permit) at the playhead's step count as its generation, with the
+instant the next frame is due as `next_change`. A describe is a draw; a
+playhead stops when no view's `retain` set includes its URL and continues
+from the same frame when one does again. While drawn a URL holds the frame
+shown and the two after it (`AHEAD`), drops a frame passed, and drops the
+frame shown on `release`; an animation of at most three frames keeps all of
+them while drawn; held frames count in `memory_used_bytes`, not against the
+bitmap budget. While a playhead runs the store arms a timer for its next
+frame on its own executor — tokio's timer natively (the runtime is built
+with `enable_time`), the Render Worker's `setTimeout` in the browser
+(`executor::sleep`) — which completes as `Completion::Due` and wakes the
+host; a frame due before it is decoded arms no timer, and its decode's
+completion wakes the host. A frame decode that fails stops the playhead and
+is noted. `ImageIO` answers every frame, from a source kept open per playing
+animation (`decode/imageio.rs`, `Opened`: at most sixteen, keyed on the
+`Bytes` allocation, closed by `ImageDecoder::forget_frames` when the store's
+playhead stops), because a GIF frame decoded from a fresh source costs time in
+proportion to its index; gdk-pixbuf and the browser's `Image` decoder answer
+one, explicitly. The fixtures in
+`tests/fixtures/animated/` are written by `tests/animated_fixtures.rs`, which
+checks them byte for byte; the store's tests (`animation_tests.rs`) run over a
+test platform whose decoder reads APNG with the `png` crate and a test clock
+(`Shared::set_clock_hook`), and include a golden through a presenting painter
+(`tests/screenshots/animated/`).
+
+Recorded limits: an animated image animates only where the platform decoder
+decodes frames by index (macOS today); the `<image>` element's own playback
+surface (`loop-count`, `autoplay`, its methods and events) is not built, so
+an `<image>` plays under the CSS policy; no `region-to-decode`, no `blur-radius` post-processing, and none of the
 `<image>` element surface past `src` — the pipeline serves whatever source
 string the paint walk names, today `url(…)` layers and the source an
 `<image>` presents through `Document::set_picture`. The macOS

@@ -4,6 +4,7 @@
 use std::rc::Rc;
 
 use bytes::Bytes;
+use vant::image::animation::ImageFrames;
 use vant::image::{Bitmap, DecodeError};
 use vant::image_header::ImageHeader;
 use vant::mime::ImageFormat;
@@ -77,5 +78,20 @@ impl vant::ImageDecoder for BrowserDecoder {
 
     fn available(&self) -> Result<(), DecodeError> {
         self.decoder().map(|_| ())
+    }
+
+    /// One frame, whatever the file: the main thread's `Image` element
+    /// hands back the first frame of an animated GIF, APNG or WebP and
+    /// nothing of the rest, so the browser draws such a file as its first
+    /// frame until the Render Worker decodes frames itself
+    /// (`docs/picture-source-design.md`, step 5). Answered here rather than
+    /// inherited, so the browser's answer is a decision on record.
+    fn frames_blocking(
+        &self,
+        _bytes: &[u8],
+        _format: ImageFormat,
+        _header: Option<ImageHeader>,
+    ) -> Result<ImageFrames, DecodeError> {
+        Ok(ImageFrames::still())
     }
 }
