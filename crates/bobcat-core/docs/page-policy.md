@@ -19,8 +19,8 @@ generate a box inside a run, and a `text` component whose
 px, and, for a `text-selection` text — `user-select` in its UA rules, so
 a pointer selects it without focus — `getSelectedText` and
 `setTextSelection` over the document's selection),
-`tree::image` (the `src`-to-replaced-content
-reflection and its UA box), `tree::scroll_container` (`scroll-view` and
+`tree::image` (the `src`/`placeholder` reflection into the element's
+sources and its UA box), `tree::scroll_container` (`scroll-view` and
 `list` as scroll containers — which axis scrolls, which one clips, and which
 way the subtree stacks, from `web-elements`' own `scroll-view.css` and
 `x-list.css`; `enable-scroll="false"` leaves the box a scroll container only
@@ -216,13 +216,28 @@ mechanism: `image`'s and `svg`'s child suppression ties on specificity with the
 `display` rules `view`, `scroll-view`, `list`, `blur-view`, `x-blur-view` and
 `wrapper` carry, so it wins only by being assembled last.
 
+`tree::image_sources` (`ImageSources`) is where an `image`'s and an `svg`'s
+sources live; `terminus` knows none of them. It records the sources each
+element names — `src` and `placeholder`, concurrent requests (ruled
+2026-09-17) — and who names each URL, presents on the element's replaced box
+(`Document::set_picture`) its `src` while that is loaded, else a loaded
+`placeholder`, else whichever it names, always at that picture's natural
+size, and turns a settled `src` into an `ImageOutcome`: at the write, when
+`Document::request_image` answers a URL the document already settled, and
+otherwise when `Document::apply_image_events` answers the report that settles
+it (`tree::apply_image_events`, which the runtime's report path calls). A
+placeholder owes no event. The two components and the runtime share one
+handle per document, built with it (`new_document`'s `images`); a freed
+element's record goes in its component's `CustomElement::freed`.
+
 `tree::svg` is the Lynx `<svg>` component
 (`docs/svg-lynx-component-design.md`): one picture, never a subtree, as
-web-core's `x-svg` and native draw it. `src` goes to
-`Document::set_image_source` (the host fetches the document and reports its
-bytes); `content` goes to `Document::set_image_document` as its bytes, filed
-under a synthetic `svg-content:<128-bit hash>` source that is parsed by the
-engine, once per distinct markup, and never asked of the host. An empty or
+web-core's `x-svg` and native draw it. `src` is its one source (the host
+fetches the document and reports its bytes); `content` goes to
+`Document::insert_image_document` as its bytes, filed under a synthetic
+`svg-content:<128-bit hash>` source that is parsed by the engine, once per
+distinct markup, and never asked of the host, and that source becomes the
+element's one source. An empty or
 removed `content` keeps the current source (web-core's `_handleContent`); the
 last attribute written wins. UA rules `svg { display: flex; }` and
 `svg > * { display: none; }`, with `svg` in the shared box block: no size

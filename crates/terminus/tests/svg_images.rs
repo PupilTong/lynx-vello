@@ -1,7 +1,8 @@
 //! SVG documents as vector images: `<image src>`, `background-image` and
 //! `mask-image` naming an SVG document, and an element handed a document as
-//! its markup (`Document::set_image_document`, what the Lynx
-//! `<svg content>` calls), over the full test pipeline —
+//! its markup (`Document::insert_image_document` and the source it answers
+//! presented with `Document::set_picture`, what the Lynx `<svg content>`
+//! does), over the full test pipeline —
 //! `prime_radiant::TestImages::insert_svg` parses a document and reports it the
 //! way a host does, `prime_radiant::pump_images` hands an element's markup to the
 //! store as a document request, which parses it the same way,
@@ -28,7 +29,7 @@ mod screenshot;
 
 use paint_common::Doc;
 use prime_radiant::TestImages;
-use terminus::link::{DocumentKind, ImageOutcome, ImageRole, NodeId};
+use terminus::link::{DocumentKind, ImageStatus, NodeId, PictureKey};
 
 const SCREEN_WIDTH: f32 = 393.0;
 const SCREEN_HEIGHT: f32 = 727.0;
@@ -101,8 +102,15 @@ fn page(css: &str) -> Doc {
     )
 }
 
-fn capture(test: &str, doc: &mut Doc, images: &TestImages) -> prime_radiant::Image {
-    prime_radiant::render_with_images(&mut doc.dom, images);
+/// Renders `doc` until its images settle, with each `(node, url)` of
+/// `presented` presented at its URL's natural size, and captures it.
+fn capture(
+    test: &str,
+    doc: &mut Doc,
+    images: &TestImages,
+    presented: &[(NodeId, &str)],
+) -> prime_radiant::Image {
+    prime_radiant::render_presenting(&mut doc.dom, images, presented);
     let image = screenshot::capture_prebuilt_document(test, &mut doc.dom, images);
     assert!(
         images.reads().is_empty(),
@@ -138,15 +146,20 @@ fn image_element_modes_match_reference() {
         ("r2 c2 rounded bordered", None),
     ];
     let root = doc.root;
+    let mut presented = Vec::new();
     for (class, mode) in cells {
         let node = doc.el_tag(root, "image", class);
         if let Some(mode) = mode {
             doc.dom.set_attribute(node, "mode", mode);
         }
-        doc.dom
-            .set_image_source(node, ImageRole::Source, Some("app:///icon.svg"));
+        presented.push((node, "app:///icon.svg"));
     }
-    let actual = capture("image_element_modes_match_reference", &mut doc, &images);
+    let actual = capture(
+        "image_element_modes_match_reference",
+        &mut doc,
+        &images,
+        &presented,
+    );
     screenshot::assert_golden(&["svg", "image-modes"], &actual);
 }
 
@@ -186,7 +199,12 @@ fn background_image_tiles_match_reference() {
     ] {
         doc.el_tag(root, "view", class);
     }
-    let actual = capture("background_image_tiles_match_reference", &mut doc, &images);
+    let actual = capture(
+        "background_image_tiles_match_reference",
+        &mut doc,
+        &images,
+        &[],
+    );
     screenshot::assert_golden(&["svg", "background"], &actual);
 }
 
@@ -211,7 +229,7 @@ fn mask_image_matches_reference() {
     for class in ["r0 c0 one", "r0 c1 tiled", "r1 c0 offset", "r1 c1 gradient"] {
         doc.el_tag(root, "view", class);
     }
-    let actual = capture("mask_image_matches_reference", &mut doc, &images);
+    let actual = capture("mask_image_matches_reference", &mut doc, &images, &[]);
     screenshot::assert_golden(&["svg", "mask"], &actual);
 }
 
@@ -227,15 +245,15 @@ fn one_document_at_two_sizes_matches_reference() {
     let images = TestImages::new();
     images.insert_svg("app:///detail.svg", DETAIL);
     let root = doc.root;
-    for class in ["small", "large"] {
+    let presented = ["small", "large"].map(|class| {
         let node = doc.el_tag(root, "image", class);
-        doc.dom
-            .set_image_source(node, ImageRole::Source, Some("app:///detail.svg"));
-    }
+        (node, "app:///detail.svg")
+    });
     let actual = capture(
         "one_document_at_two_sizes_matches_reference",
         &mut doc,
         &images,
+        &presented,
     );
     screenshot::assert_golden(&["svg", "two-sizes"], &actual);
 }
@@ -265,9 +283,7 @@ fn an_unsized_image_lays_out_at_the_documents_natural_size() {
         let mut doc = page("");
         let root = doc.root;
         let node = doc.el_tag(root, "image", "");
-        doc.dom
-            .set_image_source(node, ImageRole::Source, Some("app:///sized.svg"));
-        prime_radiant::render_with_images(&mut doc.dom, &images);
+        prime_radiant::render_presenting(&mut doc.dom, &images, &[(node, "app:///sized.svg")]);
         let layout = doc.dom.rounded_layout(node).expect("laid out");
         assert_eq!(
             (f64::from(layout.size.width), f64::from(layout.size.height)),
@@ -280,9 +296,26 @@ fn an_unsized_image_lays_out_at_the_documents_natural_size() {
 /// The source `node` presents, owned, so the document can be borrowed again.
 fn source_of(doc: &Doc, node: NodeId) -> String {
     doc.dom
-        .image_source(node, ImageRole::Source)
-        .expect("the element has a source")
+        .picture(node)
+        .and_then(PictureKey::url)
+        .expect("the element presents a source")
         .to_owned()
+}
+
+/// Presents `url` on `node` at the natural size the document knows of it,
+/// as an embedder's element does when it names the URL and when it settles.
+fn present(doc: &mut Doc, node: NodeId, url: &str) {
+    prime_radiant::present_urls(&mut doc.dom, &[(node, url)]);
+}
+
+/// Hands `node` `markup` as a document, as the Lynx `<svg content>` does:
+/// files it, presents the source it is filed under, and answers that source.
+fn present_markup(doc: &mut Doc, node: NodeId, markup: &str) -> String {
+    let source = doc
+        .dom
+        .insert_image_document(markup.as_bytes(), DocumentKind::Svg);
+    present(doc, node, &source);
+    source.to_string()
 }
 
 /// The border-box size `node` laid out at.
@@ -301,16 +334,30 @@ fn host_parse(
 }
 
 /// Answers every document request the way a host does, and applies what
-/// it reported.
-fn answer_requests(doc: &mut Doc) -> Vec<ImageOutcome> {
+/// it reported, answering the sources that settled.
+fn answer_requests(doc: &mut Doc) -> Vec<(String, ImageStatus)> {
     let events: Vec<_> = doc
         .dom
         .take_document_requests()
         .into_iter()
         .map(host_parse)
         .collect();
-    doc.dom.apply_image_events(&events)
+    settled(doc, &events)
 }
+
+/// Applies `events`, answering the sources that settled by name.
+fn settled(doc: &mut Doc, events: &[terminus::link::ImageEvent]) -> Vec<(String, ImageStatus)> {
+    doc.dom
+        .apply_image_events(events)
+        .into_iter()
+        .map(|(source, status)| (source.to_string(), status))
+        .collect()
+}
+
+const ICON_STATUS: ImageStatus = ImageStatus::Vector {
+    width: 48,
+    height: 24,
+};
 
 /// An element handed [`ICON`] as markup draws exactly what an `<image>`
 /// whose URL the host answers with the same document draws: the markup goes
@@ -327,20 +374,14 @@ fn a_document_set_as_markup_draws_as_one_loaded_from_a_url() {
     let mut by_url = page(css);
     let root = by_url.root;
     let node = by_url.el_tag(root, "image", "icon");
-    by_url
-        .dom
-        .set_image_source(node, ImageRole::Source, Some("app:///icon.svg"));
-    let by_url = capture(TEST, &mut by_url, &url_images);
+    let by_url = capture(TEST, &mut by_url, &url_images, &[(node, "app:///icon.svg")]);
 
     let markup_images = TestImages::new();
     let mut by_markup = page(css);
     let root = by_markup.root;
     let node = by_markup.el_tag(root, "image", "icon");
-    by_markup
-        .dom
-        .set_image_document(node, ImageRole::Source, ICON.as_bytes(), DocumentKind::Svg);
-    let source = source_of(&by_markup, node);
-    let by_markup = capture(TEST, &mut by_markup, &markup_images);
+    let source = present_markup(&mut by_markup, node, ICON);
+    let by_markup = capture(TEST, &mut by_markup, &markup_images, &[(node, &source)]);
     assert!(
         !markup_images.was_asked_for(&source),
         "the markup reached the host as a document request, never as a source to fetch"
@@ -357,7 +398,7 @@ fn a_document_set_as_markup_draws_as_one_loaded_from_a_url() {
 }
 
 /// Two elements handed identical markup share one synthetic source and one
-/// parse, and both settle with the document's natural size when it applies.
+/// parse, and it settles once, with the document's natural size, for both.
 #[test]
 fn identical_markup_on_two_elements_is_one_source_and_one_parse() {
     let mut doc = page("");
@@ -365,10 +406,10 @@ fn identical_markup_on_two_elements_is_one_source_and_one_parse() {
     let first = doc.el_tag(root, "image", "");
     let second = doc.el_tag(root, "image", "");
     for node in [first, second] {
+        let source = present_markup(&mut doc, node, ICON);
         assert_eq!(
-            doc.dom
-                .set_image_document(node, ImageRole::Source, ICON.as_bytes(), DocumentKind::Svg),
-            None,
+            doc.dom.image_status(&source),
+            ImageStatus::Pending,
             "pending until the parse applies"
         );
     }
@@ -384,45 +425,31 @@ fn identical_markup_on_two_elements_is_one_source_and_one_parse() {
     assert_eq!(requests.len(), 1, "one parse for both elements");
     assert!(doc.dom.take_document_requests().is_empty(), "drained once");
     let events: Vec<_> = requests.into_iter().map(host_parse).collect();
-    assert_eq!(
-        doc.dom.apply_image_events(&events),
-        [first, second].map(|node| ImageOutcome::Loaded {
-            node,
-            width: 48,
-            height: 24,
-        })
-    );
+    assert_eq!(settled(&mut doc, &events), [(source.clone(), ICON_STATUS)]);
+    for node in [first, second] {
+        present(&mut doc, node, &source);
+    }
     assert_eq!(size_of(&mut doc, first), (48.0, 24.0));
     assert_eq!(size_of(&mut doc, second), (48.0, 24.0));
 
-    // A third element on a settled markup is answered at the bind.
+    // A third element on a settled markup learns it at once.
     let third = doc.el_tag(root, "image", "");
-    assert_eq!(
-        doc.dom
-            .set_image_document(third, ImageRole::Source, ICON.as_bytes(), DocumentKind::Svg),
-        Some(ImageOutcome::Loaded {
-            node: third,
-            width: 48,
-            height: 24,
-        })
-    );
+    assert_eq!(present_markup(&mut doc, third, ICON), source);
+    assert_eq!(doc.dom.request_image(&source), ICON_STATUS);
+    assert_eq!(size_of(&mut doc, third), (48.0, 24.0));
     assert!(doc.dom.take_document_requests().is_empty());
 }
 
-/// New markup rebinds the element to a new source and forgets the old one,
-/// whose bytes are never parsed if the parse had not started; setting the
-/// same markup again is no change at all.
+/// New markup presents a new source and forgets the old one, whose bytes
+/// are never parsed if the parse had not started; presenting the same markup
+/// again is no change at all.
 #[test]
 fn changed_markup_rebinds_and_forgets_the_old_source() {
     let mut doc = page("");
     let root = doc.root;
     let node = doc.el_tag(root, "image", "");
-    doc.dom
-        .set_image_document(node, ImageRole::Source, ICON.as_bytes(), DocumentKind::Svg);
-    let icon = source_of(&doc, node);
-    doc.dom
-        .set_image_document(node, ImageRole::Source, TILE.as_bytes(), DocumentKind::Svg);
-    let tile = source_of(&doc, node);
+    let icon = present_markup(&mut doc, node, ICON);
+    let tile = present_markup(&mut doc, node, TILE);
     assert_ne!(icon, tile);
     assert!(!doc.dom.knows_image_source(&icon), "the old source is gone");
 
@@ -435,30 +462,26 @@ fn changed_markup_rebinds_and_forgets_the_old_source() {
         [tile.as_str()],
         "only the markup the element still presents is requested"
     );
-    doc.dom
-        .apply_image_events(&requests.into_iter().map(host_parse).collect::<Vec<_>>());
+    let _ = settled(
+        &mut doc,
+        &requests.into_iter().map(host_parse).collect::<Vec<_>>(),
+    );
+    present(&mut doc, node, &tile);
     assert_eq!(size_of(&mut doc, node), (20.0, 20.0));
 
-    assert_eq!(
-        doc.dom
-            .set_image_document(node, ImageRole::Source, TILE.as_bytes(), DocumentKind::Svg),
-        None,
+    doc.dom.render();
+    assert_eq!(present_markup(&mut doc, node, TILE), tile);
+    assert!(
+        !doc.dom.needs_render(),
         "the same markup again changes nothing"
     );
     assert!(doc.dom.take_document_requests().is_empty());
 
     // Back to the first markup: a new parse, and the settled one is gone.
-    doc.dom
-        .set_image_document(node, ImageRole::Source, ICON.as_bytes(), DocumentKind::Svg);
+    let icon = present_markup(&mut doc, node, ICON);
     assert!(!doc.dom.knows_image_source(&tile));
-    assert_eq!(
-        answer_requests(&mut doc),
-        [ImageOutcome::Loaded {
-            node,
-            width: 48,
-            height: 24,
-        }]
-    );
+    assert_eq!(answer_requests(&mut doc), [(icon.clone(), ICON_STATUS)]);
+    present(&mut doc, node, &icon);
     assert_eq!(size_of(&mut doc, node), (48.0, 24.0));
 }
 
@@ -472,8 +495,7 @@ fn freeing_the_last_element_forgets_its_source() {
     let first = doc.el_tag(root, "image", "");
     let second = doc.el_tag(root, "image", "");
     for node in [first, second] {
-        doc.dom
-            .set_image_document(node, ImageRole::Source, ICON.as_bytes(), DocumentKind::Svg);
+        present_markup(&mut doc, node, ICON);
     }
     let source = source_of(&doc, first);
     let requests = doc.dom.take_document_requests();

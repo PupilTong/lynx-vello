@@ -27,8 +27,8 @@ pub use crate::paint::display_list::{
 };
 pub use crate::render::image::{
     DocumentKind, DocumentRequest, FrameImage, FrameImages, ImageDescriptor, ImageEvent,
-    ImageInbox, ImageOutcome, ImageReports, ImageResidency, ImageRole, ImageSizeHint,
-    MAX_RENDERABLE_DIMENSION, NoImages, is_renderable,
+    ImageInbox, ImageReports, ImageResidency, ImageSizeHint, ImageStatus, MAX_RENDERABLE_DIMENSION,
+    NoImages, is_renderable,
 };
 pub use crate::render::picture::{PictureFrame, PictureId, PictureKey, PictureSlot, TakenFrame};
 pub use crate::render::svg::VectorDocument;

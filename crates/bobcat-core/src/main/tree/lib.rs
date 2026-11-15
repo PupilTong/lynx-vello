@@ -94,6 +94,7 @@ mod blur_view;
 mod dialog_tests;
 mod frame;
 mod image;
+mod image_sources;
 mod list;
 mod markdown;
 mod overlay;
@@ -125,10 +126,11 @@ use std::sync::Mutex;
 
 use smallvec::SmallVec;
 use terminus::link::event::QueuedEventSink;
-use terminus::link::{Document, ImageOutcome, NodeId, UserAgentStylesheet};
+use terminus::link::{Document, NodeId, UserAgentStylesheet};
 
 pub(crate) use self::base_methods::invoke_base_method;
 pub(crate) use self::frame::{MAX_FRAME_DEPTH, frame_depth, nested_page, reset_frame};
+pub(crate) use self::image_sources::{ImageOutcome, ImageSources, apply_image_events};
 pub(crate) use self::scroll_container::relevance_span;
 pub(crate) use self::svg::is_svg;
 pub(crate) use self::swiper::Autoplays;
@@ -188,18 +190,22 @@ pub(crate) const SELECTION_CHANGE: &str = "selectionchange";
 /// connections and disconnections, for the runtime to dispatch once it is out of the
 /// JavaScript call that caused them. `autoplays` is where the `x-swiper`
 /// component keeps its autoplay timers, for the runtime to wait out and run.
+/// `images` is where the `image` and `svg` components keep the sources their
+/// elements name, for the runtime to settle the image reports against
+/// ([`apply_image_events`]).
 #[must_use]
 pub(crate) fn new_document(
     viewport: Viewport,
     config: PageConfig,
     events: ComponentEvents,
     autoplays: Autoplays,
+    images: ImageSources,
 ) -> LynxDocument {
     let mut document = Document::new(viewport.device(), PAGE_TAG, ());
     document.set_queued_event_sink(Rc::new(events.clone()));
     blur_view::define(&mut document);
-    image::define(&mut document, events.clone());
-    svg::define(&mut document, events.clone());
+    image::define(&mut document, events.clone(), images.clone());
+    svg::define(&mut document, events.clone(), images);
     swiper::define(&mut document, autoplays, events.clone());
     refresh_view::define(&mut document, events.clone());
     viewpager::define(&mut document, events.clone());
@@ -502,8 +508,8 @@ impl ComponentEvents {
         }
     }
 
-    /// Queues a whole image report batch's outcomes, in the order `terminus`
-    /// returned them.
+    /// Queues a whole image report batch's outcomes, in the order
+    /// [`apply_image_events`] answered them.
     pub(crate) fn extend_images(&self, outcomes: Vec<ImageOutcome>) {
         self.0
             .borrow_mut()

@@ -1910,8 +1910,10 @@ Lynx tag.
 
 `image` is the same shape of join for pictures: Lynx names one as an attribute
 (`__CreateImage` then `src`), while everything downstream speaks replaced
-content, so the component reflects `src` into `Document::set_image_source` and
-an empty or removed value into no source at all. Its UA rules give the tag a
+content, so the component reflects `src` and `placeholder` into the
+element's sources (`tree::image_sources`), which present the picture the
+element shows on its replaced box (`Document::set_picture`), and an empty or
+removed value into no source at all. Its UA rules give the tag a
 border box, suppress every child, and — the one load-bearing declaration —
 `contain: size`, which is the CSS spelling of Lynx's rule that an `<image>`
 box is sized by its style and never by its bitmap. Native gives the tag no

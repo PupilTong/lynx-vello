@@ -2959,7 +2959,7 @@ fn scroll_metrics_and_a_load_size_reach_the_lynx_detail_as_extras() {
     );
     runtime.adopt_scroll_offsets([entry(65.0, true)].into_iter());
     runtime.slot.borrow().component_events.queue_image(Some(
-        terminus::link::ImageOutcome::Loaded {
+        crate::main::tree::ImageOutcome::Loaded {
             node: card,
             width: 40,
             height: 20,

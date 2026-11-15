@@ -546,7 +546,7 @@ mod tests {
     use crate::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
     use crate::render::gpu::{Headless, SharedGpu};
     use crate::render::image::{
-        FrameImage, FrameImages, ImageDescriptor, ImageEvent, ImageRole, ImageSizeHint,
+        FrameImage, FrameImages, ImageDescriptor, ImageEvent, ImageSizeHint,
     };
     use crate::render::picture::{PictureId, PictureKey, PictureSlot, TakenFrame};
     use crate::render::sparse::{BitmapLeases, SharedRaster};
@@ -763,9 +763,16 @@ mod tests {
         let root = document.document_element().id();
         let image = document.create_element("image", ());
         document.append_child(root, image);
-        document.set_image_source(image, ImageRole::Source, Some(SRC));
         document.apply_image_events(&[loaded(SRC)]);
+        present(&mut document, image, SRC);
         (document, image)
+    }
+
+    /// Presents `source` on `image` at the natural size the document knows
+    /// of it, as an embedder's element does.
+    fn present(document: &mut Document<()>, image: crate::tree::document::NodeId, source: &str) {
+        let natural = document.request_image(source).natural_size();
+        document.set_picture(image, Some((PictureKey::Url(Arc::from(source)), natural)));
     }
 
     /// Draws `SRC` from the store's pixels, lets the rasterizer upload them
@@ -792,8 +799,8 @@ mod tests {
         // A commit that no longer draws it ends the lease, and renders of
         // another bitmap, past the ones the target pins what it drew in,
         // release the upload.
-        document.set_image_source(image, ImageRole::Source, Some(OTHER));
         document.apply_image_events(&[loaded(OTHER)]);
+        present(document, image, OTHER);
         assert!(painter.adopt(Some(document.commit()), Some(store)));
         for _ in 0..8 {
             assert!(painter.draw_offscreen(0.0, true).expect("render"));
@@ -823,7 +830,7 @@ mod tests {
         let drawn = evict_src(&gpu, &mut painter, &store, &mut document, image);
 
         // 1. The commit that draws it again draws nothing for it, and wants it.
-        document.set_image_source(image, ImageRole::Source, Some(SRC));
+        present(&mut document, image, SRC);
         assert!(painter.adopt(Some(document.commit()), Some(&store)));
         assert_eq!(*store.wants.borrow(), [SRC.to_owned()]);
         assert!(painter.awaits_pictures());
@@ -893,7 +900,7 @@ mod tests {
         let (mut document, image) = page("");
         evict_src(&gpu, &mut painter, &store, &mut document, image);
 
-        document.set_image_source(image, ImageRole::Source, Some(SRC));
+        present(&mut document, image, SRC);
         assert!(painter.adopt(Some(document.commit()), Some(&store)));
         assert!(painter.awaits_pictures());
         store.fail();
@@ -921,7 +928,7 @@ mod tests {
         evict_src(&gpu, &mut painter, &store, &mut document, image);
 
         document.set_classes(image, "blurred");
-        document.set_image_source(image, ImageRole::Source, Some(SRC));
+        present(&mut document, image, SRC);
         assert!(painter.adopt(Some(document.commit()), Some(&store)));
         assert!(painter.draw_offscreen(0.0, false).expect("render"));
         assert_ne!(held_at(&mut painter, 4, 4), RED, "baked without it");
@@ -949,7 +956,7 @@ mod tests {
         let (mut document, image) = page("");
         evict_src(&gpu, &mut painter, &store, &mut document, image);
 
-        document.set_image_source(image, ImageRole::Source, Some(SRC));
+        present(&mut document, image, SRC);
         assert!(painter.adopt(Some(document.commit()), Some(&store)));
         assert!(painter.awaits_pictures());
         let current = painter.frame().cloned();
@@ -1080,7 +1087,7 @@ mod tests {
                 document.append_child(root, node);
                 document.set_inline_style(node, &format!("left: {}px;", index * 8));
                 document.set_classes(node, classes);
-                document.set_picture(node, Some((picture, 1, 1)));
+                document.set_picture(node, Some((PictureKey::Id(picture), Some((1, 1)))));
                 node
             })
             .collect();

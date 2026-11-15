@@ -96,20 +96,25 @@ fn object_fit_matrix_matches_reference() {
     let images = prime_radiant::TestImages::new();
     let root = doc.root;
     // No `set_natural_size` anywhere: every box below is sized purely by the
-    // dimensions the store reports when its load completes. That is the whole
-    // point of the golden — it fails if the intrinsic size does not travel
-    // from the store through the registry into layout.
+    // dimensions the store reports when its load completes, which each box is
+    // presented at once its URL settles. That is the whole point of the
+    // golden — it fails if the intrinsic size does not travel from the store
+    // through the registry into layout.
+    let mut presented = Vec::new();
     for (class, (width, height, rgba)) in cells {
         let node = doc.el_tag(root, "img", class);
         let source = format!("app:///{}.png", node.to_bits());
         images.insert_rgba8(&source, *width, *height, rgba.clone());
-        doc.dom
-            .set_image_source(node, terminus::link::ImageRole::Source, Some(&source));
+        presented.push((node, source));
     }
 
     // The natural size now arrives from the store's own load report, through
     // the same request/report loop the painter runs.
-    prime_radiant::render_with_images(&mut doc.dom, &images);
+    let presented: Vec<_> = presented
+        .iter()
+        .map(|(node, source)| (*node, source.as_str()))
+        .collect();
+    prime_radiant::render_presenting(&mut doc.dom, &images, &presented);
     let actual = screenshot::capture_prebuilt_document(
         "object_fit_matrix_matches_reference",
         &mut doc.dom,
@@ -465,7 +470,13 @@ fn live_picture_frames_match_reference() {
         "r1 c2 fill rounded blurred",
     ] {
         let node = doc.el_tag(root, "img", class);
-        doc.dom.set_picture(node, Some((store.picture, 32, 24)));
+        doc.dom.set_picture(
+            node,
+            Some((
+                terminus::link::PictureKey::Id(store.picture),
+                Some((32, 24)),
+            )),
+        );
     }
     let mut painter = pollster::block_on(Painter::new(
         DrawTarget::Offscreen,

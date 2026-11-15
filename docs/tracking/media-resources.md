@@ -50,12 +50,15 @@ is re-decoded at that size. The prefetch API row below maps to
 `LynxView::prefetch_images`; the bitmap-size cache is the fetcher's remembered
 intrinsic size, answered inline on a second request.
 
-Both halves of the replaced-content handoff exist on the `terminus` side.
-`Document::set_natural_size` installs the `NaturalSize`, invalidating the
-node-to-root layout-cache path, and `Document::set_image_source` installs the
-source string the paint walk presents to the store; neither waits for the
-other, so a frame between them paints no image and lays out at the size it
-has. Native's bitmap-size cache — a second mount of a known URL publishing its
+The replaced-content handoff is one `terminus` primitive and one service.
+`Document::set_picture` puts on a replaced box the picture it presents — a
+URL the paint walk presents to the store, or a picture one element owns —
+with its natural size, invalidating the node-to-root layout-cache path when
+that size moves; the element above `terminus` decides both. It learns a URL's
+outcome from the URL image service: `Document::request_image` asks for a URL
+once and answers its `ImageStatus`, and `Document::apply_image_events`
+answers each source a batch of reports settled. A frame before the URL loads
+paints no image and lays out at the size the box was given. Native's bitmap-size cache — a second mount of a known URL publishing its
 natural size in the commit that creates the node — is now the store's to
 provide, since only the store knows what it has already decoded.
 
@@ -150,6 +153,24 @@ clock is, and a source settles between frames. Same clock, same epoch, one
 frame of staleness at most; before the first frame it is the time origin. Events fire for
 `src` alone, which follows from the placeholder model above; the differences
 from web-core that leaves are in [deviations.md](deviations.md).
+
+Implementation note (2026-11-15, `docs/picture-source-design.md` step 3):
+the `terminus` halves of the two notes above moved to `bobcat-core`, with no
+change of behaviour. `terminus` no longer has `ImageRole`, `ImageOutcome`,
+`set_image_source`, `set_image_document` or `image_source`: a replaced box
+presents one picture at one natural size (`Document::set_picture`), and the
+registry is offered as a URL image service with no element in it
+(`Document::request_image`, `Document::image_status`,
+`Document::insert_image_document`, and the `(source, ImageStatus)` pairs
+`Document::apply_image_events` answers). `bobcat-core`'s
+`tree::image_sources` (`ImageSources`) holds each `image` and `svg`
+element's sources and who names each URL, presents `src` while it is loaded,
+else a loaded `placeholder`, else whichever it names, at that picture's
+natural size, and produces the `ImageOutcome` a `load` or `error` is built
+from: at the write for a URL the document already settled, and from the
+report otherwise. The record of a freed element goes in its component's
+`CustomElement::freed`; the box's hold on a document handed over as bytes
+goes in `terminus`'s `free_node`.
 
 Implementation note (2026-09-17, the attribute half): `tree::image` now
 observes `src`, `placeholder` and `blur-radius`, and matches `mode` and
@@ -268,7 +289,7 @@ revision 4.1 of the design, ruled 2026-10-10):
    instead (step 3). The browser embedder does not decode SVG through
    `HTMLImageElement`, so every target parses the same bytes.
 2. **Markup, in `terminus`.** `<svg content>` (`crates/bobcat-core/src/main/tree/svg.rs`)
-   hands its markup to `Document::set_image_document` as bytes. The registry
+   hands its markup to `Document::insert_image_document` as bytes. The registry
    files it under a synthetic source, `svg-content:` and the 32 hex digits of
    a 128-bit SipHash-1-3 of the bytes, created pending with its bytes queued
    as a document request (`Document::take_document_requests`); identical

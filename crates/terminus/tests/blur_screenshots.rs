@@ -366,13 +366,13 @@ fn blur_edges_and_replaced_content_matches_reference() {
 
     let images = prime_radiant::TestImages::new();
     let band = doc.el(root, "band");
+    let mut presented = Vec::new();
     for class in ["left b3", "right"] {
         let node = doc.el_tag(band, "img", class);
         let source = format!("app:///{}.png", node.to_bits());
         let (width, height, rgba) = checker(8, 8);
         images.insert_rgba8(&source, width, height, rgba);
-        doc.dom
-            .set_image_source(node, terminus::link::ImageRole::Source, Some(&source));
+        presented.push((node, source));
     }
 
     for class in [
@@ -384,7 +384,11 @@ fn blur_edges_and_replaced_content_matches_reference() {
         doc.el(root, class);
     }
 
-    prime_radiant::render_with_images(&mut doc.dom, &images);
+    let presented: Vec<_> = presented
+        .iter()
+        .map(|(node, source)| (*node, source.as_str()))
+        .collect();
+    prime_radiant::render_presenting(&mut doc.dom, &images, &presented);
     let actual = screenshot::capture_prebuilt_document(
         "blur_edges_and_replaced_content_matches_reference",
         &mut doc.dom,

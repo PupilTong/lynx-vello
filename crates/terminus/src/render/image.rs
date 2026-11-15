@@ -66,21 +66,19 @@
 //! draws correctly, because an image draw carries its anchor and extent
 //! unmultiplied and divides by the real bitmap dimensions at encode time.
 //!
-//! # An element's two sources
+//! # The URL image service
 //!
-//! A replaced element names up to two of them: the picture it is for, and a
-//! placeholder it draws until the first has pixels. They are independent
-//! entries requested at the same time — a placeholder is not something the
-//! element reaches for once its source fails. What the element draws is its
-//! own source while that is loaded, the placeholder otherwise, and nothing
-//! when neither is, so a loaded source suppresses the placeholder for good,
-//! including one whose pixels land later. The element's natural size names
-//! whichever bitmap that is, because `object-fit` resolves one against the
-//! other.
-//!
-//! Only the element's own source produces an [`ImageOutcome`], which is what
-//! an embedder turns into a `load` or an `error`. A placeholder is an interim
-//! picture the page did not ask about, so neither of its endings is an event.
+//! The document offers what it knows of a URL to whoever embeds it
+//! ([`Document::request_image`](crate::tree::document::Document::request_image),
+//! [`Document::image_status`](crate::tree::document::Document::image_status)
+//! and the settled sources
+//! [`Document::apply_image_events`](crate::tree::document::Document::apply_image_events)
+//! answers): asked for once, then pending, loaded with its natural size as a
+//! bitmap or as a vector document, or failed, and never moving again once
+//! settled. Nothing here names an element: an element that presents an
+//! image, and which of several it presents, is its embedder's, which puts
+//! the picture on the replaced box itself
+//! ([`Document::set_picture`](crate::tree::document::Document::set_picture)).
 //!
 //! # Vector images
 //!
@@ -102,7 +100,7 @@
 //!
 //! A document need not be fetched. The Lynx `<svg content>` hands the
 //! document its markup directly
-//! ([`Document::set_image_document`](crate::tree::document::Document::set_image_document)),
+//! ([`Document::insert_image_document`](crate::tree::document::Document::insert_image_document)),
 //! and the registry files it under a *synthetic source*:
 //! [`SYNTHETIC_SOURCE_PREFIX`] followed by the 32 hex digits of a 128-bit
 //! hash of the bytes (SipHash-1-3 with the zero key, [`synthetic_source`]).
@@ -113,9 +111,9 @@
 //! the host with the bytes: the host parses them exactly as it parses a
 //! fetched document and reports the result for that source. A known one
 //! binds and settles at once. No walk and no bind ever asks the host to
-//! fetch a synthetic source, and its entry is forgotten when the last node
-//! presenting it lets go ([`ImageRegistry::unbind_node`]): the one removal
-//! the registry makes, a host source still never regressing.
+//! fetch a synthetic source, and its entry is forgotten when the last
+//! replaced box presenting it lets go ([`ImageRegistry::unbind`]): the one
+//! removal the registry makes, a host source still never regressing.
 
 use std::cell::{Cell, RefCell};
 use std::convert::Infallible;
@@ -125,7 +123,6 @@ use std::sync::Arc;
 use bytes::Bytes;
 use rustc_hash::FxHashMap;
 use seldon::text::TextContext;
-use smallvec::SmallVec;
 use vant::image::Bitmap;
 use vant::image::residency::{
     Decoded, Described, Refinement, Requested, Residency, ResidencyConfig, ViewKey,
@@ -137,7 +134,6 @@ use crate::peniko::ImageData;
 use crate::render::gpu::SharedGpu;
 use crate::render::picture::{PictureId, PictureKey, TakenFrame};
 use crate::render::svg::{self, VectorDocument};
-use crate::tree::document::NodeId;
 
 /// A parsed SVG document, encoded and drawable at any size.
 ///
@@ -892,7 +888,7 @@ impl ImageEvent {
     }
 
     /// The source this event reports on.
-    fn source(&self) -> &Arc<str> {
+    pub(crate) fn source(&self) -> &Arc<str> {
         match self {
             Self::Loaded { source, .. }
             | Self::ParsedDocument { source, .. }
@@ -921,6 +917,32 @@ enum ImageState {
     Failed,
 }
 
+impl ImageState {
+    /// The state as the URL image service answers it.
+    fn status(&self) -> ImageStatus {
+        match self {
+            Self::Pending => ImageStatus::Pending,
+            Self::Ready {
+                width,
+                height,
+                kind: ImageKind::Raster,
+            } => ImageStatus::Bitmap {
+                width: *width,
+                height: *height,
+            },
+            Self::Ready {
+                width,
+                height,
+                kind: ImageKind::Vector(_),
+            } => ImageStatus::Vector {
+                width: *width,
+                height: *height,
+            },
+            Self::Failed => ImageStatus::Failed,
+        }
+    }
+}
+
 /// What a loaded image draws from.
 #[derive(Debug)]
 enum ImageKind {
@@ -931,37 +953,39 @@ enum ImageKind {
     Vector(VectorImage),
 }
 
-/// Which of a replaced element's two sources a binding is.
+/// What the document knows of one image source: the URL image service's
+/// answer ([`Document::request_image`](crate::tree::document::Document::request_image),
+/// [`Document::image_status`](crate::tree::document::Document::image_status)),
+/// and what a settled source reports
+/// ([`Document::apply_image_events`](crate::tree::document::Document::apply_image_events)).
 ///
-/// A node may hold one URL in both roles, so a binding is the pair and not
-/// the node alone — and it is what
-/// [`Document::set_image_source`](crate::tree::document::Document::set_image_source) names to
-/// say which of the two it is writing.
+/// `Pending` is the only state that moves, and it moves once: a source with
+/// one URL has one content, so a settled status is final.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ImageRole {
-    /// The picture the element is for.
-    Source,
-    /// The picture it shows until [`ImageRole::Source`] has pixels.
-    Placeholder,
+pub enum ImageStatus {
+    /// Asked for, and not settled yet; or a synthetic source no element
+    /// handed the bytes of, which never settles.
+    Pending,
+    /// Pixels the host holds, with the image's own intrinsic size.
+    Bitmap { width: u32, height: u32 },
+    /// A document the engine draws itself, with its natural size.
+    Vector { width: u32, height: u32 },
+    /// The source will never produce anything to draw.
+    Failed,
 }
 
-/// One element's own image source settling, for the embedder to turn into a
-/// `load` or an `error`.
-///
-/// A placeholder produces none: it is an interim picture the page did not ask
-/// about, so neither of its outcomes is an event. That asymmetry is the type's
-/// — there is no variant naming a placeholder.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ImageOutcome {
-    /// The element's source has loaded, as pixels or as a parsed vector
-    /// document, with this intrinsic size.
-    Loaded {
-        node: NodeId,
-        width: u32,
-        height: u32,
-    },
-    /// The element's source will never produce pixels.
-    Failed { node: NodeId },
+impl ImageStatus {
+    /// The natural size of a loaded source, bitmap or vector; `None` while
+    /// pending and for a failure.
+    #[must_use]
+    pub const fn natural_size(self) -> Option<(u32, u32)> {
+        match self {
+            Self::Bitmap { width, height } | Self::Vector { width, height } => {
+                Some((width, height))
+            }
+            Self::Pending | Self::Failed => None,
+        }
+    }
 }
 
 /// What [`ImageRegistry::resolve`] hands a draw: the source's name (the
@@ -969,21 +993,11 @@ pub enum ImageOutcome {
 /// when it is a vector image.
 pub(crate) type Resolved<'a> = (Arc<str>, (f64, f64), Option<&'a VectorImage>);
 
-/// What applying one report moved.
-pub(crate) struct ImageApplied {
-    /// The intrinsic size the source ended up with, or `None` for one that
-    /// will never produce pixels. Not the reported size: a report with a zero
-    /// axis is a failure.
-    pub(crate) loaded: Option<(u32, u32)>,
-    /// Every replaced node holding this source, in whichever role.
-    pub(crate) nodes: SmallVec<[(NodeId, ImageRole); 1]>,
-}
-
 /// The prefix of every synthetic source: the name the registry files a
 /// document handed over as markup under
-/// ([`Document::set_image_document`](crate::tree::document::Document::set_image_document)),
+/// ([`Document::insert_image_document`](crate::tree::document::Document::insert_image_document)),
 /// `svg-content:<32 hex digits>`. Such an entry is never asked of the host,
-/// and is forgotten when its last binder unbinds.
+/// and is forgotten when the last replaced box presenting it lets go.
 ///
 /// A host URL that happened to start with this prefix would be neither asked
 /// for nor kept; no host scheme does.
@@ -1018,15 +1032,12 @@ pub type DocumentRequest = (Arc<str>, Bytes, DocumentKind);
 #[derive(Debug, Default)]
 struct Entry {
     state: ImageState,
-    /// Replaced nodes presenting this source, so a completed load knows whose
-    /// natural size to recompute and whose element owes an event. A
-    /// `background-image` user is not here: it has no natural size, and the
-    /// load invalidates the frame anyway.
-    ///
-    /// Deduplicated per `(node, role)` and unbound when a node is freed, so
-    /// its length is the entry's binder count, which is what forgets a
-    /// synthetic source when it reaches zero.
-    nodes: SmallVec<[(NodeId, ImageRole); 1]>,
+    /// How many replaced boxes present this source
+    /// ([`ImageRegistry::bind`]): the count that forgets a synthetic source
+    /// when it reaches zero. A `background-image` user is not counted: a
+    /// host source is never forgotten, and no stylesheet names a synthetic
+    /// one.
+    presenters: u32,
 }
 
 /// The document's whole image state: a name table keyed by the raw source
@@ -1100,20 +1111,6 @@ impl ImageRegistry {
         }
     }
 
-    /// What a replaced element holding these two sources draws: its own
-    /// source once that has pixels, its placeholder until then, nothing when
-    /// neither has any. Requests either on a first sighting, as
-    /// [`ImageRegistry::resolve`] does.
-    pub(crate) fn resolve_presented(
-        &self,
-        source: Option<&str>,
-        placeholder: Option<&str>,
-    ) -> Option<Resolved<'_>> {
-        source
-            .and_then(|source| self.resolve(source))
-            .or_else(|| placeholder.and_then(|placeholder| self.resolve(placeholder)))
-    }
-
     /// The entry for `source`, asking for it if this is the registry's first
     /// sighting.
     ///
@@ -1137,71 +1134,77 @@ impl ImageRegistry {
         found
     }
 
-    /// Records that `node` presents `source` in `role`, asking for it if this
-    /// is the registry's first sighting.
+    /// Asks for `source` if this is the registry's first sighting of it, and
+    /// answers its name and what is known of it.
     ///
-    /// Binding has to ask, not merely record. The entry it is about to create
-    /// is exactly what [`ImageRegistry::resolve`] reads as "already asked
-    /// for", so an entry created without a request would suppress the only
-    /// request that source would ever get — and a replaced element binds its
-    /// source in the same call that makes it replaced, always before any walk
-    /// could have resolved it.
+    /// Asking has to file the entry at once, not merely queue the request.
+    /// The entry is exactly what [`ImageRegistry::resolve`] reads as "already
+    /// asked for", and an embedder asks for a source before any walk could
+    /// have resolved it.
     ///
-    /// A synthetic source is the exception, and is never asked for: its
-    /// entry already exists when it was filed by
-    /// [`ImageRegistry::insert_document`]. One named any other way (a page
-    /// writing `svg-content:…` into an `<image src>`) has no bytes to ask
-    /// for, so it binds nothing and files no entry: an entry without bytes
-    /// would make the markup's own later [`ImageRegistry::insert_document`]
-    /// read it as known and never queue its parse.
+    /// A synthetic source is never asked for: its entry already exists when
+    /// it was filed by [`ImageRegistry::insert_document`]. One named any
+    /// other way (a page writing `svg-content:…` into an attribute) has no
+    /// bytes to ask for, so it files no entry and stays pending: an entry
+    /// without bytes would make the markup's own later
+    /// [`ImageRegistry::insert_document`] read it as known and never queue
+    /// its parse.
     ///
-    /// Answers the name for the node to hold: the map's own key, so every
-    /// binder of one source shares one allocation of it, or, for such an
-    /// unfiled synthetic source, a copy of `source`.
-    pub(crate) fn bind_node(&mut self, source: &str, node: NodeId, role: ImageRole) -> Arc<str> {
-        let key = if let Some((key, _)) = self.entries.get_key_value(source) {
-            Arc::clone(key)
-        } else if is_synthetic_source(source) {
-            return Arc::from(source);
+    /// The name is the map's own key, so every holder of one source shares
+    /// one allocation of it, or, for such an unfiled synthetic source, a copy
+    /// of `source`.
+    pub(crate) fn request(&mut self, source: &str) -> (Arc<str>, ImageStatus) {
+        if let Some((key, entry)) = self.entries.get_key_value(source) {
+            return (Arc::clone(key), entry.state.status());
+        }
+        if is_synthetic_source(source) {
+            return (Arc::from(source), ImageStatus::Pending);
+        }
+        // Deduplicated against a walk that met the same source first and
+        // whose request has not been drained yet, the same way `resolve`
+        // deduplicates against itself, in discovery order. That request's
+        // name becomes the key; otherwise one name is minted for both.
+        let wanted = self.wanted.get_mut();
+        let key = if let Some(pending) = wanted.iter().find(|pending| &***pending == source) {
+            Arc::clone(pending)
         } else {
-            // Deduplicated against a walk that met the same source first and
-            // whose request has not been drained yet, the same way `resolve`
-            // deduplicates against itself, in discovery order. That request's
-            // name becomes the key; otherwise one name is minted for both.
-            let wanted = self.wanted.get_mut();
-            let key = if let Some(pending) = wanted.iter().find(|pending| &***pending == source) {
-                Arc::clone(pending)
-            } else {
-                let key = Arc::<str>::from(source);
-                wanted.push(Arc::clone(&key));
-                key
-            };
-            self.entries.insert(Arc::clone(&key), Entry::default());
+            let key = Arc::<str>::from(source);
+            wanted.push(Arc::clone(&key));
             key
         };
-        let entry = self
-            .entries
-            .get_mut(source)
-            .expect("the entry was found or just filed");
-        if !entry.nodes.contains(&(node, role)) {
-            entry.nodes.push((node, role));
+        self.entries.insert(Arc::clone(&key), Entry::default());
+        (key, ImageStatus::Pending)
+    }
+
+    /// What is known of `source`, asking for nothing.
+    pub(crate) fn status(&self, source: &str) -> ImageStatus {
+        self.entries
+            .get(source)
+            .map_or(ImageStatus::Pending, |entry| entry.state.status())
+    }
+
+    /// Records one more replaced box presenting `source`, asking for it as
+    /// [`ImageRegistry::request`] does. Answers the name for the box to hold.
+    pub(crate) fn bind(&mut self, source: &str) -> Arc<str> {
+        let (key, _) = self.request(source);
+        if let Some(entry) = self.entries.get_mut(source) {
+            entry.presenters += 1;
         }
         key
     }
 
-    /// Drops `node`'s claim on `source` in `role`. Its claim in the other
-    /// role, which an element naming one URL twice has, survives.
+    /// Drops one replaced box's claim on `source`.
     ///
     /// The last claim on a synthetic source forgets it: its entry, its
     /// picture, and its bytes if they were still waiting for a parse. A later
     /// [`ImageRegistry::insert_document`] of the same markup files it afresh.
     /// A host source is never forgotten, because one URL is reported once.
-    pub(crate) fn unbind_node(&mut self, source: &str, node: NodeId, role: ImageRole) {
+    pub(crate) fn unbind(&mut self, source: &str) {
         let Some(entry) = self.entries.get_mut(source) else {
             return;
         };
-        entry.nodes.retain(|held| *held != (node, role));
-        if entry.nodes.is_empty() && is_synthetic_source(source) {
+        entry.presenters = entry.presenters.saturating_sub(1);
+        if entry.presenters == 0 && is_synthetic_source(source) {
             self.entries.remove(source);
             self.document_requests
                 .retain(|(requested, ..)| &**requested != source);
@@ -1229,7 +1232,7 @@ impl ImageRegistry {
 
     /// The documents filed by [`ImageRegistry::insert_document`] since the
     /// last drain, for the embedder to hand the host, which parses them.
-    /// Each names an entry that is still `Pending` and still bound.
+    /// Each names an entry that is still `Pending`.
     pub(crate) fn take_document_requests(&mut self) -> Vec<DocumentRequest> {
         std::mem::take(&mut self.document_requests)
     }
@@ -1248,7 +1251,8 @@ impl ImageRegistry {
         wanted
     }
 
-    /// Applies one report from the host.
+    /// Applies one report from the host, answering the status it settled
+    /// the source at.
     ///
     /// `None` when nothing moved — a source reported twice, which one URL
     /// with one content makes a no-op.
@@ -1266,7 +1270,7 @@ impl ImageRegistry {
         &mut self,
         event: &ImageEvent,
         context: &mut Option<Box<TextContext>>,
-    ) -> Option<ImageApplied> {
+    ) -> Option<ImageStatus> {
         if is_synthetic_source(event.source()) && !self.entries.contains_key(&**event.source()) {
             return None;
         }
@@ -1274,7 +1278,7 @@ impl ImageRegistry {
         if !matches!(entry.state, ImageState::Pending) {
             return None;
         }
-        let state = match event {
+        entry.state = match event {
             // Well-formedness, not the texture bound: an image with a zero axis
             // has neither an intrinsic size nor an aspect ratio, so it would
             // stretch an unknown bitmap over the whole content box, and it is
@@ -1300,60 +1304,7 @@ impl ImageRegistry {
             }
             ImageEvent::Loaded { .. } | ImageEvent::Failed { .. } => ImageState::Failed,
         };
-        let loaded = match &state {
-            ImageState::Ready { width, height, .. } => Some((*width, *height)),
-            ImageState::Pending | ImageState::Failed => None,
-        };
-        entry.state = state;
-        Some(ImageApplied {
-            loaded,
-            nodes: entry.nodes.clone(),
-        })
-    }
-
-    /// How `source` has already settled, as the outcome `node` binding to it
-    /// now is owed.
-    ///
-    /// `None` while the source is still pending, where the report itself will
-    /// carry the outcome. A source that settled before this bind is reported
-    /// by nothing else ever again — one URL is reported once — so this is the
-    /// only place a second mount of a known URL can learn what it got.
-    pub(crate) fn outcome_for(&self, source: &str, node: NodeId) -> Option<ImageOutcome> {
-        match &self.entries.get(source)?.state {
-            ImageState::Pending => None,
-            ImageState::Ready { width, height, .. } => Some(ImageOutcome::Loaded {
-                node,
-                width: *width,
-                height: *height,
-            }),
-            ImageState::Failed => Some(ImageOutcome::Failed { node }),
-        }
-    }
-
-    /// The intrinsic dimensions of that same bitmap, for the natural size the
-    /// element carries between paints.
-    ///
-    /// It has to make [`ImageRegistry::resolve_presented`]'s choice and no
-    /// other: `object-fit` reads the natural size against the bitmap actually
-    /// drawn. Separate from it only because this one asks for nothing — it
-    /// runs where a source change or a report is being settled, not where a
-    /// frame is being built.
-    pub(crate) fn presented_dimensions(
-        &self,
-        source: Option<&str>,
-        placeholder: Option<&str>,
-    ) -> Option<(u32, u32)> {
-        source
-            .and_then(|source| self.dimensions_of(source))
-            .or_else(|| placeholder.and_then(|placeholder| self.dimensions_of(placeholder)))
-    }
-
-    /// The intrinsic dimensions already known for `source`, if it has loaded.
-    fn dimensions_of(&self, source: &str) -> Option<(u32, u32)> {
-        match &self.entries.get(source)?.state {
-            ImageState::Ready { width, height, .. } => Some((*width, *height)),
-            ImageState::Pending | ImageState::Failed => None,
-        }
+        Some(entry.state.status())
     }
 
     /// Whether the registry holds an entry for `source`.
@@ -1376,15 +1327,15 @@ impl ImageRegistry {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    /// Regression: a replaced element binds its source in the same call that
-    /// makes it replaced — before any walk can resolve it — so binding is the
-    /// first sighting. If binding creates the entry without asking, `resolve`
-    /// reads that entry as "already asked for" and the source is never
-    /// requested from the host: the image never loads, with no error.
+    /// Regression: an embedder asks for a source before any walk can
+    /// resolve it, so the request is the first sighting. If it creates the
+    /// entry without asking, `resolve` reads that entry as "already asked
+    /// for" and the source is never requested from the host: the image never
+    /// loads, with no error.
     #[test]
-    fn binding_a_node_asks_for_its_source() {
+    fn requesting_a_source_asks_the_host_for_it() {
         let mut registry = ImageRegistry::default();
-        registry.bind_node("app:///a.png", node(1), ImageRole::Source);
+        assert_eq!(registry.request("app:///a.png").1, ImageStatus::Pending);
 
         assert!(
             registry.resolve("app:///a.png").is_none(),
@@ -1393,28 +1344,31 @@ mod tests {
         assert_eq!(
             registry.take_wanted(),
             vec![Arc::<str>::from("app:///a.png")],
-            "binding asks the host for the source"
+            "the request asks the host for the source"
         );
         assert!(registry.take_wanted().is_empty(), "and asks exactly once");
     }
 
-    /// A walk that met the source first has already queued it; binding a node
-    /// to it must not queue it twice.
+    /// A walk that met the source first has already queued it; requesting
+    /// it, or presenting it, must not queue it twice, and the request shares
+    /// the walk's name for it.
     #[test]
-    fn binding_a_source_a_walk_already_met_asks_once() {
+    fn requesting_a_source_a_walk_already_met_asks_once() {
         let mut registry = ImageRegistry::default();
         assert!(registry.resolve("app:///a.png").is_none());
-        registry.bind_node("app:///a.png", node(1), ImageRole::Source);
+        let (name, _) = registry.request("app:///a.png");
+        let bound = registry.bind("app:///a.png");
 
+        assert!(Arc::ptr_eq(&name, &bound), "one name, one allocation");
         assert_eq!(registry.take_wanted().len(), 1, "one source, one request");
     }
 
-    /// Two elements presenting one source ask for it once between them.
+    /// Two requests of one source ask for it once between them.
     #[test]
-    fn two_nodes_on_one_source_ask_once() {
+    fn two_requests_of_one_source_ask_once() {
         let mut registry = ImageRegistry::default();
-        registry.bind_node("app:///a.png", node(1), ImageRole::Source);
-        registry.bind_node("app:///a.png", node(2), ImageRole::Source);
+        let _ = registry.request("app:///a.png");
+        let _ = registry.request("app:///a.png");
 
         assert_eq!(registry.take_wanted().len(), 1);
     }
@@ -1423,10 +1377,6 @@ mod tests {
     /// event with no text to shape is applied with.
     fn no_text() -> Option<Box<seldon::text::TextContext>> {
         None
-    }
-
-    fn node(bits: u64) -> crate::tree::document::NodeId {
-        crate::tree::document::NodeId::from_bits(bits).expect("a valid node id")
     }
 
     use super::{ImageInbox, ImageReports};
@@ -1480,8 +1430,8 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        ImageEvent, ImageOutcome, ImageRegistry, ImageRole, ImageSizeHint,
-        MAX_RENDERABLE_DIMENSION, NoImages, is_renderable,
+        ImageEvent, ImageRegistry, ImageSizeHint, ImageStatus, MAX_RENDERABLE_DIMENSION, NoImages,
+        is_renderable,
     };
     use crate::render::image::FrameImages;
     use crate::render::picture::PictureKey;
@@ -1668,169 +1618,90 @@ mod tests {
         assert!(registry.resolve("app:///a.png").is_none());
     }
 
+    /// Applying a report answers the status it settled the source at, which
+    /// is what an embedder learns a source's outcome from.
     #[test]
-    fn a_load_reports_the_nodes_whose_natural_size_must_change() {
+    fn a_report_answers_the_status_it_settled() {
         let mut registry = ImageRegistry::default();
-        let mut document = crate::tree::document::Document::new(
-            crate::tree::document::tests::device(),
-            "page",
-            (),
-        );
-        let root = document.create_element("view", ());
-        registry.bind_node("app:///a.png", root, ImageRole::Source);
-        let applied = registry
-            .apply(&loaded("app:///a.png", 12, 6), &mut no_text())
-            .expect("the load moved the entry");
-        assert_eq!(applied.loaded, Some((12, 6)));
+        let _ = registry.request("app:///a.png");
         assert_eq!(
-            applied.nodes.as_slice(),
-            [(root, ImageRole::Source)],
-            "the bound node relayouts"
-        );
-    }
-
-    /// One element may name one URL in both roles, so a binding is the pair
-    /// and not the node: unbinding one role must leave the other standing.
-    #[test]
-    fn one_url_in_both_roles_is_two_bindings() {
-        let mut registry = ImageRegistry::default();
-        let element = node(1);
-        registry.bind_node("app:///a.png", element, ImageRole::Source);
-        registry.bind_node("app:///a.png", element, ImageRole::Placeholder);
-        assert_eq!(registry.take_wanted().len(), 1, "one source, one request");
-
-        registry.unbind_node("app:///a.png", element, ImageRole::Source);
-        let applied = registry
-            .apply(&loaded("app:///a.png", 12, 6), &mut no_text())
-            .expect("the load moved the entry");
-        assert_eq!(
-            applied.nodes.as_slice(),
-            [(element, ImageRole::Placeholder)]
-        );
-    }
-
-    /// A failure names its nodes too — it is what an element owes an `error`
-    /// for — where it used to report none at all.
-    #[test]
-    fn a_failure_reports_its_nodes() {
-        let mut registry = ImageRegistry::default();
-        let element = node(1);
-        registry.bind_node("app:///a.png", element, ImageRole::Source);
-        let applied = registry
-            .apply(&failed("app:///a.png"), &mut no_text())
-            .expect("the failure moved the entry");
-        assert_eq!(applied.loaded, None);
-        assert_eq!(applied.nodes.as_slice(), [(element, ImageRole::Source)]);
-    }
-
-    /// A zero axis is a failure, and reports as one rather than as the load
-    /// the host wrote.
-    #[test]
-    fn a_zero_axis_load_reports_as_a_failure() {
-        let mut registry = ImageRegistry::default();
-        let element = node(1);
-        registry.bind_node("app:///bad.png", element, ImageRole::Source);
-        let applied = registry
-            .apply(&loaded("app:///bad.png", 0, 4), &mut no_text())
-            .expect("the report moved the entry");
-        assert_eq!(applied.loaded, None);
-        assert_eq!(applied.nodes.as_slice(), [(element, ImageRole::Source)]);
-    }
-
-    /// A source that settled before a node bound to it is never reported
-    /// again, so the bind is the only place its outcome can be learnt.
-    #[test]
-    fn a_settled_source_answers_a_later_bind() {
-        let mut registry = ImageRegistry::default();
-        let element = node(1);
-        registry.bind_node("app:///a.png", element, ImageRole::Source);
-        assert_eq!(
-            registry.outcome_for("app:///a.png", element),
-            None,
-            "a pending source owes nothing yet: the report will carry it"
-        );
-
-        registry.apply(&loaded("app:///a.png", 12, 6), &mut no_text());
-        registry.apply(&failed("app:///b.png"), &mut no_text());
-        assert_eq!(
-            registry.outcome_for("app:///a.png", node(2)),
-            Some(ImageOutcome::Loaded {
-                node: node(2),
+            registry.apply(&loaded("app:///a.png", 12, 6), &mut no_text()),
+            Some(ImageStatus::Bitmap {
                 width: 12,
                 height: 6
             })
         );
         assert_eq!(
-            registry.outcome_for("app:///b.png", node(2)),
-            Some(ImageOutcome::Failed { node: node(2) })
+            registry.apply(&failed("app:///b.png"), &mut no_text()),
+            Some(ImageStatus::Failed),
+            "a failure settles too, requested or not"
         );
+    }
+
+    /// A zero axis is a failure, and settles as one rather than as the load
+    /// the host wrote.
+    #[test]
+    fn a_zero_axis_load_settles_as_a_failure() {
+        let mut registry = ImageRegistry::default();
+        let _ = registry.request("app:///bad.png");
         assert_eq!(
-            registry.outcome_for("app:///never-seen.png", node(2)),
-            None,
+            registry.apply(&loaded("app:///bad.png", 0, 4), &mut no_text()),
+            Some(ImageStatus::Failed)
+        );
+        assert_eq!(registry.status("app:///bad.png"), ImageStatus::Failed);
+    }
+
+    /// A source that settled before a later request is never reported again,
+    /// so the request is where its status is learnt; a status read asks for
+    /// nothing.
+    #[test]
+    fn a_settled_source_answers_a_later_request() {
+        let mut registry = ImageRegistry::default();
+        let _ = registry.request("app:///a.png");
+        assert_eq!(registry.request("app:///a.png").1, ImageStatus::Pending);
+
+        registry.apply(&loaded("app:///a.png", 12, 6), &mut no_text());
+        registry.apply(&failed("app:///b.png"), &mut no_text());
+        assert_eq!(
+            registry.request("app:///a.png").1,
+            ImageStatus::Bitmap {
+                width: 12,
+                height: 6
+            }
+        );
+        assert_eq!(registry.request("app:///b.png").1, ImageStatus::Failed);
+        let _ = registry.take_wanted();
+        assert_eq!(
+            registry.status("app:///never-seen.png"),
+            ImageStatus::Pending,
             "a source nothing has asked for has settled on nothing"
         );
-    }
-
-    /// The whole src-over-placeholder rule, at the registry's level: the
-    /// element's own source once it has pixels, the placeholder until then.
-    #[test]
-    fn the_presented_dimensions_prefer_the_source_over_the_placeholder() {
-        let mut registry = ImageRegistry::default();
-        let (source, placeholder) = (Some("app:///a.png"), Some("app:///p.png"));
-        assert_eq!(registry.presented_dimensions(source, placeholder), None);
-
-        registry.apply(&loaded("app:///p.png", 4, 4), &mut no_text());
-        assert_eq!(
-            registry.presented_dimensions(source, placeholder),
-            Some((4, 4)),
-            "the placeholder is drawn while the source has nothing"
-        );
-        assert_eq!(
-            registry.presented_dimensions(None, placeholder),
-            Some((4, 4)),
-            "and on its own, for an element with no source at all"
-        );
-
-        registry.apply(&loaded("app:///a.png", 12, 6), &mut no_text());
-        assert_eq!(
-            registry.presented_dimensions(source, placeholder),
-            Some((12, 6)),
-            "a loaded source suppresses the placeholder"
+        assert!(
+            registry.take_wanted().is_empty(),
+            "and reading a status asks for nothing"
         );
     }
 
-    /// The paint walk's half of the same rule: it draws whichever source the
-    /// dimensions came from, and asking still asks — a source first met there
-    /// is requested exactly as a single-source `resolve` requests it.
     #[test]
-    fn the_paint_walk_resolves_the_presented_source_and_asks_for_it() {
-        let mut registry = ImageRegistry::default();
-        let (source, placeholder) = (Some("app:///a.png"), Some("app:///p.png"));
-        assert!(registry.resolve_presented(source, placeholder).is_none());
-        let mut wanted = registry.take_wanted();
-        wanted.sort();
+    fn a_status_names_the_natural_size_of_a_loaded_source_only() {
         assert_eq!(
-            wanted,
-            vec![
-                Arc::<str>::from("app:///a.png"),
-                Arc::<str>::from("app:///p.png")
-            ],
-            "a first sighting of either asks for it"
+            ImageStatus::Bitmap {
+                width: 4,
+                height: 2
+            }
+            .natural_size(),
+            Some((4, 2))
         );
-
-        registry.apply(&loaded("app:///p.png", 4, 4), &mut no_text());
-        let (drawn, dimensions, _) = registry
-            .resolve_presented(source, placeholder)
-            .expect("the placeholder draws while the source has nothing");
-        assert_eq!(drawn.as_ref(), "app:///p.png");
-        assert!((dimensions.0 - 4.0).abs() < f64::EPSILON);
-
-        registry.apply(&loaded("app:///a.png", 12, 6), &mut no_text());
-        let (drawn, _, _) = registry
-            .resolve_presented(source, placeholder)
-            .expect("the source took over");
-        assert_eq!(drawn.as_ref(), "app:///a.png");
-        assert!(registry.take_wanted().is_empty(), "each asked exactly once");
+        assert_eq!(
+            ImageStatus::Vector {
+                width: 8,
+                height: 4
+            }
+            .natural_size(),
+            Some((8, 4))
+        );
+        assert_eq!(ImageStatus::Pending.natural_size(), None);
+        assert_eq!(ImageStatus::Failed.natural_size(), None);
     }
 
     #[test]
@@ -1890,7 +1761,13 @@ mod vector_tests {
         let mut registry = ImageRegistry::default();
         let mut context = Some(Box::new(TextContext::without_system_fonts()));
         let applied = registry.apply(&drained[0], &mut context);
-        assert_eq!(applied.and_then(|applied| applied.loaded), Some((10, 10)));
+        assert_eq!(
+            applied,
+            Some(super::ImageStatus::Vector {
+                width: 10,
+                height: 10
+            })
+        );
         let (_, _, vector) = registry.resolve("app:///icon.svg").expect("loaded");
         let vector = vector.expect("a vector image");
         assert!(!vector.scene().is_empty());
@@ -1908,10 +1785,10 @@ mod vector_tests {
         assert!(matches!(event, ImageEvent::Failed { .. }));
         let mut registry = ImageRegistry::default();
         let mut context = Some(Box::new(TextContext::without_system_fonts()));
-        let applied = registry
-            .apply(&event, &mut context)
-            .expect("the failure moved the entry");
-        assert_eq!(applied.loaded, None);
+        assert_eq!(
+            registry.apply(&event, &mut context),
+            Some(super::ImageStatus::Failed)
+        );
         assert!(registry.resolve("app:///bad.svg").is_none());
     }
 
@@ -1937,23 +1814,19 @@ mod vector_tests {
 mod synthetic_tests {
     //! Documents handed over as markup: the synthetic source, its single
     //! parse, and its eviction with the last binder. The document-level
-    //! half (`Document::set_image_document`) is in `tests/svg_images.rs`.
+    //! half (`Document::insert_image_document`) is in `tests/svg_images.rs`.
 
     use std::sync::Arc;
 
     use seldon::text::TextContext;
 
     use super::{
-        DocumentKind, ImageEvent, ImageRegistry, ImageRole, SYNTHETIC_SOURCE_PREFIX,
+        DocumentKind, ImageEvent, ImageRegistry, ImageStatus, SYNTHETIC_SOURCE_PREFIX,
         is_synthetic_source, synthetic_source,
     };
 
     const ICON: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="4"/>"#;
     const OTHER: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" width="6" height="6"/>"#;
-
-    fn node(bits: u64) -> crate::tree::document::NodeId {
-        crate::tree::document::NodeId::from_bits(bits).expect("a valid node id")
-    }
 
     /// The source is the prefix and 32 lowercase hex digits, the same for
     /// the same bytes, and different for different ones.
@@ -1981,14 +1854,14 @@ mod synthetic_tests {
     }
 
     /// Two elements handing over identical markup share one entry and one
-    /// queued parse, and the parse's outcome reaches both.
+    /// queued parse, and the parse settles it for both.
     #[test]
     fn identical_markup_is_one_entry_and_one_parse() {
         let mut registry = ImageRegistry::default();
         let first = registry.insert_document(ICON, DocumentKind::Svg);
-        registry.bind_node(&first, node(1), ImageRole::Source);
+        registry.bind(&first);
         let second = registry.insert_document(ICON, DocumentKind::Svg);
-        registry.bind_node(&second, node(2), ImageRole::Source);
+        registry.bind(&second);
 
         assert!(Arc::ptr_eq(&first, &second), "one name, one allocation");
         let requests = registry.take_document_requests();
@@ -1999,25 +1872,23 @@ mod synthetic_tests {
         assert_eq!(kind, DocumentKind::Svg);
 
         let mut context = Some(Box::new(TextContext::without_system_fonts()));
-        let applied = registry
-            .apply(
+        assert_eq!(
+            registry.apply(
                 &ImageEvent::parse_document(source, &bytes, kind),
                 &mut context,
-            )
-            .expect("the parse settled the entry");
-        assert_eq!(applied.loaded, Some((8, 4)));
-        assert_eq!(
-            applied.nodes.as_slice(),
-            [(node(1), ImageRole::Source), (node(2), ImageRole::Source)],
-            "both elements are bound to the one entry"
+            ),
+            Some(ImageStatus::Vector {
+                width: 8,
+                height: 4
+            })
         );
 
         // A third element on the same markup binds a settled entry and
         // queues nothing.
         let third = registry.insert_document(ICON, DocumentKind::Svg);
-        registry.bind_node(&third, node(3), ImageRole::Source);
+        registry.bind(&third);
         assert!(registry.take_document_requests().is_empty());
-        assert!(registry.outcome_for(&third, node(3)).is_some());
+        assert!(registry.status(&third).natural_size().is_some());
     }
 
     /// The request list drains once, and markup filed after a drain is a
@@ -2026,12 +1897,12 @@ mod synthetic_tests {
     fn document_requests_drain_once() {
         let mut registry = ImageRegistry::default();
         let icon = registry.insert_document(ICON, DocumentKind::Svg);
-        registry.bind_node(&icon, node(1), ImageRole::Source);
+        registry.bind(&icon);
         assert_eq!(registry.take_document_requests().len(), 1);
         assert!(registry.take_document_requests().is_empty());
 
         let other = registry.insert_document(OTHER, DocumentKind::Svg);
-        registry.bind_node(&other, node(2), ImageRole::Source);
+        registry.bind(&other);
         let requests = registry.take_document_requests();
         assert_eq!(requests.len(), 1);
         assert!(Arc::ptr_eq(&requests[0].0, &other));
@@ -2043,7 +1914,7 @@ mod synthetic_tests {
     fn a_synthetic_source_is_never_asked_of_the_host() {
         let mut registry = ImageRegistry::default();
         let icon = registry.insert_document(ICON, DocumentKind::Svg);
-        registry.bind_node(&icon, node(1), ImageRole::Source);
+        registry.bind(&icon);
         assert!(registry.resolve(&icon).is_none(), "pending");
         assert!(
             registry
@@ -2059,7 +1930,8 @@ mod synthetic_tests {
     fn a_synthetic_source_named_by_a_page_files_nothing() {
         let mut registry = ImageRegistry::default();
         let named = synthetic_source(ICON, DocumentKind::Svg);
-        registry.bind_node(&named, node(1), ImageRole::Source);
+        assert_eq!(registry.request(&named).1, ImageStatus::Pending);
+        registry.bind(&named);
         assert!(!registry.knows(&named));
         assert!(registry.take_wanted().is_empty());
 
@@ -2068,27 +1940,27 @@ mod synthetic_tests {
         assert_eq!(registry.take_document_requests().len(), 1, "still parsed");
     }
 
-    /// The last binder letting go forgets the entry, in either role, and
-    /// takes the still-unparsed bytes with it; a host source survives
-    /// losing every binder.
+    /// The last binder letting go forgets the entry and takes the
+    /// still-unparsed bytes with it; a host source survives losing every
+    /// binder.
     #[test]
     fn the_last_unbind_forgets_a_synthetic_source() {
         let mut registry = ImageRegistry::default();
         let icon = registry.insert_document(ICON, DocumentKind::Svg);
-        registry.bind_node(&icon, node(1), ImageRole::Source);
-        registry.bind_node(&icon, node(2), ImageRole::Placeholder);
+        registry.bind(&icon);
+        registry.bind(&icon);
 
-        registry.unbind_node(&icon, node(1), ImageRole::Source);
+        registry.unbind(&icon);
         assert!(registry.knows(&icon), "one binder is left");
-        registry.unbind_node(&icon, node(2), ImageRole::Placeholder);
+        registry.unbind(&icon);
         assert!(!registry.knows(&icon), "forgotten with the last binder");
         assert!(
             registry.take_document_requests().is_empty(),
             "and its bytes are never parsed"
         );
 
-        registry.bind_node("app:///a.svg", node(3), ImageRole::Source);
-        registry.unbind_node("app:///a.svg", node(3), ImageRole::Source);
+        registry.bind("app:///a.svg");
+        registry.unbind("app:///a.svg");
         assert!(registry.knows("app:///a.svg"), "a host source never goes");
     }
 
@@ -2101,12 +1973,12 @@ mod synthetic_tests {
     fn a_parse_for_a_forgotten_source_moves_nothing() {
         let mut registry = ImageRegistry::default();
         let icon = registry.insert_document(ICON, DocumentKind::Svg);
-        registry.bind_node(&icon, node(1), ImageRole::Source);
+        registry.bind(&icon);
         let (source, bytes, kind) = registry
             .take_document_requests()
             .pop()
             .expect("one document");
-        registry.unbind_node(&icon, node(1), ImageRole::Source);
+        registry.unbind(&icon);
 
         let mut context = Some(Box::new(TextContext::without_system_fonts()));
         let event = ImageEvent::parse_document(source, &bytes, kind);
@@ -2114,12 +1986,12 @@ mod synthetic_tests {
         assert!(!registry.knows(&icon));
 
         let again = registry.insert_document(ICON, DocumentKind::Svg);
-        registry.bind_node(&again, node(2), ImageRole::Source);
+        registry.bind(&again);
         assert_eq!(registry.take_document_requests().len(), 1);
-        let applied = registry
-            .apply(&event, &mut context)
-            .expect("the new entry is pending");
-        assert_eq!(applied.nodes.as_slice(), [(node(2), ImageRole::Source)]);
+        assert!(
+            registry.apply(&event, &mut context).is_some(),
+            "the new entry is pending"
+        );
         assert!(
             registry.apply(&event, &mut context).is_none(),
             "a second report for the settled source moves nothing"

@@ -204,7 +204,7 @@ Recorded limits: only an image's first frame is decoded (no animated playback),
 no `region-to-decode`, no `blur-radius` post-processing, and none of the
 `<image>` element surface past `src` — the pipeline serves whatever source
 string the paint walk names, today `url(…)` layers and the source an
-`<image>`'s `src` installs through `Document::set_image_source`. The macOS
+`<image>` presents through `Document::set_picture`. The macOS
 decoder is type-checked against the Apple target but exercised only where
 ImageIO exists; the Linux decoder and libcurl transport are tested for real
 against the system libraries, and the browser path is linted for wasm32 and

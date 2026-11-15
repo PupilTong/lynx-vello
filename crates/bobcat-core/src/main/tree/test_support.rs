@@ -9,8 +9,8 @@ use terminus::link::stylo::servo_arc::Arc;
 use terminus::link::stylo::values::computed::{Display, Overflow};
 
 use super::{
-    Autoplays, ComponentDetail, ComponentEvent, ComponentEvents, Field, LynxDocument, PageConfig,
-    Viewport, new_document,
+    Autoplays, ComponentDetail, ComponentEvent, ComponentEvents, Field, ImageSources, LynxDocument,
+    PageConfig, Viewport, new_document,
 };
 
 /// A document on a phone-shaped viewport with the default page config.
@@ -27,15 +27,28 @@ pub(in crate::main) fn with_config(config: PageConfig) -> LynxDocument {
 pub(in crate::main) fn with_component_events(
     config: PageConfig,
 ) -> (LynxDocument, ComponentEvents) {
+    let (document, events, _) = with_image_sources(config);
+    (document, events)
+}
+
+/// The same document, plus the queue its components leave events in and the
+/// record of the sources its `image` and `svg` elements name — both of which
+/// the runtime holds the other end of.
+pub(in crate::main) fn with_image_sources(
+    config: PageConfig,
+) -> (LynxDocument, ComponentEvents, ImageSources) {
     let events = ComponentEvents::default();
+    let sources = ImageSources::default();
     (
         new_document(
             Viewport::new(393.0, 727.0),
             config,
             events.clone(),
             Autoplays::default(),
+            sources.clone(),
         ),
         events,
+        sources,
     )
 }
 
@@ -49,6 +62,7 @@ pub(in crate::main) fn with_autoplays() -> (LynxDocument, Autoplays) {
             PageConfig::default(),
             ComponentEvents::default(),
             autoplays.clone(),
+            ImageSources::default(),
         ),
         autoplays,
     )

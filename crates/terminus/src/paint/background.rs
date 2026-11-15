@@ -304,9 +304,8 @@ fn open_text_clip_ops(
 /// as an image draw, or `vector`, when the source is an SVG document, as a
 /// vector draw.
 ///
-/// Which of a replaced element's two sources that is, is the registry's
-/// choice — see `ImageRegistry::resolve_presented` — and `natural` is the
-/// dimensions of that same image.
+/// The picture is the one the element presents (`Document::set_picture`),
+/// and `natural` is the natural size it was presented with.
 pub(crate) fn paint_replaced_content(
     sink: &mut WalkSink<'_>,
     space: Option<u32>,
