@@ -753,10 +753,6 @@ fn a_painter_draws_two_frames_of_one_file_with_no_commit_between() {
     assert!(painter.adopt(Some(document.commit()), Some(&view)));
     goldens.assert_matches(&["animated", "first-frame"], &capture(&mut painter));
     let commit = painter.frame().map(|frame| frame.commit_id());
-    assert!(
-        painter.next_picture_change().is_some(),
-        "an animated picture names its next change"
-    );
     rig.settle_held(SRC, &[1, 2]);
 
     // Turns before the frame is due change nothing, and wait for nothing.

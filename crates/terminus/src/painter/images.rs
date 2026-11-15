@@ -179,18 +179,6 @@ impl PainterImages {
         self.revision
     }
 
-    /// The earliest instant a picture the frame draws said it will next
-    /// change by itself.
-    pub(super) fn next_change(&self) -> Option<ClockInstant> {
-        if !self.watching {
-            return None;
-        }
-        self.sources
-            .iter()
-            .filter_map(|source| source.next_change)
-            .min()
-    }
-
     /// Takes leases on `gpu`'s uploads, the output's stack: leases on
     /// another device's, or with `None` any, end. A table that had drawn
     /// from the old uploads is stale.
@@ -1353,8 +1341,7 @@ mod tests {
 
     /// Frame demand: each new frame owes exactly one frame, turns between
     /// changes owe none and render nothing, and a live picture never counts
-    /// as animating. The next change a picture names is the painter's to
-    /// report, for a host's timer, until a frame without one arrives.
+    /// as animating, one that names its next change included.
     #[test]
     fn frame_demand_fires_once_per_change_and_not_continuously() {
         let gpu = SharedGpu::private(SharedRaster::new);
@@ -1368,7 +1355,6 @@ mod tests {
         assert!(painter.adopt(Some(document.commit()), Some(&store)));
         assert!(painter.take_redraw());
         assert!(painter.draw_offscreen(0.0, false).expect("render"));
-        assert_eq!(painter.next_picture_change(), Some(next));
 
         for _ in 0..3 {
             let current = painter.frame().cloned();
@@ -1392,7 +1378,6 @@ mod tests {
             assert!(painter.adopt(current, Some(&store)));
             assert!(!painter.take_redraw(), "and only one");
         }
-        assert_eq!(painter.next_picture_change(), None);
         assert_eq!(store.generations_taken(picture), [1, 2, 3]);
     }
 

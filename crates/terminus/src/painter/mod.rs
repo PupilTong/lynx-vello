@@ -1930,23 +1930,6 @@ impl Painter {
         true
     }
 
-    /// The earliest instant a picture the adopted frame draws said it will
-    /// next change by itself ([`FrameImage::next_change`]), as of the last
-    /// adoption; `None` when none did.
-    ///
-    /// A live picture does not keep the display link running between its
-    /// changes: [`Self::is_animating`] and [`Self::owes_frame`] do not count
-    /// it. A host arms a timer of its own at this instant and takes a turn
-    /// then — an adoption, which describes the picture again and owes one
-    /// frame if its generation moved. A producer that publishes a frame
-    /// wakes the host itself, and needs no timer.
-    ///
-    /// [`FrameImage::next_change`]: crate::render::image::FrameImage::next_change
-    #[must_use]
-    pub fn next_picture_change(&self) -> Option<ClockInstant> {
-        self.images.next_change()
-    }
-
     /// Whether the adopted frame lacks a picture that is on its way: a
     /// source it draws has neither pixels in the store nor an upload in the
     /// rasterizer and the store has not answered it yet, or a render lost

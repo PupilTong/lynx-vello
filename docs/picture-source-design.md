@@ -161,14 +161,14 @@ scroll frame.
 5. Frame demand: a taken frame, or a wanted picture arriving, owes one frame
    (`Painter::take_redraw`); a producer's wake is what gets the host to adopt.
    A live picture does not count as animating, so it does not keep the
-   display link running. A known next-change instant is reported as
-   `Painter::next_picture_change`; the painter has no timer of its own (the
-   engine's timers run on the main thread, for realm timers and `x-swiper`
-   autoplay). A store that answers a next change wakes its host at it
+   display link running. A picture that names its next-change instant
+   (`FrameImage::next_change`) is described again at every adoption; the
+   painter has no timer of its own (the engine's timers run on the main
+   thread, for realm timers and `x-swiper` autoplay) and reports the instant
+   to no one. A store that answers a next change wakes its host at it
    itself: `bobcat-resources` arms a timer on its own executor for an
    animated image's next frame and wakes the host the way a finished load
-   does ([Animated images](#animated-images)), so no host arms one on
-   `next_picture_change`.
+   does ([Animated images](#animated-images)).
 
 ### Consequences accepted
 
@@ -378,9 +378,9 @@ One change per step, in order; each leaves the tree green.
    draws, so step 1's clearing of the target and the bakes is gone; a render
    that lost pixels it was lent still forgets the bakes, because a bake that
    failed to draw a bitmap can name the very bitmap it failed to draw. A
-   change owes one frame; a known next change is reported
-   (`Painter::next_picture_change`) for a host's timer, which no host arms
-   yet. The drawn set is the commit's. `bobcat-resources` and
+   change owes one frame; a picture that names its next change is described
+   again at every adoption, and its store wakes the host at that instant.
+   The drawn set is the commit's. `bobcat-resources` and
    `prime-radiant`'s `TestImages` answer URL pictures only, at generation
    zero. A test producer and goldens (`crates/terminus/tests/screenshots/live-picture/`):
    a picture that changes with no commit is recomposed; under `filter` it is
