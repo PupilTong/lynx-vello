@@ -206,11 +206,40 @@ pub trait ImageDecoder: Threaded {
         -> impl Future<Output = Result<Bitmap, DecodeError>>;
     /// Reported once at startup rather than once per image.
     fn available(&self) -> Result<(), DecodeError>;
+
+    /// An animated image's frames: their stated delays and the stated loop
+    /// count. Asked only of a container that may animate (GIF, PNG, WebP).
+    /// Default: `ImageFrames::still()`, one frame.
+    fn frames_blocking(&self, bytes: &[u8], format: ImageFormat,
+                       header: Option<ImageHeader>)
+        -> Result<ImageFrames, DecodeError>;
+    fn frames(&self, bytes: Bytes, format: ImageFormat,
+              header: Option<ImageHeader>)
+        -> impl Future<Output = Result<ImageFrames, DecodeError>>;
+    /// Frame `index` as the whole canvas at that frame. One animation's
+    /// frames are asked of one `Bytes` allocation, in playing order, so a
+    /// decoder may keep what it opened for them, keyed on that allocation.
+    /// Default: frame 0 through `decode_blocking`, any other refused.
+    fn decode_frame_blocking(&self, bytes: &Bytes, format: ImageFormat,
+                             header: Option<ImageHeader>, index: usize,
+                             max: (u32, u32))
+        -> Result<Bitmap, DecodeError>;
+    /// No more frames of `bytes` until the next `decode_frame_blocking` of
+    /// them. Default: nothing kept, nothing let go.
+    fn forget_frames(&self, bytes: &Bytes);
+    fn decode_frame(&self, bytes: Bytes, format: ImageFormat,
+                    header: Option<ImageHeader>, index: usize, max: (u32, u32))
+        -> impl Future<Output = Result<Bitmap, DecodeError>>;
 }
 ```
 
 `Bitmap`, `DecodeError`, `ImageFormat`, `ImageHeader` and `ImageSizeHint` all
-live in `vant`.
+live in `vant`, and so do `ImageFrames` and the playback policy built on it
+(`vant::image::animation`, [Animated images](#animated-images)). The
+animation methods have defaults that answer one frame, so a decoder that
+knows nothing of animation draws an animated file as its first frame. The
+native decoder overrides them on macOS (`ImageIO`); gdk-pixbuf on Linux and
+the browser's main-thread `Image` answer one frame explicitly.
 
 ### `Platform` — the bundle an embedder hands over
 
@@ -553,6 +582,61 @@ loaded image's pixels are not always available when a frame is composed.
   thread's `Image`; the mailbox's blocking half — `Atomics.wait` on the
   Render Worker, `Atomics.notify` on the main thread — is gone, and
   `BrowserDecoder::decode_blocking` answers `DecodeError::Unavailable`.
+
+## Animated images
+
+Delivery step 4 of `docs/picture-source-design.md`. An animated GIF, APNG or
+WebP drawn as a URL picture (a CSS image, and an `<image>` element, which
+presents a URL picture) plays automatically, for the loop count the file
+states, on one playhead per URL shared by every draw of it in every view of
+a resource scope.
+
+- **Policy, in `vant::image::animation`, with no platform and no clock**:
+  `ImageFrames` (stated delays, `Loops::Infinite` or `Loops::Plays(n)`, total
+  plays), `Timeline` (a stated delay of 10 ms or less plays as 100 ms),
+  `PlayPolicy` (the loop count and whether it starts paused;
+  `PlayPolicy::stated` is the CSS one) and `Playhead` (frame, loops
+  completed, paused, drawn, finished, and a step count that is the picture's
+  generation). Time is a `Duration` since an origin the caller picks. A
+  playhead advances only while drawn, at most one frame per call and only
+  onto a frame its caller says is ready, so no frame is skipped and N loops
+  complete exactly N times; after the last loop of a finite count the last
+  frame stays.
+- **The store, in `bobcat-resources`** (`animation.rs`): a load of a container
+  that may animate asks `frames_blocking` in the decode's closure, under the
+  decode's permit; an image with more than one frame keeps its encoded bytes
+  (counted in `encoded_bytes`) and gets a playhead. Frame 0 is the residency's
+  bitmap as for a still image. Every other frame is decoded by index at frame
+  0's decoded size, one decode in flight per source, under a decode permit.
+  `ImageIO` keeps each playing animation's source open between frames (up to
+  sixteen, closed by `forget_frames` when the animation stops being drawn):
+  it composites a GIF frame from the frames before it, so frame 299 of a
+  300-frame GIF costs about 180 ms from a fresh source and under 1 ms from
+  one that decoded frame 298 (measured on macOS 26).
+  `describe` advances the playhead to the present and answers the frame it
+  is on, its generation and the instant its next frame is due; a describe
+  is a draw, and `retain` stops a playhead no view's drawn set includes.
+- **Memory**: while drawn, a source holds the frame shown and the two after
+  it; a frame passed is dropped at once and the frame shown once the
+  rasterizer holds its upload (`release`); an animation of at most three
+  frames keeps all of them while drawn. A source not drawn holds no frame
+  beyond frame 0 in the residency. Held frames count in
+  `memory_used_bytes` and, like the pinned bitmaps of a drawn frame, not
+  against the bitmap budget. On the GPU a frame is a bitmap like any other,
+  keyed by its descriptor; a painter leases the upload of the frame it draws
+  and ends the previous frame's lease when the frame changes, so earlier
+  frames are released under the rasterizer's budget.
+- **Frame demand**: while a playhead runs, the store arms a timer on its own
+  executor (tokio's timer natively, `setTimeout` on the Render Worker in the
+  browser) for the instant the next frame is due; it completes into the
+  completion channel and wakes the host as a finished load does, and the
+  adoption that follows describes the source again. Nothing in `terminus` or
+  `bobcat-core` keeps a timer for it, and a live picture does not keep the
+  display link running. A frame due before it is decoded is waited for, and
+  its decode's completion wakes the host.
+- **Captures**: a frame between two frames of an animation wants nothing, so
+  `Painter::awaits_pictures` does not wait on it; a capture is of the frame
+  the playheads are on when the host takes it.
 
 ## Platform constraints the design answers
 

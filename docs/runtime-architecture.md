@@ -1999,10 +1999,10 @@ picture an element owns (`PictureKey::Id`, put on the element with
 `PictureSlot` and wakes the host, and the painter, which describes such a
 picture at every adoption, takes the newest frame when its generation moved,
 writes it into the picture's one texture in place and owes one frame. A
-picture that names the instant it next changes reports it through
-`Painter::next_picture_change` for a host's timer, rather than keeping the
-display link running; no host arms that timer yet, and no store in the
-workspace has such a picture. The drawn set the store is told
+picture that names the instant it next changes
+(`FrameImage::next_change`) is described again at every adoption and does not
+keep the display link running; the painter arms no timer, and the store that
+named the instant wakes its host at it. The drawn set the store is told
 (`FrameImages::retain`) is the adopted commit's pictures, which the walk
 culled to the encode window, so a producer whose picture is not in it may
 stop. A capture is refused while a drawn picture is

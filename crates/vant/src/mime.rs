@@ -64,6 +64,15 @@ impl ImageFormat {
         }
     }
 
+    /// Whether a file of this container can hold more than one frame: GIF,
+    /// APNG (which is a PNG) and animated WebP. Only these are asked how
+    /// many frames they have ([`crate::ImageDecoder::frames_blocking`]); a
+    /// still PNG answers one.
+    #[must_use]
+    pub const fn may_animate(self) -> bool {
+        matches!(self, Self::Gif | Self::Png | Self::WebP)
+    }
+
     fn from_subtype(subtype: &str) -> Self {
         match subtype {
             "png" | "apng" => Self::Png,

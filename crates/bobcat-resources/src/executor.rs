@@ -10,7 +10,10 @@
 //! runs as local futures on the Render Worker's event loop.
 //!
 //! Images wake the host to service reports; sources complete directly into
-//! main's FIFO, whose lifecycle notifications subsequently wake the host.
+//! main's FIFO, whose lifecycle notifications subsequently wake the host. An
+//! animated image's timer wakes the host the same way when its next frame is
+//! due: natively a task sleeping on this runtime's timer, in the browser a
+//! local task awaiting the Render Worker's `setTimeout` (`sleep`).
 
 use std::sync::Arc;
 
@@ -28,12 +31,14 @@ pub type Wakeup = Arc<dyn Fn() + Send + Sync>;
 ///
 /// # What runs where
 ///
-/// The painter's thread submits the four jobs this executor starts — a
-/// source load, an image load (which parses an SVG document where it would
-/// decode a bitmap), an image refinement, and the parse of a document a page
-/// handed over — and submitting one of those only enqueues a task
-/// ([`Self::spawn`]). Each job is one async task, so the driver thread runs
-/// the job's awaits and sends its completion, while every blocking step —
+/// The painter's thread submits the jobs this executor starts — a source
+/// load, an image load (which parses an SVG document where it would decode a
+/// bitmap), an image refinement, the parse of a document a page handed over,
+/// the decode of an animated image's frame, and an animated image's timer —
+/// and submitting one of those only enqueues a task ([`Self::spawn`]). A
+/// frame decode takes a decode permit as a refinement does; a timer only
+/// sleeps on the runtime's timer and completes. Each job is one async task, so the driver thread
+/// runs the job's awaits and sends its completion, while every blocking step —
 /// the transport, preprocessing, the platform decoder and the engine's SVG
 /// parser — runs on the runtime's blocking pool. That pool is capped at
 /// `worker_threads` threads and its threads are created lazily, by the
@@ -140,6 +145,8 @@ impl Executor {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .thread_name("bobcat-resources")
             .max_blocking_threads(threads)
+            // The animated sources' timers.
+            .enable_time()
             .build()
             .expect("the bobcat-resources runtime must initialize");
         let handle = runtime.handle().clone();
@@ -227,4 +234,27 @@ impl Drop for Executor {
             let _ = driver.join();
         }
     }
+}
+
+/// Resolves `duration` from now, on the Render Worker's own `setTimeout`:
+/// the browser's executor has no timer of tokio's, whose clock panics on
+/// wasm32.
+#[cfg(target_arch = "wasm32")]
+pub(crate) async fn sleep(duration: std::time::Duration) {
+    use js_sys::wasm_bindgen::{JsCast, JsValue};
+
+    let millis = i32::try_from(duration.as_millis().saturating_add(1)).unwrap_or(i32::MAX);
+    let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+        let global = js_sys::global();
+        let set_timeout = js_sys::Reflect::get(&global, &JsValue::from_str("setTimeout"))
+            .ok()
+            .and_then(|value| value.dyn_into::<js_sys::Function>().ok());
+        // A global with no `setTimeout` never resolves: the playhead then
+        // moves at the host's next turn for any other reason, rather than
+        // waking it in a loop.
+        if let Some(set_timeout) = set_timeout {
+            let _ = set_timeout.call2(&global, &resolve, &JsValue::from(millis));
+        }
+    });
+    let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
 }

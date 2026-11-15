@@ -222,9 +222,9 @@ Subsystems:
   image draws resolve to, and a `filter`/`backdrop-filter` bake keys on the
   bitmaps its own range draws (`FilterGroup::pictures`), so a picture's new
   frame or a restore recomposes with no commit and re-bakes only the bakes
-  that draw it; each owes one frame, and a picture's known next change is
-  reported (`Painter::next_picture_change`) rather than counted as animating. It composes each
-  committed frame at its own offsets and posts them back
+  that draw it; each owes one frame, and a picture that names its next
+  change is not counted as animating (its store wakes the host then). It
+  composes each committed frame at its own offsets and posts them back
   (`Painter::drain_changed`); `bobcat-core`'s `Painter` facade is its link to
   one view.
 
