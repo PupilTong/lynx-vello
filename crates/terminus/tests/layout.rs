@@ -2274,6 +2274,43 @@ fn incremental_relayout_reanchors_a_hoisted_node_inside_a_boundary() {
     );
 }
 
+/// css-grid-2 §10.1: a box whose containing block a grid generates is laid
+/// out in the grid area its own placement properties name, also when it is
+/// a descendant hoisted past a grid item rather than a child (WPT
+/// `css/css-grid/abspos/positioned-grid-descendant-containing-block-014.html`,
+/// `css/css-grid/grid-definition/grid-auto-fit-collapsed-out-of-flow-001.html`).
+#[test]
+fn a_box_hoisted_to_a_grid_is_laid_out_in_the_area_it_names() {
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 600px; align-items: flex-start; }
+         .grid { display: grid; position: relative; width: 200px; height: 200px;
+                 padding: 5px; border: 2px solid;
+                 grid-template-columns: 100px 100px; grid-template-rows: 100px 100px; }
+         .item { display: flex; grid-column: 2; grid-row: 1; }
+         .span { position: absolute; grid-column: 1 / 3; grid-row: 2; inset: 0; }
+         .auto { position: absolute; inset: 0; }
+         .half { position: absolute; grid-column: 1 / 3; top: 0; width: 50%; height: 100%; }",
+    );
+    let root = h.doc.root;
+    let grid = h.doc.el(root, ".grid");
+    let item = h.doc.el(grid, ".item");
+    let span = h.doc.el(item, ".span");
+    let auto = h.doc.el(item, ".auto");
+    let half = h.doc.el(item, ".half");
+    h.layout();
+
+    // Locations are in the item's coordinates; the item sits at (107, 7)
+    // in the grid's border box, the grid's padding box at (2, 2).
+    assert_eq!(h.rect(item), (107.0, 7.0, 100.0, 100.0));
+    // `grid-row: 2` ends at the `auto` line, the padding edge.
+    assert_eq!(h.rect(span), (-100.0, 100.0, 200.0, 105.0));
+    // No placement: the padding box, as before.
+    assert_eq!(h.rect(auto), (-105.0, -5.0, 210.0, 210.0));
+    // Percentages resolve against the area: half of columns 1–2, and every
+    // row with `auto` row lines (the padding box's height).
+    assert_eq!(h.rect(half), (0.0, -5.0, 100.0, 210.0));
+}
+
 #[test]
 fn contents_children_compete_in_the_container_order_sort() {
     let mut h = Harness::new(

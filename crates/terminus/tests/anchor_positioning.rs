@@ -1394,7 +1394,7 @@ fn an_escaping_box_follows_an_in_place_relayout() {
 /// zero minimum sizes keep a flex item's automatic minimum, which reads
 /// content, out of its input) — falls back to the whole-tree pass rather than
 /// letting the rounding tail place the box against the padding box
-/// (`hoisted::escapes_to_scrollable_block`).
+/// (`hoisted::escapes_past_late_placement`).
 #[test]
 fn an_anchored_box_escaping_an_in_place_relayout_keeps_its_scrollable_containing_block() {
     const CSS: &str = ".scroller { overflow: hidden; width: 100px; height: 100px; }

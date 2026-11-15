@@ -1588,8 +1588,10 @@ dispatches to it.
 5. **Item layout & finalize** — final child layout at known area sizes,
    baseline sharing along rows (a `baseline` item in the row its area starts
    in, flush with the row's start; a `last baseline` item in the row its
-   area ends in, flush with the row's end), direct abs-pos children against
-   a resolved grid area, `LayoutSlot::unrounded` writes, container size,
+   area ends in, flush with the row's end), abs-pos boxes against the grid
+   area their placement names (css-grid-2 §10.1: a child, whose static
+   position is also aligned in that area per css-position-3 §3.5.3, and a
+   descendant hoisted to the grid), `LayoutSlot::unrounded` writes, container size,
    `content_size`, and the container's first and last baselines (css-grid-1
    §10.6). Baselines are horizontal, so `justify-self` baseline values share
    nothing and take their fallbacks.

@@ -737,3 +737,55 @@ fn a_content_change_inside_a_fixed_grid_lanes_item_relayouts_in_place() {
     assert_eq!(rects(&mutated, &items), rects(&fresh, &fresh_items));
     assert_eq!(geometry(&mutated), geometry(&fresh));
 }
+
+/// A box hoisted out of a grid item to the grid above it is laid out in the
+/// grid area it names (css-grid-2 §10.1; WPT
+/// `css/css-grid/abspos/positioned-grid-descendant-containing-block-014.html`).
+/// The rounding tail's late placement after an in-place relayout inside the
+/// item knows only the grid's padding box, so the relayout runs the grid's
+/// pass instead and ends where a fresh layout does.
+#[test]
+fn a_content_change_in_a_grid_item_keeps_a_hoisted_box_in_its_grid_area() {
+    fn build_grid(text: &str) -> (Document<()>, terminus::link::NodeId, terminus::link::NodeId) {
+        let mut doc = doc();
+        let root = doc.document_element().id();
+        let grid = doc.create_element("view", ());
+        doc.set_inline_style(
+            grid,
+            "display: grid; position: relative; width: 200px; height: 200px;
+             grid-template-columns: 100px 100px; grid-template-rows: 100px 100px",
+        );
+        doc.append_child(root, grid);
+        // The text change relays the wrapper in place, under the input the
+        // item gave it; the hoisted box inside escapes past both to the grid.
+        let item = doc.create_element("view", ());
+        doc.set_inline_style(item, "display: flex");
+        let wrapper = doc.create_element("view", ());
+        doc.set_inline_style(wrapper, "display: flex");
+        let label = doc.create_element("text", ());
+        let run = doc.create_text_node(text, ());
+        doc.append_child(label, run);
+        doc.append_child(wrapper, label);
+        doc.append_child(item, wrapper);
+        let hoisted = doc.create_element("view", ());
+        doc.set_inline_style(
+            hoisted,
+            "position: absolute; grid-column: 2; grid-row: 2 / 3; inset: 0",
+        );
+        doc.append_child(wrapper, hoisted);
+        doc.append_child(grid, item);
+        (doc, run, hoisted)
+    }
+
+    let (mut mutated, run, hoisted) = build_grid("alpha");
+    mutated.layout();
+    // In the wrapper's coordinates; the wrapper sits at the grid's origin.
+    assert_eq!(rect(&mutated, hoisted), (100.0, 100.0, 100.0, 100.0));
+    mutated.set_text_node_data(run, "bravo bravo");
+    mutated.layout();
+    assert_eq!(rect(&mutated, hoisted), (100.0, 100.0, 100.0, 100.0));
+
+    let (mut fresh, _, _) = build_grid("bravo bravo");
+    fresh.layout();
+    assert_eq!(geometry(&mutated), geometry(&fresh));
+}

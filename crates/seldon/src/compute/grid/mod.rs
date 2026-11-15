@@ -1162,12 +1162,23 @@ fn item_area_geometry<N>(
         known.height = inner.height;
     }
     known = apply_aspect_ratio(known, item.aspect_ratio);
+    // A border box is never smaller than its padding and border: a column
+    // narrower than an item's inline padding stretches it to the padding,
+    // not to the column (css-box-4 §3, css-sizing-3 §5.1's stretch-fit
+    // "floored at zero" content box; WPT
+    // `css/css-grid/grid-items/grid-item-border-padding-005.html`).
+    let floor = box_inset_size(item.padding, item.border);
     known.width = known
         .width
-        .map(|value| clamp(value, item.min_size.width, item.max_size.width));
-    known.height = known
-        .height
-        .map(|value| clamp(value, item.min_size.height, item.max_size.height));
+        .map(|value| clamp_axis(value, item.min_size.width, item.max_size.width, floor.width));
+    known.height = known.height.map(|value| {
+        clamp_axis(
+            value,
+            item.min_size.height,
+            item.max_size.height,
+            floor.height,
+        )
+    });
 
     let axis_available = |axis: Axis| match item.intrinsic.preferred(axis) {
         IntrinsicTag::MinContent => AvailableSpace::MinContent,
@@ -1519,6 +1530,15 @@ fn absolute_axis_lines(
     (start, end)
 }
 
+/// One axis of the grid area `placement` names, as its start and size in
+/// padding-box coordinates. css-grid-2 §10.1: an `auto` line is "the
+/// corresponding padding edge of the grid container (the padding edge of
+/// the scrollable area, if the grid container overflows)". Only a scroll
+/// container has a scrollable area to speak of, so the end `auto` line of a
+/// grid that is none stays at its padding edge however far the tracks
+/// overflow it (WPT
+/// `css/css-grid/abspos/grid-positioned-items-within-grid-implicit-track-001.html`).
+#[allow(clippy::too_many_arguments)]
 fn absolute_axis_area(
     tracks: &TrackSet,
     placement: Line<GridPlacement>,
@@ -1527,14 +1547,19 @@ fn absolute_axis_area(
     padding_box_size: f32,
     content_start_inset: f32,
     reverse: bool,
+    scroll_container: bool,
 ) -> (f32, f32) {
     let (start, end) = absolute_axis_lines(placement, explicit_tracks);
     let range_start = tracks.first_coordinate;
     let range_end = tracks.first_coordinate
         + i32::try_from(tracks.tracks.len()).expect("grid tracks are clamped");
     let content_end_inset = (padding_box_size - content_start_inset - content_size).max(0.0);
-    let scrollable_padding_end = padding_box_size
-        .max(content_start_inset + tracks.end_line_position(range_end) + content_end_inset);
+    let scrollable_padding_end = if scroll_container {
+        padding_box_size
+            .max(content_start_inset + tracks.end_line_position(range_end) + content_end_inset)
+    } else {
+        padding_box_size
+    };
     let logical_start = start
         .filter(|line| (range_start..=range_end).contains(line))
         .map_or(0.0, |line| content_start_inset + tracks.line_position(line));
@@ -1608,44 +1633,34 @@ where
         used_size.width + item.margin.horizontal_sum(),
         used_size.height + item.margin.vertical_sum(),
     );
-    let auto_margin_offset = |axis: Axis| {
-        let available = axis.size(containing_size) - axis.size(used_size);
-        let start_auto = item.margin_auto.start(axis);
-        let end_auto = item.margin_auto.end(axis);
-        let fixed_start = axis.start(item.margin);
-        let fixed_end = axis.end(item.margin);
-        let count = usize::from(start_auto) + usize::from(end_auto);
-        (count > 0).then(|| {
-            let share = ((available - fixed_start - fixed_end).max(0.0)) / count as f32;
-            if start_auto { share } else { 0.0 }
-        })
-    };
+    // css-position-3 §3.5.3: for the static position "all auto margins on
+    // the box itself are treated as zero", so they absorb no free space and
+    // the self-alignment places the box (WPT
+    // `css/css-grid/abspos/positioned-grid-items-024.html`).
     Point::new(
-        auto_margin_offset(Axis::Horizontal).unwrap_or_else(|| {
-            item_alignment_offset(
-                containing_size.width - margin_box.width,
-                item.justify_self,
-                rtl,
-                item.direction == direction::T::Rtl,
-            )
-        }),
-        auto_margin_offset(Axis::Vertical).unwrap_or_else(|| {
-            item_alignment_offset(
-                containing_size.height - margin_box.height,
-                item.align_self,
-                false,
-                false,
-            )
-        }),
+        item_alignment_offset(
+            containing_size.width - margin_box.width,
+            item.justify_self,
+            rtl,
+            item.direction == direction::T::Rtl,
+        ),
+        item_alignment_offset(
+            containing_size.height - margin_box.height,
+            item.align_self,
+            false,
+            false,
+        ),
     )
 }
 
+/// The absolute pass of a grid-lanes container: Grid's, except that a
+/// hoisted box is still laid out against the padding box rather than the
+/// grid area its placement names ([`layout_grid_absolute_items`]).
+/// css-grid-3 §8 supports "grid-aligned absolute-positioned descendants …
+/// just as for regular grid containers", so that is a gap, kept until a
+/// grid-lanes change takes it.
 #[allow(clippy::too_many_arguments)]
-#[allow(
-    clippy::too_many_lines,
-    reason = "one ordered pass; the hoisted boxes interleave with it in tree order"
-)]
-#[inline(never)]
+#[inline]
 fn layout_absolute_items<'tree, T>(
     tree: &'tree T,
     state: &mut T::State,
@@ -1667,6 +1682,71 @@ where
     T: LayoutTree + 'tree,
     T::Style<'tree>: GridStyle,
 {
+    layout_grid_absolute_items(
+        tree,
+        state,
+        node,
+        items,
+        columns,
+        rows,
+        explicit_columns,
+        explicit_rows,
+        inner_size,
+        outer_size,
+        padding,
+        border,
+        rtl,
+        defaults,
+        scrollable,
+        false,
+    )
+}
+
+/// The absolute pass: the container's own out-of-flow children and the
+/// hoisted boxes, in tree order.
+///
+/// The grid area a child's placement properties name is its containing
+/// block and, when it reads its static position, its static-position
+/// rectangle too — css-position-3 §3.5.3: "if the grid container also
+/// establishes the box's actual containing block, then the grid area
+/// specified by the grid-placement properties establishes its
+/// static-position rectangle instead" of the content edges. A child whose
+/// containing block is elsewhere (lowered to `fixed`) records its static
+/// position in the content box.
+///
+/// With `hoisted_in_areas`, a hoisted descendant is laid out in the grid area
+/// its own placement properties name: css-grid-2 §10.1 speaks of any
+/// "absolutely positioned element" whose containing block the grid
+/// generates, not of its children only. One whose placement is `auto` on all
+/// four sides keeps the padding box without resolving any line.
+#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one ordered pass; the hoisted boxes interleave with it in tree order"
+)]
+#[inline(never)]
+fn layout_grid_absolute_items<'tree, T>(
+    tree: &'tree T,
+    state: &mut T::State,
+    node: T::NodeId,
+    items: &[PendingItem<T::NodeId>],
+    columns: &TrackSet,
+    rows: &TrackSet,
+    explicit_columns: usize,
+    explicit_rows: usize,
+    inner_size: Size<f32>,
+    outer_size: Size<f32>,
+    padding: Edges<f32>,
+    border: Edges<f32>,
+    rtl: bool,
+    defaults: ItemDefaults,
+    scrollable: Option<Size<f32>>,
+    hoisted_in_areas: bool,
+) -> Size<f32>
+where
+    T: LayoutTree + 'tree,
+    T::Style<'tree>: GridStyle,
+{
     let mut content_size = Size::ZERO;
     let padding_box_origin = Point::new(border.left, border.top);
     let padding_box_size = Size::new(
@@ -1679,52 +1759,94 @@ where
     crate::compute::util::debug_assert_tree_order(
         items.iter().map(|item| item.ordered.document_index),
     );
+    // A placement's area in padding-box coordinates: its origin and size.
+    let scroll_container = scrollable.is_some();
+    let area = |column: Line<GridPlacement>, row: Line<GridPlacement>| {
+        let (x, width) = absolute_axis_area(
+            columns,
+            column,
+            explicit_columns,
+            inner_size.width,
+            padding_box_size.width,
+            logical_content_start.x,
+            rtl,
+            scroll_container,
+        );
+        let (y, height) = absolute_axis_area(
+            rows,
+            row,
+            explicit_rows,
+            inner_size.height,
+            padding_box_size.height,
+            logical_content_start.y,
+            false,
+            scroll_container,
+        );
+        (Point::new(x, y), Size::new(width, height))
+    };
+    let hoisted_block = |hoisted: T::NodeId, padding_box: &AbsoluteContainingBlock| {
+        if !hoisted_in_areas {
+            return *padding_box;
+        }
+        let style = tree.style(hoisted);
+        let column = Line::new(
+            grid_placement(style.grid_column_start()),
+            grid_placement(style.grid_column_end()),
+        );
+        let row = Line::new(
+            grid_placement(style.grid_row_start()),
+            grid_placement(style.grid_row_end()),
+        );
+        let auto = |line: Line<GridPlacement>| {
+            matches!(line.start, GridPlacement::Auto) && matches!(line.end, GridPlacement::Auto)
+        };
+        if auto(column) && auto(row) {
+            return *padding_box;
+        }
+        let (origin, size) = area(column, row);
+        AbsoluteContainingBlock {
+            origin,
+            size,
+            is_padding_box: origin.x == 0.0 && origin.y == 0.0 && size == padding_box_size,
+            ..*padding_box
+        }
+    };
     let mut hoisted = crate::compute::HoistedPass::new(padding_box_size, border, rtl, scrollable);
     for pending in items {
-        hoisted.before(tree, state, node, pending.ordered.document_index);
+        hoisted.before_in(
+            tree,
+            state,
+            node,
+            pending.ordered.document_index,
+            &hoisted_block,
+        );
         let key = pending.key();
         // `absolute_layout` decides whether it reads the static position.
         let static_axes =
             crate::compute::util::needs_static_position(tree, key.node, &tree.style(key.node));
         let needs_static_measurement = static_axes.width || static_axes.height;
-        let content_static_offset = if needs_static_measurement {
+        // The static position of the box, as an offset into `rect`, a
+        // rectangle of the given size whose margins, percentages and
+        // self-alignment it is measured in.
+        let static_offset_in = |state: &mut T::State, rect: Size<f32>| {
+            if !needs_static_measurement {
+                return Point::ZERO;
+            }
             let item = resolve_grid_item(
                 &tree.style(key.node),
                 key,
                 GridArea::default(),
-                Size::new(Some(inner_size.width), Some(inner_size.height)),
+                Size::new(Some(rect.width), Some(rect.height)),
                 defaults,
             );
-            absolute_static_offset(tree, state, &item, inner_size, rtl)
-        } else {
-            Point::ZERO
+            absolute_static_offset(tree, state, &item, rect, rtl)
         };
         match pending.position {
             PositionProperty::Absolute => {
-                let (x, width) = absolute_axis_area(
-                    columns,
-                    pending.column,
-                    explicit_columns,
-                    inner_size.width,
-                    padding_box_size.width,
-                    logical_content_start.x,
-                    rtl,
-                );
-                let (y, height) = absolute_axis_area(
-                    rows,
-                    pending.row,
-                    explicit_rows,
-                    inner_size.height,
-                    padding_box_size.height,
-                    logical_content_start.y,
-                    false,
-                );
+                let (area_origin, containing_size) = area(pending.column, pending.row);
+                let (x, y) = (area_origin.x, area_origin.y);
                 let origin = Point::new(padding_box_origin.x + x, padding_box_origin.y + y);
-                let containing_size = Size::new(width, height);
-                let static_offset = Point::new(
-                    padding.left + content_static_offset.x - x,
-                    padding.top + content_static_offset.y - y,
-                );
+                let static_offset = static_offset_in(state, containing_size);
                 let mut layout = compute_absolute_layout_in(
                     tree,
                     state,
@@ -1752,9 +1874,16 @@ where
                     Size::ZERO,
                 );
                 tree.set_unrounded_layout(state, key.node, layout);
-                hoisted.inside(tree, state, node, pending.ordered.document_index);
+                hoisted.inside_in(
+                    tree,
+                    state,
+                    node,
+                    pending.ordered.document_index,
+                    &hoisted_block,
+                );
             }
             PositionProperty::Fixed => {
+                let content_static_offset = static_offset_in(state, inner_size);
                 tree.set_static_position(
                     state,
                     key.node,
@@ -1767,7 +1896,7 @@ where
             PositionProperty::Static | PositionProperty::Relative | PositionProperty::Sticky => {}
         }
     }
-    hoisted.rest(tree, state, node);
+    hoisted.rest_in(tree, state, node, &hoisted_block);
     content_size
 }
 
@@ -2076,7 +2205,7 @@ where
             if absolute.is_empty() && !tree.has_hoisted_children(state, node) {
                 Size::ZERO
             } else {
-                layout_absolute_items(
+                layout_grid_absolute_items(
                     tree,
                     state,
                     node,
@@ -2097,6 +2226,7 @@ where
                         metrics.border,
                         content_size,
                     ),
+                    true,
                 )
             };
         content_size = content_size.zip_map(absolute_content_size, f32::max);
@@ -2214,6 +2344,7 @@ mod tests {
                 20.0,
                 2.0,
                 false,
+                true,
             ),
             (0.0, 20.0)
         );
@@ -2226,8 +2357,32 @@ mod tests {
                 30.0,
                 2.0,
                 true,
+                true,
             ),
             (0.0, 30.0)
+        );
+    }
+
+    #[test]
+    fn auto_end_line_is_the_padding_edge_unless_the_grid_scrolls() {
+        let tracks = TrackSet {
+            tracks: vec![types::Track {
+                base: 50.0,
+                growth_limit: 50.0,
+                ..Default::default()
+            }],
+            ..TrackSet::default()
+        };
+        let auto = Line::new(GridPlacement::Auto, GridPlacement::Auto);
+        // A 50px track in a 30px content box with 5px padding on each side:
+        // the scrollable area ends at 5 + 50 + 5, the padding box at 40.
+        assert_eq!(
+            absolute_axis_area(&tracks, auto, 1, 30.0, 40.0, 5.0, false, false),
+            (0.0, 40.0)
+        );
+        assert_eq!(
+            absolute_axis_area(&tracks, auto, 1, 30.0, 40.0, 5.0, false, true),
+            (0.0, 60.0)
         );
     }
 }

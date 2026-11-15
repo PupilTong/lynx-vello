@@ -904,6 +904,64 @@ fn container_baseline_uses_grid_order_within_the_first_nonempty_row() {
     assert_point(tree.layout(second_column).location, Point::new(20.0, 0.0));
 }
 
+/// css-grid-2 §6.6: an item's content-based minimum is "its specified size
+/// suggestion if it exists" — a definite preferred size, even over empty
+/// content. Empty `width: 30px` and `width: 50px` items give their `0fr`
+/// and `1fr` columns those bases, and §12.7.1's restart then leaves the
+/// last `1fr` column the remaining 20px (WPT
+/// `css/css-grid/layout-algorithm/grid-find-fr-size-restart-algorithm.html`).
+#[test]
+fn a_specified_size_is_the_automatic_minimum_of_an_empty_item() {
+    let mut tree = TestTree::default();
+    let first = intrinsic_leaf(&mut tree, Size::ZERO, Size::ZERO);
+    let mut narrow_style = grid_default();
+    narrow_style.size.width = size_px(30.0);
+    let narrow = tree.push_leaf(narrow_style, Size::ZERO, Size::ZERO);
+    let mut wide_style = grid_default();
+    wide_style.size.width = size_px(50.0);
+    let wide = tree.push_leaf(wide_style, Size::ZERO, Size::ZERO);
+    let last = intrinsic_leaf(&mut tree, Size::ZERO, Size::ZERO);
+    let root = tree.push_grid(
+        grid_style(&[fr(0.0), fr(1.0), fr(0.0), fr(1.0)], &[fr(1.0)]),
+        vec![first, narrow, wide, last],
+    );
+
+    definite_layout(&tree, root, 100.0, 100.0);
+
+    assert_close(tree.layout(first).size.width, 0.0);
+    assert_point(tree.layout(narrow).location, Point::new(0.0, 0.0));
+    assert_point(tree.layout(wide).location, Point::new(30.0, 0.0));
+    assert_point(tree.layout(last).location, Point::new(80.0, 0.0));
+    assert_size(tree.layout(last).size, Size::new(20.0, 100.0));
+}
+
+/// A stretched item's border box is floored at its padding and border: a
+/// 50px column stretches an item with 40px inline padding on each side to
+/// 80px, and a 50px row one with 40px block padding to 80px (WPT
+/// `css/css-grid/grid-items/grid-item-border-padding-005.html`).
+#[test]
+fn a_stretched_item_is_never_smaller_than_its_padding() {
+    let mut tree = TestTree::default();
+    let mut inline_style = grid_default();
+    inline_style.padding.left = nn_px(40.0);
+    inline_style.padding.right = nn_px(40.0);
+    let inline = tree.push_leaf(inline_style, Size::new(80.0, 0.0), Size::new(80.0, 0.0));
+    let mut block_style = grid_default();
+    block_style.grid_column = placement(line(2), line(3));
+    block_style.padding.top = nn_px(40.0);
+    block_style.padding.bottom = nn_px(40.0);
+    let block = tree.push_leaf(block_style, Size::new(0.0, 80.0), Size::new(0.0, 80.0));
+    let root = tree.push_grid(
+        grid_style(&[px(50.0), px(50.0)], &[px(50.0)]),
+        vec![inline, block],
+    );
+
+    definite_layout(&tree, root, 100.0, 50.0);
+
+    assert_size(tree.layout(inline).size, Size::new(80.0, 50.0));
+    assert_size(tree.layout(block).size, Size::new(50.0, 80.0));
+}
+
 #[test]
 fn auto_sized_items_stretch_and_auto_margins_win_over_self_alignment() {
     let mut tree = TestTree::default();
@@ -1208,8 +1266,13 @@ fn absolute_auto_grid_lines_use_the_container_padding_edges() {
     assert_size(tree.layout(child).size, Size::new(116.0, 76.0));
 }
 
+/// css-position-3 §3.5.3: a grid child whose containing block is the grid
+/// itself takes the grid area its placement names as its static-position
+/// rectangle, not the content box (WPT
+/// `css/css-grid/abspos/positioned-grid-items-001.html`, whose items have
+/// `auto` insets).
 #[test]
-fn absolute_static_fallback_uses_content_box_not_selected_grid_area() {
+fn absolute_static_position_aligns_in_the_grid_area_it_names() {
     let mut tree = TestTree::default();
     let mut child_style = fixed_leaf_style(20.0, 10.0);
     child_style.position = PositionProperty::Absolute;
@@ -1222,7 +1285,29 @@ fn absolute_static_fallback_uses_content_box_not_selected_grid_area() {
 
     definite_layout(&tree, root, 100.0, 50.0);
 
-    assert_point(tree.layout(child).location, Point::new(40.0, 40.0));
+    // Centered in column 2 (30..100): 30 + (70 - 20) / 2; at the end of row 1.
+    assert_point(tree.layout(child).location, Point::new(55.0, 40.0));
+}
+
+/// The same with `auto` placement on every side: the area is the augmented
+/// grid's padding-edge lines, so the static position follows the padding
+/// box, not the content box (WPT
+/// `css/css-grid/abspos/absolute-positioning-grid-container-containing-block-001.html`,
+/// `autoRowAutoColumn`).
+#[test]
+fn absolute_static_position_with_auto_placement_starts_at_the_padding_edge() {
+    let mut tree = TestTree::default();
+    let mut child_style = fixed_leaf_style(20.0, 10.0);
+    child_style.position = PositionProperty::Absolute;
+    let child = tree.push_leaf(child_style, Size::new(20.0, 10.0), Size::new(20.0, 10.0));
+    let mut style = grid_style(&[px(30.0), px(70.0)], &[px(50.0)]);
+    style.padding.left = nn_px(15.0);
+    style.padding.top = nn_px(5.0);
+    let root = tree.push_grid(style, vec![child]);
+
+    definite_layout(&tree, root, 115.0, 55.0);
+
+    assert_point(tree.layout(child).location, Point::new(0.0, 0.0));
 }
 
 #[test]
@@ -1846,27 +1931,36 @@ fn normal_item_alignment_preserves_a_preferred_aspect_ratio() {
     assert_size(tree.layout(child).size, Size::new(100.0, 50.0));
 }
 
+/// css-grid-2 §10.1: an `auto` line is the padding edge, "the padding edge
+/// of the scrollable area, if the grid container overflows" — which only a
+/// scroll container has. A grid that is none keeps the padding edge however
+/// far its tracks overflow it (WPT
+/// `css/css-grid/abspos/grid-positioned-items-within-grid-implicit-track-001.html`).
 #[test]
 fn absolute_auto_line_uses_padding_edge_of_overflowing_scrollable_area() {
-    let mut tree = TestTree::default();
-    let child_style = TestStyle {
-        position: PositionProperty::Absolute,
-        inset: Edges {
-            left: inset_px(0.0),
-            right: inset_px(0.0),
-            top: inset_px(0.0),
-            bottom: inset_px(0.0),
-        },
-        grid_column: placement(line(1), GridLine::auto()),
-        grid_row: placement(line(1), line(2)),
-        ..grid_default()
-    };
-    let child = tree.push_leaf(child_style, Size::ZERO, Size::ZERO);
-    let root = tree.push_grid(grid_style(&[px(200.0)], &[px(20.0)]), vec![child]);
+    for (overflow, width) in [(Overflow::Hidden, 200.0), (Overflow::Visible, 100.0)] {
+        let mut tree = TestTree::default();
+        let child_style = TestStyle {
+            position: PositionProperty::Absolute,
+            inset: Edges {
+                left: inset_px(0.0),
+                right: inset_px(0.0),
+                top: inset_px(0.0),
+                bottom: inset_px(0.0),
+            },
+            grid_column: placement(line(1), GridLine::auto()),
+            grid_row: placement(line(1), line(2)),
+            ..grid_default()
+        };
+        let child = tree.push_leaf(child_style, Size::ZERO, Size::ZERO);
+        let mut style = grid_style(&[px(200.0)], &[px(20.0)]);
+        style.overflow = Point::new(overflow, overflow);
+        let root = tree.push_grid(style, vec![child]);
 
-    definite_layout(&tree, root, 100.0, 20.0);
+        definite_layout(&tree, root, 100.0, 20.0);
 
-    assert_size(tree.layout(child).size, Size::new(200.0, 20.0));
+        assert_size(tree.layout(child).size, Size::new(width, 20.0));
+    }
 }
 
 #[test]
@@ -2210,20 +2304,31 @@ fn absolute_children_resolve_intrinsic_preferred_widths() {
     }
 }
 
+/// css-position-3 §3.5.3: for the static position "all auto margins on the
+/// box itself are treated as zero" — they do not center the box, its
+/// self-alignment places it (WPT
+/// `css/css-grid/abspos/positioned-grid-items-024.html`).
 #[test]
-fn absolute_child_auto_margins_share_free_space_in_static_position() {
+fn absolute_child_auto_margins_are_zero_in_static_position() {
     let mut tree = TestTree::default();
     let mut child_style = fixed_leaf_style(40.0, 10.0);
     child_style.position = PositionProperty::Absolute;
     child_style.margin.left = Margin::Auto;
     child_style.margin.right = Margin::Auto;
     let child = tree.push_leaf(child_style, Size::new(40.0, 10.0), Size::new(40.0, 10.0));
-    let root = tree.push_grid(grid_style(&[px(100.0)], &[px(50.0)]), vec![child]);
+    let mut end_style = fixed_leaf_style(40.0, 10.0);
+    end_style.position = PositionProperty::Absolute;
+    end_style.margin.left = Margin::Auto;
+    end_style.margin.top = Margin::Auto;
+    end_style.justify_self = SelfAlignment(AlignFlags::END);
+    let end = tree.push_leaf(end_style, Size::new(40.0, 10.0), Size::new(40.0, 10.0));
+    let root = tree.push_grid(grid_style(&[px(100.0)], &[px(50.0)]), vec![child, end]);
 
     definite_layout(&tree, root, 100.0, 50.0);
 
-    assert_close(tree.layout(child).location.x, 30.0);
+    assert_close(tree.layout(child).location.x, 0.0);
     assert_size(tree.layout(child).size, Size::new(40.0, 10.0));
+    assert_point(tree.layout(end).location, Point::new(60.0, 0.0));
 }
 
 #[test]
@@ -3781,6 +3886,26 @@ mod last_baseline {
         assert_close(tree.layout(other).location.y, 10.0);
         assert_eq!(output.last_baseline, Some(20.0));
     }
+}
+
+/// css-grid-2 §12.5 step 4 grows only the flexible tracks with an intrinsic
+/// minimum: an item in a `minmax(0, 0.4fr)` row leaves its fixed 0 base, so
+/// §12.7.1 gives both rows 100 × 0.4 = 40 for an 80px container, and the
+/// definite rerun 80 × 0.4 = 32 each (WPT
+/// `css/css-grid/layout-algorithm/flex-sizing-rows-indefinite-height-002.html`).
+#[test]
+fn a_fixed_minimum_flexible_row_takes_no_base_from_its_item() {
+    let mut tree = TestTree::default();
+    let mut item_style = fixed_leaf_style(100.0, 100.0);
+    item_style.grid_row = placement(line(2), span(1));
+    let item = tree.push_leaf(item_style, Size::new(100.0, 100.0), Size::new(100.0, 100.0));
+    let row = minmax(fixed_breadth(0.0), breadth_fr(0.4));
+    let root = tree.push_grid(grid_style(&[px(100.0)], &[row.clone(), row]), vec![item]);
+
+    let output = auto_height_layout(&tree, root, 100.0);
+
+    assert_size(output.size, Size::new(100.0, 80.0));
+    assert_point(tree.layout(item).location, Point::new(0.0, 32.0));
 }
 
 fn auto_height_layout(tree: &TestTree, root: TestId, width: f32) -> LayoutOutput {
