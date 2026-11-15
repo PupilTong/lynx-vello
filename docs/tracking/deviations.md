@@ -1679,6 +1679,36 @@ consequential choice about whether to follow the spec or the quirk.
 
 ## Components (see [components.md](components.md))
 
+- **`<video>` is ruling 8's smallest useful element, not native's whole
+  surface** (`docs/picture-source-design.md`, "Video"). Built: `src`,
+  `loop`, `muted`, `object-fit`; `play`, `pause`; `firstframe`, `ended`,
+  `error`. web-core has no video element, so native is the only reference,
+  and these follow what Android and iOS share, iOS's where they share none.
+  What differs from native:
+  - **Not built.** The attributes `volume`, `speed`, `mode` and `timeupdate-interval` are
+    ignored; the methods `stop` and `seek` answer code 3, `METHOD_NOT_FOUND`; the events
+    `playing`, `paused`, `stopped`, `timeupdate`, `looped` and `buffering` never fire.
+  - **`play` answers at once.** Both platforms answer a `play` when playback starts (iOS's
+    `playableDidStartPlaying`, Android's `onPlaying`), or with code 8 when it fails, and queue
+    UI methods under `mode`. Here a UI method's callback runs inside the call (`__InvokeUIMethod`),
+    so `play` and `pause` answer code 0 and `{success: true}` there; a failure to play arrives
+    as the `error` event alone. A `play` with no `src` answers 8 and fires `error`, as on both.
+  - **`error`'s codes are iOS's** (`LynxVideoDefines.h:16-19`): `-1` for a source that could not
+    be opened or a `play` with none, `-2` for anything else, a platform with no player
+    included. Android reports `ExoPlayer`'s own codes, and 8 for a `play` with no `src`.
+  - **`src` is any URL the resource system resolves**, a card's registered resources and `data:`
+    URLs included, where iOS accepts `http` and `https` only and fails anything else with
+    `-1`. A source a platform's player cannot read itself is fetched by the resource system
+    and handed over as its bytes.
+  - **`loop` and `muted` are read as `__SetAttribute` writes a boolean**: on when present, off
+    when absent or `"false"`.
+  - **A video no view draws keeps playing** and publishes no frames; native's view keeps its
+    player whatever is on screen as well, and draws through its own layer.
+  - **The platforms that play.** macOS (AVFoundation) and the browser (the page's `<video>`,
+    under the browser's autoplay rules: an unmuted `play` outside a user gesture is rejected
+    and reported as `error`, not worked around). Linux has no player: every video fires
+    `error` with `-2`.
+
 - **`<image>` is never sized by its bitmap**, unlike the `<img>` it resembles.
   Native gives the tag no platform layout node unless it carries `auto-size`
   (`LayoutContext::NoNeedPlatformLayoutNode`'s table is literally

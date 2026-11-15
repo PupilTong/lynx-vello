@@ -41,12 +41,23 @@ would host it:
   natural size) and `error` fire, non-bubbling, through the component-event
   queue, and an animated `src` plays under `loop-count` and `autoplay` with
   its four methods and three events; `cap-insets` does not.
+- **The rest of the `<video>` element surface.** `src`, `loop`, `muted` and
+  `object-fit`, the `play` and `pause` UI methods and the `firstframe`,
+  `ended` and `error` events are built (`docs/picture-source-design.md`,
+  "Video"). Not built: the `volume`, `speed`, `mode` and
+  `timeupdate-interval` attributes (ignored), the `stop` and `seek` UI
+  methods (code 3), and the `playing`, `paused`, `stopped`, `timeupdate`,
+  `looped` and `buffering` events (never fired). `play` answers at once
+  rather than when playback starts. Linux has no player, so every video
+  there fires `error`; on macOS a video's orientation (its track's
+  `preferredTransform`) is not applied.
 - **UI methods other than `boundingClientRect`, `scrollIntoView`,
   `scrollTo`/`scrollBy`, `selectTab`, a swiper's `scrollTo`, a
   `scroll-view`'s `scrollTo`/`scrollBy`/`getScrollInfo`, a `list`'s
   `scrollToPosition`/`scrollBy`/`getScrollContainerInfo`/`getVisibleCells`,
   an `x-refresh-view`'s `finishRefresh`/`finishLoadMore`/`autoStartRefresh`,
-  a scroll coordinator's `setFoldExpanded`, a `text`'s `getTextBoundingRect`
+  a scroll coordinator's `setFoldExpanded`, a `text`'s `getTextBoundingRect`,
+  an `image`'s four animation methods, a `video`'s `play`/`pause`
   and a dialog's `show`/`showModal`/`close`/`requestClose`.** Those dispatch
   by name (`boundingClientRect`, `scrollIntoView` and CSSOM-View's
   `scrollTo`/`scrollBy` on every element, `selectTab` on
@@ -56,12 +67,12 @@ would host it:
   shadows the standard one, the refresh view's three on `x-refresh-view`
   only, `setFoldExpanded` on `scroll-coordinator` and `x-foldview-ng` only,
   `getTextBoundingRect`, `getSelectedText` and `setTextSelection` on `text`
+  only, the animation methods on `image` only, `play` and `pause` on `video`
   only, the dialog's on `dialog` only) through
   `__InvokeUIMethod`; every other name — the base set's `focus`/`blur` (no
   focus model), a `scroll-view`'s `takeContentScreenshot`,
   a `list`'s `getScrollInfo`, a scroll coordinator's
-  `getScrollInfo`, an `image`'s four animation methods (nothing plays image
-  frames), `requestUIInfo`,
+  `getScrollInfo`, a `video`'s `stop` and `seek`, `requestUIInfo`,
   `takeScreenshot` (no pixel readback) and the rest of the per-component
   catalog — answers code 3, `METHOD_NOT_FOUND`. The rect itself ignores
   transforms and never flushes.

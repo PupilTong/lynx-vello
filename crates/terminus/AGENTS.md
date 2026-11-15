@@ -306,13 +306,17 @@ the URL's decoder answered more than one frame
 (`ImageReports::loaded_animated`).
 
 **Picture playback.** An embedder that owns an `Id` picture can ask the host
-to play a URL's frames into it under a playhead of its own: a
+to fill it with one of two players: a URL's frames under a playhead of its
+own, or a video the platform's media player plays (`vant::media`). A
 `PlaybackRequest` (`Play { picture, source, policy }` under `vant`'s
 `PlayPolicy`, `Control { picture, control }` with `vant`'s `Control` as
-`PlaybackControl`, `End { picture }`) travels from the embedder to its host,
-and the host reports each loop through `ImageReports::playback(picture,
-PlaybackReport)`, which reaches the embedder as `ImageEvent::Playback` among
-the image reports. `terminus` defines both and acts on neither:
+`PlaybackControl`, `Open { picture, source, settings }` under `vant`'s
+`MediaSettings`, `Media { picture, command }` with `vant`'s `MediaCommand`,
+`End { picture }`) travels from the embedder to its host, and the host
+reports each loop, and each `MediaEvent` a media player reports, through
+`ImageReports::playback(picture, PlaybackReport)` (`LoopComplete`,
+`FinalLoopComplete`, `Media(MediaEvent)`), which reaches the embedder as
+`ImageEvent::Playback` among the image reports. `terminus` defines both and acts on neither:
 `Document::apply_image_events` skips a playback report, which settles no
 source. No element, attribute or event name is in either type.
 

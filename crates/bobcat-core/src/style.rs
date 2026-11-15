@@ -186,7 +186,7 @@ pub(crate) fn add_style_sheet_text_to_shadow(
 mod tests {
     use super::*;
     use crate::main::tree::{
-        Autoplays, ComponentEvents, ImageSources, PageConfig, Viewport, new_document,
+        Autoplays, ComponentEvents, ImageSources, PageConfig, Videos, Viewport, new_document,
     };
 
     fn document() -> LynxDocument {
@@ -196,6 +196,7 @@ mod tests {
             ComponentEvents::default(),
             Autoplays::default(),
             ImageSources::default(),
+            Videos::default(),
         )
     }
 

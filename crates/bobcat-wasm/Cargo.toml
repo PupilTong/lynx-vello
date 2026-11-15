@@ -51,6 +51,7 @@ web-sys = { workspace = true, features = [
     "Response",
     "ResponseInit",
     "StorageManager",
+    "VideoFrame",
     "WorkerGlobalScope",
 ] }
 # The wall clock `bobcat-core`'s `ExtraTiming` marks are typed in on this

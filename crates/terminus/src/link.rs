@@ -31,8 +31,9 @@ pub use crate::render::image::{
     NoImages, is_renderable,
 };
 pub use crate::render::picture::{
-    FrameTarget, FrameWriter, Loops, PictureFrame, PictureId, PictureKey, PictureSlot, PlayPolicy,
-    PlaybackControl, PlaybackReport, PlaybackRequest, TakenFrame,
+    FrameTarget, FrameWriter, Loops, MediaCommand, MediaError, MediaErrorKind, MediaEvent,
+    MediaSettings, PictureFrame, PictureId, PictureKey, PictureSlot, PlayPolicy, PlaybackControl,
+    PlaybackReport, PlaybackRequest, TakenFrame,
 };
 pub use crate::render::svg::VectorDocument;
 pub use crate::style::animation::AnimationTick;

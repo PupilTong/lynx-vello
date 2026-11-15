@@ -38,7 +38,25 @@ and premultiplied. The pixels never pass through Wasm memory and the main
 thread holds no image: every buffer handed to the browser is a fresh copy,
 since a `Blob` or an `ImageDecoder` cannot be built over the shared memory.
 `BobcatRenderer` builds its painter with `Painter::with_platform_frames`, a
-`Painter<BrowserFrame>`. The code
+`Painter<BrowserFrame>`. `BrowserMedia` (`media.rs`) is the video player
+(`vant::media::Media<BrowserFrame>`), in two halves because an
+`HTMLVideoElement` exists only where a `Document` does: the Render Worker's
+half keeps each open video's sink under a number and posts the facade every
+instruction as a `bobcat-media` message through the function
+`BobcatRenderer.create` was handed (`postMediaRequest` in
+`js/render-worker.ts`); the facade's half (`js/media.ts`, `MediaElements`)
+owns a detached `<video>` per video, plays `http(s)` URLs itself and the
+bytes the engine fetched for anything else from a `blob:` URL, takes each
+presented frame with `requestVideoFrameCallback` (and the first at
+`loadeddata`), and transfers it as a `VideoFrame` (`bobcat-media-frame`)
+with its `loadeddata`, `ended` and `error` reports and a rejected `play()`
+(`bobcat-media-event`). The Render Worker's script hands those to the free
+exports `deliverMediaFrame` and `deliverMediaEvent`, outside the request
+queue, since they touch only a video's sink. A video frame is a
+`BrowserFrame` too, closed when its last copy goes, written with
+`copyExternalImageToTexture` from the `VideoFrame`. Autoplay rules apply as
+the browser has them: an unmuted `play` outside a user gesture is the
+video's `error`. The code
 cache's store is `CacheStore` (`cache.rs`), a `vant::AsyncStore` over one
 cache of the web Cache API (`caches.open("bobcat-code-cache")`, 32 MiB,
 `Volatility::EvictableAnytime`), handed over as `ArtifactStore::Async`, so

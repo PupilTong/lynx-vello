@@ -207,7 +207,8 @@ impl vant::ImageDecoder for BrowserDecoder {
         let frame = if size == source {
             full
         } else {
-            bitmap_of(full.bitmap(), &bitmap_options(Some(size))).await?
+            let bitmap = full.bitmap().expect("`createImageBitmap` answers a bitmap");
+            bitmap_of(bitmap, &bitmap_options(Some(size))).await?
         };
         Ok(platform(frame, source))
     }

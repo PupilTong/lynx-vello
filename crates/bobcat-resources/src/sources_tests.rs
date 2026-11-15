@@ -1095,11 +1095,13 @@ mod code_cache {
             type Store = NoStore;
             type AsyncStore = MemAsyncStore;
             type Decoder = NativeDecoder;
+            type Media = vant::media::NoMedia;
 
             fn into_parts(self) -> Parts<NativeFetch, NoStore, MemAsyncStore, NativeDecoder> {
                 Parts {
                     fetch: NativeFetch,
                     decoder: NativeDecoder,
+                    media: vant::media::NoMedia,
                     bytes: None,
                     artifacts: Some(Tier {
                         store: ArtifactStore::Async(self.0),

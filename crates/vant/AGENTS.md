@@ -17,15 +17,32 @@ type and depends only on `bytes`, `http`, `url`, `serde_json`, `thiserror`,
   — `Durable`, `PurgedWhenIdle`, `EvictableAnytime` — and `map_body`),
   `AsyncStore` (the subset of `Store` the artifact tier uses, modelled on the
   web Cache API, every call but `volatility` a future that is `MaybeSend`),
-  `ImageDecoder`, and `Platform`, the bundle an embedder hands over:
-  `into_parts` answers `Parts { fetch, decoder, bytes, artifacts }`, the last
-  two each an optional `Tier { store, budget }` — the HTTP byte tier's
+  `ImageDecoder`, `media::Media` (below), and `Platform`, the bundle an
+  embedder hands over: `into_parts` answers `PartsOf<Self>`, `Parts { fetch,
+  decoder, media, bytes, artifacts }`, the last two each an optional `Tier {
+  store, budget }` — the HTTP byte tier's
   `Store`, and the derived-artifact tier's `ArtifactStore::Blocking(Store)` or
   `ArtifactStore::Async(AsyncStore)`, separate namespaces. Capabilities are
   traits with associated types, never `dyn`; `Threaded` is the cfg'd marker
   that requires `Send + Sync` natively and nothing on wasm32, and `MaybeSend`
   the one that requires `Send` natively and nothing on wasm32. `NoStore` is
   the `Store` and the `AsyncStore` of a host without one.
+- **The media capability** (`media.rs`): `Media<F>`, a platform's video
+  player, generic over the decoder's frame type (`Platform::Media:
+  Media<<Self::Decoder as ImageDecoder>::Frame>`): `reads(url)` says whether
+  `open` is handed a URL (`MediaSource::Url`) or the bytes the caller fetched
+  (`MediaSource::Bytes`; `http` and `https` by default), and
+  `open(source, MediaSettings { looping, muted }, sink)` answers a
+  `MediaPlayer` (`play`, `pause`, `set_loop`, `set_muted`, `command` for a
+  `MediaCommand`; dropping it closes the video). The player hands a
+  `MediaSink<F>` (`Threaded`) each new frame as a `PictureFrame<F>` with its
+  `ImageDescriptor`, asks it `wants_frames`, and reports `MediaEvent`s:
+  `FirstFrame { width, height, duration }`, `Ended`, `Failed(MediaError)`
+  with a `MediaErrorKind` (`Source`, `Playback`, `Unsupported`). `NoMedia`
+  is the player of a platform with none: every open fails with
+  `Unsupported` (`NO_MEDIA_MESSAGE`), and it reads every URL so nothing is
+  fetched for it. The policy of what an element does with these is not
+  here.
 - **The tiers**: `memory::MemoryCache` (LRU by stamp under a byte budget with a
   pinned working set), `byte_cache::ByteCache<S: Store>` (the HTTP byte tier:
   RFC 9111 `plan` over a stored response, index rebuilt from `Store::scan` and

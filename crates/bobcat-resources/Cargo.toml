@@ -38,6 +38,11 @@ tokio-util = { workspace = true }
 # the Render Worker's `setTimeout` is the timer instead.
 tokio = { workspace = true, features = ["time"] }
 
+# The video player sends AVFoundation's messages; CoreFoundation, CoreMedia
+# and CoreVideo are reached through FFI declarations, as `ImageIO` is.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { workspace = true }
+
 # In the browser a load is a local task on the Render Worker, and the clock
 # is `Date`; the browser's adapters themselves are `bobcat-wasm`'s.
 [target.'cfg(target_arch = "wasm32")'.dependencies]

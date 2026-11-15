@@ -10,9 +10,11 @@ Linux and the browser, which every shipped embedder uses. It is the worked
 example of what the protocol expects, not part of the protocol. The policy it
 applies is `vant`'s; what is here is the orchestration — `Resources<P:
 vant::Platform>`, `ViewResources<P>`, the job executor, the image and source
-pipelines, the background install holds — and the native reference adapters: `NativePlatform`
+pipelines, the video store, the background install holds — and the native reference adapters: `NativePlatform`
 (`NativeFetch` over libcurl and `file:`, `FsStore` over a cache directory and
-another over its `code` subdirectory, `NativeDecoder` over ImageIO/gdk-pixbuf).
+another over its `code` subdirectory, `NativeDecoder` over ImageIO/gdk-pixbuf,
+`NativeMedia`: `AvMedia` over AVFoundation on macOS, `vant::media::NoMedia`
+on Linux).
 The crate has no browser platform: it compiles for wasm32 as orchestration
 alone (local tasks through `wasm-bindgen-futures`, the `Date` clock through
 `js-sys`), and the browser's `Platform` is `bobcat-wasm`'s
@@ -261,6 +263,38 @@ last of a finite count), and a report, a publish or a control wakes the host.
 and slot. A source this store does not animate plays nothing. The load
 reports a source with more than one frame through `loaded_animated`, so the
 document's `ImageStatus::Bitmap` says it animates.
+
+**Videos** (`src/media/`, `docs/picture-source-design.md` "Video"): a
+`PlaybackRequest::Open` of a view's opens the `Id` picture with the
+platform's player (`Platform::Media`, a `vant::media::Media<FrameOf<P>>`,
+kept in `Shared` and shared by every scope; the pictures are each scope's
+`MediaPictures`, beside `ImageState`). The source resolves as an image's
+does; one the player reads itself (`Media::reads`) is handed over as a URL,
+anything else, registered resources and `data:` URLs included, is fetched on
+the blocking pool (a local task in the browser) and handed over as its bytes,
+the open completing as `Completion::MediaSource`; commands made meanwhile are
+sent once it is open. Each picture has a `Sink` (`media/mod.rs`, the
+`MediaSink` handed to the player): the player gives it each frame on its own
+thread; it keeps the newest and publishes it into the picture's slot while
+the picture is drawn, waking the host when the slot owes a wake, and keeps
+the player's events for `service_images`, which reports them to the view
+that opened the picture as `PlaybackReport::Media`. A describe is a draw;
+`retain` says whether any view draws it; `want` publishes the newest frame
+again. An undrawn video keeps playing and publishes nothing; the macOS
+player converts none of its frames then but the one it stops on. An open that
+fails at once is reported in the same turn, and a `play` of a failed picture
+reports the failure again. `PlaybackRequest::End`, and the drop of the
+view, close the player. The macOS player (`media/avfoundation.rs`) is
+`AVAssetReader` (BGRA video output, linear PCM audio output) on a
+`bobcat-video` thread per video, timed by an `AVSampleBufferRenderSynchronizer`
+that an `AVSampleBufferAudioRenderer` drives when the video has audio; it
+reads `file:` URLs and writes bytes to a temporary file. `AVPlayer` is not
+used because it advances only while the process's main run loop runs. It is
+reached through `objc2`'s `msg_send!`, macOS only, already in the tree
+through wgpu's Metal backend; `debug_assertions` builds check every
+message's argument and return encodings. Its tests play
+`tests/fixtures/video/rgb.mp4` (the README there has the command that made
+it); the store's run over a test player (`media/tests.rs`).
 
 Recorded limits: an animated image animates only where the platform decoder
 decodes frames by index (macOS, and browsers with `ImageDecoder`); no `region-to-decode`, no `blur-radius` post-processing, and none of the

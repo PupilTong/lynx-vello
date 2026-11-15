@@ -200,6 +200,12 @@ pub(crate) enum Completion<F> {
         source: Arc<str>,
         due: ClockInstant,
     },
+    /// The bytes a video's player is opened on were fetched, or failed to
+    /// be ([`crate::media`]).
+    MediaSource {
+        picture: PictureId,
+        source: Result<vant::media::MediaSource, String>,
+    },
 }
 
 impl<F: Clone> ImageState<F> {
@@ -383,6 +389,13 @@ fn apply<P: Platform>(resources: &Resources<P>, completion: Completion<FrameOf<P
             ));
         }
         Completion::Due { source, due } => state.animations.fired(&source, due),
+        Completion::MediaSource { picture, source } => {
+            drop(state);
+            resources
+                .media
+                .borrow_mut()
+                .fetched(&resources.shared.media, picture, source);
+        }
     }
 }
 
@@ -472,13 +485,27 @@ pub(crate) fn take_frame<P: Platform>(
 /// Serves one playback request of `view`'s, whose loops are reported to
 /// `reports`. Every request wakes the host when it changed what a picture
 /// shows or will show, so the picture is described again: its frame is
-/// published there and its timer armed.
+/// published there and its timer armed. A video's open and commands are
+/// [`crate::media`]'s, and so is an end of a picture it opened.
 pub(crate) fn playback<P: Platform>(
     resources: &Resources<P>,
     view: ViewKey,
     reports: &ImageReports,
     request: PlaybackRequest,
 ) {
+    match &request {
+        PlaybackRequest::Open { .. } | PlaybackRequest::Media { .. } => {
+            crate::media::request(resources, view, reports, request);
+            return;
+        }
+        PlaybackRequest::End { picture } if resources.media.borrow().contains(*picture) => {
+            crate::media::request(resources, view, reports, request);
+            return;
+        }
+        PlaybackRequest::Play { .. }
+        | PlaybackRequest::Control { .. }
+        | PlaybackRequest::End { .. } => {}
+    }
     let mut jobs = Vec::new();
     let mut stopped = None;
     let wake = {
@@ -510,6 +537,7 @@ pub(crate) fn playback<P: Platform>(
                 stopped = animations.end(picture);
                 false
             }
+            PlaybackRequest::Open { .. } | PlaybackRequest::Media { .. } => false,
         }
     };
     start(resources, jobs);

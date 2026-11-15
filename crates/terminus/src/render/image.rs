@@ -596,9 +596,9 @@ impl ImageReports {
         });
     }
 
-    /// `picture`'s playhead reports `report`. Nothing about the URL the
-    /// picture plays settles: the report is for whoever asked for the
-    /// playback.
+    /// `picture`'s player reports `report`: its playhead's loops, or what
+    /// its media player did. Nothing about the URL the picture plays
+    /// settles: the report is for whoever asked for the playback.
     ///
     /// Non-blocking, and it must not re-enter the store.
     pub fn playback(&self, picture: PictureId, report: PlaybackReport) {
@@ -940,7 +940,7 @@ pub enum ImageEvent {
     },
     /// This source will never produce pixels.
     Failed { source: Arc<str> },
-    /// The playhead of `picture`, an `Id` picture its owner asked to play a
+    /// The player of `picture`, an `Id` picture its owner asked to play a
     /// URL ([`PlaybackRequest`](crate::render::picture::PlaybackRequest)),
     /// reports `report`. It settles no source, and the document applies
     /// nothing for it: it is its owner's to read.

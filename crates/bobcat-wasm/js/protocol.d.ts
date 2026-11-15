@@ -264,11 +264,40 @@ export type RequestMessage<O extends Operation = Operation> = {
   } & RequestFields[P]
 }[O]
 
+/**
+ * One frame of an open video, made of what its `<video>` presented
+ * (`requestVideoFrameCallback`, or `loadeddata` for the first) and
+ * transferred: the Render Worker owns it from here and closes it.
+ */
+export interface MediaFrameMessage {
+  type: 'bobcat-media-frame'
+  /** The number the Render Worker's `bobcat-media` messages carry. */
+  player: number
+  frame: VideoFrame
+}
+
+/**
+ * What an open video's `<video>` reported: its first frame (`loadeddata`),
+ * with its natural size and its `duration` in seconds (`NaN` or `Infinity`
+ * for none); its end (`ended`, which a looping element never fires); or a
+ * failure, an `error` event or a rejected `play()`, as `source` (the
+ * element could not load the source: `MEDIA_ERR_NETWORK`,
+ * `MEDIA_ERR_SRC_NOT_SUPPORTED`) or `playback` (anything else).
+ */
+export type MediaEventFields =
+  | { event: 'firstframe'; width: number; height: number; duration: number }
+  | { event: 'ended' }
+  | { event: 'error'; kind: 'source' | 'playback'; message: string }
+
+export type MediaEventMessage = { type: 'bobcat-media-event'; player: number } & MediaEventFields
+
 export type FacadeMessage =
   | InitMessage
   | NativeModuleCallbackMessage
   | EditMessage
   | KeyMessage
+  | MediaEventMessage
+  | MediaFrameMessage
   | PointerMessage
   | RequestMessage
   | WheelMessage
@@ -387,6 +416,30 @@ export interface PerformanceMessage {
   entry: string
 }
 
+/**
+ * One instruction for a video the engine opened, which the facade plays in a
+ * detached `<video>` of its own (`js/media.ts`); `player` names the video in
+ * every message about it, both ways.
+ *
+ * - `open`: a new `<video>` paused at its start, of `url`, or of `bytes` (with `mediaType`) when
+ *   the engine fetched them itself, which the facade plays from a `blob:` URL.
+ * - `play`, `pause`: `HTMLMediaElement.play()` and `pause()`.
+ * - `loop`, `muted`: the element's `loop` and `muted`.
+ * - `close`: the video is gone; the element is emptied and let go of.
+ */
+export type MediaRequestMessage = { type: 'bobcat-media'; player: number } & (
+  | {
+      op: 'open'
+      url: string
+      bytes: Uint8Array | null
+      mediaType: string | null
+      looping: boolean
+      muted: boolean
+    }
+  | { op: 'play' | 'pause' | 'close' }
+  | { op: 'loop' | 'muted'; value: boolean }
+)
+
 /** The outcome of the request with the same number. */
 export type ResponseMessage =
   | {
@@ -404,6 +457,7 @@ export type ResponseMessage =
 export type RenderWorkerMessage =
   | { type: 'bobcat-frame-rate'; fps: number | null }
   | ErrorMessage
+  | MediaRequestMessage
   | NativeModuleCallMessage
   | PerformanceMessage
   | ReadyMessage

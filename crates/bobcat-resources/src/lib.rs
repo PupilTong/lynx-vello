@@ -52,6 +52,11 @@
 //!   playhead where the platform decoder can (`ImageIO`, the browser's `WebCodecs` `ImageDecoder`),
 //!   and a timer on this crate's own executor wakes the host when the next one is due. gdk-pixbuf
 //!   answers one frame, and so does a browser without `ImageDecoder`.
+//! - **Videos.** A `video` element's picture is filled by the platform's own player
+//!   ([`vant::media::Media`]): `AVFoundation` on macOS, the page's `<video>` in the browser
+//!   (`bobcat-wasm`), none on Linux, where every open fails. A source the player cannot read itself
+//!   is fetched here and handed over as bytes; the player publishes each frame into the picture's
+//!   slot while it is drawn, and its events reach the view with the image reports ([`media`]).
 //! - **Draw-sized decoding.** The frame reads each image with the size it draws it at
 //!   ([`bobcat_core::ImageSizeHint`]); a bitmap far larger than its draw is re-decoded at the drawn
 //!   size in the background, so a photo shown as a thumbnail costs a thumbnail.
@@ -108,6 +113,7 @@ mod executor;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod file_body;
 mod images;
+pub mod media;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod platform;
 mod registry;
@@ -534,6 +540,8 @@ pub(crate) struct Shared<P: Platform> {
     initial_decode_bound: u32,
     downsample_ratio: f32,
     decoder: Handle<P::Decoder>,
+    /// The platform's video player, which opens every video of every scope.
+    media: Handle<P::Media>,
     completions: tokio::sync::mpsc::UnboundedSender<Completion<FrameOf<P>>>,
     wakeup: Wakeup,
     log_to_stderr: bool,
@@ -805,6 +813,8 @@ pub struct Resources<
     #[cfg(not(target_arch = "wasm32"))]
     executor: Arc<executor::Executor>,
     local: Rc<RefCell<ImageState<FrameOf<P>>>>,
+    /// The scope's videos, each with its platform player.
+    media: Rc<RefCell<media::MediaPictures<P>>>,
     style_cache: Rc<RefCell<sources::StyleCache>>,
 }
 
@@ -815,6 +825,7 @@ impl<P: Platform> Clone for Resources<P> {
             #[cfg(not(target_arch = "wasm32"))]
             executor: Arc::clone(&self.executor),
             local: Rc::clone(&self.local),
+            media: Rc::clone(&self.media),
             style_cache: Rc::clone(&self.style_cache),
         }
     }
@@ -883,6 +894,7 @@ impl<P: Platform> Resources<P> {
         let Parts {
             fetch,
             decoder,
+            media,
             bytes,
             artifacts,
         } = platform.into_parts();
@@ -909,6 +921,7 @@ impl<P: Platform> Resources<P> {
             initial_decode_bound,
             downsample_ratio,
             decoder: Handle::new(decoder),
+            media: Handle::new(media),
             completions,
             wakeup: Arc::new(wakeup),
             log_to_stderr: config.log_to_stderr,
@@ -929,6 +942,7 @@ impl<P: Platform> Resources<P> {
                 config.decode_parallelism,
             )),
             style_cache: Rc::default(),
+            media: Rc::default(),
             local: Rc::new(RefCell::new(ImageState::new(
                 ImageResidency::new(
                     config.memory_budget_bytes,
@@ -991,6 +1005,7 @@ impl<P: Platform> Resources<P> {
                 initial_decode_bound: self.shared.initial_decode_bound,
                 downsample_ratio: self.shared.downsample_ratio,
                 decoder: Handle::clone(&self.shared.decoder),
+                media: Handle::clone(&self.shared.media),
                 completions,
                 wakeup: self.shared.wakeup.clone(),
                 log_to_stderr: self.shared.log_to_stderr,
@@ -1006,6 +1021,7 @@ impl<P: Platform> Resources<P> {
             #[cfg(not(target_arch = "wasm32"))]
             executor: Arc::clone(&self.executor),
             style_cache: Rc::default(),
+            media: Rc::default(),
             local: Rc::new(RefCell::new(ImageState::new(
                 ImageResidency::new(
                     self.local.borrow().residency.budget(),
@@ -1372,6 +1388,10 @@ impl<P: Platform> Drop for ViewResources<P> {
             Vec::new()
         };
         images::forget_frames(&self.resources, stopped);
+        // The videos it opened close with it.
+        if let Ok(mut media) = self.resources.media.try_borrow_mut() {
+            media.release_view(self.view);
+        }
     }
 }
 
@@ -1422,6 +1442,7 @@ where
 
     fn service_images(&self) {
         images::service(&self.resources);
+        self.resources.media.borrow().service();
         flush_code_cache(&self.resources);
     }
 
@@ -1482,23 +1503,36 @@ where
     ) -> Option<bobcat_core::FrameImage<FrameOf<P>>> {
         match picture {
             PictureKey::Url(source) => images::describe(&self.resources, source, hint),
+            PictureKey::Id(picture) if self.resources.media.borrow().contains(*picture) => {
+                self.resources.media.borrow().describe(*picture)
+            }
             PictureKey::Id(picture) => images::describe_picture(&self.resources, *picture, hint),
         }
     }
 
     fn take_frame(&self, picture: PictureId) -> Option<bobcat_core::TakenFrame<FrameOf<P>>> {
+        let media = self.resources.media.borrow();
+        if media.contains(picture) {
+            return media.take_frame(picture);
+        }
+        drop(media);
         images::take_frame(&self.resources, picture)
     }
 
     fn want(&self, picture: &PictureKey, hint: ImageSizeHint) {
         match picture {
             PictureKey::Url(source) => images::want(&self.resources, source, hint),
+            PictureKey::Id(picture) if self.resources.media.borrow().contains(*picture) => {
+                self.resources.media.borrow().want(*picture);
+            }
             PictureKey::Id(picture) => images::want_picture(&self.resources, *picture, hint),
         }
     }
 
     fn retain(&self, drawn: &[PictureKey]) {
-        images::retain(&self.resources, self.view, &urls(drawn), &ids(drawn));
+        let ids = ids(drawn);
+        self.resources.media.borrow_mut().retain(self.view, &ids);
+        images::retain(&self.resources, self.view, &urls(drawn), &ids);
     }
 
     fn release(&self, pictures: &[PictureKey]) {

@@ -80,5 +80,6 @@ the main-thread flush binding — and
   events (`main/layout_change.rs`).
 - [Page policy: tags, text and the UA sheet](docs/page-policy.md) — Lynx page
   policy in the `tree` module (`tree/lib.rs`, `ua_sheet.rs`): tags, text, the
-  UA sheet, and the sources of the `image` and `svg` elements
-  (`tree/image_sources.rs`), which `bobcat-core` owns and `terminus` does not.
+  UA sheet, the sources of the `image` and `svg` elements
+  (`tree/image_sources.rs`) and the `video` element (`tree/video.rs`), which
+  `bobcat-core` owns and `terminus` does not.

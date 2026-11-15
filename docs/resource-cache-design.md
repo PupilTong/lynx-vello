@@ -24,7 +24,7 @@ resources: the engine owns the policy, the embedder owns the bytes.
 
 | crate | owns | depends on |
 |---|---|---|
-| `vant` | every resource **policy**: `CachePolicy`, the memory tier, RFC 9111 freshness, the byte-cache tier over a `Store`, image residency and refinement decisions, MIME sniffing and preprocessing, image header probing, `data:` URLs, the resource error vocabulary, the embedder traits (`Fetch`, `Store`, `AsyncStore`, `ImageDecoder`) and `Platform`, and (PR2) the derived-artifact cache that backs the QuickJS code cache, with a synchronous and an asynchronous driver | `bytes`, `http`, `url`, `rustc-hash`, `serde_json`, `thiserror`, `vello_common` (for `peniko::ImageData`), `siphasher`. **Never** `terminus`, `bobcat-core`, tokio, libc bindings or `web-sys`. |
+| `vant` | every resource **policy**: `CachePolicy`, the memory tier, RFC 9111 freshness, the byte-cache tier over a `Store`, image residency and refinement decisions, MIME sniffing and preprocessing, image header probing, `data:` URLs, the resource error vocabulary, the embedder traits (`Fetch`, `Store`, `AsyncStore`, `ImageDecoder`, `Media`) and `Platform`, and (PR2) the derived-artifact cache that backs the QuickJS code cache, with a synchronous and an asynchronous driver | `bytes`, `http`, `url`, `rustc-hash`, `serde_json`, `thiserror`, `vello_common` (for `peniko::ImageData`), `siphasher`. **Never** `terminus`, `bobcat-core`, tokio, libc bindings or `web-sys`. |
 | `bobcat-resources` | the reference **orchestrator** (`Resources<P>`, `ViewResources<P>`, the image job pipeline, source loading, background installs over `vant::registry` (PR4), the native executor) and the shipped **native adapters**: `NativeFetch` (libcurl + `file:`), `FsStore` (a cache directory), `NativeDecoder` (ImageIO / gdk-pixbuf); the browser's adapters (`BrowserFetch`, `BrowserDecoder`, `CacheStore`) are `bobcat-wasm`'s since PR3 | `vant`, `bobcat-core`, tokio, the platform libraries |
 | `terminus` | re-exports `vant::ImageSizeHint` at `terminus::link::ImageSizeHint`; (PR5) owns the image store type `terminus::link::ImageResidency` over `vant::image::residency::Residency`, with the engine's constants and report dispatch | `vant` |
 
@@ -261,6 +261,19 @@ wanted. Its bytes are counted from its size, four a pixel. The writer that
 copies one into a texture is the frame type's own
 (`terminus::link::FrameWriter`, `docs/picture-source-design.md` "Writer").
 
+### `Media` — a video player
+
+`vant::media::Media<F>` is a platform's video player, `F` the decoder's frame
+type, so a video's frames are drawn by the same writer as a decoded image's
+(`docs/picture-source-design.md`, "Video"). `reads(url)` says whether
+`open` is handed the URL or the bytes the resource system fetched for it;
+`open(source, settings, sink)` answers a `MediaPlayer` (`play`, `pause`,
+`set_loop`, `set_muted`), and the player hands the `MediaSink` each new
+frame and its `FirstFrame`, `Ended` and `Failed` events. `NoMedia` is a
+platform without one, whose every open fails. The policy of what is
+published when is `bobcat-resources`' (`src/media/`); what an element does
+with the events is `bobcat-core`'s.
+
 ### `Platform` — the bundle an embedder hands over
 
 ```rust
@@ -269,14 +282,17 @@ pub trait Platform: 'static {
     type Store: Store;            // `NoStore` for a host with no synchronous tier
     type AsyncStore: AsyncStore;  // `NoStore` for a host without one
     type Decoder: ImageDecoder;
+    /// `NoMedia` for a host with no video player.
+    type Media: Media<<Self::Decoder as ImageDecoder>::Frame>;
     /// Taken apart once, when the resource system is built: each tier owns
     /// its store.
-    fn into_parts(self) -> Parts<Self::Fetch, Self::Store, Self::AsyncStore, Self::Decoder>;
+    fn into_parts(self) -> PartsOf<Self>;
 }
 pub enum ArtifactStore<S, A> { Blocking(S), Async(A) }
-pub struct Parts<F, S, A, D> {
+pub struct Parts<F, S, A, D, M = NoMedia> {
     pub fetch: F,
     pub decoder: D,
+    pub media: M,
     pub bytes: Option<Tier<S>>,                          // the HTTP byte tier
     pub artifacts: Option<Tier<ArtifactStore<S, A>>>,    // the derived-artifact tier (PR2)
 }
@@ -293,9 +309,11 @@ The resource system (`Resources::with_platform`) takes the parts, opens a
 when the second tier arrived.)
 
 `bobcat-resources` ships `NativePlatform` (`NativeFetch`, `FsStore`,
-`NativeDecoder`, `ArtifactStore::Blocking(FsStore)` for the artifact tier);
+`NativeDecoder`, `ArtifactStore::Blocking(FsStore)` for the artifact tier,
+`NativeMedia`: AVFoundation on macOS, `NoMedia` on Linux);
 `bobcat-wasm` ships `BrowserPlatform` (`BrowserFetch`,
-`ArtifactStore::Async(CacheStore)` for the artifact tier, `BrowserDecoder`). An embedder with its own HTTP stack or storage implements
+`ArtifactStore::Async(CacheStore)` for the artifact tier, `BrowserDecoder`,
+`BrowserMedia`). An embedder with its own HTTP stack or storage implements
 the traits and passes its own `Platform`.
 
 ## Tiers in `vant`

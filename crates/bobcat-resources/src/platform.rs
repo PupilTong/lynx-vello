@@ -18,8 +18,9 @@ use crate::transport::NativeFetch;
 
 /// macOS and Linux: libcurl and the local filesystem ([`NativeFetch`]), a
 /// cache directory when one is configured ([`FsStore`]) with the code
-/// cache's own directory inside it, and `ImageIO` or gdk-pixbuf
-/// ([`NativeDecoder`]).
+/// cache's own directory inside it, `ImageIO` or gdk-pixbuf
+/// ([`NativeDecoder`]), and `AVFoundation` on macOS or no video player on
+/// Linux ([`NativeMedia`]).
 #[derive(Debug)]
 pub struct NativePlatform {
     fetch: NativeFetch,
@@ -69,16 +70,28 @@ impl NativePlatform {
     }
 }
 
+/// The native video player: `AVFoundation` on macOS
+/// ([`AvMedia`](crate::media::avfoundation::AvMedia)), none on Linux, where
+/// every video fails to open ([`vant::media::NoMedia`]).
+#[cfg(target_os = "macos")]
+pub type NativeMedia = crate::media::avfoundation::AvMedia;
+/// The native video player: `AVFoundation` on macOS, none on Linux, where
+/// every video fails to open ([`vant::media::NoMedia`]).
+#[cfg(not(target_os = "macos"))]
+pub type NativeMedia = vant::media::NoMedia;
+
 impl Platform for NativePlatform {
     type Fetch = NativeFetch;
     type Store = FsStore;
     type AsyncStore = NoStore;
     type Decoder = NativeDecoder;
+    type Media = NativeMedia;
 
-    fn into_parts(self) -> Parts<NativeFetch, FsStore, NoStore, NativeDecoder> {
+    fn into_parts(self) -> Parts<NativeFetch, FsStore, NoStore, NativeDecoder, NativeMedia> {
         Parts {
             fetch: self.fetch,
             decoder: self.decoder,
+            media: NativeMedia::default(),
             bytes: self.bytes,
             artifacts: self.artifacts.map(|tier| Tier {
                 store: ArtifactStore::Blocking(tier.store),

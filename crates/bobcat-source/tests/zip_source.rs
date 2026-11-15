@@ -102,11 +102,13 @@ mod offline {
         type Store = NoStore;
         type AsyncStore = NoStore;
         type Decoder = NoDecoder;
+        type Media = vant::media::NoMedia;
 
         fn into_parts(self) -> Parts<NoFetch, NoStore, NoStore, NoDecoder> {
             Parts {
                 fetch: NoFetch,
                 decoder: NoDecoder,
+                media: vant::media::NoMedia,
                 bytes: None,
                 artifacts: None,
             }
