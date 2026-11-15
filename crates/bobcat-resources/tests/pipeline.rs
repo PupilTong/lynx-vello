@@ -142,6 +142,7 @@ impl Harness {
         self.view
             .describe(&url(source), hint)
             .and_then(|image| image.pixels)
+            .map(bobcat_core::PictureFrame::into_pixels)
     }
 
     /// Wants `source` at `hint`, as a painter with nothing to draw it from
@@ -327,7 +328,10 @@ fn a_released_bitmap_leaves_the_tier_and_a_want_restores_it() {
         .view
         .describe(&url("app:///a.png"), ImageSizeHint::new(32, 32))
         .expect("a loaded bitmap is described");
-    let pixels = described.pixels.expect("resident, so with its pixels");
+    let pixels = described
+        .pixels
+        .expect("resident, so with its pixels")
+        .into_pixels();
     assert_eq!(
         described.descriptor,
         bobcat_core::ImageDescriptor::of(&pixels)

@@ -118,6 +118,8 @@ impl PngFrames {
 }
 
 impl ImageDecoder for PngFrames {
+    type Frame = std::convert::Infallible;
+
     fn decode_blocking(
         &self,
         bytes: &[u8],
@@ -315,7 +317,11 @@ const HINT: ImageSizeHint = ImageSizeHint::new(8, 8);
 
 /// The colour of the top-left pixel a describe answered with.
 fn colour(image: &FrameImage) -> [u8; 4] {
-    let pixels = image.pixels.as_ref().expect("pixels");
+    let pixels = image
+        .pixels
+        .as_ref()
+        .and_then(PictureFrame::pixels)
+        .expect("pixels");
     pixels.data.data()[..4].try_into().expect("four")
 }
 

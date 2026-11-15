@@ -1,9 +1,25 @@
 //! Image sizing and decoded pixels: the size hint a frame reports for each
-//! image, the one downsampling rule every host shares, the shape every
-//! platform decoder answers in ([`Bitmap`]), when a resident bitmap is
-//! worth decoding again at another size, the residency policy built on
-//! them ([`residency::Residency`]), and the playback policy of an animated
-//! image ([`animation`]).
+//! image, the one downsampling rule every host shares, the shapes a
+//! platform decoder answers in ([`Bitmap`] for CPU pixels,
+//! [`PlatformBitmap`] for a frame of the platform's own type, either as a
+//! [`DecodedImage`]), when a resident bitmap is worth decoding again at
+//! another size, the residency policy built on them
+//! ([`residency::Residency`]), and the playback policy of an animated image
+//! ([`animation`]).
+//!
+//! # Platform frames
+//!
+//! A decoder may answer a frame that is not CPU pixels: the browser's
+//! `createImageBitmap` answers an `ImageBitmap`, whose pixels live where the
+//! browser keeps them and are copied straight into a texture. This crate
+//! never looks inside one. It is a value of the decoder's own type
+//! ([`ImageDecoder::Frame`](crate::ImageDecoder::Frame)), carried as
+//! [`PictureFrame::Platform`] beside the [`ImageDescriptor`] minted for it
+//! ([`ImageDescriptor::platform`]), and its bytes are counted from its size.
+//! A decoder that answers CPU pixels only names an uninhabited frame type
+//! ([`std::convert::Infallible`]), and every generic here defaults to it.
+
+use std::convert::Infallible;
 
 use vello_common::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat as PixelFormat};
 
@@ -122,6 +138,120 @@ impl Bitmap {
     }
 }
 
+/// A frame a platform decoder answered in its own form, with the sizes a
+/// [`Bitmap`] carries beside its pixels.
+#[derive(Clone, Debug)]
+pub struct PlatformBitmap<F> {
+    /// The frame, in the decoder's own type.
+    pub frame: F,
+    pub width: u32,
+    pub height: u32,
+    /// The image's intrinsic size, as [`Bitmap::source_width`] is.
+    pub source_width: u32,
+    pub source_height: u32,
+}
+
+/// What a decoder answers: CPU pixels, or a frame of its own type.
+#[derive(Clone, Debug)]
+pub enum DecodedImage<F = Infallible> {
+    Pixels(Bitmap),
+    Platform(PlatformBitmap<F>),
+}
+
+impl<F> From<Bitmap> for DecodedImage<F> {
+    fn from(bitmap: Bitmap) -> Self {
+        Self::Pixels(bitmap)
+    }
+}
+
+impl<F> DecodedImage<F> {
+    /// The decoded size.
+    #[must_use]
+    pub fn size(&self) -> (u32, u32) {
+        match self {
+            Self::Pixels(bitmap) => (bitmap.width, bitmap.height),
+            Self::Platform(bitmap) => (bitmap.width, bitmap.height),
+        }
+    }
+
+    /// The image's intrinsic size, which the decoded one is a rendition of.
+    #[must_use]
+    pub fn source_size(&self) -> (u32, u32) {
+        match self {
+            Self::Pixels(bitmap) => (bitmap.source_width, bitmap.source_height),
+            Self::Platform(bitmap) => (bitmap.source_width, bitmap.source_height),
+        }
+    }
+
+    /// The bytes it is counted as: the pixels' own length, or four bytes per
+    /// pixel of a platform frame, which is what its texture holds.
+    #[must_use]
+    pub fn byte_len(&self) -> usize {
+        match self {
+            Self::Pixels(bitmap) => bitmap.byte_len(),
+            Self::Platform(bitmap) => frame_bytes(bitmap.width, bitmap.height),
+        }
+    }
+
+    /// The frame a picture draws, and the descriptor that names it: the
+    /// pixels' own, or one minted for a platform frame.
+    #[must_use]
+    pub fn into_frame(self) -> (PictureFrame<F>, ImageDescriptor) {
+        match self {
+            Self::Pixels(bitmap) => {
+                let image = bitmap.into_image_data();
+                let descriptor = ImageDescriptor::of(&image);
+                (PictureFrame::Pixels(image), descriptor)
+            }
+            Self::Platform(bitmap) => (
+                PictureFrame::Platform(bitmap.frame),
+                ImageDescriptor::platform(bitmap.width, bitmap.height),
+            ),
+        }
+    }
+}
+
+/// The bytes a `width` × `height` frame of four bytes a pixel holds.
+#[must_use]
+pub fn frame_bytes(width: u32, height: u32) -> usize {
+    (width as usize)
+        .saturating_mul(height as usize)
+        .saturating_mul(4)
+}
+
+/// One frame of a picture: CPU pixels, or a frame in the platform's own
+/// form ([`PlatformBitmap`]), which only the platform's writer can copy into
+/// a texture.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PictureFrame<P = Infallible> {
+    /// CPU pixels, which the rasterizer converts and writes into a texture.
+    Pixels(ImageData),
+    /// A frame in the embedder's own form.
+    Platform(P),
+}
+
+impl<P> PictureFrame<P> {
+    /// The CPU pixels, for a [`Self::Pixels`] frame.
+    #[must_use]
+    pub const fn pixels(&self) -> Option<&ImageData> {
+        match self {
+            Self::Pixels(pixels) => Some(pixels),
+            Self::Platform(_) => None,
+        }
+    }
+}
+
+impl PictureFrame {
+    /// The CPU pixels of a frame of a store that has no platform frames.
+    #[must_use]
+    pub fn into_pixels(self) -> ImageData {
+        match self {
+            Self::Pixels(pixels) => pixels,
+            Self::Platform(never) => match never {},
+        }
+    }
+}
+
 /// What a decoded bitmap is, without its pixels: everything a rasterizer
 /// keys an upload of it on — the blob's identity, its size and its layout.
 ///
@@ -162,6 +292,22 @@ impl ImageDescriptor {
             height: image.height,
             format: image.format,
             alpha_type: image.alpha_type,
+        }
+    }
+
+    /// A descriptor for a `width` × `height` platform frame, which has no
+    /// blob: its identity is a blob id no pixels have, taken from the same
+    /// counter every [`Blob`] takes its id from, so it never names another
+    /// bitmap. The layout is what the frame's writer produces, premultiplied
+    /// RGBA8.
+    #[must_use]
+    pub fn platform(width: u32, height: u32) -> Self {
+        Self {
+            blob: Blob::<u8>::from(Vec::new()).id(),
+            width,
+            height,
+            format: PixelFormat::Rgba8,
+            alpha_type: ImageAlphaType::AlphaPremultiplied,
         }
     }
 
@@ -305,6 +451,45 @@ mod tests {
         let rebuilt = descriptor.with_pixels(weak.upgrade().expect("still held"));
         assert_eq!(rebuilt, image);
         assert_eq!(ImageDescriptor::of(&rebuilt), descriptor);
+    }
+
+    /// A platform frame is counted at four bytes a pixel and named by a
+    /// descriptor no pixels share.
+    #[test]
+    fn a_platform_frame_gets_a_descriptor_of_its_own_and_counts_its_size() {
+        let decoded: DecodedImage<u8> = DecodedImage::Platform(PlatformBitmap {
+            frame: 7,
+            width: 3,
+            height: 2,
+            source_width: 30,
+            source_height: 20,
+        });
+        assert_eq!(decoded.size(), (3, 2));
+        assert_eq!(decoded.source_size(), (30, 20));
+        assert_eq!(decoded.byte_len(), 3 * 2 * 4);
+        let (frame, descriptor) = decoded.clone().into_frame();
+        assert_eq!(frame, PictureFrame::Platform(7));
+        assert_eq!(frame.pixels(), None);
+        assert_eq!(
+            descriptor.alpha_type,
+            ImageAlphaType::AlphaPremultiplied,
+            "what the frame's writer produces"
+        );
+        let (_, other) = decoded.into_frame();
+        assert_ne!(
+            descriptor.blob, other.blob,
+            "each frame is a bitmap of its own"
+        );
+        let pixels = Bitmap {
+            width: 1,
+            height: 1,
+            source_width: 1,
+            source_height: 1,
+            premultiplied: false,
+            rgba: vec![0; 4],
+        }
+        .into_image_data();
+        assert_ne!(descriptor.blob, pixels.data.id());
     }
 
     #[test]

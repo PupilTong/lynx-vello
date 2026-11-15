@@ -21,7 +21,10 @@
 //! bakes, bound by [`SparseBackend::bind`]) is drawn as an external texture
 //! under its own id, sampled in place; a bitmap is uploaded once to a
 //! texture of its own, drawn the same way, and released once renders stop
-//! drawing it and no painter leases it ([`Bitmaps`], [`BitmapLeases`]).
+//! drawing it and no painter leases it ([`Bitmaps`], [`BitmapLeases`]). A
+//! platform frame — a frame of the embedder's own type — is uploaded the
+//! same way by its own writer ([`FrameWriter`]), in the painter's adoption
+//! rather than in a render ([`BitmapLeases::upload_frame`]).
 //!
 //! Every target on a device renders through the one `vello_gpu` renderer
 //! of its [`SharedGpu`] ([`SharedRaster`]); each target's
@@ -58,7 +61,7 @@ use crate::paint::display_list::{
 };
 use crate::peniko::{Color, Extend, Fill, ImageAlphaType, ImageData, ImageFormat, ImageSampler};
 use crate::render::image::ImageDescriptor;
-use crate::render::picture::PictureId;
+use crate::render::picture::{FrameTarget, FrameWriter, PictureFrame, PictureId};
 
 /// What one frame cost, and what it could not draw.
 #[derive(Debug, Default, Clone, Copy)]
@@ -981,14 +984,15 @@ impl BitmapLeases {
         self.gpu.raster.bitmaps().lease_picture(self.owner, picture)
     }
 
-    /// Writes `pixels`, frame `generation` of `picture`, into the picture's
-    /// own texture and leases it ([`SharedRaster::write_picture`]); answers
-    /// whether it was written.
-    pub(crate) fn write_picture(
+    /// Writes `frame`, frame `generation` of `picture`, which `descriptor`
+    /// names, into the picture's own texture and leases it
+    /// ([`SharedRaster::write_picture`]); answers whether it was written.
+    pub(crate) fn write_picture<W: FrameWriter>(
         &self,
         picture: PictureId,
         generation: u64,
-        pixels: &ImageData,
+        descriptor: ImageDescriptor,
+        frame: &PictureFrame<W>,
     ) -> bool {
         let SharedGpu {
             device,
@@ -996,7 +1000,30 @@ impl BitmapLeases {
             raster,
             ..
         } = &*self.gpu;
-        raster.write_picture(device, queue, self.owner, picture, generation, pixels)
+        raster.write_picture(
+            device, queue, self.owner, picture, generation, descriptor, frame,
+        )
+    }
+
+    /// Uploads `frame`, the platform frame `descriptor` names, through its
+    /// own writer and leases the upload, which draws it from then on as a
+    /// CPU bitmap's upload is drawn ([`ImageRef::uploaded`]); an upload
+    /// already there is leased instead. Answers whether it is leased.
+    pub(crate) fn upload_frame<W: FrameWriter>(
+        &self,
+        descriptor: &ImageDescriptor,
+        frame: &W,
+    ) -> bool {
+        if self.lease(descriptor) {
+            return true;
+        }
+        let SharedGpu {
+            device,
+            queue,
+            raster,
+            ..
+        } = &*self.gpu;
+        raster.upload_frame(device, queue, self.owner, descriptor, frame)
     }
 
     /// How many bitmaps have been uploaded on this device, by any target:
@@ -1012,6 +1039,38 @@ impl Drop for BitmapLeases {
     }
 }
 
+/// What a bitmap's texture is used as: sampled, and written by a copy.
+const BITMAP_USAGE: wgpu::TextureUsages =
+    wgpu::TextureUsages::TEXTURE_BINDING.union(wgpu::TextureUsages::COPY_DST);
+
+/// What a platform frame's texture is used as: a bitmap's usages and a
+/// render attachment, which the browser's `copyExternalImageToTexture`
+/// requires of its destination ([`FrameTarget`]).
+const FRAME_USAGE: wgpu::TextureUsages = BITMAP_USAGE.union(wgpu::TextureUsages::RENDER_ATTACHMENT);
+
+/// An empty `width` × `height` RGBA8 texture with `usage`.
+fn bitmap_texture(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+    usage: wgpu::TextureUsages,
+) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("terminus bitmap"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage,
+        view_formats: &[],
+    })
+}
+
 /// A texture of its own holding `texels`, a `width` × `height` premultiplied
 /// RGBA8 bitmap, and the id it is drawn under: `id`, or a fresh one.
 fn own_texture(
@@ -1022,26 +1081,69 @@ fn own_texture(
     height: u32,
     id: Option<TextureId>,
 ) -> (TextureId, wgpu::TextureView) {
-    let size = wgpu::Extent3d {
-        width,
-        height,
-        depth_or_array_layers: 1,
-    };
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("terminus bitmap"),
-        size,
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8Unorm,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[],
-    });
+    let texture = bitmap_texture(device, width, height, BITMAP_USAGE);
     write_texels(queue, &texture, texels, width, height);
     (
         id.unwrap_or_else(|| TextureId(next_texture_id())),
         texture.create_view(&wgpu::TextureViewDescriptor::default()),
     )
+}
+
+/// What a write puts into a picture's texture: CPU pixels converted to
+/// premultiplied texels, or a platform frame its own writer copies.
+enum Content<'a, W> {
+    Texels { texels: Vec<u8>, opaque: bool },
+    Frame(&'a W),
+}
+
+impl<W: FrameWriter> Content<'_, W> {
+    /// The usages the texture written needs.
+    const fn usage(&self) -> wgpu::TextureUsages {
+        match self {
+            Self::Texels { .. } => BITMAP_USAGE,
+            Self::Frame(_) => FRAME_USAGE,
+        }
+    }
+
+    /// Whether every pixel is opaque, as far as is known: a platform frame
+    /// is never read back, so it is drawn as one that may not be.
+    const fn opaque(&self) -> bool {
+        match self {
+            Self::Texels { opaque, .. } => *opaque,
+            Self::Frame(_) => false,
+        }
+    }
+
+    /// The bytes the texture is counted as.
+    fn bytes(&self, width: u32, height: u32) -> u64 {
+        match self {
+            Self::Texels { texels, .. } => texels.len() as u64,
+            Self::Frame(_) => u64::from(width) * u64::from(height) * 4,
+        }
+    }
+
+    /// Queues the write into `texture`, which is `width` × `height`.
+    fn write(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        texture: &wgpu::Texture,
+        width: u32,
+        height: u32,
+    ) -> bool {
+        match self {
+            Self::Texels { texels, .. } => {
+                write_texels(queue, texture, texels, width, height);
+                true
+            }
+            Self::Frame(frame) => frame.write(&FrameTarget {
+                device,
+                queue,
+                texture,
+                size: (width, height),
+            }),
+        }
+    }
 }
 
 /// Writes `texels`, a `width` × `height` premultiplied RGBA8 bitmap, over
@@ -1184,59 +1286,78 @@ impl SharedRaster {
         Ok(image)
     }
 
-    /// Writes `pixels`, frame `generation` of `picture`, into the picture's
-    /// own texture and leases it to `owner`, answering whether it was
-    /// written: `false` for pixels that cannot be drawn (too few bytes, a
-    /// zero or too long side), which leaves the texture as it was.
+    /// Writes `frame`, frame `generation` of `picture`, which `descriptor`
+    /// names, into the picture's own texture and leases it to `owner`,
+    /// answering whether it was written: `false` for a frame that cannot be
+    /// drawn (too few bytes, a zero or too long side, a platform frame its
+    /// writer could not copy), which leaves the texture as it was.
     ///
     /// The texture is rewritten in place under its one id when the frame is
-    /// the size of the last, and replaced by one of the new size under the
-    /// same id when it is not, so every draw of the picture, in a list
-    /// composed before the write or after it, samples the newest frame. The
-    /// conversion runs with no lock held; the write itself is queued, and
-    /// lands before the next submitted render.
-    fn write_picture(
+    /// the size of the last and the texture has the usages the frame's
+    /// write needs, and replaced by a new one under the same id when it does
+    /// not, so every draw of the picture, in a list composed before the write
+    /// or after it, samples the newest frame. The conversion runs with no
+    /// lock held; the write itself is queued, and lands before the next
+    /// submitted render.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the device pair, the lease owner, and the frame with its three names"
+    )]
+    fn write_picture<W: FrameWriter>(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         owner: u64,
         picture: PictureId,
         generation: u64,
-        pixels: &ImageData,
+        descriptor: ImageDescriptor,
+        frame: &PictureFrame<W>,
     ) -> bool {
         let longest = device.limits().max_texture_dimension_2d;
-        let (width, height) = (pixels.width, pixels.height);
+        let (width, height) = (descriptor.width, descriptor.height);
         if width == 0 || height == 0 || width > longest || height > longest {
             return false;
         }
-        let Some((texels, opaque)) = premultiplied(pixels) else {
-            return false;
+        let content = match frame {
+            PictureFrame::Pixels(pixels) => {
+                let Some((texels, opaque)) = premultiplied(pixels) else {
+                    return false;
+                };
+                Content::Texels { texels, opaque }
+            }
+            PictureFrame::Platform(frame) => Content::Frame(frame),
         };
         let key = BitmapKey::Picture(picture);
+        let usage = content.usage();
         let held = self.bitmaps().entries.get(&key).map(|bitmap| {
             let texture = bitmap.view.texture();
             (
                 bitmap.id,
-                (texture.width(), texture.height()) == (width, height),
+                (texture.width(), texture.height()) == (width, height)
+                    && texture.usage().contains(usage),
                 texture.clone(),
             )
         });
-        let replaced = match &held {
-            Some((_, true, texture)) => {
-                write_texels(queue, texture, &texels, width, height);
-                None
+        let replaced = if let Some((_, true, texture)) = &held {
+            if !content.write(device, queue, texture, width, height) {
+                return false;
             }
-            Some((id, false, _)) => Some(own_texture(
-                device,
-                queue,
-                &texels,
-                width,
-                height,
-                Some(*id),
-            )),
-            None => Some(own_texture(device, queue, &texels, width, height, None)),
+            None
+        } else {
+            let texture = bitmap_texture(device, width, height, usage);
+            if !content.write(device, queue, &texture, width, height) {
+                return false;
+            }
+            let id = held
+                .as_ref()
+                .map_or_else(|| TextureId(next_texture_id()), |(id, _, _)| *id);
+            Some((
+                id,
+                texture.create_view(&wgpu::TextureViewDescriptor::default()),
+            ))
         };
-        let bytes = texels.len() as u64;
+        let bytes = content.bytes(width, height);
+        let opaque = content.opaque();
         let mut bitmaps = self.bitmaps();
         let Bitmaps {
             entries,
@@ -1244,7 +1365,7 @@ impl SharedRaster {
             leases,
             ..
         } = &mut *bitmaps;
-        let written = Some((generation, ImageDescriptor::of(pixels)));
+        let written = Some((generation, descriptor));
         if let Some(bitmap) = entries.get_mut(&key) {
             if let Some((_, view)) = replaced {
                 bitmap.view = view;
@@ -1290,6 +1411,54 @@ impl SharedRaster {
         drop(bitmaps);
         self.uploads.fetch_add(1, Ordering::Release);
         true
+    }
+
+    /// Uploads `frame`, the platform frame `descriptor` names, into a
+    /// texture of its own through the frame's writer, keyed as a CPU
+    /// bitmap's upload is, and leases it to `owner`. Answers whether it is
+    /// leased: `false` for a side that is zero or longer than the device's
+    /// longest, or a frame its writer could not copy. Another target that
+    /// uploaded the same frame meanwhile keeps its upload, and this one is
+    /// dropped.
+    fn upload_frame<W: FrameWriter>(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        owner: u64,
+        descriptor: &ImageDescriptor,
+        frame: &W,
+    ) -> bool {
+        let longest = device.limits().max_texture_dimension_2d;
+        let (width, height) = (descriptor.width, descriptor.height);
+        if width == 0 || height == 0 || width > longest || height > longest {
+            return false;
+        }
+        let content = Content::Frame(frame);
+        let texture = bitmap_texture(device, width, height, content.usage());
+        if !content.write(device, queue, &texture, width, height) {
+            return false;
+        }
+        let key = BitmapKey::of(descriptor);
+        let mut bitmaps = self.bitmaps();
+        if !bitmaps.entries.contains_key(&key) {
+            let bytes = content.bytes(width, height);
+            bitmaps.bytes += bytes;
+            bitmaps.entries.insert(
+                key,
+                Bitmap {
+                    id: TextureId(next_texture_id()),
+                    view: texture.create_view(&wgpu::TextureViewDescriptor::default()),
+                    opaque: content.opaque(),
+                    bytes,
+                    written: None,
+                    last_drawn: 0,
+                    pins: SmallVec::new(),
+                    leases: 0,
+                },
+            );
+            self.uploads.fetch_add(1, Ordering::Release);
+        }
+        bitmaps.lease(owner, descriptor)
     }
 
     /// The GPU half of a render on `gpu`, whose rasterizer this is: `scene`,

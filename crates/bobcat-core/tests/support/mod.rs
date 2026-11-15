@@ -39,7 +39,7 @@ pub async fn solo_view<R, F, B>(
 ) -> Result<(LynxView<F>, Painter), LynxViewError>
 where
     R: EventRequester,
-    F: ResourceFetcher + 'static,
+    F: ResourceFetcher<PlatformFrame = std::convert::Infallible> + 'static,
     B: FnOnce(ImageReports) -> F,
 {
     let view = LynxGroup::new(event_requester, StyleThreads::Auto)

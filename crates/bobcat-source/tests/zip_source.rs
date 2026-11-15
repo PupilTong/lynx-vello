@@ -76,6 +76,8 @@ mod offline {
     pub struct NoDecoder;
 
     impl ImageDecoder for NoDecoder {
+        type Frame = std::convert::Infallible;
+
         fn decode_blocking(
             &self,
             _bytes: &[u8],

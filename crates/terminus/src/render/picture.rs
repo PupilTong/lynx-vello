@@ -17,11 +17,20 @@
 //! next adopts. Nothing queues behind the newest frame: a frame replaced
 //! before the painter took it is never drawn.
 //!
-//! A frame is CPU pixels today. [`PictureFrame::Platform`] holds a value of
-//! the embedder's own type, named by
-//! [`FrameImages::PlatformFrame`](crate::render::image::FrameImages::PlatformFrame);
-//! the painter accepts only stores whose platform frame type is uninhabited
-//! ([`std::convert::Infallible`]), so no platform frame reaches it yet.
+//! A frame is CPU pixels ([`PictureFrame::Pixels`]) or a value of the
+//! embedder's own type ([`PictureFrame::Platform`]), named by
+//! [`FrameImages::PlatformFrame`](crate::render::image::FrameImages::PlatformFrame)
+//! — an `ImageBitmap` in the browser. The painter writes CPU pixels itself;
+//! a platform frame writes itself ([`FrameWriter`]) into a texture the
+//! painter created for it, on the painter's thread. A store with no
+//! platform frames names [`std::convert::Infallible`], which needs no
+//! writer.
+//!
+//! A frame is used on the thread of the store that answers it, which is the
+//! painter's. A producer on another thread hands its frame to that thread
+//! by its platform's own means first — the browser transfers an
+//! `ImageBitmap` or a `VideoFrame` to the Render Worker with `postMessage` —
+//! and publishes it there.
 //!
 //! The thread that builds the document holds a picture's key and its natural
 //! size, never a frame.
@@ -43,6 +52,7 @@ use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
+pub use vant::image::PictureFrame;
 pub use vant::image::animation::{Control as PlaybackControl, Loops, PlayPolicy};
 
 use crate::clock::ClockInstant;
@@ -162,15 +172,48 @@ impl From<PictureId> for PictureKey {
     }
 }
 
-/// One frame of a picture.
-#[derive(Clone, Debug)]
-pub enum PictureFrame<P = Infallible> {
-    /// CPU pixels, which the painter converts and writes into the picture's
-    /// texture.
-    Pixels(ImageData),
-    /// A frame in the embedder's own form. Not drawn yet: the painter accepts
-    /// only stores whose platform frame type is uninhabited.
-    Platform(P),
+/// Where a platform frame is written: the texture the painter created for
+/// it, on the device and queue every texture it draws lives on.
+///
+/// The texture is two-dimensional, [`wgpu::TextureFormat::Rgba8Unorm`], one
+/// mip level, exactly [`Self::size`], with the usages
+/// `TEXTURE_BINDING | COPY_DST | RENDER_ATTACHMENT` — the last because the
+/// browser's `copyExternalImageToTexture` requires it of its destination.
+/// `vello_gpu` samples it as premultiplied RGBA from mip level 0 of a
+/// filterable float view, in sRGB, which is what a writer has to leave in it.
+#[derive(Debug)]
+pub struct FrameTarget<'a> {
+    pub device: &'a wgpu::Device,
+    pub queue: &'a wgpu::Queue,
+    pub texture: &'a wgpu::Texture,
+    /// The texture's size in pixels, which is the frame's: what the store
+    /// described it as.
+    pub size: (u32, u32),
+}
+
+/// A platform frame's writer: the embedder's own code that copies one of its
+/// frames into a texture the painter chose.
+///
+/// The frame type implements it, so the writer travels with the frame and no
+/// object is passed beside it. It runs on the painter's thread, in
+/// [`Painter::adopt`](crate::painter::Painter::adopt), before a swap-chain
+/// image is acquired, once per frame the painter takes.
+pub trait FrameWriter {
+    /// Queues a copy of the whole frame into `target.texture` at mip level
+    /// 0 and origin zero, premultiplied, in sRGB, so that a render submitted
+    /// after this call samples it. Must not block.
+    ///
+    /// Answers whether the copy was queued: `false` for a frame that can no
+    /// longer be read (closed, or not the size it was described as), which
+    /// leaves the picture drawing what it drew before, or nothing.
+    fn write(&self, target: &FrameTarget<'_>) -> bool;
+}
+
+/// A store with no platform frames needs no writer.
+impl FrameWriter for Infallible {
+    fn write(&self, _target: &FrameTarget<'_>) -> bool {
+        match *self {}
+    }
 }
 
 /// A frame taken out of a slot, with the generation it was published as.
@@ -178,6 +221,9 @@ pub enum PictureFrame<P = Infallible> {
 pub struct TakenFrame<P = Infallible> {
     /// The generation [`FrameImage::generation`] answered for this frame.
     pub generation: u64,
+    /// What [`FrameImage::descriptor`] answered for this frame: a platform
+    /// frame's size is read from here.
+    pub descriptor: ImageDescriptor,
     pub frame: PictureFrame<P>,
 }
 
@@ -243,8 +289,22 @@ impl<P> PictureSlot<P> {
     #[must_use = "a wake the host is owed is lost"]
     pub fn publish_pixels(&self, pixels: ImageData, next_change: Option<ClockInstant>) -> bool {
         let descriptor = ImageDescriptor::of(&pixels);
+        self.publish(PictureFrame::Pixels(pixels), descriptor, next_change)
+    }
+
+    /// [`Self::publish_pixels`] for a frame of either kind, named by
+    /// `descriptor`: for CPU pixels their own, for a platform frame the one
+    /// minted for it ([`ImageDescriptor::platform`]), whose size is the
+    /// frame's.
+    #[must_use = "a wake the host is owed is lost"]
+    pub fn publish(
+        &self,
+        frame: PictureFrame<P>,
+        descriptor: ImageDescriptor,
+        next_change: Option<ClockInstant>,
+    ) -> bool {
         let mut state = self.lock();
-        let waiting = state.frame.replace(PictureFrame::Pixels(pixels)).is_some();
+        let waiting = state.frame.replace(frame).is_some();
         state.descriptor = Some(descriptor);
         state.generation += 1;
         state.next_change = next_change;
@@ -255,7 +315,7 @@ impl<P> PictureSlot<P> {
     /// descriptor, its generation and the next change, with no pixels —
     /// those are [`Self::take`]n. `None` before the first publish.
     #[must_use]
-    pub fn describe(&self) -> Option<FrameImage> {
+    pub fn describe(&self) -> Option<FrameImage<P>> {
         let state = self.lock();
         Some(FrameImage {
             descriptor: state.descriptor?,
@@ -272,6 +332,7 @@ impl<P> PictureSlot<P> {
         let frame = state.frame.take()?;
         Some(TakenFrame {
             generation: state.generation,
+            descriptor: state.descriptor?,
             frame,
         })
     }
@@ -282,7 +343,7 @@ impl<P> PictureSlot<P> {
 mod tests {
     use std::sync::Arc;
 
-    use super::{PictureFrame, PictureId, PictureKey, PictureSlot};
+    use super::{PictureId, PictureKey, PictureSlot};
     use crate::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
 
     fn texel(value: u8) -> ImageData {
@@ -316,7 +377,7 @@ mod tests {
 
         let taken = slot.take().expect("the newest frame");
         assert_eq!(taken.generation, 2);
-        let PictureFrame::Pixels(pixels) = taken.frame;
+        let pixels = taken.frame.into_pixels();
         assert_eq!(
             pixels.data.data(),
             [2; 4],

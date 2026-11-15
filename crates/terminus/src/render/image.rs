@@ -36,6 +36,13 @@
 //! ([`FrameImages::take_frame`], `render::picture`), and written into the
 //! picture's own texture.
 //!
+//! What a store lends or hands over is a [`PictureFrame`]: CPU pixels, or a
+//! frame of the embedder's own type ([`FrameImages::PlatformFrame`]) that
+//! writes itself into a texture the painter created
+//! ([`FrameWriter`](crate::render::picture::FrameWriter)). The painter writes
+//! a lent platform frame at once and releases it, since nothing but its
+//! upload can draw it.
+//!
 //! The document never learns of any of this. There is no way to report that
 //! an image stopped being resident or came back, so a document's image state
 //! can never regress from loaded back to pending, and its natural size,
@@ -123,7 +130,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use rustc_hash::FxHashMap;
 use seldon::text::TextContext;
-use vant::image::Bitmap;
+use vant::image::DecodedImage;
 use vant::image::residency::{
     Decoded, Described, Refinement, Requested, Residency, ResidencyConfig, ViewKey,
 };
@@ -132,7 +139,9 @@ use crate::clock::ClockInstant;
 use crate::paint::display_list::DisplayList;
 use crate::peniko::ImageData;
 use crate::render::gpu::SharedGpu;
-use crate::render::picture::{PictureId, PictureKey, PlaybackReport, TakenFrame};
+use crate::render::picture::{
+    FrameWriter, PictureFrame, PictureId, PictureKey, PlaybackReport, TakenFrame,
+};
 use crate::render::svg::{self, VectorDocument};
 
 /// A parsed SVG document, encoded and drawable at any size.
@@ -299,16 +308,20 @@ pub use vant::image::{ImageDescriptor, ImageSizeHint};
 /// What a frame draws for one picture ([`FrameImages::describe`]): the
 /// bitmap's descriptor, its pixels when the store holds them, its
 /// generation, and when it will next change by itself.
+///
+/// `P` is the store's platform frame type ([`FrameImages::PlatformFrame`]).
 #[derive(Clone, Debug, PartialEq)]
-pub struct FrameImage {
-    /// The bitmap the frame draws. With `pixels`, it is theirs.
+pub struct FrameImage<P = Infallible> {
+    /// The bitmap the frame draws. With `pixels`, it is theirs; for a
+    /// platform frame it is the one minted for it, whose size is the
+    /// frame's.
     pub descriptor: ImageDescriptor,
     /// `None` when the store does not hold the bitmap: a rasterizer that
     /// still holds an upload of it draws it from there, and one that does not
     /// draws nothing and says the picture is wanted ([`FrameImages::want`]).
     /// Always `None` for an [`PictureKey::Id`] picture, whose frames are
     /// taken ([`FrameImages::take_frame`]).
-    pub pixels: Option<ImageData>,
+    pub pixels: Option<PictureFrame<P>>,
     /// A number that changes exactly when the picture's pixels do. A picture
     /// whose pixels never change answers one constant; a store with no live
     /// pictures answers zero for every one.
@@ -320,13 +333,25 @@ pub struct FrameImage {
     pub next_change: Option<ClockInstant>,
 }
 
-impl FrameImage {
+impl<P> FrameImage<P> {
     /// A bitmap the store holds, whose pixels never change.
     #[must_use]
     pub fn resident(image: ImageData) -> Self {
         Self {
             descriptor: ImageDescriptor::of(&image),
-            pixels: Some(image),
+            pixels: Some(PictureFrame::Pixels(image)),
+            generation: 0,
+            next_change: None,
+        }
+    }
+
+    /// A frame of either kind the store holds, named by `descriptor`, whose
+    /// pixels never change.
+    #[must_use]
+    pub const fn held(frame: PictureFrame<P>, descriptor: ImageDescriptor) -> Self {
+        Self {
+            descriptor,
+            pixels: Some(frame),
             generation: 0,
             next_change: None,
         }
@@ -359,11 +384,11 @@ impl FrameImage {
 /// painter never decodes and never waits for a decode or for I/O (see the
 /// module docs).
 pub trait FrameImages {
-    /// The embedder's own frame type, which a
-    /// [`PictureFrame::Platform`](crate::render::picture::PictureFrame::Platform)
-    /// carries. A store with none names [`std::convert::Infallible`]; the
-    /// painter accepts no other yet.
-    type PlatformFrame;
+    /// The embedder's own frame type, which a [`PictureFrame::Platform`]
+    /// carries and which writes itself into a texture the painter created
+    /// ([`FrameWriter`]). A store with none names
+    /// [`std::convert::Infallible`].
+    type PlatformFrame: FrameWriter;
 
     /// What the frame draws for `picture`: the descriptor of the bitmap, its
     /// pixels when the store holds them, its generation and its next change,
@@ -382,7 +407,11 @@ pub trait FrameImages {
     /// ignore it. The bitmap need not match the hint or the intrinsic size
     /// that was reported with the load: a reduced-scale decode composes
     /// correctly.
-    fn describe(&self, picture: &PictureKey, hint: ImageSizeHint) -> Option<FrameImage>;
+    fn describe(
+        &self,
+        picture: &PictureKey,
+        hint: ImageSizeHint,
+    ) -> Option<FrameImage<Self::PlatformFrame>>;
 
     /// Takes `picture`'s newest frame out of its slot, if one is there that
     /// has not been taken.
@@ -459,7 +488,11 @@ pub struct NoImages;
 impl<T: FrameImages + ?Sized> FrameImages for Rc<T> {
     type PlatformFrame = T::PlatformFrame;
 
-    fn describe(&self, picture: &PictureKey, hint: ImageSizeHint) -> Option<FrameImage> {
+    fn describe(
+        &self,
+        picture: &PictureKey,
+        hint: ImageSizeHint,
+    ) -> Option<FrameImage<Self::PlatformFrame>> {
         (**self).describe(picture, hint)
     }
 
@@ -656,12 +689,16 @@ impl ImageInbox {
 /// no IO; the host starts the loads it is told to start and feeds their
 /// completions in. The host's own notes ("image `…` failed to load") stay
 /// with the host, which these methods answer enough to write.
+///
+/// `P` is the host decoder's platform frame type
+/// ([`vant::ImageDecoder::Frame`]), [`Infallible`] for one that answers CPU
+/// pixels only.
 #[derive(Debug)]
-pub struct ImageResidency {
-    residency: Residency<ImageReports>,
+pub struct ImageResidency<P = Infallible> {
+    residency: Residency<ImageReports, P>,
 }
 
-impl ImageResidency {
+impl<P: Clone> ImageResidency<P> {
     /// A residency with a bitmap budget of `budget_bytes`, first decodes
     /// bounded by `initial_bound`, and refinements past `downsample_ratio`
     /// (see [`ResidencyConfig`]).
@@ -710,7 +747,7 @@ impl ImageResidency {
     }
 
     /// `source`'s load decoded: reported loaded to every view that asked.
-    pub fn complete_loaded(&mut self, source: &Arc<str>, decoded: Decoded) {
+    pub fn complete_loaded(&mut self, source: &Arc<str>, decoded: Decoded<P>) {
         let animated = decoded.animated;
         if let Some((waiters, intrinsic)) = self.residency.loaded(source, decoded) {
             for reports in waiters {
@@ -764,7 +801,12 @@ impl ImageResidency {
     }
 
     /// See [`Residency::refined`].
-    pub fn refined(&mut self, source: &Arc<str>, target: (u32, u32), bitmap: Bitmap) {
+    pub fn refined(
+        &mut self,
+        source: &Arc<str>,
+        target: (u32, u32),
+        bitmap: impl Into<DecodedImage<P>>,
+    ) {
         self.residency.refined(source, target, bitmap);
     }
 
@@ -774,7 +816,7 @@ impl ImageResidency {
     }
 
     /// See [`Residency::describe`].
-    pub fn describe(&mut self, source: &str, hint: ImageSizeHint) -> Described {
+    pub fn describe(&mut self, source: &str, hint: ImageSizeHint) -> Described<P> {
         self.residency.describe(source, hint)
     }
 
@@ -2103,7 +2145,8 @@ mod residency_tests {
                 source_height: intrinsic.1,
                 premultiplied: false,
                 rgba: vec![0; 4],
-            },
+            }
+            .into(),
             format: ImageFormat::Png,
             header: None,
             encoded: None,
@@ -2216,7 +2259,7 @@ mod residency_tests {
 
     #[test]
     fn the_first_decode_is_bounded_by_the_engine() {
-        let mut residency = ImageResidency::new(0, u32::MAX, 2.0);
+        let mut residency: ImageResidency = ImageResidency::new(0, u32::MAX, 2.0);
         let (reports, _inbox) = ImageInbox::new();
         assert_eq!(
             residency.request("a.png", &reports),

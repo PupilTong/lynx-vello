@@ -2559,6 +2559,7 @@ mod frame_images {
                     terminus::link::ImageSizeHint::UNBOUNDED,
                 )
                 .and_then(|image| image.pixels)
+                .map(terminus::link::PictureFrame::into_pixels)
                 .expect("a published image is described with its pixels")
         };
         let first = pixels_of();
@@ -2619,6 +2620,7 @@ mod frame_images {
         let restored = images
             .describe(&key, ImageSizeHint::UNBOUNDED)
             .and_then(|image| image.pixels)
+            .map(terminus::link::PictureFrame::into_pixels)
             .expect("described with its pixels again");
         assert_ne!(restored.data.id(), described.descriptor.blob, "a new blob");
         assert_eq!(restored.data.as_ref(), &[1, 2, 3, 255]);

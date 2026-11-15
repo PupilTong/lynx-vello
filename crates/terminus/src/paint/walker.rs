@@ -174,6 +174,7 @@ impl WalkSink<'_> {
                 if let Some(data) = pixels
                     .describe(&draw.image, draw.size_hint())
                     .and_then(|image| image.pixels)
+                    .map(crate::render::picture::PictureFrame::into_pixels)
                 {
                     crate::paint::compose::encode_image(
                         scene,

@@ -20,20 +20,37 @@ retains its XML-only, host-configured contract.
 **The browser platform** (`src/platform/`, `bobcat_wasm::platform`): the
 `vant::Platform` the Render Worker's resource system is built over.
 `BrowserFetch` is the Worker's own `fetch`, which applies HTTP cache semantics
-itself (`owns_http_cache`), so there is no byte tier. `BrowserDecoder` is the
-main thread's `Image` element over a `MessagePort` and a mailbox in shared
-Wasm memory (`mailbox.rs`; `js/image-decoder.ts` is the other half). The code
+itself (`owns_http_cache`), so there is no byte tier. `BrowserDecoder`
+(`decode.rs`) is the Render Worker's own decoders, and its frames are
+platform frames: `createImageBitmap` of the bytes as a `Blob` decodes a
+still image and an animation's first frame (`imageOrientation:
+"from-image"`, `premultiplyAlpha: "premultiply"`, `colorSpaceConversion:
+"default"`, a second `createImageBitmap` with `resizeWidth`/`resizeHeight`/
+`resizeQuality: "high"` when the image is larger than asked for), and
+WebCodecs' `ImageDecoder` says what an animation's frames are and decodes
+frame *i*, one decoder per animation kept open until `forget_frames`; where
+`ImageDecoder` is missing or refuses the type an image is one frame
+(`src/image_frames.rs`, the pure half, natively tested). The answer is a
+`BrowserFrame` (`frame.rs`), an `ImageBitmap` closed when its last copy is
+dropped, which implements `bobcat_core::FrameWriter` with WebGPU's
+`copyExternalImageToTexture` into the texture the painter created, in sRGB
+and premultiplied. The pixels never pass through Wasm memory and the main
+thread holds no image: every buffer handed to the browser is a fresh copy,
+since a `Blob` or an `ImageDecoder` cannot be built over the shared memory.
+`BobcatRenderer` builds its painter with `Painter::with_platform_frames`, a
+`Painter<BrowserFrame>`. The code
 cache's store is `CacheStore` (`cache.rs`), a `vant::AsyncStore` over one
 cache of the web Cache API (`caches.open("bobcat-code-cache")`, 32 MiB,
 `Volatility::EvictableAnytime`), handed over as `ArtifactStore::Async`, so
 compiled scripts survive a page load and are shared by every tab of the
 origin. What holds:
 
-- `BrowserPlatform::new(image_port, code_cache)` is `async` because
-  `caches.open` is, and never fails: a missing port, a scope without `caches`
-  (a context that is not secure) or an `open` that rejects (private browsing
-  in some browsers) each become a note (`the code cache will not persist:
-  …`) and the view runs with the in-memory tier. `caches` and
+- `BrowserPlatform::new(code_cache)` is `async` because `caches.open` is,
+  and never fails: a Worker with no `createImageBitmap` (`images will not
+  decode: …`), a scope without `caches` (a context that is not secure) or an
+  `open` that rejects (private browsing in some browsers) each become a note
+  (`the code cache will not persist: …`) and the view runs without images
+  or with the in-memory tier respectively. `caches` and
   `navigator.storage` are read from the global scope, so the store works in a
   Window or a Worker.
 - A key is the request URL `https://bobcat.invalid/<key>` (each path segment
@@ -52,6 +69,18 @@ origin. What holds:
 - All Cache API calls are stable `web-sys` bindings. The store's policy, and
   every overlap of its asynchronous calls, is `vant`'s and is tested natively;
   `CacheStore` itself has no automated test (the Wasm tests run in Node).
+- The one check that renders in a browser is local:
+  `node crates/bobcat-wasm/scripts/render-check.ts` after
+  `pnpm --filter bobcat-wasm build` serves a Lynx XML card with a still PNG
+  and three GIFs with the cross-origin isolation headers, drives Google
+  Chrome headless over its DevTools protocol, and asserts on screenshot
+  pixels: the still image's colour and alpha, a finite GIF resting on its
+  last frame both as a CSS image (the file's count) and as an
+  `<image loop-count="1">` (an `<image>` without `loop-count` loops
+  forever), and a looping one showing both its frames. `--repeat <n>` runs
+  it n times; a failed run prints the console of the page and its Workers. It needs a WebGPU
+  adapter in headless Chrome; CI's Ubuntu runner has no GPU, so CI does not
+  run it (`docs/browser-wasm.md`, "Rendering check").
 
 The browser UI thread is a JavaScript-only host coordinator: it creates one
 explicit embedder Worker and transfers an `OffscreenCanvas`, but never
@@ -140,9 +169,9 @@ images resolve against. That raw entry is neither a Lynx nor a web-core
 product, so it is registered verbatim, with no `MTS_CHUNK_PREAMBLE`: a raw
 main-thread script imports what it uses from `bobcat:runtime` and
 `bobcat:element` itself. Images are fetched by the resource system through the
-same Worker `fetch` and decoded on the main thread by an `Image` element in the
-package's `js/image-decoder.ts`, over a `MessageChannel` whose Worker end the
-facade hands to `BobcatRenderer::create` at init. `loadLynxXml(url)` fetches an
+same Worker `fetch` and decoded in the Render Worker too, by the browser's own
+`createImageBitmap` and `ImageDecoder` (`BrowserDecoder` above); nothing about
+an image crosses to the main thread. `loadLynxXml(url)` fetches an
 XML envelope once, decodes it with the web loader's replacement-mode UTF-8
 behavior, parses it with `bobcat-source::xml`, registers any raw stylesheet
 and its main-thread body — prefixed with `MTS_CHUNK_PREAMBLE`, as `bobcat-source`

@@ -39,6 +39,9 @@ pub struct NativeDecoder;
 
 #[cfg(not(target_arch = "wasm32"))]
 impl vant::ImageDecoder for NativeDecoder {
+    /// Every native decode is CPU pixels.
+    type Frame = std::convert::Infallible;
+
     /// The native decoders take the header the format sniff found; the
     /// format itself they read from the bytes.
     fn decode_blocking(

@@ -42,7 +42,7 @@ use wasm_bindgen_futures::future_to_promise;
 use web_sys::OffscreenCanvas;
 use web_time::SystemTime;
 
-use crate::platform::{BrowserPlatform, CodeCacheConfig};
+use crate::platform::{BrowserFrame, BrowserPlatform, CodeCacheConfig};
 use crate::text_input::{edit_command, enter_key_hint_name, input_mode_name, input_type_name};
 
 #[wasm_bindgen]
@@ -248,17 +248,19 @@ impl NativeModule for HostModule {
 ///
 /// The resource system is `bobcat-resources`: the Render Worker registers
 /// the script and stylesheet bytes its own `fetch` produced, and the system
-/// fetches everything else a page names on this Worker, has its images
-/// decoded by the main thread's `Image` element over the port the facade
-/// hands over at init, and wakes this Worker through the same signal a
-/// commit uses.
+/// fetches everything else a page names on this Worker, decodes its images
+/// here too with the browser's own `createImageBitmap` and `ImageDecoder`
+/// (`platform::BrowserDecoder`), whose `ImageBitmap`s the painter copies into
+/// textures, and wakes this Worker through the same signal a commit uses.
 #[wasm_bindgen]
 pub struct BobcatRenderer {
     /// This canvas's painter, built once and kept across page loads: the
     /// WebGPU context belongs to the canvas, and rebuilding it per page would
     /// tear the surface down and put it back for no reason. Declared before
     /// the view so its surface is released before anything else here is.
-    painter: Option<Painter>,
+    /// Its views' stores hand it `ImageBitmap`s ([`BrowserFrame`]), which it
+    /// copies into textures with WebGPU.
+    painter: Option<Painter<BrowserFrame>>,
     view: Option<LynxView<ViewResources<BrowserPlatform>>>,
     /// Empty/staged sources for the next load, sharing the platform decoder.
     resources: Resources<BrowserPlatform>,
@@ -367,7 +369,6 @@ impl BobcatRenderer {
         screen_pixel_width: f32,
         screen_pixel_height: f32,
         worker_url: String,
-        image_port: web_sys::MessagePort,
         hardware_concurrency: u32,
         default_display_linear: bool,
         default_overflow_visible: bool,
@@ -434,7 +435,7 @@ impl BobcatRenderer {
             let frame_size =
                 FrameSize::for_viewport(width, height, device_pixel_ratio).map_err(js_error)?;
             set_canvas_size(&canvas, frame_size);
-            let painter = Painter::new(
+            let painter = Painter::with_platform_frames(
                 DrawTarget::window(WindowTarget::OffscreenCanvas(canvas.clone())),
                 width,
                 height,
@@ -444,8 +445,7 @@ impl BobcatRenderer {
             .map_err(js_error)?;
             // The code cache's store is opened here, once per Worker: every
             // later page is a `new_scope` of this system and shares it.
-            let (platform, notes) =
-                BrowserPlatform::new(Some(image_port), Some(CodeCacheConfig::default())).await;
+            let (platform, notes) = BrowserPlatform::new(Some(CodeCacheConfig::default())).await;
             let resources = Resources::with_platform(
                 ResourcesConfig {
                     // Lazy bundles: a `lynx.fetchBundle` installs its
@@ -1208,10 +1208,14 @@ impl BobcatRenderer {
         // after one gets a painter of its own. Dropping the old one first is
         // what releases this canvas's WebGPU context before the replacement
         // asks for another.
-        if self.painter.as_ref().is_none_or(Painter::has_failed) {
+        if self
+            .painter
+            .as_ref()
+            .is_none_or(Painter::<BrowserFrame>::has_failed)
+        {
             drop(self.painter.take());
             self.painter = Some(
-                Painter::new(
+                Painter::with_platform_frames(
                     DrawTarget::window(WindowTarget::OffscreenCanvas(self.canvas.clone())),
                     self.width,
                     self.height,

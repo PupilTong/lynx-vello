@@ -196,7 +196,6 @@ async function initialize(message: InitMessage): Promise<void> {
     message.screenPixelWidth,
     message.screenPixelHeight,
     message.workerUrl,
-    message.imagePort,
     message.hardwareConcurrency,
     message.config.defaultDisplayLinear,
     message.config.defaultOverflowVisible,

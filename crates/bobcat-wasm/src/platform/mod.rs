@@ -2,8 +2,9 @@
 //! Render Worker.
 //!
 //! - [`BrowserFetch`]: the Render Worker's own `fetch`, whose HTTP cache is the only byte tier.
-//! - [`BrowserDecoder`]: the main thread's `Image` element, over a `MessagePort` and a mailbox in
-//!   shared Wasm memory.
+//! - [`BrowserDecoder`]: the Render Worker's own `createImageBitmap` and `WebCodecs`
+//!   `ImageDecoder`, whose frames are [`BrowserFrame`]s: `ImageBitmap`s the painter copies straight
+//!   into a texture.
 //! - The code cache's store: a [`CacheStore`] over one cache of the web Cache API, so compiled
 //!   scripts outlive the page and are shared by every tab of the origin.
 //!
@@ -15,11 +16,12 @@
 mod cache;
 mod decode;
 mod fetch;
-mod mailbox;
+mod frame;
 
 pub use cache::CacheStore;
 pub use decode::BrowserDecoder;
 pub use fetch::BrowserFetch;
+pub use frame::BrowserFrame;
 use vant::{ArtifactStore, NoStore, Parts, Platform, Tier};
 
 /// Which cache of the origin's Cache API the code cache keeps its entries
@@ -42,9 +44,9 @@ impl Default for CodeCacheConfig {
     }
 }
 
-/// The browser's Render Worker: its own `fetch` ([`BrowserFetch`]), the main
-/// thread's `Image` element ([`BrowserDecoder`]), and, when the Cache API
-/// can be opened, the code cache's store ([`CacheStore`]).
+/// The browser's Render Worker: its own `fetch` ([`BrowserFetch`]), its own
+/// image decoders ([`BrowserDecoder`]), and, when the Cache API can be
+/// opened, the code cache's store ([`CacheStore`]).
 #[derive(Debug)]
 pub struct BrowserPlatform {
     fetch: BrowserFetch,
@@ -53,31 +55,21 @@ pub struct BrowserPlatform {
 }
 
 impl BrowserPlatform {
-    /// The browser platform, decoding through `image_port` — this Worker's
-    /// end of the channel whose other end the host's main-thread image
-    /// decoder listens on (`js/image-decoder.ts`) — and keeping compiled
-    /// scripts in `code_cache`'s cache of the Cache API.
+    /// The browser platform, decoding images in this Worker and keeping
+    /// compiled scripts in `code_cache`'s cache of the Cache API.
     ///
     /// The cache is opened once, here; a second view in this Worker shares it
     /// through `Resources::new_scope`, and another tab's Worker opens the
-    /// same cache. Every failure is a note, never an error: without a port
-    /// no image decodes, and without the Cache API (a context that is not
-    /// secure, a browser that refuses it in private browsing) the code cache
-    /// keeps its artifacts in memory only.
-    pub async fn new(
-        image_port: Option<web_sys::MessagePort>,
-        code_cache: Option<CodeCacheConfig>,
-    ) -> (Self, Vec<String>) {
+    /// same cache. Every failure is a note, never an error: without
+    /// `createImageBitmap` no image decodes, and without the Cache API (a
+    /// context that is not secure, a browser that refuses it in private
+    /// browsing) the code cache keeps its artifacts in memory only.
+    pub async fn new(code_cache: Option<CodeCacheConfig>) -> (Self, Vec<String>) {
         let mut notes = Vec::new();
-        let decoder = if let Some(port) = image_port {
-            BrowserDecoder::new(port).unwrap_or_else(|error| {
-                notes.push(format!("images will not decode: {error}"));
-                BrowserDecoder::none()
-            })
-        } else {
-            notes.push("images will not decode: no image decode port was configured".to_owned());
-            BrowserDecoder::none()
-        };
+        let decoder = BrowserDecoder::new();
+        if let Err(error) = vant::ImageDecoder::available(&decoder) {
+            notes.push(format!("images will not decode: {error}"));
+        }
         let artifacts = match code_cache {
             Some(config) => match CacheStore::open(&config.cache_name).await {
                 Ok(store) => Some(Tier {

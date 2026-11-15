@@ -34,8 +34,11 @@
 //!   ([`vant::artifact::ArtifactCache`] over a synchronous store,
 //!   [`vant::artifact::AsyncArtifactCache`] over an asynchronous one).
 //! - **Platform image decoding.** No codec is compiled in: `ImageIO` on macOS, gdk-pixbuf on Linux,
-//!   the main thread's `Image` element in the browser, each asked to downsample during decode
-//!   ([`decode`]).
+//!   the Render Worker's `createImageBitmap` in the browser, each asked to downsample during decode
+//!   ([`decode`]). A decoder may answer frames of its own type rather than CPU pixels
+//!   ([`vant::ImageDecoder::Frame`]): the browser's `ImageBitmap`s are held and released by the
+//!   memory tier as CPU pixels are, and reach the painter as platform frames it has the frame type
+//!   write into a texture ([`bobcat_core::FrameWriter`]).
 //! - **SVG documents parsed for the engine.** An SVG is not decoded to pixels: on every target, the
 //!   browser included, it is parsed where a bitmap would be decoded, under a decode permit, with
 //!   the engine's own parser ([`bobcat_core::ImageEvent::parse_document`]), and reported through
@@ -46,9 +49,9 @@
 //! - **Animated images.** An animated GIF, APNG or WebP plays wherever a URL picture is drawn, for
 //!   the loop count its file states, on one playhead per URL shared by every draw
 //!   (`vant::image::animation`); its frames are decoded by index a bounded window ahead of the
-//!   playhead where the platform decoder can (`ImageIO`), and a timer on this crate's own executor
-//!   wakes the host when the next one is due. gdk-pixbuf and the browser's `Image` answer one
-//!   frame.
+//!   playhead where the platform decoder can (`ImageIO`, the browser's `WebCodecs` `ImageDecoder`),
+//!   and a timer on this crate's own executor wakes the host when the next one is due. gdk-pixbuf
+//!   answers one frame, and so does a browser without `ImageDecoder`.
 //! - **Draw-sized decoding.** The frame reads each image with the size it draws it at
 //!   ([`bobcat_core::ImageSizeHint`]); a bitmap far larger than its draw is re-decoded at the drawn
 //!   size in the background, so a photo shown as a thumbnail costs a thumbnail.
@@ -348,6 +351,11 @@ pub(crate) type Handle<T> = Rc<T>;
 /// The handle jobs hold on [`Shared`].
 pub(crate) type SharedHandle<P> = Handle<Shared<P>>;
 
+/// The frame type `P`'s decoder answers besides CPU pixels
+/// ([`vant::ImageDecoder::Frame`]): uninhabited natively, the browser's
+/// `ImageBitmap` there.
+pub type FrameOf<P> = <<P as Platform>::Decoder as vant::ImageDecoder>::Frame;
+
 /// The code cache's persistent half: the driver over the platform's
 /// artifact store, shared by every scope of one system.
 ///
@@ -526,7 +534,7 @@ pub(crate) struct Shared<P: Platform> {
     initial_decode_bound: u32,
     downsample_ratio: f32,
     decoder: Handle<P::Decoder>,
-    completions: tokio::sync::mpsc::UnboundedSender<Completion>,
+    completions: tokio::sync::mpsc::UnboundedSender<Completion<FrameOf<P>>>,
     wakeup: Wakeup,
     log_to_stderr: bool,
     container_installer: Option<Arc<dyn ContainerInstaller<PreparsedStyleSheet>>>,
@@ -599,7 +607,7 @@ impl<P: Platform> Shared<P> {
             .push(message);
     }
 
-    fn complete(&self, completion: Completion) {
+    fn complete(&self, completion: Completion<FrameOf<P>>) {
         let _ = self.completions.send(completion);
         (self.wakeup)();
     }
@@ -773,7 +781,7 @@ impl<P: Platform> Shared<P> {
         format: mime::ImageFormat,
         header: Option<image_header::ImageHeader>,
         max: (u32, u32),
-    ) -> Result<decode::Bitmap, decode::DecodeError> {
+    ) -> Result<vant::image::DecodedImage<FrameOf<P>>, decode::DecodeError> {
         vant::ImageDecoder::decode(&*self.decoder, bytes, format, header, max).await
     }
 }
@@ -796,7 +804,7 @@ pub struct Resources<
     /// Shared by every scope, held by nothing a job can reach.
     #[cfg(not(target_arch = "wasm32"))]
     executor: Arc<executor::Executor>,
-    local: Rc<RefCell<ImageState>>,
+    local: Rc<RefCell<ImageState<FrameOf<P>>>>,
     style_cache: Rc<RefCell<sources::StyleCache>>,
 }
 
@@ -1384,7 +1392,10 @@ impl<P: Platform> ViewResources<P> {
     }
 }
 
-impl<P: Platform> ResourceFetcher for ViewResources<P> {
+impl<P: Platform> ResourceFetcher for ViewResources<P>
+where
+    FrameOf<P>: bobcat_core::FrameWriter,
+{
     fn request_source(
         &self,
         request: bobcat_core::resource::SourceRequest,
@@ -1458,21 +1469,24 @@ fn ids(pictures: &[PictureKey]) -> Vec<PictureId> {
     pictures.iter().filter_map(PictureKey::id).collect()
 }
 
-impl<P: Platform> FrameImages for ViewResources<P> {
-    type PlatformFrame = std::convert::Infallible;
+impl<P: Platform> FrameImages for ViewResources<P>
+where
+    FrameOf<P>: bobcat_core::FrameWriter,
+{
+    type PlatformFrame = FrameOf<P>;
 
     fn describe(
         &self,
         picture: &PictureKey,
         hint: ImageSizeHint,
-    ) -> Option<bobcat_core::FrameImage> {
+    ) -> Option<bobcat_core::FrameImage<FrameOf<P>>> {
         match picture {
             PictureKey::Url(source) => images::describe(&self.resources, source, hint),
             PictureKey::Id(picture) => images::describe_picture(&self.resources, *picture, hint),
         }
     }
 
-    fn take_frame(&self, picture: PictureId) -> Option<bobcat_core::TakenFrame> {
+    fn take_frame(&self, picture: PictureId) -> Option<bobcat_core::TakenFrame<FrameOf<P>>> {
         images::take_frame(&self.resources, picture)
     }
 

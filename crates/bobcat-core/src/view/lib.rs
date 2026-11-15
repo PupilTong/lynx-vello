@@ -1023,7 +1023,7 @@ impl LynxGroup {
                 commands: crate::link::CommandSender::new(commands),
                 metrics,
                 images: Rc::clone(&fetcher)
-                    as Rc<dyn FrameImages<PlatformFrame = std::convert::Infallible>>,
+                    as Rc<dyn FrameImages<PlatformFrame = F::PlatformFrame>>,
                 scroll,
                 registry,
             }),
@@ -1062,7 +1062,7 @@ impl LynxGroup {
 /// its fetcher; dropping the view leaves that painter showing the last frame
 /// it drew, and dropping the painter leaves the view running with nothing
 /// watching it.
-pub struct LynxView<F> {
+pub struct LynxView<F: ResourceFetcher> {
     /// This view's end signal, cancelled the instant it is released, before
     /// anything else is, so a host still holding one of its source completions
     /// sees it cancelled without waiting for a turn of its own. The view's
@@ -1077,7 +1077,7 @@ pub struct LynxView<F> {
     /// The only strong reference there is. `Painter::attach` downgrades it,
     /// and a live weak handle on it is what "this view already has an
     /// interactive painter" means.
-    seat: Rc<ViewSeat>,
+    seat: Rc<ViewSeat<F::PlatformFrame>>,
     notices: mpsc::UnboundedReceiver<ViewNotice>,
     frames: watch::Receiver<Published>,
     /// Where the host's completed image loads land. Detached in `Drop` before
@@ -1137,7 +1137,7 @@ enum ViewState {
     Failed,
 }
 
-impl<F> LynxView<F> {
+impl<F: ResourceFetcher> LynxView<F> {
     /// Whether pump has observed successful MTS boot — the entry module
     /// evaluated and its first flush committed — and this view has not ended.
     /// An entry that threw still boots the view, once its failure has been
@@ -1149,7 +1149,7 @@ impl<F> LynxView<F> {
     }
 }
 
-impl<F> fmt::Debug for LynxView<F> {
+impl<F: ResourceFetcher> fmt::Debug for LynxView<F> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("LynxView")
@@ -1159,7 +1159,7 @@ impl<F> fmt::Debug for LynxView<F> {
     }
 }
 
-impl<F> Drop for LynxView<F> {
+impl<F: ResourceFetcher> Drop for LynxView<F> {
     fn drop(&mut self) {
         // Cancellation first: a host still holding one of this view's source
         // completions must see it before the fetcher that holds it is
@@ -1705,7 +1705,7 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
     /// [`Painter::attach`](crate::Painter::attach) takes of it can never keep
     /// a released view's task alive or hold its store open — and the weak
     /// count here is what says whether a painter has taken the seat.
-    pub(crate) const fn seat(&self) -> &Rc<ViewSeat> {
+    pub(crate) const fn seat(&self) -> &Rc<ViewSeat<F::PlatformFrame>> {
         &self.seat
     }
 

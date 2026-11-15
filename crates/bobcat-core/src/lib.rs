@@ -127,10 +127,11 @@ pub use style::{PreparsedDeclaration, PreparsedKeyframe, PreparsedRule, Preparse
 /// an animated picture next changes answers on it.
 pub use terminus::link::clock::ClockInstant;
 pub use terminus::link::{
-    DocumentKind, FontBlob, FrameImage, FrameImages, ImageDescriptor, ImageEvent, ImageInbox,
-    ImageReports, ImageResidency, ImageSizeHint, Loops, MAX_RENDERABLE_DIMENSION,
-    MAX_STYLE_THREADS, NoImages, PictureId, PictureKey, PictureSlot, PlayPolicy, PlaybackControl,
-    PlaybackReport, PlaybackRequest, TakenFrame, VectorDocument, is_renderable, kurbo, peniko,
+    DocumentKind, FontBlob, FrameImage, FrameImages, FrameTarget, FrameWriter, ImageDescriptor,
+    ImageEvent, ImageInbox, ImageReports, ImageResidency, ImageSizeHint, Loops,
+    MAX_RENDERABLE_DIMENSION, MAX_STYLE_THREADS, NoImages, PictureFrame, PictureId, PictureKey,
+    PictureSlot, PlayPolicy, PlaybackControl, PlaybackReport, PlaybackRequest, TakenFrame,
+    VectorDocument, is_renderable, kurbo, peniko, wgpu,
 };
 #[cfg(target_arch = "wasm32")]
 pub use view::configure_wasm_workers;

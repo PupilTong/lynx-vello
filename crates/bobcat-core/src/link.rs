@@ -675,7 +675,10 @@ impl FrameDemand {
 /// The field order is the release order: the goodbye — closing the view's
 /// command channel, which is what ends its task — precedes giving up the
 /// view's share of the host's resource system.
-pub(crate) struct ViewSeat {
+///
+/// `P` is the platform frame type of the host's store
+/// ([`FrameImages::PlatformFrame`]).
+pub(crate) struct ViewSeat<P = std::convert::Infallible> {
     pub(crate) frame_demand: RefCell<FrameDemand>,
     /// The view's own strong sender. Closing it is the goodbye that ends the
     /// view's task, which is why the seat dies with the view rather than with
@@ -694,7 +697,7 @@ pub(crate) struct ViewSeat {
     /// The host's resource system, as the painter reads a commit's pixels out
     /// of it. A clone of the view's own handle, so the store is released when
     /// the view drops both — seat first, by declaration order there.
-    pub(crate) images: Rc<dyn FrameImages<PlatformFrame = std::convert::Infallible>>,
+    pub(crate) images: Rc<dyn FrameImages<PlatformFrame = P>>,
     /// Where the painter posts its scroll offsets, its frame requests and its
     /// clock. Main holds a clone of its own: the seat never leaves this
     /// thread.

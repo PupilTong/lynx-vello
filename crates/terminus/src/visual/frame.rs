@@ -842,11 +842,9 @@ impl CommittedFrame {
                 // no upload, so it is held by the table it resolves into.
                 let image = match source {
                     PictureKey::Url(_) => described.pixels,
-                    PictureKey::Id(id) => pixels.take_frame(*id).map(|taken| match taken.frame {
-                        PictureFrame::Pixels(image) => image,
-                        PictureFrame::Platform(never) => match never {},
-                    }),
-                };
+                    PictureKey::Id(id) => pixels.take_frame(*id).map(|taken| taken.frame),
+                }
+                .map(PictureFrame::into_pixels);
                 let Some(image) = image else {
                     pixels.want(source, *hint);
                     wanted += 1;

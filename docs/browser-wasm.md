@@ -107,24 +107,39 @@ against.
 
 Everything else a page names — its images — the resource system fetches
 itself, in Rust, through the same Worker `fetch` (so the same origin, CORS,
-credentials and HTTP-cache policy apply), and decodes with the platform's
-`Image` element on the main thread: `js/image-decoder.ts`, shipped in the
-package's `dist/` beside the facade, which connects it to the Render Worker over a
-`MessageChannel` at init. The Render Worker hands the fetched bytes over; the
-main thread turns them into a Blob URL, decodes and resizes them through a 2D
-canvas, and copies the RGBA pixels straight into a buffer the Render Worker
-allocated in the shared Wasm memory, where each decode job has a small
-mailbox of eight `Int32` words. Every decode — a load, a refinement, and the
-restore of an evicted image a frame wants again — is a local task on the
-Render Worker that completes on its event loop, driven by the main thread's
-echoes over the port, and wakes the page loop through the engine signal.
-Neither side ever waits on the mailbox: the painter draws nothing for a
-picture whose pixels are not there yet and draws it in the frame after they
-arrive. The main thread's only cost per image is the pixel read-back. The resource system's diagnostics — an image that failed, a missing
-decoder — reach `console.warn`.
+credentials and HTTP-cache policy apply), and decodes in the Render Worker
+with the browser's own decoders (`src/platform/decode.rs`):
+
+- A still image, an animation's first frame, a refinement and the restore of an evicted image a
+  frame wants again are `createImageBitmap` of the bytes as a `Blob`, with `imageOrientation:
+  "from-image"`, `premultiplyAlpha: "premultiply"` and `colorSpaceConversion: "default"` — the
+  EXIF orientation and colour management the `Image` element applied, and the premultiplied alpha
+  the engine draws. An image larger than the size asked for is resized by a second
+  `createImageBitmap` of the first, with `resizeWidth`, `resizeHeight` and `resizeQuality:
+  "high"`, and the first is closed.
+- An animated GIF, APNG or WebP plays: WebCodecs' `ImageDecoder` says what its frames are — the
+  selected track's `frameCount` and `repetitionCount`, and each frame's `duration`, which needs
+  every frame decoded once — and `decode({ frameIndex })` answers each frame as a `VideoFrame`,
+  turned into an `ImageBitmap` at the first frame's decoded size and then closed. One
+  `ImageDecoder` per animation stays open between its frames. Where `ImageDecoder` is missing, or
+  refuses the type, an image is drawn as its first frame.
+
+The answer is an `ImageBitmap` (`BrowserFrame`, `src/platform/frame.rs`),
+which never passes through Wasm memory: the painter has it copy itself into
+the texture it draws from, with WebGPU's `copyExternalImageToTexture`, in
+sRGB and premultiplied, in the adoption that first describes it, and the
+resource system then lets it go, which closes it. A copy of the bytes is
+what the browser is handed: the Wasm memory is a `SharedArrayBuffer`, which a
+`Blob` or an `ImageDecoder` cannot be built over. Every decode is a local task
+on the Render Worker that completes on its event loop and wakes the page loop
+through the engine signal; the painter draws nothing for a picture whose
+frame is not there yet and draws it in the frame after it arrives. The main
+thread holds no image and takes no part in decoding. The resource system's
+diagnostics — an image that failed, a Worker without `createImageBitmap` —
+reach `console.warn`.
 
 SVG documents are the exception: the browser does not decode them through
-`HTMLImageElement`. Once preprocessing says the bytes are `image/svg+xml`,
+`createImageBitmap`. Once preprocessing says the bytes are `image/svg+xml`,
 the Render Worker parses them itself, inside the load's local task, with the
 engine's own parser (`ImageEvent::parse_document`), and reports the parsed
 document (`ImageReports::parsed_document`), exactly as the native targets
@@ -557,8 +572,8 @@ Every Rust/LLVM feature in `.cargo/config.toml` has an explicit Binaryen
 counterpart, including threads, bulk memory, extended const, multivalue,
 nontrapping float-to-int, reference types, SIMD, relaxed SIMD, sign extension,
 and tail calls. Generated glue and Wasm live under
-`crates/bobcat-wasm/pkg/`. The facade, the image decoder and the two Worker
-entries are TypeScript in `crates/bobcat-wasm/js/`; after wasm-pack the build
+`crates/bobcat-wasm/pkg/`. The facade and the two Worker entries are
+TypeScript in `crates/bobcat-wasm/js/`; after wasm-pack the build
 emits them with TypeScript 7 into `dist/`, the facade's declarations included
 — after, because the Workers are typed against the glue it generates. Neither
 directory is checked in.
@@ -602,6 +617,45 @@ revoked only after `loadLynxXml` settles.
 Synchronous GPU readback remains absent because browser WebGPU map completion
 is Promise-driven; native capture blocks on device polling. Browser capture
 requires a separate asynchronous facade API.
+
+## Rendering check
+
+The one check that draws the browser build in a browser is a local command:
+
+```sh
+pnpm --filter bobcat-wasm build
+node crates/bobcat-wasm/scripts/render-check.ts
+```
+
+It serves the package's `pkg/` and `dist/` and a Lynx XML card from
+`127.0.0.1` with the COOP/COEP headers above, so the page is
+cross-origin isolated and a secure context, starts Google Chrome headless
+(`--headless=new --enable-unsafe-webgpu`) with its DevTools protocol on a
+port of its own, and reads screenshots back over Node's `WebSocket`, with no
+browser-automation dependency. The card draws a still PNG it generates (an
+opaque half and a half at 50 % alpha) in an `<image>`, `fast-forever.gif` in
+an `<image>`, and `rgb-twice.gif` (from
+`crates/bobcat-resources/tests/fixtures/animated/`, two plays stated) twice:
+as a CSS `background-image`, a URL picture that plays the file's count, and
+as an `<image loop-count="1">`, a picture of the element's own. An `<image>`
+without `loop-count` loops forever whatever the file states, so a check
+that a picture comes to rest needs one of those two. The check asserts that
+the still image's two halves are the expected colours over the white page,
+that both finite pictures rest on the last frame — blue over its left half,
+green on its right — in four screenshots spread over 750 ms, longer than
+that frame is shown within a loop, and that the looping one is seen in both
+of its colours. `--repeat <n>` runs it that many times, each in a fresh
+browser, and fails if any run does; a failed run prints the console of the
+page and of every Worker it started (`--console` prints it always), which is
+where the resource system's notes go. `--package <dir>` serves another
+build's `pkg/` and `dist/` (an older build fails the animation checks and
+passes the still one), `--out <dir>` keeps the screenshots, and `CHROME` or
+`--chrome` names the browser, by default where macOS installs Google
+Chrome.
+
+CI does not run it. It needs a WebGPU adapter in headless Chrome, and the
+engine refuses to run without one; CI's Ubuntu runner has no GPU, and
+running the check there on a software adapter has not been tried.
 
 Source mapping and registration live in the complete `bobcat-source` crate,
 including its XML, web and native binary parsers, with no Cargo feature flags.

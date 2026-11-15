@@ -49,8 +49,8 @@
 //! instead of the platform decoder: natively under a decode permit, in a
 //! closure of its own on the blocking pool; in the browser inside the load's
 //! local task on the Render Worker, whose executor has no permits. The
-//! browser's `Image` element never sees an SVG, so every target parses the
-//! same bytes the same way.
+//! browser's `createImageBitmap` never sees an SVG, so every target parses
+//! the same bytes the same way.
 //!
 //! A document the page wrote itself (the Lynx `<svg content>`) arrives as a
 //! document request instead ([`request_document`]): its bytes and kind under
@@ -76,21 +76,21 @@ use bobcat_core::{
 use bytes::Bytes;
 use url::Url;
 use vant::Platform;
+use vant::image::DecodedImage;
 use vant::image::animation::ImageFrames;
 use vant::image::residency::{Decoded, Described, Refinement, ViewKey};
 
 use crate::animation::{Animations, FrameDecode, Job};
-use crate::decode::Bitmap;
 use crate::image_header::ImageHeader;
 use crate::mime::ImageFormat;
 use crate::preprocess::{self, Payload};
-use crate::{Resources, Shared, SharedHandle};
+use crate::{FrameOf, Resources, Shared, SharedHandle};
 
 /// What a raster load hands back: the bitmap, what the bytes were, the
 /// bytes themselves when nothing else could restore them or when the image
 /// animates, and its frames when it has more than one.
-type LoadedImage = (
-    Bitmap,
+type LoadedImage<F> = (
+    DecodedImage<F>,
     ImageFormat,
     Option<ImageHeader>,
     Option<Bytes>,
@@ -98,14 +98,14 @@ type LoadedImage = (
 );
 
 /// What a load job hands back: a decoded bitmap, or a parsed document.
-enum LoadOutcome {
-    Raster(LoadedImage),
+enum LoadOutcome<F> {
+    Raster(LoadedImage<F>),
     Vector(Arc<VectorDocument>),
 }
 
-impl LoadOutcome {
+impl<F> LoadOutcome<F> {
     /// The completion that reports this outcome for `source`.
-    fn completion(self, source: Arc<str>, url: Url) -> Completion {
+    fn completion(self, source: Arc<str>, url: Url) -> Completion<F> {
         match self {
             Self::Raster((bitmap, format, header, encoded, frames)) => Completion::Loaded {
                 source,
@@ -139,20 +139,21 @@ fn parse(
 
 /// The painter-thread half: the engine's residency over every source asked
 /// for, the playheads of the animated ones, and the queue its completions
-/// arrive on.
-pub(crate) struct ImageState {
-    pub(crate) residency: ImageResidency,
-    pub(crate) animations: Animations,
+/// arrive on. `F` is the platform decoder's frame type.
+pub(crate) struct ImageState<F> {
+    pub(crate) residency: ImageResidency<F>,
+    pub(crate) animations: Animations<F>,
     /// The painter is the only consumer, and drains without blocking.
-    completions: tokio::sync::mpsc::UnboundedReceiver<Completion>,
+    completions: tokio::sync::mpsc::UnboundedReceiver<Completion<F>>,
 }
 
-/// What a job sends back.
-pub(crate) enum Completion {
+/// What a job sends back: a decode's answer is CPU pixels or a frame of the
+/// platform decoder's own type `F`.
+pub(crate) enum Completion<F> {
     Loaded {
         source: Arc<str>,
         url: Url,
-        bitmap: Bitmap,
+        bitmap: DecodedImage<F>,
         format: ImageFormat,
         header: Option<ImageHeader>,
         encoded: Option<Bytes>,
@@ -173,7 +174,7 @@ pub(crate) enum Completion {
     Refined {
         source: Arc<str>,
         target: (u32, u32),
-        bitmap: Bitmap,
+        bitmap: DecodedImage<F>,
     },
     Failed {
         source: Arc<str>,
@@ -187,7 +188,7 @@ pub(crate) enum Completion {
     Frame {
         source: Arc<str>,
         index: usize,
-        bitmap: Bitmap,
+        bitmap: DecodedImage<F>,
     },
     FrameFailed {
         source: Arc<str>,
@@ -201,11 +202,11 @@ pub(crate) enum Completion {
     },
 }
 
-impl ImageState {
+impl<F: Clone> ImageState<F> {
     pub(crate) fn new(
-        residency: ImageResidency,
+        residency: ImageResidency<F>,
         origin: ClockInstant,
-        completions: tokio::sync::mpsc::UnboundedReceiver<Completion>,
+        completions: tokio::sync::mpsc::UnboundedReceiver<Completion<F>>,
     ) -> Self {
         Self {
             residency,
@@ -261,7 +262,7 @@ pub(crate) fn request_document<P: Platform>(
 
 /// Applies every completion queued since the last turn.
 pub(crate) fn service<P: Platform>(resources: &Resources<P>) {
-    let completions: Vec<Completion> = {
+    let completions: Vec<Completion<FrameOf<P>>> = {
         let mut state = resources.local.borrow_mut();
         let mut drained = Vec::new();
         // Empty and disconnected both end the drain: a scope whose senders
@@ -303,7 +304,7 @@ fn start<P: Platform>(resources: &Resources<P>, jobs: Vec<Job>) {
     }
 }
 
-fn apply<P: Platform>(resources: &Resources<P>, completion: Completion) {
+fn apply<P: Platform>(resources: &Resources<P>, completion: Completion<FrameOf<P>>) {
     let mut state = resources.local.borrow_mut();
     match completion {
         Completion::Loaded {
@@ -317,7 +318,7 @@ fn apply<P: Platform>(resources: &Resources<P>, completion: Completion) {
         } => {
             let animation = frames
                 .zip(encoded.clone())
-                .map(|(frames, bytes)| (frames, bytes, (bitmap.width, bitmap.height)));
+                .map(|(frames, bytes)| (frames, bytes, bitmap.size()));
             state.residency.complete_loaded(
                 &source,
                 Decoded {
@@ -420,7 +421,7 @@ pub(crate) fn describe_picture<P: Platform>(
     resources: &Resources<P>,
     picture: PictureId,
     hint: ImageSizeHint,
-) -> Option<FrameImage> {
+) -> Option<FrameImage<FrameOf<P>>> {
     let mut jobs = Vec::new();
     let (image, wake) = {
         let mut state = resources.local.borrow_mut();
@@ -464,7 +465,7 @@ pub(crate) fn want_picture<P: Platform>(
 pub(crate) fn take_frame<P: Platform>(
     resources: &Resources<P>,
     picture: PictureId,
-) -> Option<bobcat_core::TakenFrame> {
+) -> Option<bobcat_core::TakenFrame<FrameOf<P>>> {
     resources.local.borrow().animations.take_frame(picture)
 }
 
@@ -536,7 +537,7 @@ pub(crate) fn describe<P: Platform>(
     resources: &Resources<P>,
     source: &str,
     hint: ImageSizeHint,
-) -> Option<FrameImage> {
+) -> Option<FrameImage<FrameOf<P>>> {
     let mut state = resources.local.borrow_mut();
     if state.animations.contains(source) {
         let source: Arc<str> = Arc::from(source);
@@ -556,7 +557,11 @@ pub(crate) fn describe<P: Platform>(
     drop(state);
     let (image, refine) = match described {
         Described::Unavailable => return None,
-        Described::Resident { image, refine } => (FrameImage::resident(image), refine),
+        Described::Resident {
+            image,
+            descriptor,
+            refine,
+        } => (FrameImage::held(image, descriptor), refine),
         Described::Absent { descriptor, refine } => (FrameImage::released(descriptor), refine),
     };
     if let Some(refinement) = refine {
@@ -665,7 +670,7 @@ async fn load<P: Platform>(
     source: &Arc<str>,
     url: &Url,
     bound: (u32, u32),
-) -> Result<LoadOutcome, String> {
+) -> Result<LoadOutcome<FrameOf<P>>, String> {
     let prepared = {
         let shared = SharedHandle::clone(shared);
         let source = Arc::clone(source);
@@ -699,7 +704,11 @@ async fn load<P: Platform>(
     };
     let encoded = (!restorable || frames.is_some()).then_some(encoded);
     Ok(LoadOutcome::Raster((
-        bitmap, format, header, encoded, frames,
+        bitmap.into(),
+        format,
+        header,
+        encoded,
+        frames,
     )))
 }
 
@@ -819,7 +828,7 @@ async fn load_async<P: Platform>(
     url: &Url,
     fetched: Result<crate::transport::Fetched, vant::error::Failure>,
     bound: (u32, u32),
-) -> Result<LoadOutcome, String> {
+) -> Result<LoadOutcome<FrameOf<P>>, String> {
     let fetched = fetched.map_err(|failure| failure.to_string())?;
     let restorable = fetched.restorable;
     let preprocessed =
@@ -832,7 +841,7 @@ async fn load_async<P: Platform>(
         ));
     };
     // An SVG document is parsed here, in this task, with the engine's
-    // parser: it never reaches the main thread's `Image` element.
+    // parser: it never reaches the browser's image decoder.
     if format == ImageFormat::Svg {
         return parse(source, &preprocessed.bytes, DocumentKind::Svg).map(LoadOutcome::Vector);
     }
@@ -858,7 +867,7 @@ async fn refine<P: Platform>(
     handle: &tokio::runtime::Handle,
     permits: &Arc<tokio::sync::Semaphore>,
     refinement: Refinement,
-) -> Result<Bitmap, String> {
+) -> Result<DecodedImage<FrameOf<P>>, String> {
     let Refinement {
         url,
         encoded,
@@ -880,6 +889,7 @@ async fn refine<P: Platform>(
         shared.decode_job(&bytes, format, header, target)
     })
     .await?
+    .map(DecodedImage::from)
     .map_err(|error| error.to_string())
 }
 
@@ -968,7 +978,7 @@ fn spawn_frame<P: Platform>(resources: &Resources<P>, source: Arc<str>, decode: 
             Ok(bitmap) => Completion::Frame {
                 source,
                 index,
-                bitmap,
+                bitmap: bitmap.into(),
             },
             Err(message) => Completion::FrameFailed {
                 source,
