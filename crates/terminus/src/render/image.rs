@@ -315,7 +315,8 @@ pub struct FrameImage {
     pub generation: u64,
     /// The instant the generation will next change by itself, when the
     /// picture knows it (an animated image does; a video does not). The
-    /// painter asks for a frame then ([`crate::painter::Painter::next_picture_change`]).
+    /// painter describes such a picture again at every adoption and arms no
+    /// timer: the store wakes its host at the instant itself.
     pub next_change: Option<ClockInstant>,
 }
 
