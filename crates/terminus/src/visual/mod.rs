@@ -1283,10 +1283,10 @@ impl<T> Document<T> {
                 let (images, text_context) = self.image_apply_parts();
                 images.apply(event, text_context)
             };
-            let Some(status) = applied else {
+            let (Some(status), Some(source)) = (applied, event.source()) else {
                 continue;
             };
-            settled.push((Arc::clone(event.source()), status));
+            settled.push((Arc::clone(source), status));
             self.note_visual_mutation();
         }
         settled

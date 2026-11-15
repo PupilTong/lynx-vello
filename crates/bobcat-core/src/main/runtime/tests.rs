@@ -6730,6 +6730,7 @@ fn image_loaded(source: &str) -> terminus::link::ImageEvent {
         source: Arc::from(source),
         width: IMAGE_PIXELS.0,
         height: IMAGE_PIXELS.1,
+        animated: false,
     }
 }
 
@@ -6999,6 +7000,167 @@ fn an_element_collected_before_its_load_is_delivered_gets_nothing() {
 }
 
 /// Writes a `src` the way a card does, through the PAPI.
+/// The playback requests the entry's epilogue handed the host.
+fn playback_notices(
+    notices: &mut mpsc::UnboundedReceiver<ViewNotice>,
+) -> Vec<terminus::link::PlaybackRequest> {
+    std::iter::from_fn(|| notices.try_recv().ok())
+        .filter_map(|notice| match notice {
+            ViewNotice::Playback(requests) => Some(requests),
+            _ => None,
+        })
+        .flatten()
+        .collect()
+}
+
+/// An `<image>` whose `src` loads animated, through the realm: the entry
+/// that applied the load asks the host to play a picture of the element's
+/// own under its `loop-count`; `startplay` is delivered before `load`, each
+/// loop the host reports is a `currentloopcomplete` and the last a
+/// `finalloopcomplete`, all non-bubbling with an empty detail; and the four
+/// UI methods answer code 0 with native's message, in the call, and reach
+/// the host as controls when the entry ends.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one scenario: the load, the loops and the four methods"
+)]
+fn an_animated_image_plays_its_own_picture_through_the_realm() {
+    use terminus::link::{Loops, PlaybackControl, PlaybackReport, PlaybackRequest};
+
+    let (mut js_runtime, mut runtime, _elements, mut far) =
+        runtime_over_watching_names(ingredients());
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.seen = [];
+                globalThis.runWorklet = (value, params) => value.body(params[0]);
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const image = __CreateImage(0);
+                  __AppendElement(page, image);
+                  globalThis.held = [page, image];
+                  for (const name of [
+                    'startplay', 'load', 'currentloopcomplete', 'finalloopcomplete',
+                  ]) {
+                    __AddEvent(image, 'bindEvent', name, {
+                      type: 'worklet',
+                      value: {
+                        body: (event) =>
+                          seen.push(event.type + ':' + JSON.stringify(event.detail)),
+                      },
+                    });
+                    __AddEvent(page, 'bindEvent', name, {
+                      type: 'worklet',
+                      value: { body: (event) => seen.push('page:' + event.type) },
+                    });
+                  }
+                  __SetAttribute(image, 'src', 'app:///spinner.gif');
+                  __SetAttribute(image, 'loop-count', 2);
+                };
+                ",
+            "app:///animated-image.js",
+        )
+        .expect("main-thread script");
+    let _ = runtime.settle_entry();
+    assert!(
+        playback_notices(&mut far.0.notices).is_empty(),
+        "nothing loaded"
+    );
+
+    runtime.apply_image_events(&[terminus::link::ImageEvent::Loaded {
+        source: Arc::from("app:///spinner.gif"),
+        width: IMAGE_PIXELS.0,
+        height: IMAGE_PIXELS.1,
+        animated: true,
+    }]);
+    let _ = runtime.settle_entry();
+    let requests = playback_notices(&mut far.0.notices);
+    let [
+        PlaybackRequest::Play {
+            picture,
+            source,
+            policy,
+        },
+    ] = requests.as_slice()
+    else {
+        panic!("one play: {requests:?}");
+    };
+    let picture = *picture;
+    assert_eq!(&**source, "app:///spinner.gif");
+    assert_eq!(policy.loops, Loops::from_plays(2));
+    assert!(!policy.paused);
+    assert!(
+        runtime
+            .dispatch_component_events(&mut js_runtime)
+            .is_empty()
+    );
+    expect_seen(
+        &mut js_runtime,
+        &mut runtime,
+        r#"startplay:{}|load:{"width":40,"height":20}"#,
+    );
+
+    runtime.apply_image_events(&[
+        terminus::link::ImageEvent::Playback {
+            picture,
+            report: PlaybackReport::LoopComplete,
+        },
+        terminus::link::ImageEvent::Playback {
+            picture,
+            report: PlaybackReport::LoopComplete,
+        },
+        terminus::link::ImageEvent::Playback {
+            picture,
+            report: PlaybackReport::FinalLoopComplete,
+        },
+    ]);
+    assert!(
+        runtime
+            .dispatch_component_events(&mut js_runtime)
+            .is_empty()
+    );
+    expect_seen(
+        &mut js_runtime,
+        &mut runtime,
+        "currentloopcomplete:{}|currentloopcomplete:{}|finalloopcomplete:{}",
+    );
+
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+                import { __InvokeUIMethod } from 'bobcat:element';
+                for (const method of [
+                  'startAnimate', 'pauseAnimation', 'resumeAnimation', 'stopAnimation',
+                ]) {
+                  __InvokeUIMethod(held[1], method, {}, (result) =>
+                    seen.push(result.code + ':' + result.data));
+                }
+                ",
+            "app:///animate.mjs",
+            "calling the animation methods",
+        )
+        .expect("calling the animation methods");
+    expect_seen(
+        &mut js_runtime,
+        &mut runtime,
+        "0:Animation restarted.|0:Animation paused.|0:Animation resumed.|0:Animation stopped.",
+    );
+    let _ = runtime.settle_entry();
+    assert_eq!(
+        playback_notices(&mut far.0.notices),
+        [
+            PlaybackControl::Restart,
+            PlaybackControl::Pause,
+            PlaybackControl::Resume,
+            PlaybackControl::Stop,
+        ]
+        .map(|control| PlaybackRequest::Control { picture, control })
+    );
+}
+
 fn js_set_src(js_runtime: &mut ScriptRuntime, runtime: &mut MainThreadRuntime, source: &str) {
     runtime
         .evaluate_module(

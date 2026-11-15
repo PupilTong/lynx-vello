@@ -2587,6 +2587,10 @@ function invokeUIMethod(handle: Handle, method: string, params: unknown): Invoke
  *   `selectionBegin`, web-core's name for the start (`XInput.ts`), so a
  *   card written against either reads it. The host writes the value, the
  *   two UTF-16 offsets and `1` or `0` for composing.
+ * - `startAnimate`, `pauseAnimation`, `resumeAnimation` and
+ *   `stopAnimation`, an `image`'s: native's message as a bare string
+ *   (`"Animation restarted."`, `"Animation paused."`, `"Animation
+ *   resumed."`, `"Animation stopped."`), whether or not anything plays.
  *
  * A method without an arm gets the fields themselves.
  */
@@ -2668,6 +2672,11 @@ function decodeMethodData(handle: Handle, method: string, fields: string[]): unk
     }
     case "getCharIndexByPoint":
       return { index: Number(fields[0]) };
+    case "startAnimate":
+    case "pauseAnimation":
+    case "resumeAnimation":
+    case "stopAnimation":
+      return fields[0] ?? "";
     case "getValue": {
       const [value = "", start = "0", end = "0", composing = "0"] = fields;
       const selectionStart = Number(start);

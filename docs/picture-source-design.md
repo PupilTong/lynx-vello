@@ -183,7 +183,7 @@ scroll frame.
 
 | Layer | Owns |
 | --- | --- |
-| `terminus` | the picture key on a replaced box and in an image draw; per-picture upload and generation; compose and bake keys; frame demand; the writer for CPU pixels. Knows nothing of URLs beyond carrying them, of `<image>`, or of playback |
+| `terminus` | the picture key on a replaced box and in an image draw; per-picture upload and generation; compose and bake keys; frame demand; the writer for CPU pixels. Knows nothing of URLs beyond carrying them, or of `<image>`; it carries an `Id` picture's playback requests and reports between the document's thread and the host without acting on them |
 | `vant` | policy with no platform in it: residency, the animation timeline and playhead, the decoder and platform capability traits |
 | `bobcat-resources`, `bobcat-wasm` | the platform's side: decoders, the platform-frame writer, the media player |
 | `bobcat-core` | the elements: `image`, later `video`; attribute mapping, UI methods, events |
@@ -194,8 +194,9 @@ Option<(PictureKey, Option<(u32, u32)>)>)` — and resolves `Url` pictures, a
 replaced box's and a CSS image's alike, against its image registry. It offers
 that registry to its embedder as a URL image service with no element in it:
 `Document::request_image(url) -> ImageStatus` asks for a URL once and answers
-what is known of it (`Pending`, `Bitmap` or `Vector` with the natural size,
-`Failed`), `Document::image_status` reads it without asking,
+what is known of it (`Pending`, `Bitmap` with the natural size and whether it
+animates, `Vector` with the natural size, `Failed`), `Document::image_status`
+reads it without asking,
 `Document::insert_image_document` files a document handed over as bytes under
 its synthetic source, and `Document::apply_image_events` answers each source
 a report settled with the status it settled at. A host URL is asked for once
@@ -231,7 +232,7 @@ clock. The store around it for URL pictures is `bobcat-resources`'s
 - A **playhead** holds the position, the loops completed and whether it is
   paused, drawn or finished; its step count is the picture's generation. A
   `Url` picture has one playhead for all its draws, in every view of a
-  resource scope; an `Id` picture will have its own (step 4b).
+  resource scope; an `Id` picture has its own.
 - A playhead advances only while its picture is drawn: from the first
   describe of it until no view's drawn set (`FrameImages::retain`) includes
   it. Time does not pass while it is not: it continues from the frame it
@@ -256,9 +257,10 @@ clock. The store around it for URL pictures is `bobcat-resources`'s
   host.
 
 A playhead's *policy* (`PlayPolicy`: the loop count, and whether it starts
-paused) is the only difference between the two semantics. Only the CSS
-policy is built (`PlayPolicy::stated`); the `<image>` one and its control
-surface are step 4b:
+paused) is the only difference between the two semantics. A CSS image's is
+`PlayPolicy::stated`; an `<image>`'s is built from its attributes
+(`bobcat-core`'s `play_policy`), and its control surface drives the same
+playhead through `vant`'s four `Control`s (`Playhead::control`):
 
 | | `<image>` | CSS image, `<img>` |
 | --- | --- | --- |
@@ -287,6 +289,52 @@ Every method answers code 0, playing or not.
 
 All three carry an empty detail. An animated `placeholder` plays under the
 CSS policy and fires nothing.
+
+A playhead's *position* is the frame it plays from and its *frame shown* the
+one drawn. They differ only after `stopAnimation`, which moves the position
+to the first frame and leaves the frame shown, so the steps, and with them
+the picture's generation, do not move; `resumeAnimation` and `startAnimate`
+then show the first frame. A stop also resets the loops completed, so the
+playhead plays the whole count again.
+
+How an `<image>` plays its `src`:
+
+- The URL image service says a loaded URL animates (`ImageStatus::Bitmap`'s
+  `animated`, from `ImageReports::loaded_animated`, which the host reports
+  for a source whose decoder answered more than one frame). An `<image>`
+  whose own `src` loads animated presents an `Id` picture of its own
+  (`ImageSources` in `bobcat-core`), at the source's natural size; a still
+  `src` and every `placeholder` present the `Url` picture.
+- The document's thread asks the host for the playback with a
+  `terminus::link::PlaybackRequest` (`Play` a URL under a `PlayPolicy`, one
+  of the four `Control`s, or `End` the picture), queued by the component and
+  handed over in the entry's epilogue as one `ViewNotice::Playback`, which
+  the view's turn serves through `ResourceFetcher::request_playback`. The
+  policy is read from `loop-count` and `autoplay` in that epilogue, not at
+  the load itself: a `src` this document has already settled loads inside
+  the `__SetAttribute` that writes it, which may precede the write of either
+  attribute in the same batch. A `src` change and a free end the picture.
+- `bobcat-resources` keeps each `Id` picture's playhead beside the URL's own,
+  over the one frame sequence its store decodes for the URL; a frame is
+  decoded once while any drawn playhead's window includes it. It publishes
+  the frame a playhead shows into the picture's slot once per change of it
+  and wakes the host, and reports each loop to the view that asked for the
+  playback through `ImageReports::playback`, as `PlaybackReport::LoopComplete`
+  and, after the last of a finite count, `PlaybackReport::FinalLoopComplete`.
+  A control wakes the host, whose next adoption describes the picture,
+  publishes what it now shows and arms its timer. Two `<image>`s on one
+  frame each have their own texture.
+- The reports return with the image reports (`ImageEvent::Playback`); the
+  component maps each to its element and queues `currentloopcomplete` or
+  `finalloopcomplete`, dropping one for a picture that has ended. `startplay`
+  is queued before `load` at the load, and fires when the policy read in the
+  epilogue plays from the start (`ImageSources::autoplays`). Every event is
+  dispatched from the page's component-events entry, never inside the call
+  that caused it.
+- Each UI method answers code 0 and native's message (`"Animation
+  restarted."`, `"Animation paused."`, `"Animation resumed."`, `"Animation
+  stopped."`) as its `data`, whether or not anything plays; on an element
+  showing no animated `src` it sends nothing.
 
 Where this differs from a platform: Android continues rather than restarts
 on `startAnimate`, treats `stopAnimation` as a pause, advances by wall clock
@@ -412,15 +460,26 @@ One change per step, in order; each leaves the tree green.
      `release` in `bobcat-resources`, with its timer on the store's own
      executor; a painter ends the lease on a URL picture's previous bitmap
      when the picture moves to another within a commit. Every URL picture
-     plays: a CSS image, and an `<image>` element, which presents a URL
-     picture and until 4b plays under the CSS policy, the file's own count
-     with no control surface. Fixtures (`crates/bobcat-resources/tests/fixtures/animated/`,
+     plays under the CSS policy, the file's own count with no control
+     surface: a CSS image and an `<image>`'s `placeholder`. Fixtures (`crates/bobcat-resources/tests/fixtures/animated/`,
      written by `tests/animated_fixtures.rs`) and a golden of two frames of
      one file drawn with no commit between them
      (`crates/bobcat-resources/tests/screenshots/animated/`).
-   - **4b, the `<image>` element's playback.** Not built yet: an `Id`
-     picture per `<image>` with its own playhead under the `<image>` policy,
-     `loop-count`, `autoplay`, the four methods and the three events.
+   - **4b, the `<image>` element's playback.** An `Id` picture per
+     `<image>` showing an animated `src`, with its own playhead under the
+     `<image>` policy over the URL's shared frames: `loop-count`, `autoplay`,
+     the four methods and the three events. `vant`'s `Control` and the
+     playhead's position apart from its frame shown; `bobcat-resources`'
+     per-picture playheads, slots, loop reports and timers; the playback
+     request and report on `terminus`'s image protocol and `animated` on the
+     URL status; the component in `bobcat-core`. Tests: `vant`'s pure tests
+     of every row of the two tables, the store's in
+     `bobcat-resources/src/animation_tests.rs`, the component's in
+     `bobcat-core/src/main/tree/image_playback_tests.rs` against a host that
+     plays at instants the test names, one through the realm
+     (`an_animated_image_plays_its_own_picture_through_the_realm`), and the
+     compiled `react-animated-image` card end to end on macOS
+     (`crates/bobcat-source/tests/reactlynx_runtime.rs`).
 5. **Platform frames in the browser.** The frame-writer capability;
    `createImageBitmap` and `ImageDecoder` in the Render Worker; the
    main-thread decoder and mailbox removed.

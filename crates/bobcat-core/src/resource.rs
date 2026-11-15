@@ -135,6 +135,25 @@ pub trait ResourceFetcher:
     ) {
     }
 
+    /// Serves one request of the owner of an `Id` picture
+    /// ([`PlaybackRequest`](terminus::link::PlaybackRequest)): play the
+    /// frames of a URL this host reported loaded and animated under a
+    /// playhead of the picture's own, one of the four controls, or the end
+    /// of the picture. Non-blocking.
+    ///
+    /// A host that serves it publishes the frame the playhead shows into the
+    /// picture's slot and answers it through
+    /// [`FrameImages`](terminus::link::FrameImages) like any `Id` picture,
+    /// advances the playhead only while the picture is drawn, and reports
+    /// each loop it completes through
+    /// [`ImageReports::playback`](terminus::link::ImageReports::playback) of
+    /// this view. Waking the host for the turn that describes the picture
+    /// again, after a request that changed what it shows, is the host's.
+    ///
+    /// The default serves nothing: a host that never reports a source
+    /// animated is never asked.
+    fn request_playback(&self, _request: terminus::link::PlaybackRequest) {}
+
     /// The host's own moment in every [`LynxView::pump`](crate::LynxView::pump),
     /// on this thread, before the turn reads the reports queued so far.
     ///
@@ -232,6 +251,10 @@ impl<T: ResourceFetcher + ?Sized> ResourceFetcher for Rc<T> {
         kind: terminus::link::DocumentKind,
     ) {
         (**self).request_document(source, bytes, kind);
+    }
+
+    fn request_playback(&self, request: terminus::link::PlaybackRequest) {
+        (**self).request_playback(request);
     }
 
     fn service_images(&self) {

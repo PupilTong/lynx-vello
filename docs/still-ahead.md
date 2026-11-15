@@ -37,9 +37,10 @@ would host it:
   (`click`, `dblclick` and the compatibility mouse events are built); `tapSlop` is
   the default 50 px rather than the page config's.
 - **The rest of the `<image>` element surface.** `src`, `placeholder`,
-  `mode`, `auto-size` and `blur-radius` work, and `load` (with the bitmap's
+  `mode`, `auto-size` and `blur-radius` work, `load` (with the bitmap's
   natural size) and `error` fire, non-bubbling, through the component-event
-  queue; `cap-insets` and the animated-image events do not.
+  queue, and an animated `src` plays under `loop-count` and `autoplay` with
+  its four methods and three events; `cap-insets` does not.
 - **UI methods other than `boundingClientRect`, `scrollIntoView`,
   `scrollTo`/`scrollBy`, `selectTab`, a swiper's `scrollTo`, a
   `scroll-view`'s `scrollTo`/`scrollBy`/`getScrollInfo`, a `list`'s
@@ -70,9 +71,10 @@ would host it:
   (scroll and threshold events, sticky cells and snapping; the
   layout mapping and virtualization are UA rules already, and five UI methods
   are built).
-- **Animated image playback.** `bobcat-resources` decodes an image's first
-  frame only, with no `region-to-decode` and no `blur-radius`
-  post-processing.
+- **Animated image frames off macOS.** Only `ImageIO` decodes an animated
+  image's frames by index; gdk-pixbuf and the browser's `Image` decoder answer
+  the first frame (`docs/picture-source-design.md` step 5 takes up the
+  browser). No `region-to-decode` and no `blur-radius` post-processing.
 - **Import maps, import attributes, JSON *ESM* modules and Lynx component-bundle
   imports**, and the asynchronous half of the compiled-bundle loader:
   `requireModuleAsync` and `loadScriptAsync`. Lazy containers themselves are

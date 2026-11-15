@@ -1121,6 +1121,15 @@ pub struct LynxView<F> {
     group: Rc<GroupInner>,
 }
 
+/// What one turn's notices asked of the host's images, in the order each
+/// kind was asked.
+#[derive(Default)]
+struct ImageRequests {
+    images: Vec<Arc<str>>,
+    documents: Vec<terminus::link::DocumentRequest>,
+    playback: Vec<terminus::link::PlaybackRequest>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ViewState {
     Loading,
@@ -1348,8 +1357,7 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
     #[must_use]
     pub fn pump(&mut self) -> Vec<EngineEvent> {
         let mut events = Vec::new();
-        let mut image_requests = Vec::new();
-        let mut document_requests = Vec::new();
+        let mut requests = ImageRequests::default();
         while let Ok(notice) = self.notices.try_recv() {
             match notice {
                 ViewNotice::WorkerCreated { key, messages } => {
@@ -1388,8 +1396,9 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
                         events.push(EngineEvent::TextInputStateChanged(state));
                     }
                 }
-                ViewNotice::RequestImages(sources) => image_requests.extend(sources),
-                ViewNotice::RequestDocuments(documents) => document_requests.extend(documents),
+                ViewNotice::RequestImages(sources) => requests.images.extend(sources),
+                ViewNotice::RequestDocuments(documents) => requests.documents.extend(documents),
+                ViewNotice::Playback(playback) => requests.playback.extend(playback),
                 // A view that failed or was released asks its host for
                 // nothing more: the completion is dropped instead, which is
                 // what tells whoever was awaiting it that no source is coming.
@@ -1454,23 +1463,7 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
                 }
             }
         }
-        // The host's own moment in the turn comes before the sources this
-        // turn discovered are named, so a load that finished between turns is
-        // reported whether or not this turn asked for anything.
-        //
-        // A view that has failed asks its host for nothing at all, images and
-        // documents included: the document those pictures were for is
-        // finished with, and the same rule already governs the source
-        // requests above.
-        if self.state != ViewState::Failed {
-            self.fetcher.service_images();
-            for source in image_requests {
-                self.fetcher.request_image(source.as_ref());
-            }
-            for (source, bytes, kind) in document_requests {
-                self.fetcher.request_document(&source, bytes, kind);
-            }
-        }
+        self.serve_images(requests);
         self.take_performance_entries(&mut events);
         // Drained either way, so what a host reported before the failure is
         // discarded here rather than left to accumulate behind a view that
@@ -1480,6 +1473,33 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
             let _ = self.seat.commands.send(ToMain::ImageEvents(reports));
         }
         events
+    }
+
+    /// The host's moment in a turn for images: its own service, then the
+    /// sources, documents and playbacks this turn's notices asked for.
+    ///
+    /// The host's own moment comes before the sources this turn discovered
+    /// are named, so a load that finished between turns is reported whether
+    /// or not this turn asked for anything. A view that has failed asks its
+    /// host for nothing at all, images and documents included: the document
+    /// those pictures were for is finished with, and the same rule already
+    /// governs the source requests.
+    fn serve_images(&self, requests: ImageRequests) {
+        if self.state == ViewState::Failed {
+            return;
+        }
+        self.fetcher.service_images();
+        for source in requests.images {
+            self.fetcher.request_image(source.as_ref());
+        }
+        for (source, bytes, kind) in requests.documents {
+            self.fetcher.request_document(&source, bytes, kind);
+        }
+        // After the images: a picture plays only a source already reported
+        // loaded, so no request here waits on one above.
+        for request in requests.playback {
+            self.fetcher.request_playback(request);
+        }
     }
 
     /// Hands `events` the performance entries completed since the last turn,

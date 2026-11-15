@@ -2807,6 +2807,7 @@ mod tests {
             source: std::sync::Arc::from(source),
             width,
             height,
+            animated: false,
         }
     }
 
@@ -2906,7 +2907,8 @@ mod tests {
             document.request_image(SRC),
             ImageStatus::Bitmap {
                 width: 40,
-                height: 20
+                height: 20,
+                animated: false,
             }
         );
         assert_eq!(document.request_image(OTHER_SRC), ImageStatus::Failed);

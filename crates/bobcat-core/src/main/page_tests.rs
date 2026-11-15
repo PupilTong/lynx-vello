@@ -300,6 +300,7 @@ impl Harness {
                 } => self.sources.push((request, completion)),
                 ViewNotice::RequestImages(_)
                 | ViewNotice::RequestDocuments(_)
+                | ViewNotice::Playback(_)
                 | ViewNotice::WorkerCreated { .. }
                 | ViewNotice::NativeModuleCall { .. }
                 | ViewNotice::TextInputState(_)
@@ -2396,6 +2397,7 @@ fn an_image_load_reaches_its_listener_in_an_entry_of_its_own() {
                     source: Arc::from("app:///b.png"),
                     width: 10,
                     height: 5,
+                    animated: false,
                 },
             ])])
             .await;
@@ -2420,6 +2422,7 @@ fn an_image_load_reaches_its_listener_in_an_entry_of_its_own() {
                     source: Arc::from("app:///a.png"),
                     width: 40,
                     height: 20,
+                    animated: false,
                 },
             ])])
             .await;
@@ -2487,6 +2490,7 @@ fn an_image_event_queued_by_a_listener_is_delivered_by_an_entry_of_its_own() {
                     source: Arc::from("app:///b.png"),
                     width: 10,
                     height: 5,
+                    animated: false,
                 },
             ])])
             .await;
@@ -2507,6 +2511,7 @@ fn an_image_event_queued_by_a_listener_is_delivered_by_an_entry_of_its_own() {
                     source: Arc::from("app:///a.png"),
                     width: 40,
                     height: 20,
+                    animated: false,
                 },
             ])])
             .await;

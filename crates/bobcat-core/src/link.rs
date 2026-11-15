@@ -300,6 +300,10 @@ pub(crate) enum ViewNotice {
     /// and kind, for the store to parse and report like a fetched document
     /// (`ResourceFetcher::request_document`).
     RequestDocuments(Vec<terminus::link::DocumentRequest>),
+    /// What the owners of `Id` pictures asked of the store that plays them,
+    /// in order: an `<image>`'s animated `src` starting, one of its four
+    /// controls, or its end (`ResourceFetcher::request_playback`).
+    Playback(Vec<terminus::link::PlaybackRequest>),
     /// One source — a stylesheet, an imported module or a worker script —
     /// and the right to answer it. Whoever holds the receiving end
     /// is the destination, which is why the host never learns which.

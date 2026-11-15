@@ -98,8 +98,12 @@ pub struct ViewKey(u64);
 /// What a request for a source means for the caller.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Requested {
-    /// Already a bitmap: the caller reports its intrinsic size now.
-    Loaded { intrinsic: (u32, u32) },
+    /// Already a bitmap: the caller reports its intrinsic size now, and
+    /// whether its frames animate.
+    Loaded {
+        intrinsic: (u32, u32),
+        animated: bool,
+    },
     /// Failed before, and failed for good: the caller reports the failure
     /// now.
     Failed,
@@ -120,6 +124,9 @@ pub struct Decoded {
     pub header: Option<ImageHeader>,
     /// The encoded bytes, kept when no other tier can hand them back.
     pub encoded: Option<Bytes>,
+    /// Whether the image has more than one frame to play, as its decoder
+    /// answered: what every later request is told with its size.
+    pub animated: bool,
 }
 
 /// What a refinement re-decodes, and at what size. A restore of a wanted
@@ -209,6 +216,8 @@ enum Entry<W> {
 struct Loaded {
     url: Url,
     intrinsic: (u32, u32),
+    /// Whether the image's frames animate.
+    animated: bool,
     /// The container, for a decoder that wants to be told what it is given.
     /// Never [`ImageFormat::Svg`]: an SVG document completes as
     /// [`Entry::Parsed`], so no restore or refinement ever decodes one.
@@ -282,6 +291,7 @@ impl<W> Residency<W> {
             Some(Entry::Loaded(loaded)) => {
                 return Requested::Loaded {
                     intrinsic: loaded.intrinsic,
+                    animated: loaded.animated,
                 };
             }
             Some(Entry::Failed) => return Requested::Failed,
@@ -320,6 +330,7 @@ impl<W> Residency<W> {
             format,
             header,
             encoded,
+            animated,
         } = decoded;
         let intrinsic = (bitmap.source_width, bitmap.source_height);
         let bytes = bitmap.byte_len();
@@ -330,6 +341,7 @@ impl<W> Residency<W> {
             Entry::Loaded(Loaded {
                 url,
                 intrinsic,
+                animated,
                 format,
                 header,
                 encoded,
@@ -596,6 +608,7 @@ mod tests {
             format: ImageFormat::Png,
             header: None,
             encoded: encoded.map(Bytes::from_static),
+            animated: false,
         }
     }
 
@@ -641,7 +654,8 @@ mod tests {
         assert_eq!(
             residency.request("a.png", "third"),
             Requested::Loaded {
-                intrinsic: (40, 20)
+                intrinsic: (40, 20),
+                animated: false,
             },
             "a loaded source answers at once"
         );
@@ -927,7 +941,10 @@ mod tests {
         assert!(
             matches!(
                 residency.request("a.png", "again"),
-                Requested::Loaded { intrinsic: (2, 2) }
+                Requested::Loaded {
+                    intrinsic: (2, 2),
+                    animated: false
+                }
             ),
             "and the source stays loaded"
         );
@@ -1015,7 +1032,10 @@ mod tests {
         assert!(residency.knows("a.png"), "the entry stays loaded");
         assert!(matches!(
             residency.request("a.png", "again"),
-            Requested::Loaded { intrinsic: (2, 2) }
+            Requested::Loaded {
+                intrinsic: (2, 2),
+                animated: false
+            }
         ));
         let Described::Absent {
             descriptor: absent,

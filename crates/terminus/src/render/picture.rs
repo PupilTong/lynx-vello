@@ -25,15 +25,63 @@
 //!
 //! The thread that builds the document holds a picture's key and its natural
 //! size, never a frame.
+//!
+//! # Playback
+//!
+//! An `Id` picture may play a URL's frames under a playhead of its own.
+//! Whoever owns the picture asks the store for that with a
+//! [`PlaybackRequest`] (play a URL under a [`PlayPolicy`], one of the four
+//! [`PlaybackControl`]s, or the end of the picture), and the store reports
+//! each loop the playhead completes as a [`PlaybackReport`]
+//! ([`ImageReports::playback`](crate::render::image::ImageReports::playback)),
+//! which travels back with the image reports. What the playhead does is
+//! `vant`'s ([`vant::image::animation`]); which element owns the picture,
+//! and what it makes of a report, is the embedder's.
 
 use std::convert::Infallible;
 use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
+pub use vant::image::animation::{Control as PlaybackControl, Loops, PlayPolicy};
+
 use crate::clock::ClockInstant;
 use crate::peniko::ImageData;
 use crate::render::image::{FrameImage, ImageDescriptor};
+
+/// What the owner of an `Id` picture asks of the store that produces its
+/// frames.
+///
+/// `Send`: it crosses from the thread that builds the document to the
+/// host's, as the image requests do.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PlaybackRequest {
+    /// `picture` shows the frames of `source`, a URL the host has already
+    /// reported loaded, under a playhead of its own that starts on the first
+    /// frame under `policy`. Asked once per picture.
+    Play {
+        picture: PictureId,
+        source: Arc<str>,
+        policy: PlayPolicy,
+    },
+    /// One instruction to `picture`'s playhead.
+    Control {
+        picture: PictureId,
+        control: PlaybackControl,
+    },
+    /// `picture` is gone: the store lets go of everything it held for it.
+    End { picture: PictureId },
+}
+
+/// What a playing picture's store reports of its playhead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PlaybackReport {
+    /// A loop completed, the last of a finite count included.
+    LoopComplete,
+    /// The final loop of a finite count completed, after its
+    /// [`Self::LoopComplete`]; the last frame stays shown.
+    FinalLoopComplete,
+}
 
 /// A picture one element owns, unique in the process: two ids are never
 /// equal unless one was copied from the other.

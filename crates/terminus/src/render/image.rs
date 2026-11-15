@@ -132,7 +132,7 @@ use crate::clock::ClockInstant;
 use crate::paint::display_list::DisplayList;
 use crate::peniko::ImageData;
 use crate::render::gpu::SharedGpu;
-use crate::render::picture::{PictureId, PictureKey, TakenFrame};
+use crate::render::picture::{PictureId, PictureKey, PlaybackReport, TakenFrame};
 use crate::render::svg::{self, VectorDocument};
 
 /// A parsed SVG document, encoded and drawable at any size.
@@ -545,7 +545,31 @@ impl ImageReports {
             source: Arc::from(source),
             width,
             height,
+            animated: false,
         });
+    }
+
+    /// [`Self::loaded`], for a source whose decoder answered more than one
+    /// frame to play: the document learns that it animates
+    /// ([`ImageStatus::Bitmap`]'s `animated`), and an owner of an `Id`
+    /// picture may ask for it to be played under a playhead of its own
+    /// ([`PlaybackRequest`](crate::render::picture::PlaybackRequest)).
+    pub fn loaded_animated(&self, source: &str, width: u32, height: u32) {
+        self.post(ImageEvent::Loaded {
+            source: Arc::from(source),
+            width,
+            height,
+            animated: true,
+        });
+    }
+
+    /// `picture`'s playhead reports `report`. Nothing about the URL the
+    /// picture plays settles: the report is for whoever asked for the
+    /// playback.
+    ///
+    /// Non-blocking, and it must not re-enter the store.
+    pub fn playback(&self, picture: PictureId, report: PlaybackReport) {
+        self.post(ImageEvent::Playback { picture, report });
     }
 
     /// `source` is a document the engine draws itself, and `document` is
@@ -663,8 +687,11 @@ impl ImageResidency {
     /// load.
     pub fn request(&mut self, source: &str, reports: &ImageReports) -> Option<(u32, u32)> {
         match self.residency.request(source, reports.clone()) {
-            Requested::Loaded { intrinsic } => {
-                reports.loaded(source, intrinsic.0, intrinsic.1);
+            Requested::Loaded {
+                intrinsic,
+                animated,
+            } => {
+                report_loaded(reports, source, intrinsic, animated);
                 None
             }
             Requested::Failed => {
@@ -684,9 +711,10 @@ impl ImageResidency {
 
     /// `source`'s load decoded: reported loaded to every view that asked.
     pub fn complete_loaded(&mut self, source: &Arc<str>, decoded: Decoded) {
+        let animated = decoded.animated;
         if let Some((waiters, intrinsic)) = self.residency.loaded(source, decoded) {
             for reports in waiters {
-                reports.loaded(source, intrinsic.0, intrinsic.1);
+                report_loaded(&reports, source, intrinsic, animated);
             }
         }
     }
@@ -811,6 +839,16 @@ impl ImageResidency {
     }
 }
 
+/// Reports `source` loaded at `intrinsic` to `reports`, as an animated
+/// source when its decoder said so.
+fn report_loaded(reports: &ImageReports, source: &str, intrinsic: (u32, u32), animated: bool) {
+    if animated {
+        reports.loaded_animated(source, intrinsic.0, intrinsic.1);
+    } else {
+        reports.loaded(source, intrinsic.0, intrinsic.1);
+    }
+}
+
 /// Which kind of document a host hands the engine's parser
 /// ([`ImageEvent::parse_document`]): what the bytes are parsed as. The host
 /// learns it from its own sniffing for a fetched document, and from the
@@ -839,11 +877,13 @@ pub enum DocumentKind {
 /// every consumer matches events by pattern.
 #[derive(Clone, Debug)]
 pub enum ImageEvent {
-    /// Pixels exist for this source, with these intrinsic dimensions.
+    /// Pixels exist for this source, with these intrinsic dimensions, and
+    /// `animated` when its decoder answered more than one frame to play.
     Loaded {
         source: Arc<str>,
         width: u32,
         height: u32,
+        animated: bool,
     },
     /// This source is a document the engine draws itself, parsed by the host
     /// ([`ImageReports::parsed_document`]) and not yet encoded. Applying it
@@ -858,6 +898,14 @@ pub enum ImageEvent {
     },
     /// This source will never produce pixels.
     Failed { source: Arc<str> },
+    /// The playhead of `picture`, an `Id` picture its owner asked to play a
+    /// URL ([`PlaybackRequest`](crate::render::picture::PlaybackRequest)),
+    /// reports `report`. It settles no source, and the document applies
+    /// nothing for it: it is its owner's to read.
+    Playback {
+        picture: PictureId,
+        report: PlaybackReport,
+    },
 }
 
 impl ImageEvent {
@@ -888,12 +936,14 @@ impl ImageEvent {
         }
     }
 
-    /// The source this event reports on.
-    pub(crate) fn source(&self) -> &Arc<str> {
+    /// The source this event reports on; `None` for a playback report,
+    /// which reports on a picture.
+    pub(crate) fn source(&self) -> Option<&Arc<str>> {
         match self {
             Self::Loaded { source, .. }
             | Self::ParsedDocument { source, .. }
-            | Self::Failed { source } => source,
+            | Self::Failed { source } => Some(source),
+            Self::Playback { .. } => None,
         }
     }
 }
@@ -926,10 +976,11 @@ impl ImageState {
             Self::Ready {
                 width,
                 height,
-                kind: ImageKind::Raster,
+                kind: ImageKind::Raster { animated },
             } => ImageStatus::Bitmap {
                 width: *width,
                 height: *height,
+                animated: *animated,
             },
             Self::Ready {
                 width,
@@ -948,8 +999,8 @@ impl ImageState {
 #[derive(Debug)]
 enum ImageKind {
     /// Pixels the host holds, described through [`FrameImages`] at compose
-    /// time.
-    Raster,
+    /// time; `animated` when they have more than one frame to play.
+    Raster { animated: bool },
     /// A parsed SVG document, encoded into the frame on the document thread.
     Vector(VectorImage),
 }
@@ -967,8 +1018,15 @@ pub enum ImageStatus {
     /// Asked for, and not settled yet; or a synthetic source no element
     /// handed the bytes of, which never settles.
     Pending,
-    /// Pixels the host holds, with the image's own intrinsic size.
-    Bitmap { width: u32, height: u32 },
+    /// Pixels the host holds, with the image's own intrinsic size, and
+    /// whether its frames animate: a URL picture of it plays under the
+    /// count its file states, and an `Id` picture may play it under a
+    /// playhead of its own.
+    Bitmap {
+        width: u32,
+        height: u32,
+        animated: bool,
+    },
     /// A document the engine draws itself, with its natural size.
     Vector { width: u32, height: u32 },
     /// The source will never produce anything to draw.
@@ -981,7 +1039,7 @@ impl ImageStatus {
     #[must_use]
     pub const fn natural_size(self) -> Option<(u32, u32)> {
         match self {
-            Self::Bitmap { width, height } | Self::Vector { width, height } => {
+            Self::Bitmap { width, height, .. } | Self::Vector { width, height } => {
                 Some((width, height))
             }
             Self::Pending | Self::Failed => None,
@@ -1104,7 +1162,7 @@ impl ImageRegistry {
                 Arc::clone(key),
                 (f64::from(*width), f64::from(*height)),
                 match kind {
-                    ImageKind::Raster => None,
+                    ImageKind::Raster { .. } => None,
                     ImageKind::Vector(image) => Some(image),
                 },
             )),
@@ -1272,10 +1330,11 @@ impl ImageRegistry {
         event: &ImageEvent,
         context: &mut Option<Box<TextContext>>,
     ) -> Option<ImageStatus> {
-        if is_synthetic_source(event.source()) && !self.entries.contains_key(&**event.source()) {
+        let source = event.source()?;
+        if is_synthetic_source(source) && !self.entries.contains_key(&**source) {
             return None;
         }
-        let entry = self.entry_for(event.source());
+        let entry = self.entry_for(source);
         if !matches!(entry.state, ImageState::Pending) {
             return None;
         }
@@ -1286,13 +1345,18 @@ impl ImageRegistry {
             // refused as a failure. `MAX_RENDERABLE_DIMENSION` is deliberately
             // not tested here — see `is_renderable`, which tests the bitmap
             // instead.
-            ImageEvent::Loaded { width, height, .. } if *width > 0 && *height > 0 => {
-                ImageState::Ready {
-                    width: *width,
-                    height: *height,
-                    kind: ImageKind::Raster,
-                }
-            }
+            ImageEvent::Loaded {
+                width,
+                height,
+                animated,
+                ..
+            } if *width > 0 && *height > 0 => ImageState::Ready {
+                width: *width,
+                height: *height,
+                kind: ImageKind::Raster {
+                    animated: *animated,
+                },
+            },
             // The converter rounds a natural size to at least one px on each
             // axis, so a parsed document is never refused for a zero axis.
             ImageEvent::ParsedDocument { document, .. } => {
@@ -1304,6 +1368,7 @@ impl ImageRegistry {
                 }
             }
             ImageEvent::Loaded { .. } | ImageEvent::Failed { .. } => ImageState::Failed,
+            ImageEvent::Playback { .. } => unreachable!("a playback report names no source"),
         };
         Some(entry.state.status())
     }
@@ -1399,7 +1464,8 @@ mod tests {
                     super::ImageEvent::Loaded {
                         source: loaded,
                         width: 4,
-                        height: 4
+                        height: 4,
+                        animated: false,
                     },
                     super::ImageEvent::Failed { source: failed },
                 ] if &**loaded == "app:///a.png" && &**failed == "app:///b.png"
@@ -1442,6 +1508,7 @@ mod tests {
             source: Arc::from(source),
             width,
             height,
+            animated: false,
         }
     }
 
@@ -1629,7 +1696,8 @@ mod tests {
             registry.apply(&loaded("app:///a.png", 12, 6), &mut no_text()),
             Some(ImageStatus::Bitmap {
                 width: 12,
-                height: 6
+                height: 6,
+                animated: false,
             })
         );
         assert_eq!(
@@ -1667,7 +1735,8 @@ mod tests {
             registry.request("app:///a.png").1,
             ImageStatus::Bitmap {
                 width: 12,
-                height: 6
+                height: 6,
+                animated: false,
             }
         );
         assert_eq!(registry.request("app:///b.png").1, ImageStatus::Failed);
@@ -1688,7 +1757,8 @@ mod tests {
         assert_eq!(
             ImageStatus::Bitmap {
                 width: 4,
-                height: 2
+                height: 2,
+                animated: false,
             }
             .natural_size(),
             Some((4, 2))
@@ -2037,6 +2107,7 @@ mod residency_tests {
             format: ImageFormat::Png,
             header: None,
             encoded: None,
+            animated: false,
         }
     }
 
@@ -2055,6 +2126,7 @@ mod residency_tests {
                     source,
                     width,
                     height,
+                    ..
                 } => (&**source, *width, *height),
                 other => panic!("not a load: {other:?}"),
             })
@@ -2089,6 +2161,57 @@ mod residency_tests {
             "a loaded source reports at once"
         );
         assert!(first_inbox.drain().is_empty());
+    }
+
+    /// A source whose decoder answered more than one frame is reported
+    /// animated, to the views that waited and to every later request, and
+    /// the document's status says so; a playback report settles no source.
+    #[test]
+    fn an_animated_load_says_so_to_every_view_and_the_status() {
+        let mut residency = residency();
+        let (first, first_inbox) = ImageInbox::new();
+        residency.request("a.png", &first);
+        residency.complete_loaded(
+            &Arc::from("a.png"),
+            Decoded {
+                animated: true,
+                ..decoded((40, 20))
+            },
+        );
+        let (second, second_inbox) = ImageInbox::new();
+        residency.request("a.png", &second);
+        for inbox in [&first_inbox, &second_inbox] {
+            let events = inbox.drain();
+            assert!(
+                matches!(
+                    events.as_slice(),
+                    [ImageEvent::Loaded { animated: true, .. }]
+                ),
+                "{events:?}"
+            );
+        }
+
+        let mut registry = super::ImageRegistry::default();
+        let _ = registry.request("a.png");
+        let picture = crate::render::picture::PictureId::new();
+        let playback = ImageEvent::Playback {
+            picture,
+            report: crate::render::picture::PlaybackReport::LoopComplete,
+        };
+        assert_eq!(registry.apply(&playback, &mut None), None);
+        let (reports, inbox) = ImageInbox::new();
+        reports.loaded_animated("a.png", 40, 20);
+        for event in inbox.drain() {
+            assert_eq!(
+                registry.apply(&event, &mut None),
+                Some(super::ImageStatus::Bitmap {
+                    width: 40,
+                    height: 20,
+                    animated: true,
+                })
+            );
+        }
+        assert_eq!(registry.status("a.png").natural_size(), Some((40, 20)));
     }
 
     #[test]

@@ -94,7 +94,8 @@ answering it draws it.
 `LynxView::pump` alone advances the resource protocol past the startup sources
 `create_lynx_view` already handed over: it hands each
 `RequestSource` to the fetcher, gives it its `service_images` moment, names
-every source the last paint walk discovered, drains the image inbox back to
+every source the last paint walk discovered and every playback request the
+`image` component made, drains the image inbox back to
 `bobcat-main`, and returns the turn's lifecycle events — after a fatal event,
 nothing further. `Painter::pump` draws the frame owed and asks the host for
 nothing, so a host that wants an image to arrive takes the view's turn. Pacing

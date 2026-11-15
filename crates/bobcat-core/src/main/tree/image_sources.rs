@@ -6,8 +6,8 @@
 //! ([`terminus::link::Document::set_picture`]), and a URL can be asked for
 //! and its status learnt ([`terminus::link::Document::request_image`],
 //! [`terminus::link::Document::apply_image_events`]). An `image` element's
-//! two sources, the choice between them and its `load` and `error` are this
-//! module's.
+//! two sources, the choice between them, its `load` and `error`, and the
+//! playback of an animated `src` are this module's.
 //!
 //! # Two sources, one picture
 //!
@@ -27,12 +27,35 @@
 //! filed under ([`terminus::link::Document::insert_image_document`]), and
 //! presents it from the moment it is named.
 //!
+//! # An animated `src`
+//!
+//! A URL picture of an animated source plays under the count its file
+//! states, on one playhead every draw of the URL shares, with no control: a
+//! CSS image, and an `image`'s `placeholder`. An `image` whose own `src`
+//! loads animated ([`ImageStatus::Bitmap`]'s `animated`) presents a picture
+//! of its own instead ([`PictureKey::Id`]) and asks the host to play the
+//! source's frames into it under a playhead of its own
+//! ([`PlaybackRequest::Play`]), with the policy its `loop-count` and
+//! `autoplay` give when the entry that loaded it ends: a later change of
+//! either takes effect at the next load. Read then rather than at the load
+//! itself because a `src` this document has already seen settles inside the
+//! `__SetAttribute` that writes it, which may come before the write of
+//! either attribute in the same batch. A `src` that changes ends the picture
+//! ([`PlaybackRequest::End`]), so the next one starts at the first frame,
+//! with no loop completed and not paused; so does a free. The element's UI
+//! methods send the four controls ([`Self::control`]), and the host's loop
+//! reports come back with the image reports ([`apply_image_events`]).
+//!
+//! The requests are queued here and handed to the host by the entry's
+//! epilogue ([`Self::take_playback`]); no frame and no pixel is ever on this
+//! thread.
+//!
 //! # Outcomes
 //!
 //! Only an element's own `src` produces an [`ImageOutcome`], which the
-//! runtime turns into a `load` or an `error`. A placeholder is an interim
-//! picture the page did not ask about, so neither of its endings is an
-//! event; the type has no variant naming one.
+//! runtime turns into an event. A placeholder is an interim picture the page
+//! did not ask about, so neither of its endings is an event, and its
+//! animation fires nothing; the type has no variant naming one.
 //!
 //! A source settles in one of two places: at the write that names it, when
 //! the document has already seen it settle (a second mount of a URL, which
@@ -40,13 +63,17 @@
 //! ([`apply_image_events`]). The first happens inside the `__SetAttribute`
 //! that wrote the attribute, so the components queue it rather than
 //! dispatch it; the second is queued by the runtime for the same epilogue.
+//! An animated `src` owes [`ImageOutcome::StartPlay`] before its `load`, in
+//! both places, which is a `startplay` when the policy its picture was
+//! played under plays from the start ([`ImageSources::autoplays`]).
 //!
 //! # Lifetime
 //!
 //! The record of an element goes when the element is freed
 //! ([`terminus::link::CustomElement::freed`]), so a report that lands after
-//! a free names no stale id. The replaced box's own hold on what it presents
-//! is `terminus`'s, released by the same free.
+//! a free names no stale id, and the picture it played ends. The replaced
+//! box's own hold on what it presents is `terminus`'s, released by the same
+//! free.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -54,9 +81,23 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
-use terminus::link::{DocumentKind, ImageEvent, ImageStatus, NodeId, PictureKey};
+use terminus::link::{
+    DocumentKind, ImageEvent, ImageStatus, Loops, NodeId, PictureId, PictureKey, PlayPolicy,
+    PlaybackControl, PlaybackReport, PlaybackRequest,
+};
 
 use super::LynxDocument;
+
+/// The `image` attribute giving how many times an animated `src` plays.
+pub(crate) const LOOP_COUNT_ATTRIBUTE: &str = "loop-count";
+/// The `image` attribute saying whether an animated `src` plays as it loads.
+pub(crate) const AUTOPLAY_ATTRIBUTE: &str = "autoplay";
+
+/// The events an `image` playing an animated `src` fires, each with an empty
+/// detail.
+pub(crate) const START_PLAY_EVENT: &str = "startplay";
+pub(crate) const CURRENT_LOOP_COMPLETE_EVENT: &str = "currentloopcomplete";
+pub(crate) const FINAL_LOOP_COMPLETE_EVENT: &str = "finalloopcomplete";
 
 /// Which of an element's two sources a value is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -67,8 +108,8 @@ pub(crate) enum ImageRole {
     Placeholder,
 }
 
-/// One element's own source settling, for the runtime to turn into a `load`
-/// or an `error`.
+/// One element's own source settling or playing, for the runtime to turn
+/// into an event.
 ///
 /// A placeholder produces none: that asymmetry is the type's, which has no
 /// variant naming one.
@@ -83,6 +124,14 @@ pub(crate) enum ImageOutcome {
     },
     /// The element's source will never produce pixels.
     Failed { node: NodeId },
+    /// The element's animated source loaded and plays into `picture`: a
+    /// `startplay` when that picture plays from the start, which the policy
+    /// read at the end of the entry says ([`ImageSources::autoplays`]).
+    StartPlay { node: NodeId, picture: PictureId },
+    /// The element's animated source completed a loop
+    /// (`currentloopcomplete`) or its final loop (`finalloopcomplete`): an
+    /// event with an empty detail.
+    Played { node: NodeId, name: &'static str },
 }
 
 impl ImageOutcome {
@@ -92,7 +141,7 @@ impl ImageOutcome {
         match status {
             ImageStatus::Pending => None,
             ImageStatus::Failed => Some(Self::Failed { node }),
-            ImageStatus::Bitmap { width, height } | ImageStatus::Vector { width, height } => {
+            ImageStatus::Bitmap { width, height, .. } | ImageStatus::Vector { width, height } => {
                 Some(Self::Loaded {
                     node,
                     width,
@@ -103,11 +152,57 @@ impl ImageOutcome {
     }
 }
 
-/// The sources one element names.
+/// What an element's outcomes for one write or one report are: a `load` or
+/// an `error`, after a `startplay` when one is owed.
+pub(crate) type ImageOutcomes = SmallVec<[ImageOutcome; 2]>;
+
+/// The policy an `image`'s `loop-count` and `autoplay` give an animated
+/// `src`, as native reads them: a `loop-count` that is absent, not a number,
+/// zero or negative plays forever, and a positive one plays that many times,
+/// a fraction truncated; the file's own count is not read. `autoplay` is on
+/// unless it is `"false"`, the string `__SetAttribute` writes for `false`.
+pub(crate) fn play_policy(loop_count: Option<&str>, autoplay: Option<&str>) -> PlayPolicy {
+    let plays = loop_count
+        .and_then(|value| value.trim().parse::<f64>().ok())
+        .filter(|plays| plays.is_finite() && *plays >= 1.0)
+        .map_or(0, |plays| {
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "a finite count of at least one, truncated and saturating at u32::MAX"
+            )]
+            let plays = plays as u32;
+            plays
+        });
+    PlayPolicy {
+        loops: Loops::from_plays(plays),
+        paused: autoplay.is_some_and(|value| value == "false"),
+    }
+}
+
+/// The sources one element names, and the picture it plays its `src` into.
 #[derive(Debug, Default)]
 struct Named {
     source: Option<Arc<str>>,
     placeholder: Option<Arc<str>>,
+    /// An `image`: an animated `src` plays into a picture of its own.
+    playable: bool,
+    /// The picture an animated `src` plays into, while the element names it
+    /// loaded.
+    playing: Option<PictureId>,
+}
+
+/// A playback request queued for the host.
+#[derive(Debug)]
+enum Queued {
+    /// `picture` starts playing `source` for `element`, under the policy the
+    /// element's attributes give when the request is taken.
+    Start {
+        element: NodeId,
+        picture: PictureId,
+        source: Arc<str>,
+    },
+    Request(PlaybackRequest),
 }
 
 impl Named {
@@ -134,6 +229,12 @@ struct State {
     /// which role: a settling source owes its events in that order. One
     /// element naming one URL in both roles is two entries.
     holders: FxHashMap<Arc<str>, SmallVec<[(NodeId, ImageRole); 1]>>,
+    /// The element each playing picture belongs to.
+    players: FxHashMap<PictureId, NodeId>,
+    /// The playback requests not handed to the host yet, in order.
+    playback: Vec<Queued>,
+    /// The playing pictures whose policy plays from the start.
+    autoplaying: rustc_hash::FxHashSet<PictureId>,
 }
 
 impl State {
@@ -144,6 +245,21 @@ impl State {
                 self.holders.remove(source);
             }
         }
+    }
+
+    /// Ends the picture `element` plays its `src` into, if it plays one.
+    fn stop_playing(&mut self, element: NodeId) {
+        let Some(picture) = self
+            .elements
+            .get_mut(&element)
+            .and_then(|named| named.playing.take())
+        else {
+            return;
+        };
+        self.players.remove(&picture);
+        self.autoplaying.remove(&picture);
+        self.playback
+            .push(Queued::Request(PlaybackRequest::End { picture }));
     }
 }
 
@@ -171,6 +287,32 @@ impl ImageSources {
         role: ImageRole,
         value: Option<&str>,
     ) -> Option<ImageOutcome> {
+        self.name(document, element, role, value, false)
+            .into_iter()
+            .next()
+    }
+
+    /// [`Self::set`] for an `image`, whose animated `src` plays into a
+    /// picture of its own: answers a `startplay` before the `load` when such
+    /// a `src` had already settled and plays from the start.
+    pub(crate) fn set_playable(
+        &self,
+        document: &mut LynxDocument,
+        element: NodeId,
+        role: ImageRole,
+        value: Option<&str>,
+    ) -> ImageOutcomes {
+        self.name(document, element, role, value, true)
+    }
+
+    fn name(
+        &self,
+        document: &mut LynxDocument,
+        element: NodeId,
+        role: ImageRole,
+        value: Option<&str>,
+        playable: bool,
+    ) -> ImageOutcomes {
         let held = self
             .0
             .borrow()
@@ -178,13 +320,16 @@ impl ImageSources {
             .get(&element)
             .and_then(|named| named.get(role).cloned());
         if held.as_deref() == value {
-            return None;
+            return ImageOutcomes::new();
         }
         let status = value.map(|value| document.request_image(value));
         {
             let mut state = self.0.borrow_mut();
             if let Some(previous) = &held {
                 state.unhold(previous, (element, role));
+            }
+            if role == ImageRole::Source {
+                state.stop_playing(element);
             }
             let value = value.map(Arc::<str>::from);
             if let Some(value) = &value {
@@ -195,16 +340,24 @@ impl ImageSources {
                     .push((element, role));
             }
             let named = state.elements.entry(element).or_default();
+            named.playable |= playable;
             *named.slot(role) = value;
             if named.source.is_none() && named.placeholder.is_none() {
                 state.elements.remove(&element);
             }
         }
-        self.present(document, element);
-        match (role, status) {
-            (ImageRole::Source, Some(status)) => ImageOutcome::of(element, status),
-            _ => None,
+        let mut outcomes = ImageOutcomes::new();
+        if let (ImageRole::Source, Some(status)) = (role, status) {
+            if let Some(picture) = self.start_playing(element, status) {
+                outcomes.push(ImageOutcome::StartPlay {
+                    node: element,
+                    picture,
+                });
+            }
+            outcomes.extend(ImageOutcome::of(element, status));
         }
+        self.present(document, element);
+        outcomes
     }
 
     /// Names a document handed over as `bytes` — an `svg`'s `content` — as
@@ -225,7 +378,8 @@ impl ImageSources {
     /// document answered them — moves: every element naming one presents
     /// what it now shows, and each one whose own source it is owes an
     /// outcome, in report order and, within one source, in the order the
-    /// elements named it.
+    /// elements named it; a `startplay` before the `load` of an animated
+    /// `src` that plays from the start.
     pub(crate) fn settle(
         &self,
         document: &mut LynxDocument,
@@ -241,10 +395,13 @@ impl ImageSources {
                 .cloned()
                 .unwrap_or_default();
             for (node, role) in holders {
-                if role == ImageRole::Source
-                    && let Some(outcome) = ImageOutcome::of(node, *status)
-                {
-                    outcomes.push(outcome);
+                if role == ImageRole::Source {
+                    if let Some(picture) = self.start_playing(node, *status) {
+                        outcomes.push(ImageOutcome::StartPlay { node, picture });
+                    }
+                    if let Some(outcome) = ImageOutcome::of(node, *status) {
+                        outcomes.push(outcome);
+                    }
                 }
                 self.present(document, node);
             }
@@ -252,9 +409,122 @@ impl ImageSources {
         outcomes
     }
 
-    /// Drops everything kept for `element`, which is being freed.
+    /// The events the host's playback reports owe, in report order: a
+    /// `currentloopcomplete` per loop and a `finalloopcomplete` after the
+    /// last of a finite count, at the element whose picture played. A report
+    /// for a picture that has ended since is dropped.
+    fn played(&self, events: &[ImageEvent]) -> Vec<ImageOutcome> {
+        let state = self.0.borrow();
+        events
+            .iter()
+            .filter_map(|event| match event {
+                ImageEvent::Playback { picture, report } => {
+                    let node = *state.players.get(picture)?;
+                    let name = match report {
+                        PlaybackReport::LoopComplete => CURRENT_LOOP_COMPLETE_EVENT,
+                        PlaybackReport::FinalLoopComplete => FINAL_LOOP_COMPLETE_EVENT,
+                    };
+                    Some(ImageOutcome::Played { node, name })
+                }
+                ImageEvent::Loaded { .. }
+                | ImageEvent::ParsedDocument { .. }
+                | ImageEvent::Failed { .. } => None,
+            })
+            .collect()
+    }
+
+    /// Starts the playback of `element`'s `src`, which settled at `status`,
+    /// when the element is an `image`, the source animates and nothing plays
+    /// it yet: a picture of the element's own, whose request is queued for
+    /// the end of the entry, when its policy is read
+    /// ([`Self::take_playback`]). Answers the picture.
+    fn start_playing(&self, element: NodeId, status: ImageStatus) -> Option<PictureId> {
+        if !matches!(status, ImageStatus::Bitmap { animated: true, .. }) {
+            return None;
+        }
+        let mut state = self.0.borrow_mut();
+        let named = state.elements.get_mut(&element)?;
+        if !named.playable || named.playing.is_some() {
+            return None;
+        }
+        let source = named.source.clone()?;
+        let picture = PictureId::new();
+        named.playing = Some(picture);
+        state.players.insert(picture, element);
+        state.playback.push(Queued::Start {
+            element,
+            picture,
+            source,
+        });
+        Some(picture)
+    }
+
+    /// Whether `picture` was played from the start: the `startplay` an
+    /// [`ImageOutcome::StartPlay`] for it owes. Asked after the entry that
+    /// queued the outcome has handed its requests to the host.
+    pub(crate) fn autoplays(&self, picture: PictureId) -> bool {
+        self.0.borrow().autoplaying.contains(&picture)
+    }
+
+    /// Sends `control` to the picture `element` plays its `src` into, if it
+    /// plays one. Answers whether it does.
+    pub(crate) fn control(&self, element: NodeId, control: PlaybackControl) -> bool {
+        let mut state = self.0.borrow_mut();
+        let Some(picture) = state.elements.get(&element).and_then(|named| named.playing) else {
+            return false;
+        };
+        state
+            .playback
+            .push(Queued::Request(PlaybackRequest::Control {
+                picture,
+                control,
+            }));
+        true
+    }
+
+    /// Takes the playback requests made since the last call, for the host,
+    /// in the order they were made. A picture that starts playing is played
+    /// under the policy its element's `loop-count` and `autoplay` give now
+    /// ([`play_policy`]).
+    pub(crate) fn take_playback(&self, document: &LynxDocument) -> Vec<PlaybackRequest> {
+        let mut state = self.0.borrow_mut();
+        if state.playback.is_empty() {
+            return Vec::new();
+        }
+        let queued = std::mem::take(&mut state.playback);
+        queued
+            .into_iter()
+            .map(|queued| match queued {
+                Queued::Request(request) => request,
+                Queued::Start {
+                    element,
+                    picture,
+                    source,
+                } => {
+                    let node = document.get(element);
+                    let attribute = |name: &str| node.and_then(|node| node.attribute(name));
+                    let policy = play_policy(
+                        attribute(LOOP_COUNT_ATTRIBUTE).as_deref(),
+                        attribute(AUTOPLAY_ATTRIBUTE).as_deref(),
+                    );
+                    if !policy.paused && state.players.contains_key(&picture) {
+                        state.autoplaying.insert(picture);
+                    }
+                    PlaybackRequest::Play {
+                        picture,
+                        source,
+                        policy,
+                    }
+                }
+            })
+            .collect()
+    }
+
+    /// Drops everything kept for `element`, which is being freed, and ends
+    /// the picture it played.
     pub(crate) fn forget(&self, element: NodeId) {
         let mut state = self.0.borrow_mut();
+        state.stop_playing(element);
         let Some(named) = state.elements.remove(&element) else {
             return;
         };
@@ -275,18 +545,30 @@ impl ImageSources {
             .and_then(|named| named.get(role).cloned())
     }
 
+    /// The picture `element` plays its `src` into.
+    #[cfg(test)]
+    pub(crate) fn playing(&self, element: NodeId) -> Option<PictureId> {
+        self.0
+            .borrow()
+            .elements
+            .get(&element)
+            .and_then(|named| named.playing)
+    }
+
     /// Puts on `element`'s box the picture it shows: its `src` while that is
-    /// loaded, its `placeholder` while that is loaded and `src` is not,
+    /// loaded — the picture it plays an animated `src` into, when it plays
+    /// one — its `placeholder` while that is loaded and `src` is not,
     /// otherwise whichever it names; with that picture's natural size, or
     /// none while it has none. An element naming nothing presents nothing,
     /// and is not replaced.
     fn present(&self, document: &mut LynxDocument, element: NodeId) {
-        let (source, placeholder) = {
+        let (source, placeholder, playing) = {
             let state = self.0.borrow();
             let named = state.elements.get(&element);
             (
                 named.and_then(|named| named.source.clone()),
                 named.and_then(|named| named.placeholder.clone()),
+                named.and_then(|named| named.playing),
             )
         };
         let natural = |name: &Option<Arc<str>>| {
@@ -294,27 +576,33 @@ impl ImageSources {
                 .and_then(|name| document.image_status(name).natural_size())
         };
         let presented = match (natural(&source), natural(&placeholder)) {
-            (Some(size), _) => source.map(|source| (source, Some(size))),
-            (None, Some(size)) => placeholder.map(|placeholder| (placeholder, Some(size))),
-            (None, None) => source.or(placeholder).map(|name| (name, None)),
+            (Some(size), _) => source.map(|source| {
+                let key = playing.map_or(PictureKey::Url(source), PictureKey::Id);
+                (key, Some(size))
+            }),
+            (None, Some(size)) => {
+                placeholder.map(|placeholder| (PictureKey::Url(placeholder), Some(size)))
+            }
+            (None, None) => source
+                .or(placeholder)
+                .map(|name| (PictureKey::Url(name), None)),
         };
-        document.set_picture(
-            element,
-            presented.map(|(name, natural)| (PictureKey::Url(name), natural)),
-        );
+        document.set_picture(element, presented);
     }
 }
 
 /// Applies the painting side's image reports to `document`, and answers the
 /// outcomes they owe the elements of `sources`: what the runtime queues for
-/// its epilogue.
+/// its epilogue. The playback reports' events follow the settled sources'.
 pub(crate) fn apply_image_events(
     document: &mut LynxDocument,
     sources: &ImageSources,
     events: &[ImageEvent],
 ) -> Vec<ImageOutcome> {
     let settled = document.apply_image_events(events);
-    sources.settle(document, &settled)
+    let mut outcomes = sources.settle(document, &settled);
+    outcomes.extend(sources.played(events));
+    outcomes
 }
 
 #[cfg(test)]
@@ -352,6 +640,7 @@ mod tests {
             source: Arc::from(source),
             width,
             height,
+            animated: false,
         }
     }
 
@@ -749,7 +1038,8 @@ mod tests {
             document.image_status(SRC),
             ImageStatus::Bitmap {
                 width: 40,
-                height: 20
+                height: 20,
+                animated: false,
             }
         );
     }

@@ -130,7 +130,9 @@ use terminus::link::{Document, NodeId, UserAgentStylesheet};
 
 pub(crate) use self::base_methods::invoke_base_method;
 pub(crate) use self::frame::{MAX_FRAME_DEPTH, frame_depth, nested_page, reset_frame};
-pub(crate) use self::image_sources::{ImageOutcome, ImageSources, apply_image_events};
+pub(crate) use self::image_sources::{
+    ImageOutcome, ImageSources, START_PLAY_EVENT, apply_image_events,
+};
 pub(crate) use self::scroll_container::relevance_span;
 pub(crate) use self::svg::is_svg;
 pub(crate) use self::swiper::Autoplays;
@@ -335,7 +337,9 @@ pub(super) fn element_child_index(
 pub(crate) enum ComponentEvent {
     /// An `<image>`'s or `<svg>`'s own source settled: `load`, which carries
     /// an `<image>`'s intrinsic size and an `<svg>`'s layout size, or `error`,
-    /// which an `<svg>` does not fire.
+    /// which an `<svg>` does not fire; or an `<image>`'s animated `src`
+    /// started playing (`startplay`) or completed a loop
+    /// (`currentloopcomplete`, `finalloopcomplete`), each with a `{}` detail.
     Image(ImageOutcome),
     /// An event whose detail is `{}`, named by the component that queued
     /// it: a `<dialog>`'s `close` and `cancel` ([`terminus::link::html::dialog`],
@@ -500,12 +504,12 @@ pub(crate) struct ComponentEvents(Rc<RefCell<Vec<ComponentEvent>>>);
 
 impl ComponentEvents {
     /// Queues what an image source bind settled, if it settled anything.
-    /// `None` is the ordinary case — a source still loading, or a write that
-    /// changed nothing.
-    pub(crate) fn queue_image(&self, outcome: Option<ImageOutcome>) {
-        if let Some(outcome) = outcome {
-            self.0.borrow_mut().push(ComponentEvent::Image(outcome));
-        }
+    /// Nothing is the ordinary case — a source still loading, or a write
+    /// that changed nothing.
+    pub(crate) fn queue_image(&self, outcomes: impl IntoIterator<Item = ImageOutcome>) {
+        self.0
+            .borrow_mut()
+            .extend(outcomes.into_iter().map(ComponentEvent::Image));
     }
 
     /// Queues a whole image report batch's outcomes, in the order

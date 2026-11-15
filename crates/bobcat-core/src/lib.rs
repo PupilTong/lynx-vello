@@ -128,8 +128,9 @@ pub use style::{PreparsedDeclaration, PreparsedKeyframe, PreparsedRule, Preparse
 pub use terminus::link::clock::ClockInstant;
 pub use terminus::link::{
     DocumentKind, FontBlob, FrameImage, FrameImages, ImageDescriptor, ImageEvent, ImageInbox,
-    ImageReports, ImageResidency, ImageSizeHint, MAX_RENDERABLE_DIMENSION, MAX_STYLE_THREADS,
-    NoImages, PictureId, PictureKey, VectorDocument, is_renderable, kurbo, peniko,
+    ImageReports, ImageResidency, ImageSizeHint, Loops, MAX_RENDERABLE_DIMENSION,
+    MAX_STYLE_THREADS, NoImages, PictureId, PictureKey, PictureSlot, PlayPolicy, PlaybackControl,
+    PlaybackReport, PlaybackRequest, TakenFrame, VectorDocument, is_renderable, kurbo, peniko,
 };
 #[cfg(target_arch = "wasm32")]
 pub use view::configure_wasm_workers;

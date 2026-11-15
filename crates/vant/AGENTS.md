@@ -96,11 +96,17 @@ type and depends only on `bytes`, `http`, `url`, `serde_json`, `thiserror`,
   `PlayPolicy::stated` is the CSS image's, the file's own count) and
   `Playhead`. Pure and synchronous, reading no clock: time is a `Duration`
   since an origin the caller picks. A playhead runs only while drawn
-  (`set_drawn`), paused (`pause`, `resume`, `restart`) or not; `advance`
+  (`set_drawn`) and playing; a control surface drives it with the four
+  `Control`s (`control`: `Restart`, `Pause`, `Resume` — from the first frame
+  after a `Stop` or the final loop — and `Stop`, which moves the `position`
+  to the first frame with the loops reset while the `frame` shown stays, so
+  `steps` does not move); `advance`
   moves at most one frame, only onto a frame its caller says is ready, so no
   frame is skipped and N loops complete exactly N times (`loops_completed`,
   `Step::Advanced { looped }`, `Step::Finished`); after the last loop of a
   finite count the last frame stays. `steps` is the picture's generation.
+  `Step::loops_done` is what a step owes a control surface's loop events: a
+  completed loop, and whether it was the final one.
   `ImageDecoder` answers frames through `frames_blocking`/`frames` and
   `decode_frame_blocking`/`decode_frame`, whose defaults answer one frame;
   one animation's frames are asked of one `Bytes` allocation in playing order,

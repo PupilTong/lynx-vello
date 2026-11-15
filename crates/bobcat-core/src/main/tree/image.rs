@@ -14,8 +14,9 @@
 //!
 //! # Which attribute becomes what
 //!
-//! Four of the tag's attributes are implemented, and they reach the engine
-//! three different ways.
+//! Four of the tag's attributes are reflected, and they reach the engine
+//! three different ways; `loop-count` and `autoplay` are read rather than
+//! reflected, when an animated `src` loads ([Animated images](#animated-images)).
 //!
 //! `src` and `placeholder` are the two *sources*, named on the element's
 //! record in [`ImageSources`] under [`ImageRole::Source`] and
@@ -45,7 +46,29 @@
 //! has the entry boundary, and [`crate::realm::owner`] the epilogue's order.
 //!
 //! What is deliberately still missing: `cap-insets` (a 9-slice composite the
-//! paint layer has no primitive for) and the animated-image events.
+//! paint layer has no primitive for).
+//!
+//! # Animated images
+//!
+//! An animated `src` plays under a playhead of the element's own, in a
+//! picture of its own ([`super::image_sources`] has the lifetime): native
+//! Lynx's surface, the behaviour Android and iOS share and iOS's where they
+//! share none (`docs/picture-source-design.md`, "Animated images").
+//! `loop-count` and `autoplay` are read when the `src` loads, so neither is
+//! observed here. The four UI methods are this component's
+//! ([`CustomElement::invoke`]): `startAnimate` restarts at the first frame
+//! from any state, `pauseAnimation` stops advancing and keeps the frame
+//! shown, `resumeAnimation` continues from the paused position or, after a
+//! stop or the final loop, from the first frame, and `stopAnimation` stops
+//! advancing and moves the position to the first frame while the frame shown
+//! stays. Each answers code 0 with native's message as its data, whether or
+//! not anything was playing; a call on an element showing no animated `src`
+//! changes nothing. The control reaches the host with the entry's other
+//! requests, and the events it causes (`currentloopcomplete`,
+//! `finalloopcomplete`) come back with the host's reports, so none is fired
+//! inside the call. `startplay`, `currentloopcomplete` and
+//! `finalloopcomplete` are queued in [`ComponentEvents`] like `load`, each
+//! with an empty detail.
 //!
 //! # An `<image>` box is CSS-sized, never bitmap-sized
 //!
@@ -170,10 +193,34 @@
 //! - A `load` or an `error` is the *element's own source* settling. The placeholder produces
 //!   neither: [`super::ImageOutcome`] has no variant naming a placeholder.
 
-use terminus::link::{CustomElement, NodeId};
+use terminus::link::{CustomElement, MethodCall, MethodOutcome, NodeId, PlaybackControl};
 
 use super::image_sources::{ImageRole, ImageSources};
 use super::{ComponentEvents, LynxDocument};
+use crate::main::record::write_record_field;
+
+/// The UI methods an `image` answers, the control each sends to the picture
+/// its animated `src` plays into, and the message each answers with: native's
+/// own (`platform/darwin/ios/lynx_service/image/LynxImageService.m:294-352`,
+/// `platform/android/.../ui/image/LynxImageManager.java:773-793`).
+const ANIMATION_METHODS: [(&str, PlaybackControl, &str); 4] = [
+    (
+        "startAnimate",
+        PlaybackControl::Restart,
+        "Animation restarted.",
+    ),
+    (
+        "pauseAnimation",
+        PlaybackControl::Pause,
+        "Animation paused.",
+    ),
+    (
+        "resumeAnimation",
+        PlaybackControl::Resume,
+        "Animation resumed.",
+    ),
+    ("stopAnimation", PlaybackControl::Stop, "Animation stopped."),
+];
 
 /// Lynx's picture tag, and the attributes this module reflects off it.
 ///
@@ -324,7 +371,7 @@ impl CustomElement<()> for Image {
             // middle of the call that wrote the attribute. web-core's
             // equivalent is asynchronous for the same reason — an `<img>`
             // load event is a task, even for a cached URL.
-            SRC_ATTRIBUTE => self.outcomes.queue_image(self.sources.set(
+            SRC_ATTRIBUTE => self.outcomes.queue_image(self.sources.set_playable(
                 document,
                 element,
                 ImageRole::Source,
@@ -366,6 +413,28 @@ impl CustomElement<()> for Image {
 
     fn freed(&self, element: NodeId) {
         self.sources.forget(element);
+    }
+
+    /// `startAnimate`, `pauseAnimation`, `resumeAnimation` and
+    /// `stopAnimation`: the control sent to the picture the element plays an
+    /// animated `src` into, when it plays one, and code 0 with native's
+    /// message either way. `params` is not read.
+    fn invoke(
+        &self,
+        _document: &mut LynxDocument,
+        element: NodeId,
+        call: MethodCall<'_>,
+    ) -> MethodOutcome {
+        let Some((_, control, message)) = ANIMATION_METHODS
+            .iter()
+            .find(|(name, _, _)| *name == call.name)
+        else {
+            return MethodOutcome::NotFound;
+        };
+        let _ = self.sources.control(element, *control);
+        let mut record = String::new();
+        write_record_field(&mut record, message);
+        MethodOutcome::Data(record)
     }
 }
 
@@ -729,6 +798,7 @@ mod tests {
                 source: std::sync::Arc::from(PLACEHOLDER),
                 width: NATURAL_PIXELS.0,
                 height: NATURAL_PIXELS.1,
+                animated: false,
             }],
         );
         assert_eq!(size_of(&mut document, element), NATURAL);
@@ -1070,3 +1140,7 @@ mod tests {
         assert_eq!(blur(&document, element), Some(10.0));
     }
 }
+
+#[cfg(test)]
+#[path = "image_playback_tests.rs"]
+mod playback_tests;
