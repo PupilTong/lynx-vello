@@ -51,8 +51,10 @@ class under `bobcat-internal`, `src/worker-runtime.ts` as `bobcat:worker`,
 `src/background-thread-runtime.ts` as `bobcat:bts-runtime` and `src/bts.ts` as
 `bobcat:bts` (the BTS bootstrap and a BTS realm's root module: it imports
 `bobcat:worker` and `bobcat:timers` itself and hands `bobcat:bts-runtime` the
-loader of the view's BTS entry, which imports the URL the `initialize`
-message names). They are
+loader of the view's BTS entry, which imports, one after another, the
+`lynx:<name>` ES modules the module table flags `esm-before-entry` and then
+the URL the `initialize` message names; `bobcat:bts-runtime`'s
+`readNativeModuleTable` reads the table, three fields per module). They are
 registered per runtime, because a source is runtime-wide and no value crosses
 between two runtimes; which of them a realm can link is decided by the host
 modules it declares, not by the table. `src/native.d.ts` declares the three

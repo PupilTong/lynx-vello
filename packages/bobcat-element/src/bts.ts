@@ -20,12 +20,20 @@ import { __BobcatStartBTS } from "bobcat:bts-runtime";
 // posted message to a worker whose root module has not finished, and
 // `initialize` is one of them.
 //
+// Before the entry, it imports the ES modules of the native modules the view
+// flagged `import_before_entry` — `lynx:<name>`, which the worker driver
+// completes from the view's bytecode — one after another, each awaited, in
+// the order the view was given its modules. A rejection is the entry's: the
+// entry is not imported, and the runtime reports it as it reports the
+// entry's own. They are imported whether or not the view named an entry.
+//
 // The entry URL is the one `initialize` carries: the view's
 // `background_entry`, already an absolute URL, which the MTS realm posts as
 // boot connects the BTS. A view that named none posts `undefined`, and
 // nothing is imported; a worker at another URL that imports this module is
 // posted no `initialize` at all.
 
-__BobcatStartBTS(async ({ entry }) => {
+__BobcatStartBTS(async ({ entry }, importBeforeEntry) => {
+  for (const specifier of importBeforeEntry) await import(specifier);
   if (entry !== undefined) await import(entry);
 });

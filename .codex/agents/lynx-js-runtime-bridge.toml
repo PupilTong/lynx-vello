@@ -79,6 +79,13 @@ and `bobcat-workers` (every Worker realm, including the BTS).
   `CommandSender`, so a frame post's fence does not count it and `Page::apply`
   leaves it out of the count of applied commands) or the worker's inbox;
   `deliver` calls `bobcat:native-modules` in the realm that made the call.
+  A module may also supply one ES module as bytecode (`NativeModule::esm`,
+  written by `compile_native_module_esm`): the view keeps the bytes in one
+  `NativeModuleEsms` table its `HostOutbox`es carry, a worker realm's import
+  of `lynx:<name>` is completed from it by `realm/owner.rs`'s
+  `load_native_esm` (`ModuleCode::Bytecode`, never text, never the
+  fetcher), and the module table's third field names which modules the BTS
+  imports before its entry.
   `view/` holds
   `LynxGroup`, `LynxView`, `ViewSources` and `create_lynx_view`; `paint/` the
   `Painter`; `link.rs` the per-view channels;
@@ -101,7 +108,8 @@ and `bobcat-workers` (every Worker realm, including the BTS).
   the one table both runtimes register, and `build_runtime`, which also
   reserves `bobcat:`/`bobcat-internal:` so that an engine name nothing
   registered or declared fails in the realm with a `ReferenceError` instead of
-  reaching the fetcher), `require.rs` (`resolveModuleUrl` and
+  reaching the fetcher, and `build_main_runtime`, which reserves `lynx:` on
+  `bobcat-main` as well), `require.rs` (`resolveModuleUrl` and
   `loadModuleSync`, the two members `bobcat:module` is written over),
   `fetch.rs` (`fetchResource`, the one member a realm fetches a URL through —
   a plain fetch registered as a `Future`, or `true` at once when
@@ -115,8 +123,9 @@ and `bobcat-workers` (every Worker realm, including the BTS).
   `main-thread-runtime.ts` (`bobcat:runtime`), `worker.ts` (the W3C `Worker`),
   `worker-runtime.ts`, `background-thread-runtime.ts` (`bobcat:bts-runtime`),
   `bts.ts` (`bobcat:bts` — the BTS bootstrap and a BTS realm's root module;
-  it imports `bobcat:worker` and `bobcat:timers` first, then the BTS entry
-  the `initialize` message names),
+  it imports `bobcat:worker` and `bobcat:timers` first, then, one after
+  another, the `lynx:<name>` ES modules the module table flags
+  `esm-before-entry`, then the BTS entry the `initialize` message names),
   `cross-thread-context.ts`, `event-target.ts` (with `reportException`, the
   realm's installed exception reporter), `animation-frame.ts`
   (`bobcat:animation-frame` — every realm's `requestAnimationFrame`, frame

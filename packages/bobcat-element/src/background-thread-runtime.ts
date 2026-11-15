@@ -58,6 +58,9 @@ const jsModules = new Map<string, unknown>([["GlobalEventEmitter", emitter]]);
 // more: it is the name ReactLynx reads (`nativeApp.nativeModuleProxy
 // .LynxUIMethodModule`), and renaming it would only break that lookup.
 const nativeModules: Record<string, object> = {};
+// The `lynx:<name>` specifiers `initialize`'s table flags to be imported
+// before the BTS entry, in table order: empty until it arrives.
+let nativeModulesBeforeEntry: readonly string[] = [];
 const app: {
   NativeModules: object;
   _apiList: object;
@@ -295,9 +298,13 @@ function notifySharedDataObservers(change: Record<PropertyKey, unknown>) {
 /**
  * Arms this realm as the BTS: the first `initialize` message initializes it
  * and then calls `loadEntry` with that message, which is where `bobcat:bts`
- * reads the entry's URL from.
+ * reads the entry's URL from, and with the specifiers of the native modules'
+ * ES modules the view flagged to be imported before its entry
+ * (`lynx:<name>`), in the order the view was given its modules.
  */
-export function __BobcatStartBTS(loadEntry: (options: InitializeOptions) => Promise<unknown>) {
+export function __BobcatStartBTS(
+  loadEntry: (options: InitializeOptions, importBeforeEntry: readonly string[]) => Promise<unknown>,
+) {
   startBackground = async options => {
     __BobcatInitializeBTS(options);
     // Lynx's background load marks: the runtime is up once `initialize`
@@ -305,7 +312,7 @@ export function __BobcatStartBTS(loadEntry: (options: InitializeOptions) => Prom
     markLoadTiming("loadCoreEnd");
     markLoadTiming("loadBackgroundStart");
     try {
-      await loadEntry(options);
+      await loadEntry(options, nativeModulesBeforeEntry);
     } finally {
       // The view's load waits for this mark, so its entry reaches the
       // observers the entry just created: taken here when it completed now.
@@ -620,7 +627,8 @@ interface BackgroundData {
  * What the main thread's `initialize` message opens this realm with: the
  * page's data, the BTS entry's URL — already absolute, `undefined` for a view
  * that named none — the MTS realm's own `SystemInfo`, and the embedder's
- * modules as the record the host wrote, two fields per module.
+ * modules as the record the host wrote, three fields per module
+ * (`readNativeModuleTable`).
  */
 interface InitializeOptions extends BackgroundData {
   entry?: string;
@@ -635,33 +643,50 @@ export function __BobcatInitializeBTS(options: InitializeOptions) {
   lynx.__globalProps = params.globalProps || {};
   // Into the one object `NativeModules`, `app.NativeModules` and
   // `nativeModuleProxy` all name.
-  Object.assign(nativeModules, nativeModulesFromTable(params.nativeModuleTable ?? ""));
+  const table = readNativeModuleTable(params.nativeModuleTable ?? "");
+  Object.assign(nativeModules, table.modules);
+  nativeModulesBeforeEntry = table.importBeforeEntry;
   SystemInfo = createSystemInfo(params.systemInfo);
   lynx.SystemInfo = SystemInfo;
   // Keep the raw BTS environment consistent with its module binding.
   Object.assign(scope, { SystemInfo });
 }
 
+/** What the module table `initialize` carries says, once read. */
+export interface NativeModuleTable {
+  /** The `NativeModules` members, one object per module. */
+  modules: Record<string, object>;
+  /**
+   * The specifiers, `lynx:<name>`, of the modules whose ES module the BTS
+   * imports before its entry, in table order.
+   */
+  importBeforeEntry: string[];
+}
+
 /**
- * The `NativeModules` members out of the module table `initialize` carries,
- * as the host wrote it: two record fields per module, its name and then its
- * method names joined with commas.
+ * The module table `initialize` carries, as the host wrote it: three record
+ * fields per module — its name, its method names joined with commas, and what
+ * its ES module is: empty for none, `esm` for one that loads when something
+ * imports `lynx:<name>`, `esm-before-entry` for one the BTS imports before
+ * its entry.
  *
  * Every declared method, and nothing else: a method a module did not declare
  * is `undefined`, which is what native answers for one its module does not
  * carry. Each returns `undefined` — a module answers through the callbacks
  * among its arguments, never through a return value.
  */
-function nativeModulesFromTable(table: string): Record<string, object> {
+export function readNativeModuleTable(table: string): NativeModuleTable {
   const fields = splitRecord(table);
   const modules: Record<string, object> = {};
-  for (let index = 0; index + 1 < fields.length; index += 2) {
+  const importBeforeEntry: string[] = [];
+  for (let index = 0; index + 2 < fields.length; index += 3) {
     const name = fields[index]!;
     const methods = fields[index + 1]!;
     modules[name] = Object.fromEntries((methods === "" ? [] : methods.split(",")).map(method =>
       [method, (...args: unknown[]) => callNativeModule(name, method, args)]));
+    if (fields[index + 2] === "esm-before-entry") importBeforeEntry.push(`lynx:${name}`);
   }
-  return modules;
+  return { modules, importBeforeEntry };
 }
 
 __BobcatInitializeBTS({});

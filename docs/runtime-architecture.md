@@ -136,8 +136,13 @@ both from the MTS realm, in the `initialize` message: the global props as the
 MTS realm holds them, and the init data as `processData` returned it.
 
 The embedder's native modules reach the BTS realm in the `initialize` message
-as well. `LynxGroup::create_lynx_view` reads each module's `name()` and
-`methods()` once and encodes them as one length-prefixed record;
+as well. `LynxGroup::create_lynx_view` reads each module's `name()`,
+`methods()` and `esm()` once and encodes them as one length-prefixed record,
+three fields per module, the third saying whether the module supplies an ES
+module and whether the BTS imports it before its entry; the ES modules'
+bytecode itself stays in one table per view that every worker realm's
+`HostOutbox` carries, from which the worker driver completes an import of
+`lynx:<name>` without a request (`crates/bobcat-core/docs/resource-protocol.md`);
 `MainThreadRuntime::new` puts it behind the one-shot `bobcat-internal:host`
 member `nativeModuleTable`, beside `initData` and `globalProps`.
 `bobcat:runtime` reads it as it evaluates and never decodes it:
@@ -259,6 +264,9 @@ QuickJS ESM graph — a worker realm, on bobcat-workers' runtime
           │     ├──▶ bobcat:diagnostics (console, lynx.reportError; the
           │     │     console export is the global one)
           │     └──▶ bobcat:cross-thread-context ──▶ bobcat:event-target
+          ├──▶ await import(lynx:<name>) for each module the table flags
+          │     esm-before-entry, in order: completed by the worker driver
+          │     from the view's bytecode, no host request
           └──▶ await import(the entry URL `initialize` names), when the view
                 named one: HostOutbox → view resource host → worker
                 completion

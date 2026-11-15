@@ -17,7 +17,7 @@ use terminus::link::event::EventSteps;
 use tokio::sync::{mpsc, watch};
 
 use crate::background::{WorkerCommand, WorkerEvent};
-use crate::esm::{MTS_CHUNK_PREAMBLE, build_runtime};
+use crate::esm::{MTS_CHUNK_PREAMBLE, build_main_runtime};
 use crate::jobs::JsThread;
 use crate::link::{DetachedView, InputEventPayload, ScrollEntry, detached_outbox};
 use crate::main::WorkerFactory;
@@ -78,7 +78,7 @@ impl ScriptHarness {
             style_pool: None,
         };
         let (outbox, view) = detached_outbox(Arc::new(NoWakeup));
-        let mut js_runtime = build_runtime().expect("the benchmark runtime builds");
+        let mut js_runtime = build_main_runtime().expect("the benchmark runtime builds");
         let (workers, inbox) = mpsc::unbounded_channel();
         let thread = JsThread::new();
         let (runtime, worker_events) = MainThreadRuntime::new(

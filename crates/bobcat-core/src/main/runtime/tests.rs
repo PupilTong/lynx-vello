@@ -3,7 +3,7 @@ use tokio::sync::mpsc;
 
 use super::*;
 use crate::background::{WorkerCommand, WorkerEvent, WorkerPayload};
-use crate::esm::build_runtime;
+use crate::esm::build_main_runtime;
 use crate::jobs::JsThread;
 use crate::link::{DetachedView, detached_outbox, detached_outbox_probing_style_sheets};
 use crate::main::record::write_record_field;
@@ -360,7 +360,7 @@ fn runtime_over_watching_names_probing(
     PublishedNames,
 ) {
     let (outbox, far_end) = detached_outbox_probing_style_sheets(Arc::new(NoWakeup), probe);
-    let mut js_runtime = build_runtime().expect("the test runtime builds");
+    let mut js_runtime = build_main_runtime().expect("the test runtime builds");
     let (workers, inbox) = mpsc::unbounded_channel();
     let thread = JsThread::new();
     let viewport = ingredients.viewport;
@@ -405,7 +405,7 @@ fn two_view_group_with(
     MainThreadRuntime,
     GroupFarEnds,
 ) {
-    let mut js_runtime = build_runtime().expect("the test runtime builds");
+    let mut js_runtime = build_main_runtime().expect("the test runtime builds");
     let mut views = Vec::new();
     let mut ends = GroupFarEnds::default();
     let (workers, inbox) = mpsc::unbounded_channel();

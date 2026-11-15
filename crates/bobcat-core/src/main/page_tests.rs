@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::*;
 use crate::background::{WorkerCommand, WorkerMessage, WorkerStart};
-use crate::esm::build_runtime;
+use crate::esm::build_main_runtime;
 use crate::jobs::{JsThread, JsThreadHandle};
 use crate::link::{
     CommandSender, DetachedView, FramePost, InputEventPayload, PageUpdate, Published, ScrollEntry,
@@ -91,7 +91,7 @@ fn answered_entry(entry: &str, url: &str, token: &CancellationToken) -> StartupS
 /// One group's shared runtime, with the test holding the worker thread's end
 /// of the factory so a `Start` is observable and no worker ever boots.
 fn group(thread: &JsThreadHandle) -> (Rc<GroupContext>, mpsc::UnboundedReceiver<WorkerCommand>) {
-    let js = build_runtime().expect("the group's runtime builds");
+    let js = build_main_runtime().expect("the group's runtime builds");
     group_over(thread, Ok(js))
 }
 

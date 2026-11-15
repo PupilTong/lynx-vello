@@ -58,7 +58,15 @@ bytecode instead of compiling. `Context::complete_module_with(name, url,
 text, ModuleCode)` is `complete_module` with the choice: `Compile` (what
 `complete_module` does), `Capture` (compile, and queue the bytecode for
 `Context::take_compiled`), `Cached(bytes)` (read the bytes; if they are not
-this module, compile the text and capture). The synchronous loader's
+this module, compile the text and capture), `Bytecode(bytes)` (read the bytes
+and nothing else: the module has no text, and bytes outside this build's
+frame, bytes `JS_ReadObject` refuses, a value that is not a module, or a
+module compiled under another name fail every import of the name with a
+`TypeError` naming it — the shim marks such a source `strict` and keeps the
+refusal as its error — rather than falling back). `Context::compile_module_framed`
+is `compile_module_bytecode` with the frame added, which is what `Cached` and
+`Bytecode` read, and `is_framed_bytecode` is the frame check alone, for a
+caller that refuses bad bytes where it is handed them. The synchronous loader's
 counterpart is `register_synchronous_loader_with_code`, whose host callback is
 also told the wrapper's parameter list and answers a `RequiredCode { source,
 cached, capture }`; JSON is never read from bytecode nor captured. A
@@ -68,7 +76,8 @@ module's name, or a CommonJS wrapper's response URL with its parameter list
 `bytecode_engine_id()` and the payload length ahead of `JS_WriteObject`'s
 output — and a caller stores and returns them whole. What the rules are:
 
-- **A read never fails a load.** Bytes with another engine id or length, bytes
+- **A read never fails a load**, except a `Bytecode` completion's, which has
+  no text to fall back to. Bytes with another engine id or length, bytes
   `JS_ReadObject` rejects, a value of the wrong kind, and a module read under
   another name all fall back to the text with capture on, leaving no pending
   exception. An import that cannot be loaded is not such a failure: the read

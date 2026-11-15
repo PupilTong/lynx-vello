@@ -23,7 +23,9 @@
 //! section URL a realm builds reaches the fetcher absolute. A URL that does
 //! not resolve throws as a failed load does. An absolute URL — which is what
 //! `require` and every import hand over, already normalized — resolves to
-//! itself.
+//! itself. A `lynx:` URL, a native module's ES module, is never requested:
+//! it throws here, so a `require` of one, or of a module that imports one,
+//! works only once an `import` has loaded it into the realm.
 //!
 //! An ES module is linked *inline*: every `import` in it, and in what it
 //! imports, reaches this same closure as a [`SourceRequest::Module`] of its
@@ -46,7 +48,7 @@
 
 use quickjs_rust_bridge::{HostArgument, HostValue, RequiredKind, RequiredSource};
 
-use crate::esm::HOST_MODULE_SPECIFIER;
+use crate::esm::{HOST_MODULE_SPECIFIER, NATIVE_MODULE_ESM_PREFIX};
 use crate::jobs::JsThreadHandle;
 use crate::link::HostOutbox;
 use crate::main::quickjs::{ScriptEngine, normalize_module_url};
@@ -82,6 +84,15 @@ pub(crate) fn install(
         // caching and in-flight sharing are the fetcher's, and the realm's
         // own cache is what makes a URL loaded at most once anyway.
         let url = sources.resolve(url)?;
+        // A native module's ES module is never fetched, and has no text to
+        // compile here: it is bytecode alone, which an `import` loads. A
+        // realm that has imported it never asks this loader for it again.
+        if url.starts_with(NATIVE_MODULE_ESM_PREFIX) {
+            return Err(format!(
+                "'{url}' is a native module's ES module, which loads by `import` and \
+                 cannot be loaded synchronously before an `import` has loaded it"
+            ));
+        }
         let answer = sources.request(SourceRequest::Module(url));
         let source = thread.wait(async {
             tokio::select! {

@@ -13,7 +13,8 @@ use bobcat_core::resource::{
 };
 use bobcat_core::{
     DrawTarget, EngineError, EngineEvent, LynxGroup, LynxView, LynxViewError, ModuleCall,
-    ModuleCallback, NativeModule, NoWakeup, Painter, ScriptSource, StyleThreads, ViewSources,
+    ModuleCallback, NativeModule, NativeModuleEsm, NoWakeup, Painter, ScriptSource, StyleThreads,
+    ViewSources, compile_native_module_esm,
 };
 
 /// The screen these tests' views report, as a host with no screen to measure
@@ -26,6 +27,24 @@ const MAIN_CALLER_URL: &str = "app:///main-caller.js";
 const BACKGROUND_URL: &str = "app:///background.js";
 const UNDECLARED_URL: &str = "app:///undeclared.js";
 const ON_EVENT_URL: &str = "app:///on-event.js";
+const ESM_CALLER_URL: &str = "app:///esm-caller.js";
+const ORDER_URL: &str = "app:///order.js";
+const UNKNOWN_ESM_URL: &str = "app:///unknown-esm.js";
+const UNREADABLE_ESM_URL: &str = "app:///unreadable-esm.js";
+const MAIN_LYNX_URL: &str = "app:///main-lynx.js";
+
+thread_local! {
+    /// Every source the fetcher of this test's thread was asked for, in
+    /// order: a test's views are pumped on its own thread, which is the
+    /// only thread a fetcher is called on.
+    static REQUESTED: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Whether the fetcher of this test's thread was ever asked for a `lynx:`
+/// name.
+fn requested_a_native_esm() -> bool {
+    REQUESTED.with_borrow(|requested| requested.iter().any(|url| url.starts_with("lynx:")))
+}
 
 /// A minimal main-thread entry: a card with one element, so boot finishes.
 const MAIN_ENTRY: &str = r"
@@ -81,6 +100,11 @@ impl Entries {
             BACKGROUND_URL => Some(BACKGROUND_ENTRY.to_owned()),
             UNDECLARED_URL => Some(UNDECLARED_ENTRY.to_owned()),
             ON_EVENT_URL => Some(ON_EVENT_ENTRY.to_owned()),
+            ESM_CALLER_URL => Some(ESM_CALLER_ENTRY.to_owned()),
+            ORDER_URL => Some(ORDER_ENTRY.to_owned()),
+            UNKNOWN_ESM_URL => Some(UNKNOWN_ESM_ENTRY.to_owned()),
+            UNREADABLE_ESM_URL => Some(UNREADABLE_ESM_ENTRY.to_owned()),
+            MAIN_LYNX_URL => Some(card(MAIN_LYNX_ENTRY)),
             _ => None,
         }
     }
@@ -97,6 +121,7 @@ impl ResourceFetcher for Entries {
             | SourceRequest::Font { url }
             | SourceRequest::Fetch { url, .. } => url.clone(),
         };
+        REQUESTED.with_borrow_mut(|requested| requested.push(specifier.clone()));
         completion.complete(Self::source(&specifier).map_or_else(
             || {
                 Err(ResourceError {
@@ -171,6 +196,151 @@ lynx.getJSModule('GlobalEventEmitter').addListener('call', () => {
 });
 ";
 
+/// The ES module the `Echo` module supplies in the tests below: a wrapper
+/// over its own `echo` method, written over `bobcat:native-modules`, and the
+/// URL it knows itself by.
+const ECHO_ESM: &str = r"
+import { callNativeModule } from 'bobcat:native-modules';
+export const url = import.meta.url;
+export function echo(value, callback) {
+  callNativeModule('Echo', 'echo', [value, callback]);
+}
+";
+
+/// A background entry that imports `Echo`'s ES module statically and calls
+/// the module through it.
+const ESM_CALLER_ENTRY: &str = r"
+import { console } from 'bobcat:bts-runtime';
+import { echo, url } from 'lynx:Echo';
+echo({ note: url }, function (method, echoed) {
+  console.log('echoed ' + method + ' ' + JSON.stringify(echoed));
+});
+";
+
+/// A background entry that prints, as its top level runs, which native
+/// module ES modules have run so far.
+const ORDER_ENTRY: &str = r"
+import { console } from 'bobcat:bts-runtime';
+console.log('order ' + JSON.stringify(globalThis.ran ?? []));
+";
+
+/// A native module ES module that records it ran, and what `NativeModules`
+/// named when it did. `{name}` is the module's name.
+fn recording_esm(name: &str) -> String {
+    format!(
+        r"
+import {{ lynx }} from 'bobcat:bts-runtime';
+globalThis.ran = (globalThis.ran ?? []).concat(
+  '{name}:' + Object.keys(lynx.getApp().NativeModules).join('+'));
+"
+    )
+}
+
+/// A background entry that loads a `lynx:` name the view has no ES module
+/// for, both ways a realm can: `require` and `import()`.
+const UNKNOWN_ESM_ENTRY: &str = r"
+import { console } from 'bobcat:bts-runtime';
+import { createRequire } from 'bobcat:module';
+let required;
+try {
+  createRequire(import.meta.url)('lynx:Missing');
+  required = 'loaded';
+} catch (error) {
+  required = error.message;
+}
+import('lynx:Missing').then(
+  () => console.log('loaded'),
+  error => console.log('import: ' + error.message + ' | require: ' + required),
+);
+";
+
+/// A background entry that imports `Echo`'s ES module and prints how that
+/// went.
+const UNREADABLE_ESM_ENTRY: &str = r"
+import { console } from 'bobcat:bts-runtime';
+import('lynx:Echo').then(
+  () => console.log('loaded'),
+  error => console.log(error.name + ': ' + error.message),
+);
+";
+
+/// A main-thread entry that imports `Echo`'s ES module, which only a worker
+/// realm loads, and prints how that went; the card is [`MAIN_ENTRY`]'s.
+const MAIN_LYNX_ENTRY: &str = r"
+import('lynx:Echo').then(
+  () => console.log('loaded'),
+  error => console.log(error.name + ': ' + error.message),
+);
+globalThis.renderPage = function () {
+  __AppendElement(__CreatePage('card', 0), __CreateView(0));
+};
+";
+
+/// A module that supplies an ES module beside [`Echo`]'s method: what
+/// [`NativeModule::esm`] answers is fixed when it is built.
+struct WithEsm {
+    echo: Echo,
+    bytecode: bytes::Bytes,
+    import_before_entry: bool,
+}
+
+impl WithEsm {
+    /// `name`'s module, its ES module compiled from `source`.
+    fn new(name: &'static str, source: &str, import_before_entry: bool) -> Self {
+        Self::with_bytecode(
+            name,
+            compile_native_module_esm(name, source).expect("the ES module compiles"),
+            import_before_entry,
+        )
+    }
+
+    fn with_bytecode(name: &'static str, bytecode: Vec<u8>, import_before_entry: bool) -> Self {
+        Self {
+            echo: Echo::new(name),
+            bytecode: bytecode.into(),
+            import_before_entry,
+        }
+    }
+}
+
+impl NativeModule for WithEsm {
+    fn name(&self) -> &str {
+        self.echo.name()
+    }
+
+    fn methods(&self) -> Vec<String> {
+        self.echo.methods()
+    }
+
+    fn invoke(&self, call: ModuleCall) {
+        self.echo.invoke(call);
+    }
+
+    fn esm(&self) -> Option<NativeModuleEsm> {
+        Some(NativeModuleEsm {
+            bytecode: self.bytecode.clone(),
+            import_before_entry: self.import_before_entry,
+        })
+    }
+}
+
+/// Builds a view of `modules` whose BTS entry is `background`, and binds a
+/// painter to it, which boot's flush waits for.
+async fn esm_view(
+    group: &LynxGroup,
+    modules: Vec<Box<dyn NativeModule>>,
+    sources: ViewSources,
+) -> (LynxView<Entries>, Painter) {
+    let view = group
+        .create_lynx_view(32.0, 24.0, 1.0, |_reports| Entries, modules, sources)
+        .expect("the view is built");
+    let mut painter = Painter::new(DrawTarget::Offscreen, 32.0, 24.0, 1.0)
+        .await
+        .expect("the painter is built");
+    painter.attach(&view).expect("a fresh view takes a painter");
+    (view, painter)
+}
+
 /// An embedder's module: it hands the call's own arguments back through the
 /// callback, on the thread `pump` gave it.
 struct Echo {
@@ -241,6 +411,10 @@ impl<M: NativeModule> NativeModule for Shared<M> {
 
     fn invoke(&self, call: ModuleCall) {
         self.0.invoke(call);
+    }
+
+    fn esm(&self) -> Option<NativeModuleEsm> {
+        self.0.esm()
     }
 }
 
@@ -589,3 +763,221 @@ async fn a_module_may_drive_its_painter_inside_invoke() {
 /// Nothing here reads a callback, but the type has to be nameable by an
 /// embedder that stores one.
 const _: fn(ModuleCallback) -> usize = |callback| callback.argument_index();
+
+/// A module's ES module is what a BTS entry's `import` of `lynx:<name>`
+/// loads: its `import.meta.url` is that specifier, its own import of
+/// `bobcat:native-modules` links, and a call through it reaches the module's
+/// `invoke`. The fetcher is never asked for it.
+#[tokio::test]
+async fn a_background_entry_calls_its_module_through_the_modules_es_module() {
+    let group = LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Sequential)
+        .await
+        .expect("the group starts");
+    let module = Rc::new(WithEsm::new("Echo", ECHO_ESM, false));
+    let (mut view, _painter) = esm_view(
+        &group,
+        vec![Box::new(Shared(Rc::clone(&module))) as Box<dyn NativeModule>],
+        sources(ESM_CALLER_URL),
+    )
+    .await;
+    assert_eq!(
+        first_console_message(&mut view),
+        r#"echoed echo [{"note":"lynx:Echo"},null]"#,
+        "the module knows itself as `lynx:Echo` and its call was answered"
+    );
+    assert_eq!(module.echo.named.borrow().as_slice(), ["echo"]);
+    assert!(!requested_a_native_esm(), "a `lynx:` name is never fetched");
+}
+
+/// The modules flagged `import_before_entry` run before the BTS entry's top
+/// level, one after another in the order the view was given them, each after
+/// `initialize` has supplied `NativeModules`; a module not flagged does not
+/// run when nothing imports it.
+#[tokio::test]
+async fn flagged_es_modules_run_in_order_before_the_entry_and_others_do_not_run() {
+    let group = LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Sequential)
+        .await
+        .expect("the group starts");
+    let (mut view, _painter) = esm_view(
+        &group,
+        vec![
+            Box::new(WithEsm::new("Second", &recording_esm("Second"), true)),
+            Box::new(WithEsm::new("Lazy", &recording_esm("Lazy"), false)),
+            Box::new(WithEsm::new("First", &recording_esm("First"), true)),
+        ],
+        sources(ORDER_URL),
+    )
+    .await;
+    assert_eq!(
+        first_console_message(&mut view),
+        r#"order ["Second:Second+Lazy+First","First:Second+Lazy+First"]"#,
+        "the flagged modules ran in the given order, before the entry, and `Lazy` did not"
+    );
+    assert!(!requested_a_native_esm());
+}
+
+/// A flagged module that throws is the entry's failure: reported as the
+/// BTS's uncaught exception, and the entry is not imported.
+#[tokio::test]
+async fn a_flagged_es_module_that_throws_fails_the_entry() {
+    let group = LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Sequential)
+        .await
+        .expect("the group starts");
+    let (mut view, _painter) = esm_view(
+        &group,
+        vec![Box::new(WithEsm::new(
+            "Broken",
+            "throw Error('the native module ES module failed');",
+            true,
+        ))],
+        sources(ORDER_URL),
+    )
+    .await;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let error = 'reported: loop {
+        for event in view.pump() {
+            match event {
+                EngineEvent::WorkerThrew { source, error } => {
+                    let ScriptSource::Worker { url, .. } = &source else {
+                        panic!("{source} threw: {}", error.message);
+                    };
+                    assert_eq!(&**url, "bobcat:bts");
+                    break 'reported error;
+                }
+                EngineEvent::ConsoleMessage { message, .. } => {
+                    panic!("the entry ran: {message}")
+                }
+                event if event.is_fatal() => panic!("the view failed: {event:?}"),
+                _ => {}
+            }
+        }
+        assert!(Instant::now() < deadline, "the failure was never reported");
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    assert!(
+        error.message.contains("the native module ES module failed"),
+        "{error:?}"
+    );
+    // A turn later, the entry has still printed nothing.
+    std::thread::sleep(Duration::from_millis(50));
+    for event in view.pump() {
+        assert!(
+            !matches!(event, EngineEvent::ConsoleMessage { .. }),
+            "the entry ran after its flagged module failed: {event:?}"
+        );
+    }
+}
+
+/// A `lynx:` name the view has no ES module for fails in the BTS realm,
+/// naming the specifier — an `import` and a `require` alike — and is never
+/// fetched.
+#[tokio::test]
+async fn an_unknown_native_es_module_fails_without_a_request() {
+    let group = LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Sequential)
+        .await
+        .expect("the group starts");
+    let (mut view, _painter) = esm_view(
+        &group,
+        vec![Box::new(WithEsm::new("Echo", ECHO_ESM, false))],
+        sources(UNKNOWN_ESM_URL),
+    )
+    .await;
+    let message = first_console_message(&mut view);
+    let (import, require) = message
+        .strip_prefix("import: ")
+        .and_then(|rest| rest.split_once(" | require: "))
+        .unwrap_or_else(|| panic!("{message}"));
+    assert!(
+        import.contains("lynx:Missing") && import.contains("no native module `Missing`"),
+        "{import}"
+    );
+    assert!(
+        require.contains("lynx:Missing") && require.contains("cannot be loaded synchronously"),
+        "{require}"
+    );
+    assert!(!requested_a_native_esm(), "{:?}", REQUESTED.take());
+}
+
+/// The MTS realm does not load a native module's ES module: its import fails
+/// with a `ReferenceError` naming the specifier, and nothing is fetched.
+#[tokio::test]
+async fn the_main_thread_does_not_load_a_native_es_module() {
+    let group = LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Sequential)
+        .await
+        .expect("the group starts");
+    let (mut view, _painter) = esm_view(
+        &group,
+        vec![Box::new(WithEsm::new("Echo", ECHO_ESM, false))],
+        ViewSources::new("app:///", MAIN_LYNX_URL, SCREEN, "en-US"),
+    )
+    .await;
+    let (source, message) = first_console_output(&mut view);
+    assert_eq!(source, ScriptSource::Main, "{message}");
+    assert!(
+        message.starts_with("ReferenceError: ") && message.contains("lynx:Echo"),
+        "{message}"
+    );
+    assert!(!requested_a_native_esm());
+}
+
+/// Bytecode whose frame is not this build's — another build's id, or cut
+/// short — refuses the view where it is built, naming the module.
+#[tokio::test]
+async fn an_es_module_outside_this_builds_frame_refuses_the_view() {
+    let group = LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Sequential)
+        .await
+        .expect("the group starts");
+    let good = compile_native_module_esm("Echo", ECHO_ESM).expect("the ES module compiles");
+    let mut foreign = good.clone();
+    foreign[0] ^= 1;
+    let truncated = good[..good.len() - 1].to_vec();
+    for (case, bytecode) in [("another build", foreign), ("truncated", truncated)] {
+        let refused = group
+            .create_lynx_view(
+                32.0,
+                24.0,
+                1.0,
+                |_reports| Entries,
+                vec![Box::new(WithEsm::with_bytecode("Echo", bytecode, false))],
+                sources(ESM_CALLER_URL),
+            )
+            .map(|_: LynxView<Entries>| ())
+            .expect_err(case);
+        assert!(
+            matches!(
+                &refused,
+                LynxViewError::Engine(EngineError::InvalidNativeModuleEsm(name)) if name == "Echo"
+            ),
+            "{case}: unexpected refusal: {refused}"
+        );
+    }
+    assert!(
+        REQUESTED.with_borrow(Vec::is_empty),
+        "a refused view requests nothing"
+    );
+}
+
+/// Bytecode in a whole frame that cannot be read as the module fails its
+/// import in the importing realm with a `TypeError` naming it, and nothing
+/// runs in its place.
+#[tokio::test]
+async fn an_unreadable_es_module_fails_its_import() {
+    let group = LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Sequential)
+        .await
+        .expect("the group starts");
+    let mut garbage = compile_native_module_esm("Echo", ECHO_ESM).expect("the ES module compiles");
+    // The frame — the engine id and the length, 16 bytes — stands; the
+    // payload is not bytecode.
+    garbage[16..].fill(b'x');
+    let (mut view, _painter) = esm_view(
+        &group,
+        vec![Box::new(WithEsm::with_bytecode("Echo", garbage, false))],
+        sources(UNREADABLE_ESM_URL),
+    )
+    .await;
+    assert_eq!(
+        first_console_message(&mut view),
+        "TypeError: module 'lynx:Echo' cannot be read from the bytecode it was supplied as"
+    );
+    assert!(!requested_a_native_esm());
+}

@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 
 use super::*;
 use crate::background::{WorkerEvent, WorkerHome, WorkerKey, WorkerPayload};
-use crate::esm::build_runtime;
+use crate::esm::build_main_runtime;
 use crate::jobs::JsThread;
 use crate::link::{DetachedView, ViewNotice, block_on_deadline, detached_outbox};
 use crate::main::workers::WorkerFactory;
@@ -106,8 +106,8 @@ impl Pair {
         let table = modules
             .iter()
             .map(|(name, methods)| {
-                (
-                    (*name).to_owned(),
+                crate::native_module::TableEntry::new(
+                    *name,
                     methods.iter().map(|method| (*method).to_owned()).collect(),
                 )
             })
@@ -212,7 +212,7 @@ impl Pair {
         };
         let (outbox, view) = detached_outbox(Arc::new(NoWakeup));
         let cancel = view.token.clone();
-        let mut js = build_runtime().unwrap();
+        let mut js = build_main_runtime().unwrap();
         let ingredients = DocumentIngredients::for_test(viewport, config);
         let thread = JsThread::new();
         let (runtime, events) = MainThreadRuntime::new(
@@ -2109,10 +2109,9 @@ fn an_ordinary_worker_can_install_bts_through_its_own_import() {
                 pixel_width: 1170.0,
                 pixel_height: 2532.0,
             },
-            native_modules: crate::native_module::encode_table(&vec![(
-                "Echo".to_owned(),
-                vec!["ping".to_owned()],
-            )]),
+            native_modules: crate::native_module::encode_table(&vec![
+                crate::native_module::TableEntry::new("Echo", vec!["ping".to_owned()]),
+            ]),
             ..RealmStartup::default()
         },
     );
@@ -2166,10 +2165,9 @@ fn the_bts_reports_the_mts_system_info_and_has_its_native_modules_before_its_ent
                 pixel_width: 1287.0,
                 pixel_height: 2785.0,
             },
-            native_modules: crate::native_module::encode_table(&vec![(
-                "Echo".to_owned(),
-                vec!["ping".to_owned()],
-            )]),
+            native_modules: crate::native_module::encode_table(&vec![
+                crate::native_module::TableEntry::new("Echo", vec!["ping".to_owned()]),
+            ]),
             ..RealmStartup::default()
         },
     );

@@ -58,7 +58,7 @@ use wasm_thread::Builder as ThreadBuilder;
 use self::quickjs::{SharedRuntime, mark_checkpoint_later};
 pub(crate) use self::workers::WorkerFactory;
 use crate::background::WorkerCommand;
-use crate::esm::build_runtime;
+use crate::esm::build_main_runtime;
 use crate::jobs::{JsThread, JsThreadHandle};
 use crate::link::{ToMain, ViewOutbox};
 use crate::realm::policy;
@@ -188,7 +188,7 @@ fn run_group(style_threads: StyleThreads, link: GroupLink) {
     // built is kept as its error, which every view that attaches reports as
     // its own startup failure — as `bobcat-workers` keeps its own runtime's
     // error for each of its workers.
-    let js_runtime = build_runtime();
+    let js_runtime = build_main_runtime();
     let style_pool = match build_style_pool(style_threads.resolve()) {
         Ok(pool) => pool.map(Rc::new),
         Err(error) => {
@@ -228,8 +228,8 @@ async fn group_task(context: Rc<GroupContext>, mut attach: mpsc::UnboundedReceiv
             command = attach.recv() => match command {
                 Some(GroupCommand::Attach(attachment)) => {
                     let ViewAttachment {
-                        viewport, sources, text_context, startup, native_modules, commands,
-                        metrics, scroll, notices, frames, cancel, fetch_probe,
+                        viewport, sources, text_context, startup, native_modules, native_esms,
+                        commands, metrics, scroll, notices, frames, cancel, fetch_probe,
                         style_sheet_probe, base_url, registry,
                     } = *attachment;
                     let outbox = ViewOutbox::new(
@@ -241,7 +241,8 @@ async fn group_task(context: Rc<GroupContext>, mut attach: mpsc::UnboundedReceiv
                         style_sheet_probe,
                         base_url,
                         registry,
-                    );
+                    )
+                    .with_native_esms(native_esms);
                     #[cfg(all(target_arch = "wasm32", panic = "abort"))]
                     crate::threads::add_script_panic_reporter({
                         let outbox = outbox.clone();

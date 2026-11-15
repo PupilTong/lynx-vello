@@ -10,8 +10,11 @@
 //! member its host module lacks fails at link with a `SyntaxError`. A name
 //! under [`ENGINE_MODULE_PREFIXES`] that is neither registered nor declared
 //! fails in the realm that asked with a `ReferenceError`, and is never
-//! fetched. The names are here, beside [`crate::clock`], because neither
-//! runtime owns them.
+//! fetched. A `lynx:` name ([`NATIVE_MODULE_ESM_PREFIX`]) is never fetched
+//! either: it is an embedder's native module's ES module, which a worker
+//! realm reads from the view's bytecode and the main runtime reserves. The
+//! names are here, beside [`crate::clock`], because neither runtime owns
+//! them.
 
 use std::sync::Arc;
 
@@ -352,6 +355,21 @@ pub(crate) const SELECTOR_QUERY_SPECIFIER: &str = "bobcat:selector-query";
 /// runtimes register it, so an import of it never reaches a fetcher either.
 pub(crate) const ENGINE_MODULE_PREFIXES: [&str; 2] = ["bobcat:", "bobcat-internal:"];
 
+/// The prefix of an embedder's native module ES modules: `lynx:<name>` is the
+/// module the view's native module `<name>` supplied
+/// ([`NativeModule::esm`](crate::NativeModule::esm)), kept as written by the
+/// normalizer and never fetched.
+///
+/// Only a worker realm of the view loads one: the worker driver completes an
+/// import of a name the view has from its bytecode, on the worker thread,
+/// and fails one it does not have with an error naming it
+/// ([`crate::realm::owner`]); a synchronous load of one that no `import`
+/// has loaded throws ([`crate::require`]). The main runtime reserves the
+/// prefix ([`build_main_runtime`]), so an MTS realm, and every
+/// `ShadowRealm` on that runtime, fails an import or a `require` of one with
+/// a `ReferenceError` naming it.
+pub(crate) const NATIVE_MODULE_ESM_PREFIX: &str = "lynx:";
+
 /// Every built-in module. Both runtimes register all of them, and a realm's
 /// host modules decide which of them it can link.
 ///
@@ -417,6 +435,24 @@ pub(crate) fn build_runtime() -> Result<ScriptRuntime, ScriptError> {
             error
         })?;
     }
+    Ok(runtime)
+}
+
+/// [`build_runtime`] for `bobcat-main`, which also reserves
+/// [`NATIVE_MODULE_ESM_PREFIX`]: a native module's ES module is a worker
+/// realm's, so on this runtime a `lynx:` name fails in the realm that asked,
+/// with a `ReferenceError` naming it, and is never fetched.
+pub(crate) fn build_main_runtime() -> Result<ScriptRuntime, ScriptError> {
+    let mut runtime = build_runtime()?;
+    runtime
+        .reserve_module_prefix(NATIVE_MODULE_ESM_PREFIX)
+        .map_err(|mut error| {
+            error.message = Arc::from(format!(
+                "reserving {NATIVE_MODULE_ESM_PREFIX}: {}",
+                error.message
+            ));
+            error
+        })?;
     Ok(runtime)
 }
 

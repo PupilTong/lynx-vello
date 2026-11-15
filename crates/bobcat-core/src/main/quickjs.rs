@@ -553,6 +553,33 @@ impl ScriptEngine {
         self.finish_operation(runtime, result, PHASE)
     }
 
+    /// Answers one module request of this realm's with bytecode alone — a
+    /// native module's ES module, framed as
+    /// [`compile_module_framed`](quickjs::Context::compile_module_framed)
+    /// writes it — and resumes the imports waiting on it.
+    ///
+    /// The module is named `name` and that is also its `import.meta.url`.
+    /// It has no text: bytes that cannot be read as the module `name` fail
+    /// every import of it with a `TypeError` naming it, and nothing is
+    /// compiled in their place. The code cache takes no part, because this
+    /// is no host text answer.
+    pub(crate) fn complete_module_bytecode(
+        &self,
+        runtime: &mut ScriptRuntime,
+        name: &str,
+        bytecode: &[u8],
+    ) -> Result<(), ScriptError> {
+        const PHASE: ScriptErrorPhase = ScriptErrorPhase::ExecuteModule;
+        self.realm
+            .complete_module_with(name, name, "", quickjs::ModuleCode::Bytecode(bytecode))
+            .map_err(|error| map_quickjs_error(error, PHASE))?;
+        let result = self
+            .realm
+            .resume_module_loads()
+            .map_err(|error| map_quickjs_error(error, PHASE));
+        self.finish_operation(runtime, result, PHASE)
+    }
+
     pub(crate) fn module_finished(&self) -> Result<bool, ScriptError> {
         let result = {
             let evaluation = self.evaluation.borrow();
@@ -1008,12 +1035,15 @@ fn keep_host_panic<T>(
 
 /// URL identity is shared by static and dynamic imports. Bare names are
 /// reserved for the built-ins; transport and response policy stay with the host.
+/// An engine name and a `lynx:` name are kept as written, so `lynx:<name>`
+/// is the native module `<name>`'s ES module whatever `<name>` spells.
 ///
 /// Reachable past this module because a `require` resolves the same way an
 /// `import` does, and the realm runtime that implements it asks through the
 /// host member [`crate::require`] installs over this.
 pub(crate) fn normalize_module_url(base: &str, specifier: &str) -> Result<String, String> {
     if specifier == crate::esm::WORKER_CLASS_MODULE_SPECIFIER
+        || specifier.starts_with(crate::esm::NATIVE_MODULE_ESM_PREFIX)
         || crate::esm::ENGINE_MODULE_PREFIXES
             .iter()
             .any(|prefix| specifier.starts_with(prefix))
@@ -1051,6 +1081,22 @@ impl fmt::Debug for ScriptRuntime {
             .field("config", &self.config)
             .finish_non_exhaustive()
     }
+}
+
+/// Compiles `source` as the ES module `name` to bytecode in the bridge's
+/// frame, on a runtime of its own that strips source text, as `build.rs`
+/// compiles the built-ins: what [`ScriptEngine::complete_module_bytecode`]
+/// reads.
+pub(crate) fn compile_module_framed(name: &str, source: &str) -> Result<Vec<u8>, ScriptError> {
+    let compiler = quickjs::Runtime::with_options(quickjs::RuntimeOptions {
+        strip_source: true,
+        ..QuickJsConfig::default().runtime_options
+    })
+    .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::Initialize))?;
+    compiler
+        .create_context()
+        .and_then(|realm| realm.compile_module_framed(name, source))
+        .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::RegisterModule))
 }
 
 fn map_quickjs_error(error: quickjs::Error, phase: ScriptErrorPhase) -> ScriptError {

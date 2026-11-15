@@ -76,7 +76,7 @@ rstest.mockRequire("bobcat-internal:host", () => ({
   initialProcessor: () => "",
   initData: () => undefined,
   globalProps: () => undefined,
-  nativeModuleTable: () => "4:Echo4:ping",
+  nativeModuleTable: () => "4:Echo4:ping0:",
   // The two members every synchronous load is written over, stood in for as
   // in lynx-modules.test.ts: Node's own `URL`, and `new Function` for the
   // wrapper the engine compiles a body in.
@@ -446,7 +446,7 @@ describe("MTS/BTS lifecycle runtime", () => {
     expect(initialize).toMatchObject({
       bobcat: "runtime", method: "initialize", updateData: {seed: 1},
       entry: "https://example.test/page/background.js",
-      nativeModuleTable: "4:Echo4:ping",
+      nativeModuleTable: "4:Echo4:ping0:",
     });
     expect(initialize["systemInfo"]).toEqual(mts.SystemInfo);
     expect(Object.keys(initialize).sort()).toEqual([
@@ -1407,18 +1407,18 @@ describe("a frame's realm", () => {
 
   it("posts the native module table it was handed, which it also answers", () => {
     // The host's own, until a boot hands it another.
-    expect(runtime.__BobcatNativeModuleTable()).toBe("4:Echo4:ping");
-    runtime.__BobcatInitializeMTS({initData: {}, globalProps: {}, nativeModuleTable: "5:Other0:"});
-    expect(runtime.__BobcatNativeModuleTable()).toBe("5:Other0:");
+    expect(runtime.__BobcatNativeModuleTable()).toBe("4:Echo4:ping0:");
+    runtime.__BobcatInitializeMTS({initData: {}, globalProps: {}, nativeModuleTable: "5:Other0:0:"});
+    expect(runtime.__BobcatNativeModuleTable()).toBe("5:Other0:0:");
     // An initialization that names none leaves it.
     runtime.__BobcatInitializeMTS({initData: {}, globalProps: {}});
-    expect(runtime.__BobcatNativeModuleTable()).toBe("5:Other0:");
+    expect(runtime.__BobcatNativeModuleTable()).toBe("5:Other0:0:");
     runtime.__BobcatConnectBackground(frameWorker as unknown as Worker, {label: "x"},
       "app:///cards/child.web.bundle#background-thread");
     expect(frameWorker.postMessage.mock.calls[0]![0]).toMatchObject({
       bobcat: "runtime", method: "initialize", updateData: {label: "x"},
       entry: "app:///cards/child.web.bundle#background-thread",
-      nativeModuleTable: "5:Other0:",
+      nativeModuleTable: "5:Other0:0:",
     });
   });
 });
