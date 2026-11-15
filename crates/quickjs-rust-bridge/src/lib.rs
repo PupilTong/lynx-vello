@@ -1578,6 +1578,21 @@ mod implementation {
         .then_some(payload)
     }
 
+    /// Whether `framed` is bytecode in this build's frame
+    /// ([`Compiled::bytecode`], [`Context::compile_module_framed`]): this
+    /// build's [`bytecode_engine_id`], and a length that is the payload's
+    /// own and not zero.
+    ///
+    /// The check [`ModuleCode::Bytecode`] makes before anything is read,
+    /// for a caller that wants to refuse such bytes where it is handed
+    /// them rather than at the first import. It is the frame's guard and
+    /// nothing more: bytes damaged in place inside a whole frame still
+    /// pass, and fail only when they are read.
+    #[must_use]
+    pub fn is_framed_bytecode(framed: &[u8]) -> bool {
+        unframe_bytecode(framed).is_some()
+    }
+
     /// What the realm does about a module's compiled form.
     #[derive(Clone, Copy, Debug)]
     pub enum ModuleCode<'a> {
@@ -1593,6 +1608,16 @@ mod implementation {
         /// that compile's bytecode for [`Context::take_compiled`], exactly as
         /// [`Capture`](Self::Capture).
         Cached(&'a [u8]),
+        /// Read this bytecode — framed as [`Compiled::bytecode`] and
+        /// [`Context::compile_module_framed`] frame it, compiled under this
+        /// same name — and nothing else: the module has no text, and the
+        /// completion's text is ignored. Bytes that are not in this build's
+        /// frame fail the module at once; bytes `JS_ReadObject` refuses, a
+        /// value that is not a module, and a module compiled under another
+        /// name fail it when it is first linked. Either way every import of
+        /// the name rejects with a `TypeError` naming it, and nothing is
+        /// compiled or captured in its place.
+        Bytecode(&'a [u8]),
     }
 
     /// One compile whose bytecode a realm kept ([`Context::take_compiled`]).
@@ -2155,16 +2180,29 @@ mod implementation {
                     )
                 })
             };
-            let name = c_string(name)?;
-            let url = c_string(url)?;
-            let (bytecode, capture) = match code {
-                ModuleCode::Compile => (None, false),
-                ModuleCode::Capture => (None, true),
+            let (bytecode, capture, strict) = match code {
+                ModuleCode::Compile => (None, false, false),
+                ModuleCode::Capture => (None, true, false),
                 ModuleCode::Cached(framed) => match unframe_bytecode(framed) {
-                    Some(payload) => (Some(payload), false),
-                    None => (None, true),
+                    Some(payload) => (Some(payload), false, false),
+                    None => (None, true, false),
+                },
+                ModuleCode::Bytecode(framed) => match unframe_bytecode(framed) {
+                    Some(payload) => (Some(payload), false, true),
+                    None => {
+                        return self.complete_module(
+                            name,
+                            Err(&format!(
+                                "module '{name}' cannot be read from the bytecode it was \
+                                 supplied as: it is not in this build's frame"
+                            )),
+                        );
+                    }
                 },
             };
+            let text = if strict { "" } else { text };
+            let name = c_string(name)?;
+            let url = c_string(url)?;
             // SAFETY: all buffers live through the call, which copies them.
             let status = unsafe {
                 ffi::qjs_context_complete_module_code(
@@ -2176,6 +2214,7 @@ mod implementation {
                     bytecode.map_or(ptr::null(), <[u8]>::as_ptr),
                     bytecode.map_or(0, <[u8]>::len),
                     c_int::from(capture),
+                    c_int::from(strict),
                 )
             };
             self.completion_status(status)
@@ -2285,6 +2324,14 @@ mod implementation {
             let bytecode = unsafe { std::slice::from_raw_parts(bytes.as_ptr(), length) }.to_vec();
             unsafe { ffi::qjs_bytecode_free(self.raw().as_ptr(), bytes.as_ptr()) };
             Ok(bytecode)
+        }
+
+        /// [`Self::compile_module_bytecode`], framed as [`Compiled::bytecode`]
+        /// is: what [`ModuleCode::Bytecode`] and [`ModuleCode::Cached`] read,
+        /// in a realm of any runtime of this build.
+        pub fn compile_module_framed(&self, name: &str, source: &str) -> Result<Vec<u8>, Error> {
+            self.compile_module_bytecode(name, source)
+                .map(|payload| frame_bytecode(&payload))
         }
 
         /// Retries suspended imports after completing their sources. This
@@ -6497,6 +6544,124 @@ mod implementation {
             }
         }
 
+        /// A module completed from bytecode alone is the module that bytecode
+        /// was compiled from, under the name it was compiled under: its
+        /// `import.meta.url` is the URL it was completed with, its imports
+        /// resolve in the realm that reads it, the completion's text is never
+        /// compiled, and nothing is captured.
+        #[test]
+        fn bytecode_alone_is_the_module_it_was_compiled_from() {
+            let compiler = Runtime::with_options(RuntimeOptions {
+                strip_source: true,
+                ..RuntimeOptions::default()
+            })
+            .unwrap();
+            let bytecode = compiler
+                .create_context()
+                .unwrap()
+                .compile_module_framed(
+                    "lynx:Echo",
+                    "import { base } from 'app:///base.mjs';\n\
+                     export const url = import.meta.url;\n\
+                     export const value = base + 1;",
+                )
+                .unwrap();
+            assert!(is_framed_bytecode(&bytecode));
+            let (mut runtime, mut realm) = runtime_and_realm();
+            realm
+                .complete_module_with(
+                    "app:///base.mjs",
+                    "app:///base.mjs",
+                    "export const base = 41;",
+                    ModuleCode::Compile,
+                )
+                .unwrap();
+            realm
+                .complete_module_with(
+                    "lynx:Echo",
+                    "lynx:Echo",
+                    "globalThis.textRan = true; export const url = 'text';",
+                    ModuleCode::Bytecode(&bytecode),
+                )
+                .unwrap();
+            let namespace = settle_load(&mut runtime, &realm, "lynx:Echo").unwrap();
+            assert_eq!(
+                string_of(&realm.property(&namespace, "url").unwrap()),
+                "lynx:Echo"
+            );
+            assert_eq!(
+                realm.property(&namespace, "value").unwrap().as_number(),
+                Some(42.0)
+            );
+            assert_eq!(
+                global_text(&realm, "String(globalThis.textRan)"),
+                "undefined"
+            );
+            assert!(realm.take_compiled().is_none(), "a read keeps nothing");
+        }
+
+        /// Bytecode alone that cannot be read as the module it was handed in
+        /// for fails that module, at every import of it, with a `TypeError`
+        /// naming it — never a compile of the text in its place and never an
+        /// empty module.
+        #[test]
+        fn unreadable_bytecode_alone_fails_every_import_of_its_module() {
+            let compile = |name: &str| {
+                Runtime::new()
+                    .unwrap()
+                    .create_context()
+                    .unwrap()
+                    .compile_module_framed(name, "export const value = 1;")
+                    .unwrap()
+            };
+            let good = compile("lynx:Echo");
+            let payload = &good[BYTECODE_FRAME_HEADER..];
+            let cases: [(&str, Vec<u8>); 7] = [
+                ("unframed garbage", b"not bytecode at all".to_vec()),
+                ("framed garbage", frame_bytecode(b"definitely not quickjs")),
+                ("truncated", good[..good.len() - 3].to_vec()),
+                (
+                    "cut inside the module",
+                    frame_bytecode(&payload[..payload.len() / 2]),
+                ),
+                ("another build", {
+                    let mut foreign = good.clone();
+                    foreign[0] ^= 1;
+                    foreign
+                }),
+                ("another module's", compile("lynx:Other")),
+                (
+                    "a CommonJS wrapper",
+                    capture_commonjs("app:///lib.cjs", "exports", "exports.value = 1;"),
+                ),
+            ];
+            for (case, bytes) in cases {
+                let (mut runtime, realm) = runtime_and_realm();
+                realm
+                    .complete_module_with(
+                        "lynx:Echo",
+                        "lynx:Echo",
+                        "globalThis.textRan = true; export const value = 2;",
+                        ModuleCode::Bytecode(&bytes),
+                    )
+                    .unwrap_or_else(|error| panic!("{case}: {error:?}"));
+                for attempt in ["first", "second"] {
+                    let error = settle_load(&mut runtime, &realm, "lynx:Echo")
+                        .expect_err(&format!("{case}: the {attempt} import fails"));
+                    assert!(
+                        error.message.contains("module 'lynx:Echo' cannot be read"),
+                        "{case}, {attempt}: {error:?}"
+                    );
+                }
+                assert_eq!(
+                    global_text(&realm, "String(globalThis.textRan)"),
+                    "undefined",
+                    "{case}"
+                );
+                assert!(realm.take_compiled().is_none(), "{case}");
+            }
+        }
+
         /// An import that cannot be loaded fails a module read from bytecode
         /// exactly as it fails the module compiled from its text, through an
         /// asynchronous import and through a `require` alike, and leaves the
@@ -8505,5 +8670,5 @@ pub use implementation::{
     EvalSource, HostArgument, HostFunctionError, HostValue, InterruptHandle, Member, ModuleCode,
     ModuleNormalizer, RequiredCode, RequiredKind, RequiredSource, Runtime, RuntimeOptions,
     SourceLocation, SourceType, StructuredBytes, StructuredClone, Value, ValueKind,
-    bytecode_engine_id,
+    bytecode_engine_id, is_framed_bytecode,
 };

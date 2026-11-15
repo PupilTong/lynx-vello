@@ -218,13 +218,13 @@ describe("the BTS NativeModules object", () => {
   beforeAll(() => {
     evaluated = bts.lynx.getApp().NativeModules;
     keysBeforeInitialize = Object.keys(evaluated);
-    bts.__BobcatStartBTS(async () => {
-      seen.push(Object.keys(bts.NativeModules), bts.SystemInfo["pixelRatio"]);
+    bts.__BobcatStartBTS(async (_options, importBeforeEntry) => {
+      seen.push(Object.keys(bts.NativeModules), bts.SystemInfo["pixelRatio"], importBeforeEntry);
     });
     worker.__BobcatDeliverWorkerMessage({
       bobcat: "runtime", method: "initialize", updateData: {},
       systemInfo: systemInfo.createSystemInfo({ pixelRatio: 1.1, pixelWidth: 1287, pixelHeight: 2785 }),
-      nativeModuleTable: "3:Foo3:bar",
+      nativeModuleTable: "3:Foo3:bar0:",
     });
   });
 
@@ -237,7 +237,7 @@ describe("the BTS NativeModules object", () => {
   it("is built out of the table `initialize` carries, before the entry runs", () => {
     // The entry ran with both in place, and the object it saw is the one
     // every name for `NativeModules` already held.
-    expect(seen).toEqual([["Foo"], 1.1]);
+    expect(seen).toEqual([["Foo"], 1.1, []]);
     expect(bts.NativeModules).toBe(evaluated);
     expect(bts.lynx.SystemInfo).toBe(bts.SystemInfo);
     expect((globalThis as { SystemInfo?: unknown }).SystemInfo).toBe(bts.SystemInfo);
@@ -264,5 +264,22 @@ describe("the BTS NativeModules object", () => {
     // The name ReactLynx reads, kept although nothing is a Proxy any more.
     expect(bts.lynx.getNativeApp().nativeModuleProxy)
       .toBe(bts.lynx.getApp().NativeModules);
+  });
+});
+
+describe("the module table `initialize` carries", () => {
+  it("reads three fields per module and lists the ES modules imported before the entry", () => {
+    // `First` and `Second` flagged, `Lazy` with an ES module that loads when
+    // imported, `Plain` with none: the flagged ones, in table order.
+    const table = bts.readNativeModuleTable(
+      "5:First1:a16:esm-before-entry4:Lazy0:3:esm5:Plain0:0:6:Second3:b,c16:esm-before-entry");
+    expect(Object.keys(table.modules)).toEqual(["First", "Lazy", "Plain", "Second"]);
+    expect(Object.keys(table.modules["Second"]!)).toEqual(["b", "c"]);
+    expect(Object.keys(table.modules["Lazy"]!)).toEqual([]);
+    expect(table.importBeforeEntry).toEqual(["lynx:First", "lynx:Second"]);
+  });
+
+  it("is empty for an empty table", () => {
+    expect(bts.readNativeModuleTable("")).toEqual({ modules: {}, importBeforeEntry: [] });
   });
 });

@@ -81,7 +81,11 @@ grandchildren included, get the page realm's document members (the
 own, so `bobcat:element` and `bobcat-internal` link in them, and a worker
 realm's get nothing more, so `bobcat:timers` links in one and
 `bobcat:element` does not. A worker realm's child has no worker member, and
-no child has `bobcat-internal:native-modules`.
+no child has `bobcat-internal:native-modules`. No child loads a native
+module's ES module: a `lynx:<name>` import in a child of an MTS realm fails
+with a `ReferenceError`, because the main runtime reserves the prefix, and in
+a child of a worker realm the owner's epilogue fails the request with an
+error naming it instead of asking the host.
 `requestScriptFrame` is a
 no-op there: the frame demand is one flag per realm key, and a child under its
 parent's key would cancel the parent's demand with its own `false`. The child

@@ -1153,6 +1153,38 @@ fn a_frames_card_background_thread_calls_the_views_native_modules() {
     assert_eq!(reported(&events), Vec::<&str>::new());
 }
 
+/// The card's background thread loads the view's native module ES modules
+/// as the view's own BTS does: the one flagged `import_before_entry` has run
+/// before the card's BTS entry, and an `import` of it there answers the
+/// module the view was built with, from the view's bytecode.
+#[test]
+fn a_frames_card_background_thread_loads_the_views_native_es_modules() {
+    let spec = TestViewSpec::new(&host_entry(CARD))
+        .with_fetchable(CARD)
+        .with_module(&format!("{CARD}/root.js"), &super::card_entry(&root(CARD)))
+        .with_style_sheet_probe()
+        .with_echo_esm_module(
+            "Echo",
+            "export const url = import.meta.url;
+             globalThis.esmRuns = (globalThis.esmRuns ?? 0) + 1;",
+            true,
+        );
+    let mut engine = with_bts(
+        spec,
+        CARD,
+        "const ranBefore = globalThis.esmRuns;
+         import('lynx:Echo').then(echo => log('esm ' + echo.url + ' ' + ranBefore + ' ' + globalThis.esmRuns));",
+    )
+    .create(Arc::new(NoWakeup));
+    let mut events = Vec::new();
+    pump_until_logged(
+        &mut engine,
+        &mut events,
+        &format!("bts {CARD} esm lynx:Echo 1 1"),
+    );
+    assert_eq!(reported(&events), Vec::<&str>::new());
+}
+
 /// Letting go of a frame's card disposes of its background thread before its
 /// realm goes, as both references do: the card's BTS runs its app cleanup
 /// (`callDestroyLifetimeFun`, `ReactLynx`'s `destroyCard`) and acknowledges,

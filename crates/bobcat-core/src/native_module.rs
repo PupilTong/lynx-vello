@@ -22,9 +22,20 @@
 //! table as one of its startup members and posts it to its BTS in the
 //! `initialize` message. A plain `Worker` is posted no table, and the MTS
 //! realm has no `NativeModules`.
+//!
+//! A module may also supply one ES module, as bytecode
+//! ([`NativeModule::esm`], compiled by [`compile_native_module_esm`]): the
+//! module `lynx:<name>`, which a worker realm of the view imports. The view
+//! keeps the bytecode in one shared table ([`NativeModuleEsms`]) that travels
+//! with its host outbox to every worker realm it opens; a worker realm whose
+//! import of `lynx:<name>` is unanswered is completed from it on the worker
+//! thread, and nothing is asked of the embedder or the fetcher. The module
+//! table tells the BTS which modules have one, and which of those it imports
+//! before the view's BTS entry.
 
 use std::sync::Arc;
 
+use bytes::Bytes;
 use quickjs_rust_bridge::{HostArgument, HostValue};
 use tokio::sync::mpsc;
 
@@ -76,6 +87,87 @@ pub trait NativeModule {
     /// speak back, and they may be kept for as long as the work takes. A call
     /// simply dropped releases them all uninvoked.
     fn invoke(&self, call: ModuleCall);
+
+    /// The ES module this module supplies, if any: what an `import` of
+    /// `lynx:<name>` in a worker realm of the view loads, `<name>` being
+    /// [`Self::name`]. Read once, at
+    /// [`LynxGroup::create_lynx_view`](crate::LynxGroup::create_lynx_view),
+    /// like the name and the methods.
+    ///
+    /// The module is bytecode [`compile_native_module_esm`] wrote for this
+    /// module's name, by this build of the engine; no source text reaches the
+    /// view. Its `import.meta.url` is `lynx:<name>`, and it may import the
+    /// engine's built-ins — `callNativeModule` from `bobcat:native-modules`
+    /// is how it calls this module's own methods. The default is `None`: a
+    /// module without one, whose `lynx:<name>` import fails.
+    fn esm(&self) -> Option<NativeModuleEsm> {
+        None
+    }
+}
+
+/// The ES module a [`NativeModule`] supplies ([`NativeModule::esm`]).
+#[derive(Clone, Debug)]
+pub struct NativeModuleEsm {
+    /// What [`compile_native_module_esm`] wrote for this module's name.
+    /// [`LynxGroup::create_lynx_view`](crate::LynxGroup::create_lynx_view)
+    /// refuses bytes that are not this build's frame
+    /// ([`EngineError::InvalidNativeModuleEsm`](crate::EngineError::InvalidNativeModuleEsm));
+    /// bytes inside a whole frame that cannot be read as the module
+    /// `lynx:<name>` fail its import, in the importing realm, with a
+    /// `TypeError` naming it.
+    pub bytecode: Bytes,
+    /// Whether the view's BTS imports `lynx:<name>` before its BTS entry:
+    /// after the `initialize` message has supplied `NativeModules`, one
+    /// module after another in the order the modules were given to
+    /// `create_lynx_view`, each awaited. A rejection is the entry's, as the
+    /// entry's own import's is, and the entry is then not imported. `false`
+    /// loads the module only when something imports it.
+    pub import_before_entry: bool,
+}
+
+/// Compiles `source` as the ES module `lynx:<name>` — the module the
+/// native module `name` supplies ([`NativeModule::esm`]) — to bytecode in the
+/// engine's frame, which is what [`NativeModuleEsm::bytecode`] takes.
+///
+/// Compiled with the source text stripped, as the engine's built-ins are
+/// (functions answer `toString` with a placeholder; line numbers are kept),
+/// unlinked and never evaluated here, so an embedder can compile in its build
+/// script or at startup. The bytes are this build's: another build of the
+/// engine refuses them.
+///
+/// # Errors
+///
+/// A [`ScriptError`] for a syntax error in `source`, with
+/// [`ScriptErrorKind::Syntax`](crate::script::ScriptErrorKind::Syntax).
+pub fn compile_native_module_esm(name: &str, source: &str) -> Result<Vec<u8>, ScriptError> {
+    crate::main::quickjs::compile_module_framed(&native_module_esm_specifier(name), source)
+}
+
+/// The specifier the native module `name`'s ES module is imported by.
+pub(crate) fn native_module_esm_specifier(name: &str) -> String {
+    format!("{}{name}", crate::esm::NATIVE_MODULE_ESM_PREFIX)
+}
+
+/// A view's native module ES modules: each module's `lynx:<name>` beside the
+/// bytecode it supplied, in the order the modules were given.
+///
+/// One per view, shared by an `Arc` with every worker realm the view opens:
+/// the bytes are copied into a realm only when it imports the module.
+#[derive(Debug, Default)]
+pub(crate) struct NativeModuleEsms(Vec<(String, Bytes)>);
+
+impl NativeModuleEsms {
+    pub(crate) const fn new(modules: Vec<(String, Bytes)>) -> Self {
+        Self(modules)
+    }
+
+    /// The bytecode of the ES module imported as `specifier`, if the view
+    /// has one.
+    pub(crate) fn get(&self, specifier: &str) -> Option<&Bytes> {
+        self.0
+            .iter()
+            .find_map(|(name, bytecode)| (name == specifier).then_some(bytecode))
+    }
 }
 
 /// One `NativeModules.<module>.<method>(...)` call, as the module sees it.
@@ -409,28 +501,82 @@ fn call_id(arguments: &[HostArgument<'_>]) -> Result<u64, String> {
     }
 }
 
-/// The modules a view was built with, as the realm is told about them: each
-/// module's name followed by its method names joined with commas.
+/// What the realm is told about one module's ES module.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EsmLoad {
+    /// The module supplies none.
+    None,
+    /// It supplies one, which loads when something imports it.
+    OnImport,
+    /// It supplies one, which the BTS imports before its entry.
+    BeforeEntry,
+}
+
+impl EsmLoad {
+    /// What a module's [`NativeModule::esm`] answer tells the realm.
+    pub(crate) fn of(esm: Option<&NativeModuleEsm>) -> Self {
+        match esm {
+            None => Self::None,
+            Some(esm) if esm.import_before_entry => Self::BeforeEntry,
+            Some(_) => Self::OnImport,
+        }
+    }
+
+    /// The table field: empty, `esm` or `esm-before-entry`.
+    const fn field(self) -> &'static str {
+        match self {
+            Self::None => "",
+            Self::OnImport => "esm",
+            Self::BeforeEntry => "esm-before-entry",
+        }
+    }
+}
+
+/// One module a view was built with, as the realm is told about it.
+#[derive(Clone, Debug)]
+pub(crate) struct TableEntry {
+    pub(crate) name: String,
+    pub(crate) methods: Vec<String>,
+    pub(crate) esm: EsmLoad,
+}
+
+impl TableEntry {
+    /// A module with these methods and no ES module.
+    pub(crate) fn new(name: impl Into<String>, methods: Vec<String>) -> Self {
+        Self {
+            name: name.into(),
+            methods,
+            esm: EsmLoad::None,
+        }
+    }
+}
+
+/// The modules a view was built with, as the realm is told about them, in
+/// the order they were given.
 ///
 /// One `Vec` rather than a map because it is read once, in order, by the
-/// encoder below — the realm builds the object, and duplicate names were
-/// already refused where the view was constructed.
-pub(crate) type NativeModuleTable = Vec<(String, Vec<String>)>;
+/// encoder below — the realm builds the object and imports the flagged ES
+/// modules in this order, and duplicate names were already refused where the
+/// view was constructed.
+pub(crate) type NativeModuleTable = Vec<TableEntry>;
 
 /// Encodes a module table as the `<utf16Length>:<text>` record an MTS
 /// realm's `nativeModuleTable` answers, which the realm posts to its BTS
-/// unread and `bobcat:bts-runtime` decodes, two fields per module: the name,
-/// then the comma-joined method list.
+/// unread and `bobcat:bts-runtime` decodes, three fields per module: the
+/// name, the comma-joined method list, and what the module's ES module is —
+/// empty for none, `esm` for one that loads when imported, `esm-before-entry`
+/// for one the BTS imports before its entry.
 ///
 /// The same format `attributeNames` answers in, for the same reason — the
 /// length is in UTF-16 code units, so `String.prototype.slice` reads each
 /// field without a scan and a name may contain any character at all. A module
-/// with no methods still writes both fields, the second empty.
+/// with no methods and no ES module still writes all three fields.
 pub(crate) fn encode_table(modules: &NativeModuleTable) -> String {
     let mut record = String::new();
-    for (name, methods) in modules {
-        crate::main::record::write_record_field(&mut record, name);
-        crate::main::record::write_record_field(&mut record, &methods.join(","));
+    for module in modules {
+        crate::main::record::write_record_field(&mut record, &module.name);
+        crate::main::record::write_record_field(&mut record, &module.methods.join(","));
+        crate::main::record::write_record_field(&mut record, module.esm.field());
     }
     record
 }
@@ -441,15 +587,75 @@ mod tests {
     use crate::link::{CommandSender, FrameDemand};
 
     #[test]
-    fn a_module_with_no_methods_still_writes_both_of_its_fields() {
+    fn a_module_with_no_methods_and_no_esm_still_writes_its_three_fields() {
         let table: NativeModuleTable = vec![
-            (
-                "Echo".to_owned(),
-                vec!["ping".to_owned(), "pong".to_owned()],
-            ),
-            ("Bare".to_owned(), Vec::new()),
+            TableEntry::new("Echo", vec!["ping".to_owned(), "pong".to_owned()]),
+            TableEntry::new("Bare", Vec::new()),
         ];
-        assert_eq!(encode_table(&table), "4:Echo9:ping,pong4:Bare0:");
+        assert_eq!(encode_table(&table), "4:Echo9:ping,pong0:4:Bare0:0:");
+    }
+
+    /// The third field says whether a module has an ES module and when the
+    /// BTS loads it, in the order the modules were given; a name is counted
+    /// in UTF-16 code units like every other field.
+    #[test]
+    fn the_third_field_names_each_modules_es_module_load() {
+        let esm = |import_before_entry| NativeModuleEsm {
+            bytecode: Bytes::from_static(b"unread here"),
+            import_before_entry,
+        };
+        let table: NativeModuleTable = vec![
+            TableEntry {
+                esm: EsmLoad::of(Some(&esm(true))),
+                ..TableEntry::new("First", vec!["a".to_owned()])
+            },
+            TableEntry {
+                esm: EsmLoad::of(Some(&esm(false))),
+                ..TableEntry::new("Lazy", Vec::new())
+            },
+            TableEntry {
+                esm: EsmLoad::of(None),
+                ..TableEntry::new("Plain", Vec::new())
+            },
+            TableEntry {
+                esm: EsmLoad::of(Some(&esm(true))),
+                ..TableEntry::new("Ünï", Vec::new())
+            },
+        ];
+        assert_eq!(
+            encode_table(&table),
+            "5:First1:a16:esm-before-entry4:Lazy0:3:esm5:Plain0:0:3:Ünï0:16:esm-before-entry"
+        );
+    }
+
+    /// The table a view keeps answers by the specifier an import names, and
+    /// nothing else: the name without its prefix is no specifier.
+    #[test]
+    fn the_view_table_answers_by_specifier() {
+        let esms = NativeModuleEsms::new(vec![(
+            native_module_esm_specifier("Echo"),
+            Bytes::from_static(b"bytes"),
+        )]);
+        assert_eq!(
+            esms.get("lynx:Echo").map(Bytes::as_ref),
+            Some(&b"bytes"[..])
+        );
+        assert!(esms.get("Echo").is_none());
+        assert!(esms.get("lynx:Other").is_none());
+    }
+
+    /// What `compile_native_module_esm` writes is in this build's frame, and
+    /// a syntax error is a syntax error.
+    #[test]
+    fn a_compiled_esm_is_framed_and_a_syntax_error_is_refused() {
+        let bytecode = compile_native_module_esm("Echo", "export const x = 1;").unwrap();
+        assert!(quickjs_rust_bridge::is_framed_bytecode(&bytecode));
+        let error = compile_native_module_esm("Echo", "export let let = 1;").unwrap_err();
+        assert_eq!(
+            error.kind,
+            crate::script::ScriptErrorKind::Syntax,
+            "{error}"
+        );
     }
 
     #[test]

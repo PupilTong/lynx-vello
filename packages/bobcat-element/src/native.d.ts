@@ -410,10 +410,12 @@ interface BobcatNative {
   globalProps(): string | undefined;
   /**
    * The native modules the embedder injected when the view was built, as one
-   * record payload: a flat sequence of `<utf16Length>:<text>` fields, two per
-   * module — its `NativeModules` key, then its method names joined with
-   * commas, empty for a module that declared none. Empty for a view built with
-   * no modules at all. This realm has no `NativeModules` and posts the record
+   * record payload: a flat sequence of `<utf16Length>:<text>` fields, three
+   * per module — its `NativeModules` key, then its method names joined with
+   * commas, empty for a module that declared none, then what its ES module
+   * `lynx:<name>` is: empty for none, `esm` for one a worker realm of the view
+   * loads when it is imported, `esm-before-entry` for one the BTS imports
+   * before its entry. Empty for a view built with no modules at all. This realm has no `NativeModules` and posts the record
    * unread to its BTS Worker in `initialize`. Answers once, like `initData`,
    * and `undefined` after that and in a `ShadowRealm` child, which is handed
    * the page realm's table instead.

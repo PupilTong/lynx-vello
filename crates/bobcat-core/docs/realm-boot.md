@@ -155,6 +155,9 @@ engine knows what the compile bakes in. The rules:
   (`import.meta.url`) is set after the read and is no part of the key. The
   `EngineId` is `bobcat_core::script_engine_id()`, the bridge's
   `bytecode_engine_id()`.
+- A native module's ES module (`lynx:<name>`) is no host text answer: it is
+  completed from the view's bytecode (`ScriptEngine::complete_module_bytecode`)
+  and the cache neither looks it up nor keeps it.
 - A text under `MIN_CACHED_SOURCE_BYTES` (1 KiB) is compiled as without a
   cache and never hashed, as is every text while the tier's budget is 0. JSON
   compiles nothing. Built-in modules registered on the runtime are not host

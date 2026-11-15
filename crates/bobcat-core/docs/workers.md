@@ -149,7 +149,15 @@ JSON literal, `undefined` when the view named none), the MTS realm's own
 `SystemInfo`, and the view's native module table (the MTS startup member
 `nativeModuleTable`, posted unread). `bobcat:bts-runtime` fills `SystemInfo`
 (its live export, `lynx.SystemInfo` and the global) and `NativeModules` from
-it, and then `bobcat:bts` imports the entry it names. A plain `Worker` that
+it, and then `bobcat:bts` imports, one after another and each awaited, the ES
+module `lynx:<name>` of every native module the table flags
+`esm-before-entry`, in the order the view was given its modules, and then
+the entry it names. A flagged module's rejection is the entry's: the entry is
+not imported, and the rejection is reported as the BTS's uncaught exception,
+as an entry's own is. The flagged modules are imported whether or not the
+view named an entry. Any worker realm of the view loads a `lynx:<name>` the
+view has an ES module for when something imports it, from the view's
+bytecode and without a request (`docs/resource-protocol.md`). A plain `Worker` that
 imports `bobcat:bts-runtime` is posted no `initialize` and keeps the runtime
 constants and an empty `NativeModules`. MTS JavaScript owns BTS disposal: send
 `dispose`, await `disposed`, then terminate its Worker. BTS calls the current

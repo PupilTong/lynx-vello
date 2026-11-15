@@ -143,6 +143,13 @@ pub enum EngineError {
     /// clash where the view is built is the whole of the resolution.
     #[error("two native modules are named `{0}`")]
     DuplicateNativeModule(String),
+    /// A native module's ES module ([`NativeModule::esm`]) is not bytecode
+    /// in this build's frame: another build's, cut short, or not bytecode at
+    /// all. A construction failure of the same kind as
+    /// [`Self::DuplicateNativeModule`], decided before anything is requested.
+    /// The name is the module's.
+    #[error("the ES module of native module `{0}` is not bytecode this build of the engine wrote")]
+    InvalidNativeModuleEsm(String),
 }
 
 /// The presenting painter's failures, one variant each: its metrics, its
@@ -876,14 +883,20 @@ impl LynxGroup {
     /// module is never asked a question while script is running, and
     /// `NativeModules` carries exactly the methods declared at this call.
     ///
+    /// A module's ES module ([`NativeModule::esm`]) is read here too, and
+    /// its bytecode is kept in one table the view's worker realms share: a
+    /// worker realm completes its import of `lynx:<name>` from it, and
+    /// nothing is requested for it.
+    ///
     /// # Errors
     ///
-    /// [`LynxViewError`] if two native modules answer to one name, if the
-    /// base URL is not an absolute URL or the entry or BTS entry does not
-    /// resolve against it ([`EngineError::InvalidUrl`]), if the default font
-    /// family is one neither this view's containers nor the platform provides
+    /// [`LynxViewError`] if two native modules answer to one name, if a
+    /// module's ES module is not bytecode in this build's frame
+    /// ([`EngineError::InvalidNativeModuleEsm`]), if the base URL is not an absolute URL or the
+    /// entry or BTS entry does not resolve against it ([`EngineError::InvalidUrl`]), if the
+    /// default font family is one neither this view's containers nor the platform provides
     /// ([`EngineError::UnknownFontFamily`]), or if the group's main thread
-    /// cannot accept the attachment. All of the first three are decided
+    /// cannot accept the attachment. All of the first four are decided
     /// before the fetcher is built and before anything is requested, so a
     /// view that fails any one of them fetches nothing.
     pub fn create_lynx_view<F, B>(
@@ -906,14 +919,7 @@ impl LynxGroup {
         let registry = Arc::new(PipelineRegistry::new(time_origin));
         // Read once, before anything is sent: the table is what crosses, and
         // the modules themselves stay here.
-        let mut table = NativeModuleTable::with_capacity(native_modules.len());
-        for module in &native_modules {
-            let name = module.name();
-            if table.iter().any(|(existing, _)| existing == name) {
-                return Err(EngineError::DuplicateNativeModule(name.to_owned()).into());
-            }
-            table.push((name.to_owned(), module.methods()));
-        }
+        let (table, native_esms) = read_native_modules(&native_modules)?;
         // The entries' URLs, before the fetcher exists for the same reason as
         // the fonts below: a URL that does not resolve refuses the view
         // before anything is requested. The parsed base goes on to every
@@ -996,6 +1002,7 @@ impl LynxGroup {
                 text_context,
                 startup: StartupSources { sheets, entry },
                 native_modules: crate::native_module::encode_table(&table),
+                native_esms: Arc::new(native_esms),
                 commands: command_receiver,
                 metrics: metric_receiver,
                 scroll: Arc::clone(&scroll),
@@ -1035,7 +1042,7 @@ impl LynxGroup {
             // `pump` checks a call against these rather than asking again.
             native_modules: native_modules
                 .into_iter()
-                .zip(table.into_iter().map(|(_, methods)| methods))
+                .zip(table.into_iter().map(|module| module.methods))
                 .collect(),
             state: ViewState::Loading,
             // The view's one origin: its animations' timeline and its
@@ -1046,6 +1053,41 @@ impl LynxGroup {
             group: Rc::clone(&self.inner),
         })
     }
+}
+
+/// Reads a view's native modules once, before anything is requested: the
+/// table the realm is told about them in, and the bytecode of the ES modules
+/// they supply. Two modules of one name, and an ES module whose bytes are not
+/// this build's whole frame, refuse the view.
+fn read_native_modules(
+    native_modules: &[Box<dyn NativeModule>],
+) -> Result<(NativeModuleTable, crate::native_module::NativeModuleEsms), EngineError> {
+    let mut table = NativeModuleTable::with_capacity(native_modules.len());
+    let mut esms = Vec::new();
+    for module in native_modules {
+        let name = module.name();
+        if table.iter().any(|existing| existing.name == name) {
+            return Err(EngineError::DuplicateNativeModule(name.to_owned()));
+        }
+        // The ES module's frame is checked here, beside the names: bytes
+        // another build wrote, or cut short, refuse the view before anything
+        // is requested, rather than failing an import later.
+        let esm = module.esm();
+        if let Some(esm) = &esm {
+            if !quickjs_rust_bridge::is_framed_bytecode(&esm.bytecode) {
+                return Err(EngineError::InvalidNativeModuleEsm(name.to_owned()));
+            }
+            esms.push((
+                crate::native_module::native_module_esm_specifier(name),
+                esm.bytecode.clone(),
+            ));
+        }
+        table.push(crate::native_module::TableEntry {
+            esm: crate::native_module::EsmLoad::of(esm.as_ref()),
+            ..crate::native_module::TableEntry::new(name, module.methods())
+        });
+    }
+    Ok((table, crate::native_module::NativeModuleEsms::new(esms)))
 }
 
 /// A loading or running Lynx view: a page's worth of Lynx, on a thread its
@@ -1789,6 +1831,9 @@ pub(crate) struct ViewAttachment {
     /// Worker in the `initialize` message.
     /// The modules themselves stay on the view, on the embedder's thread.
     pub(crate) native_modules: String,
+    /// The ES modules those native modules supplied, as bytecode, which
+    /// every worker realm of the view completes `lynx:<name>` from.
+    pub(crate) native_esms: Arc<crate::native_module::NativeModuleEsms>,
     pub(crate) commands: mpsc::UnboundedReceiver<ToMain>,
     /// The reading end of the seat's metrics watch: what an attached painter
     /// names, `None` until one does.

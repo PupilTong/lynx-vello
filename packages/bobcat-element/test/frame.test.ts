@@ -77,7 +77,7 @@ function connection(frameId: number, connected: boolean): void {
 }
 
 /** The view's native module table, as the page realm holds it. */
-const MODULE_TABLE = "4:Echo4:ping";
+const MODULE_TABLE = "4:Echo4:ping0:";
 
 rstest.mockRequire("bobcat:runtime", () => ({
   SystemInfo: { platform: "headless", pixelRatio: 2 },

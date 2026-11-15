@@ -211,6 +211,7 @@ unsafe extern "C" {
         bytecode: *const u8,
         bytecode_length: usize,
         capture: c_int,
+        strict: c_int,
     ) -> c_int;
     pub(crate) fn qjs_context_take_compiled(context: *mut QjsContext) -> *mut QjsCompiled;
     pub(crate) fn qjs_compiled_free(context: *mut QjsContext, compiled: *mut QjsCompiled);

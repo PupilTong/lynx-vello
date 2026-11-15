@@ -330,8 +330,9 @@ pub(crate) struct TestViewSpec {
     fetchable: FxHashSet<String>,
     probes_fetches: bool,
     probes_style_sheets: bool,
-    /// The names of the [`EchoModule`]s the view is built with.
-    echo_modules: Vec<&'static str>,
+    /// The [`EchoModule`]s the view is built with: each one's name, and the
+    /// ES module it supplies, if any.
+    echo_modules: Vec<(&'static str, Option<crate::native_module::NativeModuleEsm>)>,
     target: TestTarget,
     width: f32,
     height: f32,
@@ -340,11 +341,15 @@ pub(crate) struct TestViewSpec {
 /// A native module that answers every call through its first function
 /// argument, with the call's own argument list: what a test needs to see
 /// that a realm's call reached the embedder and its answer came back.
-struct EchoModule(&'static str);
+struct EchoModule(&'static str, Option<crate::native_module::NativeModuleEsm>);
 
 impl crate::native_module::NativeModule for EchoModule {
     fn name(&self) -> &str {
         self.0
+    }
+
+    fn esm(&self) -> Option<crate::native_module::NativeModuleEsm> {
+        self.1.clone()
     }
 
     fn methods(&self) -> Vec<String> {
@@ -473,7 +478,27 @@ impl TestViewSpec {
     /// method, `echo`, which answers through its first function argument
     /// with the call's argument list as JSON text.
     pub(crate) fn with_echo_module(mut self, name: &'static str) -> Self {
-        self.echo_modules.push(name);
+        self.echo_modules.push((name, None));
+        self
+    }
+
+    /// [`Self::with_echo_module`], the module also supplying the ES module
+    /// `source` compiles to, as `lynx:<name>`.
+    pub(crate) fn with_echo_esm_module(
+        mut self,
+        name: &'static str,
+        source: &str,
+        import_before_entry: bool,
+    ) -> Self {
+        let bytecode = crate::native_module::compile_native_module_esm(name, source)
+            .expect("the test ES module compiles");
+        self.echo_modules.push((
+            name,
+            Some(crate::native_module::NativeModuleEsm {
+                bytecode: bytecode.into(),
+                import_before_entry,
+            }),
+        ));
         self
     }
 
@@ -591,8 +616,8 @@ impl TestViewSpec {
                     |_reports| fetcher,
                     echo_modules
                         .into_iter()
-                        .map(|name| {
-                            Box::new(EchoModule(name))
+                        .map(|(name, esm)| {
+                            Box::new(EchoModule(name, esm))
                                 as Box<dyn crate::native_module::NativeModule>
                         })
                         .collect(),

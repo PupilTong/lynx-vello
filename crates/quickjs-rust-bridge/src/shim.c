@@ -68,6 +68,10 @@ typedef struct QjsModuleSource {
     /* Whether a compile of this source's text keeps its bytecode in the
        realm's compiled queue (`qjs_context_take_compiled`). */
     int capture;
+    /* Whether `owned_bytecode` is the whole of this source: it has no text
+       to fall back to, so bytes that cannot be read as this module fail the
+       module's load (and every later one) instead of compiling the text. */
+    int strict;
     char *url;
     char *error;
     int requested;
@@ -956,6 +960,30 @@ static JSValue qjs_read_cached_module(QjsContext *context,
     return compiled;
 }
 
+/* Fails a strict source whose bytecode cannot be read as its module: the
+   reason is kept as the source's error, which every later import of the
+   name throws as it would a failed fetch's, and thrown now. */
+static void qjs_refuse_strict_source(QjsContext *context,
+                                     QjsModuleSource *source) {
+    static const char head[] = "module '";
+    static const char tail[] =
+        "' cannot be read from the bytecode it was supplied as";
+    size_t name_length = strlen(source->name);
+    char *message =
+        malloc(sizeof(head) - 1 + name_length + sizeof(tail));
+
+    if (message == NULL) {
+        JS_ThrowOutOfMemory(context->raw);
+        return;
+    }
+    memcpy(message, head, sizeof(head) - 1);
+    memcpy(message + sizeof(head) - 1, source->name, name_length);
+    memcpy(message + sizeof(head) - 1 + name_length, tail, sizeof(tail));
+    free(source->error);
+    source->error = message;
+    JS_ThrowTypeError(context->raw, "%s", message);
+}
+
 /* Compiles one source this realm has into a module of it — or reads the
    module back from the bytecode the source carries instead of text — and
    remembers the instance.
@@ -1043,6 +1071,14 @@ static JSModuleDef *qjs_compile_module_source(QjsContext *context,
                 read = 1;
             }
         }
+        if (JS_IsUndefined(compiled) && source->strict) {
+            /* Bytecode alone, and unreadable as this module: there is no
+               text to compile in its place, so the module fails, now and at
+               every later import of it. */
+            free(instance);
+            qjs_refuse_strict_source(context, source);
+            return NULL;
+        }
         if (JS_IsUndefined(compiled)) {
             compiled = JS_Eval(raw_context, (const char *)source->source,
                                source->source_length, source->name,
@@ -1126,7 +1162,8 @@ int qjs_context_complete_module(QjsContext *context, const char *name,
 int qjs_context_complete_module_code(QjsContext *context, const char *name,
                                      const char *url, const uint8_t *text,
                                      size_t length, const uint8_t *bytecode,
-                                     size_t bytecode_length, int capture);
+                                     size_t bytecode_length, int capture,
+                                     int strict);
 
 /* Loads one import's source through the host's synchronous loader and copies
    it into this realm.
@@ -1158,7 +1195,7 @@ static int qjs_require_module_source(QjsContext *context, const char *name) {
     status = qjs_context_complete_module_code(
         context, name, loaded.url, loaded.text, loaded.text_length,
         usable ? loaded.cached : NULL, usable ? loaded.cached_length : 0,
-        loaded.capture || (loaded.cached != NULL && !usable));
+        loaded.capture || (loaded.cached != NULL && !usable), 0);
     if (status != 0 && status != -5) {
         if (!JS_HasException(context->raw)) {
             JS_ThrowInternalError(context->raw,
@@ -2185,7 +2222,7 @@ static JSValue qjs_require_module(QjsContext *context, const char *requested,
        of an import of it: that source is this source, and it stands. */
     status = qjs_context_complete_module_code(
         context, requested, loaded->url, loaded->text, loaded->text_length,
-        bytecode, bytecode_length, capture);
+        bytecode, bytecode_length, capture, 0);
     if (status != 0 && status != -5) {
         if (!JS_HasException(raw)) {
             JS_ThrowInternalError(raw, "module '%s' could not be completed",
@@ -2483,7 +2520,8 @@ static int qjs_complete_module(QjsContext *context, const char *name,
                                const char *url, const uint8_t *text,
                                size_t length, const char *error,
                                const uint8_t *bytecode,
-                               size_t bytecode_length, int capture) {
+                               size_t bytecode_length, int capture,
+                               int strict) {
     QjsModuleSource *source = qjs_find_local_source(context, name);
     if (qjs_find_module_source(context->runtime, name) != NULL ||
         qjs_find_host_module_name(context->runtime, name) != NULL)
@@ -2527,16 +2565,25 @@ static int qjs_complete_module(QjsContext *context, const char *name,
         source->source_length = length;
         if (bytecode != NULL && bytecode_length > 0) {
             /* No bytecode is no loss: the text compiles, and keeps what it
-               compiled to, as bytecode that cannot be read would. */
+               compiled to, as bytecode that cannot be read would. A strict
+               source has no text to compile, so for it a failed copy is the
+               failure it is. */
             source->owned_bytecode = malloc(bytecode_length);
             if (source->owned_bytecode != NULL) {
                 memcpy(source->owned_bytecode, bytecode, bytecode_length);
                 source->owned_bytecode_length = bytecode_length;
+            } else if (strict) {
+                free(source->source);
+                free(source->url);
+                source->source = NULL;
+                source->url = NULL;
+                goto oom;
             } else {
                 capture = 1;
             }
         }
-        source->capture = capture != 0;
+        source->capture = capture != 0 && !strict;
+        source->strict = strict != 0;
     }
     return 0;
  oom:
@@ -2548,18 +2595,25 @@ int qjs_context_complete_module(QjsContext *context, const char *name,
                                 const char *url, const uint8_t *text,
                                 size_t length, const char *error) {
     return qjs_complete_module(context, name, url, text, length, error, NULL,
-                               0, 0);
+                               0, 0, 0);
 }
 
 /* `qjs_context_complete_module` with a successful answer and a choice of
    code: `bytecode` (copied; NULL for none) to read instead of compiling,
-   and `capture` to keep what a compile of the text writes. */
+   `capture` to keep what a compile of the text writes, and `strict` for
+   bytecode that is the whole of the module, which is read and never
+   replaced by a compile of the text (`qjs_refuse_strict_source`). */
 int qjs_context_complete_module_code(QjsContext *context, const char *name,
                                      const char *url, const uint8_t *text,
                                      size_t length, const uint8_t *bytecode,
-                                     size_t bytecode_length, int capture) {
+                                     size_t bytecode_length, int capture,
+                                     int strict) {
+    if (strict && (bytecode == NULL || bytecode_length == 0)) {
+        JS_ThrowTypeError(context->raw, "module '%s' has no bytecode", name);
+        return -1;
+    }
     return qjs_complete_module(context, name, url, text, length, NULL,
-                               bytecode, bytecode_length, capture);
+                               bytecode, bytecode_length, capture, strict);
 }
 
 void qjs_context_resume_module_loads(QjsContext *context) {

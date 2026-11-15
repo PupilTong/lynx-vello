@@ -684,11 +684,8 @@ fn an_initialize_posted_before_the_bts_starts_waits_for_bobcat_bts() {
 fn a_bts_reads_its_screen_and_native_modules_from_initialize() {
     let mut group = Group::new();
     let table = vec![
-        (
-            "Echo".to_owned(),
-            vec!["ping".to_owned(), "pong".to_owned()],
-        ),
-        ("Bare".to_owned(), Vec::new()),
+        crate::native_module::TableEntry::new("Echo", vec!["ping".to_owned(), "pong".to_owned()]),
+        crate::native_module::TableEntry::new("Bare", Vec::new()),
     ];
     let key = group.construct_background(0);
     let table = serde_json::to_string(&crate::native_module::encode_table(&table)).unwrap();

@@ -49,7 +49,7 @@ use url::Url;
 use crate::background::{WorkerKey, WorkerMessage};
 #[cfg(test)]
 use crate::main::tree::LynxDocument;
-use crate::native_module::ModuleReply;
+use crate::native_module::{ModuleReply, NativeModuleEsms};
 use crate::performance::PipelineRegistry;
 use crate::resource::{FetchProbe, LoadedSource, SourceCompletion, SourceRequest, StyleSheetProbe};
 use crate::view::{EngineEvent, EventRequester, LynxViewError, Viewport};
@@ -79,6 +79,10 @@ pub(crate) struct HostOutbox {
     /// its `lynx.performance` marks into: a worker's realm reaches it
     /// through this outbox, as it reaches the fetch probe.
     registry: Arc<PipelineRegistry>,
+    /// The view's native module ES modules, which a worker realm of the view
+    /// completes an import of `lynx:<name>` from. It rides here because a
+    /// worker's outbox is what travels to the worker thread.
+    native_esms: Arc<NativeModuleEsms>,
 }
 
 impl HostOutbox {
@@ -97,7 +101,19 @@ impl HostOutbox {
             probe,
             base,
             registry,
+            native_esms: Arc::default(),
         }
+    }
+
+    /// This outbox with the view's native module ES modules.
+    pub(crate) fn with_native_esms(mut self, native_esms: Arc<NativeModuleEsms>) -> Self {
+        self.native_esms = native_esms;
+        self
+    }
+
+    /// The view's native module ES modules.
+    pub(crate) fn native_esms(&self) -> &NativeModuleEsms {
+        &self.native_esms
     }
 
     /// The view's pipeline registry.
@@ -741,6 +757,9 @@ pub(crate) struct ViewOutbox {
     /// with every realm of the view, its workers' through
     /// [`HostOutbox::registry`].
     registry: Arc<PipelineRegistry>,
+    /// This view's native module ES modules, read by `create_lynx_view` and
+    /// handed to every [`HostOutbox`] the view makes, a worker's included.
+    native_esms: Arc<NativeModuleEsms>,
 }
 
 impl ViewOutbox {
@@ -767,7 +786,15 @@ impl ViewOutbox {
             style_sheet_probe,
             base,
             registry,
+            native_esms: Arc::default(),
         }
+    }
+
+    /// This outbox with the view's native module ES modules, which every
+    /// [`HostOutbox`] it makes carries.
+    pub(crate) fn with_native_esms(mut self, native_esms: Arc<NativeModuleEsms>) -> Self {
+        self.native_esms = native_esms;
+        self
     }
 
     /// This view's pipeline registry.
@@ -800,6 +827,7 @@ impl ViewOutbox {
             Arc::clone(&self.base),
             Arc::clone(&self.registry),
         )
+        .with_native_esms(Arc::clone(&self.native_esms))
     }
 
     /// Announces one notice, then wakes the thread that paints.

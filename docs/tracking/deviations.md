@@ -4304,6 +4304,16 @@ consequential choice about whether to follow the spec or the quirk.
   without a second reply path. That answer is the one command sent outside
   the seat's counting `CommandSender`, so a frame post's fence does not count
   it.
+- **`lynx:<name>`, a native module's ES module, is an engine extension** —
+  neither reference has it: native's and web-core's native modules are the
+  `NativeModules.<name>` object alone. Here an embedder's `NativeModule` may
+  also supply one ES module as bytecode (`NativeModule::esm`), which a worker
+  realm of the view imports as `lynx:<name>` and which the BTS can import
+  before its entry. It adds nothing to a Lynx API and changes nothing a card
+  that does not import a `lynx:` name can observe: `NativeModules` is built as
+  before, and the MTS realm, where the main runtime reserves the prefix, fails
+  such an import with a `ReferenceError`
+  (`crates/bobcat-core/docs/resource-protocol.md`).
 - **`lynx.reportError(error, {level: 'fatal'})` is reported and nothing more**
   — lynx-core's `reportError` maps `'fatal'` to `LynxErrorLevel.Fatal`
   (`lynx.ts`), and native's `App::ReportException` then sets the BTS app state

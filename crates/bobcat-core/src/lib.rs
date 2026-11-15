@@ -119,7 +119,9 @@ pub mod editing {
 pub use code_cache::{MIN_CACHED_SOURCE_BYTES, script_engine_id};
 pub use esm::{BTS_CHUNK_PREAMBLE, MTS_CHUNK_PREAMBLE};
 pub use main::tree::PageConfig;
-pub use native_module::{ModuleCall, ModuleCallback, NativeModule};
+pub use native_module::{
+    ModuleCall, ModuleCallback, NativeModule, NativeModuleEsm, compile_native_module_esm,
+};
 pub use paint::{Painter, PostedFrame};
 pub use style::{PreparsedDeclaration, PreparsedKeyframe, PreparsedRule, PreparsedStyleSheet};
 /// The engine's monotonic clock, which a picture's next change

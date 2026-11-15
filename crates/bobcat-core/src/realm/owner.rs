@@ -41,7 +41,10 @@
 //! future settles ([`load_child_module`], [`settle_child_future`]), what they
 //! left unhandled, and their release. [`module_answer`] is the one reading of
 //! a module request's answer, for those loads and for the entry a role
-//! completes itself.
+//! completes itself. A request for a native module's ES module, `lynx:<name>`,
+//! never reaches the host: [`load_native_esm`] completes it from the bytecode
+//! the view's outbox carries, or fails it naming the specifier, and a
+//! `ShadowRealm` child's is failed the same way.
 //!
 //! # The end
 //!
@@ -68,10 +71,13 @@ use std::cell::RefCell;
 use std::future::Future;
 use std::rc::Rc;
 
+use bytes::Bytes;
+
 use super::RealmCore;
 use super::child::{ChildKey, ChildRealms};
 use super::policy::{self, Row, Scene};
 use crate::clock::ClockInstant;
+use crate::esm::NATIVE_MODULE_ESM_PREFIX;
 use crate::future::HostFuture;
 use crate::jobs::{JobKind, JsThreadName};
 use crate::lifetime::{EndOnUnwind, Lifetime, Settles, run_job};
@@ -427,11 +433,31 @@ fn epilogue<O: RealmOwner>(owner: &Rc<O>, realm: &mut O::Realm, js: &mut ScriptR
         if owner.entry_name(realm).is_some_and(|entry| entry == url) {
             continue;
         }
+        // A native module's ES module is the view's, never the fetcher's:
+        // completed from the bytecode the view holds, or failed naming it.
+        if url.starts_with(NATIVE_MODULE_ESM_PREFIX) {
+            let bytecode = owner.host().native_esms().get(&url).cloned();
+            spawn(owner, load_native_esm(Rc::clone(owner), url, bytecode));
+            continue;
+        }
         let answer = owner.host().request(SourceRequest::Module(url.clone()));
         spawn(owner, load_module(Rc::clone(owner), url, answer));
     }
     let children = Rc::clone(&O::core(realm).children);
     for (child, url) in children.take_module_requests() {
+        // A `ShadowRealm` is not a worker realm of the view: its `lynx:`
+        // import fails, and is not fetched either.
+        if url.starts_with(NATIVE_MODULE_ESM_PREFIX) {
+            let refused = Err(format!(
+                "module '{url}': a native module's ES module loads only in a worker realm, \
+                 not in a ShadowRealm"
+            ));
+            spawn(
+                owner,
+                complete_child_module(Rc::clone(owner), child, url, refused),
+            );
+            continue;
+        }
         let answer = owner.host().request(SourceRequest::Module(url.clone()));
         spawn(
             owner,
@@ -531,6 +557,39 @@ async fn load_module<O: RealmOwner>(owner: Rc<O>, url: String, answer: SourceAns
     .await;
 }
 
+/// One import of a native module's ES module, `lynx:<name>`, that
+/// `owner`'s realm made: completed from `bytecode`, the bytes the view's
+/// module supplied, or, where the view has none under that name, failed with
+/// an error naming it. Nothing is asked of the host, and the answer is
+/// handed over in a job of its own, as [`load_module`]'s is.
+///
+/// What the completion returns is reported under [`Scene::Module`], as an
+/// import's is. Bytes that cannot be read as the module fail the import in
+/// the realm, where the code that made it can catch it.
+async fn load_native_esm<O: RealmOwner>(owner: Rc<O>, url: String, bytecode: Option<Bytes>) {
+    let completing = Rc::clone(&owner);
+    enter(&owner, JobKind::Module, move |realm, js| {
+        let engine = &O::core(realm).engine;
+        let completed = if let Some(bytecode) = &bytecode {
+            engine.complete_module_bytecode(js, &url, bytecode)
+        } else {
+            let name = &url[NATIVE_MODULE_ESM_PREFIX.len()..];
+            engine.complete_module(
+                js,
+                &url,
+                Err(&format!(
+                    "module '{url}': this view has no native module `{name}` that supplies an \
+                     ES module"
+                )),
+            )
+        };
+        if let Err(error) = completed {
+            policy::report(&completing, Scene::Module, error);
+        }
+    })
+    .await;
+}
+
 /// One module request a `ShadowRealm` child of `owner`'s realm made, shaped
 /// like [`load_module`] and completed in the child: an `import()` the child's
 /// code made, or a module of an `importValue`.
@@ -549,6 +608,18 @@ async fn load_child_module<O: RealmOwner>(
         .map_err(|error| error.to_string())
         .and_then(|answer| module_answer(&url, answer))
         .map_err(|reason| format!("module '{url}': {reason}"));
+    complete_child_module(owner, child, url, loaded).await;
+}
+
+/// Hands one module request of a `ShadowRealm` child its answer, in a job of
+/// `owner`'s: [`load_child_module`]'s second half, and the whole of a
+/// request answered without the host.
+async fn complete_child_module<O: RealmOwner>(
+    owner: Rc<O>,
+    child: ChildKey,
+    url: String,
+    loaded: Result<(String, String), String>,
+) {
     let completing = Rc::clone(&owner);
     enter(&owner, JobKind::Module, move |realm, js| {
         let loaded = loaded

@@ -48,6 +48,11 @@ its realm does not declare (an MTS realm importing `bobcat:worker`,
 (`bobcat:`, `bobcat-internal:`), so any other name under them — one no runtime
 registered and no realm declared — fails its `import` or `require` in the
 realm with a `ReferenceError` and is never sent to a fetcher.
+`build_main_runtime`, which `bobcat-main` builds its runtime with, reserves
+`lynx:` (`NATIVE_MODULE_ESM_PREFIX`) as well, the prefix of a native module's
+ES module, which only a worker realm loads; the worker runtime does not
+reserve it, and its driver answers a `lynx:` request from the view's
+bytecode instead of the fetcher (`docs/resource-protocol.md`).
 `bobcat-internal`, which has no colon, is registered on both runtimes, so an
 `import` of it always finds its source and never reaches a fetcher. The
 reserved prefixes do not cover it, though: a `require` of it in a realm that

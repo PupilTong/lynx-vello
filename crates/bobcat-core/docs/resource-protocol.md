@@ -104,7 +104,49 @@ An unknown module is `undefined` (web-core's answer, where native answers
 `null`; see `docs/tracking/deviations.md`), an undeclared method is
 `undefined` on both references, and a call naming a module this view lacks or
 a method its module did not declare is assembled and dropped, which releases
-its functions. No built-in module ships: `bridge`, `LynxUIMethodModule` and an
+its functions.
+
+**A native module may supply one ES module, `lynx:<name>`, as bytecode.**
+`NativeModule::esm` is a provided method whose default is `None`; a module
+that answers `Some(NativeModuleEsm { bytecode, import_before_entry })` hands
+the view bytes that `bobcat_core::compile_native_module_esm(name, source)`
+wrote: the source compiled as the ES module `lynx:<name>`, stripped of its
+text as the built-ins are, in the bridge's frame (the build's
+`bytecode_engine_id` and the payload length). No source text reaches the view.
+`create_lynx_view` reads `esm()` once, beside `name()` and `methods()`, checks
+each frame with `quickjs_rust_bridge::is_framed_bytecode`, and refuses one
+that is not this build's whole frame as
+`EngineError::InvalidNativeModuleEsm(name)` before anything is requested. The
+bytecode goes into one `NativeModuleEsms` table per view, an `Arc` the view's
+outbox hands to every `HostOutbox` it makes, so it travels with each worker
+the view's realms create, a frame card's BTS included. Scope is the view, not
+the runtime: nothing is registered with `Runtime::register_module_bytecode`,
+so two views of one group may supply different modules under one name. In a
+worker realm, an import of `lynx:<name>` (kept as written by the normalizer)
+becomes a module request like any other, and the worker driver's epilogue
+(`realm::owner`) answers it without the host: `load_native_esm` completes it
+in a job of the worker, from the view's bytes, through
+`ScriptEngine::complete_module_bytecode` — the bridge's
+`ModuleCode::Bytecode`, which reads the bytes and never compiles text in
+their place — or, for a name the view has no ES module for, fails it with a
+`TypeError` naming the specifier. A realm that never imports a module never
+copies its bytes. The module's `import.meta.url` is `lynx:<name>`, its imports
+of the engine's built-ins link (`callNativeModule` from
+`bobcat:native-modules` is how it calls its own module), and bytes inside a
+whole frame that cannot be read as the module `lynx:<name>` — not bytecode,
+cut inside, a module compiled under another name — fail every import of it
+with a `TypeError` naming it. The code cache takes no part. A `require` of a
+`lynx:` name throws in the realm (`require.rs`), unless an `import` has
+already loaded it there, and a worker realm's `ShadowRealm` child fails its
+import of one with an error naming it; neither reaches the fetcher. The main
+runtime reserves the prefix (`esm::build_main_runtime`), so an MTS realm and
+every `ShadowRealm` on it fail an import or a `require` of a `lynx:` name
+with a `ReferenceError` naming it. The module table carries a third field per
+module — empty for no ES module, `esm`, or `esm-before-entry` for
+`import_before_entry: true` — and the BTS imports each `esm-before-entry`
+module before its entry (`docs/workers.md`).
+
+No built-in module ships: `bridge`, `LynxUIMethodModule` and an
 intersection module are absent. Exposure is not a module here:
 `lynx.stopExposure`/`resumeExposure` are members of both `lynx` objects over
 the `switchExposure` host member, for the elements the calling card's realm
