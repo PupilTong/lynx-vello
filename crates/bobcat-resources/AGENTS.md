@@ -185,7 +185,10 @@ whose upload the rasterizer does not hold either draws nothing, is wanted
 tier as a refinement job — off the embedder's thread, under a decode permit —
 whose completion wakes the host, so the next adoption draws it with no commit.
 A restore that fails leaves the source with nothing to draw and is not
-retried. The browser's decode runs on the main thread's `Image` element over a
+retried. The store answers URL pictures only (`PictureKey::Url`): every
+generation it answers is zero, it has no `PictureKey::Id` picture and so no
+frame to take, and it hands the residency the URLs of the drawn set it is told
+(`FrameImages::retain`). The browser's decode runs on the main thread's `Image` element over a
 mailbox whose two sides only signal through `postMessage`
 (`crates/bobcat-wasm/js/image-decoder.ts` is the main thread's half); nothing
 waits on it. See `docs/picture-source-design.md`.

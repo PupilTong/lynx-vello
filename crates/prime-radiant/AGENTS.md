@@ -25,7 +25,7 @@ CSS pixels; the two coincide at a ratio of 1, which lynx-stack pins for
 determinism and every viewport here uses. Its `TestImages` is the in-memory
 `terminus::link::FrameImages` the image suites hand to a capture — the only image store in
 this workspace, and deliberately a test double: it fetches, decodes and evicts
-nothing. `pump_images` drives one round of the document-to-host image protocol
+nothing, and answers URL pictures only, at generation zero. `pump_images` drives one round of the document-to-host image protocol
 (every source `take_wanted_images` named and every document request
 `take_document_requests` queued, then the reports back through
 `apply_image_events`) and `render_with_images` loops that to quiescence.

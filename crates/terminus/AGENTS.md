@@ -194,7 +194,19 @@ Subsystems:
   the pixels are read on an upload miss alone. `render::sparse::BitmapLeases`
   is one owner's hold on uploads that does not depend on having drawn them
   recently, and the budget trim skips a leased upload as it skips a pinned
-  one. `render::blur`
+  one. `render::picture` is what an image draw names: a `PictureKey`, the
+  URL the page wrote or a process-unique `PictureId` one element owns
+  (`Document::set_picture`, with the element's natural size), and the
+  `PictureSlot` a producer on any thread publishes an `Id` picture's newest
+  frame into. `FrameImages` answers a generation per picture that changes
+  exactly when its pixels do, takes an `Id` picture's frame out of its slot
+  (`take_frame`), and names the platform frame type it would hand over
+  (`PlatformFrame`; the painter accepts `Infallible` only, as no writer for a
+  platform frame exists). The painter writes a taken frame into the picture's
+  own texture in the bitmap table (`BitmapLeases::write_picture`): one texture
+  and one texture id per picture, written in place, reallocated under the same
+  id when the size changes, never an atlas (`vello_gpu` 0.4's atlas holds
+  glyphs only). `render::blur`
   is the one exception: a `filter: blur()` bake is a partial replay of a
   committed frame's compose program, so it reads `CommittedFrame`'s filter side
   table, while still naming no node, style, layout or paint-order type. A
@@ -206,7 +218,13 @@ Subsystems:
   owner's `GesturePolicy` (`gesture.rs`), the scroll kinematics (`motion.rs`)
   and the drags, flings, bounce backs, glides and auto-scrolls run over its
   scroll intents (`inertia.rs`), the pixels an adopted frame draws
-  (`images.rs`) and the window target (`graphics.rs`). It composes each
+  (`images.rs`) and the window target (`graphics.rs`). Its compose key is
+  the commit, the scroll generation and the revision of what the commit's
+  image draws resolve to, and a `filter`/`backdrop-filter` bake keys on the
+  bitmaps its own range draws (`FilterGroup::pictures`), so a picture's new
+  frame or a restore recomposes with no commit and re-bakes only the bakes
+  that draw it; each owes one frame, and a picture's known next change is
+  reported (`Painter::next_picture_change`) rather than counted as animating. It composes each
   committed frame at its own offsets and posts them back
   (`Painter::drain_changed`); `bobcat-core`'s `Painter` facade is its link to
   one view.

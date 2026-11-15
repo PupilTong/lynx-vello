@@ -173,7 +173,7 @@ fn paint_raster_layer(
     sink.image(
         space,
         ImageDraw {
-            image: std::sync::Arc::clone(image),
+            image: crate::render::picture::PictureKey::Url(std::sync::Arc::clone(image)),
             transform: fragment.transform,
             anchor: grid.origin,
             extent: grid.tile,
@@ -312,7 +312,7 @@ pub(crate) fn paint_replaced_content(
     space: Option<u32>,
     style: &ComputedValues,
     fragment: &BoxFragment,
-    image: Arc<str>,
+    image: crate::render::picture::PictureKey,
     vector: Option<&VectorImage>,
     natural: NaturalSize,
 ) {

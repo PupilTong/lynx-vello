@@ -45,7 +45,7 @@ pub(super) fn capture(test: &str, fragment: &str, width: f32, height: f32) -> Im
 pub(super) fn capture_prebuilt_document<T: Sync>(
     test: &str,
     document: &mut terminus::link::Document<T>,
-    pixels: &impl terminus::link::FrameImages,
+    pixels: &impl terminus::link::FrameImages<PlatformFrame = std::convert::Infallible>,
 ) -> Image {
     let mut gpu = headless(test);
     capture_document(&mut gpu, document, Color::WHITE, pixels).expect("headless screenshot render")

@@ -30,6 +30,12 @@
 //! thread and wakes its host the way a finished load does; the painter asks
 //! again at its next adoption, and the next frame it composes draws it.
 //!
+//! A picture one element owns ([`PictureKey::Id`]) is asked about the same
+//! way, and answers a generation that changes exactly when its pixels do; its
+//! frames are not lent but taken out of the slot its producer publishes into
+//! ([`FrameImages::take_frame`], `render::picture`), and written into the
+//! picture's own texture.
+//!
 //! The document never learns of any of this. There is no way to report that
 //! an image stopped being resident or came back, so a document's image state
 //! can never regress from loaded back to pending, and its natural size,
@@ -112,6 +118,7 @@
 //! the registry makes, a host source still never regressing.
 
 use std::cell::{Cell, RefCell};
+use std::convert::Infallible;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -124,9 +131,11 @@ use vant::image::residency::{
     Decoded, Described, Refinement, Requested, Residency, ResidencyConfig, ViewKey,
 };
 
+use crate::clock::ClockInstant;
 use crate::paint::display_list::DisplayList;
 use crate::peniko::ImageData;
 use crate::render::gpu::SharedGpu;
+use crate::render::picture::{PictureId, PictureKey, TakenFrame};
 use crate::render::svg::{self, VectorDocument};
 use crate::tree::document::NodeId;
 
@@ -291,25 +300,50 @@ pub(crate) const fn renders_at(width: u32, height: u32) -> bool {
 
 pub use vant::image::{ImageDescriptor, ImageSizeHint};
 
-/// What a frame draws for one source ([`FrameImages::describe`]): the
-/// bitmap's descriptor, and its pixels when the store holds them.
+/// What a frame draws for one picture ([`FrameImages::describe`]): the
+/// bitmap's descriptor, its pixels when the store holds them, its
+/// generation, and when it will next change by itself.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FrameImage {
     /// The bitmap the frame draws. With `pixels`, it is theirs.
     pub descriptor: ImageDescriptor,
     /// `None` when the store does not hold the bitmap: a rasterizer that
     /// still holds an upload of it draws it from there, and one that does not
-    /// draws nothing and says the source is wanted ([`FrameImages::want`]).
+    /// draws nothing and says the picture is wanted ([`FrameImages::want`]).
+    /// Always `None` for an [`PictureKey::Id`] picture, whose frames are
+    /// taken ([`FrameImages::take_frame`]).
     pub pixels: Option<ImageData>,
+    /// A number that changes exactly when the picture's pixels do. A picture
+    /// whose pixels never change answers one constant; a store with no live
+    /// pictures answers zero for every one.
+    pub generation: u64,
+    /// The instant the generation will next change by itself, when the
+    /// picture knows it (an animated image does; a video does not). The
+    /// painter asks for a frame then ([`crate::painter::Painter::next_picture_change`]).
+    pub next_change: Option<ClockInstant>,
 }
 
 impl FrameImage {
-    /// A bitmap the store holds.
+    /// A bitmap the store holds, whose pixels never change.
     #[must_use]
     pub fn resident(image: ImageData) -> Self {
         Self {
             descriptor: ImageDescriptor::of(&image),
             pixels: Some(image),
+            generation: 0,
+            next_change: None,
+        }
+    }
+
+    /// A bitmap the store let go of, whose pixels never change: drawn from
+    /// the rasterizer's upload, or wanted.
+    #[must_use]
+    pub const fn released(descriptor: ImageDescriptor) -> Self {
+        Self {
+            descriptor,
+            pixels: None,
+            generation: 0,
+            next_change: None,
         }
     }
 }
@@ -320,35 +354,59 @@ impl FrameImage {
 /// per-commit resolved set is another; a test double is a third. This is the
 /// only image-shaped type the compose path knows.
 ///
+/// It answers for both kinds of picture ([`PictureKey`]): a URL the page
+/// wrote and a picture one element owns, whose frames a producer publishes
+/// into a slot ([`crate::render::picture::PictureSlot`]).
+///
 /// **No method may block.** Each is called on the painter's thread, and the
 /// painter never decodes and never waits for a decode or for I/O (see the
 /// module docs).
 pub trait FrameImages {
-    /// What the frame draws for `source`: the descriptor of the bitmap, and
-    /// its pixels when the store holds them, or `None` when there is nothing
-    /// to draw.
+    /// The embedder's own frame type, which a
+    /// [`PictureFrame::Platform`](crate::render::picture::PictureFrame::Platform)
+    /// carries. A store with none names [`std::convert::Infallible`]; the
+    /// painter accepts no other yet.
+    type PlatformFrame;
+
+    /// What the frame draws for `picture`: the descriptor of the bitmap, its
+    /// pixels when the store holds them, its generation and its next change,
+    /// or `None` when there is nothing to draw.
     ///
     /// A store that dropped the pixels answers their descriptor with
     /// `pixels: None`: a rasterizer that still holds an upload of that bitmap
     /// draws it from there, and one that does not draws nothing and says so
-    /// ([`Self::want`]).
+    /// ([`Self::want`]). An [`PictureKey::Id`] picture is always answered
+    /// without pixels: its newest frame is taken ([`Self::take_frame`]) when
+    /// the generation differs from the one the painter drew.
     ///
-    /// `source` is the raw string the page wrote, and it is only ever one the
-    /// host has already reported loaded. `hint` is how large the frame draws
-    /// it; a store that decodes on demand sizes its decode from it, and one
-    /// that already holds pixels may ignore it. The bitmap need not match
-    /// the hint or the intrinsic size that was reported with the load: a
-    /// reduced-scale decode composes correctly.
-    fn describe(&self, source: &str, hint: ImageSizeHint) -> Option<FrameImage>;
+    /// A URL picture is only ever one the host has already reported loaded.
+    /// `hint` is how large the frame draws it; a store that decodes on
+    /// demand sizes its decode from it, and one that already holds pixels may
+    /// ignore it. The bitmap need not match the hint or the intrinsic size
+    /// that was reported with the load: a reduced-scale decode composes
+    /// correctly.
+    fn describe(&self, picture: &PictureKey, hint: ImageSizeHint) -> Option<FrameImage>;
 
-    /// The frame draws `source` at `hint`, the store answered it without
-    /// pixels, and the rasterizer holds no upload of it either: the frame
-    /// draws nothing for it until the store holds its pixels again.
+    /// Takes `picture`'s newest frame out of its slot, if one is there that
+    /// has not been taken.
+    ///
+    /// The default answers `None`: a store with no [`PictureKey::Id`]
+    /// pictures, which is a complete policy rather than a decision left
+    /// unmade.
+    fn take_frame(&self, picture: PictureId) -> Option<TakenFrame<Self::PlatformFrame>> {
+        let _ = picture;
+        None
+    }
+
+    /// The frame draws `picture` at `hint`, the store answered it without
+    /// pixels, and the rasterizer holds no upload of it either (for an `Id`
+    /// picture: its slot held no frame to take): the frame draws nothing for
+    /// it until the store holds its pixels again.
     ///
     /// The store restores it off the calling thread and, once it holds the
     /// pixels, wakes its host the way a finished load does; [`Self::describe`]
     /// then answers them. A store that cannot restore it any more answers
-    /// `None` from [`Self::describe`] instead. Asked once per source per
+    /// `None` from [`Self::describe`] instead. Asked once per picture per
     /// resolve pass, and a store asked again while a restore is in flight
     /// starts nothing.
     ///
@@ -357,9 +415,13 @@ pub trait FrameImages {
     /// silent no-op inherited from the trait would leave a picture blank for
     /// good. A store that keeps every bitmap it answers is never asked, and
     /// writes `{}`.
-    fn want(&self, source: &str, hint: ImageSizeHint);
+    fn want(&self, picture: &PictureKey, hint: ImageSizeHint);
 
-    /// The sources the frame just resolved, deduplicated in paint order.
+    /// The pictures the frame draws, deduplicated in paint order: the
+    /// drawn set. A picture is drawn when the adopted commit draws it, which
+    /// the commit's walk has already culled to its encode window. A
+    /// producer of a picture that is not in it may stop producing; the
+    /// painter asks nothing of a picture that is not in it.
     ///
     /// Advisory: it informs residency and nothing else, and a store that
     /// ignores it is still correct. Called once per resolve pass, immediately
@@ -369,19 +431,20 @@ pub trait FrameImages {
     /// decide what its working set is, and a silent no-op inherited from the
     /// trait is the one answer that cannot be reviewed — writing `{}` says
     /// the same thing where someone can see it.
-    fn retain(&self, frame: &[Arc<str>]);
+    fn retain(&self, drawn: &[PictureKey]);
 
-    /// The rasterizer holds the upload of each of `sources` the frame last
+    /// The rasterizer holds the upload of each of `pictures` the frame last
     /// described draws, and will keep it while that frame is drawn:
     /// the store may drop their pixels. One of them is wanted again
-    /// ([`Self::want`]) only if the rasterizer loses an upload.
+    /// ([`Self::want`]) only if the rasterizer loses an upload. Only URL
+    /// pictures are named: an `Id` picture's frames are taken, not lent.
     ///
     /// Advisory, as [`Self::retain`] is. The default drops nothing — a store
     /// that keeps every bitmap it answers, which is a correct store — and is
     /// a default because it is a complete policy rather than a decision
     /// left unmade.
-    fn release(&self, sources: &[Arc<str>]) {
-        let _ = sources;
+    fn release(&self, pictures: &[PictureKey]) {
+        let _ = pictures;
     }
 }
 
@@ -397,33 +460,41 @@ pub struct NoImages;
 /// `Rc` rather than `Arc` because a resource system never leaves the painter's
 /// thread; an atomic count here would be paid on every clone and never used.
 impl<T: FrameImages + ?Sized> FrameImages for Rc<T> {
-    fn describe(&self, source: &str, hint: ImageSizeHint) -> Option<FrameImage> {
-        (**self).describe(source, hint)
+    type PlatformFrame = T::PlatformFrame;
+
+    fn describe(&self, picture: &PictureKey, hint: ImageSizeHint) -> Option<FrameImage> {
+        (**self).describe(picture, hint)
     }
 
-    fn want(&self, source: &str, hint: ImageSizeHint) {
-        (**self).want(source, hint);
+    fn take_frame(&self, picture: PictureId) -> Option<TakenFrame<Self::PlatformFrame>> {
+        (**self).take_frame(picture)
     }
 
-    fn retain(&self, frame: &[Arc<str>]) {
-        (**self).retain(frame);
+    fn want(&self, picture: &PictureKey, hint: ImageSizeHint) {
+        (**self).want(picture, hint);
     }
 
-    fn release(&self, sources: &[Arc<str>]) {
-        (**self).release(sources);
+    fn retain(&self, drawn: &[PictureKey]) {
+        (**self).retain(drawn);
+    }
+
+    fn release(&self, pictures: &[PictureKey]) {
+        (**self).release(pictures);
     }
 }
 
 impl FrameImages for NoImages {
-    fn describe(&self, _source: &str, _hint: ImageSizeHint) -> Option<FrameImage> {
+    type PlatformFrame = Infallible;
+
+    fn describe(&self, _picture: &PictureKey, _hint: ImageSizeHint) -> Option<FrameImage> {
         None
     }
 
     /// Nothing is ever answered, so nothing is ever wanted.
-    fn want(&self, _source: &str, _hint: ImageSizeHint) {}
+    fn want(&self, _picture: &PictureKey, _hint: ImageSizeHint) {}
 
     /// Nothing is held, so there is no working set to narrow.
-    fn retain(&self, _frame: &[Arc<str>]) {}
+    fn retain(&self, _drawn: &[PictureKey]) {}
 }
 
 /// Completed loads waiting for the painter to take its next turn.
@@ -1413,6 +1484,7 @@ mod tests {
         MAX_RENDERABLE_DIMENSION, NoImages, is_renderable,
     };
     use crate::render::image::FrameImages;
+    use crate::render::picture::PictureKey;
 
     fn loaded(source: &str, width: u32, height: u32) -> ImageEvent {
         ImageEvent::Loaded {
@@ -1765,7 +1837,10 @@ mod tests {
     fn the_empty_pixel_source_draws_nothing() {
         assert!(
             NoImages
-                .describe("app:///a.png", ImageSizeHint::UNBOUNDED)
+                .describe(
+                    &PictureKey::Url(Arc::from("app:///a.png")),
+                    ImageSizeHint::UNBOUNDED
+                )
                 .is_none()
         );
     }

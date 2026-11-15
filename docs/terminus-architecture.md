@@ -341,8 +341,8 @@ Replaced leaf content reads a closed `NaturalSize` value stored in lazily
 allocated node content; its internal update path automatically invalidates the
 affected cache path. Mutually exclusive literal text, natural size, and
 test-only leaf metadata reuse the node's single nullable content pointer.
-`Document::set_natural_size` and `Document::set_image_source` are the public
-replaced-content update seams (public because both halves arrive from above
+`Document::set_natural_size`, `Document::set_image_source` and
+`Document::set_picture` are the public replaced-content update seams (public because both halves arrive from above
 `terminus`, out of the embedder's image system, independently and in either order).
 The natural size always invalidates layout; a source invalidates only the scene
 *unless* it is the call that makes the element replaced, because being replaced
@@ -644,17 +644,32 @@ the fork's author grammar, so a `backdrop-filter` element inside a
 stop at it. Ruled, and recorded in `docs/tracking/deviations.md`.
 
 The image seam is the `FrameImages` trait in `crates/terminus/src/render/image.rs` —
-`describe(source, ImageSizeHint)`, `want(source, ImageSizeHint)`,
-`retain(frame)` and `release(sources)`, none of which may block — with
-`ImageReports`, `ImageInbox`, `ImageEvent` and the `NoImages` no-op store
-beside it. A source the store answers without pixels and the rasterizer holds
-no upload of draws nothing and is wanted; the store restores it off the
-painter's thread, and the painter's next adoption takes the pixels with no
-commit (the module docs and `painter/images.rs` say how). The document
+`describe(picture, ImageSizeHint)`, `take_frame(id)`,
+`want(picture, ImageSizeHint)`, `retain(drawn)` and `release(pictures)`, none
+of which may block — with `ImageReports`, `ImageInbox`, `ImageEvent` and the
+`NoImages` no-op store beside it, and an associated `PlatformFrame` type
+(`Infallible` for every store today; the painter accepts no other). An image
+draw names its picture by a `PictureKey` (`crates/terminus/src/render/picture.rs`):
+`Url`, the source the page wrote, shared by every draw of it, or `Id`, a
+process-unique `PictureId` one element owns (`Document::set_picture`, which
+also gives the element its natural size; the document holds the key and that
+size, never a frame). A describe answers the bitmap's descriptor, its pixels
+when the store holds them, a `generation` that changes exactly when its pixels
+do, and the instant it next changes by itself when it knows it. An `Id`
+picture's frames come from a `PictureSlot` its producer publishes into from
+any thread; the painter takes the newest one when the generation differs from
+the one it drew, writes it into the picture's own texture, and drops it. A
+picture the store answers without pixels and the rasterizer holds no upload of
+draws nothing and is wanted; the store restores it off the painter's thread,
+and the painter's next adoption takes the pixels with no commit (the module
+docs and `painter/images.rs` say how). What a commit's draws resolve to is a
+third term of the painter's compose key, and each `filter`/`backdrop-filter`
+bake keys on the bitmaps its own range draws, so a new frame or an arrival
+recomposes the target and re-bakes only the bakes that draw it. The document
 requests sources through `take_wanted_images`, receives answers through
-`apply_image_events`, retains no pixel and never learns of an eviction or a
-restore: the store is the consumer's, handed to `scene` and to the bake path
-per call.
+`apply_image_events`, retains no pixel and never learns of an eviction, a
+restore or a frame: the store is the consumer's, handed to `scene` and to the
+bake path per call.
 
 The private `painter`/`walker`/`paint`/`shape` modules turn the paint order
 into the retained display list (`paint::display_list`: shapes, paints,
@@ -696,10 +711,17 @@ uploads of the bitmaps its adopted commit draws (`render::sparse::BitmapLeases`)
 a leased upload is kept whether or not it was drawn recently, which is what lets
 the painter and its host drop the CPU pixels of a bitmap once its upload exists.
 An upload is keyed on the bitmap's descriptor alone — one upload serves every
-sampler a frame draws it with — and its pixels are read on a miss alone. Every
+sampler a frame draws it with — and its pixels are read on a miss alone. A
+picture an element owns is keyed on its `PictureId` instead: one texture under
+one texture id, rewritten in place by the painter when a frame of the same size
+is taken and replaced by one of the new size, under the same id, when it is
+not, and leased by the painter while its commit draws it. Every
 bitmap is a texture of its own, bound and sampled whole as an external texture,
 so a nearest-neighbour draw (`image-rendering: pixelated`) samples at the
-position computed. The render target, readback
+position computed. `vello_gpu` 0.4 has no image atlas any more (its atlas holds
+glyphs only), and samples at most one external texture per strip draw
+(`EXTERNAL_TEXTURE_SLOT_COUNT`): strips that alternate between two textures
+are split into runs, one draw call each. The render target, readback
 buffer, filter bakes and vector raster cache stay per target. `render::blur` is the third seam, and the
 one narrow exception to the floor's DOM-freedom: `FilterTextures::prepare`
 reads a `CommittedFrame`'s filter side table and calls the frame's own

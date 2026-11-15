@@ -38,7 +38,7 @@ use std::sync::{Arc, Mutex};
 use terminus::link::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
 use terminus::link::{
     Document, DocumentKind, FrameImage, FrameImages, ImageDescriptor, ImageEvent, ImageReports,
-    ImageSizeHint, VectorDocument,
+    ImageSizeHint, PictureKey, VectorDocument,
 };
 
 /// What this store answers for one source.
@@ -337,14 +337,29 @@ impl TestImages {
     }
 }
 
+/// The URLs among `pictures`: a test store holds no picture an element
+/// owns, so its logs name URLs.
+fn urls(pictures: &[PictureKey]) -> Vec<Arc<str>> {
+    pictures
+        .iter()
+        .filter_map(|picture| match picture {
+            PictureKey::Url(url) => Some(Arc::clone(url)),
+            PictureKey::Id(_) => None,
+        })
+        .collect()
+}
+
 impl FrameImages for TestImages {
+    type PlatformFrame = std::convert::Infallible;
+
     /// Answers a clone that shares the published `Blob`, so every describe
     /// of one source carries the same `Blob::id()` — the identity the
     /// rasterizer keys its bitmap uploads on. A default store records the
     /// hint and otherwise ignores it: it decodes nothing, so there is
     /// nothing to size. A [`TestImages::releasing`] one answers a released
     /// source's descriptor without its pixels, and logs the describe.
-    fn describe(&self, source: &str, hint: ImageSizeHint) -> Option<FrameImage> {
+    fn describe(&self, picture: &PictureKey, hint: ImageSizeHint) -> Option<FrameImage> {
+        let source = picture.url()?;
         if self.releasing.get() {
             self.described
                 .lock()
@@ -355,10 +370,7 @@ impl FrameImages for TestImages {
         }
         match self.entries().get(source)? {
             Entry::Ready(image) => Some(FrameImage::resident(image.clone())),
-            Entry::Released { descriptor, .. } => Some(FrameImage {
-                descriptor: *descriptor,
-                pixels: None,
-            }),
+            Entry::Released { descriptor, .. } => Some(FrameImage::released(*descriptor)),
             Entry::Pending | Entry::Svg(_) | Entry::Failed => None,
         }
     }
@@ -367,7 +379,10 @@ impl FrameImages for TestImages {
     /// blob, as a host's restore decodes again, and the next describe
     /// answers them. Logged with its hint. A source the store holds the
     /// pixels of, or never released, is not restored.
-    fn want(&self, source: &str, hint: ImageSizeHint) {
+    fn want(&self, picture: &PictureKey, hint: ImageSizeHint) {
+        let Some(source) = picture.url() else {
+            return;
+        };
         let mut entries = self.entries();
         let Some(entry) = entries.get_mut(source) else {
             return;
@@ -389,16 +404,17 @@ impl FrameImages for TestImages {
 
     /// Logs the release; a [`TestImages::releasing`] store drops the
     /// pixels too.
-    fn release(&self, sources: &[Arc<str>]) {
+    fn release(&self, pictures: &[PictureKey]) {
+        let sources = urls(pictures);
         self.released
             .lock()
             .expect("test image release log")
-            .push(sources.to_vec());
+            .push(sources.clone());
         if !self.releasing.get() {
             return;
         }
         let mut entries = self.entries();
-        for source in sources {
+        for source in &sources {
             if let Some(entry) = entries.get_mut(&**source)
                 && let Entry::Ready(image) = entry
             {
@@ -411,11 +427,11 @@ impl FrameImages for TestImages {
     }
 
     /// Records the working set a resolve pass reported.
-    fn retain(&self, frame: &[Arc<str>]) {
+    fn retain(&self, drawn: &[PictureKey]) {
         self.retained
             .lock()
             .expect("test image retain log")
-            .push(frame.to_vec());
+            .push(urls(drawn));
     }
 }
 
@@ -543,7 +559,7 @@ mod tests {
         assert!(
             terminus::link::FrameImages::describe(
                 &store,
-                "app:///icon.svg",
+                &terminus::link::PictureKey::Url(std::sync::Arc::from("app:///icon.svg")),
                 terminus::link::ImageSizeHint::UNBOUNDED
             )
             .is_none(),

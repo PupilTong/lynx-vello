@@ -54,18 +54,20 @@ globalThis.renderPage = function () {
 struct Entries;
 
 impl bobcat_core::FrameImages for Entries {
+    type PlatformFrame = std::convert::Infallible;
+
     fn describe(
         &self,
-        _source: &str,
+        _picture: &bobcat_core::PictureKey,
         _hint: bobcat_core::ImageSizeHint,
     ) -> Option<bobcat_core::FrameImage> {
         None
     }
 
     /// Nothing is ever answered, so nothing is ever wanted.
-    fn want(&self, _source: &str, _hint: bobcat_core::ImageSizeHint) {}
+    fn want(&self, _picture: &bobcat_core::PictureKey, _hint: bobcat_core::ImageSizeHint) {}
 
-    fn retain(&self, _frame: &[Arc<str>]) {}
+    fn retain(&self, _frame: &[bobcat_core::PictureKey]) {}
 }
 
 impl Entries {

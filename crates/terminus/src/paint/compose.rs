@@ -86,6 +86,7 @@ use crate::peniko::{BlendMode, Extend, Fill, ImageQuality, ImageSampler};
 use crate::render::image::{
     AspectAlign, AspectRatio, ImageSizeHint, MAX_RENDERABLE_DIMENSION, renders_at,
 };
+use crate::render::picture::PictureKey;
 use crate::visual::anchored::AnchoredSlot;
 use crate::visual::space::{self, SeamPass, Space, SpaceSamples};
 use crate::visual::{AnimationSamples, AnimationSlot};
@@ -163,9 +164,10 @@ macro_rules! with_captured {
 /// differ from silently drawing at the wrong size.
 #[derive(Debug)]
 pub(crate) struct ImageDraw {
-    /// The raw source string the page wrote — the registry's own key, so
-    /// every draw of one source in one frame shares one allocation.
-    pub(crate) image: Arc<str>,
+    /// The picture drawn: the raw source string the page wrote — the
+    /// registry's own key, so every draw of one source in one frame shares
+    /// one allocation — or a picture one element owns.
+    pub(crate) image: PictureKey,
     /// Item-local space to device px.
     pub(crate) transform: Affine,
     /// Where one copy of the source image starts, item-local.
@@ -509,6 +511,31 @@ fn encode_textured(
     }
 }
 
+/// What one pass over a filter entry's range found
+/// (`ComposeAssembly::scan_range`).
+struct RangeScan {
+    /// Some op rides another scroll, sticky or anchored node.
+    scrolls: bool,
+    /// A curve moves or fades some op relative to the entry.
+    animations: bool,
+    /// The image draws the range holds, as one covering range.
+    pictures: Range<u32>,
+    /// Layers left open at the range's end.
+    open_pushes: u32,
+}
+
+/// Grows `covering` to cover `more` as well; an empty range covers nothing.
+fn cover(covering: &mut Range<u32>, more: Range<u32>) {
+    if more.start >= more.end {
+        return;
+    }
+    *covering = if covering.start >= covering.end {
+        more
+    } else {
+        covering.start.min(more.start)..covering.end.max(more.end)
+    };
+}
+
 /// One walker-level layer-stack operation, with the space its shape rides.
 pub(crate) enum ComposeOp {
     /// Append `fragments[index]` mapped by `space`.
@@ -709,6 +736,14 @@ pub struct FilterGroup {
     /// moves the texture, not what is in it: the ancestors' clips it moves
     /// across are output clips, outside the range.
     pub(crate) inner_animations: bool,
+    /// The image draws whose pixels the bake holds: every
+    /// [`ComposeOp::Image`] in `ops`, and those of the backdrops drawn
+    /// there, as one range of draw indices covering them all (it may cover
+    /// draws between them too, which only makes the bake's picture reading
+    /// change more often than it has to). Empty when the bake draws no
+    /// image. A picture's frame or restore changes the bake through the
+    /// pictures these draws resolve to.
+    pub(crate) pictures: Range<u32>,
     /// The group this one nests inside, so the assembly needs no open-filter
     /// stack of its own.
     pub(crate) parent: Option<u32>,
@@ -726,6 +761,7 @@ impl FilterGroup {
             ops: 0..0,
             inner_chains: false,
             inner_animations: false,
+            pictures: 0..0,
             parent: None,
             backdrop: None,
         }
@@ -985,16 +1021,16 @@ impl ComposeAssembly {
             ops.end as usize <= self.program.len(),
             "a backdrop's range ends at or before the op that draws it",
         );
-        let (inner_chains, inner_animations, open_pushes) =
-            self.scan_range(&ops, entry.space, spaces, slots, anchored);
+        let scan = self.scan_range(&ops, entry.space, spaces, slots, anchored);
         let index =
             u32::try_from(self.filter_groups.len()).expect("a frame cannot hold 2^32 filters");
         entry.parent = self.open_filter;
         entry.ops = ops;
-        entry.inner_chains = inner_chains;
-        entry.inner_animations = inner_animations;
+        entry.inner_chains = scan.scrolls;
+        entry.inner_animations = scan.animations;
+        entry.pictures = scan.pictures;
         if let Some(backdrop) = entry.backdrop.as_mut() {
-            backdrop.open_pushes = open_pushes;
+            backdrop.open_pushes = scan.open_pushes;
         }
         self.filter_groups.push(entry);
         self.program.push(ComposeOp::PushBackdrop { index });
@@ -1003,11 +1039,12 @@ impl ComposeAssembly {
 
     /// One pass over an entry's range: whether it holds an op on another
     /// scroll or sticky node, whether it holds one a curve moves or fades
-    /// relative to the entry, and how many layers it leaves open at its end.
+    /// relative to the entry, which image draws it holds, and how many
+    /// layers it leaves open at its end.
     ///
-    /// A `PushBackdrop` op also carries its entry's two conditions: the
-    /// texture is re-baked on them, so a bake drawing it is stale after them
-    /// too. A backdrop's range lies before its op, so this is the only way
+    /// A `PushBackdrop` op also carries its entry's conditions and image
+    /// draws: the texture is re-baked on them, so a bake drawing it is stale
+    /// after them too. A backdrop's range lies before its op, so this is the only way
     /// an entry learns what a backdrop drawn inside it reads — the element's
     /// own blur group around its backdrop, and a child backdrop whose range
     /// opens with its root's. A nested `PushFilter` needs no such arm: its
@@ -1019,19 +1056,22 @@ impl ComposeAssembly {
         spaces: &[Space],
         slots: &[AnimationSlot],
         anchored: &[AnchoredSlot],
-    ) -> (bool, bool, u32) {
+    ) -> RangeScan {
         let mut scrolls = false;
         let mut animations = false;
+        let mut pictures = 0..0;
         let mut depth = 0_i64;
         for op in &self.program[ops.start as usize..ops.end as usize] {
             match op {
                 ComposeOp::Push { .. } => depth += 1,
                 ComposeOp::Pop => depth -= 1,
+                ComposeOp::Image { index, .. } => cover(&mut pictures, *index..*index + 1),
                 // Already scanned: a backdrop is recorded before its op.
                 ComposeOp::PushBackdrop { index } => {
                     let drawn = &self.filter_groups[*index as usize];
                     scrolls |= drawn.inner_chains;
                     animations |= drawn.inner_animations;
+                    cover(&mut pictures, drawn.pictures.clone());
                 }
                 _ => {}
             }
@@ -1046,11 +1086,12 @@ impl ComposeAssembly {
         // scope restarts clip chains), and no scope enclosing the range can
         // close inside it, so nothing in here pops a layer it did not push.
         debug_assert!(depth >= 0, "a range pops a layer it never pushed");
-        (
+        RangeScan {
             scrolls,
             animations,
-            u32::try_from(depth.max(0)).expect("a frame cannot nest 2^32 layers"),
-        )
+            pictures,
+            open_pushes: u32::try_from(depth.max(0)).expect("a frame cannot nest 2^32 layers"),
+        }
     }
 
     /// Closes the innermost open filter group, completing its op range and
@@ -1080,11 +1121,11 @@ impl ComposeAssembly {
             group.ops.end = end;
             (group.space, group.parent, group.ops.start)
         };
-        let (inner_chains, inner_animations, _) =
-            self.scan_range(&(start..end), own, spaces, slots, anchored);
+        let scan = self.scan_range(&(start..end), own, spaces, slots, anchored);
         let group = &mut self.filter_groups[index as usize];
-        group.inner_chains = inner_chains;
-        group.inner_animations = inner_animations;
+        group.inner_chains = scan.scrolls;
+        group.inner_animations = scan.animations;
+        group.pictures = scan.pictures;
         self.open_filter = parent;
         self.program.push(ComposeOp::PopFilter);
     }

@@ -726,6 +726,12 @@ pub(crate) struct FilterTextures {
     canvas: Option<Color>,
     /// Per entry, the readings its bake was taken at; see [`reading`].
     readings: Vec<(u64, u64)>,
+    /// Per entry, the picture reading its bake was taken at; see
+    /// [`picture_reading`]. An entry past the end reads zero.
+    pictures: Vec<u64>,
+    /// Per entry, this prepare's picture reading. A field so the pass
+    /// allocates nothing.
+    pictures_now: Vec<u64>,
     /// Per entry, whether this prepare bakes it. A field so the pass
     /// allocates nothing.
     due: Vec<bool>,
@@ -791,6 +797,9 @@ impl FilterTextures {
             animation_now,
             scroll_curves: frame.composes_scroll_curves(),
         };
+        self.pictures_now.clear();
+        self.pictures_now
+            .extend(groups.iter().map(|group| picture_reading(group, images)));
         if self.mark_due(commit, groups, readings) {
             if !self.due.contains(&true) {
                 return Ok(&self.images);
@@ -817,6 +826,7 @@ impl FilterTextures {
         self.readings.clear();
         self.readings
             .extend(groups.iter().map(|group| reading(group, readings)));
+        self.pictures.clone_from(&self.pictures_now);
         if groups.is_empty() {
             self.commit = Some(commit);
             return Ok(&self.images);
@@ -877,12 +887,15 @@ impl FilterTextures {
             && self.readings.len() == groups.len();
         self.due.clear();
         if cached {
-            self.due.extend(
-                groups
-                    .iter()
-                    .zip(&self.readings)
-                    .map(|(group, &taken)| reading(group, readings) != taken),
-            );
+            let picture =
+                |pictures: &[u64], index: usize| pictures.get(index).copied().unwrap_or(0);
+            self.due
+                .extend(groups.iter().zip(&self.readings).enumerate().map(
+                    |(index, (group, &taken))| {
+                        reading(group, readings) != taken
+                            || picture(&self.pictures_now, index) != picture(&self.pictures, index)
+                    },
+                ));
         } else {
             self.due.resize(groups.len(), true);
         }
@@ -1043,6 +1056,35 @@ fn reading(group: &crate::paint::compose::FilterGroup, readings: Readings) -> (u
     (generation, instant)
 }
 
+/// The picture reading one entry's bake depends on: which bitmap each image
+/// draw in its range resolves to — the picture whose texture it samples,
+/// and the frame or upload it names — folded into one number, or zero for
+/// an entry that draws no image.
+///
+/// A picture's new frame, a wanted picture arriving and a restore are each a
+/// new bitmap and so a new reading, which re-bakes the entries that draw it
+/// and no other. A frame that is the bitmap already drawn re-bakes nothing:
+/// its pixels are the same.
+fn picture_reading(group: &crate::paint::compose::FilterGroup, images: &[Option<ImageRef>]) -> u64 {
+    use std::hash::{Hash as _, Hasher as _};
+    let range = group.pictures.start as usize..group.pictures.end as usize;
+    let Some(drawn) = images.get(range) else {
+        return 0;
+    };
+    if drawn.is_empty() {
+        return 0;
+    }
+    let mut hasher = rustc_hash::FxHasher::default();
+    for image in drawn {
+        image
+            .as_ref()
+            .map(|image| (image.picture, image.descriptor))
+            .hash(&mut hasher);
+    }
+    // Never zero, which is what an entry with no image reads.
+    hasher.finish() | 1
+}
+
 /// Records one group's whole pass chain against its bank.
 fn run_chain(passes: &mut Passes<'_>, bank: &Bank, plan: &Decimation) {
     // A colour-only `backdrop-filter` bakes at σ = 0: there is nothing to
@@ -1155,6 +1197,7 @@ mod tests {
         DECIMATE_ABOVE, FilterTextures, MAX_FILTER_DIMENSION, MAX_LEVELS, MAX_TAPS, Params,
         Readings, decimate, kernel, level_size, reading,
     };
+    use crate::render::image::ImageDescriptor;
 
     /// The readings of a frame composing no scroll-timeline curve.
     const fn at(scroll_generation: u64, animation_now: Option<f64>) -> Readings {
@@ -1561,5 +1604,56 @@ mod tests {
             "taps",
         );
         assert!((at(36) - 1.0).abs() < 1e-7, "the centre tap's weight");
+    }
+
+    /// An entry's picture reading moves when a draw in its range resolves
+    /// to another bitmap, and only then: a draw outside its range, or the
+    /// same bitmap drawn again from its upload, moves nothing; an entry with
+    /// no draw reads zero whatever the table holds.
+    #[test]
+    fn a_bake_reads_only_the_pictures_its_range_draws() {
+        use crate::paint::compose::FilterGroup;
+        use crate::paint::display_list::ImageRef;
+        use crate::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
+        use crate::render::picture::PictureId;
+
+        let image = |texel: u8| ImageData {
+            data: Blob::new(std::sync::Arc::new(vec![texel; 4])),
+            format: ImageFormat::Rgba8,
+            alpha_type: ImageAlphaType::Alpha,
+            width: 1,
+            height: 1,
+        };
+        let (first, second, third) = (image(1), image(2), image(3));
+        let mut group = FilterGroup::new(1.0, crate::kurbo::Rect::new(0.0, 0.0, 4.0, 4.0), None);
+        group.pictures = 1..2;
+        let empty = FilterGroup::new(1.0, crate::kurbo::Rect::new(0.0, 0.0, 4.0, 4.0), None);
+        let table = [Some(ImageRef::lent(&first)), Some(ImageRef::lent(&second))];
+        let taken = super::picture_reading(&group, &table);
+        assert_ne!(taken, 0);
+        assert_eq!(super::picture_reading(&empty, &table), 0);
+
+        let outside = [Some(ImageRef::lent(&third)), Some(ImageRef::lent(&second))];
+        assert_eq!(super::picture_reading(&group, &outside), taken);
+        let uploaded = [None, Some(ImageRef::uploaded(ImageDescriptor::of(&second)))];
+        assert_eq!(super::picture_reading(&group, &uploaded), taken);
+
+        let replaced = [Some(ImageRef::lent(&first)), Some(ImageRef::lent(&third))];
+        assert_ne!(super::picture_reading(&group, &replaced), taken);
+        let missing = [Some(ImageRef::lent(&first)), None];
+        assert_ne!(super::picture_reading(&group, &missing), taken);
+
+        let picture = PictureId::new();
+        let written = |image: &ImageData| {
+            [
+                None,
+                Some(ImageRef::written(picture, ImageDescriptor::of(image))),
+            ]
+        };
+        assert_ne!(
+            super::picture_reading(&group, &written(&second)),
+            super::picture_reading(&group, &written(&third)),
+            "a picture's new frame is a new reading"
+        );
     }
 }

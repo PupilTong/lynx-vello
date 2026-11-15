@@ -45,19 +45,21 @@ impl ThreadedFetcher {
 }
 
 impl bobcat_core::FrameImages for ThreadedFetcher {
+    type PlatformFrame = std::convert::Infallible;
+
     fn describe(
         &self,
-        source: &str,
+        picture: &bobcat_core::PictureKey,
         hint: bobcat_core::ImageSizeHint,
     ) -> Option<bobcat_core::FrameImage> {
-        self.base.describe(source, hint)
+        self.base.describe(picture, hint)
     }
 
-    fn want(&self, source: &str, hint: bobcat_core::ImageSizeHint) {
-        self.base.want(source, hint);
+    fn want(&self, picture: &bobcat_core::PictureKey, hint: bobcat_core::ImageSizeHint) {
+        self.base.want(picture, hint);
     }
 
-    fn retain(&self, frame: &[Arc<str>]) {
+    fn retain(&self, frame: &[bobcat_core::PictureKey]) {
         self.base.retain(frame);
     }
 }
@@ -159,19 +161,21 @@ struct PendingFetcher {
 }
 
 impl bobcat_core::FrameImages for PendingFetcher {
+    type PlatformFrame = std::convert::Infallible;
+
     fn describe(
         &self,
-        source: &str,
+        picture: &bobcat_core::PictureKey,
         hint: bobcat_core::ImageSizeHint,
     ) -> Option<bobcat_core::FrameImage> {
-        self.base.describe(source, hint)
+        self.base.describe(picture, hint)
     }
 
-    fn want(&self, source: &str, hint: bobcat_core::ImageSizeHint) {
-        self.base.want(source, hint);
+    fn want(&self, picture: &bobcat_core::PictureKey, hint: bobcat_core::ImageSizeHint) {
+        self.base.want(picture, hint);
     }
 
-    fn retain(&self, frame: &[Arc<str>]) {
+    fn retain(&self, frame: &[bobcat_core::PictureKey]) {
         self.base.retain(frame);
     }
 }
@@ -652,19 +656,21 @@ struct TwoScriptFetcher {
 }
 
 impl bobcat_core::FrameImages for TwoScriptFetcher {
+    type PlatformFrame = std::convert::Infallible;
+
     fn describe(
         &self,
-        source: &str,
+        picture: &bobcat_core::PictureKey,
         hint: bobcat_core::ImageSizeHint,
     ) -> Option<bobcat_core::FrameImage> {
-        self.base.describe(source, hint)
+        self.base.describe(picture, hint)
     }
 
-    fn want(&self, source: &str, hint: bobcat_core::ImageSizeHint) {
-        self.base.want(source, hint);
+    fn want(&self, picture: &bobcat_core::PictureKey, hint: bobcat_core::ImageSizeHint) {
+        self.base.want(picture, hint);
     }
 
-    fn retain(&self, frame: &[Arc<str>]) {
+    fn retain(&self, frame: &[bobcat_core::PictureKey]) {
         self.base.retain(frame);
     }
 }

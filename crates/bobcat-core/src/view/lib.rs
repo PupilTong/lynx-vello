@@ -1022,7 +1022,8 @@ impl LynxGroup {
                 frame_demand: RefCell::new(crate::link::FrameDemand::new(Arc::clone(&registry))),
                 commands: crate::link::CommandSender::new(commands),
                 metrics,
-                images: Rc::clone(&fetcher) as Rc<dyn FrameImages>,
+                images: Rc::clone(&fetcher)
+                    as Rc<dyn FrameImages<PlatformFrame = std::convert::Infallible>>,
                 scroll,
                 registry,
             }),

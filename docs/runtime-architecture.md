@@ -1990,8 +1990,20 @@ wanted (`FrameImages::want`), once; the store restores it on its own executor
 and wakes the host as a finished load does. Every adoption — every
 `poll_link`, which every painter entry point runs first — describes the wanted
 sources again, and one whose pixels have arrived recomposes the frame and
-re-bakes its `filter`s; no commit is involved, and the document never learns
-of the eviction or the restore. A capture is refused while a drawn picture is
+re-bakes the `filter`s that draw it; no commit is involved, and the document
+never learns of the eviction or the restore. The same adoption serves a
+picture an element owns (`PictureKey::Id`, put on the element with
+`Document::set_picture`): a producer on any thread publishes its frames into a
+`PictureSlot` and wakes the host, and the painter, which describes such a
+picture at every adoption, takes the newest frame when its generation moved,
+writes it into the picture's one texture in place and owes one frame. A
+picture that names the instant it next changes reports it through
+`Painter::next_picture_change` for a host's timer, rather than keeping the
+display link running; no host arms that timer yet, and no store in the
+workspace has such a picture. The drawn set the store is told
+(`FrameImages::retain`) is the adopted commit's pictures, which the walk
+culled to the encode window, so a producer whose picture is not in it may
+stop. A capture is refused while a drawn picture is
 wanted and unanswered (`Painter::awaits_pictures`); the hosts that capture
 take their turns until it is not, under a deadline of their own.
 A commit whose bitmaps cannot be described in the same step is not adopted,
