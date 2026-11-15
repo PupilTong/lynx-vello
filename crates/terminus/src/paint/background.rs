@@ -19,7 +19,7 @@
 //!   [`VectorDraw`](crate::paint::compose::VectorDraw) — the image's scene, the tile, and the
 //!   tile's share of the clip shape — which the painter's raster cache
 //!   ([`crate::render::vector_textures`]) bakes at the device size and draws as a texture. The
-//!   scene is never appended to the frame, and the painter never reads the image through
+//!   scene is never appended to the frame, and the painter never asks for the image through
 //!   `FrameImages`.
 //! - Repeat via `peniko::Extend::Repeat` on the image sampler where the tile grid is uniform;
 //!   gradients restart per tile, so when more than one tile is visible they are drawn as an

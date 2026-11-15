@@ -114,15 +114,13 @@ package's `dist/` beside the facade, which connects it to the Render Worker over
 main thread turns them into a Blob URL, decodes and resizes them through a 2D
 canvas, and copies the RGBA pixels straight into a buffer the Render Worker
 allocated in the shared Wasm memory, where each decode job has a small
-mailbox of eight `Int32` words. An ordinary load completes on the event loop
-and wakes the page loop
-through the engine signal; a restore after eviction is the one call that
-blocks the Render Worker, with `Atomics.wait` on that job mailbox, because a
-read after a reported load must not miss. That read happens where the painter
-adopts a commit, which every painter entry point runs before the drawing path
-acquires a swap-chain image, so a restore cannot stall the chain. The main thread never waits, which is
-what keeps the two from deadlocking, and its only cost per image is the pixel
-read-back. The resource system's diagnostics — an image that failed, a missing
+mailbox of eight `Int32` words. Every decode — a load, a refinement, and the
+restore of an evicted image a frame wants again — is a local task on the
+Render Worker that completes on its event loop, driven by the main thread's
+echoes over the port, and wakes the page loop through the engine signal.
+Neither side ever waits on the mailbox: the painter draws nothing for a
+picture whose pixels are not there yet and draws it in the frame after they
+arrive. The main thread's only cost per image is the pixel read-back. The resource system's diagnostics — an image that failed, a missing
 decoder — reach `console.warn`.
 
 SVG documents are the exception: the browser does not decode them through

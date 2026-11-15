@@ -1,38 +1,32 @@
 //! Browser: the main thread's `Image` element, reached over a `MessagePort`,
-//! with a shared-memory mailbox so a read that must not miss can wait for it.
+//! with a mailbox in shared memory the decoded pixels are written through.
 //!
 //! The browser's decoder is `HTMLImageElement`, which only the main thread
-//! has, and it is asynchronous — which a load's first decode does not mind.
-//! A restore does: after an eviction, `FrameImages::read` has to hand back
-//! pixels inside the call. So the Render Worker fetches the bytes and hands
-//! them to the main thread, which decodes them through a Blob URL and never
-//! blocks, and every job has a mailbox in Wasm memory — a few `i32` words
-//! the two sides read with `Atomics`. The main thread writes the decoded
-//! size and signals; this side allocates the pixel buffer in its own heap
-//! and signals back; the main thread copies the pixels straight into that
-//! buffer and signals once more. An asynchronous load waits for those
-//! signals through `postMessage` echoes on the event loop; a restore waits
-//! on them with `Atomics.wait`, which a dedicated Worker may do and a main
-//! thread may not — which is why the main thread is the side that never
-//! waits. Its half of the protocol is `js/image-decoder.ts`.
+//! has, and it is asynchronous, as every decode in the engine is: a load's
+//! first decode, a refinement and a wanted source's restore all run in a
+//! local task on the Render Worker and wait on its event loop. So the Render
+//! Worker fetches the bytes and hands them to the main thread, which decodes
+//! them through a Blob URL, and every job has a mailbox in Wasm memory — a
+//! few `i32` words the two sides read with `Atomics`. The main thread writes
+//! the decoded size and echoes a message; this side allocates the pixel
+//! buffer in its own heap and posts where it is; the main thread copies the
+//! pixels straight into that buffer and echoes once more. Neither side ever
+//! waits on the mailbox. Its other half is `js/image-decoder.ts`.
 
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicI32, Ordering, fence};
-use std::time::Duration;
 
-use js_sys::{Array, Int32Array, Object, Reflect, Uint8Array};
+use js_sys::{Array, Object, Reflect, Uint8Array};
 use rustc_hash::FxHashMap;
 use vant::image::{Bitmap, DecodeError};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use web_sys::{MessageEvent, MessagePort};
 
-const STATE_DECODING: i32 = 0;
 const STATE_DIMENSIONS: i32 = 1;
 const STATE_BUFFER: i32 = 2;
 const STATE_DONE: i32 = 3;
-const STATE_FAILED: i32 = -1;
 
 const WORD_STATE: usize = 0;
 const WORD_WIDTH: usize = 1;
@@ -42,13 +36,6 @@ const WORD_SOURCE_HEIGHT: usize = 4;
 const WORD_POINTER: usize = 5;
 const WORD_LENGTH: usize = 6;
 const WORDS: usize = 8;
-/// The mailbox's word count and state index as the JS typed-array API
-/// wants them.
-const MAILBOX_WORDS: u32 = 8;
-const STATE_INDEX: u32 = 0;
-
-/// How long a blocking restore waits before giving the frame up.
-const RESTORE_TIMEOUT: Duration = Duration::from_secs(10);
 
 type Mailbox = Box<[AtomicI32; WORDS]>;
 
@@ -57,14 +44,13 @@ struct Job {
     /// The pixel buffer, allocated once the size is known; the main thread
     /// writes into it directly.
     buffer: Option<Vec<u8>>,
-    /// Where an asynchronous decode's result goes.
-    reply: Option<tokio::sync::oneshot::Sender<Result<Bitmap, DecodeError>>>,
+    /// Where the decode's result goes.
+    reply: tokio::sync::oneshot::Sender<Result<Bitmap, DecodeError>>,
 }
 
 /// The main thread's decoder and the jobs in flight on it.
 pub(crate) struct ImageDecoder {
     port: MessagePort,
-    memory: js_sys::WebAssembly::Memory,
     jobs: RefCell<FxHashMap<u32, Job>>,
     next_id: Cell<u32>,
     _on_message: Closure<dyn FnMut(MessageEvent)>,
@@ -105,7 +91,6 @@ impl ImageDecoder {
             port.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
             Self {
                 port,
-                memory,
                 jobs: RefCell::new(FxHashMap::default()),
                 next_id: Cell::new(1),
                 _on_message: on_message,
@@ -121,57 +106,12 @@ impl ImageDecoder {
         max: (u32, u32),
     ) -> Result<Bitmap, DecodeError> {
         let (sender, receiver) = tokio::sync::oneshot::channel();
-        self.start(bytes, media_type, max, Some(sender))?;
+        self.start(bytes, media_type, max, sender)?;
         receiver.await.unwrap_or_else(|_| {
             Err(DecodeError::Unavailable(
                 "the image decoder went away before answering".to_owned(),
             ))
         })
-    }
-
-    /// Decodes while blocking this Worker on the mailbox, for a restore.
-    pub(crate) fn decode_blocking(
-        &self,
-        bytes: &[u8],
-        media_type: &str,
-        max: (u32, u32),
-    ) -> Result<Bitmap, DecodeError> {
-        let id = self.start(bytes, media_type, max, None)?;
-        let view = self.mailbox_view(id)?;
-        let deadline = web_time::Instant::now() + RESTORE_TIMEOUT;
-        let outcome = (|| {
-            let state = wait_until(&view, deadline, |state| state != STATE_DECODING)?;
-            if state == STATE_FAILED {
-                return Err(DecodeError::Malformed(
-                    "the main thread could not decode the image".to_owned(),
-                ));
-            }
-            self.provide_buffer(id)?;
-            let state = wait_until(&view, deadline, |state| {
-                state == STATE_DONE || state == STATE_FAILED
-            })?;
-            if state == STATE_FAILED {
-                return Err(DecodeError::Malformed(
-                    "the main thread could not deliver the pixels".to_owned(),
-                ));
-            }
-            Ok(())
-        })();
-        match outcome {
-            Ok(()) => self
-                .finish(id)
-                .ok_or_else(|| DecodeError::Unavailable("the decode job vanished".to_owned())),
-            Err(error) => {
-                // On a timeout the main thread may still write into the
-                // mailbox and buffer later, so the job — and its allocations
-                // — must stay until an echo retires it.
-                if !matches!(&error, DecodeError::Unavailable(message) if message.contains("timed out"))
-                {
-                    self.jobs.borrow_mut().remove(&id);
-                }
-                Err(error)
-            }
-        }
     }
 
     /// Posts a job: the bytes, moved rather than copied, and the size to
@@ -183,8 +123,8 @@ impl ImageDecoder {
         bytes: &[u8],
         media_type: &str,
         max: (u32, u32),
-        reply: Option<tokio::sync::oneshot::Sender<Result<Bitmap, DecodeError>>>,
-    ) -> Result<u32, DecodeError> {
+        reply: tokio::sync::oneshot::Sender<Result<Bitmap, DecodeError>>,
+    ) -> Result<(), DecodeError> {
         let id = self.next_id.get();
         self.next_id.set(id.wrapping_add(1).max(1));
         let mailbox: Mailbox = Box::new(std::array::from_fn(|_| AtomicI32::new(0)));
@@ -215,7 +155,7 @@ impl ImageDecoder {
             self.jobs.borrow_mut().remove(&id);
             return Err(DecodeError::Unavailable(describe(&error)));
         }
-        Ok(id)
+        Ok(())
     }
 
     /// The main thread's echoes: `dims`, `done`, `error`.
@@ -238,18 +178,13 @@ impl ImageDecoder {
                     .borrow()
                     .get(&id)
                     .map(|job| job.mailbox[WORD_STATE].load(Ordering::SeqCst));
-                // A blocking restore may already have provided the buffer.
                 if state == Some(STATE_DIMENSIONS)
                     && let Err(error) = self.provide_buffer(id)
                 {
                     self.fail(id, error);
                 }
             }
-            "done" => {
-                if let Some((bitmap, reply)) = self.finish(id).zip(self.take_reply(id)) {
-                    let _ = reply.send(Ok(bitmap));
-                }
-            }
+            "done" => self.finish(id),
             "error" => {
                 let message = Reflect::get(data, &"message".into())
                     .ok()
@@ -298,97 +233,40 @@ impl ImageDecoder {
             .map_err(|error| DecodeError::Unavailable(describe(&error)))
     }
 
-    /// Takes a finished job's pixels as a bitmap.
-    fn finish(&self, id: u32) -> Option<Bitmap> {
-        let mut jobs = self.jobs.borrow_mut();
-        let job = jobs.get_mut(&id)?;
-        if job.mailbox[WORD_STATE].load(Ordering::SeqCst) != STATE_DONE {
-            return None;
-        }
-        // The main thread wrote the buffer before it stored `DONE`; the
-        // acquire above orders those writes before the reads below.
-        fence(Ordering::SeqCst);
-        let buffer = job.buffer.take()?;
-        let word =
-            |index: usize| u32::try_from(job.mailbox[index].load(Ordering::SeqCst)).unwrap_or(0);
-        let bitmap = Bitmap {
-            width: word(WORD_WIDTH),
-            height: word(WORD_HEIGHT),
-            source_width: word(WORD_SOURCE_WIDTH),
-            source_height: word(WORD_SOURCE_HEIGHT),
-            premultiplied: false,
-            rgba: buffer,
+    /// Answers a finished job with its pixels, as a bitmap.
+    fn finish(&self, id: u32) {
+        let Some(mut job) = self.jobs.borrow_mut().remove(&id) else {
+            return;
         };
-        // The reply, if any, is taken by the caller; the job itself retires.
-        let reply = job.reply.take();
-        jobs.remove(&id);
-        if let Some(reply) = reply {
-            jobs.insert(
-                id,
-                Job {
-                    mailbox: Box::new(std::array::from_fn(|_| AtomicI32::new(STATE_DONE))),
-                    buffer: None,
-                    reply: Some(reply),
-                },
-            );
-        }
-        Some(bitmap)
-    }
-
-    fn take_reply(
-        &self,
-        id: u32,
-    ) -> Option<tokio::sync::oneshot::Sender<Result<Bitmap, DecodeError>>> {
-        self.jobs.borrow_mut().remove(&id).and_then(|job| job.reply)
+        let outcome = if job.mailbox[WORD_STATE].load(Ordering::SeqCst) == STATE_DONE
+            && let Some(buffer) = job.buffer.take()
+        {
+            // The main thread wrote the buffer before it stored `DONE`; the
+            // acquire above orders those writes before the reads below.
+            fence(Ordering::SeqCst);
+            let word = |index: usize| {
+                u32::try_from(job.mailbox[index].load(Ordering::SeqCst)).unwrap_or(0)
+            };
+            Ok(Bitmap {
+                width: word(WORD_WIDTH),
+                height: word(WORD_HEIGHT),
+                source_width: word(WORD_SOURCE_WIDTH),
+                source_height: word(WORD_SOURCE_HEIGHT),
+                premultiplied: false,
+                rgba: buffer,
+            })
+        } else {
+            Err(DecodeError::Unavailable(
+                "the main thread finished a job it had not been handed the buffer of".to_owned(),
+            ))
+        };
+        let _ = job.reply.send(outcome);
     }
 
     fn fail(&self, id: u32, error: DecodeError) {
-        if let Some(job) = self.jobs.borrow_mut().remove(&id)
-            && let Some(reply) = job.reply
-        {
-            let _ = reply.send(Err(error));
+        if let Some(job) = self.jobs.borrow_mut().remove(&id) {
+            let _ = job.reply.send(Err(error));
         }
-    }
-
-    fn mailbox_view(&self, id: u32) -> Result<Int32Array, DecodeError> {
-        let jobs = self.jobs.borrow();
-        let job = jobs
-            .get(&id)
-            .ok_or_else(|| DecodeError::Unavailable("the decode job vanished".to_owned()))?;
-        let address = address_word(job.mailbox.as_ptr().addr())?.cast_unsigned();
-        Ok(Int32Array::new_with_byte_offset_and_length(
-            &self.memory.buffer(),
-            address,
-            MAILBOX_WORDS,
-        ))
-    }
-}
-
-/// Blocks on the mailbox's state word until `done` holds for it.
-fn wait_until(
-    view: &Int32Array,
-    deadline: web_time::Instant,
-    done: impl Fn(i32) -> bool,
-) -> Result<i32, DecodeError> {
-    loop {
-        let state = js_sys::Atomics::load(view, STATE_INDEX)
-            .map_err(|error| DecodeError::Unavailable(describe(&error)))?;
-        if done(state) {
-            return Ok(state);
-        }
-        let remaining = deadline.saturating_duration_since(web_time::Instant::now());
-        if remaining.is_zero() {
-            return Err(DecodeError::Unavailable(
-                "the image decoder timed out".to_owned(),
-            ));
-        }
-        js_sys::Atomics::wait_with_timeout(
-            view,
-            STATE_INDEX,
-            state,
-            remaining.as_secs_f64() * 1000.0,
-        )
-        .map_err(|error| DecodeError::Unavailable(describe(&error)))?;
     }
 }
 

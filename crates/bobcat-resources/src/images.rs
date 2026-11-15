@@ -2,11 +2,11 @@
 //! parse, and the completions they feed back.
 //!
 //! What is known about every source, who waits for it, the decoded-bitmap
-//! tier and its pins, and when a read hits, refines or must restore are not
-//! decided here: they are [`vant::image::residency::Residency`]'s, held as
-//! the engine's [`ImageResidency`], which also sends every report. This
-//! module asks it what a request or a read means and does the IO it is told
-//! to do.
+//! tier and its pins, and when a frame's describe refines or a want restores
+//! are not decided here: they are [`vant::image::residency::Residency`]'s,
+//! held as the engine's [`ImageResidency`], which also sends every report.
+//! This module asks it what a request, a describe or a want means and does
+//! the IO it is told to do.
 //!
 //! A request resolves the source, then a job — one task on the fetcher's own
 //! runtime natively, a local task in the browser — fetches the bytes and runs
@@ -14,18 +14,23 @@
 //! decode permit, and decodes them with the platform decoder at a bounded
 //! size on a blocking thread. Its completion lands in a channel the painter
 //! drains in its next turn, which is when the load is reported and the bitmap
-//! enters the memory tier. From then on the frame reads the source with the
-//! size it draws it at, and three things can happen:
+//! enters the memory tier. From then on the frame describes the source with
+//! the size it draws it at, and three things can happen:
 //!
 //! - the resident bitmap is about the right size, and is returned;
 //! - the resident bitmap is far larger (or smaller, with more to give) than the draw, and is
 //!   returned while a refinement job at the drawn size runs off the painter's thread and replaces
 //!   it — the downsampling the size hint exists for;
-//! - the bitmap was evicted, and is restored on the painter's thread, inside the read, from the
-//!   encoded bytes — kept in memory when nothing else holds them, read back from the byte tier or
-//!   the file when something does — because a read after a reported load must not miss. That
-//!   restore fetches and decodes synchronously and takes no decode permit: it must never wait for a
-//!   background decode.
+//! - the bitmap was released or evicted, and its descriptor is returned without pixels.
+//!
+//! In the last case a painter whose rasterizer holds no upload of the bitmap
+//! draws nothing for it and says it is wanted ([`want`]). The restore is a
+//! refinement job like any other — off the painter's thread, under a decode
+//! permit, from the encoded bytes kept in memory when nothing else holds
+//! them, read back from the byte tier or the file when something does — and
+//! its completion lands in the same channel and wakes the host the same way
+//! a load's does. Nothing on the painter's thread decodes or waits for I/O,
+//! and the document is never told: the source stays loaded throughout.
 //!
 //! # SVG documents
 //!
@@ -48,13 +53,12 @@
 //! and reported, never retained** (the residency's module docs say what that
 //! means for its entries): nothing enters the memory tier or
 //! [`Resources::memory_used_bytes`],
-//! [`FrameImages::read`](bobcat_core::FrameImages::read) answers `None` (the
-//! engine draws the document itself and never asks), and no refinement and
-//! no restore can start for it.
+//! [`FrameImages::describe`](bobcat_core::FrameImages::describe) answers
+//! `None` (the engine draws the document itself and never asks), and no
+//! refinement and no restore can start for it.
 
 use std::sync::Arc;
 
-use bobcat_core::peniko::ImageData;
 use bobcat_core::{
     DocumentKind, FrameImage, ImageEvent, ImageReports, ImageResidency, ImageSizeHint,
     VectorDocument,
@@ -62,9 +66,9 @@ use bobcat_core::{
 use bytes::Bytes;
 use url::Url;
 use vant::Platform;
-use vant::image::residency::{Decoded, Described, Read, Refinement, ViewKey};
+use vant::image::residency::{Decoded, Described, Refinement, ViewKey};
 
-use crate::decode::{Bitmap, DecodeError};
+use crate::decode::Bitmap;
 use crate::image_header::ImageHeader;
 use crate::mime::ImageFormat;
 use crate::preprocess::{self, Payload};
@@ -287,7 +291,7 @@ pub(crate) fn retain<P: Platform>(resources: &Resources<P>, view: ViewKey, frame
 
 /// What a frame drawing `source` at `hint` draws, without a restore: the
 /// resident bitmap, or the descriptor of the one the tier dropped. Starts
-/// the refinement the residency plans, as [`read`] does.
+/// the refinement the residency plans.
 pub(crate) fn describe<P: Platform>(
     resources: &Resources<P>,
     source: &str,
@@ -321,48 +325,14 @@ pub(crate) fn release<P: Platform>(resources: &Resources<P>, sources: &[Arc<str>
     resources.local.borrow_mut().residency.release(sources);
 }
 
-/// The pixels for `source`, for a draw of `hint`.
-pub(crate) fn read<P: Platform>(
-    resources: &Resources<P>,
-    source: &str,
-    hint: ImageSizeHint,
-) -> Option<ImageData> {
-    let mut state = resources.local.borrow_mut();
-    let restore = match state.residency.read(source, hint) {
-        Read::Unavailable => return None,
-        Read::Hit { image, refine } => {
-            if let Some(refinement) = refine {
-                spawn_refine(resources, Arc::from(source), refinement);
-            }
-            return Some(image);
-        }
-        Read::Restore(restore) => restore,
-    };
-    // Evicted: restore now, on this thread, with no decode permit. The
-    // contract is that a reported load never misses, and blocking the
-    // painter here is the accepted price.
-    let bytes = match restore.encoded {
-        Some(bytes) => bytes,
-        None => match restore_bytes(&resources.shared, &restore.url) {
-            Ok(bytes) => bytes,
-            Err(message) => {
-                resources.note(format!("image `{source}` could not be restored: {message}"));
-                return None;
-            }
-        },
-    };
-    match decode_blocking(
-        &resources.shared,
-        &bytes,
-        restore.format,
-        restore.header,
-        restore.target,
-    ) {
-        Ok(bitmap) => Some(state.residency.restored(source, bitmap)),
-        Err(error) => {
-            resources.note(format!("image `{source}` could not be re-decoded: {error}"));
-            None
-        }
+/// A frame draws `source` at `hint` from neither the tier's bitmap nor an
+/// upload: starts the restore the residency plans, a refinement job off this
+/// thread whose completion wakes the host. Nothing when one is in flight
+/// already, or there is nothing to restore.
+pub(crate) fn want<P: Platform>(resources: &Resources<P>, source: &str, hint: ImageSizeHint) {
+    let restore = resources.local.borrow_mut().residency.want(source, hint);
+    if let Some(restore) = restore {
+        spawn_refine(resources, Arc::from(source), restore);
     }
 }
 
@@ -606,8 +576,9 @@ async fn load_async<P: Platform>(
     Ok(LoadOutcome::Raster((bitmap, format, header, encoded)))
 }
 
-/// The refinement job: recover the bytes if the entry did not keep them,
-/// take a decode permit, decode at the drawn size.
+/// The refinement job, which is also a wanted source's restore: recover the
+/// bytes if the entry did not keep them, take a decode permit, decode at the
+/// drawn size.
 #[cfg(not(target_arch = "wasm32"))]
 async fn refine<P: Platform>(
     shared: &SharedHandle<P>,
@@ -646,10 +617,11 @@ fn spawn_refine<P: Platform>(resources: &Resources<P>, source: Arc<str>, refinem
     let permits = resources.executor.decode_permits();
     let target = refinement.target;
     // Only a task is enqueued here; the painter creates no thread, and this
-    // call is made from inside compose.
+    // call is made from inside its adoption.
     resources.executor.spawn(async move {
-        // A refinement that fails leaves the `Loaded` entry alone: its arm
-        // in `apply` only clears `refining`.
+        // A refinement that fails leaves the `Loaded` entry loaded: its arm
+        // in `apply` clears `refining`, and marks a restore that failed as
+        // having nothing to draw.
         let completion = match refine(&shared, &handle, &permits, refinement).await {
             Ok(bitmap) => Completion::Refined {
                 source,
@@ -698,9 +670,9 @@ fn spawn_refine<P: Platform>(resources: &Resources<P>, source: Arc<str>, refinem
     });
 }
 
-/// Encoded bytes for a refinement whose bytes were not kept: the same tiers
-/// as [`restore_bytes`], reached through the background job's transport seam
-/// on a blocking-pool thread.
+/// Encoded bytes for a refinement whose bytes were not kept: the byte tier
+/// or the file, through the background job's transport seam on a
+/// blocking-pool thread.
 #[cfg(not(target_arch = "wasm32"))]
 fn restore_for_job<P: Platform>(shared: &Shared<P>, url: &Url) -> Result<Bytes, String> {
     shared
@@ -714,52 +686,23 @@ fn restore_for_job<P: Platform>(shared: &Shared<P>, url: &Url) -> Result<Bytes, 
         .map_err(|failure| failure.to_string())
 }
 
-/// Encoded bytes for an image whose bytes were not kept: the byte tier or
-/// the file natively, only what is already in hand in the browser.
-///
-/// Natively this is the painter's own restore, called inside
-/// [`FrameImages::read`](bobcat_core::FrameImages::read).
+/// Encoded bytes for an image whose bytes were not kept, in the browser:
+/// only what the registry or a `data:` URL hands back without a request,
+/// since the browser's transport answers nothing synchronously.
+#[cfg(target_arch = "wasm32")]
 fn restore_bytes<P: Platform>(shared: &Shared<P>, url: &Url) -> Result<Bytes, String> {
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        shared
-            .transports
-            .fetch_blocking(
-                url,
-                crate::CachePolicy::ForceCache,
-                &http::HeaderMap::new(),
-                crate::file_body::Body::Read,
-            )
-            .map(|fetched| fetched.bytes)
-            .map_err(|failure| failure.to_string())
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        shared
-            .transports
-            .local(url)
-            .unwrap_or_else(|| {
-                Err(vant::error::Failure::new(
-                    bobcat_core::resource::ResourceErrorKind::Unavailable,
-                    bobcat_core::resource::ResourceErrorPhase::Open,
-                    "the bytes were not retained and cannot be re-fetched synchronously",
-                ))
-            })
-            .map(|fetched| fetched.bytes)
-            .map_err(|failure| failure.to_string())
-    }
-}
-
-/// The painter's own decode, for a restore inside a read: the platform
-/// decoder directly, with no permit and no test seam.
-fn decode_blocking<P: Platform>(
-    shared: &Shared<P>,
-    bytes: &[u8],
-    format: ImageFormat,
-    header: Option<ImageHeader>,
-    target: (u32, u32),
-) -> Result<Bitmap, DecodeError> {
-    shared.decode_bytes(bytes, format, header, target)
+    shared
+        .transports
+        .local(url)
+        .unwrap_or_else(|| {
+            Err(vant::error::Failure::new(
+                bobcat_core::resource::ResourceErrorKind::Unavailable,
+                bobcat_core::resource::ResourceErrorPhase::Open,
+                "the bytes were not retained and cannot be fetched again",
+            ))
+        })
+        .map(|fetched| fetched.bytes)
+        .map_err(|failure| failure.to_string())
 }
 
 /// The executor's seams, pinned where the test can reach the decoder and the
@@ -1009,7 +952,7 @@ mod job_tests {
     }
 
     #[test]
-    fn a_panicking_refinement_keeps_the_loaded_entry_readable() {
+    fn a_panicking_refinement_keeps_the_loaded_entry_drawable() {
         let resources = Resources::new(
             quiet(ResourcesConfig {
                 worker_threads: 2,
@@ -1041,8 +984,9 @@ mod job_tests {
 
         // Drawn eight times smaller: a refinement starts and its decode panics.
         assert!(
-            super::read(&resources, "app:///big.png", ImageSizeHint::new(125, 125)).is_some(),
-            "the read answers with what is resident"
+            super::describe(&resources, "app:///big.png", ImageSizeHint::new(125, 125))
+                .is_some_and(|image| image.pixels.is_some()),
+            "the describe answers with what is resident"
         );
         settle(&resources, "the refinement never reported", || {
             resources
@@ -1058,6 +1002,152 @@ mod job_tests {
             resources.knows_image("app:///big.png"),
             "the entry stays loaded"
         );
+    }
+
+    /// Loads `source` from a registered PNG through the hooked decoder and
+    /// services turns until the load is reported.
+    fn load(resources: &Resources, source: &str) {
+        let (reports, inbox) = ImageInbox::new();
+        resources
+            .register(source, tiny_png(), None)
+            .expect("register");
+        super::request(resources, source, &reports);
+        settle(resources, "the load never reported", || {
+            !inbox.drain().is_empty()
+        });
+    }
+
+    /// A source whose bitmap the tier dropped and that a frame wants is
+    /// restored by a job, on a pool thread and never on the thread that
+    /// wanted it; one restore runs however often it is wanted while in
+    /// flight; its completion wakes the host and is applied in a turn,
+    /// after which the source is described with pixels again; and nothing
+    /// of it is reported to the document.
+    #[test]
+    fn a_wanted_source_is_restored_once_off_the_calling_thread_and_wakes_the_host() {
+        let wakeups = Arc::new(AtomicUsize::new(0));
+        let resources = Resources::new(
+            quiet(ResourcesConfig {
+                worker_threads: 2,
+                ..ResourcesConfig::default()
+            }),
+            {
+                let wakeups = Arc::clone(&wakeups);
+                move || {
+                    wakeups.fetch_add(1, Ordering::SeqCst);
+                }
+            },
+        );
+        let caller = std::thread::current().id();
+        let decoded_on = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let open = Arc::new(AtomicBool::new(true));
+        resources.shared.set_decode_hook(Arc::new({
+            let decoded_on = Arc::clone(&decoded_on);
+            let open = Arc::clone(&open);
+            move |_bytes, _format, _header, _max| {
+                decoded_on
+                    .lock()
+                    .expect("decode log")
+                    .push(std::thread::current().id());
+                while !open.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                Ok(pixel(1, 1, (1, 1)))
+            }
+        }));
+        let (reports, inbox) = ImageInbox::new();
+        let view = resources.for_view(reports);
+        load(&resources, "app:///a.png");
+        let source: Arc<str> = Arc::from("app:///a.png");
+        view.release(std::slice::from_ref(&source));
+        let hint = ImageSizeHint::new(1, 1);
+        assert!(
+            view.describe(&source, hint)
+                .is_some_and(|image| image.pixels.is_none()),
+            "a released bitmap is described without its pixels"
+        );
+
+        // The restore is held inside its decode while the frame wants the
+        // source again and again.
+        open.store(false, Ordering::SeqCst);
+        let wakeups_before = wakeups.load(Ordering::SeqCst);
+        for _ in 0..3 {
+            view.want(&source, hint);
+            super::service(&resources);
+            assert!(
+                view.describe(&source, hint)
+                    .is_some_and(|image| image.pixels.is_none()),
+                "nothing is drawn from until the restore lands"
+            );
+        }
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while decoded_on.lock().expect("decode log").len() < 2 {
+            assert!(Instant::now() < deadline, "the restore never decoded");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        open.store(true, Ordering::SeqCst);
+        settle(&resources, "the restore never landed", || {
+            view.describe(&source, hint)
+                .is_some_and(|image| image.pixels.is_some())
+        });
+
+        let decoded_on = decoded_on.lock().expect("decode log").clone();
+        assert_eq!(decoded_on.len(), 2, "the load and one restore");
+        assert!(
+            decoded_on.iter().all(|thread| *thread != caller),
+            "no decode ran on the thread that wanted the source"
+        );
+        assert!(
+            wakeups.load(Ordering::SeqCst) > wakeups_before,
+            "the restore woke the host"
+        );
+        assert!(
+            inbox.drain().is_empty(),
+            "the document is told nothing of a restore"
+        );
+    }
+
+    /// A restore that fails leaves the source with nothing to draw: it is
+    /// described as nothing from then on, wanting it again starts nothing,
+    /// and the document is told nothing.
+    #[test]
+    fn a_failed_restore_leaves_the_source_with_nothing_to_draw() {
+        let resources = Resources::new(
+            quiet(ResourcesConfig {
+                worker_threads: 2,
+                ..ResourcesConfig::default()
+            }),
+            || {},
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        resources.shared.set_decode_hook(Arc::new({
+            let calls = Arc::clone(&calls);
+            move |_bytes, _format, _header, _max| {
+                if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Ok(pixel(1, 1, (1, 1)))
+                } else {
+                    Err(crate::decode::DecodeError::Malformed("gone".to_owned()))
+                }
+            }
+        }));
+        let (reports, inbox) = ImageInbox::new();
+        let view = resources.for_view(reports);
+        load(&resources, "app:///a.png");
+        let source: Arc<str> = Arc::from("app:///a.png");
+        view.release(std::slice::from_ref(&source));
+        let hint = ImageSizeHint::new(1, 1);
+        view.want(&source, hint);
+        settle(&resources, "the restore never failed", || {
+            view.describe(&source, hint).is_none()
+        });
+        view.want(&source, hint);
+        super::service(&resources);
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "nothing retries it");
+        assert!(
+            resources.knows_image("app:///a.png"),
+            "the entry stays loaded"
+        );
+        assert!(inbox.drain().is_empty());
     }
 
     /// Regression: one view's frame used to replace the scope's pinned set,

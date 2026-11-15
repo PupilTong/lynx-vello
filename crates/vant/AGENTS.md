@@ -74,14 +74,16 @@ type and depends only on `bytes`, `http`, `url`, `serde_json`, `thiserror`,
   decoded-bitmap `MemoryCache`. A host asks what a request means
   (`Requested`: report now, join, or start a load at a bound), feeds every
   completion back (`loaded`, `parsed`, `failed`, `refined`, …) and is handed
-  the waiters to tell; a frame's `read` answers `Read::Hit` with the
-  `Refinement` to start when the bitmap is far from the drawn size,
-  `Read::Restore` when it was evicted or released, or `Read::Unavailable`.
-  `describe` answers without ever asking for a restore — `Described::Resident`,
-  or `Described::Absent` with the `ImageDescriptor` (`vant::image`) of the
-  bitmap last inserted for the source — and `release(sources)` drops bitmaps
-  from the tier, pinned or not, for a caller whose rasterizer holds them; the
-  entries stay loaded. Each view has
+  the waiters to tell; a frame's `describe` answers `Described::Resident` with
+  the `Refinement` to start when the bitmap is far from the drawn size,
+  `Described::Absent` with the `ImageDescriptor` (`vant::image`) of the bitmap
+  last inserted for the source when it was evicted or released, or
+  `Described::Unavailable`, and never starts a restore. `want(source, hint)`
+  answers the `Refinement` that restores an absent bitmap, once while one is in
+  flight, for a caller whose rasterizer holds no upload either; a restore that
+  fails leaves the entry loaded and described as unavailable. `release(sources)`
+  drops bitmaps from the tier, pinned or not, for a caller whose rasterizer
+  holds them; the entries stay loaded. Each view has
   a `ViewKey` and its own working set, and the tier pins **the union of
   every view's set** (`retain(view, frame)`, `release_view`), so one view's
   frame never unpins another's. It stores waiters and never calls them.

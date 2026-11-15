@@ -46,19 +46,23 @@ impl BrowserDecoder {
 }
 
 impl vant::ImageDecoder for BrowserDecoder {
-    /// Blocks this Worker on the job's mailbox, for a restore. The main
-    /// thread's decoder takes the media type rather than a header.
+    /// The browser decodes on the main thread's event loop, which this
+    /// Worker cannot block on, so a blocking decode is unavailable: every
+    /// decode, a restore included, goes through [`Self::decode`].
     fn decode_blocking(
         &self,
-        bytes: &[u8],
-        format: ImageFormat,
+        _bytes: &[u8],
+        _format: ImageFormat,
         _header: Option<ImageHeader>,
-        max: (u32, u32),
+        _max: (u32, u32),
     ) -> Result<Bitmap, DecodeError> {
-        self.decoder()?
-            .decode_blocking(bytes, format.media_type(), max)
+        Err(DecodeError::Unavailable(
+            "the browser's image decoder answers asynchronously".to_owned(),
+        ))
     }
 
+    /// The main thread's decoder takes the media type rather than a
+    /// header.
     async fn decode(
         &self,
         bytes: Bytes,

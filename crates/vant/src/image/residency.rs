@@ -1,31 +1,35 @@
 //! Image residency: what is known about every image source a host was
 //! asked for, who waits for it, and the decoded-bitmap tier — the decisions
-//! an image pipeline makes between a request and a frame's read, with none
+//! an image pipeline makes between a request and a frame's draw, with none
 //! of its IO.
 //!
 //! [`Residency`] is synchronous and runs nothing. The host asks it what a
 //! request means ([`Residency::request`]), starts the load it is told to
 //! start, feeds every completion back ([`Residency::loaded`],
 //! [`Residency::parsed`], [`Residency::failed`], [`Residency::refined`], …)
-//! and tells the waiters each completion hands back. A frame's read
-//! ([`Residency::read`]) answers in one of three ways:
+//! and tells the waiters each completion hands back. A frame asks what it
+//! can draw for a source ([`Residency::describe`]), which never starts a
+//! decode the frame waits for, and answers in one of three ways:
 //!
 //! - the resident bitmap is about the right size, and is returned;
 //! - the resident bitmap is far larger (or smaller, with more to give) than the draw, and is
 //!   returned with a [`Refinement`] at the drawn size for the host to start off its thread; the
 //!   refined bitmap replaces it when [`Residency::refined`] is called;
-//! - the bitmap was evicted, and the read answers with the [`Refinement`] that restores it — the
-//!   encoded bytes when the entry kept them, the URL to read them back from otherwise — which the
-//!   host runs synchronously and answers with [`Residency::restored`], because a read after a
-//!   reported load must not miss.
+//! - the tier no longer holds the bitmap — released or evicted — and the answer is the
+//!   [`ImageDescriptor`] of the bitmap last inserted for the source: enough for a rasterizer that
+//!   still holds an upload of that bitmap to draw it.
 //!
-//! A frame that can draw without the pixels asks [`Residency::describe`]
-//! instead, which never asks for a restore: it answers the resident bitmap,
-//! or the [`ImageDescriptor`] of the bitmap last inserted for the source
-//! when the tier no longer holds it — enough for a rasterizer that still
-//! holds an upload of that bitmap to draw it. A caller whose rasterizer
-//! holds the upload a frame needs of a source tells the tier so
-//! ([`Residency::release`]), and the tier drops its copy, pinned or not.
+//! A caller whose rasterizer holds the upload a frame needs of a source
+//! tells the tier so ([`Residency::release`]), and the tier drops its copy,
+//! pinned or not. A caller whose rasterizer holds no upload either says the
+//! source is wanted ([`Residency::want`]), and is answered with the
+//! [`Refinement`] that restores it — the encoded bytes when the entry kept
+//! them, the URL to read them back from otherwise — which the host runs off
+//! the frame's thread, like any refinement, and answers with
+//! [`Residency::refined`] or [`Residency::refine_failed`]. Until then the
+//! frame draws nothing for the source. A restore that fails leaves the
+//! source with nothing to draw: it is described as unavailable from then
+//! on, and nothing retries it.
 //!
 //! `W` is whoever waits for a source: the engine's per-view report handle.
 //! The residency stores waiters and hands them back; it never calls them.
@@ -39,9 +43,9 @@
 //! its source completes. A fetched document leaves `Entry::Parsed`, a
 //! marker that holds nothing and keeps the source known; a later request for
 //! it fetches and parses it again. Documents are never retained: nothing of
-//! one enters the bitmap tier, [`Residency::read`] answers
-//! [`Read::Unavailable`] for it, and no refinement and no restore can start
-//! for it.
+//! one enters the bitmap tier, [`Residency::describe`] answers
+//! [`Described::Unavailable`] for it, and no refinement and no restore can
+//! start for it.
 //!
 //! The document's state never regresses, and a bitmap's does not here: an
 //! entry that failed stays failed, and one that loaded as a bitmap stays
@@ -118,8 +122,9 @@ pub struct Decoded {
     pub encoded: Option<Bytes>,
 }
 
-/// What a refinement re-decodes, and at what size. A restore inside a read
-/// ([`Read::Restore`]) re-decodes the same things.
+/// What a refinement re-decodes, and at what size. A restore of a wanted
+/// source ([`Residency::want`]) is a refinement of a bitmap the tier no
+/// longer holds.
 #[derive(Clone, Debug)]
 pub struct Refinement {
     pub url: Url,
@@ -131,42 +136,27 @@ pub struct Refinement {
     pub target: (u32, u32),
 }
 
-/// What a frame's read of a source finds.
-#[derive(Debug)]
-pub enum Read {
-    /// The resident bitmap, and the refinement the caller starts when it is
-    /// far from the drawn size and none is in flight.
-    Hit {
-        image: ImageData,
-        refine: Option<Refinement>,
-    },
-    /// Loaded, and evicted: the caller restores it now, synchronously, and
-    /// answers with [`Residency::restored`].
-    Restore(Refinement),
-    /// Not a loaded bitmap: loading, failed, a document, or never asked for.
-    Unavailable,
-}
-
-/// What a frame that may draw without the pixels finds for a source
-/// ([`Residency::describe`]).
+/// What a frame finds for a source ([`Residency::describe`]).
 #[derive(Debug)]
 pub enum Described {
-    /// The resident bitmap, and the refinement to start, exactly as
-    /// [`Read::Hit`] answers them.
+    /// The resident bitmap, and the refinement the caller starts when it is
+    /// far from the drawn size and none is in flight.
     Resident {
         image: ImageData,
         refine: Option<Refinement>,
     },
     /// Loaded, and the tier does not hold the bitmap — released or evicted.
     /// `descriptor` names the bitmap last inserted for the source; the
-    /// refinement is planned by the rule a hit is, from the descriptor's
-    /// size. Nothing is restored: a caller that cannot draw from the
-    /// descriptor alone reads the source ([`Residency::read`]).
+    /// refinement is planned by the rule a resident bitmap's is, from the
+    /// descriptor's size. Nothing is restored: a caller that cannot draw
+    /// from the descriptor alone says the source is wanted
+    /// ([`Residency::want`]).
     Absent {
         descriptor: ImageDescriptor,
         refine: Option<Refinement>,
     },
-    /// Not a loaded bitmap: loading, failed, a document, or never asked for.
+    /// Nothing to draw: loading, failed, a document, never asked for, or a
+    /// bitmap the tier dropped whose restore failed.
     Unavailable,
 }
 
@@ -228,8 +218,12 @@ struct Loaded {
     /// registration that may be cleared, a `data:` URL, a response the byte
     /// tier did not store, and everything in the browser.
     encoded: Option<Bytes>,
-    /// A refinement decode in flight, and the size it targets.
+    /// A refinement decode in flight, and the size it targets. A restore of
+    /// a wanted source is one too.
     refining: Option<(u32, u32)>,
+    /// A decode failed while the tier held no bitmap for the source: there
+    /// is nothing to draw it from, and nothing restores it again.
+    unrestorable: bool,
     /// The bitmap last inserted for the source, whether or not the tier
     /// still holds it.
     descriptor: ImageDescriptor,
@@ -340,6 +334,7 @@ impl<W> Residency<W> {
                 header,
                 encoded,
                 refining: None,
+                unrestorable: false,
                 descriptor,
             }),
         )?;
@@ -383,40 +378,30 @@ impl<W> Residency<W> {
             return;
         }
         loaded.refining = None;
+        loaded.unrestorable = false;
         let bytes = bitmap.byte_len();
         let image = bitmap.into_image_data();
         loaded.descriptor = ImageDescriptor::of(&image);
         self.bitmaps.insert(Arc::clone(source), image, bytes);
     }
 
-    /// A refinement of `source` failed. It leaves the loaded entry alone and
-    /// only clears `refining`, so a later read may plan another.
+    /// A refinement of `source` failed. It clears `refining`, so a later
+    /// describe may plan another, and leaves the loaded entry alone — but a
+    /// failure while the tier holds no bitmap for the source was its
+    /// restore, and leaves it with nothing to draw: [`Self::describe`]
+    /// answers [`Described::Unavailable`] for it from then on.
     pub fn refine_failed(&mut self, source: &str) {
+        let resident = self.bitmaps.contains(source);
         if let Some(Entry::Loaded(loaded)) = self.entries.get_mut(source) {
             loaded.refining = None;
-        }
-    }
-
-    /// The frame-side read of `source`, for a draw of `hint`.
-    pub fn read(&mut self, source: &str, hint: ImageSizeHint) -> Read {
-        let ratio = self.config.downsample_ratio;
-        let Some((loaded, target, image)) = self.find(source, hint) else {
-            return Read::Unavailable;
-        };
-        match image {
-            Some(image) => Read::Hit {
-                refine: loaded.plan((image.width, image.height), target, ratio),
-                image,
-            },
-            // Evicted or released: the caller restores it now, on its own
-            // thread. The contract is that a reported load never misses.
-            None => Read::Restore(loaded.decode_at(target)),
+            loaded.unrestorable |= !resident;
         }
     }
 
     /// What a frame drawing `source` at `hint` can draw without a restore:
-    /// the resident bitmap, or the descriptor of the one last inserted. The
-    /// refinement rule is [`Self::read`]'s; nothing is restored here.
+    /// the resident bitmap, or the descriptor of the one last inserted. A
+    /// bitmap far from the drawn size plans a refinement; nothing is
+    /// restored here.
     pub fn describe(&mut self, source: &str, hint: ImageSizeHint) -> Described {
         let ratio = self.config.downsample_ratio;
         let Some((loaded, target, image)) = self.find(source, hint) else {
@@ -428,6 +413,9 @@ impl<W> Residency<W> {
                 image,
             };
         }
+        if loaded.unrestorable {
+            return Described::Unavailable;
+        }
         let descriptor = loaded.descriptor;
         Described::Absent {
             refine: loaded.plan((descriptor.width, descriptor.height), target, ratio),
@@ -435,10 +423,30 @@ impl<W> Residency<W> {
         }
     }
 
+    /// A frame draws `source` at `hint` and has nothing to draw it from: the
+    /// tier does not hold its bitmap, and the caller's rasterizer holds no
+    /// upload of it. Answers the decode that restores it at the drawn size,
+    /// for the caller to run off its thread and answer with
+    /// [`Self::refined`] or [`Self::refine_failed`] — and marks it in
+    /// flight, so a source wanted again before that answer starts nothing.
+    ///
+    /// `None` when there is nothing to start: the bitmap is resident, a
+    /// decode of the source is already in flight (a refinement brings a
+    /// bitmap back too), its restore failed before, or it is not a loaded
+    /// bitmap.
+    pub fn want(&mut self, source: &str, hint: ImageSizeHint) -> Option<Refinement> {
+        let (loaded, target, image) = self.find(source, hint)?;
+        if image.is_some() || loaded.refining.is_some() || loaded.unrestorable {
+            return None;
+        }
+        loaded.refining = Some(target);
+        Some(loaded.decode_at(target))
+    }
+
     /// Drops the bitmaps of `sources` from the tier, pinned or not: the
-    /// caller holds them elsewhere. The entries stay loaded, so a later
-    /// [`Self::read`] restores them and [`Self::describe`] answers their
-    /// descriptors.
+    /// caller holds them elsewhere. The entries stay loaded, so
+    /// [`Self::describe`] answers their descriptors and a later
+    /// [`Self::want`] restores them.
     pub fn release(&mut self, sources: &[Arc<str>]) {
         for source in sources {
             let _ = self.bitmaps.remove(source);
@@ -465,18 +473,6 @@ impl<W> Residency<W> {
         );
         let image = self.bitmaps.get(source).cloned();
         Some((loaded, target, image))
-    }
-
-    /// The bitmap a [`Read::Restore`] decoded for `source`: it re-enters the
-    /// tier while the entry is loaded, and is what the read answers.
-    pub fn restored(&mut self, source: &str, bitmap: Bitmap) -> ImageData {
-        let bytes = bitmap.byte_len();
-        let image = bitmap.into_image_data();
-        if let Some(Entry::Loaded(loaded)) = self.entries.get_mut(source) {
-            loaded.descriptor = ImageDescriptor::of(&image);
-            self.bitmaps.insert(Arc::from(source), image.clone(), bytes);
-        }
-        image
     }
 
     /// Records `view`'s working set, replacing what it said before. The
@@ -696,8 +692,8 @@ mod tests {
         assert!(residency.failed("a.png").is_none());
         assert_eq!(residency.request("a.png", "fourth"), Requested::Failed);
         assert!(matches!(
-            residency.read("a.png", ImageSizeHint::UNBOUNDED),
-            Read::Unavailable
+            residency.describe("a.png", ImageSizeHint::UNBOUNDED),
+            Described::Unavailable
         ));
     }
 
@@ -710,8 +706,8 @@ mod tests {
         assert!(!residency.is_resident("icon.svg"));
         assert_eq!(residency.bitmap_bytes(), 0);
         assert!(matches!(
-            residency.read("icon.svg", ImageSizeHint::UNBOUNDED),
-            Read::Unavailable
+            residency.describe("icon.svg", ImageSizeHint::UNBOUNDED),
+            Described::Unavailable
         ));
         assert!(matches!(
             residency.request("icon.svg", "second"),
@@ -741,7 +737,7 @@ mod tests {
     }
 
     #[test]
-    fn only_a_loaded_bitmap_is_readable() {
+    fn only_a_loaded_bitmap_is_described() {
         let mut residency = residency(1 << 20);
         residency.request("loading.png", "waiter");
         residency.request("failed.png", "waiter");
@@ -751,8 +747,8 @@ mod tests {
         for source in ["loading.png", "failed.png", "parsed.svg", "unknown.png"] {
             assert!(
                 matches!(
-                    residency.read(source, ImageSizeHint::UNBOUNDED),
-                    Read::Unavailable
+                    residency.describe(source, ImageSizeHint::UNBOUNDED),
+                    Described::Unavailable
                 ),
                 "{source}"
             );
@@ -774,10 +770,10 @@ mod tests {
             Some(b"bytes"),
         );
         let hint = ImageSizeHint::new(125, 125);
-        let Read::Hit {
+        let Described::Resident {
             image,
             refine: Some(refinement),
-        } = residency.read("big.png", hint)
+        } = residency.describe("big.png", hint)
         else {
             panic!("a hit with a refinement");
         };
@@ -787,8 +783,8 @@ mod tests {
         assert_eq!(refinement.encoded.as_deref(), Some(&b"bytes"[..]));
         assert!(
             matches!(
-                residency.read("big.png", hint),
-                Read::Hit { refine: None, .. }
+                residency.describe("big.png", hint),
+                Described::Resident { refine: None, .. }
             ),
             "not a second while one is in flight"
         );
@@ -811,15 +807,15 @@ mod tests {
         assert_eq!(residency.resident_size("big.png"), Some((125, 125)));
         assert!(
             matches!(
-                residency.read("big.png", hint),
-                Read::Hit { refine: None, .. }
+                residency.describe("big.png", hint),
+                Described::Resident { refine: None, .. }
             ),
             "the refined bitmap is the drawn size"
         );
     }
 
     #[test]
-    fn a_failed_refinement_keeps_the_bitmap_and_lets_a_later_read_plan_again() {
+    fn a_failed_refinement_keeps_the_bitmap_and_lets_a_later_describe_plan_again() {
         let mut residency = residency(1 << 30);
         load(
             &mut residency,
@@ -829,8 +825,8 @@ mod tests {
         );
         let hint = ImageSizeHint::new(125, 125);
         assert!(matches!(
-            residency.read("big.png", hint),
-            Read::Hit {
+            residency.describe("big.png", hint),
+            Described::Resident {
                 refine: Some(_),
                 ..
             }
@@ -838,8 +834,8 @@ mod tests {
         residency.refine_failed("big.png");
         assert_eq!(residency.resident_size("big.png"), Some((1000, 1000)));
         assert!(matches!(
-            residency.read("big.png", hint),
-            Read::Hit {
+            residency.describe("big.png", hint),
+            Described::Resident {
                 refine: Some(_),
                 ..
             }
@@ -847,7 +843,7 @@ mod tests {
     }
 
     #[test]
-    fn an_evicted_bitmap_is_restored_from_kept_bytes_or_its_url() {
+    fn an_evicted_bitmap_is_restored_from_kept_bytes_or_its_url_once_wanted() {
         let mut residency = residency(1 << 20);
         load(
             &mut residency,
@@ -863,35 +859,104 @@ mod tests {
             residency.knows("kept.png"),
             "eviction never unloads an entry"
         );
+        assert!(
+            matches!(
+                residency.describe("kept.png", ImageSizeHint::UNBOUNDED),
+                Described::Absent { refine: None, .. }
+            ),
+            "a describe restores nothing"
+        );
 
-        let Read::Restore(plan) = residency.read("kept.png", ImageSizeHint::UNBOUNDED) else {
-            panic!("a restore");
-        };
+        let plan = residency
+            .want("kept.png", ImageSizeHint::UNBOUNDED)
+            .expect("a restore");
         assert_eq!(plan.encoded.as_deref(), Some(&b"kept"[..]));
         assert_eq!(plan.target, (2, 2));
-        let Read::Restore(plan) = residency.read("fetched.png", ImageSizeHint::new(1, 1)) else {
-            panic!("a restore");
-        };
+        let plan = residency
+            .want("fetched.png", ImageSizeHint::new(1, 1))
+            .expect("a restore");
         assert!(plan.encoded.is_none());
         assert_eq!(plan.url, url("fetched.png"));
         assert_eq!(plan.target, (1, 1), "restored at the drawn size");
+        assert!(
+            residency
+                .want("fetched.png", ImageSizeHint::new(1, 1))
+                .is_none(),
+            "one restore while it is in flight"
+        );
+        assert!(
+            residency
+                .want("unknown.png", ImageSizeHint::UNBOUNDED)
+                .is_none()
+        );
 
-        let image = residency.restored("fetched.png", bitmap(1, 1, (2, 2)));
-        assert_eq!((image.width, image.height), (1, 1));
+        residency.refined(&Arc::from("fetched.png"), plan.target, bitmap(1, 1, (2, 2)));
         assert!(
             residency.is_resident("fetched.png"),
-            "the restore re-enters the tier, its own insert spared"
+            "the restore re-enters the tier"
         );
-        assert!(matches!(
-            residency.read("fetched.png", ImageSizeHint::new(1, 1)),
-            Read::Hit { .. }
-        ));
-        let _ = residency.restored("unknown.png", bitmap(1, 1, (1, 1)));
-        assert!(!residency.is_resident("unknown.png"));
+        let Described::Resident { image, .. } =
+            residency.describe("fetched.png", ImageSizeHint::new(1, 1))
+        else {
+            panic!("a restored bitmap is resident");
+        };
+        assert_eq!((image.width, image.height), (1, 1));
+        assert!(
+            residency
+                .want("fetched.png", ImageSizeHint::new(1, 1))
+                .is_none(),
+            "a resident bitmap is not restored"
+        );
     }
 
     #[test]
-    fn a_read_never_asks_for_more_than_the_rasterizer_draws() {
+    fn a_failed_restore_leaves_nothing_to_draw_and_is_not_retried() {
+        let mut residency = residency(1 << 20);
+        load(&mut residency, "a.png", bitmap(2, 2, (2, 2)), None);
+        residency.release(&[Arc::from("a.png")]);
+        assert!(residency.want("a.png", ImageSizeHint::UNBOUNDED).is_some());
+        residency.refine_failed("a.png");
+        assert!(matches!(
+            residency.describe("a.png", ImageSizeHint::UNBOUNDED),
+            Described::Unavailable
+        ));
+        assert!(
+            residency.want("a.png", ImageSizeHint::UNBOUNDED).is_none(),
+            "nothing retries it"
+        );
+        assert!(
+            matches!(
+                residency.request("a.png", "again"),
+                Requested::Loaded { intrinsic: (2, 2) }
+            ),
+            "and the source stays loaded"
+        );
+
+        // A refinement that fails while the bitmap is resident is no restore.
+        load(
+            &mut residency,
+            "big.png",
+            bitmap(1000, 1000, (4000, 4000)),
+            None,
+        );
+        let hint = ImageSizeHint::new(125, 125);
+        assert!(matches!(
+            residency.describe("big.png", hint),
+            Described::Resident {
+                refine: Some(_),
+                ..
+            }
+        ));
+        residency.refine_failed("big.png");
+        residency.release(&[Arc::from("big.png")]);
+        assert!(matches!(
+            residency.describe("big.png", hint),
+            Described::Absent { .. }
+        ));
+    }
+
+    #[test]
+    fn a_restore_never_asks_for_more_than_the_rasterizer_draws() {
         let mut residency = residency(0);
         load(
             &mut residency,
@@ -900,9 +965,9 @@ mod tests {
             None,
         );
         residency.set_budget(0);
-        let Read::Restore(plan) = residency.read("huge.png", ImageSizeHint::UNBOUNDED) else {
-            panic!("a restore");
-        };
+        let plan = residency
+            .want("huge.png", ImageSizeHint::UNBOUNDED)
+            .expect("a restore");
         assert_eq!(plan.target, (MAX, MAX / 2));
     }
 
@@ -926,7 +991,7 @@ mod tests {
     }
 
     #[test]
-    fn a_released_bitmap_is_described_absent_and_read_back_by_a_restore() {
+    fn a_released_bitmap_is_described_absent_and_restored_once_wanted() {
         let mut residency = residency(1 << 20);
         load(&mut residency, "a.png", bitmap(2, 2, (2, 2)), Some(b"kept"));
         let view = residency.new_view();
@@ -965,17 +1030,16 @@ mod tests {
             "a describe restores nothing"
         );
 
-        let Read::Restore(plan) = residency.read("a.png", ImageSizeHint::UNBOUNDED) else {
-            panic!("a read of a released bitmap restores it");
-        };
+        let plan = residency
+            .want("a.png", ImageSizeHint::UNBOUNDED)
+            .expect("a wanted released bitmap is restored");
         assert_eq!(plan.encoded.as_deref(), Some(&b"kept"[..]));
-        let restored = residency.restored("a.png", bitmap(2, 2, (2, 2)));
+        residency.refined(&Arc::from("a.png"), plan.target, bitmap(2, 2, (2, 2)));
         let Described::Resident { image, .. } =
             residency.describe("a.png", ImageSizeHint::UNBOUNDED)
         else {
             panic!("a restored bitmap is resident again");
         };
-        assert_eq!(image, restored);
         assert_ne!(
             ImageDescriptor::of(&image),
             descriptor,

@@ -68,8 +68,9 @@ pub struct Response {
 
 pub trait Fetch: Threaded {
     /// Moves the bytes, blocking the calling thread. `None` from a transport
-    /// that cannot block (the browser), which makes a synchronous restore
-    /// impossible and tells the image pipeline to retain encoded bytes.
+    /// that cannot block (the browser), which tells the image pipeline to
+    /// retain encoded bytes: what it fetched cannot be read back without a
+    /// new request.
     fn fetch_blocking(&self, request: &Request) -> Option<Result<Response, Failure>>;
 
     /// Moves the bytes asynchronously. The default answers with
@@ -95,8 +96,8 @@ A `Fetch` serves `http`, `https` and natively `file:`. Registered contents and
 ### `Store` — persistent bytes
 
 Synchronous: natively a directory. The HTTP byte tier needs synchronous
-reads (a restore inside `FrameImages::read`, a mapped body), so it is always
-built on a `Store`. A browser has no synchronous storage every scope can use,
+reads (a background job's transport read on a blocking-pool thread, a mapped
+body), so it is always built on a `Store`. A browser has no synchronous storage every scope can use,
 so its only persistent tier, the derived-artifact tier, is built on an
 `AsyncStore` instead (below).
 
@@ -195,8 +196,8 @@ pub trait AsyncStore: Threaded {
 ```rust
 pub trait ImageDecoder: Threaded {
     /// Decodes at most `max` large, blocking. A decoder that cannot block
-    /// (the browser's main-thread `Image`, outside the mailbox path)
-    /// answers `DecodeError::Unavailable`.
+    /// (the browser's main-thread `Image`) answers
+    /// `DecodeError::Unavailable` and is reached through `decode` instead.
     fn decode_blocking(&self, bytes: &[u8], format: ImageFormat,
                        header: Option<ImageHeader>, max: (u32, u32))
         -> Result<Bitmap, DecodeError>;
@@ -478,10 +479,10 @@ As landed: a request answers `Requested` (`Loaded`, `Failed`, `Joined`, or
 `Start { bound }`, the bound being `initial_bound.min(max_renderable)` so the
 host names neither); completions are `loaded(Decoded)`, `parsed`, `failed`,
 `refined`, `refine_failed` and `requested_document_done`, each handing back
-the waiters to tell; a read answers `Read::Hit { image, refine }`,
-`Read::Restore(Refinement)` or `Read::Unavailable`, and a restore is answered
-with `restored`. A source that cannot be resolved is a `failed` right after
-its `Start`. A completion for an entry that is not loading is ignored.
+the waiters to tell. A source that cannot be resolved is a `failed` right
+after its `Start`. A completion for an entry that is not loading is ignored.
+What a frame asks of the residency is described under the two sections
+below.
 
 ## After the series: the CPU tier releases a bitmap the rasterizer holds
 
@@ -493,18 +494,19 @@ list, the filter bake list and the GPU upload. It now has one at a time.
   size, layout). `Residency::describe` answers `Resident`, or `Absent` with
   the descriptor of the bitmap last inserted, and never asks for a restore;
   `Residency::release` drops bitmaps from the tier, pinned or not.
-- `FrameImages` gains `describe` and `release`, both with default bodies (a
-  `read`; nothing), so a store that keeps everything is unchanged.
+- `FrameImages` gains `describe` and `release`; `release` has a default body
+  that drops nothing, so a store that keeps everything needs no policy for
+  it.
 - The display list's bitmap paint is an `ImageRef`: the descriptor and pixels
   held, lent as a weak blob, or only uploaded. The rasterizer decides a hit
   from the descriptor and reads pixels on a miss alone.
 - `BitmapLeases` holds uploads for a painter regardless of how recently they
   were drawn; the GPU budget trim skips leased uploads.
 - The painter, in `adopt` (before a swap-chain image is acquired): per commit
-  it describes each source, keeps pixels the store holds, leases the upload
-  of a source the store dropped, and reads — the blocking restore — only when
-  that upload is not there. Every turn it leases the upload of each source it
-  still holds pixels of once it exists, drops the pixels and tells the store.
+  it describes each source, keeps pixels the store holds, and leases the
+  upload of a source the store dropped; a source with neither is wanted (next
+  section). Every turn it leases the upload of each source it still holds
+  pixels of once it exists, drops the pixels and tells the store.
   A bitmap is one upload whatever the samplers it is drawn with. A render that found neither an upload nor lent pixels
   marks the table stale, and the next adoption describes the commit again.
 
@@ -512,7 +514,45 @@ The law that a dropped view's last frame stays drawable holds through the
 lease rather than through a strong reference. What it costs: leased uploads
 — the adopted commit's, off-screen ones in its encode window included — are
 exempt from the GPU byte budget, and a source drawn again after its lease
-ended and its upload was trimmed is decoded again inside `adopt`.
+ended and its upload was trimmed has to be decoded again.
+
+## Nothing on the painter's thread waits for pixels
+
+Ruled 2026-11-14 (`docs/picture-source-design.md`, ruling 2 and delivery step
+1). The painter never decodes and never waits for a decode or for I/O, so a
+loaded image's pixels are not always available when a frame is composed.
+
+- `FrameImages` is `describe`, `want`, `retain` and `release`, all
+  non-blocking. `describe` answers the descriptor, with pixels when the store
+  holds them. A source the store answers without pixels and the rasterizer
+  holds no upload of **draws nothing**, and the painter tells the store it is
+  wanted (`want`), once per resolve.
+- `Residency::want(source, hint)` answers the `Refinement` that restores it at
+  the drawn size, and marks it in flight, so a source wanted again before the
+  answer starts nothing; a refinement already in flight counts. The host runs
+  it as any refinement: a job on the executor, under a decode permit, from
+  the kept bytes or the byte tier or the file; its completion is `refined`,
+  lands in the completion channel and wakes the host. A restore that fails
+  (`refine_failed` with no bitmap in the tier) leaves the source
+  `Described::Unavailable` and is not retried.
+- Every adoption describes the wanted sources again. One whose pixels have
+  arrived is drawn: the painter clears what its target holds and forgets the
+  `filter` bakes, both keyed by commit, and asks for a frame. No commit is
+  involved, and the document — load state, natural size, layout, `load` and
+  `error` — never learns of an eviction or a restore.
+- `Painter::awaits_pictures` is true while a drawn source is wanted and
+  unanswered, or a render lost pixels and the commit has not been described
+  again; `Painter::capture` refuses such a frame, and the capturing hosts
+  (`bobcat` CLI `screenshot`, `bobcat-server`) take their turns until it is
+  false, under their frame deadline. A store that has gone answers nothing,
+  so nothing is awaited from it. `prime-radiant`'s `capture_document` has no
+  turns to take: `CommittedFrame::resolve_images` answers how many sources it
+  wanted, and the capture describes them once more and is refused if any is
+  still missing.
+- In the browser every decode was already a local task awaiting the main
+  thread's `Image`; the mailbox's blocking half — `Atomics.wait` on the
+  Render Worker, `Atomics.notify` on the main thread — is gone, and
+  `BrowserDecoder::decode_blocking` answers `DecodeError::Unavailable`.
 
 ## Platform constraints the design answers
 

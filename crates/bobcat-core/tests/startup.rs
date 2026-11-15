@@ -45,12 +45,16 @@ impl ThreadedFetcher {
 }
 
 impl bobcat_core::FrameImages for ThreadedFetcher {
-    fn read(
+    fn describe(
         &self,
         source: &str,
         hint: bobcat_core::ImageSizeHint,
-    ) -> Option<bobcat_core::peniko::ImageData> {
-        self.base.read(source, hint)
+    ) -> Option<bobcat_core::FrameImage> {
+        self.base.describe(source, hint)
+    }
+
+    fn want(&self, source: &str, hint: bobcat_core::ImageSizeHint) {
+        self.base.want(source, hint);
     }
 
     fn retain(&self, frame: &[Arc<str>]) {
@@ -155,12 +159,16 @@ struct PendingFetcher {
 }
 
 impl bobcat_core::FrameImages for PendingFetcher {
-    fn read(
+    fn describe(
         &self,
         source: &str,
         hint: bobcat_core::ImageSizeHint,
-    ) -> Option<bobcat_core::peniko::ImageData> {
-        self.base.read(source, hint)
+    ) -> Option<bobcat_core::FrameImage> {
+        self.base.describe(source, hint)
+    }
+
+    fn want(&self, source: &str, hint: bobcat_core::ImageSizeHint) {
+        self.base.want(source, hint);
     }
 
     fn retain(&self, frame: &[Arc<str>]) {
@@ -644,12 +652,16 @@ struct TwoScriptFetcher {
 }
 
 impl bobcat_core::FrameImages for TwoScriptFetcher {
-    fn read(
+    fn describe(
         &self,
         source: &str,
         hint: bobcat_core::ImageSizeHint,
-    ) -> Option<bobcat_core::peniko::ImageData> {
-        self.base.read(source, hint)
+    ) -> Option<bobcat_core::FrameImage> {
+        self.base.describe(source, hint)
+    }
+
+    fn want(&self, source: &str, hint: bobcat_core::ImageSizeHint) {
+        self.base.want(source, hint);
     }
 
     fn retain(&self, frame: &[Arc<str>]) {

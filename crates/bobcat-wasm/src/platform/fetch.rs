@@ -15,8 +15,8 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{Headers, RequestCache, RequestInit, WorkerGlobalScope};
 
-/// The browser transport. It cannot block, so a synchronous request —
-/// a restore inside a read — has nothing to ask it.
+/// The browser transport. It cannot block, so it answers no synchronous
+/// request: every fetch goes through [`Fetch::fetch`].
 #[derive(Clone, Copy, Debug, Default)]
 pub struct BrowserFetch;
 

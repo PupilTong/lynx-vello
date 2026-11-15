@@ -1972,28 +1972,33 @@ the synthetic source the document filed it as. A frame that names a source not y
 the same not-yet-loaded state a browser shows. Each `LynxView::pump` gives the
 fetcher a moment of its own (`service_images`) to forward loads that completed
 elsewhere, before the sources that turn discovered are named. A painter asks
-the host for nothing at all; it only *reads*, through the seat it holds a
+the host for no load; it only *asks the store*, through the seat it holds a
 `Weak` of, which carries the view's handle on the store the view owns.
-Adopting a commit is that read: the painter resolves the frame's images once
-per commit, synchronously and off the swap-chain window, each with the
-`ImageSizeHint` of its largest draw in the frame — the size a host decodes to.
+Adopting a commit is that question: the painter resolves the frame's images
+once per commit, off the swap-chain window, each with the `ImageSizeHint` of
+its largest draw in the frame — the size a host decodes to. **Nothing it asks
+blocks**: the painter never decodes and never waits for a decode or for I/O.
 It asks `FrameImages::describe` what each source draws as — the bitmap's
 descriptor, with its pixels when the store holds them — and holds those pixels
 only until the rasterizer has its upload, one for every draw of the source
 whatever the sampler. Then it leases the upload, drops the pixels and tells
 the store it may drop its own (`FrameImages::release`); the composed list and
 the filter bakes are only ever lent the pixels. A source whose pixels the store
-dropped draws from its leased upload, and `FrameImages::read` is called only
-when that is not there.
+dropped draws from its leased upload. When that is not there either, the
+frame draws nothing for the source and the painter tells the store it is
+wanted (`FrameImages::want`), once; the store restores it on its own executor
+and wakes the host as a finished load does. Every adoption — every
+`poll_link`, which every painter entry point runs first — describes the wanted
+sources again, and one whose pixels have arrived recomposes the frame and
+re-bakes its `filter`s; no commit is involved, and the document never learns
+of the eviction or the restore. A capture is refused while a drawn picture is
+wanted and unanswered (`Painter::awaits_pictures`); the hosts that capture
+take their turns until it is not, under a deadline of their own.
 A commit whose bitmaps cannot be described in the same step is not adopted,
 because a frame indexes its store's bitmaps by draw order and a frame over
 another commit's table would draw the wrong images; that is also why a released
 view's last frame stays drawable only if the painter adopted it while the view
-was still there — from then on its leases keep the uploads.
-That read may block, because after a reported load it must not miss: a store
-that evicted or released a bitmap restores it inside the call. It happens in `poll_link`,
-which every painter entry point runs first and always before the drawing path
-acquires a swap-chain image, so a restore cannot stall the chain under vsync. `crates/bobcat-resources`
+was still there — from then on its leases keep the uploads. `crates/bobcat-resources`
 is the reference implementation of all of this, and `LynxView::prefetch_images`
 warms sources ahead of the walk that would discover them. A Lynx `<image>`
 rides the same rails: its `src` binds a source, which is what asks the host

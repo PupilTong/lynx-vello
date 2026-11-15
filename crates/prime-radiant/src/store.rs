@@ -7,9 +7,9 @@
 //!
 //! It reports every load inline through the [`terminus::link::ImageReports`] a view
 //! handed it, so a test needs no async runtime at all. What it does honour is
-//! the identity contract: every [`FrameImages::read`] of one
-//! source returns a clone sharing the same `Blob`, which is what the
-//! rasterizer keys its bitmap uploads on.
+//! the identity contract: every [`FrameImages::describe`] of one source
+//! answers a clone sharing the same `Blob`, which is what the rasterizer
+//! keys its bitmap uploads on.
 //!
 //! An SVG document is parsed here, the way a production host parses one:
 //! with the engine's own parser ([`ImageEvent::parse_document`]), and
@@ -18,17 +18,18 @@
 //! over by the page as markup, which reaches the store as a document request
 //! ([`TestImages::request_document`], driven by [`pump_images`]). A
 //! document request keeps nothing, as a production host keeps nothing:
-//! every one is parsed and reported on its own. [`FrameImages::read`] never
-//! answers for either, because the engine never asks.
+//! every one is parsed and reported on its own. [`FrameImages::describe`]
+//! never answers for either, because the engine never asks.
 //!
 //! By default the store keeps every bitmap it answers: a painter's
-//! [`FrameImages::release`] is logged and changes nothing, and
-//! [`FrameImages::describe`] is the trait's own default, a read. A store
-//! built with [`TestImages::releasing`] behaves as a production host does
-//! instead: a release drops the pixels — a copy of the bytes stays behind so a
-//! later read can restore them, as a host restores from its encoded bytes,
-//! into a new blob — and a describe answers the bitmap's descriptor alone
-//! until then.
+//! [`FrameImages::release`] is logged and changes nothing, and every
+//! describe answers the pixels. A store built with [`TestImages::releasing`]
+//! behaves as a production host does instead: a release drops the pixels — a
+//! copy of the bytes stays behind so a later [`FrameImages::want`] can
+//! restore them, as a host restores from its encoded bytes, into a new blob
+//! — and a describe answers the bitmap's descriptor alone until then. The
+//! restore is made inside the want, since this store has nothing to decode,
+//! so the painter's next describe finds the pixels.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -116,8 +117,10 @@ pub struct TestImages {
     /// Reports not yet drained by [`pump_images`], for tests driving the
     /// protocol by hand instead of through a painter.
     pending: Mutex<Vec<ImageEvent>>,
-    /// Every read, with the size hint the frame passed for it, so a test can
-    /// assert on what a store would have been told to decode.
+    /// Every describe a keeping store answered and every restore a
+    /// [`TestImages::releasing`] one made, with the size hint the frame
+    /// passed for it, so a test can assert on what a store would have been
+    /// told to decode.
     reads: Mutex<Vec<(String, ImageSizeHint)>>,
     /// Whether a release drops the pixels ([`TestImages::releasing`]).
     releasing: Cell<bool>,
@@ -144,7 +147,7 @@ impl TestImages {
 
     /// A store whose [`FrameImages::release`] drops the pixels, and whose
     /// [`FrameImages::describe`] then answers the descriptor alone until a
-    /// read restores them into a new blob.
+    /// [`FrameImages::want`] restores them into a new blob.
     #[must_use]
     pub fn releasing() -> Self {
         let store = Self::default();
@@ -153,7 +156,7 @@ impl TestImages {
     }
 
     /// Every source a [`Self::releasing`] store was asked to describe, in
-    /// order. A default store logs a describe as the read it is.
+    /// order. A default store logs a describe in [`Self::reads`] instead.
     #[must_use]
     pub fn described(&self) -> Vec<String> {
         self.described
@@ -228,7 +231,7 @@ impl TestImages {
         self.publish(source.into(), Entry::Failed);
     }
 
-    /// Drops the pixels for `source`, so later reads miss.
+    /// Drops the pixels for `source`, so later describes answer nothing.
     ///
     /// Deliberately keeps the id: a real store's eviction does not retract an
     /// id either, and nothing above the store may observe residency.
@@ -254,8 +257,9 @@ impl TestImages {
         self.retained.lock().expect("test image retain log").clone()
     }
 
-    /// Every read so far with its size hint, in order — the sizes a decoding
-    /// store would have been asked for.
+    /// With its size hint, in order, every describe a default store answered
+    /// and every restore a [`Self::releasing`] store made — the sizes a
+    /// decoding store would have been asked to decode at.
     #[must_use]
     pub fn reads(&self) -> Vec<(String, ImageSizeHint)> {
         self.reads.lock().expect("test image read log").clone()
@@ -319,6 +323,14 @@ impl TestImages {
         self.pending.lock().expect("test image reports").push(event);
     }
 
+    /// Records one entry of [`Self::reads`].
+    fn log_read(&self, source: &str, hint: ImageSizeHint) {
+        self.reads
+            .lock()
+            .expect("test image read log")
+            .push((source.to_owned(), hint));
+    }
+
     /// Takes the reports made since the last drain.
     pub fn drain_events(&self) -> Vec<ImageEvent> {
         std::mem::take(&mut *self.pending.lock().expect("test image reports"))
@@ -326,48 +338,21 @@ impl TestImages {
 }
 
 impl FrameImages for TestImages {
-    /// Returns a clone that shares the published `Blob`, so every read of one
-    /// source carries the same `Blob::id()` — the identity the rasterizer
-    /// keys its bitmap uploads on. The hint is recorded and otherwise ignored: this store
-    /// decodes nothing, so there is nothing to size.
-    ///
-    /// A source a [`TestImages::releasing`] store released is restored: its
-    /// kept bytes become a new blob, as a host's restore decodes again.
-    fn read(&self, source: &str, hint: ImageSizeHint) -> Option<ImageData> {
-        self.reads
-            .lock()
-            .expect("test image read log")
-            .push((source.to_owned(), hint));
-        let mut entries = self.entries();
-        let entry = entries.get_mut(source)?;
-        match entry {
-            Entry::Ready(image) => Some(image.clone()),
-            Entry::Released { descriptor, bytes } => {
-                let image = ImageData {
-                    data: Blob::from(std::mem::take(bytes)),
-                    format: descriptor.format,
-                    alpha_type: descriptor.alpha_type,
-                    width: descriptor.width,
-                    height: descriptor.height,
-                };
-                *entry = Entry::Ready(image.clone());
-                Some(image)
-            }
-            Entry::Pending | Entry::Svg(_) | Entry::Failed => None,
-        }
-    }
-
-    /// A default store answers a read, as the trait's default does; a
-    /// [`TestImages::releasing`] one answers a released source's descriptor
-    /// without its pixels, and logs the describe.
+    /// Answers a clone that shares the published `Blob`, so every describe
+    /// of one source carries the same `Blob::id()` — the identity the
+    /// rasterizer keys its bitmap uploads on. A default store records the
+    /// hint and otherwise ignores it: it decodes nothing, so there is
+    /// nothing to size. A [`TestImages::releasing`] one answers a released
+    /// source's descriptor without its pixels, and logs the describe.
     fn describe(&self, source: &str, hint: ImageSizeHint) -> Option<FrameImage> {
-        if !self.releasing.get() {
-            return self.read(source, hint).map(FrameImage::resident);
+        if self.releasing.get() {
+            self.described
+                .lock()
+                .expect("test image describe log")
+                .push(source.to_owned());
+        } else {
+            self.log_read(source, hint);
         }
-        self.described
-            .lock()
-            .expect("test image describe log")
-            .push(source.to_owned());
         match self.entries().get(source)? {
             Entry::Ready(image) => Some(FrameImage::resident(image.clone())),
             Entry::Released { descriptor, .. } => Some(FrameImage {
@@ -376,6 +361,30 @@ impl FrameImages for TestImages {
             }),
             Entry::Pending | Entry::Svg(_) | Entry::Failed => None,
         }
+    }
+
+    /// Restores a released source at once: its kept bytes become a new
+    /// blob, as a host's restore decodes again, and the next describe
+    /// answers them. Logged with its hint. A source the store holds the
+    /// pixels of, or never released, is not restored.
+    fn want(&self, source: &str, hint: ImageSizeHint) {
+        let mut entries = self.entries();
+        let Some(entry) = entries.get_mut(source) else {
+            return;
+        };
+        let Entry::Released { descriptor, bytes } = entry else {
+            return;
+        };
+        let image = ImageData {
+            data: Blob::from(std::mem::take(bytes)),
+            format: descriptor.format,
+            alpha_type: descriptor.alpha_type,
+            width: descriptor.width,
+            height: descriptor.height,
+        };
+        *entry = Entry::Ready(image);
+        drop(entries);
+        self.log_read(source, hint);
     }
 
     /// Logs the release; a [`TestImages::releasing`] store drops the
@@ -511,7 +520,7 @@ mod tests {
     }
 
     /// The store parses a published document as a host does: a well-formed
-    /// one is reported as the parsed document, which no read answers for,
+    /// one is reported as the parsed document, which no describe answers for,
     /// and one that does not parse is reported as a failure.
     #[test]
     fn a_published_svg_is_reported_parsed_and_a_malformed_one_failed() {
@@ -532,13 +541,13 @@ mod tests {
         );
         assert_eq!(store.len(), 1, "only the parsed document is held");
         assert!(
-            terminus::link::FrameImages::read(
+            terminus::link::FrameImages::describe(
                 &store,
                 "app:///icon.svg",
                 terminus::link::ImageSizeHint::UNBOUNDED
             )
             .is_none(),
-            "the engine draws a document itself and never reads it"
+            "the engine draws a document itself and never asks for it"
         );
     }
 

@@ -644,11 +644,17 @@ the fork's author grammar, so a `backdrop-filter` element inside a
 stop at it. Ruled, and recorded in `docs/tracking/deviations.md`.
 
 The image seam is the `FrameImages` trait in `crates/terminus/src/render/image.rs` —
-`read(source, ImageSizeHint)` and `retain(frame)` — with `ImageReports`,
-`ImageInbox`, `ImageEvent` and the `NoImages` no-op store beside it. The
-document requests sources through `take_wanted_images`, receives answers
-through `apply_image_events`, and retains no pixel: the store is the
-consumer's, handed to `scene` and to the bake path per call.
+`describe(source, ImageSizeHint)`, `want(source, ImageSizeHint)`,
+`retain(frame)` and `release(sources)`, none of which may block — with
+`ImageReports`, `ImageInbox`, `ImageEvent` and the `NoImages` no-op store
+beside it. A source the store answers without pixels and the rasterizer holds
+no upload of draws nothing and is wanted; the store restores it off the
+painter's thread, and the painter's next adoption takes the pixels with no
+commit (the module docs and `painter/images.rs` say how). The document
+requests sources through `take_wanted_images`, receives answers through
+`apply_image_events`, retains no pixel and never learns of an eviction or a
+restore: the store is the consumer's, handed to `scene` and to the bake path
+per call.
 
 The private `painter`/`walker`/`paint`/`shape` modules turn the paint order
 into the retained display list (`paint::display_list`: shapes, paints,

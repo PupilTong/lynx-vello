@@ -17,15 +17,18 @@ use crate::style::PreparsedStyleSheet;
 /// The view services it in [`LynxView::pump`](crate::LynxView::pump) and
 /// nowhere else, past the one call that builds it: that call hands it the
 /// view's startup sources as well, so their IO overlaps everything the
-/// embedder does before its first turn. A painter observing that view reads
-/// pixels out of it through [`FrameImages`](terminus::link::FrameImages) while it
-/// composes, and asks it for nothing.
+/// embedder does before its first turn. A painter observing that view asks
+/// it what each picture draws as through
+/// [`FrameImages`](terminus::link::FrameImages), never blocking, and asks it for
+/// no load; a picture whose pixels it dropped is wanted, and restored off the
+/// painter's thread.
 ///
 /// Source requests are non-blocking: the fetcher resolves the URL, loads and
 /// validates UTF-8 (or returns a pre-parsed sheet), then consumes the concrete
 /// [`SourceCompletion`] to answer whoever asked, without naming them. It owns
 /// any executor its IO needs. Images are reported through
-/// [`ImageReports`](terminus::link::ImageReports), then read during composition.
+/// [`ImageReports`](terminus::link::ImageReports), then described during
+/// composition.
 ///
 /// **A fetcher's base URL must be the view's
 /// [`ViewSources::base_url`](crate::ViewSources::base_url).** Every script

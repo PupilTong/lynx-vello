@@ -83,7 +83,6 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use bobcat_core::peniko::ImageData;
 use bobcat_core::resource::ResourceFetcher;
 use bobcat_core::{FrameImages, ImageReports, ImageResidency, ImageSizeHint, PreparsedStyleSheet};
 use bytes::Bytes;
@@ -524,12 +523,12 @@ pub(crate) struct Shared<P: Platform> {
     notes: Mutex<Vec<String>>,
     /// A test's seam into a background job's transport read, called on the
     /// blocking thread that runs it, so a test can hold a job in flight or
-    /// make one panic. The painter's inline restore never consults it.
+    /// make one panic. Every transport read of an image runs there.
     #[cfg(all(test, not(target_arch = "wasm32")))]
     fetch_hook: Mutex<Option<FetchHook>>,
-    /// A test's stand-in for the platform decoder, consulted only by the
-    /// permit-holding decode of a background job — never by the painter's
-    /// inline restore, which is what keeps that decode uncounted.
+    /// A test's stand-in for the platform decoder, consulted by the
+    /// permit-holding decode of a background job, which is every image
+    /// decode: a load, a refinement, and a wanted source's restore.
     #[cfg(all(test, not(target_arch = "wasm32")))]
     decode_hook: Mutex<Option<DecodeHook>>,
 }
@@ -654,7 +653,8 @@ impl<P: Platform> Shared<P> {
 
     /// Decodes `bytes`, which preprocessing found to be a `format` image
     /// with `header`, at most `max` large, with the platform's decoder,
-    /// blocking the calling thread.
+    /// blocking the calling thread: a pool thread's, never the painter's.
+    #[cfg(not(target_arch = "wasm32"))]
     fn decode_bytes(
         &self,
         bytes: &[u8],
@@ -665,7 +665,8 @@ impl<P: Platform> Shared<P> {
         vant::ImageDecoder::decode_blocking(&*self.decoder, bytes, format, header, max)
     }
 
-    /// [`Self::decode_bytes`] without blocking, for the browser's loads.
+    /// The platform's decoder without blocking, for the browser's loads and
+    /// restores.
     #[cfg(target_arch = "wasm32")]
     async fn decode_bytes_async(
         &self,
@@ -745,7 +746,8 @@ impl<P: Platform> Resources<P> {
     /// transport applies HTTP cache semantics itself; the code cache over
     /// its artifact Store, whatever the transport.
     ///
-    /// `wakeup` is called whenever a load completes between painter turns —
+    /// `wakeup` is called whenever a load, a refinement or a wanted source's
+    /// restore completes between painter turns —
     /// natively from the executor's driver thread, in the browser from the
     /// Render Worker's own task, there being no driver there. Pass the same
     /// wakeup the view was given, so the completion is answered by a turn.
@@ -1312,16 +1314,16 @@ impl<P: Platform> ResourceFetcher for ViewResources<P> {
 }
 
 impl<P: Platform> FrameImages for ViewResources<P> {
-    fn read(&self, source: &str, hint: ImageSizeHint) -> Option<ImageData> {
-        images::read(&self.resources, source, hint)
+    fn describe(&self, source: &str, hint: ImageSizeHint) -> Option<bobcat_core::FrameImage> {
+        images::describe(&self.resources, source, hint)
+    }
+
+    fn want(&self, source: &str, hint: ImageSizeHint) {
+        images::want(&self.resources, source, hint);
     }
 
     fn retain(&self, frame: &[Arc<str>]) {
         images::retain(&self.resources, self.view, frame);
-    }
-
-    fn describe(&self, source: &str, hint: ImageSizeHint) -> Option<bobcat_core::FrameImage> {
-        images::describe(&self.resources, source, hint)
     }
 
     fn release(&self, sources: &[Arc<str>]) {

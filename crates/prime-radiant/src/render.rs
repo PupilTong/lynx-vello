@@ -25,6 +25,10 @@ use crate::image::{Image, ImageError};
 pub enum CaptureError {
     Gpu(GpuError),
     Image(ImageError),
+    /// This many pictures the frame draws were answered without pixels and
+    /// are on their way: the store did not restore them by the second
+    /// describe. A capture never draws a frame without them.
+    PicturesWanted(usize),
 }
 
 impl fmt::Display for CaptureError {
@@ -32,6 +36,10 @@ impl fmt::Display for CaptureError {
         match self {
             Self::Gpu(error) => write!(formatter, "{error}"),
             Self::Image(error) => write!(formatter, "{error}"),
+            Self::PicturesWanted(count) => write!(
+                formatter,
+                "{count} picture(s) the frame draws are wanted and have not arrived"
+            ),
         }
     }
 }
@@ -93,7 +101,17 @@ pub fn capture_document_sized<T: Sync>(
         .committed_frame()
         .expect("`Document::render` always leaves a committed frame retained");
     let (mut images, mut sources) = (Vec::new(), Vec::new());
-    frame.resolve_images(pixels, &mut images, &mut sources);
+    // A source the store answers without pixels is wanted, and a store that
+    // restores inside `want`, as `TestImages` does, answers the second
+    // describe with them. One that restores off this thread has no event
+    // loop here to answer in, so the capture is refused rather than drawn
+    // without the picture.
+    if frame.resolve_images(pixels, &mut images, &mut sources) > 0 {
+        let wanted = frame.resolve_images(pixels, &mut images, &mut sources);
+        if wanted > 0 {
+            return Err(CaptureError::PicturesWanted(wanted));
+        }
+    }
     // The vector textures first, since a filter bake may draw them; then,
     // with no offsets, no generation and no timeline reading, the filter
     // bakes: a capture composes the frame exactly as it was committed. They
