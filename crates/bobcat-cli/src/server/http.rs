@@ -12,6 +12,7 @@ use axum::http::header::CACHE_CONTROL;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use bobcat_core::NativeModule;
 use serde::Serialize;
 use serde_json::{Value, json};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
@@ -140,6 +141,24 @@ impl IntoResponse for ApiError {
 /// Requests remain concurrent at the HTTP layer; capture crosses one bounded
 /// queue to the thread that owns the non-`Send` Bobcat view handle.
 pub async fn serve(port: &str) -> Result<(), ServerError> {
+    serve_with_native_modules(port, Vec::new).await
+}
+
+/// Runs the screenshot server with embedder-provided native modules.
+///
+/// The factory moves to the capture thread and runs once for each new view.
+/// Its modules stay on that thread, so they may own thread-local state such
+/// as `Rc`s. The view receives the modules in the order the factory returns
+/// them, including any ES modules to import before the background entry.
+///
+/// # Errors
+///
+/// Returns the same startup, I/O, and shutdown errors as [`serve`]. A view
+/// that rejects its modules fails its capture through the usual HTTP path.
+pub async fn serve_with_native_modules(
+    port: &str,
+    create_modules: impl FnMut() -> Vec<Box<dyn NativeModule>> + Send + 'static,
+) -> Result<(), ServerError> {
     let port = parse_port(port)?;
     // The platform's fonts are discovered once per process, and the first
     // capture's layout would otherwise do it on the Lynx main thread, inside
@@ -148,7 +167,7 @@ pub async fn serve(port: &str) -> Result<(), ServerError> {
     tokio::task::spawn_blocking(bobcat_core::preload_system_fonts);
     let screenshot_store = ScreenshotStore::from_env()?;
     let (ipv4_listener, ipv6_listener) = bind_listeners(port)?;
-    let headless = Arc::new(CaptureExecutor::new()?);
+    let headless = Arc::new(CaptureExecutor::new(create_modules)?);
     let worker_failure = headless
         .take_failure_receiver()
         .map_err(|error| ServerError::HeadlessWorkerUnavailable(error.to_string()))?;
@@ -805,7 +824,7 @@ mod tests {
     #[tokio::test]
     async fn real_multipart_xml_and_zip_captures_use_the_requested_viewport() {
         use std::io::{Cursor, Write};
-        let headless = Arc::new(CaptureExecutor::new().unwrap());
+        let headless = Arc::new(CaptureExecutor::new(Vec::new).unwrap());
         let xml = br#"<lynx engine-version="4.2">
           <script thread="main">
             globalThis.renderPage = function () {

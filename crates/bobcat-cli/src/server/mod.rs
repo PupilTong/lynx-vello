@@ -12,5 +12,5 @@ mod http;
 mod remote;
 mod tos;
 
-pub use http::{ServerError, serve};
+pub use http::{ServerError, serve, serve_with_native_modules};
 pub use tos::TosConfigError;
