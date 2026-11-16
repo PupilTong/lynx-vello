@@ -12,7 +12,9 @@ use axum::http::header::CACHE_CONTROL;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use bobcat_core::NativeModule;
+use bobcat_core::resource::ResourceFetcher;
+use bobcat_core::{ImageReports, NativeModule, ViewSources};
+use bobcat_resources::Resources;
 use serde::Serialize;
 use serde_json::{Value, json};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
@@ -20,6 +22,7 @@ use tokio::net::TcpListener;
 use tokio::sync::{oneshot, watch};
 use url::Url;
 
+use super::CaptureView;
 use super::tos::{ScreenshotStore, TosConfigError};
 use crate::server::capture::{
     CaptureExecutor, CaptureFailure, CaptureInput, CaptureQueueError, CaptureRequest,
@@ -157,8 +160,34 @@ pub async fn serve(port: &str) -> Result<(), ServerError> {
 /// that rejects its modules fails its capture through the usual HTTP path.
 pub async fn serve_with_native_modules(
     port: &str,
-    create_modules: impl FnMut() -> Vec<Box<dyn NativeModule>> + Send + 'static,
+    mut create_modules: impl FnMut() -> Vec<Box<dyn NativeModule>> + Send + 'static,
 ) -> Result<(), ServerError> {
+    serve_with_view_factory(port, move |resources, _sources| CaptureView {
+        before_capture: None,
+        resources: move |reports| resources.for_view(reports),
+        native_modules: create_modules(),
+    })
+    .await
+}
+
+/// Runs the screenshot server with per-view resources and native modules.
+///
+/// The factory receives the resource scope containing the decoded page and
+/// its startup sources. It can wrap the scope's fetcher to supply external
+/// frames and share their producer with a native module. The resulting
+/// fetcher and modules are constructed and serviced on the capture thread.
+///
+/// # Errors
+///
+/// Returns the same startup, I/O, and shutdown errors as [`serve`].
+pub async fn serve_with_view_factory<B, F>(
+    port: &str,
+    create_view: impl FnMut(Resources, &mut ViewSources) -> CaptureView<B> + Send + 'static,
+) -> Result<(), ServerError>
+where
+    B: FnOnce(ImageReports) -> F,
+    F: ResourceFetcher + 'static,
+{
     let port = parse_port(port)?;
     // The platform's fonts are discovered once per process, and the first
     // capture's layout would otherwise do it on the Lynx main thread, inside
@@ -167,7 +196,7 @@ pub async fn serve_with_native_modules(
     tokio::task::spawn_blocking(bobcat_core::preload_system_fonts);
     let screenshot_store = ScreenshotStore::from_env()?;
     let (ipv4_listener, ipv6_listener) = bind_listeners(port)?;
-    let headless = Arc::new(CaptureExecutor::new(create_modules)?);
+    let headless = Arc::new(CaptureExecutor::with_view_factory(create_view)?);
     let worker_failure = headless
         .take_failure_receiver()
         .map_err(|error| ServerError::HeadlessWorkerUnavailable(error.to_string()))?;

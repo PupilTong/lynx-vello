@@ -108,6 +108,9 @@ background section is registered under the native in-memory URL
 ## The `server` feature
 
 Rust embedders can call `server::serve_with_native_modules(port, factory)`.
+Embedders supplying external frames use `serve_with_view_factory` to build a
+view-local resource fetcher and native modules sharing the frame producer. An optional per-view capture barrier finishes
+pending host work while the view is pumped, before the final draw.
 The capture thread calls the factory for each view and passes its modules to
 `LynxGroup::create_lynx_view`. Only the factory crosses threads. The stock
 `bobcat-server` uses `server::serve(port)`, which supplies an empty module list.
