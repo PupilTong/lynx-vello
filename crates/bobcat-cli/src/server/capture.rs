@@ -718,7 +718,7 @@ mod tests {
         }
 
         impl NativeModule for Probe {
-            fn name(&self) -> &str {
+            fn name(&self) -> &'static str {
                 "Probe"
             }
 
