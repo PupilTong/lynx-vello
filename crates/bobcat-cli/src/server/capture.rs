@@ -15,14 +15,17 @@ use std::sync::{Arc, Mutex, PoisonError, TryLockError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use bobcat_core::resource::ResourceFetcher;
 use bobcat_core::{
-    DrawTarget, EngineEvent, EventRequester, LynxGroup, LynxView, NativeModule, Painter,
-    ScreenMetrics, Screenshot, StyleThreads,
+    DrawTarget, EngineEvent, EventRequester, ImageReports, LynxGroup, LynxView, Painter,
+    ScreenMetrics, Screenshot, StyleThreads, ViewSources,
 };
-use bobcat_resources::{Resources, ResourcesConfig, ViewResources};
+use bobcat_resources::{Resources, ResourcesConfig};
 use bobcat_source::{DeferredPage, PageSource, ZipSource};
 use tokio::sync::oneshot;
 use url::Url;
+
+use super::CaptureView;
 
 #[derive(Default)]
 struct CaptureWakeup(tokio::sync::Notify);
@@ -133,10 +136,25 @@ pub(crate) struct CaptureExecutor {
 }
 
 impl CaptureExecutor {
+    #[cfg(test)]
     pub(crate) fn new(
-        create_modules: impl FnMut() -> Vec<Box<dyn NativeModule>> + Send + 'static,
+        mut create_modules: impl FnMut() -> Vec<Box<dyn bobcat_core::NativeModule>> + Send + 'static,
     ) -> io::Result<Self> {
-        Self::with_worker_main(move |jobs| run_capture_worker(jobs, create_modules))
+        Self::with_view_factory(move |resources, _| CaptureView {
+            before_capture: None,
+            resources: move |reports| resources.for_view(reports),
+            native_modules: create_modules(),
+        })
+    }
+
+    pub(crate) fn with_view_factory<B, F>(
+        create_view: impl FnMut(Resources, &mut ViewSources) -> CaptureView<B> + Send + 'static,
+    ) -> io::Result<Self>
+    where
+        B: FnOnce(ImageReports) -> F,
+        F: ResourceFetcher + 'static,
+    {
+        Self::with_worker_main(move |jobs| run_capture_worker(jobs, create_view))
     }
 
     pub(crate) fn with_worker_main<F>(worker_main: F) -> io::Result<Self>
@@ -291,10 +309,13 @@ fn close_and_discard_queue(
     while jobs.try_recv().is_ok() {}
 }
 
-fn run_capture_worker(
+fn run_capture_worker<B, F>(
     jobs: &Mutex<Receiver<CaptureJob>>,
-    mut create_modules: impl FnMut() -> Vec<Box<dyn NativeModule>>,
-) {
+    mut create_view: impl FnMut(Resources, &mut ViewSources) -> CaptureView<B>,
+) where
+    B: FnOnce(ImageReports) -> F,
+    F: ResourceFetcher + 'static,
+{
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -309,7 +330,7 @@ fn run_capture_worker(
         if job.response.is_closed() {
             continue;
         }
-        let result = runtime.block_on(capture_page(&job.request, &mut create_modules));
+        let result = runtime.block_on(capture_page(&job.request, &mut create_view));
         let _ = job.response.send(result);
     }
 }
@@ -343,10 +364,14 @@ fn prepare_source(
     Ok((page, archive))
 }
 
-async fn capture_page(
+async fn capture_page<B, F>(
     request: &CaptureRequest,
-    create_modules: &mut impl FnMut() -> Vec<Box<dyn NativeModule>>,
-) -> Result<Screenshot, CaptureFailure> {
+    create_view: &mut impl FnMut(Resources, &mut ViewSources) -> CaptureView<B>,
+) -> Result<Screenshot, CaptureFailure>
+where
+    B: FnOnce(ImageReports) -> F,
+    F: ResourceFetcher + 'static,
+{
     let (page, archive) = prepare_source(request)?;
     let wakeup = Arc::new(CaptureWakeup::default());
     let resources = Resources::new(resources_config(&page, request.timeout), {
@@ -367,7 +392,7 @@ async fn capture_page(
     }
     // A capture has no screen, so `SystemInfo` reports the requested capture
     // size in physical pixels, named as such.
-    let sources = page.view_sources(
+    let mut sources = page.view_sources(
         ScreenMetrics::for_viewport(
             f32::from(request.width),
             f32::from(request.height),
@@ -378,34 +403,36 @@ async fn capture_page(
     drop(page);
 
     let startup_deadline = tokio::time::Instant::now() + request.timeout;
-    let (mut view, mut painter) = tokio::time::timeout_at(startup_deadline, async {
-        // Preserve per-capture runtime isolation: the view keeps this
-        // job's group alive until capture finishes and the view drops.
-        let group = LynxGroup::new(Arc::clone(&wakeup), StyleThreads::Auto).await?;
-        let view = group.create_lynx_view(
-            f32::from(request.width),
-            f32::from(request.height),
-            DEVICE_PIXEL_RATIO,
-            resources.builder(),
-            create_modules(),
-            sources,
-        )?;
-        let mut painter = Painter::new(
-            DrawTarget::Offscreen,
-            f32::from(request.width),
-            f32::from(request.height),
-            DEVICE_PIXEL_RATIO,
-        )
-        .await?;
-        painter.attach(&view)?;
-        Ok::<_, bobcat_core::LynxViewError>((view, painter))
-    })
-    .await
-    .map_err(|_| CaptureFailure::timeout("page startup", request.timeout))?
-    .map_err(|source| CaptureFailure::StartView {
-        url: request.url.clone(),
-        source: Box::new(source),
-    })?;
+    let (mut view, mut painter, before_capture) =
+        tokio::time::timeout_at(startup_deadline, async {
+            // Preserve per-capture runtime isolation: the view keeps this
+            // job's group alive until capture finishes and the view drops.
+            let group = LynxGroup::new(Arc::clone(&wakeup), StyleThreads::Auto).await?;
+            let host = create_view(resources, &mut sources);
+            let view = group.create_lynx_view(
+                f32::from(request.width),
+                f32::from(request.height),
+                DEVICE_PIXEL_RATIO,
+                host.resources,
+                host.native_modules,
+                sources,
+            )?;
+            let mut painter = Painter::with_platform_frames(
+                DrawTarget::Offscreen,
+                f32::from(request.width),
+                f32::from(request.height),
+                DEVICE_PIXEL_RATIO,
+            )
+            .await?;
+            painter.attach(&view)?;
+            Ok::<_, bobcat_core::LynxViewError>((view, painter, host.before_capture))
+        })
+        .await
+        .map_err(|_| CaptureFailure::timeout("page startup", request.timeout))?
+        .map_err(|source| CaptureFailure::StartView {
+            url: request.url.clone(),
+            source: Box::new(source),
+        })?;
 
     tokio::time::timeout_at(startup_deadline, async {
         loop {
@@ -432,6 +459,11 @@ async fn capture_page(
     )
     .await?;
 
+    if let Some(before_capture) = before_capture {
+        await_host(before_capture, &mut view, &wakeup, request).await?;
+        frame(&mut view, &mut painter, &wakeup, &request.url, true).await?;
+    }
+
     pictures(&mut view, &mut painter, &wakeup, &request.url).await?;
     let screenshot = painter.capture().map_err(|source| CaptureFailure::Render {
         url: request.url.clone(),
@@ -441,6 +473,26 @@ async fn capture_page(
     drop(painter);
     drop(view);
     Ok(screenshot)
+}
+
+async fn await_host<F: ResourceFetcher + 'static>(
+    before_capture: super::BeforeCapture,
+    view: &mut LynxView<F>,
+    wakeup: &CaptureWakeup,
+    request: &CaptureRequest,
+) -> Result<(), CaptureFailure> {
+    let mut ready = before_capture();
+    tokio::time::timeout(request.timeout, async {
+        loop {
+            check_events(view, &request.url)?;
+            tokio::select! {
+                () = &mut ready => break Ok::<_, CaptureFailure>(()),
+                () = wakeup.0.notified() => {}
+            }
+        }
+    })
+    .await
+    .map_err(|_| CaptureFailure::timeout("host resources", request.timeout))?
 }
 
 fn resources_config(page: &DeferredPage, timeout: Duration) -> ResourcesConfig {
@@ -454,9 +506,9 @@ fn resources_config(page: &DeferredPage, timeout: Duration) -> ResourcesConfig {
     }
 }
 
-async fn settle(
-    view: &mut LynxView<ViewResources>,
-    painter: &mut Painter,
+async fn settle<F: ResourceFetcher + 'static>(
+    view: &mut LynxView<F>,
+    painter: &mut Painter<F::PlatformFrame>,
     wakeup: &CaptureWakeup,
     url: &Url,
     mut remaining: Duration,
@@ -486,9 +538,9 @@ async fn settle(
 /// resource system wakes it when a load completes, so the wakeup is what the
 /// wait sleeps on. A frame the view has not serviced by [`FRAME_DEADLINE`] is
 /// drawn from what the view had published.
-async fn frame(
-    view: &mut LynxView<ViewResources>,
-    painter: &mut Painter,
+async fn frame<F: ResourceFetcher + 'static>(
+    view: &mut LynxView<F>,
+    painter: &mut Painter<F::PlatformFrame>,
     wakeup: &CaptureWakeup,
     url: &Url,
     force: bool,
@@ -521,9 +573,9 @@ async fn frame(
 /// wakes this host when it lands. Bounded by [`FRAME_DEADLINE`]; past it the
 /// capture that follows is refused rather than returning a frame without
 /// the picture.
-async fn pictures(
-    view: &mut LynxView<ViewResources>,
-    painter: &mut Painter,
+async fn pictures<F: ResourceFetcher + 'static>(
+    view: &mut LynxView<F>,
+    painter: &mut Painter<F::PlatformFrame>,
     wakeup: &CaptureWakeup,
     url: &Url,
 ) -> Result<(), CaptureFailure> {
@@ -542,7 +594,10 @@ async fn pictures(
     }
 }
 
-fn check_events(view: &mut LynxView<ViewResources>, url: &Url) -> Result<bool, CaptureFailure> {
+fn check_events<F: ResourceFetcher + 'static>(
+    view: &mut LynxView<F>,
+    url: &Url,
+) -> Result<bool, CaptureFailure> {
     let mut finished = false;
     for event in view.pump() {
         match event {
@@ -717,7 +772,7 @@ mod tests {
             calls: Sender<u32>,
         }
 
-        impl NativeModule for Probe {
+        impl bobcat_core::NativeModule for Probe {
             fn name(&self) -> &'static str {
                 "Probe"
             }
@@ -766,6 +821,95 @@ mod tests {
                 .unwrap();
             assert_eq!(recorded.try_recv().unwrap(), expected);
         }
+        executor.shutdown().unwrap();
+    }
+
+    #[tokio::test]
+    async fn capture_uses_the_host_resource_scope_and_startup_sources() {
+        use std::cell::RefCell;
+
+        use bobcat_core::{ModuleCall, ModuleCallback, NativeModule};
+
+        struct Probe {
+            start: RefCell<Option<oneshot::Sender<ModuleCallback>>>,
+            done: RefCell<Option<oneshot::Sender<()>>>,
+        }
+        impl NativeModule for Probe {
+            fn name(&self) -> &'static str {
+                "Probe"
+            }
+            fn methods(&self) -> Vec<String> {
+                vec!["start".into(), "done".into()]
+            }
+            fn invoke(&self, call: ModuleCall) {
+                match call.method.as_str() {
+                    "start" => self
+                        .start
+                        .take()
+                        .unwrap()
+                        .send(call.callbacks.into_iter().next().unwrap())
+                        .unwrap(),
+                    "done" => self.done.take().unwrap().send(()).unwrap(),
+                    _ => unreachable!(),
+                }
+            }
+        }
+        let executor = CaptureExecutor::with_view_factory(|resources, sources| {
+            let url = resources
+                .register(
+                    "app:///host.css",
+                    "view { width: 8px; height: 8px; background: #00ff00; }",
+                    Some("text/css"),
+                )
+                .unwrap();
+            sources.style_sheets.push(url.into());
+            let (start, callback) = oneshot::channel::<ModuleCallback>();
+            let (done, ready) = oneshot::channel();
+            CaptureView {
+                before_capture: Some(Box::new(|| {
+                    Box::pin(async move {
+                        callback.await.unwrap().invoke("[]".to_owned());
+                        ready.await.unwrap();
+                    })
+                })),
+                native_modules: vec![Box::new(Probe {
+                    start: RefCell::new(Some(start)),
+                    done: RefCell::new(Some(done)),
+                })],
+                resources: move |reports| resources.for_view(reports),
+            }
+        })
+        .unwrap();
+        let xml = br#"<lynx engine-version="4.2"><script thread="main">
+            import { callNativeModule } from 'bobcat:native-modules';
+            globalThis.renderPage = function () {
+                const page = __CreatePage('0', 0);
+                __FlushElementTree(page);
+                callNativeModule('Probe', 'start', [() => {
+                    __AppendElement(page, __CreateView(0));
+                    __FlushElementTree(page);
+                    callNativeModule('Probe', 'done', []);
+                }]);
+            };
+        </script></lynx>"#;
+        let screenshot = executor
+            .capture(CaptureRequest {
+                input: CaptureInput::Bytes(xml.to_vec()),
+                url: Url::parse("file:///host.lynxml").unwrap(),
+                width: 8,
+                height: 8,
+                timeout: Duration::from_secs(30),
+                ..request()
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            screenshot
+                .pixels
+                .chunks_exact(4)
+                .all(|pixel| pixel == [0, 255, 0, 255])
+        );
         executor.shutdown().unwrap();
     }
 
