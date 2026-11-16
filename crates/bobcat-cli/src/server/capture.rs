@@ -16,8 +16,8 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use bobcat_core::{
-    DrawTarget, EngineEvent, EventRequester, LynxGroup, LynxView, Painter, ScreenMetrics,
-    Screenshot, StyleThreads,
+    DrawTarget, EngineEvent, EventRequester, LynxGroup, LynxView, NativeModule, Painter,
+    ScreenMetrics, Screenshot, StyleThreads,
 };
 use bobcat_resources::{Resources, ResourcesConfig, ViewResources};
 use bobcat_source::{DeferredPage, PageSource, ZipSource};
@@ -133,8 +133,10 @@ pub(crate) struct CaptureExecutor {
 }
 
 impl CaptureExecutor {
-    pub(crate) fn new() -> io::Result<Self> {
-        Self::with_worker_main(run_capture_worker)
+    pub(crate) fn new(
+        create_modules: impl FnMut() -> Vec<Box<dyn NativeModule>> + Send + 'static,
+    ) -> io::Result<Self> {
+        Self::with_worker_main(move |jobs| run_capture_worker(jobs, create_modules))
     }
 
     pub(crate) fn with_worker_main<F>(worker_main: F) -> io::Result<Self>
@@ -289,7 +291,10 @@ fn close_and_discard_queue(
     while jobs.try_recv().is_ok() {}
 }
 
-fn run_capture_worker(jobs: &Mutex<Receiver<CaptureJob>>) {
+fn run_capture_worker(
+    jobs: &Mutex<Receiver<CaptureJob>>,
+    mut create_modules: impl FnMut() -> Vec<Box<dyn NativeModule>>,
+) {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -304,7 +309,7 @@ fn run_capture_worker(jobs: &Mutex<Receiver<CaptureJob>>) {
         if job.response.is_closed() {
             continue;
         }
-        let result = runtime.block_on(capture_page(&job.request));
+        let result = runtime.block_on(capture_page(&job.request, &mut create_modules));
         let _ = job.response.send(result);
     }
 }
@@ -338,7 +343,10 @@ fn prepare_source(
     Ok((page, archive))
 }
 
-async fn capture_page(request: &CaptureRequest) -> Result<Screenshot, CaptureFailure> {
+async fn capture_page(
+    request: &CaptureRequest,
+    create_modules: &mut impl FnMut() -> Vec<Box<dyn NativeModule>>,
+) -> Result<Screenshot, CaptureFailure> {
     let (page, archive) = prepare_source(request)?;
     let wakeup = Arc::new(CaptureWakeup::default());
     let resources = Resources::new(resources_config(&page, request.timeout), {
@@ -379,7 +387,7 @@ async fn capture_page(request: &CaptureRequest) -> Result<Screenshot, CaptureFai
             f32::from(request.height),
             DEVICE_PIXEL_RATIO,
             resources.builder(),
-            Vec::new(),
+            create_modules(),
             sources,
         )?;
         let mut painter = Painter::new(
@@ -700,9 +708,70 @@ mod tests {
         assert!(matches!(error, CaptureQueueError::ShuttingDown));
     }
 
+    #[tokio::test]
+    async fn each_capture_invokes_its_own_native_module() {
+        use std::rc::Rc;
+
+        struct Probe {
+            instance: Rc<u32>,
+            calls: Sender<u32>,
+        }
+
+        impl NativeModule for Probe {
+            fn name(&self) -> &'static str {
+                "Probe"
+            }
+
+            fn methods(&self) -> Vec<String> {
+                vec!["record".to_owned()]
+            }
+
+            fn invoke(&self, _: bobcat_core::ModuleCall) {
+                self.calls.send(*self.instance).unwrap();
+            }
+        }
+
+        let (calls, recorded) = mpsc::channel();
+        let mut count = 0;
+        let executor = CaptureExecutor::new(move || {
+            count += 1;
+            vec![Box::new(Probe {
+                instance: Rc::new(count),
+                calls: calls.clone(),
+            })]
+        })
+        .unwrap();
+        let xml = br#"<lynx engine-version="4.2">
+            <script thread="main">
+                import { callNativeModule } from 'bobcat:native-modules';
+                globalThis.renderPage = function () {
+                    callNativeModule('Probe', 'record', []);
+                    const page = __CreatePage('0', 0);
+                    __FlushElementTree(page);
+                };
+            </script>
+        </lynx>"#;
+        for expected in [1, 2] {
+            executor
+                .capture(CaptureRequest {
+                    input: CaptureInput::Bytes(xml.to_vec()),
+                    url: Url::parse("file:///probe.lynxml").unwrap(),
+                    width: 8,
+                    height: 8,
+                    timeout: Duration::from_secs(30),
+                    ..request()
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(recorded.try_recv().unwrap(), expected);
+        }
+        executor.shutdown().unwrap();
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn a_real_web_bundle_renders_to_the_fixed_bmp_contract() {
-        let executor = CaptureExecutor::new().expect("start capture owner thread");
+        let executor = CaptureExecutor::new(Vec::new).expect("start capture owner thread");
         let result = executor
             .capture(CaptureRequest {
                 input: CaptureInput::Bytes(fixtures::fixture("basic-class-selector").page.to_vec()),
@@ -740,7 +809,7 @@ mod tests {
     /// send; `crates/bobcat-source/tests/reactlynx_runtime.rs` drives it.
     #[tokio::test(flavor = "current_thread")]
     async fn a_viewpager_card_renders_its_selected_page() {
-        let executor = CaptureExecutor::new().expect("start capture owner thread");
+        let executor = CaptureExecutor::new(Vec::new).expect("start capture owner thread");
         let result = executor
             .capture(CaptureRequest {
                 input: CaptureInput::Bytes(fixtures::fixture("react-viewpager").page.to_vec()),
@@ -791,7 +860,7 @@ mod tests {
     /// first dot and a yellow second.
     #[tokio::test(flavor = "current_thread")]
     async fn a_swiper_card_renders_its_current_items() {
-        let executor = CaptureExecutor::new().expect("start capture owner thread");
+        let executor = CaptureExecutor::new(Vec::new).expect("start capture owner thread");
         let result = executor
             .capture(CaptureRequest {
                 input: CaptureInput::Bytes(fixtures::fixture("react-swiper").page.to_vec()),
@@ -843,7 +912,7 @@ mod tests {
     /// `crates/bobcat-source/tests/reactlynx_runtime.rs` drives it.
     #[tokio::test(flavor = "current_thread")]
     async fn a_refresh_view_card_opens_on_its_content() {
-        let executor = CaptureExecutor::new().expect("start capture owner thread");
+        let executor = CaptureExecutor::new(Vec::new).expect("start capture owner thread");
         let result = executor
             .capture(CaptureRequest {
                 input: CaptureInput::Bytes(fixtures::fixture("react-refresh-view").page.to_vec()),
@@ -889,7 +958,7 @@ mod tests {
     /// `crates/bobcat-source/tests/reactlynx_runtime.rs` drives it.
     #[tokio::test(flavor = "current_thread")]
     async fn a_scroll_coordinator_card_renders_its_header_over_the_slot() {
-        let executor = CaptureExecutor::new().expect("start capture owner thread");
+        let executor = CaptureExecutor::new(Vec::new).expect("start capture owner thread");
         let result = executor
             .capture(CaptureRequest {
                 input: CaptureInput::Bytes(
@@ -938,7 +1007,7 @@ mod tests {
     /// `entry` range ends, where `entry 100%` puts opacity 0.25.
     #[tokio::test(flavor = "current_thread")]
     async fn a_scroll_timeline_card_renders_at_its_scroll_progress() {
-        let executor = CaptureExecutor::new().expect("start capture owner thread");
+        let executor = CaptureExecutor::new(Vec::new).expect("start capture owner thread");
         let result = executor
             .capture(CaptureRequest {
                 input: CaptureInput::Bytes(

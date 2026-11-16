@@ -107,6 +107,11 @@ background section is registered under the native in-memory URL
 
 ## The `server` feature
 
+Rust embedders can call `server::serve_with_native_modules(port, factory)`.
+The capture thread calls the factory for each view and passes its modules to
+`LynxGroup::create_lynx_view`. Only the factory crosses threads. The stock
+`bobcat-server` uses `server::serve(port)`, which supplies an empty module list.
+
 The `bobcat-server` HTTP screenshot **embedder** in the same crate, not runtime
 infrastructure inside `bobcat-core`. It follows UI Judge's public capture
 surface: `GET /health` and multipart `POST /screenshot/lynxml`,
