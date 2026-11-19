@@ -11,9 +11,9 @@ use parley::{
 use skrifa::instance::{LocationRef, NormalizedCoord, Size};
 use skrifa::outline::{DrawSettings, OutlinePen};
 use skrifa::{FontRef, GlyphId, MetadataProvider};
-use terminus::link::kurbo::Rect;
 
-use crate::{Direction, TextAlign, TextBaseline};
+use super::{Direction, TextAlign, TextBaseline};
+use crate::kurbo::Rect;
 
 /// The resolved `font`: what the CSS `font` shorthand names, every keyword
 /// already a number. Cloning shares the family list.
@@ -310,14 +310,14 @@ impl OutlinePen for BoundsPen {
     }
 
     fn line_to(&mut self, x: f32, y: f32) {
-        use terminus::link::kurbo::{Line as Segment, ParamCurveExtrema};
+        use crate::kurbo::{Line as Segment, ParamCurveExtrema};
         let end = (f64::from(x), f64::from(y));
         self.add(Segment::new(self.current, end).bounding_box());
         self.current = end;
     }
 
     fn quad_to(&mut self, cx0: f32, cy0: f32, x: f32, y: f32) {
-        use terminus::link::kurbo::{ParamCurveExtrema, QuadBez};
+        use crate::kurbo::{ParamCurveExtrema, QuadBez};
         let end = (f64::from(x), f64::from(y));
         let quad = QuadBez::new(self.current, (f64::from(cx0), f64::from(cy0)), end);
         self.add(quad.bounding_box());
@@ -325,7 +325,7 @@ impl OutlinePen for BoundsPen {
     }
 
     fn curve_to(&mut self, cx0: f32, cy0: f32, cx1: f32, cy1: f32, x: f32, y: f32) {
-        use terminus::link::kurbo::{CubicBez, ParamCurveExtrema};
+        use crate::kurbo::{CubicBez, ParamCurveExtrema};
         let end = (f64::from(x), f64::from(y));
         let cubic = CubicBez::new(
             self.current,

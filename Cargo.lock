@@ -378,15 +378,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bobcat-canvas"
-version = "0.1.0"
-dependencies = [
- "parley",
- "skrifa",
- "terminus",
-]
-
-[[package]]
 name = "bobcat-cli"
 version = "0.1.0"
 dependencies = [
@@ -424,7 +415,6 @@ dependencies = [
 name = "bobcat-core"
 version = "0.1.0"
 dependencies = [
- "bobcat-canvas",
  "bobcat-source",
  "bytes",
  "codspeed-divan-compat",
@@ -5081,6 +5071,7 @@ dependencies = [
  "seldon",
  "selectors",
  "siphasher",
+ "skrifa",
  "slab",
  "smallvec",
  "stylo",

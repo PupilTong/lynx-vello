@@ -11,13 +11,13 @@
 
 use std::rc::{Rc, Weak};
 
-use bobcat_canvas::{
-    CanvasError, CompositeOp, Direction, FillRule, Gradient, Image, LineCap, LineJoin, Path,
-    Pattern, Repetition, SmoothingQuality, Style, TextAlign, TextBaseline,
-};
 use quickjs_rust_bridge::{HostArgument, HostValue};
 use smallvec::SmallVec;
 use terminus::link::NodeId;
+use terminus::link::html::canvas::{
+    CanvasError, CompositeOp, Direction, FillRule, Gradient, Image, LineCap, LineJoin, Path,
+    Pattern, Repetition, SmoothingQuality, Style, TextAlign, TextBaseline,
+};
 
 use super::css::{parse_color, parse_font, serialize_color};
 use super::{CanvasDocument, CanvasEntry, CanvasTable, Entry, Fonts, Posted, Transfer, no_such};
@@ -184,13 +184,13 @@ fn install_context_members(
 
         // The state stack.
         fn canvasSave(target: id) |this| {
-            this.canvas(target, bobcat_canvas::Canvas::save).map(undefined)
+            this.canvas(target, terminus::link::html::canvas::Canvas::save).map(undefined)
         }
         fn canvasRestore(target: id) |this| {
-            this.canvas(target, bobcat_canvas::Canvas::restore).map(undefined)
+            this.canvas(target, terminus::link::html::canvas::Canvas::restore).map(undefined)
         }
         fn canvasReset(target: id) |this| {
-            this.draw(target, bobcat_canvas::Canvas::reset).map(undefined)
+            this.draw(target, terminus::link::html::canvas::Canvas::reset).map(undefined)
         }
 
         // Transformations.
@@ -215,7 +215,7 @@ fn install_context_members(
             this.canvas(target, |canvas| float_bytes(&canvas.get_transform()))
         }
         fn canvasResetTransform(target: id) |this| {
-            this.canvas(target, bobcat_canvas::Canvas::reset_transform).map(undefined)
+            this.canvas(target, terminus::link::html::canvas::Canvas::reset_transform).map(undefined)
         }
 
         // Numeric, keyword and boolean attributes.
@@ -359,7 +359,7 @@ fn install_context_members(
 
         // Building paths, on a canvas's default path or a `Path2D`.
         fn canvasBeginPath(target: id) |this| {
-            this.canvas(target, bobcat_canvas::Canvas::begin_path).map(undefined)
+            this.canvas(target, terminus::link::html::canvas::Canvas::begin_path).map(undefined)
         }
         fn canvasClosePath(target: id) |this| {
             on_path!(this, target, |path| path.close_path()).map(undefined)
@@ -537,7 +537,7 @@ fn install_context_members(
                 .map(outcome)
         }
         fn canvasTransferToBitmap(target: id) |this| {
-            let image = this.draw(target, bobcat_canvas::Canvas::take_image)?;
+            let image = this.draw(target, terminus::link::html::canvas::Canvas::take_image)?;
             Ok(id_value(this.insert(Entry::Bitmap(image))))
         }
         fn canvasBitmapFrom(source: id, crop: rest) |this| {
@@ -707,7 +707,10 @@ impl CanvasTable {
         &self,
         id: u64,
         content: &str,
-        call: impl FnOnce(&mut bobcat_canvas::Canvas, &mut bobcat_canvas::parley::FontContext) -> R,
+        call: impl FnOnce(
+            &mut terminus::link::html::canvas::Canvas,
+            &mut terminus::link::parley::FontContext,
+        ) -> R,
     ) -> Result<Option<R>, String> {
         self.draw(id, |canvas| {
             let font = canvas.font().clone();

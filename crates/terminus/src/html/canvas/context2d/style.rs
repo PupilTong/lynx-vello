@@ -3,16 +3,15 @@
 use std::f64::consts::TAU;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use terminus::link::kurbo::{Affine, BezPath, Point, Rect, Shape};
-use terminus::link::peniko::color::DynamicColor;
-use terminus::link::peniko::{
+use super::{CanvasError, Image};
+use crate::kurbo::{Affine, BezPath, Point, Rect, Shape};
+use crate::paint::display_list::{ListPaint, Texture};
+use crate::peniko::color::DynamicColor;
+use crate::peniko::{
     BlendMode, BrushRef, Color, ColorStop, Compose, Extend, Fill, ImageQuality, ImageSampler,
     InterpolationAlphaSpace, Mix,
 };
-use terminus::link::render::canvas::SurfaceImage;
-use terminus::link::{ListPaint, Texture};
-
-use crate::{CanvasError, Image};
+use crate::render::canvas::SurfaceImage;
 
 /// Declares a keyword enum with its IDL names: `from_name` answers `None`
 /// for a string the attribute ignores.
@@ -234,7 +233,7 @@ pub struct Gradient(Arc<Mutex<GradientData>>);
 
 #[derive(Debug)]
 struct GradientData {
-    gradient: terminus::link::peniko::Gradient,
+    gradient: crate::peniko::Gradient,
     /// The geometry is degenerate: the gradient paints nothing whatever its
     /// stops.
     paints_nothing: bool,
@@ -245,7 +244,7 @@ impl Gradient {
     #[expect(clippy::float_cmp, reason = "the standard's equality is exact")]
     pub fn linear(x0: f64, y0: f64, x1: f64, y1: f64) -> Result<Self, CanvasError> {
         finite(&[x0, y0, x1, y1])?;
-        let gradient = terminus::link::peniko::Gradient::new_linear((x0, y0), (x1, y1));
+        let gradient = crate::peniko::Gradient::new_linear((x0, y0), (x1, y1));
         Ok(Self::new(gradient, x0 == x1 && y0 == y1))
     }
 
@@ -265,12 +264,8 @@ impl Gradient {
             return Err(CanvasError::IndexSize);
         }
         #[expect(clippy::cast_possible_truncation, reason = "peniko radii are f32")]
-        let gradient = terminus::link::peniko::Gradient::new_two_point_radial(
-            (x0, y0),
-            r0 as f32,
-            (x1, y1),
-            r1 as f32,
-        );
+        let gradient =
+            crate::peniko::Gradient::new_two_point_radial((x0, y0), r0 as f32, (x1, y1), r1 as f32);
         Ok(Self::new(gradient, x0 == x1 && y0 == y1 && r0 == r1))
     }
 
@@ -284,12 +279,12 @@ impl Gradient {
         let start = start_angle.rem_euclid(TAU);
         #[expect(clippy::cast_possible_truncation, reason = "peniko angles are f32")]
         let mut gradient =
-            terminus::link::peniko::Gradient::new_sweep((x, y), start as f32, (start + TAU) as f32);
+            crate::peniko::Gradient::new_sweep((x, y), start as f32, (start + TAU) as f32);
         gradient.extend = Extend::Repeat;
         Ok(Self::new(gradient, false))
     }
 
-    fn new(mut gradient: terminus::link::peniko::Gradient, paints_nothing: bool) -> Self {
+    fn new(mut gradient: crate::peniko::Gradient, paints_nothing: bool) -> Self {
         // HTML "fill and stroke styles": stops interpolate in unpremultiplied
         // RGBA.
         gradient.interpolation_alpha_space = InterpolationAlphaSpace::Unpremultiplied;
@@ -353,7 +348,7 @@ struct PatternData {
 
 impl Pattern {
     /// `createPattern`. `InvalidState` for an image with no pixels. A
-    /// canvas's current pixels ([`crate::Canvas::image`]) are copied as they
+    /// canvas's current pixels ([`super::Canvas::image`]) are copied as they
     /// are now.
     pub fn new(image: Image, repetition: Repetition) -> Result<Self, CanvasError> {
         if image.is_empty() {

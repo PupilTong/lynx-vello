@@ -23,8 +23,8 @@
 //!   only on the document's thread, in [`update_placeholders`].
 //!
 //! `getContext()` and the `2d`, `bitmaprenderer`, `webgl` and `webgpu`
-//! modes are not built: a canvas draws only what an `OffscreenCanvas`
-//! commits to it. The IDL `width` and `height` setters, which throw on a
+//! modes are not built on the element: a canvas draws only what an
+//! `OffscreenCanvas` commits to it. The IDL `width` and `height` setters, which throw on a
 //! placeholder, are the embedder's script binding's; this module sees the
 //! content attributes only.
 //!
@@ -41,6 +41,16 @@
 //! [`update_placeholders`] on the document's thread. How either is delivered
 //! is the embedder's. Once the element is freed, a commit does nothing and
 //! owes nothing. A placeholder nothing was committed to draws nothing.
+//!
+//! # The 2D rendering context
+//!
+//! [`context2d`] is the `OffscreenCanvas`'s side: one bitmap and its
+//! `CanvasRenderingContext2D` ([`Canvas`]), with `Path2D`, `CanvasGradient`,
+//! `CanvasPattern` and the image it draws. It needs no [`Document`], so it
+//! runs on a thread that has none, and commits here through
+//! [`Canvas::commit`].
+
+mod context2d;
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -49,6 +59,11 @@ use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use rustc_hash::FxHashMap;
 
+pub use self::context2d::{
+    Canvas, CanvasError, CompositeOp, Direction, FillRule, Font, Gradient, Image, ImageDataRead,
+    LineCap, LineJoin, Path, Pattern, Repetition, SmoothingQuality, Style, TextAlign, TextBaseline,
+    TextMetrics,
+};
 pub use super::InvalidState;
 use crate::render::image::{FrameImage, ImageDescriptor};
 use crate::render::picture::{PictureId, PictureKey};
@@ -230,7 +245,7 @@ pub(crate) struct Canvases(Rc<RefCell<FxHashMap<NodeId, Element>>>);
 /// Installs the `canvas` component ([`Document::define_html_elements`]).
 pub(super) fn define<T>(document: &mut Document<T>) {
     let canvases = document.canvases.clone();
-    document.define(CANVAS_TAG, Box::new(Canvas(canvases)));
+    document.define(CANVAS_TAG, Box::new(CanvasElement(canvases)));
 }
 
 /// `canvas`'s context mode; `None` when it is not a live canvas element.
@@ -339,9 +354,9 @@ fn parse_non_negative_integer(input: &str) -> Option<u32> {
 
 /// The `canvas` component: owns each element's picture and mode, and keeps
 /// a mode-none canvas's natural size in step with its attributes.
-struct Canvas(Canvases);
+struct CanvasElement(Canvases);
 
-impl Canvas {
+impl CanvasElement {
     /// Presents `canvas`'s picture at its attributes' size while its mode is
     /// none; a placeholder's size is its committed bitmap's.
     fn show_attributes<T>(&self, document: &mut Document<T>, canvas: NodeId) {
@@ -357,7 +372,7 @@ impl Canvas {
     }
 }
 
-impl<T> CustomElement<T> for Canvas {
+impl<T> CustomElement<T> for CanvasElement {
     fn observed_attributes(&self) -> Vec<String> {
         vec![WIDTH_ATTRIBUTE.to_owned(), HEIGHT_ATTRIBUTE.to_owned()]
     }
@@ -390,5 +405,4 @@ impl<T> CustomElement<T> for Canvas {
 }
 
 #[cfg(test)]
-#[path = "canvas_tests.rs"]
 mod tests;
