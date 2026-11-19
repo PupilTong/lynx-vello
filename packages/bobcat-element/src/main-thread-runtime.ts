@@ -62,6 +62,8 @@ import { __BobcatQueryNodes, __BobcatSwitchExposure, type ExposureRecord } from 
 import * as elementPAPI from "bobcat:element";
 import type { NodeQueryRequest } from "bobcat:selector-query";
 import "bobcat:timers";
+// `OffscreenCanvas` and the rest of the Canvas 2D API, as globals.
+import "bobcat:canvas";
 import { cancelAnimationFrame, clearAnimationFrames, requestAnimationFrame } from "bobcat:animation-frame";
 import { createSystemInfo } from "bobcat:system-info";
 import { initialProcessor as getInitialProcessor, globalProps, initData, loadModuleSync, nativeModuleTable, hasStyleSheet, preloadStyleSheet, adoptStyleSheet,

@@ -18,6 +18,12 @@ bench = false
 # The type a document request's bytes travel in, from the document to the
 # host (`ResourceFetcher::request_document`).
 bytes = { workspace = true }
+# The Canvas 2D drawing model `bobcat:canvas` is written over (`src/canvas`).
+bobcat-canvas = { workspace = true }
+# What `src/canvas/css.rs` hands stylo's color and `font` parsers: the same
+# crates stylo itself is built on.
+cssparser = { workspace = true }
+stylo_traits = { workspace = true }
 terminus = { workspace = true }
 vant = { workspace = true }
 # `<markdown>` (`tree::markdown`): its source parser and bare-URL autolinking.

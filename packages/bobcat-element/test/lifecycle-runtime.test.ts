@@ -42,6 +42,8 @@ rstest.mockRequire("bobcat:native-modules", () => ({ callNativeModule: rstest.fn
 import * as record from "../src/record.ts";
 rstest.mockRequire("bobcat:record", () => record);
 rstest.mockRequire("bobcat:timers", () => ({}));
+// Imported for its globals, which these runtimes do not read.
+rstest.mockRequire("bobcat:canvas", () => ({}));
 import type * as sectionUrl from "../src/section-url.ts";
 import type * as bundleFetch from "../src/bundle-fetch.ts";
 import type * as future from "../src/future.ts";

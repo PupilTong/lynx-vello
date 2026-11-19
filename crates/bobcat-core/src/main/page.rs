@@ -89,8 +89,8 @@
 //! host's own updates run before the frame an acknowledgement implies. A
 //! [`ToMain::ModuleCallback`] is not sent through that sender, and neither
 //! the sender nor this page counts it, so a frame post does not wait for one
-//! sent before it. Module completions, timer wakes and a sibling's checkpoint
-//! are independent tasks and may queue an entry between any two bursts.
+//! sent before it; nor is a [`ToMain::CanvasResized`]. Module completions, timer wakes and a
+//! sibling's checkpoint are independent tasks and may queue an entry between any two bursts.
 //!
 //! # The end
 //!
@@ -162,6 +162,7 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use terminus::link::NodeId;
+use terminus::link::html::canvas::update_placeholders;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
@@ -236,8 +237,8 @@ pub(super) struct Page {
     frame_due: Cell<Option<FramePost>>,
     /// How many commands this view has been sent and has applied, counted
     /// the way [`crate::link::CommandSender`] counts them: a
-    /// [`ToMain::ModuleCallback`] is sent outside that sender and is not
-    /// counted here either.
+    /// [`ToMain::ModuleCallback`] and a [`ToMain::CanvasResized`] are sent
+    /// outside that sender and are not counted here either.
     applied: Cell<u64>,
     /// The newest frame-post sequence taken and not yet acknowledged.
     ///
@@ -598,7 +599,12 @@ impl Page {
         // which the sender counted like any other command.
         let count = commands
             .iter()
-            .filter(|command| !matches!(command, ToMain::ModuleCallback { .. }))
+            .filter(|command| {
+                !matches!(
+                    command,
+                    ToMain::ModuleCallback { .. } | ToMain::CanvasResized
+                )
+            })
             .count() as u64;
         // Taken here rather than in the job, because what the seam spawns has
         // to trap the way any other task of this view does, rather than into
@@ -705,6 +711,7 @@ impl Page {
                 }
             }
             ToMain::ImageEvents(events) => runtime.apply_image_events(&events),
+            ToMain::CanvasResized => runtime.with_document(update_placeholders),
             ToMain::FrameLoadMetrics { card, json } => {
                 if let Err(error) = runtime.deliver_frame_load_metrics(js, card, &json) {
                     policy::report(self, Scene::HostCall, error.into_script_error());

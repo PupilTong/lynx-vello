@@ -7,7 +7,7 @@ toolchain and testing. Read this file before reading or changing code under
 
 The dependency-free TypeScript sources of the ESMs `bobcat-core` preloads into
 its QuickJS realms, one file per module. Both of a group's runtimes register
-all twenty-four, as `esm.rs`'s `BUILTIN_MODULES` lists them in the order of
+all twenty-six, as `esm.rs`'s `BUILTIN_MODULES` lists them in the order of
 `src/tsconfig.json`'s `paths` (a unit test holds the two equal):
 `src/lynx-modules.ts` as `bobcat:lynx-modules`, `src/global-event-emitter.ts`
 as `bobcat:global-event-emitter`, `src/selector-query.ts` as
@@ -40,7 +40,13 @@ answers, and the native module table the BTS is posted in `initialize`),
 transport every realm kind links: `callNativeModule` over
 `invokeNativeModule`, and the `__BobcatNativeModuleCallback` both engine
 threads call with an answer), `src/cross-thread-context.ts` as
-`bobcat:cross-thread-context`, `src/performance.ts` as `bobcat:performance`
+`bobcat:cross-thread-context`, `src/dom-exception.ts` as
+`bobcat:dom-exception` (Web IDL's `DOMException`), `src/canvas.ts` as
+`bobcat:canvas` (the Canvas 2D API, imported for its effect like
+`bobcat:timers`: it installs `OffscreenCanvas` and the rest as globals, and
+exports `__BobcatTransferredCanvas`, which `element-papi.ts`'s
+`invokeUIMethod` makes a `canvas`'s `transferControlToOffscreen` answer with;
+see `crates/bobcat-core/docs/canvas.md`), `src/performance.ts` as `bobcat:performance`
 (`lynx.performance`'s JavaScript half for both realm kinds: the four pipeline
 hooks ReactLynx calls, unpacked into primitive host arguments, and the BTS's
 `createObserver` over the `lynx.performance.onPerformanceEvent` global event,
@@ -177,7 +183,7 @@ the TypeScript directly, and TypeScript 7 checks the sources as a program with
 file through `paths` and declaring the three host modules' contracts in a
 `.d.ts`.
 
-`src/timers.ts` is the one module here that does install globals, because bare
+`src/timers.ts` installs globals, because bare
 `setTimeout`/`setInterval`/`clearTimeout`/`clearInterval` are how a card
 reaches them. It keeps only the callbacks, filed under the id the host's
 `setTimer` hands back; the schedule and HTML's `long` delay conversion and
@@ -185,6 +191,8 @@ nesting clamp are `bobcat-main`'s, and the first step of the epilogue that
 follows every entry into a realm calls the module's `__BobcatRunTimer` back for
 whatever is due — before that entry's commit, so a callback's mutation rides
 the same frame. No deadline crosses the link and no host turn is owed for one.
+`src/canvas.ts` installs its interfaces the same way, for the same reason: a
+card names `OffscreenCanvas` as a free variable.
 
 `src/element-papi.ts` also exports `class Document` and the `PageConfig` its
 constructor takes: the five page switches the boot module is written with,

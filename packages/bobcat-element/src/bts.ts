@@ -1,10 +1,11 @@
-// Imported for their effects, first: the BTS's global scope and its timers
-// come from these two imports of its own. The engine installs neither in any
-// worker realm, so `self`, `name`, `postMessage`, `onmessage`, `setTimeout`
+// Imported for their effects, first: the BTS's global scope, its timers and
+// the Canvas 2D API's globals come from these imports of its own. The engine
+// installs none of them in any worker realm, so `self`, `name`, `postMessage`, `onmessage`, `setTimeout`
 // and the rest exist in the BTS realm because this module imports them, and
 // they are in place before anything imported after them is evaluated.
 import "bobcat:worker";
 import "bobcat:timers";
+import "bobcat:canvas";
 import { __BobcatStartBTS } from "bobcat:bts-runtime";
 
 // The `bobcat:bts` ESM: the BTS bootstrap, preloaded on the group's worker

@@ -438,6 +438,8 @@ impl Worker {
                         },
                         // A worker's children get the core alone.
                         None,
+                        // A worker sees the platform's fonts, not a document's.
+                        crate::canvas::CanvasHost::Worker,
                         |engine| {
                             let events = self.events.clone();
                             let key = self.key;

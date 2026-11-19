@@ -424,9 +424,11 @@ dependencies = [
 name = "bobcat-core"
 version = "0.1.0"
 dependencies = [
+ "bobcat-canvas",
  "bobcat-source",
  "bytes",
  "codspeed-divan-compat",
+ "cssparser",
  "flume",
  "linkify",
  "prime-radiant",
@@ -438,6 +440,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smallvec",
+ "stylo_traits",
  "terminus",
  "thiserror 2.0.18",
  "tokio",

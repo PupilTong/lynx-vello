@@ -5601,3 +5601,48 @@ realm.evaluate(`report => {{
         );
     });
 }
+
+/// The epilogue of each entry that drew replays what the canvas recorded:
+/// entries that draw and never read leave nothing recorded behind each one,
+/// and an entry that drew nothing settles nothing.
+#[test]
+fn the_epilogue_replays_the_canvases_an_entry_drew() {
+    on_a_js_thread(|thread| async move {
+        let (context, _workers) = group(&thread);
+        let mut owned = OwnedPage::new(context);
+        owned
+            .boot(&format!(
+                "{ONE_BOX}
+globalThis.canvasContext = new OffscreenCanvas(8, 8).getContext('2d');
+canvasContext.fillRect(0, 0, 4, 4);
+"
+            ))
+            .await;
+        let state = |owned: &OwnedPage| {
+            owner::enter(&owned.page, JobKind::Command, |runtime, _| {
+                let canvases = &runtime.core().canvases;
+                (canvases.has_pending_draws(), canvases.settled.get())
+            })
+        };
+        let (pending, mut settled) = state(&owned).await.expect("the page is live");
+        assert!(!pending, "boot's draw was settled");
+        assert_eq!(settled, 1, "boot drew the one canvas");
+        for tick in 0..3 {
+            owner::enter(&owned.page, JobKind::Command, move |runtime, js| {
+                runtime.evaluate_module(
+                    js,
+                    &format!("canvasContext.fillRect({tick}, 0, 1, 1);"),
+                    &format!("app:///draw-{tick}.js"),
+                    "drawing",
+                )
+            })
+            .await
+            .expect("the page is live")
+            .expect("the draw runs");
+            let (pending, now) = state(&owned).await.expect("the page is live");
+            assert!(!pending, "entry {tick} left draws recorded");
+            assert_eq!(now, settled + 1, "entry {tick} settled its canvas once");
+            settled = now;
+        }
+    });
+}

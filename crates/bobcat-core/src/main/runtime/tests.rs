@@ -9109,7 +9109,9 @@ fn an_engine_name_nothing_answers_fails_in_the_realm_without_a_request() {
 /// under `bobcat-internal:host`, which only this realm kind has.
 #[test]
 fn an_mts_realm_declares_these_host_members() {
-    let expected = MTS_HOST_MEMBERS.join(",");
+    let expected = crate::canvas::host_members_with_canvas(
+        &[&MTS_HOST_MEMBERS[..], &[crate::canvas::DOCUMENT_MEMBER]].concat(),
+    );
     let native_modules = "invokeNativeModule";
     let (mut js, mut runtime, _elements) = runtime();
     runtime
@@ -9144,7 +9146,9 @@ fn an_mts_realm_declares_these_host_members() {
 /// all.
 #[test]
 fn a_frame_realm_declares_the_page_members() {
-    let expected = MTS_HOST_MEMBERS.join(",");
+    let expected = crate::canvas::host_members_with_canvas(
+        &[&MTS_HOST_MEMBERS[..], &[crate::canvas::DOCUMENT_MEMBER]].concat(),
+    );
     let (mut js, mut runtime, _elements) = runtime();
     runtime
         .run_main_thread_script(
@@ -9162,8 +9166,8 @@ fn a_frame_realm_declares_the_page_members() {
         .unwrap();
 }
 
-/// The page realm's `bobcat-internal:host` exports, sorted as a namespace
-/// lists them.
+/// The page realm's `bobcat-internal:host` exports beside the canvas members
+/// every realm has, sorted as a namespace lists them.
 const MTS_HOST_MEMBERS: [&str; 62] = [
     "adoptStyleSheet",
     "attributeNames",
@@ -13404,4 +13408,62 @@ fn a_timing_flag_attribute_binds_the_next_flush_to_its_commit() {
     assert_eq!(timing.commit_id, committed);
     assert!(timing.style_start <= timing.style_end);
     assert!(timing.frame_build_start <= timing.frame_build_end);
+}
+
+/// Each canvas object's entry lives in the realm's table while the object
+/// does: a collected object's entry is dropped by its finalization, and
+/// `ImageBitmap.close()` drops its entry at once. A canvas drawn and not
+/// read keeps its draws recorded until the per-entry step replays them.
+#[test]
+fn canvas_entries_follow_their_objects_and_draws_are_settled_per_entry() {
+    let (mut js, mut runtime, _elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js,
+            r"
+        __CreatePage();
+        globalThis.kept = new OffscreenCanvas(8, 8);
+        const ctx = kept.getContext('2d');
+        globalThis.bitmap = (() => {
+            new OffscreenCanvas(2, 2);
+            new Path2D('M0 0 h1');
+            ctx.createLinearGradient(0, 0, 1, 1);
+            ctx.fillRect(0, 0, 4, 4);
+            return kept.transferToImageBitmap();
+        })();
+        ctx.fillRect(0, 0, 4, 4);
+    ",
+            "app:///canvas.js",
+        )
+        .unwrap();
+    let canvases = Rc::clone(&runtime.core().canvases);
+    // Canvases, paths, gradients, patterns, bitmaps.
+    assert_eq!(canvases.census(), [2, 1, 1, 0, 1]);
+    assert!(canvases.has_pending_draws(), "nothing has read the draw");
+    runtime.core().settle_drawn_canvases();
+    assert!(!canvases.has_pending_draws());
+    assert_eq!(canvases.settled.get(), 1, "the one canvas drawn");
+    // An entry that drew nothing settles nothing.
+    runtime.core().settle_drawn_canvases();
+    assert_eq!(canvases.settled.get(), 1);
+
+    runtime.core().engine.collect_garbage(&mut js).unwrap();
+    assert_eq!(
+        canvases.census(),
+        [1, 0, 0, 0, 1],
+        "the unreachable ones are dropped"
+    );
+    runtime
+        .evaluate_module(
+            &mut js,
+            "globalThis.bitmap.close();",
+            "app:///close.js",
+            "closing",
+        )
+        .unwrap();
+    assert_eq!(
+        canvases.census(),
+        [1, 0, 0, 0, 0],
+        "close drops the bitmap's entry"
+    );
 }

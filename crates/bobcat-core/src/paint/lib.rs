@@ -40,6 +40,7 @@
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod animation_tests;
+pub(crate) mod canvas_pictures;
 #[cfg(test)]
 mod event_loop_tests;
 #[cfg(test)]
@@ -61,6 +62,8 @@ use terminus::link::{CommittedFrame, FrameWriter};
 use tokio::sync::mpsc;
 use tokio::sync::watch;
 
+pub(crate) use self::canvas_pictures::CanvasPictures;
+use self::canvas_pictures::ViewImages;
 use crate::background::WorkerKey;
 use crate::clock::ClockInstant;
 use crate::link::{FramePost, InputEventPayload, Published, ToMain, ViewSeat};
@@ -300,6 +303,7 @@ impl Painter {
             commands: crate::link::CommandSender::new(commands),
             metrics: watch::channel(Some(viewport)).0,
             images: Rc::new(terminus::link::NoImages),
+            canvases: Arc::default(),
             scroll: Arc::clone(&scroll),
             registry: crate::performance::PipelineRegistry::detached(),
         });
@@ -649,8 +653,11 @@ impl<P: FrameWriter + 'static> Painter<P> {
         // of the view's store through the same handle whose loss means the
         // view is gone, so the two can never disagree.
         let seat = self.seat.upgrade();
-        let store = seat.as_ref().map(|seat| seat.images.as_ref());
-        if !self.core.adopt(latest.frame.clone(), store) {
+        let store = seat.as_ref().map(|seat| ViewImages {
+            canvases: &seat.canvases,
+            store: seat.images.as_ref(),
+        });
+        if !self.core.adopt(latest.frame.clone(), store.as_ref()) {
             // The view is gone with its store, so this commit's pixels can no
             // longer be described. It is not adopted; the painter keeps the last
             // commit it did read, whole.
@@ -888,6 +895,12 @@ impl<P: FrameWriter + 'static> Painter<P> {
     /// target fails. There is no recovering a lost surface, so afterwards
     /// this answers `Ok` and draws nothing.
     pub fn pump(&mut self) -> Result<(), EngineError> {
+        // The canvas GPU steps the engine's threads queued for this thread
+        // since its last turn, first: a placeholder's commit lands before
+        // the frame that may draw it, and a canvas read is answered whether
+        // or not a frame is drawn.
+        #[cfg(target_arch = "wasm32")]
+        terminus::link::render::canvas::drain();
         self.poll_link();
         self.report_presentation();
         if self.core.has_failed() {

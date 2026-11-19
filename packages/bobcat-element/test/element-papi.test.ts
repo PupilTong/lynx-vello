@@ -15,6 +15,15 @@ import * as record from "../src/record.ts";
 // The reader of every record the mock answers with, as the realm has it.
 rstest.mockRequire("bobcat:record", () => record);
 
+// The `OffscreenCanvas` a canvas's transfer answers, as the entry it is
+// made over: `bobcat:canvas` is tested through the real realm, in
+// crates/bobcat-core/src/canvas/tests.rs.
+rstest.mockRequire("bobcat:canvas", () => ({
+  __BobcatTransferredCanvas: (entry: ArrayBuffer) => ({
+    offscreen: Array.from(new Float64Array(entry)),
+  }),
+}));
+
 rstest.mockRequire("bobcat-internal:host", () => {
   const native = globalThis.__bobcatTestHost;
   if (native === undefined) {
@@ -34,6 +43,7 @@ rstest.mockRequire("bobcat-internal:host", () => {
     tagName: native.tagName,
     attributeNames: native.attributeNames,
     callElementMethod: native.callElementMethod,
+    canvasTransferControl: (native as MockBobcat).canvasTransferControl,
     getComputedStyleMap: native.getComputedStyleMap,
     childElementIds: native.childElementIds,
     parentNode: native.parentNode,
@@ -156,6 +166,11 @@ type MockBobcat = BobcatNative & {
    * an element that has not been through a flush.
    */
   answerElementMethod: (nodeId: number, method: string, params: string) => string | number;
+  /**
+   * `canvasTransferControl`: entry 10, 300 × 150, for a node's
+   * first transfer, and `InvalidStateError` after.
+   */
+  canvasTransferControl: (nodeId: number) => ArrayBuffer | string;
   answerComputedStyle: (
     nodeId: number,
     properties: string,
@@ -217,6 +232,7 @@ function createMockBobcat(issuedIds?: number[]): MockBobcat {
     return id;
   };
   const parents: Map<number, number> = new Map();
+  const transferred: Set<number> = new Set();
   // The real boundary keeps its own child order and reports element children
   // in it, so a mock that only knew parent links could not stand in for the
   // one member whose whole contract is that order.
@@ -382,6 +398,13 @@ function createMockBobcat(issuedIds?: number[]): MockBobcat {
       return tag;
     },
     answerElementMethod: () => 3,
+    canvasTransferControl: (node: unknown) => {
+      const id = nodeId("canvasTransferControl", node);
+      calls.push(["canvasTransferControl", id]);
+      if (transferred.has(id)) return "InvalidStateError";
+      transferred.add(id);
+      return new Float64Array([10, 300, 150]).buffer;
+    },
     callElementMethod: (node: unknown, method: unknown, params: unknown) => {
       const id = nodeId("callElementMethod", node);
       calls.push(["callElementMethod", id, method, params]);
@@ -5472,6 +5495,32 @@ function styleRecord(...fields: string[]): string {
 }
 
 describe("__InvokeUIMethod", () => {
+  it("answers a canvas's transferControlToOffscreen with an OffscreenCanvas", () => {
+    const canvas = __CreateElement("canvas", 0);
+    const view = __CreateView(0);
+    const answers: unknown[] = [];
+    mock.calls.length = 0;
+    for (const element of [canvas, canvas, view]) {
+      __InvokeUIMethod(element, "transferControlToOffscreen", {}, (result: unknown) =>
+        answers.push(result));
+    }
+    expect(answers).toStrictEqual([
+      { code: 0, data: { offscreen: [10, 300, 150] } },
+      // Already transferred: native's code for `InvalidStateError`.
+      { code: 7, data: undefined },
+      // Not a canvas: the generic path, whose host has no such method.
+      { code: 3, data: undefined },
+    ]);
+    const id = __GetElementUniqueID(canvas);
+    expect(mock.named("canvasTransferControl")).toEqual([
+      ["canvasTransferControl", id],
+      ["canvasTransferControl", id],
+    ]);
+    expect(mock.named("callElementMethod")).toEqual([
+      ["callElementMethod", __GetElementUniqueID(view), "transferControlToOffscreen", "{}"],
+    ]);
+  });
+
   it("reports a method the engine does not have as code 3", () => {
     const view = __CreateView(0);
     const callback = rstest.fn();
