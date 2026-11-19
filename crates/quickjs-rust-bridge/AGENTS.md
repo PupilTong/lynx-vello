@@ -174,12 +174,13 @@ It also owns the **host-function seam**: `Realm::function`,
 `define_global_function`, and `register_host_module_function` back a JS
 callable with a Rust `FnMut`, dispatched through one C trampoline
 (`JS_NewCFunctionData` + a realm-owned callback table reached via the context
-opaque). Host callbacks speak `HostValue`, a primitives-only boundary
-(undefined/null/bool/number/string) — ordinary objects, arrays, functions,
-symbols, and ill-formed UTF-16 strings are rejected on the way in rather than
-lossily converted, element identity crosses as plain numbers, and handle
-objects never leave JavaScript — which keeps ordinary callbacks leaf
-operations. Their `FnMut` closure is borrowed through a `RefCell`, so reentry
+opaque). Host callbacks speak `HostArgument` in and `HostValue` out:
+undefined/null/bool/number/string, an opaque structured clone
+(`JS_WriteObject`'s bytes) for any other value the serializer accepts, and
+the bytes of a bare `ArrayBuffer` (below). Functions, symbols, and
+ill-formed UTF-16 strings are rejected on the way in rather than lossily
+converted, element identity crosses as plain numbers, and handle objects
+never leave JavaScript. Their `FnMut` closure is borrowed through a `RefCell`, so reentry
 is refused rather than aliasing it; `function_reentrant` and
 `register_host_module_function_reentrant` take an `Fn` closure instead, which a
 nested call runs again (`bobcat-core`'s `dispatchEvent` is the one user). A
@@ -189,6 +190,123 @@ call into a realm uses (`evaluate`, `module_namespace`, `member`,
 registrations) take `&self`: a host function may call into any realm of the
 runtime, its own included, while a call further up the stack holds that
 realm. A panicking callback becomes a JS exception and leaves the slot usable.
+
+**`ArrayBuffer` bytes cross as `HostArgument::Bytes(&[u8])` /
+`HostValue::Bytes(Box<[u8]>)`.** The rule (`qjs_host_is_fixed_array_buffer`
+in `shim.c`): an argument that is itself an object of QuickJS's
+`ArrayBuffer` class (a subclass instance included) and not resizable. A
+typed array, a `DataView`, an `ArrayBuffer` inside another value and a
+resizable `ArrayBuffer` stay `Structured`, as before. A caller that means a
+view's bytes passes `view.buffer` with `byteOffset`/`byteLength` as further
+arguments. The class ID, which `quickjs.h` does not export, and each realm's
+intrinsic `resizable` getter are read in `qjs_context_new` before any code of
+the realm runs, so no getter the realm's code installed runs during
+describing.
+
+- **Inbound is one copy.** The trampoline copies the buffer into a
+  `js_malloc`'d block it frees after the dispatch; the slice borrows that
+  block, never the buffer's storage. Any host function, not only a reentrant
+  one, can call into its realm (`evaluate`, `call_member`, a getter through
+  `member`) while it holds the slice, and that code can write the buffer
+  through a view, detach it (`transfer`) or free its storage (`transfer` to
+  another length, which frees through the buffer's free function, or
+  `resize`, which `js_realloc`s). A borrow of the storage would not survive
+  any of these. `to_value` copies again into an owned box.
+- **A detached buffer** is the `TypeError` `JS_GetArrayBuffer` throws, at the
+  call, and the host function is not called: the same refusal
+  `JS_WriteObject` makes of one. An empty buffer is `Bytes(&[])`.
+- **A returned `HostValue::Bytes` is adopted, not copied**: `write_result`
+  hands the box to `qjs_host_build`, which makes it the storage of a new
+  `ArrayBuffer` with `JS_NewArrayBuffer` and `qjs_rust_bytes_free`
+  (`allocator.rs`) as its free function, the box's length in the opaque.
+  QuickJS frees through it on detach, on a transfer to another length and in
+  the finalizer; the finalizer of a detached buffer passes null, which it
+  ignores. Such a buffer is not resizable (`js_array_buffer_resize` refuses
+  an external one), and its storage is not counted against the runtime's
+  memory limit (`JS_ComputeMemoryUsage` does count it). An empty box becomes
+  an ordinary empty buffer.
+- **Bytes lent into a call** (`HostArgument::Bytes` through `call_member`, or
+  `HostValue::as_argument`) are copied into a new `ArrayBuffer`
+  (`JS_NewArrayBufferCopy`). So a bare `ArrayBuffer` posted to another realm
+  arrives as an `ArrayBuffer` with equal bytes, fixed-length.
+- `SharedArrayBuffer` is not exposed to JavaScript (`globalThis` has none),
+  and its class is not `ArrayBuffer`'s, so it never crosses as bytes.
+
+**A message can be written with a transfer list, and read with one
+replacement per listed object.** The fork adds three C functions
+(`quickjs.h`): `JS_SetUncloneable(ctx, obj, transferable)` sets two bits on
+the object (`is_uncloneable`, `is_transferable`, in the byte `is_HTMLDDA`
+uses, so `JSObject` does not grow); `JS_WriteObjectTransfer(ctx, &len, obj,
+flags, transfer, n)` writes as `JS_WriteObject` does, except that each
+`transfer[i]` is written as the tag `BC_TAG_TRANSFER` and the index `i`,
+wherever and however often `obj` holds it; `JS_ReadObjectTransfer(ctx, buf,
+len, flags, values, n)` reads that tag as `values[i]`, and an index `>= n` is
+a `SyntaxError`. `JS_WriteObject`/`JS_ReadObject` are the same functions with
+`n = 0`.
+
+- **An uncloneable object is refused by every write it is not listed in**:
+  `TypeError: uncloneable object`, from `JS_WriteObject` (every structured
+  argument of every host function) and from `JS_WriteObjectTransfer` alike.
+  The writer tests the bit once per object, before the object reference
+  lookup, and searches the list only for a marked object; a value with no
+  marked object costs one bit test per object, with or without a list.
+- **The list is checked before anything is written**: every entry must be an
+  object marked with `transferable` true and must appear once, else
+  `TypeError: value is not transferable` or `TypeError: duplicate
+  transferable`. Marking an object again with `transferable` false keeps it
+  uncloneable and keeps it out of any list (an object whose host state has
+  moved out). These three messages are the refusals that HTML calls a
+  `DataCloneError`; the bridge does not know `DOMException`, so the layer
+  above maps them by message.
+- **Slot `i` is list entry `i`**, whether or not the message holds it, so a
+  stream has as many slots as the list has entries. A listed object is not
+  added to the writer's object reference list and a slot adds nothing to the
+  reader's object table, so reference indices agree on both sides; the
+  positions that held one listed object read as one value.
+
+The bridge exposes this in three pieces:
+
+- `Context::register_host_module_function_with_transfer(module, export,
+  arity, message_index, f)` (and `function_with_transfer`) makes a host
+  function with its own C trampoline, `qjs_host_transfer_trampoline`; the
+  trampoline every other host function uses is unchanged. Argument
+  `message_index` is the message and `message_index + 1` its list:
+  `undefined` or an array, else a `TypeError`. The list is read first (an
+  array read, which can run the realm's code). With an empty list the message
+  is described as any argument is (`Structured`, `Bytes` or a primitive); with
+  a non-empty one it is written by `JS_WriteObjectTransfer` and handed to `f`
+  as `HostArgument::Transferred(TransferredBytes)` with `slots()` equal to
+  the list's length, whatever the message is. The list's own argument is
+  handed as `HostArgument::Number(length)`. A refusal throws at the call and
+  `f` is not called. The trampoline changes nothing in the realm: which
+  object each slot was is known to the realm's own code, which passes the
+  embedder's ids as further primitive arguments in list order, and moving
+  the host state out is `f`'s, after the write succeeded. `message_index` is
+  at most 253 (`QuickJS` keeps a function's length in eight bits).
+- `Context::register_host_module_transfer_members(module, mark, reviver)`
+  adds two C functions as exports, neither of which crosses into Rust:
+  `mark(object, transferable)` is `JS_SetUncloneable`, and
+  `reviver(fn)` stores, once per realm, the function a delivery calls per
+  slot. A second `reviver` call is a `TypeError`.
+- Delivery: `Revival::new(transferred, &descriptors)` pairs a stream with one
+  primitive (or structured) `HostArgument` per slot, and
+  `HostArgument::Revive(&revival)` is lent into any call (`call_member`, a
+  host-module export call). The realm builds each descriptor, calls its
+  reviver with it in slot order, and reads the stream with the answers as the
+  slots' values. No reviver, a reviver that throws, or a descriptor that
+  cannot be built fails the call before the stream is read. A
+  `HostArgument::Transferred` lent as it is reads with no replacements, so a
+  stream with slots fails at its first slot (`SyntaxError: invalid transfer
+  slot`).
+
+**The stream is never visible to JavaScript as bytes.** It exists only in a
+`TransferredBytes`/`TransferredClone`, which have no byte accessor, and is
+read only by `JS_ReadObjectTransfer` inside the shim, so a script cannot hand
+the reader a stream it made. `TransferredBytes` is a pointer and two `u32`s
+so that `HostArgument` stays 24 bytes and `HostValue` 32 (a static assertion
+holds both; one more word on either slowed every host call, the primitive
+ones included, in `benches/host_calls.rs`), and the trampoline refuses a
+stream longer than `u32::MAX` bytes with a `RangeError`.
 
 A closure's lifetime follows its JS function object rather than the realm: the
 closure sits at its own stable heap address, which a companion JS object holds

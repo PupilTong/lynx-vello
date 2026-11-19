@@ -824,3 +824,425 @@ fn an_exclusive_host_function_refuses_a_nested_call() {
         "the nested call threw the refusal"
     );
 }
+
+/// What a host function was handed for its first argument, kept: the bytes
+/// of a `Bytes` argument, or `None` for any other kind.
+type SeenBytes = Rc<RefCell<Vec<Option<Vec<u8>>>>>;
+
+/// Installs `take(value, ...)`, which records what its first argument
+/// arrived as and answers the number of bytes it saw, or -1.
+fn define_take(realm: &mut Context, seen: &SeenBytes) {
+    let sink = Rc::clone(seen);
+    realm
+        .define_global_function("take", 3, move |arguments| {
+            let bytes = match arguments.first() {
+                Some(HostArgument::Bytes(bytes)) => Some(bytes.to_vec()),
+                _ => None,
+            };
+            #[allow(clippy::cast_precision_loss, reason = "test buffers are small")]
+            let answer = bytes.as_ref().map_or(-1.0, |bytes| bytes.len() as f64);
+            sink.borrow_mut().push(bytes);
+            Ok(HostValue::Number(answer))
+        })
+        .unwrap();
+}
+
+#[test]
+fn a_bare_array_buffer_argument_arrives_as_its_bytes() {
+    let mut realm = realm();
+    let seen = SeenBytes::default();
+    define_take(&mut realm, &seen);
+    assert_eq!(
+        text(
+            &mut realm,
+            "[take(new Uint8Array([1, 2, 255]).buffer), take(new ArrayBuffer(0))].join(':')"
+        ),
+        "3:0"
+    );
+    assert_eq!(
+        *seen.borrow(),
+        [Some(vec![1, 2, 255]), Some(Vec::new())],
+        "contents and length, an empty buffer included"
+    );
+}
+
+/// A typed array's bytes are reached by passing its `buffer` with the view's
+/// own offset and length; the host slices them.
+#[test]
+fn a_view_is_passed_as_its_buffer_with_its_offset_and_length() {
+    let mut realm = realm();
+    let window: Rc<RefCell<Option<Vec<u8>>>> = Rc::default();
+    let sink = Rc::clone(&window);
+    realm
+        .define_global_function("window", 3, move |arguments| {
+            let [
+                HostArgument::Bytes(bytes),
+                HostArgument::Number(offset),
+                HostArgument::Number(length),
+            ] = arguments
+            else {
+                return Err(HostFunctionError::new("expected (buffer, offset, length)"));
+            };
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "the test passes small whole offsets"
+            )]
+            let (offset, length) = (*offset as usize, *length as usize);
+            *sink.borrow_mut() = Some(bytes[offset..offset + length].to_vec());
+            Ok(HostValue::Undefined)
+        })
+        .unwrap();
+    realm
+        .evaluate(
+            EvalSource::new(
+                "const all = new Uint8Array([0, 1, 2, 3, 4, 5, 6, 7]); \
+                 const view = new Uint8Array(all.buffer, 2, 3); \
+                 window(view.buffer, view.byteOffset, view.byteLength);",
+            ),
+            EvalOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(window.borrow_mut().take(), Some(vec![2, 3, 4]));
+}
+
+#[test]
+fn returned_bytes_become_an_array_buffer() {
+    let mut realm = realm();
+    realm
+        .define_global_function("make", 1, |arguments| {
+            let Some(&HostArgument::Number(length)) = arguments.first() else {
+                return Err(HostFunctionError::new("expected a length"));
+            };
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "the test asks for small whole lengths"
+            )]
+            let bytes: Vec<u8> = (0..length as usize).map(|i| (i % 251) as u8).collect();
+            Ok(HostValue::Bytes(bytes.into_boxed_slice()))
+        })
+        .unwrap();
+    assert_eq!(
+        text(
+            &mut realm,
+            "(() => {
+                const b = make(300);
+                const u = new Uint8Array(b);
+                const empty = make(0);
+                return [
+                    b instanceof ArrayBuffer, b.byteLength, u[0], u[1], u[299],
+                    b.resizable, empty instanceof ArrayBuffer, empty.byteLength,
+                ].join(':');
+            })()"
+        ),
+        "true:300:0:1:48:false:true:0"
+    );
+}
+
+/// A returned buffer's storage is the host's allocation; what `QuickJS` does
+/// with an external buffer's storage — write it, refuse to resize it, keep it
+/// across a same-length transfer, copy and free it on a transfer to another
+/// length, free it when detached — all works on it.
+#[test]
+fn a_returned_buffer_can_be_written_transferred_and_detached() {
+    let mut realm = realm();
+    realm
+        .define_global_function("make", 0, |_| {
+            Ok(HostValue::Bytes(Box::from([10u8, 20, 30, 40])))
+        })
+        .unwrap();
+    assert_eq!(
+        text(
+            &mut realm,
+            "(() => {
+                const out = [];
+                const a = make();
+                new Uint8Array(a)[0] = 11;
+                try { a.resize(2); out.push('resized'); }
+                catch (e) { out.push(e instanceof TypeError ? 'TypeError' : String(e)); }
+                const same = a.transfer();
+                out.push(a.detached, a.byteLength, new Uint8Array(same).join(','));
+                const longer = same.transfer(6);
+                out.push(same.detached, new Uint8Array(longer).join(','));
+                const b = make();
+                const shorter = b.transfer(2);
+                out.push(new Uint8Array(shorter).join(','));
+                const c = make();
+                const empty = c.transfer(0);
+                out.push(c.detached, empty.byteLength);
+                return out.join(':');
+            })()"
+        ),
+        "TypeError:true:0:11,20,30,40:true:11,20,30,40,0,0:10,20:true:0"
+    );
+}
+
+/// A typed array, an `ArrayBuffer` inside another value and a resizable
+/// `ArrayBuffer` all keep the structured path and come back as the same kind
+/// of value; a `DataView` is still the serializer's refusal.
+#[test]
+fn views_nested_and_resizable_buffers_keep_the_structured_path() {
+    let mut realm = realm();
+    let kinds: Rc<RefCell<Vec<&'static str>>> = Rc::default();
+    let sink = Rc::clone(&kinds);
+    realm
+        .define_global_function("echo", 1, move |arguments| {
+            let argument = arguments[0];
+            sink.borrow_mut().push(match argument {
+                HostArgument::Structured(_) => "structured",
+                HostArgument::Bytes(_) => "bytes",
+                _ => "other",
+            });
+            Ok(argument.to_value())
+        })
+        .unwrap();
+    assert_eq!(
+        text(
+            &mut realm,
+            "(() => {
+                const u = echo(new Uint8Array([1, 2, 3]));
+                let d;
+                try { echo(new DataView(new ArrayBuffer(2))); d = 'no throw'; }
+                catch (e) { d = e instanceof TypeError ? 'TypeError' : String(e); }
+                const n = echo({ b: new Uint8Array([6, 7]).buffer });
+                const r = new ArrayBuffer(2, { maxByteLength: 8 });
+                new Uint8Array(r).set([8, 9]);
+                const rr = echo(r);
+                const bare = echo(new Uint8Array([10]).buffer);
+                return [
+                    u instanceof Uint8Array, u.join(','),
+                    d,
+                    n.b instanceof ArrayBuffer, new Uint8Array(n.b).join(','),
+                    rr instanceof ArrayBuffer, rr.resizable, rr.maxByteLength,
+                    new Uint8Array(rr).join(','),
+                    bare instanceof ArrayBuffer, bare.resizable, new Uint8Array(bare).join(','),
+                ].join(':');
+            })()"
+        ),
+        "true:1,2,3:TypeError:true:6,7:true:true:8:8,9:true:false:10"
+    );
+    assert_eq!(
+        *kinds.borrow(),
+        ["structured", "structured", "structured", "bytes"]
+    );
+}
+
+/// An `ArrayBuffer` subclass instance is an `ArrayBuffer` to `QuickJS`, so it
+/// crosses as bytes; the structured path also made it a plain one.
+#[test]
+fn an_array_buffer_subclass_instance_crosses_as_bytes() {
+    let mut realm = realm();
+    let seen = SeenBytes::default();
+    define_take(&mut realm, &seen);
+    assert_eq!(
+        text(
+            &mut realm,
+            "class Sub extends ArrayBuffer {} \
+             String(take(new Sub(2)))"
+        ),
+        "2"
+    );
+    assert_eq!(*seen.borrow(), [Some(vec![0, 0])]);
+}
+
+/// Whether a buffer is resizable is read with the realm's intrinsic getter,
+/// so a getter the realm's code installed is never run by describing an
+/// argument and cannot change how it crosses.
+#[test]
+fn describing_a_buffer_runs_no_getter_of_the_realm() {
+    let mut realm = realm();
+    let seen = SeenBytes::default();
+    define_take(&mut realm, &seen);
+    assert_eq!(
+        text(
+            &mut realm,
+            "let runs = 0; \
+             Object.defineProperty(ArrayBuffer.prototype, 'resizable', \
+               { get() { runs++; return true; } }); \
+             [take(new ArrayBuffer(3)), runs].join(':')"
+        ),
+        "3:0"
+    );
+    assert_eq!(*seen.borrow(), [Some(vec![0, 0, 0])]);
+}
+
+/// A detached buffer is refused at the call with the `TypeError` the
+/// structured path throws for one, bare or nested, and the host function is
+/// not called.
+#[test]
+fn a_detached_buffer_is_a_type_error_at_the_call() {
+    let mut realm = realm();
+    let seen = SeenBytes::default();
+    define_take(&mut realm, &seen);
+    assert_eq!(
+        text(
+            &mut realm,
+            "(() => {
+                const out = [];
+                const fixed = new ArrayBuffer(4); fixed.transfer();
+                const resizable = new ArrayBuffer(4, { maxByteLength: 8 }); resizable.transfer();
+                for (const value of [fixed, resizable, { inner: fixed }]) {
+                    try { take(value); out.push('no throw'); }
+                    catch (e) { out.push(e instanceof TypeError ? 'TypeError' : String(e)); }
+                }
+                return out.join(':');
+            })()"
+        ),
+        "TypeError:TypeError:TypeError"
+    );
+    assert!(seen.borrow().is_empty(), "the host function never ran");
+    assert_eq!(text(&mut realm, "String(take(new ArrayBuffer(1)))"), "1");
+}
+
+/// The bytes are the trampoline's copy, so code of the realm that a host
+/// function runs while it holds them — writing the buffer, detaching it,
+/// freeing its storage with a transfer to another length — leaves them as
+/// they were. This holds for a host function made by `Context::function`
+/// as much as for a reentrant one: either can call into its realm.
+#[test]
+fn bytes_held_across_a_call_into_the_realm_are_unchanged() {
+    for reentrant in [false, true] {
+        let mut realm = realm();
+        let reentry = Reentry::default();
+        let again = Rc::clone(&reentry);
+        let handler = move |arguments: &[HostArgument<'_>]| {
+            let HostArgument::Bytes(bytes) = arguments[0] else {
+                return Err(HostFunctionError::new("expected bytes"));
+            };
+            let before = bytes.to_vec();
+            evaluate_again(
+                &again,
+                "new Uint8Array(globalThis.held).fill(9); \
+                 globalThis.held = globalThis.held.transfer(4096); \
+                 globalThis.held.transfer();",
+            )?;
+            // A second allocation, to make reuse of freed storage likely.
+            evaluate_again(&again, "globalThis.other = new Uint8Array(64).fill(7);")?;
+            assert_eq!(bytes, before.as_slice(), "the lent bytes did not change");
+            Ok(HostValue::Bytes(Box::from(bytes)))
+        };
+        if reentrant {
+            define_reentrant(&mut realm, "hold", 1, handler);
+        } else {
+            realm.define_global_function("hold", 1, handler).unwrap();
+        }
+        let realm = share(realm, &reentry);
+        assert_eq!(
+            shared_text(
+                &realm,
+                "globalThis.held = new Uint8Array(64).map((_, i) => i).buffer; \
+                 const back = new Uint8Array(hold(globalThis.held)); \
+                 [back.length, back[0], back[63], globalThis.held.detached].join(':')"
+            ),
+            "64:0:63:true",
+            "reentrant: {reentrant}"
+        );
+    }
+}
+
+/// What a host function keeps of a `Bytes` argument is `Send`, and lent into
+/// a call of a realm of another runtime on another thread it arrives as an
+/// `ArrayBuffer` with the same bytes: what `postMessage(arrayBuffer)` does.
+#[test]
+fn kept_bytes_arrive_in_another_realm_as_an_array_buffer() {
+    let captured: Rc<RefCell<Option<HostValue>>> = Rc::default();
+    let mut writer = realm();
+    let sink = Rc::clone(&captured);
+    writer
+        .define_global_function("keep", 1, move |arguments| {
+            *sink.borrow_mut() = arguments.first().map(|argument| argument.to_value());
+            Ok(HostValue::Undefined)
+        })
+        .unwrap();
+    writer
+        .evaluate(
+            EvalSource::new("keep(new Uint8Array([7, 8, 9]).buffer)"),
+            EvalOptions::default(),
+        )
+        .unwrap();
+    let kept = captured.borrow_mut().take().expect("the host kept it");
+    assert_eq!(kept, HostValue::Bytes(Box::from([7u8, 8, 9])));
+
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let mut reader = realm();
+        let host = reader
+            .evaluate(
+                EvalSource::new(
+                    "globalThis.host = { seen: null, take(value) { host.seen = value; } }; \
+                     globalThis.host",
+                ),
+                EvalOptions::default(),
+            )
+            .unwrap();
+        let take = reader.member("take").unwrap();
+        reader
+            .call_member(&host, &take, &[kept.as_argument()])
+            .unwrap();
+        sender
+            .send(text(
+                &mut reader,
+                "[host.seen instanceof ArrayBuffer, host.seen.resizable, \
+                 new Uint8Array(host.seen).join(',')].join(':')",
+            ))
+            .unwrap();
+    })
+    .join()
+    .unwrap();
+    assert_eq!(
+        receiver.recv_timeout(Duration::from_secs(5)).unwrap(),
+        "true:false:7,8,9"
+    );
+}
+
+/// Lending empty bytes into a call makes an empty `ArrayBuffer`.
+#[test]
+fn empty_bytes_lent_into_a_call_make_an_empty_buffer() {
+    let mut realm = realm();
+    let host = realm
+        .evaluate(
+            EvalSource::new(
+                "globalThis.host = { seen: null, take(value) { host.seen = value; } }; \
+                 globalThis.host",
+            ),
+            EvalOptions::default(),
+        )
+        .unwrap();
+    let take = realm.member("take").unwrap();
+    realm
+        .call_member(&host, &take, &[HostArgument::Bytes(&[])])
+        .unwrap();
+    assert_eq!(
+        text(
+            &mut realm,
+            "[host.seen instanceof ArrayBuffer, host.seen.byteLength].join(':')"
+        ),
+        "true:0"
+    );
+}
+
+/// Every argument copy the trampoline makes is released: 20 000 calls with a
+/// 64 KiB buffer would need over a gigabyte in a 2 MB realm otherwise.
+#[test]
+fn bytes_arguments_do_not_leak() {
+    let mut realm = tight_realm();
+    realm
+        .define_global_function("take", 1, |arguments| {
+            let Some(HostArgument::Bytes(bytes)) = arguments.first() else {
+                return Err(HostFunctionError::new("expected bytes"));
+            };
+            Ok(HostValue::Number(f64::from(bytes[0])))
+        })
+        .unwrap();
+    let value = realm
+        .evaluate(
+            EvalSource::new(
+                "const b = new Uint8Array(64 * 1024).fill(3).buffer; \
+                 let n = 0; for (let i = 0; i < 20000; i++) { n += take(b); } n",
+            ),
+            EvalOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(value.as_number(), Some(60000.0));
+}

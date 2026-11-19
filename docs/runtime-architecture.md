@@ -1273,7 +1273,10 @@ existing channel inside a `HostValue`, and the receiving realm rebuilds the
 value with `JS_ReadObject`. Preserved: `undefined`, `NaN` and `-0`, `Date`,
 `BigInt`, `ArrayBuffer` and typed arrays, cycles and shared references (two
 properties naming one object still name one object on the other side), and the
-`Number`/`String`/`Boolean`/`BigInt` wrapper objects. Refused, because this
+`Number`/`String`/`Boolean`/`BigInt` wrapper objects. A message that is itself
+a fixed-length `ArrayBuffer` skips the serializer: it crosses as
+`HostValue::Bytes` and arrives as a fixed-length `ArrayBuffer` with the same
+bytes (`crates/quickjs-rust-bridge/AGENTS.md`). Refused, because this
 first version does not extend the engine's serializer: functions, `Symbol`s,
 `Map`, `Set`, `RegExp`, `Error`, `DataView`, and accessor properties. `toJSON`
 is never consulted: structured clone has no such hook, so an object carrying

@@ -156,9 +156,56 @@ pub unsafe extern "C" fn qjs_rust_malloc_usable_size(pointer: *const c_void) -> 
     unsafe { (*allocation_header(pointer.cast_mut())).requested_size }
 }
 
+/// Frees the `Box<[u8]>` a host function returned as an `ArrayBuffer`'s
+/// storage: `QuickJS`'s free function for such a buffer, and what `shim.c`
+/// calls when the buffer could not be made. `opaque` is the box's length,
+/// which `shim.c` stored there; the runtime is not needed.
+///
+/// A null `pointer` is nothing to free. `QuickJS` passes one when it finalizes
+/// a buffer that was detached or transferred: `js_array_buffer_finalizer`
+/// calls the free function with whatever `data` holds, which detaching set
+/// to null after the storage was freed or moved to the new buffer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn qjs_rust_bytes_free(
+    _runtime: *mut c_void,
+    opaque: *mut c_void,
+    pointer: *mut c_void,
+) {
+    if pointer.is_null() {
+        return;
+    }
+    let length = opaque.addr();
+    // SAFETY: a non-null `pointer` and `length` are the pointer
+    // `Box::into_raw` gave for a `Box<[u8]>` and that box's length, passed
+    // through `shim.c` unchanged. QuickJS passes a buffer's storage to its
+    // free function once — on detach, on a transfer to another length, or
+    // in the finalizer of a buffer still holding it — and a transfer to the
+    // same length moves the storage, the length and this function to the new
+    // buffer together; `shim.c` calls it only for a box no buffer took.
+    drop(unsafe { Box::from_raw(ptr::slice_from_raw_parts_mut(pointer.cast::<u8>(), length)) });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bytes_free_releases_a_box_by_its_length() {
+        // SAFETY: null is what a detached buffer's finalizer passes.
+        unsafe { qjs_rust_bytes_free(ptr::null_mut(), ptr::null_mut(), ptr::null_mut()) };
+        for bytes in [Box::<[u8]>::from([]), Box::from([1, 2, 3])] {
+            let length = bytes.len();
+            let pointer = Box::into_raw(bytes);
+            // SAFETY: the pointer and length of a box this test gave up.
+            unsafe {
+                qjs_rust_bytes_free(
+                    ptr::null_mut(),
+                    ptr::without_provenance_mut(length),
+                    pointer.cast::<c_void>(),
+                );
+            }
+        }
+    }
 
     #[test]
     fn malloc_is_aligned_and_reports_its_payload_size() {

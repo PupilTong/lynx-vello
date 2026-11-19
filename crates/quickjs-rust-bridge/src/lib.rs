@@ -63,6 +63,7 @@ mod platform_time;
 mod implementation {
     use std::cell::{Cell, RefCell};
     use std::ffi::{CStr, CString, c_char, c_int, c_void};
+    use std::marker::PhantomData;
     use std::mem::MaybeUninit;
     use std::num::TryFromIntError;
     use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -90,6 +91,19 @@ mod implementation {
     /// event dispatch is one such call with two arguments per path step: a
     /// position event over eight steps is 31.
     const CALL_INLINE_ARGS: usize = 32;
+
+    /// The highest message index a transfer host function may have: the
+    /// shim's `QJS_TRANSFER_AT_MAX`, since `QuickJS` keeps a function's
+    /// length, at least the index plus two, in eight bits.
+    const MAX_TRANSFER_MESSAGE_INDEX: u32 = 253;
+
+    // Every host call moves its arguments and its answer, and a variant that
+    // widens either enum slows every call, the primitive ones included
+    // (measured with `benches/host_calls.rs`: 32-byte arguments and 40-byte
+    // values made a no-argument call take half as long again).
+    #[cfg(target_pointer_width = "64")]
+    const _: () =
+        assert!(mem::size_of::<HostArgument<'static>>() == 24 && mem::size_of::<HostValue>() == 32);
 
     /// `QuickJS`'s "no such atom" sentinel, returned when interning fails.
     const JS_ATOM_NULL: u32 = 0;
@@ -554,8 +568,9 @@ mod implementation {
 
     /// One described argument, borrowing the bytes the trampoline holds for
     /// it: a string is `JS_ToCStringLen2`'s UTF-8 — the realm's own bytes
-    /// for an ASCII string — and a structured clone `JS_WriteObject`'s
-    /// stream, so nothing is copied unless the host function keeps the value
+    /// for an ASCII string — a structured clone `JS_WriteObject`'s stream,
+    /// and an `ArrayBuffer`'s bytes the trampoline's copy of them, so
+    /// nothing more is copied unless the host function keeps the value
     /// ([`HostArgument::to_value`]).
     fn read_host_argument(
         argument: &ffi::QjsHostArg,
@@ -587,9 +602,31 @@ mod implementation {
                 let bytes = unsafe { std::slice::from_raw_parts(argument.text, argument.text_len) };
                 Ok(HostArgument::Structured(StructuredBytes::from_bytes(bytes)))
             }
+            // A transfer trampoline's message: `JS_WriteObjectTransfer`'s
+            // stream, never empty and at most `u32::MAX` bytes (the shim
+            // refuses a longer one), and its slot count, a nonnegative `int`.
+            ffi::HOST_ARG_TRANSFERRED => {
+                let bytes = unsafe { std::slice::from_raw_parts(argument.text, argument.text_len) };
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "the shim writes a nonnegative `int` count"
+                )]
+                let slots = argument.number as u32;
+                TransferredBytes::new(bytes, slots)
+                    .map(HostArgument::Transferred)
+                    .ok_or_else(|| HostFunctionError::new("a transferred clone is too large"))
+            }
+            // An empty buffer is described with no copy and a null pointer,
+            // which `from_raw_parts` may not be given.
+            ffi::HOST_ARG_BYTES => Ok(HostArgument::Bytes(if argument.text_len == 0 {
+                &[]
+            } else {
+                unsafe { std::slice::from_raw_parts(argument.text, argument.text_len) }
+            })),
             _ => Err(HostFunctionError::new(
-                "host functions accept undefined, null, Boolean, Number, String, and \
-                 structured-cloneable arguments only",
+                "host functions accept undefined, null, Boolean, Number, String, \
+                 ArrayBuffer, and structured-cloneable arguments only",
             )),
         }
     }
@@ -732,8 +769,231 @@ mod implementation {
         }
     }
 
+    /// A structured clone written with a transfer list, lent: what a host
+    /// function registered with
+    /// [`Context::register_host_module_function_with_transfer`] is handed for
+    /// its message when the list was not empty.
+    ///
+    /// The stream names each listed object, wherever and however often the
+    /// message holds it, as a *slot*: slot `i` is the list's entry `i`, and
+    /// there are [`Self::slots`] of them whether or not the message holds
+    /// each one. Like a [`StructuredBytes`], it is opaque, and it reads back
+    /// in any realm of this build, on any runtime, but only through a
+    /// [`Revival`]: the value each slot reads as is made in the receiving
+    /// realm. Lent into a call as it is, a stream with slots fails to read at
+    /// its first slot.
+    ///
+    /// Sixteen bytes, a pointer and two `u32`s rather than a slice and a
+    /// count, so that [`HostArgument`] stays the size it is without it: every
+    /// host call moves its arguments, and a wider enum measurably slows the
+    /// primitive ones. A stream longer than `u32::MAX` bytes is refused where
+    /// it is written.
+    #[derive(Clone, Copy)]
+    pub struct TransferredBytes<'a> {
+        start: NonNull<u8>,
+        length: u32,
+        slots: u32,
+        borrowed: PhantomData<&'a [u8]>,
+    }
+
+    // SAFETY: a `TransferredBytes` is a `&[u8]` and a count, and lends the
+    // bytes only as `&[u8]`, which is `Send` and `Sync`.
+    unsafe impl Send for TransferredBytes<'_> {}
+    // SAFETY: as above.
+    unsafe impl Sync for TransferredBytes<'_> {}
+
+    impl<'a> TransferredBytes<'a> {
+        /// `None` for a stream longer than `u32::MAX` bytes.
+        fn new(bytes: &'a [u8], slots: u32) -> Option<Self> {
+            Some(Self {
+                start: NonNull::from(bytes).cast(),
+                length: u32::try_from(bytes.len()).ok()?,
+                slots,
+                borrowed: PhantomData,
+            })
+        }
+
+        fn bytes(self) -> &'a [u8] {
+            // SAFETY: `start` and `length` are the slice `new` was lent for
+            // `'a`.
+            unsafe { std::slice::from_raw_parts(self.start.as_ptr(), self.length as usize) }
+        }
+
+        /// How many transfer slots the stream has: the length of the list it
+        /// was written with.
+        #[must_use]
+        pub const fn slots(&self) -> usize {
+            self.slots as usize
+        }
+
+        /// Copies the stream out of the call it was lent for.
+        #[must_use]
+        pub fn to_owned(self) -> TransferredClone {
+            TransferredClone {
+                bytes: Box::from(self.bytes()),
+                slots: self.slots,
+            }
+        }
+    }
+
+    impl fmt::Debug for TransferredBytes<'_> {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter
+                .debug_struct("TransferredBytes")
+                .field("length", &self.length)
+                .field("slots", &self.slots)
+                .finish()
+        }
+    }
+
+    impl PartialEq for TransferredBytes<'_> {
+        fn eq(&self, other: &Self) -> bool {
+            self.slots == other.slots && self.bytes() == other.bytes()
+        }
+    }
+
+    impl Eq for TransferredBytes<'_> {}
+
+    /// The owned form of [`TransferredBytes`]: what crosses threads inside a
+    /// [`HostValue`].
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct TransferredClone {
+        /// At most `u32::MAX` bytes: only ever copied from a
+        /// [`TransferredBytes`].
+        bytes: Box<[u8]>,
+        slots: u32,
+    }
+
+    impl TransferredClone {
+        /// How many transfer slots the stream has.
+        #[must_use]
+        pub const fn slots(&self) -> usize {
+            self.slots as usize
+        }
+
+        /// Lends the stream.
+        #[must_use]
+        pub fn as_bytes(&self) -> TransferredBytes<'_> {
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "copied from a `TransferredBytes`, so at most `u32::MAX` bytes"
+            )]
+            let length = self.bytes.len() as u32;
+            TransferredBytes {
+                start: NonNull::from(&*self.bytes).cast(),
+                length,
+                slots: self.slots,
+                borrowed: PhantomData,
+            }
+        }
+    }
+
+    /// A transferred clone and one descriptor per slot, lent into a call of
+    /// a realm as [`HostArgument::Revive`].
+    ///
+    /// The receiving realm builds each descriptor into a value, in slot
+    /// order, and calls its transfer reviver (the function its own code gave
+    /// the `setTransferReviver` export of
+    /// [`Context::register_host_module_transfer_members`]) with it; slot `i`
+    /// of the stream then reads as the reviver's `i`-th answer, at every
+    /// position the message holds it, so two positions that held one listed
+    /// object hold one answer. A realm with no reviver, a reviver that
+    /// throws, or a descriptor that cannot be built fails the call before
+    /// the stream is read, with that exception.
+    pub struct Revival<'a> {
+        raw: ffi::QjsRevival,
+        /// Where `raw.descriptors` points: a heap buffer, so moving the
+        /// `Revival` does not move it. A `Vec` rather than a `Box<[_]>`,
+        /// because moving a `Box` asserts that it is the only pointer to its
+        /// allocation, which `raw.descriptors` is not (Miri reports the
+        /// read through it as undefined behaviour). The descriptors borrow
+        /// what the arguments `new` was given borrow, for `'a`, as `message`
+        /// does.
+        descriptors: Vec<ffi::QjsHostArg>,
+        message: TransferredBytes<'a>,
+    }
+
+    // SAFETY: the raw pointers in `raw` and `descriptors` name `message`'s
+    // bytes, the buffer the `Revival` owns, and what the
+    // `HostArgument`s it was made from borrow: all of it `Send` and `Sync`
+    // data, which nothing reached through a `Revival` writes.
+    unsafe impl Send for Revival<'_> {}
+    // SAFETY: as above.
+    unsafe impl Sync for Revival<'_> {}
+
+    impl<'a> Revival<'a> {
+        /// Pairs `message` with one descriptor per slot.
+        ///
+        /// # Errors
+        ///
+        /// [`ErrorKind::InvalidInput`] when the descriptors are not one per
+        /// slot, or when one of them is itself a
+        /// [`HostArgument::Transferred`] or [`HostArgument::Revive`].
+        pub fn new(
+            message: TransferredBytes<'a>,
+            descriptors: &[HostArgument<'a>],
+        ) -> Result<Self, Error> {
+            if descriptors.len() != message.slots() {
+                return Err(Error::bridge(
+                    ErrorKind::InvalidInput,
+                    ErrorPhase::Call,
+                    "a transferred clone needs one descriptor per transfer slot",
+                ));
+            }
+            if descriptors.iter().any(|descriptor| {
+                matches!(
+                    descriptor,
+                    HostArgument::Transferred(_) | HostArgument::Revive(_)
+                )
+            }) {
+                return Err(Error::bridge(
+                    ErrorKind::InvalidInput,
+                    ErrorPhase::Call,
+                    "a transfer slot descriptor cannot itself be transferred",
+                ));
+            }
+            let descriptors: Vec<ffi::QjsHostArg> = descriptors
+                .iter()
+                .map(|descriptor| descriptor.descriptor())
+                .collect();
+            let bytes = message.bytes();
+            Ok(Self {
+                raw: ffi::QjsRevival {
+                    bytes: bytes.as_ptr(),
+                    length: bytes.len(),
+                    slots: message.slots(),
+                    descriptors: descriptors.as_ptr(),
+                },
+                descriptors,
+                message,
+            })
+        }
+
+        /// The stream this revives.
+        #[must_use]
+        pub const fn message(&self) -> TransferredBytes<'a> {
+            self.message
+        }
+    }
+
+    impl fmt::Debug for Revival<'_> {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter
+                .debug_struct("Revival")
+                .field("slots", &self.descriptors.len())
+                .finish_non_exhaustive()
+        }
+    }
+
+    /// Two revivals are equal only when they are one revival.
+    impl PartialEq for Revival<'_> {
+        fn eq(&self, other: &Self) -> bool {
+            ptr::eq(self, other)
+        }
+    }
+
     /// A value a host function returns, or one the host keeps: a primitive,
-    /// or an opaque structured clone.
+    /// an opaque structured clone, or the bytes of an `ArrayBuffer`.
     ///
     /// Owned, because it outlives the call that produced it: a return value
     /// was built by the host, and an argument kept past its call
@@ -756,6 +1016,17 @@ mod implementation {
         Number(f64),
         String(String),
         Structured(StructuredClone),
+        /// The bytes of an `ArrayBuffer`. Returned from a host function, the
+        /// allocation itself becomes the new `ArrayBuffer`'s storage, with
+        /// nothing copied; lent into a call ([`Self::as_argument`]), it is
+        /// copied into a new `ArrayBuffer` of the realm called. Either way
+        /// the buffer is fixed-length.
+        Bytes(Box<[u8]>),
+        /// A structured clone written with a transfer list
+        /// ([`TransferredBytes`]). Delivered into a realm through a
+        /// [`Revival`]; lent or returned as it is, a stream with slots fails
+        /// to read at its first slot.
+        Transferred(TransferredClone),
     }
 
     impl HostValue {
@@ -772,6 +1043,8 @@ mod implementation {
                 Self::Number(value) => HostArgument::Number(*value),
                 Self::String(value) => HostArgument::String(value),
                 Self::Structured(value) => HostArgument::Structured(value),
+                Self::Bytes(value) => HostArgument::Bytes(value),
+                Self::Transferred(value) => HostArgument::Transferred(value.as_bytes()),
             }
         }
     }
@@ -806,6 +1079,32 @@ mod implementation {
         Number(f64),
         String(&'a str),
         Structured(&'a StructuredBytes),
+        /// The bytes of an `ArrayBuffer`.
+        ///
+        /// A host function is handed this for an argument that is itself a
+        /// fixed-length `ArrayBuffer` (a subclass instance included): not a
+        /// typed array or `DataView`, not one inside another value, and not
+        /// a resizable one, all of which stay [`Self::Structured`]. A
+        /// detached one is a `TypeError` at the call, as the structured path
+        /// makes it, and the host function is not called. The bytes are a
+        /// copy the trampoline made when it described the argument, not the
+        /// buffer's own storage: the host function can run code of the realm
+        /// while it holds them, and that code can write, detach or free the
+        /// buffer. A caller that means part of a typed array passes its
+        /// `buffer` with the offset and length as further arguments.
+        ///
+        /// Lent into a call of a realm, it becomes a new fixed-length
+        /// `ArrayBuffer` with a copy of the bytes.
+        Bytes(&'a [u8]),
+        /// A message written with a non-empty transfer list: what a host
+        /// function registered with
+        /// [`Context::register_host_module_function_with_transfer`] is handed
+        /// for its message. Never made for any other host function.
+        Transferred(TransferredBytes<'a>),
+        /// A transferred clone delivered with its slots' replacements: only
+        /// ever lent into a call by the host, never handed to a host
+        /// function.
+        Revive(&'a Revival<'a>),
     }
 
     impl HostArgument<'_> {
@@ -820,6 +1119,11 @@ mod implementation {
                 Self::Number(value) => HostValue::Number(value),
                 Self::String(value) => HostValue::String(value.to_owned()),
                 Self::Structured(value) => HostValue::Structured(value.to_owned()),
+                Self::Bytes(value) => HostValue::Bytes(Box::from(value)),
+                Self::Transferred(value) => HostValue::Transferred(value.to_owned()),
+                // The descriptors are the host's own, lent with the stream;
+                // what is kept is the stream.
+                Self::Revive(value) => HostValue::Transferred(value.message().to_owned()),
             }
         }
 
@@ -841,6 +1145,22 @@ mod implementation {
                     0.0,
                     value.bytes.as_ptr(),
                     value.bytes.len(),
+                ),
+                Self::Bytes(value) => (ffi::HOST_ARG_BYTES, 0.0, value.as_ptr(), value.len()),
+                Self::Transferred(value) => {
+                    let bytes = value.bytes();
+                    (
+                        ffi::HOST_ARG_TRANSFERRED,
+                        f64::from(value.slots),
+                        bytes.as_ptr(),
+                        bytes.len(),
+                    )
+                }
+                Self::Revive(value) => (
+                    ffi::HOST_ARG_REVIVE,
+                    0.0,
+                    ptr::from_ref(&value.raw).cast::<u8>(),
+                    0,
                 ),
             };
             ffi::QjsHostArg {
@@ -966,6 +1286,24 @@ mod implementation {
                     out.kind = ffi::HOST_ARG_STRUCTURED;
                     out.text = bytes.as_ptr();
                     out.text_len = bytes.len();
+                }
+                HostValue::Transferred(clone) => {
+                    let mut parked = self.return_bytes.borrow_mut();
+                    let bytes = parked.insert(clone.bytes.into_vec());
+                    out.kind = ffi::HOST_ARG_TRANSFERRED;
+                    out.number = f64::from(clone.slots);
+                    out.text = bytes.as_ptr();
+                    out.text_len = bytes.len();
+                }
+                // Not parked: the allocation passes to the trampoline, whose
+                // `qjs_host_build` runs right after this returns and makes it
+                // the new `ArrayBuffer`'s storage, or frees it if that fails
+                // (`qjs_rust_bytes_free`, which takes the length back from
+                // the buffer's opaque).
+                HostValue::Bytes(bytes) => {
+                    out.kind = ffi::HOST_ARG_BYTES_OWNED;
+                    out.text_len = bytes.len();
+                    out.text = Box::into_raw(bytes).cast::<u8>();
                 }
             }
         }
@@ -2432,6 +2770,97 @@ mod implementation {
             self.add_host_module_function(&names, function)
         }
 
+        /// [`Self::register_host_module_function`] for a function whose
+        /// argument `message_index` is a message and whose argument
+        /// `message_index + 1` is that message's transfer list, as
+        /// `postMessage(message, transfer)` has them.
+        ///
+        /// The list is `undefined` or an array; anything else is a
+        /// `TypeError` at the call. With `undefined` or an empty array, the
+        /// message is described as any argument is, so the handler sees what
+        /// [`Self::register_host_module_function`] would show it. With a
+        /// non-empty list, each entry must be an object marked transferable
+        /// (`markUncloneable(object, true)`, from
+        /// [`Self::register_host_module_transfer_members`]) and listed once,
+        /// and the message is written with each entry as its slot, by list
+        /// index, wherever it appears: the handler is handed
+        /// [`HostArgument::Transferred`] with as many slots as the list has
+        /// entries, whatever the message is. The list's own argument is
+        /// handed as [`HostArgument::Number`], its length. Every other
+        /// argument is described as usual.
+        ///
+        /// Everything the serializer refuses throws at the call and the
+        /// handler is not called, so nothing has been sent and nothing in
+        /// the realm has changed: an entry that is not a transferable object
+        /// or is listed twice (`TypeError: value is not transferable`,
+        /// `TypeError: duplicate transferable`), a marked object the message
+        /// holds that is not listed (`TypeError: uncloneable object`), and
+        /// every refusal [`Self::register_host_module_function`] makes. The
+        /// handler learns which slot is which object from the realm's own
+        /// code, which passes whatever names the objects (ids of its own
+        /// tables) as further primitive arguments, in list order.
+        ///
+        /// `message_index` is at most 253: `QuickJS` keeps a function's
+        /// length in eight bits, and the function's length is at least
+        /// `message_index + 2`.
+        pub fn register_host_module_function_with_transfer<F>(
+            &self,
+            module_name: &str,
+            export_name: &str,
+            arity: u32,
+            message_index: u32,
+            handler: F,
+        ) -> Result<(), Error>
+        where
+            F: FnMut(&[HostArgument<'_>]) -> Result<HostValue, HostFunctionError> + 'static,
+        {
+            self.reclaim();
+            let names = host_module_names(module_name, export_name)?;
+            let function = self.function_with_transfer(export_name, arity, message_index, handler);
+            self.add_host_module_function(&names, function)
+        }
+
+        /// Adds the two members a realm's own code uses to take part in a
+        /// transfer, as the exports `mark_export` and `reviver_export` of the
+        /// native ESM module `module_name` in this realm. Neither crosses
+        /// into Rust:
+        ///
+        /// - `mark_export(object, transferable)` marks `object` uncloneable: a structured clone
+        ///   that meets it throws `TypeError: uncloneable object` unless it is in the clone's
+        ///   transfer list, and it may be in one only while the latest mark said `transferable`.
+        ///   Marking it again with `false` (an object whose payload has moved out) keeps it
+        ///   uncloneable and makes it untransferable. A non-object is a `TypeError`.
+        /// - `reviver_export(reviver)` sets the function a [`Revival`] delivered into this realm
+        ///   calls once per slot with that slot's descriptor, to make the value the slot reads as.
+        ///   Once per realm: a second call is a `TypeError`, so the realm's engine code, which runs
+        ///   first, is the code every delivery calls.
+        ///
+        /// Registered under the rules of
+        /// [`Self::register_host_module_function`].
+        pub fn register_host_module_transfer_members(
+            &self,
+            module_name: &str,
+            mark_export: &str,
+            reviver_export: &str,
+        ) -> Result<(), Error> {
+            self.reclaim();
+            for (export_name, member) in [(mark_export, 0), (reviver_export, 1)] {
+                let (module_name_c, export_name_c) = host_module_names(module_name, export_name)?;
+                // SAFETY: both names live through the call, which copies
+                // them.
+                let status = unsafe {
+                    ffi::qjs_context_add_host_module_transfer_member(
+                        self.raw().as_ptr(),
+                        module_name_c.as_ptr(),
+                        export_name_c.as_ptr(),
+                        member,
+                    )
+                };
+                host_module_status(status)?;
+            }
+            Ok(())
+        }
+
         /// Adds a host function just made as the export the two names
         /// [`host_module_names`] checked name.
         fn add_host_module_function(
@@ -2690,6 +3119,35 @@ mod implementation {
             self.host_function(
                 name,
                 arity,
+                None,
+                HostSlot::Exclusive(RefCell::new(Box::new(handler))),
+            )
+        }
+
+        /// [`Self::function`] for a function whose argument `message_index`
+        /// is a message and `message_index + 1` its transfer list: see
+        /// [`Self::register_host_module_function_with_transfer`].
+        pub fn function_with_transfer<F>(
+            &self,
+            name: &str,
+            arity: u32,
+            message_index: u32,
+            handler: F,
+        ) -> Result<Value, Error>
+        where
+            F: FnMut(&[HostArgument<'_>]) -> Result<HostValue, HostFunctionError> + 'static,
+        {
+            if message_index > MAX_TRANSFER_MESSAGE_INDEX {
+                return Err(Error::bridge(
+                    ErrorKind::InvalidInput,
+                    ErrorPhase::ConstructValue,
+                    "a transfer host function's message index is at most 253",
+                ));
+            }
+            self.host_function(
+                name,
+                arity,
+                Some(message_index),
                 HostSlot::Exclusive(RefCell::new(Box::new(handler))),
             )
         }
@@ -2712,16 +3170,32 @@ mod implementation {
         where
             F: Fn(&[HostArgument<'_>]) -> Result<HostValue, HostFunctionError> + 'static,
         {
-            self.host_function(name, arity, HostSlot::Reentrant(Box::new(handler)))
+            self.host_function(name, arity, None, HostSlot::Reentrant(Box::new(handler)))
         }
 
-        fn host_function(&self, name: &str, arity: u32, slot: HostSlot) -> Result<Value, Error> {
+        fn host_function(
+            &self,
+            name: &str,
+            arity: u32,
+            transfer_at: Option<u32>,
+            slot: HostSlot,
+        ) -> Result<Value, Error> {
             self.reclaim();
             let name = property_name(name)?;
             let arity = i32::try_from(arity).map_err(int_conversion_error)?;
+            let transfer_at = match transfer_at {
+                Some(index) => i32::try_from(index).map_err(int_conversion_error)?,
+                None => -1,
+            };
             let slot = Box::into_raw(Box::new(slot));
             let raw = unsafe {
-                ffi::qjs_new_host_function(self.raw().as_ptr(), name.as_ptr(), arity, slot.cast())
+                ffi::qjs_new_host_function(
+                    self.raw().as_ptr(),
+                    name.as_ptr(),
+                    arity,
+                    slot.cast(),
+                    transfer_at,
+                )
             };
             match self.value_or_exception(raw, ErrorPhase::ConstructValue) {
                 Ok(value) => Ok(value),
@@ -7576,6 +8050,10 @@ mod implementation {
                         HostArgument::Number(value) => format!("number:{value}"),
                         HostArgument::String(value) => format!("string:{value}"),
                         HostArgument::Structured(_) => "structured".to_owned(),
+                        HostArgument::Bytes(value) => format!("bytes:{}", value.len()),
+                        HostArgument::Transferred(_) | HostArgument::Revive(_) => {
+                            "transferred".to_owned()
+                        }
                     }))
                 })
                 .unwrap();
@@ -8662,13 +9140,96 @@ mod implementation {
             assert_eq!(error.kind, ErrorKind::WrongRealm);
         }
     }
+
+    /// The Rust half of a transfer, with no realm: what the shim is handed
+    /// for a [`HostArgument::Transferred`] and a [`HostArgument::Revive`].
+    /// No `QuickJS` call is made, so these also run under Miri.
+    #[cfg(test)]
+    mod transfer_tests {
+        use super::*;
+
+        #[test]
+        fn a_transferred_stream_lends_and_copies_its_bytes() {
+            let stream = [5_u8, 1, 2, 3];
+            let lent = TransferredBytes::new(&stream, 2).unwrap();
+            assert_eq!(lent.bytes(), &stream);
+            assert_eq!(lent.slots(), 2);
+            let owned = lent.to_owned();
+            assert_eq!(owned.as_bytes(), lent);
+            assert_eq!(
+                HostArgument::Transferred(lent).to_value(),
+                HostValue::Transferred(owned.clone())
+            );
+            let described = HostArgument::Transferred(owned.as_bytes()).descriptor();
+            assert_eq!(described.kind, ffi::HOST_ARG_TRANSFERRED);
+            assert!((described.number - 2.0).abs() < f64::EPSILON);
+            // SAFETY: the descriptor borrows `owned`, which is alive.
+            let read = unsafe { std::slice::from_raw_parts(described.text, described.text_len) };
+            assert_eq!(read, &stream);
+            assert!(TransferredBytes::new(&[], 0).unwrap().bytes().is_empty());
+        }
+
+        #[test]
+        fn a_revival_keeps_its_descriptors_where_the_shim_reads_them_after_a_move() {
+            let owned = TransferredBytes::new(&[5, 1, 2, 3], 2).unwrap().to_owned();
+            let text = String::from("slot zero");
+            let made = Revival::new(
+                owned.as_bytes(),
+                &[HostArgument::String(&text), HostArgument::Number(7.0)],
+            )
+            .unwrap();
+            let moved = Box::new(made);
+            let described = HostArgument::Revive(&moved).descriptor();
+            assert_eq!(described.kind, ffi::HOST_ARG_REVIVE);
+            assert!(ptr::eq(described.text, ptr::from_ref(&moved.raw).cast()));
+            // SAFETY: `moved.raw`'s pointers name `owned`, `moved.descriptors`
+            // and `text`, all alive.
+            unsafe {
+                let raw = &moved.raw;
+                assert_eq!(
+                    std::slice::from_raw_parts(raw.bytes, raw.length),
+                    &[5, 1, 2, 3]
+                );
+                let descriptors = std::slice::from_raw_parts(raw.descriptors, raw.slots);
+                assert_eq!(descriptors[0].kind, ffi::HOST_ARG_STRING);
+                assert_eq!(
+                    std::slice::from_raw_parts(descriptors[0].text, descriptors[0].text_len),
+                    text.as_bytes()
+                );
+                assert_eq!(descriptors[1].kind, ffi::HOST_ARG_NUMBER);
+            }
+            assert_eq!(moved.message(), owned.as_bytes());
+            assert_eq!(
+                HostArgument::Revive(&moved).to_value(),
+                HostValue::Transferred(owned.clone())
+            );
+            assert_eq!(
+                Revival::new(owned.as_bytes(), &[HostArgument::Null])
+                    .unwrap_err()
+                    .kind,
+                ErrorKind::InvalidInput
+            );
+            assert_eq!(
+                Revival::new(
+                    owned.as_bytes(),
+                    &[
+                        HostArgument::Null,
+                        HostArgument::Transferred(owned.as_bytes())
+                    ],
+                )
+                .unwrap_err()
+                .kind,
+                ErrorKind::InvalidInput
+            );
+        }
+    }
 }
 
 pub use ffi::MemoryUsage;
 pub use implementation::{
     CallOutcome, Compiled, CompiledKind, Context, Error, ErrorKind, ErrorPhase, EvalOptions,
     EvalSource, HostArgument, HostFunctionError, HostValue, InterruptHandle, Member, ModuleCode,
-    ModuleNormalizer, RequiredCode, RequiredKind, RequiredSource, Runtime, RuntimeOptions,
-    SourceLocation, SourceType, StructuredBytes, StructuredClone, Value, ValueKind,
-    bytecode_engine_id, is_framed_bytecode,
+    ModuleNormalizer, RequiredCode, RequiredKind, RequiredSource, Revival, Runtime, RuntimeOptions,
+    SourceLocation, SourceType, StructuredBytes, StructuredClone, TransferredBytes,
+    TransferredClone, Value, ValueKind, bytecode_engine_id, is_framed_bytecode,
 };
