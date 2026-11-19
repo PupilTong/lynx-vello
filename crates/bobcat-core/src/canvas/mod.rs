@@ -1,6 +1,7 @@
 //! The Canvas 2D API's host state: one [`CanvasTable`] per realm, holding
-//! the `bobcat-canvas` objects that realm's `OffscreenCanvas`, `Path2D`,
-//! `CanvasGradient`, `CanvasPattern` and `ImageBitmap` objects name by id.
+//! the Canvas 2D objects (`terminus::link::html::canvas`) that realm's
+//! `OffscreenCanvas`, `Path2D`, `CanvasGradient`, `CanvasPattern` and
+//! `ImageBitmap` objects name by id.
 //!
 //! The table is installed with the core every realm has
 //! ([`crate::realm::open_realm`], and each `ShadowRealm` child its own), so
@@ -26,11 +27,12 @@ use std::borrow::Cow;
 use std::cell::{Cell, RefCell, RefMut};
 use std::rc::Weak;
 
-use bobcat_canvas::parley::fontique::Attributes;
-use bobcat_canvas::parley::{FontContext, FontFamily};
-use bobcat_canvas::{Canvas, CanvasError, Font, Gradient, Image, ImageDataRead, Path, Pattern};
 use rustc_hash::FxHashMap;
-use terminus::link::html::canvas::InvalidState;
+use terminus::link::html::canvas::{
+    Canvas, CanvasError, Font, Gradient, Image, ImageDataRead, InvalidState, Path, Pattern,
+};
+use terminus::link::parley::fontique::Attributes;
+use terminus::link::parley::{FontContext, FontFamily};
 use terminus::link::{NodeId, TextContext};
 use tokio_util::sync::CancellationToken;
 

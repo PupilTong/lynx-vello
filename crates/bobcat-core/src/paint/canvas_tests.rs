@@ -8,9 +8,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use bobcat_canvas::{Canvas, Style};
 use terminus::link::NodeId;
-use terminus::link::html::canvas::{CanvasFrames, Placeholder, transfer_control_to_offscreen};
+use terminus::link::html::canvas::{
+    Canvas, CanvasFrames, Placeholder, Style, transfer_control_to_offscreen,
+};
 use terminus::link::peniko::Color;
 
 use super::CanvasPresenter;
@@ -288,7 +289,7 @@ fn a_committed_texture_outlives_the_bitmap_budget() {
     // 160 MiB of bitmaps drawn by canvases, past the 128 MiB kept.
     for _ in 0..10 {
         let pixels = vec![255; 2048 * 2048 * 4];
-        let image = bobcat_canvas::Image::from_premultiplied(2048, 2048, pixels)
+        let image = terminus::link::html::canvas::Image::from_premultiplied(2048, 2048, pixels)
             .expect("an image the device takes");
         let mut other = Canvas::new(1, 1);
         other

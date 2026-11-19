@@ -4,24 +4,22 @@
 use std::sync::Arc;
 
 use parley::FontContext;
-use terminus::link::html::canvas::{CanvasFrames, Committed};
-use terminus::link::kurbo::{
-    self, Affine, BezPath, Cap, Join, PathEl, Point, Rect, Shape, Stroke, StrokeOpts,
-};
-use terminus::link::peniko::{
-    BlendMode, Color, Compose, Extend, Fill, ImageQuality, ImageSampler, Mix,
-};
-use terminus::link::render::canvas::{Init, PendingRead, Surface, SurfaceError, SurfaceImage};
-use terminus::link::{DisplayList, Embolden, Glyph, ListPaint};
 
-use crate::image::Source;
-use crate::path::builder_methods;
-use crate::style::{Paint, canvas_rect, image_quality};
-use crate::text::{self, Shaper};
-use crate::{
+use super::image::Source;
+use super::path::builder_methods;
+use super::style::{Paint, canvas_rect, image_quality};
+use super::text::{self, Shaper};
+use super::{
     CanvasError, CompositeOp, Direction, FillRule, Font, Image, LineCap, LineJoin, Path,
     SmoothingQuality, Style, TextAlign, TextBaseline, TextMetrics,
 };
+use crate::html::canvas::{CanvasFrames, Committed};
+use crate::kurbo::{
+    self, Affine, BezPath, Cap, Join, PathEl, Point, Rect, Shape, Stroke, StrokeOpts,
+};
+use crate::paint::display_list::{DisplayList, Embolden, Glyph, ListPaint};
+use crate::peniko::{BlendMode, Color, Compose, Extend, Fill, ImageQuality, ImageSampler, Mix};
+use crate::render::canvas::{Init, PendingRead, Surface, SurfaceError, SurfaceImage};
 
 /// The largest `getImageData` area allocated, in pixels.
 const MAX_AREA: u64 = 1 << 28;
@@ -1422,7 +1420,7 @@ impl Canvas {
     /// The bitmap as an image, for `drawImage(canvas)`, `createPattern` and
     /// `createImageBitmap`: the canvas's texture as it is when a draw of it
     /// is replayed. A draw of it replays at once, a pattern
-    /// ([`crate::Pattern::new`]) and a bitmap ([`Image::crop`]) copy it, so
+    /// ([`super::Pattern::new`]) and a bitmap ([`Image::crop`]) copy it, so
     /// each sees the pixels as of this call. Replays what is recorded first.
     pub fn image(&mut self) -> Image {
         match &mut self.raster {

@@ -26,9 +26,8 @@
 
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 
-use bobcat_canvas::Canvas;
 use rustc_hash::FxHashMap;
-use terminus::link::html::canvas::{CanvasFrames, InvalidState};
+use terminus::link::html::canvas::{Canvas, CanvasFrames, InvalidState};
 use terminus::link::{
     FrameImage, FrameImages, FrameWriter, ImageSizeHint, NodeId, PictureId, PictureKey, TakenFrame,
 };

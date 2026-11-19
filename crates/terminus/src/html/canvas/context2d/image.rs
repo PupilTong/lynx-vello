@@ -3,11 +3,10 @@
 
 use std::sync::Arc;
 
-use terminus::link::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat, ImageSampler};
-use terminus::link::render::canvas::{MAX_SURFACE_SIDE, SurfaceImage};
-use terminus::link::{ImageRef, ListPaint, Texture};
-
-use crate::CanvasError;
+use super::CanvasError;
+use crate::paint::display_list::{ImageRef, ListPaint, Texture};
+use crate::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat, ImageSampler};
+use crate::render::canvas::{MAX_SURFACE_SIDE, SurfaceImage};
 
 /// An image a draw samples: what `drawImage` and a pattern draw, what
 /// `transferToImageBitmap` hands out, and what an `ImageBitmap` holds.
@@ -26,7 +25,7 @@ pub(crate) enum Source {
     /// A texture of its own, which lives as long as a clone does.
     Texture(SurfaceImage),
     /// A canvas's texture as it is when the list drawing it is replayed
-    /// ([`crate::Canvas::image`]): drawn at once, never kept.
+    /// ([`super::Canvas::image`]): drawn at once, never kept.
     Live(Texture),
     /// No pixels: a canvas with no bitmap.
     Empty,
@@ -179,7 +178,7 @@ impl Image {
             ),
             Source::Live(texture) => (ListPaint::texture(*texture, sampler), None, Some(*texture)),
             Source::Empty => (
-                ListPaint::from(terminus::link::peniko::Color::TRANSPARENT),
+                ListPaint::from(crate::peniko::Color::TRANSPARENT),
                 None,
                 None,
             ),
