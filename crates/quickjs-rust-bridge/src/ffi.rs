@@ -17,6 +17,20 @@ pub(crate) const HOST_ARG_STRING: i32 = 4;
 /// serializer refused: `shim.c` returns the pending exception instead of
 /// dispatching, so it never crosses into Rust and has no constant here.
 pub(crate) const HOST_ARG_STRUCTURED: i32 = 6;
+/// Bytes that become, or came from, an `ArrayBuffer`, in `text`: an
+/// argument's copy the trampoline owns, or bytes the host lends into a call,
+/// which `qjs_host_build` copies.
+pub(crate) const HOST_ARG_BYTES: i32 = 8;
+/// A host function's returned `Box<[u8]>`, whose ownership passes to
+/// `qjs_host_build`: it becomes the new `ArrayBuffer`'s storage and is
+/// released by `qjs_rust_bytes_free`. Only ever a result.
+pub(crate) const HOST_ARG_BYTES_OWNED: i32 = 9;
+/// A structured clone written with a transfer list: its bytes in `text`, its
+/// slot count in `number`.
+pub(crate) const HOST_ARG_TRANSFERRED: i32 = 10;
+/// A transferred clone with one descriptor per slot, lent into a call:
+/// `text` points at a [`QjsRevival`]. Only ever an argument the host lends.
+pub(crate) const HOST_ARG_REVIVE: i32 = 11;
 
 pub(crate) const REJECTION_NONE: i32 = 0;
 pub(crate) const REJECTION_TAKEN: i32 = 1;
@@ -30,9 +44,19 @@ pub(crate) struct QjsHostArg {
 }
 
 /// The result of a host call has the same shape an argument does: both are
-/// the boundary's vocabulary — primitives plus opaque structured clones — and
-/// both carry their bytes in `text`.
+/// the boundary's vocabulary — primitives, opaque structured clones and
+/// `ArrayBuffer` bytes — and both carry their bytes in `text`.
 pub(crate) type QjsHostResult = QjsHostArg;
+
+/// What a [`HOST_ARG_REVIVE`] argument points at: the stream, its slot
+/// count, and one descriptor per slot.
+#[repr(C)]
+pub(crate) struct QjsRevival {
+    pub(crate) bytes: *const u8,
+    pub(crate) length: usize,
+    pub(crate) slots: usize,
+    pub(crate) descriptors: *const QjsHostArg,
+}
 
 pub(crate) type HostDispatch = unsafe extern "C" fn(
     opaque: *mut c_void,
@@ -272,6 +296,13 @@ unsafe extern "C" {
         name: *const c_char,
         export_name: *const c_char,
     ) -> c_int;
+    /// `member` 0 adds `markUncloneable`, 1 adds `setTransferReviver`.
+    pub(crate) fn qjs_context_add_host_module_transfer_member(
+        context: *mut QjsContext,
+        name: *const c_char,
+        export_name: *const c_char,
+        member: c_int,
+    ) -> c_int;
     pub(crate) fn qjs_context_register_synchronous_loader(
         context: *mut QjsContext,
         name: *const c_char,
@@ -390,5 +421,6 @@ unsafe extern "C" {
         name: *const c_char,
         length: c_int,
         handler: *mut c_void,
+        transfer_at: c_int,
     ) -> *mut QjsValue;
 }

@@ -151,7 +151,35 @@ enum QjsHostArgKind {
        Rust: the trampoline returns the pending exception instead of
        dispatching. */
     QJS_ARG_FAILED = 7,
+    /* Bytes that become, or came from, an `ArrayBuffer`, in `text`.
+       Inbound (realm to host) they are the trampoline's own copy of a
+       fixed-length `ArrayBuffer` argument, released after the dispatch; as
+       an argument the host passes into a realm they are the host's, and
+       `qjs_host_build` copies them. */
+    QJS_ARG_BYTES = 8,
+    /* A host function's returned bytes: a Rust `Box<[u8]>` of `text_len`
+       bytes at `text`, whose ownership passes to `qjs_host_build`. It
+       becomes the new `ArrayBuffer`'s storage, released through
+       `qjs_rust_bytes_free`. Only ever a result, never an argument. */
+    QJS_ARG_BYTES_OWNED = 9,
+    /* A structured clone written with a transfer list
+       (`JS_WriteObjectTransfer`): its bytes in `text`, and in `number` how
+       many transfer slots it has, one per entry of the list, in list order.
+       Read with no replacements (an argument the host lends as it is, or a
+       return value), a stream with slots fails at its first slot. */
+    QJS_ARG_TRANSFERRED = 10,
+    /* A transferred clone and the host's descriptors for its slots, lent
+       into a call: `text` points at a `QjsRevival`. Each descriptor is built
+       into a value and passed to the realm's transfer reviver, whose answers
+       are the values the slots read as. Only ever an argument the host
+       lends. */
+    QJS_ARG_REVIVE = 11,
 };
+
+/* Releases a `Box<[u8]>` the host handed over as `QJS_ARG_BYTES_OWNED`;
+   `opaque` carries its length. Defined in Rust (`allocator.rs`), and the
+   free function of every `ArrayBuffer` made from one. */
+void qjs_rust_bytes_free(JSRuntime *runtime, void *opaque, void *bytes);
 
 
 typedef struct QjsHostArg {
@@ -163,9 +191,19 @@ typedef struct QjsHostArg {
 
 
 /* The result of a host call travels in the same struct an argument does:
-   both are the boundary's own vocabulary — primitives plus opaque structured
-   clones — and both carry their bytes in `text`. */
+   both are the boundary's own vocabulary — primitives, opaque structured
+   clones and `ArrayBuffer` bytes — and both carry their bytes in `text`. */
 typedef QjsHostArg QjsHostResult;
+
+/* What a `QJS_ARG_REVIVE` argument points at: a `QJS_ARG_TRANSFERRED`
+   stream with `slots` slots and one descriptor per slot, none of them itself
+   a transferred, revived or owned-bytes kind. */
+typedef struct QjsRevival {
+    const uint8_t *bytes;
+    size_t length;
+    size_t slots;
+    const QjsHostArg *descriptors;
+} QjsRevival;
 
 
 typedef int QjsHostDispatch(void *opaque, QjsContext *context, void *handler,
@@ -194,6 +232,11 @@ typedef struct QjsRuntime {
        the host owner class is, from IDs the host allocated once. */
     JSClassID shadow_realm_class_id;
     JSClassID realm_link_class_id;
+    /* QuickJS's own class ID for `ArrayBuffer`, which quickjs.h does not
+       export: read off the first realm's `ArrayBuffer` in `qjs_context_new`.
+       `JS_INVALID_CLASS_ID` until then, or if that read failed, and no
+       argument is then described as bytes. */
+    JSClassID array_buffer_class_id;
     QjsModuleSource *module_sources;
     QjsHostModuleName *host_module_names;
     QjsReservedPrefix *reserved_prefixes;
@@ -327,6 +370,16 @@ struct QjsContext {
        taken before any code of it ran: `evaluate` is an indirect eval, and
        the global `eval` binding is the child's code's to replace. */
     JSValue shadow_eval;
+    /* This realm's intrinsic `ArrayBuffer.prototype.resizable` getter, taken
+       before any code of the realm ran, so that describing an argument
+       never runs a getter the realm's code installed. `JS_UNDEFINED` if it
+       could not be read, and no argument is then described as bytes. */
+    JSValue array_buffer_resizable;
+    /* The function a `QJS_ARG_REVIVE` argument's slot descriptors are passed
+       to, set once by the realm's own code through the export
+       `qjs_context_add_host_module_transfer_member` adds. `JS_UNDEFINED`
+       until then. */
+    JSValue transfer_reviver;
     /* How objects of other realms name this one; made the first time one
        needs to. */
     QjsRealmToken *token;
@@ -1653,6 +1706,55 @@ int qjs_bytecode_format_version(void) {
     return version;
 }
 
+/* Reads what describing an `ArrayBuffer` argument needs from a realm no code
+   has run in yet: the runtime's `ArrayBuffer` class ID, the first time, and
+   this realm's intrinsic `resizable` getter. A failure leaves either unset,
+   which only turns the bytes path off: every `ArrayBuffer` then crosses as
+   a structured clone, as any other object does. */
+static void qjs_context_read_array_buffer(QjsContext *context) {
+    JSContext *raw_context = context->raw;
+    QjsRuntime *runtime = context->runtime;
+    JSPropertyDescriptor descriptor;
+    JSValue probe;
+    JSValue prototype;
+    JSAtom atom;
+    int found;
+
+    if (runtime->array_buffer_class_id == JS_INVALID_CLASS_ID) {
+        probe = JS_NewArrayBufferCopy(raw_context, NULL, 0);
+        if (JS_IsException(probe)) {
+            JS_FreeValue(raw_context, JS_GetException(raw_context));
+            return;
+        }
+        runtime->array_buffer_class_id = JS_GetClassID(probe);
+        JS_FreeValue(raw_context, probe);
+    }
+    prototype = JS_GetClassProto(raw_context, runtime->array_buffer_class_id);
+    atom = JS_NewAtom(raw_context, "resizable");
+    if (atom == JS_ATOM_NULL) {
+        JS_FreeValue(raw_context, prototype);
+        JS_FreeValue(raw_context, JS_GetException(raw_context));
+        return;
+    }
+    found = JS_GetOwnProperty(raw_context, &descriptor, prototype, atom);
+    JS_FreeAtom(raw_context, atom);
+    JS_FreeValue(raw_context, prototype);
+    if (found < 0) {
+        JS_FreeValue(raw_context, JS_GetException(raw_context));
+        return;
+    }
+    if (found == 0) {
+        return;
+    }
+    JS_FreeValue(raw_context, descriptor.value);
+    JS_FreeValue(raw_context, descriptor.setter);
+    if (JS_IsFunction(raw_context, descriptor.getter)) {
+        context->array_buffer_resizable = descriptor.getter;
+    } else {
+        JS_FreeValue(raw_context, descriptor.getter);
+    }
+}
+
 QjsContext *qjs_context_new(QjsRuntime *runtime) {
     QjsContext *context = calloc(1, sizeof(*context));
 
@@ -1661,12 +1763,15 @@ QjsContext *qjs_context_new(QjsRuntime *runtime) {
     }
     context->runtime = runtime;
     context->shadow_eval = JS_UNDEFINED;
+    context->array_buffer_resizable = JS_UNDEFINED;
+    context->transfer_reviver = JS_UNDEFINED;
     context->raw = JS_NewContext(runtime->raw);
     if (context->raw == NULL) {
         free(context);
         return NULL;
     }
     JS_SetContextOpaque(context->raw, context);
+    qjs_context_read_array_buffer(context);
     return context;
 }
 
@@ -1705,6 +1810,10 @@ void qjs_context_free(QjsContext *context) {
     }
     JS_FreeValue(context->raw, context->shadow_eval);
     context->shadow_eval = JS_UNDEFINED;
+    JS_FreeValue(context->raw, context->array_buffer_resizable);
+    context->array_buffer_resizable = JS_UNDEFINED;
+    JS_FreeValue(context->raw, context->transfer_reviver);
+    context->transfer_reviver = JS_UNDEFINED;
     /* Pending jobs and settling promises keep the realm alive past this
        point. They must not find a wrapper the host no longer holds. */
     JS_SetContextOpaque(context->raw, NULL);
@@ -1831,6 +1940,67 @@ int qjs_context_add_host_module_shared_object(QjsContext *context,
         JS_FreeValueRT(runtime->raw, runtime->shared_object);
         runtime->shared_object = JS_UNDEFINED;
     }
+    return status;
+}
+
+/* `markUncloneable(object, transferable)`: `JS_SetUncloneable` on an
+   object, so that the serializer refuses it unless it is in a transfer
+   list, and lets it be in one only while `transferable` is true. */
+static JSValue qjs_transfer_mark(JSContext *raw_context, JSValueConst this_value,
+                                 int argc, JSValueConst *argv) {
+    (void)this_value;
+    (void)argc;
+    if (!JS_IsObject(argv[0])) {
+        return JS_ThrowTypeError(raw_context,
+                                 "only an object can be marked uncloneable");
+    }
+    JS_SetUncloneable(raw_context, argv[0], JS_ToBool(raw_context, argv[1]) > 0);
+    return JS_UNDEFINED;
+}
+
+/* `setTransferReviver(reviver)`: the function this realm makes the value of
+   each transfer slot with. Once per realm, so the code that sets it first is
+   the code every later delivery calls. */
+static JSValue qjs_transfer_set_reviver(JSContext *raw_context,
+                                        JSValueConst this_value, int argc,
+                                        JSValueConst *argv) {
+    QjsContext *context = JS_GetContextOpaque(raw_context);
+
+    (void)this_value;
+    (void)argc;
+    if (context == NULL) {
+        return JS_ThrowInternalError(raw_context, "this realm is being released");
+    }
+    if (!JS_IsFunction(raw_context, argv[0])) {
+        return JS_ThrowTypeError(raw_context, "the transfer reviver is not a function");
+    }
+    if (!JS_IsUndefined(context->transfer_reviver)) {
+        return JS_ThrowTypeError(raw_context, "the transfer reviver is already set");
+    }
+    context->transfer_reviver = JS_DupValue(raw_context, argv[0]);
+    return JS_UNDEFINED;
+}
+
+/* Adds one of the two transfer members as an export of a native module of
+   this realm: `member` 0 is `qjs_transfer_mark`, 1 is
+   `qjs_transfer_set_reviver`. Their lengths are the argument counts they
+   read, which `JS_NewCFunction2` pads `argv` to. */
+int qjs_context_add_host_module_transfer_member(QjsContext *context,
+                                                const char *name,
+                                                const char *export_name,
+                                                int member) {
+    JSValue function;
+    int status;
+
+    function = member == 0
+        ? JS_NewCFunction(context->raw, qjs_transfer_mark, export_name, 2)
+        : JS_NewCFunction(context->raw, qjs_transfer_set_reviver, export_name, 1);
+    if (JS_IsException(function)) {
+        JS_FreeValue(context->raw, JS_GetException(context->raw));
+        return -1;
+    }
+    status = qjs_add_host_module_export(context, name, export_name, function);
+    JS_FreeValue(context->raw, function);
     return status;
 }
 
@@ -2999,8 +3169,47 @@ void qjs_runtime_set_host_dispatch(QjsRuntime *runtime,
    dispatch, which takes two arguments per path step. */
 #define QJS_CALL_INLINE_ARGS 32
 
-static void qjs_host_describe(JSContext *raw_context, JSValueConst value,
+/* Whether `value` crosses as bytes: an `ArrayBuffer` (QuickJS's own class,
+   so a subclass instance too, never a view and never a SharedArrayBuffer,
+   which this bridge does not expose) that is not resizable. A resizable one
+   keeps the structured path, whose stream carries its `maxByteLength`, so
+   what a receiving realm builds is resizable as before. The getter is the
+   realm's intrinsic one, a C function that runs no code of the realm's; the
+   call can still fail as any call can (the interrupt handler's poll, stack
+   overflow), which is -1 with that exception pending. */
+static int qjs_host_is_fixed_array_buffer(QjsContext *context,
+                                          JSValueConst value) {
+    JSContext *raw_context = context->raw;
+    JSValue resizable;
+    int answer;
+
+    if (context->runtime->array_buffer_class_id == JS_INVALID_CLASS_ID ||
+        JS_GetClassID(value) != context->runtime->array_buffer_class_id ||
+        JS_IsUndefined(context->array_buffer_resizable)) {
+        return 0;
+    }
+    resizable = JS_Call(raw_context, context->array_buffer_resizable, value, 0,
+                        NULL);
+    if (JS_IsException(resizable)) {
+        return -1;
+    }
+    answer = !JS_ToBool(raw_context, resizable);
+    JS_FreeValue(raw_context, resizable);
+    return answer;
+}
+
+/* Describes one argument for the host. A fixed-length `ArrayBuffer` is
+   copied, once, into a buffer the trampoline owns until the dispatch
+   returns: a host function can run code of the realm while it holds the
+   bytes (any host function can call into its realm, not only a reentrant
+   one), and that code can write the buffer through a view, detach it
+   (`transfer`), or free its storage (`transfer` to another length), none of
+   which a borrow of the realm's own storage would survive. */
+static void qjs_host_describe(QjsContext *context, JSValueConst value,
                               QjsHostArg *slot) {
+    JSContext *raw_context = context->raw;
+    int fixed;
+
     slot->text = NULL;
     slot->text_len = 0;
     slot->number = 0.0;
@@ -3033,6 +3242,32 @@ static void qjs_host_describe(JSContext *raw_context, JSValueConst value,
         slot->kind = QJS_ARG_STRING;
         slot->text = (const uint8_t *)text;
         slot->text_len = length;
+    } else if ((fixed = qjs_host_is_fixed_array_buffer(context, value)) != 0) {
+        size_t length = 0;
+        uint8_t *copy = NULL;
+        /* NULL with the `TypeError` pending for a detached buffer, the same
+           refusal `JS_WriteObject` makes of one. */
+        const uint8_t *data;
+        if (fixed < 0) {
+            slot->kind = QJS_ARG_FAILED;
+            return;
+        }
+        data = JS_GetArrayBuffer(raw_context, &length, value);
+        if (data == NULL) {
+            slot->kind = QJS_ARG_FAILED;
+            return;
+        }
+        if (length > 0) {
+            copy = js_malloc(raw_context, length);
+            if (copy == NULL) {
+                slot->kind = QJS_ARG_FAILED;
+                return;
+            }
+            memcpy(copy, data, length);
+        }
+        slot->kind = QJS_ARG_BYTES;
+        slot->text = copy;
+        slot->text_len = length;
     } else {
         /* Everything that is not a primitive — an object, a BigInt, a Symbol
            — crosses as QuickJS's own serialization rather than not at all.
@@ -3053,18 +3288,54 @@ static void qjs_host_describe(JSContext *raw_context, JSValueConst value,
     }
 }
 
-/* Releases whatever one described argument holds. Both kinds that carry bytes
-   own them: a string is `JS_ToCStringLen2`'s, a structured clone is
-   `JS_WriteObject`'s. */
+/* Releases whatever one described argument holds. Every kind that carries
+   bytes owns them: a string is `JS_ToCStringLen2`'s, a structured clone is
+   `JS_WriteObject`'s, and an `ArrayBuffer`'s bytes are the describer's copy
+   (NULL when it was empty). */
 static void qjs_host_release_arg(JSContext *raw_context, QjsHostArg *slot) {
     if (slot->kind == QJS_ARG_STRING) {
         JS_FreeCString(raw_context, (const char *)slot->text);
-    } else if (slot->kind == QJS_ARG_STRUCTURED) {
+    } else if (slot->kind == QJS_ARG_STRUCTURED ||
+               slot->kind == QJS_ARG_BYTES) {
         js_free(raw_context, (void *)slot->text);
     }
     slot->text = NULL;
     slot->text_len = 0;
 }
+
+/* Makes the `ArrayBuffer` a host function's returned bytes become, taking
+   ownership of them: the allocation is the buffer's storage, so nothing is
+   copied. QuickJS calls the free function when the buffer is detached,
+   transferred to another length, or collected. An external buffer cannot be
+   resized (`js_array_buffer_resize` refuses one) and its storage is not
+   counted against the runtime's memory limit. `JS_NewArrayBuffer` does not
+   free the storage when it fails, so this does. An empty box has no
+   allocation and no pointer QuickJS may keep, so it becomes an ordinary
+   empty buffer. */
+static JSValue qjs_host_adopt_bytes(JSContext *raw_context,
+                                    const QjsHostResult *result) {
+    uint8_t *bytes = (uint8_t *)result->text;
+    size_t length = result->text_len;
+    void *opaque = (void *)(uintptr_t)length;
+    JSValue buffer;
+
+    if (length == 0) {
+        qjs_rust_bytes_free(JS_GetRuntime(raw_context), opaque, bytes);
+        return JS_NewArrayBufferCopy(raw_context, NULL, 0);
+    }
+    buffer = JS_NewArrayBuffer(raw_context, bytes, length, qjs_rust_bytes_free,
+                               opaque, 0);
+    if (JS_IsException(buffer)) {
+        qjs_rust_bytes_free(JS_GetRuntime(raw_context), opaque, bytes);
+    }
+    return buffer;
+}
+
+/* Kept out of line: inlined, it makes `qjs_host_build` too large to inline
+   into the callers every host call goes through. */
+static JSValue qjs_host_revive(JSContext *raw_context,
+                               const QjsRevival *revival)
+    __attribute__((noinline));
 
 static JSValue qjs_host_build(JSContext *raw_context,
                               const QjsHostResult *result) {
@@ -3086,9 +3357,85 @@ static JSValue qjs_host_build(JSContext *raw_context,
            exception from building an argument or a return value. */
         return JS_ReadObject(raw_context, result->text, result->text_len,
                              JS_READ_OBJ_REFERENCE);
+    case QJS_ARG_BYTES:
+        /* The host's bytes, lent for the call: copied. An empty slice's
+           pointer is not one `memcpy` may be given, so it is not passed. */
+        return JS_NewArrayBufferCopy(
+            raw_context, result->text_len == 0 ? NULL : result->text,
+            result->text_len);
+    case QJS_ARG_BYTES_OWNED:
+        return qjs_host_adopt_bytes(raw_context, result);
+    case QJS_ARG_TRANSFERRED:
+        /* No replacements: a stream with slots fails at its first one. */
+        return JS_ReadObjectTransfer(raw_context, result->text,
+                                     result->text_len, JS_READ_OBJ_REFERENCE,
+                                     NULL, 0);
+    case QJS_ARG_REVIVE:
+        return qjs_host_revive(raw_context,
+                               (const QjsRevival *)(const void *)result->text);
     default:
         return JS_ThrowInternalError(raw_context, "invalid host return value");
     }
+}
+
+/* Reads a transferred clone into this realm: each slot's descriptor is built
+   and passed to the realm's transfer reviver, in slot order, and slot i of
+   the stream reads as the reviver's i-th answer, at every position the
+   stream names it. A reviver that throws, or a descriptor that cannot be
+   built, fails the read before the stream is read; the replacements already
+   made are released. */
+static JSValue qjs_host_revive(JSContext *raw_context,
+                               const QjsRevival *revival) {
+    QjsContext *context = JS_GetContextOpaque(raw_context);
+    JSValue *replacements;
+    JSValue value = JS_EXCEPTION;
+    size_t built;
+
+    if (context == NULL) {
+        return JS_ThrowInternalError(raw_context, "this realm is being released");
+    }
+    if (JS_IsUndefined(context->transfer_reviver)) {
+        return JS_ThrowTypeError(raw_context, "this realm has no transfer reviver");
+    }
+    if (revival->slots > INT_MAX) {
+        return JS_ThrowRangeError(raw_context, "too many transfer slots");
+    }
+    replacements = js_malloc(raw_context,
+                             (revival->slots == 0 ? 1 : revival->slots) *
+                                 sizeof(*replacements));
+    if (replacements == NULL) {
+        return JS_EXCEPTION;
+    }
+    for (built = 0; built < revival->slots; ++built) {
+        const QjsHostArg *descriptor = &revival->descriptors[built];
+        JSValue argument;
+        if (descriptor->kind == QJS_ARG_TRANSFERRED ||
+            descriptor->kind == QJS_ARG_REVIVE ||
+            descriptor->kind == QJS_ARG_BYTES_OWNED) {
+            JS_ThrowTypeError(raw_context, "invalid transfer slot descriptor");
+            break;
+        }
+        argument = qjs_host_build(raw_context, descriptor);
+        if (JS_IsException(argument)) {
+            break;
+        }
+        replacements[built] = JS_Call(raw_context, context->transfer_reviver,
+                                      JS_UNDEFINED, 1, &argument);
+        JS_FreeValue(raw_context, argument);
+        if (JS_IsException(replacements[built])) {
+            break;
+        }
+    }
+    if (built == revival->slots) {
+        value = JS_ReadObjectTransfer(raw_context, revival->bytes,
+                                      revival->length, JS_READ_OBJ_REFERENCE,
+                                      replacements, (int)revival->slots);
+    }
+    while (built > 0) {
+        JS_FreeValue(raw_context, replacements[--built]);
+    }
+    js_free(raw_context, replacements);
+    return value;
 }
 
 /* One crossing for a whole host->realm call: the arguments arrive as the
@@ -3210,7 +3557,7 @@ static JSValue qjs_host_trampoline(JSContext *raw_context,
        rather than whichever argument threw last. `described` is then how many
        slots hold anything to release. */
     for (described = 0; described < argc; ++described) {
-        qjs_host_describe(raw_context, argv[described], &arguments[described]);
+        qjs_host_describe(context, argv[described], &arguments[described]);
         if (arguments[described].kind == QJS_ARG_FAILED) {
             refused = 1;
             ++described;
@@ -3250,8 +3597,186 @@ static JSValue qjs_host_trampoline(JSContext *raw_context,
 }
 
 
+/* Releases a transfer trampoline's argument: a `QJS_ARG_TRANSFERRED`
+   stream is `JS_WriteObjectTransfer`'s, everything else is
+   `qjs_host_describe`'s. */
+static void qjs_host_release_transfer_arg(JSContext *raw_context,
+                                          QjsHostArg *slot) {
+    if (slot->kind == QJS_ARG_TRANSFERRED) {
+        js_free(raw_context, (void *)slot->text);
+        slot->text = NULL;
+        slot->text_len = 0;
+    } else {
+        qjs_host_release_arg(raw_context, slot);
+    }
+}
+
+/* The trampoline of a host function whose argument `magic` is a message and
+   whose argument `magic + 1` is its transfer list: `undefined`, or an array
+   of objects `JS_SetUncloneable` marked transferable, each listed once.
+   With a non-empty list the message is written by `JS_WriteObjectTransfer`
+   and described as `QJS_ARG_TRANSFERRED`, whatever it is; with an empty one
+   it is described as any argument is. The list itself is described as the
+   number of its entries. The list is read (which may run the realm's code,
+   as any array read may) before anything is serialized, and is not changed:
+   the host is told how many slots there are, the realm's own code knows
+   which object each one was, and nothing is detached or moved here. A
+   refusal ends the call before the host sees any of it, as
+   `qjs_host_trampoline`'s does. `qjs_new_host_function` makes the
+   function's length at least `magic + 2`, so `argv` holds both. */
+static JSValue qjs_host_transfer_trampoline(JSContext *raw_context,
+                                            JSValueConst this_value, int argc,
+                                            JSValueConst *argv, int magic,
+                                            JSValue *func_data) {
+    QjsContext *context = JS_GetContextOpaque(raw_context);
+    QjsRuntime *runtime;
+    QjsHostArg inline_arguments[QJS_HOST_INLINE_ARGS];
+    QjsHostArg *arguments = inline_arguments;
+    QjsHostOwner *owner;
+    QjsHostResult result;
+    JSValue *transfer = NULL;
+    int64_t transfer_len = 0;
+    void *handler;
+    int status;
+    int count = argc > magic + 1 ? argc : magic + 2;
+    int described = 0;
+    int index;
+    int refused = 0;
+
+    (void)this_value;
+    if (context == NULL) {
+        return JS_ThrowInternalError(raw_context, "this realm is being released");
+    }
+    runtime = context->runtime;
+    if (runtime->host_dispatch == NULL) {
+        return JS_ThrowInternalError(raw_context, "no host dispatch is installed");
+    }
+    owner = JS_GetOpaque(func_data[0], runtime->host_owner_class_id);
+    if (owner == NULL || owner->handler == NULL) {
+        return JS_ThrowInternalError(raw_context, "this host function was released");
+    }
+    handler = owner->handler;
+
+    if (!JS_IsUndefined(argv[magic + 1])) {
+        int is_array = JS_IsArray(raw_context, argv[magic + 1]);
+        if (is_array < 0) {
+            return JS_EXCEPTION;
+        }
+        if (!is_array) {
+            return JS_ThrowTypeError(raw_context, "the transfer list is not an array");
+        }
+        JSValue length = JS_GetPropertyStr(raw_context, argv[magic + 1], "length");
+        if (JS_IsException(length)) {
+            return JS_EXCEPTION;
+        }
+        status = JS_ToInt64(raw_context, &transfer_len, length);
+        JS_FreeValue(raw_context, length);
+        if (status < 0) {
+            return JS_EXCEPTION;
+        }
+        /* An array's length is never negative; a proxy's can be. */
+        if (transfer_len < 0 || transfer_len > INT_MAX ||
+            (uint64_t)transfer_len > SIZE_MAX / sizeof(*transfer)) {
+            return JS_ThrowRangeError(raw_context, "the transfer list is too long");
+        }
+        if (transfer_len > 0) {
+            transfer = js_malloc(raw_context, (size_t)transfer_len * sizeof(*transfer));
+            if (transfer == NULL) {
+                return JS_EXCEPTION;
+            }
+            for (index = 0; index < transfer_len; ++index) {
+                transfer[index] = JS_GetPropertyUint32(raw_context, argv[magic + 1],
+                                                       (uint32_t)index);
+                if (JS_IsException(transfer[index])) {
+                    while (index > 0) {
+                        JS_FreeValue(raw_context, transfer[--index]);
+                    }
+                    js_free(raw_context, transfer);
+                    return JS_EXCEPTION;
+                }
+            }
+        }
+    }
+
+    if (count > QJS_HOST_INLINE_ARGS) {
+        if ((size_t)count > SIZE_MAX / sizeof(*arguments) ||
+            (arguments = malloc((size_t)count * sizeof(*arguments))) == NULL) {
+            arguments = inline_arguments;
+            JS_ThrowOutOfMemory(raw_context);
+            refused = 1;
+        }
+    }
+    while (!refused && described < count) {
+        QjsHostArg *slot = &arguments[described];
+        if (described == magic && transfer_len > 0) {
+            size_t length = 0;
+            uint8_t *bytes = JS_WriteObjectTransfer(
+                raw_context, &length, argv[magic], JS_WRITE_OBJ_REFERENCE,
+                transfer, (int)transfer_len);
+            /* The host keeps a transferred stream's length in 32 bits. */
+            if (bytes != NULL && length > UINT32_MAX) {
+                js_free(raw_context, bytes);
+                bytes = NULL;
+                length = 0;
+                JS_ThrowRangeError(raw_context, "the message is too large to transfer");
+            }
+            slot->kind = bytes == NULL ? QJS_ARG_FAILED : QJS_ARG_TRANSFERRED;
+            slot->number = (double)transfer_len;
+            slot->text = bytes;
+            slot->text_len = length;
+        } else if (described == magic + 1) {
+            slot->kind = QJS_ARG_NUMBER;
+            slot->number = (double)transfer_len;
+            slot->text = NULL;
+            slot->text_len = 0;
+        } else {
+            qjs_host_describe(context, argv[described], slot);
+        }
+        ++described;
+        refused = slot->kind == QJS_ARG_FAILED;
+    }
+    for (index = 0; index < transfer_len; ++index) {
+        JS_FreeValue(raw_context, transfer[index]);
+    }
+    js_free(raw_context, transfer);
+    if (refused) {
+        for (index = 0; index < described; ++index) {
+            qjs_host_release_transfer_arg(raw_context, &arguments[index]);
+        }
+        if (arguments != inline_arguments) {
+            free(arguments);
+        }
+        return JS_EXCEPTION;
+    }
+
+    result.kind = QJS_ARG_UNDEFINED;
+    result.number = 0.0;
+    result.text = NULL;
+    result.text_len = 0;
+    status = runtime->host_dispatch(runtime->host_opaque, context, handler,
+                                    (size_t)count, arguments, &result);
+    for (index = 0; index < count; ++index) {
+        qjs_host_release_transfer_arg(raw_context, &arguments[index]);
+    }
+    if (arguments != inline_arguments) {
+        free(arguments);
+    }
+    if (status != 0) {
+        return JS_EXCEPTION;
+    }
+    return qjs_host_build(raw_context, &result);
+}
+
+
+/* The highest message index a transfer host function may have: its list
+   must sit inside the eight-bit length `JS_NewCFunctionData` keeps. */
+#define QJS_TRANSFER_AT_MAX (UINT8_MAX - 2)
+
+/* `transfer_at` < 0 makes an ordinary host function; otherwise its argument
+   `transfer_at` is a message and `transfer_at + 1` that message's transfer
+   list (`qjs_host_transfer_trampoline`). */
 QjsValue *qjs_new_host_function(QjsContext *context, const char *name,
-                                int length, void *handler) {
+                                int length, void *handler, int transfer_at) {
     JSContext *raw_context = context->raw;
     QjsHostOwner *owner;
     JSValue data;
@@ -3274,8 +3799,22 @@ QjsValue *qjs_new_host_function(QjsContext *context, const char *name,
     }
     JS_SetOpaque(data, owner);
 
-    function = JS_NewCFunctionData(raw_context, qjs_host_trampoline, length,
-                                   0, 1, &data);
+    if (transfer_at < 0) {
+        function = JS_NewCFunctionData(raw_context, qjs_host_trampoline, length,
+                                       0, 1, &data);
+    } else if (transfer_at > QJS_TRANSFER_AT_MAX) {
+        function = JS_ThrowRangeError(raw_context, "too many call arguments");
+    } else {
+        /* QuickJS keeps the length in eight bits and pads `argv` to it, so
+           the length is what makes both of the trampoline's arguments
+           readable. */
+        int padded = transfer_at + 2;
+        if (length > padded && length <= UINT8_MAX) {
+            padded = length;
+        }
+        function = JS_NewCFunctionData(raw_context, qjs_host_transfer_trampoline,
+                                       padded, transfer_at, 1, &data);
+    }
     if (JS_IsException(function)) {
         owner->handler = NULL;
         JS_FreeValue(raw_context, data);
