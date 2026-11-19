@@ -63,12 +63,36 @@ Subsystems:
   rules, 300 × 150 by default); `transfer_control_to_offscreen` (an
   `InvalidState` unless `none`) answers the size and a `Send`
   `CanvasFrames`, through which a canvas surface commits
-  (`render::canvas::Surface::commit`): its texture is copied into the
+  (`Canvas::commit`, through `render::canvas::Surface::commit`): its
+  texture is copied into the
   picture's own texture, which the element's link leases until it is freed,
   before the generation is published; the commit answers whether a host
   wake and an `update_placeholders` call on the document's thread are owed;
   a placeholder ignores its attributes and takes its natural size from the
-  committed bitmaps there.
+  committed bitmaps there. `html/canvas/context2d/` is HTML's 2D rendering
+  context, the `OffscreenCanvas`'s side (bucket 1: the standard, no Lynx
+  quirk), with no `Document` and no JavaScript, so a Worker's canvas has one:
+  `Canvas` is one bitmap and its `CanvasRenderingContext2D` state, one call
+  per context method or attribute taking numbers, `&str`, keyword enums
+  (`CompositeOp`, `LineCap`, … each with `from_name`/`name` for the IDL
+  strings) or `Path` (`Path2D`), `Gradient`, `Pattern` (shared by
+  reference, so a stop or transform set later shows in later draws), `Image`,
+  `Style`, `Font` (parley family names; CSS strings are parsed by the
+  caller) and `peniko::Color`; text calls take the caller's
+  `&mut parley::FontContext`; `CanvasError` names the exception. `Canvas`
+  is `Send` and there is no global state. Draws are recorded into the
+  canvas's own `DisplayList` on the calling thread and replayed onto its
+  `render::canvas::Surface` at a read, at `flush`, after a draw that samples
+  a canvas texture, or past 2 MiB of recording (`MAX_RECORDED_BYTES`);
+  `Canvas::commit(&CanvasFrames)` is HTML's update of the placeholder.
+  The canvas-only display-list items (`push_backdrop_clip`,
+  `push_drop_shadow`, `ListPaint`, `fill_with`, `stroke_with`,
+  `DrawGlyphs::paint`, `recorded_bytes`) and `render::canvas`'s `Surface`
+  are `pub(crate)`: the 2D context is their one caller. The tests are
+  `tests/canvas_draw.rs` and `tests/canvas_text.rs` (Ahem from
+  `crates/seldon/tests/fixtures`), which need a GPU adapter.
+  `docs/terminus-architecture.md` "Canvas 2D context" has the replay rules
+  and the decisions the standard leaves open.
 - `style/` — the per-document `StyleEngine` (`Stylist`, cascade pipeline,
   device, stylesheet set, the document's own `SharedRwLock` for its author
   sheets and inline styles, and the one process-wide lock every user-agent
@@ -238,7 +262,8 @@ Subsystems:
   `backdrop-filter` bake at the document's root renders over the canvas
   colour its caller composites over, which `FilterTextures::prepare` and
   `Headless::prepare_filters` therefore take. `render::canvas` is a canvas
-  bitmap as a GPU texture (`Surface`, `SurfaceImage`, for `bobcat-canvas`):
+  bitmap as a GPU texture (`Surface`, `SurfaceImage`, for `html::canvas`'s 2D
+  context):
   display lists replayed onto it (with load, with a clear, or into its
   second texture over its own content, `Init::Backdrop`, for a batch that
   blends at the root or samples the canvas itself), pixel writes, readbacks,

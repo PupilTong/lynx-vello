@@ -6,11 +6,11 @@
     reason = "the transforms compared are products of exact binary values"
 )]
 
-use bobcat_canvas::peniko::Color;
-use bobcat_canvas::{
+use terminus::link::html::canvas::{
     Canvas, CanvasError, CompositeOp, FillRule, Gradient, Image, LineCap, Path, Pattern,
     Repetition, Style,
 };
+use terminus::link::peniko::Color;
 
 const RED: [u8; 4] = [255, 0, 0, 255];
 const GREEN: [u8; 4] = [0, 255, 0, 255];

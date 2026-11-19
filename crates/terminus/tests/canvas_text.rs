@@ -5,10 +5,10 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 
-use bobcat_canvas::parley::fontique::Blob;
-use bobcat_canvas::parley::{FontContext, FontFamilyName};
-use bobcat_canvas::peniko::Color;
-use bobcat_canvas::{Canvas, Direction, Font, Style, TextAlign, TextBaseline};
+use terminus::link::html::canvas::{Canvas, Direction, Font, Style, TextAlign, TextBaseline};
+use terminus::link::parley::fontique::Blob;
+use terminus::link::parley::{FontContext, FontFamilyName};
+use terminus::link::peniko::Color;
 
 const AHEM: &[u8] = include_bytes!("../../seldon/tests/fixtures/Ahem.ttf");
 
