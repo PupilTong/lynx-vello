@@ -42,11 +42,11 @@ use crate::render::picture::PictureId;
 /// The longest side a canvas texture has: the device's
 /// `max_texture_dimension_2d` under the limits every device is created
 /// with ([`SharedGpu::LIMITS`]).
-pub const MAX_SURFACE_SIDE: u32 = SharedGpu::LIMITS.max_texture_dimension_2d;
+pub(crate) const MAX_SURFACE_SIDE: u32 = SharedGpu::LIMITS.max_texture_dimension_2d;
 
 /// How a draw treats what the surface holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Init {
+pub(crate) enum Init {
     /// Drawn over the content.
     Load,
     /// The content is cleared to transparent black first.
@@ -59,7 +59,7 @@ pub enum Init {
 
 /// Why a canvas operation produced nothing.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SurfaceError(pub String);
+pub(crate) struct SurfaceError(pub(crate) String);
 
 impl std::fmt::Display for SurfaceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -132,7 +132,7 @@ enum Op {
 ///
 /// `Send`: the owner may move it between threads, and it is used from one
 /// at a time.
-pub struct Surface {
+pub(crate) struct Surface {
     id: u64,
     width: u32,
     height: u32,
@@ -155,7 +155,7 @@ impl std::fmt::Debug for Surface {
 /// out and a copy of a canvas is. Cloning shares the texture, which is
 /// released with the last clone.
 #[derive(Clone, Debug)]
-pub struct SurfaceImage(Arc<ImageTexture>);
+pub(crate) struct SurfaceImage(Arc<ImageTexture>);
 
 #[derive(Debug)]
 struct ImageTexture {
@@ -196,18 +196,18 @@ type Gpu<'a> = Option<&'a Arc<SharedGpu>>;
 
 impl SurfaceImage {
     #[must_use]
-    pub fn width(&self) -> u32 {
+    pub(crate) fn width(&self) -> u32 {
         self.0.width
     }
 
     #[must_use]
-    pub fn height(&self) -> u32 {
+    pub(crate) fn height(&self) -> u32 {
         self.0.height
     }
 
     /// What a draw of this image names it by.
     #[must_use]
-    pub fn texture(&self) -> Texture {
+    pub(crate) fn texture(&self) -> Texture {
         Texture::with_id(self.0.id, self.0.width, self.0.height)
     }
 
@@ -215,7 +215,7 @@ impl SurfaceImage {
     /// pixels of this one from `(x, y)`, placed at the origin: the part of
     /// that rectangle inside this image.
     #[must_use]
-    pub fn crop(&self, x: i64, y: i64, width: u32, height: u32) -> Self {
+    pub(crate) fn crop(&self, x: i64, y: i64, width: u32, height: u32) -> Self {
         copy(
             self.0.gpu(),
             None,
@@ -231,7 +231,7 @@ impl SurfaceImage {
     /// it, as of every op issued so far: what a canvas's current pixels
     /// ([`Surface::texture`]) are kept as.
     #[must_use]
-    pub fn copy(source: Texture, x: i64, y: i64, width: u32, height: u32) -> Self {
+    pub(crate) fn copy(source: Texture, x: i64, y: i64, width: u32, height: u32) -> Self {
         #[cfg(not(target_arch = "wasm32"))]
         let gpu = super::gpu::live();
         #[cfg(target_arch = "wasm32")]
@@ -252,7 +252,7 @@ impl SurfaceImage {
     /// # Errors
     ///
     /// [`SurfaceError`] when the readback failed or no device answered.
-    pub fn read(&self) -> Result<Vec<u8>, SurfaceError> {
+    pub(crate) fn read(&self) -> Result<Vec<u8>, SurfaceError> {
         let size = (self.0.width, self.0.height);
         read(self.0.gpu(), None, self.0.id, size, (0, 0), size).wait()
     }
@@ -262,7 +262,7 @@ impl SurfaceImage {
 /// answered. On wasm32 the Render Worker answers it in a later turn of its
 /// own.
 #[derive(Debug)]
-pub struct PendingRead(flume::Receiver<Result<Vec<u8>, String>>);
+pub(crate) struct PendingRead(flume::Receiver<Result<Vec<u8>, String>>);
 
 impl PendingRead {
     /// Waits for the pixels: premultiplied RGBA8, row-major, tightly packed.
@@ -271,7 +271,7 @@ impl PendingRead {
     ///
     /// [`SurfaceError`] when the readback failed, or the op was dropped
     /// unapplied (no device, or the device's queue was closed).
-    pub fn wait(self) -> Result<Vec<u8>, SurfaceError> {
+    pub(crate) fn wait(self) -> Result<Vec<u8>, SurfaceError> {
         self.0
             .recv()
             .map_err(|_| SurfaceError("no GPU device answered the readback".to_owned()))?
@@ -283,7 +283,7 @@ impl PendingRead {
     /// # Errors
     ///
     /// As [`Self::wait`].
-    pub async fn wait_async(self) -> Result<Vec<u8>, SurfaceError> {
+    pub(crate) async fn wait_async(self) -> Result<Vec<u8>, SurfaceError> {
         self.0
             .recv_async()
             .await
@@ -296,7 +296,7 @@ impl Surface {
     /// A `width` × `height` surface; `None` for a zero side or one longer
     /// than [`MAX_SURFACE_SIDE`]. Nothing is allocated until the first op.
     #[must_use]
-    pub fn new(width: u32, height: u32) -> Option<Self> {
+    pub(crate) fn new(width: u32, height: u32) -> Option<Self> {
         if width == 0 || height == 0 || width > MAX_SURFACE_SIDE || height > MAX_SURFACE_SIDE {
             return None;
         }
@@ -309,21 +309,11 @@ impl Surface {
         })
     }
 
-    #[must_use]
-    pub fn width(&self) -> u32 {
-        self.width
-    }
-
-    #[must_use]
-    pub fn height(&self) -> u32 {
-        self.height
-    }
-
     /// What a draw of this surface's current pixels names it by: as they are
     /// when a list drawing it is replayed, so a caller that wants them as of
     /// now replays that list before it draws into this surface again.
     #[must_use]
-    pub fn texture(&self) -> Texture {
+    pub(crate) fn texture(&self) -> Texture {
         Texture::with_id(self.id, self.width, self.height)
     }
 
@@ -363,7 +353,12 @@ impl Surface {
     /// Replays `list`, which leaves no clip or layer open, onto the surface
     /// as `init` says, and empties it; `keep` holds the images it draws,
     /// released once it has been replayed, and is emptied too.
-    pub fn draw(&mut self, list: &mut DisplayList, init: Init, keep: &mut Vec<SurfaceImage>) {
+    pub(crate) fn draw(
+        &mut self,
+        list: &mut DisplayList,
+        init: Init,
+        keep: &mut Vec<SurfaceImage>,
+    ) {
         let (target, size) = (self.id, self.size());
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -386,7 +381,7 @@ impl Surface {
 
     /// Writes `texels`, `extent` premultiplied RGBA8 pixels, tightly packed,
     /// at `origin`; the rectangle lies inside the surface.
-    pub fn write(&mut self, origin: (u32, u32), extent: (u32, u32), texels: Vec<u8>) {
+    pub(crate) fn write(&mut self, origin: (u32, u32), extent: (u32, u32), texels: Vec<u8>) {
         self.issue(Op::Write {
             target: self.id,
             size: self.size(),
@@ -399,15 +394,16 @@ impl Surface {
     /// Reads the `extent` pixels at `origin`, a rectangle inside the
     /// surface, as of every op issued before this one.
     #[must_use]
-    pub fn read(&mut self, origin: (u32, u32), extent: (u32, u32)) -> PendingRead {
+    pub(crate) fn read(&mut self, origin: (u32, u32), extent: (u32, u32)) -> PendingRead {
         let (target, size) = (self.id, self.size());
         let (gpu, backend) = self.port();
         read(gpu.as_ref(), backend, target, size, origin, extent)
     }
 
-    /// A copy of the surface's pixels as an image.
+    /// A copy of the surface's pixels as an image, for this module's tests.
+    #[cfg(test)]
     #[must_use]
-    pub fn snapshot(&mut self) -> SurfaceImage {
+    pub(crate) fn snapshot(&mut self) -> SurfaceImage {
         let (source, size) = (self.id, self.size());
         let (gpu, backend) = self.port();
         copy(gpu.as_ref(), backend, source, size, (0, 0), size)
@@ -416,7 +412,7 @@ impl Surface {
     /// Hands the surface's texture to a new image and leaves the surface
     /// transparent black: `transferToImageBitmap`.
     #[must_use]
-    pub fn take(&mut self) -> SurfaceImage {
+    pub(crate) fn take(&mut self) -> SurfaceImage {
         let (from, size) = (self.id, self.size());
         let (gpu, backend) = self.port();
         let image = SurfaceImage(Arc::new(ImageTexture {
@@ -443,7 +439,7 @@ impl Surface {
     /// painter never draws a frame half copied. Answers what the commit owes;
     /// nothing once the element is freed.
     #[must_use = "a wake or a resize the commit owes is lost"]
-    pub fn commit(&mut self, frames: &CanvasFrames) -> Committed {
+    pub(crate) fn commit(&mut self, frames: &CanvasFrames) -> Committed {
         let Some(link) = frames.link() else {
             return Committed::default();
         };

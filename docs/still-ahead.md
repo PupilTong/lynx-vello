@@ -87,14 +87,14 @@ would host it:
   the first frame (`docs/picture-source-design.md` step 5 takes up the
   browser). No `region-to-decode` and no `blur-radius` post-processing.
 - **The rest of the canvas surface** (`crates/bobcat-core/docs/canvas.md`,
-  `crates/bobcat-canvas/AGENTS.md`). Card JavaScript draws with an
+  `docs/terminus-architecture.md` "Canvas 2D context"). Card JavaScript draws with an
   `OffscreenCanvas` 2D context in any realm and shows it in a `<canvas>`
   placeholder; not built:
   - `drawImage` of a network image: `createImageBitmap` takes an
     `OffscreenCanvas`, an `ImageBitmap` or an `ImageData` only, with no
     `Blob` or URL source. It would decode through the platform decoder
     (`vant::ImageDecoder`; `BrowserDecoder` on wasm32) into a
-    `bobcat_canvas::Image`, from `createImageBitmap` in
+    `terminus::link::html::canvas::Image`, from `createImageBitmap` in
     `packages/bobcat-element/src/canvas.ts` and a host member in
     `crates/bobcat-core/src/canvas/members.rs`.
   - `toDataURL`/`toBlob` on the element and `convertToBlob` on an
@@ -103,8 +103,8 @@ would host it:
     an encoder; `vant::Platform` has a decoder and no encoder.
   - A main-thread `getContext` on the `<canvas>` element itself: the element
     has context modes `none` and `placeholder` only
-    (`crates/terminus/src/html/canvas.rs`); a `2d` mode would bind a
-    `bobcat_canvas::Canvas` to the element's picture there and expose it
+    (`crates/terminus/src/html/canvas/mod.rs`); a `2d` mode would bind a
+    `terminus::link::html::canvas::Canvas` to the element's picture there and expose it
     through the Element PAPI (`packages/bobcat-element/src/element-papi.ts`).
   - `ArrayBuffer` in a `postMessage` transfer list (`DataCloneError` today)
     and `ImageBitmap` structured clone (transfer-only today): both are
@@ -115,14 +115,15 @@ would host it:
   - The `bitmaprenderer`, `webgl`, `webgl2` and `webgpu` contexts:
     `getContext` answers `null` for them (`canvas.ts`); a context would be
     a new mode of the canvas entry in `crates/bobcat-core/src/canvas/mod.rs`
-    over its own `terminus::link::render::canvas::Surface` texture.
+    over its own `Surface` texture (`crates/terminus/src/render/canvas.rs`,
+    which is private to `terminus`, as the 2D context's is).
   - The context's `filter`, `letterSpacing`, `wordSpacing`, `fontKerning`,
     `fontStretch`, `fontVariantCaps`, `textRendering` and `lang` attributes;
-    `small-caps` parses and is not drawn. They are `bobcat_canvas::Canvas`
-    state (`crates/bobcat-canvas/src`) with their accessors in
+    `small-caps` parses and is not drawn. They are `terminus::link::html::canvas::Canvas`
+    state (`crates/terminus/src/html/canvas/context2d/`) with their accessors in
     `canvas.ts`.
   - Bitmap color glyphs (`sbix`/`CBDT` emoji), which draw nothing
-    (`crates/bobcat-canvas`'s text path).
+    (`crates/terminus/src/html/canvas/context2d/text.rs`).
 - **Import maps, import attributes, JSON *ESM* modules and Lynx component-bundle
   imports**, and the asynchronous half of the compiled-bundle loader:
   `requireModuleAsync` and `loadScriptAsync`. Lazy containers themselves are

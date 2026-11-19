@@ -3,8 +3,8 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use bobcat_canvas::parley::{FontFamilyName, FontStyle, FontWeight, GenericFamily};
-use bobcat_canvas::peniko::Color;
+use terminus::link::parley::{FontFamilyName, FontStyle, FontWeight, GenericFamily};
+use terminus::link::peniko::Color;
 
 use super::css::{parse_color, parse_font, serialize_color};
 use crate::test_support::TestViewSpec;

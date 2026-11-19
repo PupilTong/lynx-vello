@@ -431,18 +431,18 @@ pub(crate) struct DropShadow {
 /// A paint a list records a draw with: a brush, or a texture the
 /// rasterizer binds by id ([`ListPaint::texture`]).
 #[derive(Clone, Debug, PartialEq)]
-pub struct ListPaint(pub(crate) Paint);
+pub(crate) struct ListPaint(pub(crate) Paint);
 
 impl ListPaint {
     /// `texture` sampled through `sampler`.
     #[must_use]
-    pub fn texture(texture: Texture, sampler: ImageSampler) -> Self {
+    pub(crate) fn texture(texture: Texture, sampler: ImageSampler) -> Self {
         Self(Paint::texture(texture, sampler))
     }
 
     /// `image` sampled through `sampler`.
     #[must_use]
-    pub fn image(image: ImageRef, sampler: ImageSampler) -> Self {
+    pub(crate) fn image(image: ImageRef, sampler: ImageSampler) -> Self {
         Self(Paint::Image(Arc::new(ImagePaint { image, sampler })))
     }
 }
@@ -963,7 +963,7 @@ impl DisplayList {
     }
 
     /// [`Self::fill`] with a [`ListPaint`].
-    pub fn fill_with(
+    pub(crate) fn fill_with(
         &mut self,
         style: Fill,
         transform: Affine,
@@ -975,7 +975,7 @@ impl DisplayList {
     }
 
     /// [`Self::stroke`] with a [`ListPaint`].
-    pub fn stroke_with(
+    pub(crate) fn stroke_with(
         &mut self,
         style: &Stroke,
         transform: Affine,
@@ -1002,7 +1002,7 @@ impl DisplayList {
     /// About how many bytes the recording holds: its items and the arenas
     /// they index, not counting what their paints share.
     #[must_use]
-    pub fn recorded_bytes(&self) -> usize {
+    pub(crate) fn recorded_bytes(&self) -> usize {
         use std::mem::size_of;
         self.items.len() * size_of::<Item>()
             + self.transforms.len() * size_of::<Affine>()
@@ -1065,7 +1065,7 @@ impl DisplayList {
     /// Opens a clip that is never composited as a layer of its own: a blend
     /// layer opening inside it blends with what is under the clip, cut to
     /// the clip. What a canvas's clip region is.
-    pub fn push_backdrop_clip(
+    pub(crate) fn push_backdrop_clip(
         &mut self,
         clip_style: Fill,
         transform: Affine,
@@ -1083,7 +1083,7 @@ impl DisplayList {
     /// [`Self::pop_layer`] is replaced by its alpha in `color`, offset by
     /// `(dx, dy)` in the list's space and blurred by a Gaussian of
     /// `std_dev`. Clips open around it cut what is drawn inside it too.
-    pub fn push_drop_shadow(&mut self, dx: f64, dy: f64, std_dev: f64, color: Color) {
+    pub(crate) fn push_drop_shadow(&mut self, dx: f64, dy: f64, std_dev: f64, color: Color) {
         #[expect(
             clippy::cast_possible_truncation,
             reason = "the rasterizer takes filter parameters as f32"
@@ -1727,7 +1727,7 @@ impl DrawGlyphs<'_> {
     }
 
     /// The run's paint, a texture's included.
-    pub fn paint(mut self, paint: &ListPaint) -> Self {
+    pub(crate) fn paint(mut self, paint: &ListPaint) -> Self {
         self.run.paint = paint.0.clone();
         self
     }

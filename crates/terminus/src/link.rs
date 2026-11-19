@@ -14,6 +14,7 @@
 //! `docs/terminus-link-api.md` records why each item is on the link.
 
 pub use euclid::default::{Point2D, Rect, Size2D, Vector2D};
+pub use parley;
 pub use seldon::text::{FontBlob, TextContext};
 pub use stylo;
 pub use stylo_dom::ElementState;
@@ -23,8 +24,7 @@ pub use wgpu;
 pub use crate::layout::TextLineReport;
 pub use crate::paint::compose::FilterGroup;
 pub use crate::paint::display_list::{
-    DisplayList, DrawGlyphs, Embolden, Glyph, ImagePixels, ImageRef, ListPaint, NormalizedCoord,
-    Texture,
+    DisplayList, DrawGlyphs, Embolden, Glyph, ImagePixels, ImageRef, NormalizedCoord, Texture,
 };
 pub use crate::render::image::{
     DocumentKind, DocumentRequest, FrameImage, FrameImages, ImageDescriptor, ImageEvent,
@@ -167,19 +167,15 @@ pub mod render {
         pub use crate::render::blur::MAX_FILTER_AREA;
     }
 
-    /// Canvas bitmaps as GPU textures: a
-    /// [`Surface`](crate::link::render::canvas::Surface) replays the
-    /// display lists its owner records onto its texture, writes, reads,
-    /// copies and commits it to a placeholder `<canvas>`. Natively its owner's
-    /// thread applies each step; on wasm32 the steps are queued for the Render
-    /// Worker, which applies them at the start of each turn
+    /// The wasm32 queue of canvas GPU work. A canvas's bitmap is a GPU
+    /// texture its owner records draws for
+    /// ([`Canvas`](crate::link::html::canvas::Canvas)); natively the owner's
+    /// thread applies each step, and on wasm32 the steps are queued for the
+    /// Render Worker, which applies them at the start of each turn
     /// ([`drain`](crate::link::render::canvas::drain)) once woken
     /// ([`set_waker`](crate::link::render::canvas::set_waker)).
+    #[cfg(target_arch = "wasm32")]
     pub mod canvas {
-        pub use crate::render::canvas::{
-            Init, MAX_SURFACE_SIDE, PendingRead, Surface, SurfaceError, SurfaceImage,
-        };
-        #[cfg(target_arch = "wasm32")]
         pub use crate::render::canvas::{drain, set_waker};
     }
 
@@ -211,7 +207,7 @@ pub mod scroll {
 
 /// HTML elements this crate implements over its own tree: HTML's `<dialog>`
 /// element, the `popover` attribute's UA rules, and HTML's `<canvas>` as the
-/// placeholder of an `OffscreenCanvas`.
+/// placeholder of an `OffscreenCanvas` with the 2D rendering context.
 ///
 /// Neither is part of a document by itself. `Document::new` defines no
 /// element, so an embedder that wants them calls
@@ -267,21 +263,36 @@ pub mod html {
         pub use crate::html::popover::UA_RULES;
     }
 
-    /// HTML's `<canvas>` element as the placeholder of an `OffscreenCanvas`:
-    /// a replaced element presenting a picture of its own, with the natural
-    /// size of its `width` and `height` attributes in context mode none and
-    /// of its committed bitmap in mode placeholder.
+    /// HTML's `<canvas>` element as the placeholder of an `OffscreenCanvas`,
+    /// and the 2D rendering context an `OffscreenCanvas` draws with.
+    ///
+    /// The element is a replaced element presenting a picture of its own,
+    /// with the natural size of its `width` and `height` attributes in
+    /// context mode none and of its committed bitmap in mode placeholder.
     /// [`transfer_control_to_offscreen`](crate::link::html::canvas::transfer_control_to_offscreen)
     /// is HTML's `transferControlToOffscreen()`, and answers the
     /// [`CanvasFrames`](crate::link::html::canvas::CanvasFrames) a canvas
-    /// surface on any thread commits through
-    /// ([`Surface::commit`](crate::link::render::canvas::Surface::commit));
+    /// on any thread commits through
+    /// ([`Canvas::commit`](crate::link::html::canvas::Canvas::commit));
     /// [`update_placeholders`](crate::link::html::canvas::update_placeholders)
     /// applies a committed bitmap's size on the document's thread.
+    ///
+    /// [`Canvas`](crate::link::html::canvas::Canvas) is one bitmap and its
+    /// `CanvasRenderingContext2D`, one call per context method or attribute;
+    /// [`Path`](crate::link::html::canvas::Path),
+    /// [`Gradient`](crate::link::html::canvas::Gradient),
+    /// [`Pattern`](crate::link::html::canvas::Pattern) and
+    /// [`Image`](crate::link::html::canvas::Image) are what those calls take,
+    /// and [`CanvasError`](crate::link::html::canvas::CanvasError) names the
+    /// exception one throws. None of them needs a `Document` or runs
+    /// JavaScript.
     pub mod canvas {
         pub use crate::html::canvas::{
-            CANVAS_TAG, CanvasFrames, Committed, ContextMode, InvalidState, Placeholder,
-            context_mode, transfer_control_to_offscreen, update_placeholders,
+            CANVAS_TAG, Canvas, CanvasError, CanvasFrames, Committed, CompositeOp, ContextMode,
+            Direction, FillRule, Font, Gradient, Image, ImageDataRead, InvalidState, LineCap,
+            LineJoin, Path, Pattern, Placeholder, Repetition, SmoothingQuality, Style, TextAlign,
+            TextBaseline, TextMetrics, context_mode, transfer_control_to_offscreen,
+            update_placeholders,
         };
     }
 }

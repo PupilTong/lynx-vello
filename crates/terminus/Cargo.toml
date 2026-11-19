@@ -30,6 +30,9 @@ pollster = { workspace = true }
 rayon = { workspace = true }
 vello_gpu = { workspace = true }
 glifo = { workspace = true }
+# Glyph outlines for the Canvas 2D context's `measureText` ink bounds
+# (`src/html/canvas/context2d/text.rs`).
+skrifa = { workspace = true }
 wgpu = { workspace = true }
 roxmltree = { workspace = true }
 siphasher = { workspace = true }

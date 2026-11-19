@@ -1,17 +1,22 @@
-//! The HTML Standard's Canvas 2D drawing model, replayed on the GPU.
+//! HTML's `CanvasRenderingContext2D` (canvas.html, "The 2D rendering
+//! context") over one output bitmap, replayed on the GPU.
 //!
 //! A [`Canvas`] is one output bitmap and its `CanvasRenderingContext2D`
 //! state. Each context method and attribute is one call taking numbers,
-//! `&str`, small enums or the crate's own value types ([`Path`],
+//! `&str`, small enums or the module's own value types ([`Path`],
 //! [`Gradient`], [`Pattern`], [`Image`]); errors name the exception the
-//! standard throws ([`CanvasError`]). There is no JavaScript, document, CSS
-//! parsing or GPU here: colors arrive as [`peniko::Color`], fonts as a typed
-//! [`Font`], and the caller owns the [`parley::FontContext`] text is shaped
-//! with.
+//! standard throws ([`CanvasError`]). There is no JavaScript, document or CSS
+//! parsing here: colors arrive as [`peniko::Color`](crate::peniko::Color),
+//! fonts as a typed [`Font`], and the caller owns the
+//! [`parley::FontContext`] text is shaped with. A canvas needs no
+//! [`Document`](crate::tree::document::Document): a Worker's
+//! `OffscreenCanvas` has none.
 //!
-//! Draw calls are recorded into a `terminus` display list and replayed onto
-//! the canvas's GPU texture at a read, at the owner's flush, or once the
-//! recording grows past a bound (`AGENTS.md`, "Recording and replay").
+//! Draw calls are recorded into a [`DisplayList`](crate::paint::display_list::DisplayList)
+//! and replayed onto the canvas's GPU texture
+//! ([`Surface`](crate::render::canvas::Surface)) at a read, at the owner's
+//! flush, or once the recording grows past a bound
+//! (`docs/terminus-architecture.md`, "Canvas 2D context").
 
 #![allow(
     clippy::many_single_char_names,
@@ -26,13 +31,11 @@ mod text;
 
 pub use canvas::{Canvas, ImageDataRead};
 pub use image::Image;
-pub use parley;
 pub use path::Path;
 pub use style::{
     CompositeOp, Direction, FillRule, Gradient, LineCap, LineJoin, Pattern, Repetition,
     SmoothingQuality, Style, TextAlign, TextBaseline,
 };
-pub use terminus::link::{kurbo, peniko};
 pub use text::{Font, TextMetrics};
 
 /// The exception a call throws, named as the standard names it.

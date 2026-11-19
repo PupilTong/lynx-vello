@@ -841,9 +841,11 @@ the embedder's to fire, and there is no focus, no source or trigger, and no
 
 ## HTML `<canvas>` as an `OffscreenCanvas` placeholder
 
-`html/canvas.rs` is HTML's canvas element in the two context modes this
-crate builds, `none` and `placeholder`; `getContext()` and every rendering
-context mode are not built. `Document::define_html_elements` defines its
+`html/canvas/mod.rs` is HTML's canvas element in the two context modes this
+crate builds, `none` and `placeholder`; the element's `getContext()` and its
+rendering context modes are not built (the 2D context an `OffscreenCanvas`
+draws with is `html/canvas/context2d/`, "Canvas 2D context" below).
+`Document::define_html_elements` defines its
 component, which keeps each element's state in `Document::canvases`
 (shared with the component, which drops an element's entry in
 `CustomElement::freed`): one `PictureId` for the element's life and the
@@ -858,8 +860,9 @@ following every change of either attribute.
 `transferControlToOffscreen()`: `InvalidState` unless the mode is `none`;
 otherwise the mode becomes `placeholder` and the answer is the attributes'
 size and a `CanvasFrames`. That link is `Send` and holds the element's
-state (`html::canvas::Link`) weakly. A canvas surface commits through it
-(`Surface::commit`, below), which answers a `Committed`: `wake` when the
+state (`html::canvas::Link`) weakly. A canvas commits through it
+(`Canvas::commit`, which calls `Surface::commit`, below), which answers a
+`Committed`: `wake` when the
 painter has described every earlier commit (`CanvasFrames::describe`
 clears the flag), `resize` when the bitmap's size differs from the last
 committed one and no earlier resize is pending. A placeholder ignores its
@@ -884,10 +887,108 @@ ordinary `Id`-picture path (`painter/images.rs`, `describe_picture`): the
 texture's written generation (`BitmapLeases::lease_picture`) equal to the
 described one is drawn with nothing to take.
 
+## Canvas 2D context
+
+`html/canvas/context2d/` is HTML's 2D rendering context ("The 2D rendering
+context") over one bitmap, the `OffscreenCanvas`'s side of a placeholder
+`<canvas>`. It names no `Document` and runs no JavaScript, so a Worker's
+`OffscreenCanvas` has one; the binding to QuickJS and the placeholder
+registry are the embedder's. Its types are on `link::html::canvas` beside
+the element's.
+
+- `Canvas` (`canvas.rs`) is one bitmap and its `CanvasRenderingContext2D` state: one call per
+  context method or attribute, taking numbers, `&str`, keyword enums (`CompositeOp`, `LineCap`, …
+  each with `from_name`/`name` for the IDL strings, `style.rs`) or the module's value types.
+  `Canvas` is `Send`; there is no global state.
+- Colors are `peniko::Color`; fonts are a typed `Font` (`text.rs`: parley family names, size in
+  px, weight, style, width). Parsing CSS strings is the caller's job.
+- Text calls take the caller's `&mut parley::FontContext`: the caller decides which fonts exist.
+  The canvas owns its `LayoutContext`.
+- `Path` (`path.rs`) is `Path2D` and shares its builder with the context's default path
+  (`path::builder_methods!`).
+- `Gradient` and `Pattern` (`style.rs`) are shared by reference (`Arc<Mutex<_>>`): a stop or
+  pattern transform set later shows in draws recorded after it.
+- `Image` (`image.rs`) is what `drawImage` and patterns sample: pixels not uploaded yet
+  (`from_premultiplied`, `from_unpremultiplied`, `from_image_data`, an `ImageBitmap` made from
+  `ImageData`), a texture of its own (`take_image`, `transferToImageBitmap`; a crop or copy of a
+  texture), or a canvas's current texture (`Canvas::image`).
+  Cloning shares it; it is `Send + Sync` natively. `crop` is what `createImageBitmap` makes of
+  one; `read` waits for its pixels.
+- `CanvasError` (`mod.rs`) names the exception (`IndexSizeError`, `InvalidStateError`,
+  `SyntaxError`, `TypeError`, `RangeError`).
+- `commit(&CanvasFrames)` makes the bitmap what a placeholder `<canvas>` shows (HTML's update of
+  an `OffscreenCanvas`'s placeholder) and clears `has_changes()`; it answers the `Committed` of
+  "HTML `<canvas>` as an `OffscreenCanvas` placeholder".
+
+Draws are recorded into the canvas's `DisplayList` on the calling thread:
+no GPU work and no lock per call. `Raster::flush` (`canvas.rs`) hands the
+list to the canvas's `Surface` ("Canvas surfaces"), which replays it onto the canvas's
+texture. A flush happens at every read (`get_image_data`, `image`,
+`take_image`, `commit`), before `put_image_data`, at `flush()` (which the
+embedder calls for each canvas drawn during a JavaScript entry), right after
+a draw that samples a canvas's current texture, and once the recording
+passes 2 MiB (`MAX_RECORDED_BYTES`, Chromium's bound on a canvas's recorded
+ops, measured by `DisplayList::recorded_bytes`).
+
+- A batch of `source-over` draws replays onto the texture as it is (`Init::Load`).
+- A draw composited by another operation, a `clearRect` that does not cover the canvas, or a
+  draw of the canvas itself needs the bitmap as its backdrop: `vello_gpu` composites a blend
+  layer at the root into a transparent intermediate, and cannot sample the texture it renders
+  into. What is recorded is replayed first, and the next batch starts with the bitmap drawn
+  under the canvas's own texture id and replays into the surface's second texture
+  (`Init::Backdrop`). A batch after a full clear (`reset`, a size change, a `clearRect` over the
+  whole canvas under an axis-aligned transform with no clip) is replayed over a clear
+  (`Init::Clear`) and needs no backdrop.
+- A non-`source-over` draw is a layer with that blend mode whose region is the canvas rectangle;
+  a destructive one composites over the whole clip region.
+- The clip is a chain of canvas-space paths, kept open in the list as backdrop clips
+  (`DisplayList::push_backdrop_clip`) and synced to the state's chain per draw, so a blend
+  inside them reads the bitmap cut to the clip.
+- `clearRect` is a `destination-out` layer of opaque black.
+- `putImageData` premultiplies the clipped dirty rectangle and writes it into the texture after a
+  flush.
+- `drawImage` of a canvas: `Canvas::image` flushes the source and names its texture; the target
+  flushes right after recording the draw, so later draws on the source are not seen. A pattern
+  and a crop copy the texture as of the call. Images a recorded draw samples are kept until it
+  is replayed.
+- Shadows are a drop-shadow filter layer (`DisplayList::push_drop_shadow`) around the shape,
+  composited before the shape by the state's operation inside the clip region. Under
+  `source-over` each clip path is the region of a layer of its own around the filter layer, so
+  the unclipped shape casts the shadow. Under another operation the innermost clip path is the
+  blend layer's region and the paths around it stay open clips.
+- Text is shaped with parley on the calling thread and recorded as glyph runs
+  (`DisplayList::draw_glyphs`), with synthetic bold and oblique as terminus's text paint records
+  them.
+
+Decisions the standard leaves open, or where this differs from it:
+
+- A zero side, or a side over 8,192 px (`MAX_SURFACE_SIDE`), has no bitmap: draws do nothing and
+  reads answer transparent black. `getImageData` over 2^28 px is `RangeError`. An image made from
+  pixels with a side over 8,192 px is `InvalidStateError`.
+- A readback the GPU does not answer (no device, or the Render Worker dropped it on wasm32) is
+  `InvalidStateError`.
+- `measureText` baselines the standard leaves to the font: em square split in the ratio of the
+  first font's ascent to descent; hanging baseline at 80% of the ascent; ideographic-under at
+  the descent. No `BASE` table is read. Ink bounds come from glyph outlines (`skrifa`) without
+  synthetic bold or oblique.
+- `globalAlpha` is folded into the paint, so overlapping glyphs of one text run blend with each
+  other.
+- A shadow under a composite operation other than `source-over` and two or more clip paths is
+  cast by the shape cut to every clip path but the innermost.
+- `Path::from_svg` with a syntax error is an empty path (the standard keeps the valid prefix).
+- Glyphs draw as outlines: bitmap color glyphs (`sbix`/`CBDT` emoji) draw nothing.
+
+The tests are `tests/canvas_draw.rs` and `tests/canvas_text.rs`, against the
+link. The text tests use the Ahem font from `crates/seldon/tests/fixtures`;
+both need a GPU adapter, as every screenshot test does, and run in CI's
+`engine` shard with the rest of terminus's tests.
+
 ## Canvas surfaces
 
-`render/canvas.rs` is a canvas bitmap on the GPU, for `bobcat-canvas`
-(`link::render::canvas`). A `Surface` is a `width` × `height` RGBA8 texture
+`render/canvas.rs` is a canvas bitmap on the GPU, for the 2D context
+(`html/canvas/context2d/`, its one caller, so every item is `pub(crate)`
+but wasm32's `set_waker` and `drain`, which are on `link::render::canvas`
+for the embedder that runs the Render Worker). A `Surface` is a `width` × `height` RGBA8 texture
 (premultiplied), keyed by a process-unique id (`next_texture_id`) in
 `SharedRaster`'s canvas table; `Surface::new` refuses a zero side or one
 over `MAX_SURFACE_SIDE`, the 8,192 of `SharedGpu::LIMITS`. The texture is
@@ -902,7 +1003,7 @@ one `Op` applied by `apply`:
   the canvas table and bound for the render (`SparseBackend::render_onto`'s `sources`); pixel images
   are uploaded through the bitmap table like any `ImageRef`.
 - `write` (`Queue::write_texture` of a rectangle), `read` (a rectangle copied to a staging buffer
-  and mapped; a `PendingRead` whose `wait` blocks), `snapshot` and `SurfaceImage::copy`/`crop` (a
+  and mapped; a `PendingRead` whose `wait` blocks), `SurfaceImage::copy`/`crop` and the test-only `snapshot` (a
   `copy_texture_to_texture` into a new texture), `take` (the texture moved to a new
   `SurfaceImage`'s id; the surface gets a fresh one at its next op), and `commit` (above).
 - `SurfaceImage` is a texture of its own; its last clone's drop removes it.
@@ -927,7 +1028,8 @@ start of each of that Worker's turns, applies the queue in order with one
 completion on the Render Worker; with no live device there the ops are
 dropped, which fails the reads among them.
 
-`DisplayList` carries two items for canvases. `push_backdrop_clip` opens a
+`DisplayList` carries two items for canvases, both `pub(crate)` with the
+other canvas-only list API. `push_backdrop_clip` opens a
 clip that is never isolated (`PushClip`'s `isolable`), so a blend layer
 inside it reads what is under the clip, cut to it, which is what a canvas's
 clip region needs. `push_drop_shadow` opens a `DropShadowOnly` filter layer

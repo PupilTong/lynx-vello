@@ -9,9 +9,6 @@
 use std::borrow::Cow;
 use std::sync::{Arc, LazyLock};
 
-use bobcat_canvas::Font;
-use bobcat_canvas::parley::{FontFamilyName, FontStyle, FontWeight, FontWidth, GenericFamily};
-use bobcat_canvas::peniko::Color;
 use cssparser::Parser;
 use stylo::color::{AbsoluteColor, ColorSpace};
 use stylo::context::QuirksMode;
@@ -29,6 +26,9 @@ use stylo::values::specified::font::{
 use stylo::values::specified::length::{LengthPercentage, NoCalcLength};
 use stylo::values::specified::{self, Color as SpecifiedColor};
 use stylo_traits::{CssWriter, ParsingMode, ToCss};
+use terminus::link::html::canvas::Font;
+use terminus::link::parley::{FontFamilyName, FontStyle, FontWeight, FontWidth, GenericFamily};
+use terminus::link::peniko::Color;
 use terminus::link::stylo;
 
 /// The base a relative font size resolves against: the default canvas

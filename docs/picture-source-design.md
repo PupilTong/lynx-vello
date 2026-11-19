@@ -518,7 +518,7 @@ for its life (`terminus::link::html::canvas`). Once main-thread script has
 called `transferControlToOffscreen()` on it, the element is an
 `OffscreenCanvas` placeholder, and the `OffscreenCanvas` — in the MTS realm
 or, transferred through `postMessage`, in the BTS or a `Worker` — draws with
-the Canvas 2D API (`crates/bobcat-canvas`). A canvas is not a producer of
+the Canvas 2D API (`terminus`'s `html/canvas/context2d/`). A canvas is not a producer of
 frames for the slot: its bitmap is a GPU texture (`render::canvas::Surface`)
 its draws are replayed into, natively on the drawing thread and on wasm32
 on the Render Worker. At the end of each JavaScript entry that changed it,
@@ -530,8 +530,8 @@ write. A commit of a new size resizes the element's natural size on the
 document's thread.
 
 The detail is owned by `docs/terminus-architecture.md` ("HTML `<canvas>` as
-an `OffscreenCanvas` placeholder", "Canvas surfaces"),
-`crates/bobcat-canvas/AGENTS.md` (the drawing model),
+an `OffscreenCanvas` placeholder", "Canvas 2D context" for the drawing
+model, "Canvas surfaces"),
 `crates/bobcat-core/docs/canvas.md` (the JavaScript API, transfer and the
 per-entry commit) and `crates/bobcat-core/docs/painter.md` ("Placeholder
 canvases").

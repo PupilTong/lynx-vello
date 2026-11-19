@@ -128,8 +128,7 @@ Treat that as a hypothesis to test, not the default explanation for a failure.
   ```sh
   cargo clippy --target wasm32-unknown-unknown --lib \
     -p vant -p bobcat-wasm -p bobcat-resources -p bobcat-core -p terminus \
-    -p seldon -p bobcat-source -p quickjs-rust-bridge -p bobcat-canvas \
-    -- -D warnings
+    -p seldon -p bobcat-source -p quickjs-rust-bridge -- -D warnings
   ```
 
   `--lib`, not `--all-targets`. `bobcat-core`'s own tokio dependency builds for

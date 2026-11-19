@@ -18,12 +18,12 @@ vello_gpu bump. Glyphs draw as outlines: glifo's glyph atlas cache stays off.
 vello_gpu keeps no image store for callers: each bitmap is a texture of its
 own, drawn as an external texture (`render/sparse.rs`, `Bitmaps`), and the
 optional shader paints terminus draws are named as Cargo features.
-`render/canvas.rs` is the canvas surface: a `bobcat-canvas` bitmap as a
+`render/canvas.rs` is the canvas surface: a Canvas 2D context's bitmap as a
 texture its draws replay into (natively on the drawing thread, on wasm32 on
 the Render Worker from a shared op queue), copied into a placeholder
 `<canvas>`'s picture texture at each commit (`docs/terminus-architecture.md`,
-"Canvas surfaces"). `crates/bobcat-canvas`, the Canvas 2D drawing model
-recorded into the display list, is yours too.
+"Canvas surfaces"). `crates/terminus/src/html/canvas/context2d/`, the Canvas
+2D drawing model recorded into the display list, is yours too.
 
 ## Read first
 

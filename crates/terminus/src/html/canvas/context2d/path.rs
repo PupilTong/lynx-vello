@@ -7,9 +7,8 @@
 
 use std::f64::consts::TAU;
 
-use terminus::link::kurbo::{self, Affine, BezPath, PathEl, Point, Vec2};
-
-use crate::CanvasError;
+use super::CanvasError;
+use crate::kurbo::{self, Affine, BezPath, PathEl, Point, Vec2};
 
 /// A `Path2D`: subpaths of lines and curves in its own coordinates.
 #[derive(Clone, Debug, Default)]

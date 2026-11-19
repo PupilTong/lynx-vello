@@ -56,7 +56,7 @@ cross-platform engine built on:
 - **[vello_gpu](https://github.com/linebender/vello)** (0.4) — the rasterizer, from the
   linebender Vello project: sparse strips generated on the CPU and composited on wgpu 30.
   The paint walk records terminus's own display list, which each render replays into a
-  `vello_gpu::Scene`. Card JavaScript's Canvas 2D draws (`crates/bobcat-canvas`) are
+  `vello_gpu::Scene`. Card JavaScript's Canvas 2D draws (`terminus::link::html::canvas`) are
   recorded into the same display list and replayed into a GPU texture per canvas, which an
   HTML `<canvas>` placeholder shows.
 - **[parley](https://github.com/linebender/parley)** (0.13) — text layout & shaping, including
@@ -174,7 +174,6 @@ Rust parses structured input only when Rust behavior actually needs its fields
 | `crates/bobcat-source` | Owner of Lynx source parsing: ZIP, restricted XML, `.web.bundle`, `.lynx.bundle`. | [AGENTS.md](crates/bobcat-source/AGENTS.md) |
 | `crates/bobcat-core` | The native runtime core: group, view, painter, QuickJS realms, page policy. | [AGENTS.md](crates/bobcat-core/AGENTS.md) |
 | `crates/quickjs-rust-bridge` | Owner-thread-bound safe Rust wrapper around the pinned `vendor/quickjs` submodule. | [AGENTS.md](crates/quickjs-rust-bridge/AGENTS.md) |
-| `crates/bobcat-canvas` | The HTML Canvas 2D drawing model, recorded as `terminus` display lists and replayed on the GPU: bitmap, context state, paths, paints, text, pixel access; no JavaScript. | [AGENTS.md](crates/bobcat-canvas/AGENTS.md) |
 | `crates/vant` | Resource policy below `terminus`: cache tiers, RFC 9111 freshness, MIME pipeline, image sizing, the registry of embedder-held contents, the embedder capability traits (`Fetch`, `Store`, `ImageDecoder`, `Platform`). | [AGENTS.md](crates/vant/AGENTS.md) |
 | `crates/bobcat-resources` | Reference resource system over `vant`: the load orchestration plus the native adapters (`NativePlatform`). The browser's adapters are `bobcat-wasm`'s. | [AGENTS.md](crates/bobcat-resources/AGENTS.md) |
 | `crates/bobcat-cli` | The `bobcat` product (`cli`) and the `bobcat-server` screenshot service (`server`), both embedders. | [AGENTS.md](crates/bobcat-cli/AGENTS.md) |

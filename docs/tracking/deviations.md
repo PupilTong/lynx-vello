@@ -3884,7 +3884,8 @@ consequential choice about whether to follow the spec or the quirk.
   `postMessage` only: a background `SelectorQuery.invoke` of
   `transferControlToOffscreen` answers code 3, as before.
 - **Canvas 2D departs from HTML in these places** (2026-11-19;
-  `crates/bobcat-core/docs/canvas.md`, `crates/bobcat-canvas/AGENTS.md`).
+  `crates/bobcat-core/docs/canvas.md`, `docs/terminus-architecture.md`
+  "Canvas 2D context").
   Neither native Lynx nor web-core defines a canvas API of its own, so the
   reference is the HTML Standard alone.
   - *A bitmap side is at most 8,192 px* (`MAX_SURFACE_SIDE`, the texture

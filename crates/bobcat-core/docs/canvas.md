@@ -8,7 +8,9 @@ backticks are relative to the repository root.
 
 The HTML Standard's `OffscreenCanvas` and 2D context (bucket 1: neither
 native Lynx nor web-core defines a canvas API of its own), drawn by
-`crates/bobcat-canvas`, which records each draw and replays it on the GPU.
+`terminus`'s 2D context (`terminus::link::html::canvas`,
+`crates/terminus/src/html/canvas/context2d/`), which records each draw and
+replays it on the GPU.
 A `<canvas>` element shows what an `OffscreenCanvas` commits to it once the
 MTS realm has called `transferControlToOffscreen()` on it ("The placeholder
 canvas" below); the element has no `getContext()`. An `OffscreenCanvas` and an
@@ -49,8 +51,8 @@ over a `CanvasTable` of its own in its `RealmCore`. What the table has of a
 document is its `CanvasHost`: `Worker` for a worker realm, `Document` for
 the MTS realm and its children, which adds the member
 `canvasTransferControl`. The table maps ids to `Entry` values — a canvas
-(size, its `bobcat_canvas::Canvas` made at the first call that needs a
-bitmap, and the `CanvasPresenter` of a placeholder's), a `Path`, a
+(size, its `terminus::link::html::canvas::Canvas` made at the first call
+that needs a bitmap, and the `CanvasPresenter` of a placeholder's), a `Path`, a
 `Gradient`, a `Pattern`, an `ImageBitmap`'s `Image` — all owned `Send`
 values (a compile-time assertion in `mod.rs`), which `CanvasTable::remove`
 takes out of the table.
@@ -162,9 +164,10 @@ fonts and the system's ("Colors and fonts"), not the document's
 ## The per-entry step
 
 Draws are recorded and replayed onto the canvas's GPU texture at a read
-(`bobcat-canvas`'s "Recording and replay"). Every draw lists its canvas as
-drawn; the shared epilogue (`realm/owner.rs`, step 5, after the due timers
-and before the role's commit) calls `RealmCore::settle_drawn_canvases`,
+(`docs/terminus-architecture.md`, "Canvas 2D context"). Every draw lists
+its canvas as drawn; the shared epilogue (`realm/owner.rs`, step 5, after
+the due timers and before the role's commit) calls
+`RealmCore::settle_drawn_canvases`,
 which runs `CanvasTable::settle_drawn` for the realm and each child. Each
 canvas drawn during the entry is flushed, except one with a presenter whose
 bitmap changed (`Canvas::has_changes`), which is committed instead
