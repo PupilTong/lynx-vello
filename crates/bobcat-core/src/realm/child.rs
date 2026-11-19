@@ -356,6 +356,12 @@ impl ChildRealms {
         }
     }
 
+    /// The canvas table of the child under `key`; `None` is a child that is
+    /// gone.
+    pub(crate) fn canvases(&self, key: ChildKey) -> Option<Rc<CanvasTable>> {
+        self.with_child(key, |child| Rc::clone(&child.canvases))
+    }
+
     /// Each child's [`CanvasTable::settle_drawn`], in construction order.
     pub(crate) fn settle_drawn_canvases(&self) {
         // Settling runs no JavaScript, so the list stays borrowed throughout.
@@ -448,12 +454,14 @@ pub(crate) trait ChildHostModules {
     /// own `LynxTemplateRender` in native.
     fn allocate_opener(&self) -> OpenerId;
 
+    /// `canvases` is the child's own canvas table.
     fn install(
         &self,
         engine: &mut ScriptEngine,
         key: ChildKey,
         opener: OpenerId,
         retired: Rc<Cell<bool>>,
+        canvases: &Rc<CanvasTable>,
     ) -> Result<Box<dyn ChildHostState>, ScriptError>;
 }
 
@@ -539,7 +547,13 @@ fn adopt(hook: &ShadowRealmHook, mut engine: ScriptEngine) -> Result<(), String>
     )
     .and_then(|tables| {
         if let (Some(modules), Some(opener)) = (&hook.child_hosts, own_opener) {
-            state = Some(modules.install(&mut engine, key, opener, Rc::clone(&retired))?);
+            state = Some(modules.install(
+                &mut engine,
+                key,
+                opener,
+                Rc::clone(&retired),
+                &tables.canvases,
+            )?);
         }
         Ok(tables)
     });

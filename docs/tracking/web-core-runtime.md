@@ -162,6 +162,14 @@ follows the web target. Structured clone, transfer lists, other Context
 directions, framework hydration and Lynx Core bootstrap
 remain pending. See `../runtime-architecture.md` for lifetime/error boundaries.
 
+Since then (2026-11-19): messages are structured clones, Context
+`postMessage` sends a `message` event, and `postMessage` — `Worker`'s, a
+worker global's and the Context's — takes a transfer list of
+`OffscreenCanvas` and `ImageBitmap` objects. web-core's Context has no
+transfer parameter; the Context's is a user-ruled extension
+(`deviations.md`, "The Context's `postMessage` takes a transfer list";
+`crates/bobcat-core/docs/workers.md`, "Transfer lists").
+
 ## Bobcat lifecycle and event bridge (2026-09-09)
 
 Implemented Lynx-specific contracts:

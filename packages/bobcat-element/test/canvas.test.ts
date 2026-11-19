@@ -12,6 +12,8 @@ import { beforeEach, describe, expect, it, rstest } from "@rstest/core";
 import * as eventTarget from "../src/event-target.ts";
 import * as domException from "../src/dom-exception.ts";
 rstest.mockRequire("bobcat:event-target", () => eventTarget);
+import * as transfer from "../src/transfer.ts";
+rstest.mockRequire("bobcat:transfer", () => transfer);
 rstest.mockRequire("bobcat:dom-exception", () => domException);
 
 /** Every host call, as `[member, ...arguments]`. */
@@ -23,6 +25,9 @@ let nextId = 1;
 rstest.mockRequire("bobcat-internal:host", () =>
   new Proxy({}, {
     get: (_target, name: string) => (...args: unknown[]) => {
+      // The transfer members, which the module calls as it is evaluated,
+      // ahead of this file's bindings; `transfer.test.ts` covers transfer.
+      if (name === "markTransferable" || name === "setTransferReviver") return undefined;
       calls.push([name, ...args]);
       const answer = answers.get(name);
       if (answer !== undefined) return answer(...args);

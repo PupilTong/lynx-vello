@@ -1,9 +1,12 @@
 import { EventTarget } from "bobcat:event-target";
+import { toObjectSequence } from "bobcat:transfer";
 
 export type ContextEvent = { type: string; data?: unknown; origin?: string | undefined };
+/** What a Context posts through: the envelope, and its transfer list if it has a non-empty one. */
+export type ContextSender = (event: ContextEvent, transfer?: object[]) => void;
 class CrossThreadContext extends EventTarget {
-  #sender: ((event: ContextEvent) => void) | undefined;
-  #pending: ContextEvent[] = [];
+  #sender: ContextSender | undefined;
+  #pending: [ContextEvent, object[] | undefined][] = [];
   #listeners = new WeakMap<Function, (event: unknown) => unknown>();
   #origin: string;
   constructor(origin: string) { super(); this.#origin = origin; }
@@ -37,22 +40,33 @@ class CrossThreadContext extends EventTarget {
     // Capture the public envelope now; payloads are copied by Worker's
     // structured-clone transport when posted, including messages queued
     // before connection.
-    const message = { type: event.type, data: event.data, origin: this.#origin };
-    if (this.#sender === undefined) this.#pending.push(message);
-    else this.#sender(message);
+    this.#send({ type: event.type, data: event.data, origin: this.#origin }, undefined);
     return 0;
   }
 
-  postMessage(message?: unknown) {
+  /**
+   * Sends a `message` event. `transfer` is an engine extension (Lynx's
+   * Context has no such parameter; `docs/tracking/deviations.md`): HTML's
+   * `postMessage` transfer list, which moves the `OffscreenCanvas` and
+   * `ImageBitmap` objects it names to the other thread.
+   */
+  postMessage(message?: unknown, transfer?: unknown) {
     if (!arguments.length) throw new TypeError("Context postMessage requires an argument");
-    this.dispatchEvent({ type: "message", data: message });
+    const list = transfer === undefined ? undefined : toObjectSequence(transfer);
+    this.#send({ type: "message", data: message, origin: this.#origin },
+      list === undefined || list.length === 0 ? undefined : list);
   }
 
-  connect(send: (event: ContextEvent) => void) {
+  #send(message: ContextEvent, transfer: object[] | undefined) {
+    if (this.#sender === undefined) this.#pending.push([message, transfer]);
+    else this.#sender(message, transfer);
+  }
+
+  connect(send: ContextSender) {
     this.#sender = send;
     const queued = this.#pending;
     this.#pending = [];
-    for (const event of queued) send(event);
+    for (const [event, transfer] of queued) send(event, transfer);
   }
 
   receive(event: ContextEvent) {

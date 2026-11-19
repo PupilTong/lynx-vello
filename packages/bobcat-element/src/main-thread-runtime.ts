@@ -203,7 +203,7 @@ let backgroundWorker: Worker | undefined;
 let backgroundEnded = false;
 let backgroundDisposal: Promise<void> | undefined;
 let acknowledgeDisposal: (() => void) | undefined;
-let pendingBackgroundMessages: ToBackground[] = [];
+let pendingBackgroundMessages: [ToBackground, object[] | undefined][] = [];
 /**
  * The FIFO exists only for the messages a booting entry sends before its
  * Worker is constructed. Once connected, every message goes to the Worker,
@@ -211,17 +211,26 @@ let pendingBackgroundMessages: ToBackground[] = [];
  * longer names, exactly as a browser drops a post to a terminated worker.
  * Queueing them instead would grow a list nothing can ever drain.
  */
-function sendToBackground(message: ToBackground) {
+function sendToBackground(message: ToBackground, transfer?: object[]) {
   if (backgroundDisposal) return;
-  if (backgroundWorker === undefined) pendingBackgroundMessages.push(message);
-  else backgroundWorker.postMessage(message);
+  if (backgroundWorker === undefined) pendingBackgroundMessages.push([message, transfer]);
+  else postToBackground(backgroundWorker, message, transfer);
+}
+
+/** A post with a list passes it; one without passes no second argument. */
+function postToBackground(worker: Worker, message: ToBackground, transfer: object[] | undefined) {
+  if (transfer === undefined) worker.postMessage(message);
+  else worker.postMessage(message, transfer);
 }
 
 // Context events and runtime calls share one FIFO before Worker connection.
 // Only public Context fields cross it; extra event properties cannot select
 // runtime methods. Payloads are copied by Worker's structured-clone transport
-// when posted.
-jsContext.connect((event) => sendToBackground({ type: event.type, data: event.data, origin: event.origin }));
+// when posted, and a Context message's transfer list goes with it: a message
+// queued before connection is serialized, and its listed objects detached,
+// when it is posted at connection.
+jsContext.connect((event, transfer) =>
+  sendToBackground({ type: event.type, data: event.data, origin: event.origin }, transfer));
 
 // Like web-worker-rpc, await the handler result before copying the reply.
 // The ordinary realm checkpoint runs the continuation; no nested host entry.
@@ -316,8 +325,8 @@ export function __BobcatConnectBackground(worker: Worker, data: unknown, entry?:
   backgroundWorker = worker;
   const queued = pendingBackgroundMessages;
   pendingBackgroundMessages = [];
-  for (const message of queued) {
-    worker.postMessage(message);
+  for (const [message, transfer] of queued) {
+    postToBackground(worker, message, transfer);
   }
 }
 

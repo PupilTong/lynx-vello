@@ -9,6 +9,7 @@ use std::rc::Rc;
 use quickjs_rust_bridge::HostValue;
 
 use crate::background::WorkerKey;
+use crate::canvas::{CanvasTable, Posted};
 use crate::link::HostOutbox;
 use crate::main::quickjs::ScriptEngine;
 use crate::script::ScriptError;
@@ -66,12 +67,16 @@ pub(super) struct WorkerFlags {
 /// reachable from anything the closures below capture. The native-module
 /// member is no exception: it names a module and hands over text, and what
 /// serves it is the embedder's own thread.
+///
+/// `canvases` is the realm's own table, which a message's transfer list takes
+/// its objects out of before `post` is handed the message.
 pub(super) fn install_worker_members(
     engine: &mut ScriptEngine,
     key: WorkerKey,
     host: &HostOutbox,
     name: String,
-    mut post: impl FnMut(HostValue) + 'static,
+    canvases: &Rc<CanvasTable>,
+    mut post: impl FnMut(Posted) + 'static,
 ) -> Result<WorkerFlags, ScriptError> {
     crate::native_module::install(engine, host, Some(key))?;
 
@@ -88,20 +93,23 @@ pub(super) fn install_worker_members(
         },
     )?;
 
-    engine.register_host_module_function(
+    // `postWorkerMessage(message, transfer, ...ids)`.
+    let canvases = Rc::clone(canvases);
+    engine.register_host_module_function_with_transfer(
         WORKER_HOST_MODULE_SPECIFIER,
         "postWorkerMessage",
-        1,
+        2,
+        0,
         move |arguments| {
             // Any value the boundary carries, which for anything that is not a
             // primitive is the structured clone the realm's own serializer
             // made. A value it refuses never arrives here at all: the
-            // trampoline throws in the realm that called `postMessage`.
-            post(
-                arguments
-                    .first()
-                    .map_or(HostValue::Undefined, |data| data.to_value()),
-            );
+            // trampoline throws in the realm that called `postMessage`. A
+            // transfer list's objects leave this realm's table here.
+            match canvases.take_posted("postWorkerMessage", arguments, 0)? {
+                Ok(posted) => post(posted),
+                Err(error) => return Ok(HostValue::String(error.name().to_owned())),
+            }
             Ok(HostValue::Undefined)
         },
     )?;

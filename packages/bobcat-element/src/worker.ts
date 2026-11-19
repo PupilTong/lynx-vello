@@ -1,4 +1,5 @@
 import { EventTarget, installEventHandler } from "bobcat:event-target";
+import { cloneError, postTransferring, transferOf } from "bobcat:transfer";
 // The card URL — the view's card URL (a container page's container URL), or
 // else the entry's own response URL — which `__BobcatInitEntry` names before
 // the entry's body runs; a live binding, read at each construction.
@@ -16,7 +17,8 @@ import {
 // the host boundary serializes it with the engine's own serializer, so
 // `undefined`, `NaN`, `Date`, `BigInt`, typed arrays, cycles and shared
 // references survive, and a value it refuses — a function, a `Symbol`, a `Map`
-// — throws synchronously here. Transfer lists remain unsupported.
+// — throws synchronously here. A transfer list moves `OffscreenCanvas` and
+// `ImageBitmap` objects (`bobcat:transfer`).
 const workers: Map<number, WeakRef<Worker>> = new Map();
 const registry = new FinalizationRegistry<number>(key => {
   if (workers.delete(key)) terminateWorker(key);
@@ -104,15 +106,24 @@ export class Worker extends EventTarget {
     registry.register(this, this.#key, this);
   }
 
+  /** `postMessage(message, transfer)` and `postMessage(message, { transfer })`. */
   postMessage(message: unknown, transfer?: unknown) {
-    if (transfer !== undefined) {
-      throw new TypeError("Bobcat's postMessage has no transfer list");
-    }
     // Serialized whether or not this worker still runs, as HTML's
-    // StructuredSerialize comes before the "is it terminated" check: a
-    // refused value throws here either way. The host drops a message for a
-    // worker it no longer names.
-    sendWorkerMessage(this.#key, message);
+    // StructuredSerializeWithTransfer comes before the "is it terminated"
+    // check: a refused value throws here either way, and listed objects are
+    // detached either way. The host drops a message for a worker it no
+    // longer names.
+    const list = transferOf(transfer);
+    const key = this.#key;
+    if (list === undefined) {
+      try {
+        sendWorkerMessage(key, message);
+      } catch (error) {
+        throw cloneError(error);
+      }
+      return;
+    }
+    postTransferring(list, (ids) => sendWorkerMessage(key, message, list, ...ids));
   }
 
   terminate() {

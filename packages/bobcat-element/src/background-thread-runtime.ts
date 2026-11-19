@@ -253,7 +253,11 @@ coreContext.addEventListener(
   },
 );
 
-coreContext.connect((event) => scope.postMessage({ type: event.type, data: event.data, origin: event.origin }));
+coreContext.connect((event, transfer) => {
+  const message = { type: event.type, data: event.data, origin: event.origin };
+  if (transfer === undefined) scope.postMessage(message);
+  else scope.postMessage(message, transfer);
+});
 // Only the built-in BTS bootstrap arms initialization. Its first Worker
 // message supplies inputs; ordinary messages wait for the entry's imports to
 // settle, whether they finished or threw. Nothing outside this realm waits on

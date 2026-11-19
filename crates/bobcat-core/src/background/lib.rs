@@ -86,6 +86,7 @@ use tokio_util::sync::CancellationToken;
 #[cfg(target_arch = "wasm32")]
 use wasm_thread::Builder as ThreadBuilder;
 
+use crate::canvas::{Posted, Transfer};
 use crate::clock::ClockInstant;
 use crate::script::ScriptError;
 use crate::threads::ThreadJoin;
@@ -170,6 +171,12 @@ pub(crate) enum WorkerMessage {
         data: HostValue,
         enqueued: Option<ClockInstant>,
     },
+    /// One message written with a transfer list, with the objects it moved
+    /// out of the posting realm: held and delivered as a `Post` is.
+    Transfer {
+        message: Transfer,
+        enqueued: Option<ClockInstant>,
+    },
     /// An embedder's native module answering one function argument of one
     /// call: the call the realm numbered, which argument it was, and the JSON
     /// array text to spread — or `None`, which releases the function
@@ -200,6 +207,14 @@ pub(crate) enum WorkerMessage {
 }
 
 impl WorkerMessage {
+    /// What one `postMessage` posts.
+    pub(crate) fn posted(posted: Posted, enqueued: Option<ClockInstant>) -> Self {
+        match posted {
+            Posted::Value(data) => Self::Post { data, enqueued },
+            Posted::Transfer(message) => Self::Transfer { message, enqueued },
+        }
+    }
+
     /// A post carrying no enqueue instant, for the tests that play the
     /// creating realm by hand.
     #[cfg(test)]
@@ -221,6 +236,9 @@ pub(crate) enum WorkerPayload {
     /// One value, primitive or structured clone, from the worker's
     /// `postMessage`.
     Message(HostValue),
+    /// One message the worker's `postMessage` wrote with a transfer list,
+    /// with the objects it moved out of the worker's realm.
+    Transfer(Transfer),
     /// Something in the worker's realm threw and the worker is still
     /// running, whichever entry into the realm it was: its script, a message
     /// delivered to it, a timer, animation or native module callback, a

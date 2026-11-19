@@ -333,24 +333,32 @@ impl Log {
     /// Pumps `engine` until `done` holds of what it said; any script
     /// failure fails the test.
     fn until(&mut self, engine: &mut TestEngine, done: impl Fn(&Self) -> bool) {
-        use crate::view::EngineEvent;
         let deadline = Instant::now() + Duration::from_secs(30);
         while !done(self) {
-            for event in engine.pump() {
-                match event {
-                    EngineEvent::ConsoleMessage { message, .. } => self.messages.push(message),
-                    EngineEvent::ScriptFinished => self.booted = true,
-                    EngineEvent::ScriptRunError(error)
-                    | EngineEvent::TimerFailed(error)
-                    | EngineEvent::ListenerFailed(error) => panic!("a script failed: {error}"),
-                    EngineEvent::ScriptReported { message, .. } => panic!("reported: {message}"),
-                    EngineEvent::StartupFailed(error) => panic!("the view did not boot: {error}"),
-                    EngineEvent::Panicked(error) => panic!("the engine panicked: {error}"),
-                    _ => {}
-                }
-            }
+            self.pump(engine);
             assert!(Instant::now() < deadline, "never came: {:?}", self.messages);
             std::thread::yield_now();
+        }
+    }
+
+    /// One host turn of `engine`, kept.
+    fn pump(&mut self, engine: &mut TestEngine) {
+        use crate::view::EngineEvent;
+        for event in engine.pump() {
+            match event {
+                EngineEvent::ConsoleMessage { message, .. } => self.messages.push(message),
+                EngineEvent::ScriptFinished => self.booted = true,
+                EngineEvent::ScriptRunError(error)
+                | EngineEvent::TimerFailed(error)
+                | EngineEvent::ListenerFailed(error) => panic!("a script failed: {error}"),
+                EngineEvent::ScriptReported { message, .. } => panic!("reported: {message}"),
+                EngineEvent::WorkerThrew { error, .. } | EngineEvent::WorkerEnded { error, .. } => {
+                    panic!("the BTS failed: {error}")
+                }
+                EngineEvent::StartupFailed(error) => panic!("the view did not boot: {error}"),
+                EngineEvent::Panicked(error) => panic!("the engine panicked: {error}"),
+                _ => {}
+            }
         }
     }
 }
@@ -359,7 +367,12 @@ impl Log {
 /// then runs `script` with `page` and `canvas` in scope, on a 40 × 30
 /// offscreen view, booted.
 fn scripted(style: &str, script: &str) -> (TestEngine, Log) {
-    let mut engine = TestViewSpec::new(&format!(
+    scripted_with(style, script, None)
+}
+
+/// [`scripted`], with a BTS entry when `background` names one.
+fn scripted_with(style: &str, script: &str, background: Option<&str>) -> (TestEngine, Log) {
+    let mut spec = TestViewSpec::new(&format!(
         r"
         globalThis.renderPage = function () {{
           const page = __CreatePage('card', 0);
@@ -370,8 +383,11 @@ fn scripted(style: &str, script: &str) -> (TestEngine, Log) {
         }};
         "
     ))
-    .offscreen(40.0, 30.0)
-    .create(Arc::new(crate::view::NoWakeup));
+    .offscreen(40.0, 30.0);
+    if let Some(background) = background {
+        spec = spec.with_background_entry(background);
+    }
+    let mut engine = spec.create(Arc::new(crate::view::NoWakeup));
     let mut log = Log::default();
     log.until(&mut engine, |log| log.booted);
     (engine, log)
@@ -518,4 +534,146 @@ fn a_transferred_canvas_never_drawn_captures_without_waiting() {
     );
     let shot = capture(&mut engine);
     assert_eq!(pixel(&shot, 20, 15), GREEN);
+}
+
+/// One touch on the page at (20, 15): down, then up.
+fn touch(engine: &mut TestEngine) {
+    use terminus::link::input::{InputEvent, PointerKind, PointerPhase};
+    for phase in [PointerPhase::Down, PointerPhase::Up] {
+        engine.dispatch_input(InputEvent::pointer(
+            terminus::link::Point2D::new(20.0, 15.0),
+            1,
+            PointerKind::Touch,
+            phase,
+        ));
+    }
+}
+
+/// The target use: main-thread script transfers the `<canvas>`'s control and
+/// sends the `OffscreenCanvas` to the BTS with
+/// `lynx.getJSContext().postMessage({ canvas }, [canvas])`; the BTS draws on
+/// it with a 2D context from its Context listener, and its pixels fill the
+/// canvas box. Each touch asks the BTS for the next step: a timer's draw,
+/// then a `requestAnimationFrame` callback's, each reaching the screen with
+/// no document commit. The MTS-side object is detached.
+#[test]
+fn the_bts_draws_on_a_canvas_the_main_thread_transferred() {
+    let (mut engine, mut log) = scripted_with(
+        "width:40px;height:30px;align-self:flex-start",
+        r"
+          __SetAttribute(canvas, 'width', '4');
+          __SetAttribute(canvas, 'height', '2');
+          let offscreen;
+          __InvokeUIMethod(canvas, 'transferControlToOffscreen', {}, ({ data }) => { offscreen = data; });
+          lynx.getJSContext().postMessage({ canvas: offscreen }, [offscreen]);
+          __AddEventListener(canvas, 'touchstart', () => {
+            console.log(`mts width ${offscreen.width}`);
+            lynx.getJSContext().postMessage('next');
+          }, {});
+          __FlushElementTree();
+        ",
+        Some(
+            r"
+            import { lynx } from 'bobcat:bts-runtime';
+            const core = lynx.getCoreContext();
+            let ctx;
+            let step = 0;
+            core.addEventListener('message', (event) => {
+              if (event.data !== 'next') {
+                const canvas = event.data.canvas;
+                ctx = canvas.getContext('2d');
+                ctx.fillStyle = 'red';
+                ctx.fillRect(0, 0, 4, 2);
+                console.log(`bts drew ${canvas instanceof OffscreenCanvas} ${canvas.width}x${canvas.height}`);
+              } else if (++step === 1) {
+                setTimeout(() => {
+                  ctx.fillStyle = 'blue';
+                  ctx.fillRect(2, 0, 2, 2);
+                  console.log('bts timer');
+                }, 0);
+              } else {
+                lynx.requestAnimationFrame(() => {
+                  ctx.fillStyle = '#00ff00';
+                  ctx.fillRect(0, 0, 2, 2);
+                  console.log('bts frame');
+                });
+              }
+            });
+            ",
+        ),
+    );
+    log.until(&mut engine, |log| log.has("bts drew true 4x2"));
+    let shot = capture_until(&mut engine, 35, 15, RED);
+    assert_eq!(pixel(&shot, 5, 15), RED, "the BTS's draw fills the box");
+    let commit = commit_id(&mut engine);
+
+    touch(&mut engine);
+    log.until(&mut engine, |log| {
+        log.has("mts width 0") && log.has("bts timer")
+    });
+    let shot = capture_until(&mut engine, 35, 15, BLUE);
+    assert_eq!(pixel(&shot, 5, 15), RED, "the left half kept");
+    assert_eq!(
+        commit_id(&mut engine),
+        commit,
+        "no document commit drew the timer's draw"
+    );
+
+    // The display's vsyncs, which deliver the BTS's frame request once the
+    // painter has heard it.
+    touch(&mut engine);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !log.has("bts frame") {
+        assert!(Instant::now() < deadline, "no frame: {:?}", log.messages);
+        engine.painter.vsync();
+        log.pump(&mut engine);
+        std::thread::yield_now();
+    }
+    let shot = capture_until(&mut engine, 5, 15, GREEN);
+    assert_eq!(pixel(&shot, 35, 15), BLUE, "the right half kept");
+    assert_eq!(
+        commit_id(&mut engine),
+        commit,
+        "no document commit drew the frame's draw"
+    );
+}
+
+/// The BTS setting the transferred canvas's size resizes the placeholder:
+/// the commit from `bobcat-workers` sends `ToMain::CanvasResized` through
+/// the presenter, and `bobcat-main` applies the new natural size.
+#[test]
+fn the_bts_resizing_a_transferred_canvas_resizes_the_placeholder() {
+    let (mut engine, _) = scripted_with(
+        "align-self:flex-start",
+        r"
+          __InvokeUIMethod(canvas, 'transferControlToOffscreen', {}, ({ data }) => {
+            lynx.getJSContext().postMessage(data, [data]);
+          });
+          __FlushElementTree();
+        ",
+        Some(
+            r"
+            import { lynx } from 'bobcat:bts-runtime';
+            lynx.getCoreContext().addEventListener('message', ({ data }) => {
+              data.width = 20;
+              data.height = 10;
+              const ctx = data.getContext('2d');
+              ctx.fillStyle = 'red';
+              ctx.fillRect(0, 0, 20, 10);
+            });
+            ",
+        ),
+    );
+    let canvas = canvas_of(&mut engine);
+    let before = commit_id(&mut engine);
+    // The probe lays the document out itself; the frame drawn is the one a
+    // document commit after the resize publishes.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while rect(&mut engine, canvas) != (20.0, 10.0) || commit_id(&mut engine) == before {
+        assert!(Instant::now() < deadline, "the resize was not applied");
+        engine.pump();
+        std::thread::yield_now();
+    }
+    let shot = capture_until(&mut engine, 10, 5, RED);
+    assert_ne!(pixel(&shot, 30, 5), RED, "outside the resized box");
 }

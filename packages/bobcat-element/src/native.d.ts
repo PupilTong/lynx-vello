@@ -435,9 +435,13 @@ interface BobcatWorkerNative {
   /**
    * Hands one message back to the realm that created us. Any value the host
    * boundary carries: a primitive, or a structured clone of anything else.
-   * A value the engine's serializer refuses throws at this call.
+   * A value the engine's serializer refuses throws at this call. With a
+   * non-empty `transfer` list, `ids` are what `bobcat:transfer` passes for
+   * its entries, and the answer is `"InvalidStateError"` when one is an
+   * `OffscreenCanvas` with a context (nothing is posted); see
+   * `sendWorkerMessage`.
    */
-  postWorkerMessage(data: unknown): void;
+  postWorkerMessage(data: unknown, transfer?: object[], ...ids: number[]): undefined | string;
   /**
    * Ends this worker once the running task returns. Queued messages and armed
    * timers go with it.
@@ -513,9 +517,20 @@ declare module "bobcat-internal:host" {
   ): number | null;
   /**
    * Posts one message to that worker. Any value the host boundary carries; a
-   * value the engine's serializer refuses throws at this call.
+   * value the engine's serializer refuses throws at this call. A non-empty
+   * `transfer` list is the serializer's: each entry must be an object
+   * `markTransferable` marked transferable, listed once, and `ids` name each
+   * entry's canvas-table id in list order (0 for an `OffscreenCanvas` whose
+   * context mode is not none, which answers `"InvalidStateError"` and posts
+   * nothing). The listed objects' entries leave this realm's table and ride
+   * the message.
    */
-  export function sendWorkerMessage(key: number, data: unknown): void;
+  export function sendWorkerMessage(
+    key: number,
+    data: unknown,
+    transfer?: object[],
+    ...ids: number[]
+  ): undefined | string;
   export function terminateWorker(key: number): void;
   export const createDocument: BobcatNative["createDocument"];
   export const createPage: BobcatNative["createPage"];
@@ -735,6 +750,19 @@ declare module "bobcat-internal:host" {
    * into `bobcat:future`. A future that is not pending throws.
    */
   export function settleFuture(id: number): void;
+  /**
+   * Marks `object` uncloneable: a structured clone that meets it throws
+   * `TypeError: uncloneable object` unless its transfer list holds it, which
+   * it may only while the latest mark said `transferable`.
+   */
+  export function markTransferable(object: object, transferable: boolean): void;
+  /**
+   * Sets, once per realm, the function a message delivered with a transfer
+   * list calls per slot, with the slot's index, to make the object the slot
+   * reads as. A second call throws.
+   */
+  export function setTransferReviver(reviver: (slot: number) => object): void;
+  export const canvasAdopt: BobcatCanvasNative["canvasAdopt"];
   export const canvasCreate: BobcatCanvasNative["canvasCreate"];
   export const canvasDrop: BobcatCanvasNative["canvasDrop"];
   export const canvasSetSize: BobcatCanvasNative["canvasSetSize"];
@@ -829,6 +857,12 @@ interface BobcatCanvasNative {
   canvasCreate(width: number, height: number): number;
   /** Removes the entry `id` names, whatever its kind. */
   canvasDrop(id: number): void;
+  /**
+   * Files under a new id the entry the message being delivered carries in
+   * transfer slot `slot`: a canvas's `[id, width, height]` as a
+   * `Float64Array`'s bytes, or a bitmap's id. Only the reviver calls it.
+   */
+  canvasAdopt(slot: number): ArrayBuffer | number;
   /** Setting `width`/`height`: the bitmap and the context state reset. */
   canvasSetSize(target: number, width: number, height: number): void;
   /** A new `Path2D`: empty for `source` 0, else a copy of that path. */

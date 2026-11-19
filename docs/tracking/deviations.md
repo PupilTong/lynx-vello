@@ -3871,6 +3871,19 @@ consequential choice about whether to follow the spec or the quirk.
 
 ## JS runtime & APIs (see [js-runtime.md](js-runtime.md), [accessibility.md](accessibility.md))
 
+- **The Context's `postMessage` takes a transfer list, as an engine
+  extension** (user, 2026-11-19; `packages/bobcat-element/src/cross-thread-context.ts`).
+  `lynx.getJSContext().postMessage(message, transfer)` and
+  `lynx.getCoreContext().postMessage(message, transfer)` accept HTML's
+  `sequence<object>` transfer list as a second parameter, which neither
+  native Lynx's Context nor web-core's has. It is the one card-visible
+  `postMessage` between the main and background threads, and moving an
+  `OffscreenCanvas` to the background thread needs it. The list follows
+  `Worker.postMessage`'s rules (`crates/bobcat-core/docs/workers.md`,
+  "Transfer lists"); `dispatchEvent` takes none. A transfer is made through
+  `postMessage` only: a background `SelectorQuery.invoke` of
+  `transferControlToOffscreen` answers code 3, as before.
+
 - **Main-thread code that names a browser global throws, as on native**
   (user, 2026-10-20). `MTS_CHUNK_PREAMBLE`
   (`crates/bobcat-core/src/esm.rs`) declares none of `navigator`,

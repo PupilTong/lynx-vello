@@ -98,7 +98,9 @@ explicit ESM import, creates a distinct context on the group's existing
 so `undefined`, `NaN`, `Date`, `BigInt`, typed arrays, cycles and shared
 references survive, while a function, `Symbol`, `Map`, `Set`, `RegExp`,
 `Error`, `DataView` or accessor property throws synchronously at the
-`postMessage` call; transfer lists remain pending. External ESM imports load
+`postMessage` call. `postMessage(message, transfer)` and
+`postMessage(message, { transfer })` take a transfer list of
+`OffscreenCanvas` and `ImageBitmap` objects ("Transfer lists" below). External ESM imports load
 through the view's resource fetcher and support TLA. `main/workers.rs` installs
 its three native operations — `createWorker`, `sendWorkerMessage`,
 `terminateWorker` — before entry boot. `createWorker` joins every specifier by
@@ -206,7 +208,9 @@ MTS `lynx.getJSContext()` and this BTS Context are stable
 `CrossThreadContext extends EventTarget` instances returned directly by
 `createCrossThreadContext`. `dispatchEvent({type, data})` validates the string
 type and data property, captures the public envelope, sends to the peer and
-returns `0`; Context `postMessage(value)` sends a message event. Listeners
+returns `0`; Context `postMessage(value, transfer?)` sends a message event,
+its optional second argument a transfer list as `Worker.postMessage`'s is (an
+engine extension, `docs/tracking/deviations.md`). Listeners
 receive the original null/undefined data and an undefined receiver, and ignore
 DOM listener options. The shared `bobcat:event-target` EventTarget every
 Context, `Worker` and engine target extends follows the DOM's inner-invoke
@@ -224,7 +228,10 @@ the sending CoreContext or JSContext. MTS
 queues payload references until the Worker is connected; Worker postMessage
 takes the structured-clone snapshot above for early and connected sends alike,
 and `toJSON` is never consulted. Do not add a custom codec or a deep clone on
-top of that transport; a value it refuses throws at the call. A worker's own
+top of that transport; a value it refuses throws at the call. A transfer list
+is the serializer's own, never a walk or rewrite of the message in
+JavaScript (below). A message queued before connection keeps its list and is
+serialized, its listed objects detached, when it is posted at connection. A worker's own
 task queues what is posted until its bootstrap has evaluated, and BTS JS waits
 on the application import before delivering later messages, so application
 listeners exist before first delivery. Raw XML adapters supply the optional
@@ -259,3 +266,39 @@ starts the same JS disposal Promise used by MTS teardown, terminating BTS only
 after its acknowledgement. Rust starts and awaits MTS disposal through the
 existing ESM evaluator and routes ordinary Worker events while it waits; it
 neither identifies BTS nor calls its hook.
+
+**Transfer lists.** Every `postMessage` that reaches another thread —
+`Worker`'s (`sendWorkerMessage`), a worker global's (`postWorkerMessage`) and,
+through them, the Context's — is a host member registered with the bridge's
+transfer trampoline (`crates/quickjs-rust-bridge/AGENTS.md`), the message its
+first argument after the key and the list the next. `bobcat:transfer`
+converts the second argument by Web IDL's overload resolution (a sequence, or
+a dictionary's `transfer`; anything else is a `TypeError`), and an empty list
+is the call with no list, which costs nothing more than before. With a
+non-empty list the serializer writes each listed object as a slot and refuses,
+before the member runs, a marked object the message holds unlisted
+(`uncloneable object`), a listed value that is not marked transferable
+(`value is not transferable`, which is also what a detached object is) and a
+duplicate (`duplicate transferable`); `bobcat:transfer` throws each as a
+`DOMException` `DataCloneError`. The ids of the listed objects in the realm's
+canvas table follow the list as arguments, 0 for an `OffscreenCanvas` whose
+context mode is not none. The member (`CanvasTable::take_posted`) checks every
+id first — a 0 answers `InvalidStateError`, HTML's transfer steps for such a
+canvas — and only then takes the entries out of the table; the module then
+detaches each listed object. A refusal therefore posts nothing, detaches
+nothing and takes nothing. The message rides the worker's channel or the
+view's `WorkerEvent` channel as a `canvas::Transfer` (`WorkerMessage::Transfer`,
+`WorkerPayload::Transfer`): the stream and the entries as owned `Send`
+values, held, queued and dropped exactly as a `Post` is, so a message that is
+never delivered — a worker terminated while it was held, a realm or child
+that is gone — drops what it carries. Delivery lends the entries to the
+receiving realm's table (`Transfer::deliver`) for the one call that reads the
+message; that realm's reviver, set by `bobcat:canvas`, files each one under a
+new id (`canvasAdopt`) as the read reaches its slot, and what was not filed
+when the call returns is dropped. A realm whose script never imported
+`bobcat:canvas` has no reviver: the delivery fails with the bridge's
+`TypeError: this realm has no transfer reviver`, reported as that realm's
+uncaught exception (`WorkerThrew` for a worker), and the entries are dropped.
+The internal runtime traffic that shares the channel (`nodeQuery`,
+`callLepusMethod`, `initialize`, …) passes no list. A selector query's
+`invoke` from the BTS does not transfer (`canvas.md`).

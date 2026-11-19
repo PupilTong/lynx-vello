@@ -641,6 +641,54 @@ impl ScriptEngine {
             .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::RegisterHostModuleFunction))
     }
 
+    /// [`Self::register_host_module_function`] for a member whose argument
+    /// `message_index` is a message and whose next argument is its transfer
+    /// list (the bridge's `register_host_module_function_with_transfer`):
+    /// with a non-empty list the message arrives as
+    /// [`quickjs::HostArgument::Transferred`] and the list as its length.
+    pub(crate) fn register_host_module_function_with_transfer<F>(
+        &self,
+        module_specifier: &str,
+        export_name: &str,
+        arity: u8,
+        message_index: u8,
+        mut callback: F,
+    ) -> Result<(), ScriptError>
+    where
+        F: FnMut(&[quickjs::HostArgument<'_>]) -> Result<quickjs::HostValue, String> + 'static,
+    {
+        let host_panic = Rc::clone(&self.host_panic);
+        self.realm
+            .register_host_module_function_with_transfer(
+                module_specifier,
+                export_name,
+                u32::from(arity),
+                u32::from(message_index),
+                move |arguments| {
+                    keep_host_panic(&host_panic, "the host function panicked", || {
+                        callback(arguments)
+                    })
+                    .map_err(quickjs::HostFunctionError::new)
+                },
+            )
+            .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::RegisterHostModuleFunction))
+    }
+
+    /// Adds the bridge's two transfer members as exports of a native ESM
+    /// module: `mark_export(object, transferable)` and
+    /// `reviver_export(reviver)` (the bridge's
+    /// `register_host_module_transfer_members`).
+    pub(crate) fn register_host_module_transfer_members(
+        &self,
+        module_specifier: &str,
+        mark_export: &str,
+        reviver_export: &str,
+    ) -> Result<(), ScriptError> {
+        self.realm
+            .register_host_module_transfer_members(module_specifier, mark_export, reviver_export)
+            .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::RegisterHostModuleFunction))
+    }
+
     /// [`Self::register_host_module_function`] for an `Fn` callback, which
     /// may be called again while a call of it is running: a member whose
     /// callback calls into realms ([`Self::call_module_export_nested`])

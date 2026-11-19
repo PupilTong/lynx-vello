@@ -123,6 +123,11 @@ pub(crate) const CONTEXT_MODULE_SPECIFIER: &str = "bobcat:cross-thread-context";
 /// Web IDL's `DOMException`, which `bobcat:canvas` throws and installs.
 pub(crate) const DOM_EXCEPTION_MODULE_SPECIFIER: &str = "bobcat:dom-exception";
 
+/// HTML's `StructuredSerializeWithTransfer` around the host members a
+/// `postMessage` calls: the transfer list's conversion, the `DataCloneError`
+/// the serializer's refusals are, and the detaching of what was listed.
+pub(crate) const TRANSFER_MODULE_SPECIFIER: &str = "bobcat:transfer";
+
 /// The Canvas 2D API: `OffscreenCanvas`, its context, `Path2D`, `ImageData`,
 /// `ImageBitmap` and the rest, over [`crate::canvas`]'s members. Imported for
 /// its effect, as [`TIMER_MODULE_SPECIFIER`] is: it installs those names on
@@ -406,6 +411,7 @@ pub(crate) const BUILTIN_MODULES: &[BuiltinModule] = &[
     builtin_module!(NATIVE_MODULES_MODULE_SPECIFIER, "native-modules"),
     builtin_module!(CONTEXT_MODULE_SPECIFIER, "cross-thread-context"),
     builtin_module!(DOM_EXCEPTION_MODULE_SPECIFIER, "dom-exception"),
+    builtin_module!(TRANSFER_MODULE_SPECIFIER, "transfer"),
     builtin_module!(CANVAS_MODULE_SPECIFIER, "canvas"),
     builtin_module!(WORKER_CLASS_MODULE_SPECIFIER, "worker"),
     builtin_module!(WORKER_MODULE_SPECIFIER, "worker-runtime"),

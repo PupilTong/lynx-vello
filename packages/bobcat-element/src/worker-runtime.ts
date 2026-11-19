@@ -10,6 +10,7 @@ import {
   workerName,
 } from "bobcat-internal:worker";
 import { console } from "bobcat:diagnostics";
+import { cloneError, postTransferring, transferOf } from "bobcat:transfer";
 
 // The `bobcat:worker` ESM: one worker realm's global scope, preloaded on the
 // group's worker runtime and imported for its effect by the worker's own
@@ -116,11 +117,18 @@ Object.defineProperty(scope, "console", {
 });
 
 Object.assign(scope, {
+  /** `postMessage(message, transfer)` and `postMessage(message, { transfer })`. */
   postMessage(message: unknown, transfer?: unknown): undefined {
-    if (transfer !== undefined) {
-      throw new TypeError("Bobcat's postMessage has no transfer list");
+    const list = transferOf(transfer);
+    if (list === undefined) {
+      try {
+        postWorkerMessage(message);
+      } catch (error) {
+        throw cloneError(error);
+      }
+      return undefined;
     }
-    postWorkerMessage(message);
+    postTransferring(list, (ids) => postWorkerMessage(message, list, ...ids));
     return undefined;
   },
   /**

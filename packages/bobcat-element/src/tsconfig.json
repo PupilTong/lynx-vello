@@ -36,6 +36,7 @@
       "bobcat:native-modules": ["./native-modules.ts"],
       "bobcat:cross-thread-context": ["./cross-thread-context.ts"],
       "bobcat:dom-exception": ["./dom-exception.ts"],
+      "bobcat:transfer": ["./transfer.ts"],
       "bobcat:canvas": ["./canvas.ts"],
       "bobcat-internal": ["./worker.ts"],
       "bobcat:worker": ["./worker-runtime.ts"],
