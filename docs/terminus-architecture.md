@@ -839,6 +839,103 @@ behavior of its own: Auto and Hint popovers are refused rather than shown
 the embedder's to fire, and there is no focus, no source or trigger, and no
 `overlay` transition.
 
+## HTML `<canvas>` as an `OffscreenCanvas` placeholder
+
+`html/canvas.rs` is HTML's canvas element in the two context modes this
+crate builds, `none` and `placeholder`; `getContext()` and every rendering
+context mode are not built. `Document::define_html_elements` defines its
+component, which keeps each element's state in `Document::canvases`
+(shared with the component, which drops an element's entry in
+`CustomElement::freed`): one `PictureId` for the element's life and the
+mode. The element presents that picture (`Document::set_picture`), so its
+box is replaced and generates no boxes for its children; HTML gives it no UA
+rule, so the module has none. In mode `none` the picture draws nothing, and
+its natural size is the numeric values of `width` and `height` (HTML's rules
+for parsing non-negative integers; 300 and 150 when absent or unparsable),
+following every change of either attribute.
+
+`transfer_control_to_offscreen(document, canvas)` is HTML's
+`transferControlToOffscreen()`: `InvalidState` unless the mode is `none`;
+otherwise the mode becomes `placeholder` and the answer is the attributes'
+size and a `CanvasFrames`. That link is `Send` and holds the element's
+state (`html::canvas::Link`) weakly. A canvas surface commits through it
+(`Surface::commit`, below), which answers a `Committed`: `wake` when the
+painter has described every earlier commit (`CanvasFrames::describe`
+clears the flag), `resize` when the bitmap's size differs from the last
+committed one and no earlier resize is pending. A placeholder ignores its
+`width` and `height` attributes (HTML's attribute table, "placeholder: Do
+nothing"); its natural size becomes the last committed size when the
+document's thread calls `update_placeholders`. `CanvasFrames::describe`
+answers the newest commit's generation and an `ImageDescriptor::platform`
+of its size, with no pixels, or `None` before the first commit and once the
+element is freed; after that a commit does nothing and owes nothing.
+Delivering a wake or a resize, and answering the painter for the picture,
+is the embedder's.
+
+The `Link` holds a lease owner id (`render::sparse::next_target`). A commit
+copies the canvas's texture into the picture's own texture in the shared
+bitmap table (`SharedRaster::copy_to_picture`, under
+`BitmapKey::Picture`), which is the texture a draw of the picture samples,
+leases it to that owner, and only then publishes the generation. Releases
+under the bitmap budget skip a leased texture, so the texture lives until
+the element is freed: `Link`'s `Drop` ends the lease
+(`render::canvas::end_lease`). The painter adopts the copy through its
+ordinary `Id`-picture path (`painter/images.rs`, `describe_picture`): the
+texture's written generation (`BitmapLeases::lease_picture`) equal to the
+described one is drawn with nothing to take.
+
+## Canvas surfaces
+
+`render/canvas.rs` is a canvas bitmap on the GPU, for `bobcat-canvas`
+(`link::render::canvas`). A `Surface` is a `width` × `height` RGBA8 texture
+(premultiplied), keyed by a process-unique id (`next_texture_id`) in
+`SharedRaster`'s canvas table; `Surface::new` refuses a zero side or one
+over `MAX_SURFACE_SIDE`, the 8,192 of `SharedGpu::LIMITS`. The texture is
+made, zero-filled, by the first operation that needs it. Every GPU step is
+one `Op` applied by `apply`:
+
+- `Surface::draw(list, init, keep)` replays a `DisplayList` whose clips and layers are all
+  closed: `Init::Load` over the texture (`TargetInit::SrcOver`), `Init::Clear` over a transparent
+  clear, `Init::Backdrop` into the surface's second texture over a clear with the first bound
+  under the surface's id, after which the two change places. The list is emptied; `keep` holds the
+  `SurfaceImage`s it draws until the replay. Every `Paint::Texture` the list draws is looked up in
+  the canvas table and bound for the render (`SparseBackend::render_onto`'s `sources`); pixel images
+  are uploaded through the bitmap table like any `ImageRef`.
+- `write` (`Queue::write_texture` of a rectangle), `read` (a rectangle copied to a staging buffer
+  and mapped; a `PendingRead` whose `wait` blocks), `snapshot` and `SurfaceImage::copy`/`crop` (a
+  `copy_texture_to_texture` into a new texture), `take` (the texture moved to a new
+  `SurfaceImage`'s id; the surface gets a fresh one at its next op), and `commit` (above).
+- `SurfaceImage` is a texture of its own; its last clone's drop removes it.
+
+A backdrop batch exists because `vello_gpu` composites a layer that blends
+by anything but source-over, when it sits at the root, into a transparent
+intermediate and blits that over the target (`schedule_root` with
+`CommandRecorder::root_is_blend_target`), so with `TargetInit::SrcOver` the
+blend never reads the target; and it refuses to sample the texture it
+renders into (`RenderError::TextureFeedbackLoop`). A surface therefore holds
+one texture, and a second from its first backdrop batch on.
+
+Natively the thread that owns a surface applies each op as it is issued:
+the surface makes a `SparseBackend` on `SharedGpu::offscreen()` at its first
+op, replays with no lock but the bitmap table's per bitmap draw, and takes
+the renderer lock for the GPU half. A `SurfaceImage` holds the stack too.
+On wasm32 the device is the Render Worker's: every op is pushed onto one
+queue in shared memory, which wakes the Render Worker through the waker
+`set_waker` registered when the queue was empty, and `drain`, called at the
+start of each of that Worker's turns, applies the queue in order with one
+`SparseBackend` for every canvas. A read is answered from the map's
+completion on the Render Worker; with no live device there the ops are
+dropped, which fails the reads among them.
+
+`DisplayList` carries two items for canvases. `push_backdrop_clip` opens a
+clip that is never isolated (`PushClip`'s `isolable`), so a blend layer
+inside it reads what is under the clip, cut to it, which is what a canvas's
+clip region needs. `push_drop_shadow` opens a `DropShadowOnly` filter layer
+(`Item::PushShadow`) with its offsets in the list's space; a chunk holding
+one is never culled. `ListPaint` is a paint a list records with
+(`fill_with`, `stroke_with`, `DrawGlyphs::paint`): a brush, a bitmap
+(`ListPaint::image`) or a texture by id (`ListPaint::texture`).
+
 ## Intersection observations
 
 The Intersection Observer primitive lives in `visual/intersection/`:

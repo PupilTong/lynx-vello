@@ -1,0 +1,81 @@
+//! The HTML Standard's Canvas 2D drawing model, replayed on the GPU.
+//!
+//! A [`Canvas`] is one output bitmap and its `CanvasRenderingContext2D`
+//! state. Each context method and attribute is one call taking numbers,
+//! `&str`, small enums or the crate's own value types ([`Path`],
+//! [`Gradient`], [`Pattern`], [`Image`]); errors name the exception the
+//! standard throws ([`CanvasError`]). There is no JavaScript, document, CSS
+//! parsing or GPU here: colors arrive as [`peniko::Color`], fonts as a typed
+//! [`Font`], and the caller owns the [`parley::FontContext`] text is shaped
+//! with.
+//!
+//! Draw calls are recorded into a `terminus` display list and replayed onto
+//! the canvas's GPU texture at a read, at the owner's flush, or once the
+//! recording grows past a bound (`AGENTS.md`, "Recording and replay").
+
+#![allow(
+    clippy::many_single_char_names,
+    reason = "the IDL methods' argument names: x, y, w, h, a..f"
+)]
+
+mod canvas;
+mod image;
+mod path;
+mod style;
+mod text;
+
+pub use canvas::{Canvas, ImageDataRead};
+pub use image::Image;
+pub use parley;
+pub use path::Path;
+pub use style::{
+    CompositeOp, Direction, FillRule, Gradient, LineCap, LineJoin, Pattern, Repetition,
+    SmoothingQuality, Style, TextAlign, TextBaseline,
+};
+pub use terminus::link::{kurbo, peniko};
+pub use text::{Font, TextMetrics};
+
+/// The exception a call throws, named as the standard names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CanvasError {
+    /// `DOMException` `IndexSizeError`.
+    IndexSize,
+    /// `DOMException` `InvalidStateError`.
+    InvalidState,
+    /// `DOMException` `SyntaxError`.
+    Syntax,
+    /// ECMAScript `TypeError`.
+    Type,
+    /// ECMAScript `RangeError`.
+    Range,
+}
+
+impl CanvasError {
+    /// The exception's name: the `DOMException` name, or the ECMAScript
+    /// error constructor's.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::IndexSize => "IndexSizeError",
+            Self::InvalidState => "InvalidStateError",
+            Self::Syntax => "SyntaxError",
+            Self::Type => "TypeError",
+            Self::Range => "RangeError",
+        }
+    }
+
+    /// Whether the JavaScript layer throws a `DOMException` (rather than an
+    /// ECMAScript error object).
+    #[must_use]
+    pub fn is_dom_exception(self) -> bool {
+        matches!(self, Self::IndexSize | Self::InvalidState | Self::Syntax)
+    }
+}
+
+impl std::fmt::Display for CanvasError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+impl std::error::Error for CanvasError {}

@@ -38,6 +38,7 @@
     reason = "target sizes and texture sides are small exact integers in u16 and u32 alike"
 )]
 
+use std::borrow::Cow;
 use std::ops::RangeInclusive;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -46,6 +47,7 @@ use std::time::Duration;
 use glifo::{AtlasCacher, GlyphPrepCache, GlyphRenderError, GlyphRunBackend};
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
+use vello_gpu::filter_effects::{EdgeMode, Filter, FilterPrimitive};
 use vello_gpu::{
     ClearSettings, Image, ImageSource, LayersConfig, MemorySettings, PaintType, RectU16,
     RenderOptions, RenderSettings, RenderTarget, RenderTargetConfig, Renderer, Resources, Scene,
@@ -56,8 +58,8 @@ use super::gpu::SharedGpu;
 use crate::clock::ClockInstant;
 use crate::kurbo::{Affine, BezPath, Diagonal2, Point, Rect, Shape as _};
 use crate::paint::display_list::{
-    DisplayList, FILL_TOLERANCE, GlyphRun, GlyphStyle, ImagePaint, ImageRef, Item, Paint,
-    STROKE_TOLERANCE, Shape, Texture, next_texture_id,
+    BlurredRoundedRect, DisplayList, DropShadow, FILL_TOLERANCE, GlyphRun, GlyphStyle, ImagePaint,
+    ImageRef, Item, Paint, STROKE_TOLERANCE, Shape, Texture, next_texture_id,
 };
 use crate::peniko::{Color, Extend, Fill, ImageAlphaType, ImageData, ImageFormat, ImageSampler};
 use crate::render::image::ImageDescriptor;
@@ -299,7 +301,9 @@ pub(crate) fn replay(
                 scene.set_stroke((**stroke).clone());
                 scene.stroke_path(shape_path(path, list, draw.shape, STROKE_TOLERANCE));
             }
-            Item::PushClip { region, isolated } => {
+            Item::PushClip {
+                region, isolated, ..
+            } => {
                 stats.layers += 1;
                 scene.set_transform(list.transform(region.transform));
                 scene.set_fill_rule(region.rule);
@@ -335,6 +339,11 @@ pub(crate) fn replay(
                 );
                 open.push(false);
             }
+            Item::PushShadow(shadow) => {
+                stats.layers += 1;
+                push_shadow(scene, shadow);
+                open.push(false);
+            }
             Item::Pop => match open.pop() {
                 Some(true) => scene.pop_clip(),
                 Some(false) => scene.pop_layer(),
@@ -349,23 +358,40 @@ pub(crate) fn replay(
             }
             Item::BlurredRoundedRect(blur) => {
                 stats.draws += 1;
-                scene.set_paint(blur.color);
-                scene.reset_paint_transform();
-                // Centred on its rect, the blur covers the 2.5σ-inflated
-                // area around it.
-                scene.set_transform(
-                    list.transform(blur.transform)
-                        .pre_translate(blur.rect.center().to_vec2()),
-                );
-                scene.fill_blurred_rounded_rect(
-                    &Rect::from_center_size(Point::ORIGIN, blur.rect.size()),
-                    blur.radius,
-                    blur.std_dev,
-                );
+                blurred_rounded_rect(scene, list, blur);
             }
         }
     }
     stats
+}
+
+/// Fills `blur`, centred on its rect, over the 2.5σ-inflated area around
+/// it.
+fn blurred_rounded_rect(scene: &mut Scene, list: &DisplayList, blur: &BlurredRoundedRect) {
+    scene.set_paint(blur.color);
+    scene.reset_paint_transform();
+    scene.set_transform(
+        list.transform(blur.transform)
+            .pre_translate(blur.rect.center().to_vec2()),
+    );
+    scene.fill_blurred_rounded_rect(
+        &Rect::from_center_size(Point::ORIGIN, blur.rect.size()),
+        blur.radius,
+        blur.std_dev,
+    );
+}
+
+/// Opens `shadow`'s filter layer on `scene`. The filter's offsets are taken
+/// through the transform set when it is pushed: the list's own space.
+fn push_shadow(scene: &mut Scene, shadow: &DropShadow) {
+    scene.set_transform(Affine::IDENTITY);
+    scene.push_filter_layer(Filter::from_primitive(FilterPrimitive::DropShadowOnly {
+        dx: shadow.dx,
+        dy: shadow.dy,
+        std_deviation: shadow.std_dev,
+        color: shadow.color,
+        edge_mode: EdgeMode::None,
+    }));
 }
 
 /// Draws `run` of `list` with the paint already set on `scene`, outlining
@@ -710,6 +736,9 @@ const PINNED_RENDERS: u64 = 4;
 pub(crate) struct SharedRaster {
     renderer: Mutex<Paired>,
     bitmaps: Mutex<Bitmaps>,
+    /// The canvas surfaces' and canvas images' textures, by id
+    /// ([`super::canvas`]).
+    canvases: Mutex<FxHashMap<u64, CanvasTexture>>,
     /// How many bitmaps have been uploaded, by any target: read without a
     /// lock by a lease holder that only rechecks once something was.
     uploads: AtomicU64,
@@ -719,6 +748,13 @@ impl std::fmt::Debug for SharedRaster {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SharedRaster").finish_non_exhaustive()
     }
+}
+
+/// A canvas's texture ([`super::canvas`]), and the one a draw that reads
+/// the canvas's own pixels renders into before the two change places.
+pub(crate) struct CanvasTexture {
+    pub(crate) texture: wgpu::Texture,
+    pub(crate) spare: Option<wgpu::Texture>,
 }
 
 /// A renderer and the resources it was created with, which `vello_gpu`
@@ -1092,7 +1128,7 @@ fn own_texture(
 /// What a write puts into a picture's texture: CPU pixels converted to
 /// premultiplied texels, or a platform frame its own writer copies.
 enum Content<'a, W> {
-    Texels { texels: Vec<u8>, opaque: bool },
+    Texels { texels: Cow<'a, [u8]>, opaque: bool },
     Frame(&'a W),
 }
 
@@ -1194,8 +1230,110 @@ impl SharedRaster {
                 resources,
             }),
             bitmaps: Mutex::new(Bitmaps::new(MAX_BITMAP_BYTES)),
+            canvases: Mutex::new(FxHashMap::default()),
             uploads: AtomicU64::new(0),
         }
+    }
+
+    /// Locks the canvas texture table.
+    pub(crate) fn canvases(&self) -> MutexGuard<'_, FxHashMap<u64, CanvasTexture>> {
+        self.canvases.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Ends every lease `owner` holds.
+    pub(crate) fn end_leases(&self, owner: u64) {
+        self.bitmaps().end_leases(owner);
+    }
+
+    /// Copies `source`, `width` × `height`, into `picture`'s own texture as
+    /// its frame `generation`, which `descriptor` names, and leases that
+    /// texture to `owner`; the copy is submitted before this returns. The
+    /// texture is rewritten in place under its one id when it is the size
+    /// of the last frame, and replaced under the same id when it is not, as
+    /// [`Self::write_picture`] does.
+    pub(crate) fn copy_to_picture(
+        &self,
+        gpu: &SharedGpu,
+        owner: u64,
+        picture: PictureId,
+        generation: u64,
+        descriptor: ImageDescriptor,
+        source: &wgpu::Texture,
+    ) {
+        let (width, height) = (descriptor.width, descriptor.height);
+        let key = BitmapKey::Picture(picture);
+        let held = self.bitmaps().entries.get(&key).map(|bitmap| {
+            let texture = bitmap.view.texture().clone();
+            (bitmap.id, texture)
+        });
+        let (id, texture, replaced) = match held {
+            Some((id, texture)) if (texture.width(), texture.height()) == (width, height) => {
+                (id, texture, false)
+            }
+            held => (
+                held.map_or_else(|| TextureId(next_texture_id()), |(id, _)| id),
+                bitmap_texture(&gpu.device, width, height, BITMAP_USAGE),
+                true,
+            ),
+        };
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("terminus canvas commit"),
+            });
+        encoder.copy_texture_to_texture(
+            source.as_image_copy(),
+            texture.as_image_copy(),
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        gpu.submit([encoder.finish()]);
+        let bytes = u64::from(width) * u64::from(height) * 4;
+        let mut bitmaps = self.bitmaps();
+        let Bitmaps {
+            entries,
+            bytes: total,
+            leases,
+            ..
+        } = &mut *bitmaps;
+        let written = Some((generation, descriptor));
+        if let Some(bitmap) = entries.get_mut(&key) {
+            if replaced {
+                bitmap.view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            }
+            *total = *total - bitmap.bytes + bytes;
+            bitmap.bytes = bytes;
+            bitmap.opaque = false;
+            bitmap.written = written;
+        } else {
+            *total += bytes;
+            entries.insert(
+                key,
+                Bitmap {
+                    id,
+                    view: texture.create_view(&wgpu::TextureViewDescriptor::default()),
+                    opaque: false,
+                    bytes,
+                    written,
+                    last_drawn: 0,
+                    pins: SmallVec::new(),
+                    leases: 0,
+                },
+            );
+        }
+        let held = leases.entry(owner).or_default();
+        if !held.contains(&key) {
+            held.push(key);
+            entries
+                .get_mut(&key)
+                .expect("the picture's texture was just written")
+                .leases += 1;
+        }
+        drop(bitmaps);
+        self.uploads.fetch_add(1, Ordering::Release);
     }
 
     /// Locks the renderer and its resources for one render's GPU half.
@@ -1258,7 +1396,6 @@ impl SharedRaster {
         }
         let pixels = image.pixels().ok_or(Missing::Lost)?;
         let (texels, opaque) = premultiplied(&pixels).ok_or(Missing::Unreadable)?;
-        drop(pixels);
         let (id, view) = own_texture(
             device,
             queue,
@@ -1267,6 +1404,9 @@ impl SharedRaster {
             descriptor.height,
             None,
         );
+        let bytes = texels.len() as u64;
+        drop(texels);
+        drop(pixels);
         let mut bitmaps = self.bitmaps();
         if let Some(image) = bitmaps.hit(&key, sampler, drawing) {
             return Ok(image);
@@ -1275,7 +1415,7 @@ impl SharedRaster {
             id,
             view,
             opaque,
-            bytes: texels.len() as u64,
+            bytes,
             written: None,
             last_drawn: 0,
             pins: SmallVec::new(),
@@ -1462,7 +1602,7 @@ impl SharedRaster {
     }
 
     /// The GPU half of a render on `gpu`, whose rasterizer this is: `scene`,
-    /// which a target has filled, drawn into `view` over `clear` with
+    /// which a target has filled, drawn into `view` as `init` says with
     /// `bindings` bound, under the renderer lock — the render and the submit
     /// — and then the releases.
     /// Notes the wait for the lock and the time it was held in `stats`.
@@ -1472,7 +1612,7 @@ impl SharedRaster {
         scene: &Scene,
         view: &wgpu::TextureView,
         bindings: &TextureBindings,
-        clear: Color,
+        init: TargetInit<'_>,
         stats: &mut Stats,
     ) -> Result<(), String> {
         let mut encoder = gpu
@@ -1489,9 +1629,7 @@ impl SharedRaster {
             resources,
         } = &mut *paired;
         let mut options = RenderOptions::default();
-        options.target_init = TargetInit::Clear(ClearSettings::Viewport {
-            color: clear.convert(),
-        });
+        options.target_init = init;
         let result = renderer.render(
             scene,
             resources,
@@ -1513,16 +1651,23 @@ impl SharedRaster {
 
 /// `image`'s pixels as premultiplied RGBA8, and whether every pixel is
 /// opaque; `None` when the blob holds fewer bytes than the image needs.
-fn premultiplied(image: &ImageData) -> Option<(Vec<u8>, bool)> {
+/// Pixels that already are premultiplied RGBA8 are borrowed, not copied.
+fn premultiplied(image: &ImageData) -> Option<(Cow<'_, [u8]>, bool)> {
     let bytes = image.data.data();
     let (width, height) = (image.width as usize, image.height as usize);
     let row = width * 4;
     if width == 0 || height == 0 || bytes.len() < row * height {
         return None;
     }
+    let bytes = &bytes[..row * height];
+    if image.format == ImageFormat::Rgba8 && image.alpha_type == ImageAlphaType::AlphaPremultiplied
+    {
+        let opaque = bytes.chunks_exact(4).all(|px| px[3] == 255);
+        return Some((Cow::Borrowed(bytes), opaque));
+    }
     let mut data = Vec::with_capacity(row * height);
     let mut opaque = true;
-    for px in bytes[..row * height].chunks_exact(4) {
+    for px in bytes.chunks_exact(4) {
         let [mut r, g, mut b, a] = [px[0], px[1], px[2], px[3]];
         if image.format == ImageFormat::Bgra8 {
             std::mem::swap(&mut r, &mut b);
@@ -1537,11 +1682,12 @@ fn premultiplied(image: &ImageData) -> Option<(Vec<u8>, bool)> {
         }
         data.extend_from_slice(&texel);
     }
-    Some((data, opaque))
+    Some((Cow::Owned(data), opaque))
 }
 
-/// The next target's name in the bitmaps' pins.
-fn next_target() -> u64 {
+/// The next target's name in the bitmaps' pins, and the next lease
+/// owner's.
+pub(crate) fn next_target() -> u64 {
     static NEXT: AtomicU64 = AtomicU64::new(1);
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
@@ -1599,6 +1745,26 @@ impl SparseBackend {
         height: u32,
         base_color: Color,
     ) -> Result<(), String> {
+        self.render_onto(
+            list,
+            view,
+            (width, height),
+            Some(base_color),
+            &FxHashMap::default(),
+        )
+    }
+
+    /// [`Self::render`], with the target cleared to `clear` first, or with
+    /// `None` kept and drawn over (`TargetInit::SrcOver`), and with
+    /// `sources` bound beside [`Self::bind`]'s textures for this render.
+    pub(crate) fn render_onto(
+        &mut self,
+        list: &DisplayList,
+        view: &wgpu::TextureView,
+        (width, height): (u32, u32),
+        clear: Option<Color>,
+        sources: &FxHashMap<u64, wgpu::TextureView>,
+    ) -> Result<(), String> {
         debug_assert_eq!(
             (view.texture().width(), view.texture().height()),
             (width, height),
@@ -1632,6 +1798,7 @@ impl SparseBackend {
         // colour is under the blend rather than in it: the base colour is
         // drawn as the scene's first fill instead, which over a transparent
         // clear composes to the same pixels the clear would have.
+        let base_color = clear.unwrap_or(Color::TRANSPARENT);
         let underlay = base_color.components[3] > 0.0 && list.blends_at_root();
         if underlay {
             scene.set_transform(Affine::IDENTITY);
@@ -1640,10 +1807,10 @@ impl SparseBackend {
             scene.reset_paint_transform();
             scene.fill_rect(&Rect::new(0.0, 0.0, f64::from(w), f64::from(h)));
         }
-        let clear = if underlay {
-            Color::TRANSPARENT
-        } else {
-            base_color
+        let init = match clear {
+            None => TargetInit::SrcOver,
+            Some(_) if underlay => clear_init(Color::TRANSPARENT),
+            Some(color) => clear_init(color),
         };
         textures.clear();
         let mut drawing = Drawing {
@@ -1660,12 +1827,12 @@ impl SparseBackend {
                 bitmap: &mut |paint| {
                     shared.bitmap(device, queue, &paint.image, paint.sampler, &mut drawing)
                 },
-                bound: &|id| bound.contains_key(&id),
+                bound: &|id| bound.contains_key(&id) || sources.contains_key(&id),
             },
         );
         kept.maintain();
         let mut bindings = TextureBindings::new();
-        for (&id, view) in bound.iter() {
+        for (&id, view) in bound.iter().chain(sources) {
             bindings.insert(TextureId(id), view.clone());
         }
         for (id, view) in drawing.textures.drain(..) {
@@ -1673,11 +1840,23 @@ impl SparseBackend {
         }
         stats.encode = started.elapsed();
 
-        let result = shared.render(gpu, scene, view, &bindings, clear, &mut stats);
+        let result = shared.render(gpu, scene, view, &bindings, init, &mut stats);
         *lost += u64::from(stats.images_lost);
         *last = stats;
         result
     }
+
+    /// The stack this rasterizer renders on.
+    pub(crate) fn gpu(&self) -> &Arc<SharedGpu> {
+        &self.gpu
+    }
+}
+
+/// A target cleared to `color` before the render.
+fn clear_init(color: Color) -> TargetInit<'static> {
+    TargetInit::Clear(ClearSettings::Viewport {
+        color: color.convert(),
+    })
 }
 
 impl Drop for SparseBackend {

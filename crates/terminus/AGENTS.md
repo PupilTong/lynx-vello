@@ -55,7 +55,20 @@ Subsystems:
   the source order that keeps HTML's precedence. A dialog's `close` and
   `cancel` go, at the moment they are queued, to the document's
   `event::QueuedEventSink` (`Document::set_queued_event_sink`, registered
-  once by the embedder; with none they are dropped).
+  once by the embedder; with none they are dropped). `html::canvas` is HTML's
+  `<canvas>` as an `OffscreenCanvas` placeholder, with no UA rule: each
+  element owns one `PictureId` and a context mode (`none` or `placeholder`;
+  no `getContext`) in `Document::canvases`, shared with its component; in
+  `none` its natural size is `width`/`height` (HTML's non-negative integer
+  rules, 300 × 150 by default); `transfer_control_to_offscreen` (an
+  `InvalidState` unless `none`) answers the size and a `Send`
+  `CanvasFrames`, through which a canvas surface commits
+  (`render::canvas::Surface::commit`): its texture is copied into the
+  picture's own texture, which the element's link leases until it is freed,
+  before the generation is published; the commit answers whether a host
+  wake and an `update_placeholders` call on the document's thread are owed;
+  a placeholder ignores its attributes and takes its natural size from the
+  committed bitmaps there.
 - `style/` — the per-document `StyleEngine` (`Stylist`, cascade pipeline,
   device, stylesheet set, the document's own `SharedRwLock` for its author
   sheets and inline styles, and the one process-wide lock every user-agent
@@ -224,7 +237,16 @@ Subsystems:
   table, while still naming no node, style, layout or paint-order type. A
   `backdrop-filter` bake at the document's root renders over the canvas
   colour its caller composites over, which `FilterTextures::prepare` and
-  `Headless::prepare_filters` therefore take.
+  `Headless::prepare_filters` therefore take. `render::canvas` is a canvas
+  bitmap as a GPU texture (`Surface`, `SurfaceImage`, for `bobcat-canvas`):
+  display lists replayed onto it (with load, with a clear, or into its
+  second texture over its own content, `Init::Backdrop`, for a batch that
+  blends at the root or samples the canvas itself), pixel writes, readbacks,
+  copies, and commits to a placeholder. Natively the owning thread applies
+  each step; on wasm32 the steps queue for the Render Worker, which applies
+  them at the start of each turn (`drain`, from `bobcat-core`'s
+  `Painter::pump`) once woken (`set_waker`, from `LynxViewGroup::new`).
+  `docs/terminus-architecture.md` "Canvas surfaces" has the detail.
 - `painter/` — the presenting painter (`link::painter::Painter`), built on the
   thread that draws and `!Send`: the input router and gesture synthesis on an
   owner's `GesturePolicy` (`gesture.rs`), the scroll kinematics (`motion.rs`)

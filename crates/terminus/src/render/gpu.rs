@@ -119,6 +119,11 @@ fn with_shared_slot<R>(f: impl FnOnce(&mut Weak<SharedGpu>) -> R) -> R {
     }
 }
 
+/// The live stack of this process (natively) or thread (wasm32), if any.
+pub(crate) fn live() -> Option<Arc<SharedGpu>> {
+    with_shared_slot(|slot| slot.upgrade())
+}
+
 /// The stack `slot` holds if it is live, else one `make` builds, which
 /// `slot` then holds.
 #[cfg_attr(

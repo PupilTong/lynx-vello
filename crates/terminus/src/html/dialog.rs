@@ -231,8 +231,7 @@ impl<T> CustomElement<T> for Dialog {
 
 /// HTML's `InvalidStateError`: `show()` on a modal dialog, `showModal()` on
 /// an open non-modal or a disconnected one.
-#[derive(Debug, PartialEq, Eq)]
-pub struct InvalidState;
+pub use super::InvalidState;
 
 /// HTML's `show()`.
 pub fn show<T>(document: &mut Document<T>, dialog: NodeId) -> Result<(), InvalidState> {

@@ -18,6 +18,7 @@ hmac = "0.13.0"
 sha2 = "0.11.1"
 uuid = { version = "1.28.0", features = ["v4"] }
 ve-tos-rust-sdk = { version = "2.9.20", features = ["tokio-runtime"] }
+bobcat-canvas = { path = "crates/bobcat-canvas" }
 bobcat-core = { path = "crates/bobcat-core" }
 bobcat-resources = { path = "crates/bobcat-resources" }
 bobcat-source = { path = "crates/bobcat-source" }
@@ -111,7 +112,8 @@ web-sys = "0.3"
 winit = { version = "0.30.13", default-features = false, features = ["rwh_06"] }
 
 # terminus's rasterizer: sparse strips on vello_gpu's wgpu backend
-# (`crates/terminus/src/render/raster.rs`). Its `kurbo` and `peniko`
+# (`crates/terminus/src/render/raster.rs`), which also replays
+# `bobcat-canvas`'s recorded canvases (`render/canvas.rs`). Its `kurbo` and `peniko`
 # re-exports are the geometry and paint types the whole crate draws in.
 # Without its defaults vello_gpu compiles every optional paint out of its
 # shaders and panics when a scene draws one, so the paints terminus records
@@ -127,6 +129,9 @@ vello_gpu = { version = "0.4", default-features = false, features = [
     "gradient_sweep",
 ] }
 glifo = { version = "0.5", default-features = false }
+# Glyph outlines for `bobcat-canvas`'s `measureText` ink bounds; the version
+# parley and glifo already read fonts with.
+skrifa = { version = "0.49", default-features = false, features = ["std"] }
 # The `peniko` image data `vant` decodes bitmaps into, without a vello_gpu
 # dependency.
 vello_common = { version = "0.4", default-features = false }

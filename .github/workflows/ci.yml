@@ -248,6 +248,7 @@ jobs:
           -p seldon
           -p bobcat-source
           -p quickjs-rust-bridge
+          -p bobcat-canvas
           -- -D warnings
 
       - name: Install wasm-pack

@@ -592,6 +592,20 @@ impl TextContext {
         }
     }
 
+    /// This context's fonts, for a caller that shapes `text` with parley
+    /// itself in `family` at `attributes` (a canvas's `fillText`): the
+    /// fallback lists a missing character needs are filled first, as
+    /// before a shaping here ([`Self::cover`]).
+    pub fn fonts_for(
+        &mut self,
+        text: &str,
+        family: &FontFamily<'_>,
+        attributes: Attributes,
+    ) -> &mut FontContext {
+        self.cover(text, [(0..text.len(), family, attributes)]);
+        &mut self.font
+    }
+
     /// The language [`Self::set_locale`] set, as parley takes it.
     #[must_use]
     pub fn locale(&self) -> Option<Language> {

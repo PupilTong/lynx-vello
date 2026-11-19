@@ -23,7 +23,8 @@ pub use wgpu;
 pub use crate::layout::TextLineReport;
 pub use crate::paint::compose::FilterGroup;
 pub use crate::paint::display_list::{
-    DisplayList, DrawGlyphs, Embolden, Glyph, ImagePixels, ImageRef, NormalizedCoord, Texture,
+    DisplayList, DrawGlyphs, Embolden, Glyph, ImagePixels, ImageRef, ListPaint, NormalizedCoord,
+    Texture,
 };
 pub use crate::render::image::{
     DocumentKind, DocumentRequest, FrameImage, FrameImages, ImageDescriptor, ImageEvent,
@@ -166,6 +167,22 @@ pub mod render {
         pub use crate::render::blur::MAX_FILTER_AREA;
     }
 
+    /// Canvas bitmaps as GPU textures: a
+    /// [`Surface`](crate::link::render::canvas::Surface) replays the
+    /// display lists its owner records onto its texture, writes, reads,
+    /// copies and commits it to a placeholder `<canvas>`. Natively its owner's
+    /// thread applies each step; on wasm32 the steps are queued for the Render
+    /// Worker, which applies them at the start of each turn
+    /// ([`drain`](crate::link::render::canvas::drain)) once woken
+    /// ([`set_waker`](crate::link::render::canvas::set_waker)).
+    pub mod canvas {
+        pub use crate::render::canvas::{
+            Init, MAX_SURFACE_SIDE, PendingRead, Surface, SurfaceError, SurfaceImage,
+        };
+        #[cfg(target_arch = "wasm32")]
+        pub use crate::render::canvas::{drain, set_waker};
+    }
+
     /// The CPU half of a render — a display list replayed into sparse
     /// strips — for this crate's benchmarks.
     #[doc(hidden)]
@@ -193,7 +210,8 @@ pub mod scroll {
 }
 
 /// HTML elements this crate implements over its own tree: HTML's `<dialog>`
-/// element and the `popover` attribute's UA rules.
+/// element, the `popover` attribute's UA rules, and HTML's `<canvas>` as the
+/// placeholder of an `OffscreenCanvas`.
 ///
 /// Neither is part of a document by itself. `Document::new` defines no
 /// element, so an embedder that wants them calls
@@ -247,6 +265,24 @@ pub mod html {
     /// The UA rules HTML gives the `popover` attribute.
     pub mod popover {
         pub use crate::html::popover::UA_RULES;
+    }
+
+    /// HTML's `<canvas>` element as the placeholder of an `OffscreenCanvas`:
+    /// a replaced element presenting a picture of its own, with the natural
+    /// size of its `width` and `height` attributes in context mode none and
+    /// of its committed bitmap in mode placeholder.
+    /// [`transfer_control_to_offscreen`](crate::link::html::canvas::transfer_control_to_offscreen)
+    /// is HTML's `transferControlToOffscreen()`, and answers the
+    /// [`CanvasFrames`](crate::link::html::canvas::CanvasFrames) a canvas
+    /// surface on any thread commits through
+    /// ([`Surface::commit`](crate::link::render::canvas::Surface::commit));
+    /// [`update_placeholders`](crate::link::html::canvas::update_placeholders)
+    /// applies a committed bitmap's size on the document's thread.
+    pub mod canvas {
+        pub use crate::html::canvas::{
+            CANVAS_TAG, CanvasFrames, Committed, ContextMode, InvalidState, Placeholder,
+            context_mode, transfer_control_to_offscreen, update_placeholders,
+        };
     }
 }
 

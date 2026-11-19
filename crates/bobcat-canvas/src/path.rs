@@ -1,0 +1,546 @@
+//! The path builder shared by `Path2D` and the context's current default
+//! path (HTML "Building paths").
+//!
+//! Every builder step takes the transform its points go through before they
+//! are stored: the identity for a `Path2D`, the current transformation
+//! matrix for the default path, which the standard keeps in canvas space.
+
+use std::f64::consts::TAU;
+
+use terminus::link::kurbo::{self, Affine, BezPath, PathEl, Point, Vec2};
+
+use crate::CanvasError;
+
+/// A `Path2D`: subpaths of lines and curves in its own coordinates.
+#[derive(Clone, Debug, Default)]
+pub struct Path {
+    pub(crate) elements: BezPath,
+    /// The last point.
+    current: Point,
+    /// The first point of the last subpath.
+    start: Point,
+    /// The last subpath holds only `current`, which no element records yet:
+    /// the next segment starts with a move to it.
+    pending: bool,
+}
+
+/// Arc flattening tolerance, in user units at scale 1.
+const ARC_TOLERANCE: f64 = 1e-3;
+
+impl Path {
+    /// An empty path.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// `new Path2D(d)`: the SVG path data `d`. Data with a syntax error
+    /// gives an empty path.
+    #[must_use]
+    pub fn from_svg(data: &str) -> Self {
+        let Ok(elements) = BezPath::from_svg(data) else {
+            return Self::new();
+        };
+        let mut path = Self::new();
+        for element in elements {
+            match element {
+                PathEl::MoveTo(p) => path.move_to_point(p),
+                PathEl::LineTo(p) => path.line_to_point(p),
+                PathEl::QuadTo(c, p) => path.quad_to_points(c, p),
+                PathEl::CurveTo(c1, c2, p) => path.cubic_to_points(c1, c2, p),
+                PathEl::ClosePath => path.close_path(),
+            }
+        }
+        path
+    }
+
+    /// `addPath(path, transform)`, the transform as `[a, b, c, d, e, f]`.
+    /// A non-finite transform adds nothing.
+    pub fn add_path(&mut self, path: &Self, transform: [f64; 6]) {
+        if !transform.iter().all(|value| value.is_finite()) || !path.has_subpaths() {
+            return;
+        }
+        let transform = Affine::new(transform);
+        for element in &path.elements {
+            let element = transform * element;
+            if let PathEl::MoveTo(p) = element {
+                self.elements.push(PathEl::MoveTo(p));
+            } else {
+                if self.pending {
+                    self.elements.push(PathEl::MoveTo(self.current));
+                }
+                self.elements.push(element);
+            }
+            self.pending = false;
+        }
+        // "Create a new subpath in a with (x, y) as the only point", where
+        // (x, y) is the last point of the added path's last subpath.
+        let last = transform * path.current;
+        self.current = last;
+        self.start = last;
+        self.pending = true;
+    }
+
+    pub(crate) fn has_subpaths(&self) -> bool {
+        self.pending || !self.elements.is_empty()
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.elements.truncate(0);
+        self.pending = false;
+    }
+
+    /// The path with every subpath closed, for a point-in-fill test.
+    pub(crate) fn closed(&self) -> BezPath {
+        let mut closed = BezPath::new();
+        let mut open = false;
+        for element in &self.elements {
+            match element {
+                PathEl::MoveTo(_) if open => closed.push(PathEl::ClosePath),
+                PathEl::ClosePath => open = false,
+                _ => open = true,
+            }
+            closed.push(element);
+        }
+        if open {
+            closed.push(PathEl::ClosePath);
+        }
+        closed
+    }
+
+    fn begin_segment(&mut self) {
+        if self.pending {
+            self.elements.push(PathEl::MoveTo(self.current));
+            self.pending = false;
+        }
+    }
+
+    /// HTML "ensure there is a subpath" for `p`.
+    fn ensure_subpath(&mut self, p: Point) {
+        if !self.has_subpaths() {
+            self.move_to_point(p);
+        }
+    }
+
+    fn move_to_point(&mut self, p: Point) {
+        self.current = p;
+        self.start = p;
+        self.pending = true;
+    }
+
+    fn line_to_point(&mut self, p: Point) {
+        if !self.has_subpaths() {
+            self.move_to_point(p);
+            return;
+        }
+        self.begin_segment();
+        self.elements.push(PathEl::LineTo(p));
+        self.current = p;
+    }
+
+    fn quad_to_points(&mut self, c: Point, p: Point) {
+        self.ensure_subpath(c);
+        self.begin_segment();
+        self.elements.push(PathEl::QuadTo(c, p));
+        self.current = p;
+    }
+
+    fn cubic_to_points(&mut self, c1: Point, c2: Point, p: Point) {
+        self.ensure_subpath(c1);
+        self.begin_segment();
+        self.elements.push(PathEl::CurveTo(c1, c2, p));
+        self.current = p;
+    }
+
+    /// `closePath`.
+    pub fn close_path(&mut self) {
+        if !self.has_subpaths() {
+            return;
+        }
+        if !self.pending {
+            self.elements.push(PathEl::ClosePath);
+        }
+        self.current = self.start;
+        self.pending = true;
+    }
+
+    pub(crate) fn move_to_with(&mut self, t: Affine, x: f64, y: f64) {
+        if x.is_finite() && y.is_finite() {
+            self.move_to_point(t * Point::new(x, y));
+        }
+    }
+
+    pub(crate) fn line_to_with(&mut self, t: Affine, x: f64, y: f64) {
+        if x.is_finite() && y.is_finite() {
+            self.line_to_point(t * Point::new(x, y));
+        }
+    }
+
+    pub(crate) fn quadratic_curve_to_with(&mut self, t: Affine, c: [f64; 2], p: [f64; 2]) {
+        if c.iter().chain(&p).all(|v| v.is_finite()) {
+            self.quad_to_points(t * pt(c), t * pt(p));
+        }
+    }
+
+    pub(crate) fn bezier_curve_to_with(
+        &mut self,
+        t: Affine,
+        c1: [f64; 2],
+        c2: [f64; 2],
+        p: [f64; 2],
+    ) {
+        if c1.iter().chain(&c2).chain(&p).all(|v| v.is_finite()) {
+            self.cubic_to_points(t * pt(c1), t * pt(c2), t * pt(p));
+        }
+    }
+
+    pub(crate) fn rect_with(&mut self, t: Affine, x: f64, y: f64, w: f64, h: f64) {
+        if ![x, y, w, h].iter().all(|v| v.is_finite()) {
+            return;
+        }
+        let corner = |dx, dy| t * Point::new(x + dx, y + dy);
+        self.move_to_point(corner(0.0, 0.0));
+        self.line_to_point(corner(w, 0.0));
+        self.line_to_point(corner(w, h));
+        self.line_to_point(corner(0.0, h));
+        self.close_path();
+    }
+
+    /// `ellipse`, which `arc` is with equal radii.
+    #[expect(clippy::too_many_arguments, reason = "the IDL method's arguments")]
+    pub(crate) fn ellipse_with(
+        &mut self,
+        t: Affine,
+        x: f64,
+        y: f64,
+        rx: f64,
+        ry: f64,
+        rotation: f64,
+        start: f64,
+        end: f64,
+        anticlockwise: bool,
+    ) -> Result<(), CanvasError> {
+        if ![x, y, rx, ry, rotation, start, end]
+            .iter()
+            .all(|v| v.is_finite())
+        {
+            return Ok(());
+        }
+        if rx < 0.0 || ry < 0.0 {
+            return Err(CanvasError::IndexSize);
+        }
+        // HTML "ellipse": a sweep of 2π or more the given way is the whole
+        // ellipse; otherwise the arc runs from start to end the given way,
+        // never more than one turn.
+        let sweep = if anticlockwise {
+            if start - end >= TAU {
+                -TAU
+            } else {
+                -(start - end).rem_euclid(TAU)
+            }
+        } else if end - start >= TAU {
+            TAU
+        } else {
+            (end - start).rem_euclid(TAU)
+        };
+        let arc = kurbo::Arc::new((x, y), (rx, ry), start, sweep, rotation);
+        self.append_arc(t, &arc);
+        Ok(())
+    }
+
+    /// Adds a line from the last point to `arc`'s start (or starts a
+    /// subpath there), then the arc.
+    fn append_arc(&mut self, t: Affine, arc: &kurbo::Arc) {
+        let start = t * arc_point(arc, arc.start_angle);
+        if self.has_subpaths() {
+            self.line_to_point(start);
+        } else {
+            self.move_to_point(start);
+        }
+        let tolerance = ARC_TOLERANCE / scale_of(t).max(f64::MIN_POSITIVE);
+        for element in arc.append_iter(tolerance) {
+            if let PathEl::CurveTo(c1, c2, p) = element {
+                self.cubic_to_points(t * c1, t * c2, t * p);
+            }
+        }
+    }
+
+    /// `arcTo`. `t` maps user space to storage space; the last point is
+    /// taken back to user space through its inverse.
+    pub(crate) fn arc_to_with(
+        &mut self,
+        t: Affine,
+        p1: [f64; 2],
+        p2: [f64; 2],
+        radius: f64,
+    ) -> Result<(), CanvasError> {
+        if !p1.iter().chain(&p2).chain([&radius]).all(|v| v.is_finite()) {
+            return Ok(());
+        }
+        let (p1, p2) = (pt(p1), pt(p2));
+        self.ensure_subpath(t * p1);
+        if radius < 0.0 {
+            return Err(CanvasError::IndexSize);
+        }
+        if t.determinant() == 0.0 {
+            self.line_to_point(t * p1);
+            return Ok(());
+        }
+        let p0 = t.inverse() * self.current;
+        let (d0, d2) = (p0 - p1, p2 - p1);
+        if p0 == p1 || p1 == p2 || radius == 0.0 || d0.cross(d2) == 0.0 {
+            self.line_to_point(t * p1);
+            return Ok(());
+        }
+        // The circle of `radius` tangent to both rays from p1 has its center
+        // on their bisector.
+        let (u0, u2) = (d0.normalize(), d2.normalize());
+        let half = u0.dot(u2).clamp(-1.0, 1.0).acos() / 2.0;
+        let along = radius / half.tan();
+        let center = p1 + (u0 + u2).normalize() * (radius / half.sin());
+        let t0 = p1 + u0 * along;
+        let t2 = p1 + u2 * along;
+        let a0 = (t0 - center).atan2();
+        let a2 = (t2 - center).atan2();
+        // The shorter way round.
+        let sweep = (a2 - a0 + std::f64::consts::PI).rem_euclid(TAU) - std::f64::consts::PI;
+        let arc = kurbo::Arc::new(center, (radius, radius), a0, sweep, 0.0);
+        self.append_arc(t, &arc);
+        Ok(())
+    }
+
+    /// `roundRect`, each radius as `[x, y]` (a number `r` is `[r, r]`).
+    pub(crate) fn round_rect_with(
+        &mut self,
+        t: Affine,
+        x: f64,
+        y: f64,
+        w: f64,
+        h: f64,
+        radii: &[[f64; 2]],
+    ) -> Result<(), CanvasError> {
+        if ![x, y, w, h].iter().all(|v| v.is_finite()) {
+            return Ok(());
+        }
+        if !(1..=4).contains(&radii.len()) {
+            return Err(CanvasError::Range);
+        }
+        if !radii.iter().flatten().all(|v| v.is_finite()) {
+            return Ok(());
+        }
+        if radii.iter().flatten().any(|v| *v < 0.0) {
+            return Err(CanvasError::Range);
+        }
+        let r = |i: usize| Vec2::new(radii[i][0], radii[i][1]);
+        // CSS border-radius order.
+        let [mut ul, mut ur, mut lr, mut ll] = match radii.len() {
+            4 => [r(0), r(1), r(2), r(3)],
+            3 => [r(0), r(1), r(2), r(1)],
+            2 => [r(0), r(1), r(0), r(1)],
+            _ => [r(0); 4],
+        };
+        // Scale every radius down by one factor so no two corner curves on
+        // an edge overlap.
+        let (aw, ah) = (w.abs(), h.abs());
+        let scale = [
+            aw / (ul.x + ur.x),
+            ah / (ur.y + lr.y),
+            aw / (lr.x + ll.x),
+            ah / (ul.y + ll.y),
+        ]
+        .into_iter()
+        .fold(1.0_f64, f64::min);
+        if scale < 1.0 {
+            for corner in [&mut ul, &mut ur, &mut lr, &mut ll] {
+                *corner *= scale;
+            }
+        }
+        // A negative width or height mirrors the rectangle: build it with
+        // positive extents and reflect it across its center.
+        let mut flip = Affine::IDENTITY;
+        let (mut x0, mut y0) = (x, y);
+        if w < 0.0 {
+            x0 = x + w;
+            flip = Affine::new([-1.0, 0.0, 0.0, 1.0, 2.0 * x0 + aw, 0.0]) * flip;
+        }
+        if h < 0.0 {
+            y0 = y + h;
+            flip = Affine::new([1.0, 0.0, 0.0, -1.0, 0.0, 2.0 * y0 + ah]) * flip;
+        }
+        let tf = t * flip;
+        let at = |px: f64, py: f64| tf * Point::new(px, py);
+        let (x1, y1) = (x0 + aw, y0 + ah);
+        let corner = |path: &mut Self, center: Point, radii: Vec2, from: f64| {
+            let arc = kurbo::Arc::new(center, radii, from, TAU / 4.0, 0.0);
+            let tolerance = ARC_TOLERANCE / scale_of(tf).max(f64::MIN_POSITIVE);
+            for element in arc.append_iter(tolerance) {
+                if let PathEl::CurveTo(c1, c2, p) = element {
+                    path.cubic_to_points(tf * c1, tf * c2, tf * p);
+                }
+            }
+        };
+        self.move_to_point(at(x0 + ul.x, y0));
+        self.line_to_point(at(x1 - ur.x, y0));
+        corner(self, Point::new(x1 - ur.x, y0 + ur.y), ur, -TAU / 4.0);
+        self.line_to_point(at(x1, y1 - lr.y));
+        corner(self, Point::new(x1 - lr.x, y1 - lr.y), lr, 0.0);
+        self.line_to_point(at(x0 + ll.x, y1));
+        corner(self, Point::new(x0 + ll.x, y1 - ll.y), ll, TAU / 4.0);
+        self.line_to_point(at(x0, y0 + ul.y));
+        corner(self, Point::new(x0 + ul.x, y0 + ul.y), ul, TAU / 2.0);
+        self.close_path();
+        self.move_to_point(t * Point::new(x, y));
+        Ok(())
+    }
+}
+
+/// The point at `angle` on `arc`'s ellipse.
+fn arc_point(arc: &kurbo::Arc, angle: f64) -> Point {
+    let (sin, cos) = angle.sin_cos();
+    let local = Vec2::new(arc.radii.x * cos, arc.radii.y * sin);
+    arc.center + (Affine::rotate(arc.x_rotation) * local.to_point()).to_vec2()
+}
+
+fn pt(p: [f64; 2]) -> Point {
+    Point::new(p[0], p[1])
+}
+
+/// The larger factor `t` stretches a unit vector by, roughly.
+fn scale_of(t: Affine) -> f64 {
+    let [a, b, c, d, _, _] = t.as_coeffs();
+    (a * a + b * b).max(c * c + d * d).sqrt()
+}
+
+macro_rules! builder_methods {
+    ($ty:ty, $transform:expr, $path:ident) => {
+        impl $ty {
+            /// `moveTo`.
+            pub fn move_to(&mut self, x: f64, y: f64) {
+                let t = ($transform)(&*self);
+                self.$path().move_to_with(t, x, y);
+            }
+
+            /// `lineTo`.
+            pub fn line_to(&mut self, x: f64, y: f64) {
+                let t = ($transform)(&*self);
+                self.$path().line_to_with(t, x, y);
+            }
+
+            /// `quadraticCurveTo`.
+            pub fn quadratic_curve_to(&mut self, cpx: f64, cpy: f64, x: f64, y: f64) {
+                let t = ($transform)(&*self);
+                self.$path().quadratic_curve_to_with(t, [cpx, cpy], [x, y]);
+            }
+
+            /// `bezierCurveTo`.
+            pub fn bezier_curve_to(
+                &mut self,
+                cp1x: f64,
+                cp1y: f64,
+                cp2x: f64,
+                cp2y: f64,
+                x: f64,
+                y: f64,
+            ) {
+                let t = ($transform)(&*self);
+                self.$path()
+                    .bezier_curve_to_with(t, [cp1x, cp1y], [cp2x, cp2y], [x, y]);
+            }
+
+            /// `arc`. `IndexSize` for a negative radius.
+            pub fn arc(
+                &mut self,
+                x: f64,
+                y: f64,
+                radius: f64,
+                start_angle: f64,
+                end_angle: f64,
+                anticlockwise: bool,
+            ) -> Result<(), CanvasError> {
+                let t = ($transform)(&*self);
+                self.$path().ellipse_with(
+                    t,
+                    x,
+                    y,
+                    radius,
+                    radius,
+                    0.0,
+                    start_angle,
+                    end_angle,
+                    anticlockwise,
+                )
+            }
+
+            /// `arcTo`. `IndexSize` for a negative radius.
+            pub fn arc_to(
+                &mut self,
+                x1: f64,
+                y1: f64,
+                x2: f64,
+                y2: f64,
+                radius: f64,
+            ) -> Result<(), CanvasError> {
+                let t = ($transform)(&*self);
+                self.$path().arc_to_with(t, [x1, y1], [x2, y2], radius)
+            }
+
+            /// `ellipse`. `IndexSize` for a negative radius.
+            #[expect(clippy::too_many_arguments, reason = "the IDL method's arguments")]
+            pub fn ellipse(
+                &mut self,
+                x: f64,
+                y: f64,
+                radius_x: f64,
+                radius_y: f64,
+                rotation: f64,
+                start_angle: f64,
+                end_angle: f64,
+                anticlockwise: bool,
+            ) -> Result<(), CanvasError> {
+                let t = ($transform)(&*self);
+                self.$path().ellipse_with(
+                    t,
+                    x,
+                    y,
+                    radius_x,
+                    radius_y,
+                    rotation,
+                    start_angle,
+                    end_angle,
+                    anticlockwise,
+                )
+            }
+
+            /// `rect`.
+            pub fn rect(&mut self, x: f64, y: f64, w: f64, h: f64) {
+                let t = ($transform)(&*self);
+                self.$path().rect_with(t, x, y, w, h);
+            }
+
+            /// `roundRect`, each radius as `[x, y]`: a number `r` is
+            /// `[r, r]`, a `DOMPointInit` is `[x, y]`. `Range` for a list
+            /// of other than one to four radii or a negative radius.
+            pub fn round_rect(
+                &mut self,
+                x: f64,
+                y: f64,
+                w: f64,
+                h: f64,
+                radii: &[[f64; 2]],
+            ) -> Result<(), CanvasError> {
+                let t = ($transform)(&*self);
+                self.$path().round_rect_with(t, x, y, w, h, radii)
+            }
+        }
+    };
+}
+
+pub(crate) use builder_methods;
+
+impl Path {
+    fn own(&mut self) -> &mut Self {
+        self
+    }
+}
+
+builder_methods!(Path, |_: &Path| Affine::IDENTITY, own);
