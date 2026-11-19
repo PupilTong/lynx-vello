@@ -941,6 +941,7 @@ impl LynxGroup {
         // anywhere later would already be behind them. It needs no document —
         // fonts and the default family are a `terminus::link::TextContext`'s business,
         // and a document only ever adopts a finished one.
+        let worker_fonts = Arc::new(WorkerFonts::of(&sources));
         let default_font_family = sources.default_font_family.take();
         let text_context = stage_text_context(
             std::mem::take(&mut sources.fonts),
@@ -1012,6 +1013,7 @@ impl LynxGroup {
                 // fonts, the sheets and the entry were spent above.
                 sources,
                 text_context,
+                worker_fonts,
                 startup: StartupSources { sheets, entry },
                 native_modules: crate::native_module::encode_table(&table),
                 native_esms: Arc::new(native_esms),
@@ -1838,6 +1840,8 @@ pub(crate) struct ViewAttachment {
     /// This view's fonts, default family and locale, already registered and
     /// validated on the embedder's thread.
     pub(crate) text_context: terminus::link::TextContext,
+    /// The same fonts, family and locale, for the view's worker realms.
+    pub(crate) worker_fonts: Arc<WorkerFonts>,
     /// The answers to the requests `create_lynx_view` already made.
     pub(crate) startup: StartupSources,
     /// The embedder's native modules as the BTS realm hears about them: one
@@ -2025,6 +2029,43 @@ pub(crate) fn stage_text_context(
         return Err(EngineError::InvalidLocale(locale.to_owned()).into());
     }
     Ok(text)
+}
+
+/// A view's [`ViewSources::fonts`], [`ViewSources::default_font_family`],
+/// [`ViewSources::fallback_fonts`] and [`ViewSources::locale`], which a
+/// worker realm of the view shapes its canvas text with: the host's fonts,
+/// and on wasm32, which has no system fonts, the only ones there are. Not
+/// the document's `@font-face` faces.
+#[derive(Debug, Default)]
+pub(crate) struct WorkerFonts {
+    fonts: Vec<FontBlob>,
+    default_font_family: Option<String>,
+    fallback_fonts: Vec<FontBlob>,
+    locale: String,
+}
+
+impl WorkerFonts {
+    fn of(sources: &ViewSources) -> Self {
+        Self {
+            fonts: sources.fonts.clone(),
+            default_font_family: sources.default_font_family.clone(),
+            fallback_fonts: sources.fallback_fonts.clone(),
+            locale: sources.locale.clone(),
+        }
+    }
+
+    /// A text context over these fonts and the system's. The view staged
+    /// the same set once already, so only the default value, which no view
+    /// holds, takes the fallback: the system fonts alone.
+    pub(crate) fn text_context(&self) -> terminus::link::TextContext {
+        stage_text_context(
+            self.fonts.clone(),
+            self.default_font_family.as_deref(),
+            self.fallback_fonts.clone(),
+            &self.locale,
+        )
+        .unwrap_or_default()
+    }
 }
 
 #[cfg(test)]

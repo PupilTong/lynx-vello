@@ -642,6 +642,7 @@ The one check that draws the browser build in a browser is a local command:
 
 ```sh
 pnpm --filter bobcat-wasm build
+pnpm --filter reactlynx-test-fixtures build
 node crates/bobcat-wasm/scripts/render-check.ts
 ```
 
@@ -666,7 +667,26 @@ of its colours. A fifth cell is a muted, looping `<video>` of
 `crates/bobcat-resources/tests/fixtures/video/rgb.mp4` (red, green, blue,
 0.4 s each, H.264 tagged BT.709), which the card plays as it renders; a
 muted play needs no gesture. Once its first frame is drawn every screenshot
-of the cell is one of the clip's three colours, and all three are seen. `--repeat <n>` runs it that many times, each in a fresh
+of the cell is one of the clip's three colours, and all three are seen.
+
+The same browser then loads the compiled ReactLynx card `react-canvas`
+(`packages/reactlynx-test-fixtures/src/react-canvas`) with `loadTemplate`,
+after registering `crates/seldon/tests/fixtures/Roboto-Regular.ttf` as the
+canvas's font and default family: the browser gives the engine no system
+fonts. Its main thread transfers its `<canvas>` to an `OffscreenCanvas` and
+posts it to the background thread, whose draws are queued for the Render
+Worker and replayed there. The check asserts that the first draw shows
+(red, green from `multiply` over yellow, magenta with a `clearRect` hole the
+page shows through, and text), that the background thread's
+`getImageData` of it, which blocks that thread's Worker on the Render
+Worker's readback, answers the same pixels (the card logs them and the
+check reads the console), and that a tap's `setTimeout` draw, a tap's
+`lynx.requestAnimationFrame` draw and a tap's resize to 80 by 100, which the
+placeholder's box follows, each show. Each step is waited for, up to 30 s,
+rather than timed. Not covered: other browsers, a lost device, and a page
+torn down while a read waits.
+
+`--repeat <n>` runs it that many times, each in a fresh
 browser, and fails if any run does; a failed run prints the console of the
 page and of every Worker it started (`--console` prints it always), which is
 where the resource system's notes go. `--package <dir>` serves another

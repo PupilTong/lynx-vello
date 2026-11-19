@@ -3883,6 +3883,37 @@ consequential choice about whether to follow the spec or the quirk.
   "Transfer lists"); `dispatchEvent` takes none. A transfer is made through
   `postMessage` only: a background `SelectorQuery.invoke` of
   `transferControlToOffscreen` answers code 3, as before.
+- **Canvas 2D departs from HTML in these places** (2026-11-19;
+  `crates/bobcat-core/docs/canvas.md`, `crates/bobcat-canvas/AGENTS.md`).
+  Neither native Lynx nor web-core defines a canvas API of its own, so the
+  reference is the HTML Standard alone.
+  - *A bitmap side is at most 8,192 px* (`MAX_SURFACE_SIDE`, the texture
+    limit every GPU device is created with). A larger `OffscreenCanvas`
+    has no bitmap: draws do nothing, `getImageData` answers transparent
+    black, and as an image source it is `InvalidStateError`; a
+    placeholder keeps its last committed picture and size.
+  - *`getContext('2d', options)` reads none of `options`*: `alpha: false`
+    leaves the bitmap's alpha as drawn, and `willReadFrequently` changes
+    nothing.
+  - *`ImageBitmap` is transferable and not serializable*: posted without
+    being in the transfer list it throws `DataCloneError`, where HTML
+    copies its pixels.
+  - *Colors the stylo fork's `lynx` grammar leaves out are refused*:
+    `color-mix()`, `light-dark()`, `contrast-color()` and the system colors
+    (which need a device) leave `fillStyle`, `strokeStyle` and
+    `shadowColor` unchanged, as an unparsable color does.
+  - *Relative font sizes are approximated*: `em`, `%` and the keywords
+    resolve against 10px as HTML says for an `OffscreenCanvas`, but `ex`
+    and `ch` take half of it and `lh` 1.2 times it rather than the default
+    font's metrics; viewport and container units, `rpx` and a `calc()` of
+    a relative length are refused.
+  - *A shadow under a composite operation other than `source-over` with two
+    or more clip paths* is cast by the shape cut to every clip path but the
+    innermost.
+  - *A second `transferControlToOffscreen` answers code 7*
+    (`__InvokeUIMethod`, `MainThread.Element.invoke`): the code this
+    engine's `InvalidStateError` answers for a dialog's methods. web-core
+    calls the DOM element's own method, which throws, and answers 4.
 
 - **Main-thread code that names a browser global throws, as on native**
   (user, 2026-10-20). `MTS_CHUNK_PREAMBLE`

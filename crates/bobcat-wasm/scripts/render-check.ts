@@ -1,8 +1,10 @@
 // A rendering check for the browser target: a Lynx XML card with a still
-// image and three animated ones, drawn by the threaded Wasm build in a real
-// Chrome with WebGPU, screenshotted, and asserted on pixel by pixel.
+// image and three animated ones, then a compiled ReactLynx card drawing on a
+// `<canvas>`, drawn by the threaded Wasm build in a real Chrome with WebGPU,
+// screenshotted, and asserted on pixel by pixel.
 //
 //   pnpm --filter bobcat-wasm build
+//   pnpm --filter reactlynx-test-fixtures build
 //   node crates/bobcat-wasm/scripts/render-check.ts [--package <dir>] [--chrome <path>] [--out <dir>] [--repeat <n>] [--console]
 //
 // `--package` serves another build's `pkg/` and `dist/` (the default is this
@@ -39,6 +41,21 @@
 //   browser's `<video>` on the page's thread plays it, and its frames reach
 //   the Render Worker as `VideoFrame`s. Once its first frame is drawn, every
 //   screenshot shows one of the clip's colours, and all three are seen.
+//
+// Then, on a second page, the compiled ReactLynx card `react-canvas`
+// (`packages/reactlynx-test-fixtures/src/react-canvas`, built by
+// `pnpm --filter reactlynx-test-fixtures build`): its main thread transfers
+// its `<canvas>` to an `OffscreenCanvas` and posts it to the background
+// thread, which draws on it, each draw queued for the Render Worker and
+// replayed there.
+// - The first draw shows: red, green from `multiply` over yellow, magenta
+//   with a `clearRect` hole the white page shows through, and text.
+// - The background thread's `getImageData` of that draw, which blocks its
+//   Worker on the Render Worker's readback, answers the same pixels (the
+//   card logs them; the check reads the console).
+// - A tap's `setTimeout` draw, a tap's `lynx.requestAnimationFrame` draw,
+//   and a tap's resize to 80 by 100 each show, the placeholder's box
+//   following the resize.
 
 import { spawn } from 'node:child_process'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -56,6 +73,11 @@ const animatedFixtures = path.resolve(
   '../../bobcat-resources/tests/fixtures/animated',
 )
 const videoFixtures = path.resolve(here, '../../bobcat-resources/tests/fixtures/video')
+const roboto = path.resolve(here, '../../seldon/tests/fixtures/Roboto-Regular.ttf')
+const canvasCard = path.resolve(
+  here,
+  '../../../packages/reactlynx-test-fixtures/dist/react-canvas/react-canvas.web-react-canvas.bundle',
+)
 
 const WIDTH = 560
 const HEIGHT = 120
@@ -199,6 +221,39 @@ try {
 </html>
 `
 
+/** The `react-canvas` card in a 240px view. */
+const CANVAS_SIZE = 240
+const CANVAS_PAGE = `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+html, body { margin: 0; background: #ffffff; }
+canvas { display: block; width: ${CANVAS_SIZE}px; height: ${CANVAS_SIZE}px; }
+</style>
+</head>
+<body>
+<canvas id="canvas" width="${CANVAS_SIZE}" height="${CANVAS_SIZE}"></canvas>
+<script type="module">
+import { BobcatCanvas, LYNX_XML_PAGE_CONFIG } from '/bobcat-wasm/dist/facade.js'
+try {
+  const canvas = document.getElementById('canvas')
+  const view = await BobcatCanvas.create(canvas, ${CANVAS_SIZE}, ${CANVAS_SIZE}, 1, LYNX_XML_PAGE_CONFIG)
+  view.onerror = (error) => { window.renderCheck = { error: String(error) } }
+  // The browser gives the engine no system fonts: the host's are all a
+  // realm has, the background thread's canvas text included.
+  await view.registerFonts(await (await fetch('/Roboto-Regular.ttf')).arrayBuffer())
+  await view.setDefaultFontFamily('Roboto')
+  await view.loadTemplate('/react-canvas.web.bundle')
+  window.renderCheck = { loaded: performance.now() }
+} catch (error) {
+  window.renderCheck = { error: String(error && error.stack || error) }
+}
+</script>
+</body>
+</html>
+`
+
 const TYPES: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -207,12 +262,23 @@ const TYPES: Record<string, string> = {
   '.mp4': 'video/mp4',
   '.png': 'image/png',
   '.xml': 'application/xml; charset=utf-8',
+  '.bundle': 'application/octet-stream',
+  '.ttf': 'font/ttf',
 }
 
 function file(pathname: string): { body: Buffer; type: string } | undefined {
   const type = (name: string): string => TYPES[path.extname(name)] ?? 'application/octet-stream'
   if (pathname === '/' || pathname === '/index.html') {
     return { body: Buffer.from(PAGE), type: TYPES['.html']! }
+  }
+  if (pathname === '/canvas.html') {
+    return { body: Buffer.from(CANVAS_PAGE), type: TYPES['.html']! }
+  }
+  if (pathname === '/Roboto-Regular.ttf') {
+    return { body: readFileSync(roboto), type: TYPES['.ttf']! }
+  }
+  if (pathname === '/react-canvas.web.bundle') {
+    return { body: readFileSync(canvasCard), type: TYPES['.bundle']! }
   }
   if (pathname === '/card.lynx.xml') {
     return { body: Buffer.from(CARD), type: TYPES['.xml']! }
@@ -445,10 +511,10 @@ async function evaluate(session: Session, expression: string): Promise<unknown> 
   return (answer['result'] as { value?: unknown } | undefined)?.value
 }
 
-async function screenshot(session: Session): Promise<Buffer> {
+async function screenshot(session: Session, width = WIDTH, height = HEIGHT): Promise<Buffer> {
   const answer = await session.send('Page.captureScreenshot', {
     format: 'png',
-    clip: { x: 0, y: 0, width: WIDTH, height: HEIGHT, scale: 1 },
+    clip: { x: 0, y: 0, width, height, scale: 1 },
   })
   return Buffer.from(String(answer['data']), 'base64')
 }
@@ -456,10 +522,14 @@ async function screenshot(session: Session): Promise<Buffer> {
 const delay = (ms: number): Promise<void> => new Promise((done) => setTimeout(done, ms))
 
 /** What the page reports once the card has loaded or failed, within a minute. */
-async function loaded(session: Session): Promise<{ loaded?: number; error?: string }> {
+async function loaded(session: Session, pathname = '/'): Promise<{ loaded?: number; error?: string }> {
   const deadline = Date.now() + 60_000
   while (Date.now() < deadline) {
-    const state = (await evaluate(session, 'window.renderCheck ?? null')) as {
+    // The page navigated to, not the one before it.
+    const state = (await evaluate(
+      session,
+      `location.pathname === ${JSON.stringify(pathname)} ? window.renderCheck ?? null : null`,
+    )) as {
       loaded?: number
       error?: string
     } | null
@@ -505,6 +575,139 @@ async function captureConsole(session: Session, lines: string[]): Promise<void> 
     }
   })
   await attach()
+}
+
+/**
+ * Loads the `react-canvas` card and checks each of its draws, appending
+ * what fails to `failures`. Every wait polls up to 30 s for what it expects,
+ * so no step depends on how long the page takes.
+ */
+async function canvasCheck(
+  session: Session,
+  origin: string,
+  consoleLines: string[],
+  failures: string[],
+  pngs: Buffer[],
+): Promise<void> {
+  // The page from here on, so the image page's lines are not searched.
+  const from = consoleLines.length
+  await session.send('Page.navigate', { url: `${origin}/canvas.html` })
+  const state = await loaded(session, '/canvas.html')
+  if (state.error !== undefined) {
+    failures.push(`react-canvas failed to load: ${state.error}`)
+    return
+  }
+  const logged = (prefix: string): string[] =>
+    consoleLines
+      .slice(from)
+      .map((line) => {
+        const index = line.indexOf(prefix)
+        return index === -1 ? undefined : line.slice(index + prefix.length)
+      })
+      .filter((line): line is string => line !== undefined)
+  let shot: Image | undefined
+  const until = async (label: string, done: (shot: Image) => boolean): Promise<boolean> => {
+    const deadline = Date.now() + 30_000
+    for (;;) {
+      const png = await screenshot(session, CANVAS_SIZE, CANVAS_SIZE)
+      shot = readPng(png)
+      if (done(shot)) {
+        pngs.push(png)
+        console.log(`ok   ${label}`)
+        return true
+      }
+      if (Date.now() > deadline) {
+        pngs.push(png)
+        console.log(`FAIL ${label}`)
+        failures.push(label)
+        return false
+      }
+      await delay(50)
+    }
+  }
+  const shows = (expected: [number, number, [number, number, number]][]) => (image: Image) =>
+    expected.every(([x, y, colour]) => near(at(image, x, y), colour))
+  const tap = async (): Promise<void> => {
+    for (const type of ['mousePressed', 'mouseReleased']) {
+      await session.send('Input.dispatchMouseEvent', {
+        type,
+        x: 200,
+        y: 200,
+        button: 'left',
+        buttons: type === 'mousePressed' ? 1 : 0,
+        clickCount: 1,
+      })
+    }
+  }
+  const stepped = (n: number): boolean => logged('canvas step ').includes(String(n))
+
+  const RED: [number, number, number] = [255, 0, 0]
+  const GREEN: [number, number, number] = [0, 255, 0]
+  const BLUE: [number, number, number] = [0, 0, 255]
+  const YELLOW: [number, number, number] = [255, 255, 0]
+  const CYAN: [number, number, number] = [0, 255, 255]
+  const MAGENTA: [number, number, number] = [255, 0, 255]
+  const WHITE: [number, number, number] = [255, 255, 255]
+
+  // The read is logged in the entry that drew, so it is waited for too.
+  if (
+    !(await until(
+      'react-canvas: the first draw shows red, multiply green, magenta and a cleared hole',
+      (image) =>
+        logged('canvas read ').length > 0 &&
+        shows([
+          [20, 30, RED],
+          [60, 30, GREEN],
+          [85, 5, MAGENTA],
+          [100, 20, WHITE],
+        ])(image),
+    ))
+  ) {
+    return
+  }
+  let inked = 0
+  for (let y = 0; y < 60; y += 1) {
+    for (let x = 120; x < 160; x += 1) {
+      if (!near(at(shot!, x, y), WHITE)) inked += 1
+    }
+  }
+  const textShows = inked > 50
+  console.log(`${textShows ? 'ok  ' : 'FAIL'} react-canvas: fillText inks ${String(inked)} pixels of its column`)
+  if (!textShows) failures.push('react-canvas: fillText draws')
+
+  const reads = logged('canvas read ')
+  const read = reads.length === 1 ? (JSON.parse(reads[0]!) as Record<string, unknown>) : undefined
+  const expected = {
+    canvas: true,
+    size: [160, 60],
+    a: [255, 0, 0, 255],
+    b: [0, 255, 0, 255],
+    c: [255, 0, 255, 255],
+    hole: [0, 0, 0, 0],
+  }
+  const readOk =
+    read !== undefined &&
+    Object.entries(expected).every(([key, value]) => JSON.stringify(read[key]) === JSON.stringify(value)) &&
+    typeof read['text'] === 'number' &&
+    read['text'] > 50
+  console.log(`${readOk ? 'ok  ' : 'FAIL'} react-canvas: getImageData answers the drawn pixels: ${reads.join(' | ')}`)
+  if (!readOk) failures.push('react-canvas: getImageData')
+
+  // Each tap steps the card on; a step that fails ends the check.
+  const steps: [string, [number, number, [number, number, number]][]][] = [
+    ['a setTimeout draw shows', [[20, 30, BLUE], [60, 30, GREEN]]],
+    ['a lynx.requestAnimationFrame draw shows', [[20, 30, YELLOW], [60, 30, GREEN]]],
+    [
+      "a resize to 80 by 100 resizes the placeholder's box",
+      [[40, 80, CYAN], [70, 30, CYAN], [100, 30, WHITE], [40, 120, WHITE]],
+    ],
+  ]
+  for (const [index, [label, expected]] of steps.entries()) {
+    await tap()
+    if (!(await until(`react-canvas: ${label}`, (image) => stepped(index + 1) && shows(expected)(image)))) {
+      return
+    }
+  }
 }
 
 async function main(): Promise<boolean> {
@@ -556,10 +759,6 @@ async function main(): Promise<boolean> {
       finals.push(readPng(png))
     }
     const final = finals[0]!
-    if (out !== undefined) {
-      mkdirSync(out, { recursive: true })
-      pngs.forEach((png, index) => writeFileSync(path.join(out, `shot-${String(index).padStart(2, '0')}.png`), png))
-    }
 
     const check = (label: string, actual: [number, number, number], expected: [number, number, number]): void => {
       const ok = near(actual, expected)
@@ -600,6 +799,11 @@ async function main(): Promise<boolean> {
       `${videoOk ? 'ok  ' : 'FAIL'} rgb.mp4 in a muted, looping <video> plays the clip's colours: ${named.join(' ')}`,
     )
     if (!videoOk) failures.push('rgb.mp4 plays')
+    await canvasCheck(session, origin, consoleLines, failures, pngs)
+    if (out !== undefined) {
+      mkdirSync(out, { recursive: true })
+      pngs.forEach((png, index) => writeFileSync(path.join(out, `shot-${String(index).padStart(2, '0')}.png`), png))
+    }
     if (failures.length > 0 || process.argv.includes('--console')) {
       console.log(`console of the page and its Workers (${String(consoleLines.length)} lines):`)
       for (const line of consoleLines) console.log(`  ${line}`)

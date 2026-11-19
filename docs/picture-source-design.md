@@ -55,7 +55,9 @@ All by the user on 2026-11-14 unless dated otherwise.
    `<image>` element has its own.
 7. Not built now, but the design must leave room for them without a second
    mechanism: canvas 2D, any canvas-family API visible to card JavaScript, an
-   off-screen web view with input forwarding.
+   off-screen web view with input forwarding. Canvas 2D has since been
+   built on the `Id` picture ([Canvas](#canvas)); the off-screen web view
+   has not.
 8. Video is the **smallest useful element**: `src`, `loop`, `muted`,
    `object-fit`; `play` and `pause`; `firstframe`, `ended`, `error`.
 
@@ -509,6 +511,31 @@ not do (verified on macOS 26). In the browser the page's `<video>` plays,
 its frames taken with `requestVideoFrameCallback`, and a `play()` the
 browser's autoplay rules reject is the element's `error`.
 
+## Canvas
+
+An HTML `<canvas>` element is an `Id` picture: it presents one `PictureId`
+for its life (`terminus::link::html::canvas`). Once main-thread script has
+called `transferControlToOffscreen()` on it, the element is an
+`OffscreenCanvas` placeholder, and the `OffscreenCanvas` — in the MTS realm
+or, transferred through `postMessage`, in the BTS or a `Worker` — draws with
+the Canvas 2D API (`crates/bobcat-canvas`). A canvas is not a producer of
+frames for the slot: its bitmap is a GPU texture (`render::canvas::Surface`)
+its draws are replayed into, natively on the drawing thread and on wasm32
+on the Render Worker. At the end of each JavaScript entry that changed it,
+the canvas commits: the surface's texture is copied on the GPU into the
+picture's own texture in the shared bitmap table, leased to the element,
+and only then is the picture's generation published. The painter draws that
+texture through its ordinary `Id`-picture path, with no frame to take or
+write. A commit of a new size resizes the element's natural size on the
+document's thread.
+
+The detail is owned by `docs/terminus-architecture.md` ("HTML `<canvas>` as
+an `OffscreenCanvas` placeholder", "Canvas surfaces"),
+`crates/bobcat-canvas/AGENTS.md` (the drawing model),
+`crates/bobcat-core/docs/canvas.md` (the JavaScript API, transfer and the
+per-entry commit) and `crates/bobcat-core/docs/painter.md` ("Placeholder
+canvases").
+
 ## Not built
 
 - **Platform-view composition.** A cross-origin `<web-view>` in the browser,
@@ -518,10 +545,6 @@ browser's autoplay rules reject is the element's `error`.
   taken up.
 - **Sampling a producer's texture without a copy.**
 - **A video decoder of the engine's own**, DRM, HDR.
-- **Canvas.** A canvas is a producer of CPU frames for an `Id` picture, drawn
-  on the JavaScript thread; the slot and the CPU writer are everything it
-  needs from this design. No canvas element, context or JavaScript API is
-  added.
 - **Input to a live picture.** An off-screen web view needs pointer, wheel,
   key and IME events routed to its producer in the picture's own coordinates.
 

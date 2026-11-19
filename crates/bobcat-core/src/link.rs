@@ -53,7 +53,7 @@ use crate::native_module::{ModuleReply, NativeModuleEsms};
 use crate::paint::CanvasPictures;
 use crate::performance::PipelineRegistry;
 use crate::resource::{FetchProbe, LoadedSource, SourceCompletion, SourceRequest, StyleSheetProbe};
-use crate::view::{EngineEvent, EventRequester, LynxViewError, Viewport};
+use crate::view::{EngineEvent, EventRequester, LynxViewError, Viewport, WorkerFonts};
 
 /// The answer to one source request, as the side that awaits it sees it.
 pub(crate) type SourceAnswer = oneshot::Receiver<Result<LoadedSource, LynxViewError>>;
@@ -84,6 +84,8 @@ pub(crate) struct HostOutbox {
     /// completes an import of `lynx:<name>` from. It rides here because a
     /// worker's outbox is what travels to the worker thread.
     native_esms: Arc<NativeModuleEsms>,
+    /// The view's fonts, which a worker realm's canvas text shapes with.
+    worker_fonts: Arc<WorkerFonts>,
 }
 
 impl HostOutbox {
@@ -103,6 +105,7 @@ impl HostOutbox {
             base,
             registry,
             native_esms: Arc::default(),
+            worker_fonts: Arc::default(),
         }
     }
 
@@ -110,6 +113,17 @@ impl HostOutbox {
     pub(crate) fn with_native_esms(mut self, native_esms: Arc<NativeModuleEsms>) -> Self {
         self.native_esms = native_esms;
         self
+    }
+
+    /// This outbox with the view's fonts.
+    pub(crate) fn with_worker_fonts(mut self, worker_fonts: Arc<WorkerFonts>) -> Self {
+        self.worker_fonts = worker_fonts;
+        self
+    }
+
+    /// The view's fonts, for a worker realm's canvas text.
+    pub(crate) const fn worker_fonts(&self) -> &Arc<WorkerFonts> {
+        &self.worker_fonts
     }
 
     /// The view's native module ES modules.
@@ -771,6 +785,8 @@ pub(crate) struct ViewOutbox {
     /// This view's native module ES modules, read by `create_lynx_view` and
     /// handed to every [`HostOutbox`] the view makes, a worker's included.
     native_esms: Arc<NativeModuleEsms>,
+    /// This view's fonts, handed to every [`HostOutbox`] the view makes.
+    worker_fonts: Arc<WorkerFonts>,
     /// This view's placeholder canvases, made by `create_lynx_view` and
     /// shared with its seat.
     canvases: Arc<CanvasPictures>,
@@ -805,6 +821,7 @@ impl ViewOutbox {
             base,
             registry,
             native_esms: Arc::default(),
+            worker_fonts: Arc::default(),
             canvases: Arc::default(),
             main: None,
         }
@@ -814,6 +831,13 @@ impl ViewOutbox {
     /// [`HostOutbox`] it makes carries.
     pub(crate) fn with_native_esms(mut self, native_esms: Arc<NativeModuleEsms>) -> Self {
         self.native_esms = native_esms;
+        self
+    }
+
+    /// This outbox with the view's fonts, which every [`HostOutbox`] it
+    /// makes carries.
+    pub(crate) fn with_worker_fonts(mut self, worker_fonts: Arc<WorkerFonts>) -> Self {
+        self.worker_fonts = worker_fonts;
         self
     }
 
@@ -876,6 +900,7 @@ impl ViewOutbox {
             Arc::clone(&self.registry),
         )
         .with_native_esms(Arc::clone(&self.native_esms))
+        .with_worker_fonts(Arc::clone(&self.worker_fonts))
     }
 
     /// Announces one notice, then wakes the thread that paints.

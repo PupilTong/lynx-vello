@@ -95,7 +95,11 @@ origin. What holds:
   pixels: the still image's colour and alpha, a finite GIF resting on its
   last frame both as a CSS image (the file's count) and as an
   `<image loop-count="1">` (an `<image>` without `loop-count` loops
-  forever), and a looping one showing both its frames. `--repeat <n>` runs
+  forever), and a looping one showing both its frames; then the compiled
+  ReactLynx card `react-canvas` (after `pnpm --filter
+  reactlynx-test-fixtures build`), whose background thread draws on a
+  transferred `<canvas>`: its draws, its blocking `getImageData` and its
+  resize (`docs/browser-wasm.md`, "Rendering check"). `--repeat <n>` runs
   it n times; a failed run prints the console of the page and its Workers. It needs a WebGPU
   adapter in headless Chrome; CI's Ubuntu runner has no GPU, so CI does not
   run it (`docs/browser-wasm.md`, "Rendering check").

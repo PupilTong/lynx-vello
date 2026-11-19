@@ -1,5 +1,5 @@
 name = "lynx-js-runtime-bridge"
-description = "Use for the JS runtime layer — the QuickJS realms, the MTS/BTS dual-thread model, Workers, the Element PAPI in `packages/bobcat-element`, host members, timers, ESM/resource loading, view/group lifetime, and the DOM event model. Not for CSS/layout/render (use those agents) or ReactLynx-level compatibility (use lynx-reactlynx-compat)."
+description = "Use for the JS runtime layer — the QuickJS realms, the MTS/BTS dual-thread model, Workers, the Element PAPI in `packages/bobcat-element`, host members, timers, ESM/resource loading, view/group lifetime, the DOM event model, the Canvas 2D host layer (`OffscreenCanvas` and the 2D context in every realm), and `postMessage` transfer lists. Not for CSS/layout/render (use those agents) or ReactLynx-level compatibility (use lynx-reactlynx-compat)."
 developer_instructions = """
 # JS runtime bridge (realms, dual thread, PAPI, events)
 
@@ -9,6 +9,10 @@ facades, the host module, timers and resource plumbing),
 runtime in `packages/bobcat-element/src`. The dual-thread model here is **real
 threads**, not an emulation: a group owns `bobcat-main` (document + MTS realm)
 and `bobcat-workers` (every Worker realm, including the BTS).
+The canvas host layer is yours: `packages/bobcat-element/src/canvas.ts`,
+`transfer.ts` and `dom-exception.ts`, `crates/bobcat-core/src/canvas/`, and
+the transfer list in the QuickJS serializer that moves an `OffscreenCanvas`
+or `ImageBitmap` between realms (`crates/bobcat-core/docs/canvas.md`).
 
 ## Read first
 

@@ -677,3 +677,23 @@ fn the_bts_resizing_a_transferred_canvas_resizes_the_placeholder() {
     let shot = capture_until(&mut engine, 10, 5, RED);
     assert_ne!(pixel(&shot, 30, 5), RED, "outside the resized box");
 }
+
+/// A worker realm's canvas text shapes with the view's host fonts
+/// (`ViewSources::fonts`), which on wasm32 are the only fonts there are:
+/// the BTS measures Ahem's em squares in a family no system has.
+#[test]
+fn bts_canvas_text_shapes_with_the_views_host_fonts() {
+    const AHEM: &[u8] = include_bytes!("../../../seldon/tests/fixtures/Ahem.ttf");
+    let mut engine = TestViewSpec::new("globalThis.renderPage = () => __CreatePage('card', 0);")
+        .with_default_font("Ahem", AHEM)
+        .with_background_entry(
+            r"
+            const ctx = new OffscreenCanvas(10, 10).getContext('2d');
+            ctx.font = '20px Ahem';
+            console.log(`width ${ctx.measureText('Hi').width}`);
+            ",
+        )
+        .create(Arc::new(crate::view::NoWakeup));
+    let mut log = Log::default();
+    log.until(&mut engine, |log| log.has("width 40"));
+}

@@ -1,6 +1,6 @@
 ---
 name: lynx-render-engine
-description: Use for painting and compositing — stacking contexts and CSS2 Appendix E paint order, transforms, hit testing, the display list the paint walk records and its vello_gpu replay, the baked committed frame and its compose program, scroll composition, and the animation driver. Not for layout (lynx-layout-engine), CSS resolution (lynx-css-engine), or text shaping (lynx-text-engine).
+description: Use for painting and compositing — stacking contexts and CSS2 Appendix E paint order, transforms, hit testing, the display list the paint walk records and its vello_gpu replay, the baked committed frame and its compose program, scroll composition, the animation driver, and canvas surfaces (the GPU texture a Canvas 2D context replays into and its commit to a `<canvas>` placeholder's picture). Not for layout (lynx-layout-engine), CSS resolution (lynx-css-engine), or text shaping (lynx-text-engine).
 tools: Read, Edit, Write, Bash, Grep, Glob, WebFetch, WebSearch
 model: opus
 ---
@@ -22,6 +22,12 @@ vello_gpu bump. Glyphs draw as outlines: glifo's glyph atlas cache stays off.
 vello_gpu keeps no image store for callers: each bitmap is a texture of its
 own, drawn as an external texture (`render/sparse.rs`, `Bitmaps`), and the
 optional shader paints terminus draws are named as Cargo features.
+`render/canvas.rs` is the canvas surface: a `bobcat-canvas` bitmap as a
+texture its draws replay into (natively on the drawing thread, on wasm32 on
+the Render Worker from a shared op queue), copied into a placeholder
+`<canvas>`'s picture texture at each commit (`docs/terminus-architecture.md`,
+"Canvas surfaces"). `crates/bobcat-canvas`, the Canvas 2D drawing model
+recorded into the display list, is yours too.
 
 ## Read first
 

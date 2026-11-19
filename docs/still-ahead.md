@@ -86,6 +86,43 @@ would host it:
   image's frames by index; gdk-pixbuf and the browser's `Image` decoder answer
   the first frame (`docs/picture-source-design.md` step 5 takes up the
   browser). No `region-to-decode` and no `blur-radius` post-processing.
+- **The rest of the canvas surface** (`crates/bobcat-core/docs/canvas.md`,
+  `crates/bobcat-canvas/AGENTS.md`). Card JavaScript draws with an
+  `OffscreenCanvas` 2D context in any realm and shows it in a `<canvas>`
+  placeholder; not built:
+  - `drawImage` of a network image: `createImageBitmap` takes an
+    `OffscreenCanvas`, an `ImageBitmap` or an `ImageData` only, with no
+    `Blob` or URL source. It would decode through the platform decoder
+    (`vant::ImageDecoder`; `BrowserDecoder` on wasm32) into a
+    `bobcat_canvas::Image`, from `createImageBitmap` in
+    `packages/bobcat-element/src/canvas.ts` and a host member in
+    `crates/bobcat-core/src/canvas/members.rs`.
+  - `toDataURL`/`toBlob` on the element and `convertToBlob` on an
+    `OffscreenCanvas`: nothing encodes an image. They would read the
+    bitmap back as `getImageData` does (`Canvas::read_image_data`) and need
+    an encoder; `vant::Platform` has a decoder and no encoder.
+  - A main-thread `getContext` on the `<canvas>` element itself: the element
+    has context modes `none` and `placeholder` only
+    (`crates/terminus/src/html/canvas.rs`); a `2d` mode would bind a
+    `bobcat_canvas::Canvas` to the element's picture there and expose it
+    through the Element PAPI (`packages/bobcat-element/src/element-papi.ts`).
+  - `ArrayBuffer` in a `postMessage` transfer list (`DataCloneError` today)
+    and `ImageBitmap` structured clone (transfer-only today): both are
+    `packages/bobcat-element/src/transfer.ts` and the QuickJS serializer's
+    transfer list (`crates/quickjs-rust-bridge`).
+  - `x-canvas`, web-elements' deprecated wrapper: no component is defined
+    for the tag (`crates/bobcat-core/src/main/tree/`).
+  - The `bitmaprenderer`, `webgl`, `webgl2` and `webgpu` contexts:
+    `getContext` answers `null` for them (`canvas.ts`); a context would be
+    a new mode of the canvas entry in `crates/bobcat-core/src/canvas/mod.rs`
+    over its own `terminus::link::render::canvas::Surface` texture.
+  - The context's `filter`, `letterSpacing`, `wordSpacing`, `fontKerning`,
+    `fontStretch`, `fontVariantCaps`, `textRendering` and `lang` attributes;
+    `small-caps` parses and is not drawn. They are `bobcat_canvas::Canvas`
+    state (`crates/bobcat-canvas/src`) with their accessors in
+    `canvas.ts`.
+  - Bitmap color glyphs (`sbix`/`CBDT` emoji), which draw nothing
+    (`crates/bobcat-canvas`'s text path).
 - **Import maps, import attributes, JSON *ESM* modules and Lynx component-bundle
   imports**, and the asynchronous half of the compiled-bundle loader:
   `requireModuleAsync` and `loadScriptAsync`. Lazy containers themselves are
