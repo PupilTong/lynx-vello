@@ -46,7 +46,7 @@ use crate::kurbo::{Affine, BezPath, Line, Rect, Stroke};
 use crate::layout::paragraph::PaintedParagraph;
 use crate::paint::background::{GradientBrush, gradient_brush};
 use crate::paint::convert;
-use crate::paint::display_list::{DisplayList, Embolden, Glyph};
+use crate::paint::display_list::{DisplayList, Glyph, synthesized_outlines};
 use crate::peniko;
 use crate::peniko::{BrushRef, Color, Fill, StyleRef};
 
@@ -823,16 +823,8 @@ fn draw_glyph_run(
         .map(|coord| coord.to_bits())
         .collect();
     let synthesis = run.synthesis();
-    let embolden = if synthesis.embolden() {
-        Embolden::uniform(f64::from(run.font_size()) / 48.0)
-    } else {
-        Embolden::default()
-    };
-    // The oblique leans the glyph's top to the right: in the run's y-down
-    // space, a point above the baseline (negative y) moves to positive x.
-    let glyph_transform = synthesis
-        .skew()
-        .map(|degrees| Affine::skew(-f64::from(degrees).to_radians().tan(), 0.0));
+    let (embolden, glyph_transform) =
+        synthesized_outlines(synthesis.embolden(), synthesis.skew(), run.font_size());
     scene
         .draw_glyphs(run.font())
         .font_size(run.font_size())

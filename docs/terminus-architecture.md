@@ -900,10 +900,18 @@ the element's.
   context method or attribute, taking numbers, `&str`, keyword enums (`CompositeOp`, `LineCap`, …
   each with `from_name`/`name` for the IDL strings, `style.rs`) or the module's value types.
   `Canvas` is `Send`; there is no global state.
-- Colors are `peniko::Color`; fonts are a typed `Font` (`text.rs`: parley family names, size in
-  px, weight, style, width). Parsing CSS strings is the caller's job.
-- Text calls take the caller's `&mut parley::FontContext`: the caller decides which fonts exist.
-  The canvas owns its `LayoutContext`.
+- Colors are `peniko::Color`; fonts are `seldon`'s `ResolvedFont` (family names and generic
+  families, size in px, weight, style with an oblique angle, stretch), which the state holds in an
+  `Arc` so `save()` copies no font. Parsing CSS strings is the caller's job.
+- Text calls take the caller's `&mut TextContext`: the caller decides which fonts exist. Text is
+  shaped by `seldon::text::shape_line`, the one-line shaper SVG `<text>` uses, in the context's
+  locale and scratch layout, after `text.rs` replaces each ASCII whitespace character by a space,
+  with an explicit `ltr`/`rtl` level (`inherit` is `ltr`) and trailing spaces kept inside the
+  line. `fontBoundingBox*`, the em-height values and the `textBaseline` offsets use the first
+  available font's ascent and descent (`ShapedLine::first_font`, or `seldon::text::font_metrics`
+  for text that shaped no glyph run); `text.rs` keeps the glyph ink bounds `measureText` reports
+  (skrifa outlines of the shaped runs). Each run's synthetic bold and oblique are drawn as the
+  text painter draws them (`paint::display_list::synthesized_outlines`).
 - `Path` (`path.rs`) is `Path2D` and shares its builder with the context's default path
   (`path::builder_methods!`).
 - `Gradient` and `Pattern` (`style.rs`) are shared by reference (`Arc<Mutex<_>>`): a stop or
