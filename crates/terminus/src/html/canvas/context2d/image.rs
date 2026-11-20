@@ -120,9 +120,24 @@ impl Image {
     /// What `createImageBitmap` makes of this image: the image itself, or
     /// with `crop` the `width` × `height` rectangle at `(x, y)` in it, the
     /// part outside it transparent black. A canvas's current texture is
-    /// copied, as of every draw issued so far. `Range` for a crop whose
-    /// pixels cannot be allocated.
+    /// copied, as of every draw issued so far.
+    ///
+    /// # Errors
+    ///
+    /// For any image, before anything is allocated: `Range` for a crop
+    /// with a zero width or height (HTML `createImageBitmap`: an `sw` or
+    /// `sh` of 0 is a `RangeError`), then `InvalidState` for a crop with a
+    /// side over [`MAX_SURFACE_SIDE`], as for an image made from pixels
+    /// that do not fit.
     pub fn crop(&self, crop: Option<(i64, i64, u32, u32)>) -> Result<Self, CanvasError> {
+        if let Some((_, _, width, height)) = crop {
+            if width == 0 || height == 0 {
+                return Err(CanvasError::Range);
+            }
+            if !fits(width, height) {
+                return Err(CanvasError::InvalidState);
+            }
+        }
         let (x, y, width, height) = match (crop, &self.0) {
             (None, Source::Live(_)) => (0, 0, self.width(), self.height()),
             (None, _) => return Ok(self.clone()),
@@ -208,7 +223,8 @@ fn premultiplied(data: &ImageData) -> Vec<u8> {
 }
 
 /// The `width` × `height` rectangle at `(x, y)` in `data`, premultiplied,
-/// transparent black outside it.
+/// transparent black outside it; both sides are at most
+/// [`MAX_SURFACE_SIDE`].
 fn crop_pixels(
     data: &ImageData,
     x: i64,
@@ -221,10 +237,12 @@ fn crop_pixels(
     let mut pixels = vec![0; len];
     let source = premultiplied(data);
     let (iw, ih) = (i64::from(data.width), i64::from(data.height));
-    let (cx0, cx1) = (x.max(0), (x + w).min(iw));
+    // Rows and columns are copied only where the crop overlaps the image,
+    // so `x` and `y` are then within one crop side of it.
+    let (cx0, cx1) = (x.max(0), x.saturating_add(w).min(iw));
     if cx0 < cx1 {
         let span = usize::try_from((cx1 - cx0) * 4).map_err(|_| CanvasError::Range)?;
-        for row in y.max(0)..(y + h).min(ih) {
+        for row in y.max(0)..y.saturating_add(h).min(ih) {
             let from = usize::try_from((row * iw + cx0) * 4).map_err(|_| CanvasError::Range)?;
             let to =
                 usize::try_from(((row - y) * w + cx0 - x) * 4).map_err(|_| CanvasError::Range)?;

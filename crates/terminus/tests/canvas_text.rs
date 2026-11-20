@@ -187,3 +187,20 @@ fn text_follows_the_transform() {
     canvas.fill_text(&mut fonts, "X", 0.0, 10.0, None);
     assert_eq!(ink_columns(&mut canvas, 15), Some((40, 59)));
 }
+
+/// The million-dash limit counts the glyph outlines' length: a 20 px Ahem
+/// square is 80 px of outline, 1.1 million dashes of a 7e-5 period, and is
+/// stroked solid.
+#[test]
+fn stroke_text_past_a_million_dashes_strokes_solid() {
+    let mut fonts = fonts();
+    let mut canvas = Canvas::new(40, 40);
+    canvas.set_font(ahem(20.0));
+    canvas.set_line_width(4.0);
+    canvas.set_line_dash(&[2e-5, 5e-5]);
+    canvas.set_stroke_style(Style::Color(Color::BLACK));
+    canvas.stroke_text(&mut fonts, "X", 10.0, 30.0, None);
+    // The square runs from x = 10 to 30 and y = 14 to 34; the middle of its
+    // left edge.
+    assert_eq!(alpha(&mut canvas, 10, 24), 255);
+}

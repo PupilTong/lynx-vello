@@ -8,7 +8,8 @@
 use std::f64::consts::TAU;
 
 use super::CanvasError;
-use crate::kurbo::{self, Affine, BezPath, PathEl, Point, Vec2};
+use crate::kurbo::{self, Affine, BezPath, PathEl, PathSeg, Point, Vec2};
+use crate::render::svg::{arc_tolerance, path_data};
 
 /// A `Path2D`: subpaths of lines and curves in its own coordinates.
 #[derive(Clone, Debug, Default)]
@@ -23,7 +24,10 @@ pub struct Path {
     pending: bool,
 }
 
-/// Arc flattening tolerance, in user units at scale 1.
+/// Arc flattening tolerance, in user units at scale 1, for an arc whose
+/// radius is under 1e6 units at that scale; a larger arc is flattened at a
+/// fixed fraction of its radius ([`arc_tolerance`]), which bounds its
+/// cubics.
 const ARC_TOLERANCE: f64 = 1e-3;
 
 impl Path {
@@ -33,15 +37,14 @@ impl Path {
         Self::default()
     }
 
-    /// `new Path2D(d)`: the SVG path data `d`. Data with a syntax error
-    /// gives an empty path.
+    /// `new Path2D(d)`: the SVG path data `d`. Data with an error keeps
+    /// the segments before the first one in error, as SVG's path data
+    /// error handling asks; data that does not start with a move is an
+    /// empty path.
     #[must_use]
     pub fn from_svg(data: &str) -> Self {
-        let Ok(elements) = BezPath::from_svg(data) else {
-            return Self::new();
-        };
         let mut path = Self::new();
-        for element in elements {
+        for element in path_data(data) {
             match element {
                 PathEl::MoveTo(p) => path.move_to_point(p),
                 PathEl::LineTo(p) => path.line_to_point(p),
@@ -256,8 +259,7 @@ impl Path {
         } else {
             self.move_to_point(start);
         }
-        let tolerance = ARC_TOLERANCE / scale_of(t).max(f64::MIN_POSITIVE);
-        for element in arc.append_iter(tolerance) {
+        for element in arc.append_iter(tolerance(t, arc)) {
             if let PathEl::CurveTo(c1, c2, p) = element {
                 self.cubic_to_points(t * c1, t * c2, t * p);
             }
@@ -371,8 +373,7 @@ impl Path {
         let (x1, y1) = (x0 + aw, y0 + ah);
         let corner = |path: &mut Self, center: Point, radii: Vec2, from: f64| {
             let arc = kurbo::Arc::new(center, radii, from, TAU / 4.0, 0.0);
-            let tolerance = ARC_TOLERANCE / scale_of(tf).max(f64::MIN_POSITIVE);
-            for element in arc.append_iter(tolerance) {
+            for element in arc.append_iter(tolerance(tf, &arc)) {
                 if let PathEl::CurveTo(c1, c2, p) = element {
                     path.cubic_to_points(tf * c1, tf * c2, tf * p);
                 }
@@ -393,6 +394,13 @@ impl Path {
     }
 }
 
+/// The tolerance `arc` is turned into cubics at under `t`: [`ARC_TOLERANCE`]
+/// in canvas units, never under the fraction of the radius that bounds the
+/// cubics ([`arc_tolerance`]).
+fn tolerance(t: Affine, arc: &kurbo::Arc) -> f64 {
+    arc_tolerance(arc, ARC_TOLERANCE / scale_of(t).max(f64::MIN_POSITIVE))
+}
+
 /// The point at `angle` on `arc`'s ellipse.
 fn arc_point(arc: &kurbo::Arc, angle: f64) -> Point {
     let (sin, cos) = angle.sin_cos();
@@ -405,7 +413,7 @@ fn pt(p: [f64; 2]) -> Point {
 }
 
 /// The larger factor `t` stretches a unit vector by, roughly.
-fn scale_of(t: Affine) -> f64 {
+pub(super) fn scale_of(t: Affine) -> f64 {
     let [a, b, c, d, _, _] = t.as_coeffs();
     (a * a + b * b).max(c * c + d * d).sqrt()
 }
@@ -543,3 +551,84 @@ impl Path {
 }
 
 builder_methods!(Path, |_: &Path| Affine::IDENTITY, own);
+
+/// The length of `path`, for counting dashes: exact for lines, and for a
+/// curve the mean of its chord and its control polygon, which is never
+/// under half its arc length (the polygon is never shorter than the arc).
+pub(super) fn length(path: impl IntoIterator<Item = PathEl>) -> f64 {
+    kurbo::segments(path)
+        .map(|segment| match segment {
+            PathSeg::Line(line) => line.p0.distance(line.p1),
+            PathSeg::Quad(quad) => {
+                let polygon = quad.p0.distance(quad.p1) + quad.p1.distance(quad.p2);
+                f64::midpoint(quad.p0.distance(quad.p2), polygon)
+            }
+            PathSeg::Cubic(cubic) => {
+                let polygon = cubic.p0.distance(cubic.p1)
+                    + cubic.p1.distance(cubic.p2)
+                    + cubic.p2.distance(cubic.p3);
+                f64::midpoint(cubic.p0.distance(cubic.p3), polygon)
+            }
+        })
+        .sum()
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use std::f64::consts::TAU;
+
+    use super::Path;
+    use crate::kurbo::{Affine, PathEl};
+
+    fn cubics(path: &Path) -> usize {
+        path.elements
+            .iter()
+            .filter(|element| matches!(element, PathEl::CurveTo(..)))
+            .count()
+    }
+
+    /// Every arc, whatever its radius or the transform's scale, is a
+    /// bounded number of cubics: a full turn at most 33.
+    #[test]
+    fn an_arc_is_a_bounded_number_of_cubics() {
+        let mut path = Path::new();
+        path.arc(0.0, 0.0, 1e36, 0.0, TAU, false).unwrap();
+        assert!(cubics(&path) <= 33, "{}", cubics(&path));
+
+        for (scale, radius) in [(1e200, 1.0), (1.0, 1e300), (1e300, 1e300), (1e-300, 1.0)] {
+            let t = Affine::scale(scale);
+            let mut path = Path::new();
+            path.ellipse_with(t, 0.0, 0.0, radius, radius, 0.0, 0.0, TAU, false)
+                .unwrap();
+            assert!(cubics(&path) <= 33, "{scale} {radius}: {}", cubics(&path));
+            let mut path = Path::new();
+            path.round_rect_with(t, 0.0, 0.0, radius, radius, &[[radius / 2.0; 2]])
+                .unwrap();
+            assert!(
+                cubics(&path) <= 4 * 9,
+                "{scale} {radius}: {}",
+                cubics(&path)
+            );
+            let mut path = Path::new();
+            path.move_to_with(t, 0.0, 0.0);
+            path.arc_to_with(t, [radius, 0.0], [radius, radius], radius)
+                .unwrap();
+            assert!(cubics(&path) <= 9, "{scale} {radius}: {}", cubics(&path));
+        }
+        let svg = Path::from_svg("M0 0 A1e300 1e300 0 1 1 1e300 0");
+        assert!(cubics(&svg) <= 33, "{}", cubics(&svg));
+    }
+
+    /// An ordinary radius flattens as before: at scale 1, a radius of 10
+    /// is the cubics a tolerance of 1e-3 gives.
+    #[test]
+    fn an_ordinary_arc_keeps_its_tolerance() {
+        let mut path = Path::new();
+        path.arc(0.0, 0.0, 10.0, 0.0, TAU, false).unwrap();
+        let expected = crate::kurbo::Arc::new((0.0, 0.0), (10.0, 10.0), 0.0, TAU, 0.0)
+            .append_iter(1e-3)
+            .count();
+        assert_eq!(cubics(&path), expected);
+    }
+}

@@ -12,8 +12,8 @@ pub mod paragraph;
 pub use context::TextContext;
 pub use font::FontBlob;
 pub use line::{
-    FontMetrics, LineOptions, LineWhiteSpace, ResolvedFamily, ResolvedFont, ResolvedFontStyle,
-    ShapedGlyph, ShapedLine, ShapedRun, Synthesis, font_metrics, shape_line,
+    FontMetrics, LineOptions, ResolvedFamily, ResolvedFont, ResolvedFontStyle, ShapedGlyph,
+    ShapedLine, ShapedRun, Synthesis, font_metrics, shape_line,
 };
 /// The CSS generic font families, as parley names them: what
 /// [`ResolvedFamily::Generic`] holds.
