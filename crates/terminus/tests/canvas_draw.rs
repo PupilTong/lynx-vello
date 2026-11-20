@@ -876,6 +876,21 @@ fn shadows() {
     assert_eq!(pixel(&mut canvas, 35, 25), CLEAR);
 }
 
+/// A draw that needs the bitmap as its backdrop, with a shadow blur far
+/// past what a render takes, keeps what the canvas held: `destination-over`
+/// under opaque red changes no pixel.
+#[test]
+fn a_large_shadow_blur_under_a_backdrop_draw_keeps_the_bitmap() {
+    let mut canvas = filled(16, 16, RED);
+    canvas.set_shadow_color(color(BLUE));
+    canvas.set_shadow_blur(20_000.0);
+    canvas.set_global_composite_operation(CompositeOp::DestinationOver);
+    canvas.set_fill_style(solid(GREEN));
+    canvas.fill_rect(4.0, 4.0, 4.0, 4.0);
+    assert_eq!(pixel(&mut canvas, 12, 12), RED);
+    assert_eq!(pixel(&mut canvas, 5, 5), RED);
+}
+
 #[test]
 fn shadow_blur_spreads_and_is_clipped() {
     let mut canvas = Canvas::new(60, 80);

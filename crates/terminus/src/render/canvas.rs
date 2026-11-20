@@ -25,7 +25,8 @@
 //! `vello_gpu` `schedule/mod.rs` `schedule_root`), and refuses to sample
 //! the texture it renders into (`RenderError::TextureFeedbackLoop`). Such a
 //! batch is rendered into the second texture over a clear, with the first
-//! sampled under the surface's id, and the two change places.
+//! sampled under the surface's id, and the two change places once the
+//! render has succeeded.
 
 use std::sync::Arc;
 
@@ -654,9 +655,15 @@ fn replay(
             Some(Color::TRANSPARENT),
             &sources,
         );
+        // The rendered texture becomes the content; after a failed render
+        // the content stays and the spare is kept for the next batch.
         if let Some(entry) = gpu.raster.canvases().get_mut(&target) {
-            entry.texture = spare;
-            entry.spare = Some(current);
+            if result.is_ok() {
+                entry.texture = spare;
+                entry.spare = Some(current);
+            } else {
+                entry.spare = Some(spare);
+            }
         }
         result
     } else {
@@ -1051,5 +1058,31 @@ mod tests {
         let canvases = gpu.raster.canvases();
         assert!(!canvases.contains_key(&id), "the source's texture");
         assert!(!canvases.contains_key(&copy_id), "the copy's texture");
+    }
+
+    /// A backdrop batch whose render fails (here a drop shadow whose
+    /// filter layer is past the device's texture limit) leaves the surface
+    /// as it was: the textures change places only after a render that
+    /// succeeds.
+    #[test]
+    fn a_failed_backdrop_render_keeps_the_content() {
+        let mut surface = Surface::new(8, 4).expect("a side the device takes");
+        let mut list = DisplayList::new();
+        let red = ListPaint::from(Color::from_rgba8(255, 0, 0, 255));
+        fill(&mut list, Rect::new(0.0, 0.0, 8.0, 4.0), &red);
+        surface.draw(&mut list, Init::Load, &mut Vec::new());
+        let own = ListPaint::texture(
+            surface.texture(),
+            ImageSampler::new()
+                .with_extend(Extend::Pad)
+                .with_quality(ImageQuality::Low),
+        );
+        fill(&mut list, Rect::new(0.0, 0.0, 8.0, 4.0), &own);
+        list.push_drop_shadow(0.0, 0.0, 10_000.0, Color::from_rgba8(0, 0, 255, 255));
+        fill(&mut list, Rect::new(2.0, 1.0, 4.0, 3.0), &red);
+        list.pop_layer();
+        surface.draw(&mut list, Init::Backdrop, &mut Vec::new());
+        assert_eq!(pixel(&mut surface, 1, 1), RED);
+        assert_eq!(pixel(&mut surface, 7, 3), RED);
     }
 }

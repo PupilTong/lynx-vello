@@ -1012,7 +1012,8 @@ one `Op` applied by `apply`:
 - `Surface::draw(list, init, keep)` replays a `DisplayList` whose clips and layers are all
   closed: `Init::Load` over the texture (`TargetInit::SrcOver`), `Init::Clear` over a transparent
   clear, `Init::Backdrop` into the surface's second texture over a clear with the first bound
-  under the surface's id, after which the two change places. The list is emptied; `keep` holds the
+  under the surface's id, after which the two change places unless the render failed, which leaves
+  the content as it was. The list is emptied; `keep` holds the
   `SurfaceImage`s it draws until the replay. Every `Paint::Texture` the list draws is looked up in
   the canvas table and bound for the render (`SparseBackend::render_onto`'s `sources`); pixel images
   are uploaded through the bitmap table like any `ImageRef`.
