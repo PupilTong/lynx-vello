@@ -1008,9 +1008,10 @@ impl Canvas {
         raster.bound();
     }
 
-    /// `fillRect(x, y, w, h)`.
+    /// `fillRect(x, y, w, h)`: nothing when either side is zero (HTML
+    /// "fillRect" step 2), whatever the composite operation.
     pub fn fill_rect(&mut self, x: f64, y: f64, w: f64, h: f64) {
-        if ![x, y, w, h].iter().all(|v| v.is_finite()) {
+        if ![x, y, w, h].iter().all(|v| v.is_finite()) || w == 0.0 || h == 0.0 {
             return;
         }
         let Some(raster) = &mut self.raster else {

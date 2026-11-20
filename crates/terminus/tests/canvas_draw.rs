@@ -484,6 +484,27 @@ fn composite_source_in_clears_outside_the_shape() {
     assert_eq!(pixel(&mut canvas, 15, 10), CLEAR);
 }
 
+/// HTML `fillRect` step 2: a zero width or height returns before anything
+/// is painted, so not even a destructive operation clears the canvas.
+#[test]
+fn a_zero_size_fill_rect_has_no_effect() {
+    for op in [
+        CompositeOp::Copy,
+        CompositeOp::SourceIn,
+        CompositeOp::DestinationIn,
+        CompositeOp::SourceOut,
+        CompositeOp::DestinationAtop,
+    ] {
+        let mut canvas = filled(20, 20, RED);
+        canvas.set_global_composite_operation(op);
+        canvas.set_fill_style(solid(BLUE));
+        canvas.fill_rect(0.0, 0.0, 0.0, 10.0);
+        canvas.fill_rect(0.0, 0.0, 10.0, 0.0);
+        canvas.fill_rect(5.0, 5.0, -0.0, -0.0);
+        assert_eq!(pixel(&mut canvas, 10, 10), RED, "{op:?}");
+    }
+}
+
 #[test]
 fn composite_copy_respects_the_clip() {
     let mut canvas = filled(20, 20, BLUE);
