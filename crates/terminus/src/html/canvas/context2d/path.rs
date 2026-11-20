@@ -561,13 +561,13 @@ pub(super) fn length(path: impl IntoIterator<Item = PathEl>) -> f64 {
             PathSeg::Line(line) => line.p0.distance(line.p1),
             PathSeg::Quad(quad) => {
                 let polygon = quad.p0.distance(quad.p1) + quad.p1.distance(quad.p2);
-                (quad.p0.distance(quad.p2) + polygon) / 2.0
+                f64::midpoint(quad.p0.distance(quad.p2), polygon)
             }
             PathSeg::Cubic(cubic) => {
                 let polygon = cubic.p0.distance(cubic.p1)
                     + cubic.p1.distance(cubic.p2)
                     + cubic.p2.distance(cubic.p3);
-                (cubic.p0.distance(cubic.p3) + polygon) / 2.0
+                f64::midpoint(cubic.p0.distance(cubic.p3), polygon)
             }
         })
         .sum()
