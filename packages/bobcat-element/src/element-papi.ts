@@ -1,6 +1,7 @@
 import {
   attributeNames,
   callElementMethod,
+  canvasTransferControl,
   childElementIds,
   childIndex,
   createDocument,
@@ -32,6 +33,7 @@ import {
 import type { NodeQueryRequest, QueryNode } from "bobcat:selector-query";
 import { __BobcatPublishEvent, __BobcatSendExposureRecords } from "bobcat:runtime";
 import { splitRecord } from "bobcat:record";
+import { __BobcatTransferredCanvas } from "bobcat:canvas";
 // Read only when a frame's `src`, `data` or `global-props` is written, or its
 // connection changes, never as this module evaluates: `bobcat:frame` imports
 // `bobcat:runtime`, which imports this module, so the cycle is safe exactly
@@ -94,7 +96,7 @@ import { frameConnectionChanged, frameDataChanged, frameSourceChanged } from "bo
 // | `__GetPageElement()` | the page handle `__CreatePage` minted |
 // | `__QuerySelector(element, selector, params)` | native `queryElementIds` export + this runtime's handle index |
 // | `__QuerySelectorAll(element, selector, params)` | native `queryElementIds` export + this runtime's handle index |
-// | `__InvokeUIMethod(element, method, params, callback)` | native `callElementMethod` + `getAttribute` exports + this runtime's dataset store |
+// | `__InvokeUIMethod(element, method, params, callback)` | native `callElementMethod` + `getAttribute` exports + this runtime's dataset store; a `canvas`'s `transferControlToOffscreen`, native `canvasTransferControl` + `bobcat:canvas` |
 // | `__GetComputedStyleByKey(element, key)` | native `getComputedStyleMap` export |
 // | `__FlushElementTree(element?, options?)` | native `flushElementTree` export, with `options.pipelineOptions.pipelineID` and `options.__lynx_timing_flag`; a list cell's flush (`options.listID`) commits nothing |
 //
@@ -2500,6 +2502,9 @@ interface InvokeResult {
  * empty string without serializing anything.
  */
 function invokeUIMethod(handle: Handle, method: string, params: unknown): InvokeResult {
+  if (method === TRANSFER_CONTROL && tagName(nodeIdOf(handle)) === "canvas") {
+    return transferControlToOffscreen(handle);
+  }
   let text = "";
   if (method !== "boundingClientRect") {
     try {
@@ -2517,6 +2522,26 @@ function invokeUIMethod(handle: Handle, method: string, params: unknown): Invoke
     code: Number(fields[0]),
     data: decodeMethodData(handle, method, fields.slice(1)),
   };
+}
+
+/** The UI method a `canvas` answers with an object, which no record carries. */
+const TRANSFER_CONTROL = "transferControlToOffscreen";
+
+/**
+ * HTML's `transferControlToOffscreen()` on a `canvas`, as web-core answers
+ * it by calling the DOM element's method: `data` is the `OffscreenCanvas`,
+ * the placeholder's `width` and `height` its size. It is drawn in this
+ * realm, and the host commits its bitmap to the element at the end of each
+ * JavaScript entry that changed it. A canvas whose control was already
+ * transferred answers 7, `INVALID_STATE_ERROR`, the code the host answers a
+ * kind's method failing with `InvalidStateError` (web-core answers 4 for any
+ * method that throws). An element of another kind takes the generic path,
+ * which answers 3.
+ */
+function transferControlToOffscreen(handle: Handle): InvokeResult {
+  const entry = canvasTransferControl(nodeIdOf(handle));
+  if (typeof entry === "string") return { code: 7, data: undefined };
+  return { code: 0, data: __BobcatTransferredCanvas(entry) };
 }
 
 /**
@@ -2831,6 +2856,12 @@ export function __BobcatQueryNodes(request: NodeQueryRequest) {
     // operations answer with; the BTS facade reads `code` and `data` off it.
     if (code) return status;
     const { method, params: methodParams } = params as { method: unknown; params: unknown };
+    // Its `data` is an object of this realm, which the reply cannot carry:
+    // the method is not run, and the background thread hears 3,
+    // `METHOD_NOT_FOUND`, as it does for any element.
+    if (String(method) === TRANSFER_CONTROL) {
+      return { code: 3, data: `${TRANSFER_CONTROL} cannot be invoked from the background thread` };
+    }
     return invokeUIMethod(elements[0]!, String(method), methodParams);
   }
   if (operation === "setNativeProps") {

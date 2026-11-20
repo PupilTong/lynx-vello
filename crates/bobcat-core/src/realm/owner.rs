@@ -352,33 +352,37 @@ pub(crate) fn enter_now<O: RealmOwner, T>(
 ///    synchronous wait lets the thread's tasks run, and one of them may end the owner — a
 ///    `Terminate` its consumer read, a release, a panic in another of its tasks. The callbacks of
 ///    the batch after that one still run, and what they threw is still reported.
-/// 5. **[`RealmOwner::after_timers`]**: a page's commit and the deliveries it posts; a worker's
+/// 5. **The canvases drawn during the entry**, the realm's own and then each child's
+///    ([`super::RealmCore::settle_drawn_canvases`]): each replays what it recorded, so a canvas
+///    drawn every frame and never read keeps no more than one entry's draws, and one bound to a
+///    placeholder `<canvas>` whose bitmap changed is committed to it.
+/// 6. **[`RealmOwner::after_timers`]**: a page's commit and the deliveries it posts; a worker's
 ///    `close()`, which ends it.
-/// 6. **Nothing more, for an owner that step ended.**
-/// 7. **The boot report**, until the realm's root module has settled: a finished module is marked
+/// 7. **Nothing more, for an owner that step ended.**
+/// 8. **The boot report**, until the realm's root module has settled: a finished module is marked
 ///    and reported through [`RealmOwner::on_booted`], after the commit, so the frame exists before
 ///    the event that implies it; a rejected one is marked and, where [`RealmOwner::BOOT_REJECTION`]
 ///    names a scene, reported under it.
-/// 8. **Nothing more, for an owner that report ended.**
-/// 9. **[`RealmOwner::after_boot`]**: a page's frame-post acknowledgement, after both the commit
-///    and the boot report, because a host blocked on that sequence number is blocked on the frame.
-/// 10. **The module requests** this entry produced, each asked of the host and spawned as a
+/// 9. **Nothing more, for an owner that report ended.**
+/// 10. **[`RealmOwner::after_boot`]**: a page's frame-post acknowledgement, after both the commit
+///     and the boot report, because a host blocked on that sequence number is blocked on the frame.
+/// 11. **The module requests** this entry produced, each asked of the host and spawned as a
 ///     [`load_module`] of its own — except the one [`RealmOwner::entry_name`] names, which the role
 ///     answers itself. A worker names none, so the request the load of its root module raised for
 ///     its script is among those asked of the host. Then each child's, each spawned as a
 ///     [`load_child_module`] that completes it in the child.
-/// 11. **The futures** a `.then` asked this realm to settle, each spawned as a [`settle_future`] of
+/// 12. **The futures** a `.then` asked this realm to settle, each spawned as a [`settle_future`] of
 ///     its own; then each child's, as a [`settle_child_future`].
-/// 12. **What the children left unhandled**, one rejection per child, and then what the realm
+/// 13. **What the children left unhandled**, one rejection per child, and then what the realm
 ///     itself left beside them, each reported under [`Scene::ShadowRealm`]; skipped for a realm
 ///     with no children. Nothing more, for an owner a report ended.
-/// 13. **[`RealmOwner::after_settles`]**: a page's `@font-face` loads.
-/// 14. **The release of every child nothing needs any more**, outside every JavaScript call: see
+/// 14. **[`RealmOwner::after_settles`]**: a page's `@font-face` loads.
+/// 15. **The release of every child nothing needs any more**, outside every JavaScript call: see
 ///     [`ChildRealms::release_unneeded`]. Nothing else frees a child while its owner lives.
-/// 15. **The next deadline** — the earliest of the realm's own ([`RealmOwner::next_deadline`]: its
+/// 16. **The next deadline** — the earliest of the realm's own ([`RealmOwner::next_deadline`]: its
 ///     next timer, and on a page an `x-swiper`'s next autoplay turn if that is sooner) and every
 ///     child's — republished only when it moved.
-/// 16. **The checkpoint generation**, last, so it names the generation this entry ran the shared
+/// 17. **The checkpoint generation**, last, so it names the generation this entry ran the shared
 ///     job queue up to: the clock task compares a bump against it to tell this owner's own entries
 ///     from a sibling's.
 ///
@@ -398,6 +402,7 @@ fn epilogue<O: RealmOwner>(owner: &Rc<O>, realm: &mut O::Realm, js: &mut ScriptR
     if lifetime.ended() {
         return;
     }
+    O::core(realm).settle_drawn_canvases();
     O::after_timers(owner, realm);
     if lifetime.ended() {
         return;

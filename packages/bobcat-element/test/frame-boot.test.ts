@@ -75,6 +75,7 @@ let papi: typeof elementPapiModule;
 
 // The reader of every record the host answers with, as the realm has it.
 rstest.mockRequire("bobcat:record", () => record);
+rstest.mockRequire("bobcat:canvas", () => ({}));
 
 rstest.mockRequire("bobcat:runtime", () => ({
   _ReportError(error: unknown) {

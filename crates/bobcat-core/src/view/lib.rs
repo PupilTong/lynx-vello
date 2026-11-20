@@ -732,6 +732,16 @@ impl LynxGroup {
         // `bobcat-main`, parked in its scheduler, never does.
         #[cfg(target_arch = "wasm32")]
         let alarm_clock = crate::alarm::start()?;
+        // On wasm32 a canvas's GPU steps are queued for this thread, which
+        // holds the device; queuing one wakes it, and its painter applies
+        // the queue at the start of each turn (`Painter::pump`).
+        #[cfg(target_arch = "wasm32")]
+        {
+            let requester = Arc::clone(&event_requester);
+            terminus::link::render::canvas::set_waker(Arc::new(move || {
+                requester.request_event();
+            }));
+        }
         // The group's second runtime, started here beside `bobcat-main`
         // rather than by it: `bobcat-main` is handed one sender on it and its
         // trap flag, and nothing else. First, because a `bobcat-main` that
@@ -952,6 +962,8 @@ impl LynxGroup {
         // until then, and its first `__FlushElementTree` parks on this.
         let (metrics, metric_receiver) = watch::channel(None);
         let scroll = Arc::new(ScrollMailbox::default());
+        let canvases = Arc::new(crate::paint::CanvasPictures::default());
+        let to_main = commands.downgrade();
         // The sink comes first and the store is built *from* it, so a store
         // without its report channel is unrepresentable and the two are paired
         // by construction. That pairing is per view: a host whose registry
@@ -1013,6 +1025,8 @@ impl LynxGroup {
                 style_sheet_probe: fetcher.style_sheet_probe(),
                 base_url,
                 registry: Arc::clone(&registry),
+                canvases: Arc::clone(&canvases),
+                to_main,
             })))
             .map_err(|_| EngineError::Thread {
                 name: "script",
@@ -1031,6 +1045,7 @@ impl LynxGroup {
                 metrics,
                 images: Rc::clone(&fetcher)
                     as Rc<dyn FrameImages<PlatformFrame = F::PlatformFrame>>,
+                canvases,
                 scroll,
                 registry,
             }),
@@ -1859,6 +1874,11 @@ pub(crate) struct ViewAttachment {
     pub(crate) base_url: Arc<url::Url>,
     /// The view's pipeline registry, shared with its seat.
     pub(crate) registry: Arc<PipelineRegistry>,
+    /// The view's placeholder canvases, shared with its seat.
+    pub(crate) canvases: Arc<crate::paint::CanvasPictures>,
+    /// The view's command channel, held weakly and outside the seat's
+    /// count, for a canvas presenter's `ToMain::CanvasResized`.
+    pub(crate) to_main: mpsc::WeakUnboundedSender<ToMain>,
 }
 
 /// The answers to the requests [`LynxGroup::create_lynx_view`] made on the

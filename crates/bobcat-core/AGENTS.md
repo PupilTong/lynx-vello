@@ -64,7 +64,8 @@ the main-thread flush binding — and
 - [Realm, document and boot](docs/realm-boot.md) — the realm (`open_realm`), the
   document, boot and the code cache (`code_cache.rs`).
 - [Painter, frames, pacing and images](docs/painter.md) — the `Painter`, frames,
-  pacing and images.
+  pacing and images, and the placeholder canvases' presenter
+  (`paint/canvas_pictures.rs`).
 - [Workers, the BTS and cross-thread messages](docs/workers.md) — Workers
   (`main/workers.rs`), the BTS and cross-thread messages.
 - [The host module, realm construction and ShadowRealm](docs/host-module.md) —
@@ -83,3 +84,7 @@ the main-thread flush binding — and
   UA sheet, the sources of the `image` and `svg` elements
   (`tree/image_sources.rs`) and the `video` element (`tree/video.rs`), which
   `bobcat-core` owns and `terminus` does not.
+- [The Canvas 2D API](docs/canvas.md) — `OffscreenCanvas` in every realm
+  kind: the per-realm table (`canvas/`), `transferControlToOffscreen` from
+  the MTS realm, the per-entry flush and commit, pixel reads, color and font
+  parsing, and the deviations.

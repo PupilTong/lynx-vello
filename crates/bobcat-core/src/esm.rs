@@ -120,6 +120,15 @@ pub(crate) const GLOBAL_EVENT_MODULE_SPECIFIER: &str = "bobcat:global-event-emit
 /// Lynx's typed asynchronous Context channel, shared by MTS and BTS.
 pub(crate) const CONTEXT_MODULE_SPECIFIER: &str = "bobcat:cross-thread-context";
 
+/// Web IDL's `DOMException`, which `bobcat:canvas` throws and installs.
+pub(crate) const DOM_EXCEPTION_MODULE_SPECIFIER: &str = "bobcat:dom-exception";
+
+/// The Canvas 2D API: `OffscreenCanvas`, its context, `Path2D`, `ImageData`,
+/// `ImageBitmap` and the rest, over [`crate::canvas`]'s members. Imported for
+/// its effect, as [`TIMER_MODULE_SPECIFIER`] is: it installs those names on
+/// the realm's global object.
+pub(crate) const CANVAS_MODULE_SPECIFIER: &str = "bobcat:canvas";
+
 /// The URL of a view's background thread, and the BTS bootstrap: the BTS is
 /// the worker at this URL, and this module is its realm's root module, as
 /// every worker's root module is the module at its URL. A registered module,
@@ -396,6 +405,8 @@ pub(crate) const BUILTIN_MODULES: &[BuiltinModule] = &[
     builtin_module!(PERFORMANCE_MODULE_SPECIFIER, "performance"),
     builtin_module!(NATIVE_MODULES_MODULE_SPECIFIER, "native-modules"),
     builtin_module!(CONTEXT_MODULE_SPECIFIER, "cross-thread-context"),
+    builtin_module!(DOM_EXCEPTION_MODULE_SPECIFIER, "dom-exception"),
+    builtin_module!(CANVAS_MODULE_SPECIFIER, "canvas"),
     builtin_module!(WORKER_CLASS_MODULE_SPECIFIER, "worker"),
     builtin_module!(WORKER_MODULE_SPECIFIER, "worker-runtime"),
     builtin_module!(BTS_RUNTIME_MODULE_SPECIFIER, "background-thread-runtime"),
