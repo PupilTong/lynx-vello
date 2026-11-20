@@ -354,3 +354,50 @@ runCanvasSuite('main');
         ["canvas background []", "canvas main []", "canvas worker []"]
     );
 }
+
+/// `createImageBitmap(canvas, sx, sy, sw, sh)` with a crop side past the
+/// longest texture rejects with an `InvalidStateError`, as an image that
+/// does not fit does, and a zero side with a `RangeError`; neither reaches
+/// the GPU.
+#[test]
+fn create_image_bitmap_refuses_crops_the_device_cannot_hold() {
+    let main = r"
+__CreatePage();
+(async () => {
+  const canvas = new OffscreenCanvas(4, 4);
+  canvas.getContext('2d').fillRect(0, 0, 4, 4);
+  const names = [];
+  for (const crop of [[0, 0, 20000, 16], [0, 0, 16, 20000], [0, 0, 0, 16]]) {
+    try { await createImageBitmap(canvas, ...crop); names.push('resolved'); }
+    catch (error) { names.push(error.name); }
+  }
+  console.log(`crop ${JSON.stringify(names)}`);
+})();
+";
+    let mut engine = TestViewSpec::new(main).create(Arc::new(NoWakeup));
+    let deadline = Instant::now() + Duration::from_mins(2);
+    let result = loop {
+        let mut found = None;
+        for event in engine.pump() {
+            match event {
+                EngineEvent::ConsoleMessage { message, .. } if message.starts_with("crop ") => {
+                    found = Some(message);
+                }
+                EngineEvent::ScriptReported { message, .. } => panic!("reported: {message}"),
+                EngineEvent::ScriptRunError(error) => panic!("the entry failed: {error}"),
+                EngineEvent::StartupFailed(error) => panic!("the view did not boot: {error}"),
+                EngineEvent::Panicked(error) => panic!("the engine panicked: {error}"),
+                _ => {}
+            }
+        }
+        if let Some(message) = found {
+            break message;
+        }
+        assert!(Instant::now() < deadline, "the script did not finish");
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    assert_eq!(
+        result,
+        r#"crop ["InvalidStateError","InvalidStateError","RangeError"]"#
+    );
+}
