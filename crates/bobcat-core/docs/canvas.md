@@ -27,6 +27,11 @@ painter's side of a placeholder is `painter.md`'s "Placeholder canvases".
 - `crates/bobcat-core/src/canvas/`: `mod.rs` the per-realm `CanvasTable`,
   `members.rs` the `bobcat-internal:host` members (`native.d.ts`'s
   `BobcatCanvasNative` lists them), `css.rs` the color and `font` parsing.
+  A context member runs on the canvas's `Context2d`
+  (`CanvasTable::context`, or `CanvasTable::draw` for one that may change
+  the bitmap and so lists the canvas as drawn); a canvas member runs on the
+  `OffscreenCanvas` itself (`CanvasTable::draw_canvas`, the
+  `CanvasEntry`).
 - `packages/bobcat-element/src/element-papi.ts`'s `invokeUIMethod`: a
   `canvas`'s `transferControlToOffscreen`.
 - `packages/bobcat-element/src/transfer.ts` (`bobcat:transfer`): the
@@ -51,8 +56,9 @@ over a `CanvasTable` of its own in its `RealmCore`. What the table has of a
 document is its `CanvasHost`: `Worker` for a worker realm, `Document` for
 the MTS realm and its children, which adds the member
 `canvasTransferControl`. The table maps ids to `Entry` values — a canvas
-(size, its `terminus::link::html::canvas::Canvas` made at the first call
-that needs a bitmap, and the `CanvasPresenter` of a placeholder's), a `Path`, a
+(size, its `terminus::link::html::canvas::OffscreenCanvas` made at the
+first call that needs a bitmap, and the `CanvasPresenter` of a
+placeholder's), a `Path`, a
 `Gradient`, a `Pattern`, an `ImageBitmap`'s `Image` — all owned `Send`
 values (a compile-time assertion in `mod.rs`), which `CanvasTable::remove`
 takes out of the table.
@@ -169,7 +175,7 @@ the due timers and before the role's commit) calls
 `RealmCore::settle_drawn_canvases`,
 which runs `CanvasTable::settle_drawn` for the realm and each child. Each
 canvas drawn during the entry is flushed, except one with a presenter whose
-bitmap changed (`Canvas::has_changes`), which is committed instead
+bitmap changed (`OffscreenCanvas::has_changes`), which is committed instead
 (`CanvasPresenter::commit`, which replays first): HTML's update of an
 `OffscreenCanvas`'s placeholder, done here at the end of each JavaScript
 entry, once per canvas, and only for an entry that changed it. An entry that
@@ -178,7 +184,7 @@ never committed, and its placeholder draws nothing and is not waited for.
 
 ## Reading pixels
 
-`getImageData` is `Canvas::read_image_data`, which replays what is recorded
+`getImageData` is `Context2d::read_image_data`, which replays what is recorded
 and issues the readback, then a wait on its answer (`ImageDataRead`), taken
 after the table's borrow is released (`ReadWait`). Natively the calling
 thread does the readback itself as it is issued, and the wait returns at

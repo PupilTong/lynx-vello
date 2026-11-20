@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use terminus::link::NodeId;
 use terminus::link::html::canvas::{
-    Canvas, CanvasFrames, Placeholder, Style, transfer_control_to_offscreen,
+    CanvasFrames, OffscreenCanvas, Placeholder, Style, transfer_control_to_offscreen,
 };
 use terminus::link::peniko::Color;
 
@@ -106,18 +106,20 @@ fn register(engine: &TestEngine, frames: CanvasFrames, wakes: Arc<Wakes>) -> Can
 
 /// A `width` × `height` canvas whose left half is `left` and right half
 /// `right`, drawn on the GPU.
-fn frame(width: u32, height: u32, left: [u8; 4], right: [u8; 4]) -> Canvas {
-    let mut canvas = Canvas::new(width, height);
+fn frame(width: u32, height: u32, left: [u8; 4], right: [u8; 4]) -> OffscreenCanvas {
+    let mut canvas = OffscreenCanvas::new(width, height);
     let half = f64::from(width / 2);
     for (colour, x, w) in [(left, 0.0, half), (right, half, f64::from(width) - half)] {
         let [r, g, b, a] = colour;
-        canvas.set_fill_style(Style::Color(Color::from_rgba8(r, g, b, a)));
-        canvas.fill_rect(x, 0.0, w, f64::from(height));
+        canvas
+            .context_2d()
+            .set_fill_style(Style::Color(Color::from_rgba8(r, g, b, a)));
+        canvas.context_2d().fill_rect(x, 0.0, w, f64::from(height));
     }
     canvas
 }
 
-fn solid(width: u32, height: u32, colour: [u8; 4]) -> Canvas {
+fn solid(width: u32, height: u32, colour: [u8; 4]) -> OffscreenCanvas {
     frame(width, height, colour, colour)
 }
 
@@ -186,8 +188,10 @@ fn committed_canvases_draw_stretched_and_without_a_document_commit() {
     // commit, and the next commit shows the rest.
     let mut drawn = frame(4, 2, RED, BLUE);
     presenter.commit(&mut drawn);
-    drawn.set_fill_style(Style::Color(Color::from_rgba8(0, 255, 0, 255)));
-    drawn.fill_rect(0.0, 0.0, 2.0, 2.0);
+    drawn
+        .context_2d()
+        .set_fill_style(Style::Color(Color::from_rgba8(0, 255, 0, 255)));
+    drawn.context_2d().fill_rect(0.0, 0.0, 2.0, 2.0);
     drawn.flush();
     let shot = capture(&mut engine);
     assert_eq!(pixel(&shot, 5, 15), RED, "the left half stretched");
@@ -291,8 +295,9 @@ fn a_committed_texture_outlives_the_bitmap_budget() {
         let pixels = vec![255; 2048 * 2048 * 4];
         let image = terminus::link::html::canvas::Image::from_premultiplied(2048, 2048, pixels)
             .expect("an image the device takes");
-        let mut other = Canvas::new(1, 1);
+        let mut other = OffscreenCanvas::new(1, 1);
         other
+            .context_2d()
             .draw_image(&image, 0.0, 0.0)
             .expect("a drawable image");
         other.flush();

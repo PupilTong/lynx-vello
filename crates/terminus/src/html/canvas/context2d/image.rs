@@ -25,7 +25,8 @@ pub(crate) enum Source {
     /// A texture of its own, which lives as long as a clone does.
     Texture(SurfaceImage),
     /// A canvas's texture as it is when the list drawing it is replayed
-    /// ([`super::Canvas::image`]): drawn at once, never kept.
+    /// ([`OffscreenCanvas::image`](crate::html::canvas::OffscreenCanvas::image)): drawn at once,
+    /// never kept.
     Live(Texture),
     /// No pixels: a canvas with no bitmap.
     Empty,

@@ -240,9 +240,9 @@ a weak, uncounted handle on the view's command channel
 - `CanvasPresenter` is `Send` and `Clone`, and holds its registry entry
   weakly; the entry holds the element's link weakly, the view's
   `EventRequester` and the weak command handle.
-  `commit(&mut terminus::link::html::canvas::Canvas)` is HTML's update of
+  `commit(&mut terminus::link::html::canvas::OffscreenCanvas)` is HTML's update of
   the placeholder: the canvas replays what it recorded and its texture is copied, on the GPU, into the
-  texture the picture draws from (`Canvas::commit`, over `terminus`'s
+  texture the picture draws from (`OffscreenCanvas::commit`, over `terminus`'s
   `Surface::commit`), and only then is the new generation published, so the
   painter never draws a commit half copied. Nothing queues. When the commit
   owes a wake it calls `EventRequester::request_event`; when it owes a

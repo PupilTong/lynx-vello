@@ -34,7 +34,8 @@ use quickjs_rust_bridge::{HostArgument, HostValue, Revival, TransferredClone};
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use terminus::link::html::canvas::{
-    Canvas, CanvasError, Gradient, Image, ImageDataRead, InvalidState, Path, Pattern,
+    CanvasError, Context2d, Gradient, Image, ImageDataRead, InvalidState, OffscreenCanvas, Path,
+    Pattern,
 };
 use terminus::link::{NodeId, TextContext};
 use tokio_util::sync::CancellationToken;
@@ -60,7 +61,7 @@ pub(crate) struct CanvasEntry {
     width: u32,
     height: u32,
     /// Boxed, so an entry of any kind is small to move.
-    canvas: Option<Box<Canvas>>,
+    canvas: Option<Box<OffscreenCanvas>>,
     /// Listed in [`CanvasTable::drawn`] since the last
     /// [`CanvasTable::settle_drawn`].
     drawn: bool,
@@ -173,16 +174,16 @@ impl CanvasEntry {
             presenter,
         } = transferred;
         Self {
-            canvas: Some(Box::new(Canvas::new(width, height))),
+            canvas: Some(Box::new(OffscreenCanvas::new(width, height))),
             presenter: Some(presenter),
             ..Self::new(width, height)
         }
     }
 
-    fn canvas(&mut self) -> &mut Canvas {
+    fn canvas(&mut self) -> &mut OffscreenCanvas {
         let (width, height) = (self.width, self.height);
         self.canvas
-            .get_or_insert_with(|| Box::new(Canvas::new(width, height)))
+            .get_or_insert_with(|| Box::new(OffscreenCanvas::new(width, height)))
     }
 
     /// Setting `width` or `height`: the bitmap and the context state reset.
@@ -370,23 +371,34 @@ impl CanvasTable {
         self.entries.borrow_mut()
     }
 
-    /// The canvas under `id`, for a call that reads or sets context state.
-    fn canvas<R>(&self, id: u64, call: impl FnOnce(&mut Canvas) -> R) -> Result<R, String> {
+    /// The 2D context of the canvas under `id`, for a call that reads or
+    /// sets context state.
+    fn context<R>(&self, id: u64, call: impl FnOnce(&mut Context2d<'_>) -> R) -> Result<R, String> {
         match self.entries().get_mut(&id) {
-            Some(Entry::Canvas(entry)) => Ok(call(entry.canvas())),
+            Some(Entry::Canvas(entry)) => Ok(call(&mut entry.canvas().context_2d())),
             _ => Err(no_such("canvas", id)),
         }
     }
 
-    /// [`Self::canvas`] for a call that may change the bitmap, which lists
-    /// the canvas as drawn during this entry.
-    fn draw<R>(&self, id: u64, call: impl FnOnce(&mut Canvas) -> R) -> Result<R, String> {
+    /// The canvas under `id`, for a call that may change the bitmap, which
+    /// lists the canvas as drawn during this entry.
+    fn draw_canvas<R>(
+        &self,
+        id: u64,
+        call: impl FnOnce(&mut OffscreenCanvas) -> R,
+    ) -> Result<R, String> {
         let mut entries = self.entries();
         let Some(Entry::Canvas(entry)) = entries.get_mut(&id) else {
             return Err(no_such("canvas", id));
         };
         self.note_drawn(id, entry);
         Ok(call(entry.canvas()))
+    }
+
+    /// [`Self::context`] for a call that may change the bitmap, which lists
+    /// the canvas as drawn during this entry.
+    fn draw<R>(&self, id: u64, call: impl FnOnce(&mut Context2d<'_>) -> R) -> Result<R, String> {
+        self.draw_canvas(id, |canvas| call(&mut canvas.context_2d()))
     }
 
     /// Lists the canvas `entry`, under `id`, as drawn during this entry.

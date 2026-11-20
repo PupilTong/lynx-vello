@@ -44,13 +44,15 @@
 //!
 //! # The 2D rendering context
 //!
-//! [`context2d`] is the `OffscreenCanvas`'s side: one bitmap and its
-//! `CanvasRenderingContext2D` ([`Canvas`]), with `Path2D`, `CanvasGradient`,
-//! `CanvasPattern` and the image it draws. It needs no [`Document`], so it
-//! runs on a thread that has none, and commits here through
-//! [`Canvas::commit`].
+//! [`OffscreenCanvas`] is the `OffscreenCanvas`'s side: its size and its
+//! bitmap, committed here through [`OffscreenCanvas::commit`]. Its
+//! `OffscreenCanvasRenderingContext2D` is the [`Context2d`] that
+//! [`OffscreenCanvas::context_2d`] borrows ([`context2d`]), with `Path2D`,
+//! `CanvasGradient`, `CanvasPattern` and the image it draws. Neither needs a
+//! [`Document`], so they run on a thread that has none.
 
 mod context2d;
+mod offscreen;
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -60,10 +62,11 @@ use std::sync::{Arc, Mutex, PoisonError, Weak};
 use rustc_hash::FxHashMap;
 
 pub use self::context2d::{
-    Canvas, CanvasError, CompositeOp, Direction, FillRule, GenericFamily, Gradient, Image,
+    CanvasError, CompositeOp, Context2d, Direction, FillRule, GenericFamily, Gradient, Image,
     ImageDataRead, LineCap, LineJoin, Path, Pattern, Repetition, ResolvedFamily, ResolvedFont,
     ResolvedFontStyle, SmoothingQuality, Style, TextAlign, TextBaseline, TextMetrics,
 };
+pub use self::offscreen::OffscreenCanvas;
 pub use super::InvalidState;
 use crate::render::image::{FrameImage, ImageDescriptor};
 use crate::render::picture::{PictureId, PictureKey};
