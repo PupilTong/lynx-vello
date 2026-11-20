@@ -63,7 +63,7 @@ Subsystems:
   rules, 300 × 150 by default); `transfer_control_to_offscreen` (an
   `InvalidState` unless `none`) answers the size and a `Send`
   `CanvasFrames`, through which a canvas surface commits
-  (`Canvas::commit`, through `render::canvas::Surface::commit`): its
+  (`OffscreenCanvas::commit`, through `render::canvas::Surface::commit`): its
   texture is copied into the
   picture's own texture, which the element's link leases until it is freed,
   before the generation is published; the commit answers whether a host
@@ -72,7 +72,10 @@ Subsystems:
   committed bitmaps there. `html/canvas/context2d/` is HTML's 2D rendering
   context, the `OffscreenCanvas`'s side (bucket 1: the standard, no Lynx
   quirk), with no `Document` and no JavaScript, so a Worker's canvas has one:
-  `Canvas` is one bitmap and its `CanvasRenderingContext2D` state, one call
+  `OffscreenCanvas` (`html/canvas/offscreen.rs`) is one bitmap with its
+  size, commit and `transferToImageBitmap`, and `Context2d`
+  (`context2d/context.rs`), which `OffscreenCanvas::context_2d` borrows from
+  it, is its `OffscreenCanvasRenderingContext2D`, one call
   per context method or attribute taking numbers, `&str`, keyword enums
   (`CompositeOp`, `LineCap`, … each with `from_name`/`name` for the IDL
   strings) or `Path` (`Path2D`), `Gradient`, `Pattern` (shared by
@@ -80,12 +83,12 @@ Subsystems:
   `Style`, `seldon`'s `ResolvedFont` (CSS strings are parsed by the
   caller) and `peniko::Color`; text calls take the caller's
   `&mut TextContext` and shape through `seldon::text::shape_line`, the
-  shaper SVG `<text>` uses; `CanvasError` names the exception. `Canvas`
+  shaper SVG `<text>` uses; `CanvasError` names the exception. `OffscreenCanvas`
   is `Send` and there is no global state. Draws are recorded into the
   canvas's own `DisplayList` on the calling thread and replayed onto its
   `render::canvas::Surface` at a read, at `flush`, after a draw that samples
   a canvas texture, or past 2 MiB of recording (`MAX_RECORDED_BYTES`);
-  `Canvas::commit(&CanvasFrames)` is HTML's update of the placeholder.
+  `OffscreenCanvas::commit(&CanvasFrames)` is HTML's update of the placeholder.
   The canvas-only display-list items (`push_backdrop_clip`,
   `push_drop_shadow`, `ListPaint`, `fill_with`, `stroke_with`,
   `DrawGlyphs::paint`, `recorded_bytes`) and `render::canvas`'s `Surface`

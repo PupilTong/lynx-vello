@@ -168,7 +168,7 @@ pub mod render {
 
     /// The wasm32 queue of canvas GPU work. A canvas's bitmap is a GPU
     /// texture its owner records draws for
-    /// ([`Canvas`](crate::link::html::canvas::Canvas)); natively the owner's
+    /// ([`OffscreenCanvas`](crate::link::html::canvas::OffscreenCanvas)); natively the owner's
     /// thread applies each step, and on wasm32 the steps are queued for the
     /// Render Worker, which applies them at the start of each turn
     /// ([`drain`](crate::link::render::canvas::drain)) once woken
@@ -272,12 +272,15 @@ pub mod html {
     /// is HTML's `transferControlToOffscreen()`, and answers the
     /// [`CanvasFrames`](crate::link::html::canvas::CanvasFrames) a canvas
     /// on any thread commits through
-    /// ([`Canvas::commit`](crate::link::html::canvas::Canvas::commit));
+    /// ([`OffscreenCanvas::commit`](crate::link::html::canvas::OffscreenCanvas::commit));
     /// [`update_placeholders`](crate::link::html::canvas::update_placeholders)
     /// applies a committed bitmap's size on the document's thread.
     ///
-    /// [`Canvas`](crate::link::html::canvas::Canvas) is one bitmap and its
-    /// `CanvasRenderingContext2D`, one call per context method or attribute;
+    /// [`OffscreenCanvas`](crate::link::html::canvas::OffscreenCanvas) is one
+    /// bitmap with its size and commit, and
+    /// [`Context2d`](crate::link::html::canvas::Context2d), borrowed from it
+    /// by `context_2d()`, its `OffscreenCanvasRenderingContext2D`, one call
+    /// per context method or attribute;
     /// [`Path`](crate::link::html::canvas::Path),
     /// [`Gradient`](crate::link::html::canvas::Gradient),
     /// [`Pattern`](crate::link::html::canvas::Pattern) and
@@ -291,11 +294,12 @@ pub mod html {
     /// JavaScript.
     pub mod canvas {
         pub use crate::html::canvas::{
-            CANVAS_TAG, Canvas, CanvasError, CanvasFrames, Committed, CompositeOp, ContextMode,
+            CANVAS_TAG, CanvasError, CanvasFrames, Committed, CompositeOp, Context2d, ContextMode,
             Direction, FillRule, GenericFamily, Gradient, Image, ImageDataRead, InvalidState,
-            LineCap, LineJoin, Path, Pattern, Placeholder, Repetition, ResolvedFamily,
-            ResolvedFont, ResolvedFontStyle, SmoothingQuality, Style, TextAlign, TextBaseline,
-            TextMetrics, context_mode, transfer_control_to_offscreen, update_placeholders,
+            LineCap, LineJoin, OffscreenCanvas, Path, Pattern, Placeholder, Repetition,
+            ResolvedFamily, ResolvedFont, ResolvedFontStyle, SmoothingQuality, Style, TextAlign,
+            TextBaseline, TextMetrics, context_mode, transfer_control_to_offscreen,
+            update_placeholders,
         };
     }
 }

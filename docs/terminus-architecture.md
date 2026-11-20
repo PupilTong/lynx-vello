@@ -861,7 +861,7 @@ following every change of either attribute.
 otherwise the mode becomes `placeholder` and the answer is the attributes'
 size and a `CanvasFrames`. That link is `Send` and holds the element's
 state (`html::canvas::Link`) weakly. A canvas commits through it
-(`Canvas::commit`, which calls `Surface::commit`, below), which answers a
+(`OffscreenCanvas::commit`, which calls `Surface::commit`, below), which answers a
 `Committed`: `wake` when the
 painter has described every earlier commit (`CanvasFrames::describe`
 clears the flag), `resize` when the bitmap's size differs from the last
@@ -896,10 +896,14 @@ context") over one bitmap, the `OffscreenCanvas`'s side of a placeholder
 registry are the embedder's. Its types are on `link::html::canvas` beside
 the element's.
 
-- `Canvas` (`canvas.rs`) is one bitmap and its `CanvasRenderingContext2D` state: one call per
-  context method or attribute, taking numbers, `&str`, keyword enums (`CompositeOp`, `LineCap`, …
-  each with `from_name`/`name` for the IDL strings, `style.rs`) or the module's value types.
-  `Canvas` is `Send`; there is no global state.
+- `OffscreenCanvas` (`html/canvas/offscreen.rs`) is HTML's `OffscreenCanvas`: its size, its
+  bitmap (`set_size`, `image`, `take_image`, `commit`, `flush`), and the 2D context's state, which
+  it keeps between borrows. `OffscreenCanvas::context_2d` borrows its `Context2d`
+  (`context.rs`), the `OffscreenCanvasRenderingContext2D`: the drawing state `save()` pushes, the
+  current default path and the canvas's bitmap, so a context draws on its own canvas only. The
+  context has one call per context method or attribute, taking numbers, `&str`, keyword enums
+  (`CompositeOp`, `LineCap`, … each with `from_name`/`name` for the IDL strings, `style.rs`) or
+  the module's value types. `OffscreenCanvas` is `Send`; there is no global state.
 - Colors are `peniko::Color`; fonts are `seldon`'s `ResolvedFont` (family names and generic
   families, size in px, weight, style with an oblique angle, stretch), which the state holds in an
   `Arc` so `save()` copies no font. Parsing CSS strings is the caller's job.
@@ -920,7 +924,7 @@ the element's.
 - `Image` (`image.rs`) is what `drawImage` and patterns sample: pixels not uploaded yet
   (`from_premultiplied`, `from_unpremultiplied`, `from_image_data`, an `ImageBitmap` made from
   `ImageData`), a texture of its own (`take_image`, `transferToImageBitmap`; a crop or copy of a
-  texture), or a canvas's current texture (`Canvas::image`).
+  texture), or a canvas's current texture (`OffscreenCanvas::image`).
   Cloning shares it; it is `Send + Sync` natively. `crop` is what `createImageBitmap` makes of
   one; `read` waits for its pixels.
 - `CanvasError` (`mod.rs`) names the exception (`IndexSizeError`, `InvalidStateError`,
@@ -930,7 +934,7 @@ the element's.
   "HTML `<canvas>` as an `OffscreenCanvas` placeholder".
 
 Draws are recorded into the canvas's `DisplayList` on the calling thread:
-no GPU work and no lock per call. `Raster::flush` (`canvas.rs`) hands the
+no GPU work and no lock per call. `Raster::flush` (`raster.rs`) hands the
 list to the canvas's `Surface` ("Canvas surfaces"), which replays it onto the canvas's
 texture. A flush happens at every read (`get_image_data`, `image`,
 `take_image`, `commit`), before `put_image_data`, at `flush()` (which the
@@ -956,7 +960,7 @@ ops, measured by `DisplayList::recorded_bytes`).
 - `clearRect` is a `destination-out` layer of opaque black.
 - `putImageData` premultiplies the clipped dirty rectangle and writes it into the texture after a
   flush.
-- `drawImage` of a canvas: `Canvas::image` flushes the source and names its texture; the target
+- `drawImage` of a canvas: `OffscreenCanvas::image` flushes the source and names its texture; the target
   flushes right after recording the draw, so later draws on the source are not seen. A pattern
   and a crop copy the texture as of the call. Images a recorded draw samples are kept until it
   is replayed.
@@ -985,7 +989,7 @@ Decisions the standard leaves open, or where this differs from it:
   and the whole batch, the shape included, would be lost. Along each axis the layer is under the
   canvas side + 2(a + R) + max(0, R − a) + 16 px for a reach R = 3σ and an offset a, and has 6 px
   of atlas padding on each side; σ is kept to the largest value for which that is at most 8,163 px
-  (`shadow_filter`, `canvas.rs`), so a 16 px canvas with no offset keeps σ up to about 905. When
+  (`shadow_filter`, `raster.rs`), so a 16 px canvas with no offset keeps σ up to about 905. When
   not even an unblurred shadow fits (an offset over half of 8,163 px less the side, or a side over
   8,163 px) the shadow is not drawn. `shadowBlur` and the offsets read back as set. Browsers bound
   the blur too (Skia limits its σ).

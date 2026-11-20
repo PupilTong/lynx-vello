@@ -1,8 +1,12 @@
-//! HTML's `CanvasRenderingContext2D` (canvas.html, "The 2D rendering
-//! context") over one output bitmap, replayed on the GPU.
+//! HTML's `OffscreenCanvasRenderingContext2D` (canvas.html, "The 2D
+//! rendering context") over one `OffscreenCanvas`'s bitmap, replayed on the
+//! GPU.
 //!
-//! A [`Canvas`] is one output bitmap and its `CanvasRenderingContext2D`
-//! state. Each context method and attribute is one call taking numbers,
+//! A [`Context2d`] is the 2D context of one
+//! [`OffscreenCanvas`](super::OffscreenCanvas), borrowed from it: the
+//! context's drawing state, state stack and default path, which the canvas
+//! keeps, and the canvas's bitmap it draws on. The canvas owns the size,
+//! the bitmap and its commit. Each context method and attribute is one call taking numbers,
 //! `&str`, small enums or the module's own value types ([`Path`],
 //! [`Gradient`], [`Pattern`], [`Image`]); errors name the exception the
 //! standard throws ([`CanvasError`]). There is no JavaScript, document or CSS
@@ -15,7 +19,7 @@
 //! `OffscreenCanvas` has none.
 //!
 //! Draw calls are recorded into a [`DisplayList`](crate::paint::display_list::DisplayList)
-//! and replayed onto the canvas's GPU texture
+//! ([`Raster`]) and replayed onto the canvas's GPU texture
 //! ([`Surface`](crate::render::canvas::Surface)) at a read, at the owner's
 //! flush, or once the recording grows past a bound
 //! (`docs/terminus-architecture.md`, "Canvas 2D context").
@@ -25,15 +29,21 @@
     reason = "the IDL methods' argument names: x, y, w, h, a..f"
 )]
 
-mod canvas;
+mod context;
 mod image;
 mod path;
+mod pixels;
+mod raster;
 mod style;
 mod text;
 
-pub use canvas::{Canvas, ImageDataRead};
+pub use context::Context2d;
+pub(super) use context::Context2dData;
 pub use image::Image;
+pub(super) use image::Source;
 pub use path::Path;
+pub use pixels::ImageDataRead;
+pub(super) use raster::Raster;
 pub use seldon::text::{GenericFamily, ResolvedFamily, ResolvedFont, ResolvedFontStyle};
 pub use style::{
     CompositeOp, Direction, FillRule, Gradient, LineCap, LineJoin, Pattern, Repetition,
