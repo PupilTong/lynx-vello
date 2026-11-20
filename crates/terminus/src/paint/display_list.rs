@@ -140,6 +140,18 @@ impl Texture {
         }
     }
 
+    /// The `width` × `height` texture bound under `id`, which a texture of
+    /// its own was given ([`next_texture_id`]).
+    pub(crate) fn with_id(id: u64, width: u32, height: u32) -> Self {
+        Self {
+            id,
+            width,
+            height,
+            stored_width: width,
+            stored_height: height,
+        }
+    }
+
     /// The id the texture is bound under, unique in the process.
     #[must_use]
     pub fn id(&self) -> u64 {
@@ -382,9 +394,13 @@ pub(crate) enum Item {
     /// plain source-over, and a group layer between isolates the blend by
     /// itself, so neither needs a layer of its own: every other clip is
     /// intersected into what it holds (`render::sparse`).
+    ///
+    /// A clip that is not `isolable` ([`DisplayList::push_backdrop_clip`])
+    /// is never isolated: a blend inside it reads what is under the clip.
     PushClip {
         region: Region,
         isolated: bool,
+        isolable: bool,
     },
     /// A group layer: its content composited by `blend` at `alpha`, cut to
     /// the region.
@@ -393,10 +409,60 @@ pub(crate) enum Item {
         blend: BlendMode,
         alpha: f32,
     },
+    /// A drop-shadow filter layer ([`DisplayList::push_drop_shadow`]).
+    PushShadow(DropShadow),
     Pop,
     /// [`DisplayList::runs`]`[index]`.
     Glyphs(u32),
     BlurredRoundedRect(BlurredRoundedRect),
+}
+
+/// What a drop-shadow layer replaces its content with: the content's alpha
+/// in `color`, offset by `(dx, dy)` in the list's space and blurred by a
+/// Gaussian of `std_dev`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct DropShadow {
+    pub(crate) dx: f32,
+    pub(crate) dy: f32,
+    pub(crate) std_dev: f32,
+    pub(crate) color: Color,
+}
+
+/// A paint a list records a draw with: a brush, or a texture the
+/// rasterizer binds by id ([`ListPaint::texture`]).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ListPaint(pub(crate) Paint);
+
+impl ListPaint {
+    /// `texture` sampled through `sampler`.
+    #[must_use]
+    pub(crate) fn texture(texture: Texture, sampler: ImageSampler) -> Self {
+        Self(Paint::texture(texture, sampler))
+    }
+
+    /// `image` sampled through `sampler`.
+    #[must_use]
+    pub(crate) fn image(image: ImageRef, sampler: ImageSampler) -> Self {
+        Self(Paint::Image(Arc::new(ImagePaint { image, sampler })))
+    }
+}
+
+impl From<BrushRef<'_>> for ListPaint {
+    fn from(brush: BrushRef<'_>) -> Self {
+        Self(brush.into())
+    }
+}
+
+impl From<&Brush> for ListPaint {
+    fn from(brush: &Brush) -> Self {
+        Self(brush.into())
+    }
+}
+
+impl From<Color> for ListPaint {
+    fn from(color: Color) -> Self {
+        Self(Paint::Solid(color))
+    }
 }
 
 /// How a glyph run's outlines are drawn.
@@ -404,6 +470,27 @@ pub(crate) enum Item {
 pub(crate) enum GlyphStyle {
     Fill,
     Stroke(Arc<Stroke>),
+}
+
+/// The outline widening and glyph transform that draw a run's synthetic
+/// bold and oblique: `embolden` widens by 1/48 of the font size, and a
+/// `skew` of that many degrees leans the glyph's top to the right, which in
+/// the run's y-down space moves a point above the baseline (negative y) to
+/// positive x. Every glyph draw that carries a run's synthesis (the text
+/// painter, SVG `<text>`, the Canvas 2D context) draws it through here.
+pub(crate) fn synthesized_outlines(
+    embolden: bool,
+    skew: Option<f32>,
+    font_size: f32,
+) -> (Embolden, Option<Affine>) {
+    let embolden = if embolden {
+        Embolden::uniform(f64::from(font_size) / 48.0)
+    } else {
+        Embolden::default()
+    };
+    let glyph_transform =
+        skew.map(|degrees| Affine::skew(-f64::from(degrees).to_radians().tan(), 0.0));
+    (embolden, glyph_transform)
 }
 
 /// Synthetic bold: how far a run's outlines are widened, with the controls
@@ -896,6 +983,58 @@ impl DisplayList {
         self.record(Item::Stroke(draw, Arc::new(style.clone())));
     }
 
+    /// [`Self::fill`] with a [`ListPaint`].
+    pub(crate) fn fill_with(
+        &mut self,
+        style: Fill,
+        transform: Affine,
+        paint: &ListPaint,
+        brush_transform: Option<Affine>,
+        shape: &impl crate::kurbo::Shape,
+    ) {
+        self.fill_paint(style, transform, paint.0.clone(), brush_transform, shape);
+    }
+
+    /// [`Self::stroke`] with a [`ListPaint`].
+    pub(crate) fn stroke_with(
+        &mut self,
+        style: &Stroke,
+        transform: Affine,
+        paint: &ListPaint,
+        brush_transform: Option<Affine>,
+        shape: &impl crate::kurbo::Shape,
+    ) {
+        if style.width == 0.0 {
+            return;
+        }
+        let Some(shape) = self.shape(shape, STROKE_TOLERANCE) else {
+            return;
+        };
+        let draw = Draw {
+            rule: Fill::NonZero,
+            transform: self.transform_index(transform),
+            paint_transform: self.paint_transform_index(brush_transform),
+            shape,
+            paint: paint.0.clone(),
+        };
+        self.record(Item::Stroke(draw, Arc::new(style.clone())));
+    }
+
+    /// About how many bytes the recording holds: its items and the arenas
+    /// they index, not counting what their paints share.
+    #[must_use]
+    pub(crate) fn recorded_bytes(&self) -> usize {
+        use std::mem::size_of;
+        self.items.len() * size_of::<Item>()
+            + self.transforms.len() * size_of::<Affine>()
+            + self.paint_transforms.len() * size_of::<Affine>()
+            + self.radii.len() * size_of::<RoundedRectRadii>()
+            + self.paths.len() * size_of::<PathEl>()
+            + self.runs.len() * size_of::<GlyphRun>()
+            + self.glyphs.len() * size_of::<Glyph>()
+            + self.coords.len() * size_of::<NormalizedCoord>()
+    }
+
     /// The region of a clip or layer over `clip`; an empty shape clips
     /// everything.
     fn region(&mut self, rule: Fill, transform: Affine, clip: &impl crate::kurbo::Shape) -> Region {
@@ -940,7 +1079,42 @@ impl DisplayList {
         self.open_layer(Item::PushClip {
             region,
             isolated: false,
+            isolable: true,
         });
+    }
+
+    /// Opens a clip that is never composited as a layer of its own: a blend
+    /// layer opening inside it blends with what is under the clip, cut to
+    /// the clip. What a canvas's clip region is.
+    pub(crate) fn push_backdrop_clip(
+        &mut self,
+        clip_style: Fill,
+        transform: Affine,
+        clip: &impl crate::kurbo::Shape,
+    ) {
+        let region = self.region(clip_style, transform, clip);
+        self.open_layer(Item::PushClip {
+            region,
+            isolated: false,
+            isolable: false,
+        });
+    }
+
+    /// Opens a drop-shadow layer: what is drawn until the matching
+    /// [`Self::pop_layer`] is replaced by its alpha in `color`, offset by
+    /// `(dx, dy)` in the list's space and blurred by a Gaussian of
+    /// `std_dev`. Clips open around it cut what is drawn inside it too.
+    pub(crate) fn push_drop_shadow(&mut self, dx: f64, dy: f64, std_dev: f64, color: Color) {
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the rasterizer takes filter parameters as f32"
+        )]
+        self.open_layer(Item::PushShadow(DropShadow {
+            dx: dx as f32,
+            dy: dy as f32,
+            std_dev: std_dev as f32,
+            color,
+        }));
     }
 
     /// Records a push, keeping the open stack and the clips' isolation.
@@ -965,11 +1139,13 @@ impl DisplayList {
         }
         for &open in self.open.iter().rev() {
             match &mut self.items[open as usize] {
-                Item::PushClip { isolated, .. } => {
-                    *isolated = true;
+                Item::PushClip {
+                    isolated, isolable, ..
+                } => {
+                    *isolated = *isolable;
                     break;
                 }
-                Item::PushLayer { .. } => break,
+                Item::PushLayer { .. } | Item::PushShadow(_) => break,
                 _ => {}
             }
         }
@@ -1073,6 +1249,10 @@ impl DisplayList {
 
     /// [`Self::append`], leaving out the chunks of `other` that cannot reach
     /// `visible` when it is set and `other` is sealed.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm per item kind, each remapping its arena indices"
+    )]
     fn append_chunks(&mut self, other: &Self, transform: Option<Affine>, visible: Option<Rect>) {
         let outer = |inner: Affine| transform.map_or(inner, |outer| outer * inner);
         let transforms = index(self.transforms.len());
@@ -1146,10 +1326,16 @@ impl DisplayList {
                     // Isolation is derived again as the items land, so a
                     // blend `other` opens at its root isolates the clip this
                     // list has open directly around the append.
-                    Item::PushClip { region: clip, .. } => self.open_layer(Item::PushClip {
+                    Item::PushClip {
+                        region: clip,
+                        isolable,
+                        ..
+                    } => self.open_layer(Item::PushClip {
                         region: region(*clip),
                         isolated: false,
+                        isolable: *isolable,
                     }),
+                    Item::PushShadow(shadow) => self.open_layer(Item::PushShadow(*shadow)),
                     Item::PushLayer {
                         region: layer,
                         blend,
@@ -1230,6 +1416,13 @@ impl DisplayList {
                         grow(&mut chunk, bounds);
                     }
                     clips.push(bounds);
+                }
+                Item::PushShadow(_) => {
+                    // The shadow moves and blurs what it holds by amounts no
+                    // bound here follows: a chunk holding one is never
+                    // culled.
+                    grow(&mut chunk, ANYWHERE);
+                    clips.push(clip.unwrap_or(ANYWHERE));
                 }
                 Item::Pop => {
                     clips.pop();
@@ -1437,12 +1630,22 @@ impl DisplayList {
                 style == other_style && self.same_draw(left, other, right)
             }
             (
-                Item::PushClip { region, isolated },
+                Item::PushClip {
+                    region,
+                    isolated,
+                    isolable,
+                },
                 Item::PushClip {
                     region: other_region,
                     isolated: other_isolated,
+                    isolable: other_isolable,
                 },
-            ) => isolated == other_isolated && self.same_region(region, other, other_region),
+            ) => {
+                isolated == other_isolated
+                    && isolable == other_isolable
+                    && self.same_region(region, other, other_region)
+            }
+            (Item::PushShadow(left), Item::PushShadow(right)) => left == right,
             (
                 Item::PushLayer {
                     region,
@@ -1541,6 +1744,12 @@ impl DrawGlyphs<'_> {
 
     pub fn brush<'b>(mut self, brush: impl Into<BrushRef<'b>>) -> Self {
         self.run.paint = brush.into().into();
+        self
+    }
+
+    /// The run's paint, a texture's included.
+    pub(crate) fn paint(mut self, paint: &ListPaint) -> Self {
+        self.run.paint = paint.0.clone();
         self
     }
 

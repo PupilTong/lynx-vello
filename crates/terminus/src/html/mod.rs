@@ -7,6 +7,9 @@
 //!   `:modal` and top-layer membership in step with the `open` attribute, and its four methods.
 //! - [`popover`] is the UA rules HTML gives the `popover` attribute, whose state machine is the
 //!   document's own ([`Document::show_popover`]).
+//! - [`canvas`] is HTML's `<canvas>` element as the placeholder of an `OffscreenCanvas`: a replaced
+//!   element presenting a picture of its own, its context mode, and `transferControlToOffscreen()`.
+//!   It has no UA rule.
 //!
 //! Neither is part of a document by itself. [`Document::new`] defines no
 //! element, so an embedder that wants HTML's elements calls
@@ -42,19 +45,26 @@
 //! `pointer-events`, beats every author declaration, as a UA `!important`
 //! does in a browser.
 
+pub(crate) mod canvas;
 pub(crate) mod dialog;
 pub(crate) mod popover;
 
 use crate::tree::document::Document;
 
+/// HTML's `InvalidStateError`, which a method of an element here throws.
+#[derive(Debug, PartialEq, Eq)]
+pub struct InvalidState;
+
 impl<T> Document<T> {
     /// Defines HTML's built-in elements this crate implements
-    /// ([`link::html`](crate::link::html)): today `dialog` ([`dialog`](crate::link::html::dialog)).
+    /// ([`link::html`](crate::link::html)): today `dialog` ([`dialog`](crate::link::html::dialog))
+    /// and `canvas` ([`canvas`](crate::link::html::canvas)).
     ///
     /// Like [`Document::define`], it must run before any element carries one
     /// of their tags, and the tags must have no definition yet. Their UA
     /// rules are the embedder's to add ([`link::html`](crate::link::html), "The UA rules").
     pub fn define_html_elements(&mut self) {
         dialog::define(self);
+        canvas::define(self);
     }
 }

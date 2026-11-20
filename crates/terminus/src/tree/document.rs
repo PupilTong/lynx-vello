@@ -108,6 +108,9 @@ pub struct Document<T> {
     relayout_root_ids: FxHashSet<NodeId>,
     shadow_roots: usize,
     pub(crate) custom_elements: CustomElementRegistry<T>,
+    /// The state of the document's `canvas` elements
+    /// ([`crate::html::canvas`]), shared with their component.
+    pub(crate) canvases: crate::html::canvas::Canvases,
     animations: crate::style::animation::AnimationDriver,
     /// The id the most recently built frame carries; monotone per build, so
     /// it orders commits for every consumer of published frames.
@@ -175,6 +178,7 @@ impl<T> Document<T> {
             relayout_root_ids: FxHashSet::default(),
             shadow_roots: 0,
             custom_elements: CustomElementRegistry::default(),
+            canvases: crate::html::canvas::Canvases::default(),
             animations: crate::style::animation::AnimationDriver::default(),
             commit_id: 0,
             commit_timer: crate::visual::timing::CommitTimer::default(),

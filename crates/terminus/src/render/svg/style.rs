@@ -9,7 +9,7 @@
 
 use std::str::FromStr;
 
-use seldon::text::{ResolvedFont, ResolvedFontStyle};
+use seldon::text::{GenericFamily, ResolvedFamily, ResolvedFont, ResolvedFontStyle};
 use smallvec::SmallVec;
 use svgtypes::{Length, LengthListParser, LengthUnit, PaintFallback};
 
@@ -270,7 +270,7 @@ impl Style {
             font: ResolvedFont {
                 families: Vec::new(),
                 size: 16.0,
-                weight: 400,
+                weight: 400.0,
                 style: ResolvedFontStyle::Normal,
                 stretch: 1.0,
             },
@@ -443,7 +443,7 @@ impl Style {
                     style.font.style = match value.split_whitespace().next() {
                         Some("normal") => ResolvedFontStyle::Normal,
                         Some("italic") => ResolvedFontStyle::Italic,
-                        Some("oblique") => ResolvedFontStyle::Oblique,
+                        Some("oblique") => ResolvedFontStyle::Oblique(None),
                         _ => style.font.style,
                     };
                 }
@@ -606,35 +606,30 @@ fn font_size(value: &str, parent: f64, viewport: Viewport) -> Option<f64> {
 }
 
 /// A `font-weight`: a number, `normal`, `bold`, or `bolder`/`lighter`
-/// relative to the parent's weight (CSS Fonts 4 §2.2).
-fn font_weight(value: &str, parent: u16) -> Option<u16> {
+/// relative to the parent's weight (CSS Fonts 4 §2.2). A number is rounded
+/// to a whole weight.
+fn font_weight(value: &str, parent: f32) -> Option<f32> {
     Some(match value {
-        "normal" => 400,
-        "bold" => 700,
+        "normal" => 400.0,
+        "bold" => 700.0,
         "bolder" => match parent {
-            0..350 => 400,
-            350..550 => 700,
-            550..900 => 900,
+            weight if weight < 350.0 => 400.0,
+            weight if weight < 550.0 => 700.0,
+            weight if weight < 900.0 => 900.0,
             _ => parent,
         },
         "lighter" => match parent {
-            0..100 => parent,
-            100..550 => 100,
-            550..750 => 400,
-            _ => 700,
+            weight if weight < 100.0 => parent,
+            weight if weight < 550.0 => 100.0,
+            weight if weight < 750.0 => 400.0,
+            _ => 700.0,
         },
         number => {
             let weight = number.parse::<f32>().ok()?;
             if !(1.0..=1000.0).contains(&weight) {
                 return None;
             }
-            #[expect(
-                clippy::cast_possible_truncation,
-                clippy::cast_sign_loss,
-                reason = "checked to lie within 1..=1000"
-            )]
-            let weight = weight.round() as u16;
-            weight
+            weight.round()
         }
     })
 }
@@ -658,15 +653,16 @@ fn font_stretch(value: &str) -> Option<f32> {
     })
 }
 
-/// A parsed `font-family` entry as the name the shaper reads: a generic
-/// family by its CSS keyword, a named one by its name.
-fn family_name(family: svgtypes::FontFamily) -> String {
+/// A parsed `font-family` entry as the shaper's family: a generic family
+/// as itself, a name read as CSS reads one `font-family` entry, so an
+/// unquoted keyword svgtypes does not know (`system-ui`) is still generic.
+fn family_name(family: svgtypes::FontFamily) -> ResolvedFamily {
     match family {
-        svgtypes::FontFamily::Serif => "serif".to_owned(),
-        svgtypes::FontFamily::SansSerif => "sans-serif".to_owned(),
-        svgtypes::FontFamily::Cursive => "cursive".to_owned(),
-        svgtypes::FontFamily::Fantasy => "fantasy".to_owned(),
-        svgtypes::FontFamily::Monospace => "monospace".to_owned(),
-        svgtypes::FontFamily::Named(name) => name,
+        svgtypes::FontFamily::Serif => ResolvedFamily::Generic(GenericFamily::Serif),
+        svgtypes::FontFamily::SansSerif => ResolvedFamily::Generic(GenericFamily::SansSerif),
+        svgtypes::FontFamily::Cursive => ResolvedFamily::Generic(GenericFamily::Cursive),
+        svgtypes::FontFamily::Fantasy => ResolvedFamily::Generic(GenericFamily::Fantasy),
+        svgtypes::FontFamily::Monospace => ResolvedFamily::Generic(GenericFamily::Monospace),
+        svgtypes::FontFamily::Named(name) => ResolvedFamily::parse(&name),
     }
 }

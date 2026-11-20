@@ -523,7 +523,8 @@ impl Source {
     }
 
     /// An `Id` picture: the frame its texture holds when that is the
-    /// generation the store answers; otherwise its newest frame, taken and
+    /// generation the store answers, whoever wrote it there; otherwise its
+    /// newest frame, taken and
     /// written into the texture; otherwise the older frame the texture still
     /// holds; otherwise nothing yet — the picture is wanted. Without a
     /// rasterizer the taken frame's pixels are held instead. A picture the
@@ -544,10 +545,9 @@ impl Source {
         if self.descriptor.is_some() && self.generation == state.generation {
             return;
         }
-        if !self.leased
-            && let Some((generation, descriptor)) =
-                leases.and_then(|leases| leases.lease_picture(id))
-        {
+        // What the texture holds now: a frame this painter wrote, or one
+        // another writer copied in (a placeholder canvas's commit).
+        if let Some((generation, descriptor)) = leases.and_then(|leases| leases.lease_picture(id)) {
             self.descriptor = Some(descriptor);
             self.generation = generation;
             self.leased = true;
