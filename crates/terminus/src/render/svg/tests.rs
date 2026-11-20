@@ -1366,14 +1366,20 @@ fn text_collects_chunks_with_positions_and_inherited_fonts() {
     assert_eq!(first.spans.len(), 2);
     assert_eq!(first.spans[0].text, "ab");
     assert_eq!((first.spans[0].dx, first.spans[0].dy), (0.0, 0.0));
-    assert_eq!(first.spans[0].font.families, ["Ahem", "serif"]);
+    assert_eq!(
+        first.spans[0].font.families,
+        [
+            seldon::text::ResolvedFamily::Named("Ahem".to_owned()),
+            seldon::text::ResolvedFamily::Generic(seldon::text::GenericFamily::Serif)
+        ]
+    );
     assert_eq!(first.spans[0].font.size, 10.0);
-    assert_eq!(first.spans[0].font.weight, 700);
+    assert_eq!(first.spans[0].font.weight, 700.0);
     assert_eq!(first.spans[0].letter_spacing, 1.0);
     assert_eq!(first.spans[1].text, "c");
     assert_eq!((first.spans[1].dx, first.spans[1].dy), (2.0, 3.0));
     assert_eq!(first.spans[1].font.size, 20.0, "2em of the inherited 10");
-    assert_eq!(first.spans[1].font.weight, 400, "lighter than bold");
+    assert_eq!(first.spans[1].font.weight, 400.0, "lighter than bold");
     let second = &text.chunks[1];
     assert_eq!(
         (second.x, second.y, second.anchor),
@@ -1528,13 +1534,13 @@ fn text_extends_the_bounds_of_the_layer_around_it() {
         context.as_mut().expect("the encode created the context"),
         "ab",
         &seldon::text::ResolvedFont {
-            families: vec!["Ahem".to_owned()],
+            families: vec![seldon::text::ResolvedFamily::Named("Ahem".to_owned())],
             size: 10.0,
-            weight: 400,
+            weight: 400.0,
             style: seldon::text::ResolvedFontStyle::Normal,
             stretch: 1.0,
         },
-        0.0,
+        seldon::text::LineOptions::default(),
     );
     for run in &line.runs {
         expected

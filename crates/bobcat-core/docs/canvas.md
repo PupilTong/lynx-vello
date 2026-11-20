@@ -204,7 +204,11 @@ rendering check does (`docs/browser-wasm.md`, "Rendering check").
 - `font` parses with stylo's shorthand parser
   (`properties::shorthands::font::parse_value`); the getter is the
   shorthand's own serialization (`LonghandsToSerialize`) with the size in px
-  and no line height. `small-caps` parses and is not drawn (`Font` has no
+  and no line height. The parsed value is `terminus`'s
+  `html::canvas::ResolvedFont` (`seldon`'s): family names and generic
+  families as stylo parsed them, the size in px, the weight number, the
+  style with an `oblique` angle (`oblique 0deg` is `normal`) and the stretch
+  ratio. `small-caps` parses and is not drawn (`ResolvedFont` has no
   variant).
 - Text is shaped with the realm's fonts: the MTS realm and its children use
   the document's `TextContext` (`Document::text_context_mut`, through the
@@ -214,8 +218,9 @@ rendering check does (`docs/browser-wasm.md`, "Rendering check").
   system fonts and the view's `ViewSources::fonts`, `fallback_fonts`,
   `default_font_family` and `locale`, staged as the document's context is.
   On wasm32, which has no system fonts, those host fonts are the only ones a
-  worker realm has. `TextContext::fonts_for` fills the fallback lists a
-  missing character needs first.
+  worker realm has. The canvas text calls take that `TextContext` and shape
+  through `seldon::text::shape_line`, which fills the fallback lists a
+  missing character needs first and hands parley the context's locale.
 
 ## Size limits
 

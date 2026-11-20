@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use terminus::link::parley::{FontFamilyName, FontStyle, FontWeight, GenericFamily};
+use terminus::link::html::canvas::{GenericFamily, ResolvedFamily, ResolvedFontStyle};
 use terminus::link::peniko::Color;
 
 use super::css::{parse_color, parse_font, serialize_color};
@@ -48,13 +48,13 @@ fn the_font_shorthand_parses_with_stylo() {
     let parsed = parse_font("italic bold 20px \"Times New Roman\", serif").unwrap();
     assert_eq!(parsed.css, "italic bold 20px Times New Roman, serif");
     assert!((parsed.font.size - 20.0).abs() < f32::EPSILON);
-    assert_eq!(parsed.font.weight, FontWeight::new(700.0));
-    assert_eq!(parsed.font.style, FontStyle::Italic);
+    assert!((parsed.font.weight - 700.0).abs() < f32::EPSILON);
+    assert_eq!(parsed.font.style, ResolvedFontStyle::Italic);
     assert_eq!(
-        &*parsed.font.families,
+        parsed.font.families,
         [
-            FontFamilyName::Named("Times New Roman".into()),
-            FontFamilyName::Generic(GenericFamily::Serif)
+            ResolvedFamily::Named("Times New Roman".to_owned()),
+            ResolvedFamily::Generic(GenericFamily::Serif)
         ]
     );
     // Relative sizes resolve against 10px; the line height is dropped.

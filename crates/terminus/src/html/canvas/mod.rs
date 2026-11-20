@@ -60,9 +60,9 @@ use std::sync::{Arc, Mutex, PoisonError, Weak};
 use rustc_hash::FxHashMap;
 
 pub use self::context2d::{
-    Canvas, CanvasError, CompositeOp, Direction, FillRule, Font, Gradient, Image, ImageDataRead,
-    LineCap, LineJoin, Path, Pattern, Repetition, SmoothingQuality, Style, TextAlign, TextBaseline,
-    TextMetrics,
+    Canvas, CanvasError, CompositeOp, Direction, FillRule, GenericFamily, Gradient, Image,
+    ImageDataRead, LineCap, LineJoin, Path, Pattern, Repetition, ResolvedFamily, ResolvedFont,
+    ResolvedFontStyle, SmoothingQuality, Style, TextAlign, TextBaseline, TextMetrics,
 };
 pub use super::InvalidState;
 use crate::render::image::{FrameImage, ImageDescriptor};
