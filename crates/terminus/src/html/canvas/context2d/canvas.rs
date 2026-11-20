@@ -6,7 +6,7 @@ use std::sync::Arc;
 use seldon::text::{ResolvedFont, ShapedLine, TextContext};
 
 use super::image::Source;
-use super::path::builder_methods;
+use super::path::{self, builder_methods};
 use super::style::{Paint, canvas_rect, image_quality};
 use super::text::{self, Line};
 use super::{
@@ -15,16 +15,26 @@ use super::{
 };
 use crate::html::canvas::{CanvasFrames, Committed};
 use crate::kurbo::{
-    self, Affine, BezPath, Cap, Join, PathEl, Point, Rect, Shape, Stroke, StrokeOpts,
+    self, Affine, BezPath, Cap, Join, ParamCurveNearest, PathEl, Point, Rect, Shape, Stroke,
+    StrokeOpts,
 };
 use crate::paint::display_list::{DisplayList, Glyph, ListPaint, synthesized_outlines};
 use crate::peniko::{BlendMode, Color, Compose, Extend, Fill, ImageQuality, ImageSampler, Mix};
-use crate::render::canvas::{Init, PendingRead, Surface, SurfaceError, SurfaceImage};
+use crate::render::canvas::{
+    Init, MAX_SURFACE_SIDE, PendingRead, Surface, SurfaceError, SurfaceImage,
+};
 
 /// The largest `getImageData` area allocated, in pixels.
 const MAX_AREA: u64 = 1 << 28;
 /// Flattening tolerance for hit-testing a stroke outline, in user units.
 const HIT_TOLERANCE: f64 = 0.01;
+/// How far from a path's segment a hit-tested point still lies on it, in
+/// canvas units.
+const ON_PATH_TOLERANCE: f64 = 1e-9;
+/// The most dashes a dash list cuts a path into: past it the path is
+/// stroked undashed. Skia's `SkDashPath` limit (`kMaxDashCount`), which
+/// Chromium's canvas follows; the standard sets none.
+const MAX_DASH_COUNT: f64 = 1_000_000.0;
 /// How many bytes of draws are recorded before they are replayed with no
 /// read asking: Chromium's bound on a canvas's recorded ops, 2 MiB.
 const MAX_RECORDED_BYTES: usize = 2 << 20;
@@ -108,7 +118,10 @@ impl Default for State {
 }
 
 impl State {
-    fn stroke(&self) -> Stroke {
+    /// The stroke the line styles describe, for a path `length` long in
+    /// the space the stroke is computed in; `length` is called only when a
+    /// dash list is set.
+    fn stroke(&self, length: impl FnOnce() -> f64) -> Stroke {
         let cap = match self.line_cap {
             LineCap::Butt => Cap::Butt,
             LineCap::Round => Cap::Round,
@@ -124,7 +137,10 @@ impl State {
             .with_join(join)
             .with_miter_limit(self.miter_limit);
         // HTML "trace a path": a dash list summing to zero does not dash.
-        if self.line_dash.iter().sum::<f64>() > 0.0 {
+        // Nor does one that would cut the path into more than
+        // `MAX_DASH_COUNT` dashes (a non-finite count included).
+        let period = self.line_dash.iter().sum::<f64>();
+        if period > 0.0 && length() / period <= MAX_DASH_COUNT {
             stroke.with_dashes(self.line_dash_offset, self.line_dash.iter().copied())
         } else {
             stroke
@@ -322,8 +338,9 @@ impl Raster {
         let visible = paint.filter(|_| geometry.determinant() != 0.0);
         if let Some(paint) = visible
             && state.casts_shadow()
+            && let Some(filter) = shadow_filter(state, self.size)
         {
-            self.shadow(state, blend, paint, geometry, shape);
+            self.shadow(state, blend, filter, paint, geometry, shape);
         }
         self.sync_clips(state.clip.as_ref());
         let layered = op != CompositeOp::SourceOver;
@@ -361,6 +378,7 @@ impl Raster {
         &mut self,
         state: &State,
         blend: BlendMode,
+        filter: ShadowFilter,
         paint: &Paint,
         geometry: Affine,
         shape: &Outline<'_>,
@@ -399,13 +417,8 @@ impl Raster {
             }
             layers += 1;
         }
-        self.list.push_drop_shadow(
-            state.shadow_offset_x,
-            state.shadow_offset_y,
-            // σ is half the blur.
-            state.shadow_blur / 2.0,
-            state.shadow_color,
-        );
+        self.list
+            .push_drop_shadow(filter.dx, filter.dy, filter.std_dev, state.shadow_color);
         self.paint_shape(paint, geometry, shape);
         for _ in 0..=layers {
             self.list.pop_layer();
@@ -437,6 +450,56 @@ impl Raster {
             list.pop_layer();
         }
     }
+}
+
+/// A drop shadow as the filter draws it, in canvas px.
+#[derive(Clone, Copy, Debug)]
+struct ShadowFilter {
+    dx: f64,
+    dy: f64,
+    std_dev: f64,
+}
+
+/// Px a shadow's filter layer leaves of the device's texture side
+/// ([`MAX_SURFACE_SIDE`]): 6 of atlas padding on each side (`vello_gpu`'s
+/// `FILTER_ATLAS_PADDING`, half its 13-tap kernel), 16 for rounding four
+/// lengths up to the 4 px tile, and 1 for the `f32` rounding of the
+/// filter's parameters.
+const SHADOW_LAYER_SLACK: f64 = 2.0 * 6.0 + 16.0 + 1.0;
+
+/// The shadow `state` casts on a canvas of `size`, its standard deviation
+/// (half `shadowBlur`) limited to what `vello_gpu` can filter; `None` when
+/// not even an unblurred shadow at its offsets can be.
+///
+/// `vello_gpu` renders a drop-shadow layer into an intermediate texture no
+/// longer than the device's texture side, and a render with a layer past
+/// it fails whole. Along each axis that layer (`vello_common`
+/// `FilterLayerPlacement::new`) is at most the canvas side, plus the
+/// source padding on both sides (`Filter::source_expansion`) and the
+/// filter padding on one (`Filter::filter_expansion`), each rounded up to
+/// the 4 px tile. For a reach R = 3σ and an offset of length a along the
+/// axis that is under side + 2(a + R) + max(0, R − a) + 16 px, whatever the
+/// shape, so σ is kept to the largest value for which that fits beside
+/// the atlas padding. Browsers bound the blur too (Skia limits its σ).
+fn shadow_filter(state: &State, size: Rect) -> Option<ShadowFilter> {
+    let reach = |side: f64, offset: f64| {
+        let budget = f64::from(MAX_SURFACE_SIDE) - SHADOW_LAYER_SLACK - side;
+        let a = offset.abs();
+        if 2.0 * a > budget {
+            None
+        } else if 4.0 * a <= budget {
+            Some((budget - a) / 3.0)
+        } else {
+            Some(budget / 2.0 - a)
+        }
+    };
+    let rx = reach(size.width(), state.shadow_offset_x)?;
+    let ry = reach(size.height(), state.shadow_offset_y)?;
+    Some(ShadowFilter {
+        dx: state.shadow_offset_x,
+        dy: state.shadow_offset_y,
+        std_dev: (state.shadow_blur / 2.0).min(rx.min(ry) / 3.0),
+    })
 }
 
 /// Records every glyph run of `line` under `geometry`, its alphabetic
@@ -873,7 +936,7 @@ impl Canvas {
                 .extend(self.path.elements.iter().map(|element| inverse * element));
         }
         let paint = self.state.paint(&self.state.stroke_style, raster.size);
-        let stroke = self.state.stroke();
+        let stroke = self.state.stroke(|| path::length(&self.scratch));
         let shape = Outline::Stroke(&self.scratch, &stroke);
         raster.draw(&self.state, paint.as_ref(), ctm, &shape);
         self.changed = true;
@@ -885,7 +948,7 @@ impl Canvas {
             return;
         };
         let paint = self.state.paint(&self.state.stroke_style, raster.size);
-        let stroke = self.state.stroke();
+        let stroke = self.state.stroke(|| path::length(&path.elements));
         let shape = Outline::Stroke(&path.elements, &stroke);
         raster.draw(&self.state, paint.as_ref(), self.state.transform, &shape);
         self.changed = true;
@@ -956,14 +1019,13 @@ impl Canvas {
         self.in_stroke(path.elements.iter(), ctm.inverse() * Point::new(x, y))
     }
 
-    fn in_stroke(&self, path: impl IntoIterator<Item = PathEl>, point: Point) -> bool {
-        let outline = kurbo::stroke(
-            path,
-            &self.state.stroke(),
-            &StrokeOpts::default(),
-            HIT_TOLERANCE,
-        );
-        outline.winding(point) != 0
+    fn in_stroke<P>(&self, path: P, point: Point) -> bool
+    where
+        P: IntoIterator<Item = PathEl> + Clone,
+    {
+        let stroke = self.state.stroke(|| path::length(path.clone()));
+        let outline = kurbo::stroke(path, &stroke, &StrokeOpts::default(), HIT_TOLERANCE);
+        contains(&outline, point, FillRule::NonZero)
     }
 
     // Rectangles.
@@ -1008,9 +1070,10 @@ impl Canvas {
         raster.bound();
     }
 
-    /// `fillRect(x, y, w, h)`.
+    /// `fillRect(x, y, w, h)`: nothing when either side is zero (HTML
+    /// "fillRect" step 2), whatever the composite operation.
     pub fn fill_rect(&mut self, x: f64, y: f64, w: f64, h: f64) {
-        if ![x, y, w, h].iter().all(|v| v.is_finite()) {
+        if ![x, y, w, h].iter().all(|v| v.is_finite()) || w == 0.0 || h == 0.0 {
             return;
         }
         let Some(raster) = &mut self.raster else {
@@ -1042,7 +1105,7 @@ impl Canvas {
             self.scratch.close_path();
         }
         let paint = self.state.paint(&self.state.stroke_style, raster.size);
-        let stroke = self.state.stroke();
+        let stroke = self.state.stroke(|| path::length(&self.scratch));
         let shape = Outline::Stroke(&self.scratch, &stroke);
         raster.draw(&self.state, paint.as_ref(), self.state.transform, &shape);
         self.changed = true;
@@ -1109,7 +1172,11 @@ impl Canvas {
             * Affine::translate((x, y - rise))
             * Affine::scale_non_uniform(squeeze, 1.0)
             * Affine::translate((-anchor, 0.0));
-        let line_stroke = stroke.then(|| state.stroke());
+        // glifo strokes the outlines at the font size times the uniform
+        // scale it takes out of the transform, so their length there is at
+        // most the length at the font size times the transform's scale.
+        let line_stroke = stroke
+            .then(|| state.stroke(|| line.outline_length() * path::scale_of(geometry).max(1.0)));
         let style = if stroke {
             &state.stroke_style
         } else {
@@ -1538,13 +1605,29 @@ builder_methods!(
     default_path
 );
 
-/// Whether `point` is inside `path` under `rule`.
+/// Whether `point` is inside `path` under `rule`, a point on the path
+/// itself included (HTML "is point in path" and "is point in stroke").
 fn contains(path: &BezPath, point: Point, rule: FillRule) -> bool {
     let winding = path.winding(point);
-    match rule {
+    let inside = match rule {
         FillRule::NonZero => winding != 0,
         FillRule::EvenOdd => winding % 2 != 0,
-    }
+    };
+    inside || on_path(path, point)
+}
+
+/// Whether `point` lies on one of `path`'s segments, within
+/// [`ON_PATH_TOLERANCE`]. `BezPath::winding` counts a point on a segment
+/// as inside on one side of the shape only.
+fn on_path(path: &BezPath, point: Point) -> bool {
+    path.segments().any(|segment| {
+        segment
+            .bounding_box()
+            .inflate(ON_PATH_TOLERANCE, ON_PATH_TOLERANCE)
+            .contains(point)
+            && segment.nearest(point, ON_PATH_TOLERANCE).distance_sq
+                <= ON_PATH_TOLERANCE * ON_PATH_TOLERANCE
+    })
 }
 
 /// A rectangle's start and extent with a negative extent turned around.
