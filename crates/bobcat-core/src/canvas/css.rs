@@ -7,7 +7,7 @@
 //! thread.
 
 use std::borrow::Cow;
-use std::sync::{Arc, LazyLock};
+use std::sync::LazyLock;
 
 use cssparser::Parser;
 use stylo::color::{AbsoluteColor, ColorSpace};
@@ -26,8 +26,9 @@ use stylo::values::specified::font::{
 use stylo::values::specified::length::{LengthPercentage, NoCalcLength};
 use stylo::values::specified::{self, Color as SpecifiedColor};
 use stylo_traits::{CssWriter, ParsingMode, ToCss};
-use terminus::link::html::canvas::Font;
-use terminus::link::parley::{FontFamilyName, FontStyle, FontWeight, FontWidth, GenericFamily};
+use terminus::link::html::canvas::{
+    GenericFamily, ResolvedFamily, ResolvedFont, ResolvedFontStyle,
+};
 use terminus::link::peniko::Color;
 use terminus::link::stylo;
 
@@ -115,7 +116,7 @@ pub(crate) fn serialize_color(color: Color) -> String {
 /// A `font` value: what the canvas draws with, and the serialization the
 /// `font` getter answers.
 pub(crate) struct ParsedFont {
-    pub(crate) font: Font,
+    pub(crate) font: ResolvedFont,
     pub(crate) css: String,
 }
 
@@ -136,12 +137,12 @@ pub(crate) fn parse_font(text: &str) -> Option<ParsedFont> {
         return None;
     }
     let families = families(&longhands.font_family)?;
-    let font = Font {
+    let font = ResolvedFont {
         families,
         size,
         weight: weight(&longhands.font_weight)?,
         style: style(&longhands.font_style)?,
-        width: width(&longhands.font_width)?,
+        stretch: width(&longhands.font_width)?,
     };
     let size = FontSize::Length(LengthPercentage::Length(NoCalcLength::from_px(size)));
     let line_height = LineHeight::normal();
@@ -207,17 +208,15 @@ fn length_px(length: NoCalcLength) -> Option<f32> {
     Some(length.unitless_value() * em * BASE_FONT_SIZE)
 }
 
-fn families(family: &FontFamily) -> Option<Arc<[FontFamilyName<'static>]>> {
+fn families(family: &FontFamily) -> Option<Vec<ResolvedFamily>> {
     let FontFamily::Values(list) = family else {
         return None;
     };
     Some(
         list.iter()
             .map(|single| match single {
-                SingleFontFamily::FamilyName(name) => {
-                    FontFamilyName::Named(Cow::Owned(name.name.to_string()))
-                }
-                SingleFontFamily::Generic(generic) => FontFamilyName::Generic(match generic {
+                SingleFontFamily::FamilyName(name) => ResolvedFamily::Named(name.name.to_string()),
+                SingleFontFamily::Generic(generic) => ResolvedFamily::Generic(match generic {
                     GenericFontFamily::Serif => GenericFamily::Serif,
                     GenericFontFamily::Monospace => GenericFamily::Monospace,
                     GenericFontFamily::Cursive => GenericFamily::Cursive,
@@ -231,28 +230,28 @@ fn families(family: &FontFamily) -> Option<Arc<[FontFamilyName<'static>]>> {
 }
 
 /// The weight; `bolder` and `lighter` relative to the default font's 400.
-fn weight(weight: &SpecifiedFontWeight) -> Option<FontWeight> {
+fn weight(weight: &SpecifiedFontWeight) -> Option<f32> {
     let value = match weight {
         SpecifiedFontWeight::Absolute(absolute) => absolute.compute()?.value(),
         SpecifiedFontWeight::Bolder => AbsoluteFontWeight::Bold.compute()?.value(),
         SpecifiedFontWeight::Lighter => 100.0,
         SpecifiedFontWeight::System(_) => return None,
     };
-    Some(FontWeight::new(value))
+    Some(value)
 }
 
-fn style(style: &SpecifiedFontStyle) -> Option<FontStyle> {
+fn style(style: &SpecifiedFontStyle) -> Option<ResolvedFontStyle> {
     match style {
         SpecifiedFontStyle::Specified(specified::font::SpecifiedFontStyle::Italic) => {
-            Some(FontStyle::Italic)
+            Some(ResolvedFontStyle::Italic)
         }
         SpecifiedFontStyle::Specified(specified::font::SpecifiedFontStyle::Oblique(angle)) => {
             // A `calc()` angle needs a computed-value context.
             let degrees = angle.degrees()?;
             Some(if degrees == 0.0 {
-                FontStyle::Normal
+                ResolvedFontStyle::Normal
             } else {
-                FontStyle::Oblique(Some(degrees))
+                ResolvedFontStyle::Oblique(Some(degrees))
             })
         }
         SpecifiedFontStyle::System(_) => None,
@@ -260,7 +259,7 @@ fn style(style: &SpecifiedFontStyle) -> Option<FontStyle> {
 }
 
 /// `font-stretch`'s keyword as a width ratio (CSS Fonts 4, "font-width").
-fn width(width: &SpecifiedFontWidth) -> Option<FontWidth> {
+fn width(width: &SpecifiedFontWidth) -> Option<f32> {
     let SpecifiedFontWidth::Keyword(keyword) = width else {
         return None;
     };
@@ -275,5 +274,5 @@ fn width(width: &SpecifiedFontWidth) -> Option<FontWidth> {
         FontWidthKeyword::ExtraExpanded => 150.0,
         FontWidthKeyword::UltraExpanded => 200.0,
     };
-    Some(FontWidth::from_ratio(percent / 100.0))
+    Some(percent / 100.0)
 }

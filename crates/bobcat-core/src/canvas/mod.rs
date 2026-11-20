@@ -23,16 +23,13 @@ mod members;
 #[cfg(test)]
 mod tests;
 
-use std::borrow::Cow;
 use std::cell::{Cell, RefCell, RefMut};
 use std::rc::Weak;
 
 use rustc_hash::FxHashMap;
 use terminus::link::html::canvas::{
-    Canvas, CanvasError, Font, Gradient, Image, ImageDataRead, InvalidState, Path, Pattern,
+    Canvas, CanvasError, Gradient, Image, ImageDataRead, InvalidState, Path, Pattern,
 };
-use terminus::link::parley::fontique::Attributes;
-use terminus::link::parley::{FontContext, FontFamily};
 use terminus::link::{NodeId, TextContext};
 use tokio_util::sync::CancellationToken;
 
@@ -322,22 +319,15 @@ impl CanvasTable {
         }
     }
 
-    /// Runs `shape` with the font context this realm's canvas text is
-    /// shaped with, its fallback filled for `text` in `font`; `None` when
-    /// the realm's document is not there to lend its own.
-    fn with_fonts<R>(
-        &self,
-        text: &str,
-        font: &Font,
-        shape: impl FnOnce(&mut FontContext) -> R,
-    ) -> Option<R> {
-        let family = FontFamily::List(Cow::Borrowed(&font.families));
-        let attributes = Attributes::new(font.width, font.style, font.weight);
+    /// Runs `shape` with the text context this realm's canvas text is
+    /// shaped in; `None` when the realm's document is not there to lend its
+    /// own.
+    fn with_fonts<R>(&self, shape: impl FnOnce(&mut TextContext) -> R) -> Option<R> {
         match &self.fonts {
             Fonts::System(context) => {
                 let mut context = context.borrow_mut();
                 let context = context.get_or_insert_with(|| Box::new(TextContext::new()));
-                Some(shape(context.fonts_for(text, &family, attributes)))
+                Some(shape(context))
             }
             Fonts::Document(document) => {
                 let document = document.upgrade()?;
@@ -345,7 +335,7 @@ impl CanvasTable {
                 let mut shaped = None;
                 document.with_text_context(&mut |context| {
                     if let Some(shape) = shape.take() {
-                        shaped = Some(shape(context.fonts_for(text, &family, attributes)));
+                        shaped = Some(shape(context));
                     }
                 });
                 shaped
