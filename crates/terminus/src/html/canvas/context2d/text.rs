@@ -1,12 +1,12 @@
-//! Text: the font description, shaping one line with parley, and the
-//! metrics `measureText` reports (HTML "Drawing text to the bitmap").
+//! Text: the default font, shaping one line through
+//! [`shape_line`](seldon::text::shape_line), and the metrics `measureText`
+//! reports (HTML "Drawing text to the bitmap").
 
 use std::borrow::Cow;
-use std::sync::Arc;
 
-use parley::{
-    BaseDirection, FontContext, FontFamily, FontFamilyName, FontStyle, FontWeight, FontWidth,
-    GenericFamily, Layout, LayoutContext, PositionedLayoutItem, StyleProperty, WhiteSpaceCollapse,
+use seldon::text::{
+    FontMetrics, GenericFamily, LineOptions, LineWhiteSpace, ResolvedFamily, ResolvedFont,
+    ResolvedFontStyle, ShapedLine, TextContext, font_metrics, shape_line,
 };
 use skrifa::instance::{LocationRef, NormalizedCoord, Size};
 use skrifa::outline::{DrawSettings, OutlinePen};
@@ -15,31 +15,14 @@ use skrifa::{FontRef, GlyphId, MetadataProvider};
 use super::{Direction, TextAlign, TextBaseline};
 use crate::kurbo::Rect;
 
-/// The resolved `font`: what the CSS `font` shorthand names, every keyword
-/// already a number. Cloning shares the family list.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Font {
-    /// The `font-family` list in preference order, generic families
-    /// included.
-    pub families: Arc<[FontFamilyName<'static>]>,
-    /// The font size in CSS px.
-    pub size: f32,
-    pub weight: FontWeight,
-    pub style: FontStyle,
-    /// `font-stretch`.
-    pub width: FontWidth,
-}
-
-impl Default for Font {
-    /// `10px sans-serif`.
-    fn default() -> Self {
-        Self {
-            families: Arc::new([FontFamilyName::Generic(GenericFamily::SansSerif)]),
-            size: 10.0,
-            weight: FontWeight::NORMAL,
-            style: FontStyle::Normal,
-            width: FontWidth::NORMAL,
-        }
+/// The `font` a context starts with: `10px sans-serif`.
+pub(crate) fn default_font() -> ResolvedFont {
+    ResolvedFont {
+        families: vec![ResolvedFamily::Generic(GenericFamily::SansSerif)],
+        size: 10.0,
+        weight: 400.0,
+        style: ResolvedFontStyle::Normal,
+        stretch: 1.0,
     }
 }
 
@@ -61,31 +44,61 @@ pub struct TextMetrics {
     pub ideographic_baseline: f64,
 }
 
-/// The parley state text is shaped in, kept between calls for its buffers.
-pub(crate) struct Shaper {
-    context: LayoutContext<()>,
-    pub(crate) layout: Layout<()>,
-}
-
-impl std::fmt::Debug for Shaper {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Shaper").finish_non_exhaustive()
-    }
-}
-
-/// One shaped line, in layout space: x from the line's left edge, y down
-/// from the alphabetic baseline.
-#[derive(Clone, Copy, Debug)]
+/// One shaped line: its glyph runs, x from the line's left edge and y down
+/// from the alphabetic baseline, and the metrics it is anchored by.
+#[derive(Debug)]
 pub(crate) struct Line {
+    pub(crate) shaped: ShapedLine,
     pub(crate) width: f64,
-    /// The alphabetic baseline's y in the layout.
-    pub(crate) baseline: f32,
     /// The first available font's ascent and descent.
     ascent: f64,
     descent: f64,
 }
 
 impl Line {
+    /// Shapes `text` as one unwrapped line, after the text preparation
+    /// algorithm's whitespace step: every ASCII whitespace character becomes
+    /// a space, and every space is kept.
+    pub(crate) fn shape(
+        context: &mut TextContext,
+        text: &str,
+        font: &ResolvedFont,
+        direction: Direction,
+    ) -> Self {
+        const WHITESPACE: [char; 4] = ['\t', '\n', '\x0C', '\r'];
+        let text: Cow<'_, str> = if text.contains(WHITESPACE) {
+            Cow::Owned(text.replace(WHITESPACE, " "))
+        } else {
+            Cow::Borrowed(text)
+        };
+        let options = LineOptions {
+            letter_spacing: 0.0,
+            // `inherit` with no element to inherit from is `ltr`.
+            direction: Some(if direction == Direction::Rtl {
+                seldon::text::paragraph::Direction::Rtl
+            } else {
+                seldon::text::paragraph::Direction::Ltr
+            }),
+            white_space: LineWhiteSpace::Preserve,
+        };
+        let shaped = shape_line(context, &text, font, options);
+        // Text with no glyph run (empty text) names no font: the first
+        // available font's metrics are read off a shaped letter.
+        let size = f64::from(font.size);
+        let (ascent, descent) = shaped
+            .first_font
+            .or_else(|| font_metrics(context, font))
+            .map_or((size * 0.8, size * 0.2), |metrics: FontMetrics| {
+                (f64::from(metrics.ascent), f64::from(metrics.descent))
+            });
+        Self {
+            width: f64::from(shaped.advance),
+            shaped,
+            ascent,
+            descent,
+        }
+    }
+
     /// The y of `baseline` relative to the alphabetic baseline, down
     /// positive.
     ///
@@ -110,6 +123,47 @@ impl Line {
             TextBaseline::Bottom => em_descent,
         }
     }
+
+    /// The union of the shaped glyphs' outline bounds, relative to the
+    /// line's left edge on the alphabetic baseline, y down; `None` for no
+    /// ink.
+    pub(crate) fn ink_bounds(&self) -> Option<Rect> {
+        let mut bounds: Option<Rect> = None;
+        for run in &self.shaped.runs {
+            let Ok(font) = FontRef::from_index(run.font.data.data(), run.font.index) else {
+                continue;
+            };
+            let coords: Vec<NormalizedCoord> = run
+                .normalized_coords
+                .iter()
+                .map(|coord| NormalizedCoord::from_bits(*coord))
+                .collect();
+            let outlines = font.outline_glyphs();
+            for glyph in &run.glyphs {
+                let Some(outline) = outlines.get(GlyphId::new(glyph.id)) else {
+                    continue;
+                };
+                let mut pen = BoundsPen::default();
+                let settings =
+                    DrawSettings::unhinted(Size::new(run.size), LocationRef::new(&coords));
+                if outline.draw(settings, &mut pen).is_err() {
+                    continue;
+                }
+                let Some(glyph_bounds) = pen.bounds else {
+                    continue;
+                };
+                // Outlines are y-up; the line is y-down.
+                let placed = Rect::new(
+                    f64::from(glyph.x) + glyph_bounds.x0,
+                    f64::from(glyph.y) - glyph_bounds.y1,
+                    f64::from(glyph.x) + glyph_bounds.x1,
+                    f64::from(glyph.y) - glyph_bounds.y0,
+                );
+                bounds = Some(bounds.map_or(placed, |b| b.union(placed)));
+            }
+        }
+        bounds
+    }
 }
 
 /// The physical anchor `textAlign` picks, as a fraction of the line width
@@ -122,135 +176,6 @@ pub(crate) fn align_fraction(align: TextAlign, direction: Direction) -> f64 {
         TextAlign::Start if rtl => 1.0,
         TextAlign::End if !rtl => 1.0,
         TextAlign::Left | TextAlign::Start | TextAlign::End => 0.0,
-    }
-}
-
-impl Shaper {
-    pub(crate) fn new() -> Self {
-        Self {
-            context: LayoutContext::new(),
-            layout: Layout::new(),
-        }
-    }
-
-    /// Shapes `text` as one unwrapped line, after the text preparation
-    /// algorithm's whitespace step: every ASCII whitespace character becomes
-    /// a space.
-    pub(crate) fn shape(
-        &mut self,
-        fonts: &mut FontContext,
-        text: &str,
-        font: &Font,
-        direction: Direction,
-    ) -> Line {
-        const WHITESPACE: [char; 4] = ['\t', '\n', '\x0C', '\r'];
-        let text: Cow<'_, str> = if text.contains(WHITESPACE) {
-            Cow::Owned(text.replace(WHITESPACE, " "))
-        } else {
-            Cow::Borrowed(text)
-        };
-        self.build(fonts, &text, font, direction);
-        let (ascent, descent) = self.first_run_metrics().unwrap_or_else(|| {
-            // No glyph run names the first available font: read its metrics
-            // off a shaped letter, then shape the text again.
-            self.build(fonts, "x", font, direction);
-            let metrics = self.first_run_metrics();
-            self.build(fonts, &text, font, direction);
-            let size = f64::from(font.size);
-            metrics.unwrap_or((size * 0.8, size * 0.2))
-        });
-        let baseline = self
-            .layout
-            .lines()
-            .next()
-            .map_or(0.0, |line| line.metrics().baseline);
-        Line {
-            width: f64::from(self.layout.full_width()),
-            baseline,
-            ascent,
-            descent,
-        }
-    }
-
-    fn build(&mut self, fonts: &mut FontContext, text: &str, font: &Font, direction: Direction) {
-        let mut builder = self.context.ranged_builder(fonts, text, 1.0, false);
-        builder.push_default(StyleProperty::FontFamily(FontFamily::List(Cow::Borrowed(
-            &font.families,
-        ))));
-        builder.push_default(StyleProperty::FontSize(font.size));
-        builder.push_default(StyleProperty::FontWeight(font.weight));
-        builder.push_default(StyleProperty::FontStyle(font.style));
-        builder.push_default(StyleProperty::FontWidth(font.width));
-        builder.push_default(StyleProperty::WhiteSpaceCollapse(
-            WhiteSpaceCollapse::Preserve,
-        ));
-        builder.set_base_direction(if direction == Direction::Rtl {
-            BaseDirection::Rtl
-        } else {
-            BaseDirection::Ltr
-        });
-        builder.build_into(&mut self.layout, text);
-        self.layout.break_all_lines(None);
-    }
-
-    fn first_run_metrics(&self) -> Option<(f64, f64)> {
-        let line = self.layout.lines().next()?;
-        line.items().find_map(|item| match item {
-            PositionedLayoutItem::GlyphRun(run) => {
-                let metrics = run.run().font_metrics();
-                Some((f64::from(metrics.ascent), f64::from(metrics.descent)))
-            }
-            PositionedLayoutItem::InlineBox(_) => None,
-        })
-    }
-
-    /// The union of the shaped glyphs' outline bounds, in layout space
-    /// relative to the alphabetic baseline; `None` for no ink.
-    pub(crate) fn ink_bounds(&self, line: &Line) -> Option<Rect> {
-        let mut bounds: Option<Rect> = None;
-        for laid in self.layout.lines() {
-            for item in laid.items() {
-                let PositionedLayoutItem::GlyphRun(glyph_run) = item else {
-                    continue;
-                };
-                let run = glyph_run.run();
-                let font_data = run.font();
-                let Ok(font) = FontRef::from_index(font_data.data.data(), font_data.index) else {
-                    continue;
-                };
-                let coords: Vec<NormalizedCoord> = run
-                    .normalized_coords()
-                    .iter()
-                    .map(|coord| NormalizedCoord::from_bits(coord.to_bits()))
-                    .collect();
-                let outlines = font.outline_glyphs();
-                for glyph in glyph_run.positioned_glyphs() {
-                    let Some(outline) = outlines.get(GlyphId::new(glyph.id)) else {
-                        continue;
-                    };
-                    let mut pen = BoundsPen::default();
-                    let settings = DrawSettings::unhinted(
-                        Size::new(run.font_size()),
-                        LocationRef::new(&coords),
-                    );
-                    if outline.draw(settings, &mut pen).is_err() {
-                        continue;
-                    }
-                    let Some(glyph_bounds) = pen.bounds else {
-                        continue;
-                    };
-                    // Outlines are y-up; the layout is y-down.
-                    let placed = Rect::new(
-                        f64::from(glyph.x) + glyph_bounds.x0,
-                        f64::from(glyph.y - line.baseline) - glyph_bounds.y1,
-                        f64::from(glyph.x) + glyph_bounds.x1,
-                        f64::from(glyph.y - line.baseline) - glyph_bounds.y0,
-                    );
-                    bounds = Some(bounds.map_or(placed, |b| b.union(placed)));
-                }
-            }
-        }
-        bounds
     }
 }
 

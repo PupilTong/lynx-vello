@@ -77,9 +77,10 @@ Subsystems:
   (`CompositeOp`, `LineCap`, … each with `from_name`/`name` for the IDL
   strings) or `Path` (`Path2D`), `Gradient`, `Pattern` (shared by
   reference, so a stop or transform set later shows in later draws), `Image`,
-  `Style`, `Font` (parley family names; CSS strings are parsed by the
+  `Style`, `seldon`'s `ResolvedFont` (CSS strings are parsed by the
   caller) and `peniko::Color`; text calls take the caller's
-  `&mut parley::FontContext`; `CanvasError` names the exception. `Canvas`
+  `&mut TextContext` and shape through `seldon::text::shape_line`, the
+  shaper SVG `<text>` uses; `CanvasError` names the exception. `Canvas`
   is `Send` and there is no global state. Draws are recorded into the
   canvas's own `DisplayList` on the calling thread and replayed onto its
   `render::canvas::Surface` at a read, at `flush`, after a draw that samples

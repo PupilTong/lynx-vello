@@ -1,11 +1,11 @@
 //! Items into a display list, text shaped on the way.
 
-use seldon::text::{ShapedLine, TextContext, shape_line};
+use seldon::text::{LineOptions, ShapedLine, TextContext, shape_line};
 
 use super::text::{TextAnchor, TextItem, TextPaint};
 use super::{Item, LayerClip, VectorDocument, paint_server};
 use crate::kurbo::{Affine, Point, Rect, Stroke};
-use crate::paint::display_list::{DisplayList, Glyph};
+use crate::paint::display_list::{DisplayList, Glyph, synthesized_outlines};
 use crate::peniko::{Brush, Fill, Mix, StyleRef};
 
 /// Encodes `document` into a scene in viewport units, shaping its text
@@ -127,7 +127,11 @@ fn shape_all(document: &VectorDocument, context: &mut TextContext) -> Vec<Shaped
                         .spans
                         .iter()
                         .map(|span| {
-                            shape_line(context, &span.text, &span.font, span.letter_spacing)
+                            let options = LineOptions {
+                                letter_spacing: span.letter_spacing,
+                                ..LineOptions::default()
+                            };
+                            shape_line(context, &span.text, &span.font, options)
                         })
                         .collect();
                     // The pen runs from the chunk's start through every
@@ -260,27 +264,32 @@ fn draw_text(scene: &mut DisplayList, text: &TextItem, shaped: &ShapedText) {
                 .stroke
                 .as_ref()
                 .and_then(|(style, paint)| resolve(paint).map(|brush| (style, brush)));
-            let draw =
-                |scene: &mut DisplayList, style: StyleRef<'_>, brush: &(Brush, Option<Affine>)| {
-                    for run in &line.runs {
-                        scene
-                            .draw_glyphs(&run.font)
-                            .font_size(run.size)
-                            .transform(run_transform)
-                            .normalized_coords(&run.normalized_coords)
-                            .hint(false)
-                            .brush(&brush.0)
-                            .brush_transform(brush.1)
-                            .draw(
-                                style,
-                                run.glyphs.iter().map(|glyph| Glyph {
-                                    id: glyph.id,
-                                    x: glyph.x,
-                                    y: glyph.y,
-                                }),
-                            );
-                    }
-                };
+            let draw = |scene: &mut DisplayList,
+                        style: StyleRef<'_>,
+                        brush: &(Brush, Option<Affine>)| {
+                for run in &line.runs {
+                    let (embolden, glyph_transform) =
+                        synthesized_outlines(run.synthesis.embolden, run.synthesis.skew, run.size);
+                    scene
+                        .draw_glyphs(&run.font)
+                        .font_size(run.size)
+                        .transform(run_transform)
+                        .glyph_transform(glyph_transform)
+                        .font_embolden(embolden)
+                        .normalized_coords(&run.normalized_coords)
+                        .hint(false)
+                        .brush(&brush.0)
+                        .brush_transform(brush.1)
+                        .draw(
+                            style,
+                            run.glyphs.iter().map(|glyph| Glyph {
+                                id: glyph.id,
+                                x: glyph.x,
+                                y: glyph.y,
+                            }),
+                        );
+                }
+            };
             let draw_fill = |scene: &mut DisplayList| {
                 if let Some(brush) = &fill {
                     draw(scene, Fill::NonZero.into(), brush);

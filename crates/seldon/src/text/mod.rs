@@ -11,4 +11,7 @@ pub mod paragraph;
 
 pub use context::TextContext;
 pub use font::FontBlob;
-pub use line::{ResolvedFont, ResolvedFontStyle, ShapedGlyph, ShapedLine, ShapedRun, shape_line};
+pub use line::{
+    FontMetrics, GenericFamily, LineOptions, LineWhiteSpace, ResolvedFamily, ResolvedFont,
+    ResolvedFontStyle, ShapedGlyph, ShapedLine, ShapedRun, Synthesis, font_metrics, shape_line,
+};
