@@ -6,7 +6,7 @@ use std::sync::Arc;
 use seldon::text::{ResolvedFont, ShapedLine, TextContext};
 
 use super::image::Source;
-use super::path::builder_methods;
+use super::path::{self, builder_methods};
 use super::style::{Paint, canvas_rect, image_quality};
 use super::text::{self, Line};
 use super::{
@@ -29,6 +29,10 @@ const HIT_TOLERANCE: f64 = 0.01;
 /// How far from a path's segment a hit-tested point still lies on it, in
 /// canvas units.
 const ON_PATH_TOLERANCE: f64 = 1e-9;
+/// The most dashes a dash list cuts a path into: past it the path is
+/// stroked undashed. Skia's `SkDashPath` limit (`kMaxDashCount`), which
+/// Chromium's canvas follows; the standard sets none.
+const MAX_DASH_COUNT: f64 = 1_000_000.0;
 /// How many bytes of draws are recorded before they are replayed with no
 /// read asking: Chromium's bound on a canvas's recorded ops, 2 MiB.
 const MAX_RECORDED_BYTES: usize = 2 << 20;
@@ -112,7 +116,10 @@ impl Default for State {
 }
 
 impl State {
-    fn stroke(&self) -> Stroke {
+    /// The stroke the line styles describe, for a path `length` long in
+    /// the space the stroke is computed in; `length` is called only when a
+    /// dash list is set.
+    fn stroke(&self, length: impl FnOnce() -> f64) -> Stroke {
         let cap = match self.line_cap {
             LineCap::Butt => Cap::Butt,
             LineCap::Round => Cap::Round,
@@ -128,7 +135,10 @@ impl State {
             .with_join(join)
             .with_miter_limit(self.miter_limit);
         // HTML "trace a path": a dash list summing to zero does not dash.
-        if self.line_dash.iter().sum::<f64>() > 0.0 {
+        // Nor does one that would cut the path into more than
+        // `MAX_DASH_COUNT` dashes (a non-finite count included).
+        let period = self.line_dash.iter().sum::<f64>();
+        if period > 0.0 && length() / period <= MAX_DASH_COUNT {
             stroke.with_dashes(self.line_dash_offset, self.line_dash.iter().copied())
         } else {
             stroke
@@ -877,7 +887,7 @@ impl Canvas {
                 .extend(self.path.elements.iter().map(|element| inverse * element));
         }
         let paint = self.state.paint(&self.state.stroke_style, raster.size);
-        let stroke = self.state.stroke();
+        let stroke = self.state.stroke(|| path::length(&self.scratch));
         let shape = Outline::Stroke(&self.scratch, &stroke);
         raster.draw(&self.state, paint.as_ref(), ctm, &shape);
         self.changed = true;
@@ -889,7 +899,7 @@ impl Canvas {
             return;
         };
         let paint = self.state.paint(&self.state.stroke_style, raster.size);
-        let stroke = self.state.stroke();
+        let stroke = self.state.stroke(|| path::length(&path.elements));
         let shape = Outline::Stroke(&path.elements, &stroke);
         raster.draw(&self.state, paint.as_ref(), self.state.transform, &shape);
         self.changed = true;
@@ -960,13 +970,12 @@ impl Canvas {
         self.in_stroke(path.elements.iter(), ctm.inverse() * Point::new(x, y))
     }
 
-    fn in_stroke(&self, path: impl IntoIterator<Item = PathEl>, point: Point) -> bool {
-        let outline = kurbo::stroke(
-            path,
-            &self.state.stroke(),
-            &StrokeOpts::default(),
-            HIT_TOLERANCE,
-        );
+    fn in_stroke<P>(&self, path: P, point: Point) -> bool
+    where
+        P: IntoIterator<Item = PathEl> + Clone,
+    {
+        let stroke = self.state.stroke(|| path::length(path.clone()));
+        let outline = kurbo::stroke(path, &stroke, &StrokeOpts::default(), HIT_TOLERANCE);
         contains(&outline, point, FillRule::NonZero)
     }
 
@@ -1047,7 +1056,7 @@ impl Canvas {
             self.scratch.close_path();
         }
         let paint = self.state.paint(&self.state.stroke_style, raster.size);
-        let stroke = self.state.stroke();
+        let stroke = self.state.stroke(|| path::length(&self.scratch));
         let shape = Outline::Stroke(&self.scratch, &stroke);
         raster.draw(&self.state, paint.as_ref(), self.state.transform, &shape);
         self.changed = true;
@@ -1114,7 +1123,11 @@ impl Canvas {
             * Affine::translate((x, y - rise))
             * Affine::scale_non_uniform(squeeze, 1.0)
             * Affine::translate((-anchor, 0.0));
-        let line_stroke = stroke.then(|| state.stroke());
+        // glifo strokes the outlines at the font size times the uniform
+        // scale it takes out of the transform, so their length there is at
+        // most the length at the font size times the transform's scale.
+        let line_stroke = stroke
+            .then(|| state.stroke(|| line.outline_length() * path::scale_of(geometry).max(1.0)));
         let style = if stroke {
             &state.stroke_style
         } else {

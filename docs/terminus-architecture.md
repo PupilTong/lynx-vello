@@ -974,6 +974,12 @@ Decisions the standard leaves open, or where this differs from it:
 - A zero side, or a side over 8,192 px (`MAX_SURFACE_SIDE`), has no bitmap: draws do nothing and
   reads answer transparent black. `getImageData` over 2^28 px is `RangeError`. An image made from
   pixels with a side over 8,192 px is `InvalidStateError`.
+- A dash list that would cut the stroked path into more than 1,000,000 dashes (its length, in
+  the space the stroke is computed in, over the dash period) is not applied: the path is stroked
+  undashed, by `stroke`, `strokeRect`, `strokeText` and `isPointInStroke` alike. This is Skia's
+  `SkDashPath` limit (`kMaxDashCount`); the standard sets none. A curve's length is the mean of
+  its chord and control polygon; `strokeText` counts the glyph outlines at the font size times
+  the transform's scale.
 - A readback the GPU does not answer (no device, or the Render Worker dropped it on wasm32) is
   `InvalidStateError`.
 - `measureText` baselines the standard leaves to the font: em square split in the ratio of the

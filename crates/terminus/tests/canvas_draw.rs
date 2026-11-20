@@ -206,6 +206,62 @@ fn dashes() {
     assert_eq!(canvas.line_dash(), [1.0, 2.0, 3.0, 1.0, 2.0, 3.0]);
 }
 
+/// A dash list that would cut the path into more than a million dashes is
+/// not applied and the path is stroked solid (Skia's `SkDashPath` limit):
+/// a 100-unit line under a 9e-5 period would be 1.1 million dashes. A
+/// period ten times longer still dashes.
+#[test]
+fn a_dash_past_a_million_dashes_strokes_solid() {
+    let fine = [4e-5, 5e-5];
+    let coarse = [4e-4, 5e-4];
+    // The middle of a gap of either list, on the line's axis.
+    let gap = |dash: [f64; 2]| dash[0] + dash[1] / 2.0;
+    let mut line = Path::new();
+    line.move_to(0.0, 5.0);
+    line.line_to(100.0, 5.0);
+
+    let mut canvas = Canvas::new(100, 10);
+    canvas.set_line_width(4.0);
+    canvas.set_line_dash(&fine);
+    assert!(canvas.is_point_in_stroke_path(&line, gap(fine), 5.0));
+    canvas.move_to(0.0, 5.0);
+    canvas.line_to(100.0, 5.0);
+    assert!(canvas.is_point_in_stroke(gap(fine), 5.0));
+    canvas.set_line_dash(&coarse);
+    assert!(!canvas.is_point_in_stroke_path(&line, gap(coarse), 5.0));
+    assert!(!canvas.is_point_in_stroke(gap(coarse), 5.0));
+    // A period of 2e-300: 5e301 dashes.
+    canvas.set_line_dash(&[1e-300]);
+    assert!(canvas.is_point_in_stroke_path(&line, 50.0, 5.0));
+
+    // Under the fine list every form strokes a solid line: full alpha in
+    // the middle of the line, where the dashes would cover under half.
+    canvas.set_line_dash(&fine);
+    canvas.set_stroke_style(solid(RED));
+    canvas.stroke();
+    assert_eq!(pixel(&mut canvas, 50, 5), RED, "stroke()");
+    let mut canvas = Canvas::new(100, 10);
+    canvas.set_line_width(4.0);
+    canvas.set_line_dash(&fine);
+    canvas.set_stroke_style(solid(RED));
+    canvas.stroke_path(&line);
+    assert_eq!(pixel(&mut canvas, 50, 5), RED, "stroke(path)");
+    let mut canvas = Canvas::new(100, 10);
+    canvas.set_line_width(4.0);
+    canvas.set_line_dash(&fine);
+    canvas.set_stroke_style(solid(RED));
+    canvas.stroke_rect(0.0, 5.0, 100.0, 0.0);
+    assert_eq!(pixel(&mut canvas, 50, 5), RED, "strokeRect");
+    // The coarse list dashes at the same place: under half the pixel.
+    let mut canvas = Canvas::new(100, 10);
+    canvas.set_line_width(4.0);
+    canvas.set_line_dash(&coarse);
+    canvas.set_stroke_style(solid(RED));
+    canvas.stroke_path(&line);
+    let [_, _, _, a] = pixel(&mut canvas, 50, 5);
+    assert!(a < 160, "dashed, alpha {a}");
+}
+
 #[test]
 fn dash_offset_shifts_the_pattern() {
     let mut canvas = Canvas::new(40, 10);

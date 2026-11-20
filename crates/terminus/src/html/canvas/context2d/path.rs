@@ -8,7 +8,7 @@
 use std::f64::consts::TAU;
 
 use super::CanvasError;
-use crate::kurbo::{self, Affine, BezPath, PathEl, Point, Vec2};
+use crate::kurbo::{self, Affine, BezPath, PathEl, PathSeg, Point, Vec2};
 use crate::render::svg::path_data;
 
 /// A `Path2D`: subpaths of lines and curves in its own coordinates.
@@ -405,7 +405,7 @@ fn pt(p: [f64; 2]) -> Point {
 }
 
 /// The larger factor `t` stretches a unit vector by, roughly.
-fn scale_of(t: Affine) -> f64 {
+pub(super) fn scale_of(t: Affine) -> f64 {
     let [a, b, c, d, _, _] = t.as_coeffs();
     (a * a + b * b).max(c * c + d * d).sqrt()
 }
@@ -543,3 +543,24 @@ impl Path {
 }
 
 builder_methods!(Path, |_: &Path| Affine::IDENTITY, own);
+
+/// The length of `path`, for counting dashes: exact for lines, and for a
+/// curve the mean of its chord and its control polygon, which is never
+/// under half its arc length (the polygon is never shorter than the arc).
+pub(super) fn length(path: impl IntoIterator<Item = PathEl>) -> f64 {
+    kurbo::segments(path)
+        .map(|segment| match segment {
+            PathSeg::Line(line) => line.p0.distance(line.p1),
+            PathSeg::Quad(quad) => {
+                let polygon = quad.p0.distance(quad.p1) + quad.p1.distance(quad.p2);
+                (quad.p0.distance(quad.p2) + polygon) / 2.0
+            }
+            PathSeg::Cubic(cubic) => {
+                let polygon = cubic.p0.distance(cubic.p1)
+                    + cubic.p1.distance(cubic.p2)
+                    + cubic.p2.distance(cubic.p3);
+                (cubic.p0.distance(cubic.p3) + polygon) / 2.0
+            }
+        })
+        .sum()
+}

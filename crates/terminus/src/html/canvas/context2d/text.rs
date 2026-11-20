@@ -13,7 +13,7 @@ use skrifa::outline::{DrawSettings, OutlinePen};
 use skrifa::{FontRef, GlyphId, MetadataProvider};
 
 use super::{Direction, TextAlign, TextBaseline};
-use crate::kurbo::Rect;
+use crate::kurbo::{BezPath, Rect};
 
 /// The `font` a context starts with: `10px sans-serif`.
 pub(crate) fn default_font() -> ResolvedFont {
@@ -123,6 +123,34 @@ impl Line {
         }
     }
 
+    /// The summed length of the shaped glyphs' outlines at the font size,
+    /// as [`super::path::length`] measures a path: what a dash list cuts
+    /// when the line is stroked.
+    pub(crate) fn outline_length(&self) -> f64 {
+        let mut pen = OutlinePath::default();
+        for run in &self.shaped.runs {
+            let Ok(font) = FontRef::from_index(run.font.data.data(), run.font.index) else {
+                continue;
+            };
+            let coords: Vec<NormalizedCoord> = run
+                .normalized_coords
+                .iter()
+                .map(|coord| NormalizedCoord::from_bits(*coord))
+                .collect();
+            let outlines = font.outline_glyphs();
+            for glyph in &run.glyphs {
+                let Some(outline) = outlines.get(GlyphId::new(glyph.id)) else {
+                    continue;
+                };
+                let settings =
+                    DrawSettings::unhinted(Size::new(run.size), LocationRef::new(&coords));
+                // A glyph that fails to draw part way counts what it drew.
+                let _ = outline.draw(settings, &mut pen);
+            }
+        }
+        super::path::length(&pen.0)
+    }
+
     /// The union of the shaped glyphs' outline bounds, relative to the
     /// line's left edge on the alphabetic baseline, y down; `None` for no
     /// ink.
@@ -212,6 +240,39 @@ pub(crate) fn metrics(
         hanging_baseline: anchor_y - line.baseline_offset(TextBaseline::Hanging, size),
         alphabetic_baseline: anchor_y,
         ideographic_baseline: anchor_y - line.baseline_offset(TextBaseline::Ideographic, size),
+    }
+}
+
+/// An outline pen collecting the segments drawn into one path.
+#[derive(Default)]
+struct OutlinePath(BezPath);
+
+impl OutlinePen for OutlinePath {
+    fn move_to(&mut self, x: f32, y: f32) {
+        self.0.move_to((f64::from(x), f64::from(y)));
+    }
+
+    fn line_to(&mut self, x: f32, y: f32) {
+        self.0.line_to((f64::from(x), f64::from(y)));
+    }
+
+    fn quad_to(&mut self, cx0: f32, cy0: f32, x: f32, y: f32) {
+        self.0.quad_to(
+            (f64::from(cx0), f64::from(cy0)),
+            (f64::from(x), f64::from(y)),
+        );
+    }
+
+    fn curve_to(&mut self, cx0: f32, cy0: f32, cx1: f32, cy1: f32, x: f32, y: f32) {
+        self.0.curve_to(
+            (f64::from(cx0), f64::from(cy0)),
+            (f64::from(cx1), f64::from(cy1)),
+            (f64::from(x), f64::from(y)),
+        );
+    }
+
+    fn close(&mut self) {
+        self.0.close_path();
     }
 }
 
