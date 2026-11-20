@@ -876,6 +876,50 @@ fn shadows() {
     assert_eq!(pixel(&mut canvas, 35, 25), CLEAR);
 }
 
+/// A shadow blur or offset past what the GPU can filter is limited, not an
+/// error: the shape is drawn whatever finite values the script set, on any
+/// canvas up to the longest side, and the attributes read back as set.
+#[test]
+fn a_shadow_past_the_device_limits_still_draws_the_shape() {
+    let draw = |canvas: &mut Canvas, blur: f64, offset: f64, rect: [f64; 4]| {
+        canvas.set_shadow_color(color(BLUE));
+        canvas.set_shadow_blur(blur);
+        canvas.set_shadow_offset_x(offset);
+        canvas.set_shadow_offset_y(offset);
+        canvas.set_fill_style(solid(RED));
+        canvas.fill_rect(rect[0], rect[1], rect[2], rect[3]);
+    };
+    for (blur, offset) in [
+        (20_000.0, 0.0),
+        (1e308, 0.0),
+        (f64::MAX, 0.0),
+        (2.0, 1e300),
+        (2.0, -1e300),
+        (2.0, 6000.0),
+        (1e308, 1e308),
+    ] {
+        let mut canvas = Canvas::new(16, 16);
+        draw(&mut canvas, blur, offset, [4.0, 4.0, 4.0, 4.0]);
+        assert_eq!(canvas.shadow_blur(), blur);
+        assert_eq!(canvas.shadow_offset_x(), offset);
+        assert_eq!(
+            pixel(&mut canvas, 5, 5),
+            RED,
+            "blur {blur}, offset {offset}"
+        );
+    }
+    // A shape across the longest canvas side.
+    for blur in [2.0, 20_000.0] {
+        let mut canvas = Canvas::new(8192, 4);
+        draw(&mut canvas, blur, 0.0, [0.0, 0.0, 8192.0, 4.0]);
+        assert_eq!(pixel(&mut canvas, 8000, 2), RED, "blur {blur}");
+    }
+    // A shape far past the canvas under the largest blur.
+    let mut canvas = Canvas::new(16, 16);
+    draw(&mut canvas, 20_000.0, 0.0, [-1e6, -1e6, 2e6, 2e6]);
+    assert_eq!(pixel(&mut canvas, 5, 5), RED);
+}
+
 /// A draw that needs the bitmap as its backdrop, with a shadow blur far
 /// past what a render takes, keeps what the canvas held: `destination-over`
 /// under opaque red changes no pixel.

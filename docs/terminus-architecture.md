@@ -980,6 +980,15 @@ Decisions the standard leaves open, or where this differs from it:
   `SkDashPath` limit (`kMaxDashCount`); the standard sets none. A curve's length is the mean of
   its chord and control polygon; `strokeText` counts the glyph outlines at the font size times
   the transform's scale.
+- A shadow's standard deviation (half `shadowBlur`) is limited so its drop-shadow filter layer fits
+  the device's 8,192 px texture side, since `vello_gpu` fails a render with a larger intermediate
+  and the whole batch, the shape included, would be lost. Along each axis the layer is under the
+  canvas side + 2(a + R) + max(0, R − a) + 16 px for a reach R = 3σ and an offset a, and has 6 px
+  of atlas padding on each side; σ is kept to the largest value for which that is at most 8,163 px
+  (`shadow_filter`, `canvas.rs`), so a 16 px canvas with no offset keeps σ up to about 905. When
+  not even an unblurred shadow fits (an offset over half of 8,163 px less the side, or a side over
+  8,163 px) the shadow is not drawn. `shadowBlur` and the offsets read back as set. Browsers bound
+  the blur too (Skia limits its σ).
 - A readback the GPU does not answer (no device, or the Render Worker dropped it on wasm32) is
   `InvalidStateError`.
 - `measureText` baselines the standard leaves to the font: em square split in the ratio of the

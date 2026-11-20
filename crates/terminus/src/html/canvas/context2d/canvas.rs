@@ -20,7 +20,9 @@ use crate::kurbo::{
 };
 use crate::paint::display_list::{DisplayList, Glyph, ListPaint, synthesized_outlines};
 use crate::peniko::{BlendMode, Color, Compose, Extend, Fill, ImageQuality, ImageSampler, Mix};
-use crate::render::canvas::{Init, PendingRead, Surface, SurfaceError, SurfaceImage};
+use crate::render::canvas::{
+    Init, MAX_SURFACE_SIDE, PendingRead, Surface, SurfaceError, SurfaceImage,
+};
 
 /// The largest `getImageData` area allocated, in pixels.
 const MAX_AREA: u64 = 1 << 28;
@@ -336,8 +338,9 @@ impl Raster {
         let visible = paint.filter(|_| geometry.determinant() != 0.0);
         if let Some(paint) = visible
             && state.casts_shadow()
+            && let Some(filter) = shadow_filter(state, self.size)
         {
-            self.shadow(state, blend, paint, geometry, shape);
+            self.shadow(state, blend, filter, paint, geometry, shape);
         }
         self.sync_clips(state.clip.as_ref());
         let layered = op != CompositeOp::SourceOver;
@@ -375,6 +378,7 @@ impl Raster {
         &mut self,
         state: &State,
         blend: BlendMode,
+        filter: ShadowFilter,
         paint: &Paint,
         geometry: Affine,
         shape: &Outline<'_>,
@@ -413,13 +417,8 @@ impl Raster {
             }
             layers += 1;
         }
-        self.list.push_drop_shadow(
-            state.shadow_offset_x,
-            state.shadow_offset_y,
-            // σ is half the blur.
-            state.shadow_blur / 2.0,
-            state.shadow_color,
-        );
+        self.list
+            .push_drop_shadow(filter.dx, filter.dy, filter.std_dev, state.shadow_color);
         self.paint_shape(paint, geometry, shape);
         for _ in 0..=layers {
             self.list.pop_layer();
@@ -451,6 +450,56 @@ impl Raster {
             list.pop_layer();
         }
     }
+}
+
+/// A drop shadow as the filter draws it, in canvas px.
+#[derive(Clone, Copy, Debug)]
+struct ShadowFilter {
+    dx: f64,
+    dy: f64,
+    std_dev: f64,
+}
+
+/// Px a shadow's filter layer leaves of the device's texture side
+/// ([`MAX_SURFACE_SIDE`]): 6 of atlas padding on each side (`vello_gpu`'s
+/// `FILTER_ATLAS_PADDING`, half its 13-tap kernel), 16 for rounding four
+/// lengths up to the 4 px tile, and 1 for the `f32` rounding of the
+/// filter's parameters.
+const SHADOW_LAYER_SLACK: f64 = 2.0 * 6.0 + 16.0 + 1.0;
+
+/// The shadow `state` casts on a canvas of `size`, its standard deviation
+/// (half `shadowBlur`) limited to what `vello_gpu` can filter; `None` when
+/// not even an unblurred shadow at its offsets can be.
+///
+/// `vello_gpu` renders a drop-shadow layer into an intermediate texture no
+/// longer than the device's texture side, and a render with a layer past
+/// it fails whole. Along each axis that layer (`vello_common`
+/// `FilterLayerPlacement::new`) is at most the canvas side, plus the
+/// source padding on both sides (`Filter::source_expansion`) and the
+/// filter padding on one (`Filter::filter_expansion`), each rounded up to
+/// the 4 px tile. For a reach R = 3σ and an offset of length a along the
+/// axis that is under side + 2(a + R) + max(0, R − a) + 16 px, whatever the
+/// shape, so σ is kept to the largest value for which that fits beside
+/// the atlas padding. Browsers bound the blur too (Skia limits its σ).
+fn shadow_filter(state: &State, size: Rect) -> Option<ShadowFilter> {
+    let reach = |side: f64, offset: f64| {
+        let budget = f64::from(MAX_SURFACE_SIDE) - SHADOW_LAYER_SLACK - side;
+        let a = offset.abs();
+        if 2.0 * a > budget {
+            None
+        } else if 4.0 * a <= budget {
+            Some((budget - a) / 3.0)
+        } else {
+            Some(budget / 2.0 - a)
+        }
+    };
+    let rx = reach(size.width(), state.shadow_offset_x)?;
+    let ry = reach(size.height(), state.shadow_offset_y)?;
+    Some(ShadowFilter {
+        dx: state.shadow_offset_x,
+        dy: state.shadow_offset_y,
+        std_dev: (state.shadow_blur / 2.0).min(rx.min(ry) / 3.0),
+    })
 }
 
 /// Records every glyph run of `line` under `geometry`, its alphabetic
