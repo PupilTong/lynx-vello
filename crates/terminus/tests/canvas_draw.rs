@@ -694,6 +694,45 @@ fn image_bitmaps_from_pixels_and_canvases_crop() {
     assert_eq!((from_canvas.width(), from_canvas.height()), (2, 1));
 }
 
+/// `createImageBitmap`'s crop: a zero side is `RangeError` and a side past
+/// the longest texture is `InvalidStateError`, from every kind of image and
+/// before anything is allocated; an origin far outside the image crops
+/// transparent black.
+#[test]
+fn image_bitmap_crop_sizes_are_checked_first() {
+    let mut canvas = filled(4, 4, BLUE);
+    let mut taken = filled(4, 4, BLUE);
+    let images = [image(4, 4, RED), canvas.image(), taken.take_image()];
+    for (i, image) in images.iter().enumerate() {
+        for size in [(0, 16), (16, 0), (0, 0)] {
+            assert_eq!(
+                image.crop(Some((0, 0, size.0, size.1))).err(),
+                Some(CanvasError::Range),
+                "image {i}, {size:?}"
+            );
+        }
+        for size in [(20_000, 16), (16, 8193), (u32::MAX, u32::MAX)] {
+            assert_eq!(
+                image.crop(Some((0, 0, size.0, size.1))).err(),
+                Some(CanvasError::InvalidState),
+                "image {i}, {size:?}"
+            );
+        }
+        for origin in [(i64::MAX, i64::MAX), (i64::MIN, i64::MIN)] {
+            let far = image
+                .crop(Some((origin.0, origin.1, 2, 1)))
+                .unwrap_or_else(|error| panic!("image {i}, {origin:?}: {error:?}"));
+            assert_eq!(far.read().unwrap(), [CLEAR, CLEAR].concat(), "image {i}");
+        }
+        let edge = image.crop(Some((3, 0, 8192, 1))).unwrap();
+        assert_eq!(edge.width(), 8192, "image {i}");
+    }
+    assert_eq!(
+        Canvas::new(0, 0).image().crop(Some((0, 0, 0, 1))).err(),
+        Some(CanvasError::Range)
+    );
+}
+
 #[test]
 fn a_long_recording_is_replayed_before_a_read() {
     // Enough draws to pass the recording bound several times over.

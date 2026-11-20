@@ -523,9 +523,12 @@ fn copy(
     }));
     let span = |at: i64, extent: u32, size: u32| {
         let start = at.clamp(0, i64::from(size));
-        let end = (at + i64::from(extent)).clamp(0, i64::from(size));
+        let end = at
+            .saturating_add(i64::from(extent))
+            .clamp(0, i64::from(size));
         let from = u32::try_from(start).unwrap_or(0);
-        let to = u32::try_from(start - at).unwrap_or(0);
+        // Past the extent when nothing overlaps, and then unused.
+        let to = u32::try_from(start.saturating_sub(at)).unwrap_or(0);
         (from, to, u32::try_from(end - start).unwrap_or(0))
     };
     let (fx, tx, w) = span(at.0, extent.0, source_size.0);
