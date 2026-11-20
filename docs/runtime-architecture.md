@@ -1286,9 +1286,25 @@ in the realm that wrote the value — a `TypeError` for an unsupported object
 class or a non-value property, an `InternalError` for an unsupported tag — and
 the host is never dispatched to at all, so nothing partial is sent.
 
-Transfer lists, credentials options, and worker-local
-`onerror` remain unsupported. `messageerror` is absent because the reader
-cannot fail on what the same build's writer produced.
+A `postMessage` may carry a **transfer list** (`Worker.postMessage`, a
+worker global's `postMessage`, both overloads, and the Context's
+`postMessage(message, transfer)`). The list is the serializer's own: the host
+member is registered with the bridge's transfer trampoline, which writes each
+listed object as a slot of the stream wherever the message holds it, and
+refuses before the member runs an unlisted transferable, a listed value that
+is not one and a duplicate; `bobcat:transfer` throws those as a
+`DataCloneError`. The transferables are `OffscreenCanvas` and `ImageBitmap`,
+marked by `bobcat:canvas` at construction. The member then checks every listed
+id, takes the entries out of the sending realm's canvas table, and the message
+carries them as owned values (`canvas::Transfer`), so one that is never
+delivered drops them. The receiving realm's reviver files each entry in its
+own table and builds the object the slot reads as
+(`crates/bobcat-core/docs/canvas.md`, "Transfer"). A list holding anything
+else, an `ArrayBuffer` included, is a `DataCloneError`.
+
+Credentials options and worker-local `onerror` remain unsupported.
+`messageerror` is absent because the reader cannot fail on what the same
+build's writer produced.
 
 ```text
 main realm: new Worker(url)
@@ -1493,7 +1509,9 @@ BTS GlobalEventEmitter, ordered host global events and nonfatal reports.
 
 The MTS Context exists during entry evaluation. Runtime JS projects the public
 Context fields before queuing; payload objects remain references until Worker
-connection posts the messages in FIFO order. Worker `postMessage` performs the
+connection posts the messages in FIFO order, each with the transfer list it
+was given, so a queued message's listed objects are detached when it is
+posted at connection. Worker `postMessage` performs the
 structured-clone copy, for early and connected sends alike — so what a Context
 event carries is whatever that transport preserves, and a value it refuses
 throws at the `dispatchEvent` call. That pre-connection queue is only for

@@ -213,8 +213,8 @@ impl RealmCore {
 }
 
 /// Opens one realm on `js`: creates it, enables module loading, installs the
-/// core, then runs `host_modules`, and answers with the core and whatever
-/// `host_modules` returned.
+/// core, then runs `host_modules` with the realm's canvas table, and answers
+/// with the core and whatever `host_modules` returned.
 ///
 /// `host` is what the core's members reach the view through. Its token is the
 /// end signal a `Future.wait` and a `require` park against: the view's for an
@@ -235,7 +235,7 @@ pub(crate) fn open_realm<T>(
     names: RealmNames,
     child_hosts: Option<Rc<dyn ChildHostModules>>,
     canvas_host: CanvasHost,
-    host_modules: impl FnOnce(&mut ScriptEngine) -> Result<T, ScriptError>,
+    host_modules: impl FnOnce(&mut ScriptEngine, &Rc<CanvasTable>) -> Result<T, ScriptError>,
 ) -> Result<(RealmCore, T), ScriptError> {
     let mut engine = js
         .create_realm()
@@ -260,7 +260,7 @@ pub(crate) fn open_realm<T>(
         child_hosts,
         canvas_host,
     )?;
-    let installed = host_modules(&mut engine)?;
+    let installed = host_modules(&mut engine, &canvases)?;
     Ok((
         RealmCore {
             engine,

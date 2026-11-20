@@ -119,6 +119,7 @@ impl View {
                 panic!("expected a message, got {}", error.message)
             }
             WorkerPayload::Closed => panic!("expected a message, the worker closed"),
+            WorkerPayload::Transfer(_) => panic!("expected a message, got a transfer"),
         }
     }
 

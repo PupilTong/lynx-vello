@@ -19,6 +19,10 @@ rstest.mockRequire("bobcat-internal:worker", () => ({
   sharedObject: Object.create(null),
 }));
 rstest.mockRequire("bobcat-internal:native-modules", () => ({ invokeNativeModule }));
+import * as domException from "../src/dom-exception.ts";
+rstest.mockRequire("bobcat:dom-exception", () => domException);
+import * as transfer from "../src/transfer.ts";
+rstest.mockRequire("bobcat:transfer", () => transfer);
 import * as record from "../src/record.ts";
 rstest.mockRequire("bobcat:record", () => record);
 rstest.mockRequire("bobcat:lynx-modules", () => lynxModules);

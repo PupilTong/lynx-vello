@@ -43,6 +43,7 @@ use self::pipelines::{
     TIMING_FLAG_ATTRIBUTE,
 };
 use super::quickjs::{ScriptEngine, ScriptRuntime};
+use crate::canvas::Posted;
 use crate::clock::ClockInstant;
 use crate::esm::{
     BTS_MODULE_SPECIFIER, ELEMENT_MODULE_SPECIFIER, Export, FRAME_MODULE_SPECIFIER,
@@ -2461,7 +2462,7 @@ impl MainThreadRuntime {
             crate::canvas::CanvasHost::Document(
                 Rc::downgrade(&slot) as std::rc::Weak<dyn crate::canvas::CanvasDocument>
             ),
-            |engine| {
+            |engine, canvases| {
                 document
                     .install_members(
                         engine,
@@ -2477,7 +2478,7 @@ impl MainThreadRuntime {
                 crate::native_module::install(engine, &host, None)
                     .map_err(|error| context_of("installing the native module members", error))?;
                 workers
-                    .install(engine)
+                    .install(engine, canvases)
                     .map_err(|error| context_of("installing Worker", error))
             },
         )
@@ -2572,11 +2573,12 @@ impl MainThreadRuntime {
         // the worker posted — primitive or structured clone — for a message,
         // and the error's own message for a failure.
         let (kind, data, location) = match payload {
-            WorkerPayload::Message(data) => ("message", data, None),
-            WorkerPayload::Closed => ("closed", HostValue::Undefined, None),
+            WorkerPayload::Message(data) => ("message", Posted::Value(data), None),
+            WorkerPayload::Transfer(message) => ("message", Posted::Transfer(message), None),
+            WorkerPayload::Closed => ("closed", Posted::Value(HostValue::Undefined), None),
             WorkerPayload::Errored(error) | WorkerPayload::Failed(error) => {
                 let kind = if failed { "failed" } else { "error" };
-                let data = HostValue::String(error.message.to_string());
+                let data = Posted::Value(HostValue::String(error.message.to_string()));
                 let location = error.location.clone();
                 // Before the `Worker` object's `error` event below, so no
                 // listener of it decides whether the embedder hears of this.
@@ -2593,27 +2595,41 @@ impl MainThreadRuntime {
             reason = "a key `createWorker` handed out, at most 2^53"
         )]
         let key = key.get() as f64;
-        let arguments = [
-            HostArgument::Number(key),
-            HostArgument::String(kind),
-            data.as_argument(),
-            HostArgument::String(location.and_then(|l| l.source.as_deref()).unwrap_or("")),
-            HostArgument::Number(f64::from(location.and_then(|l| l.line).unwrap_or(0))),
-            HostArgument::Number(f64::from(location.and_then(|l| l.column).unwrap_or(0))),
-        ];
-        let called = match child {
-            None => self.core.engine.call_module_export(
-                js_runtime,
-                Export::DispatchWorkerEvent,
-                &arguments,
-            ),
-            // A child that is gone took its workers with it; what one said
-            // last reaches no realm.
-            Some(child) => self
-                .core
-                .children
-                .call_module_export(js_runtime, child, Export::DispatchWorkerEvent, &arguments)
-                .unwrap_or(Ok(false)),
+        let core = &self.core;
+        let mut call = |data: HostArgument<'_>| {
+            let arguments = [
+                HostArgument::Number(key),
+                HostArgument::String(kind),
+                data,
+                HostArgument::String(location.and_then(|l| l.source.as_deref()).unwrap_or("")),
+                HostArgument::Number(f64::from(location.and_then(|l| l.line).unwrap_or(0))),
+                HostArgument::Number(f64::from(location.and_then(|l| l.column).unwrap_or(0))),
+            ];
+            match child {
+                None => core.engine.call_module_export(
+                    js_runtime,
+                    Export::DispatchWorkerEvent,
+                    &arguments,
+                ),
+                // A child that is gone took its workers with it; what one
+                // said last reaches no realm.
+                Some(child) => core
+                    .children
+                    .call_module_export(js_runtime, child, Export::DispatchWorkerEvent, &arguments)
+                    .unwrap_or(Ok(false)),
+            }
+        };
+        let called = match data {
+            Posted::Value(data) => call(data.as_argument()),
+            // The objects it carries enter the table of the realm whose
+            // `Worker` this is; for a child that is gone, they are dropped.
+            Posted::Transfer(message) => match child {
+                None => message.deliver(&core.canvases, call),
+                Some(child) => match core.children.canvases(child) {
+                    Some(canvases) => message.deliver(&canvases, call),
+                    None => Ok(false),
+                },
+            },
         }
         .map_err(|error| MainThreadError::from_engine("delivering a worker event", error));
         let finished = self.finish_batch(js_runtime, called.is_ok());
@@ -4581,6 +4597,7 @@ impl ChildHostModules for DocumentHost {
         key: ChildKey,
         opener: OpenerId,
         retired: Rc<Cell<bool>>,
+        canvases: &Rc<crate::canvas::CanvasTable>,
     ) -> Result<Box<dyn ChildHostState>, ScriptError> {
         let created = ClockInstant::now();
         let listener_key = RealmId::Child(key).listener_key();
@@ -4602,7 +4619,7 @@ impl ChildHostModules for DocumentHost {
         })?;
         let workers = view.owner(Some(key));
         workers
-            .install(engine)
+            .install(engine, canvases)
             .map_err(|error| context_of("installing Worker", error))?;
         timing.set_created(created, ClockInstant::now());
         self.slot.borrow_mut().card_realms.insert(opener, key);

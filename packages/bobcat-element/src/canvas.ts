@@ -16,6 +16,11 @@
 // `invokeUIMethod`); the host commits the latter's bitmap to the element at
 // the end of each JavaScript entry that changed it.
 //
+// `OffscreenCanvas` and `ImageBitmap` are transferable: each is marked so at
+// construction (`markTransferable`), `bobcat:transfer` detaches the ones a
+// `postMessage` listed, and the realm's transfer reviver, set below, makes
+// the object each transferred entry arrives as (`canvasAdopt`).
+//
 // Every object that names host state holds an id of the realm's table; a
 // `FinalizationRegistry` drops the entry once the object is collected, and
 // `ImageBitmap.close()` drops it at once. WebIDL's argument conversions are
@@ -29,7 +34,9 @@
 
 import { EventTarget } from "bobcat:event-target";
 import { DOMException } from "bobcat:dom-exception";
+import { registerTransferables } from "bobcat:transfer";
 import {
+  canvasAdopt,
   canvasAddColorStop,
   canvasAddPath,
   canvasArc,
@@ -93,6 +100,8 @@ import {
   canvasTransferToBitmap,
   canvasTransform,
   canvasTranslate,
+  markTransferable,
+  setTransferReviver,
 } from "bobcat-internal:host";
 
 export { DOMException };
@@ -249,6 +258,8 @@ function sameValueZero(x: number, y: number): boolean {
 // function its static block assigns.
 
 let canvasState: (value: unknown) => {id: number; width: number; height: number} | undefined;
+let canvasTransfer: (value: unknown) => {id: number; context: boolean; detach(): void} | undefined;
+let bitmapDetach: (value: unknown) => (() => void) | undefined;
 let bitmapState: (value: unknown) => {id: number; closed: boolean} | undefined;
 let pathId: (value: unknown) => number | undefined;
 let gradientId: (value: unknown) => number | undefined;
@@ -268,12 +279,31 @@ export class OffscreenCanvas extends EventTarget {
   #width: number;
   #height: number;
   #context: OffscreenCanvasRenderingContext2D | null = null;
+  /** HTML's context mode `detached`: transferred to another realm. */
+  #detached = false;
 
   static {
     canvasState = (value) => {
       if (typeof value !== "object" || value === null || !(#id in value)) return undefined;
       const canvas = value as OffscreenCanvas;
       return {id: canvas.#id, width: canvas.#width, height: canvas.#height};
+    };
+    canvasTransfer = (value) => {
+      if (typeof value !== "object" || value === null || !(#id in value)) return undefined;
+      const canvas = value as OffscreenCanvas;
+      return {
+        id: canvas.#id,
+        context: canvas.#context !== null,
+        detach() {
+          // HTML's transfer steps: the bitmap is unset, so the canvas reads
+          // as 0 × 0, and its entry is the receiving realm's now.
+          canvas.#detached = true;
+          canvas.#width = 0;
+          canvas.#height = 0;
+          entries.unregister(canvas);
+          markTransferable(canvas, false);
+        },
+      };
     };
   }
 
@@ -284,15 +314,19 @@ export class OffscreenCanvas extends EventTarget {
     this.#height = toEnforceRange(height, UNSIGNED_LONG_LONG_MAX, "OffscreenCanvas");
     this.#id = adopted ?? canvasCreate(this.#width, this.#height);
     adopted = undefined;
-    entries.register(this, this.#id);
+    entries.register(this, this.#id, this);
+    markTransferable(this, true);
   }
 
   get width(): number {
     return this.#width;
   }
 
+  /** A detached canvas has no bitmap to resize: setting its size does nothing. */
   set width(value: unknown) {
-    this.#width = toEnforceRange(value, UNSIGNED_LONG_LONG_MAX, "width");
+    const width = toEnforceRange(value, UNSIGNED_LONG_LONG_MAX, "width");
+    if (this.#detached) return;
+    this.#width = width;
     this.#resized();
   }
 
@@ -301,7 +335,9 @@ export class OffscreenCanvas extends EventTarget {
   }
 
   set height(value: unknown) {
-    this.#height = toEnforceRange(value, UNSIGNED_LONG_LONG_MAX, "height");
+    const height = toEnforceRange(value, UNSIGNED_LONG_LONG_MAX, "height");
+    if (this.#detached) return;
+    this.#height = height;
     this.#resized();
   }
 
@@ -322,17 +358,23 @@ export class OffscreenCanvas extends EventTarget {
     if (!CONTEXT_IDS.has(id)) {
       throw new TypeError(`'${id}' is not a valid OffscreenRenderingContextId`);
     }
+    if (this.#detached) throw detachedCanvas();
     if (id !== "2d") return null;
     this.#context ??= new OffscreenCanvasRenderingContext2D(INTERNAL, this, this.#id);
     return this.#context;
   }
 
   transferToImageBitmap(): ImageBitmap {
+    if (this.#detached) throw detachedCanvas();
     if (this.#context === null) {
       throw new DOMException("The canvas has no rendering context", "InvalidStateError");
     }
     return newBitmap(canvasTransferToBitmap(this.#id));
   }
+}
+
+function detachedCanvas(): DOMException {
+  return new DOMException("The OffscreenCanvas has been transferred", "InvalidStateError");
 }
 
 /**
@@ -358,6 +400,13 @@ export class ImageBitmap {
       const bitmap = value as ImageBitmap;
       return {id: bitmap.#id, closed: bitmap.#closed};
     };
+    bitmapDetach = (value) => {
+      if (typeof value !== "object" || value === null || !(#id in value)) return undefined;
+      const bitmap = value as ImageBitmap;
+      // HTML's transfer steps unset the bitmap data, as `close()` does; the
+      // entry is the receiving realm's now, so it is not dropped here.
+      return () => bitmap.#detach();
+    };
   }
 
   constructor(token: unknown, id: number) {
@@ -366,6 +415,7 @@ export class ImageBitmap {
     this.#width = canvasBitmapWidth(id);
     this.#height = canvasBitmapHeight(id);
     entries.register(this, id, this);
+    markTransferable(this, true);
   }
 
   get width(): number {
@@ -379,11 +429,17 @@ export class ImageBitmap {
   /** Releases the pixels now; the bitmap reads as 0 × 0 afterwards. */
   close(): undefined {
     if (!this.#closed) {
-      this.#closed = true;
-      entries.unregister(this);
+      this.#detach();
       canvasDrop(this.#id);
     }
     return undefined;
+  }
+
+  /** `[[Detached]]`: 0 × 0, unusable, and neither cloneable nor transferable. */
+  #detach(): void {
+    this.#closed = true;
+    entries.unregister(this);
+    markTransferable(this, false);
   }
 }
 
@@ -1184,6 +1240,26 @@ export async function createImageBitmap(image: unknown, ...values: unknown[]): P
   checkBitmapOptions(options);
   return newBitmap(created(canvasBitmapFrom(source, ...crop)));
 }
+
+// The two transferable interfaces, for `bobcat:transfer`'s `postMessage`.
+registerTransferables({
+  id(value) {
+    const canvas = canvasTransfer(value);
+    if (canvas !== undefined) return canvas.context ? 0 : canvas.id;
+    return bitmapState(value)?.id;
+  },
+  detach(value) {
+    canvasTransfer(value)?.detach();
+    bitmapDetach(value)?.();
+  },
+});
+
+// A message delivered with a transfer list: the object each slot reads as,
+// over the entry the message carried there.
+setTransferReviver((slot) => {
+  const entry = canvasAdopt(slot);
+  return typeof entry === "number" ? newBitmap(entry) : __BobcatTransferredCanvas(entry);
+});
 
 for (const [name, value] of Object.entries({
   OffscreenCanvas,

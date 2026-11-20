@@ -1,6 +1,10 @@
 import { beforeAll, describe, expect, it, rstest } from "@rstest/core";
 import * as eventTarget from "../src/event-target.ts";
 rstest.mockRequire("bobcat:event-target", () => eventTarget);
+import * as domException from "../src/dom-exception.ts";
+rstest.mockRequire("bobcat:dom-exception", () => domException);
+import * as transfer from "../src/transfer.ts";
+rstest.mockRequire("bobcat:transfer", () => transfer);
 import type { ContextEvent } from "../src/cross-thread-context.ts";
 import type * as contextModule from "../src/cross-thread-context.ts";
 let createCrossThreadContext: typeof contextModule.createCrossThreadContext;

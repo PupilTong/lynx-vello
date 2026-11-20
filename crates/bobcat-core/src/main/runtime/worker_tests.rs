@@ -4526,3 +4526,355 @@ fn freeing_a_child_ends_its_workers() {
     pair.check("if (heard.length !== 1) throw Error(heard.join('|'));");
     assert!(worker_failures(pair.notices()).is_empty());
 }
+
+/// How many entries of each kind the page realm's canvas table holds:
+/// canvases, paths, gradients, patterns, bitmaps.
+fn census(pair: &Pair) -> [usize; 5] {
+    pair.runtime.as_ref().unwrap().core.canvases.census()
+}
+
+/// How many presenters of the page's placeholder canvases are alive: one per
+/// transferred `<canvas>` whose `OffscreenCanvas` entry still exists, in a
+/// table or in a message.
+fn presenters(pair: &Pair) -> usize {
+    pair.runtime
+        .as_ref()
+        .unwrap()
+        .slot
+        .borrow()
+        .outbox
+        .canvases()
+        .presenters()
+}
+
+/// A worker script with the worker scope and the canvas interfaces.
+const CANVAS_WORKER: &str = "import 'bobcat:worker'; import 'bobcat:canvas';";
+
+/// `postMessage(message, [canvas])` from the MTS realm to a plain worker and
+/// back: posted before the worker's script has arrived, so it is held and
+/// delivered after, the canvas reads as one object at every position the
+/// message held it, it is detached on the sending side (0 × 0,
+/// `InvalidStateError` on use, `DataCloneError` when posted again), and its
+/// entry left the sender's table. The worker draws on it, refuses to
+/// transfer it once it has a context, and sends back an `ImageBitmap` of
+/// the drawing and a fresh canvas with the dictionary overload; the bitmap
+/// draws red here and is detached there.
+#[test]
+fn an_offscreen_canvas_crosses_to_a_worker_and_a_bitmap_comes_back() {
+    let mut pair = Pair::new(
+        r"
+        import { Worker } from 'bobcat-internal';
+        globalThis.got = [];
+        globalThis.worker = new Worker('./worker.js');
+        worker.onmessage = e => got.push(e.data);
+        const canvas = new OffscreenCanvas(4, 2);
+        worker.postMessage({ a: canvas, nest: { b: canvas }, list: [canvas, 1, canvas] }, [canvas]);
+        globalThis.sent = canvas;
+        ",
+    );
+    assert_eq!(census(&pair), [0; 5], "the entry left the sender's table");
+    pair.check(
+        r"
+        const named = f => { try { f(); return 'returned'; } catch (e) { return `${e.constructor.name}:${e.name}`; } };
+        const seen = [
+            sent.width, sent.height,
+            named(() => sent.getContext('2d')),
+            named(() => sent.transferToImageBitmap()),
+            named(() => worker.postMessage(sent, [sent])),
+            named(() => worker.postMessage({ sent })),
+            named(() => new OffscreenCanvas(1, 1).getContext('2d').drawImage(sent, 0, 0)),
+        ].join('|');
+        sent.width = 9;
+        const expected = '0|0|DOMException:InvalidStateError|DOMException:InvalidStateError|'
+            + 'DOMException:DataCloneError|DOMException:DataCloneError|DOMException:InvalidStateError';
+        if (seen !== expected || sent.width !== 0) throw Error(seen);
+        ",
+    );
+    pair.answer(&format!(
+        r"{CANVAS_WORKER}
+        onmessage = e => {{
+            const m = e.data;
+            const c = m.a;
+            const same = [c instanceof OffscreenCanvas, m.nest.b === c, m.list[0] === c,
+                m.list[2] === c, m.list[1], c.width, c.height].join(':');
+            let unlisted;
+            try {{ postMessage({{ c }}); }} catch (err) {{ unlisted = err.name; }}
+            const ctx = c.getContext('2d');
+            ctx.fillStyle = 'red';
+            ctx.fillRect(0, 0, 4, 2);
+            let refused;
+            try {{ postMessage(c, [c]); }} catch (err) {{ refused = err.name; }}
+            const bitmap = c.transferToImageBitmap();
+            const fresh = new OffscreenCanvas(3, 5);
+            postMessage({{ same, unlisted, refused, bitmap, fresh }}, {{ transfer: [bitmap, fresh] }});
+            postMessage([bitmap.width, bitmap.height, fresh.width].join(':'));
+        }};"
+    ));
+    pair.deliver();
+    pair.deliver();
+    pair.check(
+        r"
+        const [first, second] = got;
+        const seen = [first.same, first.unlisted, first.refused,
+            first.bitmap instanceof ImageBitmap, first.bitmap.width, first.bitmap.height,
+            first.fresh instanceof OffscreenCanvas, first.fresh.width, first.fresh.height,
+            second].join('|');
+        if (seen !== 'true:true:true:true:1:4:2|DataCloneError|InvalidStateError|true|4|2|true|3|5|0:0:0') {
+            throw Error(seen);
+        }
+        const out = new OffscreenCanvas(4, 2).getContext('2d');
+        out.drawImage(first.bitmap, 0, 0);
+        const pixel = Array.from(out.getImageData(1, 1, 1, 1).data).join(',');
+        if (pixel !== '255,0,0,255') throw Error('the bitmap drew ' + pixel);
+        first.fresh.getContext('2d').fillRect(0, 0, 1, 1);
+        ",
+    );
+    // The fresh canvas, the one `out` draws on, the one the first check
+    // made (not yet collected), and the bitmap.
+    assert_eq!(census(&pair), [3, 0, 0, 0, 1]);
+}
+
+/// Every refusal throws at the call, posts nothing, detaches nothing and
+/// leaves the sender's table as it was: a listed value that is not a
+/// transferable, a duplicate, an `OffscreenCanvas` with a context
+/// (`InvalidStateError`), a transferable the message holds unlisted, a
+/// detached or closed object, a list Web IDL refuses (`TypeError`). An
+/// empty list posts as no list does.
+#[test]
+fn a_refused_transfer_posts_and_detaches_nothing() {
+    let mut pair = Pair::new(
+        r"
+        import { Worker } from 'bobcat-internal';
+        globalThis.got = [];
+        globalThis.worker = new Worker('./worker.js');
+        worker.onmessage = e => got.push(e.data);
+        const c = new OffscreenCanvas(2, 2);
+        const drawn = new OffscreenCanvas(2, 2);
+        const drawing = drawn.getContext('2d');
+        const bitmap = drawn.transferToImageBitmap();
+        const closed = drawn.transferToImageBitmap();
+        closed.close();
+        const moved = new OffscreenCanvas(1, 1);
+        worker.postMessage({ moved }, [moved]);
+        const named = f => { try { f(); return 'sent'; } catch (e) { return `${e.constructor.name}:${e.name}`; } };
+        const outcomes = [
+            named(() => worker.postMessage({}, [{}])),
+            named(() => worker.postMessage({}, [new ArrayBuffer(1)])),
+            named(() => worker.postMessage({ c }, [c, c])),
+            named(() => worker.postMessage({ c }, { transfer: [c, c] })),
+            named(() => worker.postMessage({ drawn }, [drawn])),
+            named(() => worker.postMessage({ c, drawn }, [c, drawn])),
+            named(() => worker.postMessage({ c })),
+            named(() => worker.postMessage(bitmap)),
+            named(() => worker.postMessage({ c, bitmap }, [c])),
+            named(() => worker.postMessage({}, [c, {}])),
+            named(() => worker.postMessage({}, [closed])),
+            named(() => worker.postMessage({}, [moved])),
+            named(() => worker.postMessage({}, 5)),
+            named(() => worker.postMessage({}, [1])),
+            named(() => worker.postMessage({}, { transfer: 7 })),
+            named(() => worker.postMessage({ plain: 1 }, [])),
+            named(() => worker.postMessage({ plain: 2 }, { transfer: [] })),
+            named(() => worker.postMessage({ plain: 3 }, null)),
+        ];
+        const expected = [
+            'DOMException:DataCloneError', 'DOMException:DataCloneError',
+            'DOMException:DataCloneError', 'DOMException:DataCloneError',
+            'DOMException:InvalidStateError', 'DOMException:InvalidStateError',
+            'DOMException:DataCloneError', 'DOMException:DataCloneError',
+            'DOMException:DataCloneError', 'DOMException:DataCloneError',
+            'DOMException:DataCloneError', 'DOMException:DataCloneError',
+            'TypeError:TypeError', 'TypeError:TypeError', 'TypeError:TypeError',
+            'sent', 'sent', 'sent',
+        ];
+        if (outcomes.join('|') !== expected.join('|')) throw Error(outcomes.join('|'));
+        if (c.width !== 2 || bitmap.width !== 2 || drawn.width !== 2) throw Error('detached');
+        drawing.fillRect(0, 0, 1, 1);
+        // And the same objects still transfer.
+        worker.postMessage({ c, bitmap }, [c, bitmap]);
+        ",
+    );
+    // `drawn`; `closed` was dropped at `close()`.
+    assert_eq!(census(&pair), [1, 0, 0, 0, 0]);
+    pair.answer(&format!(
+        r"{CANVAS_WORKER}
+        onmessage = e => postMessage(Object.entries(e.data)
+            .map(([key, value]) => `${{key}}=${{typeof value === 'object' ? value.constructor.name + value.width : value}}`)
+            .join(','));"
+    ));
+    for _ in 0..5 {
+        pair.deliver();
+    }
+    pair.check(
+        r"
+        const expected = ['moved=OffscreenCanvas1', 'plain=1', 'plain=2', 'plain=3',
+            'c=OffscreenCanvas2,bitmap=ImageBitmap2'];
+        if (got.join('|') !== expected.join('|')) throw Error(got.join('|'));
+        ",
+    );
+}
+
+/// A Context message with a transfer list, sent by the MTS entry before the
+/// BTS Worker exists: it waits in the pre-connection queue with its list,
+/// and is serialized — the canvas detached — when boot posts it at
+/// connection. The BTS draws on the canvas and sends a bitmap back through
+/// `lynx.getCoreContext().postMessage(message, [bitmap])`.
+#[test]
+fn a_context_message_queued_before_connection_transfers_a_canvas() {
+    let mut pair = Pair::with_background(
+        r"
+        globalThis.results = [];
+        const context = lynx.getJSContext();
+        context.addEventListener('message', e => results.push(e.data));
+        const canvas = new OffscreenCanvas(4, 4);
+        context.postMessage({ canvas, again: canvas }, [canvas]);
+        globalThis.queuedWidth = canvas.width;
+        globalThis.sent = canvas;
+        ",
+        Some(
+            r"
+        import { lynx } from 'bobcat:bts-runtime';
+        const core = lynx.getCoreContext();
+        core.addEventListener('message', e => {
+            const c = e.data.canvas;
+            const ok = [c instanceof OffscreenCanvas, e.data.again === c, c.width].join(':');
+            const ctx = c.getContext('2d');
+            ctx.fillStyle = 'lime';
+            ctx.fillRect(0, 0, 4, 4);
+            const bitmap = c.transferToImageBitmap();
+            core.postMessage({ ok, bitmap }, [bitmap]);
+        });
+        ",
+        ),
+    );
+    pair.deliver();
+    pair.check(
+        r"
+        const [reply] = results;
+        const seen = [queuedWidth, sent.width, reply.ok, reply.bitmap instanceof ImageBitmap,
+            reply.bitmap.width].join('|');
+        if (seen !== '4|0|true:true:4|true|4') throw Error(seen);
+        const out = new OffscreenCanvas(4, 4).getContext('2d');
+        out.drawImage(reply.bitmap, 0, 0);
+        const pixel = Array.from(out.getImageData(2, 2, 1, 1).data).join(',');
+        if (pixel !== '0,255,0,255') throw Error('the bitmap drew ' + pixel);
+        ",
+    );
+}
+
+/// A canvas a `ShadowRealm` child sends to its worker comes back into the
+/// child's own table, and the child's `Worker` hears it.
+#[test]
+fn a_childs_transfer_returns_to_the_child() {
+    let mut pair = Pair::new(&format!(
+        r"{CHILD_WORKER}
+        realm.evaluate(`
+            const c = new OffscreenCanvas(2, 3);
+            worker.onmessage = e => {{
+                globalThis.back = [e.data instanceof OffscreenCanvas, e.data.width, e.data.height,
+                    c.width].join(':');
+            }};
+            worker.postMessage(c, [c]);
+        `);"
+    ));
+    pair.answer(&format!(
+        "{CANVAS_WORKER} onmessage = e => postMessage(e.data, [e.data]);"
+    ));
+    pair.deliver();
+    pair.check(
+        r"const back = realm.evaluate('globalThis.back');
+        if (back !== 'true:2:3:0') throw Error(back);",
+    );
+    assert_eq!(
+        census(&pair),
+        [0; 5],
+        "nothing entered the page realm's table"
+    );
+}
+
+/// What a message carries is dropped with it when it is not delivered: a
+/// worker terminated while the message waited for its script, and a worker
+/// whose realm has no reviver (its script never imported `bobcat:canvas`),
+/// whose delivery fails with the bridge's `TypeError` and reports it as the
+/// worker's uncaught exception. Neither keeps the placeholder's presenter.
+#[test]
+fn an_undelivered_transfer_drops_what_it_carries() {
+    const PLACEHOLDER: &str = r"
+        import { Worker } from 'bobcat-internal';
+        const page = __CreatePage('card', 0);
+        const element = __CreateElement('canvas', 0);
+        __AppendElement(page, element);
+        let offscreen;
+        __InvokeUIMethod(element, 'transferControlToOffscreen', {}, r => { offscreen = r.data; });
+        globalThis.worker = new Worker('./worker.js');
+        worker.onerror = e => { globalThis.failure = e.message; };
+        worker.postMessage({ offscreen }, [offscreen]);
+    ";
+    let wait_for_none = |pair: &Pair| {
+        let deadline = ClockInstant::now() + PATIENCE;
+        while presenters(pair) != 0 {
+            assert!(ClockInstant::now() < deadline, "the presenter was kept");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    };
+
+    let mut pair = Pair::new(PLACEHOLDER);
+    assert_eq!(presenters(&pair), 1, "the message carries the presenter");
+    assert_eq!(census(&pair), [0; 5]);
+    pair.check("worker.terminate();");
+    wait_for_none(&pair);
+
+    let mut pair = Pair::new(PLACEHOLDER);
+    pair.answer("import 'bobcat:worker'; onmessage = () => postMessage('delivered');");
+    pair.deliver();
+    pair.check(
+        r"if (!String(globalThis.failure).includes('no transfer reviver')) throw Error(String(globalThis.failure));",
+    );
+    wait_for_none(&pair);
+}
+
+/// A plain worker draws on a transferred canvas inside a
+/// `requestAnimationFrame` callback of `bobcat:animation-frame`'s, which the
+/// view's vsync runs as an entry of the worker's like any other.
+#[test]
+fn a_plain_worker_draws_a_transferred_canvas_in_an_animation_frame() {
+    let mut pair = Pair::new(
+        r"
+        import { Worker } from 'bobcat-internal';
+        globalThis.got = [];
+        globalThis.worker = new Worker('./worker.js');
+        worker.onmessage = e => got.push(e.data);
+        const canvas = new OffscreenCanvas(2, 2);
+        worker.postMessage(canvas, [canvas]);
+        ",
+    );
+    pair.answer(&format!(
+        r"{CANVAS_WORKER}
+        import {{ requestAnimationFrame }} from 'bobcat:animation-frame';
+        onmessage = e => {{
+            const ctx = e.data.getContext('2d');
+            requestAnimationFrame(time => {{
+                ctx.fillStyle = 'blue';
+                ctx.fillRect(0, 0, 2, 2);
+                postMessage(`drawn at ${{time}}: ${{Array.from(ctx.getImageData(1, 1, 1, 1).data).join(',')}}`);
+            }});
+            postMessage('requested');
+        }};"
+    ));
+    assert!(matches!(pair.next_event().unwrap().payload,
+        WorkerPayload::Message(ref value) if posted(value, "requested")));
+    let deadline = ClockInstant::now() + PATIENCE;
+    let drawn = loop {
+        pair.frame(1250.0);
+        if let Ok(event) = pair.events.try_recv() {
+            break event;
+        }
+        assert!(ClockInstant::now() < deadline, "the frame never ran");
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    assert!(
+        matches!(drawn.payload, WorkerPayload::Message(ref value)
+            if posted(value, "drawn at 1250: 0,0,255,255")),
+        "the animation frame's draw"
+    );
+}

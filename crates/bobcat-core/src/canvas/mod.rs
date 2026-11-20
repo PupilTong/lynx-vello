@@ -17,6 +17,10 @@
 //!   every entry. Each canvas drawn during the entry replays what it recorded, so a recording
 //!   nothing reads stays one entry long, and one bound to a placeholder `<canvas>` that changed is
 //!   committed to it.
+//! - **Transfer** ([`Transfer`]): a `postMessage` whose transfer list names `OffscreenCanvas` and
+//!   `ImageBitmap` objects takes their entries out of the sending realm's table
+//!   ([`CanvasTable::take_posted`]) and the message carries them; the receiving realm's reviver
+//!   files each in its own table as the message is read ([`Transfer::deliver`]).
 
 mod css;
 mod members;
@@ -26,7 +30,9 @@ mod tests;
 use std::cell::{Cell, RefCell, RefMut};
 use std::rc::Weak;
 
+use quickjs_rust_bridge::{HostArgument, HostValue, Revival, TransferredClone};
 use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
 use terminus::link::html::canvas::{
     CanvasError, Context2d, Gradient, Image, ImageDataRead, InvalidState, OffscreenCanvas, Path,
     Pattern,
@@ -68,7 +74,85 @@ pub(crate) struct CanvasEntry {
 const _: () = {
     const fn send<T: Send>() {}
     send::<Entry>();
+    send::<Transfer>();
 };
+
+/// The entries a [`Transfer`] carries, behind a trait object whose `Send`
+/// is stated in its type. A type holding a message is then proven `Send`
+/// without the compiler walking an entry's GPU types, which nest deeper than
+/// the compiler's default recursion limit lets it go.
+trait Moved: Send {
+    fn into_entries(self: Box<Self>) -> Vec<Entry>;
+
+    fn len(&self) -> usize;
+}
+
+impl Moved for Vec<Entry> {
+    fn into_entries(self: Box<Self>) -> Vec<Entry> {
+        *self
+    }
+
+    fn len(&self) -> usize {
+        Vec::len(self)
+    }
+}
+
+/// What one `postMessage` posts: a value as the host boundary described
+/// it, or a message written with a non-empty transfer list.
+#[derive(Debug)]
+pub(crate) enum Posted {
+    Value(HostValue),
+    Transfer(Transfer),
+}
+
+/// A message written with a transfer list, as it travels to the realm it is
+/// posted to: the serializer's stream, one slot per list entry, and the
+/// entry of each listed `OffscreenCanvas` or `ImageBitmap`, taken out of the
+/// sending realm's table, in list order. Dropped undelivered — a worker
+/// that ended, a realm that is gone — it drops what it carries.
+pub(crate) struct Transfer {
+    data: TransferredClone,
+    /// One per slot of `data`.
+    moved: Box<dyn Moved>,
+}
+
+impl std::fmt::Debug for Transfer {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Transfer")
+            .field("slots", &self.moved.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Transfer {
+    /// Lends this message into `call` as the argument it reads as in the
+    /// realm of `table`. The objects it carries wait in `table` for that
+    /// realm's transfer reviver, which `bobcat:canvas` sets and which files
+    /// each one in the table as the read reaches its slot (`canvasAdopt`).
+    /// Whatever was not filed when `call` returns — the realm has no
+    /// reviver, the reviver threw, the realm was not called — is dropped
+    /// then.
+    pub(crate) fn deliver<R>(
+        self,
+        table: &CanvasTable,
+        call: impl FnOnce(HostArgument<'_>) -> R,
+    ) -> R {
+        let Self { data, moved } = self;
+        let moved = moved.into_entries();
+        #[expect(clippy::cast_precision_loss, reason = "a slot index is small")]
+        let slots: SmallVec<[HostArgument<'_>; 4]> = (0..moved.len())
+            .map(|slot| HostArgument::Number(slot as f64))
+            .collect();
+        let revival = Revival::new(data.as_bytes(), &slots)
+            .expect("a transfer carries one entry per slot of its stream");
+        let waiting = table.arrived.replace(moved.into_iter().map(Some).collect());
+        let answer = call(HostArgument::Revive(&revival));
+        // Not filed: dropped here, after the call.
+        drop(table.arrived.replace(waiting));
+        answer
+    }
+}
 
 impl CanvasEntry {
     fn new(width: u32, height: u32) -> Self {
@@ -213,6 +297,9 @@ pub(crate) struct CanvasTable {
     next: Cell<u64>,
     /// The canvases drawn since the last [`Self::settle_drawn`].
     drawn: RefCell<Vec<u64>>,
+    /// The entries a message being delivered carries, by slot, until the
+    /// realm's reviver files them ([`Transfer::deliver`]); empty otherwise.
+    arrived: RefCell<Vec<Option<Entry>>>,
     fonts: Fonts,
     reads: ReadWait,
     /// How many canvases [`Self::settle_drawn`] has flushed or committed,
@@ -227,6 +314,7 @@ impl CanvasTable {
             entries: RefCell::default(),
             next: Cell::new(1),
             drawn: RefCell::default(),
+            arrived: RefCell::default(),
             fonts: match host {
                 CanvasHost::Worker => Fonts::System(RefCell::new(None)),
                 CanvasHost::Document(document) => Fonts::Document(Weak::clone(document)),
@@ -390,7 +478,10 @@ fn no_such(kind: &str, id: u64) -> String {
 /// The names of the members [`install`] registers, for a test listing what
 /// a realm's `bobcat-internal:host` exports.
 #[cfg(test)]
-pub(crate) const MEMBERS: [&str; 63] = [
+pub(crate) const MEMBERS: [&str; 66] = [
+    "markTransferable",
+    "setTransferReviver",
+    "canvasAdopt",
     "canvasCreate",
     "canvasDrop",
     "canvasSetSize",

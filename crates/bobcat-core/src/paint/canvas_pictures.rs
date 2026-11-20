@@ -57,6 +57,12 @@ impl CanvasPictures {
     fn get(&self, picture: PictureId) -> Option<Arc<CanvasPicture>> {
         self.lock().get(&picture).cloned()
     }
+
+    /// How many presenters of these canvases are alive, for a test.
+    #[cfg(test)]
+    pub(crate) fn presenters(&self) -> usize {
+        self.lock().values().map(Arc::weak_count).sum()
+    }
 }
 
 /// What a canvas's owner, on any thread, commits its bitmap through.

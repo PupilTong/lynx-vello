@@ -30,6 +30,7 @@ use super::quickjs::ScriptEngine;
 use crate::background::{
     WorkerCommand, WorkerEvent, WorkerKey, WorkerMessage, WorkerPayload, WorkerStart,
 };
+use crate::canvas::CanvasTable;
 use crate::esm::HOST_MODULE_SPECIFIER;
 use crate::link::{ViewNotice, ViewOutbox};
 use crate::realm::child::{ChildHostState, ChildKey};
@@ -148,7 +149,13 @@ impl WorkerOwner {
     /// the child. Host functions borrow it weakly: cleanup jobs queued while
     /// a realm is released must not keep the owner, its channels, or the
     /// group thread alive.
-    pub(super) fn install(self: &Rc<Self>, engine: &mut ScriptEngine) -> Result<(), ScriptError> {
+    /// `canvases` is the realm's own table, which a message's transfer list
+    /// takes its objects out of.
+    pub(super) fn install(
+        self: &Rc<Self>,
+        engine: &mut ScriptEngine,
+        canvases: &Rc<CanvasTable>,
+    ) -> Result<(), ScriptError> {
         let creator = Rc::downgrade(self);
         engine.register_host_module_function(
             HOST_MODULE_SPECIFIER,
@@ -212,21 +219,28 @@ impl WorkerOwner {
             },
         )?;
         let sender = Rc::downgrade(self);
-        engine.register_host_module_function(
+        let canvases = Rc::clone(canvases);
+        // `sendWorkerMessage(key, message, transfer, ...ids)`.
+        engine.register_host_module_function_with_transfer(
             HOST_MODULE_SPECIFIER,
             "sendWorkerMessage",
-            2,
+            3,
+            1,
             move |arguments| {
                 let key = key(arguments)?;
                 // Any value the boundary carries. A value the serializer
                 // refuses throws in the realm that called `postMessage`, so
-                // nothing here has to decide what a message may be.
-                let data = arguments
-                    .get(1)
-                    .map_or(HostValue::Undefined, |data| data.to_value());
+                // nothing here has to decide what a message may be. A
+                // transfer list's objects leave this realm's table here,
+                // whether or not the worker still runs, as HTML detaches
+                // them before it looks at the port.
+                let posted = match canvases.take_posted("sendWorkerMessage", arguments, 1)? {
+                    Ok(posted) => posted,
+                    Err(error) => return Ok(HostValue::String(error.name().to_owned())),
+                };
                 if let Some(sender) = sender.upgrade() {
                     let enqueued = sender.view.outbox.registry().js_blocking_stamp();
-                    sender.post(key, WorkerMessage::Post { data, enqueued });
+                    sender.post(key, WorkerMessage::posted(posted, enqueued));
                 }
                 Ok(HostValue::Undefined)
             },

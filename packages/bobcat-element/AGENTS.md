@@ -46,7 +46,15 @@ threads call with an answer), `src/cross-thread-context.ts` as
 `bobcat:timers`: it installs `OffscreenCanvas` and the rest as globals, and
 exports `__BobcatTransferredCanvas`, which `element-papi.ts`'s
 `invokeUIMethod` makes a `canvas`'s `transferControlToOffscreen` answer with;
-see `crates/bobcat-core/docs/canvas.md`), `src/performance.ts` as `bobcat:performance`
+it marks every `OffscreenCanvas` and `ImageBitmap` transferable and sets the
+realm's transfer reviver; see `crates/bobcat-core/docs/canvas.md`),
+`src/transfer.ts` as `bobcat:transfer` (HTML's StructuredSerializeWithTransfer
+around the host members every `postMessage` calls — `Worker`'s, a worker
+global's and, through them, the Context's: Web IDL's conversion of the second
+argument in both overloads, the serializer's three refusals thrown as a
+`DataCloneError`, and the detaching of what was listed; it never walks or
+rewrites a message, the list being the serializer's own; see
+`crates/bobcat-core/docs/workers.md`, "Transfer lists"), `src/performance.ts` as `bobcat:performance`
 (`lynx.performance`'s JavaScript half for both realm kinds: the four pipeline
 hooks ReactLynx calls, unpacked into primitive host arguments, and the BTS's
 `createObserver` over the `lynx.performance.onPerformanceEvent` global event,
@@ -192,7 +200,10 @@ follows every entry into a realm calls the module's `__BobcatRunTimer` back for
 whatever is due — before that entry's commit, so a callback's mutation rides
 the same frame. No deadline crosses the link and no host turn is owed for one.
 `src/canvas.ts` installs its interfaces the same way, for the same reason: a
-card names `OffscreenCanvas` as a free variable.
+card names `OffscreenCanvas` as a free variable. A Context's `postMessage(message, transfer)`
+takes a transfer list as an engine extension (`docs/tracking/deviations.md`);
+`dispatchEvent` takes none, and the runtime's own messages on the BTS channel
+pass none.
 
 `src/element-papi.ts` also exports `class Document` and the `PageConfig` its
 constructor takes: the five page switches the boot module is written with,

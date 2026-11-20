@@ -54,7 +54,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use quickjs_rust_bridge::{HostArgument, HostValue};
+use quickjs_rust_bridge::HostArgument;
 use rustc_hash::FxHashMap;
 use tokio::sync::{mpsc, watch};
 use tokio::task::{self, JoinError, JoinSet};
@@ -62,6 +62,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::scope::install_worker_members;
 use super::{WorkerCommand, WorkerEvent, WorkerKey, WorkerMessage, WorkerPayload, WorkerStart};
+use crate::canvas::Posted;
 use crate::clock::ClockInstant;
 use crate::esm::{Export, build_runtime};
 use crate::jobs::{JobKind, JsThread, JsThreadHandle, JsThreadName};
@@ -440,7 +441,7 @@ impl Worker {
                         None,
                         // A worker sees the platform's fonts, not a document's.
                         crate::canvas::CanvasHost::Worker,
-                        |engine| {
+                        |engine, canvases| {
                             let events = self.events.clone();
                             let key = self.key;
                             let flags = install_worker_members(
@@ -448,10 +449,16 @@ impl Worker {
                                 key,
                                 &self.host,
                                 name,
-                                move |data| {
+                                canvases,
+                                move |posted| {
                                     let _ = events.send(WorkerEvent {
                                         key,
-                                        payload: WorkerPayload::Message(data),
+                                        payload: match posted {
+                                            Posted::Value(data) => WorkerPayload::Message(data),
+                                            Posted::Transfer(message) => {
+                                                WorkerPayload::Transfer(message)
+                                            }
+                                        },
                                     });
                                 },
                             )?;
@@ -803,7 +810,7 @@ async fn consume_messages(
     // enqueue instant; `None` once it has and what was held has been
     // delivered. A held message's wait for the worker thread counts from
     // its send, as Lynx counts a task queued behind the loading bundle.
-    let mut held: Option<Vec<(HostValue, Option<ClockInstant>)>> = Some(Vec::new());
+    let mut held: Option<Vec<(Posted, Option<ClockInstant>)>> = Some(Vec::new());
     // A `PerformanceReady` read before the root module finished, delivered
     // once with what was held: one take drains every entry owed. The
     // earliest one's enqueue instant is kept.
@@ -811,8 +818,8 @@ async fn consume_messages(
     let mut ready = worker.boot_finished.subscribe();
     loop {
         if let Some(queued) = held.take_if(|_| *ready.borrow_and_update()) {
-            for (data, enqueued) in queued {
-                deliver_post(&worker, data, enqueued);
+            for (posted, enqueued) in queued {
+                deliver_post(&worker, posted, enqueued);
             }
             if let Some(enqueued) = performance_held.take() {
                 deliver_performance(&worker, enqueued);
@@ -824,10 +831,12 @@ async fn consume_messages(
                 // Explicit termination or collection of the MTS handle, or
                 // the release of its realm.
                 None | Some(WorkerMessage::Terminate) => break,
-                Some(WorkerMessage::Post { data, enqueued }) => match held.as_mut() {
-                    Some(held) => held.push((data, enqueued)),
-                    None => deliver_post(&worker, data, enqueued),
-                },
+                Some(WorkerMessage::Post { data, enqueued }) => {
+                    hold_or_deliver(&worker, held.as_mut(), Posted::Value(data), enqueued);
+                }
+                Some(WorkerMessage::Transfer { message, enqueued }) => {
+                    hold_or_deliver(&worker, held.as_mut(), Posted::Transfer(message), enqueued);
+                }
                 Some(WorkerMessage::Vsync { milliseconds, enqueued }) => {
                     deliver_vsync(&worker, milliseconds, enqueued);
                 }
@@ -898,21 +907,35 @@ fn deliver_memory_sample(worker: &Rc<Worker>, enqueued: Option<ClockInstant>) {
     }));
 }
 
-/// Queues one posted value for this worker's realm.
-fn deliver_post(worker: &Rc<Worker>, data: HostValue, enqueued: Option<ClockInstant>) {
+/// Holds one post while the root module has not finished, else queues it.
+fn hold_or_deliver(
+    worker: &Rc<Worker>,
+    held: Option<&mut Vec<(Posted, Option<ClockInstant>)>>,
+    posted: Posted,
+    enqueued: Option<ClockInstant>,
+) {
+    match held {
+        Some(held) => held.push((posted, enqueued)),
+        None => deliver_post(worker, posted, enqueued),
+    }
+}
+
+/// Queues one posted message for this worker's realm.
+fn deliver_post(worker: &Rc<Worker>, posted: Posted, enqueued: Option<ClockInstant>) {
     let delivering = Rc::clone(worker);
     owner::queue(worker, JobKind::Post, move |realm, js| {
         delivering.note_wait(enqueued);
-        deliver(&delivering, realm, js, &data);
+        deliver(&delivering, realm, js, posted);
     });
 }
 
-/// Hands one message value to a realm that is up.
+/// Hands one message to a realm that is up. A message with a transfer list
+/// that is not delivered drops the objects it carries.
 fn deliver(
     worker: &Rc<Worker>,
     realm: &mut WorkerRealm,
     js_runtime: &mut ScriptRuntime,
-    data: &HostValue,
+    posted: Posted,
 ) {
     // Closed, with its realm still standing until this entry's epilogue: HTML
     // discards whatever was queued behind a `close()`, so this message is
@@ -941,11 +964,14 @@ fn deliver(
     if !realm.scope_installed.get() {
         return;
     }
-    let delivered = realm.core.engine.call_module_export(
-        js_runtime,
-        Export::DeliverWorkerMessage,
-        &[data.as_argument()],
-    );
+    let engine = &realm.core.engine;
+    let mut call = |data: HostArgument<'_>| {
+        engine.call_module_export(js_runtime, Export::DeliverWorkerMessage, &[data])
+    };
+    let delivered = match posted {
+        Posted::Value(data) => call(data.as_argument()),
+        Posted::Transfer(message) => message.deliver(&realm.core.canvases, call),
+    };
     if let Err(error) = delivered {
         policy::report(worker, Scene::Listener, error);
     }
@@ -956,6 +982,8 @@ mod tests {
     //! Two worker realms on one runtime, driven the way [`serve_worker`]
     //! drives one — except that the test keeps both [`Worker`]s, so it can
     //! count the epilogues each of them ran.
+
+    use quickjs_rust_bridge::HostValue;
 
     use super::*;
     use crate::link::ViewNotice;
@@ -1312,6 +1340,7 @@ mod tests {
                         panic!("observer error: {}", error.message)
                     }
                     WorkerPayload::Closed => panic!("observer worker closed"),
+                    WorkerPayload::Transfer(_) => panic!("observer transferred"),
                 }
             }
             messages

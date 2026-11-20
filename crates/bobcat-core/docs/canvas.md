@@ -13,9 +13,10 @@ native Lynx nor web-core defines a canvas API of its own), drawn by
 replays it on the GPU.
 A `<canvas>` element shows what an `OffscreenCanvas` commits to it once the
 MTS realm has called `transferControlToOffscreen()` on it ("The placeholder
-canvas" below); the element has no `getContext()`. An `OffscreenCanvas` is
-not transferred between realms yet. The painter's side of a placeholder is
-`painter.md`'s "Placeholder canvases".
+canvas" below); the element has no `getContext()`. An `OffscreenCanvas` and an
+`ImageBitmap` move to another realm in a `postMessage` transfer list
+("Transfer" below), so the BTS can draw on a placeholder's canvas. The
+painter's side of a placeholder is `painter.md`'s "Placeholder canvases".
 
 ## Where it is
 
@@ -33,6 +34,9 @@ not transferred between realms yet. The painter's side of a placeholder is
   `CanvasEntry`).
 - `packages/bobcat-element/src/element-papi.ts`'s `invokeUIMethod`: a
   `canvas`'s `transferControlToOffscreen`.
+- `packages/bobcat-element/src/transfer.ts` (`bobcat:transfer`): the
+  transfer list of every `postMessage`; `docs/workers.md`, "Transfer lists",
+  is the transport.
 
 ## Names per realm kind
 
@@ -97,9 +101,11 @@ same `{code, data}` shape:
   throws. An element of another kind takes the generic path and answers 3.
 - The background thread's `SelectorQuery.invoke` of
   `transferControlToOffscreen` answers `{code: 3, data: <message>}` without
-  running the method (`__BobcatQueryNodes`): its reply is a structured clone
-  posted to the BTS, which an `OffscreenCanvas` of the MTS realm does not
-  cross.
+  running the method (`__BobcatQueryNodes`): its reply is posted to the BTS
+  with no transfer list, and an `OffscreenCanvas` crosses only in one (user
+  ruling 2026-11-19: transfer is through `postMessage` only). The BTS gets
+  one from main-thread script that sends it with
+  `lynx.getJSContext().postMessage(message, [canvas])`.
 
 Setting the `OffscreenCanvas`'s `width` or `height` resizes its bitmap, and
 the next commit sends `ToMain::CanvasResized`, on which `bobcat-main`
@@ -107,6 +113,58 @@ applies the new natural size (`update_placeholders`). A size with no bitmap
 (a zero side, or one over 8,192 px) commits nothing: the placeholder keeps
 the last commit's picture and size. Once the element is removed, draws and
 commits go on and show nowhere; once it is freed, a commit does nothing.
+
+## Transfer
+
+Every `OffscreenCanvas` and `ImageBitmap` is marked uncloneable and
+transferable as it is constructed (`markTransferable`), so a message holding
+one that its transfer list does not name throws `DataCloneError`, and only a
+listed one crosses, as one object at every position the message held it.
+HTML's StructuredSerializeWithTransfer is followed with one change of order:
+every check is made before anything moves, where HTML detaches each listed
+object as its turn comes. The checks and their exceptions:
+
+- a list entry that is not an `OffscreenCanvas` or an `ImageBitmap` (an
+  `ArrayBuffer` included), a duplicate, a detached object, and an unlisted
+  transferable in the message: `DataCloneError`;
+- an `OffscreenCanvas` whose context mode is not none (it has a 2D context):
+  `InvalidStateError`, HTML's `OffscreenCanvas` transfer steps ("If value's
+  context mode is not equal to none, then throw an InvalidStateError");
+- a second argument Web IDL refuses: `TypeError`.
+
+The serializer's own list check runs before the context-mode check, so a list
+holding both a canvas with a context and a detached object throws
+`DataCloneError` where HTML, which checks entry by entry, may throw
+`InvalidStateError`.
+
+A post that succeeds takes the listed entries out of the table and detaches
+the objects. A detached `OffscreenCanvas` (context mode `detached`) reads as
+0 × 0; setting its size does nothing; `getContext` with any valid id and
+`transferToImageBitmap` throw `InvalidStateError`, and as an image source it
+is `InvalidStateError` for its zero size. A detached `ImageBitmap` is a
+closed one: 0 × 0 and `InvalidStateError` as an image source.
+`ImageBitmap.close()` detaches too, so a closed bitmap is refused in a list.
+The message (`canvas::Transfer`) carries the taken entries as a
+`Box<dyn Moved>`, a private trait with `Send` as a supertrait, so a type that
+holds a message — a worker's channel, an embedder's `ModuleCallback` — is
+proven `Send` without the compiler walking an entry's GPU types, and no crate
+raises its recursion limit.
+
+The receiving realm's reviver files each entry in its own table and makes the
+object over it: an `OffscreenCanvas` of the entry's size, still bound to its
+placeholder if it had one, or an `ImageBitmap` with its pixels. A canvas whose
+size changed in the entry that posted it, before its realm committed that
+size, is listed as drawn in the receiving realm, which commits it.
+
+**A canvas in a worker realm.** A transferred placeholder canvas commits from
+the worker realm's epilogue on `bobcat-workers` through the same
+`settle_drawn`: its `CanvasPresenter` copies the texture, wakes the view's
+host when a wake is owed, and sends `ToMain::CanvasResized` through its weak
+command sender when the size changed, from that thread. A draw in a timer, a
+message listener or a `requestAnimationFrame` callback (`lynx`'s in the BTS,
+`bobcat:animation-frame`'s in a plain worker) is an entry like any other and
+commits at its end. Text in a worker realm shapes with the system fonts
+("Colors and fonts"), not the document's `@font-face` faces.
 
 ## The per-entry step
 
@@ -182,6 +240,8 @@ side over 8,192 px, from any source.
   changes nothing (every read is a GPU readback), and `alpha: false` leaves
   the bitmap's alpha as drawn.
 - `currentcolor` is opaque black: there is no element to take a color from.
+- `ImageBitmap` is transferable and not serializable: posted without being
+  listed it throws `DataCloneError`, where HTML copies its pixels.
 - A relative font size (`em`, `%`, `rem`, `larger`, …) resolves against
   10px, where the standard uses the canvas element's computed font size;
   `ex`/`ch` take half of it and `lh` 1.2 times it. Viewport and container

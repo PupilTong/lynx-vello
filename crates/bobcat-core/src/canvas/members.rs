@@ -20,7 +20,7 @@ use terminus::link::html::canvas::{
 };
 
 use super::css::{parse_color, parse_font, serialize_color};
-use super::{CanvasDocument, CanvasEntry, CanvasTable, Entry, Fonts, no_such};
+use super::{CanvasDocument, CanvasEntry, CanvasTable, Entry, Fonts, Posted, Transfer, no_such};
 use crate::esm::HOST_MODULE_SPECIFIER;
 use crate::main::quickjs::ScriptEngine;
 use crate::script::ScriptError;
@@ -72,6 +72,15 @@ macro_rules! on_path {
 /// Installs every canvas member on `engine`, over `table`, and in a realm
 /// with a document `canvasTransferControl` too.
 pub(crate) fn install(engine: &ScriptEngine, table: &Rc<CanvasTable>) -> Result<(), ScriptError> {
+    // `markTransferable(object, transferable)` and
+    // `setTransferReviver(reviver)`: the bridge's, which `bobcat:canvas`
+    // marks its `OffscreenCanvas` and `ImageBitmap` objects with and sets
+    // its reviver through.
+    engine.register_host_module_transfer_members(
+        HOST_MODULE_SPECIFIER,
+        "markTransferable",
+        "setTransferReviver",
+    )?;
     install_context_members(engine, table)?;
     if let Fonts::Document(document) = &table.fonts {
         install_transfer(engine, table, document)?;
@@ -132,6 +141,13 @@ fn install_context_members(
         fn canvasDrop(target: id) |this| {
             this.remove(target);
             Ok(HostValue::Undefined)
+        }
+        // The reviver's: files the entry a delivered message carries in
+        // slot `slot` and answers what `bobcat:canvas` makes the object
+        // over — a canvas's `[id, width, height]` as a `Float64Array`'s
+        // bytes, a bitmap's id.
+        fn canvasAdopt(slot: size) |this| {
+            this.adopt(slot as usize)
         }
         fn canvasSetSize(target: id, width: size, height: size) |this| {
             let mut entries = this.entries();
@@ -577,6 +593,89 @@ const FILL: u8 = 0;
 const STROKE: u8 = 1;
 
 impl CanvasTable {
+    /// The message a `postMessage` member `function` was handed at
+    /// `arguments[at]`, its transfer list's length next.
+    ///
+    /// Without a list, the value as the host boundary described it. With
+    /// one, the ids of the listed objects in this table follow the length,
+    /// one per entry in list order, 0 standing for an `OffscreenCanvas`
+    /// whose context mode is not none; every id is checked before any entry
+    /// is taken out, so a refusal leaves the table as it was. That canvas is
+    /// HTML's transfer steps' `InvalidStateError`, the inner error.
+    pub(crate) fn take_posted(
+        &self,
+        function: &str,
+        arguments: &[HostArgument<'_>],
+        at: usize,
+    ) -> Result<Result<Posted, CanvasError>, String> {
+        let message = argument(arguments, at);
+        let HostArgument::Transferred(data) = message else {
+            return Ok(Ok(Posted::Value(message.to_value())));
+        };
+        let first = at + 2;
+        let ids = (first..first + data.slots())
+            .map(|index| match argument(arguments, index) {
+                HostArgument::Number(0.0) => Ok(0),
+                _ => id(function, arguments, index),
+            })
+            .collect::<Result<SmallVec<[u64; 4]>, String>>()?;
+        if ids.contains(&0) {
+            return Ok(Err(CanvasError::InvalidState));
+        }
+        let mut entries = self.entries();
+        for (index, id) in ids.iter().enumerate() {
+            if ids[..index].contains(id)
+                || !matches!(entries.get(id), Some(Entry::Canvas(_) | Entry::Bitmap(_)))
+            {
+                return Err(format!(
+                    "{function}: transfer list entry {index} names no transferable object"
+                ));
+            }
+        }
+        let moved = ids
+            .iter()
+            .filter_map(|id| entries.remove(id))
+            .map(|mut entry| {
+                // Its listing in this table's drawn list is skipped.
+                if let Entry::Canvas(canvas) = &mut entry {
+                    canvas.drawn = false;
+                }
+                entry
+            })
+            .collect::<Vec<Entry>>();
+        Ok(Ok(Posted::Transfer(Transfer {
+            data: data.to_owned(),
+            moved: Box::new(moved),
+        })))
+    }
+
+    /// Files the entry a delivered message carries in `slot` under a new
+    /// id: `canvasAdopt`'s answer. A canvas whose bitmap changed since its
+    /// last commit — a size set in the entry that posted it — is listed as
+    /// drawn, so this realm's epilogue commits it.
+    fn adopt(&self, slot: usize) -> Result<HostValue, String> {
+        let entry = self
+            .arrived
+            .borrow_mut()
+            .get_mut(slot)
+            .and_then(Option::take)
+            .ok_or_else(|| format!("bobcat-internal:host: no transferred object in slot {slot}"))?;
+        let Entry::Canvas(canvas) = entry else {
+            return Ok(id_value(self.insert(entry)));
+        };
+        let size = [canvas.width, canvas.height].map(f64::from);
+        let changed = canvas
+            .canvas
+            .as_ref()
+            .is_some_and(|bitmap| bitmap.has_changes());
+        let id = self.insert(Entry::Canvas(canvas));
+        if changed && let Some(Entry::Canvas(canvas)) = self.entries().get_mut(&id) {
+            self.note_drawn(id, canvas);
+        }
+        #[expect(clippy::cast_precision_loss, reason = "ids stay below 2^53")]
+        Ok(float_bytes(&[id as f64, size[0], size[1]]))
+    }
+
     /// A clone of the `Path2D` under `id`.
     fn path(&self, id: u64) -> Result<Path, String> {
         match self.entries().get(&id) {
